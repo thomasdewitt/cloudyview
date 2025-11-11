@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudyview"
+version = "0.1.0"
+description = "3D cloud field visualization toolkit with radiative transfer"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "Thomas D. DeWitt", email = "thomas@example.com"}
+]
+license = {text = "MIT"}
+keywords = ["clouds", "visualization", "radiative-transfer", "atmospheric-science"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+
+dependencies = [
+    "numpy>=1.20",
+    "matplotlib>=3.3",
+    "xarray>=0.18",
+    "netCDF4>=1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "black>=21.0",
+    "isort>=5.0",
+    "flake8>=3.9",
+]
+
+[project.scripts]
+glimpse = "cloudyview.glimpse:cli"
+expedition = "cloudyview.expedition:cli"
+odyssey = "cloudyview.odyssey:cli"
+
+[project.urls]
+Homepage = "https://github.com/thomasdewitt/cloudyview"
+Documentation = "https://github.com/thomasdewitt/cloudyview"
+Repository = "https://github.com/thomasdewitt/cloudyview.git"
+Issues = "https://github.com/thomasdewitt/cloudyview/issues"
+
+[tool.setuptools]
+packages = ["cloudyview"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
