@@ -2,21 +2,29 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import matplotlib.colors
 import xarray as xr
 from typing import Optional, Tuple
+
+# Cloud color scheme for optical depth visualization
+sky_blue = '#3A4AA6'
+cloud_colors = matplotlib.colors.LinearSegmentedColormap.from_list(
+    'cloud_colors',
+    [(0, sky_blue), (1, '#FFFFFF')]
+)
 
 
 def plot_isosurface(
     data: xr.DataArray,
     threshold: float = 0.01,
-    title: str = "Cloud Field Isosurface",
-    figsize: Tuple[int, int] = (8, 6),
     output_path: Optional[str] = None,
-    cmap: str = "viridis"
+    color: Optional[str] = None,
+    color_by_opacity: bool = False,
+    opacity_field: Optional[np.ndarray] = None
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
     Plot 3D isosurface of data at specified threshold using matplotlib.
+    Minimal rendering with sky blue background.
 
     Parameters
     ----------
@@ -24,14 +32,14 @@ def plot_isosurface(
         3D data array (or 4D with time dimension)
     threshold : float, default=0.01
         Isosurface threshold value
-    title : str
-        Plot title
-    figsize : tuple
-        Figure size (width, height). Default (8, 6) for 13" MacBook
     output_path : str, optional
-        If provided, save figure to this path (PNG)
-    cmap : str
-        Colormap name
+        Path to save figure (PNG). Required - no display.
+    color : str, optional
+        Point color (default: white if color_by_opacity=False)
+    color_by_opacity : bool, optional
+        If True, color points by opacity above them (black to white)
+    opacity_field : ndarray, optional
+        3D opacity field for coloring (required if color_by_opacity=True)
 
     Returns
     -------
@@ -60,103 +68,171 @@ def plot_isosurface(
     coord_arrays = [coords[dim] for dim in dims]
     grids = np.meshgrid(*coord_arrays, indexing='ij')
 
-    # Create figure and 3D axis
-    fig = plt.figure(figsize=figsize)
-    ax = fig.add_subplot(111, projection='3d')
+    # Create figure and 3D axis (2048x2048 px = 13.653 inches at 150 DPI)
+    dpi = 150
+    figsize = (2048/dpi, 2048/dpi)
+    sky_blue = '#3A4AA6'
+    fig = plt.figure(figsize=figsize, dpi=dpi, facecolor=sky_blue)
+    ax = fig.add_subplot(111, projection='3d', facecolor=sky_blue)
 
-    # Find isosurface points (simple approach: extract points above threshold)
-    mask = data_array > threshold
-    points = np.column_stack([grid[mask] for grid in grids])
+    # Find all points above threshold for scatter plot
+    above_threshold = data_array > threshold
+    indices = np.argwhere(above_threshold)
 
-    # Plot points if any exist
-    if len(points) > 0:
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2],
-                  c=data_array[mask], cmap=cmap, s=1, alpha=0.6)
+    if len(indices) > 0:
+        # Map indices to actual coordinates
+        points = np.zeros((len(indices), 3))
+        for i, idx in enumerate(indices):
+            points[i, 0] = coords[dims[0]][idx[0]]
+            points[i, 1] = coords[dims[1]][idx[1]]
+            points[i, 2] = coords[dims[2]][idx[2]]
 
-    # Labels and title
-    ax.set_xlabel(dims[0])
-    ax.set_ylabel(dims[1])
-    ax.set_zlabel(dims[2])
-    ax.set_title(title)
+        # Calculate voxel size from coordinate spacing
+        # Compute mean spacing in each dimension
+        spacings = []
+        for dim in dims:
+            coord = coords[dim]
+            if len(coord) > 1:
+                # Mean spacing between consecutive points
+                spacing = np.mean(np.diff(coord))
+                spacings.append(abs(spacing))
+            else:
+                spacings.append(1.0)
 
-    # Set equal aspect ratio for better visualization
-    ax.set_box_aspect([1, 1, 1])
+        # Use geometric mean of spacings to get a characteristic voxel size
+        voxel_size = np.exp(np.mean(np.log(spacings)))
 
-    plt.tight_layout()
+        # Scale voxel size to marker size (in points^2)
+        # This is a heuristic: convert data units to screen points
+        # Typical marker sizes range from 1-1000, we'll use voxel_size as a base
+        marker_size = max(2, min(50, voxel_size * 10))
 
-    # Save if requested
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"Figure saved to {output_path}")
+        # Get colors and opacity from opacity field
+        if color_by_opacity and opacity_field is not None:
+            # Get opacity values at each point
+            point_opacity = opacity_field[indices[:, 0], indices[:, 1], indices[:, 2]]
+
+            # Map brightness to transparency above: white = transparent (opacity=0), black = opaque (opacity=1)
+            brightness = 1.0 - point_opacity
+
+            # Create RGBA colors where alpha matches the actual opacity
+            colors = np.zeros((len(indices), 4))
+            colors[:, 0] = brightness  # Red channel
+            colors[:, 1] = brightness  # Green channel
+            colors[:, 2] = brightness  # Blue channel
+            colors[:, 3] = point_opacity  # Alpha = actual opacity
+
+            # Scatter plot with per-point colors and alpha
+            ax.scatter(
+                points[:, 0], points[:, 1], points[:, 2],
+                c=colors,
+                s=marker_size,
+                alpha=1.0,  # Alpha is already in the color array
+                edgecolors='none'
+            )
+        else:
+            # Single color scatter plot
+            if color is None:
+                color = "white"
+            ax.scatter(
+                points[:, 0], points[:, 1], points[:, 2],
+                c=color,
+                s=marker_size,
+                alpha=0.8,
+                edgecolors='none'
+            )
+
+    # Calculate physical extents from coordinates
+    x_extent = coords['x'].max() - coords['x'].min() if len(coords['x']) > 1 else 1.0
+    y_extent = coords['y'].max() - coords['y'].min() if len(coords['y']) > 1 else 1.0
+    z_extent = coords['z'].max() - coords['z'].min() if len(coords['z']) > 1 else 1.0
+
+    # Normalize aspect ratio to physical proportions
+    extents = np.array([x_extent, y_extent, z_extent])
+    min_extent = extents.min()
+    aspect_ratio = (extents / min_extent).tolist()
+
+    # Remove ALL visual elements including axis spines and lines
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_zticks([])
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.set_zlabel('')
+    ax.set_title('')
+    ax.grid(False)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor('none')
+    ax.yaxis.pane.set_edgecolor('none')
+    ax.zaxis.pane.set_edgecolor('none')
+    # Remove axis lines
+    ax.xaxis.line.set_linewidth(0)
+    ax.yaxis.line.set_linewidth(0)
+    ax.zaxis.line.set_linewidth(0)
+    # Remove spines
+    for spine in ax.spines.values():
+        spine.set_edgecolor('none')
+
+    # Set aspect ratio to match physical proportions
+    ax.set_box_aspect(aspect_ratio)
+
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    # Save (required)
+    if not output_path:
+        raise ValueError("output_path is required - no display mode")
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0,
+                facecolor='black')
+    print(f"  ✓ Saved {output_path}")
+    plt.close(fig)
 
     return fig, ax
 
 
-def plot_slices(
-    data: xr.DataArray,
-    title: str = "Cloud Field Slices",
-    figsize: Tuple[int, int] = (8, 6),
+def plot_optical_depth(
+    optical_depth_2d: np.ndarray,
     output_path: Optional[str] = None,
-    slices: Optional[dict] = None
-) -> Tuple[plt.Figure, np.ndarray]:
+    cmap=None
+) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Plot 2D slices of 3D data.
+    Plot 2D column optical depth from above.
 
     Parameters
     ----------
-    data : xr.DataArray
-        3D data array (or 4D with time dimension)
-    title : str
-        Plot title
-    figsize : tuple
-        Figure size (width, height)
+    optical_depth_2d : ndarray (nx, ny)
+        2D optical depth field
     output_path : str, optional
-        If provided, save figure to this path (PNG)
-    slices : dict, optional
-        Dictionary specifying which slices to plot.
-        E.g., {'z': 0} plots xy slice at z=0
+        Path to save figure (PNG). Required - no display.
+    cmap : matplotlib.colors.Colormap, optional
+        Colormap (default: cloud_colors, sky blue to white)
 
     Returns
     -------
-    fig, axes
-        Matplotlib figure and axes array
+    fig, ax
+        Matplotlib figure and axes objects
     """
-    # Remove time dimension if present
-    if 'time' in data.dims:
-        data = data.isel({dim: 0 for dim in data.dims if 'time' in dim})
+    if cmap is None:
+        cmap = cloud_colors
 
-    if slices is None:
-        # Default: middle slices along each axis
-        slices = {}
-        for dim in data.dims:
-            slices[dim] = data.sizes[dim] // 2
+    # Create figure (2048x2048 px = 13.653 inches at 150 DPI)
+    dpi = 150
+    figsize = (2048/dpi, 2048/dpi)
+    fig = plt.figure(figsize=figsize, dpi=dpi)
+    ax = fig.add_subplot(111)
 
-    # Create subplots
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    # Plot with no axes/labels
+    im = ax.imshow(optical_depth_2d, cmap=cmap, origin='lower', interpolation='nearest')
+    ax.axis('off')
 
-    plot_count = 0
-    for ax, (dim, idx) in zip(axes, slices.items()):
-        if plot_count >= 3:
-            break
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
-        # Select slice
-        slice_data = data.isel({dim: idx})
+    # Save (required)
+    if not output_path:
+        raise ValueError("output_path is required - no display mode")
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+    print(f"  ✓ Saved {output_path}")
+    plt.close(fig)
 
-        # Plot
-        im = ax.imshow(slice_data.values, cmap='viridis', origin='lower')
-        ax.set_title(f"Slice at {dim}={idx}")
-        ax.set_xlabel(f"{slice_data.dims[1]}")
-        ax.set_ylabel(f"{slice_data.dims[0]}")
-        plt.colorbar(im, ax=ax, label=data.name or "Value")
-
-        plot_count += 1
-
-    fig.suptitle(title)
-    plt.tight_layout()
-
-    # Save if requested
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"Figure saved to {output_path}")
-
-    return fig, axes
+    return fig, ax

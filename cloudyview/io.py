@@ -6,11 +6,13 @@ from typing import Tuple, Dict, Any
 
 
 # Common variable names for liquid water
-LIQUID_WATER_NAMES = ["qc", "ql", "LWC", "cloud_liquid_water_mixing_ratio",
+LIQUID_WATER_NAMES = ["qc", "QC", "ql", "QL", "QN", "qn", "LWC",
+                       "cloud_liquid_water_mixing_ratio",
                        "liquid_water_content", "q_liquid", "lwc"]
 
 # Common variable names for ice water
-ICE_WATER_NAMES = ["qi", "qice", "IWC", "cloud_ice_mixing_ratio",
+ICE_WATER_NAMES = ["qi", "QI", "qice", "QICE", "IWC",
+                    "cloud_ice_mixing_ratio",
                     "ice_water_content", "q_ice", "iwc"]
 
 
@@ -118,6 +120,70 @@ def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str) -> None
                        "3D spatial data is required (e.g., x, y, z).")
 
 
+def standardize_dims(data_array: xr.DataArray) -> xr.DataArray:
+    """
+    Standardize dimension names to (x, y, z).
+
+    Maps common dimension names to standard (x, y, z) format:
+    - Horizontal: (x, y) from (x/lon/nx/longitude, y/lat/ny/latitude)
+    - Vertical: (z) from (z/height/nz/altitude/level)
+    - Removes time dimension (single timestep already validated)
+
+    Parameters
+    ----------
+    data_array : xr.DataArray
+        Input data array with arbitrary dimension names
+
+    Returns
+    -------
+    xr.DataArray
+        Data array with standardized (x, y, z) dimensions
+
+    Raises
+    ------
+    ValueError
+        If dimensions cannot be inferred
+    """
+    # Drop time dimension if present (single timestep already validated)
+    time_dims = [d for d in data_array.dims if 'time' in d.lower()]
+    for time_dim in time_dims:
+        data_array = data_array.isel({time_dim: 0}, drop=True)
+
+    # Get spatial dimensions
+    dims = list(data_array.dims)
+
+    if len(dims) != 3:
+        raise ValueError(f"Expected 3 spatial dimensions, got {len(dims)}: {dims}")
+
+    # Map dimension names
+    x_candidates = ['x', 'lon', 'longitude', 'nx']
+    y_candidates = ['y', 'lat', 'latitude', 'ny']
+    z_candidates = ['z', 'height', 'altitude', 'level', 'nz']
+
+    x_dim = None
+    y_dim = None
+    z_dim = None
+
+    for dim in dims:
+        dim_lower = dim.lower()
+        if x_dim is None and any(cand.lower() == dim_lower for cand in x_candidates):
+            x_dim = dim
+        elif y_dim is None and any(cand.lower() == dim_lower for cand in y_candidates):
+            y_dim = dim
+        elif z_dim is None and any(cand.lower() == dim_lower for cand in z_candidates):
+            z_dim = dim
+
+    if x_dim is None or y_dim is None or z_dim is None:
+        raise ValueError(f"Could not infer x, y, z dimensions from {dims}. "
+                        f"Found: x={x_dim}, y={y_dim}, z={z_dim}")
+
+    # Transpose to (x, y, z) order and rename
+    data_array = data_array.transpose(x_dim, y_dim, z_dim)
+    data_array = data_array.rename({x_dim: 'x', y_dim: 'y', z_dim: 'z'})
+
+    return data_array
+
+
 def load_and_validate(filepath: str) -> Dict[str, Any]:
     """
     Load NetCDF file and validate it, inferring variable names.
@@ -133,10 +199,13 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
         Dictionary with keys:
         - 'dataset': xr.Dataset
         - 'liquid_water_var': str (variable name)
-        - 'liquid_water_data': xr.DataArray
+        - 'liquid_water_data': xr.DataArray (with standardized (x, y, z) dims)
         - 'ice_water_var': str or None
-        - 'ice_water_data': xr.DataArray or None
+        - 'ice_water_data': xr.DataArray or None (with standardized dims)
         - 'filepath': str
+        - 'x_coord': ndarray (x coordinates)
+        - 'y_coord': ndarray (y coordinates)
+        - 'z_coord': ndarray (z coordinates)
 
     Raises
     ------
@@ -152,10 +221,20 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
     lw_var, lw_data = infer_liquid_water(ds)
     validate_data(ds, lw_data, lw_var)
 
+    # Standardize dimensions to (x, y, z)
+    lw_data = standardize_dims(lw_data)
+
     # Infer ice water variable (optional)
     iw_var, iw_data = infer_ice_water(ds)
     if iw_data is not None:
         validate_data(ds, iw_data, iw_var)
+        # Standardize dimensions
+        iw_data = standardize_dims(iw_data)
+
+    # Extract coordinate arrays
+    x_coord = lw_data.coords['x'].values if 'x' in lw_data.coords else None
+    y_coord = lw_data.coords['y'].values if 'y' in lw_data.coords else None
+    z_coord = lw_data.coords['z'].values if 'z' in lw_data.coords else None
 
     return {
         'dataset': ds,
@@ -163,5 +242,8 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
         'liquid_water_data': lw_data,
         'ice_water_var': iw_var,
         'ice_water_data': iw_data,
-        'filepath': str(filepath)
+        'filepath': str(filepath),
+        'x_coord': x_coord,
+        'y_coord': y_coord,
+        'z_coord': z_coord,
     }
