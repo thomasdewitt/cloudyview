@@ -8,8 +8,7 @@ Usage:
 This script provides comprehensive analysis of your cloud data using:
 1. Optical depth calculation via extinction coefficient
 2. Mitsuba 3 Monte Carlo path tracing with physically-based sky
-3. Multiple viewing angles with 2048 samples per pixel (high quality)
-4. Top-of-atmosphere, ground-looking-up, and horizon views
+3. A high-quality (2048 spp) ground-looking-up view matching Expedition's framing
 """
 
 import argparse
@@ -134,37 +133,29 @@ def main(
         height_z = nz * dz
         aspect_ratio = width_x / height_z
 
-        # Domain center in scaled coordinates
-        domain_center = [aspect_ratio/2, aspect_ratio/2, 0.5]
+        # Domain center at origin
+        domain_center = [0.0, 0.0, 0.0]
         ar = aspect_ratio
 
         # Camera position scaling based on FOV and domain width
+        # Cube spans [-ar, ar] x [-ar, ar] x [-1, 1], so width = 2*ar, height = 2
         # For a perspective camera: visible_width = 2 * distance * tan(fov/2)
         # We want: domain_width = visible_width / margin
         # So: distance = (margin * domain_width) / (2 * tan(fov/2))
-        fov_toa = 35.0  # degrees
-        fov_boa = 35.0  # degrees
-        fov_horizon = 40.0  # degrees
-        margin = 1.2  # Domain takes up 1/1.2 ≈ 83% of image width
+        fov_ground = 80.0  # match Expedition
+        margin = 1.1  # Domain takes up 1/1.1 ≈ 91% of image width
 
-        # Calculate camera distances to frame the domain
-        toa_distance = (margin * ar) / (2 * np.tan(np.deg2rad(fov_toa / 2)))
-        boa_distance = (margin * ar) / (2 * np.tan(np.deg2rad(fov_boa / 2)))
-        horizon_distance = (margin * ar) / (2 * np.tan(np.deg2rad(fov_horizon / 2)))
-
-        # Camera heights (z-positions in scaled coordinates)
-        toa_height = 1.0 + toa_distance  # Above domain (z=0 to z=1)
-        boa_height = -boa_distance  # Below domain
-        horizon_height = 0.5 + 0.3 * ar  # Elevated for horizon view
+        # Use distance to offset camera along +y while keeping z near the ocean surface
+        boa_distance = (margin * 2 * ar) / (2 * np.tan(np.deg2rad(fov_ground / 2)))
+        camera_height = -0.9
+        camera_origin = [0.0, ar + boa_distance, camera_height]
 
         print(f"\nDomain:")
         print(f"  Physical size: {width_x/1000:.1f} x {width_y/1000:.1f} x {height_z/1000:.1f} km")
         print(f"  Aspect ratio (x/z): {aspect_ratio:.2f}")
         print(f"  Scaled width: {ar:.1f}")
-        print(f"  Camera positions (margin={margin:.1f}x):")
-        print(f"    TOA: distance={toa_distance:.1f}, z={toa_height:.1f}")
-        print(f"    BOA: distance={boa_distance:.1f}, z={boa_height:.1f}")
-        print(f"    Horizon: z={horizon_height:.1f}")
+        print(f"  Camera (ground view, margin={margin:.1f}x, fov={fov_ground:.0f}°):")
+        print(f"    y-offset={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
 
         # Create output directory if needed
         if output:
@@ -178,70 +169,36 @@ def main(
         import mitsuba as mi
         mi.set_variant('llvm_ad_rgb')
 
-        # Define three views
+        # High-quality ground-looking-up view (matches Expedition framing)
         views = [
             {
-                'name': 'TOA View (satellite perspective)',
-                'width': 1600,
-                'height': 1600,
-                'fov': 35,
+                'name': 'Ground-Looking-Up (2048 SPP)',
+                'width': 800,
+                'height': 800,
+                'fov': fov_ground,
                 'transform': radiative_transfer.look_at_world_up(
-                    origin=[ar/2, ar/2, toa_height],
+                    origin=camera_origin,
                     target=domain_center
                 ),
-                'spp': 2048,
-                'exposure': 2.0,
-                'extinction_multiplier': 1.0,
-                'sky_type': None,  # No sky visible from space
-                'sun_azimuth': 0.0,
-                'sun_elevation': 90.0 - sza,
-                'add_ocean': True,
-                'seed': 0,
-            },
-            {
-                'name': 'BOA View (ground-looking-up)',
-                'width': 1600,
-                'height': 1600,
-                'fov': 35,
-                'transform': radiative_transfer.look_at_world_up(
-                    origin=[ar/2, ar, boa_height],
-                    target=domain_center
-                ),
+                'camera_origin': camera_origin,
                 'spp': 2048,
                 'exposure': 4.0,
                 'extinction_multiplier': 1.0,
                 'sky_type': 'sunsky',
                 'turbidity': 3.0,
-                'sun_azimuth': 0.0,
+                'sun_azimuth': 270.0,
                 'sun_elevation': 90.0 - sza,
                 'ground_albedo': 0.5,
-                'seed': 1,
-            },
-            {
-                'name': 'Horizon View with Ocean',
-                'width': 1600,
-                'height': 1600,
-                'fov': 40,
-                'transform': radiative_transfer.look_at_world_up(
-                    origin=[ar/2, ar, horizon_height],
-                    target=[ar/2, ar*3/4, 0.5]
-                ),
-                'spp': 2048,
-                'exposure': 100.0,
-                'extinction_multiplier': 1.0,
-                'sky_type': 'sunsky',
-                'turbidity': 3.0,
-                'sun_azimuth': 0.0,
-                'sun_elevation': 90.0 - sza,
-                'ground_albedo': 0.2,
                 'add_ocean': True,
-                'seed': 2,
-            },
+                'ocean_reflectance': [0.2, 0.3, 0.45],
+                'ocean_height': -0.99,
+                'seed': 0,
+            }
         ]
 
-        # Render each view
-        print(f"\nRendering {len(views)} views with 2048 SPP each...")
-        print(f"(This will take some time - approximately {len(views) * 30} minutes on typical hardware)")
+        # Render the view
+        print(f"\nRendering {len(views)} view with {views[0]['spp']} SPP...")
+        print("(This will still take several minutes—grab a coffee!)")
         print("=" * 60)
 
         for i, view in enumerate(views):
@@ -298,7 +255,7 @@ def main(
 def cli():
     """Command-line interface for odyssey.py"""
     parser = argparse.ArgumentParser(
-        description="Comprehensive cloud visualization with full 3D Mitsuba radiative transfer (2048 SPP, 3 views)"
+        description="Comprehensive cloud visualization with full 3D Mitsuba radiative transfer (2048 SPP ground view)"
     )
     parser.add_argument(
         "filename",

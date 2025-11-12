@@ -20,13 +20,11 @@ try:
     MITSUBA_AVAILABLE = True
 except ImportError:
     MITSUBA_AVAILABLE = False
-    warnings.warn("Mitsuba 3 not installed. Radiative transfer rendering will not work.")
+    raise RuntimeError("Mitsuba 3 is required for radiative transfer rendering but was not found")
 
 
 def look_at_world_up(origin, target, fallback_up=(0, 1, 0), world_up=(0, 0, 1)):
     """Return a Mitsuba look_at transform that keeps image-up aligned with world-up."""
-    if not MITSUBA_AVAILABLE:
-        raise RuntimeError("Mitsuba 3 is required for radiative transfer rendering")
 
     origin = np.array(origin, dtype=float)
     target = np.array(target, dtype=float)
@@ -70,6 +68,7 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0):
     acc = None
     taken = 0
     start = time.perf_counter()
+    warmup_time = None
 
     # initial line (0%)
     print(f"  Rendering...   0.0%  (0/{spp_total} spp)  ETA --:--", end="", flush=True)
@@ -78,6 +77,7 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0):
     for k, _ in enumerate(range(0, spp_total, step_spp)):
         spp_k = min(step_spp, spp_total - taken)
 
+        chunk_start = time.perf_counter()
         # do one chunk
         img_k = mi.render(scene, spp=spp_k, seed=seed + k)
 
@@ -89,10 +89,18 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0):
         dr.eval(acc)
 
         taken += spp_k
+        chunk_elapsed = time.perf_counter() - chunk_start
+        if warmup_time is None:
+            warmup_time = chunk_elapsed
 
         # update ETA based on samples completed
         elapsed = time.perf_counter() - start
-        eta = (elapsed * (spp_total - taken) / taken) if taken else None
+        eta = None
+        if taken > step_spp:
+            effective_elapsed = elapsed - warmup_time
+            samples_after_warmup = taken - step_spp
+            if effective_elapsed > 0 and samples_after_warmup > 0:
+                eta = effective_elapsed * (spp_total - taken) / samples_after_warmup
 
         pct = 100.0 * taken / spp_total
         print(f"\r  Rendering... {pct:5.1f}%  ({taken}/{spp_total} spp)  ETA {_fmt_eta(eta)}",
@@ -167,8 +175,6 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
     height_z = nz * dz
     aspect_ratio = width_x / height_z
 
-    print(f"  Physical dimensions: {width_x/1000:.1f} x {width_y/1000:.1f} x {height_z/1000:.1f} km")
-    print(f"  Aspect ratio (x/z): {aspect_ratio:.2f}")
 
     # Prepare extinction data for Mitsuba
     extinction_data = (sigma_ext * camera_config['extinction_multiplier'] * height_z)[
@@ -179,18 +185,18 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
     )
 
     # Create volume grid
-    print(f"  Creating volume grid: {extinction_data.shape}")
-    print(f"  Extinction ({camera_config['extinction_multiplier']:.0f}x multiplier) max: {extinction_data.max():.1f} m^-1")
     volume_grid = mi.VolumeGrid(extinction_data)
 
-    # Transform cube to world space: [0, ar] x [0, ar] x [0, 1]
-    # Cube local space is [-1, 1]^3, so scale then translate
-    cube_transform = (mi.ScalarTransform4f.translate([aspect_ratio/2, aspect_ratio/2, 0.5]) @
-                      mi.ScalarTransform4f.scale([aspect_ratio/2, aspect_ratio/2, 0.5]))
+    # Cube: scale for aspect ratio, centered at origin
+    # World space: [-ar, ar] x [-ar, ar] x [-1, 1]
+    cube_transform = mi.ScalarTransform4f.scale([aspect_ratio, aspect_ratio, 1.0])
 
-    # Grid lives in [0,1]^3, cube local space is [-1,1]^3
-    # Map cube local [-1,1]^3 -> grid [0,1]^3: (p + 1) * 0.5
-    grid_transform = mi.ScalarTransform4f.scale([0.5, 0.5, 0.5]) @ mi.ScalarTransform4f.translate([1.0, 1.0, 1.0])
+    # Grid: map grid [0,1]^3 -> cube local [-1,1]^3 (and apply aspect ratio)
+    # Mitsuba expects sigma_t.to_world to place the unit grid into world space, so
+    # we first remap [0,1] to [-1,1] and then reuse the cube transform to stretch
+    # the medium volume exactly like the enclosing shape.
+    grid_to_cube = mi.ScalarTransform4f.translate([-1.0, -1.0, -1.0]) @ mi.ScalarTransform4f.scale([2.0, 2.0, 2.0])
+    grid_transform = cube_transform @ grid_to_cube
 
     # Sun direction (for directional light: from sun to scene)
     sun_az = camera_config.get('sun_azimuth', 0.0)
@@ -199,6 +205,16 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
     sun_dir_to_sun = sun_direction_to_sun(sun_az, sun_el)
 
     # Create scene dictionary
+    camera_origin = camera_config.get('camera_origin')
+    camera_inside = False
+    if camera_origin is not None:
+        cam_x, cam_y, cam_z = map(float, camera_origin)
+        eps = 1e-4
+        if (-aspect_ratio - eps <= cam_x <= aspect_ratio + eps and
+                -aspect_ratio - eps <= cam_y <= aspect_ratio + eps and
+                -1.0 - eps <= cam_z <= 1.0 + eps):
+            camera_inside = True
+
     scene_dict = {
         'type': 'scene',
 
@@ -233,6 +249,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
             'bsdf': {'type': 'null'},  # Invisible boundary
             'interior': {
                 'type': 'heterogeneous',
+                'id': 'cloud_medium',
                 'sigma_t': {
                     'type': 'gridvolume',
                     'grid': volume_grid,
@@ -248,12 +265,14 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
         },
     }
 
+    if camera_inside:
+        scene_dict['sensor']['medium'] = {'type': 'ref', 'id': 'cloud_medium'}
+
     # Add sky/sun based on configuration
     sky_type = camera_config.get('sky_type', 'constant')
 
     if sky_type == 'sunsky':
         # Physically-based Hosek-Wilkie sun+sky model
-        print(f"  Using physically-based sunsky (turbidity={camera_config.get('turbidity', 3.0)})")
         scene_dict['sunsky'] = {
             'type': 'sunsky',
             'sun_direction': sun_dir_to_sun,  # Direction TO the sun (upward)
@@ -286,20 +305,25 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
 
     # Add ocean surface if requested
     if camera_config.get('add_ocean', False):
-        print(f"  Adding ocean surface")
-        # Ocean slightly inside the domain (within the cube)
-        ocean_size = aspect_ratio * 10  # Make it much bigger to ensure full coverage
+        ocean_size_multiplier = camera_config.get('ocean_size_multiplier', 10.0)
+        ocean_height = camera_config.get('ocean_height', -0.99)
+        ocean_height = float(np.clip(ocean_height, -1.0, 1.0))  # keep within cube bounds
+        ocean_size = aspect_ratio * ocean_size_multiplier
+        ocean_reflectance = camera_config.get('ocean_reflectance', [0.2, 0.3, 0.4])
+
+        ocean_transform = (
+            mi.ScalarTransform4f.translate([0.0, 0.0, ocean_height]) @
+            mi.ScalarTransform4f.scale([ocean_size, ocean_size, 1.0])
+        )
+
         scene_dict['ocean'] = {
             'type': 'rectangle',
-            'to_world': mi.ScalarTransform4f.scale([ocean_size, ocean_size, 1.0])
-                        .translate([-ocean_size/2 + aspect_ratio/2,
-                                   -ocean_size/2 + aspect_ratio/2,
-                                   0.001]),  # Just above z=0, inside cube
+            'to_world': ocean_transform,
             'bsdf': {
-                'type': 'twosided',  # Make ocean visible from both sides
+                'type': 'twosided',  # Visible and reflective from above/below
                 'bsdf': {
                     'type': 'diffuse',
-                    'reflectance': {'type': 'rgb', 'value': [0.3, 0.4, 0.5]},
+                    'reflectance': {'type': 'rgb', 'value': ocean_reflectance},
                 }
             }
         }
@@ -343,9 +367,6 @@ def render_view(
     img_np : ndarray
         Rendered and tone-mapped image
     """
-    print(f"\n{'='*60}")
-    print(f"Rendering: {view_config['name']}")
-    print(f"{'='*60}")
 
     # Create scene
     scene = create_mitsuba_scene(
@@ -378,6 +399,5 @@ def render_view(
     fig.savefig(output_file, dpi=dpi)
     plt.close(fig)
 
-    print(f"  ✓ Saved {output_file}")
 
     return img_np

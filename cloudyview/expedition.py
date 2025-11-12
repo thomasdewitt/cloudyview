@@ -13,6 +13,7 @@ This script provides a realistic 3D view of your cloud data using:
 
 import argparse
 import sys
+import time
 from pathlib import Path
 import numpy as np
 import netCDF4 as nc
@@ -34,6 +35,7 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         Solar zenith angle in degrees
     """
     print(f"CloudyView Expedition: Loading {filename}")
+    start_time = time.perf_counter()
 
     try:
         # Load and validate data with xarray
@@ -43,9 +45,6 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         lw_data = data_dict['liquid_water_data']
         iw_data = data_dict['ice_water_data']
 
-        print(f"✓ Loaded {lw_var} variable")
-        print(f"  Shape: {lw_data.shape}")
-        print(f"  Range: {lw_data.min().values:.4f} - {lw_data.max().values:.4f} g/kg")
 
         # Get coordinates from data or dataset
         if hasattr(lw_data, 'coords'):
@@ -106,12 +105,9 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         dy = float(y_coord[1] - y_coord[0]) if len(y_coord) > 1 else 1.0
         dz = float(z_coord[1] - z_coord[0]) if len(z_coord) > 1 else 1.0
 
-        print(f"  Grid spacing: dx={dx:.1f}m, dy={dy:.1f}m, dz={dz:.1f}m")
 
         # Compute extinction coefficient
-        print("\nComputing extinction coefficient...")
         sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0)
-        print(f"✓ Extinction range: {sigma_ext.min():.6e} - {sigma_ext.max():.6e} m^-1")
 
         # Domain dimensions
         width_x = nx * dx
@@ -119,21 +115,24 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         height_z = nz * dz
         aspect_ratio = width_x / height_z
 
-        # Domain center in scaled coordinates
-        domain_center = [aspect_ratio/2, aspect_ratio/2, 0.5]
+        # Domain center at origin
+        domain_center = [0, 0, 0]
         ar = aspect_ratio
 
         # Camera position scaling based on FOV and domain width
+        # Cube spans [-ar, ar] x [-ar, ar] x [-1, 1], so width = 2*ar
         # For a perspective camera: visible_width = 2 * distance * tan(fov/2)
         # We want: domain_width = visible_width / margin
         # So: distance = (margin * domain_width) / (2 * tan(fov/2))
-        fov_boa = 35.0  # degrees
-        margin = 1.1 
-        boa_distance = (margin * ar) / (2 * np.tan(np.deg2rad(fov_boa / 2)))
-        boa_height = -boa_distance  # Below domain
+        fov_for_full_domain = 70.0  # degrees
+        boa_distance = (2 * ar) / (2 * np.tan(np.deg2rad(fov_for_full_domain / 2)))
+        # print(boa_distance)
 
-        print(f"  Domain aspect ratio (x/z): {aspect_ratio:.2f}")
-        print(f"  Domain scaled width: {ar:.1f}")
+        # Place camera just above ocean plane but offset in +y to frame the scene
+        camera_height = -0.5  # inside the cube but above reflective ocean
+        # camera_origin = [0.0, ar , camera_height]
+        # camera_origin = [0.0, ar + boa_distance, camera_height]
+        camera_origin = [0.0, - ar * 3/4, camera_height]
 
         # Create output directory if needed
         if output:
@@ -142,24 +141,22 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         else:
             output_dir = Path(".")
 
-        # Initialize Mitsuba
-        print("\nSetting up Mitsuba 3...")
         import mitsuba as mi
         mi.set_variant('llvm_ad_rgb')
 
         # Render ground-looking-up view with 16 SPP
-        print("\nRendering ground-looking-up view...")
-        print(f"  Camera distance: {boa_distance:.1f} (z={boa_height:.1f})")
+        print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
         view_config = {
             'name': 'Ground-Looking-Up (16 SPP)',
-            'width': 800,
-            'height': 800,
-            'fov': 35,
+            'width': 600,
+            'height': 300,
+            'fov': 100,
             'transform': radiative_transfer.look_at_world_up(
-                origin=[ar/2, ar, boa_height],
+                origin=camera_origin,
                 target=domain_center
             ),
-            'spp': 2,
+            'camera_origin': camera_origin,
+            'spp': 1024,
             'exposure': 4.0,
             'extinction_multiplier': 1.0,
             'sky_type': 'sunsky',  # Physically-based sky
@@ -167,13 +164,18 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
             'sun_azimuth': 270.0,
             'sun_elevation': 90.0 - sza,  # Convert zenith angle to elevation
             'ground_albedo': 0.5,
+            'add_ocean': True,
+            'ocean_reflectance': [0.2, 0.3, 0.45],
+            'ocean_height': -.99,
             'seed': 0,
         }
 
         output_file = output_dir / "expedition_ground_view.png"
         radiative_transfer.render_view(sigma_ext, dx, dy, dz, view_config, str(output_file))
 
+        elapsed = time.perf_counter() - start_time
         print("\n✓ Expedition complete!")
+        print(f"  Total runtime: {elapsed:.1f} s ({elapsed/60:.1f} min)")
         if output:
             print(f"  Renders saved to {output_dir}")
 

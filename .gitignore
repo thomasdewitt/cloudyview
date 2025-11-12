@@ -6,6 +6,7 @@ __pycache__/
 # C extensions
 *.so
 
+mitsuba_repo_for_reference/*
 # Distribution / packaging
 .Python
 build/
