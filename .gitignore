@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.png
 
 mitsuba_repo_for_reference/*
 # Distribution / packaging

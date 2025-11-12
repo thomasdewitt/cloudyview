@@ -215,25 +215,36 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
                 -1.0 - eps <= cam_z <= 1.0 + eps):
             camera_inside = True
 
+    integrator_type = camera_config.get('integrator', 'volpath')
+    max_depth = camera_config.get('max_depth', 32)
+    rr_depth = camera_config.get('rr_depth', 5)
+    integrator = {
+        'type': integrator_type,
+        'max_depth': max_depth,
+        'rr_depth': rr_depth,
+    }
+
+    if integrator_type == 'volpathmis':
+        # same params but rr_depth is named differently
+        integrator['max_depth'] = max_depth
+    elif integrator_type == 'volpath':
+        integrator['max_depth'] = max_depth
+    elif integrator_type == 'volpath_simple':
+        integrator.pop('rr_depth', None)
+
     scene_dict = {
         'type': 'scene',
-
-        # Volumetric path tracer
-        'integrator': {
-            'type': 'volpath',
-            'max_depth': 32,
-            'rr_depth': 5,
-        },
+        'integrator': integrator,
 
         # Camera/sensor
         'sensor': {
             'type': 'perspective',
             'fov': camera_config.get('fov', 45),
             'to_world': camera_config['transform'],
-            'sampler': {
+            'sampler': camera_config.get('sampler', {
                 'type': 'independent',
                 'sample_count': spp,
-            },
+            }),
             'film': {
                 'type': 'hdrfilm',
                 'width': camera_config['width'],

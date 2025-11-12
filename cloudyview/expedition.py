@@ -148,15 +148,15 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
         view_config = {
             'name': 'Ground-Looking-Up (16 SPP)',
-            'width': 600,
-            'height': 300,
+            'width': 300,
+            'height': 150,
             'fov': 100,
             'transform': radiative_transfer.look_at_world_up(
                 origin=camera_origin,
                 target=domain_center
             ),
             'camera_origin': camera_origin,
-            'spp': 1024,
+            'spp': 2,
             'exposure': 4.0,
             'extinction_multiplier': 1.0,
             'sky_type': 'sunsky',  # Physically-based sky
@@ -167,10 +167,23 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
             'add_ocean': True,
             'ocean_reflectance': [0.2, 0.3, 0.45],
             'ocean_height': -.99,
+            'integrator': 'volpathmis',
+            'max_depth': 512,
+            'rr_depth': 512,
+            'sampler': {'type': 'independent'},
             'seed': 0,
         }
 
-        output_file = output_dir / "expedition_ground_view.png"
+        # Sobol prefers power-of-two spp; adjust if necessary
+        samples = view_config['spp']
+        next_pow2 = 1 << (samples - 1).bit_length()
+        if next_pow2 != samples:
+            print(f"  Adjusting spp from {samples} to {next_pow2} for Sobol sampler")
+            view_config['spp'] = next_pow2
+
+        view_config['sampler']['sample_count'] = view_config['spp']
+
+        output_file = output_dir / f"expedition_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
         radiative_transfer.render_view(sigma_ext, dx, dy, dz, view_config, str(output_file))
 
         elapsed = time.perf_counter() - start_time
