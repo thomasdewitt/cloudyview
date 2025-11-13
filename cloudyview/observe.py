@@ -3,13 +3,18 @@
 observe.py: Cloud field visualization with PyVista isosurface rendering.
 
 Usage:
-    python observe.py <filename.nc> [--output <path>] [--threshold <value>] [--html]
+    # Multiple surfaces (default):
+    python observe.py <filename.nc> [--html] [-n 3] [--min-threshold 0.001] [--max-threshold 0.01]
 
-This script provides a simple 3D isosurface view of cloud extinction fields:
+    # Single surface:
+    python observe.py <filename.nc> --threshold 0.005 [--html]
+
+This script provides a 3D isosurface view of cloud extinction fields:
 1. Loads cloud data and calculates extinction coefficients
-2. Renders white isosurface at specified extinction threshold
-3. Views from above at an angle with sky blue background
-4. Optional interactive HTML export for portability (open in any browser!)
+2. Renders white isosurface(s) with varying opacity based on extinction threshold
+3. Multiple surfaces: logarithmically spaced thresholds from low (transparent) to high (opaque)
+4. Views from above at an angle with sky blue background and directional sun lighting
+5. Optional interactive HTML export for portability (open in any browser!)
 """
 
 import argparse
@@ -23,7 +28,9 @@ import pyvista as pv
 from . import io, optical_depth
 
 
-def main(filename: str, output: str = None, threshold: float = 0.001, html: bool = False) -> None:
+def main(filename: str, output: str = None, threshold: float = None,
+         html: bool = False, n_surfaces: int = 10,
+         min_threshold: float = 0.001, max_threshold: float = 0.1) -> None:
     """
     Main function for observe.py
 
@@ -33,10 +40,17 @@ def main(filename: str, output: str = None, threshold: float = 0.001, html: bool
         Path to NetCDF file
     output : str, optional
         Output file path for render
-    threshold : float
-        Extinction coefficient threshold for isosurface (m^-1)
+    threshold : float, optional
+        Single extinction coefficient threshold for isosurface (m^-1)
+        If None, uses multiple surfaces from min_threshold to max_threshold
     html : bool
         If True, export interactive HTML instead of static PNG
+    n_surfaces : int
+        Number of isosurfaces to plot (default: 3)
+    min_threshold : float
+        Minimum extinction threshold (default: 0.001 m^-1)
+    max_threshold : float
+        Maximum extinction threshold (default: 0.01 m^-1)
     """
     print(f"CloudyView Observe: Loading {filename}")
     start_time = time.perf_counter()
@@ -116,7 +130,23 @@ def main(filename: str, output: str = None, threshold: float = 0.001, html: bool
         sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0)
 
         print(f"  Extinction range: {sigma_ext.min():.6f} to {sigma_ext.max():.6f} m^-1")
-        print(f"  Isosurface threshold: {threshold:.6f} m^-1")
+
+        # Determine thresholds and opacities
+        if threshold is not None:
+            # Single surface mode
+            thresholds = [threshold]
+            opacities = [1.0]
+            print(f"  Single isosurface threshold: {threshold:.6f} m^-1")
+        else:
+            # Multiple surfaces mode
+            # Logarithmically spaced thresholds from min to max
+            thresholds = np.logspace(np.log10(min_threshold), np.log10(max_threshold), n_surfaces)
+            # Linearly spaced opacities from low to fully opaque
+            min_opacity = 0.15
+            opacities = np.linspace(min_opacity, 1.0, n_surfaces)
+            print(f"  Multiple isosurfaces: {n_surfaces} surfaces")
+            print(f"  Threshold range: {min_threshold:.6f} to {max_threshold:.6f} m^-1")
+            print(f"  Opacity range: {min_opacity:.2f} to 1.00")
 
         # Create PyVista structured grid
         # PyVista expects dimensions in (nz, ny, nx) order for structured grids
@@ -127,10 +157,6 @@ def main(filename: str, output: str = None, threshold: float = 0.001, html: bool
         # Add extinction field as point data
         # Flatten in Fortran order to match PyVista's expected ordering
         grid.point_data['extinction'] = sigma_ext.flatten(order='F')
-
-        # Create isosurface
-        print("  Creating isosurface...")
-        isosurface = grid.contour([threshold], scalars='extinction')
 
         # Calculate domain geometry (needed for lighting and camera)
         center_x = (x_coord[0] + x_coord[-1]) / 2
@@ -178,8 +204,22 @@ def main(filename: str, output: str = None, threshold: float = 0.001, html: bool
         ambient_intensity = 0.3
         plotter.add_light(pv.Light(light_type='headlight', intensity=ambient_intensity))
 
-        # Add isosurface as white mesh
-        plotter.add_mesh(isosurface, color='white', smooth_shading=True)
+        # Create and add isosurfaces
+        print(f"  Creating {len(thresholds)} isosurface(s)...")
+        surfaces_added = 0
+        for i, (thresh, opacity) in enumerate(zip(thresholds, opacities)):
+            isosurface = grid.contour([thresh], scalars='extinction')
+            # Skip empty meshes
+            if isosurface.n_points == 0:
+                print(f"    Surface {i+1}/{len(thresholds)}: threshold={thresh:.6f} m^-1 - skipped (empty)")
+                continue
+            print(f"    Surface {i+1}/{len(thresholds)}: threshold={thresh:.6f} m^-1, opacity={opacity:.2f}")
+            plotter.add_mesh(isosurface, color='white', opacity=opacity, smooth_shading=True)
+            surfaces_added += 1
+
+        if surfaces_added == 0:
+            print("✗ No surfaces generated - try lower thresholds", file=sys.stderr)
+            sys.exit(1)
 
         # Calculate camera position - view from above at an angle
         # Camera position: elevated and offset for angled view
@@ -201,10 +241,18 @@ def main(filename: str, output: str = None, threshold: float = 0.001, html: bool
         if output:
             output_path = Path(output)
         else:
-            if html:
-                output_path = Path(f"observe_threshold_{threshold:.6f}.html")
+            if threshold is not None:
+                # Single surface mode
+                if html:
+                    output_path = Path(f"observe_threshold_{threshold:.6f}.html")
+                else:
+                    output_path = Path(f"observe_threshold_{threshold:.6f}.png")
             else:
-                output_path = Path(f"observe_threshold_{threshold:.6f}.png")
+                # Multiple surfaces mode
+                if html:
+                    output_path = Path(f"observe_multi_{n_surfaces}surfaces.html")
+                else:
+                    output_path = Path(f"observe_multi_{n_surfaces}surfaces.png")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -252,16 +300,29 @@ def cli():
         help="Output file path for saving render (default: observe_threshold_<value>.png or .html)"
     )
     parser.add_argument(
-        "--threshold", "-t", type=float, default=0.001,
-        help="Extinction coefficient threshold for isosurface in m^-1 (default: 0.001)"
+        "--threshold", "-t", type=float, default=None,
+        help="Single extinction coefficient threshold for isosurface in m^-1. If not set, uses multiple surfaces."
     )
     parser.add_argument(
         "--html", action="store_true",
         help="Export interactive HTML instead of static PNG (fully portable, open in any browser)"
     )
+    parser.add_argument(
+        "--n-surfaces", "-n", type=int, default=10,
+        help="Number of isosurfaces to plot in multiple surface mode (default: 3)"
+    )
+    parser.add_argument(
+        "--min-threshold", type=float, default=0.001,
+        help="Minimum extinction threshold in m^-1 for multiple surface mode (default: 0.001)"
+    )
+    parser.add_argument(
+        "--max-threshold", type=float, default=1,
+        help="Maximum extinction threshold in m^-1 for multiple surface mode (default: 0.01)"
+    )
 
     args = parser.parse_args()
-    main(args.filename, args.output, args.threshold, args.html)
+    main(args.filename, args.output, args.threshold, args.html,
+         args.n_surfaces, args.min_threshold, args.max_threshold)
 
 
 if __name__ == "__main__":
