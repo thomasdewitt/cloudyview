@@ -17,11 +17,12 @@ import time
 from pathlib import Path
 import numpy as np
 import netCDF4 as nc
+import mitsuba as mi
 
-from . import io, optical_depth, radiative_transfer, basic_render
+from . import io, radiative_transfer, optical_depth
 
 
-def main(filename: str, output: str = None, sza: float = 70.0) -> None:
+def main(filename: str, output: str = None, sza: float = 50.0) -> None:
     """
     Main function for appreciate.py
 
@@ -116,7 +117,7 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         aspect_ratio = width_x / height_z
 
         # Domain center at origin
-        domain_center = [0, 0, 0]
+        domain_center = [0, 0, 0.5]
         ar = aspect_ratio
 
         # Camera position scaling based on FOV and domain width
@@ -141,35 +142,34 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
         else:
             output_dir = Path(".")
 
-        import mitsuba as mi
         mi.set_variant('llvm_ad_rgb')
 
         # Render ground-looking-up view with 16 SPP
         print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
         view_config = {
             'name': 'Ground-Looking-Up (16 SPP)',
-            'width': 300,
-            'height': 150,
+            'width': 600,
+            'height': 300,
             'fov': 100,
             'transform': radiative_transfer.look_at_world_up(
                 origin=camera_origin,
                 target=domain_center
             ),
             'camera_origin': camera_origin,
-            'spp': 2,
+            'spp': 128,
             'exposure': 4.0,
             'extinction_multiplier': 1.0,
             'sky_type': 'sunsky',  # Physically-based sky
             'turbidity': 3.0,
-            'sun_azimuth': 270.0,
+            'sun_azimuth': 110.0,
             'sun_elevation': 90.0 - sza,  # Convert zenith angle to elevation
             'ground_albedo': 0.5,
             'add_ocean': True,
-            'ocean_reflectance': [0.2, 0.3, 0.45],
+            'ocean_reflectance': [0.0392, 0.1098, 0.1490],  # #0A1C26 = RGB(10, 28, 38)
             'ocean_height': -.99,
             'integrator': 'volpathmis',
-            'max_depth': 512,
-            'rr_depth': 512,
+            'max_depth': 128,
+            'rr_depth': 64,
             'sampler': {'type': 'independent'},
             'seed': 0,
         }
