@@ -118,20 +118,23 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         # Convert extinction to optical depth per layer
         optical_depth_3d = sigma_ext * dz
 
-        # Local opacity drives transparency directly (no remapping)
+        # Local opacity drives transparency directly (Beer-Lambert law)
         local_opacity = 1.0 - np.exp(-optical_depth_3d)
         local_opacity = np.clip(local_opacity, 0.0, 1.0)
 
-        # Calculate illumination: brightness = 1 - opacity_above
-        # For overhead sun, we need opacity ABOVE each point
-        # Cumsum from top gives us opacity above
+        # Calculate illumination: represents overhead sun brightness
+        # For overhead sun, we need cumulative optical depth ABOVE each point
+        # Cumsum from top (reverse z, cumsum, reverse back)
         cumsum_above = np.cumsum(optical_depth_3d[:, :, ::-1], axis=2)[:, :, ::-1]
-        opacity_above = 1.0 - np.exp(-cumsum_above)
 
+        # Illumination decreases exponentially with optical depth above
+        # target_tau_half sets the scale - larger values = more gradual darkening
         target_tau_half = 500.0
         tau_above = np.maximum(cumsum_above - optical_depth_3d, 0.0)
         illumination = np.exp(-tau_above / target_tau_half)
         illumination = np.clip(illumination, 0.0, 1.0)
+
+        # Apply gamma correction for better visual perception
         illumination_gamma = np.power(illumination, 0.85)
 
         # Create output directory if needed
@@ -147,19 +150,47 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
 
         # Create structured grid
         grid = pv.StructuredGrid(xx, yy, zz)
-        grid['illumination'] = illumination_gamma.ravel(order='F')
-        opacity_flat = local_opacity.ravel(order='F')
-        # Build 256-sample piecewise opacity transfer based on raw opacity values
+
+        # Approach: Create a scalar that properly represents clouds with illumination-based coloring
+        # For cloud voxels: use illumination (white=sunlit, grey=shadowed) weighted by presence
+        # For clear voxels: use zero (fully transparent)
+
+        # Create a mask for cloudy regions (where there's actual condensate)
+        cloud_mask = local_opacity > 0.001
+
+        # Initialize scalar field
+        combined_scalar = np.zeros_like(local_opacity)
+
+        # For cloudy regions, use illumination weighted by physical opacity
+        # This gives: bright white (sunlit cloud), dark grey (shadowed cloud)
+        # The weighting by opacity^0.4 makes thin clouds somewhat visible but thick clouds prominent
+        combined_scalar[cloud_mask] = illumination_gamma[cloud_mask] * np.power(local_opacity[cloud_mask], 0.4)
+
+        grid['cloud'] = combined_scalar.ravel(order='F')
+
+        # Create opacity transfer function based on the physical opacity distribution
+        # This maps the combined_scalar values to rendering opacity
+        # Goal: make rendering opacity reflect the physical opacity
         lut_bins = 256
+        opacity_tf = np.zeros(lut_bins)
+
+        # For bins where we have cloud, use a function of the physical opacity
+        scalar_flat = combined_scalar.ravel(order='F')
+        opacity_flat_masked = local_opacity.ravel(order='F')
+
         edges = np.linspace(0.0, 1.0, lut_bins + 1)
-        indices = np.clip(np.digitize(opacity_flat, edges) - 1, 0, lut_bins - 1)
-        counts = np.bincount(indices, minlength=lut_bins)
-        opacity_tf = np.bincount(indices, weights=opacity_flat, minlength=lut_bins)
-        opacity_tf = np.divide(opacity_tf, counts, out=np.zeros_like(opacity_tf), where=counts > 0)
-        # Fill gaps by nearest previous value
-        for i in range(1, lut_bins):
-            if counts[i] == 0:
-                opacity_tf[i] = opacity_tf[i-1]
+        for i in range(lut_bins):
+            bin_min = edges[i]
+            bin_max = edges[i + 1]
+            mask = (scalar_flat >= bin_min) & (scalar_flat < bin_max) & (opacity_flat_masked > 0.001)
+
+            if np.any(mask):
+                # Average physical opacity for this scalar range
+                # Then scale it to make clouds visible
+                avg_opacity = np.mean(opacity_flat_masked[mask])
+                # Apply power law to enhance thin cloud visibility
+                opacity_tf[i] = np.power(avg_opacity, 0.6) * 2.0
+
         opacity_tf = np.clip(opacity_tf, 0.0, 1.0)
 
         # Create plotter with sky blue background
@@ -171,12 +202,10 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         plotter.background_color = sky_blue
 
         # Add volumetric rendering
-        # Use combined field (illumination * local_opacity) for both color and transparency
-        # This gives: white opaque (sunlit cloud), black opaque (shadowed cloud),
-        # transparent clear regions
+        # Use combined scalar for both COLOR (white=sunlit, dark=shadowed) and presence
         volume = plotter.add_volume(
             grid,
-            scalars='illumination',
+            scalars='cloud',
             cmap='gray',
             opacity=opacity_tf.tolist(),
             shade=False,
