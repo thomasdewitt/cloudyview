@@ -238,11 +238,11 @@ def main(filename: str, output: str = None, tau_threshold: float = 0.5, tau_thre
         domain_center = [np.mean(x_coord), np.mean(y_coord), np.mean(z_coord)]
         domain_size = [np.ptp(x_coord), np.ptp(y_coord), np.ptp(z_coord)]
 
-        # Camera positioned above and to the side
+        # Camera positioned above and to the side (zoomed out for better overview)
         plotter.camera.position = [
-            domain_center[0] + 0.8 * domain_size[0],
-            domain_center[1] + 0.8 * domain_size[1],
-            domain_center[2] + 1.2 * domain_size[2]
+            domain_center[0] + 1.2 * domain_size[0],
+            domain_center[1] + 1.2 * domain_size[1],
+            domain_center[2] + 1.6 * domain_size[2]
         ]
         plotter.camera.focal_point = domain_center
 
