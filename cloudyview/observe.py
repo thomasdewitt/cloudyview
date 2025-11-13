@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """
-observe.py: Cloud field volumetric visualization with pyvista.
+observe.py: Cloud field surface visualization with pyvista.
 
 Usage:
-    python observe.py <filename.nc> [--output <path>] [--threshold <value>]
+    python observe.py <filename.nc> [--output <path>] [--tau-threshold <value>]
 
-This script provides a volumetric rendering view of cloud data using:
-1. Opacity calculation from liquid water content
-2. Illumination based on overhead sun (cumulative opacity above each point)
-3. PyVista volumetric rendering with sky blue background and path tracing
+This script provides a surface rendering view of cloud data using:
+1. Optical depth calculation from liquid water content
+2. Surface extraction at optical depth thresholds
+3. PyVista surface rendering with lighting and shadows
 """
 
 import argparse
@@ -21,7 +21,7 @@ import netCDF4 as nc
 from . import io, optical_depth
 
 
-def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
+def main(filename: str, output: str = None, tau_threshold: float = 0.5, tau_threshold_2: float = None) -> None:
     """
     Main function for observe.py
 
@@ -31,8 +31,10 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         Path to NetCDF file
     output : str, optional
         Output directory for renders
-    threshold : float
-        Opacity threshold for rendering (default: 0.001)
+    tau_threshold : float
+        Optical depth threshold for first surface (default: 0.5)
+    tau_threshold_2 : float, optional
+        Optical depth threshold for second surface (default: None)
     """
     print(f"CloudyView Observe: Loading {filename}")
     start_time = time.perf_counter()
@@ -41,6 +43,8 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         # Import pyvista here to allow graceful error handling
         try:
             import pyvista as pv
+            # Start Xvfb for offscreen rendering
+            pv.start_xvfb()
         except ImportError:
             print("✗ PyVista required but not installed", file=sys.stderr)
             print("  Install with: pip install pyvista", file=sys.stderr)
@@ -112,27 +116,16 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         dy = float(y_coord[1] - y_coord[0]) if len(y_coord) > 1 else 1.0
         dz = float(z_coord[1] - z_coord[0]) if len(z_coord) > 1 else 1.0
 
+        print(f"  Grid: {nx}x{ny}x{nz}, spacing: {dx:.1f}x{dy:.1f}x{dz:.1f}m")
+
         # Compute extinction coefficient
         sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0)
 
-        # Convert extinction to optical depth per layer
+        # Convert extinction to optical depth per layer (local optical depth at each pixel)
         optical_depth_3d = sigma_ext * dz
 
-        # Local opacity drives transparency directly (no remapping)
-        local_opacity = 1.0 - np.exp(-optical_depth_3d)
-        local_opacity = np.clip(local_opacity, 0.0, 1.0)
-
-        # Calculate illumination: brightness = 1 - opacity_above
-        # For overhead sun, we need opacity ABOVE each point
-        # Cumsum from top gives us opacity above
-        cumsum_above = np.cumsum(optical_depth_3d[:, :, ::-1], axis=2)[:, :, ::-1]
-        opacity_above = 1.0 - np.exp(-cumsum_above)
-
-        target_tau_half = 500.0
-        tau_above = np.maximum(cumsum_above - optical_depth_3d, 0.0)
-        illumination = np.exp(-tau_above / target_tau_half)
-        illumination = np.clip(illumination, 0.0, 1.0)
-        illumination_gamma = np.power(illumination, 0.85)
+        print(f"  Max local optical depth: {optical_depth_3d.max():.3f}")
+        print(f"  Creating surface at tau = {tau_threshold}...")
 
         # Create output directory if needed
         if output:
@@ -142,69 +135,111 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
             output_dir = Path(".")
 
         # Create structured grid for pyvista
-        print("  Creating volumetric grid...")
         xx, yy, zz = np.meshgrid(x_coord, y_coord, z_coord, indexing='ij')
-
-        # Create structured grid
         grid = pv.StructuredGrid(xx, yy, zz)
-        grid['illumination'] = illumination_gamma.ravel(order='F')
-        opacity_flat = local_opacity.ravel(order='F')
-        # Build 256-sample piecewise opacity transfer based on raw opacity values
-        lut_bins = 256
-        edges = np.linspace(0.0, 1.0, lut_bins + 1)
-        indices = np.clip(np.digitize(opacity_flat, edges) - 1, 0, lut_bins - 1)
-        counts = np.bincount(indices, minlength=lut_bins)
-        opacity_tf = np.bincount(indices, weights=opacity_flat, minlength=lut_bins)
-        opacity_tf = np.divide(opacity_tf, counts, out=np.zeros_like(opacity_tf), where=counts > 0)
-        # Fill gaps by nearest previous value
-        for i in range(1, lut_bins):
-            if counts[i] == 0:
-                opacity_tf[i] = opacity_tf[i-1]
-        opacity_tf = np.clip(opacity_tf, 0.0, 1.0)
+        grid['optical_depth'] = optical_depth_3d.ravel(order='F')
+
+        # Extract isosurface at tau threshold (where local optical depth = tau_threshold)
+        surface = grid.contour([tau_threshold], scalars='optical_depth')
+
+        if surface.n_points == 0:
+            print(f"  Warning: No surface found at tau={tau_threshold}")
+            print(f"  Try a different threshold value")
+            sys.exit(1)
+
+        print(f"  Surface extracted: {surface.n_points} points, {surface.n_cells} cells")
+
+        # Extract second surface if requested
+        surface_2 = None
+        if tau_threshold_2 is not None:
+            print(f"  Creating second surface at tau = {tau_threshold_2}...")
+            surface_2 = grid.contour([tau_threshold_2], scalars='optical_depth')
+
+            if surface_2.n_points > 0:
+                print(f"  Second surface: {surface_2.n_points} points, {surface_2.n_cells} cells")
+            else:
+                print(f"  Warning: No second surface found at tau={tau_threshold_2}")
+                surface_2 = None
 
         # Create plotter with sky blue background
-        print("  Rendering volumetric view...")
+        print("  Rendering surface view...")
         plotter = pv.Plotter(off_screen=True, window_size=(1200, 900))
 
         # Sky blue background
-        sky_blue = (58/255, 74/255, 166/255)
+        sky_blue = (0.53, 0.81, 0.92)  # Light blue
         plotter.background_color = sky_blue
 
-        # Add volumetric rendering
-        # Use combined field (illumination * local_opacity) for both color and transparency
-        # This gives: white opaque (sunlit cloud), black opaque (shadowed cloud),
-        # transparent clear regions
-        volume = plotter.add_volume(
-            grid,
-            scalars='illumination',
-            cmap='gray',
-            opacity=opacity_tf.tolist(),
-            shade=False,
-            show_scalar_bar=False,
-            clim=[0, 1],
-        )
+        # Add first surface - opaque white with shadows
+        if surface_2 is None:
+            # Single surface - opaque white
+            plotter.add_mesh(
+                surface,
+                color='white',
+                smooth_shading=True,
+                show_edges=False,
+                opacity=1.0,
+                lighting=True,
+                specular=0.3,
+                specular_power=15,
+            )
+        else:
+            # Two surfaces - first one semi-transparent, second one opaque
+            plotter.add_mesh(
+                surface,
+                color='white',
+                smooth_shading=True,
+                show_edges=False,
+                opacity=0.6,
+                lighting=True,
+                specular=0.3,
+                specular_power=15,
+            )
+            plotter.add_mesh(
+                surface_2,
+                color='white',
+                smooth_shading=True,
+                show_edges=False,
+                opacity=1.0,
+                lighting=True,
+                specular=0.3,
+                specular_power=15,
+            )
 
-        # Set view angle - looking down at clouds from above at an angle
+        # Add a directional light (like the sun) to create shadows
+        light = pv.Light(position=(np.max(x_coord)*2, np.max(y_coord)*2, np.max(z_coord)*3),
+                        focal_point=(np.mean(x_coord), np.mean(y_coord), np.mean(z_coord)),
+                        color='white',
+                        intensity=0.8)
+        plotter.add_light(light)
+
+        # Enable shadows for realistic perspective
+        plotter.enable_shadows()
+
+        # Set view angle - looking at clouds from above at an angle
         domain_center = [np.mean(x_coord), np.mean(y_coord), np.mean(z_coord)]
         domain_size = [np.ptp(x_coord), np.ptp(y_coord), np.ptp(z_coord)]
 
-        # Camera positioned above and to the side
+        # Camera positioned above and to the side (zoomed out for better overview)
         plotter.camera.position = [
-            domain_center[0] + 0.8 * domain_size[0],
-            domain_center[1] + 0.8 * domain_size[1],
-            domain_center[2] + 1.2 * domain_size[2]
+            domain_center[0] + 1.2 * domain_size[0],
+            domain_center[1] + 1.2 * domain_size[1],
+            domain_center[2] + 1.6 * domain_size[2]
         ]
         plotter.camera.focal_point = domain_center
 
         # Output file
-        output_file = output_dir / f"observe_volumetric_threshold={threshold:.3f}.png"
+        if tau_threshold_2 is None:
+            output_file = output_dir / f"observe_surface_tau={tau_threshold:.2f}.png"
+        else:
+            output_file = output_dir / f"observe_surfaces_tau={tau_threshold:.2f}_{tau_threshold_2:.2f}.png"
+
         plotter.screenshot(str(output_file))
         print(f"  ✓ Saved {output_file}")
         plotter.close()
 
         elapsed = time.perf_counter() - start_time
         print("\n✓ Observe complete!")
-        print(f"  Total runtime: {elapsed:.1f} s ({elapsed/60:.1f} min)")
+        print(f"  Total runtime: {elapsed:.1f} s")
         if output:
             print(f"  Renders saved to {output_dir}")
 
@@ -228,7 +263,7 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
 def cli():
     """Command-line interface for observe.py"""
     parser = argparse.ArgumentParser(
-        description="Cloud visualization with volumetric pyvista rendering"
+        description="Cloud visualization with surface rendering based on optical depth thresholds"
     )
     parser.add_argument(
         "filename",
@@ -239,12 +274,16 @@ def cli():
         help="Output directory for saving renders"
     )
     parser.add_argument(
-        "--threshold", type=float, default=0.001,
-        help="Opacity threshold for rendering (default: 0.001)"
+        "--tau-threshold", type=float, default=0.5,
+        help="Optical depth threshold for first surface (default: 0.5)"
+    )
+    parser.add_argument(
+        "--tau-threshold-2", type=float, default=None,
+        help="Optical depth threshold for second surface (optional)"
     )
 
     args = parser.parse_args()
-    main(args.filename, args.output, args.threshold)
+    main(args.filename, args.output, args.tau_threshold, args.tau_threshold_2)
 
 
 if __name__ == "__main__":
