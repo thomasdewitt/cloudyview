@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """
-glimpse.py: Quick visualization of cloud fields using optical depth and matplotlib 3D.
+glimpse.py: Quick optical depth calculation for cloud fields.
 
 Usage:
     python glimpse.py <filename.nc> [--output <path>]
 
 This script provides a quick glimpse of your cloud data using:
-1. Optical depth calculation
-2. 3D isosurface plot (matplotlib)
+1. Column optical depth calculation
+2. Top-view visualization (matplotlib)
 """
 
 import argparse
@@ -81,26 +81,6 @@ def main(filename: str, output: str = None) -> None:
         od_path = output_dir / f"cloudyview_glimpse_top_view_{base_filename}.png"
         basic_render.plot_optical_depth(opacity, output_path=str(od_path))
 
-        # Calculate 3D optical depth field for coloring
-        print("Calculating 3D optical depth...")
-        # Create 3D optical depth field from water content
-        od_3d = optical_depth.compute_extinction_field(lw_np, z_coord)
-
-        # Convert to opacity field (opacity of everything above each point)
-        opacity_3d = optical_depth.opacity_field_3d(od_3d)
-        print(f"✓ 3D opacity range: {opacity_3d.min():.4f} - {opacity_3d.max():.4f}")
-
-        # Plot isosurface with opacity coloring
-        print("Rendering 3D isosurface...")
-        iso_path = output_dir / f"cloudyview_glimpse_3D_{base_filename}.png"
-        fig, ax = basic_render.plot_isosurface(
-            lw_data,
-            threshold=0.01,
-            output_path=str(iso_path),
-            color_by_opacity=True,
-            opacity_field=opacity_3d
-        )
-
         print("\n✓ Glimpse complete!")
         print(f"  Saved to {output_dir}")
 
@@ -120,7 +100,7 @@ def main(filename: str, output: str = None) -> None:
 def cli():
     """Command-line interface for glimpse.py"""
     parser = argparse.ArgumentParser(
-        description="Quick 3D cloud visualization with optical depth and matplotlib"
+        description="Quick optical depth calculation and top-view visualization"
     )
     parser.add_argument(
         "filename",

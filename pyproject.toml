@@ -40,6 +40,7 @@ radiative-transfer = [
 visualization = [
     "scikit-image>=0.19.0",
     "scipy>=1.7.0",
+    "pyvista>=0.37.0",
 ]
 dev = [
     "pytest>=6.0",
@@ -60,8 +61,8 @@ all = [
 
 [project.scripts]
 glimpse = "cloudyview.glimpse:cli"
-expedition = "cloudyview.expedition:cli"
-odyssey = "cloudyview.odyssey:cli"
+observe = "cloudyview.observe:cli"
+appreciate = "cloudyview.appreciate:cli"
 
 [project.urls]
 Homepage = "https://github.com/thomasdewitt/cloudyview"

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-expedition.py: Cloud field visualization with optical depth and 3D radiative transfer (Mitsuba).
+appreciate.py: Cloud field visualization with optical depth and 3D radiative transfer (Mitsuba).
 
 Usage:
-    python expedition.py <filename.nc> [--output <path>] [--sza <angle>]
+    python appreciate.py <filename.nc> [--output <path>] [--sza <angle>]
 
 This script provides a realistic 3D view of your cloud data using:
 1. Optical depth calculation via extinction coefficient
@@ -23,7 +23,7 @@ from . import io, optical_depth, radiative_transfer, basic_render
 
 def main(filename: str, output: str = None, sza: float = 70.0) -> None:
     """
-    Main function for expedition.py
+    Main function for appreciate.py
 
     Parameters
     ----------
@@ -34,7 +34,7 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
     sza : float
         Solar zenith angle in degrees
     """
-    print(f"CloudyView Expedition: Loading {filename}")
+    print(f"CloudyView Appreciate: Loading {filename}")
     start_time = time.perf_counter()
 
     try:
@@ -183,11 +183,11 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
 
         view_config['sampler']['sample_count'] = view_config['spp']
 
-        output_file = output_dir / f"expedition_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
+        output_file = output_dir / f"appreciate_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
         radiative_transfer.render_view(sigma_ext, dx, dy, dz, view_config, str(output_file))
 
         elapsed = time.perf_counter() - start_time
-        print("\n✓ Expedition complete!")
+        print("\n✓ Appreciate complete!")
         print(f"  Total runtime: {elapsed:.1f} s ({elapsed/60:.1f} min)")
         if output:
             print(f"  Renders saved to {output_dir}")
@@ -210,7 +210,7 @@ def main(filename: str, output: str = None, sza: float = 70.0) -> None:
 
 
 def cli():
-    """Command-line interface for expedition.py"""
+    """Command-line interface for appreciate.py"""
     parser = argparse.ArgumentParser(
         description="Cloud visualization with 3D Mitsuba radiative transfer (ground-looking-up view)"
     )
