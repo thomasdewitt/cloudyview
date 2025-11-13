@@ -142,9 +142,19 @@ def main(filename: str, output: str = None, tau_threshold: float = 0.5, tau_thre
         xx, yy, zz = np.meshgrid(x_coord, y_coord, z_coord, indexing='ij')
         grid = pv.StructuredGrid(xx, yy, zz)
         grid['tau_from_top'] = tau_from_top.ravel(order='F')
+        grid['local_optical_depth'] = optical_depth_per_layer.ravel(order='F')
 
         # Extract isosurface at tau threshold
         surface = grid.contour([tau_threshold], scalars='tau_from_top')
+
+        # Filter surface to only keep points where there's actual cloud nearby
+        # This prevents vertical columns through clear air
+        if surface.n_points > 0:
+            # Get the local optical depth at each surface point
+            surface = surface.compute_cell_sizes()
+            # Threshold: keep only surface regions where local optical depth is significant
+            cloud_threshold = 1e-6
+            surface = surface.threshold(cloud_threshold, scalars='local_optical_depth', preference='point')
 
         if surface.n_points == 0:
             print(f"  Warning: No surface found at tau={tau_threshold}")
@@ -158,6 +168,12 @@ def main(filename: str, output: str = None, tau_threshold: float = 0.5, tau_thre
         if tau_threshold_2 is not None:
             print(f"  Creating second surface at tau = {tau_threshold_2}...")
             surface_2 = grid.contour([tau_threshold_2], scalars='tau_from_top')
+
+            # Filter second surface the same way
+            if surface_2.n_points > 0:
+                surface_2 = surface_2.compute_cell_sizes()
+                surface_2 = surface_2.threshold(cloud_threshold, scalars='local_optical_depth', preference='point')
+
             if surface_2.n_points > 0:
                 print(f"  Second surface: {surface_2.n_points} points, {surface_2.n_cells} cells")
             else:
