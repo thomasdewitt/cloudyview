@@ -3,12 +3,13 @@
 observe.py: Cloud field visualization with PyVista isosurface rendering.
 
 Usage:
-    python observe.py <filename.nc> [--output <path>] [--threshold <value>]
+    python observe.py <filename.nc> [--output <path>] [--threshold <value>] [--html]
 
 This script provides a simple 3D isosurface view of cloud extinction fields:
 1. Loads cloud data and calculates extinction coefficients
 2. Renders white isosurface at specified extinction threshold
 3. Views from above at an angle with sky blue background
+4. Optional interactive HTML export for portability (open in any browser!)
 """
 
 import argparse
@@ -22,7 +23,7 @@ import pyvista as pv
 from . import io, optical_depth
 
 
-def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
+def main(filename: str, output: str = None, threshold: float = 0.001, html: bool = False) -> None:
     """
     Main function for observe.py
 
@@ -34,6 +35,8 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         Output file path for render
     threshold : float
         Extinction coefficient threshold for isosurface (m^-1)
+    html : bool
+        If True, export interactive HTML instead of static PNG
     """
     print(f"CloudyView Observe: Loading {filename}")
     start_time = time.perf_counter()
@@ -129,18 +132,7 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         print("  Creating isosurface...")
         isosurface = grid.contour([threshold], scalars='extinction')
 
-        # Set up plotter
-        plotter = pv.Plotter(off_screen=(output is not None))
-
-        # Sky blue background
-        sky_blue = (0.53, 0.81, 0.92)
-        plotter.set_background(sky_blue)
-
-        # Add isosurface as white mesh
-        plotter.add_mesh(isosurface, color='white', smooth_shading=True)
-
-        # Calculate camera position - view from above at an angle
-        # Center of domain
+        # Calculate domain geometry (needed for lighting and camera)
         center_x = (x_coord[0] + x_coord[-1]) / 2
         center_y = (y_coord[0] + y_coord[-1]) / 2
         center_z = (z_coord[0] + z_coord[-1]) / 2
@@ -151,6 +143,45 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         extent_z = z_coord[-1] - z_coord[0]
         max_extent = max(extent_x, extent_y, extent_z)
 
+        # Set up plotter
+        plotter = pv.Plotter(off_screen=(output is not None), lighting='none')
+
+        # Sky blue background
+        sky_blue = (0.53, 0.81, 0.92)
+        plotter.set_background(sky_blue)
+
+        # Add custom lighting - sun at 70 deg azimuth
+        # Azimuth: angle from north (0°) going clockwise
+        # Elevation: angle above horizon
+        sun_azimuth = 70.0  # degrees
+        sun_elevation = 45.0  # degrees above horizon
+
+        # Convert to Cartesian coordinates for light position
+        # Place light far away to simulate directional sun
+        light_distance = max_extent * 10
+        az_rad = np.deg2rad(sun_azimuth)
+        el_rad = np.deg2rad(sun_elevation)
+
+        light_pos = [
+            center_x + light_distance * np.cos(el_rad) * np.sin(az_rad),
+            center_y + light_distance * np.cos(el_rad) * np.cos(az_rad),
+            center_z + light_distance * np.sin(el_rad)
+        ]
+
+        # Add directional sun light
+        sun_light = pv.Light(position=light_pos, light_type='scene light')
+        sun_light.set_direction_angle(sun_elevation, sun_azimuth)
+        sun_light.intensity = 1.0
+        plotter.add_light(sun_light)
+
+        # Add subtle ambient fill light so shadows aren't completely black
+        ambient_intensity = 0.3
+        plotter.add_light(pv.Light(light_type='headlight', intensity=ambient_intensity))
+
+        # Add isosurface as white mesh
+        plotter.add_mesh(isosurface, color='white', smooth_shading=True)
+
+        # Calculate camera position - view from above at an angle
         # Camera position: elevated and offset for angled view
         # Position camera above and to the side
         camera_distance = max_extent * 1.5
@@ -169,12 +200,21 @@ def main(filename: str, output: str = None, threshold: float = 0.001) -> None:
         # Determine output path
         if output:
             output_path = Path(output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
         else:
-            output_path = Path(f"observe_threshold_{threshold:.6f}.png")
+            if html:
+                output_path = Path(f"observe_threshold_{threshold:.6f}.html")
+            else:
+                output_path = Path(f"observe_threshold_{threshold:.6f}.png")
 
-        print(f"  Rendering to {output_path}...")
-        plotter.show(screenshot=str(output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if html:
+            print(f"  Exporting interactive HTML to {output_path}...")
+            plotter.export_html(str(output_path))
+            plotter.close()
+        else:
+            print(f"  Rendering to {output_path}...")
+            plotter.show(screenshot=str(output_path))
 
         elapsed = time.perf_counter() - start_time
         print("\n✓ Observe complete!")
@@ -209,15 +249,19 @@ def cli():
     )
     parser.add_argument(
         "--output", "-o",
-        help="Output file path for saving render (default: observe_threshold_<value>.png)"
+        help="Output file path for saving render (default: observe_threshold_<value>.png or .html)"
     )
     parser.add_argument(
         "--threshold", "-t", type=float, default=0.001,
         help="Extinction coefficient threshold for isosurface in m^-1 (default: 0.001)"
     )
+    parser.add_argument(
+        "--html", action="store_true",
+        help="Export interactive HTML instead of static PNG (fully portable, open in any browser)"
+    )
 
     args = parser.parse_args()
-    main(args.filename, args.output, args.threshold)
+    main(args.filename, args.output, args.threshold, args.html)
 
 
 if __name__ == "__main__":
