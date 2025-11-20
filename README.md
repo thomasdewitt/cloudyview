@@ -188,6 +188,65 @@ To integrate your own optical depth or radiative transfer code:
 - `xarray`: NetCDF file handling with labeled arrays
 - `netCDF4`: NetCDF4 file support (required by xarray for many operations)
 
+## Mie Phase Function Tables
+
+CloudyView includes pre-computed Mie scattering phase function tables for accurate cloud droplet scattering:
+
+- **Mie0.txt**: Forward scattering peak (strongly forward-scattered component)
+- **MiePF3.txt**: Rest of phase function distribution (sideways and backward scattering, wavelength-dependent RGB values)
+
+These tables are from the PhD thesis:
+
+**Antoine Bouthors (2008)** - "Real-time realistic rendering of clouds"
+PhD Thesis, Université Grenoble I - Joseph Fourier
+https://theses.hal.science/tel-00319974
+
+The dual-table approach enables efficient importance sampling by separately handling the extremely strong forward peak and the much weaker sideways/backward scattering regions.
+
+### Rendering Modes
+
+CloudyView supports three rendering modes with different tradeoffs:
+
+#### 1. **RGB Mode** (default) - `--mode rgb`
+- Single RGB render with wavelength-averaged Mie phase function
+- Full physically-based sunsky with realistic colors
+- Best for general visualization and aesthetic renders
+- Computational cost: 1× (baseline)
+
+#### 2. **Mono Mode** - `--mode mono`
+- Single monochrome render, grayscale output
+- Fastest option for quick previews
+- Computational cost: ~0.33× (3× faster than RGB)
+
+#### 3. **Chromatic Mode** - `--mode chromatic`
+- Renders 3 monochrome channels (R, G, B) separately
+- Each channel uses wavelength-specific Mie phase function
+- Enables chromatic scattering effects: coronas, halos, glories, rainbows
+- Uses simplified constant sky (sunsky incompatible with monochrome)
+- Computational cost: ~1× (3 mono renders ≈ 1 RGB render)
+
+**Example usage:**
+
+```bash
+# Default RGB mode with realistic sky
+appreciate cloud.nc high
+
+# Chromatic mode for coronas/halos (looking toward sun)
+appreciate cloud.nc high --mode chromatic --camera-azimuth 90 --camera-elevation 30
+
+# Fast mono preview
+appreciate cloud.nc low --mode mono
+```
+
+**In Python:**
+
+```python
+view_config = {
+    'render_mode': 'chromatic',  # or 'mono' or 'rgb'
+    # ... other config parameters
+}
+```
+
 ## Author
 
 Thomas D. DeWitt (https://github.com/thomasdewitt/)

@@ -5,14 +5,16 @@ Features:
 - Physically-based sky models (Preetham sunsky)
 - Optional ocean surface with waves
 - Proper atmospheric perspective
+- Accurate Mie scattering phase functions with dual-table importance sampling
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Literal
 import warnings
+import os
 
 try:
     import mitsuba as mi
@@ -21,6 +23,100 @@ try:
 except ImportError:
     MITSUBA_AVAILABLE = False
     raise RuntimeError("Mitsuba 3 is required for radiative transfer rendering but was not found")
+
+
+def get_best_variant(mode: Literal['rgb', 'mono', 'spectral'] = 'rgb') -> str:
+    """
+    Get the best available Mitsuba variant for the given mode.
+
+    Prefers CUDA (GPU) if available, otherwise falls back to LLVM (CPU).
+
+    Parameters
+    ----------
+    mode : {'rgb', 'mono', 'spectral'}
+        Rendering mode
+
+    Returns
+    -------
+    str
+        Variant name (e.g., 'cuda_ad_rgb' or 'llvm_ad_rgb')
+    """
+    cuda_variant = f'cuda_ad_{mode}'
+    llvm_variant = f'llvm_ad_{mode}'
+
+    available = mi.variants()
+
+    if cuda_variant in available:
+        return cuda_variant
+    elif llvm_variant in available:
+        return llvm_variant
+    else:
+        raise RuntimeError(f"Neither {cuda_variant} nor {llvm_variant} variant available")
+
+
+def load_mie_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
+    """
+    Load Mie scattering phase function tables from Bouthors (2008) thesis.
+
+    Returns forward peak (Mie0) and rest of distribution (MiePF3) as comma-separated strings
+    for use with Mitsuba's tabphase plugin.
+
+    Parameters
+    ----------
+    channel : {'R', 'G', 'B', 'gray'}
+        Which wavelength channel to use. MiePF3 has RGB values, Mie0 is monochrome.
+        'gray' uses luminance-weighted average of RGB.
+
+    Returns
+    -------
+    mie0_str : str
+        Forward peak phase function values (comma-separated)
+    mie_pf3_str : str
+        Rest of distribution phase function values (comma-separated)
+
+    References
+    ----------
+    Antoine Bouthors (2008) - "Real-time realistic rendering of clouds"
+    PhD Thesis, Université Grenoble I - Joseph Fourier
+    https://theses.hal.science/tel-00319974
+    """
+    # Find the Mie_tables directory relative to this module
+    module_dir = Path(__file__).parent
+    mie_dir = module_dir / 'Mie_tables'
+
+    # Load normalized tables
+    mie0_path = mie_dir / 'Mie0_normalized.txt'
+    mie_pf3_path = mie_dir / 'MiePF3_normalized.txt'
+
+    if not mie0_path.exists() or not mie_pf3_path.exists():
+        raise FileNotFoundError(
+            f"Mie phase function tables not found in {mie_dir}. "
+            "Expected Mie0_normalized.txt and MiePF3_normalized.txt"
+        )
+
+    mie0 = np.loadtxt(mie0_path)
+    mie_pf3 = np.loadtxt(mie_pf3_path)
+
+    # Select channel for MiePF3 (RGB)
+    if channel == 'R':
+        mie_pf3_values = mie_pf3[:, 0]
+    elif channel == 'G':
+        mie_pf3_values = mie_pf3[:, 1]
+    elif channel == 'B':
+        mie_pf3_values = mie_pf3[:, 2]
+    elif channel == 'gray':
+        # Luminance weights: R=0.2126, G=0.7152, B=0.0722
+        mie_pf3_values = (0.2126 * mie_pf3[:, 0] +
+                          0.7152 * mie_pf3[:, 1] +
+                          0.0722 * mie_pf3[:, 2])
+    else:
+        raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
+
+    # Convert to comma-separated strings for Mitsuba tabphase
+    mie0_str = ','.join(map(str, mie0))
+    mie_pf3_str = ','.join(map(str, mie_pf3_values))
+
+    return mie0_str, mie_pf3_str
 
 
 def look_at_world_up(origin, target, fallback_up=(0, 1, 0), world_up=(0, 0, 1)):
@@ -60,18 +156,43 @@ def _fmt_eta(seconds):
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def render_with_progress(scene, spp_total, step_spp=8, seed=0):
+def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config=None):
     """
     Minimal progressive render with single-line print and ETA.
     Prints 0% first, then updates AFTER each chunk finishes.
+
+    Parameters
+    ----------
+    scene : mi.Scene
+        Mitsuba scene to render
+    spp_total : int
+        Total samples per pixel
+    step_spp : int
+        Samples per rendering step
+    seed : int
+        Random seed
+    checkpoint_config : dict, optional
+        Configuration for saving checkpoint images:
+        - 'checkpoints': list of SPP values at which to save images
+        - 'output_pattern': str with {spp} placeholder for filename
+        - 'tone_map_func': function to apply tone mapping
+        - 'save_func': function to save image (receives img_np, filepath)
     """
     acc = None
     taken = 0
     start = time.perf_counter()
     warmup_time = None
 
+    # Track which checkpoints we've already saved
+    checkpoints = []
+    if checkpoint_config is not None:
+        checkpoints = sorted(checkpoint_config.get('checkpoints', []))
+        checkpoints_saved = set()
+    else:
+        checkpoints_saved = set()
+
     # initial line (0%)
-    print(f"  Rendering...   0.0%  (0/{spp_total} spp)  ETA --:--", end="", flush=True)
+    print(f"  0% | 0/{spp_total} spp | Elapsed: --:-- | ETA: --:--", end="", flush=True)
 
     # iterate in chunks without off-by-one
     for k, _ in enumerate(range(0, spp_total, step_spp)):
@@ -93,6 +214,28 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0):
         if warmup_time is None:
             warmup_time = chunk_elapsed
 
+        # Check if we've reached any checkpoint
+        if checkpoint_config is not None and checkpoints:
+            for checkpoint_spp in checkpoints:
+                if checkpoint_spp <= taken and checkpoint_spp not in checkpoints_saved:
+                    # Save checkpoint image
+                    current_img = acc / taken
+                    img_np = np.array(current_img)
+
+                    # Apply tone mapping if provided
+                    if 'tone_map_func' in checkpoint_config:
+                        img_np = checkpoint_config['tone_map_func'](img_np)
+
+                    # Generate output filepath
+                    output_pattern = checkpoint_config.get('output_pattern', 'checkpoint_spp={spp}.png')
+                    filepath = output_pattern.format(spp=checkpoint_spp)
+
+                    # Save using provided save function
+                    if 'save_func' in checkpoint_config:
+                        checkpoint_config['save_func'](img_np, filepath)
+
+                    checkpoints_saved.add(checkpoint_spp)
+
         # update ETA based on samples completed
         elapsed = time.perf_counter() - start
         eta = None
@@ -103,7 +246,9 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0):
                 eta = effective_elapsed * (spp_total - taken) / samples_after_warmup
 
         pct = 100.0 * taken / spp_total
-        print(f"\r  Rendering... {pct:5.1f}%  ({taken}/{spp_total} spp)  ETA {_fmt_eta(eta)}",
+        elapsed_str = _fmt_eta(elapsed)
+        eta_str = _fmt_eta(eta)
+        print(f"\r  {pct:3.0f}% | {taken}/{spp_total} spp | Elapsed: {elapsed_str} | ETA: {eta_str}",
               end="", flush=True)
 
     print()  # newline after finishing
@@ -138,7 +283,9 @@ def sun_direction_to_sun(azimuth_deg=0.0, elevation_deg=90.0):
     return direction.tolist()
 
 
-def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
+def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
+                        use_mie_phase=True, mie_channel='gray', mie_blend_weight=0.5,
+                        wavelength_nm=None):
     """
     Create Mitsuba scene with volumetric cloud, sky, and optional ocean.
 
@@ -161,6 +308,17 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
         - 'sun_elevation': elevation angle in degrees
     spp : int
         Samples per pixel
+    use_mie_phase : bool
+        If True, use accurate Mie scattering tables (Bouthors 2008) instead of Henyey-Greenstein
+    mie_channel : {'R', 'G', 'B', 'gray'}
+        Wavelength channel for Mie phase function (only used if use_mie_phase=True)
+    mie_blend_weight : float
+        Blend weight for dual-table importance sampling (0-1). Controls sampling balance
+        between forward peak (weight) and rest of distribution (1-weight). Default 0.5
+        ensures equal sampling of both regions despite strong forward peak.
+    wavelength_nm : float, optional
+        Wavelength in nanometers for spectral rendering. If specified, sets sensor to
+        render at this specific wavelength. Used for RGB channel rendering.
 
     Returns
     --------
@@ -268,13 +426,37 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
                     'wrap_mode': 'mirror',  # Mirror at boundaries
                 },
                 'albedo': {'type': 'rgb', 'value': [0.9999, 0.9999, 0.9999]},
-                'phase': {
-                    'type': 'hg',
-                    'g': 0.85  # Forward scattering for clouds
-                }
+                'phase': None,  # Will be set below
             }
         },
     }
+
+    # Configure phase function (Mie tables or Henyey-Greenstein)
+    if use_mie_phase:
+        # Load Mie scattering tables from Bouthors (2008)
+        mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
+        print(f"  Using Mie phase function (channel={mie_channel}, blend_weight={mie_blend_weight:.2f})")
+
+        # Dual-table blended phase function for efficient importance sampling
+        scene_dict['cloud']['interior']['phase'] = {
+            'type': 'blendphase',
+            'weight': mie_blend_weight,  # Balance between peak and rest sampling
+            'phase_0': {  # Rest of distribution (sideways/backward)
+                'type': 'tabphase',
+                'values': mie_pf3_str
+            },
+            'phase_1': {  # Forward peak
+                'type': 'tabphase',
+                'values': mie0_str
+            }
+        }
+    else:
+        # Simple Henyey-Greenstein approximation
+        print(f"  Using Henyey-Greenstein phase function (g=0.85)")
+        scene_dict['cloud']['interior']['phase'] = {
+            'type': 'hg',
+            'g': 0.85  # Forward scattering for clouds
+        }
 
     if camera_inside:
         scene_dict['sensor']['medium'] = {'type': 'ref', 'id': 'cloud_medium'}
@@ -283,7 +465,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
     sky_type = camera_config.get('sky_type', 'constant')
 
     if sky_type == 'sunsky':
-        # Physically-based Hosek-Wilkie sun+sky model
+        # Physically-based Hosek-Wilkie sun+sky model (works in RGB/spectral)
         scene_dict['sunsky'] = {
             'type': 'sunsky',
             'sun_direction': sun_dir_to_sun,  # Direction TO the sun (upward)
@@ -300,7 +482,8 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
             'direction': sun_dir_to_scene,
             'irradiance': {'type': 'rgb', 'value': [1000.0, 1000.0, 1000.0]}
         }
-        sky_color = camera_config.get('sky_color', [0.04231, 0.06848, 0.38133])
+        # Default: #334A6C = RGB(51, 74, 108) = (0.2, 0.2902, 0.4235)
+        sky_color = camera_config.get('sky_color', [0.2, 0.2902, 0.4235])
         scene_dict['sky'] = {
             'type': 'constant',
             'radiance': {'type': 'rgb', 'value': sky_color}
@@ -316,7 +499,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256):
 
     # Add ocean surface if requested
     if camera_config.get('add_ocean', False):
-        ocean_size_multiplier = camera_config.get('ocean_size_multiplier', 10.0)
+        ocean_size_multiplier = camera_config.get('ocean_size_multiplier', 100.0)
         ocean_height = camera_config.get('ocean_height', -0.99)
         ocean_height = float(np.clip(ocean_height, -1.0, 1.0))  # keep within cube bounds
         ocean_size = aspect_ratio * ocean_size_multiplier
@@ -357,7 +540,8 @@ def render_view(
     dy: float,
     dz: float,
     view_config: Dict,
-    output_file: str
+    output_file: str,
+    checkpoint_spp: Optional[list] = None
 ) -> np.ndarray:
     """
     Render a single view and save to file.
@@ -370,8 +554,15 @@ def render_view(
         Grid spacings
     view_config : dict
         View configuration (camera position, sky, etc.)
+        Should include 'render_mode': str - one of:
+        - 'mono': Single monochrome render with gray Mie phase, grayscale output
+        - 'rgb': Single RGB render with gray Mie phase (wavelength-averaged), full RGB sky
+        - 'chromatic': 3 mono renders with wavelength-specific Mie, enables chromatic effects
+          (coronas, halos, glories, etc.) but uses simple constant sky
     output_file : str
         Path to save rendered image
+    checkpoint_spp : list of int, optional
+        SPP values at which to save checkpoint images (e.g., [2, 32, 128, 512, 2048])
 
     Returns
     -------
@@ -379,6 +570,281 @@ def render_view(
         Rendered and tone-mapped image
     """
 
+    # Determine render mode
+    render_mode = view_config.get('render_mode', 'rgb')
+
+    if render_mode == 'chromatic':
+        # Render 3 mono channels separately with wavelength-dependent phase functions
+        print("  Chromatic mode: rendering 3 monochrome channels (R, G, B) with wavelength-specific Mie phase")
+        print("  (Enables coronas, halos, glories, and other chromatic scattering effects)")
+        img_np = render_view_chromatic(sigma_ext, dx, dy, dz, view_config,
+                                        output_file, checkpoint_spp)
+    elif render_mode == 'mono':
+        # Single monochrome render
+        print("  Mono mode: single grayscale render with luminance-weighted Mie phase")
+        img_np = render_view_mono(sigma_ext, dx, dy, dz, view_config,
+                                   output_file, checkpoint_spp)
+    else:  # 'rgb'
+        # Single RGB render with averaged phase function
+        print("  RGB mode: single RGB render with luminance-weighted Mie phase")
+        img_np = render_view_single(sigma_ext, dx, dy, dz, view_config,
+                                     output_file, checkpoint_spp)
+
+    return img_np
+
+
+def render_view_chromatic(
+    sigma_ext: np.ndarray,
+    dx: float,
+    dy: float,
+    dz: float,
+    view_config: Dict,
+    output_file: str,
+    checkpoint_spp: Optional[list] = None
+) -> np.ndarray:
+    """
+    Render RGB by rendering 3 separate monochrome channels with wavelength-dependent phase functions.
+
+    This enables coronas, halos, glories, and other chromatic scattering effects at approximately
+    the same computational cost as a single RGB render (3× mono renders ≈ 1× RGB render).
+
+    Renders progressively: at each SPP step, renders all 3 channels, then shows progress.
+
+    Uses constant sky (wavelength-specific) since sunsky doesn't support monochrome mode.
+
+    Internal function called by render_view when view_config['render_mode'] = 'chromatic'.
+    """
+    # Switch to mono mode for wavelength-specific rendering
+    # Note: Each channel uses wavelength-specific phase function from Mie tables
+    original_variant = mi.variant()
+    mono_variant = get_best_variant('mono')
+    mi.set_variant(mono_variant)
+    print(f"  Using Mitsuba variant: {mono_variant}")
+
+    # Create view config with simplified constant sky for mono mode
+    view_config_mono = view_config.copy()
+    view_config_mono['sky_type'] = 'constant'  # Use simple constant sky
+
+    channels = ['R', 'G', 'B']
+    scenes = []
+    for channel in channels:
+        scene = create_mitsuba_scene(
+            sigma_ext, dx, dy, dz,
+            view_config_mono,
+            spp=view_config['spp'],
+            mie_channel=channel
+        )
+        scenes.append(scene)
+
+    # Progressive rendering setup
+    spp_total = view_config['spp']
+    step_spp = 16
+    seed = view_config.get('seed', 0)
+
+    # Accumulate samples for each channel
+    channel_accumulators = [None, None, None]
+    taken = 0
+    start = time.perf_counter()
+    warmup_time = None
+
+    # Track checkpoints
+    checkpoints = []
+    checkpoints_saved = set()
+    if checkpoint_spp is not None:
+        checkpoints = sorted(checkpoint_spp)
+
+    print(f"  0% | 0/{spp_total} spp | Elapsed: --:-- | ETA: --:--")
+
+    while taken < spp_total:
+        remaining = spp_total - taken
+        step = min(step_spp, remaining)
+
+        # Render all 3 channels for this step
+        for i, (channel, scene) in enumerate(zip(channels, scenes)):
+            img = mi.render(scene, spp=step, seed=seed + taken + i * 10000)
+
+            if channel_accumulators[i] is None:
+                channel_accumulators[i] = img
+            else:
+                channel_accumulators[i] += img
+
+        taken += step
+        elapsed = time.perf_counter() - start
+
+        # Set warmup time after first step
+        if warmup_time is None and taken >= step_spp:
+            warmup_time = elapsed
+
+        # Estimate time per sample (after warmup)
+        if warmup_time is not None and taken > step_spp:
+            time_per_spp = (elapsed - warmup_time) / (taken - step_spp)
+            eta_seconds = time_per_spp * (spp_total - taken)
+        else:
+            eta_seconds = None
+
+        pct = 100.0 * taken / spp_total
+        elapsed_str = _fmt_eta(elapsed)
+        eta_str = _fmt_eta(eta_seconds)
+        print(f"\r  {pct:3.0f}% | {taken}/{spp_total} spp | Elapsed: {elapsed_str} | ETA: {eta_str}", end="", flush=True)
+
+        # Save checkpoint if needed
+        if checkpoints and taken in checkpoints and taken not in checkpoints_saved:
+            # Combine current RGB state
+            channel_images = [np.array(acc / taken)[..., 0] for acc in channel_accumulators]
+            img_rgb = np.stack(channel_images, axis=-1)
+            img_np = tone_map(img_rgb, exposure=view_config.get('exposure', 1.0))
+
+            # Save checkpoint image
+            output_path = Path(output_file)
+            checkpoint_file = output_path.parent / f"{output_path.stem}_spp{taken}{output_path.suffix}"
+
+            dpi = 192
+            height = view_config['height']
+            width = view_config['width']
+            fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.imshow(img_np, origin='upper')
+            ax.axis('off')
+            fig.savefig(checkpoint_file, dpi=dpi)
+            plt.close(fig)
+
+            checkpoints_saved.add(taken)
+
+    print()  # Newline after progress
+
+    # Normalize and combine final images
+    channel_images = [np.array(acc / taken)[..., 0] for acc in channel_accumulators]
+    img_rgb = np.stack(channel_images, axis=-1)
+
+    # Restore original variant
+    mi.set_variant(original_variant)
+
+    # Tone mapping
+    img_np = tone_map(img_rgb, exposure=view_config.get('exposure', 1.0))
+
+    # Save final image
+    dpi = 192
+    height = view_config['height']
+    width = view_config['width']
+    fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.imshow(img_np, origin='upper')
+    ax.axis('off')
+    fig.savefig(output_file, dpi=dpi)
+    plt.close(fig)
+
+    return img_np
+
+
+def render_view_mono(
+    sigma_ext: np.ndarray,
+    dx: float,
+    dy: float,
+    dz: float,
+    view_config: Dict,
+    output_file: str,
+    checkpoint_spp: Optional[list] = None
+) -> np.ndarray:
+    """
+    Render a single monochrome view with grayscale output.
+
+    Uses luminance-weighted Mie phase function and converts RGB sky to grayscale.
+
+    Internal function called by render_view when render_mode='mono'.
+    """
+    # Switch to mono mode
+    original_variant = mi.variant()
+    mono_variant = get_best_variant('mono')
+    mi.set_variant(mono_variant)
+    print(f"  Using Mitsuba variant: {mono_variant}")
+
+    # Override sky_type for mono mode (sunsky doesn't support mono)
+    view_config_mono = view_config.copy()
+    view_config_mono['sky_type'] = 'constant'
+
+    # Create scene
+    scene = create_mitsuba_scene(
+        sigma_ext, dx, dy, dz,
+        view_config_mono,
+        spp=view_config['spp']
+    )
+
+    # Helper function to save checkpoint images
+    def save_checkpoint_image(img_np, filepath):
+        dpi = 192
+        height = view_config['height']
+        width = view_config['width']
+        fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(img_np, origin='upper', cmap='gray')
+        ax.axis('off')
+        fig.savefig(filepath, dpi=dpi)
+        plt.close(fig)
+
+    # Helper function to apply tone mapping
+    def apply_tone_map(img_np):
+        return tone_map(img_np, exposure=view_config.get('exposure', 1.0))
+
+    # Set up checkpoint configuration
+    checkpoint_config = None
+    if checkpoint_spp is not None and len(checkpoint_spp) > 0:
+        output_path = Path(output_file)
+        output_pattern = str(output_path.parent / f"{output_path.stem}_spp={{spp}}{output_path.suffix}")
+
+        checkpoint_config = {
+            'checkpoints': checkpoint_spp,
+            'output_pattern': output_pattern,
+            'tone_map_func': apply_tone_map,
+            'save_func': save_checkpoint_image
+        }
+
+    # Render
+    step = 2
+    image = render_with_progress(scene,
+                                spp_total=view_config['spp'],
+                                step_spp=step,
+                                seed=view_config.get('seed', 0),
+                                checkpoint_config=checkpoint_config)
+
+    # Convert to numpy and extract mono channel
+    img_np = np.array(image)[..., 0]
+
+    # Restore variant
+    mi.set_variant(original_variant)
+
+    # Tone mapping
+    img_np = tone_map(img_np[..., np.newaxis], exposure=view_config.get('exposure', 1.0))[..., 0]
+
+    # Save final image (grayscale)
+    dpi = 192
+    height = view_config['height']
+    width = view_config['width']
+    fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.imshow(img_np, origin='upper', cmap='gray')
+    ax.axis('off')
+    fig.savefig(output_file, dpi=dpi)
+    plt.close(fig)
+
+    return img_np
+
+
+def render_view_single(
+    sigma_ext: np.ndarray,
+    dx: float,
+    dy: float,
+    dz: float,
+    view_config: Dict,
+    output_file: str,
+    checkpoint_spp: Optional[list] = None
+) -> np.ndarray:
+    """
+    Render a single RGB view with wavelength-averaged Mie phase function.
+
+    Uses full RGB rendering with physically-based sunsky.
+
+    Internal function called by render_view when render_mode='rgb' (default).
+    """
     # Create scene
     scene = create_mitsuba_scene(
         sigma_ext, dx, dy, dz,
@@ -386,12 +852,43 @@ def render_view(
         spp=view_config['spp']
     )
 
+    # Helper function to save checkpoint images
+    def save_checkpoint_image(img_np, filepath):
+        dpi = 192
+        height = view_config['height']
+        width = view_config['width']
+        fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(img_np, origin='upper')
+        ax.axis('off')
+        fig.savefig(filepath, dpi=dpi)
+        plt.close(fig)
+
+    # Helper function to apply tone mapping
+    def apply_tone_map(img_np):
+        return tone_map(img_np, exposure=view_config.get('exposure', 1.0))
+
+    # Set up checkpoint configuration
+    checkpoint_config = None
+    if checkpoint_spp is not None and len(checkpoint_spp) > 0:
+        # Generate output pattern based on output_file
+        output_path = Path(output_file)
+        output_pattern = str(output_path.parent / f"{output_path.stem}_spp{{spp}}{output_path.suffix}")
+
+        checkpoint_config = {
+            'checkpoints': checkpoint_spp,
+            'output_pattern': output_pattern,
+            'tone_map_func': apply_tone_map,
+            'save_func': save_checkpoint_image
+        }
+
     # Render
     step = 2
     image = render_with_progress(scene,
                                 spp_total=view_config['spp'],
                                 step_spp=step,
-                                seed=view_config.get('seed', 0))
+                                seed=view_config.get('seed', 0),
+                                checkpoint_config=checkpoint_config)
 
     # Convert to numpy
     img_np = np.array(image)
@@ -399,7 +896,7 @@ def render_view(
     # Tone mapping
     img_np = tone_map(img_np, exposure=view_config.get('exposure', 1.0))
 
-    # Save
+    # Save final image
     dpi = 192
     height = view_config['height']
     width = view_config['width']

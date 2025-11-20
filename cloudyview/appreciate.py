@@ -3,12 +3,23 @@
 appreciate.py: Cloud field visualization with optical depth and 3D radiative transfer (Mitsuba).
 
 Usage:
-    python appreciate.py <filename.nc> [--output <path>] [--sza <angle>]
+    python appreciate.py <filename.nc> [quality] [options]
+
+    quality: low (400x200), medium (800x400, default), high (1600x800)
+
+Options:
+    --output <path>           Output directory for renders
+    --sza <angle>             Solar zenith angle in degrees (default: 45)
+    --camera-azimuth <angle>  Camera look azimuth in degrees (default: 0)
+    --camera-elevation <angle> Camera look elevation in degrees (default: 45)
+    --fov <angle>             Field of view in degrees (default: 100)
+    --mode <mode>             mono/rgb/chromatic (default: rgb)
 
 This script provides a realistic 3D view of your cloud data using:
 1. Optical depth calculation via extinction coefficient
 2. Mitsuba 3 Monte Carlo path tracing with physically-based sky
-3. Ground-looking-up perspective with 16 samples per pixel
+3. Accurate Mie scattering phase functions from Bouthors (2008)
+4. Optional RGB wavelength-dependent rendering for chromatic effects
 """
 
 import argparse
@@ -22,7 +33,9 @@ import mitsuba as mi
 from . import io, radiative_transfer, optical_depth
 
 
-def main(filename: str, output: str = None, sza: float = 50.0) -> None:
+def main(filename: str, output: str = None, sza: float = 50.0, quality: str = 'medium',
+         camera_azimuth: float = 0.0, camera_elevation: float = 45.0, fov: float = 100.0,
+         render_mode: str = 'rgb') -> None:
     """
     Main function for appreciate.py
 
@@ -34,6 +47,19 @@ def main(filename: str, output: str = None, sza: float = 50.0) -> None:
         Output directory for renders
     sza : float
         Solar zenith angle in degrees
+    quality : str
+        Render quality: 'low' (400x200), 'medium' (800x400, default), 'high' (1600x800)
+    camera_azimuth : float
+        Camera look direction azimuth in degrees (0=+X, 90=+Y, 180=-X, 270=-Y)
+    camera_elevation : float
+        Camera look direction elevation in degrees (0=horizontal, 90=up, -90=down)
+    fov : float
+        Camera field of view in degrees (default: 100)
+    render_mode : str
+        Rendering mode: 'mono', 'rgb', or 'chromatic'
+        - 'mono': Single grayscale render, fastest
+        - 'rgb': Single RGB render with sunsky (default)
+        - 'chromatic': 3-channel render for chromatic effects (coronas, halos, glories)
     """
     print(f"CloudyView Appreciate: Loading {filename}")
     start_time = time.perf_counter()
@@ -142,26 +168,57 @@ def main(filename: str, output: str = None, sza: float = 50.0) -> None:
         else:
             output_dir = Path(".")
 
-        mi.set_variant('llvm_ad_rgb')
+        # Use CUDA if available, otherwise LLVM
+        variant = radiative_transfer.get_best_variant('rgb')
+        mi.set_variant(variant)
+        print(f"  Using Mitsuba variant: {variant}")
 
-        # Render ground-looking-up view with 16 SPP
+        # Map quality to resolution
+        quality_map = {
+            'low': (400, 200),
+            'medium': (800, 400),
+            'high': (1600, 800)
+        }
+        width, height = quality_map[quality]
+
+        # Compute camera target from azimuth/elevation
+        # Convert to radians
+        az_rad = np.deg2rad(camera_azimuth)
+        el_rad = np.deg2rad(camera_elevation)
+
+        # Compute look direction vector
+        # Azimuth: 0=+X, 90=+Y, 180=-X, 270=-Y
+        # Elevation: 0=horizontal, 90=zenith, -90=nadir
+        look_dir = np.array([
+            np.cos(el_rad) * np.cos(az_rad),
+            np.cos(el_rad) * np.sin(az_rad),
+            np.sin(el_rad)
+        ])
+
+        # Target point is origin + look direction
+        camera_target = camera_origin + look_dir
+
+        # Render ground-looking-up view with progressive checkpoints
         print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
+        print(f"  Camera azimuth: {camera_azimuth:.1f}°, elevation: {camera_elevation:.1f}°")
+        print(f"  Field of view: {fov:.1f}°")
+        print(f"  Render quality: {quality} ({width}x{height})")
         view_config = {
-            'name': 'Ground-Looking-Up (16 SPP)',
-            'width': 600,
-            'height': 300,
-            'fov': 100,
+            'name': 'Ground-Looking-Up (Progressive Rendering)',
+            'width': width,
+            'height': height,
+            'fov': fov,
             'transform': radiative_transfer.look_at_world_up(
                 origin=camera_origin,
-                target=domain_center
+                target=camera_target
             ),
             'camera_origin': camera_origin,
-            'spp': 128,
+            'spp': 256, 
             'exposure': 4.0,
             'extinction_multiplier': 1.0,
             'sky_type': 'sunsky',  # Physically-based sky
             'turbidity': 3.0,
-            'sun_azimuth': 110.0,
+            'sun_azimuth': 90.0,
             'sun_elevation': 90.0 - sza,  # Convert zenith angle to elevation
             'ground_albedo': 0.5,
             'add_ocean': True,
@@ -172,6 +229,7 @@ def main(filename: str, output: str = None, sza: float = 50.0) -> None:
             'rr_depth': 64,
             'sampler': {'type': 'independent'},
             'seed': 0,
+            'render_mode': render_mode,
         }
 
         # Sobol prefers power-of-two spp; adjust if necessary
@@ -183,8 +241,14 @@ def main(filename: str, output: str = None, sza: float = 50.0) -> None:
 
         view_config['sampler']['sample_count'] = view_config['spp']
 
+        # Define checkpoint SPP values for progressive rendering
+        checkpoint_spp = [2, 32, 128, 512, 1028, 2048, 4096]
+
         output_file = output_dir / f"appreciate_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
-        radiative_transfer.render_view(sigma_ext, dx, dy, dz, view_config, str(output_file))
+        radiative_transfer.render_view(
+            sigma_ext, dx, dy, dz, view_config, str(output_file),
+            checkpoint_spp=checkpoint_spp
+        )
 
         elapsed = time.perf_counter() - start_time
         print("\n✓ Appreciate complete!")
@@ -219,6 +283,13 @@ def cli():
         help="NetCDF file with cloud data (must contain qc/ql/LWC variable and be 3D single-timestep)"
     )
     parser.add_argument(
+        "quality",
+        nargs='?',
+        default='medium',
+        choices=['low', 'medium', 'high'],
+        help="Render quality: low (400x200), medium (800x400, default), high (1600x800)"
+    )
+    parser.add_argument(
         "--output", "-o",
         help="Output directory for saving renders"
     )
@@ -226,9 +297,27 @@ def cli():
         "--sza", type=float, default=45.0,
         help="Solar zenith angle in degrees (default: 45 for realistic perspective)"
     )
+    parser.add_argument(
+        "--camera-azimuth", type=float, default=0.0,
+        help="Camera look direction azimuth in degrees (0=+X/east, 90=+Y/north, default: 0)"
+    )
+    parser.add_argument(
+        "--camera-elevation", type=float, default=45.0,
+        help="Camera look direction elevation in degrees (0=horizontal, 90=up, default: 45)"
+    )
+    parser.add_argument(
+        "--fov", type=float, default=100.0,
+        help="Camera field of view in degrees (default: 100)"
+    )
+    parser.add_argument(
+        "--mode", type=str, default='rgb',
+        choices=['mono', 'rgb', 'chromatic'],
+        help="Rendering mode: mono (grayscale), rgb (default, full color), chromatic (coronas/halos)"
+    )
 
     args = parser.parse_args()
-    main(args.filename, args.output, args.sza)
+    main(args.filename, args.output, args.sza, args.quality,
+         args.camera_azimuth, args.camera_elevation, args.fov, args.mode)
 
 
 if __name__ == "__main__":
