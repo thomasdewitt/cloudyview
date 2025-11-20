@@ -1,14 +1,27 @@
 # CloudyView
 
-A Python toolkit for 3D cloud field visualization with optical depth calculations and radiative transfer modeling.
+A Python toolkit for 3D cloud field visualization with optical depth calculations and Monte Carlo radiative transfer.
 
 ## Overview
 
 CloudyView provides three tiers of visualization capabilities for 3D cloud condensate fields (from LES, cloud-resolving models, or other sources):
 
-- **Glimpse** (`glimpse`): Quick optical depth calculation + matplotlib 3D visualization
-- **Expedition** (`expedition`): Optical depth + simple 3D radiative transfer (two-stream)
-- **Odyssey** (`odyssey`): Full 3D radiative transfer with comprehensive diagnostics
+- **Glimpse** (`glimpse`): Quick optical depth calculation + matplotlib 2D visualization
+- **Witness** (`witness`): PyVista 3D isosurface rendering with configurable views
+- **Behold** (`behold`): Photorealistic Monte Carlo path tracing with Mitsuba 3
+
+## Coordinate System
+
+CloudyView uses the **meteorological convention**:
+- **East** = +x direction
+- **North** = +y direction
+- **Up** = +z direction
+
+Azimuth angles are measured counterclockwise from East:
+- 0° = East, 90° = North, 180° = West, 270° = South
+
+Elevation angles are measured from the horizon:
+- 0° = horizon, 90° = zenith, -90° = nadir
 
 ## Installation
 
@@ -29,37 +42,47 @@ pip install -e ".[dev]"
 
 All scripts require a NetCDF file with a cloud water mixing ratio variable and are designed for single-timestep 3D data.
 
-### Glimpse: Quick Look
+### Glimpse: Quick 2D View
 
 ```bash
 glimpse example_cloud.nc
 ```
 
-Outputs:
-- 3D isosurface plot (qn ≥ 0.01 g/kg)
-- 2D slice views (x-y, y-z, x-z)
+Generates a matplotlib visualization of column optical depth.
 
-### Expedition: Simple Radiative Transfer
+### Witness: 3D Isosurface Views
 
 ```bash
-expedition example_cloud.nc --sza 30
+witness example_cloud.nc
 ```
 
-Outputs everything from Glimpse plus:
-- Optical depth slices
-- Reflectance field
-- Transmission field
+Generates multiple 3D views (overhead, north oblique, west oblique) using PyVista isosurface rendering.
 
-### Odyssey: Full Analysis
+Options:
+- `--interactive`: Export interactive HTML instead of PNG
+- `-n 10`: Number of isosurfaces (default: 10)
+- `--min-threshold 0.001 --max-threshold 1.0`: Optical depth range
+
+### Behold: Photorealistic Rendering
 
 ```bash
-odyssey example_cloud.nc --output ./results --sza 30 --wavelength 0.55
+behold example_cloud.nc llvm medium
 ```
 
-Outputs everything from Expedition plus:
-- Cloud water slices
-- Heating rate calculations
-- Summary statistics
+Generates photorealistic path-traced render using Mitsuba 3.
+
+Arguments:
+- `backend`: `llvm` (CPU) or `cuda` (GPU) - **required**
+- `quality`: `min`, `low`, `medium` (default), or `high`
+
+Quality tiers:
+- `min`: 200×400, spp=1 (instant preview)
+- `low`: 400×200, spp=32 (quick preview)
+- `medium`: 800×400, spp=512 (balanced, default)
+- `high`: 1600×800, spp=4096 (production quality)
+
+Options:
+- `--output ./renders`: Output directory (default: current directory)
 
 ## Input Data Requirements
 
@@ -69,52 +92,78 @@ NetCDF files must contain:
 - **Spatial dimensions**: Must be 3D (e.g., x, y, z or lon, lat, height)
 - **Temporal dimension**: Must contain exactly one timestep
 
+## Configuration
+
+Witness and Behold can be configured via YAML files. Settings include camera positions, sun angles, rendering parameters, and more.
+
+### Configuration File Locations
+
+CloudyView searches for configuration files in this order:
+1. `./cloudyview.yaml` (current directory)
+2. `~/.cloudyview.yaml` (home directory)
+3. Built-in defaults if no config file found
+
+### Creating a Configuration File
+
+Copy the example configuration:
+
+```bash
+cp cloudyview.yaml.example cloudyview.yaml
+```
+
+Then edit `cloudyview.yaml` to customize:
+- Camera positions (relative coordinates where ±1.0 = domain edge)
+- Sun azimuth and elevation
+- Rendering parameters (max depth, exposure, etc.)
+- Ocean surface settings
+
+See `cloudyview.yaml.example` for full documentation of all options.
+
 ## Usage Examples
 
-### Display plots interactively
+### Quick Visualization Pipeline
 
 ```bash
-# Quick look
+# 1. Quick 2D overview
 glimpse my_cloud_data.nc
 
-# With simple RT
-expedition my_cloud_data.nc
+# 2. 3D isosurface views
+witness my_cloud_data.nc
 
-# Full analysis
-odyssey my_cloud_data.nc
+# 3. Photorealistic render
+behold my_cloud_data.nc cuda high --output ./renders
 ```
 
-### Save plots to files
+### Witness Examples
 
 ```bash
-# Save to output directory
-glimpse my_cloud_data.nc --output ./plots
+# Default views (overhead, north, west)
+witness cloud.nc
 
-expedition my_cloud_data.nc --output ./plots --sza 45
+# Interactive HTML export
+witness cloud.nc --interactive
 
-odyssey my_cloud_data.nc --output ./plots --sza 45 --wavelength 0.55
+# Single high optical depth isosurface
+witness cloud.nc --threshold 1.0
+
+# Custom threshold range with more surfaces
+witness cloud.nc -n 20 --min-threshold 0.0001 --max-threshold 10.0
 ```
 
-### Specify solar geometry
+### Behold Examples
 
 ```bash
-# Different solar zenith angles
-expedition cloud.nc --sza 0    # Sun overhead
-expedition cloud.nc --sza 45   # Mid-morning/afternoon
-expedition cloud.nc --sza 80   # Near horizon
-```
+# Fast CPU preview
+behold cloud.nc llvm min
 
-### Different wavelengths (Odyssey only)
+# Balanced GPU render
+behold cloud.nc cuda medium
 
-```bash
-# Visible light
-odyssey cloud.nc --wavelength 0.55
+# Production quality render
+behold cloud.nc cuda high --output ./final_renders
 
-# Near-infrared
-odyssey cloud.nc --wavelength 1.6
-
-# Thermal infrared
-odyssey cloud.nc --wavelength 11.0
+# Quick GPU preview
+behold cloud.nc cuda low
 ```
 
 ## Module Structure
@@ -127,73 +176,83 @@ odyssey cloud.nc --wavelength 11.0
   - `infer_ice_water()`: Auto-detect ice water variable
   - `load_and_validate()`: Complete data loading with validation
 
-- **`basic_render.py`**: Matplotlib-based visualization
-  - `plot_isosurface()`: 3D isosurface at specified threshold
-  - `plot_slices()`: 2D slice views along three dimensions
-
 - **`optical_depth.py`**: Optical depth calculations
-  - `calculate_optical_depth()`: Compute optical depth from water content
-  - `column_optical_depth()`: Vertically integrate to column values
+  - `compute_extinction_field()`: Compute extinction coefficient from water content
+  - Supports variable vertical spacing
 
-- **`radiative_transfer.py`**: Radiative transfer modeling
-  - `simple_3d_radiative_transfer()`: Two-stream approximation
-  - `advanced_3d_radiative_transfer()`: Full 3D RT with multiple scattering
+- **`config.py`**: Configuration system
+  - `load_config()`: Load configuration from YAML file
+  - `get_witness_config()`: Get witness configuration
+  - `get_behold_config()`: Get behold configuration
+
+- **`basic_render.py`**: Matplotlib-based visualization
+  - Column optical depth visualization
+
+- **`radiative_transfer.py`**: Mitsuba 3 Monte Carlo path tracing
+  - `load_mie_phase_tables()`: Load Mie scattering phase functions
+  - `render_view()`: Render a single view with Mitsuba
+  - `look_at_world_up()`: Camera transform helper
+  - Support for RGB rendering with physically-based sky
 
 ### CLI Scripts
 
-- **`glimpse.py`**: Entry point for quick visualization
-- **`expedition.py`**: Entry point for radiative transfer analysis
-- **`odyssey.py`**: Entry point for comprehensive visualization
+- **`glimpse.py`**: Entry point for quick 2D visualization
+- **`witness.py`**: Entry point for PyVista 3D isosurface rendering
+- **`behold.py`**: Entry point for Mitsuba photorealistic rendering
 
 ## Features
 
 ### Visualizations
-- 3D isosurface plots with configurable thresholds
-- 2D slice views for detailed field inspection
-- Multiple radiative transfer diagnostics
-- Small figure sizes optimized for 13" MacBook displays
+- **Glimpse**: 2D column optical depth visualization
+- **Witness**: Multiple 3D isosurface views with physically-based opacity
+- **Behold**: Photorealistic Monte Carlo path tracing with Mitsuba 3
 
 ### Data Handling
 - Automatic variable name inference (tries common naming conventions)
 - Comprehensive validation (checks dimensions, timestep count)
 - Support for both liquid and ice water phases
 - Works with different coordinate systems
+- Variable vertical spacing supported
 
-### Radiative Transfer
-- Placeholder implementations ready for your custom code
-- Two-stream approximation (Expedition)
-- Full 3D radiative transfer framework (Odyssey)
-- Configurable solar geometry and wavelength
+### Radiative Transfer (Behold)
+- Full volumetric path tracing with Mitsuba 3
+- Physically-based Preetham sunsky model
+- Accurate Mie scattering from pre-computed phase functions
+- Configurable camera and sun positions via YAML
+- Multiple quality levels from instant preview to production
+- Progressive rendering with checkpoints
+- Ocean surface with realistic reflections
 
-## Customization
-
-To integrate your own optical depth or radiative transfer code:
-
-1. **Optical depth**: Modify `cloudyview/optical_depth.py`
-   - Replace `calculate_optical_depth()` function
-   - Maintain input/output array types (xarray)
-
-2. **Radiative transfer**: Modify `cloudyview/radiative_transfer.py`
-   - Replace `simple_3d_radiative_transfer()` and/or `advanced_3d_radiative_transfer()`
-   - Return dictionary with result fields
-
-3. **Visualization**: Modify `cloudyview/basic_render.py`
-   - Add new visualization functions
-   - Import and use in CLI scripts
+### Configuration
+- YAML-based configuration system
+- Relative coordinate positioning
+- Multiple camera views for witness
+- Customizable rendering parameters
 
 ## Dependencies
 
-- `numpy`: Array operations
-- `matplotlib`: Plotting and visualization
-- `xarray`: NetCDF file handling with labeled arrays
-- `netCDF4`: NetCDF4 file support (required by xarray for many operations)
+### Core Dependencies
+- `numpy>=1.20`: Array operations
+- `matplotlib>=3.3`: 2D plotting
+- `xarray>=0.18`: NetCDF file handling with labeled arrays
+- `netCDF4>=1.5`: NetCDF4 file support
+- `pyyaml>=5.4`: Configuration file parsing
+
+### Optional Dependencies
+- **For witness (3D isosurfaces)**: `pyvista>=0.37.0`
+- **For behold (photorealistic rendering)**: `mitsuba>=3.0.0`, `drjit>=0.3.0`
+
+Install all optional dependencies:
+```bash
+pip install -e ".[all]"
+```
 
 ## Mie Phase Function Tables
 
-CloudyView includes pre-computed Mie scattering phase function tables for accurate cloud droplet scattering:
+Behold uses pre-computed Mie scattering phase function tables for accurate cloud droplet scattering:
 
-- **Mie0.txt**: Forward scattering peak (strongly forward-scattered component)
-- **MiePF3.txt**: Rest of phase function distribution (sideways and backward scattering, wavelength-dependent RGB values)
+- **Mie0_normalized.txt**: Forward scattering peak (strongly forward-scattered component)
+- **MiePF3_normalized.txt**: Rest of phase function distribution (sideways and backward scattering, wavelength-dependent RGB values)
 
 These tables are from the PhD thesis:
 
@@ -201,51 +260,7 @@ These tables are from the PhD thesis:
 PhD Thesis, Université Grenoble I - Joseph Fourier
 https://theses.hal.science/tel-00319974
 
-The dual-table approach enables efficient importance sampling by separately handling the extremely strong forward peak and the much weaker sideways/backward scattering regions.
-
-### Rendering Modes
-
-CloudyView supports three rendering modes with different tradeoffs:
-
-#### 1. **RGB Mode** (default) - `--mode rgb`
-- Single RGB render with wavelength-averaged Mie phase function
-- Full physically-based sunsky with realistic colors
-- Best for general visualization and aesthetic renders
-- Computational cost: 1× (baseline)
-
-#### 2. **Mono Mode** - `--mode mono`
-- Single monochrome render, grayscale output
-- Fastest option for quick previews
-- Computational cost: ~0.33× (3× faster than RGB)
-
-#### 3. **Chromatic Mode** - `--mode chromatic`
-- Renders 3 monochrome channels (R, G, B) separately
-- Each channel uses wavelength-specific Mie phase function
-- Enables chromatic scattering effects: coronas, halos, glories, rainbows
-- Uses simplified constant sky (sunsky incompatible with monochrome)
-- Computational cost: ~1× (3 mono renders ≈ 1 RGB render)
-
-**Example usage:**
-
-```bash
-# Default RGB mode with realistic sky
-appreciate cloud.nc high
-
-# Chromatic mode for coronas/halos (looking toward sun)
-appreciate cloud.nc high --mode chromatic --camera-azimuth 90 --camera-elevation 30
-
-# Fast mono preview
-appreciate cloud.nc low --mode mono
-```
-
-**In Python:**
-
-```python
-view_config = {
-    'render_mode': 'chromatic',  # or 'mono' or 'rgb'
-    # ... other config parameters
-}
-```
+The dual-table approach enables efficient importance sampling by separately handling the extremely strong forward peak and the much weaker sideways/backward scattering regions. The tables are blended with equal weighting (0.5) for optimal sampling.
 
 ## Author
 

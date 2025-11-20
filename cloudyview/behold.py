@@ -1,25 +1,26 @@
 #!/usr/bin/env python
 """
-appreciate.py: Cloud field visualization with optical depth and 3D radiative transfer (Mitsuba).
+behold.py: Cloud field visualization with optical depth and 3D radiative transfer (Mitsuba).
 
 Usage:
-    python appreciate.py <filename.nc> [quality] [options]
+    python behold.py <filename.nc> <backend> [quality] [--output <path>]
 
-    quality: low (400x200), medium (800x400, default), high (1600x800)
-
-Options:
-    --output <path>           Output directory for renders
-    --sza <angle>             Solar zenith angle in degrees (default: 45)
-    --camera-azimuth <angle>  Camera look azimuth in degrees (default: 0)
-    --camera-elevation <angle> Camera look elevation in degrees (default: 45)
-    --fov <angle>             Field of view in degrees (default: 100)
-    --mode <mode>             mono/rgb/chromatic (default: rgb)
+    backend: llvm or cuda (required)
+    quality: min (200x400), low (400x200), medium (800x400, default), high (1600x800)
 
 This script provides a realistic 3D view of your cloud data using:
 1. Optical depth calculation via extinction coefficient
 2. Mitsuba 3 Monte Carlo path tracing with physically-based sky
 3. Accurate Mie scattering phase functions from Bouthors (2008)
-4. Optional RGB wavelength-dependent rendering for chromatic effects
+4. Configurable camera and sun positions via config file
+
+Configuration is loaded from cloudyview.yaml (current dir) or ~/.cloudyview.yaml
+Settings include camera position, sun angle, rendering parameters, etc.
+
+Coordinate System (Meteorological Convention):
+- East  = +x direction
+- North = +y direction
+- Up    = +z direction
 """
 
 import argparse
@@ -30,39 +31,33 @@ import numpy as np
 import netCDF4 as nc
 import mitsuba as mi
 
-from . import io, radiative_transfer, optical_depth
+from . import io, radiative_transfer, optical_depth, config
 
 
-def main(filename: str, output: str = None, sza: float = 50.0, quality: str = 'medium',
-         camera_azimuth: float = 0.0, camera_elevation: float = 45.0, fov: float = 100.0,
-         render_mode: str = 'rgb') -> None:
+def main(filename: str, backend: str, quality: str = 'medium', output: str = None) -> None:
     """
-    Main function for appreciate.py
+    Main function for behold.py
 
     Parameters
     ----------
     filename : str
         Path to NetCDF file
+    backend : str
+        Mitsuba backend: 'llvm' or 'cuda'
+    quality : str
+        Render quality: 'min' (200x400, spp=1), 'low' (400x200),
+        'medium' (800x400, default), 'high' (1600x800)
     output : str, optional
         Output directory for renders
-    sza : float
-        Solar zenith angle in degrees
-    quality : str
-        Render quality: 'low' (400x200), 'medium' (800x400, default), 'high' (1600x800)
-    camera_azimuth : float
-        Camera look direction azimuth in degrees (0=+X, 90=+Y, 180=-X, 270=-Y)
-    camera_elevation : float
-        Camera look direction elevation in degrees (0=horizontal, 90=up, -90=down)
-    fov : float
-        Camera field of view in degrees (default: 100)
-    render_mode : str
-        Rendering mode: 'mono', 'rgb', or 'chromatic'
-        - 'mono': Single grayscale render, fastest
-        - 'rgb': Single RGB render with sunsky (default)
-        - 'chromatic': 3-channel render for chromatic effects (coronas, halos, glories)
     """
-    print(f"CloudyView Appreciate: Loading {filename}")
+    print(f"CloudyView Behold: Loading {filename}")
     start_time = time.perf_counter()
+
+    # Load configuration
+    behold_config = config.get_behold_config()
+    camera_config = behold_config['camera']
+    sun_config = behold_config['sun']
+    rendering_config = behold_config['rendering']
 
     try:
         # Load and validate data with xarray
@@ -168,41 +163,68 @@ def main(filename: str, output: str = None, sza: float = 50.0, quality: str = 'm
         else:
             output_dir = Path(".")
 
-        # Use CUDA if available, otherwise LLVM
-        variant = radiative_transfer.get_best_variant('rgb')
+        # Set Mitsuba backend explicitly based on CLI argument
+        # Validate backend choice
+        if backend.lower() not in ['llvm', 'cuda']:
+            raise ValueError(f"Invalid backend '{backend}'. Must be 'llvm' or 'cuda'.")
+
+        # Determine render mode from config (default to 'rgb')
+        render_mode = 'rgb'  # Fixed to RGB mode for now
+        variant = f'{backend.lower()}_ad_{render_mode}'
         mi.set_variant(variant)
         print(f"  Using Mitsuba variant: {variant}")
 
-        # Map quality to resolution
+        # Map quality to resolution and spp
         quality_map = {
-            'low': (400, 200),
-            'medium': (800, 400),
-            'high': (1600, 800)
+            'min': {'resolution': (200, 400), 'spp': 1},
+            'low': {'resolution': (400, 200), 'spp': 32},
+            'medium': {'resolution': (800, 400), 'spp': 512},
+            'high': {'resolution': (1600, 800), 'spp': 4096}
         }
-        width, height = quality_map[quality]
+        width, height = quality_map[quality]['resolution']
+        spp = quality_map[quality]['spp']
+
+        # Get camera settings from config (relative coordinates)
+        camera_azimuth = camera_config['azimuth']
+        camera_elevation = camera_config['elevation']
+        fov = camera_config['fov']
+
+        # Convert relative camera position to absolute
+        # Relative coords: ±1.0 = domain edge
+        rel_pos = camera_config['position']
+        camera_origin = [
+            rel_pos[0] * ar,  # x in Mitsuba normalized cube (±ar)
+            rel_pos[1] * ar,  # y in Mitsuba normalized cube (±ar)
+            rel_pos[2]        # z in Mitsuba normalized cube (±1)
+        ]
 
         # Compute camera target from azimuth/elevation
         # Convert to radians
         az_rad = np.deg2rad(camera_azimuth)
         el_rad = np.deg2rad(camera_elevation)
 
-        # Compute look direction vector
-        # Azimuth: 0=+X, 90=+Y, 180=-X, 270=-Y
-        # Elevation: 0=horizontal, 90=zenith, -90=nadir
+        # Compute look direction vector (meteorological convention)
+        # Azimuth: 0°=East(+x), 90°=North(+y)
+        # Elevation: angle above horizon
         look_dir = np.array([
-            np.cos(el_rad) * np.cos(az_rad),
-            np.cos(el_rad) * np.sin(az_rad),
-            np.sin(el_rad)
+            np.cos(el_rad) * np.cos(az_rad),  # x (East)
+            np.cos(el_rad) * np.sin(az_rad),  # y (North)
+            np.sin(el_rad)  # z (Up)
         ])
 
         # Target point is origin + look direction
         camera_target = camera_origin + look_dir
 
+        # Get sun configuration
+        sun_azimuth = sun_config['azimuth']
+        sun_elevation = sun_config['elevation']
+
         # Render ground-looking-up view with progressive checkpoints
         print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
         print(f"  Camera azimuth: {camera_azimuth:.1f}°, elevation: {camera_elevation:.1f}°")
+        print(f"  Sun azimuth: {sun_azimuth:.1f}°, elevation: {sun_elevation:.1f}°")
         print(f"  Field of view: {fov:.1f}°")
-        print(f"  Render quality: {quality} ({width}x{height})")
+        print(f"  Render quality: {quality} ({width}x{height}, spp={spp})")
         view_config = {
             'name': 'Ground-Looking-Up (Progressive Rendering)',
             'width': width,
@@ -213,20 +235,20 @@ def main(filename: str, output: str = None, sza: float = 50.0, quality: str = 'm
                 target=camera_target
             ),
             'camera_origin': camera_origin,
-            'spp': 256, 
-            'exposure': 4.0,
-            'extinction_multiplier': 1.0,
+            'spp': spp,
+            'exposure': rendering_config['exposure'],
+            'extinction_multiplier': rendering_config['extinction_multiplier'],
             'sky_type': 'sunsky',  # Physically-based sky
-            'turbidity': 3.0,
-            'sun_azimuth': 90.0,
-            'sun_elevation': 90.0 - sza,  # Convert zenith angle to elevation
-            'ground_albedo': 0.5,
-            'add_ocean': True,
-            'ocean_reflectance': [0.0392, 0.1098, 0.1490],  # #0A1C26 = RGB(10, 28, 38)
-            'ocean_height': -.99,
-            'integrator': 'volpathmis',
-            'max_depth': 128,
-            'rr_depth': 64,
+            'turbidity': rendering_config['turbidity'],
+            'sun_azimuth': sun_azimuth,
+            'sun_elevation': sun_elevation,
+            'ground_albedo': rendering_config['ground_albedo'],
+            'add_ocean': rendering_config['ocean']['enabled'],
+            'ocean_reflectance': rendering_config['ocean']['reflectance'],
+            'ocean_height': rendering_config['ocean']['height'],
+            'integrator': rendering_config['integrator'],
+            'max_depth': rendering_config['max_depth'],
+            'rr_depth': rendering_config['rr_depth'],
             'sampler': {'type': 'independent'},
             'seed': 0,
             'render_mode': render_mode,
@@ -244,14 +266,14 @@ def main(filename: str, output: str = None, sza: float = 50.0, quality: str = 'm
         # Define checkpoint SPP values for progressive rendering
         checkpoint_spp = [2, 32, 128, 512, 1028, 2048, 4096]
 
-        output_file = output_dir / f"appreciate_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
+        output_file = output_dir / f"behold_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
         radiative_transfer.render_view(
             sigma_ext, dx, dy, dz, view_config, str(output_file),
             checkpoint_spp=checkpoint_spp
         )
 
         elapsed = time.perf_counter() - start_time
-        print("\n✓ Appreciate complete!")
+        print("\n✓ Behold complete!")
         print(f"  Total runtime: {elapsed:.1f} s ({elapsed/60:.1f} min)")
         if output:
             print(f"  Renders saved to {output_dir}")
@@ -274,50 +296,33 @@ def main(filename: str, output: str = None, sza: float = 50.0, quality: str = 'm
 
 
 def cli():
-    """Command-line interface for appreciate.py"""
+    """Command-line interface for behold.py"""
     parser = argparse.ArgumentParser(
-        description="Cloud visualization with 3D Mitsuba radiative transfer (ground-looking-up view)"
+        description="Cloud visualization with 3D Mitsuba radiative transfer (photorealistic ground-looking-up view)"
     )
     parser.add_argument(
         "filename",
         help="NetCDF file with cloud data (must contain qc/ql/LWC variable and be 3D single-timestep)"
     )
     parser.add_argument(
+        "backend",
+        choices=['llvm', 'cuda'],
+        help="Mitsuba backend: llvm (CPU) or cuda (GPU)"
+    )
+    parser.add_argument(
         "quality",
         nargs='?',
         default='medium',
-        choices=['low', 'medium', 'high'],
-        help="Render quality: low (400x200), medium (800x400, default), high (1600x800)"
+        choices=['min', 'low', 'medium', 'high'],
+        help="Render quality: min (200x400, spp=1), low (400x200, spp=32), medium (800x400, spp=512, default), high (1600x800, spp=4096)"
     )
     parser.add_argument(
         "--output", "-o",
-        help="Output directory for saving renders"
-    )
-    parser.add_argument(
-        "--sza", type=float, default=45.0,
-        help="Solar zenith angle in degrees (default: 45 for realistic perspective)"
-    )
-    parser.add_argument(
-        "--camera-azimuth", type=float, default=0.0,
-        help="Camera look direction azimuth in degrees (0=+X/east, 90=+Y/north, default: 0)"
-    )
-    parser.add_argument(
-        "--camera-elevation", type=float, default=45.0,
-        help="Camera look direction elevation in degrees (0=horizontal, 90=up, default: 45)"
-    )
-    parser.add_argument(
-        "--fov", type=float, default=100.0,
-        help="Camera field of view in degrees (default: 100)"
-    )
-    parser.add_argument(
-        "--mode", type=str, default='rgb',
-        choices=['mono', 'rgb', 'chromatic'],
-        help="Rendering mode: mono (grayscale), rgb (default, full color), chromatic (coronas/halos)"
+        help="Output directory for saving renders (default: current directory)"
     )
 
     args = parser.parse_args()
-    main(args.filename, args.output, args.sza, args.quality,
-         args.camera_azimuth, args.camera_elevation, args.fov, args.mode)
+    main(args.filename, args.backend, args.quality, args.output)
 
 
 if __name__ == "__main__":

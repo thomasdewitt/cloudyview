@@ -30,6 +30,7 @@ dependencies = [
     "matplotlib>=3.3",
     "xarray>=0.18",
     "netCDF4>=1.5",
+    "pyyaml>=5.4",
 ]
 
 [project.optional-dependencies]
@@ -61,8 +62,8 @@ all = [
 
 [project.scripts]
 glimpse = "cloudyview.glimpse:cli"
-observe = "cloudyview.observe:cli"
-appreciate = "cloudyview.appreciate:cli"
+witness = "cloudyview.witness:cli"
+behold = "cloudyview.behold:cli"
 
 [project.urls]
 Homepage = "https://github.com/thomasdewitt/cloudyview"

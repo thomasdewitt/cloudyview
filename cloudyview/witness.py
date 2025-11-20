@@ -1,20 +1,25 @@
 #!/usr/bin/env python
 """
-observe.py: Cloud field visualization with PyVista isosurface rendering.
+witness.py: Cloud field visualization with PyVista isosurface rendering.
 
 Usage:
     # Multiple surfaces (default):
-    python observe.py <filename.nc> [--interactive] [-n 10] [--min-threshold 0.001] [--max-threshold 1.0]
+    python witness.py <filename.nc> [--interactive] [-n 10] [--min-threshold 0.001] [--max-threshold 1.0]
 
     # Single surface:
-    python observe.py <filename.nc> --threshold 0.5 [--interactive]
+    python witness.py <filename.nc> --threshold 0.5 [--interactive]
 
 This script generates 3D isosurface visualizations of cloud optical depth fields:
 1. Computes optical depth from extinction coefficients (per-pixel, using geometric mean voxel size)
 2. Renders white isosurface(s) with physically-based opacity: α = 1 - exp(-Δτ)
 3. Multiple surfaces: logarithmically spaced optical depth thresholds
-4. Produces two views: from below and from above
+4. Produces configurable views (overhead, oblique north, oblique west)
 5. Optional interactive HTML export for browser-based 3D exploration
+
+Coordinate System (Meteorological Convention):
+- East  = +x direction
+- North = +y direction
+- Up    = +z direction
 """
 
 import argparse
@@ -25,14 +30,14 @@ import numpy as np
 import netCDF4 as nc
 import pyvista as pv
 
-from . import io, optical_depth
+from . import io, optical_depth, config
 
 
 def main(filename: str, output: str = None, threshold: float = None,
          interactive: bool = False, n_surfaces: int = 10,
          min_threshold: float = 0.001, max_threshold: float = 0.1) -> None:
     """
-    Main function for observe.py
+    Main function for witness.py
 
     Parameters
     ----------
@@ -53,6 +58,9 @@ def main(filename: str, output: str = None, threshold: float = None,
         Maximum extinction threshold (default: 0.01 m^-1)
     """
     start_time = time.perf_counter()
+
+    # Load configuration
+    witness_config = config.get_witness_config()
 
     try:
         # Load and validate data with xarray
@@ -190,43 +198,59 @@ def main(filename: str, output: str = None, threshold: float = None,
             print("✗ No surfaces generated - try lower thresholds", file=sys.stderr)
             sys.exit(1)
 
+        # Load sun configuration
+        sun_azimuth = witness_config['sun']['azimuth']
+        sun_elevation = witness_config['sun']['elevation']
+
         # Lighting setup
-        sun_azimuth = 70.0  # degrees
-        sun_elevation = 45.0  # degrees above horizon
         light_distance = max_extent * 10
         az_rad = np.deg2rad(sun_azimuth)
         el_rad = np.deg2rad(sun_elevation)
+
+        # Convert azimuth/elevation to cartesian (meteorological convention)
+        # Azimuth: 0°=East(+x), 90°=North(+y)
+        # Elevation: angle above horizon
         light_pos = [
-            center_x + light_distance * np.cos(el_rad) * np.sin(az_rad),
-            center_y + light_distance * np.cos(el_rad) * np.cos(az_rad),
-            center_z + light_distance * np.sin(el_rad)
+            center_x + light_distance * np.cos(el_rad) * np.cos(az_rad),  # x (East)
+            center_y + light_distance * np.cos(el_rad) * np.sin(az_rad),  # y (North)
+            center_z + light_distance * np.sin(el_rad)  # z (Up)
         ]
 
         # Dark blue background
         bg_color = (0.2, 0.3, 0.4)
 
-        # Define camera positions: both from above
+        # Define camera positions from config using relative coordinates
+        # Relative coords: ±1.0 = domain edge in x,y
         camera_distance = max_extent * 1.5
-        camera_positions = {
-            'side': {
-                'position': [
-                    center_x,  # centered in x
-                    center_y + camera_distance,  # offset in +y
-                    center_z + max_extent * 0.8  # elevated above
-                ],
-                'focal_point': (center_x, center_y, center_z),
-                'up': (0, 0, 1)
-            },
-            'top': {
-                'position': [
-                    center_x,  # centered in x
-                    center_y,  # centered in y
-                    center_z + camera_distance * 1.2  # directly above
-                ],
-                'focal_point': (center_x, center_y, center_z),
-                'up': (0, 1, 0)  # y-axis as up for top-down view
+        camera_positions = {}
+
+        for view_name, view_config in witness_config['camera_views'].items():
+            # Convert relative position to absolute
+            rel_pos = view_config['position']
+            abs_pos = [
+                center_x + rel_pos[0] * extent_x / 2,  # x
+                center_y + rel_pos[1] * extent_y / 2,  # y
+                center_z + rel_pos[2] * extent_z / 2   # z
+            ]
+
+            # Compute look direction from azimuth/elevation
+            view_az_rad = np.deg2rad(view_config['azimuth'])
+            view_el_rad = np.deg2rad(view_config['elevation'])
+
+            look_dir = np.array([
+                np.cos(view_el_rad) * np.cos(view_az_rad),  # x (East)
+                np.cos(view_el_rad) * np.sin(view_az_rad),  # y (North)
+                np.sin(view_el_rad)  # z (Up)
+            ])
+
+            # Focal point is position + look direction
+            focal_point = tuple(np.array(abs_pos) + look_dir * max_extent)
+
+            camera_positions[view_name] = {
+                'position': abs_pos,
+                'focal_point': focal_point,
+                'up': (0, 0, 1)  # World up is always +z
             }
-        }
 
         # Determine base output path
         if output:
@@ -235,7 +259,7 @@ def main(filename: str, output: str = None, threshold: float = None,
         else:
             # Use dataset filename in output
             dataset_name = Path(filename).stem
-            output_base = f"cloudyview_observe"
+            output_base = f"cloudyview_witness"
             output_dir = Path(".")
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -259,18 +283,19 @@ def main(filename: str, output: str = None, threshold: float = None,
             for isosurface, opacity in isosurfaces:
                 plotter.add_mesh(isosurface, color='white', opacity=opacity, smooth_shading=True)
 
-            # Set camera to "top" view
+            # Set camera to first view (typically 'overhead')
+            first_view = list(camera_positions.keys())[0]
             plotter.camera_position = [
-                camera_positions['top']['position'],
-                camera_positions['top']['focal_point'],
-                camera_positions['top']['up']
+                camera_positions[first_view]['position'],
+                camera_positions[first_view]['focal_point'],
+                camera_positions[first_view]['up']
             ]
 
             # Save HTML
             if output:
                 output_file = output_dir / f"{output_base}.html"
             else:
-                output_file = output_dir / f"{output_base}_top_{dataset_name}.html"
+                output_file = output_dir / f"{output_base}_{first_view}_{dataset_name}.html"
             plotter.export_html(str(output_file))
             print(f"Saved: {output_file}")
 
@@ -332,9 +357,9 @@ def main(filename: str, output: str = None, threshold: float = None,
 
 
 def cli():
-    """Command-line interface for observe.py"""
+    """Command-line interface for witness.py"""
     parser = argparse.ArgumentParser(
-        description="Cloud visualization with PyVista isosurface rendering (generates two views: below & above)"
+        description="Cloud visualization with PyVista isosurface rendering (generates multiple configured views)"
     )
     parser.add_argument(
         "filename",
@@ -342,7 +367,7 @@ def cli():
     )
     parser.add_argument(
         "--output", "-o",
-        help="Output base name (generates <name>_below.png and <name>_above.png)"
+        help="Output base name (generates <name>_<view>.png for each configured view)"
     )
     parser.add_argument(
         "--threshold", "-t", type=float, default=None,

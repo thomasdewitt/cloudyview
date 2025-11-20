@@ -25,35 +25,6 @@ except ImportError:
     raise RuntimeError("Mitsuba 3 is required for radiative transfer rendering but was not found")
 
 
-def get_best_variant(mode: Literal['rgb', 'mono', 'spectral'] = 'rgb') -> str:
-    """
-    Get the best available Mitsuba variant for the given mode.
-
-    Prefers CUDA (GPU) if available, otherwise falls back to LLVM (CPU).
-
-    Parameters
-    ----------
-    mode : {'rgb', 'mono', 'spectral'}
-        Rendering mode
-
-    Returns
-    -------
-    str
-        Variant name (e.g., 'cuda_ad_rgb' or 'llvm_ad_rgb')
-    """
-    cuda_variant = f'cuda_ad_{mode}'
-    llvm_variant = f'llvm_ad_{mode}'
-
-    available = mi.variants()
-
-    if cuda_variant in available:
-        return cuda_variant
-    elif llvm_variant in available:
-        return llvm_variant
-    else:
-        raise RuntimeError(f"Neither {cuda_variant} nor {llvm_variant} variant available")
-
-
 def load_mie_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
     """
     Load Mie scattering phase function tables from Bouthors (2008) thesis.
