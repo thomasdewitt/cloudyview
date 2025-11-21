@@ -6,12 +6,12 @@ from typing import Tuple, Dict, Any
 
 
 # Common variable names for liquid water
-LIQUID_WATER_NAMES = ["qc", "QC", "ql", "QL", "QN", "qn", "LWC",
+LIQUID_WATER_NAMES = ["qc", "QC", "ql", "QL", "QN", "qn", "LWC", "clw",
                        "cloud_liquid_water_mixing_ratio",
                        "liquid_water_content", "q_liquid", "lwc"]
 
 # Common variable names for ice water
-ICE_WATER_NAMES = ["qi", "QI", "qice", "QICE", "IWC",
+ICE_WATER_NAMES = ["qi", "QI", "qice", "QICE", "IWC", "cli",
                     "cloud_ice_mixing_ratio",
                     "ice_water_content", "q_ice", "iwc"]
 
@@ -120,6 +120,50 @@ def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str) -> None
                        "3D spatial data is required (e.g., x, y, z).")
 
 
+def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataArray:
+    """
+    Check and convert water content units to g/kg.
+
+    Parameters
+    ----------
+    data_array : xr.DataArray
+        Data variable to check
+    var_name : str
+        Name of variable for error messages
+
+    Returns
+    -------
+    xr.DataArray
+        Data array with values in g/kg
+
+    Raises
+    ------
+    ValueError
+        If units are not g/kg or g/g, or if units attribute is missing
+    """
+    # Get units attribute
+    units = data_array.attrs.get('units', None)
+
+    if units is None:
+        raise ValueError(f"Variable {var_name} has no 'units' attribute. "
+                        "Units must be specified as 'g/kg' or 'g/g'.")
+
+    # Normalize units string (strip whitespace, handle case variations)
+    units_normalized = units.strip().lower()
+
+    if units_normalized == 'g/kg':
+        # Already in correct units
+        return data_array
+    elif units_normalized == 'g/g':
+        # Convert from g/g to g/kg (multiply by 1000)
+        data_array = data_array * 1000.0
+        data_array.attrs['units'] = 'g/kg'
+        return data_array
+    else:
+        raise ValueError(f"Variable {var_name} has unsupported units: {units}. "
+                        "Expected 'g/kg' or 'g/g'.")
+
+
 def standardize_dims(data_array: xr.DataArray) -> xr.DataArray:
     """
     Standardize dimension names to (x, y, z).
@@ -156,9 +200,9 @@ def standardize_dims(data_array: xr.DataArray) -> xr.DataArray:
         raise ValueError(f"Expected 3 spatial dimensions, got {len(dims)}: {dims}")
 
     # Map dimension names
-    x_candidates = ['x', 'lon', 'longitude', 'nx']
-    y_candidates = ['y', 'lat', 'latitude', 'ny']
-    z_candidates = ['z', 'height', 'altitude', 'level', 'nz']
+    x_candidates = ['x', 'lon', 'longitude', 'nx', 'ni']
+    y_candidates = ['y', 'lat', 'latitude', 'ny', 'nj']
+    z_candidates = ['z', 'height', 'altitude', 'level', 'nz', 'nk']
 
     x_dim = None
     y_dim = None
@@ -186,7 +230,13 @@ def standardize_dims(data_array: xr.DataArray) -> xr.DataArray:
 
 def load_and_validate(filepath: str) -> Dict[str, Any]:
     """
-    Load NetCDF file and validate it, inferring variable names.
+    Load NetCDF file and validate it, inferring variable names and checking units.
+
+    Performs the following checks and conversions:
+    1. Loads NetCDF file and infers liquid/ice water variables
+    2. Validates 3D single-timestep data
+    3. Standardizes dimension names to (x, y, z)
+    4. Checks units and converts g/g to g/kg if needed
 
     Parameters
     ----------
@@ -199,9 +249,9 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
         Dictionary with keys:
         - 'dataset': xr.Dataset
         - 'liquid_water_var': str (variable name)
-        - 'liquid_water_data': xr.DataArray (with standardized (x, y, z) dims)
+        - 'liquid_water_data': xr.DataArray (with standardized (x, y, z) dims, units in g/kg)
         - 'ice_water_var': str or None
-        - 'ice_water_data': xr.DataArray or None (with standardized dims)
+        - 'ice_water_data': xr.DataArray or None (with standardized dims, units in g/kg)
         - 'filepath': str
         - 'x_coord': ndarray (x coordinates)
         - 'y_coord': ndarray (y coordinates)
@@ -212,7 +262,7 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
     FileNotFoundError
         If file does not exist
     ValueError
-        If validation fails
+        If validation fails or units are missing/unsupported
     """
     # Load dataset
     ds = load_data(filepath)
@@ -224,12 +274,17 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
     # Standardize dimensions to (x, y, z)
     lw_data = standardize_dims(lw_data)
 
+    # Check and convert units to g/kg
+    lw_data = check_and_convert_units(lw_data, lw_var)
+
     # Infer ice water variable (optional)
     iw_var, iw_data = infer_ice_water(ds)
     if iw_data is not None:
         validate_data(ds, iw_data, iw_var)
         # Standardize dimensions
         iw_data = standardize_dims(iw_data)
+        # Check and convert units to g/kg
+        iw_data = check_and_convert_units(iw_data, iw_var)
 
     # Extract coordinate arrays
     x_coord = lw_data.coords['x'].values if 'x' in lw_data.coords else None

@@ -40,10 +40,19 @@ def main(filename: str, output: str = None) -> None:
         ds = data_dict['dataset']
         lw_var = data_dict['liquid_water_var']
         lw_data = data_dict['liquid_water_data']
+        iw_var = data_dict['ice_water_var']
+        iw_data = data_dict['ice_water_data']
 
-        print(f"✓ Loaded {lw_var} variable")
+        print(f"✓ Loaded {lw_var} variable (liquid water)")
         print(f"  Shape: {lw_data.shape}")
         print(f"  Range: {lw_data.min().values:.4f} - {lw_data.max().values:.4f} g/kg")
+
+        if iw_data is not None:
+            print(f"✓ Loaded {iw_var} variable (ice water)")
+            print(f"  Shape: {iw_data.shape}")
+            print(f"  Range: {iw_data.min().values:.4f} - {iw_data.max().values:.4f} g/kg")
+        else:
+            print(f"⚠ No ice water variable found (only liquid water will be used)")
 
         # Create output directory if needed
         if output:
@@ -65,12 +74,18 @@ def main(filename: str, output: str = None) -> None:
         lw_np = lw_data.values
 
         iw_np = None
-        if data_dict['ice_water_data'] is not None:
-            iw_np = data_dict['ice_water_data'].values
+        if iw_data is not None:
+            iw_np = iw_data.values
 
-        # Calculate column optical depth (2D)
+        # Calculate column optical depth (2D) from liquid and ice water content
+        # Uses empirical relationships: for liquid LWP = 0.6292 * tau * re,
+        # for ice IWP = 0.350 * tau * re (consistent with plot_optical_depth.py)
         od_col = optical_depth.optical_depth_from_lwc(lw_np, z_coord, iwc=iw_np)
-        print(f"✓ Optical depth range: {od_col.min():.4f} - {od_col.max():.4f}")
+
+        if iw_np is not None:
+            print(f"✓ Optical depth (liquid + ice) range: {od_col.min():.4f} - {od_col.max():.4f}")
+        else:
+            print(f"✓ Optical depth (liquid only) range: {od_col.min():.4f} - {od_col.max():.4f}")
 
         # Convert optical depth to opacity (1 - exp(-tau))
         opacity = 1.0 - np.exp(-od_col)
@@ -104,7 +119,7 @@ def cli():
     )
     parser.add_argument(
         "filename",
-        help="NetCDF file with cloud data (must contain qc/ql/LWC variable and be 3D single-timestep)"
+        help="NetCDF file with cloud data (must contain qc/ql/LWC variable; qi/QI/IWC optional; must be 3D single-timestep)"
     )
     parser.add_argument(
         "--output", "-o", default=".",
