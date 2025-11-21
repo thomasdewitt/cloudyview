@@ -90,6 +90,75 @@ def load_mie_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
     return mie0_str, mie_pf3_str
 
 
+def load_ice_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
+    """
+    Load ice crystal scattering phase function tables.
+
+    PLACEHOLDER: Ice tables not yet implemented. When available, they should be
+    placed in Mie_tables/ as IceMie0_normalized.txt and IceMiePF3_normalized.txt
+    with identical format to the liquid water tables.
+
+    For now, returns HG approximation parameters instead of full tables.
+
+    Parameters
+    ----------
+    channel : {'R', 'G', 'B', 'gray'}
+        Which wavelength channel to use (for future compatibility)
+
+    Returns
+    -------
+    ice_mie0_str : str or None
+        Forward peak phase function values (comma-separated), or None for HG fallback
+    ice_mie_pf3_str : str or None
+        Rest of distribution phase function values (comma-separated), or None for HG fallback
+    use_hg : bool
+        If True, use Henyey-Greenstein approximation instead of tables
+    g_ice : float
+        HG asymmetry parameter for ice (only used if use_hg=True)
+
+    References
+    ----------
+    Ice scattering properties from Yang et al. (2000, 2013) databases
+    """
+    # Find the Mie_tables directory relative to this module
+    module_dir = Path(__file__).parent
+    mie_dir = module_dir / 'Mie_tables'
+
+    # Check if ice tables exist
+    ice_mie0_path = mie_dir / 'IceMie0_normalized.txt'
+    ice_mie_pf3_path = mie_dir / 'IceMiePF3_normalized.txt'
+
+    if ice_mie0_path.exists() and ice_mie_pf3_path.exists():
+        # Load ice tables (same format as liquid)
+        ice_mie0 = np.loadtxt(ice_mie0_path)
+        ice_mie_pf3 = np.loadtxt(ice_mie_pf3_path)
+
+        # Select channel for IceMiePF3 (RGB)
+        if channel == 'R':
+            ice_mie_pf3_values = ice_mie_pf3[:, 0]
+        elif channel == 'G':
+            ice_mie_pf3_values = ice_mie_pf3[:, 1]
+        elif channel == 'B':
+            ice_mie_pf3_values = ice_mie_pf3[:, 2]
+        elif channel == 'gray':
+            # Luminance weights: R=0.2126, G=0.7152, B=0.0722
+            ice_mie_pf3_values = (0.2126 * ice_mie_pf3[:, 0] +
+                                  0.7152 * ice_mie_pf3[:, 1] +
+                                  0.0722 * ice_mie_pf3[:, 2])
+        else:
+            raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
+
+        # Convert to comma-separated strings for Mitsuba tabphase
+        ice_mie0_str = ','.join(map(str, ice_mie0))
+        ice_mie_pf3_str = ','.join(map(str, ice_mie_pf3_values))
+
+        return ice_mie0_str, ice_mie_pf3_str, False, None
+    else:
+        # Fallback to Henyey-Greenstein approximation
+        print("  Ice Mie tables not found, using Henyey-Greenstein approximation (g=0.78)")
+        return None, None, True, 0.78
+
+
 def look_at_world_up(origin, target, fallback_up=(0, 1, 0), world_up=(0, 0, 1)):
     """Return a Mitsuba look_at transform that keeps image-up aligned with world-up."""
 
@@ -256,7 +325,7 @@ def sun_direction_to_sun(azimuth_deg=0.0, elevation_deg=90.0):
 
 def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
                         use_mie_phase=True, mie_channel='gray', mie_blend_weight=0.5,
-                        wavelength_nm=None):
+                        wavelength_nm=None, ice_fraction=None):
     """
     Create Mitsuba scene with volumetric cloud, sky, and optional ocean.
 
@@ -290,6 +359,9 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     wavelength_nm : float, optional
         Wavelength in nanometers for spectral rendering. If specified, sets sensor to
         render at this specific wavelength. Used for RGB channel rendering.
+    ice_fraction : ndarray (nx, ny, nz), optional
+        Ice mass fraction field (0 = liquid, 1 = ice). If provided, creates spatially-varying
+        phase function blending between liquid and ice phase functions.
 
     Returns
     --------
@@ -403,8 +475,95 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     }
 
     # Configure phase function (Mie tables or Henyey-Greenstein)
-    if use_mie_phase:
-        # Load Mie scattering tables from Bouthors (2008)
+    # If ice_fraction is provided, create spatially-varying blend between liquid and ice phases
+    if ice_fraction is not None:
+        print("  Setting up mixed-phase (liquid/ice) rendering...")
+
+        # Prepare ice fraction grid for Mitsuba (same transform as extinction)
+        ice_fraction_data = ice_fraction[..., np.newaxis].astype(np.float32)
+        ice_fraction_data = np.ascontiguousarray(
+            np.transpose(ice_fraction_data, (2, 1, 0, 3))
+        )
+        ice_fraction_grid = mi.VolumeGrid(ice_fraction_data)
+
+        if use_mie_phase:
+            # Load liquid water Mie tables
+            mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
+
+            # Load ice Mie tables (or use HG fallback)
+            ice_mie0_str, ice_mie_pf3_str, use_hg_ice, g_ice = load_ice_phase_tables(channel=mie_channel)
+
+            # Create liquid phase (dual-table blended)
+            liquid_phase = {
+                'type': 'blendphase',
+                'weight': mie_blend_weight,
+                'phase_0': {
+                    'type': 'tabphase',
+                    'values': mie_pf3_str
+                },
+                'phase_1': {
+                    'type': 'tabphase',
+                    'values': mie0_str
+                }
+            }
+
+            # Create ice phase (dual-table blended or HG)
+            if use_hg_ice:
+                ice_phase = {
+                    'type': 'hg',
+                    'g': g_ice
+                }
+            else:
+                ice_phase = {
+                    'type': 'blendphase',
+                    'weight': mie_blend_weight,
+                    'phase_0': {
+                        'type': 'tabphase',
+                        'values': ice_mie_pf3_str
+                    },
+                    'phase_1': {
+                        'type': 'tabphase',
+                        'values': ice_mie0_str
+                    }
+                }
+
+            print(f"  Liquid phase: Mie tables (channel={mie_channel})")
+            print(f"  Ice phase: {'HG (g=' + str(g_ice) + ')' if use_hg_ice else 'Mie tables (channel=' + mie_channel + ')'}")
+            print(f"  Spatially-varying blend via ice fraction grid")
+
+            # Spatially-varying blend between liquid and ice
+            scene_dict['cloud']['interior']['phase'] = {
+                'type': 'blendphase',
+                'phase_0': liquid_phase,  # phase_0 when weight=0 (liquid)
+                'phase_1': ice_phase,      # phase_1 when weight=1 (ice)
+                'weight': {
+                    'type': 'gridvolume',
+                    'grid': ice_fraction_grid,
+                    'to_world': grid_transform,
+                    'wrap_mode': 'mirror'
+                }
+            }
+
+        else:
+            # HG approximation for both liquid and ice
+            print("  Liquid phase: HG (g=0.85)")
+            print("  Ice phase: HG (g=0.78)")
+            print("  Spatially-varying blend via ice fraction grid")
+
+            scene_dict['cloud']['interior']['phase'] = {
+                'type': 'blendphase',
+                'phase_0': {'type': 'hg', 'g': 0.85},  # Liquid
+                'phase_1': {'type': 'hg', 'g': 0.78},  # Ice
+                'weight': {
+                    'type': 'gridvolume',
+                    'grid': ice_fraction_grid,
+                    'to_world': grid_transform,
+                    'wrap_mode': 'mirror'
+                }
+            }
+
+    elif use_mie_phase:
+        # Liquid-only with Mie scattering tables from Bouthors (2008)
         mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
         print(f"  Using Mie phase function (channel={mie_channel}, blend_weight={mie_blend_weight:.2f})")
 
@@ -422,7 +581,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
             }
         }
     else:
-        # Simple Henyey-Greenstein approximation
+        # Simple Henyey-Greenstein approximation (liquid-only)
         print(f"  Using Henyey-Greenstein phase function (g=0.85)")
         scene_dict['cloud']['interior']['phase'] = {
             'type': 'hg',
@@ -512,7 +671,8 @@ def render_view(
     dz: float,
     view_config: Dict,
     output_file: str,
-    checkpoint_spp: Optional[list] = None
+    checkpoint_spp: Optional[list] = None,
+    ice_fraction: np.ndarray = None
 ) -> np.ndarray:
     """
     Render a single view and save to file.
@@ -534,6 +694,8 @@ def render_view(
         Path to save rendered image
     checkpoint_spp : list of int, optional
         SPP values at which to save checkpoint images (e.g., [2, 32, 128, 512, 2048])
+    ice_fraction : ndarray, optional
+        Ice mass fraction field (0 = liquid, 1 = ice) for mixed-phase clouds
 
     Returns
     -------
@@ -549,17 +711,17 @@ def render_view(
         print("  Chromatic mode: rendering 3 monochrome channels (R, G, B) with wavelength-specific Mie phase")
         print("  (Enables coronas, halos, glories, and other chromatic scattering effects)")
         img_np = render_view_chromatic(sigma_ext, dx, dy, dz, view_config,
-                                        output_file, checkpoint_spp)
+                                        output_file, checkpoint_spp, ice_fraction)
     elif render_mode == 'mono':
         # Single monochrome render
         print("  Mono mode: single grayscale render with luminance-weighted Mie phase")
         img_np = render_view_mono(sigma_ext, dx, dy, dz, view_config,
-                                   output_file, checkpoint_spp)
+                                   output_file, checkpoint_spp, ice_fraction)
     else:  # 'rgb'
         # Single RGB render with averaged phase function
         print("  RGB mode: single RGB render with luminance-weighted Mie phase")
         img_np = render_view_single(sigma_ext, dx, dy, dz, view_config,
-                                     output_file, checkpoint_spp)
+                                     output_file, checkpoint_spp, ice_fraction)
 
     return img_np
 
@@ -571,7 +733,8 @@ def render_view_chromatic(
     dz: float,
     view_config: Dict,
     output_file: str,
-    checkpoint_spp: Optional[list] = None
+    checkpoint_spp: Optional[list] = None,
+    ice_fraction: np.ndarray = None
 ) -> np.ndarray:
     """
     Render RGB by rendering 3 separate monochrome channels with wavelength-dependent phase functions.
@@ -603,7 +766,8 @@ def render_view_chromatic(
             sigma_ext, dx, dy, dz,
             view_config_mono,
             spp=view_config['spp'],
-            mie_channel=channel
+            mie_channel=channel,
+            ice_fraction=ice_fraction
         )
         scenes.append(scene)
 
@@ -714,7 +878,8 @@ def render_view_mono(
     dz: float,
     view_config: Dict,
     output_file: str,
-    checkpoint_spp: Optional[list] = None
+    checkpoint_spp: Optional[list] = None,
+    ice_fraction: np.ndarray = None
 ) -> np.ndarray:
     """
     Render a single monochrome view with grayscale output.
@@ -737,7 +902,8 @@ def render_view_mono(
     scene = create_mitsuba_scene(
         sigma_ext, dx, dy, dz,
         view_config_mono,
-        spp=view_config['spp']
+        spp=view_config['spp'],
+        ice_fraction=ice_fraction
     )
 
     # Helper function to save checkpoint images
@@ -807,7 +973,8 @@ def render_view_single(
     dz: float,
     view_config: Dict,
     output_file: str,
-    checkpoint_spp: Optional[list] = None
+    checkpoint_spp: Optional[list] = None,
+    ice_fraction: np.ndarray = None
 ) -> np.ndarray:
     """
     Render a single RGB view with wavelength-averaged Mie phase function.
@@ -820,7 +987,8 @@ def render_view_single(
     scene = create_mitsuba_scene(
         sigma_ext, dx, dy, dz,
         view_config,
-        spp=view_config['spp']
+        spp=view_config['spp'],
+        ice_fraction=ice_fraction
     )
 
     # Helper function to save checkpoint images

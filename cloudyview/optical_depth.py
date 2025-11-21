@@ -85,11 +85,13 @@ def column_optical_depth(
     return col_od
 
 
-def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0) -> np.ndarray:
+def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
+                            iwc: np.ndarray = None, re_ice: float = 30.0) -> np.ndarray:
     """
-    Compute extinction coefficient field from liquid water content.
+    Compute extinction coefficient field from liquid and ice water content.
 
     Uses standard relationships for cloud optics with effective radius parameter.
+    Total extinction is the sum of liquid and ice contributions.
 
     Parameters
     ----------
@@ -98,12 +100,16 @@ def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0) -
     z : ndarray (nz,)
         Heights (m)
     re : float, optional
-        Effective radius (microns, default: 10.0)
+        Liquid effective radius (microns, default: 10.0)
+    iwc : ndarray (nx, ny, nz), optional
+        Ice water content (g/kg). If None, only liquid extinction is computed.
+    re_ice : float, optional
+        Ice effective radius (microns, default: 30.0)
 
     Returns
     -------
     sigma_ext : ndarray (nx, ny, nz)
-        Extinction coefficient (m^-1)
+        Total extinction coefficient (m^-1) from liquid + ice
     """
     # Atmospheric properties
     g, R, T = 9.81, 287.05, 280.0
@@ -114,13 +120,21 @@ def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0) -
     pressures = p0 * np.exp(-z / scale_height)
     rho_air = pressures / (R * T)
 
-    # LWC in g/m^3
+    # Liquid water contribution
     lwc_g_m3 = lwc * rho_air[np.newaxis, np.newaxis, :]
-
-    # Extinction coefficient
     rho_water = 1e6  # g/m³
-    r_eff_m = re * 1e-6  # Convert μm to m
-    sigma_ext = 1.5 * lwc_g_m3 / (rho_water * r_eff_m)
+    r_eff_liquid_m = re * 1e-6  # Convert μm to m
+    sigma_ext_liquid = 1.5 * lwc_g_m3 / (rho_water * r_eff_liquid_m)
+
+    # Ice water contribution (if present)
+    if iwc is not None:
+        iwc_g_m3 = iwc * rho_air[np.newaxis, np.newaxis, :]
+        rho_ice = 917e3  # g/m³ (ice density ~917 kg/m³)
+        r_eff_ice_m = re_ice * 1e-6  # Convert μm to m
+        sigma_ext_ice = 1.5 * iwc_g_m3 / (rho_ice * r_eff_ice_m)
+        sigma_ext = sigma_ext_liquid + sigma_ext_ice
+    else:
+        sigma_ext = sigma_ext_liquid
 
     return sigma_ext
 

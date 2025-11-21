@@ -127,9 +127,36 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         dy = float(y_coord[1] - y_coord[0]) if len(y_coord) > 1 else 1.0
         dz = float(z_coord[1] - z_coord[0]) if len(z_coord) > 1 else 1.0
 
+        # Process ice water content if present
+        iw_np = None
+        ice_fraction = None
+        has_ice = False
 
-        # Compute extinction coefficient
-        sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0)
+        if iw_data is not None:
+            iw_np = iw_data.values
+            if 'time' in iw_data.dims:
+                iw_np = iw_np[0]  # Remove time dimension if present
+
+            # Check if there's actually ice in the volume
+            if np.max(iw_np) > 1e-6:
+                has_ice = True
+                print(f"  Ice water content detected (max: {np.max(iw_np):.6f} g/kg)")
+
+                # Compute ice fraction (0 = liquid, 1 = ice)
+                # Avoid division by zero
+                total_water = lw_np + iw_np
+                ice_fraction = np.divide(iw_np, total_water,
+                                        out=np.zeros_like(iw_np),
+                                        where=total_water > 1e-10)
+            else:
+                print("  Ice water content negligible, using liquid-only rendering")
+                iw_np = None
+        else:
+            print("  No ice water content in dataset")
+
+        # Compute extinction coefficient (liquid + ice if present)
+        sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0,
+                                                          iwc=iw_np, re_ice=30.0)
 
         # Domain dimensions
         width_x = nx * dx
@@ -269,7 +296,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         output_file = output_dir / f"behold_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
         radiative_transfer.render_view(
             sigma_ext, dx, dy, dz, view_config, str(output_file),
-            checkpoint_spp=checkpoint_spp
+            checkpoint_spp=checkpoint_spp,
+            ice_fraction=ice_fraction
         )
 
         elapsed = time.perf_counter() - start_time
