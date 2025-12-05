@@ -18,7 +18,7 @@ import numpy as np
 from . import io, optical_depth, basic_render
 
 
-def main(filename: str, output: str = None) -> None:
+def main(filename: str, output: str = None, label_dirs: bool = False) -> None:
     """
     Main function for glimpse.py
 
@@ -28,6 +28,8 @@ def main(filename: str, output: str = None) -> None:
         Path to NetCDF file
     output : str, optional
         Output directory for plots (default: current directory)
+    label_dirs : bool, optional
+        If True, label N/S/W/E sections of domain (default: False)
     """
     print(f"CloudyView Glimpse: Loading {filename}")
 
@@ -94,7 +96,7 @@ def main(filename: str, output: str = None) -> None:
         # Plot opacity
         print("\nRendering top view...")
         od_path = output_dir / f"cloudyview_glimpse_top_view_{base_filename}.png"
-        basic_render.plot_optical_depth(opacity, output_path=str(od_path))
+        basic_render.plot_optical_depth(opacity, output_path=str(od_path), label_dirs=label_dirs)
 
         print("\n✓ Glimpse complete!")
         print(f"  Saved to {output_dir}")
@@ -125,9 +127,13 @@ def cli():
         "--output", "-o", default=".",
         help="Output directory for saving plots (default: current directory)"
     )
+    parser.add_argument(
+        "--label-dirs", action="store_true", default=False,
+        help="Label N/S/W/E sections of the domain (default: False)"
+    )
 
     args = parser.parse_args()
-    main(args.filename, args.output)
+    main(args.filename, args.output, args.label_dirs)
 
 
 if __name__ == "__main__":

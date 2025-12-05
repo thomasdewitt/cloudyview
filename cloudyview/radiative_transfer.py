@@ -129,9 +129,30 @@ def load_ice_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
     ice_mie_pf3_path = mie_dir / 'IceMiePF3_normalized.txt'
 
     if ice_mie0_path.exists() and ice_mie_pf3_path.exists():
-        # Load ice tables (same format as liquid)
+        # Load ice tables
         ice_mie0 = np.loadtxt(ice_mie0_path)
         ice_mie_pf3 = np.loadtxt(ice_mie_pf3_path)
+
+        # Handle channel selection for IceMie0
+        # Ice tables may have RGB columns (unlike liquid which is monochrome)
+        if ice_mie0.ndim == 2:
+            # RGB format - select channel
+            if channel == 'R':
+                ice_mie0_values = ice_mie0[:, 0]
+            elif channel == 'G':
+                ice_mie0_values = ice_mie0[:, 1]
+            elif channel == 'B':
+                ice_mie0_values = ice_mie0[:, 2]
+            elif channel == 'gray':
+                # Luminance weights: R=0.2126, G=0.7152, B=0.0722
+                ice_mie0_values = (0.2126 * ice_mie0[:, 0] +
+                                   0.7152 * ice_mie0[:, 1] +
+                                   0.0722 * ice_mie0[:, 2])
+            else:
+                raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
+        else:
+            # Monochrome format - use directly
+            ice_mie0_values = ice_mie0
 
         # Select channel for IceMiePF3 (RGB)
         if channel == 'R':
@@ -149,7 +170,7 @@ def load_ice_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
             raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
 
         # Convert to comma-separated strings for Mitsuba tabphase
-        ice_mie0_str = ','.join(map(str, ice_mie0))
+        ice_mie0_str = ','.join(map(str, ice_mie0_values))
         ice_mie_pf3_str = ','.join(map(str, ice_mie_pf3_values))
 
         return ice_mie0_str, ice_mie_pf3_str, False, None

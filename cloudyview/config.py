@@ -53,14 +53,14 @@ DEFAULT_WITNESS_CONFIG = {
 # Default configuration for behold (tier 3 - Mitsuba path tracing)
 DEFAULT_BEHOLD_CONFIG = {
     'camera': {
-        'position': [0.0, -0.75, -0.5],  # Ground level, south of center
-        'azimuth': 0.0,  # Looking east
-        'elevation': 45.0,  # Looking 45° up
+        'position': [0, -.99, -0.5], # x,y,z
+        'azimuth': 90.0, 
+        'elevation': 35.0, 
         'fov': 100.0,  # Field of view in degrees
     },
     'sun': {
-        'azimuth': 90.0,  # North
-        'elevation': 45.0,  # 45° above horizon
+        'azimuth': 70.0, 
+        'elevation': 55.0,  # 45° above horizon
     },
     'rendering': {
         'max_depth': 128,
@@ -73,7 +73,7 @@ DEFAULT_BEHOLD_CONFIG = {
         'ocean': {
             'enabled': True,
             'reflectance': [0.0392, 0.1098, 0.1490],  # Dark blue ocean
-            'height': -0.99,  # Just below ground plane
+            'height': -0.9999,  # Just above ground plane
         },
     }
 }

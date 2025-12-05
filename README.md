@@ -249,7 +249,9 @@ pip install -e ".[all]"
 
 ## Mie Phase Function Tables
 
-Behold uses pre-computed Mie scattering phase function tables for accurate cloud droplet scattering:
+Behold uses pre-computed Mie scattering phase function tables for accurate cloud scattering.
+
+### Liquid Water Droplets
 
 - **Mie0_normalized.txt**: Forward scattering peak (strongly forward-scattered component)
 - **MiePF3_normalized.txt**: Rest of phase function distribution (sideways and backward scattering, wavelength-dependent RGB values)
@@ -261,6 +263,21 @@ PhD Thesis, Université Grenoble I - Joseph Fourier
 https://theses.hal.science/tel-00319974
 
 The dual-table approach enables efficient importance sampling by separately handling the extremely strong forward peak and the much weaker sideways/backward scattering regions. The tables are blended with equal weighting (0.5) for optimal sampling.
+
+### Ice Crystals
+
+- **IceMie0_normalized.txt**: Forward scattering peak for ice crystals (RGB wavelength-dependent)
+- **IceMiePF3_normalized.txt**: Rest of phase function distribution for ice crystals (RGB wavelength-dependent)
+
+These tables are derived from:
+
+**Baum, B.A., Yang, P., Heymsfield, A.J., Bansemer, A., Cole, B.H., Merrelli, A., Schmitt, C., Wang, C. (2014)** - "Ice cloud single-scattering property models with the full phase matrix at wavelengths from 0.2 to 100 µm"
+*Journal of Quantitative Spectroscopy and Radiative Transfer*, 146, 123-139.
+https://www.sciencedirect.com/science/article/pii/S0022407314000867#ab0010
+
+Full ice scattering database downloaded from: http://download.ssec.wisc.edu/files/polarization_models/
+
+**Note**: The complete ice scattering data and processing scripts are located in `ice_models/`, which contains a script to reformat the original data and extract the phase functions needed for rendering.
 
 ## Author
 

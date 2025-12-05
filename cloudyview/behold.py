@@ -164,24 +164,6 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         height_z = nz * dz
         aspect_ratio = width_x / height_z
 
-        # Domain center at origin
-        domain_center = [0, 0, 0.5]
-        ar = aspect_ratio
-
-        # Camera position scaling based on FOV and domain width
-        # Cube spans [-ar, ar] x [-ar, ar] x [-1, 1], so width = 2*ar
-        # For a perspective camera: visible_width = 2 * distance * tan(fov/2)
-        # We want: domain_width = visible_width / margin
-        # So: distance = (margin * domain_width) / (2 * tan(fov/2))
-        fov_for_full_domain = 70.0  # degrees
-        boa_distance = (2 * ar) / (2 * np.tan(np.deg2rad(fov_for_full_domain / 2)))
-        # print(boa_distance)
-
-        # Place camera just above ocean plane but offset in +y to frame the scene
-        camera_height = -0.5  # inside the cube but above reflective ocean
-        # camera_origin = [0.0, ar , camera_height]
-        # camera_origin = [0.0, ar + boa_distance, camera_height]
-        camera_origin = [0.0, - ar * 3/4, camera_height]
 
         # Create output directory if needed
         if output:
@@ -203,10 +185,10 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
 
         # Map quality to resolution and spp
         quality_map = {
-            'min': {'resolution': (200, 400), 'spp': 1},
-            'low': {'resolution': (400, 200), 'spp': 32},
-            'medium': {'resolution': (800, 400), 'spp': 512},
-            'high': {'resolution': (1600, 800), 'spp': 4096}
+            'min': {'resolution': (150, 100), 'spp': 1},
+            'low': {'resolution': (300, 200), 'spp': 32},
+            'medium': {'resolution': (600, 400), 'spp': 512},
+            'high': {'resolution': (1200, 800), 'spp': 4096}
         }
         width, height = quality_map[quality]['resolution']
         spp = quality_map[quality]['spp']
@@ -220,8 +202,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         # Relative coords: ±1.0 = domain edge
         rel_pos = camera_config['position']
         camera_origin = [
-            rel_pos[0] * ar,  # x in Mitsuba normalized cube (±ar)
-            rel_pos[1] * ar,  # y in Mitsuba normalized cube (±ar)
+            rel_pos[0] * aspect_ratio,  # x in Mitsuba normalized cube (±ar)
+            rel_pos[1] * aspect_ratio,  # y in Mitsuba normalized cube (±ar)
             rel_pos[2]        # z in Mitsuba normalized cube (±1)
         ]
 
@@ -291,7 +273,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         view_config['sampler']['sample_count'] = view_config['spp']
 
         # Define checkpoint SPP values for progressive rendering
-        checkpoint_spp = [2, 32, 128, 512, 1028, 2048, 4096]
+        checkpoint_spp = [2, 32, 128, 512, 1028, 2048, 4096, 8192]
 
         output_file = output_dir / f"behold_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
         radiative_transfer.render_view(

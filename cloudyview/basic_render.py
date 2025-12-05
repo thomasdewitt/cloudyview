@@ -194,7 +194,8 @@ def plot_isosurface(
 def plot_optical_depth(
     optical_depth_2d: np.ndarray,
     output_path: Optional[str] = None,
-    cmap=None
+    cmap=None,
+    label_dirs: bool = False
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
     Plot 2D column optical depth from above.
@@ -207,6 +208,8 @@ def plot_optical_depth(
         Path to save figure (PNG). Required - no display.
     cmap : matplotlib.colors.Colormap, optional
         Colormap (default: cloud_colors, sky blue to white)
+    label_dirs : bool, optional
+        If True, label N/S/W/E sections of domain (default: False)
 
     Returns
     -------
@@ -225,6 +228,29 @@ def plot_optical_depth(
     # Plot with no axes/labels
     im = ax.imshow(optical_depth_2d, cmap=cmap, origin='lower', interpolation='nearest')
     ax.axis('off')
+
+    # Add directional labels if requested
+    if label_dirs:
+        ny, nx = optical_depth_2d.shape
+        # Font size scaled to image size (roughly 10% of domain width)
+        fontsize = max(12, int(nx / 10))
+        bbox_props = dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='black', linewidth=1.5)
+
+        # East (+x, right) - center right, very close to edge
+        ax.text(nx - 5, ny / 2, 'E', fontsize=fontsize, color='black',
+                ha='right', va='center', bbox=bbox_props, weight='bold')
+
+        # West (-x, left) - center left, very close to edge
+        ax.text(5, ny / 2, 'W', fontsize=fontsize, color='black',
+                ha='left', va='center', bbox=bbox_props, weight='bold')
+
+        # North (+y, top) - top center, very close to edge
+        ax.text(nx / 2, ny - 5, 'N', fontsize=fontsize, color='black',
+                ha='center', va='top', bbox=bbox_props, weight='bold')
+
+        # South (-y, bottom) - bottom center, very close to edge
+        ax.text(nx / 2, 5, 'S', fontsize=fontsize, color='black',
+                ha='center', va='bottom', bbox=bbox_props, weight='bold')
 
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
