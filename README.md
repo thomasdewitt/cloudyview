@@ -13,14 +13,17 @@ CloudyView provides three tiers of visualization capabilities for 3D cloud conde
 ## Coordinate System
 
 CloudyView uses the **meteorological convention**:
+
 - **East** = +x direction
 - **North** = +y direction
 - **Up** = +z direction
 
 Azimuth angles are measured counterclockwise from East:
+
 - 0° = East, 90° = North, 180° = West, 270° = South
 
 Elevation angles are measured from the horizon:
+
 - 0° = horizon, 90° = zenith, -90° = nadir
 
 ## Installation
@@ -59,6 +62,7 @@ witness example_cloud.nc
 Generates multiple 3D views (overhead, north oblique, west oblique) using PyVista isosurface rendering.
 
 Options:
+
 - `--interactive`: Export interactive HTML instead of PNG
 - `-n 10`: Number of isosurfaces (default: 10)
 - `--min-threshold 0.001 --max-threshold 1.0`: Optical depth range
@@ -72,21 +76,30 @@ behold example_cloud.nc llvm medium
 Generates photorealistic path-traced render using Mitsuba 3.
 
 Arguments:
+
 - `backend`: `llvm` (CPU) or `cuda` (GPU) - **required**
-- `quality`: `min`, `low`, `medium` (default), or `high`
+- `quality`: `min`, `low`, `medium` (default), `high`, or `custom`
 
 Quality tiers:
-- `min`: 200×400, spp=1 (instant preview)
-- `low`: 400×200, spp=32 (quick preview)
-- `medium`: 800×400, spp=512 (balanced, default)
-- `high`: 1600×800, spp=4096 (production quality)
+
+- `min`: 150×100, spp=1 (instant preview)
+- `low`: 300×200, spp=32 (quick preview)
+- `medium`: 600×400, spp=512 (balanced, default)
+- `high`: 1200×800, spp=4096 (production quality)
+- `custom`: User-specified spp, resolution, and max_depth/rr_depth
 
 Options:
+
 - `--output ./renders`: Output directory (default: current directory)
+- `--spp N`: Samples per pixel (for custom quality)
+- `--size W H`: Image dimensions in pixels (for custom quality)
+- `--max-depth N`: Maximum ray depth (for custom quality)
+- `--rr-depth N`: Russian roulette depth (for custom quality)
 
 ## Input Data Requirements
 
 NetCDF files must contain:
+
 - **Liquid water variable** (required): One of `qc`, `ql`, `LWC`, `cloud_liquid_water_mixing_ratio`, `liquid_water_content`, `q_liquid`, or `lwc`
 - **Ice water variable** (optional): One of `qi`, `qice`, `IWC`, `cloud_ice_mixing_ratio`, `ice_water_content`, `q_ice`, or `iwc`
 - **Spatial dimensions**: Must be 3D (e.g., x, y, z or lon, lat, height)
@@ -99,6 +112,7 @@ Witness and Behold can be configured via YAML files. Settings include camera pos
 ### Configuration File Locations
 
 CloudyView searches for configuration files in this order:
+
 1. `./cloudyview.yaml` (current directory)
 2. `~/.cloudyview.yaml` (home directory)
 3. Built-in defaults if no config file found
@@ -112,6 +126,7 @@ cp cloudyview.yaml.example cloudyview.yaml
 ```
 
 Then edit `cloudyview.yaml` to customize:
+
 - Camera positions (relative coordinates where ±1.0 = domain edge)
 - Sun azimuth and elevation
 - Rendering parameters (max depth, exposure, etc.)
@@ -164,6 +179,9 @@ behold cloud.nc cuda high --output ./final_renders
 
 # Quick GPU preview
 behold cloud.nc cuda low
+
+# Custom quality: 1024x768 at 256 spp with max_depth=64
+behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
 ```
 
 ## Module Structure
@@ -171,24 +189,29 @@ behold cloud.nc cuda low
 ### Core Modules
 
 - **`io.py`**: NetCDF file handling and data validation
+  
   - `load_data()`: Load NetCDF file with xarray
   - `infer_liquid_water()`: Auto-detect liquid water variable
   - `infer_ice_water()`: Auto-detect ice water variable
   - `load_and_validate()`: Complete data loading with validation
 
 - **`optical_depth.py`**: Optical depth calculations
+  
   - `compute_extinction_field()`: Compute extinction coefficient from water content
   - Supports variable vertical spacing
 
 - **`config.py`**: Configuration system
+  
   - `load_config()`: Load configuration from YAML file
   - `get_witness_config()`: Get witness configuration
   - `get_behold_config()`: Get behold configuration
 
 - **`basic_render.py`**: Matplotlib-based visualization
+  
   - Column optical depth visualization
 
 - **`radiative_transfer.py`**: Mitsuba 3 Monte Carlo path tracing
+  
   - `load_mie_phase_tables()`: Load Mie scattering phase functions
   - `render_view()`: Render a single view with Mitsuba
   - `look_at_world_up()`: Camera transform helper
@@ -203,11 +226,13 @@ behold cloud.nc cuda low
 ## Features
 
 ### Visualizations
+
 - **Glimpse**: 2D column optical depth visualization
 - **Witness**: Multiple 3D isosurface views with physically-based opacity
 - **Behold**: Photorealistic Monte Carlo path tracing with Mitsuba 3
 
 ### Data Handling
+
 - Automatic variable name inference (tries common naming conventions)
 - Comprehensive validation (checks dimensions, timestep count)
 - Support for both liquid and ice water phases
@@ -215,6 +240,7 @@ behold cloud.nc cuda low
 - Variable vertical spacing supported
 
 ### Radiative Transfer (Behold)
+
 - Full volumetric path tracing with Mitsuba 3
 - Physically-based Preetham sunsky model
 - Accurate Mie scattering from pre-computed phase functions
@@ -224,6 +250,7 @@ behold cloud.nc cuda low
 - Ocean surface with realistic reflections
 
 ### Configuration
+
 - YAML-based configuration system
 - Relative coordinate positioning
 - Multiple camera views for witness
@@ -232,6 +259,7 @@ behold cloud.nc cuda low
 ## Dependencies
 
 ### Core Dependencies
+
 - `numpy>=1.20`: Array operations
 - `matplotlib>=3.3`: 2D plotting
 - `xarray>=0.18`: NetCDF file handling with labeled arrays
@@ -239,10 +267,12 @@ behold cloud.nc cuda low
 - `pyyaml>=5.4`: Configuration file parsing
 
 ### Optional Dependencies
+
 - **For witness (3D isosurfaces)**: `pyvista>=0.37.0`
 - **For behold (photorealistic rendering)**: `mitsuba>=3.0.0`, `drjit>=0.3.0`
 
 Install all optional dependencies:
+
 ```bash
 pip install -e ".[all]"
 ```

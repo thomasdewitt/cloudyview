@@ -6,7 +6,9 @@ Usage:
     python behold.py <filename.nc> <backend> [quality] [--output <path>]
 
     backend: llvm or cuda (required)
-    quality: min (200x400), low (400x200), medium (800x400, default), high (1600x800)
+    quality: min (150x100), low (300x200), medium (600x400, default), high (1200x800), custom
+
+    For custom quality, use: --spp N --size W H --max-depth N --rr-depth N
 
 This script provides a realistic 3D view of your cloud data using:
 1. Optical depth calculation via extinction coefficient
@@ -34,7 +36,9 @@ import mitsuba as mi
 from . import io, radiative_transfer, optical_depth, config
 
 
-def main(filename: str, backend: str, quality: str = 'medium', output: str = None) -> None:
+def main(filename: str, backend: str, quality: str = 'medium', output: str = None,
+         custom_spp: int = None, custom_size: tuple = None,
+         custom_max_depth: int = None, custom_rr_depth: int = None) -> None:
     """
     Main function for behold.py
 
@@ -45,8 +49,9 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     backend : str
         Mitsuba backend: 'llvm' or 'cuda'
     quality : str
-        Render quality: 'min' (200x400, spp=1), 'low' (400x200),
-        'medium' (800x400, default), 'high' (1600x800)
+        Render quality: 'min' (150x100, spp=1), 'low' (300x200, spp=32),
+        'medium' (600x400, spp=512, default), 'high' (1200x800, spp=4096),
+        or 'custom' (user-specified via --spp, --size, --max-depth, --rr-depth)
     output : str, optional
         Output directory for renders
     """
@@ -62,7 +67,6 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     try:
         # Load and validate data with xarray
         data_dict = io.load_and_validate(filename)
-        ds = data_dict['dataset']
         lw_var = data_dict['liquid_water_var']
         lw_data = data_dict['liquid_water_data']
         iw_data = data_dict['ice_water_data']
@@ -190,8 +194,19 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             'medium': {'resolution': (600, 400), 'spp': 512},
             'high': {'resolution': (1200, 800), 'spp': 4096}
         }
-        width, height = quality_map[quality]['resolution']
-        spp = quality_map[quality]['spp']
+
+        if quality == 'custom':
+            # Use custom parameters (with sensible defaults)
+            width, height = custom_size if custom_size else (600, 400)
+            spp = custom_spp if custom_spp else 512
+            # Override config max_depth/rr_depth if custom values provided
+            if custom_max_depth is not None:
+                rendering_config['max_depth'] = custom_max_depth
+            if custom_rr_depth is not None:
+                rendering_config['rr_depth'] = custom_rr_depth
+        else:
+            width, height = quality_map[quality]['resolution']
+            spp = quality_map[quality]['spp']
 
         # Get camera settings from config (relative coordinates)
         camera_azimuth = camera_config['azimuth']
@@ -323,16 +338,42 @@ def cli():
         "quality",
         nargs='?',
         default='medium',
-        choices=['min', 'low', 'medium', 'high'],
-        help="Render quality: min (200x400, spp=1), low (400x200, spp=32), medium (800x400, spp=512, default), high (1600x800, spp=4096)"
+        choices=['min', 'low', 'medium', 'high', 'custom'],
+        help="Render quality: min (150x100, spp=1), low (300x200, spp=32), medium (600x400, spp=512, default), high (1200x800, spp=4096), custom (use --spp, --size, etc.)"
     )
     parser.add_argument(
         "--output", "-o",
         help="Output directory for saving renders (default: current directory)"
     )
+    parser.add_argument(
+        "--spp",
+        type=int,
+        help="Samples per pixel (for custom quality)"
+    )
+    parser.add_argument(
+        "--size",
+        type=int,
+        nargs=2,
+        metavar=('WIDTH', 'HEIGHT'),
+        help="Image size in pixels (for custom quality)"
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        help="Maximum ray depth (for custom quality)"
+    )
+    parser.add_argument(
+        "--rr-depth",
+        type=int,
+        help="Russian roulette depth (for custom quality)"
+    )
 
     args = parser.parse_args()
-    main(args.filename, args.backend, args.quality, args.output)
+    main(args.filename, args.backend, args.quality, args.output,
+         custom_spp=args.spp,
+         custom_size=tuple(args.size) if args.size else None,
+         custom_max_depth=args.max_depth,
+         custom_rr_depth=args.rr_depth)
 
 
 if __name__ == "__main__":
