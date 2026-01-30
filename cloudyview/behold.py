@@ -273,9 +273,9 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         view_config['sampler']['sample_count'] = view_config['spp']
 
         # Define checkpoint SPP values for progressive rendering
-        checkpoint_spp = [2, 32, 128, 512, 1028, 2048, 4096, 8192]
+        checkpoint_spp = [2, 32, 128, 512, 1024, 2048, 4096, 8192]
 
-        output_file = output_dir / f"behold_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}_spp={view_config['spp']}.png"
+        output_file = output_dir / f"behold_ground_view_max_depth={view_config['max_depth']}_rr_depth={view_config['rr_depth']}.png"
         radiative_transfer.render_view(
             sigma_ext, dx, dy, dz, view_config, str(output_file),
             checkpoint_spp=checkpoint_spp,
