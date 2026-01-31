@@ -10,14 +10,23 @@ Usage:
 
     For custom quality, use: --spp N --size W H --max-depth N --rr-depth N
 
+    Camera/sun options (override config file):
+        --camera-position X Y Z   Camera position in relative coords (±1.0 = domain edge)
+        --camera-azimuth DEG      Camera azimuth (0=East, 90=North, 180=West, 270=South)
+        --camera-elevation DEG    Camera elevation (angle above horizon)
+        --fov DEG                 Camera field of view
+        --sun-azimuth DEG         Sun azimuth (0=East, 90=North, 180=West, 270=South)
+        --sun-elevation DEG       Sun elevation (angle above horizon)
+
 This script provides a realistic 3D view of your cloud data using:
 1. Optical depth calculation via extinction coefficient
 2. Mitsuba 3 Monte Carlo path tracing with physically-based sky
 3. Accurate Mie scattering phase functions from Bouthors (2008)
-4. Configurable camera and sun positions via config file
+4. Configurable camera and sun positions via config file or CLI
 
 Configuration is loaded from cloudyview.yaml (current dir) or ~/.cloudyview.yaml
 Settings include camera position, sun angle, rendering parameters, etc.
+CLI arguments override config file values.
 
 Coordinate System (Meteorological Convention):
 - East  = +x direction
@@ -38,7 +47,10 @@ from . import io, radiative_transfer, optical_depth, config
 
 def main(filename: str, backend: str, quality: str = 'medium', output: str = None,
          custom_spp: int = None, custom_size: tuple = None,
-         custom_max_depth: int = None, custom_rr_depth: int = None) -> None:
+         custom_max_depth: int = None, custom_rr_depth: int = None,
+         camera_position: list = None, camera_azimuth: float = None,
+         camera_elevation: float = None, camera_fov: float = None,
+         sun_azimuth: float = None, sun_elevation: float = None) -> None:
     """
     Main function for behold.py
 
@@ -54,6 +66,18 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         or 'custom' (user-specified via --spp, --size, --max-depth, --rr-depth)
     output : str, optional
         Output directory for renders
+    camera_position : list, optional
+        Camera position [x, y, z] in relative coords (±1.0 = domain edge)
+    camera_azimuth : float, optional
+        Camera azimuth in degrees (0=East, 90=North, 180=West, 270=South)
+    camera_elevation : float, optional
+        Camera elevation in degrees (angle above horizon)
+    camera_fov : float, optional
+        Camera field of view in degrees
+    sun_azimuth : float, optional
+        Sun azimuth in degrees (0=East, 90=North, 180=West, 270=South)
+    sun_elevation : float, optional
+        Sun elevation in degrees (angle above horizon)
     """
     print(f"CloudyView Behold: Loading {filename}")
     start_time = time.perf_counter()
@@ -63,6 +87,22 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     camera_config = behold_config['camera']
     sun_config = behold_config['sun']
     rendering_config = behold_config['rendering']
+
+    # Apply CLI overrides to camera config
+    if camera_position is not None:
+        camera_config['position'] = list(camera_position)
+    if camera_azimuth is not None:
+        camera_config['azimuth'] = camera_azimuth
+    if camera_elevation is not None:
+        camera_config['elevation'] = camera_elevation
+    if camera_fov is not None:
+        camera_config['fov'] = camera_fov
+
+    # Apply CLI overrides to sun config
+    if sun_azimuth is not None:
+        sun_config['azimuth'] = sun_azimuth
+    if sun_elevation is not None:
+        sun_config['elevation'] = sun_elevation
 
     try:
         # Load and validate data with xarray
@@ -367,13 +407,51 @@ def cli():
         type=int,
         help="Russian roulette depth (for custom quality)"
     )
+    parser.add_argument(
+        "--camera-position",
+        type=float,
+        nargs=3,
+        metavar=('X', 'Y', 'Z'),
+        help="Camera position in relative coords (default: 0 -0.99 -0.5). ±1.0 = domain edge"
+    )
+    parser.add_argument(
+        "--camera-azimuth",
+        type=float,
+        help="Camera azimuth in degrees (default: 90). 0=East, 90=North, 180=West, 270=South"
+    )
+    parser.add_argument(
+        "--camera-elevation",
+        type=float,
+        help="Camera elevation in degrees (default: 35). Angle above horizon"
+    )
+    parser.add_argument(
+        "--fov",
+        type=float,
+        help="Camera field of view in degrees (default: 100)"
+    )
+    parser.add_argument(
+        "--sun-azimuth",
+        type=float,
+        help="Sun azimuth in degrees (default: 70). 0=East, 90=North, 180=West, 270=South"
+    )
+    parser.add_argument(
+        "--sun-elevation",
+        type=float,
+        help="Sun elevation in degrees (default: 55). Angle above horizon"
+    )
 
     args = parser.parse_args()
     main(args.filename, args.backend, args.quality, args.output,
          custom_spp=args.spp,
          custom_size=tuple(args.size) if args.size else None,
          custom_max_depth=args.max_depth,
-         custom_rr_depth=args.rr_depth)
+         custom_rr_depth=args.rr_depth,
+         camera_position=args.camera_position,
+         camera_azimuth=args.camera_azimuth,
+         camera_elevation=args.camera_elevation,
+         camera_fov=args.fov,
+         sun_azimuth=args.sun_azimuth,
+         sun_elevation=args.sun_elevation)
 
 
 if __name__ == "__main__":

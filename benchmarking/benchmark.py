@@ -6,13 +6,16 @@ Benchmarks behold render performance with different ray tracing parameters.
 Results are appended to benchmarking/results.md with hardware info and timestamps.
 
 Usage:
-    python benchmarking/benchmark.py
+    python benchmarking/benchmark.py          # Use CUDA (GPU) backend (default)
+    python benchmarking/benchmark.py --llvm   # Use LLVM (CPU) backend
 
 Test cases:
-    1. rr_depth=4, max_depth=8 (fast, lower quality)
-    2. rr_depth=64, max_depth=128 (slow, higher quality)
+    1. 400x300, rr_depth=4, max_depth=8 (fast, lower quality)
+    2. 400x300, rr_depth=64, max_depth=128 (higher quality)
+    3. 1600x1200, rr_depth=64, max_depth=128 (high resolution)
 """
 
+import argparse
 import os
 import platform
 import subprocess
@@ -27,6 +30,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import mitsuba as mi
 
 from cloudyview import behold
+
+# =============================================================================
+# BENCHMARK CONFIGURATION
+# =============================================================================
+# Modify these values to change the benchmark parameters
+
+# Data file (relative to project root)
+DATA_FILE = "data/TWPICE_subvolume_256x256_5km.nc"
+
+# Camera/sun settings (explicit defaults in case config changes)
+CAMERA_POSITION = [0, 0, -0.9]
+CAMERA_AZIMUTH = 90.0
+CAMERA_ELEVATION = 35.0
+CAMERA_FOV = 100.0
+SUN_AZIMUTH = 70.0
+SUN_ELEVATION = 55.0
+
+# Render settings
+BENCHMARK_SPP = 32
+
+# Test cases: each dict defines a benchmark scenario
+TEST_CASES = [
+    {'name': '400x300 Fast', 'resolution': (400, 300), 'rr_depth': 4, 'max_depth': 8},
+    {'name': '400x300 High Quality', 'resolution': (400, 300), 'rr_depth': 64, 'max_depth': 128},
+    {'name': '1600x1200 Fast', 'resolution': (1600, 1200), 'rr_depth': 4, 'max_depth': 8},
+]
+
+# =============================================================================
 
 
 def get_cpu_info() -> str:
@@ -77,23 +108,14 @@ def get_mitsuba_backends() -> str:
     return ", ".join(variants) if variants else "None"
 
 
-def detect_backend() -> str:
-    """Detect best available backend (cuda if available, else llvm)."""
-    variants = mi.variants()
-    for v in variants:
-        if 'cuda' in v:
-            return 'cuda'
-    return 'llvm'
-
-
 def run_benchmark(data_file: str, backend: str, rr_depth: int, max_depth: int,
-                  output_dir: Path) -> float:
+                  resolution: tuple, output_dir: Path) -> float:
     """
     Run a single benchmark case.
 
     Returns render time in seconds.
     """
-    print(f"\n--- Benchmark: rr_depth={rr_depth}, max_depth={max_depth} ---")
+    print(f"\n--- Benchmark: {resolution[0]}x{resolution[1]}, rr_depth={rr_depth}, max_depth={max_depth} ---")
 
     start = time.perf_counter()
 
@@ -102,10 +124,16 @@ def run_benchmark(data_file: str, backend: str, rr_depth: int, max_depth: int,
         backend=backend,
         quality='custom',
         output=str(output_dir),
-        custom_spp=2,
-        custom_size=(400, 400),
+        custom_spp=BENCHMARK_SPP,
+        custom_size=resolution,
         custom_max_depth=max_depth,
-        custom_rr_depth=rr_depth
+        custom_rr_depth=rr_depth,
+        camera_position=CAMERA_POSITION,
+        camera_azimuth=CAMERA_AZIMUTH,
+        camera_elevation=CAMERA_ELEVATION,
+        camera_fov=CAMERA_FOV,
+        sun_azimuth=SUN_AZIMUTH,
+        sun_elevation=SUN_ELEVATION,
     )
 
     elapsed = time.perf_counter() - start
@@ -114,54 +142,37 @@ def run_benchmark(data_file: str, backend: str, rr_depth: int, max_depth: int,
     return elapsed
 
 
-def append_results(results_file: Path, hardware_info: dict, benchmark_results: list):
-    """Append benchmark results to markdown file."""
+def write_result(results_file: Path, hardware_info: dict, result: dict):
+    """Write a single self-contained result entry to the results file."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Create file with header if it doesn't exist
+    # Create file with table header if it doesn't exist
     if not results_file.exists():
         with open(results_file, 'w') as f:
             f.write("# CloudyView Benchmark Results\n\n")
-            f.write("This file contains benchmark results for CloudyView behold renders.\n\n")
+            f.write("| Timestamp           | GPU                      | Backend | Test Case               | Resolution | rr_depth | max_depth | Time (s) |\n")
+            f.write("|---------------------|--------------------------|---------|-------------------------|------------|----------|-----------|----------|\n")
+
+    res = f"{result['resolution'][0]}x{result['resolution'][1]}"
 
     with open(results_file, 'a') as f:
-        f.write(f"---\n\n")
-        f.write(f"## {timestamp}\n\n")
+        f.write(f"| {timestamp:<19} | {hardware_info['gpu']:<24} | {hardware_info['backend']:<7} | {result['name']:<23} | {res:<10} | {result['rr_depth']:<8} | {result['max_depth']:<9} | {result['time']:>8.2f} |\n")
 
-        # Hardware info
-        f.write("### Hardware Configuration\n\n")
-        f.write(f"- **OS**: {hardware_info['os']}\n")
-        f.write(f"- **CPU**: {hardware_info['cpu']}\n")
-        f.write(f"- **GPU**: {hardware_info['gpu']}\n")
-        f.write(f"- **Memory**: {hardware_info['memory']}\n")
-        f.write(f"- **Backend**: {hardware_info['backend']}\n")
-        f.write(f"- **Mitsuba variants**: {hardware_info['mitsuba_variants']}\n\n")
 
-        # Test configuration
-        f.write("### Test Configuration\n\n")
-        f.write(f"- **Data file**: {hardware_info['data_file']}\n")
-        f.write(f"- **Resolution**: 400x400\n")
-        f.write(f"- **SPP**: 128\n\n")
-
-        # Results table
-        f.write("### Results\n\n")
-        f.write("| Test Case | rr_depth | max_depth | Time (s) |\n")
-        f.write("|-----------|----------|-----------|----------|\n")
-        for result in benchmark_results:
-            f.write(f"| {result['name']} | {result['rr_depth']} | {result['max_depth']} | {result['time']:.2f} |\n")
-        f.write("\n")
-
-        # Speedup calculation
-        if len(benchmark_results) >= 2:
-            fast_time = benchmark_results[0]['time']
-            slow_time = benchmark_results[1]['time']
-            if fast_time > 0:
-                speedup = slow_time / fast_time
-                f.write(f"**Speedup (fast vs slow)**: {speedup:.2f}x\n\n")
 
 
 def main():
     """Run the benchmark suite."""
+    parser = argparse.ArgumentParser(description="CloudyView Benchmark Script")
+    parser.add_argument(
+        "--llvm",
+        action="store_true",
+        help="Use LLVM (CPU) backend instead of CUDA (GPU)"
+    )
+    args = parser.parse_args()
+
+    backend = 'llvm' if args.llvm else 'cuda'
+
     print("=" * 60)
     print("CloudyView Benchmark")
     print("=" * 60)
@@ -169,7 +180,7 @@ def main():
     # Paths
     script_dir = Path(__file__).parent
     project_dir = script_dir.parent
-    data_file = project_dir / "data" / "QC_FIF_Square_512,512,256.nc"
+    data_file = project_dir / DATA_FILE
     output_dir = script_dir / "output"
     results_file = script_dir / "results.md"
 
@@ -183,7 +194,6 @@ def main():
 
     # Gather hardware info
     print("\nGathering hardware information...")
-    backend = detect_backend()
 
     hardware_info = {
         'os': f"{platform.system()} {platform.release()}",
@@ -202,51 +212,44 @@ def main():
     print(f"  Backend: {backend}")
     print(f"  Mitsuba variants: {hardware_info['mitsuba_variants']}")
 
-    # Define benchmark cases
-    test_cases = [
-        {'name': 'Fast (lower quality)', 'rr_depth': 4, 'max_depth': 8},
-        {'name': 'Slow (higher quality)', 'rr_depth': 64, 'max_depth': 128},
-    ]
-
     # Run benchmarks
     print("\n" + "=" * 60)
     print("Running benchmarks...")
     print("=" * 60)
 
+    print(f"Results will be saved to: {results_file}")
+
     benchmark_results = []
-    for case in test_cases:
+    for case in TEST_CASES:
         elapsed = run_benchmark(
             data_file=str(data_file),
             backend=backend,
             rr_depth=case['rr_depth'],
             max_depth=case['max_depth'],
+            resolution=case['resolution'],
             output_dir=output_dir
         )
-        benchmark_results.append({
+        result = {
             'name': case['name'],
+            'resolution': case['resolution'],
             'rr_depth': case['rr_depth'],
             'max_depth': case['max_depth'],
             'time': elapsed
-        })
+        }
+        benchmark_results.append(result)
 
-    # Save results
-    print("\n" + "=" * 60)
-    print("Saving results...")
-    print("=" * 60)
+        # Save this result immediately (self-contained row)
+        write_result(results_file, hardware_info, result)
 
-    append_results(results_file, hardware_info, benchmark_results)
-    print(f"Results appended to: {results_file}")
+    print(f"\nResults saved to: {results_file}")
 
     # Summary
     print("\n" + "=" * 60)
     print("Benchmark Summary")
     print("=" * 60)
     for result in benchmark_results:
-        print(f"  {result['name']}: {result['time']:.2f}s")
-
-    if len(benchmark_results) >= 2:
-        speedup = benchmark_results[1]['time'] / benchmark_results[0]['time']
-        print(f"\n  Speedup (fast vs slow): {speedup:.2f}x")
+        res = f"{result['resolution'][0]}x{result['resolution'][1]}"
+        print(f"  {result['name']} ({res}): {result['time']:.2f}s")
 
 
 if __name__ == "__main__":

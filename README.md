@@ -90,11 +90,21 @@ Quality tiers:
 
 Options:
 
-- `--output ./renders`: Output directory (default: current directory)
-- `--spp N`: Samples per pixel (for custom quality)
-- `--size W H`: Image dimensions in pixels (for custom quality)
-- `--max-depth N`: Maximum ray depth (for custom quality)
-- `--rr-depth N`: Russian roulette depth (for custom quality)
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--output`, `-o` | `.` | Output directory for renders |
+| `--spp N` | varies | Samples per pixel (for custom quality) |
+| `--size W H` | varies | Image dimensions in pixels (for custom quality) |
+| `--max-depth N` | `128` | Maximum ray bounce depth (for custom quality) |
+| `--rr-depth N` | `64` | Russian roulette depth (for custom quality) |
+| `--camera-position X Y Z` | `0 -0.99 -0.5` | Camera position in relative coords (±1.0 = domain edge) |
+| `--camera-azimuth` | `90` | Camera view azimuth in degrees (0=E, 90=N, 180=W, 270=S) |
+| `--camera-elevation` | `35` | Camera view elevation in degrees (angle above horizon) |
+| `--fov` | `100` | Camera field of view in degrees |
+| `--sun-azimuth` | `70` | Sun azimuth in degrees (0=E, 90=N, 180=W, 270=S) |
+| `--sun-elevation` | `55` | Sun elevation in degrees (angle above horizon) |
+
+Camera and sun arguments override values from the config file.
 
 ## Input Data Requirements
 

@@ -309,10 +309,16 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
         pct = 100.0 * taken / spp_total
         elapsed_str = _fmt_eta(elapsed)
         eta_str = _fmt_eta(eta)
-        print(f"\r  {pct:3.0f}% | {taken}/{spp_total} spp | Elapsed: {elapsed_str} | ETA: {eta_str}",
-              end="", flush=True)
+        try:
+            print(f"\r  {pct:3.0f}% | {taken}/{spp_total} spp | Elapsed: {elapsed_str} | ETA: {eta_str}",
+                  end="", flush=True)
+        except OSError:
+            pass  # Ignore NFS stale file handle errors
 
-    print()  # newline after finishing
+    try:
+        print()  # newline after finishing
+    except OSError:
+        pass
     return acc / taken
 
 

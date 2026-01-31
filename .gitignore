@@ -143,3 +143,12 @@ dmypy.json
 results/
 plots/
 output/
+
+# Benchmark results (machine-specific)
+benchmarking/results.md
+benchmarking/output/
+
+# SLURM output files
+*.out
+*.err
+*.gpulog
