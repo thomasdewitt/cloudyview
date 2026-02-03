@@ -229,7 +229,7 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
     spp_total : int
         Total samples per pixel
     step_spp : int
-        Samples per rendering step
+        Samples per rendering step (also controls progress print frequency)
     seed : int
         Random seed
     checkpoint_config : dict, optional
@@ -800,7 +800,7 @@ def render_view_chromatic(
 
     # Progressive rendering setup
     spp_total = view_config['spp']
-    step_spp = 16
+    step_spp = view_config.get('progress_interval', 16)
     seed = view_config.get('seed', 0)
 
     # Accumulate samples for each channel
@@ -963,7 +963,7 @@ def render_view_mono(
         }
 
     # Render
-    step = 2
+    step = view_config.get('progress_interval', 2)
     image = render_with_progress(scene,
                                 spp_total=view_config['spp'],
                                 step_spp=step,
@@ -1049,7 +1049,7 @@ def render_view_single(
         }
 
     # Render
-    step = 2
+    step = view_config.get('progress_interval', 2)
     image = render_with_progress(scene,
                                 spp_total=view_config['spp'],
                                 step_spp=step,

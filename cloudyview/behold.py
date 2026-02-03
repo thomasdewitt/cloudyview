@@ -50,7 +50,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
          custom_max_depth: int = None, custom_rr_depth: int = None,
          camera_position: list = None, camera_azimuth: float = None,
          camera_elevation: float = None, camera_fov: float = None,
-         sun_azimuth: float = None, sun_elevation: float = None) -> None:
+         sun_azimuth: float = None, sun_elevation: float = None,
+         progress_interval: int = None) -> None:
     """
     Main function for behold.py
 
@@ -78,6 +79,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         Sun azimuth in degrees (0=East, 90=North, 180=West, 270=South)
     sun_elevation : float, optional
         Sun elevation in degrees (angle above horizon)
+    progress_interval : int, optional
+        Print progress every N samples (default: 2 for rgb/mono, 16 for chromatic)
     """
     print(f"CloudyView Behold: Loading {filename}")
     start_time = time.perf_counter()
@@ -318,6 +321,10 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             'render_mode': render_mode,
         }
 
+        # Add progress_interval if specified
+        if progress_interval is not None:
+            view_config['progress_interval'] = progress_interval
+
         # Sobol prefers power-of-two spp; adjust if necessary
         samples = view_config['spp']
         next_pow2 = 1 << (samples - 1).bit_length()
@@ -439,6 +446,11 @@ def cli():
         type=float,
         help="Sun elevation in degrees (default: 55). Angle above horizon"
     )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        help="Print progress every N samples (default: 2 for rgb/mono, 16 for chromatic)"
+    )
 
     args = parser.parse_args()
     main(args.filename, args.backend, args.quality, args.output,
@@ -451,7 +463,8 @@ def cli():
          camera_elevation=args.camera_elevation,
          camera_fov=args.fov,
          sun_azimuth=args.sun_azimuth,
-         sun_elevation=args.sun_elevation)
+         sun_elevation=args.sun_elevation,
+         progress_interval=args.progress_interval)
 
 
 if __name__ == "__main__":
