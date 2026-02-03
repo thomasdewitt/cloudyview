@@ -102,12 +102,6 @@ def get_memory_info() -> str:
         return "psutil not installed"
 
 
-def get_mitsuba_backends() -> str:
-    """Get available Mitsuba backends."""
-    variants = mi.variants()
-    return ", ".join(variants) if variants else "None"
-
-
 def run_benchmark(data_file: str, backend: str, rr_depth: int, max_depth: int,
                   resolution: tuple, output_dir: Path) -> float:
     """
@@ -146,17 +140,40 @@ def write_result(results_file: Path, hardware_info: dict, result: dict):
     """Write a single self-contained result entry to the results file."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Create file with table header if it doesn't exist
+    # Create file with header if it doesn't exist
     if not results_file.exists():
         with open(results_file, 'w') as f:
             f.write("# CloudyView Benchmark Results\n\n")
-            f.write("| Timestamp           | GPU                      | Backend | Test Case               | Resolution | rr_depth | max_depth | Time (s) |\n")
-            f.write("|---------------------|--------------------------|---------|-------------------------|------------|----------|-----------|----------|\n")
 
     res = f"{result['resolution'][0]}x{result['resolution'][1]}"
 
     with open(results_file, 'a') as f:
-        f.write(f"| {timestamp:<19} | {hardware_info['gpu']:<24} | {hardware_info['backend']:<7} | {result['name']:<23} | {res:<10} | {result['rr_depth']:<8} | {result['max_depth']:<9} | {result['time']:>8.2f} |\n")
+        f.write(f"---\n\n")
+        f.write(f"## {timestamp} - {result['name']}\n\n")
+
+        # Hardware info
+        f.write("### Hardware\n\n")
+        f.write(f"- **OS**: {hardware_info['os']}\n")
+        f.write(f"- **CPU**: {hardware_info['cpu']}\n")
+        f.write(f"- **GPU**: {hardware_info['gpu']}\n")
+        f.write(f"- **Memory**: {hardware_info['memory']}\n")
+        f.write(f"- **Backend**: {hardware_info['backend']}\n\n")
+
+        # Test configuration
+        f.write("### Configuration\n\n")
+        f.write(f"- **Data file**: {hardware_info['data_file']}\n")
+        f.write(f"- **Resolution**: {res}\n")
+        f.write(f"- **SPP**: {BENCHMARK_SPP}\n")
+        f.write(f"- **rr_depth**: {result['rr_depth']}\n")
+        f.write(f"- **max_depth**: {result['max_depth']}\n")
+        f.write(f"- **Camera position**: {CAMERA_POSITION}\n")
+        f.write(f"- **Camera azimuth/elevation**: {CAMERA_AZIMUTH}° / {CAMERA_ELEVATION}°\n")
+        f.write(f"- **Camera FOV**: {CAMERA_FOV}°\n")
+        f.write(f"- **Sun azimuth/elevation**: {SUN_AZIMUTH}° / {SUN_ELEVATION}°\n\n")
+
+        # Result
+        f.write(f"### Result\n\n")
+        f.write(f"**Time: {result['time']:.2f} seconds**\n\n")
 
 
 
@@ -201,7 +218,6 @@ def main():
         'gpu': get_gpu_info(),
         'memory': get_memory_info(),
         'backend': backend,
-        'mitsuba_variants': get_mitsuba_backends(),
         'data_file': data_file.name
     }
 
@@ -210,7 +226,6 @@ def main():
     print(f"  GPU: {hardware_info['gpu']}")
     print(f"  Memory: {hardware_info['memory']}")
     print(f"  Backend: {backend}")
-    print(f"  Mitsuba variants: {hardware_info['mitsuba_variants']}")
 
     # Run benchmarks
     print("\n" + "=" * 60)
