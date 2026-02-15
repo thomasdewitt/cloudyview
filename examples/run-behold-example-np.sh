@@ -1,16 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=ray_tracing
+#SBATCH --job-name=behold_example
 #SBATCH --time=2-00:00:00              # Adjust as needed
 #SBATCH --nodes=1
-#SBATCH --ntasks=1                   # Single task for Python script
-#SBATCH --cpus-per-task=1            # Cores for parallel CPU work if needed
-#SBATCH --mem=8G                    # Adjust based on scene complexity
+#SBATCH --ntasks=1                     # Single task for behold CLI
+#SBATCH --cpus-per-task=1              # Cores for parallel CPU work if needed
+#SBATCH --mem=8G                       # Adjust based on scene complexity
 
-##SBATCH --partition=kingspeak-gpu
+#SBATCH --partition=kingspeak-gpu
 ##SBATCH --qos=kingspeak-gpu
 ##SBATCH --account=kingspeak-gpu
-##SBATCH --gres=gpu:1          # Any GPU on that partition
-
+##SBATCH --gres=gpu:1                  # Any GPU on that partition
 
 # Option 2: A40 on notchpeak
 ##SBATCH --partition=notchpeak-gpu
@@ -32,24 +31,28 @@
 
 #SBATCH --error=slurm-%j.err
 
+set -eo pipefail
+
+
+DATA_FILE="../data/TWPICE_subvolume_256x256_5km.nc"
+
 # Load miniconda module
 module use ~/mymodules
 module load miniconda3
 
 # Hardcode conda base path from your env list
 source /uufs/chpc.utah.edu/common/home/u1020524/software/pkg/miniconda3/etc/profile.d/conda.sh
+# Some conda activate hooks reference optional vars (e.g., PROJ_LIB) that may be unset.
+set +u
 conda activate base
-
-
-
+set -u
 
 # Debug: show what we're using
 echo "Python in job: $(which python)"
 echo "Behold in job: $(which behold)"
 
-
 # Set working directory
-cd /uufs/chpc.utah.edu/common/home/u1020524/cloudyview/benchmarking/
+cd /uufs/chpc.utah.edu/common/home/u1020524/cloudyview/examples/
 
 # Verify GPU allocation
 echo "Job started on $(date)"
@@ -58,21 +61,30 @@ echo "Job ID: $SLURM_JOBID"
 echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
 echo ""
 
-# Check GPU detection
+# Check GPU detection when using CUDA backend
 if command -v nvidia-smi &> /dev/null; then
     echo "GPU Information:"
     nvidia-smi -L
     echo ""
-    echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
     echo ""
 else
-    echo "ERROR: nvidia-smi not found!"
+    echo "ERROR: nvidia-smi not found but backend is cuda!"
     exit 1
 fi
 
 
-
-# Run your Python ray tracing script
-python benchmark.py
+behold "$DATA_FILE" cuda custom \
+    --output . \
+    --size 600 400 \
+    --spp 2048 \
+    --max-depth 128 \
+    --rr-depth 32 \
+    --camera-position 0 0 -0.9 \
+    --camera-azimuth 90 \
+    --camera-elevation 35 \
+    --fov 100 \
+    --sun-azimuth 70 \
+    --sun-elevation 55
 
 echo "Job completed on $(date)"

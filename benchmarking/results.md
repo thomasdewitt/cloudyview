@@ -336,3 +336,86 @@ This file contains benchmark results for CloudyView behold renders.
 ### Result
 
 **Time: 12384.13 seconds**
+---
+
+## 2026-02-14 08:34:32 - 400x300 Fast
+
+### Hardware
+
+- **OS**: Linux 4.18.0-553.89.1.el8_10.x86_64
+- **CPU**: x86_64 (128 cores)
+- **GPU**: NVIDIA RTX 6000 Ada Generation (47 GB)
+- **Memory**: 2015.3 GB total
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 400x300
+- **SPP**: 32
+- **rr_depth**: 4
+- **max_depth**: 8
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 58.84 seconds**
+
+---
+
+## 2026-02-14 08:41:36 - 400x300 High Quality
+
+### Hardware
+
+- **OS**: Linux 4.18.0-553.89.1.el8_10.x86_64
+- **CPU**: x86_64 (128 cores)
+- **GPU**: NVIDIA RTX 6000 Ada Generation (47 GB)
+- **Memory**: 2015.3 GB total
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 400x300
+- **SPP**: 32
+- **rr_depth**: 64
+- **max_depth**: 128
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 424.32 seconds**
+
+---
+
+## 2026-02-14 08:55:20 - 1600x1200 Fast
+
+### Hardware
+
+- **OS**: Linux 4.18.0-553.89.1.el8_10.x86_64
+- **CPU**: x86_64 (128 cores)
+- **GPU**: NVIDIA RTX 6000 Ada Generation (47 GB)
+- **Memory**: 2015.3 GB total
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 1600x1200
+- **SPP**: 32
+- **rr_depth**: 4
+- **max_depth**: 8
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 823.99 seconds**
