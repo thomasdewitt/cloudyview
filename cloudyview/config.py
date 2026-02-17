@@ -21,31 +21,29 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 
-# Default configuration for witness (tier 2 - PyVista rendering)
+# Default configuration for witness (tier 2 - volume ray marching)
 DEFAULT_WITNESS_CONFIG = {
-    'camera_views': {
-        # Overhead view looking down
-        'overhead': {
-            'position': [0.0, 0.0, 2.0],  # Above center
-            'azimuth': 0.0,  # Look direction doesn't matter much
-            'elevation': -85.0,  # Almost straight down
-        },
-        # North oblique - from NW looking SE
-        'north_oblique': {
-            'position': [-0.5, 0.8, 0.8],  # NW and elevated
-            'azimuth': 135.0,  # Looking toward SE
-            'elevation': -30.0,  # 30° below horizon
-        },
-        # West oblique - from SW looking NE
-        'west_oblique': {
-            'position': [-0.8, -0.5, 0.8],  # SW and elevated
-            'azimuth': 45.0,  # Looking toward NE
-            'elevation': -30.0,  # 30° below horizon
-        },
+    'camera': {
+        'position': [0, 0, -0.9],  # x,y,z in relative coords (±1.0 = domain edge)
+        'azimuth': 90.0,  # 0=East, 90=North
+        'elevation': 35.0,  # angle above horizon
+        'fov': 100.0,  # field of view in degrees
     },
     'sun': {
         'azimuth': 70.0,  # degrees from east
-        'elevation': 45.0,  # degrees above horizon
+        'elevation': 55.0,  # degrees above horizon
+    },
+    'rendering': {
+        'width': 600,
+        'height': 400,
+        'n_light_steps': 64,
+        'exposure': 4.0,
+        'extinction_multiplier': 1.0,
+        'ocean': {
+            'enabled': True,
+            'reflectance': [0.0392, 0.1098, 0.1490],
+            'height': -0.9999,
+        },
     }
 }
 
