@@ -139,14 +139,14 @@ def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataA
     Raises
     ------
     ValueError
-        If units are not g/kg or g/g, or if units attribute is missing
+        If units are not g/kg, g/g, or kg/kg, or if units attribute is missing
     """
     # Get units attribute
     units = data_array.attrs.get('units', None)
 
     if units is None:
         raise ValueError(f"Variable {var_name} has no 'units' attribute. "
-                        "Units must be specified as 'g/kg' or 'g/g'.")
+                        "Units must be specified as 'g/kg', 'g/g', or 'kg/kg'.")
 
     # Normalize units string (strip whitespace, handle case variations)
     units_normalized = units.strip().lower()
@@ -154,14 +154,14 @@ def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataA
     if units_normalized == 'g/kg':
         # Already in correct units
         return data_array
-    elif units_normalized == 'g/g':
-        # Convert from g/g to g/kg (multiply by 1000)
+    elif units_normalized == 'g/g' or units_normalized == 'kg/kg':
+        # Convert from g/g or kg/kg to g/kg (multiply by 1000)
         data_array = data_array * 1000.0
         data_array.attrs['units'] = 'g/kg'
         return data_array
     else:
         raise ValueError(f"Variable {var_name} has unsupported units: {units}. "
-                        "Expected 'g/kg' or 'g/g'.")
+                        "Expected 'g/kg', 'g/g', or 'kg/kg'.")
 
 
 def standardize_dims(data_array: xr.DataArray) -> xr.DataArray:
