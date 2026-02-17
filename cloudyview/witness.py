@@ -32,18 +32,7 @@ import numpy as np
 
 from . import io, optical_depth, config
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-except ImportError:
-    HAS_NUMBA = False
-    def njit(*args, **kwargs):
-        def wrapper(func):
-            return func
-        if len(args) == 1 and callable(args[0]):
-            return args[0]
-        return wrapper
-    prange = range
+from numba import njit, prange
 
 
 # ============================================================================
@@ -642,22 +631,21 @@ def main(filename: str, output: str = None,
         image = np.zeros((img_h, img_w, 3), dtype=np.float64)
 
         # Warmup numba compilation
-        if HAS_NUMBA:
-            print("  Compiling render kernel (first run only)...", end="", flush=True)
-            warmup = np.zeros((1, 1, 3), dtype=np.float64)
-            _render_image(sigma_world, nx_d, ny_d, nz_d, ar,
-                          cam_origin[0], cam_origin[1], cam_origin[2],
-                          forward[0], forward[1], forward[2],
-                          right[0], right[1], right[2],
-                          up[0], up[1], up[2],
-                          sun_dir[0], sun_dir[1], sun_dir[2],
-                          1, 1, tan_half_fov,
-                          4, sun_color[0], sun_color[1], sun_color[2],
-                          g_hg, ambient_strength,
-                          ocean_enabled, ocean_height,
-                          ocean_ref[0], ocean_ref[1], ocean_ref[2],
-                          warmup)
-            print(" done")
+        print("  Compiling render kernel (first run only)...", end="", flush=True)
+        warmup = np.zeros((1, 1, 3), dtype=np.float64)
+        _render_image(sigma_world, nx_d, ny_d, nz_d, ar,
+                      cam_origin[0], cam_origin[1], cam_origin[2],
+                      forward[0], forward[1], forward[2],
+                      right[0], right[1], right[2],
+                      up[0], up[1], up[2],
+                      sun_dir[0], sun_dir[1], sun_dir[2],
+                      1, 1, tan_half_fov,
+                      4, sun_color[0], sun_color[1], sun_color[2],
+                      g_hg, ambient_strength,
+                      ocean_enabled, ocean_height,
+                      ocean_ref[0], ocean_ref[1], ocean_ref[2],
+                      warmup)
+        print(" done")
 
         # Render
         print("  Rendering...", end="", flush=True)
