@@ -22,11 +22,10 @@ This script provides a realistic 3D view of your cloud data using:
 1. Optical depth calculation via extinction coefficient
 2. Mitsuba 3 Monte Carlo path tracing with physically-based sky
 3. Accurate Mie scattering phase functions from Bouthors (2008)
-4. Configurable camera and sun positions via config file or CLI
+4. Configurable camera and sun positions via defaults + CLI overrides
 
-Configuration is loaded from cloudyview.yaml (current dir) or ~/.cloudyview.yaml
-Settings include camera position, sun angle, rendering parameters, etc.
-CLI arguments override config file values.
+Rendering uses built-in default settings from config.py.
+CLI arguments override those defaults.
 
 Coordinate System (Meteorological Convention):
 - East  = +x direction
@@ -39,7 +38,6 @@ import sys
 import time
 from pathlib import Path
 import numpy as np
-import netCDF4 as nc
 import mitsuba as mi
 
 from . import io, radiative_transfer, optical_depth, config
@@ -110,69 +108,31 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     try:
         # Load and validate data with xarray
         data_dict = io.load_and_validate(filename)
-        lw_var = data_dict['liquid_water_var']
         lw_data = data_dict['liquid_water_data']
         iw_data = data_dict['ice_water_data']
-
-
-        # Get coordinates from data or dataset
-        if hasattr(lw_data, 'coords'):
-            dims = lw_data.dims
-            x_coord = None
-            y_coord = None
-            z_coord = None
-
-            # Try to find coordinate arrays
-            for coord_name in ['x', 'lon', 'longitude']:
-                if coord_name in lw_data.coords:
-                    x_coord = lw_data.coords[coord_name].values
-                    break
-
-            for coord_name in ['y', 'lat', 'latitude']:
-                if coord_name in lw_data.coords:
-                    y_coord = lw_data.coords[coord_name].values
-                    break
-
-            for coord_name in ['z', 'height', 'altitude', 'level']:
-                if coord_name in lw_data.coords:
-                    z_coord = lw_data.coords[coord_name].values
-                    break
-
-        # Fallback: try to load from NetCDF directly for SAM format
+        x_coord = data_dict.get('x_coord')
+        y_coord = data_dict.get('y_coord')
+        z_coord = data_dict.get('z_coord')
         if x_coord is None or y_coord is None or z_coord is None:
-            print("  Using NetCDF direct access for coordinates...")
-            ds_nc = nc.Dataset(filename, 'r')
-            try:
-                x_coord = ds_nc.variables.get('x', None)
-                y_coord = ds_nc.variables.get('y', None)
-                z_coord = ds_nc.variables.get('z', None)
+            raise ValueError(
+                "Missing x/y/z coordinate arrays in validated dataset; "
+                "cannot render behold view."
+            )
 
-                if x_coord is not None:
-                    x_coord = x_coord[:]
-                if y_coord is not None:
-                    y_coord = y_coord[:]
-                if z_coord is not None:
-                    z_coord = z_coord[:]
-            finally:
-                ds_nc.close()
-
-        # Create default coordinates if still missing
         lw_np = lw_data.values
         if 'time' in lw_data.dims:
             lw_np = lw_np[0]  # Remove time dimension if present
 
         nx, ny, nz = lw_np.shape
-        if x_coord is None:
-            x_coord = np.arange(nx)
-        if y_coord is None:
-            y_coord = np.arange(ny)
-        if z_coord is None:
-            z_coord = np.arange(nz)
+        if len(x_coord) < 2 or len(y_coord) < 2 or len(z_coord) < 2:
+            raise ValueError(
+                "x/y/z coordinates must each contain at least 2 points to determine grid spacing."
+            )
 
         # Calculate grid spacing
-        dx = float(x_coord[1] - x_coord[0]) if len(x_coord) > 1 else 1.0
-        dy = float(y_coord[1] - y_coord[0]) if len(y_coord) > 1 else 1.0
-        dz = float(z_coord[1] - z_coord[0]) if len(z_coord) > 1 else 1.0
+        dx = float(x_coord[1] - x_coord[0])
+        dy = float(y_coord[1] - y_coord[0])
+        dz = float(z_coord[1] - z_coord[0])
 
         # Process ice water content if present
         iw_np = None
@@ -316,7 +276,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             'integrator': rendering_config['integrator'],
             'max_depth': rendering_config['max_depth'],
             'rr_depth': rendering_config['rr_depth'],
-            'sampler': {'type': 'independent'},
+            'sampler': {'type': 'independent', 'sample_count': spp},
             'seed': 0,
             'render_mode': render_mode,
         }
@@ -324,15 +284,6 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         # Add progress_interval if specified
         if progress_interval is not None:
             view_config['progress_interval'] = progress_interval
-
-        # Sobol prefers power-of-two spp; adjust if necessary
-        samples = view_config['spp']
-        next_pow2 = 1 << (samples - 1).bit_length()
-        if next_pow2 != samples:
-            print(f"  Adjusting spp from {samples} to {next_pow2} for Sobol sampler")
-            view_config['spp'] = next_pow2
-
-        view_config['sampler']['sample_count'] = view_config['spp']
 
         # Define checkpoint SPP values for progressive rendering
         checkpoint_spp = [2, 32, 128, 512, 1024, 2048, 4096, 8192]

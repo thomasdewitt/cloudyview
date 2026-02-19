@@ -39,20 +39,15 @@ def main(filename: str, output: str = None, label_dirs: bool = False) -> None:
 
         # Load and validate data
         data_dict = io.load_and_validate(filename)
-        ds = data_dict['dataset']
         lw_var = data_dict['liquid_water_var']
         lw_data = data_dict['liquid_water_data']
         iw_var = data_dict['ice_water_var']
         iw_data = data_dict['ice_water_data']
 
         print(f"✓ Loaded {lw_var} variable (liquid water)")
-        print(f"  Shape: {lw_data.shape}")
-        print(f"  Range: {lw_data.min().values:.4f} - {lw_data.max().values:.4f} g/kg")
 
         if iw_data is not None:
             print(f"✓ Loaded {iw_var} variable (ice water)")
-            print(f"  Shape: {iw_data.shape}")
-            print(f"  Range: {iw_data.min().values:.4f} - {iw_data.max().values:.4f} g/kg")
         else:
             print(f"⚠ No ice water variable found (only liquid water will be used)")
 
@@ -63,14 +58,8 @@ def main(filename: str, output: str = None, label_dirs: bool = False) -> None:
         else:
             output_dir = Path(".")
 
-        # Calculate column optical depth (2D)
-        print("\nCalculating column optical depth...")
-
         # Get z-coordinates (already standardized by load_and_validate)
         z_coord = data_dict['z_coord']
-        if z_coord is None:
-            # Fallback to indices if no coordinates available
-            z_coord = np.arange(lw_data.shape[-1])
 
         # Convert to numpy
         lw_np = lw_data.values
@@ -93,13 +82,26 @@ def main(filename: str, output: str = None, label_dirs: bool = False) -> None:
         opacity = 1.0 - np.exp(-od_col)
         print(f"✓ Opacity range: {opacity.min():.4f} - {opacity.max():.4f}")
 
-        # Plot opacity
-        print("\nRendering top view...")
-        od_path = output_dir / f"cloudyview_glimpse_top_view_{base_filename}.png"
-        basic_render.plot_optical_depth(opacity, output_path=str(od_path), label_dirs=label_dirs)
+        # Enforce map orientation compatibility with witness/behold:
+        # east-right (+x) and north-up (+y).
+        x_coord = data_dict['x_coord']
+        y_coord = data_dict['y_coord']
+        opacity_oriented = opacity
+        if x_coord[1] < x_coord[0]:
+            opacity_oriented = opacity_oriented[::-1, :]
+        if y_coord[1] < y_coord[0]:
+            opacity_oriented = opacity_oriented[:, ::-1]
+        opacity_oriented = opacity_oriented.T  # plot expects [y, x]
 
-        print("\n✓ Glimpse complete!")
-        print(f"  Saved to {output_dir}")
+        # Plot opacity
+        od_path = output_dir / f"cloudyview_glimpse_top_view_{base_filename}.png"
+        basic_render.plot_optical_depth(
+            opacity_oriented, output_path=str(od_path), label_dirs=label_dirs, print_save=False
+        )
+        saved_path = str(od_path)
+        if not od_path.is_absolute() and not saved_path.startswith("./"):
+            saved_path = f"./{saved_path}"
+        print(f"✓ Saved to {saved_path}")
 
     except FileNotFoundError as e:
         print(f"✗ Error: {e}", file=sys.stderr)

@@ -291,6 +291,12 @@ def load_and_validate(filepath: str) -> Dict[str, Any]:
     y_coord = lw_data.coords['y'].values if 'y' in lw_data.coords else None
     z_coord = lw_data.coords['z'].values if 'z' in lw_data.coords else None
 
+    if x_coord is None or y_coord is None or z_coord is None:
+        raise ValueError(
+            "Could not determine x/y/z coordinate arrays from the input dataset. "
+            "Coordinate variables for all three dimensions are required."
+        )
+
     return {
         'dataset': ds,
         'liquid_water_var': lw_var,

@@ -17,14 +17,26 @@ import pytest
 
 from cloudyview import behold
 
-from .conftest import (
-    CAMERA_CONFIGS,
-    MAX_DIFF_THRESHOLD,
-    REFERENCE_DIR,
-    RENDER_SETTINGS,
-    RMSE_THRESHOLD,
-    TEST_DATA_FILES,
-)
+try:
+    # Works when run as a test module (e.g., pytest / python -m tests.test_behold_renders)
+    from .conftest import (
+        CAMERA_CONFIGS,
+        MAX_DIFF_THRESHOLD,
+        REFERENCE_DIR,
+        RENDER_SETTINGS,
+        RMSE_THRESHOLD,
+        TEST_DATA_FILES,
+    )
+except ImportError:
+    # Works when run directly as a script (python tests/test_behold_renders.py)
+    from conftest import (
+        CAMERA_CONFIGS,
+        MAX_DIFF_THRESHOLD,
+        REFERENCE_DIR,
+        RENDER_SETTINGS,
+        RMSE_THRESHOLD,
+        TEST_DATA_FILES,
+    )
 
 
 def load_image_as_float(path: Path) -> np.ndarray:
@@ -205,3 +217,7 @@ def test_render_matches_reference(dataset_name: str, view_name: str, tmp_path: P
 
     # Log metrics even on success
     print(f"\n  {dataset_name}/{view_name}: RMSE={rmse:.4f}, max_diff={max_diff:.4f}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

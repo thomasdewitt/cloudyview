@@ -473,8 +473,6 @@ def main(filename: str, output: str = None,
     custom_size : tuple, optional
         Image size (width, height)
     """
-    import netCDF4 as nc
-
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
 
@@ -513,32 +511,24 @@ def main(filename: str, output: str = None,
         z_coord = data_dict.get('z_coord')
 
         if x_coord is None or y_coord is None or z_coord is None:
-            ds_nc = nc.Dataset(filename, 'r')
-            try:
-                if x_coord is None and 'x' in ds_nc.variables:
-                    x_coord = ds_nc.variables['x'][:]
-                if y_coord is None and 'y' in ds_nc.variables:
-                    y_coord = ds_nc.variables['y'][:]
-                if z_coord is None and 'z' in ds_nc.variables:
-                    z_coord = ds_nc.variables['z'][:]
-            finally:
-                ds_nc.close()
+            raise ValueError(
+                "Missing x/y/z coordinate arrays in validated dataset; "
+                "cannot render witness view."
+            )
 
         lw_np = lw_data.values
         if 'time' in lw_data.dims:
             lw_np = lw_np[0]
 
         nx_d, ny_d, nz_d = lw_np.shape
-        if x_coord is None:
-            x_coord = np.arange(nx_d, dtype=np.float64)
-        if y_coord is None:
-            y_coord = np.arange(ny_d, dtype=np.float64)
-        if z_coord is None:
-            z_coord = np.arange(nz_d, dtype=np.float64)
+        if len(x_coord) < 2 or len(y_coord) < 2 or len(z_coord) < 2:
+            raise ValueError(
+                "x/y/z coordinates must each contain at least 2 points to determine grid spacing."
+            )
 
-        dx = float(x_coord[1] - x_coord[0]) if len(x_coord) > 1 else 1.0
-        dy = float(y_coord[1] - y_coord[0]) if len(y_coord) > 1 else 1.0
-        dz = float(z_coord[1] - z_coord[0]) if len(z_coord) > 1 else 1.0
+        dx = float(x_coord[1] - x_coord[0])
+        dy = float(y_coord[1] - y_coord[0])
+        dz = float(z_coord[1] - z_coord[0])
 
         # Process ice water content
         iw_np = None

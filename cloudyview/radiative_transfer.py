@@ -12,9 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
-from typing import Dict, Optional, Tuple, Literal
-import warnings
-import os
+from typing import Dict, Optional, Literal
 
 try:
     import mitsuba as mi
@@ -94,11 +92,8 @@ def load_ice_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
     """
     Load ice crystal scattering phase function tables.
 
-    PLACEHOLDER: Ice tables not yet implemented. When available, they should be
-    placed in Mie_tables/ as IceMie0_normalized.txt and IceMiePF3_normalized.txt
-    with identical format to the liquid water tables.
-
-    For now, returns HG approximation parameters instead of full tables.
+    Ice phase tables must exist in Mie_tables/ as
+    IceMie0_normalized.txt and IceMiePF3_normalized.txt.
 
     Parameters
     ----------
@@ -107,14 +102,10 @@ def load_ice_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
 
     Returns
     -------
-    ice_mie0_str : str or None
-        Forward peak phase function values (comma-separated), or None for HG fallback
-    ice_mie_pf3_str : str or None
-        Rest of distribution phase function values (comma-separated), or None for HG fallback
-    use_hg : bool
-        If True, use Henyey-Greenstein approximation instead of tables
-    g_ice : float
-        HG asymmetry parameter for ice (only used if use_hg=True)
+    ice_mie0_str : str
+        Forward peak phase function values (comma-separated)
+    ice_mie_pf3_str : str
+        Rest of distribution phase function values (comma-separated)
 
     References
     ----------
@@ -124,60 +115,60 @@ def load_ice_phase_tables(channel: Literal['R', 'G', 'B', 'gray'] = 'gray'):
     module_dir = Path(__file__).parent
     mie_dir = module_dir / 'Mie_tables'
 
-    # Check if ice tables exist
+    # Check that ice tables exist
     ice_mie0_path = mie_dir / 'IceMie0_normalized.txt'
     ice_mie_pf3_path = mie_dir / 'IceMiePF3_normalized.txt'
+    if not ice_mie0_path.exists() or not ice_mie_pf3_path.exists():
+        raise FileNotFoundError(
+            f"Ice Mie phase tables not found in {mie_dir}. "
+            "Expected IceMie0_normalized.txt and IceMiePF3_normalized.txt"
+        )
 
-    if ice_mie0_path.exists() and ice_mie_pf3_path.exists():
-        # Load ice tables
-        ice_mie0 = np.loadtxt(ice_mie0_path)
-        ice_mie_pf3 = np.loadtxt(ice_mie_pf3_path)
+    # Load ice tables
+    ice_mie0 = np.loadtxt(ice_mie0_path)
+    ice_mie_pf3 = np.loadtxt(ice_mie_pf3_path)
 
-        # Handle channel selection for IceMie0
-        # Ice tables may have RGB columns (unlike liquid which is monochrome)
-        if ice_mie0.ndim == 2:
-            # RGB format - select channel
-            if channel == 'R':
-                ice_mie0_values = ice_mie0[:, 0]
-            elif channel == 'G':
-                ice_mie0_values = ice_mie0[:, 1]
-            elif channel == 'B':
-                ice_mie0_values = ice_mie0[:, 2]
-            elif channel == 'gray':
-                # Luminance weights: R=0.2126, G=0.7152, B=0.0722
-                ice_mie0_values = (0.2126 * ice_mie0[:, 0] +
-                                   0.7152 * ice_mie0[:, 1] +
-                                   0.0722 * ice_mie0[:, 2])
-            else:
-                raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
-        else:
-            # Monochrome format - use directly
-            ice_mie0_values = ice_mie0
-
-        # Select channel for IceMiePF3 (RGB)
+    # Handle channel selection for IceMie0
+    # Ice tables may have RGB columns (unlike liquid which is monochrome)
+    if ice_mie0.ndim == 2:
+        # RGB format - select channel
         if channel == 'R':
-            ice_mie_pf3_values = ice_mie_pf3[:, 0]
+            ice_mie0_values = ice_mie0[:, 0]
         elif channel == 'G':
-            ice_mie_pf3_values = ice_mie_pf3[:, 1]
+            ice_mie0_values = ice_mie0[:, 1]
         elif channel == 'B':
-            ice_mie_pf3_values = ice_mie_pf3[:, 2]
+            ice_mie0_values = ice_mie0[:, 2]
         elif channel == 'gray':
             # Luminance weights: R=0.2126, G=0.7152, B=0.0722
-            ice_mie_pf3_values = (0.2126 * ice_mie_pf3[:, 0] +
-                                  0.7152 * ice_mie_pf3[:, 1] +
-                                  0.0722 * ice_mie_pf3[:, 2])
+            ice_mie0_values = (0.2126 * ice_mie0[:, 0] +
+                               0.7152 * ice_mie0[:, 1] +
+                               0.0722 * ice_mie0[:, 2])
         else:
             raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
-
-        # Convert to comma-separated strings for Mitsuba tabphase
-        ice_mie0_str = ','.join(map(str, ice_mie0_values))
-        ice_mie_pf3_str = ','.join(map(str, ice_mie_pf3_values))
-
-        return ice_mie0_str, ice_mie_pf3_str, False, None
     else:
-        # Fallback to Henyey-Greenstein approximation
-        print("  Ice Mie tables not found, using Henyey-Greenstein approximation (g=0.78)")
-        return None, None, True, 0.78
+        # Monochrome format - use directly
+        ice_mie0_values = ice_mie0
+
+    # Select channel for IceMiePF3 (RGB)
+    if channel == 'R':
+        ice_mie_pf3_values = ice_mie_pf3[:, 0]
+    elif channel == 'G':
+        ice_mie_pf3_values = ice_mie_pf3[:, 1]
+    elif channel == 'B':
+        ice_mie_pf3_values = ice_mie_pf3[:, 2]
+    elif channel == 'gray':
+        # Luminance weights: R=0.2126, G=0.7152, B=0.0722
+        ice_mie_pf3_values = (0.2126 * ice_mie_pf3[:, 0] +
+                              0.7152 * ice_mie_pf3[:, 1] +
+                              0.0722 * ice_mie_pf3[:, 2])
+    else:
+        raise ValueError(f"channel must be 'R', 'G', 'B', or 'gray', got {channel}")
+
+    # Convert to comma-separated strings for Mitsuba tabphase
+    ice_mie0_str = ','.join(map(str, ice_mie0_values))
+    ice_mie_pf3_str = ','.join(map(str, ice_mie_pf3_values))
+
+    return ice_mie0_str, ice_mie_pf3_str
 
 
 def look_at_world_up(origin, target, fallback_up=(0, 1, 0), world_up=(0, 0, 1)):
@@ -376,7 +367,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     spp : int
         Samples per pixel
     use_mie_phase : bool
-        If True, use accurate Mie scattering tables (Bouthors 2008) instead of Henyey-Greenstein
+        Must be True. Henyey-Greenstein fallback has been removed.
     mie_channel : {'R', 'G', 'B', 'gray'}
         Wavelength channel for Mie phase function (only used if use_mie_phase=True)
     mie_blend_weight : float
@@ -396,6 +387,8 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         Mitsuba scene ready to render
     """
     nx, ny, nz = sigma_ext.shape
+    if not use_mie_phase:
+        raise ValueError("Henyey-Greenstein fallback is disabled; Mie phase tables are required.")
 
     # Calculate physical aspect ratios
     width_x = nx * dx
@@ -446,6 +439,22 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     integrator_type = camera_config.get('integrator', 'volpath')
     max_depth = camera_config.get('max_depth', 32)
     rr_depth = camera_config.get('rr_depth', 5)
+    sampler_cfg = camera_config.get('sampler', {
+        'type': 'independent',
+        'sample_count': spp,
+    })
+    if not isinstance(sampler_cfg, dict):
+        raise ValueError(f"camera_config['sampler'] must be a dict, got {type(sampler_cfg).__name__}")
+    sampler_type = str(sampler_cfg.get('type', 'independent')).lower()
+    if sampler_type == 'sobol':
+        raise NotImplementedError(
+            "Sobol sampler is not supported yet. "
+            "Use sampler type 'independent' for now."
+        )
+    if 'sample_count' not in sampler_cfg:
+        sampler_cfg = dict(sampler_cfg)
+        sampler_cfg['sample_count'] = spp
+
     integrator = {
         'type': integrator_type,
         'max_depth': max_depth,
@@ -469,10 +478,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
             'type': 'perspective',
             'fov': camera_config.get('fov', 45),
             'to_world': camera_config['transform'],
-            'sampler': camera_config.get('sampler', {
-                'type': 'independent',
-                'sample_count': spp,
-            }),
+            'sampler': sampler_cfg,
             'film': {
                 'type': 'hdrfilm',
                 'width': camera_config['width'],
@@ -501,7 +507,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         },
     }
 
-    # Configure phase function (Mie tables or Henyey-Greenstein)
+    # Configure phase function (Mie tables only)
     # If ice_fraction is provided, create spatially-varying blend between liquid and ice phases
     if ice_fraction is not None:
         print("  Setting up mixed-phase (liquid/ice) rendering...")
@@ -513,83 +519,58 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         )
         ice_fraction_grid = mi.VolumeGrid(ice_fraction_data)
 
-        if use_mie_phase:
-            # Load liquid water Mie tables
-            mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
+        # Load liquid water Mie tables
+        mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
 
-            # Load ice Mie tables (or use HG fallback)
-            ice_mie0_str, ice_mie_pf3_str, use_hg_ice, g_ice = load_ice_phase_tables(channel=mie_channel)
+        # Load ice Mie tables (required)
+        ice_mie0_str, ice_mie_pf3_str = load_ice_phase_tables(channel=mie_channel)
 
-            # Create liquid phase (dual-table blended)
-            liquid_phase = {
-                'type': 'blendphase',
-                'weight': mie_blend_weight,
-                'phase_0': {
-                    'type': 'tabphase',
-                    'values': mie_pf3_str
-                },
-                'phase_1': {
-                    'type': 'tabphase',
-                    'values': mie0_str
-                }
+        # Create liquid phase (dual-table blended)
+        liquid_phase = {
+            'type': 'blendphase',
+            'weight': mie_blend_weight,
+            'phase_0': {
+                'type': 'tabphase',
+                'values': mie_pf3_str
+            },
+            'phase_1': {
+                'type': 'tabphase',
+                'values': mie0_str
             }
+        }
 
-            # Create ice phase (dual-table blended or HG)
-            if use_hg_ice:
-                ice_phase = {
-                    'type': 'hg',
-                    'g': g_ice
-                }
-            else:
-                ice_phase = {
-                    'type': 'blendphase',
-                    'weight': mie_blend_weight,
-                    'phase_0': {
-                        'type': 'tabphase',
-                        'values': ice_mie_pf3_str
-                    },
-                    'phase_1': {
-                        'type': 'tabphase',
-                        'values': ice_mie0_str
-                    }
-                }
-
-            print(f"  Liquid phase: Mie tables (channel={mie_channel})")
-            print(f"  Ice phase: {'HG (g=' + str(g_ice) + ')' if use_hg_ice else 'Mie tables (channel=' + mie_channel + ')'}")
-            print(f"  Spatially-varying blend via ice fraction grid")
-
-            # Spatially-varying blend between liquid and ice
-            scene_dict['cloud']['interior']['phase'] = {
-                'type': 'blendphase',
-                'phase_0': liquid_phase,  # phase_0 when weight=0 (liquid)
-                'phase_1': ice_phase,      # phase_1 when weight=1 (ice)
-                'weight': {
-                    'type': 'gridvolume',
-                    'grid': ice_fraction_grid,
-                    'to_world': grid_transform,
-                    'wrap_mode': 'mirror'
-                }
+        # Create ice phase (dual-table blended)
+        ice_phase = {
+            'type': 'blendphase',
+            'weight': mie_blend_weight,
+            'phase_0': {
+                'type': 'tabphase',
+                'values': ice_mie_pf3_str
+            },
+            'phase_1': {
+                'type': 'tabphase',
+                'values': ice_mie0_str
             }
+        }
 
-        else:
-            # HG approximation for both liquid and ice
-            print("  Liquid phase: HG (g=0.85)")
-            print("  Ice phase: HG (g=0.78)")
-            print("  Spatially-varying blend via ice fraction grid")
+        print(f"  Liquid phase: Mie tables (channel={mie_channel})")
+        print(f"  Ice phase: Mie tables (channel={mie_channel})")
+        print(f"  Spatially-varying blend via ice fraction grid")
 
-            scene_dict['cloud']['interior']['phase'] = {
-                'type': 'blendphase',
-                'phase_0': {'type': 'hg', 'g': 0.85},  # Liquid
-                'phase_1': {'type': 'hg', 'g': 0.78},  # Ice
-                'weight': {
-                    'type': 'gridvolume',
-                    'grid': ice_fraction_grid,
-                    'to_world': grid_transform,
-                    'wrap_mode': 'mirror'
-                }
+        # Spatially-varying blend between liquid and ice
+        scene_dict['cloud']['interior']['phase'] = {
+            'type': 'blendphase',
+            'phase_0': liquid_phase,  # phase_0 when weight=0 (liquid)
+            'phase_1': ice_phase,      # phase_1 when weight=1 (ice)
+            'weight': {
+                'type': 'gridvolume',
+                'grid': ice_fraction_grid,
+                'to_world': grid_transform,
+                'wrap_mode': 'mirror'
             }
+        }
 
-    elif use_mie_phase:
+    else:
         # Liquid-only with Mie scattering tables from Bouthors (2008)
         mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
         print(f"  Using Mie phase function (channel={mie_channel}, blend_weight={mie_blend_weight:.2f})")
@@ -606,13 +587,6 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
                 'type': 'tabphase',
                 'values': mie0_str
             }
-        }
-    else:
-        # Simple Henyey-Greenstein approximation (liquid-only)
-        print(f"  Using Henyey-Greenstein phase function (g=0.85)")
-        scene_dict['cloud']['interior']['phase'] = {
-            'type': 'hg',
-            'g': 0.85  # Forward scattering for clouds
         }
 
     if camera_inside:

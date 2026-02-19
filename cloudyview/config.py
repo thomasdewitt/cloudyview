@@ -16,7 +16,6 @@ Elevation: Angle above horizon (0° = horizon, 90° = zenith, -90° = nadir)
 Sun angles use same convention.
 """
 
-import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -24,7 +23,7 @@ from typing import Dict, Any, Optional
 # Default configuration for witness (tier 2 - volume ray marching)
 DEFAULT_WITNESS_CONFIG = {
     'camera': {
-        'position': [0, 0, -0.9],  # x,y,z in relative coords (±1.0 = domain edge)
+        'position': [0, 0, -0.999],  # x,y,z in relative coords (±1.0 = domain edge)
         'azimuth': 90.0,  # 0=East, 90=North
         'elevation': 35.0,  # angle above horizon
         'fov': 100.0,  # field of view in degrees
@@ -51,7 +50,7 @@ DEFAULT_WITNESS_CONFIG = {
 # Default configuration for behold (tier 3 - Mitsuba path tracing)
 DEFAULT_BEHOLD_CONFIG = {
     'camera': {
-        'position': [0, -.99, -0.5], # x,y,z
+        'position': [0, 0, -0.999], # x,y,z
         'azimuth': 90.0, 
         'elevation': 35.0, 
         'fov': 100.0,  # Field of view in degrees
@@ -79,57 +78,24 @@ DEFAULT_BEHOLD_CONFIG = {
 
 def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
-    Load configuration from YAML file
+    Load built-in default configuration.
 
-    Search order:
-    1. Explicit path if provided
-    2. ./cloudyview.yaml (current directory)
-    3. ~/.cloudyview.yaml (home directory)
-    4. Use defaults if no config file found
+    External config files are intentionally disabled. Runtime customization
+    should be done with CLI arguments only.
 
     Returns
     -------
     dict
         Configuration dictionary with 'witness' and 'behold' keys
     """
-    # Start with defaults (deep copy)
-    config = {
-        'witness': _deep_copy(DEFAULT_WITNESS_CONFIG),
-        'behold': _deep_copy(DEFAULT_BEHOLD_CONFIG)
-    }
-
-    # Search for config file
-    if config_path is None:
-        candidates = [
-            Path('./cloudyview.yaml'),
-            Path.home() / '.cloudyview.yaml'
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                config_path = candidate
-                break
-
-    # Load and merge if found
     if config_path is not None:
-        config_path = Path(config_path)
-        if config_path.exists():
-            try:
-                with open(config_path, 'r') as f:
-                    user_config = yaml.safe_load(f)
-
-                if user_config:
-                    # Deep merge user config into defaults
-                    if 'witness' in user_config:
-                        _deep_merge(config['witness'], user_config['witness'])
-                    if 'behold' in user_config:
-                        _deep_merge(config['behold'], user_config['behold'])
-
-                    print(f"  Loaded config from {config_path}")
-            except Exception as e:
-                print(f"  Warning: Failed to load config from {config_path}: {e}")
-                print(f"  Using default configuration")
-
-    return config
+        raise NotImplementedError(
+            "Config files are not supported. Use built-in defaults plus CLI overrides."
+        )
+    return {
+        'witness': _deep_copy(DEFAULT_WITNESS_CONFIG),
+        'behold': _deep_copy(DEFAULT_BEHOLD_CONFIG),
+    }
 
 
 def _deep_copy(obj):
@@ -142,24 +108,6 @@ def _deep_copy(obj):
         return obj
 
 
-def _deep_merge(base: Dict, override: Dict) -> None:
-    """
-    Recursively merge override into base (modifies base in-place)
-
-    Parameters
-    ----------
-    base : dict
-        Base dictionary to merge into
-    override : dict
-        Override values to merge from
-    """
-    for key, value in override.items():
-        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value
-
-
 def get_witness_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
     Get configuration for witness (tier 2)
@@ -167,7 +115,7 @@ def get_witness_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     Parameters
     ----------
     config_path : Path, optional
-        Optional path to config file
+        Not supported. Must be None.
 
     Returns
     -------
@@ -184,7 +132,7 @@ def get_behold_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     Parameters
     ----------
     config_path : Path, optional
-        Optional path to config file
+        Not supported. Must be None.
 
     Returns
     -------
