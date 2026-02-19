@@ -226,7 +226,7 @@ def plot_optical_depth(
     ax = fig.add_subplot(111)
 
     # Plot with no axes/labels
-    im = ax.imshow(optical_depth_2d, cmap=cmap, origin='lower', interpolation='nearest')
+    im = ax.imshow(optical_depth_2d, cmap=cmap, origin='lower', interpolation='nearest', vmin=0, vmax=1)
     ax.axis('off')
 
     # Add directional labels if requested
