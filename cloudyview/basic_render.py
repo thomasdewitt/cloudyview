@@ -3,7 +3,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 # Cloud color scheme for optical depth visualization
 sky_blue = '#3A4AA6'
@@ -18,6 +18,7 @@ def plot_optical_depth(
     output_path: Optional[str] = None,
     cmap=None,
     label_dirs: bool = False,
+    camera_overlay: Optional[Dict[str, Any]] = None,
     print_save: bool = True,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
@@ -25,7 +26,7 @@ def plot_optical_depth(
 
     Parameters
     ----------
-    optical_depth_2d : ndarray (nx, ny)
+    optical_depth_2d : ndarray (ny, nx)
         2D optical depth field
     output_path : str, optional
         Path to save figure (PNG). Required - no display.
@@ -33,6 +34,12 @@ def plot_optical_depth(
         Colormap (default: cloud_colors, sky blue to white)
     label_dirs : bool, optional
         If True, label N/S/W/E sections of domain (default: False)
+    camera_overlay : dict, optional
+        Optional camera/FOV annotation with keys:
+        - 'camera_xy': (x, y) camera position in image pixel coordinates
+        - 'fov_endpoints': list of (x, y) endpoints for FOV rays
+        - 'circle_radius': optional radius in pixels; if provided, draws
+          a circle instead of FOV rays/dot (for zenith/nadir ambiguity)
     print_save : bool, optional
         If True, print saved filepath (default: True)
 
@@ -44,19 +51,40 @@ def plot_optical_depth(
     if cmap is None:
         cmap = cloud_colors
 
-    # Create figure (2048x2048 px = 13.653 inches at 150 DPI)
+    ny, nx = optical_depth_2d.shape
+
+    # Create figure with domain aspect ratio preserved.
+    # Keep the longer image side at 2048 px for consistent output quality.
     dpi = 150
-    figsize = (2048/dpi, 2048/dpi)
-    fig = plt.figure(figsize=figsize, dpi=dpi)
-    ax = fig.add_subplot(111)
+    long_side_px = 2048
+    if nx >= ny:
+        width_px = long_side_px
+        height_px = max(1, int(round(long_side_px * ny / nx)))
+    else:
+        height_px = long_side_px
+        width_px = max(1, int(round(long_side_px * nx / ny)))
+
+    figsize = (width_px / dpi, height_px / dpi)
+    fig = plt.figure(figsize=figsize, dpi=dpi, frameon=False)
+    ax = fig.add_axes([0, 0, 1, 1])
 
     # Plot with no axes/labels
-    im = ax.imshow(optical_depth_2d, cmap=cmap, origin='lower', interpolation='nearest', vmin=0, vmax=1)
+    ax.imshow(
+        optical_depth_2d,
+        cmap=cmap,
+        origin='lower',
+        interpolation='nearest',
+        vmin=0,
+        vmax=1,
+        aspect='auto',
+    )
+    ax.set_xlim(-0.5, nx - 0.5)
+    ax.set_ylim(-0.5, ny - 0.5)
+    ax.set_autoscale_on(False)
     ax.axis('off')
 
     # Add directional labels if requested
     if label_dirs:
-        ny, nx = optical_depth_2d.shape
         # Font size scaled to image size (roughly 10% of domain width)
         fontsize = max(12, int(nx / 10))
         bbox_props = dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='black', linewidth=1.5)
@@ -77,12 +105,55 @@ def plot_optical_depth(
         ax.text(nx / 2, 5, 'S', fontsize=fontsize, color='black',
                 ha='center', va='bottom', bbox=bbox_props, weight='bold')
 
-    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    # Optional camera and field-of-view overlay
+    if camera_overlay is not None:
+        cam_x, cam_y = camera_overlay['camera_xy']
+        fov_endpoints = camera_overlay.get('fov_endpoints', [])
+        circle_radius = camera_overlay.get('circle_radius')
+        linewidth = max(1.5, max(nx, ny) / 900)
+
+        if circle_radius is not None:
+            circle = plt.Circle(
+                (cam_x, cam_y),
+                float(circle_radius),
+                fill=False,
+                edgecolor='red',
+                linewidth=linewidth,
+                alpha=0.95,
+                clip_on=True,
+                zorder=4,
+            )
+            ax.add_patch(circle)
+        else:
+            marker_size = max(24.0, max(nx, ny) / 20)
+
+            for end_x, end_y in fov_endpoints:
+                ax.plot(
+                    [cam_x, end_x],
+                    [cam_y, end_y],
+                    color='red',
+                    linewidth=linewidth,
+                    alpha=0.95,
+                    solid_capstyle='round',
+                    clip_on=True,
+                    zorder=4,
+                )
+
+            ax.scatter(
+                [cam_x],
+                [cam_y],
+                s=marker_size,
+                c='red',
+                edgecolors='white',
+                linewidths=max(1.0, linewidth * 0.5),
+                clip_on=True,
+                zorder=5,
+            )
 
     # Save (required)
     if not output_path:
         raise ValueError("output_path is required - no display mode")
-    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+    plt.savefig(output_path, dpi=dpi, pad_inches=0)
     if print_save:
         print(f"  ✓ Saved {output_path}")
     plt.close(fig)

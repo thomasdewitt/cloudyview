@@ -28,25 +28,25 @@ TEST_DATA_FILES = {
 CAMERA_CONFIGS = {
     "ground_view": {
         "position": [0, -0.99, -0.99],
-        "azimuth": 90.0,
+        "azimuth": 0.0,
         "elevation": 35.0,
         "fov": 100.0,
     },
     "overhead_view": {
         "position": [0, -.5, 4.0],
-        "azimuth": 90.0,
+        "azimuth": 0.0,
         "elevation": -85.0,
         "fov": 80.0,
     },
     "side_east": {
         "position": [1.5, 0, -.99],
-        "azimuth": 180.0,
+        "azimuth": 270.0,
         "elevation": 35.0,
         "fov": 90.0,
     },
     "side_north": {
         "position": [0, 1.5, -.99],
-        "azimuth": 270.0,
+        "azimuth": 180.0,
         "elevation": 35.0,
         "fov": 90.0,
     },
@@ -65,7 +65,7 @@ RENDER_SETTINGS = {
     # "max_depth": 4,
     # "rr_depth": 2,
     "backend": "llvm",
-    "sun_azimuth": 70.0,
+    "sun_azimuth": 20.0,
     "sun_elevation": 55.0,
     "progress_interval": 128,
 }

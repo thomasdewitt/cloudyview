@@ -82,11 +82,11 @@ Arguments:
 
 Quality tiers:
 
-- `min`: 150×100, spp=1 (instant preview)
-- `low`: 300×200, spp=32 (quick preview)
-- `medium`: 600×400, spp=512 (balanced, default)
-- `high`: 1200×800, spp=4096 (production quality)
-- `custom`: User-specified spp, resolution, and max_depth/rr_depth
+- `min`: 150×100, spp=1, max_depth=4, rr_depth=2 (instant preview)
+- `low`: 300×200, spp=32, max_depth=16, rr_depth=4 (quick preview)
+- `medium`: 600×400, spp=512, max_depth=64, rr_depth=16 (balanced, default)
+- `high`: 1200×800, spp=4096, max_depth=128, rr_depth=32 (production quality)
+- `custom`: User-specified spp, resolution, and/or max_depth/rr_depth
 
 Options:
 
@@ -95,13 +95,13 @@ Options:
 | `--output`, `-o`          | `.`            | Output directory for renders                             |
 | `--spp N`                 | varies         | Samples per pixel (for custom quality)                   |
 | `--size W H`              | varies         | Image dimensions in pixels (for custom quality)          |
-| `--max-depth N`           | `128`          | Maximum ray bounce depth (for custom quality)            |
-| `--rr-depth N`            | `64`           | Russian roulette depth (for custom quality)              |
-| `--camera-position X Y Z` | `0 -0.99 -0.5` | Camera position in relative coords (±1.0 = domain edge)  |
-| `--camera-azimuth`        | `90`           | Camera view azimuth in degrees (0=E, 90=N, 180=W, 270=S) |
+| `--max-depth N`           | varies         | Maximum ray bounce depth (for custom quality override)   |
+| `--rr-depth N`            | varies         | Russian roulette depth (for custom quality override)     |
+| `--camera-position X Y Z` | `0 0 -0.999`   | Camera position in relative coords (±1.0 = domain edge)  |
+| `--camera-azimuth`        | `0`            | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W) |
 | `--camera-elevation`      | `35`           | Camera view elevation in degrees (angle above horizon)   |
 | `--fov`                   | `100`          | Camera field of view in degrees                          |
-| `--sun-azimuth`           | `70`           | Sun azimuth in degrees (0=E, 90=N, 180=W, 270=S)         |
+| `--sun-azimuth`           | `20`           | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
 | `--sun-elevation`         | `55`           | Sun elevation in degrees (angle above horizon)           |
 
 Camera and sun arguments override values from the config file.

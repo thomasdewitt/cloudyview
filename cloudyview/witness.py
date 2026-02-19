@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from . import io, optical_depth, config
+from .angles import direction_from_azimuth_elevation
 
 from numba import njit, prange
 
@@ -461,7 +462,7 @@ def main(filename: str, output: str = None,
     camera_position : list, optional
         Camera position [x, y, z] in relative coords (+-1.0 = domain edge)
     camera_azimuth : float, optional
-        Camera azimuth in degrees (0=East, 90=North)
+        Camera azimuth in degrees (0=North, 90=East, 180=South, 270=West)
     camera_elevation : float, optional
         Camera elevation in degrees (angle above horizon)
     camera_fov : float, optional
@@ -569,14 +570,9 @@ def main(filename: str, output: str = None,
             rel_pos[2]
         ])
 
-        az_rad = np.deg2rad(cam_config['azimuth'])
-        el_rad = np.deg2rad(cam_config['elevation'])
-        forward = np.array([
-            np.cos(el_rad) * np.cos(az_rad),
-            np.cos(el_rad) * np.sin(az_rad),
-            np.sin(el_rad)
-        ])
-        forward /= np.linalg.norm(forward)
+        forward = direction_from_azimuth_elevation(
+            cam_config['azimuth'], cam_config['elevation']
+        )
 
         world_up = np.array([0.0, 0.0, 1.0])
         if abs(np.dot(forward, world_up)) > 0.999:
@@ -587,14 +583,9 @@ def main(filename: str, output: str = None,
         up /= np.linalg.norm(up)
 
         # Sun direction (toward the sun)
-        sun_az_rad = np.deg2rad(sun_config['azimuth'])
-        sun_el_rad = np.deg2rad(sun_config['elevation'])
-        sun_dir = np.array([
-            np.cos(sun_el_rad) * np.cos(sun_az_rad),
-            np.cos(sun_el_rad) * np.sin(sun_az_rad),
-            np.sin(sun_el_rad)
-        ])
-        sun_dir /= np.linalg.norm(sun_dir)
+        sun_dir = direction_from_azimuth_elevation(
+            sun_config['azimuth'], sun_config['elevation']
+        )
 
         fov_rad = np.deg2rad(cam_config['fov'])
         tan_half_fov = np.tan(fov_rad * 0.5)
@@ -711,15 +702,15 @@ def cli():
                         help="Output directory")
     parser.add_argument("--camera-position", type=float, nargs=3,
                         metavar=('X', 'Y', 'Z'),
-                        help="Camera position in relative coords (default: 0 0 -0.9)")
+                        help="Camera position in relative coords (default: 0 0 -0.999)")
     parser.add_argument("--camera-azimuth", type=float,
-                        help="Camera azimuth in degrees (default: 90)")
+                        help="Camera azimuth in degrees (default: 0). 0=North, 90=East, 180=South, 270=West")
     parser.add_argument("--camera-elevation", type=float,
                         help="Camera elevation in degrees (default: 35)")
     parser.add_argument("--fov", type=float,
                         help="Camera field of view in degrees (default: 100)")
     parser.add_argument("--sun-azimuth", type=float,
-                        help="Sun azimuth in degrees (default: 70)")
+                        help="Sun azimuth in degrees (default: 20). 0=North, 90=East, 180=South, 270=West")
     parser.add_argument("--sun-elevation", type=float,
                         help="Sun elevation in degrees (default: 55)")
     parser.add_argument("--size", type=int, nargs=2,

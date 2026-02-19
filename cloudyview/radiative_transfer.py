@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import time
 from typing import Dict, Optional, Literal
+from .angles import direction_from_azimuth_elevation
 
 try:
     import mitsuba as mi
@@ -314,31 +315,24 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
 
 
 def sun_direction_to_scene(azimuth_deg=0.0, elevation_deg=90.0):
-    """Return unit vector pointing FROM the sun TOWARD the scene (for directional lights)."""
-    az = np.deg2rad(azimuth_deg)
-    el = np.deg2rad(elevation_deg)
-    cos_el = np.cos(el)
-    direction = np.array([
-        cos_el * np.cos(az),
-        cos_el * np.sin(az),
-        -np.sin(el)
-    ])
+    """
+    Return unit vector pointing FROM the sun TOWARD the scene.
+
+    Azimuth uses meteorological convention: 0°=North, 90°=East, clockwise.
+    """
+    dir_to_sun = direction_from_azimuth_elevation(azimuth_deg, elevation_deg)
+    direction = np.array([dir_to_sun[0], dir_to_sun[1], -dir_to_sun[2]])
     direction /= np.linalg.norm(direction)
     return direction.tolist()
 
 
 def sun_direction_to_sun(azimuth_deg=0.0, elevation_deg=90.0):
-    """Return unit vector pointing FROM scene TO the sun (for sunsky emitter)."""
-    az = np.deg2rad(azimuth_deg)
-    el = np.deg2rad(elevation_deg)
-    cos_el = np.cos(el)
-    direction = np.array([
-        cos_el * np.cos(az),
-        cos_el * np.sin(az),
-        np.sin(el)  # Positive z points upward to sun
-    ])
-    direction /= np.linalg.norm(direction)
-    return direction.tolist()
+    """
+    Return unit vector pointing FROM scene TO the sun.
+
+    Azimuth uses meteorological convention: 0°=North, 90°=East, clockwise.
+    """
+    return direction_from_azimuth_elevation(azimuth_deg, elevation_deg).tolist()
 
 
 def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
@@ -362,7 +356,7 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         - 'sky_type': 'sunsky' (physically-based) or 'constant' or None
         - 'turbidity': sky turbidity (2-6, for sunsky)
         - 'add_ocean': bool, whether to add ocean surface
-        - 'sun_azimuth': azimuth angle in degrees
+        - 'sun_azimuth': azimuth angle in degrees (0=N, 90=E, 180=S, 270=W)
         - 'sun_elevation': elevation angle in degrees
     spp : int
         Samples per pixel

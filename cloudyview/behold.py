@@ -6,16 +6,20 @@ Usage:
     python behold.py <filename.nc> <backend> [quality] [--output <path>]
 
     backend: llvm or cuda (required)
-    quality: min (150x100), low (300x200), medium (600x400, default), high (1200x800), custom
+    quality: min (150x100, spp=1, max_depth=4, rr_depth=2),
+             low (300x200, spp=32, max_depth=16, rr_depth=4),
+             medium (600x400, spp=512, max_depth=64, rr_depth=16, default),
+             high (1200x800, spp=4096, max_depth=128, rr_depth=32),
+             custom
 
     For custom quality, use: --spp N --size W H --max-depth N --rr-depth N
 
     Camera/sun options (override config file):
         --camera-position X Y Z   Camera position in relative coords (±1.0 = domain edge)
-        --camera-azimuth DEG      Camera azimuth (0=East, 90=North, 180=West, 270=South)
+        --camera-azimuth DEG      Camera azimuth (0=North, 90=East, 180=South, 270=West)
         --camera-elevation DEG    Camera elevation (angle above horizon)
         --fov DEG                 Camera field of view
-        --sun-azimuth DEG         Sun azimuth (0=East, 90=North, 180=West, 270=South)
+        --sun-azimuth DEG         Sun azimuth (0=North, 90=East, 180=South, 270=West)
         --sun-elevation DEG       Sun elevation (angle above horizon)
 
 This script provides a realistic 3D view of your cloud data using:
@@ -41,6 +45,7 @@ import numpy as np
 import mitsuba as mi
 
 from . import io, radiative_transfer, optical_depth, config
+from .angles import direction_from_azimuth_elevation
 
 
 def main(filename: str, backend: str, quality: str = 'medium', output: str = None,
@@ -60,21 +65,23 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     backend : str
         Mitsuba backend: 'llvm' or 'cuda'
     quality : str
-        Render quality: 'min' (150x100, spp=1), 'low' (300x200, spp=32),
-        'medium' (600x400, spp=512, default), 'high' (1200x800, spp=4096),
+        Render quality: 'min' (150x100, spp=1, max_depth=4, rr_depth=2),
+        'low' (300x200, spp=32, max_depth=16, rr_depth=4),
+        'medium' (600x400, spp=512, max_depth=64, rr_depth=16, default),
+        'high' (1200x800, spp=4096, max_depth=128, rr_depth=32),
         or 'custom' (user-specified via --spp, --size, --max-depth, --rr-depth)
     output : str, optional
         Output directory for renders
     camera_position : list, optional
         Camera position [x, y, z] in relative coords (±1.0 = domain edge)
     camera_azimuth : float, optional
-        Camera azimuth in degrees (0=East, 90=North, 180=West, 270=South)
+        Camera azimuth in degrees (0=North, 90=East, 180=South, 270=West)
     camera_elevation : float, optional
         Camera elevation in degrees (angle above horizon)
     camera_fov : float, optional
         Camera field of view in degrees
     sun_azimuth : float, optional
-        Sun azimuth in degrees (0=East, 90=North, 180=West, 270=South)
+        Sun azimuth in degrees (0=North, 90=East, 180=South, 270=West)
     sun_elevation : float, optional
         Sun elevation in degrees (angle above horizon)
     progress_interval : int, optional
@@ -192,10 +199,10 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
 
         # Map quality to resolution and spp
         quality_map = {
-            'min': {'resolution': (150, 100), 'spp': 1},
-            'low': {'resolution': (300, 200), 'spp': 32},
-            'medium': {'resolution': (600, 400), 'spp': 512},
-            'high': {'resolution': (1200, 800), 'spp': 4096}
+            'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 2, 'max_depth': 4},
+            'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 4, 'max_depth': 16},
+            'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 16, 'max_depth': 64},
+            'high': {'resolution': (1200, 800), 'spp': 4096, 'rr_depth': 32, 'max_depth': 128}
         }
 
         if quality == 'custom':
@@ -210,6 +217,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         else:
             width, height = quality_map[quality]['resolution']
             spp = quality_map[quality]['spp']
+            rendering_config['max_depth'] = quality_map[quality]['max_depth']
+            rendering_config['rr_depth'] = quality_map[quality]['rr_depth']
 
         # Get camera settings from config (relative coordinates)
         camera_azimuth = camera_config['azimuth']
@@ -225,19 +234,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             rel_pos[2]        # z in Mitsuba normalized cube (±1)
         ]
 
-        # Compute camera target from azimuth/elevation
-        # Convert to radians
-        az_rad = np.deg2rad(camera_azimuth)
-        el_rad = np.deg2rad(camera_elevation)
-
-        # Compute look direction vector (meteorological convention)
-        # Azimuth: 0°=East(+x), 90°=North(+y)
-        # Elevation: angle above horizon
-        look_dir = np.array([
-            np.cos(el_rad) * np.cos(az_rad),  # x (East)
-            np.cos(el_rad) * np.sin(az_rad),  # y (North)
-            np.sin(el_rad)  # z (Up)
-        ])
+        # Compute look direction vector from meteorological azimuth/elevation
+        look_dir = direction_from_azimuth_elevation(camera_azimuth, camera_elevation)
 
         # Target point is origin + look direction
         camera_target = camera_origin + look_dir
@@ -337,7 +335,13 @@ def cli():
         nargs='?',
         default='medium',
         choices=['min', 'low', 'medium', 'high', 'custom'],
-        help="Render quality: min (150x100, spp=1), low (300x200, spp=32), medium (600x400, spp=512, default), high (1200x800, spp=4096), custom (use --spp, --size, etc.)"
+        help=(
+            "Render quality: min (150x100, spp=1, max_depth=4, rr_depth=2), "
+            "low (300x200, spp=32, max_depth=16, rr_depth=4), "
+            "medium (600x400, spp=512, max_depth=64, rr_depth=16, default), "
+            "high (1200x800, spp=4096, max_depth=128, rr_depth=32), "
+            "custom (use --spp, --size, --max-depth, --rr-depth)"
+        )
     )
     parser.add_argument(
         "--output", "-o",
@@ -370,12 +374,12 @@ def cli():
         type=float,
         nargs=3,
         metavar=('X', 'Y', 'Z'),
-        help="Camera position in relative coords (default: 0 -0.99 -0.5). ±1.0 = domain edge"
+        help="Camera position in relative coords (default: 0 0 -0.999). ±1.0 = domain edge"
     )
     parser.add_argument(
         "--camera-azimuth",
         type=float,
-        help="Camera azimuth in degrees (default: 90). 0=East, 90=North, 180=West, 270=South"
+        help="Camera azimuth in degrees (default: 0). 0=North, 90=East, 180=South, 270=West"
     )
     parser.add_argument(
         "--camera-elevation",
@@ -390,7 +394,7 @@ def cli():
     parser.add_argument(
         "--sun-azimuth",
         type=float,
-        help="Sun azimuth in degrees (default: 70). 0=East, 90=North, 180=West, 270=South"
+        help="Sun azimuth in degrees (default: 20). 0=North, 90=East, 180=South, 270=West"
     )
     parser.add_argument(
         "--sun-elevation",

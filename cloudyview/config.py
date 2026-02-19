@@ -9,8 +9,8 @@ Coordinate System (Meteorological Convention):
 Camera positions use relative coordinates where ±1.0 = domain edge in x,y
 (z coordinates are relative to domain height)
 
-Azimuth: 0° = East, 90° = North, 180° = West, 270° = South
-         (measured counterclockwise from +x axis)
+Azimuth: 0° = North, 90° = East, 180° = South, 270° = West
+         (measured clockwise from +y axis; meteorological bearing)
 Elevation: Angle above horizon (0° = horizon, 90° = zenith, -90° = nadir)
 
 Sun angles use same convention.
@@ -24,12 +24,12 @@ from typing import Dict, Any, Optional
 DEFAULT_WITNESS_CONFIG = {
     'camera': {
         'position': [0, 0, -0.999],  # x,y,z in relative coords (±1.0 = domain edge)
-        'azimuth': 90.0,  # 0=East, 90=North
+        'azimuth': 0.0,  # 0=North, 90=East
         'elevation': 35.0,  # angle above horizon
         'fov': 100.0,  # field of view in degrees
     },
     'sun': {
-        'azimuth': 70.0,  # degrees from east
+        'azimuth': 20.0,  # 0=North, 90=East
         'elevation': 55.0,  # degrees above horizon
     },
     'rendering': {
@@ -51,12 +51,12 @@ DEFAULT_WITNESS_CONFIG = {
 DEFAULT_BEHOLD_CONFIG = {
     'camera': {
         'position': [0, 0, -0.999], # x,y,z
-        'azimuth': 90.0, 
+        'azimuth': 0.0,
         'elevation': 35.0, 
         'fov': 100.0,  # Field of view in degrees
     },
     'sun': {
-        'azimuth': 70.0, 
+        'azimuth': 20.0,
         'elevation': 55.0,  # 45° above horizon
     },
     'rendering': {
