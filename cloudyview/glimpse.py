@@ -14,9 +14,16 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
+from textwrap import dedent
 
 from . import io, optical_depth, basic_render, config
 from .angles import direction_from_azimuth_elevation, azimuth_met_to_internal_deg
+from .cli_utils import (
+    CloudyViewHelpFormatter,
+    DATA_SELECTION_HELP,
+    add_dataset_selection_arguments,
+    dataset_selection_kwargs,
+)
 
 
 def _unit_xy(direction_3d: np.ndarray, fallback_angle_rad: float) -> np.ndarray:
@@ -99,6 +106,18 @@ def main(
     camera_azimuth: float = None,
     camera_elevation: float = None,
     camera_fov: float = None,
+    liquid_water_var: str = None,
+    ice_water_var: str = None,
+    dataset_group: str = None,
+    liquid_water_group: str = None,
+    ice_water_group: str = None,
+    coords_group: str = None,
+    x_coord_name: str = None,
+    y_coord_name: str = None,
+    z_coord_name: str = None,
+    x_dim: str = None,
+    y_dim: str = None,
+    z_dim: str = None,
 ) -> None:
     """
     Main function for glimpse.py
@@ -121,6 +140,14 @@ def main(
         Camera elevation in degrees (angle above horizon)
     camera_fov : float, optional
         Camera field of view in degrees (vertical FOV)
+    liquid_water_var, ice_water_var : str, optional
+        Explicit variable-name overrides for water-content arrays
+    dataset_group, liquid_water_group, ice_water_group, coords_group : str, optional
+        NetCDF group overrides for variable/coordinate lookup
+    x_coord_name, y_coord_name, z_coord_name : str, optional
+        Explicit coordinate variable names
+    x_dim, y_dim, z_dim : str, optional
+        Explicit dimension names for x/y/z
     """
     print(f"CloudyView Glimpse: Loading {filename}")
 
@@ -149,7 +176,21 @@ def main(
         base_filename = Path(filename).stem
 
         # Load and validate data
-        data_dict = io.load_and_validate(filename)
+        data_dict = io.load_and_validate(
+            filename,
+            liquid_water_var=liquid_water_var,
+            ice_water_var=ice_water_var,
+            dataset_group=dataset_group,
+            liquid_water_group=liquid_water_group,
+            ice_water_group=ice_water_group,
+            coords_group=coords_group,
+            x_coord_name=x_coord_name,
+            y_coord_name=y_coord_name,
+            z_coord_name=z_coord_name,
+            x_dim=x_dim,
+            y_dim=y_dim,
+            z_dim=z_dim,
+        )
         lw_var = data_dict['liquid_water_var']
         lw_data = data_dict['liquid_water_data']
         iw_var = data_dict['ice_water_var']
@@ -182,7 +223,7 @@ def main(
         # Calculate column optical depth (2D) from liquid and ice water content
         # Uses empirical relationships: for liquid LWP = 0.6292 * tau * re,
         # for ice IWP = 0.350 * tau * re (consistent with plot_optical_depth.py)
-        od_col = optical_depth.optical_depth_from_lwc(lw_np, z_coord, iwc=iw_np)
+        od_col = optical_depth.vertically_integrated_optical_depth(lw_np, z_coord, iwc=iw_np)
 
         if iw_np is not None:
             print(f"✓ Optical depth (liquid + ice) range: {od_col.min():.4f} - {od_col.max():.4f}")
@@ -190,7 +231,7 @@ def main(
             print(f"✓ Optical depth (liquid only) range: {od_col.min():.4f} - {od_col.max():.4f}")
 
         # Convert optical depth to opacity (1 - exp(-tau))
-        opacity = 1.0 - np.exp(-od_col)
+        opacity = np.float32(1.0) - np.exp(-od_col.astype(np.float32))
         print(f"✓ Opacity range: {opacity.min():.4f} - {opacity.max():.4f}")
 
         # Enforce map orientation compatibility with witness/behold:
@@ -245,7 +286,46 @@ def main(
 def cli():
     """Command-line interface for glimpse.py"""
     parser = argparse.ArgumentParser(
-        description="Quick optical depth calculation and top-view visualization"
+        prog="glimpse",
+        description="Quick top-down cloud overview from column optical depth.",
+        formatter_class=CloudyViewHelpFormatter,
+        epilog=dedent(
+            f"""
+            What `glimpse` does:
+              1. Loads one 3D single-timestep cloud field from a NetCDF file.
+              2. Finds a liquid water mixing ratio/content array and, if present, an
+                 ice water array.
+              3. Converts supported units (`g/kg`, `g/g`, or `kg/kg`) to `g/kg`.
+              4. Computes vertically integrated optical depth and writes a top-view PNG.
+
+            Input requirements:
+              - The selected liquid water array is required.
+              - The ice water array is optional.
+              - The selected cloud array must be 3D after any single time dimension is removed.
+              - Physical x/y/z coordinate arrays are required so vertical spacing is known.
+
+            Output:
+              A PNG named `cloudyview_glimpse_top_view_<input-stem>.png` written to the
+              output directory.
+
+            Camera overlay:
+              `--label` draws the current `witness` camera position and field-of-view on
+              the top view. Camera coordinates are relative to the model domain:
+              - x: east-west, where -1 is west edge and +1 is east edge
+              - y: south-north, where -1 is south edge and +1 is north edge
+              - z: relative height, where -1 is bottom and +1 is top
+              Azimuth uses meteorological bearings: 0 north, 90 east, 180 south, 270 west.
+
+            {DATA_SELECTION_HELP}
+
+            Examples:
+              glimpse cloud.nc
+              glimpse cloud.nc --output renders --label-dirs
+              glimpse cloud.nc --label --camera-position 0 -0.8 -0.95 --camera-azimuth 0 --camera-elevation 35 --fov 100
+              glimpse cloud.nc --group /physics/clouds --liquid-water-var qc_cloud --ice-water-var qi_cloud
+              glimpse custom.nc --liquid-water-group /state/liquid --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
+            """
+        ),
     )
     parser.add_argument(
         "filename",
@@ -279,6 +359,7 @@ def cli():
         "--fov", type=float,
         help="Camera field of view in degrees (default: 100)"
     )
+    add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
     main(
@@ -290,6 +371,7 @@ def cli():
         camera_azimuth=args.camera_azimuth,
         camera_elevation=args.camera_elevation,
         camera_fov=args.fov,
+        **dataset_selection_kwargs(args),
     )
 
 

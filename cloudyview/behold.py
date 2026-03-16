@@ -42,10 +42,16 @@ import sys
 import time
 from pathlib import Path
 import numpy as np
-import mitsuba as mi
+from textwrap import dedent
 
-from . import io, radiative_transfer, optical_depth, config
+from . import io, optical_depth, config
 from .angles import direction_from_azimuth_elevation
+from .cli_utils import (
+    CloudyViewHelpFormatter,
+    DATA_SELECTION_HELP,
+    add_dataset_selection_arguments,
+    dataset_selection_kwargs,
+)
 
 
 def main(filename: str, backend: str, quality: str = 'medium', output: str = None,
@@ -54,7 +60,19 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
          camera_position: list = None, camera_azimuth: float = None,
          camera_elevation: float = None, camera_fov: float = None,
          sun_azimuth: float = None, sun_elevation: float = None,
-         progress_interval: int = None) -> None:
+         progress_interval: int = None,
+         liquid_water_var: str = None,
+         ice_water_var: str = None,
+         dataset_group: str = None,
+         liquid_water_group: str = None,
+         ice_water_group: str = None,
+         coords_group: str = None,
+         x_coord_name: str = None,
+         y_coord_name: str = None,
+         z_coord_name: str = None,
+         x_dim: str = None,
+         y_dim: str = None,
+         z_dim: str = None) -> None:
     """
     Main function for behold.py
 
@@ -86,6 +104,14 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         Sun elevation in degrees (angle above horizon)
     progress_interval : int, optional
         Print progress every N samples (default: 2 for rgb/mono, 16 for chromatic)
+    liquid_water_var, ice_water_var : str, optional
+        Explicit variable-name overrides for water-content arrays
+    dataset_group, liquid_water_group, ice_water_group, coords_group : str, optional
+        NetCDF group overrides for variable/coordinate lookup
+    x_coord_name, y_coord_name, z_coord_name : str, optional
+        Explicit coordinate variable names
+    x_dim, y_dim, z_dim : str, optional
+        Explicit dimension names for x/y/z
     """
     print(f"CloudyView Behold: Loading {filename}")
     start_time = time.perf_counter()
@@ -113,8 +139,25 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         sun_config['elevation'] = sun_elevation
 
     try:
+        import mitsuba as mi
+        from . import radiative_transfer
+
         # Load and validate data with xarray
-        data_dict = io.load_and_validate(filename)
+        data_dict = io.load_and_validate(
+            filename,
+            liquid_water_var=liquid_water_var,
+            ice_water_var=ice_water_var,
+            dataset_group=dataset_group,
+            liquid_water_group=liquid_water_group,
+            ice_water_group=ice_water_group,
+            coords_group=coords_group,
+            x_coord_name=x_coord_name,
+            y_coord_name=y_coord_name,
+            z_coord_name=z_coord_name,
+            x_dim=x_dim,
+            y_dim=y_dim,
+            z_dim=z_dim,
+        )
         lw_data = data_dict['liquid_water_data']
         iw_data = data_dict['ice_water_data']
         x_coord = data_dict.get('x_coord')
@@ -319,7 +362,57 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
 def cli():
     """Command-line interface for behold.py"""
     parser = argparse.ArgumentParser(
-        description="Cloud visualization with 3D Mitsuba radiative transfer (photorealistic ground-looking-up view)"
+        prog="behold",
+        description="Photorealistic cloud rendering with Mitsuba volumetric path tracing.",
+        formatter_class=CloudyViewHelpFormatter,
+        epilog=dedent(
+            f"""
+            What `behold` does:
+              1. Loads a 3D cloud field from NetCDF.
+              2. Converts liquid water and optional ice water to extinction coefficients.
+              3. Builds a Mitsuba 3 scene with physically-based sky illumination.
+              4. Progressively path-traces a ground-looking-up RGB render and saves a PNG.
+
+            Positional arguments:
+              filename  Path to the NetCDF file.
+              backend   Mitsuba execution backend: `llvm` for CPU or `cuda` for GPU.
+              quality   Preset render budget. `custom` enables the `--spp`, `--size`,
+                        `--max-depth`, and `--rr-depth` overrides.
+
+            Quality presets:
+              - min:    150x100, 1 spp,   max_depth=4,   rr_depth=2
+              - low:    300x200, 32 spp,  max_depth=16,  rr_depth=4
+              - medium: 600x400, 512 spp, max_depth=64,  rr_depth=16
+              - high:   1200x800, 4096 spp, max_depth=128, rr_depth=32
+
+            Camera and sun conventions:
+              - Coordinates are meteorological: +x east, +y north, +z up.
+              - Camera position uses relative coordinates where +/-1 reaches the domain edge
+                in x and y, and z spans the domain height.
+              - Azimuth is a meteorological bearing: 0 north, 90 east, 180 south, 270 west.
+              - Elevation is degrees above the horizon.
+
+            Output:
+              A PNG named `behold_ground_view_max_depth=<N>_rr_depth=<M>.png` written
+              to the output directory. Progressive checkpoint images may also be written
+              by the renderer while sampling accumulates.
+
+            Dependencies:
+              `behold --help` works without Mitsuba installed. Actual rendering requires
+              `mitsuba` and `drjit`.
+
+            {DATA_SELECTION_HELP}
+
+            Examples:
+              behold cloud.nc llvm min
+              behold cloud.nc cuda high --output renders
+              behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
+              behold cloud.nc llvm medium --camera-position 0 -0.99 -0.99 --camera-azimuth 0 --camera-elevation 35 --sun-azimuth 20 --sun-elevation 55
+              behold cloud.nc --help
+              behold grouped.nc cuda medium --group /physics/clouds --liquid-water-var qc_cloud --ice-water-var qi_cloud
+              behold custom.nc cuda medium --liquid-water-group /state/liquid --ice-water-group /state/ice --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
+            """
+        ),
     )
     parser.add_argument(
         "filename",
@@ -406,6 +499,7 @@ def cli():
         type=int,
         help="Print progress every N samples (default: 2 for rgb/mono, 16 for chromatic)"
     )
+    add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
     main(args.filename, args.backend, args.quality, args.output,
@@ -419,7 +513,8 @@ def cli():
          camera_fov=args.fov,
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
-         progress_interval=args.progress_interval)
+         progress_interval=args.progress_interval,
+         **dataset_selection_kwargs(args))
 
 
 if __name__ == "__main__":

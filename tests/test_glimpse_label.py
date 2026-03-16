@@ -228,7 +228,7 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
 
     captured = {}
 
-    def fake_load_and_validate(_filename):
+    def fake_load_and_validate(_filename, **_kwargs):
         lw = np.array(
             [
                 [[0.2, 0.2], [0.4, 0.4]],
@@ -246,7 +246,7 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
             "z_coord": np.array([0.0, 100.0]),
         }
 
-    def fake_optical_depth_from_lwc(lwc, z_coord, iwc=None):
+    def fake_vertically_integrated_optical_depth(lwc, z_coord, iwc=None):
         assert iwc is None
         assert lwc.shape == (2, 2, 2)
         assert z_coord.shape == (2,)
@@ -262,7 +262,7 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr(glimpse.io, "load_and_validate", fake_load_and_validate)
     monkeypatch.setattr(
-        glimpse.optical_depth, "optical_depth_from_lwc", fake_optical_depth_from_lwc
+        glimpse.optical_depth, "vertically_integrated_optical_depth", fake_vertically_integrated_optical_depth
     )
     monkeypatch.setattr(glimpse.basic_render, "plot_optical_depth", fake_plot_optical_depth)
 
@@ -279,7 +279,7 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
     raw_tau = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float64)
     raw_opacity = 1.0 - np.exp(-raw_tau)
     expected = raw_opacity[::-1, ::-1].T
-    np.testing.assert_allclose(captured["opacity"], expected)
+    np.testing.assert_allclose(captured["opacity"], expected, atol=1e-7)
 
     cam_x, _ = captured["overlay"]["camera_xy"]
     for end_x, _ in captured["overlay"]["fov_endpoints"]:

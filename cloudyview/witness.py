@@ -29,11 +29,30 @@ import time
 import math as pymath
 from pathlib import Path
 import numpy as np
+from textwrap import dedent
 
 from . import io, optical_depth, config
 from .angles import direction_from_azimuth_elevation
+from .cli_utils import (
+    CloudyViewHelpFormatter,
+    DATA_SELECTION_HELP,
+    add_dataset_selection_arguments,
+    dataset_selection_kwargs,
+)
 
-from numba import njit, prange
+try:
+    from numba import njit, prange
+except ImportError:  # pragma: no cover - only used when numba is absent
+    def njit(*args, **kwargs):
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    prange = range
 
 
 # ============================================================================
@@ -449,7 +468,19 @@ def main(filename: str, output: str = None,
          camera_position: list = None, camera_azimuth: float = None,
          camera_elevation: float = None, camera_fov: float = None,
          sun_azimuth: float = None, sun_elevation: float = None,
-         custom_size: tuple = None) -> None:
+         custom_size: tuple = None,
+         liquid_water_var: str = None,
+         ice_water_var: str = None,
+         dataset_group: str = None,
+         liquid_water_group: str = None,
+         ice_water_group: str = None,
+         coords_group: str = None,
+         x_coord_name: str = None,
+         y_coord_name: str = None,
+         z_coord_name: str = None,
+         x_dim: str = None,
+         y_dim: str = None,
+         z_dim: str = None) -> None:
     """
     Main function for witness.py
 
@@ -473,6 +504,14 @@ def main(filename: str, output: str = None,
         Sun elevation in degrees
     custom_size : tuple, optional
         Image size (width, height)
+    liquid_water_var, ice_water_var : str, optional
+        Explicit variable-name overrides for water-content arrays
+    dataset_group, liquid_water_group, ice_water_group, coords_group : str, optional
+        NetCDF group overrides for variable/coordinate lookup
+    x_coord_name, y_coord_name, z_coord_name : str, optional
+        Explicit coordinate variable names
+    x_dim, y_dim, z_dim : str, optional
+        Explicit dimension names for x/y/z
     """
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
@@ -502,7 +541,21 @@ def main(filename: str, output: str = None,
 
     try:
         # Load and validate data
-        data_dict = io.load_and_validate(filename)
+        data_dict = io.load_and_validate(
+            filename,
+            liquid_water_var=liquid_water_var,
+            ice_water_var=ice_water_var,
+            dataset_group=dataset_group,
+            liquid_water_group=liquid_water_group,
+            ice_water_group=ice_water_group,
+            coords_group=coords_group,
+            x_coord_name=x_coord_name,
+            y_coord_name=y_coord_name,
+            z_coord_name=z_coord_name,
+            x_dim=x_dim,
+            y_dim=y_dim,
+            z_dim=z_dim,
+        )
         lw_data = data_dict['liquid_water_data']
         iw_data = data_dict['ice_water_data']
 
@@ -691,7 +744,51 @@ QUALITY_PRESETS = {
 def cli():
     """Command-line interface for witness.py"""
     parser = argparse.ArgumentParser(
-        description="Cloud visualization with volume ray marching (video game-style rendering)"
+        prog="witness",
+        description="Interactive-style volumetric cloud rendering with fast ray marching.",
+        formatter_class=CloudyViewHelpFormatter,
+        epilog=dedent(
+            f"""
+            What `witness` does:
+              1. Loads a 3D cloud field from NetCDF.
+              2. Converts liquid water and optional ice water to extinction.
+              3. Ray-marches the volume with single- and multi-scattering approximations.
+              4. Writes one tone-mapped PNG named `witness_<input-stem>.png`.
+
+            Input requirements:
+              - A liquid water array is required; an ice water array is optional.
+              - The selected field must become 3D after dropping any single time dimension.
+              - Physical x/y/z coordinates are required to compute grid spacing and aspect ratio.
+
+            Camera and sun conventions:
+              - Coordinates are meteorological: +x east, +y north, +z up.
+              - Camera position uses relative coordinates where +/-1 reaches the domain edge
+                in x and y, and z spans the domain height.
+              - Azimuth is a meteorological bearing: 0 north, 90 east, 180 south, 270 west.
+              - Elevation is degrees above the horizon.
+
+            Quality:
+              Positional `quality` chooses a size preset:
+              - min: 150x100
+              - low: 300x200
+              - medium: 600x400
+              - high: 1600x1200
+              `--size WIDTH HEIGHT` overrides the preset.
+
+            Dependencies:
+              `witness --help` works without optional acceleration packages. Rendering is
+              fastest when `numba` is installed.
+
+            {DATA_SELECTION_HELP}
+
+            Examples:
+              witness cloud.nc
+              witness cloud.nc high --output renders
+              witness cloud.nc medium --size 1200 800 --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
+              witness cloud.nc --group /physics/clouds --liquid-water-var QCLOUD --ice-water-var QICE
+              witness custom.nc --liquid-water-group /state/liquid --ice-water-group /state/ice --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
+            """
+        ),
     )
     parser.add_argument("filename",
                         help="NetCDF file with cloud data")
@@ -716,6 +813,7 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
+    add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
     if args.size:
@@ -730,7 +828,8 @@ def cli():
          camera_fov=args.fov,
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
-         custom_size=size)
+         custom_size=size,
+         **dataset_selection_kwargs(args))
 
 
 if __name__ == "__main__":
