@@ -40,20 +40,20 @@ def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
 
     # Pressure and density at each level
     pressures = p0 * np.exp(-z / scale_height)
-    rho_air = pressures / (R * T)
+    rho_air = (pressures / (R * T)).astype(np.float32)
 
     # Liquid water contribution
     lwc_g_m3 = lwc * rho_air[np.newaxis, np.newaxis, :]
     rho_water = 1e6  # g/m³
     r_eff_liquid_m = re * 1e-6  # Convert μm to m
-    sigma_ext_liquid = 1.5 * lwc_g_m3 / (rho_water * r_eff_liquid_m)
+    sigma_ext_liquid = np.float32(1.5 / (rho_water * r_eff_liquid_m)) * lwc_g_m3
 
     # Ice water contribution (if present)
     if iwc is not None:
         iwc_g_m3 = iwc * rho_air[np.newaxis, np.newaxis, :]
         rho_ice = 917e3  # g/m³ (ice density ~917 kg/m³)
         r_eff_ice_m = re_ice * 1e-6  # Convert μm to m
-        sigma_ext_ice = 1.5 * iwc_g_m3 / (rho_ice * r_eff_ice_m)
+        sigma_ext_ice = np.float32(1.5 / (rho_ice * r_eff_ice_m)) * iwc_g_m3
         sigma_ext = sigma_ext_liquid + sigma_ext_ice
     else:
         print("  No ice water content detected; using liquid-only extinction.")
@@ -71,7 +71,7 @@ def optical_depth_from_water_paths(
     snow_re: float = 300.0
 ) -> np.ndarray:
     """
-    Calculate optical depth from water paths using generic relationships.
+    Calculate optical depth from water paths using relationships from Steve Krueger.
 
     Parameters
     ----------
@@ -99,15 +99,15 @@ def optical_depth_from_water_paths(
     Default values derived from standard cloud optics literature.
     """
     # Liquid water: LWP = 0.6292 * tau * re (g/m²)
-    tau_liquid = lwp / (0.6292 * liquid_re)
+    tau_liquid = lwp / np.float32(0.6292 * liquid_re)
 
     # Ice: IWP = 0.350 * tau * re (g/m²)
-    tau_ice = iwp / (0.350 * ice_re)
+    tau_ice = iwp / np.float32(0.350 * ice_re)
 
     # Snow: same relationship as ice
     tau_snow = np.zeros_like(tau_ice)
     if swp is not None:
-        tau_snow = swp / (0.350 * snow_re)
+        tau_snow = swp / np.float32(0.350 * snow_re)
     else:
         print("  No snow water path detected; using liquid+ice optical depth only.")
 
@@ -116,7 +116,7 @@ def optical_depth_from_water_paths(
     return tau_total
 
 
-def optical_depth_from_lwc(lwc: np.ndarray, z: np.ndarray,
+def vertically_integrated_optical_depth(lwc: np.ndarray, z: np.ndarray,
                            iwc: Optional[np.ndarray] = None,
                            swc: Optional[np.ndarray] = None) -> np.ndarray:
     """
@@ -147,12 +147,12 @@ def optical_depth_from_lwc(lwc: np.ndarray, z: np.ndarray,
 
     # Pressure and density at each level
     pressures = p0 * np.exp(-z / scale_height)
-    rho_air = pressures / (R * T)
+    rho_air = (pressures / (R * T)).astype(np.float32)
 
     # Calculate dz between levels
     dz = np.diff(z)
     # Pad dz to match z dimensions
-    dz = np.concatenate([dz, [dz[-1]]])
+    dz = np.concatenate([dz, [dz[-1]]]).astype(np.float32)
 
     # Integrate water content vertically to get water paths
     water_path_liquid = (lwc * rho_air[np.newaxis, np.newaxis, :] *

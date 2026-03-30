@@ -5,7 +5,6 @@ __pycache__/
 *.html
 # C extensions
 *.so
-*.png
 !tests/**/*.png
 *.nc
 mitsuba_repo_for_reference/*
@@ -146,7 +145,6 @@ plots/
 output/
 
 # Benchmark results (machine-specific)
-benchmarking/results.md
 benchmarking/output/
 
 # SLURM output files
