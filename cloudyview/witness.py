@@ -32,6 +32,7 @@ import numpy as np
 from textwrap import dedent
 
 from . import io, optical_depth, config
+from .domain import compute_domain_geometry
 from .angles import direction_from_azimuth_elevation
 from .cli_utils import (
     CloudyViewHelpFormatter,
@@ -150,10 +151,13 @@ def _hg_phase(cos_theta, g):
 
 
 @njit
-def _sample_sigma(sigma_world, px, py, pz, ar, nx, ny, nz):
-    """Sample extinction at a world-space position via trilinear interpolation."""
-    gx = (px / ar + 1.0) * 0.5 * (nx - 1)
-    gy = (py / ar + 1.0) * 0.5 * (ny - 1)
+def _sample_sigma(sigma_world, px, py, pz, ar_x, ar_y, nx, ny, nz):
+    """Sample extinction at a world-space position via trilinear interpolation.
+
+    World-space bounds: [-ar_x, ar_x] x [-ar_y, ar_y] x [-1, 1].
+    """
+    gx = (px / ar_x + 1.0) * 0.5 * (nx - 1)
+    gy = (py / ar_y + 1.0) * 0.5 * (ny - 1)
     gz = (pz + 1.0) * 0.5 * (nz - 1)
 
     if gx < 0 or gx > nx - 1.001 or gy < 0 or gy > ny - 1.001 or gz < 0 or gz > nz - 1.001:
@@ -164,10 +168,10 @@ def _sample_sigma(sigma_world, px, py, pz, ar, nx, ny, nz):
 
 @njit
 def _light_march(sigma_world, px, py, pz, sun_dx, sun_dy, sun_dz,
-                 ar, nx, ny, nz, n_steps):
+                 ar_x, ar_y, nx, ny, nz, n_steps):
     """March from a point toward the sun. Returns accumulated optical depth."""
     t_near, t_far = _ray_box(px, py, pz, sun_dx, sun_dy, sun_dz,
-                              -ar, -ar, -1.0, ar, ar, 1.0)
+                              -ar_x, -ar_y, -1.0, ar_x, ar_y, 1.0)
     tau = 0.0
     if t_far <= 0:
         return tau
@@ -179,7 +183,7 @@ def _light_march(sigma_world, px, py, pz, sun_dx, sun_dy, sun_dz,
         sy = py + t * sun_dy
         sz = pz + t * sun_dz
 
-        sigma = _sample_sigma(sigma_world, sx, sy, sz, ar, nx, ny, nz)
+        sigma = _sample_sigma(sigma_world, sx, sy, sz, ar_x, ar_y, nx, ny, nz)
         tau += sigma * dt
         if tau > 80.0:
             break
@@ -234,7 +238,7 @@ def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
 # ============================================================================
 
 @njit(parallel=True)
-def _render_image(sigma_world, nx, ny, nz, ar,
+def _render_image(sigma_world, nx, ny, nz, ar_x, ar_y,
                   cam_ox, cam_oy, cam_oz,
                   cam_fx, cam_fy, cam_fz,
                   cam_rx, cam_ry, cam_rz,
@@ -273,7 +277,7 @@ def _render_image(sigma_world, nx, ny, nz, ar,
         # --- Ray-box intersection ---
         t_near, t_far = _ray_box(cam_ox, cam_oy, cam_oz,
                                   d_x, d_y, d_z,
-                                  -ar, -ar, -1.0, ar, ar, 1.0)
+                                  -ar_x, -ar_y, -1.0, ar_x, ar_y, 1.0)
 
         # Ocean intersection
         t_ocean = 1e30
@@ -310,7 +314,7 @@ def _render_image(sigma_world, nx, ny, nz, ar,
 
                     tau_ocean = _light_march(sigma_world, o_x, o_y, o_z,
                                              sun_dx, sun_dy, sun_dz,
-                                             ar, nx, ny, nz, n_light_steps)
+                                             ar_x, ar_y, nx, ny, nz, n_light_steps)
                     t_sun_ocean = pymath.exp(-tau_ocean)
                     cos_sun_n = max(0.0, sun_dz)  # dot(surface_normal, sun_dir)
 
@@ -336,7 +340,7 @@ def _render_image(sigma_world, nx, ny, nz, ar,
 
                 # Sample extinction
                 sigma = _sample_sigma(sigma_world, p_x, p_y, p_z,
-                                      ar, nx, ny, nz)
+                                      ar_x, ar_y, nx, ny, nz)
 
                 # Adaptive step size: limit optical depth per step to ~0.5
                 if sigma > 0.01:
@@ -358,7 +362,7 @@ def _render_image(sigma_world, nx, ny, nz, ar,
                 # --- Sun light march ---
                 tau_sun = _light_march(sigma_world, p_x, p_y, p_z,
                                        sun_dx, sun_dy, sun_dz,
-                                       ar, nx, ny, nz, n_light_steps)
+                                       ar_x, ar_y, nx, ny, nz, n_light_steps)
 
                 # --- Multi-scattering in-scattering ---
                 # Schneider/Hillaire approximation: each octave represents
@@ -417,10 +421,10 @@ def _render_image(sigma_world, nx, ny, nz, ar,
             o_z = ocean_z
 
             # Only if not too far away
-            if abs(o_x) < ar * 100 and abs(o_y) < ar * 100:
+            if abs(o_x) < ar_x * 100 and abs(o_y) < ar_y * 100:
                 tau_ocean = _light_march(sigma_world, o_x, o_y, o_z,
                                          sun_dx, sun_dy, sun_dz,
-                                         ar, nx, ny, nz, n_light_steps)
+                                         ar_x, ar_y, nx, ny, nz, n_light_steps)
                 t_sun_ocean = pymath.exp(-tau_ocean)
                 cos_sun_n = max(0.0, sun_dz)
 
@@ -575,14 +579,6 @@ def main(filename: str, output: str = None,
             lw_np = lw_np[0]
 
         nx_d, ny_d, nz_d = lw_np.shape
-        if len(x_coord) < 2 or len(y_coord) < 2 or len(z_coord) < 2:
-            raise ValueError(
-                "x/y/z coordinates must each contain at least 2 points to determine grid spacing."
-            )
-
-        dx = float(x_coord[1] - x_coord[0])
-        dy = float(y_coord[1] - y_coord[0])
-        dz = float(z_coord[1] - z_coord[0])
 
         # Process ice water content
         iw_np = None
@@ -597,18 +593,20 @@ def main(filename: str, output: str = None,
         sigma_ext = optical_depth.compute_extinction_field(
             lw_np, z_coord, re=10.0, iwc=iw_np, re_ice=30.0)
 
-        # Domain geometry
-        width_x = nx_d * dx
-        width_y = ny_d * dy
-        height_z = nz_d * dz
-        ar = width_x / height_z  # aspect ratio
+        # Domain geometry (shared with behold)
+        geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx_d, ny_d, nz_d)
+        ar_x, ar_y = geom.ar_x, geom.ar_y
 
-        print(f"  Grid: {nx_d} x {ny_d} x {nz_d}, spacing: {dx:.1f} x {dy:.1f} x {dz:.1f} m")
-        print(f"  Domain: {width_x:.0f} x {width_y:.0f} x {height_z:.0f} m, aspect ratio: {ar:.2f}")
+        print(f"  Grid: {nx_d} x {ny_d} x {nz_d}, spacing: {geom.dx:.1f} x {geom.dy:.1f} m")
+        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m, "
+              f"aspect ratio: {ar_x:.2f} x {ar_y:.2f}")
 
         # Scale extinction to world space (same as behold)
+        # NOTE: linear world-z to grid-index mapping assumes uniform dz.
+        # Non-uniform dz causes slight vertical distortion in witness;
+        # behold (Mitsuba volume grid) handles it correctly.
         ext_mult = render_config['extinction_multiplier']
-        sigma_world = (sigma_ext * ext_mult * height_z).astype(np.float64)
+        sigma_world = (sigma_ext * ext_mult * geom.height_z).astype(np.float64)
         sigma_world = np.ascontiguousarray(sigma_world)
 
         sigma_max = np.max(sigma_world)
@@ -618,8 +616,8 @@ def main(filename: str, output: str = None,
         # Camera setup
         rel_pos = cam_config['position']
         cam_origin = np.array([
-            rel_pos[0] * ar,
-            rel_pos[1] * ar,
+            rel_pos[0] * ar_x,
+            rel_pos[1] * ar_y,
             rel_pos[2]
         ])
 
@@ -667,7 +665,7 @@ def main(filename: str, output: str = None,
         # Warmup numba compilation
         print("  Compiling render kernel (first run only)...", end="", flush=True)
         warmup = np.zeros((1, 1, 3), dtype=np.float64)
-        _render_image(sigma_world, nx_d, ny_d, nz_d, ar,
+        _render_image(sigma_world, nx_d, ny_d, nz_d, ar_x, ar_y,
                       cam_origin[0], cam_origin[1], cam_origin[2],
                       forward[0], forward[1], forward[2],
                       right[0], right[1], right[2],
@@ -685,7 +683,7 @@ def main(filename: str, output: str = None,
         print("  Rendering...", end="", flush=True)
         render_start = time.perf_counter()
 
-        _render_image(sigma_world, nx_d, ny_d, nz_d, ar,
+        _render_image(sigma_world, nx_d, ny_d, nz_d, ar_x, ar_y,
                       cam_origin[0], cam_origin[1], cam_origin[2],
                       forward[0], forward[1], forward[2],
                       right[0], right[1], right[2],

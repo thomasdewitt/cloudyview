@@ -7,7 +7,7 @@ A Python toolkit for 3D cloud field visualization with optical depth calculation
 CloudyView provides three tiers of visualization capabilities for 3D cloud condensate fields (from LES, cloud-resolving models, or other sources):
 
 - **Glimpse** (`glimpse`): Quick optical depth calculation + matplotlib 2D visualization
-- **Witness** (`witness`): PyVista 3D isosurface rendering with configurable views
+- **Witness** (`witness`): Fast volumetric ray marching with multi-scattering approximation
 - **Behold** (`behold`): Photorealistic Monte Carlo path tracing with Mitsuba 3
 
 ## Coordinate System
@@ -53,31 +53,33 @@ glimpse example_cloud.nc
 
 Generates a matplotlib visualization of column optical depth.
 
-### Witness: 3D Isosurface Views
+### Witness: Fast Volumetric Rendering
 
 ```bash
 witness example_cloud.nc
 ```
 
-Generates multiple 3D views (overhead, north oblique, west oblique) using PyVista isosurface rendering.
+Generates a volumetric ray-marched render with multi-scattering, procedural sky, and ocean surface.
 
 Options:
 
-- `--interactive`: Export interactive HTML instead of PNG
-- `-n 10`: Number of isosurfaces (default: 10)
-- `--min-threshold 0.001 --max-threshold 1.0`: Optical depth range
+- `--camera-position X Y Z`: Camera position in relative coords (default: 0 0 -0.999)
+- `--camera-azimuth`, `--camera-elevation`, `--fov`: Camera orientation
+- `--sun-azimuth`, `--sun-elevation`: Sun position
+- `--size W H`: Image dimensions
+- Quality presets: `min`, `low`, `medium` (default), `high`
 
 ### Behold: Photorealistic Rendering
 
 ```bash
-behold example_cloud.nc llvm medium
+behold example_cloud.nc --cpu
 ```
 
 Generates photorealistic path-traced render using Mitsuba 3.
 
 Arguments:
 
-- `backend`: `llvm` (CPU) or `cuda` (GPU) - **required**
+- `--cpu` or `--gpu`: Backend selection (required)
 - `quality`: `min`, `low`, `medium` (default), `high`, or `custom`
 
 Quality tiers:
@@ -104,8 +106,6 @@ Options:
 | `--sun-azimuth`           | `20`           | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
 | `--sun-elevation`         | `55`           | Sun elevation in degrees (angle above horizon)           |
 
-Camera and sun arguments override values from the config file.
-
 ## Input Data Requirements
 
 NetCDF files must contain:
@@ -115,35 +115,6 @@ NetCDF files must contain:
 - **Spatial dimensions**: Must be 3D (e.g., x, y, z or lon, lat, height)
 - **Temporal dimension**: Must contain exactly one timestep
 
-## Configuration
-
-Witness and Behold can be configured via YAML files. Settings include camera positions, sun angles, rendering parameters, and more.
-
-### Configuration File Locations
-
-CloudyView searches for configuration files in this order:
-
-1. `./cloudyview.yaml` (current directory)
-2. `~/.cloudyview.yaml` (home directory)
-3. Built-in defaults if no config file found
-
-### Creating a Configuration File
-
-Copy the example configuration:
-
-```bash
-cp cloudyview.yaml.example cloudyview.yaml
-```
-
-Then edit `cloudyview.yaml` to customize:
-
-- Camera positions (relative coordinates where ±1.0 = domain edge)
-- Sun azimuth and elevation
-- Rendering parameters (max depth, exposure, etc.)
-- Ocean surface settings
-
-See `cloudyview.yaml.example` for full documentation of all options.
-
 ## Usage Examples
 
 ### Quick Visualization Pipeline
@@ -152,46 +123,43 @@ See `cloudyview.yaml.example` for full documentation of all options.
 # 1. Quick 2D overview
 glimpse my_cloud_data.nc
 
-# 2. 3D isosurface views
+# 2. Fast volumetric render
 witness my_cloud_data.nc
 
 # 3. Photorealistic render
-behold my_cloud_data.nc cuda high --output ./renders
+behold my_cloud_data.nc high --gpu --output ./renders
 ```
 
 ### Witness Examples
 
 ```bash
-# Default views (overhead, north, west)
+# Default render
 witness cloud.nc
 
-# Interactive HTML export
-witness cloud.nc --interactive
+# High quality with custom camera
+witness cloud.nc high --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
 
-# Single high optical depth isosurface
-witness cloud.nc --threshold 1.0
-
-# Custom threshold range with more surfaces
-witness cloud.nc -n 20 --min-threshold 0.0001 --max-threshold 10.0
+# Custom size
+witness cloud.nc medium --size 1200 800
 ```
 
 ### Behold Examples
 
 ```bash
 # Fast CPU preview
-behold cloud.nc llvm min
+behold cloud.nc --cpu
 
 # Balanced GPU render
-behold cloud.nc cuda medium
+behold cloud.nc --gpu
 
 # Production quality render
-behold cloud.nc cuda high --output ./final_renders
+behold cloud.nc high --gpu --output ./final_renders
 
 # Quick GPU preview
-behold cloud.nc cuda low
+behold cloud.nc low --gpu
 
 # Custom quality: 1024x768 at 256 spp with max_depth=64
-behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
+behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
 ```
 
 ## Module Structure
@@ -210,27 +178,31 @@ behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 
   - `compute_extinction_field()`: Compute extinction coefficient from water content
   - Supports variable vertical spacing
 
-- **`config.py`**: Configuration system
-  
-  - `load_config()`: Load configuration from YAML file
+- **`domain.py`**: Shared domain geometry
+
+  - `DomainGeometry`: Dataclass with physical dimensions and aspect ratios
+  - `compute_domain_geometry()`: Factory from coordinate arrays (handles non-uniform dz)
+
+- **`config.py`**: Built-in configuration defaults
+
   - `get_witness_config()`: Get witness configuration
   - `get_behold_config()`: Get behold configuration
 
 - **`basic_render.py`**: Matplotlib-based visualization
-  
+
   - Column optical depth visualization
 
 - **`radiative_transfer.py`**: Mitsuba 3 Monte Carlo path tracing
-  
+
   - `load_mie_phase_tables()`: Load Mie scattering phase functions
-  - `render_view()`: Render a single view with Mitsuba
+  - `render_view()`: Render a single RGB view with Mitsuba
   - `look_at_world_up()`: Camera transform helper
-  - Support for RGB rendering with physically-based sky
+  - Physically-based Preetham sunsky model
 
 ### CLI Scripts
 
 - **`glimpse.py`**: Entry point for quick 2D visualization
-- **`witness.py`**: Entry point for PyVista 3D isosurface rendering
+- **`witness.py`**: Entry point for volumetric ray marching
 - **`behold.py`**: Entry point for Mitsuba photorealistic rendering
 
 ## Features
@@ -238,7 +210,7 @@ behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 
 ### Visualizations
 
 - **Glimpse**: 2D column optical depth visualization
-- **Witness**: Multiple 3D isosurface views with physically-based opacity
+- **Witness**: Fast volumetric ray marching with multi-scattering
 - **Behold**: Photorealistic Monte Carlo path tracing with Mitsuba 3
 
 ### Data Handling
@@ -254,17 +226,16 @@ behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 
 - Full volumetric path tracing with Mitsuba 3
 - Physically-based Preetham sunsky model
 - Accurate Mie scattering from pre-computed phase functions
-- Configurable camera and sun positions via YAML
+- Configurable camera and sun positions via CLI flags
 - Multiple quality levels from instant preview to production
 - Progressive rendering with checkpoints
 - Ocean surface with realistic reflections
 
 ### Configuration
 
-- YAML-based configuration system
-- Relative coordinate positioning
-- Multiple camera views for witness
-- Customizable rendering parameters
+- Built-in defaults with CLI overrides
+- Relative coordinate positioning (±1.0 = domain edge)
+- Customizable rendering parameters via CLI flags
 
 ## Dependencies
 
@@ -274,11 +245,9 @@ behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 
 - `matplotlib>=3.3`: 2D plotting
 - `xarray>=0.18`: NetCDF file handling with labeled arrays
 - `netCDF4>=1.5`: NetCDF4 file support
-- `pyyaml>=5.4`: Configuration file parsing
-
 ### Optional Dependencies
 
-- **For witness (3D isosurfaces)**: `pyvista>=0.37.0`
+- **For witness (volumetric rendering)**: `numba>=0.56`
 - **For behold (photorealistic rendering)**: `mitsuba>=3.0.0`, `drjit>=0.3.0`
 
 Install all optional dependencies:

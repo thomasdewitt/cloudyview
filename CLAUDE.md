@@ -22,9 +22,9 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 
 ## Key Commands
 
-- `behold <file.nc> <backend> [quality]` - Render cloud field with radiative transfer
-- `glimpse <file.nc>` - Quick 2D visualization
-- `witness <file.nc>` - 3D interactive visualization
+- `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render (Mitsuba 3)
+- `glimpse <file.nc>` - Quick 2D optical depth visualization
+- `witness <file.nc>` - Fast volumetric ray-marched render
 
 ## Running Tests
 

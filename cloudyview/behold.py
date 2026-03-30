@@ -1,35 +1,17 @@
 #!/usr/bin/env python
 """
-behold.py: Cloud field visualization with optical depth and 3D radiative transfer (Mitsuba).
+behold.py: Photorealistic cloud rendering with Mitsuba 3 path tracing.
 
 Usage:
-    python behold.py <filename.nc> <backend> [quality] [--output <path>]
+    behold <filename.nc> --cpu|--gpu [quality] [options]
 
-    backend: llvm or cuda (required)
-    quality: min (150x100, spp=1, max_depth=4, rr_depth=2),
-             low (300x200, spp=32, max_depth=16, rr_depth=4),
-             medium (600x400, spp=512, max_depth=64, rr_depth=16, default),
-             high (1200x800, spp=4096, max_depth=128, rr_depth=32),
-             custom
+    quality: min, low, medium (default), high, custom
+    For custom quality: --spp N --size W H --max-depth N --rr-depth N
 
-    For custom quality, use: --spp N --size W H --max-depth N --rr-depth N
-
-    Camera/sun options (override config file):
-        --camera-position X Y Z   Camera position in relative coords (±1.0 = domain edge)
-        --camera-azimuth DEG      Camera azimuth (0=North, 90=East, 180=South, 270=West)
-        --camera-elevation DEG    Camera elevation (angle above horizon)
-        --fov DEG                 Camera field of view
-        --sun-azimuth DEG         Sun azimuth (0=North, 90=East, 180=South, 270=West)
-        --sun-elevation DEG       Sun elevation (angle above horizon)
-
-This script provides a realistic 3D view of your cloud data using:
-1. Optical depth calculation via extinction coefficient
-2. Mitsuba 3 Monte Carlo path tracing with physically-based sky
-3. Accurate Mie scattering phase functions from Bouthors (2008)
-4. Configurable camera and sun positions via defaults + CLI overrides
-
-Rendering uses built-in default settings from config.py.
-CLI arguments override those defaults.
+Renders a 3D cloud field using Monte Carlo volumetric path tracing with
+physically-based Preetham sunsky illumination and Mie scattering phase
+functions. Supports arbitrary non-square domains and non-uniform vertical
+grid spacing.
 
 Coordinate System (Meteorological Convention):
 - East  = +x direction
@@ -45,6 +27,7 @@ import numpy as np
 from textwrap import dedent
 
 from . import io, optical_depth, config
+from .domain import compute_domain_geometry
 from .angles import direction_from_azimuth_elevation
 from .cli_utils import (
     CloudyViewHelpFormatter,
@@ -174,15 +157,16 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             lw_np = lw_np[0]  # Remove time dimension if present
 
         nx, ny, nz = lw_np.shape
-        if len(x_coord) < 2 or len(y_coord) < 2 or len(z_coord) < 2:
-            raise ValueError(
-                "x/y/z coordinates must each contain at least 2 points to determine grid spacing."
-            )
 
-        # Calculate grid spacing
-        dx = float(x_coord[1] - x_coord[0])
-        dy = float(y_coord[1] - y_coord[0])
-        dz = float(z_coord[1] - z_coord[0])
+        # Domain geometry (shared with witness)
+        geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz)
+        ar_x, ar_y = geom.ar_x, geom.ar_y
+        dx, dy = geom.dx, geom.dy
+        dz = float(z_coord[1] - z_coord[0])  # first spacing, for interface compat
+
+        print(f"  Grid: {nx} x {ny} x {nz}, spacing: {dx:.1f} x {dy:.1f} m")
+        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m, "
+              f"aspect ratio: {ar_x:.2f} x {ar_y:.2f}")
 
         # Process ice water content if present
         iw_np = None
@@ -215,12 +199,6 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0,
                                                           iwc=iw_np, re_ice=30.0)
 
-        # Domain dimensions
-        width_x = nx * dx
-        width_y = ny * dy
-        height_z = nz * dz
-        aspect_ratio = width_x / height_z
-
 
         # Create output directory if needed
         if output:
@@ -229,14 +207,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         else:
             output_dir = Path(".")
 
-        # Set Mitsuba backend explicitly based on CLI argument
-        # Validate backend choice
-        if backend.lower() not in ['llvm', 'cuda']:
-            raise ValueError(f"Invalid backend '{backend}'. Must be 'llvm' or 'cuda'.")
-
-        # Determine render mode from config (default to 'rgb')
-        render_mode = 'rgb'  # Fixed to RGB mode for now
-        variant = f'{backend.lower()}_ad_{render_mode}'
+        # Set Mitsuba backend (AD variant required by most Mitsuba builds)
+        variant = f'{backend}_ad_rgb'
         mi.set_variant(variant)
         print(f"  Using Mitsuba variant: {variant}")
 
@@ -272,9 +244,9 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         # Relative coords: ±1.0 = domain edge
         rel_pos = camera_config['position']
         camera_origin = [
-            rel_pos[0] * aspect_ratio,  # x in Mitsuba normalized cube (±ar)
-            rel_pos[1] * aspect_ratio,  # y in Mitsuba normalized cube (±ar)
-            rel_pos[2]        # z in Mitsuba normalized cube (±1)
+            rel_pos[0] * ar_x,  # x in world space (±ar_x)
+            rel_pos[1] * ar_y,  # y in world space (±ar_y)
+            rel_pos[2]          # z in world space (±1)
         ]
 
         # Compute look direction vector from meteorological azimuth/elevation
@@ -319,7 +291,9 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             'rr_depth': rendering_config['rr_depth'],
             'sampler': {'type': 'independent', 'sample_count': spp},
             'seed': 0,
-            'render_mode': render_mode,
+            'ar_x': ar_x,
+            'ar_y': ar_y,
+            'height_z': geom.height_z,
         }
 
         # Add progress_interval if specified
@@ -375,9 +349,12 @@ def cli():
 
             Positional arguments:
               filename  Path to the NetCDF file.
-              backend   Mitsuba execution backend: `llvm` for CPU or `cuda` for GPU.
               quality   Preset render budget. `custom` enables the `--spp`, `--size`,
                         `--max-depth`, and `--rr-depth` overrides.
+
+            Backend (required, pick one):
+              --cpu     Use LLVM CPU backend.
+              --gpu     Use CUDA GPU backend.
 
             Quality presets:
               - min:    150x100, 1 spp,   max_depth=4,   rr_depth=2
@@ -404,13 +381,13 @@ def cli():
             {DATA_SELECTION_HELP}
 
             Examples:
-              behold cloud.nc llvm min
-              behold cloud.nc cuda high --output renders
-              behold cloud.nc cuda custom --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
-              behold cloud.nc llvm medium --camera-position 0 -0.99 -0.99 --camera-azimuth 0 --camera-elevation 35 --sun-azimuth 20 --sun-elevation 55
+              behold cloud.nc --cpu
+              behold cloud.nc high --gpu --output renders
+              behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
+              behold cloud.nc --cpu --camera-position 0 -0.99 -0.99 --camera-azimuth 0 --camera-elevation 35 --sun-azimuth 20 --sun-elevation 55
               behold cloud.nc --help
-              behold grouped.nc cuda medium --group /physics/clouds --liquid-water-var qc_cloud --ice-water-var qi_cloud
-              behold custom.nc cuda medium --liquid-water-group /state/liquid --ice-water-group /state/ice --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
+              behold grouped.nc --gpu --group /physics/clouds --liquid-water-var qc_cloud --ice-water-var qi_cloud
+              behold custom.nc --gpu --liquid-water-group /state/liquid --ice-water-group /state/ice --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
             """
         ),
     )
@@ -418,10 +395,14 @@ def cli():
         "filename",
         help="NetCDF file with cloud data (must contain qc/ql/LWC variable and be 3D single-timestep)"
     )
-    parser.add_argument(
-        "backend",
-        choices=['llvm', 'cuda'],
-        help="Mitsuba backend: llvm (CPU) or cuda (GPU)"
+    backend_group = parser.add_mutually_exclusive_group(required=True)
+    backend_group.add_argument(
+        "--cpu", action="store_true",
+        help="Use LLVM CPU backend"
+    )
+    backend_group.add_argument(
+        "--gpu", action="store_true",
+        help="Use CUDA GPU backend"
     )
     parser.add_argument(
         "quality",
@@ -497,12 +478,13 @@ def cli():
     parser.add_argument(
         "--progress-interval",
         type=int,
-        help="Print progress every N samples (default: 2 for rgb/mono, 16 for chromatic)"
+        help="Print progress every N samples (default: 2)"
     )
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
-    main(args.filename, args.backend, args.quality, args.output,
+    backend = 'llvm' if args.cpu else 'cuda'
+    main(args.filename, backend, args.quality, args.output,
          custom_spp=args.spp,
          custom_size=tuple(args.size) if args.size else None,
          custom_max_depth=args.max_depth,

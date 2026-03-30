@@ -116,8 +116,8 @@ def test_behold_cli_passes_dataset_override_args(monkeypatch):
         [
             "behold",
             "input.nc",
-            "llvm",
             "medium",
+            "--cpu",
             "--group",
             "physics/clouds",
             "--liquid-water-var",
