@@ -177,6 +177,14 @@ def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str) -> None
         raise ValueError(f"Data has {len(spatial_dims)} spatial dimensions. "
                        "3D spatial data is required (e.g., x, y, z).")
 
+    # Each spatial dimension must have at least 2 points for grid spacing
+    for dim in spatial_dims:
+        if data_var.sizes[dim] < 2:
+            raise ValueError(
+                f"Dimension '{dim}' has only {data_var.sizes[dim]} point. "
+                "At least 2 points per spatial dimension are required."
+            )
+
 
 def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataArray:
     """

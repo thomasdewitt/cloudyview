@@ -18,9 +18,9 @@ CloudyView uses the **meteorological convention**:
 - **North** = +y direction
 - **Up** = +z direction
 
-Azimuth angles are measured counterclockwise from East:
+Azimuth angles use the meteorological convention (clockwise from North):
 
-- 0° = East, 90° = North, 180° = West, 270° = South
+- 0° = North, 90° = East, 180° = South, 270° = West
 
 Elevation angles are measured from the horizon:
 

@@ -149,10 +149,14 @@ def vertically_integrated_optical_depth(lwc: np.ndarray, z: np.ndarray,
     pressures = p0 * np.exp(-z / scale_height)
     rho_air = (pressures / (R * T)).astype(np.float32)
 
-    # Calculate dz between levels
-    dz = np.diff(z)
-    # Pad dz to match z dimensions
-    dz = np.concatenate([dz, [dz[-1]]]).astype(np.float32)
+    # Cell thickness for cell-centred coordinates.
+    # Interior cells: half-distance to neighbour below + half-distance above.
+    # Boundary cells: half-distance to sole neighbour + that same half outward.
+    spacing = np.diff(z)
+    dz = np.empty_like(z, dtype=np.float32)
+    dz[0] = spacing[0]                              # bottom boundary
+    dz[1:-1] = 0.5 * (spacing[:-1] + spacing[1:])   # interior
+    dz[-1] = spacing[-1]                             # top boundary
 
     # Integrate water content vertically to get water paths
     water_path_liquid = (lwc * rho_air[np.newaxis, np.newaxis, :] *

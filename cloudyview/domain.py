@@ -66,8 +66,8 @@ def compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz):
             "to determine grid spacing."
         )
 
-    dx = float(x_coord[1] - x_coord[0])
-    dy = float(y_coord[1] - y_coord[0])
+    dx = abs(float(x_coord[1] - x_coord[0]))
+    dy = abs(float(y_coord[1] - y_coord[0]))
 
     width_x = nx * dx
     width_y = ny * dy
@@ -75,9 +75,10 @@ def compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz):
     # Vertical extent from actual coordinate range + half-cells at boundaries.
     # z_coord values are cell centres, so the full domain spans from
     # half a cell below the first centre to half a cell above the last.
-    dz_first = float(z_coord[1] - z_coord[0])
-    dz_last = float(z_coord[-1] - z_coord[-2])
-    height_z = float(z_coord[-1] - z_coord[0]) + 0.5 * dz_first + 0.5 * dz_last
+    # abs() handles descending coordinate order.
+    dz_first = abs(float(z_coord[1] - z_coord[0]))
+    dz_last = abs(float(z_coord[-1] - z_coord[-2]))
+    height_z = abs(float(z_coord[-1] - z_coord[0])) + 0.5 * dz_first + 0.5 * dz_last
 
     ar_x = width_x / height_z
     ar_y = width_y / height_z
