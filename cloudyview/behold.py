@@ -69,7 +69,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         Render quality: 'min' (150x100, spp=1, max_depth=4, rr_depth=2),
         'low' (300x200, spp=32, max_depth=16, rr_depth=4),
         'medium' (600x400, spp=512, max_depth=64, rr_depth=16, default),
-        'high' (1200x800, spp=4096, max_depth=128, rr_depth=32),
+        'high' (1200x800, spp=2048, max_depth=96, rr_depth=64),
         or 'custom' (user-specified via --spp, --size, --max-depth, --rr-depth)
     output : str, optional
         Output directory for renders
@@ -217,7 +217,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 2, 'max_depth': 4},
             'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 4, 'max_depth': 16},
             'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 16, 'max_depth': 64},
-            'high': {'resolution': (1200, 800), 'spp': 4096, 'rr_depth': 32, 'max_depth': 128}
+            'high': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96}
         }
 
         if quality == 'custom':
@@ -360,7 +360,7 @@ def cli():
               - min:    150x100, 1 spp,   max_depth=4,   rr_depth=2
               - low:    300x200, 32 spp,  max_depth=16,  rr_depth=4
               - medium: 600x400, 512 spp, max_depth=64,  rr_depth=16
-              - high:   1200x800, 4096 spp, max_depth=128, rr_depth=32
+              - high:   1200x800, 2048 spp, max_depth=96, rr_depth=64
 
             Camera and sun conventions:
               - Coordinates are meteorological: +x east, +y north, +z up.
@@ -413,7 +413,7 @@ def cli():
             "Render quality: min (150x100, spp=1, max_depth=4, rr_depth=2), "
             "low (300x200, spp=32, max_depth=16, rr_depth=4), "
             "medium (600x400, spp=512, max_depth=64, rr_depth=16, default), "
-            "high (1200x800, spp=4096, max_depth=128, rr_depth=32), "
+            "high (1200x800, spp=2048, max_depth=96, rr_depth=64), "
             "custom (use --spp, --size, --max-depth, --rr-depth)"
         )
     )
