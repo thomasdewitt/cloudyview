@@ -419,3 +419,115 @@ This file contains benchmark results for CloudyView behold renders.
 ### Result
 
 **Time: 823.99 seconds**
+---
+
+## 2026-04-10 23:24:41 - 400x300 Fast
+
+### Hardware
+
+- **OS**: Linux 6.19.11-300.fc44.x86_64
+- **CPU**:  (32 cores)
+- **GPU**: NVIDIA GeForce RTX 5080 (15 GB)
+- **Memory**: psutil not installed
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 400x300
+- **SPP**: 32
+- **rr_depth**: 4
+- **max_depth**: 8
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 68.93 seconds**
+
+---
+
+## 2026-04-10 23:34:36 - 400x300 High Quality
+
+### Hardware
+
+- **OS**: Linux 6.19.11-300.fc44.x86_64
+- **CPU**:  (32 cores)
+- **GPU**: NVIDIA GeForce RTX 5080 (15 GB)
+- **Memory**: psutil not installed
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 400x300
+- **SPP**: 32
+- **rr_depth**: 64
+- **max_depth**: 128
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 594.96 seconds**
+
+---
+
+## 2026-04-10 23:43:36 - 400x300 Fast
+
+### Hardware
+
+- **OS**: Linux 6.19.11-300.fc44.x86_64
+- **CPU**:  (32 cores)
+- **GPU**: NVIDIA GeForce RTX 5080 (15 GB)
+- **Memory**: psutil not installed
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 400x300
+- **SPP**: 32
+- **rr_depth**: 4
+- **max_depth**: 8
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 68.04 seconds**
+
+---
+
+## 2026-04-10 23:53:30 - 400x300 High Quality
+
+### Hardware
+
+- **OS**: Linux 6.19.11-300.fc44.x86_64
+- **CPU**:  (32 cores)
+- **GPU**: NVIDIA GeForce RTX 5080 (15 GB)
+- **Memory**: psutil not installed
+- **Backend**: cuda
+
+### Configuration
+
+- **Data file**: TWPICE_subvolume_256x256_5km.nc
+- **Resolution**: 400x300
+- **SPP**: 32
+- **rr_depth**: 64
+- **max_depth**: 128
+- **Camera position**: [0, 0, -0.9]
+- **Camera azimuth/elevation**: 90.0° / 35.0°
+- **Camera FOV**: 100.0°
+- **Sun azimuth/elevation**: 70.0° / 55.0°
+
+### Result
+
+**Time: 594.90 seconds**
+
