@@ -2,19 +2,21 @@
 
 ## Python Environment
 
-**IMPORTANT**: This project requires a specific conda environment:
+This project uses **uv** for dependency management. A `.venv` and `uv.lock` are already present.
+
+When running Python commands via Bash, use `uv run`:
 
 ```bash
-conda activate cloud-vis
+uv run python your_command_here
+uv run witness cloud.nc
 ```
 
-When running Python commands via Bash, always use:
+For commands that need optional dependencies (tests, CUDA):
 
 ```bash
-conda activate cloud-vis && python your_command_here
+uv run --extra dev python -m pytest tests/ -v
+uv run --extra cuda witness cloud.nc --gpu
 ```
-
-The bash shell resets between commands, so conda environment activation must be included in each command that requires Python packages.
 
 ## Project Overview
 
@@ -24,18 +26,18 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 
 - `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render (Mitsuba 3)
 - `glimpse <file.nc>` - Quick 2D optical depth visualization
-- `witness <file.nc>` - Fast volumetric ray-marched render
+- `witness <file.nc> [--gpu]` - Fast volumetric ray-marched render (CPU default, optional CUDA GPU)
 
 ## Running Tests
 
 ```bash
-conda activate cloud-vis && pytest tests/ -v
+uv run --extra dev python -m pytest tests/ -v
 ```
 
 To generate reference images for render tests:
 
 ```bash
-conda activate cloud-vis && python tests/generate_references.py
+uv run python tests/generate_references.py
 ```
 
 ## Data Files
