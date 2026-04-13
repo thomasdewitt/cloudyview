@@ -55,6 +55,13 @@ except ImportError:  # pragma: no cover - only used when numba is absent
 
     prange = range
 
+_CUDA_AVAILABLE = False
+try:
+    from .witness_cuda import render_image_cuda
+    _CUDA_AVAILABLE = True
+except (ImportError, Exception):
+    pass
+
 
 # ============================================================================
 # Numba JIT helper functions
@@ -484,7 +491,8 @@ def main(filename: str, output: str = None,
          z_coord_name: str = None,
          x_dim: str = None,
          y_dim: str = None,
-         z_dim: str = None) -> None:
+         z_dim: str = None,
+         gpu: bool = False) -> None:
     """
     Main function for witness.py
 
@@ -517,6 +525,13 @@ def main(filename: str, output: str = None,
     x_dim, y_dim, z_dim : str, optional
         Explicit dimension names for x/y/z
     """
+    if gpu and not _CUDA_AVAILABLE:
+        print("Error: --gpu requested but CUDA is not available.",
+              file=sys.stderr)
+        print("  Requires: numba with CUDA support and an NVIDIA GPU.",
+              file=sys.stderr)
+        sys.exit(1)
+
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
 
@@ -662,40 +677,51 @@ def main(filename: str, output: str = None,
         # Allocate output
         image = np.zeros((img_h, img_w, 3), dtype=np.float64)
 
-        # Warmup numba compilation
-        print("  Compiling render kernel (first run only)...", end="", flush=True)
+        # Select render backend
+        if gpu:
+            _render_fn = render_image_cuda
+            backend_label = "GPU (CUDA)"
+        else:
+            _render_fn = _render_image
+            backend_label = "CPU"
+
+        # Common render arguments
+        _render_args = (
+            sigma_world, nx_d, ny_d, nz_d, ar_x, ar_y,
+            cam_origin[0], cam_origin[1], cam_origin[2],
+            forward[0], forward[1], forward[2],
+            right[0], right[1], right[2],
+            up[0], up[1], up[2],
+            sun_dir[0], sun_dir[1], sun_dir[2],
+        )
+        _render_kwargs_warmup = (
+            1, 1, tan_half_fov,
+            4, sun_color[0], sun_color[1], sun_color[2],
+            g_hg, ambient_strength,
+            ocean_enabled, ocean_height,
+            ocean_ref[0], ocean_ref[1], ocean_ref[2],
+        )
+        _render_kwargs_full = (
+            img_w, img_h, tan_half_fov,
+            n_light_steps,
+            sun_color[0], sun_color[1], sun_color[2],
+            g_hg, ambient_strength,
+            ocean_enabled, ocean_height,
+            ocean_ref[0], ocean_ref[1], ocean_ref[2],
+        )
+
+        # Warmup compilation
+        print(f"  Compiling {backend_label} render kernel (first run only)...",
+              end="", flush=True)
         warmup = np.zeros((1, 1, 3), dtype=np.float64)
-        _render_image(sigma_world, nx_d, ny_d, nz_d, ar_x, ar_y,
-                      cam_origin[0], cam_origin[1], cam_origin[2],
-                      forward[0], forward[1], forward[2],
-                      right[0], right[1], right[2],
-                      up[0], up[1], up[2],
-                      sun_dir[0], sun_dir[1], sun_dir[2],
-                      1, 1, tan_half_fov,
-                      4, sun_color[0], sun_color[1], sun_color[2],
-                      g_hg, ambient_strength,
-                      ocean_enabled, ocean_height,
-                      ocean_ref[0], ocean_ref[1], ocean_ref[2],
-                      warmup)
+        _render_fn(*_render_args, *_render_kwargs_warmup, warmup)
         print(" done")
 
         # Render
-        print("  Rendering...", end="", flush=True)
+        print(f"  Rendering on {backend_label}...", end="", flush=True)
         render_start = time.perf_counter()
 
-        _render_image(sigma_world, nx_d, ny_d, nz_d, ar_x, ar_y,
-                      cam_origin[0], cam_origin[1], cam_origin[2],
-                      forward[0], forward[1], forward[2],
-                      right[0], right[1], right[2],
-                      up[0], up[1], up[2],
-                      sun_dir[0], sun_dir[1], sun_dir[2],
-                      img_w, img_h, tan_half_fov,
-                      n_light_steps,
-                      sun_color[0], sun_color[1], sun_color[2],
-                      g_hg, ambient_strength,
-                      ocean_enabled, ocean_height,
-                      ocean_ref[0], ocean_ref[1], ocean_ref[2],
-                      image)
+        _render_fn(*_render_args, *_render_kwargs_full, image)
 
         render_elapsed = time.perf_counter() - render_start
         print(f" done ({render_elapsed:.1f}s)")
@@ -811,6 +837,8 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
+    parser.add_argument("--gpu", action="store_true", default=False,
+                        help="Use CUDA GPU for rendering (requires NVIDIA GPU)")
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
@@ -827,6 +855,7 @@ def cli():
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
          custom_size=size,
+         gpu=args.gpu,
          **dataset_selection_kwargs(args))
 
 

@@ -102,6 +102,44 @@ def test_witness_cli_passes_dataset_override_args(monkeypatch):
     assert captured["kwargs"]["z_dim"] == "nk"
 
 
+def test_witness_cli_passes_gpu_flag(monkeypatch):
+    captured = {}
+
+    def fake_main(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(witness, "main", fake_main)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["witness", "input.nc", "--gpu"],
+    )
+
+    witness.cli()
+
+    assert captured["kwargs"]["gpu"] is True
+
+
+def test_witness_cli_gpu_defaults_false(monkeypatch):
+    captured = {}
+
+    def fake_main(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(witness, "main", fake_main)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["witness", "input.nc"],
+    )
+
+    witness.cli()
+
+    assert captured["kwargs"]["gpu"] is False
+
+
 def test_behold_cli_passes_dataset_override_args(monkeypatch):
     captured = {}
 

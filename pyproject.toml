@@ -43,6 +43,9 @@ visualization = [
     "scipy>=1.7.0",
     "pyvista>=0.37.0",
 ]
+cuda = [
+    "numba>=0.57",
+]
 dev = [
     "pytest>=6.0",
     "black>=21.0",
@@ -86,5 +89,6 @@ line_length = 88
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests requiring CUDA GPU (deselect with '-m \"not gpu\"')",
 ]
 testpaths = ["tests"]
