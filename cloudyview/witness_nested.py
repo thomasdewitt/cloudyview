@@ -340,10 +340,10 @@ def _render_image_nested(
             t = t_near
 
             for _ in range(max_steps):
-                if t >= t_far or transmittance < 0.002:
-                    break
-
-                # Ocean hit
+                # Ocean hit. Tested before t_far because the STEAM domain has
+                # ocean_z == outer_bmin_z (both at z=0), so t_ocean == t_far for
+                # downward rays — checking t_far first would terminate the ray
+                # without rendering ocean.
                 if ocean_enabled and t >= t_ocean:
                     o_x = cam_ox + t_ocean * d_x
                     o_y = cam_oy + t_ocean * d_y
@@ -370,6 +370,9 @@ def _render_image_nested(
                     col_g += transmittance * ol_g
                     col_b += transmittance * ol_b
                     transmittance = 0.0
+                    break
+
+                if t >= t_far or transmittance < 0.002:
                     break
 
                 p_x = cam_ox + t * d_x
