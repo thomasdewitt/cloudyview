@@ -492,7 +492,8 @@ def main(filename: str, output: str = None,
          x_dim: str = None,
          y_dim: str = None,
          z_dim: str = None,
-         gpu: bool = False) -> None:
+         gpu: bool = False,
+         supersample: int = 1) -> None:
     """
     Main function for witness.py
 
@@ -557,6 +558,10 @@ def main(filename: str, output: str = None,
 
     img_w = custom_size[0] if custom_size else render_config['width']
     img_h = custom_size[1] if custom_size else render_config['height']
+
+    ss = max(1, int(supersample))
+    render_w = img_w * ss
+    render_h = img_h * ss
 
     try:
         # Load and validate data
@@ -672,10 +677,14 @@ def main(filename: str, output: str = None,
         print(f"  Camera: pos=[{cam_origin[0]:.2f}, {cam_origin[1]:.2f}, {cam_origin[2]:.2f}]")
         print(f"          azimuth={cam_config['azimuth']:.1f} elev={cam_config['elevation']:.1f} fov={cam_config['fov']:.1f}")
         print(f"  Sun: azimuth={sun_config['azimuth']:.1f} elev={sun_config['elevation']:.1f}")
-        print(f"  Image: {img_w}x{img_h}")
+        if ss > 1:
+            print(f"  Image: {img_w}x{img_h} "
+                  f"(rendered at {render_w}x{render_h}, {ss}x{ss} supersampling)")
+        else:
+            print(f"  Image: {img_w}x{img_h}")
 
-        # Allocate output
-        image = np.zeros((img_h, img_w, 3), dtype=np.float64)
+        # Allocate output at supersampled resolution
+        image = np.zeros((render_h, render_w, 3), dtype=np.float64)
 
         # Select render backend
         if gpu:
@@ -702,7 +711,7 @@ def main(filename: str, output: str = None,
             ocean_ref[0], ocean_ref[1], ocean_ref[2],
         )
         _render_kwargs_full = (
-            img_w, img_h, tan_half_fov,
+            render_w, render_h, tan_half_fov,
             n_light_steps,
             sun_color[0], sun_color[1], sun_color[2],
             g_hg, ambient_strength,
@@ -725,6 +734,10 @@ def main(filename: str, output: str = None,
 
         render_elapsed = time.perf_counter() - render_start
         print(f" done ({render_elapsed:.1f}s)")
+
+        # Downsample by averaging sxs superpixels in linear HDR space
+        if ss > 1:
+            image = image.reshape(img_h, ss, img_w, ss, 3).mean(axis=(1, 3))
 
         # Tone mapping
         image_tm = tone_map(image, exposure=exposure)
@@ -796,8 +809,8 @@ def cli():
               - min: 150x100
               - low: 300x200
               - medium: 600x400
-              - high: 1600x1200
-              `--size WIDTH HEIGHT` overrides the preset.
+              - high: 1600x1200 (rendered at 6400x4800 with 4x4 supersampling)
+              `--size WIDTH HEIGHT` overrides the preset and disables supersampling.
 
             Dependencies:
               `witness --help` works without optional acceleration packages. Rendering is
@@ -844,8 +857,10 @@ def cli():
     args = parser.parse_args()
     if args.size:
         size = tuple(args.size)
+        supersample = 1
     else:
         size = QUALITY_PRESETS[args.quality]
+        supersample = 4 if args.quality == 'high' else 1
 
     main(args.filename, args.output,
          camera_position=args.camera_position,
@@ -856,6 +871,7 @@ def cli():
          sun_elevation=args.sun_elevation,
          custom_size=size,
          gpu=args.gpu,
+         supersample=supersample,
          **dataset_selection_kwargs(args))
 
 
