@@ -55,7 +55,7 @@ from numba import njit, prange
 # constants inside the kernel — so each tuning iteration is a single edit.
 # ============================================================================
 
-POWDER_COEFF = 0.7          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
+POWDER_COEFF = 1.2          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.50                 # Henyey-Greenstein asymmetry
 AMBIENT_STRENGTH = 0.45     # overall weight of the ambient term
 SUN_COLOR = (28.0, 23.0, 16.0)   # HDR sun radiance (golden mid-day)
@@ -66,9 +66,9 @@ N_LIGHT_STEPS = 64
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
-MS_OCTAVES = 1
-MS_ATTEN = 0.25
-MS_BLEND_RATE = 0.50
+MS_OCTAVES = 2
+MS_ATTEN = 0.45
+MS_BLEND_RATE = 0.80
 
 # Ambient spectrum + vertical ramp. The ambient term stands in for multiply-
 # scattered skylight that reaches the cloud after leaving the volume.
