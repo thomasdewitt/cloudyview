@@ -82,7 +82,16 @@ AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 # multiple-scatter integral with no albedo book-keeping, so effective
 # amplitude needs to be tuned down to avoid tone-map saturation of lit
 # cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
-CLOUD_ALBEDO = 0.45
+CLOUD_ALBEDO = 0.55
+
+# Multiplier applied to tau_sun inside the MS loop, i.e. the effective
+# optical-depth-to-sun is SHADOW_CONTRAST × tau_sun. Values > 1 make
+# self-shadow darker relative to direct illumination, widening the
+# dynamic range between lit and shadowed samples. Stands in for two
+# effects the simple single-slab shadow march under-represents:
+# geometric self-shadow from cell-scale structure below grid
+# resolution, and absorption along off-grid paths.
+SHADOW_CONTRAST = 1.8
 
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
@@ -634,8 +643,9 @@ def _render_image(
 
                 ms_r = 0.0; ms_g = 0.0; ms_b = 0.0
                 ms_atten = 1.0
+                tau_sun_eff = tau_sun * SHADOW_CONTRAST
                 for octave in range(MS_OCTAVES):
-                    t_sun_ms = pymath.exp(-tau_sun * ms_atten)
+                    t_sun_ms = pymath.exp(-tau_sun_eff * ms_atten)
                     blend = min(1.0, octave * MS_BLEND_RATE)
                     oct_phase = phase_hg * (1.0 - blend) + iso_phase * blend
                     contrib = ms_atten * t_sun_ms * oct_phase
