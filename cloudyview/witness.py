@@ -83,7 +83,7 @@ MAX_STEPS = 2048
 
 # Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
 # can use it as a default; ocean tuning itself is not part of this block).
-OCEAN_REFLECTANCE = (0.0067, 0.0149, 0.0420)
+OCEAN_REFLECTANCE = (0.0054, 0.0119, 0.0336)
 
 
 # ============================================================================

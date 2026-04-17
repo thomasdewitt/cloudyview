@@ -13,7 +13,7 @@ import numpy as np
 import scaleinvariance
 
 
-DEFAULT_N = 8192
+DEFAULT_N = 2048
 DEFAULT_H = 0.9
 DEFAULT_ALPHA = 2.0
 DEFAULT_C1 = 0.001
