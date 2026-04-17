@@ -58,7 +58,7 @@ from numba import njit, prange
 POWDER_COEFF = 3.0          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.50                 # Henyey-Greenstein asymmetry (forward lobe)
 G_HG_BACK = -0.30           # Back-scatter lobe for silver-lining effect
-HG_BACK_WEIGHT = 0.20       # Fraction of phase from back lobe (1-weight = fwd)
+HG_BACK_WEIGHT = 0.30       # Fraction of phase from back lobe (1-weight = fwd)
 AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
 SUN_COLOR = (36.0, 28.0, 18.0)   # HDR sun radiance (stronger, warmer)
 
@@ -84,7 +84,7 @@ AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 # multiple-scatter integral with no albedo book-keeping, so effective
 # amplitude needs to be tuned down to avoid tone-map saturation of lit
 # cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
-CLOUD_ALBEDO = 0.70
+CLOUD_ALBEDO = 0.80
 
 # Multiplier applied to tau_sun inside the MS loop, i.e. the effective
 # optical-depth-to-sun is SHADOW_CONTRAST × tau_sun. Values > 1 make
@@ -93,7 +93,7 @@ CLOUD_ALBEDO = 0.70
 # effects the simple single-slab shadow march under-represents:
 # geometric self-shadow from cell-scale structure below grid
 # resolution, and absorption along off-grid paths.
-SHADOW_CONTRAST = 2.0
+SHADOW_CONTRAST = 1.6
 
 # Numerical integration.
 STEP_VOXEL_FACTOR = 1.0     # dt_max = min(active_level_dx) * this
