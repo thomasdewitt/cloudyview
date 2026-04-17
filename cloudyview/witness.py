@@ -854,9 +854,16 @@ def main(filename: str, output: str = None,
 
         level = NestedLevel(sigma=sigma_world, bmin=bmin, bmax=bmax, name="single")
 
-        # Camera in absolute meters: rel=[-1,1] maps to the AABB.
+        # Camera in absolute meters. x,y: rel=[-1,1] spans the AABB. z is
+        # anchored to the physical surface (z=0), not the AABB's z-range, so
+        # that rel_z=-1 is the ground even for elevated domains (e.g. data
+        # starting at z=500m keeps its real altitude instead of being slammed
+        # down). Reduces to the old mapping when bmin[2]==0.
         rel_pos = cam_config['position']
-        cam_origin = bmin + (np.array(rel_pos, dtype=np.float64) + 1.0) * 0.5 * (bmax - bmin)
+        cam_origin = np.empty(3, dtype=np.float64)
+        cam_origin[0] = bmin[0] + (rel_pos[0] + 1.0) * 0.5 * (bmax[0] - bmin[0])
+        cam_origin[1] = bmin[1] + (rel_pos[1] + 1.0) * 0.5 * (bmax[1] - bmin[1])
+        cam_origin[2] = (rel_pos[2] + 1.0) * 0.5 * bmax[2]
 
         forward = direction_from_azimuth_elevation(
             cam_config['azimuth'], cam_config['elevation']
@@ -871,10 +878,12 @@ def main(filename: str, output: str = None,
             sun_config['azimuth'], sun_config['elevation']
         )
 
-        # Ocean height: rel in [-1,1] within the AABB z-range.
+        # Ocean sits at the physical surface, not the AABB floor: rel=-1 is
+        # z=0 (sea level). Default height=-0.9999 → ~0 for any domain top.
+        # Reduces to the old mapping when bmin[2]==0.
         ocean_config = render_config['ocean']
         ocean_enabled = ocean_config['enabled']
-        ocean_z = bmin[2] + (ocean_config['height'] + 1.0) * 0.5 * (bmax[2] - bmin[2])
+        ocean_z = (ocean_config['height'] + 1.0) * 0.5 * bmax[2]
 
         n_light_steps = render_config['n_light_steps']
         exposure = render_config['exposure']
@@ -956,8 +965,10 @@ def cli():
 
             Camera and sun conventions:
               - Coordinates are meteorological: +x east, +y north, +z up.
-              - Camera position uses relative coordinates where +/-1 reaches the domain edge
-                in x, y, and z.
+              - Camera position uses relative coordinates. In x and y, +/-1 reaches
+                the domain edge. In z, -1 is the physical surface (z=0) and +1 is
+                the top of the data domain, so lifted domains (e.g. data starting
+                above ground) keep their real altitude.
               - Azimuth is a meteorological bearing: 0 north, 90 east, 180 south, 270 west.
               - Elevation is degrees above the horizon.
 
