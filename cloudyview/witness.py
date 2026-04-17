@@ -385,19 +385,13 @@ def _ocean_shade(o_x, o_y, d_x, d_y, d_z,
     F0 = 0.02
     F = F0 + (1.0 - F0) * om2 * om2 * one_minus
 
-    # Subsurface diffuse: Lambertian against the perturbed normal. The raw
-    # t_sun_ocean goes to zero under thick cloud, which makes shadows read
-    # as near-black. Cap how dark shadows can get by blending toward a floor:
-    # t_eff = floor + (1-floor) * t_sun_ocean. Physically this stands in for
-    # sky-hemisphere + multiply-scattered cloud illumination reaching the
-    # surface even when the direct sun ray is fully blocked.
-    shadow_floor = 0.3
-    t_eff = shadow_floor + (1.0 - shadow_floor) * t_sun_ocean
+    # Subsurface diffuse: Lambertian against the perturbed normal.
     cos_sun_n = sun_dx * nx + sun_dy * ny + sun_dz * nz
     if cos_sun_n < 0.0:
         cos_sun_n = 0.0
     inv_pi = 1.0 / 3.14159265358979
-    diff_irr = t_eff * cos_sun_n * inv_pi
+    # Diffuse uses raw t_sun_ocean (direct sun attenuation).
+    diff_irr = t_sun_ocean * cos_sun_n * inv_pi
     diff_r = diff_irr * sun_r * ocean_rr
     diff_g = diff_irr * sun_g * ocean_rg
     diff_b = diff_irr * sun_b * ocean_rb
@@ -406,7 +400,17 @@ def _ocean_shade(o_x, o_y, d_x, d_y, d_z,
     ol_r = F * sky_rr + one_minus_F * diff_r
     ol_g = F * sky_rg + one_minus_F * diff_g
     ol_b = F * sky_rb + one_minus_F * diff_b
-    return ol_r, ol_g, ol_b
+
+    # Global shadow dim on the whole ocean output. At boat-level grazing
+    # angles Fresnel dominates, so attenuating only the diffuse term leaves
+    # shadows invisible. A single multiplier on the final color stands in
+    # for three coupled effects: loss of direct sun under cloud, loss of
+    # sun-glint reflection where the sun is blocked, and darker sky-
+    # reflection because Fresnel then sees the cloud underside rather than
+    # clear sky. Floor 0.35 → shadows are ~35% of fully-lit brightness.
+    shadow_floor = 0.35
+    t_eff = shadow_floor + (1.0 - shadow_floor) * t_sun_ocean
+    return ol_r * t_eff, ol_g * t_eff, ol_b * t_eff
 
 
 # ============================================================================
