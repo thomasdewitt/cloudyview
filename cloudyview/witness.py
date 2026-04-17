@@ -58,7 +58,7 @@ from numba import njit, prange
 POWDER_COEFF = 3.0          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.50                 # Henyey-Greenstein asymmetry
 AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
-SUN_COLOR = (28.0, 23.0, 16.0)   # HDR sun radiance (golden mid-day)
+SUN_COLOR = (36.0, 28.0, 18.0)   # HDR sun radiance (stronger, warmer)
 
 # Shadow-ray ("light march") step count. Too low → speckled shadows where
 # thin cloud blobs alias between steps.
@@ -67,8 +67,8 @@ N_LIGHT_STEPS = 64
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
 MS_OCTAVES = 2
-MS_ATTEN = 0.45
-MS_BLEND_RATE = 0.80
+MS_ATTEN = 0.30
+MS_BLEND_RATE = 0.40
 
 # Ambient spectrum + vertical ramp. The ambient term stands in for multiply-
 # scattered skylight that reaches the cloud after leaving the volume.
@@ -82,7 +82,7 @@ AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 # multiple-scatter integral with no albedo book-keeping, so effective
 # amplitude needs to be tuned down to avoid tone-map saturation of lit
 # cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
-CLOUD_ALBEDO = 0.65
+CLOUD_ALBEDO = 0.45
 
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
