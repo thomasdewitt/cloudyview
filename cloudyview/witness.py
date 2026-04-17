@@ -56,7 +56,9 @@ from numba import njit, prange
 # ============================================================================
 
 POWDER_COEFF = 3.0          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
-G_HG = 0.50                 # Henyey-Greenstein asymmetry
+G_HG = 0.50                 # Henyey-Greenstein asymmetry (forward lobe)
+G_HG_BACK = -0.30           # Back-scatter lobe for silver-lining effect
+HG_BACK_WEIGHT = 0.20       # Fraction of phase from back lobe (1-weight = fwd)
 AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
 SUN_COLOR = (36.0, 28.0, 18.0)   # HDR sun radiance (stronger, warmer)
 
@@ -258,6 +260,22 @@ def _ray_box(ox, oy, oz, dx, dy, dz,
 def _hg_phase(cos_theta, g):
     denom = 1.0 + g * g - 2.0 * g * cos_theta
     return (1.0 - g * g) / (4.0 * 3.14159265358979 * denom * pymath.sqrt(denom))
+
+
+@njit(inline="always")
+def _hg_phase_dual(cos_theta, g_fwd, g_back, w_back):
+    """Dual-lobe HG: (1-w_back)*HG(g_fwd) + w_back*HG(g_back).
+
+    Real Mie phase functions for cloud droplets have both a strong
+    forward peak AND a secondary peak near cos_theta=-1 (the glory
+    / rainbow region). Plain single-lobe HG only models the forward
+    peak, so back-lit cumulus in our renders look uniformly dim;
+    reality shows a bright silver-lining rim. Adding a small
+    negative-g lobe restores that peak cheaply.
+    """
+    p_fwd = _hg_phase(cos_theta, g_fwd)
+    p_back = _hg_phase(cos_theta, g_back)
+    return (1.0 - w_back) * p_fwd + w_back * p_back
 
 
 @njit
@@ -530,7 +548,7 @@ def _render_image(
                 t_ocean = t_ocean_cand
 
         cos_theta = d_x * sun_dx + d_y * sun_dy + d_z * sun_dz
-        phase_hg = _hg_phase(cos_theta, g_hg)
+        phase_hg = _hg_phase_dual(cos_theta, g_hg, G_HG_BACK, HG_BACK_WEIGHT)
 
         col_r = 0.0
         col_g = 0.0
