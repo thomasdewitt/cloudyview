@@ -77,6 +77,13 @@ AMBIENT_TINT_G = 0.45
 AMBIENT_TINT_B = 0.62
 AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 
+# Per-event in-scatter amplitude. Physical single-scattering albedo for
+# water droplets is ≈0.999, but our kernel approximates the 6-octave
+# multiple-scatter integral with no albedo book-keeping, so effective
+# amplitude needs to be tuned down to avoid tone-map saturation of lit
+# cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
+CLOUD_ALBEDO = 0.40
+
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
 MAX_STEPS = 2048
@@ -640,7 +647,7 @@ def _render_image(
                 # Powder as a function of depth into the current cloud segment:
                 # dark edges, bright cores, invariant to step size.
                 powder = 1.0 - pymath.exp(-powder_coeff * tau_depth)
-                scatter_weight = d_tau * powder * transmittance
+                scatter_weight = d_tau * powder * transmittance * CLOUD_ALBEDO
 
                 col_r += scatter_weight * ms_r
                 col_g += scatter_weight * ms_g
