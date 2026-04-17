@@ -32,6 +32,7 @@ dependencies = [
     "netCDF4>=1.5",
     "pyyaml>=5.4",
     "numba>=0.57",
+    "scaleinvariance>=0.10",
 ]
 
 [project.optional-dependencies]
@@ -72,6 +73,9 @@ Homepage = "https://github.com/thomasdewitt/cloudyview"
 Documentation = "https://github.com/thomasdewitt/cloudyview"
 Repository = "https://github.com/thomasdewitt/cloudyview.git"
 Issues = "https://github.com/thomasdewitt/cloudyview/issues"
+
+[tool.uv.sources]
+scaleinvariance = { path = "../scaleinvariance", editable = true }
 
 [tool.setuptools]
 packages = ["cloudyview"]

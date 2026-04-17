@@ -285,6 +285,130 @@ def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
     return sky_r, sky_g, sky_b
 
 
+@njit(inline="always")
+def _ocean_wave_normal_fif(x, y, fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N):
+    """Sample the precomputed FIF normal map at world (x,y).
+
+    Periodic wrap + bilinear interp; renormalizes after interp so a tilted
+    normal doesn't shorten toward the mean. fif_* are float32 N×N arrays
+    produced by cloudyview.ocean_fif.generate_fif_normals.
+    """
+    gx = (x * inv_fif_dx) % fif_N
+    gy = (y * inv_fif_dx) % fif_N
+    i0 = int(gx); j0 = int(gy)
+    i1 = (i0 + 1) % fif_N
+    j1 = (j0 + 1) % fif_N
+    tx = gx - i0
+    ty = gy - j0
+    w00 = (1.0 - tx) * (1.0 - ty)
+    w10 = tx * (1.0 - ty)
+    w01 = (1.0 - tx) * ty
+    w11 = tx * ty
+    nx = (fif_nx[j0, i0] * w00 + fif_nx[j0, i1] * w10
+          + fif_nx[j1, i0] * w01 + fif_nx[j1, i1] * w11)
+    ny = (fif_ny[j0, i0] * w00 + fif_ny[j0, i1] * w10
+          + fif_ny[j1, i0] * w01 + fif_ny[j1, i1] * w11)
+    nz = (fif_nz[j0, i0] * w00 + fif_nz[j0, i1] * w10
+          + fif_nz[j1, i0] * w01 + fif_nz[j1, i1] * w11)
+    nl = 1.0 / pymath.sqrt(nx * nx + ny * ny + nz * nz)
+    return nx * nl, ny * nl, nz * nl
+
+
+@njit(inline="always")
+def _reflection_sky(dx, dy, dz, sun_dx, sun_dy, sun_dz):
+    """Sky sampler for ocean reflection: gradient + wide glint lobe.
+
+    The main _sky_radiance has a 3.6° bloom (+1.15° disc) — when reflected
+    through wavy water those sharp features produce "binary" on/off sparkles
+    as individual wave facets tilt in and out. This variant replaces the
+    narrow features with a single ~11° Lorentzian so the glint spreads
+    smoothly across many facets, reading as a soft bright path.
+    """
+    t = dz if dz > 0.0 else 0.0
+    one_minus = 1.0 - t
+    t = 1.0 - one_minus * one_minus * one_minus
+    zen_r = 0.0044; zen_g = 0.035; zen_b = 0.1156
+    hor_r = 0.10;   hor_g = 0.18;  hor_b = 0.38
+    sky_r = hor_r + (zen_r - hor_r) * t
+    sky_g = hor_g + (zen_g - hor_g) * t
+    sky_b = hor_b + (zen_b - hor_b) * t
+    cos_rs = dx * sun_dx + dy * sun_dy + dz * sun_dz
+    if cos_rs > 0.0:
+        glint_w = 0.02   # Lorentzian half-width in (1-cos); half-max ~11°
+        a = glint_w / ((1.0 - cos_rs) + glint_w)
+        sky_r += a * 1.2
+        sky_g += a * 1.0
+        sky_b += a * 0.6
+    return sky_r, sky_g, sky_b
+
+
+@njit(inline="always")
+def _ocean_shade(o_x, o_y, d_x, d_y, d_z,
+                 sun_dx, sun_dy, sun_dz, t_sun_ocean,
+                 sun_r, sun_g, sun_b,
+                 ocean_rr, ocean_rg, ocean_rb,
+                 fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N):
+    """Shade an ocean hit. Subsurface diffuse + Fresnel-weighted sky reflection.
+
+    - Perturbed normal sampled from the FIF normal map (waves).
+    - Subsurface ("body") color = ocean_reflectance × Lambertian × sun transmittance.
+    - Fresnel (Schlick, F0=0.02 for water) blends specular toward sky.
+    - Sky reflection from _reflection_sky (wide glint lobe, no narrow sun).
+    """
+    nx, ny, nz = _ocean_wave_normal_fif(o_x, o_y,
+                                          fif_nx, fif_ny, fif_nz,
+                                          inv_fif_dx, fif_N)
+
+    # Reflect the view direction around the surface normal.
+    vdotn = d_x * nx + d_y * ny + d_z * nz
+    r_x = d_x - 2.0 * vdotn * nx
+    r_y = d_y - 2.0 * vdotn * ny
+    r_z = d_z - 2.0 * vdotn * nz
+    # Guard: if the perturbed normal tips the reflected ray below the
+    # horizon, flip it up. Rare at realistic slopes but keeps the sky
+    # sampler valid.
+    if r_z < 0.0:
+        r_z = -r_z
+
+    sky_rr, sky_rg, sky_rb = _reflection_sky(r_x, r_y, r_z,
+                                              sun_dx, sun_dy, sun_dz)
+
+    # Fresnel (Schlick): cos_theta is -view · normal (view direction points
+    # away from camera into the scene, so we flip to get the incidence cos).
+    cos_i = -vdotn
+    if cos_i < 0.0:
+        cos_i = 0.0
+    if cos_i > 1.0:
+        cos_i = 1.0
+    one_minus = 1.0 - cos_i
+    om2 = one_minus * one_minus
+    F0 = 0.02
+    F = F0 + (1.0 - F0) * om2 * om2 * one_minus
+
+    # Subsurface diffuse: Lambertian against the perturbed normal. The raw
+    # t_sun_ocean goes to zero under thick cloud, which makes shadows read
+    # as near-black. Cap how dark shadows can get by blending toward a floor:
+    # t_eff = floor + (1-floor) * t_sun_ocean. Physically this stands in for
+    # sky-hemisphere + multiply-scattered cloud illumination reaching the
+    # surface even when the direct sun ray is fully blocked.
+    shadow_floor = 0.3
+    t_eff = shadow_floor + (1.0 - shadow_floor) * t_sun_ocean
+    cos_sun_n = sun_dx * nx + sun_dy * ny + sun_dz * nz
+    if cos_sun_n < 0.0:
+        cos_sun_n = 0.0
+    inv_pi = 1.0 / 3.14159265358979
+    diff_irr = t_eff * cos_sun_n * inv_pi
+    diff_r = diff_irr * sun_r * ocean_rr
+    diff_g = diff_irr * sun_g * ocean_rg
+    diff_b = diff_irr * sun_b * ocean_rb
+
+    one_minus_F = 1.0 - F
+    ol_r = F * sky_rr + one_minus_F * diff_r
+    ol_g = F * sky_rg + one_minus_F * diff_g
+    ol_b = F * sky_rb + one_minus_F * diff_b
+    return ol_r, ol_g, ol_b
+
+
 # ============================================================================
 # Main render kernel (unified: N=1 is the single-domain case)
 # ============================================================================
@@ -306,6 +430,7 @@ def _render_image(
     g_hg, ambient_strength,
     ocean_enabled, ocean_z,
     ocean_rr, ocean_rg, ocean_rb,
+    fif_nx, fif_ny, fif_nz, fif_dx,
     step_voxel_factor,   # dt_max = min(active_level_dx) * this
     max_steps,
     powder_coeff,        # powder = 1 - exp(-powder_coeff * tau_depth)
@@ -313,6 +438,8 @@ def _render_image(
 ):
     aspect = img_w / img_h
     iso_phase = 1.0 / (4.0 * 3.14159265358979)
+    inv_fif_dx = 1.0 / fif_dx
+    fif_N = fif_nx.shape[0]
 
     n_pixels = img_w * img_h
     for pixel_idx in prange(n_pixels):
@@ -377,13 +504,13 @@ def _render_image(
                         outer_bmax_x, outer_bmax_y, outer_bmax_z,
                     )
                     t_sun_ocean = pymath.exp(-tau_ocean)
-                    cos_sun_n = max(0.0, sun_dz)
-                    inv_pi = 1.0 / 3.14159265358979
-                    ocean_sun_scale = 0.05
-                    sun_irr = t_sun_ocean * cos_sun_n * ocean_sun_scale * inv_pi
-                    ol_r = sun_irr * sun_r * ocean_rr + 0.004
-                    ol_g = sun_irr * sun_g * ocean_rg + 0.004
-                    ol_b = sun_irr * sun_b * ocean_rb + 0.006
+                    ol_r, ol_g, ol_b = _ocean_shade(
+                        o_x, o_y, d_x, d_y, d_z,
+                        sun_dx, sun_dy, sun_dz, t_sun_ocean,
+                        sun_r, sun_g, sun_b,
+                        ocean_rr, ocean_rg, ocean_rb,
+                        fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N,
+                    )
 
                     col_r += transmittance * ol_r
                     col_g += transmittance * ol_g
@@ -508,13 +635,13 @@ def _render_image(
                     outer_bmax_x, outer_bmax_y, outer_bmax_z,
                 )
                 t_sun_ocean = pymath.exp(-tau_ocean)
-                cos_sun_n = max(0.0, sun_dz)
-                inv_pi = 1.0 / 3.14159265358979
-                ocean_sun_scale = 0.05
-                sun_irr = t_sun_ocean * cos_sun_n * ocean_sun_scale * inv_pi
-                ol_r = sun_irr * sun_r * ocean_rr + 0.004
-                ol_g = sun_irr * sun_g * ocean_rg + 0.004
-                ol_b = sun_irr * sun_b * ocean_rb + 0.006
+                ol_r, ol_g, ol_b = _ocean_shade(
+                    o_x, o_y, d_x, d_y, d_z,
+                    sun_dx, sun_dy, sun_dz, t_sun_ocean,
+                    sun_r, sun_g, sun_b,
+                    ocean_rr, ocean_rg, ocean_rb,
+                    fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N,
+                )
                 col_r += transmittance * ol_r
                 col_g += transmittance * ol_g
                 col_b += transmittance * ol_b
@@ -581,6 +708,10 @@ def _render_levels(
     ocean_enabled: bool,
     ocean_z: float,
     ocean_reflectance: Tuple[float, float, float],
+    fif_nx: np.ndarray,
+    fif_ny: np.ndarray,
+    fif_nz: np.ndarray,
+    fif_dx: float,
     sun_color: Tuple[float, float, float],
     g_hg: float,
     ambient_strength: float,
@@ -635,6 +766,7 @@ def _render_levels(
         g_hg, ambient_strength,
         ocean_enabled, ocean_z,
         ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+        fif_nx, fif_ny, fif_nz, fif_dx,
         step_voxel_factor, 32, powder_coeff,
         warmup,
     )
@@ -659,6 +791,7 @@ def _render_levels(
         g_hg, ambient_strength,
         ocean_enabled, ocean_z,
         ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+        fif_nx, fif_ny, fif_nz, fif_dx,
         step_voxel_factor, max_steps, powder_coeff,
         image,
     )
@@ -691,7 +824,7 @@ POWDER_COEFF = 1.5       # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.76              # Henyey-Greenstein asymmetry
 AMBIENT_STRENGTH = 0.12
 SUN_COLOR = (22.0, 21.0, 17.0)         # HDR sun intensity
-OCEAN_REFLECTANCE = (0.04, 0.05, 0.07)  # dark gray-blue
+OCEAN_REFLECTANCE = (0.0067, 0.0149, 0.0420)  # diffuse albedo; calibrated so an airplane view matches IMG_6048 center-row median sRGB (62,92,142)
 STEP_VOXEL_FACTOR = 2.0  # dt_max = min(level_dx) * this
 MAX_STEPS = 2048
 
@@ -716,6 +849,7 @@ def render_nested(
     ocean_enabled: bool = True,
     ocean_z: float = 0.0,
     ocean_reflectance: Tuple[float, float, float] = OCEAN_REFLECTANCE,
+    fif_normals: Tuple[np.ndarray, np.ndarray, np.ndarray, float] = None,
     sun_color: Tuple[float, float, float] = SUN_COLOR,
     g_hg: float = G_HG,
     ambient_strength: float = AMBIENT_STRENGTH,
@@ -727,13 +861,29 @@ def render_nested(
 
     Levels are finest-first (index 0 = highest resolution); the outermost
     (last) level defines the outer AABB the ray is clipped against.
+
+    fif_normals: (nx, ny, nz, dx_m) tuple from
+        cloudyview.ocean_fif.generate_fif_normals. Required when ocean_enabled
+        is True; the kernel samples the FIF normal map with periodic wrap at
+        each ocean hit. Pass None (with ocean_enabled=False) for sky-only.
     """
+    if ocean_enabled and fif_normals is None:
+        from cloudyview.ocean_fif import generate_fif_normals
+        fif_normals = generate_fif_normals(verbose=verbose)
+    if fif_normals is None:
+        from cloudyview.ocean_fif import dummy_fif_arrays
+        dz, _, _ = dummy_fif_arrays()
+        fif_nx, fif_ny, fif_nz, fif_dx = dz, dz, np.ones_like(dz), 1.0
+    else:
+        fif_nx, fif_ny, fif_nz, fif_dx = fif_normals
+
     image = _render_levels(
         levels,
         camera_position, camera_forward, camera_right, camera_up,
         sun_direction, image_size,
         fov_degrees, n_light_steps, step_voxel_factor, max_steps,
         ocean_enabled, ocean_z, ocean_reflectance,
+        fif_nx, fif_ny, fif_nz, fif_dx,
         sun_color, g_hg, ambient_strength, powder_coeff,
         verbose,
     )
@@ -905,6 +1055,14 @@ def main(filename: str, output: str = None,
         print(f"  Sun: azimuth={sun_config['azimuth']:.1f} elev={sun_config['elevation']:.1f}")
         print(f"  Image: {img_w}x{img_h}")
 
+        if ocean_enabled:
+            from cloudyview.ocean_fif import generate_fif_normals
+            fif_nx, fif_ny, fif_nz, fif_dx = generate_fif_normals()
+        else:
+            from cloudyview.ocean_fif import dummy_fif_arrays
+            _z, _, _o = dummy_fif_arrays()
+            fif_nx, fif_ny, fif_nz, fif_dx = _z, _z, _o, 1.0
+
         image = _render_levels(
             [level],
             (cam_origin[0], cam_origin[1], cam_origin[2]),
@@ -916,6 +1074,7 @@ def main(filename: str, output: str = None,
             cam_config['fov'], n_light_steps,
             STEP_VOXEL_FACTOR, MAX_STEPS,
             ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
+            fif_nx, fif_ny, fif_nz, fif_dx,
             SUN_COLOR, G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
             verbose=True,
         )
