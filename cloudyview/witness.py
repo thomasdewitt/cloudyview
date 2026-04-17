@@ -57,8 +57,8 @@ from numba import njit, prange
 
 POWDER_COEFF = 0.7          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.50                 # Henyey-Greenstein asymmetry
-AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
-SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
+AMBIENT_STRENGTH = 0.45     # overall weight of the ambient term
+SUN_COLOR = (28.0, 23.0, 16.0)   # HDR sun radiance (golden mid-day)
 
 # Shadow-ray ("light march") step count. Too low → speckled shadows where
 # thin cloud blobs alias between steps.
@@ -72,9 +72,9 @@ MS_BLEND_RATE = 0.50
 
 # Ambient spectrum + vertical ramp. The ambient term stands in for multiply-
 # scattered skylight that reaches the cloud after leaving the volume.
-AMBIENT_TINT_R = 0.35
-AMBIENT_TINT_G = 0.45
-AMBIENT_TINT_B = 0.62
+AMBIENT_TINT_R = 0.22
+AMBIENT_TINT_G = 0.36
+AMBIENT_TINT_B = 0.65
 AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 
 # Per-event in-scatter amplitude. Physical single-scattering albedo for
