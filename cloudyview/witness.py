@@ -55,48 +55,30 @@ from numba import njit, prange
 # constants inside the kernel — so each tuning iteration is a single edit.
 # ============================================================================
 
-POWDER_COEFF = 3.0          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
-G_HG = 0.50                 # Henyey-Greenstein asymmetry (forward lobe)
-G_HG_BACK = -0.30           # Back-scatter lobe for silver-lining effect
-HG_BACK_WEIGHT = 0.30       # Fraction of phase from back lobe (1-weight = fwd)
-AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
-SUN_COLOR = (36.0, 28.0, 18.0)   # HDR sun radiance (stronger, warmer)
+POWDER_COEFF = 1.5          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
+G_HG = 0.76                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.85)
+AMBIENT_STRENGTH = 0.12     # overall weight of the ambient term
+SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
 
 # Shadow-ray ("light march") step count. Too low → speckled shadows where
 # thin cloud blobs alias between steps.
-N_LIGHT_STEPS = 128
+N_LIGHT_STEPS = 64
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
-MS_OCTAVES = 2
-MS_ATTEN = 0.30
-MS_BLEND_RATE = 0.40
+MS_OCTAVES = 6
+MS_ATTEN = 0.4
+MS_BLEND_RATE = 0.35
 
 # Ambient spectrum + vertical ramp. The ambient term stands in for multiply-
 # scattered skylight that reaches the cloud after leaving the volume.
 AMBIENT_TINT_R = 0.22
-AMBIENT_TINT_G = 0.36
-AMBIENT_TINT_B = 0.65
+AMBIENT_TINT_G = 0.23
+AMBIENT_TINT_B = 0.28
 AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 
-# Per-event in-scatter amplitude. Physical single-scattering albedo for
-# water droplets is ≈0.999, but our kernel approximates the 6-octave
-# multiple-scatter integral with no albedo book-keeping, so effective
-# amplitude needs to be tuned down to avoid tone-map saturation of lit
-# cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
-CLOUD_ALBEDO = 0.80
-
-# Multiplier applied to tau_sun inside the MS loop, i.e. the effective
-# optical-depth-to-sun is SHADOW_CONTRAST × tau_sun. Values > 1 make
-# self-shadow darker relative to direct illumination, widening the
-# dynamic range between lit and shadowed samples. Stands in for two
-# effects the simple single-slab shadow march under-represents:
-# geometric self-shadow from cell-scale structure below grid
-# resolution, and absorption along off-grid paths.
-SHADOW_CONTRAST = 1.6
-
 # Numerical integration.
-STEP_VOXEL_FACTOR = 1.0     # dt_max = min(active_level_dx) * this
+STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
 MAX_STEPS = 2048
 
 # Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
@@ -260,22 +242,6 @@ def _ray_box(ox, oy, oz, dx, dy, dz,
 def _hg_phase(cos_theta, g):
     denom = 1.0 + g * g - 2.0 * g * cos_theta
     return (1.0 - g * g) / (4.0 * 3.14159265358979 * denom * pymath.sqrt(denom))
-
-
-@njit(inline="always")
-def _hg_phase_dual(cos_theta, g_fwd, g_back, w_back):
-    """Dual-lobe HG: (1-w_back)*HG(g_fwd) + w_back*HG(g_back).
-
-    Real Mie phase functions for cloud droplets have both a strong
-    forward peak AND a secondary peak near cos_theta=-1 (the glory
-    / rainbow region). Plain single-lobe HG only models the forward
-    peak, so back-lit cumulus in our renders look uniformly dim;
-    reality shows a bright silver-lining rim. Adding a small
-    negative-g lobe restores that peak cheaply.
-    """
-    p_fwd = _hg_phase(cos_theta, g_fwd)
-    p_back = _hg_phase(cos_theta, g_back)
-    return (1.0 - w_back) * p_fwd + w_back * p_back
 
 
 @njit
@@ -548,7 +514,7 @@ def _render_image(
                 t_ocean = t_ocean_cand
 
         cos_theta = d_x * sun_dx + d_y * sun_dy + d_z * sun_dz
-        phase_hg = _hg_phase_dual(cos_theta, g_hg, G_HG_BACK, HG_BACK_WEIGHT)
+        phase_hg = _hg_phase(cos_theta, g_hg)
 
         col_r = 0.0
         col_g = 0.0
@@ -661,9 +627,8 @@ def _render_image(
 
                 ms_r = 0.0; ms_g = 0.0; ms_b = 0.0
                 ms_atten = 1.0
-                tau_sun_eff = tau_sun * SHADOW_CONTRAST
                 for octave in range(MS_OCTAVES):
-                    t_sun_ms = pymath.exp(-tau_sun_eff * ms_atten)
+                    t_sun_ms = pymath.exp(-tau_sun * ms_atten)
                     blend = min(1.0, octave * MS_BLEND_RATE)
                     oct_phase = phase_hg * (1.0 - blend) + iso_phase * blend
                     contrib = ms_atten * t_sun_ms * oct_phase
@@ -675,7 +640,7 @@ def _render_image(
                 # Powder as a function of depth into the current cloud segment:
                 # dark edges, bright cores, invariant to step size.
                 powder = 1.0 - pymath.exp(-powder_coeff * tau_depth)
-                scatter_weight = d_tau * powder * transmittance * CLOUD_ALBEDO
+                scatter_weight = d_tau * powder * transmittance
 
                 col_r += scatter_weight * ms_r
                 col_g += scatter_weight * ms_g
