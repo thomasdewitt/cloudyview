@@ -56,7 +56,7 @@ from numba import njit, prange
 # ============================================================================
 
 POWDER_COEFF = 0.7          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
-G_HG = 0.76                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.85)
+G_HG = 0.85                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.85)
 AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
 SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
 
@@ -66,9 +66,9 @@ N_LIGHT_STEPS = 64
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
-MS_OCTAVES = 6
-MS_ATTEN = 0.4
-MS_BLEND_RATE = 0.35
+MS_OCTAVES = 3
+MS_ATTEN = 0.25
+MS_BLEND_RATE = 0.50
 
 # Ambient spectrum + vertical ramp. The ambient term stands in for multiply-
 # scattered skylight that reaches the cloud after leaving the volume.
