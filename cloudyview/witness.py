@@ -82,7 +82,7 @@ AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 # multiple-scatter integral with no albedo book-keeping, so effective
 # amplitude needs to be tuned down to avoid tone-map saturation of lit
 # cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
-CLOUD_ALBEDO = 0.55
+CLOUD_ALBEDO = 0.70
 
 # Multiplier applied to tau_sun inside the MS loop, i.e. the effective
 # optical-depth-to-sun is SHADOW_CONTRAST × tau_sun. Values > 1 make
@@ -91,7 +91,7 @@ CLOUD_ALBEDO = 0.55
 # effects the simple single-slab shadow march under-represents:
 # geometric self-shadow from cell-scale structure below grid
 # resolution, and absorption along off-grid paths.
-SHADOW_CONTRAST = 1.8
+SHADOW_CONTRAST = 3.0
 
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
