@@ -62,7 +62,7 @@ SUN_COLOR = (36.0, 28.0, 18.0)   # HDR sun radiance (stronger, warmer)
 
 # Shadow-ray ("light march") step count. Too low → speckled shadows where
 # thin cloud blobs alias between steps.
-N_LIGHT_STEPS = 64
+N_LIGHT_STEPS = 128
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
@@ -91,10 +91,10 @@ CLOUD_ALBEDO = 0.70
 # effects the simple single-slab shadow march under-represents:
 # geometric self-shadow from cell-scale structure below grid
 # resolution, and absorption along off-grid paths.
-SHADOW_CONTRAST = 3.0
+SHADOW_CONTRAST = 2.0
 
 # Numerical integration.
-STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
+STEP_VOXEL_FACTOR = 1.0     # dt_max = min(active_level_dx) * this
 MAX_STEPS = 2048
 
 # Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
