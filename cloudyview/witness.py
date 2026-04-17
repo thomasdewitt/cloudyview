@@ -48,6 +48,45 @@ from numba import njit, prange
 
 
 # ============================================================================
+# Cloud-scattering tuning block
+# ----------------------------------------------------------------------------
+# Physically-motivated knobs that control the look of the clouds (not the
+# sky/ocean). Kept at module scope — numba captures them as compile-time
+# constants inside the kernel — so each tuning iteration is a single edit.
+# ============================================================================
+
+POWDER_COEFF = 1.5          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
+G_HG = 0.76                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.85)
+AMBIENT_STRENGTH = 0.12     # overall weight of the ambient term
+SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
+
+# Shadow-ray ("light march") step count. Too low → speckled shadows where
+# thin cloud blobs alias between steps.
+N_LIGHT_STEPS = 32
+
+# Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
+# and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
+MS_OCTAVES = 6
+MS_ATTEN = 0.4
+MS_BLEND_RATE = 0.35
+
+# Ambient spectrum + vertical ramp. The ambient term stands in for multiply-
+# scattered skylight that reaches the cloud after leaving the volume.
+AMBIENT_TINT_R = 0.22
+AMBIENT_TINT_G = 0.23
+AMBIENT_TINT_B = 0.28
+AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
+
+# Numerical integration.
+STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
+MAX_STEPS = 2048
+
+# Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
+# can use it as a default; ocean tuning itself is not part of this block).
+OCEAN_REFLECTANCE = (0.0067, 0.0149, 0.0420)
+
+
+# ============================================================================
 # Level descriptor (public — also used by render_nested callers)
 # ============================================================================
 
@@ -588,15 +627,15 @@ def _render_image(
 
                 ms_r = 0.0; ms_g = 0.0; ms_b = 0.0
                 ms_atten = 1.0
-                for octave in range(6):
+                for octave in range(MS_OCTAVES):
                     t_sun_ms = pymath.exp(-tau_sun * ms_atten)
-                    blend = min(1.0, octave * 0.35)
+                    blend = min(1.0, octave * MS_BLEND_RATE)
                     oct_phase = phase_hg * (1.0 - blend) + iso_phase * blend
                     contrib = ms_atten * t_sun_ms * oct_phase
                     ms_r += contrib * sun_r
                     ms_g += contrib * sun_g
                     ms_b += contrib * sun_b
-                    ms_atten *= 0.4
+                    ms_atten *= MS_ATTEN
 
                 # Powder as a function of depth into the current cloud segment:
                 # dark edges, bright cores, invariant to step size.
@@ -611,11 +650,12 @@ def _render_image(
                 height_frac = (p_z - outer_bmin_z) / (outer_bmax_z - outer_bmin_z)
                 if height_frac < 0.0: height_frac = 0.0
                 if height_frac > 1.0: height_frac = 1.0
-                amb = ambient_strength * (0.3 + 0.7 * height_frac)
+                amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
+                                          + (1.0 - AMBIENT_HEIGHT_FLOOR) * height_frac)
                 amb_weight = transmittance * d_tau * amb
-                col_r += amb_weight * 0.22
-                col_g += amb_weight * 0.23
-                col_b += amb_weight * 0.28
+                col_r += amb_weight * AMBIENT_TINT_R
+                col_g += amb_weight * AMBIENT_TINT_G
+                col_b += amb_weight * AMBIENT_TINT_B
 
                 transmittance *= pymath.exp(-d_tau)
                 t += dt
@@ -818,22 +858,6 @@ def tone_map(image, exposure=4.0, gamma=1.4):
 
 
 # ============================================================================
-# Shared tuning parameters
-# ============================================================================
-
-# Rendering constants shared between the single-domain main() and
-# render_nested(). Tuned to match the pre-tau_depth witness benchmarks while
-# keeping the dt-invariant physical powder term.
-POWDER_COEFF = 1.5       # powder = 1 - exp(-POWDER_COEFF * tau_depth)
-G_HG = 0.76              # Henyey-Greenstein asymmetry
-AMBIENT_STRENGTH = 0.12
-SUN_COLOR = (22.0, 21.0, 17.0)         # HDR sun intensity
-OCEAN_REFLECTANCE = (0.0067, 0.0149, 0.0420)  # diffuse albedo; calibrated so an airplane view matches IMG_6048 center-row median sRGB (62,92,142)
-STEP_VOXEL_FACTOR = 2.0  # dt_max = min(level_dx) * this
-MAX_STEPS = 2048
-
-
-# ============================================================================
 # Nested-domain public entry point
 # ============================================================================
 
@@ -846,7 +870,7 @@ def render_nested(
     sun_direction: Tuple[float, float, float],
     image_size: Tuple[int, int],
     fov_degrees: float = 100.0,
-    n_light_steps: int = 32,
+    n_light_steps: int = N_LIGHT_STEPS,
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
     max_steps: int = 4096,
     exposure: float = 4.0,
