@@ -2,20 +2,18 @@
 """
 witness.py: Video game-style cloud visualization via volume ray marching.
 
-Fast, visually realistic cloud rendering using techniques from real-time graphics:
-- Volume ray marching through 3D extinction coefficient field
-- Beer-Lambert transmittance with adaptive step size
-- Sun light marching for volumetric shadows
-- Henyey-Greenstein phase function for forward scattering
-- Multi-scattering approximation for optically thick clouds
-- Powder effect for dense cloud interiors
-- Procedural sky gradient with sun glow
-- Diffuse ocean surface
+Single, unified numba kernel that handles one or many strictly-nested
+extinction grids. The single-domain CLI (`witness`) and the programmatic
+nested-domain API (`render_nested`) both route through the same
+`_render_image` kernel:
 
-API matches behold (Mitsuba path tracer) for easy comparison:
-    witness <filename.nc> [--camera-position X Y Z] [--camera-azimuth DEG]
-        [--camera-elevation DEG] [--fov DEG] [--sun-azimuth DEG]
-        [--sun-elevation DEG] [--size W H] [--output dir]
+- Ray marches in absolute world meters; levels at wildly different scales
+  compose naturally without coordinate rescaling.
+- At each sample point the finest level covering that point wins.
+- Lighting model is dt-invariant: the powder term is a function of
+  cumulative optical depth from the most recent cloud entry, not per-step
+  d_tau. Renders look the same whether sampled at 10 m or 1 km steps, which
+  is what makes variable-grid nesting work.
 
 Coordinate System (Meteorological Convention):
 - East  = +x direction
@@ -23,16 +21,20 @@ Coordinate System (Meteorological Convention):
 - Up    = +z direction
 """
 
+from __future__ import annotations
+
 import argparse
+import math as pymath
 import sys
 import time
-import math as pymath
+from dataclasses import dataclass
 from pathlib import Path
-import numpy as np
 from textwrap import dedent
+from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from . import io, optical_depth, config
-from .domain import compute_domain_geometry
 from .angles import direction_from_azimuth_elevation
 from .cli_utils import (
     CloudyViewHelpFormatter,
@@ -40,56 +42,86 @@ from .cli_utils import (
     add_dataset_selection_arguments,
     dataset_selection_kwargs,
 )
+from .domain import compute_domain_geometry
 
-try:
-    from numba import njit, prange
-except ImportError:  # pragma: no cover - only used when numba is absent
-    def njit(*args, **kwargs):
-        if args and callable(args[0]) and len(args) == 1 and not kwargs:
-            return args[0]
-
-        def decorator(func):
-            return func
-
-        return decorator
-
-    prange = range
-
-_CUDA_AVAILABLE = False
-try:
-    from .witness_cuda import render_image_cuda
-    _CUDA_AVAILABLE = True
-except (ImportError, Exception):
-    pass
+from numba import njit, prange
 
 
 # ============================================================================
-# Numba JIT helper functions
+# Level descriptor (public — also used by render_nested callers)
 # ============================================================================
 
-@njit
-def _trilinear(field, gx, gy, gz, nx, ny, nz):
-    """Trilinear interpolation of a 3D field at continuous grid coordinates."""
-    ix = int(gx)
-    iy = int(gy)
-    iz = int(gz)
+@dataclass
+class NestedLevel:
+    """One refinement level: extinction field plus its absolute-meter AABB.
 
-    fx = gx - ix
-    fy = gy - iy
-    fz = gz - iz
+    sigma is m^-1, already scaled by the caller's extinction_multiplier.
+    bmin/bmax are absolute world meters.
+    """
+    sigma: np.ndarray        # (nx, ny, nz) float64, m^-1
+    bmin: np.ndarray         # (3,) float64: (x_min, y_min, z_min) meters
+    bmax: np.ndarray         # (3,) float64: (x_max, y_max, z_max) meters
+    name: str = ""
 
-    ix1 = min(ix + 1, nx - 1)
-    iy1 = min(iy + 1, ny - 1)
-    iz1 = min(iz + 1, nz - 1)
+    @property
+    def dx(self) -> Tuple[float, float, float]:
+        nx, ny, nz = self.sigma.shape
+        return (
+            (self.bmax[0] - self.bmin[0]) / nx,
+            (self.bmax[1] - self.bmin[1]) / ny,
+            (self.bmax[2] - self.bmin[2]) / nz,
+        )
 
-    c000 = field[ix, iy, iz]
-    c100 = field[ix1, iy, iz]
-    c010 = field[ix, iy1, iz]
-    c110 = field[ix1, iy1, iz]
-    c001 = field[ix, iy, iz1]
-    c101 = field[ix1, iy, iz1]
-    c011 = field[ix, iy1, iz1]
-    c111 = field[ix1, iy1, iz1]
+
+# ============================================================================
+# Numba JIT helper functions — all in absolute world meters
+# ============================================================================
+
+@njit(inline="always")
+def _active_level(px, py, pz, n_levels, level_bmin, level_bmax):
+    """Return index of finest level containing (px, py, pz), or -1."""
+    for k in range(n_levels):
+        if (level_bmin[k, 0] <= px <= level_bmax[k, 0] and
+            level_bmin[k, 1] <= py <= level_bmax[k, 1] and
+            level_bmin[k, 2] <= pz <= level_bmax[k, 2]):
+            return k
+    return -1
+
+
+@njit(inline="always")
+def _sample_sigma_level(sigma_stacked, offset, nx, ny, nz,
+                        bmin_x, bmin_y, bmin_z,
+                        dx, dy, dz,
+                        px, py, pz):
+    """Trilinear sigma sample at level k. Returns 0 if out of bounds."""
+    gx = (px - bmin_x) / dx
+    gy = (py - bmin_y) / dy
+    gz = (pz - bmin_z) / dz
+
+    if gx < 0 or gx > nx - 1.001 or gy < 0 or gy > ny - 1.001 or gz < 0 or gz > nz - 1.001:
+        return 0.0
+
+    ix = int(gx); iy = int(gy); iz = int(gz)
+    fx = gx - ix; fy = gy - iy; fz = gz - iz
+    ix1 = ix + 1 if ix + 1 < nx else nx - 1
+    iy1 = iy + 1 if iy + 1 < ny else ny - 1
+    iz1 = iz + 1 if iz + 1 < nz else nz - 1
+
+    stride_x = ny * nz
+    stride_y = nz
+    base00 = offset + ix * stride_x + iy * stride_y
+    base10 = offset + ix1 * stride_x + iy * stride_y
+    base01 = offset + ix * stride_x + iy1 * stride_y
+    base11 = offset + ix1 * stride_x + iy1 * stride_y
+
+    c000 = sigma_stacked[base00 + iz]
+    c100 = sigma_stacked[base10 + iz]
+    c010 = sigma_stacked[base01 + iz]
+    c110 = sigma_stacked[base11 + iz]
+    c001 = sigma_stacked[base00 + iz1]
+    c101 = sigma_stacked[base10 + iz1]
+    c011 = sigma_stacked[base01 + iz1]
+    c111 = sigma_stacked[base11 + iz1]
 
     return (c000 * (1 - fx) * (1 - fy) * (1 - fz) +
             c100 * fx * (1 - fy) * (1 - fz) +
@@ -101,14 +133,32 @@ def _trilinear(field, gx, gy, gz, nx, ny, nz):
             c111 * fx * fy * fz)
 
 
-@njit
+@njit(inline="always")
+def _sample_sigma_nested(px, py, pz,
+                         sigma_stacked, level_offsets, level_dims,
+                         level_bmin, level_bmax, level_dxs,
+                         n_levels):
+    """Find finest level covering (px,py,pz) and sample it. 0 if outside all."""
+    k = _active_level(px, py, pz, n_levels, level_bmin, level_bmax)
+    if k < 0:
+        return 0.0, -1
+    sigma = _sample_sigma_level(
+        sigma_stacked, level_offsets[k],
+        level_dims[k, 0], level_dims[k, 1], level_dims[k, 2],
+        level_bmin[k, 0], level_bmin[k, 1], level_bmin[k, 2],
+        level_dxs[k, 0], level_dxs[k, 1], level_dxs[k, 2],
+        px, py, pz,
+    )
+    return sigma, k
+
+
+@njit(inline="always")
 def _ray_box(ox, oy, oz, dx, dy, dz,
              bmin_x, bmin_y, bmin_z, bmax_x, bmax_y, bmax_z):
-    """Ray-AABB intersection. Returns (t_near, t_far) or (-1, -1) if miss."""
+    """Ray-AABB intersection. Returns (t_near, t_far) or (-1,-1) if miss."""
     t_near = -1e30
     t_far = 1e30
 
-    # X slab
     if abs(dx) < 1e-12:
         if ox < bmin_x or ox > bmax_x:
             return -1.0, -1.0
@@ -117,10 +167,9 @@ def _ray_box(ox, oy, oz, dx, dy, dz,
         t2 = (bmax_x - ox) / dx
         if t1 > t2:
             t1, t2 = t2, t1
-        t_near = max(t_near, t1)
-        t_far = min(t_far, t2)
+        if t1 > t_near: t_near = t1
+        if t2 < t_far: t_far = t2
 
-    # Y slab
     if abs(dy) < 1e-12:
         if oy < bmin_y or oy > bmax_y:
             return -1.0, -1.0
@@ -129,10 +178,9 @@ def _ray_box(ox, oy, oz, dx, dy, dz,
         t2 = (bmax_y - oy) / dy
         if t1 > t2:
             t1, t2 = t2, t1
-        t_near = max(t_near, t1)
-        t_far = min(t_far, t2)
+        if t1 > t_near: t_near = t1
+        if t2 < t_far: t_far = t2
 
-    # Z slab
     if abs(dz) < 1e-12:
         if oz < bmin_z or oz > bmax_z:
             return -1.0, -1.0
@@ -141,44 +189,33 @@ def _ray_box(ox, oy, oz, dx, dy, dz,
         t2 = (bmax_z - oz) / dz
         if t1 > t2:
             t1, t2 = t2, t1
-        t_near = max(t_near, t1)
-        t_far = min(t_far, t2)
+        if t1 > t_near: t_near = t1
+        if t2 < t_far: t_far = t2
 
     if t_near > t_far or t_far < 0:
         return -1.0, -1.0
+    if t_near < 0:
+        t_near = 0.0
+    return t_near, t_far
 
-    return max(t_near, 0.0), t_far
 
-
-@njit
+@njit(inline="always")
 def _hg_phase(cos_theta, g):
-    """Henyey-Greenstein phase function (normalized to integrate to 1 over sphere)."""
     denom = 1.0 + g * g - 2.0 * g * cos_theta
     return (1.0 - g * g) / (4.0 * 3.14159265358979 * denom * pymath.sqrt(denom))
 
 
 @njit
-def _sample_sigma(sigma_world, px, py, pz, ar_x, ar_y, nx, ny, nz):
-    """Sample extinction at a world-space position via trilinear interpolation.
-
-    World-space bounds: [-ar_x, ar_x] x [-ar_y, ar_y] x [-1, 1].
-    """
-    gx = (px / ar_x + 1.0) * 0.5 * (nx - 1)
-    gy = (py / ar_y + 1.0) * 0.5 * (ny - 1)
-    gz = (pz + 1.0) * 0.5 * (nz - 1)
-
-    if gx < 0 or gx > nx - 1.001 or gy < 0 or gy > ny - 1.001 or gz < 0 or gz > nz - 1.001:
-        return 0.0
-
-    return _trilinear(sigma_world, gx, gy, gz, nx, ny, nz)
-
-
-@njit
-def _light_march(sigma_world, px, py, pz, sun_dx, sun_dy, sun_dz,
-                 ar_x, ar_y, nx, ny, nz, n_steps):
-    """March from a point toward the sun. Returns accumulated optical depth."""
+def _light_march(px, py, pz, sun_dx, sun_dy, sun_dz,
+                 sigma_stacked, level_offsets, level_dims,
+                 level_bmin, level_bmax, level_dxs,
+                 n_levels, n_steps,
+                 outer_bmin_x, outer_bmin_y, outer_bmin_z,
+                 outer_bmax_x, outer_bmax_y, outer_bmax_z):
+    """March from a point toward the sun through nested levels."""
     t_near, t_far = _ray_box(px, py, pz, sun_dx, sun_dy, sun_dz,
-                              -ar_x, -ar_y, -1.0, ar_x, ar_y, 1.0)
+                              outer_bmin_x, outer_bmin_y, outer_bmin_z,
+                              outer_bmax_x, outer_bmax_y, outer_bmax_z)
     tau = 0.0
     if t_far <= 0:
         return tau
@@ -190,7 +227,11 @@ def _light_march(sigma_world, px, py, pz, sun_dx, sun_dy, sun_dz,
         sy = py + t * sun_dy
         sz = pz + t * sun_dz
 
-        sigma = _sample_sigma(sigma_world, sx, sy, sz, ar_x, ar_y, nx, ny, nz)
+        sigma, _ = _sample_sigma_nested(
+            sx, sy, sz,
+            sigma_stacked, level_offsets, level_dims,
+            level_bmin, level_bmax, level_dxs, n_levels,
+        )
         tau += sigma * dt
         if tau > 80.0:
             break
@@ -198,39 +239,31 @@ def _light_march(sigma_world, px, py, pz, sun_dx, sun_dy, sun_dz,
     return tau
 
 
-@njit
+@njit(inline="always")
 def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
-    """Procedural sky color in HDR for a given view direction."""
-    # Height above horizon
+    """Procedural sky color in HDR."""
     t = max(0.0, min(1.0, dz))
-
-    # Base sky gradient (horizon -> zenith), slightly muted
     sky_r = 0.14 * (1.0 - t * 0.4)
     sky_g = 0.19 * (1.0 - t * 0.3)
     sky_b = 0.36 - t * 0.04
 
-    # Sun proximity glow
     cos_sun = dx * sun_dx + dy * sun_dy + dz * sun_dz
     if cos_sun > 0:
-        # Broad halo
         halo = cos_sun * cos_sun
         sky_r += halo * 0.08
         sky_g += halo * 0.06
         sky_b += halo * 0.03
-        # Sharp glow near sun disk
         if cos_sun > 0.9:
             glow = ((cos_sun - 0.9) / 0.1)
             glow = glow * glow * glow
             sky_r += glow * 0.8
             sky_g += glow * 0.7
             sky_b += glow * 0.5
-        # Sun disk
         if cos_sun > 0.9998:
             sky_r += 50.0
             sky_g += 45.0
             sky_b += 35.0
 
-    # Below horizon: fade to dark
     if dz < 0:
         fade = max(0.0, 1.0 + dz * 5.0)
         sky_r *= fade
@@ -241,25 +274,31 @@ def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
 
 
 # ============================================================================
-# Main rendering kernel
+# Main render kernel (unified: N=1 is the single-domain case)
 # ============================================================================
 
 @njit(parallel=True)
-def _render_image(sigma_world, nx, ny, nz, ar_x, ar_y,
-                  cam_ox, cam_oy, cam_oz,
-                  cam_fx, cam_fy, cam_fz,
-                  cam_rx, cam_ry, cam_rz,
-                  cam_ux, cam_uy, cam_uz,
-                  sun_dx, sun_dy, sun_dz,
-                  img_w, img_h, tan_half_fov,
-                  n_light_steps,
-                  sun_r, sun_g, sun_b,
-                  g_hg, ambient_strength,
-                  ocean_enabled, ocean_z,
-                  ocean_rr, ocean_rg, ocean_rb,
-                  image):
-    """Render all pixels using volume ray marching with adaptive stepping."""
-
+def _render_image(
+    sigma_stacked, level_offsets, level_dims,
+    level_bmin, level_bmax, level_dxs, n_levels,
+    outer_bmin_x, outer_bmin_y, outer_bmin_z,
+    outer_bmax_x, outer_bmax_y, outer_bmax_z,
+    cam_ox, cam_oy, cam_oz,
+    cam_fx, cam_fy, cam_fz,
+    cam_rx, cam_ry, cam_rz,
+    cam_ux, cam_uy, cam_uz,
+    sun_dx, sun_dy, sun_dz,
+    img_w, img_h, tan_half_fov,
+    n_light_steps,
+    sun_r, sun_g, sun_b,
+    g_hg, ambient_strength,
+    ocean_enabled, ocean_z,
+    ocean_rr, ocean_rg, ocean_rb,
+    step_voxel_factor,   # dt_max = min(active_level_dx) * this
+    max_steps,
+    powder_coeff,        # powder = 1 - exp(-powder_coeff * tau_depth)
+    image,
+):
     aspect = img_w / img_h
     iso_phase = 1.0 / (4.0 * 3.14159265358979)
 
@@ -268,7 +307,6 @@ def _render_image(sigma_world, nx, ny, nz, ar_x, ar_y,
         py = pixel_idx // img_w
         px = pixel_idx % img_w
 
-        # --- Compute ray direction ---
         ndc_x = (2.0 * (px + 0.5) / img_w - 1.0) * aspect * tan_half_fov
         ndc_y = (1.0 - 2.0 * (py + 0.5) / img_h) * tan_half_fov
 
@@ -281,52 +319,53 @@ def _render_image(sigma_world, nx, ny, nz, ar_x, ar_y,
         d_y *= inv_len
         d_z *= inv_len
 
-        # --- Ray-box intersection ---
+        # Entry into outermost volume.
         t_near, t_far = _ray_box(cam_ox, cam_oy, cam_oz,
                                   d_x, d_y, d_z,
-                                  -ar_x, -ar_y, -1.0, ar_x, ar_y, 1.0)
+                                  outer_bmin_x, outer_bmin_y, outer_bmin_z,
+                                  outer_bmax_x, outer_bmax_y, outer_bmax_z)
 
-        # Ocean intersection
         t_ocean = 1e30
         if ocean_enabled and d_z < -1e-8:
             t_ocean_cand = (ocean_z - cam_oz) / d_z
             if t_ocean_cand > 0:
                 t_ocean = t_ocean_cand
 
-        # Phase function (constant per pixel since it depends on view-sun angle)
         cos_theta = d_x * sun_dx + d_y * sun_dy + d_z * sun_dz
         phase_hg = _hg_phase(cos_theta, g_hg)
 
-        # --- Initialize accumulation ---
         col_r = 0.0
         col_g = 0.0
         col_b = 0.0
         transmittance = 1.0
 
-        # --- Volume ray march ---
+        # Cumulative optical depth from the most recent cloud entry; drives
+        # the powder term so that brightness is dt-invariant across nested
+        # grids with very different step sizes.
+        tau_depth = 0.0
+
         if t_near >= 0 and t_near < t_far:
-            dt_max = (t_far - t_near) / 300.0
             t = t_near
 
-            for _ in range(2048):
-                if t >= t_far or transmittance < 0.002:
-                    break
-
-                # Check ocean
+            for _ in range(max_steps):
+                # Ocean hit tested before t_far: if the ocean plane coincides
+                # with the outer box floor, t_ocean == t_far and the t_far
+                # break would skip ocean shading for downward rays.
                 if ocean_enabled and t >= t_ocean:
-                    # Compute ocean contribution
                     o_x = cam_ox + t_ocean * d_x
                     o_y = cam_oy + t_ocean * d_y
                     o_z = ocean_z
 
-                    tau_ocean = _light_march(sigma_world, o_x, o_y, o_z,
-                                             sun_dx, sun_dy, sun_dz,
-                                             ar_x, ar_y, nx, ny, nz, n_light_steps)
+                    tau_ocean = _light_march(
+                        o_x, o_y, o_z, sun_dx, sun_dy, sun_dz,
+                        sigma_stacked, level_offsets, level_dims,
+                        level_bmin, level_bmax, level_dxs, n_levels,
+                        n_light_steps,
+                        outer_bmin_x, outer_bmin_y, outer_bmin_z,
+                        outer_bmax_x, outer_bmax_y, outer_bmax_z,
+                    )
                     t_sun_ocean = pymath.exp(-tau_ocean)
-                    cos_sun_n = max(0.0, sun_dz)  # dot(surface_normal, sun_dir)
-
-                    # Ocean surface lighting (Lambertian BRDF = reflectance/pi)
-                    # Scale by 0.3 for atmospheric attenuation matching behold
+                    cos_sun_n = max(0.0, sun_dz)
                     inv_pi = 1.0 / 3.14159265358979
                     ocean_sun_scale = 0.05
                     sun_irr = t_sun_ocean * cos_sun_n * ocean_sun_scale * inv_pi
@@ -340,117 +379,138 @@ def _render_image(sigma_world, nx, ny, nz, ar_x, ar_y,
                     transmittance = 0.0
                     break
 
-                # Sample position
+                if t >= t_far or transmittance < 0.002:
+                    break
+
                 p_x = cam_ox + t * d_x
                 p_y = cam_oy + t * d_y
                 p_z = cam_oz + t * d_z
 
-                # Sample extinction
-                sigma = _sample_sigma(sigma_world, p_x, p_y, p_z,
-                                      ar_x, ar_y, nx, ny, nz)
+                sigma, k = _sample_sigma_nested(
+                    p_x, p_y, p_z,
+                    sigma_stacked, level_offsets, level_dims,
+                    level_bmin, level_bmax, level_dxs, n_levels,
+                )
 
-                # Adaptive step size: limit optical depth per step to ~0.5
+                if k < 0:
+                    # Outside all levels despite being inside the outer AABB
+                    # (can happen at seams). Advance a voxel and keep going.
+                    # Use the outer level's step.
+                    outer = n_levels - 1
+                    dx_k = level_dxs[outer, 0]
+                    if level_dxs[outer, 1] < dx_k:
+                        dx_k = level_dxs[outer, 1]
+                    if level_dxs[outer, 2] < dx_k:
+                        dx_k = level_dxs[outer, 2]
+                    t += dx_k * step_voxel_factor
+                    tau_depth = 0.0
+                    continue
+
+                # dt_max from current level's finest spacing.
+                dx_k = level_dxs[k, 0]
+                if level_dxs[k, 1] < dx_k:
+                    dx_k = level_dxs[k, 1]
+                if level_dxs[k, 2] < dx_k:
+                    dx_k = level_dxs[k, 2]
+                dt_max = dx_k * step_voxel_factor
+
                 if sigma > 0.01:
                     dt = min(dt_max, 0.5 / sigma)
                 else:
                     dt = dt_max
 
-                # Don't overshoot box or ocean
-                dt = min(dt, t_far - t)
+                if t + dt > t_far:
+                    dt = t_far - t
                 if ocean_enabled and t + dt > t_ocean:
                     dt = max(0.0001, t_ocean - t)
 
-                if sigma < 0.001:
+                # Skip pure-empty cells cheaply and reset the cloud-entry depth
+                # so the next cloud edge gets the full powder ramp.
+                d_tau = sigma * dt
+                if d_tau < 1e-5:
+                    tau_depth = 0.0
                     t += dt
                     continue
 
-                d_tau = sigma * dt
+                tau_depth += d_tau
 
-                # --- Sun light march ---
-                tau_sun = _light_march(sigma_world, p_x, p_y, p_z,
-                                       sun_dx, sun_dy, sun_dz,
-                                       ar_x, ar_y, nx, ny, nz, n_light_steps)
+                tau_sun = _light_march(
+                    p_x, p_y, p_z, sun_dx, sun_dy, sun_dz,
+                    sigma_stacked, level_offsets, level_dims,
+                    level_bmin, level_bmax, level_dxs, n_levels,
+                    n_light_steps,
+                    outer_bmin_x, outer_bmin_y, outer_bmin_z,
+                    outer_bmax_x, outer_bmax_y, outer_bmax_z,
+                )
 
-                # --- Multi-scattering in-scattering ---
-                # Schneider/Hillaire approximation: each octave represents
-                # higher-order scattering with reduced extinction and more
-                # isotropic phase, allowing light to penetrate deeper
-                ms_r = 0.0
-                ms_g = 0.0
-                ms_b = 0.0
-
+                ms_r = 0.0; ms_g = 0.0; ms_b = 0.0
                 ms_atten = 1.0
                 for octave in range(6):
-                    # Reduced sun transmittance for multi-scattered light
                     t_sun_ms = pymath.exp(-tau_sun * ms_atten)
-
-                    # Blend phase function toward isotropic
                     blend = min(1.0, octave * 0.35)
                     oct_phase = phase_hg * (1.0 - blend) + iso_phase * blend
-
                     contrib = ms_atten * t_sun_ms * oct_phase
                     ms_r += contrib * sun_r
                     ms_g += contrib * sun_g
                     ms_b += contrib * sun_b
-
                     ms_atten *= 0.4
 
-                # Powder effect: darkens dense interiors, brightens thin edges
-                powder = 1.0 - pymath.exp(-1.5 * d_tau)
-
-                # Scattering contribution
-                scatter_weight = sigma * dt * powder * transmittance
+                # Powder as a function of depth into the current cloud segment:
+                # dark edges, bright cores, invariant to step size.
+                powder = 1.0 - pymath.exp(-powder_coeff * tau_depth)
+                scatter_weight = d_tau * powder * transmittance
 
                 col_r += scatter_weight * ms_r
                 col_g += scatter_weight * ms_g
                 col_b += scatter_weight * ms_b
 
-                # Ambient illumination (height-dependent)
-                # Uses warm gray (multi-scattered sunlight becomes neutral)
-                # Higher minimum at cloud base for ground-bounce light
-                height_frac = (p_z + 1.0) * 0.5
+                # Ambient: height-based on the outer box.
+                height_frac = (p_z - outer_bmin_z) / (outer_bmax_z - outer_bmin_z)
+                if height_frac < 0.0: height_frac = 0.0
+                if height_frac > 1.0: height_frac = 1.0
                 amb = ambient_strength * (0.3 + 0.7 * height_frac)
-                amb_weight = transmittance * sigma * dt * amb
-
+                amb_weight = transmittance * d_tau * amb
                 col_r += amb_weight * 0.22
                 col_g += amb_weight * 0.23
                 col_b += amb_weight * 0.28
 
-                # Update transmittance
                 transmittance *= pymath.exp(-d_tau)
-
                 t += dt
 
-        # --- Ocean for rays that exit the box ---
+        # Ocean for rays that exit the outer box without hitting opacity.
         if ocean_enabled and transmittance > 0.002 and t_ocean < 1e29 and t_ocean > t_far:
             o_x = cam_ox + t_ocean * d_x
             o_y = cam_oy + t_ocean * d_y
             o_z = ocean_z
-
-            # Only if not too far away
-            if abs(o_x) < ar_x * 100 and abs(o_y) < ar_y * 100:
-                tau_ocean = _light_march(sigma_world, o_x, o_y, o_z,
-                                         sun_dx, sun_dy, sun_dz,
-                                         ar_x, ar_y, nx, ny, nz, n_light_steps)
+            dx_outer = outer_bmax_x - outer_bmin_x
+            dy_outer = outer_bmax_y - outer_bmin_y
+            cx = 0.5 * (outer_bmin_x + outer_bmax_x)
+            cy = 0.5 * (outer_bmin_y + outer_bmax_y)
+            if abs(o_x - cx) < dx_outer * 50 and abs(o_y - cy) < dy_outer * 50:
+                tau_ocean = _light_march(
+                    o_x, o_y, o_z, sun_dx, sun_dy, sun_dz,
+                    sigma_stacked, level_offsets, level_dims,
+                    level_bmin, level_bmax, level_dxs, n_levels,
+                    n_light_steps,
+                    outer_bmin_x, outer_bmin_y, outer_bmin_z,
+                    outer_bmax_x, outer_bmax_y, outer_bmax_z,
+                )
                 t_sun_ocean = pymath.exp(-tau_ocean)
                 cos_sun_n = max(0.0, sun_dz)
-
                 inv_pi = 1.0 / 3.14159265358979
                 ocean_sun_scale = 0.05
                 sun_irr = t_sun_ocean * cos_sun_n * ocean_sun_scale * inv_pi
                 ol_r = sun_irr * sun_r * ocean_rr + 0.004
                 ol_g = sun_irr * sun_g * ocean_rg + 0.004
                 ol_b = sun_irr * sun_b * ocean_rb + 0.006
-
                 col_r += transmittance * ol_r
                 col_g += transmittance * ol_g
                 col_b += transmittance * ol_b
                 transmittance = 0.0
 
-        # --- Background sky ---
         if transmittance > 0.002:
             sky_r, sky_g, sky_b = _sky_radiance(d_x, d_y, d_z,
-                                                 sun_dx, sun_dy, sun_dz)
+                                                  sun_dx, sun_dy, sun_dz)
             col_r += transmittance * sky_r
             col_g += transmittance * sky_g
             col_b += transmittance * sky_b
@@ -458,6 +518,143 @@ def _render_image(sigma_world, nx, ny, nz, ar_x, ar_y,
         image[py, px, 0] = col_r
         image[py, px, 1] = col_g
         image[py, px, 2] = col_b
+
+
+# ============================================================================
+# Level packing + kernel driver
+# ============================================================================
+
+def _pack_levels(levels: Sequence[NestedLevel]):
+    """Pack N levels into flat arrays for the numba kernel."""
+    N = len(levels)
+    sizes = [l.sigma.size for l in levels]
+    total = sum(sizes)
+    sigma_stacked = np.empty(total, dtype=np.float64)
+    level_offsets = np.zeros(N, dtype=np.int64)
+    level_dims = np.zeros((N, 3), dtype=np.int64)
+    level_bmin = np.zeros((N, 3), dtype=np.float64)
+    level_bmax = np.zeros((N, 3), dtype=np.float64)
+    level_dxs = np.zeros((N, 3), dtype=np.float64)
+
+    offset = 0
+    for k, lvl in enumerate(levels):
+        arr = np.ascontiguousarray(lvl.sigma, dtype=np.float64)
+        sigma_stacked[offset:offset + arr.size] = arr.ravel()
+        level_offsets[k] = offset
+        level_dims[k, 0], level_dims[k, 1], level_dims[k, 2] = arr.shape
+        level_bmin[k, :] = lvl.bmin
+        level_bmax[k, :] = lvl.bmax
+        nx, ny, nz = arr.shape
+        level_dxs[k, 0] = (lvl.bmax[0] - lvl.bmin[0]) / nx
+        level_dxs[k, 1] = (lvl.bmax[1] - lvl.bmin[1]) / ny
+        level_dxs[k, 2] = (lvl.bmax[2] - lvl.bmin[2]) / nz
+        offset += arr.size
+
+    return (sigma_stacked, level_offsets, level_dims,
+            level_bmin, level_bmax, level_dxs)
+
+
+def _render_levels(
+    levels: Sequence[NestedLevel],
+    camera_position: Tuple[float, float, float],
+    camera_forward: Tuple[float, float, float],
+    camera_right: Tuple[float, float, float],
+    camera_up: Tuple[float, float, float],
+    sun_direction: Tuple[float, float, float],
+    image_size: Tuple[int, int],
+    fov_degrees: float,
+    n_light_steps: int,
+    step_voxel_factor: float,
+    max_steps: int,
+    ocean_enabled: bool,
+    ocean_z: float,
+    ocean_reflectance: Tuple[float, float, float],
+    sun_color: Tuple[float, float, float],
+    g_hg: float,
+    ambient_strength: float,
+    powder_coeff: float,
+    verbose: bool,
+) -> np.ndarray:
+    """Pack levels, warm up, render, and return the linear HDR buffer."""
+    if len(levels) == 0:
+        raise ValueError("Need at least one level.")
+
+    img_w, img_h = image_size
+    (sigma_stacked, level_offsets, level_dims,
+     level_bmin, level_bmax, level_dxs) = _pack_levels(levels)
+
+    outer = levels[-1]
+    outer_bmin = np.asarray(outer.bmin, dtype=np.float64)
+    outer_bmax = np.asarray(outer.bmax, dtype=np.float64)
+
+    fov_rad = pymath.radians(fov_degrees)
+    tan_half_fov = pymath.tan(fov_rad * 0.5)
+
+    image = np.zeros((img_h, img_w, 3), dtype=np.float64)
+
+    if verbose:
+        print(f"  Levels: {len(levels)}")
+        for k, lvl in enumerate(levels):
+            dx, dy, dz = lvl.dx
+            size = lvl.bmax - lvl.bmin
+            print(f"    L{k} {lvl.name or '':12s} "
+                  f"grid={lvl.sigma.shape} "
+                  f"dx~({dx:.2f},{dy:.2f},{dz:.2f}) m "
+                  f"size=({size[0]/1000:.2f},{size[1]/1000:.2f},{size[2]/1000:.2f}) km "
+                  f"origin=({lvl.bmin[0]/1000:.2f},{lvl.bmin[1]/1000:.2f},{lvl.bmin[2]/1000:.2f}) km")
+
+    # Warmup compile with a 1x1 buffer.
+    warmup = np.zeros((1, 1, 3), dtype=np.float64)
+    if verbose:
+        print("  Compiling render kernel (first run only)...", end="", flush=True)
+    _render_image(
+        sigma_stacked, level_offsets, level_dims,
+        level_bmin, level_bmax, level_dxs, len(levels),
+        outer_bmin[0], outer_bmin[1], outer_bmin[2],
+        outer_bmax[0], outer_bmax[1], outer_bmax[2],
+        camera_position[0], camera_position[1], camera_position[2],
+        camera_forward[0], camera_forward[1], camera_forward[2],
+        camera_right[0], camera_right[1], camera_right[2],
+        camera_up[0], camera_up[1], camera_up[2],
+        sun_direction[0], sun_direction[1], sun_direction[2],
+        1, 1, tan_half_fov,
+        4,
+        sun_color[0], sun_color[1], sun_color[2],
+        g_hg, ambient_strength,
+        ocean_enabled, ocean_z,
+        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+        step_voxel_factor, 32, powder_coeff,
+        warmup,
+    )
+    if verbose:
+        print(" done")
+        print("  Rendering...", end="", flush=True)
+
+    t0 = time.perf_counter()
+    _render_image(
+        sigma_stacked, level_offsets, level_dims,
+        level_bmin, level_bmax, level_dxs, len(levels),
+        outer_bmin[0], outer_bmin[1], outer_bmin[2],
+        outer_bmax[0], outer_bmax[1], outer_bmax[2],
+        camera_position[0], camera_position[1], camera_position[2],
+        camera_forward[0], camera_forward[1], camera_forward[2],
+        camera_right[0], camera_right[1], camera_right[2],
+        camera_up[0], camera_up[1], camera_up[2],
+        sun_direction[0], sun_direction[1], sun_direction[2],
+        img_w, img_h, tan_half_fov,
+        n_light_steps,
+        sun_color[0], sun_color[1], sun_color[2],
+        g_hg, ambient_strength,
+        ocean_enabled, ocean_z,
+        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+        step_voxel_factor, max_steps, powder_coeff,
+        image,
+    )
+    elapsed = time.perf_counter() - t0
+    if verbose:
+        print(f" done ({elapsed:.1f}s)")
+
+    return image
 
 
 # ============================================================================
@@ -472,7 +669,69 @@ def tone_map(image, exposure=4.0, gamma=1.4):
 
 
 # ============================================================================
-# Main function
+# Shared tuning parameters
+# ============================================================================
+
+# Rendering constants shared between the single-domain main() and
+# render_nested(). Tuned to match the pre-tau_depth witness benchmarks while
+# keeping the dt-invariant physical powder term.
+POWDER_COEFF = 1.5       # powder = 1 - exp(-POWDER_COEFF * tau_depth)
+G_HG = 0.76              # Henyey-Greenstein asymmetry
+AMBIENT_STRENGTH = 0.12
+SUN_COLOR = (22.0, 21.0, 17.0)         # HDR sun intensity
+OCEAN_REFLECTANCE = (0.04, 0.05, 0.07)  # dark gray-blue
+STEP_VOXEL_FACTOR = 2.0  # dt_max = min(level_dx) * this
+MAX_STEPS = 2048
+
+
+# ============================================================================
+# Nested-domain public entry point
+# ============================================================================
+
+def render_nested(
+    levels: Sequence[NestedLevel],
+    camera_position: Tuple[float, float, float],
+    camera_forward: Tuple[float, float, float],
+    camera_right: Tuple[float, float, float],
+    camera_up: Tuple[float, float, float],
+    sun_direction: Tuple[float, float, float],
+    image_size: Tuple[int, int],
+    fov_degrees: float = 100.0,
+    n_light_steps: int = 32,
+    step_voxel_factor: float = STEP_VOXEL_FACTOR,
+    max_steps: int = 4096,
+    exposure: float = 4.0,
+    ocean_enabled: bool = True,
+    ocean_z: float = 0.0,
+    ocean_reflectance: Tuple[float, float, float] = OCEAN_REFLECTANCE,
+    sun_color: Tuple[float, float, float] = SUN_COLOR,
+    g_hg: float = G_HG,
+    ambient_strength: float = AMBIENT_STRENGTH,
+    powder_coeff: float = POWDER_COEFF,
+    return_linear: bool = False,
+    verbose: bool = True,
+) -> np.ndarray:
+    """Render through N strictly-nested extinction grids.
+
+    Levels are finest-first (index 0 = highest resolution); the outermost
+    (last) level defines the outer AABB the ray is clipped against.
+    """
+    image = _render_levels(
+        levels,
+        camera_position, camera_forward, camera_right, camera_up,
+        sun_direction, image_size,
+        fov_degrees, n_light_steps, step_voxel_factor, max_steps,
+        ocean_enabled, ocean_z, ocean_reflectance,
+        sun_color, g_hg, ambient_strength, powder_coeff,
+        verbose,
+    )
+    if return_linear:
+        return image
+    return tone_map(image, exposure=exposure)
+
+
+# ============================================================================
+# Single-domain main (CLI entry point)
 # ============================================================================
 
 def main(filename: str, output: str = None,
@@ -491,58 +750,16 @@ def main(filename: str, output: str = None,
          z_coord_name: str = None,
          x_dim: str = None,
          y_dim: str = None,
-         z_dim: str = None,
-         gpu: bool = False,
-         supersample: int = 1) -> None:
-    """
-    Main function for witness.py
-
-    Parameters
-    ----------
-    filename : str
-        Path to NetCDF file
-    output : str, optional
-        Output directory for renders
-    camera_position : list, optional
-        Camera position [x, y, z] in relative coords (+-1.0 = domain edge)
-    camera_azimuth : float, optional
-        Camera azimuth in degrees (0=North, 90=East, 180=South, 270=West)
-    camera_elevation : float, optional
-        Camera elevation in degrees (angle above horizon)
-    camera_fov : float, optional
-        Camera field of view in degrees
-    sun_azimuth : float, optional
-        Sun azimuth in degrees
-    sun_elevation : float, optional
-        Sun elevation in degrees
-    custom_size : tuple, optional
-        Image size (width, height)
-    liquid_water_var, ice_water_var : str, optional
-        Explicit variable-name overrides for water-content arrays
-    dataset_group, liquid_water_group, ice_water_group, coords_group : str, optional
-        NetCDF group overrides for variable/coordinate lookup
-    x_coord_name, y_coord_name, z_coord_name : str, optional
-        Explicit coordinate variable names
-    x_dim, y_dim, z_dim : str, optional
-        Explicit dimension names for x/y/z
-    """
-    if gpu and not _CUDA_AVAILABLE:
-        print("Error: --gpu requested but CUDA is not available.",
-              file=sys.stderr)
-        print("  Requires: numba with CUDA support and an NVIDIA GPU.",
-              file=sys.stderr)
-        sys.exit(1)
-
+         z_dim: str = None) -> None:
+    """Render a single NetCDF domain through the unified kernel."""
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
 
-    # Load configuration
     witness_config = config.get_witness_config()
     cam_config = witness_config['camera']
     sun_config = witness_config['sun']
     render_config = witness_config['rendering']
 
-    # Apply CLI overrides
     if camera_position is not None:
         cam_config['position'] = list(camera_position)
     if camera_azimuth is not None:
@@ -559,12 +776,7 @@ def main(filename: str, output: str = None,
     img_w = custom_size[0] if custom_size else render_config['width']
     img_h = custom_size[1] if custom_size else render_config['height']
 
-    ss = max(1, int(supersample))
-    render_w = img_w * ss
-    render_h = img_h * ss
-
     try:
-        # Load and validate data
         data_dict = io.load_and_validate(
             filename,
             liquid_water_var=liquid_water_var,
@@ -583,11 +795,9 @@ def main(filename: str, output: str = None,
         lw_data = data_dict['liquid_water_data']
         iw_data = data_dict['ice_water_data']
 
-        # Get coordinates
         x_coord = data_dict.get('x_coord')
         y_coord = data_dict.get('y_coord')
         z_coord = data_dict.get('z_coord')
-
         if x_coord is None or y_coord is None or z_coord is None:
             raise ValueError(
                 "Missing x/y/z coordinate arrays in validated dataset; "
@@ -597,10 +807,8 @@ def main(filename: str, output: str = None,
         lw_np = lw_data.values
         if 'time' in lw_data.dims:
             lw_np = lw_np[0]
-
         nx_d, ny_d, nz_d = lw_np.shape
 
-        # Process ice water content
         iw_np = None
         if iw_data is not None:
             iw_np = iw_data.values
@@ -609,140 +817,89 @@ def main(filename: str, output: str = None,
             if np.max(iw_np) < 1e-6:
                 iw_np = None
 
-        # Compute extinction coefficient
+        # Physical extinction in m^-1 (not scaled by height_z: the kernel
+        # works in absolute meters, so sigma is already in physical units).
         sigma_ext = optical_depth.compute_extinction_field(
             lw_np, z_coord, re=10.0, iwc=iw_np, re_ice=30.0)
 
-        # Domain geometry (shared with behold)
         geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx_d, ny_d, nz_d)
-        ar_x, ar_y = geom.ar_x, geom.ar_y
 
         print(f"  Grid: {nx_d} x {ny_d} x {nz_d}, spacing: {geom.dx:.1f} x {geom.dy:.1f} m")
-        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m, "
-              f"aspect ratio: {ar_x:.2f} x {ar_y:.2f}")
+        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m")
 
-        # Scale extinction to world space (same as behold)
-        # NOTE: linear world-z to grid-index mapping assumes uniform dz.
-        # Non-uniform dz causes slight vertical distortion in witness;
-        # behold (Mitsuba volume grid) handles it correctly.
         ext_mult = render_config['extinction_multiplier']
-        sigma_world = (sigma_ext * ext_mult * geom.height_z).astype(np.float64)
+        sigma_world = (sigma_ext * ext_mult).astype(np.float64)
         sigma_world = np.ascontiguousarray(sigma_world)
 
-        sigma_max = np.max(sigma_world)
-        sigma_mean_nz = np.mean(sigma_world[sigma_world > 0]) if np.any(sigma_world > 0) else 0
-        print(f"  Extinction (world): max={sigma_max:.1f}, mean(nonzero)={sigma_mean_nz:.1f}")
+        sigma_max = float(np.max(sigma_world))
+        sigma_mean_nz = float(np.mean(sigma_world[sigma_world > 0])) if np.any(sigma_world > 0) else 0.0
+        print(f"  Extinction: max={sigma_max:.4f} m^-1, mean(nonzero)={sigma_mean_nz:.4f} m^-1")
 
-        # Camera setup
+        # Absolute-meter AABB from coordinate arrays (cell-centred; half-step
+        # padding so the AABB encloses the outermost cells' extents).
+        x_vals = np.asarray(x_coord).astype(np.float64)
+        y_vals = np.asarray(y_coord).astype(np.float64)
+        z_vals = np.asarray(z_coord).astype(np.float64)
+        dx_half = 0.5 * geom.dx
+        dy_half = 0.5 * geom.dy
+        # For z, use first/last spacing instead of mean dz to tolerate stretched grids.
+        dz_lo_half = 0.5 * abs(z_vals[1] - z_vals[0])
+        dz_hi_half = 0.5 * abs(z_vals[-1] - z_vals[-2])
+        bmin = np.array([x_vals.min() - dx_half,
+                         y_vals.min() - dy_half,
+                         z_vals.min() - dz_lo_half], dtype=np.float64)
+        bmax = np.array([x_vals.max() + dx_half,
+                         y_vals.max() + dy_half,
+                         z_vals.max() + dz_hi_half], dtype=np.float64)
+
+        level = NestedLevel(sigma=sigma_world, bmin=bmin, bmax=bmax, name="single")
+
+        # Camera in absolute meters: rel=[-1,1] maps to the AABB.
         rel_pos = cam_config['position']
-        cam_origin = np.array([
-            rel_pos[0] * ar_x,
-            rel_pos[1] * ar_y,
-            rel_pos[2]
-        ])
+        cam_origin = bmin + (np.array(rel_pos, dtype=np.float64) + 1.0) * 0.5 * (bmax - bmin)
 
         forward = direction_from_azimuth_elevation(
             cam_config['azimuth'], cam_config['elevation']
         )
-
         world_up = np.array([0.0, 0.0, 1.0])
         if abs(np.dot(forward, world_up)) > 0.999:
             world_up = np.array([0.0, 1.0, 0.0])
-        right = np.cross(forward, world_up)
-        right /= np.linalg.norm(right)
-        up = np.cross(right, forward)
-        up /= np.linalg.norm(up)
+        right = np.cross(forward, world_up); right /= np.linalg.norm(right)
+        up = np.cross(right, forward); up /= np.linalg.norm(up)
 
-        # Sun direction (toward the sun)
         sun_dir = direction_from_azimuth_elevation(
             sun_config['azimuth'], sun_config['elevation']
         )
 
-        fov_rad = np.deg2rad(cam_config['fov'])
-        tan_half_fov = np.tan(fov_rad * 0.5)
-
-        # Rendering parameters
-        n_light_steps = render_config['n_light_steps']
-        exposure = render_config['exposure']
-        g_hg = 0.76  # HG asymmetry parameter
-        ambient_strength = 0.12
-        sun_color = np.array([22.0, 21.0, 17.0])  # HDR sun intensity
-
-        # Ocean (override reflectance to neutral gray for video-game style)
+        # Ocean height: rel in [-1,1] within the AABB z-range.
         ocean_config = render_config['ocean']
         ocean_enabled = ocean_config['enabled']
-        ocean_ref = [0.04, 0.05, 0.07]  # Neutral dark gray-blue
-        ocean_height = ocean_config['height']
+        ocean_z = bmin[2] + (ocean_config['height'] + 1.0) * 0.5 * (bmax[2] - bmin[2])
 
-        print(f"  Camera: pos=[{cam_origin[0]:.2f}, {cam_origin[1]:.2f}, {cam_origin[2]:.2f}]")
+        n_light_steps = render_config['n_light_steps']
+        exposure = render_config['exposure']
+
+        print(f"  Camera: abs=({cam_origin[0]:.1f},{cam_origin[1]:.1f},{cam_origin[2]:.1f}) m")
         print(f"          azimuth={cam_config['azimuth']:.1f} elev={cam_config['elevation']:.1f} fov={cam_config['fov']:.1f}")
         print(f"  Sun: azimuth={sun_config['azimuth']:.1f} elev={sun_config['elevation']:.1f}")
-        if ss > 1:
-            print(f"  Image: {img_w}x{img_h} "
-                  f"(rendered at {render_w}x{render_h}, {ss}x{ss} supersampling)")
-        else:
-            print(f"  Image: {img_w}x{img_h}")
+        print(f"  Image: {img_w}x{img_h}")
 
-        # Allocate output at supersampled resolution
-        image = np.zeros((render_h, render_w, 3), dtype=np.float64)
-
-        # Select render backend
-        if gpu:
-            _render_fn = render_image_cuda
-            backend_label = "GPU (CUDA)"
-        else:
-            _render_fn = _render_image
-            backend_label = "CPU"
-
-        # Common render arguments
-        _render_args = (
-            sigma_world, nx_d, ny_d, nz_d, ar_x, ar_y,
-            cam_origin[0], cam_origin[1], cam_origin[2],
-            forward[0], forward[1], forward[2],
-            right[0], right[1], right[2],
-            up[0], up[1], up[2],
-            sun_dir[0], sun_dir[1], sun_dir[2],
+        image = _render_levels(
+            [level],
+            (cam_origin[0], cam_origin[1], cam_origin[2]),
+            (forward[0], forward[1], forward[2]),
+            (right[0], right[1], right[2]),
+            (up[0], up[1], up[2]),
+            (sun_dir[0], sun_dir[1], sun_dir[2]),
+            (img_w, img_h),
+            cam_config['fov'], n_light_steps,
+            STEP_VOXEL_FACTOR, MAX_STEPS,
+            ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
+            SUN_COLOR, G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
+            verbose=True,
         )
-        _render_kwargs_warmup = (
-            1, 1, tan_half_fov,
-            4, sun_color[0], sun_color[1], sun_color[2],
-            g_hg, ambient_strength,
-            ocean_enabled, ocean_height,
-            ocean_ref[0], ocean_ref[1], ocean_ref[2],
-        )
-        _render_kwargs_full = (
-            render_w, render_h, tan_half_fov,
-            n_light_steps,
-            sun_color[0], sun_color[1], sun_color[2],
-            g_hg, ambient_strength,
-            ocean_enabled, ocean_height,
-            ocean_ref[0], ocean_ref[1], ocean_ref[2],
-        )
-
-        # Warmup compilation
-        print(f"  Compiling {backend_label} render kernel (first run only)...",
-              end="", flush=True)
-        warmup = np.zeros((1, 1, 3), dtype=np.float64)
-        _render_fn(*_render_args, *_render_kwargs_warmup, warmup)
-        print(" done")
-
-        # Render
-        print(f"  Rendering on {backend_label}...", end="", flush=True)
-        render_start = time.perf_counter()
-
-        _render_fn(*_render_args, *_render_kwargs_full, image)
-
-        render_elapsed = time.perf_counter() - render_start
-        print(f" done ({render_elapsed:.1f}s)")
-
-        # Downsample by averaging sxs superpixels in linear HDR space
-        if ss > 1:
-            image = image.reshape(img_h, ss, img_w, ss, 3).mean(axis=(1, 3))
-
-        # Tone mapping
         image_tm = tone_map(image, exposure=exposure)
 
-        # Save
         if output:
             output_dir = Path(output)
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -800,7 +957,7 @@ def cli():
             Camera and sun conventions:
               - Coordinates are meteorological: +x east, +y north, +z up.
               - Camera position uses relative coordinates where +/-1 reaches the domain edge
-                in x and y, and z spans the domain height.
+                in x, y, and z.
               - Azimuth is a meteorological bearing: 0 north, 90 east, 180 south, 270 west.
               - Elevation is degrees above the horizon.
 
@@ -809,8 +966,8 @@ def cli():
               - min: 150x100
               - low: 300x200
               - medium: 600x400
-              - high: 1600x1200 (rendered at 6400x4800 with 4x4 supersampling)
-              `--size WIDTH HEIGHT` overrides the preset and disables supersampling.
+              - high: 1600x1200
+              `--size WIDTH HEIGHT` overrides the preset.
 
             Dependencies:
               `witness --help` works without optional acceleration packages. Rendering is
@@ -850,17 +1007,10 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
-    parser.add_argument("--gpu", action="store_true", default=False,
-                        help="Use CUDA GPU for rendering (requires NVIDIA GPU)")
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
-    if args.size:
-        size = tuple(args.size)
-        supersample = 1
-    else:
-        size = QUALITY_PRESETS[args.quality]
-        supersample = 4 if args.quality == 'high' else 1
+    size = tuple(args.size) if args.size else QUALITY_PRESETS[args.quality]
 
     main(args.filename, args.output,
          camera_position=args.camera_position,
@@ -870,8 +1020,6 @@ def cli():
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
          custom_size=size,
-         gpu=args.gpu,
-         supersample=supersample,
          **dataset_selection_kwargs(args))
 
 
