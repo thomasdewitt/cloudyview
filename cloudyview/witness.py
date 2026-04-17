@@ -56,7 +56,7 @@ from numba import njit, prange
 # ============================================================================
 
 POWDER_COEFF = 0.7          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
-G_HG = 0.85                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.85)
+G_HG = 0.50                 # Henyey-Greenstein asymmetry
 AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
 SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
 
@@ -66,7 +66,7 @@ N_LIGHT_STEPS = 64
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
-MS_OCTAVES = 3
+MS_OCTAVES = 1
 MS_ATTEN = 0.25
 MS_BLEND_RATE = 0.50
 
@@ -82,7 +82,7 @@ AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 # multiple-scatter integral with no albedo book-keeping, so effective
 # amplitude needs to be tuned down to avoid tone-map saturation of lit
 # cloud tops (which otherwise lose all gradient to the Reinhard ceiling).
-CLOUD_ALBEDO = 0.40
+CLOUD_ALBEDO = 0.65
 
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
