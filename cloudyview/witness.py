@@ -55,9 +55,9 @@ from numba import njit, prange
 # constants inside the kernel — so each tuning iteration is a single edit.
 # ============================================================================
 
-POWDER_COEFF = 1.2          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
+POWDER_COEFF = 3.0          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.50                 # Henyey-Greenstein asymmetry
-AMBIENT_STRENGTH = 0.45     # overall weight of the ambient term
+AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
 SUN_COLOR = (28.0, 23.0, 16.0)   # HDR sun radiance (golden mid-day)
 
 # Shadow-ray ("light march") step count. Too low → speckled shadows where
