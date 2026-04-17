@@ -241,34 +241,46 @@ def _light_march(px, py, pz, sun_dx, sun_dy, sun_dz,
 
 @njit(inline="always")
 def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
-    """Procedural sky color in HDR."""
-    t = max(0.0, min(1.0, dz))
-    sky_r = 0.14 * (1.0 - t * 0.4)
-    sky_g = 0.19 * (1.0 - t * 0.3)
-    sky_b = 0.36 - t * 0.04
+    """Procedural sky: cobalt zenith, hazy horizon, gradual circumsolar bloom.
+
+    Tuned against phone photos of real cumulus scenes. The old shader had a
+    cos^2 halo across the whole sun-facing hemisphere (producing a ringed
+    bloom visible even when the sun was off-frame) plus a smoothstep bloom
+    with a hard outer disc. Replaced with a Lorentzian in 1-cos(theta): soft
+    peak, long low-amplitude tail, no visible cutoff.
+    """
+    # Zenith-to-horizon gradient. Biasing with 1-(1-dz)^3 keeps ~97% zenith
+    # down to 45° elevation and fades to horizon mostly within the bottom 20°
+    # — deep cobalt dominates most of an up-looking frame. Below-horizon rays
+    # clamp to horizon color (ocean normally handles those when enabled).
+    t = max(0.0, dz)
+    one_minus = 1.0 - t
+    t = 1.0 - one_minus * one_minus * one_minus
+    # Zenith sampled from top-center patch of IMG_6304 (sRGB (14,57,112))
+    # reverse-mapped through tone_map(exposure=4, gamma=1.4).
+    zen_r = 0.0044; zen_g = 0.035; zen_b = 0.1156
+    hor_r = 0.10;   hor_g = 0.18;  hor_b = 0.38
+    sky_r = hor_r + (zen_r - hor_r) * t
+    sky_g = hor_g + (zen_g - hor_g) * t
+    sky_b = hor_b + (zen_b - hor_b) * t
 
     cos_sun = dx * sun_dx + dy * sun_dy + dz * sun_dz
-    if cos_sun > 0:
-        halo = cos_sun * cos_sun
-        sky_r += halo * 0.08
-        sky_g += halo * 0.06
-        sky_b += halo * 0.03
-        if cos_sun > 0.9:
-            glow = ((cos_sun - 0.9) / 0.1)
-            glow = glow * glow * glow
-            sky_r += glow * 0.8
-            sky_g += glow * 0.7
-            sky_b += glow * 0.5
-        if cos_sun > 0.9998:
-            sky_r += 50.0
-            sky_g += 45.0
-            sky_b += 35.0
 
-    if dz < 0:
-        fade = max(0.0, 1.0 + dz * 5.0)
-        sky_r *= fade
-        sky_g *= fade
-        sky_b *= fade
+    # Circumsolar bloom. Lorentzian in 1-cos(theta) so the shape is a smooth
+    # peak with a long, low-amplitude tail — no finite cutoff, no visible
+    # disc outline. Half-max at ~3.6°, peak amplitude 1.
+    if cos_sun > 0.0:
+        sun_half_width = 0.002
+        a = sun_half_width / ((1.0 - cos_sun) + sun_half_width)
+        sky_r += a * 0.8
+        sky_g += a * 0.6
+        sky_b += a * 0.3
+
+    # Solar disc.
+    if cos_sun > 0.9998:
+        sky_r += 50.0
+        sky_g += 45.0
+        sky_b += 35.0
 
     return sky_r, sky_g, sky_b
 
