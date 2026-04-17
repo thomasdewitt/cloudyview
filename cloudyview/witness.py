@@ -62,7 +62,7 @@ SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
 
 # Shadow-ray ("light march") step count. Too low → speckled shadows where
 # thin cloud blobs alias between steps.
-N_LIGHT_STEPS = 32
+N_LIGHT_STEPS = 64
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
