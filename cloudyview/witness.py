@@ -55,7 +55,7 @@ from numba import njit, prange
 # constants inside the kernel — so each tuning iteration is a single edit.
 # ============================================================================
 
-POWDER_COEFF = 1.5          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
+POWDER_COEFF = 0.7          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
 G_HG = 0.76                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.85)
 AMBIENT_STRENGTH = 0.30     # overall weight of the ambient term
 SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
