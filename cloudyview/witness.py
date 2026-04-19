@@ -132,35 +132,67 @@ def _sample_sigma_level(sigma_stacked, offset, nx, ny, nz,
                         bmin_x, bmin_y, bmin_z,
                         dx, dy, dz,
                         px, py, pz):
-    """Trilinear sigma sample at level k. Returns 0 if out of bounds."""
+    """Trilinear sigma sample with ghost-zero boundary taper.
+
+    Treats the grid as if a 1-voxel-thick layer of zeros sat just outside
+    each face. Samples in that ghost zone produce a smooth linear fade
+    from σ(edge) at the last cell center down to 0 one cell out. Without
+    this, a cloud field that reaches the grid boundary has a hard σ
+    discontinuity that aliases against the shadow-ray stepping and
+    produces concentric ring artifacts on domain-truncated thick clouds.
+    Returns 0 for samples more than 1 voxel outside the grid on any axis.
+    """
     gx = (px - bmin_x) / dx
     gy = (py - bmin_y) / dy
     gz = (pz - bmin_z) / dz
 
-    if gx < 0 or gx > nx - 1.001 or gy < 0 or gy > ny - 1.001 or gz < 0 or gz > nz - 1.001:
+    if gx < -1.0 or gx >= nx or gy < -1.0 or gy >= ny or gz < -1.0 or gz >= nz:
         return 0.0
 
-    ix = int(gx); iy = int(gy); iz = int(gz)
+    ix = int(pymath.floor(gx))
+    iy = int(pymath.floor(gy))
+    iz = int(pymath.floor(gz))
     fx = gx - ix; fy = gy - iy; fz = gz - iz
-    ix1 = ix + 1 if ix + 1 < nx else nx - 1
-    iy1 = iy + 1 if iy + 1 < ny else ny - 1
-    iz1 = iz + 1 if iz + 1 < nz else nz - 1
+    ix1 = ix + 1; iy1 = iy + 1; iz1 = iz + 1
+
+    # Clamp indices to the valid array range for safe fetching; corners
+    # whose true index is out of range will be zeroed below.
+    ixs = ix if ix >= 0 else 0
+    ix1s = ix1 if ix1 < nx else nx - 1
+    iys = iy if iy >= 0 else 0
+    iy1s = iy1 if iy1 < ny else ny - 1
+    izs = iz if iz >= 0 else 0
+    iz1s = iz1 if iz1 < nz else nz - 1
 
     stride_x = ny * nz
     stride_y = nz
-    base00 = offset + ix * stride_x + iy * stride_y
-    base10 = offset + ix1 * stride_x + iy * stride_y
-    base01 = offset + ix * stride_x + iy1 * stride_y
-    base11 = offset + ix1 * stride_x + iy1 * stride_y
+    base00 = offset + ixs * stride_x + iys * stride_y
+    base10 = offset + ix1s * stride_x + iys * stride_y
+    base01 = offset + ixs * stride_x + iy1s * stride_y
+    base11 = offset + ix1s * stride_x + iy1s * stride_y
 
-    c000 = sigma_stacked[base00 + iz]
-    c100 = sigma_stacked[base10 + iz]
-    c010 = sigma_stacked[base01 + iz]
-    c110 = sigma_stacked[base11 + iz]
-    c001 = sigma_stacked[base00 + iz1]
-    c101 = sigma_stacked[base10 + iz1]
-    c011 = sigma_stacked[base01 + iz1]
-    c111 = sigma_stacked[base11 + iz1]
+    c000 = sigma_stacked[base00 + izs]
+    c100 = sigma_stacked[base10 + izs]
+    c010 = sigma_stacked[base01 + izs]
+    c110 = sigma_stacked[base11 + izs]
+    c001 = sigma_stacked[base00 + iz1s]
+    c101 = sigma_stacked[base10 + iz1s]
+    c011 = sigma_stacked[base01 + iz1s]
+    c111 = sigma_stacked[base11 + iz1s]
+
+    # Zero corners whose true index is outside the grid (ghost layer).
+    if ix < 0:
+        c000 = 0.0; c010 = 0.0; c001 = 0.0; c011 = 0.0
+    if ix1 >= nx:
+        c100 = 0.0; c110 = 0.0; c101 = 0.0; c111 = 0.0
+    if iy < 0:
+        c000 = 0.0; c100 = 0.0; c001 = 0.0; c101 = 0.0
+    if iy1 >= ny:
+        c010 = 0.0; c110 = 0.0; c011 = 0.0; c111 = 0.0
+    if iz < 0:
+        c000 = 0.0; c100 = 0.0; c010 = 0.0; c110 = 0.0
+    if iz1 >= nz:
+        c001 = 0.0; c101 = 0.0; c011 = 0.0; c111 = 0.0
 
     return (c000 * (1 - fx) * (1 - fy) * (1 - fz) +
             c100 * fx * (1 - fy) * (1 - fz) +

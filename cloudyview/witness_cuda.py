@@ -89,27 +89,55 @@ if not cuda.is_available():
 
 @cuda.jit(device=True)
 def _trilinear_d(field, gx, gy, gz, nx, ny, nz):
-    """Trilinear interpolation of a 3D field at continuous grid coordinates."""
-    ix = int(gx)
-    iy = int(gy)
-    iz = int(gz)
+    """Trilinear interpolation with ghost-zero boundary taper.
+
+    Corners whose true index falls outside [0, n-1] on any axis are
+    treated as zero — the grid is effectively padded with a 1-voxel
+    layer of zeros, producing a smooth linear fade from field(edge)
+    to 0 one voxel beyond the grid. See witness.py _sample_sigma_level
+    for the ring-artifact motivation.
+    """
+    ix = int(math.floor(gx))
+    iy = int(math.floor(gy))
+    iz = int(math.floor(gz))
 
     fx = gx - ix
     fy = gy - iy
     fz = gz - iz
 
-    ix1 = min(ix + 1, nx - 1)
-    iy1 = min(iy + 1, ny - 1)
-    iz1 = min(iz + 1, nz - 1)
+    ix1 = ix + 1
+    iy1 = iy + 1
+    iz1 = iz + 1
 
-    c000 = field[ix, iy, iz]
-    c100 = field[ix1, iy, iz]
-    c010 = field[ix, iy1, iz]
-    c110 = field[ix1, iy1, iz]
-    c001 = field[ix, iy, iz1]
-    c101 = field[ix1, iy, iz1]
-    c011 = field[ix, iy1, iz1]
-    c111 = field[ix1, iy1, iz1]
+    # Clamp for safe array access; invalid corners zeroed below.
+    ixs = ix if ix >= 0 else 0
+    ix1s = ix1 if ix1 < nx else nx - 1
+    iys = iy if iy >= 0 else 0
+    iy1s = iy1 if iy1 < ny else ny - 1
+    izs = iz if iz >= 0 else 0
+    iz1s = iz1 if iz1 < nz else nz - 1
+
+    c000 = field[ixs, iys, izs]
+    c100 = field[ix1s, iys, izs]
+    c010 = field[ixs, iy1s, izs]
+    c110 = field[ix1s, iy1s, izs]
+    c001 = field[ixs, iys, iz1s]
+    c101 = field[ix1s, iys, iz1s]
+    c011 = field[ixs, iy1s, iz1s]
+    c111 = field[ix1s, iy1s, iz1s]
+
+    if ix < 0:
+        c000 = 0.0; c010 = 0.0; c001 = 0.0; c011 = 0.0
+    if ix1 >= nx:
+        c100 = 0.0; c110 = 0.0; c101 = 0.0; c111 = 0.0
+    if iy < 0:
+        c000 = 0.0; c100 = 0.0; c001 = 0.0; c101 = 0.0
+    if iy1 >= ny:
+        c010 = 0.0; c110 = 0.0; c011 = 0.0; c111 = 0.0
+    if iz < 0:
+        c000 = 0.0; c100 = 0.0; c010 = 0.0; c110 = 0.0
+    if iz1 >= nz:
+        c001 = 0.0; c101 = 0.0; c011 = 0.0; c111 = 0.0
 
     return (c000 * (1 - fx) * (1 - fy) * (1 - fz) +
             c100 * fx * (1 - fy) * (1 - fz) +
@@ -184,7 +212,9 @@ def _sample_sigma_d(sigma_world, px, py, pz, ar_x, ar_y, nx, ny, nz):
     gy = (py / ar_y + 1.0) * 0.5 * (ny - 1)
     gz = (pz + 1.0) * 0.5 * (nz - 1)
 
-    if gx < 0 or gx > nx - 1.001 or gy < 0 or gy > ny - 1.001 or gz < 0 or gz > nz - 1.001:
+    # Allow 1-voxel ghost zone on each face so the trilinear can fade
+    # smoothly to 0 at the grid boundary (see _trilinear_d).
+    if gx < -1.0 or gx >= nx or gy < -1.0 or gy >= ny or gz < -1.0 or gz >= nz:
         return 0.0
 
     return _trilinear_d(sigma_world, gx, gy, gz, nx, ny, nz)
