@@ -35,7 +35,7 @@ DEFAULT_WITNESS_CONFIG = {
     'rendering': {
         'width': 600,
         'height': 400,
-        'n_light_steps': 64,
+        'n_light_steps': 512,
         'exposure': 4.0,
         'extinction_multiplier': 1.0,
         'ocean': {

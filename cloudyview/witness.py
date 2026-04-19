@@ -60,9 +60,11 @@ G_HG = 0.76                 # Henyey-Greenstein asymmetry (Mie for 10 µm ≈ 0.
 AMBIENT_STRENGTH = 0.12     # overall weight of the ambient term
 SUN_COLOR = (22.0, 21.0, 17.0)   # HDR sun radiance (slightly warm)
 
-# Shadow-ray ("light march") step count. Too low → speckled shadows where
-# thin cloud blobs alias between steps.
-N_LIGHT_STEPS = 64
+# Shadow-ray ("light march") iteration cap. Stepping is voxel-adaptive
+# (same STEP_VOXEL_FACTOR as the view ray), with early exit when
+# tau_sun > 80 (effectively zero sun contribution). This is a safety
+# bound; the tau saturation usually terminates long before we reach it.
+N_LIGHT_STEPS = 512
 
 # Multi-scattering octave loop. Each octave attenuates tau_sun by MS_ATTEN**k
 # and phase-blends from pure HG toward isotropic at rate MS_BLEND_RATE.
@@ -280,10 +282,22 @@ def _hg_phase(cos_theta, g):
 def _light_march(px, py, pz, sun_dx, sun_dy, sun_dz,
                  sigma_stacked, level_offsets, level_dims,
                  level_bmin, level_bmax, level_dxs,
-                 n_levels, n_steps,
+                 n_levels, max_steps,
                  outer_bmin_x, outer_bmin_y, outer_bmin_z,
                  outer_bmax_x, outer_bmax_y, outer_bmax_z):
-    """March from a point toward the sun through nested levels."""
+    """Adaptive-step shadow march toward the sun through nested levels.
+
+    Steps at ~voxel resolution of the active level (STEP_VOXEL_FACTOR ×
+    min voxel size), with early exit when tau > 80 (transmittance well
+    below perceivable). max_steps is a safety bound; saturation
+    normally terminates first on any cloud-intersecting ray.
+
+    Previously used uniform dt = t_far / N_LIGHT_STEPS, which at 64
+    samples across a ~20 km box produced 300 m steps — much coarser
+    than the grid voxels. That aliased against σ structure and, when
+    combined with hard σ edges at domain truncations, produced
+    concentric ring artifacts on thick truncated clouds.
+    """
     t_near, t_far = _ray_box(px, py, pz, sun_dx, sun_dy, sun_dz,
                               outer_bmin_x, outer_bmin_y, outer_bmin_z,
                               outer_bmax_x, outer_bmax_y, outer_bmax_z)
@@ -291,21 +305,46 @@ def _light_march(px, py, pz, sun_dx, sun_dy, sun_dz,
     if t_far <= 0:
         return tau
 
-    dt = t_far / n_steps
-    for i in range(n_steps):
-        t = (i + 0.5) * dt
+    # Fallback dt when a sample falls outside all levels (nested seams).
+    outer = n_levels - 1
+    outer_dx = level_dxs[outer, 0]
+    if level_dxs[outer, 1] < outer_dx:
+        outer_dx = level_dxs[outer, 1]
+    if level_dxs[outer, 2] < outer_dx:
+        outer_dx = level_dxs[outer, 2]
+
+    t = 0.0
+    for _ in range(max_steps):
+        if t >= t_far:
+            break
+
         sx = px + t * sun_dx
         sy = py + t * sun_dy
         sz = pz + t * sun_dz
 
-        sigma, _ = _sample_sigma_nested(
+        sigma, k = _sample_sigma_nested(
             sx, sy, sz,
             sigma_stacked, level_offsets, level_dims,
             level_bmin, level_bmax, level_dxs, n_levels,
         )
+
+        if k < 0:
+            dt = outer_dx * STEP_VOXEL_FACTOR
+        else:
+            dx_k = level_dxs[k, 0]
+            if level_dxs[k, 1] < dx_k:
+                dx_k = level_dxs[k, 1]
+            if level_dxs[k, 2] < dx_k:
+                dx_k = level_dxs[k, 2]
+            dt = dx_k * STEP_VOXEL_FACTOR
+
+        if t + dt > t_far:
+            dt = t_far - t
+
         tau += sigma * dt
         if tau > 80.0:
             break
+        t += dt
 
     return tau
 

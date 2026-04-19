@@ -222,25 +222,50 @@ def _sample_sigma_d(sigma_world, px, py, pz, ar_x, ar_y, nx, ny, nz):
 
 @cuda.jit(device=True)
 def _light_march_d(sigma_world, px, py, pz, sun_dx, sun_dy, sun_dz,
-                   ar_x, ar_y, nx, ny, nz, n_steps):
-    """March from a point toward the sun. Returns accumulated optical depth."""
+                   ar_x, ar_y, nx, ny, nz, max_steps):
+    """Adaptive-step shadow march toward the sun.
+
+    Stepping is at ~voxel resolution (2× smallest voxel edge) with
+    early exit at tau > 80. max_steps is a safety cap; saturation
+    normally terminates first. See witness.py _light_march for the
+    ring-artifact motivation.
+    """
     t_near, t_far = _ray_box_d(px, py, pz, sun_dx, sun_dy, sun_dz,
                                 -ar_x, -ar_y, -1.0, ar_x, ar_y, 1.0)
     tau = 0.0
     if t_far <= 0:
         return tau
 
-    dt = t_far / n_steps
-    for i in range(n_steps):
-        t = (i + 0.5) * dt
+    # Single level in CUDA: voxel size is constant across the grid.
+    vx = 2.0 * ar_x / nx
+    vy = 2.0 * ar_y / ny
+    vz = 2.0 / nz
+    dt_step = vx
+    if vy < dt_step:
+        dt_step = vy
+    if vz < dt_step:
+        dt_step = vz
+    dt_step *= 2.0  # STEP_VOXEL_FACTOR
+
+    t = 0.0
+    for _ in range(max_steps):
+        if t >= t_far:
+            break
+
         sx = px + t * sun_dx
         sy = py + t * sun_dy
         sz = pz + t * sun_dz
 
         sigma = _sample_sigma_d(sigma_world, sx, sy, sz, ar_x, ar_y, nx, ny, nz)
+
+        dt = dt_step
+        if t + dt > t_far:
+            dt = t_far - t
+
         tau += sigma * dt
         if tau > 80.0:
             break
+        t += dt
 
     return tau
 
