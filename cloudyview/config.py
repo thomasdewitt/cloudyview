@@ -65,11 +65,11 @@ DEFAULT_BEHOLD_CONFIG = {
         'exposure': 4.0,
         'extinction_multiplier': 1.0,
         'integrator': 'volpathmis',
-        'turbidity': 3.0,
+        'turbidity': 2.0,
         'ground_albedo': 0.5,
         'ocean': {
             'enabled': True,
-            'reflectance': [0.0392, 0.1098, 0.1490],  # Dark blue ocean
+            'reflectance': [0.0020, 0.0045, 0.0126],  # Matches witness OCEAN_REFLECTANCE
             'height': -0.9999,  # Just above ground plane
         },
     }
