@@ -29,6 +29,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+
+
+temp/
+
 # PyInstaller
 *.manifest
 *.spec
@@ -151,3 +155,5 @@ benchmarking/output/
 *.out
 *.err
 *.gpulog
+
+.codex
