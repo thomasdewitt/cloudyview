@@ -23,10 +23,13 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 import numpy as np
 from textwrap import dedent
 
 from . import io, optical_depth, config
+from .camera import Camera
+from .cloudfield import CloudField, load as _load_field
 from .domain import compute_domain_geometry
 from .angles import direction_from_azimuth_elevation
 from .cli_utils import (
@@ -35,6 +38,257 @@ from .cli_utils import (
     add_dataset_selection_arguments,
     dataset_selection_kwargs,
 )
+
+
+# Quality presets: resolution, samples per pixel, path-depth budgets.
+QUALITY_MAP = {
+    'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 2, 'max_depth': 4},
+    'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 4, 'max_depth': 16},
+    'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 16, 'max_depth': 64},
+    'high': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96},
+}
+
+
+def _prepare_extinction(field: CloudField, verbose: bool = False):
+    """Extinction field + ice fraction + geometry from a CloudField.
+
+    Returns (sigma_ext, ice_fraction, geom, dx, dy, dz).
+    """
+    x_coord, y_coord, z_coord = field.x, field.y, field.z
+    lw_np = field.lwc
+    nx, ny, nz = lw_np.shape
+
+    # Domain geometry (shared with witness)
+    geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz)
+    dx, dy = geom.dx, geom.dy
+    dz = float(z_coord[1] - z_coord[0])  # first spacing, for interface compat
+
+    if verbose:
+        print(f"  Grid: {nx} x {ny} x {nz}, spacing: {dx:.1f} x {dy:.1f} m")
+        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m, "
+              f"aspect ratio: {geom.ar_x:.2f} x {geom.ar_y:.2f}")
+
+    # Process ice water content if present
+    iw_np = field.iwc
+    ice_fraction = None
+
+    if iw_np is not None:
+        # Check if there's actually ice in the volume
+        if np.max(iw_np) > 1e-6:
+            if verbose:
+                print(f"  Ice water content detected (max: {np.max(iw_np):.6f} g/kg)")
+
+            # Compute ice fraction (0 = liquid, 1 = ice)
+            # Avoid division by zero
+            total_water = lw_np + iw_np
+            ice_fraction = np.divide(iw_np, total_water,
+                                    out=np.zeros_like(iw_np),
+                                    where=total_water > 1e-10)
+        else:
+            if verbose:
+                print("  Ice water content negligible, using liquid-only rendering")
+            iw_np = None
+    else:
+        if verbose:
+            print("  No ice water content in dataset")
+
+    if iw_np is None and verbose:
+        print("  No ice water content detected; using liquid-only extinction.")
+
+    # Compute extinction coefficient (liquid + ice if present)
+    sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0,
+                                                      iwc=iw_np, re_ice=30.0)
+
+    return sigma_ext, ice_fraction, geom, dx, dy, dz
+
+
+def _build_view_config(geom, camera: Camera, sun_azimuth: float, sun_elevation: float,
+                       quality: str, custom_spp: Optional[int],
+                       custom_size: Optional[tuple], custom_max_depth: Optional[int],
+                       custom_rr_depth: Optional[int],
+                       progress_interval: Optional[int] = None,
+                       verbose: bool = False) -> dict:
+    """Build the Mitsuba view/scene configuration dict.
+
+    Requires the Mitsuba variant to be set already (the camera transform
+    is a Mitsuba type).
+    """
+    from . import radiative_transfer
+
+    rendering_config = config.get_behold_config()['rendering']
+    ar_x, ar_y = geom.ar_x, geom.ar_y
+
+    if quality == 'custom':
+        # Use custom parameters (with sensible defaults)
+        width, height = custom_size if custom_size else (600, 400)
+        spp = custom_spp if custom_spp else 512
+        # Override config max_depth/rr_depth if custom values provided
+        if custom_max_depth is not None:
+            rendering_config['max_depth'] = custom_max_depth
+        if custom_rr_depth is not None:
+            rendering_config['rr_depth'] = custom_rr_depth
+    else:
+        width, height = QUALITY_MAP[quality]['resolution']
+        spp = QUALITY_MAP[quality]['spp']
+        rendering_config['max_depth'] = QUALITY_MAP[quality]['max_depth']
+        rendering_config['rr_depth'] = QUALITY_MAP[quality]['rr_depth']
+
+    # Convert relative camera position to absolute
+    # Relative coords: ±1.0 = domain edge
+    rel_pos = camera.position
+    camera_origin = [
+        rel_pos[0] * ar_x,  # x in world space (±ar_x)
+        rel_pos[1] * ar_y,  # y in world space (±ar_y)
+        rel_pos[2]          # z in world space (±1)
+    ]
+
+    # Compute look direction vector from meteorological azimuth/elevation
+    look_dir = direction_from_azimuth_elevation(camera.azimuth, camera.elevation)
+
+    # Target point is origin + look direction
+    camera_target = camera_origin + look_dir
+
+    if verbose:
+        print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
+        print(f"  Camera azimuth: {camera.azimuth:.1f}°, elevation: {camera.elevation:.1f}°")
+        print(f"  Sun azimuth: {sun_azimuth:.1f}°, elevation: {sun_elevation:.1f}°")
+        print(f"  Field of view: {camera.fov:.1f}°")
+        print(f"  Render quality: {quality} ({width}x{height}, spp={spp})")
+
+    view_config = {
+        'name': 'Ground-Looking-Up (Progressive Rendering)',
+        'width': width,
+        'height': height,
+        'fov': camera.fov,
+        'transform': radiative_transfer.look_at_world_up(
+            origin=camera_origin,
+            target=camera_target
+        ),
+        'camera_origin': camera_origin,
+        'spp': spp,
+        'exposure': rendering_config['exposure'],
+        'extinction_multiplier': rendering_config['extinction_multiplier'],
+        'sky_type': 'sunsky',  # Physically-based sky
+        'turbidity': rendering_config['turbidity'],
+        'sun_azimuth': sun_azimuth,
+        'sun_elevation': sun_elevation,
+        'ground_albedo': rendering_config['ground_albedo'],
+        'add_ocean': rendering_config['ocean']['enabled'],
+        'ocean_reflectance': rendering_config['ocean']['reflectance'],
+        'ocean_height': rendering_config['ocean']['height'],
+        'integrator': rendering_config['integrator'],
+        'max_depth': rendering_config['max_depth'],
+        'rr_depth': rendering_config['rr_depth'],
+        'sampler': {'type': 'independent', 'sample_count': spp},
+        'seed': 0,
+        'ar_x': ar_x,
+        'ar_y': ar_y,
+        'height_z': geom.height_z,
+    }
+
+    # Add progress_interval if specified
+    if progress_interval is not None:
+        view_config['progress_interval'] = progress_interval
+
+    return view_config
+
+
+def behold(
+    field: CloudField,
+    camera: Optional[Camera] = None,
+    quality: str = 'medium',
+    *,
+    gpu: bool = False,
+    spp: Optional[int] = None,
+    size: Optional[Tuple[int, int]] = None,
+    max_depth: Optional[int] = None,
+    rr_depth: Optional[int] = None,
+    sun_azimuth: Optional[float] = None,
+    sun_elevation: Optional[float] = None,
+    seed: int = 0,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Render a cloud field with the Mitsuba 3 path tracer.
+
+    Parameters
+    ----------
+    field : CloudField
+        Loaded cloud field (see :func:`cloudyview.load`).
+    camera : Camera, optional
+        Viewpoint; defaults to the standard behold camera.
+    quality : str
+        'min', 'low', 'medium', 'high', or 'custom'. With 'custom', the
+        `spp`, `size`, `max_depth`, and `rr_depth` overrides apply
+        (same semantics as the CLI).
+    gpu : bool
+        Use the CUDA Mitsuba backend instead of LLVM. Raises if the
+        variant is unavailable — no fallback.
+    sun_azimuth, sun_elevation : float, optional
+        Sun direction in degrees (met bearing / above horizon);
+        defaults from config (20 / 55).
+    seed : int
+        Monte Carlo seed.
+    verbose : bool
+        Print scene diagnostics and render progress (the CLI uses this).
+
+    Returns
+    -------
+    ndarray (height, width, 3)
+        Tone-mapped RGB image in [0, 1].
+
+    Raises
+    ------
+    ImportError
+        If Mitsuba 3 is not installed.
+    """
+    import mitsuba as mi
+    from . import radiative_transfer
+
+    behold_config = config.get_behold_config()
+    sun_config = behold_config['sun']
+    rendering_config = behold_config['rendering']
+
+    if camera is None:
+        camera = Camera()
+    if sun_azimuth is None:
+        sun_azimuth = sun_config['azimuth']
+    if sun_elevation is None:
+        sun_elevation = sun_config['elevation']
+
+    variant = f"{'cuda' if gpu else 'llvm'}_ad_rgb"
+    mi.set_variant(variant)
+
+    sigma_ext, ice_fraction, geom, dx, dy, dz = _prepare_extinction(
+        field, verbose=verbose)
+
+    view_config = _build_view_config(
+        geom, camera, sun_azimuth, sun_elevation,
+        quality, spp, size, max_depth, rr_depth,
+        verbose=verbose,
+    )
+
+    scene = radiative_transfer.create_mitsuba_scene(
+        sigma_ext, dx, dy, dz,
+        view_config,
+        spp=view_config['spp'],
+        ice_fraction=ice_fraction,
+        ar_x=view_config['ar_x'],
+        ar_y=view_config['ar_y'],
+        height_z=view_config['height_z'],
+        verbose=verbose,
+    )
+
+    image = radiative_transfer.render_with_progress(
+        scene,
+        spp_total=view_config['spp'],
+        step_spp=view_config.get('progress_interval', 2),
+        seed=seed,
+        verbose=verbose,
+    )
+
+    img_np = np.array(image)
+    return radiative_transfer.tone_map(
+        img_np, exposure=view_config.get('exposure', 1.0))
 
 
 def main(filename: str, backend: str, quality: str = 'medium', output: str = None,
@@ -56,8 +310,10 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
          x_dim: str = None,
          y_dim: str = None,
          z_dim: str = None) -> None:
-    """
-    Main function for behold.py
+    """CLI wrapper: load, build the scene, progressively render and save PNGs.
+
+    Composes the same helpers as the library :func:`behold`; the file
+    writes (final PNG + spp checkpoints) and printed progress live here.
 
     Parameters
     ----------
@@ -103,7 +359,6 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     behold_config = config.get_behold_config()
     camera_config = behold_config['camera']
     sun_config = behold_config['sun']
-    rendering_config = behold_config['rendering']
 
     # Apply CLI overrides to camera config
     if camera_position is not None:
@@ -126,7 +381,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         from . import radiative_transfer
 
         # Load and validate data with xarray
-        data_dict = io.load_and_validate(
+        field = _load_field(
             filename,
             liquid_water_var=liquid_water_var,
             ice_water_var=ice_water_var,
@@ -141,64 +396,16 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             y_dim=y_dim,
             z_dim=z_dim,
         )
-        lw_data = data_dict['liquid_water_data']
-        iw_data = data_dict['ice_water_data']
-        x_coord = data_dict.get('x_coord')
-        y_coord = data_dict.get('y_coord')
-        z_coord = data_dict.get('z_coord')
-        if x_coord is None or y_coord is None or z_coord is None:
-            raise ValueError(
-                "Missing x/y/z coordinate arrays in validated dataset; "
-                "cannot render behold view."
-            )
 
-        lw_np = lw_data.values
-        if 'time' in lw_data.dims:
-            lw_np = lw_np[0]  # Remove time dimension if present
+        camera = Camera(
+            position=camera_config['position'],
+            azimuth=camera_config['azimuth'],
+            elevation=camera_config['elevation'],
+            fov=camera_config['fov'],
+        )
 
-        nx, ny, nz = lw_np.shape
-
-        # Domain geometry (shared with witness)
-        geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz)
-        ar_x, ar_y = geom.ar_x, geom.ar_y
-        dx, dy = geom.dx, geom.dy
-        dz = float(z_coord[1] - z_coord[0])  # first spacing, for interface compat
-
-        print(f"  Grid: {nx} x {ny} x {nz}, spacing: {dx:.1f} x {dy:.1f} m")
-        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m, "
-              f"aspect ratio: {ar_x:.2f} x {ar_y:.2f}")
-
-        # Process ice water content if present
-        iw_np = None
-        ice_fraction = None
-        has_ice = False
-
-        if iw_data is not None:
-            iw_np = iw_data.values
-            if 'time' in iw_data.dims:
-                iw_np = iw_np[0]  # Remove time dimension if present
-
-            # Check if there's actually ice in the volume
-            if np.max(iw_np) > 1e-6:
-                has_ice = True
-                print(f"  Ice water content detected (max: {np.max(iw_np):.6f} g/kg)")
-
-                # Compute ice fraction (0 = liquid, 1 = ice)
-                # Avoid division by zero
-                total_water = lw_np + iw_np
-                ice_fraction = np.divide(iw_np, total_water,
-                                        out=np.zeros_like(iw_np),
-                                        where=total_water > 1e-10)
-            else:
-                print("  Ice water content negligible, using liquid-only rendering")
-                iw_np = None
-        else:
-            print("  No ice water content in dataset")
-
-        # Compute extinction coefficient (liquid + ice if present)
-        sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0,
-                                                          iwc=iw_np, re_ice=30.0)
-
+        sigma_ext, ice_fraction, geom, dx, dy, dz = _prepare_extinction(
+            field, verbose=True)
 
         # Create output directory if needed
         if output:
@@ -212,93 +419,13 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         mi.set_variant(variant)
         print(f"  Using Mitsuba variant: {variant}")
 
-        # Map quality to resolution and spp
-        quality_map = {
-            'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 2, 'max_depth': 4},
-            'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 4, 'max_depth': 16},
-            'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 16, 'max_depth': 64},
-            'high': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96}
-        }
-
-        if quality == 'custom':
-            # Use custom parameters (with sensible defaults)
-            width, height = custom_size if custom_size else (600, 400)
-            spp = custom_spp if custom_spp else 512
-            # Override config max_depth/rr_depth if custom values provided
-            if custom_max_depth is not None:
-                rendering_config['max_depth'] = custom_max_depth
-            if custom_rr_depth is not None:
-                rendering_config['rr_depth'] = custom_rr_depth
-        else:
-            width, height = quality_map[quality]['resolution']
-            spp = quality_map[quality]['spp']
-            rendering_config['max_depth'] = quality_map[quality]['max_depth']
-            rendering_config['rr_depth'] = quality_map[quality]['rr_depth']
-
-        # Get camera settings from config (relative coordinates)
-        camera_azimuth = camera_config['azimuth']
-        camera_elevation = camera_config['elevation']
-        fov = camera_config['fov']
-
-        # Convert relative camera position to absolute
-        # Relative coords: ±1.0 = domain edge
-        rel_pos = camera_config['position']
-        camera_origin = [
-            rel_pos[0] * ar_x,  # x in world space (±ar_x)
-            rel_pos[1] * ar_y,  # y in world space (±ar_y)
-            rel_pos[2]          # z in world space (±1)
-        ]
-
-        # Compute look direction vector from meteorological azimuth/elevation
-        look_dir = direction_from_azimuth_elevation(camera_azimuth, camera_elevation)
-
-        # Target point is origin + look direction
-        camera_target = camera_origin + look_dir
-
-        # Get sun configuration
-        sun_azimuth = sun_config['azimuth']
-        sun_elevation = sun_config['elevation']
-
-        # Render ground-looking-up view with progressive checkpoints
-        print(f"  Camera offset: x={camera_origin[0]:.1f}, y={camera_origin[1]:.1f}, z={camera_origin[2]:.1f}")
-        print(f"  Camera azimuth: {camera_azimuth:.1f}°, elevation: {camera_elevation:.1f}°")
-        print(f"  Sun azimuth: {sun_azimuth:.1f}°, elevation: {sun_elevation:.1f}°")
-        print(f"  Field of view: {fov:.1f}°")
-        print(f"  Render quality: {quality} ({width}x{height}, spp={spp})")
-        view_config = {
-            'name': 'Ground-Looking-Up (Progressive Rendering)',
-            'width': width,
-            'height': height,
-            'fov': fov,
-            'transform': radiative_transfer.look_at_world_up(
-                origin=camera_origin,
-                target=camera_target
-            ),
-            'camera_origin': camera_origin,
-            'spp': spp,
-            'exposure': rendering_config['exposure'],
-            'extinction_multiplier': rendering_config['extinction_multiplier'],
-            'sky_type': 'sunsky',  # Physically-based sky
-            'turbidity': rendering_config['turbidity'],
-            'sun_azimuth': sun_azimuth,
-            'sun_elevation': sun_elevation,
-            'ground_albedo': rendering_config['ground_albedo'],
-            'add_ocean': rendering_config['ocean']['enabled'],
-            'ocean_reflectance': rendering_config['ocean']['reflectance'],
-            'ocean_height': rendering_config['ocean']['height'],
-            'integrator': rendering_config['integrator'],
-            'max_depth': rendering_config['max_depth'],
-            'rr_depth': rendering_config['rr_depth'],
-            'sampler': {'type': 'independent', 'sample_count': spp},
-            'seed': 0,
-            'ar_x': ar_x,
-            'ar_y': ar_y,
-            'height_z': geom.height_z,
-        }
-
-        # Add progress_interval if specified
-        if progress_interval is not None:
-            view_config['progress_interval'] = progress_interval
+        view_config = _build_view_config(
+            geom, camera,
+            sun_config['azimuth'], sun_config['elevation'],
+            quality, custom_spp, custom_size, custom_max_depth, custom_rr_depth,
+            progress_interval=progress_interval,
+            verbose=True,
+        )
 
         # Define checkpoint SPP values for progressive rendering
         checkpoint_spp = [2, 32, 128, 512, 1024, 2048, 4096, 8192]

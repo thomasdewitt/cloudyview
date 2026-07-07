@@ -31,10 +31,11 @@ from .camera import Camera
 # behold submodule attributes on the package (see module docstring).
 from .glimpse import glimpse
 from .witness import witness
+from .behold import behold
 from .basic_render import save_image
 
 __all__ = ["io", "basic_render", "optical_depth", "domain",
            "vertically_integrated_optical_depth",
            "DomainGeometry", "compute_domain_geometry",
            "CloudField", "load", "Camera",
-           "glimpse", "witness", "save_image"]
+           "glimpse", "witness", "behold", "save_image"]
