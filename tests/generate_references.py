@@ -21,9 +21,13 @@ from pathlib import Path
 # Add parent directory to path for cloudyview imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import importlib
+
 import imageio.v3 as iio
 
-from cloudyview import behold
+# The package attribute `cloudyview.behold` is the public render function
+# (it shadows the submodule); import the CLI module itself explicitly.
+behold = importlib.import_module("cloudyview.behold")
 
 from conftest import (
     CAMERA_CONFIGS,

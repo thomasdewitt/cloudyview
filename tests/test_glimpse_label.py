@@ -9,7 +9,11 @@ import imageio.v3 as iio
 import numpy as np
 import pytest
 
-from cloudyview import glimpse
+# The package attribute `cloudyview.glimpse` is the public render function
+# (it shadows the submodule); import the module itself explicitly.
+import importlib
+
+glimpse = importlib.import_module("cloudyview.glimpse")
 
 try:
     from .conftest import TEST_DATA_FILES

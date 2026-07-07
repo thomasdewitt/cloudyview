@@ -1,9 +1,13 @@
 """NetCDF I/O utilities and variable inference for CloudyView."""
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+import numpy as np
 import xarray as xr
+
+logger = logging.getLogger(__name__)
 
 
 # Common variable names for liquid water
@@ -216,6 +220,15 @@ def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataA
 
     # Normalize units string (strip whitespace, handle case variations)
     units_normalized = units.strip().lower()
+
+    if units_normalized == '':
+        # SAM LPT 3D output writes an empty units attribute on QC/QI even
+        # though the values are g/kg (SAM convention). Assume g/kg, loudly.
+        logger.warning(
+            "Variable %s has an empty 'units' attribute; assuming 'g/kg' "
+            "(SAM convention).", var_name,
+        )
+        return data_array
 
     if units_normalized == 'g/kg':
         # Already in correct units
@@ -502,6 +515,7 @@ def load_and_validate(
     x_dim: Optional[str] = None,
     y_dim: Optional[str] = None,
     z_dim: Optional[str] = None,
+    ice_filepath: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Load NetCDF file and validate it, inferring variable names and checking units.
@@ -532,6 +546,12 @@ def load_and_validate(
         Explicit coordinate variable names
     x_dim, y_dim, z_dim : str, optional
         Explicit dimension names for x/y/z axes
+    ice_filepath : str, optional
+        Path to a second NetCDF file containing the ice water variable
+        (SAM LPT-style output writes one variable per file). When given,
+        the ice variable is REQUIRED and is looked up in this file only;
+        any ice variable in `filepath` is ignored. The ice grid must match
+        the liquid grid (shape, and coordinates when both files carry them).
 
     Returns
     -------
@@ -543,6 +563,7 @@ def load_and_validate(
         - 'ice_water_var': str or None
         - 'ice_water_data': xr.DataArray or None (with standardized dims, units in g/kg)
         - 'filepath': str
+        - 'ice_filepath': str or None
         - 'x_coord': ndarray (x coordinates)
         - 'y_coord': ndarray (y coordinates)
         - 'z_coord': ndarray (z coordinates)
@@ -550,7 +571,7 @@ def load_and_validate(
     Raises
     ------
     FileNotFoundError
-        If file does not exist
+        If a file does not exist
     ValueError
         If validation fails or units are missing/unsupported
     """
@@ -569,15 +590,19 @@ def load_and_validate(
 
     dataset_cache = {}
 
-    def get_dataset(group: Optional[str]) -> xr.Dataset:
+    def get_dataset(group: Optional[str], path: str = filepath) -> xr.Dataset:
         group = _normalize_group(group)
-        if group not in dataset_cache:
-            dataset_cache[group] = load_data(filepath, group=group)
-        return dataset_cache[group]
+        key = (path, group)
+        if key not in dataset_cache:
+            dataset_cache[key] = load_data(path, group=group)
+        return dataset_cache[key]
 
     root_ds = get_dataset(None)
     lw_ds = get_dataset(liquid_water_group)
-    iw_ds = get_dataset(ice_water_group)
+    if ice_filepath is not None:
+        iw_ds = get_dataset(ice_water_group, path=ice_filepath)
+    else:
+        iw_ds = get_dataset(ice_water_group)
     coord_ds = get_dataset(coords_group)
 
     # Infer liquid water variable (required)
@@ -606,14 +631,55 @@ def load_and_validate(
     # Check and convert units to g/kg
     lw_data = check_and_convert_units(lw_data, lw_var)
 
-    # Infer ice water variable (optional)
-    iw_var, iw_data = infer_ice_water(
-        iw_ds,
-        explicit_name=ice_water_var,
-        group=ice_water_group,
-    )
+    if ice_filepath is not None:
+        # Ice explicitly requested from a separate file: it is required there.
+        iw_var, iw_data = infer_variable(
+            iw_ds,
+            ICE_WATER_NAMES,
+            explicit_name=ice_water_var,
+            variable_role="ice water variable",
+            group=ice_water_group,
+        )
+    else:
+        # Infer ice water variable (optional)
+        iw_var, iw_data = infer_ice_water(
+            iw_ds,
+            explicit_name=ice_water_var,
+            group=ice_water_group,
+        )
     if iw_data is not None:
         validate_data(iw_ds, iw_data, iw_var)
+        if ice_filepath is not None:
+            # Cross-check the ice file's own coordinates against the liquid
+            # file's before standardizing. If the ice file carries no
+            # resolvable coordinates, the shape check below still applies.
+            try:
+                ice_coords = _extract_coords(
+                    iw_data,
+                    datasets=[iw_ds],
+                    x_coord_name=x_coord_name,
+                    y_coord_name=y_coord_name,
+                    z_coord_name=z_coord_name,
+                    x_dim=x_dim,
+                    y_dim=y_dim,
+                    z_dim=z_dim,
+                )
+            except ValueError:
+                ice_coords = (None, None, None)
+            for axis, lw_c, iw_c in zip(("x", "y", "z"),
+                                        (x_coord, y_coord, z_coord),
+                                        ice_coords):
+                if lw_c is None or iw_c is None:
+                    continue
+                if len(lw_c) != len(iw_c) or not np.allclose(
+                    np.asarray(lw_c, dtype=np.float64),
+                    np.asarray(iw_c, dtype=np.float64),
+                ):
+                    raise ValueError(
+                        f"Ice file '{ice_filepath}' has a different {axis}-coordinate "
+                        f"grid than liquid file '{filepath}'. The two files must "
+                        "describe the same grid."
+                    )
         # Standardize dimensions
         iw_data = standardize_dims(iw_data, x_dim=x_dim, y_dim=y_dim, z_dim=z_dim)
         # Check and convert units to g/kg
@@ -637,6 +703,7 @@ def load_and_validate(
         'ice_water_var': iw_var,
         'ice_water_data': iw_data,
         'filepath': str(filepath),
+        'ice_filepath': str(ice_filepath) if ice_filepath is not None else None,
         'x_coord': x_coord,
         'y_coord': y_coord,
         'z_coord': z_coord,

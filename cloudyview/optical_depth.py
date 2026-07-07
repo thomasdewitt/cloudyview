@@ -3,8 +3,12 @@
 Uses physical models for cloud radiative properties.
 """
 
+import logging
+
 import numpy as np
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
@@ -56,7 +60,7 @@ def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
         sigma_ext_ice = np.float32(1.5 / (rho_ice * r_eff_ice_m)) * iwc_g_m3
         sigma_ext = sigma_ext_liquid + sigma_ext_ice
     else:
-        print("  No ice water content detected; using liquid-only extinction.")
+        logger.info("No ice water content detected; using liquid-only extinction.")
         sigma_ext = sigma_ext_liquid
 
     return sigma_ext
@@ -109,7 +113,7 @@ def optical_depth_from_water_paths(
     if swp is not None:
         tau_snow = swp / np.float32(0.350 * snow_re)
     else:
-        print("  No snow water path detected; using liquid+ice optical depth only.")
+        logger.info("No snow water path detected; using liquid+ice optical depth only.")
 
     tau_total = tau_liquid + tau_ice + tau_snow
 
@@ -168,13 +172,13 @@ def vertically_integrated_optical_depth(lwc: np.ndarray, z: np.ndarray,
         water_path_ice = (iwc * rho_air[np.newaxis, np.newaxis, :] *
                          dz[np.newaxis, np.newaxis, :]).sum(axis=-1)
     else:
-        print("  No ice water content detected; optical depth uses liquid water only.")
+        logger.info("No ice water content detected; optical depth uses liquid water only.")
 
     if swc is not None:
         water_path_snow = (swc * rho_air[np.newaxis, np.newaxis, :] *
                           dz[np.newaxis, np.newaxis, :]).sum(axis=-1)
     else:
-        print("  No snow water content detected; optical depth excludes snow.")
+        logger.info("No snow water content detected; optical depth excludes snow.")
 
     # Use generic optical depth relationships
     tau = optical_depth_from_water_paths(water_path_ice, water_path_liquid, water_path_snow)

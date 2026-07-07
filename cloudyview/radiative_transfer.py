@@ -209,7 +209,8 @@ def _fmt_eta(seconds):
     return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config=None):
+def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config=None,
+                         verbose=True):
     """
     Minimal progressive render with single-line print and ETA.
     Prints 0% first, then updates AFTER each chunk finishes.
@@ -230,6 +231,9 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
         - 'output_pattern': str with {spp} placeholder for filename
         - 'tone_map_func': function to apply tone mapping
         - 'save_func': function to save image (receives img_np, filepath)
+    verbose : bool
+        Print the progress/ETA line (default True; the library render
+        functions pass False).
     """
     acc = None
     taken = 0
@@ -245,7 +249,8 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
         checkpoints_saved = set()
 
     # initial line (0%)
-    print(f"  0% | 0/{spp_total} spp | Elapsed: --:-- | ETA: --:--", end="", flush=True)
+    if verbose:
+        print(f"  0% | 0/{spp_total} spp | Elapsed: --:-- | ETA: --:--", end="", flush=True)
 
     # iterate in chunks without off-by-one
     for k, _ in enumerate(range(0, spp_total, step_spp)):
@@ -298,19 +303,21 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
             if effective_elapsed > 0 and samples_after_warmup > 0:
                 eta = effective_elapsed * (spp_total - taken) / samples_after_warmup
 
-        pct = 100.0 * taken / spp_total
-        elapsed_str = _fmt_eta(elapsed)
-        eta_str = _fmt_eta(eta)
-        try:
-            print(f"\r  {pct:3.0f}% | {taken}/{spp_total} spp | Elapsed: {elapsed_str} | ETA: {eta_str}",
-                  end="", flush=True)
-        except OSError:
-            pass  # Ignore NFS stale file handle errors
+        if verbose:
+            pct = 100.0 * taken / spp_total
+            elapsed_str = _fmt_eta(elapsed)
+            eta_str = _fmt_eta(eta)
+            try:
+                print(f"\r  {pct:3.0f}% | {taken}/{spp_total} spp | Elapsed: {elapsed_str} | ETA: {eta_str}",
+                      end="", flush=True)
+            except OSError:
+                pass  # Ignore NFS stale file handle errors
 
-    try:
-        print()  # newline after finishing
-    except OSError:
-        pass
+    if verbose:
+        try:
+            print()  # newline after finishing
+        except OSError:
+            pass
     return acc / taken
 
 
@@ -338,7 +345,7 @@ def sun_direction_to_sun(azimuth_deg=0.0, elevation_deg=90.0):
 def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
                         use_mie_phase=True, mie_channel='gray', mie_blend_weight=0.5,
                         wavelength_nm=None, ice_fraction=None,
-                        ar_x=None, ar_y=None, height_z=None):
+                        ar_x=None, ar_y=None, height_z=None, verbose=True):
     """
     Create Mitsuba scene with volumetric cloud, sky, and optional ocean.
 
@@ -512,7 +519,8 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     # Configure phase function (Mie tables only)
     # If ice_fraction is provided, create spatially-varying blend between liquid and ice phases
     if ice_fraction is not None:
-        print("  Setting up mixed-phase (liquid/ice) rendering...")
+        if verbose:
+            print("  Setting up mixed-phase (liquid/ice) rendering...")
 
         # Prepare ice fraction grid for Mitsuba (same transform as extinction)
         ice_fraction_data = ice_fraction[..., np.newaxis].astype(np.float32)
@@ -555,9 +563,10 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
             }
         }
 
-        print(f"  Liquid phase: Mie tables (channel={mie_channel})")
-        print(f"  Ice phase: Mie tables (channel={mie_channel})")
-        print(f"  Spatially-varying blend via ice fraction grid")
+        if verbose:
+            print(f"  Liquid phase: Mie tables (channel={mie_channel})")
+            print(f"  Ice phase: Mie tables (channel={mie_channel})")
+            print(f"  Spatially-varying blend via ice fraction grid")
 
         # Spatially-varying blend between liquid and ice
         scene_dict['cloud']['interior']['phase'] = {
@@ -575,7 +584,8 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     else:
         # Liquid-only with Mie scattering tables from Bouthors (2008)
         mie0_str, mie_pf3_str = load_mie_phase_tables(channel=mie_channel)
-        print(f"  Using Mie phase function (channel={mie_channel}, blend_weight={mie_blend_weight:.2f})")
+        if verbose:
+            print(f"  Using Mie phase function (channel={mie_channel}, blend_weight={mie_blend_weight:.2f})")
 
         # Dual-table blended phase function for efficient importance sampling
         scene_dict['cloud']['interior']['phase'] = {
@@ -609,7 +619,8 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         }
     elif sky_type == 'constant':
         # Simple constant sky + directional sun
-        print(f"  Using constant sky + directional sun")
+        if verbose:
+            print(f"  Using constant sky + directional sun")
         scene_dict['sun'] = {
             'type': 'directional',
             'direction': sun_dir_to_scene,
@@ -623,7 +634,8 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         }
     elif sky_type is None:
         # No sky, just sun
-        print(f"  Using directional sun only (no sky)")
+        if verbose:
+            print(f"  Using directional sun only (no sky)")
         scene_dict['sun'] = {
             'type': 'directional',
             'direction': sun_dir_to_scene,

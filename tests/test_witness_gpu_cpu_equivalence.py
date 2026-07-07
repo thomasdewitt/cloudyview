@@ -1,12 +1,15 @@
 """Test that witness GPU and CPU rendering produce visually equivalent output."""
 
 import glob
+import importlib
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from cloudyview import witness
+# The package attribute `cloudyview.witness` is the public render function
+# (it shadows the submodule); import the module itself explicitly.
+witness = importlib.import_module("cloudyview.witness")
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_FILE = str(DATA_DIR / "TWPICE_subvolume_128x128_5km.nc")

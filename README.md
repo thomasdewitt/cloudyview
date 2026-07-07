@@ -41,6 +41,49 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+## Library usage
+
+CloudyView is library-first: 3D cloud volume in, image array out. The CLIs
+below are thin wrappers over these functions.
+
+```python
+import cloudyview as cv
+
+# Load — one file with both variables, or split files (SAM LPT-style
+# output writes one variable per file: ..._QC_*.nc, ..._QI_*.nc)
+field = cv.load("cloud.nc")                          # autodetect qc + qi
+field = cv.load("..._QC_0000000600.nc",
+                ice="..._QI_0000000600.nc")          # split liquid/ice files
+field = cv.load("cloud.nc", liquid_water_var="QC")   # explicit overrides
+
+field.lwc, field.iwc      # (nx, ny, nz) float32 g/kg; iwc may be None
+field.x, field.y, field.z # 1D coords, meters
+
+cam = cv.Camera(position=(0, -0.8, -0.95),  # relative coords, ±1 = domain edge
+                azimuth=0,                  # met bearing: 0=N, 90=E
+                elevation=35,               # degrees above horizon
+                fov=100)                    # vertical field of view
+
+albedo = cv.glimpse(field)                        # (ny, nx) two-stream visual albedo
+img = cv.witness(field, camera=cam, size=(600, 400))   # (H, W, 3) in [0, 1]
+img = cv.behold(field, camera=cam, quality="high")     # (H, W, 3), Mitsuba 3
+
+cv.save_image(img, "render.png")
+```
+
+Notes:
+
+- Render functions return arrays and never write files; use `cv.save_image`
+  or matplotlib for output.
+- `cv.witness(..., gpu=True)` uses the numba CUDA backend and raises
+  `ImportError` if CUDA is unavailable (no silent CPU fallback);
+  `cv.behold(..., gpu=True)` selects Mitsuba's CUDA variant.
+- Library code raises exceptions and is quiet by default
+  (`verbose=True` restores the CLI-style diagnostics).
+- The functions `cv.glimpse` / `cv.witness` / `cv.behold` shadow the
+  same-named submodules on the package namespace; the modules remain
+  importable directly (e.g. `from cloudyview.witness import NestedLevel`).
+
 ## Quick Start
 
 All scripts require a NetCDF file with a cloud water mixing ratio variable and are designed for single-timestep 3D data.
@@ -67,6 +110,7 @@ Options:
 - `--camera-azimuth`, `--camera-elevation`, `--fov`: Camera orientation
 - `--sun-azimuth`, `--sun-elevation`: Sun position
 - `--size W H`: Image dimensions
+- `--gpu`: Render on the numba CUDA backend (fails loudly if CUDA is unavailable)
 - Quality presets: `min`, `low`, `medium` (default), `high`
 
 ### Behold: Photorealistic Rendering

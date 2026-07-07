@@ -1,11 +1,17 @@
 """CLI parsing/help coverage for dataset override flags."""
 
+import importlib
 import subprocess
 import sys
 
 import pytest
 
-from cloudyview import behold, glimpse, witness
+# The package attributes `cloudyview.glimpse` / `.witness` / `.behold` are
+# the public render functions (they shadow the submodules); import the CLI
+# modules themselves explicitly.
+behold = importlib.import_module("cloudyview.behold")
+glimpse = importlib.import_module("cloudyview.glimpse")
+witness = importlib.import_module("cloudyview.witness")
 
 
 def test_glimpse_cli_passes_dataset_override_args(monkeypatch):

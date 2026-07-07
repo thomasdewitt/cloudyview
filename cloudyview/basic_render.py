@@ -1,9 +1,21 @@
-"""Basic matplotlib 3D rendering for CloudyView."""
+"""Basic plotting and image-saving helpers for CloudyView."""
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors
 from typing import Optional, Tuple, Dict, Any
+
+
+def save_image(image: np.ndarray, output_path: str) -> None:
+    """Save a float RGB image (values in [0, 1]) as an 8-bit PNG.
+
+    Companion to the library render functions (`cv.witness`, `cv.behold`),
+    which return arrays and never write files themselves.
+    """
+    from PIL import Image as PILImage
+
+    img_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+    PILImage.fromarray(img_uint8).save(str(output_path))
 
 # Cloud color scheme for optical depth visualization
 sky_blue = '#3A4AA6'

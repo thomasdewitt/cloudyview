@@ -36,15 +36,33 @@ import numpy as np
 
 from . import io, optical_depth, config
 from .angles import direction_from_azimuth_elevation
+from .camera import Camera
 from .cli_utils import (
     CloudyViewHelpFormatter,
     DATA_SELECTION_HELP,
     add_dataset_selection_arguments,
     dataset_selection_kwargs,
 )
+from .cloudfield import CloudField, load as _load_field
 from .domain import compute_domain_geometry
 
 from numba import njit, prange
+
+
+def __getattr__(name):
+    """Lazy module attributes (PEP 562).
+
+    _CUDA_AVAILABLE probes whether the witness CUDA backend can be imported.
+    It exists for test-skip logic; library code never falls back on it —
+    requesting gpu=True with no working CUDA raises ImportError.
+    """
+    if name == "_CUDA_AVAILABLE":
+        try:
+            from . import witness_cuda  # noqa: F401
+        except ImportError:
+            return False
+        return True
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ============================================================================
@@ -992,6 +1010,279 @@ def render_nested(
 
 
 # ============================================================================
+# CUDA single-level backend adapter
+# ============================================================================
+
+def _render_single_cuda(
+    level: NestedLevel,
+    cam_origin: np.ndarray,
+    forward: np.ndarray,
+    right: np.ndarray,
+    up: np.ndarray,
+    sun_dir: np.ndarray,
+    image_size: Tuple[int, int],
+    fov_degrees: float,
+    n_light_steps: int,
+    ocean_enabled: bool,
+    ocean_z: float,
+    ocean_reflectance: Tuple[float, float, float],
+    verbose: bool,
+) -> np.ndarray:
+    """Render a single-level scene on the witness CUDA backend.
+
+    witness_cuda's kernel works in the legacy relative coordinate system:
+    x in [-ar_x, ar_x], y in [-ar_y, ar_y], z in [-1, 1]. That box is
+    geometrically similar to the level AABB (ar_* are defined from the AABB
+    itself), so the mapping is a uniform similarity transform: directions
+    are unchanged and extinction is rescaled so optical depths along any
+    segment are preserved.
+
+    Raises ImportError if the CUDA backend cannot be imported — there is
+    deliberately no CPU fallback here.
+    """
+    from . import witness_cuda  # loud ImportError when CUDA is unavailable
+
+    img_w, img_h = image_size
+    sigma = np.ascontiguousarray(level.sigma, dtype=np.float64)
+    nx, ny, nz = sigma.shape
+
+    bmin = np.asarray(level.bmin, dtype=np.float64)
+    bmax = np.asarray(level.bmax, dtype=np.float64)
+    center = 0.5 * (bmin + bmax)
+    height = bmax[2] - bmin[2]
+    scale = 2.0 / height                      # meters -> relative units
+    ar_x = (bmax[0] - bmin[0]) / height
+    ar_y = (bmax[1] - bmin[1]) / height
+
+    cam_rel = (np.asarray(cam_origin, dtype=np.float64) - center) * scale
+    ocean_z_rel = (float(ocean_z) - center[2]) * scale
+    # tau = sigma_m * L_m = (sigma_m / scale) * (L_m * scale)
+    sigma_rel = sigma / scale
+
+    fov_rad = pymath.radians(fov_degrees)
+    tan_half_fov = pymath.tan(fov_rad * 0.5)
+
+    # Warmup compile with a 1x1 buffer (mirrors the CPU path).
+    warmup = np.zeros((1, 1, 3), dtype=np.float64)
+    if verbose:
+        print("  Compiling CUDA render kernel (first run only)...", end="", flush=True)
+    witness_cuda.render_image_cuda(
+        sigma_rel, nx, ny, nz, ar_x, ar_y,
+        cam_rel[0], cam_rel[1], cam_rel[2],
+        forward[0], forward[1], forward[2],
+        right[0], right[1], right[2],
+        up[0], up[1], up[2],
+        sun_dir[0], sun_dir[1], sun_dir[2],
+        1, 1, tan_half_fov,
+        4,
+        SUN_COLOR[0], SUN_COLOR[1], SUN_COLOR[2],
+        G_HG, AMBIENT_STRENGTH,
+        ocean_enabled, ocean_z_rel,
+        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+        warmup,
+    )
+    if verbose:
+        print(" done")
+        print("  Rendering (GPU)...", end="", flush=True)
+
+    image = np.zeros((img_h, img_w, 3), dtype=np.float64)
+    t0 = time.perf_counter()
+    witness_cuda.render_image_cuda(
+        sigma_rel, nx, ny, nz, ar_x, ar_y,
+        cam_rel[0], cam_rel[1], cam_rel[2],
+        forward[0], forward[1], forward[2],
+        right[0], right[1], right[2],
+        up[0], up[1], up[2],
+        sun_dir[0], sun_dir[1], sun_dir[2],
+        img_w, img_h, tan_half_fov,
+        n_light_steps,
+        SUN_COLOR[0], SUN_COLOR[1], SUN_COLOR[2],
+        G_HG, AMBIENT_STRENGTH,
+        ocean_enabled, ocean_z_rel,
+        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+        image,
+    )
+    elapsed = time.perf_counter() - t0
+    if verbose:
+        print(f" done ({elapsed:.1f}s)")
+    return image
+
+
+# ============================================================================
+# Library render function (exported as cloudyview.witness)
+# ============================================================================
+
+def witness(
+    field: CloudField,
+    camera: Optional[Camera] = None,
+    *,
+    size: Optional[Tuple[int, int]] = None,
+    gpu: bool = False,
+    sun_azimuth: Optional[float] = None,
+    sun_elevation: Optional[float] = None,
+    exposure: Optional[float] = None,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Render a cloud field with the fast volumetric ray marcher.
+
+    Parameters
+    ----------
+    field : CloudField
+        Loaded cloud field (see :func:`cloudyview.load`).
+    camera : Camera, optional
+        Viewpoint; defaults to the standard witness camera.
+    size : (width, height), optional
+        Image size in pixels (default from config: 600x400).
+    gpu : bool
+        Render on the numba CUDA backend. Raises ImportError if CUDA is
+        not available — there is no silent CPU fallback. Note the CUDA
+        kernel is the legacy single-level implementation (procedural
+        ocean, no FIF wave normals), so GPU output is close to but not
+        pixel-identical with the CPU reference.
+    sun_azimuth, sun_elevation : float, optional
+        Sun direction in degrees (met bearing / above horizon);
+        defaults from config (20 / 55).
+    exposure : float, optional
+        Tone-mapping exposure (default from config: 4.0).
+    verbose : bool
+        Print render diagnostics (the CLI uses this); default silent.
+
+    Returns
+    -------
+    ndarray (height, width, 3), float64
+        Tone-mapped RGB image in [0, 1].
+    """
+    witness_config = config.get_witness_config()
+    sun_config = witness_config['sun']
+    render_config = witness_config['rendering']
+
+    if camera is None:
+        camera = Camera()
+    if sun_azimuth is None:
+        sun_azimuth = sun_config['azimuth']
+    if sun_elevation is None:
+        sun_elevation = sun_config['elevation']
+    if exposure is None:
+        exposure = render_config['exposure']
+
+    img_w = size[0] if size else render_config['width']
+    img_h = size[1] if size else render_config['height']
+
+    x_coord, y_coord, z_coord = field.x, field.y, field.z
+    lw_np = field.lwc
+    nx_d, ny_d, nz_d = lw_np.shape
+
+    iw_np = field.iwc
+    if iw_np is not None and np.max(iw_np) < 1e-6:
+        iw_np = None
+    if iw_np is None and verbose:
+        print("  No ice water content detected; using liquid-only extinction.")
+
+    # Physical extinction in m^-1 (not scaled by height_z: the kernel
+    # works in absolute meters, so sigma is already in physical units).
+    sigma_ext = optical_depth.compute_extinction_field(
+        lw_np, z_coord, re=10.0, iwc=iw_np, re_ice=30.0)
+
+    geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx_d, ny_d, nz_d)
+
+    if verbose:
+        print(f"  Grid: {nx_d} x {ny_d} x {nz_d}, spacing: {geom.dx:.1f} x {geom.dy:.1f} m")
+        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m")
+
+    ext_mult = render_config['extinction_multiplier']
+    sigma_world = (sigma_ext * ext_mult).astype(np.float64)
+    sigma_world = np.ascontiguousarray(sigma_world)
+
+    if verbose:
+        sigma_max = float(np.max(sigma_world))
+        sigma_mean_nz = float(np.mean(sigma_world[sigma_world > 0])) if np.any(sigma_world > 0) else 0.0
+        print(f"  Extinction: max={sigma_max:.4f} m^-1, mean(nonzero)={sigma_mean_nz:.4f} m^-1")
+
+    # Absolute-meter AABB from coordinate arrays (cell-centred; half-step
+    # padding so the AABB encloses the outermost cells' extents).
+    x_vals = np.asarray(x_coord).astype(np.float64)
+    y_vals = np.asarray(y_coord).astype(np.float64)
+    z_vals = np.asarray(z_coord).astype(np.float64)
+    dx_half = 0.5 * geom.dx
+    dy_half = 0.5 * geom.dy
+    # For z, use first/last spacing instead of mean dz to tolerate stretched grids.
+    dz_lo_half = 0.5 * abs(z_vals[1] - z_vals[0])
+    dz_hi_half = 0.5 * abs(z_vals[-1] - z_vals[-2])
+    bmin = np.array([x_vals.min() - dx_half,
+                     y_vals.min() - dy_half,
+                     z_vals.min() - dz_lo_half], dtype=np.float64)
+    bmax = np.array([x_vals.max() + dx_half,
+                     y_vals.max() + dy_half,
+                     z_vals.max() + dz_hi_half], dtype=np.float64)
+
+    level = NestedLevel(sigma=sigma_world, bmin=bmin, bmax=bmax, name="single")
+
+    # Camera in absolute meters. x,y: rel=[-1,1] spans the AABB. z is
+    # anchored to the physical surface (z=0), not the AABB's z-range, so
+    # that rel_z=-1 is the ground even for elevated domains (e.g. data
+    # starting at z=500m keeps its real altitude instead of being slammed
+    # down). Reduces to the old mapping when bmin[2]==0.
+    rel_pos = camera.position
+    cam_origin = np.empty(3, dtype=np.float64)
+    cam_origin[0] = bmin[0] + (rel_pos[0] + 1.0) * 0.5 * (bmax[0] - bmin[0])
+    cam_origin[1] = bmin[1] + (rel_pos[1] + 1.0) * 0.5 * (bmax[1] - bmin[1])
+    cam_origin[2] = (rel_pos[2] + 1.0) * 0.5 * bmax[2]
+
+    forward, right, up = camera.basis()
+
+    sun_dir = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
+
+    # Ocean sits at the physical surface, not the AABB floor: rel=-1 is
+    # z=0 (sea level). Default height=-0.9999 → ~0 for any domain top.
+    # Reduces to the old mapping when bmin[2]==0.
+    ocean_config = render_config['ocean']
+    ocean_enabled = ocean_config['enabled']
+    ocean_z = (ocean_config['height'] + 1.0) * 0.5 * bmax[2]
+
+    n_light_steps = render_config['n_light_steps']
+
+    if verbose:
+        print(f"  Camera: abs=({cam_origin[0]:.1f},{cam_origin[1]:.1f},{cam_origin[2]:.1f}) m")
+        print(f"          azimuth={camera.azimuth:.1f} elev={camera.elevation:.1f} fov={camera.fov:.1f}")
+        print(f"  Sun: azimuth={sun_azimuth:.1f} elev={sun_elevation:.1f}")
+        print(f"  Image: {img_w}x{img_h}")
+
+    if gpu:
+        image = _render_single_cuda(
+            level, cam_origin, forward, right, up, sun_dir,
+            (img_w, img_h), camera.fov, n_light_steps,
+            ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
+            verbose=verbose,
+        )
+        return tone_map(image, exposure=exposure)
+
+    if ocean_enabled:
+        from cloudyview.ocean_fif import generate_fif_normals
+        fif_nx, fif_ny, fif_nz, fif_dx = generate_fif_normals(verbose=verbose)
+    else:
+        from cloudyview.ocean_fif import dummy_fif_arrays
+        _z, _, _o = dummy_fif_arrays()
+        fif_nx, fif_ny, fif_nz, fif_dx = _z, _z, _o, 1.0
+
+    image = _render_levels(
+        [level],
+        (cam_origin[0], cam_origin[1], cam_origin[2]),
+        (forward[0], forward[1], forward[2]),
+        (right[0], right[1], right[2]),
+        (up[0], up[1], up[2]),
+        (sun_dir[0], sun_dir[1], sun_dir[2]),
+        (img_w, img_h),
+        camera.fov, n_light_steps,
+        STEP_VOXEL_FACTOR, MAX_STEPS,
+        ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
+        fif_nx, fif_ny, fif_nz, fif_dx,
+        SUN_COLOR, G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
+        verbose=verbose,
+    )
+    return tone_map(image, exposure=exposure)
+
+
+# ============================================================================
 # Single-domain main (CLI entry point)
 # ============================================================================
 
@@ -1000,6 +1291,7 @@ def main(filename: str, output: str = None,
          camera_elevation: float = None, camera_fov: float = None,
          sun_azimuth: float = None, sun_elevation: float = None,
          custom_size: tuple = None,
+         gpu: bool = False,
          liquid_water_var: str = None,
          ice_water_var: str = None,
          dataset_group: str = None,
@@ -1012,14 +1304,12 @@ def main(filename: str, output: str = None,
          x_dim: str = None,
          y_dim: str = None,
          z_dim: str = None) -> None:
-    """Render a single NetCDF domain through the unified kernel."""
+    """CLI wrapper around :func:`witness`: load, render, save a PNG."""
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
 
     witness_config = config.get_witness_config()
     cam_config = witness_config['camera']
-    sun_config = witness_config['sun']
-    render_config = witness_config['rendering']
 
     if camera_position is not None:
         cam_config['position'] = list(camera_position)
@@ -1029,16 +1319,9 @@ def main(filename: str, output: str = None,
         cam_config['elevation'] = camera_elevation
     if camera_fov is not None:
         cam_config['fov'] = camera_fov
-    if sun_azimuth is not None:
-        sun_config['azimuth'] = sun_azimuth
-    if sun_elevation is not None:
-        sun_config['elevation'] = sun_elevation
-
-    img_w = custom_size[0] if custom_size else render_config['width']
-    img_h = custom_size[1] if custom_size else render_config['height']
 
     try:
-        data_dict = io.load_and_validate(
+        field = _load_field(
             filename,
             liquid_water_var=liquid_water_var,
             ice_water_var=ice_water_var,
@@ -1053,131 +1336,23 @@ def main(filename: str, output: str = None,
             y_dim=y_dim,
             z_dim=z_dim,
         )
-        lw_data = data_dict['liquid_water_data']
-        iw_data = data_dict['ice_water_data']
 
-        x_coord = data_dict.get('x_coord')
-        y_coord = data_dict.get('y_coord')
-        z_coord = data_dict.get('z_coord')
-        if x_coord is None or y_coord is None or z_coord is None:
-            raise ValueError(
-                "Missing x/y/z coordinate arrays in validated dataset; "
-                "cannot render witness view."
-            )
-
-        lw_np = lw_data.values
-        if 'time' in lw_data.dims:
-            lw_np = lw_np[0]
-        nx_d, ny_d, nz_d = lw_np.shape
-
-        iw_np = None
-        if iw_data is not None:
-            iw_np = iw_data.values
-            if 'time' in iw_data.dims:
-                iw_np = iw_np[0]
-            if np.max(iw_np) < 1e-6:
-                iw_np = None
-
-        # Physical extinction in m^-1 (not scaled by height_z: the kernel
-        # works in absolute meters, so sigma is already in physical units).
-        sigma_ext = optical_depth.compute_extinction_field(
-            lw_np, z_coord, re=10.0, iwc=iw_np, re_ice=30.0)
-
-        geom = compute_domain_geometry(x_coord, y_coord, z_coord, nx_d, ny_d, nz_d)
-
-        print(f"  Grid: {nx_d} x {ny_d} x {nz_d}, spacing: {geom.dx:.1f} x {geom.dy:.1f} m")
-        print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m")
-
-        ext_mult = render_config['extinction_multiplier']
-        sigma_world = (sigma_ext * ext_mult).astype(np.float64)
-        sigma_world = np.ascontiguousarray(sigma_world)
-
-        sigma_max = float(np.max(sigma_world))
-        sigma_mean_nz = float(np.mean(sigma_world[sigma_world > 0])) if np.any(sigma_world > 0) else 0.0
-        print(f"  Extinction: max={sigma_max:.4f} m^-1, mean(nonzero)={sigma_mean_nz:.4f} m^-1")
-
-        # Absolute-meter AABB from coordinate arrays (cell-centred; half-step
-        # padding so the AABB encloses the outermost cells' extents).
-        x_vals = np.asarray(x_coord).astype(np.float64)
-        y_vals = np.asarray(y_coord).astype(np.float64)
-        z_vals = np.asarray(z_coord).astype(np.float64)
-        dx_half = 0.5 * geom.dx
-        dy_half = 0.5 * geom.dy
-        # For z, use first/last spacing instead of mean dz to tolerate stretched grids.
-        dz_lo_half = 0.5 * abs(z_vals[1] - z_vals[0])
-        dz_hi_half = 0.5 * abs(z_vals[-1] - z_vals[-2])
-        bmin = np.array([x_vals.min() - dx_half,
-                         y_vals.min() - dy_half,
-                         z_vals.min() - dz_lo_half], dtype=np.float64)
-        bmax = np.array([x_vals.max() + dx_half,
-                         y_vals.max() + dy_half,
-                         z_vals.max() + dz_hi_half], dtype=np.float64)
-
-        level = NestedLevel(sigma=sigma_world, bmin=bmin, bmax=bmax, name="single")
-
-        # Camera in absolute meters. x,y: rel=[-1,1] spans the AABB. z is
-        # anchored to the physical surface (z=0), not the AABB's z-range, so
-        # that rel_z=-1 is the ground even for elevated domains (e.g. data
-        # starting at z=500m keeps its real altitude instead of being slammed
-        # down). Reduces to the old mapping when bmin[2]==0.
-        rel_pos = cam_config['position']
-        cam_origin = np.empty(3, dtype=np.float64)
-        cam_origin[0] = bmin[0] + (rel_pos[0] + 1.0) * 0.5 * (bmax[0] - bmin[0])
-        cam_origin[1] = bmin[1] + (rel_pos[1] + 1.0) * 0.5 * (bmax[1] - bmin[1])
-        cam_origin[2] = (rel_pos[2] + 1.0) * 0.5 * bmax[2]
-
-        forward = direction_from_azimuth_elevation(
-            cam_config['azimuth'], cam_config['elevation']
-        )
-        world_up = np.array([0.0, 0.0, 1.0])
-        if abs(np.dot(forward, world_up)) > 0.999:
-            world_up = np.array([0.0, 1.0, 0.0])
-        right = np.cross(forward, world_up); right /= np.linalg.norm(right)
-        up = np.cross(right, forward); up /= np.linalg.norm(up)
-
-        sun_dir = direction_from_azimuth_elevation(
-            sun_config['azimuth'], sun_config['elevation']
+        camera = Camera(
+            position=cam_config['position'],
+            azimuth=cam_config['azimuth'],
+            elevation=cam_config['elevation'],
+            fov=cam_config['fov'],
         )
 
-        # Ocean sits at the physical surface, not the AABB floor: rel=-1 is
-        # z=0 (sea level). Default height=-0.9999 → ~0 for any domain top.
-        # Reduces to the old mapping when bmin[2]==0.
-        ocean_config = render_config['ocean']
-        ocean_enabled = ocean_config['enabled']
-        ocean_z = (ocean_config['height'] + 1.0) * 0.5 * bmax[2]
-
-        n_light_steps = render_config['n_light_steps']
-        exposure = render_config['exposure']
-
-        print(f"  Camera: abs=({cam_origin[0]:.1f},{cam_origin[1]:.1f},{cam_origin[2]:.1f}) m")
-        print(f"          azimuth={cam_config['azimuth']:.1f} elev={cam_config['elevation']:.1f} fov={cam_config['fov']:.1f}")
-        print(f"  Sun: azimuth={sun_config['azimuth']:.1f} elev={sun_config['elevation']:.1f}")
-        print(f"  Image: {img_w}x{img_h}")
-
-        if ocean_enabled:
-            from cloudyview.ocean_fif import generate_fif_normals
-            fif_nx, fif_ny, fif_nz, fif_dx = generate_fif_normals()
-        else:
-            from cloudyview.ocean_fif import dummy_fif_arrays
-            _z, _, _o = dummy_fif_arrays()
-            fif_nx, fif_ny, fif_nz, fif_dx = _z, _z, _o, 1.0
-
-        image = _render_levels(
-            [level],
-            (cam_origin[0], cam_origin[1], cam_origin[2]),
-            (forward[0], forward[1], forward[2]),
-            (right[0], right[1], right[2]),
-            (up[0], up[1], up[2]),
-            (sun_dir[0], sun_dir[1], sun_dir[2]),
-            (img_w, img_h),
-            cam_config['fov'], n_light_steps,
-            STEP_VOXEL_FACTOR, MAX_STEPS,
-            ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
-            fif_nx, fif_ny, fif_nz, fif_dx,
-            SUN_COLOR, G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
+        image_tm = witness(
+            field,
+            camera=camera,
+            size=tuple(custom_size) if custom_size else None,
+            gpu=gpu,
+            sun_azimuth=sun_azimuth,
+            sun_elevation=sun_elevation,
             verbose=True,
         )
-        image_tm = tone_map(image, exposure=exposure)
 
         if output:
             output_dir = Path(output)
@@ -1188,9 +1363,8 @@ def main(filename: str, output: str = None,
         dataset_name = Path(filename).stem
         output_file = output_dir / f"witness_{dataset_name}.png"
 
-        from PIL import Image as PILImage
-        img_uint8 = (np.clip(image_tm, 0, 1) * 255).astype(np.uint8)
-        PILImage.fromarray(img_uint8).save(str(output_file))
+        from .basic_render import save_image
+        save_image(image_tm, str(output_file))
         print(f"  Saved: {output_file}")
 
         elapsed = time.perf_counter() - start_time
@@ -1288,6 +1462,10 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
+    parser.add_argument("--gpu", action="store_true", default=False,
+                        help="Render on the CUDA GPU backend (requires numba "
+                             "CUDA support and an NVIDIA GPU; fails loudly "
+                             "if unavailable)")
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
@@ -1301,6 +1479,7 @@ def cli():
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
          custom_size=size,
+         gpu=args.gpu,
          **dataset_selection_kwargs(args))
 
 

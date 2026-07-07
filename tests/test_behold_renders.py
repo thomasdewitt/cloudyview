@@ -8,6 +8,7 @@ Run with: pytest tests/test_behold_renders.py -v
 Skip slow tests: pytest tests/test_behold_renders.py -v -m "not slow"
 """
 
+import importlib
 import tempfile
 from pathlib import Path
 
@@ -15,7 +16,13 @@ import imageio.v3 as iio
 import numpy as np
 import pytest
 
-from cloudyview import behold
+# Rendering requires the optional Mitsuba dependency; skip (don't fail)
+# when it isn't installed, like the GPU-only witness tests.
+pytest.importorskip("mitsuba")
+
+# The package attribute `cloudyview.behold` is the public render function
+# (it shadows the submodule); import the CLI module itself explicitly.
+behold = importlib.import_module("cloudyview.behold")
 
 try:
     # Works when run as a test module (e.g., pytest / python -m tests.test_behold_renders)
