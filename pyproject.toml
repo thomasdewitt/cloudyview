@@ -45,6 +45,11 @@ cuda = [
     "nvidia-cuda-nvcc-cu12",
     "nvidia-cuda-runtime-cu12",
 ]
+interactive = [
+    # WGSL/wgpu interactive fly-through engine (cloudyview.interactive).
+    "wgpu>=0.19",
+    "glfw>=2.6",
+]
 visualization = [
     "scikit-image>=0.19.0",
     "scipy>=1.7.0",
