@@ -24,6 +24,7 @@ Coordinate System (Meteorological Convention):
 from __future__ import annotations
 
 import argparse
+import logging
 import math as pymath
 import sys
 import time
@@ -47,6 +48,8 @@ from .cloudfield import CloudField, load as _load_field
 from .domain import compute_domain_geometry
 
 from numba import njit, prange
+
+logger = logging.getLogger(__name__)
 
 
 def __getattr__(name):
@@ -1135,10 +1138,13 @@ def witness(
         Image size in pixels (default from config: 600x400).
     gpu : bool
         Render on the numba CUDA backend. Raises ImportError if CUDA is
-        not available — there is no silent CPU fallback. Note the CUDA
-        kernel is the legacy single-level implementation (procedural
-        ocean, no FIF wave normals), so GPU output is close to but not
-        pixel-identical with the CPU reference.
+        not available — there is no silent CPU fallback. WARNING: the CUDA
+        kernel's *look* is stale — it predates the April 2026 tuning
+        rounds (old sky shader, pre-rewrite per-step powder, procedural
+        non-FIF ocean that renders near-black against the current deep-sea
+        reflectance). Geometry matches the CPU reference; appearance does
+        not. Useful for benchmarking, not for output you care about, until
+        the planned WGSL port replaces it (docs/architecture.md).
     sun_azimuth, sun_elevation : float, optional
         Sun direction in degrees (met bearing / above horizon);
         defaults from config (20 / 55).
@@ -1248,6 +1254,11 @@ def witness(
         print(f"  Image: {img_w}x{img_h}")
 
     if gpu:
+        logger.warning(
+            "witness gpu=True uses the legacy CUDA kernel: geometry matches "
+            "the CPU reference but the look is stale (old sky, non-FIF ocean, "
+            "pre-2026-04 cloud scattering). See docs/architecture.md."
+        )
         image = _render_single_cuda(
             level, cam_origin, forward, right, up, sun_dir,
             (img_w, img_h), camera.fov, n_light_steps,

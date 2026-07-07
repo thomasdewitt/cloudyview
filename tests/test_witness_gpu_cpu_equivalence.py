@@ -28,6 +28,14 @@ def _cuda_backend_available():
 @pytest.mark.gpu
 @pytest.mark.skipif(not _cuda_backend_available(),
                     reason="witness CUDA backend not available")
+@pytest.mark.xfail(
+    strict=False,
+    reason="witness_cuda's look is stale: it only received 2 of the many "
+           "CPU look-tuning commits since 2026-04 (old sky, non-FIF ocean, "
+           "pre-rewrite powder). Geometry matches; appearance diverges past "
+           "the 5/255 tolerance. Pending WGSL port or witness_cuda "
+           "retirement — see docs/architecture.md.",
+)
 def test_gpu_cpu_visual_equivalence(tmp_path):
     """GPU and CPU renders of the same scene should be nearly identical."""
     from PIL import Image

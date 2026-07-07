@@ -157,3 +157,4 @@ benchmarking/output/
 *.gpulog
 
 .codex
+.claude/worktrees/

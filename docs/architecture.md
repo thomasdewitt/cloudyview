@@ -72,6 +72,23 @@ shader is the portable artifact for the eventual browser/WebGPU direction.
 Python stays the host language (windowing, IO, xarray stack); the
 performance-critical inner loop leaves Python either way.
 
+Benchmark evidence (2026-07-07, RTX 5080 — details in
+temp/benchmarks-2026-07-07/RESULTS.md):
+- witness_cuda is a stale, reduced-feature port (only 2 of the post-April
+  look-tuning commits ever reached it: old sky, non-FIF ocean, pre-rewrite
+  powder, pre-refactor coordinates, no nesting). It is kept wired for
+  benchmarking (`gpu=True` warns loudly) and is expected to be RETIRED when
+  the WGSL engine passes equivalence.
+- Both backends re-copy/re-upload the volume every frame (~230 ms/frame on
+  the 1024² domain — 37–75%% of frame time). A resident texture removes this
+  for free.
+- On the 1 GB volume the kernel shows a memory-latency signature from manual
+  8-corner trilinear loads; hardware 3D-texture sampling targets exactly
+  this.
+- Even best-case resident-volume CUDA is ~78 ms at 480×270 on the full
+  domain: occupancy-grid empty-space skipping + progressive resolution are
+  required for interactivity at 1024², whichever backend renders.
+
 Interactive techniques (in rough order):
 - Progressive rendering: reduced resolution while the camera moves, refine to
   full when still.
