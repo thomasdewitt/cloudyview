@@ -225,18 +225,6 @@ def test_witness_returns_image():
     assert img.min() >= 0.0 and img.max() <= 1.0
 
 
-def test_witness_gpu_unavailable_raises():
-    if witness_mod._CUDA_AVAILABLE:
-        pytest.skip("CUDA backend available; nothing to assert here")
-    field = cv.CloudField(
-        lwc=np.zeros((2, 2, 2), dtype=np.float32),
-        x=np.array([0.0, 100.0]), y=np.array([0.0, 100.0]),
-        z=np.array([50.0, 150.0]),
-    )
-    with pytest.raises(ImportError):
-        cv.witness(field, size=(4, 3), gpu=True)
-
-
 # =============================================================================
 # cv.behold
 # =============================================================================

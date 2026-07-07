@@ -52,22 +52,6 @@ from numba import njit, prange
 logger = logging.getLogger(__name__)
 
 
-def __getattr__(name):
-    """Lazy module attributes (PEP 562).
-
-    _CUDA_AVAILABLE probes whether the witness CUDA backend can be imported.
-    It exists for test-skip logic; library code never falls back on it —
-    requesting gpu=True with no working CUDA raises ImportError.
-    """
-    if name == "_CUDA_AVAILABLE":
-        try:
-            from . import witness_cuda  # noqa: F401
-        except ImportError:
-            return False
-        return True
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 # ============================================================================
 # Cloud-scattering tuning block
 # ----------------------------------------------------------------------------
@@ -1034,105 +1018,6 @@ def render_nested(
 
 
 # ============================================================================
-# CUDA single-level backend adapter
-# ============================================================================
-
-def _render_single_cuda(
-    level: NestedLevel,
-    cam_origin: np.ndarray,
-    forward: np.ndarray,
-    right: np.ndarray,
-    up: np.ndarray,
-    sun_dir: np.ndarray,
-    image_size: Tuple[int, int],
-    fov_degrees: float,
-    n_light_steps: int,
-    ocean_enabled: bool,
-    ocean_z: float,
-    ocean_reflectance: Tuple[float, float, float],
-    verbose: bool,
-) -> np.ndarray:
-    """Render a single-level scene on the witness CUDA backend.
-
-    witness_cuda's kernel works in the legacy relative coordinate system:
-    x in [-ar_x, ar_x], y in [-ar_y, ar_y], z in [-1, 1]. That box is
-    geometrically similar to the level AABB (ar_* are defined from the AABB
-    itself), so the mapping is a uniform similarity transform: directions
-    are unchanged and extinction is rescaled so optical depths along any
-    segment are preserved.
-
-    Raises ImportError if the CUDA backend cannot be imported — there is
-    deliberately no CPU fallback here.
-    """
-    from . import witness_cuda  # loud ImportError when CUDA is unavailable
-
-    img_w, img_h = image_size
-    sigma = np.ascontiguousarray(level.sigma, dtype=np.float64)
-    nx, ny, nz = sigma.shape
-
-    bmin = np.asarray(level.bmin, dtype=np.float64)
-    bmax = np.asarray(level.bmax, dtype=np.float64)
-    center = 0.5 * (bmin + bmax)
-    height = bmax[2] - bmin[2]
-    scale = 2.0 / height                      # meters -> relative units
-    ar_x = (bmax[0] - bmin[0]) / height
-    ar_y = (bmax[1] - bmin[1]) / height
-
-    cam_rel = (np.asarray(cam_origin, dtype=np.float64) - center) * scale
-    ocean_z_rel = (float(ocean_z) - center[2]) * scale
-    # tau = sigma_m * L_m = (sigma_m / scale) * (L_m * scale)
-    sigma_rel = sigma / scale
-
-    fov_rad = pymath.radians(fov_degrees)
-    tan_half_fov = pymath.tan(fov_rad * 0.5)
-
-    # Warmup compile with a 1x1 buffer (mirrors the CPU path).
-    warmup = np.zeros((1, 1, 3), dtype=np.float64)
-    if verbose:
-        print("  Compiling CUDA render kernel (first run only)...", end="", flush=True)
-    witness_cuda.render_image_cuda(
-        sigma_rel, nx, ny, nz, ar_x, ar_y,
-        cam_rel[0], cam_rel[1], cam_rel[2],
-        forward[0], forward[1], forward[2],
-        right[0], right[1], right[2],
-        up[0], up[1], up[2],
-        sun_dir[0], sun_dir[1], sun_dir[2],
-        1, 1, tan_half_fov,
-        4,
-        SUN_COLOR[0], SUN_COLOR[1], SUN_COLOR[2],
-        G_HG, AMBIENT_STRENGTH,
-        ocean_enabled, ocean_z_rel,
-        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
-        warmup,
-    )
-    if verbose:
-        print(" done")
-        print("  Rendering (GPU)...", end="", flush=True)
-
-    image = np.zeros((img_h, img_w, 3), dtype=np.float64)
-    t0 = time.perf_counter()
-    witness_cuda.render_image_cuda(
-        sigma_rel, nx, ny, nz, ar_x, ar_y,
-        cam_rel[0], cam_rel[1], cam_rel[2],
-        forward[0], forward[1], forward[2],
-        right[0], right[1], right[2],
-        up[0], up[1], up[2],
-        sun_dir[0], sun_dir[1], sun_dir[2],
-        img_w, img_h, tan_half_fov,
-        n_light_steps,
-        SUN_COLOR[0], SUN_COLOR[1], SUN_COLOR[2],
-        G_HG, AMBIENT_STRENGTH,
-        ocean_enabled, ocean_z_rel,
-        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
-        image,
-    )
-    elapsed = time.perf_counter() - t0
-    if verbose:
-        print(f" done ({elapsed:.1f}s)")
-    return image
-
-
-# ============================================================================
 # Library render function (exported as cloudyview.witness)
 # ============================================================================
 
@@ -1141,7 +1026,6 @@ def witness(
     camera: Optional[Camera] = None,
     *,
     size: Optional[Tuple[int, int]] = None,
-    gpu: bool = False,
     sun_azimuth: Optional[float] = None,
     sun_elevation: Optional[float] = None,
     exposure: Optional[float] = None,
@@ -1157,15 +1041,6 @@ def witness(
         Viewpoint; defaults to the standard witness camera.
     size : (width, height), optional
         Image size in pixels (default from config: 600x400).
-    gpu : bool
-        Render on the numba CUDA backend. Raises ImportError if CUDA is
-        not available — there is no silent CPU fallback. WARNING: the CUDA
-        kernel's *look* is stale — it predates the April 2026 tuning
-        rounds (old sky shader, pre-rewrite per-step powder, procedural
-        non-FIF ocean that renders near-black against the current deep-sea
-        reflectance). Geometry matches the CPU reference; appearance does
-        not. Useful for benchmarking, not for output you care about, until
-        the planned WGSL port replaces it (docs/architecture.md).
     sun_azimuth, sun_elevation : float, optional
         Sun direction in degrees (met bearing / above horizon);
         defaults from config (20 / 55).
@@ -1274,19 +1149,6 @@ def witness(
         print(f"  Sun: azimuth={sun_azimuth:.1f} elev={sun_elevation:.1f}")
         print(f"  Image: {img_w}x{img_h}")
 
-    if gpu:
-        logger.warning(
-            "witness gpu=True uses the legacy CUDA kernel: geometry matches "
-            "the CPU reference but the look is stale (old sky, non-FIF ocean, "
-            "pre-2026-04 cloud scattering). See docs/architecture.md."
-        )
-        image = _render_single_cuda(
-            level, cam_origin, forward, right, up, sun_dir,
-            (img_w, img_h), camera.fov, n_light_steps,
-            ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
-            verbose=verbose,
-        )
-        return tone_map(image, exposure=exposure)
 
     if ocean_enabled:
         from cloudyview.ocean_fif import generate_fif_normals
@@ -1323,7 +1185,6 @@ def main(filename: str, output: str = None,
          camera_elevation: float = None, camera_fov: float = None,
          sun_azimuth: float = None, sun_elevation: float = None,
          custom_size: tuple = None,
-         gpu: bool = False,
          liquid_water_var: str = None,
          ice_water_var: str = None,
          dataset_group: str = None,
@@ -1380,7 +1241,6 @@ def main(filename: str, output: str = None,
             field,
             camera=camera,
             size=tuple(custom_size) if custom_size else None,
-            gpu=gpu,
             sun_azimuth=sun_azimuth,
             sun_elevation=sun_elevation,
             verbose=True,
@@ -1494,10 +1354,6 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
-    parser.add_argument("--gpu", action="store_true", default=False,
-                        help="Render on the CUDA GPU backend (requires numba "
-                             "CUDA support and an NVIDIA GPU; fails loudly "
-                             "if unavailable)")
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
@@ -1511,7 +1367,6 @@ def cli():
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
          custom_size=size,
-         gpu=args.gpu,
          **dataset_selection_kwargs(args))
 
 

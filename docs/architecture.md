@@ -54,13 +54,11 @@ Principles:
 
 ## Renderer strategy
 
-Three implementations of the *same* witness look, in strictness order:
+Two implementations of the *same* witness look:
 
 1. **numba CPU** (`witness.py`) — the golden reference. All look-tuning lands
    here first. ~1300 lines, painstakingly tuned against real cloud photos.
-2. **numba CUDA** (`witness_cuda.py`) — current fast path; equivalence-tested
-   against CPU (existing test).
-3. **WGSL (wgpu-py)** — the interactive engine, ported function-by-function
+2. **WGSL (wgpu-py)** — the interactive engine, ported function-by-function
    from the numba kernel and verified against numba golden images (extend the
    existing CPU/CUDA equivalence-test pattern; tolerance-based, since GPU
    float math differs slightly). The numba implementation is the mirror the
@@ -74,11 +72,10 @@ performance-critical inner loop leaves Python either way.
 
 Benchmark evidence (2026-07-07, RTX 5080 — details in
 temp/benchmarks-2026-07-07/RESULTS.md):
-- witness_cuda is a stale, reduced-feature port (only 2 of the post-April
-  look-tuning commits ever reached it: old sky, non-FIF ocean, pre-rewrite
-  powder, pre-refactor coordinates, no nesting). It is kept wired for
-  benchmarking (`gpu=True` warns loudly) and is expected to be RETIRED when
-  the WGSL engine passes equivalence.
+- witness_cuda was a stale, reduced-feature port (only 2 of the post-April
+  look-tuning commits ever reached it) and was RETIRED the same day the
+  WGSL spike proved out (Thomas's call; it lives in git history at tag
+  `witness-cuda-final` if ever needed for archaeology).
 - Both backends re-copy/re-upload the volume every frame (~230 ms/frame on
   the 1024² domain — 37–75%% of frame time). A resident texture removes this
   for free.
