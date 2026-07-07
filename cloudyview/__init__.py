@@ -30,9 +30,11 @@ from .camera import Camera
 # Public render functions. These intentionally shadow the glimpse/witness/
 # behold submodule attributes on the package (see module docstring).
 from .glimpse import glimpse
+from .witness import witness
+from .basic_render import save_image
 
 __all__ = ["io", "basic_render", "optical_depth", "domain",
            "vertically_integrated_optical_depth",
            "DomainGeometry", "compute_domain_geometry",
            "CloudField", "load", "Camera",
-           "glimpse"]
+           "glimpse", "witness", "save_image"]
