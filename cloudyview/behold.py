@@ -23,7 +23,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 import numpy as np
 from textwrap import dedent
 
@@ -206,6 +206,7 @@ def behold(
     sun_azimuth: Optional[float] = None,
     sun_elevation: Optional[float] = None,
     seed: int = 0,
+    progress_callback: Optional[Callable[[dict], None]] = None,
     verbose: bool = False,
 ) -> np.ndarray:
     """Render a cloud field with the Mitsuba 3 path tracer.
@@ -228,6 +229,9 @@ def behold(
         defaults from config (20 / 55).
     seed : int
         Monte Carlo seed.
+    progress_callback : callable, optional
+        Called as progressive chunks complete with percent, SPP, elapsed,
+        and ETA information from ``render_with_progress``.
     verbose : bool
         Print scene diagnostics and render progress (the CLI uses this).
 
@@ -283,6 +287,7 @@ def behold(
         spp_total=view_config['spp'],
         step_spp=view_config.get('progress_interval', 2),
         seed=seed,
+        progress_callback=progress_callback,
         verbose=verbose,
     )
 
@@ -309,7 +314,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
          z_coord_name: str = None,
          x_dim: str = None,
          y_dim: str = None,
-         z_dim: str = None) -> None:
+         z_dim: str = None,
+         ice: str = None) -> None:
     """CLI wrapper: load, build the scene, progressively render and save PNGs.
 
     Composes the same helpers as the library :func:`behold`; the file
@@ -321,6 +327,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         Path to NetCDF file
     backend : str
         Mitsuba backend: 'llvm' or 'cuda'
+    ice : str, optional
+        Separate NetCDF file with the ice variable (SAM LPT split-file style)
     quality : str
         Render quality: 'min' (150x100, spp=1, max_depth=4, rr_depth=2),
         'low' (300x200, spp=32, max_depth=16, rr_depth=4),
@@ -383,6 +391,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         # Load and validate data with xarray
         field = _load_field(
             filename,
+            ice=ice,
             liquid_water_var=liquid_water_var,
             ice_water_var=ice_water_var,
             dataset_group=dataset_group,
@@ -510,6 +519,7 @@ def cli():
             Examples:
               behold cloud.nc --cpu
               behold cloud.nc high --gpu --output renders
+              behold cloud_QC.nc low --gpu --ice cloud_QI.nc
               behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
               behold cloud.nc --cpu --camera-position 0 -0.99 -0.99 --camera-azimuth 0 --camera-elevation 35 --sun-azimuth 20 --sun-elevation 55
               behold cloud.nc --help
@@ -547,6 +557,10 @@ def cli():
     parser.add_argument(
         "--output", "-o",
         help="Output directory for saving renders (default: current directory)"
+    )
+    parser.add_argument(
+        "--ice",
+        help="separate NetCDF file with the ice variable (SAM LPT split-file style)"
     )
     parser.add_argument(
         "--spp",
@@ -612,6 +626,7 @@ def cli():
     args = parser.parse_args()
     backend = 'llvm' if args.cpu else 'cuda'
     main(args.filename, backend, args.quality, args.output,
+         ice=args.ice,
          custom_spp=args.spp,
          custom_size=tuple(args.size) if args.size else None,
          custom_max_depth=args.max_depth,

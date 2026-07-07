@@ -6,14 +6,26 @@ import pytest
 pytest.importorskip("wgpu", reason="requires the 'interactive' extra")
 
 from cloudyview.soar.app import (
+    ACTION_MENU_BACK,
+    ACTION_OPEN_FILE,
+    ACTION_OPEN_ICE_NO,
+    ACTION_OPEN_ICE_YES,
     ACTION_PAUSE,
     ACTION_QUIT,
+    ACTION_RENDER_BEHOLD,
+    ACTION_RENDER_MENU,
     ACTION_RESUME,
+    ACTION_SCREENSHOT,
     ACTION_TOGGLE_FULLSCREEN,
+    BEHOLD_QUALITIES_BY_KEY,
     FlyThroughApp,
+    MENU_MAIN,
+    MENU_OPEN_ICE_PROMPT,
+    MENU_RENDER_QUALITY,
     OCEAN_FLOOR_MARGIN_M,
     _clamp_position_above_ocean,
     _control_action_for_key,
+    _menu_transition,
 )
 
 
@@ -37,6 +49,9 @@ def make_event_app():
     app = object.__new__(FlyThroughApp)
     app.canvas = DummyCanvas()
     app._paused = False
+    app._menu_state = MENU_MAIN
+    app._pending_open_path = None
+    app._rendering = False
     app._captured = True
     app._keys = {"w", "Shift"}
     app._last_pointer = (10.0, 20.0)
@@ -49,6 +64,9 @@ def make_event_app():
     app.speed = 60.0
     app.capture_calls = []
     app.fullscreen_calls = 0
+    app.open_calls = 0
+    app.render_calls = []
+    app.screenshot_calls = 0
 
     def capture_mouse(capture):
         app.capture_calls.append(capture)
@@ -61,6 +79,11 @@ def make_event_app():
 
     app._capture_mouse = capture_mouse
     app._toggle_fullscreen = toggle_fullscreen
+    app._start_open_file = lambda: setattr(app, "open_calls", app.open_calls + 1)
+    app._run_behold_render = lambda quality: app.render_calls.append(quality)
+    app._save_screenshot = lambda: setattr(
+        app, "screenshot_calls", app.screenshot_calls + 1
+    )
     return app
 
 
@@ -68,6 +91,7 @@ def test_control_action_for_key_active_and_paused():
     assert _control_action_for_key(False, "Escape") == ACTION_PAUSE
     assert _control_action_for_key(False, "f") == ACTION_TOGGLE_FULLSCREEN
     assert _control_action_for_key(False, "F") == ACTION_TOGGLE_FULLSCREEN
+    assert _control_action_for_key(False, "F12") == ACTION_SCREENSHOT
     assert _control_action_for_key(False, "w") is None
 
     assert _control_action_for_key(True, "Escape") == ACTION_QUIT
@@ -76,7 +100,37 @@ def test_control_action_for_key_active_and_paused():
     assert _control_action_for_key(True, "r") == ACTION_RESUME
     assert _control_action_for_key(True, "R") == ACTION_RESUME
     assert _control_action_for_key(True, "F") == ACTION_TOGGLE_FULLSCREEN
+    assert _control_action_for_key(True, "O") == ACTION_OPEN_FILE
+    assert _control_action_for_key(True, "G") == ACTION_RENDER_MENU
     assert _control_action_for_key(True, "w") is None
+
+
+def test_pause_submenu_state_transitions_are_explicit():
+    transition = _menu_transition(True, MENU_MAIN, "G")
+    assert transition.action == ACTION_RENDER_MENU
+    assert transition.next_state == MENU_RENDER_QUALITY
+
+    for key, quality in BEHOLD_QUALITIES_BY_KEY.items():
+        transition = _menu_transition(True, MENU_RENDER_QUALITY, key)
+        assert transition.action == ACTION_RENDER_BEHOLD
+        assert transition.quality == quality
+        assert transition.next_state == MENU_RENDER_QUALITY
+
+    transition = _menu_transition(True, MENU_RENDER_QUALITY, "Escape")
+    assert transition.action == ACTION_MENU_BACK
+    assert transition.next_state == MENU_MAIN
+
+    assert (
+        _menu_transition(True, MENU_OPEN_ICE_PROMPT, "Y").action
+        == ACTION_OPEN_ICE_YES
+    )
+    assert (
+        _menu_transition(True, MENU_OPEN_ICE_PROMPT, "N").action
+        == ACTION_OPEN_ICE_NO
+    )
+    transition = _menu_transition(True, MENU_OPEN_ICE_PROMPT, "Escape")
+    assert transition.action == ACTION_MENU_BACK
+    assert transition.next_state == MENU_MAIN
 
 
 def test_clamp_position_above_ocean_uses_margin_and_returns_copy():
@@ -157,6 +211,32 @@ def test_fullscreen_key_toggles_without_becoming_movement_input():
     assert app._keys == set()
 
 
+def test_pause_open_and_render_keys_dispatch_to_submenus():
+    app = make_event_app()
+    app._paused = True
+    app._captured = False
+    app._keys = set()
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "O"})
+    assert app.open_calls == 1
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "G"})
+    assert app._menu_state == MENU_RENDER_QUALITY
+    assert "BEHOLD QUALITY" in app.canvas.titles[-1]
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "2"})
+    assert app.render_calls == ["low"]
+
+
+def test_f12_dispatches_screenshot_during_active_flight():
+    app = make_event_app()
+    app._paused = False
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "F12"})
+
+    assert app.screenshot_calls == 1
+
+
 def test_paused_mouse_move_and_wheel_do_not_change_camera_or_speed():
     app = make_event_app()
     app._paused = True
@@ -187,6 +267,47 @@ def test_move_clamps_shift_descent_to_ocean_margin():
     FlyThroughApp._move(app, 1.0)
 
     assert app.position[2] == OCEAN_FLOOR_MARGIN_M
+
+
+def test_install_field_rebuilds_renderer_on_existing_device_and_resets_camera():
+    class FakeRenderer:
+        def __init__(self, name):
+            self.name = name
+            self.device = object()
+            self.bmin = np.array([0.0, 0.0, 0.0])
+            self.bmax = np.array([100.0, 200.0, 1000.0])
+            self.ocean_enabled = True
+            self.ocean_z = 0.0
+            self.ocean_reflectance = (0.1, 0.2, 0.3)
+            self.ocean_fif_normals = ("nx", "ny", "nz", 1.0)
+            self.reset_calls = 0
+
+        def reset_accumulation(self):
+            self.reset_calls += 1
+
+    app = object.__new__(FlyThroughApp)
+    old_renderer = FakeRenderer("old")
+    new_renderer = FakeRenderer("new")
+    app.renderer = old_renderer
+    app._frame_index = 99
+    calls = []
+
+    def create_renderer(field, *, device=None, previous=None):
+        calls.append((field, device, previous))
+        return new_renderer
+
+    app._create_renderer = create_renderer
+
+    FlyThroughApp._install_field(app, field="new-field")
+
+    assert calls == [("new-field", old_renderer.device, old_renderer)]
+    assert app.renderer is new_renderer
+    assert app._frame_index == 0
+    assert app.azimuth == pytest.approx(0.0)
+    assert app.elevation == pytest.approx(35.0)
+    assert app.fov == pytest.approx(100.0)
+    assert app.position[2] >= OCEAN_FLOOR_MARGIN_M
+    assert new_renderer.reset_calls == 1
 
 
 def test_move_clamps_forward_descent_when_pitched_down():

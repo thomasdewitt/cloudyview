@@ -22,19 +22,58 @@ def main(argv=None):
     parser.add_argument("--extinction-multiplier", type=float, default=1.0)
     parser.add_argument("--max-fps", type=float, default=120.0,
                         help="frame-rate cap (default 120)")
+    parser.add_argument(
+        "--camera-position",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        help="initial camera position in relative coords",
+    )
+    parser.add_argument("--camera-azimuth", type=float,
+                        help="initial camera azimuth in degrees")
+    parser.add_argument("--camera-elevation", type=float,
+                        help="initial camera elevation in degrees")
+    parser.add_argument("--fov", type=float,
+                        help="initial vertical field of view in degrees")
     args = parser.parse_args(argv)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
 
     from ..cloudfield import load
+    from ..camera import Camera
     from .app import CONTROL_SUMMARY, run_app
 
     field = load(args.filepath, ice=args.ice)
+    camera = None
+    if any(v is not None for v in (
+        args.camera_position, args.camera_azimuth,
+        args.camera_elevation, args.fov,
+    )):
+        defaults = Camera()
+        camera = Camera(
+            position=(
+                tuple(args.camera_position)
+                if args.camera_position is not None
+                else defaults.position
+            ),
+            azimuth=(
+                args.camera_azimuth
+                if args.camera_azimuth is not None
+                else defaults.azimuth
+            ),
+            elevation=(
+                args.camera_elevation
+                if args.camera_elevation is not None
+                else defaults.elevation
+            ),
+            fov=args.fov if args.fov is not None else defaults.fov,
+        )
     print(f"Loaded {field}")
     print(CONTROL_SUMMARY)
     run_app(field, size=(w, h),
             extinction_multiplier=args.extinction_multiplier,
-            max_fps=args.max_fps)
+            max_fps=args.max_fps,
+            camera=camera)
 
 
 if __name__ == "__main__":
