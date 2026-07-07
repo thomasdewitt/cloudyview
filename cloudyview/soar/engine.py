@@ -42,8 +42,61 @@ DEFAULT_AMBIENT_STRENGTH = 0.12
 DEFAULT_OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)  # witness.py:104-106
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 
-_UNIFORM_NBYTES = 10 * 16  # 10 vec4<f32>
+_UNIFORM_NBYTES = 11 * 16  # 11 vec4<f32>
+_ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
+
+_ACCUM_SHADER = """
+struct AccumUniforms {
+    prev_weight: f32,
+    sample_weight: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
+@group(0) @binding(0) var<uniform> au: AccumUniforms;
+@group(0) @binding(1) var sample_tex: texture_2d<f32>;
+@group(0) @binding(2) var prev_tex: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let x = f32(i32(vi) / 2) * 4.0 - 1.0;
+    let y = f32(i32(vi) & 1) * 4.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let xy = vec2<i32>(frag_pos.xy);
+    let sample = textureLoad(sample_tex, xy, 0);
+    if (au.prev_weight <= 0.0) {
+        return vec4<f32>(sample.rgb, 1.0);
+    }
+    let prev = textureLoad(prev_tex, xy, 0);
+    return vec4<f32>(
+        prev.rgb * au.prev_weight + sample.rgb * au.sample_weight,
+        1.0
+    );
+}
+"""
+
+_PRESENT_SHADER = """
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let x = f32(i32(vi) / 2) * 4.0 - 1.0;
+    let y = f32(i32(vi) & 1) * 4.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let xy = vec2<i32>(frag_pos.xy);
+    let src = textureLoad(src_tex, xy, 0);
+    return vec4<f32>(src.rgb, 1.0);
+}
+"""
 
 
 def _volume_aabb(field: CloudField) -> Tuple[np.ndarray, np.ndarray]:
@@ -106,6 +159,34 @@ def _validate_fif_normals(fif_normals):
     return nx, ny, nz, float(dx)
 
 
+def _build_fif_normal_mips(base: np.ndarray) -> list[np.ndarray]:
+    """Average and renormalize a periodic normal-map mip chain on the CPU."""
+    mips = [np.ascontiguousarray(base, dtype=np.float32)]
+    cur = mips[0]
+    while cur.shape[0] > 1 or cur.shape[1] > 1:
+        h, w, _ = cur.shape
+        nh = max(1, h // 2)
+        nw = max(1, w // 2)
+        y0 = (np.arange(nh) * 2) % h
+        y1 = (y0 + 1) % h
+        x0 = (np.arange(nw) * 2) % w
+        x1 = (x0 + 1) % w
+        down = (
+            cur[y0[:, None], x0[None, :], :3]
+            + cur[y1[:, None], x0[None, :], :3]
+            + cur[y0[:, None], x1[None, :], :3]
+            + cur[y1[:, None], x1[None, :], :3]
+        ) * np.float32(0.25)
+        length = np.linalg.norm(down, axis=-1, keepdims=True)
+        down = down / np.maximum(length, np.float32(1e-12))
+        level = np.empty((nh, nw, 4), dtype=np.float32)
+        level[..., :3] = down
+        level[..., 3] = 1.0
+        mips.append(np.ascontiguousarray(level))
+        cur = mips[-1]
+    return mips
+
+
 class InteractiveRenderer:
     """Resident-volume WGSL raymarcher for a single CloudField.
 
@@ -119,6 +200,8 @@ class InteractiveRenderer:
         Reuse an existing device (the windowed app shares one with its
         canvas). Must have the ``float32-filterable`` feature.
     """
+
+    _ACCUM_FORMAT = wgpu.TextureFormat.rgba16float
 
     def __init__(
         self,
@@ -212,6 +295,7 @@ class InteractiveRenderer:
         ocean_normals[..., 1] = fif_ny
         ocean_normals[..., 2] = fif_nz
         ocean_normals[..., 3] = 1.0
+        ocean_mips = _build_fif_normal_mips(ocean_normals)
         fif_n = fif_nx.shape[0]
         max_dim_2d = self.device.limits["max-texture-dimension-2d"]
         if fif_n > max_dim_2d:
@@ -222,17 +306,22 @@ class InteractiveRenderer:
         self._ocean_texture = self.device.create_texture(
             label="ocean-fif-normals",
             size=(fif_n, fif_n, 1),
+            mip_level_count=len(ocean_mips),
             format=wgpu.TextureFormat.rgba32float,
             dimension="2d",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
         )
-        self.device.queue.write_texture(
-            {"texture": self._ocean_texture},
-            ocean_normals,
-            {"bytes_per_row": fif_n * 4 * 4, "rows_per_image": fif_n},
-            (fif_n, fif_n, 1),
-        )
-        self.ocean_nbytes = ocean_normals.nbytes
+        for level, mip in enumerate(ocean_mips):
+            h, w, _ = mip.shape
+            self.device.queue.write_texture(
+                {"texture": self._ocean_texture, "mip_level": level},
+                mip,
+                {"bytes_per_row": w * 4 * 4, "rows_per_image": h},
+                (w, h, 1),
+            )
+        self.ocean_mip_count = len(ocean_mips)
+        self.ocean_max_lod = float(len(ocean_mips) - 1)
+        self.ocean_nbytes = sum(mip.nbytes for mip in ocean_mips)
 
         # TODO(occupancy-grid): build a coarse boolean brick grid from
         # `sigma` here and bind it in the shader for empty-space skipping —
@@ -250,6 +339,7 @@ class InteractiveRenderer:
             address_mode_v="repeat",
             mag_filter="linear",
             min_filter="linear",
+            mipmap_filter="linear",
         )
         self._uniform_buf = self.device.create_buffer(
             size=_UNIFORM_NBYTES,
@@ -257,6 +347,16 @@ class InteractiveRenderer:
         )
         self._shader = self.device.create_shader_module(
             code=SHADER_PATH.read_text()
+        )
+        self._accum_uniform_buf = self.device.create_buffer(
+            size=_ACCUM_UNIFORM_NBYTES,
+            usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
+        )
+        self._accum_shader = self.device.create_shader_module(
+            code=_ACCUM_SHADER
+        )
+        self._present_shader = self.device.create_shader_module(
+            code=_PRESENT_SHADER
         )
         self._bind_group_layout = self.device.create_bind_group_layout(entries=[
             {
@@ -291,6 +391,34 @@ class InteractiveRenderer:
                 "sampler": {"type": "filtering"},
             },
         ])
+        self._accum_bind_group_layout = self.device.create_bind_group_layout(
+            entries=[
+                {
+                    "binding": 0,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "buffer": {"type": "uniform"},
+                },
+                {
+                    "binding": 1,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "texture": {"sample_type": "float", "view_dimension": "2d"},
+                },
+                {
+                    "binding": 2,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "texture": {"sample_type": "float", "view_dimension": "2d"},
+                },
+            ]
+        )
+        self._present_bind_group_layout = self.device.create_bind_group_layout(
+            entries=[
+                {
+                    "binding": 0,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "texture": {"sample_type": "float", "view_dimension": "2d"},
+                },
+            ]
+        )
         self._bind_group = self.device.create_bind_group(
             layout=self._bind_group_layout,
             entries=[
@@ -306,10 +434,27 @@ class InteractiveRenderer:
         self._pipeline_layout = self.device.create_pipeline_layout(
             bind_group_layouts=[self._bind_group_layout]
         )
+        self._accum_pipeline_layout = self.device.create_pipeline_layout(
+            bind_group_layouts=[self._accum_bind_group_layout]
+        )
+        self._present_pipeline_layout = self.device.create_pipeline_layout(
+            bind_group_layouts=[self._present_bind_group_layout]
+        )
         self._pipelines = {}  # target format -> render pipeline
+        self._accum_pipeline = None
+        self._present_pipelines = {}  # target format -> render pipeline
 
         # Offscreen target cache: (w, h) -> texture.
         self._offscreen = None
+        self._accum_targets = None
+        self._accum_key = None
+        self._accum_count = 0
+        self._accum_index = 0
+        self._current_uniform_key = None
+        self._current_uniform_size = None
+        self._current_uniform = None
+        self._current_jitter = False
+        self._current_subpixel = False
 
         # The HUD minimap: static glimpse albedo texture + tiny per-frame
         # camera/FOV uniform. Created with the renderer so the map is loaded
@@ -354,6 +499,41 @@ class InteractiveRenderer:
             )
         return self._pipelines[target_format]
 
+    def _accum_pipeline_for(self):
+        """Running-average pipeline for the fixed accumulation texture format."""
+        if self._accum_pipeline is None:
+            self._accum_pipeline = self.device.create_render_pipeline(
+                layout=self._accum_pipeline_layout,
+                vertex={"module": self._accum_shader, "entry_point": "vs_main"},
+                primitive={"topology": "triangle-list"},
+                fragment={
+                    "module": self._accum_shader,
+                    "entry_point": "fs_main",
+                    "targets": [{"format": self._ACCUM_FORMAT}],
+                },
+            )
+        return self._accum_pipeline
+
+    def _present_pipeline_for(self, target_format: str):
+        """Present the accumulated scene into the caller's target format."""
+        if target_format not in self._present_pipelines:
+            self._present_pipelines[target_format] = (
+                self.device.create_render_pipeline(
+                    layout=self._present_pipeline_layout,
+                    vertex={
+                        "module": self._present_shader,
+                        "entry_point": "vs_main",
+                    },
+                    primitive={"topology": "triangle-list"},
+                    fragment={
+                        "module": self._present_shader,
+                        "entry_point": "fs_main",
+                        "targets": [{"format": target_format}],
+                    },
+                )
+            )
+        return self._present_pipelines[target_format]
+
     def write_uniforms(
         self,
         camera: Camera,
@@ -366,6 +546,7 @@ class InteractiveRenderer:
         g_hg: float = DEFAULT_G_HG,
         ambient_strength: float = DEFAULT_AMBIENT_STRENGTH,
         frame_index: int = 0,
+        subpixel: bool = False,
     ) -> None:
         """Pack the uniform block and enqueue the (tiny) per-frame upload."""
         w, h = size
@@ -374,7 +555,7 @@ class InteractiveRenderer:
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
         tan_half_fov = np.tan(np.deg2rad(camera.fov) * 0.5)
 
-        u = np.empty((10, 4), dtype=np.float32)
+        u = np.zeros((11, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, w / h]
         u[2] = [*right, exposure]
@@ -388,12 +569,34 @@ class InteractiveRenderer:
             self.ocean_fif_dx,
             self.ocean_tile_extent,
             1.0 if self.ocean_enabled else 0.0,
-            0.0,
+            self.ocean_max_lod,
         ]
+        u[10] = [1.0 if subpixel else 0.0, 0.0, 0.0, 0.0]
+        key = u.copy()
+        key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
+        key[10, 0] = 0.0  # subpixel is a sampling mode, not scene identity
+        self._current_uniform_key = key.tobytes()
+        self._current_uniform_size = tuple(size)
+        self._current_uniform = u
+        self._current_jitter = bool(jitter)
+        self._current_subpixel = bool(subpixel)
         self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
 
-    def encode_pass(self, command_encoder, target_view, target_format: str,
-                    timestamp_writes=None) -> None:
+    def _set_current_subpixel(self, enabled: bool) -> None:
+        """Flip only the subpixel sampling flag in the already-packed uniforms."""
+        if self._current_uniform is None:
+            return
+        enabled = bool(enabled)
+        if self._current_subpixel == enabled:
+            return
+        self._current_uniform[10, 0] = 1.0 if enabled else 0.0
+        self._current_subpixel = enabled
+        self.device.queue.write_buffer(
+            self._uniform_buf, 0, self._current_uniform.tobytes()
+        )
+
+    def _encode_raymarch_pass(self, command_encoder, target_view,
+                              target_format: str, timestamp_writes=None) -> None:
         """Encode the fullscreen raymarch pass into an existing encoder."""
         desc = {
             "color_attachments": [{
@@ -410,6 +613,147 @@ class InteractiveRenderer:
         rpass.set_bind_group(0, self._bind_group)
         rpass.draw(3)
         rpass.end()
+
+    def reset_accumulation(self) -> None:
+        """Drop the temporal history; the next jittered frame seeds it."""
+        self._accum_key = None
+        self._accum_count = 0
+        self._accum_index = 0
+
+    def _accum_target(self, size: Tuple[int, int]):
+        if self._accum_targets is None or self._accum_targets["size"] != tuple(size):
+            usage = wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.TEXTURE_BINDING
+            sample = self.device.create_texture(
+                label="soar-temporal-sample",
+                size=(size[0], size[1], 1),
+                format=self._ACCUM_FORMAT,
+                usage=usage,
+            )
+            accum = [
+                self.device.create_texture(
+                    label=f"soar-temporal-accum-{i}",
+                    size=(size[0], size[1], 1),
+                    format=self._ACCUM_FORMAT,
+                    usage=usage,
+                )
+                for i in range(2)
+            ]
+            self._accum_targets = {
+                "size": tuple(size),
+                "sample": sample,
+                "sample_view": sample.create_view(),
+                "accum": accum,
+                "accum_views": [tex.create_view() for tex in accum],
+            }
+            self.reset_accumulation()
+        return self._accum_targets
+
+    def _encode_accum_average_pass(self, command_encoder, target) -> None:
+        prev_count = self._accum_count
+        next_count = prev_count + 1
+        if prev_count == 0:
+            prev_weight = 0.0
+            sample_weight = 1.0
+        else:
+            prev_weight = prev_count / next_count
+            sample_weight = 1.0 / next_count
+        weights = np.array(
+            [prev_weight, sample_weight, 0.0, 0.0], dtype=np.float32
+        )
+        self.device.queue.write_buffer(
+            self._accum_uniform_buf, 0, weights.tobytes()
+        )
+
+        prev_index = self._accum_index
+        dst_index = 1 - self._accum_index
+        bind_group = self.device.create_bind_group(
+            layout=self._accum_bind_group_layout,
+            entries=[
+                {
+                    "binding": 0,
+                    "resource": {
+                        "buffer": self._accum_uniform_buf,
+                        "offset": 0,
+                        "size": _ACCUM_UNIFORM_NBYTES,
+                    },
+                },
+                {"binding": 1, "resource": target["sample_view"]},
+                {"binding": 2, "resource": target["accum_views"][prev_index]},
+            ],
+        )
+        rpass = command_encoder.begin_render_pass(
+            color_attachments=[{
+                "view": target["accum_views"][dst_index],
+                "load_op": wgpu.LoadOp.clear,
+                "store_op": wgpu.StoreOp.store,
+                "clear_value": (0.0, 0.0, 0.0, 1.0),
+            }]
+        )
+        rpass.set_pipeline(self._accum_pipeline_for())
+        rpass.set_bind_group(0, bind_group)
+        rpass.draw(3)
+        rpass.end()
+        self._accum_index = dst_index
+        self._accum_count = next_count
+
+    def _encode_present_pass(self, command_encoder, src_view, target_view,
+                             target_format: str) -> None:
+        bind_group = self.device.create_bind_group(
+            layout=self._present_bind_group_layout,
+            entries=[{"binding": 0, "resource": src_view}],
+        )
+        rpass = command_encoder.begin_render_pass(
+            color_attachments=[{
+                "view": target_view,
+                "load_op": wgpu.LoadOp.clear,
+                "store_op": wgpu.StoreOp.store,
+                "clear_value": (0.0, 0.0, 0.0, 1.0),
+            }]
+        )
+        rpass.set_pipeline(self._present_pipeline_for(target_format))
+        rpass.set_bind_group(0, bind_group)
+        rpass.draw(3)
+        rpass.end()
+
+    def encode_pass(self, command_encoder, target_view, target_format: str,
+                    timestamp_writes=None, accumulate: Optional[bool] = None) -> None:
+        """Encode the scene pass, with temporal averaging for static jittered views."""
+        if accumulate is None:
+            accumulate = True
+        if (
+            not accumulate
+            or not self._current_jitter
+            or self._current_uniform_key is None
+            or self._current_uniform_size is None
+        ):
+            self._set_current_subpixel(False)
+            if not accumulate or not self._current_jitter:
+                self.reset_accumulation()
+            self._encode_raymarch_pass(
+                command_encoder, target_view, target_format, timestamp_writes
+            )
+            return
+
+        target = self._accum_target(self._current_uniform_size)
+        if self._accum_key != self._current_uniform_key:
+            self._accum_key = self._current_uniform_key
+            self._accum_count = 0
+            self._accum_index = 0
+
+        self._set_current_subpixel(self._accum_count >= 1)
+        self._encode_raymarch_pass(
+            command_encoder,
+            target["sample_view"],
+            self._ACCUM_FORMAT,
+            timestamp_writes,
+        )
+        self._encode_accum_average_pass(command_encoder, target)
+        self._encode_present_pass(
+            command_encoder,
+            target["accum_views"][self._accum_index],
+            target_view,
+            target_format,
+        )
 
     # ------------------------------------------------------------------
     # Offscreen rendering
@@ -433,7 +777,7 @@ class InteractiveRenderer:
                size: Tuple[int, int] = (960, 540), *,
                bird: bool = False, bird_time: float = 0.0,
                bird_pose: Optional[dict] = None, hud: bool = False,
-               **kwargs) -> np.ndarray:
+               accumulate_frames: int = 1, **kwargs) -> np.ndarray:
         """Render one frame offscreen and read it back.
 
         Parameters
@@ -447,6 +791,12 @@ class InteractiveRenderer:
         hud : bool
             Draw the minimap overlay (default off so parity renders and
             benchmarks remain HUD-free unless explicitly requested).
+        accumulate_frames : int
+            Number of static jittered frames to accumulate before readback.
+            The frame index is advanced for each internal frame so jitter
+            samples decorrelate. Single-frame and jitter-off renders use the
+            direct path. Overlays (bird, hud) are drawn only on the final
+            frame so they stay crisp over the converged volume.
 
         Returns
         -------
@@ -455,29 +805,45 @@ class InteractiveRenderer:
         """
         if camera is None:
             camera = Camera()
-        target = self._offscreen_target(size)
-        self.write_uniforms(camera, size, **kwargs)
-        enc = self.device.create_command_encoder()
-        self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT)
-        if bird:
-            origin = camera_world_origin(camera, self.bmin, self.bmax)
-            self.bird.set_static(origin, camera, bird_time,
-                                 **(bird_pose or {}))
-            self.bird.write_uniforms(
-                origin, camera, size,
-                sun_azimuth=kwargs.get("sun_azimuth", DEFAULT_SUN_AZIMUTH),
-                sun_elevation=kwargs.get("sun_elevation",
-                                         DEFAULT_SUN_ELEVATION),
-                exposure=kwargs.get("exposure", DEFAULT_EXPOSURE),
-                ambient_strength=kwargs.get("ambient_strength",
-                                            DEFAULT_AMBIENT_STRENGTH),
+        accumulate_frames = int(accumulate_frames)
+        if accumulate_frames < 1:
+            raise ValueError(
+                f"accumulate_frames must be >= 1; got {accumulate_frames}."
             )
-            self.bird.encode_pass(enc, target["view"],
-                                  self._OFFSCREEN_FORMAT, size)
-        if hud:
-            self.hud.write_uniforms(camera, size)
-            self.hud.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT)
-        self.device.queue.submit([enc.finish()])
+        frame_index0 = int(kwargs.pop("frame_index", 0))
+        target = self._offscreen_target(size)
+        accumulate = accumulate_frames > 1
+        for i in range(accumulate_frames):
+            self.write_uniforms(
+                camera, size, frame_index=frame_index0 + i, **kwargs
+            )
+            enc = self.device.create_command_encoder()
+            self.encode_pass(
+                enc, target["view"], self._OFFSCREEN_FORMAT,
+                accumulate=accumulate,
+            )
+            if i == accumulate_frames - 1:
+                if bird:
+                    origin = camera_world_origin(camera, self.bmin, self.bmax)
+                    self.bird.set_static(origin, camera, bird_time,
+                                         **(bird_pose or {}))
+                    self.bird.write_uniforms(
+                        origin, camera, size,
+                        sun_azimuth=kwargs.get("sun_azimuth",
+                                               DEFAULT_SUN_AZIMUTH),
+                        sun_elevation=kwargs.get("sun_elevation",
+                                                 DEFAULT_SUN_ELEVATION),
+                        exposure=kwargs.get("exposure", DEFAULT_EXPOSURE),
+                        ambient_strength=kwargs.get("ambient_strength",
+                                                    DEFAULT_AMBIENT_STRENGTH),
+                    )
+                    self.bird.encode_pass(enc, target["view"],
+                                          self._OFFSCREEN_FORMAT, size)
+                if hud:
+                    self.hud.write_uniforms(camera, size)
+                    self.hud.encode_pass(enc, target["view"],
+                                         self._OFFSCREEN_FORMAT)
+            self.device.queue.submit([enc.finish()])
         data = self.device.queue.read_texture(
             {"texture": target["texture"]},
             {"bytes_per_row": size[0] * 4, "rows_per_image": size[1]},

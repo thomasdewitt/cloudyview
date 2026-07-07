@@ -38,8 +38,10 @@ struct Uniforms {
     params: vec4<f32>,
     // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106)
     ocean: vec4<f32>,
-    // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = unused
+    // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
     ocean_params: vec4<f32>,
+    // x = subpixel camera-ray jitter enable (0.0 or 1.0), yzw = unused
+    flags: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -140,6 +142,13 @@ fn hash12(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
+fn hash22(p: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(
+        hash12(p + vec2<f32>(17.17, 41.93)),
+        hash12(p + vec2<f32>(71.31, 11.57))
+    );
+}
+
 fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
     if (sigma > DENSE_SIGMA_CUTOFF) {
         return min(dt_max, TAU_STEP_MAX / sigma);
@@ -222,16 +231,27 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 // FIF normal sampling follows witness._ocean_wave_normal_fif
 // (witness.py lines 417-442): periodic wrap, bilinear interpolation, then
 // renormalization. The host uploads the generated nx/ny/nz arrays as RGB.
-fn ocean_wave_normal(world_xy: vec2<f32>) -> vec3<f32> {
+fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
+    let pixel_span = 2.0 * max(t_hit, 0.0) * u.cam_origin.w / u.params.y;
+    let ocean_span = pixel_span / max(abs(dir.z), 0.03);
+    let texel_span = max(ocean_span / u.ocean_params.x, 1.0);
+    return clamp(log2(texel_span), 0.0, u.ocean_params.w);
+}
+
+fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, 0));
     let coord = world_xy / u.ocean_params.y + 0.5 / dims;
-    let n = textureSampleLevel(ocean_normals, ocean_samp, coord, 0.0).rgb;
+    let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
     return normalize(n);
 }
 
 // Ocean shade ported from witness._ocean_shade (witness.py lines 473-541).
-fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
-    let n = ocean_wave_normal(hit.xy);
+fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> vec3<f32> {
+    var normal_lod = 0.0;
+    if (u.cam_up.w > 0.5) {
+        normal_lod = ocean_normal_lod(t_hit, dir);
+    }
+    let n = ocean_wave_normal(hit.xy, normal_lod);
 
     let vdotn = dot(dir, n);
     var refl = dir - 2.0 * vdotn * n;
@@ -286,12 +306,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let aspect = u.cam_forward.w;
     let exposure = u.cam_right.w;
     let jitter_on = u.cam_up.w;
+    let subpixel_on = u.flags.x;
     let sun = u.sun_dir.xyz;
 
     // Pixel -> camera ray. Framebuffer y=0 is the image top, matching the
     // witness convention ndc_y = 1 - 2*(py+0.5)/h.
-    let ndc_x = (2.0 * frag_pos.x / img_w - 1.0) * aspect * tan_half_fov;
-    let ndc_y = (1.0 - 2.0 * frag_pos.y / img_h) * tan_half_fov;
+    var sample_pos = frag_pos.xy;
+    if (subpixel_on > 0.5) {
+        let subpixel_seed = frag_pos.xy + vec2<f32>(
+            u.sun_dir.w * 61.803,
+            u.sun_dir.w * 17.271
+        );
+        sample_pos = sample_pos + hash22(subpixel_seed) - vec2<f32>(0.5);
+    }
+    let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * aspect * tan_half_fov;
+    let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov;
     let dir = normalize(u.cam_forward.xyz
                         + ndc_x * u.cam_right.xyz
                         + ndc_y * u.cam_up.xyz);
@@ -329,7 +358,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // ocean plane coincident with the box floor is still shaded.
             if (ocean_on && t >= t_ocean) {
                 let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
-                col = col + transmittance * ocean_shade(ocean_hit, dir, sun);
+                col = col + transmittance * ocean_shade(ocean_hit, dir, sun, t_ocean);
                 transmittance = 0.0;
                 break;
             }
@@ -406,7 +435,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         let center = 0.5 * (u.bmin.xy + u.bmax.xy);
         if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
             && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
-            col = col + transmittance * ocean_shade(ocean_hit, dir, sun);
+            col = col + transmittance * ocean_shade(ocean_hit, dir, sun, t_ocean);
             transmittance = 0.0;
         }
     }
