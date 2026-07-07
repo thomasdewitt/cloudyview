@@ -1,7 +1,8 @@
 """Windowed fly-through app (glfw via rendercanvas, wgpu-py's gui stack).
 
 Controls:
-    W/A/S/D     move forward/left/back/right (horizontal)
+    W/S         move forward/back along the view direction
+    A/D         strafe left/right
     Space       move up
     LShift / C  move down
     mouse       look (cursor is captured, video-game style)
@@ -10,7 +11,13 @@ Controls:
     J           toggle jittered ray starts (A/B the banding fix)
     B           toggle the bird (the flying subject leading the camera)
     M           toggle the minimap
-    ESC         quit
+    F           toggle fullscreen/windowed
+    ESC         pause menu (releases the mouse)
+
+Pause menu:
+    R / click   resume and recapture the mouse
+    F           toggle fullscreen/windowed
+    ESC / Q     quit
 
 The window title shows a running fps readout and the current camera state
 in cv.Camera terms, so a good viewpoint can be transcribed straight into a
@@ -35,6 +42,66 @@ from .engine import (
 DEFAULT_SPEED = 60.0        # m/s, comfortable for the 25 km dev domain
 MOUSE_SENS = 0.12           # degrees per pixel
 SPEED_WHEEL_FACTOR = 1.25   # per wheel notch
+OCEAN_FLOOR_MARGIN_M = 2.0
+
+ACTION_PAUSE = "pause"
+ACTION_RESUME = "resume"
+ACTION_QUIT = "quit"
+ACTION_TOGGLE_FULLSCREEN = "toggle_fullscreen"
+
+CONTROL_SUMMARY = (
+    "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
+    "(Tab releases, click recaptures), scroll speed, "
+    "J jitter toggle, B bird toggle, M minimap toggle, "
+    "F fullscreen/window, ESC pause menu; "
+    "paused: R/click resume, F fullscreen/window, ESC/Q quit"
+)
+
+_PAUSE_OVERLAY_SHADER = """
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32)
+        -> @builtin(position) vec4<f32> {
+    let x = f32(i32(vertex_index) - 1);
+    let y = f32(i32(vertex_index & 1u) * 2 - 1);
+    return vec4<f32>(x * 3.0, y * 3.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.42);
+}
+"""
+
+
+def _normalized_key(key: str) -> str:
+    return key.lower() if len(key) == 1 else key
+
+
+def _control_action_for_key(paused: bool, key: str) -> str | None:
+    """Pure pause/fullscreen key state machine for the window shell."""
+    normalized = _normalized_key(key)
+    if paused:
+        if key == "Escape" or normalized == "q":
+            return ACTION_QUIT
+        if normalized == "r":
+            return ACTION_RESUME
+        if normalized == "f":
+            return ACTION_TOGGLE_FULLSCREEN
+        return None
+    if key == "Escape":
+        return ACTION_PAUSE
+    if normalized == "f":
+        return ACTION_TOGGLE_FULLSCREEN
+    return None
+
+
+def _clamp_position_above_ocean(
+    position, margin: float = OCEAN_FLOOR_MARGIN_M
+) -> np.ndarray:
+    """Return a copy of a world-space camera position held above z=0 ocean."""
+    clamped = np.asarray(position, dtype=np.float64).copy()
+    clamped[2] = max(clamped[2], margin)
+    return clamped
 
 
 class FlyThroughApp:
@@ -51,6 +118,7 @@ class FlyThroughApp:
             title="cloudyview", size=size, update_mode="continuous",
             max_fps=max_fps, vsync=True,
         )
+        self._ensure_resizable()
 
         device = request_device()
         self.renderer = InteractiveRenderer(
@@ -67,6 +135,7 @@ class FlyThroughApp:
         from .engine import camera_world_origin
         self.position = camera_world_origin(
             cam0, self.renderer.bmin, self.renderer.bmax)
+        self.position = _clamp_position_above_ocean(self.position)
         self.azimuth = cam0.azimuth
         self.elevation = cam0.elevation
         self.fov = cam0.fov
@@ -78,6 +147,10 @@ class FlyThroughApp:
         self._keys = set()
         self._last_pointer = None   # None -> ignore next move (capture jump guard)
         self._captured = False
+        self._paused = False
+        self._fullscreen = False
+        self._windowed_bounds = None
+        self._pause_overlay_pipelines = {}
         self._capture_mouse(True)
         self._last_time = perf_counter()
         self._frame_index = 0
@@ -92,6 +165,12 @@ class FlyThroughApp:
 
     # ------------------------------------------------------------------
 
+    def _ensure_resizable(self):
+        """Keep the GLFW window user-resizable even if backend defaults shift."""
+        import glfw
+
+        glfw.set_window_attrib(self.canvas._window, glfw.RESIZABLE, glfw.TRUE)
+
     def _capture_mouse(self, capture: bool):
         """Game-style pointer capture via glfw (rendercanvas has no
         pointer-lock API; the glfw window handle is the supported way in)."""
@@ -104,8 +183,109 @@ class FlyThroughApp:
                 glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.TRUE)
         else:
             glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_NORMAL)
+            if glfw.raw_mouse_motion_supported():
+                glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.FALSE)
         self._captured = capture
         self._last_pointer = None
+
+    def _paused_title(self, fps: float | None = None) -> str:
+        target = "windowed" if self._fullscreen else "fullscreen"
+        fps_part = "" if fps is None else f"  {fps:5.1f} fps"
+        return (
+            f"cloudyview PAUSED{fps_part}  frame={self._frame_index}  "
+            f"R/click resume  F {target}  ESC/Q quit"
+        )
+
+    def _set_paused(self, paused: bool) -> None:
+        if paused == self._paused:
+            return
+        self._paused = paused
+        self._keys.clear()
+        if paused:
+            self._capture_mouse(False)
+            self.canvas.set_title(self._paused_title())
+        else:
+            self._capture_mouse(True)
+            self._last_time = perf_counter()
+        self.canvas.request_draw()
+
+    def _current_monitor(self):
+        import glfw
+
+        window = self.canvas._window
+        if window is None:
+            raise RuntimeError("Cannot choose a fullscreen monitor: window closed.")
+
+        monitor = glfw.get_window_monitor(window)
+        if monitor is not None:
+            return monitor
+
+        monitors = glfw.get_monitors()
+        if not monitors:
+            raise RuntimeError("Cannot enter fullscreen: GLFW found no monitors.")
+
+        wx, wy = glfw.get_window_pos(window)
+        ww, wh = glfw.get_window_size(window)
+        wcx, wcy = wx + ww * 0.5, wy + wh * 0.5
+
+        best = None
+        best_overlap = -1
+        best_distance = float("inf")
+        for candidate in monitors:
+            mode = glfw.get_video_mode(candidate)
+            if mode is None:
+                continue
+            mx, my = glfw.get_monitor_pos(candidate)
+            mw, mh = int(mode.width), int(mode.height)
+            overlap_w = max(0, min(wx + ww, mx + mw) - max(wx, mx))
+            overlap_h = max(0, min(wy + wh, my + mh) - max(wy, my))
+            overlap = overlap_w * overlap_h
+            mcx, mcy = mx + mw * 0.5, my + mh * 0.5
+            distance = (wcx - mcx) ** 2 + (wcy - mcy) ** 2
+            if overlap > best_overlap or (
+                overlap == best_overlap and distance < best_distance
+            ):
+                best = candidate
+                best_overlap = overlap
+                best_distance = distance
+
+        if best is None:
+            raise RuntimeError("Cannot enter fullscreen: no video mode found.")
+        return best
+
+    def _toggle_fullscreen(self) -> None:
+        import glfw
+
+        window = self.canvas._window
+        if window is None:
+            raise RuntimeError("Cannot toggle fullscreen: window closed.")
+
+        if self._fullscreen:
+            if self._windowed_bounds is None:
+                raise RuntimeError(
+                    "Cannot restore windowed mode: previous bounds missing."
+                )
+            x, y, w, h = self._windowed_bounds
+            glfw.set_window_monitor(window, None, x, y, w, h, 0)
+            self._fullscreen = False
+        else:
+            x, y = glfw.get_window_pos(window)
+            w, h = glfw.get_window_size(window)
+            self._windowed_bounds = (int(x), int(y), int(w), int(h))
+            monitor = self._current_monitor()
+            mode = glfw.get_video_mode(monitor)
+            if mode is None:
+                raise RuntimeError("Cannot enter fullscreen: no video mode found.")
+            glfw.set_window_monitor(
+                window, monitor, 0, 0,
+                int(mode.width), int(mode.height), int(mode.refresh_rate),
+            )
+            self._fullscreen = True
+
+        self.canvas._determine_size()
+        if self._paused:
+            self.canvas.set_title(self._paused_title())
+        self.canvas.request_draw()
 
     def camera(self) -> Camera:
         """Current viewpoint as a cv.Camera (relative-coordinate position)."""
@@ -122,8 +302,17 @@ class FlyThroughApp:
         etype = event["event_type"]
         if etype == "key_down":
             key = event["key"]
-            if key == "Escape":
+            action = _control_action_for_key(self._paused, key)
+            if action == ACTION_PAUSE:
+                self._set_paused(True)
+            elif action == ACTION_RESUME:
+                self._set_paused(False)
+            elif action == ACTION_QUIT:
                 self.canvas.close()
+            elif action == ACTION_TOGGLE_FULLSCREEN:
+                self._toggle_fullscreen()
+            elif self._paused:
+                return
             elif key in ("j", "J"):
                 self.jitter = not self.jitter
             elif key in ("b", "B"):
@@ -137,8 +326,13 @@ class FlyThroughApp:
         elif etype == "key_up":
             key = event["key"]
             self._keys.discard(key.lower() if len(key) == 1 else key)
-        elif etype == "pointer_down" and not self._captured:
-            self._capture_mouse(True)   # click back in to recapture
+        elif etype == "pointer_down":
+            if self._paused:
+                self._set_paused(False)
+            elif not self._captured:
+                self._capture_mouse(True)   # click back in to recapture
+        elif self._paused:
+            return
         elif etype == "pointer_move" and self._captured:
             if self._last_pointer is None:
                 self._last_pointer = (event["x"], event["y"])
@@ -155,19 +349,18 @@ class FlyThroughApp:
                 self.speed * SPEED_WHEEL_FACTOR ** notches, 0.5, 5000.0))
 
     def _move(self, dt: float):
+        if self._paused:
+            return
+
         cam = Camera(azimuth=self.azimuth, elevation=self.elevation,
                      fov=self.fov)
         forward, right, _up = cam.basis()
-        # Horizontal-plane movement (game-style): flatten forward.
-        fwd_h = np.array([forward[0], forward[1], 0.0])
-        n = np.linalg.norm(fwd_h)
-        fwd_h = fwd_h / n if n > 1e-6 else np.array([0.0, 1.0, 0.0])
 
         step = np.zeros(3)
         if "w" in self._keys:
-            step += fwd_h
+            step += forward
         if "s" in self._keys:
-            step -= fwd_h
+            step -= forward
         if "d" in self._keys:
             step += right
         if "a" in self._keys:
@@ -178,12 +371,63 @@ class FlyThroughApp:
             step -= np.array([0.0, 0.0, 1.0])
         if np.any(step):
             self.position = self.position + step * (self.speed * dt)
+        self.position = _clamp_position_above_ocean(self.position)
+
+    def _pause_overlay_pipeline_for(self, target_format: str):
+        import wgpu
+
+        if target_format not in self._pause_overlay_pipelines:
+            shader = self.renderer.device.create_shader_module(
+                label="pause-menu-dim", code=_PAUSE_OVERLAY_SHADER
+            )
+            self._pause_overlay_pipelines[target_format] = (
+                self.renderer.device.create_render_pipeline(
+                    label="pause-menu-dim",
+                    layout="auto",
+                    vertex={"module": shader, "entry_point": "vs_main"},
+                    primitive={"topology": "triangle-list"},
+                    fragment={
+                        "module": shader,
+                        "entry_point": "fs_main",
+                        "targets": [{
+                            "format": target_format,
+                            "blend": {
+                                "color": {
+                                    "src_factor": "src-alpha",
+                                    "dst_factor": "one-minus-src-alpha",
+                                    "operation": "add",
+                                },
+                                "alpha": {
+                                    "src_factor": "one",
+                                    "dst_factor": "one-minus-src-alpha",
+                                    "operation": "add",
+                                },
+                            },
+                        }],
+                    },
+                )
+            )
+        return self._pause_overlay_pipelines[target_format]
+
+    def _encode_pause_overlay(self, command_encoder, target_view) -> None:
+        import wgpu
+
+        rpass = command_encoder.begin_render_pass(color_attachments=[{
+            "view": target_view,
+            "load_op": wgpu.LoadOp.load,
+            "store_op": wgpu.StoreOp.store,
+        }])
+        rpass.set_pipeline(self._pause_overlay_pipeline_for(self.format))
+        rpass.draw(3)
+        rpass.end()
 
     def _draw(self):
         now = perf_counter()
         dt = now - self._last_time
         self._last_time = now
-        self._move(min(dt, 0.1))
+        if not self._paused:
+            self._move(min(dt, 0.1))
+        self.position = _clamp_position_above_ocean(self.position)
 
         w, h = self.canvas.get_physical_size()
         self.renderer.write_uniforms(
@@ -197,7 +441,10 @@ class FlyThroughApp:
         self.renderer.encode_pass(enc, view, self.format)
         if self.bird_enabled:
             bird = self.renderer.bird
-            bird.update(dt, self.position, self.azimuth, self.elevation)
+            bird.update(
+                0.0 if self._paused else dt,
+                self.position, self.azimuth, self.elevation,
+            )
             bird.write_uniforms(
                 self.position, self.camera(), (w, h),
                 sun_azimuth=DEFAULT_SUN_AZIMUTH,
@@ -209,20 +456,25 @@ class FlyThroughApp:
         if self.minimap_enabled:
             self.renderer.hud.write_uniforms(self.camera(), (w, h))
             self.renderer.hud.encode_pass(enc, view, self.format)
+        if self._paused:
+            self._encode_pause_overlay(enc, view)
         self.renderer.device.queue.submit([enc.finish()])
 
         self._fps_acc.append(dt)
         if now - self._fps_last_title > 0.5 and self._fps_acc:
             fps = 1.0 / (sum(self._fps_acc) / len(self._fps_acc))
-            cam = self.camera()
-            self.canvas.set_title(
-                f"cloudyview  {fps:5.1f} fps  "
-                f"pos=({cam.position[0]:+.2f},{cam.position[1]:+.2f},"
-                f"{cam.position[2]:+.2f}) az={cam.azimuth:.0f} "
-                f"el={cam.elevation:.0f} speed={self.speed:.0f}m/s "
-                f"jitter={'on' if self.jitter else 'OFF'} "
-                f"map={'on' if self.minimap_enabled else 'OFF'}"
-            )
+            if self._paused:
+                self.canvas.set_title(self._paused_title(fps))
+            else:
+                cam = self.camera()
+                self.canvas.set_title(
+                    f"cloudyview  {fps:5.1f} fps  "
+                    f"pos=({cam.position[0]:+.2f},{cam.position[1]:+.2f},"
+                    f"{cam.position[2]:+.2f}) az={cam.azimuth:.0f} "
+                    f"el={cam.elevation:.0f} speed={self.speed:.0f}m/s "
+                    f"jitter={'on' if self.jitter else 'OFF'} "
+                    f"map={'on' if self.minimap_enabled else 'OFF'}"
+                )
             self._fps_acc = []
             self._fps_last_title = now
 

@@ -27,13 +27,11 @@ def main(argv=None):
     w, h = (int(v) for v in args.size.lower().split("x"))
 
     from ..cloudfield import load
-    from .app import run_app
+    from .app import CONTROL_SUMMARY, run_app
 
     field = load(args.filepath, ice=args.ice)
     print(f"Loaded {field}")
-    print("Controls: WASD move, Space up, LShift/C down, mouse look "
-          "(Tab releases, click recaptures), scroll speed, "
-          "J jitter toggle, B bird toggle, M minimap toggle, ESC quit")
+    print(CONTROL_SUMMARY)
     run_app(field, size=(w, h),
             extinction_multiplier=args.extinction_multiplier,
             max_fps=args.max_fps)
