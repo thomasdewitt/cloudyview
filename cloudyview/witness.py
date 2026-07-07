@@ -100,6 +100,19 @@ AMBIENT_TINT_G = 0.23
 AMBIENT_TINT_B = 0.28
 AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
 
+# Upward diffuse bounce — stands in for sun/skylight reflected off the
+# surface (and low-level multiply-scattered light between cloud base and
+# surface) that lights cloud undersides. Mirror image of the ambient ramp:
+# full weight at the surface, zero at domain top, so it lifts bases without
+# touching sunlit tops. Tint is slightly warm (reflected sunlight), unlike
+# the cool skylight ambient. Strength 0 disables the term.
+# 0.05 chosen from the 2026-07-07 contact-sheet sweep (conservative pick:
+# luminous base, maximum retained sunlit/shaded contrast; >=0.15 washes out).
+BOUNCE_STRENGTH = 0.05
+BOUNCE_TINT_R = 1.00
+BOUNCE_TINT_G = 0.97
+BOUNCE_TINT_B = 0.92
+
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
 MAX_STEPS = 2048
@@ -748,6 +761,14 @@ def _render_image(
                 col_r += amb_weight * AMBIENT_TINT_R
                 col_g += amb_weight * AMBIENT_TINT_G
                 col_b += amb_weight * AMBIENT_TINT_B
+
+                # Surface bounce: upward diffuse light, strongest at cloud base.
+                if BOUNCE_STRENGTH > 0.0:
+                    bounce = BOUNCE_STRENGTH * (1.0 - height_frac)
+                    bounce_weight = transmittance * d_tau * bounce
+                    col_r += bounce_weight * BOUNCE_TINT_R
+                    col_g += bounce_weight * BOUNCE_TINT_G
+                    col_b += bounce_weight * BOUNCE_TINT_B
 
                 transmittance *= pymath.exp(-d_tau)
                 t += dt
