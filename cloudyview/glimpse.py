@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 """
-glimpse.py: Quick optical depth calculation for cloud fields.
+glimpse.py: Quick two-stream visual albedo overview of a cloud field.
 
-Usage:
-    python glimpse.py <filename.nc> [--output <path>]
+Library usage:
+    import cloudyview as cv
+    field = cv.load("cloud.nc")
+    albedo = cv.glimpse(field)     # (ny, nx) array, east-right / north-up
 
-This script provides a quick glimpse of your cloud data using:
-1. Column optical depth calculation
-2. Top-view visualization (matplotlib)
+CLI usage:
+    glimpse <filename.nc> [--output <path>]
 """
 
 import argparse
@@ -24,6 +25,56 @@ from .cli_utils import (
     add_dataset_selection_arguments,
     dataset_selection_kwargs,
 )
+from .cloudfield import CloudField, load as _load_field
+
+
+# Conservative-scattering two-stream reflectance: A = tau / (tau + 2/(1-g)).
+# Unlike beam opacity 1-exp(-tau) (saturates by tau~4), this keeps contrast
+# between cirrus (tau~1-5) and deep cores (tau~100).
+TWO_STREAM_G = 0.85
+_TWO_STREAM_DENOM = np.float32(2.0 / (1.0 - TWO_STREAM_G))  # 13.3 for g=0.85
+
+
+def _two_stream_albedo(tau: np.ndarray) -> np.ndarray:
+    """Map column optical depth to two-stream visual albedo (float32)."""
+    tau32 = tau.astype(np.float32)
+    return tau32 / (tau32 + _TWO_STREAM_DENOM)
+
+
+def _orient_east_right_north_up(field_2d: np.ndarray,
+                                x_coord: np.ndarray,
+                                y_coord: np.ndarray) -> np.ndarray:
+    """Reorder an (nx, ny) map to (ny, nx) with +x right and +y up.
+
+    Matches the witness/behold map orientation regardless of ascending or
+    descending coordinate order in the source file.
+    """
+    oriented = field_2d
+    if x_coord[1] < x_coord[0]:
+        oriented = oriented[::-1, :]
+    if y_coord[1] < y_coord[0]:
+        oriented = oriented[:, ::-1]
+    return oriented.T  # (ny, nx), for image conventions
+
+
+def glimpse(field: CloudField) -> np.ndarray:
+    """Compute the top-down two-stream visual albedo of a cloud field.
+
+    Parameters
+    ----------
+    field : CloudField
+        Loaded cloud field (see :func:`cloudyview.load`).
+
+    Returns
+    -------
+    ndarray (ny, nx), float32
+        Visual albedo in [0, 1), oriented east-right (+x) and north-up (+y),
+        consistent with the witness/behold map orientation.
+    """
+    tau = optical_depth.vertically_integrated_optical_depth(
+        field.lwc, field.z, iwc=field.iwc
+    )
+    return _orient_east_right_north_up(_two_stream_albedo(tau), field.x, field.y)
 
 
 def _unit_xy(direction_3d: np.ndarray, fallback_angle_rad: float) -> np.ndarray:
@@ -176,7 +227,7 @@ def main(
         base_filename = Path(filename).stem
 
         # Load and validate data
-        data_dict = io.load_and_validate(
+        field = _load_field(
             filename,
             liquid_water_var=liquid_water_var,
             ice_water_var=ice_water_var,
@@ -191,15 +242,11 @@ def main(
             y_dim=y_dim,
             z_dim=z_dim,
         )
-        lw_var = data_dict['liquid_water_var']
-        lw_data = data_dict['liquid_water_data']
-        iw_var = data_dict['ice_water_var']
-        iw_data = data_dict['ice_water_data']
 
-        print(f"✓ Loaded {lw_var} variable (liquid water)")
+        print(f"✓ Loaded {field.liquid_var} variable (liquid water)")
 
-        if iw_data is not None:
-            print(f"✓ Loaded {iw_var} variable (ice water)")
+        if field.iwc is not None:
+            print(f"✓ Loaded {field.ice_var} variable (ice water)")
         else:
             print(f"⚠ No ice water variable found (only liquid water will be used)")
 
@@ -210,45 +257,30 @@ def main(
         else:
             output_dir = Path(".")
 
-        # Get z-coordinates (already standardized by load_and_validate)
-        z_coord = data_dict['z_coord']
-
-        # Convert to numpy
-        lw_np = lw_data.values
-
-        iw_np = None
-        if iw_data is not None:
-            iw_np = iw_data.values
+        # Informational lines the optical-depth library used to print
+        # directly (it logs now; the CLI keeps its output).
+        if field.iwc is None:
+            print("  No ice water content detected; optical depth uses liquid water only.")
+        print("  No snow water content detected; optical depth excludes snow.")
 
         # Calculate column optical depth (2D) from liquid and ice water content
         # Uses empirical relationships: for liquid LWP = 0.6292 * tau * re,
         # for ice IWP = 0.350 * tau * re (consistent with plot_optical_depth.py)
-        od_col = optical_depth.vertically_integrated_optical_depth(lw_np, z_coord, iwc=iw_np)
+        od_col = optical_depth.vertically_integrated_optical_depth(
+            field.lwc, field.z, iwc=field.iwc)
 
-        if iw_np is not None:
+        if field.iwc is not None:
             print(f"✓ Optical depth (liquid + ice) range: {od_col.min():.4f} - {od_col.max():.4f}")
         else:
             print(f"✓ Optical depth (liquid only) range: {od_col.min():.4f} - {od_col.max():.4f}")
 
-        # Convert optical depth to visual albedo via conservative-scattering
-        # two-stream reflectance: A = tau / (tau + 2/(1-g)), g = 0.85.
-        # Unlike beam opacity 1-exp(-tau) (saturates by tau~4), this keeps
-        # contrast between cirrus (tau~1-5) and deep cores (tau~100).
-        two_stream_denom = np.float32(2.0 / (1.0 - 0.85))  # 13.3 for g=0.85
-        tau32 = od_col.astype(np.float32)
-        albedo = tau32 / (tau32 + two_stream_denom)
+        # Two-stream visual albedo, then witness/behold-compatible map
+        # orientation: east-right (+x), north-up (+y). Same code path as
+        # the library glimpse() function.
+        albedo = _two_stream_albedo(od_col)
         print(f"✓ Visual albedo range: {albedo.min():.4f} - {albedo.max():.4f}")
 
-        # Enforce map orientation compatibility with witness/behold:
-        # east-right (+x) and north-up (+y).
-        x_coord = data_dict['x_coord']
-        y_coord = data_dict['y_coord']
-        albedo_oriented = albedo
-        if x_coord[1] < x_coord[0]:
-            albedo_oriented = albedo_oriented[::-1, :]
-        if y_coord[1] < y_coord[0]:
-            albedo_oriented = albedo_oriented[:, ::-1]
-        albedo_oriented = albedo_oriented.T  # plot expects [y, x]
+        albedo_oriented = _orient_east_right_north_up(albedo, field.x, field.y)
 
         camera_overlay = None
         if label:
