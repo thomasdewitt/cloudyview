@@ -50,6 +50,57 @@ def renderer():
     return InteractiveRenderer(field)
 
 
+def _luma01(img):
+    return img.astype(np.float32).mean(axis=-1) / 255.0
+
+
+def _cloud_edge_score(luma):
+    return _horizontal_gradient(luma) + _vertical_gradient(luma)
+
+
+def _horizontal_gradient(luma):
+    gradient = np.zeros_like(luma)
+    gradient[:, 1:] = np.abs(np.diff(luma, axis=1))
+    return gradient
+
+
+def _vertical_gradient(luma):
+    gradient = np.zeros_like(luma)
+    gradient[1:, :] = np.abs(np.diff(luma, axis=0))
+    return gradient
+
+
+def _above_horizon_mask(camera, size):
+    w, h = size
+    forward, right, up = camera.basis()
+    tan_half_fov = np.tan(np.deg2rad(camera.fov) * 0.5)
+    aspect = w / h
+    yy, xx = np.mgrid[0:h, 0:w]
+    ndc_x = (2.0 * (xx + 0.5) / w - 1.0) * aspect * tan_half_fov
+    ndc_y = (1.0 - 2.0 * (yy + 0.5) / h) * tan_half_fov
+    dirs = (
+        forward
+        + ndc_x[..., None] * right
+        + ndc_y[..., None] * up
+    )
+    dirs = dirs / np.linalg.norm(dirs, axis=-1, keepdims=True)
+    return dirs[..., 2] > 0.0
+
+
+def _cloud_edge_mask(reference, camera):
+    luma = _luma01(reference)
+    edge_score = _cloud_edge_score(luma)
+    size = (reference.shape[1], reference.shape[0])
+    above_horizon = _above_horizon_mask(camera, size)
+    return above_horizon & (
+        edge_score > np.percentile(edge_score[above_horizon], 90.0)
+    )
+
+
+def _cloud_edge_hf(img, edge):
+    return float(_horizontal_gradient(_luma01(img))[edge].mean())
+
+
 def test_offscreen_render_structure(renderer):
     """Default view: finite, non-uniform, sky above / cloud+haze structure."""
     import cloudyview as cv
@@ -103,7 +154,69 @@ def test_jitter_toggle(renderer):
         g = img.astype(float).mean(axis=-1)
         return np.abs(np.diff(g, axis=1)).mean()
 
-    assert hf(on) > hf(off)
+    # Ocean normal LOD deliberately calms high-frequency water in the jittered
+    # interactive path, so test the cloud/sky portion where ray-start jitter
+    # is the mechanism under test.
+    top = slice(0, int(on.shape[0] * 0.75))
+    assert hf(on[top]) > hf(off[top])
+
+
+def test_temporal_accumulation_anti_aliases_cloud_edges(renderer):
+    """Static accumulation should smooth pixel-footprint cloud-edge aliasing."""
+    import cloudyview as cv
+
+    size = (640, 360)
+    cam = cv.Camera()
+    renderer.reset_accumulation()
+    off = renderer.render(cam, size=size, jitter=False, frame_index=0)
+    renderer.reset_accumulation()
+    single = renderer.render(
+        cam, size=size, jitter=True, frame_index=0, accumulate_frames=1
+    )
+    renderer.reset_accumulation()
+    accum = renderer.render(
+        cam, size=size, jitter=True, frame_index=0, accumulate_frames=32
+    )
+
+    # Focus on strong above-horizon luma gradients: the visual complaint is
+    # salt-and-pepper cloud-edge noise, not smooth sky.
+    edge = _cloud_edge_mask(off, cam)
+    assert edge.sum() > 1000
+
+    single_delta = np.abs(single.astype(np.int16) - off.astype(np.int16))[edge]
+    accum_delta = np.abs(accum.astype(np.int16) - off.astype(np.int16))[edge]
+    assert np.percentile(accum_delta, 95) < np.percentile(single_delta, 95)
+
+    off_hf = _cloud_edge_hf(off, edge)
+    single_hf = _cloud_edge_hf(single, edge)
+    accum_hf = _cloud_edge_hf(accum, edge)
+    assert accum_hf < off_hf
+    assert accum_hf < single_hf
+
+
+def test_temporal_accumulation_resets_on_camera_change(renderer):
+    """A single moved render must not blend with the previous static view."""
+    import cloudyview as cv
+
+    size = (320, 180)
+    static_cam = cv.Camera()
+    moved_cam = cv.Camera(azimuth=25.0)
+
+    renderer.reset_accumulation()
+    static = renderer.render(
+        static_cam, size=size, jitter=True, frame_index=0, accumulate_frames=16
+    )
+    moved = renderer.render(
+        moved_cam, size=size, jitter=True, frame_index=100, accumulate_frames=1
+    )
+    assert renderer._accum_count == 0
+
+    renderer.reset_accumulation()
+    fresh_moved = renderer.render(
+        moved_cam, size=size, jitter=True, frame_index=100, accumulate_frames=1
+    )
+    assert np.array_equal(moved, fresh_moved)
+    assert np.mean(np.abs(moved.astype(np.int16) - static.astype(np.int16))) > 2.0
 
 
 def test_volume_upload_once(renderer):
