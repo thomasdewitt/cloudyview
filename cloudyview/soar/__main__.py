@@ -30,7 +30,7 @@ def main(argv=None):
     field = load(args.filepath, ice=args.ice)
     print(f"Loaded {field}")
     print("Controls: WASD move, Space/C up/down, left-drag look, "
-          "scroll speed, J jitter toggle, ESC quit")
+          "scroll speed, J jitter toggle, B bird toggle, ESC quit")
     run_app(field, size=(w, h),
             extinction_multiplier=args.extinction_multiplier)
 

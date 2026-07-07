@@ -206,6 +206,19 @@ class InteractiveRenderer:
         # Offscreen target cache: (w, h) -> texture.
         self._offscreen = None
 
+        # The flying subject (bird.py), created on first use. Offscreen
+        # rendering opts in with render(..., bird=True); the windowed app
+        # drives it every frame.
+        self._bird = None
+
+    @property
+    def bird(self):
+        """The :class:`~cloudyview.soar.bird.Bird` for this renderer (lazy)."""
+        if self._bird is None:
+            from .bird import Bird
+            self._bird = Bird(self)
+        return self._bird
+
     # ------------------------------------------------------------------
     # Pipeline / uniforms
     # ------------------------------------------------------------------
@@ -294,8 +307,19 @@ class InteractiveRenderer:
         return self._offscreen
 
     def render(self, camera: Optional[Camera] = None,
-               size: Tuple[int, int] = (960, 540), **kwargs) -> np.ndarray:
+               size: Tuple[int, int] = (960, 540), *,
+               bird: bool = False, bird_time: float = 0.0,
+               bird_pose: Optional[dict] = None, **kwargs) -> np.ndarray:
         """Render one frame offscreen and read it back.
+
+        Parameters
+        ----------
+        bird : bool
+            Draw the flying subject (default off: existing renders, tests
+            and benchmarks are bird-free). Offscreen the bird cruises in a
+            deterministic pose; `bird_time` (s) sets the wingbeat phase and
+            `bird_pose` may override {"bank", "pitch"} (deg) and
+            {"flap_phase"} (rad) — see :meth:`bird.Bird.set_static`.
 
         Returns
         -------
@@ -308,6 +332,21 @@ class InteractiveRenderer:
         self.write_uniforms(camera, size, **kwargs)
         enc = self.device.create_command_encoder()
         self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT)
+        if bird:
+            origin = camera_world_origin(camera, self.bmin, self.bmax)
+            self.bird.set_static(origin, camera, bird_time,
+                                 **(bird_pose or {}))
+            self.bird.write_uniforms(
+                origin, camera, size,
+                sun_azimuth=kwargs.get("sun_azimuth", DEFAULT_SUN_AZIMUTH),
+                sun_elevation=kwargs.get("sun_elevation",
+                                         DEFAULT_SUN_ELEVATION),
+                exposure=kwargs.get("exposure", DEFAULT_EXPOSURE),
+                ambient_strength=kwargs.get("ambient_strength",
+                                            DEFAULT_AMBIENT_STRENGTH),
+            )
+            self.bird.encode_pass(enc, target["view"],
+                                  self._OFFSCREEN_FORMAT, size)
         self.device.queue.submit([enc.finish()])
         data = self.device.queue.read_texture(
             {"texture": target["texture"]},
@@ -324,13 +363,16 @@ class InteractiveRenderer:
     def benchmark(self, camera: Optional[Camera] = None,
                   size: Tuple[int, int] = (960, 540), *,
                   n_warmup: int = 5, n_frames: int = 30,
-                  azimuth_step: float = 0.4, **kwargs) -> dict:
+                  azimuth_step: float = 0.4, bird: bool = False,
+                  **kwargs) -> dict:
         """Steady-state per-frame timing.
 
         The camera azimuth is nudged `azimuth_step` deg/frame (same protocol
         as temp/benchmarks-2026-07-07) so no frame is trivially cached.
         GPU time comes from timestamp queries when the device has
         'timestamp-query'; wall time is measured around submit+sync always.
+        With `bird=True` the subject pass is encoded too (flapping, phase
+        advancing per frame) and the GPU interval spans both passes.
 
         Returns a dict with per-frame arrays and summary stats (ms).
         """
@@ -351,13 +393,41 @@ class InteractiveRenderer:
                          azimuth=camera.azimuth + azimuth_step * i,
                          elevation=camera.elevation, fov=camera.fov)
             self.write_uniforms(cam, size, frame_index=i, **kwargs)
+            if bird:
+                origin = camera_world_origin(cam, self.bmin, self.bmax)
+                self.bird.set_static(origin, cam, t=i / 60.0)
+                self.bird.write_uniforms(
+                    origin, cam, size,
+                    sun_azimuth=kwargs.get("sun_azimuth",
+                                           DEFAULT_SUN_AZIMUTH),
+                    sun_elevation=kwargs.get("sun_elevation",
+                                             DEFAULT_SUN_ELEVATION),
+                    exposure=kwargs.get("exposure", DEFAULT_EXPOSURE),
+                    ambient_strength=kwargs.get("ambient_strength",
+                                                DEFAULT_AMBIENT_STRENGTH),
+                )
             enc = self.device.create_command_encoder()
             ts = None
             if timed and has_ts:
                 ts = {"query_set": query_set,
                       "beginning_of_pass_write_index": 0,
                       "end_of_pass_write_index": 1}
-            self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT, ts)
+            if bird:
+                # Timestamp interval spans volume + bird passes: begin on
+                # the volume pass, end on the bird pass.
+                ts_begin, ts_end = None, None
+                if ts is not None:
+                    ts_begin = {"query_set": query_set,
+                                "beginning_of_pass_write_index": 0}
+                    ts_end = {"query_set": query_set,
+                              "end_of_pass_write_index": 1}
+                self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT,
+                                 ts_begin)
+                self.bird.encode_pass(enc, target["view"],
+                                      self._OFFSCREEN_FORMAT, size, ts_end)
+            else:
+                self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT,
+                                 ts)
             if timed and has_ts:
                 enc.resolve_query_set(query_set, 0, 2, resolve_buf, 0)
             t0 = perf_counter()
