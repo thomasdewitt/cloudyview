@@ -1,10 +1,10 @@
 // CloudyView interactive volume raymarcher (WGSL).
 //
-// Stage 3 scope (2026-07): ray-box entry, hardware-trilinear sampling of a
+// Stage 4 scope (2026-07): ray-box entry, hardware-trilinear sampling of a
 // resident r32float 3D extinction texture, witness procedural sky, per-pixel
 // jittered ray starts, and the single-domain witness cloud-scattering model
 // (adaptive view/light marches, dt-invariant powder, MS octaves, ambient ramp,
-// surface bounce, and the witness FIF ocean). Nested levels are still staged follow-ups,
+// surface bounce, ghost-zero boundary taper, and the witness FIF ocean). Nested levels are still staged follow-ups,
 // ported function by function against the numba golden reference
 // (docs/architecture.md).
 //
@@ -98,16 +98,29 @@ fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(t_near, t_far);
 }
 
+fn sigma_data_dims_xyz() -> vec3<f32> {
+    let tex_dims = vec3<f32>(textureDimensions(vol, 0));
+    return vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x) - vec3<f32>(2.0);
+}
+
 // Extinction (m^-1) at world point p via hardware trilinear filtering.
-// Coordinate swizzle: texture is (w=nz, h=ny, d=nx), see file header.
-// Clamp-to-edge sampling extends boundary values across the outer half
-// voxel; the CPU reference instead tapers to zero through a ghost layer
-// (witness._sample_sigma_level). TODO(ghost-zero): match the taper, either
-// with a 1-voxel zero border baked at upload or explicit edge handling here.
+// Coordinate swizzle: texture is (w=nz+2, h=ny+2, d=nx+2), see file header.
+// The host uploads original data into padded texels [1..N]. Witness uses
+// gx=(p-bmin)/dx with data value i at gx=i and ghost zeros at -1 and N.
+// Therefore padded_texel = gx+1 and normalized coord = (gx+1.5)/(N+2),
+// preserving every pre-padding world/data sample while hardware filtering
+// supplies the linear taper against the zero border. The march interval stays
+// on the original outer AABB, matching witness._active_level's containment
+// test before it calls _sample_sigma_level.
 fn sample_sigma(p: vec3<f32>) -> f32 {
-    let g = (p - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz);
-    let dims = vec3<f32>(textureDimensions(vol, 0));
-    let tex_coord = vec3<f32>(g.z, g.y, g.x) + 0.5 / dims;
+    let tex_dims = vec3<f32>(textureDimensions(vol, 0));
+    let data_g = ((p - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz))
+                 * sigma_data_dims_xyz();
+    let tex_coord = vec3<f32>(
+        data_g.z + 1.5,
+        data_g.y + 1.5,
+        data_g.x + 1.5
+    ) / tex_dims;
     return textureSampleLevel(vol, vol_samp, tex_coord, 0.0).r;
 }
 

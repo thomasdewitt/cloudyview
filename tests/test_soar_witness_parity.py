@@ -1,9 +1,10 @@
 """Witness-vs-soar parity harness for staged renderer ports.
 
-Stage 3 covers the analytic sky, tone map, single-domain cloud scattering,
-and the FIF ocean. The harness generates one seeded FIF normal realization and
-passes those exact arrays into both witness.render_nested() and Soar so ocean
-pixels are deterministic at parity-test scale.
+Stage 4 covers the analytic sky, tone map, single-domain cloud scattering,
+the ghost-zero boundary taper, and the FIF ocean. The harness generates one
+seeded FIF normal realization and passes those exact arrays into both
+witness.render_nested() and Soar so ocean pixels are deterministic at
+parity-test scale.
 """
 
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ if not _adapter_ok():  # pragma: no cover
                 allow_module_level=True)
 
 
-ARTIFACT_DIR = Path(__file__).parent.parent / "parity_out" / "stage3"
+ARTIFACT_DIR = Path(__file__).parent.parent / "parity_out" / "stage4"
 DATA128 = Path(__file__).parent.parent / "data" / "TWPICE_subvolume_128x128_5km.nc"
 SKY_SIZE = (96, 64)
 CLOUD_SIZE = (96, 64)
@@ -107,8 +108,8 @@ def gaussian_cloud_field(n: int = 40):
     xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
 
     # Peak LWC is intentionally modest: visible optical depth without saturating
-    # the image, and the Gaussian is >5 sigma from the side walls so the known
-    # witness ghost-zero vs soar clamp-to-edge boundary divergence is avoided.
+    # the image, and the Gaussian is >5 sigma from the side walls so the
+    # boundary taper stays out of this focused scattering case.
     lwc = 0.020 * np.exp(
         -0.5 * (
             (xx / 650.0) ** 2
@@ -211,7 +212,7 @@ def _sample_sigma_ghost_zero(
     voxel: np.ndarray,
     p: np.ndarray,
 ) -> float:
-    """Python mirror of witness._sample_sigma_level for test masking only."""
+    """Python mirror of witness._sample_sigma_level for shadow classification."""
     shape = np.array(sigma.shape)
     g = (p - bmin) / voxel
     if np.any(g < -1.0) or np.any(g >= shape):
@@ -239,58 +240,6 @@ def _sample_sigma_ghost_zero(
     return value
 
 
-def boundary_truncation_mask(
-    field,
-    camera,
-    size: tuple[int, int],
-    base_mask: np.ndarray,
-    *,
-    margin_voxels: float = 2.0,
-) -> np.ndarray:
-    """Mask rays whose cloud contribution comes from a domain boundary.
-
-    Witness tapers sigma to a ghost-zero layer outside every face, while the
-    Soar shader intentionally keeps the resident texture's clamp-to-edge
-    behavior until the stage-4 boundary port. Excluding non-empty samples within
-    two voxels of a face keeps the test focused on the scattering model.
-    """
-    from cloudyview import optical_depth
-    from cloudyview.soar.engine import (
-        STEP_VOXEL_FACTOR,
-        _volume_aabb,
-        camera_world_origin,
-    )
-
-    bmin, bmax = _volume_aabb(field)
-    origin = camera_world_origin(camera, bmin, bmax)
-    shape = np.array(field.shape)
-    voxel = (bmax - bmin) / shape
-    dt_max = float(voxel.min()) * STEP_VOXEL_FACTOR
-    margin = margin_voxels / shape.astype(np.float64)
-    sigma = optical_depth.compute_extinction_field(
-        field.lwc, field.z, iwc=field.iwc
-    ).astype(np.float64)
-    dirs = ray_directions(camera, size)
-
-    out = np.zeros(base_mask.shape, dtype=bool)
-    for y, x in zip(*np.nonzero(base_mask)):
-        direction = dirs[y, x]
-        t, t_far = _ray_box_np(origin, direction, bmin, bmax)
-        while t < t_far:
-            p = origin + t * direction
-            s = _sample_sigma_ghost_zero(sigma, bmin, voxel, p)
-            dt = min(dt_max, 0.5 / s) if s > 0.01 else dt_max
-            if t + dt > t_far:
-                dt = t_far - t
-            if s * dt >= 1e-5:
-                frac = (p - bmin) / (bmax - bmin)
-                if np.any(frac < margin) or np.any(frac > 1.0 - margin):
-                    out[y, x] = True
-                    break
-            t += dt
-    return out
-
-
 def ocean_hit_mask(field, camera, size: tuple[int, int]) -> np.ndarray:
     """Pixels whose primary ray reaches the witness ocean extent."""
     from cloudyview.soar.engine import _volume_aabb, camera_world_origin
@@ -312,7 +261,7 @@ def ocean_hit_mask(field, camera, size: tuple[int, int]) -> np.ndarray:
     return mask
 
 
-def ocean_shadow_and_boundary_masks(
+def ocean_shadow_mask(
     field,
     camera,
     size: tuple[int, int],
@@ -321,9 +270,8 @@ def ocean_shadow_and_boundary_masks(
     sun_azimuth: float,
     sun_elevation: float,
     shadow_tau_threshold: float = 0.02,
-    margin_voxels: float = 2.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ocean pixels with cloud shadow and those hitting boundary clouds."""
+) -> np.ndarray:
+    """Return ocean pixels whose sun ray intersects visible cloud density."""
     from cloudyview import optical_depth
     from cloudyview.angles import direction_from_azimuth_elevation
     from cloudyview.soar.engine import (
@@ -339,13 +287,11 @@ def ocean_shadow_and_boundary_masks(
     shape = np.array(field.shape)
     voxel = (bmax - bmin) / shape
     dt_max = float(voxel.min()) * STEP_VOXEL_FACTOR
-    margin = margin_voxels / shape.astype(np.float64)
     sigma = optical_depth.compute_extinction_field(
         field.lwc, field.z, iwc=field.iwc
     ).astype(np.float64)
 
     shadow = np.zeros(base_mask.shape, dtype=bool)
-    boundary = np.zeros(base_mask.shape, dtype=bool)
     for y, x in zip(*np.nonzero(base_mask)):
         direction = dirs[y, x]
         if direction[2] >= -1e-8:
@@ -366,16 +312,12 @@ def ocean_shadow_and_boundary_masks(
                 dt = t_far - t
             d_tau = s * dt
             tau += d_tau
-            if d_tau >= 1e-5:
-                frac = (p - bmin) / (bmax - bmin)
-                if np.any(frac < margin) or np.any(frac > 1.0 - margin):
-                    boundary[y, x] = True
             if tau > shadow_tau_threshold:
                 shadow[y, x] = True
             if tau > 80.0:
                 break
             t += dt
-    return shadow, boundary
+    return shadow
 
 
 def render_witness_with_fif(
@@ -797,26 +739,17 @@ def test_soar_matches_witness_twpice128_default_cloud_scattering(
             threshold=3.0 / 255.0,
         )
         assert mask.sum() > 100
-        raw_stats = diff_statistics(pair.witness, pair.soar, mask)
-        boundary_mask = boundary_truncation_mask(
-            twpice128_field, case.camera, CLOUD_SIZE, mask
-        )
-        masked = mask & ~boundary_mask
-        assert masked.sum() > 100
-        stats = diff_statistics(pair.witness, pair.soar, masked)
+        stats = diff_statistics(pair.witness, pair.soar, mask)
         stats_by_case[case.name] = {
-            "cloud_pixels_raw": raw_stats.as_dict(),
-            "cloud_pixels_excluding_boundary_truncation": stats.as_dict(),
-            "boundary_truncated_pixels": int(boundary_mask.sum()),
+            "cloud_pixels_raw": stats.as_dict(),
         }
         _write_artifact(case, pair)
 
         # TWPICE is turbulent and the 128 subvolume has some nonzero lateral
-        # and top-edge voxels. We report raw cloud-pixel stats, then assert on
-        # pixels not marked as boundary-truncated because that ghost-zero vs
-        # clamp-to-edge behavior is explicitly deferred to stage 4. Away from
-        # that known divergence, the real-data case should remain close to the
-        # smooth Gaussian: a few /255 mean, with a modest fp32/tone-map tail.
+        # and top-edge voxels. Stage 4 makes those boundary-truncated cloud
+        # pixels part of the asserted raw set: the only remaining tolerated
+        # tails are fp32/hardware-filtered texture interpolation, CPU fp64,
+        # and rgba8 readback.
         assert stats.mean_abs <= 2.0 / 255.0
         assert stats.p99_abs <= 8.0 / 255.0
         assert stats.max_abs <= 16.0 / 255.0
@@ -846,7 +779,7 @@ def test_soar_matches_witness_twpice128_ocean_and_shadow(
         )
         ocean = ocean_hit_mask(twpice128_field, case.camera, CLOUD_SIZE)
         assert ocean.sum() > 100
-        shadow, shadow_boundary = ocean_shadow_and_boundary_masks(
+        shadow = ocean_shadow_mask(
             twpice128_field,
             case.camera,
             CLOUD_SIZE,
@@ -854,7 +787,7 @@ def test_soar_matches_witness_twpice128_ocean_and_shadow(
             sun_azimuth=case.sun_azimuth,
             sun_elevation=case.sun_elevation,
         )
-        mask = ocean & ~shadow_boundary
+        mask = ocean
         assert mask.sum() > 100
         shadow_mask = shadow & mask
         if "mixed_cloud_ocean_shadow" in case.name:
@@ -863,10 +796,9 @@ def test_soar_matches_witness_twpice128_ocean_and_shadow(
         stats = diff_statistics(pair.witness, pair.soar, mask)
         glint_mask = mask & (pair.witness.max(axis=-1) > 0.55)
         case_stats = {
-            "ocean_pixels_excluding_boundary_truncation": stats.as_dict(),
+            "ocean_pixels_raw": stats.as_dict(),
             "ocean_pixels": int(ocean.sum()),
             "shadow_pixels": int(shadow_mask.sum()),
-            "shadow_boundary_pixels": int(shadow_boundary.sum()),
             "glint_pixels": int(glint_mask.sum()),
         }
         if shadow_mask.any():

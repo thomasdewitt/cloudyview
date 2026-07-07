@@ -164,31 +164,42 @@ class InteractiveRenderer:
             sigma = sigma * np.float32(extinction_multiplier)
         sigma = np.ascontiguousarray(sigma, dtype=np.float32)
 
+        # Bake witness's ghost-zero boundary into the resident texture. The
+        # public AABB remains the unpadded level extent, where witness samples
+        # with gx = (p - bmin) / dx and dx = (bmax - bmin) / N. Padding shifts
+        # original voxel i to padded texel i+1; the shader maps
+        #     texel = gx + 1, texcoord = (texel + 0.5) / (N + 2),
+        # so p=bmin+i*dx still lands exactly on original sigma[i], while
+        # gx in [-1,0) and [N-1,N) filters against the zero ghost texels.
+        sigma_padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float32)
+        sigma_padded[1:-1, 1:-1, 1:-1] = sigma
+
         # Zero-reshuffle upload: a C-order (nx, ny, nz) array already has z
         # fastest, so it maps directly onto a texture with width=nz,
         # height=ny, depth=nx. The shader swizzles sample coords to match.
         # TODO(fp16): optional float16 texture to halve resident memory.
         max_dim = self.device.limits["max-texture-dimension-3d"]
-        if max(nx, ny, nz) > max_dim:
+        if max(sigma_padded.shape) > max_dim:
             raise ValueError(
-                f"Volume {nx}x{ny}x{nz} exceeds the device's 3D texture "
+                f"Padded volume {nx + 2}x{ny + 2}x{nz + 2} exceeds the "
+                f"device's 3D texture "
                 f"limit ({max_dim}); bricking/LOD is out of scope for the "
                 "spike (docs/architecture.md)."
             )
         self._texture = self.device.create_texture(
             label="cloud-sigma",
-            size=(nz, ny, nx),
+            size=(nz + 2, ny + 2, nx + 2),
             format=wgpu.TextureFormat.r32float,
             dimension="3d",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
         )
         self.device.queue.write_texture(
             {"texture": self._texture},
-            sigma,
-            {"bytes_per_row": nz * 4, "rows_per_image": ny},
-            (nz, ny, nx),
+            sigma_padded,
+            {"bytes_per_row": (nz + 2) * 4, "rows_per_image": ny + 2},
+            (nz + 2, ny + 2, nx + 2),
         )
-        self.volume_nbytes = sigma.nbytes
+        self.volume_nbytes = sigma_padded.nbytes
 
         if fif_normals is None:
             fif_normals = _default_fif_normals()
