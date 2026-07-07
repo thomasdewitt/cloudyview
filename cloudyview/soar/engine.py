@@ -311,10 +311,21 @@ class InteractiveRenderer:
         # Offscreen target cache: (w, h) -> texture.
         self._offscreen = None
 
+        # The HUD minimap: static glimpse albedo texture + tiny per-frame
+        # camera/FOV uniform. Created with the renderer so the map is loaded
+        # once alongside the resident volume.
+        from .hud import MinimapHUD
+        self._hud = MinimapHUD(self)
+
         # The flying subject (bird.py), created on first use. Offscreen
         # rendering opts in with render(..., bird=True); the windowed app
         # drives it every frame.
         self._bird = None
+
+    @property
+    def hud(self):
+        """The :class:`~cloudyview.soar.hud.MinimapHUD` for this renderer."""
+        return self._hud
 
     @property
     def bird(self):
@@ -421,7 +432,8 @@ class InteractiveRenderer:
     def render(self, camera: Optional[Camera] = None,
                size: Tuple[int, int] = (960, 540), *,
                bird: bool = False, bird_time: float = 0.0,
-               bird_pose: Optional[dict] = None, **kwargs) -> np.ndarray:
+               bird_pose: Optional[dict] = None, hud: bool = False,
+               **kwargs) -> np.ndarray:
         """Render one frame offscreen and read it back.
 
         Parameters
@@ -432,6 +444,9 @@ class InteractiveRenderer:
             deterministic pose; `bird_time` (s) sets the wingbeat phase and
             `bird_pose` may override {"bank", "pitch"} (deg) and
             {"flap_phase"} (rad) — see :meth:`bird.Bird.set_static`.
+        hud : bool
+            Draw the minimap overlay (default off so parity renders and
+            benchmarks remain HUD-free unless explicitly requested).
 
         Returns
         -------
@@ -459,6 +474,9 @@ class InteractiveRenderer:
             )
             self.bird.encode_pass(enc, target["view"],
                                   self._OFFSCREEN_FORMAT, size)
+        if hud:
+            self.hud.write_uniforms(camera, size)
+            self.hud.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT)
         self.device.queue.submit([enc.finish()])
         data = self.device.queue.read_texture(
             {"texture": target["texture"]},
@@ -476,6 +494,7 @@ class InteractiveRenderer:
                   size: Tuple[int, int] = (960, 540), *,
                   n_warmup: int = 5, n_frames: int = 30,
                   azimuth_step: float = 0.4, bird: bool = False,
+                  hud: bool = False,
                   **kwargs) -> dict:
         """Steady-state per-frame timing.
 
@@ -483,8 +502,8 @@ class InteractiveRenderer:
         as temp/benchmarks-2026-07-07) so no frame is trivially cached.
         GPU time comes from timestamp queries when the device has
         'timestamp-query'; wall time is measured around submit+sync always.
-        With `bird=True` the subject pass is encoded too (flapping, phase
-        advancing per frame) and the GPU interval spans both passes.
+        With `bird=True` and/or `hud=True`, the extra overlay pass(es) are
+        encoded too and the GPU interval spans the full frame.
 
         Returns a dict with per-frame arrays and summary stats (ms).
         """
@@ -518,15 +537,17 @@ class InteractiveRenderer:
                     ambient_strength=kwargs.get("ambient_strength",
                                                 DEFAULT_AMBIENT_STRENGTH),
                 )
+            if hud:
+                self.hud.write_uniforms(cam, size)
             enc = self.device.create_command_encoder()
             ts = None
             if timed and has_ts:
                 ts = {"query_set": query_set,
                       "beginning_of_pass_write_index": 0,
                       "end_of_pass_write_index": 1}
-            if bird:
-                # Timestamp interval spans volume + bird passes: begin on
-                # the volume pass, end on the bird pass.
+            if bird or hud:
+                # Timestamp interval spans volume + overlays: begin on the
+                # volume pass, end on the last overlay pass.
                 ts_begin, ts_end = None, None
                 if ts is not None:
                     ts_begin = {"query_set": query_set,
@@ -535,8 +556,13 @@ class InteractiveRenderer:
                               "end_of_pass_write_index": 1}
                 self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT,
                                  ts_begin)
-                self.bird.encode_pass(enc, target["view"],
-                                      self._OFFSCREEN_FORMAT, size, ts_end)
+                if bird:
+                    self.bird.encode_pass(enc, target["view"],
+                                          self._OFFSCREEN_FORMAT, size,
+                                          ts_end if not hud else None)
+                if hud:
+                    self.hud.encode_pass(enc, target["view"],
+                                         self._OFFSCREEN_FORMAT, ts_end)
             else:
                 self.encode_pass(enc, target["view"], self._OFFSCREEN_FORMAT,
                                  ts)

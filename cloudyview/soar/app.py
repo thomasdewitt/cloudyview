@@ -9,6 +9,7 @@ Controls:
     scroll      movement speed (exponential)
     J           toggle jittered ray starts (A/B the banding fix)
     B           toggle the bird (the flying subject leading the camera)
+    M           toggle the minimap
     ESC         quit
 
 The window title shows a running fps readout and the current camera state
@@ -73,6 +74,7 @@ class FlyThroughApp:
         self.speed = DEFAULT_SPEED
         self.jitter = True
         self.bird_enabled = True
+        self.minimap_enabled = True
         self._keys = set()
         self._last_pointer = None   # None -> ignore next move (capture jump guard)
         self._captured = False
@@ -126,6 +128,8 @@ class FlyThroughApp:
                 self.jitter = not self.jitter
             elif key in ("b", "B"):
                 self.bird_enabled = not self.bird_enabled
+            elif key in ("m", "M"):
+                self.minimap_enabled = not self.minimap_enabled
             elif key == "Tab":
                 self._capture_mouse(not self._captured)
             else:
@@ -202,6 +206,9 @@ class FlyThroughApp:
                 ambient_strength=DEFAULT_AMBIENT_STRENGTH,
             )
             bird.encode_pass(enc, view, self.format, (w, h))
+        if self.minimap_enabled:
+            self.renderer.hud.write_uniforms(self.camera(), (w, h))
+            self.renderer.hud.encode_pass(enc, view, self.format)
         self.renderer.device.queue.submit([enc.finish()])
 
         self._fps_acc.append(dt)
@@ -213,7 +220,8 @@ class FlyThroughApp:
                 f"pos=({cam.position[0]:+.2f},{cam.position[1]:+.2f},"
                 f"{cam.position[2]:+.2f}) az={cam.azimuth:.0f} "
                 f"el={cam.elevation:.0f} speed={self.speed:.0f}m/s "
-                f"jitter={'on' if self.jitter else 'OFF'}"
+                f"jitter={'on' if self.jitter else 'OFF'} "
+                f"map={'on' if self.minimap_enabled else 'OFF'}"
             )
             self._fps_acc = []
             self._fps_last_title = now

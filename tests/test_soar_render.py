@@ -12,6 +12,8 @@ import pytest
 
 DATA_FILE = Path(__file__).parent.parent / "data" / "TWPICE_subvolume_256x256_5km.nc"
 
+pytestmark = pytest.mark.gpu
+
 wgpu = pytest.importorskip("wgpu", reason="requires the 'interactive' extra")
 
 
@@ -26,6 +28,8 @@ def _adapter_ok():
 if not _adapter_ok():  # pragma: no cover
     pytest.skip("no wgpu adapter with float32-filterable available",
                 allow_module_level=True)
+
+HUD_SIZE = (480, 270)  # (w, h)
 
 
 def test_shader_offsets_world_samples_to_padded_texel_centers():
@@ -104,6 +108,71 @@ def test_jitter_toggle(renderer):
         return np.abs(np.diff(g, axis=1)).mean()
 
     assert hf(on) > hf(off)
+
+
+def test_hud_off_by_default_offscreen(renderer):
+    """render() and render(hud=False) are the same HUD-free image."""
+    import cloudyview as cv
+
+    cam = cv.Camera()
+    a = renderer.render(cam, HUD_SIZE)
+    b = renderer.render(cam, HUD_SIZE, hud=False)
+    assert np.array_equal(a, b)
+
+
+def test_hud_differs_only_in_expected_corner_region(renderer):
+    """hud=True changes only the top-right minimap rectangle."""
+    import cloudyview as cv
+
+    cam = cv.Camera()
+    off = renderer.render(cam, HUD_SIZE, jitter=False).astype(int)
+    on = renderer.render(cam, HUD_SIZE, jitter=False, hud=True).astype(int)
+
+    diff = np.abs(on - off).sum(axis=-1)
+    changed = diff > 4
+    n = int(changed.sum())
+    assert n > 500, "HUD invisible: too few pixels changed"
+
+    x, y, w, h = renderer.hud.rect_for_size(HUD_SIZE)
+    x0 = max(0, int(np.floor(x)) - 2)
+    y0 = max(0, int(np.floor(y)) - 2)
+    x1 = min(HUD_SIZE[0], int(np.ceil(x + w)) + 2)
+    y1 = min(HUD_SIZE[1], int(np.ceil(y + h)) + 2)
+
+    expected = np.zeros(changed.shape, dtype=bool)
+    expected[y0:y1, x0:x1] = True
+    assert not changed[~expected].any(), "HUD changed pixels outside corner"
+
+    rect_area = max(1, (x1 - x0) * (y1 - y0))
+    assert n > 0.25 * rect_area, "HUD changed too little of its rectangle"
+
+
+def test_hud_marker_position_tracks_camera_position(renderer):
+    """The per-frame HUD marker uniform follows relative camera x/y."""
+    import cloudyview as cv
+
+    center = cv.Camera(position=(0.0, 0.0, -0.95), azimuth=0.0,
+                       elevation=0.0, fov=80.0)
+    northeast = cv.Camera(position=(1.0, 1.0, -0.95), azimuth=0.0,
+                          elevation=0.0, fov=80.0)
+
+    renderer.hud.write_uniforms(center, HUD_SIZE)
+    center_px = renderer.hud._last_state["marker_pixel"]
+    renderer.hud.write_uniforms(northeast, HUD_SIZE)
+    corner_px = renderer.hud._last_state["marker_pixel"]
+
+    _x, _y, w, h = renderer.hud.rect_for_size(HUD_SIZE)
+    assert corner_px[0] > center_px[0] + 0.45 * w
+    assert corner_px[1] < center_px[1] - 0.45 * h
+
+
+def test_hud_benchmark_runs(renderer):
+    """benchmark(hud=True) exercises the overlay timestamp path."""
+    import cloudyview as cv
+
+    res = renderer.benchmark(cv.Camera(), size=(160, 90),
+                             n_warmup=2, n_frames=5, hud=True)
+    assert res["wall_ms_mean"] < 250.0
 
 
 def test_volume_upload_once(renderer):
