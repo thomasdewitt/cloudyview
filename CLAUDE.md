@@ -11,11 +11,11 @@ uv run python your_command_here
 uv run witness cloud.nc
 ```
 
-For commands that need optional dependencies (tests, CUDA):
+For commands that need optional dependencies (tests, interactive engine):
 
 ```bash
 uv run --extra dev python -m pytest tests/ -v
-uv run --extra cuda witness cloud.nc --gpu
+uv run --extra interactive python -m cloudyview.soar cloud.nc
 ```
 
 ## Project Overview
@@ -25,8 +25,11 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 ## Key Commands
 
 - `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render (Mitsuba 3)
-- `glimpse <file.nc>` - Quick 2D optical depth visualization
-- `witness <file.nc> [--gpu]` - Fast volumetric ray-marched render (CPU default, optional CUDA GPU)
+- `glimpse <file.nc>` - Quick 2D visual-albedo top view
+- `witness <file.nc>` - Fast volumetric ray-marched render (numba CPU — the golden look reference)
+- `soar <file.nc>` / `python -m cloudyview.soar` - Real-time WGSL fly-through (needs `--extra interactive`)
+
+Library API (preferred): `cv.load()` → `CloudField`, `cv.Camera`, `cv.glimpse/witness/behold` return arrays. See `docs/architecture.md` for the design spec and README for examples.
 
 ## Running Tests
 

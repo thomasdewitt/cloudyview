@@ -21,7 +21,7 @@ try:
     import wgpu
 except ImportError as e:  # pragma: no cover - exercised only without the extra
     raise ImportError(
-        "cloudyview.interactive requires wgpu. "
+        "cloudyview.soar requires wgpu. "
         "Install the interactive extra: uv sync --extra interactive "
         "(or: pip install 'cloudyview[interactive]')."
     ) from e

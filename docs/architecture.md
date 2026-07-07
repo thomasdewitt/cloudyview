@@ -104,9 +104,11 @@ Interactive techniques (in rough order):
   beyond ~2048² will need bricking/LOD — out of scope for now, don't
   preclude it.
 
-## App shell (v0)
+## App shell (v0) — `cloudyview/soar/`, CLI `soar`
 
 - wgpu-py surface in a simple window (glfw via wgpu-py's gui module).
+- Game-style pointer capture (glfw CURSOR_DISABLED; Tab releases), WASD +
+  Space/LShift vertical.
 - File-open dialog for .nc selection (split liquid/ice selection supported).
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
 - Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +

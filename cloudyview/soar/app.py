@@ -2,8 +2,10 @@
 
 Controls:
     W/A/S/D     move forward/left/back/right (horizontal)
-    Space / C   move up / down
-    left-drag   mouse-look
+    Space       move up
+    LShift / C  move down
+    mouse       look (cursor is captured, video-game style)
+    Tab         release / recapture the mouse
     scroll      movement speed (exponential)
     J           toggle jittered ray starts (A/B the banding fix)
     ESC         quit
@@ -59,8 +61,9 @@ class FlyThroughApp:
         self.speed = DEFAULT_SPEED
         self.jitter = True
         self._keys = set()
-        self._dragging = False
-        self._last_pointer = (0.0, 0.0)
+        self._last_pointer = None   # None -> ignore next move (capture jump guard)
+        self._captured = False
+        self._capture_mouse(True)
         self._last_time = perf_counter()
         self._frame_index = 0
         self._fps_acc = []
@@ -73,6 +76,21 @@ class FlyThroughApp:
         self.canvas.request_draw(self._draw)
 
     # ------------------------------------------------------------------
+
+    def _capture_mouse(self, capture: bool):
+        """Game-style pointer capture via glfw (rendercanvas has no
+        pointer-lock API; the glfw window handle is the supported way in)."""
+        import glfw
+
+        window = self.canvas._window
+        if capture:
+            glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
+            if glfw.raw_mouse_motion_supported():
+                glfw.set_input_mode(window, glfw.RAW_MOUSE_MOTION, glfw.TRUE)
+        else:
+            glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_NORMAL)
+        self._captured = capture
+        self._last_pointer = None
 
     def camera(self) -> Camera:
         """Current viewpoint as a cv.Camera (relative-coordinate position)."""
@@ -93,17 +111,19 @@ class FlyThroughApp:
                 self.canvas.close()
             elif key in ("j", "J"):
                 self.jitter = not self.jitter
+            elif key == "Tab":
+                self._capture_mouse(not self._captured)
             else:
                 self._keys.add(key.lower() if len(key) == 1 else key)
         elif etype == "key_up":
             key = event["key"]
             self._keys.discard(key.lower() if len(key) == 1 else key)
-        elif etype == "pointer_down" and event.get("button", 0) == 1:
-            self._dragging = True
-            self._last_pointer = (event["x"], event["y"])
-        elif etype == "pointer_up" and event.get("button", 0) == 1:
-            self._dragging = False
-        elif etype == "pointer_move" and self._dragging:
+        elif etype == "pointer_down" and not self._captured:
+            self._capture_mouse(True)   # click back in to recapture
+        elif etype == "pointer_move" and self._captured:
+            if self._last_pointer is None:
+                self._last_pointer = (event["x"], event["y"])
+                return
             dx = event["x"] - self._last_pointer[0]
             dy = event["y"] - self._last_pointer[1]
             self._last_pointer = (event["x"], event["y"])
@@ -135,7 +155,7 @@ class FlyThroughApp:
             step -= right
         if " " in self._keys:
             step += np.array([0.0, 0.0, 1.0])
-        if "c" in self._keys:
+        if "c" in self._keys or "Shift" in self._keys:
             step -= np.array([0.0, 0.0, 1.0])
         if np.any(step):
             self.position = self.position + step * (self.speed * dt)

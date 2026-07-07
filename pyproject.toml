@@ -40,7 +40,7 @@ radiative-transfer = [
     "drjit>=0.3.0",
 ]
 interactive = [
-    # WGSL/wgpu interactive fly-through engine (cloudyview.interactive).
+    # WGSL/wgpu interactive fly-through engine (cloudyview.soar).
     "wgpu>=0.19",
     "glfw>=2.6",
 ]
@@ -71,6 +71,7 @@ all = [
 glimpse = "cloudyview.glimpse:cli"
 witness = "cloudyview.witness:cli"
 behold = "cloudyview.behold:cli"
+soar = "cloudyview.soar.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/thomasdewitt/cloudyview"

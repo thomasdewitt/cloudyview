@@ -1,4 +1,4 @@
-"""Tests for the wgpu/WGSL interactive renderer (cloudyview.interactive).
+"""Tests for the wgpu/WGSL interactive renderer (cloudyview.soar).
 
 Skip-marked when wgpu (the 'interactive' extra) or a GPU adapter with
 float32-filterable is unavailable, so the suite stays green on CI boxes
@@ -31,7 +31,7 @@ if not _adapter_ok():  # pragma: no cover
 @pytest.fixture(scope="module")
 def renderer():
     import cloudyview as cv
-    from cloudyview.interactive import InteractiveRenderer
+    from cloudyview.soar import InteractiveRenderer
 
     field = cv.load(str(DATA_FILE))
     return InteractiveRenderer(field)

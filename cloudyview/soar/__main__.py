@@ -1,4 +1,4 @@
-"""CLI: python -m cloudyview.interactive <file.nc> [--ice ice.nc]
+"""CLI: python -m cloudyview.soar <file.nc> [--ice ice.nc]
 
 Opens the windowed fly-through for a cloud field. Naming of a proper
 console entry point (like glimpse/witness/behold) is deferred until the
@@ -10,7 +10,7 @@ import argparse
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="python -m cloudyview.interactive",
+        prog="python -m cloudyview.soar",
         description="Interactive wgpu fly-through of a 3D cloud field.",
     )
     parser.add_argument("filepath", help="NetCDF file with the cloud field")

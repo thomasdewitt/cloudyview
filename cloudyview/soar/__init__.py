@@ -1,4 +1,4 @@
-"""cloudyview.interactive: wgpu/WGSL real-time volume renderer (spike).
+"""cloudyview.soar: wgpu/WGSL real-time volume renderer (spike).
 
 Proof-of-pipeline for the interactive fly-through engine described in
 docs/architecture.md. The extinction volume lives resident on the GPU as a
@@ -11,7 +11,7 @@ Requires the ``interactive`` extra (wgpu, glfw):
 Offscreen:
 
     import cloudyview as cv
-    from cloudyview.interactive import InteractiveRenderer
+    from cloudyview.soar import InteractiveRenderer
 
     field = cv.load("cloud.nc")
     r = InteractiveRenderer(field)
@@ -19,7 +19,7 @@ Offscreen:
 
 Windowed fly-through:
 
-    uv run python -m cloudyview.interactive cloud.nc [--ice ice.nc]
+    uv run python -m cloudyview.soar cloud.nc [--ice ice.nc]
 """
 
 from .engine import InteractiveRenderer, request_device
