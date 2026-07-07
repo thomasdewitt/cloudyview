@@ -39,9 +39,11 @@ DEFAULT_SUN_ELEVATION = 55.0
 DEFAULT_EXPOSURE = 4.0
 DEFAULT_G_HG = 0.76
 DEFAULT_AMBIENT_STRENGTH = 0.12
+DEFAULT_OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)  # witness.py:104-106
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 
-_UNIFORM_NBYTES = 8 * 16  # 8 vec4<f32>
+_UNIFORM_NBYTES = 10 * 16  # 10 vec4<f32>
+_DEFAULT_FIF_NORMALS = None
 
 
 def _volume_aabb(field: CloudField) -> Tuple[np.ndarray, np.ndarray]:
@@ -73,6 +75,37 @@ def camera_world_origin(camera: Camera, bmin, bmax) -> np.ndarray:
     ])
 
 
+def _default_fif_normals():
+    """Generate and cache the witness-default FIF normal map once per process."""
+    global _DEFAULT_FIF_NORMALS
+    if _DEFAULT_FIF_NORMALS is None:
+        from ..ocean_fif import generate_fif_normals
+        # Defaults are the witness ocean tile parameters: N/dx/outer scale/etc.
+        # live in ocean_fif.py:16-24 and generate_fif_normals() uses them.
+        _DEFAULT_FIF_NORMALS = generate_fif_normals(verbose=False)
+    return _DEFAULT_FIF_NORMALS
+
+
+def _validate_fif_normals(fif_normals):
+    nx, ny, nz, dx = fif_normals
+    nx = np.ascontiguousarray(nx, dtype=np.float32)
+    ny = np.ascontiguousarray(ny, dtype=np.float32)
+    nz = np.ascontiguousarray(nz, dtype=np.float32)
+    if nx.ndim != 2 or nx.shape != ny.shape or nx.shape != nz.shape:
+        raise ValueError(
+            "fif_normals must contain matching 2D nx/ny/nz arrays; "
+            f"got {nx.shape}, {ny.shape}, {nz.shape}."
+        )
+    if nx.shape[0] != nx.shape[1]:
+        raise ValueError(
+            "The witness FIF sampler assumes a square periodic tile; "
+            f"got {nx.shape}."
+        )
+    if not np.isfinite(dx) or dx <= 0.0:
+        raise ValueError(f"FIF dx must be positive and finite; got {dx!r}.")
+    return nx, ny, nz, float(dx)
+
+
 class InteractiveRenderer:
     """Resident-volume WGSL raymarcher for a single CloudField.
 
@@ -92,10 +125,17 @@ class InteractiveRenderer:
         field: CloudField,
         *,
         extinction_multiplier: float = 1.0,
+        ocean_enabled: bool = True,
+        ocean_z: float = 0.0,
+        ocean_reflectance: Tuple[float, float, float] = DEFAULT_OCEAN_REFLECTANCE,
+        fif_normals: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = None,
         device=None,
     ):
         self.field = field
         self.bmin, self.bmax = _volume_aabb(field)
+        self.ocean_enabled = bool(ocean_enabled)
+        self.ocean_z = float(ocean_z)
+        self.ocean_reflectance = tuple(float(c) for c in ocean_reflectance)
 
         nx, ny, nz = field.shape
         extent = self.bmax - self.bmin
@@ -150,6 +190,39 @@ class InteractiveRenderer:
         )
         self.volume_nbytes = sigma.nbytes
 
+        if fif_normals is None:
+            fif_normals = _default_fif_normals()
+        fif_nx, fif_ny, fif_nz, fif_dx = _validate_fif_normals(fif_normals)
+        self.ocean_fif_normals = (fif_nx, fif_ny, fif_nz, fif_dx)
+        self.ocean_fif_dx = fif_dx
+        self.ocean_tile_extent = float(fif_nx.shape[0]) * fif_dx
+        ocean_normals = np.empty((*fif_nx.shape, 4), dtype=np.float32)
+        ocean_normals[..., 0] = fif_nx
+        ocean_normals[..., 1] = fif_ny
+        ocean_normals[..., 2] = fif_nz
+        ocean_normals[..., 3] = 1.0
+        fif_n = fif_nx.shape[0]
+        max_dim_2d = self.device.limits["max-texture-dimension-2d"]
+        if fif_n > max_dim_2d:
+            raise ValueError(
+                f"FIF normal tile {fif_n}x{fif_n} exceeds the device's 2D "
+                f"texture limit ({max_dim_2d})."
+            )
+        self._ocean_texture = self.device.create_texture(
+            label="ocean-fif-normals",
+            size=(fif_n, fif_n, 1),
+            format=wgpu.TextureFormat.rgba32float,
+            dimension="2d",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        )
+        self.device.queue.write_texture(
+            {"texture": self._ocean_texture},
+            ocean_normals,
+            {"bytes_per_row": fif_n * 4 * 4, "rows_per_image": fif_n},
+            (fif_n, fif_n, 1),
+        )
+        self.ocean_nbytes = ocean_normals.nbytes
+
         # TODO(occupancy-grid): build a coarse boolean brick grid from
         # `sigma` here and bind it in the shader for empty-space skipping —
         # the known next lever for full-domain (1024^2) interactivity.
@@ -158,6 +231,12 @@ class InteractiveRenderer:
             address_mode_u="clamp-to-edge",
             address_mode_v="clamp-to-edge",
             address_mode_w="clamp-to-edge",
+            mag_filter="linear",
+            min_filter="linear",
+        )
+        self._ocean_sampler = self.device.create_sampler(
+            address_mode_u="repeat",
+            address_mode_v="repeat",
             mag_filter="linear",
             min_filter="linear",
         )
@@ -187,6 +266,19 @@ class InteractiveRenderer:
                 "visibility": wgpu.ShaderStage.FRAGMENT,
                 "sampler": {"type": "filtering"},
             },
+            {
+                "binding": 3,
+                "visibility": wgpu.ShaderStage.FRAGMENT,
+                "texture": {
+                    "sample_type": "float",
+                    "view_dimension": "2d",
+                },
+            },
+            {
+                "binding": 4,
+                "visibility": wgpu.ShaderStage.FRAGMENT,
+                "sampler": {"type": "filtering"},
+            },
         ])
         self._bind_group = self.device.create_bind_group(
             layout=self._bind_group_layout,
@@ -196,6 +288,8 @@ class InteractiveRenderer:
                                             "size": _UNIFORM_NBYTES}},
                 {"binding": 1, "resource": self._texture.create_view()},
                 {"binding": 2, "resource": self._sampler},
+                {"binding": 3, "resource": self._ocean_texture.create_view()},
+                {"binding": 4, "resource": self._ocean_sampler},
             ],
         )
         self._pipeline_layout = self.device.create_pipeline_layout(
@@ -258,7 +352,7 @@ class InteractiveRenderer:
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
         tan_half_fov = np.tan(np.deg2rad(camera.fov) * 0.5)
 
-        u = np.empty((8, 4), dtype=np.float32)
+        u = np.empty((10, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, w / h]
         u[2] = [*right, exposure]
@@ -267,6 +361,13 @@ class InteractiveRenderer:
         u[5] = [*self.bmin, self.dt_view]
         u[6] = [*self.bmax, self.dt_light]
         u[7] = [w, h, g_hg, ambient_strength]
+        u[8] = [self.ocean_z, *self.ocean_reflectance]
+        u[9] = [
+            self.ocean_fif_dx,
+            self.ocean_tile_extent,
+            1.0 if self.ocean_enabled else 0.0,
+            0.0,
+        ]
         self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
 
     def encode_pass(self, command_encoder, target_view, target_format: str,

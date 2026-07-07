@@ -1,10 +1,10 @@
 // CloudyView interactive volume raymarcher (WGSL).
 //
-// Stage 2 scope (2026-07): ray-box entry, hardware-trilinear sampling of a
+// Stage 3 scope (2026-07): ray-box entry, hardware-trilinear sampling of a
 // resident r32float 3D extinction texture, witness procedural sky, per-pixel
 // jittered ray starts, and the single-domain witness cloud-scattering model
 // (adaptive view/light marches, dt-invariant powder, MS octaves, ambient ramp,
-// and surface bounce). FIF ocean and nested levels are still staged follow-ups,
+// surface bounce, and the witness FIF ocean). Nested levels are still staged follow-ups,
 // ported function by function against the numba golden reference
 // (docs/architecture.md).
 //
@@ -36,11 +36,17 @@ struct Uniforms {
     bmax: vec4<f32>,
     // x = image width (px), y = image height (px), z = HG asymmetry g, w = ambient strength
     params: vec4<f32>,
+    // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106)
+    ocean: vec4<f32>,
+    // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = unused
+    ocean_params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var vol: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
+@group(0) @binding(3) var ocean_normals: texture_2d<f32>;
+@group(0) @binding(4) var ocean_samp: sampler;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -64,9 +70,10 @@ const DENSE_SIGMA_CUTOFF: f32 = 0.01; // witness.py:688
 const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
 const GAMMA: f32 = 1.4;             // witness tone_map gamma
 const ISO_PHASE: f32 = 0.07957747154594767; // 1 / (4*pi)
+const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness.py:539
 
 // TODO(occupancy-grid): empty-space skipping. Cloud fields are sparse; a
-// coarse (e.g. 16^3-voxel-block) occupancy grid bound at @binding(3) would
+// coarse (e.g. 16^3-voxel-block) occupancy grid bound after the ocean slots would
 // let both the view march and the light march leap over empty bricks. This
 // is the known next lever for the full 1024x1024x255 domain
 // (docs/architecture.md "Interactive techniques").
@@ -132,10 +139,13 @@ fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
 fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
     let inv_dir = 1.0 / sun;
     let hit = ray_box(p, inv_dir);
-    let t_exit = hit.y; // p is inside the box, so t_near < 0 < t_far
+    if (hit.x > hit.y || hit.y <= 0.0) {
+        return 0.0;
+    }
+    let t_exit = hit.y;
     let dt_max = u.bmax.w;
     var tau = 0.0;
-    var t = 0.0;
+    var t = max(hit.x, 0.0);
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
         if (t >= t_exit) {
             break;
@@ -174,6 +184,63 @@ fn sky_color(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
         col = col + vec3<f32>(50.0, 45.0, 35.0);
     }
     return col;
+}
+
+// Ocean reflection sky ported from witness._reflection_sky
+// (witness.py lines 445-470).
+fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    var t = max(0.0, dir.z);
+    let one_minus = 1.0 - t;
+    t = 1.0 - one_minus * one_minus * one_minus;
+
+    let zenith = vec3<f32>(0.0044, 0.035, 0.1156);
+    let horizon = vec3<f32>(0.10, 0.18, 0.38);
+    var col = horizon + (zenith - horizon) * t;
+
+    let cos_rs = dot(dir, sun);
+    if (cos_rs > 0.0) {
+        let glint_w = 0.02;
+        let a = glint_w / ((1.0 - cos_rs) + glint_w);
+        col = col + a * vec3<f32>(1.2, 1.0, 0.6);
+    }
+    return col;
+}
+
+// FIF normal sampling follows witness._ocean_wave_normal_fif
+// (witness.py lines 417-442): periodic wrap, bilinear interpolation, then
+// renormalization. The host uploads the generated nx/ny/nz arrays as RGB.
+fn ocean_wave_normal(world_xy: vec2<f32>) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(ocean_normals, 0));
+    let coord = world_xy / u.ocean_params.y + 0.5 / dims;
+    let n = textureSampleLevel(ocean_normals, ocean_samp, coord, 0.0).rgb;
+    return normalize(n);
+}
+
+// Ocean shade ported from witness._ocean_shade (witness.py lines 473-541).
+fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+    let n = ocean_wave_normal(hit.xy);
+
+    let vdotn = dot(dir, n);
+    var refl = dir - 2.0 * vdotn * n;
+    if (refl.z < 0.0) {
+        refl.z = -refl.z;
+    }
+    let sky = ocean_reflection_sky(refl, sun);
+
+    let cos_i = clamp(-vdotn, 0.0, 1.0);
+    let one_minus = 1.0 - cos_i;
+    let om2 = one_minus * one_minus;
+    let fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
+
+    let tau_ocean = light_march_tau(hit, sun);
+    let t_sun_ocean = exp(-tau_ocean);
+    let cos_sun_n = max(0.0, dot(sun, n));
+    let diff_irr = t_sun_ocean * cos_sun_n * 0.3183098861837907;
+    let diffuse = diff_irr * SUN_COLOR * u.ocean.yzw;
+
+    let lit = fresnel * sky + (1.0 - fresnel) * diffuse;
+    let t_eff = OCEAN_SHADOW_FLOOR + (1.0 - OCEAN_SHADOW_FLOOR) * t_sun_ocean;
+    return lit * t_eff;
 }
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
@@ -216,15 +283,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         + ndc_x * u.cam_right.xyz
                         + ndc_y * u.cam_up.xyz);
 
-    let sky = sky_color(dir, sun);
-
     let inv_dir = 1.0 / dir;
     let hit = ray_box(u.cam_origin.xyz, inv_dir);
     var t_near = max(hit.x, 0.0);
     let t_far = hit.y;
 
-    if (t_near >= t_far || t_far <= 0.0) {
-        return vec4<f32>(tone_map(sky, exposure), 1.0);
+    let ocean_on = u.ocean_params.z > 0.5;
+    var t_ocean = 1e30;
+    if (ocean_on && dir.z < -1e-8) {
+        let t_ocean_candidate = (u.ocean.x - u.cam_origin.z) / dir.z;
+        if (t_ocean_candidate > 0.0) {
+            t_ocean = t_ocean_candidate;
+        }
     }
 
     let phase = hg_phase(dot(dir, sun), g_hg);
@@ -240,64 +310,97 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     var col = vec3<f32>(0.0);
     var tau_depth = 0.0;
 
-    for (var i: i32 = 0; i < MAX_VIEW_STEPS; i = i + 1) {
-        if (t >= t_far || transmittance < TRANSMITTANCE_CUTOFF) {
-            break;
-        }
-        let p = u.cam_origin.xyz + t * dir;
-        let sigma = sample_sigma(p);
+    if (t_near >= 0.0 && t_near < t_far) {
+        for (var i: i32 = 0; i < MAX_VIEW_STEPS; i = i + 1) {
+            // witness.py:621-646 tests ocean before the t_far break so an
+            // ocean plane coincident with the box floor is still shaded.
+            if (ocean_on && t >= t_ocean) {
+                let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
+                col = col + transmittance * ocean_shade(ocean_hit, dir, sun);
+                transmittance = 0.0;
+                break;
+            }
 
-        var dt = step_dt_for_sigma(sigma, dt_max);
-        if (t + dt > t_far) {
-            dt = t_far - t;
-        }
+            if (t >= t_far || transmittance < TRANSMITTANCE_CUTOFF) {
+                break;
+            }
+            let p = u.cam_origin.xyz + t * dir;
+            let sigma = sample_sigma(p);
 
-        let d_tau = sigma * dt;
-        if (d_tau < EMPTY_DTAU_CUTOFF) {
-            tau_depth = 0.0;
+            var dt = step_dt_for_sigma(sigma, dt_max);
+            if (t + dt > t_far) {
+                dt = t_far - t;
+            }
+            if (ocean_on && t + dt > t_ocean) {
+                dt = max(0.0001, t_ocean - t);
+            }
+
+            let d_tau = sigma * dt;
+            if (d_tau < EMPTY_DTAU_CUTOFF) {
+                tau_depth = 0.0;
+                t = t + dt;
+                continue;
+            }
+
+            tau_depth = tau_depth + d_tau;
+
+            let tau_sun = light_march_tau(p, sun);
+
+            var ms = vec3<f32>(0.0);
+            var ms_atten = 1.0;
+            for (var octave: i32 = 0; octave < MS_OCTAVES; octave = octave + 1) {
+                let t_sun_ms = exp(-tau_sun * ms_atten);
+                let blend = min(1.0, f32(octave) * MS_BLEND_RATE);
+                let oct_phase = phase * (1.0 - blend) + ISO_PHASE * blend;
+                let contrib = ms_atten * t_sun_ms * oct_phase;
+                ms = ms + contrib * SUN_COLOR;
+                ms_atten = ms_atten * MS_ATTEN;
+            }
+
+            // Powder is a function of cumulative optical depth since the current
+            // cloud entry, not the current step size (witness.py:729-732).
+            let powder = 1.0 - exp(-POWDER_COEFF * tau_depth);
+            let scatter_weight = d_tau * powder * transmittance;
+            col = col + scatter_weight * ms;
+
+            // Ambient: height-based on the outer box (witness.py:738-747).
+            let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
+            let amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
+                                          + (1.0 - AMBIENT_HEIGHT_FLOOR) * h);
+            col = col + transmittance * d_tau * amb * AMBIENT_TINT;
+
+            // Surface bounce is anchored at physical z=0, not the AABB floor
+            // (witness.py:749-760).
+            if (BOUNCE_STRENGTH > 0.0) {
+                let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
+                col = col + transmittance * d_tau * BOUNCE_STRENGTH
+                            * bounce_frac * BOUNCE_TINT;
+            }
+
+            transmittance = transmittance * exp(-d_tau);
             t = t + dt;
-            continue;
         }
-
-        tau_depth = tau_depth + d_tau;
-
-        let tau_sun = light_march_tau(p, sun);
-
-        var ms = vec3<f32>(0.0);
-        var ms_atten = 1.0;
-        for (var octave: i32 = 0; octave < MS_OCTAVES; octave = octave + 1) {
-            let t_sun_ms = exp(-tau_sun * ms_atten);
-            let blend = min(1.0, f32(octave) * MS_BLEND_RATE);
-            let oct_phase = phase * (1.0 - blend) + ISO_PHASE * blend;
-            let contrib = ms_atten * t_sun_ms * oct_phase;
-            ms = ms + contrib * SUN_COLOR;
-            ms_atten = ms_atten * MS_ATTEN;
-        }
-
-        // Powder is a function of cumulative optical depth since the current
-        // cloud entry, not the current step size (witness.py:729-732).
-        let powder = 1.0 - exp(-POWDER_COEFF * tau_depth);
-        let scatter_weight = d_tau * powder * transmittance;
-        col = col + scatter_weight * ms;
-
-        // Ambient: height-based on the outer box (witness.py:738-747).
-        let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
-        let amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
-                                      + (1.0 - AMBIENT_HEIGHT_FLOOR) * h);
-        col = col + transmittance * d_tau * amb * AMBIENT_TINT;
-
-        // Surface bounce is anchored at physical z=0, not the AABB floor
-        // (witness.py:749-760).
-        if (BOUNCE_STRENGTH > 0.0) {
-            let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
-            col = col + transmittance * d_tau * BOUNCE_STRENGTH
-                        * bounce_frac * BOUNCE_TINT;
-        }
-
-        transmittance = transmittance * exp(-d_tau);
-        t = t + dt;
     }
 
-    col = col + transmittance * sky;
+    // Ocean for rays that exit/miss the outer box without becoming opaque;
+    // witness.py:766-790 also limits far-open-water hits to 50 outer widths.
+    if (ocean_on
+        && transmittance > TRANSMITTANCE_CUTOFF
+        && t_ocean < 1e29
+        && t_ocean > t_far) {
+        let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
+        let outer_size = u.bmax.xyz - u.bmin.xyz;
+        let center = 0.5 * (u.bmin.xy + u.bmax.xy);
+        if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
+            && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
+            col = col + transmittance * ocean_shade(ocean_hit, dir, sun);
+            transmittance = 0.0;
+        }
+    }
+
+    if (transmittance > TRANSMITTANCE_CUTOFF) {
+        let sky = sky_color(dir, sun);
+        col = col + transmittance * sky;
+    }
     return vec4<f32>(tone_map(col, exposure), 1.0);
 }
