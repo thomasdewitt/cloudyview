@@ -43,6 +43,31 @@ OCEAN_SHADOW_MAX_TOL = 12.0 / 255.0
 FIF_SEED = 20260707
 
 
+def _realism_off() -> dict[str, float]:
+    return {
+        "gradient_shading_strength": 0.0,
+        "deep_shadow_ms_suppression": 0.0,
+        "ambient_occlusion_strength": 0.0,
+        "bounce_depth_attenuation": 0.0,
+    }
+
+
+def _realism_on() -> dict[str, float]:
+    from cloudyview.witness import (
+        AMBIENT_OCCLUSION_STRENGTH,
+        BOUNCE_DEPTH_ATTENUATION,
+        DEEP_SHADOW_MS_SUPPRESSION,
+        GRADIENT_SHADING_STRENGTH,
+    )
+
+    return {
+        "gradient_shading_strength": GRADIENT_SHADING_STRENGTH,
+        "deep_shadow_ms_suppression": DEEP_SHADOW_MS_SUPPRESSION,
+        "ambient_occlusion_strength": AMBIENT_OCCLUSION_STRENGTH,
+        "bounce_depth_attenuation": BOUNCE_DEPTH_ATTENUATION,
+    }
+
+
 @dataclass(frozen=True)
 class ParityCase:
     name: str
@@ -328,6 +353,7 @@ def render_witness_with_fif(
     sun_azimuth: float,
     sun_elevation: float,
     fif_normals,
+    realism: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Render witness via render_nested() with caller-supplied FIF normals."""
     from cloudyview import optical_depth
@@ -362,6 +388,8 @@ def render_witness_with_fif(
     origin = camera_world_origin(camera, bmin, bmax)
     forward, right, up = camera.basis()
     sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
+    if realism is None:
+        realism = _realism_off()
 
     return render_nested(
         [level],
@@ -384,6 +412,7 @@ def render_witness_with_fif(
         g_hg=G_HG,
         ambient_strength=AMBIENT_STRENGTH,
         powder_coeff=POWDER_COEFF,
+        **realism,
         verbose=False,
     ).astype(np.float64)
 
@@ -397,8 +426,11 @@ def render_witness_soar_pair(
     sun_azimuth: float,
     sun_elevation: float,
     fif_normals,
+    realism: dict[str, float] | None = None,
 ) -> ParityRender:
     """Render one scene through CPU witness and soar with matched controls."""
+    if realism is None:
+        realism = _realism_off()
     witness = render_witness_with_fif(
         field,
         camera=camera,
@@ -406,6 +438,7 @@ def render_witness_soar_pair(
         sun_azimuth=sun_azimuth,
         sun_elevation=sun_elevation,
         fif_normals=fif_normals,
+        realism=realism,
     )
     soar_u8 = renderer.render(
         camera,
@@ -414,6 +447,7 @@ def render_witness_soar_pair(
         sun_elevation=sun_elevation,
         exposure=4.0,
         jitter=False,
+        **realism,
     )
     soar = soar_u8.astype(np.float64) / 255.0
     assert witness.shape == soar.shape == (size[1], size[0], 3)
@@ -756,6 +790,62 @@ def test_soar_matches_witness_twpice128_default_cloud_scattering(
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     (ARTIFACT_DIR / "twpice128_cloud_stats.json").write_text(
+        json.dumps(stats_by_case, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def test_soar_matches_witness_twpice128_cb_realism_on(
+    twpice128_field,
+    twpice128_renderer,
+    fif_normals,
+):
+    """Cumulonimbus realism gates-on parity for the thick TWPICE case."""
+    stats_by_case = {}
+    realism = _realism_on()
+    for case in _twpice128_cases():
+        gated_case = ParityCase(
+            name=f"{case.name}_cb1111",
+            camera=case.camera,
+            sun_azimuth=case.sun_azimuth,
+            sun_elevation=case.sun_elevation,
+        )
+        pair = render_witness_soar_pair(
+            twpice128_field,
+            twpice128_renderer,
+            camera=gated_case.camera,
+            size=CLOUD_SIZE,
+            sun_azimuth=gated_case.sun_azimuth,
+            sun_elevation=gated_case.sun_elevation,
+            fif_normals=fif_normals,
+            realism=realism,
+        )
+        mask = cloud_mask(
+            pair,
+            gated_case.camera,
+            CLOUD_SIZE,
+            sun_azimuth=gated_case.sun_azimuth,
+            sun_elevation=gated_case.sun_elevation,
+            threshold=3.0 / 255.0,
+        )
+        assert mask.sum() > 100
+        stats = diff_statistics(pair.witness, pair.soar, mask)
+        stats_by_case[gated_case.name] = {
+            "cloud_pixels_raw": stats.as_dict(),
+            "realism": realism,
+        }
+        _write_artifact(gated_case, pair)
+
+        # The gates-on case adds six gradient texture samples and several
+        # saturated-shadow nonlinearities. CPU witness uses fp64 trilinear
+        # sampling; Soar uses fp32 hardware filtering and rgba8 readback, so
+        # the tail is allowed slightly more room than the all-off TWPICE case
+        # while still catching any missing gate or sign mismatch.
+        assert stats.mean_abs <= 2.5 / 255.0
+        assert stats.p99_abs <= 10.0 / 255.0
+        assert stats.max_abs <= 20.0 / 255.0
+
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    (ARTIFACT_DIR / "twpice128_cb_realism_on_stats.json").write_text(
         json.dumps(stats_by_case, indent=2, sort_keys=True) + "\n"
     )
 

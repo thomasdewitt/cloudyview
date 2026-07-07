@@ -8,6 +8,7 @@ Controls:
     mouse       look (cursor is captured, video-game style)
     Tab         release / recapture the mouse
     scroll      movement speed (exponential)
+    1/2/3/4     toggle cumulonimbus realism terms (gradient/MS/AO/bounce)
     J           toggle jittered ray starts (A/B the banding fix)
     B           toggle the bird (the flying subject leading the camera)
     M           toggle the minimap
@@ -20,8 +21,9 @@ Pause menu:
     ESC / Q     quit
 
 The window title shows a running fps readout and the current camera state
-in cv.Camera terms, so a good viewpoint can be transcribed straight into a
-witness/behold render call.
+in cv.Camera terms plus the cumulonimbus realism gate bitfield (e.g.
+cb:1010), so a good viewpoint and lighting A/B can be transcribed straight
+into a witness/behold/soar render call.
 """
 
 from time import perf_counter
@@ -32,7 +34,11 @@ from ..camera import Camera
 from ..cloudfield import CloudField
 from .engine import (
     DEFAULT_AMBIENT_STRENGTH,
+    DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
+    DEFAULT_BOUNCE_DEPTH_ATTENUATION,
+    DEFAULT_DEEP_SHADOW_MS_SUPPRESSION,
     DEFAULT_EXPOSURE,
+    DEFAULT_GRADIENT_SHADING_STRENGTH,
     DEFAULT_SUN_AZIMUTH,
     DEFAULT_SUN_ELEVATION,
     InteractiveRenderer,
@@ -52,9 +58,17 @@ ACTION_TOGGLE_FULLSCREEN = "toggle_fullscreen"
 CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
     "(Tab releases, click recaptures), scroll speed, "
+    "1 gradient, 2 MS floor, 3 ambient AO, 4 bounce attenuation, "
     "J jitter toggle, B bird toggle, M minimap toggle, "
     "F fullscreen/window, ESC pause menu; "
     "paused: R/click resume, F fullscreen/window, ESC/Q quit"
+)
+
+CB_DEFAULT_STRENGTHS = (
+    DEFAULT_GRADIENT_SHADING_STRENGTH,
+    DEFAULT_DEEP_SHADOW_MS_SUPPRESSION,
+    DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
+    DEFAULT_BOUNCE_DEPTH_ATTENUATION,
 )
 
 _PAUSE_OVERLAY_SHADER = """
@@ -142,6 +156,7 @@ class FlyThroughApp:
 
         self.speed = DEFAULT_SPEED
         self.jitter = True
+        self.cb_enabled = [True, True, True, True]
         self.bird_enabled = True
         self.minimap_enabled = True
         self._keys = set()
@@ -193,8 +208,24 @@ class FlyThroughApp:
         fps_part = "" if fps is None else f"  {fps:5.1f} fps"
         return (
             f"cloudyview PAUSED{fps_part}  frame={self._frame_index}  "
-            f"R/click resume  F {target}  ESC/Q quit"
+            f"cb:{self._cb_bits()}  R/click resume  F {target}  ESC/Q quit"
         )
+
+    def _cb_bits(self) -> str:
+        enabled = getattr(self, "cb_enabled", (True, True, True, True))
+        return "".join("1" if value else "0" for value in enabled)
+
+    def _cb_strength_kwargs(self) -> dict:
+        strengths = [
+            value if enabled else 0.0
+            for enabled, value in zip(self.cb_enabled, CB_DEFAULT_STRENGTHS)
+        ]
+        return {
+            "gradient_shading_strength": strengths[0],
+            "deep_shadow_ms_suppression": strengths[1],
+            "ambient_occlusion_strength": strengths[2],
+            "bounce_depth_attenuation": strengths[3],
+        }
 
     def _set_paused(self, paused: bool) -> None:
         if paused == self._paused:
@@ -319,6 +350,8 @@ class FlyThroughApp:
                 self.bird_enabled = not self.bird_enabled
             elif key in ("m", "M"):
                 self.minimap_enabled = not self.minimap_enabled
+            elif key in ("1", "2", "3", "4"):
+                self.cb_enabled[int(key) - 1] = not self.cb_enabled[int(key) - 1]
             elif key == "Tab":
                 self._capture_mouse(not self._captured)
             else:
@@ -432,7 +465,8 @@ class FlyThroughApp:
         w, h = self.canvas.get_physical_size()
         self.renderer.write_uniforms(
             self.camera(), (w, h), jitter=self.jitter,
-            frame_index=self._frame_index)
+            frame_index=self._frame_index,
+            **self._cb_strength_kwargs())
         self._frame_index += 1
 
         texture = self.context.get_current_texture()
@@ -472,6 +506,7 @@ class FlyThroughApp:
                     f"pos=({cam.position[0]:+.2f},{cam.position[1]:+.2f},"
                     f"{cam.position[2]:+.2f}) az={cam.azimuth:.0f} "
                     f"el={cam.elevation:.0f} speed={self.speed:.0f}m/s "
+                    f"cb:{self._cb_bits()} "
                     f"jitter={'on' if self.jitter else 'OFF'} "
                     f"map={'on' if self.minimap_enabled else 'OFF'}"
                 )
