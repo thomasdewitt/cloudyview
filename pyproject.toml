@@ -82,8 +82,11 @@ Issues = "https://github.com/thomasdewitt/cloudyview/issues"
 [tool.uv.sources]
 scaleinvariance = { path = "../scaleinvariance", editable = true }
 
-[tool.setuptools]
-packages = ["cloudyview"]
+[tool.setuptools.packages.find]
+include = ["cloudyview*"]
+
+[tool.setuptools.package-data]
+"cloudyview.soar" = ["*.wgsl"]
 
 [tool.black]
 line-length = 88

@@ -75,8 +75,7 @@ Notes:
 
 - Render functions return arrays and never write files; use `cv.save_image`
   or matplotlib for output.
-- `cv.witness(..., gpu=True)` uses the numba CUDA backend and raises
-  `ImportError` if CUDA is unavailable (no silent CPU fallback);
+- `cv.witness(...)` uses the maintained numba CPU ray marcher.
   `cv.behold(..., gpu=True)` selects Mitsuba's CUDA variant.
 - Library code raises exceptions and is quiet by default
   (`verbose=True` restores the CLI-style diagnostics).
@@ -110,7 +109,6 @@ Options:
 - `--camera-azimuth`, `--camera-elevation`, `--fov`: Camera orientation
 - `--sun-azimuth`, `--sun-elevation`: Sun position
 - `--size W H`: Image dimensions
-- `--gpu`: Render on the numba CUDA backend (fails loudly if CUDA is unavailable)
 - Quality presets: `min`, `low`, `medium` (default), `high`
 
 ### Behold: Photorealistic Rendering

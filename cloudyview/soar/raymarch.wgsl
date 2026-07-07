@@ -88,7 +88,9 @@ fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
 // with a 1-voxel zero border baked at upload or explicit edge handling here.
 fn sample_sigma(p: vec3<f32>) -> f32 {
     let g = (p - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz);
-    return textureSampleLevel(vol, vol_samp, vec3<f32>(g.z, g.y, g.x), 0.0).r;
+    let dims = vec3<f32>(textureDimensions(vol, 0));
+    let tex_coord = vec3<f32>(g.z, g.y, g.x) + 0.5 / dims;
+    return textureSampleLevel(vol, vol_samp, tex_coord, 0.0).r;
 }
 
 // Henyey-Greenstein phase function.

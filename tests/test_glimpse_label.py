@@ -283,8 +283,15 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
     raw_tau = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
     # Two-stream visual albedo, g=0.85 (matches glimpse.main)
     raw_albedo = raw_tau / (raw_tau + np.float32(2.0 / (1.0 - 0.85)))
-    expected = raw_albedo[::-1, ::-1].T
+    expected = raw_albedo.T
     np.testing.assert_allclose(captured["albedo"], expected, atol=1e-6)
+
+    legacy_oriented = glimpse._orient_east_right_north_up(
+        raw_albedo,
+        np.array([1000.0, 0.0]),
+        np.array([1000.0, 0.0]),
+    )
+    np.testing.assert_allclose(legacy_oriented, raw_albedo[::-1, ::-1].T, atol=1e-6)
 
     cam_x, _ = captured["overlay"]["camera_xy"]
     for end_x, _ in captured["overlay"]["fov_endpoints"]:

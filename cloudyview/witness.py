@@ -746,9 +746,14 @@ def _render_image(
                 col_g += amb_weight * AMBIENT_TINT_G
                 col_b += amb_weight * AMBIENT_TINT_B
 
-                # Surface bounce: upward diffuse light, strongest at cloud base.
+                # Surface bounce: upward diffuse light anchored at z=0, not
+                # the data AABB floor, so elevated domains do not receive
+                # full bounce at their lowest data voxel.
                 if BOUNCE_STRENGTH > 0.0:
-                    bounce = BOUNCE_STRENGTH * (1.0 - height_frac)
+                    bounce_frac = 1.0 - p_z / outer_bmax_z
+                    if bounce_frac < 0.0: bounce_frac = 0.0
+                    if bounce_frac > 1.0: bounce_frac = 1.0
+                    bounce = BOUNCE_STRENGTH * bounce_frac
                     bounce_weight = transmittance * d_tau * bounce
                     col_r += bounce_weight * BOUNCE_TINT_R
                     col_g += bounce_weight * BOUNCE_TINT_G

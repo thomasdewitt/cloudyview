@@ -24,7 +24,7 @@ import cloudyview as cv
 field = cv.load("cloud.nc")                          # autodetect qc + qi
 field = cv.load("..._QC_0000000600.nc",
                 ice="..._QI_0000000600.nc")          # split files
-field = cv.load("cloud.nc", liquid_var="QC", ...)    # explicit overrides
+field = cv.load("cloud.nc", liquid_water_var="QC", ...)  # explicit overrides
 
 field                    # CloudField dataclass
 field.lwc, field.iwc     # (nx,ny,nz) float32 ndarrays, g/kg; iwc may be None

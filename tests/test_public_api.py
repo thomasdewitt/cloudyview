@@ -147,6 +147,24 @@ def test_cloudfield_direct_construction_validates():
         cv.CloudField(lwc=lwc, x=np.arange(5.0), y=y, z=z)
 
 
+def test_cloudfield_normalizes_descending_coordinates():
+    lwc = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+    iwc = lwc + 100.0
+    field = cv.CloudField(
+        lwc=lwc,
+        iwc=iwc,
+        x=np.array([10.0, 0.0]),
+        y=np.array([20.0, 10.0, 0.0]),
+        z=np.array([300.0, 200.0, 100.0, 0.0]),
+    )
+
+    np.testing.assert_array_equal(field.x, [0.0, 10.0])
+    np.testing.assert_array_equal(field.y, [0.0, 10.0, 20.0])
+    np.testing.assert_array_equal(field.z, [0.0, 100.0, 200.0, 300.0])
+    np.testing.assert_array_equal(field.lwc, lwc[::-1, ::-1, ::-1])
+    np.testing.assert_array_equal(field.iwc, iwc[::-1, ::-1, ::-1])
+
+
 # =============================================================================
 # cv.Camera
 # =============================================================================

@@ -28,6 +28,15 @@ if not _adapter_ok():  # pragma: no cover
                 allow_module_level=True)
 
 
+def test_shader_offsets_world_samples_to_texel_centers():
+    """WGSL world->texture mapping must match witness's node-centered grid."""
+    from cloudyview.soar import engine
+
+    shader = engine.SHADER_PATH.read_text()
+    assert "textureDimensions(vol, 0)" in shader
+    assert "vec3<f32>(g.z, g.y, g.x) + 0.5 / dims" in shader
+
+
 @pytest.fixture(scope="module")
 def renderer():
     import cloudyview as cv

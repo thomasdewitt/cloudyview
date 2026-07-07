@@ -65,15 +65,22 @@ class CloudField:
                     "iwc shape must match lwc shape; "
                     f"got iwc={self.iwc.shape}, lwc={self.lwc.shape}."
                 )
-        for name, coord, n in (("x", self.x, self.lwc.shape[0]),
-                               ("y", self.y, self.lwc.shape[1]),
-                               ("z", self.z, self.lwc.shape[2])):
+        for axis, (name, coord, n) in enumerate(
+            (("x", self.x, self.lwc.shape[0]),
+             ("y", self.y, self.lwc.shape[1]),
+             ("z", self.z, self.lwc.shape[2]))
+        ):
             coord = np.asarray(coord)
             if coord.ndim != 1 or coord.size != n:
                 raise ValueError(
                     f"{name} coordinate must be 1D with length {n}; "
                     f"got shape {coord.shape}."
                 )
+            if coord.size > 1 and np.all(np.diff(coord) < 0):
+                coord = coord[::-1].copy()
+                self.lwc = np.flip(self.lwc, axis=axis).copy()
+                if self.iwc is not None:
+                    self.iwc = np.flip(self.iwc, axis=axis).copy()
             setattr(self, name, coord)
 
     @property
