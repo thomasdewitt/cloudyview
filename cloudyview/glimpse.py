@@ -230,25 +230,30 @@ def main(
         else:
             print(f"✓ Optical depth (liquid only) range: {od_col.min():.4f} - {od_col.max():.4f}")
 
-        # Convert optical depth to opacity (1 - exp(-tau))
-        opacity = np.float32(1.0) - np.exp(-od_col.astype(np.float32))
-        print(f"✓ Opacity range: {opacity.min():.4f} - {opacity.max():.4f}")
+        # Convert optical depth to visual albedo via conservative-scattering
+        # two-stream reflectance: A = tau / (tau + 2/(1-g)), g = 0.85.
+        # Unlike beam opacity 1-exp(-tau) (saturates by tau~4), this keeps
+        # contrast between cirrus (tau~1-5) and deep cores (tau~100).
+        two_stream_denom = np.float32(2.0 / (1.0 - 0.85))  # 13.3 for g=0.85
+        tau32 = od_col.astype(np.float32)
+        albedo = tau32 / (tau32 + two_stream_denom)
+        print(f"✓ Visual albedo range: {albedo.min():.4f} - {albedo.max():.4f}")
 
         # Enforce map orientation compatibility with witness/behold:
         # east-right (+x) and north-up (+y).
         x_coord = data_dict['x_coord']
         y_coord = data_dict['y_coord']
-        opacity_oriented = opacity
+        albedo_oriented = albedo
         if x_coord[1] < x_coord[0]:
-            opacity_oriented = opacity_oriented[::-1, :]
+            albedo_oriented = albedo_oriented[::-1, :]
         if y_coord[1] < y_coord[0]:
-            opacity_oriented = opacity_oriented[:, ::-1]
-        opacity_oriented = opacity_oriented.T  # plot expects [y, x]
+            albedo_oriented = albedo_oriented[:, ::-1]
+        albedo_oriented = albedo_oriented.T  # plot expects [y, x]
 
         camera_overlay = None
         if label:
             camera_overlay = _build_camera_overlay(
-                image_shape=opacity_oriented.shape,
+                image_shape=albedo_oriented.shape,
                 camera_position=cam_position,
                 camera_azimuth=cam_azimuth,
                 camera_elevation=cam_elevation,
@@ -256,10 +261,10 @@ def main(
                 render_aspect=render_aspect,
             )
 
-        # Plot opacity
+        # Plot visual albedo
         od_path = output_dir / f"cloudyview_glimpse_top_view_{base_filename}.png"
         basic_render.plot_optical_depth(
-            opacity_oriented,
+            albedo_oriented,
             output_path=str(od_path),
             label_dirs=label_dirs,
             camera_overlay=camera_overlay,

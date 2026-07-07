@@ -253,7 +253,7 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
         return np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float64)
 
     def fake_plot_optical_depth(optical_depth_2d, **kwargs):
-        captured["opacity"] = np.array(optical_depth_2d, copy=True)
+        captured["albedo"] = np.array(optical_depth_2d, copy=True)
         captured["overlay"] = kwargs.get("camera_overlay")
         output_path = Path(kwargs["output_path"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,10 +276,11 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
         camera_fov=70.0,
     )
 
-    raw_tau = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float64)
-    raw_opacity = 1.0 - np.exp(-raw_tau)
-    expected = raw_opacity[::-1, ::-1].T
-    np.testing.assert_allclose(captured["opacity"], expected, atol=1e-7)
+    raw_tau = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
+    # Two-stream visual albedo, g=0.85 (matches glimpse.main)
+    raw_albedo = raw_tau / (raw_tau + np.float32(2.0 / (1.0 - 0.85)))
+    expected = raw_albedo[::-1, ::-1].T
+    np.testing.assert_allclose(captured["albedo"], expected, atol=1e-6)
 
     cam_x, _ = captured["overlay"]["camera_xy"]
     for end_x, _ in captured["overlay"]["fov_endpoints"]:
