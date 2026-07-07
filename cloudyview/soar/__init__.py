@@ -20,6 +20,9 @@ Offscreen:
 Windowed fly-through:
 
     uv run python -m cloudyview.soar cloud.nc [--ice ice.nc]
+
+ESC opens the control-center menu (resume, open file, render in behold,
+fullscreen, quit). F12 writes a metadata-bearing PNG screenshot.
 """
 
 from .engine import InteractiveRenderer, request_device

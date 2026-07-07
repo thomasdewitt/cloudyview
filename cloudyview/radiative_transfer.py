@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
-from typing import Dict, Optional, Literal
+from typing import Any, Callable, Dict, Optional, Literal
 from .angles import direction_from_azimuth_elevation
 
 try:
@@ -210,7 +210,10 @@ def _fmt_eta(seconds):
 
 
 def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config=None,
-                         verbose=True):
+                         verbose=True,
+                         progress_callback: Optional[
+                             Callable[[Dict[str, Any]], None]
+                         ] = None):
     """
     Minimal progressive render with single-line print and ETA.
     Prints 0% first, then updates AFTER each chunk finishes.
@@ -234,11 +237,26 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
     verbose : bool
         Print the progress/ETA line (default True; the library render
         functions pass False).
+    progress_callback : callable, optional
+        Called at 0% and after each completed chunk with a dict containing
+        ``taken_spp``, ``spp_total``, ``percent``, ``elapsed``, and ``eta``.
     """
     acc = None
     taken = 0
     start = time.perf_counter()
     warmup_time = None
+
+    def notify(elapsed: float, eta: Optional[float]) -> None:
+        if progress_callback is None:
+            return
+        progress_callback({
+            "taken_spp": taken,
+            "spp_total": spp_total,
+            "step_spp": step_spp,
+            "percent": 100.0 * taken / spp_total if spp_total else 100.0,
+            "elapsed": elapsed,
+            "eta": eta,
+        })
 
     # Track which checkpoints we've already saved
     checkpoints = []
@@ -251,6 +269,7 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
     # initial line (0%)
     if verbose:
         print(f"  0% | 0/{spp_total} spp | Elapsed: --:-- | ETA: --:--", end="", flush=True)
+    notify(0.0, None)
 
     # iterate in chunks without off-by-one
     for k, _ in enumerate(range(0, spp_total, step_spp)):
@@ -302,6 +321,9 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
             samples_after_warmup = taken - step_spp
             if effective_elapsed > 0 and samples_after_warmup > 0:
                 eta = effective_elapsed * (spp_total - taken) / samples_after_warmup
+        elif taken > 0 and elapsed > 0:
+            eta = elapsed * (spp_total - taken) / taken
+        notify(elapsed, eta)
 
         if verbose:
             pct = 100.0 * taken / spp_total

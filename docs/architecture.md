@@ -113,9 +113,14 @@ Interactive techniques (in rough order):
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
 - Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
   FOV wedge (reuse glimpse overlay math).
-- Screenshot key (PNG with camera metadata embedded).
-- "Render in behold" action: shells out a background behold render with the
-  current camera.
+- Screenshot key (F12): offscreen PNG at the current window size with camera,
+  source-file, sun, renderer, version, timestamp, and reproduction metadata
+  embedded in PNG text chunks.
+- ESC menu as control center: open a new `.nc` (with split ice-file prompt),
+  render the current `app.camera()` in `behold`, toggle fullscreen, resume, or
+  quit. Behold runs in the foreground because the Mitsuba GPU backend needs the
+  full device; the title reports progress/ETA and warns that it cannot be
+  canceled once started.
 - Later garnish: a subject (bird / paper airplane) in front of the camera.
 
 ## Testing
