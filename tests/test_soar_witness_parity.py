@@ -1,8 +1,9 @@
 """Witness-vs-soar parity harness for staged renderer ports.
 
-Stage 2 covers the analytic sky, tone map, and single-domain cloud scattering.
-The FIF ocean remains out of scope; comparison masks keep only above-horizon
-pixels so witness's ocean pass does not participate.
+Stage 3 covers the analytic sky, tone map, single-domain cloud scattering,
+and the FIF ocean. The harness generates one seeded FIF normal realization and
+passes those exact arrays into both witness.render_nested() and Soar so ocean
+pixels are deterministic at parity-test scale.
 """
 
 from dataclasses import dataclass
@@ -29,11 +30,16 @@ if not _adapter_ok():  # pragma: no cover
                 allow_module_level=True)
 
 
-ARTIFACT_DIR = Path(__file__).parent.parent / "parity_out" / "stage2"
+ARTIFACT_DIR = Path(__file__).parent.parent / "parity_out" / "stage3"
 DATA128 = Path(__file__).parent.parent / "data" / "TWPICE_subvolume_128x128_5km.nc"
 SKY_SIZE = (96, 64)
 CLOUD_SIZE = (96, 64)
 SKY_ABS_TOL = 3.0 / 255.0
+OCEAN_ABS_TOL = 3.0 / 255.0
+OCEAN_SHADOW_MEAN_TOL = 1.5 / 255.0
+OCEAN_SHADOW_P99_TOL = 3.0 / 255.0
+OCEAN_SHADOW_MAX_TOL = 12.0 / 255.0
+FIF_SEED = 20260707
 
 
 @dataclass(frozen=True)
@@ -244,7 +250,7 @@ def boundary_truncation_mask(
     """Mask rays whose cloud contribution comes from a domain boundary.
 
     Witness tapers sigma to a ghost-zero layer outside every face, while the
-    stage-2 soar shader intentionally keeps the resident texture's clamp-to-edge
+    Soar shader intentionally keeps the resident texture's clamp-to-edge
     behavior until the stage-4 boundary port. Excluding non-empty samples within
     two voxels of a face keeps the test focused on the scattering model.
     """
@@ -285,6 +291,161 @@ def boundary_truncation_mask(
     return out
 
 
+def ocean_hit_mask(field, camera, size: tuple[int, int]) -> np.ndarray:
+    """Pixels whose primary ray reaches the witness ocean extent."""
+    from cloudyview.soar.engine import _volume_aabb, camera_world_origin
+
+    bmin, bmax = _volume_aabb(field)
+    origin = camera_world_origin(camera, bmin, bmax)
+    dirs = ray_directions(camera, size)
+    dz = dirs[..., 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_ocean = (0.0 - origin[2]) / dz
+    mask = (dz < -1e-8) & (t_ocean > 0.0)
+
+    hit_x = origin[0] + t_ocean * dirs[..., 0]
+    hit_y = origin[1] + t_ocean * dirs[..., 1]
+    extent = bmax - bmin
+    center = 0.5 * (bmin + bmax)
+    mask &= np.abs(hit_x - center[0]) < extent[0] * 50.0
+    mask &= np.abs(hit_y - center[1]) < extent[1] * 50.0
+    return mask
+
+
+def ocean_shadow_and_boundary_masks(
+    field,
+    camera,
+    size: tuple[int, int],
+    base_mask: np.ndarray,
+    *,
+    sun_azimuth: float,
+    sun_elevation: float,
+    shadow_tau_threshold: float = 0.02,
+    margin_voxels: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ocean pixels with cloud shadow and those hitting boundary clouds."""
+    from cloudyview import optical_depth
+    from cloudyview.angles import direction_from_azimuth_elevation
+    from cloudyview.soar.engine import (
+        STEP_VOXEL_FACTOR,
+        _volume_aabb,
+        camera_world_origin,
+    )
+
+    bmin, bmax = _volume_aabb(field)
+    origin = camera_world_origin(camera, bmin, bmax)
+    dirs = ray_directions(camera, size)
+    sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
+    shape = np.array(field.shape)
+    voxel = (bmax - bmin) / shape
+    dt_max = float(voxel.min()) * STEP_VOXEL_FACTOR
+    margin = margin_voxels / shape.astype(np.float64)
+    sigma = optical_depth.compute_extinction_field(
+        field.lwc, field.z, iwc=field.iwc
+    ).astype(np.float64)
+
+    shadow = np.zeros(base_mask.shape, dtype=bool)
+    boundary = np.zeros(base_mask.shape, dtype=bool)
+    for y, x in zip(*np.nonzero(base_mask)):
+        direction = dirs[y, x]
+        if direction[2] >= -1e-8:
+            continue
+        t_ocean = (0.0 - origin[2]) / direction[2]
+        if t_ocean <= 0.0:
+            continue
+        p0 = origin + t_ocean * direction
+        t, t_far = _ray_box_np(p0, sun, bmin, bmax)
+        if t > t_far or t_far <= 0.0:
+            continue
+        tau = 0.0
+        while t < t_far:
+            p = p0 + t * sun
+            s = _sample_sigma_ghost_zero(sigma, bmin, voxel, p)
+            dt = dt_max
+            if t + dt > t_far:
+                dt = t_far - t
+            d_tau = s * dt
+            tau += d_tau
+            if d_tau >= 1e-5:
+                frac = (p - bmin) / (bmax - bmin)
+                if np.any(frac < margin) or np.any(frac > 1.0 - margin):
+                    boundary[y, x] = True
+            if tau > shadow_tau_threshold:
+                shadow[y, x] = True
+            if tau > 80.0:
+                break
+            t += dt
+    return shadow, boundary
+
+
+def render_witness_with_fif(
+    field,
+    *,
+    camera,
+    size: tuple[int, int],
+    sun_azimuth: float,
+    sun_elevation: float,
+    fif_normals,
+) -> np.ndarray:
+    """Render witness via render_nested() with caller-supplied FIF normals."""
+    from cloudyview import optical_depth
+    from cloudyview.angles import direction_from_azimuth_elevation
+    from cloudyview.soar.engine import _volume_aabb, camera_world_origin
+    from cloudyview.witness import (
+        AMBIENT_STRENGTH,
+        G_HG,
+        MAX_STEPS,
+        N_LIGHT_STEPS,
+        OCEAN_REFLECTANCE,
+        POWDER_COEFF,
+        STEP_VOXEL_FACTOR,
+        SUN_COLOR,
+        NestedLevel,
+        render_nested,
+    )
+
+    bmin, bmax = _volume_aabb(field)
+    iwc = field.iwc
+    if iwc is not None and float(np.max(iwc)) < 1e-6:
+        iwc = None
+    sigma = optical_depth.compute_extinction_field(
+        field.lwc, field.z, re=10.0, iwc=iwc, re_ice=30.0
+    ).astype(np.float64)
+    level = NestedLevel(
+        sigma=np.ascontiguousarray(sigma),
+        bmin=bmin,
+        bmax=bmax,
+        name="single",
+    )
+    origin = camera_world_origin(camera, bmin, bmax)
+    forward, right, up = camera.basis()
+    sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
+
+    return render_nested(
+        [level],
+        tuple(origin),
+        tuple(forward),
+        tuple(right),
+        tuple(up),
+        tuple(sun),
+        size,
+        fov_degrees=camera.fov,
+        n_light_steps=N_LIGHT_STEPS,
+        step_voxel_factor=STEP_VOXEL_FACTOR,
+        max_steps=MAX_STEPS,
+        exposure=4.0,
+        ocean_enabled=True,
+        ocean_z=0.0,
+        ocean_reflectance=OCEAN_REFLECTANCE,
+        fif_normals=fif_normals,
+        sun_color=SUN_COLOR,
+        g_hg=G_HG,
+        ambient_strength=AMBIENT_STRENGTH,
+        powder_coeff=POWDER_COEFF,
+        verbose=False,
+    ).astype(np.float64)
+
+
 def render_witness_soar_pair(
     field,
     renderer,
@@ -293,19 +454,17 @@ def render_witness_soar_pair(
     size: tuple[int, int],
     sun_azimuth: float,
     sun_elevation: float,
+    fif_normals,
 ) -> ParityRender:
     """Render one scene through CPU witness and soar with matched controls."""
-    import cloudyview as cv
-
-    witness = cv.witness(
+    witness = render_witness_with_fif(
         field,
         camera=camera,
         size=size,
         sun_azimuth=sun_azimuth,
         sun_elevation=sun_elevation,
-        exposure=4.0,
-        verbose=False,
-    ).astype(np.float64)
+        fif_normals=fif_normals,
+    )
     soar_u8 = renderer.render(
         camera,
         size=size,
@@ -382,10 +541,29 @@ def field():
 
 
 @pytest.fixture(scope="module")
-def renderer(field):
+def fif_normals():
+    from cloudyview.ocean_fif import generate_fif_normals
+
+    np.random.seed(FIF_SEED)
+    return generate_fif_normals(
+        rng=np.random.default_rng(FIF_SEED),
+        verbose=False,
+    )
+
+
+def assert_renderer_uses_fif(renderer, fif_normals) -> None:
+    for uploaded, expected in zip(renderer.ocean_fif_normals[:3], fif_normals[:3]):
+        assert np.array_equal(uploaded, expected)
+    assert renderer.ocean_fif_normals[3] == fif_normals[3]
+
+
+@pytest.fixture(scope="module")
+def renderer(field, fif_normals):
     from cloudyview.soar import InteractiveRenderer
 
-    return InteractiveRenderer(field)
+    r = InteractiveRenderer(field, fif_normals=fif_normals)
+    assert_renderer_uses_fif(r, fif_normals)
+    return r
 
 
 @pytest.fixture(scope="module")
@@ -394,10 +572,12 @@ def gaussian_field_fixture():
 
 
 @pytest.fixture(scope="module")
-def gaussian_renderer(gaussian_field_fixture):
+def gaussian_renderer(gaussian_field_fixture, fif_normals):
     from cloudyview.soar import InteractiveRenderer
 
-    return InteractiveRenderer(gaussian_field_fixture)
+    r = InteractiveRenderer(gaussian_field_fixture, fif_normals=fif_normals)
+    assert_renderer_uses_fif(r, fif_normals)
+    return r
 
 
 @pytest.fixture(scope="module")
@@ -408,10 +588,12 @@ def twpice128_field():
 
 
 @pytest.fixture(scope="module")
-def twpice128_renderer(twpice128_field):
+def twpice128_renderer(twpice128_field, fif_normals):
     from cloudyview.soar import InteractiveRenderer
 
-    return InteractiveRenderer(twpice128_field)
+    r = InteractiveRenderer(twpice128_field, fif_normals=fif_normals)
+    assert_renderer_uses_fif(r, fif_normals)
+    return r
 
 
 def _sky_cases():
@@ -436,6 +618,13 @@ def _sky_cases():
             name="low_horizon",
             camera=cv.Camera(position=(0.0, 0.0, -0.999),
                              azimuth=200.0, elevation=12.0, fov=80.0),
+            sun_azimuth=20.0,
+            sun_elevation=55.0,
+        ),
+        ParityCase(
+            name="ocean_dominant_empty",
+            camera=cv.Camera(position=(0.0, 0.0, -0.999),
+                             azimuth=210.0, elevation=2.0, fov=72.0),
             sun_azimuth=20.0,
             sun_elevation=55.0,
         ),
@@ -483,8 +672,29 @@ def _twpice128_cases():
     ]
 
 
-def test_soar_matches_witness_sky_and_tone_map(field, renderer):
-    """Sky-only parity, masking below-horizon pixels until stage 3 ocean port."""
+def _twpice128_ocean_cases():
+    import cloudyview as cv
+
+    return [
+        ParityCase(
+            name="twpice128_ocean_dominant",
+            camera=cv.Camera(position=(-0.65, -0.65, -0.999),
+                             azimuth=45.0, elevation=-6.0, fov=90.0),
+            sun_azimuth=20.0,
+            sun_elevation=55.0,
+        ),
+        ParityCase(
+            name="twpice128_mixed_cloud_ocean_shadow",
+            camera=cv.Camera(position=(0.65, 0.65, -0.999),
+                             azimuth=300.0, elevation=0.0, fov=110.0),
+            sun_azimuth=20.0,
+            sun_elevation=55.0,
+        ),
+    ]
+
+
+def test_soar_matches_witness_sky_ocean_and_tone_map(field, renderer, fif_normals):
+    """Zero-field parity: sky above the horizon, FIF ocean below it."""
     stats_by_case = {}
     for case in _sky_cases():
         pair = render_witness_soar_pair(
@@ -494,18 +704,19 @@ def test_soar_matches_witness_sky_and_tone_map(field, renderer):
             size=SKY_SIZE,
             sun_azimuth=case.sun_azimuth,
             sun_elevation=case.sun_elevation,
+            fif_normals=fif_normals,
         )
-        assert pair.above_horizon.any()
-        stats = diff_statistics(pair.witness, pair.soar, pair.above_horizon)
+        mask = np.ones(pair.above_horizon.shape, dtype=bool)
+        stats = diff_statistics(pair.witness, pair.soar, mask)
         stats_by_case[case.name] = stats.as_dict()
         _write_artifact(case, pair)
 
         # The zero field removes volume texture sampling and light marching
-        # from the compared pixels, so the remaining error should be only WGSL
-        # fp32 vs CPU fp64 plus rgba8unorm readback quantization (~0.5/255).
-        # 3/255 leaves room for backend rounding while still catching math
-        # drift in the sky constants, Lorentzian bloom, sun disk, or tone map.
-        assert stats.max_abs <= SKY_ABS_TOL
+        # from sky pixels. Ocean pixels add one hardware-bilinear normal sample
+        # and fp32 shading, but no shadow march in this empty scene. 3/255
+        # leaves room for rgba8 readback/backend rounding while still catching
+        # drift in sky constants, tone map, FIF sampling, or ocean BRDF math.
+        assert stats.max_abs <= max(SKY_ABS_TOL, OCEAN_ABS_TOL)
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     (ARTIFACT_DIR / "sky_stats.json").write_text(
@@ -516,6 +727,7 @@ def test_soar_matches_witness_sky_and_tone_map(field, renderer):
 def test_soar_matches_witness_gaussian_cloud_scattering(
     gaussian_field_fixture,
     gaussian_renderer,
+    fif_normals,
 ):
     """Smooth cloud parity: exercises scattering without boundary truncation."""
     stats_by_case = {}
@@ -527,6 +739,7 @@ def test_soar_matches_witness_gaussian_cloud_scattering(
             size=CLOUD_SIZE,
             sun_azimuth=case.sun_azimuth,
             sun_elevation=case.sun_elevation,
+            fif_normals=fif_normals,
         )
         mask = cloud_mask(
             pair,
@@ -541,8 +754,9 @@ def test_soar_matches_witness_gaussian_cloud_scattering(
         stats_by_case[case.name] = stats.as_dict()
         _write_artifact(case, pair)
 
-        # Smooth centered Gaussian: no lateral boundary truncation, no ocean,
-        # same single-grid stepping rule. The remaining differences are WGSL
+        # Smooth centered Gaussian: no lateral boundary truncation and the mask
+        # focuses on above-horizon cloud-scattering pixels. Dedicated stage-3
+        # tests assert ocean pixels. The remaining differences are WGSL
         # fp32/hardware texture interpolation, CPU fp64, and rgba8 readback.
         # Mean cloud-pixel error should stay within a couple of code values;
         # the p99/max limits leave room for fp32/tone-map/readback tails while
@@ -560,8 +774,9 @@ def test_soar_matches_witness_gaussian_cloud_scattering(
 def test_soar_matches_witness_twpice128_default_cloud_scattering(
     twpice128_field,
     twpice128_renderer,
+    fif_normals,
 ):
-    """Default-camera TWPICE parity against the stage-2 cloud model."""
+    """Default-camera TWPICE parity against the cloud-scattering model."""
     stats_by_case = {}
     for case in _twpice128_cases():
         pair = render_witness_soar_pair(
@@ -571,6 +786,7 @@ def test_soar_matches_witness_twpice128_default_cloud_scattering(
             size=CLOUD_SIZE,
             sun_azimuth=case.sun_azimuth,
             sun_elevation=case.sun_elevation,
+            fif_normals=fif_normals,
         )
         mask = cloud_mask(
             pair,
@@ -607,5 +823,72 @@ def test_soar_matches_witness_twpice128_default_cloud_scattering(
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     (ARTIFACT_DIR / "twpice128_cloud_stats.json").write_text(
+        json.dumps(stats_by_case, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def test_soar_matches_witness_twpice128_ocean_and_shadow(
+    twpice128_field,
+    twpice128_renderer,
+    fif_normals,
+):
+    """Ocean parity on real data, including cloud-shadowed water pixels."""
+    stats_by_case = {}
+    for case in _twpice128_ocean_cases():
+        pair = render_witness_soar_pair(
+            twpice128_field,
+            twpice128_renderer,
+            camera=case.camera,
+            size=CLOUD_SIZE,
+            sun_azimuth=case.sun_azimuth,
+            sun_elevation=case.sun_elevation,
+            fif_normals=fif_normals,
+        )
+        ocean = ocean_hit_mask(twpice128_field, case.camera, CLOUD_SIZE)
+        assert ocean.sum() > 100
+        shadow, shadow_boundary = ocean_shadow_and_boundary_masks(
+            twpice128_field,
+            case.camera,
+            CLOUD_SIZE,
+            ocean,
+            sun_azimuth=case.sun_azimuth,
+            sun_elevation=case.sun_elevation,
+        )
+        mask = ocean & ~shadow_boundary
+        assert mask.sum() > 100
+        shadow_mask = shadow & mask
+        if "mixed_cloud_ocean_shadow" in case.name:
+            assert shadow_mask.sum() > 25
+
+        stats = diff_statistics(pair.witness, pair.soar, mask)
+        glint_mask = mask & (pair.witness.max(axis=-1) > 0.55)
+        case_stats = {
+            "ocean_pixels_excluding_boundary_truncation": stats.as_dict(),
+            "ocean_pixels": int(ocean.sum()),
+            "shadow_pixels": int(shadow_mask.sum()),
+            "shadow_boundary_pixels": int(shadow_boundary.sum()),
+            "glint_pixels": int(glint_mask.sum()),
+        }
+        if shadow_mask.any():
+            case_stats["shadowed_ocean_pixels"] = diff_statistics(
+                pair.witness, pair.soar, shadow_mask
+            ).as_dict()
+        if glint_mask.any():
+            case_stats["glint_pixels_stats"] = diff_statistics(
+                pair.witness, pair.soar, glint_mask
+            ).as_dict()
+        stats_by_case[case.name] = case_stats
+        _write_artifact(case, pair)
+
+        # Real-data ocean pixels exercise the FIF normal texture and, where
+        # shadowed, the same cloud light march as cloud scattering. The mean
+        # is held near a few code values; p99/max allow narrow glint pixels and
+        # fp32/hardware-filtered normal interpolation without masking them out.
+        assert stats.mean_abs <= OCEAN_SHADOW_MEAN_TOL
+        assert stats.p99_abs <= OCEAN_SHADOW_P99_TOL
+        assert stats.max_abs <= OCEAN_SHADOW_MAX_TOL
+
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    (ARTIFACT_DIR / "twpice128_ocean_stats.json").write_text(
         json.dumps(stats_by_case, indent=2, sort_keys=True) + "\n"
     )
