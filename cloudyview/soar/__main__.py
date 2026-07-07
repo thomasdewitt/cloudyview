@@ -33,7 +33,7 @@ def main(argv=None):
     print(f"Loaded {field}")
     print("Controls: WASD move, Space up, LShift/C down, mouse look "
           "(Tab releases, click recaptures), scroll speed, "
-          "J jitter toggle, ESC quit")
+          "J jitter toggle, B bird toggle, ESC quit")
     run_app(field, size=(w, h),
             extinction_multiplier=args.extinction_multiplier,
             max_fps=args.max_fps)

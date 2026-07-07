@@ -8,6 +8,7 @@ Controls:
     Tab         release / recapture the mouse
     scroll      movement speed (exponential)
     J           toggle jittered ray starts (A/B the banding fix)
+    B           toggle the bird (the flying subject leading the camera)
     ESC         quit
 
 The window title shows a running fps readout and the current camera state
@@ -21,7 +22,14 @@ import numpy as np
 
 from ..camera import Camera
 from ..cloudfield import CloudField
-from .engine import InteractiveRenderer, request_device
+from .engine import (
+    DEFAULT_AMBIENT_STRENGTH,
+    DEFAULT_EXPOSURE,
+    DEFAULT_SUN_AZIMUTH,
+    DEFAULT_SUN_ELEVATION,
+    InteractiveRenderer,
+    request_device,
+)
 
 DEFAULT_SPEED = 60.0        # m/s, comfortable for the 25 km dev domain
 MOUSE_SENS = 0.12           # degrees per pixel
@@ -64,6 +72,7 @@ class FlyThroughApp:
 
         self.speed = DEFAULT_SPEED
         self.jitter = True
+        self.bird_enabled = True
         self._keys = set()
         self._last_pointer = None   # None -> ignore next move (capture jump guard)
         self._captured = False
@@ -115,6 +124,8 @@ class FlyThroughApp:
                 self.canvas.close()
             elif key in ("j", "J"):
                 self.jitter = not self.jitter
+            elif key in ("b", "B"):
+                self.bird_enabled = not self.bird_enabled
             elif key == "Tab":
                 self._capture_mouse(not self._captured)
             else:
@@ -177,8 +188,20 @@ class FlyThroughApp:
         self._frame_index += 1
 
         texture = self.context.get_current_texture()
+        view = texture.create_view()
         enc = self.renderer.device.create_command_encoder()
-        self.renderer.encode_pass(enc, texture.create_view(), self.format)
+        self.renderer.encode_pass(enc, view, self.format)
+        if self.bird_enabled:
+            bird = self.renderer.bird
+            bird.update(dt, self.position, self.azimuth, self.elevation)
+            bird.write_uniforms(
+                self.position, self.camera(), (w, h),
+                sun_azimuth=DEFAULT_SUN_AZIMUTH,
+                sun_elevation=DEFAULT_SUN_ELEVATION,
+                exposure=DEFAULT_EXPOSURE,
+                ambient_strength=DEFAULT_AMBIENT_STRENGTH,
+            )
+            bird.encode_pass(enc, view, self.format, (w, h))
         self.renderer.device.queue.submit([enc.finish()])
 
         self._fps_acc.append(dt)
