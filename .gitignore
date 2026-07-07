@@ -147,6 +147,7 @@ dmypy.json
 results/
 plots/
 output/
+parity_out/
 
 # Benchmark results (machine-specific)
 benchmarking/output/

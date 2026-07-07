@@ -2,8 +2,8 @@
 //
 // Spike scope (2026-07): ray-box entry, hardware-trilinear sampling of a
 // resident r32float 3D extinction texture, Beer-Lambert absorption with a
-// single Henyey-Greenstein sun light-march, gradient sky, per-pixel jittered
-// ray starts. This is NOT the witness look — the full port (FIF ocean,
+// single Henyey-Greenstein sun light-march, witness procedural sky,
+// per-pixel jittered ray starts. This is NOT the full witness look — FIF ocean,
 // multi-scatter octaves, powder, nested levels) happens later, function by
 // function against the numba golden reference (docs/architecture.md).
 //
@@ -128,25 +128,30 @@ fn light_march(p: vec3<f32>, sun: vec3<f32>) -> f32 {
     return exp(-tau);
 }
 
-// Simple gradient sky + sun disc. Placeholder for the witness sky port.
+// Procedural sky ported from witness._sky_radiance (witness.py lines 371-413).
 fn sky_color(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
-    let up = clamp(dir.z, -1.0, 1.0);
-    var col: vec3<f32>;
-    if (up >= 0.0) {
-        let t = pow(1.0 - up, 4.0);
-        col = mix(vec3<f32>(0.10, 0.28, 0.65), vec3<f32>(0.55, 0.68, 0.88), t);
-    } else {
-        // Below the horizon: dark sea-haze gradient (no ocean in the spike).
-        let t = clamp(-up * 6.0, 0.0, 1.0);
-        col = mix(vec3<f32>(0.55, 0.68, 0.88), vec3<f32>(0.020, 0.042, 0.075), t);
+    var t = max(0.0, dir.z);
+    let one_minus = 1.0 - t;
+    t = 1.0 - one_minus * one_minus * one_minus;
+
+    let zenith = vec3<f32>(0.0044, 0.035, 0.1156);
+    let horizon = vec3<f32>(0.10, 0.18, 0.38);
+    var col = horizon + (zenith - horizon) * t;
+
+    let cos_sun = dot(dir, sun);
+    if (cos_sun > 0.0) {
+        let sun_half_width = 0.002;
+        let a = sun_half_width / ((1.0 - cos_sun) + sun_half_width);
+        col = col + a * vec3<f32>(0.8, 0.6, 0.3);
     }
-    let cos_sun = clamp(dot(dir, sun), -1.0, 1.0);
-    col = col + vec3<f32>(1.0, 0.95, 0.85) * pow(max(cos_sun, 0.0), 1200.0) * 30.0;
-    col = col + vec3<f32>(0.28, 0.24, 0.17) * pow(max(cos_sun, 0.0), 8.0);
+    if (cos_sun > 0.9998) {
+        col = col + vec3<f32>(50.0, 45.0, 35.0);
+    }
     return col;
 }
 
-// Reinhard + gamma, matching witness.tone_map(image, exposure, gamma=1.4).
+// Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
+// with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
 fn tone_map(hdr: vec3<f32>, exposure: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
     let mapped = exposed / (1.0 + exposed);
