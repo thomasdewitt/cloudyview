@@ -1,0 +1,111 @@
+# CloudyView architecture (2026-07 redesign)
+
+Status: agreed direction (Thomas + Claude, 2026-07-07 session). This doc is the
+spec for the library-first refactor and the interactive app.
+
+## Goals
+
+1. **Library-first.** Standard usage is Python functions: 3D cloud volume in,
+   image out. CLIs remain as thin wrappers.
+2. **Interactive fly-through app** (desktop, this machine, RTX 5080): open a
+   .nc via file dialog, fly through the volume game-style, top-view minimap,
+   screenshots, launch a `behold` render from the current camera.
+3. **Rendering tiers:** `glimpse` = 2D diagnostic; `witness` = game-like
+   real-time; `behold` = offline physics engine (Mitsuba, not interactive
+   even on the 5080).
+
+## Public API (target)
+
+```python
+import cloudyview as cv
+
+# Loading — one file with both variables, or split files (SAM LPT style
+# writes one variable per file: ..._QC_*.nc, ..._QI_*.nc)
+field = cv.load("cloud.nc")                          # autodetect qc + qi
+field = cv.load("..._QC_0000000600.nc",
+                ice="..._QI_0000000600.nc")          # split files
+field = cv.load("cloud.nc", liquid_var="QC", ...)    # explicit overrides
+
+field                    # CloudField dataclass
+field.lwc, field.iwc     # (nx,ny,nz) float32 ndarrays, g/kg; iwc may be None
+field.x, field.y, field.z  # 1D coords, meters
+
+cam = cv.Camera(position=(0, -0.8, -0.95), azimuth=0, elevation=35, fov=100)
+                         # existing conventions: met azimuth (0=N, 90=E),
+                         # elevation above horizon, relative position ±1
+
+img = cv.glimpse(field)                  # (ny,nx) two-stream visual albedo
+img = cv.witness(field, camera=cam, size=(W, H))     # (H,W,3) image array
+img = cv.behold(field, camera=cam, quality="high")   # (H,W,3) image array
+```
+
+Principles:
+- **Library code raises exceptions; only CLI wrappers catch and `sys.exit`.**
+- **No silent fallbacks, ever.** Required accelerators are required; failures
+  are loud. (Longstanding project rule — see CLAUDE.md.)
+- Render functions return arrays and do not write files or call matplotlib.
+  Saving/plotting are separate helpers (`cv.save_image`, plotting in
+  `basic_render`).
+- Keep the existing CLI entry points (`glimpse`, `witness`, `behold`) working
+  with identical behavior, reimplemented on top of the library API.
+- Downstream consumers (`../steam-renders`, `../turbulon-analysis`) import
+  cloudyview internals; check what surface they use and keep it working or
+  update those repos in the same change.
+
+## Renderer strategy
+
+Three implementations of the *same* witness look, in strictness order:
+
+1. **numba CPU** (`witness.py`) — the golden reference. All look-tuning lands
+   here first. ~1300 lines, painstakingly tuned against real cloud photos.
+2. **numba CUDA** (`witness_cuda.py`) — current fast path; equivalence-tested
+   against CPU (existing test).
+3. **WGSL (wgpu-py)** — the interactive engine, ported function-by-function
+   from the numba kernel and verified against numba golden images (extend the
+   existing CPU/CUDA equivalence-test pattern; tolerance-based, since GPU
+   float math differs slightly). The numba implementation is the mirror the
+   shader is developed against — port + verify, never re-tune from scratch.
+
+Why WGSL/wgpu rather than evolving numba.cuda into the app engine: 3D-texture
+hardware trilinear sampling, no per-frame Python↔GPU round trip, and the
+shader is the portable artifact for the eventual browser/WebGPU direction.
+Python stays the host language (windowing, IO, xarray stack); the
+performance-critical inner loop leaves Python either way.
+
+Interactive techniques (in rough order):
+- Progressive rendering: reduced resolution while the camera moves, refine to
+  full when still.
+- Per-pixel jittered ray starts (blue-noise) + temporal accumulation — also
+  the expected fix for the residual ring/banding artifact (coherent
+  step-size shells around dense cores).
+- Coarse occupancy grid for empty-space skipping (cloud fields are sparse).
+- fp16 density texture option for large domains.
+
+## Scale targets
+
+- `data/TWPICE_subvolume_256x256_5km.nc` — dev/test.
+- `/home/thomas/Downloads/experiment/data_twpice/` — full SAM LPT TWPICE,
+  1024×1024×255 per variable (~1 GB fp32). QC and QI in separate files.
+  Combined extinction fits GPU memory directly; fp16 halves it. Domains
+  beyond ~2048² will need bricking/LOD — out of scope for now, don't
+  preclude it.
+
+## App shell (v0)
+
+- wgpu-py surface in a simple window (glfw via wgpu-py's gui module).
+- File-open dialog for .nc selection (split liquid/ice selection supported).
+- WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
+- Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
+  FOV wedge (reuse glimpse overlay math).
+- Screenshot key (PNG with camera metadata embedded).
+- "Render in behold" action: shells out a background behold render with the
+  current camera.
+- Later garnish: a subject (bird / paper airplane) in front of the camera.
+
+## Testing
+
+- Keep and extend the equivalence-test pattern: CPU numba is truth; CUDA and
+  WGSL match within tolerance on benchmark scenes.
+- Reference photos: Thomas's own photos get promoted to `references/photos/`
+  (committed); stock-site images stay local-only (gitignored) for licensing
+  reasons.
