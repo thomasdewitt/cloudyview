@@ -20,6 +20,8 @@ def main(argv=None):
     parser.add_argument("--size", default="1280x720",
                         help="window size WxH (default 1280x720)")
     parser.add_argument("--extinction-multiplier", type=float, default=1.0)
+    parser.add_argument("--max-fps", type=float, default=120.0,
+                        help="frame-rate cap (default 120)")
     args = parser.parse_args(argv)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
@@ -29,10 +31,12 @@ def main(argv=None):
 
     field = load(args.filepath, ice=args.ice)
     print(f"Loaded {field}")
-    print("Controls: WASD move, Space/C up/down, left-drag look, "
-          "scroll speed, J jitter toggle, ESC quit")
+    print("Controls: WASD move, Space up, LShift/C down, mouse look "
+          "(Tab releases, click recaptures), scroll speed, "
+          "J jitter toggle, ESC quit")
     run_app(field, size=(w, h),
-            extinction_multiplier=args.extinction_multiplier)
+            extinction_multiplier=args.extinction_multiplier,
+            max_fps=args.max_fps)
 
 
 if __name__ == "__main__":

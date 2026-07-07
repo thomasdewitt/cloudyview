@@ -30,13 +30,17 @@ SPEED_WHEEL_FACTOR = 1.25   # per wheel notch
 
 class FlyThroughApp:
     def __init__(self, field: CloudField, *, size=(1280, 720),
-                 extinction_multiplier: float = 1.0):
+                 extinction_multiplier: float = 1.0,
+                 max_fps: float = 120.0):
         # Import here so offscreen use never needs glfw / a display.
         from rendercanvas.glfw import RenderCanvas, loop
 
         self._loop = loop
+        # "continuous" honors max_fps; uncapped ("fastest", vsync off) burns
+        # a full GPU rendering ~4000 fps nobody can see.
         self.canvas = RenderCanvas(
-            title="cloudyview", size=size, update_mode="fastest", vsync=False
+            title="cloudyview", size=size, update_mode="continuous",
+            max_fps=max_fps, vsync=True,
         )
 
         device = request_device()
