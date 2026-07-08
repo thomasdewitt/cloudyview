@@ -20,7 +20,7 @@ Pause menu:
     ESC / R     resume and recapture the mouse
     O           open the in-window .nc browser
     G           render current view in behold (then 1=min, 2=low,
-                3=medium, 4=high; ESC backs out)
+                3=medium, 4=high, 5=max/overnight; ESC backs out)
     F           toggle fullscreen/windowed
     Q           quit from the top-level pause menu
 
@@ -1110,7 +1110,8 @@ class FlyThroughApp:
                 ("Min", "min"),
                 ("Low", "low"),
                 ("Medium", "medium"),
-                ("High", "high"),
+                ("High (~1 h)", "high"),
+                ("Max (overnight)", "max"),
             ):
                 if self._imgui_button(imgui, label):
                     self._run_behold_render(quality)

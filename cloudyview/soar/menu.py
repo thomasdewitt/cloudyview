@@ -30,6 +30,7 @@ BEHOLD_QUALITIES_BY_KEY = {
     "2": "low",
     "3": "medium",
     "4": "high",
+    "5": "max",   # pre-2026-07-07 'high': 1200x800, 2048 spp — overnight tier
 }
 
 
