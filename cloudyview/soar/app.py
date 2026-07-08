@@ -51,6 +51,7 @@ from .fullscreen import (
     choose_fullscreen_monitor,
     fullscreen_video_mode,
     safe_windowed_bounds,
+    video_mode_fields,
 )
 from .jobs import BackgroundJob
 from .menu import (
@@ -340,7 +341,7 @@ class FlyThroughApp:
             monitor, mode = fullscreen_video_mode(glfw, monitor)
             glfw.set_window_monitor(
                 window, monitor, 0, 0,
-                int(mode.width), int(mode.height), int(mode.refresh_rate),
+                *video_mode_fields(mode),
             )
             self._fullscreen = True
 
