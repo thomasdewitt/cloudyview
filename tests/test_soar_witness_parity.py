@@ -54,16 +54,22 @@ def _realism_off() -> dict[str, float]:
 
 def _realism_on() -> dict[str, float]:
     from cloudyview.witness import (
+        AMBIENT_OCCLUSION_FLOOR,
         AMBIENT_OCCLUSION_STRENGTH,
         BOUNCE_DEPTH_ATTENUATION,
         DEEP_SHADOW_MS_SUPPRESSION,
+        GRADIENT_SHADING_COARSE_RADIUS_M,
+        GRADIENT_SHADING_COARSE_WEIGHT,
         GRADIENT_SHADING_STRENGTH,
     )
 
     return {
         "gradient_shading_strength": GRADIENT_SHADING_STRENGTH,
+        "gradient_coarse_weight": GRADIENT_SHADING_COARSE_WEIGHT,
+        "gradient_coarse_radius_m": GRADIENT_SHADING_COARSE_RADIUS_M,
         "deep_shadow_ms_suppression": DEEP_SHADOW_MS_SUPPRESSION,
         "ambient_occlusion_strength": AMBIENT_OCCLUSION_STRENGTH,
+        "ambient_occlusion_floor": AMBIENT_OCCLUSION_FLOOR,
         "bounce_depth_attenuation": BOUNCE_DEPTH_ATTENUATION,
     }
 
@@ -835,7 +841,7 @@ def test_soar_matches_witness_twpice128_cb_realism_on(
         }
         _write_artifact(gated_case, pair)
 
-        # The gates-on case adds six gradient texture samples and several
+        # The blended gates-on case adds twelve gradient texture samples and several
         # saturated-shadow nonlinearities. CPU witness uses fp64 trilinear
         # sampling; Soar uses fp32 hardware filtering and rgba8 readback, so
         # the tail is allowed slightly more room than the all-off TWPICE case

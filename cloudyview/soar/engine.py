@@ -40,9 +40,12 @@ DEFAULT_EXPOSURE = 4.0
 DEFAULT_G_HG = 0.76
 DEFAULT_AMBIENT_STRENGTH = 0.12
 DEFAULT_OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)  # witness.py:104-106
-DEFAULT_GRADIENT_SHADING_STRENGTH = 0.75
+DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50
+DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65
+DEFAULT_GRADIENT_COARSE_RADIUS_M = 500.0
 DEFAULT_DEEP_SHADOW_MS_SUPPRESSION = 0.90
-DEFAULT_AMBIENT_OCCLUSION_STRENGTH = 0.75
+DEFAULT_AMBIENT_OCCLUSION_STRENGTH = 1.00
+DEFAULT_AMBIENT_OCCLUSION_FLOOR = 0.24
 DEFAULT_BOUNCE_DEPTH_ATTENUATION = 0.80
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 
@@ -550,8 +553,11 @@ class InteractiveRenderer:
         g_hg: float = DEFAULT_G_HG,
         ambient_strength: float = DEFAULT_AMBIENT_STRENGTH,
         gradient_shading_strength: float = DEFAULT_GRADIENT_SHADING_STRENGTH,
+        gradient_coarse_weight: float = DEFAULT_GRADIENT_COARSE_WEIGHT,
+        gradient_coarse_radius_m: float = DEFAULT_GRADIENT_COARSE_RADIUS_M,
         deep_shadow_ms_suppression: float = DEFAULT_DEEP_SHADOW_MS_SUPPRESSION,
         ambient_occlusion_strength: float = DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
+        ambient_occlusion_floor: float = DEFAULT_AMBIENT_OCCLUSION_FLOOR,
         bounce_depth_attenuation: float = DEFAULT_BOUNCE_DEPTH_ATTENUATION,
         frame_index: int = 0,
         subpixel: bool = False,
@@ -579,7 +585,12 @@ class InteractiveRenderer:
             1.0 if self.ocean_enabled else 0.0,
             self.ocean_max_lod,
         ]
-        u[10] = [1.0 if subpixel else 0.0, 0.0, 0.0, 0.0]
+        u[10] = [
+            1.0 if subpixel else 0.0,
+            gradient_coarse_weight,
+            gradient_coarse_radius_m,
+            ambient_occlusion_floor,
+        ]
         u[11] = [
             gradient_shading_strength,
             deep_shadow_ms_suppression,

@@ -109,11 +109,17 @@ BOUNCE_TINT_B = 0.92
 # that term and restores the pre-package look for that path.
 #
 # 1) Gradient thick-surface shading. Central-difference sigma samples estimate
-# the outward normal N=-normalize(grad sigma). The N.sun lobe modulates only
-# the sun/MS contribution, gated by tau_depth and gradient confidence so thin
-# fair-weather wisps do not become plastic or noisy.
-GRADIENT_SHADING_STRENGTH = 0.75
+# the outward normal N=-normalize(grad sigma). A fine stencil keeps close-range
+# surface relief; a coarse world-space stencil recovers the 100s-of-meters lobe
+# orientation that survives kilometer-range viewing. The N.sun lobe modulates
+# only the sun/MS contribution, gated by tau_depth and gradient confidence so
+# thin fair-weather wisps do not become plastic or noisy.
+GRADIENT_SHADING_STRENGTH = 1.50
 GRADIENT_SHADING_RADIUS_VOXELS = 1.0
+GRADIENT_SHADING_COARSE_WEIGHT = 0.65
+GRADIENT_SHADING_COARSE_RADIUS_M = 500.0
+GRADIENT_SHADING_COARSE_MIN_VOXELS = 4.0
+GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION = 0.125
 GRADIENT_SHADING_TAU_START = 0.25
 GRADIENT_SHADING_TAU_FULL = 1.60
 GRADIENT_SHADING_CONF_START = 0.06
@@ -131,8 +137,8 @@ DEEP_SHADOW_MS_FLOOR = 0.24
 # 3) Directional ambient occlusion. The same saturated sun optical depth is
 # used as a cheap directional sky-access proxy. It removes fill in buried
 # cavities while retaining a cool blue ambient floor.
-AMBIENT_OCCLUSION_STRENGTH = 0.75
-AMBIENT_OCCLUSION_FLOOR = 0.34
+AMBIENT_OCCLUSION_STRENGTH = 1.00
+AMBIENT_OCCLUSION_FLOOR = 0.24
 
 # 4) Depth-attenuated bounce. Ground/ocean bounce should light the visible
 # underside skin, not the whole core. k is in optical-depth units.
@@ -312,13 +318,9 @@ def _sample_sigma_level_k(k, px, py, pz,
 
 
 @njit(inline="always")
-def _sigma_gradient_level(k, px, py, pz,
-                          sigma_stacked, level_offsets, level_dims,
-                          level_bmin, level_dxs):
-    hx = level_dxs[k, 0] * GRADIENT_SHADING_RADIUS_VOXELS
-    hy = level_dxs[k, 1] * GRADIENT_SHADING_RADIUS_VOXELS
-    hz = level_dxs[k, 2] * GRADIENT_SHADING_RADIUS_VOXELS
-
+def _sigma_gradient_at_radius_level(k, px, py, pz, hx, hy, hz,
+                                    sigma_stacked, level_offsets, level_dims,
+                                    level_bmin, level_dxs):
     sxp = _sample_sigma_level_k(k, px + hx, py, pz,
                                 sigma_stacked, level_offsets, level_dims,
                                 level_bmin, level_dxs)
@@ -341,12 +343,116 @@ def _sigma_gradient_level(k, px, py, pz,
     gx = (sxp - sxm) / (2.0 * hx)
     gy = (syp - sym) / (2.0 * hy)
     gz = (szp - szm) / (2.0 * hz)
-    h_min = hx
-    if hy < h_min:
-        h_min = hy
-    if hz < h_min:
-        h_min = hz
-    return gx, gy, gz, h_min
+    return gx, gy, gz
+
+
+@njit(inline="always")
+def _sigma_gradient_level(k, px, py, pz, sigma,
+                          gradient_coarse_weight,
+                          gradient_coarse_radius_m,
+                          sigma_stacked, level_offsets, level_dims,
+                          level_bmin, level_dxs):
+    fine_hx = level_dxs[k, 0] * GRADIENT_SHADING_RADIUS_VOXELS
+    fine_hy = level_dxs[k, 1] * GRADIENT_SHADING_RADIUS_VOXELS
+    fine_hz = level_dxs[k, 2] * GRADIENT_SHADING_RADIUS_VOXELS
+    fine_x, fine_y, fine_z = _sigma_gradient_at_radius_level(
+        k, px, py, pz, fine_hx, fine_hy, fine_hz,
+        sigma_stacked, level_offsets, level_dims, level_bmin, level_dxs,
+    )
+    fine_h_min = fine_hx
+    if fine_hy < fine_h_min:
+        fine_h_min = fine_hy
+    if fine_hz < fine_h_min:
+        fine_h_min = fine_hz
+    fine_len = pymath.sqrt(
+        fine_x * fine_x + fine_y * fine_y + fine_z * fine_z
+    )
+    fine_conf = (fine_len * fine_h_min) / (sigma + 1e-4)
+
+    if gradient_coarse_weight <= 0.0:
+        return fine_x, fine_y, fine_z, fine_conf
+
+    dx = level_dxs[k, 0]
+    dy = level_dxs[k, 1]
+    dz = level_dxs[k, 2]
+    extent_x = level_dims[k, 0] * dx
+    extent_y = level_dims[k, 1] * dy
+    extent_z = level_dims[k, 2] * dz
+
+    coarse_hx = gradient_coarse_radius_m
+    min_hx = GRADIENT_SHADING_COARSE_MIN_VOXELS * dx
+    max_hx = GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION * extent_x
+    if coarse_hx < min_hx:
+        coarse_hx = min_hx
+    if coarse_hx > max_hx:
+        coarse_hx = max_hx
+    if coarse_hx < fine_hx:
+        coarse_hx = fine_hx
+
+    coarse_hy = gradient_coarse_radius_m
+    min_hy = GRADIENT_SHADING_COARSE_MIN_VOXELS * dy
+    max_hy = GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION * extent_y
+    if coarse_hy < min_hy:
+        coarse_hy = min_hy
+    if coarse_hy > max_hy:
+        coarse_hy = max_hy
+    if coarse_hy < fine_hy:
+        coarse_hy = fine_hy
+
+    coarse_hz = gradient_coarse_radius_m
+    min_hz = GRADIENT_SHADING_COARSE_MIN_VOXELS * dz
+    max_hz = GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION * extent_z
+    if coarse_hz < min_hz:
+        coarse_hz = min_hz
+    if coarse_hz > max_hz:
+        coarse_hz = max_hz
+    if coarse_hz < fine_hz:
+        coarse_hz = fine_hz
+
+    coarse_x, coarse_y, coarse_z = _sigma_gradient_at_radius_level(
+        k, px, py, pz, coarse_hx, coarse_hy, coarse_hz,
+        sigma_stacked, level_offsets, level_dims, level_bmin, level_dxs,
+    )
+    coarse_h_min = coarse_hx
+    if coarse_hy < coarse_h_min:
+        coarse_h_min = coarse_hy
+    if coarse_hz < coarse_h_min:
+        coarse_h_min = coarse_hz
+    coarse_len = pymath.sqrt(
+        coarse_x * coarse_x + coarse_y * coarse_y + coarse_z * coarse_z
+    )
+    coarse_conf = (coarse_len * coarse_h_min) / (sigma + 1e-4)
+
+    if gradient_coarse_weight >= 1.0:
+        return coarse_x, coarse_y, coarse_z, coarse_conf
+
+    fine_gate = _smoothstep(
+        GRADIENT_SHADING_CONF_START, GRADIENT_SHADING_CONF_FULL, fine_conf
+    )
+    coarse_gate = _smoothstep(
+        GRADIENT_SHADING_CONF_START, GRADIENT_SHADING_CONF_FULL, coarse_conf
+    )
+    coarse_w = gradient_coarse_weight * coarse_gate
+    fine_w = (1.0 - gradient_coarse_weight) * fine_gate
+
+    blend_x = 0.0
+    blend_y = 0.0
+    blend_z = 0.0
+    if fine_len > 1e-12:
+        fine_inv_len = 1.0 / fine_len
+        blend_x += fine_w * fine_x * fine_inv_len
+        blend_y += fine_w * fine_y * fine_inv_len
+        blend_z += fine_w * fine_z * fine_inv_len
+    if coarse_len > 1e-12:
+        coarse_inv_len = 1.0 / coarse_len
+        blend_x += coarse_w * coarse_x * coarse_inv_len
+        blend_y += coarse_w * coarse_y * coarse_inv_len
+        blend_z += coarse_w * coarse_z * coarse_inv_len
+
+    grad_conf = fine_conf
+    if coarse_conf > grad_conf:
+        grad_conf = coarse_conf
+    return blend_x, blend_y, blend_z, grad_conf
 
 
 @njit(inline="always")
@@ -673,8 +779,11 @@ def _render_image(
     max_steps,
     powder_coeff,        # powder = 1 - exp(-powder_coeff * tau_depth)
     gradient_shading_strength,
+    gradient_coarse_weight,
+    gradient_coarse_radius_m,
     deep_shadow_ms_suppression,
     ambient_occlusion_strength,
+    ambient_occlusion_floor,
     bounce_depth_attenuation,
     image,
 ):
@@ -853,8 +962,10 @@ def _render_image(
                     ms_atten *= MS_ATTEN
 
                 if gradient_shading_strength > 0.0:
-                    grad_x, grad_y, grad_z, grad_h = _sigma_gradient_level(
-                        k, p_x, p_y, p_z,
+                    grad_x, grad_y, grad_z, grad_conf = _sigma_gradient_level(
+                        k, p_x, p_y, p_z, sigma,
+                        gradient_coarse_weight,
+                        gradient_coarse_radius_m,
                         sigma_stacked, level_offsets, level_dims,
                         level_bmin, level_dxs,
                     )
@@ -862,7 +973,6 @@ def _render_image(
                         grad_x * grad_x + grad_y * grad_y + grad_z * grad_z
                     )
                     if grad_len > 1e-12:
-                        grad_conf = (grad_len * grad_h) / (sigma + 1e-4)
                         surface_gate = (
                             _smoothstep(
                                 GRADIENT_SHADING_TAU_START,
@@ -906,8 +1016,8 @@ def _render_image(
                                           + (1.0 - AMBIENT_HEIGHT_FLOOR) * height_frac)
                 if ambient_occlusion_strength > 0.0:
                     amb_factor = 1.0 - ambient_occlusion_strength * deep_shadow_gate
-                    if amb_factor < AMBIENT_OCCLUSION_FLOOR:
-                        amb_factor = AMBIENT_OCCLUSION_FLOOR
+                    if amb_factor < ambient_occlusion_floor:
+                        amb_factor = ambient_occlusion_floor
                     amb *= amb_factor
                 amb_weight = transmittance * d_tau * amb
                 col_r += amb_weight * AMBIENT_TINT_R
@@ -1033,8 +1143,11 @@ def _render_levels(
     ambient_strength: float,
     powder_coeff: float,
     gradient_shading_strength: float,
+    gradient_coarse_weight: float,
+    gradient_coarse_radius_m: float,
     deep_shadow_ms_suppression: float,
     ambient_occlusion_strength: float,
+    ambient_occlusion_floor: float,
     bounce_depth_attenuation: float,
     verbose: bool,
 ) -> np.ndarray:
@@ -1089,8 +1202,11 @@ def _render_levels(
         fif_nx, fif_ny, fif_nz, fif_dx,
         step_voxel_factor, 32, powder_coeff,
         gradient_shading_strength,
+        gradient_coarse_weight,
+        gradient_coarse_radius_m,
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
+        ambient_occlusion_floor,
         bounce_depth_attenuation,
         warmup,
     )
@@ -1118,8 +1234,11 @@ def _render_levels(
         fif_nx, fif_ny, fif_nz, fif_dx,
         step_voxel_factor, max_steps, powder_coeff,
         gradient_shading_strength,
+        gradient_coarse_weight,
+        gradient_coarse_radius_m,
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
+        ambient_occlusion_floor,
         bounce_depth_attenuation,
         image,
     )
@@ -1167,8 +1286,11 @@ def render_nested(
     ambient_strength: float = AMBIENT_STRENGTH,
     powder_coeff: float = POWDER_COEFF,
     gradient_shading_strength: float = GRADIENT_SHADING_STRENGTH,
+    gradient_coarse_weight: float = GRADIENT_SHADING_COARSE_WEIGHT,
+    gradient_coarse_radius_m: float = GRADIENT_SHADING_COARSE_RADIUS_M,
     deep_shadow_ms_suppression: float = DEEP_SHADOW_MS_SUPPRESSION,
     ambient_occlusion_strength: float = AMBIENT_OCCLUSION_STRENGTH,
+    ambient_occlusion_floor: float = AMBIENT_OCCLUSION_FLOOR,
     bounce_depth_attenuation: float = BOUNCE_DEPTH_ATTENUATION,
     return_linear: bool = False,
     verbose: bool = True,
@@ -1202,8 +1324,11 @@ def render_nested(
         fif_nx, fif_ny, fif_nz, fif_dx,
         sun_color, g_hg, ambient_strength, powder_coeff,
         gradient_shading_strength,
+        gradient_coarse_weight,
+        gradient_coarse_radius_m,
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
+        ambient_occlusion_floor,
         bounce_depth_attenuation,
         verbose,
     )
@@ -1367,8 +1492,11 @@ def witness(
         fif_nx, fif_ny, fif_nz, fif_dx,
         SUN_COLOR, G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
         GRADIENT_SHADING_STRENGTH,
+        GRADIENT_SHADING_COARSE_WEIGHT,
+        GRADIENT_SHADING_COARSE_RADIUS_M,
         DEEP_SHADOW_MS_SUPPRESSION,
         AMBIENT_OCCLUSION_STRENGTH,
+        AMBIENT_OCCLUSION_FLOOR,
         BOUNCE_DEPTH_ATTENUATION,
         verbose=verbose,
     )
