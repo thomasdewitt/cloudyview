@@ -4,6 +4,12 @@ from pathlib import Path
 
 import pytest
 
+# Importing cloudyview first wires DRJIT_LIBLLVM_PATH (behold module scope)
+# before any test module's `pytest.importorskip("mitsuba")` can initialize
+# Dr.Jit without it — the LLVM backend availability is decided at that
+# first import.
+import cloudyview  # noqa: F401
+
 # =============================================================================
 # Path Configuration
 # =============================================================================

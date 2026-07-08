@@ -49,6 +49,33 @@ QUALITY_MAP = {
 }
 
 
+def _ensure_drjit_llvm_path() -> None:
+    """Point Dr.Jit at the system libLLVM when only a versioned .so exists.
+
+    Fedora ships /usr/lib64/libLLVM.so.NN (no unversioned symlink without
+    llvm-devel), and Dr.Jit >= 1.0 only dlopens "libLLVM.so" unless
+    DRJIT_LIBLLVM_PATH is set. This resolves the intended path; if no
+    library exists anywhere, Dr.Jit's own loud ImportError still fires.
+    """
+    import glob
+    import os
+
+    if os.environ.get("DRJIT_LIBLLVM_PATH"):
+        return
+    candidates = sorted(
+        glob.glob("/usr/lib64/libLLVM.so*") + glob.glob("/usr/lib/libLLVM.so*")
+        + glob.glob("/usr/lib/x86_64-linux-gnu/libLLVM*.so*")
+    )
+    if candidates:
+        os.environ["DRJIT_LIBLLVM_PATH"] = candidates[-1]
+
+
+# Wire the path at import time: Dr.Jit reads the variable when the mitsuba
+# module is first imported anywhere in the process, which can happen before
+# behold's own render functions run (e.g. test-collection probes).
+_ensure_drjit_llvm_path()
+
+
 def _prepare_extinction(field: CloudField, verbose: bool = False):
     """Extinction field + ice fraction + geometry from a CloudField.
 
@@ -245,6 +272,8 @@ def behold(
     ImportError
         If Mitsuba 3 is not installed.
     """
+    if not gpu:
+        _ensure_drjit_llvm_path()   # must precede the mitsuba/drjit import
     import mitsuba as mi
     from . import radiative_transfer
 
@@ -425,6 +454,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
 
         # Set Mitsuba backend (AD variant required by most Mitsuba builds)
         variant = f'{backend}_ad_rgb'
+        if backend == 'llvm':
+            _ensure_drjit_llvm_path()
         mi.set_variant(variant)
         print(f"  Using Mitsuba variant: {variant}")
 
