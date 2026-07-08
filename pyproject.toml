@@ -43,6 +43,7 @@ interactive = [
     # WGSL/wgpu interactive fly-through engine (cloudyview.soar).
     "wgpu>=0.19",
     "glfw>=2.6",
+    "imgui-bundle>=1.6",
 ]
 visualization = [
     "scikit-image>=0.19.0",

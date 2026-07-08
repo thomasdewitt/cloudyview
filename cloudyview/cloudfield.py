@@ -14,7 +14,7 @@ All validation and variable/coordinate inference lives in
 """
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 from pathlib import Path
 
 import numpy as np
@@ -112,6 +112,7 @@ def load(
     x_dim: Optional[str] = None,
     y_dim: Optional[str] = None,
     z_dim: Optional[str] = None,
+    stage_callback: Optional[Callable[[str], None]] = None,
 ) -> CloudField:
     """Load a cloud field from NetCDF into a :class:`CloudField`.
 
@@ -132,6 +133,8 @@ def load(
         Explicit coordinate variable names.
     x_dim, y_dim, z_dim : str, optional
         Explicit dimension names for the x/y/z axes.
+    stage_callback : callable, optional
+        Receives coarse loading stage strings for interactive callers.
 
     Returns
     -------
@@ -144,6 +147,8 @@ def load(
     ValueError
         If validation fails (dims, units, grid mismatch between files, ...).
     """
+    if stage_callback is not None:
+        stage_callback("loading file")
     result = io.load_and_validate(
         str(filepath),
         liquid_water_var=liquid_water_var,
@@ -161,6 +166,8 @@ def load(
         ice_filepath=str(ice) if ice is not None else None,
     )
 
+    if stage_callback is not None:
+        stage_callback("building CloudField")
     iw_data = result['ice_water_data']
     return CloudField(
         lwc=result['liquid_water_data'].values,
