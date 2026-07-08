@@ -155,6 +155,7 @@ class FlyThroughApp:
         self.bird_enabled = True
         self.minimap_enabled = True
         self._keys = set()
+        self._closing = False
         self._last_pointer = None   # None -> ignore next move (capture jump guard)
         self._captured = False
         self._paused = False
@@ -349,6 +350,14 @@ class FlyThroughApp:
         if self._paused:
             self.canvas.set_title(self._menu_title())
         self.canvas.request_draw()
+
+    def _close_after_frame(self) -> None:
+        """Close on the event loop, never mid-frame (surface-destroy panic)."""
+        loop = getattr(self, "_loop", None)
+        if loop is not None:
+            loop.call_soon(self.canvas.close)
+        else:
+            self.canvas.close()
 
     def _try_toggle_fullscreen(self) -> None:
         try:
@@ -788,7 +797,8 @@ class FlyThroughApp:
             elif action == ACTION_RESUME:
                 self._set_paused(False)
             elif action == ACTION_QUIT:
-                self.canvas.close()
+                self._closing = True
+                self._close_after_frame()
             elif action == ACTION_TOGGLE_FULLSCREEN:
                 self._try_toggle_fullscreen()
             elif action == ACTION_OPEN_FILE:
@@ -1053,7 +1063,8 @@ class FlyThroughApp:
             if self._imgui_button(imgui, label):
                 self._try_toggle_fullscreen()
             if self._imgui_button(imgui, "Quit"):
-                self.canvas.close()
+                self._closing = True
+                self._close_after_frame()
         finally:
             self._end_imgui_window(imgui)
 
@@ -1185,6 +1196,10 @@ class FlyThroughApp:
             self._end_imgui_window(imgui)
 
     def _draw(self):
+        # After close() the surface texture is destroyed; a queued draw
+        # submitting against it panics wgpu-native at shutdown. Bail out.
+        if self._closing or self.canvas.get_closed():
+            return
         self._pump_jobs()
         active_snapshot = self._active_job_snapshot()
 
