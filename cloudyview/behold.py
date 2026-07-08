@@ -45,7 +45,14 @@ QUALITY_MAP = {
     'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 2, 'max_depth': 4},
     'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 4, 'max_depth': 16},
     'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 16, 'max_depth': 64},
-    'high': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96},
+    # high trimmed 2026-07-07 (Thomas: "turn down resolution a bit, spp a
+    # bit, perhaps max depth"): 1200x800->960x640, spp 2048->1024,
+    # max_depth 96->64, and rr_depth 64->16 — Russian roulette is unbiased,
+    # so earlier termination trades a little variance (where the image is
+    # brightest/smoothest) for a large cut in mean path length in dense
+    # cloud. Old settings preserved as 'max' for when time doesn't matter.
+    'high': {'resolution': (960, 640), 'spp': 1024, 'rr_depth': 16, 'max_depth': 64},
+    'max': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96},
 }
 
 
@@ -576,7 +583,7 @@ def cli():
         "quality",
         nargs='?',
         default='medium',
-        choices=['min', 'low', 'medium', 'high', 'custom'],
+        choices=['min', 'low', 'medium', 'high', 'max', 'custom'],
         help=(
             "Render quality: min (150x100, spp=1, max_depth=4, rr_depth=2), "
             "low (300x200, spp=32, max_depth=16, rr_depth=4), "
