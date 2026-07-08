@@ -16,19 +16,18 @@ Controls:
     ESC         pause menu (releases the mouse)
 
 Pause menu:
-    R / click   resume and recapture the mouse
-    O           open a new .nc file (optionally a split ice .nc)
+    ESC / R     resume and recapture the mouse
+    O           open the in-window .nc browser
     G           render current view in behold (then 1=min, 2=low,
                 3=medium, 4=high; ESC backs out)
     F           toggle fullscreen/windowed
-    ESC / Q     quit
+    Q           quit from the top-level pause menu
 
-The window title shows a running fps readout and the current camera state
-in cv.Camera terms, so a good viewpoint can be transcribed straight into a
-witness/behold render call.
+Menus, file picking, loading progress, errors, and behold progress are drawn
+inside the wgpu window with Dear ImGui. The window title remains a compact
+flight readout for camera transcription into witness/behold calls.
 """
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import shlex
@@ -48,42 +47,49 @@ from .engine import (
     camera_world_origin,
     request_device,
 )
+from .fullscreen import (
+    choose_fullscreen_monitor,
+    fullscreen_video_mode,
+    safe_windowed_bounds,
+)
+from .jobs import BackgroundJob
+from .menu import (
+    ACTION_MENU_BACK,
+    ACTION_OPEN_FILE,
+    ACTION_OPEN_ICE_NO,
+    ACTION_OPEN_ICE_YES,
+    ACTION_PAUSE,
+    ACTION_QUIT,
+    ACTION_RENDER_BEHOLD,
+    ACTION_RENDER_MENU,
+    ACTION_RESUME,
+    ACTION_SCREENSHOT,
+    ACTION_TOGGLE_FULLSCREEN,
+    BEHOLD_QUALITIES_BY_KEY,
+    MENU_ERROR,
+    MENU_FILE_BROWSER_ICE,
+    MENU_FILE_BROWSER_LIQUID,
+    MENU_MAIN,
+    MENU_OPEN_ICE_PROMPT,
+    MENU_RENDER_QUALITY,
+    FileEntry,
+    control_action_for_key as _control_action_for_key,
+    list_netcdf_entries,
+    menu_transition as _menu_transition,
+)
 
 DEFAULT_SPEED = 60.0        # m/s, comfortable for the 25 km dev domain
 MOUSE_SENS = 0.12           # degrees per pixel
 SPEED_WHEEL_FACTOR = 1.25   # per wheel notch
 OCEAN_FLOOR_MARGIN_M = 2.0
 
-ACTION_PAUSE = "pause"
-ACTION_RESUME = "resume"
-ACTION_QUIT = "quit"
-ACTION_TOGGLE_FULLSCREEN = "toggle_fullscreen"
-ACTION_OPEN_FILE = "open_file"
-ACTION_OPEN_ICE_YES = "open_ice_yes"
-ACTION_OPEN_ICE_NO = "open_ice_no"
-ACTION_RENDER_MENU = "render_menu"
-ACTION_RENDER_BEHOLD = "render_behold"
-ACTION_MENU_BACK = "menu_back"
-ACTION_SCREENSHOT = "screenshot"
-
-MENU_MAIN = "main"
-MENU_OPEN_ICE_PROMPT = "open_ice_prompt"
-MENU_RENDER_QUALITY = "render_quality"
-
-BEHOLD_QUALITIES_BY_KEY = {
-    "1": "min",
-    "2": "low",
-    "3": "medium",
-    "4": "high",
-}
-
 CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
     "(Tab releases, click recaptures), scroll speed, "
     "J jitter toggle, B bird toggle, M minimap toggle, "
     "F fullscreen/window, F12 screenshot, ESC pause menu; "
-    "paused: R/click resume, O open file, G behold render, "
-    "F fullscreen/window, ESC/Q quit"
+    "paused: ESC/R resume, O open in-window file browser, G behold render, "
+    "F fullscreen/window, Q quit from the top-level menu"
 )
 
 _PAUSE_OVERLAY_SHADER = """
@@ -100,77 +106,6 @@ fn fs_main() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 0.42);
 }
 """
-
-
-def _normalized_key(key: str) -> str:
-    return key.lower() if len(key) == 1 else key
-
-
-@dataclass(frozen=True)
-class MenuTransition:
-    action: str | None
-    next_state: str | None = None
-    quality: str | None = None
-
-
-def _menu_transition(
-    paused: bool, menu_state: str, key: str
-) -> MenuTransition:
-    """Pure key state machine for flight, pause menu, and pause submenus."""
-    normalized = _normalized_key(key)
-    if not paused:
-        if key == "Escape":
-            return MenuTransition(ACTION_PAUSE, MENU_MAIN)
-        if key == "F12":
-            return MenuTransition(ACTION_SCREENSHOT)
-        if normalized == "f":
-            return MenuTransition(ACTION_TOGGLE_FULLSCREEN)
-        return MenuTransition(None)
-
-    if menu_state == MENU_MAIN:
-        if key == "Escape" or normalized == "q":
-            return MenuTransition(ACTION_QUIT, MENU_MAIN)
-        if normalized == "r":
-            return MenuTransition(ACTION_RESUME, MENU_MAIN)
-        if normalized == "f":
-            return MenuTransition(ACTION_TOGGLE_FULLSCREEN, MENU_MAIN)
-        if normalized == "o":
-            return MenuTransition(ACTION_OPEN_FILE, MENU_MAIN)
-        if normalized == "g":
-            return MenuTransition(ACTION_RENDER_MENU, MENU_RENDER_QUALITY)
-        return MenuTransition(None, MENU_MAIN)
-
-    if menu_state == MENU_OPEN_ICE_PROMPT:
-        if key == "Escape":
-            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
-        if normalized == "q":
-            return MenuTransition(ACTION_QUIT, MENU_OPEN_ICE_PROMPT)
-        if normalized == "y":
-            return MenuTransition(ACTION_OPEN_ICE_YES, MENU_OPEN_ICE_PROMPT)
-        if normalized == "n":
-            return MenuTransition(ACTION_OPEN_ICE_NO, MENU_OPEN_ICE_PROMPT)
-        return MenuTransition(None, MENU_OPEN_ICE_PROMPT)
-
-    if menu_state == MENU_RENDER_QUALITY:
-        if key == "Escape":
-            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
-        if normalized == "q":
-            return MenuTransition(ACTION_QUIT, MENU_RENDER_QUALITY)
-        quality = BEHOLD_QUALITIES_BY_KEY.get(normalized)
-        if quality is not None:
-            return MenuTransition(
-                ACTION_RENDER_BEHOLD, MENU_RENDER_QUALITY, quality
-            )
-        return MenuTransition(None, MENU_RENDER_QUALITY)
-
-    return MenuTransition(None, menu_state)
-
-
-def _control_action_for_key(
-    paused: bool, key: str, menu_state: str = MENU_MAIN
-) -> str | None:
-    """Backward-compatible action-only view of the menu state machine."""
-    return _menu_transition(paused, menu_state, key).action
 
 
 def _clamp_position_above_ocean(
@@ -224,7 +159,17 @@ class FlyThroughApp:
         self._paused = False
         self._menu_state = MENU_MAIN
         self._pending_open_path = None
+        self._file_browser_dir = (
+            Path(field.source).expanduser().parent
+            if field.source else Path.cwd()
+        )
+        self._last_file_dir = self._file_browser_dir
+        self._file_browser_error = None
+        self._loading_job = None
+        self._behold_job = None
         self._rendering = False
+        self._error_message = None
+        self._imgui = None
         self._fullscreen = False
         self._windowed_bounds = None
         self._pause_overlay_pipelines = {}
@@ -239,7 +184,7 @@ class FlyThroughApp:
         self.canvas.add_event_handler(self._on_event,
                                       "key_down", "key_up",
                                       "pointer_down", "pointer_up",
-                                      "pointer_move", "wheel")
+                                      "pointer_move", "wheel", "char")
         self.canvas.request_draw(self._draw)
 
     # ------------------------------------------------------------------
@@ -303,34 +248,28 @@ class FlyThroughApp:
         self._last_pointer = None
 
     def _paused_title(self, fps: float | None = None) -> str:
-        target = "windowed" if self._fullscreen else "fullscreen"
         fps_part = "" if fps is None else f"  {fps:5.1f} fps"
-        return (
-            f"cloudyview PAUSED{fps_part}  frame={self._frame_index}  "
-            f"R/click resume  O open file  G behold  F {target}  ESC/Q quit"
-        )
+        return f"cloudyview paused{fps_part}  frame={self._frame_index}"
 
     def _open_ice_title(self) -> str:
         filename = (
             Path(self._pending_open_path).name if self._pending_open_path else ""
         )
-        return (
-            f"cloudyview OPEN FILE  {filename}  "
-            "pick separate ice file?  Y yes  N no  ESC back"
-        )
+        return f"cloudyview open file  {filename}"
 
     def _render_quality_title(self) -> str:
-        return (
-            "cloudyview BEHOLD QUALITY  "
-            "1 min  2 low  3 medium  4 high  ESC back"
-        )
+        return "cloudyview behold quality"
 
     def _menu_title(self, fps: float | None = None) -> str:
         state = getattr(self, "_menu_state", MENU_MAIN)
         if state == MENU_OPEN_ICE_PROMPT:
             return self._open_ice_title()
+        if state in (MENU_FILE_BROWSER_LIQUID, MENU_FILE_BROWSER_ICE):
+            return "cloudyview file browser"
         if state == MENU_RENDER_QUALITY:
             return self._render_quality_title()
+        if state == MENU_ERROR:
+            return "cloudyview error"
         return self._paused_title(fps)
 
     def _set_menu_state(self, state: str) -> None:
@@ -363,6 +302,8 @@ class FlyThroughApp:
         else:
             self._menu_state = MENU_MAIN
             self._pending_open_path = None
+            self._file_browser_error = None
+            self._error_message = None
             self._capture_mouse(True)
             self._last_time = perf_counter()
         self.canvas.request_draw()
@@ -373,43 +314,10 @@ class FlyThroughApp:
         window = self.canvas._window
         if window is None:
             raise RuntimeError("Cannot choose a fullscreen monitor: window closed.")
-
-        monitor = glfw.get_window_monitor(window)
-        if monitor is not None:
-            return monitor
-
-        monitors = glfw.get_monitors()
-        if not monitors:
+        monitor = choose_fullscreen_monitor(glfw, window)
+        if monitor is None:
             raise RuntimeError("Cannot enter fullscreen: GLFW found no monitors.")
-
-        wx, wy = glfw.get_window_pos(window)
-        ww, wh = glfw.get_window_size(window)
-        wcx, wcy = wx + ww * 0.5, wy + wh * 0.5
-
-        best = None
-        best_overlap = -1
-        best_distance = float("inf")
-        for candidate in monitors:
-            mode = glfw.get_video_mode(candidate)
-            if mode is None:
-                continue
-            mx, my = glfw.get_monitor_pos(candidate)
-            mw, mh = int(mode.width), int(mode.height)
-            overlap_w = max(0, min(wx + ww, mx + mw) - max(wx, mx))
-            overlap_h = max(0, min(wy + wh, my + mh) - max(wy, my))
-            overlap = overlap_w * overlap_h
-            mcx, mcy = mx + mw * 0.5, my + mh * 0.5
-            distance = (wcx - mcx) ** 2 + (wcy - mcy) ** 2
-            if overlap > best_overlap or (
-                overlap == best_overlap and distance < best_distance
-            ):
-                best = candidate
-                best_overlap = overlap
-                best_distance = distance
-
-        if best is None:
-            raise RuntimeError("Cannot enter fullscreen: no video mode found.")
-        return best
+        return monitor
 
     def _toggle_fullscreen(self) -> None:
         import glfw
@@ -427,13 +335,9 @@ class FlyThroughApp:
             glfw.set_window_monitor(window, None, x, y, w, h, 0)
             self._fullscreen = False
         else:
-            x, y = glfw.get_window_pos(window)
-            w, h = glfw.get_window_size(window)
-            self._windowed_bounds = (int(x), int(y), int(w), int(h))
+            self._windowed_bounds = safe_windowed_bounds(glfw, window)
             monitor = self._current_monitor()
-            mode = glfw.get_video_mode(monitor)
-            if mode is None:
-                raise RuntimeError("Cannot enter fullscreen: no video mode found.")
+            monitor, mode = fullscreen_video_mode(glfw, monitor)
             glfw.set_window_monitor(
                 window, monitor, 0, 0,
                 int(mode.width), int(mode.height), int(mode.refresh_rate),
@@ -444,6 +348,12 @@ class FlyThroughApp:
         if self._paused:
             self.canvas.set_title(self._menu_title())
         self.canvas.request_draw()
+
+    def _try_toggle_fullscreen(self) -> None:
+        try:
+            self._toggle_fullscreen()
+        except Exception as e:
+            self._show_error(f"Fullscreen failed: {e}")
 
     def camera(self) -> Camera:
         """Current viewpoint as a cv.Camera (relative-coordinate position)."""
@@ -456,41 +366,33 @@ class FlyThroughApp:
         return Camera(position=rel, azimuth=self.azimuth,
                       elevation=self.elevation, fov=self.fov)
 
-    def _ask_netcdf_file(self, *, title: str, initialdir: str | None = None):
-        """Open the required native Tk file dialog and return a selected path."""
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-        except ImportError as e:  # pragma: no cover - platform packaging only
-            raise RuntimeError(
-                "Native file dialogs require tkinter. Install python3-tkinter "
-                "for your Python, then restart soar."
-            ) from e
-
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            return filedialog.askopenfilename(
-                parent=root,
-                title=title,
-                initialdir=initialdir,
-                filetypes=[
-                    ("NetCDF files", "*.nc"),
-                    ("All files", "*"),
-                ],
-            )
-        finally:
-            root.destroy()
-
     def _start_open_file(self) -> None:
-        self.canvas.set_title("cloudyview OPEN FILE  choose liquid .nc")
-        path = self._ask_netcdf_file(title="Open CloudyView NetCDF")
-        if not path:
-            self._pending_open_path = None
-            self._set_menu_state(MENU_MAIN)
-            return
-        self._pending_open_path = str(path)
-        self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+        self._pending_open_path = None
+        self._file_browser_error = None
+        self._set_file_browser_dir(getattr(self, "_last_file_dir", Path.cwd()))
+        self._set_menu_state(MENU_FILE_BROWSER_LIQUID)
+
+    def _set_file_browser_dir(self, directory: str | Path) -> None:
+        try:
+            path = Path(directory).expanduser().resolve()
+            if not path.is_dir():
+                path = path.parent
+            self._file_browser_dir = path
+            self._last_file_dir = path
+            self._file_browser_error = None
+        except Exception as e:
+            self._file_browser_error = str(e)
+
+    def _select_browser_path(self, path: str | Path) -> None:
+        selected = Path(path).expanduser().resolve()
+        self._last_file_dir = selected.parent
+        if self._menu_state == MENU_FILE_BROWSER_LIQUID:
+            self._pending_open_path = str(selected)
+            self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+        elif self._menu_state == MENU_FILE_BROWSER_ICE:
+            self._start_loading_file(
+                self._pending_open_path, str(selected)
+            )
 
     def _finish_open_file(self, *, use_ice: bool) -> None:
         liquid_path = self._pending_open_path
@@ -498,38 +400,123 @@ class FlyThroughApp:
             self._set_menu_state(MENU_MAIN)
             return
 
-        ice_path = None
         if use_ice:
-            self.canvas.set_title("cloudyview OPEN FILE  choose ice .nc")
-            ice_path = self._ask_netcdf_file(
-                title="Open split ice-variable NetCDF",
-                initialdir=str(Path(liquid_path).parent),
-            )
-            if not ice_path:
-                self._pending_open_path = None
-                self._set_menu_state(MENU_MAIN)
-                return
-
-        self.canvas.set_title(
-            f"cloudyview LOADING  {Path(liquid_path).name} ..."
-        )
-        try:
-            field = load_cloud_field(liquid_path, ice=ice_path or None)
-            self._install_field(field)
-        except Exception as e:
-            self._pending_open_path = None
-            self._set_menu_state(MENU_MAIN)
-            message = f"cloudyview open failed: {e}"
-            print(message)
-            self._flash_title(message, seconds=6.0)
+            self._file_browser_error = None
+            self._set_file_browser_dir(Path(liquid_path).parent)
+            self._set_menu_state(MENU_FILE_BROWSER_ICE)
             return
 
-        print(f"Loaded {self.renderer.field}")
+        self._start_loading_file(liquid_path, None)
+
+    def _start_loading_file(
+        self, liquid_path: str | Path | None, ice_path: str | Path | None
+    ) -> None:
+        if not liquid_path:
+            self._show_error("Open file failed: no liquid NetCDF was selected.")
+            return
+        if self._loading_job is not None or self._behold_job is not None:
+            self._show_error("Another operation is already running.")
+            return
+
+        liquid_path = str(liquid_path)
+        ice_path = str(ice_path) if ice_path else None
+        previous = self.renderer
+        device = previous.device
+        filename = Path(liquid_path).name
+
+        def target(report):
+            def stage(stage_name: str) -> None:
+                report(stage_name)
+
+            field = load_cloud_field(
+                liquid_path, ice=ice_path, stage_callback=stage
+            )
+            report("building extinction")
+            renderer = self._create_renderer(
+                field, device=device, previous=previous
+            )
+            report("uploading texture")
+            return {
+                "field": field,
+                "renderer": renderer,
+                "liquid_path": liquid_path,
+                "ice_path": ice_path,
+            }
+
         self._pending_open_path = None
+        self._file_browser_error = None
+        self._set_menu_state(MENU_MAIN)
+        self.canvas.set_title(f"cloudyview loading {filename}")
+        self._loading_job = BackgroundJob(
+            kind="loading",
+            filename=filename,
+            target=target,
+            initial_stage="queued",
+        )
+        self._loading_job.start()
+        self.canvas.request_draw()
+
+    def _install_loaded_renderer(self, result: dict) -> None:
+        self.renderer = result["renderer"]
+        self._reset_camera_to_default()
+        self._frame_index = 0
+        self.renderer.reset_accumulation()
+        print(f"Loaded {self.renderer.field}")
         self._set_paused(False)
         self._flash_title(
-            f"cloudyview loaded {Path(liquid_path).name}", seconds=3.0
+            f"cloudyview loaded {Path(result['liquid_path']).name}", seconds=3.0
         )
+
+    def _show_error(self, message: str) -> None:
+        self._error_message = str(message)
+        self._loading_job = None
+        self._behold_job = None
+        self._rendering = False
+        self._set_paused(True)
+        self._set_menu_state(MENU_ERROR)
+        print(f"cloudyview error: {self._error_message}")
+        self.canvas.request_draw()
+
+    def _active_job(self):
+        for job in (self._loading_job, self._behold_job):
+            if job is None:
+                continue
+            snapshot = job.pump()
+            if not snapshot.done:
+                return job
+        return None
+
+    def _active_job_snapshot(self):
+        job = self._active_job()
+        return None if job is None else job.snapshot()
+
+    def _pump_jobs(self) -> None:
+        if self._loading_job is not None:
+            snapshot = self._loading_job.pump()
+            if snapshot.done:
+                job = self._loading_job
+                self._loading_job = None
+                if snapshot.error:
+                    self._show_error(f"Open file failed: {snapshot.error}")
+                else:
+                    self._install_loaded_renderer(snapshot.result)
+                job.join(0.0)
+
+        if self._behold_job is not None:
+            snapshot = self._behold_job.pump()
+            if snapshot.done:
+                job = self._behold_job
+                self._behold_job = None
+                self._rendering = False
+                if snapshot.error:
+                    self._show_error(snapshot.error)
+                else:
+                    print(f"Behold render saved to {snapshot.result}")
+                    self._set_paused(False)
+                    self._flash_title(
+                        f"cloudyview behold saved {snapshot.result}", seconds=5.0
+                    )
+                job.join(0.0)
 
     @staticmethod
     def _fmt_num(value: float) -> str:
@@ -703,39 +690,56 @@ class FlyThroughApp:
         self._flash_title(f"cloudyview screenshot saved {path}", seconds=4.0)
 
     def _run_behold_render(self, quality: str) -> None:
+        if self._loading_job is not None or self._behold_job is not None:
+            self._show_error("Another operation is already running.")
+            return
         camera = self.camera()
         path = self._timestamped_png_path(f"cloudyview_behold_{quality}")
-        self._rendering = True
-        self.canvas.set_title(
-            f"cloudyview BEHOLD {quality}  0%  ETA --:--  "
-            "cannot cancel once started"
-        )
 
-        def on_progress(progress: dict) -> None:
-            eta = progress.get("eta")
-            if eta is None and progress.get("taken_spp"):
-                elapsed = progress.get("elapsed", 0.0)
-                taken = progress["taken_spp"]
-                total = progress.get("spp_total", taken)
-                eta = elapsed * max(0, total - taken) / taken
-            self.canvas.set_title(
-                f"cloudyview BEHOLD {quality}  "
-                f"{progress.get('percent', 0.0):5.1f}%  "
-                f"ETA {self._fmt_eta(eta)}  cannot cancel once started"
-            )
+        def target(report):
+            def on_progress(progress: dict) -> None:
+                eta = progress.get("eta")
+                if eta is None and progress.get("taken_spp"):
+                    elapsed = progress.get("elapsed", 0.0)
+                    taken = progress["taken_spp"]
+                    total = progress.get("spp_total", taken)
+                    eta = elapsed * max(0, total - taken) / taken
+                report(
+                    "rendering",
+                    percent=progress.get("percent", 0.0),
+                    eta=eta,
+                    note="cannot cancel once started",
+                )
 
-        try:
-            from .. import behold as behold_render
+            try:
+                from .. import behold as behold_render
+            except ImportError as e:
+                raise RuntimeError(
+                    "cloudyview behold requires Mitsuba; install the "
+                    "radiative-transfer extra, e.g. uv sync --extra "
+                    f"radiative-transfer ({e})"
+                ) from e
 
-            image = behold_render(
-                self.renderer.field,
-                camera=camera,
-                quality=quality,
-                gpu=True,
-                sun_azimuth=self.sun_azimuth,
-                sun_elevation=self.sun_elevation,
-                progress_callback=on_progress,
-            )
+            try:
+                image = behold_render(
+                    self.renderer.field,
+                    camera=camera,
+                    quality=quality,
+                    gpu=True,
+                    sun_azimuth=self.sun_azimuth,
+                    sun_elevation=self.sun_elevation,
+                    progress_callback=on_progress,
+                )
+            except Exception as e:
+                detail = str(e)
+                if any(token in detail.lower() for token in ("mitsuba", "drjit")):
+                    raise RuntimeError(
+                        "cloudyview behold requires Mitsuba; install the "
+                        "radiative-transfer extra, e.g. uv sync --extra "
+                        f"radiative-transfer ({e})"
+                    ) from e
+                raise RuntimeError(f"cloudyview behold failed: {e}") from e
+
             metadata = self._metadata(
                 camera,
                 renderer="behold",
@@ -745,42 +749,30 @@ class FlyThroughApp:
                 ),
             )
             self._write_png_with_metadata(image, path, metadata)
-        except ImportError as e:
-            self._rendering = False
-            self._set_menu_state(MENU_MAIN)
-            message = (
-                "cloudyview behold requires Mitsuba; install the "
-                "radiative-transfer extra, e.g. uv sync --extra "
-                f"radiative-transfer ({e})"
-            )
-            print(message)
-            self._flash_title(message, seconds=7.0)
-            self.canvas.request_draw()
-            return
-        except Exception as e:
-            self._rendering = False
-            self._set_menu_state(MENU_MAIN)
-            detail = str(e)
-            if any(token in detail.lower() for token in ("mitsuba", "drjit")):
-                message = (
-                    "cloudyview behold requires Mitsuba; install the "
-                    "radiative-transfer extra, e.g. uv sync --extra "
-                    f"radiative-transfer ({e})"
-                )
-            else:
-                message = f"cloudyview behold failed: {e}"
-            print(message)
-            self._flash_title(message, seconds=7.0)
-            self.canvas.request_draw()
-            return
+            return path
 
-        self._rendering = False
-        print(f"Behold render saved to {path}")
-        self._set_paused(False)
-        self._flash_title(f"cloudyview behold saved {path}", seconds=5.0)
+        self._rendering = True
+        self._set_menu_state(MENU_MAIN)
+        self.canvas.set_title(f"cloudyview behold {quality}")
+        self._behold_job = BackgroundJob(
+            kind=f"behold {quality}",
+            filename=path.name,
+            target=target,
+            initial_stage="starting render",
+            note="cannot cancel once started",
+        )
+        self._behold_job.start()
+        self.canvas.request_draw()
 
     def _on_event(self, event):
-        if getattr(self, "_rendering", False):
+        self._pump_jobs()
+        active_job = self._active_job()
+        if (
+            getattr(self, "_paused", False) or active_job is not None
+        ) and self._imgui is not None:
+            self._imgui.handle_event(event)
+
+        if active_job is not None:
             return
 
         etype = event["event_type"]
@@ -797,7 +789,7 @@ class FlyThroughApp:
             elif action == ACTION_QUIT:
                 self.canvas.close()
             elif action == ACTION_TOGGLE_FULLSCREEN:
-                self._toggle_fullscreen()
+                self._try_toggle_fullscreen()
             elif action == ACTION_OPEN_FILE:
                 self._start_open_file()
             elif action == ACTION_OPEN_ICE_YES:
@@ -809,8 +801,12 @@ class FlyThroughApp:
             elif action == ACTION_RENDER_BEHOLD:
                 self._run_behold_render(transition.quality)
             elif action == ACTION_MENU_BACK:
-                self._pending_open_path = None
-                self._set_menu_state(transition.next_state or MENU_MAIN)
+                if transition.next_state == MENU_OPEN_ICE_PROMPT:
+                    self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+                else:
+                    self._pending_open_path = None
+                    self._error_message = None
+                    self._set_menu_state(transition.next_state or MENU_MAIN)
             elif action == ACTION_SCREENSHOT:
                 self._save_screenshot()
             elif self._paused:
@@ -829,10 +825,12 @@ class FlyThroughApp:
             key = event["key"]
             self._keys.discard(key.lower() if len(key) == 1 else key)
         elif etype == "pointer_down":
-            if self._paused and getattr(self, "_menu_state", MENU_MAIN) == MENU_MAIN:
-                self._set_paused(False)
-            elif not self._captured:
+            if self._paused:
+                return
+            if not self._captured:
                 self._capture_mouse(True)   # click back in to recapture
+        elif etype == "char":
+            return
         elif self._paused:
             return
         elif etype == "pointer_move" and self._captured:
@@ -923,14 +921,276 @@ class FlyThroughApp:
         rpass.draw(3)
         rpass.end()
 
-    def _draw(self):
-        if getattr(self, "_rendering", False):
+    def _ensure_imgui(self) -> None:
+        if self._imgui is None:
+            from .imgui_layer import SoarImguiLayer
+
+            self._imgui = SoarImguiLayer(
+                device=self.renderer.device,
+                target_format=self.format,
+                canvas=self.canvas,
+            )
+
+    @staticmethod
+    def _imgui_flags(imgui, enum_name: str, *names: str) -> int:
+        enum_cls = getattr(imgui, enum_name, None)
+        if enum_cls is None:
+            return 0
+        value = 0
+        for name in names:
+            if hasattr(enum_cls, name):
+                enum_value = getattr(enum_cls, name)
+                value |= int(getattr(enum_value, "value", enum_value))
+        return value
+
+    @staticmethod
+    def _imgui_cond_always(imgui) -> int:
+        cond = getattr(imgui, "Cond_", None)
+        if cond is not None and hasattr(cond, "always"):
+            return getattr(cond, "always")
+        return 0
+
+    def _begin_imgui_window(
+        self, imgui, title: str, width: float, height: float
+    ) -> None:
+        logical_w, logical_h = self.canvas.get_logical_size()
+        x = max(16.0, (logical_w - width) * 0.5)
+        y = max(16.0, (logical_h - height) * 0.5)
+        cond = self._imgui_cond_always(imgui)
+        flags = self._imgui_flags(
+            imgui,
+            "WindowFlags_",
+            "no_resize",
+            "no_collapse",
+            "no_saved_settings",
+            "no_move",
+        )
+        try:
+            imgui.set_next_window_pos((x, y), cond)
+            imgui.set_next_window_size((width, height), cond)
+        except TypeError:
+            imgui.set_next_window_pos((x, y))
+            imgui.set_next_window_size((width, height))
+        try:
+            imgui.begin(title, None, flags)
+        except TypeError:
+            try:
+                imgui.begin(title, flags)
+            except TypeError:
+                imgui.begin(title)
+
+    @staticmethod
+    def _end_imgui_window(imgui) -> None:
+        imgui.end()
+
+    @staticmethod
+    def _imgui_button(imgui, label: str, width: float = 320.0) -> bool:
+        try:
+            return bool(imgui.button(label, (width, 38.0)))
+        except TypeError:
+            return bool(imgui.button(label))
+
+    @staticmethod
+    def _imgui_text_wrapped(imgui, text: str) -> None:
+        if hasattr(imgui, "text_wrapped"):
+            imgui.text_wrapped(text)
+        else:
+            imgui.text(text)
+
+    @staticmethod
+    def _imgui_progress_bar(
+        imgui, fraction: float, label: str, width: float = 420.0
+    ) -> None:
+        if not hasattr(imgui, "progress_bar"):
+            imgui.text(label)
             return
+        fraction = float(np.clip(fraction, 0.0, 1.0))
+        try:
+            imgui.progress_bar(fraction, (width, 0.0), label)
+        except TypeError:
+            imgui.progress_bar(fraction)
+            imgui.text(label)
+
+    def _draw_imgui(self, command_encoder, target_view) -> None:
+        self._ensure_imgui()
+        self._imgui.encode(
+            command_encoder, target_view, self._draw_imgui_contents
+        )
+
+    def _draw_imgui_contents(self, imgui) -> None:
+        snapshot = self._active_job_snapshot()
+        if snapshot is not None:
+            self._draw_job_overlay(imgui, snapshot)
+            return
+
+        state = getattr(self, "_menu_state", MENU_MAIN)
+        if state == MENU_RENDER_QUALITY:
+            self._draw_quality_menu(imgui)
+        elif state == MENU_OPEN_ICE_PROMPT:
+            self._draw_ice_prompt(imgui)
+        elif state in (MENU_FILE_BROWSER_LIQUID, MENU_FILE_BROWSER_ICE):
+            self._draw_file_browser(imgui, state)
+        elif state == MENU_ERROR:
+            self._draw_error_dialog(imgui)
+        else:
+            self._draw_main_menu(imgui)
+
+    def _draw_main_menu(self, imgui) -> None:
+        self._begin_imgui_window(imgui, "Paused", 420.0, 330.0)
+        try:
+            if self._imgui_button(imgui, "Resume"):
+                self._set_paused(False)
+            if self._imgui_button(imgui, "Open file..."):
+                self._start_open_file()
+            if self._imgui_button(imgui, "Render in behold..."):
+                self._set_menu_state(MENU_RENDER_QUALITY)
+            label = (
+                "Exit fullscreen"
+                if getattr(self, "_fullscreen", False)
+                else "Enter fullscreen"
+            )
+            if self._imgui_button(imgui, label):
+                self._try_toggle_fullscreen()
+            if self._imgui_button(imgui, "Quit"):
+                self.canvas.close()
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_quality_menu(self, imgui) -> None:
+        self._begin_imgui_window(imgui, "Behold Quality", 420.0, 330.0)
+        try:
+            for label, quality in (
+                ("Min", "min"),
+                ("Low", "low"),
+                ("Medium", "medium"),
+                ("High", "high"),
+            ):
+                if self._imgui_button(imgui, label):
+                    self._run_behold_render(quality)
+            if self._imgui_button(imgui, "Back"):
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_ice_prompt(self, imgui) -> None:
+        self._begin_imgui_window(imgui, "Ice File", 460.0, 250.0)
+        try:
+            filename = (
+                Path(self._pending_open_path).name
+                if self._pending_open_path else "selected file"
+            )
+            imgui.text(filename)
+            if hasattr(imgui, "separator"):
+                imgui.separator()
+            if self._imgui_button(imgui, "Yes, pick ice file"):
+                self._finish_open_file(use_ice=True)
+            if self._imgui_button(imgui, "No ice"):
+                self._finish_open_file(use_ice=False)
+            if self._imgui_button(imgui, "Back"):
+                self._pending_open_path = None
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_file_browser(self, imgui, state: str) -> None:
+        title = (
+            "Open Cloud NetCDF"
+            if state == MENU_FILE_BROWSER_LIQUID
+            else "Open Ice NetCDF"
+        )
+        self._begin_imgui_window(imgui, title, 720.0, 560.0)
+        try:
+            current_dir = Path(getattr(self, "_file_browser_dir", Path.cwd()))
+            self._imgui_text_wrapped(imgui, str(current_dir))
+            if hasattr(imgui, "separator"):
+                imgui.separator()
+            if self._imgui_button(imgui, "Up", 120.0):
+                self._set_file_browser_dir(current_dir.parent)
+            if hasattr(imgui, "same_line"):
+                imgui.same_line()
+            if self._imgui_button(imgui, "Back", 120.0):
+                if state == MENU_FILE_BROWSER_ICE:
+                    self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+                else:
+                    self._pending_open_path = None
+                    self._set_menu_state(MENU_MAIN)
+                return
+
+            if self._file_browser_error:
+                self._imgui_text_wrapped(imgui, self._file_browser_error)
+
+            try:
+                entries = list_netcdf_entries(current_dir)
+                self._file_browser_error = None
+            except Exception as e:
+                entries = []
+                self._file_browser_error = str(e)
+                self._imgui_text_wrapped(imgui, self._file_browser_error)
+
+            if hasattr(imgui, "begin_child"):
+                try:
+                    imgui.begin_child("files", (0.0, 390.0), True)
+                except TypeError:
+                    imgui.begin_child("files")
+            try:
+                for entry in entries:
+                    self._draw_file_entry(imgui, entry)
+            finally:
+                if hasattr(imgui, "end_child"):
+                    imgui.end_child()
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_file_entry(self, imgui, entry: FileEntry) -> None:
+        if entry.is_dir:
+            label = f"[{entry.name}]"
+        else:
+            label = f"{entry.name}    {entry.display_size}"
+        if self._imgui_button(imgui, label, 660.0):
+            if entry.is_dir:
+                self._set_file_browser_dir(entry.path)
+            else:
+                self._select_browser_path(entry.path)
+
+    def _draw_error_dialog(self, imgui) -> None:
+        self._begin_imgui_window(imgui, "Error", 520.0, 250.0)
+        try:
+            self._imgui_text_wrapped(
+                imgui, self._error_message or "Unknown soar error."
+            )
+            if self._imgui_button(imgui, "Back", 160.0):
+                self._error_message = None
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_job_overlay(self, imgui, snapshot) -> None:
+        title = "Loading" if snapshot.kind == "loading" else "Rendering"
+        self._begin_imgui_window(imgui, title, 520.0, 250.0)
+        try:
+            self._imgui_text_wrapped(imgui, snapshot.filename)
+            imgui.text(f"Stage: {snapshot.stage}")
+            imgui.text(f"Elapsed: {self._fmt_eta(snapshot.elapsed)}")
+            if snapshot.percent is not None:
+                percent = float(snapshot.percent)
+                self._imgui_progress_bar(
+                    imgui, percent / 100.0, f"{percent:5.1f}%"
+                )
+            if snapshot.eta is not None:
+                imgui.text(f"ETA: {self._fmt_eta(snapshot.eta)}")
+            if snapshot.note:
+                self._imgui_text_wrapped(imgui, snapshot.note)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw(self):
+        self._pump_jobs()
+        active_snapshot = self._active_job_snapshot()
 
         now = perf_counter()
         dt = now - self._last_time
         self._last_time = now
-        if not self._paused:
+        if not self._paused and active_snapshot is None:
             self._move(min(dt, 0.1))
         self.position = _clamp_position_above_ocean(self.position)
 
@@ -963,8 +1223,10 @@ class FlyThroughApp:
         if self.minimap_enabled:
             self.renderer.hud.write_uniforms(self.camera(), (w, h))
             self.renderer.hud.encode_pass(enc, view, self.format)
-        if self._paused:
+        if self._paused or active_snapshot is not None:
             self._encode_pause_overlay(enc, view)
+        if self._paused or active_snapshot is not None:
+            self._draw_imgui(enc, view)
         self.renderer.device.queue.submit([enc.finish()])
 
         self._fps_acc.append(dt)

@@ -4,7 +4,7 @@ Proof-of-pipeline for the interactive fly-through engine described in
 docs/architecture.md. The extinction volume lives resident on the GPU as a
 3D texture; frames are raymarched by `raymarch.wgsl`.
 
-Requires the ``interactive`` extra (wgpu, glfw):
+Requires the ``interactive`` extra (wgpu, glfw, imgui-bundle):
 
     uv sync --extra interactive
 
@@ -21,8 +21,8 @@ Windowed fly-through:
 
     uv run python -m cloudyview.soar cloud.nc [--ice ice.nc]
 
-ESC opens the control-center menu (resume, open file, render in behold,
-fullscreen, quit). F12 writes a metadata-bearing PNG screenshot.
+ESC opens the in-window pause menu; ESC resumes from the top level and backs
+out of submenus. F12 writes a metadata-bearing PNG screenshot.
 """
 
 from .engine import InteractiveRenderer, request_device

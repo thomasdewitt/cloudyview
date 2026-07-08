@@ -1,5 +1,7 @@
 """Headless tests for the soar window app shell."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -18,6 +20,8 @@ from cloudyview.soar.app import (
     ACTION_SCREENSHOT,
     ACTION_TOGGLE_FULLSCREEN,
     BEHOLD_QUALITIES_BY_KEY,
+    MENU_FILE_BROWSER_ICE,
+    MENU_FILE_BROWSER_LIQUID,
     FlyThroughApp,
     MENU_MAIN,
     MENU_OPEN_ICE_PROMPT,
@@ -27,6 +31,8 @@ from cloudyview.soar.app import (
     _control_action_for_key,
     _menu_transition,
 )
+from cloudyview.soar.jobs import BackgroundJob
+from cloudyview.soar.menu import format_file_size, list_netcdf_entries
 
 
 class DummyCanvas:
@@ -51,7 +57,14 @@ def make_event_app():
     app._paused = False
     app._menu_state = MENU_MAIN
     app._pending_open_path = None
+    app._file_browser_dir = Path.cwd()
+    app._last_file_dir = Path.cwd()
+    app._file_browser_error = None
+    app._loading_job = None
+    app._behold_job = None
     app._rendering = False
+    app._error_message = None
+    app._imgui = None
     app._captured = True
     app._keys = {"w", "Shift"}
     app._last_pointer = (10.0, 20.0)
@@ -94,7 +107,7 @@ def test_control_action_for_key_active_and_paused():
     assert _control_action_for_key(False, "F12") == ACTION_SCREENSHOT
     assert _control_action_for_key(False, "w") is None
 
-    assert _control_action_for_key(True, "Escape") == ACTION_QUIT
+    assert _control_action_for_key(True, "Escape") == ACTION_RESUME
     assert _control_action_for_key(True, "q") == ACTION_QUIT
     assert _control_action_for_key(True, "Q") == ACTION_QUIT
     assert _control_action_for_key(True, "r") == ACTION_RESUME
@@ -106,6 +119,10 @@ def test_control_action_for_key_active_and_paused():
 
 
 def test_pause_submenu_state_transitions_are_explicit():
+    transition = _menu_transition(True, MENU_MAIN, "O")
+    assert transition.action == ACTION_OPEN_FILE
+    assert transition.next_state == MENU_FILE_BROWSER_LIQUID
+
     transition = _menu_transition(True, MENU_MAIN, "G")
     assert transition.action == ACTION_RENDER_MENU
     assert transition.next_state == MENU_RENDER_QUALITY
@@ -119,10 +136,15 @@ def test_pause_submenu_state_transitions_are_explicit():
     transition = _menu_transition(True, MENU_RENDER_QUALITY, "Escape")
     assert transition.action == ACTION_MENU_BACK
     assert transition.next_state == MENU_MAIN
+    assert _menu_transition(True, MENU_RENDER_QUALITY, "q").action is None
 
     assert (
         _menu_transition(True, MENU_OPEN_ICE_PROMPT, "Y").action
         == ACTION_OPEN_ICE_YES
+    )
+    assert (
+        _menu_transition(True, MENU_OPEN_ICE_PROMPT, "Y").next_state
+        == MENU_FILE_BROWSER_ICE
     )
     assert (
         _menu_transition(True, MENU_OPEN_ICE_PROMPT, "N").action
@@ -131,6 +153,9 @@ def test_pause_submenu_state_transitions_are_explicit():
     transition = _menu_transition(True, MENU_OPEN_ICE_PROMPT, "Escape")
     assert transition.action == ACTION_MENU_BACK
     assert transition.next_state == MENU_MAIN
+    assert _menu_transition(True, MENU_FILE_BROWSER_ICE, "Escape").next_state == (
+        MENU_OPEN_ICE_PROMPT
+    )
 
 
 def test_clamp_position_above_ocean_uses_margin_and_returns_copy():
@@ -154,11 +179,11 @@ def test_escape_pauses_releases_capture_and_clears_movement_keys():
     assert app._keys == set()
     assert app.capture_calls == [False]
     assert app.canvas.closed is False
-    assert "PAUSED" in app.canvas.titles[-1]
+    assert "paused" in app.canvas.titles[-1]
     assert app.canvas.draw_requests == 1
 
 
-def test_resume_key_and_click_recapture_pointer():
+def test_resume_key_recaptures_pointer_and_paused_click_does_not_resume():
     app = make_event_app()
     app._paused = True
     app._captured = False
@@ -177,13 +202,29 @@ def test_resume_key_and_click_recapture_pointer():
 
     FlyThroughApp._on_event(app, {"event_type": "pointer_down"})
 
-    assert app._paused is False
+    assert app._paused is True
+    assert app._captured is False
+    assert app.capture_calls == []
+
+    app._paused = False
+    FlyThroughApp._on_event(app, {"event_type": "pointer_down"})
+
     assert app._captured is True
     assert app.capture_calls == [True]
 
 
-def test_paused_escape_or_q_quits_without_recapturing():
-    for key in ("Escape", "q", "Q"):
+def test_paused_escape_resumes_and_q_quits_without_recapturing():
+    app = make_event_app()
+    app._paused = True
+    app._captured = False
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "Escape"})
+
+    assert app.canvas.closed is False
+    assert app._paused is False
+    assert app.capture_calls == [True]
+
+    for key in ("q", "Q"):
         app = make_event_app()
         app._paused = True
         app._captured = False
@@ -222,7 +263,7 @@ def test_pause_open_and_render_keys_dispatch_to_submenus():
 
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "G"})
     assert app._menu_state == MENU_RENDER_QUALITY
-    assert "BEHOLD QUALITY" in app.canvas.titles[-1]
+    assert "behold quality" in app.canvas.titles[-1]
 
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "2"})
     assert app.render_calls == ["low"]
@@ -323,3 +364,117 @@ def test_move_clamps_forward_descent_when_pitched_down():
     FlyThroughApp._move(app, 1.0)
 
     assert app.position[2] == OCEAN_FLOOR_MARGIN_M
+
+
+def test_file_browser_filters_netcdf_files_and_formats_sizes(tmp_path):
+    (tmp_path / "nested").mkdir()
+    nc = tmp_path / "cloud.nc"
+    nc.write_bytes(b"0" * 1536)
+    (tmp_path / "notes.txt").write_text("ignore")
+
+    entries = list_netcdf_entries(tmp_path)
+
+    assert [entry.name for entry in entries] == ["nested", "cloud.nc"]
+    assert entries[0].is_dir is True
+    assert entries[1].display_size == "1.5 KB"
+    assert format_file_size(4 * 1024**3) == "4.0 GB"
+
+
+def test_select_browser_path_drives_liquid_and_ice_handoff(tmp_path):
+    app = make_event_app()
+    liquid = tmp_path / "liquid.nc"
+    ice = tmp_path / "ice.nc"
+    liquid.touch()
+    ice.touch()
+    calls = []
+
+    app._start_loading_file = lambda liquid_path, ice_path: calls.append(
+        (liquid_path, ice_path)
+    )
+
+    app._menu_state = MENU_FILE_BROWSER_LIQUID
+    FlyThroughApp._select_browser_path(app, liquid)
+
+    assert app._pending_open_path == str(liquid.resolve())
+    assert app._menu_state == MENU_OPEN_ICE_PROMPT
+
+    app._menu_state = MENU_FILE_BROWSER_ICE
+    FlyThroughApp._select_browser_path(app, ice)
+
+    assert calls == [(str(liquid.resolve()), str(ice.resolve()))]
+
+
+def test_background_job_progress_and_result_handoff():
+    def target(report):
+        report("loading file")
+        report("building extinction", percent=50.0)
+        return "renderer"
+
+    job = BackgroundJob(
+        kind="loading",
+        filename="cloud.nc",
+        target=target,
+        initial_stage="queued",
+    )
+    job.start()
+    job.join(2.0)
+    snapshot = job.snapshot()
+
+    assert snapshot.done is True
+    assert snapshot.error is None
+    assert snapshot.result == "renderer"
+    assert snapshot.stage == "building extinction"
+    assert snapshot.percent == pytest.approx(50.0)
+
+
+def test_async_load_job_installs_fake_renderer(tmp_path):
+    class FakeRenderer:
+        def __init__(self, field):
+            self.field = field
+            self.device = object()
+            self.bmin = np.array([0.0, 0.0, 0.0])
+            self.bmax = np.array([100.0, 200.0, 1000.0])
+            self.reset_calls = 0
+
+        def reset_accumulation(self):
+            self.reset_calls += 1
+
+    app = make_event_app()
+    app._extinction_multiplier = 1.0
+    app.renderer = FakeRenderer("old")
+    app._frame_index = 5
+    app._paused = True
+    app._captured = False
+    app.canvas.titles.clear()
+
+    stages = []
+
+    def fake_load(path, *, ice=None, stage_callback=None):
+        if stage_callback is not None:
+            stage_callback("loading file")
+        stages.append((path, ice))
+        return "new-field"
+
+    def fake_create_renderer(field, *, device=None, previous=None):
+        assert field == "new-field"
+        assert previous.field == "old"
+        return FakeRenderer(field)
+
+    app._create_renderer = fake_create_renderer
+    import cloudyview.soar.app as soar_app
+
+    original_load = soar_app.load_cloud_field
+    soar_app.load_cloud_field = fake_load
+    try:
+        FlyThroughApp._start_loading_file(app, tmp_path / "cloud.nc", None)
+        app._loading_job.join(2.0)
+        FlyThroughApp._pump_jobs(app)
+    finally:
+        soar_app.load_cloud_field = original_load
+
+    assert stages == [(str(tmp_path / "cloud.nc"), None)]
+    assert app.renderer.field == "new-field"
+    assert app.renderer.reset_calls == 1
+    assert app._frame_index == 0
+    assert app._paused is False
+    assert app.capture_calls == [True]

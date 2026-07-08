@@ -1,8 +1,8 @@
 """CLI: python -m cloudyview.soar <file.nc> [--ice ice.nc]
 
-Opens the windowed fly-through for a cloud field. Naming of a proper
-console entry point (like glimpse/witness/behold) is deferred until the
-subpackage name settles.
+Loads the initial cloud field, then opens the windowed fly-through. In-window
+pause menus handle later file opens, loading progress, errors, and behold
+progress without native file dialogs.
 """
 
 import argparse
@@ -43,6 +43,7 @@ def main(argv=None):
     from ..camera import Camera
     from .app import CONTROL_SUMMARY, run_app
 
+    print(f"Loading {args.filepath} ...")
     field = load(args.filepath, ice=args.ice)
     camera = None
     if any(v is not None for v in (

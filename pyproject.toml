@@ -43,7 +43,8 @@ interactive = [
     # WGSL/wgpu interactive fly-through engine (cloudyview.soar).
     "wgpu>=0.19",
     "glfw>=2.6",
-    # The in-app "Render in behold" action (G) drives Mitsuba directly,
+    "imgui-bundle>=1.6",
+    # The in-app "Render in behold" action drives Mitsuba directly,
     # so the app extra carries the path tracer too.
     "mitsuba>=3.0.0",
     "drjit>=0.3.0",
