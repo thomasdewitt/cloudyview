@@ -393,7 +393,9 @@ dev = [
     { name = "pytest" },
 ]
 interactive = [
+    { name = "drjit" },
     { name = "glfw" },
+    { name = "mitsuba" },
     { name = "wgpu", version = "0.31.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "wgpu", version = "0.31.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -414,6 +416,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'all'", specifier = ">=21.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=21.0" },
     { name = "drjit", marker = "extra == 'all'", specifier = ">=0.3.0" },
+    { name = "drjit", marker = "extra == 'interactive'", specifier = ">=0.3.0" },
     { name = "drjit", marker = "extra == 'radiative-transfer'", specifier = ">=0.3.0" },
     { name = "flake8", marker = "extra == 'all'", specifier = ">=3.9" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=3.9" },
@@ -423,6 +426,7 @@ requires-dist = [
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "matplotlib", specifier = ">=3.3" },
     { name = "mitsuba", marker = "extra == 'all'", specifier = ">=3.0.0" },
+    { name = "mitsuba", marker = "extra == 'interactive'", specifier = ">=3.0.0" },
     { name = "mitsuba", marker = "extra == 'radiative-transfer'", specifier = ">=3.0.0" },
     { name = "netcdf4", specifier = ">=1.5" },
     { name = "numba", specifier = ">=0.57" },
