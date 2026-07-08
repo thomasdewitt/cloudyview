@@ -40,6 +40,13 @@ DEFAULT_EXPOSURE = 4.0
 DEFAULT_G_HG = 0.76
 DEFAULT_AMBIENT_STRENGTH = 0.12
 DEFAULT_OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)  # witness.py:104-106
+DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50
+DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65
+DEFAULT_GRADIENT_COARSE_RADIUS_M = 500.0
+DEFAULT_DEEP_SHADOW_MS_SUPPRESSION = 0.90
+DEFAULT_AMBIENT_OCCLUSION_STRENGTH = 1.00
+DEFAULT_AMBIENT_OCCLUSION_FLOOR = 0.24
+DEFAULT_BOUNCE_DEPTH_ATTENUATION = 0.80
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 DEFAULT_MOTION_BLEND_ALPHA = 0.45
 DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0
@@ -47,7 +54,7 @@ DEFAULT_MOTION_JITTER_SCALE = 0.65
 DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0
 DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 
-_UNIFORM_NBYTES = 11 * 16  # 11 vec4<f32>
+_UNIFORM_NBYTES = 13 * 16  # 13 vec4<f32>
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
 
@@ -607,6 +614,13 @@ class InteractiveRenderer:
         exposure: float = DEFAULT_EXPOSURE,
         g_hg: float = DEFAULT_G_HG,
         ambient_strength: float = DEFAULT_AMBIENT_STRENGTH,
+        gradient_shading_strength: float = DEFAULT_GRADIENT_SHADING_STRENGTH,
+        gradient_coarse_weight: float = DEFAULT_GRADIENT_COARSE_WEIGHT,
+        gradient_coarse_radius_m: float = DEFAULT_GRADIENT_COARSE_RADIUS_M,
+        deep_shadow_ms_suppression: float = DEFAULT_DEEP_SHADOW_MS_SUPPRESSION,
+        ambient_occlusion_strength: float = DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
+        ambient_occlusion_floor: float = DEFAULT_AMBIENT_OCCLUSION_FLOOR,
+        bounce_depth_attenuation: float = DEFAULT_BOUNCE_DEPTH_ATTENUATION,
         frame_index: int = 0,
         subpixel: bool = False,
         jitter_scale: float = 1.0,
@@ -619,7 +633,7 @@ class InteractiveRenderer:
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
         tan_half_fov = np.tan(np.deg2rad(camera.fov) * 0.5)
 
-        u = np.zeros((11, 4), dtype=np.float32)
+        u = np.zeros((13, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, w / h]
         u[2] = [*right, exposure]
@@ -635,7 +649,21 @@ class InteractiveRenderer:
             1.0 if self.ocean_enabled else 0.0,
             self.ocean_max_lod,
         ]
+        # Row 10: sampling flags only (excluded from scene identity).
         u[10] = [1.0 if subpixel else 0.0, jitter_scale, 0.0, 0.0]
+        # Rows 11-12: Cb realism look parameters (scene identity).
+        u[11] = [
+            gradient_shading_strength,
+            deep_shadow_ms_suppression,
+            ambient_occlusion_strength,
+            bounce_depth_attenuation,
+        ]
+        u[12] = [
+            gradient_coarse_weight,
+            gradient_coarse_radius_m,
+            ambient_occlusion_floor,
+            0.0,
+        ]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity

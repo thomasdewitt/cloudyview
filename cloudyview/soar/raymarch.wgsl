@@ -41,8 +41,14 @@ struct Uniforms {
     // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
     ocean_params: vec4<f32>,
     // x = subpixel camera-ray jitter enable (0.0 or 1.0),
-    // y = jitter amplitude scale, zw = unused
+    // y = jitter amplitude scale, zw = unused (sampling flags only)
     flags: vec4<f32>,
+    // x = gradient shading, y = deep-shadow MS suppression,
+    // z = directional ambient occlusion, w = bounce depth attenuation
+    cb_realism: vec4<f32>,
+    // x = gradient coarse weight, y = gradient coarse radius (m),
+    // z = directional ambient occlusion floor, w = unused
+    cb_params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -61,6 +67,17 @@ const AMBIENT_TINT: vec3<f32> = vec3<f32>(0.22, 0.23, 0.28); // witness.py:82-84
 const AMBIENT_HEIGHT_FLOOR: f32 = 0.3; // witness.py:85
 const BOUNCE_STRENGTH: f32 = 0.05;   // witness.py:95
 const BOUNCE_TINT: vec3<f32> = vec3<f32>(1.0, 0.97, 0.92); // witness.py:96-98
+const GRADIENT_SHADING_RADIUS_VOXELS: f32 = 1.0; // witness.py tuning block
+const GRADIENT_SHADING_COARSE_MIN_VOXELS: f32 = 4.0;
+const GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION: f32 = 0.125;
+const GRADIENT_SHADING_TAU_START: f32 = 0.25;
+const GRADIENT_SHADING_TAU_FULL: f32 = 1.60;
+const GRADIENT_SHADING_CONF_START: f32 = 0.06;
+const GRADIENT_SHADING_CONF_FULL: f32 = 0.28;
+const GRADIENT_SHADING_SHADOW_SIDE_SCALE: f32 = 0.55;
+const DEEP_SHADOW_TAU_START: f32 = 38.0;
+const DEEP_SHADOW_TAU_FULL: f32 = 80.0;
+const DEEP_SHADOW_MS_FLOOR: f32 = 0.24;
 const MS_OCTAVES: i32 = 6;           // witness.py:76
 const MS_ATTEN: f32 = 0.4;           // witness.py:77
 const MS_BLEND_RATE: f32 = 0.35;     // witness.py:78
@@ -106,6 +123,10 @@ fn sigma_data_dims_xyz() -> vec3<f32> {
     return vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x) - vec3<f32>(2.0);
 }
 
+fn sigma_voxel_size_xyz() -> vec3<f32> {
+    return (u.bmax.xyz - u.bmin.xyz) / sigma_data_dims_xyz();
+}
+
 // Extinction (m^-1) at world point p via hardware trilinear filtering.
 // Coordinate swizzle: texture is (w=nz+2, h=ny+2, d=nx+2), see file header.
 // The host uploads original data into padded texels [1..N]. Witness uses
@@ -125,6 +146,76 @@ fn sample_sigma(p: vec3<f32>) -> f32 {
         data_g.x + 1.5
     ) / tex_dims;
     return textureSampleLevel(vol, vol_samp, tex_coord, 0.0).r;
+}
+
+fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>) -> vec3<f32> {
+    let sxp = sample_sigma(p + vec3<f32>(h.x, 0.0, 0.0));
+    let sxm = sample_sigma(p - vec3<f32>(h.x, 0.0, 0.0));
+    let syp = sample_sigma(p + vec3<f32>(0.0, h.y, 0.0));
+    let sym = sample_sigma(p - vec3<f32>(0.0, h.y, 0.0));
+    let szp = sample_sigma(p + vec3<f32>(0.0, 0.0, h.z));
+    let szm = sample_sigma(p - vec3<f32>(0.0, 0.0, h.z));
+    return vec3<f32>(
+        (sxp - sxm) / (2.0 * h.x),
+        (syp - sym) / (2.0 * h.y),
+        (szp - szm) / (2.0 * h.z)
+    );
+}
+
+fn sigma_gradient(p: vec3<f32>, sigma: f32,
+                  coarse_weight_in: f32,
+                  coarse_radius_m: f32) -> vec4<f32> {
+    let fine_h = sigma_voxel_size_xyz() * GRADIENT_SHADING_RADIUS_VOXELS;
+    let fine_grad = sigma_gradient_at_radius(p, fine_h);
+    let fine_len = length(fine_grad);
+    let fine_conf = (
+        fine_len * min(min(fine_h.x, fine_h.y), fine_h.z)
+    ) / (sigma + 1e-4);
+
+    let coarse_weight = clamp(coarse_weight_in, 0.0, 1.0);
+    if (coarse_weight <= 0.0) {
+        return vec4<f32>(fine_grad, fine_conf);
+    }
+
+    let voxel = sigma_voxel_size_xyz();
+    let extent = u.bmax.xyz - u.bmin.xyz;
+    let coarse_h = max(
+        fine_h,
+        min(
+            max(
+                vec3<f32>(coarse_radius_m),
+                voxel * GRADIENT_SHADING_COARSE_MIN_VOXELS
+            ),
+            extent * GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION
+        )
+    );
+    let coarse_grad = sigma_gradient_at_radius(p, coarse_h);
+    let coarse_len = length(coarse_grad);
+    let coarse_conf = (
+        coarse_len * min(min(coarse_h.x, coarse_h.y), coarse_h.z)
+    ) / (sigma + 1e-4);
+
+    if (coarse_weight >= 1.0) {
+        return vec4<f32>(coarse_grad, coarse_conf);
+    }
+
+    let fine_gate = smoothstep(
+        GRADIENT_SHADING_CONF_START, GRADIENT_SHADING_CONF_FULL, fine_conf
+    );
+    let coarse_gate = smoothstep(
+        GRADIENT_SHADING_CONF_START, GRADIENT_SHADING_CONF_FULL, coarse_conf
+    );
+    let fine_w = (1.0 - coarse_weight) * fine_gate;
+    let coarse_w = coarse_weight * coarse_gate;
+
+    var blended = vec3<f32>(0.0);
+    if (fine_len > 1e-12) {
+        blended = blended + fine_w * fine_grad / fine_len;
+    }
+    if (coarse_len > 1e-12) {
+        blended = blended + coarse_w * coarse_grad / coarse_len;
+    }
+    return vec4<f32>(blended, max(fine_conf, coarse_conf));
 }
 
 // Henyey-Greenstein phase function.
@@ -310,6 +401,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let subpixel_on = u.flags.x;
     let jitter_scale = clamp(u.flags.y, 0.0, 1.0);
     let sun = u.sun_dir.xyz;
+    let gradient_shading_strength = u.cb_realism.x;
+    let deep_shadow_ms_suppression = u.cb_realism.y;
+    let ambient_occlusion_strength = u.cb_realism.z;
+    let bounce_depth_attenuation = u.cb_realism.w;
+    let gradient_coarse_weight = u.cb_params.x;
+    let gradient_coarse_radius_m = u.cb_params.y;
+    let ambient_occlusion_floor = u.cb_params.z;
 
     // Pixel -> camera ray. Framebuffer y=0 is the image top, matching the
     // witness convention ndc_y = 1 - 2*(py+0.5)/h.
@@ -390,6 +488,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             tau_depth = tau_depth + d_tau;
 
             let tau_sun = light_march_tau(p, sun);
+            var deep_shadow_gate = 0.0;
+            if (deep_shadow_ms_suppression > 0.0
+                || ambient_occlusion_strength > 0.0) {
+                deep_shadow_gate = smoothstep(
+                    DEEP_SHADOW_TAU_START, DEEP_SHADOW_TAU_FULL, tau_sun
+                );
+            }
 
             var ms = vec3<f32>(0.0);
             var ms_atten = 1.0;
@@ -397,9 +502,49 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 let t_sun_ms = exp(-tau_sun * ms_atten);
                 let blend = min(1.0, f32(octave) * MS_BLEND_RATE);
                 let oct_phase = phase * (1.0 - blend) + ISO_PHASE * blend;
-                let contrib = ms_atten * t_sun_ms * oct_phase;
+                var contrib = ms_atten * t_sun_ms * oct_phase;
+                if (deep_shadow_ms_suppression > 0.0) {
+                    let iso_gate = smoothstep(0.35, 1.0, blend);
+                    let ms_floor = max(
+                        DEEP_SHADOW_MS_FLOOR,
+                        1.0 - deep_shadow_ms_suppression
+                              * deep_shadow_gate
+                              * iso_gate
+                    );
+                    contrib = contrib * ms_floor;
+                }
                 ms = ms + contrib * SUN_COLOR;
                 ms_atten = ms_atten * MS_ATTEN;
+            }
+
+            if (gradient_shading_strength > 0.0) {
+                let grad_conf_v = sigma_gradient(
+                    p, sigma, gradient_coarse_weight, gradient_coarse_radius_m
+                );
+                let grad = grad_conf_v.xyz;
+                let grad_len = length(grad);
+                if (grad_len > 1e-12) {
+                    let surface_gate = smoothstep(
+                        GRADIENT_SHADING_TAU_START,
+                        GRADIENT_SHADING_TAU_FULL,
+                        tau_depth
+                    ) * smoothstep(
+                        GRADIENT_SHADING_CONF_START,
+                        GRADIENT_SHADING_CONF_FULL,
+                        grad_conf_v.w
+                    );
+                    var n_dot_sun = -dot(grad, sun) / grad_len;
+                    if (n_dot_sun < 0.0) {
+                        n_dot_sun = n_dot_sun * GRADIENT_SHADING_SHADOW_SIDE_SCALE;
+                    }
+                    let gradient_factor = max(
+                        0.20,
+                        1.0 + gradient_shading_strength
+                              * surface_gate
+                              * n_dot_sun
+                    );
+                    ms = ms * gradient_factor;
+                }
             }
 
             // Powder is a function of cumulative optical depth since the current
@@ -410,16 +555,26 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Ambient: height-based on the outer box (witness.py:738-747).
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
-            let amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
+            var amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
                                           + (1.0 - AMBIENT_HEIGHT_FLOOR) * h);
+            if (ambient_occlusion_strength > 0.0) {
+                let amb_factor = max(
+                    ambient_occlusion_floor,
+                    1.0 - ambient_occlusion_strength * deep_shadow_gate
+                );
+                amb = amb * amb_factor;
+            }
             col = col + transmittance * d_tau * amb * AMBIENT_TINT;
 
             // Surface bounce is anchored at physical z=0, not the AABB floor
             // (witness.py:749-760).
             if (BOUNCE_STRENGTH > 0.0) {
                 let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
-                col = col + transmittance * d_tau * BOUNCE_STRENGTH
-                            * bounce_frac * BOUNCE_TINT;
+                var bounce = BOUNCE_STRENGTH * bounce_frac;
+                if (bounce_depth_attenuation > 0.0) {
+                    bounce = bounce * exp(-bounce_depth_attenuation * tau_depth);
+                }
+                col = col + transmittance * d_tau * bounce * BOUNCE_TINT;
             }
 
             transmittance = transmittance * exp(-d_tau);
