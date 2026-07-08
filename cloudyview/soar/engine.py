@@ -736,6 +736,31 @@ class InteractiveRenderer:
         self._last_motion_delta = None
         self._last_motion_reset = False
 
+    def encode_present_last(self, command_encoder, target_view,
+                            target_format: str) -> bool:
+        """Re-present the last accumulated frame without marching the volume.
+
+        Used while a behold render owns the GPU: the app keeps its window
+        alive by blitting the frozen frame under the progress overlay at
+        near-zero cost. Returns False when no accumulated frame exists
+        (e.g. jitter off, or nothing rendered yet) — the caller must then
+        encode a normal pass.
+        """
+        if (
+            self._accum_targets is None
+            or self._accum_count < 1
+            or self._current_uniform_size is None
+            or self._accum_targets["size"] != tuple(self._current_uniform_size)
+        ):
+            return False
+        self._encode_present_pass(
+            command_encoder,
+            self._accum_targets["accum_views"][self._accum_index],
+            target_view,
+            target_format,
+        )
+        return True
+
     def _accum_target(self, size: Tuple[int, int]):
         if self._accum_targets is None or self._accum_targets["size"] != tuple(size):
             usage = wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.TEXTURE_BINDING

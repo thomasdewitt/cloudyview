@@ -1246,18 +1246,26 @@ class FlyThroughApp:
         self.position = _clamp_position_above_ocean(self.position)
 
         w, h = self.canvas.get_physical_size()
-        self.renderer.write_uniforms(
-            self.camera(), (w, h), jitter=self.jitter,
-            sun_azimuth=self.sun_azimuth,
-            sun_elevation=self.sun_elevation,
-            frame_index=self._frame_index,
-            **self._cb_strength_kwargs())
+        if self._behold_job is None:
+            self.renderer.write_uniforms(
+                self.camera(), (w, h), jitter=self.jitter,
+                sun_azimuth=self.sun_azimuth,
+                sun_elevation=self.sun_elevation,
+                frame_index=self._frame_index,
+                **self._cb_strength_kwargs())
         self._frame_index += 1
 
         texture = self.context.get_current_texture()
         view = texture.create_view()
         enc = self.renderer.device.create_command_encoder()
-        self.renderer.encode_pass(enc, view, self.format)
+        if self._behold_job is not None:
+            # Behold owns the GPU: blit the frozen last frame instead of
+            # marching the volume every frame (near-zero cost). Falls back
+            # to a normal pass when no accumulated frame exists (jitter off).
+            if not self.renderer.encode_present_last(enc, view, self.format):
+                self.renderer.encode_pass(enc, view, self.format)
+        else:
+            self.renderer.encode_pass(enc, view, self.format)
         if self.bird_enabled:
             bird = self.renderer.bird
             bird.update(
