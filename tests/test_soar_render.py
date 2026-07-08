@@ -105,6 +105,14 @@ def _cloud_edge_hf(img, edge):
     return float(_horizontal_gradient(_luma01(img))[edge].mean())
 
 
+def _motion_flicker(frames, masks):
+    values = []
+    for prev, cur, mask in zip(frames[:-1], frames[1:], masks[1:]):
+        diff = np.abs(cur.astype(np.float32) - prev.astype(np.float32))
+        values.append(float(diff[mask].mean()))
+    return float(np.mean(values))
+
+
 def test_offscreen_render_structure(renderer):
     """Default view: finite, non-uniform, sky above / cloud+haze structure."""
     import cloudyview as cv
@@ -198,8 +206,83 @@ def test_temporal_accumulation_anti_aliases_cloud_edges(renderer):
     assert accum_hf < single_hf
 
 
+def test_motion_accumulation_lowers_flicker(renderer):
+    """Small camera deltas should EMA-blend instead of hard-resetting."""
+    import cloudyview as cv
+
+    size = (192, 108)
+    base = cv.Camera(position=(-0.15, -0.10, -0.95),
+                     azimuth=5.0, elevation=24.0, fov=90.0)
+    cams = [
+        cv.Camera(
+            position=(base.position[0] + 0.0008 * i,
+                      base.position[1] + 0.0005 * i,
+                      base.position[2]),
+            azimuth=base.azimuth + 0.18 * i,
+            elevation=base.elevation,
+            fov=base.fov,
+        )
+        for i in range(9)
+    ]
+
+    renderer.reset_accumulation()
+    baseline = [
+        renderer.render(
+            cam, size=size, jitter=True, frame_index=i,
+            accumulate=True, motion_accumulation=False,
+        )
+        for i, cam in enumerate(cams)
+    ]
+
+    masks = []
+    for cam, frame in zip(cams, baseline):
+        above = _above_horizon_mask(cam, size)
+        luma = _luma01(frame)
+        cloud = above & (luma > np.percentile(luma[above], 55.0))
+        assert cloud.sum() > 500
+        masks.append(cloud)
+
+    renderer.reset_accumulation()
+    smoothed = [
+        renderer.render(
+            cam, size=size, jitter=True, frame_index=i,
+            accumulate=True, motion_accumulation=True,
+            motion_blend_alpha=0.45, motion_jitter_scale=0.65,
+        )
+        for i, cam in enumerate(cams)
+    ]
+
+    assert renderer._accum_motion
+    assert (
+        _motion_flicker(smoothed, masks)
+        < 0.9 * _motion_flicker(baseline, masks)
+    )
+
+
+def test_motion_settings_do_not_change_static_accumulation(renderer):
+    """No-motion convergence stays on the exact static running-average path."""
+    import cloudyview as cv
+
+    size = (192, 108)
+    cam = cv.Camera()
+
+    renderer.reset_accumulation()
+    baseline = renderer.render(
+        cam, size=size, jitter=True, frame_index=0,
+        accumulate_frames=8, motion_accumulation=False,
+    )
+    renderer.reset_accumulation()
+    with_motion_defaults = renderer.render(
+        cam, size=size, jitter=True, frame_index=0,
+        accumulate_frames=8, motion_accumulation=True,
+        motion_blend_alpha=0.35, motion_jitter_scale=0.35,
+    )
+
+    assert np.array_equal(with_motion_defaults, baseline)
+
+
 def test_temporal_accumulation_resets_on_camera_change(renderer):
-    """A single moved render must not blend with the previous static view."""
+    """A large camera jump must not blend with the previous static view."""
     import cloudyview as cv
 
     size = (320, 180)
@@ -211,13 +294,14 @@ def test_temporal_accumulation_resets_on_camera_change(renderer):
         static_cam, size=size, jitter=True, frame_index=0, accumulate_frames=16
     )
     moved = renderer.render(
-        moved_cam, size=size, jitter=True, frame_index=100, accumulate_frames=1
+        moved_cam, size=size, jitter=True, frame_index=100, accumulate=True
     )
-    assert renderer._accum_count == 0
+    assert renderer._accum_count == 1
+    assert renderer._last_motion_reset
 
     renderer.reset_accumulation()
     fresh_moved = renderer.render(
-        moved_cam, size=size, jitter=True, frame_index=100, accumulate_frames=1
+        moved_cam, size=size, jitter=True, frame_index=100, accumulate=True
     )
     assert np.array_equal(moved, fresh_moved)
     assert np.mean(np.abs(moved.astype(np.int16) - static.astype(np.int16))) > 2.0

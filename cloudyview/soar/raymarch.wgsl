@@ -40,7 +40,8 @@ struct Uniforms {
     ocean: vec4<f32>,
     // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
     ocean_params: vec4<f32>,
-    // x = subpixel camera-ray jitter enable (0.0 or 1.0), yzw = unused
+    // x = subpixel camera-ray jitter enable (0.0 or 1.0),
+    // y = jitter amplitude scale, zw = unused
     flags: vec4<f32>,
 };
 
@@ -307,6 +308,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let exposure = u.cam_right.w;
     let jitter_on = u.cam_up.w;
     let subpixel_on = u.flags.x;
+    let jitter_scale = clamp(u.flags.y, 0.0, 1.0);
     let sun = u.sun_dir.xyz;
 
     // Pixel -> camera ray. Framebuffer y=0 is the image top, matching the
@@ -317,7 +319,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             u.sun_dir.w * 61.803,
             u.sun_dir.w * 17.271
         );
-        sample_pos = sample_pos + hash22(subpixel_seed) - vec2<f32>(0.5);
+        sample_pos = sample_pos
+                     + (hash22(subpixel_seed) - vec2<f32>(0.5)) * jitter_scale;
     }
     let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * aspect * tan_half_fov;
     let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov;
@@ -346,7 +349,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // frame index is folded in so temporal accumulation stays unbiased.
     let jitter = hash12(frag_pos.xy + vec2<f32>(u.sun_dir.w * 61.803, 0.0));
     let dt_max = u.bmin.w;
-    var t = t_near + jitter_on * jitter * dt_max;
+    var t = t_near + jitter_on * jitter * jitter_scale * dt_max;
 
     var transmittance = 1.0;
     var col = vec3<f32>(0.0);

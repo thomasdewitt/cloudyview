@@ -41,6 +41,11 @@ DEFAULT_G_HG = 0.76
 DEFAULT_AMBIENT_STRENGTH = 0.12
 DEFAULT_OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)  # witness.py:104-106
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
+DEFAULT_MOTION_BLEND_ALPHA = 0.45
+DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0
+DEFAULT_MOTION_JITTER_SCALE = 0.65
+DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0
+DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 
 _UNIFORM_NBYTES = 11 * 16  # 11 vec4<f32>
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
@@ -111,6 +116,27 @@ def _volume_aabb(field: CloudField) -> Tuple[np.ndarray, np.ndarray]:
     bmin = np.array([x.min() - dx_half, y.min() - dy_half, z.min() - dz_lo_half])
     bmax = np.array([x.max() + dx_half, y.max() + dy_half, z.max() + dz_hi_half])
     return bmin, bmax
+
+
+def _validate_finite_float(name: str, value: float) -> float:
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be finite; got {value!r}.")
+    return value
+
+
+def _validate_unit_interval(name: str, value: float) -> float:
+    value = _validate_finite_float(name, value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1]; got {value!r}.")
+    return value
+
+
+def _validate_positive_float(name: str, value: float) -> float:
+    value = _validate_finite_float(name, value)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be > 0; got {value!r}.")
+    return value
 
 
 def camera_world_origin(camera: Camera, bmin, bmax) -> np.ndarray:
@@ -212,6 +238,12 @@ class InteractiveRenderer:
         ocean_z: float = 0.0,
         ocean_reflectance: Tuple[float, float, float] = DEFAULT_OCEAN_REFLECTANCE,
         fif_normals: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]] = None,
+        motion_accumulation: bool = True,
+        motion_blend_alpha: float = DEFAULT_MOTION_BLEND_ALPHA,
+        motion_blend_reference_fps: float = DEFAULT_MOTION_BLEND_REFERENCE_FPS,
+        motion_jitter_scale: float = DEFAULT_MOTION_JITTER_SCALE,
+        motion_reset_angle_degrees: float = DEFAULT_MOTION_RESET_ANGLE_DEGREES,
+        motion_reset_translation_m: Optional[float] = None,
         device=None,
     ):
         self.field = field
@@ -219,6 +251,30 @@ class InteractiveRenderer:
         self.ocean_enabled = bool(ocean_enabled)
         self.ocean_z = float(ocean_z)
         self.ocean_reflectance = tuple(float(c) for c in ocean_reflectance)
+        self.motion_accumulation = bool(motion_accumulation)
+        self.motion_blend_alpha = _validate_unit_interval(
+            "motion_blend_alpha", motion_blend_alpha
+        )
+        self.motion_blend_reference_fps = _validate_positive_float(
+            "motion_blend_reference_fps", motion_blend_reference_fps
+        )
+        self.motion_jitter_scale = _validate_unit_interval(
+            "motion_jitter_scale", motion_jitter_scale
+        )
+        self.motion_reset_angle_degrees = _validate_positive_float(
+            "motion_reset_angle_degrees", motion_reset_angle_degrees
+        )
+        if motion_reset_translation_m is None:
+            horizontal_extent = min(
+                float(self.bmax[0] - self.bmin[0]),
+                float(self.bmax[1] - self.bmin[1]),
+            )
+            motion_reset_translation_m = (
+                DEFAULT_MOTION_RESET_TRANSLATION_FRACTION * horizontal_extent
+            )
+        self.motion_reset_translation_m = _validate_positive_float(
+            "motion_reset_translation_m", motion_reset_translation_m
+        )
 
         nx, ny, nz = field.shape
         extent = self.bmax - self.bmin
@@ -450,11 +506,17 @@ class InteractiveRenderer:
         self._accum_key = None
         self._accum_count = 0
         self._accum_index = 0
+        self._accum_motion = False
+        self._accum_last_origin = None
+        self._accum_last_forward = None
+        self._last_motion_delta = None
+        self._last_motion_reset = False
         self._current_uniform_key = None
         self._current_uniform_size = None
         self._current_uniform = None
         self._current_jitter = False
         self._current_subpixel = False
+        self._current_jitter_scale = 1.0
 
         # The HUD minimap: static glimpse albedo texture + tiny per-frame
         # camera/FOV uniform. Created with the renderer so the map is loaded
@@ -547,9 +609,11 @@ class InteractiveRenderer:
         ambient_strength: float = DEFAULT_AMBIENT_STRENGTH,
         frame_index: int = 0,
         subpixel: bool = False,
+        jitter_scale: float = 1.0,
     ) -> None:
         """Pack the uniform block and enqueue the (tiny) per-frame upload."""
         w, h = size
+        jitter_scale = _validate_unit_interval("jitter_scale", jitter_scale)
         origin = camera_world_origin(camera, self.bmin, self.bmax)
         forward, right, up = camera.basis()
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
@@ -571,29 +635,48 @@ class InteractiveRenderer:
             1.0 if self.ocean_enabled else 0.0,
             self.ocean_max_lod,
         ]
-        u[10] = [1.0 if subpixel else 0.0, 0.0, 0.0, 0.0]
+        u[10] = [1.0 if subpixel else 0.0, jitter_scale, 0.0, 0.0]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
-        key[10, 0] = 0.0  # subpixel is a sampling mode, not scene identity
+        key[10] = 0.0  # sampling flags are not scene identity
         self._current_uniform_key = key.tobytes()
         self._current_uniform_size = tuple(size)
         self._current_uniform = u
         self._current_jitter = bool(jitter)
         self._current_subpixel = bool(subpixel)
+        self._current_jitter_scale = jitter_scale
         self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
 
     def _set_current_subpixel(self, enabled: bool) -> None:
         """Flip only the subpixel sampling flag in the already-packed uniforms."""
+        self._set_current_sampling(subpixel=enabled)
+
+    def _set_current_sampling(
+        self,
+        *,
+        subpixel: Optional[bool] = None,
+        jitter_scale: Optional[float] = None,
+    ) -> None:
+        """Flip sampling flags in the already-packed uniforms."""
         if self._current_uniform is None:
             return
-        enabled = bool(enabled)
-        if self._current_subpixel == enabled:
-            return
-        self._current_uniform[10, 0] = 1.0 if enabled else 0.0
-        self._current_subpixel = enabled
-        self.device.queue.write_buffer(
-            self._uniform_buf, 0, self._current_uniform.tobytes()
-        )
+        changed = False
+        if subpixel is not None:
+            subpixel = bool(subpixel)
+            if self._current_subpixel != subpixel:
+                self._current_uniform[10, 0] = 1.0 if subpixel else 0.0
+                self._current_subpixel = subpixel
+                changed = True
+        if jitter_scale is not None:
+            jitter_scale = _validate_unit_interval("jitter_scale", jitter_scale)
+            if self._current_jitter_scale != jitter_scale:
+                self._current_uniform[10, 1] = jitter_scale
+                self._current_jitter_scale = jitter_scale
+                changed = True
+        if changed:
+            self.device.queue.write_buffer(
+                self._uniform_buf, 0, self._current_uniform.tobytes()
+            )
 
     def _encode_raymarch_pass(self, command_encoder, target_view,
                               target_format: str, timestamp_writes=None) -> None:
@@ -619,6 +702,11 @@ class InteractiveRenderer:
         self._accum_key = None
         self._accum_count = 0
         self._accum_index = 0
+        self._accum_motion = False
+        self._accum_last_origin = None
+        self._accum_last_forward = None
+        self._last_motion_delta = None
+        self._last_motion_reset = False
 
     def _accum_target(self, size: Tuple[int, int]):
         if self._accum_targets is None or self._accum_targets["size"] != tuple(size):
@@ -648,15 +736,15 @@ class InteractiveRenderer:
             self.reset_accumulation()
         return self._accum_targets
 
-    def _encode_accum_average_pass(self, command_encoder, target) -> None:
-        prev_count = self._accum_count
-        next_count = prev_count + 1
-        if prev_count == 0:
-            prev_weight = 0.0
-            sample_weight = 1.0
-        else:
-            prev_weight = prev_count / next_count
-            sample_weight = 1.0 / next_count
+    def _encode_accum_blend_pass(
+        self,
+        command_encoder,
+        target,
+        *,
+        prev_weight: float,
+        sample_weight: float,
+        next_count: int,
+    ) -> None:
         weights = np.array(
             [prev_weight, sample_weight, 0.0, 0.0], dtype=np.float32
         )
@@ -694,7 +782,7 @@ class InteractiveRenderer:
         rpass.draw(3)
         rpass.end()
         self._accum_index = dst_index
-        self._accum_count = next_count
+        self._accum_count = int(next_count)
 
     def _encode_present_pass(self, command_encoder, src_view, target_view,
                              target_format: str) -> None:
@@ -715,9 +803,75 @@ class InteractiveRenderer:
         rpass.draw(3)
         rpass.end()
 
+    def _current_camera_motion_basis(self):
+        if self._current_uniform is None:
+            return None, None
+        origin = np.asarray(self._current_uniform[0, :3], dtype=np.float64)
+        forward = np.asarray(self._current_uniform[1, :3], dtype=np.float64)
+        return origin, forward
+
+    def _motion_delta_exceeds_reset(
+        self,
+        origin: np.ndarray,
+        forward: np.ndarray,
+        *,
+        translation_threshold_m: float,
+        angle_threshold_degrees: float,
+    ) -> bool:
+        if self._accum_last_origin is None or self._accum_last_forward is None:
+            self._last_motion_delta = None
+            return True
+        translation = float(np.linalg.norm(origin - self._accum_last_origin))
+        cos_angle = float(
+            np.clip(np.dot(forward, self._accum_last_forward), -1.0, 1.0)
+        )
+        angle = float(np.degrees(np.arccos(cos_angle)))
+        self._last_motion_delta = {
+            "translation_m": translation,
+            "angle_degrees": angle,
+        }
+        return (
+            translation > translation_threshold_m
+            or angle > angle_threshold_degrees
+        )
+
+    def _motion_alpha_for_dt(
+        self,
+        alpha_per_reference_frame: float,
+        *,
+        reference_fps: float,
+        delta_seconds: Optional[float],
+    ) -> float:
+        alpha = _validate_unit_interval(
+            "motion_blend_alpha", alpha_per_reference_frame
+        )
+        reference_fps = _validate_positive_float(
+            "motion_blend_reference_fps", reference_fps
+        )
+        if delta_seconds is None:
+            return alpha
+        delta_seconds = _validate_finite_float("motion_delta_seconds", delta_seconds)
+        if delta_seconds <= 0.0 or alpha in (0.0, 1.0):
+            return alpha
+        equivalent_frames = delta_seconds * reference_fps
+        return float(1.0 - (1.0 - alpha) ** equivalent_frames)
+
     def encode_pass(self, command_encoder, target_view, target_format: str,
-                    timestamp_writes=None, accumulate: Optional[bool] = None) -> None:
-        """Encode the scene pass, with temporal averaging for static jittered views."""
+                    timestamp_writes=None, accumulate: Optional[bool] = None,
+                    *, motion_accumulation: Optional[bool] = None,
+                    motion_blend_alpha: Optional[float] = None,
+                    motion_blend_reference_fps: Optional[float] = None,
+                    motion_jitter_scale: Optional[float] = None,
+                    motion_reset_angle_degrees: Optional[float] = None,
+                    motion_reset_translation_m: Optional[float] = None,
+                    motion_delta_seconds: Optional[float] = None) -> None:
+        """Encode the scene pass, with temporal averaging for jittered views.
+
+        Static frames use a true running average. Small camera deltas use a
+        no-reprojection exponential blend at ``motion_blend_alpha`` new-frame
+        weight, specified per frame at ``motion_blend_reference_fps`` unless
+        ``motion_delta_seconds`` is supplied.
+        """
         if accumulate is None:
             accumulate = True
         if (
@@ -735,25 +889,129 @@ class InteractiveRenderer:
             return
 
         target = self._accum_target(self._current_uniform_size)
-        if self._accum_key != self._current_uniform_key:
-            self._accum_key = self._current_uniform_key
-            self._accum_count = 0
-            self._accum_index = 0
+        origin, forward = self._current_camera_motion_basis()
+        current_key = self._current_uniform_key
 
-        self._set_current_subpixel(self._accum_count >= 1)
+        use_motion = (
+            self.motion_accumulation
+            if motion_accumulation is None
+            else bool(motion_accumulation)
+        )
+        alpha_ref = (
+            self.motion_blend_alpha
+            if motion_blend_alpha is None
+            else _validate_unit_interval("motion_blend_alpha", motion_blend_alpha)
+        )
+        reference_fps = (
+            self.motion_blend_reference_fps
+            if motion_blend_reference_fps is None
+            else _validate_positive_float(
+                "motion_blend_reference_fps", motion_blend_reference_fps
+            )
+        )
+        jitter_scale_motion = (
+            self.motion_jitter_scale
+            if motion_jitter_scale is None
+            else _validate_unit_interval("motion_jitter_scale", motion_jitter_scale)
+        )
+        reset_angle = (
+            self.motion_reset_angle_degrees
+            if motion_reset_angle_degrees is None
+            else _validate_positive_float(
+                "motion_reset_angle_degrees", motion_reset_angle_degrees
+            )
+        )
+        reset_translation = (
+            self.motion_reset_translation_m
+            if motion_reset_translation_m is None
+            else _validate_positive_float(
+                "motion_reset_translation_m", motion_reset_translation_m
+            )
+        )
+
+        prev_count = self._accum_count
+        next_count = prev_count + 1
+        if prev_count == 0:
+            prev_weight = 0.0
+            sample_weight = 1.0
+        else:
+            prev_weight = prev_count / next_count
+            sample_weight = 1.0 / next_count
+        subpixel = prev_count >= 1
+        jitter_scale = 1.0
+        self._last_motion_reset = False
+
+        if self._accum_key is None:
+            self._accum_key = current_key
+            self._accum_motion = False
+            subpixel = False
+        elif self._accum_key == current_key:
+            if self._accum_motion:
+                # The motion buffer is deliberately smeared. Once the camera
+                # stops, discard it so static accumulation is again a true
+                # running average for the fixed view.
+                self._accum_count = 0
+                self._accum_index = 0
+                self._accum_motion = False
+                prev_weight = 0.0
+                sample_weight = 1.0
+                next_count = 1
+                subpixel = False
+            else:
+                self._accum_motion = False
+        else:
+            alpha = self._motion_alpha_for_dt(
+                alpha_ref,
+                reference_fps=reference_fps,
+                delta_seconds=motion_delta_seconds,
+            )
+            reset_for_jump = self._motion_delta_exceeds_reset(
+                origin,
+                forward,
+                translation_threshold_m=reset_translation,
+                angle_threshold_degrees=reset_angle,
+            )
+            can_blend_motion = use_motion and alpha < 1.0 and not reset_for_jump
+            self._accum_key = current_key
+            if can_blend_motion:
+                prev_weight = 1.0 - alpha
+                sample_weight = alpha
+                next_count = 1
+                subpixel = True
+                jitter_scale = jitter_scale_motion
+                self._accum_motion = True
+            else:
+                self._accum_count = 0
+                self._accum_index = 0
+                prev_weight = 0.0
+                sample_weight = 1.0
+                next_count = 1
+                subpixel = False
+                self._accum_motion = False
+                self._last_motion_reset = True
+
+        self._set_current_sampling(subpixel=subpixel, jitter_scale=jitter_scale)
         self._encode_raymarch_pass(
             command_encoder,
             target["sample_view"],
             self._ACCUM_FORMAT,
             timestamp_writes,
         )
-        self._encode_accum_average_pass(command_encoder, target)
+        self._encode_accum_blend_pass(
+            command_encoder,
+            target,
+            prev_weight=prev_weight,
+            sample_weight=sample_weight,
+            next_count=next_count,
+        )
         self._encode_present_pass(
             command_encoder,
             target["accum_views"][self._accum_index],
             target_view,
             target_format,
         )
+        self._accum_last_origin = origin
+        self._accum_last_forward = forward
 
     # ------------------------------------------------------------------
     # Offscreen rendering
@@ -777,7 +1035,16 @@ class InteractiveRenderer:
                size: Tuple[int, int] = (960, 540), *,
                bird: bool = False, bird_time: float = 0.0,
                bird_pose: Optional[dict] = None, hud: bool = False,
-               accumulate_frames: int = 1, **kwargs) -> np.ndarray:
+               accumulate_frames: int = 1,
+               accumulate: Optional[bool] = None,
+               motion_accumulation: Optional[bool] = None,
+               motion_blend_alpha: Optional[float] = None,
+               motion_blend_reference_fps: Optional[float] = None,
+               motion_jitter_scale: Optional[float] = None,
+               motion_reset_angle_degrees: Optional[float] = None,
+               motion_reset_translation_m: Optional[float] = None,
+               motion_delta_seconds: Optional[float] = None,
+               **kwargs) -> np.ndarray:
         """Render one frame offscreen and read it back.
 
         Parameters
@@ -797,6 +1064,10 @@ class InteractiveRenderer:
             samples decorrelate. Single-frame and jitter-off renders use the
             direct path. Overlays (bird, hud) are drawn only on the final
             frame so they stay crisp over the converged volume.
+        accumulate : bool, optional
+            Force use of the temporal path even for a single frame. This is
+            how offscreen motion-sequence tests/evaluation exercise the same
+            accumulation path that the windowed app uses.
 
         Returns
         -------
@@ -812,7 +1083,9 @@ class InteractiveRenderer:
             )
         frame_index0 = int(kwargs.pop("frame_index", 0))
         target = self._offscreen_target(size)
-        accumulate = accumulate_frames > 1
+        use_accumulation = (
+            accumulate_frames > 1 if accumulate is None else bool(accumulate)
+        )
         for i in range(accumulate_frames):
             self.write_uniforms(
                 camera, size, frame_index=frame_index0 + i, **kwargs
@@ -820,7 +1093,14 @@ class InteractiveRenderer:
             enc = self.device.create_command_encoder()
             self.encode_pass(
                 enc, target["view"], self._OFFSCREEN_FORMAT,
-                accumulate=accumulate,
+                accumulate=use_accumulation,
+                motion_accumulation=motion_accumulation,
+                motion_blend_alpha=motion_blend_alpha,
+                motion_blend_reference_fps=motion_blend_reference_fps,
+                motion_jitter_scale=motion_jitter_scale,
+                motion_reset_angle_degrees=motion_reset_angle_degrees,
+                motion_reset_translation_m=motion_reset_translation_m,
+                motion_delta_seconds=motion_delta_seconds,
             )
             if i == accumulate_frames - 1:
                 if bird:
