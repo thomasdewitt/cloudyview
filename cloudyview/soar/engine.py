@@ -43,6 +43,13 @@ from ..witness import (
     LIGHT_TRANSFER_FULL_ELEVATION_DEG,
     LIGHT_TRANSFER_SPLIT_STRENGTH,
     LOW_SUN_SKY_FIELD_STRENGTH,
+    OCEAN_GLINT_ROUGHNESS,
+    OCEAN_GLINT_ROUGHNESS_PER_LOD,
+    OCEAN_GLINT_STRENGTH,
+    OCEAN_HAZE_EXTINCTION_PER_KM,
+    OCEAN_MIP_BIAS,
+    OCEAN_REALISM,
+    OCEAN_SKY_SHADOW_FLOOR,
     SPECTRAL_LIGHTING_STRENGTH,
     _spectral_lighting_colors,
 )
@@ -71,6 +78,16 @@ DEFAULT_SPECTRAL_LIGHTING_STRENGTH = SPECTRAL_LIGHTING_STRENGTH
 DEFAULT_LOW_SUN_SKY_FIELD_STRENGTH = LOW_SUN_SKY_FIELD_STRENGTH
 DEFAULT_LIGHT_TRANSFER_SPLIT_STRENGTH = LIGHT_TRANSFER_SPLIT_STRENGTH
 DEFAULT_AERIAL_PERSPECTIVE_STRENGTH = AERIAL_PERSPECTIVE_STRENGTH
+# Ocean realism (witness iter_004/009/011): footprint-filtered normal mips,
+# spectral GGX sun glint, sky-field haze, per-term cloud shadowing.
+# ocean_realism=0.0 is the untouched legacy ocean shader.
+DEFAULT_OCEAN_REALISM = OCEAN_REALISM
+DEFAULT_OCEAN_MIP_BIAS = OCEAN_MIP_BIAS
+DEFAULT_OCEAN_GLINT_STRENGTH = OCEAN_GLINT_STRENGTH
+DEFAULT_OCEAN_GLINT_ROUGHNESS = OCEAN_GLINT_ROUGHNESS
+DEFAULT_OCEAN_GLINT_ROUGHNESS_PER_LOD = OCEAN_GLINT_ROUGHNESS_PER_LOD
+DEFAULT_OCEAN_HAZE_EXTINCTION_PER_KM = OCEAN_HAZE_EXTINCTION_PER_KM
+DEFAULT_OCEAN_SKY_SHADOW_FLOOR = OCEAN_SKY_SHADOW_FLOOR
 # Exact pre-port soar ambient tint (stale vs witness iter_010's retuned
 # (0.19, 0.225, 0.30)). Pass ambient_tint=PRE_PORT_AMBIENT_TINT together with
 # the *_strength=0.0 kill switches to reproduce the pre-port frame bit-for-bit.
@@ -82,7 +99,7 @@ DEFAULT_MOTION_JITTER_SCALE = 0.65
 DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0
 DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 
-_UNIFORM_NBYTES = 18 * 16  # 20 vec4<f32> (rows documented in write_uniforms)
+_UNIFORM_NBYTES = 20 * 16  # 20 vec4<f32> (rows documented in write_uniforms)
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
 
@@ -684,6 +701,17 @@ class InteractiveRenderer:
         ),
         aerial_perspective_strength: float = DEFAULT_AERIAL_PERSPECTIVE_STRENGTH,
         ambient_tint: Optional[Tuple[float, float, float]] = None,
+        ocean_realism: float = DEFAULT_OCEAN_REALISM,
+        ocean_mip_bias: float = DEFAULT_OCEAN_MIP_BIAS,
+        ocean_glint_strength: float = DEFAULT_OCEAN_GLINT_STRENGTH,
+        ocean_glint_roughness: float = DEFAULT_OCEAN_GLINT_ROUGHNESS,
+        ocean_glint_roughness_per_lod: float = (
+            DEFAULT_OCEAN_GLINT_ROUGHNESS_PER_LOD
+        ),
+        ocean_haze_extinction_per_km: float = (
+            DEFAULT_OCEAN_HAZE_EXTINCTION_PER_KM
+        ),
+        ocean_sky_shadow_floor: float = DEFAULT_OCEAN_SKY_SHADOW_FLOOR,
         frame_index: int = 0,
         subpixel: bool = False,
         jitter_scale: float = 1.0,
@@ -713,6 +741,22 @@ class InteractiveRenderer:
                 "aerial_perspective_strength must be >= 0; got "
                 f"{aerial_perspective_strength!r}."
             )
+        ocean_realism = _validate_unit_interval("ocean_realism", ocean_realism)
+        ocean_mip_bias = _validate_finite_float(
+            "ocean_mip_bias", ocean_mip_bias
+        )
+        for name, value in (
+            ("ocean_glint_strength", ocean_glint_strength),
+            ("ocean_glint_roughness", ocean_glint_roughness),
+            ("ocean_glint_roughness_per_lod", ocean_glint_roughness_per_lod),
+            ("ocean_haze_extinction_per_km", ocean_haze_extinction_per_km),
+        ):
+            value = _validate_finite_float(name, value)
+            if value < 0.0:
+                raise ValueError(f"{name} must be >= 0; got {value!r}.")
+        ocean_sky_shadow_floor = _validate_unit_interval(
+            "ocean_sky_shadow_floor", ocean_sky_shadow_floor
+        )
         origin = camera_world_origin(camera, self.bmin, self.bmax)
         forward, right, up = camera.basis()
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
@@ -741,7 +785,7 @@ class InteractiveRenderer:
             light_transfer_split_strength, float(sun_elevation)
         )
 
-        u = np.zeros((18, 4), dtype=np.float32)
+        u = np.zeros((20, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, w / h]
         u[2] = [*right, exposure]
@@ -781,6 +825,20 @@ class InteractiveRenderer:
         u[15] = [*sky_horizon, aerial_perspective_strength]
         u[16] = [*sky_bloom, AERIAL_BETA_PER_KM * 1e-3]  # w: beta0 in m^-1
         u[17] = [*sky_disc, AERIAL_SCALE_HEIGHT_M]
+        # Rows 18-19: ocean realism (scene identity). Haze extinction is
+        # packed in m^-1 like the cloud aerial beta0.
+        u[18] = [
+            ocean_realism,
+            ocean_mip_bias,
+            ocean_glint_strength,
+            ocean_glint_roughness,
+        ]
+        u[19] = [
+            ocean_glint_roughness_per_lod,
+            ocean_haze_extinction_per_km * 1e-3,
+            ocean_sky_shadow_floor,
+            0.0,
+        ]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity

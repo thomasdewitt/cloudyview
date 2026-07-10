@@ -64,6 +64,13 @@ struct Uniforms {
     sky_bloom: vec4<f32>,
     // xyz = solar disc color, w = aerial haze scale height (m)
     sky_disc: vec4<f32>,
+    // Rows 18-19: ocean realism (witness iter_004/009/011).
+    // x = master gate (0 = exact legacy ocean shader), y = mip bias,
+    // z = GGX glint strength, w = GGX base roughness
+    ocean_realism_a: vec4<f32>,
+    // x = GGX roughness widening per normal LOD, y = ocean haze extinction
+    // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
+    ocean_realism_b: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -459,6 +466,185 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> ve
     return lit * t_eff;
 }
 
+// ---------------------------------------------------------------------------
+// Ocean realism path (witness iter_004/009/011): footprint-filtered normal
+// mips, energy-partitioned spectral GGX sun glint, per-term cloud shadowing,
+// and sky-field haze along the ocean sightline.
+// ---------------------------------------------------------------------------
+
+// Legacy reflected sky with its fixed glint lobe faded by the master gate
+// (witness._reflection_sky_realism). At ocean_realism = 1 the legacy lobe is
+// fully off and the GGX glint replaces it.
+fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
+                          legacy_glint_weight: f32) -> vec3<f32> {
+    var t = max(0.0, dir.z);
+    let one_minus = 1.0 - t;
+    t = 1.0 - one_minus * one_minus * one_minus;
+    var col = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
+    let cos_rs = dot(dir, sun);
+    if (cos_rs > 0.0 && legacy_glint_weight > 0.0) {
+        let glint_w = 0.02;
+        let a = glint_w / ((1.0 - cos_rs) + glint_w);
+        col = col + legacy_glint_weight * a * vec3<f32>(1.2, 1.0, 0.6);
+    }
+    return col;
+}
+
+// Smith masking for a GGX distribution parameterized by RMS slope.
+fn ggx_smith_g1(n_dot_x: f32, alpha_squared: f32) -> f32 {
+    let root = sqrt(alpha_squared + (1.0 - alpha_squared) * n_dot_x * n_dot_x);
+    return (2.0 * n_dot_x) / (n_dot_x + root);
+}
+
+// One packed FIF normal mip level, sampled the witness way: the half-texel
+// offset is per-LEVEL (witness bilinear grid puts texel value i at gx = i),
+// so trilinear-in-LOD is done as two explicit level samples + mix +
+// renormalize (witness._ocean_wave_normal_mipped) rather than a single
+// hardware trilinear fetch whose half-texel offset would only fit level 0.
+fn ocean_normal_mip_sample(world_xy: vec2<f32>, level: f32) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(ocean_normals, i32(level)));
+    let coord = world_xy / u.ocean_params.y + 0.5 / dims;
+    return textureSampleLevel(ocean_normals, ocean_samp, coord, level).rgb;
+}
+
+fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
+    let level0 = floor(lod);
+    let level1 = min(level0 + 1.0, u.ocean_params.w);
+    let f = lod - level0;
+    var n = ocean_normal_mip_sample(world_xy, level0);
+    if (level1 > level0 && f > 0.0) {
+        n = mix(n, ocean_normal_mip_sample(world_xy, level1), f);
+    }
+    return normalize(n);
+}
+
+// Footprint-filtered ocean with microfacet sun glint and path haze
+// (witness._ocean_shade_realism).
+fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
+                       t_hit: f32) -> vec3<f32> {
+    let ocean_realism = u.ocean_realism_a.x;
+    let ocean_mip_bias = u.ocean_realism_a.y;
+    let glint_strength = u.ocean_realism_a.z;
+    let glint_roughness = u.ocean_realism_a.w;
+    let glint_roughness_per_lod = u.ocean_realism_b.x;
+    let haze_beta0 = u.ocean_realism_b.y;
+    let sky_shadow_floor = u.ocean_realism_b.z;
+
+    // Project one pixel's angular span onto the water; the grazing-angle
+    // factor drives the horizon toward coarser mip levels.
+    let grazing = max(abs(dir.z), 0.03);
+    let pixel_angular_span = 2.0 * u.cam_origin.w / u.params.y;
+    let ocean_span = t_hit * pixel_angular_span / grazing;
+    let texel_span = max(ocean_span / u.ocean_params.x, 1.0);
+    var lod = log2(texel_span) + ocean_mip_bias;
+    lod = clamp(lod, 0.0, u.ocean_params.w);
+    // Scaling LOD with the master gate keeps intermediate gate values a
+    // continuous tuning range (witness does the same).
+    lod = lod * ocean_realism;
+
+    let n = ocean_wave_normal_mipped(hit.xy, lod);
+
+    // Reflect the view direction around the filtered surface normal.
+    let vdotn = dot(dir, n);
+    var refl = dir - 2.0 * vdotn * n;
+    if (refl.z < 0.0) {
+        refl.z = -refl.z;
+    }
+    let legacy_glint_weight = 1.0 - ocean_realism;
+    let sky = reflection_sky_realism(refl, sun, legacy_glint_weight);
+
+    // Water Fresnel for the resolved sky reflection.
+    let n_dot_v = clamp(-vdotn, 0.0, 1.0);
+    let one_minus = 1.0 - n_dot_v;
+    let om2 = one_minus * one_minus;
+    let view_fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
+
+    let tau_ocean = light_march_tau(hit, sun);
+    let t_sun_ocean = exp(-tau_ocean);
+    let n_dot_l = max(0.0, dot(sun, n));
+
+    // Direct-sun GGX glint, tinted by the spectral beam color. Mip filtering
+    // removes unresolved slope variance; alpha widening per LOD folds it back
+    // into a broader stable highlight instead of point-sample sparkles.
+    let glint_weight = ocean_realism * glint_strength;
+    var glint = vec3<f32>(0.0);
+    var sun_fresnel = 0.02;
+    if (glint_weight > 0.0 && n_dot_l > 0.0 && n_dot_v > 1e-8) {
+        var h = sun - dir;
+        let h_len = length(h);
+        if (h_len > 1e-8) {
+            h = h / h_len;
+            let n_dot_h = dot(n, h);
+            if (n_dot_h > 0.0) {
+                let v_dot_h = clamp(dot(-dir, h), 0.0, 1.0);
+                let one_minus_vh = 1.0 - v_dot_h;
+                let vh2 = one_minus_vh * one_minus_vh;
+                sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
+
+                let alpha = clamp(
+                    glint_roughness + glint_roughness_per_lod * lod,
+                    0.02, 0.75
+                );
+                let alpha_squared = alpha * alpha;
+                let denom = n_dot_h * n_dot_h * (alpha_squared - 1.0) + 1.0;
+                let d_ggx = alpha_squared
+                    / (3.14159265358979 * denom * denom);
+                let g_smith = ggx_smith_g1(n_dot_v, alpha_squared)
+                    * ggx_smith_g1(n_dot_l, alpha_squared);
+                let spec = glint_weight * t_sun_ocean * d_ggx * g_smith
+                    * sun_fresnel / (4.0 * n_dot_v);
+                glint = spec * u.cloud_sun.xyz;
+            }
+        }
+    }
+
+    // Direct subsurface light uses the complement of the incident Fresnel
+    // allocation so the specular sun path does not create energy.
+    let energy_weight = min(glint_weight, 1.0);
+    let diffuse_partition = 1.0 - energy_weight * sun_fresnel;
+    let diff_irr = t_sun_ocean * n_dot_l * 0.3183098861837907
+        * diffuse_partition;
+    let diffuse = diff_irr * SUN_COLOR * u.ocean.yzw;
+
+    // Per-term cloud shadowing (witness iter_011): the sun terms already
+    // carry t_sun_ocean; only the sky-reflection term dims, and only to
+    // sky_shadow_floor — under a cloud the water still reflects the mostly
+    // unblocked sky dome and keeps its wave texture.
+    let sky_shadow = sky_shadow_floor + (1.0 - sky_shadow_floor) * t_sun_ocean;
+    var ol = view_fresnel * sky * sky_shadow
+        + (1.0 - view_fresnel) * diffuse
+        + glint;
+
+    // Ocean-only aerial perspective toward the same angular sky field the
+    // cloud haze uses (solar disc excluded), killing the horizon seam.
+    let haze_tau = ocean_realism * haze_beta0 * t_hit;
+    if (haze_tau > 0.0) {
+        let haze = 1.0 - exp(-haze_tau);
+        let h_len = length(dir.xy);
+        var hdir = dir.xy;
+        if (h_len > 1e-8) {
+            hdir = dir.xy / h_len;
+        }
+        let haze_col = sky_radiance(
+            vec3<f32>(hdir, 0.0), sun,
+            u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
+            u.cloud_sun.w
+        );
+        ol = mix(ol, haze_col, haze);
+    }
+
+    return ol;
+}
+
+// Master-gate dispatch: exact-zero realism keeps the untouched legacy ocean
+// arithmetic (witness._ocean_shade_dispatch).
+fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
+                        t_hit: f32) -> vec3<f32> {
+    if (u.ocean_realism_a.x == 0.0) {
+        return ocean_shade(hit, dir, sun, t_hit);
+    }
+    return ocean_shade_realism(hit, dir, sun, t_hit);
+}
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
 // with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
@@ -569,7 +755,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // ocean plane coincident with the box floor is still shaded.
             if (ocean_on && t >= t_ocean) {
                 let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
-                col = col + transmittance * ocean_shade(ocean_hit, dir, sun, t_ocean);
+                col = col + transmittance
+                            * ocean_shade_dispatch(ocean_hit, dir, sun, t_ocean);
                 transmittance = 0.0;
                 break;
             }
@@ -754,7 +941,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         let center = 0.5 * (u.bmin.xy + u.bmax.xy);
         if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
             && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
-            col = col + transmittance * ocean_shade(ocean_hit, dir, sun, t_ocean);
+            col = col + transmittance
+                        * ocean_shade_dispatch(ocean_hit, dir, sun, t_ocean);
             transmittance = 0.0;
         }
     }
