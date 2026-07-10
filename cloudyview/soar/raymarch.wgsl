@@ -47,7 +47,8 @@ struct Uniforms {
     // z = directional ambient occlusion, w = bounce depth attenuation
     cb_realism: vec4<f32>,
     // x = gradient coarse weight, y = gradient coarse radius (m),
-    // z = directional ambient occlusion floor, w = unused
+    // z = directional ambient occlusion floor,
+    // w = cone stencil tan(theta) (0 = legacy fixed coarse radius)
     cb_params: vec4<f32>,
     // Rows 13-17: witness realism package (per-frame CPU spectral precompute,
     // see witness._spectral_lighting_colors / engine.write_uniforms).
@@ -205,7 +206,9 @@ fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>) -> vec3<f32> {
 
 fn sigma_gradient(p: vec3<f32>, sigma: f32,
                   coarse_weight_in: f32,
-                  coarse_radius_m: f32) -> vec4<f32> {
+                  coarse_radius_m: f32,
+                  sample_distance_m: f32,
+                  cone_stencil_tan_theta: f32) -> vec4<f32> {
     let fine_h = sigma_voxel_size_xyz() * GRADIENT_SHADING_RADIUS_VOXELS;
     let fine_grad = sigma_gradient_at_radius(p, fine_h);
     let fine_len = length(fine_grad);
@@ -220,16 +223,29 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
 
     let voxel = sigma_voxel_size_xyz();
     let extent = u.bmax.xyz - u.bmin.xyz;
-    let coarse_h = max(
-        fine_h,
-        min(
-            max(
-                vec3<f32>(coarse_radius_m),
-                voxel * GRADIENT_SHADING_COARSE_MIN_VOXELS
-            ),
+
+    // Cone stencil (witness iter_001): a fixed angular radius follows
+    // apparent cloud scale — distant samples use a broader world-space
+    // normal while nearby samples converge on the fine stencil. An exact
+    // zero explicitly selects the legacy fixed-radius path, which keeps
+    // its larger minimum-voxel floor and the domain-fraction ceiling.
+    var cone_radius_m: f32;
+    var coarse_min_voxels: f32;
+    if (cone_stencil_tan_theta > 0.0) {
+        cone_radius_m = sample_distance_m * cone_stencil_tan_theta;
+        coarse_min_voxels = GRADIENT_SHADING_RADIUS_VOXELS;
+    } else {
+        cone_radius_m = coarse_radius_m;
+        coarse_min_voxels = GRADIENT_SHADING_COARSE_MIN_VOXELS;
+    }
+    var coarse_h = max(vec3<f32>(cone_radius_m), voxel * coarse_min_voxels);
+    if (cone_stencil_tan_theta == 0.0) {
+        coarse_h = min(
+            coarse_h,
             extent * GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION
-        )
-    );
+        );
+    }
+    coarse_h = max(coarse_h, fine_h);
     let coarse_grad = sigma_gradient_at_radius(p, coarse_h);
     let coarse_len = length(coarse_grad);
     let coarse_conf = (
@@ -846,7 +862,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             if (gradient_shading_strength > 0.0) {
                 let grad_conf_v = sigma_gradient(
-                    p, sigma, gradient_coarse_weight, gradient_coarse_radius_m
+                    p, sigma, gradient_coarse_weight, gradient_coarse_radius_m,
+                    t, u.cb_params.w
                 );
                 let grad = grad_conf_v.xyz;
                 let grad_len = length(grad);

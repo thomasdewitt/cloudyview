@@ -37,6 +37,7 @@ from ..angles import direction_from_azimuth_elevation
 from ..witness import (
     SUN_COLOR as WITNESS_SUN_COLOR,
     AERIAL_BETA_PER_KM,
+    CONE_STENCIL_THETA_DEG,
     AERIAL_PERSPECTIVE_STRENGTH,
     AERIAL_SCALE_HEIGHT_M,
     LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG,
@@ -88,9 +89,16 @@ DEFAULT_OCEAN_GLINT_ROUGHNESS = OCEAN_GLINT_ROUGHNESS
 DEFAULT_OCEAN_GLINT_ROUGHNESS_PER_LOD = OCEAN_GLINT_ROUGHNESS_PER_LOD
 DEFAULT_OCEAN_HAZE_EXTINCTION_PER_KM = OCEAN_HAZE_EXTINCTION_PER_KM
 DEFAULT_OCEAN_SKY_SHADOW_FLOOR = OCEAN_SKY_SHADOW_FLOOR
+# Cone stencil (witness iter_001): the coarse gradient-shading radius
+# subtends a fixed angle at the camera (radius = distance * tan(theta)).
+# Exact 0.0 selects the legacy fixed-radius coarse stencil.
+DEFAULT_CONE_STENCIL_THETA_DEG = CONE_STENCIL_THETA_DEG
 # Exact pre-port soar ambient tint (stale vs witness iter_010's retuned
-# (0.19, 0.225, 0.30)). Pass ambient_tint=PRE_PORT_AMBIENT_TINT together with
-# the *_strength=0.0 kill switches to reproduce the pre-port frame bit-for-bit.
+# (0.19, 0.225, 0.30)). The master kill combination reproducing the pre-port
+# frame bit-for-bit is: spectral_lighting_strength=0.0,
+# low_sun_sky_field_strength=0.0, light_transfer_split_strength=0.0,
+# aerial_perspective_strength=0.0, ocean_realism=0.0,
+# cone_stencil_theta_deg=0.0, ambient_tint=PRE_PORT_AMBIENT_TINT.
 PRE_PORT_AMBIENT_TINT = (0.22, 0.23, 0.28)
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 DEFAULT_MOTION_BLEND_ALPHA = 0.45
@@ -712,6 +720,7 @@ class InteractiveRenderer:
             DEFAULT_OCEAN_HAZE_EXTINCTION_PER_KM
         ),
         ocean_sky_shadow_floor: float = DEFAULT_OCEAN_SKY_SHADOW_FLOOR,
+        cone_stencil_theta_deg: float = DEFAULT_CONE_STENCIL_THETA_DEG,
         frame_index: int = 0,
         subpixel: bool = False,
         jitter_scale: float = 1.0,
@@ -756,6 +765,17 @@ class InteractiveRenderer:
                 raise ValueError(f"{name} must be >= 0; got {value!r}.")
         ocean_sky_shadow_floor = _validate_unit_interval(
             "ocean_sky_shadow_floor", ocean_sky_shadow_floor
+        )
+        cone_stencil_theta_deg = _validate_finite_float(
+            "cone_stencil_theta_deg", cone_stencil_theta_deg
+        )
+        if not 0.0 <= cone_stencil_theta_deg < 90.0:
+            raise ValueError(
+                "cone_stencil_theta_deg must be in [0, 90); got "
+                f"{cone_stencil_theta_deg!r}."
+            )
+        cone_stencil_tan_theta = float(
+            np.tan(np.deg2rad(cone_stencil_theta_deg))
         )
         origin = camera_world_origin(camera, self.bmin, self.bmax)
         forward, right, up = camera.basis()
@@ -814,7 +834,7 @@ class InteractiveRenderer:
             gradient_coarse_weight,
             gradient_coarse_radius_m,
             ambient_occlusion_floor,
-            0.0,
+            cone_stencil_tan_theta,
         ]
         # Rows 13-17: witness realism package, per-frame spectral precompute
         # (scene identity). Colors are the _spectral_lighting_colors outputs;
