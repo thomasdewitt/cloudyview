@@ -168,6 +168,14 @@ BOUNCE_DEPTH_ATTENUATION = 0.80
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
 MAX_STEPS = 2048
 
+# Deterministic still-image sampling. Values above 1 decorrelate the camera
+# ray within each pixel and the view-march phase within its first step, then
+# average the samples in linear HDR space. This turns coherent step-shell
+# isophotes into high-frequency error that the spatial average removes.
+# WITNESS_SPP=1 is an explicit, exact legacy path: pixel centers, no phase
+# jitter, and no averaging. Cost scales approximately linearly with SPP.
+WITNESS_SPP = 4
+
 # Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
 # can use it as a default; ocean tuning itself is not part of this block).
 OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)
@@ -534,6 +542,18 @@ def _ray_box(ox, oy, oz, dx, dy, dz,
 
 
 @njit(inline="always")
+def _sampling_hash(pixel_idx, dimension):
+    """Deterministic [0, 1) SplitMix64 hash for per-pixel sample rotations."""
+    x = np.uint64(pixel_idx) + np.uint64(dimension + 1) * np.uint64(
+        0x9E3779B97F4A7C15
+    )
+    x = (x ^ (x >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    x = (x ^ (x >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    x = x ^ (x >> np.uint64(31))
+    return float(x >> np.uint64(11)) * (1.0 / 9007199254740992.0)
+
+
+@njit(inline="always")
 def _hg_phase(cos_theta, g):
     denom = 1.0 + g * g - 2.0 * g * cos_theta
     return (1.0 - g * g) / (4.0 * 3.14159265358979 * denom * pymath.sqrt(denom))
@@ -845,6 +865,8 @@ def _render_image(
     ambient_occlusion_strength,
     ambient_occlusion_floor,
     bounce_depth_attenuation,
+    sample_index,
+    samples_per_pixel,
     image,
 ):
     aspect = img_w / img_h
@@ -857,8 +879,29 @@ def _render_image(
         py = pixel_idx // img_w
         px = pixel_idx % img_w
 
-        ndc_x = (2.0 * (px + 0.5) / img_w - 1.0) * aspect * tan_half_fov
-        ndc_y = (1.0 - 2.0 * (py + 0.5) / img_h) * tan_half_fov
+        # SPP=1 is deliberately the exact legacy sampling path. At higher
+        # SPP, an R2 low-discrepancy sequence is independently rotated per
+        # pixel. It spreads rays across the pixel without RNG state or the
+        # clustering of independent white-noise samples.
+        if samples_per_pixel == 1:
+            sample_x = px + 0.5
+            sample_y = py + 0.5
+        else:
+            subpixel_x = (
+                _sampling_hash(pixel_idx, 0)
+                + sample_index * 0.7548776662466927
+            )
+            subpixel_y = (
+                _sampling_hash(pixel_idx, 1)
+                + sample_index * 0.5698402909980532
+            )
+            subpixel_x -= pymath.floor(subpixel_x)
+            subpixel_y -= pymath.floor(subpixel_y)
+            sample_x = px + subpixel_x
+            sample_y = py + subpixel_y
+
+        ndc_x = (2.0 * sample_x / img_w - 1.0) * aspect * tan_half_fov
+        ndc_y = (1.0 - 2.0 * sample_y / img_h) * tan_half_fov
 
         d_x = cam_fx + ndc_x * cam_rx + ndc_y * cam_ux
         d_y = cam_fy + ndc_x * cam_ry + ndc_y * cam_uy
@@ -895,7 +938,33 @@ def _render_image(
         tau_depth = 0.0
 
         if t_near >= 0 and t_near < t_far:
-            t = t_near
+            if samples_per_pixel == 1:
+                # Exact legacy phase: first sample lies on the AABB entry.
+                t = t_near
+            else:
+                # Stratify the first-step phase across samples and rotate it
+                # per pixel. The entry level selects the physical step scale,
+                # including when a fine nested grid touches the outer AABB.
+                entry_x = cam_ox + t_near * d_x
+                entry_y = cam_oy + t_near * d_y
+                entry_z = cam_oz + t_near * d_z
+                entry_level = _active_level(
+                    entry_x, entry_y, entry_z,
+                    n_levels, level_bmin, level_bmax,
+                )
+                if entry_level < 0:
+                    entry_level = n_levels - 1
+                entry_dx = level_dxs[entry_level, 0]
+                if level_dxs[entry_level, 1] < entry_dx:
+                    entry_dx = level_dxs[entry_level, 1]
+                if level_dxs[entry_level, 2] < entry_dx:
+                    entry_dx = level_dxs[entry_level, 2]
+                phase = (
+                    _sampling_hash(pixel_idx, 2)
+                    + (sample_index + 0.5) / samples_per_pixel
+                )
+                phase -= pymath.floor(phase)
+                t = t_near + phase * entry_dx * step_voxel_factor
 
             for _ in range(max_steps):
                 # Ocean hit tested before t_far: if the ocean plane coincides
@@ -1144,9 +1213,16 @@ def _render_image(
             col_g += transmittance * sky_g
             col_b += transmittance * sky_b
 
-        image[py, px, 0] = col_r
-        image[py, px, 1] = col_g
-        image[py, px, 2] = col_b
+        if samples_per_pixel == 1:
+            # Exact legacy write path: no otherwise-redundant multiply by 1.
+            image[py, px, 0] = col_r
+            image[py, px, 1] = col_g
+            image[py, px, 2] = col_b
+        else:
+            sample_weight = 1.0 / samples_per_pixel
+            image[py, px, 0] += col_r * sample_weight
+            image[py, px, 1] += col_g * sample_weight
+            image[py, px, 2] += col_b * sample_weight
 
 
 # ============================================================================
@@ -1299,6 +1375,7 @@ def _render_levels(
     ambient_occlusion_strength: float,
     ambient_occlusion_floor: float,
     bounce_depth_attenuation: float,
+    witness_spp: int,
     verbose: bool,
 ) -> np.ndarray:
     """Pack levels, warm up, render, and return the linear HDR buffer."""
@@ -1310,6 +1387,9 @@ def _render_levels(
     if (not pymath.isfinite(spectral_lighting_strength) or
             spectral_lighting_strength < 0.0 or spectral_lighting_strength > 1.0):
         raise ValueError("spectral_lighting_strength must be finite and in [0, 1].")
+    if (isinstance(witness_spp, (bool, np.bool_)) or
+            not isinstance(witness_spp, (int, np.integer)) or witness_spp < 1):
+        raise ValueError("witness_spp must be a positive integer.")
 
     cone_stencil_tan_theta = pymath.tan(
         pymath.radians(cone_stencil_theta_deg)
@@ -1378,6 +1458,7 @@ def _render_levels(
         ambient_occlusion_strength,
         ambient_occlusion_floor,
         bounce_depth_attenuation,
+        0, 1,
         warmup,
     )
     if verbose:
@@ -1385,39 +1466,41 @@ def _render_levels(
         print("  Rendering...", end="", flush=True)
 
     t0 = time.perf_counter()
-    _render_image(
-        sigma_stacked, level_offsets, level_dims,
-        level_bmin, level_bmax, level_dxs, len(levels),
-        outer_bmin[0], outer_bmin[1], outer_bmin[2],
-        outer_bmax[0], outer_bmax[1], outer_bmax[2],
-        camera_position[0], camera_position[1], camera_position[2],
-        camera_forward[0], camera_forward[1], camera_forward[2],
-        camera_right[0], camera_right[1], camera_right[2],
-        camera_up[0], camera_up[1], camera_up[2],
-        sun_direction[0], sun_direction[1], sun_direction[2],
-        img_w, img_h, tan_half_fov,
-        n_light_steps,
-        sun_color[0], sun_color[1], sun_color[2],
-        cloud_sun[0], cloud_sun[1], cloud_sun[2],
-        ambient_tint[0], ambient_tint[1], ambient_tint[2],
-        sky_horizon[0], sky_horizon[1], sky_horizon[2],
-        sky_bloom[0], sky_bloom[1], sky_bloom[2],
-        sky_disc[0], sky_disc[1], sky_disc[2],
-        g_hg, ambient_strength,
-        ocean_enabled, ocean_z,
-        ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
-        fif_nx, fif_ny, fif_nz, fif_dx,
-        step_voxel_factor, max_steps, powder_coeff,
-        gradient_shading_strength,
-        gradient_coarse_weight,
-        gradient_coarse_radius_m,
-        cone_stencil_tan_theta,
-        deep_shadow_ms_suppression,
-        ambient_occlusion_strength,
-        ambient_occlusion_floor,
-        bounce_depth_attenuation,
-        image,
-    )
+    for sample_index in range(witness_spp):
+        _render_image(
+            sigma_stacked, level_offsets, level_dims,
+            level_bmin, level_bmax, level_dxs, len(levels),
+            outer_bmin[0], outer_bmin[1], outer_bmin[2],
+            outer_bmax[0], outer_bmax[1], outer_bmax[2],
+            camera_position[0], camera_position[1], camera_position[2],
+            camera_forward[0], camera_forward[1], camera_forward[2],
+            camera_right[0], camera_right[1], camera_right[2],
+            camera_up[0], camera_up[1], camera_up[2],
+            sun_direction[0], sun_direction[1], sun_direction[2],
+            img_w, img_h, tan_half_fov,
+            n_light_steps,
+            sun_color[0], sun_color[1], sun_color[2],
+            cloud_sun[0], cloud_sun[1], cloud_sun[2],
+            ambient_tint[0], ambient_tint[1], ambient_tint[2],
+            sky_horizon[0], sky_horizon[1], sky_horizon[2],
+            sky_bloom[0], sky_bloom[1], sky_bloom[2],
+            sky_disc[0], sky_disc[1], sky_disc[2],
+            g_hg, ambient_strength,
+            ocean_enabled, ocean_z,
+            ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
+            fif_nx, fif_ny, fif_nz, fif_dx,
+            step_voxel_factor, max_steps, powder_coeff,
+            gradient_shading_strength,
+            gradient_coarse_weight,
+            gradient_coarse_radius_m,
+            cone_stencil_tan_theta,
+            deep_shadow_ms_suppression,
+            ambient_occlusion_strength,
+            ambient_occlusion_floor,
+            bounce_depth_attenuation,
+            sample_index, witness_spp,
+            image,
+        )
     elapsed = time.perf_counter() - t0
     if verbose:
         print(f" done ({elapsed:.1f}s)")
@@ -1470,6 +1553,7 @@ def render_nested(
     ambient_occlusion_strength: float = AMBIENT_OCCLUSION_STRENGTH,
     ambient_occlusion_floor: float = AMBIENT_OCCLUSION_FLOOR,
     bounce_depth_attenuation: float = BOUNCE_DEPTH_ATTENUATION,
+    witness_spp: int = WITNESS_SPP,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -1483,6 +1567,9 @@ def render_nested(
 
     spectral_lighting_strength blends from the legacy fixed spectra at 0 to
         elevation-dependent direct sun, diffuse fill, and main-sky color at 1.
+
+    witness_spp controls deterministic still-image sampling. 1 is the exact
+        legacy pixel-center/no-jitter path; higher values average jittered rays.
 
     fif_normals: (nx, ny, nz, dx_m) tuple from
         cloudyview.ocean_fif.generate_fif_normals. Required when ocean_enabled
@@ -1516,6 +1603,7 @@ def render_nested(
         ambient_occlusion_strength,
         ambient_occlusion_floor,
         bounce_depth_attenuation,
+        witness_spp,
         verbose,
     )
     if return_linear:
@@ -1686,6 +1774,7 @@ def witness(
         AMBIENT_OCCLUSION_STRENGTH,
         AMBIENT_OCCLUSION_FLOOR,
         BOUNCE_DEPTH_ATTENUATION,
+        WITNESS_SPP,
         verbose=verbose,
     )
     return tone_map(image, exposure=exposure)
