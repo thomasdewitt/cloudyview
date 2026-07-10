@@ -100,6 +100,27 @@ ATMOSPHERE_AEROSOL_ANGSTROM = 1.3
 ATMOSPHERE_RGB_WAVELENGTHS_NM = (680.0, 550.0, 460.0)
 SUNSET_HORIZON_RADIANCE = (0.42, 0.20, 0.055)
 
+# Angular distribution of the low-sun horizon spectrum. Aerosol path length
+# reddens a broad sector at the geometric horizon, but that sector narrows
+# rapidly with elevation; the zenith and anti-solar sky remain blue. The
+# neutral control color bends the blue-to-gold interpolation through pale
+# daylight instead of the mauve produced by a straight RGB blend. Strength 0
+# restores the iter_006 azimuth-only spectral sky field exactly.
+LOW_SUN_SKY_FIELD_STRENGTH = 1.0
+LOW_SUN_SKY_WARM_ELEVATION_DEG = 32.0
+LOW_SUN_SKY_HORIZON_AZIMUTH_DEG = 105.0
+LOW_SUN_SKY_UPPER_AZIMUTH_DEG = 45.0
+LOW_SUN_SKY_NEUTRAL_RADIANCE = (0.27, 0.30, 0.32)
+_LOW_SUN_SKY_MAX_WARM_DZ = pymath.sin(pymath.radians(
+    LOW_SUN_SKY_WARM_ELEVATION_DEG
+))
+_LOW_SUN_SKY_HORIZON_AZIMUTH_COS = pymath.cos(pymath.radians(
+    LOW_SUN_SKY_HORIZON_AZIMUTH_DEG
+))
+_LOW_SUN_SKY_UPPER_AZIMUTH_COS = pymath.cos(pymath.radians(
+    LOW_SUN_SKY_UPPER_AZIMUTH_DEG
+))
+
 # Upward diffuse bounce — stands in for sun/skylight reflected off the
 # surface (and low-level multiply-scattered light between cloud base and
 # surface) that lights cloud undersides. Mirror image of the ambient ramp:
@@ -661,7 +682,8 @@ def _light_march(px, py, pz, sun_dx, sun_dy, sun_dz,
 def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz,
                   spectral_hor_r, spectral_hor_g, spectral_hor_b,
                   bloom_r, bloom_g, bloom_b,
-                  disc_r, disc_g, disc_b):
+                  disc_r, disc_g, disc_b,
+                  low_sun_sky_field_strength):
     """Procedural sky: cobalt zenith, hazy horizon, gradual circumsolar bloom.
 
     Tuned against phone photos of real cumulus scenes. The old shader had a
@@ -682,28 +704,115 @@ def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz,
     zen_r = 0.0044; zen_g = 0.035; zen_b = 0.1156
     base_hor_r = 0.10; base_hor_g = 0.18; base_hor_b = 0.38
 
-    # Atmospheric reddening is strongest near the sun's azimuth and fades
-    # smoothly to the unchanged blue horizon opposite it. At strength=0 the
-    # precomputed spectral horizon equals base_hor exactly.
-    view_h_len = pymath.sqrt(dx * dx + dy * dy)
-    sun_h_len = pymath.sqrt(sun_dx * sun_dx + sun_dy * sun_dy)
-    horizon_sun_weight = 0.0
-    if view_h_len > 1e-12 and sun_h_len > 1e-12:
-        cos_sun_az = ((dx * sun_dx + dy * sun_dy)
-                      / (view_h_len * sun_h_len))
-        if cos_sun_az < -1.0:
-            cos_sun_az = -1.0
-        if cos_sun_az > 1.0:
-            cos_sun_az = 1.0
-        horizon_sun_weight = 0.5 + 0.5 * cos_sun_az
-        horizon_sun_weight = (horizon_sun_weight * horizon_sun_weight
-                              * (3.0 - 2.0 * horizon_sun_weight))
-    hor_r = base_hor_r + horizon_sun_weight * (spectral_hor_r - base_hor_r)
-    hor_g = base_hor_g + horizon_sun_weight * (spectral_hor_g - base_hor_g)
-    hor_b = base_hor_b + horizon_sun_weight * (spectral_hor_b - base_hor_b)
-    sky_r = hor_r + (zen_r - hor_r) * t
-    sky_g = hor_g + (zen_g - hor_g) * t
-    sky_b = hor_b + (zen_b - hor_b) * t
+    base_sky_r = base_hor_r + (zen_r - base_hor_r) * t
+    base_sky_g = base_hor_g + (zen_g - base_hor_g) * t
+    base_sky_b = base_hor_b + (zen_b - base_hor_b) * t
+    sky_r = base_sky_r
+    sky_g = base_sky_g
+    sky_b = base_sky_b
+
+    # Strength=0 spectral lighting and the calibrated 55-degree sun both
+    # produce the base horizon exactly. Keeping that case out of the angular
+    # work preserves the approved legacy sky arithmetic and color.
+    has_spectral_horizon = (
+        spectral_hor_r != base_hor_r
+        or spectral_hor_g != base_hor_g
+        or spectral_hor_b != base_hor_b
+    )
+    if has_spectral_horizon:
+        view_h_len = pymath.sqrt(dx * dx + dy * dy)
+        sun_h_len = pymath.sqrt(sun_dx * sun_dx + sun_dy * sun_dy)
+        cos_sun_az = -1.0
+        if view_h_len > 1e-12 and sun_h_len > 1e-12:
+            cos_sun_az = ((dx * sun_dx + dy * sun_dy)
+                          / (view_h_len * sun_h_len))
+            if cos_sun_az < -1.0:
+                cos_sun_az = -1.0
+            if cos_sun_az > 1.0:
+                cos_sun_az = 1.0
+
+        # Exact iter_006 field for a continuous tuning/bypass path.
+        legacy_az_weight = 0.5 + 0.5 * cos_sun_az
+        legacy_az_weight = (legacy_az_weight * legacy_az_weight
+                            * (3.0 - 2.0 * legacy_az_weight))
+        legacy_hor_r = base_hor_r + legacy_az_weight * (
+            spectral_hor_r - base_hor_r
+        )
+        legacy_hor_g = base_hor_g + legacy_az_weight * (
+            spectral_hor_g - base_hor_g
+        )
+        legacy_hor_b = base_hor_b + legacy_az_weight * (
+            spectral_hor_b - base_hor_b
+        )
+        legacy_sky_r = legacy_hor_r + (zen_r - legacy_hor_r) * t
+        legacy_sky_g = legacy_hor_g + (zen_g - legacy_hor_g) * t
+        legacy_sky_b = legacy_hor_b + (zen_b - legacy_hor_b) * t
+
+        # Warmth is confined vertically, while the azimuthal support widens
+        # toward the horizon where the aerosol slant path is longest. Work in
+        # direction cosine space to avoid inverse trig in every sky pixel.
+        elevation_progress = _smoothstep(
+            0.0, _LOW_SUN_SKY_MAX_WARM_DZ, max(0.0, dz)
+        )
+        azimuth_cutoff = (
+            _LOW_SUN_SKY_HORIZON_AZIMUTH_COS
+            + elevation_progress * (
+                _LOW_SUN_SKY_UPPER_AZIMUTH_COS
+                - _LOW_SUN_SKY_HORIZON_AZIMUTH_COS
+            )
+        )
+        azimuth_weight = _smoothstep(azimuth_cutoff, 1.0, cos_sun_az)
+        warm_weight = (1.0 - elevation_progress) * azimuth_weight
+
+        # Recover the precomputed horizon's spectral mix so the neutral
+        # bridge also vanishes exactly with SPECTRAL_LIGHTING_STRENGTH=0.
+        sunset_red_span = SUNSET_HORIZON_RADIANCE[0] - base_hor_r
+        horizon_mix = (spectral_hor_r - base_hor_r) / sunset_red_span
+        if horizon_mix < 0.0:
+            horizon_mix = 0.0
+        if horizon_mix > 1.0:
+            horizon_mix = 1.0
+        neutral_hor_r = base_hor_r + horizon_mix * (
+            LOW_SUN_SKY_NEUTRAL_RADIANCE[0] - base_hor_r
+        )
+        neutral_hor_g = base_hor_g + horizon_mix * (
+            LOW_SUN_SKY_NEUTRAL_RADIANCE[1] - base_hor_g
+        )
+        neutral_hor_b = base_hor_b + horizon_mix * (
+            LOW_SUN_SKY_NEUTRAL_RADIANCE[2] - base_hor_b
+        )
+        neutral_sky_r = neutral_hor_r + (zen_r - neutral_hor_r) * t
+        neutral_sky_g = neutral_hor_g + (zen_g - neutral_hor_g) * t
+        neutral_sky_b = neutral_hor_b + (zen_b - neutral_hor_b) * t
+        warm_sky_r = spectral_hor_r + (zen_r - spectral_hor_r) * t
+        warm_sky_g = spectral_hor_g + (zen_g - spectral_hor_g) * t
+        warm_sky_b = spectral_hor_b + (zen_b - spectral_hor_b) * t
+
+        # Quadratic Bezier in linear radiance: blue -> neutral -> warm. This
+        # avoids the purple midpoint of complementary blue/orange endpoints.
+        cool_weight = 1.0 - warm_weight
+        cool_weight_2 = cool_weight * cool_weight
+        neutral_weight = 2.0 * cool_weight * warm_weight
+        warm_weight_2 = warm_weight * warm_weight
+        wedge_sky_r = (cool_weight_2 * base_sky_r
+                       + neutral_weight * neutral_sky_r
+                       + warm_weight_2 * warm_sky_r)
+        wedge_sky_g = (cool_weight_2 * base_sky_g
+                       + neutral_weight * neutral_sky_g
+                       + warm_weight_2 * warm_sky_g)
+        wedge_sky_b = (cool_weight_2 * base_sky_b
+                       + neutral_weight * neutral_sky_b
+                       + warm_weight_2 * warm_sky_b)
+
+        sky_r = legacy_sky_r + low_sun_sky_field_strength * (
+            wedge_sky_r - legacy_sky_r
+        )
+        sky_g = legacy_sky_g + low_sun_sky_field_strength * (
+            wedge_sky_g - legacy_sky_g
+        )
+        sky_b = legacy_sky_b + low_sun_sky_field_strength * (
+            wedge_sky_b - legacy_sky_b
+        )
 
     cos_sun = dx * sun_dx + dy * sun_dy + dz * sun_dz
 
@@ -977,6 +1086,7 @@ def _ocean_shade_realism(
     ocean_haze_extinction_per_km,
     sky_hor_r, sky_hor_g, sky_hor_b,
     sky_bloom_r, sky_bloom_g, sky_bloom_b,
+    low_sun_sky_field_strength,
 ):
     """Footprint-filtered ocean with microfacet sun glint and path haze."""
     # Project one pixel's angular span onto the horizontal water plane. The
@@ -1117,12 +1227,16 @@ def _ocean_shade_realism(
         else:
             h_x = d_x
             h_y = d_y
+        # Use the same angular sky field at this sightline's azimuth and the
+        # geometric horizon, so the asymptotic haze color equals the adjacent
+        # sky. The solar disc remains excluded as in the legacy haze.
         haze_r, haze_g, haze_b = _sky_radiance(
             h_x, h_y, 0.0,
             sun_dx, sun_dy, sun_dz,
             sky_hor_r, sky_hor_g, sky_hor_b,
             sky_bloom_r, sky_bloom_g, sky_bloom_b,
             0.0, 0.0, 0.0,
+            low_sun_sky_field_strength,
         )
         one_minus_haze = 1.0 - haze
         ol_r = one_minus_haze * ol_r + haze * haze_r
@@ -1147,6 +1261,7 @@ def _ocean_shade_dispatch(
     ocean_haze_extinction_per_km,
     sky_hor_r, sky_hor_g, sky_hor_b,
     sky_bloom_r, sky_bloom_g, sky_bloom_b,
+    low_sun_sky_field_strength,
 ):
     """Keep master-gate zero on the untouched legacy arithmetic path."""
     if ocean_realism == 0.0:
@@ -1171,6 +1286,7 @@ def _ocean_shade_dispatch(
         ocean_haze_extinction_per_km,
         sky_hor_r, sky_hor_g, sky_hor_b,
         sky_bloom_r, sky_bloom_g, sky_bloom_b,
+        low_sun_sky_field_strength,
     )
 
 
@@ -1197,6 +1313,7 @@ def _render_image(
     sky_hor_r, sky_hor_g, sky_hor_b,
     sky_bloom_r, sky_bloom_g, sky_bloom_b,
     sky_disc_r, sky_disc_g, sky_disc_b,
+    low_sun_sky_field_strength,
     g_hg, ambient_strength,
     ocean_enabled, ocean_z,
     ocean_rr, ocean_rg, ocean_rb,
@@ -1354,6 +1471,7 @@ def _render_image(
                         ocean_haze_extinction_per_km,
                         sky_hor_r, sky_hor_g, sky_hor_b,
                         sky_bloom_r, sky_bloom_g, sky_bloom_b,
+                        low_sun_sky_field_strength,
                     )
 
                     col_r += transmittance * ol_r
@@ -1600,6 +1718,7 @@ def _render_image(
                     ocean_haze_extinction_per_km,
                     sky_hor_r, sky_hor_g, sky_hor_b,
                     sky_bloom_r, sky_bloom_g, sky_bloom_b,
+                    low_sun_sky_field_strength,
                 )
                 col_r += transmittance * ol_r
                 col_g += transmittance * ol_g
@@ -1611,7 +1730,8 @@ def _render_image(
                                                   sun_dx, sun_dy, sun_dz,
                                                   sky_hor_r, sky_hor_g, sky_hor_b,
                                                   sky_bloom_r, sky_bloom_g, sky_bloom_b,
-                                                  sky_disc_r, sky_disc_g, sky_disc_b)
+                                                  sky_disc_r, sky_disc_g, sky_disc_b,
+                                                  low_sun_sky_field_strength)
             col_r += transmittance * sky_r
             col_g += transmittance * sky_g
             col_b += transmittance * sky_b
@@ -1871,6 +1991,7 @@ def _render_levels(
     ocean_haze_extinction_per_km: float,
     sun_color: Tuple[float, float, float],
     spectral_lighting_strength: float,
+    low_sun_sky_field_strength: float,
     g_hg: float,
     ambient_strength: float,
     powder_coeff: float,
@@ -1895,6 +2016,37 @@ def _render_levels(
     if (not pymath.isfinite(spectral_lighting_strength) or
             spectral_lighting_strength < 0.0 or spectral_lighting_strength > 1.0):
         raise ValueError("spectral_lighting_strength must be finite and in [0, 1].")
+    if (not pymath.isfinite(low_sun_sky_field_strength) or
+            low_sun_sky_field_strength < 0.0 or
+            low_sun_sky_field_strength > 1.0):
+        raise ValueError(
+            "low_sun_sky_field_strength must be finite and in [0, 1]."
+        )
+    if (not pymath.isfinite(LOW_SUN_SKY_WARM_ELEVATION_DEG) or
+            LOW_SUN_SKY_WARM_ELEVATION_DEG <= 0.0 or
+            LOW_SUN_SKY_WARM_ELEVATION_DEG > 90.0):
+        raise ValueError(
+            "low-sun sky warm elevation must be finite and in (0, 90]."
+        )
+    if (not pymath.isfinite(LOW_SUN_SKY_HORIZON_AZIMUTH_DEG) or
+            LOW_SUN_SKY_HORIZON_AZIMUTH_DEG <= 0.0 or
+            LOW_SUN_SKY_HORIZON_AZIMUTH_DEG > 180.0):
+        raise ValueError(
+            "low-sun sky horizon azimuth must be finite and in (0, 180]."
+        )
+    if (not pymath.isfinite(LOW_SUN_SKY_UPPER_AZIMUTH_DEG) or
+            LOW_SUN_SKY_UPPER_AZIMUTH_DEG <= 0.0 or
+            LOW_SUN_SKY_UPPER_AZIMUTH_DEG >
+            LOW_SUN_SKY_HORIZON_AZIMUTH_DEG):
+        raise ValueError(
+            "low-sun sky upper azimuth must be finite, positive, and no "
+            "wider than its horizon azimuth."
+        )
+    if any(not pymath.isfinite(c) or c < 0.0
+           for c in LOW_SUN_SKY_NEUTRAL_RADIANCE):
+        raise ValueError(
+            "low-sun sky neutral radiance must be finite and nonnegative."
+        )
     if (not pymath.isfinite(ocean_realism) or
             ocean_realism < 0.0 or ocean_realism > 1.0):
         raise ValueError("ocean_realism must be finite and in [0, 1].")
@@ -2017,6 +2169,7 @@ def _render_levels(
         sky_horizon[0], sky_horizon[1], sky_horizon[2],
         sky_bloom[0], sky_bloom[1], sky_bloom[2],
         sky_disc[0], sky_disc[1], sky_disc[2],
+        low_sun_sky_field_strength,
         g_hg, ambient_strength,
         ocean_enabled, ocean_z,
         ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
@@ -2063,6 +2216,7 @@ def _render_levels(
             sky_horizon[0], sky_horizon[1], sky_horizon[2],
             sky_bloom[0], sky_bloom[1], sky_bloom[2],
             sky_disc[0], sky_disc[1], sky_disc[2],
+            low_sun_sky_field_strength,
             g_hg, ambient_strength,
             ocean_enabled, ocean_z,
             ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
@@ -2147,6 +2301,7 @@ def render_nested(
     ocean_glint_roughness: float = OCEAN_GLINT_ROUGHNESS,
     ocean_glint_roughness_per_lod: float = OCEAN_GLINT_ROUGHNESS_PER_LOD,
     ocean_haze_extinction_per_km: float = OCEAN_HAZE_EXTINCTION_PER_KM,
+    low_sun_sky_field_strength: float = LOW_SUN_SKY_FIELD_STRENGTH,
 ) -> np.ndarray:
     """Render through N strictly-nested extinction grids.
 
@@ -2158,6 +2313,9 @@ def render_nested(
 
     spectral_lighting_strength blends from the legacy fixed spectra at 0 to
         elevation-dependent direct sun, diffuse fill, and main-sky color at 1.
+
+    low_sun_sky_field_strength blends from the iter_006 azimuth-only warm sky
+        at 0 to the elevation-and-azimuth warm wedge at 1.
 
     light_transfer_split_strength controls the low-sun warm-direct/cool-
         diffuse separation; 0 selects the exact previous cloud shader.
@@ -2195,6 +2353,7 @@ def render_nested(
         ocean_glint_roughness_per_lod,
         ocean_haze_extinction_per_km,
         sun_color, spectral_lighting_strength,
+        low_sun_sky_field_strength,
         g_hg, ambient_strength, powder_coeff,
         gradient_shading_strength,
         gradient_coarse_weight,
@@ -2371,6 +2530,7 @@ def witness(
         OCEAN_GLINT_ROUGHNESS_PER_LOD,
         OCEAN_HAZE_EXTINCTION_PER_KM,
         SUN_COLOR, SPECTRAL_LIGHTING_STRENGTH,
+        LOW_SUN_SKY_FIELD_STRENGTH,
         G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
         GRADIENT_SHADING_STRENGTH,
         GRADIENT_SHADING_COARSE_WEIGHT,
