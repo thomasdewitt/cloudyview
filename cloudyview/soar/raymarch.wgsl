@@ -49,6 +49,21 @@ struct Uniforms {
     // x = gradient coarse weight, y = gradient coarse radius (m),
     // z = directional ambient occlusion floor, w = unused
     cb_params: vec4<f32>,
+    // Rows 13-17: witness realism package (per-frame CPU spectral precompute,
+    // see witness._spectral_lighting_colors / engine.write_uniforms).
+    // xyz = spectral direct-beam color for cloud MS octaves,
+    // w = low-sun sky field strength (0 = iter_006 azimuth-only field)
+    cloud_sun: vec4<f32>,
+    // xyz = spectral ambient tint, w = effective light-transfer split
+    // strength (already elevation-faded on the CPU; 0 = legacy shader)
+    ambient_tint: vec4<f32>,
+    // xyz = spectral sky horizon color, w = aerial perspective strength
+    // (0 = exact legacy: no haze extinction, no in-scatter)
+    sky_horizon: vec4<f32>,
+    // xyz = circumsolar bloom color, w = aerial beta0 (m^-1, sea level)
+    sky_bloom: vec4<f32>,
+    // xyz = solar disc color, w = aerial haze scale height (m)
+    sky_disc: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -63,7 +78,8 @@ struct Uniforms {
 
 const SUN_COLOR: vec3<f32> = vec3<f32>(22.0, 21.0, 17.0); // witness.py:66
 const POWDER_COEFF: f32 = 1.5;       // witness.py:63
-const AMBIENT_TINT: vec3<f32> = vec3<f32>(0.22, 0.23, 0.28); // witness.py:82-84
+// Ambient tint now arrives per-frame in u.ambient_tint (spectral fill);
+// witness legacy value is (0.19, 0.225, 0.30) since iter_010.
 const AMBIENT_HEIGHT_FLOOR: f32 = 0.3; // witness.py:85
 const BOUNCE_STRENGTH: f32 = 0.05;   // witness.py:95
 const BOUNCE_TINT: vec3<f32> = vec3<f32>(1.0, 0.97, 0.92); // witness.py:96-98
@@ -90,7 +106,25 @@ const DENSE_SIGMA_CUTOFF: f32 = 0.01; // witness.py:688
 const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
 const GAMMA: f32 = 1.4;             // witness tone_map gamma
 const ISO_PHASE: f32 = 0.07957747154594767; // 1 / (4*pi)
-const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness.py:539
+const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
+
+// Low-sun sky color field (witness iter_007). Direction-cosine-space
+// constants derived from the witness tuning block:
+//   sin(LOW_SUN_SKY_WARM_ELEVATION_DEG = 32),
+//   cos(LOW_SUN_SKY_HORIZON_AZIMUTH_DEG = 105),
+//   cos(LOW_SUN_SKY_UPPER_AZIMUTH_DEG = 45).
+const SKY_ZENITH: vec3<f32> = vec3<f32>(0.0044, 0.035, 0.1156);
+const SKY_BASE_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.18, 0.38);
+const LOW_SUN_SKY_MAX_WARM_DZ: f32 = 0.5299192642332049;
+const LOW_SUN_SKY_HORIZON_AZIMUTH_COS: f32 = -0.25881904510252074;
+const LOW_SUN_SKY_UPPER_AZIMUTH_COS: f32 = 0.7071067811865476;
+const LOW_SUN_SKY_NEUTRAL_RADIANCE: vec3<f32> = vec3<f32>(0.27, 0.30, 0.32);
+const SUNSET_HORIZON_RADIANCE_R: f32 = 0.42; // SUNSET_HORIZON_RADIANCE[0]
+
+// Light-transfer split (witness iter_006). The elevation fade lives on the
+// CPU (engine._effective_light_transfer_split); these are the fixed knobs.
+const LIGHT_TRANSFER_DIRECT_BOOST: f32 = 0.25;
+const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 
 // TODO(occupancy-grid): empty-space skipping. Cloud fields are sparse; a
 // coarse (e.g. 16^3-voxel-block) occupancy grid bound after the ocean slots would
@@ -278,24 +312,81 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
     return tau;
 }
 
-// Procedural sky ported from witness._sky_radiance (witness.py lines 371-413).
-fn sky_color(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
+// Procedural sky ported from witness._sky_radiance, including the spectral
+// horizon and low-sun elevation x azimuth warm wedge (iter_002 + iter_007).
+// hor/bloom/disc are the per-frame spectral colors from the uniforms; the
+// aerial/ocean haze targets pass disc = 0 to exclude the solar disc.
+fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
+                hor: vec3<f32>, bloom: vec3<f32>, disc: vec3<f32>,
+                low_sun_sky_field_strength: f32) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
     t = 1.0 - one_minus * one_minus * one_minus;
 
-    let zenith = vec3<f32>(0.0044, 0.035, 0.1156);
-    let horizon = vec3<f32>(0.10, 0.18, 0.38);
-    var col = horizon + (zenith - horizon) * t;
+    let base_sky = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
+    var col = base_sky;
+
+    // Strength-0 spectral lighting and the calibrated 55-degree sun both
+    // reproduce the base horizon exactly; skipping the angular work then
+    // preserves the approved legacy sky arithmetic (witness does the same).
+    if (any(hor != SKY_BASE_HORIZON)) {
+        let view_h_len = length(dir.xy);
+        let sun_h_len = length(sun.xy);
+        var cos_sun_az = -1.0;
+        if (view_h_len > 1e-12 && sun_h_len > 1e-12) {
+            cos_sun_az = clamp(
+                dot(dir.xy, sun.xy) / (view_h_len * sun_h_len), -1.0, 1.0
+            );
+        }
+
+        // Exact iter_006 azimuth-only field (the strength-0 bypass target).
+        var legacy_az_weight = 0.5 + 0.5 * cos_sun_az;
+        legacy_az_weight = legacy_az_weight * legacy_az_weight
+                           * (3.0 - 2.0 * legacy_az_weight);
+        let legacy_hor = SKY_BASE_HORIZON
+                         + legacy_az_weight * (hor - SKY_BASE_HORIZON);
+        let legacy_sky = legacy_hor + (SKY_ZENITH - legacy_hor) * t;
+
+        // Warmth confined vertically; azimuthal support widens toward the
+        // horizon where the aerosol slant path is longest.
+        let elevation_progress = smoothstep(
+            0.0, LOW_SUN_SKY_MAX_WARM_DZ, max(0.0, dir.z)
+        );
+        let azimuth_cutoff = LOW_SUN_SKY_HORIZON_AZIMUTH_COS
+            + elevation_progress * (LOW_SUN_SKY_UPPER_AZIMUTH_COS
+                                    - LOW_SUN_SKY_HORIZON_AZIMUTH_COS);
+        let azimuth_weight = smoothstep(azimuth_cutoff, 1.0, cos_sun_az);
+        let warm_weight = (1.0 - elevation_progress) * azimuth_weight;
+
+        // Recover the horizon's spectral mix so the neutral bridge also
+        // vanishes exactly at SPECTRAL_LIGHTING_STRENGTH = 0.
+        let sunset_red_span = SUNSET_HORIZON_RADIANCE_R - SKY_BASE_HORIZON.r;
+        let horizon_mix = clamp(
+            (hor.r - SKY_BASE_HORIZON.r) / sunset_red_span, 0.0, 1.0
+        );
+        let neutral_hor = SKY_BASE_HORIZON + horizon_mix
+            * (LOW_SUN_SKY_NEUTRAL_RADIANCE - SKY_BASE_HORIZON);
+        let neutral_sky = neutral_hor + (SKY_ZENITH - neutral_hor) * t;
+        let warm_sky = hor + (SKY_ZENITH - hor) * t;
+
+        // Quadratic Bezier in linear radiance: blue -> neutral -> warm,
+        // avoiding the purple midpoint of a straight blue/orange lerp.
+        let cool_weight = 1.0 - warm_weight;
+        let wedge_sky = cool_weight * cool_weight * base_sky
+            + 2.0 * cool_weight * warm_weight * neutral_sky
+            + warm_weight * warm_weight * warm_sky;
+
+        col = legacy_sky + low_sun_sky_field_strength * (wedge_sky - legacy_sky);
+    }
 
     let cos_sun = dot(dir, sun);
     if (cos_sun > 0.0) {
         let sun_half_width = 0.002;
         let a = sun_half_width / ((1.0 - cos_sun) + sun_half_width);
-        col = col + a * vec3<f32>(0.8, 0.6, 0.3);
+        col = col + a * bloom;
     }
     if (cos_sun > 0.9998) {
-        col = col + vec3<f32>(50.0, 45.0, 35.0);
+        col = col + disc;
     }
     return col;
 }
@@ -367,6 +458,7 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> ve
     let t_eff = OCEAN_SHADOW_FLOOR + (1.0 - OCEAN_SHADOW_FLOOR) * t_sun_ocean;
     return lit * t_eff;
 }
+
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
 // with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
@@ -442,6 +534,24 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     let phase = hg_phase(dot(dir, sun), g_hg);
 
+    // Aerial perspective (witness iter_008): this sightline's horizon sky
+    // color (solar disc excluded) — the same asymptotic target the ocean
+    // haze uses, so cloud and water converge to one haze color.
+    let aerial_strength = u.sky_horizon.w;
+    var aer = vec3<f32>(0.0);
+    if (aerial_strength > 0.0) {
+        let ah_len = length(dir.xy);
+        var ah = dir.xy;
+        if (ah_len > 1e-8) {
+            ah = dir.xy / ah_len;
+        }
+        aer = sky_radiance(
+            vec3<f32>(ah, 0.0), sun,
+            u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
+            u.cloud_sun.w
+        );
+    }
+
     // Jittered first step: decorrelates the sampling shells between
     // neighboring pixels, killing the coherent ring/banding artifact.
     // frame index is folded in so temporal accumulation stays unbiased.
@@ -487,10 +597,31 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             tau_depth = tau_depth + d_tau;
 
+            // Aerial perspective: clear-air transmittance camera->sample via
+            // the closed-form exponential atmosphere (witness._render_image).
+            var air_t = 1.0;
+            if (aerial_strength > 0.0) {
+                let aer_beta0 = u.sky_bloom.w;
+                let aer_h = u.sky_disc.w;
+                let aer_z0 = max(u.cam_origin.z, 0.0);
+                let aer_z1 = max(p.z, 0.0);
+                let aer_mu = dir.z;
+                var tau_air: f32;
+                if (aer_mu > 1e-6 || aer_mu < -1e-6) {
+                    tau_air = aer_beta0 * (aer_h / aer_mu)
+                        * (exp(-aer_z0 / aer_h) - exp(-aer_z1 / aer_h));
+                } else {
+                    tau_air = aer_beta0 * t * exp(-aer_z0 / aer_h);
+                }
+                air_t = exp(-aerial_strength * tau_air);
+            }
+
             let tau_sun = light_march_tau(p, sun);
+            let light_transfer_split_strength = u.ambient_tint.w;
             var deep_shadow_gate = 0.0;
             if (deep_shadow_ms_suppression > 0.0
-                || ambient_occlusion_strength > 0.0) {
+                || ambient_occlusion_strength > 0.0
+                || light_transfer_split_strength > 0.0) {
                 deep_shadow_gate = smoothstep(
                     DEEP_SHADOW_TAU_START, DEEP_SHADOW_TAU_FULL, tau_sun
                 );
@@ -513,8 +644,17 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     );
                     contrib = contrib * ms_floor;
                 }
-                ms = ms + contrib * SUN_COLOR;
+                ms = ms + contrib * u.cloud_sun.xyz;
                 ms_atten = ms_atten * MS_ATTEN;
+            }
+
+            // Light-transfer split, warm side: modest boost of the unoccluded
+            // direct/MS source at low sun (witness iter_006).
+            if (light_transfer_split_strength > 0.0) {
+                let direct_factor = 1.0 + light_transfer_split_strength
+                    * LIGHT_TRANSFER_DIRECT_BOOST
+                    * exp(-tau_sun);
+                ms = ms * direct_factor;
             }
 
             if (gradient_shading_strength > 0.0) {
@@ -550,10 +690,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // Powder is a function of cumulative optical depth since the current
             // cloud entry, not the current step size (witness.py:729-732).
             let powder = 1.0 - exp(-POWDER_COEFF * tau_depth);
-            let scatter_weight = d_tau * powder * transmittance;
+            let scatter_weight = d_tau * powder * transmittance * air_t;
             col = col + scatter_weight * ms;
 
-            // Ambient: height-based on the outer box (witness.py:738-747).
+            // Ambient: height-based on the outer box (witness._render_image).
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
             var amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
                                           + (1.0 - AMBIENT_HEIGHT_FLOOR) * h);
@@ -564,17 +704,38 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
                 amb = amb * amb_factor;
             }
-            col = col + transmittance * d_tau * amb * AMBIENT_TINT;
+            col = col + transmittance * d_tau * amb * air_t
+                        * u.ambient_tint.xyz;
 
-            // Surface bounce is anchored at physical z=0, not the AABB floor
-            // (witness.py:749-760).
+            // Light-transfer split, cool side: a skylight floor restored only
+            // in saturated sun shadow; lit faces keep their contrast.
+            if (light_transfer_split_strength > 0.0) {
+                let sky_fill = light_transfer_split_strength
+                    * LIGHT_TRANSFER_SHADOW_SKYLIGHT
+                    * (AMBIENT_HEIGHT_FLOOR + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
+                    * deep_shadow_gate;
+                col = col + transmittance * d_tau * sky_fill * air_t
+                            * u.ambient_tint.xyz;
+            }
+
+            // Surface bounce is anchored at physical z=0, not the AABB floor.
             if (BOUNCE_STRENGTH > 0.0) {
                 let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
                 var bounce = BOUNCE_STRENGTH * bounce_frac;
                 if (bounce_depth_attenuation > 0.0) {
                     bounce = bounce * exp(-bounce_depth_attenuation * tau_depth);
                 }
-                col = col + transmittance * d_tau * bounce * BOUNCE_TINT;
+                col = col + transmittance * d_tau * bounce * air_t
+                            * BOUNCE_TINT;
+            }
+
+            // Aerial in-scatter: sky light scattered into the path replaces
+            // exactly the radiance this sample occludes.
+            if (aerial_strength > 0.0 && air_t < 1.0) {
+                let aer_in = transmittance
+                    * (1.0 - exp(-d_tau))
+                    * (1.0 - air_t);
+                col = col + aer_in * aer;
             }
 
             transmittance = transmittance * exp(-d_tau);
@@ -599,7 +760,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (transmittance > TRANSMITTANCE_CUTOFF) {
-        let sky = sky_color(dir, sun);
+        let sky = sky_radiance(
+            dir, sun,
+            u.sky_horizon.xyz, u.sky_bloom.xyz, u.sky_disc.xyz,
+            u.cloud_sun.w
+        );
         col = col + transmittance * sky;
     }
     return vec4<f32>(tone_map(col, exposure), 1.0);

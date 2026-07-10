@@ -418,6 +418,13 @@ def render_witness_with_fif(
         g_hg=G_HG,
         ambient_strength=AMBIENT_STRENGTH,
         powder_coeff=POWDER_COEFF,
+        # witness_spp=1 is witness's explicit exact-legacy sampling path
+        # (pixel centers, no march-phase jitter). WITNESS_SPP>1 supersampling
+        # is witness's still-image analogue of soar's sub-pixel jitter +
+        # temporal accumulation (tested in test_soar_render), so the parity
+        # harness compares the single-deterministic-sample structure on both
+        # sides rather than two different anti-aliasing strategies.
+        witness_spp=1,
         **realism,
         verbose=False,
     ).astype(np.float64)

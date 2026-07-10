@@ -31,6 +31,22 @@ from ..camera import Camera
 from ..cloudfield import CloudField
 from ..angles import direction_from_azimuth_elevation
 
+# witness.py is the golden look reference: the realism-package defaults and
+# the per-frame spectral precompute are imported, not copied, so a witness
+# tuning-block edit propagates to soar automatically.
+from ..witness import (
+    SUN_COLOR as WITNESS_SUN_COLOR,
+    AERIAL_BETA_PER_KM,
+    AERIAL_PERSPECTIVE_STRENGTH,
+    AERIAL_SCALE_HEIGHT_M,
+    LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG,
+    LIGHT_TRANSFER_FULL_ELEVATION_DEG,
+    LIGHT_TRANSFER_SPLIT_STRENGTH,
+    LOW_SUN_SKY_FIELD_STRENGTH,
+    SPECTRAL_LIGHTING_STRENGTH,
+    _spectral_lighting_colors,
+)
+
 SHADER_PATH = Path(__file__).parent / "raymarch.wgsl"
 
 # Defaults mirroring witness.py / config.py.
@@ -47,6 +63,18 @@ DEFAULT_DEEP_SHADOW_MS_SUPPRESSION = 0.90
 DEFAULT_AMBIENT_OCCLUSION_STRENGTH = 1.00
 DEFAULT_AMBIENT_OCCLUSION_FLOOR = 0.24
 DEFAULT_BOUNCE_DEPTH_ATTENUATION = 0.80
+# Spectral time-of-day lighting / low-sun sky field / light-transfer split /
+# aerial perspective (witness realism package, iter_002..iter_008). Defaults
+# come straight from the witness tuning block; 0.0 is the documented exact
+# legacy path for each mechanism.
+DEFAULT_SPECTRAL_LIGHTING_STRENGTH = SPECTRAL_LIGHTING_STRENGTH
+DEFAULT_LOW_SUN_SKY_FIELD_STRENGTH = LOW_SUN_SKY_FIELD_STRENGTH
+DEFAULT_LIGHT_TRANSFER_SPLIT_STRENGTH = LIGHT_TRANSFER_SPLIT_STRENGTH
+DEFAULT_AERIAL_PERSPECTIVE_STRENGTH = AERIAL_PERSPECTIVE_STRENGTH
+# Exact pre-port soar ambient tint (stale vs witness iter_010's retuned
+# (0.19, 0.225, 0.30)). Pass ambient_tint=PRE_PORT_AMBIENT_TINT together with
+# the *_strength=0.0 kill switches to reproduce the pre-port frame bit-for-bit.
+PRE_PORT_AMBIENT_TINT = (0.22, 0.23, 0.28)
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 DEFAULT_MOTION_BLEND_ALPHA = 0.45
 DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0
@@ -54,7 +82,7 @@ DEFAULT_MOTION_JITTER_SCALE = 0.65
 DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0
 DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 
-_UNIFORM_NBYTES = 13 * 16  # 13 vec4<f32>
+_UNIFORM_NBYTES = 18 * 16  # 20 vec4<f32> (rows documented in write_uniforms)
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
 
@@ -144,6 +172,34 @@ def _validate_positive_float(name: str, value: float) -> float:
     if value <= 0.0:
         raise ValueError(f"{name} must be > 0; got {value!r}.")
     return value
+
+
+def _effective_light_transfer_split(
+    strength: float, sun_elevation_deg: float
+) -> float:
+    """Elevation fade of the light-transfer split (witness._render_levels).
+
+    Full strength at/below LIGHT_TRANSFER_FULL_ELEVATION_DEG, smoothstepped to
+    exactly 0.0 at LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG so the approved
+    high-sun look is untouched. Mirrors witness.py's per-frame precompute
+    (do NOT change one without the other).
+    """
+    strength = _validate_finite_float("light_transfer_split_strength", strength)
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError(
+            f"light_transfer_split_strength must be in [0, 1]; got {strength!r}."
+        )
+    if sun_elevation_deg >= LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG - 1e-6:
+        return 0.0
+    if sun_elevation_deg > LIGHT_TRANSFER_FULL_ELEVATION_DEG:
+        low_sun_mix = (
+            (LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG - sun_elevation_deg)
+            / (LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG
+               - LIGHT_TRANSFER_FULL_ELEVATION_DEG)
+        )
+        low_sun_mix = low_sun_mix * low_sun_mix * (3.0 - 2.0 * low_sun_mix)
+        return strength * low_sun_mix
+    return strength
 
 
 def camera_world_origin(camera: Camera, bmin, bmax) -> np.ndarray:
@@ -621,19 +677,71 @@ class InteractiveRenderer:
         ambient_occlusion_strength: float = DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
         ambient_occlusion_floor: float = DEFAULT_AMBIENT_OCCLUSION_FLOOR,
         bounce_depth_attenuation: float = DEFAULT_BOUNCE_DEPTH_ATTENUATION,
+        spectral_lighting_strength: float = DEFAULT_SPECTRAL_LIGHTING_STRENGTH,
+        low_sun_sky_field_strength: float = DEFAULT_LOW_SUN_SKY_FIELD_STRENGTH,
+        light_transfer_split_strength: float = (
+            DEFAULT_LIGHT_TRANSFER_SPLIT_STRENGTH
+        ),
+        aerial_perspective_strength: float = DEFAULT_AERIAL_PERSPECTIVE_STRENGTH,
+        ambient_tint: Optional[Tuple[float, float, float]] = None,
         frame_index: int = 0,
         subpixel: bool = False,
         jitter_scale: float = 1.0,
     ) -> None:
-        """Pack the uniform block and enqueue the (tiny) per-frame upload."""
+        """Pack the uniform block and enqueue the (tiny) per-frame upload.
+
+        Realism-package strengths (spectral lighting, low-sun sky field,
+        light-transfer split, aerial perspective) default to the witness
+        tuning-block values; 0.0 selects each mechanism's exact legacy
+        arithmetic, matching witness's documented gate semantics.
+        ``ambient_tint`` overrides the spectral ambient color (used only to
+        reproduce the pre-port frame; see PRE_PORT_AMBIENT_TINT).
+        """
         w, h = size
         jitter_scale = _validate_unit_interval("jitter_scale", jitter_scale)
+        spectral_lighting_strength = _validate_unit_interval(
+            "spectral_lighting_strength", spectral_lighting_strength
+        )
+        low_sun_sky_field_strength = _validate_unit_interval(
+            "low_sun_sky_field_strength", low_sun_sky_field_strength
+        )
+        aerial_perspective_strength = _validate_finite_float(
+            "aerial_perspective_strength", aerial_perspective_strength
+        )
+        if aerial_perspective_strength < 0.0:
+            raise ValueError(
+                "aerial_perspective_strength must be >= 0; got "
+                f"{aerial_perspective_strength!r}."
+            )
         origin = camera_world_origin(camera, self.bmin, self.bmax)
         forward, right, up = camera.basis()
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
         tan_half_fov = np.tan(np.deg2rad(camera.fov) * 0.5)
 
-        u = np.zeros((13, 4), dtype=np.float32)
+        # Per-frame CPU precompute, exactly as witness._render_levels does it:
+        # spectral beam/fill/sky colors from the sun's air mass, and the
+        # elevation-faded light-transfer split strength.
+        (cloud_sun, spectral_ambient, sky_horizon,
+         sky_bloom, sky_disc) = _spectral_lighting_colors(
+            tuple(float(c) for c in sun),
+            WITNESS_SUN_COLOR,
+            spectral_lighting_strength,
+        )
+        if ambient_tint is None:
+            ambient_tint = spectral_ambient
+        else:
+            ambient_tint = tuple(
+                _validate_finite_float("ambient_tint", c) for c in ambient_tint
+            )
+            if len(ambient_tint) != 3:
+                raise ValueError(
+                    f"ambient_tint must have 3 components; got {ambient_tint!r}."
+                )
+        light_transfer_eff = _effective_light_transfer_split(
+            light_transfer_split_strength, float(sun_elevation)
+        )
+
+        u = np.zeros((18, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, w / h]
         u[2] = [*right, exposure]
@@ -664,6 +772,15 @@ class InteractiveRenderer:
             ambient_occlusion_floor,
             0.0,
         ]
+        # Rows 13-17: witness realism package, per-frame spectral precompute
+        # (scene identity). Colors are the _spectral_lighting_colors outputs;
+        # at strength 0 (or the 55-degree reference sun) they equal the legacy
+        # constants exactly, which is what keeps the WGSL legacy paths exact.
+        u[13] = [*cloud_sun, low_sun_sky_field_strength]
+        u[14] = [*ambient_tint, light_transfer_eff]
+        u[15] = [*sky_horizon, aerial_perspective_strength]
+        u[16] = [*sky_bloom, AERIAL_BETA_PER_KM * 1e-3]  # w: beta0 in m^-1
+        u[17] = [*sky_disc, AERIAL_SCALE_HEIGHT_M]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity
