@@ -57,8 +57,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 # Physically-motivated knobs that control the look of the clouds and sky.
 # Kept at module scope so each tuning iteration is a single edit. Ocean-only
-# tuning remains separate; the spectral atmosphere below intentionally does
-# not alter the ocean shader.
+# tuning remains separate; its direct glint reuses the spectral beam color.
 # ============================================================================
 
 POWDER_COEFF = 1.5          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
@@ -176,8 +175,22 @@ MAX_STEPS = 2048
 # jitter, and no averaging. Cost scales approximately linearly with SPP.
 WITNESS_SPP = 4
 
+# Ocean surface realism. The legacy ocean point-samples a 5 cm FIF normal
+# tile, so distant pixels alias unresolved waves into full-amplitude speckle.
+# The realism path box-filters and renormalizes a normal mip chain, chooses a
+# level from the projected pixel footprint on the water, replaces the old
+# fixed-color reflection lobe with a beam-tinted GGX sun glint, and applies
+# Beer-Lambert aerial perspective along the ocean sightline. At 0 the master
+# gate takes the untouched legacy shader path exactly.
+OCEAN_REALISM = 1.0
+OCEAN_MIP_BIAS = -0.5
+OCEAN_GLINT_STRENGTH = 0.65
+OCEAN_GLINT_ROUGHNESS = 0.10
+OCEAN_GLINT_ROUGHNESS_PER_LOD = 0.025
+OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
+
 # Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
-# can use it as a default; ocean tuning itself is not part of this block).
+# can use it as a default).
 OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)
 
 
@@ -729,6 +742,83 @@ def _ocean_wave_normal_fif(x, y, fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N):
 
 
 @njit(inline="always")
+def _sample_ocean_normal_mip_level(x, y, level,
+                                   mip_nx, mip_ny, mip_nz,
+                                   mip_offsets, mip_dims,
+                                   inv_tile_extent):
+    """Periodic bilinear sample from one packed FIF normal-map mip level."""
+    nx_dim = mip_dims[level, 0]
+    ny_dim = mip_dims[level, 1]
+    offset = mip_offsets[level]
+
+    u = x * inv_tile_extent
+    v = y * inv_tile_extent
+    u -= pymath.floor(u)
+    v -= pymath.floor(v)
+    gx = u * nx_dim
+    gy = v * ny_dim
+    i0 = int(gx)
+    j0 = int(gy)
+    i1 = (i0 + 1) % nx_dim
+    j1 = (j0 + 1) % ny_dim
+    tx = gx - i0
+    ty = gy - j0
+    w00 = (1.0 - tx) * (1.0 - ty)
+    w10 = tx * (1.0 - ty)
+    w01 = (1.0 - tx) * ty
+    w11 = tx * ty
+    p00 = offset + j0 * nx_dim + i0
+    p10 = offset + j0 * nx_dim + i1
+    p01 = offset + j1 * nx_dim + i0
+    p11 = offset + j1 * nx_dim + i1
+    nx = (mip_nx[p00] * w00 + mip_nx[p10] * w10
+          + mip_nx[p01] * w01 + mip_nx[p11] * w11)
+    ny = (mip_ny[p00] * w00 + mip_ny[p10] * w10
+          + mip_ny[p01] * w01 + mip_ny[p11] * w11)
+    nz = (mip_nz[p00] * w00 + mip_nz[p10] * w10
+          + mip_nz[p01] * w01 + mip_nz[p11] * w11)
+    return nx, ny, nz
+
+
+@njit(inline="always")
+def _ocean_wave_normal_mipped(x, y, lod,
+                              mip_nx, mip_ny, mip_nz,
+                              mip_offsets, mip_dims, n_mips,
+                              inv_tile_extent):
+    """Trilinear-in-LOD normal sample, renormalized after interpolation."""
+    if lod < 0.0:
+        lod = 0.0
+    max_lod = n_mips - 1
+    if lod > max_lod:
+        lod = float(max_lod)
+    level0 = int(pymath.floor(lod))
+    level1 = level0 + 1
+    if level1 > max_lod:
+        level1 = max_lod
+    f = lod - level0
+    n0x, n0y, n0z = _sample_ocean_normal_mip_level(
+        x, y, level0,
+        mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims,
+        inv_tile_extent,
+    )
+    if level1 == level0:
+        nx = n0x
+        ny = n0y
+        nz = n0z
+    else:
+        n1x, n1y, n1z = _sample_ocean_normal_mip_level(
+            x, y, level1,
+            mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims,
+            inv_tile_extent,
+        )
+        nx = n0x + f * (n1x - n0x)
+        ny = n0y + f * (n1y - n0y)
+        nz = n0z + f * (n1z - n0z)
+    inv_len = 1.0 / pymath.sqrt(nx * nx + ny * ny + nz * nz)
+    return nx * inv_len, ny * inv_len, nz * inv_len
+
+
+@njit(inline="always")
 def _reflection_sky(dx, dy, dz, sun_dx, sun_dy, sun_dz):
     """Sky sampler for ocean reflection: gradient + wide glint lobe.
 
@@ -757,11 +847,11 @@ def _reflection_sky(dx, dy, dz, sun_dx, sun_dy, sun_dz):
 
 
 @njit(inline="always")
-def _ocean_shade(o_x, o_y, d_x, d_y, d_z,
-                 sun_dx, sun_dy, sun_dz, t_sun_ocean,
-                 sun_r, sun_g, sun_b,
-                 ocean_rr, ocean_rg, ocean_rb,
-                 fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N):
+def _ocean_shade_legacy(o_x, o_y, d_x, d_y, d_z,
+                        sun_dx, sun_dy, sun_dz, t_sun_ocean,
+                        sun_r, sun_g, sun_b,
+                        ocean_rr, ocean_rg, ocean_rb,
+                        fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N):
     """Shade an ocean hit. Subsurface diffuse + Fresnel-weighted sky reflection.
 
     - Perturbed normal sampled from the FIF normal map (waves).
@@ -827,6 +917,249 @@ def _ocean_shade(o_x, o_y, d_x, d_y, d_z,
     return ol_r * t_eff, ol_g * t_eff, ol_b * t_eff
 
 
+@njit(inline="always")
+def _reflection_sky_realism(dx, dy, dz, sun_dx, sun_dy, sun_dz,
+                            legacy_glint_weight):
+    """Legacy reflected sky with its fixed glint faded out by the master gate."""
+    t = dz if dz > 0.0 else 0.0
+    one_minus = 1.0 - t
+    t = 1.0 - one_minus * one_minus * one_minus
+    zen_r = 0.0044; zen_g = 0.035; zen_b = 0.1156
+    hor_r = 0.10;   hor_g = 0.18;  hor_b = 0.38
+    sky_r = hor_r + (zen_r - hor_r) * t
+    sky_g = hor_g + (zen_g - hor_g) * t
+    sky_b = hor_b + (zen_b - hor_b) * t
+    cos_rs = dx * sun_dx + dy * sun_dy + dz * sun_dz
+    if cos_rs > 0.0 and legacy_glint_weight > 0.0:
+        glint_w = 0.02
+        a = glint_w / ((1.0 - cos_rs) + glint_w)
+        sky_r += legacy_glint_weight * a * 1.2
+        sky_g += legacy_glint_weight * a * 1.0
+        sky_b += legacy_glint_weight * a * 0.6
+    return sky_r, sky_g, sky_b
+
+
+@njit(inline="always")
+def _ggx_smith_g1(n_dot_x, alpha_squared):
+    """Smith masking for a GGX distribution parameterized by RMS slope."""
+    root = pymath.sqrt(
+        alpha_squared + (1.0 - alpha_squared) * n_dot_x * n_dot_x
+    )
+    return (2.0 * n_dot_x) / (n_dot_x + root)
+
+
+@njit
+def _ocean_shade_realism(
+    o_x, o_y, d_x, d_y, d_z, t_hit, pixel_angular_span,
+    sun_dx, sun_dy, sun_dz, t_sun_ocean,
+    sun_r, sun_g, sun_b,
+    beam_r, beam_g, beam_b,
+    ocean_rr, ocean_rg, ocean_rb,
+    fif_dx, fif_N,
+    mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+    ocean_realism, ocean_mip_bias,
+    ocean_glint_strength, ocean_glint_roughness,
+    ocean_glint_roughness_per_lod,
+    ocean_haze_extinction_per_km,
+    sky_hor_r, sky_hor_g, sky_hor_b,
+    sky_bloom_r, sky_bloom_g, sky_bloom_b,
+):
+    """Footprint-filtered ocean with microfacet sun glint and path haze."""
+    # Project one pixel's angular span onto the horizontal water plane. The
+    # grazing-angle factor is what drives the horizon to coarser mip levels.
+    grazing = abs(d_z)
+    if grazing < 0.03:
+        grazing = 0.03
+    ocean_span = t_hit * pixel_angular_span / grazing
+    texel_span = ocean_span / fif_dx
+    if texel_span < 1.0:
+        texel_span = 1.0
+    lod = pymath.log(texel_span) * 1.4426950408889634 + ocean_mip_bias
+    if lod < 0.0:
+        lod = 0.0
+    max_lod = n_mips - 1
+    if lod > max_lod:
+        lod = float(max_lod)
+    # Scaling LOD as well as the light-transfer terms makes intermediate
+    # master-gate values a useful, continuous tuning range.
+    lod *= ocean_realism
+
+    tile_extent = fif_N * fif_dx
+    nx, ny, nz = _ocean_wave_normal_mipped(
+        o_x, o_y, lod,
+        mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+        1.0 / tile_extent,
+    )
+
+    # Reflect the view direction around the filtered surface normal.
+    vdotn = d_x * nx + d_y * ny + d_z * nz
+    r_x = d_x - 2.0 * vdotn * nx
+    r_y = d_y - 2.0 * vdotn * ny
+    r_z = d_z - 2.0 * vdotn * nz
+    if r_z < 0.0:
+        r_z = -r_z
+    legacy_glint_weight = 1.0 - ocean_realism
+    sky_rr, sky_rg, sky_rb = _reflection_sky_realism(
+        r_x, r_y, r_z, sun_dx, sun_dy, sun_dz,
+        legacy_glint_weight,
+    )
+
+    # Water Fresnel for the resolved sky reflection.
+    n_dot_v = -vdotn
+    if n_dot_v < 0.0:
+        n_dot_v = 0.0
+    if n_dot_v > 1.0:
+        n_dot_v = 1.0
+    one_minus = 1.0 - n_dot_v
+    om2 = one_minus * one_minus
+    view_fresnel = 0.02 + 0.98 * om2 * om2 * one_minus
+
+    n_dot_l = sun_dx * nx + sun_dy * ny + sun_dz * nz
+    if n_dot_l < 0.0:
+        n_dot_l = 0.0
+
+    # Direct-sun GGX glint. Mip filtering removes unresolved slope variance;
+    # increasing alpha with LOD folds that variance back into a broader,
+    # stable highlight rather than reintroducing point-sample sparkles.
+    glint_weight = ocean_realism * ocean_glint_strength
+    glint_r = 0.0
+    glint_g = 0.0
+    glint_b = 0.0
+    sun_fresnel = 0.02
+    if glint_weight > 0.0 and n_dot_l > 0.0 and n_dot_v > 1e-8:
+        h_x = sun_dx - d_x
+        h_y = sun_dy - d_y
+        h_z = sun_dz - d_z
+        h_len = pymath.sqrt(h_x * h_x + h_y * h_y + h_z * h_z)
+        if h_len > 1e-8:
+            inv_h_len = 1.0 / h_len
+            h_x *= inv_h_len
+            h_y *= inv_h_len
+            h_z *= inv_h_len
+            n_dot_h = nx * h_x + ny * h_y + nz * h_z
+            if n_dot_h > 0.0:
+                v_dot_h = (-d_x * h_x - d_y * h_y - d_z * h_z)
+                if v_dot_h < 0.0:
+                    v_dot_h = 0.0
+                if v_dot_h > 1.0:
+                    v_dot_h = 1.0
+                one_minus_vh = 1.0 - v_dot_h
+                vh2 = one_minus_vh * one_minus_vh
+                sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh
+
+                alpha = (ocean_glint_roughness
+                         + ocean_glint_roughness_per_lod * lod)
+                if alpha < 0.02:
+                    alpha = 0.02
+                if alpha > 0.75:
+                    alpha = 0.75
+                alpha_squared = alpha * alpha
+                denom = (n_dot_h * n_dot_h * (alpha_squared - 1.0) + 1.0)
+                D = alpha_squared / (
+                    3.14159265358979 * denom * denom
+                )
+                G = (_ggx_smith_g1(n_dot_v, alpha_squared)
+                     * _ggx_smith_g1(n_dot_l, alpha_squared))
+                spec = (glint_weight * t_sun_ocean * D * G * sun_fresnel
+                        / (4.0 * n_dot_v))
+                glint_r = spec * beam_r
+                glint_g = spec * beam_g
+                glint_b = spec * beam_b
+
+    # Direct subsurface light uses the complement of the incident Fresnel
+    # allocation, so enabling the specular sun path does not create energy
+    # without taking it from the transmitted/diffuse path.
+    energy_weight = glint_weight
+    if energy_weight > 1.0:
+        energy_weight = 1.0
+    diffuse_partition = 1.0 - energy_weight * sun_fresnel
+    inv_pi = 1.0 / 3.14159265358979
+    diff_irr = t_sun_ocean * n_dot_l * inv_pi * diffuse_partition
+    diff_r = diff_irr * sun_r * ocean_rr
+    diff_g = diff_irr * sun_g * ocean_rg
+    diff_b = diff_irr * sun_b * ocean_rb
+
+    one_minus_F = 1.0 - view_fresnel
+    ol_r = view_fresnel * sky_rr + one_minus_F * diff_r + glint_r
+    ol_g = view_fresnel * sky_rg + one_minus_F * diff_g + glint_g
+    ol_b = view_fresnel * sky_rb + one_minus_F * diff_b + glint_b
+
+    shadow_floor = 0.35
+    t_eff = shadow_floor + (1.0 - shadow_floor) * t_sun_ocean
+    ol_r *= t_eff
+    ol_g *= t_eff
+    ol_b *= t_eff
+
+    # Ocean-only aerial perspective. t_hit is already the slant path length,
+    # so Beer-Lambert extinction naturally increases toward grazing angles.
+    haze_tau = (ocean_realism * ocean_haze_extinction_per_km
+                * 0.001 * t_hit)
+    if haze_tau > 0.0:
+        haze = 1.0 - pymath.exp(-haze_tau)
+        h_len = pymath.sqrt(d_x * d_x + d_y * d_y)
+        if h_len > 1e-8:
+            h_x = d_x / h_len
+            h_y = d_y / h_len
+        else:
+            h_x = d_x
+            h_y = d_y
+        haze_r, haze_g, haze_b = _sky_radiance(
+            h_x, h_y, 0.0,
+            sun_dx, sun_dy, sun_dz,
+            sky_hor_r, sky_hor_g, sky_hor_b,
+            sky_bloom_r, sky_bloom_g, sky_bloom_b,
+            0.0, 0.0, 0.0,
+        )
+        one_minus_haze = 1.0 - haze
+        ol_r = one_minus_haze * ol_r + haze * haze_r
+        ol_g = one_minus_haze * ol_g + haze * haze_g
+        ol_b = one_minus_haze * ol_b + haze * haze_b
+
+    return ol_r, ol_g, ol_b
+
+
+@njit
+def _ocean_shade_dispatch(
+    o_x, o_y, d_x, d_y, d_z, t_hit, pixel_angular_span,
+    sun_dx, sun_dy, sun_dz, t_sun_ocean,
+    sun_r, sun_g, sun_b,
+    beam_r, beam_g, beam_b,
+    ocean_rr, ocean_rg, ocean_rb,
+    fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_dx, fif_N,
+    mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+    ocean_realism, ocean_mip_bias,
+    ocean_glint_strength, ocean_glint_roughness,
+    ocean_glint_roughness_per_lod,
+    ocean_haze_extinction_per_km,
+    sky_hor_r, sky_hor_g, sky_hor_b,
+    sky_bloom_r, sky_bloom_g, sky_bloom_b,
+):
+    """Keep master-gate zero on the untouched legacy arithmetic path."""
+    if ocean_realism == 0.0:
+        return _ocean_shade_legacy(
+            o_x, o_y, d_x, d_y, d_z,
+            sun_dx, sun_dy, sun_dz, t_sun_ocean,
+            sun_r, sun_g, sun_b,
+            ocean_rr, ocean_rg, ocean_rb,
+            fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N,
+        )
+    return _ocean_shade_realism(
+        o_x, o_y, d_x, d_y, d_z, t_hit, pixel_angular_span,
+        sun_dx, sun_dy, sun_dz, t_sun_ocean,
+        sun_r, sun_g, sun_b,
+        beam_r, beam_g, beam_b,
+        ocean_rr, ocean_rg, ocean_rb,
+        fif_dx, fif_N,
+        mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+        ocean_realism, ocean_mip_bias,
+        ocean_glint_strength, ocean_glint_roughness,
+        ocean_glint_roughness_per_lod,
+        ocean_haze_extinction_per_km,
+        sky_hor_r, sky_hor_g, sky_hor_b,
+        sky_bloom_r, sky_bloom_g, sky_bloom_b,
+    )
+
+
 # ============================================================================
 # Main render kernel (unified: N=1 is the single-domain case)
 # ============================================================================
@@ -854,6 +1187,11 @@ def _render_image(
     ocean_enabled, ocean_z,
     ocean_rr, ocean_rg, ocean_rb,
     fif_nx, fif_ny, fif_nz, fif_dx,
+    mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+    ocean_realism, ocean_mip_bias,
+    ocean_glint_strength, ocean_glint_roughness,
+    ocean_glint_roughness_per_lod,
+    ocean_haze_extinction_per_km,
     step_voxel_factor,   # dt_max = min(active_level_dx) * this
     max_steps,
     powder_coeff,        # powder = 1 - exp(-powder_coeff * tau_depth)
@@ -873,6 +1211,7 @@ def _render_image(
     iso_phase = 1.0 / (4.0 * 3.14159265358979)
     inv_fif_dx = 1.0 / fif_dx
     fif_N = fif_nx.shape[0]
+    pixel_angular_span = 2.0 * tan_half_fov / img_h
 
     n_pixels = img_w * img_h
     for pixel_idx in prange(n_pixels):
@@ -984,12 +1323,22 @@ def _render_image(
                         outer_bmax_x, outer_bmax_y, outer_bmax_z,
                     )
                     t_sun_ocean = pymath.exp(-tau_ocean)
-                    ol_r, ol_g, ol_b = _ocean_shade(
+                    ol_r, ol_g, ol_b = _ocean_shade_dispatch(
                         o_x, o_y, d_x, d_y, d_z,
+                        t_ocean, pixel_angular_span,
                         sun_dx, sun_dy, sun_dz, t_sun_ocean,
                         sun_r, sun_g, sun_b,
+                        cloud_sun_r, cloud_sun_g, cloud_sun_b,
                         ocean_rr, ocean_rg, ocean_rb,
-                        fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N,
+                        fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_dx, fif_N,
+                        mip_nx, mip_ny, mip_nz,
+                        mip_offsets, mip_dims, n_mips,
+                        ocean_realism, ocean_mip_bias,
+                        ocean_glint_strength, ocean_glint_roughness,
+                        ocean_glint_roughness_per_lod,
+                        ocean_haze_extinction_per_km,
+                        sky_hor_r, sky_hor_g, sky_hor_b,
+                        sky_bloom_r, sky_bloom_g, sky_bloom_b,
                     )
 
                     col_r += transmittance * ol_r
@@ -1191,12 +1540,22 @@ def _render_image(
                     outer_bmax_x, outer_bmax_y, outer_bmax_z,
                 )
                 t_sun_ocean = pymath.exp(-tau_ocean)
-                ol_r, ol_g, ol_b = _ocean_shade(
+                ol_r, ol_g, ol_b = _ocean_shade_dispatch(
                     o_x, o_y, d_x, d_y, d_z,
+                    t_ocean, pixel_angular_span,
                     sun_dx, sun_dy, sun_dz, t_sun_ocean,
                     sun_r, sun_g, sun_b,
+                    cloud_sun_r, cloud_sun_g, cloud_sun_b,
                     ocean_rr, ocean_rg, ocean_rb,
-                    fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_N,
+                    fif_nx, fif_ny, fif_nz, inv_fif_dx, fif_dx, fif_N,
+                    mip_nx, mip_ny, mip_nz,
+                    mip_offsets, mip_dims, n_mips,
+                    ocean_realism, ocean_mip_bias,
+                    ocean_glint_strength, ocean_glint_roughness,
+                    ocean_glint_roughness_per_lod,
+                    ocean_haze_extinction_per_km,
+                    sky_hor_r, sky_hor_g, sky_hor_b,
+                    sky_bloom_r, sky_bloom_g, sky_bloom_b,
                 )
                 col_r += transmittance * ol_r
                 col_g += transmittance * ol_g
@@ -1257,6 +1616,104 @@ def _pack_levels(levels: Sequence[NestedLevel]):
 
     return (sigma_stacked, level_offsets, level_dims,
             level_bmin, level_bmax, level_dxs)
+
+
+def _prepare_fif_normals(fif_nx, fif_ny, fif_nz, fif_dx):
+    """Validate and canonicalize the square periodic FIF normal map."""
+    fif_nx = np.ascontiguousarray(fif_nx, dtype=np.float32)
+    fif_ny = np.ascontiguousarray(fif_ny, dtype=np.float32)
+    fif_nz = np.ascontiguousarray(fif_nz, dtype=np.float32)
+    if (fif_nx.ndim != 2 or fif_nx.shape != fif_ny.shape
+            or fif_nx.shape != fif_nz.shape):
+        raise ValueError(
+            "fif_normals must contain matching 2D nx/ny/nz arrays; "
+            f"got {fif_nx.shape}, {fif_ny.shape}, {fif_nz.shape}."
+        )
+    if fif_nx.shape[0] != fif_nx.shape[1]:
+        raise ValueError(
+            "The witness FIF sampler requires a square periodic tile; "
+            f"got {fif_nx.shape}."
+        )
+    if fif_nx.shape[0] < 1:
+        raise ValueError("The witness FIF normal tile must not be empty.")
+    if not np.isfinite(fif_dx) or fif_dx <= 0.0:
+        raise ValueError(f"FIF dx must be positive and finite; got {fif_dx!r}.")
+    if (not np.isfinite(fif_nx).all()
+            or not np.isfinite(fif_ny).all()
+            or not np.isfinite(fif_nz).all()):
+        raise ValueError("FIF normals must be finite.")
+    return fif_nx, fif_ny, fif_nz, float(fif_dx)
+
+
+def _build_fif_normal_mips(fif_nx, fif_ny, fif_nz):
+    """Pack a periodic, box-filtered, renormalized FIF normal mip chain."""
+    dims = []
+    h, w = fif_nx.shape
+    while True:
+        dims.append((w, h))
+        if w == 1 and h == 1:
+            break
+        w = max(1, (w + 1) // 2)
+        h = max(1, (h + 1) // 2)
+
+    sizes = [w_level * h_level for w_level, h_level in dims]
+    offsets = np.zeros(len(dims), dtype=np.int64)
+    if len(dims) > 1:
+        offsets[1:] = np.cumsum(sizes[:-1], dtype=np.int64)
+    total = int(sum(sizes))
+    mip_nx = np.empty(total, dtype=np.float32)
+    mip_ny = np.empty(total, dtype=np.float32)
+    mip_nz = np.empty(total, dtype=np.float32)
+    mip_dims = np.asarray(dims, dtype=np.int64)
+
+    base_size = sizes[0]
+    mip_nx[:base_size] = fif_nx.ravel()
+    mip_ny[:base_size] = fif_ny.ravel()
+    mip_nz[:base_size] = fif_nz.ravel()
+
+    for level in range(1, len(dims)):
+        prev_w, prev_h = dims[level - 1]
+        cur_w, cur_h = dims[level]
+        prev_start = offsets[level - 1]
+        prev_stop = prev_start + sizes[level - 1]
+        cur_start = offsets[level]
+        cur_stop = cur_start + sizes[level]
+
+        prev_x = mip_nx[prev_start:prev_stop].reshape(prev_h, prev_w)
+        prev_y = mip_ny[prev_start:prev_stop].reshape(prev_h, prev_w)
+        prev_z = mip_nz[prev_start:prev_stop].reshape(prev_h, prev_w)
+        y0 = (np.arange(cur_h, dtype=np.int64) * 2) % prev_h
+        y1 = (y0 + 1) % prev_h
+        x0 = (np.arange(cur_w, dtype=np.int64) * 2) % prev_w
+        x1 = (x0 + 1) % prev_w
+
+        down_x = (
+            prev_x[y0[:, None], x0[None, :]]
+            + prev_x[y1[:, None], x0[None, :]]
+            + prev_x[y0[:, None], x1[None, :]]
+            + prev_x[y1[:, None], x1[None, :]]
+        ) * np.float32(0.25)
+        down_y = (
+            prev_y[y0[:, None], x0[None, :]]
+            + prev_y[y1[:, None], x0[None, :]]
+            + prev_y[y0[:, None], x1[None, :]]
+            + prev_y[y1[:, None], x1[None, :]]
+        ) * np.float32(0.25)
+        down_z = (
+            prev_z[y0[:, None], x0[None, :]]
+            + prev_z[y1[:, None], x0[None, :]]
+            + prev_z[y0[:, None], x1[None, :]]
+            + prev_z[y1[:, None], x1[None, :]]
+        ) * np.float32(0.25)
+        inv_len = 1.0 / np.maximum(
+            np.sqrt(down_x * down_x + down_y * down_y + down_z * down_z),
+            np.float32(1e-12),
+        )
+        mip_nx[cur_start:cur_stop] = (down_x * inv_len).ravel()
+        mip_ny[cur_start:cur_stop] = (down_y * inv_len).ravel()
+        mip_nz[cur_start:cur_stop] = (down_z * inv_len).ravel()
+
+    return mip_nx, mip_ny, mip_nz, offsets, mip_dims
 
 
 def _spectral_lighting_colors(
@@ -1362,6 +1819,12 @@ def _render_levels(
     fif_ny: np.ndarray,
     fif_nz: np.ndarray,
     fif_dx: float,
+    ocean_realism: float,
+    ocean_mip_bias: float,
+    ocean_glint_strength: float,
+    ocean_glint_roughness: float,
+    ocean_glint_roughness_per_lod: float,
+    ocean_haze_extinction_per_km: float,
     sun_color: Tuple[float, float, float],
     spectral_lighting_strength: float,
     g_hg: float,
@@ -1387,9 +1850,48 @@ def _render_levels(
     if (not pymath.isfinite(spectral_lighting_strength) or
             spectral_lighting_strength < 0.0 or spectral_lighting_strength > 1.0):
         raise ValueError("spectral_lighting_strength must be finite and in [0, 1].")
+    if (not pymath.isfinite(ocean_realism) or
+            ocean_realism < 0.0 or ocean_realism > 1.0):
+        raise ValueError("ocean_realism must be finite and in [0, 1].")
+    if not pymath.isfinite(ocean_mip_bias):
+        raise ValueError("ocean_mip_bias must be finite.")
+    if (not pymath.isfinite(ocean_glint_strength)
+            or ocean_glint_strength < 0.0):
+        raise ValueError("ocean_glint_strength must be finite and nonnegative.")
+    if (not pymath.isfinite(ocean_glint_roughness)
+            or ocean_glint_roughness < 0.0):
+        raise ValueError("ocean_glint_roughness must be finite and nonnegative.")
+    if (not pymath.isfinite(ocean_glint_roughness_per_lod)
+            or ocean_glint_roughness_per_lod < 0.0):
+        raise ValueError(
+            "ocean_glint_roughness_per_lod must be finite and nonnegative."
+        )
+    if (not pymath.isfinite(ocean_haze_extinction_per_km)
+            or ocean_haze_extinction_per_km < 0.0):
+        raise ValueError(
+            "ocean_haze_extinction_per_km must be finite and nonnegative."
+        )
     if (isinstance(witness_spp, (bool, np.bool_)) or
             not isinstance(witness_spp, (int, np.integer)) or witness_spp < 1):
         raise ValueError("witness_spp must be a positive integer.")
+
+    fif_nx, fif_ny, fif_nz, fif_dx = _prepare_fif_normals(
+        fif_nx, fif_ny, fif_nz, fif_dx
+    )
+    if ocean_enabled and ocean_realism > 0.0:
+        (mip_nx, mip_ny, mip_nz,
+         mip_offsets, mip_dims) = _build_fif_normal_mips(
+            fif_nx, fif_ny, fif_nz
+        )
+    else:
+        mip_nx = fif_nx.ravel()
+        mip_ny = fif_ny.ravel()
+        mip_nz = fif_nz.ravel()
+        mip_offsets = np.zeros(1, dtype=np.int64)
+        mip_dims = np.asarray(
+            [[fif_nx.shape[1], fif_nx.shape[0]]], dtype=np.int64
+        )
+    n_mips = len(mip_offsets)
 
     cone_stencil_tan_theta = pymath.tan(
         pymath.radians(cone_stencil_theta_deg)
@@ -1449,6 +1951,11 @@ def _render_levels(
         ocean_enabled, ocean_z,
         ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
         fif_nx, fif_ny, fif_nz, fif_dx,
+        mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+        ocean_realism, ocean_mip_bias,
+        ocean_glint_strength, ocean_glint_roughness,
+        ocean_glint_roughness_per_lod,
+        ocean_haze_extinction_per_km,
         step_voxel_factor, 32, powder_coeff,
         gradient_shading_strength,
         gradient_coarse_weight,
@@ -1489,6 +1996,11 @@ def _render_levels(
             ocean_enabled, ocean_z,
             ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
             fif_nx, fif_ny, fif_nz, fif_dx,
+            mip_nx, mip_ny, mip_nz, mip_offsets, mip_dims, n_mips,
+            ocean_realism, ocean_mip_bias,
+            ocean_glint_strength, ocean_glint_roughness,
+            ocean_glint_roughness_per_lod,
+            ocean_haze_extinction_per_km,
             step_voxel_factor, max_steps, powder_coeff,
             gradient_shading_strength,
             gradient_coarse_weight,
@@ -1556,6 +2068,12 @@ def render_nested(
     witness_spp: int = WITNESS_SPP,
     return_linear: bool = False,
     verbose: bool = True,
+    ocean_realism: float = OCEAN_REALISM,
+    ocean_mip_bias: float = OCEAN_MIP_BIAS,
+    ocean_glint_strength: float = OCEAN_GLINT_STRENGTH,
+    ocean_glint_roughness: float = OCEAN_GLINT_ROUGHNESS,
+    ocean_glint_roughness_per_lod: float = OCEAN_GLINT_ROUGHNESS_PER_LOD,
+    ocean_haze_extinction_per_km: float = OCEAN_HAZE_EXTINCTION_PER_KM,
 ) -> np.ndarray:
     """Render through N strictly-nested extinction grids.
 
@@ -1575,6 +2093,9 @@ def render_nested(
         cloudyview.ocean_fif.generate_fif_normals. Required when ocean_enabled
         is True; the kernel samples the FIF normal map with periodic wrap at
         each ocean hit. Pass None (with ocean_enabled=False) for sky-only.
+
+    ocean_realism controls the footprint-filtered normal, spectral glint, and
+        ocean-haze pass. 0 selects the exact legacy ocean shader.
     """
     if ocean_enabled and fif_normals is None:
         from cloudyview.ocean_fif import generate_fif_normals
@@ -1593,6 +2114,10 @@ def render_nested(
         fov_degrees, n_light_steps, step_voxel_factor, max_steps,
         ocean_enabled, ocean_z, ocean_reflectance,
         fif_nx, fif_ny, fif_nz, fif_dx,
+        ocean_realism, ocean_mip_bias,
+        ocean_glint_strength, ocean_glint_roughness,
+        ocean_glint_roughness_per_lod,
+        ocean_haze_extinction_per_km,
         sun_color, spectral_lighting_strength,
         g_hg, ambient_strength, powder_coeff,
         gradient_shading_strength,
@@ -1764,6 +2289,10 @@ def witness(
         STEP_VOXEL_FACTOR, MAX_STEPS,
         ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
         fif_nx, fif_ny, fif_nz, fif_dx,
+        OCEAN_REALISM, OCEAN_MIP_BIAS,
+        OCEAN_GLINT_STRENGTH, OCEAN_GLINT_ROUGHNESS,
+        OCEAN_GLINT_ROUGHNESS_PER_LOD,
+        OCEAN_HAZE_EXTINCTION_PER_KM,
         SUN_COLOR, SPECTRAL_LIGHTING_STRENGTH,
         G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
         GRADIENT_SHADING_STRENGTH,
