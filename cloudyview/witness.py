@@ -110,14 +110,18 @@ BOUNCE_TINT_B = 0.92
 #
 # 1) Gradient thick-surface shading. Central-difference sigma samples estimate
 # the outward normal N=-normalize(grad sigma). A fine stencil keeps close-range
-# surface relief; a coarse world-space stencil recovers the 100s-of-meters lobe
-# orientation that survives kilometer-range viewing. The N.sun lobe modulates
-# only the sun/MS contribution, gated by tau_depth and gradient confidence so
-# thin fair-weather wisps do not become plastic or noisy.
+# surface relief; a coarse stencil recovers the broad lobe orientation that
+# survives kilometer-range viewing. In cone mode its radius subtends a fixed
+# angle at the camera, so the sampled world-space scale grows with viewing
+# distance. Set CONE_STENCIL_THETA_DEG to 0.0 for the legacy fixed-radius
+# stencil. The N.sun lobe modulates only the sun/MS contribution, gated by
+# tau_depth and gradient confidence so thin fair-weather wisps do not become
+# plastic or noisy.
 GRADIENT_SHADING_STRENGTH = 1.50
 GRADIENT_SHADING_RADIUS_VOXELS = 1.0
 GRADIENT_SHADING_COARSE_WEIGHT = 0.65
 GRADIENT_SHADING_COARSE_RADIUS_M = 500.0
+CONE_STENCIL_THETA_DEG = 2.0
 GRADIENT_SHADING_COARSE_MIN_VOXELS = 4.0
 GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION = 0.125
 GRADIENT_SHADING_TAU_START = 0.25
@@ -347,9 +351,10 @@ def _sigma_gradient_at_radius_level(k, px, py, pz, hx, hy, hz,
 
 
 @njit(inline="always")
-def _sigma_gradient_level(k, px, py, pz, sigma,
+def _sigma_gradient_level(k, px, py, pz, sigma, sample_distance_m,
                           gradient_coarse_weight,
                           gradient_coarse_radius_m,
+                          cone_stencil_tan_theta,
                           sigma_stacked, level_offsets, level_dims,
                           level_bmin, level_dxs):
     fine_hx = level_dxs[k, 0] * GRADIENT_SHADING_RADIUS_VOXELS
@@ -379,32 +384,42 @@ def _sigma_gradient_level(k, px, py, pz, sigma,
     extent_y = level_dims[k, 1] * dy
     extent_z = level_dims[k, 2] * dz
 
-    coarse_hx = gradient_coarse_radius_m
-    min_hx = GRADIENT_SHADING_COARSE_MIN_VOXELS * dx
+    # A fixed angular radius follows apparent cloud scale: distant samples use
+    # a broader world-space normal while nearby samples converge on the fine
+    # stencil. An exact zero explicitly selects the legacy fixed-radius path.
+    if cone_stencil_tan_theta > 0.0:
+        coarse_radius_m = sample_distance_m * cone_stencil_tan_theta
+        coarse_min_voxels = GRADIENT_SHADING_RADIUS_VOXELS
+    else:
+        coarse_radius_m = gradient_coarse_radius_m
+        coarse_min_voxels = GRADIENT_SHADING_COARSE_MIN_VOXELS
+
+    coarse_hx = coarse_radius_m
+    min_hx = coarse_min_voxels * dx
     max_hx = GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION * extent_x
     if coarse_hx < min_hx:
         coarse_hx = min_hx
-    if coarse_hx > max_hx:
+    if cone_stencil_tan_theta == 0.0 and coarse_hx > max_hx:
         coarse_hx = max_hx
     if coarse_hx < fine_hx:
         coarse_hx = fine_hx
 
-    coarse_hy = gradient_coarse_radius_m
-    min_hy = GRADIENT_SHADING_COARSE_MIN_VOXELS * dy
+    coarse_hy = coarse_radius_m
+    min_hy = coarse_min_voxels * dy
     max_hy = GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION * extent_y
     if coarse_hy < min_hy:
         coarse_hy = min_hy
-    if coarse_hy > max_hy:
+    if cone_stencil_tan_theta == 0.0 and coarse_hy > max_hy:
         coarse_hy = max_hy
     if coarse_hy < fine_hy:
         coarse_hy = fine_hy
 
-    coarse_hz = gradient_coarse_radius_m
-    min_hz = GRADIENT_SHADING_COARSE_MIN_VOXELS * dz
+    coarse_hz = coarse_radius_m
+    min_hz = coarse_min_voxels * dz
     max_hz = GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION * extent_z
     if coarse_hz < min_hz:
         coarse_hz = min_hz
-    if coarse_hz > max_hz:
+    if cone_stencil_tan_theta == 0.0 and coarse_hz > max_hz:
         coarse_hz = max_hz
     if coarse_hz < fine_hz:
         coarse_hz = fine_hz
@@ -781,6 +796,7 @@ def _render_image(
     gradient_shading_strength,
     gradient_coarse_weight,
     gradient_coarse_radius_m,
+    cone_stencil_tan_theta,
     deep_shadow_ms_suppression,
     ambient_occlusion_strength,
     ambient_occlusion_floor,
@@ -963,9 +979,10 @@ def _render_image(
 
                 if gradient_shading_strength > 0.0:
                     grad_x, grad_y, grad_z, grad_conf = _sigma_gradient_level(
-                        k, p_x, p_y, p_z, sigma,
+                        k, p_x, p_y, p_z, sigma, t,
                         gradient_coarse_weight,
                         gradient_coarse_radius_m,
+                        cone_stencil_tan_theta,
                         sigma_stacked, level_offsets, level_dims,
                         level_bmin, level_dxs,
                     )
@@ -1145,6 +1162,7 @@ def _render_levels(
     gradient_shading_strength: float,
     gradient_coarse_weight: float,
     gradient_coarse_radius_m: float,
+    cone_stencil_theta_deg: float,
     deep_shadow_ms_suppression: float,
     ambient_occlusion_strength: float,
     ambient_occlusion_floor: float,
@@ -1154,6 +1172,13 @@ def _render_levels(
     """Pack levels, warm up, render, and return the linear HDR buffer."""
     if len(levels) == 0:
         raise ValueError("Need at least one level.")
+    if (not pymath.isfinite(cone_stencil_theta_deg) or
+            cone_stencil_theta_deg < 0.0 or cone_stencil_theta_deg >= 90.0):
+        raise ValueError("cone_stencil_theta_deg must be finite and in [0, 90).")
+
+    cone_stencil_tan_theta = pymath.tan(
+        pymath.radians(cone_stencil_theta_deg)
+    )
 
     img_w, img_h = image_size
     (sigma_stacked, level_offsets, level_dims,
@@ -1204,6 +1229,7 @@ def _render_levels(
         gradient_shading_strength,
         gradient_coarse_weight,
         gradient_coarse_radius_m,
+        cone_stencil_tan_theta,
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
         ambient_occlusion_floor,
@@ -1236,6 +1262,7 @@ def _render_levels(
         gradient_shading_strength,
         gradient_coarse_weight,
         gradient_coarse_radius_m,
+        cone_stencil_tan_theta,
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
         ambient_occlusion_floor,
@@ -1288,6 +1315,7 @@ def render_nested(
     gradient_shading_strength: float = GRADIENT_SHADING_STRENGTH,
     gradient_coarse_weight: float = GRADIENT_SHADING_COARSE_WEIGHT,
     gradient_coarse_radius_m: float = GRADIENT_SHADING_COARSE_RADIUS_M,
+    cone_stencil_theta_deg: float = CONE_STENCIL_THETA_DEG,
     deep_shadow_ms_suppression: float = DEEP_SHADOW_MS_SUPPRESSION,
     ambient_occlusion_strength: float = AMBIENT_OCCLUSION_STRENGTH,
     ambient_occlusion_floor: float = AMBIENT_OCCLUSION_FLOOR,
@@ -1299,6 +1327,9 @@ def render_nested(
 
     Levels are finest-first (index 0 = highest resolution); the outermost
     (last) level defines the outer AABB the ray is clipped against.
+
+    cone_stencil_theta_deg sets the coarse-gradient angular radius; 0 uses
+        the legacy fixed world-space radius.
 
     fif_normals: (nx, ny, nz, dx_m) tuple from
         cloudyview.ocean_fif.generate_fif_normals. Required when ocean_enabled
@@ -1326,6 +1357,7 @@ def render_nested(
         gradient_shading_strength,
         gradient_coarse_weight,
         gradient_coarse_radius_m,
+        cone_stencil_theta_deg,
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
         ambient_occlusion_floor,
@@ -1494,6 +1526,7 @@ def witness(
         GRADIENT_SHADING_STRENGTH,
         GRADIENT_SHADING_COARSE_WEIGHT,
         GRADIENT_SHADING_COARSE_RADIUS_M,
+        CONE_STENCIL_THETA_DEG,
         DEEP_SHADOW_MS_SUPPRESSION,
         AMBIENT_OCCLUSION_STRENGTH,
         AMBIENT_OCCLUSION_FLOOR,
