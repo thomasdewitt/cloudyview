@@ -236,6 +236,11 @@ OCEAN_MIP_BIAS = -0.5
 OCEAN_GLINT_STRENGTH = 0.85
 OCEAN_GLINT_ROUGHNESS = 0.28
 OCEAN_GLINT_ROUGHNESS_PER_LOD = 0.025
+# Under cloud shadow the water keeps most of its sky reflection and all of its
+# wave texture; only the blocked sky fraction dims. 1.0 would ignore shadowing
+# of the sky term entirely; the old behavior multiplied the WHOLE composite by
+# 0.35 + 0.65*t_sun (double-shadowing the sun terms -> airbrushed dark ovals).
+OCEAN_SKY_SHADOW_FLOOR = 0.75
 OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 
 # Ocean diffuse albedo — calibrated to IMG_6048 (kept here so render_nested
@@ -1217,16 +1222,18 @@ def _ocean_shade_realism(
     diff_g = diff_irr * sun_g * ocean_rg
     diff_b = diff_irr * sun_b * ocean_rb
 
+    # Per-term cloud shadowing (iter_011). The sun-derived terms (diff_*,
+    # glint_*) already carry t_sun_ocean; multiplying the whole composite by a
+    # shadow factor again double-shadowed them AND dimmed the reflected-sky
+    # term, which is what painted the airbrushed dark ovals — under a cloud
+    # the water still reflects the (mostly unblocked) sky dome and keeps its
+    # wave texture. Only mildly dim the sky reflection for the blocked part
+    # of the sky hemisphere.
+    sky_shadow = OCEAN_SKY_SHADOW_FLOOR + (1.0 - OCEAN_SKY_SHADOW_FLOOR) * t_sun_ocean
     one_minus_F = 1.0 - view_fresnel
-    ol_r = view_fresnel * sky_rr + one_minus_F * diff_r + glint_r
-    ol_g = view_fresnel * sky_rg + one_minus_F * diff_g + glint_g
-    ol_b = view_fresnel * sky_rb + one_minus_F * diff_b + glint_b
-
-    shadow_floor = 0.35
-    t_eff = shadow_floor + (1.0 - shadow_floor) * t_sun_ocean
-    ol_r *= t_eff
-    ol_g *= t_eff
-    ol_b *= t_eff
+    ol_r = view_fresnel * sky_rr * sky_shadow + one_minus_F * diff_r + glint_r
+    ol_g = view_fresnel * sky_rg * sky_shadow + one_minus_F * diff_g + glint_g
+    ol_b = view_fresnel * sky_rb * sky_shadow + one_minus_F * diff_b + glint_b
 
     # Ocean-only aerial perspective. t_hit is already the slant path length,
     # so Beer-Lambert extinction naturally increases toward grazing angles.
