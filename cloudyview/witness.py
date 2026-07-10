@@ -198,6 +198,20 @@ LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG = 55.0
 # underside skin, not the whole core. k is in optical-depth units.
 BOUNCE_DEPTH_ATTENUATION = 0.80
 
+# 6) Aerial perspective on clouds (iter_008). Each cloud sample's radiance is
+# extinguished by the clear-air haze along the view path and replaced by
+# in-scattered sky light of the same sightline's horizon color (the iter_007
+# sky field, solar disc excluded — identical to the ocean haze target). The
+# haze optical depth uses a closed-form exponential atmosphere: for a ray from
+# camera altitude z0 to sample altitude z over distance t,
+#   tau = beta0 * H/mu * (exp(-z0/H) - exp(-z/H)),   mu = d_z  (t*exp(-z0/H)
+# for horizontal rays), so an 80 km sightline to an anvil top accrues far less
+# haze than one to the storm base — high paths stay clear, low paths milk out.
+# Strength 0 is the exact previous arithmetic path.
+AERIAL_PERSPECTIVE_STRENGTH = 1.0
+AERIAL_BETA_PER_KM = 0.035        # sea-level clear-air extinction (~110 km vis)
+AERIAL_SCALE_HEIGHT_M = 2500.0    # aerosol-dominated haze scale height
+
 # Numerical integration.
 STEP_VOXEL_FACTOR = 2.0     # dt_max = min(active_level_dx) * this
 MAX_STEPS = 2048
@@ -1398,6 +1412,29 @@ def _render_image(
         cos_theta = d_x * sun_dx + d_y * sun_dy + d_z * sun_dz
         phase_hg = _hg_phase(cos_theta, g_hg)
 
+        # Aerial perspective: this sightline's horizon sky color (solar disc
+        # excluded), the same asymptotic target the ocean haze uses so cloud
+        # and water converge to one haze color at the horizon.
+        aer_r = 0.0
+        aer_g = 0.0
+        aer_b = 0.0
+        if AERIAL_PERSPECTIVE_STRENGTH > 0.0:
+            ah_len = pymath.sqrt(d_x * d_x + d_y * d_y)
+            if ah_len > 1e-8:
+                ah_x = d_x / ah_len
+                ah_y = d_y / ah_len
+            else:
+                ah_x = d_x
+                ah_y = d_y
+            aer_r, aer_g, aer_b = _sky_radiance(
+                ah_x, ah_y, 0.0,
+                sun_dx, sun_dy, sun_dz,
+                sky_hor_r, sky_hor_g, sky_hor_b,
+                sky_bloom_r, sky_bloom_g, sky_bloom_b,
+                0.0, 0.0, 0.0,
+                low_sun_sky_field_strength,
+            )
+
         col_r = 0.0
         col_g = 0.0
         col_b = 0.0
@@ -1535,6 +1572,33 @@ def _render_image(
 
                 tau_depth += d_tau
 
+                # Aerial perspective: clear-air transmittance camera->sample
+                # via the closed-form exponential atmosphere (see constants).
+                air_t = 1.0
+                if AERIAL_PERSPECTIVE_STRENGTH > 0.0:
+                    aer_beta0 = AERIAL_BETA_PER_KM * 0.001
+                    aer_z0 = cam_oz
+                    if aer_z0 < 0.0:
+                        aer_z0 = 0.0
+                    aer_z1 = p_z
+                    if aer_z1 < 0.0:
+                        aer_z1 = 0.0
+                    aer_mu = d_z
+                    if aer_mu > 1e-6 or aer_mu < -1e-6:
+                        tau_air = (
+                            aer_beta0 * (AERIAL_SCALE_HEIGHT_M / aer_mu)
+                            * (pymath.exp(-aer_z0 / AERIAL_SCALE_HEIGHT_M)
+                               - pymath.exp(-aer_z1 / AERIAL_SCALE_HEIGHT_M))
+                        )
+                    else:
+                        tau_air = (
+                            aer_beta0 * t
+                            * pymath.exp(-aer_z0 / AERIAL_SCALE_HEIGHT_M)
+                        )
+                    air_t = pymath.exp(
+                        -AERIAL_PERSPECTIVE_STRENGTH * tau_air
+                    )
+
                 tau_sun = _light_march(
                     p_x, p_y, p_z, sun_dx, sun_dy, sun_dz,
                     sigma_stacked, level_offsets, level_dims,
@@ -1626,7 +1690,7 @@ def _render_image(
                 # Powder as a function of depth into the current cloud segment:
                 # dark edges, bright cores, invariant to step size.
                 powder = 1.0 - pymath.exp(-powder_coeff * tau_depth)
-                scatter_weight = d_tau * powder * transmittance
+                scatter_weight = d_tau * powder * transmittance * air_t
 
                 col_r += scatter_weight * ms_r
                 col_g += scatter_weight * ms_g
@@ -1643,7 +1707,7 @@ def _render_image(
                     if amb_factor < ambient_occlusion_floor:
                         amb_factor = ambient_occlusion_floor
                     amb *= amb_factor
-                amb_weight = transmittance * d_tau * amb
+                amb_weight = transmittance * d_tau * amb * air_t
                 col_r += amb_weight * ambient_tint_r
                 col_g += amb_weight * ambient_tint_g
                 col_b += amb_weight * ambient_tint_b
@@ -1660,7 +1724,7 @@ def _render_image(
                            + (1.0 - AMBIENT_HEIGHT_FLOOR) * height_frac)
                         * deep_shadow_gate
                     )
-                    sky_fill_weight = transmittance * d_tau * sky_fill
+                    sky_fill_weight = transmittance * d_tau * sky_fill * air_t
                     col_r += sky_fill_weight * ambient_tint_r
                     col_g += sky_fill_weight * ambient_tint_g
                     col_b += sky_fill_weight * ambient_tint_b
@@ -1675,10 +1739,22 @@ def _render_image(
                     bounce = BOUNCE_STRENGTH * bounce_frac
                     if bounce_depth_attenuation > 0.0:
                         bounce *= pymath.exp(-bounce_depth_attenuation * tau_depth)
-                    bounce_weight = transmittance * d_tau * bounce
+                    bounce_weight = transmittance * d_tau * bounce * air_t
                     col_r += bounce_weight * BOUNCE_TINT_R
                     col_g += bounce_weight * BOUNCE_TINT_G
                     col_b += bounce_weight * BOUNCE_TINT_B
+
+                # Aerial in-scatter: the sky light scattered into the path
+                # replaces exactly the radiance this sample occludes.
+                if AERIAL_PERSPECTIVE_STRENGTH > 0.0 and air_t < 1.0:
+                    aer_in = (
+                        transmittance
+                        * (1.0 - pymath.exp(-d_tau))
+                        * (1.0 - air_t)
+                    )
+                    col_r += aer_in * aer_r
+                    col_g += aer_in * aer_g
+                    col_b += aer_in * aer_b
 
                 transmittance *= pymath.exp(-d_tau)
                 t += dt
