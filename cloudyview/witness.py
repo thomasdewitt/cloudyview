@@ -118,7 +118,7 @@ BOUNCE_TINT_B = 0.92
 # Diagnosis: once a deep convective cloud becomes optically thick, the visible
 # near-shell source term is too spatially smooth. Direct sun is mostly gone,
 # the saturated light march leaves a uniform isotropic multi-scattering floor,
-# ambient is height-only, and bounce keeps lighting deep cores. These four
+# ambient is height-only, and bounce keeps lighting deep cores. These five
 # gated terms add local surface orientation and remove fill only where optical
 # depth says the sample is truly buried. Setting any strength to 0.0 disables
 # that term and restores the pre-package look for that path.
@@ -159,7 +159,21 @@ DEEP_SHADOW_MS_FLOOR = 0.24
 AMBIENT_OCCLUSION_STRENGTH = 1.00
 AMBIENT_OCCLUSION_FLOOR = 0.24
 
-# 4) Depth-attenuated bounce. Ground/ocean bounce should light the visible
+# 4) Low-sun direct/diffuse split. tau_sun is valid for the direct beam but
+# overly aggressive as a proxy for the whole sky dome. Under low sun, boost
+# the unoccluded warm sun/MS source modestly while adding a separately colored
+# diffuse source only as that directional path saturates. The latter reuses
+# the spectral ambient color and height ramp, producing cool luminous shade
+# without a global exposure lift. Both additions fade out at the 55-degree
+# spectral calibration elevation, preserving the approved high-sun look.
+# Master strength 0 is the exact previous arithmetic path at every elevation.
+LIGHT_TRANSFER_SPLIT_STRENGTH = 1.0
+LIGHT_TRANSFER_DIRECT_BOOST = 0.25
+LIGHT_TRANSFER_SHADOW_SKYLIGHT = 0.18
+LIGHT_TRANSFER_FULL_ELEVATION_DEG = 45.0
+LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG = 55.0
+
+# 5) Depth-attenuated bounce. Ground/ocean bounce should light the visible
 # underside skin, not the whole core. k is in optical-depth units.
 BOUNCE_DEPTH_ATTENUATION = 0.80
 
@@ -1202,6 +1216,7 @@ def _render_image(
     deep_shadow_ms_suppression,
     ambient_occlusion_strength,
     ambient_occlusion_floor,
+    light_transfer_split_strength,
     bounce_depth_attenuation,
     sample_index,
     samples_per_pixel,
@@ -1412,7 +1427,9 @@ def _render_image(
                 )
 
                 deep_shadow_gate = 0.0
-                if deep_shadow_ms_suppression > 0.0 or ambient_occlusion_strength > 0.0:
+                if (deep_shadow_ms_suppression > 0.0
+                        or ambient_occlusion_strength > 0.0
+                        or light_transfer_split_strength > 0.0):
                     deep_shadow_gate = _smoothstep(
                         DEEP_SHADOW_TAU_START, DEEP_SHADOW_TAU_FULL, tau_sun
                     )
@@ -1438,6 +1455,16 @@ def _render_image(
                     ms_g += contrib * cloud_sun_g
                     ms_b += contrib * cloud_sun_b
                     ms_atten *= MS_ATTEN
+
+                if light_transfer_split_strength > 0.0:
+                    direct_factor = 1.0 + (
+                        light_transfer_split_strength
+                        * LIGHT_TRANSFER_DIRECT_BOOST
+                        * pymath.exp(-tau_sun)
+                    )
+                    ms_r *= direct_factor
+                    ms_g *= direct_factor
+                    ms_b *= direct_factor
 
                 if gradient_shading_strength > 0.0:
                     grad_x, grad_y, grad_z, grad_conf = _sigma_gradient_level(
@@ -1502,6 +1529,23 @@ def _render_image(
                 col_r += amb_weight * ambient_tint_r
                 col_g += amb_weight * ambient_tint_g
                 col_b += amb_weight * ambient_tint_b
+
+                # The directional sun ray cannot estimate visibility of the
+                # whole sky hemisphere. Restore a cool diffuse floor only in
+                # saturated sun shadow; lit faces retain the existing direct
+                # radiance and contrast.
+                if light_transfer_split_strength > 0.0:
+                    sky_fill = (
+                        light_transfer_split_strength
+                        * LIGHT_TRANSFER_SHADOW_SKYLIGHT
+                        * (AMBIENT_HEIGHT_FLOOR
+                           + (1.0 - AMBIENT_HEIGHT_FLOOR) * height_frac)
+                        * deep_shadow_gate
+                    )
+                    sky_fill_weight = transmittance * d_tau * sky_fill
+                    col_r += sky_fill_weight * ambient_tint_r
+                    col_g += sky_fill_weight * ambient_tint_g
+                    col_b += sky_fill_weight * ambient_tint_b
 
                 # Surface bounce: upward diffuse light anchored at z=0, not
                 # the data AABB floor, so elevated domains do not receive
@@ -1837,6 +1881,7 @@ def _render_levels(
     deep_shadow_ms_suppression: float,
     ambient_occlusion_strength: float,
     ambient_occlusion_floor: float,
+    light_transfer_split_strength: float,
     bounce_depth_attenuation: float,
     witness_spp: int,
     verbose: bool,
@@ -1874,6 +1919,17 @@ def _render_levels(
     if (isinstance(witness_spp, (bool, np.bool_)) or
             not isinstance(witness_spp, (int, np.integer)) or witness_spp < 1):
         raise ValueError("witness_spp must be a positive integer.")
+    if (not pymath.isfinite(light_transfer_split_strength)
+            or light_transfer_split_strength < 0.0
+            or light_transfer_split_strength > 1.0):
+        raise ValueError(
+            "light_transfer_split_strength must be finite and in [0, 1]."
+        )
+    if (LIGHT_TRANSFER_FULL_ELEVATION_DEG
+            >= LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG):
+        raise ValueError(
+            "light-transfer full elevation must be below its cutoff."
+        )
 
     fif_nx, fif_ny, fif_nz, fif_dx = _prepare_fif_normals(
         fif_nx, fif_ny, fif_nz, fif_dx
@@ -1896,6 +1952,20 @@ def _render_levels(
     cone_stencil_tan_theta = pymath.tan(
         pymath.radians(cone_stencil_theta_deg)
     )
+    sun_elevation_deg = pymath.degrees(pymath.asin(
+        max(-1.0, min(1.0, sun_direction[2]))
+    ))
+    if (sun_elevation_deg
+            >= LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG - 1e-6):
+        light_transfer_split_strength = 0.0
+    elif sun_elevation_deg > LIGHT_TRANSFER_FULL_ELEVATION_DEG:
+        low_sun_mix = (
+            (LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG - sun_elevation_deg)
+            / (LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG
+               - LIGHT_TRANSFER_FULL_ELEVATION_DEG)
+        )
+        low_sun_mix = low_sun_mix * low_sun_mix * (3.0 - 2.0 * low_sun_mix)
+        light_transfer_split_strength *= low_sun_mix
     (cloud_sun, ambient_tint, sky_horizon,
      sky_bloom, sky_disc) = _spectral_lighting_colors(
         sun_direction, sun_color, spectral_lighting_strength
@@ -1964,6 +2034,7 @@ def _render_levels(
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
         ambient_occlusion_floor,
+        light_transfer_split_strength,
         bounce_depth_attenuation,
         0, 1,
         warmup,
@@ -2009,6 +2080,7 @@ def _render_levels(
             deep_shadow_ms_suppression,
             ambient_occlusion_strength,
             ambient_occlusion_floor,
+            light_transfer_split_strength,
             bounce_depth_attenuation,
             sample_index, witness_spp,
             image,
@@ -2064,6 +2136,7 @@ def render_nested(
     deep_shadow_ms_suppression: float = DEEP_SHADOW_MS_SUPPRESSION,
     ambient_occlusion_strength: float = AMBIENT_OCCLUSION_STRENGTH,
     ambient_occlusion_floor: float = AMBIENT_OCCLUSION_FLOOR,
+    light_transfer_split_strength: float = LIGHT_TRANSFER_SPLIT_STRENGTH,
     bounce_depth_attenuation: float = BOUNCE_DEPTH_ATTENUATION,
     witness_spp: int = WITNESS_SPP,
     return_linear: bool = False,
@@ -2085,6 +2158,9 @@ def render_nested(
 
     spectral_lighting_strength blends from the legacy fixed spectra at 0 to
         elevation-dependent direct sun, diffuse fill, and main-sky color at 1.
+
+    light_transfer_split_strength controls the low-sun warm-direct/cool-
+        diffuse separation; 0 selects the exact previous cloud shader.
 
     witness_spp controls deterministic still-image sampling. 1 is the exact
         legacy pixel-center/no-jitter path; higher values average jittered rays.
@@ -2127,6 +2203,7 @@ def render_nested(
         deep_shadow_ms_suppression,
         ambient_occlusion_strength,
         ambient_occlusion_floor,
+        light_transfer_split_strength,
         bounce_depth_attenuation,
         witness_spp,
         verbose,
@@ -2302,6 +2379,7 @@ def witness(
         DEEP_SHADOW_MS_SUPPRESSION,
         AMBIENT_OCCLUSION_STRENGTH,
         AMBIENT_OCCLUSION_FLOOR,
+        LIGHT_TRANSFER_SPLIT_STRENGTH,
         BOUNCE_DEPTH_ATTENUATION,
         WITNESS_SPP,
         verbose=verbose,
