@@ -173,7 +173,7 @@ MAX_STEPS = 2048
 # isophotes into high-frequency error that the spatial average removes.
 # WITNESS_SPP=1 is an explicit, exact legacy path: pixel centers, no phase
 # jitter, and no averaging. Cost scales approximately linearly with SPP.
-WITNESS_SPP = 4
+WITNESS_SPP = 8
 
 # Ocean surface realism. The legacy ocean point-samples a 5 cm FIF normal
 # tile, so distant pixels alias unresolved waves into full-amplitude speckle.
