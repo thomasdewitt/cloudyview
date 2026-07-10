@@ -53,12 +53,12 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Cloud-scattering tuning block
+# Lighting and cloud-scattering tuning block
 # ----------------------------------------------------------------------------
-# Physically-motivated knobs that control the look of the clouds (not the
-# sky/ocean). Kept at module scope — numba captures supporting thresholds as
-# compile-time constants inside the kernel — so each tuning iteration is a
-# single edit.
+# Physically-motivated knobs that control the look of the clouds and sky.
+# Kept at module scope so each tuning iteration is a single edit. Ocean-only
+# tuning remains separate; the spectral atmosphere below intentionally does
+# not alter the ocean shader.
 # ============================================================================
 
 POWDER_COEFF = 1.5          # powder = 1 - exp(-POWDER_COEFF * tau_depth)
@@ -84,6 +84,22 @@ AMBIENT_TINT_R = 0.22
 AMBIENT_TINT_G = 0.23
 AMBIENT_TINT_B = 0.28
 AMBIENT_HEIGHT_FLOOR = 0.3  # amb(h) = strength * (floor + (1-floor) * h)
+
+# Spectral time-of-day lighting. SUN_COLOR is calibrated around the default
+# 55-degree sun. At lower elevations, the extra optical air mass selectively
+# removes short wavelengths from the direct beam (Rayleigh ~ lambda^-4 plus
+# an Angstrom aerosol term). The corresponding diffuse fill becomes bluer,
+# while the sun-facing horizon and circumsolar light warm. Strength 0 restores
+# the exact legacy fixed-color cloud/sky path. These colors are precomputed
+# once per frame; no atmospheric work is done in the pixel loop.
+SPECTRAL_LIGHTING_STRENGTH = 1.0
+ATMOSPHERE_REFERENCE_SUN_ELEVATION_DEG = 55.0
+ATMOSPHERE_MAX_AIRMASS = 20.0
+ATMOSPHERE_RAYLEIGH_OD_550 = 0.10
+ATMOSPHERE_AEROSOL_OD_550 = 0.08
+ATMOSPHERE_AEROSOL_ANGSTROM = 1.3
+ATMOSPHERE_RGB_WAVELENGTHS_NM = (680.0, 550.0, 460.0)
+SUNSET_HORIZON_RADIANCE = (0.42, 0.20, 0.055)
 
 # Upward diffuse bounce — stands in for sun/skylight reflected off the
 # surface (and low-level multiply-scattered light between cloud base and
@@ -595,7 +611,10 @@ def _light_march(px, py, pz, sun_dx, sun_dy, sun_dz,
 
 
 @njit(inline="always")
-def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
+def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz,
+                  spectral_hor_r, spectral_hor_g, spectral_hor_b,
+                  bloom_r, bloom_g, bloom_b,
+                  disc_r, disc_g, disc_b):
     """Procedural sky: cobalt zenith, hazy horizon, gradual circumsolar bloom.
 
     Tuned against phone photos of real cumulus scenes. The old shader had a
@@ -614,7 +633,27 @@ def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
     # Zenith sampled from top-center patch of IMG_6304 (sRGB (14,57,112))
     # reverse-mapped through tone_map(exposure=4, gamma=1.4).
     zen_r = 0.0044; zen_g = 0.035; zen_b = 0.1156
-    hor_r = 0.10;   hor_g = 0.18;  hor_b = 0.38
+    base_hor_r = 0.10; base_hor_g = 0.18; base_hor_b = 0.38
+
+    # Atmospheric reddening is strongest near the sun's azimuth and fades
+    # smoothly to the unchanged blue horizon opposite it. At strength=0 the
+    # precomputed spectral horizon equals base_hor exactly.
+    view_h_len = pymath.sqrt(dx * dx + dy * dy)
+    sun_h_len = pymath.sqrt(sun_dx * sun_dx + sun_dy * sun_dy)
+    horizon_sun_weight = 0.0
+    if view_h_len > 1e-12 and sun_h_len > 1e-12:
+        cos_sun_az = ((dx * sun_dx + dy * sun_dy)
+                      / (view_h_len * sun_h_len))
+        if cos_sun_az < -1.0:
+            cos_sun_az = -1.0
+        if cos_sun_az > 1.0:
+            cos_sun_az = 1.0
+        horizon_sun_weight = 0.5 + 0.5 * cos_sun_az
+        horizon_sun_weight = (horizon_sun_weight * horizon_sun_weight
+                              * (3.0 - 2.0 * horizon_sun_weight))
+    hor_r = base_hor_r + horizon_sun_weight * (spectral_hor_r - base_hor_r)
+    hor_g = base_hor_g + horizon_sun_weight * (spectral_hor_g - base_hor_g)
+    hor_b = base_hor_b + horizon_sun_weight * (spectral_hor_b - base_hor_b)
     sky_r = hor_r + (zen_r - hor_r) * t
     sky_g = hor_g + (zen_g - hor_g) * t
     sky_b = hor_b + (zen_b - hor_b) * t
@@ -627,15 +666,15 @@ def _sky_radiance(dx, dy, dz, sun_dx, sun_dy, sun_dz):
     if cos_sun > 0.0:
         sun_half_width = 0.002
         a = sun_half_width / ((1.0 - cos_sun) + sun_half_width)
-        sky_r += a * 0.8
-        sky_g += a * 0.6
-        sky_b += a * 0.3
+        sky_r += a * bloom_r
+        sky_g += a * bloom_g
+        sky_b += a * bloom_b
 
     # Solar disc.
     if cos_sun > 0.9998:
-        sky_r += 50.0
-        sky_g += 45.0
-        sky_b += 35.0
+        sky_r += disc_r
+        sky_g += disc_g
+        sky_b += disc_b
 
     return sky_r, sky_g, sky_b
 
@@ -786,6 +825,11 @@ def _render_image(
     img_w, img_h, tan_half_fov,
     n_light_steps,
     sun_r, sun_g, sun_b,
+    cloud_sun_r, cloud_sun_g, cloud_sun_b,
+    ambient_tint_r, ambient_tint_g, ambient_tint_b,
+    sky_hor_r, sky_hor_g, sky_hor_b,
+    sky_bloom_r, sky_bloom_g, sky_bloom_b,
+    sky_disc_r, sky_disc_g, sky_disc_b,
     g_hg, ambient_strength,
     ocean_enabled, ocean_z,
     ocean_rr, ocean_rg, ocean_rb,
@@ -972,9 +1016,9 @@ def _render_image(
                         if ms_floor < DEEP_SHADOW_MS_FLOOR:
                             ms_floor = DEEP_SHADOW_MS_FLOOR
                         contrib *= ms_floor
-                    ms_r += contrib * sun_r
-                    ms_g += contrib * sun_g
-                    ms_b += contrib * sun_b
+                    ms_r += contrib * cloud_sun_r
+                    ms_g += contrib * cloud_sun_g
+                    ms_b += contrib * cloud_sun_b
                     ms_atten *= MS_ATTEN
 
                 if gradient_shading_strength > 0.0:
@@ -1037,9 +1081,9 @@ def _render_image(
                         amb_factor = ambient_occlusion_floor
                     amb *= amb_factor
                 amb_weight = transmittance * d_tau * amb
-                col_r += amb_weight * AMBIENT_TINT_R
-                col_g += amb_weight * AMBIENT_TINT_G
-                col_b += amb_weight * AMBIENT_TINT_B
+                col_r += amb_weight * ambient_tint_r
+                col_g += amb_weight * ambient_tint_g
+                col_b += amb_weight * ambient_tint_b
 
                 # Surface bounce: upward diffuse light anchored at z=0, not
                 # the data AABB floor, so elevated domains do not receive
@@ -1092,7 +1136,10 @@ def _render_image(
 
         if transmittance > 0.002:
             sky_r, sky_g, sky_b = _sky_radiance(d_x, d_y, d_z,
-                                                  sun_dx, sun_dy, sun_dz)
+                                                  sun_dx, sun_dy, sun_dz,
+                                                  sky_hor_r, sky_hor_g, sky_hor_b,
+                                                  sky_bloom_r, sky_bloom_g, sky_bloom_b,
+                                                  sky_disc_r, sky_disc_g, sky_disc_b)
             col_r += transmittance * sky_r
             col_g += transmittance * sky_g
             col_b += transmittance * sky_b
@@ -1136,6 +1183,90 @@ def _pack_levels(levels: Sequence[NestedLevel]):
             level_bmin, level_bmax, level_dxs)
 
 
+def _spectral_lighting_colors(
+    sun_direction: Tuple[float, float, float],
+    sun_color: Tuple[float, float, float],
+    strength: float,
+):
+    """Precompute low-sun cloud and sky spectra from relative air mass.
+
+    ``sun_color`` is the renderer's calibrated beam at the reference solar
+    elevation. Only the additional air mass below that elevation is applied,
+    which keeps the approved high-sun look stable while giving dawn and
+    golden-hour shots a physical spectral separation.
+    """
+    legacy_ambient = (AMBIENT_TINT_R, AMBIENT_TINT_G, AMBIENT_TINT_B)
+    legacy_horizon = (0.10, 0.18, 0.38)
+    legacy_bloom = (0.8, 0.6, 0.3)
+    legacy_disc = (50.0, 45.0, 35.0)
+    if strength == 0.0:
+        return (sun_color, legacy_ambient, legacy_horizon,
+                legacy_bloom, legacy_disc)
+
+    def air_mass(elevation_deg):
+        # Kasten-Young relative optical air mass, clamped near the horizon
+        # where the plane-parallel approximation otherwise diverges.
+        elevation_deg = max(0.0, elevation_deg)
+        denom = (pymath.sin(pymath.radians(elevation_deg))
+                 + 0.50572 * (elevation_deg + 6.07995) ** -1.6364)
+        return min(ATMOSPHERE_MAX_AIRMASS, 1.0 / denom)
+
+    sun_z = max(-1.0, min(1.0, sun_direction[2]))
+    elevation_deg = pymath.degrees(pymath.asin(sun_z))
+    extra_air_mass = max(
+        0.0,
+        air_mass(elevation_deg)
+        - air_mass(ATMOSPHERE_REFERENCE_SUN_ELEVATION_DEG),
+    )
+
+    optical_depths = []
+    for wavelength_nm in ATMOSPHERE_RGB_WAVELENGTHS_NM:
+        wavelength_ratio = 550.0 / wavelength_nm
+        rayleigh_od = ATMOSPHERE_RAYLEIGH_OD_550 * wavelength_ratio ** 4.0
+        aerosol_od = (ATMOSPHERE_AEROSOL_OD_550
+                      * wavelength_ratio ** ATMOSPHERE_AEROSOL_ANGSTROM)
+        optical_depths.append(rayleigh_od + aerosol_od)
+
+    # Beer-Lambert transmittance through only the extra low-sun atmosphere.
+    # Interpolation in transmittance space makes strength=0 an exact bypass.
+    beam_scale = tuple(
+        1.0 - strength * (1.0 - pymath.exp(-extra_air_mass * tau))
+        for tau in optical_depths
+    )
+    cloud_sun = tuple(sun_color[c] * beam_scale[c] for c in range(3))
+
+    # Diffuse sky fill follows the spectrum removed by one vertical column.
+    # Preserve the legacy fill luminance: this changes shadow chromaticity,
+    # while the attenuated direct beam naturally raises its relative weight.
+    scattered = tuple(1.0 - pymath.exp(-tau) for tau in optical_depths)
+    legacy_luma = (0.2126 * legacy_ambient[0]
+                   + 0.7152 * legacy_ambient[1]
+                   + 0.0722 * legacy_ambient[2])
+    scattered_luma = (0.2126 * scattered[0]
+                      + 0.7152 * scattered[1]
+                      + 0.0722 * scattered[2])
+    fill_target = tuple(c * legacy_luma / scattered_luma for c in scattered)
+    fill_mix = strength * (1.0 - pymath.exp(-0.6 * extra_air_mass))
+    ambient = tuple(
+        legacy_ambient[c] + fill_mix * (fill_target[c] - legacy_ambient[c])
+        for c in range(3)
+    )
+
+    # Low-altitude scattered light forms a broad warm band toward the solar
+    # azimuth. Directional application happens in _sky_radiance; this is the
+    # per-frame spectral endpoint only.
+    horizon_mix = strength * (1.0 - pymath.exp(-0.45 * extra_air_mass))
+    horizon = tuple(
+        legacy_horizon[c]
+        + horizon_mix * (SUNSET_HORIZON_RADIANCE[c] - legacy_horizon[c])
+        for c in range(3)
+    )
+
+    bloom = tuple(legacy_bloom[c] * beam_scale[c] for c in range(3))
+    disc = tuple(legacy_disc[c] * beam_scale[c] for c in range(3))
+    return cloud_sun, ambient, horizon, bloom, disc
+
+
 def _render_levels(
     levels: Sequence[NestedLevel],
     camera_position: Tuple[float, float, float],
@@ -1156,6 +1287,7 @@ def _render_levels(
     fif_nz: np.ndarray,
     fif_dx: float,
     sun_color: Tuple[float, float, float],
+    spectral_lighting_strength: float,
     g_hg: float,
     ambient_strength: float,
     powder_coeff: float,
@@ -1175,9 +1307,16 @@ def _render_levels(
     if (not pymath.isfinite(cone_stencil_theta_deg) or
             cone_stencil_theta_deg < 0.0 or cone_stencil_theta_deg >= 90.0):
         raise ValueError("cone_stencil_theta_deg must be finite and in [0, 90).")
+    if (not pymath.isfinite(spectral_lighting_strength) or
+            spectral_lighting_strength < 0.0 or spectral_lighting_strength > 1.0):
+        raise ValueError("spectral_lighting_strength must be finite and in [0, 1].")
 
     cone_stencil_tan_theta = pymath.tan(
         pymath.radians(cone_stencil_theta_deg)
+    )
+    (cloud_sun, ambient_tint, sky_horizon,
+     sky_bloom, sky_disc) = _spectral_lighting_colors(
+        sun_direction, sun_color, spectral_lighting_strength
     )
 
     img_w, img_h = image_size
@@ -1221,6 +1360,11 @@ def _render_levels(
         1, 1, tan_half_fov,
         4,
         sun_color[0], sun_color[1], sun_color[2],
+        cloud_sun[0], cloud_sun[1], cloud_sun[2],
+        ambient_tint[0], ambient_tint[1], ambient_tint[2],
+        sky_horizon[0], sky_horizon[1], sky_horizon[2],
+        sky_bloom[0], sky_bloom[1], sky_bloom[2],
+        sky_disc[0], sky_disc[1], sky_disc[2],
         g_hg, ambient_strength,
         ocean_enabled, ocean_z,
         ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
@@ -1254,6 +1398,11 @@ def _render_levels(
         img_w, img_h, tan_half_fov,
         n_light_steps,
         sun_color[0], sun_color[1], sun_color[2],
+        cloud_sun[0], cloud_sun[1], cloud_sun[2],
+        ambient_tint[0], ambient_tint[1], ambient_tint[2],
+        sky_horizon[0], sky_horizon[1], sky_horizon[2],
+        sky_bloom[0], sky_bloom[1], sky_bloom[2],
+        sky_disc[0], sky_disc[1], sky_disc[2],
         g_hg, ambient_strength,
         ocean_enabled, ocean_z,
         ocean_reflectance[0], ocean_reflectance[1], ocean_reflectance[2],
@@ -1309,6 +1458,7 @@ def render_nested(
     ocean_reflectance: Tuple[float, float, float] = OCEAN_REFLECTANCE,
     fif_normals: Tuple[np.ndarray, np.ndarray, np.ndarray, float] = None,
     sun_color: Tuple[float, float, float] = SUN_COLOR,
+    spectral_lighting_strength: float = SPECTRAL_LIGHTING_STRENGTH,
     g_hg: float = G_HG,
     ambient_strength: float = AMBIENT_STRENGTH,
     powder_coeff: float = POWDER_COEFF,
@@ -1330,6 +1480,9 @@ def render_nested(
 
     cone_stencil_theta_deg sets the coarse-gradient angular radius; 0 uses
         the legacy fixed world-space radius.
+
+    spectral_lighting_strength blends from the legacy fixed spectra at 0 to
+        elevation-dependent direct sun, diffuse fill, and main-sky color at 1.
 
     fif_normals: (nx, ny, nz, dx_m) tuple from
         cloudyview.ocean_fif.generate_fif_normals. Required when ocean_enabled
@@ -1353,7 +1506,8 @@ def render_nested(
         fov_degrees, n_light_steps, step_voxel_factor, max_steps,
         ocean_enabled, ocean_z, ocean_reflectance,
         fif_nx, fif_ny, fif_nz, fif_dx,
-        sun_color, g_hg, ambient_strength, powder_coeff,
+        sun_color, spectral_lighting_strength,
+        g_hg, ambient_strength, powder_coeff,
         gradient_shading_strength,
         gradient_coarse_weight,
         gradient_coarse_radius_m,
@@ -1522,7 +1676,8 @@ def witness(
         STEP_VOXEL_FACTOR, MAX_STEPS,
         ocean_enabled, ocean_z, OCEAN_REFLECTANCE,
         fif_nx, fif_ny, fif_nz, fif_dx,
-        SUN_COLOR, G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
+        SUN_COLOR, SPECTRAL_LIGHTING_STRENGTH,
+        G_HG, AMBIENT_STRENGTH, POWDER_COEFF,
         GRADIENT_SHADING_STRENGTH,
         GRADIENT_SHADING_COARSE_WEIGHT,
         GRADIENT_SHADING_COARSE_RADIUS_M,
