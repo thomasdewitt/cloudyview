@@ -36,6 +36,7 @@ temp/
 # PyInstaller
 *.manifest
 *.spec
+!packaging/soar.spec
 
 # Installer logs
 pip-log.txt

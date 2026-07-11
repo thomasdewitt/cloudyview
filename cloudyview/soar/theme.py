@@ -36,6 +36,7 @@ FONT_BODY_FAMILIES = (
 FONT_MONO_FAMILIES = (
     "Adwaita Mono",
     "JetBrains Mono",
+    "Inconsolata",
     "Droid Sans Mono",
     "DejaVu Sans Mono",
 )
@@ -60,14 +61,11 @@ def find_font(families) -> str:
             text=True,
             timeout=10.0,
         )
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(
-            "soar theme: fontconfig 'fc-list' is required to locate an "
-            "embedded UI font. Install fontconfig and a supported TTF face."
-        ) from exc
+    except (FileNotFoundError, subprocess.SubprocessError):
+        result = None
 
     records = []
-    for line in result.stdout.splitlines():
+    for line in result.stdout.splitlines() if result is not None else ():
         parts = line.split("\t", 2)
         if len(parts) != 3:
             continue
@@ -87,8 +85,28 @@ def find_font(families) -> str:
         for path, family_names in records:
             if wanted in family_names:
                 return str(path)
+
+    # imgui-bundle carries permissively licensed UI fonts on every supported
+    # wheel. The PyInstaller spec includes these exact files, making the theme
+    # independent of fontconfig and host fonts on Windows and macOS.
+    try:
+        import imgui_bundle
+
+        font_root = Path(imgui_bundle.__file__).resolve().parent / "assets" / "fonts"
+        bundled = {
+            "Roboto": font_root / "Roboto" / "Roboto-Regular.ttf",
+            "Droid Sans": font_root / "DroidSans.ttf",
+            "Inconsolata": font_root / "Inconsolata-Medium.ttf",
+        }
+        for family in families:
+            path = bundled.get(family)
+            if path is not None and path.is_file():
+                return str(path)
+    except (ImportError, OSError):
+        pass
+
     raise RuntimeError(
-        "soar theme: fc-list found no usable regular TTF for:\n  "
+        "soar theme: found no usable regular TTF for:\n  "
         + "\n  ".join(families)
         + "\nInstall one of these families (e.g. Adwaita or DejaVu)."
     )

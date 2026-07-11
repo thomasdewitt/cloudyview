@@ -12,12 +12,13 @@ CLI usage:
 """
 
 import argparse
+from importlib import import_module
 import sys
 from pathlib import Path
 import numpy as np
 from textwrap import dedent
 
-from . import io, optical_depth, basic_render, config
+from . import io, optical_depth, config
 from .angles import direction_from_azimuth_elevation, azimuth_met_to_internal_deg
 from .cli_utils import (
     CloudyViewHelpFormatter,
@@ -26,6 +27,17 @@ from .cli_utils import (
     dataset_selection_kwargs,
 )
 from .cloudfield import CloudField, load as _load_field
+
+
+class _LazyBasicRender:
+    """Retain the monkeypatchable CLI seam without importing Matplotlib."""
+
+    def __getattr__(self, name):
+        module = import_module(".basic_render", __package__)
+        return getattr(module, name)
+
+
+basic_render = _LazyBasicRender()
 
 
 # Conservative-scattering two-stream reflectance: A = tau / (tau + 2/(1-g)).

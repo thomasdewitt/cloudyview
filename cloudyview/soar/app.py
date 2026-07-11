@@ -37,6 +37,7 @@ witness/behold/soar render calls.
 """
 
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from pathlib import Path
 import shlex
 from time import perf_counter
@@ -104,6 +105,7 @@ SPEED_WHEEL_FACTOR = 1.25   # per wheel notch
 # = 10 m): below this the normal-mapped water reads wrong (no displacement
 # geometry) — Thomas 2026-07-10.
 OCEAN_FLOOR_MARGIN_M = 5.0 * 10.0
+BEHOLD_UNAVAILABLE_MESSAGE = "behold rendering requires the full dev install"
 
 CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
@@ -138,6 +140,14 @@ fn fs_main() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 0.42);
 }
 """
+
+
+def behold_rendering_available() -> bool:
+    """Return whether the optional offline renderer can be offered in-menu."""
+    try:
+        return find_spec("mitsuba") is not None and find_spec("drjit") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _clamp_position_above_ocean(
@@ -1054,7 +1064,12 @@ class FlyThroughApp:
             elif action == ACTION_OPEN_ICE_NO:
                 self._finish_open_file(use_ice=False)
             elif action == ACTION_RENDER_MENU:
-                self._set_menu_state(transition.next_state or MENU_RENDER_QUALITY)
+                if behold_rendering_available():
+                    self._set_menu_state(
+                        transition.next_state or MENU_RENDER_QUALITY
+                    )
+                else:
+                    self._flash_title(BEHOLD_UNAVAILABLE_MESSAGE, seconds=4.0)
             elif action == ACTION_SETTINGS_MENU:
                 self._set_menu_state(transition.next_state or MENU_SETTINGS)
             elif action == ACTION_SELECT_TIER:
@@ -1339,8 +1354,15 @@ class FlyThroughApp:
                 self._set_paused(False)
             if theme.menu_button("Open file...", "O"):
                 self._start_open_file()
-            if theme.menu_button("Render in behold...", "G"):
+            behold_available = behold_rendering_available()
+            if theme.menu_button(
+                "Render in behold...",
+                "G" if behold_available else None,
+                disabled=not behold_available,
+            ):
                 self._set_menu_state(MENU_RENDER_QUALITY)
+            if not behold_available:
+                theme.caption(BEHOLD_UNAVAILABLE_MESSAGE, wrapped=True)
             if theme.menu_button("Settings...", "S"):
                 self._set_menu_state(MENU_SETTINGS)
             periodic_label = (
@@ -1379,6 +1401,12 @@ class FlyThroughApp:
         self._begin_imgui_window(imgui, "quality_menu", 420.0)
         try:
             theme.header("render in behold", "Quality")
+            if not behold_rendering_available():
+                theme.caption(BEHOLD_UNAVAILABLE_MESSAGE, wrapped=True)
+                imgui.dummy((1.0, 4.0))
+                if theme.menu_button("Back", "ESC", height=38.0):
+                    self._set_menu_state(MENU_MAIN)
+                return
             if self.periodic and self._view_spans_domain_edge():
                 theme.caption(
                     "view spans domain edge — behold will differ",
@@ -1785,6 +1813,9 @@ class FlyThroughApp:
         self._loop.run()
 
 
-def run_app(field: CloudField, **kwargs):
+def run_app(field: CloudField, *, startup_message: str | None = None, **kwargs):
     """Open the fly-through window for a loaded CloudField (blocks)."""
-    FlyThroughApp(field, **kwargs).run()
+    app = FlyThroughApp(field, **kwargs)
+    if startup_message:
+        app._flash_title(startup_message, seconds=4.0)
+    app.run()

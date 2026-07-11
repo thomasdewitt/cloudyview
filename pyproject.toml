@@ -42,12 +42,9 @@ radiative-transfer = [
 interactive = [
     # WGSL/wgpu interactive fly-through engine (cloudyview.soar).
     "wgpu>=0.19",
+    "rendercanvas>=2.0",
     "glfw>=2.6",
     "imgui-bundle>=1.6",
-    # The in-app "Render in behold" action drives Mitsuba directly,
-    # so the app extra carries the path tracer too.
-    "mitsuba>=3.0.0",
-    "drjit>=0.3.0",
 ]
 visualization = [
     "scikit-image>=0.19.0",
@@ -60,6 +57,8 @@ dev = [
     "isort>=5.0",
     "flake8>=3.9",
     "imageio>=2.28",
+    "pillow>=9.0",
+    "pyinstaller>=6.0",
 ]
 all = [
     "mitsuba>=3.0.0",

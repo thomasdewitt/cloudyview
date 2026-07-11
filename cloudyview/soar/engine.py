@@ -33,10 +33,9 @@ from ..camera import Camera
 from ..cloudfield import CloudField
 from ..angles import direction_from_azimuth_elevation
 
-# witness.py is the golden look reference: the realism-package defaults and
-# the per-frame spectral precompute are imported, not copied, so a witness
-# tuning-block edit propagates to soar automatically.
-from ..witness import (
+# Witness and Soar share this dependency-light look module. Importing the
+# interactive engine must not import Witness (and therefore Numba) at startup.
+from ..look import (
     SUN_COLOR as WITNESS_SUN_COLOR,
     AERIAL_BETA_PER_KM,
     CONE_STENCIL_THETA_DEG,
