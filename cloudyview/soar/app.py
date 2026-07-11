@@ -21,6 +21,9 @@ Pause menu:
     O           open the in-window .nc browser
     G           render current view in behold (then 1=min, 2=low,
                 3=medium, 4=high, 5=max/overnight; ESC backs out)
+    P           toggle the periodic (horizontally tiled) domain — on by
+                default; turn off for subvolume cutouts that are not
+                physically periodic
     F           toggle fullscreen/windowed
     Q           quit from the top-level pause menu
 
@@ -52,6 +55,7 @@ from .engine import (
     DEFAULT_SUN_ELEVATION,
     InteractiveRenderer,
     camera_world_origin,
+    periodic_march_cap_m,
     request_device,
 )
 from .fullscreen import (
@@ -73,6 +77,7 @@ from .menu import (
     ACTION_RESUME,
     ACTION_SCREENSHOT,
     ACTION_TOGGLE_FULLSCREEN,
+    ACTION_TOGGLE_PERIODIC,
     BEHOLD_QUALITIES_BY_KEY,
     MENU_ERROR,
     MENU_FILE_BROWSER_ICE,
@@ -98,6 +103,7 @@ CONTROL_SUMMARY = (
     "J jitter toggle, B bird toggle, M minimap toggle, "
     "F fullscreen/window, F12 screenshot, ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, G behold render, "
+    "P periodic domain toggle, "
     "F fullscreen/window, Q quit from the top-level menu"
 )
 
@@ -133,11 +139,72 @@ def _clamp_position_above_ocean(
     return clamped
 
 
+def _wrap_position_horizontal(position, bmin, bmax) -> np.ndarray:
+    """Wrap a world-space camera position into the domain in x/y.
+
+    Flight over a periodic domain is endless: crossing a lateral face lands
+    the camera on the opposite face (modulo the domain extent). z is left
+    alone — the ocean-floor clamp owns the vertical bound.
+    """
+    wrapped = np.asarray(position, dtype=np.float64).copy()
+    for axis in (0, 1):
+        extent = float(bmax[axis] - bmin[axis])
+        wrapped[axis] = bmin[axis] + (wrapped[axis] - bmin[axis]) % extent
+    return wrapped
+
+
+def _slab_exit_t(origin, direction, lo, hi, axes) -> float:
+    """Forward distance at which a ray leaves the slab(s) of ``axes``."""
+    t_exit = np.inf
+    for axis in axes:
+        d = float(direction[axis])
+        if abs(d) < 1e-12:
+            continue
+        t0 = (float(lo[axis]) - float(origin[axis])) / d
+        t1 = (float(hi[axis]) - float(origin[axis])) / d
+        t_exit = min(t_exit, max(t0, t1))
+    return t_exit
+
+
+def view_spans_domain_edge(
+    origin,
+    camera: Camera,
+    bmin,
+    bmax,
+    *,
+    aspect: float,
+) -> bool:
+    """True when a periodic view would march past the domain's x/y walls.
+
+    Casts the center and four frustum-corner rays from the (wrapped,
+    in-domain) camera origin and checks whether any leaves the horizontal
+    AABB before its periodic march cap or the z slab — i.e. while wrapped
+    volume is still visible along it. Behold's Mitsuba volume is finite, so
+    such a view renders differently there (used for the render-menu notice).
+    """
+    origin = np.asarray(origin, dtype=np.float64)
+    forward, right, up = camera.basis()
+    tan_half = float(np.tan(np.deg2rad(camera.fov) * 0.5))
+    directions = [np.asarray(forward, dtype=np.float64)]
+    for sx in (-1.0, 1.0):
+        for sy in (-1.0, 1.0):
+            d = forward + sx * aspect * tan_half * right + sy * tan_half * up
+            directions.append(d / np.linalg.norm(d))
+    for direction in directions:
+        t_horizontal = _slab_exit_t(origin, direction, bmin, bmax, (0, 1))
+        t_vertical = _slab_exit_t(origin, direction, bmin, bmax, (2,))
+        cap = periodic_march_cap_m(origin[2], direction, bmin, bmax)
+        if t_horizontal < min(t_vertical, cap):
+            return True
+    return False
+
+
 class FlyThroughApp:
     def __init__(self, field: CloudField, *, size=(1280, 720),
                  extinction_multiplier: float = 1.0,
                  max_fps: float = 120.0,
-                 camera: Camera | None = None):
+                 camera: Camera | None = None,
+                 periodic: bool = True):
         # Import here so offscreen use never needs glfw / a display.
         from rendercanvas.glfw import RenderCanvas, loop
 
@@ -151,6 +218,7 @@ class FlyThroughApp:
         self._ensure_resizable()
 
         self._extinction_multiplier = float(extinction_multiplier)
+        self.periodic = bool(periodic)
         self.sun_azimuth = DEFAULT_SUN_AZIMUTH
         self.sun_elevation = DEFAULT_SUN_ELEVATION
 
@@ -211,6 +279,7 @@ class FlyThroughApp:
         """Create the field-resident renderer, reusing the app GPU device."""
         kwargs = {
             "extinction_multiplier": self._extinction_multiplier,
+            "periodic": self.periodic,
             "device": device,
         }
         if previous is not None:
@@ -851,6 +920,8 @@ class FlyThroughApp:
                     self._pending_open_path = None
                     self._error_message = None
                     self._set_menu_state(transition.next_state or MENU_MAIN)
+            elif action == ACTION_TOGGLE_PERIODIC:
+                self._toggle_periodic()
             elif action == ACTION_SCREENSHOT:
                 self._save_screenshot()
             elif self._paused:
@@ -917,7 +988,38 @@ class FlyThroughApp:
             step -= np.array([0.0, 0.0, 1.0])
         if np.any(step):
             self.position = self.position + step * (self.speed * dt)
-        self.position = _clamp_position_above_ocean(self.position)
+        self.position = self._constrain_position(self.position)
+
+    def _constrain_position(self, position) -> np.ndarray:
+        """Ocean-floor clamp plus, when periodic, the horizontal x/y wrap."""
+        constrained = _clamp_position_above_ocean(position)
+        if self.periodic:
+            constrained = _wrap_position_horizontal(
+                constrained, self.renderer.bmin, self.renderer.bmax
+            )
+        return constrained
+
+    def _toggle_periodic(self) -> None:
+        """Flip horizontal domain tiling; the renderer rewrites its border."""
+        self.periodic = not self.periodic
+        self.renderer.set_periodic(self.periodic)
+        self.position = self._constrain_position(self.position)
+        self._flash_title(
+            "cloudyview periodic domain "
+            f"{'on' if self.periodic else 'off'}",
+            seconds=2.5,
+        )
+        self.canvas.request_draw()
+
+    def _view_spans_domain_edge(self) -> bool:
+        w, h = self.canvas.get_physical_size()
+        return view_spans_domain_edge(
+            self.position,
+            self.camera(),
+            self.renderer.bmin,
+            self.renderer.bmax,
+            aspect=w / h,
+        )
 
     def _pause_overlay_pipeline_for(self, target_format: str):
         import wgpu
@@ -1082,7 +1184,7 @@ class FlyThroughApp:
             self._draw_main_menu(imgui)
 
     def _draw_main_menu(self, imgui) -> None:
-        self._begin_imgui_window(imgui, "Paused", 420.0, 330.0)
+        self._begin_imgui_window(imgui, "Paused", 420.0, 380.0)
         try:
             if self._imgui_button(imgui, "Resume"):
                 self._set_paused(False)
@@ -1090,6 +1192,13 @@ class FlyThroughApp:
                 self._start_open_file()
             if self._imgui_button(imgui, "Render in behold..."):
                 self._set_menu_state(MENU_RENDER_QUALITY)
+            periodic_label = (
+                "Periodic domain: on"
+                if self.periodic
+                else "Periodic domain: off"
+            )
+            if self._imgui_button(imgui, periodic_label):
+                self._toggle_periodic()
             label = (
                 "Exit fullscreen"
                 if getattr(self, "_fullscreen", False)
@@ -1104,8 +1213,14 @@ class FlyThroughApp:
             self._end_imgui_window(imgui)
 
     def _draw_quality_menu(self, imgui) -> None:
-        self._begin_imgui_window(imgui, "Behold Quality", 420.0, 330.0)
+        self._begin_imgui_window(imgui, "Behold Quality", 420.0, 360.0)
         try:
+            if self.periodic and self._view_spans_domain_edge():
+                self._imgui_text_wrapped(
+                    imgui, "view spans domain edge — behold will differ"
+                )
+                if hasattr(imgui, "separator"):
+                    imgui.separator()
             for label, quality in (
                 ("Min", "min"),
                 ("Low", "low"),
@@ -1244,7 +1359,7 @@ class FlyThroughApp:
         self._last_time = now
         if not self._paused and active_snapshot is None:
             self._move(min(dt, 0.1))
-        self.position = _clamp_position_above_ocean(self.position)
+        self.position = self._constrain_position(self.position)
 
         w, h = self.canvas.get_physical_size()
         if self._behold_job is None:

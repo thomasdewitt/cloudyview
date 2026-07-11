@@ -8,12 +8,6 @@
 // ported function by function against the numba golden reference
 // (docs/architecture.md).
 //
-// Periodic domain (2026-07): SAM LES fields are doubly periodic in x/y, so
-// in this periodic shader the volume tiles horizontally — density sampling
-// wraps (sample_sigma), the view march never exits sideways (z slab +
-// periodic_march_cap), and the light march exits only through the domain
-// top. The flag exactly off reproduces the finite-box behavior bit-for-bit.
-//
 // Conventions shared with the CPU renderer (cloudyview/witness.py):
 // - World space is absolute meters, +x east, +y north, +z up.
 // - The volume AABB is cell-edge aligned (half-cell padding around centers).
@@ -78,10 +72,6 @@ struct Uniforms {
     // x = GGX roughness widening per normal LOD, y = ocean haze extinction
     // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
     ocean_realism_b: vec4<f32>,
-    // Row 20: periodic domain (SAM LES fields are doubly periodic in x/y).
-    // x = periodic enable in host scene identity (0.0 or 1.0); OFF selects
-    // raymarch_legacy.wgsl rather than branching through this module.
-    periodic: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -89,11 +79,6 @@ struct Uniforms {
 @group(0) @binding(2) var vol_samp: sampler;
 @group(0) @binding(3) var ocean_normals: texture_2d<f32>;
 @group(0) @binding(4) var ocean_samp: sampler;
-
-// Compile-time rather than dynamically read in hot loops. OFF selects the
-// untouched raymarch_legacy.wgsl module; this module is periodic-only, so its
-// density, light, and view branches fold away completely.
-const PERIODIC_DOMAIN: bool = true;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -130,19 +115,6 @@ const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
 const GAMMA: f32 = 1.4;             // witness tone_map gamma
 const ISO_PHASE: f32 = 0.07957747154594767; // 1 / (4*pi)
 const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
-
-// Periodic-domain march caps. A tiled domain has no horizontal exit, so the
-// view march ends where camera->sample clear-air transmittance (the aerial
-// perspective exponential atmosphere, rows 16-17) drops to ~2percent — beyond
-// that a cloud sample is invisible through the haze — with an absolute
-// ceiling of 2 full horizontal domain wraps so rays above the haze (where
-// the transmittance cap diverges) still terminate. The far repeats remain
-// visible inside those wraps by design.
-const PERIODIC_AIR_TAU_CUTOFF: f32 = 3.912023005428146; // -ln(0.02)
-const PERIODIC_MAX_WRAPS: f32 = 2.0;
-// Extra step headroom for the (much longer) periodic view march; the
-// non-periodic path keeps MAX_VIEW_STEPS exactly.
-const MAX_VIEW_STEPS_PERIODIC: i32 = 4096;
 
 // Low-sun sky color field (witness iter_007). Direction-cosine-space
 // constants derived from the witness tuning block:
@@ -208,21 +180,8 @@ fn sigma_voxel_size_xyz() -> vec3<f32> {
 // test before it calls _sample_sigma_level.
 fn sample_sigma(p: vec3<f32>) -> f32 {
     let tex_dims = vec3<f32>(textureDimensions(vol, 0));
-    let dims = sigma_data_dims_xyz();
-    let domain_g = (p - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz);
-    var data_g = domain_g * dims;
-    if (PERIODIC_DOMAIN) {
-        // Doubly-periodic domain: wrap x/y into [0, N) so any world point
-        // samples the tiled field. The x/y ghost texels are filled from the
-        // OPPOSITE faces (engine._write_ghost_border), so hardware trilinear
-        // filtering across gx in [N-1, N) interpolates sigma[N-1] against
-        // sigma[0] — the seam is exact. z keeps the ghost-zero taper.
-        data_g = vec3<f32>(
-            fract(domain_g.x) * dims.x,
-            fract(domain_g.y) * dims.y,
-            data_g.z
-        );
-    }
+    let data_g = ((p - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz))
+                 * sigma_data_dims_xyz();
     let tex_coord = vec3<f32>(
         data_g.z + 1.5,
         data_g.y + 1.5,
@@ -349,29 +308,15 @@ fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
 // Sun optical depth from p toward the sun: witness adaptive-step shadow march
 // to the box exit with tau saturation (witness.py:299-367).
 fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
-    var t_exit: f32;
-    var t_start: f32;
-    if (PERIODIC_DOMAIN) {
-        // Tiled domain: no horizontal exit; the sun is above the horizon
-        // (engine.write_uniforms validates sun_elevation > 0 when periodic),
-        // so the light march always leaves through the domain top.
-        if (p.z >= u.bmax.z) {
-            return 0.0;
-        }
-        t_exit = (u.bmax.z - p.z) / sun.z;
-        t_start = max((u.bmin.z - p.z) / sun.z, 0.0);
-    } else {
-        let inv_dir = 1.0 / sun;
-        let hit = ray_box(p, inv_dir);
-        if (hit.x > hit.y || hit.y <= 0.0) {
-            return 0.0;
-        }
-        t_exit = hit.y;
-        t_start = max(hit.x, 0.0);
+    let inv_dir = 1.0 / sun;
+    let hit = ray_box(p, inv_dir);
+    if (hit.x > hit.y || hit.y <= 0.0) {
+        return 0.0;
     }
+    let t_exit = hit.y;
     let dt_max = u.bmax.w;
     var tau = 0.0;
-    var t = t_start;
+    var t = max(hit.x, 0.0);
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
         if (t >= t_exit) {
             break;
@@ -388,45 +333,6 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
         t = t + dt;
     }
     return tau;
-}
-
-// Max view-march distance in a periodic domain. Closed-form inversion of the
-// exponential-atmosphere transmittance the in-march aerial perspective uses:
-//   tau(t) = beta0 * (H / mu) * (exp(-z0/H) - exp(-z1/H)),  z1 = z0 + mu * t
-// solved for tau = PERIODIC_AIR_TAU_CUTOFF / strength (i.e. air_t ~ 2%),
-// plus the PERIODIC_MAX_WRAPS horizontal-travel ceiling. With the aerial
-// machinery disabled (strength == 0) only the wrap ceiling applies — far
-// repeats then stay crisp but the march still terminates.
-fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
-    var cap = 3.4e38;
-    let h_len = length(dir.xy);
-    if (h_len > 1e-8) {
-        let extent = u.bmax.xyz - u.bmin.xyz;
-        cap = PERIODIC_MAX_WRAPS * max(extent.x, extent.y) / h_len;
-    }
-    let aerial_strength = u.sky_horizon.w;
-    if (aerial_strength > 0.0) {
-        let aer_beta0 = u.sky_bloom.w;
-        let aer_h = u.sky_disc.w;
-        let z0 = max(cam_z, 0.0);
-        let mu = dir.z;
-        let tau_cap = PERIODIC_AIR_TAU_CUTOFF / aerial_strength;
-        let e0 = exp(-z0 / aer_h);
-        if (mu > 1e-6 || mu < -1e-6) {
-            let a = e0 - tau_cap * mu / (aer_beta0 * aer_h);
-            if (a > 0.0) {
-                let t_sol = (-aer_h * log(a) - z0) / mu;
-                if (t_sol > 0.0) {
-                    cap = min(cap, t_sol);
-                }
-            }
-            // a <= 0: an upward ray leaves the haze before reaching the
-            // cutoff optical depth — the wrap ceiling is the only cap.
-        } else {
-            cap = min(cap, tau_cap / (aer_beta0 * e0));
-        }
-    }
-    return cap;
 }
 
 // Procedural sky ported from witness._sky_radiance, including the spectral
@@ -815,25 +721,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         + ndc_y * u.cam_up.xyz);
 
     let inv_dir = 1.0 / dir;
-    let periodic_on = PERIODIC_DOMAIN;
-    var t_near: f32;
-    var t_far: f32;
-    if (periodic_on) {
-        // Tiled domain: only the z slab bounds the march (rays never exit
-        // horizontally); the horizontal exit is replaced by the clear-air
-        // transmittance / wrap-ceiling cap.
-        let tz0 = (u.bmin.z - u.cam_origin.z) * inv_dir.z;
-        let tz1 = (u.bmax.z - u.cam_origin.z) * inv_dir.z;
-        t_near = max(min(tz0, tz1), 0.0);
-        t_far = min(
-            max(tz0, tz1),
-            periodic_march_cap(u.cam_origin.z, dir)
-        );
-    } else {
-        let hit = ray_box(u.cam_origin.xyz, inv_dir);
-        t_near = max(hit.x, 0.0);
-        t_far = hit.y;
-    }
+    let hit = ray_box(u.cam_origin.xyz, inv_dir);
+    var t_near = max(hit.x, 0.0);
+    let t_far = hit.y;
 
     let ocean_on = u.ocean_params.z > 0.5;
     var t_ocean = 1e30;
@@ -875,13 +765,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     var col = vec3<f32>(0.0);
     var tau_depth = 0.0;
 
-    // The periodic march can legitimately cover several domain widths, so
-    // it gets more step headroom; the non-periodic bound is untouched.
-    let max_view_steps = select(MAX_VIEW_STEPS, MAX_VIEW_STEPS_PERIODIC,
-                                periodic_on);
-
     if (t_near >= 0.0 && t_near < t_far) {
-        for (var i: i32 = 0; i < max_view_steps; i = i + 1) {
+        for (var i: i32 = 0; i < MAX_VIEW_STEPS; i = i + 1) {
             // witness.py:621-646 tests ocean before the t_far break so an
             // ocean plane coincident with the box floor is still shaded.
             if (ocean_on && t >= t_ocean) {

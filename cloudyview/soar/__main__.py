@@ -23,6 +23,14 @@ def main(argv=None):
     parser.add_argument("--max-fps", type=float, default=120.0,
                         help="frame-rate cap (default 120)")
     parser.add_argument(
+        "--no-periodic",
+        action="store_true",
+        help="disable horizontal domain tiling (periodic is on by default; "
+             "SAM LES domains are doubly periodic in x/y). Use for "
+             "subvolume cutouts, which are not physically periodic and "
+             "would show seams at the wrap.",
+    )
+    parser.add_argument(
         "--camera-position",
         type=float,
         nargs=3,
@@ -74,7 +82,8 @@ def main(argv=None):
     run_app(field, size=(w, h),
             extinction_multiplier=args.extinction_multiplier,
             max_fps=args.max_fps,
-            camera=camera)
+            camera=camera,
+            periodic=not args.no_periodic)
 
 
 if __name__ == "__main__":

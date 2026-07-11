@@ -550,7 +550,9 @@ def assert_renderer_uses_fif(renderer, fif_normals) -> None:
 def renderer(field, fif_normals):
     from cloudyview.soar import InteractiveRenderer
 
-    r = InteractiveRenderer(field, fif_normals=fif_normals)
+    # periodic=False throughout this harness: witness is a finite-box
+    # renderer, so parity is defined against the non-tiled march.
+    r = InteractiveRenderer(field, fif_normals=fif_normals, periodic=False)
     assert_renderer_uses_fif(r, fif_normals)
     return r
 
@@ -564,7 +566,9 @@ def gaussian_field_fixture():
 def gaussian_renderer(gaussian_field_fixture, fif_normals):
     from cloudyview.soar import InteractiveRenderer
 
-    r = InteractiveRenderer(gaussian_field_fixture, fif_normals=fif_normals)
+    r = InteractiveRenderer(
+        gaussian_field_fixture, fif_normals=fif_normals, periodic=False
+    )
     assert_renderer_uses_fif(r, fif_normals)
     return r
 
@@ -580,7 +584,9 @@ def twpice128_field():
 def twpice128_renderer(twpice128_field, fif_normals):
     from cloudyview.soar import InteractiveRenderer
 
-    r = InteractiveRenderer(twpice128_field, fif_normals=fif_normals)
+    r = InteractiveRenderer(
+        twpice128_field, fif_normals=fif_normals, periodic=False
+    )
     assert_renderer_uses_fif(r, fif_normals)
     return r
 

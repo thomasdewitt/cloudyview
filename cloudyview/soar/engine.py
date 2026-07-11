@@ -56,6 +56,7 @@ from ..witness import (
 )
 
 SHADER_PATH = Path(__file__).parent / "raymarch.wgsl"
+LEGACY_SHADER_PATH = Path(__file__).parent / "raymarch_legacy.wgsl"
 
 # Defaults mirroring witness.py / config.py.
 DEFAULT_SUN_AZIMUTH = 20.0
@@ -100,6 +101,10 @@ DEFAULT_CONE_STENCIL_THETA_DEG = CONE_STENCIL_THETA_DEG
 # aerial_perspective_strength=0.0, ocean_realism=0.0,
 # cone_stencil_theta_deg=0.0, ambient_tint=PRE_PORT_AMBIENT_TINT.
 PRE_PORT_AMBIENT_TINT = (0.22, 0.23, 0.28)
+# Periodic-domain march caps — keep in exact sync with raymarch.wgsl
+# (PERIODIC_AIR_TAU_CUTOFF / PERIODIC_MAX_WRAPS there).
+PERIODIC_AIR_TAU_CUTOFF = 3.912023005428146  # -ln(0.02)
+PERIODIC_MAX_WRAPS = 2.0
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 DEFAULT_MOTION_BLEND_ALPHA = 0.45
 DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0
@@ -107,7 +112,7 @@ DEFAULT_MOTION_JITTER_SCALE = 0.65
 DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0
 DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 
-_UNIFORM_NBYTES = 20 * 16  # 20 vec4<f32> (rows documented in write_uniforms)
+_UNIFORM_NBYTES = 21 * 16  # 21 vec4<f32> (rows documented in write_uniforms)
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
 
@@ -227,6 +232,48 @@ def _effective_light_transfer_split(
     return strength
 
 
+def periodic_march_cap_m(
+    cam_z: float,
+    direction,
+    bmin,
+    bmax,
+    *,
+    aerial_perspective_strength: float = DEFAULT_AERIAL_PERSPECTIVE_STRENGTH,
+) -> float:
+    """Python mirror of the shader's ``periodic_march_cap`` (raymarch.wgsl).
+
+    Distance at which camera->sample clear-air transmittance through the
+    aerial-perspective exponential atmosphere drops to ~2%, bounded by the
+    PERIODIC_MAX_WRAPS horizontal-travel ceiling. Used by the app to decide
+    whether a periodic view marches past the finite Mitsuba volume (the
+    behold hand-off notice); keep in exact sync with the WGSL.
+    """
+    direction = np.asarray(direction, dtype=np.float64)
+    cap = np.inf
+    h_len = float(np.hypot(direction[0], direction[1]))
+    if h_len > 1e-8:
+        extent = np.asarray(bmax, dtype=np.float64) - np.asarray(
+            bmin, dtype=np.float64
+        )
+        cap = PERIODIC_MAX_WRAPS * max(extent[0], extent[1]) / h_len
+    if aerial_perspective_strength > 0.0:
+        beta0 = AERIAL_BETA_PER_KM * 1e-3
+        scale_h = AERIAL_SCALE_HEIGHT_M
+        z0 = max(float(cam_z), 0.0)
+        mu = float(direction[2])
+        tau_cap = PERIODIC_AIR_TAU_CUTOFF / aerial_perspective_strength
+        e0 = np.exp(-z0 / scale_h)
+        if abs(mu) > 1e-6:
+            a = e0 - tau_cap * mu / (beta0 * scale_h)
+            if a > 0.0:
+                t_sol = (-scale_h * np.log(a) - z0) / mu
+                if t_sol > 0.0:
+                    cap = min(cap, float(t_sol))
+        else:
+            cap = min(cap, float(tau_cap / (beta0 * e0)))
+    return float(cap)
+
+
 def camera_world_origin(camera: Camera, bmin, bmax) -> np.ndarray:
     """Relative camera position -> absolute meters (matches witness()).
 
@@ -240,6 +287,37 @@ def camera_world_origin(camera: Camera, bmin, bmax) -> np.ndarray:
         bmin[1] + (rel[1] + 1.0) * 0.5 * (bmax[1] - bmin[1]),
         (rel[2] + 1.0) * 0.5 * bmax[2],
     ])
+
+
+def _ghost_face_arrays(sigma: np.ndarray) -> dict:
+    """Periodic x/y ghost-border faces for the padded volume texture.
+
+    The padded texture is (w=nz+2, h=ny+2, d=nx+2); texture depth indexes x
+    and texture rows index y (see the upload swizzle note in __init__). The
+    x faces are single depth slices of shape (ny+2, nz+2); the y faces span
+    every depth slice with shape (nx+2, 1, nz+2) so one write_texture call
+    covers the whole row. Corner texels wrap in both x and y (they are the
+    trilinear support for samples near a domain corner); the z ghost columns
+    stay zero — the vertical taper is not periodic.
+    """
+    nx, ny, nz = sigma.shape
+    x_lo = np.zeros((ny + 2, nz + 2), dtype=np.float32)  # texture depth 0
+    x_hi = np.zeros((ny + 2, nz + 2), dtype=np.float32)  # texture depth nx+1
+    x_lo[1:-1, 1:-1] = sigma[-1]
+    x_lo[0, 1:-1] = sigma[-1, -1]
+    x_lo[-1, 1:-1] = sigma[-1, 0]
+    x_hi[1:-1, 1:-1] = sigma[0]
+    x_hi[0, 1:-1] = sigma[0, -1]
+    x_hi[-1, 1:-1] = sigma[0, 0]
+    y_lo = np.zeros((nx + 2, 1, nz + 2), dtype=np.float32)  # texture row 0
+    y_hi = np.zeros((nx + 2, 1, nz + 2), dtype=np.float32)  # texture row ny+1
+    y_lo[1:-1, 0, 1:-1] = sigma[:, -1]
+    y_lo[0, 0, 1:-1] = sigma[-1, -1]
+    y_lo[-1, 0, 1:-1] = sigma[0, -1]
+    y_hi[1:-1, 0, 1:-1] = sigma[:, 0]
+    y_hi[0, 0, 1:-1] = sigma[-1, 0]
+    y_hi[-1, 0, 1:-1] = sigma[0, 0]
+    return {"x_lo": x_lo, "x_hi": x_hi, "y_lo": y_lo, "y_hi": y_hi}
 
 
 def _default_fif_normals():
@@ -310,6 +388,13 @@ class InteractiveRenderer:
         The loaded cloud volume (see :func:`cloudyview.load`).
     extinction_multiplier : float
         Scales the physical extinction field (witness config default 1.0).
+    periodic : bool
+        Tile the volume horizontally (SAM LES domains are doubly periodic
+        in x/y): density sampling wraps, the view march never exits
+        sideways, and the light march exits through the domain top. On by
+        default; turn off for subvolume cutouts (which are not physically
+        periodic and would show seams). Off reproduces the finite-box
+        behavior bit-for-bit. Toggle later with :meth:`set_periodic`.
     device : wgpu.GPUDevice, optional
         Reuse an existing device (the windowed app shares one with its
         canvas). Must have the ``float32-filterable`` feature.
@@ -322,6 +407,7 @@ class InteractiveRenderer:
         field: CloudField,
         *,
         extinction_multiplier: float = 1.0,
+        periodic: bool = True,
         ocean_enabled: bool = True,
         ocean_z: float = 0.0,
         ocean_reflectance: Tuple[float, float, float] = DEFAULT_OCEAN_REFLECTANCE,
@@ -336,6 +422,7 @@ class InteractiveRenderer:
     ):
         self.field = field
         self.bmin, self.bmax = _volume_aabb(field)
+        self.periodic = bool(periodic)
         self.ocean_enabled = bool(ocean_enabled)
         self.ocean_z = float(ocean_z)
         self.ocean_reflectance = tuple(float(c) for c in ocean_reflectance)
@@ -398,8 +485,19 @@ class InteractiveRenderer:
         #     texel = gx + 1, texcoord = (texel + 0.5) / (N + 2),
         # so p=bmin+i*dx still lands exactly on original sigma[i], while
         # gx in [-1,0) and [N-1,N) filters against the zero ghost texels.
+        # In periodic mode the x/y ghost texels are instead filled from the
+        # OPPOSITE faces so hardware trilinear filtering is exact across the
+        # wrap seam (the shader wraps its sample coordinate into [0, N));
+        # z keeps the ghost-zero taper. The border alone is rewritten on
+        # set_periodic() so toggling never re-uploads the volume.
         sigma_padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float32)
         sigma_padded[1:-1, 1:-1, 1:-1] = sigma
+        self._ghost_faces = _ghost_face_arrays(sigma)
+        if self.periodic:
+            sigma_padded[0, :, :] = self._ghost_faces["x_lo"]
+            sigma_padded[-1, :, :] = self._ghost_faces["x_hi"]
+            sigma_padded[:, 0, :] = self._ghost_faces["y_lo"][:, 0, :]
+            sigma_padded[:, -1, :] = self._ghost_faces["y_hi"][:, 0, :]
 
         # Zero-reshuffle upload: a C-order (nx, ny, nz) array already has z
         # fastest, so it maps directly onto a texture with width=nz,
@@ -413,12 +511,16 @@ class InteractiveRenderer:
                 f"limit ({max_dim}); bricking/LOD is out of scope for the "
                 "spike (docs/architecture.md)."
             )
+        # COPY_SRC so tests can read the resident texels back and verify the
+        # ghost-border content (periodic wrap vs ghost zero); free otherwise.
         self._texture = self.device.create_texture(
             label="cloud-sigma",
             size=(nz + 2, ny + 2, nx + 2),
             format=wgpu.TextureFormat.r32float,
             dimension="3d",
-            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+            usage=(wgpu.TextureUsage.TEXTURE_BINDING
+                   | wgpu.TextureUsage.COPY_DST
+                   | wgpu.TextureUsage.COPY_SRC),
         )
         self.device.queue.write_texture(
             {"texture": self._texture},
@@ -491,6 +593,14 @@ class InteractiveRenderer:
         )
         self._shader = self.device.create_shader_module(
             code=SHADER_PATH.read_text()
+        )
+        # A separate, untouched pre-periodic module is deliberate: even a
+        # pipeline-specialized branch in the combined module changed register
+        # allocation/arithmetic enough to move a few output bytes on Vulkan.
+        # OFF therefore uses the exact legacy instruction graph and carries
+        # zero periodic runtime cost; ON is free to optimize independently.
+        self._legacy_shader = self.device.create_shader_module(
+            code=LEGACY_SHADER_PATH.read_text()
         )
         self._accum_uniform_buf = self.device.create_buffer(
             size=_ACCUM_UNIFORM_NBYTES,
@@ -631,23 +741,80 @@ class InteractiveRenderer:
         return self._bird
 
     # ------------------------------------------------------------------
+    # Periodic domain
+    # ------------------------------------------------------------------
+
+    def _write_ghost_border(self, periodic: bool) -> None:
+        """Rewrite the x/y ghost-border texels of the resident volume.
+
+        Periodic fills them from the opposite faces (exact trilinear wrap);
+        non-periodic restores the witness ghost-zero taper. Only the four
+        border faces are uploaded — the interior never moves.
+        """
+        nx, ny, nz = self.field.shape
+        faces = self._ghost_faces
+        if not periodic:
+            faces = {name: np.zeros_like(arr) for name, arr in faces.items()}
+        queue = self.device.queue
+        row_bytes = (nz + 2) * 4
+        queue.write_texture(
+            {"texture": self._texture, "origin": (0, 0, 0)},
+            np.ascontiguousarray(faces["x_lo"]),
+            {"bytes_per_row": row_bytes, "rows_per_image": ny + 2},
+            (nz + 2, ny + 2, 1),
+        )
+        queue.write_texture(
+            {"texture": self._texture, "origin": (0, 0, nx + 1)},
+            np.ascontiguousarray(faces["x_hi"]),
+            {"bytes_per_row": row_bytes, "rows_per_image": ny + 2},
+            (nz + 2, ny + 2, 1),
+        )
+        queue.write_texture(
+            {"texture": self._texture, "origin": (0, 0, 0)},
+            np.ascontiguousarray(faces["y_lo"]),
+            {"bytes_per_row": row_bytes, "rows_per_image": 1},
+            (nz + 2, 1, nx + 2),
+        )
+        queue.write_texture(
+            {"texture": self._texture, "origin": (0, ny + 1, 0)},
+            np.ascontiguousarray(faces["y_hi"]),
+            {"bytes_per_row": row_bytes, "rows_per_image": 1},
+            (nz + 2, 1, nx + 2),
+        )
+
+    def set_periodic(self, periodic: bool) -> None:
+        """Switch horizontal tiling on/off; rewrites only the ghost border.
+
+        The periodic flag is part of the uniform scene-identity key, so the
+        temporal accumulation history resets on the next frame by itself.
+        """
+        periodic = bool(periodic)
+        if periodic == self.periodic:
+            return
+        self._write_ghost_border(periodic)
+        self.periodic = periodic
+
+    # ------------------------------------------------------------------
     # Pipeline / uniforms
     # ------------------------------------------------------------------
 
     def pipeline_for(self, target_format: str):
         """Render pipeline for a given color-target format (cached)."""
-        if target_format not in self._pipelines:
-            self._pipelines[target_format] = self.device.create_render_pipeline(
+        key = (target_format, self.periodic)
+        if key not in self._pipelines:
+            shader = self._shader if self.periodic else self._legacy_shader
+            fragment = {
+                "module": shader,
+                "entry_point": "fs_main",
+                "targets": [{"format": target_format}],
+            }
+            self._pipelines[key] = self.device.create_render_pipeline(
                 layout=self._pipeline_layout,
-                vertex={"module": self._shader, "entry_point": "vs_main"},
+                vertex={"module": shader, "entry_point": "vs_main"},
                 primitive={"topology": "triangle-list"},
-                fragment={
-                    "module": self._shader,
-                    "entry_point": "fs_main",
-                    "targets": [{"format": target_format}],
-                },
+                fragment=fragment,
             )
-        return self._pipelines[target_format]
+        return self._pipelines[key]
 
     def _accum_pipeline_for(self):
         """Running-average pipeline for the fixed accumulation texture format."""
@@ -777,6 +944,13 @@ class InteractiveRenderer:
         cone_stencil_tan_theta = float(
             np.tan(np.deg2rad(cone_stencil_theta_deg))
         )
+        if self.periodic and float(sun_elevation) <= 0.0:
+            raise ValueError(
+                "Periodic domains require the sun above the horizon (the "
+                "light march exits only through the domain top); got "
+                f"sun_elevation={sun_elevation!r}. Disable periodic "
+                "(set_periodic(False)) for below-horizon suns."
+            )
         origin = camera_world_origin(camera, self.bmin, self.bmax)
         forward, right, up = camera.basis()
         sun = direction_from_azimuth_elevation(sun_azimuth, sun_elevation)
@@ -805,7 +979,7 @@ class InteractiveRenderer:
             light_transfer_split_strength, float(sun_elevation)
         )
 
-        u = np.zeros((20, 4), dtype=np.float32)
+        u = np.zeros((21, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, w / h]
         u[2] = [*right, exposure]
@@ -859,6 +1033,11 @@ class InteractiveRenderer:
             ocean_sky_shadow_floor,
             0.0,
         ]
+        # Row 20: periodic domain (scene identity — toggling it must reset
+        # the temporal accumulation, and it does via the key below). Driven
+        # by renderer state, never per-call: the shader flag must match the
+        # ghost-border texel content baked by set_periodic().
+        u[20] = [1.0 if self.periodic else 0.0, 0.0, 0.0, 0.0]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity

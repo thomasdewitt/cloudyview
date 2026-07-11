@@ -298,6 +298,7 @@ def test_paused_mouse_move_and_wheel_do_not_change_camera_or_speed():
 def test_move_clamps_shift_descent_to_ocean_margin():
     app = object.__new__(FlyThroughApp)
     app._paused = False
+    app.periodic = False
     app._keys = {"Shift"}
     app.position = np.array([0.0, 0.0, OCEAN_FLOOR_MARGIN_M + 0.25])
     app.speed = 60.0
@@ -354,6 +355,7 @@ def test_install_field_rebuilds_renderer_on_existing_device_and_resets_camera():
 def test_move_clamps_forward_descent_when_pitched_down():
     app = object.__new__(FlyThroughApp)
     app._paused = False
+    app.periodic = False
     app._keys = {"w"}
     app.position = np.array([0.0, 0.0, OCEAN_FLOOR_MARGIN_M + 0.25])
     app.speed = 60.0

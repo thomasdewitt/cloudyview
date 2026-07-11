@@ -17,6 +17,7 @@ ACTION_RENDER_MENU = "render_menu"
 ACTION_RENDER_BEHOLD = "render_behold"
 ACTION_MENU_BACK = "menu_back"
 ACTION_SCREENSHOT = "screenshot"
+ACTION_TOGGLE_PERIODIC = "toggle_periodic"
 
 MENU_MAIN = "main"
 MENU_FILE_BROWSER_LIQUID = "file_browser_liquid"
@@ -70,6 +71,8 @@ def menu_transition(
             return MenuTransition(ACTION_OPEN_FILE, MENU_FILE_BROWSER_LIQUID)
         if normalized == "g":
             return MenuTransition(ACTION_RENDER_MENU, MENU_RENDER_QUALITY)
+        if normalized == "p":
+            return MenuTransition(ACTION_TOGGLE_PERIODIC, MENU_MAIN)
         return MenuTransition(None, MENU_MAIN)
 
     if menu_state == MENU_FILE_BROWSER_LIQUID:
