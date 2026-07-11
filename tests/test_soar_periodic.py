@@ -15,9 +15,12 @@ Coverage:
 - the behold hand-off "view spans domain edge" predicate.
 
 GPU tests are skip-marked like the other soar suites. The bit-exactness
-references were rendered on the dev RTX 5080; bit-for-bit equality is the
-contract on that adapter (other adapters may round differently, in which
-case regenerate the references at the pre-change commit).
+references are rendered ON THE DEV RTX 5080 at the pre-change commit
+(a1e157d); bit-for-bit equality is the contract on that adapter only —
+other adapters (including llvmpipe sandboxes) round differently, in which
+case regenerate the references at the pre-change commit on the target
+adapter. (Originally generated on llvmpipe by a sandboxed agent, which
+failed on real hardware — regenerated 2026-07-10.)
 """
 
 import json
