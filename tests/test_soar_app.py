@@ -18,6 +18,8 @@ from cloudyview.soar.app import (
     ACTION_RENDER_MENU,
     ACTION_RESUME,
     ACTION_SCREENSHOT,
+    ACTION_SELECT_TIER,
+    ACTION_SETTINGS_MENU,
     ACTION_TOGGLE_FULLSCREEN,
     BEHOLD_QUALITIES_BY_KEY,
     MENU_FILE_BROWSER_ICE,
@@ -26,6 +28,7 @@ from cloudyview.soar.app import (
     MENU_MAIN,
     MENU_OPEN_ICE_PROMPT,
     MENU_RENDER_QUALITY,
+    MENU_SETTINGS,
     OCEAN_FLOOR_MARGIN_M,
     _clamp_position_above_ocean,
     _control_action_for_key,
@@ -49,6 +52,9 @@ class DummyCanvas:
 
     def request_draw(self, *args):
         self.draw_requests += 1
+
+    def get_physical_size(self):
+        return 1280, 720
 
 
 def make_event_app():
@@ -80,6 +86,7 @@ def make_event_app():
     app.open_calls = 0
     app.render_calls = []
     app.screenshot_calls = 0
+    app.tier_calls = []
 
     def capture_mouse(capture):
         app.capture_calls.append(capture)
@@ -97,6 +104,7 @@ def make_event_app():
     app._save_screenshot = lambda: setattr(
         app, "screenshot_calls", app.screenshot_calls + 1
     )
+    app._select_quality_tier = lambda tier: app.tier_calls.append(tier)
     return app
 
 
@@ -156,6 +164,67 @@ def test_pause_submenu_state_transitions_are_explicit():
     assert _menu_transition(True, MENU_FILE_BROWSER_ICE, "Escape").next_state == (
         MENU_OPEN_ICE_PROMPT
     )
+
+
+def test_settings_submenu_transitions_are_explicit():
+    transition = _menu_transition(True, MENU_MAIN, "S")
+    assert transition.action == ACTION_SETTINGS_MENU
+    assert transition.next_state == MENU_SETTINGS
+
+    for key, tier in zip(("1", "2", "3", "4"),
+                         ("high", "medium", "low", "potato")):
+        transition = _menu_transition(True, MENU_SETTINGS, key)
+        assert transition.action == ACTION_SELECT_TIER
+        assert transition.next_state == MENU_SETTINGS
+        assert transition.tier == tier
+
+    transition = _menu_transition(True, MENU_SETTINGS, "Escape")
+    assert transition.action == ACTION_MENU_BACK
+    assert transition.next_state == MENU_MAIN
+
+
+def test_settings_key_dispatches_tier_selection():
+    app = make_event_app()
+    app._paused = True
+    app._menu_state = MENU_SETTINGS
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "3"})
+    assert app.tier_calls == ["low"]
+
+
+def test_startup_auto_benchmark_selects_highest_60_fps_tier():
+    timings = {"potato": 4.0, "low": 8.0, "medium": 15.0, "high": 24.0}
+
+    class FakeRenderer:
+        def __init__(self):
+            self.quality_tier = "high"
+            self.calls = []
+            self.reset_calls = 0
+
+        def set_quality_tier(self, name, *, camera_moving):
+            self.quality_tier = name
+            self.calls.append((name, camera_moving))
+
+        def benchmark(self, *args, **kwargs):
+            return {
+                "timestamps_used": True,
+                "gpu_ms_mean": timings[self.quality_tier],
+                "wall_ms_mean": timings[self.quality_tier] + 1.0,
+            }
+
+        def reset_accumulation(self):
+            self.reset_calls += 1
+
+    app = object.__new__(FlyThroughApp)
+    app.canvas = DummyCanvas()
+    app.renderer = FakeRenderer()
+    app.camera = lambda: object()
+
+    FlyThroughApp._run_startup_tier_benchmark(app)
+
+    assert app.renderer.quality_tier == "medium"
+    assert app._auto_benchmark_ms == timings
+    assert app.renderer.calls[-1] == ("medium", False)
+    assert app.renderer.reset_calls == 1
 
 
 def test_clamp_position_above_ocean_uses_margin_and_returns_copy():

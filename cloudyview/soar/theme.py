@@ -346,7 +346,7 @@ class SoarTheme:
     def menu_button(self, label: str, hint: str | None = None, *,
                     width: float = 0.0, height: float = BUTTON_HEIGHT,
                     right_text: str | None = None, sublabel: str | None = None,
-                    text_color=None) -> bool:
+                    text_color=None, disabled: bool = False) -> bool:
         """Full-width themed button: label left, key-cap hint right.
 
         ``sublabel`` draws a faint secondary note just after the label
@@ -355,6 +355,8 @@ class SoarTheme:
         imgui = self.imgui
         if width <= 0.0:
             width = imgui.get_content_region_avail().x
+        if disabled:
+            imgui.begin_disabled()
         if text_color is not None:
             imgui.push_style_color(imgui.Col_.text, text_color)
         label_size = imgui.calc_text_size(label)
@@ -374,6 +376,8 @@ class SoarTheme:
             )
             self.pop_font()
         self._draw_right_slot(rect_min, rect_max, hint, right_text)
+        if disabled:
+            imgui.end_disabled()
         return bool(clicked)
 
     def progress_bar(self, fraction: float | None, *,

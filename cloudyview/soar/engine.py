@@ -11,7 +11,9 @@ Two consumers:
   swapchain texture format.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
+import struct
 from time import perf_counter
 from typing import Optional, Tuple
 
@@ -106,6 +108,7 @@ PRE_PORT_AMBIENT_TINT = (0.22, 0.23, 0.28)
 PERIODIC_AIR_TAU_CUTOFF = 3.912023005428146  # -ln(0.02)
 PERIODIC_MAX_WRAPS = 2.0
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
+DEFAULT_MAX_LIGHT_STEPS = 512  # keep in sync with both WGSL modules
 # 0.45 was approved pre-realism; with the ported look Thomas flagged the
 # trailing smear ('turn down the time-blur') but 0.72 read 'a bit
 # speckled' — 0.58 is Thomas's requested midpoint (2026-07-10).
@@ -118,6 +121,74 @@ DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 _UNIFORM_NBYTES = 21 * 16  # 21 vec4<f32> (rows documented in write_uniforms)
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
+
+
+@dataclass(frozen=True)
+class QualityPreset:
+    """One named interactive performance preset.
+
+    ``step_factor`` is measured in minimum-volume voxels. Potato's moving
+    settings are deliberately temporary: once the camera stops it uses the
+    exact High sampling settings so temporal accumulation converges a clean
+    still instead of merely averaging a coarse flight frame.
+    """
+
+    name: str
+    label: str
+    render_scale: float
+    step_factor: float
+    max_light_steps: int
+
+
+QUALITY_PRESETS = {
+    "high": QualityPreset("high", "High", 1.0, 2.0, 512),
+    "medium": QualityPreset("medium", "Medium", 0.75, 2.5, 384),
+    "low": QualityPreset("low", "Low", 0.60, 3.0, 256),
+    "potato": QualityPreset(
+        "potato", "Potato — smooth stills, rough flight", 0.25, 4.0, 128
+    ),
+}
+QUALITY_TIER_NAMES = tuple(QUALITY_PRESETS)
+DEFAULT_QUALITY_TIER = "high"
+MIN_RENDER_SCALE = 0.25
+MAX_RENDER_SCALE = 1.0
+
+
+def render_target_size(
+    size: Tuple[int, int], render_scale: float
+) -> Tuple[int, int]:
+    """Deterministic scaled target size, rounded to the nearest pixel."""
+    scale = _validate_finite_float("render_scale", render_scale)
+    if not MIN_RENDER_SCALE <= scale <= MAX_RENDER_SCALE:
+        raise ValueError(
+            f"render_scale must be in [{MIN_RENDER_SCALE}, "
+            f"{MAX_RENDER_SCALE}]; got {scale!r}."
+        )
+    w, h = (int(size[0]), int(size[1]))
+    if w < 1 or h < 1:
+        raise ValueError(f"render size must be positive; got {(w, h)!r}.")
+    return (
+        max(1, int(np.floor(w * scale + 0.5))),
+        max(1, int(np.floor(h * scale + 0.5))),
+    )
+
+
+def choose_quality_tier(
+    frame_times_ms: dict[str, float], *, target_ms: float = 1000.0 / 60.0
+) -> str:
+    """Choose the highest measured tier at or below ``target_ms``."""
+    target_ms = _validate_positive_float("target_ms", target_ms)
+    missing = [name for name in QUALITY_TIER_NAMES if name not in frame_times_ms]
+    if missing:
+        raise ValueError(f"Missing benchmark times for: {', '.join(missing)}.")
+    for name in QUALITY_TIER_NAMES:
+        value = _validate_positive_float(
+            f"frame_times_ms[{name!r}]", frame_times_ms[name]
+        )
+        if value <= target_ms:
+            return name
+    return "potato"
+
 
 _ACCUM_SHADER = """
 struct AccumUniforms {
@@ -168,6 +239,34 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let xy = vec2<i32>(frag_pos.xy);
     let src = textureLoad(src_tex, xy, 0);
     return vec4<f32>(src.rgb, 1.0);
+}
+"""
+
+_UPSCALE_SHADER = """
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_samp: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
+    let x = f32(i32(vi) / 2) * 4.0 - 1.0;
+    let y = f32(i32(vi) & 1) * 4.0 - 1.0;
+    var out: VertexOutput;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>(0.5 * (x + 1.0), 0.5 * (1.0 - y));
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(
+        textureSampleLevel(src_tex, src_samp, in.uv, 0.0).rgb,
+        1.0
+    );
 }
 """
 
@@ -304,16 +403,17 @@ def _ghost_face_arrays(sigma: np.ndarray) -> dict:
     stay zero — the vertical taper is not periodic.
     """
     nx, ny, nz = sigma.shape
-    x_lo = np.zeros((ny + 2, nz + 2), dtype=np.float32)  # texture depth 0
-    x_hi = np.zeros((ny + 2, nz + 2), dtype=np.float32)  # texture depth nx+1
+    dtype = sigma.dtype
+    x_lo = np.zeros((ny + 2, nz + 2), dtype=dtype)  # texture depth 0
+    x_hi = np.zeros((ny + 2, nz + 2), dtype=dtype)  # texture depth nx+1
     x_lo[1:-1, 1:-1] = sigma[-1]
     x_lo[0, 1:-1] = sigma[-1, -1]
     x_lo[-1, 1:-1] = sigma[-1, 0]
     x_hi[1:-1, 1:-1] = sigma[0]
     x_hi[0, 1:-1] = sigma[0, -1]
     x_hi[-1, 1:-1] = sigma[0, 0]
-    y_lo = np.zeros((nx + 2, 1, nz + 2), dtype=np.float32)  # texture row 0
-    y_hi = np.zeros((nx + 2, 1, nz + 2), dtype=np.float32)  # texture row ny+1
+    y_lo = np.zeros((nx + 2, 1, nz + 2), dtype=dtype)  # texture row 0
+    y_hi = np.zeros((nx + 2, 1, nz + 2), dtype=dtype)  # texture row ny+1
     y_lo[1:-1, 0, 1:-1] = sigma[:, -1]
     y_lo[0, 0, 1:-1] = sigma[-1, -1]
     y_lo[-1, 0, 1:-1] = sigma[0, -1]
@@ -401,6 +501,13 @@ class InteractiveRenderer:
     device : wgpu.GPUDevice, optional
         Reuse an existing device (the windowed app shares one with its
         canvas). Must have the ``float32-filterable`` feature.
+    quality_tier : {"high", "medium", "low", "potato"}
+        Initial explicit preset. The engine default is High so library callers
+        retain the reference behavior; the window app's CLI defaults to auto.
+    volume_fp16 : bool
+        Store extinction in r16float instead of reference r32float. This is a
+        load-time choice because the engine deliberately keeps no second full
+        CPU copy for live re-upload.
     """
 
     _ACCUM_FORMAT = wgpu.TextureFormat.rgba16float
@@ -421,6 +528,8 @@ class InteractiveRenderer:
         motion_jitter_scale: float = DEFAULT_MOTION_JITTER_SCALE,
         motion_reset_angle_degrees: float = DEFAULT_MOTION_RESET_ANGLE_DEGREES,
         motion_reset_translation_m: Optional[float] = None,
+        quality_tier: str = DEFAULT_QUALITY_TIER,
+        volume_fp16: bool = False,
         device=None,
     ):
         self.field = field
@@ -429,6 +538,7 @@ class InteractiveRenderer:
         self.ocean_enabled = bool(ocean_enabled)
         self.ocean_z = float(ocean_z)
         self.ocean_reflectance = tuple(float(c) for c in ocean_reflectance)
+        self.volume_fp16 = bool(volume_fp16)
         self.motion_accumulation = bool(motion_accumulation)
         self.motion_blend_alpha = _validate_unit_interval(
             "motion_blend_alpha", motion_blend_alpha
@@ -457,8 +567,13 @@ class InteractiveRenderer:
         nx, ny, nz = field.shape
         extent = self.bmax - self.bmin
         voxel = np.array([extent[0] / nx, extent[1] / ny, extent[2] / nz])
-        self.dt_view = float(voxel.min()) * STEP_VOXEL_FACTOR
-        self.dt_light = self.dt_view  # witness shadow march uses the same factor
+        self._min_voxel_m = float(voxel.min())
+        self.quality_tier = DEFAULT_QUALITY_TIER
+        self.render_scale = 1.0
+        self.step_factor = STEP_VOXEL_FACTOR
+        self.max_light_steps = DEFAULT_MAX_LIGHT_STEPS
+        self._camera_moving = False
+        self.set_quality_tier(quality_tier, camera_moving=False)
 
         if device is None:
             device = request_device()
@@ -466,8 +581,9 @@ class InteractiveRenderer:
         if "float32-filterable" not in device.features:
             raise RuntimeError(
                 "wgpu device lacks the 'float32-filterable' feature required "
-                "for hardware trilinear sampling of the r32float density "
-                "texture. Refusing to fall back to nearest-neighbor."
+                "for hardware trilinear sampling of float32 textures "
+                "(density in fp32 mode and the ocean normal map). Refusing "
+                "to fall back to nearest-neighbor."
             )
 
         # --- Extinction volume -> resident 3D texture (uploaded ONCE). ---
@@ -479,7 +595,8 @@ class InteractiveRenderer:
         )
         if extinction_multiplier != 1.0:
             sigma = sigma * np.float32(extinction_multiplier)
-        sigma = np.ascontiguousarray(sigma, dtype=np.float32)
+        sigma_dtype = np.float16 if self.volume_fp16 else np.float32
+        sigma = np.ascontiguousarray(sigma, dtype=sigma_dtype)
 
         # Bake witness's ghost-zero boundary into the resident texture. The
         # public AABB remains the unpadded level extent, where witness samples
@@ -493,7 +610,9 @@ class InteractiveRenderer:
         # wrap seam (the shader wraps its sample coordinate into [0, N));
         # z keeps the ghost-zero taper. The border alone is rewritten on
         # set_periodic() so toggling never re-uploads the volume.
-        sigma_padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float32)
+        sigma_padded = np.zeros(
+            (nx + 2, ny + 2, nz + 2), dtype=sigma_dtype
+        )
         sigma_padded[1:-1, 1:-1, 1:-1] = sigma
         self._ghost_faces = _ghost_face_arrays(sigma)
         if self.periodic:
@@ -505,7 +624,6 @@ class InteractiveRenderer:
         # Zero-reshuffle upload: a C-order (nx, ny, nz) array already has z
         # fastest, so it maps directly onto a texture with width=nz,
         # height=ny, depth=nx. The shader swizzles sample coords to match.
-        # TODO(fp16): optional float16 texture to halve resident memory.
         max_dim = self.device.limits["max-texture-dimension-3d"]
         if max(sigma_padded.shape) > max_dim:
             raise ValueError(
@@ -516,10 +634,15 @@ class InteractiveRenderer:
             )
         # COPY_SRC so tests can read the resident texels back and verify the
         # ghost-border content (periodic wrap vs ghost zero); free otherwise.
+        self.volume_texture_format = (
+            wgpu.TextureFormat.r16float
+            if self.volume_fp16
+            else wgpu.TextureFormat.r32float
+        )
         self._texture = self.device.create_texture(
             label="cloud-sigma",
             size=(nz + 2, ny + 2, nx + 2),
-            format=wgpu.TextureFormat.r32float,
+            format=self.volume_texture_format,
             dimension="3d",
             usage=(wgpu.TextureUsage.TEXTURE_BINDING
                    | wgpu.TextureUsage.COPY_DST
@@ -528,7 +651,10 @@ class InteractiveRenderer:
         self.device.queue.write_texture(
             {"texture": self._texture},
             sigma_padded,
-            {"bytes_per_row": (nz + 2) * 4, "rows_per_image": ny + 2},
+            {
+                "bytes_per_row": (nz + 2) * sigma_padded.dtype.itemsize,
+                "rows_per_image": ny + 2,
+            },
             (nz + 2, ny + 2, nx + 2),
         )
         self.volume_nbytes = sigma_padded.nbytes
@@ -594,17 +720,21 @@ class InteractiveRenderer:
             size=_UNIFORM_NBYTES,
             usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
         )
-        self._shader = self.device.create_shader_module(
-            code=SHADER_PATH.read_text()
-        )
+        self._shader_source = SHADER_PATH.read_text()
+        self._legacy_shader_source = LEGACY_SHADER_PATH.read_text()
+        self._shader = self.device.create_shader_module(code=self._shader_source)
         # A separate, untouched pre-periodic module is deliberate: even a
         # pipeline-specialized branch in the combined module changed register
         # allocation/arithmetic enough to move a few output bytes on Vulkan.
         # OFF therefore uses the exact legacy instruction graph and carries
         # zero periodic runtime cost; ON is free to optimize independently.
         self._legacy_shader = self.device.create_shader_module(
-            code=LEGACY_SHADER_PATH.read_text()
+            code=self._legacy_shader_source
         )
+        self._shader_modules = {
+            (True, DEFAULT_MAX_LIGHT_STEPS): self._shader,
+            (False, DEFAULT_MAX_LIGHT_STEPS): self._legacy_shader,
+        }
         self._accum_uniform_buf = self.device.create_buffer(
             size=_ACCUM_UNIFORM_NBYTES,
             usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
@@ -614,6 +744,15 @@ class InteractiveRenderer:
         )
         self._present_shader = self.device.create_shader_module(
             code=_PRESENT_SHADER
+        )
+        self._upscale_shader = self.device.create_shader_module(
+            code=_UPSCALE_SHADER
+        )
+        self._upscale_sampler = self.device.create_sampler(
+            address_mode_u="clamp-to-edge",
+            address_mode_v="clamp-to-edge",
+            mag_filter="linear",
+            min_filter="linear",
         )
         self._bind_group_layout = self.device.create_bind_group_layout(entries=[
             {
@@ -676,6 +815,20 @@ class InteractiveRenderer:
                 },
             ]
         )
+        self._upscale_bind_group_layout = self.device.create_bind_group_layout(
+            entries=[
+                {
+                    "binding": 0,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "texture": {"sample_type": "float", "view_dimension": "2d"},
+                },
+                {
+                    "binding": 1,
+                    "visibility": wgpu.ShaderStage.FRAGMENT,
+                    "sampler": {"type": "filtering"},
+                },
+            ]
+        )
         self._bind_group = self.device.create_bind_group(
             layout=self._bind_group_layout,
             entries=[
@@ -697,12 +850,17 @@ class InteractiveRenderer:
         self._present_pipeline_layout = self.device.create_pipeline_layout(
             bind_group_layouts=[self._present_bind_group_layout]
         )
-        self._pipelines = {}  # target format -> render pipeline
+        self._upscale_pipeline_layout = self.device.create_pipeline_layout(
+            bind_group_layouts=[self._upscale_bind_group_layout]
+        )
+        self._pipelines = {}  # (target format, periodic, light steps) -> pipeline
         self._accum_pipeline = None
         self._present_pipelines = {}  # target format -> render pipeline
+        self._upscale_pipelines = {}  # target format -> render pipeline
 
         # Offscreen target cache: (w, h) -> texture.
         self._offscreen = None
+        self._scaled_sample = None
         self._accum_targets = None
         self._accum_key = None
         self._accum_count = 0
@@ -714,6 +872,7 @@ class InteractiveRenderer:
         self._last_motion_reset = False
         self._current_uniform_key = None
         self._current_uniform_size = None
+        self._current_output_size = None
         self._current_uniform = None
         self._current_jitter = False
         self._current_subpixel = False
@@ -744,6 +903,78 @@ class InteractiveRenderer:
         return self._bird
 
     # ------------------------------------------------------------------
+    # Interactive quality
+    # ------------------------------------------------------------------
+
+    @property
+    def dt_view(self) -> float:
+        return self._min_voxel_m * self.step_factor
+
+    @property
+    def dt_light(self) -> float:
+        return self.dt_view
+
+    @property
+    def flight_render_scale(self) -> float:
+        """Render scale used while moving (the slider-facing value)."""
+        return self._flight_render_scale
+
+    @property
+    def quality_is_custom(self) -> bool:
+        preset = QUALITY_PRESETS[self.quality_tier]
+        return self._flight_render_scale != preset.render_scale
+
+    def _apply_effective_quality(self) -> None:
+        preset = QUALITY_PRESETS[self.quality_tier]
+        effective = preset
+        if self.quality_tier == "potato" and not self._camera_moving:
+            effective = QUALITY_PRESETS["high"]
+        new_values = (
+            1.0 if effective.name == "high" and self.quality_tier == "potato"
+            else self._flight_render_scale,
+            effective.step_factor,
+            effective.max_light_steps,
+        )
+        old_values = (
+            getattr(self, "render_scale", None),
+            getattr(self, "step_factor", None),
+            getattr(self, "max_light_steps", None),
+        )
+        self.render_scale, self.step_factor, self.max_light_steps = new_values
+        if new_values != old_values and hasattr(self, "_accum_key"):
+            self.reset_accumulation()
+
+    def set_quality_tier(
+        self, quality_tier: str, *, camera_moving: Optional[bool] = None
+    ) -> None:
+        """Apply a named preset; Potato restores High when stationary."""
+        quality_tier = str(quality_tier).lower()
+        if quality_tier not in QUALITY_PRESETS:
+            raise ValueError(
+                f"Unknown quality tier {quality_tier!r}; expected one of "
+                f"{', '.join(QUALITY_TIER_NAMES)}."
+            )
+        if camera_moving is not None:
+            self._camera_moving = bool(camera_moving)
+        self.quality_tier = quality_tier
+        self._flight_render_scale = QUALITY_PRESETS[quality_tier].render_scale
+        self._apply_effective_quality()
+
+    def set_render_scale(self, render_scale: float) -> None:
+        """Override the selected preset's moving render scale."""
+        render_target_size((1, 1), render_scale)  # shared validation
+        self._flight_render_scale = float(render_scale)
+        self._apply_effective_quality()
+
+    def set_camera_moving(self, moving: bool) -> None:
+        """Select Potato's flight or converged-still sampling settings."""
+        moving = bool(moving)
+        if moving == self._camera_moving:
+            return
+        self._camera_moving = moving
+        self._apply_effective_quality()
+
+    # ------------------------------------------------------------------
     # Periodic domain
     # ------------------------------------------------------------------
 
@@ -759,7 +990,7 @@ class InteractiveRenderer:
         if not periodic:
             faces = {name: np.zeros_like(arr) for name, arr in faces.items()}
         queue = self.device.queue
-        row_bytes = (nz + 2) * 4
+        row_bytes = (nz + 2) * self._ghost_faces["x_lo"].dtype.itemsize
         queue.write_texture(
             {"texture": self._texture, "origin": (0, 0, 0)},
             np.ascontiguousarray(faces["x_lo"]),
@@ -801,11 +1032,34 @@ class InteractiveRenderer:
     # Pipeline / uniforms
     # ------------------------------------------------------------------
 
+    def _shader_for(self, periodic: bool, max_light_steps: int):
+        key = (bool(periodic), int(max_light_steps))
+        if key in self._shader_modules:
+            return self._shader_modules[key]
+        if not 1 <= key[1] <= DEFAULT_MAX_LIGHT_STEPS:
+            raise ValueError(
+                "max_light_steps must be between 1 and "
+                f"{DEFAULT_MAX_LIGHT_STEPS}; got {key[1]}."
+            )
+        source = self._shader_source if key[0] else self._legacy_shader_source
+        sentinel = "const MAX_LIGHT_STEPS: i32 = 512;"
+        if source.count(sentinel) != 1:
+            raise RuntimeError(
+                "WGSL light-step specialization sentinel is missing or "
+                "ambiguous; refusing to build a mismatched tier shader."
+            )
+        source = source.replace(
+            sentinel, f"const MAX_LIGHT_STEPS: i32 = {key[1]};"
+        )
+        module = self.device.create_shader_module(code=source)
+        self._shader_modules[key] = module
+        return module
+
     def pipeline_for(self, target_format: str):
         """Render pipeline for a given color-target format (cached)."""
-        key = (target_format, self.periodic)
+        key = (target_format, self.periodic, self.max_light_steps)
         if key not in self._pipelines:
-            shader = self._shader if self.periodic else self._legacy_shader
+            shader = self._shader_for(self.periodic, self.max_light_steps)
             fragment = {
                 "module": shader,
                 "entry_point": "fs_main",
@@ -853,6 +1107,26 @@ class InteractiveRenderer:
                 )
             )
         return self._present_pipelines[target_format]
+
+    def _upscale_pipeline_for(self, target_format: str):
+        """Bilinear scaled-present pipeline; High never takes this path."""
+        if target_format not in self._upscale_pipelines:
+            self._upscale_pipelines[target_format] = (
+                self.device.create_render_pipeline(
+                    layout=self._upscale_pipeline_layout,
+                    vertex={
+                        "module": self._upscale_shader,
+                        "entry_point": "vs_main",
+                    },
+                    primitive={"topology": "triangle-list"},
+                    fragment={
+                        "module": self._upscale_shader,
+                        "entry_point": "fs_main",
+                        "targets": [{"format": target_format}],
+                    },
+                )
+            )
+        return self._upscale_pipelines[target_format]
 
     def write_uniforms(
         self,
@@ -904,7 +1178,8 @@ class InteractiveRenderer:
         ``ambient_tint`` overrides the spectral ambient color (used only to
         reproduce the pre-port frame; see PRE_PORT_AMBIENT_TINT).
         """
-        w, h = size
+        output_w, output_h = (int(size[0]), int(size[1]))
+        w, h = render_target_size((output_w, output_h), self.render_scale)
         jitter_scale = _validate_unit_interval("jitter_scale", jitter_scale)
         spectral_lighting_strength = _validate_unit_interval(
             "spectral_lighting_strength", spectral_lighting_strength
@@ -984,7 +1259,7 @@ class InteractiveRenderer:
 
         u = np.zeros((21, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
-        u[1] = [*forward, w / h]
+        u[1] = [*forward, output_w / output_h]
         u[2] = [*right, exposure]
         u[3] = [*up, 1.0 if jitter else 0.0]
         u[4] = [*sun, float(frame_index)]
@@ -1044,8 +1319,11 @@ class InteractiveRenderer:
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity
-        self._current_uniform_key = key.tobytes()
-        self._current_uniform_size = tuple(size)
+        self._current_uniform_key = key.tobytes() + struct.pack(
+            "<III", self.max_light_steps, output_w, output_h
+        )
+        self._current_uniform_size = (w, h)
+        self._current_output_size = (output_w, output_h)
         self._current_uniform = u
         self._current_jitter = bool(jitter)
         self._current_subpixel = bool(subpixel)
@@ -1102,6 +1380,24 @@ class InteractiveRenderer:
         rpass.draw(3)
         rpass.end()
 
+    def _scaled_sample_target(self, size: Tuple[int, int]):
+        if self._scaled_sample is None or self._scaled_sample["size"] != tuple(size):
+            tex = self.device.create_texture(
+                label="soar-scaled-sample",
+                size=(size[0], size[1], 1),
+                format=self._ACCUM_FORMAT,
+                usage=(
+                    wgpu.TextureUsage.RENDER_ATTACHMENT
+                    | wgpu.TextureUsage.TEXTURE_BINDING
+                ),
+            )
+            self._scaled_sample = {
+                "size": tuple(size),
+                "texture": tex,
+                "view": tex.create_view(),
+            }
+        return self._scaled_sample
+
     def reset_accumulation(self) -> None:
         """Drop the temporal history; the next jittered frame seeds it."""
         self._accum_key = None
@@ -1135,6 +1431,7 @@ class InteractiveRenderer:
             self._accum_targets["accum_views"][self._accum_index],
             target_view,
             target_format,
+            upscale=(self._current_uniform_size != self._current_output_size),
         )
         return True
 
@@ -1214,11 +1511,29 @@ class InteractiveRenderer:
         self._accum_index = dst_index
         self._accum_count = int(next_count)
 
-    def _encode_present_pass(self, command_encoder, src_view, target_view,
-                             target_format: str) -> None:
+    def _encode_present_pass(
+        self,
+        command_encoder,
+        src_view,
+        target_view,
+        target_format: str,
+        *,
+        upscale: bool = False,
+    ) -> None:
+        if upscale:
+            layout = self._upscale_bind_group_layout
+            entries = [
+                {"binding": 0, "resource": src_view},
+                {"binding": 1, "resource": self._upscale_sampler},
+            ]
+            pipeline = self._upscale_pipeline_for(target_format)
+        else:
+            layout = self._present_bind_group_layout
+            entries = [{"binding": 0, "resource": src_view}]
+            pipeline = self._present_pipeline_for(target_format)
         bind_group = self.device.create_bind_group(
-            layout=self._present_bind_group_layout,
-            entries=[{"binding": 0, "resource": src_view}],
+            layout=layout,
+            entries=entries,
         )
         rpass = command_encoder.begin_render_pass(
             color_attachments=[{
@@ -1228,7 +1543,7 @@ class InteractiveRenderer:
                 "clear_value": (0.0, 0.0, 0.0, 1.0),
             }]
         )
-        rpass.set_pipeline(self._present_pipeline_for(target_format))
+        rpass.set_pipeline(pipeline)
         rpass.set_bind_group(0, bind_group)
         rpass.draw(3)
         rpass.end()
@@ -1313,9 +1628,26 @@ class InteractiveRenderer:
             self._set_current_subpixel(False)
             if not accumulate or not self._current_jitter:
                 self.reset_accumulation()
-            self._encode_raymarch_pass(
-                command_encoder, target_view, target_format, timestamp_writes
-            )
+            scaled = self._current_uniform_size != self._current_output_size
+            if scaled:
+                sample = self._scaled_sample_target(self._current_uniform_size)
+                self._encode_raymarch_pass(
+                    command_encoder,
+                    sample["view"],
+                    self._ACCUM_FORMAT,
+                    timestamp_writes,
+                )
+                self._encode_present_pass(
+                    command_encoder,
+                    sample["view"],
+                    target_view,
+                    target_format,
+                    upscale=True,
+                )
+            else:
+                self._encode_raymarch_pass(
+                    command_encoder, target_view, target_format, timestamp_writes
+                )
             return
 
         target = self._accum_target(self._current_uniform_size)
@@ -1439,6 +1771,7 @@ class InteractiveRenderer:
             target["accum_views"][self._accum_index],
             target_view,
             target_format,
+            upscale=(self._current_uniform_size != self._current_output_size),
         )
         self._accum_last_origin = origin
         self._accum_last_forward = forward
@@ -1696,7 +2029,8 @@ class InteractiveRenderer:
 def request_device():
     """Request a high-performance adapter/device with the features we need.
 
-    Raises RuntimeError (not a fallback) when float32-filterable is missing.
+    Raises RuntimeError (not a fallback) when float32-filterable is missing;
+    the fp32 ocean normal texture requires it even with an fp16 volume.
     'timestamp-query' is added opportunistically for benchmarking.
     """
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
@@ -1704,7 +2038,7 @@ def request_device():
     if "float32-filterable" not in adapter.features:
         raise RuntimeError(
             "GPU adapter does not support 'float32-filterable' (required for "
-            "hardware trilinear sampling of the r32float density texture)."
+            "hardware trilinear sampling of the renderer's float32 textures)."
         )
     if "timestamp-query" in adapter.features:
         features.append("timestamp-query")

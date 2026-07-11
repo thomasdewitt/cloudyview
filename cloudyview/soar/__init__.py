@@ -25,6 +25,18 @@ ESC opens the in-window pause menu; ESC resumes from the top level and backs
 out of submenus. F12 writes a metadata-bearing PNG screenshot.
 """
 
-from .engine import InteractiveRenderer, request_device
+from .engine import (
+    QUALITY_PRESETS,
+    InteractiveRenderer,
+    QualityPreset,
+    render_target_size,
+    request_device,
+)
 
-__all__ = ["InteractiveRenderer", "request_device"]
+__all__ = [
+    "InteractiveRenderer",
+    "QualityPreset",
+    "QUALITY_PRESETS",
+    "render_target_size",
+    "request_device",
+]

@@ -168,9 +168,8 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // is the known next lever for the full 1024x1024x255 domain
 // (docs/architecture.md "Interactive techniques").
 
-// TODO(fp16): store density as a filterable 16-bit format to halve resident
-// memory on large domains. r32float + float32-filterable works everywhere we
-// care about today, so fp16 is an optimization, not a requirement.
+// The host may bind either r32float (reference/default) or filterable r16float
+// density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
 
 // ---------------------------------------------------------------------------
 // Helpers

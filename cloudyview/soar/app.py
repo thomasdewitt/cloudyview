@@ -22,6 +22,7 @@ Pause menu:
     O           open the in-window .nc browser
     G           render current view in behold (then 1=min, 2=low,
                 3=medium, 4=high, 5=max/overnight; ESC backs out)
+    S           performance settings (tier, render scale, temporal smoothing)
     P           toggle the periodic (horizontally tiled) domain — on by
                 default; turn off for subvolume cutouts that are not
                 physically periodic
@@ -55,6 +56,7 @@ from .engine import (
     DEFAULT_SUN_AZIMUTH,
     DEFAULT_SUN_ELEVATION,
     InteractiveRenderer,
+    QUALITY_PRESETS,
     camera_world_origin,
     periodic_march_cap_m,
     request_device,
@@ -79,6 +81,8 @@ from .menu import (
     ACTION_SCREENSHOT,
     ACTION_TOGGLE_FULLSCREEN,
     ACTION_TOGGLE_PERIODIC,
+    ACTION_SETTINGS_MENU,
+    ACTION_SELECT_TIER,
     BEHOLD_QUALITIES_BY_KEY,
     MENU_ERROR,
     MENU_FILE_BROWSER_ICE,
@@ -86,6 +90,7 @@ from .menu import (
     MENU_MAIN,
     MENU_OPEN_ICE_PROMPT,
     MENU_RENDER_QUALITY,
+    MENU_SETTINGS,
     FileEntry,
     control_action_for_key as _control_action_for_key,
     list_netcdf_entries,
@@ -107,6 +112,7 @@ CONTROL_SUMMARY = (
     "J jitter toggle, B bird toggle, M minimap toggle, F3 stats readout, "
     "F fullscreen/window, F12 screenshot, ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, G behold render, "
+    "S performance settings, "
     "P periodic domain toggle, "
     "F fullscreen/window, Q quit from the top-level menu"
 )
@@ -208,7 +214,9 @@ class FlyThroughApp:
                  extinction_multiplier: float = 1.0,
                  max_fps: float = 120.0,
                  camera: Camera | None = None,
-                 periodic: bool = True):
+                 periodic: bool = True,
+                 tier: str = "auto",
+                 volume_fp16: bool = False):
         # Import here so offscreen use never needs glfw / a display.
         from rendercanvas.glfw import RenderCanvas, loop
 
@@ -223,6 +231,17 @@ class FlyThroughApp:
 
         self._extinction_multiplier = float(extinction_multiplier)
         self.periodic = bool(periodic)
+        self.volume_fp16 = bool(volume_fp16)
+        self._requested_tier = str(tier).lower()
+        if self._requested_tier not in (*QUALITY_PRESETS, "auto"):
+            raise ValueError(
+                f"tier must be one of auto, {', '.join(QUALITY_PRESETS)}; "
+                f"got {tier!r}."
+            )
+        self._tier_source = (
+            "auto" if self._requested_tier == "auto" else "user"
+        )
+        self._auto_benchmark_ms = None
         self.sun_azimuth = DEFAULT_SUN_AZIMUTH
         self.sun_elevation = DEFAULT_SUN_ELEVATION
 
@@ -236,6 +255,8 @@ class FlyThroughApp:
         # Camera state: world meters + met angles. Start at the default
         # witness viewpoint.
         self._reset_camera_to_default(camera)
+        if self._requested_tier == "auto":
+            self._run_startup_tier_benchmark()
 
         self.speed = DEFAULT_SPEED
         self.jitter = True
@@ -273,6 +294,8 @@ class FlyThroughApp:
         self._fps_value = None
         self._fps_frame_ms = None
         self._stats_mode = "subtle"   # subtle -> expanded -> hidden (F3)
+        self._last_quality_camera_signature = None
+        self._camera_moving_for_quality(self.camera())
 
         self.canvas.add_event_handler(self._on_event,
                                       "key_down", "key_up",
@@ -287,6 +310,16 @@ class FlyThroughApp:
         kwargs = {
             "extinction_multiplier": self._extinction_multiplier,
             "periodic": self.periodic,
+            "quality_tier": (
+                previous.quality_tier
+                if previous is not None
+                else (
+                    "high"
+                    if self._requested_tier == "auto"
+                    else self._requested_tier
+                )
+            ),
+            "volume_fp16": self.volume_fp16,
             "device": device,
         }
         if previous is not None:
@@ -295,8 +328,12 @@ class FlyThroughApp:
                 "ocean_z": previous.ocean_z,
                 "ocean_reflectance": previous.ocean_reflectance,
                 "fif_normals": previous.ocean_fif_normals,
+                "motion_blend_alpha": previous.motion_blend_alpha,
             })
-        return InteractiveRenderer(field, **kwargs)
+        renderer = InteractiveRenderer(field, **kwargs)
+        if previous is not None and previous.quality_is_custom:
+            renderer.set_render_scale(previous.flight_render_scale)
+        return renderer
 
     def _reset_camera_to_default(self, camera: Camera | None = None) -> None:
         """Reset the app camera to the shared default or supplied ``cv.Camera``."""
@@ -308,6 +345,85 @@ class FlyThroughApp:
         self.elevation = cam0.elevation
         self.fov = cam0.fov
 
+    def _run_startup_tier_benchmark(self) -> None:
+        """Measure one steady frame per moving preset and select for 60 fps."""
+        size = tuple(int(v) for v in self.canvas.get_physical_size())
+        timings = {}
+        timing_source = None
+        camera = self.camera()
+        chosen = "potato"
+        target_ms = 1000.0 / 60.0
+        # Ascend from the cheapest tier. Once one misses 60 fps, every more
+        # expensive preset is intentionally skipped; this bounds startup on
+        # the weak machines auto-selection exists to help.
+        for name in reversed(tuple(QUALITY_PRESETS)):
+            self.renderer.set_quality_tier(name, camera_moving=True)
+            result = self.renderer.benchmark(
+                camera,
+                size=size,
+                n_warmup=1,
+                n_frames=1,
+                azimuth_step=0.4,
+            )
+            timing_key = (
+                "gpu_ms_mean"
+                if result.get("timestamps_used")
+                else "wall_ms_mean"
+            )
+            timing_source = "GPU timestamps" if result.get(
+                "timestamps_used"
+            ) else "wall clock"
+            timings[name] = float(result[timing_key])
+            if timings[name] > target_ms:
+                break
+            chosen = name
+        self.renderer.set_quality_tier(chosen, camera_moving=False)
+        self.renderer.reset_accumulation()
+        self._auto_benchmark_ms = timings
+        table = ", ".join(
+            f"{QUALITY_PRESETS[name].label}: {timings[name]:.2f} ms"
+            for name in reversed(tuple(QUALITY_PRESETS))
+            if name in timings
+        )
+        print(
+            f"soar auto-tier ({size[0]}x{size[1]}, {timing_source}): "
+            f"{table}; chose {chosen}"
+        )
+
+    def _select_quality_tier(self, name: str) -> None:
+        """Apply an explicit session-persistent menu choice."""
+        self.renderer.set_quality_tier(
+            name, camera_moving=getattr(self.renderer, "_camera_moving", False)
+        )
+        self._tier_source = "user"
+        self.canvas.request_draw()
+
+    def _set_render_scale(self, value: float) -> None:
+        self.renderer.set_render_scale(value)
+        self._tier_source = "user"
+        self.canvas.request_draw()
+
+    def _set_motion_blend_alpha(self, value: float) -> None:
+        value = float(value)
+        if not 0.3 <= value <= 0.9:
+            raise ValueError(
+                f"motion temporal smoothing must be in [0.3, 0.9]; got {value}."
+            )
+        self.renderer.motion_blend_alpha = value
+        self._tier_source = "user"
+        self.canvas.request_draw()
+
+    def _camera_moving_for_quality(self, camera: Camera) -> bool:
+        signature = (
+            *tuple(float(v) for v in camera.position),
+            float(camera.azimuth),
+            float(camera.elevation),
+            float(camera.fov),
+        )
+        previous = self._last_quality_camera_signature
+        self._last_quality_camera_signature = signature
+        return previous is not None and signature != previous
+
     def _install_field(self, field: CloudField) -> None:
         """Swap to a freshly loaded field and rebuild field-specific GPU state."""
         previous = self.renderer
@@ -317,6 +433,8 @@ class FlyThroughApp:
         self._reset_camera_to_default()
         self._frame_index = 0
         self.renderer.reset_accumulation()
+        self._last_quality_camera_signature = None
+        self._camera_moving_for_quality(self.camera())
 
     def _ensure_resizable(self):
         """Keep the GLFW window user-resizable even if backend defaults shift."""
@@ -363,6 +481,8 @@ class FlyThroughApp:
             return "cloudyview file browser"
         if state == MENU_RENDER_QUALITY:
             return self._render_quality_title()
+        if state == MENU_SETTINGS:
+            return "cloudyview settings"
         if state == MENU_ERROR:
             return "cloudyview error"
         return self._paused_title(fps)
@@ -587,6 +707,8 @@ class FlyThroughApp:
         self._reset_camera_to_default()
         self._frame_index = 0
         self.renderer.reset_accumulation()
+        self._last_quality_camera_signature = None
+        self._camera_moving_for_quality(self.camera())
         print(f"Loaded {self.renderer.field}")
         self._set_paused(False)
         self._flash_title(
@@ -691,6 +813,9 @@ class FlyThroughApp:
         parts = ["python", "-m", "cloudyview.soar", source]
         if field.ice_source:
             parts.extend(["--ice", field.ice_source])
+        parts.extend(["--tier", self.renderer.quality_tier])
+        if self.renderer.volume_fp16:
+            parts.append("--fp16-volume")
         parts.extend([
             "--camera-position",
             *(self._fmt_num(v) for v in camera.position),
@@ -809,6 +934,11 @@ class FlyThroughApp:
                 "hud": bool(self.minimap_enabled),
                 "jitter": bool(self.jitter),
                 "size": [int(w), int(h)],
+                "tier": renderer.quality_tier,
+                "render_scale": renderer.render_scale,
+                "step_factor": renderer.step_factor,
+                "max_light_steps": renderer.max_light_steps,
+                "volume_fp16": renderer.volume_fp16,
             },
         )
         self._write_png_with_metadata(image, path, metadata)
@@ -925,6 +1055,10 @@ class FlyThroughApp:
                 self._finish_open_file(use_ice=False)
             elif action == ACTION_RENDER_MENU:
                 self._set_menu_state(transition.next_state or MENU_RENDER_QUALITY)
+            elif action == ACTION_SETTINGS_MENU:
+                self._set_menu_state(transition.next_state or MENU_SETTINGS)
+            elif action == ACTION_SELECT_TIER:
+                self._select_quality_tier(transition.tier)
             elif action == ACTION_RENDER_BEHOLD:
                 self._run_behold_render(transition.quality)
             elif action == ACTION_MENU_BACK:
@@ -1170,6 +1304,8 @@ class FlyThroughApp:
         state = getattr(self, "_menu_state", MENU_MAIN)
         if state == MENU_RENDER_QUALITY:
             self._draw_quality_menu(imgui)
+        elif state == MENU_SETTINGS:
+            self._draw_settings_menu(imgui)
         elif state == MENU_OPEN_ICE_PROMPT:
             self._draw_ice_prompt(imgui)
         elif state in (MENU_FILE_BROWSER_LIQUID, MENU_FILE_BROWSER_ICE):
@@ -1205,6 +1341,8 @@ class FlyThroughApp:
                 self._start_open_file()
             if theme.menu_button("Render in behold...", "G"):
                 self._set_menu_state(MENU_RENDER_QUALITY)
+            if theme.menu_button("Settings...", "S"):
+                self._set_menu_state(MENU_SETTINGS)
             periodic_label = (
                 "Periodic domain: on"
                 if self.periodic
@@ -1256,6 +1394,86 @@ class FlyThroughApp:
             ):
                 if theme.menu_button(label, hint, sublabel=note):
                     self._run_behold_render(quality)
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_settings_menu(self, imgui) -> None:
+        from .theme import TEXT_FAINT
+
+        theme = self._theme
+        renderer = self.renderer
+        self._begin_imgui_window(imgui, "settings_menu", 520.0)
+        try:
+            theme.header("performance", "Settings")
+            for hint, name in (("1", "high"), ("2", "medium"),
+                               ("3", "low"), ("4", "potato")):
+                preset = QUALITY_PRESETS[name]
+                selected = renderer.quality_tier == name
+                if selected and self._tier_source == "auto":
+                    label = f"{preset.label} (auto)"
+                    right_text = None
+                elif selected and renderer.quality_is_custom:
+                    label = preset.label
+                    right_text = "custom"
+                elif selected:
+                    label = preset.label
+                    right_text = "selected"
+                else:
+                    label = preset.label
+                    right_text = None
+                if theme.menu_button(
+                    label, hint, right_text=right_text
+                ):
+                    self._select_quality_tier(name)
+
+            imgui.dummy((1.0, 8.0))
+            theme.caption("Render scale")
+            changed, scale = imgui.slider_float(
+                "##render_scale",
+                renderer.flight_render_scale,
+                0.25,
+                1.0,
+                "%.2fx",
+            )
+            if changed:
+                self._set_render_scale(scale)
+
+            theme.caption("Motion temporal smoothing")
+            changed, alpha = imgui.slider_float(
+                "##motion_blend_alpha",
+                renderer.motion_blend_alpha,
+                0.3,
+                0.9,
+                "%.2f",
+            )
+            if changed:
+                self._set_motion_blend_alpha(alpha)
+
+            imgui.dummy((1.0, 6.0))
+            fp_label = (
+                "fp16 volume: on" if renderer.volume_fp16
+                else "fp16 volume: off"
+            )
+            theme.menu_button(
+                fp_label,
+                None,
+                disabled=True,
+                text_color=TEXT_FAINT,
+            )
+            theme.caption(
+                "Constructor-only to avoid retaining a second full volume; "
+                "use --fp16-volume at load.",
+                wrapped=True,
+            )
+            if renderer.quality_tier == "potato":
+                theme.caption(
+                    "Potato switches to exact High sampling when the camera "
+                    "stops, then accumulates a smooth still.",
+                    wrapped=True,
+                )
             imgui.dummy((1.0, 4.0))
             if theme.menu_button("Back", "ESC", height=38.0):
                 self._set_menu_state(MENU_MAIN)
@@ -1461,6 +1679,8 @@ class FlyThroughApp:
                     ("view", f"az {cam.azimuth:.0f}° · el {cam.elevation:.0f}°"
                              f" · fov {cam.fov:.0f}°"),
                     ("speed", f"{self.speed:.0f} m/s"),
+                    ("tier", f"{self.renderer.quality_tier} · "
+                             f"{self.renderer.render_scale:.2f}x"),
                     ("cb", self._cb_bits()),
                     ("flags", f"jitter {'on' if self.jitter else 'off'}"
                               f" · map {'on' if self.minimap_enabled else 'off'}"
@@ -1495,9 +1715,12 @@ class FlyThroughApp:
         self.position = self._constrain_position(self.position)
 
         w, h = self.canvas.get_physical_size()
+        camera = self.camera()
+        camera_moving = self._camera_moving_for_quality(camera)
+        self.renderer.set_camera_moving(camera_moving)
         if self._behold_job is None:
             self.renderer.write_uniforms(
-                self.camera(), (w, h), jitter=self.jitter,
+                camera, (w, h), jitter=self.jitter,
                 sun_azimuth=self.sun_azimuth,
                 sun_elevation=self.sun_elevation,
                 frame_index=self._frame_index,
@@ -1522,7 +1745,7 @@ class FlyThroughApp:
                 self.position, self.azimuth, self.elevation,
             )
             bird.write_uniforms(
-                self.position, self.camera(), (w, h),
+                self.position, camera, (w, h),
                 sun_azimuth=self.sun_azimuth,
                 sun_elevation=self.sun_elevation,
                 exposure=DEFAULT_EXPOSURE,
@@ -1530,7 +1753,7 @@ class FlyThroughApp:
             )
             bird.encode_pass(enc, view, self.format, (w, h))
         if self.minimap_enabled:
-            self.renderer.hud.write_uniforms(self.camera(), (w, h))
+            self.renderer.hud.write_uniforms(camera, (w, h))
             self.renderer.hud.encode_pass(enc, view, self.format)
         if self._paused or active_snapshot is not None:
             self._encode_pause_overlay(enc, view)

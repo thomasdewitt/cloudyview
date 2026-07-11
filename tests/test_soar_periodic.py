@@ -53,6 +53,17 @@ def _adapter_ok():
     return "float32-filterable" in adapter.features
 
 
+def _is_rtx_5080_reference_adapter():
+    """The checked-in byte references are explicitly RTX-5080-specific."""
+    adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
+    info = adapter.info
+    identity = " ".join(
+        str(info.get(name, ""))
+        for name in ("vendor", "device", "description")
+    ).lower()
+    return "5080" in identity
+
+
 if not _adapter_ok():  # pragma: no cover
     pytest.skip("no wgpu adapter with float32-filterable available",
                 allow_module_level=True)
@@ -305,6 +316,9 @@ def prechange_renderer():
     from cloudyview.ocean_fif import generate_fif_normals
     from cloudyview.soar import InteractiveRenderer
 
+    if not _is_rtx_5080_reference_adapter():
+        pytest.skip("byte-exact prechange references require the RTX 5080")
+
     meta = json.loads((PRECHANGE_DIR / "meta.json").read_text())
     seed = meta["fif_seed"]
     np.random.seed(seed)
@@ -491,6 +505,29 @@ def test_cli_no_periodic_flag_reaches_run_app(monkeypatch, tmp_path):
     captured.clear()
     soar_main.main([str(DATA128)])
     assert captured["periodic"] is True
+
+
+def test_cli_tier_and_fp16_volume_reach_run_app(monkeypatch):
+    import cloudyview.soar.__main__ as soar_main
+
+    captured = {}
+
+    monkeypatch.setattr(
+        "cloudyview.soar.app.run_app",
+        lambda field, **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "cloudyview.cloudfield.load", lambda path, ice=None: "field"
+    )
+
+    soar_main.main([str(DATA128)])
+    assert captured["tier"] == "auto"
+    assert captured["volume_fp16"] is False
+
+    captured.clear()
+    soar_main.main([str(DATA128), "--tier", "low", "--fp16-volume"])
+    assert captured["tier"] == "low"
+    assert captured["volume_fp16"] is True
 
 
 # ---------------------------------------------------------------------------

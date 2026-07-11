@@ -18,12 +18,15 @@ ACTION_RENDER_BEHOLD = "render_behold"
 ACTION_MENU_BACK = "menu_back"
 ACTION_SCREENSHOT = "screenshot"
 ACTION_TOGGLE_PERIODIC = "toggle_periodic"
+ACTION_SETTINGS_MENU = "settings_menu"
+ACTION_SELECT_TIER = "select_tier"
 
 MENU_MAIN = "main"
 MENU_FILE_BROWSER_LIQUID = "file_browser_liquid"
 MENU_OPEN_ICE_PROMPT = "open_ice_prompt"
 MENU_FILE_BROWSER_ICE = "file_browser_ice"
 MENU_RENDER_QUALITY = "render_quality"
+MENU_SETTINGS = "settings"
 MENU_ERROR = "error"
 
 BEHOLD_QUALITIES_BY_KEY = {
@@ -32,6 +35,13 @@ BEHOLD_QUALITIES_BY_KEY = {
     "3": "medium",
     "4": "high",
     "5": "max",   # pre-2026-07-07 'high': 1200x800, 2048 spp — overnight tier
+}
+
+QUALITY_TIERS_BY_KEY = {
+    "1": "high",
+    "2": "medium",
+    "3": "low",
+    "4": "potato",
 }
 
 
@@ -44,6 +54,7 @@ class MenuTransition:
     action: str | None
     next_state: str | None = None
     quality: str | None = None
+    tier: str | None = None
 
 
 def menu_transition(
@@ -71,6 +82,8 @@ def menu_transition(
             return MenuTransition(ACTION_OPEN_FILE, MENU_FILE_BROWSER_LIQUID)
         if normalized == "g":
             return MenuTransition(ACTION_RENDER_MENU, MENU_RENDER_QUALITY)
+        if normalized == "s":
+            return MenuTransition(ACTION_SETTINGS_MENU, MENU_SETTINGS)
         if normalized == "p":
             return MenuTransition(ACTION_TOGGLE_PERIODIC, MENU_MAIN)
         return MenuTransition(None, MENU_MAIN)
@@ -103,6 +116,16 @@ def menu_transition(
                 ACTION_RENDER_BEHOLD, MENU_RENDER_QUALITY, quality
             )
         return MenuTransition(None, MENU_RENDER_QUALITY)
+
+    if menu_state == MENU_SETTINGS:
+        if key == "Escape":
+            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        tier = QUALITY_TIERS_BY_KEY.get(normalized)
+        if tier is not None:
+            return MenuTransition(
+                ACTION_SELECT_TIER, MENU_SETTINGS, tier=tier
+            )
+        return MenuTransition(None, MENU_SETTINGS)
 
     if menu_state == MENU_ERROR:
         if key == "Escape":

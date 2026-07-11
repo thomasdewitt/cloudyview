@@ -23,6 +23,17 @@ def main(argv=None):
     parser.add_argument("--max-fps", type=float, default=120.0,
                         help="frame-rate cap (default 120)")
     parser.add_argument(
+        "--tier",
+        choices=("high", "medium", "low", "potato", "auto"),
+        default="auto",
+        help="interactive performance tier (default auto benchmarks at startup)",
+    )
+    parser.add_argument(
+        "--fp16-volume",
+        action="store_true",
+        help="store cloud extinction in a filterable fp16 texture (applies at load)",
+    )
+    parser.add_argument(
         "--no-periodic",
         action="store_true",
         help="disable horizontal domain tiling (periodic is on by default; "
@@ -83,7 +94,9 @@ def main(argv=None):
             extinction_multiplier=args.extinction_multiplier,
             max_fps=args.max_fps,
             camera=camera,
-            periodic=not args.no_periodic)
+            periodic=not args.no_periodic,
+            tier=args.tier,
+            volume_fp16=args.fp16_volume)
 
 
 if __name__ == "__main__":
