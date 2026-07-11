@@ -95,7 +95,10 @@ from .menu import (
 DEFAULT_SPEED = 60.0        # m/s, comfortable for the 25 km dev domain
 MOUSE_SENS = 0.12           # degrees per pixel
 SPEED_WHEEL_FACTOR = 1.25   # per wheel notch
-OCEAN_FLOOR_MARGIN_M = 2.0
+# Five dominant ocean wavelengths (FIF outer scale, ocean_fif.DEFAULT_OUTER_SCALE_M
+# = 10 m): below this the normal-mapped water reads wrong (no displacement
+# geometry) — Thomas 2026-07-10.
+OCEAN_FLOOR_MARGIN_M = 5.0 * 10.0
 
 CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "

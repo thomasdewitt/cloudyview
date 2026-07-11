@@ -107,9 +107,9 @@ PERIODIC_AIR_TAU_CUTOFF = 3.912023005428146  # -ln(0.02)
 PERIODIC_MAX_WRAPS = 2.0
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 # 0.45 was approved pre-realism; with the ported look Thomas flagged the
-# trailing smear ('turn down the time-blur', 2026-07-10) — 0.72 keeps a
-# touch of temporal smoothing without visible ghosting at flight speed.
-DEFAULT_MOTION_BLEND_ALPHA = 0.72
+# trailing smear ('turn down the time-blur') but 0.72 read 'a bit
+# speckled' — 0.58 is Thomas's requested midpoint (2026-07-10).
+DEFAULT_MOTION_BLEND_ALPHA = 0.58
 DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0
 DEFAULT_MOTION_JITTER_SCALE = 0.65
 DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0

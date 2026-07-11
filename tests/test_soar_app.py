@@ -165,8 +165,9 @@ def test_clamp_position_above_ocean_uses_margin_and_returns_copy():
     assert clamped.tolist() == [10.0, 20.0, OCEAN_FLOOR_MARGIN_M]
     assert original.tolist() == [10.0, 20.0, -50.0]
 
-    already_above = _clamp_position_above_ocean([1.0, 2.0, 25.0])
-    assert already_above.tolist() == [1.0, 2.0, 25.0]
+    # probe must sit above OCEAN_FLOOR_MARGIN_M (50 m since 2026-07-10)
+    already_above = _clamp_position_above_ocean([1.0, 2.0, 80.0])
+    assert already_above.tolist() == [1.0, 2.0, 80.0]
 
 
 def test_escape_pauses_releases_capture_and_clears_movement_keys():
