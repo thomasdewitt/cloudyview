@@ -12,6 +12,7 @@ Controls:
     J           toggle jittered ray starts (A/B the banding fix)
     B           toggle the bird (the flying subject leading the camera)
     M           toggle the minimap
+    F3          cycle the corner stats readout (subtle/expanded/hidden)
     F           toggle fullscreen/windowed
     F12         save a PNG screenshot with render metadata
     ESC         pause menu (releases the mouse)
@@ -100,7 +101,7 @@ CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
     "(Tab releases, click recaptures), scroll speed, "
     "1 gradient, 2 MS floor, 3 ambient AO, 4 bounce attenuation, "
-    "J jitter toggle, B bird toggle, M minimap toggle, "
+    "J jitter toggle, B bird toggle, M minimap toggle, F3 stats readout, "
     "F fullscreen/window, F12 screenshot, ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, G behold render, "
     "P periodic domain toggle, "
@@ -266,6 +267,9 @@ class FlyThroughApp:
         self._frame_index = 0
         self._fps_acc = []
         self._fps_last_title = 0.0
+        self._fps_value = None
+        self._fps_frame_ms = None
+        self._stats_mode = "subtle"   # subtle -> expanded -> hidden (F3)
 
         self.canvas.add_event_handler(self._on_event,
                                       "key_down", "key_up",
@@ -335,9 +339,9 @@ class FlyThroughApp:
         self._last_pointer = None
 
     def _paused_title(self, fps: float | None = None) -> str:
-        fps_part = "" if fps is None else f"  {fps:5.1f} fps"
-        return (f"cloudyview paused{fps_part}  frame={self._frame_index}  "
-                f"cb:{self._cb_bits()}")
+        # Runtime diagnostics live in the toggleable corner readout, not the
+        # native window chrome. Keep the optional argument for compatibility.
+        return "cloudyview paused"
 
     def _open_ice_title(self) -> str:
         filename = (
@@ -393,6 +397,13 @@ class FlyThroughApp:
             "ambient_occlusion_strength": strengths[2],
             "bounce_depth_attenuation": strengths[3],
         }
+
+    def _cycle_stats_mode(self) -> None:
+        """F3 cycles the corner stats readout: subtle -> expanded -> hidden."""
+        order = ("subtle", "expanded", "hidden")
+        current = getattr(self, "_stats_mode", "subtle")
+        index = order.index(current) if current in order else 0
+        self._stats_mode = order[(index + 1) % len(order)]
 
     def _set_paused(self, paused: bool) -> None:
         if paused == self._paused:
@@ -932,6 +943,8 @@ class FlyThroughApp:
                 self.bird_enabled = not self.bird_enabled
             elif key in ("m", "M"):
                 self.minimap_enabled = not self.minimap_enabled
+            elif key == "F3":
+                self._cycle_stats_mode()
             elif key in ("1", "2", "3", "4"):
                 self.cb_enabled[int(key) - 1] = not self.cb_enabled[int(key) - 1]
             elif key == "Tab":
@@ -1098,66 +1111,42 @@ class FlyThroughApp:
             return getattr(cond, "always")
         return 0
 
+    @property
+    def _theme(self):
+        """Theme attached to the lazily created ImGui layer."""
+        self._ensure_imgui()
+        return self._imgui.theme
+
     def _begin_imgui_window(
-        self, imgui, title: str, width: float, height: float
+        self, imgui, name: str, width: float, height: float = 0.0
     ) -> None:
+        """Begin a centered, fixed glass panel (height 0 = auto-fit)."""
         logical_w, logical_h = self.canvas.get_logical_size()
-        x = max(16.0, (logical_w - width) * 0.5)
-        y = max(16.0, (logical_h - height) * 0.5)
         cond = self._imgui_cond_always(imgui)
-        flags = self._imgui_flags(
-            imgui,
-            "WindowFlags_",
+        flag_names = [
             "no_resize",
             "no_collapse",
             "no_saved_settings",
             "no_move",
+            "no_title_bar",
+            "no_scrollbar",
+        ]
+        if height <= 0.0:
+            flag_names.append("always_auto_resize")
+        flags = self._imgui_flags(
+            imgui,
+            "WindowFlags_",
+            *flag_names,
         )
-        try:
-            imgui.set_next_window_pos((x, y), cond)
-            imgui.set_next_window_size((width, height), cond)
-        except TypeError:
-            imgui.set_next_window_pos((x, y))
-            imgui.set_next_window_size((width, height))
-        try:
-            imgui.begin(title, None, flags)
-        except TypeError:
-            try:
-                imgui.begin(title, flags)
-            except TypeError:
-                imgui.begin(title)
+        imgui.set_next_window_pos(
+            (logical_w * 0.5, logical_h * 0.46), cond, (0.5, 0.5)
+        )
+        imgui.set_next_window_size((width, height), cond)
+        imgui.begin(f"##{name}", None, flags)
 
     @staticmethod
     def _end_imgui_window(imgui) -> None:
         imgui.end()
-
-    @staticmethod
-    def _imgui_button(imgui, label: str, width: float = 320.0) -> bool:
-        try:
-            return bool(imgui.button(label, (width, 38.0)))
-        except TypeError:
-            return bool(imgui.button(label))
-
-    @staticmethod
-    def _imgui_text_wrapped(imgui, text: str) -> None:
-        if hasattr(imgui, "text_wrapped"):
-            imgui.text_wrapped(text)
-        else:
-            imgui.text(text)
-
-    @staticmethod
-    def _imgui_progress_bar(
-        imgui, fraction: float, label: str, width: float = 420.0
-    ) -> None:
-        if not hasattr(imgui, "progress_bar"):
-            imgui.text(label)
-            return
-        fraction = float(np.clip(fraction, 0.0, 1.0))
-        try:
-            imgui.progress_bar(fraction, (width, 0.0), label)
-        except TypeError:
-            imgui.progress_bar(fraction)
-            imgui.text(label)
 
     def _draw_imgui(self, command_encoder, target_view) -> None:
         self._ensure_imgui()
@@ -1169,6 +1158,10 @@ class FlyThroughApp:
         snapshot = self._active_job_snapshot()
         if snapshot is not None:
             self._draw_job_overlay(imgui, snapshot)
+            return
+
+        if not getattr(self, "_paused", False):
+            self._draw_stats_readout(imgui)
             return
 
         state = getattr(self, "_menu_state", MENU_MAIN)
@@ -1183,104 +1176,137 @@ class FlyThroughApp:
         else:
             self._draw_main_menu(imgui)
 
+    def _field_display_name(self) -> str:
+        renderer = getattr(self, "renderer", None)
+        field = getattr(renderer, "field", None)
+        source = getattr(field, "source", None)
+        return Path(source).name if source else "in-memory field"
+
+    @staticmethod
+    def _truncate_middle(text: str, max_chars: int = 32) -> str:
+        if len(text) <= max_chars:
+            return text
+        keep = max_chars - 1
+        head = (keep + 1) // 2
+        tail = keep - head
+        return f"{text[:head]}…{text[-tail:]}"
+
     def _draw_main_menu(self, imgui) -> None:
-        self._begin_imgui_window(imgui, "Paused", 420.0, 380.0)
+        theme = self._theme
+        self._begin_imgui_window(imgui, "main_menu", 420.0)
         try:
-            if self._imgui_button(imgui, "Resume"):
+            theme.header("cloudyview", "Paused")
+            if theme.menu_button("Resume", "ESC"):
                 self._set_paused(False)
-            if self._imgui_button(imgui, "Open file..."):
+            if theme.menu_button("Open file...", "O"):
                 self._start_open_file()
-            if self._imgui_button(imgui, "Render in behold..."):
+            if theme.menu_button("Render in behold...", "G"):
                 self._set_menu_state(MENU_RENDER_QUALITY)
             periodic_label = (
                 "Periodic domain: on"
                 if self.periodic
                 else "Periodic domain: off"
             )
-            if self._imgui_button(imgui, periodic_label):
+            if theme.menu_button(periodic_label, "P"):
                 self._toggle_periodic()
             label = (
                 "Exit fullscreen"
                 if getattr(self, "_fullscreen", False)
                 else "Enter fullscreen"
             )
-            if self._imgui_button(imgui, label):
+            if theme.menu_button(label, "F"):
                 self._try_toggle_fullscreen()
-            if self._imgui_button(imgui, "Quit"):
+            if theme.menu_button("Quit", "Q"):
                 self._closing = True
                 self._close_after_frame()
+            imgui.dummy((1.0, 8.0))
+            theme.mono_text(
+                self._truncate_middle(self._field_display_name(), 44),
+                size=13.0,
+            )
+            theme.hint_row((
+                ("WASD", "fly"),
+                ("mouse", "look"),
+                ("scroll", "speed"),
+                ("F3", "stats"),
+            ))
         finally:
             self._end_imgui_window(imgui)
 
     def _draw_quality_menu(self, imgui) -> None:
-        self._begin_imgui_window(imgui, "Behold Quality", 420.0, 360.0)
+        theme = self._theme
+        self._begin_imgui_window(imgui, "quality_menu", 420.0)
         try:
+            theme.header("render in behold", "Quality")
             if self.periodic and self._view_spans_domain_edge():
-                self._imgui_text_wrapped(
-                    imgui, "view spans domain edge — behold will differ"
+                theme.caption(
+                    "view spans domain edge — behold will differ",
+                    wrapped=True,
                 )
-                if hasattr(imgui, "separator"):
-                    imgui.separator()
-            for label, quality in (
-                ("Min", "min"),
-                ("Low", "low"),
-                ("Medium", "medium"),
-                ("High (~1 h)", "high"),
-                ("Max (overnight)", "max"),
+                imgui.dummy((1.0, 4.0))
+            for label, hint, quality, note in (
+                ("Min", "1", "min", "fast preview"),
+                ("Low", "2", "low", "draft"),
+                ("Medium", "3", "medium", "balanced"),
+                ("High", "4", "high", "~1 h"),
+                ("Max", "5", "max", "overnight"),
             ):
-                if self._imgui_button(imgui, label):
+                if theme.menu_button(label, hint, sublabel=note):
                     self._run_behold_render(quality)
-            if self._imgui_button(imgui, "Back"):
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
                 self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
 
     def _draw_ice_prompt(self, imgui) -> None:
-        self._begin_imgui_window(imgui, "Ice File", 460.0, 250.0)
+        theme = self._theme
+        self._begin_imgui_window(imgui, "ice_prompt", 460.0)
         try:
             filename = (
                 Path(self._pending_open_path).name
                 if self._pending_open_path else "selected file"
             )
-            imgui.text(filename)
-            if hasattr(imgui, "separator"):
-                imgui.separator()
-            if self._imgui_button(imgui, "Yes, pick ice file"):
+            theme.header("open file", "Ice phase?")
+            theme.mono_text(filename, size=13.0)
+            imgui.dummy((1.0, 6.0))
+            if theme.menu_button("Yes, pick ice file", "Y"):
                 self._finish_open_file(use_ice=True)
-            if self._imgui_button(imgui, "No ice"):
+            if theme.menu_button("No ice", "N"):
                 self._finish_open_file(use_ice=False)
-            if self._imgui_button(imgui, "Back"):
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
                 self._pending_open_path = None
                 self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
 
     def _draw_file_browser(self, imgui, state: str) -> None:
+        theme = self._theme
         title = (
-            "Open Cloud NetCDF"
+            "Open cloud file"
             if state == MENU_FILE_BROWSER_LIQUID
-            else "Open Ice NetCDF"
+            else "Open ice file"
         )
-        self._begin_imgui_window(imgui, title, 720.0, 560.0)
+        self._begin_imgui_window(imgui, "file_browser", 720.0, 560.0)
         try:
             current_dir = Path(getattr(self, "_file_browser_dir", Path.cwd()))
-            self._imgui_text_wrapped(imgui, str(current_dir))
-            if hasattr(imgui, "separator"):
-                imgui.separator()
-            if self._imgui_button(imgui, "Up", 120.0):
+            theme.header("netcdf browser", title)
+            if theme.menu_button("Up", None, width=110.0, height=34.0):
                 self._set_file_browser_dir(current_dir.parent)
-            if hasattr(imgui, "same_line"):
-                imgui.same_line()
-            if self._imgui_button(imgui, "Back", 120.0):
+            imgui.same_line()
+            if theme.menu_button("Back", "ESC", width=110.0, height=34.0):
                 if state == MENU_FILE_BROWSER_ICE:
                     self._set_menu_state(MENU_OPEN_ICE_PROMPT)
                 else:
                     self._pending_open_path = None
                     self._set_menu_state(MENU_MAIN)
                 return
+            imgui.same_line()
+            theme.mono_text(str(current_dir), size=13.0)
 
             if self._file_browser_error:
-                self._imgui_text_wrapped(imgui, self._file_browser_error)
+                theme.caption(self._file_browser_error, wrapped=True)
 
             try:
                 entries = list_netcdf_entries(current_dir)
@@ -1288,63 +1314,167 @@ class FlyThroughApp:
             except Exception as e:
                 entries = []
                 self._file_browser_error = str(e)
-                self._imgui_text_wrapped(imgui, self._file_browser_error)
+                theme.caption(self._file_browser_error, wrapped=True)
 
-            if hasattr(imgui, "begin_child"):
-                try:
-                    imgui.begin_child("files", (0.0, 390.0), True)
-                except TypeError:
-                    imgui.begin_child("files")
+            child_flags = self._imgui_flags(
+                imgui, "ChildFlags_", "always_use_window_padding"
+            )
+            imgui.push_style_var(
+                imgui.StyleVar_.window_padding, (12.0, 12.0)
+            )
+            imgui.begin_child("files", (0.0, 0.0), child_flags)
             try:
+                if not entries:
+                    theme.caption("No folders or .nc files here.")
                 for entry in entries:
                     self._draw_file_entry(imgui, entry)
             finally:
-                if hasattr(imgui, "end_child"):
-                    imgui.end_child()
+                imgui.end_child()
+                imgui.pop_style_var()
         finally:
             self._end_imgui_window(imgui)
 
     def _draw_file_entry(self, imgui, entry: FileEntry) -> None:
+        from .theme import TEXT_MUTED
+
+        theme = self._theme
         if entry.is_dir:
-            label = f"[{entry.name}]"
+            clicked = theme.menu_button(
+                f"{entry.name}/", None, height=36.0, text_color=TEXT_MUTED
+            )
         else:
-            label = f"{entry.name}    {entry.display_size}"
-        if self._imgui_button(imgui, label, 660.0):
+            clicked = theme.menu_button(
+                entry.name, None, height=36.0, right_text=entry.display_size
+            )
+        if clicked:
             if entry.is_dir:
                 self._set_file_browser_dir(entry.path)
             else:
                 self._select_browser_path(entry.path)
 
     def _draw_error_dialog(self, imgui) -> None:
-        self._begin_imgui_window(imgui, "Error", 520.0, 250.0)
+        from .theme import ERROR
+
+        theme = self._theme
+        self._begin_imgui_window(imgui, "error_dialog", 520.0)
         try:
-            self._imgui_text_wrapped(
-                imgui, self._error_message or "Unknown soar error."
+            theme.header("error", "Something failed", kicker_color=ERROR)
+            theme.body_text(
+                self._error_message or "Unknown soar error.", wrapped=True
             )
-            if self._imgui_button(imgui, "Back", 160.0):
+            imgui.dummy((1.0, 6.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
                 self._error_message = None
                 self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
 
     def _draw_job_overlay(self, imgui, snapshot) -> None:
-        title = "Loading" if snapshot.kind == "loading" else "Rendering"
-        self._begin_imgui_window(imgui, title, 520.0, 250.0)
+        from .theme import TEXT_FAINT
+
+        theme = self._theme
+        loading = snapshot.kind == "loading"
+        self._begin_imgui_window(imgui, "job_overlay", 520.0)
         try:
-            self._imgui_text_wrapped(imgui, snapshot.filename)
-            imgui.text(f"Stage: {snapshot.stage}")
-            imgui.text(f"Elapsed: {self._fmt_eta(snapshot.elapsed)}")
-            if snapshot.percent is not None:
-                percent = float(snapshot.percent)
-                self._imgui_progress_bar(
-                    imgui, percent / 100.0, f"{percent:5.1f}%"
-                )
-            if snapshot.eta is not None:
-                imgui.text(f"ETA: {self._fmt_eta(snapshot.eta)}")
+            if loading:
+                theme.header("loading", self._truncate_middle(snapshot.filename))
+            else:
+                quality = snapshot.kind.split(" ", 1)[-1]
+                theme.header("rendering in behold", quality.capitalize())
+            status = f"{snapshot.stage} · {self._fmt_eta(snapshot.elapsed)}"
+            theme.mono_text(status, size=13.0)
+            imgui.dummy((1.0, 2.0))
+            percent = snapshot.percent
+            theme.progress_bar(None if percent is None else percent / 100.0)
+            if percent is not None:
+                theme.push_font(theme.font_mono, 13.0)
+                theme.body_text(f"{float(percent):3.0f}%", TEXT_FAINT)
+                if snapshot.eta is not None:
+                    eta_text = f"ETA {self._fmt_eta(snapshot.eta)}"
+                    text_w = imgui.calc_text_size(eta_text).x
+                    imgui.same_line(
+                        imgui.get_window_width()
+                        - imgui.get_style().window_padding.x - text_w
+                    )
+                    theme.body_text(eta_text, TEXT_FAINT)
+                theme.pop_font()
+            if not loading:
+                imgui.dummy((1.0, 2.0))
+                theme.mono_text(snapshot.filename, TEXT_FAINT, size=12.0)
             if snapshot.note:
-                self._imgui_text_wrapped(imgui, snapshot.note)
+                theme.caption(snapshot.note, TEXT_FAINT)
         finally:
             self._end_imgui_window(imgui)
+
+    def _draw_stats_readout(self, imgui) -> None:
+        """Corner fps readout: subtle pill, or an expanded diagnostics card."""
+        from .theme import PANEL_BG, TEXT_FAINT, TEXT_MUTED
+
+        mode = getattr(self, "_stats_mode", "subtle")
+        fps = getattr(self, "_fps_value", None)
+        if mode == "hidden" or fps is None:
+            return
+        theme = self._theme
+        frame_ms = getattr(self, "_fps_frame_ms", None) or (1000.0 / max(fps, 1e-6))
+
+        logical_w, logical_h = self.canvas.get_logical_size()
+        cond = self._imgui_cond_always(imgui)
+        flags = self._imgui_flags(
+            imgui,
+            "WindowFlags_",
+            "no_decoration",
+            "no_move",
+            "no_saved_settings",
+            "always_auto_resize",
+            "no_focus_on_appearing",
+            "no_nav",
+            "no_inputs",
+        )
+        imgui.set_next_window_pos(
+            (logical_w - 14.0, logical_h - 12.0), cond, (1.0, 1.0)
+        )
+        alpha = 0.38 if mode == "subtle" else 0.74
+        imgui.push_style_color(
+            imgui.Col_.window_bg, (*PANEL_BG[:3], alpha)
+        )
+        imgui.push_style_var(imgui.StyleVar_.window_rounding, 10.0)
+        imgui.push_style_var(
+            imgui.StyleVar_.window_padding,
+            (12.0, 7.0) if mode == "subtle" else (16.0, 12.0),
+        )
+        imgui.begin("##stats_readout", None, flags)
+        try:
+            if mode == "subtle":
+                theme.mono_text(
+                    f"{fps:.0f} fps · {frame_ms:.1f} ms",
+                    (*TEXT_MUTED[:3], 0.78), size=13.0,
+                )
+            else:
+                cam = self.camera()
+                rows = (
+                    ("fps", f"{fps:5.1f} · {frame_ms:.1f} ms"),
+                    ("pos", "({:+.2f}, {:+.2f}, {:+.2f})".format(
+                        *cam.position)),
+                    ("view", f"az {cam.azimuth:.0f}° · el {cam.elevation:.0f}°"
+                             f" · fov {cam.fov:.0f}°"),
+                    ("speed", f"{self.speed:.0f} m/s"),
+                    ("cb", self._cb_bits()),
+                    ("flags", f"jitter {'on' if self.jitter else 'off'}"
+                              f" · map {'on' if self.minimap_enabled else 'off'}"
+                              f" · bird {'on' if self.bird_enabled else 'off'}"),
+                    ("frame", f"{self._frame_index}"),
+                )
+                theme.push_font(theme.font_mono, 13.0)
+                label_w = imgui.calc_text_size("flags").x + 14.0
+                for label, value in rows:
+                    theme.body_text(label, TEXT_FAINT)
+                    imgui.same_line(label_w + imgui.get_style().window_padding.x)
+                    theme.body_text(value, TEXT_MUTED)
+                theme.pop_font()
+        finally:
+            imgui.end()
+            imgui.pop_style_var(2)
+            imgui.pop_style_color()
 
     def _draw(self):
         # After close() the surface texture is destroyed; a queued draw
@@ -1401,27 +1531,25 @@ class FlyThroughApp:
             self.renderer.hud.encode_pass(enc, view, self.format)
         if self._paused or active_snapshot is not None:
             self._encode_pause_overlay(enc, view)
-        if self._paused or active_snapshot is not None:
             self._draw_imgui(enc, view)
+        elif (
+            getattr(self, "_stats_mode", "subtle") != "hidden"
+            and getattr(self, "_fps_value", None) is not None
+        ):
+            self._draw_imgui(enc, view)   # corner stats readout only
         self.renderer.device.queue.submit([enc.finish()])
 
         self._fps_acc.append(dt)
         if now - self._fps_last_title > 0.5 and self._fps_acc:
-            fps = 1.0 / (sum(self._fps_acc) / len(self._fps_acc))
+            mean_dt = sum(self._fps_acc) / len(self._fps_acc)
+            fps = 1.0 / mean_dt
+            self._fps_value = fps
+            self._fps_frame_ms = mean_dt * 1000.0
             if not self._title_flash_active(now):
                 if self._paused:
-                    self.canvas.set_title(self._menu_title(fps))
+                    self.canvas.set_title(self._menu_title())
                 else:
-                    cam = self.camera()
-                    self.canvas.set_title(
-                        f"cloudyview  {fps:5.1f} fps  "
-                        f"pos=({cam.position[0]:+.2f},{cam.position[1]:+.2f},"
-                        f"{cam.position[2]:+.2f}) az={cam.azimuth:.0f} "
-                        f"el={cam.elevation:.0f} speed={self.speed:.0f}m/s "
-                        f"cb:{self._cb_bits()} "
-                        f"jitter={'on' if self.jitter else 'OFF'} "
-                        f"map={'on' if self.minimap_enabled else 'OFF'}"
-                    )
+                    self.canvas.set_title("cloudyview")
             self._fps_acc = []
             self._fps_last_title = now
 
