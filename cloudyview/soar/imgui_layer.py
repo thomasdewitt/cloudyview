@@ -62,6 +62,8 @@ class SoarImguiLayer:
                 "change: uv sync --extra interactive"
             ) from e
 
+        from .theme import SoarTheme
+
         self.imgui = imgui
         self._canvas = canvas
         self._context = imgui.create_context()
@@ -71,6 +73,7 @@ class SoarImguiLayer:
         io.display_size = canvas.get_logical_size()
         scale = canvas.get_pixel_ratio()
         io.display_framebuffer_scale = (scale, scale)
+        self.theme = SoarTheme(imgui)
         self._key_map = self._build_key_map()
         self._mod_key_map = self._build_mod_key_map()
 
