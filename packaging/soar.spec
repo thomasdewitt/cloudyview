@@ -38,7 +38,15 @@ hiddenimports += [
     "imgui_bundle.imgui",
     "netCDF4",
     "xarray",
+    "cloudyview.ocean_fif",  # lazy import in soar engine (_default_fif_normals)
 ]
+hiddenimports += collect_submodules("scaleinvariance")
+
+# scaleinvariance is installed editable (uv .pth import hook, invisible to
+# PyInstaller's Analysis) — resolve its real source tree onto pathex.
+import scaleinvariance as _si
+from pathlib import Path as _Path
+_editable_paths = [str(_Path(_si.__file__).resolve().parents[1])]
 
 for distribution in (
     "wgpu",
@@ -72,7 +80,7 @@ elif sys.platform == "darwin":
 
 a = Analysis(
     [str(PACKAGING / "smoke_test.py")],
-    pathex=[str(ROOT)],
+    pathex=[str(ROOT)] + _editable_paths,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
