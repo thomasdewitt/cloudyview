@@ -149,6 +149,7 @@ results/
 plots/
 output/
 parity_out/
+references/ai-generated-thunderstorms/
 
 # Benchmark results (machine-specific)
 benchmarking/output/
