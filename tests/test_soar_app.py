@@ -348,6 +348,26 @@ def test_f12_dispatches_screenshot_during_active_flight():
     assert app.screenshot_calls == 1
 
 
+def test_f3_cycles_corner_stats_without_becoming_movement_input():
+    app = make_event_app()
+    app._paused = False
+    app._keys = set()
+
+    assert getattr(app, "_stats_mode", "subtle") == "subtle"
+    for expected in ("expanded", "hidden", "subtle"):
+        FlyThroughApp._on_event(
+            app, {"event_type": "key_down", "key": "F3"}
+        )
+        assert app._stats_mode == expected
+        assert app._keys == set()
+
+
+def test_runtime_diagnostics_are_not_duplicated_in_window_title():
+    app = make_event_app()
+
+    assert FlyThroughApp._paused_title(app, 120.0) == "cloudyview paused"
+
+
 def test_paused_mouse_move_and_wheel_do_not_change_camera_or_speed():
     app = make_event_app()
     app._paused = True
