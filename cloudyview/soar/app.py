@@ -48,6 +48,8 @@ from ..camera import Camera
 from ..cloudfield import CloudField, load as load_cloud_field
 from ..render_metadata import build_render_metadata, embed_metadata
 from .engine import (
+    APP_LIGHT_MARCH_LOD_DEGREES,
+    APP_VIEW_STEP_LOD_DEGREES,
     DEFAULT_AMBIENT_STRENGTH,
     DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
     DEFAULT_BOUNCE_DEPTH_ATTENUATION,
@@ -271,6 +273,7 @@ class FlyThroughApp:
         self.speed = DEFAULT_SPEED
         self.jitter = True
         self.cb_enabled = [True, True, True, True]
+        self.distance_lod = True   # L toggles (A/B vs exact legacy marching)
         self.bird_enabled = True
         self.minimap_enabled = True
         self._keys = set()
@@ -529,6 +532,15 @@ class FlyThroughApp:
             "deep_shadow_ms_suppression": strengths[1],
             "ambient_occlusion_strength": strengths[2],
             "bounce_depth_attenuation": strengths[3],
+            # Distance LOD (2026-07-17 perf pass): app opts in; the library
+            # default stays 0.0 (exact legacy) until the goldens move.
+            # L toggles it live for A/B flying.
+            "light_march_lod_degrees": (
+                APP_LIGHT_MARCH_LOD_DEGREES if self.distance_lod else 0.0
+            ),
+            "view_step_lod_degrees": (
+                APP_VIEW_STEP_LOD_DEGREES if self.distance_lod else 0.0
+            ),
         }
 
     def _cycle_stats_mode(self) -> None:
@@ -1095,6 +1107,8 @@ class FlyThroughApp:
                 self.bird_enabled = not self.bird_enabled
             elif key in ("m", "M"):
                 self.minimap_enabled = not self.minimap_enabled
+            elif key in ("l", "L"):
+                self.distance_lod = not self.distance_lod
             elif key == "F3":
                 self._cycle_stats_mode()
             elif key in ("1", "2", "3", "4"):

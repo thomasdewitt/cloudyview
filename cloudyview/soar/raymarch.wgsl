@@ -78,9 +78,14 @@ struct Uniforms {
     // x = GGX roughness widening per normal LOD, y = ocean haze extinction
     // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
     ocean_realism_b: vec4<f32>,
-    // Row 20: periodic domain (SAM LES fields are doubly periodic in x/y).
+    // Row 20: periodic domain + distance LOD (2026-07-17 perf pass).
     // x = periodic enable in host scene identity (0.0 or 1.0); OFF selects
     // raymarch_legacy.wgsl rather than branching through this module.
+    // y = light-march LOD tan(theta): sun-march dt floor grows as
+    //     view_distance * y so distant cloud copies get coarser (never
+    //     truncated) tau quadrature. 0 = exact legacy fixed dt.
+    // z = view-step LOD tan(theta): view-march dt floor grows as t * z —
+    //     the degrees-not-meters step. 0 = exact legacy fixed dt.
     periodic: vec4<f32>,
 };
 
@@ -347,7 +352,11 @@ fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
 
 // Sun optical depth from p toward the sun: witness adaptive-step shadow march
 // to the box exit with tau saturation (witness.py:299-367).
-fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
+// `dt_floor` coarsens (never truncates) the quadrature for distant samples:
+// callers pass view_distance * u.periodic.y, so the full integration range
+// is kept while far cloud copies stop paying near-field step counts.
+// dt_floor = 0 -> bit-exact legacy.
+fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32) -> f32 {
     var t_exit: f32;
     var t_start: f32;
     if (PERIODIC_DOMAIN) {
@@ -368,7 +377,7 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
         t_exit = hit.y;
         t_start = max(hit.x, 0.0);
     }
-    let dt_max = u.bmax.w;
+    let dt_max = max(u.bmax.w, dt_floor);
     var tau = 0.0;
     var t = t_start;
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
@@ -564,7 +573,7 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> ve
     let om2 = one_minus * one_minus;
     let fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun);
+    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y);
     let t_sun_ocean = exp(-tau_ocean);
     let cos_sun_n = max(0.0, dot(sun, n));
     let diff_irr = t_sun_ocean * cos_sun_n * 0.3183098861837907;
@@ -668,7 +677,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let om2 = one_minus * one_minus;
     let view_fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun);
+    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y);
     let t_sun_ocean = exp(-tau_ocean);
     let n_dot_l = max(0.0, dot(sun, n));
 
@@ -897,7 +906,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let p = u.cam_origin.xyz + t * dir;
             let sigma = sample_sigma(p);
 
-            var dt = step_dt_for_sigma(sigma, dt_max);
+            // Distance LOD: the step floor grows with distance so far
+            // wrapped copies march in angular, not metric, resolution
+            // (0 = exact legacy). Dense-sigma refinement still applies.
+            var dt = step_dt_for_sigma(sigma, max(dt_max, t * u.periodic.z));
             if (t + dt > t_far) {
                 dt = t_far - t;
             }
@@ -933,7 +945,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 air_t = exp(-aerial_strength * tau_air);
             }
 
-            let tau_sun = light_march_tau(p, sun);
+            let tau_sun = light_march_tau(p, sun, t * u.periodic.y);
             let light_transfer_split_strength = u.ambient_tint.w;
             var deep_shadow_gate = 0.0;
             if (deep_shadow_ms_suppression > 0.0

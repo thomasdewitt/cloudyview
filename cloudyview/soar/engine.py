@@ -108,6 +108,17 @@ PERIODIC_AIR_TAU_CUTOFF = 3.912023005428146  # -ln(0.02)
 PERIODIC_MAX_WRAPS = 2.0
 STEP_VOXEL_FACTOR = 2.0  # dt = min voxel dimension * this (witness value)
 DEFAULT_MAX_LIGHT_STEPS = 512  # keep in sync with both WGSL modules
+# Distance LOD (2026-07-17 perf pass): march step floors that grow with view
+# distance — degrees, not meters. 0.0 = exact legacy fixed-dt marching, and
+# the library default stays 0.0 until the golden references are deliberately
+# moved; the app opts in (see app.py). Perf ceilings measured in
+# temp/perf-2026-07-17: light march ~4x, view step ~5x on GATE hot case.
+DEFAULT_LIGHT_MARCH_LOD_DEGREES = 0.0
+DEFAULT_VIEW_STEP_LOD_DEGREES = 0.0
+# App-tier values (tuned on GATE contact sheets; below these angles the
+# floor only engages beyond ~10-20 km so near-field marching is untouched).
+APP_LIGHT_MARCH_LOD_DEGREES = 0.7
+APP_VIEW_STEP_LOD_DEGREES = 0.3
 # 0.45 was approved pre-realism; with the ported look Thomas flagged the
 # trailing smear ('turn down the time-blur') but 0.72 read 'a bit
 # speckled' — 0.58 is Thomas's requested midpoint (2026-07-10).
@@ -1164,6 +1175,8 @@ class InteractiveRenderer:
         ),
         ocean_sky_shadow_floor: float = DEFAULT_OCEAN_SKY_SHADOW_FLOOR,
         cone_stencil_theta_deg: float = DEFAULT_CONE_STENCIL_THETA_DEG,
+        light_march_lod_degrees: float = DEFAULT_LIGHT_MARCH_LOD_DEGREES,
+        view_step_lod_degrees: float = DEFAULT_VIEW_STEP_LOD_DEGREES,
         frame_index: int = 0,
         subpixel: bool = False,
         jitter_scale: float = 1.0,
@@ -1311,10 +1324,27 @@ class InteractiveRenderer:
             0.0,
         ]
         # Row 20: periodic domain (scene identity — toggling it must reset
-        # the temporal accumulation, and it does via the key below). Driven
-        # by renderer state, never per-call: the shader flag must match the
-        # ghost-border texel content baked by set_periodic().
-        u[20] = [1.0 if self.periodic else 0.0, 0.0, 0.0, 0.0]
+        # the temporal accumulation, and it does via the key below). x is
+        # driven by renderer state, never per-call: the shader flag must
+        # match the ghost-border texel content baked by set_periodic().
+        # y/z: distance-LOD step floors as tan(theta) (0 = exact legacy);
+        # per-call like the other look/perf knobs, and scene identity so a
+        # change resets the temporal accumulation.
+        for name, value in (
+            ("light_march_lod_degrees", light_march_lod_degrees),
+            ("view_step_lod_degrees", view_step_lod_degrees),
+        ):
+            value = _validate_finite_float(name, value)
+            if not 0.0 <= value < 45.0:
+                raise ValueError(
+                    f"{name} must be in [0, 45) degrees; got {value!r}."
+                )
+        u[20] = [
+            1.0 if self.periodic else 0.0,
+            float(np.tan(np.radians(light_march_lod_degrees))),
+            float(np.tan(np.radians(view_step_lod_degrees))),
+            0.0,
+        ]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity

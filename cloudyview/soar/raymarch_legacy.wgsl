@@ -72,6 +72,11 @@ struct Uniforms {
     // x = GGX roughness widening per normal LOD, y = ocean haze extinction
     // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
     ocean_realism_b: vec4<f32>,
+    // Row 20: shared with raymarch.wgsl (the uniform buffer is one layout
+    // for both modules). x = periodic enable (always 0 when this module is
+    // selected); y = light-march LOD tan(theta); z = view-step LOD
+    // tan(theta). y/z = 0 -> bit-exact legacy marching.
+    periodic: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -306,14 +311,16 @@ fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
 
 // Sun optical depth from p toward the sun: witness adaptive-step shadow march
 // to the box exit with tau saturation (witness.py:299-367).
-fn light_march_tau(p: vec3<f32>, sun: vec3<f32>) -> f32 {
+// `dt_floor` coarsens (never truncates) the quadrature for distant samples
+// (callers pass view_distance * u.periodic.y); 0 -> bit-exact legacy.
+fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32) -> f32 {
     let inv_dir = 1.0 / sun;
     let hit = ray_box(p, inv_dir);
     if (hit.x > hit.y || hit.y <= 0.0) {
         return 0.0;
     }
     let t_exit = hit.y;
-    let dt_max = u.bmax.w;
+    let dt_max = max(u.bmax.w, dt_floor);
     var tau = 0.0;
     var t = max(hit.x, 0.0);
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
@@ -470,7 +477,7 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> ve
     let om2 = one_minus * one_minus;
     let fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun);
+    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y);
     let t_sun_ocean = exp(-tau_ocean);
     let cos_sun_n = max(0.0, dot(sun, n));
     let diff_irr = t_sun_ocean * cos_sun_n * 0.3183098861837907;
@@ -574,7 +581,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let om2 = one_minus * one_minus;
     let view_fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun);
+    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y);
     let t_sun_ocean = exp(-tau_ocean);
     let n_dot_l = max(0.0, dot(sun, n));
 
@@ -782,7 +789,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let p = u.cam_origin.xyz + t * dir;
             let sigma = sample_sigma(p);
 
-            var dt = step_dt_for_sigma(sigma, dt_max);
+            // Distance LOD step floor (0 = exact legacy); see raymarch.wgsl.
+            var dt = step_dt_for_sigma(sigma, max(dt_max, t * u.periodic.z));
             if (t + dt > t_far) {
                 dt = t_far - t;
             }
@@ -818,7 +826,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 air_t = exp(-aerial_strength * tau_air);
             }
 
-            let tau_sun = light_march_tau(p, sun);
+            let tau_sun = light_march_tau(p, sun, t * u.periodic.y);
             let light_transfer_split_strength = u.ambient_tint.w;
             var deep_shadow_gate = 0.0;
             if (deep_shadow_ms_suppression > 0.0
