@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cloudyview — fly a real cloud field</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #06080c;
+    font-family: system-ui, -apple-system, sans-serif; color: #cfd8e3;
+  }
+  #view { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #overlay {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: #06080c; z-index: 2;
+  }
+  #overlay .msg { font-size: 15px; letter-spacing: 0.02em; color: #8fa0b5; }
+  #hud {
+    position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
+    background: rgba(10, 14, 20, 0.72); border: 1px solid rgba(160,180,205,.15);
+    border-radius: 12px; padding: 10px 18px; font-size: 13px; line-height: 1.7;
+    text-align: center; pointer-events: none; z-index: 1;
+    backdrop-filter: blur(6px);
+  }
+  #hud b { color: #e8eef6; font-weight: 600; }
+  #hud.hidden { display: none; }
+  #fps {
+    position: absolute; right: 14px; bottom: 12px; font-size: 12px;
+    font-variant-numeric: tabular-nums; color: rgba(220,230,242,.85);
+    background: rgba(10,14,20,.6); border-radius: 8px; padding: 4px 9px;
+    z-index: 1;
+  }
+  #credit {
+    position: absolute; left: 14px; bottom: 12px; font-size: 11px;
+    color: rgba(160,175,195,.55); z-index: 1;
+  }
+  #credit a { color: rgba(170,190,215,.75); }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="overlay"><div class="msg">loading…</div></div>
+<div id="hud">
+  <b>Click</b> to fly &nbsp;·&nbsp; <b>WASD</b> move &nbsp;·&nbsp;
+  <b>Space / Shift</b> up, down &nbsp;·&nbsp; <b>scroll</b> speed &nbsp;·&nbsp;
+  <b>Esc</b> release mouse<br>
+  Real large-eddy-simulation clouds (TWP-ICE, Darwin 2006) — volumetric
+  ray marching in your browser.
+</div>
+<div id="fps"></div>
+<div id="credit">cloudyview / soar</div>
+<script src="soar.js"></script>
+</body>
+</html>

@@ -161,3 +161,6 @@ benchmarking/output/
 
 .codex
 .claude/worktrees/
+web/demo/
+# the blanket *.html rule (line 5) must not swallow the browser build
+!web/index.html
