@@ -198,6 +198,24 @@ def test_camera_basis_orthonormal():
     np.testing.assert_allclose(np.dot(right, up), 0.0, atol=1e-12)
 
 
+def test_camera_basis_continuous_through_vertical():
+    # Regression (2026-07-17): the old up-reference flip within ~2.5° of
+    # vertical snapped the view (and flight frame) when looking straight
+    # up or down. The right vector must stay the analytic horizontal
+    # (cos az, -sin az, 0) at every elevation, including exactly ±90.
+    for az in (0.0, 45.0, 200.0):
+        expected = np.array(
+            [np.cos(np.deg2rad(az)), -np.sin(np.deg2rad(az)), 0.0]
+        )
+        prev = None
+        for el in (0.0, 60.0, 87.0, 89.0, 89.9, 90.0, -90.0):
+            _, right, _ = cv.Camera(azimuth=az, elevation=el).basis()
+            np.testing.assert_allclose(right, expected, atol=1e-12)
+            if prev is not None:
+                assert np.linalg.norm(right - prev) < 1e-9
+            prev = right
+
+
 # =============================================================================
 # cv.glimpse
 # =============================================================================

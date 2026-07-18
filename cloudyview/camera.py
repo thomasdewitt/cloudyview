@@ -59,18 +59,19 @@ class Camera:
         return direction_from_azimuth_elevation(self.azimuth, self.elevation)
 
     def basis(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Orthonormal (forward, right, up) camera basis.
+        """Orthonormal (forward, right, up) camera basis (no roll).
 
-        Matches the construction used by the witness renderer: world-up
-        unless the view is within ~2.5 degrees of vertical, in which case
-        +y is used as the up reference.
+        The right vector of a yaw/pitch camera is horizontal and depends
+        only on azimuth: normalize(cross(forward, world_up)) reduces
+        analytically to (cos az, -sin az, 0). Using the closed form keeps
+        the basis continuous through straight up/down — the historical
+        cross-product construction flipped its up-reference within ~2.5
+        degrees of vertical, visibly snapping the view (and the WASD
+        frame) near the pole.
         """
         forward = self.forward
-        world_up = np.array([0.0, 0.0, 1.0])
-        if abs(np.dot(forward, world_up)) > 0.999:
-            world_up = np.array([0.0, 1.0, 0.0])
-        right = np.cross(forward, world_up)
-        right /= np.linalg.norm(right)
+        az = np.deg2rad(self.azimuth)
+        right = np.array([np.cos(az), -np.sin(az), 0.0])
         up = np.cross(right, forward)
         up /= np.linalg.norm(up)
         return forward, right, up

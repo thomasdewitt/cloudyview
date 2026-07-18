@@ -118,9 +118,7 @@ BEHOLD_UNAVAILABLE_MESSAGE = "behold rendering requires the full dev install"
 CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
     "(Tab releases, click recaptures), scroll speed, "
-    "1 gradient, 2 MS floor, 3 ambient AO, 4 bounce attenuation, "
-    "J jitter toggle, B bird toggle, M minimap toggle, L distance-LOD toggle, "
-    "F3 stats readout, "
+    "B bird toggle, M minimap toggle, F3 stats readout, "
     "R record flight track (again to stop, then save; re-render with "
     "soar --render-track), "
     "F fullscreen/window, F12 screenshot, F1/? controls reference, "
@@ -289,9 +287,13 @@ class FlyThroughApp:
         self.context.configure(device=device, format=self.format)
 
         self.speed = DEFAULT_SPEED
+        # Decided configuration (2026-07-17): the A/B toggle keys for
+        # jitter (J), the realism gates (1-4), and the distance LOD (L)
+        # are retired — these are permanently on. The attributes remain
+        # for the metadata/uniform plumbing.
         self.jitter = True
         self.cb_enabled = [True, True, True, True]
-        self.distance_lod = True   # L toggles (A/B vs exact legacy marching)
+        self.distance_lod = True
         self._track_recording = False   # R toggles (see soar/track.py)
         self._track_samples: list[list[float]] = []
         self._track_t0 = 0.0
@@ -557,10 +559,6 @@ class FlyThroughApp:
             and now < getattr(self, "_title_flash_until", 0.0)
         )
 
-    def _cb_bits(self) -> str:
-        enabled = getattr(self, "cb_enabled", (True, True, True, True))
-        return "".join("1" if value else "0" for value in enabled)
-
     def _cb_strength_kwargs(self) -> dict:
         strengths = [
             value if enabled else 0.0
@@ -571,15 +569,10 @@ class FlyThroughApp:
             "deep_shadow_ms_suppression": strengths[1],
             "ambient_occlusion_strength": strengths[2],
             "bounce_depth_attenuation": strengths[3],
-            # Distance LOD (2026-07-17 perf pass): app opts in; the library
-            # default stays 0.0 (exact legacy) until the goldens move.
-            # L toggles it live for A/B flying.
-            "light_march_lod_degrees": (
-                APP_LIGHT_MARCH_LOD_DEGREES if self.distance_lod else 0.0
-            ),
-            "view_step_lod_degrees": (
-                APP_VIEW_STEP_LOD_DEGREES if self.distance_lod else 0.0
-            ),
+            # Distance LOD (decided 2026-07-17, aggressive angles): always
+            # on in the app; the library default stays 0.0 (exact legacy).
+            "light_march_lod_degrees": APP_LIGHT_MARCH_LOD_DEGREES,
+            "view_step_lod_degrees": APP_VIEW_STEP_LOD_DEGREES,
         }
 
     def _cycle_stats_mode(self) -> None:
@@ -1228,18 +1221,12 @@ class FlyThroughApp:
                 self._toggle_track_recording()
             elif self._paused:
                 return
-            elif key in ("j", "J"):
-                self.jitter = not self.jitter
             elif key in ("b", "B"):
                 self.bird_enabled = not self.bird_enabled
             elif key in ("m", "M"):
                 self.minimap_enabled = not self.minimap_enabled
-            elif key in ("l", "L"):
-                self.distance_lod = not self.distance_lod
             elif key == "F3":
                 self._cycle_stats_mode()
-            elif key in ("1", "2", "3", "4"):
-                self.cb_enabled[int(key) - 1] = not self.cb_enabled[int(key) - 1]
             elif key == "Tab":
                 self._capture_mouse(not self._captured)
             else:
@@ -1593,11 +1580,8 @@ class FlyThroughApp:
             ("G (paused)", "photoreal behold render of this view"),
         )),
         ("Toggles", (
-            ("L", "distance-LOD marching (fast) vs exact legacy"),
-            ("J", "ray jitter"),
             ("B", "bird"),
             ("M", "minimap"),
-            ("1-4", "realism terms (gradient, MS floor, AO, bounce)"),
             ("F3", "stats readout: subtle / expanded / hidden"),
             ("F", "fullscreen"),
         )),
@@ -1975,9 +1959,7 @@ class FlyThroughApp:
                     ("speed", f"{self.speed:.0f} m/s"),
                     ("tier", f"{self.renderer.quality_tier} · "
                              f"{self.renderer.render_scale:.2f}x"),
-                    ("cb", self._cb_bits()),
-                    ("flags", f"jitter {'on' if self.jitter else 'off'}"
-                              f" · map {'on' if self.minimap_enabled else 'off'}"
+                    ("flags", f"map {'on' if self.minimap_enabled else 'off'}"
                               f" · bird {'on' if self.bird_enabled else 'off'}"
                               + (" · REC"
                                  if getattr(self, "_track_recording", False)

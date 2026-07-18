@@ -82,19 +82,10 @@ def _camera_overlay_geometry(camera: Camera, image_shape: Tuple[int, int],
     forward = direction_from_azimuth_elevation(
         camera.azimuth, camera.elevation
     )
-    world_up = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(forward, world_up)) > 0.999:
-        world_up = np.array([0.0, 1.0, 0.0])
-    right = np.cross(forward, world_up)
-    right_norm = np.linalg.norm(right)
-    if right_norm < 1e-10:
-        right = np.array([
-            -np.sin(az_internal_rad),
-            np.cos(az_internal_rad),
-            0.0,
-        ])
-    else:
-        right /= right_norm
+    # Analytic horizontal right vector (see Camera.basis): continuous
+    # through straight up/down, no up-reference flip.
+    az_rad = np.deg2rad(camera.azimuth)
+    right = np.array([np.cos(az_rad), -np.sin(az_rad), 0.0])
 
     left_dir = forward - np.tan(half_hfov) * right
     right_dir = forward + np.tan(half_hfov) * right

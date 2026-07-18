@@ -32,7 +32,7 @@ Firefox 141+, Safari 26); the page shows a friendly message otherwise.
 ## Controls
 
 Click to capture the pointer; WASD + Space/Shift to fly; scroll for
-speed; L toggles the distance-LOD marching (A/B against exact legacy);
+speed;
 Esc releases the mouse.
 
 ## Self-test

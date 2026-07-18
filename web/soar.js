@@ -75,17 +75,11 @@ function forwardFrom(azDeg, elDeg) {
 }
 
 function cameraBasis(azDeg, elDeg) {
-  // Port of Camera.basis(): world-up reference unless nearly vertical.
+  // Port of Camera.basis(): analytic horizontal right vector, continuous
+  // through straight up/down (no up-reference flip at the pole).
   const f = forwardFrom(azDeg, elDeg);
-  let upRef = [0, 0, 1];
-  if (Math.abs(f[2]) > 0.999) upRef = [0, 1, 0];
-  const r = [
-    f[1] * upRef[2] - f[2] * upRef[1],
-    f[2] * upRef[0] - f[0] * upRef[2],
-    f[0] * upRef[1] - f[1] * upRef[0],
-  ];
-  const rn = Math.hypot(...r);
-  const right = r.map((v) => v / rn);
+  const az = azDeg * DEG;
+  const right = [Math.cos(az), -Math.sin(az), 0];
   const u = [
     right[1] * f[2] - right[2] * f[1],
     right[2] * f[0] - right[0] * f[2],
@@ -289,15 +283,12 @@ async function main() {
     speed: SPEED_DEFAULT,
     keys: new Set(),
     captured: false,
-    lod: true,
+
     renderScale: 1.0,
     frame: 0,
     stillFrames: 0,
     lastCam: "",
   };
-  // Distance-LOD template values (row 20 y/z) for the L toggle.
-  const lodY = uniform[20 * 4 + 1], lodZ = uniform[20 * 4 + 2];
-
   canvas.addEventListener("click", () => {
     if (!state.captured) canvas.requestPointerLock();
   });
@@ -328,7 +319,6 @@ async function main() {
     state.el = Math.max(-89, Math.min(89, state.el - e.movementY * 0.12));
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "l" || e.key === "L") { state.lod = !state.lod; return; }
     state.keys.add(e.key.toLowerCase());
   });
   document.addEventListener("keyup", (e) => state.keys.delete(e.key.toLowerCase()));
@@ -367,8 +357,7 @@ async function main() {
     U[7 * 4 + 0] = w; U[7 * 4 + 1] = h;
     U[10 * 4 + 0] = 1.0;                            // subpixel jitter
     U[10 * 4 + 1] = 0.65;
-    U[20 * 4 + 1] = state.lod ? lodY : 0.0;
-    U[20 * 4 + 2] = state.lod ? lodZ : 0.0;
+    // Row 20 y/z (distance LOD) stays at the template's shipped values.
     device.queue.writeBuffer(uniformBuf, 0, U);
   }
 
@@ -396,7 +385,7 @@ async function main() {
     if (!targets || targets.w !== w || targets.h !== h) makeTargets(w, h);
 
     const camKey = state.pos.map((v) => v.toFixed(2)).join(",")
-      + `|${state.az.toFixed(2)}|${state.el.toFixed(2)}|${w}x${h}|${state.lod}`;
+      + `|${state.az.toFixed(2)}|${state.el.toFixed(2)}|${w}x${h}`;
     const still = camKey === state.lastCam;
     state.lastCam = camKey;
     state.stillFrames = still ? Math.min(state.stillFrames + 1, STILL_ACCUM_MAX) : 0;
