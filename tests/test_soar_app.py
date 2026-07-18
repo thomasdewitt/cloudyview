@@ -215,11 +215,12 @@ def test_startup_auto_benchmark_selects_highest_60_fps_tier():
             self.reset_calls += 1
 
     app = object.__new__(FlyThroughApp)
-    app.canvas = DummyCanvas()
     app.renderer = FakeRenderer()
     app.camera = lambda: object()
 
-    FlyThroughApp._run_startup_tier_benchmark(app)
+    # Runs pre-window since 2026-07-17 (GNOME watchdog fix): the requested
+    # window size is passed in; no canvas exists yet.
+    FlyThroughApp._run_startup_tier_benchmark(app, (1280, 720))
 
     assert app.renderer.quality_tier == "medium"
     assert app._auto_benchmark_ms == timings

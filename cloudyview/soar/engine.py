@@ -115,10 +115,13 @@ DEFAULT_MAX_LIGHT_STEPS = 512  # keep in sync with both WGSL modules
 # temp/perf-2026-07-17: light march ~4x, view step ~5x on GATE hot case.
 DEFAULT_LIGHT_MARCH_LOD_DEGREES = 0.0
 DEFAULT_VIEW_STEP_LOD_DEGREES = 0.0
-# App-tier values (tuned on GATE contact sheets; below these angles the
-# floor only engages beyond ~10-20 km so near-field marching is untouched).
-APP_LIGHT_MARCH_LOD_DEGREES = 0.7
-APP_VIEW_STEP_LOD_DEGREES = 0.3
+# App-tier values. Thomas flew GATE 2026-07-17 comparing 0.7/0.3 against
+# 1.4/0.6 ("aggressive"): "aggressive is a big win. I do get around 60fps
+# now" and the visual difference was "not even clear which is better" —
+# so aggressive is the shipped default (~2x framerate in real flying; the
+# larger factors in temp/perf-2026-07-17 are the synthetic hot cameras).
+APP_LIGHT_MARCH_LOD_DEGREES = 1.4
+APP_VIEW_STEP_LOD_DEGREES = 0.6
 # 0.45 was approved pre-realism; with the ported look Thomas flagged the
 # trailing smear ('turn down the time-blur') but 0.72 read 'a bit
 # speckled' — 0.58 is Thomas's requested midpoint (2026-07-10).

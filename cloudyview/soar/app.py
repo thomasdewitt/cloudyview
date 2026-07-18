@@ -233,13 +233,6 @@ class FlyThroughApp:
         from rendercanvas.glfw import RenderCanvas, loop
 
         self._loop = loop
-        # "continuous" honors max_fps; uncapped ("fastest", vsync off) burns
-        # a full GPU rendering ~4000 fps nobody can see.
-        self.canvas = RenderCanvas(
-            title="cloudyview", size=size, update_mode="continuous",
-            max_fps=max_fps, vsync=True,
-        )
-        self._ensure_resizable()
 
         self._extinction_multiplier = float(extinction_multiplier)
         self.periodic = bool(periodic)
@@ -260,15 +253,27 @@ class FlyThroughApp:
         device = request_device()
         self.renderer = self._create_renderer(field, device=device)
 
-        self.context = self.canvas.get_context("wgpu")
-        self.format = self.context.get_preferred_format(device.adapter)
-        self.context.configure(device=device, format=self.format)
-
         # Camera state: world meters + met angles. Start at the default
         # witness viewpoint.
         self._reset_camera_to_default(camera)
         if self._requested_tier == "auto":
-            self._run_startup_tier_benchmark()
+            self._run_startup_tier_benchmark(size)
+
+        # The window is created only after the heavy startup work (volume
+        # upload, FIF ocean, shader compiles, tier benchmark). A visible
+        # window that pumps no events for those seconds is what made GNOME
+        # pop "not responding" over a perfectly healthy launch; now the
+        # window appearing means the app is ready to fly.
+        # "continuous" honors max_fps; uncapped ("fastest", vsync off)
+        # burns a full GPU rendering ~4000 fps nobody can see.
+        self.canvas = RenderCanvas(
+            title="cloudyview", size=size, update_mode="continuous",
+            max_fps=max_fps, vsync=True,
+        )
+        self._ensure_resizable()
+        self.context = self.canvas.get_context("wgpu")
+        self.format = self.context.get_preferred_format(device.adapter)
+        self.context.configure(device=device, format=self.format)
 
         self.speed = DEFAULT_SPEED
         self.jitter = True
@@ -358,9 +363,15 @@ class FlyThroughApp:
         self.elevation = cam0.elevation
         self.fov = cam0.fov
 
-    def _run_startup_tier_benchmark(self) -> None:
-        """Measure one steady frame per moving preset and select for 60 fps."""
-        size = tuple(int(v) for v in self.canvas.get_physical_size())
+    def _run_startup_tier_benchmark(self, size) -> None:
+        """Measure one steady frame per moving preset and select for 60 fps.
+
+        Runs before the window exists (see __init__), so the measurement
+        target is the requested window size rather than the physical
+        framebuffer; under HiDPI scaling the two can differ, which only
+        shifts the tier cutoffs slightly.
+        """
+        size = tuple(int(v) for v in size)
         timings = {}
         timing_source = None
         camera = self.camera()
@@ -1696,7 +1707,9 @@ class FlyThroughApp:
         imgui.set_next_window_pos(
             (logical_w - 14.0, logical_h - 12.0), cond, (1.0, 1.0)
         )
-        alpha = 0.38 if mode == "subtle" else 0.74
+        # 0.38 washed out over bright cumulus (Thomas, 2026-07-17: "the fps
+        # is hard to read when certain cloud colors are behind it").
+        alpha = 0.62 if mode == "subtle" else 0.80
         imgui.push_style_color(
             imgui.Col_.window_bg, (*PANEL_BG[:3], alpha)
         )
@@ -1710,7 +1723,7 @@ class FlyThroughApp:
             if mode == "subtle":
                 theme.mono_text(
                     f"{fps:.0f} fps · {frame_ms:.1f} ms",
-                    (*TEXT_MUTED[:3], 0.78), size=13.0,
+                    (*TEXT_MUTED[:3], 0.95), size=13.0,
                 )
             else:
                 cam = self.camera()
