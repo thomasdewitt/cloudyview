@@ -87,7 +87,12 @@ from .menu import (
     ACTION_TOGGLE_PERIODIC,
     ACTION_SETTINGS_MENU,
     ACTION_SELECT_TIER,
+    ACTION_CONTROLS_MENU,
+    ACTION_TRACK_SAVE,
+    ACTION_TRACK_DISCARD,
     BEHOLD_QUALITIES_BY_KEY,
+    MENU_CONTROLS,
+    MENU_TRACK_SAVE,
     MENU_ERROR,
     MENU_FILE_BROWSER_ICE,
     MENU_FILE_BROWSER_LIQUID,
@@ -114,11 +119,14 @@ CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
     "(Tab releases, click recaptures), scroll speed, "
     "1 gradient, 2 MS floor, 3 ambient AO, 4 bounce attenuation, "
-    "J jitter toggle, B bird toggle, M minimap toggle, F3 stats readout, "
-    "R record flight track (re-render with soar --render-track), "
-    "F fullscreen/window, F12 screenshot, ESC pause menu; "
+    "J jitter toggle, B bird toggle, M minimap toggle, L distance-LOD toggle, "
+    "F3 stats readout, "
+    "R record flight track (again to stop, then save; re-render with "
+    "soar --render-track), "
+    "F fullscreen/window, F12 screenshot, F1/? controls reference, "
+    "ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, G behold render, "
-    "S performance settings, "
+    "S settings (tiers, render scale, FOV), C controls reference, "
     "P periodic domain toggle, "
     "F fullscreen/window, Q quit from the top-level menu"
 )
@@ -287,6 +295,8 @@ class FlyThroughApp:
         self._track_recording = False   # R toggles (see soar/track.py)
         self._track_samples: list[list[float]] = []
         self._track_t0 = 0.0
+        self._track_pending = None      # stopped take awaiting save/discard
+        self._speed_flash_until = 0.0   # transient m/s readout after scroll
         self.bird_enabled = True
         self.minimap_enabled = True
         self._keys = set()
@@ -521,6 +531,10 @@ class FlyThroughApp:
             return self._render_quality_title()
         if state == MENU_SETTINGS:
             return "cloudyview settings"
+        if state == MENU_CONTROLS:
+            return "cloudyview controls"
+        if state == MENU_TRACK_SAVE:
+            return "cloudyview save flight track?"
         if state == MENU_ERROR:
             return "cloudyview error"
         return self._paused_title(fps)
@@ -581,6 +595,11 @@ class FlyThroughApp:
         self._paused = paused
         self._keys.clear()
         if paused:
+            # A recording survives a pause, but paused time must not leak
+            # into the track's clock (the offline video would render a
+            # long hold between the two poses).
+            if getattr(self, "_track_recording", False):
+                self._track_pause_started = perf_counter()
             self._menu_state = MENU_MAIN
             self._capture_mouse(False)
             self.canvas.set_title(self._menu_title())
@@ -591,6 +610,11 @@ class FlyThroughApp:
             self._error_message = None
             self._capture_mouse(True)
             self._last_time = perf_counter()
+            paused_for = getattr(self, "_track_pause_started", None)
+            if paused_for is not None:
+                if getattr(self, "_track_recording", False):
+                    self._track_t0 += perf_counter() - paused_for
+                self._track_pause_started = None
         self.canvas.request_draw()
 
     def _current_monitor(self):
@@ -915,23 +939,34 @@ class FlyThroughApp:
 
     def _toggle_track_recording(self) -> None:
         if getattr(self, "_track_recording", False):
-            self._finish_track_recording()
+            self._stop_track_recording()
             return
         self._track_samples = []
         self._track_t0 = perf_counter()
         self._track_recording = True
-        self._flash_title("cloudyview recording track — R to stop",
+        self._flash_title("cloudyview recording flight track — R to stop",
                           seconds=3.0)
 
-    def _finish_track_recording(self) -> None:
-        from .track import save_track
-
+    def _stop_track_recording(self) -> None:
+        """R while recording: hold the take and ask save / discard."""
         self._track_recording = False
         samples = self._track_samples
         self._track_samples = []
         if len(samples) < 2:
             self._flash_title("cloudyview track discarded (too short)",
                               seconds=3.0)
+            return
+        self._track_pending = samples
+        self._set_paused(True)
+        self._set_menu_state(MENU_TRACK_SAVE)
+
+    def _track_save_pending(self) -> None:
+        from .track import save_track
+
+        samples = getattr(self, "_track_pending", None)
+        self._track_pending = None
+        if not samples:
+            self._set_paused(False)
             return
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = Path.cwd() / f"cloudyview_track_{stamp}.json"
@@ -953,14 +988,18 @@ class FlyThroughApp:
         save_track(path, header, samples)
         duration = samples[-1][0]
         self._flash_title(
-            f"cloudyview track saved — {len(samples)} samples, "
-            f"{duration:.0f}s",
-            seconds=4.0,
+            f"cloudyview track saved — {path.name}", seconds=4.0
         )
         print(
             f"Saved track {path} ({len(samples)} samples, {duration:.1f}s)\n"
             f"Render with: soar --render-track {path}"
         )
+        self._set_paused(False)
+
+    def _track_discard_pending(self) -> None:
+        self._track_pending = None
+        self._flash_title("cloudyview track discarded", seconds=2.5)
+        self._set_paused(False)
 
     def _save_screenshot(self) -> None:
         camera = self.camera()
@@ -1136,6 +1175,9 @@ class FlyThroughApp:
             action = transition.action
             if action == ACTION_PAUSE:
                 self._set_paused(True)
+                # F1/? pauses straight into the controls reference.
+                if transition.next_state not in (None, MENU_MAIN):
+                    self._set_menu_state(transition.next_state)
             elif action == ACTION_RESUME:
                 self._set_paused(False)
             elif action == ACTION_QUIT:
@@ -1171,6 +1213,12 @@ class FlyThroughApp:
                     self._set_menu_state(transition.next_state or MENU_MAIN)
             elif action == ACTION_TOGGLE_PERIODIC:
                 self._toggle_periodic()
+            elif action == ACTION_CONTROLS_MENU:
+                self._set_menu_state(MENU_CONTROLS)
+            elif action == ACTION_TRACK_SAVE:
+                self._track_save_pending()
+            elif action == ACTION_TRACK_DISCARD:
+                self._track_discard_pending()
             elif action == ACTION_SCREENSHOT:
                 self._save_screenshot()
             elif key in ("r", "R"):
@@ -1222,6 +1270,9 @@ class FlyThroughApp:
             notches = -event.get("dy", 0.0) / 100.0
             self.speed = float(np.clip(
                 self.speed * SPEED_WHEEL_FACTOR ** notches, 0.5, 5000.0))
+            # Surface the new speed briefly in the corner pill (otherwise
+            # it is only visible in the expanded F3 stats).
+            self._speed_flash_until = perf_counter() + 1.5
 
     def _move(self, dt: float):
         if self._paused:
@@ -1414,6 +1465,10 @@ class FlyThroughApp:
             self._draw_quality_menu(imgui)
         elif state == MENU_SETTINGS:
             self._draw_settings_menu(imgui)
+        elif state == MENU_CONTROLS:
+            self._draw_controls_menu(imgui)
+        elif state == MENU_TRACK_SAVE:
+            self._draw_track_save_menu(imgui)
         elif state == MENU_OPEN_ICE_PROMPT:
             self._draw_ice_prompt(imgui)
         elif state in (MENU_FILE_BROWSER_LIQUID, MENU_FILE_BROWSER_ICE):
@@ -1458,6 +1513,8 @@ class FlyThroughApp:
                 theme.caption(BEHOLD_UNAVAILABLE_MESSAGE, wrapped=True)
             if theme.menu_button("Settings...", "S"):
                 self._set_menu_state(MENU_SETTINGS)
+            if theme.menu_button("Controls...", "C"):
+                self._set_menu_state(MENU_CONTROLS)
             periodic_label = (
                 "Periodic domain: on"
                 if self.periodic
@@ -1521,6 +1578,89 @@ class FlyThroughApp:
         finally:
             self._end_imgui_window(imgui)
 
+    _CONTROLS_REFERENCE = (
+        ("Flying", (
+            ("W / S", "forward / back along view"),
+            ("A / D", "strafe left / right"),
+            ("Space", "climb"),
+            ("LShift / C", "descend"),
+            ("mouse", "look (Tab releases, click recaptures)"),
+            ("scroll", "flight speed"),
+        )),
+        ("Recording & captures", (
+            ("R", "record flight track (again to stop, then save)"),
+            ("F12", "screenshot with reproduction metadata"),
+            ("G (paused)", "photoreal behold render of this view"),
+        )),
+        ("Toggles", (
+            ("L", "distance-LOD marching (fast) vs exact legacy"),
+            ("J", "ray jitter"),
+            ("B", "bird"),
+            ("M", "minimap"),
+            ("1-4", "realism terms (gradient, MS floor, AO, bounce)"),
+            ("F3", "stats readout: subtle / expanded / hidden"),
+            ("F", "fullscreen"),
+        )),
+        ("Menus", (
+            ("ESC", "pause menu / back"),
+            ("F1 or ?", "this reference"),
+            ("O (paused)", "open a NetCDF cloud field"),
+            ("P (paused)", "periodic domain on/off"),
+        )),
+    )
+
+    def _draw_controls_menu(self, imgui) -> None:
+        theme = self._theme
+        self._begin_imgui_window(imgui, "controls_menu", 460.0)
+        try:
+            theme.header("cloudyview", "Controls")
+            from .theme import TEXT_FAINT, TEXT_MUTED
+
+            key_w = 110.0
+            for section, rows in self._CONTROLS_REFERENCE:
+                imgui.dummy((1.0, 4.0))
+                theme.caption(section)
+                theme.push_font(theme.font_mono, 13.0)
+                for key, what in rows:
+                    theme.body_text(key, TEXT_MUTED)
+                    imgui.same_line(
+                        key_w + imgui.get_style().window_padding.x
+                    )
+                    theme.body_text(what, TEXT_FAINT)
+                theme.pop_font()
+            imgui.dummy((1.0, 8.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_track_save_menu(self, imgui) -> None:
+        theme = self._theme
+        self._begin_imgui_window(imgui, "track_save_menu", 460.0)
+        try:
+            theme.header("flight track", "Save recording?")
+            samples = getattr(self, "_track_pending", None) or []
+            duration = samples[-1][0] if samples else 0.0
+            theme.body_text(
+                f"{duration:.0f} s of flight · {len(samples)} camera samples"
+            )
+            theme.caption(
+                "Saving writes a small .json flight track next to your "
+                "screenshots. Render it to a smooth 60 fps video (each "
+                "frame fully converged — no motion speckle) with:",
+                wrapped=True,
+            )
+            theme.mono_text(
+                "soar --render-track <saved file>", size=12.0,
+            )
+            imgui.dummy((1.0, 8.0))
+            if theme.menu_button("Save", "S / Enter"):
+                self._track_save_pending()
+            if theme.menu_button("Discard", "D / ESC"):
+                self._track_discard_pending()
+        finally:
+            self._end_imgui_window(imgui)
+
     def _draw_settings_menu(self, imgui) -> None:
         from .theme import TEXT_FAINT
 
@@ -1572,6 +1712,15 @@ class FlyThroughApp:
             )
             if changed:
                 self._set_motion_blend_alpha(alpha)
+
+            theme.caption("Field of view (vertical)")
+            changed, fov = imgui.slider_float(
+                "##fov", float(self.fov), 30.0, 110.0, "%.0f°",
+            )
+            if changed:
+                # Accumulation resets by itself: fov is scene identity via
+                # the uniform key.
+                self.fov = float(fov)
 
             imgui.dummy((1.0, 6.0))
             fp_label = (
@@ -1789,12 +1938,30 @@ class FlyThroughApp:
         imgui.begin("##stats_readout", None, flags)
         try:
             if mode == "subtle":
-                rec = (
-                    "REC · " if getattr(self, "_track_recording", False)
+                recording = getattr(self, "_track_recording", False)
+                if recording:
+                    # Pulsing red record dot ahead of the readout.
+                    pulse = 0.55 + 0.45 * np.sin(perf_counter() * 4.0)
+                    draw = imgui.get_window_draw_list()
+                    pos = imgui.get_cursor_screen_pos()
+                    center = (pos.x + 6.0, pos.y + 8.0)
+                    draw.add_circle_filled(
+                        center, 5.0,
+                        imgui.color_convert_float4_to_u32(
+                            (0.92, 0.18, 0.15, pulse)
+                        ),
+                    )
+                    imgui.dummy((16.0, 1.0))
+                    imgui.same_line()
+                speed_note = (
+                    f" · {self.speed:.0f} m/s"
+                    if perf_counter() < getattr(
+                        self, "_speed_flash_until", 0.0
+                    )
                     else ""
                 )
                 theme.mono_text(
-                    f"{rec}{fps:.0f} fps · {frame_ms:.1f} ms",
+                    f"{fps:.0f} fps · {frame_ms:.1f} ms{speed_note}",
                     (*TEXT_MUTED[:3], 0.95), size=13.0,
                 )
             else:

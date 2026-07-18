@@ -20,6 +20,9 @@ ACTION_SCREENSHOT = "screenshot"
 ACTION_TOGGLE_PERIODIC = "toggle_periodic"
 ACTION_SETTINGS_MENU = "settings_menu"
 ACTION_SELECT_TIER = "select_tier"
+ACTION_CONTROLS_MENU = "controls_menu"
+ACTION_TRACK_SAVE = "track_save"
+ACTION_TRACK_DISCARD = "track_discard"
 
 MENU_MAIN = "main"
 MENU_FILE_BROWSER_LIQUID = "file_browser_liquid"
@@ -27,6 +30,8 @@ MENU_OPEN_ICE_PROMPT = "open_ice_prompt"
 MENU_FILE_BROWSER_ICE = "file_browser_ice"
 MENU_RENDER_QUALITY = "render_quality"
 MENU_SETTINGS = "settings"
+MENU_CONTROLS = "controls"
+MENU_TRACK_SAVE = "track_save"
 MENU_ERROR = "error"
 
 BEHOLD_QUALITIES_BY_KEY = {
@@ -67,6 +72,9 @@ def menu_transition(
             return MenuTransition(ACTION_PAUSE, MENU_MAIN)
         if key == "F12":
             return MenuTransition(ACTION_SCREENSHOT)
+        if key in ("F1", "?"):
+            # Pause straight into the controls reference.
+            return MenuTransition(ACTION_PAUSE, MENU_CONTROLS)
         if normalized == "f":
             return MenuTransition(ACTION_TOGGLE_FULLSCREEN)
         return MenuTransition(None)
@@ -78,6 +86,8 @@ def menu_transition(
             return MenuTransition(ACTION_QUIT, MENU_MAIN)
         if normalized == "f":
             return MenuTransition(ACTION_TOGGLE_FULLSCREEN, MENU_MAIN)
+        if normalized == "c":
+            return MenuTransition(ACTION_CONTROLS_MENU, MENU_CONTROLS)
         if normalized == "o":
             return MenuTransition(ACTION_OPEN_FILE, MENU_FILE_BROWSER_LIQUID)
         if normalized == "g":
@@ -126,6 +136,20 @@ def menu_transition(
                 ACTION_SELECT_TIER, MENU_SETTINGS, tier=tier
             )
         return MenuTransition(None, MENU_SETTINGS)
+
+    if menu_state == MENU_CONTROLS:
+        if key == "Escape":
+            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        return MenuTransition(None, MENU_CONTROLS)
+
+    if menu_state == MENU_TRACK_SAVE:
+        # A recording just stopped: explicit save/discard only. R must not
+        # resume here (it would silently drop the take).
+        if normalized == "s" or key == "Enter":
+            return MenuTransition(ACTION_TRACK_SAVE, MENU_MAIN)
+        if normalized == "d" or key == "Escape":
+            return MenuTransition(ACTION_TRACK_DISCARD, MENU_MAIN)
+        return MenuTransition(None, MENU_TRACK_SAVE)
 
     if menu_state == MENU_ERROR:
         if key == "Escape":

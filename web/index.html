@@ -35,6 +35,17 @@
     color: rgba(160,175,195,.55); z-index: 1;
   }
   #credit a { color: rgba(170,190,215,.75); }
+  #topbar {
+    position: absolute; right: 14px; top: 12px; display: flex; gap: 8px;
+    z-index: 1;
+  }
+  #topbar.hidden { display: none; }
+  #topbar button {
+    background: rgba(10, 14, 20, 0.72); color: #cfd8e3; font-size: 12px;
+    border: 1px solid rgba(160,180,205,.18); border-radius: 9px;
+    padding: 6px 12px; cursor: pointer; backdrop-filter: blur(6px);
+  }
+  #topbar button:hover { border-color: rgba(180,200,225,.45); }
 </style>
 </head>
 <body>
@@ -48,6 +59,10 @@
   ray marching in your browser.
 </div>
 <div id="fps"></div>
+<div id="topbar">
+  <button id="qualitybtn" title="render resolution">quality: full</button>
+  <button id="fsbtn" title="fullscreen">⛶ fullscreen</button>
+</div>
 <div id="credit">cloudyview / soar</div>
 <script src="soar.js"></script>
 </body>

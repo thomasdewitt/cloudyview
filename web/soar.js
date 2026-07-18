@@ -301,9 +301,26 @@ async function main() {
   canvas.addEventListener("click", () => {
     if (!state.captured) canvas.requestPointerLock();
   });
+  const topbar = document.getElementById("topbar");
   document.addEventListener("pointerlockchange", () => {
     state.captured = document.pointerLockElement === canvas;
     hud.classList.toggle("hidden", state.captured);
+    topbar.classList.toggle("hidden", state.captured);
+  });
+  const QUALITY_STEPS = [
+    ["full", 1.0], ["balanced", 0.75], ["fast", 0.5],
+  ];
+  let qualityIdx = 0;
+  const qualityBtn = document.getElementById("qualitybtn");
+  qualityBtn.addEventListener("click", () => {
+    qualityIdx = (qualityIdx + 1) % QUALITY_STEPS.length;
+    const [label, scale] = QUALITY_STEPS[qualityIdx];
+    state.renderScale = scale;
+    qualityBtn.textContent = `quality: ${label}`;
+  });
+  document.getElementById("fsbtn").addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
   });
   document.addEventListener("mousemove", (e) => {
     if (!state.captured) return;
