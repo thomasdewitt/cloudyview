@@ -107,6 +107,29 @@ def main(argv=None):
     parser.add_argument("--fov", type=float,
                         help="initial vertical field of view in degrees")
     parser.add_argument(
+        "--render-track",
+        metavar="TRACK_JSON",
+        help="re-render a recorded flight track (R in the app) into a "
+             "video, then exit; the cloud field is reloaded from the "
+             "track's own header, so no filepath argument is needed",
+    )
+    parser.add_argument(
+        "--track-out", metavar="OUT",
+        help="output video path (default: track filename with .mp4)",
+    )
+    parser.add_argument("--track-fps", type=float, default=60.0,
+                        help="output video frame rate (default 60)")
+    parser.add_argument(
+        "--track-size", default="1920x1080",
+        help="video resolution WxH (default 1920x1080)",
+    )
+    parser.add_argument(
+        "--track-accumulate", type=int, default=24,
+        help="jittered accumulation passes per video frame — converged, "
+             "speckle-free frames regardless of flight-time fps "
+             "(default 24)",
+    )
+    parser.add_argument(
         "--offscreen-smoke",
         action="store_true",
         help="load the selected/default data and render exactly one small "
@@ -118,6 +141,21 @@ def main(argv=None):
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args(argv)
+
+    if args.render_track:
+        from .track import render_track
+
+        out = args.track_out or str(
+            Path(args.render_track).with_suffix(".mp4")
+        )
+        tw, th = (int(v) for v in args.track_size.lower().split("x"))
+        render_track(
+            args.render_track, out,
+            fps=args.track_fps,
+            size=(tw, th),
+            accumulate_frames=args.track_accumulate,
+        )
+        return
 
     w, h = (int(v) for v in args.size.lower().split("x"))
 

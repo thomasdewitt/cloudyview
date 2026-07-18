@@ -114,6 +114,7 @@ CONTROL_SUMMARY = (
     "(Tab releases, click recaptures), scroll speed, "
     "1 gradient, 2 MS floor, 3 ambient AO, 4 bounce attenuation, "
     "J jitter toggle, B bird toggle, M minimap toggle, F3 stats readout, "
+    "R record flight track (re-render with soar --render-track), "
     "F fullscreen/window, F12 screenshot, ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, G behold render, "
     "S performance settings, "
@@ -279,6 +280,9 @@ class FlyThroughApp:
         self.jitter = True
         self.cb_enabled = [True, True, True, True]
         self.distance_lod = True   # L toggles (A/B vs exact legacy marching)
+        self._track_recording = False   # R toggles (see soar/track.py)
+        self._track_samples: list[list[float]] = []
+        self._track_t0 = 0.0
         self.bird_enabled = True
         self.minimap_enabled = True
         self._keys = set()
@@ -899,6 +903,55 @@ class FlyThroughApp:
             render_options=render_options,
         )
 
+    def _toggle_track_recording(self) -> None:
+        if getattr(self, "_track_recording", False):
+            self._finish_track_recording()
+            return
+        self._track_samples = []
+        self._track_t0 = perf_counter()
+        self._track_recording = True
+        self._flash_title("cloudyview recording track — R to stop",
+                          seconds=3.0)
+
+    def _finish_track_recording(self) -> None:
+        from .track import save_track
+
+        self._track_recording = False
+        samples = self._track_samples
+        self._track_samples = []
+        if len(samples) < 2:
+            self._flash_title("cloudyview track discarded (too short)",
+                              seconds=3.0)
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = Path.cwd() / f"cloudyview_track_{stamp}.json"
+        header = build_render_metadata(
+            self.renderer.field,
+            self.camera(),
+            sun_azimuth=self.sun_azimuth,
+            sun_elevation=self.sun_elevation,
+            renderer="soar",
+            quality=self.renderer.quality_tier,
+            reproduction_command=f"soar --render-track {path.name}",
+            render_options={
+                **self._cb_strength_kwargs(),
+                "periodic": self.renderer.periodic,
+                "extinction_multiplier": self._extinction_multiplier,
+                "volume_fp16": self.volume_fp16,
+            },
+        )
+        save_track(path, header, samples)
+        duration = samples[-1][0]
+        self._flash_title(
+            f"cloudyview track saved — {len(samples)} samples, "
+            f"{duration:.0f}s",
+            seconds=4.0,
+        )
+        print(
+            f"Saved track {path} ({len(samples)} samples, {duration:.1f}s)\n"
+            f"Render with: soar --render-track {path}"
+        )
+
     def _save_screenshot(self) -> None:
         camera = self.camera()
         w, h = self.canvas.get_physical_size()
@@ -1110,6 +1163,11 @@ class FlyThroughApp:
                 self._toggle_periodic()
             elif action == ACTION_SCREENSHOT:
                 self._save_screenshot()
+            elif key in ("r", "R"):
+                # Only reached unpaused: while paused the menu table above
+                # consumes R as resume (documented), so record start/stop
+                # is a flying-only control.
+                self._toggle_track_recording()
             elif self._paused:
                 return
             elif key in ("j", "J"):
@@ -1721,8 +1779,12 @@ class FlyThroughApp:
         imgui.begin("##stats_readout", None, flags)
         try:
             if mode == "subtle":
+                rec = (
+                    "REC · " if getattr(self, "_track_recording", False)
+                    else ""
+                )
                 theme.mono_text(
-                    f"{fps:.0f} fps · {frame_ms:.1f} ms",
+                    f"{rec}{fps:.0f} fps · {frame_ms:.1f} ms",
                     (*TEXT_MUTED[:3], 0.95), size=13.0,
                 )
             else:
@@ -1739,7 +1801,10 @@ class FlyThroughApp:
                     ("cb", self._cb_bits()),
                     ("flags", f"jitter {'on' if self.jitter else 'off'}"
                               f" · map {'on' if self.minimap_enabled else 'off'}"
-                              f" · bird {'on' if self.bird_enabled else 'off'}"),
+                              f" · bird {'on' if self.bird_enabled else 'off'}"
+                              + (" · REC"
+                                 if getattr(self, "_track_recording", False)
+                                 else "")),
                     ("frame", f"{self._frame_index}"),
                 )
                 theme.push_font(theme.font_mono, 13.0)
@@ -1780,6 +1845,13 @@ class FlyThroughApp:
                 sun_elevation=self.sun_elevation,
                 frame_index=self._frame_index,
                 **self._cb_strength_kwargs())
+        if (getattr(self, "_track_recording", False) and not self._paused
+                and self._behold_job is None):
+            self._track_samples.append([
+                perf_counter() - self._track_t0,
+                *camera.position,
+                camera.azimuth, camera.elevation, camera.fov,
+            ])
         self._frame_index += 1
 
         texture = self.context.get_current_texture()
