@@ -61,6 +61,7 @@ from .engine import (
     InteractiveRenderer,
     QUALITY_PRESETS,
     camera_world_origin,
+    choose_volume_fp16,
     periodic_march_cap_m,
     request_device,
 )
@@ -229,7 +230,7 @@ class FlyThroughApp:
                  camera: Camera | None = None,
                  periodic: bool = True,
                  tier: str = "auto",
-                 volume_fp16: bool = False):
+                 volume_fp16: bool | None = None):
         # Import here so offscreen use never needs glfw / a display.
         from rendercanvas.glfw import RenderCanvas, loop
 
@@ -237,7 +238,10 @@ class FlyThroughApp:
 
         self._extinction_multiplier = float(extinction_multiplier)
         self.periodic = bool(periodic)
-        self.volume_fp16 = bool(volume_fp16)
+        # None = auto: choose_volume_fp16 decides per loaded field (so an
+        # O-menu reload of a gigaLES gets fp16 even if the session started
+        # on a small subvolume).
+        self.volume_fp16 = None if volume_fp16 is None else bool(volume_fp16)
         self._requested_tier = str(tier).lower()
         if self._requested_tier not in (*QUALITY_PRESETS, "auto"):
             raise ValueError(
@@ -329,6 +333,12 @@ class FlyThroughApp:
 
     def _create_renderer(self, field: CloudField, *, device=None, previous=None):
         """Create the field-resident renderer, reusing the app GPU device."""
+        volume_fp16 = choose_volume_fp16(field.lwc.size, self.volume_fp16)
+        if volume_fp16 and self.volume_fp16 is None:
+            print(
+                f"soar: {field.lwc.size / 1e6:.0f}M-voxel volume -> fp16 "
+                "texture (auto; --fp32-volume forces full precision)"
+            )
         kwargs = {
             "extinction_multiplier": self._extinction_multiplier,
             "periodic": self.periodic,
@@ -341,7 +351,7 @@ class FlyThroughApp:
                     else self._requested_tier
                 )
             ),
-            "volume_fp16": self.volume_fp16,
+            "volume_fp16": volume_fp16,
             "device": device,
         }
         if previous is not None:
@@ -937,7 +947,7 @@ class FlyThroughApp:
                 **self._cb_strength_kwargs(),
                 "periodic": self.renderer.periodic,
                 "extinction_multiplier": self._extinction_multiplier,
-                "volume_fp16": self.volume_fp16,
+                "volume_fp16": self.renderer.volume_fp16,
             },
         )
         save_track(path, header, samples)

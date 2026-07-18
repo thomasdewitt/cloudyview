@@ -115,6 +115,19 @@ DEFAULT_MAX_LIGHT_STEPS = 512  # keep in sync with both WGSL modules
 # temp/perf-2026-07-17: light march ~4x, view step ~5x on GATE hot case.
 DEFAULT_LIGHT_MARCH_LOD_DEGREES = 0.0
 DEFAULT_VIEW_STEP_LOD_DEGREES = 0.0
+# Auto fp16-volume threshold: at/above this voxel count an fp32 volume
+# costs >= 1 GB VRAM and the fp16 texture is measured 1.46x faster on the
+# GATE gigaLES (bandwidth-bound marching), with ~1e-3 relative sampling
+# error and untouched geometry. The library still defaults to fp32; the
+# app and CLI use choose_volume_fp16() unless the user forces either way.
+AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024
+
+
+def choose_volume_fp16(n_voxels: int, explicit: Optional[bool]) -> bool:
+    """Resolve the fp16-volume setting: explicit choice wins, else by size."""
+    if explicit is not None:
+        return bool(explicit)
+    return int(n_voxels) >= AUTO_FP16_MIN_VOXELS
 # App-tier values. Thomas flew GATE 2026-07-17 comparing 0.7/0.3 against
 # 1.4/0.6 ("aggressive"): "aggressive is a big win. I do get around 60fps
 # now" and the visual difference was "not even clear which is better" —

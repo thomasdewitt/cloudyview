@@ -80,10 +80,18 @@ def main(argv=None):
         default="auto",
         help="interactive performance tier (default auto benchmarks at startup)",
     )
-    parser.add_argument(
+    fp16_group = parser.add_mutually_exclusive_group()
+    fp16_group.add_argument(
         "--fp16-volume",
         action="store_true",
-        help="store cloud extinction in a filterable fp16 texture (applies at load)",
+        help="force the fp16 extinction texture regardless of volume size",
+    )
+    fp16_group.add_argument(
+        "--fp32-volume",
+        action="store_true",
+        help="force full-precision fp32 (default is automatic: fields at "
+             "or above 256M voxels get fp16 — half the VRAM, ~1.5x faster "
+             "marching, ~1e-3 sampling precision, geometry untouched)",
     )
     parser.add_argument(
         "--no-periodic",
@@ -208,7 +216,11 @@ def main(argv=None):
             camera=camera,
             periodic=not args.no_periodic,
             tier=args.tier,
-            volume_fp16=args.fp16_volume,
+            volume_fp16=(
+                True if args.fp16_volume
+                else False if args.fp32_volume
+                else None
+            ),
             startup_message=("cloudyview demo data" if using_demo else None))
 
 

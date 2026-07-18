@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from cloudyview.soar.engine import AUTO_FP16_MIN_VOXELS, choose_volume_fp16
 from cloudyview.soar.track import (
     TRACK_SCHEMA,
     load_track,
@@ -81,6 +82,14 @@ def test_periodic_position_interpolates_through_domain_wrap():
     frames_flat = resample_track(rows, 10.0, periodic=False)
     xs_flat = np.array([cam.position[0] for _, cam in frames_flat])
     assert np.any(np.abs(xs_flat) < 0.2)
+
+
+def test_choose_volume_fp16_auto_and_explicit():
+    assert not choose_volume_fp16(AUTO_FP16_MIN_VOXELS - 1, None)
+    assert choose_volume_fp16(AUTO_FP16_MIN_VOXELS, None)
+    # An explicit user choice always wins over the size heuristic.
+    assert choose_volume_fp16(1, True)
+    assert not choose_volume_fp16(AUTO_FP16_MIN_VOXELS * 4, False)
 
 
 def test_unsorted_and_duplicate_times_are_cleaned():

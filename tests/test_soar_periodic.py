@@ -522,12 +522,17 @@ def test_cli_tier_and_fp16_volume_reach_run_app(monkeypatch):
 
     soar_main.main([str(DATA128)])
     assert captured["tier"] == "auto"
-    assert captured["volume_fp16"] is False
+    # None = auto since 2026-07-17: choose_volume_fp16 resolves per field.
+    assert captured["volume_fp16"] is None
 
     captured.clear()
     soar_main.main([str(DATA128), "--tier", "low", "--fp16-volume"])
     assert captured["tier"] == "low"
     assert captured["volume_fp16"] is True
+
+    captured.clear()
+    soar_main.main([str(DATA128), "--fp32-volume"])
+    assert captured["volume_fp16"] is False
 
 
 # ---------------------------------------------------------------------------
