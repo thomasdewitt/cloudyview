@@ -14,12 +14,13 @@ from cloudyview.soar.app import (
     ACTION_OPEN_ICE_YES,
     ACTION_PAUSE,
     ACTION_QUIT,
-    ACTION_RENDER_BEHOLD,
+    ACTION_COPY_BEHOLD_COMMAND,
+    ACTION_SELECT_BEHOLD_QUALITY,
     ACTION_RENDER_MENU,
     ACTION_RESUME,
     ACTION_SCREENSHOT,
     ACTION_SELECT_TIER,
-    ACTION_SETTINGS_MENU,
+    ACTION_QUALITY_MENU,
     ACTION_TOGGLE_FULLSCREEN,
     BEHOLD_QUALITIES_BY_KEY,
     MENU_FILE_BROWSER_ICE,
@@ -31,7 +32,7 @@ from cloudyview.soar.app import (
     MENU_OPEN_UNITS_PROMPT,
     MENU_RENDER_QUALITY,
     MENU_SCREENSHOT,
-    MENU_SETTINGS,
+    MENU_QUALITY,
     OCEAN_FLOOR_MARGIN_M,
     _clamp_position_above_ocean,
     _control_action_for_key,
@@ -78,8 +79,7 @@ def make_event_app():
     app._last_file_dir = Path.cwd()
     app._file_browser_error = None
     app._loading_job = None
-    app._behold_job = None
-    app._rendering = False
+    app._video_render = None
     app._error_message = None
     app._imgui = None
     app._captured = True
@@ -95,7 +95,8 @@ def make_event_app():
     app.capture_calls = []
     app.fullscreen_calls = 0
     app.open_calls = 0
-    app.render_calls = []
+    app._behold_quality = "high"
+    app._clipboard_note = None
     app.screenshot_calls = 0
     app.tier_calls = []
 
@@ -111,7 +112,6 @@ def make_event_app():
     app._capture_mouse = capture_mouse
     app._toggle_fullscreen = toggle_fullscreen
     app._start_open_file = lambda: setattr(app, "open_calls", app.open_calls + 1)
-    app._run_behold_render = lambda quality: app.render_calls.append(quality)
     app.screenshot_overlays = []
 
     def save_screenshot(*, overlays=True):
@@ -154,7 +154,7 @@ def test_pause_submenu_state_transitions_are_explicit():
 
     for key, quality in BEHOLD_QUALITIES_BY_KEY.items():
         transition = _menu_transition(True, MENU_RENDER_QUALITY, key)
-        assert transition.action == ACTION_RENDER_BEHOLD
+        assert transition.action == ACTION_SELECT_BEHOLD_QUALITY
         assert transition.quality == quality
         assert transition.next_state == MENU_RENDER_QUALITY
 
@@ -162,6 +162,10 @@ def test_pause_submenu_state_transitions_are_explicit():
     assert transition.action == ACTION_MENU_BACK
     assert transition.next_state == MENU_MAIN
     assert _menu_transition(True, MENU_RENDER_QUALITY, "q").action is None
+    assert (
+        _menu_transition(True, MENU_RENDER_QUALITY, "c").action
+        == ACTION_COPY_BEHOLD_COMMAND
+    )
 
     assert (
         _menu_transition(True, MENU_OPEN_ICE_PROMPT, "Y").action
@@ -185,17 +189,17 @@ def test_pause_submenu_state_transitions_are_explicit():
 
 def test_settings_submenu_transitions_are_explicit():
     transition = _menu_transition(True, MENU_MAIN, "S")
-    assert transition.action == ACTION_SETTINGS_MENU
-    assert transition.next_state == MENU_SETTINGS
+    assert transition.action == ACTION_QUALITY_MENU
+    assert transition.next_state == MENU_QUALITY
 
     for key, tier in zip(("1", "2", "3", "4"),
                          ("high", "medium", "low", "potato")):
-        transition = _menu_transition(True, MENU_SETTINGS, key)
+        transition = _menu_transition(True, MENU_QUALITY, key)
         assert transition.action == ACTION_SELECT_TIER
-        assert transition.next_state == MENU_SETTINGS
+        assert transition.next_state == MENU_QUALITY
         assert transition.tier == tier
 
-    transition = _menu_transition(True, MENU_SETTINGS, "Escape")
+    transition = _menu_transition(True, MENU_QUALITY, "Escape")
     assert transition.action == ACTION_MENU_BACK
     assert transition.next_state == MENU_MAIN
 
@@ -203,7 +207,7 @@ def test_settings_submenu_transitions_are_explicit():
 def test_settings_key_dispatches_tier_selection():
     app = make_event_app()
     app._paused = True
-    app._menu_state = MENU_SETTINGS
+    app._menu_state = MENU_QUALITY
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "3"})
     assert app.tier_calls == ["low"]
 
@@ -353,28 +357,15 @@ def test_pause_open_and_render_keys_dispatch_to_submenus():
     assert app._menu_state == MENU_RENDER_QUALITY
     assert "behold quality" in app.canvas.titles[-1]
 
+    # The G panel hands over a command; the number keys only choose which
+    # quality it names.
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "2"})
-    assert app.render_calls == ["low"]
+    assert app._behold_quality == "low"
+    assert app._menu_state == MENU_RENDER_QUALITY
 
 
-def test_n_opens_the_nest_browser_when_no_nest_is_loaded():
-    from types import SimpleNamespace
-
-    app = make_event_app()
-    app._paused = True
-    app.renderer = SimpleNamespace(nested=False)
-    app.nest_calls = 0
-    app._start_open_nest = lambda: setattr(
-        app, "nest_calls", app.nest_calls + 1
-    )
-
-    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "N"})
-
-    assert app.nest_calls == 1
-
-
-def test_n_removes_the_nest_when_one_is_loaded():
-    """Same key, and the main-menu label says which it will do."""
+def test_n_removes_a_loaded_nest():
+    """N is removal only — a nest arrives with the file it lives in."""
     from types import SimpleNamespace
 
     app = make_event_app()
@@ -390,22 +381,14 @@ def test_n_removes_the_nest_when_one_is_loaded():
     assert app.remove_calls == 1
 
 
-def test_open_nest_reuses_the_open_chain_with_the_nest_flag():
+def test_n_is_harmless_with_no_nest_loaded():
+    from types import SimpleNamespace
+
     app = make_event_app()
-    app.open_calls = 0
-    real_start = FlyThroughApp._start_open_file
-
-    def start_open_file():
-        app.open_calls += 1
-        app._pending_is_nest = False   # what the real reset does
-
-    app._start_open_file = start_open_file
-    FlyThroughApp._start_open_nest(app)
-
-    assert app.open_calls == 1
-    assert app._pending_is_nest is True
-    assert FlyThroughApp._open_kicker(app) == "nested field"
-    assert real_start is not None
+    app._paused = True
+    app.renderer = SimpleNamespace(nested=False, nest=None)
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "N"})
+    assert app._menu_state == MENU_MAIN
 
 
 def test_f12_opens_the_screenshot_prompt_during_active_flight():
@@ -777,3 +760,72 @@ def test_missing_units_are_asked_for_before_the_load_starts(tmp_path):
     FlyThroughApp._select_condensate_units(app, transition.units)
 
     assert loads == [(str(nested), None, "kg/kg")]
+
+
+# ---------------------------------------------------------------------------
+# Capture settings (shared by the screenshot and video dialogs)
+# ---------------------------------------------------------------------------
+
+def _capture_app():
+    app = make_event_app()
+    from cloudyview.soar.app import default_save_dir
+    app._save_dir = default_save_dir()
+    app._save_dir_text = str(app._save_dir)
+    app._capture_size = None
+    return app
+
+
+def test_default_save_dir_prefers_downloads():
+    from cloudyview.soar.app import default_save_dir
+
+    chosen = default_save_dir()
+    downloads = Path.home() / "Downloads"
+    assert chosen == (downloads if downloads.is_dir() else Path.home())
+
+
+def test_capture_size_follows_the_window_by_default():
+    app = _capture_app()
+    assert FlyThroughApp.capture_size(app) == app.canvas.get_physical_size()
+
+
+def test_capture_size_override_and_reset():
+    app = _capture_app()
+    FlyThroughApp._set_capture_size(app, (1920, 1080))
+    assert FlyThroughApp.capture_size(app) == (1920, 1080)
+    FlyThroughApp._set_capture_size(app, None)
+    assert FlyThroughApp.capture_size(app) == app.canvas.get_physical_size()
+
+
+def test_capture_size_is_clamped_not_rejected():
+    """A half-typed number in a text field must not throw."""
+    from cloudyview.soar.app import CAPTURE_SIZE_LIMITS
+
+    lo, hi = CAPTURE_SIZE_LIMITS
+    app = _capture_app()
+    FlyThroughApp._set_capture_size(app, (0, 999999))
+    assert FlyThroughApp.capture_size(app) == (lo, hi)
+
+
+def test_save_dir_accepts_a_real_directory(tmp_path):
+    app = _capture_app()
+    assert FlyThroughApp._set_save_dir(app, str(tmp_path)) is True
+    assert app._save_dir == tmp_path
+
+
+def test_save_dir_rejects_a_missing_directory_but_keeps_the_text(tmp_path):
+    app = _capture_app()
+    before = app._save_dir
+    missing = str(tmp_path / "nope")
+    assert FlyThroughApp._set_save_dir(app, missing) is False
+    assert app._save_dir == before          # unchanged
+    assert app._save_dir_text == missing    # still editable
+    assert FlyThroughApp._save_dir_is_usable(app) is False
+
+
+def test_timestamped_paths_land_in_the_save_dir(tmp_path):
+    app = _capture_app()
+    FlyThroughApp._set_save_dir(app, str(tmp_path))
+    png = FlyThroughApp._timestamped_png_path(app, "shot")
+    mp4 = FlyThroughApp._timestamped_path(app, "clip", ".mp4")
+    assert png.parent == tmp_path and png.suffix == ".png"
+    assert mp4.parent == tmp_path and mp4.suffix == ".mp4"

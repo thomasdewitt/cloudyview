@@ -14,25 +14,25 @@ Controls:
     M           toggle the minimap
     F3          cycle the corner stats readout (subtle/expanded/hidden)
     F           toggle fullscreen/windowed
-    F12         save a PNG screenshot (asks: with bird + map, or clouds only)
-    ESC         pause menu (releases the mouse)
+    F12         save a PNG (asks size, folder, and what to include; then
+                shows the result)
+    ESC         pause menu (releases the mouse; field of view lives there)
 
 Pause menu:
     ESC / R     resume and recapture the mouse
     O           open the in-window .nc browser
-    N           add a nested (finer) field inside the current one, or
-                remove the one already loaded
-    G           render current view in behold (then 1=min, 2=low,
-                3=medium, 4=high, 5=max/overnight; ESC backs out)
+    N           remove the loaded nested field
+    G           behold render command for this view (1-5 pick the quality,
+                C copies it; behold itself runs in a terminal)
     T           time of day: sunset/midday presets + zenith/azimuth sliders
-    S           performance settings (tier, render scale, temporal smoothing)
+    S           quality (tier, render scale, temporal smoothing)
     P           toggle the periodic (horizontally tiled) domain — on by
                 default; turn off for subvolume cutouts that are not
                 physically periodic
     F           toggle fullscreen/windowed
     Q           quit from the top-level pause menu
 
-Menus, file picking, loading progress, errors, and behold progress are drawn
+Menus, file picking, loading progress, errors, and video progress are drawn
 inside the wgpu window with Dear ImGui. The window title remains a compact
 flight readout — fps, camera state in cv.Camera terms, and the cumulonimbus
 realism gate bitfield (e.g. cb:1010) — for transcription into
@@ -40,10 +40,10 @@ witness/behold/soar render calls.
 """
 
 from datetime import datetime, timezone
-from importlib.util import find_spec
 from pathlib import Path
 import shlex
 from time import perf_counter
+from typing import Tuple
 
 import numpy as np
 
@@ -81,19 +81,21 @@ from .menu import (
     ACTION_OPEN_FILE,
     ACTION_OPEN_ICE_NO,
     ACTION_OPEN_ICE_YES,
-    ACTION_OPEN_NEST,
+    ACTION_REMOVE_NEST,
     ACTION_PAUSE,
     ACTION_QUIT,
-    ACTION_RENDER_BEHOLD,
+    ACTION_COPY_BEHOLD_COMMAND,
+    ACTION_SELECT_BEHOLD_QUALITY,
     ACTION_RENDER_MENU,
     ACTION_RESUME,
     ACTION_SCREENSHOT,
+    ACTION_CLOSE_PREVIEW,
     ACTION_SCREENSHOT_CLOUDS_ONLY,
     ACTION_SCREENSHOT_WITH_OVERLAYS,
     ACTION_TOGGLE_FULLSCREEN,
     ACTION_TOGGLE_PERIODIC,
     ACTION_SELECT_SUN_PRESET,
-    ACTION_SETTINGS_MENU,
+    ACTION_QUALITY_MENU,
     ACTION_SUN_MENU,
     ACTION_SELECT_BOTH_GROUPS,
     ACTION_SELECT_GROUP,
@@ -107,6 +109,7 @@ from .menu import (
     SUN_PRESETS,
     MENU_CONTROLS,
     MENU_SCREENSHOT,
+    MENU_SCREENSHOT_PREVIEW,
     MENU_TRACK_SAVE,
     MENU_ERROR,
     MENU_FILE_BROWSER_ICE,
@@ -116,7 +119,7 @@ from .menu import (
     MENU_OPEN_ICE_PROMPT,
     MENU_OPEN_UNITS_PROMPT,
     MENU_RENDER_QUALITY,
-    MENU_SETTINGS,
+    MENU_QUALITY,
     MENU_SUN,
     FileEntry,
     control_action_for_key as _control_action_for_key,
@@ -127,23 +130,53 @@ from .menu import (
 DEFAULT_SPEED = 60.0        # m/s, comfortable for the 25 km dev domain
 MOUSE_SENS = 0.12           # degrees per pixel
 SPEED_WHEEL_FACTOR = 1.25   # per wheel notch
-# Five dominant ocean wavelengths (FIF outer scale, ocean_fif.DEFAULT_OUTER_SCALE_M
-# = 10 m): below this the normal-mapped water reads wrong (no displacement
-# geometry) — Thomas 2026-07-10.
-OCEAN_FLOOR_MARGIN_M = 5.0 * 10.0
-BEHOLD_UNAVAILABLE_MESSAGE = "behold rendering requires the full dev install"
+# Minimum flight height above the z=0 ocean, and so the lowest the bird can
+# get (it rides the camera — see bird.DISTANCE/DROP — and has no floor of its
+# own). Originally five dominant ocean wavelengths (FIF outer scale,
+# ocean_fif.DEFAULT_OUTER_SCALE_M = 10 m), below which the normal-mapped water
+# reads wrong for want of displacement geometry — Thomas 2026-07-10. Halved to
+# 2.5 wavelengths on 2026-07-31 (Thomas): flying lower is worth more than the
+# water holding up at the very bottom of the range.
+OCEAN_FLOOR_MARGIN_M = 2.5 * 10.0
+# Behold quality presets, as offered by the command panel. These are
+# behold's own CLI names — the panel hands over a command, it does not run
+# anything.
+BEHOLD_QUALITY_ROWS = (
+    ("Min", "1", "min", "fast preview"),
+    ("Low", "2", "low", "draft"),
+    ("Medium", "3", "medium", "balanced"),
+    ("High", "4", "high", "~1 h"),
+    ("Max", "5", "max", "overnight"),
+)
+
+# Capture defaults shared by the screenshot (F12) and video (R) dialogs —
+# they are the same decision twice, so they are the same settings twice.
+CAPTURE_SIZE_PRESETS = (
+    ("1280 x 720", (1280, 720)),
+    ("1920 x 1080", (1920, 1080)),
+    ("3840 x 2160", (3840, 2160)),
+)
+CAPTURE_SIZE_LIMITS = (64, 7680)
+DEFAULT_VIDEO_FPS = 60.0
+DEFAULT_VIDEO_ACCUMULATE = 24
+
+
+def default_save_dir() -> Path:
+    """Where captures land by default: ~/Downloads, else home."""
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.is_dir() else Path.home()
 
 CONTROL_SUMMARY = (
     "Controls: W/S forward/back, A/D strafe, Space up, LShift/C down, mouse look "
     "(Tab releases, click recaptures), scroll speed, "
     "B bird toggle, M minimap toggle, F3 stats readout, "
     "R record flight track (again to stop, then save; re-render with "
-    "soar --render-track), "
+    "then pick size/folder and render it to mp4), "
     "F fullscreen/window, F12 screenshot, F1/? controls reference, "
     "ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, "
-    "N add/remove a nested finer field, G behold render, "
-    "S settings (tiers, render scale, FOV), T time of day, "
+    "N remove a loaded nested field, G behold render command, "
+    "S quality (tiers, render scale, smoothing), T time of day, "
     "C controls reference, "
     "P periodic domain toggle, "
     "F fullscreen/window, Q quit from the top-level menu"
@@ -170,14 +203,6 @@ fn fs_main() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 0.42);
 }
 """
-
-
-def behold_rendering_available() -> bool:
-    """Return whether the optional offline renderer can be offered in-menu."""
-    try:
-        return find_spec("mitsuba") is not None and find_spec("drjit") is not None
-    except (ImportError, ValueError):
-        return False
 
 
 def _clamp_position_above_ocean(
@@ -344,7 +369,6 @@ class FlyThroughApp:
         self._pending_group_choices = []  # groups awaiting the user's pick
         self._pending_units = None        # user-supplied condensate units
         self._pending_units_vars = []     # variables that carry no units
-        self._pending_is_nest = False     # the open chain targets the nest
         self._pending_nest_group = None   # second group, loaded as the nest
         self._pending_nest_pair = None    # (outer, inner) offered by the picker
         # The browser opens at home, not next to whatever file the session was
@@ -355,9 +379,17 @@ class FlyThroughApp:
         self._last_file_dir = self._file_browser_dir
         self._file_browser_error = None
         self._loading_job = None
-        self._behold_job = None
+        self._video_render = None        # foreground track -> mp4 encode
         self._pending_screenshot = None   # True/False = overlays; taken in _draw
-        self._rendering = False
+        # Capture settings, shared by the screenshot and video dialogs.
+        self._save_dir = default_save_dir()
+        self._save_dir_text = str(self._save_dir)
+        self._capture_size = None        # None = follow the window
+        self._video_fps = DEFAULT_VIDEO_FPS
+        self._video_accumulate = DEFAULT_VIDEO_ACCUMULATE
+        self._preview = None             # {"ref", "keep", "image", "path"}
+        self._behold_quality = "high"    # which command the G panel shows
+        self._clipboard_note = None
         self._error_message = None
         self._imgui = None
         self._fullscreen = False
@@ -579,8 +611,8 @@ class FlyThroughApp:
             return "cloudyview file browser"
         if state == MENU_RENDER_QUALITY:
             return self._render_quality_title()
-        if state == MENU_SETTINGS:
-            return "cloudyview settings"
+        if state == MENU_QUALITY:
+            return "cloudyview quality"
         if state == MENU_SUN:
             return "cloudyview time of day"
         if state == MENU_CONTROLS:
@@ -589,6 +621,8 @@ class FlyThroughApp:
             return "cloudyview save flight track?"
         if state == MENU_SCREENSHOT:
             return "cloudyview screenshot: what to include?"
+        if state == MENU_SCREENSHOT_PREVIEW:
+            return "cloudyview screenshot saved"
         if state == MENU_ERROR:
             return "cloudyview error"
         return self._paused_title(fps)
@@ -734,17 +768,6 @@ class FlyThroughApp:
         self._set_file_browser_dir(getattr(self, "_last_file_dir", Path.home()))
         self._set_menu_state(MENU_FILE_BROWSER_LIQUID)
 
-    def _start_open_nest(self) -> None:
-        """Pick a finer field to nest inside the one already loaded.
-
-        Deliberately the same browser/group/ice/units chain as opening the
-        main file — only the destination differs (see _start_loading_file),
-        so a nest gets the same group picker and unit prompts the outer
-        field does.
-        """
-        self._start_open_file()
-        self._pending_is_nest = True
-
     # ------------------------------------------------------------------
     # Time of day
     # ------------------------------------------------------------------
@@ -810,7 +833,6 @@ class FlyThroughApp:
         self._pending_group_choices = []
         self._pending_units = None
         self._pending_units_vars = []
-        self._pending_is_nest = False
         self._pending_nest_group = None
         self._pending_nest_pair = None
 
@@ -846,7 +868,7 @@ class FlyThroughApp:
         # coordinates (no field data) so the picker can offer both at once
         # instead of making the user choose one and lose the other.
         self._pending_nest_pair = None
-        if len(groups) > 1 and not self._pending_is_nest:
+        if len(groups) > 1:
             try:
                 self._pending_nest_pair = io.find_nestable_group_pair(
                     self._pending_open_path, groups
@@ -932,7 +954,7 @@ class FlyThroughApp:
         if not liquid_path:
             self._show_error("Open file failed: no liquid NetCDF was selected.")
             return
-        if self._loading_job is not None or self._behold_job is not None:
+        if self._loading_job is not None or self._video_render is not None:
             self._show_error("Another operation is already running.")
             return
 
@@ -940,7 +962,6 @@ class FlyThroughApp:
         ice_path = str(ice_path) if ice_path else None
         group = self._pending_group
         units = self._pending_units
-        is_nest = self._pending_is_nest
         nest_group = self._pending_nest_group
 
         if units is None:
@@ -993,15 +1014,6 @@ class FlyThroughApp:
                 renderer = self._create_renderer(
                     field, nest=nest_field, device=device, previous=previous
                 )
-            elif is_nest:
-                # The outer field stays put; only the nest is new. Placement
-                # comes from the file's own coordinates, and a nest outside
-                # the outer domain raises here — reported as a load failure
-                # rather than clipped away.
-                renderer = self._create_renderer(
-                    previous.field, nest=field,
-                    device=device, previous=previous,
-                )
             else:
                 renderer = self._create_renderer(
                     field, device=device, previous=previous
@@ -1012,7 +1024,6 @@ class FlyThroughApp:
                 "renderer": renderer,
                 "liquid_path": liquid_path,
                 "ice_path": ice_path,
-                "is_nest": is_nest,
             }
 
         self._reset_pending_open()
@@ -1029,44 +1040,36 @@ class FlyThroughApp:
         self.canvas.request_draw()
 
     def _install_loaded_renderer(self, result: dict) -> None:
-        is_nest = bool(result.get("is_nest"))
         self.renderer = result["renderer"]
-        # A nest joins the scene you are already flying in — keep the
-        # viewpoint. A new outer field is a new scene, so reset to default.
-        if not is_nest:
-            self._reset_camera_to_default()
+        self._reset_camera_to_default()
         self._frame_index = 0
         self.renderer.reset_accumulation()
         self._last_quality_camera_signature = None
         self._camera_moving_for_quality(self.camera())
-        name = Path(result["liquid_path"]).name
-        if not is_nest:
-            print(f"Loaded {self.renderer.field}")
+        print(f"Loaded {self.renderer.field}")
         if self.renderer.nested:
             coverage = self.renderer.nest_coverage_fraction
             print(
                 f"Loaded nest {self.renderer.nest} "
                 f"(covers {coverage * 100:.0f}% of the outer domain)"
             )
-        message = (
-            f"cloudyview nested {name}" if is_nest
-            else f"cloudyview loaded {name}"
-        )
         self._set_paused(False)
-        self._flash_title(message, seconds=3.0)
+        self._flash_title(
+            f"cloudyview loaded {Path(result['liquid_path']).name}",
+            seconds=3.0,
+        )
 
     def _show_error(self, message: str) -> None:
         self._error_message = str(message)
         self._loading_job = None
-        self._behold_job = None
-        self._rendering = False
+        self._video_render = None
         self._set_paused(True)
         self._set_menu_state(MENU_ERROR)
         print(f"cloudyview error: {self._error_message}")
         self.canvas.request_draw()
 
     def _active_job(self):
-        for job in (self._loading_job, self._behold_job):
+        for job in (self._loading_job,):
             if job is None:
                 continue
             snapshot = job.pump()
@@ -1090,21 +1093,6 @@ class FlyThroughApp:
                     self._install_loaded_renderer(snapshot.result)
                 job.join(0.0)
 
-        if self._behold_job is not None:
-            snapshot = self._behold_job.pump()
-            if snapshot.done:
-                job = self._behold_job
-                self._behold_job = None
-                self._rendering = False
-                if snapshot.error:
-                    self._show_error(snapshot.error)
-                else:
-                    print(f"Behold render saved to {snapshot.result}")
-                    self._set_paused(False)
-                    self._flash_title(
-                        f"cloudyview behold saved {snapshot.result}", seconds=5.0
-                    )
-                job.join(0.0)
 
     @staticmethod
     def _fmt_num(value: float) -> str:
@@ -1177,9 +1165,47 @@ class FlyThroughApp:
         ])
         return self._quote_command(parts)
 
-    def _timestamped_png_path(self, prefix: str) -> Path:
+    # ------------------------------------------------------------------
+    # Capture settings (shared by the F12 screenshot and the track video)
+    # ------------------------------------------------------------------
+
+    def capture_size(self) -> Tuple[int, int]:
+        """The size captures render at — the window unless overridden."""
+        if self._capture_size is not None:
+            return self._capture_size
+        w, h = self.canvas.get_physical_size()
+        return (int(w), int(h))
+
+    def _set_capture_size(self, size) -> None:
+        """Clamp and store an explicit capture size, or None to follow the
+        window. Sizes are clamped rather than rejected: a half-typed number
+        in a text field must not throw."""
+        if size is None:
+            self._capture_size = None
+            return
+        lo, hi = CAPTURE_SIZE_LIMITS
+        self._capture_size = tuple(
+            int(min(max(int(v), lo), hi)) for v in size
+        )
+
+    def _set_save_dir(self, text: str) -> bool:
+        """Accept a save directory if it exists; report whether it took."""
+        self._save_dir_text = str(text)
+        try:
+            path = Path(text).expanduser()
+        except Exception:
+            return False
+        if not path.is_dir():
+            return False
+        self._save_dir = path
+        return True
+
+    def _timestamped_path(self, prefix: str, suffix: str) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        return Path.cwd() / f"{prefix}_{stamp}.png"
+        return self._save_dir / f"{prefix}_{stamp}{suffix}"
+
+    def _timestamped_png_path(self, prefix: str) -> Path:
+        return self._timestamped_path(prefix, ".png")
 
     def _write_png_with_metadata(
         self, image: np.ndarray, path: Path, metadata: dict
@@ -1246,8 +1272,7 @@ class FlyThroughApp:
         if not samples:
             self._set_paused(False)
             return
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = Path.cwd() / f"cloudyview_track_{stamp}.json"
+        path = self._timestamped_path("cloudyview_track", ".json")
         header = build_render_metadata(
             self.renderer.field,
             self.camera(),
@@ -1265,14 +1290,126 @@ class FlyThroughApp:
         )
         save_track(path, header, samples)
         duration = samples[-1][0]
-        self._flash_title(
-            f"cloudyview track saved — {path.name}", seconds=4.0
-        )
         print(
-            f"Saved track {path} ({len(samples)} samples, {duration:.1f}s)\n"
-            f"Render with: soar --render-track {path}"
+            f"Saved track {path} ({len(samples)} samples, {duration:.1f}s)"
         )
+        self._start_video_render(path)
+
+    # ------------------------------------------------------------------
+    # Track video (foreground: the encode owns the GPU)
+    # ------------------------------------------------------------------
+
+    def _start_video_render(self, track_path) -> None:
+        """Begin encoding the saved track, stepped from the draw loop.
+
+        Deliberately not a background thread: the encode renders through the
+        app's own resident volume, which is not shareable across threads,
+        and the whole point is to give the GPU to the encode rather than
+        split it with live marching.
+        """
+        from .track import TrackVideoRender
+
+        out_path = track_path.with_suffix(".mp4")
+        width, height = self.capture_size()
+        try:
+            self._video_render = TrackVideoRender(
+                track_path, out_path,
+                fps=self._video_fps,
+                size=(width, height),
+                accumulate_frames=self._video_accumulate,
+                renderer=self.renderer,
+            )
+        except Exception as e:
+            self._video_render = None
+            self._show_error(f"Video render failed to start: {e}")
+            return
+        self._set_menu_state(MENU_MAIN)
+        self._set_paused(True)
+        self.canvas.set_title(f"cloudyview rendering {out_path.name}")
+        print(
+            f"Rendering {out_path} — {self._video_render.total} frames at "
+            f"{width}x{height}, {self._video_fps:g} fps"
+        )
+
+    def _step_video_render(self, budget_seconds: float = 0.25) -> None:
+        """Encode as many frames as fit in one draw's time budget.
+
+        The budget is what keeps the progress bar and the window alive: a
+        single 4K accumulated frame can take seconds, so this always steps
+        at least one and stops as soon as it has overrun.
+        """
+        render = self._video_render
+        if render is None:
+            return
+        deadline = perf_counter() + budget_seconds
+        try:
+            while True:
+                finished = render.step()
+                if finished or perf_counter() >= deadline:
+                    break
+        except Exception as e:
+            self._video_render = None
+            self._show_error(f"Video render failed: {e}")
+            return
+        if not render.done:
+            return
+
+        self._video_render = None
+        try:
+            out_path = render.close()
+        except Exception as e:
+            self._show_error(f"Video render failed: {e}")
+            return
+        print(f"Video saved to {out_path}")
         self._set_paused(False)
+        self._flash_title(f"cloudyview video saved {out_path}", seconds=5.0)
+
+    def _cancel_video_render(self) -> None:
+        render = self._video_render
+        self._video_render = None
+        if render is not None:
+            render.abort()
+        self._set_paused(False)
+        self._flash_title("cloudyview video render cancelled", seconds=3.0)
+
+    def _draw_video_progress(self, imgui) -> None:
+        from .theme import TEXT_FAINT
+
+        render = self._video_render
+        if render is None:
+            return
+        progress = render.progress()
+        theme = self._theme
+        self._begin_imgui_window(imgui, "video_progress", 520.0)
+        try:
+            theme.header("rendering video", render.out_path.name)
+            theme.mono_text(
+                f"frame {progress['frame']}/{progress['total']} · "
+                f"{render.width}x{render.height} · "
+                f"{self._fmt_eta(progress['elapsed'])} elapsed",
+                size=13.0,
+            )
+            imgui.dummy((1.0, 2.0))
+            theme.progress_bar(progress["percent"] / 100.0)
+            theme.push_font(theme.font_mono, 13.0)
+            theme.body_text(f"{progress['percent']:3.0f}%", TEXT_FAINT)
+            if progress["eta"] is not None:
+                eta_text = f"ETA {self._fmt_eta(progress['eta'])}"
+                text_w = imgui.calc_text_size(eta_text).x
+                imgui.same_line(
+                    imgui.get_window_width()
+                    - imgui.get_style().window_padding.x - text_w
+                )
+                theme.body_text(eta_text, TEXT_FAINT)
+            theme.pop_font()
+            theme.caption(
+                f"{progress['fps']:.2f} frames/s rendered", TEXT_FAINT
+            )
+            imgui.dummy((1.0, 6.0))
+            if theme.menu_button("Cancel", "ESC", height=38.0):
+                self._cancel_video_render()
+        finally:
+            self._end_imgui_window(imgui)
 
     def _track_discard_pending(self) -> None:
         self._track_pending = None
@@ -1287,7 +1424,7 @@ class FlyThroughApp:
         with are rarely the same one.
         """
         camera = self.camera()
-        w, h = self.canvas.get_physical_size()
+        w, h = self.capture_size()
         path = self._timestamped_png_path("cloudyview_soar")
         renderer = self.renderer
         want_bird = bool(overlays)
@@ -1364,89 +1501,43 @@ class FlyThroughApp:
         )
         self._write_png_with_metadata(image, path, metadata)
         print(f"Screenshot saved to {path}")
-        # Straight back to flight — the prompt exists to pick the contents,
-        # not to park the app in a menu.
-        self._set_menu_state(MENU_MAIN)
-        self._set_paused(False)
+        self._show_preview(image, path)
         self._flash_title(f"cloudyview screenshot saved {path}", seconds=4.0)
 
-    def _run_behold_render(self, quality: str) -> None:
-        if self._loading_job is not None or self._behold_job is not None:
-            self._show_error("Another operation is already running.")
+    def _show_preview(self, image, path) -> None:
+        """Park on the saved frame with a Close button.
+
+        The shot is already on disk before this runs, so a failure to
+        register the preview texture must not read as a failed capture —
+        fall back to returning straight to flight.
+        """
+        self._release_preview()
+        if self._imgui is None:
+            self._close_preview()
             return
-        camera = self.camera()
-        path = self._timestamped_png_path(f"cloudyview_behold_{quality}")
-
-        def target(report):
-            def on_progress(progress: dict) -> None:
-                eta = progress.get("eta")
-                if eta is None and progress.get("taken_spp"):
-                    elapsed = progress.get("elapsed", 0.0)
-                    taken = progress["taken_spp"]
-                    total = progress.get("spp_total", taken)
-                    eta = elapsed * max(0, total - taken) / taken
-                report(
-                    "rendering",
-                    percent=progress.get("percent", 0.0),
-                    eta=eta,
-                    note="cannot cancel once started",
-                )
-
-            try:
-                from .. import behold as behold_render
-            except ImportError as e:
-                raise RuntimeError(
-                    "cloudyview behold requires Mitsuba; install the "
-                    "radiative-transfer extra, e.g. uv sync --extra "
-                    f"radiative-transfer ({e})"
-                ) from e
-
-            try:
-                image = behold_render(
-                    self.renderer.field,
-                    camera=camera,
-                    quality=quality,
-                    gpu=True,
-                    sun_azimuth=self.sun_azimuth,
-                    sun_elevation=self.sun_elevation,
-                    progress_callback=on_progress,
-                )
-            except Exception as e:
-                detail = str(e)
-                if any(token in detail.lower() for token in ("mitsuba", "drjit")):
-                    raise RuntimeError(
-                        "cloudyview behold requires Mitsuba; install the "
-                        "radiative-transfer extra, e.g. uv sync --extra "
-                        f"radiative-transfer ({e})"
-                    ) from e
-                raise RuntimeError(f"cloudyview behold failed: {e}") from e
-
-            metadata = self._metadata(
-                camera,
-                renderer="behold",
-                quality=quality,
-                reproduction_command=self._behold_reproduction_command(
-                    camera, quality
-                ),
-            )
-            self._write_png_with_metadata(image, path, metadata)
-            return path
-
-        self._rendering = True
-        self._set_menu_state(MENU_MAIN)
-        self.canvas.set_title(f"cloudyview behold {quality}")
-        self._behold_job = BackgroundJob(
-            kind=f"behold {quality}",
-            filename=path.name,
-            target=target,
-            initial_stage="starting render",
-            note="cannot cancel once started",
-        )
-        self._behold_job.start()
-        self.canvas.request_draw()
+        try:
+            ref, keep = self._imgui.register_image(image)
+        except Exception as e:  # pragma: no cover - backend/driver specific
+            # The frame is already on disk; a preview that will not register
+            # must not read as a failed capture.
+            print(f"cloudyview: preview unavailable ({e})")
+            self._close_preview()
+            return
+        self._preview = {
+            "ref": ref, "keep": keep, "image": image, "path": path,
+        }
+        self._set_paused(True)
+        self._set_menu_state(MENU_SCREENSHOT_PREVIEW)
 
     def _on_event(self, event):
         self._pump_jobs()
+        if self._video_render is not None:
+            if self._imgui is not None:
+                self._imgui.handle_event(event)
+            if (event.get("event_type") == "key_down"
+                    and event.get("key") == "Escape"):
+                self._cancel_video_render()
+            return
         active_job = self._active_job()
         if (
             getattr(self, "_paused", False) or active_job is not None
@@ -1477,11 +1568,8 @@ class FlyThroughApp:
                 self._try_toggle_fullscreen()
             elif action == ACTION_OPEN_FILE:
                 self._start_open_file()
-            elif action == ACTION_OPEN_NEST:
-                if self.renderer.nested:
-                    self._remove_nest()
-                else:
-                    self._start_open_nest()
+            elif action == ACTION_REMOVE_NEST:
+                self._remove_nest()
             elif action == ACTION_OPEN_ICE_YES:
                 self._finish_open_file(use_ice=True)
             elif action == ACTION_OPEN_ICE_NO:
@@ -1493,22 +1581,23 @@ class FlyThroughApp:
             elif action == ACTION_SELECT_UNITS:
                 self._select_condensate_units(transition.units)
             elif action == ACTION_RENDER_MENU:
-                if behold_rendering_available():
-                    self._set_menu_state(
-                        transition.next_state or MENU_RENDER_QUALITY
-                    )
-                else:
-                    self._flash_title(BEHOLD_UNAVAILABLE_MESSAGE, seconds=4.0)
-            elif action == ACTION_SETTINGS_MENU:
-                self._set_menu_state(transition.next_state or MENU_SETTINGS)
+                self._clipboard_note = None
+                self._set_menu_state(
+                    transition.next_state or MENU_RENDER_QUALITY
+                )
+            elif action == ACTION_QUALITY_MENU:
+                self._set_menu_state(transition.next_state or MENU_QUALITY)
             elif action == ACTION_SUN_MENU:
                 self._set_menu_state(transition.next_state or MENU_SUN)
             elif action == ACTION_SELECT_SUN_PRESET:
                 self._select_sun_preset(transition.sun_preset)
+            elif action == ACTION_SELECT_BEHOLD_QUALITY:
+                self._behold_quality = transition.quality
+                self._clipboard_note = None
+            elif action == ACTION_COPY_BEHOLD_COMMAND:
+                self._copy_behold_command()
             elif action == ACTION_SELECT_TIER:
                 self._select_quality_tier(transition.tier)
-            elif action == ACTION_RENDER_BEHOLD:
-                self._run_behold_render(transition.quality)
             elif action == ACTION_MENU_BACK:
                 if transition.next_state == MENU_OPEN_ICE_PROMPT:
                     self._set_menu_state(MENU_OPEN_ICE_PROMPT)
@@ -1531,6 +1620,8 @@ class FlyThroughApp:
                 self._save_screenshot(overlays=True)
             elif action == ACTION_SCREENSHOT_CLOUDS_ONLY:
                 self._save_screenshot(overlays=False)
+            elif action == ACTION_CLOSE_PREVIEW:
+                self._close_preview()
             elif key in ("r", "R"):
                 # Only reached unpaused: while paused the menu table above
                 # consumes R as resume (documented), so record start/stop
@@ -1755,6 +1846,10 @@ class FlyThroughApp:
         )
 
     def _draw_imgui_contents(self, imgui) -> None:
+        if self._video_render is not None:
+            self._draw_video_progress(imgui)
+            return
+
         snapshot = self._active_job_snapshot()
         if snapshot is not None:
             self._draw_job_overlay(imgui, snapshot)
@@ -1766,9 +1861,9 @@ class FlyThroughApp:
 
         state = getattr(self, "_menu_state", MENU_MAIN)
         if state == MENU_RENDER_QUALITY:
+            self._draw_behold_quality_menu(imgui)
+        elif state == MENU_QUALITY:
             self._draw_quality_menu(imgui)
-        elif state == MENU_SETTINGS:
-            self._draw_settings_menu(imgui)
         elif state == MENU_SUN:
             self._draw_sun_menu(imgui)
         elif state == MENU_CONTROLS:
@@ -1777,6 +1872,8 @@ class FlyThroughApp:
             self._draw_track_save_menu(imgui)
         elif state == MENU_SCREENSHOT:
             self._draw_screenshot_menu(imgui)
+        elif state == MENU_SCREENSHOT_PREVIEW:
+            self._draw_screenshot_preview(imgui)
         elif state == MENU_OPEN_GROUP_PROMPT:
             self._draw_group_prompt(imgui)
         elif state == MENU_OPEN_UNITS_PROMPT:
@@ -1824,24 +1921,16 @@ class FlyThroughApp:
                 nest_name = self._truncate_middle(self._nest_display_name(), 22)
                 if theme.menu_button(f"Remove nest ({nest_name})", "N"):
                     self._remove_nest()
-            elif theme.menu_button("Add nested field...", "N"):
-                self._start_open_nest()
-            behold_available = behold_rendering_available()
-            if theme.menu_button(
-                "Render in behold...",
-                "G" if behold_available else None,
-                disabled=not behold_available,
-            ):
+            if theme.menu_button("Behold render command...", "G"):
+                self._clipboard_note = None
                 self._set_menu_state(MENU_RENDER_QUALITY)
-            if not behold_available:
-                theme.caption(BEHOLD_UNAVAILABLE_MESSAGE, wrapped=True)
             if theme.menu_button(
                 "Time of day...", "T",
                 right_text=f"{self.sun_zenith:.0f}deg zenith",
             ):
                 self._set_menu_state(MENU_SUN)
-            if theme.menu_button("Settings...", "S"):
-                self._set_menu_state(MENU_SETTINGS)
+            if theme.menu_button("Quality...", "S"):
+                self._set_menu_state(MENU_QUALITY)
             if theme.menu_button("Controls...", "C"):
                 self._set_menu_state(MENU_CONTROLS)
             periodic_label = (
@@ -1861,6 +1950,19 @@ class FlyThroughApp:
             if theme.menu_button("Quit", "Q"):
                 self._closing = True
                 self._close_after_frame()
+            # Field of view lives here rather than under Quality: it frames
+            # the shot, it is not a performance dial, and it is reached often
+            # enough that a submenu is one hop too many.
+            imgui.dummy((1.0, 8.0))
+            theme.caption("Field of view (vertical)")
+            changed, fov = imgui.slider_float(
+                "##fov", float(self.fov), 30.0, 110.0, "%.0f deg",
+            )
+            if changed:
+                # Accumulation resets by itself: fov is scene identity via
+                # the uniform key.
+                self.fov = float(fov)
+
             imgui.dummy((1.0, 8.0))
             theme.mono_text(
                 self._truncate_middle(self._field_display_name(), 44),
@@ -1891,37 +1993,66 @@ class FlyThroughApp:
         finally:
             self._end_imgui_window(imgui)
 
-    def _draw_quality_menu(self, imgui) -> None:
+    def _draw_behold_quality_menu(self, imgui) -> None:
+        """Hand over a behold command for this view; do not run it.
+
+        Behold is Mitsuba, is minutes-to-overnight, and wants the GPU to
+        itself — none of which belongs inside a fly-through. The panel's job
+        is to carry the current camera and sun out to a terminal exactly,
+        which is also the one thing that works identically in the browser
+        build, where there is no Mitsuba at all.
+        """
         theme = self._theme
-        self._begin_imgui_window(imgui, "quality_menu", 420.0)
+        camera = self.camera()
+        quality = self._behold_quality
+        command = self._behold_reproduction_command(camera, quality)
+        self._begin_imgui_window(imgui, "behold_command", 640.0)
         try:
-            theme.header("render in behold", "Quality")
-            if not behold_rendering_available():
-                theme.caption(BEHOLD_UNAVAILABLE_MESSAGE, wrapped=True)
-                imgui.dummy((1.0, 4.0))
-                if theme.menu_button("Back", "ESC", height=38.0):
-                    self._set_menu_state(MENU_MAIN)
-                return
+            theme.header("render in behold", "Command for this view")
+            theme.caption(
+                "Path-traced rendering runs in a terminal, not here. This "
+                "command reproduces exactly what you are looking at — "
+                "camera, sun, field and all.",
+                wrapped=True,
+            )
             if self.periodic and self._view_spans_domain_edge():
                 theme.caption(
-                    "view spans domain edge — behold will differ",
+                    "view spans domain edge — behold does not tile, so its "
+                    "frame will differ",
                     wrapped=True,
                 )
-                imgui.dummy((1.0, 4.0))
-            for label, hint, quality, note in (
-                ("Min", "1", "min", "fast preview"),
-                ("Low", "2", "low", "draft"),
-                ("Medium", "3", "medium", "balanced"),
-                ("High", "4", "high", "~1 h"),
-                ("Max", "5", "max", "overnight"),
-            ):
-                if theme.menu_button(label, hint, sublabel=note):
-                    self._run_behold_render(quality)
+            imgui.dummy((1.0, 6.0))
+            theme.caption("Quality")
+            for label, hint, name, note in BEHOLD_QUALITY_ROWS:
+                if theme.menu_button(
+                    label, hint, sublabel=note, height=32.0,
+                    right_text="selected" if name == quality else None,
+                ):
+                    self._behold_quality = name
+            imgui.dummy((1.0, 8.0))
+            theme.mono_text(command, size=12.0, wrapped=True)
+            imgui.dummy((1.0, 6.0))
+            if theme.menu_button("Copy command", "C"):
+                self._copy_behold_command()
+            if self._clipboard_note:
+                theme.caption(self._clipboard_note)
             imgui.dummy((1.0, 4.0))
             if theme.menu_button("Back", "ESC", height=38.0):
                 self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
+
+    def _copy_behold_command(self) -> None:
+        command = self._behold_reproduction_command(
+            self.camera(), self._behold_quality
+        )
+        print(command)
+        try:
+            self._imgui.imgui.set_clipboard_text(command)
+        except Exception as e:  # pragma: no cover - platform clipboard
+            self._clipboard_note = f"clipboard unavailable ({e}) — printed to the terminal"
+            return
+        self._clipboard_note = "copied to the clipboard (also printed to the terminal)"
 
     _CONTROLS_REFERENCE = (
         ("Flying", (
@@ -1933,9 +2064,9 @@ class FlyThroughApp:
             ("scroll", "flight speed"),
         )),
         ("Recording & captures", (
-            ("R", "record flight track (again to stop, then save)"),
-            ("F12", "screenshot — prompts for overlays, keeps repro metadata"),
-            ("G (paused)", "photoreal behold render of this view"),
+            ("R", "record a flight track; stop to render it to mp4"),
+            ("F12", "screenshot — size, folder, overlays; then a preview"),
+            ("G (paused)", "copy a behold command for this exact view"),
         )),
         ("Toggles", (
             ("B", "bird"),
@@ -1947,8 +2078,9 @@ class FlyThroughApp:
             ("ESC", "pause menu / back"),
             ("F1 or ?", "this reference"),
             ("O (paused)", "open a NetCDF cloud field"),
-            ("N (paused)", "add / remove a nested finer field"),
+            ("N (paused)", "remove a loaded nested field"),
             ("T (paused)", "time of day: sun presets and zenith slider"),
+            ("S (paused)", "quality: tier, render scale, smoothing"),
             ("P (paused)", "periodic domain on/off"),
         )),
     )
@@ -1980,47 +2112,124 @@ class FlyThroughApp:
 
     def _draw_track_save_menu(self, imgui) -> None:
         theme = self._theme
-        self._begin_imgui_window(imgui, "track_save_menu", 460.0)
+        self._begin_imgui_window(imgui, "track_save_menu", 520.0)
         try:
-            theme.header("flight track", "Save recording?")
+            theme.header("flight track", "Render this recording?")
             samples = getattr(self, "_track_pending", None) or []
             duration = samples[-1][0] if samples else 0.0
+            frames = int(round(duration * self._video_fps))
             theme.body_text(
                 f"{duration:.0f} s of flight · {len(samples)} camera samples"
             )
             theme.caption(
-                "Saving writes a small .json flight track next to your "
-                "screenshots. Render it to a smooth 60 fps video (each "
-                "frame fully converged — no motion speckle) with:",
+                "Saving writes the .json track and then encodes it to mp4 "
+                "right here — every frame fully converged, so no motion "
+                "speckle. The window shows progress while it runs; the "
+                "track file stays behind for re-rendering later with "
+                "soar --render-track.",
                 wrapped=True,
             )
-            theme.mono_text(
-                "soar --render-track <saved file>", size=12.0,
+            imgui.dummy((1.0, 6.0))
+            self._draw_capture_settings(imgui, video=True)
+            imgui.dummy((1.0, 4.0))
+            theme.caption(
+                f"~{frames} frames at {self._video_fps:g} fps, "
+                f"{self._video_accumulate} passes each"
             )
             imgui.dummy((1.0, 8.0))
-            if theme.menu_button("Save", "S / Enter"):
+            usable = self._save_dir_is_usable()
+            if theme.menu_button(
+                "Save and render video", "S / Enter", disabled=not usable
+            ):
                 self._track_save_pending()
             if theme.menu_button("Discard", "D / ESC"):
                 self._track_discard_pending()
         finally:
             self._end_imgui_window(imgui)
 
+    def _draw_capture_settings(self, imgui, *, video: bool) -> None:
+        """Size and destination controls, shared by both capture dialogs.
+
+        A screenshot and a video are the same decision twice — how big, and
+        where does it go — so they get the same controls rather than two
+        drifting copies.
+        """
+        theme = self._theme
+        win_w, win_h = self.canvas.get_physical_size()
+        size = self.capture_size()
+
+        theme.caption("Size")
+        if theme.menu_button(
+            f"Window ({int(win_w)} x {int(win_h)})", None, height=32.0,
+            right_text="selected" if self._capture_size is None else None,
+        ):
+            self._set_capture_size(None)
+        for label, preset in CAPTURE_SIZE_PRESETS:
+            selected = self._capture_size == preset
+            if theme.menu_button(
+                label, None, height=32.0,
+                right_text="selected" if selected else None,
+            ):
+                self._set_capture_size(preset)
+
+        imgui.set_next_item_width(200.0)
+        changed, values = imgui.input_int2("##capture_size", list(size))
+        if changed:
+            self._set_capture_size(values)
+        imgui.same_line()
+        theme.caption("custom w x h")
+
+        imgui.dummy((1.0, 6.0))
+        theme.caption("Save to")
+        imgui.set_next_item_width(400.0)
+        changed, text = imgui.input_text("##save_dir", self._save_dir_text)
+        if changed and not self._set_save_dir(text):
+            # Keep the typed text so it can be finished; the render buttons
+            # below refuse to fire until it resolves to a real directory.
+            pass
+        if not Path(self._save_dir_text).expanduser().is_dir():
+            theme.caption("Not a directory — captures will not be saved here.")
+
+        if video:
+            imgui.dummy((1.0, 6.0))
+            theme.caption("Frame rate")
+            imgui.set_next_item_width(200.0)
+            changed, fps = imgui.slider_float(
+                "##video_fps", float(self._video_fps), 12.0, 120.0, "%.0f fps"
+            )
+            if changed:
+                self._video_fps = float(fps)
+            theme.caption("Accumulation passes per frame")
+            imgui.set_next_item_width(200.0)
+            changed, passes = imgui.slider_int(
+                "##video_accum", int(self._video_accumulate), 1, 64, "%d"
+            )
+            if changed:
+                self._video_accumulate = int(passes)
+
+    def _save_dir_is_usable(self) -> bool:
+        return Path(self._save_dir_text).expanduser().is_dir()
+
     def _draw_screenshot_menu(self, imgui) -> None:
         theme = self._theme
-        self._begin_imgui_window(imgui, "screenshot_menu", 460.0)
+        self._begin_imgui_window(imgui, "screenshot_menu", 520.0)
         try:
-            w, h = self.canvas.get_physical_size()
             theme.header("screenshot", "What goes in the frame?")
-            theme.body_text(f"{int(w)} x {int(h)} px")
             theme.caption(
                 "Both save the same converged render and the same "
                 "reproduction metadata; only the overlays differ.",
                 wrapped=True,
             )
+            imgui.dummy((1.0, 6.0))
+            self._draw_capture_settings(imgui, video=False)
+
             imgui.dummy((1.0, 8.0))
-            if theme.menu_button("With bird and location map", "W / Enter"):
+            usable = self._save_dir_is_usable()
+            if theme.menu_button(
+                "With bird and location map", "W / Enter", disabled=not usable
+            ):
                 self._pending_screenshot = True
-            if theme.menu_button("Clouds only", "C"):
+            if theme.menu_button("Clouds only", "C", disabled=not usable):
                 self._pending_screenshot = False
             imgui.dummy((1.0, 4.0))
             if theme.menu_button("Cancel", "ESC", height=38.0):
@@ -2028,6 +2237,43 @@ class FlyThroughApp:
                 self._set_paused(False)
         finally:
             self._end_imgui_window(imgui)
+
+    def _draw_screenshot_preview(self, imgui) -> None:
+        preview = self._preview
+        if preview is None:
+            self._set_menu_state(MENU_MAIN)
+            return
+        theme = self._theme
+        image = preview["image"]
+        height, width = image.shape[:2]
+        max_w, max_h = 760.0, 460.0
+        scale = min(max_w / width, max_h / height, 1.0)
+        draw_w, draw_h = width * scale, height * scale
+
+        self._begin_imgui_window(imgui, "screenshot_preview", draw_w + 48.0)
+        try:
+            theme.header("screenshot", "Saved")
+            imgui.image(preview["ref"], imgui.ImVec2(draw_w, draw_h))
+            theme.mono_text(str(preview["path"]), size=12.0)
+            theme.caption(f"{width} x {height} px")
+            imgui.dummy((1.0, 6.0))
+            if theme.menu_button("Close", "ESC / Enter", height=38.0):
+                self._close_preview()
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _release_preview(self) -> None:
+        """Drop the preview texture without touching menu/pause state."""
+        preview = self._preview
+        self._preview = None
+        if preview is not None and self._imgui is not None:
+            self._imgui.release_image(preview["ref"])
+
+    def _close_preview(self) -> None:
+        """Drop the preview and go back to flying."""
+        self._release_preview()
+        self._set_menu_state(MENU_MAIN)
+        self._set_paused(False)
 
     _SUN_DIRECTION_LABELS = (
         (22.5, "N"), (67.5, "NE"), (112.5, "E"), (157.5, "SE"),
@@ -2103,14 +2349,14 @@ class FlyThroughApp:
         finally:
             self._end_imgui_window(imgui)
 
-    def _draw_settings_menu(self, imgui) -> None:
+    def _draw_quality_menu(self, imgui) -> None:
         from .theme import TEXT_FAINT
 
         theme = self._theme
         renderer = self.renderer
-        self._begin_imgui_window(imgui, "settings_menu", 520.0)
+        self._begin_imgui_window(imgui, "quality_menu", 520.0)
         try:
-            theme.header("performance", "Settings")
+            theme.header("performance", "Quality")
             for hint, name in (("1", "high"), ("2", "medium"),
                                ("3", "low"), ("4", "potato")):
                 preset = QUALITY_PRESETS[name]
@@ -2155,15 +2401,6 @@ class FlyThroughApp:
             if changed:
                 self._set_motion_blend_alpha(alpha)
 
-            theme.caption("Field of view (vertical)")
-            changed, fov = imgui.slider_float(
-                "##fov", float(self.fov), 30.0, 110.0, "%.0f°",
-            )
-            if changed:
-                # Accumulation resets by itself: fov is scene identity via
-                # the uniform key.
-                self.fov = float(fov)
-
             imgui.dummy((1.0, 6.0))
             fp_label = (
                 "fp16 volume: on" if renderer.volume_fp16
@@ -2202,7 +2439,7 @@ class FlyThroughApp:
         theme = self._theme
         self._begin_imgui_window(imgui, "group_prompt", 460.0)
         try:
-            theme.header(self._open_kicker(), "Which group?")
+            theme.header("open file", "Which group?")
             theme.mono_text(self._pending_open_filename(), size=13.0)
             theme.caption(
                 "The root group holds no cloud field. These groups do:",
@@ -2237,7 +2474,7 @@ class FlyThroughApp:
         theme = self._theme
         self._begin_imgui_window(imgui, "units_prompt", 460.0)
         try:
-            theme.header(self._open_kicker(), "Which units?")
+            theme.header("open file", "Which units?")
             theme.mono_text(self._pending_open_filename(), size=13.0)
             theme.caption(
                 f"No units attribute on {', '.join(self._pending_units_vars)}. "
@@ -2263,7 +2500,7 @@ class FlyThroughApp:
         self._begin_imgui_window(imgui, "ice_prompt", 460.0)
         try:
             filename = self._pending_open_filename()
-            theme.header(self._open_kicker(), "Ice phase?")
+            theme.header("open file", "Ice phase?")
             theme.mono_text(filename, size=13.0)
             if self._pending_group:
                 theme.caption(f"group: {self._pending_group}")
@@ -2279,18 +2516,12 @@ class FlyThroughApp:
         finally:
             self._end_imgui_window(imgui)
 
-    def _open_kicker(self) -> str:
-        """Menu kicker for the shared open chain — file, or nested field."""
-        return "nested field" if self._pending_is_nest else "open file"
-
     def _draw_file_browser(self, imgui, state: str) -> None:
         theme = self._theme
-        if state == MENU_FILE_BROWSER_ICE:
-            title = "Open ice file"
-        elif self._pending_is_nest:
-            title = "Open nested field"
-        else:
-            title = "Open cloud file"
+        title = (
+            "Open ice file" if state == MENU_FILE_BROWSER_ICE
+            else "Open cloud file"
+        )
         self._begin_imgui_window(imgui, "file_browser", 720.0, 560.0)
         try:
             current_dir = Path(getattr(self, "_file_browser_dir", Path.cwd()))
@@ -2512,6 +2743,10 @@ class FlyThroughApp:
         if self._closing or self.canvas.get_closed():
             return
         self._pump_jobs()
+        # The video encode gets this frame's time before anything else; the
+        # window is only here to show progress while it runs.
+        if self._video_render is not None:
+            self._step_video_render()
         # A screenshot requested by clicking the prompt is taken here, not in
         # the imgui callback that raised it: that callback runs with a command
         # encoder open, and the screenshot render submits its own.
@@ -2531,7 +2766,7 @@ class FlyThroughApp:
         camera = self.camera()
         camera_moving = self._camera_moving_for_quality(camera)
         self.renderer.set_camera_moving(camera_moving)
-        if self._behold_job is None:
+        if self._video_render is None:
             self.renderer.write_uniforms(
                 camera, (w, h), jitter=self.jitter,
                 sun_azimuth=self.sun_azimuth,
@@ -2539,7 +2774,7 @@ class FlyThroughApp:
                 frame_index=self._frame_index,
                 **self._cb_strength_kwargs())
         if (getattr(self, "_track_recording", False) and not self._paused
-                and self._behold_job is None):
+                and self._video_render is None):
             self._track_samples.append([
                 perf_counter() - self._track_t0,
                 *camera.position,
@@ -2550,10 +2785,11 @@ class FlyThroughApp:
         texture = self.context.get_current_texture()
         view = texture.create_view()
         enc = self.renderer.device.create_command_encoder()
-        if self._behold_job is not None:
-            # Behold owns the GPU: blit the frozen last frame instead of
-            # marching the volume every frame (near-zero cost). Falls back
-            # to a normal pass when no accumulated frame exists (jitter off).
+        if self._video_render is not None:
+            # The video encode owns the GPU: blit the frozen last frame
+            # instead of marching the volume again for the window (near-zero
+            # cost). Falls back to a normal pass when no accumulated frame
+            # exists (jitter off).
             if not self.renderer.encode_present_last(enc, view, self.format):
                 self.renderer.encode_pass(enc, view, self.format)
         else:

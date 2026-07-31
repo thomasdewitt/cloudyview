@@ -168,107 +168,212 @@ def resample_track(samples: np.ndarray, fps: float, *,
     return frames
 
 
+class TrackVideoRender:
+    """A track -> mp4 render the caller drives one frame at a time.
+
+    Foreground by design. The windowed app steps this from its draw loop
+    rather than handing it to a thread: the renderer and its resident
+    volume are not shareable across threads, and giving the GPU wholly to
+    the encode is the point — a live progress bar costs one blit a frame.
+
+    Each output frame is rendered offscreen with `accumulate_frames`
+    jittered accumulation passes — the converged-still quality the app only
+    reaches when the camera stops. Frames are piped to ffmpeg as raw RGB;
+    requires the `ffmpeg` binary (no fallback encoder).
+
+    renderer : InteractiveRenderer, optional
+        Render with an already-resident volume instead of loading the field
+        again. The app passes its own: a second copy of a gigavoxel field
+        would not fit beside the first. Its quality tier is set to High for
+        the render and restored on close.
+    """
+
+    def __init__(self, track_path, out_path, *, fps: float = 60.0,
+                 size: tuple[int, int] = (1920, 1080),
+                 accumulate_frames: int = 24, crf: int = 18,
+                 renderer=None):
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError(
+                "ffmpeg not found on PATH — install it (e.g. `sudo dnf "
+                "install ffmpeg`) to encode track videos. Refusing to fall "
+                "back to writing frame files."
+            )
+        from ..cloudfield import load
+        from .engine import InteractiveRenderer
+
+        self.track_path = Path(track_path)
+        self.out_path = Path(out_path)
+        header, samples = load_track(self.track_path)
+
+        source = header.get("source", {})
+        liquid = source.get("path")
+        if not liquid:
+            raise ValueError(f"{self.track_path}: header has no source path.")
+        render_opts = header.get("render", {})
+        sun = header.get("sun", {})
+
+        # yuv420p wants even dimensions.
+        self.width, self.height = (int(size[0]) & ~1, int(size[1]) & ~1)
+        self.fps = float(fps)
+        self.accumulate_frames = int(accumulate_frames)
+
+        self._restore_tier = None
+        if renderer is None:
+            print(f"track: loading {liquid}", flush=True)
+            field = load(
+                liquid,
+                ice=source.get("ice_path"),
+                liquid_water_var=source.get("liquid_var"),
+                ice_water_var=source.get("ice_var"),
+            )
+            renderer = InteractiveRenderer(
+                field,
+                periodic=bool(render_opts.get("periodic", True)),
+                extinction_multiplier=float(
+                    render_opts.get("extinction_multiplier", 1.0)
+                ),
+                volume_fp16=bool(render_opts.get("volume_fp16", False)),
+            )
+        else:
+            self._restore_tier = renderer.quality_tier
+        renderer.set_quality_tier("high", camera_moving=False)
+        self.renderer = renderer
+
+        self._frames = resample_track(
+            samples, self.fps, periodic=renderer.periodic
+        )
+        self.total = len(self._frames)
+        self.frames_done = 0
+
+        self._uniform_kwargs = {
+            "sun_azimuth": float(sun.get("azimuth", 235.0)),
+            "sun_elevation": float(sun.get("elevation", 25.0)),
+        }
+        for key in (
+            "gradient_shading_strength", "deep_shadow_ms_suppression",
+            "ambient_occlusion_strength", "bounce_depth_attenuation",
+            "light_march_lod_degrees", "view_step_lod_degrees",
+        ):
+            if key in render_opts:
+                self._uniform_kwargs[key] = float(render_opts[key])
+
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", f"{self.width}x{self.height}",
+            "-r", f"{self.fps}", "-i", "-",
+            "-c:v", "libx264", "-crf", str(int(crf)), "-preset", "medium",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(self.out_path),
+        ]
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        self._t_start = perf_counter()
+        self._closed = False
+
+    @property
+    def done(self) -> bool:
+        return self.frames_done >= self.total
+
+    def step(self, n: int = 1) -> bool:
+        """Render up to n frames. Returns True once every frame is encoded."""
+        for _ in range(int(n)):
+            if self.done:
+                break
+            _, camera = self._frames[self.frames_done]
+            try:
+                image = self.renderer.render(
+                    camera, size=(self.width, self.height), jitter=True,
+                    accumulate_frames=self.accumulate_frames,
+                    **self._uniform_kwargs,
+                )
+                self._proc.stdin.write(
+                    np.ascontiguousarray(image[:, :, :3]).tobytes()
+                )
+            except BaseException:
+                self.abort()
+                raise
+            self.frames_done += 1
+        return self.done
+
+    def progress(self) -> dict:
+        elapsed = perf_counter() - self._t_start
+        rate = self.frames_done / max(elapsed, 1e-6)
+        remaining = self.total - self.frames_done
+        return {
+            "frame": self.frames_done,
+            "total": self.total,
+            "percent": 100.0 * self.frames_done / max(self.total, 1),
+            "fps": rate,
+            "eta": remaining / rate if rate > 0 else None,
+            "elapsed": elapsed,
+        }
+
+    def _restore(self) -> None:
+        if self._restore_tier is not None:
+            self.renderer.set_quality_tier(
+                self._restore_tier, camera_moving=False
+            )
+            self._restore_tier = None
+
+    def abort(self) -> None:
+        """Stop encoding and leave no half-written video behind."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._proc.stdin.close()
+            self._proc.terminate()
+        finally:
+            self._restore()
+            self.out_path.unlink(missing_ok=True)
+
+    def close(self) -> Path:
+        """Finalize the encode; raises if ffmpeg failed."""
+        if self._closed:
+            return self.out_path
+        self._closed = True
+        try:
+            self._proc.stdin.close()
+            code = self._proc.wait()
+        finally:
+            self._restore()
+        if code != 0:
+            raise RuntimeError(f"ffmpeg exited with status {code}.")
+        duration = self.total / self.fps
+        print(
+            f"track: wrote {self.out_path} ({self.total} frames, "
+            f"{duration:.1f}s at {self.fps:g} fps)",
+            flush=True,
+        )
+        return self.out_path
+
+
 def render_track(track_path: str | Path, out_path: str | Path, *,
                  fps: float = 60.0, size: tuple[int, int] = (1920, 1080),
                  accumulate_frames: int = 24,
-                 crf: int = 18) -> Path:
+                 crf: int = 18,
+                 renderer=None,
+                 progress_callback=None) -> Path:
     """Re-render a recorded track into a video (blocks; prints progress).
 
-    Each output frame is rendered offscreen with `accumulate_frames`
-    jittered accumulation passes — the converged-still quality the app
-    only reaches when the camera stops. Frames are piped to ffmpeg as raw
-    RGB; requires the `ffmpeg` binary (no fallback encoder).
+    The CLI entry point: drives :class:`TrackVideoRender` to completion.
     """
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError(
-            "ffmpeg not found on PATH — install it (e.g. `sudo dnf install "
-            "ffmpeg`) to encode track videos. Refusing to fall back to "
-            "writing frame files."
-        )
-    from ..cloudfield import load
-    from .engine import InteractiveRenderer
-
-    track_path = Path(track_path)
-    out_path = Path(out_path)
-    header, samples = load_track(track_path)
-
-    source = header.get("source", {})
-    liquid = source.get("path")
-    if not liquid:
-        raise ValueError(f"{track_path}: header has no source path.")
-    render_opts = header.get("render", {})
-    sun = header.get("sun", {})
-
-    # yuv420p wants even dimensions.
-    w, h = (int(size[0]) & ~1, int(size[1]) & ~1)
-
-    print(f"track: loading {liquid}", flush=True)
-    field = load(
-        liquid,
-        ice=source.get("ice_path"),
-        liquid_water_var=source.get("liquid_var"),
-        ice_water_var=source.get("ice_var"),
+    render = TrackVideoRender(
+        track_path, out_path, fps=fps, size=size,
+        accumulate_frames=accumulate_frames, crf=crf, renderer=renderer,
     )
-    renderer = InteractiveRenderer(
-        field,
-        periodic=bool(render_opts.get("periodic", True)),
-        extinction_multiplier=float(
-            render_opts.get("extinction_multiplier", 1.0)
-        ),
-        volume_fp16=bool(render_opts.get("volume_fp16", False)),
-    )
-    renderer.set_quality_tier("high", camera_moving=False)
-
-    frames = resample_track(samples, fps, periodic=renderer.periodic)
-    uniform_kwargs = {
-        "sun_azimuth": float(sun.get("azimuth", 235.0)),
-        "sun_elevation": float(sun.get("elevation", 25.0)),
-    }
-    for key in (
-        "gradient_shading_strength", "deep_shadow_ms_suppression",
-        "ambient_occlusion_strength", "bounce_depth_attenuation",
-        "light_march_lod_degrees", "view_step_lod_degrees",
-    ):
-        if key in render_opts:
-            uniform_kwargs[key] = float(render_opts[key])
-
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
-        "-r", f"{fps}", "-i", "-",
-        "-c:v", "libx264", "-crf", str(int(crf)), "-preset", "medium",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path),
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    n = len(frames)
-    t_start = perf_counter()
-    try:
-        for k, (_, cam) in enumerate(frames):
-            img = renderer.render(
-                cam, size=(w, h), jitter=True,
-                accumulate_frames=accumulate_frames, **uniform_kwargs,
+    while not render.step():
+        progress = render.progress()
+        if progress_callback is not None:
+            progress_callback(progress)
+        if render.frames_done % 30 == 0:
+            eta = progress["eta"]
+            print(
+                f"track: frame {progress['frame']}/{progress['total']} "
+                f"({progress['fps']:.1f} fps render, ETA "
+                f"{(eta or 0.0) / 60.0:.1f} min)",
+                flush=True,
             )
-            proc.stdin.write(np.ascontiguousarray(img[:, :, :3]).tobytes())
-            if k % 30 == 0 or k == n - 1:
-                elapsed = perf_counter() - t_start
-                rate = (k + 1) / elapsed
-                eta = (n - k - 1) / rate if rate > 0 else float("inf")
-                print(
-                    f"track: frame {k + 1}/{n} "
-                    f"({rate:.1f} fps render, ETA {eta / 60.0:.1f} min)",
-                    flush=True,
-                )
-        proc.stdin.close()
-        code = proc.wait()
-    except BaseException:
-        proc.stdin.close()
-        proc.terminate()
-        raise
-    if code != 0:
-        raise RuntimeError(f"ffmpeg exited with status {code}.")
-    dur = len(frames) / fps
-    print(
-        f"track: wrote {out_path} ({n} frames, {dur:.1f}s at {fps:g} fps)",
-        flush=True,
-    )
-    return out_path
+    if progress_callback is not None:
+        progress_callback(render.progress())
+    return render.close()

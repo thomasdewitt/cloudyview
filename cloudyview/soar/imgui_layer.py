@@ -95,6 +95,52 @@ class SoarImguiLayer:
                     break
         return key_map
 
+    def register_image(self, rgb: "object"):
+        """Upload an (h, w, 3) uint8 image and return an ImGui texture ref.
+
+        The caller owns the lifetime: hold the returned ``(ref, texture)``
+        for as long as the image is drawn, then pass it to
+        :meth:`release_image`. Textures registered here are unrelated to the
+        font atlas the backend manages itself.
+        """
+        import numpy as np
+        import wgpu
+
+        rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+        if rgb.ndim != 3 or rgb.shape[2] not in (3, 4):
+            raise ValueError(
+                f"register_image expects (h, w, 3|4) uint8; got {rgb.shape}."
+            )
+        height, width = rgb.shape[:2]
+        if rgb.shape[2] == 3:
+            rgba = np.empty((height, width, 4), dtype=np.uint8)
+            rgba[..., :3] = rgb
+            rgba[..., 3] = 255
+        else:
+            rgba = rgb
+
+        device = self._backend._device
+        texture = device.create_texture(
+            label="imgui-image",
+            size=(width, height, 1),
+            format=wgpu.TextureFormat.rgba8unorm,
+            dimension="2d",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+        )
+        device.queue.write_texture(
+            {"texture": texture},
+            rgba,
+            {"bytes_per_row": width * 4, "rows_per_image": height},
+            (width, height, 1),
+        )
+        view = texture.create_view()
+        return self._backend.register_texture(view), (texture, view)
+
+    def release_image(self, ref) -> None:
+        """Drop a texture registered by :meth:`register_image`."""
+        if ref is not None:
+            self._backend.unregister_texture(ref)
+
     def handle_event(self, event: dict) -> None:
         """Forward rendercanvas events to ImGui IO."""
         io = self._backend.io

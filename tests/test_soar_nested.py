@@ -288,7 +288,70 @@ def test_nested_render_is_stable_across_periodic_toggle(nested_renderer):
 
 
 # ---------------------------------------------------------------------------
-# (e) CLI / app wiring
+# (e) Minimap footprint
+# ---------------------------------------------------------------------------
+
+def test_hud_has_no_nest_rectangle_without_a_nest():
+    assert _renderer().hud.nest_map_uv() is None
+    assert _renderer().hud.nest_pixel_rect((480, 270)) is None
+
+
+def test_hud_nest_rectangle_matches_the_nest_footprint(nested_renderer):
+    """Map UV spans the outer field, so the rect is the nest's x/y fraction."""
+    r = nested_renderer
+    u0, v0, u1, v1 = r.hud.nest_map_uv()
+    extent = np.asarray(r.bmax) - np.asarray(r.bmin)
+    expect_lo = (np.asarray(r.nest_bmin) - np.asarray(r.bmin)) / extent
+    expect_hi = (np.asarray(r.nest_bmax) - np.asarray(r.bmin)) / extent
+    assert u0 == pytest.approx(expect_lo[0])
+    assert v0 == pytest.approx(expect_lo[1])
+    assert u1 == pytest.approx(expect_hi[0])
+    assert v1 == pytest.approx(expect_hi[1])
+    assert 0.0 <= u0 < u1 <= 1.0
+    assert 0.0 <= v0 < v1 <= 1.0
+
+
+def test_hud_nest_pixel_rect_sits_inside_the_minimap(nested_renderer):
+    size = (640, 360)
+    r = nested_renderer
+    mx, my, mw, mh = r.hud.rect_for_size(size)
+    nx, ny, nw, nh = r.hud.nest_pixel_rect(size)
+    assert nw > 0 and nh > 0
+    assert mx <= nx and ny >= my
+    assert nx + nw <= mx + mw + 1e-6
+    assert ny + nh <= my + mh + 1e-6
+
+
+def test_hud_nest_rectangle_is_packed_into_the_uniforms(nested_renderer):
+    import cloudyview as cv
+
+    r = nested_renderer
+    r.hud.write_uniforms(cv.Camera(), (640, 360))
+    state = r.hud._last_state
+    assert state["nest_uv"] == r.hud.nest_map_uv()
+
+
+def test_hud_draws_the_nest_rectangle(nested_renderer):
+    """The outline must actually reach pixels, not just the uniform block."""
+    import cloudyview as cv
+
+    size = (640, 360)
+    cam = cv.Camera(position=(0.0, -0.9, 0.0), azimuth=0.0, elevation=0.0)
+    with_nest = nested_renderer.render(cam, size, jitter=False, hud=True)
+    plain = _renderer().render(cam, size, jitter=False, hud=True)
+
+    x, y, w, h = nested_renderer.hud.nest_pixel_rect(size)
+    # Sample the outline's top edge, away from the camera marker.
+    row = int(y) + 1
+    span = slice(int(x) + 2, int(x + w) - 2)
+    edge_diff = np.abs(
+        with_nest[row, span].astype(int) - plain[row, span].astype(int)
+    )
+    assert edge_diff.max() > 8
+
+
+# ---------------------------------------------------------------------------
+# (f) CLI / app wiring
 # ---------------------------------------------------------------------------
 
 def test_cli_exposes_nest_arguments():
@@ -338,8 +401,7 @@ def _loading_app(renderer):
     app._extinction_multiplier = 1.0
     app._requested_tier = "high"
     app._loading_job = None
-    app._behold_job = None
-    app._rendering = False
+    app._video_render = None
     app._frame_index = 0
     app._pending_open_path = None
     app._pending_ice_path = None
@@ -347,7 +409,6 @@ def _loading_app(renderer):
     app._pending_group_choices = []
     app._pending_units = None
     app._pending_units_vars = []
-    app._pending_is_nest = False
     app._pending_nest_group = None
     app._pending_nest_pair = None
     app._file_browser_error = None
@@ -359,53 +420,6 @@ def _loading_app(renderer):
     app._reset_camera_to_default = lambda camera=None: None
     app.camera = lambda: __import__("cloudyview").Camera()
     return app
-
-
-def test_menu_open_chain_loads_a_nest_into_the_running_scene(tmp_path):
-    """The in-app path: pick a file with the nest flag set, get a nest.
-
-    This is the flow the ESC menu drives (N -> browser -> load); the CLI
-    only covers construction.
-    """
-    from cloudyview.soar.app import FlyThroughApp
-
-    nest_path = _write_nc(tmp_path / "nest.nc", _nest_field())
-    renderer = _renderer()
-    assert renderer.nested is False
-
-    app = _loading_app(renderer)
-    app._pending_is_nest = True
-    FlyThroughApp._start_loading_file(app, nest_path, None)
-
-    job = app._loading_job
-    assert job is not None
-    job.join(30.0)
-    snapshot = job.pump()
-    assert snapshot.error is None, snapshot.error
-    assert snapshot.result["is_nest"] is True
-
-    FlyThroughApp._install_loaded_renderer(app, snapshot.result)
-    assert app.renderer.nested is True
-    assert app.renderer.nest.shape == _nest_field().shape
-    # The outer field is untouched — a nest joins the scene, not replaces it.
-    assert app.renderer.field.shape == renderer.field.shape
-
-
-def test_menu_open_chain_reports_a_nest_that_does_not_fit(tmp_path):
-    from cloudyview.soar.app import FlyThroughApp
-
-    nest = _nest_field()
-    moved = type(nest)(lwc=nest.lwc, x=nest.x + 1e6, y=nest.y, z=nest.z)
-    path = _write_nc(tmp_path / "far.nc", moved)
-
-    app = _loading_app(_renderer())
-    app._pending_is_nest = True
-    FlyThroughApp._start_loading_file(app, path, None)
-    app._loading_job.join(30.0)
-    snapshot = app._loading_job.pump()
-
-    assert snapshot.error is not None
-    assert "must lie inside" in snapshot.error
 
 
 def test_remove_nest_keeps_the_outer_field(tmp_path):

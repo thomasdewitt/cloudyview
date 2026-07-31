@@ -13,8 +13,11 @@ struct HudUniforms {
     camera: vec4<f32>,
     // left endpoint UV.xy, right endpoint UV.zw (wedge mode only).
     rays: vec4<f32>,
-    // x = line half-width px, y = border width px, z = halo width px.
+    // x = line half-width px, y = border width px, z = halo width px,
+    // w = nest rectangle enable (0 or 1).
     style: vec4<f32>,
+    // Nested field footprint in map UV: xy = min corner, zw = max corner.
+    nest: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: HudUniforms;
@@ -95,6 +98,19 @@ fn disk_coverage(distance_px: f32, radius_px: f32) -> f32 {
     return 1.0 - smoothstep(radius_px, radius_px + 1.0, distance_px);
 }
 
+// Unsigned distance to a rectangle's border (standard box SDF, absolute
+// value): zero on the outline, growing both inward and outward.
+fn dist_to_rect_border(p: vec2<f32>, lo: vec2<f32>, hi: vec2<f32>) -> f32 {
+    let d = max(lo - p, p - hi);
+    let outside = length(max(d, vec2<f32>(0.0)));
+    let inside = min(max(d.x, d.y), 0.0);
+    return abs(outside + inside);
+}
+
+fn inside_rect(p: vec2<f32>, lo: vec2<f32>, hi: vec2<f32>) -> bool {
+    return p.x >= lo.x && p.y >= lo.y && p.x <= hi.x && p.y <= hi.y;
+}
+
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let p = frag.xy;
@@ -113,6 +129,32 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let cam = uv_to_screen(u.camera.xy);
     let line_hw = u.style.x;
     let halo_hw = u.style.z;
+
+    // Nested-field footprint, drawn UNDER the camera overlay: it is context,
+    // not the thing you steer by. White line over an ink halo so it reads on
+    // both the bright cloud and dark ocean ends of the albedo map, and
+    // thinner than the camera's rays so the two never compete.
+    if (u.style.w > 0.5) {
+        // uv_to_screen flips y, so the UV min/max corners come back as
+        // opposite screen corners; re-sort them.
+        let c0 = uv_to_screen(u.nest.xy);
+        let c1 = uv_to_screen(u.nest.zw);
+        let lo = min(c0, c1);
+        let hi = max(c0, c1);
+        if (inside_rect(p, lo, hi)) {
+            out = over(out, vec4<f32>(WHITE, 0.10));
+        }
+        let nest_hw = max(line_hw * 0.7, 1.0);
+        let nest_d = dist_to_rect_border(p, lo, hi);
+        let halo = stroke_coverage(nest_d, nest_hw + halo_hw);
+        if (halo > 0.0) {
+            out = over(out, vec4<f32>(INK, 0.30 * halo));
+        }
+        let line = stroke_coverage(nest_d, nest_hw);
+        if (line > 0.0) {
+            out = over(out, vec4<f32>(WHITE, 0.80 * line));
+        }
+    }
 
     if (u.camera.z < 0.5) {
         let left = uv_to_screen(u.rays.xy);

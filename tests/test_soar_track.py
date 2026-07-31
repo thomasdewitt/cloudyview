@@ -104,3 +104,137 @@ def test_unsorted_and_duplicate_times_are_cleaned():
     assert xs == sorted(xs)
     assert frames[0][1].position[0] == pytest.approx(0.0)
     assert frames[-1][1].position[0] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Stepped video render (the app drives this from its draw loop)
+# ---------------------------------------------------------------------------
+
+def _video_fixture(tmp_path):
+    """A tiny real scene + track, ready to encode."""
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not on PATH")
+    pytest.importorskip("wgpu", reason="requires the 'interactive' extra")
+
+    import xarray as xr
+    import cloudyview as cv
+    from cloudyview.render_metadata import build_render_metadata
+    from cloudyview.soar import InteractiveRenderer
+    from cloudyview.soar.track import save_track
+
+    n, nz, d = 16, 8, 100.0
+    coords = {
+        axis: ((np.arange(count) + 0.5) * d)
+        for axis, count in (("x", n), ("y", n), ("z", nz))
+    }
+    path = tmp_path / "field.nc"
+    xr.Dataset(
+        {"QC": (("x", "y", "z"),
+                np.full((n, n, nz), 0.2, np.float32), {"units": "g/kg"})},
+        coords={k: (k, v, {"units": "m"}) for k, v in coords.items()},
+    ).to_netcdf(path)
+
+    field = cv.load(str(path))
+    flat = np.zeros((8, 8), dtype=np.float32)
+    renderer = InteractiveRenderer(
+        field, periodic=True, ocean_enabled=False,
+        fif_normals=(flat, flat, np.ones((8, 8), np.float32), 1.0),
+    )
+    header = build_render_metadata(
+        field, cv.Camera(), sun_azimuth=235.0, sun_elevation=25.0,
+        renderer="soar", quality="high", reproduction_command="test",
+        render_options={"periodic": True},
+    )
+    samples = [
+        [t / 8.0, 0.0, -0.9, -0.3, float(t * 5), 5.0, 70.0] for t in range(8)
+    ]
+    track = tmp_path / "clip.json"
+    save_track(track, header, samples)
+    return renderer, track
+
+
+def test_stepped_video_render_writes_a_playable_file(tmp_path):
+    from cloudyview.soar.track import TrackVideoRender
+
+    renderer, track = _video_fixture(tmp_path)
+    out = tmp_path / "clip.mp4"
+    render = TrackVideoRender(
+        track, out, fps=8.0, size=(160, 90), accumulate_frames=1,
+        renderer=renderer,
+    )
+    assert render.total > 0
+    assert render.done is False
+
+    guard = 0
+    while not render.step(2):
+        guard += 1
+        assert guard < 1000, "step() never reported completion"
+    assert render.close() == out
+    assert out.stat().st_size > 0
+
+
+def test_stepped_video_render_reports_progress(tmp_path):
+    from cloudyview.soar.track import TrackVideoRender
+
+    renderer, track = _video_fixture(tmp_path)
+    render = TrackVideoRender(
+        track, tmp_path / "p.mp4", fps=8.0, size=(96, 54),
+        accumulate_frames=1, renderer=renderer,
+    )
+    assert render.progress()["percent"] == 0.0
+    render.step()
+    mid = render.progress()
+    assert 0.0 < mid["percent"] <= 100.0
+    assert mid["frame"] == 1
+    assert mid["eta"] is not None
+    while not render.step(4):
+        pass
+    render.close()
+    assert render.progress()["percent"] == pytest.approx(100.0)
+
+
+def test_video_render_restores_the_quality_tier(tmp_path):
+    """The app's renderer is borrowed, not consumed."""
+    from cloudyview.soar.track import TrackVideoRender
+
+    renderer, track = _video_fixture(tmp_path)
+    renderer.set_quality_tier("low", camera_moving=False)
+    render = TrackVideoRender(
+        track, tmp_path / "t.mp4", fps=8.0, size=(96, 54),
+        accumulate_frames=1, renderer=renderer,
+    )
+    assert renderer.quality_tier == "high"   # forced for the encode
+    while not render.step(4):
+        pass
+    render.close()
+    assert renderer.quality_tier == "low"
+
+
+def test_aborted_video_render_leaves_no_file(tmp_path):
+    from cloudyview.soar.track import TrackVideoRender
+
+    renderer, track = _video_fixture(tmp_path)
+    renderer.set_quality_tier("medium", camera_moving=False)
+    out = tmp_path / "aborted.mp4"
+    render = TrackVideoRender(
+        track, out, fps=8.0, size=(96, 54), accumulate_frames=1,
+        renderer=renderer,
+    )
+    render.step()
+    render.abort()
+    assert not out.exists()
+    assert renderer.quality_tier == "medium"
+
+
+def test_video_size_is_forced_even_for_yuv420p(tmp_path):
+    from cloudyview.soar.track import TrackVideoRender
+
+    renderer, track = _video_fixture(tmp_path)
+    render = TrackVideoRender(
+        track, tmp_path / "odd.mp4", fps=8.0, size=(161, 91),
+        accumulate_frames=1, renderer=renderer,
+    )
+    assert (render.width, render.height) == (160, 90)
+    render.abort()

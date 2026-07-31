@@ -18,7 +18,7 @@ from ..glimpse import glimpse
 
 SHADER_PATH = Path(__file__).parent / "hud.wgsl"
 
-_UNIFORM_NBYTES = 5 * 16  # 5 vec4<f32>
+_UNIFORM_NBYTES = 6 * 16  # 6 vec4<f32>
 _SKY_BLUE = np.array([0x3A, 0x4A, 0xA6], dtype=np.float32) / 255.0
 _WHITE = np.array([1.0, 1.0, 1.0], dtype=np.float32)
 
@@ -219,6 +219,44 @@ class MinimapHUD:
 
         return (screen_w - margin - map_w, margin, map_w, map_h)
 
+    def nest_map_uv(self):
+        """Nested field's horizontal footprint in map UV, or None.
+
+        The map spans the OUTER field's x/y extent, and the nest is required
+        to lie inside it, so the fractions are always in [0, 1]. Vertical
+        extent is not shown: the minimap is a top-down plan view, and a
+        nest's z range has no place to go on it.
+        """
+        renderer = self.renderer
+        if not getattr(renderer, "nested", False):
+            return None
+        bmin = np.asarray(renderer.bmin, dtype=np.float64)
+        bmax = np.asarray(renderer.bmax, dtype=np.float64)
+        extent = bmax - bmin
+        if np.any(extent[:2] <= 0.0):
+            return None
+        lo = (np.asarray(renderer.nest_bmin, dtype=np.float64) - bmin) / extent
+        hi = (np.asarray(renderer.nest_bmax, dtype=np.float64) - bmin) / extent
+        return (
+            float(np.clip(lo[0], 0.0, 1.0)), float(np.clip(lo[1], 0.0, 1.0)),
+            float(np.clip(hi[0], 0.0, 1.0)), float(np.clip(hi[1], 0.0, 1.0)),
+        )
+
+    def nest_pixel_rect(self, size: Tuple[int, int]):
+        """The nest outline in screen pixels ``(x, y, w, h)``, or None."""
+        nest_uv = self.nest_map_uv()
+        if nest_uv is None:
+            return None
+        rect = self.rect_for_size(size)
+        u0, v0, u1, v1 = nest_uv
+        # uv_to_screen flips y; sort so the result is a positive-extent box.
+        xs = sorted((rect[0] + u0 * rect[2], rect[0] + u1 * rect[2]))
+        ys = sorted((
+            rect[1] + (1.0 - v0) * rect[3],
+            rect[1] + (1.0 - v1) * rect[3],
+        ))
+        return (xs[0], ys[0], xs[1] - xs[0], ys[1] - ys[0])
+
     def marker_pixel(self, camera: Camera, size: Tuple[int, int]) -> Tuple[float, float]:
         """Return the marker center in screen pixels for tests/diagnostics."""
         rect = self.rect_for_size(size)
@@ -257,12 +295,17 @@ class MinimapHUD:
         else:
             (left_u, left_v), (right_u, right_v) = endpoints
 
-        u = np.empty((5, 4), dtype=np.float32)
+        nest_uv = self.nest_map_uv()
+        u = np.empty((6, 4), dtype=np.float32)
         u[0] = [screen_w, screen_h, MAP_OPACITY, marker_radius]
         u[1] = [*rect]
         u[2] = [cam_u, cam_v, mode, circle_radius]
         u[3] = [left_u, left_v, right_u, right_v]
-        u[4] = [line_width, border_width, halo_width, 0.0]
+        u[4] = [
+            line_width, border_width, halo_width,
+            0.0 if nest_uv is None else 1.0,
+        ]
+        u[5] = [0.0, 0.0, 0.0, 0.0] if nest_uv is None else list(nest_uv)
         self.device.queue.write_buffer(self._ubuf, 0, u.tobytes())
 
         self._last_state = {
@@ -276,6 +319,7 @@ class MinimapHUD:
                 rect[0] + cam_u * rect[2],
                 rect[1] + (1.0 - cam_v) * rect[3],
             ),
+            "nest_uv": nest_uv,
         }
 
     def _pipeline_for(self, target_format: str):

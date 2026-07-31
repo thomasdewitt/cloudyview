@@ -11,18 +11,19 @@ ACTION_RESUME = "resume"
 ACTION_QUIT = "quit"
 ACTION_TOGGLE_FULLSCREEN = "toggle_fullscreen"
 ACTION_OPEN_FILE = "open_file"
-ACTION_OPEN_NEST = "open_nest"
+ACTION_REMOVE_NEST = "remove_nest"
 ACTION_OPEN_ICE_YES = "open_ice_yes"
 ACTION_OPEN_ICE_NO = "open_ice_no"
 ACTION_SELECT_GROUP = "select_group"
 ACTION_SELECT_BOTH_GROUPS = "select_both_groups"
 ACTION_SELECT_UNITS = "select_units"
 ACTION_RENDER_MENU = "render_menu"
-ACTION_RENDER_BEHOLD = "render_behold"
+ACTION_SELECT_BEHOLD_QUALITY = "select_behold_quality"
+ACTION_COPY_BEHOLD_COMMAND = "copy_behold_command"
 ACTION_MENU_BACK = "menu_back"
 ACTION_SCREENSHOT = "screenshot"
 ACTION_TOGGLE_PERIODIC = "toggle_periodic"
-ACTION_SETTINGS_MENU = "settings_menu"
+ACTION_QUALITY_MENU = "quality_menu"
 ACTION_SELECT_TIER = "select_tier"
 ACTION_CONTROLS_MENU = "controls_menu"
 ACTION_SUN_MENU = "sun_menu"
@@ -31,6 +32,7 @@ ACTION_TRACK_SAVE = "track_save"
 ACTION_TRACK_DISCARD = "track_discard"
 ACTION_SCREENSHOT_WITH_OVERLAYS = "screenshot_with_overlays"
 ACTION_SCREENSHOT_CLOUDS_ONLY = "screenshot_clouds_only"
+ACTION_CLOSE_PREVIEW = "close_preview"
 
 MENU_MAIN = "main"
 MENU_FILE_BROWSER_LIQUID = "file_browser_liquid"
@@ -39,11 +41,12 @@ MENU_OPEN_UNITS_PROMPT = "open_units_prompt"
 MENU_OPEN_ICE_PROMPT = "open_ice_prompt"
 MENU_FILE_BROWSER_ICE = "file_browser_ice"
 MENU_RENDER_QUALITY = "render_quality"
-MENU_SETTINGS = "settings"
+MENU_QUALITY = "quality"
 MENU_CONTROLS = "controls"
 MENU_TRACK_SAVE = "track_save"
 MENU_SUN = "sun"
 MENU_SCREENSHOT = "screenshot"
+MENU_SCREENSHOT_PREVIEW = "screenshot_preview"
 MENU_ERROR = "error"
 
 BEHOLD_QUALITIES_BY_KEY = {
@@ -135,14 +138,15 @@ def menu_transition(
         if normalized == "o":
             return MenuTransition(ACTION_OPEN_FILE, MENU_FILE_BROWSER_LIQUID)
         if normalized == "n":
-            # Add a nested field, or drop the one already loaded — the app
-            # picks based on whether its renderer has a nest, and the button
-            # label says which it will be.
-            return MenuTransition(ACTION_OPEN_NEST, MENU_FILE_BROWSER_LIQUID)
+            # Drop a loaded nest. There is no "add" counterpart: a nest comes
+            # from the file it lives in (the group picker's "Use both,
+            # nested"), or from --nest at launch. The app ignores this when
+            # its renderer has no nest.
+            return MenuTransition(ACTION_REMOVE_NEST, MENU_MAIN)
         if normalized == "g":
             return MenuTransition(ACTION_RENDER_MENU, MENU_RENDER_QUALITY)
         if normalized == "s":
-            return MenuTransition(ACTION_SETTINGS_MENU, MENU_SETTINGS)
+            return MenuTransition(ACTION_QUALITY_MENU, MENU_QUALITY)
         if normalized == "t":
             return MenuTransition(ACTION_SUN_MENU, MENU_SUN)
         if normalized == "p":
@@ -197,24 +201,30 @@ def menu_transition(
         return MenuTransition(None, MENU_FILE_BROWSER_ICE)
 
     if menu_state == MENU_RENDER_QUALITY:
+        # This menu hands over a command; nothing renders here. The number
+        # keys choose which quality the command names.
         if key == "Escape":
             return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        if normalized == "c" or key == "Enter":
+            return MenuTransition(
+                ACTION_COPY_BEHOLD_COMMAND, MENU_RENDER_QUALITY
+            )
         quality = BEHOLD_QUALITIES_BY_KEY.get(normalized)
         if quality is not None:
             return MenuTransition(
-                ACTION_RENDER_BEHOLD, MENU_RENDER_QUALITY, quality
+                ACTION_SELECT_BEHOLD_QUALITY, MENU_RENDER_QUALITY, quality
             )
         return MenuTransition(None, MENU_RENDER_QUALITY)
 
-    if menu_state == MENU_SETTINGS:
+    if menu_state == MENU_QUALITY:
         if key == "Escape":
             return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
         tier = QUALITY_TIERS_BY_KEY.get(normalized)
         if tier is not None:
             return MenuTransition(
-                ACTION_SELECT_TIER, MENU_SETTINGS, tier=tier
+                ACTION_SELECT_TIER, MENU_QUALITY, tier=tier
             )
-        return MenuTransition(None, MENU_SETTINGS)
+        return MenuTransition(None, MENU_QUALITY)
 
     if menu_state == MENU_SUN:
         if key == "Escape":
@@ -250,6 +260,12 @@ def menu_transition(
         if key == "Escape":
             return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
         return MenuTransition(None, MENU_SCREENSHOT)
+
+    if menu_state == MENU_SCREENSHOT_PREVIEW:
+        # Any way out is the same way out; the shot is already on disk.
+        if key in ("Escape", "Enter") or normalized in ("c", "r"):
+            return MenuTransition(ACTION_CLOSE_PREVIEW, MENU_MAIN)
+        return MenuTransition(None, MENU_SCREENSHOT_PREVIEW)
 
     if menu_state == MENU_ERROR:
         if key == "Escape":

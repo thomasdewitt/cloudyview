@@ -9,7 +9,8 @@ spec for the library-first refactor and the interactive app.
    image out. CLIs remain as thin wrappers.
 2. **Interactive fly-through app** (desktop, this machine, RTX 5080): open a
    .nc via file dialog, fly through the volume game-style, top-view minimap,
-   screenshots, launch a `behold` render from the current camera.
+   screenshots and flight-track videos, and a copy-pasteable `behold` command
+   for the current camera.
 3. **Rendering tiers:** `glimpse` = 2D diagnostic; `witness` = game-like
    real-time; `behold` = offline physics engine (Mitsuba, not interactive
    even on the 5080).
@@ -170,13 +171,27 @@ is the same trade witness makes; the occupancy grid above is the fix.
   scene); opening a new *outer* file resets the camera and drops the nest.
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
 - Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
-  FOV wedge (reuse glimpse overlay math).
-- Screenshot key (F12): prompts for what belongs in the frame (bird +
-  location map, or clouds only), then writes an offscreen PNG at the current
-  window size with camera, source-file, sun, renderer, version, timestamp,
-  and reproduction metadata embedded in PNG text chunks. The choice is per
-  shot rather than the live B/M toggles — the frame worth keeping and the
-  frame worth flying with are rarely the same one.
+  FOV wedge (reuse glimpse overlay math), and — when a nest is loaded — its
+  horizontal footprint as a subtle white outline drawn *under* the camera
+  overlay. A nest is easy to fly straight past; the outline is how you find
+  it. Vertical extent is not shown: the minimap is a plan view.
+- Captures (F12 screenshot, R flight track) share one settings block:
+  output size (window / presets / custom) and destination folder, defaulting
+  to `~/Downloads`. A screenshot and a video are the same decision twice.
+  - **F12** also asks what belongs in the frame (bird + location map, or
+    clouds only) — per shot rather than the live B/M toggles, because the
+    frame worth keeping and the frame worth flying with are rarely the same
+    one — then writes the PNG with camera, source-file, sun, renderer,
+    version, timestamp and reproduction metadata in PNG text chunks, and
+    shows the result in-window with a Close button.
+  - **R** stops recording into the same block plus frame rate and
+    accumulation passes, then encodes the track to mp4 **in the foreground**:
+    `track.TrackVideoRender` is stepped from the draw loop rather than run on
+    a thread, because the encode renders through the app's own resident
+    volume (not shareable across threads) and the point is to give the GPU
+    to the encode. The window blits its last frame and shows progress + ETA;
+    Escape aborts and removes the partial file. The .json track is kept for
+    re-rendering later with `soar --render-track`.
 - Time-of-day panel (**T** in the ESC menu): midday / golden hour / sunset
   presets plus solar zenith and azimuth sliders. The sun drives the whole
   spectral package (beam colour, sky field, low-sun warm wedge, ocean
@@ -188,10 +203,14 @@ is the same trade witness makes; the occupancy grid above is the fix.
   launch, and a moved sun is written into the screenshot reproduction
   command.
 - ESC menu as control center: open a new `.nc` (with split ice-file prompt),
-  render the current `app.camera()` in `behold`, toggle fullscreen, resume, or
-  quit. Behold runs in the foreground because the Mitsuba GPU backend needs the
-  full device; the title reports progress/ETA and warns that it cannot be
-  canceled once started.
+  toggle fullscreen, resume, or quit.
+- **Behold is not run from the app.** G shows a copy-pasteable `behold`
+  command for the current view — field, camera, sun, quality — and copies it
+  to the clipboard. Path tracing is minutes-to-overnight and wants the GPU to
+  itself, which does not belong inside a fly-through; handing over an exact
+  command is also the only form of this that works identically in the browser
+  build, where there is no Mitsuba at all. Soar therefore has no Mitsuba
+  dependency.
 - Later garnish: a subject (bird / paper airplane) in front of the camera.
 
 ## Testing
