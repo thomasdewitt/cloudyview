@@ -1,18 +1,27 @@
 // CloudyView interactive volume raymarcher (WGSL).
 //
-// Stage 4 scope (2026-07): ray-box entry, hardware-trilinear sampling of a
-// resident r32float 3D extinction texture, witness procedural sky, per-pixel
-// jittered ray starts, and the single-domain witness cloud-scattering model
-// (adaptive view/light marches, dt-invariant powder, MS octaves, ambient ramp,
-// surface bounce, ghost-zero boundary taper, and the witness FIF ocean). Nested levels are still staged follow-ups,
-// ported function by function against the numba golden reference
-// (docs/architecture.md).
+// Ray-box entry, hardware-trilinear sampling of resident 3D extinction
+// textures, witness procedural sky, per-pixel jittered ray starts, and the
+// witness cloud-scattering model (adaptive view/light marches, dt-invariant
+// powder, MS octaves, ambient ramp, surface bounce, ghost-zero boundary
+// taper, and the witness FIF ocean), ported function by function against the
+// numba reference in witness.py (docs/architecture.md).
 //
-// Periodic domain (2026-07): SAM LES fields are doubly periodic in x/y, so
-// in this periodic shader the volume tiles horizontally — density sampling
-// wraps (sample_sigma), the view march never exits sideways (z slab +
-// periodic_march_cap), and the light march exits only through the domain
-// top. The flag exactly off reproduces the finite-box behavior bit-for-bit.
+// This is the single raymarch module. The host specializes it by rewriting
+// three const declarations before compiling (engine._shader_for):
+// PERIODIC_DOMAIN, NESTED, and MAX_LIGHT_STEPS. Every branch on the first
+// two folds away at compile time, so an unused feature costs nothing.
+//
+// Periodic domain: SAM LES fields are doubly periodic in x/y, so the volume
+// tiles horizontally — density sampling wraps (wrap_to_domain), the view
+// march never exits sideways (z slab + periodic_march_cap), and the light
+// march exits only through the domain top.
+//
+// Nested levels: an optional second, finer field ("the nest") sits inside
+// the outer AABB and wins wherever it covers, exactly like
+// witness._active_level. The nest tiles WITH the parent — the whole scene is
+// one periodic tile — so a wrapped world point is tested against the nest
+// box after wrapping, and every domain copy carries a copy of the nest.
 //
 // Conventions shared with the CPU renderer (cloudyview/witness.py):
 // - World space is absolute meters, +x east, +y north, +z up.
@@ -79,14 +88,19 @@ struct Uniforms {
     // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
     ocean_realism_b: vec4<f32>,
     // Row 20: periodic domain + distance LOD (2026-07-17 perf pass).
-    // x = periodic enable in host scene identity (0.0 or 1.0); OFF selects
-    // raymarch_legacy.wgsl rather than branching through this module.
+    // x = periodic enable in host scene identity (0.0 or 1.0); the shader
+    //     itself branches on the compile-time PERIODIC_DOMAIN const.
     // y = light-march LOD tan(theta): sun-march dt floor grows as
     //     view_distance * y so distant cloud copies get coarser (never
-    //     truncated) tau quadrature. 0 = exact legacy fixed dt.
+    //     truncated) tau quadrature. 0 = fixed dt.
     // z = view-step LOD tan(theta): view-march dt floor grows as t * z —
-    //     the degrees-not-meters step. 0 = exact legacy fixed dt.
+    //     the degrees-not-meters step. 0 = fixed dt.
     periodic: vec4<f32>,
+    // Rows 21-22: the optional nest (NESTED). Same packing as rows 5-6 but
+    // for the finer level: xyz = nest AABB min/max (m), w = the nest's own
+    // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
+    nest_bmin: vec4<f32>,
+    nest_bmax: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -94,11 +108,15 @@ struct Uniforms {
 @group(0) @binding(2) var vol_samp: sampler;
 @group(0) @binding(3) var ocean_normals: texture_2d<f32>;
 @group(0) @binding(4) var ocean_samp: sampler;
+// The finer nested level. Always bound (a 1x1x1 zero texture when there is
+// no nest) so one bind-group layout serves both specializations.
+@group(0) @binding(5) var nest_vol: texture_3d<f32>;
 
-// Compile-time rather than dynamically read in hot loops. OFF selects the
-// untouched raymarch_legacy.wgsl module; this module is periodic-only, so its
+// Compile-time, rather than dynamically read in hot loops: the host rewrites
+// these two declarations per specialization (engine._shader_for), so the
 // density, light, and view branches fold away completely.
 const PERIODIC_DOMAIN: bool = true;
+const NESTED: bool = false;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -168,13 +186,14 @@ const LIGHT_TRANSFER_DIRECT_BOOST: f32 = 0.25;
 const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 
 // TODO(occupancy-grid): empty-space skipping. Cloud fields are sparse; a
-// coarse (e.g. 16^3-voxel-block) occupancy grid bound after the ocean slots would
-// let both the view march and the light march leap over empty bricks. This
-// is the known next lever for the full 1024x1024x255 domain
+// coarse (e.g. 16^3-voxel-block) occupancy grid bound in the next free slot
+// would let both the view march and the light march leap over empty bricks.
+// This is the known next lever for the full 1024x1024x255 domain
 // (docs/architecture.md "Interactive techniques").
 
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
+// Both levels always share one format.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -192,56 +211,126 @@ fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(t_near, t_far);
 }
 
-fn sigma_data_dims_xyz() -> vec3<f32> {
-    let tex_dims = vec3<f32>(textureDimensions(vol, 0));
+// One refinement level's sample, plus the march step sizes that level asks
+// for. witness carries the same two things out of _sample_sigma_nested (the
+// value and the level index that sets dt_max).
+struct LevelSample {
+    sigma: f32,
+    dt_view: f32,
+    dt_light: f32,
+    in_nest: bool,
+}
+
+fn level_data_dims(t: texture_3d<f32>) -> vec3<f32> {
+    let tex_dims = vec3<f32>(textureDimensions(t, 0));
     return vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x) - vec3<f32>(2.0);
 }
 
-fn sigma_voxel_size_xyz() -> vec3<f32> {
-    return (u.bmax.xyz - u.bmin.xyz) / sigma_data_dims_xyz();
+// Voxel size (m) of whichever level is active at the sample point.
+fn level_voxel_size(in_nest: bool) -> vec3<f32> {
+    if (NESTED && in_nest) {
+        return (u.nest_bmax.xyz - u.nest_bmin.xyz) / level_data_dims(nest_vol);
+    }
+    return (u.bmax.xyz - u.bmin.xyz) / level_data_dims(vol);
 }
 
-// Extinction (m^-1) at world point p via hardware trilinear filtering.
+// Fold a world point into the outer tile. The scene — nest included — is one
+// periodic tile, so this runs before any level test: every domain copy then
+// carries a copy of the nest at the same place within the tile.
+fn wrap_to_domain(p: vec3<f32>) -> vec3<f32> {
+    if (!PERIODIC_DOMAIN) {
+        return p;
+    }
+    let extent = u.bmax.xy - u.bmin.xy;
+    let g = fract((p.xy - u.bmin.xy) / extent);
+    return vec3<f32>(u.bmin.xy + g * extent, p.z);
+}
+
+// Containment test for the already-wrapped point (witness._active_level).
+fn in_nest_box(q: vec3<f32>) -> bool {
+    if (!NESTED) {
+        return false;
+    }
+    return all(q >= u.nest_bmin.xyz) && all(q <= u.nest_bmax.xyz);
+}
+
+// Extinction (m^-1) from one level via hardware trilinear filtering.
 // Coordinate swizzle: texture is (w=nz+2, h=ny+2, d=nx+2), see file header.
 // The host uploads original data into padded texels [1..N]. Witness uses
 // gx=(p-bmin)/dx with data value i at gx=i and ghost zeros at -1 and N.
 // Therefore padded_texel = gx+1 and normalized coord = (gx+1.5)/(N+2),
 // preserving every pre-padding world/data sample while hardware filtering
-// supplies the linear taper against the zero border. The march interval stays
-// on the original outer AABB, matching witness._active_level's containment
-// test before it calls _sample_sigma_level.
-fn sample_sigma(p: vec3<f32>) -> f32 {
-    let tex_dims = vec3<f32>(textureDimensions(vol, 0));
-    let dims = sigma_data_dims_xyz();
-    let domain_g = (p - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz);
-    var data_g = domain_g * dims;
-    if (PERIODIC_DOMAIN) {
-        // Doubly-periodic domain: wrap x/y into [0, N) so any world point
-        // samples the tiled field. The x/y ghost texels are filled from the
-        // OPPOSITE faces (engine._write_ghost_border), so hardware trilinear
-        // filtering across gx in [N-1, N) interpolates sigma[N-1] against
-        // sigma[0] — the seam is exact. z keeps the ghost-zero taper.
-        data_g = vec3<f32>(
-            fract(domain_g.x) * dims.x,
-            fract(domain_g.y) * dims.y,
-            data_g.z
-        );
-    }
+// supplies the linear taper against the zero border. In a periodic domain
+// the outer level's x/y ghost texels are instead filled from the OPPOSITE
+// faces (engine._write_ghost_border), so filtering across the wrap seam is
+// exact; the nest always keeps the ghost-zero taper, which is what lets it
+// blend out into the coarse field at its own boundary.
+fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
+                bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
+    let tex_dims = vec3<f32>(textureDimensions(t, 0));
+    let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x) - vec3<f32>(2.0);
+    let data_g = ((q - bmin) / (bmax - bmin)) * dims;
     let tex_coord = vec3<f32>(
         data_g.z + 1.5,
         data_g.y + 1.5,
         data_g.x + 1.5
     ) / tex_dims;
-    return textureSampleLevel(vol, vol_samp, tex_coord, 0.0).r;
+    return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r;
 }
 
-fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>) -> vec3<f32> {
-    let sxp = sample_sigma(p + vec3<f32>(h.x, 0.0, 0.0));
-    let sxm = sample_sigma(p - vec3<f32>(h.x, 0.0, 0.0));
-    let syp = sample_sigma(p + vec3<f32>(0.0, h.y, 0.0));
-    let sym = sample_sigma(p - vec3<f32>(0.0, h.y, 0.0));
-    let szp = sample_sigma(p + vec3<f32>(0.0, 0.0, h.z));
-    let szm = sample_sigma(p - vec3<f32>(0.0, 0.0, h.z));
+// Sample a *chosen* level at an already-wrapped point.
+fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
+    if (NESTED && in_nest) {
+        return sample_level(nest_vol, q, u.nest_bmin.xyz, u.nest_bmax.xyz);
+    }
+    return sample_level(vol, q, u.bmin.xyz, u.bmax.xyz);
+}
+
+// Finest level covering p wins (witness._sample_sigma_nested).
+fn sample_sigma(p: vec3<f32>) -> f32 {
+    let q = wrap_to_domain(p);
+    return sample_sigma_pinned(q, in_nest_box(q));
+}
+
+// Same dispatch, carrying the active level's step sizes back to the caller.
+fn sample_level_at(p: vec3<f32>) -> LevelSample {
+    let q = wrap_to_domain(p);
+    let nested_here = in_nest_box(q);
+    var s: LevelSample;
+    s.in_nest = nested_here;
+    s.sigma = sample_sigma_pinned(q, nested_here);
+    if (NESTED && nested_here) {
+        s.dt_view = u.nest_bmin.w;
+        s.dt_light = u.nest_bmax.w;
+    } else {
+        s.dt_view = u.bmin.w;
+        s.dt_light = u.bmax.w;
+    }
+    return s;
+}
+
+// One gradient tap. `pin` keeps the tap on the caller's level instead of
+// re-dispatching — used for the one-voxel fine stencil, where crossing into
+// the coarse field mid-stencil would measure the resolution change rather
+// than the cloud. The coarse stencil deliberately does NOT pin: its radius
+// routinely leaves the nest, and reading the parent field there is both
+// cheaper and more honest than reading the nest's ghost-zero taper (witness
+// pins at every radius, which puts a spurious edge on the nest boundary).
+fn sigma_tap(p: vec3<f32>, pin: bool, pin_nest: bool) -> f32 {
+    if (NESTED && pin) {
+        return sample_sigma_pinned(wrap_to_domain(p), pin_nest);
+    }
+    return sample_sigma(p);
+}
+
+fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>,
+                            pin: bool, pin_nest: bool) -> vec3<f32> {
+    let sxp = sigma_tap(p + vec3<f32>(h.x, 0.0, 0.0), pin, pin_nest);
+    let sxm = sigma_tap(p - vec3<f32>(h.x, 0.0, 0.0), pin, pin_nest);
+    let syp = sigma_tap(p + vec3<f32>(0.0, h.y, 0.0), pin, pin_nest);
+    let sym = sigma_tap(p - vec3<f32>(0.0, h.y, 0.0), pin, pin_nest);
+    let szp = sigma_tap(p + vec3<f32>(0.0, 0.0, h.z), pin, pin_nest);
+    let szm = sigma_tap(p - vec3<f32>(0.0, 0.0, h.z), pin, pin_nest);
     return vec3<f32>(
         (sxp - sxm) / (2.0 * h.x),
         (syp - sym) / (2.0 * h.y),
@@ -253,9 +342,10 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
                   coarse_weight_in: f32,
                   coarse_radius_m: f32,
                   sample_distance_m: f32,
-                  cone_stencil_tan_theta: f32) -> vec4<f32> {
-    let fine_h = sigma_voxel_size_xyz() * GRADIENT_SHADING_RADIUS_VOXELS;
-    let fine_grad = sigma_gradient_at_radius(p, fine_h);
+                  cone_stencil_tan_theta: f32,
+                  in_nest: bool) -> vec4<f32> {
+    let fine_h = level_voxel_size(in_nest) * GRADIENT_SHADING_RADIUS_VOXELS;
+    let fine_grad = sigma_gradient_at_radius(p, fine_h, true, in_nest);
     let fine_len = length(fine_grad);
     let fine_conf = (
         fine_len * min(min(fine_h.x, fine_h.y), fine_h.z)
@@ -266,7 +356,7 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         return vec4<f32>(fine_grad, fine_conf);
     }
 
-    let voxel = sigma_voxel_size_xyz();
+    let voxel = level_voxel_size(in_nest);
     let extent = u.bmax.xyz - u.bmin.xyz;
 
     // Cone stencil (witness iter_001): a fixed angular radius follows
@@ -291,7 +381,7 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         );
     }
     coarse_h = max(coarse_h, fine_h);
-    let coarse_grad = sigma_gradient_at_radius(p, coarse_h);
+    let coarse_grad = sigma_gradient_at_radius(p, coarse_h, false, in_nest);
     let coarse_len = length(coarse_grad);
     let coarse_conf = (
         coarse_len * min(min(coarse_h.x, coarse_h.y), coarse_h.z)
@@ -377,19 +467,23 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32) -> f32 {
         t_exit = hit.y;
         t_start = max(hit.x, 0.0);
     }
-    let dt_max = max(u.bmax.w, dt_floor);
     var tau = 0.0;
     var t = t_start;
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
         if (t >= t_exit) {
             break;
         }
-        let sigma = sample_sigma(p + t * sun);
-        var dt = dt_max;
+        // Step size follows the level the shadow ray is currently in, so a
+        // fine nest is integrated at its own resolution and the coarse field
+        // outside it is not (witness._light_march). The step cap is shared:
+        // a shadow ray crossing a deep nest can exhaust MAX_LIGHT_STEPS, but
+        // tau saturation (LIGHT_TAU_CUTOFF) normally ends it far sooner.
+        let s = sample_level_at(p + t * sun);
+        var dt = max(s.dt_light, dt_floor);
         if (t + dt > t_exit) {
             dt = t_exit - t;
         }
-        tau = tau + sigma * dt;
+        tau = tau + s.sigma * dt;
         if (tau > LIGHT_TAU_CUTOFF) {
             break;
         }
@@ -875,9 +969,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Jittered first step: decorrelates the sampling shells between
     // neighboring pixels, killing the coherent ring/banding artifact.
     // frame index is folded in so temporal accumulation stays unbiased.
+    // The entry step scale is the outer level's: the nest is required to lie
+    // strictly inside the outer AABB, so a ray always enters through it.
     let jitter = hash12(frag_pos.xy + vec2<f32>(u.sun_dir.w * 61.803, 0.0));
-    let dt_max = u.bmin.w;
-    var t = t_near + jitter_on * jitter * jitter_scale * dt_max;
+    let entry_dt = u.bmin.w;
+    var t = t_near + jitter_on * jitter * jitter_scale * entry_dt;
 
     var transmittance = 1.0;
     var col = vec3<f32>(0.0);
@@ -904,12 +1000,19 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 break;
             }
             let p = u.cam_origin.xyz + t * dir;
-            let sigma = sample_sigma(p);
+            // The active level sets the step scale, so the march refines on
+            // entering the nest and coarsens on leaving it. The dt-invariant
+            // powder term below is what lets the two levels composite
+            // without a brightness seam (witness.py header).
+            let level = sample_level_at(p);
+            let sigma = level.sigma;
 
             // Distance LOD: the step floor grows with distance so far
             // wrapped copies march in angular, not metric, resolution
-            // (0 = exact legacy). Dense-sigma refinement still applies.
-            var dt = step_dt_for_sigma(sigma, max(dt_max, t * u.periodic.z));
+            // (0 = fixed dt). Dense-sigma refinement still applies.
+            var dt = step_dt_for_sigma(
+                sigma, max(level.dt_view, t * u.periodic.z)
+            );
             if (t + dt > t_far) {
                 dt = t_far - t;
             }
@@ -989,7 +1092,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             if (gradient_shading_strength > 0.0) {
                 let grad_conf_v = sigma_gradient(
                     p, sigma, gradient_coarse_weight, gradient_coarse_radius_m,
-                    t, u.cb_params.w
+                    t, u.cb_params.w, level.in_nest
                 );
                 let grad = grad_conf_v.xyz;
                 let grad_len = length(grad);

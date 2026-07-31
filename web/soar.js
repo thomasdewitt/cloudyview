@@ -164,6 +164,20 @@ async function main() {
     { bytesPerRow: pz * 2, rowsPerImage: py }, [pz, py, px],
   );
 
+  // The nest slot. The web demo ships a single level, but the shader's
+  // bind-group layout is shared with the desktop build, so bind the same
+  // 1x1x1 zero stand-in the engine uses when there is no nest.
+  const nestTex = device.createTexture({
+    size: [1, 1, 1],
+    dimension: "3d",
+    format: "r16float",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  device.queue.writeTexture(
+    { texture: nestTex }, new Uint16Array(1),
+    { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1],
+  );
+
   const fifTex = device.createTexture({
     size: [meta.fif.n, meta.fif.n, 1],
     format: "rgba16float",
@@ -189,7 +203,7 @@ async function main() {
   });
 
   // --- Uniforms: template from the Python renderer; we own a few rows.
-  const uniform = new Float32Array(21 * 4);
+  const uniform = new Float32Array(meta.uniform_template.length * 4);
   uniform.set(meta.uniform_template.flat());
   const uniformBuf = device.createBuffer({
     size: uniform.byteLength,
@@ -215,6 +229,8 @@ async function main() {
         texture: { sampleType: "float", viewDimension: "2d" } },
       { binding: 4, visibility: GPUShaderStage.FRAGMENT,
         sampler: { type: "filtering" } },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "float", viewDimension: "3d" } },
     ],
   });
   const rayPipeline = device.createRenderPipeline({
@@ -234,6 +250,7 @@ async function main() {
       { binding: 2, resource: volSampler },
       { binding: 3, resource: fifTex.createView() },
       { binding: 4, resource: oceanSampler },
+      { binding: 5, resource: nestTex.createView() },
     ],
   });
 

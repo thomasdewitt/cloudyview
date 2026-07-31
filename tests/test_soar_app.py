@@ -30,6 +30,7 @@ from cloudyview.soar.app import (
     MENU_OPEN_ICE_PROMPT,
     MENU_OPEN_UNITS_PROMPT,
     MENU_RENDER_QUALITY,
+    MENU_SCREENSHOT,
     MENU_SETTINGS,
     OCEAN_FLOOR_MARGIN_M,
     _clamp_position_above_ocean,
@@ -108,9 +109,15 @@ def make_event_app():
     app._toggle_fullscreen = toggle_fullscreen
     app._start_open_file = lambda: setattr(app, "open_calls", app.open_calls + 1)
     app._run_behold_render = lambda quality: app.render_calls.append(quality)
-    app._save_screenshot = lambda: setattr(
-        app, "screenshot_calls", app.screenshot_calls + 1
-    )
+    app.screenshot_overlays = []
+
+    def save_screenshot(*, overlays=True):
+        app.screenshot_calls += 1
+        app.screenshot_overlays.append(overlays)
+        app._menu_state = MENU_MAIN
+        app._paused = False
+
+    app._save_screenshot = save_screenshot
     app._select_quality_tier = lambda tier: app.tier_calls.append(tier)
     return app
 
@@ -347,13 +354,41 @@ def test_pause_open_and_render_keys_dispatch_to_submenus():
     assert app.render_calls == ["low"]
 
 
-def test_f12_dispatches_screenshot_during_active_flight():
+def test_f12_opens_the_screenshot_prompt_during_active_flight():
+    """F12 asks what belongs in the frame instead of shooting immediately."""
     app = make_event_app()
     app._paused = False
 
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "F12"})
 
+    assert app.screenshot_calls == 0
+    assert app._paused is True
+    assert app._menu_state == MENU_SCREENSHOT
+
+
+@pytest.mark.parametrize(
+    "key, overlays",
+    [("w", True), ("W", True), ("Enter", True), ("1", True),
+     ("c", False), ("C", False), ("2", False)],
+)
+def test_screenshot_prompt_keys_choose_the_overlays(key, overlays):
+    app = make_event_app()
+    app._paused = False
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "F12"})
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": key})
+
     assert app.screenshot_calls == 1
+    assert app.screenshot_overlays == [overlays]
+
+
+def test_screenshot_prompt_escape_cancels_without_saving():
+    app = make_event_app()
+    app._paused = False
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "F12"})
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "Escape"})
+
+    assert app.screenshot_calls == 0
+    assert app._menu_state == MENU_MAIN
 
 
 def test_f3_cycles_corner_stats_without_becoming_movement_input():

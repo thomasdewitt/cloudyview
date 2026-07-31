@@ -37,8 +37,8 @@ def test_shader_offsets_world_samples_to_padded_texel_centers():
     from cloudyview.soar import engine
 
     shader = engine.SHADER_PATH.read_text()
-    assert "textureDimensions(vol, 0)" in shader
-    assert "sigma_data_dims_xyz()" in shader
+    assert "textureDimensions(t, 0)" in shader
+    assert "level_data_dims(vol)" in shader
     assert "data_g.z + 1.5" in shader
     assert "data_g.y + 1.5" in shader
     assert "data_g.x + 1.5" in shader

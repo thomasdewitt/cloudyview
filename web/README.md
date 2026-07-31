@@ -14,7 +14,7 @@ gitignored. Regenerate it on a machine with the GPU:
 
 This dumps `demo/` (~13 MB): the fp16 ghost-padded extinction volume from
 `data/TWPICE_subvolume_256x256_5km.nc`, a seeded 512² FIF normal mip
-chain, and `meta.json` — including the full 21-row uniform block from a
+chain, and `meta.json` — including the full uniform block from a
 real `InteractiveRenderer`, so the browser can never drift from the
 Python renderer's look constants. It also copies `raymarch.wgsl` here.
 

@@ -101,6 +101,19 @@ def main(argv=None):
                         help="NetCDF group holding the cloud field, for files "
                              "that keep each field in its own group. Omit to "
                              "auto-detect when there is exactly one candidate.")
+    parser.add_argument(
+        "--nest", default=None, metavar="FILE",
+        help="a second, finer NetCDF field nested inside the main one. "
+             "Placement comes from the file's own absolute coordinates and "
+             "must lie inside the outer field's bounding box. Wherever the "
+             "nest covers, it wins, and the march refines to its voxel "
+             "scale; in a periodic domain the nest tiles with the parent.",
+    )
+    parser.add_argument("--nest-ice", default=None,
+                        help="separate NetCDF file with the nest's ice variable")
+    parser.add_argument("--nest-group", default=None,
+                        help="NetCDF group holding the nested cloud field "
+                             "(same auto-detection as --group when omitted)")
     parser.add_argument("--size", default="1280x720",
                         help="window size WxH (default 1280x720)")
     parser.add_argument("--extinction-multiplier", type=float, default=1.0)
@@ -219,6 +232,21 @@ def main(argv=None):
         liquid_water_group=group,
         ice_water_group=None if args.ice else group,
     )
+    nest = None
+    if args.nest:
+        nest_path = Path(args.nest)
+        print(f"Loading nest {nest_path} ...")
+        nest_group = (
+            args.nest_group if args.nest_group is not None
+            else resolve_group(nest_path)
+        )
+        nest = load(
+            str(nest_path),
+            ice=args.nest_ice,
+            liquid_water_group=nest_group,
+            ice_water_group=None if args.nest_ice else nest_group,
+        )
+        print(f"Loaded nest {nest}")
     camera = None
     if any(v is not None for v in (
         args.camera_position, args.camera_azimuth,
@@ -249,6 +277,7 @@ def main(argv=None):
         return
     print(CONTROL_SUMMARY)
     run_app(field, size=(w, h),
+            nest=nest,
             extinction_multiplier=args.extinction_multiplier,
             max_fps=args.max_fps,
             camera=camera,

@@ -57,7 +57,6 @@ from ..look import (
 )
 
 SHADER_PATH = Path(__file__).parent / "raymarch.wgsl"
-LEGACY_SHADER_PATH = Path(__file__).parent / "raymarch_legacy.wgsl"
 
 # Defaults mirroring witness.py / config.py.
 DEFAULT_SUN_AZIMUTH = 20.0
@@ -144,7 +143,8 @@ DEFAULT_MOTION_JITTER_SCALE = 0.65
 DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0
 DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05
 
-_UNIFORM_NBYTES = 21 * 16  # 21 vec4<f32> (rows documented in write_uniforms)
+_UNIFORM_ROWS = 23
+_UNIFORM_NBYTES = _UNIFORM_ROWS * 16  # vec4<f32> rows; see write_uniforms
 _ACCUM_UNIFORM_NBYTES = 16  # 4 f32s
 _DEFAULT_FIF_NORMALS = None
 
@@ -309,6 +309,75 @@ def _volume_aabb(field: CloudField) -> Tuple[np.ndarray, np.ndarray]:
     bmin = np.array([x.min() - dx_half, y.min() - dy_half, z.min() - dz_lo_half])
     bmax = np.array([x.max() + dx_half, y.max() + dy_half, z.max() + dz_hi_half])
     return bmin, bmax
+
+
+def _min_voxel_size(field: CloudField, bmin, bmax) -> float:
+    """Smallest voxel edge (m) of a level — the march's step scale."""
+    nx, ny, nz = field.shape
+    extent = np.asarray(bmax) - np.asarray(bmin)
+    return float(
+        min(extent[0] / nx, extent[1] / ny, extent[2] / nz)
+    )
+
+
+def _validate_nest_containment(bmin, bmax, nest_bmin, nest_bmax) -> None:
+    """The nest must lie inside the outer AABB; anything else is an error.
+
+    The march is clipped to the outer box and (when periodic) wrapped into
+    it, so a nest poking outside would be silently truncated at exactly the
+    places a refinement level exists to resolve. Placement comes from each
+    file's own absolute coordinates — a nest that misses is nearly always
+    two fields that were never meant to be composed, or one whose
+    coordinates are in the wrong units/origin.
+    """
+    nest_bmin = np.asarray(nest_bmin, dtype=np.float64)
+    nest_bmax = np.asarray(nest_bmax, dtype=np.float64)
+    bmin = np.asarray(bmin, dtype=np.float64)
+    bmax = np.asarray(bmax, dtype=np.float64)
+    # Tolerance scaled to the outer domain: a nest sharing a face with the
+    # parent (a common, legitimate setup) must not trip on float noise.
+    tol = 1e-9 * np.maximum(bmax - bmin, 1.0)
+    if np.any(nest_bmin < bmin - tol) or np.any(nest_bmax > bmax + tol):
+        axes = "xyz"
+        detail = ", ".join(
+            f"{axes[i]}: nest [{nest_bmin[i]:.1f}, {nest_bmax[i]:.1f}] "
+            f"vs outer [{bmin[i]:.1f}, {bmax[i]:.1f}]"
+            for i in range(3)
+        )
+        raise ValueError(
+            "The nested field must lie inside the outer field's bounding "
+            f"box (absolute meters); it does not. {detail}. Check that both "
+            "files carry absolute coordinates on the same origin and in the "
+            "same units."
+        )
+    if np.any(nest_bmax <= nest_bmin):
+        raise ValueError(
+            f"The nested field has a degenerate bounding box: "
+            f"{nest_bmin.tolist()} -> {nest_bmax.tolist()}."
+        )
+
+
+def _padded_volume(sigma: np.ndarray, periodic: bool):
+    """Ghost-pad an extinction grid into its resident-texture layout.
+
+    Returns (padded, faces). Padding shifts original voxel i to padded texel
+    i+1 so the shader's (gx + 1.5) / (N + 2) mapping lands exactly on
+    sigma[i] while hardware filtering supplies witness's linear taper against
+    the zero border. When periodic, the x/y ghost texels are filled from the
+    OPPOSITE faces instead so filtering across the wrap seam is exact; z
+    always keeps the ghost-zero taper. `faces` is kept so set_periodic() can
+    rewrite the border alone, without re-uploading the volume.
+    """
+    nx, ny, nz = sigma.shape
+    padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=sigma.dtype)
+    padded[1:-1, 1:-1, 1:-1] = sigma
+    faces = _ghost_face_arrays(sigma)
+    if periodic:
+        padded[0, :, :] = faces["x_lo"]
+        padded[-1, :, :] = faces["x_hi"]
+        padded[:, 0, :] = faces["y_lo"][:, 0, :]
+        padded[:, -1, :] = faces["y_hi"][:, 0, :]
+    return padded, faces
 
 
 def _validate_finite_float(name: str, value: float) -> float:
@@ -509,21 +578,32 @@ def _build_fif_normal_mips(base: np.ndarray) -> list[np.ndarray]:
 
 
 class InteractiveRenderer:
-    """Resident-volume WGSL raymarcher for a single CloudField.
+    """Resident-volume WGSL raymarcher for a cloud field, plus optional nest.
 
     Parameters
     ----------
     field : CloudField
-        The loaded cloud volume (see :func:`cloudyview.load`).
+        The loaded cloud volume (see :func:`cloudyview.load`). This is the
+        outer level: its AABB bounds the march and, when periodic, is the
+        tile that repeats.
+    nest : CloudField, optional
+        A second, finer field placed by its own absolute coordinates inside
+        the outer field's AABB. Wherever it covers, it wins — the same
+        finest-level-wins rule as :func:`cloudyview.witness.render_nested`.
+        Both levels are resident simultaneously; the nest is required to lie
+        inside the outer AABB and a :class:`ValueError` is raised if it does
+        not. In a periodic domain the nest tiles with the parent (one scene,
+        one tile), so every domain copy carries a copy of the nest.
     extinction_multiplier : float
         Scales the physical extinction field (witness config default 1.0).
+        Applied to both levels.
     periodic : bool
         Tile the volume horizontally (SAM LES domains are doubly periodic
         in x/y): density sampling wraps, the view march never exits
         sideways, and the light march exits through the domain top. On by
         default; turn off for subvolume cutouts (which are not physically
-        periodic and would show seams). Off reproduces the finite-box
-        behavior bit-for-bit. Toggle later with :meth:`set_periodic`.
+        periodic and would show seams). Toggle later with
+        :meth:`set_periodic`.
     device : wgpu.GPUDevice, optional
         Reuse an existing device (the windowed app shares one with its
         canvas). Must have the ``float32-filterable`` feature.
@@ -533,7 +613,7 @@ class InteractiveRenderer:
     volume_fp16 : bool
         Store extinction in r16float instead of reference r32float. This is a
         load-time choice because the engine deliberately keeps no second full
-        CPU copy for live re-upload.
+        CPU copy for live re-upload. Both levels share the format.
     """
 
     _ACCUM_FORMAT = wgpu.TextureFormat.rgba16float
@@ -542,6 +622,7 @@ class InteractiveRenderer:
         self,
         field: CloudField,
         *,
+        nest: Optional[CloudField] = None,
         extinction_multiplier: float = 1.0,
         periodic: bool = True,
         ocean_enabled: bool = True,
@@ -560,6 +641,16 @@ class InteractiveRenderer:
     ):
         self.field = field
         self.bmin, self.bmax = _volume_aabb(field)
+        self.nest = nest
+        self.nested = nest is not None
+        if self.nested:
+            self.nest_bmin, self.nest_bmax = _volume_aabb(nest)
+            _validate_nest_containment(
+                self.bmin, self.bmax, self.nest_bmin, self.nest_bmax
+            )
+        else:
+            self.nest_bmin = np.zeros(3)
+            self.nest_bmax = np.zeros(3)
         self.periodic = bool(periodic)
         self.ocean_enabled = bool(ocean_enabled)
         self.ocean_z = float(ocean_z)
@@ -590,10 +681,11 @@ class InteractiveRenderer:
             "motion_reset_translation_m", motion_reset_translation_m
         )
 
-        nx, ny, nz = field.shape
-        extent = self.bmax - self.bmin
-        voxel = np.array([extent[0] / nx, extent[1] / ny, extent[2] / nz])
-        self._min_voxel_m = float(voxel.min())
+        self._min_voxel_m = _min_voxel_size(field, self.bmin, self.bmax)
+        self._min_voxel_nest_m = (
+            _min_voxel_size(nest, self.nest_bmin, self.nest_bmax)
+            if self.nested else self._min_voxel_m
+        )
         self.quality_tier = DEFAULT_QUALITY_TIER
         self.render_scale = 1.0
         self.step_factor = STEP_VOXEL_FACTOR
@@ -612,78 +704,34 @@ class InteractiveRenderer:
                 "to fall back to nearest-neighbor."
             )
 
-        # --- Extinction volume -> resident 3D texture (uploaded ONCE). ---
-        iwc = field.iwc
-        if iwc is not None and float(np.max(iwc)) < 1e-6:
-            iwc = None
-        sigma = optical_depth.compute_extinction_field(
-            field.lwc, field.z, re=10.0, iwc=iwc, re_ice=30.0
-        )
-        if extinction_multiplier != 1.0:
-            sigma = sigma * np.float32(extinction_multiplier)
-        sigma_dtype = np.float16 if self.volume_fp16 else np.float32
-        sigma = np.ascontiguousarray(sigma, dtype=sigma_dtype)
-
-        # Bake witness's ghost-zero boundary into the resident texture. The
-        # public AABB remains the unpadded level extent, where witness samples
-        # with gx = (p - bmin) / dx and dx = (bmax - bmin) / N. Padding shifts
-        # original voxel i to padded texel i+1; the shader maps
-        #     texel = gx + 1, texcoord = (texel + 0.5) / (N + 2),
-        # so p=bmin+i*dx still lands exactly on original sigma[i], while
-        # gx in [-1,0) and [N-1,N) filters against the zero ghost texels.
-        # In periodic mode the x/y ghost texels are instead filled from the
-        # OPPOSITE faces so hardware trilinear filtering is exact across the
-        # wrap seam (the shader wraps its sample coordinate into [0, N));
-        # z keeps the ghost-zero taper. The border alone is rewritten on
-        # set_periodic() so toggling never re-uploads the volume.
-        sigma_padded = np.zeros(
-            (nx + 2, ny + 2, nz + 2), dtype=sigma_dtype
-        )
-        sigma_padded[1:-1, 1:-1, 1:-1] = sigma
-        self._ghost_faces = _ghost_face_arrays(sigma)
-        if self.periodic:
-            sigma_padded[0, :, :] = self._ghost_faces["x_lo"]
-            sigma_padded[-1, :, :] = self._ghost_faces["x_hi"]
-            sigma_padded[:, 0, :] = self._ghost_faces["y_lo"][:, 0, :]
-            sigma_padded[:, -1, :] = self._ghost_faces["y_hi"][:, 0, :]
-
-        # Zero-reshuffle upload: a C-order (nx, ny, nz) array already has z
-        # fastest, so it maps directly onto a texture with width=nz,
-        # height=ny, depth=nx. The shader swizzles sample coords to match.
-        max_dim = self.device.limits["max-texture-dimension-3d"]
-        if max(sigma_padded.shape) > max_dim:
-            raise ValueError(
-                f"Padded volume {nx + 2}x{ny + 2}x{nz + 2} exceeds the "
-                f"device's 3D texture "
-                f"limit ({max_dim}); bricking/LOD is out of scope for the "
-                "spike (docs/architecture.md)."
-            )
-        # COPY_SRC so tests can read the resident texels back and verify the
-        # ghost-border content (periodic wrap vs ghost zero); free otherwise.
+        # --- Extinction volumes -> resident 3D textures (uploaded ONCE). ---
         self.volume_texture_format = (
             wgpu.TextureFormat.r16float
             if self.volume_fp16
             else wgpu.TextureFormat.r32float
         )
-        self._texture = self.device.create_texture(
-            label="cloud-sigma",
-            size=(nz + 2, ny + 2, nx + 2),
-            format=self.volume_texture_format,
-            dimension="3d",
-            usage=(wgpu.TextureUsage.TEXTURE_BINDING
-                   | wgpu.TextureUsage.COPY_DST
-                   | wgpu.TextureUsage.COPY_SRC),
-        )
-        self.device.queue.write_texture(
-            {"texture": self._texture},
-            sigma_padded,
-            {
-                "bytes_per_row": (nz + 2) * sigma_padded.dtype.itemsize,
-                "rows_per_image": ny + 2,
-            },
-            (nz + 2, ny + 2, nx + 2),
-        )
+        sigma_dtype = np.float16 if self.volume_fp16 else np.float32
+
+        # The outer level tiles when periodic, so its ghost border is the
+        # wrap seam; the border alone is rewritten by set_periodic().
+        sigma = self._extinction(field, extinction_multiplier, sigma_dtype)
+        sigma_padded, self._ghost_faces = _padded_volume(sigma, self.periodic)
+        self._texture = self._upload_volume(sigma_padded, "cloud-sigma")
         self.volume_nbytes = sigma_padded.nbytes
+
+        # The nest never wraps: its ghost-zero border IS how it blends out
+        # into the coarse field at its own boundary (witness's per-level
+        # taper). A 1-voxel dummy stands in when there is no nest so a single
+        # bind-group layout serves both shader specializations.
+        if self.nested:
+            nest_sigma = self._extinction(
+                nest, extinction_multiplier, sigma_dtype
+            )
+            nest_padded, _ = _padded_volume(nest_sigma, False)
+        else:
+            nest_padded = np.zeros((1, 1, 1), dtype=sigma_dtype)
+        self._nest_texture = self._upload_volume(nest_padded, "cloud-sigma-nest")
+        self.nest_nbytes = nest_padded.nbytes if self.nested else 0
 
         if fif_normals is None:
             fif_normals = _default_fif_normals()
@@ -747,20 +795,12 @@ class InteractiveRenderer:
             usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
         )
         self._shader_source = SHADER_PATH.read_text()
-        self._legacy_shader_source = LEGACY_SHADER_PATH.read_text()
-        self._shader = self.device.create_shader_module(code=self._shader_source)
-        # A separate, untouched pre-periodic module is deliberate: even a
-        # pipeline-specialized branch in the combined module changed register
-        # allocation/arithmetic enough to move a few output bytes on Vulkan.
-        # OFF therefore uses the exact legacy instruction graph and carries
-        # zero periodic runtime cost; ON is free to optimize independently.
-        self._legacy_shader = self.device.create_shader_module(
-            code=self._legacy_shader_source
+        # (periodic, nested, max_light_steps) -> module. Every combination is
+        # a const-rewrite of the one source, compiled on first use.
+        self._shader_modules = {}
+        self._shader = self._shader_for(
+            self.periodic, self.nested, DEFAULT_MAX_LIGHT_STEPS
         )
-        self._shader_modules = {
-            (True, DEFAULT_MAX_LIGHT_STEPS): self._shader,
-            (False, DEFAULT_MAX_LIGHT_STEPS): self._legacy_shader,
-        }
         self._accum_uniform_buf = self.device.create_buffer(
             size=_ACCUM_UNIFORM_NBYTES,
             usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
@@ -811,6 +851,14 @@ class InteractiveRenderer:
                 "binding": 4,
                 "visibility": wgpu.ShaderStage.FRAGMENT,
                 "sampler": {"type": "filtering"},
+            },
+            {
+                "binding": 5,
+                "visibility": wgpu.ShaderStage.FRAGMENT,
+                "texture": {
+                    "sample_type": "float",
+                    "view_dimension": "3d",
+                },
             },
         ])
         self._accum_bind_group_layout = self.device.create_bind_group_layout(
@@ -865,6 +913,7 @@ class InteractiveRenderer:
                 {"binding": 2, "resource": self._sampler},
                 {"binding": 3, "resource": self._ocean_texture.create_view()},
                 {"binding": 4, "resource": self._ocean_sampler},
+                {"binding": 5, "resource": self._nest_texture.create_view()},
             ],
         )
         self._pipeline_layout = self.device.create_pipeline_layout(
@@ -915,6 +964,65 @@ class InteractiveRenderer:
         # drives it every frame.
         self._bird = None
 
+    # ------------------------------------------------------------------
+    # Resident volumes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extinction(field: CloudField, multiplier: float, dtype) -> np.ndarray:
+        """Physical extinction (m^-1) for one level, in the texture dtype."""
+        iwc = field.iwc
+        if iwc is not None and float(np.max(iwc)) < 1e-6:
+            iwc = None
+        sigma = optical_depth.compute_extinction_field(
+            field.lwc, field.z, re=10.0, iwc=iwc, re_ice=30.0
+        )
+        if multiplier != 1.0:
+            sigma = sigma * np.float32(multiplier)
+        return np.ascontiguousarray(sigma, dtype=dtype)
+
+    def _upload_volume(self, padded: np.ndarray, label: str):
+        """Create and fill one resident 3D texture from a ghost-padded grid.
+
+        Zero-reshuffle upload: a C-order (nx, ny, nz) array already has z
+        fastest, so it maps directly onto a texture with width=nz, height=ny,
+        depth=nx. The shader swizzles sample coords to match.
+        """
+        px, py, pz = padded.shape
+        max_dim = self.device.limits["max-texture-dimension-3d"]
+        if max(padded.shape) > max_dim:
+            raise ValueError(
+                f"Padded volume {px}x{py}x{pz} ({label}) exceeds the device's "
+                f"3D texture limit ({max_dim}); bricking/LOD is out of scope "
+                "(docs/architecture.md)."
+            )
+        # COPY_SRC so tests can read the resident texels back and verify the
+        # ghost-border content (periodic wrap vs ghost zero); free otherwise.
+        texture = self.device.create_texture(
+            label=label,
+            size=(pz, py, px),
+            format=self.volume_texture_format,
+            dimension="3d",
+            usage=(wgpu.TextureUsage.TEXTURE_BINDING
+                   | wgpu.TextureUsage.COPY_DST
+                   | wgpu.TextureUsage.COPY_SRC),
+        )
+        self.device.queue.write_texture(
+            {"texture": texture},
+            padded,
+            {
+                "bytes_per_row": pz * padded.dtype.itemsize,
+                "rows_per_image": py,
+            },
+            (pz, py, px),
+        )
+        return texture
+
+    @property
+    def resident_nbytes(self) -> int:
+        """Total resident extinction bytes across both levels."""
+        return self.volume_nbytes + self.nest_nbytes
+
     @property
     def hud(self):
         """The :class:`~cloudyview.soar.hud.MinimapHUD` for this renderer."""
@@ -939,6 +1047,15 @@ class InteractiveRenderer:
     @property
     def dt_light(self) -> float:
         return self.dt_view
+
+    @property
+    def dt_view_nest(self) -> float:
+        """View-march step inside the nest — its own voxel scale."""
+        return self._min_voxel_nest_m * self.step_factor
+
+    @property
+    def dt_light_nest(self) -> float:
+        return self.dt_view_nest
 
     @property
     def flight_render_scale(self) -> float:
@@ -1058,34 +1175,56 @@ class InteractiveRenderer:
     # Pipeline / uniforms
     # ------------------------------------------------------------------
 
-    def _shader_for(self, periodic: bool, max_light_steps: int):
-        key = (bool(periodic), int(max_light_steps))
+    def _shader_for(self, periodic: bool, nested: bool, max_light_steps: int):
+        """Compile (and cache) one specialization of the raymarch module.
+
+        The three consts are rewritten in the source before compiling, so
+        each variant's dead branches fold away entirely rather than being
+        tested per sample in the march's hot loops.
+        """
+        key = (bool(periodic), bool(nested), int(max_light_steps))
         if key in self._shader_modules:
             return self._shader_modules[key]
-        if not 1 <= key[1] <= DEFAULT_MAX_LIGHT_STEPS:
+        if not 1 <= key[2] <= DEFAULT_MAX_LIGHT_STEPS:
             raise ValueError(
                 "max_light_steps must be between 1 and "
-                f"{DEFAULT_MAX_LIGHT_STEPS}; got {key[1]}."
+                f"{DEFAULT_MAX_LIGHT_STEPS}; got {key[2]}."
             )
-        source = self._shader_source if key[0] else self._legacy_shader_source
-        sentinel = "const MAX_LIGHT_STEPS: i32 = 512;"
-        if source.count(sentinel) != 1:
-            raise RuntimeError(
-                "WGSL light-step specialization sentinel is missing or "
-                "ambiguous; refusing to build a mismatched tier shader."
-            )
-        source = source.replace(
-            sentinel, f"const MAX_LIGHT_STEPS: i32 = {key[1]};"
-        )
+        source = self._shader_source
+        for sentinel, replacement in (
+            (
+                "const PERIODIC_DOMAIN: bool = true;",
+                f"const PERIODIC_DOMAIN: bool = "
+                f"{'true' if key[0] else 'false'};",
+            ),
+            (
+                "const NESTED: bool = false;",
+                f"const NESTED: bool = {'true' if key[1] else 'false'};",
+            ),
+            (
+                "const MAX_LIGHT_STEPS: i32 = 512;",
+                f"const MAX_LIGHT_STEPS: i32 = {key[2]};",
+            ),
+        ):
+            if source.count(sentinel) != 1:
+                raise RuntimeError(
+                    f"WGSL specialization sentinel {sentinel!r} is missing or "
+                    "ambiguous; refusing to build a mismatched shader."
+                )
+            source = source.replace(sentinel, replacement)
         module = self.device.create_shader_module(code=source)
         self._shader_modules[key] = module
         return module
 
     def pipeline_for(self, target_format: str):
         """Render pipeline for a given color-target format (cached)."""
-        key = (target_format, self.periodic, self.max_light_steps)
+        key = (
+            target_format, self.periodic, self.nested, self.max_light_steps
+        )
         if key not in self._pipelines:
-            shader = self._shader_for(self.periodic, self.max_light_steps)
+            shader = self._shader_for(
+                self.periodic, self.nested, self.max_light_steps
+            )
             fragment = {
                 "module": shader,
                 "entry_point": "fs_main",
@@ -1285,7 +1424,7 @@ class InteractiveRenderer:
             light_transfer_split_strength, float(sun_elevation)
         )
 
-        u = np.zeros((21, 4), dtype=np.float32)
+        u = np.zeros((_UNIFORM_ROWS, 4), dtype=np.float32)
         u[0] = [*origin, tan_half_fov]
         u[1] = [*forward, output_w / output_h]
         u[2] = [*right, exposure]
@@ -1361,6 +1500,12 @@ class InteractiveRenderer:
             float(np.tan(np.radians(view_step_lod_degrees))),
             0.0,
         ]
+        # Rows 21-22: the nest's AABB and its own march step sizes. Read only
+        # by the NESTED specialization; zero-filled otherwise (the shader's
+        # containment test is compiled out, so the zero box is never hit).
+        if self.nested:
+            u[21] = [*self.nest_bmin, self.dt_view_nest]
+            u[22] = [*self.nest_bmax, self.dt_light_nest]
         key = u.copy()
         key[4, 3] = 0.0  # frame_index varies jitter seeds, not scene identity
         key[10] = 0.0  # sampling flags are not scene identity

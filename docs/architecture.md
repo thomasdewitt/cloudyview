@@ -95,6 +95,42 @@ Interactive techniques (in rough order):
 - Coarse occupancy grid for empty-space skipping (cloud fields are sparse).
 - fp16 density texture option for large domains.
 
+### Nested domains
+
+Witness composes N strictly-nested extinction grids (`render_nested`,
+finest-first, absolute meters, finest level covering a point wins). Soar
+implements the same model with **exactly two** levels — an outer field and
+one optional finer `nest` — because that is the shape the data comes in
+(a refinement run inside its parent) and because two levels need no
+dynamic texture indexing, which core WebGPU does not have.
+
+- Both volumes are resident 3D textures (bindings 1 and 5); a 1³ zero
+  texture stands in when there is no nest so one bind-group layout serves
+  both shader specializations.
+- Placement comes from each file's own absolute coordinates. A nest that
+  does not lie inside the outer AABB is a hard error, never a silent clip:
+  the march is clipped to (and wrapped into) the outer box, so an
+  overhanging nest would be truncated exactly where refinement matters.
+- Step size follows the active level in both the view and the light march,
+  as in witness. The dt-invariant powder term is what lets levels at very
+  different step scales composite without a brightness seam.
+- **Periodic + nested: the whole scene is one tile.** A world point is
+  wrapped into the outer domain *before* the nest containment test, so
+  every domain copy carries a copy of the nest. The alternative (nest once
+  in absolute space) was rejected: it makes the tiled field
+  inhomogeneous and fights the distance-LOD step floor.
+- The nest's ghost border stays zero even when the domain is periodic —
+  that taper is how the fine field blends out into the coarse one at its
+  own boundary. Only the outer level's border carries the wrap seam.
+- Gradient shading pins the one-voxel fine stencil to the active level, but
+  lets the wide coarse stencil re-dispatch per tap. Witness pins at every
+  radius, which puts a spurious edge on the nest boundary whenever the
+  coarse radius reaches past it.
+
+Known cost: a shadow ray crossing a deep nest marches at the fine step and
+can exhaust `MAX_LIGHT_STEPS` before `LIGHT_TAU_CUTOFF` saturates it. This
+is the same trade witness makes; the occupancy grid above is the fix.
+
 ## Scale targets
 
 - `data/TWPICE_subvolume_256x256_5km.nc` — dev/test.
@@ -110,12 +146,19 @@ Interactive techniques (in rough order):
 - Game-style pointer capture (glfw CURSOR_DISABLED; Tab releases), WASD +
   Space/LShift vertical.
 - File-open dialog for .nc selection (split liquid/ice selection supported).
+  Opens at `$HOME` and then remembers the last directory of the session.
+- `--nest FILE` loads a second, finer field nested inside the main one
+  (see "Nested domains"). It belongs to the field it was launched with:
+  opening another file from the ESC menu replaces the scene and drops it.
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
 - Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
   FOV wedge (reuse glimpse overlay math).
-- Screenshot key (F12): offscreen PNG at the current window size with camera,
-  source-file, sun, renderer, version, timestamp, and reproduction metadata
-  embedded in PNG text chunks.
+- Screenshot key (F12): prompts for what belongs in the frame (bird +
+  location map, or clouds only), then writes an offscreen PNG at the current
+  window size with camera, source-file, sun, renderer, version, timestamp,
+  and reproduction metadata embedded in PNG text chunks. The choice is per
+  shot rather than the live B/M toggles — the frame worth keeping and the
+  frame worth flying with are rarely the same one.
 - ESC menu as control center: open a new `.nc` (with split ice-file prompt),
   render the current `app.camera()` in `behold`, toggle fullscreen, resume, or
   quit. Behold runs in the foreground because the Mitsuba GPU backend needs the

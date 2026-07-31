@@ -2,7 +2,7 @@
 
 Produces web/demo/: the fp16 ghost-padded extinction volume, an fp16 FIF
 ocean normal mip chain, the raymarch WGSL (copied verbatim — the shader IS
-the shared artifact), and meta.json holding the full 21-row uniform
+the shared artifact), and meta.json holding the full uniform
 template dumped from a real InteractiveRenderer, so the JS host only
 rewrites the camera/size/sampling rows per frame and can never drift from
 the Python renderer's look constants.

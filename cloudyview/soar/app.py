@@ -14,7 +14,7 @@ Controls:
     M           toggle the minimap
     F3          cycle the corner stats readout (subtle/expanded/hidden)
     F           toggle fullscreen/windowed
-    F12         save a PNG screenshot with render metadata
+    F12         save a PNG screenshot (asks: with bird + map, or clouds only)
     ESC         pause menu (releases the mouse)
 
 Pause menu:
@@ -84,6 +84,8 @@ from .menu import (
     ACTION_RENDER_MENU,
     ACTION_RESUME,
     ACTION_SCREENSHOT,
+    ACTION_SCREENSHOT_CLOUDS_ONLY,
+    ACTION_SCREENSHOT_WITH_OVERLAYS,
     ACTION_TOGGLE_FULLSCREEN,
     ACTION_TOGGLE_PERIODIC,
     ACTION_SETTINGS_MENU,
@@ -95,6 +97,7 @@ from .menu import (
     ACTION_TRACK_DISCARD,
     BEHOLD_QUALITIES_BY_KEY,
     MENU_CONTROLS,
+    MENU_SCREENSHOT,
     MENU_TRACK_SAVE,
     MENU_ERROR,
     MENU_FILE_BROWSER_ICE,
@@ -236,6 +239,7 @@ def view_spans_domain_edge(
 
 class FlyThroughApp:
     def __init__(self, field: CloudField, *, size=(1280, 720),
+                 nest: CloudField | None = None,
                  extinction_multiplier: float = 1.0,
                  max_fps: float = 120.0,
                  camera: Camera | None = None,
@@ -267,7 +271,10 @@ class FlyThroughApp:
         self.sun_elevation = DEFAULT_SUN_ELEVATION
 
         device = request_device()
-        self.renderer = self._create_renderer(field, device=device)
+        # The nest belongs to the field it was launched with. Opening another
+        # file from the O-menu replaces the scene, so it drops the nest
+        # rather than silently re-placing it under unrelated data.
+        self.renderer = self._create_renderer(field, nest=nest, device=device)
 
         # Camera state: world meters + met angles. Start at the default
         # witness viewpoint.
@@ -318,14 +325,16 @@ class FlyThroughApp:
         self._pending_group_choices = []  # groups awaiting the user's pick
         self._pending_units = None        # user-supplied condensate units
         self._pending_units_vars = []     # variables that carry no units
-        self._file_browser_dir = (
-            Path(field.source).expanduser().parent
-            if field.source else Path.cwd()
-        )
+        # The browser opens at home, not next to whatever file the session was
+        # launched with: data lives all over the disk and home is the one
+        # place every tree is reachable from. It remembers the last directory
+        # visited within the session (_last_file_dir).
+        self._file_browser_dir = Path.home()
         self._last_file_dir = self._file_browser_dir
         self._file_browser_error = None
         self._loading_job = None
         self._behold_job = None
+        self._pending_screenshot = None   # True/False = overlays; taken in _draw
         self._rendering = False
         self._error_message = None
         self._imgui = None
@@ -353,15 +362,18 @@ class FlyThroughApp:
 
     # ------------------------------------------------------------------
 
-    def _create_renderer(self, field: CloudField, *, device=None, previous=None):
+    def _create_renderer(self, field: CloudField, *, nest: CloudField | None = None,
+                         device=None, previous=None):
         """Create the field-resident renderer, reusing the app GPU device."""
-        volume_fp16 = choose_volume_fp16(field.lwc.size, self.volume_fp16)
+        n_voxels = field.lwc.size + (nest.lwc.size if nest is not None else 0)
+        volume_fp16 = choose_volume_fp16(n_voxels, self.volume_fp16)
         if volume_fp16 and self.volume_fp16 is None:
             print(
-                f"soar: {field.lwc.size / 1e6:.0f}M-voxel volume -> fp16 "
+                f"soar: {n_voxels / 1e6:.0f}M-voxel volume -> fp16 "
                 "texture (auto; --fp32-volume forces full precision)"
             )
         kwargs = {
+            "nest": nest,
             "extinction_multiplier": self._extinction_multiplier,
             "periodic": self.periodic,
             "quality_tier": (
@@ -551,6 +563,8 @@ class FlyThroughApp:
             return "cloudyview controls"
         if state == MENU_TRACK_SAVE:
             return "cloudyview save flight track?"
+        if state == MENU_SCREENSHOT:
+            return "cloudyview screenshot: what to include?"
         if state == MENU_ERROR:
             return "cloudyview error"
         return self._paused_title(fps)
@@ -693,7 +707,7 @@ class FlyThroughApp:
     def _start_open_file(self) -> None:
         self._reset_pending_open()
         self._file_browser_error = None
-        self._set_file_browser_dir(getattr(self, "_last_file_dir", Path.cwd()))
+        self._set_file_browser_dir(getattr(self, "_last_file_dir", Path.home()))
         self._set_menu_state(MENU_FILE_BROWSER_LIQUID)
 
     def _set_file_browser_dir(self, directory: str | Path) -> None:
@@ -981,6 +995,11 @@ class FlyThroughApp:
         parts = ["python", "-m", "cloudyview.soar", source]
         if field.ice_source:
             parts.extend(["--ice", field.ice_source])
+        nest = self.renderer.nest
+        if nest is not None and nest.source:
+            parts.extend(["--nest", nest.source])
+            if nest.ice_source:
+                parts.extend(["--nest-ice", nest.ice_source])
         parts.extend(["--tier", self.renderer.quality_tier])
         if self.renderer.volume_fp16:
             parts.append("--fp16-volume")
@@ -1098,11 +1117,19 @@ class FlyThroughApp:
         self._flash_title("cloudyview track discarded", seconds=2.5)
         self._set_paused(False)
 
-    def _save_screenshot(self) -> None:
+    def _save_screenshot(self, *, overlays: bool = True) -> None:
+        """Render and save a PNG. ``overlays`` includes bird + minimap.
+
+        The choice is per shot (the F12 prompt), not the app's live B/M
+        toggles: the frame you want to keep and the frame you want to fly
+        with are rarely the same one.
+        """
         camera = self.camera()
         w, h = self.canvas.get_physical_size()
         path = self._timestamped_png_path("cloudyview_soar")
         renderer = self.renderer
+        want_bird = bool(overlays)
+        want_hud = bool(overlays)
         accum_state = (
             getattr(renderer, "_accum_key", None),
             getattr(renderer, "_accum_count", 0),
@@ -1110,7 +1137,7 @@ class FlyThroughApp:
         )
         had_bird = getattr(renderer, "_bird", None) is not None
         bird_state = None
-        if self.bird_enabled and had_bird:
+        if want_bird and had_bird:
             bird = renderer._bird
             bird_attrs = (
                 "position",
@@ -1138,8 +1165,8 @@ class FlyThroughApp:
             image = renderer.render(
                 camera,
                 size=(w, h),
-                bird=self.bird_enabled,
-                hud=self.minimap_enabled,
+                bird=want_bird,
+                hud=want_hud,
                 jitter=self.jitter,
                 sun_azimuth=self.sun_azimuth,
                 sun_elevation=self.sun_elevation,
@@ -1154,7 +1181,7 @@ class FlyThroughApp:
             if bird_state is not None:
                 for name, value in bird_state.items():
                     setattr(renderer._bird, name, value)
-            elif self.bird_enabled and not had_bird:
+            elif want_bird and not had_bird:
                 renderer._bird = None
 
         metadata = self._metadata(
@@ -1162,8 +1189,8 @@ class FlyThroughApp:
             renderer="soar",
             reproduction_command=self._soar_reproduction_command(camera),
             render_options={
-                "bird": bool(self.bird_enabled),
-                "hud": bool(self.minimap_enabled),
+                "bird": want_bird,
+                "hud": want_hud,
                 "jitter": bool(self.jitter),
                 "size": [int(w), int(h)],
                 "tier": renderer.quality_tier,
@@ -1175,6 +1202,10 @@ class FlyThroughApp:
         )
         self._write_png_with_metadata(image, path, metadata)
         print(f"Screenshot saved to {path}")
+        # Straight back to flight — the prompt exists to pick the contents,
+        # not to park the app in a menu.
+        self._set_menu_state(MENU_MAIN)
+        self._set_paused(False)
         self._flash_title(f"cloudyview screenshot saved {path}", seconds=4.0)
 
     def _run_behold_render(self, quality: str) -> None:
@@ -1321,7 +1352,12 @@ class FlyThroughApp:
             elif action == ACTION_TRACK_DISCARD:
                 self._track_discard_pending()
             elif action == ACTION_SCREENSHOT:
-                self._save_screenshot()
+                self._set_paused(True)
+                self._set_menu_state(transition.next_state or MENU_SCREENSHOT)
+            elif action == ACTION_SCREENSHOT_WITH_OVERLAYS:
+                self._save_screenshot(overlays=True)
+            elif action == ACTION_SCREENSHOT_CLOUDS_ONLY:
+                self._save_screenshot(overlays=False)
             elif key in ("r", "R"):
                 # Only reached unpaused: while paused the menu table above
                 # consumes R as resume (documented), so record start/stop
@@ -1564,6 +1600,8 @@ class FlyThroughApp:
             self._draw_controls_menu(imgui)
         elif state == MENU_TRACK_SAVE:
             self._draw_track_save_menu(imgui)
+        elif state == MENU_SCREENSHOT:
+            self._draw_screenshot_menu(imgui)
         elif state == MENU_OPEN_GROUP_PROMPT:
             self._draw_group_prompt(imgui)
         elif state == MENU_OPEN_UNITS_PROMPT:
@@ -1688,7 +1726,7 @@ class FlyThroughApp:
         )),
         ("Recording & captures", (
             ("R", "record flight track (again to stop, then save)"),
-            ("F12", "screenshot with reproduction metadata"),
+            ("F12", "screenshot — prompts for overlays, keeps repro metadata"),
             ("G (paused)", "photoreal behold render of this view"),
         )),
         ("Toggles", (
@@ -1754,6 +1792,30 @@ class FlyThroughApp:
                 self._track_save_pending()
             if theme.menu_button("Discard", "D / ESC"):
                 self._track_discard_pending()
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_screenshot_menu(self, imgui) -> None:
+        theme = self._theme
+        self._begin_imgui_window(imgui, "screenshot_menu", 460.0)
+        try:
+            w, h = self.canvas.get_physical_size()
+            theme.header("screenshot", "What goes in the frame?")
+            theme.body_text(f"{int(w)} x {int(h)} px")
+            theme.caption(
+                "Both save the same converged render and the same "
+                "reproduction metadata; only the overlays differ.",
+                wrapped=True,
+            )
+            imgui.dummy((1.0, 8.0))
+            if theme.menu_button("With bird and location map", "W / Enter"):
+                self._pending_screenshot = True
+            if theme.menu_button("Clouds only", "C"):
+                self._pending_screenshot = False
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Cancel", "ESC", height=38.0):
+                self._set_menu_state(MENU_MAIN)
+                self._set_paused(False)
         finally:
             self._end_imgui_window(imgui)
 
@@ -2148,6 +2210,12 @@ class FlyThroughApp:
         if self._closing or self.canvas.get_closed():
             return
         self._pump_jobs()
+        # A screenshot requested by clicking the prompt is taken here, not in
+        # the imgui callback that raised it: that callback runs with a command
+        # encoder open, and the screenshot render submits its own.
+        if self._pending_screenshot is not None:
+            overlays, self._pending_screenshot = self._pending_screenshot, None
+            self._save_screenshot(overlays=overlays)
         active_snapshot = self._active_job_snapshot()
 
         now = perf_counter()

@@ -25,6 +25,8 @@ ACTION_SELECT_TIER = "select_tier"
 ACTION_CONTROLS_MENU = "controls_menu"
 ACTION_TRACK_SAVE = "track_save"
 ACTION_TRACK_DISCARD = "track_discard"
+ACTION_SCREENSHOT_WITH_OVERLAYS = "screenshot_with_overlays"
+ACTION_SCREENSHOT_CLOUDS_ONLY = "screenshot_clouds_only"
 
 MENU_MAIN = "main"
 MENU_FILE_BROWSER_LIQUID = "file_browser_liquid"
@@ -36,6 +38,7 @@ MENU_RENDER_QUALITY = "render_quality"
 MENU_SETTINGS = "settings"
 MENU_CONTROLS = "controls"
 MENU_TRACK_SAVE = "track_save"
+MENU_SCREENSHOT = "screenshot"
 MENU_ERROR = "error"
 
 BEHOLD_QUALITIES_BY_KEY = {
@@ -85,7 +88,10 @@ def menu_transition(
         if key == "Escape":
             return MenuTransition(ACTION_PAUSE, MENU_MAIN)
         if key == "F12":
-            return MenuTransition(ACTION_SCREENSHOT)
+            # Pauses into the screenshot prompt rather than shooting
+            # immediately: what belongs in a saved frame (the bird and the
+            # location map, or clouds alone) is a per-shot decision.
+            return MenuTransition(ACTION_SCREENSHOT, MENU_SCREENSHOT)
         if key in ("F1", "?"):
             # Pause straight into the controls reference.
             return MenuTransition(ACTION_PAUSE, MENU_CONTROLS)
@@ -186,6 +192,17 @@ def menu_transition(
         if normalized == "d" or key == "Escape":
             return MenuTransition(ACTION_TRACK_DISCARD, MENU_MAIN)
         return MenuTransition(None, MENU_TRACK_SAVE)
+
+    if menu_state == MENU_SCREENSHOT:
+        if normalized == "w" or key == "Enter" or normalized == "1":
+            return MenuTransition(
+                ACTION_SCREENSHOT_WITH_OVERLAYS, MENU_MAIN
+            )
+        if normalized == "c" or normalized == "2":
+            return MenuTransition(ACTION_SCREENSHOT_CLOUDS_ONLY, MENU_MAIN)
+        if key == "Escape":
+            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        return MenuTransition(None, MENU_SCREENSHOT)
 
     if menu_state == MENU_ERROR:
         if key == "Escape":

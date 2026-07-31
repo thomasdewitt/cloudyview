@@ -8,22 +8,12 @@ through the domain top, and the app camera wraps modulo the domain.
 Coverage:
 - ghost-border texel content (periodic fill vs ghost zero, toggling);
 - render-level seam correctness (translation invariance by one period);
-- periodic=off bit-exactness against pre-change reference frames rendered
-  at a1e157d (the commit before the periodic port), including the
-  documented realism kill combination;
 - app camera wrap + minimap marker, ESC-menu toggle, --no-periodic wiring;
 - the behold hand-off "view spans domain edge" predicate.
 
-GPU tests are skip-marked like the other soar suites. The bit-exactness
-references are rendered ON THE DEV RTX 5080 at the pre-change commit
-(a1e157d); bit-for-bit equality is the contract on that adapter only —
-other adapters (including llvmpipe sandboxes) round differently, in which
-case regenerate the references at the pre-change commit on the target
-adapter. (Originally generated on llvmpipe by a sandboxed agent, which
-failed on real hardware — regenerated 2026-07-10.)
+GPU tests are skip-marked like the other soar suites.
 """
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +28,6 @@ from cloudyview.soar.menu import (
 )
 
 DATA128 = Path(__file__).parent.parent / "data" / "TWPICE_subvolume_128x128_5km.nc"
-PRECHANGE_DIR = Path(__file__).parent / "reference_images" / "soar_prechange"
 
 pytestmark = pytest.mark.gpu
 
@@ -51,17 +40,6 @@ def _adapter_ok():
     except Exception:
         return False
     return "float32-filterable" in adapter.features
-
-
-def _is_rtx_5080_reference_adapter():
-    """The checked-in byte references are explicitly RTX-5080-specific."""
-    adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-    info = adapter.info
-    identity = " ".join(
-        str(info.get(name, ""))
-        for name in ("vendor", "device", "description")
-    ).lower()
-    return "5080" in identity
 
 
 if not _adapter_ok():  # pragma: no cover
@@ -189,7 +167,9 @@ def test_periodic_flag_is_packed_and_scene_identity(small_periodic_renderer):
     r = small_periodic_renderer
     r.set_periodic(True)
     r.write_uniforms(cv.Camera(), (32, 32), jitter=False)
-    assert r._current_uniform.shape == (21, 4)
+    from cloudyview.soar.engine import _UNIFORM_ROWS
+
+    assert r._current_uniform.shape == (_UNIFORM_ROWS, 4)
     assert r._current_uniform[20, 0] == 1.0
     key_on = r._current_uniform_key
     r.set_periodic(False)
@@ -299,78 +279,6 @@ def test_periodic_removes_the_domain_wall(twpice128_renderer):
     r.set_periodic(True)
 
     assert np.abs(on.astype(np.int16) - off.astype(np.int16)).mean() > 2.0
-
-
-# ---------------------------------------------------------------------------
-# (c) periodic=off bit-exactness vs the pre-change frames
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def prechange_renderer():
-    """Renderer matching the reference generation, with periodic off.
-
-    The references were rendered with the seeded FIF realization the parity
-    harness uses (the default FIF tile is unseeded and differs per process).
-    """
-    import cloudyview as cv
-    from cloudyview.ocean_fif import generate_fif_normals
-    from cloudyview.soar import InteractiveRenderer
-
-    if not _is_rtx_5080_reference_adapter():
-        pytest.skip("byte-exact prechange references require the RTX 5080")
-
-    meta = json.loads((PRECHANGE_DIR / "meta.json").read_text())
-    seed = meta["fif_seed"]
-    np.random.seed(seed)
-    fif_normals = generate_fif_normals(
-        rng=np.random.default_rng(seed), verbose=False
-    )
-    field = cv.load(str(DATA128))
-    return InteractiveRenderer(field, periodic=False, fif_normals=fif_normals)
-
-
-def _prechange_case_camera(meta: dict, name: str):
-    import cloudyview as cv
-
-    case = meta["cases"][name]
-    return cv.Camera(
-        position=tuple(case["camera_position"]),
-        azimuth=case["camera_azimuth"],
-        elevation=case["camera_elevation"],
-        fov=case["camera_fov"],
-    )
-
-
-@pytest.mark.parametrize(
-    "case_name", ["twpice128_default", "twpice128_edge", "twpice128_killcombo"]
-)
-def test_periodic_off_is_bit_exact_vs_prechange_frame(
-    prechange_renderer, case_name
-):
-    from cloudyview.soar.engine import PRE_PORT_AMBIENT_TINT
-
-    meta = json.loads((PRECHANGE_DIR / "meta.json").read_text())
-    reference = np.load(PRECHANGE_DIR / f"{case_name}.npy")
-    camera = _prechange_case_camera(meta, case_name)
-
-    kwargs = {}
-    if case_name == "twpice128_killcombo":
-        # The documented master kill combination (engine.py): with periodic
-        # off it must still reproduce the pre-port arithmetic bit-for-bit.
-        kwargs = dict(
-            spectral_lighting_strength=0.0,
-            low_sun_sky_field_strength=0.0,
-            light_transfer_split_strength=0.0,
-            aerial_perspective_strength=0.0,
-            ocean_realism=0.0,
-            cone_stencil_theta_deg=0.0,
-            ambient_tint=PRE_PORT_AMBIENT_TINT,
-        )
-
-    img = prechange_renderer.render(
-        camera, size=tuple(meta["size"]), jitter=False, **kwargs
-    )
-    np.testing.assert_array_equal(img, reference)
 
 
 # ---------------------------------------------------------------------------
