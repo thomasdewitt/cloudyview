@@ -497,7 +497,7 @@ def test_cli_no_periodic_flag_reaches_run_app(monkeypatch, tmp_path):
         captured.update(kwargs)
 
     monkeypatch.setattr("cloudyview.soar.app.run_app", fake_run_app)
-    monkeypatch.setattr("cloudyview.cloudfield.load", lambda path, ice=None: "field")
+    monkeypatch.setattr("cloudyview.cloudfield.load", lambda path, ice=None, **kwargs: "field")
 
     soar_main.main([str(DATA128), "--no-periodic"])
     assert captured["periodic"] is False
@@ -517,7 +517,7 @@ def test_cli_tier_and_fp16_volume_reach_run_app(monkeypatch):
         lambda field, **kwargs: captured.update(kwargs),
     )
     monkeypatch.setattr(
-        "cloudyview.cloudfield.load", lambda path, ice=None: "field"
+        "cloudyview.cloudfield.load", lambda path, ice=None, **kwargs: "field"
     )
 
     soar_main.main([str(DATA128)])

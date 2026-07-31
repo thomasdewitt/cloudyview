@@ -44,6 +44,7 @@ from time import perf_counter
 
 import numpy as np
 
+from .. import io
 from ..camera import Camera
 from ..cloudfield import CloudField, load as load_cloud_field
 from ..render_metadata import build_render_metadata, embed_metadata
@@ -86,7 +87,9 @@ from .menu import (
     ACTION_TOGGLE_FULLSCREEN,
     ACTION_TOGGLE_PERIODIC,
     ACTION_SETTINGS_MENU,
+    ACTION_SELECT_GROUP,
     ACTION_SELECT_TIER,
+    ACTION_SELECT_UNITS,
     ACTION_CONTROLS_MENU,
     ACTION_TRACK_SAVE,
     ACTION_TRACK_DISCARD,
@@ -97,7 +100,9 @@ from .menu import (
     MENU_FILE_BROWSER_ICE,
     MENU_FILE_BROWSER_LIQUID,
     MENU_MAIN,
+    MENU_OPEN_GROUP_PROMPT,
     MENU_OPEN_ICE_PROMPT,
+    MENU_OPEN_UNITS_PROMPT,
     MENU_RENDER_QUALITY,
     MENU_SETTINGS,
     FileEntry,
@@ -308,6 +313,11 @@ class FlyThroughApp:
         self._paused = False
         self._menu_state = MENU_MAIN
         self._pending_open_path = None
+        self._pending_ice_path = None
+        self._pending_group = None        # chosen NetCDF group, None = root
+        self._pending_group_choices = []  # groups awaiting the user's pick
+        self._pending_units = None        # user-supplied condensate units
+        self._pending_units_vars = []     # variables that carry no units
         self._file_browser_dir = (
             Path(field.source).expanduser().parent
             if field.source else Path.cwd()
@@ -527,6 +537,10 @@ class FlyThroughApp:
         state = getattr(self, "_menu_state", MENU_MAIN)
         if state == MENU_OPEN_ICE_PROMPT:
             return self._open_ice_title()
+        if state == MENU_OPEN_GROUP_PROMPT:
+            return "cloudyview which NetCDF group?"
+        if state == MENU_OPEN_UNITS_PROMPT:
+            return "cloudyview which condensate units?"
         if state in (MENU_FILE_BROWSER_LIQUID, MENU_FILE_BROWSER_ICE):
             return "cloudyview file browser"
         if state == MENU_RENDER_QUALITY:
@@ -598,7 +612,7 @@ class FlyThroughApp:
             self.canvas.set_title(self._menu_title())
         else:
             self._menu_state = MENU_MAIN
-            self._pending_open_path = None
+            self._reset_pending_open()
             self._file_browser_error = None
             self._error_message = None
             self._capture_mouse(True)
@@ -677,7 +691,7 @@ class FlyThroughApp:
                       elevation=self.elevation, fov=self.fov)
 
     def _start_open_file(self) -> None:
-        self._pending_open_path = None
+        self._reset_pending_open()
         self._file_browser_error = None
         self._set_file_browser_dir(getattr(self, "_last_file_dir", Path.cwd()))
         self._set_menu_state(MENU_FILE_BROWSER_LIQUID)
@@ -693,16 +707,68 @@ class FlyThroughApp:
         except Exception as e:
             self._file_browser_error = str(e)
 
+    def _reset_pending_open(self) -> None:
+        self._pending_open_path = None
+        self._pending_ice_path = None
+        self._pending_group = None
+        self._pending_group_choices = []
+        self._pending_units = None
+        self._pending_units_vars = []
+
     def _select_browser_path(self, path: str | Path) -> None:
         selected = Path(path).expanduser().resolve()
         self._last_file_dir = selected.parent
         if self._menu_state == MENU_FILE_BROWSER_LIQUID:
+            self._reset_pending_open()
             self._pending_open_path = str(selected)
-            self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+            self._start_group_selection()
         elif self._menu_state == MENU_FILE_BROWSER_ICE:
             self._start_loading_file(
                 self._pending_open_path, str(selected)
             )
+
+    def _start_group_selection(self) -> None:
+        """Pick the NetCDF group holding the field, before anything is read.
+
+        Files that keep each field in its own group (STEAM render nests)
+        have an empty root, so the loader's variable search has nothing to
+        find. One candidate group is taken automatically; several are the
+        user's call.
+        """
+        try:
+            groups = io.find_liquid_water_groups(self._pending_open_path)
+        except Exception:
+            # Unreadable file: leave it to the load, which reports the
+            # failure with its own wording.
+            groups = []
+
+        if not groups or "" in groups:
+            # Root group carries the field, or nothing anywhere does — in
+            # which case the loader's own message names the variables it
+            # looked for. Never guess a group in that case.
+            self._pending_group = None
+        elif len(groups) == 1:
+            self._pending_group = groups[0]
+            print(f"cloudyview: using NetCDF group '{groups[0]}'")
+        else:
+            self._pending_group_choices = groups
+            self._set_menu_state(MENU_OPEN_GROUP_PROMPT)
+            return
+
+        self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+
+    def _select_group(self, index: int | None) -> None:
+        choices = self._pending_group_choices
+        if index is None or not (0 <= index < len(choices)):
+            return
+        self._pending_group = choices[index]
+        self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+
+    def _select_condensate_units(self, units: str | None) -> None:
+        if units is None:
+            return
+        self._pending_units = units
+        self._start_loading_file(self._pending_open_path, self._pending_ice_path)
 
     def _finish_open_file(self, *, use_ice: bool) -> None:
         liquid_path = self._pending_open_path
@@ -718,6 +784,23 @@ class FlyThroughApp:
 
         self._start_loading_file(liquid_path, None)
 
+    @staticmethod
+    def _condensate_vars_missing_units(
+        liquid_path: str, ice_path: str | None, group: str | None
+    ) -> list:
+        """Condensate variables with no 'units' attribute, liquid then ice.
+
+        Probing costs one metadata open. Any failure here is left to the
+        real load, which reports it with its own wording.
+        """
+        try:
+            missing = io.condensate_vars_missing_units(liquid_path, group=group)
+            if ice_path:
+                missing = missing + io.condensate_vars_missing_units(ice_path)
+        except Exception:
+            return []
+        return missing
+
     def _start_loading_file(
         self, liquid_path: str | Path | None, ice_path: str | Path | None
     ) -> None:
@@ -730,6 +813,20 @@ class FlyThroughApp:
 
         liquid_path = str(liquid_path)
         ice_path = str(ice_path) if ice_path else None
+        group = self._pending_group
+        units = self._pending_units
+
+        if units is None:
+            missing = self._condensate_vars_missing_units(
+                liquid_path, ice_path, group
+            )
+            if missing:
+                self._pending_open_path = liquid_path
+                self._pending_ice_path = ice_path
+                self._pending_units_vars = missing
+                self._set_menu_state(MENU_OPEN_UNITS_PROMPT)
+                return
+
         previous = self.renderer
         device = previous.device
         filename = Path(liquid_path).name
@@ -739,7 +836,14 @@ class FlyThroughApp:
                 report(stage_name)
 
             field = load_cloud_field(
-                liquid_path, ice=ice_path, stage_callback=stage
+                liquid_path,
+                ice=ice_path,
+                liquid_water_group=group,
+                # A separate ice file is its own root; the group only
+                # applies to ice living alongside the liquid variable.
+                ice_water_group=None if ice_path else group,
+                fallback_units=units,
+                stage_callback=stage,
             )
             report("building extinction")
             renderer = self._create_renderer(
@@ -753,7 +857,7 @@ class FlyThroughApp:
                 "ice_path": ice_path,
             }
 
-        self._pending_open_path = None
+        self._reset_pending_open()
         self._file_browser_error = None
         self._set_menu_state(MENU_MAIN)
         self.canvas.set_title(f"cloudyview loading {filename}")
@@ -1184,6 +1288,10 @@ class FlyThroughApp:
                 self._finish_open_file(use_ice=True)
             elif action == ACTION_OPEN_ICE_NO:
                 self._finish_open_file(use_ice=False)
+            elif action == ACTION_SELECT_GROUP:
+                self._select_group(transition.group_index)
+            elif action == ACTION_SELECT_UNITS:
+                self._select_condensate_units(transition.units)
             elif action == ACTION_RENDER_MENU:
                 if behold_rendering_available():
                     self._set_menu_state(
@@ -1201,7 +1309,7 @@ class FlyThroughApp:
                 if transition.next_state == MENU_OPEN_ICE_PROMPT:
                     self._set_menu_state(MENU_OPEN_ICE_PROMPT)
                 else:
-                    self._pending_open_path = None
+                    self._reset_pending_open()
                     self._error_message = None
                     self._set_menu_state(transition.next_state or MENU_MAIN)
             elif action == ACTION_TOGGLE_PERIODIC:
@@ -1456,6 +1564,10 @@ class FlyThroughApp:
             self._draw_controls_menu(imgui)
         elif state == MENU_TRACK_SAVE:
             self._draw_track_save_menu(imgui)
+        elif state == MENU_OPEN_GROUP_PROMPT:
+            self._draw_group_prompt(imgui)
+        elif state == MENU_OPEN_UNITS_PROMPT:
+            self._draw_units_prompt(imgui)
         elif state == MENU_OPEN_ICE_PROMPT:
             self._draw_ice_prompt(imgui)
         elif state in (MENU_FILE_BROWSER_LIQUID, MENU_FILE_BROWSER_ICE):
@@ -1734,16 +1846,68 @@ class FlyThroughApp:
         finally:
             self._end_imgui_window(imgui)
 
+    def _pending_open_filename(self) -> str:
+        return (
+            Path(self._pending_open_path).name
+            if self._pending_open_path else "selected file"
+        )
+
+    def _draw_group_prompt(self, imgui) -> None:
+        theme = self._theme
+        self._begin_imgui_window(imgui, "group_prompt", 460.0)
+        try:
+            theme.header("open file", "Which group?")
+            theme.mono_text(self._pending_open_filename(), size=13.0)
+            theme.caption(
+                "The root group holds no cloud field. These groups do:",
+                wrapped=True,
+            )
+            imgui.dummy((1.0, 6.0))
+            for index, group in enumerate(self._pending_group_choices):
+                hint = str(index + 1) if index < 9 else None
+                if theme.menu_button(group, hint):
+                    self._select_group(index)
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
+                self._reset_pending_open()
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
+    def _draw_units_prompt(self, imgui) -> None:
+        theme = self._theme
+        self._begin_imgui_window(imgui, "units_prompt", 460.0)
+        try:
+            theme.header("open file", "Which units?")
+            theme.mono_text(self._pending_open_filename(), size=13.0)
+            theme.caption(
+                f"No units attribute on {', '.join(self._pending_units_vars)}. "
+                "Mixing ratios are usually kg/kg; SAM-style output is g/kg.",
+                wrapped=True,
+            )
+            imgui.dummy((1.0, 6.0))
+            for label, hint, units in (
+                ("g/kg", "G", "g/kg"),
+                ("kg/kg", "K", "kg/kg"),
+            ):
+                if theme.menu_button(label, hint):
+                    self._select_condensate_units(units)
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
+                self._reset_pending_open()
+                self._set_menu_state(MENU_MAIN)
+        finally:
+            self._end_imgui_window(imgui)
+
     def _draw_ice_prompt(self, imgui) -> None:
         theme = self._theme
         self._begin_imgui_window(imgui, "ice_prompt", 460.0)
         try:
-            filename = (
-                Path(self._pending_open_path).name
-                if self._pending_open_path else "selected file"
-            )
+            filename = self._pending_open_filename()
             theme.header("open file", "Ice phase?")
             theme.mono_text(filename, size=13.0)
+            if self._pending_group:
+                theme.caption(f"group: {self._pending_group}")
             imgui.dummy((1.0, 6.0))
             if theme.menu_button("Yes, pick ice file", "Y"):
                 self._finish_open_file(use_ice=True)
@@ -1751,7 +1915,7 @@ class FlyThroughApp:
                 self._finish_open_file(use_ice=False)
             imgui.dummy((1.0, 4.0))
             if theme.menu_button("Back", "ESC", height=38.0):
-                self._pending_open_path = None
+                self._reset_pending_open()
                 self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
@@ -1774,7 +1938,7 @@ class FlyThroughApp:
                 if state == MENU_FILE_BROWSER_ICE:
                     self._set_menu_state(MENU_OPEN_ICE_PROMPT)
                 else:
-                    self._pending_open_path = None
+                    self._reset_pending_open()
                     self._set_menu_state(MENU_MAIN)
                 return
             imgui.same_line()

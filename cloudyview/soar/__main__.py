@@ -22,7 +22,33 @@ def demo_data_path() -> Path:
     return Path(__file__).resolve().parents[2] / "data" / DEMO_FILENAME
 
 
-def run_offscreen_smoke(filepath: Path, *, size=(96, 54)) -> None:
+def resolve_group(filepath: Path) -> str | None:
+    """Auto-detect the NetCDF group holding the cloud field, or None for root.
+
+    Mirrors the in-app open flow: one candidate group is taken, several
+    are the user's call — here that means `--group`, since the terminal
+    launch has no window to ask in yet.
+    """
+    from .. import io
+
+    groups = io.find_liquid_water_groups(str(filepath))
+    if not groups or "" in groups:
+        # Root group works, or nothing anywhere does — leave the loader to
+        # say so in its own words.
+        return None
+    if len(groups) == 1:
+        print(f"Using NetCDF group '{groups[0]}'")
+        return groups[0]
+    raise SystemExit(
+        f"{filepath} has no cloud field in the root group, but several "
+        f"groups carry one: {', '.join(groups)}. "
+        "Re-run with --group <name> to pick one."
+    )
+
+
+def run_offscreen_smoke(
+    filepath: Path, *, size=(96, 54), group: str | None = None
+) -> None:
     """Load ``filepath`` and render one small frame without opening a window."""
     import numpy as np
 
@@ -30,7 +56,9 @@ def run_offscreen_smoke(filepath: Path, *, size=(96, 54)) -> None:
     from ..cloudfield import load
     from .engine import InteractiveRenderer
 
-    field = load(str(filepath))
+    field = load(
+        str(filepath), liquid_water_group=group, ice_water_group=group
+    )
     flat = np.zeros((4, 4), dtype=np.float32)
     up = np.ones((4, 4), dtype=np.float32)
     renderer = InteractiveRenderer(
@@ -69,6 +97,10 @@ def main(argv=None):
     parser.add_argument("--ice", default=None,
                         help="separate NetCDF file with the ice variable "
                              "(SAM LPT split-file style)")
+    parser.add_argument("--group", default=None,
+                        help="NetCDF group holding the cloud field, for files "
+                             "that keep each field in its own group. Omit to "
+                             "auto-detect when there is exactly one candidate.")
     parser.add_argument("--size", default="1280x720",
                         help="window size WxH (default 1280x720)")
     parser.add_argument("--extinction-multiplier", type=float, default=1.0)
@@ -177,10 +209,16 @@ def main(argv=None):
         print(f"Loading demo data: {filepath} ...")
     else:
         print(f"Loading {filepath} ...")
+    group = args.group if args.group is not None else resolve_group(filepath)
     if args.offscreen_smoke:
-        run_offscreen_smoke(filepath)
+        run_offscreen_smoke(filepath, group=group)
         return
-    field = load(str(filepath), ice=args.ice)
+    field = load(
+        str(filepath),
+        ice=args.ice,
+        liquid_water_group=group,
+        ice_water_group=None if args.ice else group,
+    )
     camera = None
     if any(v is not None for v in (
         args.camera_position, args.camera_azimuth,

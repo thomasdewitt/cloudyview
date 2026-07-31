@@ -112,6 +112,7 @@ def load(
     x_dim: Optional[str] = None,
     y_dim: Optional[str] = None,
     z_dim: Optional[str] = None,
+    fallback_units: Optional[str] = None,
     stage_callback: Optional[Callable[[str], None]] = None,
 ) -> CloudField:
     """Load a cloud field from NetCDF into a :class:`CloudField`.
@@ -133,6 +134,10 @@ def load(
         Explicit coordinate variable names.
     x_dim, y_dim, z_dim : str, optional
         Explicit dimension names for the x/y/z axes.
+    fallback_units : str, optional
+        Units to assume for condensate variables that carry no 'units'
+        attribute at all ('g/kg' or 'kg/kg'). Without it a missing
+        attribute stays an error.
     stage_callback : callable, optional
         Receives coarse loading stage strings for interactive callers.
 
@@ -164,6 +169,7 @@ def load(
         y_dim=y_dim,
         z_dim=z_dim,
         ice_filepath=str(ice) if ice is not None else None,
+        fallback_units=fallback_units,
     )
 
     if stage_callback is not None:

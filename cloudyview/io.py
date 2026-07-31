@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+import netCDF4
 import numpy as np
 import xarray as xr
 
@@ -149,6 +150,81 @@ def infer_ice_water(
         return None, None
 
 
+def _walk_groups(dataset, prefix: str = ""):
+    """Yield ``(group path, group)`` for a NetCDF dataset, root group first."""
+    yield prefix, dataset
+    for name, child in dataset.groups.items():
+        yield from _walk_groups(child, f"{prefix}/{name}" if prefix else name)
+
+
+def find_liquid_water_groups(
+    filepath: str, candidate_names: Optional[list] = None
+) -> list:
+    """
+    List the NetCDF groups of a file that hold a 3D liquid water field.
+
+    The root group is reported as ``""`` (see `_normalize_group`). Files
+    that keep each field in its own group — STEAM render nests, for
+    instance — have an empty root and one entry per nest. Interactive
+    callers use this to decide whether a group must be chosen before the
+    file can be loaded at all.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to NetCDF file
+    candidate_names : list, optional
+        Variable names to look for (default `LIQUID_WATER_NAMES`)
+
+    Returns
+    -------
+    list
+        Group paths, outermost first. Empty when nothing recognizable
+        exists anywhere in the file.
+    """
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {filepath}")
+
+    names = LIQUID_WATER_NAMES if candidate_names is None else candidate_names
+    found = []
+    with netCDF4.Dataset(str(path)) as dataset:
+        for group_path, group in _walk_groups(dataset):
+            for name in names:
+                variable = group.variables.get(name)
+                # 3D is what `validate_data` will demand; a 1D 'qc' profile
+                # sitting in a group is not a renderable field.
+                if variable is not None and variable.ndim >= 3:
+                    found.append(group_path)
+                    break
+    return found
+
+
+def condensate_vars_missing_units(
+    filepath: str,
+    group: Optional[str] = None,
+    liquid_water_var: Optional[str] = None,
+    ice_water_var: Optional[str] = None,
+) -> list:
+    """
+    Name the condensate variables that carry no 'units' attribute at all.
+
+    An empty list means `check_and_convert_units` can proceed unaided (an
+    empty-string units attribute counts as present — that is the SAM
+    convention handled there). Interactive callers use this to ask for
+    units up front instead of failing part-way through a load.
+    """
+    ds = load_data(filepath, group=group)
+    missing = []
+    for var_name, data in (
+        infer_liquid_water(ds, explicit_name=liquid_water_var, group=group),
+        infer_ice_water(ds, explicit_name=ice_water_var, group=group),
+    ):
+        if data is not None and data.attrs.get("units", None) is None:
+            missing.append(var_name)
+    return missing
+
+
 def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str) -> None:
     """
     Validate dataset properties.
@@ -190,7 +266,11 @@ def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str) -> None
             )
 
 
-def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataArray:
+def check_and_convert_units(
+    data_array: xr.DataArray,
+    var_name: str,
+    fallback_units: Optional[str] = None,
+) -> xr.DataArray:
     """
     Check and convert water content units to g/kg.
 
@@ -200,6 +280,11 @@ def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataA
         Data variable to check
     var_name : str
         Name of variable for error messages
+    fallback_units : str, optional
+        Units to assume when the variable has no 'units' attribute at all.
+        Only for callers that asked the user which units the file is in
+        (see `condensate_vars_missing_units`); without it a missing
+        attribute stays an error.
 
     Returns
     -------
@@ -213,6 +298,13 @@ def check_and_convert_units(data_array: xr.DataArray, var_name: str) -> xr.DataA
     """
     # Get units attribute
     units = data_array.attrs.get('units', None)
+
+    if units is None and fallback_units is not None:
+        logger.warning(
+            "Variable %s has no 'units' attribute; using the caller-supplied "
+            "'%s'.", var_name, fallback_units,
+        )
+        units = fallback_units
 
     if units is None:
         raise ValueError(f"Variable {var_name} has no 'units' attribute. "
@@ -516,6 +608,7 @@ def load_and_validate(
     y_dim: Optional[str] = None,
     z_dim: Optional[str] = None,
     ice_filepath: Optional[str] = None,
+    fallback_units: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Load NetCDF file and validate it, inferring variable names and checking units.
@@ -552,6 +645,9 @@ def load_and_validate(
         the ice variable is REQUIRED and is looked up in this file only;
         any ice variable in `filepath` is ignored. The ice grid must match
         the liquid grid (shape, and coordinates when both files carry them).
+    fallback_units : str, optional
+        Units to assume for condensate variables that carry no 'units'
+        attribute at all. Without it a missing attribute stays an error.
 
     Returns
     -------
@@ -629,7 +725,7 @@ def load_and_validate(
     lw_data = standardize_dims(lw_data, x_dim=x_dim, y_dim=y_dim, z_dim=z_dim)
 
     # Check and convert units to g/kg
-    lw_data = check_and_convert_units(lw_data, lw_var)
+    lw_data = check_and_convert_units(lw_data, lw_var, fallback_units)
 
     if ice_filepath is not None:
         # Ice explicitly requested from a separate file: it is required there.
@@ -683,7 +779,7 @@ def load_and_validate(
         # Standardize dimensions
         iw_data = standardize_dims(iw_data, x_dim=x_dim, y_dim=y_dim, z_dim=z_dim)
         # Check and convert units to g/kg
-        iw_data = check_and_convert_units(iw_data, iw_var)
+        iw_data = check_and_convert_units(iw_data, iw_var, fallback_units)
         if iw_data.shape != lw_data.shape:
             raise ValueError(
                 "Liquid water and ice water arrays must have identical spatial shapes. "

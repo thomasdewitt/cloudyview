@@ -26,7 +26,9 @@ from cloudyview.soar.app import (
     MENU_FILE_BROWSER_LIQUID,
     FlyThroughApp,
     MENU_MAIN,
+    MENU_OPEN_GROUP_PROMPT,
     MENU_OPEN_ICE_PROMPT,
+    MENU_OPEN_UNITS_PROMPT,
     MENU_RENDER_QUALITY,
     MENU_SETTINGS,
     OCEAN_FLOOR_MARGIN_M,
@@ -63,6 +65,11 @@ def make_event_app():
     app._paused = False
     app._menu_state = MENU_MAIN
     app._pending_open_path = None
+    app._pending_ice_path = None
+    app._pending_group = None
+    app._pending_group_choices = []
+    app._pending_units = None
+    app._pending_units_vars = []
     app._file_browser_dir = Path.cwd()
     app._last_file_dir = Path.cwd()
     app._file_browser_error = None
@@ -542,10 +549,14 @@ def test_async_load_job_installs_fake_renderer(tmp_path):
 
     stages = []
 
-    def fake_load(path, *, ice=None, stage_callback=None):
+    def fake_load(path, *, ice=None, liquid_water_group=None,
+                  ice_water_group=None, fallback_units=None,
+                  stage_callback=None):
         if stage_callback is not None:
             stage_callback("loading file")
-        stages.append((path, ice))
+        stages.append(
+            (path, ice, liquid_water_group, ice_water_group, fallback_units)
+        )
         return "new-field"
 
     def fake_create_renderer(field, *, device=None, previous=None):
@@ -565,9 +576,113 @@ def test_async_load_job_installs_fake_renderer(tmp_path):
     finally:
         soar_app.load_cloud_field = original_load
 
-    assert stages == [(str(tmp_path / "cloud.nc"), None)]
+    assert stages == [(str(tmp_path / "cloud.nc"), None, None, None, None)]
     assert app.renderer.field == "new-field"
     assert app.renderer.reset_calls == 1
     assert app._frame_index == 0
     assert app._paused is False
     assert app.capture_calls == [True]
+
+
+def _write_nested_render_file(path, groups=("render_a", "render_b"),
+                              with_units=True):
+    """A file shaped like a STEAM render nest: empty root, field per group."""
+    import xarray as xr
+
+    xr.Dataset().to_netcdf(path, mode="w")
+    attrs = {"units": "kg/kg"} if with_units else {}
+    for group in groups:
+        xr.Dataset(
+            data_vars={
+                "qc": (
+                    ("x", "y", "z"),
+                    np.full((2, 3, 4), 0.001, dtype=np.float64),
+                    dict(attrs),
+                ),
+            },
+            coords={
+                "x": np.array([0.0, 1000.0]),
+                "y": np.array([0.0, 2000.0, 4000.0]),
+                "z": np.array([100.0, 300.0, 800.0, 1600.0]),
+            },
+        ).to_netcdf(path, mode="a", group=group)
+
+
+def test_single_candidate_group_is_chosen_without_asking(tmp_path):
+    app = make_event_app()
+    nested = tmp_path / "one_nest.nc"
+    _write_nested_render_file(nested, groups=("render_a",))
+
+    app._menu_state = MENU_FILE_BROWSER_LIQUID
+    FlyThroughApp._select_browser_path(app, nested)
+
+    assert app._pending_group == "render_a"
+    assert app._menu_state == MENU_OPEN_ICE_PROMPT
+
+
+def test_multiple_candidate_groups_ask_before_loading(tmp_path):
+    app = make_event_app()
+    nested = tmp_path / "nests.nc"
+    _write_nested_render_file(nested)
+
+    app._menu_state = MENU_FILE_BROWSER_LIQUID
+    FlyThroughApp._select_browser_path(app, nested)
+
+    assert app._menu_state == MENU_OPEN_GROUP_PROMPT
+    assert app._pending_group_choices == ["render_a", "render_b"]
+    assert app._pending_group is None
+
+    # The number keys mirror the on-screen list order.
+    transition = _menu_transition(True, MENU_OPEN_GROUP_PROMPT, "2")
+    assert transition.group_index == 1
+    FlyThroughApp._select_group(app, transition.group_index)
+
+    assert app._pending_group == "render_b"
+    assert app._menu_state == MENU_OPEN_ICE_PROMPT
+
+
+def test_root_group_file_skips_the_group_prompt(tmp_path):
+    import xarray as xr
+
+    app = make_event_app()
+    flat = tmp_path / "flat.nc"
+    xr.Dataset(
+        data_vars={
+            "qc": (
+                ("x", "y", "z"),
+                np.zeros((2, 3, 4), dtype=np.float64),
+                {"units": "g/kg"},
+            )
+        }
+    ).to_netcdf(flat)
+
+    app._menu_state = MENU_FILE_BROWSER_LIQUID
+    FlyThroughApp._select_browser_path(app, flat)
+
+    assert app._pending_group is None
+    assert app._menu_state == MENU_OPEN_ICE_PROMPT
+
+
+def test_missing_units_are_asked_for_before_the_load_starts(tmp_path):
+    app = make_event_app()
+    nested = tmp_path / "no_units.nc"
+    _write_nested_render_file(nested, groups=("render_a",), with_units=False)
+    app._pending_open_path = str(nested)
+    app._pending_group = "render_a"
+    loads = []
+    app._create_renderer = lambda *a, **k: None
+
+    FlyThroughApp._start_loading_file(app, nested, None)
+
+    assert app._menu_state == MENU_OPEN_UNITS_PROMPT
+    assert app._pending_units_vars == ["qc"]
+    assert app._loading_job is None
+
+    transition = _menu_transition(True, MENU_OPEN_UNITS_PROMPT, "k")
+    assert transition.units == "kg/kg"
+    app._start_loading_file = lambda liquid_path, ice_path: loads.append(
+        (liquid_path, ice_path, app._pending_units)
+    )
+    FlyThroughApp._select_condensate_units(app, transition.units)
+
+    assert loads == [(str(nested), None, "kg/kg")]

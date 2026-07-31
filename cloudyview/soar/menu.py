@@ -13,6 +13,8 @@ ACTION_TOGGLE_FULLSCREEN = "toggle_fullscreen"
 ACTION_OPEN_FILE = "open_file"
 ACTION_OPEN_ICE_YES = "open_ice_yes"
 ACTION_OPEN_ICE_NO = "open_ice_no"
+ACTION_SELECT_GROUP = "select_group"
+ACTION_SELECT_UNITS = "select_units"
 ACTION_RENDER_MENU = "render_menu"
 ACTION_RENDER_BEHOLD = "render_behold"
 ACTION_MENU_BACK = "menu_back"
@@ -26,6 +28,8 @@ ACTION_TRACK_DISCARD = "track_discard"
 
 MENU_MAIN = "main"
 MENU_FILE_BROWSER_LIQUID = "file_browser_liquid"
+MENU_OPEN_GROUP_PROMPT = "open_group_prompt"
+MENU_OPEN_UNITS_PROMPT = "open_units_prompt"
 MENU_OPEN_ICE_PROMPT = "open_ice_prompt"
 MENU_FILE_BROWSER_ICE = "file_browser_ice"
 MENU_RENDER_QUALITY = "render_quality"
@@ -49,6 +53,14 @@ QUALITY_TIERS_BY_KEY = {
     "4": "potato",
 }
 
+# Group picker: number keys mirror the on-screen list order.
+GROUP_INDEX_BY_KEY = {str(n): n - 1 for n in range(1, 10)}
+
+CONDENSATE_UNITS_BY_KEY = {
+    "g": "g/kg",
+    "k": "kg/kg",
+}
+
 
 def _normalized_key(key: str) -> str:
     return key.lower() if len(key) == 1 else key
@@ -60,6 +72,8 @@ class MenuTransition:
     next_state: str | None = None
     quality: str | None = None
     tier: str | None = None
+    group_index: int | None = None
+    units: str | None = None
 
 
 def menu_transition(
@@ -102,6 +116,28 @@ def menu_transition(
         if key == "Escape":
             return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
         return MenuTransition(None, MENU_FILE_BROWSER_LIQUID)
+
+    if menu_state == MENU_OPEN_GROUP_PROMPT:
+        if key == "Escape":
+            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        group_index = GROUP_INDEX_BY_KEY.get(normalized)
+        if group_index is not None:
+            # The app rejects an index past the end of its own list.
+            return MenuTransition(
+                ACTION_SELECT_GROUP, MENU_OPEN_GROUP_PROMPT,
+                group_index=group_index,
+            )
+        return MenuTransition(None, MENU_OPEN_GROUP_PROMPT)
+
+    if menu_state == MENU_OPEN_UNITS_PROMPT:
+        if key == "Escape":
+            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        units = CONDENSATE_UNITS_BY_KEY.get(normalized)
+        if units is not None:
+            return MenuTransition(
+                ACTION_SELECT_UNITS, MENU_OPEN_UNITS_PROMPT, units=units,
+            )
+        return MenuTransition(None, MENU_OPEN_UNITS_PROMPT)
 
     if menu_state == MENU_OPEN_ICE_PROMPT:
         if key == "Escape":
