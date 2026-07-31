@@ -92,6 +92,7 @@ from .menu import (
     ACTION_TOGGLE_FULLSCREEN,
     ACTION_TOGGLE_PERIODIC,
     ACTION_SETTINGS_MENU,
+    ACTION_SELECT_BOTH_GROUPS,
     ACTION_SELECT_GROUP,
     ACTION_SELECT_TIER,
     ACTION_SELECT_UNITS,
@@ -330,6 +331,8 @@ class FlyThroughApp:
         self._pending_units = None        # user-supplied condensate units
         self._pending_units_vars = []     # variables that carry no units
         self._pending_is_nest = False     # the open chain targets the nest
+        self._pending_nest_group = None   # second group, loaded as the nest
+        self._pending_nest_pair = None    # (outer, inner) offered by the picker
         # The browser opens at home, not next to whatever file the session was
         # launched with: data lives all over the disk and home is the one
         # place every tree is reachable from. It remembers the last directory
@@ -760,6 +763,8 @@ class FlyThroughApp:
         self._pending_units = None
         self._pending_units_vars = []
         self._pending_is_nest = False
+        self._pending_nest_group = None
+        self._pending_nest_pair = None
 
     def _select_browser_path(self, path: str | Path) -> None:
         selected = Path(path).expanduser().resolve()
@@ -788,6 +793,19 @@ class FlyThroughApp:
             # failure with its own wording.
             groups = []
 
+        # Several groups in one file are often a coarse domain and a
+        # refinement of part of it — exactly a nested pair. Probe the
+        # coordinates (no field data) so the picker can offer both at once
+        # instead of making the user choose one and lose the other.
+        self._pending_nest_pair = None
+        if len(groups) > 1 and not self._pending_is_nest:
+            try:
+                self._pending_nest_pair = io.find_nestable_group_pair(
+                    self._pending_open_path, groups
+                )
+            except Exception:
+                self._pending_nest_pair = None
+
         if not groups or "" in groups:
             # Root group carries the field, or nothing anywhere does — in
             # which case the loader's own message names the variables it
@@ -808,7 +826,20 @@ class FlyThroughApp:
         if index is None or not (0 <= index < len(choices)):
             return
         self._pending_group = choices[index]
+        self._pending_nest_group = None
         self._set_menu_state(MENU_OPEN_ICE_PROMPT)
+
+    def _select_both_groups_nested(self) -> None:
+        """Load the file's coarse group and its refinement as one scene.
+
+        Skips the ice prompt: a second ice *file* makes no sense for a pair
+        of groups that already live in this one.
+        """
+        pair = self._pending_nest_pair
+        if not pair:
+            return
+        self._pending_group, self._pending_nest_group = pair
+        self._start_loading_file(self._pending_open_path, None)
 
     def _select_condensate_units(self, units: str | None) -> None:
         if units is None:
@@ -862,11 +893,18 @@ class FlyThroughApp:
         group = self._pending_group
         units = self._pending_units
         is_nest = self._pending_is_nest
+        nest_group = self._pending_nest_group
 
         if units is None:
             missing = self._condensate_vars_missing_units(
                 liquid_path, ice_path, group
             )
+            if nest_group is not None:
+                # One answer covers both groups: they are the same file, and
+                # asking twice for the same file's convention is noise.
+                missing = missing + self._condensate_vars_missing_units(
+                    liquid_path, None, nest_group
+                )
             if missing:
                 self._pending_open_path = liquid_path
                 self._pending_ice_path = ice_path
@@ -892,8 +930,22 @@ class FlyThroughApp:
                 fallback_units=units,
                 stage_callback=stage,
             )
+            nest_field = None
+            if nest_group is not None:
+                report(f"loading nest group {nest_group}")
+                nest_field = load_cloud_field(
+                    liquid_path,
+                    liquid_water_group=nest_group,
+                    ice_water_group=nest_group,
+                    fallback_units=units,
+                )
+
             report("building extinction")
-            if is_nest:
+            if nest_group is not None:
+                renderer = self._create_renderer(
+                    field, nest=nest_field, device=device, previous=previous
+                )
+            elif is_nest:
                 # The outer field stays put; only the nest is new. Placement
                 # comes from the file's own coordinates, and a nest outside
                 # the outer domain raises here — reported as a load failure
@@ -940,12 +992,18 @@ class FlyThroughApp:
         self._last_quality_camera_signature = None
         self._camera_moving_for_quality(self.camera())
         name = Path(result["liquid_path"]).name
-        if is_nest:
-            print(f"Loaded nest {self.renderer.nest}")
-            message = f"cloudyview nested {name}"
-        else:
+        if not is_nest:
             print(f"Loaded {self.renderer.field}")
-            message = f"cloudyview loaded {name}"
+        if self.renderer.nested:
+            coverage = self.renderer.nest_coverage_fraction
+            print(
+                f"Loaded nest {self.renderer.nest} "
+                f"(covers {coverage * 100:.0f}% of the outer domain)"
+            )
+        message = (
+            f"cloudyview nested {name}" if is_nest
+            else f"cloudyview loaded {name}"
+        )
         self._set_paused(False)
         self._flash_title(message, seconds=3.0)
 
@@ -1378,6 +1436,8 @@ class FlyThroughApp:
                 self._finish_open_file(use_ice=False)
             elif action == ACTION_SELECT_GROUP:
                 self._select_group(transition.group_index)
+            elif action == ACTION_SELECT_BOTH_GROUPS:
+                self._select_both_groups_nested()
             elif action == ACTION_SELECT_UNITS:
                 self._select_condensate_units(transition.units)
             elif action == ACTION_RENDER_MENU:
@@ -1746,6 +1806,7 @@ class FlyThroughApp:
             if self.renderer.nested:
                 nest = self.renderer.nest
                 refine = self.renderer.dt_view / self.renderer.dt_view_nest
+                coverage = self.renderer.nest_coverage_fraction
                 theme.mono_text(
                     "+ nest "
                     + self._truncate_middle(self._nest_display_name(), 30)
@@ -1753,7 +1814,10 @@ class FlyThroughApp:
                     size=13.0,
                 )
                 theme.caption(
-                    f"{nest.shape[0]}x{nest.shape[1]}x{nest.shape[2]} voxels"
+                    f"{nest.shape[0]}x{nest.shape[1]}x{nest.shape[2]} voxels, "
+                    f"covering {coverage * 100:.0f}% of the domain"
+                    + (" — little of the outer field is visible"
+                       if coverage > 0.75 else "")
                 )
             theme.hint_row((
                 ("WASD", "fly"),
@@ -2007,6 +2071,19 @@ class FlyThroughApp:
                 wrapped=True,
             )
             imgui.dummy((1.0, 6.0))
+            pair = self._pending_nest_pair
+            if pair:
+                outer_group, inner_group = pair
+                if theme.menu_button("Use both, nested", "B"):
+                    self._select_both_groups_nested()
+                theme.caption(
+                    f"'{inner_group}' lies inside '{outer_group}' and is "
+                    "finer — they can be rendered together, with the finer "
+                    "one taking over where it covers.",
+                    wrapped=True,
+                )
+                imgui.dummy((1.0, 6.0))
+                theme.caption("Or just one:")
             for index, group in enumerate(self._pending_group_choices):
                 hint = str(index + 1) if index < 9 else None
                 if theme.menu_button(group, hint):

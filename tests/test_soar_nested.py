@@ -348,6 +348,8 @@ def _loading_app(renderer):
     app._pending_units = None
     app._pending_units_vars = []
     app._pending_is_nest = False
+    app._pending_nest_group = None
+    app._pending_nest_pair = None
     app._file_browser_error = None
     app._last_quality_camera_signature = None
     app._set_menu_state = lambda state: None
@@ -418,6 +420,118 @@ def test_remove_nest_keeps_the_outer_field(tmp_path):
     assert app.renderer.nested is False
     assert app.renderer.nest is None
     assert app.renderer.field.shape == outer_shape
+
+
+def _write_group_pair(path, groups):
+    """One file, one group per field — the STEAM render-nest shape."""
+    import netCDF4
+    import xarray as xr
+
+    with netCDF4.Dataset(path, "w"):
+        pass
+    for name, field in groups:
+        xr.Dataset(
+            {"QC": (("x", "y", "z"), field.lwc, {"units": "g/kg"})},
+            coords={
+                "x": ("x", np.asarray(field.x, np.float64), {"units": "m"}),
+                "y": ("y", np.asarray(field.y, np.float64), {"units": "m"}),
+                "z": ("z", np.asarray(field.z, np.float64), {"units": "m"}),
+            },
+        ).to_netcdf(path, group=name, mode="a")
+    return str(path)
+
+
+def test_group_picker_offers_a_nestable_pair(tmp_path):
+    from cloudyview import io
+    from cloudyview.soar.app import FlyThroughApp
+
+    path = _write_group_pair(
+        tmp_path / "nests.nc",
+        (("render_a", _outer_field()), ("render_b", _nest_field())),
+    )
+    app = _loading_app(_renderer())
+    app._pending_open_path = path
+    app._set_menu_state = lambda state: setattr(app, "_menu_state", state)
+    FlyThroughApp._start_group_selection(app)
+
+    assert app._pending_nest_pair == ("render_a", "render_b")
+    assert io.find_nestable_group_pair(path) == ("render_a", "render_b")
+
+
+def test_group_picker_does_not_offer_two_renders_of_one_domain(tmp_path):
+    """A finer group covering the whole parent is a replacement, not a nest."""
+    from cloudyview.cloudfield import CloudField
+    from cloudyview.soar.app import FlyThroughApp
+
+    coarse = _outer_field()
+    fine_n = OUTER_N * 2
+    step = VOXEL_M / 2
+    same_domain = CloudField(
+        lwc=np.zeros((fine_n, fine_n, OUTER_NZ * 2), np.float32),
+        x=(np.arange(fine_n) + 0.5) * step,
+        y=(np.arange(fine_n) + 0.5) * step,
+        z=(np.arange(OUTER_NZ * 2) + 0.5) * step,
+    )
+    path = _write_group_pair(
+        tmp_path / "same.nc",
+        (("render_a", coarse), ("render_b", same_domain)),
+    )
+    app = _loading_app(_renderer())
+    app._pending_open_path = path
+    app._set_menu_state = lambda state: setattr(app, "_menu_state", state)
+    FlyThroughApp._start_group_selection(app)
+
+    assert app._pending_nest_pair is None
+
+
+def test_use_both_groups_loads_one_file_as_two_levels(tmp_path):
+    from cloudyview.soar.app import FlyThroughApp
+
+    path = _write_group_pair(
+        tmp_path / "nests.nc",
+        (("render_a", _outer_field()), ("render_b", _nest_field())),
+    )
+    app = _loading_app(_renderer())
+    app._pending_open_path = path
+    app._pending_nest_pair = ("render_a", "render_b")
+    FlyThroughApp._select_both_groups_nested(app)
+
+    app._loading_job.join(60.0)
+    snapshot = app._loading_job.pump()
+    assert snapshot.error is None, snapshot.error
+    FlyThroughApp._install_loaded_renderer(app, snapshot.result)
+
+    assert app.renderer.nested is True
+    assert app.renderer.field.shape == _outer_field().shape
+    assert app.renderer.nest.shape == _nest_field().shape
+
+
+def test_a_nest_covering_the_whole_domain_is_refused():
+    """The 'only the nest shows' case is an error, not a confusing render."""
+    from cloudyview.cloudfield import CloudField
+
+    full = CloudField(
+        lwc=np.zeros((OUTER_N * 2, OUTER_N * 2, OUTER_NZ * 2), np.float32),
+        x=(np.arange(OUTER_N * 2) + 0.5) * (VOXEL_M / 2),
+        y=(np.arange(OUTER_N * 2) + 0.5) * (VOXEL_M / 2),
+        z=(np.arange(OUTER_NZ * 2) + 0.5) * (VOXEL_M / 2),
+    )
+    with pytest.raises(ValueError, match="covers the entire outer domain"):
+        _renderer(nest=full)
+
+
+def test_a_nest_spanning_x_and_y_but_not_z_is_allowed():
+    """Full-horizontal refinement over part of the column is legitimate."""
+    from cloudyview.cloudfield import CloudField
+
+    nz = OUTER_NZ
+    slab = CloudField(
+        lwc=np.zeros((OUTER_N * 2, OUTER_N * 2, nz), np.float32),
+        x=(np.arange(OUTER_N * 2) + 0.5) * (VOXEL_M / 2),
+        y=(np.arange(OUTER_N * 2) + 0.5) * (VOXEL_M / 2),
+        z=(np.arange(nz) + 0.5) * (VOXEL_M / 2),
+    )
+    assert _renderer(nest=slab).nested is True
 
 
 def test_reproduction_command_includes_the_nest():

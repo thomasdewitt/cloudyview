@@ -355,6 +355,20 @@ def _validate_nest_containment(bmin, bmax, nest_bmin, nest_bmax) -> None:
             f"The nested field has a degenerate bounding box: "
             f"{nest_bmin.tolist()} -> {nest_bmax.tolist()}."
         )
+    # Finest level wins, so a nest that fills the outer box on every axis
+    # hides the outer field completely — you would be looking at the nest
+    # alone and wondering where the parent went. That is two renders of one
+    # domain, not a refinement of part of it.
+    if (np.all(nest_bmin <= bmin + tol)
+            and np.all(nest_bmax >= bmax - tol)):
+        raise ValueError(
+            "The nested field covers the entire outer domain "
+            f"({nest_bmin.tolist()} -> {nest_bmax.tolist()}), so nesting it "
+            "would hide the outer field completely — the finest level "
+            "covering a point always wins. These look like two renders of "
+            "the same domain rather than a coarse field and a refinement "
+            "of part of it; open the finer one on its own instead."
+        )
 
 
 def _padded_volume(sigma: np.ndarray, periodic: bool):
@@ -1022,6 +1036,20 @@ class InteractiveRenderer:
     def resident_nbytes(self) -> int:
         """Total resident extinction bytes across both levels."""
         return self.volume_nbytes + self.nest_nbytes
+
+    @property
+    def nest_coverage_fraction(self) -> float:
+        """Fraction of the outer domain's volume the nest hides, 0 when none.
+
+        Worth surfacing: the finest level covering a point always wins, so a
+        nest at 0.9 means almost nothing of the outer field is left to see,
+        which looks like the outer field failed to load.
+        """
+        if not self.nested:
+            return 0.0
+        outer = np.prod(np.asarray(self.bmax) - np.asarray(self.bmin))
+        nest = np.prod(np.asarray(self.nest_bmax) - np.asarray(self.nest_bmin))
+        return float(nest / outer) if outer > 0 else 0.0
 
     @property
     def hud(self):

@@ -200,6 +200,79 @@ def find_liquid_water_groups(
     return found
 
 
+def group_domain_extent(filepath: str, group: Optional[str] = None):
+    """Absolute-meter (bmin, bmax, min_spacing) of one group's grid.
+
+    Cell-edge aligned like the renderers' AABBs (half a cell beyond the
+    outermost centers), so the result is directly comparable across
+    groups. Coordinates only — no field data is read. Returns None when
+    the group has no usable 3D grid.
+    """
+    try:
+        ds = load_data(filepath, group=group)
+        _, data = infer_liquid_water(ds, group=group)
+        coords = _extract_coords(_drop_time_dims(data), [ds])
+    except Exception:
+        return None
+
+    bmin, bmax, spacing = [], [], []
+    for values in coords:
+        values = np.asarray(values, dtype=np.float64)
+        if values.size < 2:
+            return None
+        lo_half = 0.5 * abs(values[1] - values[0])
+        hi_half = 0.5 * abs(values[-1] - values[-2])
+        bmin.append(float(values.min()) - lo_half)
+        bmax.append(float(values.max()) + hi_half)
+        spacing.append(float(abs(np.diff(values)).min()))
+    return np.array(bmin), np.array(bmax), min(spacing)
+
+
+def find_nestable_group_pair(filepath: str, groups: Optional[list] = None):
+    """Find a (outer, inner) group pair that forms a nested domain.
+
+    Files that keep each field in its own group — STEAM render nests —
+    often hold exactly this: a coarse parent and a finer child covering
+    part of it. Returns (outer_group, inner_group) when one group's grid
+    lies inside another's AND is strictly finer, or None when no pair
+    qualifies (including when a candidate covers its parent entirely,
+    which is a replacement, not a refinement).
+
+    Coordinates only; the caller still does the real load.
+    """
+    if groups is None:
+        groups = find_liquid_water_groups(filepath)
+    extents = {}
+    for group in groups:
+        extent = group_domain_extent(filepath, group=group or None)
+        if extent is not None:
+            extents[group] = extent
+    if len(extents) < 2:
+        return None
+
+    best = None
+    for inner, (inner_min, inner_max, inner_dx) in extents.items():
+        for outer, (outer_min, outer_max, outer_dx) in extents.items():
+            if inner == outer or inner_dx >= outer_dx:
+                continue
+            tol = 1e-9 * np.maximum(outer_max - outer_min, 1.0)
+            if np.any(inner_min < outer_min - tol):
+                continue
+            if np.any(inner_max > outer_max + tol):
+                continue
+            # A child filling the parent on every axis hides it completely;
+            # that is two renders of one domain, not a refinement.
+            covers = np.all(inner_min <= outer_min + tol) and np.all(
+                inner_max >= outer_max - tol
+            )
+            if covers:
+                continue
+            ratio = outer_dx / inner_dx
+            if best is None or ratio > best[0]:
+                best = (ratio, outer, inner)
+    return None if best is None else (best[1], best[2])
+
+
 def condensate_vars_missing_units(
     filepath: str,
     group: Optional[str] = None,

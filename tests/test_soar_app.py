@@ -72,6 +72,8 @@ def make_event_app():
     app._pending_units = None
     app._pending_units_vars = []
     app._pending_is_nest = False
+    app._pending_nest_group = None
+    app._pending_nest_pair = None
     app._file_browser_dir = Path.cwd()
     app._last_file_dir = Path.cwd()
     app._file_browser_error = None
@@ -618,6 +620,8 @@ def test_async_load_job_installs_fake_renderer(tmp_path):
     class FakeRenderer:
         def __init__(self, field):
             self.field = field
+            self.nest = None
+            self.nested = False
             self.device = object()
             self.bmin = np.array([0.0, 0.0, 0.0])
             self.bmax = np.array([100.0, 200.0, 1000.0])

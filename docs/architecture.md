@@ -107,10 +107,18 @@ dynamic texture indexing, which core WebGPU does not have.
 - Both volumes are resident 3D textures (bindings 1 and 5); a 1³ zero
   texture stands in when there is no nest so one bind-group layout serves
   both shader specializations.
-- Placement comes from each file's own absolute coordinates. A nest that
-  does not lie inside the outer AABB is a hard error, never a silent clip:
-  the march is clipped to (and wrapped into) the outer box, so an
-  overhanging nest would be truncated exactly where refinement matters.
+- Placement comes from each file's own absolute coordinates. Two hard
+  errors, never silent behavior:
+  - a nest that does not lie inside the outer AABB — the march is clipped
+    to (and wrapped into) the outer box, so an overhanging nest would be
+    truncated exactly where refinement matters;
+  - a nest that *fills* the outer AABB on all three axes. Finest-wins means
+    it would hide the outer field entirely, which reads as "the parent
+    failed to load". That is two renders of one domain, not a refinement.
+  Partial coverage is reported rather than refused (`nest_coverage_fraction`,
+  shown in the paused menu and printed on load) — a nest spanning the full
+  horizontal domain over part of the column is legitimate, and the number
+  is what explains a view with little parent left in it.
 - Step size follows the active level in both the view and the light march,
   as in witness. The dt-invariant powder term is what lets levels at very
   different step scales composite without a brightness seam.
@@ -147,13 +155,19 @@ is the same trade witness makes; the occupancy grid above is the fix.
   Space/LShift vertical.
 - File-open dialog for .nc selection (split liquid/ice selection supported).
   Opens at `$HOME` and then remembers the last directory of the session.
-- Nested fields (see "Nested domains") two ways: `--nest FILE` at launch, or
-  **N** in the ESC menu, which reuses the whole open-file chain — same
-  browser, group picker, ice prompt, units prompt — with one flag deciding
-  whether the loaded field replaces the scene or becomes its nest. N flips
-  to "Remove nest" once one is loaded. Adding a nest keeps the current
-  viewpoint (you are already flying in that scene); opening a new *outer*
-  file resets the camera and drops the nest.
+- Nested fields (see "Nested domains") three ways:
+  - `--nest FILE` at launch;
+  - **N** in the ESC menu, which reuses the whole open-file chain — same
+    browser, group picker, ice prompt, units prompt — with one flag deciding
+    whether the loaded field replaces the scene or becomes its nest. N flips
+    to "Remove nest" once one is loaded;
+  - **"Use both, nested"** in the group picker. When one file holds several
+    groups (STEAM render nests), `io.find_nestable_group_pair` probes their
+    *coordinates only* for a pair where one lies strictly inside the other
+    and is finer, and offers to load both as one scene. This is the common
+    case, and picking one group used to mean silently losing the other.
+  Adding a nest keeps the current viewpoint (you are already flying in that
+  scene); opening a new *outer* file resets the camera and drops the nest.
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
 - Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
   FOV wedge (reuse glimpse overlay math).

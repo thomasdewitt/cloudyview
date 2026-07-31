@@ -15,6 +15,7 @@ ACTION_OPEN_NEST = "open_nest"
 ACTION_OPEN_ICE_YES = "open_ice_yes"
 ACTION_OPEN_ICE_NO = "open_ice_no"
 ACTION_SELECT_GROUP = "select_group"
+ACTION_SELECT_BOTH_GROUPS = "select_both_groups"
 ACTION_SELECT_UNITS = "select_units"
 ACTION_RENDER_MENU = "render_menu"
 ACTION_RENDER_BEHOLD = "render_behold"
@@ -132,6 +133,12 @@ def menu_transition(
     if menu_state == MENU_OPEN_GROUP_PROMPT:
         if key == "Escape":
             return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        if normalized == "b":
+            # Only offered when the app found a nestable pair; it ignores
+            # the action otherwise.
+            return MenuTransition(
+                ACTION_SELECT_BOTH_GROUPS, MENU_OPEN_GROUP_PROMPT
+            )
         group_index = GROUP_INDEX_BY_KEY.get(normalized)
         if group_index is not None:
             # The app rejects an index past the end of its own list.
