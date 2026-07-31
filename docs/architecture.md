@@ -147,9 +147,13 @@ is the same trade witness makes; the occupancy grid above is the fix.
   Space/LShift vertical.
 - File-open dialog for .nc selection (split liquid/ice selection supported).
   Opens at `$HOME` and then remembers the last directory of the session.
-- `--nest FILE` loads a second, finer field nested inside the main one
-  (see "Nested domains"). It belongs to the field it was launched with:
-  opening another file from the ESC menu replaces the scene and drops it.
+- Nested fields (see "Nested domains") two ways: `--nest FILE` at launch, or
+  **N** in the ESC menu, which reuses the whole open-file chain — same
+  browser, group picker, ice prompt, units prompt — with one flag deciding
+  whether the loaded field replaces the scene or becomes its nest. N flips
+  to "Remove nest" once one is loaded. Adding a nest keeps the current
+  viewpoint (you are already flying in that scene); opening a new *outer*
+  file resets the camera and drops the nest.
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
 - Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
   FOV wedge (reuse glimpse overlay math).

@@ -29,7 +29,7 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 - `witness <file.nc>` - Fast volumetric ray-marched render (numba CPU — the golden look reference)
 - `soar <file.nc>` / `python -m cloudyview.soar` - Real-time WGSL fly-through (needs `--extra interactive`).
   `--nest <fine.nc>` adds a second, finer field nested inside the main one (placed by its own
-  absolute coordinates; must lie inside the outer domain or it raises).
+  absolute coordinates; must lie inside the outer domain or it raises). In-app: ESC menu, N.
 
 Library API (preferred): `cv.load()` → `CloudField`, `cv.Camera`, `cv.glimpse/witness/behold` return arrays. See `docs/architecture.md` for the design spec and README for examples.
 

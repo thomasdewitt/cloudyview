@@ -20,6 +20,8 @@ Controls:
 Pause menu:
     ESC / R     resume and recapture the mouse
     O           open the in-window .nc browser
+    N           add a nested (finer) field inside the current one, or
+                remove the one already loaded
     G           render current view in behold (then 1=min, 2=low,
                 3=medium, 4=high, 5=max/overnight; ESC backs out)
     S           performance settings (tier, render scale, temporal smoothing)
@@ -78,6 +80,7 @@ from .menu import (
     ACTION_OPEN_FILE,
     ACTION_OPEN_ICE_NO,
     ACTION_OPEN_ICE_YES,
+    ACTION_OPEN_NEST,
     ACTION_PAUSE,
     ACTION_QUIT,
     ACTION_RENDER_BEHOLD,
@@ -131,7 +134,8 @@ CONTROL_SUMMARY = (
     "soar --render-track), "
     "F fullscreen/window, F12 screenshot, F1/? controls reference, "
     "ESC pause menu; "
-    "paused: ESC/R resume, O open in-window file browser, G behold render, "
+    "paused: ESC/R resume, O open in-window file browser, "
+    "N add/remove a nested finer field, G behold render, "
     "S settings (tiers, render scale, FOV), C controls reference, "
     "P periodic domain toggle, "
     "F fullscreen/window, Q quit from the top-level menu"
@@ -325,6 +329,7 @@ class FlyThroughApp:
         self._pending_group_choices = []  # groups awaiting the user's pick
         self._pending_units = None        # user-supplied condensate units
         self._pending_units_vars = []     # variables that carry no units
+        self._pending_is_nest = False     # the open chain targets the nest
         # The browser opens at home, not next to whatever file the session was
         # launched with: data lives all over the disk and home is the one
         # place every tree is reachable from. It remembers the last directory
@@ -710,6 +715,32 @@ class FlyThroughApp:
         self._set_file_browser_dir(getattr(self, "_last_file_dir", Path.home()))
         self._set_menu_state(MENU_FILE_BROWSER_LIQUID)
 
+    def _start_open_nest(self) -> None:
+        """Pick a finer field to nest inside the one already loaded.
+
+        Deliberately the same browser/group/ice/units chain as opening the
+        main file — only the destination differs (see _start_loading_file),
+        so a nest gets the same group picker and unit prompts the outer
+        field does.
+        """
+        self._start_open_file()
+        self._pending_is_nest = True
+
+    def _remove_nest(self) -> None:
+        """Drop the nested level, keeping the outer field and the camera."""
+        if not self.renderer.nested:
+            return
+        previous = self.renderer
+        self.renderer = self._create_renderer(
+            previous.field, nest=None, device=previous.device, previous=previous
+        )
+        self._frame_index = 0
+        self.renderer.reset_accumulation()
+        self._last_quality_camera_signature = None
+        self._camera_moving_for_quality(self.camera())
+        self._set_paused(False)
+        self._flash_title("cloudyview nested field removed", seconds=3.0)
+
     def _set_file_browser_dir(self, directory: str | Path) -> None:
         try:
             path = Path(directory).expanduser().resolve()
@@ -728,6 +759,7 @@ class FlyThroughApp:
         self._pending_group_choices = []
         self._pending_units = None
         self._pending_units_vars = []
+        self._pending_is_nest = False
 
     def _select_browser_path(self, path: str | Path) -> None:
         selected = Path(path).expanduser().resolve()
@@ -829,6 +861,7 @@ class FlyThroughApp:
         ice_path = str(ice_path) if ice_path else None
         group = self._pending_group
         units = self._pending_units
+        is_nest = self._pending_is_nest
 
         if units is None:
             missing = self._condensate_vars_missing_units(
@@ -860,15 +893,26 @@ class FlyThroughApp:
                 stage_callback=stage,
             )
             report("building extinction")
-            renderer = self._create_renderer(
-                field, device=device, previous=previous
-            )
+            if is_nest:
+                # The outer field stays put; only the nest is new. Placement
+                # comes from the file's own coordinates, and a nest outside
+                # the outer domain raises here — reported as a load failure
+                # rather than clipped away.
+                renderer = self._create_renderer(
+                    previous.field, nest=field,
+                    device=device, previous=previous,
+                )
+            else:
+                renderer = self._create_renderer(
+                    field, device=device, previous=previous
+                )
             report("uploading texture")
             return {
                 "field": field,
                 "renderer": renderer,
                 "liquid_path": liquid_path,
                 "ice_path": ice_path,
+                "is_nest": is_nest,
             }
 
         self._reset_pending_open()
@@ -885,17 +929,25 @@ class FlyThroughApp:
         self.canvas.request_draw()
 
     def _install_loaded_renderer(self, result: dict) -> None:
+        is_nest = bool(result.get("is_nest"))
         self.renderer = result["renderer"]
-        self._reset_camera_to_default()
+        # A nest joins the scene you are already flying in — keep the
+        # viewpoint. A new outer field is a new scene, so reset to default.
+        if not is_nest:
+            self._reset_camera_to_default()
         self._frame_index = 0
         self.renderer.reset_accumulation()
         self._last_quality_camera_signature = None
         self._camera_moving_for_quality(self.camera())
-        print(f"Loaded {self.renderer.field}")
+        name = Path(result["liquid_path"]).name
+        if is_nest:
+            print(f"Loaded nest {self.renderer.nest}")
+            message = f"cloudyview nested {name}"
+        else:
+            print(f"Loaded {self.renderer.field}")
+            message = f"cloudyview loaded {name}"
         self._set_paused(False)
-        self._flash_title(
-            f"cloudyview loaded {Path(result['liquid_path']).name}", seconds=3.0
-        )
+        self._flash_title(message, seconds=3.0)
 
     def _show_error(self, message: str) -> None:
         self._error_message = str(message)
@@ -1315,6 +1367,11 @@ class FlyThroughApp:
                 self._try_toggle_fullscreen()
             elif action == ACTION_OPEN_FILE:
                 self._start_open_file()
+            elif action == ACTION_OPEN_NEST:
+                if self.renderer.nested:
+                    self._remove_nest()
+                else:
+                    self._start_open_nest()
             elif action == ACTION_OPEN_ICE_YES:
                 self._finish_open_file(use_ice=True)
             elif action == ACTION_OPEN_ICE_NO:
@@ -1621,6 +1678,12 @@ class FlyThroughApp:
         source = getattr(field, "source", None)
         return Path(source).name if source else "in-memory field"
 
+    def _nest_display_name(self) -> str:
+        renderer = getattr(self, "renderer", None)
+        nest = getattr(renderer, "nest", None)
+        source = getattr(nest, "source", None)
+        return Path(source).name if source else "in-memory nest"
+
     @staticmethod
     def _truncate_middle(text: str, max_chars: int = 32) -> str:
         if len(text) <= max_chars:
@@ -1639,6 +1702,12 @@ class FlyThroughApp:
                 self._set_paused(False)
             if theme.menu_button("Open file...", "O"):
                 self._start_open_file()
+            if self.renderer.nested:
+                nest_name = self._truncate_middle(self._nest_display_name(), 22)
+                if theme.menu_button(f"Remove nest ({nest_name})", "N"):
+                    self._remove_nest()
+            elif theme.menu_button("Add nested field...", "N"):
+                self._start_open_nest()
             behold_available = behold_rendering_available()
             if theme.menu_button(
                 "Render in behold...",
@@ -1674,6 +1743,18 @@ class FlyThroughApp:
                 self._truncate_middle(self._field_display_name(), 44),
                 size=13.0,
             )
+            if self.renderer.nested:
+                nest = self.renderer.nest
+                refine = self.renderer.dt_view / self.renderer.dt_view_nest
+                theme.mono_text(
+                    "+ nest "
+                    + self._truncate_middle(self._nest_display_name(), 30)
+                    + f"  {refine:.0f}x finer",
+                    size=13.0,
+                )
+                theme.caption(
+                    f"{nest.shape[0]}x{nest.shape[1]}x{nest.shape[2]} voxels"
+                )
             theme.hint_row((
                 ("WASD", "fly"),
                 ("mouse", "look"),
@@ -1739,6 +1820,7 @@ class FlyThroughApp:
             ("ESC", "pause menu / back"),
             ("F1 or ?", "this reference"),
             ("O (paused)", "open a NetCDF cloud field"),
+            ("N (paused)", "add / remove a nested finer field"),
             ("P (paused)", "periodic domain on/off"),
         )),
     )
@@ -1918,7 +2000,7 @@ class FlyThroughApp:
         theme = self._theme
         self._begin_imgui_window(imgui, "group_prompt", 460.0)
         try:
-            theme.header("open file", "Which group?")
+            theme.header(self._open_kicker(), "Which group?")
             theme.mono_text(self._pending_open_filename(), size=13.0)
             theme.caption(
                 "The root group holds no cloud field. These groups do:",
@@ -1940,7 +2022,7 @@ class FlyThroughApp:
         theme = self._theme
         self._begin_imgui_window(imgui, "units_prompt", 460.0)
         try:
-            theme.header("open file", "Which units?")
+            theme.header(self._open_kicker(), "Which units?")
             theme.mono_text(self._pending_open_filename(), size=13.0)
             theme.caption(
                 f"No units attribute on {', '.join(self._pending_units_vars)}. "
@@ -1966,7 +2048,7 @@ class FlyThroughApp:
         self._begin_imgui_window(imgui, "ice_prompt", 460.0)
         try:
             filename = self._pending_open_filename()
-            theme.header("open file", "Ice phase?")
+            theme.header(self._open_kicker(), "Ice phase?")
             theme.mono_text(filename, size=13.0)
             if self._pending_group:
                 theme.caption(f"group: {self._pending_group}")
@@ -1982,13 +2064,18 @@ class FlyThroughApp:
         finally:
             self._end_imgui_window(imgui)
 
+    def _open_kicker(self) -> str:
+        """Menu kicker for the shared open chain — file, or nested field."""
+        return "nested field" if self._pending_is_nest else "open file"
+
     def _draw_file_browser(self, imgui, state: str) -> None:
         theme = self._theme
-        title = (
-            "Open cloud file"
-            if state == MENU_FILE_BROWSER_LIQUID
-            else "Open ice file"
-        )
+        if state == MENU_FILE_BROWSER_ICE:
+            title = "Open ice file"
+        elif self._pending_is_nest:
+            title = "Open nested field"
+        else:
+            title = "Open cloud file"
         self._begin_imgui_window(imgui, "file_browser", 720.0, 560.0)
         try:
             current_dir = Path(getattr(self, "_file_browser_dir", Path.cwd()))

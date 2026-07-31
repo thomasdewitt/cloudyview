@@ -11,6 +11,7 @@ ACTION_RESUME = "resume"
 ACTION_QUIT = "quit"
 ACTION_TOGGLE_FULLSCREEN = "toggle_fullscreen"
 ACTION_OPEN_FILE = "open_file"
+ACTION_OPEN_NEST = "open_nest"
 ACTION_OPEN_ICE_YES = "open_ice_yes"
 ACTION_OPEN_ICE_NO = "open_ice_no"
 ACTION_SELECT_GROUP = "select_group"
@@ -110,6 +111,11 @@ def menu_transition(
             return MenuTransition(ACTION_CONTROLS_MENU, MENU_CONTROLS)
         if normalized == "o":
             return MenuTransition(ACTION_OPEN_FILE, MENU_FILE_BROWSER_LIQUID)
+        if normalized == "n":
+            # Add a nested field, or drop the one already loaded — the app
+            # picks based on whether its renderer has a nest, and the button
+            # label says which it will be.
+            return MenuTransition(ACTION_OPEN_NEST, MENU_FILE_BROWSER_LIQUID)
         if normalized == "g":
             return MenuTransition(ACTION_RENDER_MENU, MENU_RENDER_QUALITY)
         if normalized == "s":

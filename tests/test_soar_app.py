@@ -71,6 +71,7 @@ def make_event_app():
     app._pending_group_choices = []
     app._pending_units = None
     app._pending_units_vars = []
+    app._pending_is_nest = False
     app._file_browser_dir = Path.cwd()
     app._last_file_dir = Path.cwd()
     app._file_browser_error = None
@@ -352,6 +353,57 @@ def test_pause_open_and_render_keys_dispatch_to_submenus():
 
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "2"})
     assert app.render_calls == ["low"]
+
+
+def test_n_opens_the_nest_browser_when_no_nest_is_loaded():
+    from types import SimpleNamespace
+
+    app = make_event_app()
+    app._paused = True
+    app.renderer = SimpleNamespace(nested=False)
+    app.nest_calls = 0
+    app._start_open_nest = lambda: setattr(
+        app, "nest_calls", app.nest_calls + 1
+    )
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "N"})
+
+    assert app.nest_calls == 1
+
+
+def test_n_removes_the_nest_when_one_is_loaded():
+    """Same key, and the main-menu label says which it will do."""
+    from types import SimpleNamespace
+
+    app = make_event_app()
+    app._paused = True
+    app.renderer = SimpleNamespace(nested=True)
+    app.remove_calls = 0
+    app._remove_nest = lambda: setattr(
+        app, "remove_calls", app.remove_calls + 1
+    )
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "N"})
+
+    assert app.remove_calls == 1
+
+
+def test_open_nest_reuses_the_open_chain_with_the_nest_flag():
+    app = make_event_app()
+    app.open_calls = 0
+    real_start = FlyThroughApp._start_open_file
+
+    def start_open_file():
+        app.open_calls += 1
+        app._pending_is_nest = False   # what the real reset does
+
+    app._start_open_file = start_open_file
+    FlyThroughApp._start_open_nest(app)
+
+    assert app.open_calls == 1
+    assert app._pending_is_nest is True
+    assert FlyThroughApp._open_kicker(app) == "nested field"
+    assert real_start is not None
 
 
 def test_f12_opens_the_screenshot_prompt_during_active_flight():

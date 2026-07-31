@@ -305,6 +305,121 @@ def test_cli_exposes_nest_arguments():
     assert "--nest-ice" in out
 
 
+def _write_nc(path, field):
+    import xarray as xr
+
+    xr.Dataset(
+        {"QC": (("x", "y", "z"), field.lwc, {"units": "g/kg"})},
+        coords={
+            "x": ("x", np.asarray(field.x, np.float64), {"units": "m"}),
+            "y": ("y", np.asarray(field.y, np.float64), {"units": "m"}),
+            "z": ("z", np.asarray(field.z, np.float64), {"units": "m"}),
+        },
+    ).to_netcdf(path)
+    return str(path)
+
+
+def _loading_app(renderer):
+    """The slice of FlyThroughApp the open-file chain actually touches."""
+    from cloudyview.soar.app import FlyThroughApp
+
+    class Canvas:
+        def set_title(self, title):
+            pass
+
+        def request_draw(self, *args):
+            pass
+
+    app = object.__new__(FlyThroughApp)
+    app.canvas = Canvas()
+    app.renderer = renderer
+    app.periodic = renderer.periodic
+    app.volume_fp16 = renderer.volume_fp16
+    app._extinction_multiplier = 1.0
+    app._requested_tier = "high"
+    app._loading_job = None
+    app._behold_job = None
+    app._rendering = False
+    app._frame_index = 0
+    app._pending_open_path = None
+    app._pending_ice_path = None
+    app._pending_group = None
+    app._pending_group_choices = []
+    app._pending_units = None
+    app._pending_units_vars = []
+    app._pending_is_nest = False
+    app._file_browser_error = None
+    app._last_quality_camera_signature = None
+    app._set_menu_state = lambda state: None
+    app._set_paused = lambda paused: None
+    app._flash_title = lambda text, seconds=0.0: None
+    app._camera_moving_for_quality = lambda camera: False
+    app._reset_camera_to_default = lambda camera=None: None
+    app.camera = lambda: __import__("cloudyview").Camera()
+    return app
+
+
+def test_menu_open_chain_loads_a_nest_into_the_running_scene(tmp_path):
+    """The in-app path: pick a file with the nest flag set, get a nest.
+
+    This is the flow the ESC menu drives (N -> browser -> load); the CLI
+    only covers construction.
+    """
+    from cloudyview.soar.app import FlyThroughApp
+
+    nest_path = _write_nc(tmp_path / "nest.nc", _nest_field())
+    renderer = _renderer()
+    assert renderer.nested is False
+
+    app = _loading_app(renderer)
+    app._pending_is_nest = True
+    FlyThroughApp._start_loading_file(app, nest_path, None)
+
+    job = app._loading_job
+    assert job is not None
+    job.join(30.0)
+    snapshot = job.pump()
+    assert snapshot.error is None, snapshot.error
+    assert snapshot.result["is_nest"] is True
+
+    FlyThroughApp._install_loaded_renderer(app, snapshot.result)
+    assert app.renderer.nested is True
+    assert app.renderer.nest.shape == _nest_field().shape
+    # The outer field is untouched — a nest joins the scene, not replaces it.
+    assert app.renderer.field.shape == renderer.field.shape
+
+
+def test_menu_open_chain_reports_a_nest_that_does_not_fit(tmp_path):
+    from cloudyview.soar.app import FlyThroughApp
+
+    nest = _nest_field()
+    moved = type(nest)(lwc=nest.lwc, x=nest.x + 1e6, y=nest.y, z=nest.z)
+    path = _write_nc(tmp_path / "far.nc", moved)
+
+    app = _loading_app(_renderer())
+    app._pending_is_nest = True
+    FlyThroughApp._start_loading_file(app, path, None)
+    app._loading_job.join(30.0)
+    snapshot = app._loading_job.pump()
+
+    assert snapshot.error is not None
+    assert "must lie inside" in snapshot.error
+
+
+def test_remove_nest_keeps_the_outer_field(tmp_path):
+    from cloudyview.soar.app import FlyThroughApp
+
+    app = _loading_app(_renderer(nest=_nest_field()))
+    assert app.renderer.nested is True
+    outer_shape = app.renderer.field.shape
+
+    FlyThroughApp._remove_nest(app)
+
+    assert app.renderer.nested is False
+    assert app.renderer.nest is None
+    assert app.renderer.field.shape == outer_shape
+
+
 def test_reproduction_command_includes_the_nest():
     from types import SimpleNamespace
 
