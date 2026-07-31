@@ -25,6 +25,8 @@ ACTION_TOGGLE_PERIODIC = "toggle_periodic"
 ACTION_SETTINGS_MENU = "settings_menu"
 ACTION_SELECT_TIER = "select_tier"
 ACTION_CONTROLS_MENU = "controls_menu"
+ACTION_SUN_MENU = "sun_menu"
+ACTION_SELECT_SUN_PRESET = "select_sun_preset"
 ACTION_TRACK_SAVE = "track_save"
 ACTION_TRACK_DISCARD = "track_discard"
 ACTION_SCREENSHOT_WITH_OVERLAYS = "screenshot_with_overlays"
@@ -40,6 +42,7 @@ MENU_RENDER_QUALITY = "render_quality"
 MENU_SETTINGS = "settings"
 MENU_CONTROLS = "controls"
 MENU_TRACK_SAVE = "track_save"
+MENU_SUN = "sun"
 MENU_SCREENSHOT = "screenshot"
 MENU_ERROR = "error"
 
@@ -61,6 +64,24 @@ QUALITY_TIERS_BY_KEY = {
 # Group picker: number keys mirror the on-screen list order.
 GROUP_INDEX_BY_KEY = {str(n): n - 1 for n in range(1, 10)}
 
+# Time-of-day presets: (azimuth, elevation) in met degrees. Elevation is
+# what drives the look — the spectral sun/sky package fades with air mass —
+# so these are chosen by solar elevation, with an azimuth that puts the sun
+# where it belongs at that time of day in the northern hemisphere. Sunset
+# stays a hair above the horizon: a periodic domain's light march exits
+# through the domain top and needs the sun above it.
+SUN_PRESETS = {
+    "midday": (180.0, 75.0),
+    "golden hour": (255.0, 12.0),
+    "sunset": (270.0, 0.5),
+}
+SUN_PRESET_BY_KEY = {
+    str(index + 1): name for index, name in enumerate(SUN_PRESETS)
+}
+
+# The slider's lower bound on solar elevation, for the same reason.
+MIN_SUN_ELEVATION_DEG = 0.5
+
 CONDENSATE_UNITS_BY_KEY = {
     "g": "g/kg",
     "k": "kg/kg",
@@ -79,6 +100,7 @@ class MenuTransition:
     tier: str | None = None
     group_index: int | None = None
     units: str | None = None
+    sun_preset: str | None = None
 
 
 def menu_transition(
@@ -121,6 +143,8 @@ def menu_transition(
             return MenuTransition(ACTION_RENDER_MENU, MENU_RENDER_QUALITY)
         if normalized == "s":
             return MenuTransition(ACTION_SETTINGS_MENU, MENU_SETTINGS)
+        if normalized == "t":
+            return MenuTransition(ACTION_SUN_MENU, MENU_SUN)
         if normalized == "p":
             return MenuTransition(ACTION_TOGGLE_PERIODIC, MENU_MAIN)
         return MenuTransition(None, MENU_MAIN)
@@ -191,6 +215,16 @@ def menu_transition(
                 ACTION_SELECT_TIER, MENU_SETTINGS, tier=tier
             )
         return MenuTransition(None, MENU_SETTINGS)
+
+    if menu_state == MENU_SUN:
+        if key == "Escape":
+            return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
+        preset = SUN_PRESET_BY_KEY.get(normalized)
+        if preset is not None:
+            return MenuTransition(
+                ACTION_SELECT_SUN_PRESET, MENU_SUN, sun_preset=preset
+            )
+        return MenuTransition(None, MENU_SUN)
 
     if menu_state == MENU_CONTROLS:
         if key == "Escape":

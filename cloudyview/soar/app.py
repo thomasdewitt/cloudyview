@@ -24,6 +24,7 @@ Pause menu:
                 remove the one already loaded
     G           render current view in behold (then 1=min, 2=low,
                 3=medium, 4=high, 5=max/overnight; ESC backs out)
+    T           time of day: sunset/midday presets + zenith/azimuth sliders
     S           performance settings (tier, render scale, temporal smoothing)
     P           toggle the periodic (horizontally tiled) domain — on by
                 default; turn off for subvolume cutouts that are not
@@ -91,7 +92,9 @@ from .menu import (
     ACTION_SCREENSHOT_WITH_OVERLAYS,
     ACTION_TOGGLE_FULLSCREEN,
     ACTION_TOGGLE_PERIODIC,
+    ACTION_SELECT_SUN_PRESET,
     ACTION_SETTINGS_MENU,
+    ACTION_SUN_MENU,
     ACTION_SELECT_BOTH_GROUPS,
     ACTION_SELECT_GROUP,
     ACTION_SELECT_TIER,
@@ -100,6 +103,8 @@ from .menu import (
     ACTION_TRACK_SAVE,
     ACTION_TRACK_DISCARD,
     BEHOLD_QUALITIES_BY_KEY,
+    MIN_SUN_ELEVATION_DEG,
+    SUN_PRESETS,
     MENU_CONTROLS,
     MENU_SCREENSHOT,
     MENU_TRACK_SAVE,
@@ -112,6 +117,7 @@ from .menu import (
     MENU_OPEN_UNITS_PROMPT,
     MENU_RENDER_QUALITY,
     MENU_SETTINGS,
+    MENU_SUN,
     FileEntry,
     control_action_for_key as _control_action_for_key,
     list_netcdf_entries,
@@ -137,7 +143,8 @@ CONTROL_SUMMARY = (
     "ESC pause menu; "
     "paused: ESC/R resume, O open in-window file browser, "
     "N add/remove a nested finer field, G behold render, "
-    "S settings (tiers, render scale, FOV), C controls reference, "
+    "S settings (tiers, render scale, FOV), T time of day, "
+    "C controls reference, "
     "P periodic domain toggle, "
     "F fullscreen/window, Q quit from the top-level menu"
 )
@@ -250,6 +257,8 @@ class FlyThroughApp:
                  camera: Camera | None = None,
                  periodic: bool = True,
                  tier: str = "auto",
+                 sun_azimuth: float | None = None,
+                 sun_elevation: float | None = None,
                  volume_fp16: bool | None = None):
         # Import here so offscreen use never needs glfw / a display.
         from rendercanvas.glfw import RenderCanvas, loop
@@ -274,6 +283,11 @@ class FlyThroughApp:
         self._auto_benchmark_ms = None
         self.sun_azimuth = DEFAULT_SUN_AZIMUTH
         self.sun_elevation = DEFAULT_SUN_ELEVATION
+        if sun_azimuth is not None or sun_elevation is not None:
+            self._set_sun(
+                azimuth=sun_azimuth,
+                zenith=None if sun_elevation is None else 90.0 - sun_elevation,
+            )
 
         device = request_device()
         # The nest belongs to the field it was launched with. Opening another
@@ -567,6 +581,8 @@ class FlyThroughApp:
             return self._render_quality_title()
         if state == MENU_SETTINGS:
             return "cloudyview settings"
+        if state == MENU_SUN:
+            return "cloudyview time of day"
         if state == MENU_CONTROLS:
             return "cloudyview controls"
         if state == MENU_TRACK_SAVE:
@@ -728,6 +744,38 @@ class FlyThroughApp:
         """
         self._start_open_file()
         self._pending_is_nest = True
+
+    # ------------------------------------------------------------------
+    # Time of day
+    # ------------------------------------------------------------------
+
+    @property
+    def sun_zenith(self) -> float:
+        """Solar zenith angle in degrees — 0 overhead, 90 at the horizon."""
+        return 90.0 - self.sun_elevation
+
+    def _set_sun(self, azimuth: float | None = None,
+                 zenith: float | None = None) -> None:
+        """Move the sun. Elevation is floored just above the horizon.
+
+        A periodic domain's light march exits only through the domain top,
+        so write_uniforms refuses a sun at or below the horizon; clamping
+        here keeps the slider usable all the way to its end instead of
+        raising at the last degree.
+        """
+        if azimuth is not None:
+            self.sun_azimuth = float(azimuth) % 360.0
+        if zenith is not None:
+            elevation = 90.0 - float(zenith)
+            self.sun_elevation = max(MIN_SUN_ELEVATION_DEG, min(90.0, elevation))
+
+    def _select_sun_preset(self, name: str | None) -> None:
+        preset = SUN_PRESETS.get(name or "")
+        if preset is None:
+            return
+        azimuth, elevation = preset
+        self._set_sun(azimuth=azimuth, zenith=90.0 - elevation)
+        self._flash_title(f"cloudyview sun: {name}", seconds=2.0)
 
     def _remove_nest(self) -> None:
         """Drop the nested level, keeping the outer field and the camera."""
@@ -1111,6 +1159,10 @@ class FlyThroughApp:
             if nest.ice_source:
                 parts.extend(["--nest-ice", nest.ice_source])
         parts.extend(["--tier", self.renderer.quality_tier])
+        if self.sun_azimuth != DEFAULT_SUN_AZIMUTH:
+            parts.extend(["--sun-azimuth", self._fmt_num(self.sun_azimuth)])
+        if self.sun_elevation != DEFAULT_SUN_ELEVATION:
+            parts.extend(["--sun-elevation", self._fmt_num(self.sun_elevation)])
         if self.renderer.volume_fp16:
             parts.append("--fp16-volume")
         parts.extend([
@@ -1449,6 +1501,10 @@ class FlyThroughApp:
                     self._flash_title(BEHOLD_UNAVAILABLE_MESSAGE, seconds=4.0)
             elif action == ACTION_SETTINGS_MENU:
                 self._set_menu_state(transition.next_state or MENU_SETTINGS)
+            elif action == ACTION_SUN_MENU:
+                self._set_menu_state(transition.next_state or MENU_SUN)
+            elif action == ACTION_SELECT_SUN_PRESET:
+                self._select_sun_preset(transition.sun_preset)
             elif action == ACTION_SELECT_TIER:
                 self._select_quality_tier(transition.tier)
             elif action == ACTION_RENDER_BEHOLD:
@@ -1713,6 +1769,8 @@ class FlyThroughApp:
             self._draw_quality_menu(imgui)
         elif state == MENU_SETTINGS:
             self._draw_settings_menu(imgui)
+        elif state == MENU_SUN:
+            self._draw_sun_menu(imgui)
         elif state == MENU_CONTROLS:
             self._draw_controls_menu(imgui)
         elif state == MENU_TRACK_SAVE:
@@ -1777,6 +1835,11 @@ class FlyThroughApp:
                 self._set_menu_state(MENU_RENDER_QUALITY)
             if not behold_available:
                 theme.caption(BEHOLD_UNAVAILABLE_MESSAGE, wrapped=True)
+            if theme.menu_button(
+                "Time of day...", "T",
+                right_text=f"{self.sun_zenith:.0f}deg zenith",
+            ):
+                self._set_menu_state(MENU_SUN)
             if theme.menu_button("Settings...", "S"):
                 self._set_menu_state(MENU_SETTINGS)
             if theme.menu_button("Controls...", "C"):
@@ -1885,6 +1948,7 @@ class FlyThroughApp:
             ("F1 or ?", "this reference"),
             ("O (paused)", "open a NetCDF cloud field"),
             ("N (paused)", "add / remove a nested finer field"),
+            ("T (paused)", "time of day: sun presets and zenith slider"),
             ("P (paused)", "periodic domain on/off"),
         )),
     )
@@ -1962,6 +2026,80 @@ class FlyThroughApp:
             if theme.menu_button("Cancel", "ESC", height=38.0):
                 self._set_menu_state(MENU_MAIN)
                 self._set_paused(False)
+        finally:
+            self._end_imgui_window(imgui)
+
+    _SUN_DIRECTION_LABELS = (
+        (22.5, "N"), (67.5, "NE"), (112.5, "E"), (157.5, "SE"),
+        (202.5, "S"), (247.5, "SW"), (292.5, "W"), (337.5, "NW"),
+    )
+
+    def _sun_compass_label(self) -> str:
+        azimuth = self.sun_azimuth % 360.0
+        for edge, label in self._SUN_DIRECTION_LABELS:
+            if azimuth < edge:
+                return label
+        return "N"
+
+    def _draw_sun_menu(self, imgui) -> None:
+        theme = self._theme
+        self._begin_imgui_window(imgui, "sun_menu", 520.0)
+        try:
+            theme.header("time of day", "Sun")
+            for index, name in enumerate(SUN_PRESETS):
+                azimuth, elevation = SUN_PRESETS[name]
+                selected = (
+                    abs(self.sun_elevation - elevation) < 0.05
+                    and abs((self.sun_azimuth - azimuth) % 360.0) < 0.05
+                )
+                if theme.menu_button(
+                    name.capitalize(), str(index + 1),
+                    right_text="selected" if selected else None,
+                ):
+                    self._select_sun_preset(name)
+
+            imgui.dummy((1.0, 8.0))
+            theme.caption("Solar zenith angle")
+            changed, zenith = imgui.slider_float(
+                "##sun_zenith",
+                self.sun_zenith,
+                0.0,
+                90.0 - MIN_SUN_ELEVATION_DEG,
+                "%.1f deg",
+            )
+            if changed:
+                self._set_sun(zenith=zenith)
+
+            # Azimuth matters as much as zenith for the look at low sun (the
+            # warm horizon wedge is azimuth-dependent), and a zenith slider
+            # with no way to move the sun round the sky is half a control.
+            theme.caption("Solar azimuth")
+            changed, azimuth = imgui.slider_float(
+                "##sun_azimuth",
+                self.sun_azimuth,
+                0.0,
+                360.0,
+                "%.0f deg",
+            )
+            if changed:
+                self._set_sun(azimuth=azimuth)
+
+            theme.body_text(
+                f"zenith {self.sun_zenith:.1f} deg  ·  "
+                f"elevation {self.sun_elevation:.1f} deg  ·  "
+                f"azimuth {self.sun_azimuth:.0f} deg "
+                f"({self._sun_compass_label()})"
+            )
+            if self.sun_elevation <= MIN_SUN_ELEVATION_DEG + 1e-6:
+                theme.caption(
+                    "At the horizon. The sun cannot go below it while the "
+                    "domain is periodic — the light march exits through the "
+                    "domain top.",
+                    wrapped=True,
+                )
+            imgui.dummy((1.0, 4.0))
+            if theme.menu_button("Back", "ESC", height=38.0):
+                self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
 

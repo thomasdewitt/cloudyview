@@ -159,6 +159,12 @@ def main(argv=None):
                         help="initial camera elevation in degrees")
     parser.add_argument("--fov", type=float,
                         help="initial vertical field of view in degrees")
+    parser.add_argument("--sun-azimuth", type=float,
+                        help="solar azimuth in degrees (met bearing, "
+                             "clockwise from north); adjustable in-app with T")
+    parser.add_argument("--sun-elevation", type=float,
+                        help="solar elevation in degrees above the horizon "
+                             "(zenith angle = 90 - elevation)")
     parser.add_argument(
         "--render-track",
         metavar="TRACK_JSON",
@@ -283,6 +289,8 @@ def main(argv=None):
             camera=camera,
             periodic=not args.no_periodic,
             tier=args.tier,
+            sun_azimuth=args.sun_azimuth,
+            sun_elevation=args.sun_elevation,
             volume_fp16=(
                 True if args.fp16_volume
                 else False if args.fp32_volume

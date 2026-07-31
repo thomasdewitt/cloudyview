@@ -540,6 +540,8 @@ def test_reproduction_command_includes_the_nest():
     import cloudyview as cv
     from cloudyview.soar.app import FlyThroughApp
 
+    from cloudyview.soar.app import DEFAULT_SUN_AZIMUTH, DEFAULT_SUN_ELEVATION
+
     app = object.__new__(FlyThroughApp)
     app.renderer = SimpleNamespace(
         field=SimpleNamespace(source="outer.nc", ice_source=None),
@@ -547,5 +549,7 @@ def test_reproduction_command_includes_the_nest():
         quality_tier="high",
         volume_fp16=False,
     )
+    app.sun_azimuth = DEFAULT_SUN_AZIMUTH
+    app.sun_elevation = DEFAULT_SUN_ELEVATION
     command = FlyThroughApp._soar_reproduction_command(app, cv.Camera())
     assert "--nest fine.nc" in command

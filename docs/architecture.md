@@ -177,6 +177,16 @@ is the same trade witness makes; the occupancy grid above is the fix.
   and reproduction metadata embedded in PNG text chunks. The choice is per
   shot rather than the live B/M toggles — the frame worth keeping and the
   frame worth flying with are rarely the same one.
+- Time-of-day panel (**T** in the ESC menu): midday / golden hour / sunset
+  presets plus solar zenith and azimuth sliders. The sun drives the whole
+  spectral package (beam colour, sky field, low-sun warm wedge, ocean
+  glint), so this is a look control rather than a convenience. Elevation is
+  floored at 0.5 deg: a periodic domain's light march exits only through the
+  domain top, so `write_uniforms` refuses a sun at or below the horizon, and
+  clamping at the control keeps the slider usable to its end instead of
+  raising at the last degree. `--sun-azimuth` / `--sun-elevation` set it at
+  launch, and a moved sun is written into the screenshot reproduction
+  command.
 - ESC menu as control center: open a new `.nc` (with split ice-file prompt),
   render the current `app.camera()` in `behold`, toggle fullscreen, resume, or
   quit. Behold runs in the foreground because the Mitsuba GPU backend needs the
