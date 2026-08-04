@@ -33,7 +33,10 @@ from cloudyview.soar.app import (
     MENU_RENDER_QUALITY,
     MENU_SCREENSHOT,
     MENU_QUALITY,
+    APP_LIGHT_MARCH_LOD_DEGREES,
+    APP_VIEW_STEP_LOD_DEGREES,
     OCEAN_FLOOR_MARGIN_M,
+    STILL_ACCUMULATE_FRAMES,
     _clamp_position_above_ocean,
     _control_action_for_key,
     _menu_transition,
@@ -123,6 +126,98 @@ def make_event_app():
     app._save_screenshot = save_screenshot
     app._select_quality_tier = lambda tier: app.tier_calls.append(tier)
     return app
+
+
+def _screenshot_app(tmp_path):
+    """The slice of the app the real _save_screenshot touches."""
+    from cloudyview.camera import Camera
+    from cloudyview.cloudfield import CloudField
+    from cloudyview.soar.app import CB_DEFAULT_STRENGTHS
+
+    app = make_event_app()
+    field = CloudField(
+        lwc=np.zeros((2, 2, 2), dtype=np.float32),
+        x=np.arange(2), y=np.arange(2), z=np.arange(2),
+        source=str(tmp_path / "cloud.nc"),
+    )
+    app.cb_enabled = [True] * len(CB_DEFAULT_STRENGTHS)
+    app.tone_map_gamma = 2.66
+    app.sun_azimuth = 235.0
+    app.sun_elevation = 25.0
+
+    class Renderer:
+        quality_tier = "high"
+        render_scale = 1.0
+        step_factor = 2.0
+        max_light_steps = 512
+        volume_fp16 = True
+        nest = None
+        _bird = None
+
+        def render(self, camera, **kwargs):
+            app.render_kwargs = kwargs
+            return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    Renderer.field = field
+    app.renderer = Renderer()
+    app.camera = lambda: Camera()
+    app.capture_size = lambda: (640, 480)
+    app._timestamped_png_path = lambda stem: tmp_path / f"{stem}.png"
+    app._metadata = lambda camera, **kwargs: dict(kwargs)
+    app._write_png_with_metadata = lambda image, path, metadata: setattr(
+        app, "written_metadata", metadata
+    )
+    app._show_preview = lambda image, path: None
+    app._flash_title = lambda text, seconds=0.0: None
+    return app
+
+
+def test_a_saved_still_uses_the_apps_own_lod_not_the_librarys(tmp_path):
+    """A still is the live view held still, so it marches the same way.
+
+    render()'s defaults are 0.0 (exact legacy). Letting stills fall through
+    to them darkened and hardened the far field, losing the aerial haze the
+    app actually flies with.
+    """
+    app = _screenshot_app(tmp_path)
+
+    FlyThroughApp._save_screenshot(app, overlays=False)
+
+    assert app.render_kwargs["light_march_lod_degrees"] == APP_LIGHT_MARCH_LOD_DEGREES
+    assert app.render_kwargs["view_step_lod_degrees"] == APP_VIEW_STEP_LOD_DEGREES
+
+
+def test_a_saved_still_accumulates_instead_of_grabbing_one_frame(tmp_path):
+    """The parked live view converges; a one-frame still came out grainy."""
+    app = _screenshot_app(tmp_path)
+
+    FlyThroughApp._save_screenshot(app, overlays=False)
+
+    assert app.render_kwargs["accumulate_frames"] == STILL_ACCUMULATE_FRAMES
+    assert STILL_ACCUMULATE_FRAMES > 1
+
+
+def test_a_saved_still_keeps_the_look_toggles_the_user_chose(tmp_path):
+    """LOD is a frame-budget concession; the cloud-brightness gates are not."""
+    app = _screenshot_app(tmp_path)
+    app.cb_enabled[2] = False        # ambient occlusion off
+
+    FlyThroughApp._save_screenshot(app, overlays=False)
+
+    assert app.render_kwargs["ambient_occlusion_strength"] == 0.0
+    assert app.render_kwargs["gradient_shading_strength"] > 0.0
+
+
+def test_still_metadata_records_what_the_still_was_rendered_with(tmp_path):
+    """Otherwise the embedded command does not reproduce the image."""
+    app = _screenshot_app(tmp_path)
+
+    FlyThroughApp._save_screenshot(app, overlays=False)
+
+    options = app.written_metadata["render_options"]
+    assert options["light_march_lod_degrees"] == APP_LIGHT_MARCH_LOD_DEGREES
+    assert options["view_step_lod_degrees"] == APP_VIEW_STEP_LOD_DEGREES
+    assert "ambient_occlusion_strength" in options
 
 
 def test_control_action_for_key_active_and_paused():

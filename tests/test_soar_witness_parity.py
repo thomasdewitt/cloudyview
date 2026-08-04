@@ -442,6 +442,8 @@ def render_witness_soar_pair(
     realism: dict[str, float] | None = None,
 ) -> ParityRender:
     """Render one scene through CPU witness and soar with matched controls."""
+    from cloudyview.soar.engine import TONE_MAP_GAMMA_WITNESS
+
     if realism is None:
         realism = _realism_off()
     witness = render_witness_with_fif(
@@ -460,6 +462,12 @@ def render_witness_soar_pair(
         sun_elevation=sun_elevation,
         exposure=4.0,
         jitter=False,
+        # Parity is about the arithmetic matching witness, not about the
+        # look the app ships. witness tone-maps at gamma 1.4; soar's
+        # default is a deliberate departure (engine.DEFAULT_TONE_MAP_GAMMA),
+        # so pin the reference value here or every pixel differs by the
+        # difference between two looks rather than two implementations.
+        tone_map_gamma=TONE_MAP_GAMMA_WITNESS,
         **realism,
     )
     soar = soar_u8.astype(np.float64) / 255.0

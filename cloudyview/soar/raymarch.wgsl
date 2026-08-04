@@ -150,7 +150,10 @@ const LIGHT_TAU_CUTOFF: f32 = 80.0; // witness.py:363
 const EMPTY_DTAU_CUTOFF: f32 = 1e-5; // witness.py:701
 const DENSE_SIGMA_CUTOFF: f32 = 0.01; // witness.py:688
 const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
-const GAMMA: f32 = 1.4;             // witness tone_map gamma
+// Tone-map gamma is per-frame (u.periodic.w), not a const — see tone_map.
+// witness's own value is 1.4; the app ships a higher default (engine
+// DEFAULT_TONE_MAP_GAMMA) because 1.4 alone is not the look soar has
+// actually been flown with.
 const ISO_PHASE: f32 = 0.07957747154594767; // 1 / (4*pi)
 const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
 
@@ -860,10 +863,14 @@ fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
 // with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
-fn tone_map(hdr: vec3<f32>, exposure: f32) -> vec3<f32> {
+// Gamma arrives per-frame (u.periodic.w) rather than as the GAMMA const:
+// it is the one knob that decides how much the far field lifts, and it is
+// the only place the encode may happen — the swapchain must be a plain
+// unorm format, never *-srgb, or this runs a second time.
+fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
     let mapped = exposed / (1.0 + exposed);
-    return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / GAMMA));
+    return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / gamma));
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,5 +1208,5 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         );
         col = col + transmittance * sky;
     }
-    return vec4<f32>(tone_map(col, exposure), 1.0);
+    return vec4<f32>(tone_map(col, exposure, u.periodic.w), 1.0);
 }

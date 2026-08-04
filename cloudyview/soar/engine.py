@@ -114,6 +114,23 @@ DEFAULT_MAX_LIGHT_STEPS = 512  # keep in sync with both WGSL modules
 # temp/perf-2026-07-17: light march ~4x, view step ~5x on GATE hot case.
 DEFAULT_LIGHT_MARCH_LOD_DEGREES = 0.0
 DEFAULT_VIEW_STEP_LOD_DEGREES = 0.0
+
+# Tone-map gamma (raymarch.wgsl tone_map). witness uses 1.4, and soar's
+# offscreen path matched it — but the window has always presented through
+# an *-srgb swapchain, which encoded a second time, so every hour flown in
+# this app was at an effective gamma near 1.4 * 2.2 ~ 3.1. That accidental
+# lift is most of what the flown look is: it opens the far field into
+# aerial haze that a bare 1.4 renders dark and hard.
+#
+# Neither end is right. 1.4 is the reference but not the look; 3.1 is the
+# look but washes the near field out. The default sits ~75% of the way
+# from the reference toward what soar has actually looked like (Thomas,
+# 2026-08-04), and it is now the ONLY place the encode happens — the
+# swapchain is forced to a plain unorm format (app._present_format).
+TONE_MAP_GAMMA_WITNESS = 1.4
+TONE_MAP_GAMMA_AS_FLOWN = 3.08     # 1.4 x 2.2, the old double encode
+DEFAULT_TONE_MAP_GAMMA = 2.66      # witness + 0.75 * (as_flown - witness)
+TONE_MAP_GAMMA_LIMITS = (1.0, 4.0)
 # Auto fp16-volume threshold: at/above this voxel count an fp32 volume
 # costs >= 1 GB VRAM and the fp16 texture is measured 1.46x faster on the
 # GATE gigaLES (bandwidth-bound marching), with ~1e-3 relative sampling
@@ -1382,6 +1399,7 @@ class InteractiveRenderer:
         cone_stencil_theta_deg: float = DEFAULT_CONE_STENCIL_THETA_DEG,
         light_march_lod_degrees: float = DEFAULT_LIGHT_MARCH_LOD_DEGREES,
         view_step_lod_degrees: float = DEFAULT_VIEW_STEP_LOD_DEGREES,
+        tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
         frame_index: int = 0,
         subpixel: bool = False,
         jitter_scale: float = 1.0,
@@ -1544,11 +1562,19 @@ class InteractiveRenderer:
                 raise ValueError(
                     f"{name} must be in [0, 45) degrees; got {value!r}."
                 )
+        tone_map_gamma = _validate_finite_float(
+            "tone_map_gamma", tone_map_gamma
+        )
+        if not TONE_MAP_GAMMA_LIMITS[0] <= tone_map_gamma <= TONE_MAP_GAMMA_LIMITS[1]:
+            lo, hi = TONE_MAP_GAMMA_LIMITS
+            raise ValueError(
+                f"tone_map_gamma must be in [{lo}, {hi}]; got {tone_map_gamma!r}."
+            )
         u[20] = [
             1.0 if self.periodic else 0.0,
             float(np.tan(np.radians(light_march_lod_degrees))),
             float(np.tan(np.radians(view_step_lod_degrees))),
-            0.0,
+            tone_map_gamma,
         ]
         # Rows 21-22: the nest's AABB and its own march step sizes. Read only
         # by the NESTED specialization; zero-filled otherwise (the shader's

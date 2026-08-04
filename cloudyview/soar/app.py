@@ -54,6 +54,10 @@ from ..render_metadata import build_render_metadata, embed_metadata
 from .engine import (
     APP_LIGHT_MARCH_LOD_DEGREES,
     APP_VIEW_STEP_LOD_DEGREES,
+    DEFAULT_TONE_MAP_GAMMA,
+    TONE_MAP_GAMMA_AS_FLOWN,
+    TONE_MAP_GAMMA_LIMITS,
+    TONE_MAP_GAMMA_WITNESS,
     DEFAULT_AMBIENT_STRENGTH,
     DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
     DEFAULT_BOUNCE_DEPTH_ATTENUATION,
@@ -189,6 +193,34 @@ CB_DEFAULT_STRENGTHS = (
     DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
     DEFAULT_BOUNCE_DEPTH_ATTENUATION,
 )
+
+# A saved still is the view you were looking at, held still — so it is
+# rendered with the app's own distance LOD (APP_*_LOD_DEGREES), not the
+# library's exact-legacy 0.0. Stills used to get 0.0 by accident, through
+# render()'s defaults, and the difference is not subtle: the coarser light
+# march the app flies with lets more light through the far field, giving
+# the aerial haze that makes flight look right. Turning it off darkened
+# and hardened every distant cloud, which is not what the app looks like.
+#
+# What a still does get is time: the live view converges by accumulating
+# jittered frames while parked, and a one-frame still cannot. Rendering
+# this many gets the same converged image instead of a grainy one.
+STILL_ACCUMULATE_FRAMES = 64
+
+def _present_format(preferred: str) -> str:
+    """The swapchain format, with sRGB encoding refused.
+
+    raymarch.wgsl's tone_map already gamma-encodes what it returns, so an
+    ``*-srgb`` swapchain encodes a second time and the window stops
+    matching the offscreen path, witness, and the browser build — which
+    is exactly what happened, unnoticed, for as long as the app has had a
+    window (found 2026-08-04, comparing a screenshot against the live
+    view). Gamma belongs in one place: engine.DEFAULT_TONE_MAP_GAMMA.
+    """
+    if not preferred.endswith("-srgb"):
+        return preferred
+    return preferred[: -len("-srgb")]
+
 
 _PAUSE_OVERLAY_SHADER = """
 @vertex
@@ -340,7 +372,9 @@ class FlyThroughApp:
         )
         self._ensure_resizable()
         self.context = self.canvas.get_context("wgpu")
-        self.format = self.context.get_preferred_format(device.adapter)
+        self.format = _present_format(
+            self.context.get_preferred_format(device.adapter)
+        )
         self.context.configure(device=device, format=self.format)
 
         self.speed = DEFAULT_SPEED
@@ -350,6 +384,10 @@ class FlyThroughApp:
         # for the metadata/uniform plumbing.
         self.jitter = True
         self.cb_enabled = [True, True, True, True]
+        # How much the far field lifts into haze. See engine's
+        # DEFAULT_TONE_MAP_GAMMA for why the default is neither witness's
+        # 1.4 nor the 3.08 this app spent its life accidentally rendering.
+        self.tone_map_gamma = DEFAULT_TONE_MAP_GAMMA
         self.distance_lod = True
         self._track_recording = False   # R toggles (see soar/track.py)
         self._track_samples: list[list[float]] = []
@@ -530,6 +568,22 @@ class FlyThroughApp:
         self._tier_source = "user"
         self.canvas.request_draw()
 
+    def _set_tone_map_gamma(self, value: float) -> None:
+        """Set the tone-map gamma and drop the accumulated frames.
+
+        Gamma is scene identity in the uniform block, so an accumulation
+        built at the old value would blend two different looks together.
+        """
+        value = float(value)
+        lo, hi = TONE_MAP_GAMMA_LIMITS
+        if not lo <= value <= hi:
+            raise ValueError(
+                f"tone-map gamma must be in [{lo}, {hi}]; got {value}."
+            )
+        self.tone_map_gamma = value
+        self.renderer.reset_accumulation()
+        self.canvas.request_draw()
+
     def _set_motion_blend_alpha(self, value: float) -> None:
         value = float(value)
         if not 0.3 <= value <= 0.9:
@@ -652,6 +706,7 @@ class FlyThroughApp:
             for enabled, value in zip(self.cb_enabled, CB_DEFAULT_STRENGTHS)
         ]
         return {
+            "tone_map_gamma": self.tone_map_gamma,
             "gradient_shading_strength": strengths[0],
             "deep_shadow_ms_suppression": strengths[1],
             "ambient_occlusion_strength": strengths[2],
@@ -1466,6 +1521,10 @@ class FlyThroughApp:
                 )
                 for name in bird_attrs
             }
+        # Exactly what the live view is showing — same LOD, same look gates
+        # (see STILL_ACCUMULATE_FRAMES). Passing these was the whole fix:
+        # render()'s own defaults are the library's, not the app's.
+        look = self._cb_strength_kwargs()
         try:
             image = renderer.render(
                 camera,
@@ -1476,6 +1535,8 @@ class FlyThroughApp:
                 sun_azimuth=self.sun_azimuth,
                 sun_elevation=self.sun_elevation,
                 frame_index=self._frame_index,
+                accumulate_frames=STILL_ACCUMULATE_FRAMES,
+                **look,
             )
         finally:
             (
@@ -1503,6 +1564,9 @@ class FlyThroughApp:
                 "step_factor": renderer.step_factor,
                 "max_light_steps": renderer.max_light_steps,
                 "volume_fp16": renderer.volume_fp16,
+                # Without these the recorded command does not reproduce the
+                # recorded image: the LOD differs from the live view's.
+                **look,
             },
         )
         self._write_png_with_metadata(image, path, metadata)
@@ -2406,6 +2470,23 @@ class FlyThroughApp:
             )
             if changed:
                 self._set_motion_blend_alpha(alpha)
+
+            theme.caption("Tone-map gamma")
+            changed, gamma = imgui.slider_float(
+                "##tone_map_gamma",
+                self.tone_map_gamma,
+                *TONE_MAP_GAMMA_LIMITS,
+                "%.2f",
+            )
+            if changed:
+                self._set_tone_map_gamma(gamma)
+            theme.caption(
+                f"{TONE_MAP_GAMMA_WITNESS:.1f} is witness's own value — "
+                "darker, harder far field. Higher lifts distance into haze; "
+                f"{TONE_MAP_GAMMA_AS_FLOWN:.2f} is what the window used to "
+                "render by encoding gamma twice.",
+                wrapped=True,
+            )
 
             imgui.dummy((1.0, 6.0))
             fp_label = (
