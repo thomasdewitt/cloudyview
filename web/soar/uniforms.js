@@ -1,0 +1,237 @@
+// The uniform block: 23 rows of 4 floats, 368 bytes, rebuilt every frame.
+//
+// A direct port of InteractiveRenderer.write_uniforms. Row order and meaning
+// are fixed by raymarch.wgsl, which the browser shares verbatim with the
+// desktop — so this file is the whole of the look that lives outside the
+// shader. tests/test_web_uniform_parity.py diffs it against Python.
+
+"use strict";
+
+import * as K from "./constants.js";
+import {
+  directionFromAzimuthElevation, spectralLightingColors,
+  effectiveLightTransferSplit,
+} from "./spectral.js";
+import { cameraBasis } from "./camera.js";
+
+const DEG = Math.PI / 180.0;
+
+/** Scaled march resolution. Round-half-up, matching numpy's floor(x + 0.5). */
+export function renderTargetSize([w, h], renderScale) {
+  const scale = Number(renderScale);
+  if (!Number.isFinite(scale)) {
+    throw new Error(`render_scale must be finite; got ${renderScale}.`);
+  }
+  if (!(scale >= K.MIN_RENDER_SCALE && scale <= K.MAX_RENDER_SCALE)) {
+    throw new Error(
+      `render_scale must be in [${K.MIN_RENDER_SCALE}, ` +
+      `${K.MAX_RENDER_SCALE}]; got ${scale}.`);
+  }
+  if (w < 1 || h < 1) throw new Error(`size must be positive; got ${w}x${h}.`);
+  return [
+    Math.max(1, Math.floor(w * scale + 0.5)),
+    Math.max(1, Math.floor(h * scale + 0.5)),
+  ];
+}
+
+function unitInterval(name, value) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) throw new Error(`${name} must be finite; got ${value}.`);
+  if (!(v >= 0.0 && v <= 1.0)) {
+    throw new Error(`${name} must be in [0, 1]; got ${value}.`);
+  }
+  return v;
+}
+
+/**
+ * Pack one frame. `state` carries the scene (field bounds, step sizes, ocean),
+ * `view` the camera and per-frame choices. Returns the Float32Array so the
+ * caller can upload and key off the same bytes numpy would have produced.
+ */
+export function packUniforms(state, view) {
+  const {
+    bmin, bmax, dtView, dtLight, periodic,
+    oceanZ, oceanReflectance, oceanFifDx, oceanTileExtent, oceanEnabled,
+    oceanMaxLod,
+    nested = false, nestBmin, nestBmax, dtViewNest, dtLightNest,
+  } = state;
+
+  const {
+    camera, outputSize, renderSize,
+    jitter = true,
+    sunAzimuth = K.DEFAULT_SUN_AZIMUTH,
+    sunElevation = K.DEFAULT_SUN_ELEVATION,
+    exposure = K.DEFAULT_EXPOSURE,
+    gHg = K.DEFAULT_G_HG,
+    ambientStrength = K.DEFAULT_AMBIENT_STRENGTH,
+    gradientShadingStrength = K.DEFAULT_GRADIENT_SHADING_STRENGTH,
+    gradientCoarseWeight = K.DEFAULT_GRADIENT_COARSE_WEIGHT,
+    gradientCoarseRadiusM = K.DEFAULT_GRADIENT_COARSE_RADIUS_M,
+    deepShadowMsSuppression = K.DEFAULT_DEEP_SHADOW_MS_SUPPRESSION,
+    ambientOcclusionStrength = K.DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
+    ambientOcclusionFloor = K.DEFAULT_AMBIENT_OCCLUSION_FLOOR,
+    bounceDepthAttenuation = K.DEFAULT_BOUNCE_DEPTH_ATTENUATION,
+    spectralLightingStrength = K.SPECTRAL_LIGHTING_STRENGTH,
+    lowSunSkyFieldStrength = K.LOW_SUN_SKY_FIELD_STRENGTH,
+    lightTransferSplitStrength = K.LIGHT_TRANSFER_SPLIT_STRENGTH,
+    aerialPerspectiveStrength = K.AERIAL_PERSPECTIVE_STRENGTH,
+    oceanRealism = K.OCEAN_REALISM,
+    oceanMipBias = K.OCEAN_MIP_BIAS,
+    oceanGlintStrength = K.OCEAN_GLINT_STRENGTH,
+    oceanGlintRoughness = K.OCEAN_GLINT_ROUGHNESS,
+    oceanGlintRoughnessPerLod = K.OCEAN_GLINT_ROUGHNESS_PER_LOD,
+    oceanHazeExtinctionPerKm = K.OCEAN_HAZE_EXTINCTION_PER_KM,
+    oceanSkyShadowFloor = K.OCEAN_SKY_SHADOW_FLOOR,
+    coneStencilThetaDeg = K.CONE_STENCIL_THETA_DEG,
+    lightMarchLodDegrees = K.APP_LIGHT_MARCH_LOD_DEGREES,
+    viewStepLodDegrees = K.APP_VIEW_STEP_LOD_DEGREES,
+    toneMapGamma = K.DEFAULT_TONE_MAP_GAMMA,
+    frameIndex = 0,
+    subpixel = false,
+    jitterScale = 1.0,
+  } = view;
+
+  const [outputW, outputH] = outputSize;
+  const [w, h] = renderSize;
+
+  unitInterval("jitter_scale", jitterScale);
+  unitInterval("spectral_lighting_strength", spectralLightingStrength);
+  unitInterval("low_sun_sky_field_strength", lowSunSkyFieldStrength);
+  unitInterval("ocean_realism", oceanRealism);
+  unitInterval("ocean_sky_shadow_floor", oceanSkyShadowFloor);
+  if (!(aerialPerspectiveStrength >= 0.0)) {
+    throw new Error(
+      `aerial_perspective_strength must be >= 0; got ${aerialPerspectiveStrength}.`);
+  }
+  if (!(coneStencilThetaDeg >= 0.0 && coneStencilThetaDeg < 90.0)) {
+    throw new Error(
+      `cone_stencil_theta_deg must be in [0, 90); got ${coneStencilThetaDeg}.`);
+  }
+  for (const [name, value] of [
+    ["light_march_lod_degrees", lightMarchLodDegrees],
+    ["view_step_lod_degrees", viewStepLodDegrees],
+  ]) {
+    if (!(value >= 0.0 && value < 45.0)) {
+      throw new Error(`${name} must be in [0, 45) degrees; got ${value}.`);
+    }
+  }
+  const [gLo, gHi] = K.TONE_MAP_GAMMA_LIMITS;
+  if (!(toneMapGamma >= gLo && toneMapGamma <= gHi)) {
+    throw new Error(
+      `tone_map_gamma must be in [${gLo}, ${gHi}]; got ${toneMapGamma}.`);
+  }
+  // A periodic light march exits only through the domain top. With the sun at
+  // or below the horizon there is no exit, so this is an error rather than a
+  // clamp — the picture would be wrong in a way that looks plausible.
+  if (periodic && sunElevation <= 0.0) {
+    throw new Error(
+      "Periodic domains require the sun above the horizon (the light march " +
+      `exits only through the domain top); got sun_elevation=${sunElevation}. ` +
+      "Turn periodic off for a below-horizon sun.");
+  }
+
+  const origin = camera.position;
+  const [forward, right, up] = cameraBasis(camera.azimuth, camera.elevation);
+  const sun = directionFromAzimuthElevation(sunAzimuth, sunElevation);
+  const tanHalfFov = Math.tan(camera.fov * DEG * 0.5);
+
+  const spec = spectralLightingColors(sun, K.SUN_COLOR, spectralLightingStrength);
+  const lightTransferEff = effectiveLightTransferSplit(
+    lightTransferSplitStrength, sunElevation);
+
+  const u = new Float32Array(K.UNIFORM_ROWS * 4);
+  const row = (i, a, b, c, d) => {
+    u[i * 4] = a; u[i * 4 + 1] = b; u[i * 4 + 2] = c; u[i * 4 + 3] = d;
+  };
+
+  row(0, origin[0], origin[1], origin[2], tanHalfFov);
+  row(1, forward[0], forward[1], forward[2], outputW / outputH);
+  row(2, right[0], right[1], right[2], exposure);
+  row(3, up[0], up[1], up[2], jitter ? 1.0 : 0.0);
+  row(4, sun[0], sun[1], sun[2], frameIndex);
+  row(5, bmin[0], bmin[1], bmin[2], dtView);
+  row(6, bmax[0], bmax[1], bmax[2], dtLight);
+  row(7, w, h, gHg, ambientStrength);
+  row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
+  row(9, oceanFifDx, oceanTileExtent, oceanEnabled ? 1.0 : 0.0, oceanMaxLod);
+  // Row 10 is sampling flags only — deliberately excluded from scene identity.
+  row(10, subpixel ? 1.0 : 0.0, jitterScale, 0.0, 0.0);
+  row(11, gradientShadingStrength, deepShadowMsSuppression,
+       ambientOcclusionStrength, bounceDepthAttenuation);
+  row(12, gradientCoarseWeight, gradientCoarseRadiusM, ambientOcclusionFloor,
+       Math.tan(coneStencilThetaDeg * DEG));
+  row(13, spec.cloudSun[0], spec.cloudSun[1], spec.cloudSun[2],
+       lowSunSkyFieldStrength);
+  row(14, spec.ambient[0], spec.ambient[1], spec.ambient[2], lightTransferEff);
+  row(15, spec.horizon[0], spec.horizon[1], spec.horizon[2],
+       aerialPerspectiveStrength);
+  row(16, spec.bloom[0], spec.bloom[1], spec.bloom[2],
+       K.AERIAL_BETA_PER_KM * 1e-3);           // w: beta0 in m^-1
+  row(17, spec.disc[0], spec.disc[1], spec.disc[2], K.AERIAL_SCALE_HEIGHT_M);
+  row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
+  row(19, oceanGlintRoughnessPerLod, oceanHazeExtinctionPerKm * 1e-3,
+       oceanSkyShadowFloor, 0.0);
+  row(20, periodic ? 1.0 : 0.0,
+       Math.tan(lightMarchLodDegrees * DEG),
+       Math.tan(viewStepLodDegrees * DEG),
+       toneMapGamma);
+  if (nested) {
+    row(21, nestBmin[0], nestBmin[1], nestBmin[2], dtViewNest);
+    row(22, nestBmax[0], nestBmax[1], nestBmax[2], dtLightNest);
+  }
+  return u;
+}
+
+/**
+ * The scene-identity key that decides whether temporal accumulation continues
+ * or restarts. Two components are zeroed out on purpose:
+ *
+ *   row 4.w  — the frame index only decorrelates jitter seeds. If it counted,
+ *              every frame would read as a scene change and nothing would
+ *              ever converge.
+ *   row 10   — the sampling flags are OUTPUTS of the accumulation decision.
+ *              Including them would make the key self-referential.
+ *
+ * maxLightSteps and the output size are folded in because both change the
+ * image without appearing in the buffer.
+ */
+export function sceneKey(u, maxLightSteps, outputW, outputH) {
+  const copy = new Float32Array(u);
+  copy[4 * 4 + 3] = 0.0;
+  copy[10 * 4] = 0.0; copy[10 * 4 + 1] = 0.0;
+  copy[10 * 4 + 2] = 0.0; copy[10 * 4 + 3] = 0.0;
+  const key = new Uint8Array(copy.byteLength + 12);
+  key.set(new Uint8Array(copy.buffer), 0);
+  new DataView(key.buffer).setUint32(copy.byteLength, maxLightSteps, true);
+  new DataView(key.buffer).setUint32(copy.byteLength + 4, outputW, true);
+  new DataView(key.buffer).setUint32(copy.byteLength + 8, outputH, true);
+  return key;
+}
+
+export function keysEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** Frame-rate-independent EMA: alpha is defined per frame at referenceFps. */
+export function motionAlphaForDt(alpha, referenceFps, deltaSeconds) {
+  if (deltaSeconds == null) return alpha;
+  if (deltaSeconds <= 0 || alpha === 0.0 || alpha === 1.0) return alpha;
+  return 1.0 - Math.pow(1.0 - alpha, deltaSeconds * referenceFps);
+}
+
+/**
+ * Highest tier whose measured frame time clears the target. Mirrors
+ * engine.choose_quality_tier, including its order.
+ */
+export function chooseQualityTier(frameTimesMs, targetMs = K.AUTO_TIER_TARGET_MS) {
+  for (const name of K.QUALITY_TIER_NAMES) {
+    const v = frameTimesMs[name];
+    if (!Number.isFinite(v) || v <= 0) {
+      throw new Error(`frame time for tier '${name}' must be finite and > 0.`);
+    }
+    if (v <= targetMs) return name;
+  }
+  return "potato";
+}
