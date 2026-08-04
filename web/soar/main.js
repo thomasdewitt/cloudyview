@@ -78,6 +78,7 @@ dom.failureBack.addEventListener("click", () => {
 
 let gpu = null;         // {adapter, limits} once probed
 let gpuProbe = null;    // the in-flight probe, so we only run it once
+let viewer = null;      // set once the viewer boots, for error reporting
 
 async function probeGPU() {
   const adapter = await acquireAdapter();
@@ -157,11 +158,16 @@ async function enterViewer(source) {
         "Reload the page to start over. If it keeps happening on the same " +
         "field, it is probably running out of video memory — try a coarser " +
         "level or close other GPU-heavy tabs."),
-      onError: (message) => console.error("uncaptured:", message),
+      // WebGPU reports validation asynchronously, so an uncaught error here
+      // would otherwise show up only as a picture that is quietly wrong.
+      onError: (message) => {
+        console.error("uncaptured:", message);
+        viewer?.ui?.say(`GPU error — the picture may be wrong:\n${message}`, 8);
+      },
     });
     const { boot } = await import("./viewer.js");
-    await boot({ device, adapter, source, progress, onReady: hideLoading,
-                 onFailure: showFailure });
+    viewer = await boot({ device, adapter, source, progress,
+                          onReady: hideLoading, onFailure: showFailure });
   } catch (err) {
     if (err instanceof WebGPUUnavailable) {
       showFailure(err.message, err.detail, "");

@@ -178,9 +178,25 @@ export class Renderer {
     });
     this.refreshBindGroup();
 
+    const texEntry = {
+      binding: 0, visibility: GPUShaderStage.FRAGMENT,
+      texture: { sampleType: "float", viewDimension: "2d" },
+    };
+    this.blitLayoutExact = device.createBindGroupLayout({
+      label: "present-exact", entries: [texEntry],
+    });
+    this.blitLayoutSampled = device.createBindGroupLayout({
+      label: "present-sampled",
+      entries: [texEntry, {
+        binding: 1, visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: "filtering" },
+      }],
+    });
+
     const accumModule = device.createShaderModule({ code: ACCUM_SHADER });
     const presentModule = device.createShaderModule({ code: PRESENT_SHADER });
     this.presentModule = presentModule;
+    this._shaderModules = [accumModule, presentModule];
     this.accumPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: accumModule, entryPoint: "vs_main" },
@@ -189,6 +205,43 @@ export class Renderer {
       primitive: { topology: "triangle-list" },
     });
     this._blitPipelines = new Map();
+  }
+
+  /**
+   * Compile and validate before the first frame.
+   *
+   * WebGPU hands back a shader module and a pipeline whether or not they are
+   * valid, and reports the failure asynchronously — so the default symptom of
+   * a broken shader or a mismatched layout is a black canvas and a line in
+   * the console. This asks the questions up front and throws with the WGSL
+   * error text, which the failure panel then shows.
+   */
+  async init() {
+    this._shaderModules.push(this._module(
+      this.periodic, this.scene.nested, this.maxLightSteps));
+
+    const problems = [];
+    for (const module of this._shaderModules) {
+      const info = await module.getCompilationInfo?.();
+      for (const message of info?.messages ?? []) {
+        if (message.type !== "error") continue;
+        problems.push(
+          `line ${message.lineNum}:${message.linePos} — ${message.message}`);
+      }
+    }
+    if (problems.length) {
+      throw new Error(`The shader did not compile.\n${problems.join("\n")}`);
+    }
+
+    this.device.pushErrorScope("validation");
+    this._rayPipeline(ACCUM_FORMAT);
+    this._rayPipeline(this.canvasFormat);
+    this._blitPipeline(this.canvasFormat, true);
+    this._blitPipeline(this.canvasFormat, false);
+    const error = await this.device.popErrorScope();
+    if (error) {
+      throw new Error(`Setting up the render pipelines failed: ${error.message}`);
+    }
   }
 
   /**
@@ -320,13 +373,28 @@ export class Renderer {
     return pipeline;
   }
 
+  /**
+   * The present pass, in two flavours: an exact texel copy when the render
+   * target is already the output size, and a bilinear upscale when it is not.
+   *
+   * Both layouts are declared explicitly rather than left to `layout: "auto"`.
+   * Auto derives the layout from the bindings an entry point actually USES,
+   * and fs_exact never touches the sampler — so an auto layout would omit
+   * binding 1, a bind group offering it would fail validation, and because
+   * WebGPU reports validation asynchronously the only symptom is a black
+   * canvas and a console line. That is precisely the failure this build is
+   * supposed not to have.
+   */
   _blitPipeline(targetFormat, exact) {
     const key = `${targetFormat}|${exact}`;
     let pipeline = this._blitPipelines.get(key);
     if (!pipeline) {
       pipeline = this.device.createRenderPipeline({
         label: `present(${key})`,
-        layout: "auto",
+        layout: this.device.createPipelineLayout({
+          bindGroupLayouts: [exact ? this.blitLayoutExact
+                                   : this.blitLayoutSampled],
+        }),
         vertex: { module: this.presentModule, entryPoint: "vs_main" },
         fragment: { module: this.presentModule,
                     entryPoint: exact ? "fs_exact" : "fs_main",
@@ -541,6 +609,8 @@ export class Renderer {
   }
 
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact) {
+    const entries = [{ binding: 0, resource: srcTex.createView() }];
+    if (!exact) entries.push({ binding: 1, resource: this.blitSampler });
     const p = encoder.beginRenderPass({
       colorAttachments: [{
         view: targetView, loadOp: "clear", storeOp: "store",
@@ -549,11 +619,8 @@ export class Renderer {
     });
     p.setPipeline(this._blitPipeline(targetFormat, exact));
     p.setBindGroup(0, this.device.createBindGroup({
-      layout: this._blitPipeline(targetFormat, exact).getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: srcTex.createView() },
-        { binding: 1, resource: this.blitSampler },
-      ],
+      layout: exact ? this.blitLayoutExact : this.blitLayoutSampled,
+      entries,
     }));
     p.draw(3);
     p.end();

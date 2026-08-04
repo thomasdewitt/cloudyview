@@ -193,7 +193,16 @@ export class UI {
     this.menu.replaceChildren();
     const build = this[`_panel_${name}`];
     if (!build) throw new Error(`no such panel: ${name}`);
-    build.call(this, context);
+    try {
+      build.call(this, context);
+    } catch (err) {
+      // A panel that throws half-way through leaves a blank box and no clue.
+      console.error(`panel '${name}' failed:`, err);
+      this.menu.append(this._header("error", "This panel failed to build"));
+      this.menu.append(el("div", "row", String(err.message || err)));
+      this.menu.append(el("div", "divider"));
+      this.menu.append(item("Back to flying", null, () => this.app.resume()));
+    }
   }
 
   _header(kicker, title) {

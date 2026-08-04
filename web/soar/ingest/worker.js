@@ -1,0 +1,285 @@
+// The ingest worker.
+//
+// It has to be a worker: Emscripten's filesystem is synchronous, and browsers
+// forbid synchronous file access on the main thread. WORKERFS is what makes
+// this a viewer rather than an uploader — libhdf5 reads the chunks it needs
+// straight out of the File, so a 40 GB run costs a few tens of megabytes of
+// wasm heap and never leaves the machine.
+//
+// Measured 2026-08-04: a 537 MB chunked netCDF-4, mid-file sub-box read in
+// 4 ms, wasm heap flat at 19 MB across mount, open and slice, in both Firefox
+// and Chrome, with no cross-origin isolation.
+
+"use strict";
+
+import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
+import {
+  describeGroup, findLiquidWaterGroups, decoderFor, unitsMultiplier,
+  attrString,
+} from "./netcdf.js";
+import * as K from "../constants.js";
+
+const MOUNT = "/local";
+// Bytes of decoded source per slab. Big enough that per-slab overhead is
+// noise, small enough that two of them plus the fp16 output fit comfortably.
+const SLAB_BUDGET_BYTES = 96 * 1024 * 1024;
+
+let ready = null;
+let root = null;
+let mounted = false;
+
+// --- fp16 ------------------------------------------------------------------
+
+const HAS_F16 = typeof Float16Array !== "undefined";
+const _f32 = new Float32Array(1);
+const _u32 = new Uint32Array(_f32.buffer);
+
+/** IEEE binary32 to binary16, with the same round-to-nearest-even numpy uses. */
+function toHalf(value) {
+  _f32[0] = value;
+  const x = _u32[0];
+  const sign = (x >>> 16) & 0x8000;
+  let exp = (x >>> 23) & 0xff;
+  let mant = x & 0x7fffff;
+  if (exp === 0xff) return sign | 0x7c00 | (mant ? 0x200 : 0);   // inf / NaN
+  let e = exp - 127 + 15;
+  if (e >= 0x1f) return sign | 0x7c00;                            // overflow
+  if (e <= 0) {
+    if (e < -10) return sign;                                     // underflow
+    mant |= 0x800000;
+    const shift = 14 - e;
+    let half = mant >>> shift;
+    if ((mant >>> (shift - 1)) & 1) half += 1;                    // round
+    return sign | half;
+  }
+  let half = (e << 10) | (mant >>> 13);
+  if ((mant >>> 12) & 1) half += 1;
+  return sign | half;
+}
+
+function makeHalfWriter(length) {
+  if (HAS_F16) {
+    const view = new Float16Array(length);
+    return { store: view, set: (i, v) => { view[i] = v; },
+             bytes: () => new Uint16Array(view.buffer) };
+  }
+  const view = new Uint16Array(length);
+  return { store: view, set: (i, v) => { view[i] = toHalf(v); },
+           bytes: () => view };
+}
+
+// --- helpers ---------------------------------------------------------------
+
+const strictlyDescending = (c) => {
+  for (let i = 1; i < c.length; i++) if (!(c[i] - c[i - 1] < 0)) return false;
+  return c.length > 1;
+};
+
+function post(message, transfer) {
+  self.postMessage(message, transfer || []);
+}
+
+async function ensureReady() {
+  ready ??= h5wasm.ready;
+  return ready;
+}
+
+// --- operations ------------------------------------------------------------
+
+async function open({ file }) {
+  const { FS } = await ensureReady();
+  if (!mounted) {
+    try { FS.mkdir(MOUNT); } catch { /* already there */ }
+    FS.mount(FS.filesystems.WORKERFS, { files: [file] }, MOUNT);
+    mounted = true;
+  }
+  root = new h5wasm.File(`${MOUNT}/${file.name}`, "r");
+
+  const paths = findLiquidWaterGroups(root);
+  if (!paths.length) {
+    throw new Error(
+      "No cloud water field in this file. cloudyview looks for a variable " +
+      "named one of: qc, QC, ql, QL, LWC, clw, cloud_liquid_water_mixing_" +
+      "ratio, liquid_water_content, lwc — with three spatial dimensions.");
+  }
+
+  const groups = [];
+  const problems = [];
+  for (const path of paths) {
+    try {
+      groups.push(describeGroup(root, path));
+    } catch (err) {
+      // A group with unusable coordinates just drops out of the list, but
+      // say so — silently offering fewer choices is how people conclude the
+      // tool cannot read their file.
+      problems.push(`${path || "(root)"}: ${err.message}`);
+    }
+  }
+  if (!groups.length) {
+    throw new Error(
+      `Found cloud water, but no group could be read.\n${problems.join("\n")}`);
+  }
+  return { groups, problems, filename: file.name };
+}
+
+/**
+ * Stream one group's extinction field to the main thread, ghost-padded and
+ * laid out for the texture.
+ *
+ * The transpose happens here rather than on the GPU. netCDF stores (z, y, x)
+ * with x fastest; the texture wants z fastest. r16float is not a storage
+ * texture format and copyBufferToTexture's 256-byte row rule does not fit an
+ * (nz+2)*2 row, so a compute path would cost either double the memory or a
+ * lot of padding. queue.writeTexture has no such rule, and the per-voxel work
+ * is a multiply-add against a precomputed rho_air(z) — no exp per voxel.
+ */
+async function extinction({ group, units, label }) {
+  const description = describeGroup(root, group);
+  const handle = group ? root.get(group) : root;
+  const dataset = handle.get(description.liquidVar);
+  const iceDataset = description.iceVar ? handle.get(description.iceVar) : null;
+
+  const multiplier = unitsMultiplier(
+    description.units ?? units ?? null) ?? unitsMultiplier(units);
+  if (multiplier === null) {
+    throw new Error(
+      `No units on ${description.liquidVar} and none supplied.`);
+  }
+  const iceMultiplier = iceDataset
+    ? (unitsMultiplier(attrString(iceDataset.attrs, "units")) ??
+       unitsMultiplier(units) ?? multiplier)
+    : 0.0;
+
+  const decode = decoderFor(dataset.attrs);
+  const decodeIce = iceDataset ? decoderFor(iceDataset.attrs) : null;
+
+  const [nx, ny, nz] = description.shape;
+  const axis = description.storageAxis;         // field axis -> storage axis
+  const storageShape = description.storageShape;
+
+  // Ascending coordinates, and the flip that gets us there.
+  const flip = {};
+  const coords = {};
+  for (const a of ["x", "y", "z"]) {
+    const values = Float64Array.from(description.coords[a]);
+    flip[a] = strictlyDescending(values);
+    coords[a] = flip[a] ? values.slice().reverse() : values;
+  }
+
+  // rho_air is a function of height alone, so it is a table, not a per-voxel
+  // exp. Fixed isothermal atmosphere, matching optical_depth.py exactly.
+  const rhoAir = new Float64Array(nz);
+  for (let k = 0; k < nz; k++) {
+    rhoAir[k] = K.AIR_P0 * Math.exp(-coords.z[k] / K.AIR_SCALE_HEIGHT_M)
+              / (K.AIR_R * K.AIR_T);
+  }
+
+  // Chunk along the slowest storage axis: that is the contiguous direction on
+  // disk, so each read is chunk-aligned rather than striped across the file.
+  const chunkAxis = 0;
+  const chunkField = ["x", "y", "z"].find((a) => axis[a] === chunkAxis);
+  const fieldExtent = { x: nx, y: ny, z: nz };
+  const perIndexBytes = storageShape.reduce((a, b) => a * b, 1)
+    / storageShape[chunkAxis] * 4;
+  const chunkLength = Math.max(
+    1, Math.min(storageShape[chunkAxis],
+                Math.floor(SLAB_BUDGET_BYTES / Math.max(perIndexBytes, 1))));
+
+  post({ type: "geometry", label, description,
+         coords: { x: Array.from(coords.x), y: Array.from(coords.y),
+                   z: Array.from(coords.z) },
+         flip });
+
+  const total = fieldExtent[chunkField];
+  for (let start = 0; start < total; start += chunkLength) {
+    const stop = Math.min(start + chunkLength, total);
+    // Field indices map to storage indices through the flip.
+    const storageRange = flip[chunkField]
+      ? [total - stop, total - start]
+      : [start, stop];
+
+    const ranges = storageShape.map(() => []);
+    for (const dropped of description.droppedAxes) ranges[dropped] = [0, 1];
+    ranges[chunkAxis] = storageRange;
+
+    const raw = dataset.slice(ranges);
+    const rawIce = iceDataset ? iceDataset.slice(ranges) : null;
+
+    const local = { x: nx, y: ny, z: nz };
+    local[chunkField] = stop - start;
+    const out = makeHalfWriter(local.x * local.y * local.z);
+
+    // Storage strides over the slab we just read.
+    const slabShape = storageShape.slice();
+    slabShape[chunkAxis] = storageRange[1] - storageRange[0];
+    for (const dropped of description.droppedAxes) slabShape[dropped] = 1;
+    const strides = new Array(slabShape.length);
+    let acc = 1;
+    for (let i = slabShape.length - 1; i >= 0; i--) {
+      strides[i] = acc; acc *= slabShape[i];
+    }
+
+    const base = { x: 0, y: 0, z: 0 };
+    base[chunkField] = start;
+    const idx = new Array(slabShape.length).fill(0);
+
+    let o = 0;
+    for (let lx = 0; lx < local.x; lx++) {
+      const gx = base.x + lx;
+      idx[axis.x] = flip.x ? nx - 1 - gx : gx;
+      if (chunkField === "x") idx[axis.x] -= storageRange[0];
+      for (let ly = 0; ly < local.y; ly++) {
+        const gy = base.y + ly;
+        idx[axis.y] = flip.y ? ny - 1 - gy : gy;
+        if (chunkField === "y") idx[axis.y] -= storageRange[0];
+        for (let lz = 0; lz < local.z; lz++) {
+          const gz = base.z + lz;
+          idx[axis.z] = flip.z ? nz - 1 - gz : gz;
+          if (chunkField === "z") idx[axis.z] -= storageRange[0];
+
+          let flat = 0;
+          for (let i = 0; i < idx.length; i++) flat += idx[i] * strides[i];
+
+          let q = raw[flat];
+          if (decode) q = decode(q);
+          let sigma = K.SIGMA_LIQUID_PREFACTOR * (q * multiplier);
+          if (rawIce) {
+            let qi = rawIce[flat];
+            if (decodeIce) qi = decodeIce(qi);
+            sigma += K.SIGMA_ICE_PREFACTOR * (qi * iceMultiplier);
+          }
+          out.set(o++, sigma * rhoAir[gz]);
+        }
+      }
+    }
+
+    const bytes = out.bytes();
+    // Ghost ring: original voxel i lands on texel i+1.
+    const origin = [1, 1, 1];
+    origin[0] = chunkField === "z" ? start + 1 : 1;
+    origin[1] = chunkField === "y" ? start + 1 : 1;
+    origin[2] = chunkField === "x" ? start + 1 : 1;
+    post({
+      type: "slab", label,
+      origin,
+      size: [local.z, local.y, local.x],   // texture is (w=z, h=y, d=x)
+      done: stop / total,
+      data: bytes,
+    }, [bytes.buffer]);
+  }
+  return { label, shape: [nx, ny, nz] };
+}
+
+self.onmessage = async (event) => {
+  const { id, op, ...args } = event.data;
+  try {
+    let result;
+    if (op === "open") result = await open(args);
+    else if (op === "extinction") result = await extinction(args);
+    else throw new Error(`unknown ingest operation '${op}'`);
+    post({ id, ok: true, result });
+  } catch (err) {
+    post({ id, ok: false, error: String(err?.message || err),
+           advice: err?.advice || "" });
+  }
+};
