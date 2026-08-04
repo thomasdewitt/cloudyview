@@ -67,6 +67,18 @@ QUALITY_TIERS_BY_KEY = {
 # Group picker: number keys mirror the on-screen list order.
 GROUP_INDEX_BY_KEY = {str(n): n - 1 for n in range(1, 10)}
 
+# Nested pairs sit above that list on their own keys, starting at B so a
+# file offering one pair keeps the single "Use both, nested" shortcut it
+# has always had. A three-level file offers more, hence C, D, ...
+GROUP_PAIR_INDEX_BY_KEY = {
+    chr(ord("b") + index): index for index in range(6)
+}
+# What the picker shows next to each pair. Pairs past the last key are
+# still listed and still clickable, just without a shortcut.
+PAIR_KEY_BY_INDEX = {
+    index: key.upper() for key, index in GROUP_PAIR_INDEX_BY_KEY.items()
+}
+
 # Time-of-day presets: (azimuth, elevation) in met degrees. Elevation is
 # what drives the look — the spectral sun/sky package fades with air mass —
 # so these are chosen by solar elevation, with an azimuth that puts the sun
@@ -102,6 +114,7 @@ class MenuTransition:
     quality: str | None = None
     tier: str | None = None
     group_index: int | None = None
+    pair_index: int | None = None
     units: str | None = None
     sun_preset: str | None = None
 
@@ -161,11 +174,13 @@ def menu_transition(
     if menu_state == MENU_OPEN_GROUP_PROMPT:
         if key == "Escape":
             return MenuTransition(ACTION_MENU_BACK, MENU_MAIN)
-        if normalized == "b":
-            # Only offered when the app found a nestable pair; it ignores
-            # the action otherwise.
+        pair_index = GROUP_PAIR_INDEX_BY_KEY.get(normalized)
+        if pair_index is not None:
+            # Only offered when the app found that many nestable pairs; it
+            # ignores the action otherwise.
             return MenuTransition(
-                ACTION_SELECT_BOTH_GROUPS, MENU_OPEN_GROUP_PROMPT
+                ACTION_SELECT_BOTH_GROUPS, MENU_OPEN_GROUP_PROMPT,
+                pair_index=pair_index,
             )
         group_index = GROUP_INDEX_BY_KEY.get(normalized)
         if group_index is not None:

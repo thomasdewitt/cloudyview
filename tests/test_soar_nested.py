@@ -410,7 +410,7 @@ def _loading_app(renderer):
     app._pending_units = None
     app._pending_units_vars = []
     app._pending_nest_group = None
-    app._pending_nest_pair = None
+    app._pending_nest_pairs = []
     app._file_browser_error = None
     app._last_quality_camera_signature = None
     app._set_menu_state = lambda state: None
@@ -436,7 +436,7 @@ def test_remove_nest_keeps_the_outer_field(tmp_path):
     assert app.renderer.field.shape == outer_shape
 
 
-def _write_group_pair(path, groups):
+def _write_groups(path, groups):
     """One file, one group per field — the STEAM render-nest shape."""
     import netCDF4
     import xarray as xr
@@ -459,7 +459,7 @@ def test_group_picker_offers_a_nestable_pair(tmp_path):
     from cloudyview import io
     from cloudyview.soar.app import FlyThroughApp
 
-    path = _write_group_pair(
+    path = _write_groups(
         tmp_path / "nests.nc",
         (("render_a", _outer_field()), ("render_b", _nest_field())),
     )
@@ -468,8 +468,8 @@ def test_group_picker_offers_a_nestable_pair(tmp_path):
     app._set_menu_state = lambda state: setattr(app, "_menu_state", state)
     FlyThroughApp._start_group_selection(app)
 
-    assert app._pending_nest_pair == ("render_a", "render_b")
-    assert io.find_nestable_group_pair(path) == ("render_a", "render_b")
+    assert app._pending_nest_pairs == [("render_a", "render_b")]
+    assert io.find_nestable_group_pairs(path) == [("render_a", "render_b")]
 
 
 def test_group_picker_does_not_offer_two_renders_of_one_domain(tmp_path):
@@ -486,7 +486,7 @@ def test_group_picker_does_not_offer_two_renders_of_one_domain(tmp_path):
         y=(np.arange(fine_n) + 0.5) * step,
         z=(np.arange(OUTER_NZ * 2) + 0.5) * step,
     )
-    path = _write_group_pair(
+    path = _write_groups(
         tmp_path / "same.nc",
         (("render_a", coarse), ("render_b", same_domain)),
     )
@@ -495,19 +495,19 @@ def test_group_picker_does_not_offer_two_renders_of_one_domain(tmp_path):
     app._set_menu_state = lambda state: setattr(app, "_menu_state", state)
     FlyThroughApp._start_group_selection(app)
 
-    assert app._pending_nest_pair is None
+    assert app._pending_nest_pairs == []
 
 
 def test_use_both_groups_loads_one_file_as_two_levels(tmp_path):
     from cloudyview.soar.app import FlyThroughApp
 
-    path = _write_group_pair(
+    path = _write_groups(
         tmp_path / "nests.nc",
         (("render_a", _outer_field()), ("render_b", _nest_field())),
     )
     app = _loading_app(_renderer())
     app._pending_open_path = path
-    app._pending_nest_pair = ("render_a", "render_b")
+    app._pending_nest_pairs = [("render_a", "render_b")]
     FlyThroughApp._select_both_groups_nested(app)
 
     app._loading_job.join(60.0)
@@ -517,6 +517,68 @@ def test_use_both_groups_loads_one_file_as_two_levels(tmp_path):
 
     assert app.renderer.nested is True
     assert app.renderer.field.shape == _outer_field().shape
+    assert app.renderer.nest.shape == _nest_field().shape
+
+
+def _middle_field():
+    """A 2x refinement of part of the outer domain, containing _nest_field."""
+    from cloudyview.cloudfield import CloudField
+
+    step = VOXEL_M / 2
+    x = 800.0 + (np.arange(32) + 0.5) * step
+    y = 800.0 + (np.arange(32) + 0.5) * step
+    z = 200.0 + (np.arange(24) + 0.5) * step
+    lwc = np.zeros((x.size, y.size, z.size), dtype=np.float32)
+    return CloudField(lwc=lwc, x=x, y=y, z=z)
+
+
+def _three_level_file(tmp_path):
+    return _write_groups(
+        tmp_path / "three.nc",
+        (
+            ("coarse", _outer_field()),
+            ("middle", _middle_field()),
+            ("fine", _nest_field()),
+        ),
+    )
+
+
+def test_three_levels_offer_every_pair_not_just_the_extremes(tmp_path):
+    """Coarsest + finest is one choice of three, not the only one."""
+    from cloudyview import io
+    from cloudyview.soar.app import FlyThroughApp
+
+    path = _three_level_file(tmp_path)
+    app = _loading_app(_renderer())
+    app._pending_open_path = path
+    app._set_menu_state = lambda state: setattr(app, "_menu_state", state)
+    FlyThroughApp._start_group_selection(app)
+
+    expected = [
+        ("coarse", "middle"), ("coarse", "fine"), ("middle", "fine"),
+    ]
+    assert app._pending_nest_pairs == expected
+    assert io.find_nestable_group_pairs(path) == expected
+
+
+def test_a_middle_pair_of_three_levels_loads(tmp_path):
+    from cloudyview.soar.app import FlyThroughApp
+
+    path = _three_level_file(tmp_path)
+    app = _loading_app(_renderer())
+    app._pending_open_path = path
+    app._pending_nest_pairs = [
+        ("coarse", "middle"), ("coarse", "fine"), ("middle", "fine"),
+    ]
+    FlyThroughApp._select_both_groups_nested(app, 2)
+
+    app._loading_job.join(60.0)
+    snapshot = app._loading_job.pump()
+    assert snapshot.error is None, snapshot.error
+    FlyThroughApp._install_loaded_renderer(app, snapshot.result)
+
+    assert app.renderer.nested is True
+    assert app.renderer.field.shape == _middle_field().shape
     assert app.renderer.nest.shape == _nest_field().shape
 
 

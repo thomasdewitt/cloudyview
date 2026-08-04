@@ -163,10 +163,13 @@ is the same trade witness makes; the occupancy grid above is the fix.
     whether the loaded field replaces the scene or becomes its nest. N flips
     to "Remove nest" once one is loaded;
   - **"Use both, nested"** in the group picker. When one file holds several
-    groups (STEAM render nests), `io.find_nestable_group_pair` probes their
-    *coordinates only* for a pair where one lies strictly inside the other
+    groups (STEAM render nests), `io.find_nestable_group_pairs` probes their
+    *coordinates only* for pairs where one lies strictly inside the other
     and is finer, and offers to load both as one scene. This is the common
     case, and picking one group used to mean silently losing the other.
+    Three or more levels yield several pairs (coarse+middle, coarse+fine,
+    middle+fine) and the renderer holds two: the picker lists every pair —
+    keys B, C, D, ... — rather than deciding which two levels were meant.
   Adding a nest keeps the current viewpoint (you are already flying in that
   scene); opening a new *outer* file resets the camera and drops the nest.
 - WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.

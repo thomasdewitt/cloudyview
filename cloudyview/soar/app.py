@@ -106,6 +106,7 @@ from .menu import (
     ACTION_TRACK_DISCARD,
     BEHOLD_QUALITIES_BY_KEY,
     MIN_SUN_ELEVATION_DEG,
+    PAIR_KEY_BY_INDEX,
     SUN_PRESETS,
     MENU_CONTROLS,
     MENU_SCREENSHOT,
@@ -370,7 +371,7 @@ class FlyThroughApp:
         self._pending_units = None        # user-supplied condensate units
         self._pending_units_vars = []     # variables that carry no units
         self._pending_nest_group = None   # second group, loaded as the nest
-        self._pending_nest_pair = None    # (outer, inner) offered by the picker
+        self._pending_nest_pairs = []     # (outer, inner)s offered by the picker
         # The browser opens at home, not next to whatever file the session was
         # launched with: data lives all over the disk and home is the one
         # place every tree is reachable from. It remembers the last directory
@@ -834,7 +835,7 @@ class FlyThroughApp:
         self._pending_units = None
         self._pending_units_vars = []
         self._pending_nest_group = None
-        self._pending_nest_pair = None
+        self._pending_nest_pairs = []
 
     def _select_browser_path(self, path: str | Path) -> None:
         selected = Path(path).expanduser().resolve()
@@ -866,15 +867,17 @@ class FlyThroughApp:
         # Several groups in one file are often a coarse domain and a
         # refinement of part of it — exactly a nested pair. Probe the
         # coordinates (no field data) so the picker can offer both at once
-        # instead of making the user choose one and lose the other.
-        self._pending_nest_pair = None
+        # instead of making the user choose one and lose the other. Three
+        # levels give several pairs and the renderer holds two: offer every
+        # pair rather than deciding for the user which two levels they meant.
+        self._pending_nest_pairs = []
         if len(groups) > 1:
             try:
-                self._pending_nest_pair = io.find_nestable_group_pair(
+                self._pending_nest_pairs = io.find_nestable_group_pairs(
                     self._pending_open_path, groups
                 )
             except Exception:
-                self._pending_nest_pair = None
+                self._pending_nest_pairs = []
 
         if not groups or "" in groups:
             # Root group carries the field, or nothing anywhere does — in
@@ -899,16 +902,19 @@ class FlyThroughApp:
         self._pending_nest_group = None
         self._set_menu_state(MENU_OPEN_ICE_PROMPT)
 
-    def _select_both_groups_nested(self) -> None:
-        """Load the file's coarse group and its refinement as one scene.
+    def _select_both_groups_nested(self, index: int = 0) -> None:
+        """Load one coarse group and one refinement of it as one scene.
+
+        `index` picks among the pairs the file offers — a three-level file
+        has more than one, and the renderer holds two levels at a time.
 
         Skips the ice prompt: a second ice *file* makes no sense for a pair
         of groups that already live in this one.
         """
-        pair = self._pending_nest_pair
-        if not pair:
+        pairs = self._pending_nest_pairs
+        if not (0 <= index < len(pairs)):
             return
-        self._pending_group, self._pending_nest_group = pair
+        self._pending_group, self._pending_nest_group = pairs[index]
         self._start_loading_file(self._pending_open_path, None)
 
     def _select_condensate_units(self, units: str | None) -> None:
@@ -1577,7 +1583,7 @@ class FlyThroughApp:
             elif action == ACTION_SELECT_GROUP:
                 self._select_group(transition.group_index)
             elif action == ACTION_SELECT_BOTH_GROUPS:
-                self._select_both_groups_nested()
+                self._select_both_groups_nested(transition.pair_index or 0)
             elif action == ACTION_SELECT_UNITS:
                 self._select_condensate_units(transition.units)
             elif action == ACTION_RENDER_MENU:
@@ -2446,17 +2452,32 @@ class FlyThroughApp:
                 wrapped=True,
             )
             imgui.dummy((1.0, 6.0))
-            pair = self._pending_nest_pair
-            if pair:
-                outer_group, inner_group = pair
+            pairs = self._pending_nest_pairs
+            if len(pairs) == 1:
+                outer_group, inner_group = pairs[0]
                 if theme.menu_button("Use both, nested", "B"):
-                    self._select_both_groups_nested()
+                    self._select_both_groups_nested(0)
                 theme.caption(
                     f"'{inner_group}' lies inside '{outer_group}' and is "
                     "finer — they can be rendered together, with the finer "
                     "one taking over where it covers.",
                     wrapped=True,
                 )
+                imgui.dummy((1.0, 6.0))
+                theme.caption("Or just one:")
+            elif pairs:
+                # More than two nesting levels: every pair is a legitimate
+                # scene and only the user knows which two they came for.
+                theme.caption(
+                    "These nest — two levels render together, the finer one "
+                    "taking over where it covers:",
+                    wrapped=True,
+                )
+                for index, (outer_group, inner_group) in enumerate(pairs):
+                    hint = PAIR_KEY_BY_INDEX.get(index)
+                    label = f"{outer_group}  +  {inner_group}"
+                    if theme.menu_button(label, hint):
+                        self._select_both_groups_nested(index)
                 imgui.dummy((1.0, 6.0))
                 theme.caption("Or just one:")
             for index, group in enumerate(self._pending_group_choices):

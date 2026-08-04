@@ -74,7 +74,7 @@ def make_event_app():
     app._pending_units_vars = []
     app._pending_is_nest = False
     app._pending_nest_group = None
-    app._pending_nest_pair = None
+    app._pending_nest_pairs = []
     app._file_browser_dir = Path.cwd()
     app._last_file_dir = Path.cwd()
     app._file_browser_error = None
@@ -713,6 +713,19 @@ def test_multiple_candidate_groups_ask_before_loading(tmp_path):
 
     assert app._pending_group == "render_b"
     assert app._menu_state == MENU_OPEN_ICE_PROMPT
+
+
+def test_nested_pair_keys_run_from_b(tmp_path):
+    """One pair keeps B; a three-level file's later pairs get C, D, ..."""
+    from cloudyview.soar.menu import ACTION_SELECT_BOTH_GROUPS
+
+    first = _menu_transition(True, MENU_OPEN_GROUP_PROMPT, "b")
+    assert first.action == ACTION_SELECT_BOTH_GROUPS
+    assert first.pair_index == 0
+
+    third = _menu_transition(True, MENU_OPEN_GROUP_PROMPT, "d")
+    assert third.action == ACTION_SELECT_BOTH_GROUPS
+    assert third.pair_index == 2
 
 
 def test_root_group_file_skips_the_group_prompt(tmp_path):

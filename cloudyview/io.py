@@ -228,15 +228,20 @@ def group_domain_extent(filepath: str, group: Optional[str] = None):
     return np.array(bmin), np.array(bmax), min(spacing)
 
 
-def find_nestable_group_pair(filepath: str, groups: Optional[list] = None):
-    """Find a (outer, inner) group pair that forms a nested domain.
+def find_nestable_group_pairs(filepath: str, groups: Optional[list] = None):
+    """List every (outer, inner) group pair that forms a nested domain.
 
     Files that keep each field in its own group — STEAM render nests —
     often hold exactly this: a coarse parent and a finer child covering
-    part of it. Returns (outer_group, inner_group) when one group's grid
-    lies inside another's AND is strictly finer, or None when no pair
-    qualifies (including when a candidate covers its parent entirely,
-    which is a replacement, not a refinement).
+    part of it. A pair qualifies when one group's grid lies inside
+    another's AND is strictly finer; a candidate that covers its parent
+    entirely is a replacement, not a refinement, and is left out.
+
+    Three or more nesting levels give several qualifying pairs (coarse +
+    middle, coarse + fine, middle + fine). All of them are returned —
+    the renderer holds two levels at a time, so which two is the caller's
+    (in practice, the user's) choice. Pairs come back in the order the
+    groups appear in `groups`: outer first, then inner.
 
     Coordinates only; the caller still does the real load.
     """
@@ -248,11 +253,11 @@ def find_nestable_group_pair(filepath: str, groups: Optional[list] = None):
         if extent is not None:
             extents[group] = extent
     if len(extents) < 2:
-        return None
+        return []
 
-    best = None
-    for inner, (inner_min, inner_max, inner_dx) in extents.items():
-        for outer, (outer_min, outer_max, outer_dx) in extents.items():
+    pairs = []
+    for outer, (outer_min, outer_max, outer_dx) in extents.items():
+        for inner, (inner_min, inner_max, inner_dx) in extents.items():
             if inner == outer or inner_dx >= outer_dx:
                 continue
             tol = 1e-9 * np.maximum(outer_max - outer_min, 1.0)
@@ -267,10 +272,8 @@ def find_nestable_group_pair(filepath: str, groups: Optional[list] = None):
             )
             if covers:
                 continue
-            ratio = outer_dx / inner_dx
-            if best is None or ratio > best[0]:
-                best = (ratio, outer, inner)
-    return None if best is None else (best[1], best[2])
+            pairs.append((outer, inner))
+    return pairs
 
 
 def condensate_vars_missing_units(
