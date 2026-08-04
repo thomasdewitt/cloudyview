@@ -1,6 +1,61 @@
 # Plan — soar becomes a browser tool
 
-Status: proposed 2026-08-04. Supersedes the desktop app once complete.
+Status: in progress, 2026-08-04. Supersedes the desktop app once complete.
+
+## Where it stands
+
+Done:
+
+- **The look crossed over, and is pinned.** Every host-side constant and
+  calculation is JavaScript now (`web/soar/constants.js`, `spectral.js`,
+  `camera.js`, `uniforms.js`, `field.js`), because a time-of-day slider means
+  the spectral lighting cannot be baked into a template.
+  `tests/test_web_uniform_parity.py` runs those modules under node and diffs
+  the packed 368-byte block against `write_uniforms` across sun angles, gamma,
+  fov through the pole and the sampling flags — plus the AABB on a stretched
+  vertical grid, the periodic march cap, the wrapped-view notice, and the
+  nest-pair rule. Perturbing one constant fails it with the row named.
+- **The robustness floor** (`gpu.js`): `requiredLimits` from the adapter,
+  error scopes around allocations, a lost-device handler, and refusals that
+  name the axis and the number.
+- **Landing page and viewer**, one page, since a `File` handle cannot survive
+  a navigation.
+- **The demo path end to end**: scene upload, the three-pass chain, the
+  temporal accumulation state machine, flight controls, click-only menus.
+- **Stills**: accumulated capture at any size, PNG download, reproduction
+  metadata spliced in as a `tEXt` chunk (verified round-trip).
+
+Not yet: ingest of arbitrary netCDF, video, bird, minimap, track recording.
+
+## Decisions taken while building
+
+- **Extinction and the transpose run on the CPU, in a worker** — not as a
+  compute shader. `r16float` is not a storage-texture format, and
+  `copyBufferToTexture`'s 256-byte row rule does not fit a `(nz+2)*2` row, so
+  a compute path would need either a doubled-memory `r32float` volume or
+  awkward padding. `queue.writeTexture` has no such rule. The per-voxel work
+  is a multiply-add against a precomputed `rho_air(z)` — no `exp` per voxel —
+  so this is cheap; revisit only if measured slow.
+- **The ocean tile ships with the tool** (`web/soar/ocean/`), not with the
+  demo. It is a periodic ~100 m patch of sea surface with nothing to do with
+  anyone's data, it comes from a multifractal that only exists in Python, and
+  a field opened from disk still needs it. ~2.8 MB, and it works offline.
+- **The demo ships a zero border plus its wrap faces**, rather than the faces
+  baked in, so toggling periodic is a texture write instead of a download.
+- **Menus are click-only**; keys are Esc, Tab, F, F3, B, M, R, F12. The
+  desktop's `menu.py` key state machine does not come across.
+- **No mobile special-casing** (Thomas, 2026-08-04): the standard no-WebGPU
+  message is the right answer there. The Chrome-flags advice is gated to
+  desktop Linux so Android is not told to pass a command line.
+- **Video is WebCodecs `VideoEncoder`**, because it takes the timestamp the
+  caller gives it: a 30 s flight is 30 s of video whether a frame took 16 ms
+  or six seconds to converge. Screen capture cannot do that. A frame ZIP is
+  not a fallback — it is not a video (Thomas, 2026-08-04).
+  Chrome has had `VideoEncoder` since 94 and Safari since 16.4; H.264 needs
+  even dimensions everywhere, and Chrome matrixes RGB to YUV as **BT.601
+  limited range** regardless of source, so the encoder's reported
+  `decoderConfig.colorSpace` must be propagated into the container rather
+  than assuming BT.709.
 
 ## The goal
 

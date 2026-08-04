@@ -13,6 +13,9 @@ import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoScene, loadOceanTile } from "./scene.js";
 import { UI } from "./ui.js";
 import { mod360 } from "./spectral.js";
+import {
+  renderStill, imageDataToPng, download, timestampedName,
+} from "./capture.js";
 
 const OCEAN_URL = "ocean";
 
@@ -277,8 +280,72 @@ class Viewer {
     this.ui.say("Track recording is not wired up yet.", 2);
   }
 
-  saveScreenshot() {
-    this.ui.say("Still capture is not wired up yet.", 2);
+  /** The capture resolution: an explicit choice, or whatever the window is. */
+  captureDimensions() {
+    return this.captureSize ?? [this.canvas.width, this.canvas.height];
+  }
+
+  /** What made this picture, so the picture can be made again. */
+  renderMetadata(size) {
+    const rel = this.camera.relativePosition();
+    return {
+      schema: "cloudyview.render.v1",
+      source: {
+        path: this.scene.sourceName ?? null,
+        ice_path: this.scene.iceSourceName ?? null,
+        liquid_var: this.scene.liquidVar ?? null,
+        ice_var: this.scene.iceVar ?? null,
+      },
+      camera: {
+        position: rel,
+        azimuth: this.camera.azimuth,
+        elevation: this.camera.elevation,
+        fov: this.camera.fov,
+      },
+      sun: { azimuth: this.sunAzimuth, elevation: this.sunElevation },
+      render: {
+        renderer: "soar-web",
+        size,
+        tier: this.renderer.qualityTier,
+        render_scale: 1.0,
+        step_factor: this.renderer.stepFactor,
+        max_light_steps: this.renderer.maxLightSteps,
+        periodic: this.renderer.periodic,
+        accumulate_frames: K.STILL_ACCUMULATE_FRAMES,
+        tone_map_gamma: this.toneMapGamma,
+        light_march_lod_degrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
+        view_step_lod_degrees: K.APP_VIEW_STEP_LOD_DEGREES,
+      },
+      timestamp: new Date().toISOString(),
+      reproduction_command: this.beholdCommand(),
+    };
+  }
+
+  async saveScreenshot({ overlays = true } = {}) {
+    if (this._capturing) return;
+    this._capturing = true;
+    const size = this.captureDimensions();
+    this.ui.close();
+    this.ui.showProgress(
+      `Rendering a ${size[0]}x${size[1]} still…`, 0);
+    try {
+      const image = await renderStill(
+        this.device, this.renderer, this._viewKwargs(), size,
+        K.STILL_ACCUMULATE_FRAMES);
+      this.ui.showProgress("Encoding…", 0.95);
+      const blob = await imageDataToPng(image, this.renderMetadata(size));
+      download(blob, timestampedName("cloudyview_soar", ".png"));
+      this.ui.say(`Saved a ${size[0]}x${size[1]} still.`, 3);
+    } catch (err) {
+      this.ui.say(`Could not save the still: ${err.message}`, 5);
+    } finally {
+      this.ui.hideProgress();
+      this._capturing = false;
+      this._lastTime = performance.now();
+      // `overlays` will select the bird and minimap once those land; the
+      // still is clouds-only until then, which is what both buttons give.
+      void overlays;
+    }
   }
 
   pickFile() {
@@ -327,6 +394,12 @@ class Viewer {
 
   async _frame() {
     if (this.stop) return;
+    // A capture owns the renderer while it runs — the live loop would fight
+    // it for the accumulation buffer and neither picture would converge.
+    if (this._capturing) {
+      requestAnimationFrame(() => this._frame());
+      return;
+    }
     const now = performance.now();
     const dt = Math.min((now - this._lastTime) / 1000, 0.1);
     this._lastTime = now;
