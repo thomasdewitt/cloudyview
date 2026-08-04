@@ -28,7 +28,7 @@ except ImportError as e:  # pragma: no cover - exercised only without the extra
         "(or: pip install 'cloudyview[interactive]')."
     ) from e
 
-from .. import optical_depth
+from .. import io, optical_depth
 from ..camera import Camera
 from ..cloudfield import CloudField
 from ..angles import direction_from_azimuth_elevation
@@ -321,14 +321,23 @@ def _min_voxel_size(field: CloudField, bmin, bmax) -> float:
 
 
 def _validate_nest_containment(bmin, bmax, nest_bmin, nest_bmax) -> None:
-    """The nest must lie inside the outer AABB; anything else is an error.
+    """The nest must lie inside the outer AABB, give or take a cell edge.
 
     The march is clipped to the outer box and (when periodic) wrapped into
-    it, so a nest poking outside would be silently truncated at exactly the
-    places a refinement level exists to resolve. Placement comes from each
-    file's own absolute coordinates — a nest that misses is nearly always
-    two fields that were never meant to be composed, or one whose
-    coordinates are in the wrong units/origin.
+    it, so a nest poking outside is truncated at exactly the places a
+    refinement level exists to resolve — which is why a real miss is an
+    error rather than a quiet crop. Placement comes from each file's own
+    absolute coordinates, and a nest that misses is nearly always two
+    fields that were never meant to be composed, or one whose coordinates
+    are in the wrong units/origin.
+
+    A *sliver* of overhang is a different animal. Both boxes are built
+    from cell edges, so a nest whose outermost cell is thicker than its
+    parent's can sit a few tens of metres proud of a 20 km domain. That
+    is the grid's doing, not the placement's, and the march already
+    handles it: the sliver is outside the outer box and never sampled.
+    `io.NEST_OVERHANG_FRACTION` draws the line, and the clip is reported
+    rather than passed over in silence.
     """
     nest_bmin = np.asarray(nest_bmin, dtype=np.float64)
     nest_bmax = np.asarray(nest_bmax, dtype=np.float64)
@@ -337,18 +346,31 @@ def _validate_nest_containment(bmin, bmax, nest_bmin, nest_bmax) -> None:
     # Tolerance scaled to the outer domain: a nest sharing a face with the
     # parent (a common, legitimate setup) must not trip on float noise.
     tol = 1e-9 * np.maximum(bmax - bmin, 1.0)
-    if np.any(nest_bmin < bmin - tol) or np.any(nest_bmax > bmax + tol):
-        axes = "xyz"
+    overhang, allowance = io.nest_overhang(bmin, bmax, nest_bmin, nest_bmax)
+    axes = "xyz"
+    if np.any(overhang > allowance):
         detail = ", ".join(
             f"{axes[i]}: nest [{nest_bmin[i]:.1f}, {nest_bmax[i]:.1f}] "
             f"vs outer [{bmin[i]:.1f}, {bmax[i]:.1f}]"
             for i in range(3)
         )
+        worst = int(np.argmax(overhang - allowance))
         raise ValueError(
             "The nested field must lie inside the outer field's bounding "
-            f"box (absolute meters); it does not. {detail}. Check that both "
-            "files carry absolute coordinates on the same origin and in the "
-            "same units."
+            f"box (absolute meters); it does not. {detail}. The worst axis "
+            f"({axes[worst]}) overhangs by {overhang[worst]:.1f} m, past the "
+            f"{allowance[worst]:.1f} m that gets clipped away. Check that "
+            "both files carry absolute coordinates on the same origin and "
+            "in the same units."
+        )
+    if np.any(overhang > tol):
+        clipped = ", ".join(
+            f"{axes[i]} by {overhang[i]:.1f} m"
+            for i in range(3) if overhang[i] > tol[i]
+        )
+        print(
+            f"cloudyview: nest overhangs the outer domain ({clipped}); "
+            "the overhanging sliver is clipped and will not be rendered."
         )
     if np.any(nest_bmax <= nest_bmin):
         raise ValueError(

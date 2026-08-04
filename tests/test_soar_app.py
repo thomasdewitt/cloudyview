@@ -552,6 +552,17 @@ def test_file_browser_filters_netcdf_files_and_formats_sizes(tmp_path):
     assert format_file_size(4 * 1024**3) == "4.0 GB"
 
 
+def test_file_browser_hides_dotfiles(tmp_path):
+    """A home directory is mostly ~/.cache; none of it holds cloud fields."""
+    (tmp_path / ".cache").mkdir()
+    (tmp_path / ".hidden.nc").write_bytes(b"0")
+    (tmp_path / "cloud.nc").write_bytes(b"0")
+
+    entries = list_netcdf_entries(tmp_path)
+
+    assert [entry.name for entry in entries] == ["cloud.nc"]
+
+
 def test_select_browser_path_drives_liquid_and_ice_handoff(tmp_path):
     app = make_event_app()
     liquid = tmp_path / "liquid.nc"

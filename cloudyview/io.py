@@ -228,6 +228,35 @@ def group_domain_extent(filepath: str, group: Optional[str] = None):
     return np.array(bmin), np.array(bmax), min(spacing)
 
 
+# A nest's box is built from cell edges (half a cell beyond the outermost
+# centers), so a nest whose top cell is thicker than its parent's can end
+# up a hair above the parent's own top edge — a grid-edge artifact, not a
+# misplaced field. Overhang up to this fraction of the outer span on an
+# axis is clipped away by the march (which never leaves the outer box)
+# instead of being refused. Anything larger is a real placement error:
+# wrong origin or wrong units, which miss by orders of magnitude.
+NEST_OVERHANG_FRACTION = 0.01
+
+
+def nest_overhang(outer_min, outer_max, nest_min, nest_max):
+    """Per-axis (overhang, allowance) in meters for a nest inside a parent.
+
+    Overhang is how far the nest's box reaches past the parent's on each
+    axis (0 where it stays inside); allowance is what
+    `NEST_OVERHANG_FRACTION` permits there. ``overhang <= allowance`` on
+    every axis means the pair nests — the excess is simply never marched.
+    """
+    outer_min = np.asarray(outer_min, dtype=np.float64)
+    outer_max = np.asarray(outer_max, dtype=np.float64)
+    nest_min = np.asarray(nest_min, dtype=np.float64)
+    nest_max = np.asarray(nest_max, dtype=np.float64)
+    overhang = np.maximum(
+        np.maximum(outer_min - nest_min, nest_max - outer_max), 0.0
+    )
+    allowance = NEST_OVERHANG_FRACTION * np.maximum(outer_max - outer_min, 1.0)
+    return overhang, allowance
+
+
 def find_nestable_group_pairs(filepath: str, groups: Optional[list] = None):
     """List every (outer, inner) group pair that forms a nested domain.
 
@@ -261,9 +290,10 @@ def find_nestable_group_pairs(filepath: str, groups: Optional[list] = None):
             if inner == outer or inner_dx >= outer_dx:
                 continue
             tol = 1e-9 * np.maximum(outer_max - outer_min, 1.0)
-            if np.any(inner_min < outer_min - tol):
-                continue
-            if np.any(inner_max > outer_max + tol):
+            overhang, allowance = nest_overhang(
+                outer_min, outer_max, inner_min, inner_max
+            )
+            if np.any(overhang > allowance):
                 continue
             # A child filling the parent on every axis hides it completely;
             # that is two renders of one domain, not a refinement.

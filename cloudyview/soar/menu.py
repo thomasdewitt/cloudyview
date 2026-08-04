@@ -325,10 +325,16 @@ def format_file_size(size_bytes: int) -> str:
 
 
 def list_netcdf_entries(directory: str | Path) -> list[FileEntry]:
-    """Return directories and ``*.nc`` files for the in-window browser."""
+    """Return directories and ``*.nc`` files for the in-window browser.
+
+    Dotfiles and dot-directories are left out: a home directory is mostly
+    ~/.cache and ~/.config, and none of it holds cloud fields.
+    """
     root = Path(directory).expanduser()
     entries: list[FileEntry] = []
     for child in root.iterdir():
+        if child.name.startswith("."):
+            continue
         try:
             is_dir = child.is_dir()
         except OSError:

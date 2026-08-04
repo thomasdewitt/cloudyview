@@ -582,6 +582,44 @@ def test_a_middle_pair_of_three_levels_loads(tmp_path):
     assert app.renderer.nest.shape == _nest_field().shape
 
 
+def _proud_nest(overhang_m):
+    """A nest sitting `overhang_m` above the outer domain's top edge.
+
+    Real STEAM nests do this by a cell edge: the nest's top cell is thinner
+    than the parent's, so its box lands slightly proud of the parent's.
+    """
+    from cloudyview.cloudfield import CloudField
+
+    nest = _nest_field()
+    fine = VOXEL_M / REFINE
+    outer_top = OUTER_NZ * VOXEL_M
+    # Place the nest's top cell edge overhang_m above the outer top edge.
+    z_top_center = outer_top + overhang_m - 0.5 * fine
+    z = z_top_center - (np.arange(nest.z.size)[::-1] + 0) * fine
+    return CloudField(lwc=nest.lwc, x=nest.x, y=nest.y, z=z)
+
+
+def test_a_nest_proud_of_the_domain_by_a_sliver_is_clipped(capsys):
+    """A cell-edge overhang is the grid's doing; the march clips it.
+
+    10 m over this 1600 m column is the same 0.6% as the 37 m by which a
+    real STEAM nest_a clears its parent's 20 km top.
+    """
+    nest = _proud_nest(overhang_m=10.0)
+    renderer = _renderer(nest=nest)
+
+    assert renderer.nested is True
+    assert "clipped" in capsys.readouterr().out
+
+
+def test_a_nest_hanging_well_outside_the_domain_is_still_refused():
+    """Wrong origin or wrong units miss by far more than a cell edge."""
+    nest = _proud_nest(overhang_m=400.0)  # 25% of the column
+
+    with pytest.raises(ValueError, match="must lie inside"):
+        _renderer(nest=nest)
+
+
 def test_a_nest_covering_the_whole_domain_is_refused():
     """The 'only the nest shows' case is an error, not a confusing render."""
     from cloudyview.cloudfield import CloudField
