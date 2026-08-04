@@ -12,7 +12,8 @@ import { packUniforms, renderTargetSize, chooseQualityTier } from
 import { spectralLightingColors, effectiveLightTransferSplit,
          directionFromAzimuthElevation } from "../web/soar/spectral.js";
 import { cameraBasis, cameraWorldOrigin } from "../web/soar/camera.js";
-import { volumeAABB, minVoxelSize } from "../web/soar/field.js";
+import { volumeAABB, minVoxelSize, periodicMarchCapM, viewSpansDomainEdge,
+         nestOverhang, nestablePairs } from "../web/soar/field.js";
 
 const input = JSON.parse(await new Promise((resolve, reject) => {
   let data = "";
@@ -57,6 +58,18 @@ if (input.scalars) {
     ([rel, bmin, bmax]) => cameraWorldOrigin(rel, bmin, bmax));
   out.scalars.tiers = (input.scalars.tiers || []).map(
     (times) => chooseQualityTier(times));
+  out.scalars.marchCap = (input.scalars.marchCap || []).map(
+    ([camZ, direction, bmin, bmax]) =>
+      periodicMarchCapM(camZ, direction, bmin, bmax));
+  out.scalars.spansEdge = (input.scalars.spansEdge || []).map(
+    ([origin, azimuth, elevation, fov, aspect, bmin, bmax]) =>
+      viewSpansDomainEdge(
+        origin, cameraBasis(azimuth, elevation), fov, aspect, bmin, bmax));
+  out.scalars.nestOverhang = (input.scalars.nestOverhang || []).map(
+    ([outerMin, outerMax, nestMin, nestMax]) =>
+      nestOverhang(outerMin, outerMax, nestMin, nestMax));
+  out.scalars.nestPairs = (input.scalars.nestPairs || []).map(
+    (domains) => nestablePairs(domains));
 }
 
 process.stdout.write(JSON.stringify(out));

@@ -12,6 +12,11 @@
 
 "use strict";
 
+import {
+  AERIAL_PERSPECTIVE_STRENGTH, AERIAL_BETA_PER_KM, AERIAL_SCALE_HEIGHT_M,
+  PERIODIC_AIR_TAU_CUTOFF, PERIODIC_MAX_WRAPS,
+} from "./constants.js";
+
 /** io.NEST_OVERHANG_FRACTION — 1% of the parent span, per axis. */
 export const NEST_OVERHANG_FRACTION = 0.01;
 
@@ -171,6 +176,83 @@ export function domainExtent(x, y, z) {
     }
   }
   return { bmin, bmax, dx };
+}
+
+/**
+ * How far a periodic march can usefully go before clear-air extinction (or
+ * two domain wraps) makes further samples invisible. Mirror of the shader's
+ * own cap, and of engine.periodic_march_cap_m.
+ */
+export function periodicMarchCapM(
+  camZ, direction, bmin, bmax,
+  aerialPerspectiveStrength = AERIAL_PERSPECTIVE_STRENGTH,
+) {
+  let cap = Infinity;
+  const hLen = Math.hypot(direction[0], direction[1]);
+  if (hLen > 1e-8) {
+    cap = PERIODIC_MAX_WRAPS *
+      Math.max(bmax[0] - bmin[0], bmax[1] - bmin[1]) / hLen;
+  }
+  if (aerialPerspectiveStrength > 0.0) {
+    const beta0 = AERIAL_BETA_PER_KM * 1e-3;
+    const scaleH = AERIAL_SCALE_HEIGHT_M;
+    const z0 = Math.max(camZ, 0.0);
+    const mu = direction[2];
+    const tauCap = PERIODIC_AIR_TAU_CUTOFF / aerialPerspectiveStrength;
+    const e0 = Math.exp(-z0 / scaleH);
+    if (Math.abs(mu) > 1e-6) {
+      const a = e0 - tauCap * mu / (beta0 * scaleH);
+      if (a > 0.0) {
+        const t = (-scaleH * Math.log(a) - z0) / mu;
+        if (t > 0.0) cap = Math.min(cap, t);
+      }
+    } else {
+      cap = Math.min(cap, tauCap / (beta0 * e0));
+    }
+  }
+  return cap;
+}
+
+/** Forward distance at which a ray leaves the slab(s) of `axes`. */
+function slabExitT(origin, direction, lo, hi, axes) {
+  let tExit = Infinity;
+  for (const axis of axes) {
+    const d = direction[axis];
+    if (Math.abs(d) < 1e-12) continue;
+    const t0 = (lo[axis] - origin[axis]) / d;
+    const t1 = (hi[axis] - origin[axis]) / d;
+    tExit = Math.min(tExit, Math.max(t0, t1));
+  }
+  return tExit;
+}
+
+/**
+ * True when a periodic view marches past the domain's lateral walls — i.e.
+ * when you are seeing wrapped copies of the field.
+ *
+ * behold's volume is finite and does not tile, so its frame of the same
+ * camera will differ. That is worth saying before someone waits an hour for
+ * a render that does not match what they framed.
+ */
+export function viewSpansDomainEdge(origin, basis, fovDeg, aspect, bmin, bmax) {
+  const [forward, right, up] = basis;
+  const tanHalf = Math.tan(fovDeg * Math.PI / 360.0);
+  const directions = [forward];
+  for (const sx of [-1.0, 1.0]) {
+    for (const sy of [-1.0, 1.0]) {
+      const d = [0, 1, 2].map((i) =>
+        forward[i] + sx * aspect * tanHalf * right[i] + sy * tanHalf * up[i]);
+      const n = Math.hypot(d[0], d[1], d[2]);
+      directions.push([d[0] / n, d[1] / n, d[2] / n]);
+    }
+  }
+  for (const direction of directions) {
+    const tHorizontal = slabExitT(origin, direction, bmin, bmax, [0, 1]);
+    const tVertical = slabExitT(origin, direction, bmin, bmax, [2]);
+    const cap = periodicMarchCapM(origin[2], direction, bmin, bmax);
+    if (tHorizontal < Math.min(tVertical, cap)) return true;
+  }
+  return false;
 }
 
 /**

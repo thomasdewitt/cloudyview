@@ -273,6 +273,80 @@ def test_spectral_and_helper_math_matches_python():
         assert choose_quality_tier(times) == have
 
 
+def test_domain_geometry_helpers_match_python():
+    """The march cap, the wrapped-view notice, and the nesting rules."""
+    from cloudyview.soar.app import view_spans_domain_edge
+    from cloudyview.soar.engine import periodic_march_cap_m
+    from cloudyview import io as cv_io
+
+    bmin = [-6000.0, -5000.0, 0.0]
+    bmax = [6000.0, 5000.0, 4000.0]
+    cap_cases = [
+        (500.0, [1.0, 0.0, 0.0]),
+        (500.0, [0.0, 0.0, 1.0]),
+        (500.0, [0.0, 0.0, -1.0]),
+        (2500.0, [0.6, 0.6, 0.5291502622129181]),
+        (0.0, [0.7071067811865476, 0.7071067811865476, 0.0]),
+    ]
+    edge_cases = [
+        ([0.0, 0.0, 500.0], 0.0, 0.0, 100.0, 16 / 9),
+        ([0.0, 0.0, 3000.0], 0.0, -85.0, 30.0, 16 / 9),
+        ([5000.0, 4000.0, 200.0], 45.0, 5.0, 100.0, 16 / 9),
+    ]
+    # Two nests inside one parent, plus a third that overhangs badly.
+    domains = [
+        {"name": "parent", "bmin": [0.0, 0.0, 0.0],
+         "bmax": [20000.0, 20000.0, 4000.0], "dx": 100.0},
+        {"name": "nest_a", "bmin": [5000.0, 5000.0, 0.0],
+         "bmax": [15000.0, 15000.0, 4037.0], "dx": 50.0},
+        {"name": "nest_b", "bmin": [8000.0, 8000.0, 0.0],
+         "bmax": [12000.0, 12000.0, 2000.0], "dx": 25.0},
+        {"name": "elsewhere", "bmin": [90000.0, 0.0, 0.0],
+         "bmax": [95000.0, 5000.0, 4000.0], "dx": 10.0},
+    ]
+    overhang_cases = [
+        ([0.0, 0.0, 0.0], [20000.0, 20000.0, 4000.0],
+         [5000.0, 5000.0, 0.0], [15000.0, 15000.0, 4037.0]),
+        ([0.0, 0.0, 0.0], [1600.0, 1600.0, 1600.0],
+         [100.0, 100.0, 0.0], [500.0, 500.0, 1610.0]),
+    ]
+
+    got = _run_harness({"scalars": {
+        "marchCap": [[z, d, bmin, bmax] for z, d in cap_cases],
+        "spansEdge": [[o, az, el, fov, aspect, bmin, bmax]
+                      for o, az, el, fov, aspect in edge_cases],
+        "nestOverhang": [[a, b, c, d] for a, b, c, d in overhang_cases],
+        "nestPairs": [domains],
+    }})["scalars"]
+
+    for (cam_z, direction), have in zip(cap_cases, got["marchCap"]):
+        want = periodic_march_cap_m(cam_z, np.array(direction), bmin, bmax)
+        if np.isinf(want):
+            assert have is None or have > 1e300
+        else:
+            assert np.isclose(want, have, rtol=1e-12), (
+                f"march cap differs for z={cam_z} d={direction}")
+
+    for (origin, azimuth, elevation, fov, aspect), have in zip(
+            edge_cases, got["spansEdge"]):
+        want = view_spans_domain_edge(
+            origin, Camera(azimuth=azimuth, elevation=elevation, fov=fov),
+            np.array(bmin), np.array(bmax), aspect=aspect)
+        assert bool(want) == bool(have), (
+            f"wrapped-view notice differs at {origin} az={azimuth} el={elevation}")
+
+    for (o_min, o_max, n_min, n_max), have in zip(
+            overhang_cases, got["nestOverhang"]):
+        w_over, w_allow = cv_io.nest_overhang(
+            np.array(o_min), np.array(o_max), np.array(n_min), np.array(n_max))
+        assert np.allclose(w_over, have["overhang"], rtol=1e-12, atol=1e-9)
+        assert np.allclose(w_allow, have["allowance"], rtol=1e-12, atol=1e-9)
+
+    # The pair rule: every valid (outer, inner) is offered, none invented.
+    assert [list(p) for p in got["nestPairs"][0]] == [
+        ["parent", "nest_a"], ["parent", "nest_b"], ["nest_a", "nest_b"]]
+
+
 def test_browser_refuses_a_below_horizon_sun_in_a_periodic_domain(renderer):
     """The same refusal as the engine's, for the same reason."""
     state = _state_of(renderer)

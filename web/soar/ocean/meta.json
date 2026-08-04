@@ -1,0 +1,9 @@
+{
+ "schema": "cloudyview.web.ocean.v1",
+ "n": 512,
+ "dx_m": 0.2,
+ "mips": 10,
+ "format": "rgba16float",
+ "tile_extent_m": 102.4,
+ "seed": 20260717
+}
