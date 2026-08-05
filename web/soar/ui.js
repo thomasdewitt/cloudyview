@@ -241,6 +241,18 @@ export class UI {
                   "the path-traced command, for a terminal",
                   () => this.open("behold")));
     m.append(item("Controls", null, () => this.open("controls")));
+    m.append(item(
+      `Minimap: ${app.minimap && app.minimapEnabled ? "on" : "off"}`,
+      app.minimap
+        ? "M — the overhead albedo map, top right"
+        : (app._minimapProblem ?? "not available for this field"),
+      () => { app.toggleMinimap(); this.open("main"); }));
+    m.append(item(
+      `Bird: ${app.bird && app.birdEnabled ? "on" : "off"}`,
+      app.bird
+        ? "B — a swift, flying ahead of you"
+        : (app._birdProblem ?? "not available for this field"),
+      () => { app.toggleBird(); this.open("main"); }));
     m.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
                   "wrap the field laterally, so flight never runs out",
                   () => { app.togglePeriodic(); this.open("main"); }));

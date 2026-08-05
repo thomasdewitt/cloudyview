@@ -96,6 +96,9 @@ function levelReceiver(device, label, onProgress) {
       onProgress?.(message.done, state.slabsDone, state.slabs);
     } else if (message.type === "faces") {
       state.faces = message.faces;
+    } else if (message.type === "map") {
+      state.albedo = message.data;
+      state.albedoShape = message.shape;
     }
   };
 
@@ -211,6 +214,9 @@ export async function loadFileScene(
       if (!receiver.state.faces) {
         throw new Error(`The wrap faces for '${label}' never arrived.`);
       }
+      if (!receiver.state.albedo) {
+        throw new Error(`The overhead map for '${label}' never arrived.`);
+      }
       built.push({ level, receiver });
     }
 
@@ -239,6 +245,10 @@ export async function loadFileScene(
       oceanTileExtent: oceanTile.tileExtent,
       oceanMaxLod: oceanTile.maxLod,
       _faces: outer.receiver.state.faces,
+      // The minimap always shows the OUTER domain; the nest is drawn on it as
+      // a footprint rectangle, which is why only this level's map is kept.
+      albedo: outer.receiver.state.albedo,
+      albedoShape: outer.receiver.state.albedoShape,
       _nest: null,
       _nestDummy: createNestDummy(device),
       // A file's domain is NOT known to be periodic. nest_a in a nested

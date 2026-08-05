@@ -382,6 +382,50 @@ def test_extinction_matches_python():
             f"python={want} js={have}")
 
 
+def test_minimap_column_albedo_matches_glimpse():
+    """The minimap's column integral, against glimpse itself.
+
+    Worth pinning separately from extinction because it is a genuinely
+    different quantity. glimpse goes through water paths and the empirical
+    path-to-tau relations, which weight ice at 1/(0.350*30) = 0.095 m^2/g
+    against the extinction volume's 0.055 — so the map cannot be derived from
+    the texture the raymarcher uses, and the two arithmetics can drift apart
+    without anything else noticing.
+
+    Only the arithmetic is pinned here, not the minimap's screen layout: that
+    reference lives in soar/hud.py, which this port retires.
+    """
+    from cloudyview.glimpse import _two_stream_albedo
+    from cloudyview import optical_depth
+
+    # A stretched grid, so the cell-thickness rule at both boundaries and in
+    # the interior all matter.
+    z = np.array([0.0, 40.0, 90.0, 150.0, 220.0, 300.0, 500.0, 900.0],
+                 dtype=np.float64)
+    columns = [
+        (np.zeros(len(z)), np.zeros(len(z))),                   # clear sky
+        (np.array([0, 0, 0.4, 0.9, 1.2, 0.3, 0, 0]), np.zeros(len(z))),
+        (np.zeros(len(z)), np.array([0, 0, 0, 0.05, 0.2, 0.4, 0.3, 0.02])),
+        (np.array([0, 0.1, 0.6, 0.2, 0, 0, 0, 0]),
+         np.array([0, 0, 0, 0.1, 0.5, 0.9, 0.4, 0.05])),        # mixed phase
+        (np.full(len(z), 3.0), np.full(len(z), 3.0)),           # saturated
+    ]
+
+    got = _run_harness({"scalars": {
+        "columnAlbedo": [[list(lwc), list(iwc), list(z)] for lwc, iwc in columns],
+    }})["scalars"]["columnAlbedo"]
+
+    for (lwc, iwc), have in zip(columns, got):
+        tau = optical_depth.vertically_integrated_optical_depth(
+            np.asarray(lwc, dtype=np.float32).reshape(1, 1, -1),
+            z,
+            iwc=np.asarray(iwc, dtype=np.float32).reshape(1, 1, -1),
+        )
+        want = float(_two_stream_albedo(tau)[0, 0])
+        assert np.isclose(want, have, rtol=1e-6, atol=1e-9), (
+            f"column albedo differs: python={want} js={have}")
+
+
 def test_browser_refuses_a_below_horizon_sun_in_a_periodic_domain(renderer):
     """The same refusal as the engine's, for the same reason."""
     state = _state_of(renderer)

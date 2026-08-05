@@ -14,7 +14,9 @@ import { spectralLightingColors, effectiveLightTransferSplit,
 import { cameraBasis, cameraWorldOrigin } from "../web/soar/camera.js";
 import { volumeAABB, minVoxelSize, periodicMarchCapM, viewSpansDomainEdge,
          nestOverhang, nestablePairs } from "../web/soar/field.js";
-import { sigmaAt, rhoAirAt } from "../web/soar/optical.js";
+import { sigmaAt, rhoAirAt, rhoAirTable, cellThickness,
+         opticalDepthFromWaterPaths, twoStreamAlbedo } from
+  "../web/soar/optical.js";
 
 const input = JSON.parse(await new Promise((resolve, reject) => {
   let data = "";
@@ -73,6 +75,20 @@ if (input.scalars) {
     (domains) => nestablePairs(domains));
   out.scalars.extinction = (input.scalars.extinction || []).map(
     ([lwc, iwc, z]) => sigmaAt(lwc, iwc, rhoAirAt(z)));
+  // The minimap's column integral, exactly as the ingest worker accumulates
+  // it: water paths first, then glimpse's empirical path-to-tau relations,
+  // then two-stream albedo. NOT a reduction of the extinction above.
+  out.scalars.columnAlbedo = (input.scalars.columnAlbedo || []).map(
+    ([lwc, iwc, z]) => {
+      const rho = rhoAirTable(z);
+      const dz = cellThickness(z);
+      let lwp = 0.0, iwp = 0.0;
+      for (let k = 0; k < z.length; k++) {
+        lwp += lwc[k] * rho[k] * dz[k];
+        iwp += iwc[k] * rho[k] * dz[k];
+      }
+      return twoStreamAlbedo(opticalDepthFromWaterPaths(lwp, iwp));
+    });
 }
 
 process.stdout.write(JSON.stringify(out));

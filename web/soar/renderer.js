@@ -79,6 +79,19 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
  * value cannot do. Each sentinel must appear exactly once — a shader that
  * quietly failed to specialize would render the wrong thing at full speed.
  */
+/**
+ * Run whatever wants to draw on top of the finished frame — the minimap, the
+ * bird. Each is `(encoder, targetView, targetFormat)` and encodes its own
+ * load-op-"load" pass; nulls are skipped so a caller can pass a fixed-shape
+ * list of things that are individually on or off.
+ */
+function encodeOverlays(overlays, encoder, targetView, targetFormat) {
+  if (!overlays) return;
+  for (const overlay of overlays) {
+    overlay?.(encoder, targetView, targetFormat);
+  }
+}
+
 export function specializeShader(source, { periodic, nested, maxLightSteps }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
@@ -410,6 +423,11 @@ export class Renderer {
     if (this._targets && this._targets.w === w && this._targets.h === h) {
       return this._targets;
     }
+    // Frames already submitted may still be reading these. Destroying a
+    // texture out from under in-flight commands is legal by the letter of the
+    // spec, but it is the kind of thing that segfaults a browser rather than
+    // raising, and a resize happens once, not per frame — so wait.
+    if (this._targets) await this.device.queue.onSubmittedWorkDone();
     for (const t of [this._targets?.sample, this._targets?.accumA,
                      this._targets?.accumB]) {
       t?.destroy();
@@ -518,14 +536,24 @@ export class Renderer {
   /**
    * March, accumulate, present. `view` is everything packUniforms takes bar
    * the sampling flags, which this method owns.
+   *
+   * `target` may be a texture view or a function returning one, and for the
+   * canvas it MUST be the function. A swapchain texture is only valid until
+   * the end of the animation-frame callback that asked for it, and this
+   * method awaits the render targets first — an await that goes to the GPU
+   * and back whenever the canvas has just been resized. Taking the view
+   * before that await meant drawing into a texture the compositor had
+   * already reclaimed, which is not an exception, it is a crashed browser.
    */
-  async drawFrame(targetView, targetFormat, outputSize, view,
-                  { deltaSeconds = null, accumulate = true } = {}) {
+  async drawFrame(target, targetFormat, outputSize, view,
+                  { deltaSeconds = null, accumulate = true,
+                    overlays = null } = {}) {
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
     const renderSize = renderTargetSize(outputSize, this.renderScale);
     const targets = await this._targetsFor(renderSize[0], renderSize[1]);
+    const targetView = typeof target === "function" ? target() : target;
 
     // Pack once to learn the scene key, then re-pack with the sampling flags
     // the plan chose. Row 10 is excluded from the key precisely so this is
@@ -571,6 +599,7 @@ export class Renderer {
         this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
                          false);
       }
+      encodeOverlays(overlays, encoder, targetView, targetFormat);
       this.device.queue.submit([encoder.finish()]);
       return;
     }
@@ -601,6 +630,7 @@ export class Renderer {
 
     this._encodeBlit(encoder, outTex, targetView, targetFormat,
                      renderSize[0] === outputW && renderSize[1] === outputH);
+    encodeOverlays(overlays, encoder, targetView, targetFormat);
     this.device.queue.submit([encoder.finish()]);
 
     this._accumIndex = 1 - this._accumIndex;
@@ -608,6 +638,12 @@ export class Renderer {
     this._lastPresented = outTex;
   }
 
+  /**
+   * Overlays are encoded into the SAME command buffer as the frame they sit
+   * on, after the blit that put it on screen. A separate submit would work
+   * but would let the compositor pick up the bare frame in between, which
+   * reads as the minimap flickering.
+   */
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact) {
     const entries = [{ binding: 0, resource: srcTex.createView() }];
     if (!exact) entries.push({ binding: 1, resource: this.blitSampler });

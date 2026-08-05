@@ -186,3 +186,30 @@ export const SIGMA_LIQUID_PREFACTOR =
   1.5 / (RHO_WATER_G_M3 * RE_LIQUID_UM * 1e-6);   // 0.15 m^2/g
 export const SIGMA_ICE_PREFACTOR =
   1.5 / (RHO_ICE_G_M3 * RE_ICE_UM * 1e-6);        // 0.054525... m^2/g
+
+// --- column optical depth (glimpse) ---------------------------------------
+//
+// The minimap is a glimpse image, and glimpse does NOT integrate the same
+// sigma the raymarch uses. It goes through water paths and empirical
+// path-to-tau relations, which for ice give 1/(0.350*30) = 0.0952 m^2/g
+// against sigma's 0.0545. So the map cannot be derived from the extinction
+// volume — it is accumulated separately, from lwc and iwc, on the way past.
+
+export const LWP_TAU_COEFF = 0.6292;     // LWP = 0.6292 * tau * re_liquid
+export const IWP_TAU_COEFF = 0.350;      // IWP = 0.350  * tau * re_ice
+
+// Conservative-scattering two-stream reflectance, A = tau / (tau + 2/(1-g)).
+// Unlike beam opacity it keeps contrast from cirrus (tau ~ 1) all the way to
+// deep cores (tau ~ 100), which is the whole point of the map.
+export const TWO_STREAM_G = 0.85;
+export const TWO_STREAM_DENOM = 2.0 / (1.0 - TWO_STREAM_G);   // 13.33...
+
+// --- minimap layout (soar/hud.py) -----------------------------------------
+
+export const MAP_HEIGHT_FRAC = 0.22;
+export const MAP_MAX_WIDTH_FRAC = 0.34;
+export const MAP_MARGIN_FRAC = 0.025;
+export const MAP_OPACITY = 0.74;
+// The same sky-blue -> white ramp basic_render uses, so a glimpse PNG and
+// the corner of the flight view read as the same picture.
+export const MAP_SKY_BLUE = [0x3a / 255, 0x4a / 255, 0xa6 / 255];

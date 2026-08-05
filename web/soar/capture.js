@@ -21,7 +21,8 @@ const STILL_FORMAT = "rgba8unorm";
  * untouched, which also means the accumulation the viewer had built up is
  * spent — the caller resets it.
  */
-export async function renderStill(device, renderer, view, size, frames) {
+export async function renderStill(device, renderer, view, size, frames,
+                                  overlays = null) {
   const [w, h] = size;
   if (w > device.limits.maxTextureDimension2D ||
       h > device.limits.maxTextureDimension2D) {
@@ -46,7 +47,9 @@ export async function renderStill(device, renderer, view, size, frames) {
       await renderer.drawFrame(
         targetView, STILL_FORMAT, size,
         { ...view, frameIndex: (view.frameIndex ?? 0) + i },
-        { deltaSeconds: null });
+        // Every pass clears the target before blitting into it, so drawing
+        // the overlays each time composites them once, not sixty-four times.
+        { deltaSeconds: null, overlays });
     }
     return await readBack(device, texture, w, h);
   } finally {

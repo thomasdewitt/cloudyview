@@ -236,6 +236,7 @@ export async function loadDemoScene(device, baseUrl, oceanUrl, progress) {
   const volumeBytes = await fetchBytes(
     `${baseUrl}/volume.bin`, (f) => progress?.("Downloading the cloud field…", f * 0.8));
   const facesBytes = await fetchBytes(`${baseUrl}/faces.bin`);
+  const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
 
   progress?.("Loading the ocean surface…", 0.85);
   const ocean = await loadOceanTile(device, oceanUrl);
@@ -267,6 +268,9 @@ export async function loadDemoScene(device, baseUrl, oceanUrl, progress) {
     oceanTileExtent: ocean.tileExtent,
     oceanMaxLod: ocean.maxLod,
     _faces: faces,
+    albedo: new Float32Array(
+      mapBytes.buffer, mapBytes.byteOffset, mapBytes.byteLength / 4),
+    albedoShape: meta.map.shape_yx,
     _nest: null,
     _nestDummy: createNestDummy(device),
     periodicDefault: true,

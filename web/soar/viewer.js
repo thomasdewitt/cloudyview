@@ -11,6 +11,8 @@ import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoScene, loadOceanTile } from "./scene.js";
+import { Minimap } from "./minimap.js";
+import { Bird } from "./bird.js";
 import { UI } from "./ui.js";
 import { mod360 } from "./spectral.js";
 import {
@@ -76,6 +78,8 @@ class Viewer {
 
   async start(source, progress) {
     this.shaderSource = await (await fetch("raymarch.wgsl")).text();
+    this.hudSource = await (await fetch("hud.wgsl")).text();
+    this.birdSource = await (await fetch("bird.wgsl")).text();
     this.progress = progress;
 
     // The UI is built before the field loads, because loading a file asks
@@ -106,9 +110,13 @@ class Viewer {
       this.stop = true;
       await this.device.queue.onSubmittedWorkDone();
       this.renderer?.destroy();
+      this.minimap?.destroy();
+      this.bird?.destroy();
       this.scene.destroy();
       this.scene = null;
       this.renderer = null;
+      this.minimap = null;
+      this.bird = null;
       this.frameIndex = 0;
       this._lastSignature = null;
       this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
@@ -143,6 +151,29 @@ class Viewer {
     await this.renderer.init();
     this.camera = new FlightCamera(this.scene.bmin, this.scene.bmax,
                                    { periodic: this.renderer.periodic });
+
+    // The map and the bird are overlays, not the picture. A GPU that cannot
+    // hold one (or a field too wide for a 2D texture) is a reason to fly
+    // without it and say so, not a reason to fail the load.
+    try {
+      this.minimap = await new Minimap(this.device, {
+        albedo: this.scene.albedo, shape: this.scene.albedoShape,
+      }).init(this.canvasFormat, this.hudSource);
+    } catch (err) {
+      this.minimap = null;
+      this._minimapProblem = String(err?.message || err);
+    }
+    try {
+      this.bird = new Bird(this.device, {
+        volumeView: this.scene.volumeView, sampler: this.renderer.volSampler,
+        bmin: this.scene.bmin, bmax: this.scene.bmax,
+      });
+      await this.bird.init(this.canvasFormat, this.birdSource);
+    } catch (err) {
+      this.bird = null;
+      this._birdProblem = String(err?.message || err);
+    }
+
     this.ui.setSubtitle(this.sourceLabel);
     if (this.scene.nestNote) this.ui.say(this.scene.nestNote, 8);
     this.stop = false;
@@ -283,14 +314,8 @@ class Viewer {
         return;
       case "f": this.toggleFullscreen(); return;
       case "F3": e.preventDefault(); this.ui.cycleStats(); return;
-      // Honest until they exist: a toggle that reports "on" and draws
-      // nothing is worse than saying so.
-      case "b":
-        this.ui.say("The bird has not been ported to the browser yet.", 2.5);
-        return;
-      case "m":
-        this.ui.say("The minimap has not been ported to the browser yet.", 2.5);
-        return;
+      case "b": this.toggleBird(); return;
+      case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
       case "F12": e.preventDefault(); this.ui.open("capture"); return;
       default: break;
@@ -358,6 +383,30 @@ class Viewer {
     this.camera.periodic = this.renderer.periodic;
     this.camera.constrain();
     this.ui.say(`Periodic domain ${this.renderer.periodic ? "on" : "off"}.`);
+  }
+
+  toggleMinimap() {
+    if (!this.minimap) {
+      this.ui.say(
+        this._minimapProblem
+          ? `No minimap for this field: ${this._minimapProblem}`
+          : "There is no minimap for this field.", 5);
+      return;
+    }
+    this.minimapEnabled = !this.minimapEnabled;
+    this.ui.say(`Minimap ${this.minimapEnabled ? "on" : "off"}.`);
+  }
+
+  toggleBird() {
+    if (!this.bird) {
+      this.ui.say(
+        this._birdProblem
+          ? `No bird for this field: ${this._birdProblem}`
+          : "There is no bird for this field.", 5);
+      return;
+    }
+    this.birdEnabled = !this.birdEnabled;
+    this.ui.say(`Bird ${this.birdEnabled ? "on" : "off"}.`);
   }
 
   toggleFullscreen() {
@@ -433,10 +482,26 @@ class Viewer {
     this.ui.close();
     this.ui.showProgress(
       `Rendering a ${size[0]}x${size[1]} still…`, 0);
+    // A still is rendered at the capture size, not the window's, so the
+    // overlays are re-laid-out for it. The bird holds the pose it had when
+    // the button was pressed rather than flying on through the accumulation.
+    const stillOverlays = [];
+    if (overlays && this.bird && this.birdEnabled) {
+      this.bird.writeUniforms(this.camera, size, {
+        sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+      });
+      stillOverlays.push((enc, view, format) =>
+        this.bird.encodePass(enc, view, format, size));
+    }
+    if (overlays && this.minimap && this.minimapEnabled) {
+      this.minimap.update(this.camera, this.scene, size);
+      stillOverlays.push((enc, view, format) =>
+        this.minimap.encodePass(enc, view, format));
+    }
     try {
       const image = await renderStill(
         this.device, this.renderer, this._viewKwargs(), size,
-        K.STILL_ACCUMULATE_FRAMES);
+        K.STILL_ACCUMULATE_FRAMES, stillOverlays);
       this.ui.showProgress("Encoding…", 0.95);
       const blob = await imageDataToPng(image, this.renderMetadata(size));
       download(blob, timestampedName("cloudyview_soar", ".png"));
@@ -447,9 +512,6 @@ class Viewer {
       this.ui.hideProgress();
       this._capturing = false;
       this._lastTime = performance.now();
-      // `overlays` will select the bird and minimap once those land; the
-      // still is clouds-only until then, which is what both buttons give.
-      void overlays;
     }
   }
 
@@ -566,10 +628,30 @@ class Viewer {
       this.canvas.height = outH;
     }
 
+    // Bird first, minimap second: the bird lives in the scene and takes the
+    // scene's depth, the map is chrome laid over the finished picture.
+    const overlays = [];
+    if (this.bird && this.birdEnabled) {
+      this.bird.update(this.paused ? 0 : dt, this.camera);
+      this.bird.writeUniforms(this.camera, [outW, outH], {
+        sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+      });
+      overlays.push((enc, view, format) =>
+        this.bird.encodePass(enc, view, format, [outW, outH]));
+    }
+    if (this.minimap && this.minimapEnabled) {
+      this.minimap.update(this.camera, this.scene, [outW, outH]);
+      overlays.push((enc, view, format) =>
+        this.minimap.encodePass(enc, view, format));
+    }
+
     try {
+      // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
+      // must not be acquired until every await inside the draw has resolved.
       await this.renderer.drawFrame(
-        this.context.getCurrentTexture().createView(), this.canvasFormat,
-        [outW, outH], this._viewKwargs(), { deltaSeconds: dt });
+        () => this.context.getCurrentTexture().createView(), this.canvasFormat,
+        [outW, outH], this._viewKwargs(),
+        { deltaSeconds: dt, overlays });
     } catch (err) {
       this.stop = true;
       this.onFailure?.("Rendering stopped.", String(err.message || err),
@@ -588,8 +670,9 @@ class Viewer {
     this.ui.drawStats({
       fps: this._fps, frameMs: this._frameMs, camera: this.camera,
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
-      frame: this.frameIndex, minimap: this.minimapEnabled,
-      bird: this.birdEnabled, recording: false,
+      frame: this.frameIndex,
+      minimap: Boolean(this.minimap && this.minimapEnabled),
+      bird: Boolean(this.bird && this.birdEnabled), recording: false,
       showSpeed: performance.now() / 1000 < this.camera.speedFlashUntil,
     });
 

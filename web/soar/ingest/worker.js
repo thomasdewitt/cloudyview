@@ -17,7 +17,10 @@ import {
   describeGroup, findLiquidWaterGroups, decoderFor, unitsMultiplier,
   attrString,
 } from "./netcdf.js";
-import { rhoAirTable, sigmaAt } from "../optical.js";
+import {
+  rhoAirTable, sigmaAt, cellThickness, opticalDepthFromWaterPaths,
+  twoStreamAlbedo,
+} from "../optical.js";
 import {
   pluginsNeeded, installPlugins, assertFiltersSupported,
 } from "./filters.js";
@@ -262,6 +265,18 @@ async function extinction({ group, units, label, slabBudget }) {
   // exp. Fixed isothermal atmosphere, matching optical_depth.py exactly.
   const rhoAir = rhoAirTable(coords.z);
 
+  // The minimap's column integrals, accumulated on the way past.
+  //
+  // glimpse does not integrate sigma — it integrates water paths and applies
+  // empirical path-to-tau relations, which weight ice nearly twice as heavily
+  // as the extinction volume does. So the map cannot be derived from the
+  // texture; it has to come from lwc and iwc directly, which is free here and
+  // a second full read of the file anywhere else. float32 accumulators, like
+  // numpy's, over a few hundred same-magnitude terms.
+  const dz = cellThickness(coords.z);
+  const lwpColumn = new Float32Array(nx * ny);
+  const iwpColumn = new Float32Array(nx * ny);
+
   // Read in TILES aligned to the file's own HDF5 chunking.
   //
   // A hyperslab that covers part of a chunk still costs the whole chunk's
@@ -364,6 +379,7 @@ async function extinction({ group, units, label, slabBudget }) {
       for (let ly = 0; ly < local.y; ly++) {
         const gy = base.y + ly;
         idx[axis.y] = (flip.y ? ny - 1 - gy : gy) - rangeStart.y;
+        const column = gx * ny + gy;
         for (let lz = 0; lz < local.z; lz++) {
           const gz = base.z + lz;
           idx[axis.z] = (flip.z ? nz - 1 - gz : gz) - rangeStart.z;
@@ -378,10 +394,16 @@ async function extinction({ group, units, label, slabBudget }) {
             qi = rawIce[flat];
             if (decodeIce) qi = decodeIce(qi);
           }
-          const sigma = sigmaAt(q * multiplier, qi * iceMultiplier, rhoAir[gz]);
+          const lwc = q * multiplier;
+          const iwc = qi * iceMultiplier;
+          const sigma = sigmaAt(lwc, iwc, rhoAir[gz]);
           if (Number.isFinite(sigma)) { if (sigma !== 0) finiteNonZero += 1; }
           else nonFinite += 1;
           out.set(o++, sigma);
+
+          const thickness = rhoAir[gz] * dz[gz];
+          lwpColumn[column] += lwc * thickness;
+          iwpColumn[column] += iwc * thickness;
         }
       }
     }
@@ -481,6 +503,18 @@ async function extinction({ group, units, label, slabBudget }) {
       `all zero (plus ${nonFinite} non-finite). That is a failed read rather ` +
       "than an empty sky — the HDF5 reader returned buffers it never filled.");
   }
+
+  // The minimap image, in glimpse's orientation: (ny, nx) with east to the
+  // right and north up. The read already delivered ascending coordinates, so
+  // glimpse's conditional flips are behind us and only the transpose is left.
+  const albedo = new Float32Array(ny * nx);
+  for (let ix = 0; ix < nx; ix++) {
+    for (let iy = 0; iy < ny; iy++) {
+      albedo[iy * nx + ix] = twoStreamAlbedo(opticalDepthFromWaterPaths(
+        lwpColumn[ix * ny + iy], iwpColumn[ix * ny + iy]));
+    }
+  }
+  post({ type: "map", label, shape: [ny, nx], data: albedo }, [albedo.buffer]);
 
   const faces = {
     x_lo: buildX(plane("x", nx - 1)),

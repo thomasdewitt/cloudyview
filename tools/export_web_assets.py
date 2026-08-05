@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from cloudyview.cloudfield import load
+from cloudyview.glimpse import glimpse
 from cloudyview.ocean_fif import generate_fif_normals
 from cloudyview.soar import engine as soar_engine
 from cloudyview.soar.engine import _build_fif_normal_mips, _ghost_face_arrays
@@ -91,6 +92,15 @@ def export_demo() -> None:
     (DEMO_OUT / "volume.bin").write_bytes(padded.tobytes())
     print(f"  volume.bin: {padded.nbytes / 1e6:.1f} MB {padded.shape}")
 
+    # The minimap image. glimpse integrates water paths rather than the sigma
+    # above — ice is weighted nearly twice as heavily — so this is a genuinely
+    # separate quantity, not a reduction of volume.bin. Shipped as float32 and
+    # colorized in the browser, so the demo and an opened file go through the
+    # same colour ramp instead of two that could drift.
+    albedo = np.ascontiguousarray(glimpse(field), dtype=np.float32)
+    (DEMO_OUT / "map.bin").write_bytes(albedo.tobytes())
+    print(f"  map.bin: {albedo.nbytes / 1e6:.2f} MB {albedo.shape} (ny, nx)")
+
     faces = _ghost_face_arrays(sigma)
     blob = b"".join(
         np.ascontiguousarray(faces[name], dtype=np.float16).tobytes()
@@ -101,7 +111,7 @@ def export_demo() -> None:
 
     bmin, bmax = soar_engine._volume_aabb(field)
     meta = {
-        "schema": "cloudyview.web.demo.v2",
+        "schema": "cloudyview.web.demo.v3",
         "source": DEMO_NC.name,
         "title": "TWP-ICE, Darwin 2006",
         "description": (
@@ -115,6 +125,9 @@ def export_demo() -> None:
             "bmin": [float(v) for v in bmin],
             "bmax": [float(v) for v in bmax],
         },
+        # Two-stream albedo for the minimap, float32, (ny, nx), east right
+        # and north up.
+        "map": {"shape_yx": [int(albedo.shape[0]), int(albedo.shape[1])]},
         # Face planes, in file order, as (rows, cols) of r16float.
         "faces": {
             "order": ["x_lo", "x_hi", "y_lo", "y_hi"],
@@ -130,9 +143,9 @@ def export_demo() -> None:
 
 def main() -> None:
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / "cloudyview" / "soar" / "raymarch.wgsl",
-                SOAR_OUT / "raymarch.wgsl")
-    print(f"copied raymarch.wgsl -> {SOAR_OUT / 'raymarch.wgsl'}")
+    for name in ("raymarch.wgsl", "hud.wgsl", "bird.wgsl"):
+        shutil.copy(REPO / "cloudyview" / "soar" / name, SOAR_OUT / name)
+        print(f"copied {name} -> {SOAR_OUT / name}")
     export_ocean()
     export_demo()
 
