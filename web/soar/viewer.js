@@ -18,7 +18,10 @@ import { UI } from "./ui.js";
 import { mod360 } from "./spectral.js";
 import {
   renderStill, imageDataToPng, download, timestampedName,
+  createOfflineTarget, beginOfflineRender, endOfflineRender, renderAccumulated,
+  readBack,
 } from "./capture.js";
+import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
 const OCEAN_URL = "ocean";
 
@@ -293,6 +296,9 @@ class Viewer {
       // sequence read as close-then-open, which is the menu "popping right
       // back up". So: no repeats, and one Escape action per 350 ms whatever
       // the source.
+      // A video render owns the GPU for minutes. Escape is the way out of it,
+      // and must not also open the menu on top of the progress bar.
+      if (this._capturing) { this._videoAbort = true; return; }
       const now = performance.now();
       if (e.repeat) return;
       if (now - (this._lockLostAt ?? -1e9) < 400) return;
@@ -460,6 +466,112 @@ class Viewer {
   trackFrameCount(samples) {
     return resampleTrack(samples, this.videoFps,
                          { periodic: this.renderer.periodic }).length;
+  }
+
+  /**
+   * Fly a recorded track again, offline, and encode it.
+   *
+   * Every output frame is rendered with the accumulation converged — the
+   * picture the live view only reaches when you stop moving — and stamped
+   * with the timestamp the track says it has, not the one the clock says.
+   * That is the whole argument for WebCodecs over screen capture: a frame
+   * may take six seconds to converge and the video is still 30 seconds long.
+   */
+  async renderTrackVideo(samples) {
+    if (this._capturing) return;
+    const { VideoWriter, evenSize } = await import("./video.js");
+
+    // Even before the offscreen texture is made, not after: H.264 refuses odd
+    // dimensions, and every frame has to be the size the encoder was told.
+    const size = evenSize(this.captureDimensions());
+    const frames = resampleTrack(samples, this.videoFps,
+                                 { periodic: this.renderer.periodic });
+
+    this._capturing = true;
+    this._videoAbort = false;
+    this.ui.close();
+    this.ui.showProgress("Choosing a codec…", 0);
+
+    let writer = null, target = null, saved = null;
+    try {
+      writer = new VideoWriter({
+        width: size[0], height: size[1], fps: this.videoFps,
+      });
+      const chosen = await writer.init();
+      for (const warning of writer.warnings ?? []) console.warn(warning);
+
+      target = createOfflineTarget(this.device, size, "soar-video");
+      saved = beginOfflineRender(this.renderer);
+
+      const t0 = performance.now();
+      for (let i = 0; i < frames.length; i++) {
+        if (this._videoAbort) throw new Error("Cancelled.");
+        const pose = {
+          position: cameraWorldOrigin(
+            frames[i].position, this.scene.bmin, this.scene.bmax),
+          azimuth: frames[i].azimuth,
+          elevation: frames[i].elevation,
+          fov: frames[i].fov,
+        };
+        const overlays = this._offlineOverlays(pose, size, 1.0 / this.videoFps);
+        await renderAccumulated(
+          this.renderer, target.view, size,
+          { ...this._viewKwargs(), camera: pose, frameIndex: i * 1024 },
+          this.videoAccumulate, overlays);
+        await writer.addFrame(
+          await readBack(this.device, target.texture, size[0], size[1]), i);
+
+        const done = (i + 1) / frames.length;
+        const rate = (i + 1) / ((performance.now() - t0) / 1000);
+        const eta = (frames.length - i - 1) / Math.max(rate, 1e-6);
+        this.ui.showProgress(
+          `Frame ${i + 1} of ${frames.length} · ${chosen.label} · ` +
+          `${eta > 90 ? `${(eta / 60).toFixed(1)} min` : `${eta.toFixed(0)} s`}` +
+          " left — Esc to cancel", done);
+      }
+
+      this.ui.showProgress("Finishing the file…", 1);
+      const blob = await writer.finish();
+      download(blob, timestampedName("cloudyview_soar", writer.fileExtension));
+      this.ui.say(
+        `Saved ${frames.length} frames as ${writer.fileExtension} ` +
+        `(${(blob.size / 1e6).toFixed(1)} MB, ${chosen.label}).`, 6);
+    } catch (err) {
+      await writer?.abort();
+      this.ui.say(this._videoAbort
+        ? "Video cancelled; nothing was saved."
+        : `Could not make the video: ${err.message}`, 6);
+    } finally {
+      target?.texture.destroy();
+      if (saved) endOfflineRender(this.renderer, saved);
+      this.ui.hideProgress();
+      this._capturing = false;
+      this._videoAbort = false;
+      this._lastTime = performance.now();
+    }
+  }
+
+  /** The overlays an offline frame draws, laid out for that frame's size. */
+  _offlineOverlays(pose, size, dt) {
+    const overlays = [];
+    if (this.bird && this.birdEnabled) {
+      this.bird.update(dt, pose);
+      this.bird.writeUniforms(pose, size, {
+        sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+      });
+      overlays.push((enc, view, format) =>
+        this.bird.encodePass(enc, view, format, size));
+    }
+    if (this.minimap && this.minimapEnabled) {
+      this.minimap.update({
+        ...pose,
+        relativePosition: () => worldToRelative(
+          pose.position, this.scene.bmin, this.scene.bmax),
+      }, this.scene, size);
+      overlays.push((enc, view, format) =>
+        this.minimap.encodePass(enc, view, format));
+    }
+    return overlays;
   }
 
   /** The track as a file, readable by cloudyview's own `render_track`. */

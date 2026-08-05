@@ -23,40 +23,67 @@ const STILL_FORMAT = "rgba8unorm";
  */
 export async function renderStill(device, renderer, view, size, frames,
                                   overlays = null) {
+  const target = createOfflineTarget(device, size, "soar-still");
+  const saved = beginOfflineRender(renderer);
+  try {
+    await renderAccumulated(renderer, target.view, size, view, frames, overlays);
+    return await readBack(device, target.texture, size[0], size[1]);
+  } finally {
+    target.texture.destroy();
+    endOfflineRender(renderer, saved);
+  }
+}
+
+/**
+ * One offscreen colour target for an offline render.
+ *
+ * Separate from renderStill because a video makes hundreds of frames at the
+ * same size, and allocating and destroying a 4K texture per frame would
+ * dominate the render.
+ */
+export function createOfflineTarget(device, size, label) {
   const [w, h] = size;
-  if (w > device.limits.maxTextureDimension2D ||
-      h > device.limits.maxTextureDimension2D) {
+  const limit = device.limits.maxTextureDimension2D;
+  if (w > limit || h > limit) {
     throw new Error(
-      `${w}x${h} is larger than this browser's ${device.limits.maxTextureDimension2D} ` +
-      "texture limit. Choose a smaller capture size.");
+      `${w}x${h} is larger than this browser's ${limit} texture limit. ` +
+      "Choose a smaller capture size.");
   }
   const texture = device.createTexture({
-    label: "soar-still",
+    label: label || "soar-offline",
     size: [w, h], format: STILL_FORMAT,
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
   });
+  return { texture, view: texture.createView(), format: STILL_FORMAT };
+}
 
-  const savedScale = renderer.flightRenderScale;
-  const savedTier = renderer.qualityTier;
-  try {
-    renderer.setQualityTier("high");
-    renderer.setRenderScale(1.0);
-    renderer.resetAccumulation();
-    const targetView = texture.createView();
-    for (let i = 0; i < frames; i++) {
-      await renderer.drawFrame(
-        targetView, STILL_FORMAT, size,
-        { ...view, frameIndex: (view.frameIndex ?? 0) + i },
-        // Every pass clears the target before blitting into it, so drawing
-        // the overlays each time composites them once, not sixty-four times.
-        { deltaSeconds: null, overlays });
-    }
-    return await readBack(device, texture, w, h);
-  } finally {
-    texture.destroy();
-    renderer.setQualityTier(savedTier);
-    renderer.setRenderScale(savedScale);
-    renderer.resetAccumulation();
+/** Force full quality for an offline render; returns what to restore. */
+export function beginOfflineRender(renderer) {
+  const saved = { scale: renderer.flightRenderScale,
+                  tier: renderer.qualityTier };
+  renderer.setQualityTier("high");
+  renderer.setRenderScale(1.0);
+  renderer.resetAccumulation();
+  return saved;
+}
+
+export function endOfflineRender(renderer, saved) {
+  renderer.setQualityTier(saved.tier);
+  renderer.setRenderScale(saved.scale);
+  renderer.resetAccumulation();
+}
+
+/** Accumulate `frames` jittered passes of one camera into `targetView`. */
+export async function renderAccumulated(renderer, targetView, size, view,
+                                        frames, overlays = null) {
+  renderer.resetAccumulation();
+  for (let i = 0; i < frames; i++) {
+    await renderer.drawFrame(
+      targetView, STILL_FORMAT, size,
+      { ...view, frameIndex: (view.frameIndex ?? 0) + i },
+      // Every pass clears the target before blitting into it, so drawing the
+      // overlays each time composites them once, not sixty-four times.
+      { deltaSeconds: null, overlays });
   }
 }
 
@@ -169,36 +196,6 @@ export function timestampedName(prefix, suffix) {
   return `${prefix}_${stamp}${suffix}`;
 }
 
-// --- video ----------------------------------------------------------------
-
-/**
- * Is frame-exact video encoding available here?
- *
- * WebCodecs is the path that matters: it takes the timestamp I give it, so a
- * 30-second flight is 30 seconds of video whether each frame took 16 ms or
- * six seconds to converge. Screen capture cannot do that.
- */
-export async function videoSupport(width, height, fps) {
-  if (typeof VideoEncoder === "undefined") {
-    return { kind: "none",
-             why: "This browser has no WebCodecs VideoEncoder." };
-  }
-  // Even dimensions are a hard H.264 requirement in every implementation.
-  const w = width & ~1, h = height & ~1;
-  for (const codec of ["avc1.640034", "avc1.640028", "vp09.00.10.08", "vp8"]) {
-    const config = {
-      codec, width: w, height: h,
-      bitrate: 24_000_000, framerate: fps,
-      latencyMode: "quality",
-      ...(codec.startsWith("avc1") ? { avc: { format: "avc" } } : {}),
-    };
-    try {
-      const support = await VideoEncoder.isConfigSupported(config);
-      if (support.supported) {
-        return { kind: "webcodecs", config: support.config ?? config };
-      }
-    } catch { /* try the next codec */ }
-  }
-  return { kind: "none",
-           why: "No codec this browser offers could be configured." };
-}
+// Codec selection lives in video.js, which decides by trial-encoding a real
+// frame rather than by asking isConfigSupported — a browser can answer
+// "supported" and then produce nothing.

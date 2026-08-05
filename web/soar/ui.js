@@ -475,6 +475,22 @@ export class UI {
     if (problem) m.append(el("div", "row", problem));
 
     m.append(el("div", "divider"));
+    // Whether video works at all is a question only video.js can answer, and
+    // it answers it by encoding a frame — so the button is built optimistically
+    // and the capability line is filled in once the module has loaded.
+    const render = item(
+      "Render it to video",
+      `${app.videoAccumulate} accumulated passes per frame, ` +
+      `at ${app.videoFps.toFixed(0)} fps`,
+      () => app.renderTrackVideo(samples));
+    m.append(render);
+    import("./video.js").then(({ videoCapabilities }) => {
+      const caps = videoCapabilities();
+      if (caps.available) return;
+      render.disabled = true;
+      const note = render.querySelector(".note");
+      if (note) note.textContent = caps.why;
+    });
     m.append(item("Save the track", "a .json cloudyview's render_track reads",
                   () => { app.downloadTrack(samples); this.open("main"); }));
     m.append(item("Discard it", null, () => this.open("main")));
