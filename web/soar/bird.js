@@ -1,10 +1,11 @@
 // The bird: the small animated flying subject that leads the fly-through.
 //
-// Port of cloudyview/soar/bird.py. `bird.wgsl` is the desktop shader copied
-// byte-for-byte, exactly as raymarch.wgsl is, so everything that can differ
-// between the two builds lives in this file.
+// The flight behaviour began as a port of the desktop's bird.py; the geometry
+// and shading did not. `birdmesh.js` and `bird.wgsl` rebuilt the animal from
+// anatomy and are native to this build — unlike raymarch.wgsl, which crossed
+// over verbatim.
 //
-// A stylized swift — sixteen triangles of procedural mesh, no assets — that
+// A common swift at its real size — procedural mesh, no assets — that
 // flies a few metres ahead of and below the camera. It flaps (faster when
 // slow, tucking into a glide above a speed threshold), banks into turns,
 // pitches with climbs and descents, and bobs with its own wingbeat. All state
