@@ -18,21 +18,19 @@ import {
   attrString,
 } from "./netcdf.js";
 import { rhoAirTable, sigmaAt } from "../optical.js";
+import {
+  pluginsNeeded, installPlugins, assertFiltersSupported,
+} from "./filters.js";
 
 const MOUNT = "/local";
-// Bytes of decoded source per slab, PER VARIABLE.
+// Bytes of decoded source per slab, per variable.
 //
-// This was 96 MB, sized for throughput. That is far too much: libhdf5 runs
-// in a 32-bit wasm heap, and a read that cannot be satisfied does not always
-// fail loudly — h5wasm's issue #100 is a chunked dataset that came back
-// silently full of zeros in the browser, and that is exactly what a 2048 x
-// 2048 x 211 field did here: every voxel present, every finite value zero,
-// a few thousand infinities where stale heap showed through.
-//
-// 8 MB per variable keeps each read comfortably inside the heap. It costs
-// more round trips through libhdf5, which is the right trade against
-// returning an empty field that looks like data.
-const SLAB_BUDGET_BYTES = 8 * 1024 * 1024;
+// Kept modest because libhdf5 runs in a 32-bit wasm heap and a filtered read
+// needs a whole-chunk scratch buffer besides. (An earlier comment here
+// blamed this budget for a field that came back all zeros. That was wrong —
+// the cause was an unregistered compression filter; see filters.js. The
+// smaller budget is still the right default, but it fixed nothing.)
+const SLAB_BUDGET_BYTES = 16 * 1024 * 1024;
 
 let ready = null;
 let root = null;
@@ -123,6 +121,32 @@ function readSlice(dataset, ranges, expected, name) {
   return values;
 }
 
+let installedPlugins = new Set();
+
+/** Walk every 3-D dataset's filter list and fetch the plugins it implies. */
+async function installNeededPlugins() {
+  const module = await ensureReady();
+  const filterLists = [];
+  const visit = (group) => {
+    for (const key of group.keys()) {
+      const item = group.get(key);
+      if (!item) continue;
+      if (item.type === "Group") { visit(item); continue; }
+      if (item.shape?.length >= 3 && item.filters) filterLists.push(item.filters);
+    }
+  };
+  visit(root);
+  const { plugins, unknown } = pluginsNeeded(filterLists);
+  if (unknown !== null) {
+    console.warn(
+      `cloudyview: unrecognized HDF5 filter id ${unknown}; loading every ` +
+      "decompression plugin rather than guessing.");
+  }
+  if (plugins.length) {
+    installedPlugins = await installPlugins(module, plugins, installedPlugins);
+  }
+}
+
 // --- operations ------------------------------------------------------------
 
 async function open({ file }) {
@@ -133,6 +157,11 @@ async function open({ file }) {
     mounted = true;
   }
   root = new h5wasm.File(`${MOUNT}/${file.name}`, "r");
+
+  // Compression filters first: reading a dataset whose filter is missing
+  // does not fail, it returns zeros. Opening the file is enough to see which
+  // filters it uses — that is metadata, and costs no decompression.
+  await installNeededPlugins();
 
   const paths = findLiquidWaterGroups(root);
   if (!paths.length) {
@@ -188,6 +217,12 @@ async function extinction({ group, units, label, slabBudget }) {
     ? (unitsMultiplier(attrString(iceDataset.attrs, "units")) ??
        unitsMultiplier(units) ?? multiplier)
     : 0.0;
+
+  assertFiltersSupported(dataset.filters, installedPlugins, description.liquidVar);
+  if (iceDataset) {
+    assertFiltersSupported(
+      iceDataset.filters, installedPlugins, description.iceVar);
+  }
 
   const decode = decoderFor(dataset.attrs);
   const decodeIce = iceDataset ? decoderFor(iceDataset.attrs) : null;
@@ -423,6 +458,7 @@ async function extinction({ group, units, label, slabBudget }) {
 async function probe({ group, variable, points, box }) {
   const handle = group ? root.get(group) : root;
   const dataset = handle.get(variable);
+  assertFiltersSupported(dataset.filters, installedPlugins, variable);
   const shape = dataset.shape;
   const values = [];
   for (const point of points) {
