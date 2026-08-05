@@ -133,7 +133,7 @@ async function open({ file }) {
  * lot of padding. queue.writeTexture has no such rule, and the per-voxel work
  * is a multiply-add against a precomputed rho_air(z) — no exp per voxel.
  */
-async function extinction({ group, units, label }) {
+async function extinction({ group, units, label, slabBudget }) {
   const description = describeGroup(root, group);
   const handle = group ? root.get(group) : root;
   const dataset = handle.get(description.liquidVar);
@@ -183,14 +183,18 @@ async function extinction({ group, units, label }) {
   const perIndexBytes = (spatialVoxels / fieldExtent[chunkField]) * 4;
   const chunkLength = Math.max(
     1, Math.min(storageShape[chunkAxis],
-                Math.floor(SLAB_BUDGET_BYTES / Math.max(perIndexBytes, 1))));
+                Math.floor((slabBudget || SLAB_BUDGET_BYTES)
+                            / Math.max(perIndexBytes, 1))));
 
+  const total = fieldExtent[chunkField];
   post({ type: "geometry", label, description,
          coords: { x: Array.from(coords.x), y: Array.from(coords.y),
                    z: Array.from(coords.z) },
-         flip });
-
-  const total = fieldExtent[chunkField];
+         flip,
+         // So the caller can say "slab 3 of 11" rather than showing a bar
+         // that sits still for ten seconds at a time.
+         slabs: Math.ceil(total / chunkLength),
+         voxels: spatialVoxels });
   for (let start = 0; start < total; start += chunkLength) {
     const stop = Math.min(start + chunkLength, total);
     // Field indices map to storage indices through the flip.

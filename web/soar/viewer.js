@@ -227,10 +227,17 @@ class Viewer {
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
     if (key === "Escape") {
-      // If this very press is what released the pointer lock, the lock-change
-      // handler has already paused; acting again would close the menu we just
-      // opened.
-      if (performance.now() - (this._lockLostAt ?? -1e9) < 400) return;
+      // Escape reaches us by three routes that can all fire for one physical
+      // press: the browser releasing the pointer lock, the keydown itself,
+      // and auto-repeat if the key is held a moment. Any two of them in
+      // sequence read as close-then-open, which is the menu "popping right
+      // back up". So: no repeats, and one Escape action per 350 ms whatever
+      // the source.
+      const now = performance.now();
+      if (e.repeat) return;
+      if (now - (this._lockLostAt ?? -1e9) < 400) return;
+      if (now - (this._lastEscapeAt ?? -1e9) < 350) return;
+      this._lastEscapeAt = now;
       if (this.ui.isOpen) this.ui.back();
       else this.pause();
       return;

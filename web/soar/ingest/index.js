@@ -66,6 +66,8 @@ function levelReceiver(device, label, onProgress) {
       if (message.label !== label) return;
       if (message.type === "geometry") {
         state.geometry = message;
+        state.slabs = message.slabs;
+        state.slabsDone = 0;
         const [nx, ny, nz] = message.description.shape;
         state.padded = [nx + 2, ny + 2, nz + 2];
         state.texture = await createVolumeTexture(
@@ -73,7 +75,8 @@ function levelReceiver(device, label, onProgress) {
       } else if (message.type === "slab") {
         writeVolumeSlab(device, state.texture, message.data,
                         message.origin, message.size);
-        onProgress?.(message.done);
+        state.slabsDone = (state.slabsDone ?? 0) + 1;
+        onProgress?.(message.done, state.slabsDone, state.slabs);
       } else if (message.type === "faces") {
         state.faces = message.faces;
       }
@@ -147,8 +150,11 @@ export async function loadFileScene(device, file, { ocean, progress, ask }) {
     for (const [index, level] of chosen.entries()) {
       const label = level.path || "(root)";
       const share = 0.9 / chosen.length;
-      const receiver = levelReceiver(device, label, (done) =>
-        progress(`Reading ${label}…`, 0.05 + share * (index + done)));
+      const receiver = levelReceiver(device, label, (done, n, of) =>
+        progress(
+          `Reading ${label} — part ${n} of ${of}` +
+          (level.shape ? ` (${level.shape.join(" x ")} cells)` : ""),
+          0.05 + share * (index + done)));
       receivers.set(label, receiver);
       progress(`Reading ${label}…`, 0.05 + share * index);
       await link.call("extinction", { group: level.path, units, label });
