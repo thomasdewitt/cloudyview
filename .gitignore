@@ -164,3 +164,5 @@ benchmarking/output/
 web/demo/
 # the blanket *.html rule (line 5) must not swallow the browser build
 !web/index.html
+!web/soar/*.html
+!web/soar/**/*.html
