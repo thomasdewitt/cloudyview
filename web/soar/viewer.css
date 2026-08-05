@@ -100,7 +100,9 @@
   padding: 0;
   backdrop-filter: none;
 }
-#viewer.captured #toolbar { display: none; }
+/* Only while the mouse is free AND the menu is closed — see _syncChrome. */
+#viewer.captured #toolbar,
+#viewer.menu-open #toolbar { display: none; }
 
 button.chip {
   font-family: var(--ui-font);

@@ -347,6 +347,41 @@ def test_domain_geometry_helpers_match_python():
         ["parent", "nest_a"], ["parent", "nest_b"], ["nest_a", "nest_b"]]
 
 
+def test_extinction_matches_python():
+    """Condensate to extinction, the arithmetic the ingest worker runs.
+
+    Verified end to end once in a browser (2026-08-04): the whole TWP-ICE
+    128x128x77 field read through h5wasm came out bit-identical to
+    compute_extinction_field in fp16 — same maximum, same argmax, same 18407
+    non-zero cells. This pins the arithmetic so it stays that way.
+    """
+    from cloudyview import optical_depth
+
+    cases = [
+        (0.5, 0.0, 1000.0),
+        (0.0, 0.0, 0.0),
+        (2.5, 0.8, 4500.0),
+        (0.0, 1.2, 250.0),
+        (-0.01, 0.0, 800.0),     # negative condensate is NOT clamped
+        (1e-6, 1e-6, 12000.0),
+    ]
+    got = _run_harness({"scalars": {
+        "extinction": [list(c) for c in cases],
+    }})["scalars"]["extinction"]
+
+    for (lwc, iwc, z), have in zip(cases, got):
+        want = optical_depth.compute_extinction_field(
+            np.array([[[lwc]]], dtype=np.float32),
+            np.array([z], dtype=np.float64),
+            re=10.0,
+            iwc=np.array([[[iwc]]], dtype=np.float32),
+            re_ice=30.0,
+        )[0, 0, 0]
+        assert np.isclose(want, have, rtol=1e-6, atol=0), (
+            f"extinction differs at lwc={lwc} iwc={iwc} z={z}: "
+            f"python={want} js={have}")
+
+
 def test_browser_refuses_a_below_horizon_sun_in_a_periodic_domain(renderer):
     """The same refusal as the engine's, for the same reason."""
     state = _state_of(renderer)

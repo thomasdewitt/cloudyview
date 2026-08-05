@@ -77,6 +77,11 @@ class Viewer {
   async start(source, progress) {
     const shaderSource = await (await fetch("raymarch.wgsl")).text();
 
+    // The UI is built before the field loads, because loading a file asks
+    // questions — which group, what units — and those are menu panels.
+    this.ui = new UI(this.uiRoot, this);
+    this.ui.statsMode = "subtle";
+
     if (source.kind === "demo") {
       this.scene = await loadDemoScene(
         this.device, source.base, OCEAN_URL,
@@ -86,7 +91,6 @@ class Viewer {
         this.sunElevation = this.scene.sun.elevation;
       }
     } else {
-      // Ingest of an arbitrary netCDF lands here; see ingest/.
       const { loadFileScene } = await import("./ingest/index.js");
       this.scene = await loadFileScene(
         this.device, source.file, {
@@ -108,14 +112,53 @@ class Viewer {
     await this.renderer.init();
     this.camera = new FlightCamera(this.scene.bmin, this.scene.bmax,
                                    { periodic: this.renderer.periodic });
-    this.ui = new UI(this.uiRoot, this);
-    this.ui.statsMode = "subtle";
     this.ui.setSubtitle(this.sourceLabel);
+    if (this.scene.nestNote) this.ui.say(this.scene.nestNote, 8);
 
     this._bindInput();
     this._lastTime = performance.now();
     this.paused = false;
     requestAnimationFrame(() => this._frame());
+  }
+
+  /**
+   * Put a question from the loader on screen and wait for the answer.
+   *
+   * Nothing here is guessed. Which group holds the field, which two nest, and
+   * what the condensate units are when the file does not say — a wrong guess
+   * on the last one is off by a factor of a thousand and still looks like a
+   * cloud.
+   */
+  _ask(question) {
+    return new Promise((resolve, reject) => {
+      this.setLoadingVisible?.(false);
+      const done = (value) => {
+        this.ui.close();
+        this.setLoadingVisible?.(true);
+        resolve(value);
+      };
+      const cancel = () => {
+        this.ui.close();
+        reject(new Error("Cancelled before the field was loaded."));
+      };
+      if (question.panel === "groups") {
+        this.ui.open("groups", {
+          groups: question.groups, pairs: question.pairs,
+          filename: question.filename,
+          onPick: (group) => done({ group }),
+          onPickPair: (pair) => done({ pair }),
+          onCancel: cancel,
+        });
+      } else if (question.panel === "units") {
+        this.ui.open("units", {
+          variables: question.variables, filename: question.filename,
+          onPick: (units) => done({ units }),
+          onCancel: cancel,
+        });
+      } else {
+        reject(new Error(`unknown question '${question.panel}'`));
+      }
+    });
   }
 
   // --- input ---------------------------------------------------------------
@@ -134,16 +177,24 @@ class Viewer {
       // Swallowing it is the difference between taking the mouse and having
       // the view snap somewhere random.
       this._discardNextPointerMove = true;
-      this.canvas.parentElement.classList.toggle("captured", this.captured);
+      this._syncChrome();
       if (this.captured) return;
 
       this.camera.keys.clear();
-      // While the pointer is locked the browser eats Escape to release it, so
-      // the keydown handler never sees it. Losing the lock IS the pause —
-      // except when Tab asked for it, which frees the cursor without leaving
-      // the flight.
+      // Escape releases the pointer lock in the browser itself, and Firefox
+      // ALSO delivers the keydown. Handling both turned one press into
+      // pause-then-resume — the menu appeared and vanished in a frame. So the
+      // lock loss is the single source of truth for pausing, and the keydown
+      // that caused it is ignored for a moment afterwards.
+      this._lockLostAt = performance.now();
       if (wasCaptured && !this._tabRelease && !this.paused) this.pause();
       this._tabRelease = false;
+    });
+
+    // Firefox refuses a re-lock for about a second after the user pressed
+    // Escape, so resuming cannot rely on it. Say what to do instead.
+    document.addEventListener("pointerlockerror", () => {
+      if (!this.paused) this.ui.say("Click the view to take the mouse.", 3);
     });
 
     document.addEventListener("mousemove", (e) => {
@@ -176,8 +227,10 @@ class Viewer {
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 
     if (key === "Escape") {
-      // Pointer lock eats the first Escape itself; this fires on the second,
-      // or immediately when the mouse was already free.
+      // If this very press is what released the pointer lock, the lock-change
+      // handler has already paused; acting again would close the menu we just
+      // opened.
+      if (performance.now() - (this._lockLostAt ?? -1e9) < 400) return;
       if (this.ui.isOpen) this.ui.back();
       else this.pause();
       return;
@@ -196,13 +249,13 @@ class Viewer {
         return;
       case "f": this.toggleFullscreen(); return;
       case "F3": e.preventDefault(); this.ui.cycleStats(); return;
+      // Honest until they exist: a toggle that reports "on" and draws
+      // nothing is worse than saying so.
       case "b":
-        this.birdEnabled = !this.birdEnabled;
-        this.ui.say(`Bird ${this.birdEnabled ? "on" : "off"}.`, 1.2);
+        this.ui.say("The bird has not been ported to the browser yet.", 2.5);
         return;
       case "m":
-        this.minimapEnabled = !this.minimapEnabled;
-        this.ui.say(`Minimap ${this.minimapEnabled ? "on" : "off"}.`, 1.2);
+        this.ui.say("The minimap has not been ported to the browser yet.", 2.5);
         return;
       case "r": this.toggleTrackRecording(); return;
       case "F12": e.preventDefault(); this.ui.open("capture"); return;
@@ -214,17 +267,33 @@ class Viewer {
 
   // --- state changes -------------------------------------------------------
 
+  /**
+   * Keep the on-screen chrome consistent with what the mouse is doing.
+   *
+   * The toolbar is for when the mouse is free but the menu is closed — after
+   * Tab, or before the first click. While flying there is nothing to click,
+   * and while the menu is open the menu has everything, so a floating "menu"
+   * button that only appears once the menu is already open is just noise.
+   */
+  _syncChrome() {
+    const viewer = this.canvas.parentElement;
+    viewer.classList.toggle("captured", this.captured);
+    viewer.classList.toggle("menu-open", Boolean(this.ui?.isOpen));
+  }
+
   pause() {
     this.paused = true;
     this.camera.keys.clear();
     if (this.captured) document.exitPointerLock();
     this.ui.open("main");
+    this._syncChrome();
   }
 
   resume() {
     this.ui.close();
     this.paused = false;
     this._lastTime = performance.now();
+    this._syncChrome();
     this.canvas.requestPointerLock();
   }
 
@@ -456,12 +525,14 @@ class Viewer {
   }
 }
 
-export async function boot({ device, source, progress, onReady, onFailure }) {
+export async function boot({ device, source, progress, onReady, onFailure,
+                             setLoadingVisible }) {
   const canvas = document.getElementById("view");
   const uiRoot = document.getElementById("ui");
   uiRoot.replaceChildren();
   const viewer = new Viewer(device, canvas, uiRoot);
   viewer.onFailure = onFailure;
+  viewer.setLoadingVisible = setLoadingVisible;
   await viewer.start(source, progress);
   onReady?.();
   return viewer;

@@ -14,6 +14,7 @@ import { spectralLightingColors, effectiveLightTransferSplit,
 import { cameraBasis, cameraWorldOrigin } from "../web/soar/camera.js";
 import { volumeAABB, minVoxelSize, periodicMarchCapM, viewSpansDomainEdge,
          nestOverhang, nestablePairs } from "../web/soar/field.js";
+import { sigmaAt, rhoAirAt } from "../web/soar/optical.js";
 
 const input = JSON.parse(await new Promise((resolve, reject) => {
   let data = "";
@@ -70,6 +71,8 @@ if (input.scalars) {
       nestOverhang(outerMin, outerMax, nestMin, nestMax));
   out.scalars.nestPairs = (input.scalars.nestPairs || []).map(
     (domains) => nestablePairs(domains));
+  out.scalars.extinction = (input.scalars.extinction || []).map(
+    ([lwc, iwc, z]) => sigmaAt(lwc, iwc, rhoAirAt(z)));
 }
 
 process.stdout.write(JSON.stringify(out));

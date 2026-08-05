@@ -17,7 +17,7 @@ import {
   describeGroup, findLiquidWaterGroups, decoderFor, unitsMultiplier,
   attrString,
 } from "./netcdf.js";
-import * as K from "../constants.js";
+import { rhoAirTable, sigmaAt } from "../optical.js";
 
 const MOUNT = "/local";
 // Bytes of decoded source per slab. Big enough that per-slab overhead is
@@ -168,19 +168,19 @@ async function extinction({ group, units, label }) {
 
   // rho_air is a function of height alone, so it is a table, not a per-voxel
   // exp. Fixed isothermal atmosphere, matching optical_depth.py exactly.
-  const rhoAir = new Float64Array(nz);
-  for (let k = 0; k < nz; k++) {
-    rhoAir[k] = K.AIR_P0 * Math.exp(-coords.z[k] / K.AIR_SCALE_HEIGHT_M)
-              / (K.AIR_R * K.AIR_T);
-  }
+  const rhoAir = rhoAirTable(coords.z);
 
-  // Chunk along the slowest storage axis: that is the contiguous direction on
-  // disk, so each read is chunk-aligned rather than striped across the file.
-  const chunkAxis = 0;
-  const chunkField = ["x", "y", "z"].find((a) => axis[a] === chunkAxis);
+  // Chunk along the slowest SPATIAL storage axis — the contiguous direction
+  // on disk, so each read is chunk-aligned rather than striped across the
+  // file. Storage axis 0 is usually the time dimension, which has already
+  // been dropped and is not a field axis at all.
   const fieldExtent = { x: nx, y: ny, z: nz };
-  const perIndexBytes = storageShape.reduce((a, b) => a * b, 1)
-    / storageShape[chunkAxis] * 4;
+  const chunkField = ["x", "y", "z"]
+    .map((a) => [a, axis[a]])
+    .sort((p, q) => p[1] - q[1])[0][0];
+  const chunkAxis = axis[chunkField];
+  const spatialVoxels = nx * ny * nz;
+  const perIndexBytes = (spatialVoxels / fieldExtent[chunkField]) * 4;
   const chunkLength = Math.max(
     1, Math.min(storageShape[chunkAxis],
                 Math.floor(SLAB_BUDGET_BYTES / Math.max(perIndexBytes, 1))));
@@ -242,13 +242,12 @@ async function extinction({ group, units, label }) {
 
           let q = raw[flat];
           if (decode) q = decode(q);
-          let sigma = K.SIGMA_LIQUID_PREFACTOR * (q * multiplier);
+          let qi = 0.0;
           if (rawIce) {
-            let qi = rawIce[flat];
+            qi = rawIce[flat];
             if (decodeIce) qi = decodeIce(qi);
-            sigma += K.SIGMA_ICE_PREFACTOR * (qi * iceMultiplier);
           }
-          out.set(o++, sigma * rhoAir[gz]);
+          out.set(o++, sigmaAt(q * multiplier, qi * iceMultiplier, rhoAir[gz]));
         }
       }
     }
@@ -267,6 +266,91 @@ async function extinction({ group, units, label }) {
       data: bytes,
     }, [bytes.buffer]);
   }
+  // The four lateral ghost planes, for periodic wrapping. Read separately as
+  // four thin hyperslabs rather than accumulated during the sweep: each is
+  // one plane out of the whole field, so the cost is noise and the code is
+  // something a person can check.
+  const plane = (fieldAxis, fieldIndex) => {
+    const storageIndex = flip[fieldAxis]
+      ? fieldExtent[fieldAxis] - 1 - fieldIndex : fieldIndex;
+    const ranges = storageShape.map(() => []);
+    for (const dropped of description.droppedAxes) ranges[dropped] = [0, 1];
+    ranges[axis[fieldAxis]] = [storageIndex, storageIndex + 1];
+    const raw = dataset.slice(ranges);
+    const rawI = iceDataset ? iceDataset.slice(ranges) : null;
+    // The two axes that remain, in field order.
+    const rest = ["x", "y", "z"].filter((a) => a !== fieldAxis);
+    const shape = rest.map((a) => fieldExtent[a]);
+    const slabShape = storageShape.slice();
+    slabShape[axis[fieldAxis]] = 1;
+    for (const dropped of description.droppedAxes) slabShape[dropped] = 1;
+    const strides = new Array(slabShape.length);
+    let acc = 1;
+    for (let i = slabShape.length - 1; i >= 0; i--) {
+      strides[i] = acc; acc *= slabShape[i];
+    }
+    const out = new Float64Array(shape[0] * shape[1]);
+    const idx = new Array(slabShape.length).fill(0);
+    idx[axis[fieldAxis]] = 0;
+    let o = 0;
+    for (let a = 0; a < shape[0]; a++) {
+      idx[axis[rest[0]]] = flip[rest[0]] ? shape[0] - 1 - a : a;
+      for (let b = 0; b < shape[1]; b++) {
+        idx[axis[rest[1]]] = flip[rest[1]] ? shape[1] - 1 - b : b;
+        let flat = 0;
+        for (let i = 0; i < idx.length; i++) flat += idx[i] * strides[i];
+        let q = raw[flat];
+        if (decode) q = decode(q);
+        let qi = 0.0;
+        if (rawI) {
+          qi = rawI[flat];
+          if (decodeIce) qi = decodeIce(qi);
+        }
+        // rest is in field order, so z is the second axis unless the fixed
+        // axis IS z, in which case this plane has no z to index.
+        const zIndex = rest[1] === "z" ? b : (rest[0] === "z" ? a : 0);
+        out[o++] = sigmaAt(q * multiplier, qi * iceMultiplier, rhoAir[zIndex]);
+      }
+    }
+    return { values: out, shape };
+  };
+
+  // engine._ghost_face_arrays: the opposite face, with corners that wrap in
+  // both x and y because they are the trilinear support near a domain corner.
+  const buildX = (source) => {          // source is (ny, nz)
+    const face = makeHalfWriter((ny + 2) * (nz + 2));
+    const at = (iy, iz) => source.values[iy * nz + iz];
+    for (let iz = 0; iz < nz; iz++) {
+      for (let iy = 0; iy < ny; iy++) {
+        face.set((iy + 1) * (nz + 2) + iz + 1, at(iy, iz));
+      }
+      face.set(0 * (nz + 2) + iz + 1, at(ny - 1, iz));
+      face.set((ny + 1) * (nz + 2) + iz + 1, at(0, iz));
+    }
+    return face.bytes();
+  };
+  const buildY = (source) => {          // source is (nx, nz)
+    const face = makeHalfWriter((nx + 2) * (nz + 2));
+    const at = (ix, iz) => source.values[ix * nz + iz];
+    for (let iz = 0; iz < nz; iz++) {
+      for (let ix = 0; ix < nx; ix++) {
+        face.set((ix + 1) * (nz + 2) + iz + 1, at(ix, iz));
+      }
+      face.set(0 * (nz + 2) + iz + 1, at(nx - 1, iz));
+      face.set((nx + 1) * (nz + 2) + iz + 1, at(0, iz));
+    }
+    return face.bytes();
+  };
+
+  const faces = {
+    x_lo: buildX(plane("x", nx - 1)),
+    x_hi: buildX(plane("x", 0)),
+    y_lo: buildY(plane("y", ny - 1)),
+    y_hi: buildY(plane("y", 0)),
+  };
+  post({ type: "faces", label, faces },
+       Object.values(faces).map((f) => f.buffer));
+
   return { label, shape: [nx, ny, nz] };
 }
 

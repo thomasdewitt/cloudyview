@@ -166,8 +166,13 @@ async function enterViewer(source) {
       },
     });
     const { boot } = await import("./viewer.js");
-    viewer = await boot({ device, adapter, source, progress,
-                          onReady: hideLoading, onFailure: showFailure });
+    viewer = await boot({
+      device, adapter, source, progress,
+      onReady: hideLoading, onFailure: showFailure,
+      // The loader asks questions (which group, what units) and those are
+      // menu panels, which live under this overlay.
+      setLoadingVisible: (visible) => { dom.loading.hidden = !visible; },
+    });
   } catch (err) {
     if (err instanceof WebGPUUnavailable) {
       showFailure(err.message, err.detail, "");
