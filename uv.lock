@@ -406,6 +406,7 @@ dev = [
 interactive = [
     { name = "glfw" },
     { name = "imgui-bundle" },
+    { name = "jeepney", marker = "sys_platform == 'linux'" },
     { name = "rendercanvas" },
     { name = "wgpu", version = "0.31.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "wgpu", version = "0.31.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -435,6 +436,7 @@ requires-dist = [
     { name = "imgui-bundle", marker = "extra == 'interactive'", specifier = ">=1.6" },
     { name = "isort", marker = "extra == 'all'", specifier = ">=5.0" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "jeepney", marker = "sys_platform == 'linux' and extra == 'interactive'", specifier = ">=0.8" },
     { name = "matplotlib", specifier = ">=3.3" },
     { name = "mitsuba", marker = "extra == 'all'", specifier = ">=3.0.0" },
     { name = "mitsuba", marker = "extra == 'radiative-transfer'", specifier = ">=3.0.0" },
@@ -899,6 +901,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ef/7c/ec4ab396d31b3b395e2e999c8f46dec78c5e29209fac49d1f4dace04041d/isort-8.0.1.tar.gz", hash = "sha256:171ac4ff559cdc060bcfff550bc8404a486fee0caab245679c2abe7cb253c78d", size = 769592, upload-time = "2026-02-28T10:08:20.685Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3e/95/c7c34aa53c16353c56d0b802fba48d5f5caa2cdee7958acbcb795c830416/isort-8.0.1-py3-none-any.whl", hash = "sha256:28b89bc70f751b559aeca209e6120393d43fbe2490de0559662be7a9787e3d75", size = 89733, upload-time = "2026-02-28T10:08:19.466Z" },
+]
+
+[[package]]
+name = "jeepney"
+version = "0.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/6f/357efd7602486741aa73ffc0617fb310a29b588ed0fd69c2399acbb85b0c/jeepney-0.9.0.tar.gz", hash = "sha256:cf0e9e845622b81e4a28df94c40345400256ec608d0e55bb8a3feaa9163f5732", size = 106758, upload-time = "2025-02-27T18:51:01.684Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl", hash = "sha256:97e5714520c16fc0a45695e5365a2e11b81ea79bba796e26f9f1d178cb182683", size = 49010, upload-time = "2025-02-27T18:51:00.104Z" },
 ]
 
 [[package]]

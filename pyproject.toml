@@ -45,6 +45,9 @@ interactive = [
     "rendercanvas>=2.0",
     "glfw>=2.6",
     "imgui-bundle>=1.6",
+    # Pure-Python D-Bus, for the desktop's own file chooser via
+    # xdg-desktop-portal (soar.filedialog). No GTK/Qt pulled in or frozen.
+    "jeepney>=0.8; sys_platform == 'linux'",
 ]
 visualization = [
     "scikit-image>=0.19.0",
