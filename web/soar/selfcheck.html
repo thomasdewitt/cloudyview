@@ -72,6 +72,37 @@ document.getElementById("file").addEventListener("change", async (event) => {
       log(`  z: [${head(g.coords.z)} ... ${tail(g.coords.z)}]`);
     }
 
+    // Raw reads first, before any of our arithmetic touches the numbers.
+    // These are storage indices, so the same indices in Python address the
+    // same elements — if they disagree, the fault is beneath us.
+    for (const g of groups) {
+      for (const variable of [g.liquidVar, g.iceVar].filter(Boolean)) {
+        const s = g.storageShape;
+        const mid = s.map((n) => Math.floor(n / 2));
+        const last = s.map((n) => n - 1);
+        const points = [s.map(() => 0), mid, last,
+                        s.map((n, i) => Math.floor(n * (i === 0 ? 0.87 : 0.31)))];
+        // A central column 64 cells square through the full depth. Cloud
+        // fields are empty at their corners, so a box has to be big enough
+        // and central enough to actually contain something — a probe that
+        // reads zero from a real field and zero from a broken one tells you
+        // nothing at all.
+        const box = s.map((n, i) => i === s.length - 1
+          ? [0, n]
+          : [Math.max(0, Math.floor(n / 2) - 32), Math.min(n, Math.floor(n / 2) + 32)]);
+        const r = await call("probe", { group: g.path, variable, points, box });
+        log(`\nraw probe '${g.path}'.${variable}  dtype=${r.dtype} ` +
+            `chunks=${JSON.stringify(r.chunks)}`);
+        for (const v of r.values) {
+          log(`  [${v.index.join(",")}] = ${v.value}` +
+              (v.returned === 1 ? "" : `   <-- returned ${v.returned} values`));
+        }
+        const b = r.box;
+        log(`  box ${JSON.stringify(b.box)}: returned ${b.returned}/${b.expected}` +
+            `  sum=${b.sum}  nonzero=${b.nonzero}  nonFinite=${b.nonFinite}`);
+      }
+    }
+
     const which = groups.length === 1 ? groups[0].path : prompt(
       `Which group? (${groups.map((g) => g.path).join(", ")})`, groups[0].path);
     const level = groups.find((g) => (g.path || "") === (which || ""));

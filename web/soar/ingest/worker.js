@@ -414,12 +414,47 @@ async function extinction({ group, units, label, slabBudget }) {
   return { label, shape: [nx, ny, nz] };
 }
 
+/**
+ * Read raw values at given STORAGE indices, with no interpretation at all —
+ * no unit conversion, no transpose, no flips, no extinction. Purely "what
+ * does libhdf5 hand back for this element". If these disagree with the same
+ * indices in Python, the fault is under us; if they agree, it is ours.
+ */
+async function probe({ group, variable, points, box }) {
+  const handle = group ? root.get(group) : root;
+  const dataset = handle.get(variable);
+  const shape = dataset.shape;
+  const values = [];
+  for (const point of points) {
+    const ranges = point.map((i) => [i, i + 1]);
+    const got = dataset.slice(ranges);
+    values.push({ index: point, value: got && got.length ? got[0] : null,
+                  returned: got ? got.length : 0 });
+  }
+  let boxReport = null;
+  if (box) {
+    const got = dataset.slice(box.map(([a, b]) => [a, b]));
+    let sum = 0, nonzero = 0, nonFinite = 0;
+    for (let i = 0; i < got.length; i++) {
+      const v = got[i];
+      if (!Number.isFinite(v)) { nonFinite += 1; continue; }
+      sum += v; if (v !== 0) nonzero += 1;
+    }
+    const expected = box.reduce((n, [a, b]) => n * (b - a), 1);
+    boxReport = { box, returned: got.length, expected, sum, nonzero, nonFinite,
+                  first: got[0] ?? null, last: got[got.length - 1] ?? null };
+  }
+  return { variable, shape, dtype: dataset.dtype,
+           chunks: dataset.metadata?.chunks ?? null, values, box: boxReport };
+}
+
 self.onmessage = async (event) => {
   const { id, op, ...args } = event.data;
   try {
     let result;
     if (op === "open") result = await open(args);
     else if (op === "extinction") result = await extinction(args);
+    else if (op === "probe") result = await probe(args);
     else throw new Error(`unknown ingest operation '${op}'`);
     post({ id, ok: true, result });
   } catch (err) {
