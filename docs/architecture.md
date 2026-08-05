@@ -77,8 +77,9 @@ is the portable artifact. That portability is what let the whole engine move
 to the browser: the shader crossed over verbatim and only the host had to be
 rewritten in JavaScript.
 
-Benchmark evidence (2026-07-07, RTX 5080 — details in
-temp/benchmarks-2026-07-07/RESULTS.md):
+Benchmark evidence (2026-07-07, RTX 5080 — the detailed writeup lived in a
+scratch `temp/` folder that no longer exists; the findings that mattered are
+kept here):
 - witness_cuda was a stale, reduced-feature port (only 2 of the post-April
   look-tuning commits ever reached it) and was RETIRED the same day the
   WGSL spike proved out (Thomas's call; it lives in git history at tag
