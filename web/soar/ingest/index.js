@@ -15,6 +15,9 @@ import {
 } from "../scene.js";
 import { volumeAABB, minVoxelSize, domainExtent, nestablePairs } from "../field.js";
 
+// How much uploaded data may be in flight before waiting for the GPU.
+const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
+
 /** Promise-shaped calls over postMessage, plus a channel for streamed data. */
 class WorkerLink {
   constructor(onEvent) {
@@ -59,7 +62,7 @@ class WorkerLink {
  */
 function levelReceiver(device, label, onProgress) {
   const state = { texture: null, padded: null, faces: null, geometry: null,
-                  slabsDone: 0, error: null };
+                  slabsDone: 0, error: null, queuedBytes: 0 };
 
   const step = async (message) => {
     if (message.type === "geometry") {
@@ -78,6 +81,18 @@ function levelReceiver(device, label, onProgress) {
       writeVolumeSlab(device, state.texture, message.data,
                       message.origin, message.size);
       state.slabsDone += 1;
+      state.queuedBytes += message.data.byteLength;
+
+      // queue.writeTexture copies into driver-owned staging memory that is
+      // only reclaimed once the GPU has consumed it. Nothing here submits
+      // work, so without a barrier every slab of a multi-gigabyte field
+      // piles up at once — which on a 3.5 GB variable exhausts system memory
+      // and takes the device, and then the browser, down with it. Draining
+      // periodically bounds that to roughly one barrier's worth.
+      if (state.queuedBytes >= UPLOAD_DRAIN_BYTES) {
+        state.queuedBytes = 0;
+        await device.queue.onSubmittedWorkDone();
+      }
       onProgress?.(message.done, state.slabsDone, state.slabs);
     } else if (message.type === "faces") {
       state.faces = message.faces;
