@@ -426,6 +426,70 @@ def test_minimap_column_albedo_matches_glimpse():
             f"column albedo differs: python={want} js={have}")
 
 
+def test_track_resampling_matches_python():
+    """The browser's track resampler against track.resample_track.
+
+    Both ends of this matter. The desktop can re-render a track the browser
+    recorded and vice versa — the schema is shared — so the two resamplers
+    have to agree, or the same track becomes two different flights.
+
+    The cases exercise what actually goes wrong: irregular hand-flown frame
+    timing (the reason the spline is time-parameterized rather than uniform),
+    azimuth crossing north in both directions, and a periodic domain wrap in
+    x and y, which looks exactly like teleporting across the domain unless it
+    is unwrapped first.
+    """
+    from cloudyview.soar import track as track_py
+
+    cases = []
+
+    # Irregular timing, azimuth crossing north the short way (350 -> 10).
+    jittery = [
+        [0.000, -0.6, -0.2, 0.10, 350.0, -5.0, 60.0],
+        [0.019, -0.5, -0.15, 0.12, 355.0, -4.0, 60.0],
+        [0.061, -0.3, -0.05, 0.15, 2.0, -2.0, 58.0],
+        [0.074, -0.2, 0.05, 0.17, 8.0, 0.0, 55.0],
+        [0.131, 0.1, 0.2, 0.20, 14.0, 4.0, 55.0],
+        [0.152, 0.3, 0.3, 0.22, 20.0, 6.0, 52.0],
+    ]
+    cases.append((jittery, 60.0, False))
+
+    # A periodic wrap: x runs off +1 and reappears at -1, twice.
+    wrapping = [
+        [0.0, 0.7, 0.9, 0.3, 45.0, 0.0, 60.0],
+        [0.1, 0.9, 0.98, 0.3, 44.0, 0.0, 60.0],
+        [0.2, -0.9, -0.94, 0.3, 43.0, 0.0, 60.0],
+        [0.3, -0.7, -0.8, 0.3, 42.0, 0.0, 60.0],
+        [0.4, -0.5, -0.6, 0.3, 41.0, 0.0, 60.0],
+    ]
+    cases.append((wrapping, 30.0, True))
+
+    # Azimuth crossing north the other way (5 -> 355), non-periodic.
+    backwards = [
+        [0.0, 0.0, 0.0, 0.5, 5.0, 10.0, 70.0],
+        [0.25, 0.1, 0.0, 0.5, 358.0, 5.0, 68.0],
+        [0.5, 0.2, 0.1, 0.5, 350.0, 0.0, 65.0],
+        [0.75, 0.3, 0.2, 0.5, 340.0, -5.0, 60.0],
+    ]
+    cases.append((backwards, 24.0, False))
+
+    got = _run_harness({"scalars": {
+        "trackResample": [[s, fps, periodic] for s, fps, periodic in cases],
+    }})["scalars"]["trackResample"]
+
+    for (samples, fps, periodic), have in zip(cases, got):
+        want = track_py.resample_track(
+            np.asarray(samples, dtype=np.float64), fps, periodic=periodic)
+        assert len(want) == len(have), (
+            f"frame count differs at fps={fps}: python={len(want)} "
+            f"js={len(have)}")
+        for k, ((t, cam), row) in enumerate(zip(want, have)):
+            expected = [t, *cam.position, cam.azimuth, cam.elevation, cam.fov]
+            assert np.allclose(expected, row, rtol=1e-9, atol=1e-9), (
+                f"frame {k} differs at fps={fps}, periodic={periodic}:\n"
+                f"  python={expected}\n  js    ={row}")
+
+
 def test_browser_refuses_a_below_horizon_sun_in_a_periodic_domain(renderer):
     """The same refusal as the engine's, for the same reason."""
     state = _state_of(renderer)

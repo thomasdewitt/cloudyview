@@ -453,6 +453,33 @@ export class UI {
     m.append(this._backButton());
   }
 
+  /** What R offers when you stop recording. */
+  _panel_track({ samples }) {
+    const app = this.app;
+    const m = this.menu;
+    const duration = samples[samples.length - 1][0];
+    m.append(this._header("track", "Flight recorded"));
+
+    let frames = null, problem = null;
+    try {
+      frames = app.trackFrameCount(samples);
+    } catch (err) {
+      problem = String(err.message || err);
+    }
+    m.append(el("div", "row",
+      `${samples.length} samples over ${duration.toFixed(1)} seconds` +
+      (frames === null
+        ? "."
+        : `, which becomes ${frames} frames at ` +
+          `${app.videoFps.toFixed(0)} fps.`)));
+    if (problem) m.append(el("div", "row", problem));
+
+    m.append(el("div", "divider"));
+    m.append(item("Save the track", "a .json cloudyview's render_track reads",
+                  () => { app.downloadTrack(samples); this.open("main"); }));
+    m.append(item("Discard it", null, () => this.open("main")));
+  }
+
   _panel_capture() {
     const app = this.app;
     const m = this.menu;

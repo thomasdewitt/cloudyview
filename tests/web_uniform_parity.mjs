@@ -14,6 +14,7 @@ import { spectralLightingColors, effectiveLightTransferSplit,
 import { cameraBasis, cameraWorldOrigin } from "../web/soar/camera.js";
 import { volumeAABB, minVoxelSize, periodicMarchCapM, viewSpansDomainEdge,
          nestOverhang, nestablePairs } from "../web/soar/field.js";
+import { resampleTrack } from "../web/soar/track.js";
 import { sigmaAt, rhoAirAt, rhoAirTable, cellThickness,
          opticalDepthFromWaterPaths, twoStreamAlbedo } from
   "../web/soar/optical.js";
@@ -89,6 +90,10 @@ if (input.scalars) {
       }
       return twoStreamAlbedo(opticalDepthFromWaterPaths(lwp, iwp));
     });
+  out.scalars.trackResample = (input.scalars.trackResample || []).map(
+    ([samples, fps, periodic]) =>
+      resampleTrack(samples, fps, { periodic }).map(
+        (f) => [f.t, ...f.position, f.azimuth, f.elevation, f.fov]));
 }
 
 process.stdout.write(JSON.stringify(out));

@@ -13,6 +13,7 @@ import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
+import { TrackRecorder, trackPayload, resampleTrack } from "./track.js";
 import { UI } from "./ui.js";
 import { mod360 } from "./spectral.js";
 import {
@@ -50,6 +51,7 @@ class Viewer {
 
     this.birdEnabled = true;
     this.minimapEnabled = true;
+    this.recorder = new TrackRecorder();
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
@@ -430,8 +432,43 @@ class Viewer {
     location.reload();
   }
 
+  /**
+   * R: start or stop recording the flight path.
+   *
+   * What is recorded is the track, not the pixels — where the camera was and
+   * when, once per rendered frame. The video is made afterwards by flying
+   * that path again at an exact frame rate with the accumulation converged,
+   * which is a picture the live view never shows you and a screen recording
+   * cannot produce.
+   */
   toggleTrackRecording() {
-    this.ui.say("Track recording is not wired up yet.", 2);
+    if (this.recorder.recording) {
+      const samples = this.recorder.stop();
+      if (samples.length < 2) {
+        this.ui.say("Too short to be a track — nothing recorded.", 3);
+        return;
+      }
+      this.pause();
+      this.ui.open("track", { samples });
+      return;
+    }
+    this.recorder.start(performance.now() / 1000);
+    this.ui.say("Recording the flight path. R again to stop.", 3);
+  }
+
+  /** How many video frames a track becomes at the chosen rate. */
+  trackFrameCount(samples) {
+    return resampleTrack(samples, this.videoFps,
+                         { periodic: this.renderer.periodic }).length;
+  }
+
+  /** The track as a file, readable by cloudyview's own `render_track`. */
+  downloadTrack(samples) {
+    const size = this.captureDimensions();
+    const payload = trackPayload(this.renderMetadata(size), samples);
+    download(new Blob([JSON.stringify(payload)], { type: "application/json" }),
+             timestampedName("cloudyview_track", ".json"));
+    this.ui.say(`Saved ${samples.length} samples.`, 3);
   }
 
   /** The capture resolution: an explicit choice, or whatever the window is. */
@@ -659,6 +696,12 @@ class Viewer {
       return;
     }
 
+    // Sampled after the frame it describes, so the track records what was on
+    // screen rather than what was about to be.
+    if (this.recorder.recording && !this.paused) {
+      this.recorder.sample(now / 1000, this.camera);
+    }
+
     this.frameIndex += 1;
     this._fpsAcc += dt; this._fpsN += 1;
     if (this._fpsAcc >= 0.5) {
@@ -672,7 +715,8 @@ class Viewer {
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
       frame: this.frameIndex,
       minimap: Boolean(this.minimap && this.minimapEnabled),
-      bird: Boolean(this.bird && this.birdEnabled), recording: false,
+      bird: Boolean(this.bird && this.birdEnabled),
+      recording: this.recorder.recording,
       showSpeed: performance.now() / 1000 < this.camera.speedFlashUntil,
     });
 
