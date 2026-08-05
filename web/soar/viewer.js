@@ -427,8 +427,27 @@ class Viewer {
     }
   }
 
+  /**
+   * Opening a second file inside a live session would mean tearing down the
+   * scene, the renderer and half a gigabyte of resident texture while frames
+   * are still in flight. Going back to the start page does the same job with
+   * none of that risk, so say so plainly rather than offering a dead button.
+   */
   pickFile() {
-    this.ui.say("Opening another file is not wired up yet.", 2);
+    this.ui.open("message", {
+      kicker: "open a file",
+      title: "Start again from the front page",
+      body: "Opening another field means replacing everything resident on " +
+            "the GPU. Rather than tear that down underneath a running " +
+            "render, soar goes back to the start page — the file picker and " +
+            "drag-and-drop are both there.",
+      advice: "Nothing is uploaded either way; the file is read on this " +
+              "machine.",
+      actions: [
+        ["Back to the start page", () => this.leave()],
+        ["Stay here", () => this.ui.open("main")],
+      ],
+    });
   }
 
   /** True when the view sees wrapped copies — behold's volume does not tile. */

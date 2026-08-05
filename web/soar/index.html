@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soar — fly a real cloud field</title>
+<meta name="description" content="Fly through a three-dimensional cloud field
+  in your browser: volumetric ray marching with multiple scattering, on real
+  large-eddy-simulation output or your own netCDF file.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="viewer.css">
+<link rel="canonical" href="https://thomasddewitt.com/thought-cloud/soar/">
+</head>
+<body>
+
+<header class="site-header" id="site-header">
+  <nav class="site-nav">
+    <div class="nav-item">
+      <a href="../../index.html" class="nav-link">Thomas DeWitt</a>
+    </div>
+    <div class="nav-item static-breadcrumb">
+      <a href="../" class="nav-link active"><em>Thought Cloud</em></a>
+      <span class="breadcrumb-divider">/</span>
+      <span class="breadcrumb-current">Soar</span>
+    </div>
+    <div class="nav-item">
+      <a href="../../about.html" class="nav-link">About</a>
+    </div>
+    <div class="nav-item">
+      <a href="../../cv.html" class="nav-link">CV</a>
+    </div>
+  </nav>
+</header>
+
+<main id="landing">
+  <h1>Soar</h1>
+  <p class="subtitle">Volumetric cloud rendering, in a tab</p>
+
+  <p class="lede">
+    Fly through a cloud field the way light does — marching through the
+    volume, scattering many times before it reaches you. No installation,
+    and the file never leaves your machine.
+  </p>
+
+  <div id="capability">Checking what this browser can do…</div>
+
+  <div class="choices">
+    <button class="choice" id="choice-demo">
+      <span class="title">Fly the demo field</span>
+      <span class="meta" id="demo-meta">
+        TWP-ICE, Darwin 2006 — a large-eddy simulation of tropical
+        convection. About 13 MB.
+      </span>
+    </button>
+
+    <button class="choice" id="choice-open">
+      <span class="title">Open your own file</span>
+      <span class="meta">
+        A netCDF file with a cloud water field. Drop it anywhere on this
+        page, or click to browse. Read locally — nothing is uploaded.
+      </span>
+    </button>
+    <input type="file" id="file-input" accept=".nc,.nc4,.cdf,.h5,.hdf5">
+  </div>
+
+  <section class="notes">
+    <h2>What this is</h2>
+    <p>
+      The same renderer as <code>cloudyview</code>'s desktop viewer, compiled
+      to run on your GPU through WebGPU. Single scattering plus a multiple-
+      scattering approximation, a physically-based sky, and an ocean below.
+      It is not a path tracer — it is fast enough to fly.
+    </p>
+    <h2>Controls</h2>
+    <p>
+      Click the view to take the mouse. <b>WASD</b> to move,
+      <b>Space</b> and <b>Shift</b> for up and down, scroll to change speed,
+      <b>Esc</b> for the menu. Everything else lives in the menu.
+    </p>
+  </section>
+</main>
+
+<div id="viewer" hidden>
+  <canvas id="view"></canvas>
+  <div id="ui"></div>
+</div>
+
+<div id="loading" hidden>
+  <div class="box">
+    <div class="stage" id="loading-stage">Starting…</div>
+    <div class="bar"><span id="loading-bar"></span></div>
+    <div class="failure" id="loading-failure">
+      <h2 id="failure-title"></h2>
+      <p id="failure-body"></p>
+      <p class="advice" id="failure-advice"></p>
+      <button id="failure-back">Back</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>

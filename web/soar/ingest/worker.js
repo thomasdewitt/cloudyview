@@ -20,9 +20,19 @@ import {
 import { rhoAirTable, sigmaAt } from "../optical.js";
 
 const MOUNT = "/local";
-// Bytes of decoded source per slab. Big enough that per-slab overhead is
-// noise, small enough that two of them plus the fp16 output fit comfortably.
-const SLAB_BUDGET_BYTES = 96 * 1024 * 1024;
+// Bytes of decoded source per slab, PER VARIABLE.
+//
+// This was 96 MB, sized for throughput. That is far too much: libhdf5 runs
+// in a 32-bit wasm heap, and a read that cannot be satisfied does not always
+// fail loudly — h5wasm's issue #100 is a chunked dataset that came back
+// silently full of zeros in the browser, and that is exactly what a 2048 x
+// 2048 x 211 field did here: every voxel present, every finite value zero,
+// a few thousand infinities where stale heap showed through.
+//
+// 8 MB per variable keeps each read comfortably inside the heap. It costs
+// more round trips through libhdf5, which is the right trade against
+// returning an empty field that looks like data.
+const SLAB_BUDGET_BYTES = 8 * 1024 * 1024;
 
 let ready = null;
 let root = null;
@@ -82,6 +92,35 @@ function post(message, transfer) {
 async function ensureReady() {
   ready ??= h5wasm.ready;
   return ready;
+}
+
+/** How many elements a hyperslab request should return. */
+function slabVoxels(storageShape, ranges) {
+  let n = 1;
+  for (let i = 0; i < storageShape.length; i++) {
+    const r = ranges[i];
+    n *= (!r || r.length === 0) ? storageShape[i] : (r[1] - r[0]);
+  }
+  return n;
+}
+
+/**
+ * Read a hyperslab and insist it is the size that was asked for.
+ *
+ * libhdf5 in wasm can return a short or empty buffer rather than failing
+ * when a read does not fit the heap. Silently accepting that produces a
+ * field of zeros, which renders as a clear sky and reads as "the tool does
+ * not work" rather than "the read failed".
+ */
+function readSlice(dataset, ranges, expected, name) {
+  const values = dataset.slice(ranges);
+  if (!values || values.length !== expected) {
+    throw new Error(
+      `Reading '${name}' returned ${values ? values.length : 0} values where ` +
+      `${expected} were requested. The HDF5 reader could not satisfy a read ` +
+      "this large in the browser's memory.");
+  }
+  return values;
 }
 
 // --- operations ------------------------------------------------------------
@@ -186,6 +225,9 @@ async function extinction({ group, units, label, slabBudget }) {
                 Math.floor((slabBudget || SLAB_BUDGET_BYTES)
                             / Math.max(perIndexBytes, 1))));
 
+  let finiteNonZero = 0;
+  let nonFinite = 0;
+
   const total = fieldExtent[chunkField];
   post({ type: "geometry", label, description,
          coords: { x: Array.from(coords.x), y: Array.from(coords.y),
@@ -206,8 +248,10 @@ async function extinction({ group, units, label, slabBudget }) {
     for (const dropped of description.droppedAxes) ranges[dropped] = [0, 1];
     ranges[chunkAxis] = storageRange;
 
-    const raw = dataset.slice(ranges);
-    const rawIce = iceDataset ? iceDataset.slice(ranges) : null;
+    const expected = slabVoxels(storageShape, ranges);
+    const raw = readSlice(dataset, ranges, expected, description.liquidVar);
+    const rawIce = iceDataset
+      ? readSlice(iceDataset, ranges, expected, description.iceVar) : null;
 
     const local = { x: nx, y: ny, z: nz };
     local[chunkField] = stop - start;
@@ -251,7 +295,10 @@ async function extinction({ group, units, label, slabBudget }) {
             qi = rawIce[flat];
             if (decodeIce) qi = decodeIce(qi);
           }
-          out.set(o++, sigmaAt(q * multiplier, qi * iceMultiplier, rhoAir[gz]));
+          const sigma = sigmaAt(q * multiplier, qi * iceMultiplier, rhoAir[gz]);
+          if (Number.isFinite(sigma)) { if (sigma !== 0) finiteNonZero += 1; }
+          else nonFinite += 1;
+          out.set(o++, sigma);
         }
       }
     }
@@ -345,6 +392,15 @@ async function extinction({ group, units, label, slabBudget }) {
     }
     return face.bytes();
   };
+
+  // A field that is entirely zero apart from a scattering of infinities is
+  // not a cloud field, it is a failed read. Say so instead of rendering it.
+  if (finiteNonZero === 0) {
+    throw new Error(
+      `'${description.liquidVar}' read as ${spatialVoxels} values that are ` +
+      `all zero (plus ${nonFinite} non-finite). That is a failed read rather ` +
+      "than an empty sky — the HDF5 reader returned buffers it never filled.");
+  }
 
   const faces = {
     x_lo: buildX(plane("x", nx - 1)),
