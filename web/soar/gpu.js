@@ -224,6 +224,13 @@ export async function guardAllocation(device, label, bytes, fn) {
   }
   const validation = await device.popErrorScope();
   const oom = await device.popErrorScope();
+  if (validation || oom) {
+    // The object exists — the failure is only reported here, asynchronously.
+    // Throwing without releasing it leaves gigabytes reachable from nothing
+    // but a garbage collector, which is exactly the wrong thing to do at the
+    // moment the GPU has just said it is out of memory.
+    releaseAllocation(result);
+  }
   if (validation) {
     throw new AllocationFailed(
       `${label} was rejected: ${validation.message}`, { label, bytes });
@@ -236,6 +243,38 @@ export async function guardAllocation(device, label, bytes, fn) {
       { label, bytes });
   }
   return result;
+}
+
+/** Destroy whatever an allocation thunk produced: one object, or a bag of them. */
+function releaseAllocation(result) {
+  if (!result || typeof result !== "object") return;
+  if (typeof result.destroy === "function") { result.destroy(); return; }
+  for (const value of Object.values(result)) {
+    if (value && typeof value.destroy === "function") value.destroy();
+  }
+}
+
+/**
+ * Destroy textures and buffers only once the GPU has finished with the work
+ * already submitted.
+ *
+ * Destroying a resource an in-flight command buffer still references is legal
+ * by the letter of the spec and is the kind of thing that takes a browser's
+ * GPU process down rather than raising — see Renderer._targetsFor, which has
+ * always waited. Anything replaced mid-flight (a depth buffer on a resize, a
+ * nest that was just unbound) needs the same barrier.
+ */
+export function retireAfterSubmittedWork(device, ...resources) {
+  const live = resources.filter(Boolean);
+  if (!live.length) return Promise.resolve();
+  const release = () => {
+    for (const resource of live) {
+      // A device destroyed while this was pending has already reclaimed
+      // everything on it; destroy() then has nothing to do and may object.
+      try { resource.destroy(); } catch { /* the device took it first */ }
+    }
+  };
+  return device.queue.onSubmittedWorkDone().then(release, release);
 }
 
 /**

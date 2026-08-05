@@ -9,7 +9,12 @@ Conventions (see config.py):
 - `azimuth` is a meteorological bearing in degrees: 0 north, 90 east,
   180 south, 270 west (clockwise from north).
 - `elevation` is degrees above the horizon (0 horizon, 90 zenith).
-- `fov` is the vertical field of view in degrees.
+- `fov` is the HORIZONTAL field of view in degrees. All three renderers
+  agree on this: behold inherited it from Mitsuba's `fov_axis="x"` default,
+  and witness and soar were brought onto it (2026-08-05) — before that they
+  read the same number as vertical, so a camera handed from soar to behold
+  came out zoomed in by the image aspect ratio. The vertical half-angle is
+  atan(tan(fov/2) / aspect).
 """
 
 from dataclasses import dataclass, field

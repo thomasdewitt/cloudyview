@@ -34,6 +34,8 @@ field.x, field.y, field.z  # 1D coords, meters
 cam = cv.Camera(position=(0, -0.8, -0.95), azimuth=0, elevation=35, fov=100)
                          # existing conventions: met azimuth (0=N, 90=E),
                          # elevation above horizon, relative position ±1
+                         # (z: -1 is the surface, not the data's floor),
+                         # fov horizontal — all three renderers agree
 
 img = cv.glimpse(field)                  # (ny,nx) two-stream visual albedo
 img = cv.witness(field, camera=cam, size=(W, H))     # (H,W,3) image array
@@ -209,7 +211,12 @@ is the same trade witness makes; the occupancy grid above is the fix.
   toggle fullscreen, resume, or quit.
 - **Behold is not run from the app.** G shows a copy-pasteable `behold`
   command for the current view — field, camera, sun, quality — and copies it
-  to the clipboard. Path tracing is minutes-to-overnight and wants the GPU to
+  to the clipboard. The file is named by absolute path (the command is run
+  from another directory) and by NetCDF group where the field came from one;
+  with a nest loaded there are two fields on screen and behold renders one,
+  so the panel asks which — and re-expresses the camera in the chosen
+  field's box, since a relative position means "this far across THIS field".
+  Path tracing is minutes-to-overnight and wants the GPU to
   itself, which does not belong inside a fly-through; handing over an exact
   command is also the only form of this that works identically in the browser
   build, where there is no Mitsuba at all. Soar therefore has no Mitsuba

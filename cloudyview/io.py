@@ -762,8 +762,10 @@ def load_and_validate(
         - 'dataset': xr.Dataset
         - 'liquid_water_var': str (variable name)
         - 'liquid_water_data': xr.DataArray (with standardized (x, y, z) dims, units in g/kg)
+        - 'liquid_water_group': str or None (group the liquid came from, root = None)
         - 'ice_water_var': str or None
         - 'ice_water_data': xr.DataArray or None (with standardized dims, units in g/kg)
+        - 'ice_water_group': str or None (group the ice came from, root = None)
         - 'filepath': str
         - 'ice_filepath': str or None
         - 'x_coord': ndarray (x coordinates)
@@ -902,8 +904,10 @@ def load_and_validate(
         'dataset': lw_ds,
         'liquid_water_var': lw_var,
         'liquid_water_data': lw_data,
+        'liquid_water_group': liquid_water_group,
         'ice_water_var': iw_var,
         'ice_water_data': iw_data,
+        'ice_water_group': ice_water_group if iw_data is not None else None,
         'filepath': str(filepath),
         'ice_filepath': str(ice_filepath) if ice_filepath is not None else None,
         'x_coord': x_coord,

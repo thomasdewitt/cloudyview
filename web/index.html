@@ -4,66 +4,35 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cloudyview — fly a real cloud field</title>
+<!--
+  The viewer moved to soar/.
+
+  What used to live here was the first browser port: one field, one shader,
+  a payload described by meta.fif and meta.uniform_template. The demo export
+  stopped emitting those keys when the scene gained an ocean, a nest and a
+  minimap, so this page has been throwing on meta.fif.mips rather than
+  rendering anything. soar/ is the viewer that works; this is a signpost to
+  it, so an old bookmark lands somewhere real.
+
+  soar.js and raymarch.wgsl beside this file are what that first port was.
+  Nothing references them now.
+-->
+<meta http-equiv="refresh" content="0; url=soar/">
+<link rel="canonical" href="soar/">
 <style>
   html, body {
-    margin: 0; height: 100%; overflow: hidden; background: #06080c;
+    margin: 0; height: 100%; background: #06080c;
     font-family: system-ui, -apple-system, sans-serif; color: #cfd8e3;
   }
-  #view { width: 100%; height: 100%; display: block; cursor: crosshair; }
-  #overlay {
-    position: absolute; inset: 0; display: grid; place-items: center;
-    background: #06080c; z-index: 2;
-  }
-  #overlay .msg { font-size: 15px; letter-spacing: 0.02em; color: #8fa0b5; }
-  #hud {
-    position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
-    background: rgba(10, 14, 20, 0.72); border: 1px solid rgba(160,180,205,.15);
-    border-radius: 12px; padding: 10px 18px; font-size: 13px; line-height: 1.7;
-    text-align: center; pointer-events: none; z-index: 1;
-    backdrop-filter: blur(6px);
-  }
-  #hud b { color: #e8eef6; font-weight: 600; }
-  #hud.hidden { display: none; }
-  #fps {
-    position: absolute; right: 14px; bottom: 12px; font-size: 12px;
-    font-variant-numeric: tabular-nums; color: rgba(220,230,242,.85);
-    background: rgba(10,14,20,.6); border-radius: 8px; padding: 4px 9px;
-    z-index: 1;
-  }
-  #credit {
-    position: absolute; left: 14px; bottom: 12px; font-size: 11px;
-    color: rgba(160,175,195,.55); z-index: 1;
-  }
-  #credit a { color: rgba(170,190,215,.75); }
-  #topbar {
-    position: absolute; right: 14px; top: 12px; display: flex; gap: 8px;
-    z-index: 1;
-  }
-  #topbar.hidden { display: none; }
-  #topbar button {
-    background: rgba(10, 14, 20, 0.72); color: #cfd8e3; font-size: 12px;
-    border: 1px solid rgba(160,180,205,.18); border-radius: 9px;
-    padding: 6px 12px; cursor: pointer; backdrop-filter: blur(6px);
-  }
-  #topbar button:hover { border-color: rgba(180,200,225,.45); }
+  main { display: grid; place-items: center; height: 100%; }
+  p { font-size: 15px; letter-spacing: 0.02em; color: #8fa0b5; }
+  a { color: #cfd8e3; }
 </style>
 </head>
 <body>
-<canvas id="view"></canvas>
-<div id="overlay"><div class="msg">loading…</div></div>
-<div id="hud">
-  <b>Click</b> to fly &nbsp;·&nbsp; <b>WASD</b> move &nbsp;·&nbsp;
-  <b>Space / Shift</b> up, down &nbsp;·&nbsp; <b>scroll</b> speed &nbsp;·&nbsp;
-  <b>Esc</b> release mouse<br>
-  Real large-eddy-simulation clouds (TWP-ICE, Darwin 2006) — volumetric
-  ray marching in your browser.
-</div>
-<div id="fps"></div>
-<div id="topbar">
-  <button id="qualitybtn" title="render resolution">quality: full</button>
-  <button id="fsbtn" title="fullscreen">⛶ fullscreen</button>
-</div>
-<div id="credit">cloudyview / soar</div>
-<script src="soar.js"></script>
+<main>
+  <p>cloudyview has moved to <a href="soar/">soar/</a>.</p>
+</main>
+<script>location.replace("soar/");</script>
 </body>
 </html>

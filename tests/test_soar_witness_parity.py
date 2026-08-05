@@ -161,8 +161,8 @@ def ray_directions(camera, size: tuple[int, int]) -> np.ndarray:
 
     px = np.arange(w, dtype=np.float64) + 0.5
     py = np.arange(h, dtype=np.float64) + 0.5
-    ndc_x = (2.0 * px / w - 1.0) * aspect * tan_half_fov
-    ndc_y = (1.0 - 2.0 * py / h) * tan_half_fov
+    ndc_x = (2.0 * px / w - 1.0) * tan_half_fov
+    ndc_y = (1.0 - 2.0 * py / h) * tan_half_fov / aspect
     xx, yy = np.meshgrid(ndc_x, ndc_y)
 
     dirs = (forward[None, None, :]

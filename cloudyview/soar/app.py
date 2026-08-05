@@ -89,6 +89,7 @@ from .menu import (
     ACTION_PAUSE,
     ACTION_QUIT,
     ACTION_COPY_BEHOLD_COMMAND,
+    ACTION_SELECT_BEHOLD_FIELD,
     ACTION_SELECT_BEHOLD_QUALITY,
     ACTION_RENDER_MENU,
     ACTION_RESUME,
@@ -296,7 +297,7 @@ def view_spans_domain_edge(
     directions = [np.asarray(forward, dtype=np.float64)]
     for sx in (-1.0, 1.0):
         for sy in (-1.0, 1.0):
-            d = forward + sx * aspect * tan_half * right + sy * tan_half * up
+            d = forward + sx * tan_half * right + sy * tan_half / aspect * up
             directions.append(d / np.linalg.norm(d))
     for direction in directions:
         t_horizontal = _slab_exit_t(origin, direction, bmin, bmax, (0, 1))
@@ -428,6 +429,7 @@ class FlyThroughApp:
         self._video_accumulate = DEFAULT_VIDEO_ACCUMULATE
         self._preview = None             # {"ref", "keep", "image", "path"}
         self._behold_quality = "high"    # which command the G panel shows
+        self._behold_field_choice = "outer"  # "outer"/"nest": behold takes one
         self._clipboard_note = None
         self._error_message = None
         self._imgui = None
@@ -807,14 +809,22 @@ class FlyThroughApp:
         except Exception as e:
             self._show_error(f"Fullscreen failed: {e}")
 
-    def camera(self) -> Camera:
-        """Current viewpoint as a cv.Camera (relative-coordinate position)."""
-        bmin, bmax = self.renderer.bmin, self.renderer.bmax
-        rel = (
+    def _relative_position_in(self, bmin, bmax) -> tuple:
+        """Where the camera is as a fraction of the given box, ±1 at its edges.
+
+        z is anchored to the physical surface rather than the box floor, so a
+        field that starts aloft keeps its real altitude — the convention
+        witness and behold both read (see camera.py).
+        """
+        return (
             2.0 * (self.position[0] - bmin[0]) / (bmax[0] - bmin[0]) - 1.0,
             2.0 * (self.position[1] - bmin[1]) / (bmax[1] - bmin[1]) - 1.0,
             2.0 * self.position[2] / bmax[2] - 1.0,
         )
+
+    def camera(self) -> Camera:
+        """Current viewpoint as a cv.Camera (relative-coordinate position)."""
+        rel = self._relative_position_in(self.renderer.bmin, self.renderer.bmax)
         return Camera(position=rel, azimuth=self.azimuth,
                       elevation=self.elevation, fov=self.fov)
 
@@ -1102,6 +1112,8 @@ class FlyThroughApp:
 
     def _install_loaded_renderer(self, result: dict) -> None:
         self.renderer = result["renderer"]
+        # A choice of field belongs to the file it was made for.
+        self._behold_field_choice = "outer"
         self._reset_camera_to_default()
         self._frame_index = 0
         self.renderer.reset_accumulation()
@@ -1174,12 +1186,71 @@ class FlyThroughApp:
     def _quote_command(parts) -> str:
         return " ".join(shlex.quote(str(part)) for part in parts)
 
+    @staticmethod
+    def _abs_source(path: str | None) -> str:
+        """Absolute path for a command that will be run from anywhere.
+
+        The panel's command is copied into some other terminal, in some
+        other directory; the relative path soar itself was launched with
+        would not resolve there.
+        """
+        if not path:
+            return "<in-memory>"
+        return str(Path(path).expanduser().resolve())
+
+    def _behold_target_field(self) -> tuple:
+        """(field, label, box) the behold command should name.
+
+        Behold renders one field from one group. With a nest loaded there
+        are two on screen, so the choice is the user's — `_behold_field_choice`
+        holds it, and falls back to the outer field when there is no nest
+        (or the nest went away under a stale selection).
+
+        The box comes along because a relative position means "this far
+        across THIS field": quoting the outer domain's fraction at a nest a
+        fortieth of its width puts the camera kilometres from the view it
+        was framed in.
+        """
+        nest = self.renderer.nest if self.renderer.nested else None
+        if nest is not None and self._behold_field_choice == "nest":
+            return nest, "nest", (self.renderer.nest_bmin, self.renderer.nest_bmax)
+        return (self.renderer.field, "outer",
+                (self.renderer.bmin, self.renderer.bmax))
+
+    @staticmethod
+    def _behold_group_arguments(field) -> list:
+        """Group flags that point behold at the same arrays soar read.
+
+        Nothing to say for a field that came from the root group. A
+        separate ice file is its own root, so a group there can only apply
+        to the liquid lookup; otherwise one group covers the whole dataset
+        (coordinates included), which is how soar loaded it.
+        """
+        liquid_group = field.liquid_group
+        ice_group = None if field.ice_source else field.ice_group
+        if ice_group and ice_group != liquid_group:
+            parts = (
+                ["--liquid-water-group", liquid_group] if liquid_group else []
+            )
+            return parts + ["--ice-water-group", ice_group]
+        if not liquid_group:
+            return []
+        if field.ice_source:
+            return ["--liquid-water-group", liquid_group]
+        return ["--group", liquid_group]
+
     def _behold_reproduction_command(self, camera: Camera, quality: str) -> str:
-        field = self.renderer.field
-        source = field.source or "<in-memory>"
+        field, _, (bmin, bmax) = self._behold_target_field()
+        camera = Camera(
+            position=self._relative_position_in(bmin, bmax),
+            azimuth=camera.azimuth, elevation=camera.elevation,
+            fov=camera.fov,
+        )
+        source = self._abs_source(field.source)
         parts = ["behold", source, quality, "--gpu"]
         if field.ice_source:
-            parts.extend(["--ice", field.ice_source])
+            parts.extend(["--ice", self._abs_source(field.ice_source)])
+        parts.extend(self._behold_group_arguments(field))
         parts.extend([
             "--camera-position",
             *(self._fmt_num(v) for v in camera.position),
@@ -1664,6 +1735,9 @@ class FlyThroughApp:
             elif action == ACTION_SELECT_BEHOLD_QUALITY:
                 self._behold_quality = transition.quality
                 self._clipboard_note = None
+            elif action == ACTION_SELECT_BEHOLD_FIELD:
+                if self.renderer.nested:
+                    self._select_behold_field(transition.behold_field)
             elif action == ACTION_COPY_BEHOLD_COMMAND:
                 self._copy_behold_command()
             elif action == ACTION_SELECT_TIER:
@@ -2091,6 +2165,29 @@ class FlyThroughApp:
                     "frame will differ",
                     wrapped=True,
                 )
+            if self.renderer.nested:
+                # Two fields on screen, and behold renders one. Ask rather
+                # than pick: which one is wanted is not derivable from the
+                # view — the camera sees both.
+                _, chosen, _ = self._behold_target_field()
+                imgui.dummy((1.0, 6.0))
+                theme.caption(
+                    "behold renders one field, not a nested pair — the other "
+                    "one will be absent from its frame",
+                    wrapped=True,
+                )
+                theme.caption("Which field")
+                for label, key, name, field in (
+                    ("Outer field", "O", "outer", self.renderer.field),
+                    ("Nested field", "I", "nest", self.renderer.nest),
+                ):
+                    if theme.menu_button(
+                        label, key,
+                        sublabel=self._behold_field_summary(field),
+                        height=32.0,
+                        right_text="selected" if name == chosen else None,
+                    ):
+                        self._select_behold_field(name)
             imgui.dummy((1.0, 6.0))
             theme.caption("Quality")
             for label, hint, name, note in BEHOLD_QUALITY_ROWS:
@@ -2111,6 +2208,19 @@ class FlyThroughApp:
                 self._set_menu_state(MENU_MAIN)
         finally:
             self._end_imgui_window(imgui)
+
+    @staticmethod
+    def _behold_field_summary(field) -> str:
+        """One line naming a field the way the picker needs: group, then file."""
+        if field is None:
+            return ""
+        where = field.liquid_group or "root group"
+        name = Path(field.source).name if field.source else "in-memory"
+        return f"{where} — {name}"
+
+    def _select_behold_field(self, name: str) -> None:
+        self._behold_field_choice = name
+        self._clipboard_note = None
 
     def _copy_behold_command(self) -> None:
         command = self._behold_reproduction_command(

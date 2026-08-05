@@ -13,7 +13,10 @@ import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
-import { TrackRecorder, trackPayload, resampleTrack } from "./track.js";
+import {
+  TrackRecorder, trackPayload, resampleTrack, resampledFrameCount,
+  MAX_TRACK_SECONDS,
+} from "./track.js";
 import { UI } from "./ui.js";
 import { mod360 } from "./spectral.js";
 import {
@@ -48,6 +51,7 @@ class Viewer {
     this.sunElevation = K.DEFAULT_SUN_ELEVATION;
     this.toneMapGamma = K.DEFAULT_TONE_MAP_GAMMA;
     this.beholdQuality = K.DEFAULT_BEHOLD_QUALITY;
+    this.beholdField = "outer";   // "outer" or "nest": behold renders one
     this.captureSize = null;
     this.videoFps = K.DEFAULT_VIDEO_FPS;
     this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
@@ -61,6 +65,23 @@ class Viewer {
     this._fpsAcc = 0; this._fpsN = 0; this._fps = null; this._frameMs = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
+
+    // The frame loop is identified by a generation, not by a boolean.
+    //
+    // A frame is async: it can be sitting in an await when the field is
+    // replaced. Suppressing it with a flag that a later load clears again
+    // revives it, and since every live frame schedules its own successor the
+    // result is two permanent loops sharing one renderer — which a hidden tab
+    // makes deterministic rather than merely possible, because the suppressed
+    // callback cannot run and retire itself while the load is in flight.
+    // Bumping the generation orphans the old frame for good.
+    this._loopGeneration = 0;
+    this._raf = null;
+    // `stop` is fatal and one-way: a lost device or a failed draw. Nothing
+    // clears it, so no later load can resurrect a loop on a dead device.
+    this.stop = false;
+    this._disposed = false;
+    this._listeners = new AbortController();
   }
 
   get sunZenith() { return 90.0 - this.sunElevation; }
@@ -100,88 +121,140 @@ class Viewer {
 
     await this.loadField(source, progress);
     this._bindInput();
-    this._lastTime = performance.now();
     this.paused = false;
-    requestAnimationFrame(() => this._frame());
+    this._startLoop();
+  }
+
+  /**
+   * Release everything the current field owns, once the GPU has finished with
+   * it. Destroying a texture that submitted commands still reference is legal
+   * by the letter of the spec and segfaults browsers in practice, so the
+   * barrier is not optional.
+   */
+  async _releaseField() {
+    this._stopLoop();
+    if (!this.scene) return;
+    await this.device.queue.onSubmittedWorkDone();
+    this.renderer?.destroy();
+    this.minimap?.destroy();
+    this.bird?.destroy();
+    this.scene.destroy();
+    this.scene = null;
+    this.renderer = null;
+    this.minimap = null;
+    this.bird = null;
+    this.frameIndex = 0;
+    this._lastSignature = null;
+    this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
+    this.sunElevation = K.DEFAULT_SUN_ELEVATION;
   }
 
   /**
    * Load (or replace) the field. Everything resident on the GPU for the old
    * one is released first — a second field would otherwise sit alongside the
    * first, and these are gigabytes.
+   *
+   * The new field is built into locals and only committed once all of it
+   * exists. A shader that fails to compile half-way through would otherwise
+   * leave a volume texture with no owner and no reference: gigabytes that
+   * only a garbage collector knows about, released whenever it feels like it.
    */
   async loadField(source, progress) {
-    if (this.scene) {
-      this.stop = true;
-      await this.device.queue.onSubmittedWorkDone();
-      this.renderer?.destroy();
-      this.minimap?.destroy();
-      this.bird?.destroy();
-      this.scene.destroy();
-      this.scene = null;
-      this.renderer = null;
-      this.minimap = null;
-      this.bird = null;
-      this.frameIndex = 0;
-      this._lastSignature = null;
-      this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
-      this.sunElevation = K.DEFAULT_SUN_ELEVATION;
-    }
+    await this._releaseField();
 
-    if (source.kind === "demo") {
-      this.scene = await loadDemoScene(
-        this.device, source.base, OCEAN_URL,
-        (stage, fraction) => progress(stage, fraction));
-      if (this.scene.sun) {
-        this.sunAzimuth = this.scene.sun.azimuth;
-        this.sunElevation = this.scene.sun.elevation;
+    let scene = null, renderer = null, minimap = null, bird = null;
+    let sun = null, minimapProblem = null, birdProblem = null;
+    try {
+      // The ocean is a patch of sea surface, not anything about the data, so
+      // it survives a change of field — and belongs to the viewer, which is
+      // what disposes of it.
+      const ocean = async () => (this._ocean ??=
+        await loadOceanTile(this.device, OCEAN_URL));
+
+      if (source.kind === "demo") {
+        scene = await loadDemoScene(
+          this.device, source.base, ocean,
+          (stage, fraction) => progress(stage, fraction));
+        sun = scene.sun ?? null;
+      } else {
+        const { loadFileScene } = await import("./ingest/index.js");
+        scene = await loadFileScene(
+          this.device, source.file, {
+            ocean,
+            progress,
+            ask: (question) => this._ask(question),
+          });
       }
-    } else {
-      const { loadFileScene } = await import("./ingest/index.js");
-      this.scene = await loadFileScene(
-        this.device, source.file, {
-          // The ocean is a patch of sea surface, not anything about the
-          // data, so it survives a change of field.
-          ocean: async () => (this._ocean ??=
-            await loadOceanTile(this.device, OCEAN_URL)),
-          progress,
-          ask: (question) => this._ask(question),
-        });
-    }
 
-    this.renderer = new Renderer(this.device, this.shaderSource, this.scene,
-                                 { canvasFormat: this.canvasFormat });
-    if (this.scene.periodicDefault === false) this.renderer.setPeriodic(false);
-    progress("Compiling the shader…", 0.97);
-    await this.renderer.init();
-    this.camera = new FlightCamera(this.scene.bmin, this.scene.bmax,
-                                   { periodic: this.renderer.periodic });
+      renderer = new Renderer(this.device, this.shaderSource, scene,
+                              { canvasFormat: this.canvasFormat });
+      if (scene.periodicDefault === false) renderer.setPeriodic(false);
+      progress("Compiling the shader…", 0.97);
+      await renderer.init();
 
-    // The map and the bird are overlays, not the picture. A GPU that cannot
-    // hold one (or a field too wide for a 2D texture) is a reason to fly
-    // without it and say so, not a reason to fail the load.
-    try {
-      this.minimap = await new Minimap(this.device, {
-        albedo: this.scene.albedo, shape: this.scene.albedoShape,
-      }).init(this.canvasFormat, this.hudSource);
-    } catch (err) {
-      this.minimap = null;
-      this._minimapProblem = String(err?.message || err);
-    }
-    try {
-      this.bird = new Bird(this.device, {
-        volumeView: this.scene.volumeView, sampler: this.renderer.volSampler,
-        bmin: this.scene.bmin, bmax: this.scene.bmax,
+      // The map and the bird are overlays, not the picture. A GPU that cannot
+      // hold one (or a field too wide for a 2D texture) is a reason to fly
+      // without it and say so, not a reason to fail the load. Said now rather
+      // than only when the menu is next opened.
+      const map = new Minimap(this.device, {
+        albedo: scene.albedo, shape: scene.albedoShape,
       });
-      await this.bird.init(this.canvasFormat, this.birdSource);
+      try {
+        minimap = await map.init(this.canvasFormat, this.hudSource);
+      } catch (err) {
+        map.destroy();
+        minimap = null;
+        minimapProblem = String(err?.message || err);
+      }
+      const flyer = new Bird(this.device, {
+        volumeView: scene.volumeView, sampler: renderer.volSampler,
+        bmin: scene.bmin, bmax: scene.bmax,
+      });
+      try {
+        await flyer.init(this.canvasFormat, this.birdSource);
+        bird = flyer;
+      } catch (err) {
+        flyer.destroy();
+        bird = null;
+        birdProblem = String(err?.message || err);
+      }
     } catch (err) {
-      this.bird = null;
-      this._birdProblem = String(err?.message || err);
+      bird?.destroy();
+      minimap?.destroy();
+      renderer?.destroy();
+      scene?.destroy();
+      throw err;
     }
+
+    this.scene = scene;
+    this.renderer = renderer;
+    this.minimap = minimap;
+    this.bird = bird;
+    this._minimapProblem = minimapProblem;
+    this._birdProblem = birdProblem;
+    if (sun) {
+      this.sunAzimuth = sun.azimuth;
+      this.sunElevation = sun.elevation;
+    }
+    this.camera = new FlightCamera(scene.bmin, scene.bmax,
+                                   { periodic: renderer.periodic });
 
     this.ui.setSubtitle(this.sourceLabel);
-    if (this.scene.nestNote) this.ui.say(this.scene.nestNote, 8);
-    this.stop = false;
+
+    // Everything the load has to admit to, in ONE toast. say() replaces
+    // whatever is on screen rather than queueing, so four calls in a row
+    // would show the fourth and quietly lose the other three — which is the
+    // same silence these messages exist to break.
+    const notes = [];
+    if (scene.nestNote) notes.push(scene.nestNote);
+    if (minimapProblem) notes.push(`Flying without the minimap: ${minimapProblem}`);
+    if (birdProblem) notes.push(`Flying without the bird: ${birdProblem}`);
+    if (scene.skipped?.length) {
+      notes.push(
+        `${scene.skipped.length} group(s) in this file could not be read, ` +
+        `and were not offered:\n${scene.skipped.join("\n")}`);
+    }
+    if (notes.length) this.ui.say(notes.join("\n\n"), 6 + 3 * notes.length);
   }
 
   /**
@@ -228,10 +301,16 @@ class Viewer {
 
   _bindInput() {
     const canvas = this.canvas;
+    // Every listener below outlives its own statement, and half of them are on
+    // `document`, which outlives the viewer. Registered against one signal so
+    // dispose() can take them all off in a line — otherwise a viewer that has
+    // been left behind is still reachable from the document, and so is its
+    // scene, its renderer, and its device.
+    const { signal } = this._listeners;
 
     canvas.addEventListener("click", () => {
       if (!this.captured && !this.ui.isOpen) canvas.requestPointerLock();
-    });
+    }, { signal });
 
     document.addEventListener("pointerlockchange", () => {
       const wasCaptured = this.captured;
@@ -252,13 +331,13 @@ class Viewer {
       this._lockLostAt = performance.now();
       if (wasCaptured && !this._tabRelease && !this.paused) this.pause();
       this._tabRelease = false;
-    });
+    }, { signal });
 
     // Firefox refuses a re-lock for about a second after the user pressed
     // Escape, so resuming cannot rely on it. Say what to do instead.
     document.addEventListener("pointerlockerror", () => {
       if (!this.paused) this.ui.say("Click the view to take the mouse.", 3);
-    });
+    }, { signal });
 
     document.addEventListener("mousemove", (e) => {
       if (!this.captured) return;
@@ -267,19 +346,19 @@ class Viewer {
         return;
       }
       this.camera.look(e.movementX, e.movementY);
-    });
+    }, { signal });
 
     document.addEventListener("wheel", (e) => {
       if (!this.captured) return;
       this.camera.scrollSpeed(e.deltaY, performance.now() / 1000);
-    }, { passive: true });
+    }, { passive: true, signal });
 
-    document.addEventListener("keydown", (e) => this._onKeyDown(e));
+    document.addEventListener("keydown", (e) => this._onKeyDown(e), { signal });
     document.addEventListener("keyup", (e) => {
       this.camera.keys.delete(e.key.toLowerCase());
-    });
+    }, { signal });
 
-    window.addEventListener("blur", () => this.camera.keys.clear());
+    window.addEventListener("blur", () => this.camera.keys.clear(), { signal });
   }
 
   /**
@@ -432,9 +511,51 @@ class Viewer {
     this.ui.open("main");
   }
 
-  leave() {
+  /**
+   * Give everything back: the frame loop, the listeners, the GPU.
+   *
+   * Idempotent and safe to call from any state, because every path out of the
+   * viewer ends here — leaving by the menu, backing out of a failure, and a
+   * boot that threw half-built. Ordered deliberately: the loop stops before
+   * anything is destroyed, and the queue is drained before any texture is,
+   * because a frame submitted a millisecond ago may still be reading the
+   * volume this is about to free.
+   */
+  async dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
     this.stop = true;
-    this.scene.destroy();
+    this._stopLoop();
+    this._videoAbort = true;
+    this._listeners.abort();
+    if (this.captured) document.exitPointerLock();
+
+    try {
+      await this.device.queue.onSubmittedWorkDone();
+    } catch {
+      // A device already lost has no queue to drain, and that is precisely
+      // the case where the destroys below matter least and must not throw.
+    }
+    this.renderer?.destroy();
+    this.minimap?.destroy();
+    this.bird?.destroy();
+    this.scene?.destroy();
+    this._ocean?.texture?.destroy();
+    this.renderer = null;
+    this.minimap = null;
+    this.bird = null;
+    this.scene = null;
+    this._ocean = null;
+
+    // Unconfigure before destroy: the swapchain holds textures on this device,
+    // and leaving it configured against a destroyed device is the state
+    // Firefox's own error message calls "Queue[Id] does not exist".
+    this.context?.unconfigure();
+    this.device.destroy();
+  }
+
+  async leave() {
+    await this.dispose();
     location.reload();
   }
 
@@ -448,24 +569,33 @@ class Viewer {
    * cannot produce.
    */
   toggleTrackRecording() {
-    if (this.recorder.recording) {
-      const samples = this.recorder.stop();
-      if (samples.length < 2) {
-        this.ui.say("Too short to be a track — nothing recorded.", 3);
-        return;
-      }
-      this.pause();
-      this.ui.open("track", { samples });
+    if (this.recorder.recording) { this._finishTrackRecording(); return; }
+    this.recorder.start();
+    this.ui.say(
+      "Recording the flight path. R again to stop; it stops itself after " +
+      `${Math.round(MAX_TRACK_SECONDS / 60)} minutes of flying.`, 4);
+  }
+
+  /** Stop recording and offer what was caught. */
+  _finishTrackRecording(reachedLimit = false) {
+    const samples = this.recorder.stop();
+    if (samples.length < 2) {
+      this.ui.say("Too short to be a track — nothing recorded.", 3);
       return;
     }
-    this.recorder.start(performance.now() / 1000);
-    this.ui.say("Recording the flight path. R again to stop.", 3);
+    this.pause();
+    if (reachedLimit) {
+      this.ui.say(
+        `That is ${Math.round(MAX_TRACK_SECONDS / 60)} minutes of flying, ` +
+        "which is the longest track cloudyview records. Here is what it " +
+        "caught.", 6);
+    }
+    this.ui.open("track", { samples });
   }
 
   /** How many video frames a track becomes at the chosen rate. */
   trackFrameCount(samples) {
-    return resampleTrack(samples, this.videoFps,
-                         { periodic: this.renderer.periodic }).length;
+    return resampledFrameCount(samples, this.videoFps);
   }
 
   /**
@@ -543,7 +673,10 @@ class Viewer {
         : `Could not make the video: ${err.message}`, 6);
     } finally {
       target?.texture.destroy();
-      if (saved) endOfflineRender(this.renderer, saved);
+      // The renderer is gone when the session was disposed mid-render — the
+      // abort flag is what woke this loop up. There is then no state left to
+      // restore, and reaching for it would throw inside a finally.
+      if (saved && this.renderer) endOfflineRender(this.renderer, saved);
       this.ui.hideProgress();
       this._capturing = false;
       this._videoAbort = false;
@@ -697,9 +830,8 @@ class Viewer {
     try {
       await this.loadField({ kind: "file", file }, this.progress);
       this.setLoadingVisible?.(false);
-      this._lastTime = performance.now();
       this.paused = false;
-      requestAnimationFrame(() => this._frame());
+      this._startLoop();
     } catch (err) {
       this.onFailure?.("Could not open this field.",
                        String(err?.message || err), err?.advice || "");
@@ -716,12 +848,50 @@ class Viewer {
       this.scene.bmin, this.scene.bmax);
   }
 
+  /** Group name of the nested level, for the menu and the behold command. */
+  get nestName() {
+    return this.scene?.nestGroup ?? null;
+  }
+
+  /**
+   * Which of the loaded fields the behold command names, and the box its
+   * coordinates are measured in.
+   *
+   * behold renders one field from one group, so a nested scene has to be
+   * asked about; the outer field is the answer until it is. The box travels
+   * with the group because the relative position means "this far across THIS
+   * field" — quoting the outer domain's fraction at a nest a fortieth of its
+   * width puts the camera kilometres from where it was framed.
+   */
+  beholdTarget() {
+    if (this.scene?.nested && this.beholdField === "nest") {
+      return {
+        group: this.scene.nestGroup,
+        bmin: this.scene.nestBmin,
+        bmax: this.scene.nestBmax,
+      };
+    }
+    return {
+      group: this.scene?.groupPath ?? null,
+      bmin: this.scene?.bmin,
+      bmax: this.scene?.bmax,
+    };
+  }
+
+  beholdGroup() {
+    return this.beholdTarget().group;
+  }
+
   beholdCommand() {
-    const rel = this.camera.relativePosition();
+    const { group, bmin, bmax } = this.beholdTarget();
+    const rel = worldToRelative(this.camera.position, bmin, bmax);
     const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
+    // A browser never learns where the file it was handed lives, so the
+    // path here is a name to be completed in the terminal, not a path.
     const source = this.scene.sourceName ?? "<your-file.nc>";
     return [
       "behold", source, this.beholdQuality, "--gpu",
+      ...(group ? ["--group", group] : []),
       "--camera-position", n(rel[0]), n(rel[1]), n(rel[2]),
       "--camera-azimuth", n(this.camera.azimuth),
       "--camera-elevation", n(this.camera.elevation),
@@ -746,12 +916,43 @@ class Viewer {
     };
   }
 
-  async _frame() {
-    if (this.stop) return;
+  /**
+   * Start the one frame loop, retiring whatever was running before it.
+   *
+   * The only place a loop is ever started. Everything that wants the picture
+   * moving again — the first load, a replacement field, the end of a capture —
+   * comes through here, so "how many loops are running" has one answer.
+   */
+  _startLoop() {
+    if (this.stop || this._disposed) return;
+    this._stopLoop();
+    const generation = this._loopGeneration;
+    this._lastTime = performance.now();
+    this._raf = requestAnimationFrame(() => this._frame(generation));
+  }
+
+  /** Retire the running loop, including a frame currently mid-await. */
+  _stopLoop() {
+    this._loopGeneration += 1;
+    if (this._raf !== null) {
+      cancelAnimationFrame(this._raf);
+      this._raf = null;
+    }
+  }
+
+  /** Whether the frame that is asking is still the one that should be running. */
+  _loopAlive(generation) {
+    return !this.stop && !this._disposed
+        && generation === this._loopGeneration;
+  }
+
+  async _frame(generation) {
+    this._raf = null;
+    if (!this._loopAlive(generation)) return;
     // A capture owns the renderer while it runs — the live loop would fight
     // it for the accumulation buffer and neither picture would converge.
     if (this._capturing) {
-      requestAnimationFrame(() => this._frame());
+      this._raf = requestAnimationFrame(() => this._frame(generation));
       return;
     }
     const now = performance.now();
@@ -807,11 +1008,19 @@ class Viewer {
                        err.advice || "");
       return;
     }
+    // The draw is the loop's one long await. A field replaced (or the viewer
+    // left) while it was in flight means this frame belongs to a session that
+    // no longer exists — and everything below it touches state that release
+    // has already torn down.
+    if (!this._loopAlive(generation)) return;
 
     // Sampled after the frame it describes, so the track records what was on
-    // screen rather than what was about to be.
+    // screen rather than what was about to be. The clock is the flight's own
+    // accumulated time, not the wall's: see TrackRecorder.
     if (this.recorder.recording && !this.paused) {
-      this.recorder.sample(now / 1000, this.camera);
+      this.recorder.advance(dt);
+      this.recorder.sample(this.camera);
+      if (this.recorder.full) this._finishTrackRecording(true);
     }
 
     this.frameIndex += 1;
@@ -832,7 +1041,7 @@ class Viewer {
       showSpeed: performance.now() / 1000 < this.camera.speedFlashUntil,
     });
 
-    requestAnimationFrame(() => this._frame());
+    this._raf = requestAnimationFrame(() => this._frame(generation));
   }
 }
 
@@ -848,7 +1057,15 @@ export async function boot({ device, source, progress, onReady, onFailure,
   // during the very allocation that loading performs, and whoever is
   // watching for that needs to be able to stop this viewer.
   register?.(viewer);
-  await viewer.start(source, progress);
+  try {
+    await viewer.start(source, progress);
+  } catch (err) {
+    // A boot that threw half-way is still holding whatever it managed to
+    // build — most of a field, a device, a configured swapchain. The caller
+    // is about to show a failure panel, not to keep this viewer.
+    await viewer.dispose();
+    throw err;
+  }
   onReady?.();
   return viewer;
 }

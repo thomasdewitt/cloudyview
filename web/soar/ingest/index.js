@@ -53,6 +53,9 @@ class WorkerLink {
     });
   }
 
+  /** Fire-and-forget, for the slab acks: no id, no reply, no promise. */
+  notify(op, args) { this.worker.postMessage({ op, ...args }); }
+
   close() { this.worker.terminate(); }
 }
 
@@ -60,7 +63,7 @@ class WorkerLink {
  * Upload one level's extinction field, slab by slab as the worker produces
  * it, so the JS heap never holds the whole volume.
  */
-function levelReceiver(device, label, onProgress) {
+function levelReceiver(device, label, onProgress, ack) {
   const state = { texture: null, padded: null, faces: null, geometry: null,
                   slabsDone: 0, error: null, queuedBytes: 0 };
 
@@ -115,9 +118,16 @@ function levelReceiver(device, label, onProgress) {
     state,
     handle(message) {
       if (message.label !== label) return chain;
-      chain = chain.then(() => step(message)).catch((err) => {
-        state.error ??= err;
-      });
+      // Read now, while the buffer is still attached: `step` hands it to
+      // writeTexture and the ack must survive that.
+      const credit = message.type === "slab" ? (message.bytes ?? 0) : 0;
+      chain = chain
+        .then(() => step(message))
+        .catch((err) => { state.error ??= err; })
+        // Unconditionally, including after a failure. The worker is blocked
+        // waiting for this; withholding it because the upload went wrong
+        // turns a load that should report an error into one that hangs.
+        .then(() => { if (credit) ack(credit); });
       return chain;
     },
     settled: () => chain,
@@ -140,10 +150,19 @@ export async function loadFileScene(
     receivers.get(message.label)?.handle(message);
   });
 
+  // A throw anywhere below — a refused nest, a map that never arrived, an
+  // ocean that would not load — used to leave whatever had already been
+  // allocated to the garbage collector, which is a poor custodian of several
+  // gigabytes of video memory. The catch at the end gives it all back: every
+  // volume texture is reachable through `receivers` from the moment it is
+  // created, and the nest stand-in through this.
+  let nestDummy = null;
   try {
     progress("Reading the file structure…", 0.02);
     const { groups, problems } = await link.call("open", { file });
     if (problems?.length) {
+      // Kept, not just logged. Offering three of a file's five groups with no
+      // explanation is how someone concludes the tool cannot read their data.
       console.warn("cloudyview: groups skipped:\n" + problems.join("\n"));
     }
 
@@ -165,9 +184,15 @@ export async function loadFileScene(
         : [groups.find((g) => g.path === answer.group)];
     }
 
-    // Units, once, covering every level chosen.
+    // Units, once, covering every condensate variable of every level chosen —
+    // ice as well as liquid. A variable whose units the file does not declare
+    // is a question, never an inference from its neighbour.
     let units = null;
-    const unknown = chosen.filter((g) => !g.unitsKnown).map((g) => g.liquidVar);
+    const unknown = [];
+    for (const g of chosen) {
+      if (!g.unitsKnown) unknown.push(g.liquidVar);
+      if (g.iceVar && !g.iceUnitsKnown) unknown.push(g.iceVar);
+    }
     if (unknown.length) {
       units = (await ask({
         panel: "units", filename: file.name, variables: [...new Set(unknown)],
@@ -196,7 +221,8 @@ export async function loadFileScene(
         progress(
           `Reading ${label} — part ${n} of ${of}` +
           (level.shape ? ` (${level.shape.join(" x ")} cells)` : ""),
-          0.05 + share * (index + done)));
+          0.05 + share * (index + done)),
+        (bytes) => link.notify("ack", { bytes }));
       receivers.set(label, receiver);
       progress(`Reading ${label}…`, 0.05 + share * index);
       await link.call("extinction",
@@ -221,6 +247,8 @@ export async function loadFileScene(
     }
 
     progress("Loading the ocean surface…", 0.95);
+    // The ocean belongs to the session, not to this scene, so it is not in
+    // the cleanup below: the caller keeps it across a change of field.
     const oceanTile = await ocean();
 
     const outer = built[0];
@@ -250,13 +278,16 @@ export async function loadFileScene(
       albedo: outer.receiver.state.albedo,
       albedoShape: outer.receiver.state.albedoShape,
       _nest: null,
-      _nestDummy: createNestDummy(device),
+      _nestDummy: (nestDummy = createNestDummy(device)),
       // A file's domain is NOT known to be periodic. nest_a in a nested
       // run is a 32 km box inside a 2048 km parent; tiling it laterally
       // invents structure that looks exactly like data — a line of
       // identical clouds marching to the horizon. Off unless asked for.
       periodicDefault: false,
       sourceName: file.name,
+      // Kept so the behold hand-off can name this group again: a file of
+      // several groups renders the wrong field without it.
+      groupPath: outer.level.path || null,
       title: outer.level.path ? `group ${outer.level.path}` : null,
       liquidVar: outer.level.liquidVar,
       iceVar: outer.level.iceVar,
@@ -280,8 +311,18 @@ export async function loadFileScene(
       scene.nestNote = report.clipped;
     }
 
+    // Groups this file has that could not be read. Carried out so the viewer
+    // can say so on screen rather than only in the console.
+    scene.skipped = problems ?? [];
+
     progress("Ready.", 1);
     return scene;
+  } catch (err) {
+    for (const receiver of receivers.values()) {
+      receiver.state.texture?.destroy();
+    }
+    nestDummy?.destroy();
+    throw err;
   } finally {
     link.close();
   }

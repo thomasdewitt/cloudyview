@@ -102,6 +102,35 @@ export function catmullRom(times, values, tOut) {
  * goes through 0 rather than the long way round; in a periodic domain the
  * x/y wrap is unwrapped the same way and re-wrapped afterwards.
  */
+const frameCountBetween = (t0, t1, fps) =>
+  Math.floor((t1 - t0 + 1e-9) * fps) + 1;
+
+/**
+ * How many frames `resampleTrack` would produce — without producing them.
+ *
+ * The menu shows this number the instant a recording stops, purely to say
+ * "which becomes 900 frames at 30 fps". Resampling to count was fine while a
+ * track was a minute of flying; it is not fine for a track whose length is
+ * whatever the clock did, and it is the arithmetic below either way.
+ */
+export function resampledFrameCount(samples, fps) {
+  const times = distinctAscendingTimes(samples, fps);
+  return frameCountBetween(times[0], times[times.length - 1], fps);
+}
+
+/** The sample times a resample would actually interpolate over. */
+function distinctAscendingTimes(samples, fps) {
+  if (!(fps > 0)) throw new Error(`fps must be positive; got ${fps}.`);
+  const sorted = samples.map((s) => s[0]).sort((a, b) => a - b);
+  const distinct = sorted.filter((t, i) => i === 0 || t > sorted[i - 1]);
+  if (distinct.length < 2) {
+    throw new Error(
+      `The track collapses to ${distinct.length} sample(s) with distinct ` +
+      "times, which is not enough to interpolate. Fly for longer.");
+  }
+  return distinct;
+}
+
 export function resampleTrack(samples, fps, { periodic = true } = {}) {
   if (!(fps > 0)) throw new Error(`fps must be positive; got ${fps}.`);
 
@@ -120,8 +149,8 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
   if (periodic) { x = unwrapPeriodic(x); y = unwrapPeriodic(y); }
   const az = unwrapDegrees(column(4));
 
-  const t0 = times[0], t1 = times[times.length - 1];
-  const count = Math.floor((t1 - t0 + 1e-9) * fps) + 1;
+  const count = frameCountBetween(times[0], times[times.length - 1], fps);
+  const t0 = times[0];
   const tOut = new Float64Array(count);
   for (let k = 0; k < count; k++) tOut[k] = t0 + k / fps;
 
@@ -156,41 +185,68 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
 }
 
 /**
+ * A track long enough that it is no longer a flight anyone meant to record.
+ *
+ * Ten minutes is 18,000 frames at 30 fps, which is already a big video and a
+ * big render. The point of the cap is not the video, though — it is that the
+ * clock below has to stop somewhere, and a bound stated in seconds of flying
+ * is one a person can reason about.
+ */
+export const MAX_TRACK_SECONDS = 600.0;
+
+/**
  * The in-flight recorder: appends one sample per rendered frame.
  *
  * Samples are the camera's own relative coordinates, taken after the frame
  * that showed them, so the track describes what was on screen rather than
  * what was about to be.
+ *
+ * The clock is the flight's, not the wall's: it advances by the delta of each
+ * rendered frame. Wall time made "start recording, switch to another app for
+ * the afternoon, come back" into a track claiming to be five hours long —
+ * requestAnimationFrame does not fire in a hidden tab, so no samples describe
+ * those hours, but the first one afterwards carried the whole gap in its
+ * timestamp. Resampling that at 30 fps asks for half a million frames.
  */
 export class TrackRecorder {
   constructor() {
     this.samples = [];
-    this.startedAt = null;
+    this.elapsed = 0.0;
+    this._recording = false;
   }
 
-  get recording() { return this.startedAt !== null; }
+  get recording() { return this._recording; }
   get duration() {
     return this.samples.length ? this.samples[this.samples.length - 1][0] : 0.0;
   }
+  /** True once the flight has run past what a track is allowed to hold. */
+  get full() { return this.elapsed >= MAX_TRACK_SECONDS; }
 
-  start(nowSeconds) {
+  start() {
     this.samples = [];
-    this.startedAt = nowSeconds;
+    this.elapsed = 0.0;
+    this._recording = true;
   }
 
-  /** One sample. `camera` is the live FlightCamera. */
-  sample(nowSeconds, camera) {
-    if (this.startedAt === null) return;
+  /** Advance the flight clock by one rendered frame. */
+  advance(deltaSeconds) {
+    if (!this._recording) return;
+    this.elapsed += Math.max(0.0, deltaSeconds);
+  }
+
+  /** One sample at the current flight time. `camera` is the live FlightCamera. */
+  sample(camera) {
+    if (!this._recording) return;
     const rel = camera.relativePosition();
     this.samples.push([
-      nowSeconds - this.startedAt,
+      this.elapsed,
       rel[0], rel[1], rel[2],
       camera.azimuth, camera.elevation, camera.fov,
     ]);
   }
 
   stop() {
-    this.startedAt = null;
+    this._recording = false;
     return this.samples;
   }
 }

@@ -62,7 +62,7 @@ field.x, field.y, field.z # 1D coords, meters
 cam = cv.Camera(position=(0, -0.8, -0.95),  # relative coords, ±1 = domain edge
                 azimuth=0,                  # met bearing: 0=N, 90=E
                 elevation=35,               # degrees above horizon
-                fov=100)                    # vertical field of view
+                fov=100)                    # horizontal field of view
 
 albedo = cv.glimpse(field)                        # (ny, nx) two-stream visual albedo
 img = cv.witness(field, camera=cam, size=(600, 400))   # (H, W, 3) in [0, 1]

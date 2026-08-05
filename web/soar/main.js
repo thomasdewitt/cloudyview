@@ -68,10 +68,18 @@ export function showFailure(title, body, advice) {
   console.error(title, body, advice);
 }
 
-dom.failureBack.addEventListener("click", () => {
+// Backing out of a failure is a full exit, not a hidden div.
+//
+// The viewer behind this panel still owns a device, a swapchain, a volume of
+// several gigabytes, and a set of listeners on `document` that keep all of it
+// reachable. Hiding it and then opening another field stacked a second device
+// on the same canvas — and the watcher for the first one was still live,
+// pointed at whatever `viewer` happened to mean by then.
+dom.failureBack.addEventListener("click", async () => {
   hideLoading();
   dom.viewer.hidden = true;
   dom.header.style.display = "";
+  await endSession();
 });
 
 // --- capability check -----------------------------------------------------
@@ -145,30 +153,70 @@ async function resolveDemoBase() {
   return DEMO_BASE_URL;
 }
 
-async function enterViewer(source) {
+/** Tear down whatever session is running, and wait for it. */
+async function endSession() {
+  const going = viewer;
+  viewer = null;
+  await going?.dispose();
+}
+
+/**
+ * Open a field in a viewer of its own.
+ *
+ * Serialized against itself. Double-clicking Demo used to start two of these
+ * — the network probe for the demo base is awaited before anything is hidden,
+ * so both got that far — and each acquired its own GPUDevice and configured
+ * the same canvas with it. One canvas cannot belong to two devices, and the
+ * loser's device-lost watcher would then stop the winner's viewer.
+ */
+let entering = null;
+function enterViewer(source) {
+  entering = (entering ?? Promise.resolve())
+    .catch(() => {})
+    .then(() => enterViewerOnce(source));
+  return entering;
+}
+
+async function enterViewerOnce(source) {
+  await endSession();
   dom.viewer.hidden = false;
   dom.header.style.display = "none";
   showLoading("Starting WebGPU…");
+  let device = null;
   try {
     const { adapter } = await (gpuProbe ??= probeGPU());
-    const device = await acquireDevice(adapter);
+    device = await acquireDevice(adapter);
+    // `session` rather than the module-level `viewer`: this closure must act
+    // on the viewer that owns THIS device, whatever has happened since. An
+    // old device dying is not a reason to stop a new session.
+    const session = { viewer: null };
     watchDevice(device, {
       onLost: (message) => {
         // Stop FIRST. Every frame after this would call into a queue whose
         // device no longer exists, and Firefox does not treat that as an
         // error — it crashes the process ("Queue[Id] does not exist").
-        if (viewer) viewer.stop = true;
+        if (session.viewer) session.viewer.stop = true;
+        if (session.viewer !== viewer) return;   // a session already replaced
         showFailure(
           "The GPU device was lost.", message,
           "Reload the page to start over. If it keeps happening on the same " +
           "field, it is probably running out of video memory — try a coarser " +
           "level or close other GPU-heavy tabs.");
       },
-      // WebGPU reports validation asynchronously, so an uncaught error here
-      // would otherwise show up only as a picture that is quietly wrong.
+      // WebGPU reports validation asynchronously. gpu.js calls both of these
+      // fatal, and it is right: an uncaptured validation error means the
+      // command stream is not what this code thinks it is, so the picture is
+      // undefined and every later frame compounds it. Stop and say so rather
+      // than carry on submitting into a state nobody can reason about.
       onError: (message) => {
         console.error("uncaptured:", message);
-        viewer?.ui?.say(`GPU error — the picture may be wrong:\n${message}`, 8);
+        if (session.viewer) session.viewer.stop = true;
+        if (session.viewer !== viewer) return;
+        showFailure(
+          "The GPU rejected a command.", message,
+          "This is a bug in cloudyview rather than anything you did. The " +
+          "picture after this point would be undefined, so rendering has " +
+          "stopped. Reload the page to start over.");
       },
     });
     const { boot } = await import("./viewer.js");
@@ -178,9 +226,14 @@ async function enterViewer(source) {
       // The loader asks questions (which group, what units) and those are
       // menu panels, which live under this overlay.
       setLoadingVisible: (visible) => { dom.loading.hidden = !visible; },
-      register: (v) => { viewer = v; },
+      register: (v) => { viewer = v; session.viewer = v; },
     });
+    session.viewer = viewer;
   } catch (err) {
+    // boot() disposes the viewer it could not finish, which takes the device
+    // with it; a failure before boot leaves the device here to release.
+    if (viewer) await endSession();
+    else device?.destroy();
     if (err instanceof WebGPUUnavailable) {
       showFailure(err.message, err.detail, "");
     } else {

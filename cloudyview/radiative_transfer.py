@@ -8,7 +8,18 @@ Features:
 - Accurate Mie scattering phase functions with dual-table importance sampling
 """
 
+import os
+
 import numpy as np
+import matplotlib
+# Every figure here goes straight to a file — nothing in this module ever
+# wants a window. A GUI backend is not merely unused: the checkpoint writer
+# builds its figure from the render's progress thread, and Qt answers that
+# with "QSocketNotifier: Can only be used with threads started with QThread"
+# on every run of behold. Set before pyplot is imported, which is when the
+# backend is resolved, and skipped when MPLBACKEND names a choice of yours.
+if not os.environ.get("MPLBACKEND"):
+    matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
@@ -508,6 +519,11 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
         'sensor': {
             'type': 'perspective',
             'fov': camera_config.get('fov', 45),
+            # Stated, not inherited: this IS Mitsuba's default, and it is the
+            # axis witness and soar march along too (see camera.py). Left
+            # implicit it reads like an oversight, which is how the two sides
+            # drifted apart in the first place.
+            'fov_axis': 'x',
             'to_world': camera_config['transform'],
             'sampler': sampler_cfg,
             'film': {
@@ -668,7 +684,10 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     if camera_config.get('add_ocean', False):
         ocean_size_multiplier = camera_config.get('ocean_size_multiplier', 100.0)
         ocean_height = camera_config.get('ocean_height', -0.99)
-        ocean_height = float(np.clip(ocean_height, -1.0, 1.0))  # keep within cube bounds
+        # Capped at the cube's ceiling only. The floor is deliberately open:
+        # for data that starts aloft, the physical sea surface lies BELOW the
+        # cube, and pinning it to -1 would hang the ocean at cloud base.
+        ocean_height = float(min(ocean_height, 1.0))
         ocean_size_x = ar_x * ocean_size_multiplier
         ocean_size_y = ar_y * ocean_size_multiplier
         ocean_reflectance = camera_config.get('ocean_reflectance', [0.2, 0.3, 0.4])

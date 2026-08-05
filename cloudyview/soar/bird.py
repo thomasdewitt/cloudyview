@@ -129,7 +129,7 @@ def _perspective_vp(origin: np.ndarray, camera: Camera,
                     size: Tuple[int, int]) -> np.ndarray:
     """World->clip matrix matching the raymarcher's ray construction.
 
-    Vertical FOV, clip +y = image top, WebGPU depth in [0, 1].
+    Horizontal FOV, clip +y = image top, WebGPU depth in [0, 1].
     """
     forward, right, up = camera.basis()
     w, h = size
@@ -141,8 +141,8 @@ def _perspective_vp(origin: np.ndarray, camera: Camera,
     view[:3, 3] = -view[:3, :3] @ origin
 
     proj = np.zeros((4, 4))
-    proj[0, 0] = f / aspect
-    proj[1, 1] = f
+    proj[0, 0] = f
+    proj[1, 1] = f * aspect
     proj[2, 2] = FAR / (NEAR - FAR)
     proj[2, 3] = NEAR * FAR / (NEAR - FAR)
     proj[3, 2] = -1.0

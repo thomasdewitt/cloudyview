@@ -12,7 +12,9 @@
 "use strict";
 
 import { volumeAABB, minVoxelSize, validateNestContainment } from "./field.js";
-import { guardAllocation, volumeFits } from "./gpu.js";
+import {
+  guardAllocation, volumeFits, retireAfterSubmittedWork,
+} from "./gpu.js";
 
 const FACE_NAMES = ["x_lo", "x_hi", "y_lo", "y_hi"];
 
@@ -162,6 +164,8 @@ export class Scene {
   get nestBmax() { return this._nest?.bmax ?? [0, 0, 0]; }
   get minVoxelNestM() { return this._nest?.minVoxelM ?? this.minVoxelM; }
   get nestView() { return (this._nest?.texture ?? this._nestDummy).createView(); }
+  /** NetCDF group the nest was read from, null when it came from the root. */
+  get nestGroup() { return this._nest?.name || null; }
 
   writeGhostBorder(periodic) {
     if (!this._faces) return;
@@ -181,10 +185,18 @@ export class Scene {
     return report;
   }
 
+  /**
+   * Unbind the nest and release it once the GPU is done with it.
+   *
+   * The caller rebuilds the bind group immediately, but frames submitted
+   * before that are still sampling this texture. Destroying it now is how a
+   * "remove nest" click becomes a crash a few milliseconds later.
+   */
   removeNest() {
     const had = Boolean(this._nest);
-    this._nest?.texture?.destroy();
+    const texture = this._nest?.texture ?? null;
     this._nest = null;
+    if (texture) retireAfterSubmittedWork(this.device, texture);
     return had;
   }
 
@@ -227,8 +239,13 @@ export function createNestDummy(device) {
  * `progress(stage, fraction)` reports download and upload separately because
  * the download is the slow part on a first visit and the upload is the slow
  * part afterwards, and saying so is better than one bar that stalls.
+ *
+ * `ocean` is a thunk rather than a URL for the same reason the file loader
+ * takes one: the sea surface is field-independent and belongs to the session,
+ * so loading the demo after a file (or the other way round) reuses the tile
+ * already on the card instead of allocating a second one and abandoning it.
  */
-export async function loadDemoScene(device, baseUrl, oceanUrl, progress) {
+export async function loadDemoScene(device, baseUrl, ocean, progress) {
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const padded = meta.volume.padded_dims_xyz;
@@ -239,48 +256,58 @@ export async function loadDemoScene(device, baseUrl, oceanUrl, progress) {
   const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
 
   progress?.("Loading the ocean surface…", 0.85);
-  const ocean = await loadOceanTile(device, oceanUrl);
+  const oceanTile = await ocean();
 
   progress?.("Uploading to the GPU…", 0.92);
   const volumeTexture = await createVolumeTexture(
     device, padded, "the demo cloud field");
-  const [px, py, pz] = padded;
-  writeVolumeSlab(
-    device, volumeTexture,
-    new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
-                    volumeBytes.byteLength / 2),
-    [0, 0, 0], [pz, py, px]);
+  // From here the volume exists on the card and nothing else holds it. Any
+  // throw before the Scene takes ownership has to give it back.
+  let nestDummy = null;
+  try {
+    const [px, py, pz] = padded;
+    writeVolumeSlab(
+      device, volumeTexture,
+      new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
+                      volumeBytes.byteLength / 2),
+      [0, 0, 0], [pz, py, px]);
 
-  const faces = unpackFaces(facesBytes, padded);
-  writeGhostBorder(device, volumeTexture, faces, true, padded);
+    const faces = unpackFaces(facesBytes, padded);
+    writeGhostBorder(device, volumeTexture, faces, true, padded);
+    nestDummy = createNestDummy(device);
 
-  const bmin = meta.volume.bmin;
-  const bmax = meta.volume.bmax;
-  const scene = new Scene(device, {
-    volumeTexture,
-    volumeView: volumeTexture.createView(),
-    padded,
-    shape: meta.volume.shape_xyz,
-    bmin, bmax,
-    minVoxelM: minVoxelSize(meta.volume.shape_xyz, bmin, bmax),
-    oceanView: ocean.view,
-    oceanFifDx: ocean.dx,
-    oceanTileExtent: ocean.tileExtent,
-    oceanMaxLod: ocean.maxLod,
-    _faces: faces,
-    albedo: new Float32Array(
-      mapBytes.buffer, mapBytes.byteOffset, mapBytes.byteLength / 4),
-    albedoShape: meta.map.shape_yx,
-    _nest: null,
-    _nestDummy: createNestDummy(device),
-    periodicDefault: true,
-    title: meta.title,
-    description: meta.description,
-    sourceName: meta.source,
-    sun: meta.sun,
-  });
-  progress?.("Ready.", 1);
-  return scene;
+    const bmin = meta.volume.bmin;
+    const bmax = meta.volume.bmax;
+    const scene = new Scene(device, {
+      volumeTexture,
+      volumeView: volumeTexture.createView(),
+      padded,
+      shape: meta.volume.shape_xyz,
+      bmin, bmax,
+      minVoxelM: minVoxelSize(meta.volume.shape_xyz, bmin, bmax),
+      oceanView: oceanTile.view,
+      oceanFifDx: oceanTile.dx,
+      oceanTileExtent: oceanTile.tileExtent,
+      oceanMaxLod: oceanTile.maxLod,
+      _faces: faces,
+      albedo: new Float32Array(
+        mapBytes.buffer, mapBytes.byteOffset, mapBytes.byteLength / 4),
+      albedoShape: meta.map.shape_yx,
+      _nest: null,
+      _nestDummy: nestDummy,
+      periodicDefault: true,
+      title: meta.title,
+      description: meta.description,
+      sourceName: meta.source,
+      sun: meta.sun,
+    });
+    progress?.("Ready.", 1);
+    return scene;
+  } catch (err) {
+    volumeTexture.destroy();
+    nestDummy?.destroy();
+    throw err;
+  }
 }
 
 export { volumeAABB, minVoxelSize };

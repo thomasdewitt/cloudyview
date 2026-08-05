@@ -103,13 +103,15 @@ export function cameraOverlayGeometry(
   const camY = (relativePosition[1] + 1.0) * 0.5 * nym1;
   const cameraUV = [camX / nxm1, camY / nym1];
 
-  const halfVfovDeg = 0.5 * fov;
+  // fov is horizontal (see camera.py); the zenith/nadir test is a vertical
+  // question, so the height's half-angle has to be derived from it.
+  const halfHfov = fov * 0.5 * DEG;
+  const halfVfovDeg = Math.atan(Math.tan(halfHfov) / renderAspect) / DEG;
   if ((90.0 - elevation) <= halfVfovDeg || (90.0 + elevation) <= halfVfovDeg) {
     return { cameraUV, circleRadiusPx: nx / 10.0 };
   }
 
   const azInternalRad = azimuthMetToInternalDeg(azimuth) * DEG;
-  const halfHfov = Math.atan(Math.tan(fov * 0.5 * DEG) * renderAspect);
   // The analytic horizontal right vector, not a cross product: continuous
   // through vertical, which is the whole reason cameraBasis is shaped that way.
   const [forward, right] = cameraBasis(azimuth, elevation);

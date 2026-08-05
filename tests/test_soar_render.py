@@ -80,8 +80,8 @@ def _above_horizon_mask(camera, size):
     tan_half_fov = np.tan(np.deg2rad(camera.fov) * 0.5)
     aspect = w / h
     yy, xx = np.mgrid[0:h, 0:w]
-    ndc_x = (2.0 * (xx + 0.5) / w - 1.0) * aspect * tan_half_fov
-    ndc_y = (1.0 - 2.0 * (yy + 0.5) / h) * tan_half_fov
+    ndc_x = (2.0 * (xx + 0.5) / w - 1.0) * tan_half_fov
+    ndc_y = (1.0 - 2.0 * (yy + 0.5) / h) * tan_half_fov / aspect
     dirs = (
         forward
         + ndc_x[..., None] * right

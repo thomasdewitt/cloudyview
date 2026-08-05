@@ -65,7 +65,11 @@ def _camera_overlay_geometry(camera: Camera, image_shape: Tuple[int, int],
     cam_y = ((camera.position[1] + 1.0) * 0.5) * nym1
     cam_uv = (cam_x / nxm1, cam_y / nym1)
 
-    half_vfov_deg = 0.5 * float(camera.fov)
+    # fov is horizontal (see camera.py); the zenith/nadir test is a vertical
+    # question, so the height's half-angle has to be derived from it.
+    half_hfov = np.deg2rad(float(camera.fov) * 0.5)
+    half_vfov = np.arctan(np.tan(half_hfov) / render_aspect)
+    half_vfov_deg = float(np.rad2deg(half_vfov))
     includes_zenith = (90.0 - float(camera.elevation)) <= half_vfov_deg
     includes_nadir = (90.0 + float(camera.elevation)) <= half_vfov_deg
 
@@ -76,8 +80,6 @@ def _camera_overlay_geometry(camera: Camera, image_shape: Tuple[int, int],
         }
 
     az_internal_rad = np.deg2rad(azimuth_met_to_internal_deg(camera.azimuth))
-    half_vfov = np.deg2rad(camera.fov * 0.5)
-    half_hfov = np.arctan(np.tan(half_vfov) * render_aspect)
 
     forward = direction_from_azimuth_elevation(
         camera.azimuth, camera.elevation

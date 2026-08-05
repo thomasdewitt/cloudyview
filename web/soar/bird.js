@@ -42,6 +42,7 @@ import { cameraBasis } from "./camera.js";
 import { directionFromAzimuthElevation, mod360,
          spectralLightingColors } from "./spectral.js";
 import { buildBirdMesh, FLOATS_PER_VERTEX } from "./birdmesh.js";
+import { retireAfterSubmittedWork } from "./gpu.js";
 
 const SHADER_URL = new URL("./bird.wgsl", import.meta.url);
 
@@ -141,7 +142,7 @@ function writeColumnMajor(out, offset, m) {
 }
 
 /**
- * World->clip matrix matching the raymarcher's ray construction: vertical
+ * World->clip matrix matching the raymarcher's ray construction: horizontal
  * FOV, clip +y = image top, WebGPU depth in [0, 1].
  */
 function perspectiveVP(origin, camera, [w, h]) {
@@ -159,8 +160,8 @@ function perspectiveVP(origin, camera, [w, h]) {
   view[15] = 1.0;
 
   const proj = new Float64Array(16);
-  proj[0] = f / aspect;
-  proj[5] = f;
+  proj[0] = f;
+  proj[5] = f * aspect;
   proj[10] = FAR / (NEAR - FAR);
   proj[11] = NEAR * FAR / (NEAR - FAR);
   proj[14] = -1.0;
@@ -609,7 +610,10 @@ export class Bird {
   /** Tiny per-target depth buffer for bird self-occlusion (cached). */
   _depthView(w, h) {
     if (this._depth === null || this._depth.w !== w || this._depth.h !== h) {
-      this._depth?.texture.destroy();
+      // Not destroyed on the spot: a resize (or a move to a screen with a
+      // different DPI) happens between frames that are still in flight, and
+      // this texture is a live attachment in them.
+      if (this._depth) retireAfterSubmittedWork(this.device, this._depth.texture);
       const texture = this.device.createTexture({
         label: "bird-depth",
         size: [w, h, 1],

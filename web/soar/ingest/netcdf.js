@@ -280,6 +280,42 @@ export function describeGroup(root, path) {
   const { resolved, dropped } = resolveSpatialDims(
     datasetDimNames(dataset), dataset.shape);
 
+  // The ice variable is read with the liquid variable's ranges, strides and
+  // flat index — one sweep, one hyperslab pair, one loop. That is only
+  // correct if it is laid out identically, which nothing guarantees: io.py
+  // standardizes each variable separately and would simply transpose. Here a
+  // mismatch would silently read ice from the wrong cells, so it is checked
+  // rather than assumed. (Refused rather than rendered liquid-only: dropping
+  // the ice changes the picture, and a cirrus deck vanishing quietly is worse
+  // than a message saying why.)
+  const iceDataset = iceVar ? group.get(iceVar) : null;
+  let iceUnits = null;
+  if (iceDataset) {
+    const ice = resolveSpatialDims(
+      datasetDimNames(iceDataset), iceDataset.shape);
+    const differences = [];
+    if (String(iceDataset.shape) !== String(dataset.shape)) {
+      differences.push(
+        `stored shape [${iceDataset.shape}] against [${dataset.shape}]`);
+    }
+    for (const axis of ["x", "y", "z"]) {
+      const a = ice.resolved[axis], b = resolved[axis];
+      if (a.axis !== b.axis || a.size !== b.size) {
+        differences.push(
+          `${axis} is storage axis ${a.axis} of length ${a.size} against ` +
+          `axis ${b.axis} of length ${b.size}`);
+      }
+    }
+    if (differences.length) {
+      throw new Error(
+        `'${iceVar}' and '${liquidVar}' in ${path ? `group '${path}'` : "the root group"} ` +
+        `are not stored the same way (${differences.join("; ")}), so they ` +
+        "cannot be read together. cloudyview reads both condensate variables " +
+        "in one pass over the file.");
+    }
+    iceUnits = attrString(iceDataset.attrs, "units");
+  }
+
   const coords = {};
   for (const axis of ["x", "y", "z"]) {
     coords[axis] = findCoordinate(group, root, resolved[axis]);
@@ -304,6 +340,12 @@ export function describeGroup(root, path) {
     },
     units,
     unitsKnown: units !== null,
+    // Asked about separately from the liquid variable's. Inheriting them was
+    // a factor-of-1000 error waiting to happen: qc in g/kg beside a qi with
+    // no units that is really kg/kg renders ice a thousand times too thin,
+    // and still looks entirely like a cloud.
+    iceUnits,
+    iceUnitsKnown: iceVar === null || iceUnits !== null,
     chunks: dataset.metadata?.chunks ?? null,
     filters: (dataset.filters ?? []).map((f) => f.name ?? String(f.id)),
     dtype: dataset.dtype ?? null,

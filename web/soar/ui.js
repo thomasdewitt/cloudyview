@@ -426,6 +426,18 @@ export class UI {
         "This view spans a domain edge. behold does not tile, so its frame " +
         "will differ from what you see here."));
     }
+    if (app.scene?.nested) {
+      // Two fields on screen and behold renders one, so which is wanted
+      // cannot be read off the view — the camera sees both.
+      m.append(el("div", "row",
+        "behold renders one field, not a nested pair. The other one will " +
+        "be absent from its frame."));
+      m.append(segmented(
+        [[`Outer (${app.scene.groupPath || "root group"})`, "outer"],
+         [`Nested (${app.scene.nestGroup || "root group"})`, "nest"]],
+        (v) => v === app.beholdField,
+        (v) => { app.beholdField = v; this.open("behold"); }));
+    }
     m.append(segmented(
       K.BEHOLD_QUALITY_ROWS.map(([label, value]) => [label, value]),
       (v) => v === app.beholdQuality,

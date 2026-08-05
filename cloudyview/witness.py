@@ -1361,7 +1361,9 @@ def _render_image(
     iso_phase = 1.0 / (4.0 * 3.14159265358979)
     inv_fif_dx = 1.0 / fif_dx
     fif_N = fif_nx.shape[0]
-    pixel_angular_span = 2.0 * tan_half_fov / img_h
+    # fov is horizontal (see camera.py), so the per-pixel angle comes off the
+    # width. Square pixels make the height follow.
+    pixel_angular_span = 2.0 * tan_half_fov / img_w
 
     n_pixels = img_w * img_h
     for pixel_idx in prange(n_pixels):
@@ -1389,8 +1391,8 @@ def _render_image(
             sample_x = px + subpixel_x
             sample_y = py + subpixel_y
 
-        ndc_x = (2.0 * sample_x / img_w - 1.0) * aspect * tan_half_fov
-        ndc_y = (1.0 - 2.0 * sample_y / img_h) * tan_half_fov
+        ndc_x = (2.0 * sample_x / img_w - 1.0) * tan_half_fov
+        ndc_y = (1.0 - 2.0 * sample_y / img_h) * tan_half_fov / aspect
 
         d_x = cam_fx + ndc_x * cam_rx + ndc_y * cam_ux
         d_y = cam_fy + ndc_x * cam_ry + ndc_y * cam_uy
@@ -2713,7 +2715,7 @@ def cli():
     parser.add_argument("--camera-elevation", type=float,
                         help="Camera elevation in degrees (default: 35)")
     parser.add_argument("--fov", type=float,
-                        help="Camera field of view in degrees (default: 100)")
+                        help="Camera horizontal field of view in degrees (default: 100)")
     parser.add_argument("--sun-azimuth", type=float,
                         help="Sun azimuth in degrees (default: 20). 0=North, 90=East, 180=South, 270=West")
     parser.add_argument("--sun-elevation", type=float,

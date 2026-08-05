@@ -35,7 +35,7 @@
 // therefore (gz, gy, gx) — see sample_sigma().
 
 struct Uniforms {
-    // xyz = camera origin (m), w = tan(fov_vertical / 2)
+    // xyz = camera origin (m), w = tan(fov_horizontal / 2)
     cam_origin: vec4<f32>,
     // xyz = forward, w = aspect (width / height)
     cam_forward: vec4<f32>,
@@ -917,8 +917,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         sample_pos = sample_pos
                      + (hash22(subpixel_seed) - vec2<f32>(0.5)) * jitter_scale;
     }
-    let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * aspect * tan_half_fov;
-    let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov;
+    let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * tan_half_fov;
+    let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov / aspect;
     let dir = normalize(u.cam_forward.xyz
                         + ndc_x * u.cam_right.xyz
                         + ndc_y * u.cam_up.xyz);

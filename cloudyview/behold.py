@@ -136,6 +136,20 @@ def _prepare_extinction(field: CloudField, verbose: bool = False):
     return sigma_ext, ice_fraction, geom, dx, dy, dz
 
 
+def _relative_z_to_cube(rel_z: float, geom) -> float:
+    """Relative height -> behold's cube coordinate, anchored at the surface.
+
+    rel_z = -1 is the physical surface (z = 0) and +1 the top of the data,
+    which is what witness and soar mean by it. The cube itself spans only
+    the data's own slab, so a domain that starts aloft — a nest based at
+    1 km — puts the surface *below* the cube, and a camera down there
+    correctly ends up outside it looking up at the volume. Reduces to the
+    identity when the data starts at the ground.
+    """
+    z_physical = (float(rel_z) + 1.0) * 0.5 * geom.z_top
+    return 2.0 * (z_physical - geom.z_bottom) / geom.height_z - 1.0
+
+
 def _build_view_config(geom, camera: Camera, sun_azimuth: float, sun_elevation: float,
                        quality: str, custom_spp: Optional[int],
                        custom_size: Optional[tuple], custom_max_depth: Optional[int],
@@ -173,7 +187,7 @@ def _build_view_config(geom, camera: Camera, sun_azimuth: float, sun_elevation: 
     camera_origin = [
         rel_pos[0] * ar_x,  # x in world space (±ar_x)
         rel_pos[1] * ar_y,  # y in world space (±ar_y)
-        rel_pos[2]          # z in world space (±1)
+        _relative_z_to_cube(rel_pos[2], geom),
     ]
 
     # Compute look direction vector from meteorological azimuth/elevation
@@ -209,7 +223,11 @@ def _build_view_config(geom, camera: Camera, sun_azimuth: float, sun_elevation: 
         'ground_albedo': rendering_config['ground_albedo'],
         'add_ocean': rendering_config['ocean']['enabled'],
         'ocean_reflectance': rendering_config['ocean']['reflectance'],
-        'ocean_height': rendering_config['ocean']['height'],
+        # Same anchor as the camera: the sea belongs at the physical surface,
+        # not at the floor of whatever slab of atmosphere was loaded.
+        'ocean_height': _relative_z_to_cube(
+            rendering_config['ocean']['height'], geom
+        ),
         'integrator': rendering_config['integrator'],
         'max_depth': rendering_config['max_depth'],
         'rr_depth': rendering_config['rr_depth'],
@@ -642,7 +660,7 @@ def cli():
     parser.add_argument(
         "--fov",
         type=float,
-        help="Camera field of view in degrees (default: 100)"
+        help="Camera horizontal field of view in degrees (default: 100)"
     )
     parser.add_argument(
         "--sun-azimuth",

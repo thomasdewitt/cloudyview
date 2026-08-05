@@ -99,6 +99,7 @@ def make_event_app():
     app.fullscreen_calls = 0
     app.open_calls = 0
     app._behold_quality = "high"
+    app._behold_field_choice = "outer"
     app._clipboard_note = None
     app.screenshot_calls = 0
     app.tier_calls = []
@@ -457,6 +458,121 @@ def test_pause_open_and_render_keys_dispatch_to_submenus():
     FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "2"})
     assert app._behold_quality == "low"
     assert app._menu_state == MENU_RENDER_QUALITY
+
+
+def _behold_app(tmp_path, *, group=None, nest_group=None, ice=False):
+    """The slice of the app the behold hand-off touches.
+
+    The source path is deliberately relative here: soar can be launched with
+    one, and the command it hands over is run from somewhere else.
+    """
+    from types import SimpleNamespace
+    from cloudyview.camera import Camera
+    from cloudyview.cloudfield import CloudField
+
+    def field(name, group):
+        return CloudField(
+            lwc=np.zeros((2, 2, 2), dtype=np.float32),
+            x=np.arange(2), y=np.arange(2), z=np.arange(2),
+            source=name,
+            ice_source="ice.nc" if ice else None,
+            liquid_group=group,
+            ice_group=None if ice else group,
+        )
+
+    app = make_event_app()
+    app.sun_azimuth = 235.0
+    app.sun_elevation = 25.0
+    app.azimuth, app.elevation, app.fov = 67.8, 24.7, 30.0
+    # Outer domain 0..1000 m square, nest the middle 100 m of it. One camera,
+    # two boxes, two different fractions: 0.04 across the outer field in x and
+    # 0.4 across the nest.
+    app.position = np.array([520.0, 500.0, 100.0])
+    nest = field("cloud.nc", nest_group) if nest_group is not None else None
+    app.renderer = SimpleNamespace(
+        field=field("cloud.nc", group), nest=nest, nested=nest is not None,
+        bmin=np.zeros(3), bmax=np.array([1000.0, 1000.0, 1000.0]),
+        nest_bmin=np.array([450.0, 450.0, 0.0]),
+        nest_bmax=np.array([550.0, 550.0, 200.0]),
+    )
+    app.camera = lambda: FlyThroughApp.camera(app)
+    return app
+
+
+def test_behold_command_names_an_absolute_path(tmp_path, monkeypatch):
+    """The command is copied into another terminal, in another directory."""
+    monkeypatch.chdir(tmp_path)
+    app = _behold_app(tmp_path)
+
+    command = app._behold_reproduction_command(app.camera(), "high")
+
+    assert f"behold {tmp_path / 'cloud.nc'} high --gpu" in command
+    assert "--group" not in command
+
+
+def test_behold_command_carries_the_group_soar_read(tmp_path, monkeypatch):
+    """A file whose root holds no field renders nothing without its group."""
+    monkeypatch.chdir(tmp_path)
+    app = _behold_app(tmp_path, group="nest_a")
+
+    assert "--group nest_a" in app._behold_reproduction_command(
+        app.camera(), "high"
+    )
+
+
+def test_behold_group_applies_to_the_liquid_only_beside_an_ice_file(
+    tmp_path, monkeypatch
+):
+    """A separate ice file is its own root — the group cannot cover it."""
+    monkeypatch.chdir(tmp_path)
+    app = _behold_app(tmp_path, group="nest_a", ice=True)
+
+    command = app._behold_reproduction_command(app.camera(), "high")
+
+    assert "--liquid-water-group nest_a" in command
+    assert "--group nest_a" not in command
+    assert f"--ice {tmp_path / 'ice.nc'}" in command
+
+
+def test_behold_asks_which_field_when_two_groups_are_on_screen(
+    tmp_path, monkeypatch
+):
+    """behold renders one field; a nested pair is a choice, not a guess."""
+    monkeypatch.chdir(tmp_path)
+    app = _behold_app(tmp_path, group="coarse", nest_group="nest_a")
+
+    outer = app._behold_reproduction_command(app.camera(), "high")
+    assert "--group coarse" in outer
+    # Relative to the outer domain, as the panel's own view is.
+    assert "--camera-position 0.04 0 -0.8" in outer
+
+    app._paused = True
+    app._menu_state = MENU_RENDER_QUALITY
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "i"})
+
+    assert app._behold_field_choice == "nest"
+    nested = app._behold_reproduction_command(app.camera(), "high")
+    assert "--group nest_a" in nested
+    # Same camera, re-expressed in the nest's much smaller box — quoting the
+    # outer field's 0.04 here would land it 230 m away.
+    assert "--camera-position 0.4 0 0" in nested
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "o"})
+    assert app._behold_field_choice == "outer"
+
+
+def test_behold_field_keys_are_inert_without_a_nest(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    app = _behold_app(tmp_path, group="coarse")
+    app._paused = True
+    app._menu_state = MENU_RENDER_QUALITY
+
+    FlyThroughApp._on_event(app, {"event_type": "key_down", "key": "i"})
+
+    assert app._behold_field_choice == "outer"
+    assert "--group coarse" in app._behold_reproduction_command(
+        app.camera(), "high"
+    )
 
 
 def test_n_removes_a_loaded_nest():

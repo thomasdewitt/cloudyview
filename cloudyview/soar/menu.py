@@ -19,6 +19,7 @@ ACTION_SELECT_BOTH_GROUPS = "select_both_groups"
 ACTION_SELECT_UNITS = "select_units"
 ACTION_RENDER_MENU = "render_menu"
 ACTION_SELECT_BEHOLD_QUALITY = "select_behold_quality"
+ACTION_SELECT_BEHOLD_FIELD = "select_behold_field"
 ACTION_COPY_BEHOLD_COMMAND = "copy_behold_command"
 ACTION_MENU_BACK = "menu_back"
 ACTION_SCREENSHOT = "screenshot"
@@ -55,6 +56,14 @@ BEHOLD_QUALITIES_BY_KEY = {
     "3": "medium",
     "4": "high",
     "5": "max",   # pre-2026-07-07 'high': 1200x800, 2048 spp — overnight tier
+}
+
+# Which of the two loaded fields the behold command names. Behold renders
+# one field from one group, so a nested scene has to be asked about rather
+# than guessed at.
+BEHOLD_FIELDS_BY_KEY = {
+    "o": "outer",
+    "i": "nest",
 }
 
 QUALITY_TIERS_BY_KEY = {
@@ -115,6 +124,7 @@ class MenuTransition:
     tier: str | None = None
     group_index: int | None = None
     pair_index: int | None = None
+    behold_field: str | None = None
     units: str | None = None
     sun_preset: str | None = None
 
@@ -228,6 +238,14 @@ def menu_transition(
         if quality is not None:
             return MenuTransition(
                 ACTION_SELECT_BEHOLD_QUALITY, MENU_RENDER_QUALITY, quality
+            )
+        behold_field = BEHOLD_FIELDS_BY_KEY.get(normalized)
+        if behold_field is not None:
+            # Only means anything with a nest loaded; the app ignores it
+            # otherwise, since there is only one field to name.
+            return MenuTransition(
+                ACTION_SELECT_BEHOLD_FIELD, MENU_RENDER_QUALITY,
+                behold_field=behold_field,
             )
         return MenuTransition(None, MENU_RENDER_QUALITY)
 

@@ -158,7 +158,7 @@ def main(argv=None):
     parser.add_argument("--camera-elevation", type=float,
                         help="initial camera elevation in degrees")
     parser.add_argument("--fov", type=float,
-                        help="initial vertical field of view in degrees")
+                        help="initial horizontal field of view in degrees")
     parser.add_argument("--sun-azimuth", type=float,
                         help="solar azimuth in degrees (met bearing, "
                              "clockwise from north); adjustable in-app with T")

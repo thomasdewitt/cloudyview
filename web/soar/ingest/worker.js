@@ -108,6 +108,53 @@ function post(message, transfer) {
   self.postMessage(message, transfer || []);
 }
 
+// --- backpressure ----------------------------------------------------------
+
+// Bytes of slab data allowed to be posted but not yet consumed.
+//
+// postMessage does not block and does not care whether anyone is listening.
+// The main thread consumes a slab, uploads it, and periodically waits for the
+// GPU; while it waits, and while the tab is in the background and throttled,
+// this loop would happily decode and post the rest of the field. Each posted
+// slab keeps its transferred buffer alive in the browser's message queue, so
+// on a multi-gigabyte field "switch to another app during the load" became
+// "the whole volume is resident in the message queue" — and then neither the
+// content process nor the GPU process survives it. Kept below the consumer's
+// own drain threshold so the pipeline still overlaps.
+const MAX_OUTSTANDING_BYTES = 32 * 1024 * 1024;
+
+let outstandingBytes = 0;
+let creditWaiter = null;
+
+/** The main thread has finished with `bytes` worth of slab. */
+function returnCredit(bytes) {
+  outstandingBytes = Math.max(0, outstandingBytes - bytes);
+  if (creditWaiter && outstandingBytes < MAX_OUTSTANDING_BYTES) {
+    const resume = creditWaiter;
+    creditWaiter = null;
+    resume();
+  }
+}
+
+/**
+ * Wait until there is room for another slab, then account for it.
+ * One producer, so one waiter — there is never a queue of these.
+ */
+async function spendCredit(bytes) {
+  while (outstandingBytes >= MAX_OUTSTANDING_BYTES) {
+    await new Promise((resolve) => { creditWaiter = resolve; });
+  }
+  outstandingBytes += bytes;
+}
+
+/** Forget any outstanding accounting — a fresh read starts from zero. */
+function resetCredit() {
+  outstandingBytes = 0;
+  const resume = creditWaiter;
+  creditWaiter = null;
+  resume?.();
+}
+
 async function ensureReady() {
   ready ??= h5wasm.ready;
   return ready;
@@ -228,15 +275,18 @@ async function extinction({ group, units, label, slabBudget }) {
   const dataset = handle.get(description.liquidVar);
   const iceDataset = description.iceVar ? handle.get(description.iceVar) : null;
 
-  const multiplier = unitsMultiplier(
-    description.units ?? units ?? null) ?? unitsMultiplier(units);
-  if (multiplier === null) {
-    throw new Error(
-      `No units on ${description.liquidVar} and none supplied.`);
-  }
+  // Each condensate variable takes its OWN declared units, falling back only
+  // to what the user was asked for — never to the other variable's. An ice
+  // field silently given the liquid field's multiplier is wrong by a factor
+  // of a thousand and renders as a perfectly plausible sky.
+  const multiplierFor = (declared, name) => {
+    const m = unitsMultiplier(declared) ?? unitsMultiplier(units ?? null);
+    if (m === null) throw new Error(`No units on ${name} and none supplied.`);
+    return m;
+  };
+  const multiplier = multiplierFor(description.units, description.liquidVar);
   const iceMultiplier = iceDataset
-    ? (unitsMultiplier(attrString(iceDataset.attrs, "units")) ??
-       unitsMultiplier(units) ?? multiplier)
+    ? multiplierFor(attrString(iceDataset.attrs, "units"), description.iceVar)
     : 0.0;
 
   assertFiltersSupported(dataset.filters, installedPlugins, description.liquidVar);
@@ -408,12 +458,17 @@ async function extinction({ group, units, label, slabBudget }) {
       }
     }
     const bytes = out.bytes();
+    // Read before the transfer: posting detaches the buffer, and the ack that
+    // comes back has to be able to name the same number.
+    const slabBytes = bytes.byteLength;
+    await spendCredit(slabBytes);
     // Ghost ring: original voxel i lands on texel i+1.
     post({
       type: "slab", label,
       origin: [z0 + 1, y0 + 1, x0 + 1],
       size: [local.z, local.y, local.x],   // texture is (w=z, h=y, d=x)
       done: (++tilesDone) / tileCount,
+      bytes: slabBytes,
       data: bytes,
     }, [bytes.buffer]);
   } } }
@@ -564,11 +619,16 @@ async function probe({ group, variable, points, box }) {
 }
 
 self.onmessage = async (event) => {
+  // Acks carry no id and expect no reply: they are the consumer saying it has
+  // room for more, which is the only thing keeping the loop above in step
+  // with a main thread that may be throttled or waiting on the GPU.
+  if (event.data?.op === "ack") { returnCredit(event.data.bytes); return; }
+
   const { id, op, ...args } = event.data;
   try {
     let result;
     if (op === "open") result = await open(args);
-    else if (op === "extinction") result = await extinction(args);
+    else if (op === "extinction") { resetCredit(); result = await extinction(args); }
     else if (op === "probe") result = await probe(args);
     else throw new Error(`unknown ingest operation '${op}'`);
     post({ id, ok: true, result });

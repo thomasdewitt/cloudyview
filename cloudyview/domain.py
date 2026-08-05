@@ -24,6 +24,11 @@ class DomainGeometry:
         Total horizontal extents (metres).
     height_z : float
         Total vertical extent (metres), computed from actual z-coordinate range.
+    z_bottom, z_top : float
+        Cell-edge floor and ceiling of the data (metres). Both are absolute
+        altitudes, so a domain that starts aloft — a nest sitting at 1 km —
+        reports where it actually is rather than pretending it starts at the
+        surface. `height_z == z_top - z_bottom`.
     ar_x : float
         Horizontal-to-vertical aspect ratio in x: width_x / height_z.
     ar_y : float
@@ -39,6 +44,8 @@ class DomainGeometry:
     height_z: float
     ar_x: float
     ar_y: float
+    z_bottom: float = 0.0
+    z_top: float = 0.0
 
 
 def compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz):
@@ -80,6 +87,13 @@ def compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz):
     dz_last = abs(float(z_coord[-1] - z_coord[-2]))
     height_z = abs(float(z_coord[-1] - z_coord[0])) + 0.5 * dz_first + 0.5 * dz_last
 
+    # Absolute cell-edge floor and ceiling. min/max rather than [0]/[-1] so a
+    # descending z axis reports the same box.
+    z_lo = float(np.min(z_coord))
+    z_hi = float(np.max(z_coord))
+    z_bottom = z_lo - 0.5 * (dz_first if z_lo == float(z_coord[0]) else dz_last)
+    z_top = z_hi + 0.5 * (dz_last if z_hi == float(z_coord[-1]) else dz_first)
+
     ar_x = width_x / height_z
     ar_y = width_y / height_z
 
@@ -88,4 +102,5 @@ def compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz):
         dx=dx, dy=dy,
         width_x=width_x, width_y=width_y, height_z=height_z,
         ar_x=ar_x, ar_y=ar_y,
+        z_bottom=z_bottom, z_top=z_top,
     )

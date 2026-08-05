@@ -40,6 +40,10 @@ class CloudField:
         Path of the separate ice file, when ice was loaded split-file style.
     liquid_var, ice_var : str or None
         Variable names the data came from (e.g. "QC", "QI").
+    liquid_group, ice_group : str or None
+        NetCDF groups the data was read from; None means the root group.
+        Kept so a caller can name this exact field again on a command line
+        (soar's behold hand-off does), which a file of several groups needs.
     """
 
     lwc: np.ndarray
@@ -51,6 +55,8 @@ class CloudField:
     ice_source: Optional[str] = None
     liquid_var: Optional[str] = None
     ice_var: Optional[str] = None
+    liquid_group: Optional[str] = None
+    ice_group: Optional[str] = None
 
     def __post_init__(self):
         self.lwc = np.asarray(self.lwc, dtype=np.float32)
@@ -185,4 +191,6 @@ def load(
         ice_source=result.get('ice_filepath'),
         liquid_var=result.get('liquid_water_var'),
         ice_var=result.get('ice_water_var'),
+        liquid_group=result.get('liquid_water_group'),
+        ice_group=result.get('ice_water_group'),
     )

@@ -166,11 +166,26 @@ export function nestablePairs(domains) {
  * Cell-edge extent of one level, matching io.group_domain_extent so extents
  * are comparable across groups. `dx` is the smallest spacing over ALL three
  * axes — a single scalar, which is what ranks one level as finer than another.
+ *
+ * NOT volumeAABB. The two differ, and deliberately: engine._volume_aabb pads
+ * x and y by the FIRST spacing at both ends, because the march maps world to
+ * grid linearly and a horizontal box that does not match that mapping puts
+ * the field in the wrong place. group_domain_extent pads every axis by its
+ * own first and last spacings, because its job is to compare one grid's
+ * footprint with another's. On a uniform horizontal grid these agree, which
+ * is why delegating here went unnoticed; on a stretched one it decided
+ * nestability from the wrong box.
  */
 export function domainExtent(x, y, z) {
-  const { bmin, bmax } = volumeAABB(x, y, z);
+  const bmin = [], bmax = [];
   let dx = Infinity;
   for (const c of [x, y, z]) {
+    const lo = 0.5 * Math.abs(c[1] - c[0]);
+    const hi = 0.5 * Math.abs(c[c.length - 1] - c[c.length - 2]);
+    let min = Infinity, max = -Infinity;
+    for (const v of c) { if (v < min) min = v; if (v > max) max = v; }
+    bmin.push(min - lo);
+    bmax.push(max + hi);
     for (let i = 1; i < c.length; i++) {
       dx = Math.min(dx, Math.abs(c[i] - c[i - 1]));
     }
@@ -241,7 +256,7 @@ export function viewSpansDomainEdge(origin, basis, fovDeg, aspect, bmin, bmax) {
   for (const sx of [-1.0, 1.0]) {
     for (const sy of [-1.0, 1.0]) {
       const d = [0, 1, 2].map((i) =>
-        forward[i] + sx * aspect * tanHalf * right[i] + sy * tanHalf * up[i]);
+        forward[i] + sx * tanHalf * right[i] + sy * tanHalf / aspect * up[i]);
       const n = Math.hypot(d[0], d[1], d[2]);
       directions.push([d[0] / n, d[1] / n, d[2] / n]);
     }

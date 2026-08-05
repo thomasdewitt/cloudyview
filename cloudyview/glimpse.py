@@ -115,7 +115,11 @@ def _build_camera_overlay(
     cam_x = ((camera_position[0] + 1.0) * 0.5) * (nx - 1)
     cam_y = ((camera_position[1] + 1.0) * 0.5) * (ny - 1)
 
-    half_vfov_deg = 0.5 * float(camera_fov)
+    # fov is horizontal (see camera.py); the zenith/nadir test is a vertical
+    # question, so the height's half-angle has to be derived from it.
+    half_hfov = np.deg2rad(float(camera_fov) * 0.5)
+    half_vfov = np.arctan(np.tan(half_hfov) / render_aspect)
+    half_vfov_deg = float(np.rad2deg(half_vfov))
     includes_zenith = (90.0 - float(camera_elevation)) <= half_vfov_deg
     includes_nadir = (90.0 + float(camera_elevation)) <= half_vfov_deg
 
@@ -127,8 +131,6 @@ def _build_camera_overlay(
         }
 
     az_internal_rad = np.deg2rad(azimuth_met_to_internal_deg(camera_azimuth))
-    half_vfov = np.deg2rad(camera_fov * 0.5)
-    half_hfov = np.arctan(np.tan(half_vfov) * render_aspect)
 
     forward = direction_from_azimuth_elevation(camera_azimuth, camera_elevation)
 
@@ -202,7 +204,7 @@ def main(
     camera_elevation : float, optional
         Camera elevation in degrees (angle above horizon)
     camera_fov : float, optional
-        Camera field of view in degrees (vertical FOV)
+        Camera field of view in degrees (horizontal FOV)
     liquid_water_var, ice_water_var : str, optional
         Explicit variable-name overrides for water-content arrays
     dataset_group, liquid_water_group, ice_water_group, coords_group : str, optional
