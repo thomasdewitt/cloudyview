@@ -108,6 +108,7 @@ class Viewer {
 
     this.renderer = new Renderer(this.device, shaderSource, this.scene,
                                  { canvasFormat: this.canvasFormat });
+    if (this.scene.periodicDefault === false) this.renderer.setPeriodic(false);
     progress("Compiling the shader…", 0.97);
     await this.renderer.init();
     this.camera = new FlightCamera(this.scene.bmin, this.scene.bmax,

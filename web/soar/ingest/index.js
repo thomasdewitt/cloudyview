@@ -226,6 +226,11 @@ export async function loadFileScene(
       _faces: outer.receiver.state.faces,
       _nest: null,
       _nestDummy: createNestDummy(device),
+      // A file's domain is NOT known to be periodic. nest_a in a nested
+      // run is a 32 km box inside a 2048 km parent; tiling it laterally
+      // invents structure that looks exactly like data — a line of
+      // identical clouds marching to the horizon. Off unless asked for.
+      periodicDefault: false,
       sourceName: file.name,
       title: outer.level.path ? `group ${outer.level.path}` : null,
       liquidVar: outer.level.liquidVar,

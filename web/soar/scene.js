@@ -269,6 +269,7 @@ export async function loadDemoScene(device, baseUrl, oceanUrl, progress) {
     _faces: faces,
     _nest: null,
     _nestDummy: createNestDummy(device),
+    periodicDefault: true,
     title: meta.title,
     description: meta.description,
     sourceName: meta.source,
