@@ -183,81 +183,107 @@ function addBody(rows) {
 
 // --- wing ------------------------------------------------------------------
 //
-// Two structures, because the bird has two. The arm carries the secondaries
-// as one membrane; the hand is ten separate primaries. Everything is built
-// for the right wing and mirrored.
-
-const wingArch = (s) => 0.012 * Math.sin(Math.PI * Math.min(1, s * 0.9));
-
-/** Leading edge of the arm, shoulder (s=0) to wrist (s=1). */
-function armLeading(s) {
-  const p = lerp3(SHOULDER, WRIST, s);
-  return [p[0], p[1] + 0.014 * (1.0 - s), p[2] + wingArch(s * 0.4)];
-}
-
-function armChord(s) {
-  return 0.047 - 0.011 * s;
-}
+// ONE leading edge, from the shoulder all the way to the wingtip.
+//
+// The first version of this built the arm and the hand as two separate
+// shapes that met at the wrist, and it showed: a rectangular slab of arm
+// stopping dead, a fan of primaries starting behind and below it, and a
+// visible step in both the leading and the trailing edge. The wings read as
+// bolted on, which is exactly what they were.
+//
+// A real wing has no such seam. The leading edge is a single continuous
+// curve; the covert membrane runs out over the base of the hand and hides
+// every quill; the primaries emerge from underneath it and their exposed
+// lengths make the outer half of the silhouette. So that is how it is built
+// now: one curve, one membrane over the inner two thirds, and ten feathers
+// rooted well beneath it.
 
 /**
- * The arm membrane, with a scalloped trailing edge.
+ * The wing's leading edge, shoulder (s = 0) to wingtip (s = 1).
  *
- * The scallops are the secondary tips. At this size they are two or three
- * pixels each, which is exactly the scale at which a perfectly smooth
- * trailing edge starts to look manufactured.
+ * The crescent lives in this curve. The sweep accelerates outboard — the
+ * exponent — and the arch peaks near the wrist and falls away to a tip held
+ * slightly low, which is what stops the thin outer wing from ever going
+ * exactly edge-on and rasterizing into dots.
  */
-function addArm(rows, side) {
-  surface(rows, 14, 8, (u, v) => {
-    const le = armLeading(u);
-    const scallop = 0.0016 * Math.sin(u * Math.PI * 7.0) * v;
-    const chord = armChord(u) + scallop;
-    // Camber: a thin sheet bowed downward, deepest a third back.
-    const camber = -0.0055 * armChord(u) / 0.047 * Math.sin(Math.PI * Math.pow(v, 0.8));
+function wingLeading(s) {
+  const t = clamp01(s);
+  return [
+    SHOULDER[0] + (WING_TIP[0] - SHOULDER[0]) * t,
+    0.030 - 0.092 * Math.pow(t, 1.35) + 0.010 * Math.sin(Math.PI * Math.pow(t, 0.8)),
+    0.004 + 0.016 * Math.sin(Math.PI * Math.min(1.0, t * 0.85)) - 0.008 * t * t,
+  ];
+}
+
+// Where the covert membrane gives out and the primaries take over the
+// silhouette. Not a joint — the membrane tapers to nothing here.
+const MEMBRANE_END = 0.60;
+
+/**
+ * The membrane: secondaries over the arm, coverts over the base of the hand,
+ * as one sheet.
+ *
+ * Its inner edge starts inside the body so the junction is buried rather than
+ * abutted, and its outer end pinches to a point instead of being cut off, so
+ * there is no step for the eye to catch.
+ */
+function membraneChord(s) {
+  const t = clamp01(s / MEMBRANE_END);
+  const taper = 0.047 * (1.0 - 0.62 * Math.pow(t, 1.25));
+  // Pinch out over the last fifth rather than ending on an edge.
+  return taper * Math.pow(1.0 - smoothstep(0.78, 1.0, t), 0.65);
+}
+
+function addMembrane(rows, side) {
+  surface(rows, 26, 8, (u, v) => {
+    const s = u * MEMBRANE_END;
+    const le = wingLeading(s);
+    // Scallops are the secondary tips, and they only exist over the arm —
+    // out on the hand the coverts are smooth and the primaries make the edge.
+    const scallop = 0.0016 * Math.sin(u * Math.PI * 7.0) * v
+                  * (1.0 - smoothstep(0.35, 0.6, u));
+    const chord = membraneChord(s) + scallop;
+    const camber = -0.0055 * (membraneChord(s) / 0.047)
+                 * Math.sin(Math.PI * Math.pow(v, 0.8));
+    // Reach inboard of the shoulder at the root so the body swallows the join.
+    const inboard = 1.0 - 0.55 * (1.0 - smoothstep(0.0, 0.10, u));
     return [
-      side * le[0],
+      side * le[0] * inboard,
       le[1] - chord * v,
       le[2] + camber,
     ];
-  }, (u, v) => ({
-    span: side * (0.10 + 0.28 * u),
+  }, (u, v, p) => ({
+    // Span is read off the vertex's own x, never invented per structure. The
+    // vertex stage bends by span, so if the membrane and the primaries lying
+    // over it disagreed by even a little they would visibly come apart at the
+    // top of every stroke.
+    span: p[0] / SEMI_SPAN,
     chord: v,
     part: PART.ARM,
     feather: u,
   }), { flip: side < 0 });
 }
 
-/** Leading edge of the hand, wrist (u=0) to wingtip (u=1). */
-function handLeading(u) {
-  const p = lerp3(WRIST, WING_TIP, u);
-  // The hand's leading edge bows forward near the wrist and the tip drops:
-  // the crescent is in this curve, not in the outline of the feathers.
-  return [
-    p[0],
-    p[1] + 0.013 * Math.sin(Math.PI * Math.pow(u, 0.75)),
-    p[2] + 0.008 * Math.sin(Math.PI * u) - 0.006 * u * u,
-  ];
-}
-
 /**
  * The ten primaries.
  *
- * Each is a tapered lens on its own spine. The spines start close together —
- * the manus a swift hangs them from is short — and fan out to tips that walk
- * around the wing's outer edge, so the gaps between them open toward the tip
- * exactly as they do on a real bird. They overlap the way feathers imbricate:
- * each one's leading edge lies over its inner neighbour.
+ * Rooted along the leading curve well inboard of where they become visible,
+ * so their quills sit under the membrane exactly as a bird's do. Their tips
+ * walk around the outer edge, so the gaps open toward the wingtip and close
+ * to nothing where the membrane still covers them.
  */
 function addPrimaries(rows, side) {
-  const innerTip = [0.104, -0.050, 0.006];      // P1, tucked behind the wrist
+  // The innermost primary reaches just past where the membrane pinches out,
+  // so the two silhouettes overlap instead of meeting.
+  const innerTip = [0.108, -0.044, 0.004];
   const outerTip = WING_TIP;
-  const wrist = handLeading(0.0);
 
   for (let i = 0; i < PRIMARY_COUNT; i++) {
     const f = i / (PRIMARY_COUNT - 1);
-    // Quill roots along the short manus, the outer feathers rooted further
-    // out and slightly aft.
-    const root = add(handLeading(0.02 + 0.24 * Math.pow(f, 1.15)),
-                     [0.0, -0.004 - 0.010 * f, 0.0]);
+    // Quill roots on the leading curve, from a third of the way out — deep
+    // under the membrane — to a little past halfway.
+    const root = add(wingLeading(0.30 + 0.22 * Math.pow(f, 1.1)),
+                     [0.0, -0.006 - 0.008 * f, -0.0012]);
     // Tips fan around the outer edge, with a slight outward bulge so the
     // silhouette is convex rather than a straight-edged wedge.
     const g = Math.pow(f, 1.22);
@@ -292,14 +318,13 @@ function addPrimaries(rows, side) {
         c[1] + across[1] * offset,
         c[2] + across[2] * offset + cup,
       ];
-    }, (u, v) => ({
-      span: side * (0.42 + 0.58 * (0.25 + 0.75 * f) * (0.35 + 0.65 * u)),
+    }, (u, v, p) => ({
+      span: p[0] / SEMI_SPAN,     // see addMembrane: never invented per part
       chord: v,
       part: PART.PRIMARY,
       feather: f,
     }), { flip: side < 0 });
 
-    void wrist;
   }
 }
 
@@ -317,8 +342,8 @@ function addTail(rows) {
     const signed = (i - half) / half;              // -1 .. 1
     const side = signed < 0 ? -1 : 1;
     const f = Math.abs(signed);
-    const root = [side * (0.0016 + 0.0060 * f), TAIL_BASE[1] + 0.003 * f, 0.0];
-    const len = 0.019 + 0.043 * Math.pow(f, 1.15);
+    const root = [side * (0.0018 + 0.0085 * f), TAIL_BASE[1] + 0.004 * f, 0.0];
+    const len = 0.022 + 0.034 * Math.pow(f, 1.15);
     const tip = [
       side * (0.006 + 0.026 * Math.pow(f, 1.1)),
       TAIL_BASE[1] - len,
@@ -328,7 +353,7 @@ function addTail(rows) {
     const axis = normalize(sub(tip, root));
     const across = normalize(cross([0, 0, 1], axis));
     const halfWidth = (t) =>
-      0.0060 * Math.pow(Math.sin(Math.PI * Math.pow(clamp01(t), 0.8)), 0.65);
+      0.0078 * Math.pow(Math.sin(Math.PI * Math.pow(clamp01(t), 0.62)), 0.6);
 
     surface(rows, 8, 2, (u, v) => {
       const c = spine(u);
@@ -362,7 +387,7 @@ export function buildBirdMesh({ scale = 1.0 } = {}) {
   const rows = [];
   addBody(rows);
   for (const side of [1, -1]) {
-    addArm(rows, side);
+    addMembrane(rows, side);
     addPrimaries(rows, side);
   }
   addTail(rows);
