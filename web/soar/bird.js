@@ -35,26 +35,50 @@
 "use strict";
 
 import { DEFAULT_EXPOSURE, DEFAULT_AMBIENT_STRENGTH,
-         DEFAULT_SUN_AZIMUTH, DEFAULT_SUN_ELEVATION } from "./constants.js";
+         DEFAULT_SUN_AZIMUTH, DEFAULT_SUN_ELEVATION,
+         DEFAULT_TONE_MAP_GAMMA,
+         SPECTRAL_LIGHTING_STRENGTH } from "./constants.js";
 import { cameraBasis } from "./camera.js";
-import { directionFromAzimuthElevation, mod360 } from "./spectral.js";
+import { directionFromAzimuthElevation, mod360,
+         spectralLightingColors } from "./spectral.js";
+import { buildBirdMesh, FLOATS_PER_VERTEX } from "./birdmesh.js";
 
 const SHADER_URL = new URL("./bird.wgsl", import.meta.url);
 
-const UNIFORM_NBYTES = 3 * 64 + 4 * 16;   // 3 mat4 + 4 vec4
+const UNIFORM_NBYTES = 3 * 64 + 7 * 16;   // 3 mat4 + 7 vec4
+const UNIFORM_FLOATS = UNIFORM_NBYTES / 4;
 const DEG = Math.PI / 180.0;
 
 // --- Placement (metres, camera-relative) -----------------------------------
-const DISTANCE = 8.5;         // ahead of the camera along the smoothed view direction
-const DROP = 2.4;             // below the view center (screen-space, via camera up)
-const SCALE = 1.25;           // mesh scale: ~1.8 m span (the third-person cheat —
-                              // a real swift would be an unreadable speck at 100 fov)
+//
+// The bird is life-size. The old one was scaled to a 1.8 m wingspan and flown
+// 8.5 m out, which subtended twelve degrees — a swift the size of an
+// albatross, a quarter of the way across the screen. A real one at 4.6 m
+// subtends five, which is about ninety pixels at 1280 across a 60 degree
+// view: small enough to be a bird, large enough that the primaries separate.
+const DISTANCE = 4.6;         // ahead of the camera along the smoothed view direction
+const DROP = 1.15;            // below the view center (screen-space, via camera up)
+const SCALE = 1.0;            // life size: 0.40 m span, 0.165 m bill to tail
 const NEAR = 0.5, FAR = 400.0;
 
 // --- Animation --------------------------------------------------------------
-const FLAP_AMPLITUDE = 0.55;  // rad of wingtip rotation about the body axis
+const FLAP_AMPLITUDE = 0.62;  // rad of wingtip rotation about the body axis
 const REST_DIHEDRAL = 0.10;   // rad, wings-slightly-raised carry angle while flapping
 const GLIDE_DIHEDRAL = 0.18;  // rad, the stiff shallow V of a glide
+// A swift's wingbeat is mostly hand. The wrist adds its own flex a quarter
+// cycle behind the shoulder, which is what makes the stroke look driven
+// rather than waved, and the hand supinates on the upstroke so it slices.
+const WRIST_FLEX = 0.30;      // rad, extra bend carried by the hand alone
+const WRIST_LAG = 1.15;       // rad of phase, hand behind shoulder
+const HAND_TWIST = 0.34;      // rad of supination at the top of the upstroke
+const TAIL_SPREAD_MAX = 0.55; // fraction of extra width in a hard turn
+
+// --- Look -------------------------------------------------------------------
+// How strongly the sun comes through a backlit feather vane, and how much sky
+// the oiled plumage catches at grazing angles. Both are the knobs to reach for
+// first if the bird sits wrong against a particular sky.
+const TRANSMISSION_GAIN = 0.85;
+const SHEEN_GAIN = 0.55;
 const FLAP_HZ_SLOW = 4.2;     // wingbeat when hovering / slow
 const FLAP_HZ_FAST = 2.2;     // wingbeat just below the glide threshold
 const GLIDE_LO = 70.0;        // m/s: flap starts fading into a glide
@@ -91,80 +115,6 @@ function smoothstep(x, lo, hi) {
   return t * t * (3.0 - 2.0 * t);
 }
 
-/**
- * Procedural swift: body octahedron, forked tail, swept sickle wings.
- *
- * Returns {data, nVertices} where `data` is float32 rows of
- * [pos.xyz, normal.xyz, span_frac] with vertices duplicated per face
- * (flat-face normals, no index buffer). Local frame: +x right, +y forward,
- * +z up; the flap pivot (shoulder line) is at z = 0. Units are metres.
- */
-function buildMesh() {
-  // Body (slender fusiform, slightly deeper than wide).
-  const N = [0.00, 0.46, 0.000];    // nose
-  const U = [0.00, 0.12, 0.055];    // crown
-  const D = [0.00, 0.10, -0.095];   // belly keel
-  const L = [-0.075, 0.06, 0.005];  // left shoulder
-  const R = [0.075, 0.06, 0.005];   // right shoulder
-  const T = [0.00, -0.32, 0.005];   // tail root
-
-  const faces = [
-    [N, L, U], [N, U, R], [U, L, T], [U, T, R],   // back
-    [N, D, L], [N, R, D], [D, T, L], [D, R, T],   // belly
-  ];
-
-  // Forked tail: angled slightly downward so it joins the belly silhouette
-  // from the usual seen-from-below viewpoint.
-  const TL = [-0.16, -0.64, -0.030];
-  const TR = [0.16, -0.64, -0.030];
-  const TN = [0.00, -0.46, -0.010];
-  faces.push([T, TL, TN], [T, TN, TR]);
-
-  // Right wing: swept-back sickle in two panels (arm + hand), tapering to a
-  // point. Leading edge shoulder -> wrist -> tip; the wrist is raised and the
-  // tip dropped (gull-like arch) so the thin surface never goes fully edge-on
-  // and rasterizes into dots at flap extremes.
-  const WLR = [0.05, 0.12, 0.020];    // leading root
-  const WTR = [0.03, -0.14, 0.005];   // trailing root (buried in the body)
-  const WW = [0.40, 0.04, 0.070];     // wrist (leading, arched high)
-  const WTM = [0.34, -0.20, 0.030];   // trailing mid
-  const WTIP = [0.72, -0.26, 0.000];  // wingtip (dropped below the wrist arch)
-  const rightWing = [[WLR, WW, WTR], [WW, WTM, WTR], [WW, WTIP, WTM]];
-  faces.push(...rightWing);
-  // Left wing: mirror x. Reversing the winding keeps the face outward.
-  for (const tri of rightWing) {
-    faces.push(tri.slice().reverse().map(([vx, vy, vz]) => [-vx, vy, vz]));
-  }
-
-  const tipX = 0.72, deadzone = 0.06;
-  const data = new Float32Array(faces.length * 3 * 7);
-  let k = 0;
-  for (const tri of faces) {
-    const [a, b, c] = tri;
-    const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    const n = [
-      e1[1] * e2[2] - e1[2] * e2[1],
-      e1[2] * e2[0] - e1[0] * e2[2],
-      e1[0] * e2[1] - e1[1] * e2[0],
-    ];
-    const norm = Math.hypot(n[0], n[1], n[2]);
-    if (norm < 1e-12) {
-      throw new Error(`degenerate bird face: ${JSON.stringify(tri)}`);
-    }
-    n[0] /= norm; n[1] /= norm; n[2] /= norm;
-    for (const v of tri) {
-      // Span fraction: 0 across the body's deadzone, ±1 at the wingtips, and
-      // it is measured on the UNSCALED mesh so SCALE cannot change the flap.
-      const frac = Math.sign(v[0]) * Math.max(Math.abs(v[0]) - deadzone, 0.0)
-                 / (tipX - deadzone);
-      data[k++] = v[0] * SCALE; data[k++] = v[1] * SCALE; data[k++] = v[2] * SCALE;
-      data[k++] = n[0]; data[k++] = n[1]; data[k++] = n[2];
-      data[k++] = frac;
-    }
-  }
-  return { data, nVertices: faces.length * 3 };
-}
 
 // --- 4x4 matrices ----------------------------------------------------------
 //
@@ -282,8 +232,9 @@ export class Bird {
     this.bmin = [...bmin];
     this.bmax = [...bmax];
 
-    const { data, nVertices } = buildMesh();
-    this.nVertices = nVertices;
+    const { data, vertexCount, stride } = buildBirdMesh({ scale: SCALE });
+    this.nVertices = vertexCount;
+    this.vertexStride = stride;
     this._vbuf = device.createBuffer({
       label: "bird-mesh",
       size: data.byteLength,
@@ -333,6 +284,9 @@ export class Bird {
     this.flapPhase = 0.0;              // rad
     this.flapAmp = FLAP_AMPLITUDE;
     this.flapAngle = REST_DIHEDRAL;    // rad, current wing angle
+    this.wristFlex = 0.0;              // rad, extra bend carried by the hand
+    this.handTwist = 0.0;              // rad, supination of the hand
+    this.tailSpread = 0.0;             // 0 closed, 1 fully fanned
     this._speed = 0.0;                 // smoothed m/s
     this._vz = 0.0;                    // smoothed vertical velocity m/s
     this._clock = 0.0;
@@ -436,6 +390,14 @@ export class Bird {
     this.flapAngle = center + this.flapAmp * Math.sin(this.flapPhase);
 
     const ampFrac = this.flapAmp / FLAP_AMPLITUDE;
+
+    // The hand lags the shoulder and adds its own flex, and supinates through
+    // the upstroke — nose-down as the wing rises, so it slices rather than
+    // pushing the bird back down. Both fade out with the flap into a glide,
+    // where the wing goes stiff.
+    this.wristFlex = WRIST_FLEX * ampFrac * Math.sin(this.flapPhase - WRIST_LAG);
+    this.handTwist = HAND_TWIST * ampFrac * Math.cos(this.flapPhase);
+
     return BOB_AMPLITUDE * ampFrac * Math.sin(this.flapPhase - 1.2)
          + IDLE_BOB * Math.sin(TWO_PI * IDLE_BOB_HZ * this._clock);
   }
@@ -494,6 +456,12 @@ export class Bird {
     const kp = 1.0 - Math.exp(-dt / TAU_PITCH);
     this.pitch += (pitchTarget - this.pitch) * kp;
 
+    // The tail fans in a turn — it is the rudder and the airbrake, and a
+    // swift's fork opens visibly whenever it changes direction.
+    const spreadTarget = TAIL_SPREAD_MAX
+      * Math.min(1.0, Math.abs(this.bank) / BANK_MAX);
+    this.tailSpread += (spreadTarget - this.tailSpread) * kb;
+
     this._place(origin, this._flap(dt));
   }
 
@@ -517,6 +485,9 @@ export class Bird {
       ? mod2pi(TWO_PI * FLAP_HZ_FAST * t)
       : Number(flapPhase);
     this.flapAngle = REST_DIHEDRAL + this.flapAmp * Math.sin(this.flapPhase);
+    this.wristFlex = WRIST_FLEX * Math.sin(this.flapPhase - WRIST_LAG);
+    this.handTwist = HAND_TWIST * Math.cos(this.flapPhase);
+    this.tailSpread = 0.0;
     this._place(camera.position, BOB_AMPLITUDE * Math.sin(this.flapPhase - 1.2));
   }
 
@@ -530,6 +501,10 @@ export class Bird {
     sunElevation = DEFAULT_SUN_ELEVATION,
     exposure = DEFAULT_EXPOSURE,
     ambientStrength = DEFAULT_AMBIENT_STRENGTH,
+    toneMapGamma = DEFAULT_TONE_MAP_GAMMA,
+    spectralStrength = SPECTRAL_LIGHTING_STRENGTH,
+    transmissionGain = TRANSMISSION_GAIN,
+    sheenGain = SHEEN_GAIN,
   } = {}) {
     const [w, h] = outputSize;
     if (!(w >= 1 && h >= 1)) {
@@ -553,6 +528,11 @@ export class Bird {
     nrot[15] = 1.0;
 
     const sun = directionFromAzimuthElevation(sunAzimuth, sunElevation);
+    // The same spectral shift the clouds get, from the same function: at a
+    // low sun the beam reddens and the fill goes blue, and the bird has to
+    // move with it or it reads as a sticker.
+    const light = spectralLightingColors(sun, undefined, spectralStrength);
+
     const u = this._uniforms;
     writeColumnMajor(u, 0, vp);
     writeColumnMajor(u, 16, model);
@@ -562,7 +542,13 @@ export class Bird {
     u[56] = this.bmin[0]; u[57] = this.bmin[1]; u[58] = this.bmin[2];
     u[59] = this.flapAngle;
     u[60] = this.bmax[0]; u[61] = this.bmax[1]; u[62] = this.bmax[2];
-    u[63] = 0.0;
+    u[63] = toneMapGamma;
+    u[64] = light.cloudSun[0]; u[65] = light.cloudSun[1];
+    u[66] = light.cloudSun[2]; u[67] = transmissionGain;
+    u[68] = light.ambient[0]; u[69] = light.ambient[1];
+    u[70] = light.ambient[2]; u[71] = sheenGain;
+    u[72] = this.wristFlex; u[73] = this.handTwist;
+    u[74] = this.tailSpread; u[75] = 0.0;
     this.device.queue.writeBuffer(this._ubuf, 0, u);
   }
 
@@ -579,11 +565,14 @@ export class Bird {
           module: this._shader,
           entryPoint: "vs_main",
           buffers: [{
-            arrayStride: 7 * 4,
+            arrayStride: FLOATS_PER_VERTEX * 4,
             attributes: [
-              { format: "float32x3", offset: 0, shaderLocation: 0 },
-              { format: "float32x3", offset: 12, shaderLocation: 1 },
-              { format: "float32", offset: 24, shaderLocation: 2 },
+              { format: "float32x3", offset: 0, shaderLocation: 0 },   // pos
+              { format: "float32x3", offset: 12, shaderLocation: 1 },  // normal
+              { format: "float32", offset: 24, shaderLocation: 2 },    // span
+              { format: "float32", offset: 28, shaderLocation: 3 },    // chord
+              { format: "float32", offset: 32, shaderLocation: 4 },    // part
+              { format: "float32", offset: 36, shaderLocation: 5 },    // feather
             ],
           }],
         },

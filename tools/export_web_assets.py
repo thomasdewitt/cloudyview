@@ -143,7 +143,15 @@ def export_demo() -> None:
 
 def main() -> None:
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
-    for name in ("raymarch.wgsl", "hud.wgsl", "bird.wgsl"):
+    # raymarch.wgsl and hud.wgsl are the shared artifacts — the browser must
+    # run them verbatim, so they are copied rather than hand-edited there.
+    #
+    # bird.wgsl is NOT in this list. The browser's bird was rebuilt from
+    # anatomy (web/soar/birdmesh.js, web/soar/bird.wgsl) and no longer matches
+    # the desktop's sixteen triangles; copying would overwrite it. The desktop
+    # bird is on the deletion list for this port anyway, so the two are
+    # allowed to diverge rather than the work being done twice.
+    for name in ("raymarch.wgsl", "hud.wgsl"):
         shutil.copy(REPO / "cloudyview" / "soar" / name, SOAR_OUT / name)
         print(f"copied {name} -> {SOAR_OUT / name}")
     export_ocean()
