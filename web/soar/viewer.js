@@ -533,13 +533,17 @@ class Viewer {
 }
 
 export async function boot({ device, source, progress, onReady, onFailure,
-                             setLoadingVisible }) {
+                             setLoadingVisible, register }) {
   const canvas = document.getElementById("view");
   const uiRoot = document.getElementById("ui");
   uiRoot.replaceChildren();
   const viewer = new Viewer(device, canvas, uiRoot);
   viewer.onFailure = onFailure;
   viewer.setLoadingVisible = setLoadingVisible;
+  // Handed over before loading starts, not after: the device can be lost
+  // during the very allocation that loading performs, and whoever is
+  // watching for that needs to be able to stop this viewer.
+  register?.(viewer);
   await viewer.start(source, progress);
   onReady?.();
   return viewer;

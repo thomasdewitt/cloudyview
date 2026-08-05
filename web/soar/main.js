@@ -153,11 +153,17 @@ async function enterViewer(source) {
     const { adapter } = await (gpuProbe ??= probeGPU());
     const device = await acquireDevice(adapter);
     watchDevice(device, {
-      onLost: (message) => showFailure(
-        "The GPU device was lost.", message,
-        "Reload the page to start over. If it keeps happening on the same " +
-        "field, it is probably running out of video memory — try a coarser " +
-        "level or close other GPU-heavy tabs."),
+      onLost: (message) => {
+        // Stop FIRST. Every frame after this would call into a queue whose
+        // device no longer exists, and Firefox does not treat that as an
+        // error — it crashes the process ("Queue[Id] does not exist").
+        if (viewer) viewer.stop = true;
+        showFailure(
+          "The GPU device was lost.", message,
+          "Reload the page to start over. If it keeps happening on the same " +
+          "field, it is probably running out of video memory — try a coarser " +
+          "level or close other GPU-heavy tabs.");
+      },
       // WebGPU reports validation asynchronously, so an uncaught error here
       // would otherwise show up only as a picture that is quietly wrong.
       onError: (message) => {
@@ -172,6 +178,7 @@ async function enterViewer(source) {
       // The loader asks questions (which group, what units) and those are
       // menu panels, which live under this overlay.
       setLoadingVisible: (visible) => { dom.loading.hidden = !visible; },
+      register: (v) => { viewer = v; },
     });
   } catch (err) {
     if (err instanceof WebGPUUnavailable) {
