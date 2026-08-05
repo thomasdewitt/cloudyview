@@ -27,11 +27,10 @@ Regenerate both with:
 
     uv run python tools/export_web_assets.py
 
-Known issue (2026-08-05): the ocean tile is not reproducible from the seed
-recorded in `soar/ocean/meta.json`. `cloudyview.ocean_fif.generate_fif_normals`
-does not pass `levy_noise=` to `FIF_ND`, so the cascade draws fresh randomness
-on every call and its `rng` argument only steers the boost direction.
-Re-running the exporter therefore rewrites the committed `fif_mip*.bin`.
+The seed recorded in `soar/ocean/meta.json` reproduces the tile exactly, so
+re-running the exporter leaves the committed `fif_mip*.bin` byte-identical.
+(It did not until 2026-08-05: `generate_fif_normals` was letting `FIF_ND` draw
+its own cascade noise, so its `rng` argument steered only the boost direction.)
 
 ## Deploy
 

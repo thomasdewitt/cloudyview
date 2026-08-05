@@ -11,6 +11,7 @@ smooth rolling swell; outer scale 10 m + 1 m max-min gives a gentle sea.
 from typing import Tuple
 import numpy as np
 import scaleinvariance
+from scaleinvariance.simulation.FIF import extremal_levy
 
 
 DEFAULT_N = 2048
@@ -41,25 +42,41 @@ def generate_fif_normals(
 
     nx/ny/nz are components of the unit surface normal at grid cell centers.
     Sample them with periodic wrap + bilinear interpolation at any world (x,y).
+
+    Passing ``rng`` makes the whole tile reproducible — both the cascade and
+    the boost direction. Leave it None for a fresh sea each call.
     """
     scaleinvariance.set_numerical_precision('float32')
+
+    if rng is None:
+        rng = np.random.default_rng()
 
     if verbose:
         print(f"  FIF: {N}x{N} alpha={alpha} C1={C1} H={H} "
               f"outer={outer_scale_m}m dx={dx_m:.3f}m "
               f"(tile={N * dx_m / 1000:.2f} km)")
 
+    # The cascade's randomness has to be generated here and handed in. Left to
+    # itself FIF_ND draws its own noise, so `rng` would steer only the boost
+    # direction below and two calls with the same generator would still give
+    # different seas. With periodic=True the simulation domain is the output
+    # domain, so the noise is exactly (N, N) — non-periodic axes would be
+    # doubled. Note extremal_levy seeds numpy's *global* RNG rather than
+    # taking a Generator, which is why the seed is drawn from `rng` here.
+    levy = extremal_levy(
+        alpha, size=N * N, seed=int(rng.integers(0, 2 ** 32))
+    ).reshape(N, N)
+
     fif = scaleinvariance.FIF_ND(
         size=(N, N),
         alpha=alpha, C1=C1, H=H,
+        levy_noise=levy,
         outer_scale=outer_scale_m / dx_m,
         periodic=True,
     )
     h = fif.astype(np.float64) - fif.mean()
 
     if boost != 1.0:
-        if rng is None:
-            rng = np.random.default_rng()
         theta = rng.uniform(0.0, 2.0 * np.pi)
         target_k = 1.0 / outer_scale_m   # cycles/m
         k0x = np.cos(theta) * target_k
