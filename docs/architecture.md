@@ -3,12 +3,17 @@
 Status: agreed direction (Thomas + Claude, 2026-07-07 session). This doc is the
 spec for the library-first refactor and the interactive app.
 
+Updated 2026-08-05: soar shipped as a desktop app first (wgpu-py + glfw +
+imgui, `cloudyview/soar/`) and was rewritten for the browser. The desktop app
+has been deleted; `web/soar/` is the only fly-through. Sections below are
+written for the browser build. The desktop one is in git history.
+
 ## Goals
 
 1. **Library-first.** Standard usage is Python functions: 3D cloud volume in,
    image out. CLIs remain as thin wrappers.
-2. **Interactive fly-through app** (desktop, this machine, RTX 5080): open a
-   .nc via file dialog, fly through the volume game-style, top-view minimap,
+2. **Interactive fly-through app** (browser, WebGPU): open a .nc from the
+   file picker, fly through the volume game-style, top-view minimap,
    screenshots and flight-track videos, and a copy-pasteable `behold` command
    for the current camera.
 3. **Rendering tiers:** `glimpse` = 2D diagnostic; `witness` = game-like
@@ -61,17 +66,16 @@ Two implementations of the *same* witness look:
 
 1. **numba CPU** (`witness.py`) — the golden reference. All look-tuning lands
    here first. ~1300 lines, painstakingly tuned against real cloud photos.
-2. **WGSL (wgpu-py)** — the interactive engine, ported function-by-function
-   from the numba kernel and verified against numba golden images (extend the
-   existing CPU/CUDA equivalence-test pattern; tolerance-based, since GPU
-   float math differs slightly). The numba implementation is the mirror the
-   shader is developed against — port + verify, never re-tune from scratch.
+2. **WGSL (WebGPU)** — the interactive engine (`web/soar/raymarch.wgsl`),
+   ported function-by-function from the numba kernel. The numba
+   implementation is the mirror the shader is developed against — port +
+   verify, never re-tune from scratch.
 
-Why WGSL/wgpu rather than evolving numba.cuda into the app engine: 3D-texture
-hardware trilinear sampling, no per-frame Python↔GPU round trip, and the
-shader is the portable artifact for the eventual browser/WebGPU direction.
-Python stays the host language (windowing, IO, xarray stack); the
-performance-critical inner loop leaves Python either way.
+Why WGSL rather than evolving numba.cuda into the app engine: 3D-texture
+hardware trilinear sampling, no per-frame host↔GPU round trip, and the shader
+is the portable artifact. That portability is what let the whole engine move
+to the browser: the shader crossed over verbatim and only the host had to be
+rewritten in JavaScript.
 
 Benchmark evidence (2026-07-07, RTX 5080 — details in
 temp/benchmarks-2026-07-07/RESULTS.md):
@@ -151,82 +155,70 @@ is the same trade witness makes; the occupancy grid above is the fix.
   beyond ~2048² will need bricking/LOD — out of scope for now, don't
   preclude it.
 
-## App shell (v0) — `cloudyview/soar/`, CLI `soar`
+## App shell — `web/soar/`
 
-- wgpu-py surface in a simple window (glfw via wgpu-py's gui module).
-- Game-style pointer capture (glfw CURSOR_DISABLED; Tab releases), WASD +
-  Space/LShift vertical.
-- File-open dialog for .nc selection (split liquid/ice selection supported).
-  Opens at `$HOME` and then remembers the last directory of the session.
-- Nested fields (see "Nested domains") three ways:
-  - `--nest FILE` at launch;
-  - **N** in the ESC menu, which reuses the whole open-file chain — same
-    browser, group picker, ice prompt, units prompt — with one flag deciding
-    whether the loaded field replaces the scene or becomes its nest. N flips
-    to "Remove nest" once one is loaded;
-  - **"Use both, nested"** in the group picker. When one file holds several
-    groups (STEAM render nests), `io.find_nestable_group_pairs` probes their
-    *coordinates only* for pairs where one lies strictly inside the other
-    and is finer, and offers to load both as one scene. This is the common
-    case, and picking one group used to mean silently losing the other.
-    Three or more levels yield several pairs (coarse+middle, coarse+fine,
-    middle+fine) and the renderer holds two: the picker lists every pair —
-    keys B, C, D, ... — rather than deciding which two levels were meant.
-  Adding a nest keeps the current viewpoint (you are already flying in that
-  scene); opening a new *outer* file resets the camera and drops the nest.
-- WASD + mouse-look camera, scroll for speed; camera state ↔ `cv.Camera`.
-- Minimap overlay: `cv.glimpse` albedo of the loaded field, camera marker +
-  FOV wedge (reuse glimpse overlay math), and — when a nest is loaded — its
-  horizontal footprint as a subtle white outline drawn *under* the camera
-  overlay. A nest is easy to fly straight past; the outline is how you find
-  it. Vertical extent is not shown: the minimap is a plan view.
-- Captures (F12 screenshot, R flight track) share one settings block:
-  output size (window / presets / custom) and destination folder, defaulting
-  to `~/Downloads`. A screenshot and a video are the same decision twice.
-  - **F12** also asks what belongs in the frame (bird + location map, or
-    clouds only) — per shot rather than the live B/M toggles, because the
-    frame worth keeping and the frame worth flying with are rarely the same
-    one — then writes the PNG with camera, source-file, sun, renderer,
-    version, timestamp and reproduction metadata in PNG text chunks, and
-    shows the result in-window with a Close button.
-  - **R** stops recording into the same block plus frame rate and
-    accumulation passes, then encodes the track to mp4 **in the foreground**:
-    `track.TrackVideoRender` is stepped from the draw loop rather than run on
-    a thread, because the encode renders through the app's own resident
-    volume (not shareable across threads) and the point is to give the GPU
-    to the encode. The window blits its last frame and shows progress + ETA;
-    Escape aborts and removes the partial file. The .json track is kept for
-    re-rendering later with `soar --render-track`.
-- Time-of-day panel (**T** in the ESC menu): midday / golden hour / sunset
-  presets plus solar zenith and azimuth sliders. The sun drives the whole
-  spectral package (beam colour, sky field, low-sun warm wedge, ocean
-  glint), so this is a look control rather than a convenience. Elevation is
-  floored at 0.5 deg: a periodic domain's light march exits only through the
-  domain top, so `write_uniforms` refuses a sun at or below the horizon, and
-  clamping at the control keeps the slider usable to its end instead of
-  raising at the last degree. `--sun-azimuth` / `--sun-elevation` set it at
-  launch, and a moved sun is written into the screenshot reproduction
-  command.
-- ESC menu as control center: open a new `.nc` (with split ice-file prompt),
-  toggle fullscreen, resume, or quit.
-- **Behold is not run from the app.** G shows a copy-pasteable `behold`
-  command for the current view — field, camera, sun, quality — and copies it
-  to the clipboard. The file is named by absolute path (the command is run
-  from another directory) and by NetCDF group where the field came from one;
-  with a nest loaded there are two fields on screen and behold renders one,
-  so the panel asks which — and re-expresses the camera in the chosen
-  field's box, since a relative position means "this far across THIS field".
-  Path tracing is minutes-to-overnight and wants the GPU to
-  itself, which does not belong inside a fly-through; handing over an exact
-  command is also the only form of this that works identically in the browser
-  build, where there is no Mitsuba at all. Soar therefore has no Mitsuba
-  dependency.
-- Later garnish: a subject (bird / paper airplane) in front of the camera.
+A static WebGPU page: no server, no Python at run time. Serve `web/` and open
+`soar/`. `tools/export_web_assets.py` regenerates the binary assets it ships
+(the FIF ocean normal tile) and the demo field.
+
+- Game-style pointer capture (Esc releases), WASD + Space/Shift vertical,
+  scroll for speed. Camera state ↔ `cv.Camera` conventions throughout —
+  meteorological angles, relative coordinates only at the edges.
+- netCDF ingest in the browser (`ingest/`, h5wasm): group picker, split
+  liquid/ice selection, units prompt. The questions `io.py` asks on a
+  terminal get asked in the UI instead.
+- Nested fields (see "Nested domains"): loaded from a second file, or from a
+  second group of the same file. When one file holds several groups (STEAM
+  render nests), the coordinates alone identify pairs where one lies strictly
+  inside the other and is finer, and both can be loaded as one scene — picking
+  one group used to mean silently losing the other. Three or more levels yield
+  several pairs and the renderer holds two, so the picker lists every pair
+  rather than deciding which two levels were meant. Adding a nest keeps the
+  current viewpoint; opening a new *outer* file resets the camera and drops
+  the nest.
+- Minimap overlay: `glimpse` albedo of the loaded field, camera marker + FOV
+  wedge, and — when a nest is loaded — its horizontal footprint as a subtle
+  outline drawn *under* the camera overlay. A nest is easy to fly straight
+  past; the outline is how you find it. Vertical extent is not shown: the
+  minimap is a plan view.
+- Captures share one settings block: output size and what belongs in the frame
+  (bird + location map, or clouds only) — per capture rather than the live
+  toggles, because the frame worth keeping and the frame worth flying with are
+  rarely the same one. Stills accumulate at any size and download as PNG with
+  camera, source file, sun, renderer, version and reproduction metadata in a
+  `tEXt` chunk (`capture.js`, matching `cloudyview/render_metadata.py` so both
+  are readable by the same tools). Flight tracks encode to video with
+  WebCodecs (`video.js`, mp4 where AVC is available, else webm).
+- Time-of-day panel: presets plus solar elevation and azimuth. The sun drives
+  the whole spectral package (beam colour, sky field, low-sun warm wedge,
+  ocean glint), so this is a look control rather than a convenience. Elevation
+  is floored just above zero: a periodic domain's light march exits only
+  through the domain top, so the uniform packing refuses a sun at or below the
+  horizon, and clamping at the control keeps the slider usable to its end
+  instead of raising at the last degree.
+- **Behold is not run from the app.** A panel shows a copy-pasteable `behold`
+  command for the current view — field, camera, sun, quality. The file is
+  named by absolute path and by NetCDF group where the field came from one;
+  with a nest loaded there are two fields on screen and behold renders one, so
+  the panel asks which, and re-expresses the camera in the chosen field's box,
+  since a relative position means "this far across THIS field". Path tracing
+  is minutes-to-overnight and wants the GPU to itself, which does not belong
+  inside a fly-through — and in the browser there is no Mitsuba at all.
 
 ## Testing
 
-- Keep and extend the equivalence-test pattern: CPU numba is truth; CUDA and
-  WGSL match within tolerance on benchmark scenes.
+- CPU numba is truth. `witness.py` is where look-tuning lands, and
+  `tests/test_behold_renders.py` pins the offline renderers against committed
+  reference images.
+- The browser engine is **not** currently pinned to it by a test. The desktop
+  build carried two such pins — a soar/witness image comparison and a
+  uniform-block diff that ran `web/soar/`'s JavaScript under node against
+  `write_uniforms` — and both were deleted with the desktop app (2026-08-05),
+  since each used the wgpu engine as its reference. Reinstating cover here
+  means writing a reference the browser can be checked against directly:
+  either frozen golden uniform blocks committed as a fixture, or headless
+  WebGPU screenshots diffed against witness. Until then "the look cannot
+  drift" is a hope rather than a property.
 - Reference photos: Thomas's own photos get promoted to `references/photos/`
   (committed); stock-site images stay local-only (gitignored) for licensing
   reasons.

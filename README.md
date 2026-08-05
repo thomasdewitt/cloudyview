@@ -10,6 +10,10 @@ CloudyView provides three tiers of visualization capabilities for 3D cloud conde
 - **Witness** (`witness`): Fast volumetric ray marching with multi-scattering approximation
 - **Behold** (`behold`): Photorealistic Monte Carlo path tracing with Mitsuba 3
 
+Plus **Soar**, a real-time fly-through of the witness look — a static WebGPU
+page under [`web/soar/`](web/soar), with no Python at run time. Serve the `web/`
+directory and open `soar/`; see [`web/README.md`](web/README.md).
+
 ## Coordinate System
 
 CloudyView uses the **meteorological convention**:

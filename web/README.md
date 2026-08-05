@@ -1,43 +1,45 @@
-# soar web — the browser build
+# soar — the browser build
 
-The desktop renderer's WGSL (`raymarch.wgsl`, copied verbatim by the export
-script) running under WebGPU with a ~600-line JS host. Real TWP-ICE LES
-clouds, FIF ocean, the full realism package, distance LOD — in a tab.
-Verified 2026-07-17: 261 fps at 1280×720 on the RTX 5080 under Chromium.
+The witness look running under WebGPU with a JavaScript host. Real LES cloud
+fields, FIF ocean, the full realism package, distance LOD — in a tab. Verified
+2026-07-17: 261 fps at 1280×720 on the RTX 5080 under Chromium.
 
-## Build the demo payload
-
-The payload (volume, ocean normal mips, uniform template) is derived and
-gitignored. Regenerate it on a machine with the GPU:
-
-    uv run python tools/export_web_demo.py
-
-This dumps `demo/` (~13 MB): the fp16 ghost-padded extinction volume from
-`data/TWPICE_subvolume_256x256_5km.nc`, a seeded 512² FIF normal mip
-chain, and `meta.json` — including the full uniform block from a
-real `InteractiveRenderer`, so the browser can never drift from the
-Python renderer's look constants. It also copies `raymarch.wgsl` here.
+This is the only soar. The desktop app it was ported from (wgpu-py + glfw +
+imgui) was deleted 2026-08-05 and lives in git history. `soar/raymarch.wgsl`
+used to be copied here from that engine, which was its source; it is now the
+original and is edited in place.
 
 ## Run locally
 
-    cd web && python3 -m http.server 8130
-    # open http://localhost:8130/
+    python3 -m http.server 8765 --directory web
+    # open http://localhost:8765/soar/
+
+Serve the `web/` directory rather than `web/soar/` — the viewer looks for a
+sibling `demo/` folder one level up.
+
+## Assets
+
+`soar/ocean/` is committed: a periodic 100 m patch of sea surface, generated
+from a multifractal that only exists in Python, so it ships with the tool and
+works offline. `demo/` is the demo cloud field — derived, gitignored, and
+fetched from the repo at run time so the deployed folder stays small.
+Regenerate both with:
+
+    uv run python tools/export_web_assets.py
+
+Known issue (2026-08-05): the ocean tile is not reproducible from the seed
+recorded in `soar/ocean/meta.json`. `cloudyview.ocean_fif.generate_fif_normals`
+does not pass `levy_noise=` to `FIF_ND`, so the cascade draws fresh randomness
+on every call and its `rng` argument only steers the boost direction.
+Re-running the exporter therefore rewrites the committed `fif_mip*.bin`.
 
 ## Deploy
 
-The folder is fully static and self-contained — copy `web/` anywhere
-(the website, an S3 bucket). Needs a WebGPU browser (Chrome/Edge 113+,
-Firefox 141+, Safari 26); the page shows a friendly message otherwise.
+The folder is fully static and self-contained — copy `web/` anywhere (the
+website, an S3 bucket). Needs a WebGPU browser (Chrome/Edge 113+, Firefox 141+,
+Safari 26); the page shows a friendly message otherwise.
 
 ## Controls
 
-Click to capture the pointer; WASD + Space/Shift to fly; scroll for
-speed;
-Esc releases the mouse.
-
-## Self-test
-
-`?selftest` renders 90 frames offscreen (no canvas compositing — works
-in headless browsers), then POSTs a PNG of the accumulated frame to
-`/selftest-shot` and `{fps, gpuErrors}` to `/selftest-log`. Harness:
-`temp/perf-2026-07-17/` scripts drive it via Playwright.
+Click to capture the pointer; WASD + Space/Shift to fly; scroll for speed; Esc
+releases the mouse and opens the menu.

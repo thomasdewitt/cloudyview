@@ -11,23 +11,22 @@ Two destinations, for two different reasons:
                     at run time rather than copied to the website, so the
                     deployed folder stays small.
 
-Also copies raymarch.wgsl into web/soar/ — the shader is the shared artifact
-and the browser must run it verbatim, so it is never hand-edited there.
+The WGSL under web/soar/ is edited in place. It used to be copied from the
+desktop engine, which was the source; the desktop app is gone and the browser
+copy is now the original.
 
-    uv run --extra interactive python tools/export_web_assets.py
+    uv run python tools/export_web_assets.py
 """
 
 import json
-import shutil
 from pathlib import Path
 
 import numpy as np
 
-from cloudyview.cloudfield import load
+from cloudyview import optical_depth
+from cloudyview.cloudfield import CloudField, load
 from cloudyview.glimpse import glimpse
 from cloudyview.ocean_fif import generate_fif_normals
-from cloudyview.soar import engine as soar_engine
-from cloudyview.soar.engine import _build_fif_normal_mips, _ghost_face_arrays
 
 REPO = Path(__file__).resolve().parents[1]
 DEMO_NC = REPO / "data" / "TWPICE_subvolume_256x256_5km.nc"
@@ -42,6 +41,80 @@ FIF_DX_M = 0.2
 FIF_SEED = 20260717
 
 DEMO_SUN = {"azimuth": 235.0, "elevation": 25.0}
+
+
+def _volume_aabb(field: CloudField):
+    """Absolute-meter AABB with half-cell padding (matches witness())."""
+    x = np.asarray(field.x, dtype=np.float64)
+    y = np.asarray(field.y, dtype=np.float64)
+    z = np.asarray(field.z, dtype=np.float64)
+    dx_half = 0.5 * abs(x[1] - x[0])
+    dy_half = 0.5 * abs(y[1] - y[0])
+    dz_lo_half = 0.5 * abs(z[1] - z[0])
+    dz_hi_half = 0.5 * abs(z[-1] - z[-2])
+    bmin = np.array([x.min() - dx_half, y.min() - dy_half, z.min() - dz_lo_half])
+    bmax = np.array([x.max() + dx_half, y.max() + dy_half, z.max() + dz_hi_half])
+    return bmin, bmax
+
+
+def _ghost_face_arrays(sigma: np.ndarray) -> dict:
+    """Periodic x/y ghost-border faces for the padded volume texture.
+
+    The padded texture is (w=nz+2, h=ny+2, d=nx+2); texture depth indexes x
+    and texture rows index y. The x faces are single depth slices of shape
+    (ny+2, nz+2); the y faces span every depth slice with shape
+    (nx+2, 1, nz+2) so one upload covers the whole row. Corner texels wrap in
+    both x and y (they are the trilinear support for samples near a domain
+    corner); the z ghost columns stay zero — the vertical taper is not
+    periodic.
+    """
+    nx, ny, nz = sigma.shape
+    dtype = sigma.dtype
+    x_lo = np.zeros((ny + 2, nz + 2), dtype=dtype)  # texture depth 0
+    x_hi = np.zeros((ny + 2, nz + 2), dtype=dtype)  # texture depth nx+1
+    x_lo[1:-1, 1:-1] = sigma[-1]
+    x_lo[0, 1:-1] = sigma[-1, -1]
+    x_lo[-1, 1:-1] = sigma[-1, 0]
+    x_hi[1:-1, 1:-1] = sigma[0]
+    x_hi[0, 1:-1] = sigma[0, -1]
+    x_hi[-1, 1:-1] = sigma[0, 0]
+    y_lo = np.zeros((nx + 2, 1, nz + 2), dtype=dtype)  # texture row 0
+    y_hi = np.zeros((nx + 2, 1, nz + 2), dtype=dtype)  # texture row ny+1
+    y_lo[1:-1, 0, 1:-1] = sigma[:, -1]
+    y_lo[0, 0, 1:-1] = sigma[-1, -1]
+    y_lo[-1, 0, 1:-1] = sigma[0, -1]
+    y_hi[1:-1, 0, 1:-1] = sigma[:, 0]
+    y_hi[0, 0, 1:-1] = sigma[-1, 0]
+    y_hi[-1, 0, 1:-1] = sigma[0, 0]
+    return {"x_lo": x_lo, "x_hi": x_hi, "y_lo": y_lo, "y_hi": y_hi}
+
+
+def _build_fif_normal_mips(base: np.ndarray) -> list:
+    """Average and renormalize a periodic normal-map mip chain on the CPU."""
+    mips = [np.ascontiguousarray(base, dtype=np.float32)]
+    cur = mips[0]
+    while cur.shape[0] > 1 or cur.shape[1] > 1:
+        h, w, _ = cur.shape
+        nh = max(1, h // 2)
+        nw = max(1, w // 2)
+        y0 = (np.arange(nh) * 2) % h
+        y1 = (y0 + 1) % h
+        x0 = (np.arange(nw) * 2) % w
+        x1 = (x0 + 1) % w
+        down = (
+            cur[y0[:, None], x0[None, :], :3]
+            + cur[y1[:, None], x0[None, :], :3]
+            + cur[y0[:, None], x1[None, :], :3]
+            + cur[y1[:, None], x1[None, :], :3]
+        ) * np.float32(0.25)
+        length = np.linalg.norm(down, axis=-1, keepdims=True)
+        down = down / np.maximum(length, np.float32(1e-12))
+        level = np.empty((nh, nw, 4), dtype=np.float32)
+        level[..., :3] = down
+        level[..., 3] = 1.0
+        mips.append(np.ascontiguousarray(level))
+        cur = mips[-1]
+    return mips
 
 
 def export_ocean() -> dict:
@@ -77,7 +150,7 @@ def export_demo() -> None:
     field = load(str(DEMO_NC))
     print(f"demo field: {field.lwc.shape} from {DEMO_NC.name}")
 
-    sigma = soar_engine.optical_depth.compute_extinction_field(
+    sigma = optical_depth.compute_extinction_field(
         field.lwc, field.z, re=10.0, iwc=field.iwc, re_ice=30.0
     )
     sigma = np.ascontiguousarray(sigma, dtype=np.float16)
@@ -109,7 +182,7 @@ def export_demo() -> None:
     (DEMO_OUT / "faces.bin").write_bytes(blob)
     print(f"  faces.bin: {len(blob) / 1e6:.2f} MB")
 
-    bmin, bmax = soar_engine._volume_aabb(field)
+    bmin, bmax = _volume_aabb(field)
     meta = {
         "schema": "cloudyview.web.demo.v3",
         "source": DEMO_NC.name,
@@ -143,17 +216,6 @@ def export_demo() -> None:
 
 def main() -> None:
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
-    # raymarch.wgsl and hud.wgsl are the shared artifacts — the browser must
-    # run them verbatim, so they are copied rather than hand-edited there.
-    #
-    # bird.wgsl is NOT in this list. The browser's bird was rebuilt from
-    # anatomy (web/soar/birdmesh.js, web/soar/bird.wgsl) and no longer matches
-    # the desktop's sixteen triangles; copying would overwrite it. The desktop
-    # bird is on the deletion list for this port anyway, so the two are
-    # allowed to diverge rather than the work being done twice.
-    for name in ("raymarch.wgsl", "hud.wgsl"):
-        shutil.copy(REPO / "cloudyview" / "soar" / name, SOAR_OUT / name)
-        print(f"copied {name} -> {SOAR_OUT / name}")
     export_ocean()
     export_demo()
 

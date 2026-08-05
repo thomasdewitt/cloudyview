@@ -11,11 +11,10 @@ uv run python your_command_here
 uv run witness cloud.nc
 ```
 
-For commands that need optional dependencies (tests, interactive engine):
+For commands that need optional dependencies (tests):
 
 ```bash
 uv run --extra dev python -m pytest tests/ -v
-uv run --extra interactive python -m cloudyview.soar cloud.nc
 ```
 
 ## Project Overview
@@ -27,9 +26,16 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 - `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render (Mitsuba 3)
 - `glimpse <file.nc>` - Quick 2D visual-albedo top view
 - `witness <file.nc>` - Fast volumetric ray-marched render (numba CPU — the golden look reference)
-- `soar <file.nc>` / `python -m cloudyview.soar` - Real-time WGSL fly-through (needs `--extra interactive`).
-  `--nest <fine.nc>` adds a second, finer field nested inside the main one (placed by its own
-  absolute coordinates; must lie inside the outer domain or it raises). In-app: ESC menu, N.
+
+Soar, the real-time fly-through, is a browser app under `web/soar/` — WebGPU, no
+Python at run time. Serve the `web/` directory and open `soar/`:
+
+```bash
+python3 -m http.server 8765 --directory web
+```
+
+`tools/export_web_assets.py` regenerates its binary assets (the FIF ocean tile
+and the demo field).
 
 Library API (preferred): `cv.load()` → `CloudField`, `cv.Camera`, `cv.glimpse/witness/behold` return arrays. See `docs/architecture.md` for the design spec and README for examples.
 
