@@ -59,28 +59,50 @@ class WorkerLink {
  */
 function levelReceiver(device, label, onProgress) {
   const state = { texture: null, padded: null, faces: null, geometry: null,
-                  pending: Promise.resolve() };
+                  slabsDone: 0, error: null };
+
+  const step = async (message) => {
+    if (message.type === "geometry") {
+      state.geometry = message;
+      state.slabs = message.slabs;
+      const [nx, ny, nz] = message.description.shape;
+      state.padded = [nx + 2, ny + 2, nz + 2];
+      state.texture = await createVolumeTexture(
+        device, state.padded, `the field in ${label}`);
+    } else if (message.type === "slab") {
+      if (!state.texture) {
+        throw new Error(
+          "A slab arrived before the volume texture existed — the upload " +
+          "queue is out of order.");
+      }
+      writeVolumeSlab(device, state.texture, message.data,
+                      message.origin, message.size);
+      state.slabsDone += 1;
+      onProgress?.(message.done, state.slabsDone, state.slabs);
+    } else if (message.type === "faces") {
+      state.faces = message.faces;
+    }
+  };
+
+  // Messages arrive faster than they can be handled, and handling the first
+  // one is genuinely slow: allocating the volume texture goes through an
+  // error scope, which resolves only after the GPU has caught up. Handling
+  // them concurrently meant slabs arriving during that window were written
+  // to a texture that did not exist yet — the write threw into a promise
+  // nobody was holding, the slab was silently lost, and the field came out
+  // with untouched regions in it. Hence one at a time, in order, with the
+  // failure kept rather than dropped.
+  let chain = Promise.resolve();
   return {
     state,
-    async handle(message) {
-      if (message.label !== label) return;
-      if (message.type === "geometry") {
-        state.geometry = message;
-        state.slabs = message.slabs;
-        state.slabsDone = 0;
-        const [nx, ny, nz] = message.description.shape;
-        state.padded = [nx + 2, ny + 2, nz + 2];
-        state.texture = await createVolumeTexture(
-          device, state.padded, `the field in ${label}`);
-      } else if (message.type === "slab") {
-        writeVolumeSlab(device, state.texture, message.data,
-                        message.origin, message.size);
-        state.slabsDone = (state.slabsDone ?? 0) + 1;
-        onProgress?.(message.done, state.slabsDone, state.slabs);
-      } else if (message.type === "faces") {
-        state.faces = message.faces;
-      }
+    handle(message) {
+      if (message.label !== label) return chain;
+      chain = chain.then(() => step(message)).catch((err) => {
+        state.error ??= err;
+      });
+      return chain;
     },
+    settled: () => chain,
   };
 }
 
@@ -92,7 +114,9 @@ function levelReceiver(device, label, onProgress) {
  * the file does not say. None of them are guessed — a field rendered in the
  * wrong units looks entirely plausible and is off by a thousand.
  */
-export async function loadFileScene(device, file, { ocean, progress, ask }) {
+export async function loadFileScene(
+  device, file, { ocean, progress, ask, slabBudget } = {},
+) {
   const receivers = new Map();
   const link = new WorkerLink((message) => {
     receivers.get(message.label)?.handle(message);
@@ -157,7 +181,21 @@ export async function loadFileScene(device, file, { ocean, progress, ask }) {
           0.05 + share * (index + done)));
       receivers.set(label, receiver);
       progress(`Reading ${label}…`, 0.05 + share * index);
-      await link.call("extinction", { group: level.path, units, label });
+      await link.call("extinction",
+                      { group: level.path, units, label, slabBudget });
+      // The RPC resolving means the worker has SENT everything, not that we
+      // have finished writing it. Wait for the upload queue to drain, and
+      // surface anything it swallowed.
+      await receiver.settled();
+      if (receiver.state.error) throw receiver.state.error;
+      if (receiver.state.slabsDone !== receiver.state.slabs) {
+        throw new Error(
+          `Only ${receiver.state.slabsDone} of ${receiver.state.slabs} parts ` +
+          `of '${label}' reached the GPU. The field would have holes in it.`);
+      }
+      if (!receiver.state.faces) {
+        throw new Error(`The wrap faces for '${label}' never arrived.`);
+      }
       built.push({ level, receiver });
     }
 
