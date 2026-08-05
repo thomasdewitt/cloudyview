@@ -1,6 +1,12 @@
-/* Landing page. Follows the site's warm palette and type (see
-   personal-website/thought-cloud/*/index.html); the viewer itself is a
-   lights-out overlay and lives in viewer.css. */
+/* Landing page. Follows the warm palette and type used across
+   personal-website/thought-cloud; the viewer itself is a lights-out overlay
+   and lives in viewer.css.
+
+   Careful with comments here: a stray asterisk-slash (as in a glob like
+   thought-cloud slash star slash index.html) closes the comment early, and
+   the parser then discards rules until it can resync — which silently took
+   the whole :root block with it once, leaving every custom property
+   undefined and the loading overlay transparent. */
 
 :root {
   --bg-warm: #f4efe5;

@@ -637,6 +637,18 @@ export class Renderer {
     return true;
   }
 
+  /** Release the render targets. Pipelines and modules go with the object. */
+  destroy() {
+    for (const t of [this._targets?.sample, this._targets?.accumA,
+                     this._targets?.accumB]) {
+      t?.destroy();
+    }
+    this._targets = null;
+    this._lastPresented = null;
+    this.uniformBuf?.destroy();
+    this.accumUniformBuf?.destroy();
+  }
+
   _sceneState() {
     const s = this.scene;
     return {

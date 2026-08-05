@@ -75,12 +75,45 @@ class Viewer {
   // --- setup ---------------------------------------------------------------
 
   async start(source, progress) {
-    const shaderSource = await (await fetch("raymarch.wgsl")).text();
+    this.shaderSource = await (await fetch("raymarch.wgsl")).text();
+    this.progress = progress;
 
     // The UI is built before the field loads, because loading a file asks
     // questions — which group, what units — and those are menu panels.
     this.ui = new UI(this.uiRoot, this);
     this.ui.statsMode = "subtle";
+
+    this.context = this.canvas.getContext("webgpu");
+    this.canvasFormat = presentFormat(navigator.gpu.getPreferredCanvasFormat());
+    this.context.configure({
+      device: this.device, format: this.canvasFormat, alphaMode: "opaque",
+    });
+
+    await this.loadField(source, progress);
+    this._bindInput();
+    this._lastTime = performance.now();
+    this.paused = false;
+    requestAnimationFrame(() => this._frame());
+  }
+
+  /**
+   * Load (or replace) the field. Everything resident on the GPU for the old
+   * one is released first — a second field would otherwise sit alongside the
+   * first, and these are gigabytes.
+   */
+  async loadField(source, progress) {
+    if (this.scene) {
+      this.stop = true;
+      await this.device.queue.onSubmittedWorkDone();
+      this.renderer?.destroy();
+      this.scene.destroy();
+      this.scene = null;
+      this.renderer = null;
+      this.frameIndex = 0;
+      this._lastSignature = null;
+      this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
+      this.sunElevation = K.DEFAULT_SUN_ELEVATION;
+    }
 
     if (source.kind === "demo") {
       this.scene = await loadDemoScene(
@@ -94,19 +127,16 @@ class Viewer {
       const { loadFileScene } = await import("./ingest/index.js");
       this.scene = await loadFileScene(
         this.device, source.file, {
-          ocean: () => loadOceanTile(this.device, OCEAN_URL),
+          // The ocean is a patch of sea surface, not anything about the
+          // data, so it survives a change of field.
+          ocean: async () => (this._ocean ??=
+            await loadOceanTile(this.device, OCEAN_URL)),
           progress,
           ask: (question) => this._ask(question),
         });
     }
 
-    this.context = this.canvas.getContext("webgpu");
-    this.canvasFormat = presentFormat(navigator.gpu.getPreferredCanvasFormat());
-    this.context.configure({
-      device: this.device, format: this.canvasFormat, alphaMode: "opaque",
-    });
-
-    this.renderer = new Renderer(this.device, shaderSource, this.scene,
+    this.renderer = new Renderer(this.device, this.shaderSource, this.scene,
                                  { canvasFormat: this.canvasFormat });
     if (this.scene.periodicDefault === false) this.renderer.setPeriodic(false);
     progress("Compiling the shader…", 0.97);
@@ -115,11 +145,7 @@ class Viewer {
                                    { periodic: this.renderer.periodic });
     this.ui.setSubtitle(this.sourceLabel);
     if (this.scene.nestNote) this.ui.say(this.scene.nestNote, 8);
-
-    this._bindInput();
-    this._lastTime = performance.now();
-    this.paused = false;
-    requestAnimationFrame(() => this._frame());
+    this.stop = false;
   }
 
   /**
@@ -427,27 +453,46 @@ class Viewer {
     }
   }
 
-  /**
-   * Opening a second file inside a live session would mean tearing down the
-   * scene, the renderer and half a gigabyte of resident texture while frames
-   * are still in flight. Going back to the start page does the same job with
-   * none of that risk, so say so plainly rather than offering a dead button.
-   */
-  pickFile() {
-    this.ui.open("message", {
-      kicker: "open a file",
-      title: "Start again from the front page",
-      body: "Opening another field means replacing everything resident on " +
-            "the GPU. Rather than tear that down underneath a running " +
-            "render, soar goes back to the start page — the file picker and " +
-            "drag-and-drop are both there.",
-      advice: "Nothing is uploaded either way; the file is read on this " +
-              "machine.",
-      actions: [
-        ["Back to the start page", () => this.leave()],
-        ["Stay here", () => this.ui.open("main")],
-      ],
-    });
+  /** Open a netCDF file and fly it, releasing the current one. */
+  async pickFile() {
+    this.ui.close();
+    let file = null;
+    try {
+      if (window.showOpenFilePicker) {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: "netCDF cloud field",
+                    accept: { "application/x-netcdf": [".nc", ".nc4", ".cdf"],
+                              "application/x-hdf5": [".h5", ".hdf5"] } }],
+        });
+        file = await handle.getFile();
+      } else {
+        file = await new Promise((resolve) => {
+          const input = document.createElement("input");
+          input.type = "file";
+          input.accept = ".nc,.nc4,.cdf,.h5,.hdf5";
+          input.addEventListener("change",
+            () => resolve(input.files?.[0] ?? null), { once: true });
+          input.addEventListener("cancel", () => resolve(null), { once: true });
+          input.click();
+        });
+      }
+    } catch {
+      file = null;   // the picker was dismissed
+    }
+    if (!file) { this.paused ? this.ui.open("main") : this.resume(); return; }
+
+    this.paused = true;
+    this.setLoadingVisible?.(true);
+    try {
+      await this.loadField({ kind: "file", file }, this.progress);
+      this.setLoadingVisible?.(false);
+      this._lastTime = performance.now();
+      this.paused = false;
+      requestAnimationFrame(() => this._frame());
+    } catch (err) {
+      this.onFailure?.("Could not open this field.",
+                       String(err?.message || err), err?.advice || "");
+    }
   }
 
   /** True when the view sees wrapped copies — behold's volume does not tile. */
