@@ -233,6 +233,48 @@ const MS_TAIL_FLOOR: f32 = 0.15;
 // exposure change, and it is why the thin-cloud regression views are
 // essentially untouched.
 const MS_TAIL_TAU_KNEE: f32 = 4.0;
+
+// Incidence cosine of the beam on the local skin (lighting-loop iter_006).
+//
+// iter_002 gave the isotropic tail a *depth* (how far the sample sits from the
+// illuminated region, measured along the sun path). It still has no
+// *direction*. On directly sunlit skin — which is essentially all of a cloud
+// field seen from above — tau_sun is below the knee everywhere the camera can
+// see, so the tail is delivered at full strength to every lit sample
+// regardless of which way that sample's surface faces. Ablation on the aerial
+// views (drop octaves 1-5) takes v8's cloud tops from L 205 to 151: a quarter
+// of a cloud top's brightness is a pedestal with no orientation dependence at
+// all. That is why tops read uniform from altitude while the same cloud's side
+// view does not — every other term that could shade them is inert up there
+// (the whole deep-shadow machinery of iterations 001/004/005 is worth 0.11
+// levels on v8, gradient shading 2.0, ambient 1.4).
+//
+// The tail is diffuse light that entered this neighbourhood of the cloud and
+// random-walked to the sample, so its source strength is the irradiance
+// available locally, and for a collimated beam on a tilted skin element that
+// is the incidence cosine mu0 = n.s. A turret crown turned toward the beam
+// collects the full irradiance; the wall of the crevice beside it, tilted
+// away, collects a fraction of it and gets a proportionally weaker tail even
+// though the beam still reaches both and tau_sun cannot tell them apart.
+//
+// Normalized by the value a *horizontal* face would see (mu_ref = sun.z), so
+// this is a contrast change and not an exposure change: level cloud top keeps
+// exactly its iter_005 value and only surfaces tilted away from the sun give
+// anything up. Same discipline as iter_002's knee, and it is most of what
+// keeps the thin regression views still — a wisp never reaches the tau_depth
+// the surface gate asks for, so it has no resolved skin to tilt.
+//
+// It rides (1 - deep_shadow_gate), the reverse of every other term this loop
+// has added: once tau_sun saturates there is no local beam irradiance left to
+// be proportional to, the tail is pure diffusion from elsewhere, and the
+// orientation of this particular skin element stops meaning anything. That
+// hand-off is also what keeps v1's and v2's hard-won shadowed masses out of
+// this iteration's way, by construction rather than by tuning.
+const TAIL_MU_FLOOR: f32 = 0.30;
+// Guard for a sun near the horizon: without it mu_ref -> 0 and the ratio
+// saturates at 1 for every orientation. That is the correct limit (a grazing
+// beam lights nothing preferentially) but a numerically noisy way to reach it.
+const TAIL_MU_REF_MIN: f32 = 0.25;
 // Sun-march quadrature jitter (lighting-loop iter_003). The random phase is
 // off while the distance-LOD floor is at or below the light march's own step
 // and full once the floor has coarsened it by this factor, so a march the
@@ -1388,6 +1430,49 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     max(tau_sun - MS_TAIL_TAU_KNEE, 0.0), g_hg
                 );
 
+            // Local surface frame. Hoisted above the MS loop (iter_006) so the
+            // tail can be weighted by the beam's incidence on the skin; the
+            // gradient *shading* below consumes exactly these values in exactly
+            // the same way it did, so that term is untouched.
+            var grad = vec3<f32>(0.0);
+            var grad_len = 0.0;
+            var surface_gate = 0.0;
+            if (gradient_shading_strength > 0.0) {
+                let grad_conf_v = sigma_gradient(
+                    p, sigma, gradient_coarse_weight, gradient_coarse_radius_m,
+                    t, u.cb_params.w, level.in_nest
+                );
+                grad = grad_conf_v.xyz;
+                grad_len = length(grad);
+                surface_gate = smoothstep(
+                    GRADIENT_SHADING_TAU_START,
+                    GRADIENT_SHADING_TAU_FULL,
+                    tau_depth
+                ) * smoothstep(
+                    GRADIENT_SHADING_CONF_START,
+                    GRADIENT_SHADING_CONF_FULL,
+                    grad_conf_v.w
+                );
+            }
+
+            // Beam incidence on the skin, relative to a horizontal face (see
+            // the TAIL_MU_* block). Exactly 1 where the field is level, so it
+            // costs no brightness on flat cloud top and only the flanks of
+            // turrets and the walls of the crevices between them give the tail
+            // up.
+            var tail_mu_factor = 1.0;
+            if (grad_len > 1e-12) {
+                let mu0 = max(-dot(grad, sun) / grad_len, 0.0);
+                let mu_ratio = clamp(
+                    mu0 / max(sun.z, TAIL_MU_REF_MIN), 0.0, 1.0
+                );
+                tail_mu_factor = mix(
+                    1.0,
+                    TAIL_MU_FLOOR + (1.0 - TAIL_MU_FLOOR) * mu_ratio,
+                    surface_gate * (1.0 - deep_shadow_gate)
+                );
+            }
+
             var ms = vec3<f32>(0.0);
             var ms_atten = 1.0;
             for (var octave: i32 = 0; octave < MS_OCTAVES; octave = octave + 1) {
@@ -1400,7 +1485,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // baseline value; the tail is put on the diffusion depth in
                 // proportion to how isotropic it has already become, so the
                 // handover is continuous and nothing is double-counted.
-                contrib = contrib * mix(1.0, ms_tail_factor, iso_gate);
+                contrib = contrib
+                    * mix(1.0, ms_tail_factor * tail_mu_factor, iso_gate);
                 if (deep_shadow_ms_suppression > 0.0) {
                     let ms_floor = max(
                         DEEP_SHADOW_MS_FLOOR,
@@ -1424,22 +1510,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
 
             if (gradient_shading_strength > 0.0) {
-                let grad_conf_v = sigma_gradient(
-                    p, sigma, gradient_coarse_weight, gradient_coarse_radius_m,
-                    t, u.cb_params.w, level.in_nest
-                );
-                let grad = grad_conf_v.xyz;
-                let grad_len = length(grad);
                 if (grad_len > 1e-12) {
-                    let surface_gate = smoothstep(
-                        GRADIENT_SHADING_TAU_START,
-                        GRADIENT_SHADING_TAU_FULL,
-                        tau_depth
-                    ) * smoothstep(
-                        GRADIENT_SHADING_CONF_START,
-                        GRADIENT_SHADING_CONF_FULL,
-                        grad_conf_v.w
-                    );
                     var n_dot_sun = -dot(grad, sun) / grad_len;
                     if (n_dot_sun < 0.0) {
                         n_dot_sun = n_dot_sun * GRADIENT_SHADING_SHADOW_SIDE_SCALE;
