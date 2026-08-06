@@ -181,10 +181,19 @@ export class UI {
     this.panel = null;
   }
 
-  /** Esc: back out one level, or resume from the top. */
-  back() {
+  /**
+   * Esc: back out one level, or resume from the top.
+   *
+   * Resuming from the Escape KEY must not grab the pointer: Firefox honours
+   * the request and then its own Escape handling exits the fresh lock, which
+   * reads as lock loss and re-opens the menu — the "menu flashes away and
+   * right back" bug. So the key resumes without capture (a click takes the
+   * mouse); the clickable Resume items keep the grab, a click is a clean
+   * gesture.
+   */
+  back(capture = true) {
     if (this.panel && this.panel !== "main") this.open("main");
-    else this.app.resume();
+    else this.app.resume({ capture });
   }
 
   open(name, context) {
@@ -242,9 +251,9 @@ export class UI {
                   () => this.open("behold")));
     m.append(item("Controls", null, () => this.open("controls")));
     m.append(item(
-      `Minimap: ${app.minimap && app.minimapEnabled ? "on" : "off"}`,
+      `Minimap: ${!app.minimap ? "off" : { corner: "on", full: "fullscreen", off: "off" }[app.minimapMode]}`,
       app.minimap
-        ? "M — the overhead albedo map, top right"
+        ? "M — corner map, fullscreen (click to travel), off"
         : (app._minimapProblem ?? "not available for this field"),
       () => { app.toggleMinimap(); this.open("main"); }));
     m.append(item(
@@ -254,7 +263,7 @@ export class UI {
         : (app._birdProblem ?? "not available for this field"),
       () => { app.toggleBird(); this.open("main"); }));
     m.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
-                  "wrap the field laterally, so flight never runs out",
+                  "wrap the field laterally",
                   () => { app.togglePeriodic(); this.open("main"); }));
     m.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
                   "F", () => { app.toggleFullscreen(); this.open("main"); }));
@@ -314,12 +323,6 @@ export class UI {
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
       onInput: (v) => app.setToneMapGamma(v),
     }));
-    m.append(el("div", "row",
-      `${K.TONE_MAP_GAMMA_WITNESS} is witness's own value — darker, with a ` +
-      `harder far field. Higher lifts distance into haze; ` +
-      `${K.TONE_MAP_GAMMA_AS_FLOWN} is what the desktop window used to ` +
-      `render by encoding gamma twice. The default sits between them.`));
-
     if (r.qualityTier === "potato") {
       m.append(el("div", "row",
         "Potato switches to exact High sampling the moment the camera " +
@@ -544,8 +547,7 @@ export class UI {
     }));
     m.append(el("div", "row",
       "Press R while flying to record a track. Stop it and the track is " +
-      "re-rendered here at full convergence — every frame clean, however " +
-      "long that takes — and downloaded as a video."));
+      "re-rendered here at full quality and downloaded as a video."));
     m.append(el("div", "divider"));
     m.append(this._backButton());
   }

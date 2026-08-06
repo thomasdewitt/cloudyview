@@ -161,7 +161,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let right = uv_to_screen(u.rays.zw);
 
         if (inside_triangle(p, cam, left, right)) {
-            out = over(out, vec4<f32>(RED, 0.13));
+            out = over(out, vec4<f32>(RED, 0.05));
         }
 
         let ray_d = min(
@@ -170,36 +170,36 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         );
         let halo = stroke_coverage(ray_d, line_hw + halo_hw);
         if (halo > 0.0) {
-            out = over(out, vec4<f32>(INK, 0.38 * halo));
+            out = over(out, vec4<f32>(INK, 0.22 * halo));
         }
         let ray = stroke_coverage(ray_d, line_hw);
         if (ray > 0.0) {
-            out = over(out, vec4<f32>(RED, 0.96 * ray));
+            out = over(out, vec4<f32>(RED, 0.50 * ray));
         }
     } else {
         let ring_d = abs(length(p - cam) - u.camera.w);
         let halo = stroke_coverage(ring_d, line_hw + halo_hw);
         if (halo > 0.0) {
-            out = over(out, vec4<f32>(INK, 0.38 * halo));
+            out = over(out, vec4<f32>(INK, 0.22 * halo));
         }
         let ring = stroke_coverage(ring_d, line_hw);
         if (ring > 0.0) {
-            out = over(out, vec4<f32>(RED, 0.96 * ring));
+            out = over(out, vec4<f32>(RED, 0.50 * ring));
         }
     }
 
     let marker_d = length(p - cam);
     let outer = disk_coverage(marker_d, u.frame.w + 2.0);
     if (outer > 0.0) {
-        out = over(out, vec4<f32>(INK, 0.30 * outer));
+        out = over(out, vec4<f32>(INK, 0.22 * outer));
     }
     let rim = disk_coverage(marker_d, u.frame.w + 1.2);
     if (rim > 0.0) {
-        out = over(out, vec4<f32>(WHITE, 0.90 * rim));
+        out = over(out, vec4<f32>(WHITE, 0.55 * rim));
     }
     let dot = disk_coverage(marker_d, u.frame.w);
     if (dot > 0.0) {
-        out = over(out, vec4<f32>(RED, 0.98 * dot));
+        out = over(out, vec4<f32>(RED, 0.80 * dot));
     }
 
     let edge_d = min(

@@ -150,8 +150,8 @@ export const COMPASS_EDGES = [
 export const STILL_ACCUMULATE_FRAMES = 64;
 export const CAPTURE_SIZE_PRESETS = [
   ["1280 x 720", [1280, 720]],
-  ["1920 x 1080", [1920, 1080]],
-  ["3840 x 2160", [3840, 2160]],
+  ["2K", [1920, 1080]],
+  ["4K", [3840, 2160]],
 ];
 export const CAPTURE_SIZE_LIMITS = [64, 7680];
 export const DEFAULT_VIDEO_FPS = 60.0;

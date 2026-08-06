@@ -61,11 +61,24 @@ function unitXY(direction, fallbackRad) {
  * over the window size and the map's aspect, and it is the piece a test can
  * check without a GPU.
  */
-export function rectForSize(size, albedoShape) {
+export function rectForSize(size, albedoShape, fullscreen = false) {
   const [screenW, screenH] = [Number(size[0]), Number(size[1])];
   const [ny, nx] = albedoShape;
   const aspect = nx / ny;
   const margin = Math.max(8.0, Math.round(screenH * MAP_MARGIN_FRAC));
+
+  if (fullscreen) {
+    // As large as the screen allows at the map's own aspect, centred.
+    const availW = Math.max(24.0, screenW - 2.0 * margin);
+    const availH = Math.max(24.0, screenH - 2.0 * margin);
+    let mapH = availH;
+    let mapW = mapH * aspect;
+    if (mapW > availW) {
+      mapH *= availW / mapW;
+      mapW = availW;
+    }
+    return [(screenW - mapW) * 0.5, (screenH - mapH) * 0.5, mapW, mapH];
+  }
 
   let mapH = Math.max(24.0, Math.round(screenH * MAP_HEIGHT_FRAC));
   let mapW = Math.round(mapH * aspect);
@@ -269,10 +282,26 @@ export class Minimap {
             rect[1] + (1.0 - cameraUV[1]) * rect[3]];
   }
 
+  /**
+   * Map a framebuffer-pixel point to world x/y, or null outside the map.
+   * Inverse of the marker placement: map u = (rel_x + 1) / 2, and the map
+   * is drawn north-up, so screen y runs against world y.
+   */
+  worldXYFromPixel(px, py, scene) {
+    if (!this._rect) return null;
+    const [x, y, w, h] = this._rect;
+    if (px < x || py < y || px > x + w || py > y + h) return null;
+    const u = (px - x) / w;
+    const v = 1.0 - (py - y) / h;
+    const { bmin, bmax } = scene;
+    return [bmin[0] + u * (bmax[0] - bmin[0]),
+            bmin[1] + v * (bmax[1] - bmin[1])];
+  }
+
   /** Pack the layout and overlay geometry for this frame. */
-  update(camera, scene, size) {
+  update(camera, scene, size, fullscreen = false) {
     const [screenW, screenH] = [Number(size[0]), Number(size[1])];
-    const rect = rectForSize(size, this.albedoShape);
+    const rect = rectForSize(size, this.albedoShape, fullscreen);
     const [ny, nx] = this.albedoShape;
     const overlay = cameraOverlayGeometry(
       camera.relativePosition(), camera.azimuth, camera.elevation, camera.fov,
@@ -280,8 +309,9 @@ export class Minimap {
     const [camU, camV] = overlay.cameraUV;
 
     const minSide = Math.min(rect[2], rect[3]);
-    const markerRadius = Math.max(3.0, minSide * 0.028);
-    const lineWidth = Math.max(1.25, minSide * 0.010);
+    // Deliberately understated: the marker is a reference, not a cursor.
+    const markerRadius = Math.max(2.5, minSide * 0.020);
+    const lineWidth = Math.max(1.0, minSide * 0.0065);
     const borderWidth = Math.max(1.0, minSide * 0.008);
     const haloWidth = Math.max(0.85, lineWidth * 0.75);
 
@@ -296,7 +326,7 @@ export class Minimap {
 
     const nest = nestMapUV(scene);
     const u = this.uniforms;
-    u.set([screenW, screenH, MAP_OPACITY, markerRadius], 0);
+    u.set([screenW, screenH, fullscreen ? 0.95 : MAP_OPACITY, markerRadius], 0);
     u.set(rect, 4);
     u.set([camU, camV, mode, circleRadius], 8);
     u.set([leftU, leftV, rightU, rightV], 12);

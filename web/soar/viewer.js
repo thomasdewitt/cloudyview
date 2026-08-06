@@ -57,7 +57,9 @@ class Viewer {
     this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
 
     this.birdEnabled = true;
-    this.minimapEnabled = true;
+    // "corner" | "full" | "off". Fullscreen frees the mouse so the map can
+    // be clicked to travel; M cycles through all three.
+    this.minimapMode = "corner";
     this.recorder = new TrackRecorder();
     this.paused = true;
     this.captured = false;
@@ -308,8 +310,26 @@ class Viewer {
     // scene, its renderer, and its device.
     const { signal } = this._listeners;
 
-    canvas.addEventListener("click", () => {
-      if (!this.captured && !this.ui.isOpen) canvas.requestPointerLock();
+    canvas.addEventListener("click", (e) => {
+      if (this.ui.isOpen) return;
+      if (this.minimapMode === "full" && !this.captured && this.minimap) {
+        // The canvas backbuffer and its CSS box differ by the render scale;
+        // the map rect lives in backbuffer pixels.
+        const hit = this.minimap.worldXYFromPixel(
+          e.offsetX * (canvas.width / canvas.clientWidth),
+          e.offsetY * (canvas.height / canvas.clientHeight),
+          this.scene);
+        if (hit) {
+          this.camera.position[0] = hit[0];
+          this.camera.position[1] = hit[1];
+          this.camera.constrain();
+          return;
+        }
+        // Clicking off the map is done with it: back to the corner, flying.
+        this.setMinimapMode("corner");
+        return;
+      }
+      if (!this.captured) this._requestCapture();
     }, { signal });
 
     document.addEventListener("pointerlockchange", () => {
@@ -383,7 +403,7 @@ class Viewer {
       if (now - (this._lockLostAt ?? -1e9) < 400) return;
       if (now - (this._lastEscapeAt ?? -1e9) < 350) return;
       this._lastEscapeAt = now;
-      if (this.ui.isOpen) this.ui.back();
+      if (this.ui.isOpen) this.ui.back(false);
       else this.pause();
       return;
     }
@@ -396,7 +416,7 @@ class Viewer {
           this._tabRelease = true;
           document.exitPointerLock();
         } else {
-          this.canvas.requestPointerLock();
+          this._requestCapture();
         }
         return;
       case "f": this.toggleFullscreen(); return;
@@ -435,12 +455,25 @@ class Viewer {
     this._syncChrome();
   }
 
-  resume() {
+  /**
+   * Ask for the pointer once, quietly. Chromium returns a promise that
+   * rejects inside the post-Escape cooldown; the pointerlockerror listener
+   * already tells the user what to do, so the rejection itself is noise.
+   */
+  _requestCapture() {
+    const p = this.canvas.requestPointerLock?.();
+    if (p?.catch) p.catch(() => {});
+  }
+
+  resume({ capture = true } = {}) {
     this.ui.close();
     this.paused = false;
+    // A fullscreen map under a re-taken pointer is a screen you can't leave.
+    if (this.minimapMode === "full") this.minimapMode = "corner";
     this._lastTime = performance.now();
     this._syncChrome();
-    this.canvas.requestPointerLock();
+    if (capture) this._requestCapture();
+    else this.ui.say("Click the view to take the mouse.", 2);
   }
 
   setSun({ azimuth, elevation, zenith }) {
@@ -480,8 +513,26 @@ class Viewer {
           : "There is no minimap for this field.", 5);
       return;
     }
-    this.minimapEnabled = !this.minimapEnabled;
-    this.ui.say(`Minimap ${this.minimapEnabled ? "on" : "off"}.`);
+    const order = ["corner", "full", "off"];
+    this.setMinimapMode(order[(order.indexOf(this.minimapMode) + 1) % 3]);
+  }
+
+  setMinimapMode(mode) {
+    const wasFull = this.minimapMode === "full";
+    this.minimapMode = mode;
+    if (mode === "full") {
+      // The map needs a visible cursor to be clickable.
+      if (this.captured) {
+        this._tabRelease = true;
+        document.exitPointerLock();
+      }
+      this.ui.say("Minimap fullscreen — click to travel, M to dismiss.", 4);
+    } else {
+      this.ui.say(`Minimap ${mode === "corner" ? "on" : "off"}.`);
+      if (wasFull && !this.paused && !this.ui.isOpen && !this.captured) {
+        this._requestCapture();
+      }
+    }
   }
 
   toggleBird() {
@@ -695,7 +746,7 @@ class Viewer {
       overlays.push((enc, view, format) =>
         this.bird.encodePass(enc, view, format, size));
     }
-    if (this.minimap && this.minimapEnabled) {
+    if (this.minimap && this.minimapMode !== "off") {
       this.minimap.update({
         ...pose,
         relativePosition: () => worldToRelative(
@@ -775,7 +826,7 @@ class Viewer {
       stillOverlays.push((enc, view, format) =>
         this.bird.encodePass(enc, view, format, size));
     }
-    if (overlays && this.minimap && this.minimapEnabled) {
+    if (overlays && this.minimap && this.minimapMode !== "off") {
       this.minimap.update(this.camera, this.scene, size);
       stillOverlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
@@ -989,8 +1040,9 @@ class Viewer {
       overlays.push((enc, view, format) =>
         this.bird.encodePass(enc, view, format, [outW, outH]));
     }
-    if (this.minimap && this.minimapEnabled) {
-      this.minimap.update(this.camera, this.scene, [outW, outH]);
+    if (this.minimap && this.minimapMode !== "off") {
+      this.minimap.update(this.camera, this.scene, [outW, outH],
+                          this.minimapMode === "full");
       overlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
     }
@@ -1035,7 +1087,7 @@ class Viewer {
       fps: this._fps, frameMs: this._frameMs, camera: this.camera,
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
       frame: this.frameIndex,
-      minimap: Boolean(this.minimap && this.minimapEnabled),
+      minimap: Boolean(this.minimap && this.minimapMode !== "off"),
       bird: Boolean(this.bird && this.birdEnabled),
       recording: this.recorder.recording,
       showSpeed: performance.now() / 1000 < this.camera.speedFlashUntil,
