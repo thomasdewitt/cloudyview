@@ -56,7 +56,10 @@ OCEAN_REALISM = 1.0
 OCEAN_MIP_BIAS = -0.5
 OCEAN_GLINT_STRENGTH = 0.85
 OCEAN_GLINT_ROUGHNESS = 0.28
-OCEAN_GLINT_ROUGHNESS_PER_LOD = 0.025
+# How much of the slope variance the normal-mip filter removed is drawn
+# stochastically per pixel per frame (lighting-loop iter_008). The remainder
+# stays as extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.
+OCEAN_SLOPE_DRAW_FRACTION = 0.5
 OCEAN_SKY_SHADOW_FLOOR = 0.75
 OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 

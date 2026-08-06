@@ -192,7 +192,7 @@ class ViewState:
     ocean_mip_bias: float = look.OCEAN_MIP_BIAS
     ocean_glint_strength: float = look.OCEAN_GLINT_STRENGTH
     ocean_glint_roughness: float = look.OCEAN_GLINT_ROUGHNESS
-    ocean_glint_roughness_per_lod: float = look.OCEAN_GLINT_ROUGHNESS_PER_LOD
+    ocean_slope_draw_fraction: float = look.OCEAN_SLOPE_DRAW_FRACTION
     ocean_haze_extinction_per_km: float = look.OCEAN_HAZE_EXTINCTION_PER_KM
     ocean_sky_shadow_floor: float = look.OCEAN_SKY_SHADOW_FLOOR
     cone_stencil_theta_deg: float = look.CONE_STENCIL_THETA_DEG
@@ -218,7 +218,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     _non_negative("aerial_perspective_strength", view.aerial_perspective_strength)
     _non_negative("ocean_glint_strength", view.ocean_glint_strength)
     _non_negative("ocean_glint_roughness", view.ocean_glint_roughness)
-    _non_negative("ocean_glint_roughness_per_lod", view.ocean_glint_roughness_per_lod)
+    _unit_interval("ocean_slope_draw_fraction", view.ocean_slope_draw_fraction)
     _non_negative("ocean_haze_extinction_per_km", view.ocean_haze_extinction_per_km)
     _lod_degrees("light_march_lod_degrees", view.light_march_lod_degrees)
     _lod_degrees("view_step_lod_degrees", view.view_step_lod_degrees)
@@ -273,7 +273,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[17] = (*disc, look.AERIAL_SCALE_HEIGHT_M)
     u[18] = (view.ocean_realism, view.ocean_mip_bias,
              view.ocean_glint_strength, view.ocean_glint_roughness)
-    u[19] = (view.ocean_glint_roughness_per_lod,
+    u[19] = (view.ocean_slope_draw_fraction,
              view.ocean_haze_extinction_per_km * 1e-3,
              view.ocean_sky_shadow_floor, 0.0)
     u[20] = (1.0 if state.periodic else 0.0,

@@ -84,7 +84,7 @@ struct Uniforms {
     // x = master gate (0 = exact legacy ocean shader), y = mip bias,
     // z = GGX glint strength, w = GGX base roughness
     ocean_realism_a: vec4<f32>,
-    // x = GGX roughness widening per normal LOD, y = ocean haze extinction
+    // x = ocean sub-pixel slope draw fraction, y = ocean haze extinction
     // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
     ocean_realism_b: vec4<f32>,
     // Row 20: periodic domain + distance LOD (2026-07-17 perf pass).
@@ -1125,6 +1125,67 @@ fn ggx_smith_g1(n_dot_x: f32, alpha_squared: f32) -> f32 {
     return (2.0 * n_dot_x) / (n_dot_x + root);
 }
 
+// Slope variance the FIF normal mip chain removes, level by level, measured
+// directly on the shipped tile (tools/export_web_assets.py, seed 20260717).
+// Entry k is mean(sx^2 + sy^2) at level 0 minus the same quantity at level k,
+// where s = n.xy / n.z. Level 0 is the resolved surface and removes nothing;
+// by level 6 the 512^2 tile is down to 8x8 texels and essentially the whole
+// 0.0908 RMS slope of this sea has been filtered out of the normal.
+//
+// This is what the microfacet lobe has to put back. It is a *variance*: it
+// adds to alpha^2, not to alpha (lighting-loop iter_008), and its total is a
+// property of the tile rather than a free parameter — 0.00825 in slope
+// variance is alpha 0.0908 of widening, no matter how many levels the mip
+// chain has.
+const FIF_SLOPE_VARIANCE_REMOVED = array<f32, 10>(
+    0.000000, 0.000449, 0.001407, 0.002788, 0.004635,
+    0.007078, 0.008090, 0.008211, 0.008242, 0.008249
+);
+
+// Interpolated the same way the normal itself is: linearly between the two
+// bracketing levels, so roughness and normal always describe the same surface.
+fn fif_slope_variance_removed(lod: f32) -> f32 {
+    let l0 = clamp(floor(lod), 0.0, 9.0);
+    let l1 = min(l0 + 1.0, 9.0);
+    let f = clamp(lod - l0, 0.0, 1.0);
+    return mix(FIF_SLOPE_VARIANCE_REMOVED[i32(l0)],
+               FIF_SLOPE_VARIANCE_REMOVED[i32(l1)], f);
+}
+
+// The removed variance is split between two estimators of the same thing.
+// `draw_fraction` of it is sampled stochastically (per-axis, hence the 0.5 —
+// the table is the total over both axes); the remainder stays analytic, as
+// extra width on the microfacet lobe. The endpoints are both exact: at 1 the
+// surface is fully sampled, at 0 the sun lobe is exactly as wide as the sea
+// it stands for and only the Fresnel/sky nonlinearity goes unresolved. In
+// between it is a pure noise-vs-nonlinearity dial with no bias either way.
+fn slope_jitter_sigma(lod: f32, draw_fraction: f32) -> f32 {
+    return sqrt(0.5 * clamp(draw_fraction, 0.0, 1.0)
+                * fif_slope_variance_removed(lod));
+}
+
+// Slope variance left for the lobe to carry.
+fn slope_lobe_variance(lod: f32, draw_fraction: f32) -> f32 {
+    return (1.0 - clamp(draw_fraction, 0.0, 1.0))
+           * fif_slope_variance_removed(lod);
+}
+
+// One draw from the sub-pixel slope distribution about a filtered normal.
+// Gaussian by Box-Muller, which is the right shape here: the slope of a
+// filtered Gaussian-ish wave field is Gaussian, and a Gaussian slope density
+// is what makes a sun glitter path an elongated ellipse rather than a disc.
+fn ocean_slope_sample(n: vec3<f32>, sigma: f32,
+                      seed: vec2<f32>) -> vec3<f32> {
+    if (sigma <= 0.0) {
+        return n;
+    }
+    let nz = max(n.z, 1e-4);
+    let radius = sigma * sqrt(-2.0 * log(max(seed.x, 1e-6)));
+    let phi = 6.283185307179586 * seed.y;
+    let slope = n.xy / nz + radius * vec2<f32>(cos(phi), sin(phi));
+    return normalize(vec3<f32>(slope, 1.0));
+}
+
 // One packed FIF normal mip level, sampled the witness way: the half-texel
 // offset is per-LEVEL (witness bilinear grid puts texel value i at gx = i),
 // so trilinear-in-LOD is done as two explicit level samples + mix +
@@ -1151,12 +1212,13 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 // (witness._ocean_shade_realism).
 fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                        sun_shadow: vec3<f32>, t_hit: f32,
-                       jit: f32) -> vec3<f32> {
+                       jit: f32, slope_seed: vec2<f32>,
+                       slope_jitter: f32) -> vec3<f32> {
     let ocean_realism = u.ocean_realism_a.x;
     let ocean_mip_bias = u.ocean_realism_a.y;
     let glint_strength = u.ocean_realism_a.z;
     let glint_roughness = u.ocean_realism_a.w;
-    let glint_roughness_per_lod = u.ocean_realism_b.x;
+    let slope_draw_fraction = u.ocean_realism_b.x;
     let haze_beta0 = u.ocean_realism_b.y;
     let sky_shadow_floor = u.ocean_realism_b.z;
 
@@ -1172,7 +1234,21 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     // continuous tuning range (witness does the same).
     lod = lod * ocean_realism;
 
-    let n = ocean_wave_normal_mipped(hit.xy, lod);
+    // The mip gives the footprint's MEAN normal. Every judge view's water is
+    // sub-pixel: at v7's near field one pixel covers ~30 m of a 0.2 m wave
+    // field, so the honest statement is not "this facet is flat" but "this
+    // pixel contains a slope distribution whose variance the filter removed".
+    // Evaluating the shading at the mean normal is wrong for exactly the
+    // reason the sea looks the way it does: Fresnel goes as (1 - n.v)^5 and
+    // the sky gradient is steep near the horizon, so at grazing incidence the
+    // radiance is strongly convex in slope and its mean is not the value at
+    // the mean. Draw the missing slope instead of averaging it away, the same
+    // move iter_003 made for the sun-march quadrature and iter_007 for the
+    // solar disc: one unbiased sample per pixel per frame, accumulated.
+    let n = ocean_slope_sample(ocean_wave_normal_mipped(hit.xy, lod),
+                               slope_jitter * slope_jitter_sigma(
+                                   lod, slope_draw_fraction),
+                               slope_seed);
 
     // Reflect the view direction around the filtered surface normal.
     let vdotn = dot(dir, n);
@@ -1212,8 +1288,16 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
+                // Base roughness is what lives BELOW the tile's own 0.2 m
+                // sampling — capillary ripple the FIF field never had — plus
+                // whatever share of the filtered-away variance the slope draw
+                // did not take. Variances add; roughnesses do not, which is
+                // what the old `roughness + per_lod * lod` ramp got wrong (it
+                // reached alpha 0.51 at the horizon for a sea whose entire
+                // RMS slope is 0.091).
                 let alpha = clamp(
-                    glint_roughness + glint_roughness_per_lod * lod,
+                    sqrt(glint_roughness * glint_roughness
+                         + slope_lobe_variance(lod, slope_draw_fraction)),
                     0.02, 0.75
                 );
                 let alpha_squared = alpha * alpha;
@@ -1271,11 +1355,13 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // arithmetic (witness._ocean_shade_dispatch).
 fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                         sun_shadow: vec3<f32>, t_hit: f32,
-                        jit: f32) -> vec3<f32> {
+                        jit: f32, slope_seed: vec2<f32>,
+                        slope_jitter: f32) -> vec3<f32> {
     if (u.ocean_realism_a.x == 0.0) {
         return ocean_shade(hit, dir, sun, sun_shadow, t_hit, jit);
     }
-    return ocean_shade_realism(hit, dir, sun, sun_shadow, t_hit, jit);
+    return ocean_shade_realism(hit, dir, sun, sun_shadow, t_hit, jit,
+                               slope_seed, slope_jitter);
 }
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
@@ -1413,6 +1499,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     );
     let penumbra_tan = SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
                        * jitter_on * jitter_scale;
+    // Independent stream for the ocean's sub-pixel slope draw (iter_008).
+    let ocean_slope_seed = hash22(
+        frag_pos.xy + vec2<f32>(u.sun_dir.w * 61.133, 17.907)
+    );
     // Independent stream for the forward pre-march's quadrature offset.
     let ahead_jitter = jitter_on * jitter_scale * hash12(
         frag_pos.xy + vec2<f32>(u.sun_dir.w * 13.577, 7.19)
@@ -1460,7 +1550,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                                 ocean_hit, dir, sun,
                                 sun_cone_dir(sun, sun_cone_seed,
                                              penumbra_tan),
-                                t_ocean, shadow_jitter);
+                                t_ocean, shadow_jitter,
+                                ocean_slope_seed,
+                                jitter_on * jitter_scale);
                 transmittance = 0.0;
                 break;
             }
@@ -1827,7 +1919,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         * ocean_shade_dispatch(
                             ocean_hit, dir, sun,
                             sun_cone_dir(sun, sun_cone_seed, penumbra_tan),
-                            t_ocean, shadow_jitter);
+                            t_ocean, shadow_jitter,
+                            ocean_slope_seed, jitter_on * jitter_scale);
             transmittance = 0.0;
         }
     }

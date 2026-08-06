@@ -79,7 +79,7 @@ export function packUniforms(state, view) {
     oceanMipBias = K.OCEAN_MIP_BIAS,
     oceanGlintStrength = K.OCEAN_GLINT_STRENGTH,
     oceanGlintRoughness = K.OCEAN_GLINT_ROUGHNESS,
-    oceanGlintRoughnessPerLod = K.OCEAN_GLINT_ROUGHNESS_PER_LOD,
+    oceanSlopeDrawFraction = K.OCEAN_SLOPE_DRAW_FRACTION,
     oceanHazeExtinctionPerKm = K.OCEAN_HAZE_EXTINCTION_PER_KM,
     oceanSkyShadowFloor = K.OCEAN_SKY_SHADOW_FLOOR,
     coneStencilThetaDeg = K.CONE_STENCIL_THETA_DEG,
@@ -169,7 +169,7 @@ export function packUniforms(state, view) {
        K.AERIAL_BETA_PER_KM * 1e-3);           // w: beta0 in m^-1
   row(17, spec.disc[0], spec.disc[1], spec.disc[2], K.AERIAL_SCALE_HEIGHT_M);
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
-  row(19, oceanGlintRoughnessPerLod, oceanHazeExtinctionPerKm * 1e-3,
+  row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm * 1e-3,
        oceanSkyShadowFloor, 0.0);
   row(20, periodic ? 1.0 : 0.0,
        Math.tan(lightMarchLodDegrees * DEG),
