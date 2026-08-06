@@ -285,11 +285,6 @@ async function showReel(demo, root) {
   reelShown = demo.id;
 }
 
-function formatBytes(n) {
-  if (!n) return "";
-  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`;
-}
-
 async function buildRail() {
   const root = await resolveDemosRoot();
   let index;
@@ -313,11 +308,9 @@ async function buildRail() {
     button.type = "button";
     button.disabled = capabilityFailed;
     button.innerHTML =
-      `<span class="name"></span><span class="field"></span>` +
-      `<span class="size"></span>`;
+      `<span class="name"></span><span class="field"></span>`;
     button.querySelector(".name").textContent = demo.title;
     button.querySelector(".field").textContent = demo.field ?? "";
-    button.querySelector(".size").textContent = formatBytes(demo.bytes);
     button.title = demo.description ?? "";
 
     const enter = () => {
