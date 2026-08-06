@@ -53,6 +53,15 @@ To generate reference images for render tests:
 uv run python tests/generate_references.py
 ```
 
+Two golden-image sets guard the renderers. `behold` covers the Mitsuba path
+tracer; `soar` covers the witness/soar WGSL renderer via the eight frozen
+judge views of the lighting loop, and so pins the browser's look too. The
+soar set must be baked on real GPU hardware — the generator refuses a
+software rasterizer rather than falling back to one, and the test skips when
+no usable adapter is present. Re-bake one set with `--target soar` or
+`--target behold`; see `tests/conftest.py` for the views and for how the
+tolerances were measured.
+
 ## Data Files
 
 Test data is stored in `data/`:
