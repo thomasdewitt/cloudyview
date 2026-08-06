@@ -12,7 +12,26 @@ import { packUniforms, sceneKey, keysEqual, renderTargetSize,
          motionAlphaForDt } from "./uniforms.js";
 import { guardAllocation } from "./gpu.js";
 
-const ACCUM_FORMAT = "rgba16float";
+// The march's output for one frame. Half precision is plenty for a single
+// sample: its round-off is ~0.03 8-bit levels and it is averaged away.
+const SAMPLE_FORMAT = "rgba16float";
+
+// The running mean. This one is a *feedback* buffer — this frame's output is
+// next frame's input — so its round-off does not average away, it integrates.
+// Measured on this box (NVIDIA/Vulkan), the f32 -> f16 render-target store
+// truncates toward zero rather than rounding to nearest: mean error -0.469
+// ulp, and the WebGPU spec does not pin the rounding mode, so no
+// implementation is obliged to do better. Fed back through
+// `prev*i/(i+1) + s/(i+1)` that half-ulp integrates into a systematic
+// darkening that grows with frame count (~10 8-bit levels by 1024 frames; see
+// the lighting journal, iter_012). Full precision removes it: an f32 store is
+// exact for a value the pass just computed in f32.
+//
+// rgba32float is renderable but NOT filterable in core WebGPU, which is why
+// the accumulate pass and the present pass below both read it with
+// textureLoad and declare `unfilterable-float`. Nothing here needs a
+// filtering sampler, so no optional feature is involved.
+const ACCUM_FORMAT = "rgba32float";
 
 const ACCUM_SHADER = `
 struct AccumUniforms {
@@ -45,8 +64,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 // Two present paths, matching the engine: an exact texel copy when the render
 // target is already the output size, and a bilinear upscale when it is not.
 //
+// The upscale is done by hand from four textureLoads rather than by a
+// filtering sampler, because its source is the rgba32float accumulator and
+// core WebGPU cannot filter that. Same taps, same weights, same result as the
+// hardware's bilinear; it just costs three extra loads on a pass that runs
+// once per frame.
+//
 // This pass is also the ONLY place a float value in this renderer becomes an
-// 8-bit one: the march writes rgba16float, accumulation averages rgba16float,
+// 8-bit one: the march writes float, accumulation averages float,
 // and the canvas is a plain (non-srgb) unorm8 swapchain, so the hardware
 // quantizes exactly what fs_main/fs_exact return. That makes it the one
 // correct place for the dither — see `DITHER_WGSL`, and see
@@ -106,7 +131,24 @@ fn dither_present(rgb: vec3<f32>, frag_xy: vec2<f32>) -> vec3<f32> {
 const PRESENT_SHADER = `
 ${DITHER_WGSL}
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
-@group(0) @binding(1) var src_samp: sampler;
+
+// Clamp-to-edge bilinear, by hand. Matches a linear sampler's texel space:
+// the texel centre of texel i is at (i + 0.5) / size.
+fn sample_bilinear(uv: vec2<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(src_tex, 0));
+    let p = uv * size - vec2<f32>(0.5);
+    let base = floor(p);
+    let f = p - base;
+    let hi = vec2<i32>(size) - vec2<i32>(1);
+    let i0 = clamp(vec2<i32>(base), vec2<i32>(0), hi);
+    let i1 = clamp(vec2<i32>(base) + vec2<i32>(1), vec2<i32>(0), hi);
+    let c00 = textureLoad(src_tex, vec2<i32>(i0.x, i0.y), 0).rgb;
+    let c10 = textureLoad(src_tex, vec2<i32>(i1.x, i0.y), 0).rgb;
+    let c01 = textureLoad(src_tex, vec2<i32>(i0.x, i1.y), 0).rgb;
+    let c11 = textureLoad(src_tex, vec2<i32>(i1.x, i1.y), 0).rgb;
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
 struct VOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -122,7 +164,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
 }
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let rgb = textureSampleLevel(src_tex, src_samp, in.uv, 0.0).rgb;
+    let rgb = sample_bilinear(in.uv);
     return vec4<f32>(dither_present(rgb, floor(in.position.xy)), 1.0);
 }
 @fragment
@@ -229,10 +271,6 @@ export class Renderer {
       addressModeU: "repeat", addressModeV: "repeat",
       magFilter: "linear", minFilter: "linear", mipmapFilter: "linear",
     });
-    this.blitSampler = device.createSampler({
-      magFilter: "linear", minFilter: "linear",
-    });
-
     this.rayLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
@@ -253,19 +291,34 @@ export class Renderer {
     });
     this.refreshBindGroup();
 
-    const texEntry = {
-      binding: 0, visibility: GPUShaderStage.FRAGMENT,
-      texture: { sampleType: "float", viewDimension: "2d" },
-    };
-    this.blitLayoutExact = device.createBindGroupLayout({
-      label: "present-exact", entries: [texEntry],
-    });
-    this.blitLayoutSampled = device.createBindGroupLayout({
-      label: "present-sampled",
-      entries: [texEntry, {
-        binding: 1, visibility: GPUShaderStage.FRAGMENT,
-        sampler: { type: "filtering" },
+    // One layout for both present entry points: a single unfilterable-float
+    // texture and no sampler. `unfilterable-float` is the weaker requirement,
+    // so it accepts the rgba16float sample target as well as the rgba32float
+    // accumulator, and neither entry point filters any more.
+    this.blitLayout = device.createBindGroupLayout({
+      label: "present",
+      entries: [{
+        binding: 0, visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
       }],
+    });
+    this.blitPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [this.blitLayout],
+    });
+
+    // Explicit, not `layout: "auto"`: auto would infer a filterable-float
+    // entry for prev_tex, and the rgba32float accumulator cannot satisfy it.
+    // WebGPU reports that asynchronously, so the symptom would be a black
+    // canvas and one console line.
+    this.accumLayout = device.createBindGroupLayout({
+      label: "accumulate",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d" } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
+      ],
     });
 
     const accumModule = device.createShaderModule({ code: ACCUM_SHADER });
@@ -273,7 +326,9 @@ export class Renderer {
     this.presentModule = presentModule;
     this._shaderModules = [accumModule, presentModule];
     this.accumPipeline = device.createRenderPipeline({
-      layout: "auto",
+      layout: device.createPipelineLayout({
+        bindGroupLayouts: [this.accumLayout],
+      }),
       vertex: { module: accumModule, entryPoint: "vs_main" },
       fragment: { module: accumModule, entryPoint: "fs_main",
                   targets: [{ format: ACCUM_FORMAT }] },
@@ -311,7 +366,7 @@ export class Renderer {
     this.device.pushErrorScope("validation");
     // The march only ever targets the float intermediate now; everything
     // reaches the canvas through the (dithering) present pass.
-    this._rayPipeline(ACCUM_FORMAT);
+    this._rayPipeline(SAMPLE_FORMAT);
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
     const error = await this.device.popErrorScope();
@@ -453,13 +508,12 @@ export class Renderer {
    * The present pass, in two flavours: an exact texel copy when the render
    * target is already the output size, and a bilinear upscale when it is not.
    *
-   * Both layouts are declared explicitly rather than left to `layout: "auto"`.
-   * Auto derives the layout from the bindings an entry point actually USES,
-   * and fs_exact never touches the sampler — so an auto layout would omit
-   * binding 1, a bind group offering it would fail validation, and because
-   * WebGPU reports validation asynchronously the only symptom is a black
-   * canvas and a console line. That is precisely the failure this build is
-   * supposed not to have.
+   * Both share one explicit layout — one unfilterable-float texture, no
+   * sampler. Explicit rather than `layout: "auto"` because auto derives the
+   * layout from the bindings an entry point actually uses and infers
+   * filterable float for a plain `texture_2d<f32>`, which the rgba32float
+   * accumulator cannot satisfy; WebGPU reports that asynchronously, so the
+   * only symptom would be a black canvas and a console line.
    */
   _blitPipeline(targetFormat, exact) {
     const key = `${targetFormat}|${exact}`;
@@ -467,10 +521,7 @@ export class Renderer {
     if (!pipeline) {
       pipeline = this.device.createRenderPipeline({
         label: `present(${key})`,
-        layout: this.device.createPipelineLayout({
-          bindGroupLayouts: [exact ? this.blitLayoutExact
-                                   : this.blitLayoutSampled],
-        }),
+        layout: this.blitPipelineLayout,
         vertex: { module: this.presentModule, entryPoint: "vs_main" },
         fragment: { module: this.presentModule,
                     entryPoint: exact ? "fs_exact" : "fs_main",
@@ -496,18 +547,20 @@ export class Renderer {
       t?.destroy();
     }
     this._lastPresented = null;   // it pointed into what we just destroyed
-    const bytes = w * h * 8 * 3;
-    const make = (label) => this.device.createTexture({
-      label, size: [w, h], format: ACCUM_FORMAT,
+    // 8 bytes for the half-precision sample target, 16 each for the two
+    // full-precision accumulators.
+    const bytes = w * h * (8 + 16 + 16);
+    const make = (label, format) => this.device.createTexture({
+      label, size: [w, h], format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
            | GPUTextureUsage.COPY_SRC,
     });
     this._targets = await guardAllocation(
       this.device, `${w}x${h} render targets`, bytes, () => ({
         w, h,
-        sample: make("soar-sample"),
-        accumA: make("soar-accum-a"),
-        accumB: make("soar-accum-b"),
+        sample: make("soar-sample", SAMPLE_FORMAT),
+        accumA: make("soar-accum-a", ACCUM_FORMAT),
+        accumB: make("soar-accum-b", ACCUM_FORMAT),
       }));
     this._resetAccumulation();
     return this._targets;
@@ -653,7 +706,7 @@ export class Renderer {
       // encode point.
       const exact = renderSize[0] === outputW && renderSize[1] === outputH;
       const p = pass(targets.sample.createView());
-      p.setPipeline(this._rayPipeline(ACCUM_FORMAT));
+      p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
       p.setBindGroup(0, this.rayBindGroup);
       p.draw(3);
       p.end();
@@ -668,7 +721,7 @@ export class Renderer {
       [plan.prevWeight, plan.sampleWeight, 0, 0]));
 
     let p = pass(targets.sample.createView());
-    p.setPipeline(this._rayPipeline(ACCUM_FORMAT));
+    p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
     p.setBindGroup(0, this.rayBindGroup);
     p.draw(3);
     p.end();
@@ -678,7 +731,7 @@ export class Renderer {
     p = pass(outTex.createView());
     p.setPipeline(this.accumPipeline);
     p.setBindGroup(0, this.device.createBindGroup({
-      layout: this.accumPipeline.getBindGroupLayout(0),
+      layout: this.accumLayout,
       entries: [
         { binding: 0, resource: { buffer: this.accumUniformBuf } },
         { binding: 1, resource: targets.sample.createView() },
@@ -706,7 +759,6 @@ export class Renderer {
    */
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact) {
     const entries = [{ binding: 0, resource: srcTex.createView() }];
-    if (!exact) entries.push({ binding: 1, resource: this.blitSampler });
     const p = encoder.beginRenderPass({
       colorAttachments: [{
         view: targetView, loadOp: "clear", storeOp: "store",
@@ -715,8 +767,7 @@ export class Renderer {
     });
     p.setPipeline(this._blitPipeline(targetFormat, exact));
     p.setBindGroup(0, this.device.createBindGroup({
-      layout: exact ? this.blitLayoutExact : this.blitLayoutSampled,
-      entries,
+      layout: this.blitLayout, entries,
     }));
     p.draw(3);
     p.end();

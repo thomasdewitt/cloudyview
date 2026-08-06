@@ -328,7 +328,15 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 """
 
-ACCUM_FORMAT = "rgba16float"
+# The march's own output for one frame: half precision is plenty for a single
+# sample (its round-off is ~0.03 8-bit levels, unbiased, and it averages away).
+SAMPLE_FORMAT = "rgba16float"
+# The running mean, which is a *feedback* loop: this frame's output is next
+# frame's input, so its round-off does not average away, it integrates. In
+# half precision the loop drifts systematically darker with frame count
+# (~10 levels from 1 to 1024 frames — see the journal, iter_012). Full
+# precision costs one texture's worth of bandwidth and removes it entirely.
+ACCUM_FORMAT = "rgba32float"
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
@@ -527,7 +535,7 @@ class SoarRenderer:
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
             vertex={"module": self._ray_module, "entry_point": "vs_main"},
             fragment={"module": self._ray_module, "entry_point": "fs_main",
-                      "targets": [{"format": ACCUM_FORMAT}]},
+                      "targets": [{"format": SAMPLE_FORMAT}]},
             primitive={"topology": "triangle-list"})
 
         self._accum_layout = d.create_bind_group_layout(entries=[
@@ -535,8 +543,13 @@ class SoarRenderer:
              "buffer": {"type": "uniform"}},
             {"binding": 1, "visibility": wgpu.ShaderStage.FRAGMENT,
              "texture": {"sample_type": "float", "view_dimension": "2d"}},
+            # The accumulator is rgba32float, which core WebGPU declares
+            # unfilterable. This pass only ever textureLoad()s it, so that is
+            # exactly right — and stating it here means a future sampled read
+            # fails validation loudly instead of silently needing a feature.
             {"binding": 2, "visibility": wgpu.ShaderStage.FRAGMENT,
-             "texture": {"sample_type": "float", "view_dimension": "2d"}},
+             "texture": {"sample_type": "unfilterable-float",
+                         "view_dimension": "2d"}},
         ])
         self._accum_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._accum_layout]),
@@ -552,10 +565,10 @@ class SoarRenderer:
         w, h = size
         usage = (wgpu.TextureUsage.RENDER_ATTACHMENT
                  | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC)
-        make = lambda: self.device.create_texture(
-            size=(w, h, 1), dimension="2d", format=ACCUM_FORMAT, usage=usage)
-        self._targets = {"size": size, "sample": make(),
-                         "accum": [make(), make()]}
+        make = lambda fmt: self.device.create_texture(
+            size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
+        self._targets = {"size": size, "sample": make(SAMPLE_FORMAT),
+                         "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)]}
         return self._targets
 
     def _ensure_bind_group(self):
@@ -589,8 +602,8 @@ class SoarRenderer:
         divergence from the browser.
 
         Returns (h, w, 3) float64 in [0, 1], already tone-mapped by the
-        shader. Read back from the rgba16float accumulator rather than an
-        8-bit blit, so nothing is quantised on the way out.
+        shader. Read back from the float accumulator rather than an 8-bit
+        blit, so nothing is quantised on the way out.
         """
         if frames < 1:
             raise ValueError(f"frames must be >= 1; got {frames}.")
@@ -647,7 +660,8 @@ class SoarRenderer:
     def _read_back(self, texture, w: int, h: int) -> np.ndarray:
         """copy_texture_to_buffer does enforce the 256-byte row rule."""
         wgpu = self.wgpu
-        bytes_per_texel = 8                       # rgba16float
+        dtype = {"rgba16float": np.float16, "rgba32float": np.float32}[ACCUM_FORMAT]
+        bytes_per_texel = 4 * np.dtype(dtype).itemsize
         row = math.ceil(w * bytes_per_texel / 256) * 256
         buf = self.device.create_buffer(
             size=row * h,
@@ -660,7 +674,8 @@ class SoarRenderer:
             (w, h, 1))
         self.device.queue.submit([enc.finish()])
         buf.map_sync(wgpu.MapMode.READ)
-        raw = np.frombuffer(bytearray(buf.read_mapped()), np.float16)
+        raw = np.frombuffer(bytearray(buf.read_mapped()), dtype)
         buf.unmap()
-        img = raw.reshape(h, row // 2)[:, :w * 4].reshape(h, w, 4)
+        img = raw.reshape(h, row // np.dtype(dtype).itemsize)[:, :w * 4]
+        img = img.reshape(h, w, 4)
         return np.ascontiguousarray(img[:, :, :3], dtype=np.float64)
