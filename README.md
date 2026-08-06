@@ -79,7 +79,7 @@ Notes:
 
 - Render functions return arrays and never write files; use `cv.save_image`
   or matplotlib for output.
-- `cv.witness(...)` uses the maintained numba CPU ray marcher.
+- `cv.witness(...)` drives soar's WGSL ray marcher through wgpu.
   `cv.behold(..., gpu=True)` selects Mitsuba's CUDA variant.
 - Library code raises exceptions and is quiet by default
   (`verbose=True` restores the CLI-style diagnostics).
@@ -293,7 +293,7 @@ behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth
 - `netCDF4>=1.5`: NetCDF4 file support
 ### Optional Dependencies
 
-- **For witness (volumetric rendering)**: `numba>=0.56`
+- **For witness (volumetric rendering)**: `wgpu>=0.30` and a GPU
 - **For behold (photorealistic rendering)**: `mitsuba>=3.0.0`, `drjit>=0.3.0`
 
 Install all optional dependencies:

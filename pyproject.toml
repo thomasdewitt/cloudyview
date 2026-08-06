@@ -30,7 +30,7 @@ dependencies = [
     "xarray>=0.18",
     "netCDF4>=1.5",
     "pyyaml>=5.4",
-    "numba>=0.57",
+    "wgpu>=0.30",
     "scaleinvariance>=0.10",
 ]
 

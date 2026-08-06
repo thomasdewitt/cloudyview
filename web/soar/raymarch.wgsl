@@ -117,6 +117,11 @@ struct Uniforms {
 // density, light, and view branches fold away completely.
 const PERIODIC_DOMAIN: bool = true;
 const NESTED: bool = false;
+// Off returns linear HDR radiance instead of a display-referred image, for
+// callers that want the physical quantity — render_nested(return_linear=True)
+// in Python. The browser always leaves this on: it is presenting to a canvas,
+// and this is the only place the encode may happen.
+const TONE_MAP: bool = true;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -1207,6 +1212,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             u.cloud_sun.w
         );
         col = col + transmittance * sky;
+    }
+    if (!TONE_MAP) {
+        return vec4<f32>(col, 1.0);
     }
     return vec4<f32>(tone_map(col, exposure, u.periodic.w), 1.0);
 }

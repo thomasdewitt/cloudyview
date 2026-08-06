@@ -62,14 +62,31 @@ Principles:
 
 ## Renderer strategy
 
-Two implementations of the *same* witness look:
+**One implementation.** `web/soar/raymarch.wgsl` is the renderer; everything
+else is a host that fills its uniform block and binds its textures. There are
+two hosts — JavaScript in the browser (`web/soar/renderer.js`) and Python via
+wgpu (`cloudyview/soar_host.py`) — and `witness.py` is a thin wrapper around
+the Python one.
 
-1. **numba CPU** (`witness.py`) — the golden reference. All look-tuning lands
-   here first. ~1300 lines, painstakingly tuned against real cloud photos.
-2. **WGSL (WebGPU)** — the interactive engine (`web/soar/raymarch.wgsl`),
-   ported function-by-function from the numba kernel. The numba
-   implementation is the mirror the shader is developed against — port +
-   verify, never re-tune from scratch.
+It was not always this way, and the reason for the change is worth keeping.
+There used to be a numba CPU kernel in `witness.py` described as "the golden
+reference", with the WGSL ported function-by-function from it. Two
+implementations of one look diverge: periodic domains and distance LOD landed
+in the shader and never came back to the CPU, so by 2026-08 `witness` could
+not render what soar renders, and the "reference" was the less capable of the
+two. The kernel was deleted rather than resynchronised (Thomas's call,
+2026-08-05: "it's best to have a single renderer core, and it's fine if we
+lose CPU portability"). It lives in git history if ever needed.
+
+What that costs: rendering needs a GPU. `witness --help` still does not.
+
+What pins it: `tests/test_uniform_parity.py` diffs the Python host's 368-byte
+uniform block against the browser's own `packUniforms` running under node,
+byte for byte. Since the shader is shared by construction, the uniform block
+and the texture upload are the only places a Python render can silently stop
+matching soar — so that is what the test covers. This replaces the parity
+tests deleted with the desktop app, which used the wgpu engine as their own
+reference and so could not have caught a drift.
 
 Why WGSL rather than evolving numba.cuda into the app engine: 3D-texture
 hardware trilinear sampling, no per-frame host↔GPU round trip, and the shader
