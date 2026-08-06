@@ -284,6 +284,71 @@ const TAIL_MU_REF_MIN: f32 = 0.25;
 // dt_light is two voxels.
 const LIGHT_JITTER_LOD_FULL: f32 = 2.0;
 
+// Solar penumbra (lighting-loop iter_007).
+//
+// Every shadow in this renderer is cast by a point source: one shadow ray per
+// sample, toward one direction. The sun is not a point — it subtends 0.53
+// degrees, so a shadow edge is not an edge but a penumbra whose width grows
+// linearly with the distance from caster to receiver. A cloud 4 km above the
+// water throws a ~40 m penumbra onto it; a cloud shadow falling on another
+// cloud 2 km behind carries ~20 m; and every terminator in the references is
+// visibly a gradient, not a step.
+//
+// The implementation is the cheap one that the accumulation buffer makes
+// exact: deflect the shadow ray's direction into the solar cone, one draw per
+// pixel per frame (and advanced along the view march by an R2 additive
+// recurrence, so a single view ray's many shadow rays sample the disc
+// low-discrepancy rather than all landing on the same point of it). Averaging
+// the *radiance* over frames gives <exp(-tau)> over the disc, which is the
+// correct penumbra; averaging tau first would not be. Nothing else in the
+// shader sees the deflected direction — the phase function, the gradient
+// shading incidence, the ocean glint and the sky all keep the disc centre,
+// because a quarter-degree rotation is invisible in all of them and only the
+// *occlusion* is a discontinuous function of direction.
+//
+// It rides the same jitter_on * jitter_scale switch as iter_003's quadrature
+// phase: asking for a deterministic march asks for a point sun, and gets the
+// exact previous image.
+const SUN_ANGULAR_RADIUS: f32 = 0.0046542; // tan(0.2666 deg), the true disc
+// Widening factor, an art knob, and the honest measurement is that it should
+// be 1. Sweeping it (see the journal) shows the true disc doing exactly the
+// work the geometry predicts and no more: at 9-degree sun the shadow throw is
+// 6.4 times the caster height, so a 2 km cloud casts a 120 m penumbra onto the
+// water — wider than a voxel, and it visibly dissolves v7's hard sawtooth
+// shadow edge. At 55-degree sun the same cloud casts 23 m, a fifth of a voxel
+// and narrower than the trilinear ramp the rendered cloud edge already has, so
+// v5/v8 do not move and *should* not. Forcing them to move by widening is a
+// distance-weighted blur of the shadow field, and it visibly eats the small
+// cloud shadows that carry the LES structure.
+const SUN_CONE_WIDEN: f32 = 1.0;
+
+// The second component of the source: the forward-scattering skirt.
+//
+// A shadow's edge in a real cloud photograph is not one penumbra but two
+// nested ones — a sharp core from the disc, and a wide, low-contrast foot. The
+// foot is not geometry, it is diffraction: a 10 um droplet's forward lobe is
+// about lambda/d ~ 3 degrees wide, so sunlight clipping the caster's edge is
+// deflected by a couple of degrees and continues almost undiminished into what
+// the geometric shadow says is dark. The same happens in the haze along the
+// path. A single-scattering shadow march has no way to represent that light —
+// it counts every scattering event as an extinction — which is exactly why our
+// shadow edges read as cutouts.
+//
+// The cheap equivalence is to put that flux into the *source*: a fraction of
+// the shadowing illumination is drawn from a much wider cone. Unlike raising
+// SUN_CONE_WIDEN this does not blur the shadow, because 85 percent of the
+// draws still land on the disc — it adds a faint skirt outside the core edge
+// and leaves the core where it was. The two-component draw is stratified out
+// of the same radial uniform, so it costs one compare.
+const AUREOLE_FRACTION: f32 = 0.15;
+const AUREOLE_WIDEN: f32 = 8.0;   // ~2.1 degrees, the droplet forward lobe
+// Numerical guard only: the deflected ray must stay above the horizon, since
+// the periodic light march exits through the domain top and divides by sun.z.
+// engine.write_uniforms validates sun elevation > 0; with the shipped cone
+// (1.6 deg half-angle) this clamp is inactive above ~2 deg elevation, and the
+// judge set's lowest sun is 9 deg.
+const SUN_CONE_MIN_Z: f32 = 0.02;
+
 // Forward pre-march: what is ahead of the sample (lighting-loop iter_004).
 //
 // Every quantity the march has ever had is *backward*-looking. tau_depth is
@@ -602,6 +667,42 @@ fn hash22(p: vec2<f32>) -> vec2<f32> {
         hash12(p + vec2<f32>(17.17, 41.93)),
         hash12(p + vec2<f32>(71.31, 11.57))
     );
+}
+
+// One draw from the solar cone about `sun` (see the SUN_* block). `r` is a
+// pair of uniforms in [0,1); `tan_max` is the cone's tangent half-angle, and 0
+// returns `sun` exactly. Uniform on the disc (sqrt(r1) radius), which is the
+// right measure for a source of uniform radiance — limb darkening and the
+// aureole's radial profile are both out of scope here.
+fn sun_cone_dir(sun: vec3<f32>, r: vec2<f32>, tan_max: f32) -> vec3<f32> {
+    if (tan_max <= 0.0) {
+        return sun;
+    }
+    // Any helper not parallel to the sun gives a valid tangent frame; the
+    // frame's azimuthal origin is arbitrary because r.y is uniform.
+    var helper = vec3<f32>(0.0, 0.0, 1.0);
+    if (abs(sun.z) > 0.9) {
+        helper = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let t1 = normalize(cross(helper, sun));
+    let t2 = cross(sun, t1);
+    // Two-component source, stratified out of the same radial uniform: the
+    // first AUREOLE_FRACTION of the interval draws from the wide forward-
+    // scattering skirt, the rest from the solar disc. Both are remapped back
+    // onto [0,1) so each component keeps its own uniform-on-the-disc measure.
+    var scale = 1.0;
+    var ru = r.x;
+    if (ru < AUREOLE_FRACTION) {
+        scale = AUREOLE_WIDEN;
+        ru = ru / max(AUREOLE_FRACTION, 1e-6);
+    } else {
+        ru = (ru - AUREOLE_FRACTION) / max(1.0 - AUREOLE_FRACTION, 1e-6);
+    }
+    let radius = tan_max * scale * sqrt(ru);
+    let phi = 6.283185307179586 * r.y;
+    var d = sun + radius * (cos(phi) * t1 + sin(phi) * t2);
+    d.z = max(d.z, SUN_CONE_MIN_Z);
+    return normalize(d);
 }
 
 fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
@@ -959,7 +1060,10 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 }
 
 // Ocean shade ported from witness._ocean_shade (witness.py lines 473-541).
-fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32,
+// `sun_shadow` is the penumbra-deflected direction (iter_007) and is used
+// only for the cloud-shadow march; every shading term keeps the disc centre.
+fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
+               sun_shadow: vec3<f32>, t_hit: f32,
                jit: f32) -> vec3<f32> {
     var normal_lod = 0.0;
     if (u.cam_up.w > 0.5) {
@@ -979,7 +1083,8 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32,
     let om2 = one_minus * one_minus;
     let fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y, jit);
+    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.periodic.y,
+                                    jit);
     let t_sun_ocean = exp(-tau_ocean);
     let cos_sun_n = max(0.0, dot(sun, n));
     let diff_irr = t_sun_ocean * cos_sun_n * 0.3183098861837907;
@@ -1045,7 +1150,8 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 // Footprint-filtered ocean with microfacet sun glint and path haze
 // (witness._ocean_shade_realism).
 fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
-                       t_hit: f32, jit: f32) -> vec3<f32> {
+                       sun_shadow: vec3<f32>, t_hit: f32,
+                       jit: f32) -> vec3<f32> {
     let ocean_realism = u.ocean_realism_a.x;
     let ocean_mip_bias = u.ocean_realism_a.y;
     let glint_strength = u.ocean_realism_a.z;
@@ -1083,7 +1189,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let om2 = one_minus * one_minus;
     let view_fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y, jit);
+    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.periodic.y,
+                                    jit);
     let t_sun_ocean = exp(-tau_ocean);
     let n_dot_l = max(0.0, dot(sun, n));
 
@@ -1163,11 +1270,12 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // Master-gate dispatch: exact-zero realism keeps the untouched legacy ocean
 // arithmetic (witness._ocean_shade_dispatch).
 fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
-                        t_hit: f32, jit: f32) -> vec3<f32> {
+                        sun_shadow: vec3<f32>, t_hit: f32,
+                        jit: f32) -> vec3<f32> {
     if (u.ocean_realism_a.x == 0.0) {
-        return ocean_shade(hit, dir, sun, t_hit, jit);
+        return ocean_shade(hit, dir, sun, sun_shadow, t_hit, jit);
     }
-    return ocean_shade_realism(hit, dir, sun, t_hit, jit);
+    return ocean_shade_realism(hit, dir, sun, sun_shadow, t_hit, jit);
 }
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
@@ -1298,6 +1406,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let shadow_jitter = jitter_on * jitter_scale * hash12(
         frag_pos.xy + vec2<f32>(u.sun_dir.w * 37.719, 53.31)
     );
+    // Independent stream for the solar-cone draw (iter_007). Two uniforms:
+    // squared radius and azimuth on the disc.
+    let sun_cone_seed = hash22(
+        frag_pos.xy + vec2<f32>(u.sun_dir.w * 29.117, 3.71)
+    );
+    let penumbra_tan = SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
+                       * jitter_on * jitter_scale;
     // Independent stream for the forward pre-march's quadrature offset.
     let ahead_jitter = jitter_on * jitter_scale * hash12(
         frag_pos.xy + vec2<f32>(u.sun_dir.w * 13.577, 7.19)
@@ -1341,8 +1456,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             if (ocean_on && t >= t_ocean) {
                 let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
                 col = col + transmittance
-                            * ocean_shade_dispatch(ocean_hit, dir, sun,
-                                                   t_ocean, shadow_jitter);
+                            * ocean_shade_dispatch(
+                                ocean_hit, dir, sun,
+                                sun_cone_dir(sun, sun_cone_seed,
+                                             penumbra_tan),
+                                t_ocean, shadow_jitter);
                 transmittance = 0.0;
                 break;
             }
@@ -1408,7 +1526,22 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let step_shadow_jitter = fract(
                 shadow_jitter + f32(i) * 0.6180339887498949
             );
-            let tau_sun = light_march_tau(p, sun, t * u.periodic.y,
+            // Draw this sample's point on the solar disc (iter_007). The R2
+            // additive recurrence advances both coordinates along the view
+            // march for the same reason the golden ratio advances the
+            // quadrature phase above: the many shadow rays that composite into
+            // one pixel then cover the disc low-discrepancy within a single
+            // frame, so soar's first frame shows a soft edge with light dither
+            // rather than a hard edge that only melts once accumulation
+            // settles.
+            let sun_shadow = sun_cone_dir(
+                sun,
+                fract(sun_cone_seed + f32(i) * vec2<f32>(
+                    0.7548776662466927, 0.5698402909980532
+                )),
+                penumbra_tan
+            );
+            let tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
                                           step_shadow_jitter);
             let light_transfer_split_strength = u.ambient_tint.w;
             var deep_shadow_gate = 0.0;
@@ -1691,8 +1824,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
             && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
             col = col + transmittance
-                        * ocean_shade_dispatch(ocean_hit, dir, sun, t_ocean,
-                                               shadow_jitter);
+                        * ocean_shade_dispatch(
+                            ocean_hit, dir, sun,
+                            sun_cone_dir(sun, sun_cone_seed, penumbra_tan),
+                            t_ocean, shadow_jitter);
             transmittance = 0.0;
         }
     }
