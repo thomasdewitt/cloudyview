@@ -415,11 +415,14 @@ const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
 // view march ends where camera->sample clear-air transmittance (the aerial
 // perspective exponential atmosphere, rows 16-17) drops to ~2percent — beyond
 // that a cloud sample is invisible through the haze — with an absolute
-// ceiling of 2 full horizontal domain wraps so rays above the haze (where
-// the transmittance cap diverges) still terminate. The far repeats remain
-// visible inside those wraps by design.
+// range ceiling so rays above the haze (where the transmittance cap
+// diverges) still terminate. The ceiling is a distance, not a wrap count:
+// a wrap count made the tiling end visibly early on small domains, and the
+// eye judges range in meters of haze and horizon, not in domain widths.
+// 400 km is past the Earth-curvature horizon from any sane camera altitude,
+// and the angular view-step LOD reaches it in O(log) steps.
 const PERIODIC_AIR_TAU_CUTOFF: f32 = 3.912023005428146; // -ln(0.02)
-const PERIODIC_MAX_WRAPS: f32 = 2.0;
+const PERIODIC_MAX_RANGE_M: f32 = 4.0e5;
 // Extra step headroom for the (much longer) periodic view march; the
 // non-periodic path keeps MAX_VIEW_STEPS exactly.
 const MAX_VIEW_STEPS_PERIODIC: i32 = 4096;
@@ -1056,15 +1059,14 @@ fn premarch_tau_ahead(origin: vec3<f32>, dir: vec3<f32>,
 // exponential-atmosphere transmittance the in-march aerial perspective uses:
 //   tau(t) = beta0 * (H / mu) * (exp(-z0/H) - exp(-z1/H)),  z1 = z0 + mu * t
 // solved for tau = PERIODIC_AIR_TAU_CUTOFF / strength (i.e. air_t ~ 2%),
-// plus the PERIODIC_MAX_WRAPS horizontal-travel ceiling. With the aerial
-// machinery disabled (strength == 0) only the wrap ceiling applies — far
+// plus the PERIODIC_MAX_RANGE_M horizontal-travel ceiling. With the aerial
+// machinery disabled (strength == 0) only the range ceiling applies — far
 // repeats then stay crisp but the march still terminates.
 fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
     var cap = 3.4e38;
     let h_len = length(dir.xy);
     if (h_len > 1e-8) {
-        let extent = u.bmax.xyz - u.bmin.xyz;
-        cap = PERIODIC_MAX_WRAPS * max(extent.x, extent.y) / h_len;
+        cap = PERIODIC_MAX_RANGE_M / h_len;
     }
     let aerial_strength = u.sky_horizon.w;
     if (aerial_strength > 0.0) {

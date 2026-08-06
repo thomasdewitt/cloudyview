@@ -14,7 +14,7 @@
 
 import {
   AERIAL_PERSPECTIVE_STRENGTH, AERIAL_BETA_PER_KM, AERIAL_SCALE_HEIGHT_M,
-  PERIODIC_AIR_TAU_CUTOFF, PERIODIC_MAX_WRAPS,
+  PERIODIC_AIR_TAU_CUTOFF, PERIODIC_MAX_RANGE_M,
 } from "./constants.js";
 
 /** io.NEST_OVERHANG_FRACTION — 1% of the parent span, per axis. */
@@ -195,8 +195,8 @@ export function domainExtent(x, y, z) {
 
 /**
  * How far a periodic march can usefully go before clear-air extinction (or
- * two domain wraps) makes further samples invisible. Mirror of the shader's
- * own cap, and of engine.periodic_march_cap_m.
+ * the absolute range ceiling) makes further samples invisible. Mirror of
+ * the shader's own cap.
  */
 export function periodicMarchCapM(
   camZ, direction, bmin, bmax,
@@ -205,8 +205,7 @@ export function periodicMarchCapM(
   let cap = Infinity;
   const hLen = Math.hypot(direction[0], direction[1]);
   if (hLen > 1e-8) {
-    cap = PERIODIC_MAX_WRAPS *
-      Math.max(bmax[0] - bmin[0], bmax[1] - bmin[1]) / hLen;
+    cap = PERIODIC_MAX_RANGE_M / hLen;
   }
   if (aerialPerspectiveStrength > 0.0) {
     const beta0 = AERIAL_BETA_PER_KM * 1e-3;
