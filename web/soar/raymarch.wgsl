@@ -193,6 +193,43 @@ const SKY_PROBE_STEPS: i32 = 15;      // 100 m quadrature at full span
 // The deepest limit of the skylight-split fill: at T_sky -> 0 the shadow
 // skylight keeps this fraction, so saturated shadow still does not go black.
 const SKY_PROBE_FILL_FLOOR: f32 = 0.34;
+
+// Isotropic-tail diffusion depth (lighting-loop iter_002).
+//
+// The MS cascade's octave k illuminates with exp(-MS_ATTEN^k * tau_sun). With
+// MS_ATTEN = 0.4 that is exp(-0.010 * tau_sun) by octave 5 and exp(-0.026 *
+// tau_sun) by octave 4: constants for any tau_sun a cloud can produce. Those
+// octaves are therefore applied orientation-blind and depth-blind, and they
+// are not small - ablation on v6 (drop octaves 1-5) takes the sunlit cloud
+// from mean 197 to 159, so the tail is roughly a fifth of a lit core's
+// brightness, delivered as a flat pedestal. That pedestal is what turns
+// sunlit cauliflower into paste: the turret tops and the crevices between
+// them differ by tens of optical depths to the sun, octaves 0-1 have already
+// died in both, and everything that remains is the same number.
+//
+// The tail is diffuse light that arrived by many scatterings from the
+// illuminated part of the cloud, so what should set its magnitude is the
+// diffusion depth to that illuminated region - which is the same two-stream
+// slab transmittance iter_001 introduced, evaluated on the sun path:
+//
+//     T_d = 1 / (1 + 0.75 * (1 - g) * tau_sun)
+//
+// Unlike exp(-MS_ATTEN^k * tau_sun) this still discriminates at tau_sun = 40,
+// and unlike exp(-tau_sun) it does not collapse by tau_sun = 5, so it fills
+// exactly the range the cascade leaves flat. A lit face (tau_sun ~ 0) is
+// unchanged; a crevice shadowed by the next turret darkens smoothly.
+//
+// The floor is the fully buried limit, so a deep core keeps a tail rather
+// than going black - and it bounds how much this can compound with the
+// existing deep-shadow MS suppression.
+const MS_TAIL_FLOOR: f32 = 0.15;
+// Below this sun optical depth the tail is left exactly alone. A sample that
+// the sun still reaches nearly unattenuated is not sitting at the bottom of a
+// diffusion well, and dimming it would only cost brightness without buying
+// form; the knee is what turns this into a contrast change instead of an
+// exposure change, and it is why the thin-cloud regression views are
+// essentially untouched.
+const MS_TAIL_TAU_KNEE: f32 = 4.0;
 const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
 
 // Periodic-domain march caps. A tiled domain has no horizontal exit, so the
@@ -1136,6 +1173,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
             }
 
+            // Diffusion depth for the isotropic tail (see MS_TAIL_FLOOR).
+            // The knee is what keeps this a *contrast* change rather than a
+            // dimming: below it the factor is exactly 1, so thin cloud and
+            // the directly lit shoulder of a turret are bit-identical to
+            // iter_001 and only the genuinely self-shadowed parts move.
+            let ms_tail_factor = MS_TAIL_FLOOR + (1.0 - MS_TAIL_FLOOR)
+                * diffuse_transmittance(
+                    max(tau_sun - MS_TAIL_TAU_KNEE, 0.0), g_hg
+                );
+
             var ms = vec3<f32>(0.0);
             var ms_atten = 1.0;
             for (var octave: i32 = 0; octave < MS_OCTAVES; octave = octave + 1) {
@@ -1143,8 +1190,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 let blend = min(1.0, f32(octave) * MS_BLEND_RATE);
                 let oct_phase = phase * (1.0 - blend) + ISO_PHASE * blend;
                 var contrib = ms_atten * t_sun_ms * oct_phase;
+                let iso_gate = smoothstep(0.35, 1.0, blend);
+                // Octaves 0-1 still carry the beam and keep their exact
+                // baseline value; the tail is put on the diffusion depth in
+                // proportion to how isotropic it has already become, so the
+                // handover is continuous and nothing is double-counted.
+                contrib = contrib * mix(1.0, ms_tail_factor, iso_gate);
                 if (deep_shadow_ms_suppression > 0.0) {
-                    let iso_gate = smoothstep(0.35, 1.0, blend);
                     let ms_floor = max(
                         DEEP_SHADOW_MS_FLOOR,
                         1.0 - deep_shadow_ms_suppression
