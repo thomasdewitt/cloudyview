@@ -134,6 +134,9 @@ const POWDER_COEFF: f32 = 1.5;       // witness.py:63
 const AMBIENT_HEIGHT_FLOOR: f32 = 0.3; // witness.py:85
 const BOUNCE_STRENGTH: f32 = 0.05;   // witness.py:95
 const BOUNCE_TINT: vec3<f32> = vec3<f32>(1.0, 0.97, 0.92); // witness.py:96-98
+// Sunlit ground beyond the edge of this cloud's own shadow still bounces up
+// into its base (lighting-loop iter_005; see the use site).
+const BOUNCE_LATERAL_FLOOR: f32 = 0.25;
 const GRADIENT_SHADING_RADIUS_VOXELS: f32 = 1.0; // witness.py tuning block
 const GRADIENT_SHADING_COARSE_MIN_VOXELS: f32 = 4.0;
 const GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION: f32 = 0.125;
@@ -670,6 +673,45 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
 // the same saturated grey.
 fn diffuse_transmittance(tau: f32, g: f32) -> f32 {
     return 1.0 / (1.0 + 0.75 * (1.0 - g) * tau);
+}
+
+// Spectrum of the buried residual of the diffuse fills (lighting-loop
+// iter_005).
+//
+// Both diffuse fills are tinted with u.ambient_tint, which is the *clear-sky*
+// spectrum — strongly blue (legacy 0.19/0.225/0.30, B/R = 1.58). That is the
+// right colour for light which arrived at the sample straight from the sky,
+// and it is what the t_sky-proportional part of each fill is. It is the wrong
+// colour for the part that survives when t_sky -> 0.
+//
+// Both fills carry a floor (ambient_occlusion_floor, SKY_PROBE_FILL_FLOOR)
+// precisely because one vertical measurement cannot drive a deeply buried
+// sample black: light still gets in, but not from the sky overhead. It gets
+// in through the *sunlit* top and flanks and diffuses. Liquid-water droplets
+// scatter essentially neutrally across the visible, so many scatterings do
+// not blue that light further — it keeps the spectrum it entered with, which
+// is the direct beam's (u.cloud_sun, warm), softened toward white by the
+// sideways skylight mixed into it on the way.
+//
+// So the floor part of each fill gets this spectrum instead, at the same
+// luminance as the ambient tint it replaces. The change is a pure hue
+// rotation of the deepest shadow: level, contrast and structure are
+// untouched, and any sample the sun march still resolves (gate 0) keeps
+// u.ambient_tint exactly. This is what stops accumulated deep shadow from
+// converging on slate blue, which the references never do — real dark bases
+// hold a neutral-to-faintly-warm grey (ai07's storm base B/R 1.10, its
+// nearby dark cumulus 0.78) even where they are very dark.
+const DEEP_FILL_SUN_FRACTION: f32 = 0.25;
+const LUMA_WEIGHTS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+
+fn deep_fill_tint(ambient: vec3<f32>) -> vec3<f32> {
+    let sun_luma = max(dot(u.cloud_sun.xyz, LUMA_WEIGHTS), 1e-6);
+    let sun_chroma = u.cloud_sun.xyz / sun_luma;
+    // Luma-preserving by construction: both endpoints have unit luma, so the
+    // mix does too and the returned tint carries exactly the ambient tint's
+    // luminance. Only the chromaticity moves.
+    let chroma = mix(vec3<f32>(1.0), sun_chroma, DEEP_FILL_SUN_FRACTION);
+    return dot(ambient, LUMA_WEIGHTS) * chroma;
 }
 
 // Diffuse sky transmittance above p (see the SKY_PROBE_* block). `jit` is a
@@ -1238,6 +1280,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // vertical probe did not: the sine of the angle between the two.
     let ahead_novelty = sqrt(max(1.0 - dir.z * dir.z, 0.0));
 
+    // Spectrum of the buried residual of the diffuse fills — per frame, not
+    // per sample (it depends only on the two lighting spectra).
+    let deep_tint = deep_fill_tint(u.ambient_tint.xyz);
+
     // One coarse pass over the whole sightline before anything is composited.
     var tau_total = 0.0;
     if (t_near >= 0.0 && t_near < t_far) {
@@ -1463,25 +1509,32 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Ambient: height-based on the outer box (witness._render_image).
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
-            var amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
-                                          + (1.0 - AMBIENT_HEIGHT_FLOOR) * h);
-            if (ambient_occlusion_strength > 0.0) {
-                // The constant deep-shadow floor becomes the T_sky -> 0 limit
-                // of a measured factor: fully buried samples land on exactly
-                // ambient_occlusion_floor as before, and everything less
-                // buried lifts continuously toward unoccluded.
-                let amb_factor = mix(
-                    1.0,
-                    ambient_occlusion_floor
-                        + (1.0 - ambient_occlusion_floor) * t_sky,
-                    clamp(ambient_occlusion_strength, 0.0, 1.0)
-                        * deep_shadow_gate
-                );
-                amb = amb * amb_factor;
-            }
-            amb = amb * ahead_factor;
+            let amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
+                                          + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
+                      * ahead_factor;
+            // The constant deep-shadow floor becomes the T_sky -> 0 limit
+            // of a measured factor: fully buried samples land on exactly
+            // ambient_occlusion_floor as before, and everything less
+            // buried lifts continuously toward unoccluded.
+            //
+            //   amb_factor = (1 - s) + s*floor + s*(1 - floor)*t_sky
+            //
+            // written out rather than as a mix() because its three pieces do
+            // not share a spectrum. The first two are the fill a buried
+            // sample keeps; the third is the part measured to arrive from the
+            // sky. Summed, the weights are exactly the old amb_factor, so
+            // this is a spectral split at unchanged luminance.
+            let ao_s = select(
+                0.0,
+                clamp(ambient_occlusion_strength, 0.0, 1.0) * deep_shadow_gate,
+                ambient_occlusion_strength > 0.0
+            );
+            let amb_w_deep = ao_s * ambient_occlusion_floor;
+            let amb_w_sky = (1.0 - ao_s)
+                + ao_s * (1.0 - ambient_occlusion_floor) * t_sky;
             col = col + transmittance * d_tau * amb * air_t
-                        * u.ambient_tint.xyz;
+                        * (amb_w_sky * u.ambient_tint.xyz
+                           + amb_w_deep * deep_tint);
 
             // Light-transfer split, cool side: a skylight floor restored only
             // in saturated sun shadow; lit faces keep their contrast.
@@ -1489,18 +1542,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // Same measured visibility: this fill is skylight too, and it
                 // is the larger of the two diffuse terms, so leaving it flat
                 // would wash the structure back out.
-                let fill_factor = mix(
-                    1.0,
-                    SKY_PROBE_FILL_FLOOR
-                        + (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky,
-                    deep_shadow_gate
-                );
+                // Same spectral split as the ambient above: the floor part is
+                // sunlight that diffused in, the t_sky part is sky.
+                let fill_w_deep = deep_shadow_gate * SKY_PROBE_FILL_FLOOR;
+                let fill_w_sky = (1.0 - deep_shadow_gate)
+                    + deep_shadow_gate * (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky;
                 let sky_fill = light_transfer_split_strength
                     * LIGHT_TRANSFER_SHADOW_SKYLIGHT
                     * (AMBIENT_HEIGHT_FLOOR + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
-                    * deep_shadow_gate * fill_factor * ahead_factor;
+                    * deep_shadow_gate * ahead_factor;
                 col = col + transmittance * d_tau * sky_fill * air_t
-                            * u.ambient_tint.xyz;
+                            * (fill_w_sky * u.ambient_tint.xyz
+                               + fill_w_deep * deep_tint);
             }
 
             // Surface bounce is anchored at physical z=0, not the AABB floor.
@@ -1520,9 +1573,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // number everywhere across a base and the term composited
                 // as a flat pedestal over the whole frame. Faded in by the
                 // saturation gate, so thin cloud keeps its bounce exactly.
+                //
+                // A lateral floor (iter_001 flagged this as the one thing it
+                // would tune): the ground a base sample sees is a hemisphere,
+                // not a point, and a cloud shadow is finite. Beyond its edge
+                // is sunlit surface, and that light reaches the base without
+                // ever passing through the saturated column overhead — so the
+                // sunward attenuation must not run to zero. T(80) = 0.10 with
+                // no floor; the floor puts it back to a small but nonzero
+                // pedestal, and because BOUNCE_TINT is warm it restores
+                // warmth exactly at the cloud base, where the accumulated
+                // blue collected worst.
                 bounce = bounce * mix(
                     1.0,
-                    diffuse_transmittance(tau_sun, g_hg),
+                    max(diffuse_transmittance(tau_sun, g_hg),
+                        BOUNCE_LATERAL_FLOOR),
                     deep_shadow_gate
                 );
                 col = col + transmittance * d_tau * bounce * air_t
