@@ -6,16 +6,83 @@ import matplotlib.colors
 from typing import Optional, Tuple, Dict, Any
 
 
-def save_image(image: np.ndarray, output_path: str) -> None:
+def quantize_uint8(
+    image: np.ndarray,
+    dither: bool = True,
+    seed: Optional[int] = 0,
+) -> np.ndarray:
+    """Encode a float RGB image (values in [0, 1]) to 8-bit, with dither.
+
+    The renderers accumulate in float and their output is smooth: a sky
+    gradient, a stretch of open water, the flank of a cloud. Rounding such a
+    ramp to 8 bits draws its iso-contours — the quantization error is a
+    *deterministic* function of the value, so it is constant along a contour
+    and jumps by a level across it, which the eye reads as Mach banding. No
+    amount of renderer work removes that; it is made at the encode.
+
+    The cure is to decorrelate the error from the signal by adding ~1 LSB of
+    zero-mean noise before rounding (TPDF: the sum of two uniforms, which is
+    what makes the error's *variance* signal-independent as well as its mean,
+    so the ramp carries an even grain instead of a modulated one). The
+    amplitude is below perception on its own — the render's own Monte Carlo
+    grain is an order of magnitude larger — and the mean is preserved exactly,
+    so nothing about the image's brightness or look changes.
+
+    Two details that matter:
+
+    - The rounding is round-to-nearest, not the truncation this used to do.
+      Truncation is a uniform -0.5 LSB bias, i.e. every image the toolkit has
+      ever written was half a level dark; with a symmetric dither it would
+      also defeat the dither's zero mean.
+    - The dither tapers to zero within one level of the 0 and 255 rails, so a
+      clipped highlight or a true black stays exactly clipped rather than
+      picking up speckle. Clipping the dithered value instead would reintroduce
+      a bias exactly where there is no quantization error to hide.
+
+    Parameters
+    ----------
+    image : ndarray
+        Float image; values outside [0, 1] are clipped.
+    dither : bool, optional
+        Set False for a bit-exact, noise-free encode (still round-to-nearest).
+    seed : int or None, optional
+        Seed for the dither. Fixed by default so renders stay reproducible;
+        pass None to draw from OS entropy.
+
+    Returns
+    -------
+    ndarray of uint8, same shape as `image`.
+    """
+    # float32 throughout: 24 bits of mantissa over a 0..255 range is eight
+    # orders of magnitude more than an 8-bit encode can use, and it halves the
+    # cost of drawing one dither sample per subpixel.
+    v = np.clip(np.asarray(image, dtype=np.float32), 0.0, 1.0) * np.float32(255)
+    if dither:
+        rng = np.random.default_rng(seed)
+        tpdf = rng.random(v.shape, dtype=np.float32)
+        tpdf -= rng.random(v.shape, dtype=np.float32)
+        # Full amplitude everywhere except within one level of the rails,
+        # where a clipped highlight or a true black must stay exact.
+        v = v + tpdf * np.clip(np.minimum(v, np.float32(255) - v), 0.0, 1.0)
+    return np.clip(np.rint(v), 0.0, 255.0).astype(np.uint8)
+
+
+def save_image(
+    image: np.ndarray,
+    output_path: str,
+    dither: bool = True,
+    seed: Optional[int] = 0,
+) -> None:
     """Save a float RGB image (values in [0, 1]) as an 8-bit PNG.
 
     Companion to the library render functions (`cv.witness`, `cv.behold`),
-    which return arrays and never write files themselves.
+    which return arrays and never write files themselves. See
+    :func:`quantize_uint8` for the encode, which is dithered.
     """
     from PIL import Image as PILImage
 
-    img_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
-    PILImage.fromarray(img_uint8).save(str(output_path))
+    PILImage.fromarray(quantize_uint8(image, dither=dither, seed=seed)).save(
+        str(output_path))
 
 # Cloud color scheme for optical depth visualization
 sky_blue = '#3A4AA6'

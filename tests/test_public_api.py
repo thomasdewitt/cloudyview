@@ -287,3 +287,46 @@ def test_save_image_roundtrip(tmp_path):
     loaded = np.array(Image.open(out))
     assert loaded.shape == (4, 6, 3)
     assert loaded[..., 0].min() == 255 and loaded[..., 1].max() == 0
+
+
+# =============================================================================
+# cv.quantize_uint8 — the dithered 8-bit encode
+# =============================================================================
+
+def test_quantize_uint8_preserves_mean_and_kills_the_contours():
+    """A shallow ramp is the case the dither exists for.
+
+    Undithered, the rounding error is a deterministic function of the value,
+    so it is constant along an iso-contour and jumps a level across it — that
+    is the banding. Dithered, the error must be noise: zero mean, and no
+    structure left once the noise is averaged down.
+    """
+    h, w = 256, 512
+    ramp = np.linspace(0.30, 0.34, w)
+    img = np.repeat(ramp[None, :, None], h, axis=0).repeat(3, axis=2)
+    truth = img * 255.0
+
+    plain = cv.quantize_uint8(img, dither=False).astype(float)
+    dithered = cv.quantize_uint8(img).astype(float)
+
+    # Mean brightness is preserved to well under a hundredth of a level.
+    assert abs((dithered - truth).mean()) < 0.01
+    # Column-averaging kills white noise but not a contour; the dithered
+    # residual must land near the noise floor and far below the plain one.
+    col = lambda q: (q - truth).mean(axis=(0, 2)).std()  # noqa: E731
+    assert col(dithered) < 0.25 * col(plain)
+
+
+def test_quantize_uint8_leaves_the_rails_exact():
+    """A clipped highlight or a true black must not pick up dither speckle."""
+    img = np.zeros((32, 32, 3))
+    img[..., 0] = 1.0
+    img[..., 1] = 2.0      # over-range: clips to white
+    q = cv.quantize_uint8(img)
+    assert q[..., 0].min() == 255 and q[..., 1].min() == 255
+    assert q[..., 2].max() == 0
+
+
+def test_quantize_uint8_is_reproducible():
+    img = np.random.default_rng(3).random((16, 24, 3))
+    assert np.array_equal(cv.quantize_uint8(img), cv.quantize_uint8(img))

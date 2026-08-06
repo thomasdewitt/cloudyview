@@ -44,7 +44,67 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 // Two present paths, matching the engine: an exact texel copy when the render
 // target is already the output size, and a bilinear upscale when it is not.
+//
+// This pass is also the ONLY place a float value in this renderer becomes an
+// 8-bit one: the march writes rgba16float, accumulation averages rgba16float,
+// and the canvas is a plain (non-srgb) unorm8 swapchain, so the hardware
+// quantizes exactly what fs_main/fs_exact return. That makes it the one
+// correct place for the dither — see `DITHER_WGSL`, and see
+// cloudyview/basic_render.py's quantize_uint8 for witness's matching encode.
+// Anything dithered earlier would be averaged back out by accumulation.
+const DITHER_WGSL = `
+// TPDF dither, ~1 LSB, for the float -> unorm8 present.
+//
+// A smooth ramp (the low-sun sky above all, open water, a cloud flank)
+// quantizes to its own iso-contours, because the rounding error is a
+// deterministic function of the value: constant along a contour, jumping a
+// level across it. That is Mach banding, and it is made here, not in the
+// march. Adding zero-mean noise before the rounding decorrelates the error
+// from the signal; drawing it TPDF (sum of two uniforms) makes the error's
+// variance signal-independent too, so the ramp carries an even grain rather
+// than a grain that pulses with the contours.
+//
+// The pattern is a pure function of pixel position and does not advance with
+// time: it must be *static*, or the accumulated still would average it away
+// (restoring the bands) and a parked camera would shimmer.
+//
+// Near the 0 and 1 rails the dither tapers to nothing so a clipped highlight
+// or a true black stays exactly clipped. Clipping the dithered value instead
+// would bias exactly where there is no quantization error to hide.
+// Two independent uniforms per call, from pcg2d. The input here is an exact
+// integer pixel coordinate, and the usual float sine/fract hashes are lattice
+// sequences on integer input — measurably biased (the first version of this
+// cost 0.03 LSB of mean brightness). An integer bit-mix has no such structure.
+// The three channels are decorrelated by an offset in the input, so each
+// stream keeps its own mean of 0.5: a shared stream would tint the noise.
+fn dither_hash2(p: vec2<u32>) -> vec2<f32> {
+    var v = p * 1664525u + vec2<u32>(1013904223u);
+    v.x = v.x + v.y * 1664525u;
+    v.y = v.y + v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x = v.x + v.y * 1664525u;
+    v.y = v.y + v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return vec2<f32>(v) * (1.0 / 4294967296.0);
+}
+
+fn dither_present(rgb: vec3<f32>, frag_xy: vec2<f32>) -> vec3<f32> {
+    let lsb = 1.0 / 255.0;
+    let v = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let taper = clamp(min(v, vec3<f32>(1.0) - v) / lsb, vec3<f32>(0.0),
+                      vec3<f32>(1.0));
+    let p = vec2<u32>(frag_xy);
+    let hr = dither_hash2(p);
+    let hg = dither_hash2(p + vec2<u32>(17u, 23u));
+    let hb = dither_hash2(p + vec2<u32>(41u, 59u));
+    let tpdf = vec3<f32>(hr.x + hr.y, hg.x + hg.y, hb.x + hb.y)
+             - vec3<f32>(1.0);
+    return v + tpdf * lsb * taper;
+}
+`;
+
 const PRESENT_SHADER = `
+${DITHER_WGSL}
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_samp: sampler;
 struct VOut {
@@ -62,11 +122,13 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
 }
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(textureSampleLevel(src_tex, src_samp, in.uv, 0.0).rgb, 1.0);
+    let rgb = textureSampleLevel(src_tex, src_samp, in.uv, 0.0).rgb;
+    return vec4<f32>(dither_present(rgb, floor(in.position.xy)), 1.0);
 }
 @fragment
 fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    return vec4<f32>(textureLoad(src_tex, vec2<i32>(frag_pos.xy), 0).rgb, 1.0);
+    let rgb = textureLoad(src_tex, vec2<i32>(frag_pos.xy), 0).rgb;
+    return vec4<f32>(dither_present(rgb, floor(frag_pos.xy)), 1.0);
 }
 `;
 
@@ -247,8 +309,9 @@ export class Renderer {
     }
 
     this.device.pushErrorScope("validation");
+    // The march only ever targets the float intermediate now; everything
+    // reaches the canvas through the (dithering) present pass.
     this._rayPipeline(ACCUM_FORMAT);
-    this._rayPipeline(this.canvasFormat);
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
     const error = await this.device.popErrorScope();
@@ -582,23 +645,20 @@ export class Renderer {
     });
 
     if (!plan) {
-      // No accumulation: march straight at the output (through a scaled
-      // intermediate when the render size differs).
-      if (renderSize[0] === outputW && renderSize[1] === outputH) {
-        const p = pass(targetView);
-        p.setPipeline(this._rayPipeline(targetFormat));
-        p.setBindGroup(0, this.rayBindGroup);
-        p.draw(3);
-        p.end();
-      } else {
-        let p = pass(targets.sample.createView());
-        p.setPipeline(this._rayPipeline(ACCUM_FORMAT));
-        p.setBindGroup(0, this.rayBindGroup);
-        p.draw(3);
-        p.end();
-        this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
-                         false);
-      }
+      // No accumulation: march at a float intermediate and present from it.
+      // The march could target the canvas directly when the sizes match, and
+      // used to — but then the hardware would quantize the march's own output
+      // and this frame would be the one path in the renderer that skips the
+      // present pass's dither. One full-screen blit is cheaper than a second
+      // encode point.
+      const exact = renderSize[0] === outputW && renderSize[1] === outputH;
+      const p = pass(targets.sample.createView());
+      p.setPipeline(this._rayPipeline(ACCUM_FORMAT));
+      p.setBindGroup(0, this.rayBindGroup);
+      p.draw(3);
+      p.end();
+      this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
+                       exact);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
       this.device.queue.submit([encoder.finish()]);
       return;

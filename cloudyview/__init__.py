@@ -76,6 +76,12 @@ def save_image(*args, **kwargs):
     return import_module(".basic_render", __name__).save_image(*args, **kwargs)
 
 
+def quantize_uint8(*args, **kwargs):
+    """Lazily call :func:`cloudyview.basic_render.quantize_uint8`."""
+    return import_module(
+        ".basic_render", __name__).quantize_uint8(*args, **kwargs)
+
+
 class _CloudyViewModule(ModuleType):
     """Keep public lazy functions from being replaced by child modules.
 
@@ -100,4 +106,4 @@ __all__ = ["io", "basic_render", "optical_depth", "domain",
            "vertically_integrated_optical_depth",
            "DomainGeometry", "compute_domain_geometry",
            "CloudField", "load", "Camera",
-           "glimpse", "witness", "behold", "save_image"]
+           "glimpse", "witness", "behold", "save_image", "quantize_uint8"]
