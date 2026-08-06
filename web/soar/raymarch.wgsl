@@ -238,6 +238,46 @@ const MS_TAIL_TAU_KNEE: f32 = 4.0;
 // visible: the artifact needs dt to exceed roughly a voxel of structure, and
 // dt_light is two voxels.
 const LIGHT_JITTER_LOD_FULL: f32 = 2.0;
+
+// Forward pre-march: what is ahead of the sample (lighting-loop iter_004).
+//
+// Every quantity the march has ever had is *backward*-looking. tau_depth is
+// depth since the last cloud entry (and resets at every gap), transmittance
+// is what the ray has already crossed, the sun march looks toward the sun,
+// and iter_001's probe looks up. Nothing knows what lies beyond the sample
+// along the sightline — and because compositing kills everything past
+// tau_view ~ 6, the image of a cloud is formed entirely by a thin visible
+// skin. That skin therefore has no idea whether it is the skin of a tau-2
+// wisp or of a tau-300 anvil, and it is lit identically in both cases.
+//
+// Physically the difference is large and it is a *diffuse-illumination*
+// difference. The fills iter_001 measures (the AO'd ambient and the
+// shadow-skylight floor) are diffuse radiance arriving at the sample from the
+// hemisphere around it. iter_001 samples one direction of that hemisphere,
+// straight up. The other direction that matters for a visible sample is the
+// one the camera cannot see behind it: a skin sample on a wisp is within a
+// couple of mean free paths of open air in *both* directions, while the same
+// skin on a monolith is open only backward, toward the camera, and buried
+// forward. One coarse pre-march along the view ray measures exactly that.
+//
+// This is not iter_002's rejected hemispherical probe. That failed because it
+// spent a third of its cosine weight on near-horizontal directions chosen
+// blind, which in a horizontally extensive layer all report T ~ 0 and flatten
+// everything. Here the extra direction is not chosen: it is the sightline,
+// the one direction along which the renderer is already integrating, so the
+// structure it reports is registered with the silhouette the viewer is
+// looking at. That is why it produces a luminous fringe hugging every edge
+// and gap rather than a uniform veil.
+//
+// Weight and floor bound how far it may go: at AHEAD_FLOOR the buried limit
+// still keeps that fraction of the vertical probe's answer, so a deep body
+// darkens toward a floor rather than toward black.
+const AHEAD_STEP_SCALE: f32 = 4.0;   // pre-march dt = this x the view dt
+const AHEAD_MAX_STEPS: i32 = 192;
+const AHEAD_TAU_CAP: f32 = 60.0;     // T_d(60) = 0.036; past here it is floor
+const AHEAD_FLOOR: f32 = 0.30;
+const AHEAD_WEIGHT: f32 = 1.0;
+
 const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
 
 // Periodic-domain march caps. A tiled domain has no horizontal exit, so the
@@ -648,6 +688,35 @@ fn sky_probe_transmittance(p: vec3<f32>, g: f32, jit: f32) -> f32 {
         tau = tau + sample_sigma(p + vec3<f32>(0.0, 0.0, t)) * dt;
     }
     return diffuse_transmittance(tau, g);
+}
+
+// Total optical depth along the view ray (see the AHEAD_* block). One coarse
+// pass, run once per pixel before compositing starts, so the main march can
+// subtract what it has already crossed and know what is still ahead of it.
+//
+// Coarse on purpose: the consumer is a two-stream transmittance whose useful
+// dynamic range spans two decades of tau, so a 20 percent quadrature error is
+// invisible, and the same distance LOD the view march uses keeps far tiles
+// cheap. The tau cap ends it as soon as the answer can no longer matter, which
+// in the thick views it is meant for happens within a few hundred metres.
+fn premarch_tau_ahead(origin: vec3<f32>, dir: vec3<f32>,
+                      t0: f32, t1: f32, jit: f32) -> f32 {
+    var tau = 0.0;
+    let dt_base = u.bmin.w * AHEAD_STEP_SCALE;
+    var t = t0 + clamp(jit, 0.0, 1.0) * dt_base;
+    for (var i: i32 = 0; i < AHEAD_MAX_STEPS; i = i + 1) {
+        if (t >= t1 || tau > AHEAD_TAU_CAP) {
+            break;
+        }
+        let s = sample_level_at(origin + t * dir);
+        var dt = max(s.dt_view * AHEAD_STEP_SCALE, t * u.periodic.z);
+        if (t + dt > t1) {
+            dt = t1 - t;
+        }
+        tau = tau + s.sigma * dt;
+        t = t + dt;
+    }
+    return tau;
 }
 
 // Max view-march distance in a periodic domain. Closed-form inversion of the
@@ -1145,17 +1214,37 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let shadow_jitter = jitter_on * jitter_scale * hash12(
         frag_pos.xy + vec2<f32>(u.sun_dir.w * 37.719, 53.31)
     );
+    // Independent stream for the forward pre-march's quadrature offset.
+    let ahead_jitter = jitter_on * jitter_scale * hash12(
+        frag_pos.xy + vec2<f32>(u.sun_dir.w * 13.577, 7.19)
+    );
     let entry_dt = u.bmin.w;
     var t = t_near + jitter_on * jitter * jitter_scale * entry_dt;
 
     var transmittance = 1.0;
     var col = vec3<f32>(0.0);
     var tau_depth = 0.0;
+    // Optical depth this ray has already crossed, so the pre-march total can
+    // be turned into "what is still ahead of this sample". Unlike tau_depth
+    // this never resets: it is the ray's own coordinate along its chord.
+    var tau_view = 0.0;
 
     // The periodic march can legitimately cover several domain widths, so
     // it gets more step headroom; the non-periodic bound is untouched.
     let max_view_steps = select(MAX_VIEW_STEPS, MAX_VIEW_STEPS_PERIODIC,
                                 periodic_on);
+
+    // How much new hemisphere the sightline probe covers that iter_001's
+    // vertical probe did not: the sine of the angle between the two.
+    let ahead_novelty = sqrt(max(1.0 - dir.z * dir.z, 0.0));
+
+    // One coarse pass over the whole sightline before anything is composited.
+    var tau_total = 0.0;
+    if (t_near >= 0.0 && t_near < t_far) {
+        tau_total = premarch_tau_ahead(
+            u.cam_origin.xyz, dir, t_near, min(t_far, t_ocean), ahead_jitter
+        );
+    }
 
     if (t_near >= 0.0 && t_near < t_far) {
         for (var i: i32 = 0; i < max_view_steps; i = i + 1) {
@@ -1202,6 +1291,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
 
             tau_depth = tau_depth + d_tau;
+            tau_view = tau_view + d_tau;
 
             // Aerial perspective: clear-air transmittance camera->sample via
             // the closed-form exponential atmosphere (witness._render_image).
@@ -1335,6 +1425,42 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
             }
 
+            // Second probe direction, free from the pre-march: how much cloud
+            // lies beyond this sample along the sightline. A skin sample on a
+            // wisp is open both ways and keeps its full diffuse fill; the
+            // same skin on a deep mass is open only backward, toward the
+            // camera, and is a poor place for diffuse light to reach. This is
+            // the whole of the entry-face thick/thin distinction, and because
+            // the direction is the sightline the structure it reports is
+            // registered with the silhouette: a luminous fringe around every
+            // edge and gap, with the body behind it falling away.
+            //
+            // It multiplies the diffuse terms rather than feeding t_sky,
+            // deliberately. Both consumers of t_sky wrap it in a floor
+            // (ambient_occlusion_floor, SKY_PROBE_FILL_FLOOR) that exists so
+            // one vertical measurement cannot drive a sample to black; the
+            // forward measurement is independent evidence about a different
+            // part of the hemisphere and should not be spent inside another
+            // term's safety floor. It carries its own.
+            //
+            // Its weight is the sine of the angle between the two probe
+            // directions (ahead_novelty, hoisted out of the loop). A sightline
+            // pointing straight up is re-measuring what iter_001 already
+            // measured and must not be counted twice; an oblique or horizontal
+            // one is genuinely new information about the hemisphere. That is
+            // the whole of the two-direction quadrature: coincident samples
+            // collapse to one, orthogonal samples both count.
+            var ahead_factor = 1.0;
+            if (deep_shadow_gate > 0.0) {
+                let tau_ahead = max(tau_total - tau_view, 0.0);
+                let t_ahead = AHEAD_FLOOR + (1.0 - AHEAD_FLOOR)
+                    * diffuse_transmittance(tau_ahead, g_hg);
+                ahead_factor = mix(
+                    1.0, t_ahead,
+                    AHEAD_WEIGHT * ahead_novelty * deep_shadow_gate
+                );
+            }
+
             // Ambient: height-based on the outer box (witness._render_image).
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
             var amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
@@ -1353,6 +1479,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
                 amb = amb * amb_factor;
             }
+            amb = amb * ahead_factor;
             col = col + transmittance * d_tau * amb * air_t
                         * u.ambient_tint.xyz;
 
@@ -1371,7 +1498,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 let sky_fill = light_transfer_split_strength
                     * LIGHT_TRANSFER_SHADOW_SKYLIGHT
                     * (AMBIENT_HEIGHT_FLOOR + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
-                    * deep_shadow_gate * fill_factor;
+                    * deep_shadow_gate * fill_factor * ahead_factor;
                 col = col + transmittance * d_tau * sky_fill * air_t
                             * u.ambient_tint.xyz;
             }
