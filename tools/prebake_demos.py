@@ -1,0 +1,350 @@
+"""Bake the shippable demo set: GPU-ready volumes plus a preview video each.
+
+Two products per demo, both written to web/demos/<id>/:
+
+  volume.bin.gz + faces.bin + map.bin + meta.json
+      What the viewer uploads. Identical in layout to what
+      export_web_assets.py writes for the single demo, with the volume
+      gzipped — the texture is r16float either way, so the bytes on the wire
+      are exactly the bytes that reach the GPU, and deflate is HDF5/browser
+      builtin territory rather than a bespoke codec.
+
+  preview.mp4 + poster.jpg
+      A ground-level loop for the landing page. Rendered with witness, which
+      is the look soar is a port of.
+
+Seamless looping falls out of the renderer: these are periodic sims and the
+shader wraps the domain, so crossing exactly one domain width returns the
+camera to an identical scene. (This needed the array tiled 3x3 while witness
+was a numba kernel with no wrap of its own. It is not a kernel any more.)
+
+    uv run python tools/prebake_demos.py            # everything
+    uv run python tools/prebake_demos.py --only fif --seconds 2 --fps 5
+"""
+
+import argparse
+import gzip
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+from netCDF4 import Dataset
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import cloudyview as cv
+from cloudyview import optical_depth
+from cloudyview.cloudfield import CloudField
+from cloudyview.glimpse import glimpse
+from export_web_assets import _ghost_face_arrays, _volume_aabb
+
+REPO = Path(__file__).resolve().parents[1]
+SRC = REPO / "data" / "demos"
+OUT = REPO / "web" / "demos"
+
+# Crops come from measuring where the cloud actually is. Levels are trimmed
+# to the occupied range plus headroom; empty sky costs the same per voxel as
+# a cumulus tower and renders to nothing.
+DEMOS = [
+    dict(
+        id="twpice",
+        title="TWP-ICE, Darwin 2006",
+        field="Tropical deep convection",
+        description=(
+            "A large-eddy simulation of a monsoon-break squall line near "
+            "Darwin, Australia, from the TWP-ICE field campaign."
+        ),
+        liquid=("TWPICE_LPT_3D_QC_0000003450.nc", "QC"),
+        ice=("TWPICE_LPT_3D_QI_0000003450.nc", "QI"),
+        dims="yxz",
+        crop=dict(y=(0, 1024), x=(1024, 2048), z=(0, 206)),
+        scale=1.0,                       # already g/kg
+        sun=dict(azimuth=235.0, elevation=25.0),
+    ),
+    dict(
+        id="dycoms",
+        title="DYCOMS-II RF01",
+        field="Marine stratocumulus",
+        description=(
+            "The nocturnal stratocumulus deck off the California coast, "
+            "from the DYCOMS-II RF01 case."
+        ),
+        liquid=("DYCOMS_RF01_640x640x640_dt0.25sec_320_0000043200_W_QN.nc", "QN"),
+        ice=None,
+        dims="zyx",
+        crop=dict(y=(0, 640), x=(0, 640), z=(215, 355)),
+        scale=1.0,                       # units attribute says g/kg
+        sun=dict(azimuth=235.0, elevation=18.0),
+    ),
+    dict(
+        id="rce",
+        title="CM1 radiative–convective equilibrium",
+        field="Radiative–convective equilibrium",
+        description=(
+            "Scattered maritime convection in statistical equilibrium with "
+            "radiative cooling, from CM1."
+        ),
+        liquid=("CM1_RCE_small_les300_3D_allvars_hour1200.nc", "clw"),
+        ice=("CM1_RCE_small_les300_3D_allvars_hour1200.nc", "cli"),
+        dims="zyx",
+        crop=dict(y=(0, 540), x=(0, 540), z=(0, 88)),
+        scale=1e3,                       # g/g -> g/kg
+        sun=dict(azimuth=235.0, elevation=30.0),
+    ),
+    dict(
+        id="fif",
+        title="Fractionally integrated flux cascade",
+        field="Synthetic multifractal field",
+        description=(
+            "Not a simulation of anything — a multiplicative cascade with "
+            "the scaling statistics of real cloud water."
+        ),
+        liquid=("QC_FIF_Square_512,512,256.nc", "QC"),
+        ice=None,
+        dims="xyz",
+        crop=dict(y=(0, 512), x=(0, 512), z=(108, 170)),
+        scale=1.0,
+        sun=dict(azimuth=235.0, elevation=22.0),
+    ),
+]
+
+# --- loading ---------------------------------------------------------------
+
+def _read(path: Path, var: str, dims: str, crop: dict) -> np.ndarray:
+    """Read one variable, cropped, standardized to (x, y, z)."""
+    ys, xs, zs = crop["y"], crop["x"], crop["z"]
+    with Dataset(path) as ds:
+        v = ds.variables[var]
+        if dims == "yxz":
+            a = v[0, ys[0]:ys[1], xs[0]:xs[1], zs[0]:zs[1]]
+            a = np.moveaxis(np.asarray(a, np.float32), 0, 1)      # -> (x, y, z)
+        elif dims == "zyx":
+            a = v[0, zs[0]:zs[1], ys[0]:ys[1], xs[0]:xs[1]]
+            a = np.moveaxis(np.asarray(a, np.float32), 0, 2)      # -> (y, x, z)
+            a = np.moveaxis(a, 0, 1)                              # -> (x, y, z)
+        elif dims == "xyz":
+            a = np.asarray(v[xs[0]:xs[1], ys[0]:ys[1], zs[0]:zs[1]], np.float32)
+        else:
+            raise ValueError(f"unknown dim order {dims!r}")
+    return np.ascontiguousarray(a)
+
+
+def _coords(path: Path, crop: dict):
+    with Dataset(path) as ds:
+        x = np.asarray(ds.variables["x"][crop["x"][0]:crop["x"][1]], np.float64)
+        y = np.asarray(ds.variables["y"][crop["y"][0]:crop["y"][1]], np.float64)
+        z = np.asarray(ds.variables["z"][crop["z"][0]:crop["z"][1]], np.float64)
+    return x, y, z
+
+
+def load_demo(spec: dict) -> CloudField:
+    lwc = _read(SRC / spec["liquid"][0], spec["liquid"][1], spec["dims"], spec["crop"])
+    iwc = None
+    if spec["ice"]:
+        iwc = _read(SRC / spec["ice"][0], spec["ice"][1], spec["dims"], spec["crop"])
+    s = np.float32(spec["scale"])
+    if s != 1.0:
+        lwc *= s
+        if iwc is not None:
+            iwc *= s
+    x, y, z = _coords(SRC / spec["liquid"][0], spec["crop"])
+    return CloudField(lwc=lwc, iwc=iwc, x=x, y=y, z=z,
+                      source=str(SRC / spec["liquid"][0]),
+                      liquid_var=spec["liquid"][1],
+                      ice_var=spec["ice"][1] if spec["ice"] else None)
+
+
+# --- the shipped volume ----------------------------------------------------
+
+def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
+    sigma = optical_depth.compute_extinction_field(
+        field.lwc, field.z, re=10.0, iwc=field.iwc, re_ice=30.0)
+    sigma = np.ascontiguousarray(sigma, dtype=np.float16)
+    nx, ny, nz = sigma.shape
+
+    # Zero ghost border; the browser writes the periodic faces itself so that
+    # toggling periodic does not need another download.
+    padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float16)
+    padded[1:-1, 1:-1, 1:-1] = sigma
+    raw = padded.tobytes()
+    del padded
+    with gzip.open(out / "volume.bin.gz", "wb", compresslevel=6) as fh:
+        fh.write(raw)
+    gz_bytes = (out / "volume.bin.gz").stat().st_size
+    print(f"    volume.bin.gz {gz_bytes/1e6:7.1f} MB "
+          f"(from {len(raw)/1e6:.1f} MB, {len(raw)/gz_bytes:.1f}x)")
+
+    faces = _ghost_face_arrays(sigma)
+    blob = b"".join(np.ascontiguousarray(faces[n], dtype=np.float16).tobytes()
+                    for n in ("x_lo", "x_hi", "y_lo", "y_hi"))
+    (out / "faces.bin").write_bytes(blob)
+
+    albedo = np.ascontiguousarray(glimpse(field), dtype=np.float32)
+    (out / "map.bin").write_bytes(albedo.tobytes())
+
+    bmin, bmax = _volume_aabb(field)
+    return {
+        "schema": "cloudyview.web.demo.v4",
+        "id": spec["id"],
+        "title": spec["title"],
+        "field": spec["field"],
+        "description": spec["description"],
+        "source": Path(spec["liquid"][0]).name,
+        "volume": {
+            "shape_xyz": [int(nx), int(ny), int(nz)],
+            "padded_dims_xyz": [nx + 2, ny + 2, nz + 2],
+            "format": "r16float",
+            "compression": "gzip",
+            "file": "volume.bin.gz",
+            "bytes": int(gz_bytes),
+            "bytes_uncompressed": int(len(raw)),
+            "bmin": [float(v) for v in bmin],
+            "bmax": [float(v) for v in bmax],
+        },
+        "map": {"shape_yx": [int(albedo.shape[0]), int(albedo.shape[1])]},
+        "faces": {"order": ["x_lo", "x_hi", "y_lo", "y_hi"],
+                  "x_shape": [ny + 2, nz + 2], "y_shape": [nx + 2, nz + 2]},
+        "sun": spec["sun"],
+    }
+
+
+# --- the preview video -----------------------------------------------------
+
+def render_video(spec: dict, field: CloudField, out: Path,
+                 seconds: float, fps: int, size, elevation: float,
+                 accumulate: int = 24) -> dict:
+    """One ground-level pass across the domain, looping seamlessly.
+
+    These are periodic sims, so crossing exactly one domain width returns the
+    camera to an identical scene. That used to need the array tiled 3x3,
+    because the numba marcher had no wrap; the renderer is now the shader,
+    which does, so the field is rendered at full resolution as-is.
+    """
+    span_m = float(field.x[-1] - field.x[0])
+    print(f"    video: {field.lwc.shape}, one period = {span_m/1e3:.1f} km "
+          f"in {seconds:g} s ({span_m/seconds*3.6:.0f} km/h), "
+          f"{accumulate} passes/frame")
+
+    frames = int(round(seconds * fps))
+    tmp = Path(tempfile.mkdtemp(prefix=f"soar-{spec['id']}-"))
+    t_start = time.time()
+    try:
+        for i in range(frames):
+            # Exactly one domain width, so the first and last frames see the
+            # same field and the loop has no seam.
+            x_rel = -1.0 + 2.0 * (i / frames)
+            cam = cv.Camera(position=(x_rel, 0.0, -0.999),
+                            azimuth=90.0, elevation=elevation, fov=100.0)
+            img = cv.witness(field, cam, size=size,
+                             sun_azimuth=spec["sun"]["azimuth"],
+                             sun_elevation=spec["sun"]["elevation"],
+                             periodic=True, accumulate=accumulate)
+            arr = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+            _write_png(tmp / f"{i:05d}.png", arr)
+            if i == 0 or (i + 1) % 25 == 0:
+                per = (time.time() - t_start) / (i + 1)
+                print(f"      frame {i+1}/{frames}  {per:.1f}s/frame  "
+                      f"eta {per*(frames-i-1)/60:.0f} min", flush=True)
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-framerate", str(fps),
+             "-i", str(tmp / "%05d.png"), "-an", "-c:v", "libx264",
+             "-crf", "26", "-preset", "slow", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", str(out / "preview.mp4")], check=True)
+        shutil.copyfile(tmp / "00000.png", tmp / "poster.png")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(tmp / "poster.png"),
+                        "-q:v", "4", str(out / "poster.jpg")], check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    mb = (out / "preview.mp4").stat().st_size / 1e6
+    print(f"    preview.mp4 {mb:.1f} MB ({frames} frames, {time.time()-t_start:.0f}s)")
+    return {"file": "preview.mp4", "poster": "poster.jpg", "seconds": seconds,
+            "fps": fps, "size": list(size), "bytes": int(mb * 1e6),
+            "period_km": round(span_m / 1e3, 2),
+            "speed_kmh": round(span_m / seconds * 3.6),
+            "coarsened": 1}
+
+
+def _write_png(path: Path, rgb: np.ndarray) -> None:
+    """Minimal PNG writer — avoids adding an image dependency for the bake."""
+    import struct, zlib
+    h, w, _ = rgb.shape
+    rows = b"".join(b"\x00" + rgb[y].tobytes() for y in range(h))
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(rows, 6))
+           + chunk(b"IEND", b""))
+    path.write_bytes(png)
+
+
+# --- driver ----------------------------------------------------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--only", nargs="*", help="demo ids to build")
+    ap.add_argument("--skip-video", action="store_true")
+    ap.add_argument("--skip-volume", action="store_true")
+    ap.add_argument("--seconds", type=float, default=30.0,
+                    help="loop period; one full domain crossing (default 30)")
+    ap.add_argument("--fps", type=int, default=24)
+    ap.add_argument("--size", type=int, nargs=2, default=[1280, 720])
+    ap.add_argument("--elevation", type=float, default=20.0,
+                    help="camera elevation, degrees above horizon")
+    args = ap.parse_args()
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    index = []
+    for spec in DEMOS:
+        if args.only and spec["id"] not in args.only:
+            continue
+        out = OUT / spec["id"]
+        out.mkdir(parents=True, exist_ok=True)
+        print(f"\n=== {spec['id']}: {spec['title']} ===", flush=True)
+        t0 = time.time()
+        field = load_demo(spec)
+        print(f"    loaded {field.lwc.shape}"
+              f"{' + ice' if field.iwc is not None else ''} in {time.time()-t0:.0f}s",
+              flush=True)
+
+        meta_path = out / "meta.json"
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        if not args.skip_volume:
+            meta = bake_volume(spec, field, out)
+        if not args.skip_video:
+            meta["video"] = render_video(spec, field, out, args.seconds,
+                                         args.fps, tuple(args.size), args.elevation)
+        meta_path.write_text(json.dumps(meta, indent=1))
+        index.append({k: meta[k] for k in ("id", "title", "field", "description")
+                      if k in meta} | {
+            "base": spec["id"],
+            "bytes": meta.get("volume", {}).get("bytes"),
+            "video": meta.get("video", {}).get("file"),
+            "poster": meta.get("video", {}).get("poster"),
+        })
+        del field
+
+    if index:
+        prev = OUT / "index.json"
+        existing = json.loads(prev.read_text())["demos"] if prev.exists() else []
+        by_id = {d["id"]: d for d in existing}
+        for d in index:
+            by_id[d["id"]] = d
+        order = [s["id"] for s in DEMOS]
+        merged = sorted(by_id.values(), key=lambda d: order.index(d["id"]))
+        prev.write_text(json.dumps(
+            {"schema": "soar.demos.v1", "demos": merged}, indent=1))
+        total = sum(d.get("bytes") or 0 for d in merged)
+        print(f"\n{OUT}/index.json — {len(merged)} demos, "
+              f"{total/1e6:.0f} MB of volume")
+
+
+if __name__ == "__main__":
+    main()

@@ -164,3 +164,10 @@ web/demo/
 # the blanket *.html rule (line 5) must not swallow the browser build
 !web/soar/*.html
 !web/soar/**/*.html
+
+# Demo pipeline: source fields and baked web assets.
+# Sources are large third-party model output; baked assets are hosted on R2
+# (see tools/prebake_demos.py), not served from this repo.
+data/demos/
+web/demos/
+web/_mockups/media/
