@@ -248,30 +248,39 @@ async function enterViewerOnce(source) {
 
 // --- the demo rail --------------------------------------------------------
 //
-// Each demo carries a short preview loop rendered from its own field by
-// tools/prebake_demos.py. Hovering one plays it behind the page, so the
-// choice is made by looking at the sky rather than by reading a label.
+// Each demo carries one still rendered from its own field by
+// tools/prebake_demos.py. Hovering a demo cross-fades it behind the page, so
+// the choice is made by looking at a sky rather than by reading a label.
 
 let capabilityFailed = false;
-let reelActive = 1;      // starts at 1 so the first show() lands on reel-a,
-                         // which is the layer with preload="auto"
+let reelActive = 1;      // starts at 1 so the first show() lands on reel-a
 let reelShown = null;
-let previewing = null;
 let previewHold = null;
 
+/** Cross-fade the backdrop to a demo's still, decoding before it is shown. */
 async function showReel(demo, root) {
-  if (!demo?.video) return;
-  if (reelShown === demo.id) { dom.reel[reelActive].play().catch(() => {}); return; }
+  if (!demo?.still || reelShown === demo.id) return;
   const next = 1 - reelActive;
-  const video = dom.reel[next];
-  const src = `${root}/${demo.base}/${demo.video}`;
-  if (video.dataset.src !== src) { video.src = src; video.dataset.src = src; }
-  video.currentTime = 0;
-  try { await video.play(); } catch { /* autoplay refused; the poster stands */ }
-  video.classList.add("on");
-  const stale = dom.reel[reelActive];
-  stale.classList.remove("on");
-  setTimeout(() => { if (stale !== dom.reel[reelActive]) stale.pause(); }, 900);
+  const image = dom.reel[next];
+  const src = `${root}/${demo.base}/${demo.still}`;
+  if (image.dataset.src !== src) {
+    image.dataset.src = src;
+    image.src = src;
+    // Wait for `load`, not `decode()`. decode() is the nicer primitive —
+    // it resolves when the bitmap is ready to paint, so the fade never
+    // reveals a half-drawn image — but it does not settle at all in a
+    // backgrounded tab, which left the backdrop black with nothing logged.
+    // `load` fires either way, and an image that errors resolves too so a
+    // missing still costs one blank fade rather than a stuck reel.
+    if (!image.complete) {
+      await new Promise((resolve) => {
+        image.addEventListener("load", resolve, { once: true });
+        image.addEventListener("error", resolve, { once: true });
+      });
+    }
+  }
+  image.classList.add("on");
+  dom.reel[reelActive].classList.remove("on");
   reelActive = next;
   reelShown = demo.id;
 }
@@ -305,7 +314,7 @@ async function buildRail() {
     button.disabled = capabilityFailed;
     button.innerHTML =
       `<span class="name"></span><span class="field"></span>` +
-      `<span class="size"></span><span class="scrub"><i></i></span>`;
+      `<span class="size"></span>`;
     button.querySelector(".name").textContent = demo.title;
     button.querySelector(".field").textContent = demo.field ?? "";
     button.querySelector(".size").textContent = formatBytes(demo.bytes);
@@ -313,7 +322,6 @@ async function buildRail() {
 
     const enter = () => {
       clearTimeout(previewHold);
-      previewing = demo;
       document.body.classList.add("previewing");
       for (const other of dom.rail.children) other.classList.toggle("live", other === button);
       showReel(demo, root);
@@ -321,7 +329,6 @@ async function buildRail() {
     const leave = () => {
       clearTimeout(previewHold);
       previewHold = setTimeout(() => {
-        previewing = null;
         document.body.classList.remove("previewing");
         for (const other of dom.rail.children) other.classList.remove("live");
       }, 350);
@@ -336,23 +343,14 @@ async function buildRail() {
     dom.rail.appendChild(button);
   }
 
-  // Something is always playing, so the page is a sky rather than a form.
+  // Something is always on screen, so the page is a sky rather than a form.
   if (index.demos.length) await showReel(index.demos[0], root);
-}
 
-// The scrub bar makes the loop legible as a flight across the domain rather
-// than a background texture.
-function tickScrub() {
-  if (previewing) {
-    const video = dom.reel[reelActive];
-    const bar = dom.rail.querySelector(".demo.live .scrub i");
-    if (bar && video.duration) {
-      bar.style.width = `${(100 * video.currentTime / video.duration).toFixed(1)}%`;
-    }
+  // Warm the rest so the first hover cross-fades instead of flashing empty.
+  for (const demo of index.demos.slice(1)) {
+    if (demo.still) new Image().src = `${root}/${demo.base}/${demo.still}`;
   }
-  requestAnimationFrame(tickScrub);
 }
-requestAnimationFrame(tickScrub);
 
 dom.open.addEventListener("click", () => dom.fileInput.click());
 dom.fileInput.addEventListener("change", () => {

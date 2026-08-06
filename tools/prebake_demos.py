@@ -1,4 +1,4 @@
-"""Bake the shippable demo set: GPU-ready volumes plus a preview video each.
+"""Bake the shippable demo set: a GPU-ready volume and a still per demo.
 
 Two products per demo, both written to web/demos/<id>/:
 
@@ -9,17 +9,13 @@ Two products per demo, both written to web/demos/<id>/:
       are exactly the bytes that reach the GPU, and deflate is HDF5/browser
       builtin territory rather than a bespoke codec.
 
-  preview.mp4 + poster.jpg
-      A ground-level loop for the landing page. Rendered with witness, which
-      is the look soar is a port of.
-
-Seamless looping falls out of the renderer: these are periodic sims and the
-shader wraps the domain, so crossing exactly one domain width returns the
-camera to an identical scene. (This needed the array tiled 3x3 while witness
-was a numba kernel with no wrap of its own. It is not a kernel any more.)
+  still.webp
+      One converged ground-level frame for the landing page, rendered with
+      witness — which is now the same shader the browser runs, so the preview
+      is the thing itself rather than an impression of it.
 
     uv run python tools/prebake_demos.py            # everything
-    uv run python tools/prebake_demos.py --only fif --seconds 2 --fps 5
+    uv run python tools/prebake_demos.py --only fif --skip-volume
 """
 
 import argparse
@@ -213,61 +209,57 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
     }
 
 
-# --- the preview video -----------------------------------------------------
+# --- the preview still ------------------------------------------------------
 
-def render_video(spec: dict, field: CloudField, out: Path,
-                 seconds: float, fps: int, size, elevation: float,
-                 accumulate: int = 24) -> dict:
-    """One ground-level pass across the domain, looping seamlessly.
+def render_still(spec: dict, field: CloudField, out: Path, size,
+                 accumulate: int, quality: int) -> dict:
+    """One converged frame, which is what a hover preview should be.
 
-    These are periodic sims, so crossing exactly one domain width returns the
-    camera to an identical scene. That used to need the array tiled 3x3,
-    because the numba marcher had no wrap; the renderer is now the shader,
-    which does, so the field is rendered at full resolution as-is.
+    This was a video for a while. The arithmetic killed it: a 60 s 1440p60
+    loop lands somewhere around 30-110 MB per demo, which for the FIF cascade
+    is fifteen times the weight of the 1.9 MB field it is advertising. A 4K
+    still is 60-210 kB — two to three orders of magnitude less — renders in
+    seconds rather than hours, and cannot judder.
+
+    Motion, where it is wanted, is a slow CSS scale on the image and costs
+    nothing.
     """
-    span_m = float(field.x[-1] - field.x[0])
-    print(f"    video: {field.lwc.shape}, one period = {span_m/1e3:.1f} km "
-          f"in {seconds:g} s ({span_m/seconds*3.6:.0f} km/h), "
-          f"{accumulate} passes/frame")
+    still = spec.get("still", {})
+    # Default framing looks across the sun rather than into or away from it,
+    # which is where cloud sides read best. Override per demo in DEMOS.
+    azimuth = still.get("azimuth", (spec["sun"]["azimuth"] + 130.0) % 360.0)
+    elevation = still.get("elevation", 20.0)
+    print(f"    still: {size[0]}x{size[1]}, {accumulate} passes, "
+          f"azimuth {azimuth:.0f}, elevation {elevation:.0f}", flush=True)
 
-    frames = int(round(seconds * fps))
+    t0 = time.time()
+    img = cv.witness(
+        field,
+        cv.Camera(position=(0.0, 0.0, -0.999), azimuth=azimuth,
+                  elevation=elevation, fov=100.0),
+        size=size, sun_azimuth=spec["sun"]["azimuth"],
+        sun_elevation=spec["sun"]["elevation"],
+        periodic=True, accumulate=accumulate)
+    render_s = time.time() - t0
+
     tmp = Path(tempfile.mkdtemp(prefix=f"soar-{spec['id']}-"))
-    t_start = time.time()
     try:
-        for i in range(frames):
-            # Exactly one domain width, so the first and last frames see the
-            # same field and the loop has no seam.
-            x_rel = -1.0 + 2.0 * (i / frames)
-            cam = cv.Camera(position=(x_rel, 0.0, -0.999),
-                            azimuth=90.0, elevation=elevation, fov=100.0)
-            img = cv.witness(field, cam, size=size,
-                             sun_azimuth=spec["sun"]["azimuth"],
-                             sun_elevation=spec["sun"]["elevation"],
-                             periodic=True, accumulate=accumulate)
-            arr = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-            _write_png(tmp / f"{i:05d}.png", arr)
-            if i == 0 or (i + 1) % 25 == 0:
-                per = (time.time() - t_start) / (i + 1)
-                print(f"      frame {i+1}/{frames}  {per:.1f}s/frame  "
-                      f"eta {per*(frames-i-1)/60:.0f} min", flush=True)
-        subprocess.run(
-            ["ffmpeg", "-v", "error", "-y", "-framerate", str(fps),
-             "-i", str(tmp / "%05d.png"), "-an", "-c:v", "libx264",
-             "-crf", "26", "-preset", "slow", "-pix_fmt", "yuv420p",
-             "-movflags", "+faststart", str(out / "preview.mp4")], check=True)
-        shutil.copyfile(tmp / "00000.png", tmp / "poster.png")
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(tmp / "poster.png"),
-                        "-q:v", "4", str(out / "poster.jpg")], check=True)
+        master = tmp / "still.png"
+        _write_png(master, np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8))
+        # WebP rather than AVIF: supported everywhere WebGPU is, and an AVIF
+        # trial came out an order of magnitude worse than JPEG rather than
+        # better, so it is not paying for its complexity here.
+        subprocess.run(["magick", str(master), "-quality", str(quality),
+                        "-define", "webp:method=6", "-strip",
+                        str(out / "still.webp")], check=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    mb = (out / "preview.mp4").stat().st_size / 1e6
-    print(f"    preview.mp4 {mb:.1f} MB ({frames} frames, {time.time()-t_start:.0f}s)")
-    return {"file": "preview.mp4", "poster": "poster.jpg", "seconds": seconds,
-            "fps": fps, "size": list(size), "bytes": int(mb * 1e6),
-            "period_km": round(span_m / 1e3, 2),
-            "speed_kmh": round(span_m / seconds * 3.6),
-            "coarsened": 1}
+    nbytes = (out / "still.webp").stat().st_size
+    print(f"    still.webp {nbytes/1e3:.0f} kB (rendered in {render_s:.1f}s)")
+    return {"file": "still.webp", "size": list(size), "bytes": int(nbytes),
+            "azimuth": azimuth, "elevation": elevation,
+            "accumulate": accumulate}
 
 
 def _write_png(path: Path, rgb: np.ndarray) -> None:
@@ -290,14 +282,14 @@ def _write_png(path: Path, rgb: np.ndarray) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", nargs="*", help="demo ids to build")
-    ap.add_argument("--skip-video", action="store_true")
+    ap.add_argument("--skip-still", action="store_true")
     ap.add_argument("--skip-volume", action="store_true")
-    ap.add_argument("--seconds", type=float, default=30.0,
-                    help="loop period; one full domain crossing (default 30)")
-    ap.add_argument("--fps", type=int, default=24)
-    ap.add_argument("--size", type=int, nargs=2, default=[1280, 720])
-    ap.add_argument("--elevation", type=float, default=20.0,
-                    help="camera elevation, degrees above horizon")
+    ap.add_argument("--size", type=int, nargs=2, default=[3840, 2160],
+                    help="still resolution (default 4K)")
+    ap.add_argument("--accumulate", type=int, default=192,
+                    help="accumulated passes; it is one frame (default 192)")
+    ap.add_argument("--quality", type=int, default=82,
+                    help="WebP quality (default 82)")
     args = ap.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -318,16 +310,15 @@ def main() -> None:
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
         if not args.skip_volume:
             meta = bake_volume(spec, field, out)
-        if not args.skip_video:
-            meta["video"] = render_video(spec, field, out, args.seconds,
-                                         args.fps, tuple(args.size), args.elevation)
+        if not args.skip_still:
+            meta["still"] = render_still(spec, field, out, tuple(args.size),
+                                         args.accumulate, args.quality)
         meta_path.write_text(json.dumps(meta, indent=1))
         index.append({k: meta[k] for k in ("id", "title", "field", "description")
                       if k in meta} | {
             "base": spec["id"],
             "bytes": meta.get("volume", {}).get("bytes"),
-            "video": meta.get("video", {}).get("file"),
-            "poster": meta.get("video", {}).get("poster"),
+            "still": meta.get("still", {}).get("file"),
         })
         del field
 
