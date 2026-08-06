@@ -3,84 +3,68 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Soar — fly a real cloud field</title>
+<title>Soar — fly through cloud model output</title>
 <meta name="description" content="Fly through a three-dimensional cloud field
   in your browser: volumetric ray marching with multiple scattering, on real
   large-eddy-simulation output or your own netCDF file.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@200;300;400;500&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="viewer.css">
 <link rel="canonical" href="https://thomasddewitt.com/thought-cloud/soar/">
 </head>
 <body>
 
-<header class="site-header" id="site-header">
-  <nav class="site-nav">
-    <div class="nav-item">
-      <a href="../../index.html" class="nav-link">Thomas DeWitt</a>
-    </div>
-    <div class="nav-item static-breadcrumb">
-      <a href="../" class="nav-link active"><em>Thought Cloud</em></a>
-      <span class="breadcrumb-divider">/</span>
-      <span class="breadcrumb-current">Soar</span>
-    </div>
-    <div class="nav-item">
-      <a href="../../about.html" class="nav-link">About</a>
-    </div>
-    <div class="nav-item">
-      <a href="../../cv.html" class="nav-link">CV</a>
-    </div>
-  </nav>
-</header>
-
 <main id="landing">
-  <h1>Soar</h1>
-  <p class="subtitle">Volumetric cloud rendering, in a tab</p>
 
-  <p class="lede">
-    Fly through a cloud field the way light does — marching through the
-    volume, scattering many times before it reaches you. No installation,
-    and the file never leaves your machine.
-  </p>
-
-  <div id="capability">Checking what this browser can do…</div>
-
-  <div class="choices">
-    <button class="choice" id="choice-demo">
-      <span class="title">Fly the demo field</span>
-      <span class="meta" id="demo-meta">
-        TWP-ICE, Darwin 2006 — a large-eddy simulation of tropical
-        convection. About 13 MB.
-      </span>
-    </button>
-
-    <button class="choice" id="choice-open">
-      <span class="title">Open your own file</span>
-      <span class="meta">
-        A netCDF file with a cloud water field. Drop it anywhere on this
-        page, or click to browse. Read locally — nothing is uploaded.
-      </span>
-    </button>
-    <input type="file" id="file-input" accept=".nc,.nc4,.cdf,.h5,.hdf5">
+  <div id="reel">
+    <video id="reel-a" muted loop playsinline preload="auto"></video>
+    <video id="reel-b" muted loop playsinline preload="none"></video>
   </div>
 
-  <section class="notes">
-    <h2>What this is</h2>
-    <p>
-      <code>cloudyview</code>'s volumetric renderer, running on your GPU
-      through WebGPU. Single scattering plus a multiple-scattering
-      approximation, a physically-based sky, and an ocean below. It is not a
-      path tracer — it is fast enough to fly.
-    </p>
-    <h2>Controls</h2>
-    <p>
-      Click the view to take the mouse. <b>WASD</b> to move,
-      <b>Space</b> and <b>Shift</b> for up and down, scroll to change speed,
-      <b>Esc</b> for the menu. Everything else lives in the menu.
-    </p>
-  </section>
+  <div class="frame">
+
+    <header class="strip" id="site-header">
+      <nav class="site-nav">
+        <a href="../../index.html">Thomas DeWitt</a>
+        <span class="sep">/</span>
+        <a href="../">Thought Cloud</a>
+        <span class="sep">/</span>
+        <span class="here">Soar</span>
+      </nav>
+      <div class="colophon">cloudyview · webgpu</div>
+    </header>
+
+    <div class="center">
+      <h1>SOAR</h1>
+      <p class="tag">Fly through cloud model output</p>
+
+      <button class="own" id="choice-open">Render your own 3D cloud volume</button>
+      <p class="own-note">netCDF — or drop one anywhere on this page</p>
+      <input type="file" id="file-input" accept=".nc,.nc4,.cdf,.h5,.hdf5">
+    </div>
+
+    <div class="base">
+      <div class="rail-head">
+        <span>Demos</span>
+        <span class="rule"></span>
+      </div>
+
+      <div class="rail" id="rail">
+        <p class="rail-loading">Loading the demo list…</p>
+      </div>
+
+      <div class="readout">
+        <div id="capability">Checking what this browser can do…</div>
+        <div class="keys">
+          <kbd>W A S D</kbd> fly &nbsp; <kbd>space</kbd> / <kbd>shift</kbd> climb &nbsp;
+          <kbd>scroll</kbd> speed &nbsp; <kbd>esc</kbd> menu
+        </div>
+      </div>
+    </div>
+
+  </div>
 </main>
 
 <div id="viewer" hidden>

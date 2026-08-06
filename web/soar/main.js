@@ -20,9 +20,10 @@ const dom = {
   viewer: el("viewer"),
   header: el("site-header"),
   capability: el("capability"),
-  demo: el("choice-demo"),
+  rail: el("rail"),
   open: el("choice-open"),
   fileInput: el("file-input"),
+  reel: [el("reel-a"), el("reel-b")],
   loading: el("loading"),
   stage: el("loading-stage"),
   bar: el("loading-bar"),
@@ -128,29 +129,31 @@ async function renderCapability() {
     const detail = err instanceof WebGPUUnavailable ? err.detail : String(err);
     dom.capability.innerHTML =
       `<b>${err.message}</b><span class="detail">${detail}</span>`;
-    dom.demo.disabled = true;
     dom.open.disabled = true;
+    for (const button of dom.rail.querySelectorAll(".demo")) {
+      button.disabled = true;
+    }
+    capabilityFailed = true;
   }
 }
 
 // --- picking a field ------------------------------------------------------
 
-// Demo data is fetched from the cloudyview repository rather than shipped
-// beside the page, so the site stays a thin static folder. Pinned to a tag:
-// a deployed page must not change under a push to master.
-export const DEMO_BASE_URL =
-  "https://raw.githubusercontent.com/thomasddewitt/cloudyview/web-demo-v1/web/demo";
+// Demo fields are hosted rather than served from the cloudyview repository:
+// the set runs to a few hundred megabytes and binaries in git are forever.
+// They live beside the site on the same static host.
+export const DEMOS_BASE_URL = "https://thomasddewitt.com/thought-cloud/soar-demos";
 
-// Until the repo is public, a sibling demo/ folder wins if it exists. This is
-// also how development works with no network.
-export const DEMO_LOCAL_URL = "../demo";
+// A sibling demos/ folder wins if it exists — that is how a local bake is
+// tried out, and how development works with no network.
+export const DEMOS_LOCAL_URL = "../demos";
 
-async function resolveDemoBase() {
+async function resolveDemosRoot() {
   try {
-    const probe = await fetch(`${DEMO_LOCAL_URL}/meta.json`, { method: "HEAD" });
-    if (probe.ok) return DEMO_LOCAL_URL;
-  } catch { /* no local copy; fall through to the pinned remote */ }
-  return DEMO_BASE_URL;
+    const probe = await fetch(`${DEMOS_LOCAL_URL}/index.json`, { method: "HEAD" });
+    if (probe.ok) return DEMOS_LOCAL_URL;
+  } catch { /* no local bake; fall through to the hosted set */ }
+  return DEMOS_BASE_URL;
 }
 
 /** Tear down whatever session is running, and wait for it. */
@@ -243,10 +246,113 @@ async function enterViewerOnce(source) {
   }
 }
 
-dom.demo.addEventListener("click", async () => {
-  const base = await resolveDemoBase();
-  enterViewer({ kind: "demo", base });
-});
+// --- the demo rail --------------------------------------------------------
+//
+// Each demo carries a short preview loop rendered from its own field by
+// tools/prebake_demos.py. Hovering one plays it behind the page, so the
+// choice is made by looking at the sky rather than by reading a label.
+
+let capabilityFailed = false;
+let reelActive = 1;      // starts at 1 so the first show() lands on reel-a,
+                         // which is the layer with preload="auto"
+let reelShown = null;
+let previewing = null;
+let previewHold = null;
+
+async function showReel(demo, root) {
+  if (!demo?.video) return;
+  if (reelShown === demo.id) { dom.reel[reelActive].play().catch(() => {}); return; }
+  const next = 1 - reelActive;
+  const video = dom.reel[next];
+  const src = `${root}/${demo.base}/${demo.video}`;
+  if (video.dataset.src !== src) { video.src = src; video.dataset.src = src; }
+  video.currentTime = 0;
+  try { await video.play(); } catch { /* autoplay refused; the poster stands */ }
+  video.classList.add("on");
+  const stale = dom.reel[reelActive];
+  stale.classList.remove("on");
+  setTimeout(() => { if (stale !== dom.reel[reelActive]) stale.pause(); }, 900);
+  reelActive = next;
+  reelShown = demo.id;
+}
+
+function formatBytes(n) {
+  if (!n) return "";
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`;
+}
+
+async function buildRail() {
+  const root = await resolveDemosRoot();
+  let index;
+  try {
+    const response = await fetch(`${root}/index.json`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    index = await response.json();
+  } catch (err) {
+    // No silent empty rail: if the list cannot be had, say so, because the
+    // page without it offers no way in but your own file.
+    dom.rail.innerHTML =
+      `<p class="rail-loading">The demo list could not be loaded (${err.message}). ` +
+      `Opening your own file still works.</p>`;
+    return;
+  }
+
+  dom.rail.replaceChildren();
+  for (const demo of index.demos) {
+    const button = document.createElement("button");
+    button.className = "demo";
+    button.type = "button";
+    button.disabled = capabilityFailed;
+    button.innerHTML =
+      `<span class="name"></span><span class="field"></span>` +
+      `<span class="size"></span><span class="scrub"><i></i></span>`;
+    button.querySelector(".name").textContent = demo.title;
+    button.querySelector(".field").textContent = demo.field ?? "";
+    button.querySelector(".size").textContent = formatBytes(demo.bytes);
+    button.title = demo.description ?? "";
+
+    const enter = () => {
+      clearTimeout(previewHold);
+      previewing = demo;
+      document.body.classList.add("previewing");
+      for (const other of dom.rail.children) other.classList.toggle("live", other === button);
+      showReel(demo, root);
+    };
+    const leave = () => {
+      clearTimeout(previewHold);
+      previewHold = setTimeout(() => {
+        previewing = null;
+        document.body.classList.remove("previewing");
+        for (const other of dom.rail.children) other.classList.remove("live");
+      }, 350);
+    };
+    button.addEventListener("mouseenter", enter);
+    button.addEventListener("focus", enter);
+    button.addEventListener("mouseleave", leave);
+    button.addEventListener("blur", leave);
+    button.addEventListener("click", () =>
+      enterViewer({ kind: "demo", base: `${root}/${demo.base}` }));
+
+    dom.rail.appendChild(button);
+  }
+
+  // Something is always playing, so the page is a sky rather than a form.
+  if (index.demos.length) await showReel(index.demos[0], root);
+}
+
+// The scrub bar makes the loop legible as a flight across the domain rather
+// than a background texture.
+function tickScrub() {
+  if (previewing) {
+    const video = dom.reel[reelActive];
+    const bar = dom.rail.querySelector(".demo.live .scrub i");
+    if (bar && video.duration) {
+      bar.style.width = `${(100 * video.currentTime / video.duration).toFixed(1)}%`;
+    }
+  }
+  requestAnimationFrame(tickScrub);
+}
+requestAnimationFrame(tickScrub);
 
 dom.open.addEventListener("click", () => dom.fileInput.click());
 dom.fileInput.addEventListener("change", () => {
@@ -275,11 +381,17 @@ document.addEventListener("drop", (e) => {
 });
 
 renderCapability();
+buildRail();
 
-// A URL of the form ?demo goes straight in — useful for linking to the thing
-// itself rather than to the page that offers it.
-if (new URLSearchParams(location.search).has("demo")) {
-  resolveDemoBase().then((base) => enterViewer({ kind: "demo", base }));
+// ?demo=<id> goes straight in — useful for linking to a particular field
+// rather than to the page that offers them. Bare ?demo takes the first.
+const wanted = new URLSearchParams(location.search).get("demo");
+if (wanted !== null) {
+  resolveDemosRoot().then(async (root) => {
+    const index = await (await fetch(`${root}/index.json`)).json();
+    const demo = index.demos.find((d) => d.id === wanted) ?? index.demos[0];
+    if (demo) enterViewer({ kind: "demo", base: `${root}/${demo.base}` });
+  });
 }
 
 export { browserGuess };

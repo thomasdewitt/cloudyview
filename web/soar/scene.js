@@ -18,29 +18,34 @@ import {
 
 const FACE_NAMES = ["x_lo", "x_hi", "y_lo", "y_hi"];
 
-async function fetchBytes(url, onProgress) {
+async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Could not fetch ${url} (HTTP ${response.status}).`);
   }
   const total = Number(response.headers.get("content-length")) || 0;
   if (!onProgress || !total || !response.body) {
-    return new Uint8Array(await response.arrayBuffer());
+    const raw = await response.arrayBuffer();
+    if (!decompress) return new Uint8Array(raw);
+    return new Uint8Array(await new Response(
+      new Blob([raw]).stream().pipeThrough(new DecompressionStream(decompress))
+    ).arrayBuffer());
   }
-  const reader = response.body.getReader();
-  const chunks = [];
+  // Progress counts bytes off the wire, so it has to be measured BEFORE the
+  // decompressor — content-length is the compressed size, and counting
+  // inflated bytes against it would run the bar to several hundred percent.
   let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    onProgress(received / total);
-  }
-  const out = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
-  return out;
+  const counted = response.body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      received += chunk.length;
+      onProgress(received / total);
+      controller.enqueue(chunk);
+    },
+  }));
+  const stream = decompress
+    ? counted.pipeThrough(new DecompressionStream(decompress))
+    : counted;
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 /**
@@ -250,8 +255,16 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const padded = meta.volume.padded_dims_xyz;
 
+  // The volume ships gzipped. It is fp16 either way — the texture is
+  // r16float — so this is purely wire size, and DecompressionStream means a
+  // dumb static host works without any Content-Encoding negotiation. Older
+  // bakes wrote a plain volume.bin; meta says which.
+  const volumeFile = meta.volume.file ?? "volume.bin";
+  const gzipped = meta.volume.compression === "gzip";
   const volumeBytes = await fetchBytes(
-    `${baseUrl}/volume.bin`, (f) => progress?.("Downloading the cloud field…", f * 0.8));
+    `${baseUrl}/${volumeFile}`,
+    (f) => progress?.("Downloading the cloud field…", f * 0.8),
+    gzipped ? "gzip" : null);
   const facesBytes = await fetchBytes(`${baseUrl}/faces.bin`);
   const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
 
