@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -56,6 +56,11 @@ from .soar_host import (
 )
 
 logger = logging.getLogger(__name__)
+
+# TONE_MAP_GAMMA_WITNESS is re-exported: witness's own default is soar's 2.66
+# now, and this is how a caller asks for the pre-2026-08 encode.
+__all__ = ["witness", "render_nested", "tone_map", "NestedLevel",
+           "TONE_MAP_GAMMA_WITNESS", "QUALITY_PRESETS", "main", "cli"]
 
 # Effective radii the extinction conversion assumes, mirrored in
 # web/soar/constants.js so the browser derives the same sigma from a file.
@@ -172,17 +177,13 @@ def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
 def render_nested(
     levels: Sequence[NestedLevel],
     camera_position,
-    camera_forward=None,
-    camera_right=None,
-    camera_up=None,
-    sun_direction=None,
+    *,
+    azimuth: float,
+    elevation: float,
+    sun_azimuth: float,
+    sun_elevation: float,
     image_size=(600, 400),
     fov_degrees: float = 100.0,
-    *,
-    azimuth: Optional[float] = None,
-    elevation: Optional[float] = None,
-    sun_azimuth: Optional[float] = None,
-    sun_elevation: Optional[float] = None,
     exposure: float = 4.0,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
     periodic: bool = False,
@@ -190,7 +191,6 @@ def render_nested(
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
     return_linear: bool = False,
     verbose: bool = True,
-    **legacy,
 ) -> np.ndarray:
     """Render one or two nested levels, finest first.
 
@@ -198,10 +198,9 @@ def render_nested(
     constant and core WebGPU has no dynamic texture indexing — so more than
     two levels raises rather than silently dropping the extra ones.
 
-    Angles are preferred over basis vectors now that the camera basis lives
-    in one place; pass azimuth/elevation and sun_azimuth/sun_elevation. The
-    old forward/right/up and sun_direction arguments are accepted and
-    converted.
+    Camera and sun are given as meteorological angles; the basis is derived
+    in one place (soar_host.camera_basis) so it cannot disagree with the
+    browser's.
 
     With return_linear=True the shader's tone map is compiled out and the
     linear HDR radiance comes back unbounded.
@@ -215,27 +214,6 @@ def render_nested(
             "most two (one outer field plus one nest). NESTED is a "
             "compile-time constant because core WebGPU has no dynamic "
             "texture indexing, so extra levels cannot be bound.")
-    for unexpected in legacy:
-        logger.debug("render_nested: ignoring legacy argument %r", unexpected)
-
-    if azimuth is None or elevation is None:
-        if camera_forward is None:
-            raise ValueError(
-                "render_nested needs azimuth and elevation (or a "
-                "camera_forward vector to derive them from).")
-        f = np.asarray(camera_forward, dtype=np.float64)
-        f = f / np.linalg.norm(f)
-        elevation = float(np.degrees(np.arcsin(np.clip(f[2], -1.0, 1.0))))
-        azimuth = float((90.0 - np.degrees(np.arctan2(f[1], f[0]))) % 360.0)
-    if sun_azimuth is None or sun_elevation is None:
-        if sun_direction is None:
-            raise ValueError(
-                "render_nested needs sun_azimuth and sun_elevation (or a "
-                "sun_direction vector).")
-        s = np.asarray(sun_direction, dtype=np.float64)
-        s = s / np.linalg.norm(s)
-        sun_elevation = float(np.degrees(np.arcsin(np.clip(s[2], -1.0, 1.0))))
-        sun_azimuth = float((90.0 - np.degrees(np.arctan2(s[1], s[0]))) % 360.0)
 
     outer = levels[-1]
     renderer = _renderer_for(levels, periodic=periodic,

@@ -29,7 +29,7 @@ Conventions inherited from the shader, all easy to get subtly wrong:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field as _field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -594,7 +594,6 @@ class SoarRenderer:
         """
         if frames < 1:
             raise ValueError(f"frames must be >= 1; got {frames}.")
-        wgpu = self.wgpu
         w, h = view.render_size
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()
