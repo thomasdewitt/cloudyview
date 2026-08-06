@@ -230,6 +230,14 @@ const MS_TAIL_FLOOR: f32 = 0.15;
 // exposure change, and it is why the thin-cloud regression views are
 // essentially untouched.
 const MS_TAIL_TAU_KNEE: f32 = 4.0;
+// Sun-march quadrature jitter (lighting-loop iter_003). The random phase is
+// off while the distance-LOD floor is at or below the light march's own step
+// and full once the floor has coarsened it by this factor, so a march the
+// fine step already resolves stays exactly as it was. Two is the smallest
+// value that reaches full randomization before the coherent pattern becomes
+// visible: the artifact needs dt to exceed roughly a voxel of structure, and
+// dt_light is two voxels.
+const LIGHT_JITTER_LOD_FULL: f32 = 2.0;
 const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
 
 // Periodic-domain march caps. A tiled domain has no horizontal exit, so the
@@ -524,7 +532,41 @@ fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
 // callers pass view_distance * u.periodic.y, so the full integration range
 // is kept while far cloud copies stop paying near-field step counts.
 // dt_floor = 0 -> bit-exact legacy.
-fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32) -> f32 {
+//
+// `jit` in [0, 1) offsets the quadrature grid (lighting-loop iter_003). The
+// LOD floor is an *angular* step: it gives a distant sample the step count a
+// footprint-filtered march would need, but the samples themselves are still
+// point taps of the field, so above ~1 voxel of dt the march is undersampled
+// rather than filtered. Undersampling on a grid that neighbouring pixels
+// share is what produced the stair-steps: a flat ocean puts every pixel's
+// shadow ray at the same t_start, dt_floor varies only slowly across the
+// image, so a whole neighbourhood tests the cloud at the same few heights
+// and the raw voxel structure of those slices prints onto the water.
+// Offsetting the whole quadrature grid by one uniform random phase per pixel
+// per frame makes the same step count an unbiased estimator of the same
+// integral (the shifted grids tile the ray), so the coherent pattern becomes
+// zero-mean noise that accumulation averages away.
+//
+// A randomized *lattice* rather than per-step stratification, deliberately:
+// stratifying each step independently was tried and is visibly noisier
+// (v7 ocean high-frequency std 2.36 vs 1.68 at 64 frames, 9.5 vs 6.6 at one
+// frame). Independent strata put consecutive taps anywhere from 0 to 2 dt
+// apart; the shifted regular grid keeps them exactly dt apart, which is a
+// randomized midpoint rule and converges like h^2 on a field this smooth
+// instead of h^1.5.
+//
+// The phase fades in only where the LOD floor actually coarsens the march
+// past its own step (LIGHT_JITTER_LOD_FULL), and that gate is not cosmetic.
+// The unjittered march is a left-endpoint rule whose first tap is the sample
+// point itself, so it charges a full step of the local density and biases
+// tau_sun high by about 0.5 * dt * sigma. Randomizing the phase removes that
+// bias as well as the aliasing — measured as a 3-6 level brightening of every
+// cloud in every view, near field included, which is a global lighting change
+// and not this iteration's business. Gated, a march the fine step already
+// resolves keeps its exact previous value (bias and all) and only the
+// LOD-coarsened rays — the ones with the artifact — are randomized.
+fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
+                   jit: f32) -> f32 {
     var t_exit: f32;
     var t_start: f32;
     if (PERIODIC_DOMAIN) {
@@ -546,7 +588,17 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32) -> f32 {
         t_start = max(hit.x, 0.0);
     }
     var tau = 0.0;
-    var t = t_start;
+    // The phase is sized by the step this ray will actually take. Only the
+    // outer level's dt_light is known here; a shadow ray that starts inside
+    // the nest is offset by more than one of its own steps, which still
+    // decorrelates it and still integrates the same range.
+    let dt_fine = u.bmax.w;
+    let dt_nominal = max(dt_fine, dt_floor);
+    let lod_fade = clamp(
+        (dt_floor / max(dt_fine, 1e-6) - 1.0) / (LIGHT_JITTER_LOD_FULL - 1.0),
+        0.0, 1.0
+    );
+    var t = t_start + clamp(jit, 0.0, 1.0) * dt_nominal * lod_fade;
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
         if (t >= t_exit) {
             break;
@@ -754,7 +806,8 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 }
 
 // Ocean shade ported from witness._ocean_shade (witness.py lines 473-541).
-fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> vec3<f32> {
+fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32,
+               jit: f32) -> vec3<f32> {
     var normal_lod = 0.0;
     if (u.cam_up.w > 0.5) {
         normal_lod = ocean_normal_lod(t_hit, dir);
@@ -773,7 +826,7 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32) -> ve
     let om2 = one_minus * one_minus;
     let fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y);
+    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y, jit);
     let t_sun_ocean = exp(-tau_ocean);
     let cos_sun_n = max(0.0, dot(sun, n));
     let diff_irr = t_sun_ocean * cos_sun_n * 0.3183098861837907;
@@ -839,7 +892,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 // Footprint-filtered ocean with microfacet sun glint and path haze
 // (witness._ocean_shade_realism).
 fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
-                       t_hit: f32) -> vec3<f32> {
+                       t_hit: f32, jit: f32) -> vec3<f32> {
     let ocean_realism = u.ocean_realism_a.x;
     let ocean_mip_bias = u.ocean_realism_a.y;
     let glint_strength = u.ocean_realism_a.z;
@@ -877,7 +930,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let om2 = one_minus * one_minus;
     let view_fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y);
+    let tau_ocean = light_march_tau(hit, sun, t_hit * u.periodic.y, jit);
     let t_sun_ocean = exp(-tau_ocean);
     let n_dot_l = max(0.0, dot(sun, n));
 
@@ -957,11 +1010,11 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // Master-gate dispatch: exact-zero realism keeps the untouched legacy ocean
 // arithmetic (witness._ocean_shade_dispatch).
 fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
-                        t_hit: f32) -> vec3<f32> {
+                        t_hit: f32, jit: f32) -> vec3<f32> {
     if (u.ocean_realism_a.x == 0.0) {
-        return ocean_shade(hit, dir, sun, t_hit);
+        return ocean_shade(hit, dir, sun, t_hit, jit);
     }
-    return ocean_shade_realism(hit, dir, sun, t_hit);
+    return ocean_shade_realism(hit, dir, sun, t_hit, jit);
 }
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
@@ -1086,6 +1139,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let probe_jitter = hash12(
         frag_pos.xy + vec2<f32>(u.sun_dir.w * 23.147, 91.7)
     ) - 0.5;
+    // Independent stream for the sun march's quadrature offset (iter_003).
+    // Under the same jitter_on switch as the view march: turning jitter off
+    // asks for a deterministic march, and this is one, artifact and all.
+    let shadow_jitter = jitter_on * jitter_scale * hash12(
+        frag_pos.xy + vec2<f32>(u.sun_dir.w * 37.719, 53.31)
+    );
     let entry_dt = u.bmin.w;
     var t = t_near + jitter_on * jitter * jitter_scale * entry_dt;
 
@@ -1105,7 +1164,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             if (ocean_on && t >= t_ocean) {
                 let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
                 col = col + transmittance
-                            * ocean_shade_dispatch(ocean_hit, dir, sun, t_ocean);
+                            * ocean_shade_dispatch(ocean_hit, dir, sun,
+                                                   t_ocean, shadow_jitter);
                 transmittance = 0.0;
                 break;
             }
@@ -1162,7 +1222,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 air_t = exp(-aerial_strength * tau_air);
             }
 
-            let tau_sun = light_march_tau(p, sun, t * u.periodic.y);
+            // A view ray takes many steps, so its shadow rays advance the
+            // offset by the golden ratio instead of reusing one value: the
+            // sequence is low-discrepancy along the march, which averages the
+            // quadrature noise down within a single frame rather than leaving
+            // it all for temporal accumulation.
+            let step_shadow_jitter = fract(
+                shadow_jitter + f32(i) * 0.6180339887498949
+            );
+            let tau_sun = light_march_tau(p, sun, t * u.periodic.y,
+                                          step_shadow_jitter);
             let light_transfer_split_strength = u.ambient_tint.w;
             var deep_shadow_gate = 0.0;
             if (deep_shadow_ms_suppression > 0.0
@@ -1359,7 +1428,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
             && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
             col = col + transmittance
-                        * ocean_shade_dispatch(ocean_hit, dir, sun, t_ocean);
+                        * ocean_shade_dispatch(ocean_hit, dir, sun, t_ocean,
+                                               shadow_jitter);
             transmittance = 0.0;
         }
     }
