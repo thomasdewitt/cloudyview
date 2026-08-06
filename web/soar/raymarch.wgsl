@@ -129,6 +129,27 @@ const TONE_MAP: bool = true;
 
 const SUN_COLOR: vec3<f32> = vec3<f32>(22.0, 21.0, 17.0); // witness.py:66
 const POWDER_COEFF: f32 = 1.5;       // witness.py:63
+// Powder is a *backscatter* phenomenon (lighting-loop iter_014). The boundary
+// darkening it models is the deficit of low-order paths that have to reverse
+// direction near a surface: with the sun behind the observer a thin edge has
+// not had room to build the multiple scattering that would send light back,
+// so it reads dark. Looking *toward* the sun the same edge is lit by the
+// forward peak in transmission — the paths are filled by construction — and
+// the darkening should not be there at all. The term below fades powder out
+// over the genuinely forward cone only; side- and back-scatter keep it whole,
+// which also makes any view whose whole frame sits below the cone start
+// bit-identical to iter_012.
+//
+// "Genuinely forward" is not a taste threshold, it is a property of the phase
+// function and is derived rather than tuned: the fade begins exactly where the
+// HG lobe rises above isotropic, i.e. where a photon crossing a thin edge is
+// more likely to continue toward the camera than a random walk would send it.
+// Solving HG(mu, g) = 1/4pi for mu gives
+//     mu_cross = (1 + g^2 - (1 - g^2)^(2/3)) / (2 g),
+// which is 0.667 at the shipped g = 0.76 (and 0.762 at g = 0.85). Below it the
+// forward lobe is *weaker* than isotropic and there is nothing to fill the
+// backscatter paths with, so powder stays whole.
+const POWDER_FWD_FADE: f32 = 0.85;       // fraction of powder removed at mu = 1
 // Ambient tint now arrives per-frame in u.ambient_tint (spectral fill);
 // witness legacy value is (0.19, 0.225, 0.30) since iter_010.
 const AMBIENT_HEIGHT_FLOOR: f32 = 0.3; // witness.py:85
@@ -1588,7 +1609,27 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    let phase = hg_phase(dot(dir, sun), g_hg);
+    let cos_scatter = dot(dir, sun);
+    let phase = hg_phase(cos_scatter, g_hg);
+
+    // Scattering-geometry weight on the powder term (see POWDER_FWD_*). One
+    // value per pixel: cos_scatter is constant along a view ray. 1 keeps the
+    // full boundary darkening, 1 - POWDER_FWD_FADE is what survives at exact
+    // forward scattering.
+    let g2_hg = g_hg * g_hg;
+    // clamped short of 1 so the smoothstep below can never be degenerate; the
+    // select handles the isotropic case, where no forward cone exists at all
+    // and powder must stay whole in every direction.
+    let powder_fwd_cos_start = clamp(
+        (1.0 + g2_hg - pow(max(1.0 - g2_hg, 1e-6), 2.0 / 3.0))
+        / (2.0 * max(g_hg, 1e-4)),
+        -1.0, 0.999
+    );
+    let powder_weight = 1.0 - POWDER_FWD_FADE * select(
+        0.0,
+        smoothstep(powder_fwd_cos_start, 1.0, cos_scatter),
+        g_hg > 1e-4
+    );
 
     // Aerial perspective (witness iter_008): this sightline's horizon sky
     // color (solar disc excluded) — the same asymptotic target the ocean
@@ -1888,7 +1929,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Powder is a function of cumulative optical depth since the current
             // cloud entry, not the current step size (witness.py:729-732).
-            let powder = 1.0 - exp(-POWDER_COEFF * tau_depth);
+            // powder_weight is the scattering-geometry dependence powder has
+            // always been missing; at weight 1 this is exactly the old
+            // expression. Note no extra depth gate is needed: the deficit it
+            // scales, exp(-POWDER_COEFF * tau_depth), is already dead by
+            // tau_depth ~ 2, so the change is confined to the thin skin and
+            // the edges, which is where the physics lives.
+            let powder = 1.0 - powder_weight * exp(-POWDER_COEFF * tau_depth);
             let scatter_weight = d_tau * powder * transmittance * air_t;
             col = col + scatter_weight * ms;
 
