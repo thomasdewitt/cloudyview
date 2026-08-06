@@ -160,6 +160,39 @@ const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
 // DEFAULT_TONE_MAP_GAMMA) because 1.4 alone is not the look soar has
 // actually been flown with.
 const ISO_PHASE: f32 = 0.07957747154594767; // 1 / (4*pi)
+
+// Sky-visibility probe (lighting-loop iter_001).
+//
+// Once the sun march saturates (LIGHT_TAU_CUTOFF), tau_sun carries no
+// information: every deep sample sees exp(-tau_sun) = 0, the MS octaves die,
+// and the whole interior collapses onto one ambient value scaled by the
+// constant deep-shadow floor. That constant is the flat grey of a thick
+// cloud base.
+//
+// The skylight actually reaching such a sample is not constant — it is sky
+// radiance diffusely transmitted through whatever cloud lies between the
+// sample and the sky. Measure that with a short march straight up and feed
+// the result through the Eddington / two-stream diffuse transmittance of a
+// conservative scattering slab in similarity-scaled optical depth:
+//
+//     T_sky = 1 / (1 + 0.75 * (1 - g) * tau_up)
+//
+// The (1-g) scaling is what makes this usable: with g = 0.85 the factor
+// still discriminates out to tau_up ~ 40 instead of collapsing to zero by
+// tau_up ~ 5 the way exp(-tau_up) would, so a base under 300 m of cloud and
+// a base under 3 km of cloud are different pixels.
+//
+// The probe is bounded (SKY_PROBE_SPAN) rather than run to the domain top:
+// skylight entering the side of a wall is not measured by a vertical ray, so
+// a whole-column integral over-darkens vertical faces. A bounded span reads
+// as "how much cloud is immediately overhead", which is the cue that puts
+// dark cores under the deep parts and luminous fringes near thin spots and
+// gaps.
+const SKY_PROBE_SPAN: f32 = 1500.0;   // m of headroom sampled above p
+const SKY_PROBE_STEPS: i32 = 15;      // 100 m quadrature at full span
+// The deepest limit of the skylight-split fill: at T_sky -> 0 the shadow
+// skylight keeps this fraction, so saturated shadow still does not go black.
+const SKY_PROBE_FILL_FLOOR: f32 = 0.34;
 const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
 
 // Periodic-domain march caps. A tiled domain has no horizontal exit, so the
@@ -498,6 +531,34 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32) -> f32 {
         t = t + dt;
     }
     return tau;
+}
+
+// Eddington / two-stream diffuse transmittance of a conservative scattering
+// slab, in similarity-scaled optical depth. This is the one function that
+// replaces the constant deep-shadow floors: unlike exp(-tau) it keeps
+// discriminating out to tau ~ 40, so "buried under 300 m of cloud" and
+// "buried under 3 km" stay different pixels instead of both collapsing onto
+// the same saturated grey.
+fn diffuse_transmittance(tau: f32, g: f32) -> f32 {
+    return 1.0 / (1.0 + 0.75 * (1.0 - g) * tau);
+}
+
+// Diffuse sky transmittance above p (see the SKY_PROBE_* block). `jit` is a
+// per-pixel offset in [-0.5, 0.5] that decorrelates the quadrature shells
+// between neighbouring pixels; temporal accumulation averages it out.
+fn sky_probe_transmittance(p: vec3<f32>, g: f32, jit: f32) -> f32 {
+    let headroom = u.bmax.z - p.z;
+    if (headroom <= 0.0) {
+        return 1.0;
+    }
+    let span = min(SKY_PROBE_SPAN, headroom);
+    let dt = span / f32(SKY_PROBE_STEPS);
+    var tau = 0.0;
+    for (var i: i32 = 0; i < SKY_PROBE_STEPS; i = i + 1) {
+        let t = (f32(i) + 0.5 + jit) * dt;
+        tau = tau + sample_sigma(p + vec3<f32>(0.0, 0.0, t)) * dt;
+    }
+    return diffuse_transmittance(tau, g);
 }
 
 // Max view-march distance in a periodic domain. Closed-form inversion of the
@@ -984,6 +1045,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // The entry step scale is the outer level's: the nest is required to lie
     // strictly inside the outer AABB, so a ray always enters through it.
     let jitter = hash12(frag_pos.xy + vec2<f32>(u.sun_dir.w * 61.803, 0.0));
+    // Independent stream for the sky probe's quadrature offset.
+    let probe_jitter = hash12(
+        frag_pos.xy + vec2<f32>(u.sun_dir.w * 23.147, 91.7)
+    ) - 0.5;
     let entry_dt = u.bmin.w;
     var t = t_near + jitter_on * jitter * jitter_scale * entry_dt;
 
@@ -1138,14 +1203,32 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let scatter_weight = d_tau * powder * transmittance * air_t;
             col = col + scatter_weight * ms;
 
+            // Sky visibility, measured. Only where the sun march has already
+            // saturated — elsewhere tau_sun still carries the shading and
+            // this costs nothing and changes nothing (thin cloud is bit
+            // identical). One probe serves both skylight terms below.
+            var t_sky = 1.0;
+            if (deep_shadow_gate > 0.0
+                && (ambient_occlusion_strength > 0.0
+                    || light_transfer_split_strength > 0.0)) {
+                t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
+            }
+
             // Ambient: height-based on the outer box (witness._render_image).
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
             var amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
                                           + (1.0 - AMBIENT_HEIGHT_FLOOR) * h);
             if (ambient_occlusion_strength > 0.0) {
-                let amb_factor = max(
-                    ambient_occlusion_floor,
-                    1.0 - ambient_occlusion_strength * deep_shadow_gate
+                // The constant deep-shadow floor becomes the T_sky -> 0 limit
+                // of a measured factor: fully buried samples land on exactly
+                // ambient_occlusion_floor as before, and everything less
+                // buried lifts continuously toward unoccluded.
+                let amb_factor = mix(
+                    1.0,
+                    ambient_occlusion_floor
+                        + (1.0 - ambient_occlusion_floor) * t_sky,
+                    clamp(ambient_occlusion_strength, 0.0, 1.0)
+                        * deep_shadow_gate
                 );
                 amb = amb * amb_factor;
             }
@@ -1155,10 +1238,19 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // Light-transfer split, cool side: a skylight floor restored only
             // in saturated sun shadow; lit faces keep their contrast.
             if (light_transfer_split_strength > 0.0) {
+                // Same measured visibility: this fill is skylight too, and it
+                // is the larger of the two diffuse terms, so leaving it flat
+                // would wash the structure back out.
+                let fill_factor = mix(
+                    1.0,
+                    SKY_PROBE_FILL_FLOOR
+                        + (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky,
+                    deep_shadow_gate
+                );
                 let sky_fill = light_transfer_split_strength
                     * LIGHT_TRANSFER_SHADOW_SKYLIGHT
                     * (AMBIENT_HEIGHT_FLOOR + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
-                    * deep_shadow_gate;
+                    * deep_shadow_gate * fill_factor;
                 col = col + transmittance * d_tau * sky_fill * air_t
                             * u.ambient_tint.xyz;
             }
@@ -1170,6 +1262,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 if (bounce_depth_attenuation > 0.0) {
                     bounce = bounce * exp(-bounce_depth_attenuation * tau_depth);
                 }
+                // The surface underneath is in this cloud's own shadow. The
+                // bounce pedestal only exists in proportion to the sunlight
+                // that actually reaches the ground, and under a saturated
+                // column that is nearly none — which is why a real storm
+                // base is dark and this one was not. tau_depth alone could
+                // never see it: every base sample has just entered the
+                // cloud, so the existing depth attenuation is the same
+                // number everywhere across a base and the term composited
+                // as a flat pedestal over the whole frame. Faded in by the
+                // saturation gate, so thin cloud keeps its bounce exactly.
+                bounce = bounce * mix(
+                    1.0,
+                    diffuse_transmittance(tau_sun, g_hg),
+                    deep_shadow_gate
+                );
                 col = col + transmittance * d_tau * bounce * air_t
                             * BOUNCE_TINT;
             }
