@@ -41,6 +41,10 @@ basic_render = _LazyBasicRender()
 
 
 # Conservative-scattering two-stream reflectance: A = tau / (tau + 2/(1-g)).
+# This is exactly Eq. 5.51 of Bohren & Clothiaux (2006), "Fundamentals of
+# Atmospheric Radiation", written as R = (tau(1-g)/2) / (1 + tau(1-g)/2).
+# (Petty's Eq. 13.63 looks the same but absorbs a diffusivity factor 2 into
+# the scaled tau, so it is not the same expression.)
 # Unlike beam opacity 1-exp(-tau) (saturates by tau~4), this keeps contrast
 # between cirrus (tau~1-5) and deep cores (tau~100).
 TWO_STREAM_G = 0.85
@@ -278,8 +282,8 @@ def main(
         print("  No snow water content detected; optical depth excludes snow.")
 
         # Calculate column optical depth (2D) from liquid and ice water content
-        # Uses empirical relationships: for liquid LWP = 0.6292 * tau * re,
-        # for ice IWP = 0.350 * tau * re (consistent with plot_optical_depth.py)
+        # Liquid is geometric optics with Q_ext = 2, ice is Ebert & Curry
+        # (1992) band 1 — see cloudyview/optical_depth.py.
         od_col = optical_depth.vertically_integrated_optical_depth(
             field.lwc, field.z, iwc=field.iwc)
 

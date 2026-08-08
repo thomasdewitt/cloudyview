@@ -11,6 +11,23 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+# --- bulk optics -----------------------------------------------------------
+#
+# Liquid is the geometric-optics limit with Q_ext = 2 exactly:
+# tau = 3 Q_ext LWP / (4 rho_w r_e) = 1.5 LWP / r_e for LWP in g/m^2 and
+# r_e in microns (rho_w = 1e6 g/m^3 folds in). Petty (2006), "A First Course
+# in Atmospheric Radiation", 2nd ed., Eq. 7.86. This is the same Q_ext = 2
+# that compute_extinction_field assumes, so the column integral and the
+# volume renderers agree on liquid.
+TAU_PER_LWP_UM = np.float32(1.5)          # m^2 um / g
+
+# Ice is Ebert & Curry (1992), JGR 97(D4), 3831-3836, doi:10.1029/91JD02472,
+# Table 2 band 1 (0.25-0.7 um), used exactly as published:
+# tau / IWP = a + b / r_e  [IWP g/m^2, r_e um].
+EC92_BAND1_A = np.float32(3.448e-3)       # m^2 / g
+EC92_BAND1_B = np.float32(2.431)          # m^2 um / g
+
+
 def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
                             iwc: np.ndarray = None, re_ice: float = 30.0) -> np.ndarray:
     """
@@ -46,7 +63,8 @@ def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
     pressures = p0 * np.exp(-z / scale_height)
     rho_air = (pressures / (R * T)).astype(np.float32)
 
-    # Liquid water contribution
+    # Liquid water contribution. The 1.5 is 3 Q_ext / 4 with Q_ext = 2, the
+    # geometric-optics limit — Petty (2006), Eq. 7.86.
     lwc_g_m3 = lwc * rho_air[np.newaxis, np.newaxis, :]
     rho_water = 1e6  # g/m³
     r_eff_liquid_m = re * 1e-6  # Convert μm to m
@@ -75,7 +93,7 @@ def optical_depth_from_water_paths(
     snow_re: float = 300.0
 ) -> np.ndarray:
     """
-    Calculate optical depth from water paths using relationships from Steve Krueger.
+    Calculate optical depth from liquid, ice and snow water paths.
 
     Parameters
     ----------
@@ -99,19 +117,21 @@ def optical_depth_from_water_paths(
 
     Notes
     -----
-    Uses empirical relationships between water path, effective radius, and optical depth.
-    Default values derived from standard cloud optics literature.
+    Liquid is the geometric-optics limit with Q_ext = 2 (Petty 2006, Eq. 7.86);
+    ice is Ebert & Curry (1992) Table 2 band 1 exactly. See the module header.
     """
-    # Liquid water: LWP = 0.6292 * tau * re (g/m²)
-    tau_liquid = lwp / np.float32(0.6292 * liquid_re)
+    # Liquid: tau = 1.5 * LWP / r_e — Petty (2006), Eq. 7.86 with Q_ext = 2.
+    tau_liquid = lwp * (TAU_PER_LWP_UM / np.float32(liquid_re))
 
-    # Ice: IWP = 0.350 * tau * re (g/m²)
-    tau_ice = iwp / np.float32(0.350 * ice_re)
+    # Ice: tau = IWP * (a + b / r_e) — Ebert & Curry (1992), Table 2 band 1.
+    tau_ice = iwp * (EC92_BAND1_A + EC92_BAND1_B / np.float32(ice_re))
 
-    # Snow: same relationship as ice
+    # Snow: same relationship as ice. r_e = 300 um is well outside the range
+    # Ebert & Curry fit (ice cloud, r_e ~ 5-130 um); extrapolating rather than
+    # splitting snow onto its own parameterization is a deliberate choice.
     tau_snow = np.zeros_like(tau_ice)
     if swp is not None:
-        tau_snow = swp / np.float32(0.350 * snow_re)
+        tau_snow = swp * (EC92_BAND1_A + EC92_BAND1_B / np.float32(snow_re))
     else:
         logger.info("No snow water path detected; using liquid+ice optical depth only.")
 

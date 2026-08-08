@@ -12,7 +12,8 @@
 import {
   AIR_P0, AIR_R, AIR_T, AIR_SCALE_HEIGHT_M,
   SIGMA_LIQUID_PREFACTOR, SIGMA_ICE_PREFACTOR,
-  LWP_TAU_COEFF, IWP_TAU_COEFF, RE_LIQUID_UM, RE_ICE_UM, TWO_STREAM_DENOM,
+  TAU_PER_LWP_UM, EC92_BAND1_A, EC92_BAND1_B,
+  RE_LIQUID_UM, RE_ICE_UM, TWO_STREAM_DENOM,
 } from "./constants.js";
 
 /** Air density (kg/m^3) at height z (m). */
@@ -63,8 +64,8 @@ export function cellThickness(zCoords) {
 
 /** Column optical depth from liquid and ice water paths (g/m^2). */
 export function opticalDepthFromWaterPaths(lwpGm2, iwpGm2) {
-  return lwpGm2 / (LWP_TAU_COEFF * RE_LIQUID_UM)
-       + iwpGm2 / (IWP_TAU_COEFF * RE_ICE_UM);
+  return lwpGm2 * (TAU_PER_LWP_UM / RE_LIQUID_UM)
+       + iwpGm2 * (EC92_BAND1_A + EC92_BAND1_B / RE_ICE_UM);
 }
 
 /** Two-stream visual albedo in [0, 1) from column optical depth. */

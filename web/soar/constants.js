@@ -193,15 +193,24 @@ export const SIGMA_ICE_PREFACTOR =
 // --- column optical depth (glimpse) ---------------------------------------
 //
 // The minimap is a glimpse image, and glimpse does NOT integrate the same
-// sigma the raymarch uses. It goes through water paths and empirical
-// path-to-tau relations, which for ice give 1/(0.350*30) = 0.0952 m^2/g
-// against sigma's 0.0545. So the map cannot be derived from the extinction
-// volume — it is accumulated separately, from lwc and iwc, on the way past.
+// sigma the raymarch uses. Liquid now agrees — both are geometric optics with
+// Q_ext = 2 — but ice does not: Ebert & Curry gives 0.0845 m^2/g at
+// r_e = 30 um against sigma's geometric-optics 0.0545. So the map cannot be
+// derived from the extinction volume — it is accumulated separately, from
+// lwc and iwc, on the way past.
 
-export const LWP_TAU_COEFF = 0.6292;     // LWP = 0.6292 * tau * re_liquid
-export const IWP_TAU_COEFF = 0.350;      // IWP = 0.350  * tau * re_ice
+// tau = 1.5 * LWP / r_e_um: geometric optics, Q_ext = 2 exactly.
+// Petty (2006), "A First Course in Atmospheric Radiation", 2nd ed., Eq. 7.86.
+export const TAU_PER_LWP_UM = 1.5;       // m^2 um / g
+
+// tau = IWP * (a + b / r_e_um): Ebert & Curry (1992), JGR 97(D4), 3831-3836,
+// doi:10.1029/91JD02472, Table 2 band 1 (0.25-0.7 um), used exactly.
+export const EC92_BAND1_A = 3.448e-3;    // m^2 / g
+export const EC92_BAND1_B = 2.431;       // m^2 um / g
 
 // Conservative-scattering two-stream reflectance, A = tau / (tau + 2/(1-g)).
+// Exactly Eq. 5.51 of Bohren & Clothiaux (2006), "Fundamentals of
+// Atmospheric Radiation".
 // Unlike beam opacity it keeps contrast from cirrus (tau ~ 1) all the way to
 // deep cores (tau ~ 100), which is the whole point of the map.
 export const TWO_STREAM_G = 0.85;
