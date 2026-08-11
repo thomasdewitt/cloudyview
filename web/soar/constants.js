@@ -99,18 +99,213 @@ export const AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024;
 
 // --- quality ------------------------------------------------------------
 
+// A tier is four numbers, and only the first three vary.
+//
+// `renderScale` is the FLIGHT scale — what the march runs at while the camera
+// is moving. What a held view converges to is the hold ladder below.
+//
+// `stepFactor` is the view march's step, in voxels. `lightStepFactor` is the
+// light march's, and it is a separate axis because the two degrade very
+// differently. Measured on a 5080 against the TWPICE view at 640x360, taking
+// High as the reference picture:
+//
+//     light step 2x coarser   1.32x faster   RMSE 0.0011
+//     light step 4x coarser   1.51x faster   RMSE 0.0018
+//     light step 8x coarser   1.86x faster   RMSE 0.022
+//
+// The light march is about a third of the frame, and coarsening it costs
+// almost nothing visually until 8x. Lowering `maxLightSteps` — the old way of
+// making the light march cheap — buys a similar amount but TRUNCATES the
+// integration rather than coarsening it, so at a low sun the ray runs out of
+// steps before it leaves the cloud and the tier brightens in a way that
+// depends on the viewing direction. A coarse step integrates the whole path;
+// a low cap integrates part of it and stops. So the cap is now a safety
+// ceiling at DEFAULT_MAX_LIGHT_STEPS for every tier, and the light march is
+// made cheap by its step instead.
+//
+// Holding the cap equal across tiers has a second effect worth as much as the
+// first: it is what the shader is textually specialized on (see
+// specializeShader), so one value means ONE raymarch.wgsl module for the whole
+// session. Switching tiers — which the startup probe does several times in its
+// first half second, and the quality panel does on a click — no longer
+// compiles anything, so there is no stall to hide.
+//
+// The lower tiers therefore do not look like High, on purpose. They are
+// allowed to: their job is to be much faster while the camera moves, and the
+// hold ladder converges every tier to High's own sampling the moment you stop,
+// so the picture you actually study is tier-independent.
 export const QUALITY_PRESETS = {
-  high:   { name: "high",   label: "High",   renderScale: 1.0,  stepFactor: 2.0, maxLightSteps: 512 },
-  medium: { name: "medium", label: "Medium", renderScale: 0.75, stepFactor: 2.5, maxLightSteps: 384 },
-  low:    { name: "low",    label: "Low",    renderScale: 0.60, stepFactor: 3.0, maxLightSteps: 256 },
+  high:   { name: "high",   label: "High",   renderScale: 1.0,
+            stepFactor: 2.0, lightStepFactor: 2.0,
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+  medium: { name: "medium", label: "Medium", renderScale: 0.75,
+            stepFactor: 2.5, lightStepFactor: 4.0,
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+  low:    { name: "low",    label: "Low",    renderScale: 0.60,
+            stepFactor: 3.0, lightStepFactor: 8.0,
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+  // Potato flies at an eighth, not a quarter. A quarter was chosen against a
+  // 5080; a GPU sixty times slower renders potato's own frame in ~30 ms, and
+  // an eighth is four times fewer pixels than a quarter, which brings that
+  // back inside a vsync. Nothing is lost by it: the hold ladder climbs
+  // 0.125 -> 0.25 -> 0.5 -> 1.0 the moment the view is held, so the rough
+  // flight scale is only ever what you see while actually moving.
   potato: { name: "potato", label: "Potato — smooth stills, rough flight",
-            renderScale: 0.25, stepFactor: 4.0, maxLightSteps: 128 },
+            renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
 };
 export const QUALITY_TIER_NAMES = ["high", "medium", "low", "potato"];
+// Cheapest first. This is the order the startup probe walks, and the order
+// matters for more than tidiness — see AUTO_TIER_COST_RATIO_TO_NEXT.
+export const QUALITY_TIERS_CHEAPEST_FIRST = ["potato", "low", "medium", "high"];
+// The tier a Renderer is born with. In practice the startup probe replaces it
+// before the first frame is presented (viewer.loadField sets the probe's
+// starting tier before Renderer.init compiles anything); this is the answer
+// when there is no measurement, which is what the offline capture paths want.
 export const DEFAULT_QUALITY_TIER = "high";
-export const MIN_RENDER_SCALE = 0.25;
+// The floor was 0.25 until potato's flight scale went below it. Only two
+// things read it: renderTargetSize's validation, and the Quality panel's
+// slider bounds (whose step is 0.025 so that both ends stay reachable). The
+// capture paths never see it — they force 1.0.
+export const MIN_RENDER_SCALE = 0.125;
 export const MAX_RENDER_SCALE = 1.0;
+export const RENDER_SCALE_SLIDER_STEP = 0.025;
+
+// --- the progressive hold ladder -----------------------------------------
+//
+// Flying and holding still want opposite things. While the camera moves, the
+// only thing that matters is that the next frame arrives soon, so the march
+// runs at the tier's flight scale. The moment the view is held, latency stops
+// mattering and the picture starts to: the renderer climbs this ladder toward
+// full resolution, accumulating at each rung, so a held view converges to
+// something far better than the tier flew at.
+//
+// Each rung is {scale, sampling}: the render scale to march at, and the tier
+// whose step factors to sample with. A rung whose scale is not strictly above
+// the previous rung's is dropped when the ladder is built, so a hand-set
+// render scale (the Quality panel's slider) simply shortens the ladder instead
+// of contradicting it. Rung 0 is always the flight configuration and is
+// implicit — it is not listed here.
+//
+// The TOP rung is "high" for every tier without exception, and that is the
+// point of the whole mechanism: the tier governs FLIGHT, and a parked picture
+// is tier-independent. Whatever you flew here on, stop moving and the view
+// converges to High's own sampling at full resolution — the same still. This
+// generalizes what the old potato-only parked swap did for one tier.
+//
+// Intermediate rungs keep the flight tier's sampling because they are meant to
+// be cheap stepping stones: their job is to put something settled on screen
+// while the expensive rung is still being paid for, not to be the answer.
+// (Before the light-step rework this rule also avoided a mid-hold shader
+// compile. That reason is gone — every tier now specializes identically — but
+// the rule earns its keep on cost alone.)
+export const QUALITY_HOLD_LADDERS = {
+  high:   [],                                    // flies at 1.0; hold just accumulates
+  medium: [{ scale: 1.00, sampling: "high" }],
+  low:    [{ scale: 1.00, sampling: "high" }],
+  potato: [{ scale: 0.25, sampling: "potato" },
+           { scale: 0.50, sampling: "potato" },
+           { scale: 1.00, sampling: "high" }],
+};
+// Accumulated frames to spend on a rung before climbing to the next. Small,
+// because the point of the low rungs is to show *something* settled while the
+// expensive one is still being paid for; the top rung is where convergence
+// actually happens.
+export const HOLD_RUNG_FRAMES = 4;
+
+// The ceiling on a single held frame, and the reason the climb is gated by a
+// measurement rather than run open-loop.
+//
+// Every rung doubles the linear scale, so it quadruples the pixels, and the
+// top rung changes the sampling on top of that. A machine that settles on
+// potato because potato flies at 10 ms would reach the top rung at something
+// like 10 ms x 64 pixels — half a second in one fragment pass, and on Metal a
+// long enough pass is not slow, it is a dead device. So the ladder predicts
+// the next rung's cost from the rung it is standing on (see
+// Renderer._buildHoldLadder) and refuses to climb past this. A capped ladder
+// converges where it stands, which is the whole point: the view still
+// settles, it just settles at half resolution on hardware that cannot afford
+// full. 400 ms is comfortably inside any GPU watchdog and is a frame you only
+// ever wait for while parked.
+export const HOLD_MAX_FRAME_MS = 400.0;
+
+// The frame count that ends a hold — CONVERGED_ACCUM_FRAMES — is defined with
+// STILL_ACCUMULATE_FRAMES under "capture" below, because it is the same
+// number for the same reason and the two must not drift.
+
+// --- the startup auto-tier probe -----------------------------------------
+//
+// What the probe is aiming at: one frame inside a 60 Hz vsync.
 export const AUTO_TIER_TARGET_MS = 1000.0 / 60.0;
+// The escalation rule, and the safety property that hangs off it.
+//
+// The probe starts at the cheapest tier and escalates only when the tier it
+// just MEASURED predicts that the next tier up will still clear the target
+// with margin:
+//
+//     measured_ms * AUTO_TIER_COST_RATIO_TO_NEXT[tier]
+//         < AUTO_TIER_TARGET_MS * AUTO_TIER_MARGIN
+//
+// so no tier is ever rendered without a measurement below it proving it has
+// room. That is not merely tidy on Apple silicon: Metal's GPU watchdog kills
+// a fragment pass that runs too long, and a killed pass is a lost device,
+// which main.js (rightly) treats as fatal. There is no "try high first and
+// back off" shortcut here and there must never be one — backing off would
+// mean having already submitted the frame that killed the device.
+//
+// The ratios are measured, not guessed. RTX 5080, 2560x1440 output, TWPICE
+// 256^3, two views (a thick one and an overview), at the tier configurations
+// defined above. Per-frame cost is the SLOPE of total time against frame
+// count, which cancels setup, upload and readback:
+//
+//     high     4.75 / 4.59 ms
+//     medium   2.55 / 2.50     -> high:   1.87x / 1.83x
+//     low      1.59 / 1.45     -> medium: 1.61x / 1.73x
+//     potato   0.399 / 0.392   -> low:    3.97x / 3.70x
+//
+// The constants below round those up for headroom. Note how unequal the rungs
+// are: potato to low is a step four times bigger than low to medium. A single
+// flat threshold would be either too timid at the top or reckless at the
+// bottom, which is why the gate is a per-tier ratio rather than one number.
+//
+// One honest caveat about potato. It has 23x fewer pixels than low, yet costs
+// only ~4x less, because at 320x180 the frame stops being about the march at
+// all — command encoding, uniform upload and the blit dominate. That floor is
+// mostly CPU- and driver-side, so it does NOT shrink on a slower GPU, and the
+// true potato->low ratio there is larger than 4.5. The gate is therefore
+// optimistic on exactly the weak hardware it protects.
+//
+// That is a known and bounded weakness, and it is bounded by the ordering
+// rule rather than by this number: being one rung too optimistic costs a
+// settle point that is sluggish, not a machine that freezes, because the tier
+// above is still never rendered without its own completed measurement. The
+// catastrophic case — submitting a High frame on an M1 having measured
+// nothing — is prevented by the walk being strictly one rung at a time, not
+// by the accuracy of these ratios.
+export const AUTO_TIER_COST_RATIO_TO_NEXT = {
+  potato: 4.5,
+  low: 2.0,
+  medium: 2.0,
+};
+export const AUTO_TIER_MARGIN = 0.75;
+// Frames per tier: the first is thrown away and the rest are measured. The
+// throwaway is not politeness, it is the only way the number means anything —
+// the first frame at a tier pays for the pipeline creation (which on Metal
+// happens at first use, inside the frame) and the render-target allocation at
+// that tier's scale. Measuring it would measure the driver.
+export const AUTO_TIER_WARMUP_FRAMES = 1;
+// Timed frames per tier, and why it is odd: the estimate is their MEDIAN. A
+// mean is dragged by any one stall, and a minimum is optimistic on a machine
+// whose frame times are genuinely spread — which is exactly the machine this
+// is protecting. Three is the smallest count for which a median means
+// anything, and the probe is paid for in real frames the user is watching, so
+// it is also as many as is polite. Total cost: 4 frames x 4 tiers, worst case.
+export const AUTO_TIER_SAMPLE_FRAMES = 3;
+// When even the floor tier cannot hold this, say so out loud. There is
+// nothing left to fall back to — the floor is the floor — so the honest
+// move is to settle there and tell the user what they are looking at rather
+// than let them conclude the app is broken.
+export const AUTO_TIER_FLOOR_WARN_MS = 50.0;
 // Ceiling on the timestep the camera, bird and recorder integrate over, so a
 // stall (a tab in the background, a shader compile) does not fling the camera
 // across the domain. It is NOT the clock the FPS readout uses.
@@ -152,6 +347,12 @@ export const COMPASS_EDGES = [
 // --- capture --------------------------------------------------------------
 
 export const STILL_ACCUMULATE_FRAMES = 64;
+// Accumulated frames at the hold ladder's top rung, with the scene unchanged,
+// after which the live loop stops marching: past this, another march costs a
+// full volume traversal to change nothing visible. The same number a still
+// capture accumulates, and deliberately the same constant — a held view and a
+// still are the same picture, so they must settle at the same point.
+export const CONVERGED_ACCUM_FRAMES = STILL_ACCUMULATE_FRAMES;
 export const CAPTURE_SIZE_PRESETS = [
   ["1280 x 720", [1280, 720]],
   ["2K", [1920, 1080]],

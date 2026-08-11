@@ -239,9 +239,15 @@ export class Renderer {
     this.qualityTier = K.DEFAULT_QUALITY_TIER;
     this._flightRenderScale = K.QUALITY_PRESETS[this.qualityTier].renderScale;
     this._cameraMoving = false;
-    this.renderScale = this._flightRenderScale;
-    this.stepFactor = K.QUALITY_PRESETS[this.qualityTier].stepFactor;
-    this.maxLightSteps = K.QUALITY_PRESETS[this.qualityTier].maxLightSteps;
+    this._holdLadder = null;
+    this._holdRung = 0;
+    this._holdCapped = false;
+    this.renderScale = null;
+    this.stepFactor = null;
+    this.lightStepFactor = null;
+    this.maxLightSteps = null;
+    this._resetAccumulation();          // _applyRung resets it again; be defined first
+    this._applyEffectiveQuality();
 
     this.motionBlendAlpha = K.DEFAULT_MOTION_BLEND_ALPHA;
     this.motionResetTranslationM = K.DEFAULT_MOTION_RESET_TRANSLATION_FRACTION *
@@ -250,6 +256,8 @@ export class Renderer {
     this._modules = new Map();
     this._pipelines = new Map();
     this._targets = null;
+    // Scratch for the per-frame accumulation weights; see drawFrame.
+    this._accumWeights = new Float32Array(4);
     this._resetAccumulation();
 
     this.uniformBuf = device.createBuffer({
@@ -425,30 +433,153 @@ export class Renderer {
     moving = Boolean(moving);
     if (moving === this._cameraMoving) return;
     this._cameraMoving = moving;
-    this._applyEffectiveQuality();
+    // Moving is always rung 0. Stopping does NOT jump up the ladder — it
+    // starts at the flight rung and climbs from there, so the first held
+    // frame costs exactly what the last flown one did.
+    this._holdRung = 0;
+    this._holdCapped = false;
+    this._applyRung();
+  }
+
+  // --- the hold ladder ----------------------------------------------------
+
+  /**
+   * Build the rungs this tier can climb while the view is held.
+   *
+   * Rung 0 is the flight configuration — the tier's own sampling at whatever
+   * render scale is in force, which is the preset's unless the Quality
+   * panel's slider has overridden it. Above it come QUALITY_HOLD_LADDERS'
+   * entries, minus any that would not actually be an improvement on the rung
+   * below. That last rule is what makes a hand-set render scale behave: set
+   * it to 1.0 and every tier's ladder collapses to a single rung, which is
+   * "hold just accumulates", which is exactly right.
+   */
+  _buildHoldLadder() {
+    const preset = K.QUALITY_PRESETS[this.qualityTier];
+    const rungs = [{
+      scale: this._flightRenderScale,
+      stepFactor: preset.stepFactor,
+      lightStepFactor: preset.lightStepFactor,
+      maxLightSteps: preset.maxLightSteps,
+      costRatio: 1.0,
+    }];
+    for (const step of K.QUALITY_HOLD_LADDERS[this.qualityTier]) {
+      const below = rungs[rungs.length - 1];
+      if (!(step.scale > below.scale)) continue;
+      const sampling = K.QUALITY_PRESETS[step.sampling];
+      if (!sampling) {
+        throw new Error(
+          `hold ladder for '${this.qualityTier}' names an unknown sampling ` +
+          `tier '${step.sampling}'.`);
+      }
+      rungs.push({
+        scale: step.scale,
+        stepFactor: sampling.stepFactor,
+        lightStepFactor: sampling.lightStepFactor,
+        maxLightSteps: sampling.maxLightSteps,
+        // What this rung is expected to cost relative to the one below it.
+        // Pixels go as the square of the scale. The view march takes a step
+        // every stepFactor voxels, so halving the step factor doubles the
+        // steps. The light march does the same, and is about a third of the
+        // frame — hence the weighted third/two-thirds split rather than
+        // treating the two step factors alike. Crude, and deliberately so: it
+        // is a gate, not a model, and it only has to be right to within the
+        // factor of safety in HOLD_MAX_FRAME_MS.
+        costRatio: (step.scale / below.scale) ** 2
+                 * ((2 / 3) * (below.stepFactor / sampling.stepFactor)
+                    + (1 / 3) * (below.lightStepFactor
+                                 / sampling.lightStepFactor)),
+      });
+    }
+    this._holdLadder = rungs;
+    this._holdRung = 0;
+    this._holdCapped = false;
+  }
+
+  _applyEffectiveQuality() {
+    this._buildHoldLadder();
+    this._applyRung();
+  }
+
+  /** Put the current rung's numbers in force, restarting accumulation if they moved. */
+  _applyRung() {
+    const rung = this._holdLadder[this._holdRung];
+    const changed = rung.scale !== this.renderScale
+      || rung.stepFactor !== this.stepFactor
+      || rung.lightStepFactor !== this.lightStepFactor
+      || rung.maxLightSteps !== this.maxLightSteps;
+    this.renderScale = rung.scale;
+    this.stepFactor = rung.stepFactor;
+    this.lightStepFactor = rung.lightStepFactor;
+    this.maxLightSteps = rung.maxLightSteps;
+    if (changed) this._resetAccumulation();
   }
 
   /**
-   * Potato is the only tier that behaves differently parked: it swaps to
-   * High's sampling AND forces full render scale, so a still converges
-   * properly instead of accumulating a quarter-resolution smear.
+   * One live frame's worth of hold progress. The live loop calls this and
+   * nothing else does — the offline capture paths drive drawFrame directly
+   * and must never climb, because their output has to be reproducible.
+   *
+   * Climbing throws away the rung below rather than upscaling it into the new
+   * accumulator. That is a deliberate choice and it is safe: the first frame
+   * after a reset is drawn unjittered (subpixel = false, see
+   * _accumulationPlan), which is a clean, complete image — the same frame the
+   * view already shows every time a turn ends. So the switch reads as
+   * coarse-then-sharp, never as a flash or a black frame. Seeding the new
+   * accumulator from the old one would need a second, non-dithering upscale
+   * pipeline and a reordering of _targetsFor's destroy-then-create, for a
+   * transition that is already not visible as a regression.
+   *
+   * `lastMarchMs` is how long the previous marched frame took. The climb is
+   * gated on it: a rung is only taken when the rung below it, measured,
+   * predicts the new one will land inside HOLD_MAX_FRAME_MS. Nothing is ever
+   * rendered at a cost that has not been justified from below — the same
+   * invariant the startup tier probe runs on, and for the same reason.
    */
-  _applyEffectiveQuality() {
-    const preset = K.QUALITY_PRESETS[this.qualityTier];
-    let effective = preset;
-    if (this.qualityTier === "potato" && !this._cameraMoving) {
-      effective = K.QUALITY_PRESETS.high;
+  holdTick(lastMarchMs = null) {
+    if (this._cameraMoving || this._holdCapped) return;
+    if (this._holdRung >= this._holdLadder.length - 1) return;
+    if (this._accumCount < K.HOLD_RUNG_FRAMES) return;
+    const next = this._holdLadder[this._holdRung + 1];
+    if (lastMarchMs === null) return;     // no measurement yet: not next frame's problem
+    if (lastMarchMs * next.costRatio > K.HOLD_MAX_FRAME_MS) {
+      // This machine cannot afford the rest of the ladder. Stop here and let
+      // the view converge where it stands rather than never converging (and
+      // so never sleeping) on exactly the hardware that most needs the sleep.
+      // A one-off stall can trip this spuriously; the cost is a still that
+      // settles a rung low, and it clears the moment the camera moves again.
+      this._holdCapped = true;
+      return;
     }
-    const renderScale =
-      (effective.name === "high" && this.qualityTier === "potato")
-        ? 1.0 : this._flightRenderScale;
-    const changed = renderScale !== this.renderScale
-      || effective.stepFactor !== this.stepFactor
-      || effective.maxLightSteps !== this.maxLightSteps;
-    this.renderScale = renderScale;
-    this.stepFactor = effective.stepFactor;
-    this.maxLightSteps = effective.maxLightSteps;
-    if (changed) this._resetAccumulation();
+    this._holdRung += 1;
+    this._applyRung();
+  }
+
+  /** Which rung is in force, and how many there are. For the stats readout. */
+  get holdRung() { return this._holdRung; }
+  get holdRungCount() { return this._holdLadder.length; }
+  /** True when the ladder stopped short because the next rung was too dear. */
+  get holdCapped() { return this._holdCapped; }
+
+  /**
+   * The view is settled: as high up the ladder as this machine will go, no
+   * motion blend left in the buffer, and enough samples that another march
+   * would change nothing anyone can see. This is the live loop's signal to
+   * stop marching.
+   */
+  get converged() {
+    const atTop = this._holdRung === this._holdLadder.length - 1
+      || this._holdCapped;
+    return !this._cameraMoving && atTop && !this._accumMotion
+      && this._accumCount >= K.CONVERGED_ACCUM_FRAMES;
+  }
+
+  /** Samples blended into the picture on screen. The stats readout's "spp". */
+  get accumCount() { return this._accumCount; }
+
+  /** Whether there is a finished frame to re-present without marching. */
+  get canPresentLast() {
+    return Boolean(this._lastPresented && this._targets);
   }
 
   setPeriodic(periodic) {
@@ -461,12 +592,19 @@ export class Renderer {
     this.scene.writeGhostBorder?.(periodic);
   }
 
+  // The view march's step and the light march's are separate numbers now; see
+  // QUALITY_PRESETS for the measurements that separated them. They are equal
+  // at High, and at every tier's top hold rung, which is High's sampling — so
+  // a converged still is stepped identically whatever tier flew there.
   get dtView() { return this.scene.minVoxelM * this.stepFactor; }
-  get dtLight() { return this.dtView; }
+  get dtLight() { return this.scene.minVoxelM * this.lightStepFactor; }
   get dtViewNest() {
     return (this.scene.minVoxelNestM ?? this.scene.minVoxelM) * this.stepFactor;
   }
-  get dtLightNest() { return this.dtViewNest; }
+  get dtLightNest() {
+    return (this.scene.minVoxelNestM ?? this.scene.minVoxelM)
+      * this.lightStepFactor;
+  }
 
   // --- pipelines ----------------------------------------------------------
 
@@ -561,6 +699,20 @@ export class Renderer {
         sample: make("soar-sample", SAMPLE_FORMAT),
         accumA: make("soar-accum-a", ACCUM_FORMAT),
         accumB: make("soar-accum-b", ACCUM_FORMAT),
+      }));
+    // The two accumulation bind groups, built once per target set rather than
+    // once per frame. Index i is the group to use when _accumIndex is i: it
+    // reads the sample target and the accumulator NOT being written this
+    // frame. Ordered to match the outTex choice in drawFrame.
+    const t = this._targets;
+    t.accumBindGroups = [t.accumA, t.accumB].map((prevTex) =>
+      this.device.createBindGroup({
+        layout: this.accumLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this.accumUniformBuf } },
+          { binding: 1, resource: t.sample.createView() },
+          { binding: 2, resource: prevTex.createView() },
+        ],
       }));
     this._resetAccumulation();
     return this._targets;
@@ -671,19 +823,24 @@ export class Renderer {
     const targets = await this._targetsFor(renderSize[0], renderSize[1]);
     const targetView = typeof target === "function" ? target() : target;
 
-    // Pack once to learn the scene key, then re-pack with the sampling flags
-    // the plan chose. Row 10 is excluded from the key precisely so this is
-    // safe — the flags cannot change the decision that produced them.
+    // Pack ONCE, learn the scene key from it, then write the sampling flags
+    // the plan chose straight into row 10. Row 10 is excluded from the key
+    // precisely so this is safe — the flags are outputs of the decision that
+    // produced them and cannot change it.
+    //
+    // This used to re-pack the whole block instead, which meant running the
+    // spectral sky solve, the light-transfer split and two dozen rows of
+    // trigonometry a second time every frame to alter two floats. Nothing
+    // else in the block depends on subpixel or jitterScale; row 10's z and w
+    // are always zero, in both the packed default and here.
     const state = this._sceneState();
-    let u = packUniforms(state, { ...view, outputSize, renderSize });
+    const u = packUniforms(state, { ...view, outputSize, renderSize });
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
     if (plan) {
-      u = packUniforms(state, {
-        ...view, outputSize, renderSize,
-        subpixel: plan.subpixel, jitterScale: plan.jitterScale,
-      });
+      u[10 * 4] = plan.subpixel ? 1.0 : 0.0;
+      u[10 * 4 + 1] = plan.jitterScale;
     } else {
       this._resetAccumulation();
     }
@@ -717,8 +874,11 @@ export class Renderer {
       return;
     }
 
-    this.device.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array(
-      [plan.prevWeight, plan.sampleWeight, 0, 0]));
+    // One scratch array for the blend weights, refilled rather than rebuilt.
+    // writeBuffer copies out of it synchronously, so reusing it is safe.
+    this._accumWeights[0] = plan.prevWeight;
+    this._accumWeights[1] = plan.sampleWeight;
+    this.device.queue.writeBuffer(this.accumUniformBuf, 0, this._accumWeights);
 
     let p = pass(targets.sample.createView());
     p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
@@ -726,18 +886,15 @@ export class Renderer {
     p.draw(3);
     p.end();
 
-    const prevTex = this._accumIndex === 0 ? targets.accumA : targets.accumB;
+    // The accumulator ping-pongs between two textures, so there are exactly
+    // two bind groups for the whole life of a target set. They were being
+    // built from scratch every frame — along with three texture views — for a
+    // pair of resources that only change when the render target is
+    // reallocated, which is where they are now built instead.
     const outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
     p = pass(outTex.createView());
     p.setPipeline(this.accumPipeline);
-    p.setBindGroup(0, this.device.createBindGroup({
-      layout: this.accumLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.accumUniformBuf } },
-        { binding: 1, resource: targets.sample.createView() },
-        { binding: 2, resource: prevTex.createView() },
-      ],
-    }));
+    p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
     p.draw(3);
     p.end();
 
@@ -773,13 +930,22 @@ export class Renderer {
     p.end();
   }
 
-  /** Re-present the last accumulated frame without marching again. */
-  presentLast(targetView, targetFormat, outputSize) {
-    if (!this._lastPresented || !this._targets) return false;
+  /**
+   * Re-present the last accumulated frame without marching again, drawing
+   * `overlays` over it as drawFrame would.
+   *
+   * This is the cheap half of the live loop once the view has converged: the
+   * volume is not traversed at all, and the frame costs one full-screen blit
+   * plus whatever the overlays are. The bird is why the loop still runs at
+   * all in that state — it flies whether or not the camera does.
+   */
+  presentLast(targetView, targetFormat, outputSize, overlays = null) {
+    if (!this.canPresentLast) return false;
     const encoder = this.device.createCommandEncoder();
     this._encodeBlit(
       encoder, this._lastPresented, targetView, targetFormat,
       this._targets.w === outputSize[0] && this._targets.h === outputSize[1]);
+    encodeOverlays(overlays, encoder, targetView, targetFormat);
     this.device.queue.submit([encoder.finish()]);
     return true;
   }

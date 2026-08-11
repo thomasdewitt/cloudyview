@@ -222,16 +222,32 @@ export function motionAlphaForDt(alpha, referenceFps, deltaSeconds) {
 }
 
 /**
- * Highest tier whose measured frame time clears the target. Mirrors
- * engine.choose_quality_tier, including its order.
+ * The tier to escalate to after measuring `tier` at `measuredMs`, or null to
+ * settle where we are.
+ *
+ * This replaces an earlier `chooseQualityTier`, which took a frame time for
+ * every tier and picked the best one that fit. That shape cannot be used
+ * here, and the reason is worth keeping: to fill in its argument you have to
+ * have already rendered a frame at every tier, including the one that is too
+ * expensive — and rendering one frame that is too expensive is precisely the
+ * failure being avoided (a multi-second fragment pass freezes the machine and
+ * can lose the device to the GPU watchdog). So the decision is made one rung
+ * at a time, upward, and each step is justified by a measurement taken below
+ * it. See AUTO_TIER_COST_RATIO_TO_NEXT for the numbers and the argument.
  */
-export function chooseQualityTier(frameTimesMs, targetMs = K.AUTO_TIER_TARGET_MS) {
-  for (const name of K.QUALITY_TIER_NAMES) {
-    const v = frameTimesMs[name];
-    if (!Number.isFinite(v) || v <= 0) {
-      throw new Error(`frame time for tier '${name}' must be finite and > 0.`);
-    }
-    if (v <= targetMs) return name;
+export function escalateQualityTier(tier, measuredMs) {
+  const order = K.QUALITY_TIERS_CHEAPEST_FIRST;
+  const at = order.indexOf(tier);
+  if (at < 0) throw new Error(`unknown quality tier '${tier}'.`);
+  if (!(Number.isFinite(measuredMs) && measuredMs >= 0)) {
+    throw new Error(
+      `measured frame time must be finite and >= 0; got ${measuredMs}.`);
   }
-  return "potato";
+  if (at === order.length - 1) return null;          // nothing dearer to try
+  const ratio = K.AUTO_TIER_COST_RATIO_TO_NEXT[tier];
+  if (!(ratio > 0)) {
+    throw new Error(`no cost ratio recorded for quality tier '${tier}'.`);
+  }
+  const budget = K.AUTO_TIER_TARGET_MS * K.AUTO_TIER_MARGIN;
+  return measuredMs * ratio < budget ? order[at + 1] : null;
 }
