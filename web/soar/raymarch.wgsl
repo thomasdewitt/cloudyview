@@ -185,7 +185,7 @@ const SHALLOW_SUPPRESSION_KEEP: f32 = 0.25;
 // High-sun skylight reaching saturated shadow, by openness. The low-sun
 // path (light-transfer split) keeps its exact 0.26 as split -> 1.
 const HIGH_SUN_SHADOW_SKYLIGHT_STORM: f32 = 0.03;
-const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.18;
+const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.45;
 // The high-sun skylight fill engages on *moderate* shadow, not the deep
 // gate: direct light is spent by tau_sun ~ 5 and the MS octaves by ~ 20,
 // so a fair-weather base at tau_sun 15-38 was pitch dark yet entirely
@@ -203,10 +203,16 @@ const SHADOW_SKYLIGHT_TAU_FULL: f32 = 26.0;
 // the tau_sun the light march already measured, the return is analytic.
 // Gated in as the MS ladder dies (no double counting below tau ~8); a
 // buried storm keeps only DIFFUSE_BEAM_STORM_KEEP of it.
-const DIFFUSE_BEAM_STRENGTH: f32 = 1.0;
-const DIFFUSE_BEAM_TAU_START: f32 = 8.0;
-const DIFFUSE_BEAM_TAU_FULL: f32 = 24.0;
+const DIFFUSE_BEAM_STRENGTH: f32 = 0.95;
+const DIFFUSE_BEAM_TAU_START: f32 = 6.0;
+const DIFFUSE_BEAM_TAU_FULL: f32 = 22.0;
 const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.25;
+// Spectral tint of the diffused beam: hundreds of scatterings put an
+// effective absorption path of tens of meters of liquid water on this
+// light, and water absorbs red far more than blue (single-scatter albedo
+// ~0.998 at 680 nm vs ~0.9999 at 460 nm) — deep-diffused daylight is
+// measurably blue. Reference bases sit at linear B/R ~ 2.4.
+const DIFFUSE_BEAM_TINT: vec3<f32> = vec3<f32>(0.85, 0.97, 1.08);
 // Ambient height ramp floor for open shallow cloud (storms keep
 // AMBIENT_HEIGHT_FLOOR = 0.3): an open base sees the sky sideways and the
 // bright surface below, so its fill should not fall to a third.
@@ -2228,7 +2234,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                       deep_shadow_gate * (1.0 - shallow_open));
             if (diffuse_beam > 0.0) {
                 col = col + transmittance * d_tau * diffuse_beam * air_t
-                            * ISO_PHASE * u.cloud_sun.xyz;
+                            * ISO_PHASE * DIFFUSE_BEAM_TINT * u.cloud_sun.xyz;
             }
 
             // Surface bounce is anchored at physical z=0, not the AABB floor.
