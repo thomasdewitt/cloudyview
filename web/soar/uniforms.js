@@ -10,7 +10,7 @@
 import * as K from "./constants.js";
 import {
   directionFromAzimuthElevation, spectralLightingColors,
-  effectiveLightTransferSplit,
+  effectiveLightTransferSplit, aerialBetaPerKm, oceanHazeExtinctionPerKm,
 } from "./spectral.js";
 import { cameraBasis } from "./camera.js";
 
@@ -75,12 +75,13 @@ export function packUniforms(state, view) {
     lowSunSkyFieldStrength = K.LOW_SUN_SKY_FIELD_STRENGTH,
     lightTransferSplitStrength = K.LIGHT_TRANSFER_SPLIT_STRENGTH,
     aerialPerspectiveStrength = K.AERIAL_PERSPECTIVE_STRENGTH,
+    // One number for the whole aerosol story; no per-term override exists.
+    haze = K.DEFAULT_HAZE,
     oceanRealism = K.OCEAN_REALISM,
     oceanMipBias = K.OCEAN_MIP_BIAS,
     oceanGlintStrength = K.OCEAN_GLINT_STRENGTH,
     oceanGlintRoughness = K.OCEAN_GLINT_ROUGHNESS,
     oceanSlopeDrawFraction = K.OCEAN_SLOPE_DRAW_FRACTION,
-    oceanHazeExtinctionPerKm = K.OCEAN_HAZE_EXTINCTION_PER_KM,
     oceanSkyShadowFloor = K.OCEAN_SKY_SHADOW_FLOOR,
     coneStencilThetaDeg = K.CONE_STENCIL_THETA_DEG,
     lightMarchLodDegrees = K.APP_LIGHT_MARCH_LOD_DEGREES,
@@ -99,6 +100,7 @@ export function packUniforms(state, view) {
   unitInterval("low_sun_sky_field_strength", lowSunSkyFieldStrength);
   unitInterval("ocean_realism", oceanRealism);
   unitInterval("ocean_sky_shadow_floor", oceanSkyShadowFloor);
+  unitInterval("haze", haze);
   if (!(aerialPerspectiveStrength >= 0.0)) {
     throw new Error(
       `aerial_perspective_strength must be >= 0; got ${aerialPerspectiveStrength}.`);
@@ -154,8 +156,9 @@ export function packUniforms(state, view) {
   row(7, w, h, gHg, ambientStrength);
   row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
   row(9, oceanFifDx, oceanTileExtent, oceanEnabled ? 1.0 : 0.0, oceanMaxLod);
-  // Row 10 is sampling flags only — deliberately excluded from scene identity.
-  row(10, subpixel ? 1.0 : 0.0, jitterScale, 0.0, 0.0);
+  // x/y are sampling flags, excluded from scene identity; z is haze, which
+  // is scene state and is not. See sceneKey.
+  row(10, subpixel ? 1.0 : 0.0, jitterScale, haze, 0.0);
   row(11, gradientShadingStrength, deepShadowMsSuppression,
        ambientOcclusionStrength, bounceDepthAttenuation);
   row(12, gradientCoarseWeight, gradientCoarseRadiusM, ambientOcclusionFloor,
@@ -166,10 +169,10 @@ export function packUniforms(state, view) {
   row(15, spec.horizon[0], spec.horizon[1], spec.horizon[2],
        aerialPerspectiveStrength);
   row(16, spec.bloom[0], spec.bloom[1], spec.bloom[2],
-       K.AERIAL_BETA_PER_KM * 1e-3);           // w: beta0 in m^-1
+       aerialBetaPerKm(haze) * 1e-3);          // w: beta0 in m^-1
   row(17, spec.disc[0], spec.disc[1], spec.disc[2], K.AERIAL_SCALE_HEIGHT_M);
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
-  row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm * 1e-3,
+  row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
        oceanSkyShadowFloor, 0.0);
   row(20, periodic ? 1.0 : 0.0,
        Math.tan(lightMarchLodDegrees * DEG),
@@ -189,8 +192,10 @@ export function packUniforms(state, view) {
  *   row 4.w  — the frame index only decorrelates jitter seeds. If it counted,
  *              every frame would read as a scene change and nothing would
  *              ever converge.
- *   row 10   — the sampling flags are OUTPUTS of the accumulation decision.
- *              Including them would make the key self-referential.
+ *   row 10.x/y — the sampling flags are OUTPUTS of the accumulation decision.
+ *              Including them would make the key self-referential. Only those
+ *              two: row 10.z is haze, which is scene state like any other and
+ *              must restart the average when it moves.
  *
  * maxLightSteps and the output size are folded in because both change the
  * image without appearing in the buffer.
@@ -199,7 +204,6 @@ export function sceneKey(u, maxLightSteps, outputW, outputH) {
   const copy = new Float32Array(u);
   copy[4 * 4 + 3] = 0.0;
   copy[10 * 4] = 0.0; copy[10 * 4 + 1] = 0.0;
-  copy[10 * 4 + 2] = 0.0; copy[10 * 4 + 3] = 0.0;
   const key = new Uint8Array(copy.byteLength + 12);
   key.set(new Uint8Array(copy.buffer), 0);
   new DataView(key.buffer).setUint32(copy.byteLength, maxLightSteps, true);

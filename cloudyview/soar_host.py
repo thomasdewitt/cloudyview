@@ -210,12 +210,15 @@ class ViewState:
     low_sun_sky_field_strength: float = look.LOW_SUN_SKY_FIELD_STRENGTH
     light_transfer_split_strength: float = look.LIGHT_TRANSFER_SPLIT_STRENGTH
     aerial_perspective_strength: float = look.AERIAL_PERSPECTIVE_STRENGTH
+    # One number for the whole aerosol story: aerial extinction, the sky's
+    # horizon wedge, the circumsolar lobe, the haze over the sea. There is
+    # deliberately no per-term override — see look.DEFAULT_HAZE.
+    haze: float = look.DEFAULT_HAZE
     ocean_realism: float = look.OCEAN_REALISM
     ocean_mip_bias: float = look.OCEAN_MIP_BIAS
     ocean_glint_strength: float = look.OCEAN_GLINT_STRENGTH
     ocean_glint_roughness: float = look.OCEAN_GLINT_ROUGHNESS
     ocean_slope_draw_fraction: float = look.OCEAN_SLOPE_DRAW_FRACTION
-    ocean_haze_extinction_per_km: float = look.OCEAN_HAZE_EXTINCTION_PER_KM
     ocean_sky_shadow_floor: float = look.OCEAN_SKY_SHADOW_FLOOR
     cone_stencil_theta_deg: float = look.CONE_STENCIL_THETA_DEG
     light_march_lod_degrees: float = APP_LIGHT_MARCH_LOD_DEGREES
@@ -241,7 +244,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     _non_negative("ocean_glint_strength", view.ocean_glint_strength)
     _non_negative("ocean_glint_roughness", view.ocean_glint_roughness)
     _unit_interval("ocean_slope_draw_fraction", view.ocean_slope_draw_fraction)
-    _non_negative("ocean_haze_extinction_per_km", view.ocean_haze_extinction_per_km)
+    _unit_interval("haze", view.haze)
     _lod_degrees("light_march_lod_degrees", view.light_march_lod_degrees)
     _lod_degrees("view_step_lod_degrees", view.view_step_lod_degrees)
     if not (0.0 <= view.cone_stencil_theta_deg < 90.0):
@@ -282,7 +285,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[8] = (state.ocean_z, *state.ocean_reflectance)
     u[9] = (state.ocean_fif_dx, state.ocean_tile_extent,
             1.0 if state.ocean_enabled else 0.0, float(state.ocean_max_lod))
-    u[10] = (1.0 if view.subpixel else 0.0, view.jitter_scale, 0.0, 0.0)
+    u[10] = (1.0 if view.subpixel else 0.0, view.jitter_scale, view.haze, 0.0)
     u[11] = (view.gradient_shading_strength, view.deep_shadow_ms_suppression,
              view.ambient_occlusion_strength, view.bounce_depth_attenuation)
     u[12] = (view.gradient_coarse_weight, view.gradient_coarse_radius_m,
@@ -291,12 +294,12 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[13] = (*cloud_sun, view.low_sun_sky_field_strength)
     u[14] = (*ambient, split)
     u[15] = (*horizon, view.aerial_perspective_strength)
-    u[16] = (*bloom, look.AERIAL_BETA_PER_KM * 1e-3)
+    u[16] = (*bloom, look.aerial_beta_per_km(view.haze) * 1e-3)
     u[17] = (*disc, look.AERIAL_SCALE_HEIGHT_M)
     u[18] = (view.ocean_realism, view.ocean_mip_bias,
              view.ocean_glint_strength, view.ocean_glint_roughness)
     u[19] = (view.ocean_slope_draw_fraction,
-             view.ocean_haze_extinction_per_km * 1e-3,
+             look.ocean_haze_extinction_per_km(view.haze) * 1e-3,
              view.ocean_sky_shadow_floor, 0.0)
     u[20] = (1.0 if state.periodic else 0.0,
              math.tan(view.light_march_lod_degrees * DEG),

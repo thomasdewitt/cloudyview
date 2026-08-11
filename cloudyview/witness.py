@@ -44,6 +44,7 @@ from .cli_utils import (
     dataset_selection_kwargs,
 )
 from .cloudfield import CloudField, load as _load_field
+from .look import DEFAULT_HAZE
 from .soar_host import (
     DEFAULT_TONE_MAP_GAMMA,
     STILL_ACCUMULATE_FRAMES,
@@ -189,6 +190,7 @@ def render_nested(
     fov_degrees: float = 100.0,
     exposure: float = 4.0,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
+    haze: float = DEFAULT_HAZE,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
@@ -241,7 +243,7 @@ def render_nested(
         azimuth=azimuth, elevation=elevation, fov=fov_degrees,
         output_size=(w, h), render_size=(w, h),
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
-        exposure=exposure, tone_map_gamma=tone_map_gamma,
+        exposure=exposure, tone_map_gamma=tone_map_gamma, haze=haze,
     )
     if verbose:
         print(f"  Rendering {w}x{h}, {accumulate} accumulated passes, "
@@ -263,6 +265,7 @@ def witness(
     sun_elevation: Optional[float] = None,
     exposure: Optional[float] = None,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
+    haze: Optional[float] = None,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     verbose: bool = False,
@@ -287,6 +290,11 @@ def witness(
     tone_map_gamma : float, optional
         Display encode. Defaults to soar's 2.66; pass
         TONE_MAP_GAMMA_WITNESS (1.4) for the pre-2026-08 look.
+    haze : float, optional
+        Aerosol amount in [0, 1], the same slider soar shows. Drives the
+        aerial perspective, the sky's horizon whitening, the circumsolar
+        lobe and the haze over the sea together. Default 0.35, the tuned
+        look.
     periodic : bool, optional
         Wrap the domain in x and y, as soar does for LES fields. Requires
         the sun above the horizon.
@@ -313,6 +321,8 @@ def witness(
         sun_elevation = witness_config['sun']['elevation']
     if exposure is None:
         exposure = rendering['exposure']
+    if haze is None:
+        haze = DEFAULT_HAZE
 
     iwc = field.iwc
     if iwc is not None and float(np.max(iwc)) < ICE_NEGLIGIBLE_G_KG:
@@ -343,7 +353,7 @@ def witness(
         azimuth=camera.azimuth, elevation=camera.elevation,
         fov_degrees=camera.fov, image_size=tuple(size),
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
-        exposure=exposure, tone_map_gamma=tone_map_gamma,
+        exposure=exposure, tone_map_gamma=tone_map_gamma, haze=haze,
         periodic=periodic, accumulate=accumulate, verbose=verbose)
 
 

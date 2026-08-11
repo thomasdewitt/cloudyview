@@ -51,6 +51,7 @@ class Viewer {
     this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
     this.sunElevation = K.DEFAULT_SUN_ELEVATION;
     this.toneMapGamma = K.DEFAULT_TONE_MAP_GAMMA;
+    this.haze = K.DEFAULT_HAZE;
     this.beholdQuality = K.DEFAULT_BEHOLD_QUALITY;
     this.beholdField = "outer";   // "outer" or "nest": behold renders one
     this.captureSize = null;
@@ -891,6 +892,20 @@ class Viewer {
   }
 
   /**
+   * How much aerosol is in the air, 0 to 1. Unlike the gamma above this is
+   * not a display choice — it changes what the march computes, so the frames
+   * already averaged are of a different sky and cannot be kept.
+   */
+  setHaze(haze) {
+    if (!(haze >= 0.0 && haze <= 1.0)) {
+      throw new Error(`haze must be in [0, 1]; got ${haze}.`);
+    }
+    this.haze = haze;
+    this.renderer.resetAccumulation();
+    this._wake("haze");
+  }
+
+  /**
    * The Quality panel's tier buttons. Choosing by hand ends the automatic
    * choice for the session — including on the next field loaded, because
    * having the app overrule a deliberate choice a minute later is worse than
@@ -1242,6 +1257,7 @@ class Viewer {
         periodic: this.renderer.periodic,
         accumulate_frames: K.STILL_ACCUMULATE_FRAMES,
         tone_map_gamma: this.toneMapGamma,
+        haze: this.haze,
         light_march_lod_degrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
         view_step_lod_degrees: K.APP_VIEW_STEP_LOD_DEGREES,
       },
@@ -1408,6 +1424,7 @@ class Viewer {
       sunAzimuth: this.sunAzimuth,
       sunElevation: this.sunElevation,
       toneMapGamma: this.toneMapGamma,
+      haze: this.haze,
       lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES,
       frameIndex: this.frameIndex,

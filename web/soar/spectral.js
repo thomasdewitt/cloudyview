@@ -15,6 +15,8 @@ import {
   ATMOSPHERE_AEROSOL_ANGSTROM, ATMOSPHERE_RGB_WAVELENGTHS_NM,
   SUNSET_HORIZON_RADIANCE,
   LIGHT_TRANSFER_FULL_ELEVATION_DEG, LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG,
+  DEFAULT_HAZE, AERIAL_BETA_PER_KM, AERIAL_BETA_FLOOR_PER_KM,
+  OCEAN_HAZE_EXTINCTION_PER_KM,
 } from "./constants.js";
 
 const DEG = Math.PI / 180.0;
@@ -129,4 +131,30 @@ export function effectiveLightTransferSplit(strength, sunElevationDeg) {
     return strength * (m * m * (3.0 - 2.0 * m));  // smoothstep
   }
   return strength;
+}
+
+// Aerosol loading rises faster than linearly with the slider, so haze 1 is a
+// real murk (0.11/km, ~36 km visual range by Koschmieder) rather than a
+// slightly softer default. Twin of look.py's _AERIAL_BETA_HAZE_COEFFICIENT.
+const AERIAL_BETA_HAZE_COEFFICIENT =
+  (AERIAL_BETA_PER_KM - AERIAL_BETA_FLOOR_PER_KM)
+  / (DEFAULT_HAZE * Math.sqrt(DEFAULT_HAZE));
+const OCEAN_HAZE_BETA_RATIO =
+  OCEAN_HAZE_EXTINCTION_PER_KM / AERIAL_BETA_PER_KM;
+
+/**
+ * Sea-level clear-air extinction for a haze setting in [0, 1].
+ *
+ * h**1.5 is spelled h*sqrt(h) because sqrt is correctly rounded by IEEE-754
+ * and Math.pow is not: this number is packed into a uniform block that
+ * tests/test_uniform_parity.py diffs byte for byte against Python.
+ */
+export function aerialBetaPerKm(haze) {
+  return AERIAL_BETA_FLOOR_PER_KM
+    + AERIAL_BETA_HAZE_COEFFICIENT * (haze * Math.sqrt(haze));
+}
+
+/** Haze over the sea, held at its tuned ratio to the sky's own extinction. */
+export function oceanHazeExtinctionPerKm(haze) {
+  return OCEAN_HAZE_BETA_RATIO * aerialBetaPerKm(haze);
 }
