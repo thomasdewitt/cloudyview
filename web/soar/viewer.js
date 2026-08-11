@@ -19,6 +19,7 @@ import {
 } from "./track.js";
 import { UI } from "./ui.js";
 import { mod360 } from "./spectral.js";
+import { escalateQualityTier } from "./uniforms.js";
 import {
   renderStill, imageDataToPng, download, timestampedName,
   createOfflineTarget, beginOfflineRender, endOfflineRender, renderAccumulated,
@@ -68,6 +69,28 @@ class Viewer {
     this._lastSignature = null;
     this._discardNextPointerMove = false;
 
+    // Quality is measured, not assumed. `qualityTier` is the answer for this
+    // session — set by the startup probe, or by the user in the Quality
+    // panel, which also switches `_autoTier` off for good: having chosen once
+    // by hand, they should not have the choice taken back on the next field.
+    this.qualityTier = null;
+    this._autoTier = true;
+    this._probe = null;
+
+    // The loop sleeps on a converged view (see _frame) and only these three
+    // fields say so. `_sleeping` means no rAF is pending and only _wake can
+    // start one; `_marchPending` means the next frame must re-march whatever
+    // the accumulation state thinks; `_lastMarchMs` is what the last marched
+    // frame cost, which is what gates the hold ladder's next rung.
+    this._sleeping = false;
+    this._marchPending = true;
+    this._lastMarchMs = null;
+    this._prevFrameMarched = false;
+    this._wakeReason = null;
+    this._resizeObserver = null;
+    this._loadNotes = null;
+    this._loadNotesUntil = 0;
+
     // The frame loop is identified by a generation, not by a boolean.
     //
     // A frame is async: it can be sitting in an await when the field is
@@ -95,6 +118,9 @@ class Viewer {
   }
 
   get isFullscreen() { return Boolean(document.fullscreenElement); }
+
+  /** Whether soar is still choosing the quality tier by measurement. */
+  get autoTier() { return this._autoTier; }
 
   get sourceLabel() {
     return this.scene.title
@@ -191,6 +217,12 @@ class Viewer {
       renderer = new Renderer(this.device, this.shaderSource, scene,
                               { canvasFormat: this.canvasFormat });
       if (scene.periodicDefault === false) renderer.setPeriodic(false);
+      // Choose the tier BEFORE init(), because init() is what compiles and
+      // validates the shader, and the shader is specialized on the tier's
+      // maxLightSteps. Setting it afterwards would compile a module for a
+      // tier no frame is ever drawn at, and would make the probe's first
+      // frame pay for a second compile.
+      renderer.setQualityTier(this._startingQualityTier());
       progress("Compiling the shader…", 0.97);
       await renderer.init();
 
@@ -256,7 +288,163 @@ class Viewer {
         `${scene.skipped.length} group(s) in this file could not be read, ` +
         `and were not offered:\n${scene.skipped.join("\n")}`);
     }
-    if (notes.length) this.ui.say(notes.join("\n\n"), 6 + 3 * notes.length);
+    // Kept as well as said, because the auto-quality result lands a second or
+    // so later and say() replaces rather than queues; _announceAutoTier
+    // repeats these alongside it rather than wiping them.
+    if (notes.length) {
+      const seconds = 6 + 3 * notes.length;
+      this._loadNotes = notes.join("\n\n");
+      this._loadNotesUntil = performance.now() + seconds * 1000;
+      this.ui.say(this._loadNotes, seconds);
+    } else {
+      this._loadNotes = null;
+      this._loadNotesUntil = 0;
+    }
+
+    this._beginAutoTier();
+  }
+
+  // --- choosing a quality tier by measurement ------------------------------
+
+  /**
+   * The tier the first frame of a newly loaded field is drawn at.
+   *
+   * When the probe is going to run this is the FLOOR, and that is a safety
+   * property rather than a preference. The deployed demo field is
+   * 1024x1024x206; a high-tier frame of it at Retina resolution is most of a
+   * second of fragment work that nothing can preempt, which on a Mac freezes
+   * the whole machine (the compositor shares the GPU) and can lose the device
+   * to Metal's command-buffer watchdog. The old default of "high, and never
+   * adapt" is exactly that frame, submitted before anything has been
+   * measured. So: start at the floor, and never render a tier that a
+   * completed measurement below it has not shown to be affordable.
+   */
+  _startingQualityTier() {
+    if (!this._autoTier) return this.qualityTier ?? K.DEFAULT_QUALITY_TIER;
+    return K.QUALITY_TIERS_CHEAPEST_FIRST[0];
+  }
+
+  /** Arm the probe for a freshly loaded field, unless the user opted out. */
+  _beginAutoTier() {
+    if (!this._autoTier) { this._probe = null; return; }
+    this._probe = {
+      tier: K.QUALITY_TIERS_CHEAPEST_FIRST[0], frame: 0, samples: [],
+    };
+  }
+
+  /**
+   * Account for one probe frame. `ms` is wall time across a frame that was
+   * followed by device.queue.onSubmittedWorkDone(), so it is that frame's GPU
+   * time — rAF deltas cannot be used here, because they saturate at the
+   * vsync interval and are pipelined besides.
+   *
+   * Strictly one rung at a time: the escalation below happens only after a
+   * full measurement has come back, and the next frame is the first one drawn
+   * at the new tier. No frame is ever in flight at a tier whose affordability
+   * is still being established.
+   */
+  _probeFrame(ms) {
+    const probe = this._probe;
+    if (!probe) return;
+    probe.frame += 1;
+    if (probe.frame <= K.AUTO_TIER_WARMUP_FRAMES) return;
+    probe.samples.push(ms);
+    if (probe.samples.length < K.AUTO_TIER_SAMPLE_FRAMES) return;
+
+    // The median, not the mean and not the minimum. A mean is dragged by any
+    // one stall — a GC pause, the compositor taking the GPU — and every such
+    // contamination is upward, so the mean of three is biased high. The
+    // minimum over-corrects the other way: on a machine whose frame times are
+    // genuinely spread, the best of three is a frame time it will rarely hit
+    // again, and escalating on it is exactly the wrong call on exactly the
+    // hardware this protects. The middle sample is neither.
+    const measured = [...probe.samples].sort((a, b) => a - b)[
+      Math.floor(probe.samples.length / 2)];
+    const next = escalateQualityTier(probe.tier, measured);
+    if (next) {
+      probe.tier = next;
+      probe.frame = 0;
+      probe.samples = [];
+      this.renderer.setQualityTier(next);
+      return;
+    }
+    this._probe = null;
+    this._settleAutoTier(probe.tier, measured);
+  }
+
+  /**
+   * Wait for the GPU queue to go idle, for timing. True if it did.
+   *
+   * This is the probe's clock and it is allowed to fail. `onSubmittedWorkDone`
+   * is core WebGPU, but it is not universally honoured: headless Chrome
+   * rejects it with "A valid external Instance reference no longer exists"
+   * for every frame that touched the canvas swapchain — reproducible in
+   * twenty lines with no soar involved — and a driver that behaves like that
+   * in the field is entirely possible.
+   *
+   * What must NOT happen is what happened before this existed: the rejection
+   * reaching the frame's own catch, which treats a throw as a lost device and
+   * stops rendering for good. A stopwatch that breaks is not a renderer that
+   * broke. So the failure is caught here and ends the probe instead — and
+   * ending the probe means staying at the tier last PROVEN affordable, which
+   * is the floor unless a completed measurement already justified more. No
+   * measurement, no escalation: that is the same invariant the whole probe
+   * runs on, arriving at the same answer from the other direction.
+   */
+  async _awaitQueueIdle() {
+    try {
+      await this.device.queue.onSubmittedWorkDone();
+      return true;
+    } catch (err) {
+      this._abandonAutoTier(err);
+      return false;
+    }
+  }
+
+  /** The probe cannot time frames here. Settle where it stands, and say so. */
+  _abandonAutoTier(err) {
+    const probe = this._probe;
+    if (!probe) return;
+    // probe.tier is never speculative: the probe only moves to a tier after a
+    // completed measurement below it proved that tier affordable. So whatever
+    // it is standing on when the clock breaks is already justified.
+    const tier = probe.tier;
+    this._probe = null;
+    this.qualityTier = tier;
+    console.warn(
+      `soar: cannot time frames on this browser (${err?.message || err}); ` +
+      `staying at the last quality proven affordable ('${tier}').`);
+    const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
+    this.ui.say(
+      `This browser will not let soar time a frame, so quality is staying at ` +
+      `${label} — the highest it had already measured as safe. Change it any ` +
+      `time in the menu.`, 7);
+  }
+
+  /** Record the probe's verdict and say it out loud. */
+  _settleAutoTier(tier, measuredMs) {
+    this.qualityTier = tier;
+    const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
+    console.info(
+      `soar: auto quality ${tier} — ${measuredMs.toFixed(2)} ms/frame probed ` +
+      `at ${this.canvas.width}x${this.canvas.height}`);
+
+    const floor = K.QUALITY_TIERS_CHEAPEST_FIRST[0];
+    // No silent misery: when even the floor is over budget there is nothing
+    // to fall back to, so say what the machine is doing instead of letting
+    // the user conclude the app is broken. The parked view is still worth
+    // having on such a GPU, which is worth saying too.
+    const line = (tier === floor && measuredMs > K.AUTO_TIER_FLOOR_WARN_MS)
+      ? `This GPU renders ${measuredMs.toFixed(0)} ms a frame even at ` +
+        `${label} — the lowest quality soar has. Expect a slideshow while ` +
+        "you fly. Stop moving and the picture still sharpens and converges."
+      : `Auto quality: ${label} — change any time in the menu.`;
+
+    if (this._loadNotes && performance.now() < this._loadNotesUntil) {
+      this.ui.say(`${this._loadNotes}\n\n${line}`, 8);
+    } else {
+      this.ui.say(line, tier === floor ? 8 : 5);
+    }
   }
 
   /**
@@ -299,6 +487,39 @@ class Viewer {
     });
   }
 
+  // --- waking the loop -----------------------------------------------------
+
+  /**
+   * The one way the frame loop is started again after it has slept, and the
+   * one place to look for the answer to "what wakes it".
+   *
+   * Everything that changes the picture, the overlays, or the size of either
+   * calls this. In order:
+   *
+   *   camera input   keydown, keyup, mouse move under the lock, wheel,
+   *                  the field-of-view slider, a click-to-travel on the
+   *                  fullscreen minimap, losing or taking the pointer
+   *   scene state    sun, quality tier, render scale, motion smoothing,
+   *                  tone-map gamma, periodic domain, removing the nest
+   *   overlays       minimap mode, bird on/off, the stats readout's own mode
+   *   geometry       canvas resize and devicePixelRatio change, via the
+   *                  observers in _bindInput — the size check inside _frame
+   *                  cannot see either while the loop is asleep
+   *   captures       track recording and video/still capture, which hold the
+   *                  loop awake for their duration
+   *
+   * Safe to call at any time and from any state; waking an already-awake loop
+   * costs one boolean.
+   */
+  _wake(reason) {
+    if (this.stop || this._disposed) return;
+    this._marchPending = true;
+    if (!this._sleeping) return;
+    this._sleeping = false;
+    this._wakeReason = reason;
+    this._startLoop();
+  }
+
   // --- input ---------------------------------------------------------------
 
   _bindInput() {
@@ -323,6 +544,7 @@ class Viewer {
           this.camera.position[0] = hit[0];
           this.camera.position[1] = hit[1];
           this.camera.constrain();
+          this._wake("minimap travel");
           return;
         }
         // Clicking off the map is done with it: back to the corner, flying.
@@ -333,6 +555,7 @@ class Viewer {
     }, { signal });
 
     document.addEventListener("pointerlockchange", () => {
+      this._wake("pointer lock");
       const wasCaptured = this.captured;
       this.captured = document.pointerLockElement === canvas;
       // The jump to the window centre arrives as one enormous movement event.
@@ -366,19 +589,53 @@ class Viewer {
         return;
       }
       this.camera.look(e.movementX, e.movementY);
+      this._wake("mouse look");
     }, { signal });
 
     document.addEventListener("wheel", (e) => {
       if (!this.captured) return;
       this.camera.scrollSpeed(e.deltaY, performance.now() / 1000);
+      this._wake("wheel");
     }, { passive: true, signal });
 
     document.addEventListener("keydown", (e) => this._onKeyDown(e), { signal });
     document.addEventListener("keyup", (e) => {
       this.camera.keys.delete(e.key.toLowerCase());
+      this._wake("keyup");
     }, { signal });
 
-    window.addEventListener("blur", () => this.camera.keys.clear(), { signal });
+    window.addEventListener("blur", () => {
+      this.camera.keys.clear();
+      this._wake("blur");
+    }, { signal });
+
+    // The canvas's size check lives inside _frame, which does not run while
+    // the loop is asleep — so the loop has to be woken from outside it. One
+    // observer for the CSS box (window resize, entering fullscreen, the
+    // sidebar of a devtools pane opening) and one media query for the device
+    // pixel ratio (dragging the window to a display with different scaling,
+    // or changing the browser's zoom), which fires no resize at all.
+    this._resizeObserver = new ResizeObserver(() => this._wake("resize"));
+    this._resizeObserver.observe(this.canvas);
+    this._watchDevicePixelRatio(signal);
+  }
+
+  /**
+   * There is no devicePixelRatio event. The idiom is a media query pinned to
+   * the current value, which stops matching the moment it changes; it is
+   * one-shot, so it re-arms itself against the new value.
+   */
+  _watchDevicePixelRatio(signal) {
+    const arm = () => {
+      if (this._disposed) return;
+      const query = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio}dppx)`);
+      query.addEventListener("change", () => {
+        this._wake("devicePixelRatio");
+        arm();
+      }, { once: true, signal });
+    };
+    arm();
   }
 
   /**
@@ -387,6 +644,10 @@ class Viewer {
    */
   _onKeyDown(e) {
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    // Before the switch, and unconditionally: every key here either moves the
+    // camera or changes what is drawn, and the ones that do neither cost one
+    // frame to find that out.
+    this._wake("keydown");
 
     if (key === "Escape") {
       // Escape reaches us by three routes that can all fire for one physical
@@ -453,6 +714,11 @@ class Viewer {
     if (this.captured) document.exitPointerLock();
     this.ui.open("main");
     this._syncChrome();
+    // Pausing does not put the loop to sleep and resuming does not wake it:
+    // sleep is decided purely by whether the picture is finished. This wake
+    // is only here because pausing stops the bird, which changes what the
+    // next frame has to draw.
+    this._wake("pause");
   }
 
   /**
@@ -474,6 +740,7 @@ class Viewer {
     this._syncChrome();
     if (capture) this._requestCapture();
     else this.ui.say("Click the view to take the mouse.", 2);
+    this._wake("resume");
   }
 
   setSun({ azimuth, elevation, zenith }) {
@@ -483,6 +750,7 @@ class Viewer {
       this.sunElevation = Math.min(
         90.0, Math.max(K.MIN_SUN_ELEVATION_DEG, elevation));
     }
+    this._wake("sun");
   }
 
   setToneMapGamma(gamma) {
@@ -492,10 +760,39 @@ class Viewer {
     }
     this.toneMapGamma = gamma;
     this.renderer.resetAccumulation();
+    this._wake("tone-map gamma");
   }
 
+  /**
+   * The Quality panel's tier buttons. Choosing by hand ends the automatic
+   * choice for the session — including on the next field loaded, because
+   * having the app overrule a deliberate choice a minute later is worse than
+   * carrying a stale one.
+   */
   setQualityTier(tier) {
+    this._autoTier = false;
+    this._probe = null;
+    this.qualityTier = tier;
     this.renderer.setQualityTier(tier);
+    this._wake("quality tier");
+  }
+
+  /** The Quality panel's render-scale slider: the flight scale, by hand. */
+  setRenderScale(scale) {
+    this.renderer.setRenderScale(scale);
+    this._wake("render scale");
+  }
+
+  /** The Quality panel's motion-smoothing slider. */
+  setMotionBlendAlpha(alpha) {
+    this.renderer.motionBlendAlpha = alpha;
+    this._wake("motion smoothing");
+  }
+
+  /** The field-of-view slider, which is a camera change like any other. */
+  setFov(fov) {
+    this.camera.setFov(fov);
+    this._wake("field of view");
   }
 
   togglePeriodic() {
@@ -503,6 +800,7 @@ class Viewer {
     this.camera.periodic = this.renderer.periodic;
     this.camera.constrain();
     this.ui.say(`Periodic domain ${this.renderer.periodic ? "on" : "off"}.`);
+    this._wake("periodic");
   }
 
   toggleMinimap() {
@@ -520,6 +818,7 @@ class Viewer {
   setMinimapMode(mode) {
     const wasFull = this.minimapMode === "full";
     this.minimapMode = mode;
+    this._wake("minimap mode");
     if (mode === "full") {
       // The map needs a visible cursor to be clickable.
       if (this.captured) {
@@ -545,6 +844,9 @@ class Viewer {
     }
     this.birdEnabled = !this.birdEnabled;
     this.ui.say(`Bird ${this.birdEnabled ? "on" : "off"}.`);
+    // Both directions matter: turning it on gives the loop something to
+    // animate again, turning it off lets a converged view sleep outright.
+    this._wake("bird");
   }
 
   toggleFullscreen() {
@@ -558,6 +860,7 @@ class Viewer {
       this.renderer.resetAccumulation();
       this.frameIndex = 0;
       this.ui.say("Nested field removed.");
+      this._wake("nest removed");
     }
     this.ui.open("main");
   }
@@ -579,6 +882,10 @@ class Viewer {
     this._stopLoop();
     this._videoAbort = true;
     this._listeners.abort();
+    // Not covered by the abort signal: ResizeObserver has no signal option,
+    // and it holds the canvas, which holds this viewer.
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     if (this.captured) document.exitPointerLock();
 
     try {
@@ -622,6 +929,9 @@ class Viewer {
   toggleTrackRecording() {
     if (this.recorder.recording) { this._finishTrackRecording(); return; }
     this.recorder.start();
+    // A recording holds the loop awake outright — a track's samples are its
+    // timeline, and a sleeping loop would record a pause as nothing at all.
+    this._wake("track recording");
     this.ui.say(
       "Recording the flight path. R again to stop; it stops itself after " +
       `${Math.round(MAX_TRACK_SECONDS / 60)} minutes of flying.`, 4);
@@ -669,6 +979,7 @@ class Viewer {
                                  { periodic: this.renderer.periodic });
 
     this._capturing = true;
+    this._wake("capture");
     this._videoAbort = false;
     this.ui.close();
     this.ui.showProgress("Choosing a codec…", 0);
@@ -730,6 +1041,10 @@ class Viewer {
       if (saved && this.renderer) endOfflineRender(this.renderer, saved);
       this.ui.hideProgress();
       this._capturing = false;
+      // The capture owned the renderer's quality state and its accumulation;
+      // whatever the live view was converging towards is gone, and the loop
+      // may have been asleep when the capture began.
+      this._wake("capture finished");
       this._videoAbort = false;
       this._lastTime = performance.now();
     }
@@ -811,6 +1126,7 @@ class Viewer {
   async saveScreenshot({ overlays = true } = {}) {
     if (this._capturing) return;
     this._capturing = true;
+    this._wake("capture");
     const size = this.captureDimensions();
     this.ui.close();
     this.ui.showProgress(
@@ -844,6 +1160,10 @@ class Viewer {
     } finally {
       this.ui.hideProgress();
       this._capturing = false;
+      // The capture owned the renderer's quality state and its accumulation;
+      // whatever the live view was converging towards is gone, and the loop
+      // may have been asleep when the capture began.
+      this._wake("capture finished");
       this._lastTime = performance.now();
     }
   }
@@ -979,6 +1299,12 @@ class Viewer {
     this._stopLoop();
     const generation = this._loopGeneration;
     this._lastTime = performance.now();
+    this._sleeping = false;
+    this._marchPending = true;
+    // Whatever the last marched frame cost, it was measured before a sleep of
+    // unknown length at a tier that may since have changed. The hold ladder
+    // waits for a fresh one rather than climbing on it.
+    this._lastMarchMs = null;
     this._raf = requestAnimationFrame(() => this._frame(generation));
   }
 
@@ -1016,17 +1342,35 @@ class Viewer {
     const elapsed = (now - this._lastTime) / 1000;
     const dt = Math.min(elapsed, K.MAX_SIM_TIMESTEP);
     this._lastTime = now;
+    // How long the previous frame took, kept only when that frame actually
+    // marched. This is the rAF clock rather than a queue wait, and that is
+    // fine for what it is used for: rAF deltas saturate at the vsync interval
+    // and so understate a FAST frame, but a frame that took 300 ms shows up
+    // as 300 ms. The hold ladder's gate only ever asks "is this too slow to
+    // climb", which is the direction this clock is honest in.
+    if (this._prevFrameMarched) this._lastMarchMs = elapsed * 1000;
 
     if (!this.paused) this.camera.move(dt);
     this.camera.constrain();
 
     // "Moving" is an exact comparison against the previous frame's view, not
-    // a velocity: it is what lets Potato swap to full quality the instant you
-    // stop, rather than after a timeout.
+    // a velocity: it is what lets the hold ladder start climbing the instant
+    // you stop, rather than after a timeout.
     const signature = this.camera.signature();
     this.renderer.setCameraMoving(
       this._lastSignature !== null && signature !== this._lastSignature);
     this._lastSignature = signature;
+
+    if (this._probe) {
+      // The probe measures the FLIGHT configuration, because what decides
+      // whether a tier is usable is what it costs while the camera moves.
+      // The camera is by definition still at load, so without this the hold
+      // ladder would climb underneath the probe and it would measure the
+      // converged picture instead.
+      this.renderer.setCameraMoving(true);
+    } else {
+      this.renderer.holdTick(this._lastMarchMs);
+    }
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const outW = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
@@ -1054,13 +1398,60 @@ class Viewer {
         this.minimap.encodePass(enc, view, format));
     }
 
+    // Marching is the expensive half — a full traversal of the volume for
+    // every pixel. Presenting is a blit. Once the view has converged there is
+    // nothing left for a march to add, so the loop keeps presenting (the bird
+    // still flies over it) and stops marching.
+    const march = this._marchPending
+      || !this.renderer.converged
+      || !this.renderer.canPresentLast;
+    const probing = Boolean(this._probe);
+    // Tracks the probe WITHIN this frame: it goes false the moment a
+    // measurement fails, so the rest of the frame stops pretending to time
+    // anything. See _awaitQueueIdle.
+    let measuring = probing;
+    let submittedAt = 0;
     try {
-      // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
-      // must not be acquired until every await inside the draw has resolved.
-      await this.renderer.drawFrame(
-        () => this.context.getCurrentTexture().createView(), this.canvasFormat,
-        [outW, outH], this._viewKwargs(),
-        { deltaSeconds: dt, overlays });
+      if (measuring) {
+        // Start the clock on an idle queue. Without this the measurement
+        // includes however much of the PREVIOUS frame was still outstanding
+        // when this one was encoded, which on the first probe frames — the
+        // ones that matter most, at the floor — is most of what is being
+        // timed. Drain, then start counting.
+        measuring = await this._awaitQueueIdle();
+        submittedAt = performance.now();
+      }
+      if (march) {
+        this._marchPending = false;
+        // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
+        // must not be acquired until every await inside the draw has resolved.
+        await this.renderer.drawFrame(
+          () => this.context.getCurrentTexture().createView(), this.canvasFormat,
+          [outW, outH], this._viewKwargs(),
+          { deltaSeconds: dt, overlays });
+      } else {
+        this.renderer.presentLast(
+          this.context.getCurrentTexture().createView(), this.canvasFormat,
+          [outW, outH], overlays);
+      }
+      if (measuring) {
+        // The one measurement method, and the close of the window opened by
+        // the drain above: queue idle, encode and submit the frame, wait for
+        // the queue to go idle again. What is left between the two clocks is
+        // this frame's GPU work and nothing else.
+        //
+        // rAF deltas cannot do this job — they saturate at the vsync interval
+        // and are pipelined besides, so a frame that took 40 ms and one that
+        // took 4 are indistinguishable through them. Waiting on the queue
+        // serializes the pipeline, which is exactly what makes the number
+        // honest, and is affordable for the dozen-odd frames the probe lasts.
+        // Timestamp queries would avoid the stall, but Safari commonly does
+        // not expose the feature, and a second measurement path that only
+        // some machines take is a worse thing to own than a stall nobody
+        // sees — the machines that would take the fallback are precisely the
+        // ones the probe exists for.
+        measuring = await this._awaitQueueIdle();
+      }
     } catch (err) {
       this.stop = true;
       this.onFailure?.("Rendering stopped.", String(err.message || err),
@@ -1072,6 +1463,7 @@ class Viewer {
     // no longer exists — and everything below it touches state that release
     // has already torn down.
     if (!this._loopAlive(generation)) return;
+    if (measuring) this._probeFrame(performance.now() - submittedAt);
 
     // Sampled after the frame it describes, so the track records what was on
     // screen rather than what was about to be. The clock is the flight's own
@@ -1083,13 +1475,21 @@ class Viewer {
     }
 
     this.frameIndex += 1;
-    this._fpsAcc += elapsed; this._fpsN += 1;
-    if (this._fpsAcc >= 0.5) {
-      const meanDt = this._fpsAcc / this._fpsN;
-      this._fps = 1 / meanDt;
-      this._frameMs = meanDt * 1000;
-      this._fpsAcc = 0; this._fpsN = 0;
+    // Both the readout and the hold ladder's cost gate describe MARCHED
+    // frames only. Folding presented-only frames in would report the cost of
+    // a blit as the cost of the picture, and would tell the ladder it could
+    // afford a rung it cannot.
+    this._prevFrameMarched = march;
+    if (march) {
+      this._fpsAcc += elapsed; this._fpsN += 1;
+      if (this._fpsAcc >= 0.5) {
+        const meanDt = this._fpsAcc / this._fpsN;
+        this._fps = 1 / meanDt;
+        this._frameMs = meanDt * 1000;
+        this._fpsAcc = 0; this._fpsN = 0;
+      }
     }
+    const converged = this.renderer.converged;
     this.ui.drawStats({
       fps: this._fps, frameMs: this._frameMs, camera: this.camera,
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
@@ -1098,9 +1498,52 @@ class Viewer {
       bird: Boolean(this.bird && this.birdEnabled),
       recording: this.recorder.recording,
       showSpeed: performance.now() / 1000 < this.camera.speedFlashUntil,
+      parked: !march,
+      converged,
+      probing,
+      autoTier: this._autoTier,
+      wakeReason: this._wakeReason,
+      spp: this.renderer.accumCount,
+      holdRung: this.renderer.holdRung,
+      holdRungCount: this.renderer.holdRungCount,
+      holdCapped: this.renderer.holdCapped,
     });
 
+    // Sleep on a converged view.
+    //
+    // Nothing here is coupled to pause or to the pointer lock: the test is
+    // purely "is the picture finished", and what ends it is purely the input
+    // enumerated in _wake. Bugs 1-2 in docs/soar-bugs.md live in the pause
+    // state machine and this must not become a third.
+    //
+    // The bird is the usual reason a converged view keeps a loop at all — it
+    // flies whether or not the camera does — but a blit is not a march, so
+    // the GPU still goes quiet. When it is off (or the view is paused, which
+    // stops it), nothing is left to draw and the loop stops outright. That
+    // matters most on the machines that struggle: a fanless laptop that keeps
+    // re-marching a view nobody is moving heats itself into thermal
+    // throttling, so a parked picture is not merely wasteful, it makes the
+    // NEXT flight slower.
+    const animating = this._overlaysAnimate() || this.recorder.recording
+      || this._capturing || probing;
+    if (converged && !this._marchPending && !animating) {
+      this._sleeping = true;
+      return;                    // no rAF is scheduled; only _wake starts one
+    }
+
     this._raf = requestAnimationFrame(() => this._frame(generation));
+  }
+
+  /**
+   * Whether anything drawn over the finished picture is still moving.
+   *
+   * Only the bird is, and only while the view is unpaused — _frame hands it a
+   * dt of zero when paused, so a paused bird is a still image. The minimap
+   * changes when the camera or the mode does, and both of those go through
+   * _wake, so it does not hold the loop open.
+   */
+  _overlaysAnimate() {
+    return Boolean(this.bird && this.birdEnabled && !this.paused);
   }
 }
 

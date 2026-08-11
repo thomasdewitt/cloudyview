@@ -141,28 +141,59 @@ export class UI {
     return this.statsMode;
   }
 
+  /**
+   * The readout, which has to be honest about a loop that stops.
+   *
+   * An fps number describes frames the renderer is choosing to produce. Once
+   * the view has converged it produces none — the loop either presents the
+   * finished picture for the bird to fly over, or stops outright — and the
+   * last number measured then sits there describing nothing. So a converged
+   * view reports what it actually is: parked, and how many samples deep.
+   * Same for the startup probe, whose frames are deliberately serialized
+   * against the GPU queue and so have a frame rate that means nothing at all.
+   */
   drawStats({ fps, frameMs, camera, tier, renderScale, frame, minimap, bird,
-              recording, showSpeed }) {
-    if (this.statsMode === "hidden" || fps == null) {
+              recording, showSpeed, parked = false, converged = false,
+              probing = false, autoTier = false, wakeReason = null, spp = 0,
+              holdRung = 0, holdRungCount = 1, holdCapped = false }) {
+    // `fps` is null until the first half-second of marching has been
+    // averaged, which on a slow machine is a while — but the probe is running
+    // in exactly that window and has something to say, so a null rate is no
+    // longer on its own a reason to hide.
+    if (this.statsMode === "hidden" || (fps == null && !probing && !converged)) {
       this.stats.hidden = true;
       return;
     }
     this.stats.hidden = false;
+    const rate = fps == null
+      ? "—"
+      : `${fps.toFixed(0)} fps · ${frameMs.toFixed(1)} ms`;
     if (this.statsMode !== "expanded") {
       const speed = showSpeed ? ` · ${camera.speed.toFixed(0)} m/s` : "";
       const rec = recording ? "● " : "";
-      this.stats.textContent =
-        `${rec}${fps.toFixed(0)} fps · ${frameMs.toFixed(1)} ms${speed}`;
+      const state = probing ? "measuring quality…"
+        : converged ? `parked · ${spp} spp`
+        : rate;
+      this.stats.textContent = `${rec}${state}${speed}`;
       return;
     }
+    // Which half of the loop is running, in the words the code uses for it.
+    const loop = probing ? `probing ${tier}`
+      : converged ? (parked ? "parked · presenting only" : "parked")
+      : holdCapped ? `holding — capped at rung ${holdRung + 1}/${holdRungCount}`
+      : holdRung > 0 ? `holding — rung ${holdRung + 1}/${holdRungCount}`
+      : "flying";
     const rel = camera.relativePosition();
     const rows = [
-      ["fps", `${fps.toFixed(1)} · ${frameMs.toFixed(1)} ms`],
+      ["fps", converged ? `parked · ${spp} spp` : rate],
+      ["loop", loop +
+               (converged && wakeReason ? ` · last woke: ${wakeReason}` : "")],
       ["pos", `(${rel.map((v) => v.toFixed(2)).join(", ")})`],
       ["view", `az ${camera.azimuth.toFixed(0)}° · el ` +
                `${camera.elevation.toFixed(0)}° · fov ${camera.fov.toFixed(0)}°`],
       ["speed", `${camera.speed.toFixed(0)} m/s`],
-      ["tier", `${tier} · ${renderScale.toFixed(2)}x`],
+      ["tier", `${tier}${autoTier ? " (auto)" : ""} · ` +
+               `${renderScale.toFixed(2)}x`],
       ["flags", `map ${minimap ? "on" : "off"} · bird ${bird ? "on" : "off"}` +
                 (recording ? " · REC" : "")],
       ["frame", `${frame}`],
@@ -240,9 +271,13 @@ export class UI {
     m.append(item("Time of day…",
                   `${app.sunZenith.toFixed(0)}° zenith`,
                   () => this.open("sun")));
+    // The FLIGHT scale, not renderer.renderScale — that one is whichever hold
+    // rung is in force at the instant the menu was built, so the summary would
+    // read differently depending on how long you sat still before pausing.
     m.append(item("Quality…",
                   `${K.QUALITY_PRESETS[app.renderer.qualityTier].label}` +
-                  `, ${app.renderer.renderScale.toFixed(2)}x`,
+                  `, ${app.renderer.flightRenderScale.toFixed(3)}x` +
+                  (app.autoTier ? ", chosen automatically" : ""),
                   () => this.open("quality")));
     m.append(item("Capture…", "still image or a flight video",
                   () => this.open("capture")));
@@ -273,7 +308,7 @@ export class UI {
     const fov = sliderRow("Field of view", {
       min: K.FOV_LIMITS[0], max: K.FOV_LIMITS[1], step: 1,
       value: app.camera.fov, format: (v) => `${v.toFixed(0)}°`,
-      onInput: (v) => app.camera.setFov(v),
+      onInput: (v) => app.setFov(v),
     });
     m.append(fov);
 
@@ -302,6 +337,16 @@ export class UI {
       (v) => v === r.qualityTier,
       (v) => { app.setQualityTier(v); this.open("quality"); });
     m.append(tiers);
+    // Everything here goes through the viewer rather than straight at the
+    // renderer, because every one of these changes the picture and the frame
+    // loop may be asleep in front of it — the viewer's setters are what wake
+    // it. Reaching past them would leave a slider that moves and a view that
+    // does not.
+    m.append(el("div", "row", app.autoTier
+      ? "Chosen automatically by measuring this machine. Pick a tier to " +
+        "decide for yourself; soar will stop choosing for the rest of the " +
+        "session."
+      : "Set by hand for this session."));
     if (r.qualityIsCustom) {
       m.append(el("div", "row", "Render scale has been set by hand, so this " +
                                "tier is running custom."));
@@ -309,24 +354,31 @@ export class UI {
 
     m.append(el("div", "divider"));
     m.append(sliderRow("Render scale", {
-      min: K.MIN_RENDER_SCALE, max: K.MAX_RENDER_SCALE, step: 0.05,
-      value: r.flightRenderScale, format: (v) => `${v.toFixed(2)}x`,
-      onInput: (v) => r.setRenderScale(v),
+      // The step has to divide the floor: at 0.05 the slider could not reach
+      // 0.125 at all, and the bottom of its own range was unselectable.
+      min: K.MIN_RENDER_SCALE, max: K.MAX_RENDER_SCALE,
+      step: K.RENDER_SCALE_SLIDER_STEP,
+      value: r.flightRenderScale, format: (v) => `${v.toFixed(3)}x`,
+      onInput: (v) => app.setRenderScale(v),
     }));
     m.append(sliderRow("Motion smoothing", {
       min: 0.3, max: 0.9, step: 0.01, value: r.motionBlendAlpha,
       format: (v) => v.toFixed(2),
-      onInput: (v) => { r.motionBlendAlpha = v; },
+      onInput: (v) => app.setMotionBlendAlpha(v),
     }));
     m.append(sliderRow("Tone-map gamma", {
       min: K.TONE_MAP_GAMMA_LIMITS[0], max: K.TONE_MAP_GAMMA_LIMITS[1],
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
       onInput: (v) => app.setToneMapGamma(v),
     }));
-    if (r.qualityTier === "potato") {
+    // The tier governs flight only. Say so wherever a tier is chosen, because
+    // it is the thing that makes choosing a low one reasonable.
+    if (K.QUALITY_HOLD_LADDERS[r.qualityTier].length) {
       m.append(el("div", "row",
-        "Potato switches to exact High sampling the moment the camera " +
-        "stops, then accumulates a smooth still."));
+        `${K.QUALITY_PRESETS[r.qualityTier].label.split(" —")[0]} is how the ` +
+        "view is drawn while you move. Stop, and it sharpens step by step to " +
+        "full resolution and High sampling — the same still every tier " +
+        "settles to."));
     }
     m.append(el("div", "divider"));
     m.append(this._backButton());
