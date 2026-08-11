@@ -306,6 +306,48 @@ export const AUTO_TIER_SAMPLE_FRAMES = 3;
 // move is to settle there and tell the user what they are looking at rather
 // than let them conclude the app is broken.
 export const AUTO_TIER_FLOOR_WARN_MS = 50.0;
+
+// --- the probe's clock, calibrated before it is believed ------------------
+//
+// The probe's preferred clock is queue-idle round-trips: drain, submit the
+// frame, drain again, and the wall time between the drains is the frame's
+// GPU work. That is only true when waiting on the queue costs nothing —
+// and on Firefox it does not: its WebGPU resolves onSubmittedWorkDone on an
+// internal poll cadence rather than on a fence, so the wait reports ~100 ms
+// on an RTX 5080 whose actual frame is one or two — which read as "this GPU
+// renders 100 ms a frame even at Potato" while High flew at vsync
+// (observed on Thomas's box, 2026-08-11). A clock cannot be trusted on
+// reputation; it has to be measured. Before the first probe frame, the
+// round-trip is timed on an EMPTY queue: whatever it costs there is the
+// clock's own overhead, not the GPU's work. The minimum of a few rounds is
+// used because the first may still drain real leftover work — the cleanest
+// round is the honest floor.
+export const AUTO_TIER_CLOCK_CALIBRATION_ROUNDS = 3;
+// An empty-queue round-trip above this means the clock cannot resolve a
+// frame budget and the probe switches to its cadence clock (below). Chrome
+// measures well under 1 ms here; Firefox's poll cadence is far above it.
+export const AUTO_TIER_CLOCK_OVERHEAD_MAX_MS = 4.0;
+// The cadence clock: no queue waits at all — just the rAF-to-rAF wall time
+// of marched frames. It saturates at the vsync interval, so it cannot see
+// headroom below one vsync and cannot PREDICT the next tier the way the
+// queue clock's ratios do. What it can do is falsify: a tier whose frames
+// arrive on the vsync beat is affordable, one whose frames do not is not.
+// So in cadence mode the probe climbs while the current tier holds the
+// beat, and steps BACK one rung when it breaks. The one over-step is
+// bounded by the adjacent-tier cost ratios (2-4.5x of a vsync-priced
+// frame, tens of milliseconds) — brief, and nowhere near watchdog
+// territory, which keeps the never-render-the-catastrophic-frame property
+// even though this clock cannot predict.
+//
+// The threshold carries slack over one 60 Hz vsync for compositor jitter.
+// On a faster display frames arrive under budget and simply pass sooner.
+export const AUTO_TIER_CADENCE_HOLD_MS = AUTO_TIER_TARGET_MS * 1.25;
+// The cadence clock reads each frame's time one frame LATE (this frame's
+// rAF delta describes the previous frame), so a tier switch needs two
+// frames of warm-up before a sample describes the new tier in steady state:
+// one for the switch frame itself, one for the first new-tier frame and its
+// render-target reallocation.
+export const AUTO_TIER_WARMUP_FRAMES_CADENCE = 2;
 // Ceiling on the timestep the camera, bird and recorder integrate over, so a
 // stall (a tab in the background, a shader compile) does not fling the camera
 // across the domain. It is NOT the clock the FPS readout uses.

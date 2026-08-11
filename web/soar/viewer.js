@@ -329,7 +329,70 @@ class Viewer {
     if (!this._autoTier) { this._probe = null; return; }
     this._probe = {
       tier: K.QUALITY_TIERS_CHEAPEST_FIRST[0], frame: 0, samples: [],
+      // Which stopwatch to believe — decided by _chooseProbeClock at the
+      // first probe frame, by measuring the stopwatch itself. "queue" is the
+      // drain-submit-drain GPU clock; "cadence" is rAF wall time.
+      clock: null,
+      overheadMs: 0,
+      // The tier climbed FROM into the current one, so the cadence clock can
+      // step back a rung when the tier it climbed to breaks the beat.
+      climbedFrom: null,
+      // Median measured at each tier that finished sampling, so settling on
+      // a stepped-back tier reports that tier's own number.
+      medians: {},
     };
+  }
+
+  /**
+   * Decide which clock the probe may believe, by timing the clock itself.
+   *
+   * See the AUTO_TIER_CLOCK_* block in constants.js for the whole argument.
+   * The short of it: onSubmittedWorkDone is only a GPU fence on some
+   * browsers. On Firefox it resolves on an internal poll cadence — ~100 ms
+   * on a machine whose actual frame is one or two — and a probe that
+   * believed it concluded a 5080 could not afford Potato. So the round-trip
+   * is measured here on an EMPTY queue: anything it costs is the clock's
+   * own overhead. The minimum of a few rounds, because the first may still
+   * be draining real work from the load.
+   *
+   * `?probeclock=queue|cadence` in the URL forces the choice, for testing
+   * either path on a browser whose calibration would pick the other.
+   */
+  async _chooseProbeClock() {
+    const probe = this._probe;
+    const forced = new URLSearchParams(location.search).get("probeclock");
+    if (forced === "queue" || forced === "cadence") {
+      probe.clock = forced;
+      console.info(`soar: probe clock forced to '${forced}' by ?probeclock=`);
+      return;
+    }
+    const rounds = [];
+    try {
+      for (let i = 0; i < K.AUTO_TIER_CLOCK_CALIBRATION_ROUNDS; i++) {
+        const t0 = performance.now();
+        await this.device.queue.onSubmittedWorkDone();
+        rounds.push(performance.now() - t0);
+      }
+    } catch (err) {
+      // The queue clock does not even run here (headless Chrome rejects it
+      // outright for swapchain frames). The cadence clock owes it nothing.
+      probe.clock = "cadence";
+      console.info(
+        `soar: onSubmittedWorkDone rejects on this browser ` +
+        `(${err?.message || err}); probing by frame cadence.`);
+      return;
+    }
+    const overhead = Math.min(...rounds);
+    if (overhead <= K.AUTO_TIER_CLOCK_OVERHEAD_MAX_MS) {
+      probe.clock = "queue";
+      probe.overheadMs = overhead;
+    } else {
+      probe.clock = "cadence";
+      console.info(
+        `soar: waiting on an EMPTY queue costs ${overhead.toFixed(1)} ms ` +
+        `here, so onSubmittedWorkDone is a poll cadence, not a fence — ` +
+        `probing by frame cadence instead.`);
+    }
   }
 
   /**
@@ -347,7 +410,10 @@ class Viewer {
     const probe = this._probe;
     if (!probe) return;
     probe.frame += 1;
-    if (probe.frame <= K.AUTO_TIER_WARMUP_FRAMES) return;
+    const warmup = probe.clock === "cadence"
+      ? K.AUTO_TIER_WARMUP_FRAMES_CADENCE
+      : K.AUTO_TIER_WARMUP_FRAMES;
+    if (probe.frame <= warmup) return;
     probe.samples.push(ms);
     if (probe.samples.length < K.AUTO_TIER_SAMPLE_FRAMES) return;
 
@@ -360,16 +426,46 @@ class Viewer {
     // hardware this protects. The middle sample is neither.
     const measured = [...probe.samples].sort((a, b) => a - b)[
       Math.floor(probe.samples.length / 2)];
-    const next = escalateQualityTier(probe.tier, measured);
-    if (next) {
+    probe.medians[probe.tier] = measured;
+
+    const climb = (next) => {
+      probe.climbedFrom = probe.tier;
       probe.tier = next;
       probe.frame = 0;
       probe.samples = [];
       this.renderer.setQualityTier(next);
+    };
+
+    if (probe.clock === "cadence") {
+      // The cadence clock cannot predict the next tier (it saturates at the
+      // vsync interval), only falsify the current one: frames arriving on
+      // the beat mean this tier is affordable, frames off it mean it is not.
+      // So: climb while the beat holds, and when the tier climbed TO breaks
+      // it, step back to the one that held. See AUTO_TIER_CADENCE_HOLD_MS.
+      const order = K.QUALITY_TIERS_CHEAPEST_FIRST;
+      const at = order.indexOf(probe.tier);
+      const holds = measured <= K.AUTO_TIER_CADENCE_HOLD_MS;
+      if (holds && at < order.length - 1) {
+        climb(order[at + 1]);
+        return;
+      }
+      let tier = probe.tier;
+      if (!holds && probe.climbedFrom) {
+        tier = probe.climbedFrom;
+        this.renderer.setQualityTier(tier);
+      }
+      this._probe = null;
+      this._settleAutoTier(tier, probe.medians[tier] ?? measured, "cadence");
+      return;
+    }
+
+    const next = escalateQualityTier(probe.tier, measured);
+    if (next) {
+      climb(next);
       return;
     }
     this._probe = null;
-    this._settleAutoTier(probe.tier, measured);
+    this._settleAutoTier(probe.tier, measured, "queue");
   }
 
   /**
@@ -396,38 +492,30 @@ class Viewer {
       await this.device.queue.onSubmittedWorkDone();
       return true;
     } catch (err) {
-      this._abandonAutoTier(err);
+      // The queue clock died mid-probe. That is a broken stopwatch, not a
+      // broken renderer — and the probe still has its other clock. Demote to
+      // cadence, restart the current tier's samples (they were taken with a
+      // clock that just proved untrustworthy), and carry on climbing.
+      const probe = this._probe;
+      if (probe) {
+        probe.clock = "cadence";
+        probe.frame = 0;
+        probe.samples = [];
+        console.warn(
+          `soar: the queue clock failed mid-probe ` +
+          `(${err?.message || err}); continuing by frame cadence.`);
+      }
       return false;
     }
   }
 
-  /** The probe cannot time frames here. Settle where it stands, and say so. */
-  _abandonAutoTier(err) {
-    const probe = this._probe;
-    if (!probe) return;
-    // probe.tier is never speculative: the probe only moves to a tier after a
-    // completed measurement below it proved that tier affordable. So whatever
-    // it is standing on when the clock breaks is already justified.
-    const tier = probe.tier;
-    this._probe = null;
-    this.qualityTier = tier;
-    console.warn(
-      `soar: cannot time frames on this browser (${err?.message || err}); ` +
-      `staying at the last quality proven affordable ('${tier}').`);
-    const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
-    this.ui.say(
-      `This browser will not let soar time a frame, so quality is staying at ` +
-      `${label} — the highest it had already measured as safe. Change it any ` +
-      `time in the menu.`, 7);
-  }
-
   /** Record the probe's verdict and say it out loud. */
-  _settleAutoTier(tier, measuredMs) {
+  _settleAutoTier(tier, measuredMs, clock) {
     this.qualityTier = tier;
     const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
     console.info(
       `soar: auto quality ${tier} — ${measuredMs.toFixed(2)} ms/frame probed ` +
-      `at ${this.canvas.width}x${this.canvas.height}`);
+      `at ${this.canvas.width}x${this.canvas.height} (${clock} clock)`);
 
     const floor = K.QUALITY_TIERS_CHEAPEST_FIRST[0];
     // No silent misery: when even the floor is over budget there is nothing
@@ -563,7 +651,23 @@ class Viewer {
       // the view snap somewhere random.
       this._discardNextPointerMove = true;
       this._syncChrome();
-      if (this.captured) return;
+      if (this.captured) {
+        // Holding the pointer IS flying — enforced here as an invariant
+        // rather than trusted to every path that can ask for the lock.
+        // Without it, anything that leaves "paused, menu closed, mouse free"
+        // (a screenshot closes the menu with no resume — bug 2's sibling;
+        // app switching can drop and re-grant the lock) lets the next click
+        // capture the pointer while paused: the view still pans, because
+        // look() is deliberately not gated on pause, but WASD, the bird's
+        // clock and the recorder are all frozen. Observed live 2026-08-11.
+        if (this.paused) {
+          this.ui.close();
+          this.paused = false;
+          this._lastTime = performance.now();
+          this._syncChrome();
+        }
+        return;
+      }
 
       this.camera.keys.clear();
       // Escape releases the pointer lock in the browser itself, and Firefox
@@ -1406,13 +1510,31 @@ class Viewer {
       || !this.renderer.converged
       || !this.renderer.canPresentLast;
     const probing = Boolean(this._probe);
-    // Tracks the probe WITHIN this frame: it goes false the moment a
-    // measurement fails, so the rest of the frame stops pretending to time
-    // anything. See _awaitQueueIdle.
+    // The probe's first act is to time its own stopwatch — see
+    // _chooseProbeClock. Two clocks come out of that:
+    //
+    //   queue    drain, submit, drain: the wall time between the drains is
+    //            this frame's GPU work. Honest wherever waiting on the
+    //            queue is a fence, which is measured, not assumed —
+    //            Firefox's onSubmittedWorkDone is a ~100 ms poll cadence
+    //            that read a 5080's one-millisecond Potato as a slideshow.
+    //   cadence  no waits at all: the rAF delta of marched frames. It
+    //            saturates at the vsync interval, so it cannot predict the
+    //            next tier — but it can falsify the current one, and the
+    //            probe's cadence rule (climb while the beat holds, step
+    //            back when it breaks) needs nothing more.
+    if (probing && this._probe.clock === null) {
+      await this._chooseProbeClock();
+      if (!this._loopAlive(generation)) return;
+    }
+    const queueClock = probing && this._probe?.clock === "queue";
+    // Tracks the probe WITHIN this frame: it goes false the moment a queue
+    // wait fails, so the rest of the frame stops pretending to time
+    // anything. See _awaitQueueIdle, which also demotes the clock.
     let measuring = probing;
     let submittedAt = 0;
     try {
-      if (measuring) {
+      if (queueClock && measuring) {
         // Start the clock on an idle queue. Without this the measurement
         // includes however much of the PREVIOUS frame was still outstanding
         // when this one was encoded, which on the first probe frames — the
@@ -1434,22 +1556,12 @@ class Viewer {
           this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], overlays);
       }
-      if (measuring) {
-        // The one measurement method, and the close of the window opened by
-        // the drain above: queue idle, encode and submit the frame, wait for
-        // the queue to go idle again. What is left between the two clocks is
-        // this frame's GPU work and nothing else.
-        //
-        // rAF deltas cannot do this job — they saturate at the vsync interval
-        // and are pipelined besides, so a frame that took 40 ms and one that
-        // took 4 are indistinguishable through them. Waiting on the queue
-        // serializes the pipeline, which is exactly what makes the number
-        // honest, and is affordable for the dozen-odd frames the probe lasts.
-        // Timestamp queries would avoid the stall, but Safari commonly does
-        // not expose the feature, and a second measurement path that only
-        // some machines take is a worse thing to own than a stall nobody
-        // sees — the machines that would take the fallback are precisely the
-        // ones the probe exists for.
+      if (queueClock && measuring) {
+        // Close of the window the drain above opened: what sits between the
+        // two clocks is this frame's GPU work and nothing else. Serializing
+        // the pipeline is what makes the number honest, and is affordable
+        // for the dozen-odd frames the probe lasts. (Timestamp queries would
+        // avoid the stall, but Safari commonly does not expose the feature.)
         measuring = await this._awaitQueueIdle();
       }
     } catch (err) {
@@ -1463,7 +1575,15 @@ class Viewer {
     // no longer exists — and everything below it touches state that release
     // has already torn down.
     if (!this._loopAlive(generation)) return;
-    if (measuring) this._probeFrame(performance.now() - submittedAt);
+    if (measuring && this._probe) {
+      this._probeFrame(this._probe.clock === "queue"
+        // The queue clock's own round-trip cost rides on every reading;
+        // calibration measured it, so take it back off.
+        ? Math.max(0, performance.now() - submittedAt - this._probe.overheadMs)
+        // This frame's rAF delta describes the PREVIOUS frame — the cadence
+        // warm-up count accounts for the lag.
+        : elapsed * 1000);
+    }
 
     // Sampled after the frame it describes, so the track records what was on
     // screen rather than what was about to be. The clock is the flight's own
