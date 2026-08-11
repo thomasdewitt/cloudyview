@@ -438,6 +438,14 @@ const SKY_BASE_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.18, 0.38);
 // sky_radiance. Solved against the 2026-08-11 reference photo so mid-sky
 // (z ~ 0.6) lands within ~1/255 of the photo on all three channels.
 const SKY_HAZE_ELEVATION_SIGMA: f32 = 0.33;
+// Broad circumsolar aerosol lobe (sky_radiance). Peak-normalized HG:
+// g = 0.68 is ~17 deg half-width; the amplitude is the radiance added at
+// the peak. The tint is the aerosol's own mild-Angstrom spectrum; the
+// spectral bloom ratio warms it at low sun.
+const CIRCUMSOLAR_G: f32 = 0.68;
+const CIRCUMSOLAR_AMPLITUDE: f32 = 0.045;
+const CIRCUMSOLAR_TINT: vec3<f32> = vec3<f32>(0.75, 0.92, 1.00);
+const LEGACY_BLOOM_CONST: vec3<f32> = vec3<f32>(0.8, 0.6, 0.3);
 const LOW_SUN_SKY_MAX_WARM_DZ: f32 = 0.5299192642332049;
 const LOW_SUN_SKY_HORIZON_AZIMUTH_COS: f32 = -0.25881904510252074;
 const LOW_SUN_SKY_UPPER_AZIMUTH_COS: f32 = 0.7071067811865476;
@@ -1186,6 +1194,24 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     }
 
     let cos_sun = dot(dir, sun);
+
+    // Broad aerosol forward lobe: the faint brightening-and-desaturation
+    // the sky shows for tens of degrees around the sun, which the tight
+    // Lorentzian bloom (half-width ~3.6 deg) cannot supply. Peak-normalized
+    // Henyey-Greenstein, no angular cutoff and no elevation gate — the
+    // sunward hue change is a permanent feature of a hazy sky, at noon as
+    // at dusk. The tint is cool (mild Angstrom spectrum) scaled by the
+    // spectral bloom's warm ratio, so at noon it desaturates toward white
+    // and at low sun it inherits the beam's warmth.
+    let g_a = CIRCUMSOLAR_G;
+    let d_hg = 1.0 + g_a * g_a - 2.0 * g_a * cos_sun;
+    let one_minus_g = 1.0 - g_a;
+    let lobe = (one_minus_g * one_minus_g * one_minus_g)
+        / max(pow(d_hg, 1.5), 1e-6);
+    let warm_ratio = bloom / LEGACY_BLOOM_CONST;
+    col = col + CIRCUMSOLAR_AMPLITUDE * lobe
+        * CIRCUMSOLAR_TINT * warm_ratio;
+
     if (cos_sun > 0.0) {
         let sun_half_width = 0.002;
         let a = sun_half_width / ((1.0 - cos_sun) + sun_half_width);
