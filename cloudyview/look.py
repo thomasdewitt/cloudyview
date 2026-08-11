@@ -10,7 +10,7 @@ import math
 from typing import Tuple
 
 
-SUN_COLOR = (22.0, 21.0, 17.0)
+SUN_COLOR = (21.6, 21.2, 19.2)
 
 AMBIENT_TINT_R = 0.19
 AMBIENT_TINT_G = 0.225

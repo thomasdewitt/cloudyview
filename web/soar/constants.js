@@ -10,7 +10,7 @@
 
 // --- look.py: the witness realism package -------------------------------
 
-export const SUN_COLOR = [22.0, 21.0, 17.0];
+export const SUN_COLOR = [21.6, 21.2, 19.2];
 export const LEGACY_AMBIENT = [0.19, 0.225, 0.30];
 export const LEGACY_HORIZON = [0.10, 0.18, 0.38];
 export const LEGACY_BLOOM = [0.8, 0.6, 0.3];

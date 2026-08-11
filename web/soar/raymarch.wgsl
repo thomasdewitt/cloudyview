@@ -127,7 +127,7 @@ const TONE_MAP: bool = true;
 // Constants (witness.py values where the concept carries over)
 // ---------------------------------------------------------------------------
 
-const SUN_COLOR: vec3<f32> = vec3<f32>(22.0, 21.0, 17.0); // witness.py:66
+const SUN_COLOR: vec3<f32> = vec3<f32>(21.6, 21.2, 19.2); // look.py SUN_COLOR
 const POWDER_COEFF: f32 = 1.5;       // witness.py:63
 // Powder is a *backscatter* phenomenon (lighting-loop iter_014). The boundary
 // darkening it models is the deficit of low-order paths that have to reverse
