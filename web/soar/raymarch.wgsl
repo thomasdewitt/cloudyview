@@ -1539,15 +1539,32 @@ fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                                slope_seed, slope_jitter);
 }
 
+// Display white balance, applied in linear light before the Reinhard curve.
+// Reference photos render midday scenes cool — lit cloud faces in the
+// 2026-08-11 reference carry B-R = +20 in sRGB — and the beam colour alone
+// cannot reach that through the Reinhard compression. This is the camera's
+// white balance, not physics, so it sits at the display end of the chain
+// and scales every sun elevation identically (golden hour keeps its
+// relative warmth on a slightly cooler anchor).
+const WHITE_BALANCE_GAIN: vec3<f32> = vec3<f32>(0.94, 1.0, 1.08);
+
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
 // with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
 // Gamma arrives per-frame (u.periodic.w) rather than as the GAMMA const:
 // it is the one knob that decides how much the far field lifts, and it is
 // the only place the encode may happen — the swapchain must be a plain
 // unorm format, never *-srgb, or this runs a second time.
+// Extended Reinhard: plain e/(1+e) crushes lit cloud faces into a grey
+// ceiling (a face at exposed radiance ~4.7 displays at 227/255 and cannot
+// move). The white point lets radiance >= TONE_MAP_WHITE_POINT reach 1.0,
+// so sunlit faces read vibrant white; below ~10% of the white point the
+// curve is within 0.3% of plain Reinhard, so sky and shadow are untouched.
+const TONE_MAP_WHITE_POINT: f32 = 8.0;
+
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
-    let exposed = hdr * exposure;
-    let mapped = exposed / (1.0 + exposed);
+    let exposed = hdr * WHITE_BALANCE_GAIN * exposure;
+    let w2 = TONE_MAP_WHITE_POINT * TONE_MAP_WHITE_POINT;
+    let mapped = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
     return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / gamma));
 }
 
