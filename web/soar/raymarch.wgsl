@@ -1692,6 +1692,19 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     var transmittance = 1.0;
     var col = vec3<f32>(0.0);
     var tau_depth = 0.0;
+    // Whether the march below shaded the water, tracked rather than inferred
+    // (docs/soar-bugs.md 6). The far-water fallback used to decide the same
+    // thing from `t_ocean > t_far`, which is only meaningful when the ray hit
+    // the box at all: ray_box returns t_near > t_far on a MISS with t_far
+    // still a positive finite number — the nearest exit plane of a box the
+    // ray never entered. Such a ray skips the march (the guard below wants
+    // t_near < t_far) and then failed the fallback too whenever that
+    // leftover t_far happened to exceed t_ocean, so the ocean was hit and
+    // nothing shaded it. Because t_far varies smoothly with direction that
+    // came out as a contiguous region of sky where the water should be,
+    // reachable with periodicity off and the camera just outside the domain
+    // looking down.
+    var ocean_consumed = false;
     // Optical depth this ray has already crossed, so the pre-march total can
     // be turned into "what is still ahead of this sample". Unlike tau_depth
     // this never resets: it is the ray's own coordinate along its chord.
@@ -1733,6 +1746,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                                 ocean_slope_seed,
                                 jitter_on * jitter_scale);
                 transmittance = 0.0;
+                ocean_consumed = true;
                 break;
             }
 
@@ -2089,12 +2103,23 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    // Ocean for rays that exit/miss the outer box without becoming opaque;
-    // witness.py:766-790 also limits far-open-water hits to 50 outer widths.
+    // Ocean for rays that exit or MISS the outer box without becoming opaque.
+    // The condition is what it always meant to say — the water was hit, the
+    // ray still carries light, and the march did not already shade it — with
+    // no reference to a t_far that a missing ray never had (see
+    // ocean_consumed above).
+    //
+    // The 50-outer-width clamp below is a second, much larger-scale version
+    // of the same shape and is deliberately left alone: past it the water is
+    // unshaded and the sky shows through, but at that range the ocean's own
+    // aerial haze (ocean_realism_b.y * t_hit) has already carried it onto the
+    // horizon sky colour, so the seam is invisible at the shipped settings
+    // and only appears with the legacy no-haze ocean. Removing it is a look
+    // change — water drawn to the edge of the float — not a bug fix.
     if (ocean_on
+        && !ocean_consumed
         && transmittance > TRANSMITTANCE_CUTOFF
-        && t_ocean < 1e29
-        && t_ocean > t_far) {
+        && t_ocean < 1e29) {
         let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
         let outer_size = u.bmax.xyz - u.bmin.xyz;
         let center = 0.5 * (u.bmin.xy + u.bmax.xy);

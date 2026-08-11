@@ -432,7 +432,15 @@ class SoarRenderer:
 
     def __init__(self, *, periodic: bool = True, nested: bool = False,
                  max_light_steps: int = DEFAULT_MAX_LIGHT_STEPS,
-                 tone_map: bool = True, device=None):
+                 tone_map: bool = True, device=None,
+                 shader_source: Optional[str] = None):
+        """`shader_source` overrides the checked-in shader.
+
+        It exists so two revisions of raymarch.wgsl can be held against each
+        other on one device, in raw float, without a checkout — which is how
+        a change claiming to preserve the image gets to prove it (see
+        tools/soar_shader_ab.py). Everything else reads the file.
+        """
         import wgpu                                    # local: GPU only on use
         self.wgpu = wgpu
         if device is None:
@@ -444,7 +452,8 @@ class SoarRenderer:
         self.max_light_steps = int(max_light_steps)
         self.tone_map = bool(tone_map)
 
-        source = specialize(read_shader(), periodic=self.periodic,
+        source = specialize(shader_source if shader_source is not None
+                            else read_shader(), periodic=self.periodic,
                             nested=self.nested,
                             max_light_steps=self.max_light_steps,
                             tone_map=self.tone_map)
