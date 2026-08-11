@@ -856,15 +856,16 @@ export class Renderer {
     const targetView = typeof target === "function" ? target() : target;
 
     // Pack ONCE, learn the scene key from it, then write the sampling flags
-    // the plan chose straight into row 10. Row 10 is excluded from the key
-    // precisely so this is safe — the flags are outputs of the decision that
-    // produced them and cannot change it.
+    // the plan chose straight into row 10's x and y. Those two components are
+    // excluded from the key precisely so this is safe — the flags are outputs
+    // of the decision that produced them and cannot change it. The rest of
+    // row 10 (z = haze) is scene state and is left alone.
     //
     // This used to re-pack the whole block instead, which meant running the
     // spectral sky solve, the light-transfer split and two dozen rows of
     // trigonometry a second time every frame to alter two floats. Nothing
-    // else in the block depends on subpixel or jitterScale; row 10's z and w
-    // are always zero, in both the packed default and here.
+    // else in the block depends on subpixel or jitterScale, and nothing here
+    // touches row 10's z or w.
     const state = this._sceneState();
     const u = packUniforms(state, { ...view, outputSize, renderSize });
     const plan = accumulate && view.jitter !== false

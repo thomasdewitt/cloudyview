@@ -44,6 +44,11 @@ CASES = [
     ("sun_at_reference", {}, {"sun_elevation": 55.0}),
     ("split_fade", {}, {"sun_elevation": 50.0}),
     ("witness_gamma", {}, {"tone_map_gamma": sh.TONE_MAP_GAMMA_WITNESS}),
+    # Haze feeds three rows through a non-linear ramp (10.z raw, 16.w aerial
+    # beta, 19.y ocean haze), so both ends and one interior point.
+    ("haze_clear", {}, {"haze": 0.0}),
+    ("haze_thick", {}, {"haze": 0.7}),
+    ("haze_max", {}, {"haze": 1.0}),
     ("no_lod", {}, {"light_march_lod_degrees": 0.0, "view_step_lod_degrees": 0.0}),
     ("subpixel", {}, {"subpixel": True, "jitter_scale": 0.65, "frame_index": 37}),
     ("no_jitter", {}, {"jitter": False}),
@@ -124,6 +129,7 @@ def _js_view(extra):
         "spectral_lighting_strength": "spectralLightingStrength",
         "low_sun_sky_field_strength": "lowSunSkyFieldStrength",
         "cone_stencil_theta_deg": "coneStencilThetaDeg",
+        "haze": "haze",
     }
     for k, val in extra.items():
         if k == "render_size":

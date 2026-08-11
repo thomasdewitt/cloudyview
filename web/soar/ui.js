@@ -371,6 +371,11 @@ export class UI {
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
       onInput: (v) => app.setToneMapGamma(v),
     }));
+    m.append(sliderRow("Haze", {
+      min: 0.0, max: 1.0, step: 0.01, value: app.haze,
+      format: (v) => v.toFixed(2),
+      onInput: (v) => app.setHaze(v),
+    }));
     // The tier governs flight only. Say so wherever a tier is chosen, because
     // it is the thing that makes choosing a low one reasonable.
     if (K.QUALITY_HOLD_LADDERS[r.qualityTier].length) {

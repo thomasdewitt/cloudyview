@@ -47,6 +47,15 @@ export const OCEAN_SLOPE_DRAW_FRACTION = 0.5;
 export const OCEAN_SKY_SHADOW_FLOOR = 0.75;
 export const OCEAN_HAZE_EXTINCTION_PER_KM = 0.012;
 
+// One knob for the whole aerosol story — aerial extinction, the horizon
+// wedge, the circumsolar lobe, the haze over the sea. Separate sliders would
+// let a viewer build a sky no photograph contains. Every haze-dependent term
+// is anchored here: at 0.35 each returns its tuned constant exactly, so the
+// default look is unchanged. See look.py for the physics of the ramp, and
+// spectral.js for the two functions that consume these.
+export const DEFAULT_HAZE = 0.35;
+export const AERIAL_BETA_FLOOR_PER_KM = 0.015;
+
 // --- engine.py defaults -------------------------------------------------
 
 export const DEFAULT_SUN_AZIMUTH = 20.0;
