@@ -111,6 +111,10 @@ export const DEFAULT_QUALITY_TIER = "high";
 export const MIN_RENDER_SCALE = 0.25;
 export const MAX_RENDER_SCALE = 1.0;
 export const AUTO_TIER_TARGET_MS = 1000.0 / 60.0;
+// Ceiling on the timestep the camera, bird and recorder integrate over, so a
+// stall (a tab in the background, a shader compile) does not fling the camera
+// across the domain. It is NOT the clock the FPS readout uses.
+export const MAX_SIM_TIMESTEP = 0.1;
 
 // --- camera and flight ---------------------------------------------------
 

@@ -1,15 +1,17 @@
 """Export the browser build's binary assets.
 
-Two destinations, for two different reasons:
+One destination:
 
   web/soar/ocean/   the FIF ocean normal tile. Field-independent (it is a
                     periodic 100 m patch of sea surface, not anything about
                     your data), generated from a multifractal that only
                     exists in Python, so it ships WITH the tool and works
-                    offline.
-  web/demo/         the demo cloud field. Fetched from the cloudyview repo
-                    at run time rather than copied to the website, so the
-                    deployed folder stays small.
+                    offline. Committed, and the seed is fixed, so a re-run
+                    must reproduce the same bytes.
+
+Cloud fields are not exported here. Each demo field is baked separately by
+tools/prebake_demos.py into web/soar/demos/<id>/, which is what the browser
+fetches; this module keeps the two array helpers that bake shares.
 
 The WGSL under web/soar/ is edited in place. It used to be copied from the
 desktop engine, which was the source; the desktop app is gone and the browser
@@ -23,24 +25,18 @@ from pathlib import Path
 
 import numpy as np
 
-from cloudyview import optical_depth
-from cloudyview.cloudfield import CloudField, load
-from cloudyview.glimpse import glimpse
+from cloudyview.cloudfield import CloudField
 from cloudyview.ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
-DEMO_NC = REPO / "data" / "TWPICE_subvolume_256x256_5km.nc"
 SOAR_OUT = REPO / "web" / "soar"
 OCEAN_OUT = SOAR_OUT / "ocean"
-DEMO_OUT = REPO / "web" / "demo"
 
 # 512 rather than the app's 2048: a quarter the texel count for the same
 # physical tile (dx scales to match), which keeps the download honest.
 FIF_N = 512
 FIF_DX_M = 0.2
 FIF_SEED = 20260717
-
-DEMO_SUN = {"azimuth": 235.0, "elevation": 25.0}
 
 
 def _volume_aabb(field: CloudField):
@@ -145,79 +141,9 @@ def export_ocean() -> dict:
     return meta
 
 
-def export_demo() -> None:
-    DEMO_OUT.mkdir(parents=True, exist_ok=True)
-    field = load(str(DEMO_NC))
-    print(f"demo field: {field.lwc.shape} from {DEMO_NC.name}")
-
-    sigma = optical_depth.compute_extinction_field(
-        field.lwc, field.z, re=10.0, iwc=field.iwc, re_ice=30.0
-    )
-    sigma = np.ascontiguousarray(sigma, dtype=np.float16)
-    nx, ny, nz = sigma.shape
-
-    # Ghost-padded, but with a ZERO border: the browser writes the periodic
-    # faces itself so that toggling periodic off and on again does not need
-    # another download. Original voxel i lands on padded texel i+1, which is
-    # what makes the shader's (g + 1.5) / (N + 2) mapping exact.
-    padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float16)
-    padded[1:-1, 1:-1, 1:-1] = sigma
-    (DEMO_OUT / "volume.bin").write_bytes(padded.tobytes())
-    print(f"  volume.bin: {padded.nbytes / 1e6:.1f} MB {padded.shape}")
-
-    # The minimap image. glimpse integrates water paths rather than the sigma
-    # above — ice is weighted nearly twice as heavily — so this is a genuinely
-    # separate quantity, not a reduction of volume.bin. Shipped as float32 and
-    # colorized in the browser, so the demo and an opened file go through the
-    # same colour ramp instead of two that could drift.
-    albedo = np.ascontiguousarray(glimpse(field), dtype=np.float32)
-    (DEMO_OUT / "map.bin").write_bytes(albedo.tobytes())
-    print(f"  map.bin: {albedo.nbytes / 1e6:.2f} MB {albedo.shape} (ny, nx)")
-
-    faces = _ghost_face_arrays(sigma)
-    blob = b"".join(
-        np.ascontiguousarray(faces[name], dtype=np.float16).tobytes()
-        for name in ("x_lo", "x_hi", "y_lo", "y_hi")
-    )
-    (DEMO_OUT / "faces.bin").write_bytes(blob)
-    print(f"  faces.bin: {len(blob) / 1e6:.2f} MB")
-
-    bmin, bmax = _volume_aabb(field)
-    meta = {
-        "schema": "cloudyview.web.demo.v3",
-        "source": DEMO_NC.name,
-        "title": "TWP-ICE, Darwin 2006",
-        "description": (
-            "A large-eddy simulation of tropical convection near Darwin, "
-            "Australia, from the TWP-ICE field campaign."
-        ),
-        "volume": {
-            "shape_xyz": [int(nx), int(ny), int(nz)],
-            "padded_dims_xyz": [nx + 2, ny + 2, nz + 2],
-            "format": "r16float",
-            "bmin": [float(v) for v in bmin],
-            "bmax": [float(v) for v in bmax],
-        },
-        # Two-stream albedo for the minimap, float32, (ny, nx), east right
-        # and north up.
-        "map": {"shape_yx": [int(albedo.shape[0]), int(albedo.shape[1])]},
-        # Face planes, in file order, as (rows, cols) of r16float.
-        "faces": {
-            "order": ["x_lo", "x_hi", "y_lo", "y_hi"],
-            "x_shape": [ny + 2, nz + 2],
-            "y_shape": [nx + 2, nz + 2],
-        },
-        "sun": DEMO_SUN,
-    }
-    (DEMO_OUT / "meta.json").write_text(json.dumps(meta, indent=1))
-    total = sum(f.stat().st_size for f in DEMO_OUT.iterdir())
-    print(f"  {DEMO_OUT} ({total / 1e6:.1f} MB total)")
-
-
 def main() -> None:
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
     export_ocean()
-    export_demo()
 
 
 if __name__ == "__main__":

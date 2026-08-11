@@ -1,6 +1,6 @@
 """Bake the shippable demo set: a GPU-ready volume and a still per demo.
 
-Two products per demo, both written to web/demos/<id>/:
+Two products per demo, both written to web/soar/demos/<id>/:
 
   volume.bin.gz + faces.bin + map.bin + meta.json
       What the viewer uploads. Identical in layout to what
@@ -15,7 +15,8 @@ Two products per demo, both written to web/demos/<id>/:
       is the thing itself rather than an impression of it.
 
     uv run python tools/prebake_demos.py            # everything
-    uv run python tools/prebake_demos.py --only fif --skip-volume
+    uv run python tools/prebake_demos.py --only rce --skip-volume
+    uv run python tools/prebake_demos.py --index-only   # regroup, no baking
 """
 
 import argparse
@@ -41,7 +42,21 @@ from export_web_assets import _ghost_face_arrays, _volume_aabb
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "data" / "demos"
-OUT = REPO / "web" / "demos"
+OUT = REPO / "web" / "soar" / "demos"
+
+# The rail on the landing page is grouped, and the grouping lives here: each
+# spec names a group, and every group is declared below whether or not it has
+# anything in it yet. A group with no demos ships as "coming-soon", which the
+# viewer renders as a placeholder rather than an empty row.
+GROUPS = [
+    dict(id="hydrodynamics", title="Hydrodynamic large-eddy simulations"),
+    # STEAM is the cascade/turbulon model. Its fields carry nested refinements
+    # (r0/r1/r2 in one file), so a demo here will eventually need a per-level
+    # payload — that hangs off the demo object as a `levels` list, alongside
+    # `base`/`bytes`/`still`, and nothing in the index schema or in the
+    # viewer's group rendering assumes a demo is a single volume.
+    dict(id="steam", title="STEAM cascade simulations"),
+]
 
 # Crops come from measuring where the cloud actually is. Levels are trimmed
 # to the occupied range plus headroom; empty sky costs the same per voxel as
@@ -49,7 +64,8 @@ OUT = REPO / "web" / "demos"
 DEMOS = [
     dict(
         id="twpice",
-        title="TWP-ICE, Darwin 2006",
+        group="hydrodynamics",
+        title="SAM TWP-ICE",
         field="Tropical deep convection",
         description=(
             "A large-eddy simulation of a monsoon-break squall line near "
@@ -64,7 +80,8 @@ DEMOS = [
     ),
     dict(
         id="dycoms",
-        title="DYCOMS-II RF01",
+        group="hydrodynamics",
+        title="SAM DYCOMS",
         field="Marine stratocumulus",
         description=(
             "The nocturnal stratocumulus deck off the California coast, "
@@ -79,7 +96,8 @@ DEMOS = [
     ),
     dict(
         id="rce",
-        title="CM1 radiative–convective equilibrium",
+        group="hydrodynamics",
+        title="CM1 RCE",
         field="Radiative–convective equilibrium",
         description=(
             "Scattered maritime convection in statistical equilibrium with "
@@ -92,21 +110,10 @@ DEMOS = [
         scale=1e3,                       # g/g -> g/kg
         sun=dict(azimuth=235.0, elevation=30.0),
     ),
-    dict(
-        id="fif",
-        title="Fractionally integrated flux cascade",
-        field="Synthetic multifractal field",
-        description=(
-            "Not a simulation of anything — a multiplicative cascade with "
-            "the scaling statistics of real cloud water."
-        ),
-        liquid=("QC_FIF_Square_512,512,256.nc", "QC"),
-        ice=None,
-        dims="xyz",
-        crop=dict(y=(0, 512), x=(0, 512), z=(108, 170)),
-        scale=1.0,
-        sun=dict(azimuth=235.0, elevation=22.0),
-    ),
+    # The FIF cascade was shipped here until 2026-08-08 and was dropped: it is
+    # not a fluid-dynamics simulation, and the synthetic slot on the rail now
+    # belongs to STEAM. Its source field stays in data/demos/, so restoring it
+    # is a spec here plus a bake.
 ]
 
 # --- loading ---------------------------------------------------------------
@@ -277,11 +284,91 @@ def _write_png(path: Path, rgb: np.ndarray) -> None:
     path.write_bytes(png)
 
 
+# --- the index the landing page reads ---------------------------------------
+
+def _index_entry(spec: dict) -> dict:
+    """One row of index.json, read back from what is actually on disk.
+
+    Nothing here comes from the run that baked it: the row is rebuilt from
+    the demo's meta.json and checked against the files beside it, so
+    --index-only produces exactly what a full bake would and a truncated
+    download or a half-finished bake is a hard error rather than a demo that
+    404s in the browser.
+    """
+    out = OUT / spec["id"]
+    meta_path = out / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"{meta_path} — {spec['id']} has not been baked")
+    meta = json.loads(meta_path.read_text())
+
+    volume = meta.get("volume") or {}
+    if not volume:
+        raise ValueError(f"{meta_path} records no volume")
+    vol = out / volume["file"]
+    if not vol.exists():
+        raise FileNotFoundError(f"{vol} — meta.json names it but it is missing")
+    if int(volume["bytes"]) != vol.stat().st_size:
+        raise ValueError(f"{vol} is {vol.stat().st_size} bytes, meta.json says "
+                         f"{volume['bytes']} — re-bake {spec['id']}")
+
+    still = meta.get("still") or {}
+    if still:
+        img = out / still["file"]
+        if not img.exists():
+            raise FileNotFoundError(f"{img} — meta.json names it but it is missing")
+        if int(still["bytes"]) != img.stat().st_size:
+            raise ValueError(f"{img} is {img.stat().st_size} bytes, meta.json says "
+                             f"{still['bytes']} — re-render the still")
+
+    return {k: meta[k] for k in ("id", "title", "field", "description")
+            if k in meta} | {
+        "base": spec["id"],
+        "bytes": int(volume["bytes"]),
+        "still": still.get("file"),
+    }
+
+
+def write_index(strict: bool) -> None:
+    """Rebuild web/soar/demos/index.json from the per-demo meta.json files.
+
+    `strict` is off during a bake, where a demo declared in DEMOS but never
+    baked is a normal intermediate state; it is on for --index-only, where a
+    missing bake would quietly drop a demo off the page.
+    """
+    groups, total, count = [], 0, 0
+    for g in GROUPS:
+        rows = []
+        for spec in (s for s in DEMOS if s["group"] == g["id"]):
+            try:
+                rows.append(_index_entry(spec))
+            except FileNotFoundError as err:
+                if strict:
+                    raise
+                print(f"    ! {spec['id']} left out of the index: {err}")
+        entry = {"id": g["id"], "title": g["title"]}
+        if not rows:
+            entry["status"] = "coming-soon"
+        entry["demos"] = rows
+        groups.append(entry)
+        total += sum(r["bytes"] for r in rows)
+        count += len(rows)
+
+    path = OUT / "index.json"
+    path.write_text(json.dumps({"schema": "soar.demos.v2", "groups": groups},
+                               indent=1))
+    shape = ", ".join(f"{g['title']} {len(g['demos'])}" for g in groups)
+    print(f"\n{path} — {count} demos ({shape}), {total/1e6:.0f} MB of volume")
+
+
 # --- driver ----------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", nargs="*", help="demo ids to build")
+    ap.add_argument("--index-only", action="store_true",
+                    help="rewrite web/soar/demos/index.json from the existing "
+                         "per-demo meta.json files and bake nothing; the way "
+                         "to reshuffle grouping without the sources or a GPU")
     ap.add_argument("--skip-still", action="store_true")
     ap.add_argument("--skip-volume", action="store_true")
     ap.add_argument("--size", type=int, nargs=2, default=[3840, 2160],
@@ -293,7 +380,13 @@ def main() -> None:
     args = ap.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
-    index = []
+
+    if args.index_only:
+        if args.only:
+            ap.error("--index-only rewrites the whole index; --only means nothing")
+        write_index(strict=True)
+        return
+
     for spec in DEMOS:
         if args.only and spec["id"] not in args.only:
             continue
@@ -314,27 +407,11 @@ def main() -> None:
             meta["still"] = render_still(spec, field, out, tuple(args.size),
                                          args.accumulate, args.quality)
         meta_path.write_text(json.dumps(meta, indent=1))
-        index.append({k: meta[k] for k in ("id", "title", "field", "description")
-                      if k in meta} | {
-            "base": spec["id"],
-            "bytes": meta.get("volume", {}).get("bytes"),
-            "still": meta.get("still", {}).get("file"),
-        })
         del field
 
-    if index:
-        prev = OUT / "index.json"
-        existing = json.loads(prev.read_text())["demos"] if prev.exists() else []
-        by_id = {d["id"]: d for d in existing}
-        for d in index:
-            by_id[d["id"]] = d
-        order = [s["id"] for s in DEMOS]
-        merged = sorted(by_id.values(), key=lambda d: order.index(d["id"]))
-        prev.write_text(json.dumps(
-            {"schema": "soar.demos.v1", "demos": merged}, indent=1))
-        total = sum(d.get("bytes") or 0 for d in merged)
-        print(f"\n{OUT}/index.json — {len(merged)} demos, "
-              f"{total/1e6:.0f} MB of volume")
+    # Always from disk, never from this run: a partial bake and a full one
+    # then write the same file, and there is no merge step to get wrong.
+    write_index(strict=False)
 
 
 if __name__ == "__main__":

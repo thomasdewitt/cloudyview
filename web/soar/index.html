@@ -46,12 +46,9 @@
     </div>
 
     <div class="base">
-      <div class="rail-head">
-        <span>Demos</span>
-        <span class="rule"></span>
-      </div>
-
-      <div class="rail" id="rail">
+      <!-- The rail is built from web/demos/index.json, which is grouped: each
+           group brings its own .rail-head. Only the placeholder is markup. -->
+      <div class="rail-groups" id="rail">
         <p class="rail-loading">Loading the demo list…</p>
       </div>
 

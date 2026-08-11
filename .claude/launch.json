@@ -7,6 +7,14 @@
       "runtimeArgs": ["-m", "http.server", "8765", "--directory", "web"],
       "port": 8765,
       "url": "http://localhost:8765"
+    },
+    {
+      "name": "soar-dist",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8799",
+                      "--directory", "dist/thought-cloud"],
+      "port": 8799,
+      "url": "http://localhost:8799"
     }
   ]
 }

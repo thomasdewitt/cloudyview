@@ -160,14 +160,21 @@ benchmarking/output/
 
 .codex
 .claude/worktrees/
-web/demo/
 # the blanket *.html rule (line 5) must not swallow the browser build
 !web/soar/*.html
 !web/soar/**/*.html
 
+# nor may the blanket *.so rule (line 7) swallow the vendored HDF5 filter
+# plugins — without them the browser cannot read compressed netCDF4/HDF5,
+# which is the whole "render your own volume" path.
+!web/soar/vendor/h5wasm-plugins/plugins/*.so
+
 # Demo pipeline: source fields and baked web assets.
-# Sources are large third-party model output; baked assets are hosted on R2
-# (see tools/prebake_demos.py), not served from this repo.
+# Sources are large third-party model output. The baked set lives inside the
+# app (web/soar/demos/) so soar is one self-contained folder, matching the
+# site's one-folder-per-artifact layout — but it is derived, it is hundreds of
+# megabytes, and binaries in git are forever. Bake it with
+# tools/prebake_demos.py; ship it with tools/stage_deploy.py.
 data/demos/
-web/demos/
+web/soar/demos/
 web/_mockups/media/

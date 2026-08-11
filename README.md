@@ -32,7 +32,20 @@ Elevation angles are measured from the horizon:
 
 ## Installation
 
-### From source (development)
+Install from a source checkout, not from a wheel. `witness` and `soar` render
+from `web/soar/raymarch.wgsl`, which sits beside the package rather than
+inside it — deliberately, so the browser and the Python host share one shader
+and the look cannot drift. A plain `pip install` of the package alone does not
+carry it, and `witness` will say so rather than fail obscurely. `glimpse` and
+`behold` do not need it.
+
+```bash
+git clone https://github.com/thomasdewitt/cloudyview
+cd cloudyview
+uv sync
+```
+
+### With pip instead
 
 ```bash
 cd /path/to/cloudyview

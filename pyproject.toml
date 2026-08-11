@@ -9,7 +9,7 @@ description = "3D cloud field visualization toolkit with radiative transfer"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    {name = "Thomas D. DeWitt", email = "thomas@example.com"}
+    {name = "Thomas D. DeWitt", email = "thomas.dewitt@utah.edu"}
 ]
 license = {text = "MIT"}
 keywords = ["clouds", "visualization", "radiative-transfer", "atmospheric-science"]

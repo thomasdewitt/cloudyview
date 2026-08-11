@@ -1007,7 +1007,14 @@ class Viewer {
       return;
     }
     const now = performance.now();
-    const dt = Math.min((now - this._lastTime) / 1000, 0.1);
+    // Two clocks. `elapsed` is what the frame actually took; `dt` is what the
+    // simulation is allowed to believe, clamped so one long stall cannot
+    // teleport the camera through the field. Only the camera, the bird and
+    // the track recorder get the clamped one — the FPS readout gets the truth,
+    // or it saturates at exactly 1/CLAMP and reports the same number at every
+    // quality tier no matter how much slower the frame really was.
+    const elapsed = (now - this._lastTime) / 1000;
+    const dt = Math.min(elapsed, K.MAX_SIM_TIMESTEP);
     this._lastTime = now;
 
     if (!this.paused) this.camera.move(dt);
@@ -1076,7 +1083,7 @@ class Viewer {
     }
 
     this.frameIndex += 1;
-    this._fpsAcc += dt; this._fpsN += 1;
+    this._fpsAcc += elapsed; this._fpsN += 1;
     if (this._fpsAcc >= 0.5) {
       const meanDt = this._fpsAcc / this._fpsN;
       this._fps = 1 / meanDt;

@@ -41,6 +41,28 @@ WEB_SOAR = Path(__file__).resolve().parents[1] / "web" / "soar"
 SHADER_PATH = WEB_SOAR / "raymarch.wgsl"
 OCEAN_DIR = WEB_SOAR / "ocean"
 
+
+def read_shader() -> str:
+    """The shader source, or a diagnosis of why there isn't any.
+
+    `web/soar/` sits beside the package rather than inside it, so this
+    resolves only in a source checkout. `pip install`, from PyPI or from git,
+    copies just `cloudyview/` and leaves the shader behind — at which point
+    the bare FileNotFoundError names a path under site-packages and reads like
+    a bug in the library. Say what actually happened instead.
+    """
+    if not SHADER_PATH.exists():
+        raise FileNotFoundError(
+            f"the ray-marching shader is missing: {SHADER_PATH}\n"
+            "cloudyview renders from web/soar/raymarch.wgsl, which lives "
+            "beside the package rather than inside it, so witness and soar "
+            "need a source checkout:\n"
+            "    git clone https://github.com/thomasdewitt/cloudyview\n"
+            "    cd cloudyview && uv sync\n"
+            "A pip install of the package alone does not carry the shader. "
+            "glimpse and behold do not need it and still work.")
+    return SHADER_PATH.read_text()
+
 UNIFORM_ROWS = 23
 UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 368; the scene key compares all of it
 
@@ -391,7 +413,7 @@ class SoarRenderer:
         self.max_light_steps = int(max_light_steps)
         self.tone_map = bool(tone_map)
 
-        source = specialize(SHADER_PATH.read_text(), periodic=self.periodic,
+        source = specialize(read_shader(), periodic=self.periodic,
                             nested=self.nested,
                             max_light_steps=self.max_light_steps,
                             tone_map=self.tone_map)

@@ -160,6 +160,7 @@ body.previewing .strip,
 body.previewing .center,
 body.previewing .rail-head,
 body.previewing .readout,
+body.previewing .soon,
 body.previewing .demo { opacity: 0.2; }
 body.previewing .demo.live { opacity: 1; }
 
@@ -215,12 +216,37 @@ body.previewing .demo.live { opacity: 1; }
 }
 .rail-head .rule { flex: 1; height: 1px; background: var(--line-soft); }
 
+/* One section per group. The gap between groups is a little wider than the
+   gap between cards, so the heading belongs to the rail beneath it rather
+   than floating between two of them. */
+.rail-group + .rail-group { margin-top: 1.15rem; }
+
 .rail {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
   gap: 0.6rem;
+  /* Not `stretch`. Grid items default to filling the row's height, so one
+     card growing on hover would grow every card beside it. `end` sizes each
+     to its own content and rests them all on the same bottom line, which is
+     the line that has to stay put when one of them expands upward. */
+  align-items: end;
 }
 .rail-loading { grid-column: 1 / -1; margin: 0; font-size: 0.6875rem; color: var(--faint); }
+
+/* A group with nothing in it yet. Not a disabled card: a card that cannot be
+   clicked reads as a demo that is broken, and this one is only unwritten. */
+.soon {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0.7rem 1rem;
+  border: 1px dashed var(--line-soft);
+  text-shadow: var(--shadow-text);
+  transition: opacity .45s ease;
+  font-size: 0.5625rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
 
 .demo {
   position: relative;
@@ -241,11 +267,16 @@ body.previewing .demo.live { opacity: 1; }
 }
 .demo:hover:not([disabled]), .demo:focus-visible {
   border-color: var(--amber);
-  background: rgba(8, 13, 20, 0.62);
-  transform: translateY(-2px);
+  background: rgba(8, 13, 20, 0.72);
   outline: none;
 }
 .demo[disabled] { opacity: 0.45; cursor: default; }
+
+/* No GPU adapter. These stay clickable on purpose — main.js answers the click
+   with the reason rather than swallowing it — so they read as unavailable
+   without reading as inert. Keep the pointer: they still do something. */
+#rail.unavailable .demo,
+.own.unavailable { opacity: 0.5; border-style: dashed; }
 .demo .name {
   display: block;
   font-family: var(--display);
@@ -263,6 +294,49 @@ body.previewing .demo.live { opacity: 1; }
   margin-top: 0.4rem;
 }
 .demo.live { border-color: var(--amber); }
+
+/* The case description, which used to be a `title` tooltip. On hover the card
+   grows and the text rises into it from the bottom edge — the card keeps its
+   width and its bottom, so the rail does not reflow and the eye stays on the
+   card it is already looking at.
+
+   0fr -> 1fr animates to the content's own height, which max-height cannot do
+   without a magic number that clips long descriptions. `.desc` is the clip,
+   `.desc-inner` is what slides, and it is `.demo`'s existing overflow:hidden
+   that makes it emerge from the bottom rather than fade in place. */
+.demo .desc {
+  display: grid;
+  grid-template-rows: 0fr;
+  margin-top: 0;
+  transition: grid-template-rows .38s cubic-bezier(.22,.61,.36,1),
+              margin-top .38s cubic-bezier(.22,.61,.36,1);
+}
+.demo .desc-inner {
+  /* Explicitly block: it is a <span>, and inside a <button> it does not get
+     blockified the way a grid item normally would — it computed to `inline`,
+     contributed no height, and the row stayed collapsed however the track was
+     sized. */
+  display: block;
+  overflow: hidden;
+  min-height: 0;
+  font-size: 0.625rem;
+  line-height: 1.65;
+  color: var(--dim);
+  text-wrap: pretty;
+  opacity: 0;
+  transform: translateY(1em);
+  transition: transform .38s cubic-bezier(.22,.61,.36,1), opacity .28s ease;
+}
+.demo:hover .desc,
+.demo:focus-visible .desc { grid-template-rows: 1fr; margin-top: 0.55rem; }
+.demo:hover .desc-inner,
+.demo:focus-visible .desc-inner { opacity: 1; transform: translateY(0); }
+
+/* Someone who asked not to be moved gets the text without the travel. */
+@media (prefers-reduced-motion: reduce) {
+  .demo .desc, .demo .desc-inner { transition-duration: 0.01ms; }
+  .demo .desc-inner { transform: none; }
+}
 
 /* --- bottom readout --- */
 

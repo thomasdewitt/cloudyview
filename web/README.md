@@ -14,18 +14,24 @@ original and is edited in place.
     python3 -m http.server 8765 --directory web
     # open http://localhost:8765/soar/
 
-Serve the `web/` directory rather than `web/soar/` — the viewer looks for a
-sibling `demo/` folder one level up.
+Either directory works — `demos/` sits inside `soar/`, so the tree you serve
+is the tree the site gets.
 
 ## Assets
 
 `soar/ocean/` is committed: a periodic 100 m patch of sea surface, generated
 from a multifractal that only exists in Python, so it ships with the tool and
-works offline. `demo/` is the demo cloud field — derived, gitignored, and
-fetched from the repo at run time so the deployed folder stays small.
-Regenerate both with:
+works offline. Regenerate it with:
 
     uv run python tools/export_web_assets.py
+
+`demos/` is the baked demo set — derived, gitignored, and served from the
+website rather than from this repo, because it runs to a few hundred megabytes
+and binaries in git are forever. Bake it with `tools/prebake_demos.py`, which
+needs the source fields in `data/demos/` and a GPU. To reshuffle which demos
+appear, or how they are grouped, without re-baking anything:
+
+    uv run python tools/prebake_demos.py --index-only
 
 The seed recorded in `soar/ocean/meta.json` reproduces the tile exactly, so
 re-running the exporter leaves the committed `fif_mip*.bin` byte-identical.
@@ -34,9 +40,18 @@ its own cascade noise, so its `rng` argument steered only the boost direction.)
 
 ## Deploy
 
-The folder is fully static and self-contained — copy `web/` anywhere (the
-website, an S3 bucket). Needs a WebGPU browser (Chrome/Edge 113+, Firefox 141+,
-Safari 26); the page shows a friendly message otherwise.
+Do **not** copy `web/` wholesale — it carries `_mockups/` and a few hundred
+megabytes of baked demos. Stage exactly what ships:
+
+    uv run python tools/stage_deploy.py --clean
+
+That writes `dist/thought-cloud/soar/` — one self-contained folder, demos
+included, with the app's filenames content-fingerprinted so the CDN cannot
+serve a stale mix of modules. See [`docs/deploy.md`](../docs/deploy.md) for
+where it goes and what to check afterwards.
+
+Needs a WebGPU browser (Chrome/Edge 113+, Firefox 141+, Safari 26); the page
+explains itself otherwise, and says so again if you click a demo anyway.
 
 ## Controls
 
