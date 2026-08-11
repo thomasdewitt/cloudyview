@@ -604,7 +604,10 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
                   sample_distance_m: f32,
                   cone_stencil_tan_theta: f32,
                   in_nest: bool) -> vec4<f32> {
-    let fine_h = level_voxel_size(in_nest) * GRADIENT_SHADING_RADIUS_VOXELS;
+    // One voxel-size lookup for both stencils: the coarse branch below asked
+    // level_voxel_size(in_nest) for the same answer a second time.
+    let voxel = level_voxel_size(in_nest);
+    let fine_h = voxel * GRADIENT_SHADING_RADIUS_VOXELS;
     let fine_grad = sigma_gradient_at_radius(p, fine_h, true, in_nest);
     let fine_len = length(fine_grad);
     let fine_conf = (
@@ -616,7 +619,6 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         return vec4<f32>(fine_grad, fine_conf);
     }
 
-    let voxel = level_voxel_size(in_nest);
     let extent = u.bmax.xyz - u.bmin.xyz;
 
     // Cone stencil (witness iter_001): a fixed angular radius follows
@@ -2101,16 +2103,22 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                             * BOUNCE_TINT;
             }
 
+            // This step's attenuation, computed once. The aerial in-scatter
+            // below and the transmittance update are the same exp of the same
+            // operand; the compiler cannot always see that across the branch,
+            // and it is one transcendental per view step either way.
+            let step_atten = exp(-d_tau);
+
             // Aerial in-scatter: sky light scattered into the path replaces
             // exactly the radiance this sample occludes.
             if (aerial_strength > 0.0 && air_t < 1.0) {
                 let aer_in = transmittance
-                    * (1.0 - exp(-d_tau))
+                    * (1.0 - step_atten)
                     * (1.0 - air_t);
                 col = col + aer_in * aer;
             }
 
-            transmittance = transmittance * exp(-d_tau);
+            transmittance = transmittance * step_atten;
             t = t + dt;
         }
     }
