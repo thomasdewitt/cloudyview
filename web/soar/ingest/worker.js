@@ -24,6 +24,8 @@ import {
 import {
   pluginsNeeded, installPlugins, assertFiltersSupported,
 } from "./filters.js";
+import { makeHalfWriter } from "../half.js";
+import { buildXFace, buildYFace } from "../ghost.js";
 
 const MOUNT = "/local";
 // Bytes of decoded source per slab, per variable.
@@ -38,64 +40,6 @@ const SLAB_BUDGET_BYTES = 16 * 1024 * 1024;
 let ready = null;
 let root = null;
 let mounted = false;
-
-// --- fp16 ------------------------------------------------------------------
-
-const HAS_F16 = typeof Float16Array !== "undefined";
-const _f32 = new Float32Array(1);
-const _u32 = new Uint32Array(_f32.buffer);
-
-/**
- * IEEE binary32 to binary16, round-to-nearest-EVEN — the mode numpy and the
- * native Float16Array both use. An earlier version rounded half away from
- * zero, which diverged systematically.
- *
- * Only reached on browsers with WebGPU but without Float16Array (Chrome
- * 113-134; Firefox has had it since well before its WebGPU release), so this
- * is close to dead code already.
- *
- * Residual: measured against the native path over 137k values it differs on
- * 4 of them, always by one fp16 ULP. Those are double-rounding cases — this
- * goes f64 to f32 to f16 where the native path goes f64 to f16 directly.
- * Eliminating them needs a round-to-odd intermediate, which is not worth the
- * code for a 3e-5 disagreement one ULP below a quantization the renderer has
- * already applied. Stated rather than hidden.
- */
-function toHalf(value) {
-  _f32[0] = value;
-  const x = _u32[0];
-  const sign = (x >>> 16) & 0x8000;
-  const exp = (x >>> 23) & 0xff;
-  const mant = x & 0x7fffff;
-  if (exp === 0xff) return sign | 0x7c00 | (mant ? 0x200 : 0);   // inf / NaN
-  const e = exp - 127 + 15;
-  if (e >= 0x1f) return sign | 0x7c00;                            // overflow
-  if (e <= 0) {
-    if (e < -10) return sign;                                     // underflow
-    const m = mant | 0x800000;
-    const shift = 14 - e;
-    let half = m >>> shift;
-    const rest = m & ((1 << shift) - 1);
-    const halfway = 1 << (shift - 1);
-    if (rest > halfway || (rest === halfway && (half & 1))) half += 1;
-    return sign | half;
-  }
-  let half = (e << 10) | (mant >>> 13);
-  const rest = mant & 0x1fff;
-  if (rest > 0x1000 || (rest === 0x1000 && (half & 1))) half += 1;
-  return sign | half;
-}
-
-function makeHalfWriter(length) {
-  if (HAS_F16) {
-    const view = new Float16Array(length);
-    return { store: view, set: (i, v) => { view[i] = v; },
-             bytes: () => new Uint16Array(view.buffer) };
-  }
-  const view = new Uint16Array(length);
-  return { store: view, set: (i, v) => { view[i] = toHalf(v); },
-           bytes: () => view };
-}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -523,32 +467,13 @@ async function extinction({ group, units, label, slabBudget }) {
     return { values: out, shape };
   };
 
-  // engine._ghost_face_arrays: the opposite face, with corners that wrap in
-  // both x and y because they are the trilinear support near a domain corner.
-  const buildX = (source) => {          // source is (ny, nz)
-    const face = makeHalfWriter((ny + 2) * (nz + 2));
-    const at = (iy, iz) => source.values[iy * nz + iz];
-    for (let iz = 0; iz < nz; iz++) {
-      for (let iy = 0; iy < ny; iy++) {
-        face.set((iy + 1) * (nz + 2) + iz + 1, at(iy, iz));
-      }
-      face.set(0 * (nz + 2) + iz + 1, at(ny - 1, iz));
-      face.set((ny + 1) * (nz + 2) + iz + 1, at(0, iz));
-    }
-    return face.bytes();
-  };
-  const buildY = (source) => {          // source is (nx, nz)
-    const face = makeHalfWriter((nx + 2) * (nz + 2));
-    const at = (ix, iz) => source.values[ix * nz + iz];
-    for (let iz = 0; iz < nz; iz++) {
-      for (let ix = 0; ix < nx; ix++) {
-        face.set((ix + 1) * (nz + 2) + iz + 1, at(ix, iz));
-      }
-      face.set(0 * (nz + 2) + iz + 1, at(nx - 1, iz));
-      face.set((nx + 1) * (nz + 2) + iz + 1, at(0, iz));
-    }
-    return face.bytes();
-  };
+  // The opposite face, with corners that wrap in both x and y because they
+  // are the trilinear support near a domain corner. The placement itself
+  // lives in ../ghost.js so the Python host can be diffed against this exact
+  // code under node — the two hosts disagreed about it silently once already
+  // (tests/test_soar_texture_parity.py).
+  const buildX = (source) => buildXFace(source.values, ny, nz);
+  const buildY = (source) => buildYFace(source.values, nx, nz);
 
   // A field that is entirely zero apart from a scattering of infinities is
   // not a cloud field, it is a failed read. Say so instead of rendering it.

@@ -15,8 +15,7 @@ import { volumeAABB, minVoxelSize, validateNestContainment } from "./field.js";
 import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
 } from "./gpu.js";
-
-const FACE_NAMES = ["x_lo", "x_hi", "y_lo", "y_hi"];
+import { FACE_NAMES, faceLength, ghostPlanes, zeroFaces } from "./ghost.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
@@ -127,33 +126,28 @@ export function writeVolumeSlab(device, texture, data, origin, size) {
  * same shape, which is why toggling does not need the volume re-uploaded.
  */
 export function writeGhostBorder(device, texture, faces, periodic, padded) {
-  const [px, py, pz] = padded;
-  const zeros = (n) => new Uint16Array(n);
-  const xPlane = (name) => periodic ? faces[name] : zeros(py * pz);
-  const yPlane = (name) => periodic ? faces[name] : zeros(px * pz);
-
-  const write = (data, origin, size, rowsPerImage) =>
+  const [, , pz] = padded;
+  const use = periodic ? faces : zeroFaces(padded);
+  for (const plane of ghostPlanes(padded)) {
     device.queue.writeTexture(
-      { texture, origin: { x: origin[0], y: origin[1], z: origin[2] } },
-      data, { bytesPerRow: pz * 2, rowsPerImage }, size);
-
-  write(xPlane("x_lo"), [0, 0, 0], [pz, py, 1], py);
-  write(xPlane("x_hi"), [0, 0, px - 1], [pz, py, 1], py);
-  write(yPlane("y_lo"), [0, 0, 0], [pz, 1, px], 1);
-  write(yPlane("y_hi"), [0, py - 1, 0], [pz, 1, px], 1);
+      { texture, origin: { x: plane.origin[0], y: plane.origin[1],
+                           z: plane.origin[2] } },
+      use[plane.name],
+      { bytesPerRow: pz * 2, rowsPerImage: plane.rows },
+      plane.size);
+  }
 }
 
 /** Split the packed faces.bin blob into its four planes. */
 export function unpackFaces(bytes, padded) {
-  const [px, py, pz] = padded;
-  const sizes = { x_lo: py * pz, x_hi: py * pz, y_lo: px * pz, y_hi: px * pz };
   const words = new Uint16Array(
     bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
   const faces = {};
   let offset = 0;
   for (const name of FACE_NAMES) {
-    faces[name] = words.subarray(offset, offset + sizes[name]);
-    offset += sizes[name];
+    const n = faceLength(name, padded);
+    faces[name] = words.subarray(offset, offset + n);
+    offset += n;
   }
   return faces;
 }
@@ -279,11 +273,9 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
   let nestDummy = null;
   try {
     const [px, py, pz] = padded;
-    writeVolumeSlab(
-      device, volumeTexture,
-      new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
-                      volumeBytes.byteLength / 2),
-      [0, 0, 0], [pz, py, px]);
+    const words = new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
+                                  volumeBytes.byteLength / 2);
+    writeVolumeSlab(device, volumeTexture, words, [0, 0, 0], [pz, py, px]);
 
     const faces = unpackFaces(facesBytes, padded);
     writeGhostBorder(device, volumeTexture, faces, true, padded);
