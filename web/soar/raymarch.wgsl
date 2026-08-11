@@ -168,6 +168,49 @@ const GRADIENT_SHADING_CONF_FULL: f32 = 0.28;
 const GRADIENT_SHADING_SHADOW_SIDE_SCALE: f32 = 0.55;
 const DEEP_SHADOW_TAU_START: f32 = 38.0;
 const DEEP_SHADOW_TAU_FULL: f32 = 80.0;
+// Shallow/storm discrimination (2026-08-11 tuning). tau_sun saturates at
+// LIGHT_TAU_CUTOFF for a fair-weather cumulus base and a storm base alike,
+// so the deep-shadow machinery — tuned on storm references — darkened both.
+// The sky probe already measures the difference: a shallow base sits under
+// a few hundred meters of cloud (t_sky well above zero), a buried storm
+// interior under kilometres (t_sky ~ 0). shallow_open fades the storm
+// treatment out for optically open shadow: less MS suppression, less
+// occlusion, skylight-blue fill, and a high-sun shadow skylight the
+// light-transfer split (gated to low sun) never provided.
+const SHALLOW_OPEN_TSKY_START: f32 = 0.08;
+const SHALLOW_OPEN_TSKY_FULL: f32 = 0.30;
+// Fraction of MS suppression / ambient occlusion an open shallow shadow
+// keeps (a buried storm keeps 1.0 = the tuned look, exactly).
+const SHALLOW_SUPPRESSION_KEEP: f32 = 0.25;
+// High-sun skylight reaching saturated shadow, by openness. The low-sun
+// path (light-transfer split) keeps its exact 0.26 as split -> 1.
+const HIGH_SUN_SHADOW_SKYLIGHT_STORM: f32 = 0.03;
+const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.18;
+// The high-sun skylight fill engages on *moderate* shadow, not the deep
+// gate: direct light is spent by tau_sun ~ 5 and the MS octaves by ~ 20,
+// so a fair-weather base at tau_sun 15-38 was pitch dark yet entirely
+// below DEEP_SHADOW_TAU_START — exactly the abrupt white-to-dark-grey
+// cliff in the renders. The storm machinery keeps the deep gate.
+const SHADOW_SKYLIGHT_TAU_START: f32 = 6.0;
+const SHADOW_SKYLIGHT_TAU_FULL: f32 = 26.0;
+// Diffused-beam glow: the Eddington diffusion tail of the sun through the
+// cloud mass, emitted isotropically. The MS octave ladder decays
+// geometrically in tau_sun and is spent by ~20; real diffusion decays as
+// 1/(1 + 0.18 tau), and the gap is exactly the tau_sun 15-50 band where
+// fair-weather bases went dark — a real base is diffusely TRANSLUCENT and
+// often brighter than the sky behind it. This is the out-and-back
+// multiple-scattering approximation at zero added cost: the "out" march is
+// the tau_sun the light march already measured, the return is analytic.
+// Gated in as the MS ladder dies (no double counting below tau ~8); a
+// buried storm keeps only DIFFUSE_BEAM_STORM_KEEP of it.
+const DIFFUSE_BEAM_STRENGTH: f32 = 1.0;
+const DIFFUSE_BEAM_TAU_START: f32 = 8.0;
+const DIFFUSE_BEAM_TAU_FULL: f32 = 24.0;
+const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.25;
+// Ambient height ramp floor for open shallow cloud (storms keep
+// AMBIENT_HEIGHT_FLOOR = 0.3): an open base sees the sky sideways and the
+// bright surface below, so its fill should not fall to a third.
+const AMBIENT_HEIGHT_FLOOR_SHALLOW: f32 = 0.6;
 const DEEP_SHADOW_MS_FLOOR: f32 = 0.24;
 const MS_OCTAVES: i32 = 6;           // witness.py:76
 const MS_ATTEN: f32 = 0.4;           // witness.py:77
@@ -1909,6 +1952,31 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
             }
 
+            // Moderate-shadow gate: where the beam and MS octaves are spent
+            // but the deep-shadow machinery has not engaged. This is where
+            // the skylight fill lives.
+            let shadow_gate = smoothstep(
+                SHADOW_SKYLIGHT_TAU_START, SHADOW_SKYLIGHT_TAU_FULL, tau_sun
+            );
+
+            // Sky visibility, measured (hoisted from the diffuse block below
+            // so the MS floor can use it too). Run for any meaningfully
+            // shadowed sample — elsewhere tau_sun still carries the shading
+            // and this costs nothing. One probe serves every consumer.
+            var t_sky = 1.0;
+            var shallow_open = 0.0;
+            if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
+                t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
+                shallow_open = smoothstep(
+                    SHALLOW_OPEN_TSKY_START, SHALLOW_OPEN_TSKY_FULL, t_sky
+                );
+            }
+            // A buried storm sample keeps the full tuned suppression; an
+            // optically open shallow shadow keeps only a quarter of it.
+            let storm_weight = mix(
+                SHALLOW_SUPPRESSION_KEEP, 1.0, 1.0 - shallow_open
+            );
+
             // Diffusion depth for the isotropic tail (see MS_TAIL_FLOOR).
             // The knee is what keeps this a *contrast* change rather than a
             // dimming: below it the factor is exactly 1, so thin cloud and
@@ -1980,6 +2048,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     let ms_floor = max(
                         DEEP_SHADOW_MS_FLOOR,
                         1.0 - deep_shadow_ms_suppression
+                              * storm_weight
                               * deep_shadow_gate
                               * iso_gate
                     );
@@ -2026,16 +2095,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let scatter_weight = d_tau * powder * transmittance * air_t;
             col = col + scatter_weight * ms;
 
-            // Sky visibility, measured. Only where the sun march has already
-            // saturated — elsewhere tau_sun still carries the shading and
-            // this costs nothing and changes nothing (thin cloud is bit
-            // identical). One probe serves both skylight terms below.
-            var t_sky = 1.0;
-            if (deep_shadow_gate > 0.0
-                && (ambient_occlusion_strength > 0.0
-                    || light_transfer_split_strength > 0.0)) {
-                t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
-            }
+            // (t_sky and shallow_open were measured above the MS loop.)
 
             // Second probe direction, free from the pre-march: how much cloud
             // lies beyond this sample along the sightline. A skin sample on a
@@ -2074,10 +2134,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
 
             // Ambient: height-based on the outer box (witness._render_image).
+            // The ramp floor is by openness: a storm interior keeps the tuned
+            // 0.3, an open shallow base — which sees sky sideways and bright
+            // surface below — keeps 0.6 of the full fill.
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
-            let amb = ambient_strength * (AMBIENT_HEIGHT_FLOOR
-                                          + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
-                      * ahead_factor;
+            let height_floor = mix(
+                AMBIENT_HEIGHT_FLOOR, AMBIENT_HEIGHT_FLOOR_SHALLOW,
+                shallow_open * deep_shadow_gate
+            );
+            let height_ramp = height_floor + (1.0 - height_floor) * h;
+            let amb = ambient_strength * height_ramp * ahead_factor;
             // The constant deep-shadow floor becomes the T_sky -> 0 limit
             // of a measured factor: fully buried samples land on exactly
             // ambient_occlusion_floor as before, and everything less
@@ -2092,19 +2158,26 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // this is a spectral split at unchanged luminance.
             let ao_s = select(
                 0.0,
-                clamp(ambient_occlusion_strength, 0.0, 1.0) * deep_shadow_gate,
+                clamp(ambient_occlusion_strength, 0.0, 1.0)
+                    * storm_weight * deep_shadow_gate,
                 ambient_occlusion_strength > 0.0
             );
+            // Open shallow shadow is filled by skylight and keeps the
+            // ambient's blue; only genuinely buried fill decays to the
+            // neutral deep tint (same luminance, storm-tuned chroma).
+            let fill_tint = mix(deep_tint, u.ambient_tint.xyz, shallow_open);
             let amb_w_deep = ao_s * ambient_occlusion_floor;
             let amb_w_sky = (1.0 - ao_s)
                 + ao_s * (1.0 - ambient_occlusion_floor) * t_sky;
             col = col + transmittance * d_tau * amb * air_t
                         * (amb_w_sky * u.ambient_tint.xyz
-                           + amb_w_deep * deep_tint);
+                           + amb_w_deep * fill_tint);
 
             // Light-transfer split, cool side: a skylight floor restored only
-            // in saturated sun shadow; lit faces keep their contrast.
-            if (light_transfer_split_strength > 0.0) {
+            // in saturated sun shadow; lit faces keep their contrast. The
+            // tuned low-sun path, unchanged.
+            if (light_transfer_split_strength > 0.0
+                && deep_shadow_gate > 0.0) {
                 // Same measured visibility: this fill is skylight too, and it
                 // is the larger of the two diffuse terms, so leaving it flat
                 // would wash the structure back out.
@@ -2115,11 +2188,47 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     + deep_shadow_gate * (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky;
                 let sky_fill = light_transfer_split_strength
                     * LIGHT_TRANSFER_SHADOW_SKYLIGHT
-                    * (AMBIENT_HEIGHT_FLOOR + (1.0 - AMBIENT_HEIGHT_FLOOR) * h)
+                    * height_ramp
                     * deep_shadow_gate * ahead_factor;
                 col = col + transmittance * d_tau * sky_fill * air_t
                             * (fill_w_sky * u.ambient_tint.xyz
-                               + fill_w_deep * deep_tint);
+                               + fill_w_deep * fill_tint);
+            }
+
+            // High-sun shadow skylight (2026-08-11): where the split above
+            // is gated off, moderately shadowed samples used to get no
+            // skylight at all — the beam and the MS octaves are spent by
+            // tau_sun ~ 20, so a fair-weather base went from white to dark
+            // grey across a few steps. Openness decides the coefficient
+            // (a buried storm interior keeps almost nothing, which is what
+            // keeps storm bases dark), and the measured sky visibility
+            // carves the spatial structure so bases brighten toward their
+            // edges and thin spots.
+            let high_sun_fill = (1.0 - light_transfer_split_strength)
+                * mix(HIGH_SUN_SHADOW_SKYLIGHT_STORM,
+                      HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW,
+                      shallow_open)
+                * shadow_gate * height_ramp * ahead_factor;
+            if (high_sun_fill > 0.0) {
+                let vis = SKY_PROBE_FILL_FLOOR
+                    + (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky;
+                col = col + transmittance * d_tau * high_sun_fill * air_t
+                            * vis * u.ambient_tint.xyz;
+            }
+
+            // Diffused-beam glow (see the constants block): isotropic
+            // re-emission of the diffusion tail of the direct beam. The
+            // dominant base-lighting term for moderately thick fair-weather
+            // cloud; fades to a quarter for buried storm interiors.
+            let diffuse_beam = DIFFUSE_BEAM_STRENGTH
+                * diffuse_transmittance(tau_sun, g_hg)
+                * smoothstep(DIFFUSE_BEAM_TAU_START, DIFFUSE_BEAM_TAU_FULL,
+                             tau_sun)
+                * mix(1.0, DIFFUSE_BEAM_STORM_KEEP,
+                      deep_shadow_gate * (1.0 - shallow_open));
+            if (diffuse_beam > 0.0) {
+                col = col + transmittance * d_tau * diffuse_beam * air_t
+                            * ISO_PHASE * u.cloud_sun.xyz;
             }
 
             // Surface bounce is anchored at physical z=0, not the AABB floor.
