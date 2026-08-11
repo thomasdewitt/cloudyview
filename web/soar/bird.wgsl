@@ -101,13 +101,17 @@ fn sample_sigma(p: vec3<f32>) -> f32 {
     return textureSampleLevel(vol, vol_samp, vec3<f32>(t.z, t.y, t.x), 0.0).r;
 }
 
-const WHITE_BALANCE_GAIN: vec3<f32> = vec3<f32>(0.94, 1.0, 1.08);
 const TONE_MAP_WHITE_POINT: f32 = 8.0;
+const TONE_MAP_SHOULDER: f32 = 0.35;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
-    let exposed = hdr * WHITE_BALANCE_GAIN * exposure;
+    let exposed = hdr * exposure;
     let w2 = TONE_MAP_WHITE_POINT * TONE_MAP_WHITE_POINT;
-    let mapped = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
+    let per_channel = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
+    let y = dot(exposed, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let chroma_preserving = exposed * (1.0 + y / w2) / (1.0 + y);
+    let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+    let mapped = mix(per_channel, chroma_preserving, k);
     return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
                vec3<f32>(1.0 / max(gamma, 0.01)));
 }

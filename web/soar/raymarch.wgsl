@@ -130,7 +130,7 @@ const TONE_MAP: bool = true;
 // Constants (witness.py values where the concept carries over)
 // ---------------------------------------------------------------------------
 
-const SUN_COLOR: vec3<f32> = vec3<f32>(21.6, 21.2, 19.2); // look.py SUN_COLOR
+const SUN_COLOR: vec3<f32> = vec3<f32>(20.2, 21.0, 22.4); // look.py SUN_COLOR
 const POWDER_COEFF: f32 = 1.5;       // witness.py:63
 // Powder is a *backscatter* phenomenon (lighting-loop iter_014). The boundary
 // darkening it models is the deficit of low-order paths that have to reverse
@@ -1708,14 +1708,12 @@ fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                                slope_seed, slope_jitter);
 }
 
-// Display white balance, applied in linear light before the Reinhard curve.
-// Reference photos render midday scenes cool — lit cloud faces in the
-// 2026-08-11 reference carry B-R = +20 in sRGB — and the beam colour alone
-// cannot reach that through the Reinhard compression. This is the camera's
-// white balance, not physics, so it sits at the display end of the chain
-// and scales every sun elevation identically (golden hour keeps its
-// relative warmth on a slightly cooler anchor).
-const WHITE_BALANCE_GAIN: vec3<f32> = vec3<f32>(0.94, 1.0, 1.08);
+// Highlight shoulder: how far bright regions blend from per-channel
+// Reinhard toward a luminance-normalized curve. Per-channel compression
+// desaturates highlights toward grey; the luminance-preserving branch
+// keeps the beam's chroma, so lit faces read vibrant rather than chalky.
+// Gated on luminance so sky and shadow keep the per-channel curve exactly.
+const TONE_MAP_SHOULDER: f32 = 0.35;
 
 // Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
 // with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
@@ -1731,9 +1729,13 @@ const WHITE_BALANCE_GAIN: vec3<f32> = vec3<f32>(0.94, 1.0, 1.08);
 const TONE_MAP_WHITE_POINT: f32 = 8.0;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
-    let exposed = hdr * WHITE_BALANCE_GAIN * exposure;
+    let exposed = hdr * exposure;
     let w2 = TONE_MAP_WHITE_POINT * TONE_MAP_WHITE_POINT;
-    let mapped = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
+    let per_channel = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
+    let y = dot(exposed, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let chroma_preserving = exposed * (1.0 + y / w2) / (1.0 + y);
+    let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+    let mapped = mix(per_channel, chroma_preserving, k);
     return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / gamma));
 }
 

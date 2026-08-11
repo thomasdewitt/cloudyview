@@ -10,8 +10,8 @@
 
 // --- look.py: the witness realism package -------------------------------
 
-export const SUN_COLOR = [21.6, 21.2, 19.2];
-export const LEGACY_AMBIENT = [0.19, 0.225, 0.30];
+export const SUN_COLOR = [20.2, 21.0, 22.4];
+export const LEGACY_AMBIENT = [0.18, 0.225, 0.33];
 export const LEGACY_HORIZON = [0.10, 0.18, 0.38];
 export const LEGACY_BLOOM = [0.8, 0.6, 0.3];
 export const LEGACY_DISC = [50.0, 45.0, 35.0];
@@ -62,7 +62,7 @@ export const DEFAULT_SUN_AZIMUTH = 20.0;
 export const DEFAULT_SUN_ELEVATION = 55.0;
 export const DEFAULT_EXPOSURE = 4.0;
 export const DEFAULT_G_HG = 0.76;
-export const DEFAULT_AMBIENT_STRENGTH = 0.12;
+export const DEFAULT_AMBIENT_STRENGTH = 0.15;
 // NB: config.py's witness block carries a different (brighter) ocean
 // reflectance. soar uses this one — do not cross the wires.
 export const DEFAULT_OCEAN_REFLECTANCE = [0.0020, 0.0045, 0.0126];
