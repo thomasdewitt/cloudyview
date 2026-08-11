@@ -206,7 +206,7 @@ const SHADOW_SKYLIGHT_TAU_FULL: f32 = 26.0;
 // the tau_sun the light march already measured, the return is analytic.
 // Gated in as the MS ladder dies (no double counting below tau ~8); a
 // buried storm keeps only DIFFUSE_BEAM_STORM_KEEP of it.
-const DIFFUSE_BEAM_STRENGTH: f32 = 0.95;
+const DIFFUSE_BEAM_STRENGTH: f32 = 1.08;
 const DIFFUSE_BEAM_TAU_START: f32 = 6.0;
 const DIFFUSE_BEAM_TAU_FULL: f32 = 22.0;
 const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.25;
@@ -215,6 +215,11 @@ const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.25;
 // light, and water absorbs red far more than blue (single-scatter albedo
 // ~0.998 at 680 nm vs ~0.9999 at 460 nm) — deep-diffused daylight is
 // measurably blue. Reference bases sit at linear B/R ~ 2.4.
+// Weight of the measured surface gradient on the diffuse fills (ambient,
+// skylight, diffuse beam). 0 = the fills stay orientation-blind (flat
+// shadow); 1 = fills shade as hard as the beam does.
+const FILL_GRADIENT_WEIGHT: f32 = 0.6;
+
 const DIFFUSE_BEAM_TINT: vec3<f32> = vec3<f32>(0.85, 0.97, 1.08);
 // Ambient height ramp floor for open shallow cloud (storms keep
 // AMBIENT_HEIGHT_FLOOR = 0.3): an open base sees the sky sideways and the
@@ -1106,17 +1111,26 @@ fn diffuse_transmittance(tau: f32, g: f32) -> f32 {
 // converging on slate blue, which the references never do — real dark bases
 // hold a neutral-to-faintly-warm grey (ai07's storm base B/R 1.10, its
 // nearby dark cumulus 0.78) even where they are very dark.
-const DEEP_FILL_SUN_FRACTION: f32 = 0.25;
+const DEEP_FILL_SUN_FRACTION: f32 = 0.15;
 const LUMA_WEIGHTS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
 fn deep_fill_tint(ambient: vec3<f32>) -> vec3<f32> {
     let sun_luma = max(dot(u.cloud_sun.xyz, LUMA_WEIGHTS), 1e-6);
     let sun_chroma = u.cloud_sun.xyz / sun_luma;
-    // Luma-preserving by construction: both endpoints have unit luma, so the
+    // Luma-preserving by construction: every endpoint has unit luma, so the
     // mix does too and the returned tint carries exactly the ambient tint's
     // luminance. Only the chromaticity moves.
-    let chroma = mix(vec3<f32>(1.0), sun_chroma, DEEP_FILL_SUN_FRACTION);
-    return dot(ambient, LUMA_WEIGHTS) * chroma;
+    //
+    // The base chroma is the AMBIENT's blue, not neutral (2026-08-11): the
+    // neutral anchor came from AI-generated storm references, but the real
+    // anvil-underside photo (IMG_7053) holds display B-R = +15..+18 in its
+    // darkest cores — through the tone curve's ~0.30 log-slope that needs
+    // linear B/R ~ 1.5, i.e. buried shadow KEEPS the skylight's coolness,
+    // with only a small warm pull from sun that diffused in.
+    let amb_luma = max(dot(ambient, LUMA_WEIGHTS), 1e-6);
+    let amb_chroma = ambient / amb_luma;
+    let chroma = mix(amb_chroma, sun_chroma, DEEP_FILL_SUN_FRACTION);
+    return amb_luma * chroma;
 }
 
 // Diffuse sky transmittance above p (see the SKY_PROBE_* block). `jit` is a
@@ -2153,6 +2167,15 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ms = ms * direct_factor;
             }
 
+            // fill_shape carries the surface's billow orientation into the
+            // diffuse fills below (2026-08-11): once tau_sun saturates, ms
+            // is spent and every remaining light source was orientation-
+            // blind, so shaded cloud went flat. Real anvil undersides
+            // (IMG_7053) keep soft billow definition deep into shadow. The
+            // fills take the same measured gradient at reduced weight —
+            // diffuse light is directional enough to shade billows, just
+            // more softly than the beam.
+            var fill_shape = 1.0;
             if (gradient_shading_strength > 0.0) {
                 if (grad_len > 1e-12) {
                     var n_dot_sun = -dot(grad, sun) / grad_len;
@@ -2166,6 +2189,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                               * n_dot_sun
                     );
                     ms = ms * gradient_factor;
+                    fill_shape = mix(1.0, gradient_factor,
+                                     FILL_GRADIENT_WEIGHT);
                 }
             }
 
@@ -2229,7 +2254,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 shallow_open * deep_shadow_gate
             );
             let height_ramp = height_floor + (1.0 - height_floor) * h;
-            let amb = ambient_strength * height_ramp * ahead_factor;
+            let amb = ambient_strength * height_ramp * ahead_factor
+                      * fill_shape;
             // The constant deep-shadow floor becomes the T_sky -> 0 limit
             // of a measured factor: fully buried samples land on exactly
             // ambient_occlusion_floor as before, and everything less
@@ -2275,7 +2301,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 let sky_fill = light_transfer_split_strength
                     * LIGHT_TRANSFER_SHADOW_SKYLIGHT
                     * height_ramp
-                    * deep_shadow_gate * ahead_factor;
+                    * deep_shadow_gate * ahead_factor * fill_shape;
                 col = col + transmittance * d_tau * sky_fill * air_t
                             * (fill_w_sky * u.ambient_tint.xyz
                                + fill_w_deep * fill_tint);
@@ -2294,7 +2320,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 * mix(HIGH_SUN_SHADOW_SKYLIGHT_STORM,
                       HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW,
                       shallow_open)
-                * shadow_gate * height_ramp * ahead_factor;
+                * shadow_gate * height_ramp * ahead_factor * fill_shape;
             if (high_sun_fill > 0.0) {
                 let vis = SKY_PROBE_FILL_FLOOR
                     + (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky;
@@ -2311,7 +2337,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 * smoothstep(DIFFUSE_BEAM_TAU_START, DIFFUSE_BEAM_TAU_FULL,
                              tau_sun)
                 * mix(1.0, DIFFUSE_BEAM_STORM_KEEP,
-                      deep_shadow_gate * (1.0 - shallow_open));
+                      deep_shadow_gate * (1.0 - shallow_open))
+                * fill_shape;
             if (diffuse_beam > 0.0) {
                 col = col + transmittance * d_tau * diffuse_beam * air_t
                             * ISO_PHASE * DIFFUSE_BEAM_TINT * u.cloud_sun.xyz;
