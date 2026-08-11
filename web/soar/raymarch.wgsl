@@ -192,10 +192,12 @@ const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.45;
 // The high-sun skylight fill engages on *moderate* shadow, not the deep
 // gate: direct light is spent by tau_sun ~ 5 and the MS octaves by ~ 20,
 // so a fair-weather base at tau_sun 15-38 was pitch dark yet entirely
-// below DEEP_SHADOW_TAU_START — exactly the abrupt white-to-dark-grey
-// cliff in the renders. The storm machinery keeps the deep gate.
-const SHADOW_SKYLIGHT_TAU_START: f32 = 6.0;
-const SHADOW_SKYLIGHT_TAU_FULL: f32 = 26.0;
+// below DEEP_SHADOW_TAU_START. The gate is exponential-onset, not a
+// smoothstep window: a late-arriving gate made brightness NON-MONOTONE
+// in tau (white -> grey -> white -> grey moving into a base, verified on
+// the linear-tau wedge harness). 1 - exp(-tau/t0) rises while the beam
+// and MS ladder are still alive, so the summed profile only decays.
+const SHADOW_SKYLIGHT_TAU_ONSET: f32 = 4.0;
 // Diffused-beam glow: the Eddington diffusion tail of the sun through the
 // cloud mass, emitted isotropically. The MS octave ladder decays
 // geometrically in tau_sun and is spent by ~20; real diffusion decays as
@@ -207,9 +209,13 @@ const SHADOW_SKYLIGHT_TAU_FULL: f32 = 26.0;
 // Gated in as the MS ladder dies (no double counting below tau ~8); a
 // buried storm keeps only DIFFUSE_BEAM_STORM_KEEP of it.
 const DIFFUSE_BEAM_STRENGTH: f32 = 1.08;
-const DIFFUSE_BEAM_TAU_START: f32 = 6.0;
-const DIFFUSE_BEAM_TAU_FULL: f32 = 22.0;
-const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.25;
+const DIFFUSE_BEAM_TAU_ONSET: f32 = 2.5;
+// A buried storm interior keeps this much of the glow. 0.25 was tuned to
+// AI storm references and produced a floor DARKER than the real anvil
+// photo (IMG_7053: darkest cores ~115/255; the 0.25 floor rendered 68)
+// and an 8x step across the deep gate. 0.55 lands the floor on the photo
+// and halves the step.
+const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.55;
 // Spectral tint of the diffused beam: hundreds of scatterings put an
 // effective absorption path of tens of meters of liquid water on this
 // light, and water absorbs red far more than blue (single-scatter albedo
@@ -2056,10 +2062,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Moderate-shadow gate: where the beam and MS octaves are spent
             // but the deep-shadow machinery has not engaged. This is where
-            // the skylight fill lives.
-            let shadow_gate = smoothstep(
-                SHADOW_SKYLIGHT_TAU_START, SHADOW_SKYLIGHT_TAU_FULL, tau_sun
-            );
+            // the skylight fill lives. Exponential onset — see the
+            // SHADOW_SKYLIGHT_TAU_ONSET comment for why not a smoothstep.
+            let shadow_gate = 1.0 - exp(-tau_sun / SHADOW_SKYLIGHT_TAU_ONSET);
 
             // Sky visibility, measured (hoisted from the diffuse block below
             // so the MS floor can use it too). Run for any meaningfully
@@ -2336,8 +2341,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // cloud; fades to a quarter for buried storm interiors.
             let diffuse_beam = DIFFUSE_BEAM_STRENGTH
                 * diffuse_transmittance(tau_sun, g_hg)
-                * smoothstep(DIFFUSE_BEAM_TAU_START, DIFFUSE_BEAM_TAU_FULL,
-                             tau_sun)
+                * (1.0 - exp(-tau_sun / DIFFUSE_BEAM_TAU_ONSET))
                 * mix(1.0, DIFFUSE_BEAM_STORM_KEEP,
                       deep_shadow_gate * (1.0 - shallow_open))
                 * fill_shape;
