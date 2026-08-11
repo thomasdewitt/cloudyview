@@ -86,13 +86,14 @@ export const DEFAULT_MAX_LIGHT_STEPS = 512;
 export const APP_LIGHT_MARCH_LOD_DEGREES = 1.4;
 export const APP_VIEW_STEP_LOD_DEGREES = 0.6;
 
-// Tone-map gamma. 1.4 is witness's reference; the desktop window spent years
-// presenting through an sRGB swapchain and encoding a second time, so what
-// soar actually looked like in flight was ~3.08. The default sits 75% of the
-// way from the reference toward that, and this is now the only encode.
+// Tone-map gamma. 1.4 is witness's reference; 3.08 is what the desktop
+// window accidentally showed for years (sRGB swapchain double-encode).
+// The default is 1.66 — the value Thomas flies and the one every
+// 2026-08-11 look constant was tuned against a real photo at; the look
+// and the encode are a matched pair now.
 export const TONE_MAP_GAMMA_WITNESS = 1.4;
 export const TONE_MAP_GAMMA_AS_FLOWN = 3.08;
-export const DEFAULT_TONE_MAP_GAMMA = 2.66;
+export const DEFAULT_TONE_MAP_GAMMA = 1.66;
 export const TONE_MAP_GAMMA_LIMITS = [1.0, 4.0];
 
 export const DEFAULT_MOTION_BLEND_ALPHA = 0.58;
