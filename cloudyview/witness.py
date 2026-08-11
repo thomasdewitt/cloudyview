@@ -148,7 +148,10 @@ def _padded(sigma: np.ndarray) -> np.ndarray:
     """Ghost-pad by one voxel per side; original voxel i lands at i+1.
 
     The border stays zero so hardware trilinear filtering supplies a linear
-    taper out of the field instead of smearing the edge voxel outward.
+    taper out of the field instead of smearing the edge voxel outward. In a
+    periodic domain the lateral ring is rewritten from the opposite faces
+    instead — SoarRenderer.upload_volume does that, so a caller never has to
+    know which kind of border this is.
     """
     nx, ny, nz = sigma.shape
     out = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float16)

@@ -391,6 +391,37 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     return source
 
 
+def write_wrap_ghosts(padded: np.ndarray) -> np.ndarray:
+    """Fill a padded volume's lateral ghost ring from the opposite faces.
+
+    The mirror of web/soar/scene.js writeGhostBorder(periodic=true), which in
+    turn consumes ingest/worker.js's buildX/buildY. A doubly periodic LES
+    field tiles horizontally, so the texel just outside face x=0 is the field
+    at x=nx-1; filling it makes hardware trilinear filtering exact across the
+    wrap seam instead of tapering into a zero that is not there.
+
+    The four corner columns wrap in BOTH x and y — they are the trilinear
+    support for a sample near a domain corner — and the z ghost planes stay
+    zero, because the vertical is never periodic.
+
+    Returns the same array, modified in place.
+    """
+    if padded.ndim != 3 or min(padded.shape) < 3:
+        raise ValueError(
+            "write_wrap_ghosts needs a ghost-padded (nx+2, ny+2, nz+2) "
+            f"volume; got shape {padded.shape}.")
+    core = padded[1:-1, 1:-1, 1:-1]
+    padded[0, 1:-1, 1:-1] = core[-1]
+    padded[-1, 1:-1, 1:-1] = core[0]
+    padded[1:-1, 0, 1:-1] = core[:, -1]
+    padded[1:-1, -1, 1:-1] = core[:, 0]
+    padded[0, 0, 1:-1] = core[-1, -1]
+    padded[0, -1, 1:-1] = core[-1, 0]
+    padded[-1, 0, 1:-1] = core[0, -1]
+    padded[-1, -1, 1:-1] = core[0, 0]
+    return padded
+
+
 class SoarRenderer:
     """A device, the specialized shader, and one uploaded field.
 
@@ -489,9 +520,20 @@ class SoarRenderer:
         A C-order array of that shape is already z-fastest, which is exactly
         the byte order a texture of size (nz+2, ny+2, nx+2) wants, so there
         is no transpose here and adding one is a bug.
+
+        In a periodic domain the lateral ghost ring is rewritten from the
+        opposite faces before upload, which is what the browser does
+        (scene.writeGhostBorder) and what the shader's sample_level comment
+        already promises. Callers hand us a zero-bordered array — that is
+        what a ghost pad means — so doing it here rather than asking every
+        caller to is the only way the two hosts cannot drift. That rewrite
+        lands in the caller's array when it is already contiguous fp16; it is
+        idempotent, so re-uploading the same buffer is safe.
         """
         wgpu = self.wgpu
         data = np.ascontiguousarray(sigma_padded, dtype=np.float16)
+        if self.periodic:
+            data = write_wrap_ghosts(data)
         px, py, pz = data.shape
         limit = self.device.limits.get("max-texture-dimension-3d", 2048)
         if max(px, py, pz) > limit:
