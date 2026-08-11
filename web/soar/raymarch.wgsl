@@ -825,18 +825,27 @@ fn strat2(index: u32, pixel: vec2<u32>, stream: u32,
 // returns `sun` exactly. Uniform on the disc (sqrt(r1) radius), which is the
 // right measure for a source of uniform radiance — limb darkening and the
 // aureole's radial profile are both out of scope here.
-fn sun_cone_dir(sun: vec3<f32>, r: vec2<f32>, tan_max: f32) -> vec3<f32> {
-    if (tan_max <= 0.0) {
-        return sun;
-    }
-    // Any helper not parallel to the sun gives a valid tangent frame; the
-    // frame's azimuthal origin is arbitrary because r.y is uniform.
+// The tangent frame the draw is made in. It depends only on the sun, which is
+// constant over the whole frame, so it is built once per fragment (fs_main)
+// rather than per draw — and there is one draw per view step, plus the
+// ocean's. Any helper not parallel to the sun gives a valid frame; the
+// azimuthal origin is arbitrary because r.y is uniform.
+fn sun_tangent_frame(sun: vec3<f32>) -> mat2x3<f32> {
     var helper = vec3<f32>(0.0, 0.0, 1.0);
     if (abs(sun.z) > 0.9) {
         helper = vec3<f32>(1.0, 0.0, 0.0);
     }
     let t1 = normalize(cross(helper, sun));
-    let t2 = cross(sun, t1);
+    return mat2x3<f32>(t1, cross(sun, t1));
+}
+
+fn sun_cone_dir(sun: vec3<f32>, frame: mat2x3<f32>, r: vec2<f32>,
+                tan_max: f32) -> vec3<f32> {
+    if (tan_max <= 0.0) {
+        return sun;
+    }
+    let t1 = frame[0];
+    let t2 = frame[1];
     // Two-component source, stratified out of the same radial uniform: the
     // first AUREOLE_FRACTION of the interval draws from the wide forward-
     // scattering skirt, the rest from the solar disc. Both are remapped back
@@ -1677,6 +1686,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                                vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
     let penumbra_tan = SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
                        * jitter_on * jitter_scale;
+    // Built once here, not once per draw: same crosses, same normalize, same
+    // order, so every deflected direction is the number it always was.
+    let sun_frame = sun_tangent_frame(sun);
     // Independent stream for the ocean's sub-pixel slope draw (iter_008).
     let ocean_slope_seed = strat2(frame_index, strat_pixel,
                                   STRAT_STREAM_OCEAN_SLOPE,
@@ -1740,8 +1752,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 col = col + transmittance
                             * ocean_shade_dispatch(
                                 ocean_hit, dir, sun,
-                                sun_cone_dir(sun, sun_cone_seed,
-                                             penumbra_tan),
+                                sun_cone_dir(sun, sun_frame,
+                                             sun_cone_seed, penumbra_tan),
                                 t_ocean, shadow_jitter,
                                 ocean_slope_seed,
                                 jitter_on * jitter_scale);
@@ -1820,7 +1832,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // rather than a hard edge that only melts once accumulation
             // settles.
             let sun_shadow = sun_cone_dir(
-                sun,
+                sun, sun_frame,
                 fract(sun_cone_seed + f32(i) * vec2<f32>(
                     0.7548776662466927, 0.5698402909980532
                 )),
@@ -2128,7 +2140,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             col = col + transmittance
                         * ocean_shade_dispatch(
                             ocean_hit, dir, sun,
-                            sun_cone_dir(sun, sun_cone_seed, penumbra_tan),
+                            sun_cone_dir(sun, sun_frame, sun_cone_seed,
+                                         penumbra_tan),
                             t_ocean, shadow_jitter,
                             ocean_slope_seed, jitter_on * jitter_scale);
             transmittance = 0.0;
