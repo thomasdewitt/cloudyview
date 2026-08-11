@@ -1190,8 +1190,11 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     var col = base_sky;
 
     // Strength-0 spectral lighting and the calibrated 55-degree sun both
-    // reproduce the base horizon exactly; skipping the angular work then
-    // preserves the approved legacy sky arithmetic (witness does the same).
+    // reproduce the base horizon exactly, so the low-sun angular wedge is
+    // skipped. NOTE (2026-08-11): this bypass is no longer a bit-exact
+    // legacy contract — the Gaussian horizon cutoff above and the
+    // circumsolar lobe below run unconditionally; they are the base look
+    // now, pinned by the re-baked goldens rather than by strength-0.
     if (any(hor != SKY_BASE_HORIZON)) {
         let view_h_len = length(dir.xy);
         let sun_h_len = length(sun.xy);
@@ -1949,14 +1952,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
                                           step_shadow_jitter);
             let light_transfer_split_strength = u.ambient_tint.w;
-            var deep_shadow_gate = 0.0;
-            if (deep_shadow_ms_suppression > 0.0
-                || ambient_occlusion_strength > 0.0
-                || light_transfer_split_strength > 0.0) {
-                deep_shadow_gate = smoothstep(
-                    DEEP_SHADOW_TAU_START, DEEP_SHADOW_TAU_FULL, tau_sun
-                );
-            }
+            // Unconditional: the diffuse beam and the high-sun skylight
+            // consume this gate too, so computing it only when the storm
+            // machinery is enabled would hand a buried storm the full
+            // shallow treatment when suppression/AO/split are all zero
+            // (codex review 2026-08-11, finding 3).
+            let deep_shadow_gate = smoothstep(
+                DEEP_SHADOW_TAU_START, DEEP_SHADOW_TAU_FULL, tau_sun
+            );
 
             // Moderate-shadow gate: where the beam and MS octaves are spent
             // but the deep-shadow machinery has not engaged. This is where
