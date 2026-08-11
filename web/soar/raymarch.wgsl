@@ -434,6 +434,10 @@ const MAX_VIEW_STEPS_PERIODIC: i32 = 4096;
 //   cos(LOW_SUN_SKY_UPPER_AZIMUTH_DEG = 45).
 const SKY_ZENITH: vec3<f32> = vec3<f32>(0.0044, 0.035, 0.1156);
 const SKY_BASE_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.18, 0.38);
+// Angular scale height (in dir.z) of the horizon-whitening wedge; see
+// sky_radiance. Solved against the 2026-08-11 reference photo so mid-sky
+// (z ~ 0.6) lands within ~1/255 of the photo on all three channels.
+const SKY_HAZE_ELEVATION_SIGMA: f32 = 0.33;
 const LOW_SUN_SKY_MAX_WARM_DZ: f32 = 0.5299192642332049;
 const LOW_SUN_SKY_HORIZON_AZIMUTH_COS: f32 = -0.25881904510252074;
 const LOW_SUN_SKY_UPPER_AZIMUTH_COS: f32 = 0.7071067811865476;
@@ -1113,7 +1117,17 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
                 low_sun_sky_field_strength: f32) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
-    t = 1.0 - one_minus * one_minus * one_minus;
+    // Horizon whitening = legacy cubic shape times a Gaussian elevation
+    // cutoff. The cubic alone still mixed ~6% horizon white at 35-40
+    // degrees, which read as a steel-grey wash across the whole upper sky;
+    // reference photos hold zenith-deep saturation down to ~35 degrees.
+    // The Gaussian kills the whitening by mid-elevation while leaving the
+    // horizon band (z < ~0.15) within ~1/255 of the approved legacy sky.
+    // Its width is the whitening's angular scale height — the natural knob
+    // for an aerosol/haze amount.
+    let zc = t / SKY_HAZE_ELEVATION_SIGMA;
+    let w_horizon = one_minus * one_minus * one_minus * exp(-zc * zc);
+    t = 1.0 - w_horizon;
 
     let base_sky = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
     var col = base_sky;
