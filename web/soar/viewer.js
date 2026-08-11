@@ -162,7 +162,13 @@ class Viewer {
   async _releaseField() {
     this._stopLoop();
     if (!this.scene) return;
-    await this.device.queue.onSubmittedWorkDone();
+    try {
+      await this.device.queue.onSubmittedWorkDone();
+    } catch {
+      // Same shape as dispose(): a device already lost has no queue to
+      // drain, and that is precisely the case where the destroys below
+      // matter least and must not throw.
+    }
     this.renderer?.destroy();
     this.minimap?.destroy();
     this.bird?.destroy();
@@ -366,6 +372,20 @@ class Viewer {
       console.info(`soar: probe clock forced to '${forced}' by ?probeclock=`);
       return;
     }
+    // One calibration per session. The verdict is a property of the browser
+    // and device, not of the field, so a hot-swapped file reuses it — which
+    // also keeps queue waits (a crash lottery on Firefox, see bug 14) off
+    // the reload path.
+    if (this._probeClockVerdict) {
+      probe.clock = this._probeClockVerdict.clock;
+      probe.overheadMs = this._probeClockVerdict.overheadMs;
+      return;
+    }
+    const remember = () => {
+      this._probeClockVerdict = {
+        clock: probe.clock, overheadMs: probe.overheadMs,
+      };
+    };
     const rounds = [];
     try {
       for (let i = 0; i < K.AUTO_TIER_CLOCK_CALIBRATION_ROUNDS; i++) {
@@ -377,6 +397,7 @@ class Viewer {
       // The queue clock does not even run here (headless Chrome rejects it
       // outright for swapchain frames). The cadence clock owes it nothing.
       probe.clock = "cadence";
+      remember();
       console.info(
         `soar: onSubmittedWorkDone rejects on this browser ` +
         `(${err?.message || err}); probing by frame cadence.`);
@@ -386,8 +407,10 @@ class Viewer {
     if (overhead <= K.AUTO_TIER_CLOCK_OVERHEAD_MAX_MS) {
       probe.clock = "queue";
       probe.overheadMs = overhead;
+      remember();
     } else {
       probe.clock = "cadence";
+      remember();
       console.info(
         `soar: waiting on an EMPTY queue costs ${overhead.toFixed(1)} ms ` +
         `here, so onSubmittedWorkDone is a poll cadence, not a fence — ` +

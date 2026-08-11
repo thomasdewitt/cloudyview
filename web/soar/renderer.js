@@ -671,49 +671,81 @@ export class Renderer {
     return pipeline;
   }
 
+  /**
+   * The render targets for one march size, POOLED per size rather than
+   * destroyed and reallocated on every change.
+   *
+   * The hold ladder made target-size changes routine — every rung climb is
+   * one — where they used to be a rare resize. The old destroy-and-drain
+   * path cost a full `onSubmittedWorkDone()` wait per change, which on
+   * Firefox is a ~100 ms poll rather than a fence (see the probe-clock
+   * notes in constants.js), so a single hold's climb stalled for most of a
+   * second. Worse than slow: Firefox's WebGPU runs in its MAIN process on
+   * this stack, and its queue lifetime tracking is assert-happy — "Queue[Id]
+   * is no longer alive" takes down the whole browser (docs/soar-bugs.md 14).
+   * Every drain-and-destroy is a spin of that wheel. A pool spins it only on
+   * a genuine output resize.
+   *
+   * Cost: the ladder's sizes sum to ~1.33x of the full-size targets alone
+   * (1 + 1/4 + 1/16 + ...), so the pool's ceiling is about a third more
+   * memory than the old worst case, held instead of churned.
+   */
   async _targetsFor(w, h) {
     if (this._targets && this._targets.w === w && this._targets.h === h) {
       return this._targets;
     }
-    // Frames already submitted may still be reading these. Destroying a
-    // texture out from under in-flight commands is legal by the letter of the
-    // spec, but it is the kind of thing that segfaults a browser rather than
-    // raising, and a resize happens once, not per frame — so wait.
-    if (this._targets) await this.device.queue.onSubmittedWorkDone();
-    for (const t of [this._targets?.sample, this._targets?.accumA,
-                     this._targets?.accumB]) {
-      t?.destroy();
+    this._targetPool ??= new Map();
+    const key = `${w}x${h}`;
+    let targets = this._targetPool.get(key);
+    if (!targets) {
+      // A genuine new size. If the pool has grown past the ladder's worst
+      // case, something is resizing repeatedly (a window drag) — drain once
+      // and drop the lot rather than accumulating textures forever. This is
+      // the ONLY path left with a queue wait on it.
+      if (this._targetPool.size >= 6) {
+        await this.device.queue.onSubmittedWorkDone();
+        for (const old of this._targetPool.values()) {
+          old.sample.destroy(); old.accumA.destroy(); old.accumB.destroy();
+        }
+        this._targetPool.clear();
+      }
+      // 8 bytes for the half-precision sample target, 16 each for the two
+      // full-precision accumulators.
+      const bytes = w * h * (8 + 16 + 16);
+      const make = (label, format) => this.device.createTexture({
+        label: `${label}-${key}`, size: [w, h], format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+             | GPUTextureUsage.COPY_SRC,
+      });
+      targets = await guardAllocation(
+        this.device, `${key} render targets`, bytes, () => ({
+          w, h,
+          sample: make("soar-sample", SAMPLE_FORMAT),
+          accumA: make("soar-accum-a", ACCUM_FORMAT),
+          accumB: make("soar-accum-b", ACCUM_FORMAT),
+        }));
+      // The two accumulation bind groups, built once per target set rather
+      // than once per frame. Index i is the group to use when _accumIndex is
+      // i: it reads the sample target and the accumulator NOT being written
+      // this frame. Ordered to match the outTex choice in drawFrame.
+      targets.accumBindGroups = [targets.accumA, targets.accumB].map(
+        (prevTex) => this.device.createBindGroup({
+          layout: this.accumLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this.accumUniformBuf } },
+            { binding: 1, resource: targets.sample.createView() },
+            { binding: 2, resource: prevTex.createView() },
+          ],
+        }));
+      this._targetPool.set(key, targets);
     }
-    this._lastPresented = null;   // it pointed into what we just destroyed
-    // 8 bytes for the half-precision sample target, 16 each for the two
-    // full-precision accumulators.
-    const bytes = w * h * (8 + 16 + 16);
-    const make = (label, format) => this.device.createTexture({
-      label, size: [w, h], format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-           | GPUTextureUsage.COPY_SRC,
-    });
-    this._targets = await guardAllocation(
-      this.device, `${w}x${h} render targets`, bytes, () => ({
-        w, h,
-        sample: make("soar-sample", SAMPLE_FORMAT),
-        accumA: make("soar-accum-a", ACCUM_FORMAT),
-        accumB: make("soar-accum-b", ACCUM_FORMAT),
-      }));
-    // The two accumulation bind groups, built once per target set rather than
-    // once per frame. Index i is the group to use when _accumIndex is i: it
-    // reads the sample target and the accumulator NOT being written this
-    // frame. Ordered to match the outTex choice in drawFrame.
-    const t = this._targets;
-    t.accumBindGroups = [t.accumA, t.accumB].map((prevTex) =>
-      this.device.createBindGroup({
-        layout: this.accumLayout,
-        entries: [
-          { binding: 0, resource: { buffer: this.accumUniformBuf } },
-          { binding: 1, resource: t.sample.createView() },
-          { binding: 2, resource: prevTex.createView() },
-        ],
-      }));
+    this._targets = targets;
+    // The last presented frame lives in some OTHER size's accumulator now.
+    // It still exists (pooled, not destroyed), but presentLast sizes its
+    // blit off _targets, so re-presenting it would upscale with the wrong
+    // dimensions. Null it: the first frame at the new size is unjittered and
+    // clean, exactly as the old destroy path behaved.
+    this._lastPresented = null;
     this._resetAccumulation();
     return this._targets;
   }
@@ -952,10 +984,12 @@ export class Renderer {
 
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
-    for (const t of [this._targets?.sample, this._targets?.accumA,
-                     this._targets?.accumB]) {
-      t?.destroy();
+    for (const targets of this._targetPool?.values() ?? []) {
+      targets.sample.destroy();
+      targets.accumA.destroy();
+      targets.accumB.destroy();
     }
+    this._targetPool?.clear();
     this._targets = null;
     this._lastPresented = null;
     this.uniformBuf?.destroy();

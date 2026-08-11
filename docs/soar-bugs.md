@@ -949,6 +949,34 @@ ID above identifies the report already submitted. Being a dual-GPU Wayland
 box with `gpuProcess: unused` may matter — WebGPU faults land in-process
 there, with nothing to contain them.
 
+**Follow-up (2026-08-11, same day, local build of the optimization pass):**
+recurred repeatedly (~2 min apart) while flying `localhost:8765/soar/` in
+Firefox 153.0.1 — new variant of the fingerprint, this time a Rust
+assertion rather than the "does not exist" message:
+
+```
+MozCrashReason: assertion `left == right` failed: Queue[Id(0,1)] is no longer alive
+  left: 1
+ right: 2
+```
+
+`SIGSEGV / SEGV_MAPERR` at `0x0`, thread 0, process **main**, crash event
+`558d6766-e22c-4934-9576-8ae012565c8c`, same box/driver as above.
+
+**Why the frequency jumped:** the optimization pass had multiplied
+queue-wait traffic — probe calibration waited on the queue at every field
+load, and every hold-ladder rung climb reallocated the render targets
+behind a drain-and-destroy. Each `onSubmittedWorkDone` on this Firefox is a
+~100 ms poll AND a spin of the lifetime-assert wheel. Mitigated the same
+day (commit "the ladder stops draining the queue"): render targets are now
+POOLED per rung size (drain only on a genuine resize past the pool cap),
+the probe-clock calibration verdict is cached per session, and
+`_releaseField`'s drain is guarded like `dispose`'s. Queue waits during
+ordinary flight are now zero once the probe has settled. The crash itself
+remains Firefox's to fix — if it recurs at this reduced exposure, collect
+the crash ID from about:crashes and it belongs upstream with both
+fingerprints.
+
 **What to try when fixing:**
 
 1. Put a timeout on the drain, so `unconfigure()` and `destroy()` run even if
