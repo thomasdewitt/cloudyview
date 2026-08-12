@@ -376,6 +376,16 @@ export class UI {
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setHaze(v),
     }));
+    m.append(sliderRow("White point", {
+      min: 4.0, max: 40.0, step: 0.5, value: app.toneMapWhitePoint,
+      format: (v) => v.toFixed(1),
+      onInput: (v) => app.setToneMapWhitePoint(v),
+    }));
+    m.append(sliderRow("Contrast", {
+      min: 0.5, max: 1.6, step: 0.01, value: app.contrast,
+      format: (v) => v.toFixed(2),
+      onInput: (v) => app.setContrast(v),
+    }));
     // The tier governs flight only. Say so wherever a tier is chosen, because
     // it is the thing that makes choosing a low one reasonable.
     if (K.QUALITY_HOLD_LADDERS[r.qualityTier].length) {

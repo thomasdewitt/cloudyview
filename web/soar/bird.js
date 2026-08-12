@@ -38,6 +38,7 @@
 import { DEFAULT_EXPOSURE, DEFAULT_AMBIENT_STRENGTH,
          DEFAULT_SUN_AZIMUTH, DEFAULT_SUN_ELEVATION,
          DEFAULT_TONE_MAP_GAMMA,
+         DEFAULT_TONE_MAP_WHITE_POINT, DEFAULT_CONTRAST,
          SPECTRAL_LIGHTING_STRENGTH } from "./constants.js";
 import { cameraBasis } from "./camera.js";
 import { directionFromAzimuthElevation, mod360,
@@ -47,7 +48,7 @@ import { retireAfterSubmittedWork } from "./gpu.js";
 
 const SHADER_URL = new URL("./bird.wgsl", import.meta.url);
 
-const UNIFORM_NBYTES = 3 * 64 + 7 * 16;   // 3 mat4 + 7 vec4
+const UNIFORM_NBYTES = 3 * 64 + 8 * 16;   // 3 mat4 + 8 vec4
 const UNIFORM_FLOATS = UNIFORM_NBYTES / 4;
 const DEG = Math.PI / 180.0;
 
@@ -504,6 +505,8 @@ export class Bird {
     exposure = DEFAULT_EXPOSURE,
     ambientStrength = DEFAULT_AMBIENT_STRENGTH,
     toneMapGamma = DEFAULT_TONE_MAP_GAMMA,
+    toneMapWhitePoint = DEFAULT_TONE_MAP_WHITE_POINT,
+    contrast = DEFAULT_CONTRAST,
     spectralStrength = SPECTRAL_LIGHTING_STRENGTH,
     transmissionGain = TRANSMISSION_GAIN,
     sheenGain = SHEEN_GAIN,
@@ -551,6 +554,7 @@ export class Bird {
     u[70] = light.ambient[2]; u[71] = sheenGain;
     u[72] = this.wristFlex; u[73] = this.handTwist;
     u[74] = this.tailSpread; u[75] = 0.0;
+    u[76] = toneMapWhitePoint; u[77] = contrast; u[78] = 0.0; u[79] = 0.0;
     this.device.queue.writeBuffer(this._ubuf, 0, u);
   }
 

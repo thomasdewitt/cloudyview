@@ -47,6 +47,8 @@ from .cloudfield import CloudField, load as _load_field
 from .look import DEFAULT_HAZE
 from .soar_host import (
     DEFAULT_TONE_MAP_GAMMA,
+    DEFAULT_TONE_MAP_WHITE_POINT,
+    DEFAULT_CONTRAST,
     STILL_ACCUMULATE_FRAMES,
     STEP_VOXEL_FACTOR,
     TONE_MAP_GAMMA_WITNESS,
@@ -190,6 +192,8 @@ def render_nested(
     fov_degrees: float = 100.0,
     exposure: float = 4.0,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
+    tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT,
+    contrast: float = DEFAULT_CONTRAST,
     haze: float = DEFAULT_HAZE,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
@@ -243,7 +247,9 @@ def render_nested(
         azimuth=azimuth, elevation=elevation, fov=fov_degrees,
         output_size=(w, h), render_size=(w, h),
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
-        exposure=exposure, tone_map_gamma=tone_map_gamma, haze=haze,
+        exposure=exposure, tone_map_gamma=tone_map_gamma,
+        tone_map_white_point=tone_map_white_point, contrast=contrast,
+        haze=haze,
     )
     if verbose:
         print(f"  Rendering {w}x{h}, {accumulate} accumulated passes, "
@@ -265,6 +271,8 @@ def witness(
     sun_elevation: Optional[float] = None,
     exposure: Optional[float] = None,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
+    tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT,
+    contrast: float = DEFAULT_CONTRAST,
     haze: Optional[float] = None,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
@@ -353,7 +361,9 @@ def witness(
         azimuth=camera.azimuth, elevation=camera.elevation,
         fov_degrees=camera.fov, image_size=tuple(size),
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
-        exposure=exposure, tone_map_gamma=tone_map_gamma, haze=haze,
+        exposure=exposure, tone_map_gamma=tone_map_gamma,
+        tone_map_white_point=tone_map_white_point, contrast=contrast,
+        haze=haze,
         periodic=periodic, accumulate=accumulate, verbose=verbose)
 
 

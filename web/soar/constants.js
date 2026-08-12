@@ -98,6 +98,22 @@ export const TONE_MAP_GAMMA_AS_FLOWN = 3.08;
 export const DEFAULT_TONE_MAP_GAMMA = 1.66;
 export const TONE_MAP_GAMMA_LIMITS = [1.0, 4.0];
 
+// The extended-Reinhard white point: the exposed radiance that maps to 1.0,
+// and so what decides whether a sunlit face is white or a bright grey it
+// cannot escape. A shader const until it became the second knob worth
+// reaching for after gamma. Default 15.0 — the tuned value, so nothing moves
+// unless the slider does. Below 4 the picture clips; above 40 the shoulder
+// is so close to linear that the slider stops doing anything.
+export const DEFAULT_TONE_MAP_WHITE_POINT = 15.0;
+export const TONE_MAP_WHITE_POINT_LIMITS = [4.0, 40.0];
+
+// Display-space contrast about mid-grey, after the gamma encode. 1.0 is
+// exactly the identity — see raymarch.wgsl's tone_map for why that is written
+// as a multiply-add. Past 1.6 the sky posterizes and the shadows block up;
+// below 0.5 the picture is fog.
+export const DEFAULT_CONTRAST = 1.0;
+export const CONTRAST_LIMITS = [0.5, 1.6];
+
 export const DEFAULT_MOTION_BLEND_ALPHA = 0.58;
 export const DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0;
 export const DEFAULT_MOTION_JITTER_SCALE = 0.65;

@@ -58,8 +58,9 @@ struct Uniforms {
     // x = subpixel camera-ray jitter enable (0.0 or 1.0),
     // y = jitter amplitude scale (x and y are sampling flags, excluded from
     //     the host's scene-identity key),
-    // z = haze in [0, 1] — the user's one aerosol knob, which also sets
-    //     row 16.w and row 19.y on the host side; w = unused
+    // z = haze in [0, HAZE_MAX] — the user's one aerosol knob, which also
+    //     sets row 16.w and row 19.y on the host side;
+    // w = tone-map white point (exposed radiance that displays as 1.0)
     flags: vec4<f32>,
     // x = gradient shading, y = deep-shadow MS suppression,
     // z = directional ambient occlusion, w = bounce depth attenuation
@@ -88,7 +89,8 @@ struct Uniforms {
     // z = GGX glint strength, w = GGX base roughness
     ocean_realism_a: vec4<f32>,
     // x = ocean sub-pixel slope draw fraction, y = ocean haze extinction
-    // (m^-1), z = sky-reflection cloud-shadow floor, w = unused
+    // (m^-1), z = sky-reflection cloud-shadow floor,
+    // w = display contrast about mid-grey (1.0 = identity)
     ocean_realism_b: vec4<f32>,
     // Row 20: periodic domain + distance LOD (2026-07-17 perf pass).
     // x = periodic enable in host scene identity (0.0 or 1.0); the shader
@@ -1729,20 +1731,26 @@ const TONE_MAP_SHOULDER: f32 = 0.35;
 // unorm format, never *-srgb, or this runs a second time.
 // Extended Reinhard: plain e/(1+e) crushes lit cloud faces into a grey
 // ceiling (a face at exposed radiance ~4.7 displays at 227/255 and cannot
-// move). The white point lets radiance >= TONE_MAP_WHITE_POINT reach 1.0,
-// so sunlit faces read vibrant white; below ~10% of the white point the
-// curve is within 0.3% of plain Reinhard, so sky and shadow are untouched.
-const TONE_MAP_WHITE_POINT: f32 = 15.0;
+// move). The white point (u.flags.w, user slider) is the exposed radiance
+// that reaches 1.0, so sunlit faces read vibrant white; below ~10% of it
+// the curve is within 0.3% of plain Reinhard, so sky and shadow are
+// untouched. Contrast (u.ocean_realism_b.w) pivots the encoded value on
+// mid-grey; at 1.0 the multiply-add is the exact identity.
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
-    let w2 = TONE_MAP_WHITE_POINT * TONE_MAP_WHITE_POINT;
+    let wp = u.flags.w;
+    let w2 = wp * wp;
     let per_channel = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
     let y = dot(exposed, vec3<f32>(0.2126, 0.7152, 0.0722));
     let chroma_preserving = exposed * (1.0 + y / w2) / (1.0 + y);
     let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
     let mapped = mix(per_channel, chroma_preserving, k);
-    return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / gamma));
+    let encoded = pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
+                      vec3<f32>(1.0 / gamma));
+    let c = u.ocean_realism_b.w;
+    return clamp(vec3<f32>(0.5) + (encoded - vec3<f32>(0.5)) * c,
+                 vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // ---------------------------------------------------------------------------

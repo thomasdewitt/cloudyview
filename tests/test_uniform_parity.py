@@ -50,6 +50,10 @@ CASES = [
     ("haze_thick", {}, {"haze": 0.7}),
     ("haze_max", {}, {"haze": 1.0}),
     ("haze_soup", {}, {"haze": 2.0}),
+    ("white_point_low", {}, {"tone_map_white_point": 8.0}),
+    ("contrast_up", {}, {"contrast": 1.3}),
+    ("display_combo", {}, {"tone_map_white_point": 24.0, "contrast": 0.8,
+                           "haze": 0.5}),
     ("no_lod", {}, {"light_march_lod_degrees": 0.0, "view_step_lod_degrees": 0.0}),
     ("subpixel", {}, {"subpixel": True, "jitter_scale": 0.65, "frame_index": 37}),
     ("no_jitter", {}, {"jitter": False}),
@@ -131,6 +135,7 @@ def _js_view(extra):
         "low_sun_sky_field_strength": "lowSunSkyFieldStrength",
         "cone_stencil_theta_deg": "coneStencilThetaDeg",
         "haze": "haze",
+        "tone_map_white_point": "toneMapWhitePoint", "contrast": "contrast",
     }
     for k, val in extra.items():
         if k == "render_size":

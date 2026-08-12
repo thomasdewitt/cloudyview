@@ -43,6 +43,10 @@ struct BirdUniforms {
     sky_rgb: vec4<f32>,
     // x = wrist flex (rad), y = hand twist (rad), z = tail spread, w = unused.
     anim: vec4<f32>,
+    // x = tone-map white point, y = display contrast; z/w unused. The
+    // scene's tone map is per-frame state now, so the bird's copy takes the
+    // same values or it reads as a sticker with its own camera.
+    display: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> bu: BirdUniforms;
@@ -101,19 +105,22 @@ fn sample_sigma(p: vec3<f32>) -> f32 {
     return textureSampleLevel(vol, vol_samp, vec3<f32>(t.z, t.y, t.x), 0.0).r;
 }
 
-const TONE_MAP_WHITE_POINT: f32 = 15.0;
 const TONE_MAP_SHOULDER: f32 = 0.35;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
-    let w2 = TONE_MAP_WHITE_POINT * TONE_MAP_WHITE_POINT;
+    let wp = bu.display.x;
+    let w2 = wp * wp;
     let per_channel = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
     let y = dot(exposed, vec3<f32>(0.2126, 0.7152, 0.0722));
     let chroma_preserving = exposed * (1.0 + y / w2) / (1.0 + y);
     let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
     let mapped = mix(per_channel, chroma_preserving, k);
-    return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
-               vec3<f32>(1.0 / max(gamma, 0.01)));
+    let encoded = pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
+                      vec3<f32>(1.0 / max(gamma, 0.01)));
+    let c = bu.display.y;
+    return clamp(vec3<f32>(0.5) + (encoded - vec3<f32>(0.5)) * c,
+                 vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 fn rot_y(p: vec3<f32>, a: f32) -> vec3<f32> {

@@ -77,6 +77,8 @@ export function packUniforms(state, view) {
     aerialPerspectiveStrength = K.AERIAL_PERSPECTIVE_STRENGTH,
     // One number for the whole aerosol story; no per-term override exists.
     haze = K.DEFAULT_HAZE,
+    toneMapWhitePoint = K.DEFAULT_TONE_MAP_WHITE_POINT,
+    contrast = K.DEFAULT_CONTRAST,
     oceanRealism = K.OCEAN_REALISM,
     oceanMipBias = K.OCEAN_MIP_BIAS,
     oceanGlintStrength = K.OCEAN_GLINT_STRENGTH,
@@ -102,6 +104,19 @@ export function packUniforms(state, view) {
   unitInterval("ocean_sky_shadow_floor", oceanSkyShadowFloor);
   if (!(Number(haze) >= 0.0 && Number(haze) <= K.HAZE_MAX)) {
     throw new Error(`haze must be in [0, ${K.HAZE_MAX}]; got ${haze}.`);
+  }
+  {
+    const [lo, hi] = K.TONE_MAP_WHITE_POINT_LIMITS;
+    if (!(Number(toneMapWhitePoint) >= lo && Number(toneMapWhitePoint) <= hi)) {
+      throw new Error(
+        `tone_map_white_point must be in [${lo}, ${hi}]; got ${toneMapWhitePoint}.`);
+    }
+  }
+  {
+    const [lo, hi] = K.CONTRAST_LIMITS;
+    if (!(Number(contrast) >= lo && Number(contrast) <= hi)) {
+      throw new Error(`contrast must be in [${lo}, ${hi}]; got ${contrast}.`);
+    }
   }
   if (!(aerialPerspectiveStrength >= 0.0)) {
     throw new Error(
@@ -160,7 +175,7 @@ export function packUniforms(state, view) {
   row(9, oceanFifDx, oceanTileExtent, oceanEnabled ? 1.0 : 0.0, oceanMaxLod);
   // x/y are sampling flags, excluded from scene identity; z is haze, which
   // is scene state and is not. See sceneKey.
-  row(10, subpixel ? 1.0 : 0.0, jitterScale, haze, 0.0);
+  row(10, subpixel ? 1.0 : 0.0, jitterScale, haze, toneMapWhitePoint);
   row(11, gradientShadingStrength, deepShadowMsSuppression,
        ambientOcclusionStrength, bounceDepthAttenuation);
   row(12, gradientCoarseWeight, gradientCoarseRadiusM, ambientOcclusionFloor,
@@ -175,7 +190,7 @@ export function packUniforms(state, view) {
   row(17, spec.disc[0], spec.disc[1], spec.disc[2], K.AERIAL_SCALE_HEIGHT_M);
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
   row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
-       oceanSkyShadowFloor, 0.0);
+       oceanSkyShadowFloor, contrast);
   row(20, periodic ? 1.0 : 0.0,
        Math.tan(lightMarchLodDegrees * DEG),
        Math.tan(viewStepLodDegrees * DEG),

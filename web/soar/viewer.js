@@ -51,6 +51,8 @@ class Viewer {
     this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
     this.sunElevation = K.DEFAULT_SUN_ELEVATION;
     this.toneMapGamma = K.DEFAULT_TONE_MAP_GAMMA;
+    this.toneMapWhitePoint = K.DEFAULT_TONE_MAP_WHITE_POINT;
+    this.contrast = K.DEFAULT_CONTRAST;
     this.haze = K.DEFAULT_HAZE;
     this.beholdQuality = K.DEFAULT_BEHOLD_QUALITY;
     this.beholdField = "outer";   // "outer" or "nest": behold renders one
@@ -891,6 +893,27 @@ class Viewer {
     this._wake("tone-map gamma");
   }
 
+  setToneMapWhitePoint(whitePoint) {
+    const [lo, hi] = K.TONE_MAP_WHITE_POINT_LIMITS;
+    if (!(whitePoint >= lo && whitePoint <= hi)) {
+      throw new Error(
+        `tone_map_white_point must be in [${lo}, ${hi}]; got ${whitePoint}.`);
+    }
+    this.toneMapWhitePoint = whitePoint;
+    this.renderer.resetAccumulation();
+    this._wake("tone-map white point");
+  }
+
+  setContrast(contrast) {
+    const [lo, hi] = K.CONTRAST_LIMITS;
+    if (!(contrast >= lo && contrast <= hi)) {
+      throw new Error(`contrast must be in [${lo}, ${hi}]; got ${contrast}.`);
+    }
+    this.contrast = contrast;
+    this.renderer.resetAccumulation();
+    this._wake("contrast");
+  }
+
   /**
    * How much aerosol is in the air, 0 to 1. Unlike the gamma above this is
    * not a display choice — it changes what the march computes, so the frames
@@ -1199,6 +1222,9 @@ class Viewer {
       this.bird.update(dt, pose);
       this.bird.writeUniforms(pose, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+        toneMapGamma: this.toneMapGamma,
+        toneMapWhitePoint: this.toneMapWhitePoint,
+        contrast: this.contrast,
       });
       overlays.push((enc, view, format) =>
         this.bird.encodePass(enc, view, format, size));
@@ -1257,6 +1283,8 @@ class Viewer {
         periodic: this.renderer.periodic,
         accumulate_frames: K.STILL_ACCUMULATE_FRAMES,
         tone_map_gamma: this.toneMapGamma,
+        tone_map_white_point: this.toneMapWhitePoint,
+        contrast: this.contrast,
         haze: this.haze,
         light_march_lod_degrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
         view_step_lod_degrees: K.APP_VIEW_STEP_LOD_DEGREES,
@@ -1281,6 +1309,9 @@ class Viewer {
     if (overlays && this.bird && this.birdEnabled) {
       this.bird.writeUniforms(this.camera, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+        toneMapGamma: this.toneMapGamma,
+        toneMapWhitePoint: this.toneMapWhitePoint,
+        contrast: this.contrast,
       });
       stillOverlays.push((enc, view, format) =>
         this.bird.encodePass(enc, view, format, size));
@@ -1424,6 +1455,8 @@ class Viewer {
       sunAzimuth: this.sunAzimuth,
       sunElevation: this.sunElevation,
       toneMapGamma: this.toneMapGamma,
+      toneMapWhitePoint: this.toneMapWhitePoint,
+      contrast: this.contrast,
       haze: this.haze,
       lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES,
@@ -1531,6 +1564,9 @@ class Viewer {
       this.bird.update(this.paused ? 0 : dt, this.camera);
       this.bird.writeUniforms(this.camera, [outW, outH], {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+        toneMapGamma: this.toneMapGamma,
+        toneMapWhitePoint: this.toneMapWhitePoint,
+        contrast: this.contrast,
       });
       overlays.push((enc, view, format) =>
         this.bird.encodePass(enc, view, format, [outW, outH]));

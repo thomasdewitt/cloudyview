@@ -95,6 +95,24 @@ TONE_MAP_GAMMA_AS_FLOWN = 3.08
 DEFAULT_TONE_MAP_GAMMA = 1.66
 TONE_MAP_GAMMA_LIMITS = (1.0, 4.0)
 
+# The extended-Reinhard white point: the exposed radiance that maps to 1.0.
+# It was a shader const until it became the second thing worth reaching for
+# after gamma — it is what decides whether a sunlit face is white or is a
+# bright grey it cannot escape. The default is the tuned 15.0, so nothing
+# moves unless a caller asks. Below 4 the whole picture clips (plain
+# Reinhard's own ceiling behaviour); above 40 the curve is within a fraction
+# of a percent of linear-through-the-shoulder and the slider does nothing.
+DEFAULT_TONE_MAP_WHITE_POINT = 15.0
+TONE_MAP_WHITE_POINT_LIMITS = (4.0, 40.0)
+
+# Display-space contrast about mid-grey, applied after the gamma encode.
+# 1.0 is exactly the identity (see raymarch.wgsl's tone_map for why the
+# arithmetic is written the way it is). The range is deliberately narrow:
+# past 1.6 the sky posterizes and the shadows block up, and below 0.5 the
+# picture is fog.
+DEFAULT_CONTRAST = 1.0
+CONTRAST_LIMITS = (0.5, 1.6)
+
 MIN_SUN_ELEVATION_DEG = 0.5
 STILL_ACCUMULATE_FRAMES = 64
 
@@ -224,6 +242,8 @@ class ViewState:
     light_march_lod_degrees: float = APP_LIGHT_MARCH_LOD_DEGREES
     view_step_lod_degrees: float = APP_VIEW_STEP_LOD_DEGREES
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA
+    tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT
+    contrast: float = DEFAULT_CONTRAST
     frame_index: int = 0
     subpixel: bool = False
     jitter_scale: float = 1.0
@@ -256,6 +276,14 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     if not (lo <= view.tone_map_gamma <= hi):
         raise ValueError(f"tone_map_gamma must be in [{lo}, {hi}]; got "
                          f"{view.tone_map_gamma}.")
+    lo, hi = TONE_MAP_WHITE_POINT_LIMITS
+    if not (lo <= view.tone_map_white_point <= hi):
+        raise ValueError(f"tone_map_white_point must be in [{lo}, {hi}]; got "
+                         f"{view.tone_map_white_point}.")
+    lo, hi = CONTRAST_LIMITS
+    if not (lo <= view.contrast <= hi):
+        raise ValueError(f"contrast must be in [{lo}, {hi}]; got "
+                         f"{view.contrast}.")
     # Not a clamp: a periodic light march exits only through the domain top,
     # so a sun at or below the horizon has no exit and the picture is wrong
     # in a way that still looks plausible.
@@ -287,7 +315,8 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[8] = (state.ocean_z, *state.ocean_reflectance)
     u[9] = (state.ocean_fif_dx, state.ocean_tile_extent,
             1.0 if state.ocean_enabled else 0.0, float(state.ocean_max_lod))
-    u[10] = (1.0 if view.subpixel else 0.0, view.jitter_scale, view.haze, 0.0)
+    u[10] = (1.0 if view.subpixel else 0.0, view.jitter_scale, view.haze,
+             view.tone_map_white_point)
     u[11] = (view.gradient_shading_strength, view.deep_shadow_ms_suppression,
              view.ambient_occlusion_strength, view.bounce_depth_attenuation)
     u[12] = (view.gradient_coarse_weight, view.gradient_coarse_radius_m,
@@ -302,7 +331,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
              view.ocean_glint_strength, view.ocean_glint_roughness)
     u[19] = (view.ocean_slope_draw_fraction,
              look.ocean_haze_extinction_per_km(view.haze) * 1e-3,
-             view.ocean_sky_shadow_floor, 0.0)
+             view.ocean_sky_shadow_floor, view.contrast)
     u[20] = (1.0 if state.periodic else 0.0,
              math.tan(view.light_march_lod_degrees * DEG),
              math.tan(view.view_step_lod_degrees * DEG),
