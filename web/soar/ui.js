@@ -236,6 +236,11 @@ export class UI {
   open(name, context) {
     this.panel = name;
     this.menu.hidden = false;
+    // Panels whose controls change the picture dock to the bottom edge so
+    // the picture stays visible while it is being tuned — a centred box
+    // sits exactly on top of the thing the sliders move.
+    this.menu.classList.toggle(
+      "dock-bottom", name === "quality" || name === "terminal");
     this.menu.replaceChildren();
     const build = this[`_panel_${name}`];
     if (!build) throw new Error(`no such panel: ${name}`);
@@ -288,9 +293,9 @@ export class UI {
                   () => this.open("quality")));
     m.append(item("Capture…", "still image or a flight video",
                   () => this.open("capture")));
-    m.append(item("Render this view in behold…",
-                  "the path-traced command, for a terminal",
-                  () => this.open("behold")));
+    m.append(item("Render this view in a terminal…",
+                  "a pasteable command — witness or behold",
+                  () => this.open("terminal")));
     m.append(item("Controls", null, () => this.open("controls")));
     m.append(item(
       `Minimap: ${!app.minimap ? "off" : { corner: "on", full: "fullscreen", off: "off" }[app.minimapMode]}`,
@@ -498,37 +503,54 @@ export class UI {
     m.append(this._backButton());
   }
 
-  _panel_behold() {
+  _panel_terminal() {
     const app = this.app;
     const m = this.menu;
-    m.append(this._header("render in behold", "Command for this view"));
-    m.append(el("div", "row",
-      "Path tracing runs in a terminal, not in a tab. This command " +
-      "reproduces exactly what you are looking at — camera, sun, field and " +
-      "all."));
-    if (app.renderer.periodic && app.viewSpansDomainEdge()) {
-      m.append(el("div", "row",
-        "This view spans a domain edge. behold does not tile, so its frame " +
-        "will differ from what you see here."));
-    }
-    if (app.scene?.nested) {
-      // Two fields on screen and behold renders one, so which is wanted
-      // cannot be read off the view — the camera sees both.
-      m.append(el("div", "row",
-        "behold renders one field, not a nested pair. The other one will " +
-        "be absent from its frame."));
-      m.append(segmented(
-        [[`Outer (${app.scene.groupPath || "root group"})`, "outer"],
-         [`Nested (${app.scene.nestGroup || "root group"})`, "nest"]],
-        (v) => v === app.beholdField,
-        (v) => { app.beholdField = v; this.open("behold"); }));
-    }
-    m.append(segmented(
-      K.BEHOLD_QUALITY_ROWS.map(([label, value]) => [label, value]),
-      (v) => v === app.beholdQuality,
-      (v) => { app.beholdQuality = v; this.open("behold"); }));
+    m.append(this._header("render in a terminal", "Command for this view"));
 
-    const command = app.beholdCommand();
+    m.append(segmented(
+      [["witness — exactly this view", "witness"],
+       ["behold — path traced", "behold"]],
+      (v) => v === app.terminalRenderer,
+      (v) => { app.terminalRenderer = v; this.open("terminal"); }));
+
+    if (app.terminalRenderer === "witness") {
+      // witness drives the same WGSL as this view, so nothing is absent
+      // from its frame and no outer/nest choice exists to offer.
+      m.append(el("div", "row",
+        "The same renderer as this view — " +
+        (app.scene?.nested ? "both nested levels, " : "") +
+        "the same image settings, rendered at still quality on a GPU."));
+    } else {
+      m.append(el("div", "row",
+        "Path tracing runs in a terminal, not in a tab. This command " +
+        "reproduces what you are looking at — camera, sun, field and " +
+        "all."));
+      if (app.renderer.periodic && app.viewSpansDomainEdge()) {
+        m.append(el("div", "row",
+          "This view spans a domain edge. behold does not tile, so its " +
+          "frame will differ from what you see here."));
+      }
+      if (app.scene?.nested) {
+        // Two fields on screen and behold renders one, so which is wanted
+        // cannot be read off the view — the camera sees both.
+        m.append(el("div", "row",
+          "behold renders one field, not a nested pair. The other one will " +
+          "be absent from its frame."));
+        m.append(segmented(
+          [[`Outer (${app.scene.groupPath || "root group"})`, "outer"],
+           [`Nested (${app.scene.nestGroup || "root group"})`, "nest"]],
+          (v) => v === app.beholdField,
+          (v) => { app.beholdField = v; this.open("terminal"); }));
+      }
+      m.append(segmented(
+        K.BEHOLD_QUALITY_ROWS.map(([label, value]) => [label, value]),
+        (v) => v === app.beholdQuality,
+        (v) => { app.beholdQuality = v; this.open("terminal"); }));
+    }
+
+    const command = app.terminalRenderer === "witness"
+      ? app.witnessCommand() : app.beholdCommand();
     const box = el("div", "row");
     box.style.display = "block";
     box.style.fontFamily = "var(--ui-mono)";

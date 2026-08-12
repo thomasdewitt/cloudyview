@@ -56,6 +56,9 @@ class Viewer {
     this.haze = K.DEFAULT_HAZE;
     this.beholdQuality = K.DEFAULT_BEHOLD_QUALITY;
     this.beholdField = "outer";   // "outer" or "nest": behold renders one
+    // witness is the default because it reproduces this exact view — nests,
+    // wrap and image settings — where behold path-traces one bare field.
+    this.terminalRenderer = "witness";
     this.captureSize = null;
     this.videoFps = K.DEFAULT_VIDEO_FPS;
     this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
@@ -359,7 +362,7 @@ class Viewer {
    * The short of it: onSubmittedWorkDone is only a GPU fence on some
    * browsers. On Firefox it resolves on an internal poll cadence — ~100 ms
    * on a machine whose actual frame is one or two — and a probe that
-   * believed it concluded a 5080 could not afford Potato. So the round-trip
+   * believed it concluded a 5080 could not afford Minimal (then "potato"). So the round-trip
    * is measured here on an EMPTY queue: anything it costs is the clock's
    * own overhead. The minimum of a few rounds, because the first may still
    * be draining real work from the load.
@@ -1297,7 +1300,10 @@ class Viewer {
         view_step_lod_degrees: K.APP_VIEW_STEP_LOD_DEGREES,
       },
       timestamp: new Date().toISOString(),
-      reproduction_command: this.beholdCommand(),
+      // witness, not behold: the still was rendered by the witness/soar
+      // renderer, so this is the command that reproduces THIS image —
+      // nests, wrap and image controls included.
+      reproduction_command: this.witnessCommand(),
     };
   }
 
@@ -1466,6 +1472,39 @@ class Viewer {
     ].join(" ");
   }
 
+  /**
+   * Unlike behold, witness drives the exact WGSL this view was drawn with,
+   * so its command reproduces the view completely: both nested levels, the
+   * periodic wrap, and the image controls — which are display state a
+   * default render would not carry. The image controls are always written
+   * out rather than only when non-default, because "exactly this view" must
+   * survive a change of defaults.
+   */
+  witnessCommand() {
+    const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
+    const source = this.scene.sourceName ?? "<your-file.nc>";
+    const rel = worldToRelative(
+      this.camera.position, this.scene.bmin, this.scene.bmax);
+    return [
+      "witness", source,
+      "--size", this.canvas.width, this.canvas.height,
+      ...(this.scene.groupPath ? ["--group", this.scene.groupPath] : []),
+      ...(this.scene.nested && this.scene.nestGroup
+          ? ["--nest-group", this.scene.nestGroup] : []),
+      "--camera-position", n(rel[0]), n(rel[1]), n(rel[2]),
+      "--camera-azimuth", n(this.camera.azimuth),
+      "--camera-elevation", n(this.camera.elevation),
+      "--fov", n(this.camera.fov),
+      "--sun-azimuth", n(this.sunAzimuth),
+      "--sun-elevation", n(this.sunElevation),
+      ...(this.renderer.periodic ? ["--periodic"] : []),
+      "--gamma", n(this.toneMapGamma),
+      "--white-point", n(this.toneMapWhitePoint),
+      "--contrast", n(this.contrast),
+      "--haze", n(this.haze),
+    ].join(" ");
+  }
+
   // --- the loop ------------------------------------------------------------
 
   _viewKwargs() {
@@ -1613,7 +1652,7 @@ class Viewer {
     //            this frame's GPU work. Honest wherever waiting on the
     //            queue is a fence, which is measured, not assumed —
     //            Firefox's onSubmittedWorkDone is a ~100 ms poll cadence
-    //            that read a 5080's one-millisecond Potato as a slideshow.
+    //            that read a 5080's one-millisecond Minimal as a slideshow.
     //   cadence  no waits at all: the rAF delta of marched frames. It
     //            saturates at the vsync interval, so it cannot predict the
     //            next tier — but it can falsify the current one, and the

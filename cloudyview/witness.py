@@ -262,6 +262,31 @@ def render_nested(
     return image
 
 
+def _field_level(field: CloudField, name: str, verbose: bool = False) -> NestedLevel:
+    """Turn a loaded CloudField into a renderable NestedLevel.
+
+    Converts condensate to extinction (dropping ice when it is negligible),
+    applies the config's extinction_multiplier, and derives the absolute-meter
+    AABB. Shared by the single-field and nested paths so both levels of a nest
+    are built by exactly the same rule.
+    """
+    rendering = config.get_witness_config()['rendering']
+
+    iwc = field.iwc
+    if iwc is not None and float(np.max(iwc)) < ICE_NEGLIGIBLE_G_KG:
+        if verbose:
+            print("  Ice water content is negligible; rendering liquid only.")
+        iwc = None
+
+    sigma = optical_depth.compute_extinction_field(
+        field.lwc, field.z, re=RE_LIQUID_UM, iwc=iwc, re_ice=RE_ICE_UM)
+    sigma = np.ascontiguousarray(
+        sigma * rendering.get('extinction_multiplier', 1.0), dtype=np.float64)
+
+    bmin, bmax = _volume_aabb(field)
+    return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=name)
+
+
 def witness(
     field: CloudField,
     camera: Optional[Camera] = None,
@@ -332,19 +357,8 @@ def witness(
     if haze is None:
         haze = DEFAULT_HAZE
 
-    iwc = field.iwc
-    if iwc is not None and float(np.max(iwc)) < ICE_NEGLIGIBLE_G_KG:
-        if verbose:
-            print("  Ice water content is negligible; rendering liquid only.")
-        iwc = None
-
-    sigma = optical_depth.compute_extinction_field(
-        field.lwc, field.z, re=RE_LIQUID_UM, iwc=iwc, re_ice=RE_ICE_UM)
-    sigma = np.ascontiguousarray(
-        sigma * rendering.get('extinction_multiplier', 1.0), dtype=np.float64)
-
-    bmin, bmax = _volume_aabb(field)
-    level = NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name="single")
+    level = _field_level(field, "single", verbose=verbose)
+    sigma, bmin, bmax = level.sigma, level.bmin, level.bmax
     position = camera_world_origin(camera.position, bmin, bmax)
 
     if verbose:
@@ -367,11 +381,70 @@ def witness(
         periodic=periodic, accumulate=accumulate, verbose=verbose)
 
 
+def _render_with_nest(filename: str, outer_field: CloudField, camera: Camera,
+                      nest_group: str, *, size, sun_azimuth, sun_elevation,
+                      periodic: bool, look_kwargs: dict,
+                      load_kwargs: dict) -> np.ndarray:
+    """Render `filename` with a finer field from `nest_group` as the nest.
+
+    The nest is a second field in the SAME file, read from its own NetCDF
+    group. The group-specific overrides (--liquid-water-group and friends)
+    describe the outer field only, so the nest is loaded with `nest_group` as
+    its dataset group and inherits just the variable/coordinate NAME
+    overrides. If it will not load, this raises: a quietly single-field image
+    would look plausible and be the wrong picture.
+    """
+    print(f"  Nest: loading group {nest_group}")
+    try:
+        nest_field = _load_field(filename, dataset_group=nest_group,
+                                 **load_kwargs)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not load the nest field from group '{nest_group}' of "
+            f"{filename}: {exc}") from exc
+
+    witness_config = config.get_witness_config()
+    rendering = witness_config['rendering']
+    if size is None:
+        size = (rendering['width'], rendering['height'])
+    if sun_azimuth is None:
+        sun_azimuth = witness_config['sun']['azimuth']
+    if sun_elevation is None:
+        sun_elevation = witness_config['sun']['elevation']
+
+    outer = _field_level(outer_field, "outer", verbose=True)
+    nest = _field_level(nest_field, nest_group, verbose=True)
+    # Relative camera coordinates resolve against the OUTER box, as they do
+    # in the browser, so the same numbers frame the same view either side.
+    position = camera_world_origin(camera.position, outer.bmin, outer.bmax)
+
+    print(f"  Outer grid: {outer.sigma.shape}, nest grid: {nest.sigma.shape}")
+    print(f"  Camera at {np.round(position, 1)} m, azimuth "
+          f"{camera.azimuth:.1f}, elevation {camera.elevation:.1f}, "
+          f"fov {camera.fov:.1f} (horizontal)")
+    print(f"  Sun: azimuth {sun_azimuth:.1f}, elevation {sun_elevation:.1f}")
+
+    return render_nested(
+        [nest, outer], position,          # finest first
+        azimuth=camera.azimuth, elevation=camera.elevation,
+        fov_degrees=camera.fov, image_size=tuple(size),
+        sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
+        exposure=rendering['exposure'],
+        periodic=periodic, verbose=True,
+        **look_kwargs)
+
+
 def main(filename: str, output: str = None,
          camera_position: list = None, camera_azimuth: float = None,
          camera_elevation: float = None, camera_fov: float = None,
          sun_azimuth: float = None, sun_elevation: float = None,
          custom_size: tuple = None,
+         tone_map_gamma: float = None,
+         tone_map_white_point: float = None,
+         contrast: float = None,
+         haze: float = None,
+         periodic: bool = False,
+         nest_group: str = None,
          liquid_water_var: str = None,
          ice_water_var: str = None,
          dataset_group: str = None,
@@ -400,6 +473,18 @@ def main(filename: str, output: str = None,
     if camera_fov is not None:
         cam_config['fov'] = camera_fov
 
+    # None means "the library default"; only forward what was actually asked
+    # for, so cloudyview.witness / soar_host stay the single source of truth.
+    look_kwargs = {}
+    if tone_map_gamma is not None:
+        look_kwargs['tone_map_gamma'] = tone_map_gamma
+    if tone_map_white_point is not None:
+        look_kwargs['tone_map_white_point'] = tone_map_white_point
+    if contrast is not None:
+        look_kwargs['contrast'] = contrast
+    if haze is not None:
+        look_kwargs['haze'] = haze
+
     try:
         field = _load_field(
             filename,
@@ -424,14 +509,36 @@ def main(filename: str, output: str = None,
             fov=cam_config['fov'],
         )
 
-        image_tm = witness(
-            field,
-            camera=camera,
-            size=tuple(custom_size) if custom_size else None,
-            sun_azimuth=sun_azimuth,
-            sun_elevation=sun_elevation,
-            verbose=True,
-        )
+        if nest_group:
+            image_tm = _render_with_nest(
+                filename, field, camera, nest_group,
+                size=tuple(custom_size) if custom_size else None,
+                sun_azimuth=sun_azimuth,
+                sun_elevation=sun_elevation,
+                periodic=periodic,
+                look_kwargs=look_kwargs,
+                load_kwargs=dict(
+                    liquid_water_var=liquid_water_var,
+                    ice_water_var=ice_water_var,
+                    x_coord_name=x_coord_name,
+                    y_coord_name=y_coord_name,
+                    z_coord_name=z_coord_name,
+                    x_dim=x_dim,
+                    y_dim=y_dim,
+                    z_dim=z_dim,
+                ),
+            )
+        else:
+            image_tm = witness(
+                field,
+                camera=camera,
+                size=tuple(custom_size) if custom_size else None,
+                sun_azimuth=sun_azimuth,
+                sun_elevation=sun_elevation,
+                periodic=periodic,
+                verbose=True,
+                **look_kwargs,
+            )
 
         if output:
             output_dir = Path(output)
@@ -503,6 +610,18 @@ def cli():
               - high: 1600x1200
               `--size WIDTH HEIGHT` overrides the preset.
 
+            Image controls (the same knobs the browser app exposes):
+              `--gamma`, `--white-point`, `--contrast` and `--haze` set the tone
+              map and aerosol amount; omit one and the library default stands.
+              `--periodic` wraps the domain in x and y for LES fields.
+
+            Nesting:
+              `--nest-group GROUP` renders a finer field from another NetCDF group
+              of the SAME file inside the outer domain. The group-specific flags
+              (`--liquid-water-group` and friends) describe the outer field only;
+              the nest inherits the variable and coordinate NAME overrides.
+              Relative camera coordinates resolve against the outer domain.
+
             Dependencies:
               `witness --help` works without a GPU. Rendering needs one: this drives
               the same WGSL shader the browser app runs, through wgpu, so there is a
@@ -515,6 +634,7 @@ def cli():
               witness cloud.nc high --output renders
               witness cloud.nc medium --size 1200 800 --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
               witness cloud.nc --group /physics/clouds --liquid-water-var QCLOUD --ice-water-var QICE
+              witness cloud.nc high --nest-group /nest --white-point 15 --gamma 1.66 --haze 1.0 --periodic
               witness custom.nc --liquid-water-group /state/liquid --ice-water-group /state/ice --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
             """
         ),
@@ -542,6 +662,21 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
+    parser.add_argument("--gamma", type=float,
+                        help=f"Tone-map gamma (default: {DEFAULT_TONE_MAP_GAMMA})")
+    parser.add_argument("--white-point", type=float,
+                        help="Extended-Reinhard white point: the exposed radiance "
+                             f"mapping to 1.0 (default: {DEFAULT_TONE_MAP_WHITE_POINT})")
+    parser.add_argument("--contrast", type=float,
+                        help="Display contrast about mid-grey, applied after the "
+                             f"gamma encode (default: {DEFAULT_CONTRAST})")
+    parser.add_argument("--haze", type=float,
+                        help=f"Aerosol amount, 0 to 2 (default: {DEFAULT_HAZE})")
+    parser.add_argument("--periodic", action="store_true",
+                        help="Wrap the domain in x and y, as soar does for LES fields")
+    parser.add_argument("--nest-group", metavar="GROUP",
+                        help="NetCDF group in the same file holding a finer field "
+                             "to render as a nest inside the outer domain")
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
@@ -555,6 +690,12 @@ def cli():
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
          custom_size=size,
+         tone_map_gamma=args.gamma,
+         tone_map_white_point=args.white_point,
+         contrast=args.contrast,
+         haze=args.haze,
+         periodic=args.periodic,
+         nest_group=args.nest_group,
          **dataset_selection_kwargs(args))
 
 

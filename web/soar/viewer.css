@@ -135,6 +135,14 @@ button.chip.on { border-color: var(--hot); color: var(--hot); }
   padding: 20px 22px;
 }
 #menu[hidden] { display: none; }
+/* Image-tuning panels (quality, terminal render) sit at the bottom so the
+   view being adjusted stays visible above them. */
+#menu.dock-bottom {
+  top: auto;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-height: min(48vh, calc(100vh - 4rem));
+}
 #menu .menu-title {
   font-size: 17px;
   color: var(--ink-bright);
