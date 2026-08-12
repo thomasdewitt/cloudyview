@@ -168,9 +168,9 @@ export async function loadFileScene(
 
     // Which level, or which two.
     const pairs = nestablePairs(groups.map((g) => {
-      const { bmin, bmax, dx } = domainExtent(
+      const { bmin, bmax, spacing } = domainExtent(
         g.coords.x, g.coords.y, g.coords.z);
-      return { name: g.path, bmin, bmax, dx };
+      return { name: g.path, bmin, bmax, spacing };
     }));
 
     let chosen = [groups[0]];

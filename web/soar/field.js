@@ -138,7 +138,11 @@ export function validateNestContainment(bmin, bmax, nestMin, nestMax) {
 /**
  * Every (outer, inner) pair among these domains that forms a valid nest.
  *
- * `domains` is [{name, bmin, bmax, dx}]. Three levels of refinement give
+ * `domains` is [{name, bmin, bmax, spacing}] with `spacing` the per-axis
+ * minimum grid spacing. Finer means: no axis coarser, at least one axis
+ * strictly finer — per-axis, because the ordinary nest refines horizontally
+ * while sharing the parent's vertical levels, and a single scalar would rank
+ * such a pair as a tie. Three levels of refinement give
  * several qualifying pairs (coarse+middle, coarse+fine, middle+fine) and all
  * of them are offered — which of the two you want is not ours to guess.
  */
@@ -146,7 +150,12 @@ export function nestablePairs(domains) {
   const pairs = [];
   for (const outer of domains) {
     for (const inner of domains) {
-      if (inner === outer || !(inner.dx < outer.dx)) continue;
+      if (inner === outer) continue;
+      const noAxisCoarser =
+        inner.spacing.every((s, i) => s <= outer.spacing[i]);
+      const oneAxisFiner =
+        inner.spacing.some((s, i) => s < outer.spacing[i]);
+      if (!noAxisCoarser || !oneAxisFiner) continue;
       const tol = outer.bmin.map(
         (_, i) => 1e-9 * Math.max(outer.bmax[i] - outer.bmin[i], 1.0));
       const { overhang, allowance } =
@@ -164,8 +173,8 @@ export function nestablePairs(domains) {
 
 /**
  * Cell-edge extent of one level, matching io.group_domain_extent so extents
- * are comparable across groups. `dx` is the smallest spacing over ALL three
- * axes — a single scalar, which is what ranks one level as finer than another.
+ * are comparable across groups. `spacing` is the smallest spacing per axis —
+ * kept per-axis because refinement is a per-axis relation (see nestablePairs).
  *
  * NOT volumeAABB. The two differ, and deliberately: engine._volume_aabb pads
  * x and y by the FIRST spacing at both ends, because the march maps world to
@@ -177,8 +186,7 @@ export function nestablePairs(domains) {
  * nestability from the wrong box.
  */
 export function domainExtent(x, y, z) {
-  const bmin = [], bmax = [];
-  let dx = Infinity;
+  const bmin = [], bmax = [], spacing = [];
   for (const c of [x, y, z]) {
     const lo = 0.5 * Math.abs(c[1] - c[0]);
     const hi = 0.5 * Math.abs(c[c.length - 1] - c[c.length - 2]);
@@ -186,11 +194,13 @@ export function domainExtent(x, y, z) {
     for (const v of c) { if (v < min) min = v; if (v > max) max = v; }
     bmin.push(min - lo);
     bmax.push(max + hi);
+    let dx = Infinity;
     for (let i = 1; i < c.length; i++) {
       dx = Math.min(dx, Math.abs(c[i] - c[i - 1]));
     }
+    spacing.push(dx);
   }
-  return { bmin, bmax, dx };
+  return { bmin, bmax, spacing };
 }
 
 /**

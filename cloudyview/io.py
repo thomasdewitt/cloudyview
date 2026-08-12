@@ -201,12 +201,16 @@ def find_liquid_water_groups(
 
 
 def group_domain_extent(filepath: str, group: Optional[str] = None):
-    """Absolute-meter (bmin, bmax, min_spacing) of one group's grid.
+    """Absolute-meter (bmin, bmax, spacing) of one group's grid.
 
     Cell-edge aligned like the renderers' AABBs (half a cell beyond the
     outermost centers), so the result is directly comparable across
-    groups. Coordinates only — no field data is read. Returns None when
-    the group has no usable 3D grid.
+    groups. `spacing` is the minimum grid spacing per axis (x, y, z) —
+    kept per-axis because refinement is a per-axis relation: an
+    atmospheric nest usually refines horizontally while sharing its
+    parent's vertical levels, and collapsing to one scalar would rank
+    such a pair as a tie. Coordinates only — no field data is read.
+    Returns None when the group has no usable 3D grid.
     """
     try:
         ds = load_data(filepath, group=group)
@@ -225,7 +229,7 @@ def group_domain_extent(filepath: str, group: Optional[str] = None):
         bmin.append(float(values.min()) - lo_half)
         bmax.append(float(values.max()) + hi_half)
         spacing.append(float(abs(np.diff(values)).min()))
-    return np.array(bmin), np.array(bmax), min(spacing)
+    return np.array(bmin), np.array(bmax), np.array(spacing)
 
 
 # A nest's box is built from cell edges (half a cell beyond the outermost
@@ -263,8 +267,10 @@ def find_nestable_group_pairs(filepath: str, groups: Optional[list] = None):
     Files that keep each field in its own group — STEAM render nests —
     often hold exactly this: a coarse parent and a finer child covering
     part of it. A pair qualifies when one group's grid lies inside
-    another's AND is strictly finer; a candidate that covers its parent
-    entirely is a replacement, not a refinement, and is left out.
+    another's AND is finer — no axis coarser, at least one axis strictly
+    finer. Per-axis, because the ordinary nest refines horizontally while
+    sharing the parent's vertical levels; a candidate that covers its
+    parent entirely is a replacement, not a refinement, and is left out.
 
     Three or more nesting levels give several qualifying pairs (coarse +
     middle, coarse + fine, middle + fine). All of them are returned —
@@ -287,7 +293,10 @@ def find_nestable_group_pairs(filepath: str, groups: Optional[list] = None):
     pairs = []
     for outer, (outer_min, outer_max, outer_dx) in extents.items():
         for inner, (inner_min, inner_max, inner_dx) in extents.items():
-            if inner == outer or inner_dx >= outer_dx:
+            if inner == outer:
+                continue
+            # Finer means: no axis coarser, at least one strictly finer.
+            if np.any(inner_dx > outer_dx) or not np.any(inner_dx < outer_dx):
                 continue
             tol = 1e-9 * np.maximum(outer_max - outer_min, 1.0)
             overhang, allowance = nest_overhang(
