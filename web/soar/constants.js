@@ -321,6 +321,14 @@ export const AUTO_TIER_COST_RATIO_TO_NEXT = {
   medium: 2.0,
 };
 export const AUTO_TIER_MARGIN = 0.75;
+// A first verdict BELOW this tier is re-measured once, this long after it
+// settled, before being announced — walking upward from the tier already
+// proven. Probe noise is one-sided (startup contention only ever inflates a
+// measurement), so a high verdict is self-proving and a low one is the case
+// worth a second look; the retry can only raise the answer, and the
+// no-frame-at-an-unproven-tier invariant holds throughout.
+export const AUTO_TIER_CONFIRM_FROM = "medium";
+export const AUTO_TIER_CONFIRM_DELAY_MS = 1000.0;
 // Frames per tier: the first is thrown away and the rest are measured. The
 // throwaway is not politeness, it is the only way the number means anything —
 // the first frame at a tier pays for the pipeline creation (which on Metal

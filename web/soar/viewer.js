@@ -83,6 +83,10 @@ class Viewer {
     this.qualityTier = null;
     this._autoTier = true;
     this._probe = null;
+    // One-shot second opinion on a low auto-tier verdict — see
+    // _settleAutoTier and AUTO_TIER_CONFIRM_FROM.
+    this._confirmTimer = null;
+    this._confirmed = false;
 
     // The loop sleeps on a converged view (see _frame) and only these three
     // fields say so. `_sleeping` means no rAF is pending and only _wake can
@@ -339,9 +343,16 @@ class Viewer {
 
   /** Arm the probe for a freshly loaded field, unless the user opted out. */
   _beginAutoTier() {
+    clearTimeout(this._confirmTimer);
+    this._confirmTimer = null;
+    this._confirmed = false;
     if (!this._autoTier) { this._probe = null; return; }
+    this._armProbe(K.QUALITY_TIERS_CHEAPEST_FIRST[0]);
+  }
+
+  _armProbe(tier) {
     this._probe = {
-      tier: K.QUALITY_TIERS_CHEAPEST_FIRST[0], frame: 0, samples: [],
+      tier, frame: 0, samples: [],
       // Which stopwatch to believe — decided by _chooseProbeClock at the
       // first probe frame, by measuring the stopwatch itself. "queue" is the
       // drain-submit-drain GPU clock; "cadence" is rAF wall time.
@@ -542,6 +553,31 @@ class Viewer {
   /** Record the probe's verdict and say it out loud. */
   _settleAutoTier(tier, measuredMs, clock) {
     this.qualityTier = tier;
+    // A low verdict gets one silent second opinion before it is announced.
+    // Probe noise is one-sided: load turbulence — the volume upload's tail,
+    // shader warmup, GC, the compositor — can only make a machine look
+    // SLOWER than it is, never faster. So a verdict at or above
+    // AUTO_TIER_CONFIRM_FROM proves itself, while a 5080 that measured as
+    // Minimal (seen ~10% of loads) deserves re-measuring once the
+    // turbulence has passed. The retry walks upward from the tier already
+    // proven — same rung-at-a-time invariant, so it can only raise the
+    // answer, and it never runs when the user has picked a tier by hand.
+    const order = K.QUALITY_TIERS_CHEAPEST_FIRST;
+    if (order.indexOf(tier) < order.indexOf(K.AUTO_TIER_CONFIRM_FROM)
+        && !this._confirmed) {
+      this._confirmed = true;
+      console.info(
+        `soar: auto quality ${tier} measured ${measuredMs.toFixed(2)} ms ` +
+        `(${clock} clock) — low verdict, re-confirming in ` +
+        `${K.AUTO_TIER_CONFIRM_DELAY_MS} ms`);
+      this._confirmTimer = setTimeout(() => {
+        this._confirmTimer = null;
+        if (!this._autoTier || this._probe || this._disposed) return;
+        this._armProbe(this.qualityTier);
+        this._wake("auto-tier confirm");
+      }, K.AUTO_TIER_CONFIRM_DELAY_MS);
+      return;
+    }
     const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
     console.info(
       `soar: auto quality ${tier} — ${measuredMs.toFixed(2)} ms/frame probed ` +
@@ -948,6 +984,8 @@ class Viewer {
   setQualityTier(tier) {
     this._autoTier = false;
     this._probe = null;
+    clearTimeout(this._confirmTimer);
+    this._confirmTimer = null;
     this.qualityTier = tier;
     this.renderer.setQualityTier(tier);
     this._wake("quality tier");
@@ -1056,6 +1094,8 @@ class Viewer {
     this._disposed = true;
     this.stop = true;
     this._stopLoop();
+    clearTimeout(this._confirmTimer);
+    this._confirmTimer = null;
     this._videoAbort = true;
     this._listeners.abort();
     // Not covered by the abort signal: ResizeObserver has no signal option,
