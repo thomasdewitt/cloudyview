@@ -211,7 +211,7 @@ const SHADOW_SKYLIGHT_TAU_ONSET: f32 = 4.0;
 // Gated in as the MS ladder dies (no double counting below tau ~8); a
 // buried storm keeps only DIFFUSE_BEAM_STORM_KEEP of it.
 const DIFFUSE_BEAM_STRENGTH: f32 = 1.08;
-const DIFFUSE_BEAM_TAU_ONSET: f32 = 2.5;
+const DIFFUSE_BEAM_TAU_ONSET: f32 = 9.0;
 // A buried storm interior keeps this much of the glow. 0.25 was tuned to
 // AI storm references and produced a floor DARKER than the real anvil
 // photo (IMG_7053: darkest cores ~115/255; the 0.25 floor rendered 68)
