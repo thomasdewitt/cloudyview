@@ -56,3 +56,22 @@ GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view
 | potato | v1_thick_backlit | 120x68 | 0.360 | 2777.9 |
 | potato | v4_overview_south | 120x68 | 0.328 | 3045.0 |
 | potato | v8_ocean_lod | 120x68 | 0.123 | 8130.9 |
+
+## 2026-08-11 20:11:25 — e970d69 — head-e970d69 (visual-tuning + bug fixes)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 1.187 | 842.2 |
+| high | v4_overview_south | 960x540 | 0.822 | 1216.6 |
+| high | v8_ocean_lod | 960x540 | 0.892 | 1121.7 |
+| medium | v1_thick_backlit | 720x405 | 0.707 | 1413.6 |
+| medium | v4_overview_south | 720x405 | 0.626 | 1598.5 |
+| medium | v8_ocean_lod | 720x405 | 0.428 | 2337.5 |
+| low | v1_thick_backlit | 576x324 | 0.493 | 2026.7 |
+| low | v4_overview_south | 576x324 | 0.442 | 2261.9 |
+| low | v8_ocean_lod | 576x324 | 0.279 | 3580.1 |
+| minimal | v1_thick_backlit | 120x68 | 0.377 | 2655.0 |
+| minimal | v4_overview_south | 120x68 | 0.409 | 2447.1 |
+| minimal | v8_ocean_lod | 120x68 | 0.145 | 6917.7 |
