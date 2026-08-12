@@ -904,6 +904,7 @@ const STRAT_STREAM_SUN_MARCH: u32 = 4u;
 const STRAT_STREAM_SUN_CONE: u32 = 5u;
 const STRAT_STREAM_OCEAN_SLOPE: u32 = 6u;
 const STRAT_STREAM_PREMARCH: u32 = 7u;
+const STRAT_STREAM_NEST_SEAM: u32 = 8u;
 
 const STRAT_INV_2P32: f32 = 2.3283064365386963e-10;
 
@@ -1939,6 +1940,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // be turned into "what is still ahead of this sample". Unlike tau_depth
     // this never resets: it is the ray's own coordinate along its chord.
     var tau_view = 0.0;
+    // Whether the previous view sample sat inside the nest, so the march can
+    // notice the fine->coarse crossing (docs/soar-bugs.md 4).
+    var was_in_nest = false;
 
     // The periodic march can legitimately cover several domain widths, so
     // it gets more step headroom; the non-periodic bound is untouched.
@@ -1989,6 +1993,34 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // powder term below is what lets the two levels composite
             // without a brightness seam (witness.py header).
             let level = sample_level_at(p);
+            // Crossing OUT of the nest, the step length jumps fine -> coarse,
+            // but every ray crosses at the same geometric plane and arrives
+            // with at most a fine step's worth of phase — so sample phase
+            // past the seam covered barely half the coarse period, and the
+            // coherent remainder survived accumulation as stripes parallel
+            // to the seam (docs/soar-bugs.md 4; the A/B pinned the view
+            // march, not the light march). The cure is the file's usual one:
+            // an independent per-pixel-per-frame uniform phase, spanning the
+            // FULL effective coarse step — adding a full-period uniform
+            // modulo the period is uniform whatever the crossing
+            // distribution was, where re-using the entry draw or spanning
+            // only the step difference both leave a coherent residual
+            // (measured; the first attempt did the former and the stripes
+            // survived it). The reverse crossing needs nothing: a coarse
+            // period of phase folded into a fine one already covers it.
+            if (NESTED && was_in_nest && !level.in_nest) {
+                was_in_nest = false;
+                let seam_jitter = strat1(frame_index, strat_pixel,
+                                         STRAT_STREAM_NEST_SEAM,
+                                         STRAT_ALPHA_10);
+                let skip = jitter_on * seam_jitter * jitter_scale
+                           * max(u.bmin.w, t * u.periodic.z);
+                if (skip > 0.0) {
+                    t = t + skip;
+                    continue;
+                }
+            }
+            was_in_nest = level.in_nest;
             let sigma = level.sigma;
 
             // Distance LOD: the step floor grows with distance so far
