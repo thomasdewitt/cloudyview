@@ -1732,7 +1732,7 @@ const TONE_MAP_SHOULDER: f32 = 0.35;
 // move). The white point lets radiance >= TONE_MAP_WHITE_POINT reach 1.0,
 // so sunlit faces read vibrant white; below ~10% of the white point the
 // curve is within 0.3% of plain Reinhard, so sky and shadow are untouched.
-const TONE_MAP_WHITE_POINT: f32 = 12.0;
+const TONE_MAP_WHITE_POINT: f32 = 15.0;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
