@@ -34,6 +34,12 @@ function sliderRow(label, { min, max, step, value, format, onInput }) {
   return row;
 }
 
+// Panels whose controls change (or capture) the picture dock to the bottom
+// edge instead of the centre — anything where one would want to SEE the view
+// while the panel is up (Thomas, 2026-08-11). Navigation and questions stay
+// centred.
+const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]);
+
 function segmented(options, isOn, onPick) {
   const wrap = el("div", "segmented");
   const buttons = options.map(([label, value]) => {
@@ -239,8 +245,7 @@ export class UI {
     // Panels whose controls change the picture dock to the bottom edge so
     // the picture stays visible while it is being tuned — a centred box
     // sits exactly on top of the thing the sliders move.
-    this.menu.classList.toggle(
-      "dock-bottom", name === "quality" || name === "terminal");
+    this.menu.classList.toggle("dock-bottom", DOCKED_PANELS.has(name));
     this.menu.replaceChildren();
     const build = this[`_panel_${name}`];
     if (!build) throw new Error(`no such panel: ${name}`);
@@ -373,7 +378,11 @@ export class UI {
     }
 
     m.append(el("div", "divider"));
-    m.append(sliderRow("Render scale", {
+    // Two columns while docked at the bottom: the panel exists to be looked
+    // PAST — every row it saves is sky the sliders are actually changing.
+    const sliders = el("div", "slider-grid");
+    m.append(sliders);
+    sliders.append(sliderRow("Render scale", {
       // The step has to divide the floor: at 0.05 the slider could not reach
       // 0.125 at all, and the bottom of its own range was unselectable.
       min: K.MIN_RENDER_SCALE, max: K.MAX_RENDER_SCALE,
@@ -381,27 +390,27 @@ export class UI {
       value: r.flightRenderScale, format: (v) => `${v.toFixed(3)}x`,
       onInput: (v) => app.setRenderScale(v),
     }));
-    m.append(sliderRow("Motion smoothing", {
+    sliders.append(sliderRow("Motion smoothing", {
       min: 0.3, max: 0.9, step: 0.01, value: r.motionBlendAlpha,
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setMotionBlendAlpha(v),
     }));
-    m.append(sliderRow("Tone-map gamma", {
+    sliders.append(sliderRow("Tone-map gamma", {
       min: K.TONE_MAP_GAMMA_LIMITS[0], max: K.TONE_MAP_GAMMA_LIMITS[1],
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
       onInput: (v) => app.setToneMapGamma(v),
     }));
-    m.append(sliderRow("Haze", {
+    sliders.append(sliderRow("Haze", {
       min: 0.0, max: 2.0, step: 0.01, value: app.haze,
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setHaze(v),
     }));
-    m.append(sliderRow("White point", {
+    sliders.append(sliderRow("White point", {
       min: 4.0, max: 40.0, step: 0.5, value: app.toneMapWhitePoint,
       format: (v) => v.toFixed(1),
       onInput: (v) => app.setToneMapWhitePoint(v),
     }));
-    m.append(sliderRow("Contrast", {
+    sliders.append(sliderRow("Contrast", {
       min: 0.5, max: 1.6, step: 0.01, value: app.contrast,
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setContrast(v),

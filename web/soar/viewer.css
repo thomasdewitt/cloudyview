@@ -135,14 +135,22 @@ button.chip.on { border-color: var(--hot); color: var(--hot); }
   padding: 20px 22px;
 }
 #menu[hidden] { display: none; }
-/* Image-tuning panels (quality, terminal render) sit at the bottom so the
-   view being adjusted stays visible above them. */
+/* Image-tuning panels (quality, sun, terminal render) sit at the bottom so
+   the view being adjusted stays visible above them — wider than the centred
+   menu so the slider grid keeps the panel short enough not to scroll. */
 #menu.dock-bottom {
   top: auto;
   bottom: 24px;
   transform: translateX(-50%);
-  max-height: min(48vh, calc(100vh - 4rem));
+  width: min(62rem, calc(100vw - 3rem));
+  max-height: min(60vh, calc(100vh - 4rem));
 }
+.slider-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 26px;
+}
+@media (max-width: 760px) { .slider-grid { grid-template-columns: 1fr; } }
 #menu .menu-title {
   font-size: 17px;
   color: var(--ink-bright);
