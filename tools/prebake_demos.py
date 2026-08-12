@@ -76,7 +76,7 @@ DEMOS = [
         dims="yxz",
         crop=dict(y=(0, 1024), x=(1024, 2048), z=(0, 206)),
         scale=1.0,                       # already g/kg
-        sun=dict(azimuth=235.0, elevation=25.0),
+        sun=dict(azimuth=235.0, elevation=70.0),   # zenith ~20 (Thomas, 2026-08-11)
     ),
     dict(
         id="dycoms",
@@ -108,7 +108,7 @@ DEMOS = [
         dims="zyx",
         crop=dict(y=(0, 540), x=(0, 540), z=(0, 88)),
         scale=1e3,                       # g/g -> g/kg
-        sun=dict(azimuth=235.0, elevation=30.0),
+        sun=dict(azimuth=235.0, elevation=15.0),   # zenith 75 (Thomas, 2026-08-11)
     ),
     # The FIF cascade was shipped here until 2026-08-08 and was dropped: it is
     # not a fluid-dynamics simulation, and the synthetic slot on the rail now
