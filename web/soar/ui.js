@@ -467,11 +467,6 @@ export class UI {
     }));
     refresh();
     m.append(readout);
-    if (app.sunElevation <= K.MIN_SUN_ELEVATION_DEG + 1e-6) {
-      m.append(el("div", "row",
-        "At the horizon. The sun cannot go below it while the domain is " +
-        "periodic — the light march exits through the domain top."));
-    }
     m.append(el("div", "divider"));
     m.append(this._backButton());
   }
@@ -523,18 +518,12 @@ export class UI {
       (v) => v === app.terminalRenderer,
       (v) => { app.terminalRenderer = v; this.open("terminal"); }));
 
-    if (app.terminalRenderer === "witness") {
+    m.append(el("div", "row",
+      "Run this command in the folder where the file is saved."));
+    if (app.terminalRenderer === "behold") {
       // witness drives the same WGSL as this view, so nothing is absent
-      // from its frame and no outer/nest choice exists to offer.
-      m.append(el("div", "row",
-        "The same renderer as this view — " +
-        (app.scene?.nested ? "both nested levels, " : "") +
-        "the same image settings, rendered at still quality on a GPU."));
-    } else {
-      m.append(el("div", "row",
-        "Path tracing runs in a terminal, not in a tab. This command " +
-        "reproduces what you are looking at — camera, sun, field and " +
-        "all."));
+      // from its frame and no outer/nest choice exists to offer; behold
+      // needs its caveats and its outer/nest choice.
       if (app.renderer.periodic && app.viewSpansDomainEdge()) {
         m.append(el("div", "row",
           "This view spans a domain edge. behold does not tile, so its " +
@@ -626,7 +615,7 @@ export class UI {
       const note = render.querySelector(".note");
       if (note) {
         note.textContent =
-          `${app.videoAccumulate} accumulated passes per frame, at ` +
+          `${app.videoAccumulate} samples per pixel, at ` +
           `${app.videoFps.toFixed(0)} fps`;
       }
     };
@@ -635,7 +624,7 @@ export class UI {
       value: app.videoFps, format: (v) => `${v.toFixed(0)} fps`,
       onInput: (v) => { app.videoFps = v; refresh(); },
     }));
-    m.append(sliderRow("Passes per frame", {
+    m.append(sliderRow("Samples per pixel", {
       min: K.VIDEO_ACCUMULATE_LIMITS[0], max: K.VIDEO_ACCUMULATE_LIMITS[1],
       step: 1, value: app.videoAccumulate, format: (v) => `${v}`,
       onInput: (v) => { app.videoAccumulate = v; refresh(); },
@@ -674,15 +663,27 @@ export class UI {
       }));
 
     m.append(el("div", "divider"));
-    m.append(item("Save a still", `${K.STILL_ACCUMULATE_FRAMES} accumulated ` +
-                  "passes, then a PNG download",
-                  () => app.saveScreenshot({ overlays: true })));
+    const save = item("Save a still", "",
+                      () => app.saveScreenshot({ overlays: true }));
+    const refresh = () => {
+      const note = save.querySelector(".note");
+      if (note) {
+        note.textContent =
+          `${app.stillSamples} samples per pixel, then a PNG download`;
+      }
+    };
+    m.append(sliderRow("Samples per pixel", {
+      min: K.STILL_SAMPLES_LIMITS[0], max: K.STILL_SAMPLES_LIMITS[1],
+      step: 1, value: app.stillSamples, format: (v) => `${v}`,
+      onInput: (v) => { app.stillSamples = v; refresh(); },
+    }));
+    m.append(save);
+    refresh();
     m.append(item("Save a still, clouds only", "no bird, no minimap",
                   () => app.saveScreenshot({ overlays: false })));
 
     m.append(el("div", "row",
-      "For video: press R while flying to record a track — the options " +
-      "appear when you stop."));
+      "For video: press R while flying to record a track."));
     m.append(el("div", "divider"));
     m.append(this._backButton());
   }

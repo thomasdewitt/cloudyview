@@ -422,6 +422,10 @@ export const COMPASS_EDGES = [
 // --- capture --------------------------------------------------------------
 
 export const STILL_ACCUMULATE_FRAMES = 64;
+// The still capture's samples-per-pixel slider. The default stays
+// STILL_ACCUMULATE_FRAMES; the top is where a 4K still starts costing real
+// wall-clock without a visible return on converged scenes.
+export const STILL_SAMPLES_LIMITS = [8, 256];
 // Accumulated frames at the hold ladder's top rung, with the scene unchanged,
 // after which the live loop stops marching: past this, another march costs a
 // full volume traversal to change nothing visible. The same number a still

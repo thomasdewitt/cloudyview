@@ -60,6 +60,7 @@ class Viewer {
     // wrap and image settings — where behold path-traces one bare field.
     this.terminalRenderer = "witness";
     this.captureSize = null;
+    this.stillSamples = K.STILL_ACCUMULATE_FRAMES;
     this.videoFps = K.DEFAULT_VIDEO_FPS;
     this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
 
@@ -1337,7 +1338,7 @@ class Viewer {
     try {
       const image = await renderStill(
         this.device, this.renderer, this._viewKwargs(), size,
-        K.STILL_ACCUMULATE_FRAMES, stillOverlays);
+        this.stillSamples, stillOverlays);
       this.ui.showProgress("Encoding…", 0.95);
       const blob = await imageDataToPng(image, this.renderMetadata(size));
       download(blob, timestampedName("cloudyview_soar", ".png"));
