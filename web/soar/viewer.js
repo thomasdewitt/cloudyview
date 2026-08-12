@@ -579,7 +579,12 @@ class Viewer {
       };
       const cancel = () => {
         this.ui.close();
-        reject(new Error("Cancelled before the field was loaded."));
+        // `cancelled` is what the catch sites test for — a deliberate Back
+        // is not a load failure and must not be reported as one (bug 11).
+        // A marker property, not a message string: wording changes.
+        const err = new Error("Cancelled before the field was loaded.");
+        err.cancelled = true;
+        reject(err);
       };
       if (question.panel === "groups") {
         this.ui.open("groups", {
@@ -815,7 +820,10 @@ class Viewer {
       case "b": this.toggleBird(); return;
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
-      case "F12": e.preventDefault(); this.ui.open("capture"); return;
+      // Through pause(), not ui.open() directly: the dialog needs the mouse,
+      // so the pointer must be released first — opening it under a held lock
+      // left the camera turning behind an unusable panel (bug 1).
+      case "F12": e.preventDefault(); this.pause("capture"); return;
       default: break;
     }
     if ("wasdc ".includes(key)) this.camera.keys.add(key);
@@ -829,8 +837,7 @@ class Viewer {
    *
    * The toolbar is for when the mouse is free but the menu is closed — after
    * Tab, or before the first click. While flying there is nothing to click,
-   * and while the menu is open the menu has everything, so a floating "menu"
-   * button that only appears once the menu is already open is just noise.
+   * and while the menu is open the menu has everything.
    */
   _syncChrome() {
     const viewer = this.canvas.parentElement;
@@ -838,11 +845,11 @@ class Viewer {
     viewer.classList.toggle("menu-open", Boolean(this.ui?.isOpen));
   }
 
-  pause() {
+  pause(panel = "main") {
     this.paused = true;
     this.camera.keys.clear();
     if (this.captured) document.exitPointerLock();
-    this.ui.open("main");
+    this.ui.open(panel);
     this._syncChrome();
     // Pausing does not put the loop to sleep and resuming does not wake it:
     // sleep is decided purely by whether the picture is finished. This wake
@@ -1368,7 +1375,15 @@ class Viewer {
     } catch {
       file = null;   // the picker was dismissed
     }
-    if (!file) { this.paused ? this.ui.open("main") : this.resume(); return; }
+    if (!file) {
+      // Dismissing the picker with no field loaded happens one way: a Back
+      // from the group/units question already released the field, and then
+      // the re-offered picker was dismissed too. There is nothing to resume
+      // into, so this is a full exit to the start page.
+      if (!this.scene) { this.leave(); return; }
+      this.paused ? this.ui.open("main") : this.resume();
+      return;
+    }
 
     this.paused = true;
     this.setLoadingVisible?.(true);
@@ -1378,6 +1393,11 @@ class Viewer {
       this.paused = false;
       this._startLoop();
     } catch (err) {
+      // Back from the group/units question returns to choosing a file — the
+      // usual reason is the wrong file, and the picker is where that gets
+      // fixed (bug 11). The field is already released by then, so the
+      // no-file branch above handles a second dismissal.
+      if (err?.cancelled) { this.setLoadingVisible?.(false); return this.pickFile(); }
       this.onFailure?.("Could not open this field.",
                        String(err?.message || err), err?.advice || "");
     }

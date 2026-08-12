@@ -85,11 +85,13 @@ export class UI {
 
     this.toolbar = el("div", "panel");
     this.toolbar.id = "toolbar";
-    this.menuButton = el("button", "chip", "☰ menu");
-    this.menuButton.addEventListener("click", () => this.open("main"));
+    // No "menu" chip here. It only ever existed as a rescue for the state
+    // "mouse free, menu closed, Escape swallowed" (bug 2); Escape now pauses
+    // reliably from the keydown route, so the net came down rather than
+    // staying up to hide the next regression.
     this.fsButton = el("button", "chip", "⛶ fullscreen");
     this.fsButton.addEventListener("click", () => this.app.toggleFullscreen());
-    this.toolbar.append(this.menuButton, this.fsButton);
+    this.toolbar.append(this.fsButton);
 
     this.menu = el("div", "panel");
     this.menu.id = "menu";
@@ -210,6 +212,10 @@ export class UI {
   close() {
     this.menu.hidden = true;
     this.panel = null;
+    // Every open/close keeps the chrome classes honest. saveScreenshot used
+    // to close the menu with no _syncChrome, leaving `menu-open` describing
+    // a state the app was no longer in (bug 2's sibling).
+    this.app._syncChrome?.();
   }
 
   /**
@@ -233,6 +239,7 @@ export class UI {
     this.menu.replaceChildren();
     const build = this[`_panel_${name}`];
     if (!build) throw new Error(`no such panel: ${name}`);
+    this.app._syncChrome?.();
     try {
       build.call(this, context);
     } catch (err) {
@@ -290,7 +297,15 @@ export class UI {
       app.minimap
         ? "M — corner map, fullscreen (click to travel), off"
         : (app._minimapProblem ?? "not available for this field"),
-      () => { app.toggleMinimap(); this.open("main"); }));
+      () => {
+        app.toggleMinimap();
+        // Landing on fullscreen, the whole point is the map this menu would
+        // cover — and "click to travel" cannot work under it (bug 12). The
+        // menu closes (mouse stays free for the map; Escape brings it back);
+        // the other modes re-open it so the row's label updates.
+        if (app.minimapMode === "full") this.close();
+        else this.open("main");
+      }));
     m.append(item(
       `Bird: ${app.bird && app.birdEnabled ? "on" : "off"}`,
       app.bird
@@ -644,7 +659,7 @@ export class UI {
     }
     for (const g of groups) m.append(item(g || "(root)", null, () => onPick(g)));
     m.append(el("div", "divider"));
-    m.append(item("Cancel", null, onCancel));
+    m.append(item("Back", "choose a different file", onCancel));
   }
 
   /** Condensate units, when the file does not say. */
@@ -658,7 +673,7 @@ export class UI {
     m.append(item("g/kg", null, () => onPick("g/kg")));
     m.append(item("kg/kg", null, () => onPick("kg/kg")));
     m.append(el("div", "divider"));
-    m.append(item("Cancel", null, onCancel));
+    m.append(item("Back", "choose a different file", onCancel));
   }
 
   _panel_message({ kicker, title, body, advice, actions }) {

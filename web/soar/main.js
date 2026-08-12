@@ -284,6 +284,15 @@ async function enterViewerOnce(source) {
     // with it; a failure before boot leaves the device here to release.
     if (viewer) await endSession();
     else device?.destroy();
+    if (err?.cancelled) {
+      // Back on the group/units question during the very first load. There
+      // is no viewer to return to, so this is a quiet walk back to the start
+      // page — a deliberate choice, not a failure panel (bug 11).
+      hideLoading();
+      dom.viewer.hidden = true;
+      dom.header.style.display = "";
+      return;
+    }
     if (err instanceof WebGPUUnavailable) {
       showFailure(err.message, err.detail, "");
     } else {
