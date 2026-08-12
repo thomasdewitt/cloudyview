@@ -303,11 +303,20 @@ let capabilityFailed = false;
 let capabilityError = null;
 let reelActive = 1;      // starts at 1 so the first show() lands on reel-a
 let reelShown = null;
+let reelGeneration = 0;
 let previewHold = null;
 
 /** Cross-fade the backdrop to a demo's still, decoding before it is shown. */
 async function showReel(demo, root) {
   if (!demo?.still || reelShown === demo.id) return;
+  // Claim the reel before the first await. Two calls in flight used to pick
+  // the same buffer and the loser hid the element the winner had just shown,
+  // leaving the backdrop black (docs/soar-bugs.md entry 8). `reelShown` set
+  // here dedupes repeat hovers on one card; the generation token below drops
+  // every call but the newest — the last hover is the only one whose result
+  // anyone wants.
+  const generation = ++reelGeneration;
+  reelShown = demo.id;
   const next = 1 - reelActive;
   const image = dom.reel[next];
   const src = `${root}/${demo.base}/${demo.still}`;
@@ -327,10 +336,10 @@ async function showReel(demo, root) {
       });
     }
   }
+  if (generation !== reelGeneration) return;
   image.classList.add("on");
   dom.reel[reelActive].classList.remove("on");
   reelActive = next;
-  reelShown = demo.id;
 }
 
 /** One card. Hovering it previews its field behind the whole page. */
