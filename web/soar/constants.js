@@ -172,26 +172,31 @@ export const QUALITY_PRESETS = {
   low:    { name: "low",    label: "Low",    renderScale: 0.60,
             stepFactor: 3.0, lightStepFactor: 8.0,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
-  // Potato flies at an eighth, not a quarter. A quarter was chosen against a
-  // 5080; a GPU sixty times slower renders potato's own frame in ~30 ms, and
+  // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
+  // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
   // an eighth is four times fewer pixels than a quarter, which brings that
   // back inside a vsync. Nothing is lost by it: the hold ladder climbs
   // 0.125 -> 0.25 -> 0.5 -> 1.0 the moment the view is held, so the rough
   // flight scale is only ever what you see while actually moving.
-  potato: { name: "potato", label: "Potato — smooth stills, rough flight",
+  // Plain "Minimal", not the old "smooth stills, rough flight" tag: since
+  // the hold ladder, every tier converges to the same full-res still, so the
+  // bottom tier is no longer "rough" anywhere but in flight — and the name
+  // is user-facing in the startup toast on exactly the machines it used to
+  // insult as "Potato".
+  minimal: { name: "minimal", label: "Minimal",
             renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
 };
-export const QUALITY_TIER_NAMES = ["high", "medium", "low", "potato"];
+export const QUALITY_TIER_NAMES = ["high", "medium", "low", "minimal"];
 // Cheapest first. This is the order the startup probe walks, and the order
 // matters for more than tidiness — see AUTO_TIER_COST_RATIO_TO_NEXT.
-export const QUALITY_TIERS_CHEAPEST_FIRST = ["potato", "low", "medium", "high"];
+export const QUALITY_TIERS_CHEAPEST_FIRST = ["minimal", "low", "medium", "high"];
 // The tier a Renderer is born with. In practice the startup probe replaces it
 // before the first frame is presented (viewer.loadField sets the probe's
 // starting tier before Renderer.init compiles anything); this is the answer
 // when there is no measurement, which is what the offline capture paths want.
 export const DEFAULT_QUALITY_TIER = "high";
-// The floor was 0.25 until potato's flight scale went below it. Only two
+// The floor was 0.25 until minimal's flight scale went below it. Only two
 // things read it: renderTargetSize's validation, and the Quality panel's
 // slider bounds (whose step is 0.025 so that both ends stay reachable). The
 // capture paths never see it — they force 1.0.
@@ -219,7 +224,7 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // point of the whole mechanism: the tier governs FLIGHT, and a parked picture
 // is tier-independent. Whatever you flew here on, stop moving and the view
 // converges to High's own sampling at full resolution — the same still. This
-// generalizes what the old potato-only parked swap did for one tier.
+// generalizes what the old minimal-only parked swap did for one tier.
 //
 // Intermediate rungs keep the flight tier's sampling because they are meant to
 // be cheap stepping stones: their job is to put something settled on screen
@@ -231,8 +236,8 @@ export const QUALITY_HOLD_LADDERS = {
   high:   [],                                    // flies at 1.0; hold just accumulates
   medium: [{ scale: 1.00, sampling: "high" }],
   low:    [{ scale: 1.00, sampling: "high" }],
-  potato: [{ scale: 0.25, sampling: "potato" },
-           { scale: 0.50, sampling: "potato" },
+  minimal: [{ scale: 0.25, sampling: "minimal" },
+           { scale: 0.50, sampling: "minimal" },
            { scale: 1.00, sampling: "high" }],
 };
 // Accumulated frames to spend on a rung before climbing to the next. Small,
@@ -246,7 +251,7 @@ export const HOLD_RUNG_FRAMES = 4;
 //
 // Every rung doubles the linear scale, so it quadruples the pixels, and the
 // top rung changes the sampling on top of that. A machine that settles on
-// potato because potato flies at 10 ms would reach the top rung at something
+// minimal because minimal flies at 10 ms would reach the top rung at something
 // like 10 ms x 64 pixels — half a second in one fragment pass, and on Metal a
 // long enough pass is not slow, it is a dead device. So the ladder predicts
 // the next rung's cost from the rung it is standing on (see
@@ -289,18 +294,18 @@ export const AUTO_TIER_TARGET_MS = 1000.0 / 60.0;
 //     high     4.75 / 4.59 ms
 //     medium   2.55 / 2.50     -> high:   1.87x / 1.83x
 //     low      1.59 / 1.45     -> medium: 1.61x / 1.73x
-//     potato   0.399 / 0.392   -> low:    3.97x / 3.70x
+//     minimal   0.399 / 0.392   -> low:    3.97x / 3.70x
 //
 // The constants below round those up for headroom. Note how unequal the rungs
-// are: potato to low is a step four times bigger than low to medium. A single
+// are: minimal to low is a step four times bigger than low to medium. A single
 // flat threshold would be either too timid at the top or reckless at the
 // bottom, which is why the gate is a per-tier ratio rather than one number.
 //
-// One honest caveat about potato. It has 23x fewer pixels than low, yet costs
+// One honest caveat about minimal. It has 23x fewer pixels than low, yet costs
 // only ~4x less, because at 320x180 the frame stops being about the march at
 // all — command encoding, uniform upload and the blit dominate. That floor is
 // mostly CPU- and driver-side, so it does NOT shrink on a slower GPU, and the
-// true potato->low ratio there is larger than 4.5. The gate is therefore
+// true minimal->low ratio there is larger than 4.5. The gate is therefore
 // optimistic on exactly the weak hardware it protects.
 //
 // That is a known and bounded weakness, and it is bounded by the ordering
@@ -311,7 +316,7 @@ export const AUTO_TIER_TARGET_MS = 1000.0 / 60.0;
 // nothing — is prevented by the walk being strictly one rung at a time, not
 // by the accuracy of these ratios.
 export const AUTO_TIER_COST_RATIO_TO_NEXT = {
-  potato: 4.5,
+  minimal: 4.5,
   low: 2.0,
   medium: 2.0,
 };
@@ -343,7 +348,7 @@ export const AUTO_TIER_FLOOR_WARN_MS = 50.0;
 // and on Firefox it does not: its WebGPU resolves onSubmittedWorkDone on an
 // internal poll cadence rather than on a fence, so the wait reports ~100 ms
 // on an RTX 5080 whose actual frame is one or two — which read as "this GPU
-// renders 100 ms a frame even at Potato" while High flew at vsync
+// renders 100 ms a frame even at Minimal" while High flew at vsync
 // (observed on Thomas's box, 2026-08-11). A clock cannot be trusted on
 // reputation; it has to be measured. Before the first probe frame, the
 // round-trip is timed on an EMPTY queue: whatever it costs there is the

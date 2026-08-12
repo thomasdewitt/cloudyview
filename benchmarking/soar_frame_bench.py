@@ -35,7 +35,7 @@ TIERS = {
                "light_step_factor": 4.0,  "max_light_steps": 512},
     "low":    {"render_scale": 0.60,  "step_factor": 3.0,
                "light_step_factor": 8.0,  "max_light_steps": 512},
-    "potato": {"render_scale": 0.125, "step_factor": 4.0,
+    "minimal": {"render_scale": 0.125, "step_factor": 4.0,
                "light_step_factor": 12.0, "max_light_steps": 512},
 }
 
@@ -136,7 +136,7 @@ def main():
     parser.add_argument("--views", type=str, default=None,
                         help="comma-separated prefixes, e.g. v1,v8")
     parser.add_argument("--tiers", type=str, default=None,
-                        help="comma-separated tier names, e.g. high,potato")
+                        help="comma-separated tier names, e.g. high,minimal")
     parser.add_argument("--label", type=str, default="",
                         help="note recorded with the results (e.g. git rev)")
     args = parser.parse_args()
