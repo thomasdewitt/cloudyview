@@ -581,37 +581,69 @@ export class UI {
     m.append(this._backButton());
   }
 
-  /** What R offers when you stop recording. */
+  /** What R offers when you stop recording — including every video option.
+   *  Video settings live HERE, not in the capture panel: they only mean
+   *  anything once a track exists (Thomas, 2026-08-11). */
   _panel_track({ samples }) {
     const app = this.app;
     const m = this.menu;
     const duration = samples[samples.length - 1][0];
     m.append(this._header("track", "Flight recorded"));
 
-    let frames = null, problem = null;
-    try {
-      frames = app.trackFrameCount(samples);
-    } catch (err) {
-      problem = String(err.message || err);
-    }
-    m.append(el("div", "row",
-      `${samples.length} samples over ${duration.toFixed(1)} seconds` +
-      (frames === null
-        ? "."
-        : `, which becomes ${frames} frames at ` +
-          `${app.videoFps.toFixed(0)} fps.`)));
-    if (problem) m.append(el("div", "row", problem));
+    const summary = el("div", "row");
+    m.append(summary);
 
     m.append(el("div", "divider"));
+    m.append(el("h3", null, "size"));
+    m.append(segmented(
+      [["Window", "window"],
+       ...K.CAPTURE_SIZE_PRESETS.map(([label, size]) => [label, size.join("x")])],
+      (v) => v === (app.captureSize ? app.captureSize.join("x") : "window"),
+      (v) => {
+        app.captureSize = v === "window" ? null : v.split("x").map(Number);
+        this.open("track", { samples });
+      }));
+
     // Whether video works at all is a question only video.js can answer, and
     // it answers it by encoding a frame — so the button is built optimistically
     // and the capability line is filled in once the module has loaded.
-    const render = item(
-      "Render it to video",
-      `${app.videoAccumulate} accumulated passes per frame, ` +
-      `at ${app.videoFps.toFixed(0)} fps`,
-      () => app.renderTrackVideo(samples));
+    const render = item("Render it to video", "",
+                        () => app.renderTrackVideo(samples));
+    const refresh = () => {
+      let frames = null, problem = "";
+      try {
+        frames = app.trackFrameCount(samples);
+      } catch (err) {
+        problem = ` ${String(err.message || err)}`;
+      }
+      summary.textContent =
+        `${samples.length} samples over ${duration.toFixed(1)} seconds` +
+        (frames === null
+          ? `.${problem}`
+          : `, which becomes ${frames} frames at ` +
+            `${app.videoFps.toFixed(0)} fps.`);
+      if (render.disabled) return;   // the capability line owns the note
+      const note = render.querySelector(".note");
+      if (note) {
+        note.textContent =
+          `${app.videoAccumulate} accumulated passes per frame, at ` +
+          `${app.videoFps.toFixed(0)} fps`;
+      }
+    };
+    m.append(sliderRow("Frame rate", {
+      min: K.VIDEO_FPS_LIMITS[0], max: K.VIDEO_FPS_LIMITS[1], step: 1,
+      value: app.videoFps, format: (v) => `${v.toFixed(0)} fps`,
+      onInput: (v) => { app.videoFps = v; refresh(); },
+    }));
+    m.append(sliderRow("Passes per frame", {
+      min: K.VIDEO_ACCUMULATE_LIMITS[0], max: K.VIDEO_ACCUMULATE_LIMITS[1],
+      step: 1, value: app.videoAccumulate, format: (v) => `${v}`,
+      onInput: (v) => { app.videoAccumulate = v; refresh(); },
+    }));
+
+    m.append(el("div", "divider"));
     m.append(render);
+    refresh();
     import("./video.js").then(({ videoCapabilities }) => {
       const caps = videoCapabilities();
       if (caps.available) return;
@@ -624,10 +656,12 @@ export class UI {
     m.append(item("Discard it", null, () => this.open("main")));
   }
 
+  /** Stills only. Video options live in the track panel, which appears when
+   *  a recording stops — they mean nothing before a track exists. */
   _panel_capture() {
     const app = this.app;
     const m = this.menu;
-    m.append(this._header("capture", "Still or video"));
+    m.append(this._header("capture", "Still image"));
 
     m.append(el("h3", null, "size"));
     m.append(segmented(
@@ -646,21 +680,9 @@ export class UI {
     m.append(item("Save a still, clouds only", "no bird, no minimap",
                   () => app.saveScreenshot({ overlays: false })));
 
-    m.append(el("div", "divider"));
-    m.append(el("h3", null, "flight video"));
-    m.append(sliderRow("Frame rate", {
-      min: K.VIDEO_FPS_LIMITS[0], max: K.VIDEO_FPS_LIMITS[1], step: 1,
-      value: app.videoFps, format: (v) => `${v.toFixed(0)} fps`,
-      onInput: (v) => { app.videoFps = v; },
-    }));
-    m.append(sliderRow("Passes per frame", {
-      min: K.VIDEO_ACCUMULATE_LIMITS[0], max: K.VIDEO_ACCUMULATE_LIMITS[1],
-      step: 1, value: app.videoAccumulate, format: (v) => `${v}`,
-      onInput: (v) => { app.videoAccumulate = v; },
-    }));
     m.append(el("div", "row",
-      "Press R while flying to record a track. Stop it and the track is " +
-      "re-rendered here at full quality and downloaded as a video."));
+      "For video: press R while flying to record a track — the options " +
+      "appear when you stop."));
     m.append(el("div", "divider"));
     m.append(this._backButton());
   }
