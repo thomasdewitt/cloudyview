@@ -49,6 +49,7 @@ CASES = [
     ("haze_clear", {}, {"haze": 0.0}),
     ("haze_thick", {}, {"haze": 0.7}),
     ("haze_max", {}, {"haze": 1.0}),
+    ("haze_soup", {}, {"haze": 2.0}),
     ("no_lod", {}, {"light_march_lod_degrees": 0.0, "view_step_lod_degrees": 0.0}),
     ("subpixel", {}, {"subpixel": True, "jitter_scale": 0.65, "frame_index": 37}),
     ("no_jitter", {}, {"jitter": False}),

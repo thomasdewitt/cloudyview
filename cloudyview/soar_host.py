@@ -244,7 +244,9 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     _non_negative("ocean_glint_strength", view.ocean_glint_strength)
     _non_negative("ocean_glint_roughness", view.ocean_glint_roughness)
     _unit_interval("ocean_slope_draw_fraction", view.ocean_slope_draw_fraction)
-    _unit_interval("haze", view.haze)
+    if not (0.0 <= view.haze <= look.HAZE_MAX):
+        raise ValueError(
+            f"haze must be in [0, {look.HAZE_MAX}]; got {view.haze}.")
     _lod_degrees("light_march_lod_degrees", view.light_march_lod_degrees)
     _lod_degrees("view_step_lod_degrees", view.view_step_lod_degrees)
     if not (0.0 <= view.cone_stencil_theta_deg < 90.0):

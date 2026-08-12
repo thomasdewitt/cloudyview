@@ -100,7 +100,9 @@ export function packUniforms(state, view) {
   unitInterval("low_sun_sky_field_strength", lowSunSkyFieldStrength);
   unitInterval("ocean_realism", oceanRealism);
   unitInterval("ocean_sky_shadow_floor", oceanSkyShadowFloor);
-  unitInterval("haze", haze);
+  if (!(Number(haze) >= 0.0 && Number(haze) <= K.HAZE_MAX)) {
+    throw new Error(`haze must be in [0, ${K.HAZE_MAX}]; got ${haze}.`);
+  }
   if (!(aerialPerspectiveStrength >= 0.0)) {
     throw new Error(
       `aerial_perspective_strength must be >= 0; got ${aerialPerspectiveStrength}.`);

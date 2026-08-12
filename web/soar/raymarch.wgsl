@@ -498,7 +498,7 @@ const MAX_VIEW_STEPS_PERIODIC: i32 = 4096;
 const SKY_ZENITH: vec3<f32> = vec3<f32>(0.0044, 0.035, 0.1156);
 const SKY_BASE_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.18, 0.38);
 // The haze knob's anchor. Every haze-dependent expression below is written
-// as a deviation from its tuned constant, so haze == HAZE_DEFAULT recovers
+// as a deviation from its tuned constant, so haze == HAZE_ANCHOR recovers
 // that constant EXACTLY rather than to within a ULP — the default look is
 // meant to be a fixed point of the whole parameterization.
 //
@@ -510,7 +510,7 @@ const SKY_BASE_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.18, 0.38);
 // 8-bit codes. Writing the divide as t * (1/sigma) does not help; only
 // freezing sigma back into a literal would, which is the feature.
 // Twin of look.DEFAULT_HAZE.
-const HAZE_DEFAULT: f32 = 0.35;
+const HAZE_ANCHOR: f32 = 0.35;
 
 // Angular scale height (in dir.z) of the horizon-whitening wedge; see
 // sky_radiance. Solved against the 2026-08-11 reference photo so mid-sky
@@ -525,7 +525,7 @@ const SKY_HAZE_SIGMA_MIN: f32 = 0.15;
 const SKY_HAZE_SIGMA_MAX: f32 = 0.65;
 // Reach alone is not enough: a clear day is not a hazy day with a shorter
 // wedge, it is a *weaker* one, so the amplitude moves too. Piecewise linear
-// through (0, 0.60), (HAZE_DEFAULT, 1.0), (1, 1.585) — the kink is the
+// through (0, 0.60), (HAZE_ANCHOR, 1.0), (1, 1.585) — the kink is the
 // anchor, and the steeper upper leg is what lets haze 1 read as murk.
 const SKY_HAZE_WEDGE_GAIN_AT_ZERO: f32 = 0.60;
 const SKY_HAZE_WEDGE_GAIN_SLOPE: f32 = 0.9;
@@ -1232,18 +1232,18 @@ fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
 
 fn sky_haze_elevation_sigma(haze: f32) -> f32 {
     return clamp(
-        SKY_HAZE_ELEVATION_SIGMA + SKY_HAZE_SIGMA_PER_HAZE * (haze - HAZE_DEFAULT),
+        SKY_HAZE_ELEVATION_SIGMA + SKY_HAZE_SIGMA_PER_HAZE * (haze - HAZE_ANCHOR),
         SKY_HAZE_SIGMA_MIN, SKY_HAZE_SIGMA_MAX);
 }
 
 fn sky_haze_wedge_gain(haze: f32) -> f32 {
-    if (haze < HAZE_DEFAULT) {
+    if (haze < HAZE_ANCHOR) {
         return SKY_HAZE_WEDGE_GAIN_AT_ZERO
-            + (1.0 - SKY_HAZE_WEDGE_GAIN_AT_ZERO) * haze / HAZE_DEFAULT;
+            + (1.0 - SKY_HAZE_WEDGE_GAIN_AT_ZERO) * haze / HAZE_ANCHOR;
     }
     // At the anchor this branch is 1.0 exactly, and a multiply by 1.0 is
     // exact — which is how the default wedge survives untouched.
-    return 1.0 + SKY_HAZE_WEDGE_GAIN_SLOPE * (haze - HAZE_DEFAULT);
+    return 1.0 + SKY_HAZE_WEDGE_GAIN_SLOPE * (haze - HAZE_ANCHOR);
 }
 
 fn circumsolar_amplitude(haze: f32) -> f32 {
@@ -1252,7 +1252,7 @@ fn circumsolar_amplitude(haze: f32) -> f32 {
     // whereas summing floor and span would land a ULP or two off 0.045.
     let span = CIRCUMSOLAR_AMPLITUDE - CIRCUMSOLAR_AMPLITUDE_FLOOR;
     return CIRCUMSOLAR_AMPLITUDE
-        + span * (pow(haze / HAZE_DEFAULT, CIRCUMSOLAR_HAZE_EXPONENT) - 1.0);
+        + span * (pow(haze / HAZE_ANCHOR, CIRCUMSOLAR_HAZE_EXPONENT) - 1.0);
 }
 
 // Procedural sky ported from witness._sky_radiance, including the spectral
@@ -1732,7 +1732,7 @@ const TONE_MAP_SHOULDER: f32 = 0.35;
 // move). The white point lets radiance >= TONE_MAP_WHITE_POINT reach 1.0,
 // so sunlit faces read vibrant white; below ~10% of the white point the
 // curve is within 0.3% of plain Reinhard, so sky and shadow are untouched.
-const TONE_MAP_WHITE_POINT: f32 = 8.0;
+const TONE_MAP_WHITE_POINT: f32 = 12.0;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;

@@ -101,7 +101,7 @@ fn sample_sigma(p: vec3<f32>) -> f32 {
     return textureSampleLevel(vol, vol_samp, vec3<f32>(t.z, t.y, t.x), 0.0).r;
 }
 
-const TONE_MAP_WHITE_POINT: f32 = 8.0;
+const TONE_MAP_WHITE_POINT: f32 = 12.0;
 const TONE_MAP_SHOULDER: f32 = 0.35;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {

@@ -372,7 +372,7 @@ export class UI {
       onInput: (v) => app.setToneMapGamma(v),
     }));
     m.append(sliderRow("Haze", {
-      min: 0.0, max: 1.0, step: 0.01, value: app.haze,
+      min: 0.0, max: 2.0, step: 0.01, value: app.haze,
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setHaze(v),
     }));

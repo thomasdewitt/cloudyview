@@ -897,8 +897,8 @@ class Viewer {
    * already averaged are of a different sky and cannot be kept.
    */
   setHaze(haze) {
-    if (!(haze >= 0.0 && haze <= 1.0)) {
-      throw new Error(`haze must be in [0, 1]; got ${haze}.`);
+    if (!(haze >= 0.0 && haze <= K.HAZE_MAX)) {
+      throw new Error(`haze must be in [0, ${K.HAZE_MAX}]; got ${haze}.`);
     }
     this.haze = haze;
     this.renderer.resetAccumulation();

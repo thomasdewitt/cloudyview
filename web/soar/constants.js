@@ -53,7 +53,9 @@ export const OCEAN_HAZE_EXTINCTION_PER_KM = 0.012;
 // is anchored here: at 0.35 each returns its tuned constant exactly, so the
 // default look is unchanged. See look.py for the physics of the ramp, and
 // spectral.js for the two functions that consume these.
-export const DEFAULT_HAZE = 0.35;
+export const HAZE_ANCHOR = 0.35;
+export const DEFAULT_HAZE = 1.0;
+export const HAZE_MAX = 2.0;
 export const AERIAL_BETA_FLOOR_PER_KM = 0.015;
 
 // --- engine.py defaults -------------------------------------------------

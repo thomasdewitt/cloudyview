@@ -69,9 +69,13 @@ OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 # circumsolar lobe and the haze over the sea would let a viewer build a sky
 # no photograph contains — a razor-sharp far field under a milky horizon.
 # They are all the same aerosol, so they get one number, and every term is
-# ANCHORED at DEFAULT_HAZE: at 0.35 each expression returns its tuned
-# constant exactly, so the default look is a fixed point of this refactor.
-DEFAULT_HAZE = 0.35
+# ANCHORED at HAZE_ANCHOR: at 0.35 each expression returns its tuned
+# constant exactly. The anchor is a calibration point, not the default —
+# Thomas flies at 1.0 ("slammed to 1 looks best", 2026-08-11), so that is
+# the default; the slider runs to 2 for genuinely soupy days.
+HAZE_ANCHOR = 0.35
+DEFAULT_HAZE = 1.0
+HAZE_MAX = 2.0
 # Even at haze 0 the air is not vacuum. 0.015/km is a clean Rayleigh-limited
 # atmosphere: Koschmieder's 3.912/beta puts the visual range at ~260 km,
 # which is the "you can see the far range from the pass" day, not vacuum.
@@ -82,7 +86,7 @@ AERIAL_BETA_FLOOR_PER_KM = 0.015
 # default. A linear ramp spent most of its travel in looks nobody wants.
 _AERIAL_BETA_HAZE_COEFFICIENT = (
     (AERIAL_BETA_PER_KM - AERIAL_BETA_FLOOR_PER_KM)
-    / (DEFAULT_HAZE * math.sqrt(DEFAULT_HAZE))
+    / (HAZE_ANCHOR * math.sqrt(HAZE_ANCHOR))
 )
 # The sea's haze was tuned against the sky's, not independently: 0.343x the
 # column beta. Holding the ratio is what keeps a hazy horizon and a hazy
@@ -91,7 +95,7 @@ _OCEAN_HAZE_BETA_RATIO = OCEAN_HAZE_EXTINCTION_PER_KM / AERIAL_BETA_PER_KM
 
 
 def aerial_beta_per_km(haze: float) -> float:
-    """Sea-level clear-air extinction for a haze setting in [0, 1].
+    """Sea-level clear-air extinction for a haze setting in [0, HAZE_MAX].
 
     h**1.5 is written h*sqrt(h) so the browser cannot disagree: sqrt is
     correctly rounded by IEEE-754 and pow is not, and this number is packed
