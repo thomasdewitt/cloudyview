@@ -16,7 +16,11 @@ symbol name and by verbatim snippet instead.
 
 ## 1. F12 opens the capture dialog but does not release the pointer
 
-**Status:** open
+**Status:** FIXED 2026-08-11 (`d6a4d17`, bug-fix session) — F12 now routes
+through `pause(panel)` (pause gained a panel argument), so the pointer is
+released and the paused state is real before the capture panel opens. The
+pointerlockchange handler sees `paused` already true and does not
+double-open "main". Escape from the panel backs to the main menu.
 **Found:** 2026-08-10, deployed web build
 
 **Repro:** fly (pointer captured), press F12. The capture dialog appears, but
@@ -64,7 +68,15 @@ run so the chrome matches the released state.
 
 ## 2. After a screenshot, Escape releases the cursor but does not open the menu
 
-**Status:** open, cause not confirmed — needs a live repro
+**Status:** FIXED structurally 2026-08-11 (`d6a4d17`, bug-fix session) —
+the original repro was never obtained, so what landed is the class fix,
+not a point fix: (a) the Escape keydown route (added in the 08-11
+optimization coda) pauses whenever the lock is already gone, so a
+swallowed lock-release Escape is no longer unrecoverable; (b) `ui.open`/
+`ui.close` now call `_syncChrome`, killing the stale `menu-open` chrome
+class `saveScreenshot`'s bare `ui.close()` used to leave; (c) per 2b, the
+rescue "menu" toolbar chip is deleted (the fullscreen chip stays). If
+Thomas can still reach a dead-Escape state on the next flight, reopen.
 **Found:** 2026-08-10, deployed web build
 
 **Repro:** F12 → take a still → fly around some more → press Escape. The
@@ -275,7 +287,13 @@ That is a hypothesis from reading, not a diagnosis. Get the repro first.
 
 ## 5. A horizontally rectangular nest is not offered as a nest
 
-**Status:** open, strong candidate cause found by reading
+**Status:** FIXED 2026-08-11 (`dd816a9`, bug-fix session) — exactly the
+likely-fix below: per-axis spacing in `group_domain_extent`/`domainExtent`,
+finer = no axis coarser + at least one axis strictly finer, changed in
+io.py and field.js together with a node-vs-Python agreement test
+(tests/test_io_overrides.py) so the verdicts cannot drift. The real STEAM
+file from entry 16 still detects. Awaiting a rectangular-nest file from
+Thomas to confirm the original symptom (the diagnosis was from reading).
 **Found:** 2026-08-10, deployed web build
 
 **Symptom:** a nest that should qualify is not detected, when the nest is
@@ -461,7 +479,14 @@ larger-scale version of the same hole:
 
 ## 7. The pause menu overlaps the hint strip, printing the field name twice
 
-**Status:** open
+**Status:** FIXED 2026-08-11 (`d6a4d17`, bug-fix session) — `#viewer
+.menu-open #hint { display: none }`, the same treatment `#toolbar` had.
+Part 2 (menu max-height + internal scroll) turned out to already exist
+(`max-height: calc(100vh - 4rem); overflow-y: auto`). Decision on the
+field name in the hint subtitle: kept — with the hint hidden under the
+menu it only shows in the free-mouse state, where nothing duplicates it.
+This also delivers item 2 of entry 13 (no controls hint on the render
+panel) for free.
 **Found:** 2026-08-11, deployed web build
 
 **Repro:** pause on a field whose menu is tall — the screenshot that found
@@ -533,7 +558,14 @@ part carrying its weight least.
 
 ## 8. The landing page sometimes shows a black backdrop instead of a still
 
-**Status:** open, cause found by reading — intermittent, no reliable repro yet
+**Status:** FIXED 2026-08-11 (`6007456`, bug-fix session) — the likely-fix
+below: `reelShown` claimed synchronously before the first await (dedupes
+in-flight repeats of one card), plus a generation token so every call but
+the newest drops out after its await. Verified live against the served
+tree: same-tick double hover (the race) now ends with exactly one reel
+`on`; sequential hovers end on the last-hovered demo. The third path (a
+404ing `all[0]` still opening the page black) is untouched — it is a
+missing-asset symptom, not this race.
 **Found:** 2026-08-11, deployed web build
 
 **Symptom:** the landing page occasionally comes up with a black background
@@ -606,7 +638,15 @@ is the window the race lives in.
 
 ## 9. The bottom quality tier is named "Potato"
 
-**Status:** open — a rename, decided with Thomas (2026-08-11), not yet applied
+**Status:** APPLIED 2026-08-11 (`8510dbb`, bug-fix session) — `potato` →
+`minimal` in QUALITY_PRESETS, both tier orderings, QUALITY_HOLD_LADDERS
+(key and sampling values), AUTO_TIER_COST_RATIO_TO_NEXT, and
+benchmarking/soar_frame_bench.py's TIERS table. Label is plain "Minimal"
+(the "smooth stills, rough flight" tag was stale per the note below). The
+uniforms.js floor and renderer.js parked special case named below no
+longer existed — the ladder had already replaced them, as predicted. Old
+metadata keeps saying "potato"; historical docs/benchmark results were
+left alone.
 **Found:** 2026-08-11, during the optimization pass
 
 Not a defect; a naming decision recorded so it survives to a session that can
@@ -694,7 +734,16 @@ measured cost next to it.
 
 ## 11. Cancelling the group/units question reports a load failure
 
-**Status:** open
+**Status:** FIXED 2026-08-11 (`d6a4d17`, bug-fix session) — the cancel
+rejection carries a `cancelled` marker property (not a message string);
+`pickFile` re-offers the OS picker on it, a second dismissal with the
+field already released exits to the start page via `leave()`, and a
+cancel during the very first load (main.js) walks quietly back to the
+landing page instead of the failure panel. Both panels say "Back —
+choose a different file". NOT done: the units panel's Back returns to
+the file picker, not to the group question — the honest answer needs the
+ask sequence to be re-enterable rather than a straight-line await chain,
+and was deliberately left for a session that wants to restructure ingest.
 **Found:** 2026-08-11, deployed web build
 
 **Repro:** menu → "Open a file…" → pick a `.nc` → the group (or units)
@@ -777,7 +826,12 @@ label and the callback:
 
 ## 12. Choosing "Minimap: fullscreen" from the menu leaves the menu on top of it
 
-**Status:** open
+**Status:** FIXED 2026-08-11 (`d6a4d17`, bug-fix session) — the likely-fix:
+the menu row closes the menu when the toggle lands on `fullscreen` (mouse
+stays free for click-to-travel; Escape brings the menu back; the app
+stays paused, which `setMinimapMode`'s return-to-flight logic already
+respects) and re-opens it for `corner`/`off` so the row's label updates.
+The "click to travel, M to dismiss" toast is now true as given.
 **Found:** 2026-08-11, deployed web build
 
 **Repro:** pause, click the "Minimap" row until it reads `fullscreen`. The
@@ -820,7 +874,24 @@ either does not fix the other.
 
 ## 13. "Render this view in behold…" should become a terminal-render panel
 
-**Status:** open — design change, not a defect
+**Status:** MOSTLY DONE 2026-08-11 (`522f04f`, bug-fix session, on
+Thomas's direct ask that evening). Landed: the panel is "Render this view
+in a terminal" with a witness | behold segmented choice (witness default —
+it reproduces the view exactly, nests and periodic wrap included, via the
+new `--nest-group`/`--periodic`/`--gamma`/`--white-point`/`--contrast`/
+`--haze` CLI args; the outer/nest chooser and quality tiers appear only on
+the behold branch); item 1 — the panel (and the quality panel) dock to the
+bottom (`#menu.dock-bottom`) so the view stays visible; item 2 — done via
+bug 7's `menu-open` hint rule. Screenshot PNG `reproduction_command` is
+now the witness command. STILL OPEN: item 3 (editable camera/view text
+boxes driving the live view — its own panel-sized piece of work). The
+flight-video remark is RESOLVED (Thomas, same evening): reading (a) was
+right — video does not belong in the capture panel. Landed in `05c654d`:
+capture is stills-only with a one-line pointer at R; frame rate, passes
+per frame and the size preset live in the track panel that pops when a
+recording stops. Same session also docked all view-facing panels
+(quality, sun, capture, track, terminal) to the bottom edge with the
+quality sliders in two columns (`5d50155`).
 **Raised:** 2026-08-11
 
 Thomas's words, kept close to verbatim because several of these are taste
@@ -878,7 +949,11 @@ panel that landed in this list. Ask before designing around it.
 
 ## 14. Firefox crashes on teardown: "Queue[Id(2,4)] does not exist"
 
-**Status:** open — browser crash, one occurrence, not reproduced
+**Status:** open — STALE ENTRY, read 17/17a/17b/18 first. Five crashes as
+of 2026-08-11 evening, two stack variants, and 17b retires the teardown-
+ordering hypothesis this entry is built on (three of the crashes had no
+teardown running at all). Kept for the fingerprints and the mitigation
+list; the current reading and the decisive experiment live in 17b.
 **Found:** 2026-08-11, https://thomasddewitt.com/thought-cloud/soar/
 
 **Repro (once):** do a render, go back to the start page, then switch to
@@ -987,3 +1062,329 @@ fingerprints.
    `dispose` wait for (or cancel) an in-flight capture.
 4. Try to reproduce with `visibilitychange` — render, exit to the start page,
    and background the tab in the same beat.
+
+---
+
+## 15. Second crash: tabbing away while the volume is loading
+
+**Status:** open — same family as bug 14
+**Found:** 2026-08-11, deployed web build
+
+**Repro (once):** start loading a field, switch to another application while
+it is still loading. Firefox dies.
+
+**Why this one matters more than a second data point.** Bug 14 happened after
+a render, and the hypothesis there was that a render leaves a long queue
+drain for `dispose` to await. This crash happened during a *load* — before
+any render existed. So the specific "renders leave a slow drain" story is not
+the whole cause, and the general one is:
+
+> soar holds a live `GPUDevice` and a configured canvas across a long await,
+> and the window can be occluded at any point during it.
+
+Loading has its own long awaits with large GPU work in flight — the volume
+upload is hundreds of megabytes of `writeTexture` — and `boot()` can be
+mid-flight with a device acquired, the canvas configured, and no viewer yet
+assigned to `viewer`, which is exactly the window `enterViewerOnce`'s catch
+already reasons about:
+
+```js
+    // boot() disposes the viewer it could not finish, which takes the device
+    // with it; a failure before boot leaves the device here to release.
+    if (viewer) await endSession();
+    else device?.destroy();
+```
+
+**Is soar doing something wrong, or is it all Firefox?** Both, and they are
+separable:
+
+- *Firefox's fault:* a content page must not segfault the browser's main
+  process. A stale queue id should surface as a lost device. Nothing soar
+  does can make that correct behaviour, and it is worth reporting upstream
+  with the crash ids.
+- *Plausibly soar's fault:* soar can stop creating the window in which the
+  bug is reachable. Every occurrence so far has the same shape — a device
+  alive, the canvas still configured, a long await outstanding, and the tab
+  going into the background. That is a state soar chooses to be in, and can
+  choose to hold for less time.
+
+**What to try, beyond bug 14's list:**
+
+1. Handle `visibilitychange`: when the page is hidden mid-load or mid-
+   teardown, get the canvas unconfigured rather than leaving the swapchain
+   live against work nobody is watching.
+2. Make the load path abortable at each await, so backgrounding can wind it
+   down deliberately instead of leaving it suspended.
+3. Check whether the crash needs `dispose` at all. This one had no exit to
+   the start page — if a plain background during load is enough, then
+   teardown ordering is not the whole story and the swapchain lifetime is.
+
+---
+
+## 16. NOT a soar bug — the STEAM nest overhang is real, and it is a grid bug
+
+**Status:** investigated 2026-08-11, closed as far as cloudyview is concerned
+**File:** `turbulon-analysis/runs/small-domain/small_c002_s0030.nc`
+
+Logged so nobody re-derives it. soar reported:
+
+> The nest overhangs the outer domain (y by 5.0 m, z by 3.8 m); the
+> overhanging sliver is clipped and will not be rendered.
+
+**cloudyview's arithmetic is exactly right.** Computed from the file:
+
+```
+parent box [-10.  -10.   -8.7859]  ..  [40950.  10230.   5491.2141]
+nest   box [17915.   -5.   -5.   ]  ..  [23035.  10235.   5495.    ]
+overhang   [0.  5.  3.7859]
+```
+
+which is the reported 5.0 m and 3.8 m to the digit.
+
+**The overhang is a half-cell mismatch, and it is exact:**
+
+```
+y: (dy_parent - dy_nest)/2 = (20     - 10)/2 = 5.0
+z: (dz_parent - dz_nest)/2 = (17.5719 - 10)/2 = 3.7859
+```
+
+**Root cause in STEAM: both grids put the first cell *centre* at 0, not the
+first cell *edge*.** Parent `y` centres run 0, 20, …, 10220; nest `y` centres
+run 0, 10, …, 10230. Both span 10240 m and mean the same domain, but the
+centre-at-origin convention puts the parent's box at [-10, 10230] and the
+nest's at [-5, 10235]. Same in z. Nothing is misplaced by a large amount and
+neither file is wrong on its own — they are only inconsistent with each
+other, and only because their spacings differ.
+
+**The worse consequence is alignment, not overhang.** The nest is a clean 2x
+refinement of the parent (20 m → 10 m), so its cell boundaries should fall on
+the parent's every second edge. They never do:
+
+```
+parent y edges: -10, 10, 30, 50, …   (≡ 10 mod 20)
+nest   y edges:  -5,  5, 15, 25, …   (≡  5 mod 10)
+nest edges coinciding with a parent edge: 0 of 1025
+```
+
+Every fine cell straddles a coarse cell boundary. The 5 m sliver is the
+visible symptom; the misalignment is the actual defect.
+
+**Fix belongs in STEAM:** place centres at `(i + 0.5) * d`. Then a 10240 m
+domain is [0, 10240] at any resolution, the parent's y centres are 10, 30, …,
+10230, the nest's are 5, 15, …, 10235, both boxes agree, and every second
+nest edge lands on a parent edge.
+
+**Not related to bug 5.** This file is horizontally rectangular (parent
+2048x512, nest 512x1024), so it looks like a match — but its fineness gate
+passes: the parent's minimum spacing over all axes is 17.57 m (the vertical)
+and the nest's is 10 m, so `inner.dx < outer.dx` holds. Bug 5 needs the two
+levels to *share* their finest axis. Different bug; do not test bug 5's fix
+against this file.
+
+**Nothing to change in cloudyview.** The 1% allowance absorbs the sliver, the
+clip is correct, and the message is accurate. Arguably the wording could
+say "the two grids are offset by half a cell" rather than "overhangs", since
+that is what a half-cell overhang almost always means — but that is a copy
+change, not a fix.
+
+---
+
+## 17. Third crash — the three reports compared, and what it changes
+
+**Status:** open. Supersedes part of bug 14's hypothesis.
+**Found:** 2026-08-11
+
+Third `Queue[Id] does not exist` crash. Comparing all three is where the new
+information is; the report on its own says little.
+
+| | crash A (bug 14) | crash B (bug 15) | crash C (this) |
+|---|---|---|---|
+| Action | render → home → switch apps | switch apps while loading | not recorded |
+| `MozCrashReason` | `Queue[Id(2,4)]` | — | `Queue[Id(1,1)]` |
+| Crash ID | `806f15b8-…` | — | `554ef0a4-…` |
+| Firefox uptime | 1897 s | — | **200 s** |
+| `URL:` field | soar | — | **absent** |
+| Free RAM | 38.1 GB | — | 31.0 GB |
+
+**The stacks are the same crash.** Rebasing both against their `libxul.so`
+load address, frames 0–29 and frame 32 are byte-identical; only frames 30–31
+differ:
+
+```
+ #   crash A    crash C   match
+ 0  0x683af2c  0x683af2c  yes
+ …           (all identical)
+29  0x31704f0  0x31704f0  yes
+30  0x3722f15  0x2edb6a6  NO
+31  0x2ebdb04  0x2ebda5e  NO
+32  0x37228d6  0x37228d6  yes
+```
+
+Identical crash site, identical thirty frames of call path, and a two-frame
+difference right out at the event loop. Two different dispatch sources reach
+one handler. That is the same bug, entered two ways — not two bugs.
+
+**The queue id is the finding.** wgpu ids carry an index and an epoch, so
+`Id(2,4)` is slot 2 on its fourth reuse — a much-recycled queue, in a Firefox
+that had been up 32 minutes. `Id(1,1)` is slot 1, epoch 1: **the first queue
+ever created in that process**, 200 seconds after startup.
+
+That is inconvenient for bug 14's story. "Teardown leaves a stale swapchain
+pointing at a destroyed device" predicts recycled ids and a prior session; a
+first-ever queue on a three-minute-old browser has neither. Combined with
+crash B happening during a *load* with no teardown at all, the teardown-
+ordering hypothesis explains at most one of the three.
+
+**Revised reading.** The common factor across all three is not a soar
+lifecycle path — it is WebGPU plus this display configuration:
+
+- `ProcessType: main` with `gpuProcess: unused` — WebGPU faults land in the
+  browser's main process with nothing to contain them
+- Wayland, GNOME, `wrCompositor: blocklisted`
+- dual GPU (RTX 5080 active, AMD iGPU present and inactive)
+- `SIGSEGV` at `0x0` — a null deref, not a use-after-free of ours to fix
+
+soar can still narrow the window (bug 14's and 15's suggestions stand, and
+are cheap), but this now reads as predominantly a Firefox bug on this box
+rather than something soar is doing wrong.
+
+**The test that would settle it, and it is cheap:** open an unrelated WebGPU
+page — a browser sample, anything that holds a device — and background the
+window a few times. If that crashes too, soar is not the cause and the whole
+thing belongs upstream with the three crash ids. If only soar crashes, the
+difference is worth finding: soar holds a much larger volume and a longer
+frame than a sample does.
+
+Also worth recording: crash C arrived **205 seconds after crash B**, on a
+browser that had been up 200 seconds. Whatever the state is, it re-arms
+almost immediately after a restart.
+
+### 17a. Fourth report — the point of diminishing returns
+
+A fourth crash (`44921c2a-…`, `Queue[Id(1,2)]`, uptime 135 s, 360 s after the
+previous) is **byte-identical to crash A across all 33 frames**. So there are
+two stack variants, not four, and both have now been seen more than once:
+
+```
+variant 1 (crashes A, D): frames 30-31 = 0x3722f15, 0x2ebdb04
+variant 2 (crash C):      frames 30-31 = 0x2edb6a6, 0x2ebda5e
+```
+
+Queue ids across the four: `(2,4)`, `(1,1)`, `(1,2)`. The epochs confirm the
+id is not the variable that matters — slot 1 dies on its first use and on its
+second, and slot 2 dies on its fourth.
+
+**Further reports of these two variants add nothing.** What would still be
+worth capturing:
+
+- a crash with a **third** stack variant — that is a different path in
+- the result of the non-soar WebGPU backgrounding test above, which is the
+  one experiment that separates soar from Firefox
+- any crash where the action is recorded precisely, since three of the four
+  have no action attached and the `URL:` field was absent on one
+
+### 17b. The crashes happen *while backgrounded*, not at the moment of an action
+
+Thomas: the crash notification usually arrives while he is in a different
+application. That reframes everything above.
+
+The crash is not triggered by a soar action. It happens some time **after the
+window is occluded**, with soar sitting in the background. The "actions" on
+crashes A and B — exit to home, mid-load — were simply the last thing before
+tabbing away, not the cause. Crashes C and D have no action recorded because
+there was none, and the absent `URL:` field on one report fits: no focused tab
+at crash time.
+
+The trigger is therefore *occlusion plus a live GPU device*. This retires the
+teardown-ordering hypothesis in bug 14 entirely — three of the four crashes
+had no teardown running at all.
+
+**This makes the decisive test passive and easy:** leave an unrelated WebGPU
+page open in a backgrounded window and go work elsewhere for a while. No
+interaction needed. If Firefox dies, the whole thing is upstream.
+
+**And it points at the mitigation that actually matches the failure.** Rather
+than shortening the window in `dispose`, release the device when the page is
+hidden — `visibilitychange` → unconfigure the canvas, drop the device,
+rebuild on return. soar then is not holding the object that dies. That is a
+larger change than the bug 14 timeout, but it is the one aimed at how the
+crash really happens, and it composes with the parked-loop work from bug 3: a
+hidden tab is the limiting case of a view that is not changing.
+
+Worth deciding at fix time how much state survives the drop — camera, sun,
+quality and the loaded field would all need to come back, and re-uploading a
+multi-gigabyte volume on un-hide is not acceptable. A device drop that
+requires a reload is worse than the crash; one that keeps the field in memory
+and only rebuilds GPU resources is the thing to aim for.
+
+---
+
+## 18. Fifth crash — clicking the DYCOMS demo, and it contests 17b
+
+**Status:** open. Crash report not captured. **Contests the "only while
+backgrounded" reading in 17b — read them together.**
+**Found:** 2026-08-11
+
+**Repro:** clicked the DYCOMS demo on the landing page; crash immediately
+after. Thomas notes this demo usually loads fine.
+
+**Why this one matters.** 17b concluded the crashes were not triggered by a
+soar action at all — that they happen some time after the window is occluded,
+and the remembered "action" was just the last thing before tabbing away. A
+crash *immediately on clicking a demo* does not fit that, if the window was
+still in the foreground. Either:
+
+- (a) the window was in the foreground, and 17b's framing is too narrow —
+  backgrounding is one trigger among several, and loading is another; or
+- (b) Thomas clicked and then tabbed away while it loaded, which makes this
+  a duplicate of bug 15 and leaves 17b intact.
+
+**These have to be told apart before any fix is chosen**, because they point
+at different mitigations: (a) says the device lifetime is unsafe generally,
+(b) says releasing on `visibilitychange` is still the right aim. Ask which it
+was before treating 17b as settled.
+
+**Size is probably not the variable.** The obvious guess is that DYCOMS is
+the heaviest load, and it is not — from the baked set:
+
+```
+twpice  1024 x 1024 x 206  = 216 M voxels   184 MB download
+dycoms   640 x  640 x 140  =  57 M voxels    64 MB download
+rce      540 x  540 x  88  =  26 M voxels    14 MB download
+```
+
+DYCOMS is the middle one, and TWPICE — nearly four times larger — is the demo
+that has not been reported crashing. So "the biggest volume overflows
+something" does not survive the numbers. Worth checking whether DYCOMS is
+merely the one clicked most often.
+
+**What is still missing:** the crash report for this one was not captured. It
+is the report most worth having of the five, because it is the only one with
+a precise action attached, and a third stack variant here would be the first
+genuinely new signal since crash A.
+
+---
+
+## 19. NOT a soar bug — Firefox serves stale ES modules from plain http.server
+
+**Status:** closed with a remedy, 2026-08-11. Logged because it burned two
+diagnoses in one evening.
+
+**Symptom:** after an edit, the served page runs OLD module code no matter
+what — Ctrl+Shift+R does not help, restarting Firefox does not help. The only
+thing that "works" is restarting the server on a different port (new origin,
+fresh cache). Presented tonight as two separate mysteries: "cloud volumes
+never load" (a half-old, half-new module graph threw inside ingest after the
+bug-5 commit changed field.js and ingest/index.js together) and "the Haze
+slider maxes at 1.0" (an old uniforms.js against a new constants.js).
+
+**Cause:** `python3 -m http.server` sends no cache headers, so Firefox
+heuristically caches ES modules — and a hard reload does not reliably
+revalidate fetches made by the module loader, only the document itself.
+
+**Remedy, permanent:** serve the working tree with
+`python3 tools/dev_server.py [port]` — it sends `Cache-Control: no-store` on
+everything, and exists precisely for this. Bookkeeping notes: the deployed
+site is immune (stage_deploy.py fingerprints module filenames transitively,
+so a stale mix cannot be assembled), and the iter13 sliders / "Minimal" tier
+label make good version markers when in doubt.
