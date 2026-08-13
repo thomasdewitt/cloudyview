@@ -374,6 +374,7 @@ class Viewer {
 
   _armProbe(tier) {
     this._probe = {
+      kind: "tier",
       tier, frame: 0, samples: [],
       // Which stopwatch to believe — decided by _chooseProbeClock at the
       // first probe frame, by measuring the stopwatch itself. "queue" is the
@@ -408,7 +409,7 @@ class Viewer {
     const probe = this._probe;
     const forced = new URLSearchParams(location.search).get("probeclock");
     if (forced === "queue" || forced === "cadence") {
-      probe.clock = forced;
+      probe.clock = forced; this._probeClockUsed = probe.clock;
       console.info(`soar: probe clock forced to '${forced}' by ?probeclock=`);
       return;
     }
@@ -417,7 +418,7 @@ class Viewer {
     // also keeps queue waits (a crash lottery on Firefox, see bug 14) off
     // the reload path.
     if (this._probeClockVerdict) {
-      probe.clock = this._probeClockVerdict.clock;
+      probe.clock = this._probeClockVerdict.clock; this._probeClockUsed = probe.clock;
       probe.overheadMs = this._probeClockVerdict.overheadMs;
       return;
     }
@@ -436,7 +437,7 @@ class Viewer {
     } catch (err) {
       // The queue clock does not even run here (headless Chrome rejects it
       // outright for swapchain frames). The cadence clock owes it nothing.
-      probe.clock = "cadence";
+      probe.clock = "cadence"; this._probeClockUsed = probe.clock;
       remember();
       console.info(
         `soar: onSubmittedWorkDone rejects on this browser ` +
@@ -445,11 +446,11 @@ class Viewer {
     }
     const overhead = Math.min(...rounds);
     if (overhead <= K.AUTO_TIER_CLOCK_OVERHEAD_MAX_MS) {
-      probe.clock = "queue";
+      probe.clock = "queue"; this._probeClockUsed = probe.clock;
       probe.overheadMs = overhead;
       remember();
     } else {
-      probe.clock = "cadence";
+      probe.clock = "cadence"; this._probeClockUsed = probe.clock;
       remember();
       console.info(
         `soar: waiting on an EMPTY queue costs ${overhead.toFixed(1)} ms ` +
@@ -477,6 +478,21 @@ class Viewer {
       ? K.AUTO_TIER_WARMUP_FRAMES_CADENCE
       : K.AUTO_TIER_WARMUP_FRAMES;
     if (probe.frame <= warmup) return;
+    // A benchmark borrows the probe's timing path rather than starting a
+    // second one, because everything hard about timing a frame here is
+    // already solved in it: which stopwatch this browser can be believed
+    // about (onSubmittedWorkDone is a ~100 ms poll on Firefox, not a fence),
+    // what that stopwatch costs on an empty queue, and how many frames to
+    // throw away first. It also holds the renderer in its FLIGHT
+    // configuration, which is what stops the hold ladder from converging the
+    // view out from under a stationary measurement and timing a blit.
+    if (probe.kind === "bench") {
+      probe.samples.push(ms);
+      if (performance.now() < probe.until) return;
+      this._probe = null;
+      probe.resolve(probe.samples);
+      return;
+    }
     probe.samples.push(ms);
     if (probe.samples.length < K.AUTO_TIER_SAMPLE_FRAMES) return;
 
@@ -561,7 +577,7 @@ class Viewer {
       // clock that just proved untrustworthy), and carry on climbing.
       const probe = this._probe;
       if (probe) {
-        probe.clock = "cadence";
+        probe.clock = "cadence"; this._probeClockUsed = probe.clock;
         probe.frame = 0;
         probe.samples = [];
         console.warn(
@@ -1078,6 +1094,139 @@ class Viewer {
     } finally {
       this._brickSwitchBusy = false;
     }
+  }
+
+  /** Brick extent in voxels. Rebuilds the field when bricks are on. */
+  async setBrickShape(axis, value) {
+    const next = [...this.brickShape];
+    next["xyz".indexOf(axis)] = Math.max(1, Math.round(value));
+    if (next.join() === this.brickShape.join()) return;
+    this.brickShape = next;
+    if (!this.brickedRequested || this._brickSwitchBusy) return;
+    this._brickSwitchBusy = true;
+    this._keepCameraOnNextLoad = true;
+    try {
+      await this.loadField(this._source, this.progress);
+      const s = this.scene?.brickStats;
+      if (s) {
+        this.ui.say(
+          `Bricks ${this.brickShape.join("x")} — ` +
+          `${(100 * s.occupiedBricks / s.totalBricks).toFixed(1)}% occupied, ` +
+          `atlas ${(s.denseTexels / Math.max(s.atlasTexels, 1)).toFixed(1)}x ` +
+          "smaller than dense.");
+      }
+    } finally {
+      this._brickSwitchBusy = false;
+    }
+  }
+
+  /**
+   * Time the view in front of you, for `seconds`, as it is right now.
+   *
+   * Resolves to the per-frame milliseconds the probe path measured. The
+   * camera must not move while this runs — it is timing one picture, and a
+   * hand on the keyboard makes the number describe a different one every
+   * frame.
+   */
+  _timeCurrentView(seconds) {
+    return new Promise((resolve) => {
+      this._probe = {
+        kind: "bench", frame: 0, samples: [], clock: null, overheadMs: 0,
+        until: performance.now() + seconds * 1000,
+        resolve,
+      };
+      this._wake("benchmark");
+    });
+  }
+
+  /**
+   * Time this exact view with bricks off and with bricks on, and report both.
+   *
+   * The two runs are separated by a rebuild of the field, which is the only
+   * honest way to compare them: bricking is decided at build time. The camera
+   * is carried across, so the two numbers describe one picture rather than
+   * two. Nothing is inferred and nothing is chosen — the answer goes to you,
+   * because the answer is known to differ by machine and the two prior
+   * attempts at this were killed by a measurement taken on one card.
+   */
+  async benchmarkBricks({ seconds = 5 } = {}) {
+    if (this._brickSwitchBusy || !this._source) return null;
+    if (this._source.kind !== "demo") {
+      this.ui.say("Bricks are only built for the bundled fields so far.");
+      return null;
+    }
+    const wasBricked = this.brickedRequested;
+    this._brickSwitchBusy = true;
+    const runs = [];
+    try {
+      for (const bricked of [false, true]) {
+        this.brickedRequested = bricked;
+        this._keepCameraOnNextLoad = true;
+        await this.loadField(this._source, this.progress);
+        this.ui.say(
+          `Measuring ${bricked ? `bricks ${this.brickShape.join("x")}`
+                               : "dense"}… ${seconds}s, hands off.`,
+          seconds + 1);
+        const samples = await this._timeCurrentView(seconds);
+        // The median, for the reason the tier probe uses one: a mean is
+        // dragged by any single stall — a GC pause, the compositor taking
+        // the GPU — and every such contamination is upward.
+        const sorted = [...samples].sort((a, b) => a - b);
+        runs.push({
+          bricked,
+          brick: bricked ? [...this.brickShape] : null,
+          frames: sorted.length,
+          medianMs: sorted[Math.floor(sorted.length / 2)] ?? NaN,
+          meanMs: samples.reduce((a, b) => a + b, 0) / (samples.length || 1),
+          stats: this.scene?.brickStats ?? null,
+        });
+      }
+    } finally {
+      this.brickedRequested = wasBricked;
+      this._keepCameraOnNextLoad = true;
+      await this.loadField(this._source, this.progress).catch(() => {});
+      this._brickSwitchBusy = false;
+    }
+    this._reportBrickBenchmark(runs, seconds);
+    return runs;
+  }
+
+  _reportBrickBenchmark(runs, seconds) {
+    const [dense, brick] = runs;
+    const ratio = brick.medianMs / Math.max(dense.medianMs, 1e-9);
+    const fps = (ms) => (ms > 0 ? 1000 / ms : 0);
+    const s = brick.stats;
+    // The full table to the console, where it can be selected and pasted
+    // into the results file; the verdict on screen, where it is read.
+    const lines = [
+      `soar brick benchmark — ${this.sourceLabel}`,
+      `  tier ${this.renderer.qualityTier}, render scale ` +
+      `${this.renderer.renderScale}, ${seconds}s per run, ` +
+      `${this._probeClockUsed ?? "?"} clock`,
+      `  camera ${this.camera.position.map((v) => v.toFixed(0)).join(", ")} ` +
+      `az ${this.camera.azimuth.toFixed(1)} el ${this.camera.elevation.toFixed(1)}`,
+      `  dense           median ${dense.medianMs.toFixed(3)} ms ` +
+      `(${fps(dense.medianMs).toFixed(0)} fps), mean ` +
+      `${dense.meanMs.toFixed(3)}, ${dense.frames} frames`,
+      `  bricks ${brick.brick.join("x").padEnd(9)} median ` +
+      `${brick.medianMs.toFixed(3)} ms (${fps(brick.medianMs).toFixed(0)} fps)` +
+      `, mean ${brick.meanMs.toFixed(3)}, ${brick.frames} frames`,
+      `  bricked is ${ratio.toFixed(2)}x ` +
+      `${ratio >= 1 ? "SLOWER" : "faster"} than dense`,
+    ];
+    if (s) {
+      lines.push(
+        `  ${s.occupiedBricks} of ${s.totalBricks} bricks occupied ` +
+        `(${(100 * s.occupiedBricks / s.totalBricks).toFixed(2)}%), atlas ` +
+        `${(s.denseTexels / Math.max(s.atlasTexels, 1)).toFixed(2)}x smaller ` +
+        "than dense");
+    }
+    console.log(lines.join("\n"));
+    this.ui.say(
+      `${brick.brick.join("x")}: dense ${dense.medianMs.toFixed(2)} ms vs ` +
+      `bricked ${brick.medianMs.toFixed(2)} ms — ${ratio.toFixed(2)}x ` +
+      `${ratio >= 1 ? "slower" : "faster"}. Full table in the console.`,
+      12);
   }
 
   togglePeriodic() {

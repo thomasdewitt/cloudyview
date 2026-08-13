@@ -17,7 +17,7 @@ const el = (tag, className, text) => {
 };
 
 /** A labelled slider row that reports live and commits continuously. */
-function sliderRow(label, { min, max, step, value, format, onInput }) {
+function sliderRow(label, { min, max, step, value, format, onInput, onChange }) {
   const row = el("div", "row");
   row.append(el("label", null, label));
   const input = el("input");
@@ -27,8 +27,14 @@ function sliderRow(label, { min, max, step, value, format, onInput }) {
   input.addEventListener("input", () => {
     const v = Number(input.value);
     readout.textContent = format(v);
-    onInput(v);
+    onInput?.(v);
   });
+  // Separate from `input` for controls whose effect is expensive: a brick
+  // size rebuilds the whole field, and doing that once per pixel of drag
+  // would rebuild it thirty times on the way to the value you wanted.
+  if (onChange) {
+    input.addEventListener("change", () => onChange(Number(input.value)));
+  }
   row.append(input, readout);
   row.setValue = (v) => { input.value = v; readout.textContent = format(v); };
   return row;
@@ -38,7 +44,8 @@ function sliderRow(label, { min, max, step, value, format, onInput }) {
 // edge instead of the centre — anything where one would want to SEE the view
 // while the panel is up (Thomas, 2026-08-11). Navigation and questions stay
 // centred.
-const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]);
+const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track",
+                               "bricks"]);
 
 function segmented(options, isOn, onPick) {
   const wrap = el("div", "segmented");
@@ -329,10 +336,10 @@ export class UI {
         ? (app.scene.brickStats
             ? `${(100 * app.scene.brickStats.occupiedBricks
                   / app.scene.brickStats.totalBricks).toFixed(1)}% of bricks `
-              + "hold cloud; the march leaps the rest"
-            : "empty space is skipped")
+              + "hold cloud; size and timing in here"
+            : "size and timing in here")
         : "store only the bricks that hold cloud, and skip the rest",
-      () => { app.toggleBricks(); this.open("main"); }));
+      () => this.open("bricks")));
     m.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
                   "F", () => { app.toggleFullscreen(); this.open("main"); }));
     m.append(item("Back to the start page", null, () => app.leave()));
@@ -357,6 +364,67 @@ export class UI {
         (coverage > 0.75 ? " — little of the outer field is visible" : "")));
     }
     m.append(source);
+  }
+
+  _panel_bricks() {
+    const app = this.app;
+    const m = this.menu;
+    const scene = app.scene;
+    const stats = scene.brickStats;
+    m.append(this._header("storage", "Sparse bricks"));
+
+    m.append(item(`Bricks: ${scene.bricked ? "on" : "off"}`,
+                  scene.bricked
+                    ? "the field is stored as occupied bricks only"
+                    : "the field is one dense volume",
+                  async () => { await app.toggleBricks(); this.open("bricks"); }));
+
+    if (stats) {
+      const share = 100 * stats.occupiedBricks / stats.totalBricks;
+      const saving = stats.denseTexels / Math.max(stats.atlasTexels, 1);
+      m.append(el("div", "row",
+        `${stats.occupiedBricks.toLocaleString()} of ` +
+        `${stats.totalBricks.toLocaleString()} bricks hold cloud ` +
+        `(${share.toFixed(2)}%). Atlas is ${saving.toFixed(2)}x smaller than ` +
+        "the dense volume."));
+    }
+
+    m.append(el("div", "divider"));
+    // Independent per axis on purpose. Cloud fields are not isotropic — a
+    // stratocumulus deck is far thinner than it is wide — so the brick that
+    // wastes least is not obviously a cube, and the only way to find out is
+    // to try. Each change rebuilds the field, so these act on release rather
+    // than on drag.
+    for (const axis of ["x", "y", "z"]) {
+      const i = "xyz".indexOf(axis);
+      m.append(sliderRow(`Brick ${axis}`, {
+        min: 1, max: 32, step: 1, value: app.brickShape[i],
+        format: (v) => `${v} voxels`,
+        onChange: (v) => app.setBrickShape(axis, v),
+      }));
+    }
+    m.append(el("div", "row",
+      `Current: ${app.brickShape.join(" x ")} voxels per brick, plus a ` +
+      "1-voxel apron on every side so filtering across a brick seam stays " +
+      "exact."));
+
+    m.append(el("div", "divider"));
+    m.append(item("Time this view, both ways", "5 s each, hands off the keys",
+                  () => {
+                    this.close();
+                    app.benchmarkBricks({ seconds: 5 });
+                  }));
+    m.append(el("div", "row",
+      "Rebuilds the field twice and times the view in front of you with " +
+      "bricks off, then on, at the current tier. The camera is held across " +
+      "both. Summary on screen, full table in the browser console."));
+    m.append(el("div", "row",
+      "Expect bricks to LOSE on a fast discrete GPU: measured 3-6x slower on " +
+      "an RTX 5080, where the march is texture-latency bound. The reason to " +
+      "measure it here is that a bandwidth-scarce machine may disagree."));
+
+    m.append(el("div", "divider"));
+    m.append(this._backButton());
   }
 
   _panel_quality() {
