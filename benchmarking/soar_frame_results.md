@@ -259,3 +259,33 @@ GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field steam_
 | high | v1_thick_backlit | 960x540 | 3.913 | 255.5 |
 | high | v4_overview_south | 960x540 | 4.273 | 234.0 |
 | high | v8_ocean_lod | 960x540 | 1.272 | 786.5 |
+
+## 2026-08-13 10:34:10 — bebd40c — TWPICE 256, BRICKED 8^3
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field TWPICE_subvolume_256x256_5km.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 6.027 | 165.9 |
+| high | v4_overview_south | 960x540 | 3.762 | 265.8 |
+| high | v8_ocean_lod | 960x540 | 3.318 | 301.4 |
+
+## 2026-08-13 10:34:18 — bebd40c — TWPICE 256, dense (control for brick run)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field TWPICE_subvolume_256x256_5km.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 1.167 | 857.0 |
+| high | v4_overview_south | 960x540 | 0.808 | 1237.9 |
+| high | v8_ocean_lod | 960x540 | 0.894 | 1118.2 |
+
+## 2026-08-13 10:34:36 — bebd40c — FIF, z-crop + BRICKED 8^3 (sparse: 1.3% occupied)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field QC_FIF_Square_512,512,256.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 10.215 | 97.9 |
+| high | v4_overview_south | 960x540 | 17.118 | 58.4 |
+| high | v8_ocean_lod | 960x540 | 4.004 | 249.7 |

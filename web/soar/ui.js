@@ -160,7 +160,7 @@ export class UI {
    * Same for the startup probe, whose frames are deliberately serialized
    * against the GPU queue and so have a frame rate that means nothing at all.
    */
-  drawStats({ fps, frameMs, camera, tier, renderScale, frame, minimap, bird,
+  drawStats({ fps, camera, tier, renderScale, frame, minimap, bird,
               recording, showSpeed, parked = false, converged = false,
               probing = false, autoTier = false, wakeReason = null, spp = 0,
               holdRung = 0, holdRungCount = 1, holdCapped = false }) {
@@ -173,9 +173,7 @@ export class UI {
       return;
     }
     this.stats.hidden = false;
-    const rate = fps == null
-      ? "—"
-      : `${fps.toFixed(0)} fps · ${frameMs.toFixed(1)} ms`;
+    const rate = fps == null ? "—" : `${fps.toFixed(0)} fps`;
     if (this.statsMode !== "expanded") {
       const speed = showSpeed ? ` · ${camera.speed.toFixed(0)} m/s` : "";
       const rec = recording ? "● " : "";
@@ -325,6 +323,16 @@ export class UI {
     m.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
                   "wrap the field laterally",
                   () => { app.togglePeriodic(); this.open("main"); }));
+    m.append(item(
+      `Sparse bricks: ${app.scene.bricked ? "on" : "off"}`,
+      app.scene.bricked
+        ? (app.scene.brickStats
+            ? `${(100 * app.scene.brickStats.occupiedBricks
+                  / app.scene.brickStats.totalBricks).toFixed(1)}% of bricks `
+              + "hold cloud; the march leaps the rest"
+            : "empty space is skipped")
+        : "store only the bricks that hold cloud, and skip the rest",
+      () => { app.toggleBricks(); this.open("main"); }));
     m.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
                   "F", () => { app.toggleFullscreen(); this.open("main"); }));
     m.append(item("Back to the start page", null, () => app.leave()));

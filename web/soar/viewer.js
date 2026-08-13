@@ -71,8 +71,15 @@ class Viewer {
     this.recorder = new TrackRecorder();
     this.paused = true;
     this.captured = false;
+    // Sparse bricks are a manual switch, never inferred from the field: no
+    // occupancy threshold, no memory heuristic, nothing that could choose
+    // differently on two machines and make a measurement unrepeatable.
+    this.brickedRequested = false;
+    this.brickShape = [8, 8, 8];
+    this._source = null;
+    this._keepCameraOnNextLoad = false;
     this.frameIndex = 0;
-    this._fpsAcc = 0; this._fpsN = 0; this._fps = null; this._frameMs = null;
+    this._fpsAcc = 0; this._fpsN = 0; this._fps = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
 
@@ -206,6 +213,9 @@ class Viewer {
    */
   async loadField(source, progress) {
     await this._releaseField();
+    // Remembered so the brick switch can rebuild the same field the other
+    // way round without asking the user to open it again.
+    this._source = source;
 
     let scene = null, renderer = null, minimap = null, bird = null;
     let sun = null, minimapProblem = null, birdProblem = null;
@@ -219,7 +229,8 @@ class Viewer {
       if (source.kind === "demo") {
         scene = await loadDemoScene(
           this.device, source.base, ocean,
-          (stage, fraction) => progress(stage, fraction));
+          (stage, fraction) => progress(stage, fraction),
+          { bricked: this.brickedRequested, brick: this.brickShape });
         sun = scene.sun ?? null;
       } else {
         const { loadFileScene } = await import("./ingest/index.js");
@@ -287,8 +298,19 @@ class Viewer {
       this.sunAzimuth = sun.azimuth;
       this.sunElevation = sun.elevation;
     }
+    // A brick rebuild is the SAME field seen the same way, so the camera
+    // survives it — otherwise the switch would move the view and the A/B it
+    // exists to serve would compare two different pictures.
+    const keep = this._keepCameraOnNextLoad ? this.camera : null;
+    this._keepCameraOnNextLoad = false;
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
                                    { periodic: renderer.periodic });
+    if (keep) {
+      this.camera.position = keep.position;
+      this.camera.azimuth = keep.azimuth;
+      this.camera.elevation = keep.elevation;
+      this.camera.speed = keep.speed;
+    }
 
     this.ui.setSubtitle(this.sourceLabel);
 
@@ -1007,6 +1029,55 @@ class Viewer {
   setFov(fov) {
     this.camera.setFov(fov);
     this._wake("field of view");
+  }
+
+  /**
+   * Store the field as one dense volume, or as sparse bricks.
+   *
+   * A manual switch and nothing else. There is no gate that looks at the
+   * field and decides for you: the two prior attempts at empty-space skipping
+   * were reverted on measurements taken on one machine, and the whole reason
+   * this is a switch is so the same view can be timed both ways on YOURS.
+   *
+   * Bricking is decided when the field is built, so this rebuilds it — and
+   * carries the camera across, because comparing one view two ways is the
+   * point and a moved camera would compare two pictures instead.
+   */
+  async toggleBricks() {
+    if (this._brickSwitchBusy || !this._source) return;
+    if (this._source.kind !== "demo") {
+      this.ui.say("Bricks are only built for the bundled fields so far. An "
+                  + "opened file still loads dense — the ingest path has to "
+                  + "learn to build them as it reads.");
+      return;
+    }
+    this._brickSwitchBusy = true;
+    this.brickedRequested = !this.brickedRequested;
+    this._keepCameraOnNextLoad = true;
+    try {
+      await this.loadField(this._source, this.progress);
+      const stats = this.scene?.brickStats;
+      if (stats) {
+        const share = 100 * stats.occupiedBricks / stats.totalBricks;
+        const saving = stats.denseTexels / Math.max(stats.atlasTexels, 1);
+        this.ui.say(
+          `Bricks on — ${stats.occupiedBricks.toLocaleString()} of ` +
+          `${stats.totalBricks.toLocaleString()} bricks hold cloud ` +
+          `(${share.toFixed(1)}%), atlas ${saving.toFixed(1)}x smaller than ` +
+          "the dense volume.");
+      } else {
+        this.ui.say("Bricks off — one dense volume.");
+      }
+    } catch (err) {
+      // The rebuild failed, so the field is gone rather than merely
+      // unbricked. Say which, and put the flag back so a retry is the other
+      // way round rather than the same way again.
+      this.brickedRequested = !this.brickedRequested;
+      this.ui.say(`Could not rebuild the field: ${err.message}`);
+      throw err;
+    } finally {
+      this._brickSwitchBusy = false;
+    }
   }
 
   togglePeriodic() {
@@ -1779,15 +1850,13 @@ class Viewer {
     if (march) {
       this._fpsAcc += elapsed; this._fpsN += 1;
       if (this._fpsAcc >= 0.5) {
-        const meanDt = this._fpsAcc / this._fpsN;
-        this._fps = 1 / meanDt;
-        this._frameMs = meanDt * 1000;
+        this._fps = this._fpsN / this._fpsAcc;
         this._fpsAcc = 0; this._fpsN = 0;
       }
     }
     const converged = this.renderer.converged;
     this.ui.drawStats({
-      fps: this._fps, frameMs: this._frameMs, camera: this.camera,
+      fps: this._fps, camera: this.camera,
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
       frame: this.frameIndex,
       minimap: Boolean(this.minimap && this.minimapMode !== "off"),

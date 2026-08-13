@@ -11,7 +11,9 @@
 
 "use strict";
 
-import { createBrickDummies } from "./brickvolume.js";
+import {
+  createBrickDummies, buildBrickPayload, feedPaddedVolume, uploadBrickPayload,
+} from "./brickvolume.js";
 import { volumeAABB, minVoxelSize, validateNestContainment } from "./field.js";
 import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
@@ -258,7 +260,8 @@ export function createNestDummy(device) {
  * so loading the demo after a file (or the other way round) reuses the tile
  * already on the card instead of allocating a second one and abandoning it.
  */
-export async function loadDemoScene(device, baseUrl, ocean, progress) {
+export async function loadDemoScene(device, baseUrl, ocean, progress,
+                                    { bricked = false, brick } = {}) {
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const padded = meta.volume.padded_dims_xyz;
@@ -295,6 +298,22 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
     writeGhostBorder(device, volumeTexture, faces, true, padded);
     nestDummy = createNestDummy(device);
 
+    // The sparse copy, when asked for. Built from the dense volume already in
+    // hand rather than from a second download, and kept ALONGSIDE it: the
+    // point of the switch is to A/B one view without reloading the field, and
+    // that needs both resident. A field bricked for its own sake would not
+    // allocate the dense texture at all.
+    let bricks = null;
+    if (bricked) {
+      progress?.("Building bricks…", 0.9);
+      const shape = meta.volume.shape_xyz;
+      bricks = await uploadBrickPayload(
+        device,
+        buildBrickPayload(shape, feedPaddedVolume(words, shape),
+                          { brick, periodic: true }),
+        meta.title || "demo");
+    }
+
     const bmin = meta.volume.bmin;
     const bmax = meta.volume.bmax;
     const scene = new Scene(device, {
@@ -315,6 +334,7 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
       _nest: null,
       _nestDummy: nestDummy,
       _brickDummies: createBrickDummies(device),
+      _bricks: bricks,
       periodicDefault: true,
       title: meta.title,
       description: meta.description,

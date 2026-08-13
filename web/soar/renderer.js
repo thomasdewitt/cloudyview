@@ -626,13 +626,19 @@ export class Renderer {
   // --- pipelines ----------------------------------------------------------
 
   _module(periodic, nested, maxLightSteps) {
-    const key = `${periodic}|${nested}|${maxLightSteps}`;
+    // Bricking is a property of the SCENE, not of the tier, so it belongs in
+    // the key but never changes without a new scene — a tier switch still
+    // compiles nothing, which is what makes the hold ladder free.
+    const bricked = Boolean(this.scene.bricked);
+    const brick = this.scene._bricks?.brick ?? [8, 8, 8];
+    const key = `${periodic}|${nested}|${maxLightSteps}|${bricked}|${brick}`;
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
         code: specializeShader(this.shaderSource,
-                               { periodic, nested, maxLightSteps }),
+                               { periodic, nested, maxLightSteps,
+                                 bricked, brick }),
       });
       this._modules.set(key, module);
     }
@@ -1018,6 +1024,9 @@ export class Renderer {
     const s = this.scene;
     return {
       bmin: s.bmin, bmax: s.bmax,
+      // Row 23, read only by the BRICKED shader: a bricked field has no dense
+      // texture to ask its grid size of.
+      shape: s.shape,
       dtView: this.dtView, dtLight: this.dtLight,
       periodic: this.periodic,
       oceanZ: 0.0,
