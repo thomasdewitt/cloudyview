@@ -11,6 +11,7 @@
 
 "use strict";
 
+import { createBrickDummies } from "./brickvolume.js";
 import { volumeAABB, minVoxelSize, validateNestContainment } from "./field.js";
 import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
@@ -163,6 +164,17 @@ export class Scene {
   get nestBmax() { return this._nest?.bmax ?? [0, 0, 0]; }
   get minVoxelNestM() { return this._nest?.minVoxelM ?? this.minVoxelM; }
   get nestView() { return (this._nest?.texture ?? this._nestDummy).createView(); }
+
+  /** True when the outer level is stored as sparse bricks. */
+  get bricked() { return Boolean(this._bricks); }
+  get brickAtlasView() {
+    return (this._bricks ?? this._brickDummies).atlasView;
+  }
+  get brickPageView() {
+    return (this._bricks ?? this._brickDummies).pageView;
+  }
+  /** What the debug panel reports: occupancy, atlas size, saving vs dense. */
+  get brickStats() { return this._bricks?.stats ?? null; }
   /** NetCDF group the nest was read from, null when it came from the root. */
   get nestGroup() { return this._nest?.name || null; }
 
@@ -217,6 +229,8 @@ export class Scene {
     this.volumeTexture?.destroy();
     this._nest?.texture?.destroy();
     this._nestDummy?.destroy();
+    this._brickDummies?.destroy();
+    this._bricks?.destroy();
   }
 }
 
@@ -300,6 +314,7 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
       albedoShape: meta.map.shape_yx,
       _nest: null,
       _nestDummy: nestDummy,
+      _brickDummies: createBrickDummies(device),
       periodicDefault: true,
       title: meta.title,
       description: meta.description,

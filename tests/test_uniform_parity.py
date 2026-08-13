@@ -183,9 +183,12 @@ def test_uniform_block_matches_browser(label, scene_extra, view_extra, js_blocks
         f"uniform block differs from the browser in {len(rows)} row(s):\n{detail}")
 
 
-def test_block_is_368_bytes():
-    assert sh.UNIFORM_NBYTES == 368
-    assert _python_block({}, {}).nbytes == 368
+def test_block_is_384_bytes():
+    """24 rows of 4 floats. Row 23 (the outer grid size, for BRICKED) took it
+    from 368; the number is pinned rather than derived so that a row added on
+    one side and not the other fails here as well as in the diff above."""
+    assert sh.UNIFORM_NBYTES == 384
+    assert _python_block({}, {}).nbytes == 384
 
 
 def test_periodic_requires_sun_above_horizon():

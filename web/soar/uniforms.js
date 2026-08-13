@@ -54,6 +54,7 @@ export function packUniforms(state, view) {
     oceanZ, oceanReflectance, oceanFifDx, oceanTileExtent, oceanEnabled,
     oceanMaxLod,
     nested = false, nestBmin, nestBmax, dtViewNest, dtLightNest,
+    shape = null,
   } = state;
 
   const {
@@ -199,6 +200,16 @@ export function packUniforms(state, view) {
     row(21, nestBmin[0], nestBmin[1], nestBmin[2], dtViewNest);
     row(22, nestBmax[0], nestBmax[1], nestBmax[2], dtLightNest);
   }
+  // Row 23: the outer level's grid size in voxels.
+  //
+  // The dense path never needed this — it reads the volume texture's own
+  // dimensions and subtracts the ghost ring. A BRICKED field has no such
+  // texture to ask: the page table is rounded up to whole bricks (a 231-deep
+  // field at 8^3 gives 29 pages, i.e. 232), so working the grid back from it
+  // would stretch the field by up to a voxel and move the domain box. Hence
+  // the three numbers, carried rather than inferred. Zero-filled when the
+  // host does not supply them, which only the BRICKED specialization reads.
+  if (shape) row(23, shape[0], shape[1], shape[2], 0.0);
   return u;
 }
 

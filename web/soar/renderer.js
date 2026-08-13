@@ -196,7 +196,9 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   }
 }
 
-export function specializeShader(source, { periodic, nested, maxLightSteps }) {
+export function specializeShader(source, { periodic, nested, maxLightSteps,
+                                           bricked = false,
+                                           brick = [8, 8, 8] }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
@@ -209,6 +211,11 @@ export function specializeShader(source, { periodic, nested, maxLightSteps }) {
      `const NESTED: bool = ${nested ? "true" : "false"};`],
     ["const MAX_LIGHT_STEPS: i32 = 512;",
      `const MAX_LIGHT_STEPS: i32 = ${maxLightSteps};`],
+    ["const BRICKED: bool = false;",
+     `const BRICKED: bool = ${bricked ? "true" : "false"};`],
+    ["const BRICK_X: i32 = 8;", `const BRICK_X: i32 = ${brick[0]};`],
+    ["const BRICK_Y: i32 = 8;", `const BRICK_Y: i32 = ${brick[1]};`],
+    ["const BRICK_Z: i32 = 8;", `const BRICK_Z: i32 = ${brick[2]};`],
   ];
   let out = source;
   for (const [sentinel, replacement] of swaps) {
@@ -292,6 +299,14 @@ export class Renderer {
           sampler: { type: "filtering" } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
+        // The sparse pair, bound whether or not the field is bricked — one
+        // layout has to serve every specialization. The page table holds slot
+        // ids, and an interpolated id means nothing, so it is uint and read
+        // with textureLoad rather than sampled.
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "3d" } },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
@@ -400,6 +415,8 @@ export class Renderer {
         { binding: 3, resource: scene.oceanView },
         { binding: 4, resource: this.oceanSampler },
         { binding: 5, resource: scene.nestView },
+        { binding: 6, resource: scene.brickAtlasView },
+        { binding: 7, resource: scene.brickPageView },
       ],
     });
   }

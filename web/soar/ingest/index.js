@@ -13,6 +13,7 @@ import {
   Scene, createVolumeTexture, writeVolumeSlab, writeGhostBorder,
   createNestDummy,
 } from "../scene.js";
+import { createBrickDummies } from "../brickvolume.js";
 import { volumeAABB, minVoxelSize, domainExtent, nestablePairs } from "../field.js";
 import { SPEC_FLOOR_TEXTURE_3D } from "../gpu.js";
 
@@ -361,6 +362,7 @@ export async function loadFileScene(
       albedoShape: outer.receiver.state.albedoShape,
       _nest: null,
       _nestDummy: (nestDummy = createNestDummy(device)),
+      _brickDummies: createBrickDummies(device),
       // A file's domain is NOT known to be periodic. nest_a in a nested
       // run is a 32 km box inside a 2048 km parent; tiling it laterally
       // invents structure that looks exactly like data — a line of
