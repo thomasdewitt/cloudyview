@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 # TONE_MAP_GAMMA_WITNESS is re-exported: witness's own default is soar's 2.66
 # now, and this is how a caller asks for the pre-2026-08 encode.
 __all__ = ["witness", "render_nested", "tone_map", "NestedLevel",
+           "crop_empty_z",
            "TONE_MAP_GAMMA_WITNESS", "QUALITY_PRESETS", "main", "cli"]
 
 # Effective radii the extinction conversion assumes, mirrored in
@@ -145,6 +146,62 @@ def _volume_aabb(field: CloudField):
     bmin = np.array([x.min() - dx_half, y.min() - dy_half, z.min() - dz_lo_half])
     bmax = np.array([x.max() + dx_half, y.max() + dy_half, z.max() + dz_hi_half])
     return bmin, bmax
+
+
+# A value stores as a nonzero fp16 exactly when it exceeds half the smallest
+# positive subnormal: round-to-nearest-even sends 2**-25 itself to zero.
+# Extinction is non-negative, so this one comparison is the whole test.
+_FP16_NONZERO_FLOOR = 2.0 ** -25
+
+
+def crop_empty_z(sigma: np.ndarray, z: np.ndarray):
+    """Trim z planes that hold no cloud, returning (sigma, z, (lo, hi)).
+
+    Cloud fields are mostly empty sky, and the emptiness is overwhelmingly
+    vertical: measured across the demo set, 8% of the z extent is vacuum on a
+    STEAM parent, 19% on TWP-ICE LPT, 35% on the FIF cascade, 40% on CM1, and
+    75% on DYCOMS, whose deck occupies 137 of 531 levels. Sizing the volume to
+    the file's z extent pays for all of it twice — in memory, and in a march
+    that crosses the vacuum sample by sample because nothing tells it there is
+    nothing there.
+
+    Emptiness is judged on the value AS STORED, not on the float64 sigma. The
+    texture is r16float in both hosts, so a sigma below the smallest fp16
+    subnormal is zero as far as any renderer will ever know, and defining the
+    crop that way is what lets web/soar/ingest/worker.js reach the same band
+    from the same file. The two hosts have silently disagreed about texture
+    construction once already (tests/test_soar_texture_parity.py exists
+    because of it), so this rule lives in one sentence in two places on
+    purpose.
+
+    Cropping moves bmin.z/bmax.z onto the cloud, which is a different scene
+    from the uncropped one — cameras place relative to the domain box. That is
+    intended: it is what the browser does, so it is what a user sees.
+    """
+    if sigma.ndim != 3:
+        raise ValueError(f"crop_empty_z needs a 3D field; got {sigma.shape}.")
+    z = np.asarray(z, dtype=np.float64)
+    if sigma.shape[2] != z.size:
+        raise ValueError(
+            f"field has {sigma.shape[2]} z planes but {z.size} z coordinates.")
+
+    # Per-plane max rather than a float16 copy of the whole field: same answer,
+    # and it does not need a second array the size of the first.
+    occupied = np.nanmax(sigma, axis=(0, 1)) > _FP16_NONZERO_FLOOR
+    if not occupied.any():
+        raise ValueError(
+            "Every z plane of this field stores as zero in fp16, so it would "
+            "render as empty sky and there is no occupied band to crop to. "
+            "Check the units — this is what a field read as kg/kg when it is "
+            "really g/kg looks like.")
+
+    lo = int(np.argmax(occupied))
+    hi = int(len(occupied) - 1 - np.argmax(occupied[::-1]))
+    # The AABB needs two z coordinates to size its outer half-cells, and a
+    # one-plane field is not something the march can do anything with anyway.
+    if hi == lo:
+        hi = min(len(occupied) - 1, lo + 1)
+    return sigma[:, :, lo:hi + 1], z[lo:hi + 1], (lo, hi)
 
 
 def _padded(sigma: np.ndarray) -> np.ndarray:
@@ -284,6 +341,18 @@ def _field_level(field: CloudField, name: str, verbose: bool = False) -> NestedL
         sigma * rendering.get('extinction_multiplier', 1.0), dtype=np.float64)
 
     bmin, bmax = _volume_aabb(field)
+    # Trim the empty sky above and below the cloud, and move the box with it.
+    # Only z: x and y are cropped by nobody, here or in the browser.
+    sigma, z_crop, (lo, hi) = crop_empty_z(sigma, field.z)
+    sigma = np.ascontiguousarray(sigma)
+    if hi - lo + 1 < np.asarray(field.z).size:
+        bmin[2] = z_crop.min() - 0.5 * abs(z_crop[1] - z_crop[0])
+        bmax[2] = z_crop.max() + 0.5 * abs(z_crop[-1] - z_crop[-2])
+        if verbose:
+            source = np.asarray(field.z).size
+            print(f"  Cropped to z planes {lo}-{hi} of {source} "
+                  f"({100 * (1 - (hi - lo + 1) / source):.0f}% of the "
+                  "vertical held no cloud).")
     return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=name)
 
 

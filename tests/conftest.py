@@ -197,6 +197,7 @@ def build_soar_level(nc_path=None):
     from cloudyview import optical_depth
     from cloudyview.witness import (
         ICE_NEGLIGIBLE_G_KG, RE_ICE_UM, RE_LIQUID_UM, NestedLevel, _volume_aabb,
+        crop_empty_z,
     )
 
     nc_path = Path(nc_path or SOAR_DATA_FILE)
@@ -208,6 +209,18 @@ def build_soar_level(nc_path=None):
         field.lwc, field.z, re=RE_LIQUID_UM, iwc=iwc, re_ice=RE_ICE_UM)
     sigma = np.ascontiguousarray(sigma, dtype=np.float64)
     bmin, bmax = _volume_aabb(field)
+    # The app crops empty sky off the top and bottom before it uploads, so the
+    # reference recipe does too — otherwise the goldens would pin a pipeline
+    # nobody runs. On the TWP-ICE subvolume this is a NO-OP: the field is
+    # already tight in z (0 of 77 planes empty), which is exactly why the
+    # judge views can pin the lighting loop without also pinning the crop.
+    # Leaving the call in rather than skipping it is the point — it asserts
+    # the no-op instead of assuming it.
+    sigma, z_crop, (lo, hi) = crop_empty_z(sigma, field.z)
+    sigma = np.ascontiguousarray(sigma)
+    if hi - lo + 1 < np.asarray(field.z).size:
+        bmin[2] = z_crop.min() - 0.5 * abs(z_crop[1] - z_crop[0])
+        bmax[2] = z_crop.max() + 0.5 * abs(z_crop[-1] - z_crop[-2])
     return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=nc_path.stem)
 
 

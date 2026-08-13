@@ -75,3 +75,187 @@ GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view
 | minimal | v1_thick_backlit | 120x68 | 0.377 | 2655.0 |
 | minimal | v4_overview_south | 120x68 | 0.409 | 2447.1 |
 | minimal | v8_ocean_lod | 120x68 | 0.145 | 6917.7 |
+
+## 2026-08-12 17:34:06 — ef80a72 — pre-brick baseline (ef80a72 + ingest fixes)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 1.175 | 851.1 |
+| high | v4_overview_south | 960x540 | 0.819 | 1220.6 |
+| high | v8_ocean_lod | 960x540 | 0.875 | 1142.6 |
+| medium | v1_thick_backlit | 720x405 | 0.704 | 1419.8 |
+| medium | v4_overview_south | 720x405 | 0.632 | 1582.5 |
+| medium | v8_ocean_lod | 720x405 | 0.433 | 2308.1 |
+| low | v1_thick_backlit | 576x324 | 0.490 | 2042.8 |
+| low | v4_overview_south | 576x324 | 0.437 | 2289.9 |
+| low | v8_ocean_lod | 576x324 | 0.279 | 3579.2 |
+| minimal | v1_thick_backlit | 120x68 | 0.375 | 2664.6 |
+| minimal | v4_overview_south | 120x68 | 0.406 | 2462.1 |
+| minimal | v8_ocean_lod | 120x68 | 0.142 | 7057.2 |
+
+## 2026-08-12 17:37:50 — ef80a72 — pre-brick baseline on sparse STEAM field (4x decimated)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field steam_small_c002_s0010_4x.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 11.349 | 88.1 |
+| high | v4_overview_south | 960x540 | 11.650 | 85.8 |
+| high | v8_ocean_lod | 960x540 | 2.228 | 448.7 |
+| medium | v1_thick_backlit | 720x405 | 3.823 | 261.6 |
+| medium | v4_overview_south | 720x405 | 3.803 | 262.9 |
+| medium | v8_ocean_lod | 720x405 | 1.223 | 817.3 |
+| low | v1_thick_backlit | 576x324 | 3.032 | 329.8 |
+| low | v4_overview_south | 576x324 | 2.953 | 338.7 |
+| low | v8_ocean_lod | 576x324 | 1.174 | 851.7 |
+| minimal | v1_thick_backlit | 120x68 | 1.092 | 915.8 |
+| minimal | v4_overview_south | 120x68 | 1.469 | 680.6 |
+| minimal | v8_ocean_lod | 120x68 | 0.913 | 1095.6 |
+
+## 2026-08-13 08:55:50 — ef80a72 — cross-field speed survey: FIF
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field QC_FIF_Square_512,512,256.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 10.308 | 97.0 |
+| high | v4_overview_south | 960x540 | 3.841 | 260.3 |
+| high | v8_ocean_lod | 960x540 | 2.356 | 424.4 |
+| medium | v1_thick_backlit | 720x405 | 3.915 | 255.4 |
+| medium | v4_overview_south | 720x405 | 2.964 | 337.4 |
+| medium | v8_ocean_lod | 720x405 | 1.696 | 589.5 |
+| low | v1_thick_backlit | 576x324 | 1.931 | 518.0 |
+| low | v4_overview_south | 576x324 | 2.238 | 446.9 |
+| low | v8_ocean_lod | 576x324 | 1.512 | 661.2 |
+| minimal | v1_thick_backlit | 120x68 | 0.618 | 1618.2 |
+| minimal | v4_overview_south | 120x68 | 1.089 | 918.3 |
+| minimal | v8_ocean_lod | 120x68 | 0.374 | 2672.5 |
+
+## 2026-08-13 08:55:59 — ef80a72 — cross-field speed survey: DYCOMS full source
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field DYCOMS_RF01_640x640x640_dt0.25sec_320_0000043200_W_QN.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 6.869 | 145.6 |
+| high | v4_overview_south | 960x540 | 4.590 | 217.9 |
+| high | v8_ocean_lod | 960x540 | 4.473 | 223.6 |
+| medium | v1_thick_backlit | 720x405 | 2.549 | 392.3 |
+| medium | v4_overview_south | 720x405 | 3.905 | 256.1 |
+| medium | v8_ocean_lod | 720x405 | 3.717 | 269.0 |
+| low | v1_thick_backlit | 576x324 | 1.277 | 783.1 |
+| low | v4_overview_south | 576x324 | 3.190 | 313.4 |
+| low | v8_ocean_lod | 576x324 | 4.202 | 238.0 |
+| minimal | v1_thick_backlit | 120x68 | 0.281 | 3554.2 |
+| minimal | v4_overview_south | 120x68 | 1.385 | 722.1 |
+| minimal | v8_ocean_lod | 120x68 | 0.696 | 1437.0 |
+
+## 2026-08-13 08:56:23 — ef80a72 — cross-field speed survey: CM1 RCE full source
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field CM1_RCE_small_les300_3D_allvars_hour1200.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 6.213 | 161.0 |
+| high | v4_overview_south | 960x540 | 4.101 | 243.8 |
+| high | v8_ocean_lod | 960x540 | 2.431 | 411.4 |
+| medium | v1_thick_backlit | 720x405 | 3.593 | 278.3 |
+| medium | v4_overview_south | 720x405 | 3.188 | 313.6 |
+| medium | v8_ocean_lod | 720x405 | 1.500 | 666.5 |
+| low | v1_thick_backlit | 576x324 | 2.423 | 412.7 |
+| low | v4_overview_south | 576x324 | 1.953 | 511.9 |
+| low | v8_ocean_lod | 576x324 | 1.174 | 851.7 |
+| minimal | v1_thick_backlit | 120x68 | 1.542 | 648.4 |
+| minimal | v4_overview_south | 120x68 | 1.367 | 731.8 |
+| minimal | v8_ocean_lod | 120x68 | 0.393 | 2541.3 |
+
+## 2026-08-13 08:58:26 — ef80a72 — cross-field speed survey: TWPICE LPT full QC+QI
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field TWPICE_LPT_3D_QC_0000003450.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 3.356 | 297.9 |
+| high | v4_overview_south | 960x540 | 8.824 | 113.3 |
+| high | v8_ocean_lod | 960x540 | 2.530 | 395.3 |
+| medium | v1_thick_backlit | 720x405 | 1.289 | 776.0 |
+| medium | v4_overview_south | 720x405 | 6.183 | 161.7 |
+| medium | v8_ocean_lod | 720x405 | 1.961 | 509.9 |
+| low | v1_thick_backlit | 576x324 | 0.792 | 1262.7 |
+| low | v4_overview_south | 576x324 | 3.980 | 251.3 |
+| low | v8_ocean_lod | 576x324 | 1.718 | 582.1 |
+| minimal | v1_thick_backlit | 120x68 | 0.206 | 4863.0 |
+| minimal | v4_overview_south | 120x68 | 1.509 | 662.7 |
+| minimal | v8_ocean_lod | 120x68 | 0.555 | 1801.4 |
+
+## 2026-08-13 09:14:08 — ef80a72 — DYCOMS source z-cropped 216:353 (auto z-crop candidate)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field dycoms_zcrop.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 6.830 | 146.4 |
+| high | v4_overview_south | 960x540 | 3.201 | 312.4 |
+| high | v8_ocean_lod | 960x540 | 1.230 | 813.1 |
+
+## 2026-08-13 09:42:47 — ef80a72 — DYCOMS, z-crop OFF (control)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field DYCOMS_RF01_640x640x640_dt0.25sec_320_0000043200_W_QN.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 6.882 | 145.3 |
+| high | v4_overview_south | 960x540 | 4.596 | 217.6 |
+| high | v8_ocean_lod | 960x540 | 4.492 | 222.6 |
+
+## 2026-08-13 09:43:06 — ef80a72 — DYCOMS, z-crop ON (auto, 216-352 of 531)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field DYCOMS_RF01_640x640x640_dt0.25sec_320_0000043200_W_QN.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 6.857 | 145.8 |
+| high | v4_overview_south | 960x540 | 3.199 | 312.5 |
+| high | v8_ocean_lod | 960x540 | 1.197 | 835.4 |
+
+## 2026-08-13 09:43:23 — ef80a72 — FIF, z-crop ON
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field QC_FIF_Square_512,512,256.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 2.757 | 362.8 |
+| high | v4_overview_south | 960x540 | 2.756 | 362.8 |
+| high | v8_ocean_lod | 960x540 | 1.051 | 951.6 |
+
+## 2026-08-13 09:43:31 — ef80a72 — CM1 RCE, z-crop ON
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field CM1_RCE_small_les300_3D_allvars_hour1200.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 5.610 | 178.2 |
+| high | v4_overview_south | 960x540 | 4.223 | 236.8 |
+| high | v8_ocean_lod | 960x540 | 2.412 | 414.6 |
+
+## 2026-08-13 09:43:44 — ef80a72 — STEAM 4x, z-crop ON
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field steam_small_c002_s0010_4x.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 3.649 | 274.1 |
+| high | v4_overview_south | 960x540 | 3.892 | 256.9 |
+| high | v8_ocean_lod | 960x540 | 1.166 | 857.8 |
+
+## 2026-08-13 09:44:05 — ef80a72 — STEAM 4x, z-crop OFF (control, same session)
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field steam_small_c002_s0010_4x.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 3.913 | 255.5 |
+| high | v4_overview_south | 960x540 | 4.273 | 234.0 |
+| high | v8_ocean_lod | 960x540 | 1.272 | 786.5 |

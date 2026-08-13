@@ -26,6 +26,7 @@ import {
 } from "./filters.js";
 import { makeHalfWriter } from "../half.js";
 import { buildXFace, buildYFace } from "../ghost.js";
+import { markOccupiedPlanes, occupiedBand } from "../zcrop.js";
 
 const MOUNT = "/local";
 // Bytes of decoded source per slab, per variable.
@@ -35,7 +36,20 @@ const MOUNT = "/local";
 // blamed this budget for a field that came back all zeros. That was wrong —
 // the cause was an unregistered compression filter; see filters.js. The
 // smaller budget is still the right default, but it fixed nothing.)
-const SLAB_BUDGET_BYTES = 16 * 1024 * 1024;
+//
+// 64 MB, not the 16 MB it was: below one whole chunk the budget stops being
+// modest and starts being expensive. A STEAM parent chunked 128x64x1000
+// float32 is 32.8 MB, so 16 MB split z in half and every chunk was inflated
+// TWICE per variable — 134 GB of decompression to deliver 67. 64 MB fits that
+// chunk whole with room to grow z, and keeps the fp16 slab it produces at
+// 16.4 MB, under MAX_OUTSTANDING_BYTES, so two are still in flight at once.
+const SLAB_BUDGET_BYTES = 64 * 1024 * 1024;
+
+// The most a single chunk may drag the budget up to (see `chunkFloor` below).
+// A file chunked larger than this gets split and re-inflated, because a
+// 32-bit heap holding two of these plus libhdf5's own scratch is the failure
+// that takes the whole worker with it.
+const SLAB_BUDGET_CEILING_BYTES = 256 * 1024 * 1024;
 
 let ready = null;
 let root = null;
@@ -281,13 +295,27 @@ async function extinction({ group, units, label, slabBudget }) {
   // boundaries reads each chunk exactly once.
   const fieldExtent = { x: nx, y: ny, z: nz };
   const spatialVoxels = nx * ny * nz;
-  const budget = slabBudget || SLAB_BUDGET_BYTES;
 
   const chunkExtent = {};
   for (const a of ["x", "y", "z"]) {
     const c = description.chunks?.[axis[a]];
     chunkExtent[a] = Math.max(1, Math.min(c || fieldExtent[a], fieldExtent[a]));
   }
+  // The budget's floor is one whole chunk, whatever was asked for. HDF5 has
+  // to inflate the entire chunk to satisfy any part of it, so a budget under
+  // that size buys no memory — the scratch buffer is the same either way —
+  // and costs a re-inflation of every chunk for every piece it was split
+  // into. The ceiling is what stops a pathologically-chunked file from
+  // turning that floor into a heap exhaustion.
+  //
+  // Only for a CHUNKED dataset. A contiguous one has no chunk to inflate:
+  // libhdf5 reads the hyperslab and nothing else, so the floor would buy
+  // nothing and would ask for the whole variable in one read.
+  const chunkFloor = description.chunks
+    ? chunkExtent.x * chunkExtent.y * chunkExtent.z * 4 : 0;
+  const budget = Math.min(
+    Math.max(slabBudget || SLAB_BUDGET_BYTES, chunkFloor),
+    SLAB_BUDGET_CEILING_BYTES);
   const tile = { x: chunkExtent.x, y: chunkExtent.y, z: chunkExtent.z };
   const tileBytes = () => tile.x * tile.y * tile.z * 4;
   // A single chunk larger than the budget has to be split — halve the longest
@@ -314,6 +342,27 @@ async function extinction({ group, units, label, slabBudget }) {
 
   let finiteNonZero = 0;
   let nonFinite = 0;
+
+  // Which z planes hold anything at all, and the slabs waiting on the answer.
+  //
+  // A cloud field is mostly empty sky: measured over the demo set, 8% of the
+  // z extent is vacuum on a STEAM parent, 19% on TWP-ICE LPT, 35% on the FIF
+  // cascade, 40% on CM1, and 75% on DYCOMS, whose deck occupies 137 of 531
+  // levels. Sizing the volume texture to the file's z extent pays for all of
+  // it — in memory, and in a march that crosses the vacuum sample by sample
+  // because nothing tells it there is nothing there. Cropping to the occupied
+  // band costs one comparison per texel here and returned 3.6x on the DYCOMS
+  // source at high tier (v8 4.47 -> 1.23 ms), plus 3.8x of its memory.
+  //
+  // The band cannot be known before the last tile is read, so the texture
+  // cannot be allocated before then either, and the slabs are held until it
+  // exists. That is the one place soar keeps a whole field in host memory,
+  // and it is bounded by the same budget that decides the field is loadable
+  // at all: a volume that fits on the card as r16float fits in the RAM of any
+  // machine that has such a card, and one that does not fit is exactly the
+  // case this crop exists to rescue.
+  const zOccupied = new Uint8Array(nz);
+  const staged = [];
 
   post({ type: "geometry", label, description,
          coords: { x: Array.from(coords.x), y: Array.from(coords.y),
@@ -402,20 +451,88 @@ async function extinction({ group, units, label, slabBudget }) {
       }
     }
     const bytes = out.bytes();
+    // Occupancy is read off the STORED fp16, never off the f64 sigma. The
+    // crop has to mean "every plane outside this band is exactly zero in the
+    // texture", and a sigma small enough to flush to fp16 zero is zero as far
+    // as the renderer is ever going to know. Extinction is non-negative, so
+    // the only zero bit pattern in play is 0x0000.
+    //
+    // z is the fastest axis of `out` — o = (lx * local.y + ly) * local.z + lz
+    // — so the plane a texel belongs to is its index modulo the tile depth.
+    markOccupiedPlanes(bytes, z0, local.z, zOccupied);
+    staged.push({ x0, y0, z0, local: { ...local }, bytes });
+    post({ type: "read", label, done: (++tilesDone) / tileCount });
+  } } }
+
+  // A field that is entirely zero apart from a scattering of infinities is
+  // not a cloud field, it is a failed read. Say so instead of rendering it.
+  // Checked here, before anything is sized to the result: a crop computed
+  // from a failed read would be a second, more confusing error.
+  if (finiteNonZero === 0) {
+    throw new Error(
+      `'${description.liquidVar}' read as ${spatialVoxels} values that are ` +
+      `all zero (plus ${nonFinite} non-finite). That is a failed read rather ` +
+      "than an empty sky — the HDF5 reader returned buffers it never filled.");
+  }
+
+  // The occupied band, and the crop that follows from it. finiteNonZero > 0
+  // got us past the check above, so a throw here means a real field whose
+  // every value flushed to fp16 zero — which occupiedBand says better than a
+  // repeat of it would.
+  const { lo: zLo, hi: zHi, count: zCount, cropped } = occupiedBand(zOccupied);
+
+  // Coordinates follow the crop; everything downstream derives the domain box
+  // from them, so this is what actually moves bmin.z/bmax.z onto the cloud.
+  const zCoords = Array.from(coords.z.slice(zLo, zHi + 1));
+  post({
+    type: "volume", label,
+    shape: [nx, ny, zCount],
+    zCrop: [zLo, zHi],
+    zCropped: cropped,
+    coords: { x: Array.from(coords.x), y: Array.from(coords.y), z: zCoords },
+    // Only the slabs that survive the crop are sent, so this is the count the
+    // receiver checks against — not the tile count of the read.
+    slabs: staged.reduce(
+      (n, s) => n + (s.z0 + s.local.z > zLo && s.z0 <= zHi ? 1 : 0), 0),
+  });
+
+  // Post what the crop kept, clipping the tiles that straddle its edges.
+  let sent = 0;
+  const sendable = staged.length;
+  for (let i = 0; i < sendable; i++) {
+    const slab = staged[i];
+    staged[i] = null;                     // release as we go, not at the end
+    const lo = Math.max(slab.z0, zLo);
+    const hi = Math.min(slab.z0 + slab.local.z - 1, zHi);
+    if (hi < lo) continue;
+    const depth = hi - lo + 1;
+    let bytes = slab.bytes;
+    if (depth !== slab.local.z) {
+      // z is the fastest axis, so a z sub-range is a stride-copy of runs.
+      const trimmed = new Uint16Array(slab.local.x * slab.local.y * depth);
+      const offset = lo - slab.z0;
+      let o = 0;
+      for (let c = 0; c < slab.local.x * slab.local.y; c++) {
+        const src = c * slab.local.z + offset;
+        for (let k = 0; k < depth; k++) trimmed[o++] = bytes[src + k];
+      }
+      bytes = trimmed;
+    }
     // Read before the transfer: posting detaches the buffer, and the ack that
     // comes back has to be able to name the same number.
     const slabBytes = bytes.byteLength;
     await spendCredit(slabBytes);
-    // Ghost ring: original voxel i lands on texel i+1.
+    // Ghost ring: original voxel i lands on texel i+1, and z is measured from
+    // the crop's floor rather than the file's.
     post({
       type: "slab", label,
-      origin: [z0 + 1, y0 + 1, x0 + 1],
-      size: [local.z, local.y, local.x],   // texture is (w=z, h=y, d=x)
-      done: (++tilesDone) / tileCount,
+      origin: [lo - zLo + 1, slab.y0 + 1, slab.x0 + 1],
+      size: [depth, slab.local.y, slab.local.x],  // texture is (w=z, h=y, d=x)
+      done: (++sent) / sendable,
       bytes: slabBytes,
       data: bytes,
     }, [bytes.buffer]);
-  } } }
+  }
   // The four lateral ghost planes, for periodic wrapping. Read separately as
   // four thin hyperslabs rather than accumulated during the sweep: each is
   // one plane out of the whole field, so the cost is noise and the code is
@@ -472,17 +589,21 @@ async function extinction({ group, units, label, slabBudget }) {
   // lives in ../ghost.js so the Python host can be diffed against this exact
   // code under node — the two hosts disagreed about it silently once already
   // (tests/test_soar_texture_parity.py).
-  const buildX = (source) => buildXFace(source.values, ny, nz);
-  const buildY = (source) => buildYFace(source.values, nx, nz);
-
-  // A field that is entirely zero apart from a scattering of infinities is
-  // not a cloud field, it is a failed read. Say so instead of rendering it.
-  if (finiteNonZero === 0) {
-    throw new Error(
-      `'${description.liquidVar}' read as ${spatialVoxels} values that are ` +
-      `all zero (plus ${nonFinite} non-finite). That is a failed read rather ` +
-      "than an empty sky — the HDF5 reader returned buffers it never filled.");
-  }
+  // The wrap faces are lateral, so z is always the second (fastest) axis of
+  // the plane, and the crop that shrank the volume has to shrink them by the
+  // same band or the ghost ring would be filled from the wrong heights.
+  const cropPlaneZ = (source) => {
+    if (!cropped) return source;
+    const rows = source.shape[0];
+    const values = new Float64Array(rows * zCount);
+    for (let r = 0; r < rows; r++) {
+      const src = r * nz + zLo;
+      for (let k = 0; k < zCount; k++) values[r * zCount + k] = source.values[src + k];
+    }
+    return { values, shape: [rows, zCount] };
+  };
+  const buildX = (source) => buildXFace(cropPlaneZ(source).values, ny, zCount);
+  const buildY = (source) => buildYFace(cropPlaneZ(source).values, nx, zCount);
 
   // The minimap image, in glimpse's orientation: (ny, nx) with east to the
   // right and north up. The read already delivered ascending coordinates, so
@@ -505,7 +626,7 @@ async function extinction({ group, units, label, slabBudget }) {
   post({ type: "faces", label, faces },
        Object.values(faces).map((f) => f.buffer));
 
-  return { label, shape: [nx, ny, nz] };
+  return { label, shape: [nx, ny, zCount], zCrop: [zLo, zHi], sourceZ: nz };
 }
 
 /**

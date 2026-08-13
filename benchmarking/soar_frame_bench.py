@@ -52,14 +52,17 @@ OUTPUT_SIZE = (960, 540)
 SUN = {"sun_azimuth": 20.0, "sun_elevation": 55.0}
 
 
-def build_level():
+def build_level(data_file=DATA_FILE, ice_file=None, fallback_units=None,
+                zcrop=True):
     import cloudyview as cv
     from cloudyview import optical_depth
     from cloudyview.witness import (
-        ICE_NEGLIGIBLE_G_KG, RE_ICE_UM, RE_LIQUID_UM, NestedLevel, _volume_aabb,
+        ICE_NEGLIGIBLE_G_KG, RE_ICE_UM, RE_LIQUID_UM, NestedLevel,
+        _volume_aabb, crop_empty_z,
     )
 
-    field = cv.load(str(DATA_FILE))
+    field = cv.load(str(data_file), ice=str(ice_file) if ice_file else None,
+                    fallback_units=fallback_units)
     iwc = field.iwc
     if iwc is not None and float(np.max(iwc)) < ICE_NEGLIGIBLE_G_KG:
         iwc = None
@@ -67,7 +70,18 @@ def build_level():
         field.lwc, field.z, re=RE_LIQUID_UM, iwc=iwc, re_ice=RE_ICE_UM)
     sigma = np.ascontiguousarray(sigma, dtype=np.float64)
     bmin, bmax = _volume_aabb(field)
-    return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=DATA_FILE.stem)
+    # The crop is the feature under test as often as it is a fixed part of the
+    # pipeline, so it is switchable here even though the app applies it always.
+    if zcrop:
+        sigma, z, (lo, hi) = crop_empty_z(sigma, field.z)
+        sigma = np.ascontiguousarray(sigma)
+        source = np.asarray(field.z).size
+        if hi - lo + 1 < source:
+            bmin[2] = z.min() - 0.5 * abs(z[1] - z[0])
+            bmax[2] = z.max() + 0.5 * abs(z[-1] - z[-2])
+            print(f"z-crop: planes {lo}-{hi} of {source} "
+                  f"({100 * (1 - (hi - lo + 1) / source):.0f}% empty)")
+    return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=data_file.stem)
 
 
 def time_tier(level, tier_name, tier, views, frames, warmup):
@@ -139,7 +153,27 @@ def main():
                         help="comma-separated tier names, e.g. high,minimal")
     parser.add_argument("--label", type=str, default="",
                         help="note recorded with the results (e.g. git rev)")
+    # Which field is benched is not a detail: an optimization that skips empty
+    # space is worth what the field's emptiness is worth. TWPICE is 9.9%
+    # occupied by voxel and 29% by 8^3 brick; a STEAM parent is 0.22% and
+    # 0.79%. Timing a skip on TWPICE alone would measure the one regime where
+    # it cannot pay.
+    parser.add_argument("--field", type=Path, default=DATA_FILE,
+                        help=f"netCDF field to render (default {DATA_FILE.name})")
+    parser.add_argument("--ice", type=Path, default=None,
+                        help="separate netCDF file with the ice variable "
+                             "(SAM LPT one-variable-per-file style)")
+    parser.add_argument("--no-zcrop", action="store_true",
+                        help="render the file's whole z extent, including the "
+                             "empty sky the app would crop away (for A/B)")
+    parser.add_argument("--fallback-units", type=str, default=None,
+                        help="units to assume when the file's condensate "
+                             "variable carries no units attribute (SAM: g/kg)")
     args = parser.parse_args()
+    if not args.field.exists():
+        raise SystemExit(f"no such field: {args.field}")
+    if args.ice is not None and not args.ice.exists():
+        raise SystemExit(f"no such ice file: {args.ice}")
 
     views = VIEWS
     if args.views:
@@ -157,7 +191,8 @@ def main():
     print(f"output {OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}, "
           f"{args.frames} frames/view, {args.warmup} warmup")
 
-    level = build_level()
+    level = build_level(args.field, args.ice, args.fallback_units,
+                        zcrop=not args.no_zcrop)
     all_rows = []
     for tier_name, tier in tiers.items():
         rows = time_tier(level, tier_name, tier, views,
@@ -172,7 +207,8 @@ def main():
         f.write(f"\n## {stamp} — {rev}"
                 + (f" — {args.label}" if args.label else "") + "\n\n")
         f.write(f"GPU: {gpu_name()} · output {OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}"
-                f" · {args.frames} frames/view\n\n")
+                f" · {args.frames} frames/view"
+                f" · field {args.field.name}\n\n")
         f.write("| tier | view | render size | ms/frame | fps |\n")
         f.write("|------|------|-------------|----------|-----|\n")
         for tier_name, view_name, rw, rh, ms in all_rows:
