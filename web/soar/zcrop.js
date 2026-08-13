@@ -10,7 +10,7 @@
 // sample by sample because nothing tells it there is nothing there.
 //
 // This module is pure array-in / array-out and node-testable, for the same
-// reason ghost.js and bricks.js are: the browser's ingest worker and the
+// reason ghost.js is: the browser's ingest worker and the
 // Python host must reach the SAME band from the same file, and a rule
 // duplicated in two hosts is a rule that drifts. These two have silently
 // disagreed about texture construction once already — every `witness

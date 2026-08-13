@@ -110,6 +110,10 @@ kept here):
 - Even best-case resident-volume CUDA is ~78 ms at 480×270 on the full
   domain: occupancy-grid empty-space skipping + progressive resolution are
   required for interactivity at 1024², whichever backend renders.
+  *(2026-08-13: half right. Progressive resolution was required and shipped —
+  the flight/hold ladder. Empty-space skipping was not: it has since been
+  built three times and measured slower every time, on two different
+  architectures. See raymarch.wgsl's note where the TODO used to be.)*
 
 Interactive techniques (in rough order):
 - Progressive rendering: reduced resolution while the camera moves, refine to
@@ -117,7 +121,15 @@ Interactive techniques (in rough order):
 - Per-pixel jittered ray starts (blue-noise) + temporal accumulation — also
   the expected fix for the residual ring/banding artifact (coherent
   step-size shells around dense cores).
-- Coarse occupancy grid for empty-space skipping (cloud fields are sparse).
+- ~~Coarse occupancy grid for empty-space skipping (cloud fields are
+  sparse).~~ **Tried and rejected, three times** (2026-07-17 view march,
+  2026-08-11 light-march majorant grid, 2026-08-13 full sparse bricks with
+  page-table DDA). Correct in every case, slower in every case, on an RTX
+  5080 and on Apple silicon. The march is texture-latency bound and any
+  scheme that knows where the empty space is must ask something per sample to
+  find out. The sparseness is real and does pay — but as *storage*, not
+  traversal: see the z-crop (`web/soar/zcrop.js`), which drops the empty sky
+  at load for up to 3.6x. Full post-mortem in `raymarch.wgsl`.
 - fp16 density texture option for large domains.
 
 ### Nested domains
@@ -162,7 +174,9 @@ dynamic texture indexing, which core WebGPU does not have.
 
 Known cost: a shadow ray crossing a deep nest marches at the fine step and
 can exhaust `MAX_LIGHT_STEPS` before `LIGHT_TAU_CUTOFF` saturates it. This
-is the same trade witness makes; the occupancy grid above is the fix.
+is the same trade witness makes. It was expected that the occupancy grid
+above would fix it; that grid has since been measured and rejected three
+times, so this cost stands unaddressed rather than merely pending.
 
 ## Scale targets
 
