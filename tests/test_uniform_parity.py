@@ -183,6 +183,35 @@ def test_uniform_block_matches_browser(label, scene_extra, view_extra, js_blocks
         f"uniform block differs from the browser in {len(rows)} row(s):\n{detail}")
 
 
+def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
+    """constants.js must agree with itself, and with the Python host.
+
+    This is the test for the failure it was written after. Row 23 was added,
+    UNIFORM_ROWS went 23 -> 24 on both hosts, and web/soar/constants.js was
+    ALSO carrying an independent literal `UNIFORM_NBYTES = 368` that nobody
+    moved. The packer then produced 384 bytes and wrote them into a 368-byte
+    buffer, so every draw failed validation and the app rendered black —
+    without any test noticing, because the packed ARRAYS still matched each
+    other perfectly. The parity test above compares what the two hosts pack;
+    this compares what the browser allocates to hold it.
+    """
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e",
+         'import * as K from "%s";'
+         'process.stdout.write(JSON.stringify('
+         '{rows: K.UNIFORM_ROWS, bytes: K.UNIFORM_NBYTES}));'
+         % (REPO / "web" / "soar" / "constants.js").as_posix()],
+        capture_output=True, text=True, cwd=REPO)
+    assert proc.returncode == 0, proc.stderr
+    js = json.loads(proc.stdout)
+    assert js["bytes"] == js["rows"] * 16, (
+        f"constants.js says {js['rows']} rows but {js['bytes']} bytes; the "
+        "buffer and the block have come apart")
+    assert (js["rows"], js["bytes"]) == (sh.UNIFORM_ROWS, sh.UNIFORM_NBYTES), (
+        f"browser has {js['rows']} rows / {js['bytes']} bytes, Python has "
+        f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
+
+
 def test_block_is_384_bytes():
     """24 rows of 4 floats. Row 23 (the outer grid size, for BRICKED) took it
     from 368; the number is pinned rather than derived so that a row added on

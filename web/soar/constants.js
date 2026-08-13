@@ -121,7 +121,11 @@ export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
 export const UNIFORM_ROWS = 24;
-export const UNIFORM_NBYTES = 368;
+// DERIVED, never written out. These were two independent literals until row
+// 23 was added and only one of them moved: the packer produced 384 bytes, the
+// buffer stayed 368, and every draw failed validation with a black screen.
+// One of them is a fact about the block and the other was a copy of it.
+export const UNIFORM_NBYTES = UNIFORM_ROWS * 16;
 
 export const AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024;
 

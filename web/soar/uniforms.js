@@ -1,4 +1,4 @@
-// The uniform block: 23 rows of 4 floats, 368 bytes, rebuilt every frame.
+// The uniform block: 24 rows of 4 floats, 384 bytes, rebuilt every frame.
 //
 // A direct port of InteractiveRenderer.write_uniforms. Row order and meaning
 // are fixed by raymarch.wgsl, which the browser shares verbatim with the
