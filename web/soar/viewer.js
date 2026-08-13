@@ -1130,10 +1130,30 @@ class Viewer {
    */
   _timeCurrentView(seconds) {
     return new Promise((resolve) => {
+      let done = false;
+      const finish = (samples) => {
+        if (done) return;
+        done = true;
+        clearTimeout(watchdog);
+        this._probe = null;
+        resolve(samples);
+      };
+      // A measurement that waits on frames must not wait forever. If the loop
+      // stops for any reason the window did not anticipate — a lost device, a
+      // backgrounded tab throttling rAF to nothing — this ends the run with
+      // whatever it collected instead of leaving the app looking hung, which
+      // is exactly what it looked like the first time.
+      const watchdog = setTimeout(() => {
+        console.warn(
+          `soar: benchmark window of ${seconds}s ended by watchdog after ` +
+          `${this._probe?.samples.length ?? 0} frames — the loop stopped ` +
+          "producing them.");
+        finish(this._probe?.samples ?? []);
+      }, (seconds + 5) * 1000);
       this._probe = {
         kind: "bench", frame: 0, samples: [], clock: null, overheadMs: 0,
         until: performance.now() + seconds * 1000,
-        resolve,
+        resolve: finish,
       };
       this._wake("benchmark");
     });
@@ -1163,15 +1183,24 @@ class Viewer {
         this.brickedRequested = bricked;
         this._keepCameraOnNextLoad = true;
         await this.loadField(this._source, this.progress);
+        // A rebuilt field starts on rung 0 — the flight configuration, which
+        // at Minimal is an eighth of the pixels. That is not the picture you
+        // were looking at when you asked for the measurement, and it would
+        // also put the two runs on different rungs. Both are pinned to the
+        // top, which is where a still view ends up anyway.
+        this.renderer.pinTopRung();
         this.ui.say(
           `Measuring ${bricked ? `bricks ${this.brickShape.join("x")}`
-                               : "dense"}… ${seconds}s, hands off.`,
+                               : "dense"} at ` +
+          `${(this.renderer.renderScale * 100).toFixed(0)}% scale… ` +
+          `${seconds}s, hands off.`,
           seconds + 1);
         const samples = await this._timeCurrentView(seconds);
         // The median, for the reason the tier probe uses one: a mean is
         // dragged by any single stall — a GC pause, the compositor taking
         // the GPU — and every such contamination is upward.
         const sorted = [...samples].sort((a, b) => a - b);
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
         runs.push({
           bricked,
           brick: bricked ? [...this.brickShape] : null,
@@ -1179,6 +1208,17 @@ class Viewer {
           medianMs: sorted[Math.floor(sorted.length / 2)] ?? NaN,
           meanMs: samples.reduce((a, b) => a + b, 0) / (samples.length || 1),
           stats: this.scene?.brickStats ?? null,
+          // Recorded per run, not read afterwards: the finally block rebuilds
+          // the field, and a renderer read after that describes the restored
+          // one rather than the measured one.
+          tier: this.renderer.qualityTier,
+          scale: this.renderer.renderScale,
+          rung: `${this.renderer.holdRung + 1}/${this.renderer.holdRungCount}`,
+          pixels: [
+            Math.round(this.canvas.clientWidth * dpr * this.renderer.renderScale),
+            Math.round(this.canvas.clientHeight * dpr * this.renderer.renderScale),
+          ],
+          clock: this._probeClockUsed ?? "?",
         });
       }
     } finally {
@@ -1186,8 +1226,13 @@ class Viewer {
       this._keepCameraOnNextLoad = true;
       await this.loadField(this._source, this.progress).catch(() => {});
       this._brickSwitchBusy = false;
+      // Nothing else is going to. loadField builds a field; it does not start
+      // the loop — the caller does, and at startup that caller is init(). Left
+      // out, the app sits on the last frame of the last measurement looking
+      // exactly like it has hung, which is what it did.
+      this._wake("benchmark done");
     }
-    this._reportBrickBenchmark(runs, seconds);
+    if (runs.length === 2) this._reportBrickBenchmark(runs, seconds);
     return runs;
   }
 
@@ -1200,10 +1245,10 @@ class Viewer {
     // into the results file; the verdict on screen, where it is read.
     const lines = [
       `soar brick benchmark — ${this.sourceLabel}`,
-      `  tier ${this.renderer.qualityTier}, render scale ` +
-      `${this.renderer.renderScale}, ${seconds}s per run, ` +
-      `${this._probeClockUsed ?? "?"} clock`,
-      `  camera ${this.camera.position.map((v) => v.toFixed(0)).join(", ")} ` +
+      `  tier ${dense.tier}, hold rung ${dense.rung}, render scale ` +
+      `${dense.scale} (${dense.pixels[0]}x${dense.pixels[1]} marched), ` +
+      `${seconds}s per run, ${dense.clock} clock`,
+      `  camera ${[...this.camera.position].map((v) => v.toFixed(0)).join(", ")} ` +
       `az ${this.camera.azimuth.toFixed(1)} el ${this.camera.elevation.toFixed(1)}`,
       `  dense           median ${dense.medianMs.toFixed(3)} ms ` +
       `(${fps(dense.medianMs).toFixed(0)} fps), mean ` +
@@ -1858,7 +1903,21 @@ class Viewer {
       this._lastSignature !== null && signature !== this._lastSignature);
     this._lastSignature = signature;
 
-    if (this._probe) {
+    if (this._probe?.kind === "bench") {
+      // A benchmark is the mirror image of the tier probe. The probe wants
+      // the flight configuration, because what decides whether a tier is
+      // usable is what it costs while you are moving. A benchmark wants the
+      // configuration you are LOOKING at — you ran it from a paused menu, in
+      // front of a view that has long since climbed to full render scale —
+      // so the ladder is left exactly where the pinning at bench start put
+      // it, and holdTick is not called, so nothing moves it mid-measurement.
+      //
+      // Marching is forced instead: a still view converges within a couple of
+      // seconds and then stops marching, so a five-second window that did not
+      // do this would time a blit for most of its length and report a frame
+      // rate that belongs to the compositor.
+      this._marchPending = true;
+    } else if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
       // whether a tier is usable is what it costs while the camera moves.
       // The camera is by definition still at load, so without this the hold

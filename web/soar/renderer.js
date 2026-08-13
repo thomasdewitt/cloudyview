@@ -572,6 +572,28 @@ export class Renderer {
     this._applyRung();
   }
 
+  /**
+   * Put the ladder on its top rung now, without climbing to it.
+   *
+   * For measurement, not for flying. A benchmark has to time the picture the
+   * user is actually looking at, and a still view has already climbed to full
+   * render scale — timing the FLIGHT configuration instead would report a
+   * quarter-resolution frame nobody was watching. It also makes an A/B
+   * comparable at all: each side of one rebuilds the field, and a rebuilt
+   * field starts at rung 0, so without this the second run would be measured
+   * somewhere else on the ladder from the first.
+   *
+   * Deliberately skips holdTick's affordability gate. That gate exists so a
+   * weak machine never RENDERS a cost it has not justified from below; here
+   * the whole point is to pay a known cost on purpose and find out what it
+   * is.
+   */
+  pinTopRung() {
+    this._holdRung = this._holdLadder.length - 1;
+    this._holdCapped = false;
+    this._applyRung();
+  }
+
   /** Which rung is in force, and how many there are. For the stats readout. */
   get holdRung() { return this._holdRung; }
   get holdRungCount() { return this._holdLadder.length; }
