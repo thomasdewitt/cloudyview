@@ -526,7 +526,11 @@ class SoarRenderer:
             address_mode_u="repeat", address_mode_v="repeat",
             mag_filter="linear", min_filter="linear", mipmap_filter="linear")
 
-        self._vol_tex = None
+        # A bricked field has no dense volume at all — that is the memory win —
+        # but binding 1 still has to be bound, so it gets the same 1x1x1
+        # stand-in the absent nest gets. The shader never reads it: every
+        # branch that would is behind `if (BRICKED)`.
+        self._vol_tex = self._dummy_volume() if self.bricked else None
         self._nest_tex = self._dummy_volume()
         self._brick_atlas = self._dummy_volume()
         self._brick_pages = self._dummy_pages()

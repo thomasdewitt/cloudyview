@@ -84,6 +84,48 @@ export function createBrickBuilder({ dims, brick = [8, 8, 8], periodic = true })
     return slots[id - 1];
   }
 
+  /**
+   * Brick cells along one axis whose 1-voxel apron contains coordinate `v`.
+   *
+   * Derived from the coordinates themselves rather than from the offset
+   * within the brick, because a field whose extent is not a multiple of the
+   * brick leaves a PARTIAL edge brick — there, the last voxel of the field is
+   * not at the last offset of its brick, and a test on the offset would miss
+   * the periodic neighbour across the domain seam entirely.
+   */
+  function apronCells(v, n, b, g, wrap) {
+    const out = [];
+    // d = -1 and 0 only, never +1. A sample at g interpolates voxels
+    // floor(g) and floor(g)+1, so a brick's reach extends one voxel PAST its
+    // far face and not at all before its near one — voxel v is therefore
+    // wanted by its own brick and by the one below it (which is a different
+    // brick only when v sits on the boundary). Allocating the +1 side as well
+    // would be harmless but would pay for slots nothing can ever sample.
+    for (let d = -1; d <= 0; d++) {
+      let w = v + d;
+      if (wrap) {
+        if (w < 0) w += n; else if (w >= n) w -= n;
+      } else if (w < 0 || w >= n) {
+        continue;
+      }
+      const c = (w / b) | 0;
+      if (c >= 0 && c < g && !out.includes(c)) out.push(c);
+    }
+    return out;
+  }
+
+  /** Give a slot to every brick this voxel shows up in the apron of. */
+  function touchApronNeighbours(x, y, z, ctor) {
+    const xs = apronCells(x, nx, bx, gx, periodic);
+    const ys = apronCells(y, ny, by, gy, periodic);
+    const zs = apronCells(z, nz, bz, gz, false);
+    for (const cx of xs) {
+      for (const cy of ys) {
+        for (const cz of zs) slotFor(cx, cy, cz, ctor);
+      }
+    }
+  }
+
   function addTile(base, size, values) {
     const [x0, y0, z0] = base;
     const [sx, sy, sz] = size;
@@ -103,6 +145,26 @@ export function createBrickBuilder({ dims, brick = [8, 8, 8], periodic = true })
           const slot = slotFor(cx, cy, cz, ValueArray);
           slot[((ox + 1) * py + oy + 1) * pz + oz + 1] = v;
           occupiedVoxels++;
+          // A brick holding nothing of its own can still be needed.
+          //
+          // The dense field's trilinear filter reaches one voxel past the last
+          // nonzero voxel — that overhang IS the taper a cloud edge fades
+          // through, and the renderer samples it constantly. A brick just
+          // outside the cloud that had no slot would answer 0 there and cut
+          // the taper off at a brick boundary, which is visible as a hard edge
+          // and, worse, tells the empty-space skip it may leap a region the
+          // dense march would have found cloud in. So any brick whose APRON
+          // this voxel lands in gets a slot too; finalize() then fills that
+          // apron from the neighbours exactly as it does for every other slot.
+          //
+          // Only voxels on a brick face have neighbours to notify, which is
+          // 6/8 of them at 8^3 and none of the interior, so this is a boundary
+          // cost rather than a per-voxel one.
+          if (ox === 0 || ox === bx - 1 || x === 0 || x === nx - 1
+              || oy === 0 || oy === by - 1 || y === 0 || y === ny - 1
+              || oz === 0 || oz === bz - 1 || z === 0 || z === nz - 1) {
+            touchApronNeighbours(x, y, z, ValueArray);
+          }
         }
       }
     }

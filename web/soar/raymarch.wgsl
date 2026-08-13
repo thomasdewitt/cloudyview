@@ -794,12 +794,23 @@ fn sample_bricked(q: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
 // The closed form is exact in f64 (verified over 200k random cases spanning
 // the real parameter ranges, including the linear-to-geometric transition);
 // f32 makes it good to a step either way, which the two short walks correct.
+// Every comparison here is "has this lattice point reached the goal", and in
+// f32 the closed form lands within a rounding error of it rather than on it.
+// Without slack, a landing a hair SHORT reads as not-yet-arrived, the
+// correction walk adds a whole further step, and the march skips a sample it
+// was supposed to take — measured at 0.36% of pixels differing visibly even
+// when the jump was capped at one step, which is by definition no jump at all.
+// The slack is relative because t spans metres to tens of kilometres.
+fn lattice_reached(t: f32, goal: f32) -> bool {
+    return t >= goal - max(abs(goal), 1.0) * 1e-6;
+}
+
 fn lattice_forward(t0: f32, a: f32, r: f32, goal: f32) -> f32 {
-    if (t0 >= goal) {
+    if (lattice_reached(t0, goal)) {
         return t0;
     }
     if (r <= 0.0) {
-        return t0 + ceil((goal - t0) / a) * a;
+        return t0 + ceil((goal - t0) / a - 1e-6) * a;
     }
     var t = t0;
     if (t * r <= a) {
@@ -807,23 +818,23 @@ fn lattice_forward(t0: f32, a: f32, r: f32, goal: f32) -> f32 {
         // (or past the goal, if that comes first).
         let limit = min(goal, a / r);
         var n = floor((limit - t) / a);
-        if (t + n * a < limit) {
+        if (!lattice_reached(t + n * a, limit)) {
             n = n + 1.0;
         }
         t = t + n * a;
-        if (t >= goal) {
+        if (lattice_reached(t, goal)) {
             return t;
         }
     }
     t = t * pow(1.0 + r, max(ceil(log(goal / t) / log(1.0 + r)), 0.0));
     for (var i: i32 = 0; i < 4; i = i + 1) {
-        if (t >= goal) { break; }
+        if (lattice_reached(t, goal)) { break; }
         t = t + max(a, t * r);
     }
     for (var i: i32 = 0; i < 4; i = i + 1) {
         var prev = t - a;
         if (t * r > a) { prev = t / (1.0 + r); }
-        if (prev < goal || prev <= 0.0) { break; }
+        if (!lattice_reached(prev, goal) || prev <= 0.0) { break; }
         t = prev;
     }
     return t;

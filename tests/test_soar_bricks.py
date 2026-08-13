@@ -150,16 +150,35 @@ def check_round_trip(field, brick, periodic, tile, tmp_path):
     px, py, pz = bx + 2, by + 2, bz + 2
     ax, ay, az = out["atlasBrickGrid"]
 
-    # Page-table truth: a brick is empty exactly when the reference is all
-    # zero inside it.
+    # Page-table truth: a brick has a slot exactly when the renderer can ever
+    # sample a non-zero value inside it — which is NOT the same as holding a
+    # non-zero voxel.
+    #
+    # Trilinear filtering at a point in brick c has support [floor(g),
+    # floor(g)+1], so a sample anywhere in the brick can reach one voxel past
+    # its far face. That overhang is the taper a cloud edge fades through. A
+    # brick just outside the cloud that had no slot would answer 0 there and
+    # cut the taper off at a brick boundary — visible as a hard edge, and
+    # worse, it would tell the empty-space skip it may leap a region the dense
+    # march finds cloud in. So the test is over the SAMPLING SUPPORT, wrapped
+    # in x/y when the field is periodic and clipped in z where it is not.
     gx, gy, gz = out["pageDims"]
+    nx, ny, nz = field.shape
     for cx in range(gx):
         for cy in range(gy):
             for cz in range(gz):
-                block = field[cx * bx:(cx + 1) * bx,
-                              cy * by:(cy + 1) * by,
-                              cz * bz:(cz + 1) * bz]
-                assert (page[cx, cy, cz] != 0) == bool((block != 0).any()), \
+                xs = [(cx * bx + i) % nx if periodic else cx * bx + i
+                      for i in range(bx + 1)]
+                ys = [(cy * by + i) % ny if periodic else cy * by + i
+                      for i in range(by + 1)]
+                xs = [v for v in xs if 0 <= v < nx]
+                ys = [v for v in ys if 0 <= v < ny]
+                zs = [v for v in (cz * bz + i for i in range(bz + 1))
+                      if 0 <= v < nz]
+                reachable = bool(
+                    xs and ys and zs
+                    and (field[np.ix_(xs, ys, zs)] != 0).any())
+                assert (page[cx, cy, cz] != 0) == reachable, \
                     f"page table wrong at brick ({cx},{cy},{cz})"
 
     # Every texel of every occupied brick's padded slot — interior AND apron —
