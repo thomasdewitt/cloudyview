@@ -9,6 +9,13 @@
       "url": "http://localhost:8765"
     },
     {
+      "name": "soar-nocache",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["tools/dev_server.py", "8766"],
+      "port": 8766,
+      "url": "http://localhost:8766"
+    },
+    {
       "name": "soar-dist",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8799",

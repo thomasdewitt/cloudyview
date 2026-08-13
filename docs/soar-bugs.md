@@ -228,7 +228,19 @@ sleeping on pause is safe. A loop asleep in a state the app thinks is
 > second-hand and the viewing geometry matters — get the actual view before
 > theorising. Do not start from the guess in this note.
 
-**Status:** open, cause unknown
+**Status:** FIXED 2026-08-11 (`65f001f`) — and the wait-for-the-repro rule
+paid for itself twice. Thomas reproduced it live and the new terminal
+panel turned his view into a one-line witness command. An A/B forcing the
+outer level's steps selectively fine pinned the VIEW march (the entry
+below guesses the entry phase, which was close but wrong in the detail
+that mattered: the phase past the seam is not re-aligned, it is
+UNDER-DISPERSED — rays arrive with at most a fine step of phase spread
+against a coarse period, and the coherent remainder is bias, surviving
+accumulation). Second lesson: re-using the entry jitter for the re-draw
+left a measurable residual (correlated draws); the fix that works is an
+independent stratified stream spanning the full effective coarse step at
+the fine→coarse crossing. Non-nested builds compile the branch out, so
+the golden set never moved.
 **Found:** 2026-08-10, deployed web build
 
 **Repro (approximate):** stand inside the nest, look up and out at a cloud

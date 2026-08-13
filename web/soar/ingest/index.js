@@ -90,13 +90,18 @@ function levelReceiver(device, label, onProgress, ack) {
           `This field needs ${worst} texels on ${axis} once ghost-padded; ` +
           `this browser allows ${cap}. Cropping empty sky cannot help — it ` +
           "only ever shrinks z.");
+        // No tool named here on purpose. This used to point at
+        // tools/decimate_field.py, which has since been deleted, and advice
+        // that names a file the reader cannot find is worse than advice that
+        // says what to do — box-averaging is exact for extinction (it is
+        // linear in the mixing ratios), so anyone can do it in four lines.
         err.advice = cap <= SPEC_FLOOR_TEXTURE_3D
           ? "Chrome reports the WebGPU spec minimum of 2048 no matter what " +
             "the card can do; Firefox reports the hardware's real limit. Or " +
-            `decimate by ${Math.ceil(worst / cap)}x with ` +
-            "tools/decimate_field.py."
-          : `Decimate by ${Math.ceil(worst / cap)}x with ` +
-            "tools/decimate_field.py.";
+            `box-average the field down by ${Math.ceil(worst / cap)}x on ` +
+            `${axis} first.`
+          : `Box-average the field down by ${Math.ceil(worst / cap)}x on ` +
+            `${axis} first.`;
         throw err;
       }
     } else if (message.type === "read") {
