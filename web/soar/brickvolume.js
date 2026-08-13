@@ -94,6 +94,19 @@ export async function uploadBrickPayload(device, payload, label) {
   const [ax, ay, az] = payload.atlasDims;
   const [gx, gy, gz] = payload.pageDims;
 
+  // A big brick makes a big atlas cell, and the atlas is a 3D texture like
+  // any other — Chrome and Safari clamp those to 2048 per axis whatever the
+  // card can do. Caught here with the numbers in it, because the alternative
+  // is a WebGPU validation error naming a texture the user never asked for.
+  const cap = device.limits.maxTextureDimension3D;
+  if (Math.max(ax, ay, az) > cap) {
+    const err = new Error(
+      `A ${payload.brick.join("x")} brick makes an atlas of ${ax}x${ay}x${az} ` +
+      `texels, and this browser allows ${cap} per axis.`);
+    err.advice = "Use a smaller brick.";
+    throw err;
+  }
+
   // Texture axes are (w=z, h=y, d=x), matching the dense volume — see the
   // raymarch.wgsl header. Both textures follow it so the shader's swizzle is
   // the same one it already uses.

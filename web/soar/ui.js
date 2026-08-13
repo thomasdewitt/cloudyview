@@ -17,15 +17,26 @@ const el = (tag, className, text) => {
 };
 
 /** A labelled slider row that reports live and commits continuously. */
-function sliderRow(label, { min, max, step, value, format, onInput, onChange }) {
+function sliderRow(label, { min, max, step, value, format, onInput, onChange,
+                            choices = null }) {
   const row = el("div", "row");
   row.append(el("label", null, label));
   const input = el("input");
+  // `choices` makes the slider index a fixed list rather than sweep a range.
+  // For brick sizes that is the difference between a control you can land a
+  // value with and one you cannot: the useful sizes are powers of two spanning
+  // two orders of magnitude, and a linear 2..256 slider spends four fifths of
+  // its travel on sizes nobody wants.
+  const toSlider = (v) => (choices ? Math.max(0, choices.indexOf(v)) : v);
+  const fromSlider = (i) => (choices ? choices[i] : i);
   input.type = "range";
-  input.min = min; input.max = max; input.step = step; input.value = value;
+  input.min = choices ? 0 : min;
+  input.max = choices ? choices.length - 1 : max;
+  input.step = choices ? 1 : step;
+  input.value = toSlider(value);
   const readout = el("span", "value", format(value));
   input.addEventListener("input", () => {
-    const v = Number(input.value);
+    const v = fromSlider(Number(input.value));
     readout.textContent = format(v);
     onInput?.(v);
   });
@@ -33,10 +44,14 @@ function sliderRow(label, { min, max, step, value, format, onInput, onChange }) 
   // size rebuilds the whole field, and doing that once per pixel of drag
   // would rebuild it thirty times on the way to the value you wanted.
   if (onChange) {
-    input.addEventListener("change", () => onChange(Number(input.value)));
+    input.addEventListener(
+      "change", () => onChange(fromSlider(Number(input.value))));
   }
   row.append(input, readout);
-  row.setValue = (v) => { input.value = v; readout.textContent = format(v); };
+  row.setValue = (v) => {
+    input.value = toSlider(v);
+    readout.textContent = format(v);
+  };
   return row;
 }
 
@@ -398,7 +413,14 @@ export class UI {
     for (const axis of ["x", "y", "z"]) {
       const i = "xyz".indexOf(axis);
       m.append(sliderRow(`Brick ${axis}`, {
-        min: 1, max: 32, step: 1, value: app.brickShape[i],
+        // Powers of two only, and up to 256. Not a UI nicety: a brick extent
+        // that divides the field evenly leaves no partial edge bricks, and
+        // the useful range spans two orders of magnitude — small bricks skip
+        // more empty space and pay more apron, large ones the reverse — so
+        // the interesting values are logarithmically spaced and a linear
+        // slider would spend most of its travel between 200 and 256.
+        choices: K.BRICK_SIZE_CHOICES,
+        value: app.brickShape[i],
         format: (v) => `${v} voxels`,
         onChange: (v) => app.setBrickShape(axis, v),
       }));

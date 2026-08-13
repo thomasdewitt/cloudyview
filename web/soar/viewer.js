@@ -1100,8 +1100,16 @@ class Viewer {
 
   /** Brick extent in voxels. Rebuilds the field when bricks are on. */
   async setBrickShape(axis, value) {
+    // Snapped to a power of two whatever the caller asked for. A brick that
+    // divides the field evenly leaves no partial edge bricks, and every
+    // measurement is easier to compare against the last when the axis is
+    // quantized — 8 vs 9 is not a question anyone wants an answer to.
+    const snapped = K.BRICK_SIZE_CHOICES.reduce(
+      (best, c) => (Math.abs(Math.log2(c / value))
+                    < Math.abs(Math.log2(best / value)) ? c : best),
+      K.BRICK_SIZE_CHOICES[0]);
     const next = [...this.brickShape];
-    next["xyz".indexOf(axis)] = Math.max(1, Math.round(value));
+    next["xyz".indexOf(axis)] = snapped;
     if (next.join() === this.brickShape.join()) return;
     this.brickShape = next;
     if (!this.brickedRequested || this._brickSwitchBusy) return;
