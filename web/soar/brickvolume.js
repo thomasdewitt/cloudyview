@@ -31,6 +31,12 @@ import { guardAllocation } from "./gpu.js";
 // themselves off it.
 export const BRICK = [8, 8, 8];
 
+// How much uploaded atlas may be in flight before waiting for the GPU. Same
+// number, and the same reason, as ingest/index.js: queue.writeTexture copies
+// into driver-owned staging memory that is only reclaimed once the GPU has
+// consumed it, and nothing here submits work.
+const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
+
 /**
  * Build the brick payload for a field held as ingest-ordered tiles.
  *
@@ -101,13 +107,25 @@ export async function uploadBrickPayload(device, payload, label) {
 
   // One x-plane of the atlas per write, for the same reason the dense upload
   // drains: driver staging memory is only reclaimed once the GPU consumes it.
+  //
+  // Drained by BYTES rather than by plane count. A drain is not free — on
+  // Firefox, onSubmittedWorkDone is a poll cadence and waiting on an empty
+  // queue measures ~89 ms — so the interval has to be tied to the thing it
+  // protects against, which is staging memory, not to how the atlas happens
+  // to be sliced. A thin atlas would otherwise pay a full drain every few
+  // megabytes and spend most of the load waiting.
   const planeTexels = ay * az;
+  let queued = 0;
   for (let x = 0; x < ax; x++) {
     const plane = payload.atlas.subarray(x * planeTexels, (x + 1) * planeTexels);
     device.queue.writeTexture(
       { texture: atlas, origin: { x: 0, y: 0, z: x } },
       plane, { bytesPerRow: az * 2, rowsPerImage: ay }, [az, ay, 1]);
-    if ((x & 63) === 63) await device.queue.onSubmittedWorkDone();
+    queued += plane.byteLength;
+    if (queued >= UPLOAD_DRAIN_BYTES) {
+      queued = 0;
+      await device.queue.onSubmittedWorkDone();
+    }
   }
 
   // r32uint, not a storage buffer: the DDA reads it with textureLoad at

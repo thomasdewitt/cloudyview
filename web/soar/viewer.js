@@ -1093,6 +1093,8 @@ class Viewer {
       throw err;
     } finally {
       this._brickSwitchBusy = false;
+      // _releaseField stopped the loop and nothing else restarts it.
+      this._startLoop();
     }
   }
 
@@ -1117,6 +1119,7 @@ class Viewer {
       }
     } finally {
       this._brickSwitchBusy = false;
+      this._startLoop();
     }
   }
 
@@ -1155,7 +1158,14 @@ class Viewer {
         until: performance.now() + seconds * 1000,
         resolve: finish,
       };
-      this._wake("benchmark");
+      // _startLoop, not _wake. _releaseField stops the loop by bumping the
+      // generation, but it does not set _sleeping — so after a field rebuild
+      // there is no loop running AND _wake believes there is, returns early,
+      // and starts nothing. The first run of a benchmark only ever worked
+      // because the auto-tier probe happened to start one during that load;
+      // by the second run auto-tier had settled and nothing did, so the
+      // window collected zero frames and the watchdog ended it.
+      this._startLoop();
     });
   }
 
@@ -1182,7 +1192,15 @@ class Viewer {
       for (const bricked of [false, true]) {
         this.brickedRequested = bricked;
         this._keepCameraOnNextLoad = true;
+        // Timed and reported, but deliberately OUTSIDE the window below.
+        // Building an atlas is a one-off cost paid when the field is opened;
+        // folding it into a per-frame number would be a category error. It is
+        // still worth knowing, because on a field this decides nothing else
+        // does — a minute to build is a fact about whether you would ever
+        // switch this on, whatever the frame time says.
+        const builtAt = performance.now();
         await this.loadField(this._source, this.progress);
+        const buildMs = performance.now() - builtAt;
         // A rebuilt field starts on rung 0 — the flight configuration, which
         // at Minimal is an eighth of the pixels. That is not the picture you
         // were looking at when you asked for the measurement, and it would
@@ -1208,6 +1226,7 @@ class Viewer {
           medianMs: sorted[Math.floor(sorted.length / 2)] ?? NaN,
           meanMs: samples.reduce((a, b) => a + b, 0) / (samples.length || 1),
           stats: this.scene?.brickStats ?? null,
+          buildMs,
           // Recorded per run, not read afterwards: the finally block rebuilds
           // the field, and a renderer read after that describes the restored
           // one rather than the measured one.
@@ -1230,7 +1249,7 @@ class Viewer {
       // the loop — the caller does, and at startup that caller is init(). Left
       // out, the app sits on the last frame of the last measurement looking
       // exactly like it has hung, which is what it did.
-      this._wake("benchmark done");
+      this._startLoop();
     }
     if (runs.length === 2) this._reportBrickBenchmark(runs, seconds);
     return runs;
@@ -1258,13 +1277,26 @@ class Viewer {
       `, mean ${brick.meanMs.toFixed(3)}, ${brick.frames} frames`,
       `  bricked is ${ratio.toFixed(2)}x ` +
       `${ratio >= 1 ? "SLOWER" : "faster"} than dense`,
+      // One-off, and NOT part of the per-frame numbers above. Reported
+      // because a field that takes a minute to brick is one you would never
+      // switch this on for, whatever its frame time turns out to be.
+      `  field build (one-off, not in the frame times above): dense ` +
+      `${(dense.buildMs / 1000).toFixed(1)}s, bricked ` +
+      `${(brick.buildMs / 1000).toFixed(1)}s`,
     ];
     if (s) {
+      const saving = s.denseTexels / Math.max(s.atlasTexels, 1);
       lines.push(
         `  ${s.occupiedBricks} of ${s.totalBricks} bricks occupied ` +
         `(${(100 * s.occupiedBricks / s.totalBricks).toFixed(2)}%), atlas ` +
-        `${(s.denseTexels / Math.max(s.atlasTexels, 1)).toFixed(2)}x smaller ` +
-        "than dense");
+        `${saving.toFixed(2)}x ${saving >= 1 ? "smaller" : "LARGER"} than dense`);
+      if (saving < 1) {
+        lines.push(
+          "  NOTE: the atlas is bigger than the dense volume. At this " +
+          "occupancy the aprons cost more than the empty bricks save, so " +
+          "there is nothing for bricking to win here on memory either — try " +
+          "a larger brick, or a sparser field.");
+      }
     }
     console.log(lines.join("\n"));
     this.ui.say(

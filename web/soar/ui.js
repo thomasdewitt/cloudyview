@@ -403,10 +403,32 @@ export class UI {
         onChange: (v) => app.setBrickShape(axis, v),
       }));
     }
+    // The apron is what makes a brick self-contained under trilinear
+    // filtering, and it is also what bricking pays for. A b^3 brick stores
+    // (b+2)^3 texels, so the overhead is fixed by the shape alone — and with
+    // it, the occupancy above which bricking COSTS memory rather than saving
+    // it. Worth stating outright: it is the number that decides whether a
+    // given field is worth bricking at a given size, and 8^3 breaks even at
+    // barely half occupancy, which is lower than most people would guess.
+    const [bx, by, bz] = app.brickShape;
+    const overhead = ((bx + 2) * (by + 2) * (bz + 2)) / (bx * by * bz);
+    const breakEven = 100 / overhead;
     m.append(el("div", "row",
       `Current: ${app.brickShape.join(" x ")} voxels per brick, plus a ` +
       "1-voxel apron on every side so filtering across a brick seam stays " +
-      "exact."));
+      `exact. That apron makes each stored brick ${overhead.toFixed(2)}x its ` +
+      `own size, so bricking only saves memory below ${breakEven.toFixed(0)}% ` +
+      "brick occupancy. Bigger bricks dilute the apron and skip less; " +
+      "smaller ones skip more and pay more."));
+    if (stats) {
+      const occ = 100 * stats.occupiedBricks / stats.totalBricks;
+      if (occ > breakEven) {
+        m.append(el("div", "row",
+          `This field is ${occ.toFixed(1)}% occupied at this size — above ` +
+          `the ${breakEven.toFixed(0)}% break-even, so the atlas is BIGGER ` +
+          "than the dense volume. Try a larger brick."));
+      }
+    }
 
     m.append(el("div", "divider"));
     m.append(item("Time this view, both ways", "5 s each, hands off the keys",
