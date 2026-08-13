@@ -71,15 +71,8 @@ class Viewer {
     this.recorder = new TrackRecorder();
     this.paused = true;
     this.captured = false;
-    // Sparse bricks are a manual switch, never inferred from the field: no
-    // occupancy threshold, no memory heuristic, nothing that could choose
-    // differently on two machines and make a measurement unrepeatable.
-    this.brickedRequested = false;
-    this.brickShape = [8, 8, 8];
-    this._source = null;
-    this._keepCameraOnNextLoad = false;
     this.frameIndex = 0;
-    this._fpsAcc = 0; this._fpsN = 0; this._fps = null;
+    this._fpsAcc = 0; this._fpsN = 0; this._fps = null; this._frameMs = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
 
@@ -213,9 +206,6 @@ class Viewer {
    */
   async loadField(source, progress) {
     await this._releaseField();
-    // Remembered so the brick switch can rebuild the same field the other
-    // way round without asking the user to open it again.
-    this._source = source;
 
     let scene = null, renderer = null, minimap = null, bird = null;
     let sun = null, minimapProblem = null, birdProblem = null;
@@ -229,8 +219,7 @@ class Viewer {
       if (source.kind === "demo") {
         scene = await loadDemoScene(
           this.device, source.base, ocean,
-          (stage, fraction) => progress(stage, fraction),
-          { bricked: this.brickedRequested, brick: this.brickShape });
+          (stage, fraction) => progress(stage, fraction));
         sun = scene.sun ?? null;
       } else {
         const { loadFileScene } = await import("./ingest/index.js");
@@ -298,19 +287,8 @@ class Viewer {
       this.sunAzimuth = sun.azimuth;
       this.sunElevation = sun.elevation;
     }
-    // A brick rebuild is the SAME field seen the same way, so the camera
-    // survives it — otherwise the switch would move the view and the A/B it
-    // exists to serve would compare two different pictures.
-    const keep = this._keepCameraOnNextLoad ? this.camera : null;
-    this._keepCameraOnNextLoad = false;
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
                                    { periodic: renderer.periodic });
-    if (keep) {
-      this.camera.position = keep.position;
-      this.camera.azimuth = keep.azimuth;
-      this.camera.elevation = keep.elevation;
-      this.camera.speed = keep.speed;
-    }
 
     this.ui.setSubtitle(this.sourceLabel);
 
@@ -374,7 +352,6 @@ class Viewer {
 
   _armProbe(tier) {
     this._probe = {
-      kind: "tier",
       tier, frame: 0, samples: [],
       // Which stopwatch to believe — decided by _chooseProbeClock at the
       // first probe frame, by measuring the stopwatch itself. "queue" is the
@@ -409,7 +386,7 @@ class Viewer {
     const probe = this._probe;
     const forced = new URLSearchParams(location.search).get("probeclock");
     if (forced === "queue" || forced === "cadence") {
-      probe.clock = forced; this._probeClockUsed = probe.clock;
+      probe.clock = forced;
       console.info(`soar: probe clock forced to '${forced}' by ?probeclock=`);
       return;
     }
@@ -418,7 +395,7 @@ class Viewer {
     // also keeps queue waits (a crash lottery on Firefox, see bug 14) off
     // the reload path.
     if (this._probeClockVerdict) {
-      probe.clock = this._probeClockVerdict.clock; this._probeClockUsed = probe.clock;
+      probe.clock = this._probeClockVerdict.clock;
       probe.overheadMs = this._probeClockVerdict.overheadMs;
       return;
     }
@@ -437,7 +414,7 @@ class Viewer {
     } catch (err) {
       // The queue clock does not even run here (headless Chrome rejects it
       // outright for swapchain frames). The cadence clock owes it nothing.
-      probe.clock = "cadence"; this._probeClockUsed = probe.clock;
+      probe.clock = "cadence";
       remember();
       console.info(
         `soar: onSubmittedWorkDone rejects on this browser ` +
@@ -446,11 +423,11 @@ class Viewer {
     }
     const overhead = Math.min(...rounds);
     if (overhead <= K.AUTO_TIER_CLOCK_OVERHEAD_MAX_MS) {
-      probe.clock = "queue"; this._probeClockUsed = probe.clock;
+      probe.clock = "queue";
       probe.overheadMs = overhead;
       remember();
     } else {
-      probe.clock = "cadence"; this._probeClockUsed = probe.clock;
+      probe.clock = "cadence";
       remember();
       console.info(
         `soar: waiting on an EMPTY queue costs ${overhead.toFixed(1)} ms ` +
@@ -478,21 +455,6 @@ class Viewer {
       ? K.AUTO_TIER_WARMUP_FRAMES_CADENCE
       : K.AUTO_TIER_WARMUP_FRAMES;
     if (probe.frame <= warmup) return;
-    // A benchmark borrows the probe's timing path rather than starting a
-    // second one, because everything hard about timing a frame here is
-    // already solved in it: which stopwatch this browser can be believed
-    // about (onSubmittedWorkDone is a ~100 ms poll on Firefox, not a fence),
-    // what that stopwatch costs on an empty queue, and how many frames to
-    // throw away first. It also holds the renderer in its FLIGHT
-    // configuration, which is what stops the hold ladder from converging the
-    // view out from under a stationary measurement and timing a blit.
-    if (probe.kind === "bench") {
-      probe.samples.push(ms);
-      if (performance.now() < probe.until) return;
-      this._probe = null;
-      probe.resolve(probe.samples);
-      return;
-    }
     probe.samples.push(ms);
     if (probe.samples.length < K.AUTO_TIER_SAMPLE_FRAMES) return;
 
@@ -577,7 +539,7 @@ class Viewer {
       // clock that just proved untrustworthy), and carry on climbing.
       const probe = this._probe;
       if (probe) {
-        probe.clock = "cadence"; this._probeClockUsed = probe.clock;
+        probe.clock = "cadence";
         probe.frame = 0;
         probe.samples = [];
         console.warn(
@@ -1045,273 +1007,6 @@ class Viewer {
   setFov(fov) {
     this.camera.setFov(fov);
     this._wake("field of view");
-  }
-
-  /**
-   * Store the field as one dense volume, or as sparse bricks.
-   *
-   * A manual switch and nothing else. There is no gate that looks at the
-   * field and decides for you: the two prior attempts at empty-space skipping
-   * were reverted on measurements taken on one machine, and the whole reason
-   * this is a switch is so the same view can be timed both ways on YOURS.
-   *
-   * Bricking is decided when the field is built, so this rebuilds it — and
-   * carries the camera across, because comparing one view two ways is the
-   * point and a moved camera would compare two pictures instead.
-   */
-  async toggleBricks() {
-    if (this._brickSwitchBusy || !this._source) return;
-    if (this._source.kind !== "demo") {
-      this.ui.say("Bricks are only built for the bundled fields so far. An "
-                  + "opened file still loads dense — the ingest path has to "
-                  + "learn to build them as it reads.");
-      return;
-    }
-    this._brickSwitchBusy = true;
-    this.brickedRequested = !this.brickedRequested;
-    this._keepCameraOnNextLoad = true;
-    try {
-      await this.loadField(this._source, this.progress);
-      const stats = this.scene?.brickStats;
-      if (stats) {
-        const share = 100 * stats.occupiedBricks / stats.totalBricks;
-        const saving = stats.denseTexels / Math.max(stats.atlasTexels, 1);
-        this.ui.say(
-          `Bricks on — ${stats.occupiedBricks.toLocaleString()} of ` +
-          `${stats.totalBricks.toLocaleString()} bricks hold cloud ` +
-          `(${share.toFixed(1)}%), atlas ${saving.toFixed(1)}x smaller than ` +
-          "the dense volume.");
-      } else {
-        this.ui.say("Bricks off — one dense volume.");
-      }
-    } catch (err) {
-      // The rebuild failed, so the field is gone rather than merely
-      // unbricked. Say which, and put the flag back so a retry is the other
-      // way round rather than the same way again.
-      this.brickedRequested = !this.brickedRequested;
-      this.ui.say(`Could not rebuild the field: ${err.message}`);
-      throw err;
-    } finally {
-      this._brickSwitchBusy = false;
-      // _releaseField stopped the loop and nothing else restarts it.
-      this._startLoop();
-    }
-  }
-
-  /** Brick extent in voxels. Rebuilds the field when bricks are on. */
-  async setBrickShape(axis, value) {
-    // Snapped to a power of two whatever the caller asked for. A brick that
-    // divides the field evenly leaves no partial edge bricks, and every
-    // measurement is easier to compare against the last when the axis is
-    // quantized — 8 vs 9 is not a question anyone wants an answer to.
-    const snapped = K.BRICK_SIZE_CHOICES.reduce(
-      (best, c) => (Math.abs(Math.log2(c / value))
-                    < Math.abs(Math.log2(best / value)) ? c : best),
-      K.BRICK_SIZE_CHOICES[0]);
-    const next = [...this.brickShape];
-    next["xyz".indexOf(axis)] = snapped;
-    if (next.join() === this.brickShape.join()) return;
-    this.brickShape = next;
-    if (!this.brickedRequested || this._brickSwitchBusy) return;
-    this._brickSwitchBusy = true;
-    this._keepCameraOnNextLoad = true;
-    try {
-      await this.loadField(this._source, this.progress);
-      const s = this.scene?.brickStats;
-      if (s) {
-        this.ui.say(
-          `Bricks ${this.brickShape.join("x")} — ` +
-          `${(100 * s.occupiedBricks / s.totalBricks).toFixed(1)}% occupied, ` +
-          `atlas ${(s.denseTexels / Math.max(s.atlasTexels, 1)).toFixed(1)}x ` +
-          "smaller than dense.");
-      }
-    } finally {
-      this._brickSwitchBusy = false;
-      this._startLoop();
-    }
-  }
-
-  /**
-   * Time the view in front of you, for `seconds`, as it is right now.
-   *
-   * Resolves to the per-frame milliseconds the probe path measured. The
-   * camera must not move while this runs — it is timing one picture, and a
-   * hand on the keyboard makes the number describe a different one every
-   * frame.
-   */
-  _timeCurrentView(seconds) {
-    return new Promise((resolve) => {
-      let done = false;
-      const finish = (samples) => {
-        if (done) return;
-        done = true;
-        clearTimeout(watchdog);
-        this._probe = null;
-        resolve(samples);
-      };
-      // A measurement that waits on frames must not wait forever. If the loop
-      // stops for any reason the window did not anticipate — a lost device, a
-      // backgrounded tab throttling rAF to nothing — this ends the run with
-      // whatever it collected instead of leaving the app looking hung, which
-      // is exactly what it looked like the first time.
-      const watchdog = setTimeout(() => {
-        console.warn(
-          `soar: benchmark window of ${seconds}s ended by watchdog after ` +
-          `${this._probe?.samples.length ?? 0} frames — the loop stopped ` +
-          "producing them.");
-        finish(this._probe?.samples ?? []);
-      }, (seconds + 5) * 1000);
-      this._probe = {
-        kind: "bench", frame: 0, samples: [], clock: null, overheadMs: 0,
-        until: performance.now() + seconds * 1000,
-        resolve: finish,
-      };
-      // _startLoop, not _wake. _releaseField stops the loop by bumping the
-      // generation, but it does not set _sleeping — so after a field rebuild
-      // there is no loop running AND _wake believes there is, returns early,
-      // and starts nothing. The first run of a benchmark only ever worked
-      // because the auto-tier probe happened to start one during that load;
-      // by the second run auto-tier had settled and nothing did, so the
-      // window collected zero frames and the watchdog ended it.
-      this._startLoop();
-    });
-  }
-
-  /**
-   * Time this exact view with bricks off and with bricks on, and report both.
-   *
-   * The two runs are separated by a rebuild of the field, which is the only
-   * honest way to compare them: bricking is decided at build time. The camera
-   * is carried across, so the two numbers describe one picture rather than
-   * two. Nothing is inferred and nothing is chosen — the answer goes to you,
-   * because the answer is known to differ by machine and the two prior
-   * attempts at this were killed by a measurement taken on one card.
-   */
-  async benchmarkBricks({ seconds = 5 } = {}) {
-    if (this._brickSwitchBusy || !this._source) return null;
-    if (this._source.kind !== "demo") {
-      this.ui.say("Bricks are only built for the bundled fields so far.");
-      return null;
-    }
-    const wasBricked = this.brickedRequested;
-    this._brickSwitchBusy = true;
-    const runs = [];
-    try {
-      for (const bricked of [false, true]) {
-        this.brickedRequested = bricked;
-        this._keepCameraOnNextLoad = true;
-        // Timed and reported, but deliberately OUTSIDE the window below.
-        // Building an atlas is a one-off cost paid when the field is opened;
-        // folding it into a per-frame number would be a category error. It is
-        // still worth knowing, because on a field this decides nothing else
-        // does — a minute to build is a fact about whether you would ever
-        // switch this on, whatever the frame time says.
-        const builtAt = performance.now();
-        await this.loadField(this._source, this.progress);
-        const buildMs = performance.now() - builtAt;
-        // A rebuilt field starts on rung 0 — the flight configuration, which
-        // at Minimal is an eighth of the pixels. That is not the picture you
-        // were looking at when you asked for the measurement, and it would
-        // also put the two runs on different rungs. Both are pinned to the
-        // top, which is where a still view ends up anyway.
-        this.renderer.pinTopRung();
-        this.ui.say(
-          `Measuring ${bricked ? `bricks ${this.brickShape.join("x")}`
-                               : "dense"} at ` +
-          `${(this.renderer.renderScale * 100).toFixed(0)}% scale… ` +
-          `${seconds}s, hands off.`,
-          seconds + 1);
-        const samples = await this._timeCurrentView(seconds);
-        // The median, for the reason the tier probe uses one: a mean is
-        // dragged by any single stall — a GC pause, the compositor taking
-        // the GPU — and every such contamination is upward.
-        const sorted = [...samples].sort((a, b) => a - b);
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        runs.push({
-          bricked,
-          brick: bricked ? [...this.brickShape] : null,
-          frames: sorted.length,
-          medianMs: sorted[Math.floor(sorted.length / 2)] ?? NaN,
-          meanMs: samples.reduce((a, b) => a + b, 0) / (samples.length || 1),
-          stats: this.scene?.brickStats ?? null,
-          buildMs,
-          // Recorded per run, not read afterwards: the finally block rebuilds
-          // the field, and a renderer read after that describes the restored
-          // one rather than the measured one.
-          tier: this.renderer.qualityTier,
-          scale: this.renderer.renderScale,
-          rung: `${this.renderer.holdRung + 1}/${this.renderer.holdRungCount}`,
-          pixels: [
-            Math.round(this.canvas.clientWidth * dpr * this.renderer.renderScale),
-            Math.round(this.canvas.clientHeight * dpr * this.renderer.renderScale),
-          ],
-          clock: this._probeClockUsed ?? "?",
-        });
-      }
-    } finally {
-      this.brickedRequested = wasBricked;
-      this._keepCameraOnNextLoad = true;
-      await this.loadField(this._source, this.progress).catch(() => {});
-      this._brickSwitchBusy = false;
-      // Nothing else is going to. loadField builds a field; it does not start
-      // the loop — the caller does, and at startup that caller is init(). Left
-      // out, the app sits on the last frame of the last measurement looking
-      // exactly like it has hung, which is what it did.
-      this._startLoop();
-    }
-    if (runs.length === 2) this._reportBrickBenchmark(runs, seconds);
-    return runs;
-  }
-
-  _reportBrickBenchmark(runs, seconds) {
-    const [dense, brick] = runs;
-    const ratio = brick.medianMs / Math.max(dense.medianMs, 1e-9);
-    const fps = (ms) => (ms > 0 ? 1000 / ms : 0);
-    const s = brick.stats;
-    // The full table to the console, where it can be selected and pasted
-    // into the results file; the verdict on screen, where it is read.
-    const lines = [
-      `soar brick benchmark — ${this.sourceLabel}`,
-      `  tier ${dense.tier}, hold rung ${dense.rung}, render scale ` +
-      `${dense.scale} (${dense.pixels[0]}x${dense.pixels[1]} marched), ` +
-      `${seconds}s per run, ${dense.clock} clock`,
-      `  camera ${[...this.camera.position].map((v) => v.toFixed(0)).join(", ")} ` +
-      `az ${this.camera.azimuth.toFixed(1)} el ${this.camera.elevation.toFixed(1)}`,
-      `  dense           median ${dense.medianMs.toFixed(3)} ms ` +
-      `(${fps(dense.medianMs).toFixed(0)} fps), mean ` +
-      `${dense.meanMs.toFixed(3)}, ${dense.frames} frames`,
-      `  bricks ${brick.brick.join("x").padEnd(9)} median ` +
-      `${brick.medianMs.toFixed(3)} ms (${fps(brick.medianMs).toFixed(0)} fps)` +
-      `, mean ${brick.meanMs.toFixed(3)}, ${brick.frames} frames`,
-      `  bricked is ${ratio.toFixed(2)}x ` +
-      `${ratio >= 1 ? "SLOWER" : "faster"} than dense`,
-      // One-off, and NOT part of the per-frame numbers above. Reported
-      // because a field that takes a minute to brick is one you would never
-      // switch this on for, whatever its frame time turns out to be.
-      `  field build (one-off, not in the frame times above): dense ` +
-      `${(dense.buildMs / 1000).toFixed(1)}s, bricked ` +
-      `${(brick.buildMs / 1000).toFixed(1)}s`,
-    ];
-    if (s) {
-      const saving = s.denseTexels / Math.max(s.atlasTexels, 1);
-      lines.push(
-        `  ${s.occupiedBricks} of ${s.totalBricks} bricks occupied ` +
-        `(${(100 * s.occupiedBricks / s.totalBricks).toFixed(2)}%), atlas ` +
-        `${saving.toFixed(2)}x ${saving >= 1 ? "smaller" : "LARGER"} than dense`);
-      if (saving < 1) {
-        lines.push(
-          "  NOTE: the atlas is bigger than the dense volume. At this " +
-          "occupancy the aprons cost more than the empty bricks save, so " +
-          "there is nothing for bricking to win here on memory either — try " +
-          "a larger brick, or a sparser field.");
-      }
-    }
-    console.log(lines.join("\n"));
-    this.ui.say(
-      `${brick.brick.join("x")}: dense ${dense.medianMs.toFixed(2)} ms vs ` +
-      `bricked ${brick.medianMs.toFixed(2)} ms — ${ratio.toFixed(2)}x ` +
-      `${ratio >= 1 ? "slower" : "faster"}. Full table in the console.`,
-      12);
   }
 
   togglePeriodic() {
@@ -1943,21 +1638,7 @@ class Viewer {
       this._lastSignature !== null && signature !== this._lastSignature);
     this._lastSignature = signature;
 
-    if (this._probe?.kind === "bench") {
-      // A benchmark is the mirror image of the tier probe. The probe wants
-      // the flight configuration, because what decides whether a tier is
-      // usable is what it costs while you are moving. A benchmark wants the
-      // configuration you are LOOKING at — you ran it from a paused menu, in
-      // front of a view that has long since climbed to full render scale —
-      // so the ladder is left exactly where the pinning at bench start put
-      // it, and holdTick is not called, so nothing moves it mid-measurement.
-      //
-      // Marching is forced instead: a still view converges within a couple of
-      // seconds and then stops marching, so a five-second window that did not
-      // do this would time a blit for most of its length and report a frame
-      // rate that belongs to the compositor.
-      this._marchPending = true;
-    } else if (this._probe) {
+    if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
       // whether a tier is usable is what it costs while the camera moves.
       // The camera is by definition still at load, so without this the hold
@@ -2098,13 +1779,15 @@ class Viewer {
     if (march) {
       this._fpsAcc += elapsed; this._fpsN += 1;
       if (this._fpsAcc >= 0.5) {
-        this._fps = this._fpsN / this._fpsAcc;
+        const meanDt = this._fpsAcc / this._fpsN;
+        this._fps = 1 / meanDt;
+        this._frameMs = meanDt * 1000;
         this._fpsAcc = 0; this._fpsN = 0;
       }
     }
     const converged = this.renderer.converged;
     this.ui.drawStats({
-      fps: this._fps, camera: this.camera,
+      fps: this._fps, frameMs: this._frameMs, camera: this.camera,
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
       frame: this.frameIndex,
       minimap: Boolean(this.minimap && this.minimapMode !== "off"),

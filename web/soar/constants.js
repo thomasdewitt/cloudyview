@@ -120,21 +120,13 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
-// Brick extents the panel offers, per axis and independently.
-//
-// Powers of two so a brick divides the field evenly and leaves no partial
-// edge bricks, and spanning two orders of magnitude because that is the range
-// over which the trade actually moves: a small brick skips more empty space
-// and pays more apron (an 8^3 brick stores 1.95x its own volume, so it only
-// saves memory below 51% occupancy), a large one the reverse (32^3 is 1.20x,
-// break-even 83%).
-export const BRICK_SIZE_CHOICES = [2, 4, 8, 16, 32, 64, 128, 256];
-
-export const UNIFORM_ROWS = 24;
-// DERIVED, never written out. These were two independent literals until row
-// 23 was added and only one of them moved: the packer produced 384 bytes, the
+export const UNIFORM_ROWS = 23;
+// DERIVED, never written out. These were two independent literals until a row
+// was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.
-// One of them is a fact about the block and the other was a copy of it.
+// One of them is a fact about the block and the other was a copy of it. Kept
+// derived after that row was reverted, because the bug was never about the
+// row — it was about the copy.
 export const UNIFORM_NBYTES = UNIFORM_ROWS * 16;
 
 export const AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024;

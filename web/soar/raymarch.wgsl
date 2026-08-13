@@ -106,16 +106,6 @@ struct Uniforms {
     // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
     nest_bmin: vec4<f32>,
     nest_bmax: vec4<f32>,
-    // Row 23: the outer level's grid size in voxels; w unused.
-    //
-    // The dense path never reads this — sample_level derives the grid from
-    // the volume texture's own dimensions, minus the ghost ring. A BRICKED
-    // field has no such texture to ask: its page table is rounded up to whole
-    // bricks (a 231-deep field at 8^3 gives 29 pages, i.e. 232), so inferring
-    // the grid from it would stretch the field by up to a voxel and move the
-    // domain box with it. Geometry is sacred, so the three numbers are
-    // carried. Zero when the host did not supply them.
-    field_dims: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -126,49 +116,12 @@ struct Uniforms {
 // The finer nested level. Always bound (a 1x1x1 zero texture when there is
 // no nest) so one bind-group layout serves both specializations.
 @group(0) @binding(5) var nest_vol: texture_3d<f32>;
-// The sparse representation of the OUTER level. Always bound (1x1x1 stand-ins
-// when the field is dense) for the same reason the nest is: one bind-group
-// layout has to serve every specialization.
-//
-// brick_atlas holds only the occupied bricks, each with a 1-voxel apron of
-// its neighbours' values, so hardware trilinear inside a brick is exact
-// everywhere including across brick seams. brick_pages is one texel per brick
-// of the field: 0 for empty, otherwise a 1-based slot in the atlas. See
-// web/soar/bricks.js for the layout and tests/test_soar_bricks.py for the
-// proof that it preserves every value.
-@group(0) @binding(6) var brick_atlas: texture_3d<f32>;
-@group(0) @binding(7) var brick_pages: texture_3d<u32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
 // density, light, and view branches fold away completely.
 const PERIODIC_DOMAIN: bool = true;
 const NESTED: bool = false;
-// The outer level is stored as sparse bricks rather than one dense volume.
-//
-// This is a storage change with a traversal consequence, and the consequence
-// is the point: a page table lets the march LEAP the clear air between clouds
-// instead of stepping through it. Two earlier attempts at empty-space skipping
-// were measured and reverted (2026-07-17 view-march occupancy skip, 1.2-2.5x
-// SLOWER; 2026-08-11 light-march 8^3 majorant grid, 0.5-0.9x), and both failed
-// the same way: they added a dependent texture fetch per SAMPLE, on dense
-// fields, on a card whose march is texture-latency bound. Nothing here may
-// repeat that. In occupied space the bricked path costs one page fetch per
-// brick CROSSING — roughly one per four taps at high's step factor — and in
-// empty space it costs one per brick skipped while touching the atlas not at
-// all.
-const BRICKED: bool = false;
-// Brick extent in voxels, before the apron. Shared with web/soar/brickvolume.js
-// and rewritten by the same specialization pass, so trying another shape is a
-// one-line experiment on both sides.
-const BRICK_X: i32 = 8;
-const BRICK_Y: i32 = 8;
-const BRICK_Z: i32 = 8;
-// Most bricks a single skip may cross before giving up and taking an ordinary
-// step. A cap, not a budget: it exists so a grazing ray through a mostly-empty
-// domain cannot spin, and it is far above the crossings any real sightline
-// needs.
-const MAX_BRICK_STEPS: i32 = 512;
 // Off returns linear HDR radiance instead of a display-referred image, for
 // callers that want the physical quantity — render_nested(return_linear=True)
 // in Python. The browser always leaves this on: it is presenting to a canvas,
@@ -605,11 +558,47 @@ const SUNSET_HORIZON_RADIANCE_R: f32 = 0.42; // SUNSET_HORIZON_RADIANCE[0]
 const LIGHT_TRANSFER_DIRECT_BOOST: f32 = 0.25;
 const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 
-// TODO(occupancy-grid): empty-space skipping. Cloud fields are sparse; a
-// coarse (e.g. 16^3-voxel-block) occupancy grid bound in the next free slot
-// would let both the view march and the light march leap over empty bricks.
-// This is the known next lever for the full 1024x1024x255 domain
-// (docs/architecture.md "Interactive techniques").
+// EMPTY-SPACE SKIPPING: measured three times, lost three times. Do not read
+// the sparseness of cloud fields as an unclaimed opportunity — it is a claim
+// that has been tested to destruction, and this note replaces the TODO that
+// used to invite it.
+//
+//   2026-07-17  view-march occupancy skip. 1.2-2.5x SLOWER. Fine-dt empty
+//               samples are cheap; the skip machinery is not.
+//   2026-08-11  8^3 majorant/occupancy grid on the light march. Proven
+//               max|diff| == 0.0 and measured 0.5-0.9x. Machinery cost 47 ms;
+//               skipping 36% of bricks recovered 0.8 ms.
+//   2026-08-13  full sparse bricks: page table, atlas with a 1-voxel apron,
+//               brick-DDA traversal that consults only the page table in
+//               vacuum, and a skip that lands on the march's own sample
+//               lattice so the picture is unchanged. Proven correct against a
+//               dense render (the difference is a Monte Carlo realization and
+//               falls as 1/sqrt(frames)). Measured 3-6x SLOWER on an RTX 5080
+//               across both a 33%-occupied field and an 8%-occupied one, and
+//               slower again on Apple silicon — which was the one hypothesis
+//               left standing after the first two, since both of those were
+//               5080 texture-latency measurements wearing the costume of a
+//               measurement about an algorithm.
+//
+// The mechanism, consistent across all three: this march is texture-LATENCY
+// bound, and every scheme that knows where the empty space is must ask
+// something to find out. In occupied space that ask lands on the critical
+// path of a loop that tolerates no added control flow (a bit-identical
+// micro-opt — reusing the view sample as the light march's first tap — also
+// regressed). The skip cannot outrun the question.
+//
+// Two things worth knowing before a fourth attempt. The one lever left
+// untried is hoisting the page fetch to one per brick CROSSING instead of one
+// per tap, which needs the march restructured around brick crossings rather
+// than around samples. And bricking has a memory break-even that is lower
+// than it looks: an 8^3 brick with its apron stores 1000 texels to hold 512,
+// so it only shrinks a field below 51% brick occupancy (16^3: 70%, 32^3:
+// 83%). The whole attempt is in git — see the commit that reverted it for
+// the entry point, and benchmarking/soar_frame_results.md for the numbers.
+//
+// What DID pay, and shipped, is cropping the empty sky off a field at load:
+// same insight about sparseness, applied to storage rather than traversal,
+// where nothing has to be asked per sample. See web/soar/zcrop.js.
 
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
@@ -650,10 +639,6 @@ fn level_data_dims(t: texture_3d<f32>) -> vec3<f32> {
 fn level_voxel_size(in_nest: bool) -> vec3<f32> {
     if (NESTED && in_nest) {
         return (u.nest_bmax.xyz - u.nest_bmin.xyz) / level_data_dims(nest_vol);
-    }
-    if (BRICKED) {
-        // No dense volume to ask — `vol` is a 1x1x1 stand-in here.
-        return (u.bmax.xyz - u.bmin.xyz) / u.field_dims.xyz;
     }
     return (u.bmax.xyz - u.bmin.xyz) / level_data_dims(vol);
 }
@@ -702,210 +687,10 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
     return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r;
 }
 
-// --- sparse bricks ---------------------------------------------------------
-//
-// Layout mirror of web/soar/bricks.js. That file is the single definition and
-// a node test holds it to exact equality against a dense reference; what
-// follows must decode what it encoded, so the two are commented as one thing.
-//
-// Texture axes are (w=z, h=y, d=x) for both, as everywhere else here, so a
-// textureDimensions comes back as (z, y, x) and gets swizzled on the way in.
-
-fn brick_extent() -> vec3<f32> {
-    return vec3<f32>(f32(BRICK_X), f32(BRICK_Y), f32(BRICK_Z));
-}
-
-fn brick_padded() -> vec3<f32> {
-    return vec3<f32>(f32(BRICK_X + 2), f32(BRICK_Y + 2), f32(BRICK_Z + 2));
-}
-
-/// Page grid in bricks: ceil(field / brick), which is the texture's own size.
-fn brick_page_dims() -> vec3<i32> {
-    let d = textureDimensions(brick_pages, 0);
-    return vec3<i32>(i32(d.z), i32(d.y), i32(d.x));
-}
-
-/// Atlas size in BRICKS per axis, recovered from its texel dimensions.
-fn brick_atlas_grid() -> vec3<i32> {
-    let d = textureDimensions(brick_atlas, 0);
-    return vec3<i32>(i32(d.z) / (BRICK_X + 2),
-                     i32(d.y) / (BRICK_Y + 2),
-                     i32(d.x) / (BRICK_Z + 2));
-}
-
-/// 1-based atlas slot for a brick cell; 0 means the brick holds nothing.
-fn brick_page_at(cell: vec3<i32>) -> u32 {
-    return textureLoad(brick_pages, vec3<i32>(cell.z, cell.y, cell.x), 0).r;
-}
-
-/// Where a brick's slot id puts it in the atlas, in bricks (bricks.js
-/// finalize: s = (sx * ay + sy) * az + sz).
-fn brick_slot_origin(slot: u32) -> vec3<f32> {
-    let s = i32(slot - 1u);
-    let grid = brick_atlas_grid();
-    return vec3<f32>(f32(s / (grid.y * grid.z)),
-                     f32((s / grid.z) % grid.y),
-                     f32(s % grid.z));
-}
-
-// Extinction from the atlas, at the same world point and by the same
-// filtering the dense path would have used.
-//
-// The apron is what makes this exact rather than approximate. A sample
-// anywhere in a brick's own voxel range interpolates between texels 1..B+1 of
-// that brick's slot, and texel B+1 holds the NEIGHBOUR's first voxel, so the
-// filter never reaches into another slot and never has to be told not to.
-// Interior voxel v sits at texel v + 1, hence the +1.5 in texel-centre space
-// — the same convention, and the same one-voxel offset, as the dense path's
-// ghost ring.
-fn sample_bricked(q: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
-    let dims = u.field_dims.xyz;
-    let data_g = ((q - bmin) / (bmax - bmin)) * dims;
-    let bext = brick_extent();
-    let cell = vec3<i32>(floor(data_g / bext));
-    let pages = brick_page_dims();
-    if (any(cell < vec3<i32>(0, 0, 0)) || any(cell >= pages)) {
-        return 0.0;
-    }
-    let slot = brick_page_at(cell);
-    if (slot == 0u) {
-        return 0.0;
-    }
-    let local = data_g - vec3<f32>(cell) * bext;
-    let coord = brick_slot_origin(slot) * brick_padded() + local
-                + vec3<f32>(1.5, 1.5, 1.5);
-    let adims = vec3<f32>(textureDimensions(brick_atlas, 0));
-    return textureSampleLevel(
-        brick_atlas, vol_samp,
-        vec3<f32>(coord.z, coord.y, coord.x) / adims, 0.0).r;
-}
-
-// The first point of the march's own sample lattice at or past `goal`.
-//
-// In empty space the step is always dt = max(a, t * r): constant while `a`
-// dominates, then geometric with ratio (1 + r) once t * r overtakes it. Both
-// halves invert in closed form, so skipping a thousand steps costs what
-// skipping one does AND lands exactly where taking them would have. That last
-// part is why this exists at all: jumping to the brick face instead would put
-// every subsequent sample at a different place from the dense march, and the
-// difference between "the skip is free" and "the skip is free and changes
-// nothing" is the only thing that makes it checkable.
-//
-// The closed form is exact in f64 (verified over 200k random cases spanning
-// the real parameter ranges, including the linear-to-geometric transition);
-// f32 makes it good to a step either way, which the two short walks correct.
-// Every comparison here is "has this lattice point reached the goal", and in
-// f32 the closed form lands within a rounding error of it rather than on it.
-// Without slack, a landing a hair SHORT reads as not-yet-arrived, the
-// correction walk adds a whole further step, and the march skips a sample it
-// was supposed to take — measured at 0.36% of pixels differing visibly even
-// when the jump was capped at one step, which is by definition no jump at all.
-// The slack is relative because t spans metres to tens of kilometres.
-fn lattice_reached(t: f32, goal: f32) -> bool {
-    return t >= goal - max(abs(goal), 1.0) * 1e-6;
-}
-
-fn lattice_forward(t0: f32, a: f32, r: f32, goal: f32) -> f32 {
-    if (lattice_reached(t0, goal)) {
-        return t0;
-    }
-    if (r <= 0.0) {
-        return t0 + ceil((goal - t0) / a - 1e-6) * a;
-    }
-    var t = t0;
-    if (t * r <= a) {
-        // Linear phase, ending at the first lattice point past the crossover
-        // (or past the goal, if that comes first).
-        let limit = min(goal, a / r);
-        var n = floor((limit - t) / a);
-        if (!lattice_reached(t + n * a, limit)) {
-            n = n + 1.0;
-        }
-        t = t + n * a;
-        if (lattice_reached(t, goal)) {
-            return t;
-        }
-    }
-    t = t * pow(1.0 + r, max(ceil(log(goal / t) / log(1.0 + r)), 0.0));
-    for (var i: i32 = 0; i < 4; i = i + 1) {
-        if (lattice_reached(t, goal)) { break; }
-        t = t + max(a, t * r);
-    }
-    for (var i: i32 = 0; i < 4; i = i + 1) {
-        var prev = t - a;
-        if (t * r > a) { prev = t / (1.0 + r); }
-        if (!lattice_reached(prev, goal) || prev <= 0.0) { break; }
-        t = prev;
-    }
-    return t;
-}
-
-// How far along `dir` the ray can go before it enters a brick holding
-// anything, capped at `max_t`. Touches the page table and nothing else — no
-// atlas fetch, no filtering, no sample.
-//
-// A 3D-DDA over the brick grid, in brick units so the per-axis increments are
-// one. In a periodic domain the cell index wraps in x and y exactly as
-// wrap_to_domain wraps the sample point, so a skip crosses tile seams without
-// knowing it has; z never wraps, and leaving it ends the skip because the ray
-// has left the field.
-fn brick_skip_distance(p: vec3<f32>, dir: vec3<f32>, max_t: f32) -> f32 {
-    let bmin = u.bmin.xyz;
-    let bmax = u.bmax.xyz;
-    let pages = brick_page_dims();
-    // One world metre is this many bricks, per axis.
-    let scale = (u.field_dims.xyz / (bmax - bmin)) / brick_extent();
-    let gb = (p - bmin) * scale;
-    let db = dir * scale;
-
-    var cell = vec3<i32>(floor(gb));
-    let step = vec3<i32>(sign(db));
-    let speed = abs(db);
-    let moving = speed > vec3<f32>(1e-30, 1e-30, 1e-30);
-    // Bricks from here to the next face on each axis: (cell + 1) - gb going
-    // up, gb - cell going down. An axis the ray does not move along never
-    // reaches its face, so it waits forever rather than immediately.
-    let to_face = (max(vec3<f32>(step), vec3<f32>(0.0, 0.0, 0.0))
-                   + vec3<f32>(cell) - gb) * sign(db);
-    let big = vec3<f32>(3.0e38, 3.0e38, 3.0e38);
-    var t_max = select(big, to_face / speed, moving);
-    let t_delta = select(big, 1.0 / speed, moving);
-
-    var t = 0.0;
-    for (var i: i32 = 0; i < MAX_BRICK_STEPS; i = i + 1) {
-        var c = cell;
-        if (PERIODIC_DOMAIN) {
-            c.x = ((c.x % pages.x) + pages.x) % pages.x;
-            c.y = ((c.y % pages.y) + pages.y) % pages.y;
-        } else if (c.x < 0 || c.x >= pages.x || c.y < 0 || c.y >= pages.y) {
-            return max_t;
-        }
-        if (c.z < 0 || c.z >= pages.z) {
-            return max_t;
-        }
-        if (brick_page_at(c) != 0u) {
-            return t;
-        }
-        // Advance to the nearest brick face.
-        let m = min(t_max.x, min(t_max.y, t_max.z));
-        if (m >= max_t) {
-            return max_t;
-        }
-        t = m;
-        if (t_max.x == m) { cell.x = cell.x + step.x; t_max.x = t_max.x + t_delta.x; }
-        if (t_max.y == m) { cell.y = cell.y + step.y; t_max.y = t_max.y + t_delta.y; }
-        if (t_max.z == m) { cell.z = cell.z + step.z; t_max.z = t_max.z + t_delta.z; }
-    }
-    return t;
-}
-
 // Sample a *chosen* level at an already-wrapped point.
 fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
     if (NESTED && in_nest) {
         return sample_level(nest_vol, q, u.nest_bmin.xyz, u.nest_bmax.xyz);
-    }
-    if (BRICKED) {
-        return sample_bricked(q, u.bmin.xyz, u.bmax.xyz);
     }
     return sample_level(vol, q, u.bmin.xyz, u.bmax.xyz);
 }
@@ -1323,21 +1108,6 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
         // tau saturation (LIGHT_TAU_CUTOFF) normally ends it far sooner.
         let s = sample_level_at(p + t * sun);
         var dt = max(s.dt_light, dt_floor);
-        // Clear air on the way to the sun, same trade as the view march. This
-        // loop is the dominant per-frame cost and the one the 2026-08-11
-        // majorant grid made 0.5-0.9x by adding a dependent fetch per sample,
-        // so the skip is reached ONLY when the sample was already empty and
-        // adds nothing whatever to the occupied path. Its step is constant
-        // here (both terms are per-ray), so the lattice snap is the r = 0
-        // branch and costs one ceil.
-        if (BRICKED && !NESTED && s.sigma <= 0.0) {
-            let run = brick_skip_distance(
-                wrap_to_domain(p + t * sun), sun, t_exit - t);
-            if (run > dt) {
-                t = lattice_forward(t, dt, 0.0, t + run);
-                continue;
-            }
-        }
         if (t + dt > t_exit) {
             dt = t_exit - t;
         }
@@ -2305,35 +2075,6 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let d_tau = sigma * dt;
             if (d_tau < EMPTY_DTAU_CUTOFF) {
                 tau_depth = 0.0;
-                // Clear air. On a bricked field the page table can say how
-                // much of it lies ahead, and one lookup per brick replaces one
-                // sample per step across the whole of it — this is where the
-                // storage change earns its keep, and it costs occupied space
-                // nothing because it is reached only when the sample came back
-                // empty. Snapped to the lattice rather than dropped at the
-                // brick face, so the samples after the gap sit exactly where
-                // the dense march would have put them.
-                //
-                // Not attempted in a nested run: the nest is dense, so a leap
-                // across the outer field could vault a refined region without
-                // ever looking at it. Bricking the nest too is what removes
-                // this restriction; until then the outer field still gets the
-                // storage, just not the skip.
-                if (BRICKED && !NESTED) {
-                    var cap = t_far - t;
-                    if (ocean_on) {
-                        cap = min(cap, t_ocean - t);
-                    }
-                    if (cap > dt) {
-                        let run = brick_skip_distance(
-                            wrap_to_domain(p), dir, cap);
-                        if (run > dt) {
-                            t = lattice_forward(t, level.dt_view,
-                                                u.periodic.z, t + run);
-                            continue;
-                        }
-                    }
-                }
                 t = t + dt;
                 continue;
             }

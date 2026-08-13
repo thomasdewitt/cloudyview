@@ -186,14 +186,19 @@ def test_uniform_block_matches_browser(label, scene_extra, view_extra, js_blocks
 def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
     """constants.js must agree with itself, and with the Python host.
 
-    This is the test for the failure it was written after. Row 23 was added,
-    UNIFORM_ROWS went 23 -> 24 on both hosts, and web/soar/constants.js was
-    ALSO carrying an independent literal `UNIFORM_NBYTES = 368` that nobody
+    This is the test for the failure it was written after. A 24th row was
+    added, UNIFORM_ROWS went 23 -> 24 on both hosts, and web/soar/constants.js
+    was ALSO carrying an independent literal `UNIFORM_NBYTES = 368` that nobody
     moved. The packer then produced 384 bytes and wrote them into a 368-byte
     buffer, so every draw failed validation and the app rendered black —
     without any test noticing, because the packed ARRAYS still matched each
     other perfectly. The parity test above compares what the two hosts pack;
     this compares what the browser allocates to hold it.
+
+    That row has since been reverted along with the rest of the sparse-brick
+    work, so the block is 23 rows again. The test stays: the bug was never
+    about the row, it was about a derived quantity being written out by hand,
+    and the next row to be added will be added by someone who was not here.
     """
     proc = subprocess.run(
         ["node", "--input-type=module", "-e",
@@ -212,12 +217,12 @@ def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
         f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
 
 
-def test_block_is_384_bytes():
-    """24 rows of 4 floats. Row 23 (the outer grid size, for BRICKED) took it
-    from 368; the number is pinned rather than derived so that a row added on
-    one side and not the other fails here as well as in the diff above."""
-    assert sh.UNIFORM_NBYTES == 384
-    assert _python_block({}, {}).nbytes == 384
+def test_block_is_368_bytes():
+    """23 rows of 4 floats. Pinned rather than derived on purpose, so that a
+    row added on one side and not the other fails here as well as in the diff
+    above."""
+    assert sh.UNIFORM_NBYTES == 368
+    assert _python_block({}, {}).nbytes == 368
 
 
 def test_periodic_requires_sun_above_horizon():

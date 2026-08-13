@@ -17,41 +17,20 @@ const el = (tag, className, text) => {
 };
 
 /** A labelled slider row that reports live and commits continuously. */
-function sliderRow(label, { min, max, step, value, format, onInput, onChange,
-                            choices = null }) {
+function sliderRow(label, { min, max, step, value, format, onInput }) {
   const row = el("div", "row");
   row.append(el("label", null, label));
   const input = el("input");
-  // `choices` makes the slider index a fixed list rather than sweep a range.
-  // For brick sizes that is the difference between a control you can land a
-  // value with and one you cannot: the useful sizes are powers of two spanning
-  // two orders of magnitude, and a linear 2..256 slider spends four fifths of
-  // its travel on sizes nobody wants.
-  const toSlider = (v) => (choices ? Math.max(0, choices.indexOf(v)) : v);
-  const fromSlider = (i) => (choices ? choices[i] : i);
   input.type = "range";
-  input.min = choices ? 0 : min;
-  input.max = choices ? choices.length - 1 : max;
-  input.step = choices ? 1 : step;
-  input.value = toSlider(value);
+  input.min = min; input.max = max; input.step = step; input.value = value;
   const readout = el("span", "value", format(value));
   input.addEventListener("input", () => {
-    const v = fromSlider(Number(input.value));
+    const v = Number(input.value);
     readout.textContent = format(v);
-    onInput?.(v);
+    onInput(v);
   });
-  // Separate from `input` for controls whose effect is expensive: a brick
-  // size rebuilds the whole field, and doing that once per pixel of drag
-  // would rebuild it thirty times on the way to the value you wanted.
-  if (onChange) {
-    input.addEventListener(
-      "change", () => onChange(fromSlider(Number(input.value))));
-  }
   row.append(input, readout);
-  row.setValue = (v) => {
-    input.value = toSlider(v);
-    readout.textContent = format(v);
-  };
+  row.setValue = (v) => { input.value = v; readout.textContent = format(v); };
   return row;
 }
 
@@ -59,8 +38,7 @@ function sliderRow(label, { min, max, step, value, format, onInput, onChange,
 // edge instead of the centre — anything where one would want to SEE the view
 // while the panel is up (Thomas, 2026-08-11). Navigation and questions stay
 // centred.
-const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track",
-                               "bricks"]);
+const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]);
 
 function segmented(options, isOn, onPick) {
   const wrap = el("div", "segmented");
@@ -182,7 +160,7 @@ export class UI {
    * Same for the startup probe, whose frames are deliberately serialized
    * against the GPU queue and so have a frame rate that means nothing at all.
    */
-  drawStats({ fps, camera, tier, renderScale, frame, minimap, bird,
+  drawStats({ fps, frameMs, camera, tier, renderScale, frame, minimap, bird,
               recording, showSpeed, parked = false, converged = false,
               probing = false, autoTier = false, wakeReason = null, spp = 0,
               holdRung = 0, holdRungCount = 1, holdCapped = false }) {
@@ -195,7 +173,9 @@ export class UI {
       return;
     }
     this.stats.hidden = false;
-    const rate = fps == null ? "—" : `${fps.toFixed(0)} fps`;
+    const rate = fps == null
+      ? "—"
+      : `${fps.toFixed(0)} fps · ${frameMs.toFixed(1)} ms`;
     if (this.statsMode !== "expanded") {
       const speed = showSpeed ? ` · ${camera.speed.toFixed(0)} m/s` : "";
       const rec = recording ? "● " : "";
@@ -345,16 +325,6 @@ export class UI {
     m.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
                   "wrap the field laterally",
                   () => { app.togglePeriodic(); this.open("main"); }));
-    m.append(item(
-      `Sparse bricks: ${app.scene.bricked ? "on" : "off"}`,
-      app.scene.bricked
-        ? (app.scene.brickStats
-            ? `${(100 * app.scene.brickStats.occupiedBricks
-                  / app.scene.brickStats.totalBricks).toFixed(1)}% of bricks `
-              + "hold cloud; size and timing in here"
-            : "size and timing in here")
-        : "store only the bricks that hold cloud, and skip the rest",
-      () => this.open("bricks")));
     m.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
                   "F", () => { app.toggleFullscreen(); this.open("main"); }));
     m.append(item("Back to the start page", null, () => app.leave()));
@@ -379,96 +349,6 @@ export class UI {
         (coverage > 0.75 ? " — little of the outer field is visible" : "")));
     }
     m.append(source);
-  }
-
-  _panel_bricks() {
-    const app = this.app;
-    const m = this.menu;
-    const scene = app.scene;
-    const stats = scene.brickStats;
-    m.append(this._header("storage", "Sparse bricks"));
-
-    m.append(item(`Bricks: ${scene.bricked ? "on" : "off"}`,
-                  scene.bricked
-                    ? "the field is stored as occupied bricks only"
-                    : "the field is one dense volume",
-                  async () => { await app.toggleBricks(); this.open("bricks"); }));
-
-    if (stats) {
-      const share = 100 * stats.occupiedBricks / stats.totalBricks;
-      const saving = stats.denseTexels / Math.max(stats.atlasTexels, 1);
-      m.append(el("div", "row",
-        `${stats.occupiedBricks.toLocaleString()} of ` +
-        `${stats.totalBricks.toLocaleString()} bricks hold cloud ` +
-        `(${share.toFixed(2)}%). Atlas is ${saving.toFixed(2)}x smaller than ` +
-        "the dense volume."));
-    }
-
-    m.append(el("div", "divider"));
-    // Independent per axis on purpose. Cloud fields are not isotropic — a
-    // stratocumulus deck is far thinner than it is wide — so the brick that
-    // wastes least is not obviously a cube, and the only way to find out is
-    // to try. Each change rebuilds the field, so these act on release rather
-    // than on drag.
-    for (const axis of ["x", "y", "z"]) {
-      const i = "xyz".indexOf(axis);
-      m.append(sliderRow(`Brick ${axis}`, {
-        // Powers of two only, and up to 256. Not a UI nicety: a brick extent
-        // that divides the field evenly leaves no partial edge bricks, and
-        // the useful range spans two orders of magnitude — small bricks skip
-        // more empty space and pay more apron, large ones the reverse — so
-        // the interesting values are logarithmically spaced and a linear
-        // slider would spend most of its travel between 200 and 256.
-        choices: K.BRICK_SIZE_CHOICES,
-        value: app.brickShape[i],
-        format: (v) => `${v} voxels`,
-        onChange: (v) => app.setBrickShape(axis, v),
-      }));
-    }
-    // The apron is what makes a brick self-contained under trilinear
-    // filtering, and it is also what bricking pays for. A b^3 brick stores
-    // (b+2)^3 texels, so the overhead is fixed by the shape alone — and with
-    // it, the occupancy above which bricking COSTS memory rather than saving
-    // it. Worth stating outright: it is the number that decides whether a
-    // given field is worth bricking at a given size, and 8^3 breaks even at
-    // barely half occupancy, which is lower than most people would guess.
-    const [bx, by, bz] = app.brickShape;
-    const overhead = ((bx + 2) * (by + 2) * (bz + 2)) / (bx * by * bz);
-    const breakEven = 100 / overhead;
-    m.append(el("div", "row",
-      `Current: ${app.brickShape.join(" x ")} voxels per brick, plus a ` +
-      "1-voxel apron on every side so filtering across a brick seam stays " +
-      `exact. That apron makes each stored brick ${overhead.toFixed(2)}x its ` +
-      `own size, so bricking only saves memory below ${breakEven.toFixed(0)}% ` +
-      "brick occupancy. Bigger bricks dilute the apron and skip less; " +
-      "smaller ones skip more and pay more."));
-    if (stats) {
-      const occ = 100 * stats.occupiedBricks / stats.totalBricks;
-      if (occ > breakEven) {
-        m.append(el("div", "row",
-          `This field is ${occ.toFixed(1)}% occupied at this size — above ` +
-          `the ${breakEven.toFixed(0)}% break-even, so the atlas is BIGGER ` +
-          "than the dense volume. Try a larger brick."));
-      }
-    }
-
-    m.append(el("div", "divider"));
-    m.append(item("Time this view, both ways", "5 s each, hands off the keys",
-                  () => {
-                    this.close();
-                    app.benchmarkBricks({ seconds: 5 });
-                  }));
-    m.append(el("div", "row",
-      "Rebuilds the field twice and times the view in front of you with " +
-      "bricks off, then on, at the current tier. The camera is held across " +
-      "both. Summary on screen, full table in the browser console."));
-    m.append(el("div", "row",
-      "Expect bricks to LOSE on a fast discrete GPU: measured 3-6x slower on " +
-      "an RTX 5080, where the march is texture-latency bound. The reason to " +
-      "measure it here is that a bandwidth-scarce machine may disagree."));
-
-    m.append(el("div", "divider"));
-    m.append(this._backButton());
   }
 
   _panel_quality() {

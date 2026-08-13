@@ -63,8 +63,8 @@ def read_shader() -> str:
             "glimpse and behold do not need it and still work.")
     return SHADER_PATH.read_text()
 
-UNIFORM_ROWS = 24
-UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 384; the scene key compares all of it
+UNIFORM_ROWS = 23
+UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 368; the scene key compares all of it
 
 DEG = math.pi / 180.0
 
@@ -200,10 +200,6 @@ class SceneState:
     nest_bmax: Optional[Sequence[float]] = None
     dt_view_nest: float = 0.0
     dt_light_nest: float = 0.0
-    # The outer level's grid size in voxels. Only the BRICKED shader reads it
-    # — the dense path asks the volume texture — so it stays optional, and a
-    # host that leaves it out packs zeros on both sides.
-    shape: Optional[Sequence[int]] = None
 
 
 @dataclass
@@ -343,11 +339,6 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     if state.nested:
         u[21] = (*state.nest_bmin, state.dt_view_nest)
         u[22] = (*state.nest_bmax, state.dt_light_nest)
-    # Row 23: the outer level's grid size in voxels. A bricked field cannot
-    # recover it from its page table, which is rounded up to whole bricks; see
-    # the matching note in web/soar/uniforms.js.
-    if state.shape is not None:
-        u[23] = (*state.shape, 0.0)
     return u
 
 
@@ -405,9 +396,8 @@ ACCUM_FORMAT = "rgba32float"
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
-               max_light_steps: int, tone_map: bool = True,
-               bricked: bool = False, brick=(8, 8, 8)) -> str:
-    """Bake the compile-time constants into the shader source.
+               max_light_steps: int, tone_map: bool = True) -> str:
+    """Bake the three compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
     bounds a loop. Each sentinel must appear exactly once — a miss renders
@@ -424,11 +414,6 @@ def specialize(source: str, *, periodic: bool, nested: bool,
          f"const MAX_LIGHT_STEPS: i32 = {int(max_light_steps)};"),
         ("const TONE_MAP: bool = true;",
          f"const TONE_MAP: bool = {'true' if tone_map else 'false'};"),
-        ("const BRICKED: bool = false;",
-         f"const BRICKED: bool = {'true' if bricked else 'false'};"),
-        ("const BRICK_X: i32 = 8;", f"const BRICK_X: i32 = {int(brick[0])};"),
-        ("const BRICK_Y: i32 = 8;", f"const BRICK_Y: i32 = {int(brick[1])};"),
-        ("const BRICK_Z: i32 = 8;", f"const BRICK_Z: i32 = {int(brick[2])};"),
     ]
     for sentinel, replacement in swaps:
         if source.count(sentinel) != 1:
@@ -482,8 +467,7 @@ class SoarRenderer:
     def __init__(self, *, periodic: bool = True, nested: bool = False,
                  max_light_steps: int = DEFAULT_MAX_LIGHT_STEPS,
                  tone_map: bool = True, device=None,
-                 shader_source: Optional[str] = None,
-                 bricked: bool = False, brick=(8, 8, 8)):
+                 shader_source: Optional[str] = None):
         """`shader_source` overrides the checked-in shader.
 
         It exists so two revisions of raymarch.wgsl can be held against each
@@ -501,15 +485,12 @@ class SoarRenderer:
         self.nested = bool(nested)
         self.max_light_steps = int(max_light_steps)
         self.tone_map = bool(tone_map)
-        self.bricked = bool(bricked)
-        self.brick = tuple(int(b) for b in brick)
 
         source = specialize(shader_source if shader_source is not None
                             else read_shader(), periodic=self.periodic,
                             nested=self.nested,
                             max_light_steps=self.max_light_steps,
-                            tone_map=self.tone_map,
-                            bricked=self.bricked, brick=self.brick)
+                            tone_map=self.tone_map)
         self._ray_module = device.create_shader_module(code=source)
         self._accum_module = device.create_shader_module(code=_ACCUM_SHADER)
 
@@ -526,14 +507,8 @@ class SoarRenderer:
             address_mode_u="repeat", address_mode_v="repeat",
             mag_filter="linear", min_filter="linear", mipmap_filter="linear")
 
-        # A bricked field has no dense volume at all — that is the memory win —
-        # but binding 1 still has to be bound, so it gets the same 1x1x1
-        # stand-in the absent nest gets. The shader never reads it: every
-        # branch that would is behind `if (BRICKED)`.
-        self._vol_tex = self._dummy_volume() if self.bricked else None
+        self._vol_tex = None
         self._nest_tex = self._dummy_volume()
-        self._brick_atlas = self._dummy_volume()
-        self._brick_pages = self._dummy_pages()
         self._ocean_tex = self._load_ocean()
         self._targets = None
         self._bind_group = None
@@ -550,17 +525,6 @@ class SoarRenderer:
         self.device.queue.write_texture(
             {"texture": tex}, np.zeros(1, np.float16).tobytes(),
             {"bytes_per_row": 2, "rows_per_image": 1}, (1, 1, 1))
-        return tex
-
-    def _dummy_pages(self):
-        """Binding 7 must always be bound, bricked or not."""
-        wgpu = self.wgpu
-        tex = self.device.create_texture(
-            size=(1, 1, 1), dimension="3d", format="r32uint",
-            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        self.device.queue.write_texture(
-            {"texture": tex}, np.zeros(1, np.uint32).tobytes(),
-            {"bytes_per_row": 4, "rows_per_image": 1}, (1, 1, 1))
         return tex
 
     def _load_ocean(self):
@@ -632,53 +596,6 @@ class SoarRenderer:
             {"bytes_per_row": pz * 2, "rows_per_image": py}, (pz, py, px))
         self._bind_group = None
 
-    def upload_bricks(self, atlas: np.ndarray, page_table: np.ndarray) -> None:
-        """Upload the sparse pair bound at bindings 6 and 7.
-
-        `atlas` is (ax, ay, az) fp16 and `page_table` is (gx, gy, gz) uint32,
-        both x-major with z fastest — exactly what web/soar/bricks.js
-        finalize() produces, reshaped out of its flat arrays. Same
-        no-transpose rule as upload_volume: a C-order array of that shape is
-        already the byte order a texture of size (az, ay, ax) wants.
-
-        The layout is bricks.js's and is not reimplemented here. That file is
-        the single definition, tests/test_soar_bricks.py holds it to exact
-        equality against a dense reference, and this host's job is to hand the
-        result to the GPU without opinions about it.
-        """
-        if not self.bricked:
-            raise RuntimeError(
-                "This renderer was built with bricked=False, so the shader "
-                "has BRICKED baked to false and would ignore the atlas.")
-        wgpu = self.wgpu
-        a = np.ascontiguousarray(atlas, dtype=np.float16)
-        p = np.ascontiguousarray(page_table, dtype=np.uint32)
-        ax, ay, az = a.shape
-        gx, gy, gz = p.shape
-        pad = tuple(b + 2 for b in self.brick)
-        if (ax % pad[0], ay % pad[1], az % pad[2]) != (0, 0, 0):
-            raise ValueError(
-                f"atlas {ax}x{ay}x{az} is not a whole number of "
-                f"{pad[0]}x{pad[1]}x{pad[2]} padded bricks; the shader "
-                "recovers the atlas grid by dividing, so this would decode "
-                "every slot to the wrong place.")
-        for tex in (self._brick_atlas, self._brick_pages):
-            if tex is not None:
-                tex.destroy()
-        self._brick_atlas = self.device.create_texture(
-            size=(az, ay, ax), dimension="3d", format="r16float",
-            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        self.device.queue.write_texture(
-            {"texture": self._brick_atlas}, a.tobytes(),
-            {"bytes_per_row": az * 2, "rows_per_image": ay}, (az, ay, ax))
-        self._brick_pages = self.device.create_texture(
-            size=(gz, gy, gx), dimension="3d", format="r32uint",
-            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        self.device.queue.write_texture(
-            {"texture": self._brick_pages}, p.tobytes(),
-            {"bytes_per_row": gz * 4, "rows_per_image": gy}, (gz, gy, gx))
-        self._bind_group = None
-
     def upload_nest(self, sigma_padded: np.ndarray) -> None:
         """Upload the finer level bound at binding 5.
 
@@ -720,14 +637,6 @@ class SoarRenderer:
             {"binding": 4, "visibility": wgpu.ShaderStage.FRAGMENT,
              "sampler": {"type": "filtering"}},
             {"binding": 5, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
-            # The sparse pair. Bound whether or not the field is bricked, for
-            # the same reason binding 5 is: one layout serves every
-            # specialization. The page table is unfilterable by nature — it
-            # holds slot ids, and interpolating an id is meaningless — so it
-            # is uint and read with textureLoad.
-            {"binding": 6, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
-            {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT,
-             "texture": {"sample_type": "uint", "view_dimension": "3d"}},
         ])
         self._ray_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
@@ -783,8 +692,6 @@ class SoarRenderer:
                 {"binding": 3, "resource": self._ocean_tex.create_view()},
                 {"binding": 4, "resource": self._ocean_sampler},
                 {"binding": 5, "resource": self._nest_tex.create_view()},
-                {"binding": 6, "resource": self._brick_atlas.create_view()},
-                {"binding": 7, "resource": self._brick_pages.create_view()},
             ])
         return self._bind_group
 

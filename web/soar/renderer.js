@@ -196,9 +196,7 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   }
 }
 
-export function specializeShader(source, { periodic, nested, maxLightSteps,
-                                           bricked = false,
-                                           brick = [8, 8, 8] }) {
+export function specializeShader(source, { periodic, nested, maxLightSteps }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
@@ -211,11 +209,6 @@ export function specializeShader(source, { periodic, nested, maxLightSteps,
      `const NESTED: bool = ${nested ? "true" : "false"};`],
     ["const MAX_LIGHT_STEPS: i32 = 512;",
      `const MAX_LIGHT_STEPS: i32 = ${maxLightSteps};`],
-    ["const BRICKED: bool = false;",
-     `const BRICKED: bool = ${bricked ? "true" : "false"};`],
-    ["const BRICK_X: i32 = 8;", `const BRICK_X: i32 = ${brick[0]};`],
-    ["const BRICK_Y: i32 = 8;", `const BRICK_Y: i32 = ${brick[1]};`],
-    ["const BRICK_Z: i32 = 8;", `const BRICK_Z: i32 = ${brick[2]};`],
   ];
   let out = source;
   for (const [sentinel, replacement] of swaps) {
@@ -299,14 +292,6 @@ export class Renderer {
           sampler: { type: "filtering" } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
-        // The sparse pair, bound whether or not the field is bricked — one
-        // layout has to serve every specialization. The page table holds slot
-        // ids, and an interpolated id means nothing, so it is uint and read
-        // with textureLoad rather than sampled.
-        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "float", viewDimension: "3d" } },
-        { binding: 7, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
@@ -415,8 +400,6 @@ export class Renderer {
         { binding: 3, resource: scene.oceanView },
         { binding: 4, resource: this.oceanSampler },
         { binding: 5, resource: scene.nestView },
-        { binding: 6, resource: scene.brickAtlasView },
-        { binding: 7, resource: scene.brickPageView },
       ],
     });
   }
@@ -572,28 +555,6 @@ export class Renderer {
     this._applyRung();
   }
 
-  /**
-   * Put the ladder on its top rung now, without climbing to it.
-   *
-   * For measurement, not for flying. A benchmark has to time the picture the
-   * user is actually looking at, and a still view has already climbed to full
-   * render scale — timing the FLIGHT configuration instead would report a
-   * quarter-resolution frame nobody was watching. It also makes an A/B
-   * comparable at all: each side of one rebuilds the field, and a rebuilt
-   * field starts at rung 0, so without this the second run would be measured
-   * somewhere else on the ladder from the first.
-   *
-   * Deliberately skips holdTick's affordability gate. That gate exists so a
-   * weak machine never RENDERS a cost it has not justified from below; here
-   * the whole point is to pay a known cost on purpose and find out what it
-   * is.
-   */
-  pinTopRung() {
-    this._holdRung = this._holdLadder.length - 1;
-    this._holdCapped = false;
-    this._applyRung();
-  }
-
   /** Which rung is in force, and how many there are. For the stats readout. */
   get holdRung() { return this._holdRung; }
   get holdRungCount() { return this._holdLadder.length; }
@@ -648,19 +609,13 @@ export class Renderer {
   // --- pipelines ----------------------------------------------------------
 
   _module(periodic, nested, maxLightSteps) {
-    // Bricking is a property of the SCENE, not of the tier, so it belongs in
-    // the key but never changes without a new scene — a tier switch still
-    // compiles nothing, which is what makes the hold ladder free.
-    const bricked = Boolean(this.scene.bricked);
-    const brick = this.scene._bricks?.brick ?? [8, 8, 8];
-    const key = `${periodic}|${nested}|${maxLightSteps}|${bricked}|${brick}`;
+    const key = `${periodic}|${nested}|${maxLightSteps}`;
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
         code: specializeShader(this.shaderSource,
-                               { periodic, nested, maxLightSteps,
-                                 bricked, brick }),
+                               { periodic, nested, maxLightSteps }),
       });
       this._modules.set(key, module);
     }
@@ -1046,9 +1001,6 @@ export class Renderer {
     const s = this.scene;
     return {
       bmin: s.bmin, bmax: s.bmax,
-      // Row 23, read only by the BRICKED shader: a bricked field has no dense
-      // texture to ask its grid size of.
-      shape: s.shape,
       dtView: this.dtView, dtLight: this.dtLight,
       periodic: this.periodic,
       oceanZ: 0.0,

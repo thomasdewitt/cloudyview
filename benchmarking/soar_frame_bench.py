@@ -84,82 +84,15 @@ def build_level(data_file=DATA_FILE, ice_file=None, fallback_units=None,
     return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=data_file.stem)
 
 
-def build_bricks(level, brick):
-    """The sparse pair for `level`, built by the browser's own bricks.js.
-
-    Shelled out to node rather than reimplemented here for the reason the
-    layout lives in one file at all: two implementations of a shape that can
-    drift will drift. The field goes over as a raw float32 sidecar, not
-    embedded in the JSON — a 640^3 field is a gigabyte, and base64 in an
-    argument is not a transport.
-    """
-    import json
-    import subprocess
-    import tempfile
-
-    repo = Path(__file__).resolve().parents[1]
-    bricks_js = repo / "web" / "soar" / "bricks.js"
-    if not bricks_js.exists():
-        raise SystemExit(f"no {bricks_js}")
-    sigma = np.ascontiguousarray(level.sigma, dtype=np.float32)
-    nx, ny, nz = sigma.shape
-    with tempfile.TemporaryDirectory() as d:
-        raw = Path(d) / "field.f32"
-        raw.write_bytes(sigma.tobytes())
-        out_path = Path(d) / "out.bin"
-        script = f"""
-        import {{ createBrickBuilder }} from {str(bricks_js)!r};
-        import {{ readFileSync, writeFileSync }} from "node:fs";
-        const [nx, ny, nz] = {[nx, ny, nz]!r};
-        const field = new Float32Array(readFileSync({str(raw)!r}).buffer);
-        const b = createBrickBuilder(
-            {{ dims: [nx, ny, nz], brick: {list(brick)!r}, periodic: true }});
-        // One x-plane per tile: the builder streams, and a whole-field tile
-        // would be a second copy of the field.
-        for (let x = 0; x < nx; x++) {{
-          b.addTile([x, 0, 0], [1, ny, nz],
-                    field.subarray(x * ny * nz, (x + 1) * ny * nz));
-        }}
-        const o = b.finalize();
-        writeFileSync({str(out_path)!r}, Buffer.concat([
-          Buffer.from(new Uint32Array(o.pageTable).buffer),
-          Buffer.from(new Float32Array(o.atlas).buffer)]));
-        process.stdout.write(JSON.stringify(
-          {{ pageDims: o.pageDims, atlasDims: o.atlasDims, stats: o.stats }}));
-        """
-        proc = subprocess.run(["node", "--input-type=module", "-"],
-                              input=script, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise SystemExit(f"bricks.js failed:\n{proc.stderr[-4000:]}")
-        meta = json.loads(proc.stdout)
-        blob = out_path.read_bytes()
-    gx, gy, gz = meta["pageDims"]
-    ax, ay, az = meta["atlasDims"]
-    npage = gx * gy * gz
-    page = np.frombuffer(blob, dtype="<u4", count=npage).reshape(gx, gy, gz)
-    atlas = np.frombuffer(blob, dtype="<f4", offset=npage * 4,
-                          count=ax * ay * az).reshape(ax, ay, az)
-    s = meta["stats"]
-    print(f"bricks {brick}: {s['occupiedBricks']}/{s['totalBricks']} occupied "
-          f"({100 * s['occupiedBricks'] / s['totalBricks']:.2f}%), atlas "
-          f"{s['denseTexels'] / max(s['atlasTexels'], 1):.2f}x smaller than dense")
-    return atlas, page
-
-
-def time_tier(level, tier_name, tier, views, frames, warmup, bricks=None,
-              brick=(8, 8, 8)):
+def time_tier(level, tier_name, tier, views, frames, warmup):
     from cloudyview.soar_host import (
         SceneState, SoarRenderer, ViewState, camera_world_origin,
     )
     from cloudyview.witness import _padded, OCEAN_REFLECTANCE
 
     renderer = SoarRenderer(periodic=True, nested=False,
-                            max_light_steps=tier["max_light_steps"],
-                            bricked=bricks is not None, brick=brick)
-    if bricks is not None:
-        renderer.upload_bricks(bricks[0], bricks[1])
-    else:
-        renderer.upload_volume(_padded(level.sigma))
+                            max_light_steps=tier["max_light_steps"])
+    renderer.upload_volume(_padded(level.sigma))
 
     min_voxel = min(level.dx)
     state = SceneState(
@@ -169,8 +102,6 @@ def time_tier(level, tier_name, tier, views, frames, warmup, bricks=None,
         dt_light=min_voxel * tier["light_step_factor"],
         periodic=True,
         ocean_reflectance=OCEAN_REFLECTANCE,
-        # Row 23, read only by the bricked shader.
-        shape=tuple(int(v) for v in level.sigma.shape),
     )
 
     scale = tier["render_scale"]
@@ -232,12 +163,6 @@ def main():
     parser.add_argument("--ice", type=Path, default=None,
                         help="separate netCDF file with the ice variable "
                              "(SAM LPT one-variable-per-file style)")
-    parser.add_argument("--bricked", action="store_true",
-                        help="store the field as sparse bricks and skip empty "
-                             "space (built by web/soar/bricks.js under node)")
-    parser.add_argument("--brick", type=str, default="8,8,8",
-                        help="brick extent x,y,z (default 8,8,8) — the shape "
-                             "axis is a one-flag experiment on purpose")
     parser.add_argument("--no-zcrop", action="store_true",
                         help="render the file's whole z extent, including the "
                              "empty sky the app would crop away (for A/B)")
@@ -268,14 +193,10 @@ def main():
 
     level = build_level(args.field, args.ice, args.fallback_units,
                         zcrop=not args.no_zcrop)
-    brick = tuple(int(v) for v in args.brick.split(","))
-    if len(brick) != 3 or any(b < 1 for b in brick):
-        raise SystemExit(f"--brick wants three positive integers, got {args.brick}")
-    bricks = build_bricks(level, brick) if args.bricked else None
     all_rows = []
     for tier_name, tier in tiers.items():
         rows = time_tier(level, tier_name, tier, views,
-                         args.frames, args.warmup, bricks=bricks, brick=brick)
+                         args.frames, args.warmup)
         all_rows.extend((tier_name, *r) for r in rows)
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
