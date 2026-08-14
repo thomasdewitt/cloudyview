@@ -600,7 +600,7 @@ export class UI {
       ["Esc", "menu"],
       ["F", "fullscreen"],
       ["F3", "stats: brief, full, off"],
-      ["B", "flyer — swift, paper dart, off"],
+      ["B", "flyer — paper dart, swift, off"],
       ["M", "minimap"],
       ["R", "record a flight track"],
       ["F12", "screenshot"],

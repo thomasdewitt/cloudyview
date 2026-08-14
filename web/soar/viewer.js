@@ -15,6 +15,24 @@ import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
 
+/**
+ * The flyers, in the order B cycles them — and so the first is the default.
+ *
+ * One table rather than an order here, a name there and a build loop
+ * somewhere else: three lists that have to agree is three chances for them
+ * not to, and the only thing any of them encodes is "which flyers, in what
+ * order".
+ *
+ * The dart leads. It is the one that reads at a glance — pale against sky
+ * where the swift is a dark speck, and its phugoid says "thrown object"
+ * before you have looked at the shape — so it is the better first impression
+ * of a renderer someone has just opened.
+ */
+const FLYERS = [
+  { kind: "dart", Species: Dart, name: "paper dart", source: "dartSource" },
+  { kind: "bird", Species: Bird, name: "swift", source: "birdSource" },
+];
+
 /** Release both flyers, whichever of them got built. */
 function destroyFlyers(flyers) {
   for (const flyer of Object.values(flyers ?? {})) flyer?.destroy();
@@ -91,10 +109,10 @@ export class Viewer {
     this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
 
     this.flyerEnabled = true;
-    // Which of the two flyers is up: "bird" (a common swift) or "dart" (a
-    // paper aeroplane). They share a render pass and differ in mesh, shading
-    // and — mostly — in how they move. B cycles off / swift / dart.
-    this.flyerKind = "bird";
+    // Which of the two flyers is up. They share a render pass and differ in
+    // mesh, shading and — mostly — in how they move. B cycles them in FLYERS
+    // order and then off; the first of FLYERS is what you get on load.
+    this.flyerKind = FLYERS[0].kind;
     // "corner" | "full" | "off". Fullscreen frees the mouse so the map can
     // be clicked to travel; M cycles through all three.
     this.minimapMode = "corner";
@@ -298,11 +316,10 @@ export class Viewer {
         bmin: scene.bmin, bmax: scene.bmax,
       };
       const built = {};
-      for (const [kind, Species, source] of
-           [["bird", Bird, this.birdSource], ["dart", Dart, this.dartSource]]) {
+      for (const { kind, Species, source } of FLYERS) {
         const flyer = new Species(this.device, resources);
         try {
-          await flyer.init(this.canvasFormat, source);
+          await flyer.init(this.canvasFormat, this[source]);
           built[kind] = flyer;
         } catch (err) {
           flyer.destroy();
@@ -1279,20 +1296,17 @@ export class Viewer {
 
   /** The flyers that built, in cycle order. */
   get availableFlyers() {
-    return ["bird", "dart"].filter((kind) => this.flyers?.[kind]);
+    return FLYERS.map((f) => f.kind).filter((kind) => this.flyers?.[kind]);
   }
-
-  /** Names for the two, as the messages and the menu say them. */
-  static FLYER_NAMES = { bird: "swift", dart: "paper dart" };
 
   /** What is up, for the menu row and the stats readout: a name, or "off". */
   get flyerLabel() {
     return this.flyer && this.flyerEnabled
-      ? Viewer.FLYER_NAMES[this.flyerKind] : "off";
+      ? FLYERS.find((f) => f.kind === this.flyerKind).name : "off";
   }
 
   /**
-   * B: off -> swift -> dart -> off.
+   * B: off -> paper dart -> swift -> off, per FLYERS.
    *
    * One key for both the choice and the switch, because there are two of them
    * and there is not going to be a third. Turning one on gives the loop
@@ -1321,7 +1335,7 @@ export class Viewer {
     } else {
       this.flyerKind = available[at + 1];
     }
-    const name = Viewer.FLYER_NAMES[this.flyerKind];
+    const name = FLYERS.find((f) => f.kind === this.flyerKind).name;
     this.ui.say(this.flyerEnabled
       ? `${name[0].toUpperCase()}${name.slice(1)}.`
       : "No flyer.");
