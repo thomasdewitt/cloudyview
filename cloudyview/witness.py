@@ -493,12 +493,18 @@ def _render_with_nest(filename: str, outer_field: CloudField, camera: Camera,
           f"fov {camera.fov:.1f} (horizontal)")
     print(f"  Sun: azimuth {sun_azimuth:.1f}, elevation {sun_elevation:.1f}")
 
+    # `exposure` may arrive in look_kwargs (soar's auto-exposure writes it
+    # into the reproduction command); pop it off a copy so it does not
+    # collide with the explicit kwarg below.
+    look_kwargs = dict(look_kwargs)
+    exposure = look_kwargs.pop('exposure', rendering['exposure'])
+
     return render_nested(
         [nest, outer], position,          # finest first
         azimuth=camera.azimuth, elevation=camera.elevation,
         fov_degrees=camera.fov, image_size=tuple(size),
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
-        exposure=rendering['exposure'],
+        exposure=exposure,
         periodic=periodic, verbose=True,
         **look_kwargs)
 
@@ -508,6 +514,7 @@ def main(filename: str, output: str = None,
          camera_elevation: float = None, camera_fov: float = None,
          sun_azimuth: float = None, sun_elevation: float = None,
          custom_size: tuple = None,
+         exposure: float = None,
          tone_map_gamma: float = None,
          tone_map_white_point: float = None,
          contrast: float = None,
@@ -545,6 +552,8 @@ def main(filename: str, output: str = None,
     # None means "the library default"; only forward what was actually asked
     # for, so cloudyview.witness / soar_host stay the single source of truth.
     look_kwargs = {}
+    if exposure is not None:
+        look_kwargs['exposure'] = exposure
     if tone_map_gamma is not None:
         look_kwargs['tone_map_gamma'] = tone_map_gamma
     if tone_map_white_point is not None:
@@ -731,6 +740,10 @@ def cli():
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
+    parser.add_argument("--exposure", type=float,
+                        help="Tone-map exposure (linear pre-scale; default 4.0). "
+                             "Soar's auto-exposure writes its metered value here "
+                             "so a terminal render reproduces the flown frame")
     parser.add_argument("--gamma", type=float,
                         help=f"Tone-map gamma (default: {DEFAULT_TONE_MAP_GAMMA})")
     parser.add_argument("--white-point", type=float,
@@ -759,6 +772,7 @@ def cli():
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
          custom_size=size,
+         exposure=args.exposure,
          tone_map_gamma=args.gamma,
          tone_map_white_point=args.white_point,
          contrast=args.contrast,

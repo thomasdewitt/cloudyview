@@ -13,6 +13,12 @@ import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
+import { Dart } from "./dart.js";
+
+/** Release both flyers, whichever of them got built. */
+function destroyFlyers(flyers) {
+  for (const flyer of Object.values(flyers ?? {})) flyer?.destroy();
+}
 import {
   TrackRecorder, trackPayload, resampleTrack, resampledFrameCount,
   MAX_TRACK_SECONDS,
@@ -57,6 +63,17 @@ export class Viewer {
     this.contrast = K.DEFAULT_CONTRAST;
     this.haze = K.DEFAULT_HAZE;
     this._holdMode = K.DEFAULT_HOLD_MODE;
+    // The video-camera loop: exposure glides toward what the linear meter
+    // asks for (see constants.js, AUTO_EXPOSURE_*). `exposure` is the live
+    // value the frames are drawn with either way; turning auto off freezes
+    // it where it is, the way a camera's manual mode inherits the metered
+    // setting. Auto is a tier default (off below High) until touched by
+    // hand; the pre-probe initial state matches the default tier's.
+    this.exposure = K.DEFAULT_EXPOSURE;
+    this.autoExposure =
+      K.AUTO_EXPOSURE_DEFAULT_BY_TIER[K.DEFAULT_QUALITY_TIER] ?? false;
+    this._aeLastMeterMs = 0;
+    this._aeSettled = false;
     this.lodStrength = K.DEFAULT_LOD_STRENGTH_BY_TIER[K.DEFAULT_QUALITY_TIER];
     // Three settings carry a per-tier default (haze, motion smoothing, LOD
     // strength) and the tier is chosen by measurement, so it can change under
@@ -73,7 +90,11 @@ export class Viewer {
     this.videoFps = K.DEFAULT_VIDEO_FPS;
     this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
 
-    this.birdEnabled = true;
+    this.flyerEnabled = true;
+    // Which of the two flyers is up: "bird" (a common swift) or "dart" (a
+    // paper aeroplane). They share a render pass and differ in mesh, shading
+    // and — mostly — in how they move. B cycles off / swift / dart.
+    this.flyerKind = "bird";
     // "corner" | "full" | "off". Fullscreen frees the mouse so the map can
     // be clicked to travel; M cycles through all three.
     this.minimapMode = "corner";
@@ -154,6 +175,7 @@ export class Viewer {
     this.shaderSource = await (await fetch("raymarch.wgsl")).text();
     this.hudSource = await (await fetch("hud.wgsl")).text();
     this.birdSource = await (await fetch("bird.wgsl")).text();
+    this.dartSource = await (await fetch("dart.wgsl")).text();
     this.progress = progress;
 
     // The UI is built before the field loads, because loading a file asks
@@ -191,12 +213,12 @@ export class Viewer {
     }
     this.renderer?.destroy();
     this.minimap?.destroy();
-    this.bird?.destroy();
+    destroyFlyers(this.flyers);
     this.scene.destroy();
     this.scene = null;
     this.renderer = null;
     this.minimap = null;
-    this.bird = null;
+    this.flyers = null;
     this.frameIndex = 0;
     this._lastSignature = null;
     this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
@@ -216,8 +238,8 @@ export class Viewer {
   async loadField(source, progress) {
     await this._releaseField();
 
-    let scene = null, renderer = null, minimap = null, bird = null;
-    let sun = null, minimapProblem = null, birdProblem = null;
+    let scene = null, renderer = null, minimap = null, flyers = null;
+    let sun = null, minimapProblem = null, flyerProblem = null;
     try {
       // The ocean is a patch of sea surface, not anything about the data, so
       // it survives a change of field — and belongs to the viewer, which is
@@ -266,20 +288,33 @@ export class Viewer {
         minimap = null;
         minimapProblem = String(err?.message || err);
       }
-      const flyer = new Bird(this.device, {
+      // Both flyers are built up front rather than on demand. Each is a few
+      // thousand triangles and one small pipeline, and building them together
+      // means switching between them is instant and — more to the point —
+      // that a GPU which cannot hold one says so now, at load, rather than
+      // the first time someone presses B.
+      const resources = {
         volumeView: scene.volumeView, sampler: renderer.volSampler,
         bmin: scene.bmin, bmax: scene.bmax,
-      });
-      try {
-        await flyer.init(this.canvasFormat, this.birdSource);
-        bird = flyer;
-      } catch (err) {
-        flyer.destroy();
-        bird = null;
-        birdProblem = String(err?.message || err);
+      };
+      const built = {};
+      for (const [kind, Species, source] of
+           [["bird", Bird, this.birdSource], ["dart", Dart, this.dartSource]]) {
+        const flyer = new Species(this.device, resources);
+        try {
+          await flyer.init(this.canvasFormat, source);
+          built[kind] = flyer;
+        } catch (err) {
+          flyer.destroy();
+          built[kind] = null;
+          // One message covers both: they share a pass, so whatever stops one
+          // stops the other, and two identical notes help nobody.
+          flyerProblem ??= String(err?.message || err);
+        }
       }
+      flyers = built;
     } catch (err) {
-      bird?.destroy();
+      destroyFlyers(flyers);
       minimap?.destroy();
       renderer?.destroy();
       scene?.destroy();
@@ -292,9 +327,12 @@ export class Viewer {
     // one while there was no renderer to ask, it gets it now.
     renderer.setHoldMode(this.holdMode);
     this.minimap = minimap;
-    this.bird = bird;
+    this.flyers = flyers;
+    // If the one that was up last time did not build for this field, start on
+    // one that did rather than on a null nothing draws and nobody mentions.
+    if (!this.flyer) this.flyerKind = this.availableFlyers[0] ?? this.flyerKind;
     this._minimapProblem = minimapProblem;
-    this._birdProblem = birdProblem;
+    this._flyerProblem = flyerProblem;
     if (sun) {
       this.sunAzimuth = sun.azimuth;
       this.sunElevation = sun.elevation;
@@ -311,7 +349,7 @@ export class Viewer {
     const notes = [];
     if (scene.nestNote) notes.push(scene.nestNote);
     if (minimapProblem) notes.push(`Flying without the minimap: ${minimapProblem}`);
-    if (birdProblem) notes.push(`Flying without the bird: ${birdProblem}`);
+    if (flyerProblem) notes.push(`Flying without a flyer: ${flyerProblem}`);
     if (scene.skipped?.length) {
       notes.push(
         `${scene.skipped.length} group(s) in this file could not be read, ` +
@@ -873,7 +911,7 @@ export class Viewer {
         return;
       case "f": this.toggleFullscreen(); return;
       case "F3": e.preventDefault(); this.ui.cycleStats(); return;
-      case "b": this.toggleBird(); return;
+      case "b": this.cycleFlyer(); return;
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
       // Through pause(), not ui.open() directly: the dialog needs the mouse,
@@ -978,6 +1016,91 @@ export class Viewer {
   }
 
   /**
+   * Video-camera exposure. On, the linear meter drives `exposure` (see
+   * _aeTick); off, it freezes wherever the meter left it — manual mode on a
+   * camera inherits the metered setting, and snapping back to the default
+   * would visibly re-expose the very picture the user just chose to pin.
+   * A hand toggle is final: no tier change flips it back.
+   */
+  setAutoExposure(on, { byHand = true } = {}) {
+    if (byHand) this._byHand.add("autoExposure");
+    this.autoExposure = Boolean(on);
+    this._aeSettled = false;
+    if (this.autoExposure) {
+      this._aeLastMeterMs = 0;
+      this._wake("auto exposure");
+    }
+  }
+
+  /** The hand slider. Moving it is choosing manual, as on a camera body. */
+  setExposure(exposure) {
+    const [lo, hi] = K.EXPOSURE_LIMITS;
+    if (!(exposure >= lo && exposure <= hi)) {
+      throw new Error(`exposure must be in [${lo}, ${hi}]; got ${exposure}.`);
+    }
+    if (this.autoExposure) this.setAutoExposure(false);
+    this.exposure = exposure;
+    this.renderer.resetAccumulation();
+    this._wake("exposure");
+  }
+
+  /**
+   * One metering step per frame (the one-readback-in-flight guard in
+   * meterLuminance is the real throttle), folded into the exposure with a
+   * fixed-time-constant glide over MEASURED elapsed time, so the feel does
+   * not depend on the frame rate. Skipped while the startup probe is timing
+   * frames (its queue drains must not measure meter work) — captures never
+   * reach here, since _frame short-circuits on them.
+   *
+   * The glide stops inside the stop band and does not restart until the
+   * target leaves the (wider) start band: every exposure step is a scene-key
+   * change that restarts accumulation, so without the hysteresis a parked
+   * view would chase metering noise forever instead of converging.
+   */
+  _aeTick(nowMs, outputSize) {
+    if (!this.autoExposure || this._probe) return;
+    if (nowMs - this._aeLastMeterMs < K.AUTO_EXPOSURE_INTERVAL_MS) return;
+    this._aeLastMeterMs = nowMs;
+    this.renderer.meterLuminance(outputSize, this._viewKwargs())
+      .then((highlight) => {
+        if (!(highlight > 0) || this._disposed || !this.autoExposure) return;
+        const [lo, hi] = K.AUTO_EXPOSURE_LIMITS;
+        // Full protection would place the highlight at the fraction of the
+        // white point; the response exponent applies only that share of the
+        // log-distance below the ceiling (see AUTO_EXPOSURE_RESPONSE).
+        const full = K.AUTO_EXPOSURE_HIGHLIGHT_FRACTION
+          * this.toneMapWhitePoint / highlight;
+        const target = Math.min(hi, Math.max(
+          lo,
+          full >= hi ? hi
+                     : hi * Math.pow(full / hi, K.AUTO_EXPOSURE_RESPONSE)));
+        const err = Math.abs(Math.log2(target / this.exposure));
+        if (this._aeSettled) {
+          if (err < K.AUTO_EXPOSURE_DEADBAND_START_LOG2) return;
+          this._aeSettled = false;
+        } else if (err < K.AUTO_EXPOSURE_DEADBAND_STOP_LOG2) {
+          this._aeSettled = true;
+          return;
+        }
+        // Elapsed time is measured between APPLIED steps — readbacks can
+        // skip frames under load, and the glide should not slow with them.
+        const applyMs = performance.now();
+        const elapsedS = Math.min(
+          0.25, Math.max(0.001, (applyMs - (this._aeLastApplyMs ?? applyMs
+                                            - 16.7)) / 1000));
+        this._aeLastApplyMs = applyMs;
+        const alpha = 1 - Math.exp(
+          -elapsedS / K.AUTO_EXPOSURE_TIME_CONSTANT_S);
+        this.exposure *= Math.pow(target / this.exposure, alpha);
+        this.ui?.refreshExposure?.(this.exposure);
+        // The new exposure reaches the shader through _viewKwargs on the
+        // next frame; it is in the scene key, so accumulation restarts by
+        // itself. A sleeping loop needs the nudge.
+        this._wake("auto exposure");
+      });
+  }
+
+  /**
    * How much aerosol is in the air, 0 to 1. Unlike the gamma above this is
    * not a display choice — it changes what the march computes, so the frames
    * already averaged are of a different sky and cannot be kept.
@@ -1036,6 +1159,10 @@ export class Viewer {
   _applyTierDefaults(tier) {
     if (!this._byHand.has("haze")) {
       this.setHaze(K.DEFAULT_HAZE_BY_TIER[tier], { byHand: false });
+    }
+    if (!this._byHand.has("autoExposure")) {
+      this.setAutoExposure(K.AUTO_EXPOSURE_DEFAULT_BY_TIER[tier] ?? false,
+                           { byHand: false });
     }
     if (!this._byHand.has("lod")) {
       this.setLodStrength(K.DEFAULT_LOD_STRENGTH_BY_TIER[tier], { byHand: false });
@@ -1138,19 +1265,67 @@ export class Viewer {
     }
   }
 
-  toggleBird() {
-    if (!this.bird) {
+  /**
+   * The flyer currently up, or null if there is none for this field.
+   *
+   * Everything downstream — the frame loop, the stills, the stats readout —
+   * only ever wants the active one, and asking through a getter means there
+   * is no second copy of "which flyer" to be assigned, forgotten, and left
+   * pointing at a destroyed object.
+   */
+  get flyer() {
+    return this.flyers?.[this.flyerKind] ?? null;
+  }
+
+  /** The flyers that built, in cycle order. */
+  get availableFlyers() {
+    return ["bird", "dart"].filter((kind) => this.flyers?.[kind]);
+  }
+
+  /** Names for the two, as the messages and the menu say them. */
+  static FLYER_NAMES = { bird: "swift", dart: "paper dart" };
+
+  /** What is up, for the menu row and the stats readout: a name, or "off". */
+  get flyerLabel() {
+    return this.flyer && this.flyerEnabled
+      ? Viewer.FLYER_NAMES[this.flyerKind] : "off";
+  }
+
+  /**
+   * B: off -> swift -> dart -> off.
+   *
+   * One key for both the choice and the switch, because there are two of them
+   * and there is not going to be a third. Turning one on gives the loop
+   * something to animate again; turning them off lets a converged view sleep
+   * outright, so both directions have to wake it.
+   */
+  cycleFlyer() {
+    // Only the ones that actually built. They share a pass, so in practice
+    // either both are here or neither is — but cycling onto a flyer that
+    // failed to compile would draw nothing and say nothing, which is the one
+    // outcome worth ruling out by construction.
+    const available = this.availableFlyers;
+    if (!available.length) {
       this.ui.say(
-        this._birdProblem
-          ? `No bird for this field: ${this._birdProblem}`
-          : "There is no bird for this field.", 5);
+        this._flyerProblem
+          ? `No flyer for this field: ${this._flyerProblem}`
+          : "There is no flyer for this field.", 5);
       return;
     }
-    this.birdEnabled = !this.birdEnabled;
-    this.ui.say(`Bird ${this.birdEnabled ? "on" : "off"}.`);
-    // Both directions matter: turning it on gives the loop something to
-    // animate again, turning it off lets a converged view sleep outright.
-    this._wake("bird");
+    const at = available.indexOf(this.flyerKind);
+    if (!this.flyerEnabled) {
+      this.flyerEnabled = true;
+      this.flyerKind = available[0];
+    } else if (at < 0 || at === available.length - 1) {
+      this.flyerEnabled = false;
+    } else {
+      this.flyerKind = available[at + 1];
+    }
+    const name = Viewer.FLYER_NAMES[this.flyerKind];
+    this.ui.say(this.flyerEnabled
+      ? `${name[0].toUpperCase()}${name.slice(1)}.`
+      : "No flyer.");
+    this._wake("flyer");
   }
 
   toggleFullscreen() {
@@ -1202,12 +1377,12 @@ export class Viewer {
     }
     this.renderer?.destroy();
     this.minimap?.destroy();
-    this.bird?.destroy();
+    destroyFlyers(this.flyers);
     this.scene?.destroy();
     this._ocean?.texture?.destroy();
     this.renderer = null;
     this.minimap = null;
-    this.bird = null;
+    this.flyers = null;
     this.scene = null;
     this._ocean = null;
 
@@ -1359,16 +1534,16 @@ export class Viewer {
   /** The overlays an offline frame draws, laid out for that frame's size. */
   _offlineOverlays(pose, size, dt) {
     const overlays = [];
-    if (this.bird && this.birdEnabled) {
-      this.bird.update(dt, pose);
-      this.bird.writeUniforms(pose, size, {
+    if (this.flyer && this.flyerEnabled) {
+      this.flyer.update(dt, pose);
+      this.flyer.writeUniforms(pose, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
         toneMapGamma: this.toneMapGamma,
         toneMapWhitePoint: this.toneMapWhitePoint,
         contrast: this.contrast,
       });
       overlays.push((enc, view, format) =>
-        this.bird.encodePass(enc, view, format, size));
+        this.flyer.encodePass(enc, view, format, size));
     }
     if (this.minimap && this.minimapMode !== "off") {
       this.minimap.update({
@@ -1450,15 +1625,15 @@ export class Viewer {
     // overlays are re-laid-out for it. The bird holds the pose it had when
     // the button was pressed rather than flying on through the accumulation.
     const stillOverlays = [];
-    if (overlays && this.bird && this.birdEnabled) {
-      this.bird.writeUniforms(this.camera, size, {
+    if (overlays && this.flyer && this.flyerEnabled) {
+      this.flyer.writeUniforms(this.camera, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
         toneMapGamma: this.toneMapGamma,
         toneMapWhitePoint: this.toneMapWhitePoint,
         contrast: this.contrast,
       });
       stillOverlays.push((enc, view, format) =>
-        this.bird.encodePass(enc, view, format, size));
+        this.flyer.encodePass(enc, view, format, size));
     }
     if (overlays && this.minimap && this.minimapMode !== "off") {
       this.minimap.update(this.camera, this.scene, size);
@@ -1631,6 +1806,7 @@ export class Viewer {
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
       ...(this.renderer.periodic ? ["--periodic"] : []),
+      "--exposure", n(this.exposure),
       "--gamma", n(this.toneMapGamma),
       "--white-point", n(this.toneMapWhitePoint),
       "--contrast", n(this.contrast),
@@ -1646,6 +1822,7 @@ export class Viewer {
       jitter: true,
       sunAzimuth: this.sunAzimuth,
       sunElevation: this.sunElevation,
+      exposure: this.exposure,
       toneMapGamma: this.toneMapGamma,
       toneMapWhitePoint: this.toneMapWhitePoint,
       contrast: this.contrast,
@@ -1752,16 +1929,17 @@ export class Viewer {
     // Bird first, minimap second: the bird lives in the scene and takes the
     // scene's depth, the map is chrome laid over the finished picture.
     const overlays = [];
-    if (this.bird && this.birdEnabled) {
-      this.bird.update(this.paused ? 0 : dt, this.camera);
-      this.bird.writeUniforms(this.camera, [outW, outH], {
+    if (this.flyer && this.flyerEnabled) {
+      this.flyer.update(this.paused ? 0 : dt, this.camera);
+      this.flyer.writeUniforms(this.camera, [outW, outH], {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+        exposure: this.exposure,
         toneMapGamma: this.toneMapGamma,
         toneMapWhitePoint: this.toneMapWhitePoint,
         contrast: this.contrast,
       });
       overlays.push((enc, view, format) =>
-        this.bird.encodePass(enc, view, format, [outW, outH]));
+        this.flyer.encodePass(enc, view, format, [outW, outH]));
     }
     if (this.minimap && this.minimapMode !== "off") {
       this.minimap.update(this.camera, this.scene, [outW, outH],
@@ -1853,6 +2031,10 @@ export class Viewer {
         : elapsed * 1000);
     }
 
+    // Fire-and-forget: the meter renders ~5k rays on its own uniform buffer
+    // and folds its answer in whenever the readback lands.
+    this._aeTick(now, [outW, outH]);
+
     // Sampled after the frame it describes, so the track records what was on
     // screen rather than what was about to be. The clock is the flight's own
     // accumulated time, not the wall's: see TrackRecorder.
@@ -1883,7 +2065,7 @@ export class Viewer {
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
       frame: this.frameIndex,
       minimap: Boolean(this.minimap && this.minimapMode !== "off"),
-      bird: Boolean(this.bird && this.birdEnabled),
+      flyer: this.flyerLabel,
       recording: this.recorder.recording,
       showSpeed: performance.now() / 1000 < this.camera.speedFlashUntil,
       parked: !march,
@@ -1931,7 +2113,7 @@ export class Viewer {
    * _wake, so it does not hold the loop open.
    */
   _overlaysAnimate() {
-    return Boolean(this.bird && this.birdEnabled && !this.paused);
+    return Boolean(this.flyer && this.flyerEnabled && !this.paused);
   }
 }
 

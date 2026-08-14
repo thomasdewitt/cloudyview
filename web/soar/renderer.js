@@ -202,7 +202,9 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   }
 }
 
-export function specializeShader(source, { periodic, nested, maxLightSteps }) {
+export function specializeShader(source,
+                                 { periodic, nested, maxLightSteps,
+                                   toneMap = true }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
@@ -215,6 +217,10 @@ export function specializeShader(source, { periodic, nested, maxLightSteps }) {
      `const NESTED: bool = ${nested ? "true" : "false"};`],
     ["const MAX_LIGHT_STEPS: i32 = 512;",
      `const MAX_LIGHT_STEPS: i32 = ${maxLightSteps};`],
+    // The auto-exposure meter compiles the encode out and reads linear HDR —
+    // the same switch witness's return_linear uses (soar_host.specialize).
+    ["const TONE_MAP: bool = true;",
+     `const TONE_MAP: bool = ${toneMap ? "true" : "false"};`],
   ];
   let out = source;
   for (const [sentinel, replacement] of swaps) {
@@ -678,14 +684,14 @@ export class Renderer {
 
   // --- pipelines ----------------------------------------------------------
 
-  _module(periodic, nested, maxLightSteps) {
-    const key = `${periodic}|${nested}|${maxLightSteps}`;
+  _module(periodic, nested, maxLightSteps, toneMap = true) {
+    const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}`;
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
         code: specializeShader(this.shaderSource,
-                               { periodic, nested, maxLightSteps }),
+                               { periodic, nested, maxLightSteps, toneMap }),
       });
       this._modules.set(key, module);
     }
@@ -1108,8 +1114,130 @@ export class Renderer {
     return true;
   }
 
+  // --- the auto-exposure meter ---------------------------------------------
+
+  /**
+   * One tiny linear-radiance render of `view`, read back and reduced to the
+   * luminance at AUTO_EXPOSURE_PERCENTILE. Returns null when a previous
+   * meter's readback is still in flight (one is ever allowed; the AE loop
+   * just tries again next interval).
+   *
+   * The march is the real shader with TONE_MAP compiled out, at
+   * AUTO_EXPOSURE_METER_SIZE — the same footprint-per-cost trade renderScale
+   * makes, so ~5k rays per meter against ~1M for a frame. It gets its own
+   * uniform buffer and target: the main frame's buffer is rewritten inside
+   * drawFrame's multi-sample loop, and sharing it would race the meter's
+   * submit against those rewrites.
+   */
+  async meterLuminance(outputSize, view) {
+    if (this._meterBusy) return null;
+    this._meterBusy = true;
+    try {
+      const [mw, mh] = K.AUTO_EXPOSURE_METER_SIZE;
+      if (!this._meterTex) {
+        this._meterUniformBuf = this.device.createBuffer({
+          label: "soar-meter-uniforms",
+          size: K.UNIFORM_NBYTES,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this._meterTex = this.device.createTexture({
+          label: "soar-meter", size: [mw, mh], format: ACCUM_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
+        // 16 bytes per rgba32float texel; the row is 256-byte aligned by
+        // construction (96 * 16 = 1536).
+        this._meterReadBuf = this.device.createBuffer({
+          label: "soar-meter-read", size: mw * 16 * mh,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+      }
+      const module = this._module(
+        this.periodic, this.scene.nested, this.maxLightSteps, false);
+      this._meterPipeline ??= new Map();
+      const pipeKey = `${this.periodic}|${this.scene.nested}|` +
+                      `${this.maxLightSteps}`;
+      let pipeline = this._meterPipeline.get(pipeKey);
+      if (!pipeline) {
+        pipeline = this.device.createRenderPipeline({
+          label: `meter(${pipeKey})`,
+          layout: this.rayPipelineLayout,
+          vertex: { module, entryPoint: "vs_main" },
+          fragment: { module, entryPoint: "fs_main",
+                      targets: [{ format: ACCUM_FORMAT }] },
+          primitive: { topology: "triangle-list" },
+        });
+        this._meterPipeline.set(pipeKey, pipeline);
+      }
+      // Real outputSize for the aspect, meter size for the ray grid — the
+      // same split renderScale relies on. One deterministic sample.
+      const u = packUniforms(this._sceneState(), {
+        ...view, outputSize, renderSize: [mw, mh],
+        subpixel: false, jitterScale: 1.0,
+      });
+      this.device.queue.writeBuffer(this._meterUniformBuf, 0, u);
+      const bindGroup = this.device.createBindGroup({
+        label: "soar-meter",
+        layout: this.rayLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this._meterUniformBuf } },
+          { binding: 1, resource: this.scene.volumeView },
+          { binding: 2, resource: this.volSampler },
+          { binding: 3, resource: this.scene.oceanView },
+          { binding: 4, resource: this.oceanSampler },
+          { binding: 5, resource: this.scene.nestView },
+        ],
+      });
+      const encoder = this.device.createCommandEncoder();
+      const p = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: this._meterTex.createView(),
+          loadOp: "clear", storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      p.setPipeline(pipeline);
+      p.setBindGroup(0, bindGroup);
+      p.draw(3);
+      p.end();
+      encoder.copyTextureToBuffer(
+        { texture: this._meterTex },
+        { buffer: this._meterReadBuf, bytesPerRow: mw * 16 },
+        [mw, mh]);
+      this.device.queue.submit([encoder.finish()]);
+
+      await this._meterReadBuf.mapAsync(GPUMapMode.READ);
+      const data = new Float32Array(this._meterReadBuf.getMappedRange());
+      const lums = new Float32Array(mw * mh);
+      for (let i = 0; i < mw * mh; i++) {
+        lums[i] = 0.2126 * data[i * 4]
+                + 0.7152 * data[i * 4 + 1]
+                + 0.0722 * data[i * 4 + 2];
+      }
+      this._meterReadBuf.unmap();
+      lums.sort();
+      // The highlight statistic: mean of everything above the rank. See
+      // AUTO_EXPOSURE_PERCENTILE for why the mean and not the percentile.
+      const rank = Math.min(
+        lums.length - 1,
+        Math.floor(K.AUTO_EXPOSURE_PERCENTILE * lums.length));
+      let sum = 0.0;
+      for (let i = rank; i < lums.length; i++) sum += lums[i];
+      return sum / (lums.length - rank);
+    } catch (err) {
+      // A lost device or an unmapped-in-teardown buffer ends metering, not
+      // the app: the AE loop treats null as "no reading this interval".
+      return null;
+    } finally {
+      this._meterBusy = false;
+    }
+  }
+
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
+    this._meterTex?.destroy();
+    this._meterReadBuf?.destroy();
+    this._meterUniformBuf?.destroy();
+    this._meterTex = this._meterReadBuf = this._meterUniformBuf = null;
     for (const targets of this._targetPool?.values() ?? []) {
       targets.sample.destroy();
       targets.accumA.destroy();

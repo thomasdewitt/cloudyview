@@ -22,10 +22,20 @@
 // way up. That is a swift's actual wingbeat, and it is why the silhouette
 // changes shape through the stroke instead of just tilting.
 
+// EVERYTHING POSITIONAL HERE IS RELATIVE TO THE CAMERA, and it has to stay
+// that way. A swift is 0.40 m across with 2-8 mm of structure in its feathers,
+// which is finer than a float32 ulp once world coordinates pass a couple of
+// hundred kilometres — and soar's camera is unbounded in altitude. Feeding
+// absolute world positions through `model` and `vp`, as this once did, put a
+// cancellation of two ~1e6 quantities between the mesh and the screen and the
+// bird rasterized as three or four stray slivers. The host differences the
+// camera out in doubles (see bird.js writeUniforms); nothing below is ever
+// bigger than the handful of metres the bird is away.
 struct BirdUniforms {
-    // World -> clip (camera view-projection, WebGPU depth 0..1).
+    // Camera-relative -> clip. Camera basis only: NO translation.
     vp: mat4x4<f32>,
-    // Bird local -> world (rotation * translation; mesh is pre-scaled).
+    // Bird local -> camera-relative (rotation, then the offset from the
+    // camera to the bird; mesh is pre-scaled).
     model: mat4x4<f32>,
     // Rotation-only copy of `model`, for normals.
     nrot: mat4x4<f32>,
@@ -146,7 +156,8 @@ fn hash11(x: f32) -> f32 {
 
 struct VSOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) world_pos: vec3<f32>,
+    // Camera to this vertex, in world axes, metres. Not a world position.
+    @location(0) rel_pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) local_pos: vec3<f32>,
     // x = signed span, y = chord, z = part, w = feather id.
@@ -194,12 +205,12 @@ fn vs_main(
     }
 
     var out: VSOut;
-    let wp = (bu.model * vec4<f32>(p, 1.0)).xyz;
-    out.world_pos = wp;
+    let rel = (bu.model * vec4<f32>(p, 1.0)).xyz;
+    out.rel_pos = rel;
     out.local_pos = p;
     out.normal = (bu.nrot * vec4<f32>(n, 0.0)).xyz;
     out.attrs = vec4<f32>(span, chord, part, feather);
-    out.clip = bu.vp * vec4<f32>(wp, 1.0);
+    out.clip = bu.vp * vec4<f32>(rel, 1.0);
     return out;
 }
 
@@ -220,7 +231,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // Thin shells: orient the normal toward the viewer so both faces shade.
     var n = normalize(in.normal);
-    let to_cam = cam - in.world_pos;
+    // The camera sits at the origin of this frame, so the vector to it is
+    // just the negated interpolant — no differencing of world positions, and
+    // so no cancellation however far out the camera has flown.
+    let to_cam = -in.rel_pos;
     let dist = length(to_cam);
     let view = to_cam / dist;
     if (dot(n, view) < 0.0) { n = -n; }
@@ -309,6 +323,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Cloud between camera and bird: a short Beer-Lambert march of the
     // resident sigma texture. The volume pass already painted that cloud, so
     // ordinary alpha blending composites the two correctly to first order.
+    //
+    // This is the one place absolute world coordinates survive, and they have
+    // to: the volume is anchored to the world, not to the camera. It is also
+    // the one place they are harmless — this asks which voxels a 5 m segment
+    // crosses, and a voxel is metres wide.
     let dir = -view;
     let hit = ray_box(cam, 1.0 / dir);
     let t0 = max(hit.x, 0.0);

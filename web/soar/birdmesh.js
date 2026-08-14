@@ -383,6 +383,15 @@ function addTail(rows) {
  *
  * `scale` multiplies every position. 1.0 is a real swift: 40 cm across.
  */
+export const ATTRIBUTES = [
+  { format: "float32x3", offset: 0, shaderLocation: 0 },    // pos
+  { format: "float32x3", offset: 12, shaderLocation: 1 },   // normal
+  { format: "float32", offset: 24, shaderLocation: 2 },     // span
+  { format: "float32", offset: 28, shaderLocation: 3 },     // chord
+  { format: "float32", offset: 32, shaderLocation: 4 },     // part
+  { format: "float32", offset: 36, shaderLocation: 5 },     // feather
+];
+
 export function buildBirdMesh({ scale = 1.0 } = {}) {
   const rows = [];
   addBody(rows);
@@ -411,7 +420,7 @@ export function buildBirdMesh({ scale = 1.0 } = {}) {
         "derivative degenerated; look for a pinch point.");
     }
   }
-  return { data, vertexCount, stride: VERTEX_STRIDE };
+  return { data, vertexCount, stride: VERTEX_STRIDE, attributes: ATTRIBUTES };
 }
 
 /** The mesh's bounding box, for placement checks and tests. */

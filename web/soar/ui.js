@@ -159,13 +159,13 @@ export class UI {
    *
    * An fps number describes frames the renderer is choosing to produce. Once
    * the view has converged it produces none — the loop either presents the
-   * finished picture for the bird to fly over, or stops outright — and the
+   * finished picture for the flyer to cross, or stops outright — and the
    * last number measured then sits there describing nothing. So a converged
    * view reports what it actually is: parked, and how many samples deep.
    * Same for the startup probe, whose frames are deliberately serialized
    * against the GPU queue and so have a frame rate that means nothing at all.
    */
-  drawStats({ fps, frameMs, camera, tier, renderScale, frame, minimap, bird,
+  drawStats({ fps, frameMs, camera, tier, renderScale, frame, minimap, flyer,
               recording, showSpeed, parked = false, converged = false,
               probing = false, autoTier = false, wakeReason = null, spp = 0,
               holdRung = 0, holdRungCount = 1, holdCapped = false }) {
@@ -207,7 +207,7 @@ export class UI {
       ["speed", `${camera.speed.toFixed(0)} m/s`],
       ["tier", `${tier}${autoTier ? " (auto)" : ""} · ` +
                `${renderScale.toFixed(2)}x`],
-      ["flags", `map ${minimap ? "on" : "off"} · bird ${bird ? "on" : "off"}` +
+      ["flags", `map ${minimap ? "on" : "off"} · flyer ${flyer}` +
                 (recording ? " · REC" : "")],
       ["frame", `${frame}`],
     ];
@@ -219,6 +219,15 @@ export class UI {
   // --- menu ----------------------------------------------------------------
 
   get isOpen() { return !this.menu.hidden; }
+
+  /**
+   * Track the meter on the open Quality panel's exposure slider. Called by
+   * the viewer whenever auto exposure applies a step; a detached row (panel
+   * closed or rebuilt) takes the value harmlessly.
+   */
+  refreshExposure(value) {
+    this._exposureRow?.setValue(value);
+  }
 
   close() {
     this.menu.hidden = true;
@@ -350,12 +359,16 @@ export class UI {
         if (app.minimapMode === "full") this.close();
         else this.open("main");
       }));
+    // Like the minimap row above: the label carries the state and the key
+    // cycles it, because there are three states and a checkbox has two. The
+    // second branch of the subtitle has to survive — a field that cannot
+    // carry a flyer still owes an explanation of why.
     appearance.append(item(
-      `Bird: ${app.bird && app.birdEnabled ? "on" : "off"}`,
-      app.bird
+      `Flyer: ${app.flyerLabel}`,
+      app.availableFlyers.length
         ? "Keyboard shortcut: B"
-        : (app._birdProblem ?? "not available for this field"),
-      () => { app.toggleBird(); this.open("main"); }));
+        : (app._flyerProblem ?? "not available for this field"),
+      () => { app.cycleFlyer(); this.open("main"); }));
     appearance.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
                            "Keyboard shortcut: F",
                            () => { app.toggleFullscreen(); this.open("main"); }));
@@ -454,6 +467,22 @@ export class UI {
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setMotionSmoothing(v),
     }));
+    // Exposure is a slider full stop, with auto as its mode (Thomas,
+    // 2026-08-14). Dragging the slider is choosing manual — setExposure
+    // turns auto off — and the row's value tracks the meter while auto runs.
+    const exposureRow = sliderRow("Exposure", {
+      min: K.EXPOSURE_LIMITS[0], max: K.EXPOSURE_LIMITS[1], step: 0.05,
+      value: app.exposure, format: (v) => v.toFixed(2),
+      onInput: (v) => app.setExposure(v),
+    });
+    sliders.append(exposureRow);
+    this._exposureRow = exposureRow;
+    m.append(item(
+      `Auto exposure: ${app.autoExposure ? "on" : "off"}`,
+      app.autoExposure
+        ? "metering the frame like a video camera"
+        : "the slider has it",
+      () => { app.setAutoExposure(!app.autoExposure); this.open("quality"); }));
     sliders.append(sliderRow("Tone-map gamma", {
       min: K.TONE_MAP_GAMMA_LIMITS[0], max: K.TONE_MAP_GAMMA_LIMITS[1],
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
@@ -554,7 +583,7 @@ export class UI {
       ["Esc", "menu"],
       ["F", "fullscreen"],
       ["F3", "stats: brief, full, off"],
-      ["B", "bird"],
+      ["B", "flyer — swift, paper dart, off"],
       ["M", "minimap"],
       ["R", "record a flight track"],
       ["F12", "screenshot"],

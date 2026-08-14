@@ -133,6 +133,43 @@ const TONE_MAP: bool = true;
 // ---------------------------------------------------------------------------
 
 const SUN_COLOR: vec3<f32> = vec3<f32>(20.2, 21.0, 22.4); // look.py SUN_COLOR
+// Droplet diffraction spike on the once-scattered beam (2026-08-14).
+//
+// A single HG lobe at the shipped g = 0.76 is the tuned SHAPE of the side-
+// and back-scattered light, but as a forward peak it is off by orders of
+// magnitude: a 10 um droplet puts roughly half its scattered energy into a
+// diffraction lobe a couple of degrees wide (the same lambda/d ~ 3 deg the
+// aureole draws from), whose peak is ~10^3 x isotropic where HG(0.76)
+// manages ~30x. That missing factor is why a thin veil in front of the sun
+// rendered as the same order of brightness as a sunlit thick base, when a
+// camera pointed sunward meters the veil orders of magnitude brighter and
+// exposes the base down to dark grey.
+//
+// The spike is a second, narrow HG lobe ADDED to the once-scattered term
+// only. Deliberately additive rather than an energy split: re-weighting the
+// tuned lobe by (1 - w) would dim every side- and back-scatter view by
+// nearly 2x, and the tuned look is the baseline this change is measured
+// against. The lobe's own solid angle is so small (half-width ~2 deg) that
+// the added energy integrates to a few percent of the total.
+//
+// It rides octave 0's transmittance exp(-tau_sun): the diffraction peak is
+// a property of light scattered ONCE — a second scattering convolves the
+// lobe with the full phase function and hands the result to the MS ladder,
+// which already owns it. g = 0.95 puts the half-width at ~2 deg, matching
+// the droplet lobe the aureole models; the weight is the Mie diffraction
+// share of ~half the scattered energy.
+//
+// The lobe is windowed to zero by 30 deg from the sun. An HG tail is not
+// compact — at 90 deg HG(0.95) still runs ~9% of the tuned lobe, so the
+// unwindowed sum would brighten every side- and back-scatter view by a
+// near-constant tithe, which is exactly the look change this term must not
+// make. Diffraction has no such tail (it is an aperture transform, not a
+// resonance), so the window is more physical than the HG it trims, and the
+// smoothstep keeps the sky around the sun free of a visible rim.
+const DIFFRACTION_G: f32 = 0.95;
+const DIFFRACTION_WEIGHT: f32 = 0.5;
+const DIFFRACTION_WINDOW_COS_START: f32 = 0.8660254037844387; // cos 30 deg
+const DIFFRACTION_WINDOW_COS_FULL: f32 = 0.9659258262890683;  // cos 15 deg
 const POWDER_COEFF: f32 = 1.5;       // witness.py:63
 // Powder is a *backscatter* phenomenon (lighting-loop iter_014). The boundary
 // darkening it models is the deficit of low-order paths that have to reverse
@@ -171,8 +208,19 @@ const GRADIENT_SHADING_TAU_FULL: f32 = 1.60;
 const GRADIENT_SHADING_CONF_START: f32 = 0.06;
 const GRADIENT_SHADING_CONF_FULL: f32 = 0.28;
 const GRADIENT_SHADING_SHADOW_SIDE_SCALE: f32 = 0.55;
-const DEEP_SHADOW_TAU_START: f32 = 38.0;
-const DEEP_SHADOW_TAU_FULL: f32 = 80.0;
+// The deep-shadow gate spans 15 -> 1000 in LOG tau (2026-08-14, Thomas: the
+// darkest bottoms belong to the genuinely thickest columns, and tau 100 is
+// not that — a storm core runs to several hundred). Log space rather than
+// linear because a linear smoothstep over 15..1000 spends nearly all its
+// travel above tau 200 and the transition would collapse back into a cliff
+// at the deep end; per-e-fold is how the rest of the transition curve was
+// shaped, so the gate matches it. The march that feeds this saturates at
+// LIGHT_TAU_CUTOFF, whose deep-quadrature escalation (see light_march_tau)
+// is what makes measuring tau 1000 affordable.
+const DEEP_SHADOW_TAU_START: f32 = 15.0;
+const DEEP_SHADOW_TAU_FULL: f32 = 1000.0;
+const DEEP_SHADOW_LOG_TAU_START: f32 = 2.70805020110221;  // ln(15)
+const DEEP_SHADOW_LOG_TAU_FULL: f32 = 6.907755278982137;  // ln(1000)
 // Shallow/storm discrimination (2026-08-11 tuning). tau_sun saturates at
 // LIGHT_TAU_CUTOFF for a fair-weather cumulus base and a storm base alike,
 // so the deep-shadow machinery — tuned on storm references — darkened both.
@@ -182,7 +230,7 @@ const DEEP_SHADOW_TAU_FULL: f32 = 80.0;
 // treatment out for optically open shadow: less MS suppression, less
 // occlusion, skylight-blue fill, and a high-sun shadow skylight the
 // light-transfer split (gated to low sun) never provided.
-const SHALLOW_OPEN_TSKY_START: f32 = 0.08;
+const SHALLOW_OPEN_TSKY_START: f32 = 0.05;
 const SHALLOW_OPEN_TSKY_FULL: f32 = 0.30;
 // Fraction of MS suppression / ambient occlusion an open shallow shadow
 // keeps (a buried storm keeps 1.0 = the tuned look, exactly).
@@ -190,7 +238,7 @@ const SHALLOW_SUPPRESSION_KEEP: f32 = 0.25;
 // High-sun skylight reaching saturated shadow, by openness. The low-sun
 // path (light-transfer split) keeps its exact 0.26 as split -> 1.
 const HIGH_SUN_SHADOW_SKYLIGHT_STORM: f32 = 0.03;
-const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.45;
+const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.24;
 // The high-sun skylight fill engages on *moderate* shadow, not the deep
 // gate: direct light is spent by tau_sun ~ 5 and the MS octaves by ~ 20,
 // so a fair-weather base at tau_sun 15-38 was pitch dark yet entirely
@@ -199,7 +247,7 @@ const HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW: f32 = 0.45;
 // in tau (white -> grey -> white -> grey moving into a base, verified on
 // the linear-tau wedge harness). 1 - exp(-tau/t0) rises while the beam
 // and MS ladder are still alive, so the summed profile only decays.
-const SHADOW_SKYLIGHT_TAU_ONSET: f32 = 4.0;
+const SHADOW_SKYLIGHT_TAU_ONSET: f32 = 9.0;
 // Diffused-beam glow: the Eddington diffusion tail of the sun through the
 // cloud mass, emitted isotropically. The MS octave ladder decays
 // geometrically in tau_sun and is spent by ~20; real diffusion decays as
@@ -210,14 +258,14 @@ const SHADOW_SKYLIGHT_TAU_ONSET: f32 = 4.0;
 // the tau_sun the light march already measured, the return is analytic.
 // Gated in as the MS ladder dies (no double counting below tau ~8); a
 // buried storm keeps only DIFFUSE_BEAM_STORM_KEEP of it.
-const DIFFUSE_BEAM_STRENGTH: f32 = 1.08;
-const DIFFUSE_BEAM_TAU_ONSET: f32 = 9.0;
+const DIFFUSE_BEAM_STRENGTH: f32 = 0.75;
+const DIFFUSE_BEAM_TAU_ONSET: f32 = 7.0;
 // A buried storm interior keeps this much of the glow. 0.25 was tuned to
 // AI storm references and produced a floor DARKER than the real anvil
 // photo (IMG_7053: darkest cores ~115/255; the 0.25 floor rendered 68)
 // and an 8x step across the deep gate. 0.55 lands the floor on the photo
 // and halves the step.
-const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.55;
+const DIFFUSE_BEAM_STORM_KEEP: f32 = 0.80;
 // Spectral tint of the diffused beam: hundreds of scatterings put an
 // effective absorption path of tens of meters of liquid water on this
 // light, and water absorbs red far more than blue (single-scatter albedo
@@ -233,14 +281,26 @@ const DIFFUSE_BEAM_TINT: vec3<f32> = vec3<f32>(0.85, 0.97, 1.08);
 // AMBIENT_HEIGHT_FLOOR = 0.3): an open base sees the sky sideways and the
 // bright surface below, so its fill should not fall to a third.
 const AMBIENT_HEIGHT_FLOOR_SHALLOW: f32 = 0.6;
-const DEEP_SHADOW_MS_FLOOR: f32 = 0.24;
+const DEEP_SHADOW_MS_FLOOR: f32 = 0.28;
 const MS_OCTAVES: i32 = 6;           // witness.py:76
 const MS_ATTEN: f32 = 0.4;           // witness.py:77
 const MS_BLEND_RATE: f32 = 0.35;     // witness.py:78
 const MAX_VIEW_STEPS: i32 = 2048;   // witness.py:102
 const MAX_LIGHT_STEPS: i32 = 512;   // witness.py:72
 const TRANSMITTANCE_CUTOFF: f32 = 0.002; // witness early-exit
-const LIGHT_TAU_CUTOFF: f32 = 80.0; // witness.py:363
+const LIGHT_TAU_CUTOFF: f32 = 1000.0; // was 80; see DEEP_SHADOW_TAU_FULL
+// Deep-quadrature escalation for the sun march. Fine steps to tau 1000
+// would cost hundreds of extra taps; past the escalation threshold nothing
+// consumes tau but the two-stream diffuse terms and the log-space deep
+// gate, both logarithmically sensitive, so the step grows geometrically
+// and the whole 32 -> 1000 tail costs ~20 extra taps. The threshold sits
+// beyond every exponential consumer that matters: the beam is dead by
+// tau ~ 8 and MS octave 2 by ~ 30; octaves 3-5 still breathe there, but
+// their weights (0.064 down) put the quadrature error of a growing step
+// below a display level.
+const LIGHT_DEEP_QUAD_TAU_START: f32 = 32.0;
+const LIGHT_DEEP_QUAD_GROWTH: f32 = 1.2;
+const LIGHT_DEEP_QUAD_MAX_BOOST: f32 = 64.0;
 const EMPTY_DTAU_CUTOFF: f32 = 1e-5; // witness.py:701
 const DENSE_SIGMA_CUTOFF: f32 = 0.01; // witness.py:688
 const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
@@ -281,7 +341,7 @@ const SKY_PROBE_SPAN: f32 = 1500.0;   // m of headroom sampled above p
 const SKY_PROBE_STEPS: i32 = 15;      // 100 m quadrature at full span
 // The deepest limit of the skylight-split fill: at T_sky -> 0 the shadow
 // skylight keeps this fraction, so saturated shadow still does not go black.
-const SKY_PROBE_FILL_FLOOR: f32 = 0.34;
+const SKY_PROBE_FILL_FLOOR: f32 = 0.40;
 
 // Isotropic-tail diffusion depth (lighting-loop iter_002).
 //
@@ -311,14 +371,14 @@ const SKY_PROBE_FILL_FLOOR: f32 = 0.34;
 // The floor is the fully buried limit, so a deep core keeps a tail rather
 // than going black - and it bounds how much this can compound with the
 // existing deep-shadow MS suppression.
-const MS_TAIL_FLOOR: f32 = 0.15;
+const MS_TAIL_FLOOR: f32 = 0.18;
 // Below this sun optical depth the tail is left exactly alone. A sample that
 // the sun still reaches nearly unattenuated is not sitting at the bottom of a
 // diffusion well, and dimming it would only cost brightness without buying
 // form; the knee is what turns this into a contrast change instead of an
 // exposure change, and it is why the thin-cloud regression views are
 // essentially untouched.
-const MS_TAIL_TAU_KNEE: f32 = 4.0;
+const MS_TAIL_TAU_KNEE: f32 = 1.0;
 
 // Incidence cosine of the beam on the local skin (lighting-loop iter_006).
 //
@@ -1097,6 +1157,10 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
         0.0, 1.0
     );
     var t = t_start + clamp(jit, 0.0, 1.0) * dt_nominal * lod_fade;
+    // Deep-quadrature escalation state (see LIGHT_DEEP_QUAD_*): grows the
+    // step geometrically once tau passes the threshold, so the march can
+    // afford to measure all the way to LIGHT_TAU_CUTOFF = 1000.
+    var dt_boost = 1.0;
     for (var i: i32 = 0; i < MAX_LIGHT_STEPS; i = i + 1) {
         if (t >= t_exit) {
             break;
@@ -1107,13 +1171,17 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
         // a shadow ray crossing a deep nest can exhaust MAX_LIGHT_STEPS, but
         // tau saturation (LIGHT_TAU_CUTOFF) normally ends it far sooner.
         let s = sample_level_at(p + t * sun);
-        var dt = max(s.dt_light, dt_floor);
+        var dt = max(s.dt_light, dt_floor) * dt_boost;
         if (t + dt > t_exit) {
             dt = t_exit - t;
         }
         tau = tau + s.sigma * dt;
         if (tau > LIGHT_TAU_CUTOFF) {
             break;
+        }
+        if (tau > LIGHT_DEEP_QUAD_TAU_START) {
+            dt_boost = min(dt_boost * LIGHT_DEEP_QUAD_GROWTH,
+                           LIGHT_DEEP_QUAD_MAX_BOOST);
         }
         t = t + dt;
     }
@@ -1877,6 +1945,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
+    // Once-scattered diffraction spike (see DIFFRACTION_G). Constant along
+    // the ray, like `phase`; the window makes it exactly zero beyond 30 deg
+    // from the sun, so any view not containing the near-sun sky is
+    // bit-identical.
+    let phase_diffraction = DIFFRACTION_WEIGHT
+        * hg_phase(cos_scatter, DIFFRACTION_G)
+        * smoothstep(DIFFRACTION_WINDOW_COS_START,
+                     DIFFRACTION_WINDOW_COS_FULL, cos_scatter);
 
     // Scattering-geometry weight on the powder term (see POWDER_FWD_*). One
     // value per pixel: cos_scatter is constant along a view ray. 1 keeps the
@@ -2132,8 +2208,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // machinery is enabled would hand a buried storm the full
             // shallow treatment when suppression/AO/split are all zero
             // (codex review 2026-08-11, finding 3).
+            // Log-space: per-e-fold travel between tau 15 and 1000 (see the
+            // DEEP_SHADOW_TAU constants). The max() guard only matters for
+            // tau_sun < 1, which is far below the gate's onset anyway.
             let deep_shadow_gate = smoothstep(
-                DEEP_SHADOW_TAU_START, DEEP_SHADOW_TAU_FULL, tau_sun
+                DEEP_SHADOW_LOG_TAU_START, DEEP_SHADOW_LOG_TAU_FULL,
+                log(max(tau_sun, 1e-3))
             );
 
             // Moderate-shadow gate: where the beam and MS octaves are spent
@@ -2239,6 +2319,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 }
                 ms = ms + contrib * u.cloud_sun.xyz;
                 ms_atten = ms_atten * MS_ATTEN;
+            }
+
+            // The diffraction spike joins the ladder as part of the
+            // once-scattered term: octave 0's transmittance, no tail or
+            // suppression factors (octave 0's iso_gate is 0), and it shares
+            // the direct-boost and gradient multipliers below exactly as
+            // octave 0 does. The guard is per-pixel-coherent (the window is
+            // constant along the ray), so far-from-sun pixels skip the exp.
+            if (phase_diffraction > 0.0) {
+                ms = ms + phase_diffraction * exp(-tau_sun) * u.cloud_sun.xyz;
             }
 
             // Light-transfer split, warm side: modest boost of the unoccluded

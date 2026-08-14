@@ -131,6 +131,71 @@ export const TONE_MAP_WHITE_POINT_LIMITS = [4.0, 40.0];
 export const DEFAULT_CONTRAST = 1.0;
 export const CONTRAST_LIMITS = [0.5, 1.6];
 
+// --- auto exposure --------------------------------------------------------
+//
+// The camera-side half of the 2026-08-14 forward-scattering change. The
+// diffraction spike puts thin cloud near the sun orders of magnitude above a
+// diffusely-lit base in linear radiance — which is physically right, and
+// useless under a fixed exposure, because the tone map clamps the veils to
+// white and shows the base at the same grey it always had. What a video
+// camera does with that scene is stop down for the highlights, and THAT is
+// what makes a toward-sun base read dark. So: meter the linear frame, place
+// a high percentile of its luminance just under the tone map's white point,
+// and glide the exposure there.
+//
+// This is HIGHLIGHT PROTECTION, not a full AE loop, and the difference was
+// measured before it was chosen: a mid-tone meter (key / log-average) drives
+// the dark-base views — the ones the transition retune just darkened on
+// purpose — up 3-4x, because to an average meter an intentionally dark scene
+// and an underexposure are the same thing. So the tuned DEFAULT_EXPOSURE is
+// a CEILING the controller never exceeds; the meter can only stop DOWN from
+// it, and only when the highlight statistic would clip. On the judge set
+// that leaves every no-sun-in-frame view at exactly the shipped look and
+// stops the toward-sun / low-sun frames to ~1, which is where the dark
+// bottoms come from.
+// Auto is a per-tier default (Thomas, 2026-08-14): on everywhere the meter
+// is affordable — which measurement says is everywhere but Minimal, where
+// the frame budget is so tight that even the glide's accumulation restarts
+// hurt. The meter itself is ~0.1-0.5% of a frame's rays. A hand-touched
+// toggle survives tier changes, like haze.
+export const AUTO_EXPOSURE_DEFAULT_BY_TIER = {
+  max: true, high: true, medium: true, low: true, minimal: false,
+};
+// Metered on a tiny linear render (TONE_MAP compiled out) of the live view:
+// 64x36 = 2304 rays per meter, beneath measurement next to a frame's march.
+export const AUTO_EXPOSURE_METER_SIZE = [64, 36];
+// Every frame: the 200 ms first cut stepped visibly (Thomas). The real
+// cadence is set by the readback round-trip — one meter is in flight at a
+// time — and the glide's time constant is computed from measured elapsed
+// time, so the feel is frame-rate independent.
+export const AUTO_EXPOSURE_INTERVAL_MS = 0;
+// The highlight statistic: the MEAN of the pixels above this rank. The mean
+// (not the percentile itself) is what keeps the sun's aureole and a bright
+// veil from hiding inside the top bin — measured, p95 alone reads the
+// toward-sun frame at 3.3 where its top-1% mean is 15.7.
+export const AUTO_EXPOSURE_PERCENTILE = 0.99;
+// Where the highlight statistic would be placed, as exposed radiance
+// relative to the white point, at full response.
+export const AUTO_EXPOSURE_HIGHLIGHT_FRACTION = 0.90;
+// Response strength: the fraction of the log-distance below the ceiling the
+// controller actually applies. Full protection (1.0) put the toward-sun
+// STEAM frame 8x down and read as too dark (Thomas, 2026-08-14) — a real
+// camera lets the region around the sun clip rather than crush the scene.
+// At 0.5 that frame stops ~3.5x down and a mild highlight barely moves.
+export const AUTO_EXPOSURE_RESPONSE = 0.5;
+// Floor and ceiling of the AUTO range. The ceiling is DEFAULT_EXPOSURE by
+// design (see above). The manual slider spans EXPOSURE_LIMITS instead.
+export const AUTO_EXPOSURE_LIMITS = [1.0, 4.0];
+// The hand slider's range: wider than auto's, because manual means manual.
+export const EXPOSURE_LIMITS = [0.5, 16.0];
+// Glide, deadband, hysteresis: the loop adapts over ~half a second, stops
+// once within the stop band so a parked view's accumulation can converge
+// (every exposure step restarts it — exposure is in the scene key), and
+// wakes again only past the start band.
+export const AUTO_EXPOSURE_TIME_CONSTANT_S = 0.5;
+export const AUTO_EXPOSURE_DEADBAND_STOP_LOG2 = 0.05;
+export const AUTO_EXPOSURE_DEADBAND_START_LOG2 = 0.25;
+
 export const DEFAULT_MOTION_BLEND_ALPHA = 0.58;
 export const DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0;
 
