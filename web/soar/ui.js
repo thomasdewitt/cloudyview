@@ -17,10 +17,18 @@ const el = (tag, className, text) => {
   return node;
 };
 
-/** A labelled slider row that reports live and commits continuously. */
+/**
+ * A labelled slider row that reports live and commits continuously.
+ *
+ * `label` is a string, or a list of strings and nodes when the label carries
+ * a control of its own — the exposure row's auto toggle rides inside its
+ * parentheses rather than spending a row of a panel meant to be looked past.
+ */
 function sliderRow(label, { min, max, step, value, format, onInput }) {
   const row = el("div", "row");
-  row.append(el("label", null, label));
+  const tag = el("label");
+  tag.append(...(Array.isArray(label) ? label : [label]));
+  row.append(tag);
   const input = el("input");
   input.type = "range";
   input.min = min; input.max = max; input.step = step; input.value = value;
@@ -345,6 +353,12 @@ export class UI {
       "Quality…",
       K.QUALITY_PRESETS[app.renderer.qualityTier].label.split(" —")[0],
       () => this.open("quality")));
+    // Whether the field wraps is a fact about how the scene looks — an
+    // endless sheet or a box in empty air — so it sits with the other two
+    // that change the picture, above the overlay and window rows.
+    appearance.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
+                           "wrap the field laterally",
+                           () => { app.togglePeriodic(); this.open("main"); }));
     appearance.append(item(
       `Minimap: ${!app.minimap ? "off" : { corner: "on", full: "fullscreen", off: "off" }[app.minimapMode]}`,
       app.minimap
@@ -393,9 +407,6 @@ export class UI {
     session.append(item("Render this view in a terminal…", null,
                         () => this.open("terminal")));
     session.append(item("Controls", null, () => this.open("controls")));
-    session.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
-                        "wrap the field laterally",
-                        () => { app.togglePeriodic(); this.open("main"); }));
     const fov = sliderRow("Field of view", {
       min: K.FOV_LIMITS[0], max: K.FOV_LIMITS[1], step: 1,
       value: app.camera.fov, format: (v) => `${v.toFixed(0)}°`,
@@ -468,21 +479,27 @@ export class UI {
       onInput: (v) => app.setMotionSmoothing(v),
     }));
     // Exposure is a slider full stop, with auto as its mode (Thomas,
-    // 2026-08-14). Dragging the slider is choosing manual — setExposure
-    // turns auto off — and the row's value tracks the meter while auto runs.
-    const exposureRow = sliderRow("Exposure", {
+    // 2026-08-14) — so auto is a word inside the label rather than a row of
+    // its own. Dragging the slider is choosing manual: setExposure turns
+    // auto off, and the toggle has to be repainted where it stands, since
+    // nothing rebuilds the panel under a hand that is still on the slider.
+    const auto = el("button", "mini");
+    const paintAuto = () => {
+      auto.textContent = app.autoExposure ? "on" : "off";
+      auto.classList.toggle("on", app.autoExposure);
+    };
+    paintAuto();
+    auto.addEventListener("click", () => {
+      app.setAutoExposure(!app.autoExposure);
+      paintAuto();
+    });
+    const exposureRow = sliderRow(["Exposure (auto: ", auto, ")"], {
       min: K.EXPOSURE_LIMITS[0], max: K.EXPOSURE_LIMITS[1], step: 0.05,
       value: app.exposure, format: (v) => v.toFixed(2),
-      onInput: (v) => app.setExposure(v),
+      onInput: (v) => { app.setExposure(v); paintAuto(); },
     });
     sliders.append(exposureRow);
     this._exposureRow = exposureRow;
-    m.append(item(
-      `Auto exposure: ${app.autoExposure ? "on" : "off"}`,
-      app.autoExposure
-        ? "metering the frame like a video camera"
-        : "the slider has it",
-      () => { app.setAutoExposure(!app.autoExposure); this.open("quality"); }));
     sliders.append(sliderRow("Tone-map gamma", {
       min: K.TONE_MAP_GAMMA_LIMITS[0], max: K.TONE_MAP_GAMMA_LIMITS[1],
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),

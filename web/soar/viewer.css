@@ -319,6 +319,27 @@ button.resume kbd {
   background: rgba(232, 131, 74, 0.14);
 }
 
+/* A control small enough to live inside a slider's label, in the running
+   text — the exposure row's auto toggle. Same box as .segmented button, one
+   size down, so it reads as the same kind of thing. */
+button.mini {
+  font-family: var(--ui-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink-dim);
+  background: rgba(150, 175, 210, 0.07);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--control-radius);
+  padding: 0 5px;
+  cursor: pointer;
+}
+button.mini:hover { color: var(--ink-bright); }
+button.mini.on {
+  color: var(--ink-bright);
+  border-color: var(--hot);
+  background: rgba(232, 131, 74, 0.14);
+}
+
 .divider { height: 1px; background: var(--panel-line); margin: 14px 0; }
 
 /* --- transient toast (screenshot saved, command copied, …) --- */
