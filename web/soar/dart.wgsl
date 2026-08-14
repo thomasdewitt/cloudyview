@@ -288,7 +288,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let formation = vnoise(sheet_uv) - 0.5;
 
     var albedo = PAPER * (1.0 + 0.035 * formation);
-    albedo = mix(albedo, GRIME, 0.55 * grime);
+    // Handling. Mixed toward a darker, yellower paper rather than toward grey:
+    // what makes old paper look old is that it goes warm as it goes dim, and a
+    // neutral darkening just reads as shadow.
+    albedo = mix(albedo, GRIME, 0.62 * grime);
+    // Scuffing: where it is dirtiest it has also been rubbed, and rubbed paper
+    // has a broken surface that scatters a little more and a little unevenly.
+    // Without this the grime is a smooth wash and reads as a painted marking
+    // rather than as dirt.
+    let scuff = grime * (0.5 + formation);
+    albedo = albedo * (1.0 - 0.16 * scuff);
 
     // The crease. Every fold on used paper is a line of shadow with a slightly
     // pale, slightly furred shoulder either side — the fibres have been broken

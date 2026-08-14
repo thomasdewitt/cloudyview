@@ -47,7 +47,9 @@
 //   layers  how many thicknesses of paper. 1 to 8. Drives transmission.
 //   crease  metres to the nearest fold or cut edge, capped. Drives the
 //           hairline of shadow every fold on used paper carries.
-//   grime   0 clean, 1 handled. Fingers go on the nose and under the keel.
+//   grime   0 clean, 1 handled. Fingers go on the nose and under the keel,
+//           but most of what shows is on the top of the wing — see the
+//           weathering note below for why that distinction cost a pass.
 
 "use strict";
 
@@ -90,10 +92,59 @@ const dihedralOf = (side) => (side > 0 ? DIHEDRAL_DEG.right : DIHEDRAL_DEG.left)
 
 // --- weathering ------------------------------------------------------------
 //
-// This dart has been thrown. Nothing here is large — the whole point is that
-// each is at or just above the threshold of being noticed.
+// This dart has been thrown, many times, and `wear` is how many: 0 is folded
+// a minute ago, 1 is a week on a desk and a hundred flights.
+//
+// The first pass at this put all of it in the right physical places and none
+// of it anywhere you could see. The grime sat on the nose and along the pinch
+// under the keel — where fingers genuinely go — but a flyer is drawn from
+// above and behind, so the only visible surface is the top of the wing, and
+// the wing was spotless. The tip bend had been softened until it was gone,
+// and the dog-ear was on the far side. All of it was there and none of it
+// read, which is a good lesson about where detail has to live: not where the
+// object would have it, but where the camera is.
+//
+// So the things that carry the wear now are the ones a viewer can actually
+// see at ninety pixels, in roughly this order of how much work they do:
+//
+//   RUMPLES     soft buckling across the wing. A flown sheet is never flat
+//               again, and this is what says "used" before anything else,
+//               because it breaks the one big highlight into streaks.
+//   THE NOSE    blunted and swollen from hitting walls. The only wear that
+//               changes the silhouette, and the eye reads a silhouette first.
+//   GRIME       on the TOP of the wing, where it can be seen, graded from the
+//               handled root outward.
+//   the tip bend and the dog-ear, which were always here, scaled by wear.
+//
+// Every displacement below goes through the same parametric placement the
+// clean shape does, so `surface` differentiates it and the normals follow for
+// free. That is the whole reason the rumples shade instead of just moving.
+
+/**
+ * How thrown this one is. 0 folds a crisp sheet; 1 is the desk-worn dart.
+ *
+ * A single dial rather than a dozen constants because the honest answer to
+ * "how weathered should it be" is a matter of taste, and taste wants one
+ * number to turn.
+ */
+export const DEFAULT_WEAR = 1.0;
 
 const BOW_M = 0.0035;               // wings bow; paper does not stay flat
+
+// Soft buckling of a flown wing. Two octaves: a long slow warp with a finer
+// crinkle on top, both anchored at the keel — the folded edge is stiff, and
+// paper buckles where nothing is holding it, which is outboard and aft.
+const RUMPLE_M = 0.0052;
+const RUMPLE_CYCLES = 6.0;          // across the sheet's width
+
+// A dart's nose meets a lot of walls. It shortens, rounds, and swells as the
+// eight layers up front crumple against each other.
+const NOSE_BLUNT_M = 0.011;         // how much length it loses
+const NOSE_SWELL_M = 0.0016;        // and how much fatter it gets
+const NOSE_ZONE_M = 0.034;          // how far back the damage reaches
+
+// A flown trailing edge is never straight again.
+const TRAIL_WAVE_M = 0.0035;
 // The left tip took a knock and stayed bent. This wants to be spread over a
 // third of the semi-span: eleven millimetres of rise crammed into the outer
 // fifth turned the tip edge-on to the viewer and rendered as a dark rolled
@@ -130,6 +181,35 @@ const smoothstep = (lo, hi, x) => {
   const t = clamp01((x - lo) / (hi - lo));
   return t * t * (3.0 - 2.0 * t);
 };
+
+/**
+ * Smooth deterministic value noise, for the rumples.
+ *
+ * Kept coarse on purpose. `surface` finds its normals by differencing the
+ * placement function over 1e-4 of parameter space, so anything with features
+ * near that scale comes back as normal noise rather than as buckling. The
+ * wavelengths here are centimetres.
+ */
+const hash2 = (i, j) => {
+  const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+};
+function valueNoise(x, y) {
+  const i = Math.floor(x), j = Math.floor(y);
+  const fx = x - i, fy = y - j;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = hash2(i, j), b = hash2(i + 1, j);
+  const c = hash2(i, j + 1), d = hash2(i + 1, j + 1);
+  const lo = a + (b - a) * ux;
+  return lo + ((c + (d - c) * ux) - lo) * uy;
+}
+
+/** Two octaves of it, centred on zero. */
+function rumpleField(s, t) {
+  const k = RUMPLE_CYCLES / SHEET_W;
+  return (valueNoise(s * k, t * k * 0.62) - 0.5)
+       + 0.42 * (valueNoise(s * k * 2.7 + 11.3, t * k * 1.9 + 4.1) - 0.5);
+}
 
 /** Rotate `p` about the line through `a` with unit direction `d`, by `ang`. */
 function rotateAboutLine(p, a, d, ang) {
@@ -246,13 +326,26 @@ function creaseDistance(lines, s, t) {
  * Handling grime: where fingers go. The nose, because that is what you hold
  * to throw it, and the underside of the keel, because that is what you pinch.
  */
-function grimeAt(s, t) {
+function grimeAt(s, t, wear) {
+  if (wear <= 0.0) return 0.0;
+  // Where the hand goes: the nose to throw it, and the keel to pinch it.
+  // Both are physically right and both are nearly invisible in flight, so
+  // they are no longer carrying this on their own.
   const nose = Math.exp(-Math.pow((t - 0.030) / 0.038, 2));
   const pinch = Math.exp(-Math.pow((t - 0.115) / 0.045, 2))
               * Math.exp(-Math.pow(s / 0.012, 2));
-  const smudge = 0.45 * Math.exp(-Math.pow((t - 0.215) / 0.050, 2))
-               * Math.exp(-Math.pow((s - 0.062) / 0.030, 2));
-  return clamp01(0.85 * nose + 0.7 * pinch + smudge);
+  // What the camera sees. A dart picked up a hundred times is grubbiest along
+  // the wing root, where it is held flat between finger and thumb, and it
+  // dirties outward from there and back along the trailing edge, which is the
+  // part that drags on every desk it lands on.
+  const root = 0.75 * Math.exp(-Math.pow((s - KEEL) / 0.028, 2))
+             * smoothstep(0.05, 0.16, t);
+  const trailing = 0.55 * smoothstep(0.72, 1.00, t / SHEET_L);
+  // Plus a general dinginess with the grain of the paper, so it is never a
+  // clean gradient.
+  const dingy = 0.30 * (0.5 + rumpleField(s + 3.1, t - 1.7));
+  return clamp01(
+    wear * (0.85 * nose + 0.7 * pinch + root + trailing + dingy));
 }
 
 // --- surfaces --------------------------------------------------------------
@@ -318,7 +411,7 @@ function chordAt(s, t, side) {
  * One wing: the sheet from the keel fold out to the leading edge, opened to
  * its dihedral, bowed, and — on the left — bent at the tip.
  */
-function addWing(rows, side, lines) {
+function addWing(rows, side, lines, wear) {
   const k = keelOf(side);
   const dih = dihedralOf(side);
   const cosD = Math.cos(dih), sinD = Math.sin(dih);
@@ -347,13 +440,23 @@ function addWing(rows, side, lines) {
               * (0.35 + 0.65 * Math.sin(Math.PI * chord));
     // The left tip took a knock and never came back.
     const bend = side < 0
-      ? TIP_BEND_M * Math.pow(smoothstep(TIP_BEND_FROM, 1.0, spanFrac), 1.5)
+      ? wear * TIP_BEND_M
+        * Math.pow(smoothstep(TIP_BEND_FROM, 1.0, spanFrac), 1.5)
       : 0.0;
+    // Rumples. Anchored at the keel fold, which is stiff, and free outboard
+    // and aft — paper buckles where nothing is holding it. This is the single
+    // thing that makes the aeroplane look flown, because it breaks the wing's
+    // one broad highlight into streaks.
+    const rumple = wear * RUMPLE_M * rumpleField(s, t)
+                 * Math.pow(spanFrac, 0.75) * (0.30 + 0.70 * chord);
+    // And the trailing edge stops being straight.
+    const trail = wear * TRAIL_WAVE_M
+                * smoothstep(0.80, 1.0, chord) * Math.sin(s * 84.0 + side * 1.9);
 
     let p = [
       side * (s - k) * cosD,
-      yOf(t),
-      (s - k) * sinD + bow + bend,
+      yOf(t) - trail,
+      (s - k) * sinD + bow + bend + rumple,
     ];
 
     if (dogEar) {
@@ -365,7 +468,7 @@ function addWing(rows, side, lines) {
       // obvious thing to write — rotates every point by a different amount
       // and rolls the corner into a tube; a dog-ear is a flat piece of paper
       // lying at an angle, with one crease.
-      const turn = DOG_EAR_TURN * (1.0 - smoothstep(0.74, 1.0, over));
+      const turn = wear * DOG_EAR_TURN * (1.0 - smoothstep(0.74, 1.0, over));
       if (turn > 1e-4) p = rotateAboutLine(p, earA, earDir, -turn);
     }
     return p;
@@ -387,7 +490,7 @@ function addWing(rows, side, lines) {
       part: PART.WING,
       layers,
       crease: creaseDistance(lines, s, t),
-      grime: grimeAt(s, t),
+      grime: grimeAt(s, t, wear),
     };
   }, { flip: side < 0 });
 }
@@ -399,16 +502,22 @@ function addWing(rows, side, lines) {
  * are separate paper, and pressed face to face they are exactly the two sheet
  * thicknesses that the bottom edge of a real dart shows.
  */
-function addKeel(rows, side, lines) {
+function addKeel(rows, side, lines, wear) {
   const k = keelOf(side);
   surface(rows, 60, 6, (u, v) => {
     const t = SHEET_L * u;
     const top = Math.min(k, halfWidth(t, side));
     const s = top * v;
+    // The nose has met a lot of walls. It loses length, swells as the eight
+    // layers crumple against one another, and stops being a needle. This is
+    // the only wear on the aircraft that changes the outline, which is why it
+    // is worth more than its eleven millimetres suggest — a silhouette is the
+    // first thing read and the last thing forgiven.
+    const hit = wear * Math.pow(1.0 - smoothstep(0.0, NOSE_ZONE_M, t), 1.6);
     return [
-      side * PAPER_THICKNESS * 0.5,
-      yOf(t),
-      s - k,
+      side * (PAPER_THICKNESS * 0.5 + NOSE_SWELL_M * hit),
+      yOf(t) - NOSE_BLUNT_M * hit,
+      s - k + 0.0020 * hit,
     ];
   }, (u, v) => {
     const t = SHEET_L * u;
@@ -421,7 +530,7 @@ function addKeel(rows, side, lines) {
       // Face to face, so both halves' layers are over every point of it.
       layers: 2 * layersAt(s, t, side),
       crease: creaseDistance(lines, s, t),
-      grime: grimeAt(s, t),
+      grime: grimeAt(s, t, wear),
     };
   }, { flip: side < 0 });
 }
@@ -437,12 +546,12 @@ function addKeel(rows, side, lines) {
  * `scale` multiplies every position. 1.0 is a real sheet of A4: 174 mm across
  * the wings, 297 mm nose to tail.
  */
-export function buildDartMesh({ scale = 1.0 } = {}) {
+export function buildDartMesh({ scale = 1.0, wear = DEFAULT_WEAR } = {}) {
   const rows = [];
   for (const side of [1, -1]) {
     const lines = creaseLines(side);
-    addKeel(rows, side, lines);
-    addWing(rows, side, lines);
+    addKeel(rows, side, lines, wear);
+    addWing(rows, side, lines, wear);
   }
 
   const data = new Float32Array(rows);

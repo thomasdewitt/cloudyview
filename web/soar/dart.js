@@ -30,7 +30,7 @@
 "use strict";
 
 import { Flyer, attitudeFrame, clamp, mod2pi, TWO_PI, DEG } from "./flyer.js";
-import { buildDartMesh } from "./dartmesh.js";
+import { buildDartMesh, DEFAULT_WEAR } from "./dartmesh.js";
 
 const SHADER_URL = new URL("./dart.wgsl", import.meta.url);
 
@@ -101,11 +101,17 @@ export class Dart extends Flyer {
   static TRANSMISSION_GAIN = 1.15;
   static SHEEN_GAIN = 0.30;
 
-  constructor(device, resources) {
+  /**
+   * `wear` is how thrown this one is: 0 folds a crisp sheet, 1 the desk-worn
+   * dart. It is a fold-time property, not a uniform — the rumples, the
+   * blunted nose and the bent tip are geometry — so changing it means
+   * rebuilding the mesh, which is why it is a construction argument.
+   */
+  constructor(device, resources, { wear = DEFAULT_WEAR } = {}) {
     super(device, resources, {
       label: "dart",
       shaderUrl: SHADER_URL,
-      mesh: buildDartMesh({ scale: SCALE }),
+      mesh: buildDartMesh({ scale: SCALE, wear }),
       distance: DISTANCE,
       drop: DROP,
     });
