@@ -42,7 +42,9 @@ export function presentFormat(preferred) {
     : preferred;
 }
 
-class Viewer {
+// Exported for tests, which drive its prototype methods against stubs —
+// see tests/test_soar_load_panels.py. boot() is still the way to build one.
+export class Viewer {
   constructor(device, canvas, uiRoot) {
     this.device = device;
     this.canvas = canvas;
@@ -54,6 +56,7 @@ class Viewer {
     this.toneMapWhitePoint = K.DEFAULT_TONE_MAP_WHITE_POINT;
     this.contrast = K.DEFAULT_CONTRAST;
     this.haze = K.DEFAULT_HAZE;
+    this._holdMode = K.DEFAULT_HOLD_MODE;
     this.lodStrength = K.DEFAULT_LOD_STRENGTH_BY_TIER[K.DEFAULT_QUALITY_TIER];
     // Three settings carry a per-tier default (haze, motion smoothing, LOD
     // strength) and the tier is chosen by measurement, so it can change under
@@ -285,6 +288,9 @@ class Viewer {
 
     this.scene = scene;
     this.renderer = renderer;
+    // A renderer is born in DEFAULT_HOLD_MODE; if the UI asked for another
+    // one while there was no renderer to ask, it gets it now.
+    renderer.setHoldMode(this.holdMode);
     this.minimap = minimap;
     this.bird = bird;
     this._minimapProblem = minimapProblem;
@@ -1001,11 +1007,25 @@ class Viewer {
     this._wake("level of detail");
   }
 
-  /** Live or still: what a held view settles to. See HOLD_MODES. */
+  /**
+   * Live or still: what a held view settles to. See HOLD_MODES.
+   *
+   * Held on the viewer as well as on the renderer, because there are windows
+   * with no renderer in them: _releaseField nulls it, and the panels that go
+   * up during a load — which group? which units? — drive this from the UI on
+   * their way up, which threw and turned a three-group file into "Could not
+   * open this field" (2026-08-14). Remembering it here rather than skipping
+   * the call means the mode survives the gap instead of depending on an
+   * argument about which panels can be open while a field loads.
+   */
   setHoldMode(mode) {
-    this.renderer.setHoldMode(mode);
+    this._holdMode = mode;
+    this.renderer?.setHoldMode(mode);
     this._wake("hold mode");
   }
+
+  /** The mode a renderer built from now on should start in. */
+  get holdMode() { return this._holdMode ?? K.DEFAULT_HOLD_MODE; }
 
   /**
    * The tier's own defaults for the three settings that have them, skipping
