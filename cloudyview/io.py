@@ -242,13 +242,25 @@ def group_domain_extent(filepath: str, group: Optional[str] = None):
 NEST_OVERHANG_FRACTION = 0.01
 
 
-def nest_overhang(outer_min, outer_max, nest_min, nest_max):
+def nest_overhang(outer_min, outer_max, nest_min, nest_max, outer_spacing):
     """Per-axis (overhang, allowance) in meters for a nest inside a parent.
 
     Overhang is how far the nest's box reaches past the parent's on each
-    axis (0 where it stays inside); allowance is what
-    `NEST_OVERHANG_FRACTION` permits there. ``overhang <= allowance`` on
-    every axis means the pair nests — the excess is simply never marched.
+    axis (0 where it stays inside); allowance is what may be clipped there.
+    ``overhang <= allowance`` on every axis means the pair nests — the
+    excess is simply never marched.
+
+    The allowance is a fraction of the parent's span OR one parent cell,
+    whichever is larger, and the second half of that is not decoration.
+    Both boxes are built from cell EDGES, so the overhang this tolerance
+    exists to absorb is measured in parent cells; expressing it only as a
+    fraction of the span silently assumes the parent has many of them.
+    A coarse outer level — a turbulon parent three cells tall over 15 km —
+    breaks that assumption completely: 1% of its span is 149 m and one of
+    its cells is 4.9 km, so a middle level that reaches half a parent cell
+    below the parent's floor was refused as a coordinate error. That was
+    the whole reason a three-level file offered only its finest pair
+    (Thomas, 2026-08-14).
     """
     outer_min = np.asarray(outer_min, dtype=np.float64)
     outer_max = np.asarray(outer_max, dtype=np.float64)
@@ -257,7 +269,11 @@ def nest_overhang(outer_min, outer_max, nest_min, nest_max):
     overhang = np.maximum(
         np.maximum(outer_min - nest_min, nest_max - outer_max), 0.0
     )
-    allowance = NEST_OVERHANG_FRACTION * np.maximum(outer_max - outer_min, 1.0)
+    outer_spacing = np.asarray(outer_spacing, dtype=np.float64)
+    allowance = np.maximum(
+        NEST_OVERHANG_FRACTION * np.maximum(outer_max - outer_min, 1.0),
+        outer_spacing,
+    )
     return overhang, allowance
 
 
@@ -300,7 +316,7 @@ def find_nestable_group_pairs(filepath: str, groups: Optional[list] = None):
                 continue
             tol = 1e-9 * np.maximum(outer_max - outer_min, 1.0)
             overhang, allowance = nest_overhang(
-                outer_min, outer_max, inner_min, inner_max
+                outer_min, outer_max, inner_min, inner_max, outer_dx
             )
             if np.any(overhang > allowance):
                 continue

@@ -11,7 +11,8 @@
 
 "use strict";
 
-import { volumeAABB, minVoxelSize, validateNestContainment } from "./field.js";
+import { volumeAABB, minVoxelSize, voxelSizes, validateNestContainment }
+  from "./field.js";
 import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
 } from "./gpu.js";
@@ -179,7 +180,8 @@ export class Scene {
    */
   attachNest(nest) {
     const report = validateNestContainment(
-      this.bmin, this.bmax, nest.bmin, nest.bmax);
+      this.bmin, this.bmax, nest.bmin, nest.bmax,
+      voxelSizes(this.shape, this.bmin, this.bmax));
     this._nest = nest;
     return report;
   }

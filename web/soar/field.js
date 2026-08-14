@@ -48,28 +48,38 @@ export function volumeAABB(x, y, z) {
   };
 }
 
+/** Per-axis voxel edge (m). */
+export function voxelSizes(shape, bmin, bmax) {
+  return [0, 1, 2].map((i) => (bmax[i] - bmin[i]) / shape[i]);
+}
+
 /** Smallest voxel edge (m) — the scale the march steps in. */
 export function minVoxelSize(shape, bmin, bmax) {
-  return Math.min(
-    (bmax[0] - bmin[0]) / shape[0],
-    (bmax[1] - bmin[1]) / shape[1],
-    (bmax[2] - bmin[2]) / shape[2],
-  );
+  return Math.min(...voxelSizes(shape, bmin, bmax));
 }
 
 /**
  * Per-axis (overhang, allowance) in metres for a nest inside a parent.
+ *
  * Both boxes are built from cell edges, so a nest whose outermost cell is
- * thicker than its parent's can sit tens of metres proud of a 20 km domain.
- * That sliver is the grid's doing, not the placement's.
+ * thicker than its parent's can sit proud of the parent's box for no reason
+ * but the grid. That is what the allowance absorbs, and it is why the
+ * allowance is a fraction of the parent's span OR one parent cell, whichever
+ * is larger: the sliver is measured in parent cells, and a fraction of the
+ * span only stands in for that while the parent has many of them. A turbulon
+ * parent three cells tall over 15 km has 149 m of fraction against 4.9 km of
+ * cell, which refused its own middle level as a coordinate error — see
+ * io.nest_overhang for the case.
  */
-export function nestOverhang(outerMin, outerMax, nestMin, nestMax) {
+export function nestOverhang(outerMin, outerMax, nestMin, nestMax,
+                             outerSpacing) {
   const overhang = [], allowance = [];
   for (let i = 0; i < 3; i++) {
     overhang.push(Math.max(
       outerMin[i] - nestMin[i], nestMax[i] - outerMax[i], 0.0));
-    allowance.push(
-      NEST_OVERHANG_FRACTION * Math.max(outerMax[i] - outerMin[i], 1.0));
+    allowance.push(Math.max(
+      NEST_OVERHANG_FRACTION * Math.max(outerMax[i] - outerMin[i], 1.0),
+      outerSpacing[i]));
   }
   return { overhang, allowance };
 }
@@ -82,9 +92,11 @@ export function nestOverhang(outerMin, outerMax, nestMin, nestMax) {
  * that were never meant to be composed, or one whose coordinates are in the
  * wrong units or on the wrong origin.
  */
-export function validateNestContainment(bmin, bmax, nestMin, nestMax) {
+export function validateNestContainment(bmin, bmax, nestMin, nestMax,
+                                        spacing) {
   const tol = bmin.map((_, i) => 1e-9 * Math.max(bmax[i] - bmin[i], 1.0));
-  const { overhang, allowance } = nestOverhang(bmin, bmax, nestMin, nestMax);
+  const { overhang, allowance } =
+    nestOverhang(bmin, bmax, nestMin, nestMax, spacing);
 
   if (overhang.some((o, i) => o > allowance[i])) {
     const detail = AXES.map((a, i) =>
@@ -158,8 +170,8 @@ export function nestablePairs(domains) {
       if (!noAxisCoarser || !oneAxisFiner) continue;
       const tol = outer.bmin.map(
         (_, i) => 1e-9 * Math.max(outer.bmax[i] - outer.bmin[i], 1.0));
-      const { overhang, allowance } =
-        nestOverhang(outer.bmin, outer.bmax, inner.bmin, inner.bmax);
+      const { overhang, allowance } = nestOverhang(
+        outer.bmin, outer.bmax, inner.bmin, inner.bmax, outer.spacing);
       if (overhang.some((o, i) => o > allowance[i])) continue;
       const covers =
         inner.bmin.every((v, i) => v <= outer.bmin[i] + tol[i]) &&
