@@ -1049,10 +1049,16 @@ class Viewer {
     this._wake("quality tier");
   }
 
-  /** The Quality panel's render-scale slider: the flight scale, by hand. */
+  /** The Quality panel's render-scale sliders, by hand: what the march runs
+   *  at while the camera moves, and what a held view climbs to. */
   setRenderScale(scale) {
     this.renderer.setRenderScale(scale);
     this._wake("render scale");
+  }
+
+  setHoldRenderScale(scale) {
+    this.renderer.setHoldRenderScale(scale);
+    this._wake("hold render scale");
   }
 
   /**

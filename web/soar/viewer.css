@@ -289,6 +289,18 @@ button.resume kbd {
 .item[disabled] { opacity: 0.42; cursor: default; }
 .item[disabled]:hover { background: none; border-color: transparent; }
 
+/* Two groups of buttons on one line — the quality tiers and the preview.
+   A docked panel is meant to be looked past, so a row saved is sky. */
+.seg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.seg-group { display: flex; align-items: center; gap: 10px; }
+.seg-group h3 { margin: 0; }
+
 .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
 .segmented button {
   font-family: var(--ui-font);

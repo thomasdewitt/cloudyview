@@ -328,14 +328,23 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // (Before the light-step rework this rule also avoided a mid-hold shader
 // compile. That reason is gone — every tier now specializes identically — but
 // the rule earns its keep on cost alone.)
-export const QUALITY_HOLD_LADDERS = {
-  max:    [],                                    // flies at 1.0, 8 spp a frame
-  high:   [],                                    // flies at 1.0; hold just accumulates
-  medium: [{ scale: 1.00, sampling: "high" }],
-  low:    [{ scale: 0.50, sampling: "low" },
-           { scale: 0.75, sampling: "high" }],
-  minimal: [{ scale: 0.25, sampling: "minimal" },
-           { scale: 0.50, sampling: "high" }],
+// The stepping stones only. The TOP rung is not listed here — it is the
+// hold render scale below, sampled like High, which the Quality panel now
+// exposes as its own slider next to the flight one. Splitting the two is
+// what lets "how sharp it gets when I stop" be a number the user sets rather
+// than a table entry they cannot see (Thomas, 2026-08-14).
+export const QUALITY_HOLD_RUNGS = {
+  max:    [],
+  high:   [],
+  medium: [],
+  low:    [{ scale: 0.50, sampling: "low" }],
+  minimal: [{ scale: 0.25, sampling: "minimal" }],
+};
+// Where each tier converges when it is held: the top rung's scale, at High's
+// sampling. Equal to the flight scale on High and Max, which is why their
+// ladders collapse to one rung and a hold there merely accumulates.
+export const HOLD_RENDER_SCALE_BY_TIER = {
+  max: 1.0, high: 1.0, medium: 1.0, low: 0.75, minimal: 0.5,
 };
 // Accumulated frames to spend on a rung before climbing to the next. Small,
 // because the point of the low rungs is to show *something* settled while the
@@ -506,7 +515,12 @@ export const DEFAULT_SPEED = 60.0;          // m/s
 export const SPEED_LIMITS = [0.5, 5000.0];
 export const SPEED_WHEEL_FACTOR = 1.25;     // per notch
 export const ELEVATION_LIMITS = [-89.0, 89.0];
-export const OCEAN_FLOOR_MARGIN_M = 25.0;   // 2.5 ocean FIF outer scales
+// How close to the sea the camera — and so the bird, which flies off it and
+// has no floor of its own — may get. Halved from 25 m on 2026-08-14. It is
+// still 1.25 ocean FIF outer scales and better than ten times the surface's
+// own peak-to-trough, so nothing here is about clipping through a wave: it is
+// how low you are allowed to fly, and lower is better flying.
+export const OCEAN_FLOOR_MARGIN_M = 12.5;
 
 // --- sun ------------------------------------------------------------------
 

@@ -244,6 +244,7 @@ export class Renderer {
     this.periodic = true;
     this.qualityTier = K.DEFAULT_QUALITY_TIER;
     this._flightRenderScale = K.QUALITY_PRESETS[this.qualityTier].renderScale;
+    this._holdRenderScale = K.HOLD_RENDER_SCALE_BY_TIER[this.qualityTier];
     this._cameraMoving = false;
     this._holdLadder = null;
     this._holdRung = 0;
@@ -415,9 +416,13 @@ export class Renderer {
 
   get flightRenderScale() { return this._flightRenderScale; }
 
+  get holdRenderScale() { return this._holdRenderScale; }
+
   get qualityIsCustom() {
-    return this._flightRenderScale !==
-      K.QUALITY_PRESETS[this.qualityTier].renderScale;
+    return this._flightRenderScale
+        !== K.QUALITY_PRESETS[this.qualityTier].renderScale
+      || this._holdRenderScale
+        !== K.HOLD_RENDER_SCALE_BY_TIER[this.qualityTier];
   }
 
   setQualityTier(tier, cameraMoving = null) {
@@ -426,13 +431,23 @@ export class Renderer {
     }
     if (cameraMoving !== null) this._cameraMoving = Boolean(cameraMoving);
     this.qualityTier = tier;
+    // Both scales come from the tier. A hand-set scale does not survive a
+    // tier change, and never has — the tier is the coarser choice.
     this._flightRenderScale = K.QUALITY_PRESETS[tier].renderScale;
+    this._holdRenderScale = K.HOLD_RENDER_SCALE_BY_TIER[tier];
     this._applyEffectiveQuality();
   }
 
   setRenderScale(scale) {
     renderTargetSize([1, 1], scale);   // validates, throws on a bad value
     this._flightRenderScale = Number(scale);
+    this._applyEffectiveQuality();
+  }
+
+  /** What a held view climbs to. Below the flight scale it climbs nowhere. */
+  setHoldRenderScale(scale) {
+    renderTargetSize([1, 1], scale);
+    this._holdRenderScale = Number(scale);
     this._applyEffectiveQuality();
   }
 
@@ -455,11 +470,13 @@ export class Renderer {
    *
    * Rung 0 is the flight configuration — the tier's own sampling at whatever
    * render scale is in force, which is the preset's unless the Quality
-   * panel's slider has overridden it. Above it come QUALITY_HOLD_LADDERS'
-   * entries, minus any that would not actually be an improvement on the rung
-   * below. That last rule is what makes a hand-set render scale behave: set
-   * it to 1.0 and every tier's ladder collapses to a single rung, which is
-   * "hold just accumulates", which is exactly right.
+   * panel's slider has overridden it. Above it come QUALITY_HOLD_RUNGS'
+   * stepping stones and then the hold scale itself, minus any that would not
+   * actually be an improvement on the rung below. That last rule is what
+   * makes both hand-set scales behave: raise the flight scale to the hold
+   * scale, or lower the hold scale to the flight scale, and the ladder
+   * collapses to a single rung — "hold just accumulates", which is exactly
+   * right in either case.
    */
   _buildHoldLadder() {
     const preset = K.QUALITY_PRESETS[this.qualityTier];
@@ -470,7 +487,21 @@ export class Renderer {
       maxLightSteps: preset.maxLightSteps,
       costRatio: 1.0,
     }];
-    for (const step of K.QUALITY_HOLD_LADDERS[this.qualityTier]) {
+    const steps = [
+      // Stepping stones only count while they are on the way. Dragging the
+      // hold slider down to (or below) the flight scale must collapse the
+      // ladder, and it would not if an intermediate rung were still allowed
+      // to climb past the destination.
+      ...K.QUALITY_HOLD_RUNGS[this.qualityTier].filter(
+        (step) => step.scale < this._holdRenderScale),
+      // The top rung is the hold scale, sampled like High: whatever tier flew
+      // you here, a settled picture is stepped and lit the same. A hold scale
+      // at or below the flight scale simply drops it, which collapses the
+      // ladder to "hold just accumulates" — the honest reading of asking for
+      // a still no sharper than the flight.
+      { scale: this._holdRenderScale, sampling: "high" },
+    ];
+    for (const step of steps) {
       const below = rungs[rungs.length - 1];
       if (!(step.scale > below.scale)) continue;
       const sampling = K.QUALITY_PRESETS[step.sampling];

@@ -50,6 +50,17 @@ ALL_TIERS = TIERS + ["max"]
 _JS = textwrap.dedent("""
     import * as K from "%s";
     import { hazeEFoldingKm } from "%s";
+    import { Renderer } from "%s";
+
+    // The real builder, which is pure — no device, no textures.
+    function ladderFor(tier, holdScale) {
+      const r = Object.create(Renderer.prototype);
+      r.qualityTier = tier;
+      r._flightRenderScale = K.QUALITY_PRESETS[tier].renderScale;
+      r._holdRenderScale = holdScale ?? K.HOLD_RENDER_SCALE_BY_TIER[tier];
+      r._buildHoldLadder();
+      return r._holdLadder;
+    }
 
     const tiers = %s;
     const smoothingSweep = [0, 0.25, 0.5, 0.75, 1.0];
@@ -73,7 +84,8 @@ _JS = textwrap.dedent("""
       defaultHoldMode: K.DEFAULT_HOLD_MODE,
       defaultPreview: K.DEFAULT_QUALITY_PREVIEW,
       presets: K.QUALITY_PRESETS,
-      ladders: K.QUALITY_HOLD_LADDERS,
+      holdRungs: K.QUALITY_HOLD_RUNGS,
+      holdScale: K.HOLD_RENDER_SCALE_BY_TIER,
       minRenderScale: K.MIN_RENDER_SCALE,
       alphaFor: Object.fromEntries(tiers.map((t) => [
         t, smoothingSweep.map((s) => K.motionAlphaForSmoothing(s, t))])),
@@ -83,8 +95,14 @@ _JS = textwrap.dedent("""
       smoothingSweep,
       hazeSweep,
       eFolding: hazeSweep.map((h) => hazeEFoldingKm(h)),
+      built: Object.fromEntries(tiers.map((t) => [t, ladderFor(t)])),
+      // Minimal, with the hold slider dragged to and below its flight scale.
+      handSet: [ladderFor("minimal", 0.125), ladderFor("minimal", 0.1)]
+        .map((rungs) => rungs.map((r) => r.scale)),
     }));
-""") % (CONSTANTS_JS.as_posix(), SPECTRAL_JS.as_posix(), json.dumps(ALL_TIERS))
+""") % (CONSTANTS_JS.as_posix(), SPECTRAL_JS.as_posix(),
+        (REPO / "web" / "soar" / "renderer.js").as_posix(),
+        json.dumps(ALL_TIERS))
 
 
 @pytest.fixture(scope="module")
@@ -101,7 +119,7 @@ def test_every_tier_appears_in_every_per_tier_table(js):
     assert sorted(js["tierNames"]) == sorted(ALL_TIERS)
     assert js["cheapestFirst"] == TIERS
     for table in ("parked", "alphaFloor", "defaultSmoothing", "defaultHaze",
-                  "defaultLod", "presets", "ladders"):
+                  "defaultLod", "presets", "holdRungs", "holdScale"):
         assert sorted(js[table]) == sorted(ALL_TIERS), table
 
 
@@ -122,26 +140,36 @@ def test_flight_scales_fall_with_the_tier_and_stay_renderable(js):
     assert min(scales) >= js["minRenderScale"]
 
 
-def test_hold_ladders_climb_from_the_flight_scale_to_the_tier_ceiling(js):
-    """Every rung is dearer than the one below and the top samples like High.
+def test_hold_ladders_climb_from_the_flight_scale_to_the_hold_scale(js):
+    """The composed ladder, as Renderer._buildHoldLadder actually builds it.
 
-    The ceiling is per tier since 2026-08-14 — Minimal converges at half
-    scale, Low at three quarters — so this no longer asserts that every tier
-    reaches 1.0. What it does assert is that the climb is monotone and that
-    the top rung is sampled like High wherever there is a climb at all,
-    because a settled picture must not be stepped like the tier that flew it.
+    Every rung is dearer than the one below, the top one samples like High
+    wherever there is a climb at all (a settled picture must not be stepped
+    like the tier that flew it), and the climb ends at the hold scale — which
+    is per tier since 2026-08-14 and a slider since the same day, so this
+    asserts a ceiling rather than "everything reaches 1.0".
     """
     for tier in ALL_TIERS:
-        rungs = js["ladders"][tier]
-        scales = [js["presets"][tier]["renderScale"]] + [r["scale"] for r in rungs]
+        rungs = js["built"][tier]
+        scales = [r["scale"] for r in rungs]
+        assert scales[0] == js["presets"][tier]["renderScale"], tier
         assert scales == sorted(scales), tier
         assert len(set(scales)) == len(scales), tier
-        if rungs:
-            assert rungs[-1]["sampling"] == "high", tier
-    assert js["ladders"]["minimal"][-1]["scale"] == 0.5
-    assert js["ladders"]["low"][-1]["scale"] == 0.75
-    assert js["ladders"]["medium"][-1]["scale"] == 1.0
-    assert js["ladders"]["high"] == js["ladders"]["max"] == []
+        assert scales[-1] == max(
+            js["presets"][tier]["renderScale"], js["holdScale"][tier]), tier
+        if len(rungs) > 1:
+            assert rungs[-1]["stepFactor"] == js["presets"]["high"]["stepFactor"], tier
+    assert [r["scale"] for r in js["built"]["minimal"]] == [0.125, 0.25, 0.5]
+    assert [r["scale"] for r in js["built"]["low"]] == [0.3, 0.5, 0.75]
+    assert [r["scale"] for r in js["built"]["medium"]] == [0.6, 1.0]
+    assert len(js["built"]["high"]) == len(js["built"]["max"]) == 1
+
+
+def test_a_hold_scale_at_or_below_the_flight_scale_collapses_the_ladder(js):
+    """Asking for a still no sharper than the flight is a hold that only
+    accumulates — not a rung that climbs downward."""
+    for scales in js["handSet"]:
+        assert scales == [0.125], scales
 
 
 def test_parked_samples_are_capped_and_rise_with_the_tier(js):

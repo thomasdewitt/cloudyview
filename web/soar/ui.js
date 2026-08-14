@@ -403,57 +403,51 @@ export class UI {
     const m = this.menu;
     m.append(this._header("performance", "Quality"));
 
-    const tiers = segmented(
-      K.QUALITY_TIER_NAMES.map((n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
-      (v) => v === r.qualityTier,
-      (v) => { app.setQualityTier(v); this.open("quality"); });
-    m.append(tiers);
+    // The tiers and the preview share one line. This panel is docked at the
+    // bottom to be looked PAST, and every row it does not spend is sky
+    // (Thomas, 2026-08-14) — which is also why the prose that used to explain
+    // each of these is gone.
+    const head = el("div", "seg-row");
     // Everything here goes through the viewer rather than straight at the
     // renderer, because every one of these changes the picture and the frame
     // loop may be asleep in front of it — the viewer's setters are what wake
     // it. Reaching past them would leave a slider that moves and a view that
     // does not.
-    m.append(el("div", "row", app.autoTier
-      ? "Chosen automatically by measuring this machine. Pick a tier to " +
-        "decide for yourself; soar will stop choosing for the rest of the " +
-        "session."
-      : "Set by hand for this session."));
-    if (r.qualityTier === "max") {
-      m.append(el("div", "row",
-        `Max marches ${K.QUALITY_PRESETS.max.sppPerFrame} times for every ` +
-        "frame it shows, so a view is clean while it is still moving. It is " +
-        "never chosen automatically — it is the one tier you have to mean."));
-    }
+    head.append(segmented(
+      K.QUALITY_TIER_NAMES.map((n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
+      (v) => v === r.qualityTier,
+      (v) => { app.setQualityTier(v); this.open("quality"); }));
+    const show = el("div", "seg-group");
+    show.append(el("h3", null, "show"));
+    show.append(segmented(
+      [["Live", "live"], ["Still", "still"]],
+      (v) => v === this._qualityPreview,
+      (v) => { this._qualityPreview = v; this.open("quality"); }));
+    head.append(show);
+    m.append(head);
     if (r.qualityIsCustom) {
       m.append(el("div", "row", "Render scale has been set by hand, so this " +
                                "tier is running custom."));
     }
 
     m.append(el("div", "divider"));
-    m.append(el("h3", null, "show while this panel is open"));
-    m.append(segmented(
-      [["Live", "live"], ["Still", "still"]],
-      (v) => v === this._qualityPreview,
-      (v) => { this._qualityPreview = v; this.open("quality"); }));
-    m.append(el("div", "row", this._qualityPreview === "live"
-      ? "The flight picture, held still — what these controls actually " +
-        "change. Close the panel and held views go back to sharpening."
-      : "The settled picture, which every tier converges to. The controls " +
-        "below will look like they do nothing: that is the point of it."));
-
-    m.append(el("div", "divider"));
     // Two columns while docked at the bottom: the panel exists to be looked
     // PAST — every row it saves is sky the sliders are actually changing.
     const sliders = el("div", "slider-grid");
     m.append(sliders);
-    sliders.append(sliderRow("Render scale", {
-      // The step has to divide the floor: at 0.05 the slider could not reach
-      // 0.125 at all, and the bottom of its own range was unselectable.
+    // Two scales, because the tier has two: what it marches at while you
+    // move, and what a held view climbs to. The step has to divide the floor:
+    // at 0.05 the slider could not reach 0.125 at all, and the bottom of its
+    // own range was unselectable.
+    const scaleRow = (label, value, onInput) => sliderRow(label, {
       min: K.MIN_RENDER_SCALE, max: K.MAX_RENDER_SCALE,
       step: K.RENDER_SCALE_SLIDER_STEP,
-      value: r.flightRenderScale, format: (v) => `${v.toFixed(3)}x`,
-      onInput: (v) => app.setRenderScale(v),
-    }));
+      value, format: (v) => `${v.toFixed(3)}x`, onInput,
+    });
+    sliders.append(scaleRow("Render scale, moving", r.flightRenderScale,
+                            (v) => app.setRenderScale(v)));
+    sliders.append(scaleRow("Render scale, still", r.holdRenderScale,
+                            (v) => app.setHoldRenderScale(v)));
     // Smoothing, not alpha — up is more. The tier sets how far up goes.
     sliders.append(sliderRow("Motion smoothing", {
       min: 0.0, max: 1.0, step: 0.01, value: app.motionSmoothing,
@@ -489,15 +483,6 @@ export class UI {
       format: (v) => v.toFixed(2),
       onInput: (v) => app.setContrast(v),
     }));
-    // The tier governs flight only. Say so wherever a tier is chosen, because
-    // it is the thing that makes choosing a low one reasonable.
-    if (r.holdMode === "still" && K.QUALITY_HOLD_LADDERS[r.qualityTier].length) {
-      m.append(el("div", "row",
-        `${K.QUALITY_PRESETS[r.qualityTier].label.split(" —")[0]} is how the ` +
-        "view is drawn while you move. Stop, and it sharpens step by step to " +
-        "full resolution and High sampling — the same still every tier " +
-        "settles to."));
-    }
     m.append(el("div", "divider"));
     m.append(this._backButton());
   }
