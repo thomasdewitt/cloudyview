@@ -12,6 +12,12 @@ import { packUniforms, sceneKey, keysEqual, renderTargetSize,
          motionAlphaForDt } from "./uniforms.js";
 import { guardAllocation } from "./gpu.js";
 
+// Frame-index spacing between the samples of one frame. The index seeds the
+// jitter and the dither, and the viewer's own index steps by 1 per frame, so
+// a stride of 1 here would make sample s of this frame the twin of sample 0
+// of the frame s later — correlated noise that averages to a pattern.
+const SPP_FRAME_INDEX_STRIDE = 4096;
+
 // The march's output for one frame. Half precision is plenty for a single
 // sample: its round-off is ~0.03 8-bit levels and it is averaged away.
 const SAMPLE_FORMAT = "rgba16float";
@@ -242,6 +248,7 @@ export class Renderer {
     this._holdLadder = null;
     this._holdRung = 0;
     this._holdCapped = false;
+    this._holdMode = K.DEFAULT_HOLD_MODE;
     this.renderScale = null;
     this.stepFactor = null;
     this.lightStepFactor = null;
@@ -537,6 +544,7 @@ export class Renderer {
    * invariant the startup tier probe runs on, and for the same reason.
    */
   holdTick(lastMarchMs = null) {
+    if (this._holdMode === "live") return;   // what you flew on is what you keep
     if (this._cameraMoving || this._holdCapped) return;
     if (this._holdRung >= this._holdLadder.length - 1) return;
     if (this._accumCount < K.HOLD_RUNG_FRAMES) return;
@@ -568,10 +576,41 @@ export class Renderer {
    * stop marching.
    */
   get converged() {
-    const atTop = this._holdRung === this._holdLadder.length - 1
+    const atTop = this._holdMode === "live"
+      || this._holdRung === this._holdLadder.length - 1
       || this._holdCapped;
     return !this._cameraMoving && atTop && !this._accumMotion
-      && this._accumCount >= K.CONVERGED_ACCUM_FRAMES;
+      && this._accumCount >= this.parkedAccumFrames;
+  }
+
+  /** Jittered marches per presented frame — 1 everywhere but Max. */
+  get sppPerFrame() {
+    return K.QUALITY_PRESETS[this.qualityTier].sppPerFrame ?? 1;
+  }
+
+  /** Samples a held view settles at, which is a property of the tier. */
+  get parkedAccumFrames() {
+    return K.PARKED_ACCUM_FRAMES_BY_TIER[this.qualityTier];
+  }
+
+  get holdMode() { return this._holdMode; }
+
+  /**
+   * Live or still. Switching to live drops straight back to the flight rung —
+   * the point of the mode is that nothing above it is ever rendered, and that
+   * has to include the rung already in force when the switch is made.
+   */
+  setHoldMode(mode) {
+    if (!K.HOLD_MODES.includes(mode)) {
+      throw new Error(`unknown hold mode '${mode}'.`);
+    }
+    if (mode === this._holdMode) return;
+    this._holdMode = mode;
+    if (mode === "live") {
+      this._holdRung = 0;
+      this._holdCapped = false;
+      this._applyRung();
+    }
   }
 
   /** Samples blended into the picture on screen. The stats readout's "spp". */
@@ -907,38 +946,93 @@ export class Renderer {
       return;
     }
 
-    // One scratch array for the blend weights, refilled rather than rebuilt.
-    // writeBuffer copies out of it synchronously, so reusing it is safe.
-    this._accumWeights[0] = plan.prevWeight;
-    this._accumWeights[1] = plan.sampleWeight;
-    this.device.queue.writeBuffer(this.accumUniformBuf, 0, this._accumWeights);
+    // How many jittered marches go into this one presented frame. Every tier
+    // but Max takes a single one; see QUALITY_PRESETS.
+    //
+    // They are separate submissions rather than one long pass, and that is the
+    // safety property, not an implementation detail: each command buffer is
+    // exactly one ordinary frame's worth of work, so eight samples cost eight
+    // frames of GPU time and never one pass eight times longer. Metal's
+    // watchdog kills a pass by duration, so the loop is what lets a tier this
+    // dear exist at all without risking the device. (It also means the
+    // uniform buffer can be rewritten between samples, which is what
+    // decorrelates their jitter.)
+    const samples = accumulate ? Math.max(1, this.sppPerFrame) : 1;
+    let outTex = null;
+    for (let s = 0; s < samples; s++) {
+      const step = s === 0 ? plan : this._extraSamplePlan(plan.jitterScale);
+      if (s > 0) {
+        // Only the three components that differ between samples of one view,
+        // for the reason the full repack is avoided above. None of them is in
+        // the scene key, so the key computed once still describes all of them.
+        u[4 * 4 + 3] = (view.frameIndex ?? 0) + s * SPP_FRAME_INDEX_STRIDE;
+        u[10 * 4] = step.subpixel ? 1.0 : 0.0;
+        u[10 * 4 + 1] = step.jitterScale;
+        this.device.queue.writeBuffer(this.uniformBuf, 0, u);
+      }
+      // One scratch array for the blend weights, refilled rather than rebuilt.
+      // writeBuffer copies out of it synchronously, so reusing it is safe.
+      this._accumWeights[0] = step.prevWeight;
+      this._accumWeights[1] = step.sampleWeight;
+      this.device.queue.writeBuffer(this.accumUniformBuf, 0, this._accumWeights);
 
-    let p = pass(targets.sample.createView());
-    p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
-    p.setBindGroup(0, this.rayBindGroup);
-    p.draw(3);
-    p.end();
+      const enc = s === 0 ? encoder : this.device.createCommandEncoder();
+      const sPass = (viewRef) => enc.beginRenderPass({
+        colorAttachments: [{
+          view: viewRef, loadOp: "clear", storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
 
-    // The accumulator ping-pongs between two textures, so there are exactly
-    // two bind groups for the whole life of a target set. They were being
-    // built from scratch every frame — along with three texture views — for a
-    // pair of resources that only change when the render target is
-    // reallocated, which is where they are now built instead.
-    const outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
-    p = pass(outTex.createView());
-    p.setPipeline(this.accumPipeline);
-    p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
-    p.draw(3);
-    p.end();
+      let p = sPass(targets.sample.createView());
+      p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
+      p.setBindGroup(0, this.rayBindGroup);
+      p.draw(3);
+      p.end();
 
-    this._encodeBlit(encoder, outTex, targetView, targetFormat,
-                     renderSize[0] === outputW && renderSize[1] === outputH);
-    encodeOverlays(overlays, encoder, targetView, targetFormat);
-    this.device.queue.submit([encoder.finish()]);
+      // The accumulator ping-pongs between two textures, so there are exactly
+      // two bind groups for the whole life of a target set. They were being
+      // built from scratch every frame — along with three texture views — for
+      // a pair of resources that only change when the render target is
+      // reallocated, which is where they are now built instead.
+      outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
+      p = sPass(outTex.createView());
+      p.setPipeline(this.accumPipeline);
+      p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
+      p.draw(3);
+      p.end();
 
-    this._accumIndex = 1 - this._accumIndex;
-    this._accumCount = plan.nextCount;
+      // Only the last sample reaches the screen: the ones before it are the
+      // picture being built, and presenting each would be a strobe.
+      if (s === samples - 1) {
+        this._encodeBlit(enc, outTex, targetView, targetFormat,
+                         renderSize[0] === outputW && renderSize[1] === outputH);
+        encodeOverlays(overlays, enc, targetView, targetFormat);
+      }
+      this.device.queue.submit([enc.finish()]);
+
+      this._accumIndex = 1 - this._accumIndex;
+      this._accumCount = step.nextCount;
+    }
     this._lastPresented = outTex;
+  }
+
+  /**
+   * A further jittered sample of the SAME view inside one presented frame.
+   *
+   * Not _accumulationPlan: that one asks whether the scene changed, and
+   * within a frame it has not — asked twice it would read the unchanged key
+   * as "motion has just ended" and throw the samples already taken away.
+   * This is the plain running average, continuing whatever the frame's first
+   * sample decided (a motion blend, or a fresh start).
+   */
+  _extraSamplePlan(jitterScale) {
+    const nextCount = this._accumCount + 1;
+    return {
+      prevWeight: this._accumCount / nextCount,
+      sampleWeight: 1.0 / nextCount,
+      nextCount, subpixel: true, jitterScale,
+    };
   }
 
   /**

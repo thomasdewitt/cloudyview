@@ -289,3 +289,47 @@ GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 64 frames/view · field QC_FIF
 | high | v1_thick_backlit | 960x540 | 10.215 | 97.9 |
 | high | v4_overview_south | 960x540 | 17.118 | 58.4 |
 | high | v8_ocean_lod | 960x540 | 4.004 | 249.7 |
+
+## 2026-08-14 10:46:58 — d88440b
+
+GPU: NVIDIA GeForce RTX 5080 · output 960x540 · 32 frames/view · field TWPICE_subvolume_256x256_5km.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 960x540 | 1.238 | 808.1 |
+| high | v4_overview_south | 960x540 | 0.861 | 1161.2 |
+| high | v8_ocean_lod | 960x540 | 0.735 | 1360.6 |
+| medium | v1_thick_backlit | 576x324 | 1.476 | 677.5 |
+| medium | v4_overview_south | 576x324 | 0.481 | 2078.4 |
+| medium | v8_ocean_lod | 576x324 | 0.338 | 2961.1 |
+| low | v1_thick_backlit | 288x162 | 0.346 | 2889.1 |
+| low | v4_overview_south | 288x162 | 0.395 | 2529.3 |
+| low | v8_ocean_lod | 288x162 | 0.160 | 6239.2 |
+| minimal | v1_thick_backlit | 120x68 | 0.385 | 2600.4 |
+| minimal | v4_overview_south | 120x68 | 0.402 | 2490.0 |
+| minimal | v8_ocean_lod | 120x68 | 0.141 | 7072.4 |
+| hold_low | v1_thick_backlit | 720x405 | 0.849 | 1178.1 |
+| hold_low | v4_overview_south | 720x405 | 0.678 | 1475.9 |
+| hold_low | v8_ocean_lod | 720x405 | 0.491 | 2036.0 |
+| hold_minimal | v1_thick_backlit | 480x270 | 0.574 | 1741.6 |
+| hold_minimal | v4_overview_south | 480x270 | 0.510 | 1961.8 |
+| hold_minimal | v8_ocean_lod | 480x270 | 0.331 | 3023.9 |
+
+## 2026-08-14 10:47:17 — d88440b
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 32 frames/view · field TWPICE_subvolume_256x256_5km.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 2560x1440 | 7.482 | 133.7 |
+| high | v4_overview_south | 2560x1440 | 5.322 | 187.9 |
+| medium | v1_thick_backlit | 1536x864 | 2.515 | 397.6 |
+| medium | v4_overview_south | 1536x864 | 2.346 | 426.2 |
+| low | v1_thick_backlit | 768x432 | 0.654 | 1530.2 |
+| low | v4_overview_south | 768x432 | 0.614 | 1627.6 |
+| minimal | v1_thick_backlit | 320x180 | 0.332 | 3012.7 |
+| minimal | v4_overview_south | 320x180 | 0.403 | 2482.1 |
+| hold_low | v1_thick_backlit | 1920x1080 | 4.393 | 227.6 |
+| hold_low | v4_overview_south | 1920x1080 | 3.136 | 318.8 |
+| hold_minimal | v1_thick_backlit | 1280x720 | 1.948 | 513.4 |
+| hold_minimal | v4_overview_south | 1280x720 | 1.334 | 749.9 |

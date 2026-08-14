@@ -8,6 +8,7 @@
 "use strict";
 
 import * as K from "./constants.js";
+import { hazeEFoldingKm } from "./spectral.js";
 
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
@@ -71,6 +72,10 @@ export class UI {
     this.root = root;
     this.app = app;
     this.panel = null;          // null while flying
+    // What the Quality panel shows while it is open, remembered for the
+    // session. It is a preview, not a setting: only the panel turns it on and
+    // leaving the panel always turns it off. See HOLD_MODES.
+    this._qualityPreview = K.DEFAULT_QUALITY_PREVIEW;
     this._build();
   }
 
@@ -218,6 +223,7 @@ export class UI {
   close() {
     this.menu.hidden = true;
     this.panel = null;
+    this._syncQualityPreview();
     // Every open/close keeps the chrome classes honest. saveScreenshot used
     // to close the menu with no _syncChrome, leaving `menu-open` describing
     // a state the app was no longer in (bug 2's sibling).
@@ -246,6 +252,9 @@ export class UI {
     // the picture stays visible while it is being tuned — a centred box
     // sits exactly on top of the thing the sliders move.
     this.menu.classList.toggle("dock-bottom", DOCKED_PANELS.has(name));
+    // The pause menu is two columns; every other centred panel is one.
+    this.menu.classList.toggle("wide", name === "main");
+    this._syncQualityPreview();
     this.menu.replaceChildren();
     const build = this[`_panel_${name}`];
     if (!build) throw new Error(`no such panel: ${name}`);
@@ -262,9 +271,23 @@ export class UI {
     }
   }
 
+  /** A panel head. `kicker` may be null where it would only restate the
+   *  title — two lines saying one thing is worse than one (Thomas,
+   *  2026-08-14). */
+  /**
+   * Hold the flight picture still while — and only while — the Quality panel
+   * is up, so its controls have something visible to act on. Driven from the
+   * panel's lifecycle rather than from a setting, because a preview that
+   * outlived the panel would quietly cost every later hold its still.
+   */
+  _syncQualityPreview() {
+    this.app.setHoldMode?.(
+      this.panel === "quality" ? this._qualityPreview : "still");
+  }
+
   _header(kicker, title) {
-    const h = el("div");
-    h.append(el("h3", null, kicker));
+    const h = el("div", "panel-head");
+    if (kicker) h.append(el("h3", null, kicker));
     h.append(el("p", "menu-title", title));
     return h;
   }
@@ -273,39 +296,50 @@ export class UI {
     return item(label, null, () => this.open("main"));
   }
 
+  /**
+   * The pause menu: two columns, and Resume sits in the title line.
+   *
+   * "Paused" is the state and Resume is the way out of it, so the way out
+   * belongs on the same line as the state rather than as the first of a dozen
+   * identical rows. Left column is how the picture looks; right column is the
+   * field you are flying and what you take away from it. Leaving is neither,
+   * so it sits alone at the foot (Thomas, 2026-08-14).
+   */
   _panel_main() {
     const app = this.app;
     const m = this.menu;
-    m.append(this._header("cloudyview", "Paused"));
 
-    m.append(item("Resume", "Esc", () => app.resume()));
-    m.append(item("Open a file…", "netCDF, read on this machine",
-                  () => app.pickFile()));
-    if (app.scene.nested) {
-      m.append(item(`Remove the nest (${app.nestName ?? "nested field"})`,
-                    null, () => app.removeNest()));
-    }
-    m.append(item("Time of day…",
-                  `${app.sunZenith.toFixed(0)}° zenith`,
-                  () => this.open("sun")));
-    // The FLIGHT scale, not renderer.renderScale — that one is whichever hold
-    // rung is in force at the instant the menu was built, so the summary would
-    // read differently depending on how long you sat still before pausing.
-    m.append(item("Quality…",
-                  `${K.QUALITY_PRESETS[app.renderer.qualityTier].label}` +
-                  `, ${app.renderer.flightRenderScale.toFixed(3)}x` +
-                  (app.autoTier ? ", chosen automatically" : ""),
-                  () => this.open("quality")));
-    m.append(item("Capture…", "still image or a flight video",
-                  () => this.open("capture")));
-    m.append(item("Render this view in a terminal…",
-                  "a pasteable command — witness or behold",
-                  () => this.open("terminal")));
-    m.append(item("Controls", null, () => this.open("controls")));
-    m.append(item(
+    const head = el("div", "menu-head");
+    head.append(el("p", "menu-title", "Paused"));
+    const resume = el("button", "resume");
+    resume.append(el("span", null, "Resume"));
+    resume.append(el("kbd", null, "Esc"));
+    resume.addEventListener("click", () => app.resume());
+    head.append(resume);
+    m.append(head);
+
+    const cols = el("div", "menu-cols");
+    const appearance = el("div", "col");
+    const session = el("div", "col");
+    appearance.append(el("h3", null, "appearance"));
+    session.append(el("h3", null, "session"));
+    cols.append(appearance, session);
+    m.append(cols);
+
+    appearance.append(item("Time of day…",
+                           `${app.sunZenith.toFixed(0)}° zenith`,
+                           () => this.open("sun")));
+    // The tier's name and nothing else. The render scale, and whether the
+    // machine chose the tier, are the quality panel's business (Thomas,
+    // 2026-08-14).
+    appearance.append(item(
+      "Quality…",
+      K.QUALITY_PRESETS[app.renderer.qualityTier].label.split(" —")[0],
+      () => this.open("quality")));
+    appearance.append(item(
       `Minimap: ${!app.minimap ? "off" : { corner: "on", full: "fullscreen", off: "off" }[app.minimapMode]}`,
       app.minimap
-        ? "M — corner map, fullscreen (click to travel), off"
+        ? "Keyboard shortcut: M"
         : (app._minimapProblem ?? "not available for this field"),
       () => {
         app.toggleMinimap();
@@ -316,39 +350,51 @@ export class UI {
         if (app.minimapMode === "full") this.close();
         else this.open("main");
       }));
-    m.append(item(
+    appearance.append(item(
       `Bird: ${app.bird && app.birdEnabled ? "on" : "off"}`,
       app.bird
-        ? "B — a swift, flying ahead of you"
+        ? "Keyboard shortcut: B"
         : (app._birdProblem ?? "not available for this field"),
       () => { app.toggleBird(); this.open("main"); }));
-    m.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
-                  "wrap the field laterally",
-                  () => { app.togglePeriodic(); this.open("main"); }));
-    m.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
-                  "F", () => { app.toggleFullscreen(); this.open("main"); }));
-    m.append(item("Back to the start page", null, () => app.leave()));
+    appearance.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
+                           "Keyboard shortcut: F",
+                           () => { app.toggleFullscreen(); this.open("main"); }));
 
-    m.append(el("div", "divider"));
+    // What is loaded belongs on the control that would replace it, not in a
+    // block of its own at the foot (Thomas, 2026-08-14).
+    const open = item("Open a NetCDF file…", `Current: ${app.sourceLabel}`,
+                      () => app.pickFile());
+    if (app.scene.nested) {
+      const coverage = app.scene.nestCoverageFraction();
+      open.append(el("span", "note",
+        `+ nest, ${(app.renderer.dtView / app.renderer.dtViewNest).toFixed(0)}` +
+        `× finer, covering ${(coverage * 100).toFixed(0)}% of the domain` +
+        (coverage > 0.75 ? " — little of the outer field is visible" : "")));
+    }
+    session.append(open);
+    if (app.scene.nested) {
+      session.append(item(`Remove the nest (${app.nestName ?? "nested field"})`,
+                          null, () => app.removeNest()));
+    }
+    session.append(item("Capture…", null, () => this.open("capture")));
+    session.append(item("Render this view in a terminal…", null,
+                        () => this.open("terminal")));
+    session.append(item("Controls", null, () => this.open("controls")));
+    session.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
+                        "wrap the field laterally",
+                        () => { app.togglePeriodic(); this.open("main"); }));
     const fov = sliderRow("Field of view", {
       min: K.FOV_LIMITS[0], max: K.FOV_LIMITS[1], step: 1,
       value: app.camera.fov, format: (v) => `${v.toFixed(0)}°`,
       onInput: (v) => app.setFov(v),
     });
-    m.append(fov);
+    fov.classList.add("tight");
+    session.append(fov);
 
-    const source = el("div", "row");
-    source.style.display = "block";
-    source.append(el("h3", null, "field"));
-    source.append(el("div", null, app.sourceLabel));
-    if (app.scene.nested) {
-      const coverage = app.scene.nestCoverageFraction();
-      source.append(el("div", null,
-        `+ nest, ${(app.renderer.dtView / app.renderer.dtViewNest).toFixed(0)}` +
-        `× finer, covering ${(coverage * 100).toFixed(0)}% of the domain` +
-        (coverage > 0.75 ? " — little of the outer field is visible" : "")));
-    }
-    m.append(source);
+    m.append(el("div", "divider"));
+    const foot = el("div", "menu-foot");
+    foot.append(item("Back to the start page", null, () => app.leave()));
+    m.append(foot);
   }
 
   _panel_quality() {
@@ -372,10 +418,28 @@ export class UI {
         "decide for yourself; soar will stop choosing for the rest of the " +
         "session."
       : "Set by hand for this session."));
+    if (r.qualityTier === "max") {
+      m.append(el("div", "row",
+        `Max marches ${K.QUALITY_PRESETS.max.sppPerFrame} times for every ` +
+        "frame it shows, so a view is clean while it is still moving. It is " +
+        "never chosen automatically — it is the one tier you have to mean."));
+    }
     if (r.qualityIsCustom) {
       m.append(el("div", "row", "Render scale has been set by hand, so this " +
                                "tier is running custom."));
     }
+
+    m.append(el("div", "divider"));
+    m.append(el("h3", null, "show while this panel is open"));
+    m.append(segmented(
+      [["Live", "live"], ["Still", "still"]],
+      (v) => v === this._qualityPreview,
+      (v) => { this._qualityPreview = v; this.open("quality"); }));
+    m.append(el("div", "row", this._qualityPreview === "live"
+      ? "The flight picture, held still — what these controls actually " +
+        "change. Close the panel and held views go back to sharpening."
+      : "The settled picture, which every tier converges to. The controls " +
+        "below will look like they do nothing: that is the point of it."));
 
     m.append(el("div", "divider"));
     // Two columns while docked at the bottom: the panel exists to be looked
@@ -390,20 +454,30 @@ export class UI {
       value: r.flightRenderScale, format: (v) => `${v.toFixed(3)}x`,
       onInput: (v) => app.setRenderScale(v),
     }));
+    // Smoothing, not alpha — up is more. The tier sets how far up goes.
     sliders.append(sliderRow("Motion smoothing", {
-      min: 0.3, max: 0.9, step: 0.01, value: r.motionBlendAlpha,
+      min: 0.0, max: 1.0, step: 0.01, value: app.motionSmoothing,
       format: (v) => v.toFixed(2),
-      onInput: (v) => app.setMotionBlendAlpha(v),
+      onInput: (v) => app.setMotionSmoothing(v),
     }));
     sliders.append(sliderRow("Tone-map gamma", {
       min: K.TONE_MAP_GAMMA_LIMITS[0], max: K.TONE_MAP_GAMMA_LIMITS[1],
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
       onInput: (v) => app.setToneMapGamma(v),
     }));
+    // Read out as the distance it means. The knob drives four terms and is
+    // not a length, but this is the length it implies at sea level, and it is
+    // what the periodic march cap is derived from.
     sliders.append(sliderRow("Haze", {
-      min: 0.0, max: 2.0, step: 0.01, value: app.haze,
-      format: (v) => v.toFixed(2),
+      min: 0.0, max: K.HAZE_MAX, step: 0.01, value: app.haze,
+      format: (v) => `${hazeEFoldingKm(v).toFixed(1)} km`,
       onInput: (v) => app.setHaze(v),
+    }));
+    sliders.append(sliderRow("Level of detail", {
+      min: K.LOD_STRENGTH_LIMITS[0], max: K.LOD_STRENGTH_LIMITS[1],
+      step: 0.05, value: app.lodStrength,
+      format: (v) => `${v.toFixed(2)}x`,
+      onInput: (v) => app.setLodStrength(v),
     }));
     sliders.append(sliderRow("White point", {
       min: 4.0, max: 40.0, step: 0.5, value: app.toneMapWhitePoint,
@@ -417,7 +491,7 @@ export class UI {
     }));
     // The tier governs flight only. Say so wherever a tier is chosen, because
     // it is the thing that makes choosing a low one reasonable.
-    if (K.QUALITY_HOLD_LADDERS[r.qualityTier].length) {
+    if (r.holdMode === "still" && K.QUALITY_HOLD_LADDERS[r.qualityTier].length) {
       m.append(el("div", "row",
         `${K.QUALITY_PRESETS[r.qualityTier].label.split(" —")[0]} is how the ` +
         "view is drawn while you move. Stop, and it sharpens step by step to " +
@@ -473,7 +547,7 @@ export class UI {
 
   _panel_controls() {
     const m = this.menu;
-    m.append(this._header("cloudyview", "Controls"));
+    m.append(this._header(null, "Controls"));
     const section = (title, rows) => {
       m.append(el("h3", null, title));
       for (const [key, what] of rows) {
@@ -500,9 +574,6 @@ export class UI {
       ["R", "record a flight track"],
       ["F12", "screenshot"],
     ]);
-    m.append(el("div", "row",
-      "Everything else lives in the menu — there is nothing you can only " +
-      "reach by keyboard."));
     m.append(el("div", "divider"));
     m.append(this._backButton());
   }
@@ -510,7 +581,7 @@ export class UI {
   _panel_terminal() {
     const app = this.app;
     const m = this.menu;
-    m.append(this._header("render in a terminal", "Command for this view"));
+    m.append(this._header(null, "Render in a terminal"));
 
     m.append(segmented(
       [["witness — exactly this view", "witness"],

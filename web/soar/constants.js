@@ -55,8 +55,25 @@ export const OCEAN_HAZE_EXTINCTION_PER_KM = 0.012;
 // spectral.js for the two functions that consume these.
 export const HAZE_ANCHOR = 0.35;
 export const DEFAULT_HAZE = 1.0;
-export const HAZE_MAX = 2.0;
+export const HAZE_MAX = 2.5;
 export const AERIAL_BETA_FLOOR_PER_KM = 0.015;
+
+// Haze is also the cheapest performance lever there is, which is why the
+// lower tiers ask for more of it. In a periodic domain the view march ends
+// where the clear-air transmittance runs out (periodic_march_cap in
+// raymarch.wgsl), so thicker air is literally a shorter ray: at haze 1 the
+// sea-level e-folding length is 9.0 km, at haze 2 it is 3.5 km, and the cap
+// moves in proportion. A tier that cannot afford the distance buys the
+// atmosphere that hides it.
+//
+// The cost of this: tiers no longer converge to the same picture, which the
+// hold ladder was built to guarantee. That guarantee is now the Still mode's
+// (see DEFAULT_HOLD_MODE) rather than the app's, and two machines that
+// auto-pick different tiers will show different weather. Thomas asked for it
+// with that trade named (2026-08-14). A hand-set haze is never overridden.
+export const DEFAULT_HAZE_BY_TIER = {
+  max: 1.0, high: 1.0, medium: 1.3, low: 1.6, minimal: 2.0,
+};
 
 // --- engine.py defaults -------------------------------------------------
 
@@ -116,6 +133,63 @@ export const CONTRAST_LIMITS = [0.5, 1.6];
 
 export const DEFAULT_MOTION_BLEND_ALPHA = 0.58;
 export const DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0;
+
+// --- motion smoothing, which the slider states the right way up -----------
+//
+// The accumulator blends each new march into the picture with weight alpha,
+// so alpha is the INVERSE of smoothing: 0.9 keeps almost nothing of the last
+// frame, 0.15 keeps most of it. The slider used to show alpha under the label
+// "Motion smoothing", so turning it up smoothed less (Thomas, 2026-08-14).
+// It now shows smoothing itself, on [0, 1], and this is where the two meet.
+//
+// The floor is per tier because smoothing is worth more the slower the
+// machine: it is the one setting that makes a low frame rate read as motion
+// blur rather than as stutter, and it costs nothing at all. Minimal reaches
+// twice the blend depth High can (alpha 0.15 against 0.30 — depth goes as
+// 1/alpha, so ~6.7 frames against ~3.3).
+export const MOTION_ALPHA_AT_ZERO_SMOOTHING = 0.90;
+export const MOTION_ALPHA_FLOOR_BY_TIER = {
+  max: 0.30, high: 0.30, medium: 0.24, low: 0.20, minimal: 0.15,
+};
+// High's default is 0.53 because that is exactly DEFAULT_MOTION_BLEND_ALPHA
+// (0.58) expressed in the new units — the look nobody asked to change.
+export const DEFAULT_MOTION_SMOOTHING_BY_TIER = {
+  // Max is the one tier that does not need smoothing to hide sampling noise:
+  // it has already paid for eight samples by the time the frame is shown.
+  max: 0.30, high: 0.53, medium: 0.65, low: 0.82, minimal: 1.0,
+};
+
+export function motionAlphaForSmoothing(smoothing, tier) {
+  const floor = MOTION_ALPHA_FLOOR_BY_TIER[tier];
+  if (floor === undefined) throw new Error(`unknown quality tier '${tier}'.`);
+  const s = Math.max(0, Math.min(1, Number(smoothing)));
+  return MOTION_ALPHA_AT_ZERO_SMOOTHING
+    - s * (MOTION_ALPHA_AT_ZERO_SMOOTHING - floor);
+}
+
+/** The inverse, for a tier change that must not move the slider's meaning. */
+export function motionSmoothingForAlpha(alpha, tier) {
+  const floor = MOTION_ALPHA_FLOOR_BY_TIER[tier];
+  if (floor === undefined) throw new Error(`unknown quality tier '${tier}'.`);
+  const span = MOTION_ALPHA_AT_ZERO_SMOOTHING - floor;
+  return Math.max(0, Math.min(
+    1, (MOTION_ALPHA_AT_ZERO_SMOOTHING - Number(alpha)) / span));
+}
+
+// --- level of detail ------------------------------------------------------
+//
+// APP_LIGHT_MARCH_LOD_DEGREES and APP_VIEW_STEP_LOD_DEGREES are angular: a
+// step is allowed to subtend this much of the view, so it grows with distance
+// and the far field costs a fraction of the near one. This multiplies both,
+// and it is the second-cheapest tier lever after haze — coarser far-field
+// stepping is most of what makes distance read as haze rather than as a wall
+// (the note above APP_LIGHT_MARCH_LOD_DEGREES), so it degrades along the
+// grain of the look instead of against it. Past ~2.5 the far field starts to
+// band on high-contrast tops, which is why the slider stops where it does.
+export const DEFAULT_LOD_STRENGTH_BY_TIER = {
+  max: 1.0, high: 1.0, medium: 1.35, low: 1.7, minimal: 2.2,
+};
+export const LOD_STRENGTH_LIMITS = [0.5, 3.0];
 export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
@@ -169,33 +243,39 @@ export const AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024;
 // hold ladder converges every tier to High's own sampling the moment you stop,
 // so the picture you actually study is tier-independent.
 export const QUALITY_PRESETS = {
+  // `sppPerFrame` is how many jittered marches go into ONE presented frame.
+  // Every tier but Max takes a single one and leans on accumulation across
+  // frames instead; Max pays for the noise up front so that a frame is clean
+  // while it is still moving. See drawFrame for why that is eight separate
+  // submissions rather than one eight-times-longer pass.
+  max:    { name: "max",    label: "Max",    renderScale: 1.0,
+            stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
   high:   { name: "high",   label: "High",   renderScale: 1.0,
-            stepFactor: 2.0, lightStepFactor: 2.0,
+            stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 1,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
-  medium: { name: "medium", label: "Medium", renderScale: 0.75,
-            stepFactor: 2.5, lightStepFactor: 4.0,
+  medium: { name: "medium", label: "Medium", renderScale: 0.60,
+            stepFactor: 2.5, lightStepFactor: 4.0, sppPerFrame: 1,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
-  low:    { name: "low",    label: "Low",    renderScale: 0.60,
-            stepFactor: 3.0, lightStepFactor: 8.0,
+  low:    { name: "low",    label: "Low",    renderScale: 0.30,
+            stepFactor: 3.0, lightStepFactor: 8.0, sppPerFrame: 1,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
   // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
   // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
   // an eighth is four times fewer pixels than a quarter, which brings that
-  // back inside a vsync. Nothing is lost by it: the hold ladder climbs
-  // 0.125 -> 0.25 -> 0.5 -> 1.0 the moment the view is held, so the rough
-  // flight scale is only ever what you see while actually moving.
-  // Plain "Minimal", not the old "smooth stills, rough flight" tag: since
-  // the hold ladder, every tier converges to the same full-res still, so the
-  // bottom tier is no longer "rough" anywhere but in flight — and the name
-  // is user-facing in the startup toast on exactly the machines it used to
-  // insult as "Potato".
+  // back inside a vsync. Plain "Minimal", not the old "smooth stills, rough
+  // flight" tag — the name is user-facing in the startup toast on exactly the
+  // machines it used to insult as "Potato".
   minimal: { name: "minimal", label: "Minimal",
             renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+            sppPerFrame: 1, maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
 };
-export const QUALITY_TIER_NAMES = ["high", "medium", "low", "minimal"];
+export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // Cheapest first. This is the order the startup probe walks, and the order
 // matters for more than tidiness — see AUTO_TIER_COST_RATIO_TO_NEXT.
+// Max is deliberately absent: the probe walks this list, so a tier that is
+// not in it can only ever be reached by a click. Eight marches a frame is a
+// choice a machine should never make on someone's behalf.
 export const QUALITY_TIERS_CHEAPEST_FIRST = ["minimal", "low", "medium", "high"];
 // The tier a Renderer is born with. In practice the startup probe replaces it
 // before the first frame is presented (viewer.loadField sets the probe's
@@ -226,11 +306,21 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // of contradicting it. Rung 0 is always the flight configuration and is
 // implicit — it is not listed here.
 //
-// The TOP rung is "high" for every tier without exception, and that is the
-// point of the whole mechanism: the tier governs FLIGHT, and a parked picture
-// is tier-independent. Whatever you flew here on, stop moving and the view
-// converges to High's own sampling at full resolution — the same still. This
-// generalizes what the old minimal-only parked swap did for one tier.
+// The top rung SAMPLES like High for every tier without exception — the tier
+// governs flight, and a parked picture is stepped and lit the same wherever
+// you flew in from. Its SCALE is capped per tier (0.5 on Minimal, 0.75 on
+// Low), which is new and is a real retreat from "every tier converges to the
+// same still": those two settle to a picture that is upscaled, not native.
+//
+// The reason is the upscale itself. Minimal flying at 0.125 and holding at
+// 1.0 is a 64x jump in pixels for one frame, and on the hardware that picks
+// Minimal that frame is most of a second — which is what the view then has to
+// be flown out of (Thomas, on the Mac: "much of the feel of slowness might be
+// caused by the still frame upscaling"). 0.5 is 16x, lands inside
+// HOLD_MAX_FRAME_MS on that hardware instead of being capped by it, and is
+// four times the detail it flew at. The difference between a 0.5 upscale and
+// a native still is far smaller than the difference between a settled picture
+// and one that never arrives.
 //
 // Intermediate rungs keep the flight tier's sampling because they are meant to
 // be cheap stepping stones: their job is to put something settled on screen
@@ -239,12 +329,13 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // compile. That reason is gone — every tier now specializes identically — but
 // the rule earns its keep on cost alone.)
 export const QUALITY_HOLD_LADDERS = {
+  max:    [],                                    // flies at 1.0, 8 spp a frame
   high:   [],                                    // flies at 1.0; hold just accumulates
   medium: [{ scale: 1.00, sampling: "high" }],
-  low:    [{ scale: 1.00, sampling: "high" }],
+  low:    [{ scale: 0.50, sampling: "low" },
+           { scale: 0.75, sampling: "high" }],
   minimal: [{ scale: 0.25, sampling: "minimal" },
-           { scale: 0.50, sampling: "minimal" },
-           { scale: 1.00, sampling: "high" }],
+           { scale: 0.50, sampling: "high" }],
 };
 // Accumulated frames to spend on a rung before climbing to the next. Small,
 // because the point of the low rungs is to show *something* settled while the
@@ -268,9 +359,8 @@ export const HOLD_RUNG_FRAMES = 4;
 // ever wait for while parked.
 export const HOLD_MAX_FRAME_MS = 400.0;
 
-// The frame count that ends a hold — CONVERGED_ACCUM_FRAMES — is defined with
-// STILL_ACCUMULATE_FRAMES under "capture" below, because it is the same
-// number for the same reason and the two must not drift.
+// The sample count a held view settles at — PARKED_ACCUM_FRAMES_BY_TIER — is
+// defined under "capture" below, next to the capture count it used to be.
 
 // --- the startup auto-tier probe -----------------------------------------
 //
@@ -294,37 +384,39 @@ export const AUTO_TIER_TARGET_MS = 1000.0 / 60.0;
 //
 // The ratios are measured, not guessed. RTX 5080, 2560x1440 output, TWPICE
 // 256^3, two views (a thick one and an overview), at the tier configurations
-// defined above. Per-frame cost is the SLOPE of total time against frame
-// count, which cancels setup, upload and readback:
+// defined above. Re-measured 2026-08-14 when the flight scales moved
+// (benchmarking/soar_frame_bench.py --output 2560x1440):
 //
-//     high     4.75 / 4.59 ms
-//     medium   2.55 / 2.50     -> high:   1.87x / 1.83x
-//     low      1.59 / 1.45     -> medium: 1.61x / 1.73x
-//     minimal   0.399 / 0.392   -> low:    3.97x / 3.70x
+//     high     7.48 / 5.32 ms
+//     medium   2.52 / 2.35     -> high:   2.98x / 2.27x
+//     low      0.654 / 0.614   -> medium: 3.85x / 3.82x
+//     minimal  0.332 / 0.403   -> low:    1.97x / 1.52x
 //
-// The constants below round those up for headroom. Note how unequal the rungs
-// are: minimal to low is a step four times bigger than low to medium. A single
-// flat threshold would be either too timid at the top or reckless at the
-// bottom, which is why the gate is a per-tier ratio rather than one number.
+// The constants below round those UP, which makes the gate harder to pass,
+// not easier. Note how unequal the rungs are: a single flat threshold would
+// be either too timid at the top or reckless at the bottom, which is why the
+// gate is a per-tier ratio rather than one number.
 //
-// One honest caveat about minimal. It has 23x fewer pixels than low, yet costs
-// only ~4x less, because at 320x180 the frame stops being about the march at
-// all — command encoding, uniform upload and the blit dominate. That floor is
-// mostly CPU- and driver-side, so it does NOT shrink on a slower GPU, and the
-// true minimal->low ratio there is larger than 4.5. The gate is therefore
-// optimistic on exactly the weak hardware it protects.
+// One honest caveat about minimal, and it is why its ratio is 4.0 and not the
+// ~2 that was measured. At 320x180 the frame stops being about the march at
+// all — command encoding, uniform upload and the blit dominate — so minimal
+// measures as barely cheaper than low on this card. That floor is CPU- and
+// driver-side, so it does NOT shrink on a slower GPU, where the true ratio is
+// nearer the work ratio: 5.8x the pixels times a finer step, call it 7x.
+// Taking the measured 2 at face value would let a weak machine escalate on
+// the strength of a number that describes this one. 4.0 is the old 4.5 nudged
+// by the new scales rather than by the new measurement, deliberately.
 //
-// That is a known and bounded weakness, and it is bounded by the ordering
-// rule rather than by this number: being one rung too optimistic costs a
-// settle point that is sluggish, not a machine that freezes, because the tier
-// above is still never rendered without its own completed measurement. The
-// catastrophic case — submitting a High frame on an M1 having measured
-// nothing — is prevented by the walk being strictly one rung at a time, not
-// by the accuracy of these ratios.
+// That weakness is bounded by the ordering rule rather than by these numbers:
+// being one rung too optimistic costs a settle point that is sluggish, not a
+// machine that freezes, because the tier above is still never rendered
+// without its own completed measurement. The catastrophic case — submitting a
+// High frame on an M1 having measured nothing — is prevented by the walk
+// being strictly one rung at a time, not by the accuracy of these ratios.
 export const AUTO_TIER_COST_RATIO_TO_NEXT = {
-  minimal: 4.5,
-  low: 2.0,
-  medium: 2.0,
+  minimal: 4.0,
+  low: 4.0,
+  medium: 3.0,
 };
 export const AUTO_TIER_MARGIN = 0.75;
 // A first verdict BELOW this tier is re-measured once, this long after it
@@ -440,12 +532,47 @@ export const STILL_ACCUMULATE_FRAMES = 64;
 // STILL_ACCUMULATE_FRAMES; the top is where a 4K still starts costing real
 // wall-clock without a visible return on converged scenes.
 export const STILL_SAMPLES_LIMITS = [8, 256];
-// Accumulated frames at the hold ladder's top rung, with the scene unchanged,
-// after which the live loop stops marching: past this, another march costs a
-// full volume traversal to change nothing visible. The same number a still
-// capture accumulates, and deliberately the same constant — a held view and a
-// still are the same picture, so they must settle at the same point.
-export const CONVERGED_ACCUM_FRAMES = STILL_ACCUMULATE_FRAMES;
+// Accumulated frames at the top of the ladder, with the scene unchanged,
+// after which the live loop stops marching.
+//
+// This used to BE STILL_ACCUMULATE_FRAMES — 64, the same constant a capture
+// uses, on the argument that a held view and a still are the same picture and
+// must settle at the same point. The argument was right about the picture and
+// wrong about the cost. A capture is a thing you asked for and wait on; a held
+// view is what happens every time you stop for a moment, and on a slow machine
+// 64 marches at the top rung is several seconds of saturated GPU that you then
+// have to fly out of — every one of those frames is already submitted when you
+// touch a key, and the tail of one is the lag (see docs/soar-bugs.md and the
+// note in Renderer.holdTick). The returns are also long gone by then: the
+// noise a march removes falls as 1/sqrt(n), so 8 -> 32 halves it and 32 -> 64
+// takes another 30%, on top of a picture that is already jitter-averaged.
+//
+// So parking now stops where the returns stop, sooner on the tiers that can
+// least afford not to. A capture still accumulates all 64 — it is explicit,
+// and nobody is waiting to fly out of it (Thomas, 2026-08-14).
+export const PARKED_ACCUM_FRAMES_BY_TIER = {
+  max: 32, high: 32, medium: 24, low: 16, minimal: 8,
+};
+
+// Which picture a held view settles to.
+//
+//   "live"  — the ladder never climbs: what you see when you stop is what you
+//             saw while moving, just cleaner (it still accumulates to the cap
+//             above, and still parks and sleeps once it gets there).
+//   "still" — the hold ladder, climbing toward High sampling whatever tier
+//             flew you here. What flying does, and the default.
+//
+// Live exists because of what the Quality panel is FOR. Every control in it
+// changes how the view is drawn while you move, and every one of them was
+// invisible there: the panel is open, the camera is not moving, so the ladder
+// has already converged the view to High's sampling and the tier buttons do
+// nothing you can see. Live holds the flight picture still so the controls
+// have something to act on, and it lasts exactly as long as the panel is open
+// — close it and stills come back (Thomas, 2026-08-14).
+export const HOLD_MODES = ["live", "still"];
+export const DEFAULT_HOLD_MODE = "still";
+// What the Quality panel opens showing, remembered for the session.
+export const DEFAULT_QUALITY_PREVIEW = "live";
 export const CAPTURE_SIZE_PRESETS = [
   ["1280 x 720", [1280, 720]],
   ["2K", [1920, 1080]],

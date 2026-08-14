@@ -1,6 +1,16 @@
 /* The viewer: a lights-out overlay that takes the whole window. Deliberately
    not the site's warm palette — the eye needs to adapt to the render, and
-   every panel here sits over a picture. */
+   every panel here sits over a picture.
+
+   The chrome is an instrument face: near-opaque, square, unblurred. That is a
+   measurement rather than a taste. A backdrop filter blurs what is behind a
+   panel but does not darken it, so the type sits on the mean of whatever is
+   back there — and behind this chrome is a sunlit cloud top as often as a
+   night ocean. A frosted panel that reads beautifully over the ocean puts its
+   subtitles at 1.1:1 over the cloud, where 4.5:1 is the floor; at 0.94 opaque
+   the same text holds 6.2:1 against ANY sky. Panels that cannot be read are
+   not a style. (Eight skins were built and measured against a sunlit cloud
+   top and a night ocean; Thomas picked this one, 2026-08-14.) */
 
 #viewer {
   position: fixed;
@@ -8,8 +18,10 @@
   z-index: 1005;
   background: #05070a;
   overflow: hidden;
-  --panel-bg: rgba(12, 16, 22, 0.88);
-  --panel-line: rgba(150, 172, 200, 0.16);
+  --panel-bg: rgba(6, 9, 13, 0.94);
+  --panel-line: rgba(150, 172, 200, 0.22);
+  --panel-radius: 2px;
+  --control-radius: 2px;
   --panel-line-lit: rgba(170, 195, 225, 0.42);
   --ink: #d3dcea;
   --ink-bright: #f0f5fb;
@@ -43,15 +55,15 @@
   position: absolute;
   background: var(--panel-bg);
   border: 1px solid var(--panel-line);
-  border-radius: 12px;
+  border-radius: var(--panel-radius);
   padding: 14px 16px;
-  backdrop-filter: blur(10px);
   font-size: 13px;
   line-height: 1.55;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 .panel h3 {
   margin: 0 0 10px;
+  font-family: var(--ui-mono);
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -114,10 +126,9 @@ button.chip {
   color: var(--ink);
   background: var(--panel-bg);
   border: 1px solid var(--panel-line);
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   padding: 6px 12px;
   cursor: pointer;
-  backdrop-filter: blur(10px);
   transition: border-color 0.15s ease, color 0.15s ease;
 }
 button.chip:hover { border-color: var(--panel-line-lit); color: var(--ink-bright); }
@@ -133,6 +144,7 @@ button.chip.on { border-color: var(--hot); color: var(--hot); }
   max-height: calc(100vh - 4rem);
   overflow-y: auto;
   padding: 20px 22px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
 }
 #menu[hidden] { display: none; }
 /* Image-tuning panels (quality, sun, terminal render) sit at the bottom so
@@ -145,17 +157,89 @@ button.chip.on { border-color: var(--hot); color: var(--hot); }
   width: min(62rem, calc(100vw - 3rem));
   max-height: min(60vh, calc(100vh - 4rem));
 }
+/* The pause menu needs the width its two columns ask for; the one-column
+   panels (controls, open-file questions, messages) stay narrow. */
+#menu.wide { width: min(46rem, calc(100vw - 3rem)); }
 .slider-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   column-gap: 26px;
 }
 @media (max-width: 760px) { .slider-grid { grid-template-columns: 1fr; } }
+
+/* --- the pause menu's head, columns and foot --- */
+
+.menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.menu-head .menu-title { margin: 0; }
+
+button.resume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--ui-font);
+  font-size: 13px;
+  color: var(--ink-bright);
+  background: rgba(232, 131, 74, 0.14);
+  border: 1px solid var(--hot);
+  border-radius: var(--control-radius);
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+button.resume:hover { background: rgba(232, 131, 74, 0.24); }
+button.resume kbd {
+  font-family: var(--ui-mono);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--control-radius);
+  padding: 0 4px;
+}
+
+.menu-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 22px;
+  align-items: start;
+}
+.menu-cols .col > h3:first-child { margin-top: 0; }
+/* Column-width sliders: the 10.5rem label of a full-width row leaves the
+   track no room at all inside half a panel. */
+.row.tight { display: block; padding: 5px 10px; }
+.row.tight > label { display: block; flex: none; margin-bottom: 2px; }
+.row.tight > .value { float: right; flex: none; }
+.row.tight input[type="range"] { width: 100%; }
+
+/* Leaving is neither column's business, so it sits under both — on its own,
+   in the same left margin as every other item. */
+.menu-foot { display: flex; align-items: center; gap: 16px; }
+.menu-foot .item { width: auto; flex: none; }
+
+@media (max-width: 760px) {
+  .menu-cols { grid-template-columns: 1fr; }
+  .menu-foot { display: block; }
+}
+/* The title is set in the mono face the readouts use, and every panel head
+   is closed by one amber rule — the instrument's one piece of colour. */
 #menu .menu-title {
-  font-size: 17px;
+  font-family: var(--ui-mono);
+  font-size: 15px;
+  letter-spacing: 0.02em;
   color: var(--ink-bright);
   margin: 0 0 2px;
 }
+.menu-head,
+.panel-head {
+  border-bottom: 1px solid var(--hot);
+  padding-bottom: 10px;
+  margin-bottom: 14px;
+}
+.panel-head h3 { margin-bottom: 4px; }
 #menu .menu-sub {
   color: var(--ink-dim);
   font-size: 12px;
@@ -196,7 +280,7 @@ button.chip.on { border-color: var(--hot); color: var(--hot); }
   color: var(--ink);
   background: none;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--control-radius);
   padding: 8px 10px;
   cursor: pointer;
 }
@@ -212,7 +296,7 @@ button.chip.on { border-color: var(--hot); color: var(--hot); }
   color: var(--ink-dim);
   background: rgba(150, 175, 210, 0.07);
   border: 1px solid var(--panel-line);
-  border-radius: 7px;
+  border-radius: var(--control-radius);
   padding: 5px 10px;
   cursor: pointer;
 }

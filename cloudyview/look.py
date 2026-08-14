@@ -72,10 +72,15 @@ OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 # ANCHORED at HAZE_ANCHOR: at 0.35 each expression returns its tuned
 # constant exactly. The anchor is a calibration point, not the default —
 # Thomas flies at 1.0 ("slammed to 1 looks best", 2026-08-11), so that is
-# the default; the slider runs to 2 for genuinely soupy days.
+# the default; the slider runs past 2 for genuinely soupy days.
 HAZE_ANCHOR = 0.35
 DEFAULT_HAZE = 1.0
-HAZE_MAX = 2.0
+# 2.5 since 2026-08-14, when haze became soar's cheapest performance lever as
+# well as a look: the lower tiers default into thick air because a periodic
+# view march ends where the clear-air transmittance does, so thicker air is a
+# shorter ray. 2.5 is a 2.6 km e-folding — 10 km of visual range, a genuinely
+# murky day and the point past which the far field is gone rather than soft.
+HAZE_MAX = 2.5
 # Even at haze 0 the air is not vacuum. 0.015/km is a clean Rayleigh-limited
 # atmosphere: Koschmieder's 3.912/beta puts the visual range at ~260 km,
 # which is the "you can see the far range from the pass" day, not vacuum.

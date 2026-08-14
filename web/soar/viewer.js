@@ -54,6 +54,12 @@ class Viewer {
     this.toneMapWhitePoint = K.DEFAULT_TONE_MAP_WHITE_POINT;
     this.contrast = K.DEFAULT_CONTRAST;
     this.haze = K.DEFAULT_HAZE;
+    this.lodStrength = K.DEFAULT_LOD_STRENGTH_BY_TIER[K.DEFAULT_QUALITY_TIER];
+    // Three settings carry a per-tier default (haze, motion smoothing, LOD
+    // strength) and the tier is chosen by measurement, so it can change under
+    // the user twice in the first second. A setting the user has touched is
+    // theirs from then on and no tier change moves it again.
+    this._byHand = new Set();
     this.beholdQuality = K.DEFAULT_BEHOLD_QUALITY;
     this.beholdField = "outer";   // "outer" or "nest": behold renders one
     // witness is the default because it reproduces this exact view — nests,
@@ -578,6 +584,10 @@ class Viewer {
       }, K.AUTO_TIER_CONFIRM_DELAY_MS);
       return;
     }
+    // The verdict is final now, so the tier's own haze, smoothing and LOD
+    // come with it — not during the probe's walk, which passes through tiers
+    // it has no intention of settling on.
+    this._applyTierDefaults(tier);
     const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
     console.info(
       `soar: auto quality ${tier} — ${measuredMs.toFixed(2)} ms/frame probed ` +
@@ -966,13 +976,60 @@ class Viewer {
    * not a display choice — it changes what the march computes, so the frames
    * already averaged are of a different sky and cannot be kept.
    */
-  setHaze(haze) {
+  setHaze(haze, { byHand = true } = {}) {
     if (!(haze >= 0.0 && haze <= K.HAZE_MAX)) {
       throw new Error(`haze must be in [0, ${K.HAZE_MAX}]; got ${haze}.`);
     }
+    if (byHand) this._byHand.add("haze");
     this.haze = haze;
     this.renderer.resetAccumulation();
     this._wake("haze");
+  }
+
+  /**
+   * How coarsely the far field is stepped, as a multiple of the tuned angular
+   * LOD. Cheap distance, and it degrades along the grain of the look.
+   */
+  setLodStrength(strength, { byHand = true } = {}) {
+    const [lo, hi] = K.LOD_STRENGTH_LIMITS;
+    if (!(strength >= lo && strength <= hi)) {
+      throw new Error(`LOD strength must be in [${lo}, ${hi}]; got ${strength}.`);
+    }
+    if (byHand) this._byHand.add("lod");
+    this.lodStrength = strength;
+    this.renderer.resetAccumulation();
+    this._wake("level of detail");
+  }
+
+  /** Live or still: what a held view settles to. See HOLD_MODES. */
+  setHoldMode(mode) {
+    this.renderer.setHoldMode(mode);
+    this._wake("hold mode");
+  }
+
+  /**
+   * The tier's own defaults for the three settings that have them, skipping
+   * any the user has set by hand. Motion smoothing is carried across in
+   * SMOOTHING units rather than alpha, so a tier change moves the floor
+   * without moving where the slider sits.
+   */
+  _applyTierDefaults(tier) {
+    if (!this._byHand.has("haze")) {
+      this.setHaze(K.DEFAULT_HAZE_BY_TIER[tier], { byHand: false });
+    }
+    if (!this._byHand.has("lod")) {
+      this.setLodStrength(K.DEFAULT_LOD_STRENGTH_BY_TIER[tier], { byHand: false });
+    }
+    const smoothing = this._byHand.has("smoothing")
+      ? this.motionSmoothing
+      : K.DEFAULT_MOTION_SMOOTHING_BY_TIER[tier];
+    this.setMotionSmoothing(smoothing, { byHand: false });
+  }
+
+  /** Where the motion-smoothing slider sits, in its own units. */
+  get motionSmoothing() {
+    return K.motionSmoothingForAlpha(
+      this.renderer.motionBlendAlpha, this.renderer.qualityTier);
   }
 
   /**
@@ -988,6 +1045,7 @@ class Viewer {
     this._confirmTimer = null;
     this.qualityTier = tier;
     this.renderer.setQualityTier(tier);
+    this._applyTierDefaults(tier);
     this._wake("quality tier");
   }
 
@@ -997,9 +1055,15 @@ class Viewer {
     this._wake("render scale");
   }
 
-  /** The Quality panel's motion-smoothing slider. */
-  setMotionBlendAlpha(alpha) {
-    this.renderer.motionBlendAlpha = alpha;
+  /**
+   * The Quality panel's motion-smoothing slider, in smoothing units: 0 is
+   * none, 1 is as deep as this tier allows. The renderer still holds an
+   * alpha, which runs the other way — see motionAlphaForSmoothing.
+   */
+  setMotionSmoothing(smoothing, { byHand = true } = {}) {
+    if (byHand) this._byHand.add("smoothing");
+    this.renderer.motionBlendAlpha = K.motionAlphaForSmoothing(
+      smoothing, this.renderer.qualityTier);
     this._wake("motion smoothing");
   }
 
@@ -1378,7 +1442,9 @@ class Viewer {
     try {
       const image = await renderStill(
         this.device, this.renderer, this._viewKwargs(), size,
-        this.stillSamples, stillOverlays);
+        this.stillSamples, stillOverlays,
+        (fraction) => this.ui.showProgress(
+          `Rendering a ${size[0]}x${size[1]} still…`, fraction));
       this.ui.showProgress("Encoding…", 0.95);
       const blob = await imageDataToPng(image, this.renderMetadata(size));
       download(blob, timestampedName("cloudyview_soar", ".png"));
@@ -1558,8 +1624,8 @@ class Viewer {
       toneMapWhitePoint: this.toneMapWhitePoint,
       contrast: this.contrast,
       haze: this.haze,
-      lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
-      viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES,
+      lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * this.lodStrength,
+      viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * this.lodStrength,
       frameIndex: this.frameIndex,
     };
   }

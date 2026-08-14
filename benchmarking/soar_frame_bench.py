@@ -28,15 +28,23 @@ RESULTS_FILE = Path(__file__).parent / "soar_frame_results.md"
 # Mirrors web/soar/constants.js QUALITY_PRESETS — keep the two in step.
 # These are the FLIGHT configurations; the browser's hold ladder converges
 # every tier to high's sampling at full scale when the view is held.
+# Max is absent on purpose: it is High run 8 times per presented frame, so
+# its per-frame cost is 8x the "high" row and nothing here would be learned
+# by measuring it. The "hold" rows are the top of each tier's hold ladder —
+# High's sampling at the scale that tier is allowed to converge to.
 TIERS = {
     "high":   {"render_scale": 1.0,   "step_factor": 2.0,
                "light_step_factor": 2.0,  "max_light_steps": 512},
-    "medium": {"render_scale": 0.75,  "step_factor": 2.5,
+    "medium": {"render_scale": 0.60,  "step_factor": 2.5,
                "light_step_factor": 4.0,  "max_light_steps": 512},
-    "low":    {"render_scale": 0.60,  "step_factor": 3.0,
+    "low":    {"render_scale": 0.30,  "step_factor": 3.0,
                "light_step_factor": 8.0,  "max_light_steps": 512},
     "minimal": {"render_scale": 0.125, "step_factor": 4.0,
                "light_step_factor": 12.0, "max_light_steps": 512},
+    "hold_low": {"render_scale": 0.75, "step_factor": 2.0,
+               "light_step_factor": 2.0,  "max_light_steps": 512},
+    "hold_minimal": {"render_scale": 0.50, "step_factor": 2.0,
+               "light_step_factor": 2.0,  "max_light_steps": 512},
 }
 
 # The frozen judge views this repo already uses (tests/conftest.py), the
@@ -48,6 +56,11 @@ VIEWS = {
     "v8_ocean_lod":      {"camera_position": [0.0, 0.0, 3.0],    "azimuth": 180, "elevation": -55, "fov": 70},
 }
 
+# The default is small enough to iterate on. Pass --output for the numbers
+# that decide anything: below ~1 Mpixel the frame stops being about the march
+# and the per-frame CPU/driver floor dominates, which is exactly the regime
+# where a tier ratio measured here would lie (Minimal can measure SLOWER than
+# Low at 960x540 — it did, 2026-08-14).
 OUTPUT_SIZE = (960, 540)
 SUN = {"sun_azimuth": 20.0, "sun_elevation": 55.0}
 
@@ -143,6 +156,9 @@ def gpu_name():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=str, default=None,
+                        help="output size WxH (default 960x540); use "
+                             "2560x1440 for tier cost ratios")
     parser.add_argument("--frames", type=int, default=64,
                         help="timed frames per view (default 64)")
     parser.add_argument("--warmup", type=int, default=8,
@@ -180,6 +196,9 @@ def main():
         wanted = args.views.split(",")
         views = {k: v for k, v in VIEWS.items()
                  if any(k.startswith(p) for p in wanted)}
+    global OUTPUT_SIZE
+    if args.output:
+        OUTPUT_SIZE = tuple(int(v) for v in args.output.lower().split("x"))
     tiers = TIERS
     if args.tiers:
         tiers = {k: TIERS[k] for k in args.tiers.split(",")}

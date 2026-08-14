@@ -158,3 +158,19 @@ export function aerialBetaPerKm(haze) {
 export function oceanHazeExtinctionPerKm(haze) {
   return OCEAN_HAZE_BETA_RATIO * aerialBetaPerKm(haze);
 }
+
+/**
+ * Sea-level e-folding length of the clear air, in km — simply 1/beta.
+ *
+ * What the haze slider reads out, because "1.60" says nothing and "5.7 km"
+ * says what the air is. It is NOT a definition of the knob and cannot be:
+ * haze also drives the horizon wedge, the circumsolar lobe and the sea's own
+ * haze, and beta itself falls off with AERIAL_SCALE_HEIGHT_M above the
+ * surface, so a ray angled upward sees less than this. It is the one number
+ * with a unit that the setting implies, and it is the distance the periodic
+ * march cap is derived from. (Koschmieder's visual range — the convention
+ * look.py's comments quote — is 3.912 of these.)
+ */
+export function hazeEFoldingKm(haze) {
+  return 1.0 / aerialBetaPerKm(haze);
+}
