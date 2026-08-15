@@ -302,11 +302,18 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
       albedoShape: meta.map.shape_yx,
       _nest: null,
       _nestDummy: nestDummy,
-      periodicDefault: true,
+      // From the bake, because it is a property of the field rather than a
+      // preference: TWP-ICE is a 102 km crop out of a larger run, and
+      // wrapping it repeats a squall line. Older bakes have no `periodic`
+      // key and every one of them tiled, so absent means true.
+      periodicDefault: meta.periodic ?? true,
       title: meta.title,
       description: meta.description,
       sourceName: meta.source,
       sun: meta.sun,
+      // Where the landing page's still was taken from, so flight can open
+      // there — see Camera.applyStart and viewer boot.
+      startCamera: meta.still?.camera ?? null,
     });
     progress?.("Ready.", 1);
     return scene;

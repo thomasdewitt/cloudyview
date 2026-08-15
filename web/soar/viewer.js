@@ -355,7 +355,8 @@ export class Viewer {
       this.sunElevation = sun.elevation;
     }
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
-                                   { periodic: renderer.periodic });
+                                   { periodic: renderer.periodic,
+                                     start: scene.startCamera });
 
     this.ui.setSubtitle(this.sourceLabel);
 

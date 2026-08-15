@@ -62,15 +62,48 @@ export function worldToRelative(pos, bmin, bmax) {
  * Flight state and the controls that move it. World metres and meteorological
  * angles throughout; relative coordinates appear only at the edges.
  */
+/**
+ * Where flight begins.
+ *
+ * A demo baked since 2026-08-14 carries the camera its landing-page still was
+ * taken from, so clicking a case opens on the picture that was clicked rather
+ * than on a generic view of the same field. Absent is normal — older bakes
+ * and any user's own file have none, and those get DEFAULT_CAMERA.
+ *
+ * Present but malformed is NOT normal: it means a bake wrote a camera nobody
+ * can use, and quietly flying somewhere else would hide that for as long as
+ * nobody happened to compare the still with the view. So it raises.
+ */
+function startCamera(start) {
+  if (start == null) return DEFAULT_CAMERA;
+  const { position, azimuth, elevation, fov } = start;
+  const ok = Array.isArray(position) && position.length === 3
+    && position.every((v) => Number.isFinite(v))
+    && [azimuth, elevation].every((v) => Number.isFinite(v));
+  if (!ok) {
+    throw new Error(
+      "This field carries a start camera that cannot be read " +
+      `(${JSON.stringify(start)}). Re-bake it with tools/prebake_demos.py.`);
+  }
+  return {
+    position, azimuth, elevation,
+    fov: Number.isFinite(fov) ? fov : DEFAULT_CAMERA.fov,
+  };
+}
+
 export class FlightCamera {
-  constructor(bmin, bmax, { periodic = true } = {}) {
+  constructor(bmin, bmax, { periodic = true, start = null } = {}) {
     this.bmin = bmin;
     this.bmax = bmax;
     this.periodic = periodic;
-    this.position = cameraWorldOrigin(DEFAULT_CAMERA.position, bmin, bmax);
-    this.azimuth = DEFAULT_CAMERA.azimuth;
-    this.elevation = DEFAULT_CAMERA.elevation;
-    this.fov = DEFAULT_CAMERA.fov;
+    // Held so `reset` returns to this field's own opening view rather than to
+    // the global default — on a demo those are different places, and the one
+    // worth going back to is the one the page promised.
+    this.start = startCamera(start);
+    this.position = cameraWorldOrigin(this.start.position, bmin, bmax);
+    this.azimuth = this.start.azimuth;
+    this.elevation = this.start.elevation;
+    this.fov = this.start.fov;
     this.speed = DEFAULT_SPEED;
     this.keys = new Set();
     this.speedFlashUntil = 0;
@@ -78,9 +111,9 @@ export class FlightCamera {
   }
 
   reset() {
-    this.position = cameraWorldOrigin(DEFAULT_CAMERA.position, this.bmin, this.bmax);
-    this.azimuth = DEFAULT_CAMERA.azimuth;
-    this.elevation = DEFAULT_CAMERA.elevation;
+    this.position = cameraWorldOrigin(this.start.position, this.bmin, this.bmax);
+    this.azimuth = this.start.azimuth;
+    this.elevation = this.start.elevation;
     this.speed = DEFAULT_SPEED;
     this.constrain();
   }
