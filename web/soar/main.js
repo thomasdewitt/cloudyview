@@ -389,13 +389,27 @@ function demoCard(demo, root, numbers) {
   // and comparing them across rows is the point — DYCOMS resolves 5 m over
   // 3.2 km where TWP-ICE resolves 100 m over 102 km. A number you have to
   // hover to see cannot be compared with the one above it.
+  //
+  // Anything past the numbers is optional and hidden until the row is hovered
+  // or focused, when the card grows to hold it. Most cases have nothing here
+  // and the block is not built at all — an empty expansion that opens onto
+  // nothing is worse than a row that simply does not open.
+  //
+  // This used to be `button.title`, i.e. the browser's own tooltip: a pale
+  // box in the OS's font that lands wherever the pointer is, after whatever
+  // delay the OS feels like, on top of the still the hover exists to reveal.
+  const more = [
+    demo.warning ? `<span class="warn"></span>` : "",
+    demo.description ? `<span class="note"></span>` : "",
+  ].join("");
   button.innerHTML =
     `<span class="top"><span class="name"></span><span class="res"></span></span>` +
     `<span class="field"></span>` +
     (numbers
       ? `<span class="data"><span class="grid"></span>` +
         `<span><span class="domain"></span> <span class="u">across</span></span></span>`
-      : "");
+      : "") +
+    (more ? `<span class="more"><span class="more-in">${more}</span></span>` : "");
   button.querySelector(".name").textContent = demo.title;
   button.querySelector(".field").textContent = demo.field ?? "";
   if (numbers) {
@@ -403,11 +417,11 @@ function demoCard(demo, root, numbers) {
     button.querySelector(".grid").textContent = numbers.grid;
     button.querySelector(".domain").textContent = numbers.domain;
   }
-  // The description is no longer on the card. It is a paragraph, the row is
-  // three lines of specification, and the still behind the page says more
-  // about the field than the sentence did. Kept as the accessible name so it
-  // still reaches a screen reader and a long-hover tooltip.
-  if (demo.description) button.title = demo.description;
+  // textContent, not innerHTML: these two strings come out of a baked JSON
+  // file rather than out of this source, and the rest of the card is built
+  // the same way.
+  if (demo.warning) button.querySelector(".warn").textContent = demo.warning;
+  if (demo.description) button.querySelector(".note").textContent = demo.description;
 
   // `live` is cleared across every card on the page, not just this card's
   // group: the preview is one backdrop shared by all of them.
@@ -485,11 +499,11 @@ function renderGroup(group, root, numbersById) {
  * The per-case numbers, fetched alongside the index.
  *
  * They live in each demo's meta.json rather than in the group index, which
- * carries only id/title/field/description/base/bytes/still. Reading the metas
- * is deliberate over adding the fields to the index: the index is baked
- * output, and hoisting them into it would mean re-baking the demo set to see
- * them. These files are about a kilobyte each, the app fetches them on load
- * anyway, and asking early warms that fetch.
+ * carries only id/title/field/description/warning/base/bytes/still. Reading
+ * the metas is deliberate over adding the fields to the index: the index is
+ * baked output, and hoisting them into it would mean re-baking the demo set
+ * to see them. These files are about a kilobyte each, the app fetches them
+ * on load anyway, and asking early warms that fetch.
  *
  * A meta that will not load resolves to null rather than rejecting. That is
  * not a silent fallback dressed up: a case whose meta.json is missing cannot

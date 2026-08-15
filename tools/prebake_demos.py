@@ -103,16 +103,33 @@ GROUPS = [
 # anybody typed. `sun` moved with them for the same reason: it is the light
 # he chose the view under, and the still and the flight have to agree about
 # it or entering flight is a jump cut.
+#
+# Two optional keys, both prose, both shown only when the landing page's card
+# is opened by a hover:
+#
+#   description   What this case IS, when the title and the regime line do not
+#                 already say it. The LES cases had one each and they have
+#                 been dropped: "the nocturnal stratocumulus deck off the
+#                 California coast" told a reader nothing that "SAM DYCOMS /
+#                 Marine stratocumulus" and the still behind the page had not
+#                 already (Thomas, 2026-08-15). Write one when a case would
+#                 otherwise be a mystery — a STEAM cascade with a particular
+#                 set of parameters is the likely first customer.
+#
+#   warning       What will go wrong before it goes wrong. Reserved for a real
+#                 cost to the person clicking; it is set in red on the card and
+#                 spending that on "this one is quite pretty" would make the
+#                 next one unreadable.
 DEMOS = [
     dict(
         id="twpice",
         group="hydrodynamics",
         title="SAM TWP-ICE",
         field="Tropical deep convection",
-        description=(
-            "A large-eddy simulation of a monsoon-break squall line near "
-            "Darwin, Australia, from the TWP-ICE field campaign."
-        ),
+        # 1024 x 1024 x 206 cells at fp16 is 432 MB of texture, before the
+        # renderer's own buffers, and it is the one case here that will not
+        # fit on a laptop's integrated graphics.
+        warning="Needs a highly capable GPU",
         liquid=("TWPICE_LPT_3D_QC_0000003450.nc", "QC"),
         ice=("TWPICE_LPT_3D_QI_0000003450.nc", "QI"),
         dims="yxz",
@@ -135,10 +152,6 @@ DEMOS = [
         group="hydrodynamics",
         title="SAM DYCOMS",
         field="Marine stratocumulus",
-        description=(
-            "The nocturnal stratocumulus deck off the California coast, "
-            "from the DYCOMS-II RF01 case."
-        ),
         liquid=("DYCOMS_RF01_640x640x640_dt0.25sec_320_0000043200_W_QN.nc", "QN"),
         ice=None,
         dims="zyx",
@@ -157,10 +170,6 @@ DEMOS = [
         group="hydrodynamics",
         title="CM1 RCE",
         field="Radiative–convective equilibrium",
-        description=(
-            "Scattered maritime convection in statistical equilibrium with "
-            "radiative cooling, from CM1."
-        ),
         liquid=("CM1_RCE_small_les300_3D_allvars_hour1200.nc", "clw"),
         ice=("CM1_RCE_small_les300_3D_allvars_hour1200.nc", "cli"),
         dims="zyx",
@@ -257,7 +266,10 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
         "id": spec["id"],
         "title": spec["title"],
         "field": spec["field"],
-        "description": spec["description"],
+        # Absent rather than empty when a case has nothing to add: the landing
+        # page builds the expansion only for the keys that are here, and an
+        # empty string would open a card onto a blank line.
+        **{k: spec[k] for k in ("description", "warning") if spec.get(k)},
         "source": Path(spec["liquid"][0]).name,
         "periodic": bool(spec.get("periodic", True)),
         "volume": {
@@ -411,7 +423,7 @@ def _index_entry(spec: dict) -> dict:
             raise ValueError(f"{img} is {img.stat().st_size} bytes, meta.json says "
                              f"{still['bytes']} — re-render the still")
 
-    return {k: meta[k] for k in ("id", "title", "field", "description")
+    return {k: meta[k] for k in ("id", "title", "field", "description", "warning")
             if k in meta} | {
         "base": spec["id"],
         "bytes": int(volume["bytes"]),
@@ -484,11 +496,18 @@ def main() -> None:
         out = OUT / spec["id"]
         out.mkdir(parents=True, exist_ok=True)
         print(f"\n=== {spec['id']}: {spec['title']} ===", flush=True)
-        t0 = time.time()
-        field = load_demo(spec)
-        print(f"    loaded {field.lwc.shape}"
-              f"{' + ice' if field.iwc is not None else ''} in {time.time()-t0:.0f}s",
-              flush=True)
+        # Only when a product needs it. With both --skip-volume and
+        # --skip-still this pass writes nothing but text, and reading a
+        # gigabyte of netCDF to copy a sentence out of DEMOS would put the
+        # source files — which are not in the repo — between anyone and a
+        # one-word edit to a card.
+        field = None
+        if not (args.skip_volume and args.skip_still):
+            t0 = time.time()
+            field = load_demo(spec)
+            print(f"    loaded {field.lwc.shape}"
+                  f"{' + ice' if field.iwc is not None else ''} "
+                  f"in {time.time()-t0:.0f}s", flush=True)
 
         meta_path = out / "meta.json"
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -508,8 +527,17 @@ def main() -> None:
             # picture and leaves the file still describing the old one, which
             # is a worse failure than a slow re-bake because nothing reports
             # it. Only volume/map are genuinely derived from the arrays.
-            for key in ("title", "field", "description"):
+            for key in ("title", "field"):
                 meta[key] = spec[key]
+            # The optional prose has to be *removed* when the spec drops it,
+            # not merely overwritten: deleting a description from DEMOS and
+            # leaving the old sentence in meta.json is the same failure the
+            # paragraph above is about, in its quietest form.
+            for key in ("description", "warning"):
+                if spec.get(key):
+                    meta[key] = spec[key]
+                else:
+                    meta.pop(key, None)
             meta["sun"] = dict(spec["sun"])
             meta["periodic"] = bool(spec.get("periodic", True))
         if not args.skip_still:
