@@ -42,7 +42,7 @@ import {
   MAX_TRACK_SECONDS,
 } from "./track.js";
 import { UI } from "./ui.js";
-import { mod360 } from "./spectral.js";
+import { mod360, HAZE_MIN } from "./spectral.js";
 import { escalateQualityTier } from "./uniforms.js";
 import {
   renderStill, imageDataToPng, download, timestampedName,
@@ -80,6 +80,7 @@ export class Viewer {
     this.toneMapWhitePoint = K.DEFAULT_TONE_MAP_WHITE_POINT;
     this.contrast = K.DEFAULT_CONTRAST;
     this.haze = K.DEFAULT_HAZE;
+    this.hazeHeightDependent = K.DEFAULT_HAZE_HEIGHT_DEPENDENT;
     this._holdMode = K.DEFAULT_HOLD_MODE;
     // The video-camera loop: exposure glides toward what the linear meter
     // asks for (see constants.js, AUTO_EXPOSURE_*). `exposure` is the live
@@ -1124,13 +1125,30 @@ export class Viewer {
    * already averaged are of a different sky and cannot be kept.
    */
   setHaze(haze, { byHand = true } = {}) {
-    if (!(haze >= 0.0 && haze <= K.HAZE_MAX)) {
-      throw new Error(`haze must be in [0, ${K.HAZE_MAX}]; got ${haze}.`);
+    if (!(haze >= HAZE_MIN && haze <= K.HAZE_MAX)) {
+      throw new Error(`haze must be in [${HAZE_MIN}, ${K.HAZE_MAX}]; got ${haze}.`);
     }
     if (byHand) this._byHand.add("haze");
     this.haze = haze;
     this.renderer.resetAccumulation();
     this._wake("haze");
+  }
+
+  /**
+   * Whether that aerosol thins with height.
+   *
+   * Off is uniform haze — the sea-level extinction at every altitude, which
+   * is unphysical and is the cheapest range lever in the renderer: an
+   * exponential atmosphere at a 2.5 km scale height lets an upward ray leave
+   * the haze without ever reaching the cutoff optical depth, so only the
+   * range ceiling bounds it. Changes what the march computes, so the
+   * accumulated frames are of a different sky and cannot be kept.
+   */
+  setHazeHeightDependent(on, { byHand = true } = {}) {
+    if (byHand) this._byHand.add("hazeHeightDependent");
+    this.hazeHeightDependent = Boolean(on);
+    this.renderer.resetAccumulation();
+    this._wake("haze profile");
   }
 
   /**
@@ -1504,7 +1522,8 @@ export class Viewer {
         const overlays = this._offlineOverlays(pose, size, 1.0 / this.videoFps);
         await renderAccumulated(
           this.renderer, target.view, size,
-          { ...this._viewKwargs(), camera: pose, frameIndex: i * 1024 },
+          { ...this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }),
+            camera: pose, frameIndex: i * 1024 },
           this.videoAccumulate, overlays);
         await writer.addFrame(
           await readBack(this.device, target.texture, size[0], size[1]), i);
@@ -1617,14 +1636,25 @@ export class Viewer {
         tone_map_white_point: this.toneMapWhitePoint,
         contrast: this.contrast,
         haze: this.haze,
-        light_march_lod_degrees: K.APP_LIGHT_MARCH_LOD_DEGREES,
-        view_step_lod_degrees: K.APP_VIEW_STEP_LOD_DEGREES,
+        haze_height_dependent: this.hazeHeightDependent,
+        // The LOD a CAPTURE runs at, not the live view's and not the bare
+        // constants. This used to write K.APP_*_LOD_DEGREES unscaled, so a
+        // sidecar claimed 1.4/0.6 whatever the slider said — and the tier
+        // moves that slider on its own, so most captures below "high" were
+        // misreported.
+        lod_strength: K.DEFAULT_LOD_STRENGTH,
+        light_march_lod_degrees:
+          K.APP_LIGHT_MARCH_LOD_DEGREES * K.DEFAULT_LOD_STRENGTH,
+        view_step_lod_degrees:
+          K.APP_VIEW_STEP_LOD_DEGREES * K.DEFAULT_LOD_STRENGTH,
       },
       timestamp: new Date().toISOString(),
       // witness, not behold: the still was rendered by the witness/soar
       // renderer, so this is the command that reproduces THIS image —
-      // nests, wrap and image controls included.
-      reproduction_command: this.witnessCommand(),
+      // nests, wrap and image controls included. At the capture's LOD rather
+      // than the live view's, for the same reason.
+      reproduction_command: this.witnessCommand(
+        { lodStrength: K.DEFAULT_LOD_STRENGTH }),
     };
   }
 
@@ -1657,7 +1687,8 @@ export class Viewer {
     }
     try {
       const image = await renderStill(
-        this.device, this.renderer, this._viewKwargs(), size,
+        this.device, this.renderer,
+        this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }), size,
         this.stillSamples, stillOverlays,
         (fraction) => this.ui.showProgress(
           `Rendering a ${size[0]}x${size[1]} still…`, fraction));
@@ -1803,7 +1834,7 @@ export class Viewer {
    * out rather than only when non-default, because "exactly this view" must
    * survive a change of defaults.
    */
-  witnessCommand() {
+  witnessCommand({ lodStrength = this.lodStrength } = {}) {
     const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
     const source = this.scene.sourceName ?? "<your-file.nc>";
     const rel = worldToRelative(
@@ -1826,12 +1857,26 @@ export class Viewer {
       "--white-point", n(this.toneMapWhitePoint),
       "--contrast", n(this.contrast),
       "--haze", n(this.haze),
+      ...(this.hazeHeightDependent
+          ? ["--haze-height-dependent"] : ["--no-haze-height-dependent"]),
+      // Always written, like the image controls above: the quality tier moves
+      // this slider on its own, so a command without it reproduces the view
+      // only by luck of which tier was in force.
+      "--lod", n(lodStrength),
     ].join(" ");
   }
 
   // --- the loop ------------------------------------------------------------
 
-  _viewKwargs() {
+  /**
+   * The per-frame view state.
+   *
+   * `lodStrength` is overridable because an offline render should not inherit
+   * a march chosen to keep flight smooth — captures pass
+   * K.DEFAULT_LOD_STRENGTH. Everything else follows the live view, which is
+   * the point of a capture: it is what you were looking at.
+   */
+  _viewKwargs({ lodStrength = this.lodStrength } = {}) {
     return {
       camera: this.camera,
       jitter: true,
@@ -1842,8 +1887,9 @@ export class Viewer {
       toneMapWhitePoint: this.toneMapWhitePoint,
       contrast: this.contrast,
       haze: this.haze,
-      lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * this.lodStrength,
-      viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * this.lodStrength,
+      hazeHeightDependent: this.hazeHeightDependent,
+      lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * lodStrength,
+      viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
       frameIndex: this.frameIndex,
     };
   }

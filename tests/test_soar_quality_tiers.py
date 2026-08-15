@@ -49,7 +49,7 @@ ALL_TIERS = TIERS + ["max"]
 
 _JS = textwrap.dedent("""
     import * as K from "%s";
-    import { hazeEFoldingKm } from "%s";
+    import { hazeEFoldingKm, HAZE_MIN } from "%s";
     import { Renderer } from "%s";
 
     // The real builder, which is pure — no device, no textures.
@@ -77,6 +77,8 @@ _JS = textwrap.dedent("""
       legacyAlpha: K.DEFAULT_MOTION_BLEND_ALPHA,
       defaultHaze: K.DEFAULT_HAZE_BY_TIER,
       hazeMax: K.HAZE_MAX,
+      hazeMin: HAZE_MIN,
+      hazeMaxEFoldingKm: K.HAZE_MAX_E_FOLDING_KM,
       defaultLod: K.DEFAULT_LOD_STRENGTH_BY_TIER,
       lodLimits: K.LOD_STRENGTH_LIMITS,
       lodDegrees: [K.APP_LIGHT_MARCH_LOD_DEGREES, K.APP_VIEW_STEP_LOD_DEGREES],
@@ -239,6 +241,21 @@ def test_haze_reads_out_as_a_shrinking_distance(js):
 
 def test_haze_ceiling_matches_python(js):
     assert js["hazeMax"] == look.HAZE_MAX
+
+
+def test_haze_clear_end_matches_python(js):
+    """Both ends of the slider, and the distance the clear one is derived from.
+
+    HAZE_MIN is not typed on either side — it is the inverse of the extinction
+    ramp evaluated at HAZE_MAX_E_FOLDING_KM — so this pins the inverse as much
+    as the constant. A host that got the 2/3 power or the sign wrong lands
+    somewhere plausible rather than somewhere obviously broken.
+    """
+    assert js["hazeMaxEFoldingKm"] == look.HAZE_MAX_E_FOLDING_KM
+    assert js["hazeMin"] == pytest.approx(look.HAZE_MIN, rel=1e-12)
+    # And it means what it says: that haze is 200 km of e-folding.
+    assert 1.0 / look.aerial_beta_per_km(look.HAZE_MIN) == pytest.approx(
+        look.HAZE_MAX_E_FOLDING_KM, rel=1e-12)
 
 
 def test_flying_gets_stills_and_the_quality_panel_gets_the_live_view(js):

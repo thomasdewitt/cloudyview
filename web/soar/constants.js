@@ -35,6 +35,12 @@ export const LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG = 55.0;
 export const AERIAL_PERSPECTIVE_STRENGTH = 1.0;
 export const AERIAL_BETA_PER_KM = 0.035;
 export const AERIAL_SCALE_HEIGHT_M = 2500.0;
+// Whether the aerial haze thins with height at all. Off by default: at a
+// 2.5 km scale height an upward ray leaves the haze without ever reaching the
+// cutoff optical depth, so nothing bounds its march but the range ceiling.
+// Uniform haze is unphysical and caps every ray at one distance — the
+// cheapest range lever there is. Mirrors soar_host.ViewState.
+export const DEFAULT_HAZE_HEIGHT_DEPENDENT = false;
 
 export const OCEAN_REALISM = 1.0;
 export const OCEAN_MIP_BIAS = -0.5;
@@ -57,6 +63,11 @@ export const HAZE_ANCHOR = 0.35;
 export const DEFAULT_HAZE = 1.0;
 export const HAZE_MAX = 2.5;
 export const AERIAL_BETA_FLOOR_PER_KM = 0.015;
+// The clear end of the haze slider, in the distance a viewer reads rather
+// than in the aerosol coordinate: 200 km of e-folding, which is past haze 0
+// and so past a Rayleigh-limited sky. HAZE_MIN is derived from it in
+// spectral.js. The curve is EXTENDED, not rescaled — see look.py.
+export const HAZE_MAX_E_FOLDING_KM = 200.0;
 
 // Haze is also the cheapest performance lever there is, which is why the
 // lower tiers ask for more of it. In a periodic domain the view march ends
@@ -251,10 +262,28 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // (the note above APP_LIGHT_MARCH_LOD_DEGREES), so it degrades along the
 // grain of the look instead of against it. Past ~2.5 the far field starts to
 // band on high-contrast tops, which is why the slider stops where it does.
+// High and max fly at 0.5 — half the angular step, so the far field is
+// marched twice as finely as the tuned constants alone would ask for
+// (Thomas, 2026-08-15). The two tiers are equal here on purpose: whatever
+// else max buys, it must never march more coarsely than high.
 export const DEFAULT_LOD_STRENGTH_BY_TIER = {
-  max: 1.0, high: 1.0, medium: 1.35, low: 1.7, minimal: 2.2,
+  max: 0.5, high: 0.5, medium: 1.35, low: 1.7, minimal: 2.2,
 };
-export const LOD_STRENGTH_LIMITS = [0.5, 3.0];
+// The floor is below the default rather than equal to it: a slider whose
+// default sits on its own end stop cannot be used to ask for anything finer,
+// and finer is only ever slower — never wrong.
+export const LOD_STRENGTH_LIMITS = [0.25, 3.0];
+
+// The strength anything that is not holding a framerate renders at: a still,
+// a video frame, witness, and the uniform block's own default. A capture is
+// already paying for hundreds of accumulated passes, so it has no business
+// inheriting a coarse march chosen to keep flight smooth.
+//
+// Mirrors soar_host.DEFAULT_LOD_STRENGTH, and tests/test_uniform_parity.py
+// compares the two hosts' defaults directly — it caught them disagreeing the
+// moment the Python side moved, which is the whole reason this is one named
+// constant rather than a 0.5 written into three call sites.
+export const DEFAULT_LOD_STRENGTH = 0.5;
 export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;

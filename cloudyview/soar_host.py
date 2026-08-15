@@ -85,6 +85,18 @@ DEFAULT_AMBIENT_OCCLUSION_FLOOR = 0.24
 DEFAULT_BOUNCE_DEPTH_ATTENUATION = 0.80
 APP_LIGHT_MARCH_LOD_DEGREES = 1.4
 APP_VIEW_STEP_LOD_DEGREES = 0.6
+# What multiplies both for a render that is not trying to hold a framerate:
+# an offline still, a video frame, anything witness draws. Matches the
+# browser's CAPTURE_LOD_STRENGTH and its high/max tier default, so a terminal
+# render, an in-app capture and a high-tier flight all march the same.
+#
+# Angular LOD only ever grows the step FLOOR (dt = max(dt_base, t*tan(theta))),
+# so a smaller strength costs time and can never coarsen anything: at 0.5 the
+# far field is marched twice as finely as the tuned constants alone ask for.
+DEFAULT_LOD_STRENGTH = 0.5
+# Whether the aerial haze thins with height. Mirrors
+# web/soar/constants.js DEFAULT_HAZE_HEIGHT_DEPENDENT; see ViewState below.
+DEFAULT_HAZE_HEIGHT_DEPENDENT = False
 STEP_VOXEL_FACTOR = 2.0
 DEFAULT_MAX_LIGHT_STEPS = 512
 
@@ -232,6 +244,14 @@ class ViewState:
     # horizon wedge, the circumsolar lobe, the haze over the sea. There is
     # deliberately no per-term override — see look.DEFAULT_HAZE.
     haze: float = look.DEFAULT_HAZE
+    # Whether that aerosol thins with height. Off by default (Thomas,
+    # 2026-08-15): the exponential profile is the physical one, but a
+    # 2.5 km scale height means an upward ray leaves the haze entirely, and
+    # nothing then bounds how far it marches except the range ceiling. Uniform
+    # haze puts the same extinction at every altitude, which is unphysical and
+    # caps every ray at one distance — the cheapest performance lever in the
+    # renderer. See raymarch.wgsl's sky_disc.w.
+    haze_height_dependent: bool = DEFAULT_HAZE_HEIGHT_DEPENDENT
     ocean_realism: float = look.OCEAN_REALISM
     ocean_mip_bias: float = look.OCEAN_MIP_BIAS
     ocean_glint_strength: float = look.OCEAN_GLINT_STRENGTH
@@ -239,8 +259,14 @@ class ViewState:
     ocean_slope_draw_fraction: float = look.OCEAN_SLOPE_DRAW_FRACTION
     ocean_sky_shadow_floor: float = look.OCEAN_SKY_SHADOW_FLOOR
     cone_stencil_theta_deg: float = look.CONE_STENCIL_THETA_DEG
-    light_march_lod_degrees: float = APP_LIGHT_MARCH_LOD_DEGREES
-    view_step_lod_degrees: float = APP_VIEW_STEP_LOD_DEGREES
+    # The app's angles scaled by DEFAULT_LOD_STRENGTH — see above. Given as
+    # resolved angles rather than as a strength because the shader wants
+    # tan(theta) and there is no reason for two representations to exist down
+    # here; callers that think in strength (witness's --lod) multiply.
+    light_march_lod_degrees: float = (APP_LIGHT_MARCH_LOD_DEGREES
+                                      * DEFAULT_LOD_STRENGTH)
+    view_step_lod_degrees: float = (APP_VIEW_STEP_LOD_DEGREES
+                                    * DEFAULT_LOD_STRENGTH)
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA
     tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT
     contrast: float = DEFAULT_CONTRAST
@@ -264,9 +290,10 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     _non_negative("ocean_glint_strength", view.ocean_glint_strength)
     _non_negative("ocean_glint_roughness", view.ocean_glint_roughness)
     _unit_interval("ocean_slope_draw_fraction", view.ocean_slope_draw_fraction)
-    if not (0.0 <= view.haze <= look.HAZE_MAX):
+    if not (look.HAZE_MIN <= view.haze <= look.HAZE_MAX):
         raise ValueError(
-            f"haze must be in [0, {look.HAZE_MAX}]; got {view.haze}.")
+            f"haze must be in [{look.HAZE_MIN}, {look.HAZE_MAX}]; "
+            f"got {view.haze}.")
     _lod_degrees("light_march_lod_degrees", view.light_march_lod_degrees)
     _lod_degrees("view_step_lod_degrees", view.view_step_lod_degrees)
     if not (0.0 <= view.cone_stencil_theta_deg < 90.0):
@@ -326,7 +353,8 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[14] = (*ambient, split)
     u[15] = (*horizon, view.aerial_perspective_strength)
     u[16] = (*bloom, look.aerial_beta_per_km(view.haze) * 1e-3)
-    u[17] = (*disc, look.AERIAL_SCALE_HEIGHT_M)
+    u[17] = (*disc, look.AERIAL_SCALE_HEIGHT_M
+                    if view.haze_height_dependent else 0.0)
     u[18] = (view.ocean_realism, view.ocean_mip_bias,
              view.ocean_glint_strength, view.ocean_glint_roughness)
     u[19] = (view.ocean_slope_draw_fraction,

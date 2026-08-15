@@ -16,6 +16,7 @@ import {
   SUNSET_HORIZON_RADIANCE,
   LIGHT_TRANSFER_FULL_ELEVATION_DEG, LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG,
   HAZE_ANCHOR, AERIAL_BETA_PER_KM, AERIAL_BETA_FLOOR_PER_KM,
+  HAZE_MAX_E_FOLDING_KM,
   OCEAN_HAZE_EXTINCTION_PER_KM,
 } from "./constants.js";
 
@@ -151,7 +152,7 @@ const OCEAN_HAZE_BETA_RATIO =
  */
 export function aerialBetaPerKm(haze) {
   return AERIAL_BETA_FLOOR_PER_KM
-    + AERIAL_BETA_HAZE_COEFFICIENT * (haze * Math.sqrt(haze));
+    + AERIAL_BETA_HAZE_COEFFICIENT * (haze * Math.sqrt(Math.abs(haze)));
 }
 
 /** Haze over the sea, held at its tuned ratio to the sky's own extinction. */
@@ -174,3 +175,18 @@ export function oceanHazeExtinctionPerKm(haze) {
 export function hazeEFoldingKm(haze) {
   return 1.0 / aerialBetaPerKm(haze);
 }
+
+/**
+ * The haze setting whose sea-level e-folding length is `km` — the inverse of
+ * the above, so the slider can be scaled in the distance it reads out.
+ * Sign-preserving, which is what lets the clear end run past haze 0.
+ * Mirrors look.haze_for_e_folding_km.
+ */
+export function hazeFromEFoldingKm(km) {
+  const excess = (1.0 / Number(km) - AERIAL_BETA_FLOOR_PER_KM)
+                 / AERIAL_BETA_HAZE_COEFFICIENT;
+  return Math.sign(excess) * Math.abs(excess) ** (2.0 / 3.0);
+}
+
+/** The aerosol coordinate at the clear end of the slider. */
+export const HAZE_MIN = hazeFromEFoldingKm(HAZE_MAX_E_FOLDING_KM);

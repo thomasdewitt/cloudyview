@@ -11,6 +11,7 @@ import * as K from "./constants.js";
 import {
   directionFromAzimuthElevation, spectralLightingColors,
   effectiveLightTransferSplit, aerialBetaPerKm, oceanHazeExtinctionPerKm,
+  HAZE_MIN,
 } from "./spectral.js";
 import { cameraBasis } from "./camera.js";
 
@@ -86,8 +87,13 @@ export function packUniforms(state, view) {
     oceanSlopeDrawFraction = K.OCEAN_SLOPE_DRAW_FRACTION,
     oceanSkyShadowFloor = K.OCEAN_SKY_SHADOW_FLOOR,
     coneStencilThetaDeg = K.CONE_STENCIL_THETA_DEG,
-    lightMarchLodDegrees = K.APP_LIGHT_MARCH_LOD_DEGREES,
-    viewStepLodDegrees = K.APP_VIEW_STEP_LOD_DEGREES,
+    hazeHeightDependent = K.DEFAULT_HAZE_HEIGHT_DEPENDENT,
+    // The app's angles at DEFAULT_LOD_STRENGTH, matching soar_host.ViewState.
+    // The viewer always passes these explicitly (its slider scales them); the
+    // defaults are what a caller who does not care gets, and they have to be
+    // the same number on both sides — see test_uniform_parity.
+    lightMarchLodDegrees = K.APP_LIGHT_MARCH_LOD_DEGREES * K.DEFAULT_LOD_STRENGTH,
+    viewStepLodDegrees = K.APP_VIEW_STEP_LOD_DEGREES * K.DEFAULT_LOD_STRENGTH,
     toneMapGamma = K.DEFAULT_TONE_MAP_GAMMA,
     frameIndex = 0,
     subpixel = false,
@@ -102,8 +108,8 @@ export function packUniforms(state, view) {
   unitInterval("low_sun_sky_field_strength", lowSunSkyFieldStrength);
   unitInterval("ocean_realism", oceanRealism);
   unitInterval("ocean_sky_shadow_floor", oceanSkyShadowFloor);
-  if (!(Number(haze) >= 0.0 && Number(haze) <= K.HAZE_MAX)) {
-    throw new Error(`haze must be in [0, ${K.HAZE_MAX}]; got ${haze}.`);
+  if (!(Number(haze) >= HAZE_MIN && Number(haze) <= K.HAZE_MAX)) {
+    throw new Error(`haze must be in [${HAZE_MIN}, ${K.HAZE_MAX}]; got ${haze}.`);
   }
   {
     const [lo, hi] = K.TONE_MAP_WHITE_POINT_LIMITS;
@@ -187,7 +193,10 @@ export function packUniforms(state, view) {
        aerialPerspectiveStrength);
   row(16, spec.bloom[0], spec.bloom[1], spec.bloom[2],
        aerialBetaPerKm(haze) * 1e-3);          // w: beta0 in m^-1
-  row(17, spec.disc[0], spec.disc[1], spec.disc[2], K.AERIAL_SCALE_HEIGHT_M);
+  // A scale height of 0 is the shader's signal for "no height profile";
+  // see raymarch.wgsl's sky_disc.w.
+  row(17, spec.disc[0], spec.disc[1], spec.disc[2],
+      hazeHeightDependent ? K.AERIAL_SCALE_HEIGHT_M : 0.0);
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
   row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
        oceanSkyShadowFloor, contrast);

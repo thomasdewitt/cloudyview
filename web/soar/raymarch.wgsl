@@ -82,7 +82,13 @@ struct Uniforms {
     sky_horizon: vec4<f32>,
     // xyz = circumsolar bloom color, w = aerial beta0 (m^-1, sea level)
     sky_bloom: vec4<f32>,
-    // xyz = solar disc color, w = aerial haze scale height (m)
+    // xyz = solar disc color, w = aerial haze scale height (m), where
+    //     w <= 0 means the haze does NOT thin with height: the sea-level
+    //     extinction applies at every altitude. That is unphysical and it is
+    //     the point — an exponential atmosphere lets an upward ray leave the
+    //     haze without ever reaching the cutoff optical depth, so it marches
+    //     to the range ceiling, while a uniform one caps every ray at the
+    //     same distance. It is the cheapest range lever there is.
     sky_disc: vec4<f32>,
     // Rows 18-19: ocean realism (witness iter_004/009/011).
     // x = master gate (0 = exact legacy ocean shader), y = mip bias,
@@ -1347,6 +1353,12 @@ fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
         let z0 = max(cam_z, 0.0);
         let mu = dir.z;
         let tau_cap = PERIODIC_AIR_TAU_CUTOFF / aerial_strength;
+        if (aer_h <= 0.0) {
+            // Uniform haze: tau = beta0 * t, so every ray caps at the same
+            // distance whatever its direction — including the upward ones the
+            // exponential profile lets escape.
+            return min(cap, tau_cap / aer_beta0);
+        }
         let e0 = exp(-z0 / aer_h);
         if (mu > 1e-6 || mu < -1e-6) {
             let a = e0 - tau_cap * mu / (aer_beta0 * aer_h);
@@ -2202,7 +2214,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 let aer_z1 = max(p.z, 0.0);
                 let aer_mu = dir.z;
                 var tau_air: f32;
-                if (aer_mu > 1e-6 || aer_mu < -1e-6) {
+                if (aer_h <= 0.0) {
+                    tau_air = aer_beta0 * t;          // uniform: no z profile
+                } else if (aer_mu > 1e-6 || aer_mu < -1e-6) {
                     tau_air = aer_beta0 * (aer_h / aer_mu)
                         * (exp(-aer_z0 / aer_h) - exp(-aer_z1 / aer_h));
                 } else {

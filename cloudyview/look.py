@@ -81,10 +81,20 @@ DEFAULT_HAZE = 1.0
 # shorter ray. 2.5 is a 2.6 km e-folding — 10 km of visual range, a genuinely
 # murky day and the point past which the far field is gone rather than soft.
 HAZE_MAX = 2.5
-# Even at haze 0 the air is not vacuum. 0.015/km is a clean Rayleigh-limited
-# atmosphere: Koschmieder's 3.912/beta puts the visual range at ~260 km,
-# which is the "you can see the far range from the pass" day, not vacuum.
+# Haze 0 is a clean Rayleigh-limited atmosphere, not vacuum: 0.015/km puts
+# Koschmieder's 3.912/beta at a ~260 km visual range (a 67 km e-folding),
+# which is the "you can see the far range from the pass" day.
 AERIAL_BETA_FLOOR_PER_KM = 0.015
+# ...and the slider now runs PAST it, into air cleaner than Earth has, because
+# the far field is what costs and someone tuning a look wants to see the field
+# undimmed (Thomas, 2026-08-15). Negative haze is a slider coordinate, not a
+# claim about the sky.
+#
+# Crucially this EXTENDS the curve rather than redefining it: the h*sqrt(h)
+# below is written h*sqrt(|h|), which is bit-identical for every h >= 0, so
+# nothing that was ever tuned or rendered moves. Lowering the floor instead
+# would have re-scaled the whole ramp and changed every still on the site.
+HAZE_MAX_E_FOLDING_KM = 200.0          # the clear end of the slider
 # Extinction rises faster than linearly with the slider because aerosol
 # loading does: haze 1 lands at 0.11/km, a visual range of ~36 km, which is
 # a genuinely thick summer haze rather than a slightly softer version of the
@@ -107,7 +117,24 @@ def aerial_beta_per_km(haze: float) -> float:
     into a uniform block that a test diffs byte for byte against JS.
     """
     return (AERIAL_BETA_FLOOR_PER_KM
-            + _AERIAL_BETA_HAZE_COEFFICIENT * (haze * math.sqrt(haze)))
+            + _AERIAL_BETA_HAZE_COEFFICIENT * (haze * math.sqrt(abs(haze))))
+
+
+def haze_for_e_folding_km(km: float) -> float:
+    """The haze setting whose sea-level e-folding length is `km`.
+
+    The inverse of aerial_beta_per_km composed with 1/beta, so the slider can
+    be scaled in the distance a viewer actually reads rather than in the
+    aerosol coordinate. Sign-preserving, which is what lets the clear end run
+    past haze 0.
+    """
+    excess = (1.0 / float(km) - AERIAL_BETA_FLOOR_PER_KM) / _AERIAL_BETA_HAZE_COEFFICIENT
+    return math.copysign(abs(excess) ** (2.0 / 3.0), excess)
+
+
+# The clear end of the slider, in the aerosol coordinate. Derived rather than
+# typed so the two ends cannot drift apart.
+HAZE_MIN = haze_for_e_folding_km(HAZE_MAX_E_FOLDING_KM)
 
 
 def ocean_haze_extinction_per_km(haze: float) -> float:

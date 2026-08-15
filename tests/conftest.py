@@ -121,6 +121,24 @@ SOAR_RENDER_SETTINGS = {
     "periodic": True,
     "sun_azimuth": 20.0,
     "sun_elevation": 55.0,
+    # Stated, not inherited. witness's default LOD strength moved from 1.0 to
+    # 0.5 on 2026-08-15, and these references were baked at 1.0 — a golden set
+    # whose inputs follow a default silently stops comparing against what it
+    # was baked from the moment that default moves. Every other input here is
+    # pinned for the same reason; this one only looked like it did not need to
+    # be because it had no argument to pin it with.
+    #
+    # Re-baking at 0.5 is a defensible choice (the goldens would then track
+    # what the app ships) but it is a deliberate re-bake, on GPU hardware,
+    # against measured tolerances — not something a default change should do
+    # by itself.
+    "lod": 1.0,
+    # Same reasoning, same day: the haze profile became a user-facing toggle
+    # that defaults to OFF (uniform), and these references were baked with the
+    # exponential atmosphere. Pinned rather than followed — with the default
+    # they miss by RMSE 0.015-0.053 against a 0.006 threshold, which is a
+    # measure of how much of this look the profile actually carries.
+    "haze_height_dependent": True,
 }
 
 # Measured on the bake machine (RTX 5080, Vulkan, driver 595.80) at the
@@ -240,6 +258,8 @@ def render_soar_view(level, view):
         image_size=SOAR_RENDER_SETTINGS["size"],
         periodic=SOAR_RENDER_SETTINGS["periodic"],
         accumulate=SOAR_RENDER_SETTINGS["accumulate"],
+        lod=SOAR_RENDER_SETTINGS["lod"],
+        haze_height_dependent=SOAR_RENDER_SETTINGS["haze_height_dependent"],
         verbose=False,
     )
 

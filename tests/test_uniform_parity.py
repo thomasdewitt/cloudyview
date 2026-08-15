@@ -68,6 +68,12 @@ CASES = [
                          "spectral_lighting_strength": 0.5,
                          "low_sun_sky_field_strength": 0.25,
                          "cone_stencil_theta_deg": 7.5}),
+    # The haze profile, both ways. It is packed as a sentinel — row 17.w is
+    # the scale height, and 0 means "no height dependence" — so the two hosts
+    # can disagree about it without disagreeing about any named value. Both
+    # default to off, which would leave the on-state untested.
+    ("haze_height_dependent", {}, {"haze_height_dependent": True}),
+    ("haze_uniform", {}, {"haze_height_dependent": False}),
 ]
 
 BASE_SCENE = dict(
@@ -134,7 +140,7 @@ def _js_view(extra):
         "spectral_lighting_strength": "spectralLightingStrength",
         "low_sun_sky_field_strength": "lowSunSkyFieldStrength",
         "cone_stencil_theta_deg": "coneStencilThetaDeg",
-        "haze": "haze",
+        "haze": "haze", "haze_height_dependent": "hazeHeightDependent",
         "tone_map_white_point": "toneMapWhitePoint", "contrast": "contrast",
     }
     for k, val in extra.items():

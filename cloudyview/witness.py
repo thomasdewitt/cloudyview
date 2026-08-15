@@ -44,8 +44,12 @@ from .cli_utils import (
     dataset_selection_kwargs,
 )
 from .cloudfield import CloudField, load as _load_field
-from .look import DEFAULT_HAZE
+from .look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
 from .soar_host import (
+    APP_LIGHT_MARCH_LOD_DEGREES,
+    APP_VIEW_STEP_LOD_DEGREES,
+    DEFAULT_HAZE_HEIGHT_DEPENDENT,
+    DEFAULT_LOD_STRENGTH,
     DEFAULT_TONE_MAP_GAMMA,
     DEFAULT_TONE_MAP_WHITE_POINT,
     DEFAULT_CONTRAST,
@@ -239,9 +243,11 @@ def render_nested(
     tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT,
     contrast: float = DEFAULT_CONTRAST,
     haze: float = DEFAULT_HAZE,
+    haze_height_dependent: bool = DEFAULT_HAZE_HEIGHT_DEPENDENT,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
+    lod: float = DEFAULT_LOD_STRENGTH,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -293,7 +299,12 @@ def render_nested(
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
         exposure=exposure, tone_map_gamma=tone_map_gamma,
         tone_map_white_point=tone_map_white_point, contrast=contrast,
-        haze=haze,
+        haze=haze, haze_height_dependent=haze_height_dependent,
+        # Angular LOD: the step floor grows as t*tan(theta), so this only ever
+        # buys back far-field steps. Scaled from the app's constants so the
+        # browser's slider and this argument are the same number.
+        light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
+        view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
     )
     if verbose:
         print(f"  Rendering {w}x{h}, {accumulate} accumulated passes, "
@@ -355,8 +366,10 @@ def witness(
     tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT,
     contrast: float = DEFAULT_CONTRAST,
     haze: Optional[float] = None,
+    haze_height_dependent: bool = DEFAULT_HAZE_HEIGHT_DEPENDENT,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
+    lod: float = DEFAULT_LOD_STRENGTH,
     verbose: bool = False,
 ) -> np.ndarray:
     """Render a cloud field with soar's volumetric ray marcher.
@@ -433,7 +446,7 @@ def witness(
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
         exposure=exposure, tone_map_gamma=tone_map_gamma,
         tone_map_white_point=tone_map_white_point, contrast=contrast,
-        haze=haze,
+        haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
         periodic=periodic, accumulate=accumulate, verbose=verbose)
 
 
@@ -506,6 +519,8 @@ def main(filename: str, output: str = None,
          tone_map_white_point: float = None,
          contrast: float = None,
          haze: float = None,
+         haze_height_dependent: bool = None,
+         lod: float = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -549,6 +564,10 @@ def main(filename: str, output: str = None,
         look_kwargs['contrast'] = contrast
     if haze is not None:
         look_kwargs['haze'] = haze
+    if lod is not None:
+        look_kwargs['lod'] = lod
+    if haze_height_dependent is not None:
+        look_kwargs['haze_height_dependent'] = haze_height_dependent
 
     try:
         field = _load_field(
@@ -741,6 +760,21 @@ def cli():
                              f"gamma encode (default: {DEFAULT_CONTRAST})")
     parser.add_argument("--haze", type=float,
                         help=f"Aerosol amount, 0 to 2 (default: {DEFAULT_HAZE})")
+    parser.add_argument("--haze-height-dependent",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Let the haze thin with height on a "
+                             f"{int(AERIAL_SCALE_HEIGHT_M)} m scale height. Off "
+                             "by default: uniform haze puts the sea-level "
+                             "extinction at every altitude, which is "
+                             "unphysical and bounds how far every ray marches")
+    parser.add_argument("--lod", type=float,
+                        help="Angular level of detail: multiplies the step "
+                             "angles the far field is marched at "
+                             f"({APP_VIEW_STEP_LOD_DEGREES} deg view, "
+                             f"{APP_LIGHT_MARCH_LOD_DEGREES} deg sun). The step "
+                             "floor grows as t*tan(theta), so smaller is finer "
+                             "and slower and never coarser. Soar writes its "
+                             f"flown value here (default: {DEFAULT_LOD_STRENGTH})")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",
@@ -764,6 +798,8 @@ def cli():
          tone_map_white_point=args.white_point,
          contrast=args.contrast,
          haze=args.haze,
+         lod=args.lod,
+         haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,
          **dataset_selection_kwargs(args))

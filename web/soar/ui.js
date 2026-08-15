@@ -8,7 +8,7 @@
 "use strict";
 
 import * as K from "./constants.js";
-import { hazeEFoldingKm } from "./spectral.js";
+import { hazeEFoldingKm, hazeFromEFoldingKm, HAZE_MIN } from "./spectral.js";
 
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
@@ -508,10 +508,44 @@ export class UI {
     // Read out as the distance it means. The knob drives four terms and is
     // not a length, but this is the length it implies at sea level, and it is
     // what the periodic march cap is derived from.
-    sliders.append(sliderRow("Haze", {
-      min: 0.0, max: K.HAZE_MAX, step: 0.01, value: app.haze,
-      format: (v) => `${hazeEFoldingKm(v).toFixed(1)} km`,
-      onInput: (v) => app.setHaze(v),
+    // The profile rides inside the label the way auto does on Exposure: it is
+    // a mode of this slider, not a control of its own. Off means the
+    // sea-level extinction applies at every altitude — unphysical, and the
+    // cheapest range lever there is, because an exponential atmosphere lets
+    // an upward ray leave the haze and march to the ceiling.
+    const profile = el("button", "mini");
+    const paintProfile = () => {
+      profile.textContent = app.hazeHeightDependent ? "on" : "off";
+      profile.classList.toggle("on", app.hazeHeightDependent);
+    };
+    paintProfile();
+    profile.addEventListener("click", () => {
+      app.setHazeHeightDependent(!app.hazeHeightDependent);
+      paintProfile();
+    });
+    // Scaled in the distance it reads out, logarithmically, rather than in
+    // the aerosol coordinate. The range it has to cover is 2.5 km to 200 km —
+    // eighty-fold — and linear travel in `haze` spends more than half its
+    // length between 2 and 5 km of visibility, where consecutive positions
+    // are indistinguishable, and crosses the whole clear end in a few pixels.
+    // Log travel gives every position the same RATIO of change.
+    //
+    // The slider still runs clear-to-murky left-to-right, which is why the
+    // mapping is inverted: it is labelled Haze, and dragging right must add
+    // haze. Position is a plain 0..1; only the readout is a physical number.
+    const hazeKm = (p) => K.HAZE_MAX_E_FOLDING_KM
+      * (hazeEFoldingKm(K.HAZE_MAX) / K.HAZE_MAX_E_FOLDING_KM) ** p;
+    const hazePosition = (haze) =>
+      Math.log(hazeEFoldingKm(haze) / K.HAZE_MAX_E_FOLDING_KM)
+      / Math.log(hazeEFoldingKm(K.HAZE_MAX) / K.HAZE_MAX_E_FOLDING_KM);
+    sliders.append(sliderRow(["Haze (height dependent: ", profile, ")"], {
+      min: 0.0, max: 1.0, step: 0.002, value: hazePosition(app.haze),
+      format: (p) => {
+        const km = hazeKm(p);
+        return `${km >= 100 ? km.toFixed(0) : km.toFixed(1)} km`;
+      },
+      onInput: (p) => app.setHaze(
+        Math.min(K.HAZE_MAX, Math.max(HAZE_MIN, hazeFromEFoldingKm(hazeKm(p))))),
     }));
     sliders.append(sliderRow("Level of detail", {
       min: K.LOD_STRENGTH_LIMITS[0], max: K.LOD_STRENGTH_LIMITS[1],
