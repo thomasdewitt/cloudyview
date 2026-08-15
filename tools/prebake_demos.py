@@ -40,9 +40,10 @@ from cloudyview.cloudfield import CloudField
 from cloudyview.glimpse import glimpse
 from cloudyview.look import DEFAULT_HAZE
 from cloudyview.soar_host import (
-    DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_TONE_MAP_GAMMA,
-    DEFAULT_TONE_MAP_WHITE_POINT,
+    DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_HAZE_HEIGHT_DEPENDENT,
+    DEFAULT_LOD_STRENGTH, DEFAULT_TONE_MAP_GAMMA, DEFAULT_TONE_MAP_WHITE_POINT,
 )
+from cloudyview.witness import crop_empty_z
 from export_web_assets import _volume_aabb
 
 # The tone map the app flies with, imported rather than restated: a still that
@@ -60,14 +61,33 @@ LOOK_DEFAULTS = {
     "white_point": DEFAULT_TONE_MAP_WHITE_POINT,
     "contrast": DEFAULT_CONTRAST,
     "haze": DEFAULT_HAZE,
+    # Angular LOD, recorded like the rest: a still rendered at one strength
+    # and a flight opened at another are the same camera marched two ways,
+    # and the `look` block is the record of how the picture was made.
+    "lod": DEFAULT_LOD_STRENGTH,
+    # Same, for the haze profile. A demo whose framing was chosen under the
+    # exponential atmosphere says so here rather than inheriting whatever the
+    # app defaults to this month.
+    "haze_height_dependent": DEFAULT_HAZE_HEIGHT_DEPENDENT,
 }
 _LOOK_ARG = {"exposure": "exposure", "gamma": "tone_map_gamma",
              "white_point": "tone_map_white_point", "contrast": "contrast",
-             "haze": "haze"}
+             "haze": "haze", "lod": "lod",
+             "haze_height_dependent": "haze_height_dependent"}
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "data" / "demos"
 OUT = REPO / "web" / "soar" / "demos"
+
+# The STEAM fields are read out of the repo that produces them rather than
+# copied here: they are model output, turbulon-model owns them, and a copy
+# under data/demos would be a second thing to keep in step with
+# generate_demo_fields.py. A spec names its own source with `src`.
+#
+# Sibling layout, which is the convention on both of Thomas's machines
+# (~/code-and-data/<repo>). If the path is wrong the netCDF open fails and
+# says so — there is nothing here to fall back to.
+STEAM_SRC = REPO.parent / "turbulon-model" / "demos" / "fields"
 
 # The rail on the landing page is grouped, and the grouping lives here: each
 # spec names a group, and every group is declared below whether or not it has
@@ -121,15 +141,109 @@ GROUPS = [
 #                 spending that on "this one is quite pretty" would make the
 #                 next one unreadable.
 DEMOS = [
+    # --- STEAM -------------------------------------------------------------
+    # Read straight out of turbulon-model rather than copied into data/demos:
+    # see STEAM_SRC. Both are periodic — they are cascade fields on their own
+    # root domain, not crops out of a larger run, so the wrap is the field's
+    # own (Thomas, 2026-08-15) and `periodic` stays at its default.
+    #
+    # z="auto" rather than a typed range: the browser and witness both trim
+    # empty planes before rendering, so the domain box a camera is normalized
+    # against IS the occupied band. See occupied_z_band.
+    dict(
+        id="desert",
+        group="steam",
+        title="STEAM high-based convection",
+        field="Utah summer cumulus congestus",
+        warning="Needs a highly capable GPU",
+        liquid=("demo_desert-convection.nc", "qc"),
+        ice=("demo_desert-convection.nc", "qi"),
+        src=STEAM_SRC,
+        dims="xyz",
+        crop=dict(y=(0, 2048), x=(0, 2048), z="auto"),
+        scale=1e3,                       # kg/kg -> g/kg
+        sun=dict(azimuth=65.0, elevation=45.5),
+        still=dict(
+            size=(1920, 963),
+            position=(0.0776818342067, -0.27879259066, -0.998326359833),
+            azimuth=44.28, elevation=25.76, fov=100.0,
+            exposure=1.17125651993, haze=0.55,
+        ),
+    ),
+    # The same world as the case above — same seed, same outer scale, same
+    # 51.2 km box — carried two cascade classes less far, so its cells are
+    # 100 m rather than 25 m. That pairing is the point of shipping both:
+    # it is one field at two resolutions rather than two fields.
+    dict(
+        id="desert-coarse",
+        group="steam",
+        title="STEAM high-based convection (coarse)",
+        field="Utah cumulus on a coarser grid",
+        liquid=("demo_desert-convection-coarse.nc", "qc"),
+        ice=("demo_desert-convection-coarse.nc", "qi"),
+        src=STEAM_SRC,
+        dims="xyz",
+        crop=dict(y=(0, 512), x=(0, 512), z="auto"),
+        scale=1e3,
+        sun=dict(azimuth=0.0, elevation=45.5),
+        still=dict(
+            size=(1920, 963),
+            position=(0.917919995217, -0.696861762887, -0.673006416282),
+            azimuth=358.68, elevation=4.16, fov=100.0,
+            exposure=2.98704821995, haze=0.92,
+        ),
+    ),
+    dict(
+        id="congestus",
+        group="steam",
+        title="STEAM marine cumulus congestus",
+        field="Maritime cumulus congestus",
+        warning="Needs a highly capable GPU",
+        liquid=("demo_marine-congestus.nc", "qc"),
+        ice=("demo_marine-congestus.nc", "qi"),
+        src=STEAM_SRC,
+        dims="xyz",
+        crop=dict(y=(0, 2048), x=(0, 2048), z="auto"),
+        scale=1e3,
+        sun=dict(azimuth=100.0, elevation=51.5),
+        still=dict(
+            size=(1920, 963),
+            position=(0.516654156817, -0.285165086182, -0.993548387097),
+            azimuth=249.48, elevation=45.92, fov=100.0,
+            exposure=3.86833683967, haze=1.0,
+        ),
+    ),
+    dict(
+        id="stratified",
+        group="steam",
+        title="STEAM stratified cirrus",
+        field="Thin upper-atmosphere ice clouds",
+        warning="Needs a highly capable GPU",
+        liquid=("demo_stratified.nc", "qc"),
+        ice=("demo_stratified.nc", "qi"),
+        src=STEAM_SRC,
+        dims="xyz",
+        crop=dict(y=(0, 1024), x=(0, 1024), z="auto"),
+        scale=1e3,
+        sun=dict(azimuth=277.0, elevation=4.5),
+        still=dict(
+            size=(1920, 963),
+            position=(-0.488904823109, 0.653836399367, -0.998325965182),
+            azimuth=278.16, elevation=21.8, fov=100.0,
+            exposure=3.55906028557, haze=0.0,
+        ),
+    ),
+    # --- hydrodynamic LES --------------------------------------------------
     dict(
         id="twpice",
         group="hydrodynamics",
         title="SAM TWP-ICE",
         field="Tropical deep convection",
-        # 1024 x 1024 x 206 cells at fp16 is 432 MB of texture, before the
-        # renderer's own buffers, and it is the one case here that will not
-        # fit on a laptop's integrated graphics.
-        warning="Needs a highly capable GPU",
+        # No warning here despite being the largest of the LES set: it is
+        # 432 MB of texture and flies fine in practice. The warning moved to
+        # the STEAM cases, which are the ones that actually hurt — 1.2 to
+        # 4.2 GB (Thomas, 2026-08-15: "TWPICE is not GPU-difficult but all
+        # the steam runs are").
         liquid=("TWPICE_LPT_3D_QC_0000003450.nc", "QC"),
         ice=("TWPICE_LPT_3D_QI_0000003450.nc", "QI"),
         dims="yxz",
@@ -191,6 +305,10 @@ DEMOS = [
 
 # --- loading ---------------------------------------------------------------
 
+def source_dir(spec: dict) -> Path:
+    return spec.get("src", SRC)
+
+
 def _read(path: Path, var: str, dims: str, crop: dict) -> np.ndarray:
     """Read one variable, cropped, standardized to (x, y, z)."""
     ys, xs, zs = crop["y"], crop["x"], crop["z"]
@@ -218,19 +336,80 @@ def _coords(path: Path, crop: dict):
     return x, y, z
 
 
+def _extinction(lwc, z, iwc):
+    """The one extinction the whole toolkit renders — re 10 um / 30 um ice."""
+    return optical_depth.compute_extinction_field(lwc, z, re=10.0, iwc=iwc,
+                                                  re_ice=30.0)
+
+
+def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
+    """The z planes that hold cloud, by the rule witness and the browser use.
+
+    Why this is computed rather than typed. A camera position in soar is
+    normalized to the domain box, and BOTH the browser's ingest and witness
+    trim empty z planes before rendering — so the box a flight is placed in is
+    the occupied band, not the file's z extent. Thomas flies a raw netCDF,
+    copies the reproduction command, and that camera means "relative to the
+    band". If the bake then ships a volume cut anywhere else, the still and
+    the flight are two different scenes and entering flight is a jump cut.
+
+    The band is found from a per-plane maximum accumulated over x-slabs, so
+    this costs one streamed pass and a few GB rather than a second copy of a
+    field that can be tens of gigabytes. The decision itself is handed to
+    crop_empty_z on a 1x1xnz array — the same function, so there is one
+    definition of "occupied" and not a second one that agrees today.
+    """
+    src = source_dir(spec)
+    path = src / spec["liquid"][0]
+    with Dataset(path) as ds:
+        z = np.asarray(ds.variables["z"][:], np.float64)
+    full_z = (0, int(z.size))
+    xs = spec["crop"]["x"]
+    scale = np.float32(spec["scale"])
+    peak = np.zeros(z.size, dtype=np.float64)
+    for i0 in range(xs[0], xs[1], slab):
+        window = dict(spec["crop"], x=(i0, min(i0 + slab, xs[1])), z=full_z)
+        lwc = _read(path, spec["liquid"][1], spec["dims"], window)
+        iwc = (_read(src / spec["ice"][0], spec["ice"][1], spec["dims"], window)
+               if spec["ice"] else None)
+        if scale != 1.0:
+            lwc *= scale
+            if iwc is not None:
+                iwc *= scale
+        sigma = _extinction(lwc, z, iwc)
+        peak = np.maximum(peak, np.nanmax(sigma, axis=(0, 1)))
+        print(f"    scanning for cloud: x {min(i0 + slab, xs[1])}/{xs[1]}",
+              end="\r", flush=True)
+    _, _, (lo, hi) = crop_empty_z(peak.reshape(1, 1, -1), z)
+    print(f"    occupied z band {lo}:{hi + 1} = {z[lo]:.0f}..{z[hi]:.0f} m "
+          f"({hi + 1 - lo} of {z.size} planes, "
+          f"{100 * (1 - (hi + 1 - lo) / z.size):.0f}% vacuum dropped)")
+    return lo, hi + 1
+
+
+def resolved_crop(spec: dict) -> dict:
+    """The spec's crop with an `auto` z resolved to the occupied band."""
+    crop = dict(spec["crop"])
+    if crop.get("z") == "auto":
+        crop["z"] = occupied_z_band(spec)
+    return crop
+
+
 def load_demo(spec: dict) -> CloudField:
-    lwc = _read(SRC / spec["liquid"][0], spec["liquid"][1], spec["dims"], spec["crop"])
+    src = source_dir(spec)
+    crop = resolved_crop(spec)
+    lwc = _read(src / spec["liquid"][0], spec["liquid"][1], spec["dims"], crop)
     iwc = None
     if spec["ice"]:
-        iwc = _read(SRC / spec["ice"][0], spec["ice"][1], spec["dims"], spec["crop"])
+        iwc = _read(src / spec["ice"][0], spec["ice"][1], spec["dims"], crop)
     s = np.float32(spec["scale"])
     if s != 1.0:
         lwc *= s
         if iwc is not None:
             iwc *= s
-    x, y, z = _coords(SRC / spec["liquid"][0], spec["crop"])
+    x, y, z = _coords(src / spec["liquid"][0], crop)
     return CloudField(lwc=lwc, iwc=iwc, x=x, y=y, z=z,
-                      source=str(SRC / spec["liquid"][0]),
+                      source=str(src / spec["liquid"][0]),
                       liquid_var=spec["liquid"][1],
                       ice_var=spec["ice"][1] if spec["ice"] else None)
 
@@ -238,9 +417,8 @@ def load_demo(spec: dict) -> CloudField:
 # --- the shipped volume ----------------------------------------------------
 
 def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
-    sigma = optical_depth.compute_extinction_field(
-        field.lwc, field.z, re=10.0, iwc=field.iwc, re_ice=30.0)
-    sigma = np.ascontiguousarray(sigma, dtype=np.float16)
+    sigma = np.ascontiguousarray(
+        _extinction(field.lwc, field.z, field.iwc), dtype=np.float16)
     nx, ny, nz = sigma.shape
 
     # The bare field: no ghost border, and no faces.bin beside it. The
