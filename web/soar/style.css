@@ -210,16 +210,21 @@ h1 {
   font-weight: 300;
   font-size: clamp(2.8rem, 7vw, 5.5rem);
   line-height: 1;
-  /* NO text-indent, though tracked display type conventionally gets one.
-     The hack exists because letter-spacing historically added its space
-     after the last character too, so a centred line carried a trailing space
-     and the glyphs sat left by half of it. Current engines trim that space
-     instead, and the indent then pushes the glyphs OFF centre by half its
-     own value — measured here at 9.9 px right of centre with indent == the
-     tracking, 5.0 px at half, and 0.00 px at zero. This page had paired them
-     1:1 since it was written. If a target browser ever stops trimming, the
-     symptom is the wordmark sitting left by half the tracking. */
+  /* text-indent MUST equal letter-spacing on centred tracked type, and the
+     1:1 pairing is not a coincidence — it is the correction.
+     letter-spacing adds its space after every character including the last,
+     and that trailing space is inside the line box being centred, so the ink
+     sits left by half of it. Indenting by the full tracking puts the line's
+     start right by the same amount and the ink lands centred:
+         ink offset = (indent - tracking) / 2
+     Measured: at indent 0 the wordmark sits 9.92 px left, exactly half the
+     19.82 px tracking; at indent == tracking it is 0.00.
+     Do not "simplify" this away by measuring a Range over the whole line —
+     that rect INCLUDES the trailing space, so it reports centred when the
+     glyphs are not, which is how this got removed once already. Measure the
+     first and last characters and subtract one tracking step. */
   letter-spacing: 0.30em;
+  text-indent: 0.30em;
   color: var(--ink);
   margin: 0;
   text-shadow: 0 0.05em 0.6em rgba(0, 0, 0, 0.6);
@@ -229,7 +234,8 @@ h1 {
   text-shadow: var(--shadow-text);
   font-family: var(--mono);
   font-size: 0.6875rem;
-  letter-spacing: 0.24em;       /* and no text-indent — see h1 */
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;          /* must equal the tracking — see h1 */
   text-transform: uppercase;
   color: var(--dim);
   margin: 1.2rem 0 0;
