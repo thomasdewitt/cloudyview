@@ -726,6 +726,32 @@ export const MAP_HEIGHT_FRAC = 0.22;
 export const MAP_MAX_WIDTH_FRAC = 0.34;
 export const MAP_MARGIN_FRAC = 0.025;
 export const MAP_OPACITY = 0.74;
-// The same sky-blue -> white ramp basic_render uses, so a glimpse PNG and
-// the corner of the flight view read as the same picture.
-export const MAP_SKY_BLUE = [0x3a / 255, 0x4a / 255, 0xa6 / 255];
+// The same ramp basic_render uses, so a glimpse PNG and the corner of the
+// flight view read as the same picture — and the same one turbulon-analysis
+// plots albedo fields with, so a paper figure does too. Deep ocean blue at
+// clear sky through to white at albedo 1, monotone in lightness: the stops
+// are what make it read as cloud over water instead of as a two-colour map,
+// which is why this is a ramp and not the single blue it used to be
+// (0x3a4aa6, lerped straight to white).
+//
+// Kept byte-for-byte with cloudyview/basic_render.py's `cloud_colors` by
+// tests/test_map_ramp_parity.py, because a comment saying "the same ramp" is
+// exactly what stops being true.
+export const MAP_CLOUD_RAMP = [
+  [0.00, [0x06 / 255, 0x1a / 255, 0x3c / 255]],
+  [0.18, [0x12 / 255, 0x3f / 255, 0x74 / 255]],
+  [0.38, [0x2f / 255, 0x74 / 255, 0xac / 255]],
+  [0.60, [0x79 / 255, 0xb0 / 255, 0xd6 / 255]],
+  [0.80, [0xc6 / 255, 0xdd / 255, 0xee / 255]],
+  [1.00, [1.0, 1.0, 1.0]],
+];
+// Clear sky, i.e. the bottom of that ramp. The HUD draws its halos and rims
+// against it.
+export const MAP_SKY_BLUE = MAP_CLOUD_RAMP[0][1];
+
+// The overlay drawn ON the map — camera dot, field-of-view rays, nest
+// footprint. One warm colour against a blue-to-white field, and the same
+// value as the chrome's --hot and the landing page's --amber, so the marker
+// belongs to the app rather than to the picture. Replaces pure red, which
+// read as an error state and clashed with the cloud ramp at both ends.
+export const MAP_ACCENT = [0xe8 / 255, 0x83 / 255, 0x4a / 255];

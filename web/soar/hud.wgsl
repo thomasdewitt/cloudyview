@@ -24,7 +24,15 @@ struct HudUniforms {
 @group(0) @binding(1) var map_tex: texture_2d<f32>;
 @group(0) @binding(2) var map_samp: sampler;
 
-const RED: vec3<f32> = vec3<f32>(1.0, 0.0, 0.0);
+// The overlay colour: the app's warm accent, matching soar's --hot, the
+// landing page's --amber and basic_render's ACCENT, so the camera marker
+// looks the same in a glimpse PNG and in the corner of the flight view.
+// It replaces pure red, which read as an error state and fought the cloud
+// ramp at both ends.
+//
+// Duplicated from MAP_ACCENT in constants.js because a shader constant
+// cannot import; tests/test_map_ramp_parity.py fails if the two drift.
+const ACCENT: vec3<f32> = vec3<f32>(232.0 / 255.0, 131.0 / 255.0, 74.0 / 255.0);
 const WHITE: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 const INK: vec3<f32> = vec3<f32>(0.02, 0.025, 0.035);
 
@@ -161,7 +169,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let right = uv_to_screen(u.rays.zw);
 
         if (inside_triangle(p, cam, left, right)) {
-            out = over(out, vec4<f32>(RED, 0.05));
+            out = over(out, vec4<f32>(ACCENT, 0.05));
         }
 
         let ray_d = min(
@@ -174,7 +182,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         }
         let ray = stroke_coverage(ray_d, line_hw);
         if (ray > 0.0) {
-            out = over(out, vec4<f32>(RED, 0.50 * ray));
+            // Opaque. The coverage factor is antialiasing, not translucency:
+            // it is 1 inside the stroke and falls off over the last pixel, so
+            // multiplying by it keeps the edge smooth while the body of the
+            // line sits at full strength over the map.
+            out = over(out, vec4<f32>(ACCENT, ray));
         }
     } else {
         let ring_d = abs(length(p - cam) - u.camera.w);
@@ -184,22 +196,31 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         }
         let ring = stroke_coverage(ring_d, line_hw);
         if (ring > 0.0) {
-            out = over(out, vec4<f32>(RED, 0.50 * ring));
+            out = over(out, vec4<f32>(ACCENT, ring));
         }
     }
 
+    // The dot, with a rim and a halo that keep it findable at both ends of the
+    // albedo ramp: white for the dark-ocean end, ink for the bright-cloud end.
+    //
+    // Both are sized FROM the dot rather than at fixed pixel offsets. They
+    // used to be +1.2 and +2.0 px, which was fine at the old radius and wrong
+    // the moment it halved — at a 2.5 px dot a fixed +1.2 rim is half again as
+    // wide as the mark it is meant to trim, so the marker would have read as a
+    // white blob with an orange centre.
     let marker_d = length(p - cam);
-    let outer = disk_coverage(marker_d, u.frame.w + 2.0);
+    let rim_w = max(0.7, u.frame.w * 0.45);
+    let outer = disk_coverage(marker_d, u.frame.w + rim_w * 2.0);
     if (outer > 0.0) {
         out = over(out, vec4<f32>(INK, 0.22 * outer));
     }
-    let rim = disk_coverage(marker_d, u.frame.w + 1.2);
+    let rim = disk_coverage(marker_d, u.frame.w + rim_w);
     if (rim > 0.0) {
         out = over(out, vec4<f32>(WHITE, 0.55 * rim));
     }
     let dot = disk_coverage(marker_d, u.frame.w);
     if (dot > 0.0) {
-        out = over(out, vec4<f32>(RED, 0.80 * dot));
+        out = over(out, vec4<f32>(ACCENT, dot));
     }
 
     let edge_d = min(

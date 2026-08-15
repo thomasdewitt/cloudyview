@@ -19,7 +19,8 @@
 
 import {
   MAP_HEIGHT_FRAC, MAP_MAX_WIDTH_FRAC, MAP_MARGIN_FRAC, MAP_OPACITY,
-  MAP_SKY_BLUE,
+  MAP_CLOUD_RAMP,
+  MAP_ACCENT,
 } from "./constants.js";
 import { cameraBasis } from "./camera.js";
 import { mod360 } from "./spectral.js";
@@ -33,18 +34,46 @@ export function azimuthMetToInternalDeg(azimuthDeg) {
   return mod360(90.0 - mod360(azimuthDeg));
 }
 
-/** RGBA8 sky-blue -> white, the ramp basic_render uses for glimpse output. */
+/**
+ * RGBA8 over MAP_CLOUD_RAMP — the ramp basic_render uses for glimpse output.
+ *
+ * Piecewise-linear between the ramp's stops, which is what matplotlib's
+ * LinearSegmentedColormap does with the same list, so the two agree to a
+ * rounding step. It used to be a single lerp from one blue to white; the
+ * intermediate stops are the whole reason the field reads as cloud over
+ * water, so they cannot be dropped for a cheaper interpolation here.
+ */
 export function colorizeAlbedo(albedo) {
   const rgba = new Uint8Array(albedo.length * 4);
-  const [br, bg, bb] = MAP_SKY_BLUE;
   for (let i = 0; i < albedo.length; i++) {
-    const a = clamp01(albedo[i]);
-    rgba[i * 4 + 0] = Math.round((br + (1.0 - br) * a) * 255.0);
-    rgba[i * 4 + 1] = Math.round((bg + (1.0 - bg) * a) * 255.0);
-    rgba[i * 4 + 2] = Math.round((bb + (1.0 - bb) * a) * 255.0);
+    const [r, g, b] = sampleCloudRamp(clamp01(albedo[i]));
+    rgba[i * 4 + 0] = Math.round(r * 255.0);
+    rgba[i * 4 + 1] = Math.round(g * 255.0);
+    rgba[i * 4 + 2] = Math.round(b * 255.0);
     rgba[i * 4 + 3] = 255;
   }
   return rgba;
+}
+
+/** The ramp at `t` in [0, 1], linear between the bracketing stops. */
+export function sampleCloudRamp(t) {
+  const stops = MAP_CLOUD_RAMP;
+  if (t <= stops[0][0]) return stops[0][1];
+  for (let s = 1; s < stops.length; s++) {
+    const [x1, c1] = stops[s];
+    if (t <= x1) {
+      const [x0, c0] = stops[s - 1];
+      // Stops are distinct by construction; guard anyway so a future edit
+      // that duplicates one divides by zero loudly rather than silently.
+      const span = x1 - x0;
+      if (span <= 0) throw new Error("MAP_CLOUD_RAMP has a repeated stop");
+      const f = (t - x0) / span;
+      return [c0[0] + (c1[0] - c0[0]) * f,
+              c0[1] + (c1[1] - c0[1]) * f,
+              c0[2] + (c1[2] - c0[2]) * f];
+    }
+  }
+  return stops[stops.length - 1][1];
 }
 
 /** Project a 3D direction to unit top-down XY, falling back to an azimuth. */
@@ -310,10 +339,15 @@ export class Minimap {
 
     const minSide = Math.min(rect[2], rect[3]);
     // Deliberately understated: the marker is a reference, not a cursor.
-    const markerRadius = Math.max(2.5, minSide * 0.020);
-    const lineWidth = Math.max(1.0, minSide * 0.0065);
+    // Halved on 2026-08-14 (both the dot and the rays), which is as small as
+    // the antialiasing lets them go and still be found: stroke_coverage fades
+    // over one pixel past the half-width, so a 0.5 px half-width still paints
+    // a ~2 px line. Going smaller stops shrinking the mark and just makes it
+    // fainter. The map's own border is not part of that and is unchanged.
+    const markerRadius = Math.max(1.25, minSide * 0.010);
+    const lineWidth = Math.max(0.5, minSide * 0.00325);
     const borderWidth = Math.max(1.0, minSide * 0.008);
-    const haloWidth = Math.max(0.85, lineWidth * 0.75);
+    const haloWidth = Math.max(0.6, lineWidth * 0.75);
 
     let mode = 0.0, circleRadius = 0.0;
     let leftU = 0.0, leftV = 0.0, rightU = 0.0, rightV = 0.0;

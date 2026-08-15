@@ -84,12 +84,37 @@ def save_image(
     PILImage.fromarray(quantize_uint8(image, dither=dither, seed=seed)).save(
         str(output_path))
 
-# Cloud color scheme for optical depth visualization
-sky_blue = '#3A4AA6'
+# Cloud color scheme for optical depth visualization.
+#
+# This is turbulon-analysis's albedo-field ramp
+# (fractal-analysis/scripts/plot_albedo_fields.py), adopted here so a glimpse
+# and a paper figure of the same field are the same picture. It replaces a
+# two-stop interpolation from #3A4AA6, a violet-leaning blue that read as a
+# colour scheme rather than as water.
+#
+# The stops matter as much as the endpoints: the ramp is deliberately monotone
+# in lightness, so the field reads as cloud over ocean rather than as a
+# two-colour map. Interpolating straight from the deep blue to white — which
+# is what changing only the clear-sky colour would give — passes through a
+# washed mid-blue that neither end asked for.
+sky_blue = '#061a3c'          # clear sky, i.e. deep ocean seen from above
 cloud_colors = matplotlib.colors.LinearSegmentedColormap.from_list(
     'cloud_colors',
-    [(0, sky_blue), (1, '#FFFFFF')]
+    [
+        (0.00, sky_blue),
+        (0.18, '#123f74'),
+        (0.38, '#2f74ac'),
+        (0.60, '#79b0d6'),
+        (0.80, '#c6ddee'),
+        (1.00, '#ffffff'),
+    ]
 )
+
+# The one warm thing in the frame: the camera marker and its field of view.
+# Shared with the app's chrome — soar's --hot and the landing page's --amber
+# are this same value — so the overlay reads as annotation rather than as
+# part of the field, whichever end of the cloud ramp it happens to cross.
+ACCENT = '#e8834a'
 
 
 def plot_optical_depth(
@@ -189,14 +214,22 @@ def plot_optical_depth(
         cam_x, cam_y = camera_overlay['camera_xy']
         fov_endpoints = camera_overlay.get('fov_endpoints', [])
         circle_radius = camera_overlay.get('circle_radius')
-        linewidth = max(1.5, max(nx, ny) / 900)
+        # Constants in points, not functions of the grid. The image is always
+        # `long_side_px` on its long side whatever the field's shape, so the
+        # old `max(nx, ny) / 900` grew the annotation with the number of cells
+        # while the picture it sits on stayed the same size — a 4096-cell
+        # field got a marker twice the weight of a 1024-cell one for no
+        # reason the viewer could see. Roughly a 2 px line and an 17 px dot at
+        # 2048 px: enough to find, thin enough not to cover the structure it
+        # is pointing at, which the old 3 px lines did.
+        linewidth = 1.0
 
         if circle_radius is not None:
             circle = plt.Circle(
                 (cam_x, cam_y),
                 float(circle_radius),
                 fill=False,
-                edgecolor='red',
+                edgecolor=ACCENT,
                 linewidth=linewidth,
                 alpha=0.95,
                 clip_on=True,
@@ -204,13 +237,13 @@ def plot_optical_depth(
             )
             ax.add_patch(circle)
         else:
-            marker_size = max(24.0, max(nx, ny) / 20)
+            marker_size = 70.0
 
             for end_x, end_y in fov_endpoints:
                 ax.plot(
                     [cam_x, end_x],
                     [cam_y, end_y],
-                    color='red',
+                    color=ACCENT,
                     linewidth=linewidth,
                     alpha=0.95,
                     solid_capstyle='round',
@@ -218,13 +251,18 @@ def plot_optical_depth(
                     zorder=4,
                 )
 
+            # Ringed in the clear-sky blue rather than in white. The marker
+            # sits wherever the camera happens to be, which is as often on a
+            # white cloud top as on open water, and a white ring vanishes on
+            # the first of those. The dark end of the ramp holds against both
+            # and belongs to the picture.
             ax.scatter(
                 [cam_x],
                 [cam_y],
                 s=marker_size,
-                c='red',
-                edgecolors='white',
-                linewidths=max(1.0, linewidth * 0.5),
+                c=ACCENT,
+                edgecolors=sky_blue,
+                linewidths=max(0.6, linewidth * 0.5),
                 clip_on=True,
                 zorder=5,
             )
