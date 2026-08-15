@@ -1,7 +1,21 @@
 # Soar — bug log
 
-Running list of bugs found while flying the deployed build. Not being fixed
-right now; this file is the queue for a later session. Newest at the bottom.
+Running list of bugs found while flying the deployed build. Newest at the
+bottom.
+
+**It is no longer a queue of open work** — it started as one, and the 08-11
+bug-fix and optimization sessions emptied most of it. Reviewed entry by entry
+against the tree on **2026-08-14**; what is genuinely still open is:
+
+| | | |
+|---|---|---|
+| **14 / 15 / 17 / 18** | Firefox crashes | still recurring, and the mitigation 17b names is **not implemented** — nothing but `capture.js` listens for `visibilitychange`. The one live thread here. |
+| **13**, item 3 | editable camera/view boxes in the terminal-render panel | its own panel-sized piece of work; the rest of 13 landed |
+| **11**, coda | the units panel's Back returns to the file picker, not to the group question | needs the ask sequence re-enterable; deliberately parked |
+
+Everything else is FIXED, APPLIED, or NOT-A-SOAR-BUG. Entries are kept after
+they close: several of them (4, 8, 19) are worth more as records of how the
+diagnosis went than as bug reports.
 
 **Bugs 1–6 carry line numbers against commit `e150a47` ("soar ships as one
 folder"), which is exactly what was deployed when they were found.** Line
@@ -704,8 +718,28 @@ the name ends up in menus, metadata and reproduction commands.
 
 ## 10. A "max" tier: multiple spp per frame, gated on measured headroom
 
-**Status:** open — feature design, decided with Thomas (2026-08-11), for
-after the optimization pass lands
+**Status:** DONE 2026-08-11..14 (`a0d9d32`, the quality-of-life pass). `max`
+is a `QUALITY_PRESETS` tier at `sppPerFrame: 8`, high's step factors, and
+`Renderer.drawFrame` loops the march/accumulate pair over it
+(`const samples = accumulate ? Math.max(1, this.sppPerFrame) : 1`).
+**Two deliberate departures from the sketch below, both stricter than it
+asked for**, recorded because the sketch reads as the spec and is no longer:
+
+1. *Not a probe rung at all.* The sketch made max "simply one more rung after
+   high". `QUALITY_TIERS_CHEAPEST_FIRST` is `["minimal", "low", "medium",
+   "high"]`, so the auto-tier probe stops at high and can never escalate into
+   max — it is reachable only by picking it in the quality panel, where it is
+   labelled **"overnight"**. Stronger than "probe-gated, never a default":
+   never automatic under any measurement.
+2. *N separate submissions, not one long pass* — and that is the safety
+   property rather than an implementation detail. Each command buffer stays
+   exactly one ordinary frame's worth of work, so eight samples cost eight
+   frames of GPU time and never one pass eight times longer. Metal's watchdog
+   kills a pass by duration, so the loop is what lets a tier this dear exist
+   without risking the device. It also lets the uniform buffer be rewritten
+   between samples, which is what decorrelates their jitter — the frame index
+   advances by `SPP_FRAME_INDEX_STRIDE` per sample.
+
 **Found:** 2026-08-11, during the optimization pass
 
 Every frame today is exactly one march pass (1 spp); quality accrues only by
@@ -756,6 +790,15 @@ choose a different file". NOT done: the units panel's Back returns to
 the file picker, not to the group question — the honest answer needs the
 ask sequence to be re-enterable rather than a straight-line await chain,
 and was deliberately left for a session that wants to restructure ingest.
+Still true 2026-08-14. **Related, and fixed since** (`c34268d`): these same
+question panels later broke opening a local file outright — the Quality
+panel's live preview is synced from `UI.open`/`UI.close`, and the group and
+units questions are menu panels raised inside the window where
+`_releaseField` has nulled the renderer, so asking which group you meant
+threw `can't access property setHoldMode`. Demos were unaffected because a
+demo asks nothing. Worth knowing here because this entry is where one looks
+for "the questions a file asks", and because it is the second bug caused by
+that window rather than by the questions themselves.
 **Found:** 2026-08-11, deployed web build
 
 **Repro:** menu → "Open a file…" → pick a `.nc` → the group (or units)
@@ -903,7 +946,9 @@ capture is stills-only with a one-line pointer at R; frame rate, passes
 per frame and the size preset live in the track panel that pops when a
 recording stops. Same session also docked all view-facing panels
 (quality, sun, capture, track, terminal) to the bottom edge with the
-quality sliders in two columns (`5d50155`).
+quality sliders in two columns (`5d50155`). Item 3 re-checked 2026-08-14
+and still open: `_panel_terminal` prints the command and offers Copy, with
+no `input` of any kind.
 **Raised:** 2026-08-11
 
 Thomas's words, kept close to verbatim because several of these are taste
@@ -961,11 +1006,12 @@ panel that landed in this list. Ask before designing around it.
 
 ## 14. Firefox crashes on teardown: "Queue[Id(2,4)] does not exist"
 
-**Status:** open — STALE ENTRY, read 17/17a/17b/18 first. Five crashes as
-of 2026-08-11 evening, two stack variants, and 17b retires the teardown-
-ordering hypothesis this entry is built on (three of the crashes had no
-teardown running at all). Kept for the fingerprints and the mitigation
-list; the current reading and the decisive experiment live in 17b.
+**Status:** open, and **still recurring as of 2026-08-14 — see 18a, which is
+now the live end of this thread.** STALE ENTRY otherwise: read 17/17a/17b/18a
+first. Five crashes as of 2026-08-11 evening, two stack variants, and 17b
+retires the teardown-ordering hypothesis this entry is built on (three of the
+crashes had no teardown running at all). Kept for the fingerprints and the
+mitigation list; the current reading and the decisive experiment live in 17b.
 **Found:** 2026-08-11, https://thomasddewitt.com/thought-cloud/soar/
 
 **Repro (once):** do a render, go back to the start page, then switch to
@@ -1079,7 +1125,9 @@ fingerprints.
 
 ## 15. Second crash: tabbing away while the volume is loading
 
-**Status:** open — same family as bug 14
+**Status:** open — same family as bug 14; still recurring 2026-08-14 (18a).
+Item 1 of "what to try" below is the one that survived contact with the
+evidence, and it is still not implemented.
 **Found:** 2026-08-11, deployed web build
 
 **Repro (once):** start loading a field, switch to another application while
@@ -1203,7 +1251,8 @@ change, not a fix.
 
 ## 17. Third crash — the three reports compared, and what it changes
 
-**Status:** open. Supersedes part of bug 14's hypothesis.
+**Status:** open. Supersedes part of bug 14's hypothesis; 17b is **confirmed
+independently** by Thomas on 2026-08-14 (18a).
 **Found:** 2026-08-11
 
 Third `Queue[Id] does not exist` crash. Comparing all three is where the new
@@ -1333,8 +1382,10 @@ and only rebuilds GPU resources is the thing to aim for.
 
 ## 18. Fifth crash — clicking the DYCOMS demo, and it contests 17b
 
-**Status:** open. Crash report not captured. **Contests the "only while
-backgrounded" reading in 17b — read them together.**
+**Status:** RESOLVED as a duplicate of bug 15, 2026-08-14 — reading (b)
+below. It contested 17b for three days; 18a settles it the other way, and
+17b stands. Crash report was never captured and is no longer worth waiting
+for.
 **Found:** 2026-08-11
 
 **Repro:** clicked the DYCOMS demo on the landing page; crash immediately
@@ -1374,6 +1425,54 @@ merely the one clicked most often.
 is the report most worth having of the five, because it is the only one with
 a precise action attached, and a third stack variant here would be the first
 genuinely new signal since crash A.
+
+### 18a. 2026-08-14 — asked directly, and the trigger condition is now stated
+
+Asked, three days on, whether the crashes had recurred since the 08-11
+mitigations landed (`35453d3`: render targets pooled per rung size, the
+probe-clock verdict cached per session, `_releaseField`'s drain guarded —
+which together stopped ordinary flight performing any queue waits at all).
+Thomas:
+
+> "still crashing, possibly less pften? Only when i am in another app."
+
+**That last sentence is the finding, and it did not need a crash report.**
+Every reading in 14 through 18 was reconstructed backwards from stacks and
+queue ids; this is the trigger condition stated forwards, from the outside.
+
+**It settles 18 against itself.** 18 offered (a) the window was in the
+foreground, so 17b is too narrow, or (b) he clicked and tabbed away while it
+loaded, leaving 17b intact. "Only when I am in another app" is (b). The
+DYCOMS click is a duplicate of bug 15, 17b's occlusion framing stands
+unamended, and the question 18 said had to be answered before choosing a fix
+is now answered. **The fix to aim at is 17b's: release the device when the
+page is hidden.**
+
+**Which is still not implemented.** `grep -rn visibilitychange web/soar/*.js`
+finds exactly one listener, in `capture.js`, and it is waiting for a save to
+finish. Nothing unconfigures the canvas or drops the device on hide. The
+crashes recur because nothing was ever done about the mechanism — the 08-11
+work narrowed the window that teardown ordering opens, which 17b had already
+shown was the wrong window.
+
+**"Possibly less often" is an impression, not a count**, and should not be
+promoted into a measurement of the pooling work. It is equally consistent
+with less flying since the deploy. Do not treat it as evidence either way.
+
+**The decisive experiment is unchanged and is now cheaper**, because the
+trigger no longer has to be guessed at: open any unrelated WebGPU page — a
+browser sample — background the window, and go do something else for half an
+hour. If Firefox dies, the whole thing is upstream with four crash ids and
+two stack variants, and soar's remaining job is only to stop holding the
+object that dies. That experiment has been outstanding since 2026-08-11 and
+is the cheapest thing in this file.
+
+**Caveat when the fix is written** (from 17b, still binding): re-uploading a
+multi-gigabyte volume on un-hide is not acceptable. A device drop that costs
+a reload is worse than the crash. Keep the field in host memory and rebuild
+only GPU resources — and note this composes with the parked-loop work from
+bug 3, since a hidden tab is the limiting case of a view that is not
+changing.
 
 ---
 
