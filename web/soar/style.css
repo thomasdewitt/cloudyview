@@ -112,35 +112,33 @@ html, body {
 }
 /* A still rather than a loop. A 60 s 1440p60 video ran 30-110 MB per demo —
    for the FIF cascade, fifteen times the weight of the field it advertises —
-   against 60-210 kB for a 4K still. The drift below buys back the sense of
-   movement for no bytes at all. */
+   against 60-210 kB for a 4K still.
+
+   And a still that actually holds still: this carried a 110 s scale-and-pan
+   drift to buy back a sense of movement, which is exactly what a converged
+   render of a cloud field should not do (Thomas, 2026-08-15). The only motion
+   left on the page is the cross-fade between one case and the next. */
 #reel img {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   object-fit: cover;
   opacity: 0;
   transition: opacity 0.9s ease;
-  animation: drift 110s ease-in-out infinite alternate;
-  will-change: transform;
-  backface-visibility: hidden;
 }
 #reel img.on { opacity: 1; }
-
-@keyframes drift {
-  from { transform: scale(1.06) translate3d(-0.35%, 0.15%, 0); }
-  to   { transform: scale(1.10) translate3d(0.35%, -0.2%, 0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  #reel img { animation: none; transform: scale(1.04); }
-}
 #reel::after {
   content: '';
   position: absolute; inset: 0;
+  /* Lighter than it was on every stop. The scrim exists to keep small type
+     legible, but the type that most needed it (the wordmark, the group heads)
+     now carries its own halo — so the picture can come forward and the
+     vignette can stop announcing itself. Roughly two thirds of the old
+     strength at the corners and a little over half at the edges. */
   background:
     radial-gradient(120% 90% at 50% 38%, transparent 26%,
-                    rgba(5, 8, 12, 0.55) 70%, rgba(5, 8, 12, 0.93) 100%),
-    linear-gradient(to bottom, rgba(5, 8, 12, 0.72) 0%, transparent 20%,
-                    transparent 46%, rgba(5, 8, 12, 0.92) 92%);
+                    rgba(5, 8, 12, 0.35) 70%, rgba(5, 8, 12, 0.62) 100%),
+    linear-gradient(to bottom, rgba(5, 8, 12, 0.42) 0%, transparent 20%,
+                    transparent 46%, rgba(5, 8, 12, 0.60) 92%);
   transition: opacity 0.6s ease;
 }
 /* Lighter, not heavier: the chrome has faded to 0.2, so the scrim no
@@ -234,11 +232,26 @@ h1 {
   text-indent: 0.30em;
   color: var(--ink);
   margin: 0;
-  text-shadow: 0 0.05em 0.6em rgba(0, 0, 0, 0.6);
+  /* Near-white type at weight 300 over a sunlit cloud top is the worst case
+     on this page — thin strokes, and a backdrop that can be brighter than the
+     ink. The old single soft glow was lift, not contrast, and the wordmark
+     disappeared into a bright reel frame.
+     Three layers, all in em so they scale with the clamp: a hairline contact
+     shadow, a tight halo hugging the strokes, and the soft lift that was here
+     before at half strength. Proportionally this is the same treatment
+     .rail-head gets at 11px — nothing wider than 0.18em, so the shadow only
+     ever appears where a letter is standing on it rather than pooling in the
+     tracking. */
+  text-shadow:
+    0 0.012em 0.02em rgba(3, 8, 14, 0.95),
+    0 0 0.05em rgba(3, 8, 14, 0.85),
+    0 0.03em 0.18em rgba(3, 8, 14, 0.5);
   animation: rise 1.5s 0.15s cubic-bezier(.2, .7, .2, 1) both;
 }
 .tag {
-  text-shadow: var(--shadow-text);
+  /* --shadow-text plus a tight halo of its own: it sits directly under the
+     wordmark, so it meets the same bright cloud. */
+  text-shadow: var(--shadow-text), 0 0 0.35em rgba(3, 8, 14, 0.9);
   font-family: var(--mono);
   font-size: 0.6875rem;
   letter-spacing: 0.24em;
@@ -257,12 +270,20 @@ h1 {
    to see the domain, and at 0.2 the chrome is still a page with a picture
    behind it rather than the picture. */
 body.previewing .strip,
-body.previewing .hero,
 body.previewing .rail-head,
 body.previewing .readout,
 body.previewing .soon,
 body.previewing .demo { opacity: 0.08; }
 body.previewing .demo.live { opacity: 1; }
+/* The hero goes to nothing rather than to 0.08. It is the one piece of chrome
+   sitting in the middle of the picture, and at 0.08 a 5.5rem wordmark is
+   still a grey shape across the sky you are trying to look at. Everything
+   else is small and at the edges, so a trace of it reads as chrome resting
+   rather than as something in the way.
+   Deliberately still clickable: the fade back takes 350 ms of grace plus
+   0.45 s, and pointer-events: none here would swallow the click of someone
+   already moving from a card to the button. */
+body.previewing .hero { opacity: 0; }
 
 /* --- primary: bring your own --- */
 
@@ -447,11 +468,23 @@ body.previewing .demo.live { opacity: 1; }
   font-size: 0.78125rem;
   letter-spacing: 0.02em;
   color: var(--ink-bright);
+  /* A flex item will not shrink below its content by default, so a long name
+     pushed the resolution into wrapping instead of wrapping itself. The name
+     is the thing with room to take a second line. */
+  min-width: 0;
 }
 /* The horizontal grid spacing, in the corner the download size used to have.
    A file size tells you how long you will wait; the resolution tells you what
-   you are about to fly through, and only one of those is worth a corner. */
-.demo .res { font-family: var(--mono); font-size: 0.65625rem; color: var(--ink); }
+   you are about to fly through, and only one of those is worth a corner.
+   Never broken across lines: "100" over "m" is not a number, and this is the
+   one field on the card whose whole job is to be compared down the column. */
+.demo .res {
+  font-family: var(--mono);
+  font-size: 0.65625rem;
+  color: var(--ink);
+  flex: none;
+  white-space: nowrap;
+}
 .demo .field {
   display: block;
   font-size: 0.71875rem;
