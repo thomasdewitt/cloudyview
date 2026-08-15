@@ -98,8 +98,8 @@ async function probeGPU() {
 
 function fieldSizeSentence(limits) {
   const cap = limits.maxTextureDimension3D;
-  // The volume is ghost-padded by one texel per side before upload.
-  const cells = cap - 2;
+  // One texel per cell, so the limit IS the cell count.
+  const cells = cap;
   const voxels = (cells / 1e3) ** 3;
   return `Fields up to <b>${cells}&thinsp;&times;&thinsp;${cells}` +
          `&thinsp;&times;&thinsp;${cells}</b> cells ` +

@@ -2,12 +2,12 @@
 
 Two products per demo, both written to web/soar/demos/<id>/:
 
-  volume.bin.gz + faces.bin + map.bin + meta.json
-      What the viewer uploads. Identical in layout to what
-      export_web_assets.py writes for the single demo, with the volume
-      gzipped — the texture is r16float either way, so the bytes on the wire
-      are exactly the bytes that reach the GPU, and deflate is HDF5/browser
-      builtin territory rather than a bespoke codec.
+  volume.bin.gz + map.bin + meta.json
+      What the viewer uploads: the (nx, ny, nz) field with no border of
+      any kind, one texel per cell, gzipped — the texture is r16float
+      either way, so the bytes on the wire are exactly the bytes that reach
+      the GPU, and deflate is HDF5/browser builtin territory rather than a
+      bespoke codec.
 
   still.webp
       One converged ground-level frame for the landing page, rendered with
@@ -43,7 +43,7 @@ from cloudyview.soar_host import (
     DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_TONE_MAP_GAMMA,
     DEFAULT_TONE_MAP_WHITE_POINT,
 )
-from export_web_assets import _ghost_face_arrays, _volume_aabb
+from export_web_assets import _volume_aabb
 
 # The tone map the app flies with, imported rather than restated: a still that
 # is meant to be the frame you land on cannot hold a private copy of the look,
@@ -234,29 +234,26 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
     sigma = np.ascontiguousarray(sigma, dtype=np.float16)
     nx, ny, nz = sigma.shape
 
-    # Zero ghost border; the browser writes the periodic faces itself so that
-    # toggling periodic does not need another download.
-    padded = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float16)
-    padded[1:-1, 1:-1, 1:-1] = sigma
-    raw = padded.tobytes()
-    del padded
+    # The bare field: no ghost border, and no faces.bin beside it. The
+    # browser tapers and wraps in the shader, so toggling periodic still
+    # needs no second download and a 2048-cell axis still fits.
+    raw = sigma.tobytes()
     with gzip.open(out / "volume.bin.gz", "wb", compresslevel=6) as fh:
         fh.write(raw)
     gz_bytes = (out / "volume.bin.gz").stat().st_size
     print(f"    volume.bin.gz {gz_bytes/1e6:7.1f} MB "
           f"(from {len(raw)/1e6:.1f} MB, {len(raw)/gz_bytes:.1f}x)")
-
-    faces = _ghost_face_arrays(sigma)
-    blob = b"".join(np.ascontiguousarray(faces[n], dtype=np.float16).tobytes()
-                    for n in ("x_lo", "x_hi", "y_lo", "y_hi"))
-    (out / "faces.bin").write_bytes(blob)
+    stale = out / "faces.bin"
+    if stale.exists():
+        stale.unlink()
+        print("    removed faces.bin (the wrap is a sampler mode now)")
 
     albedo = np.ascontiguousarray(glimpse(field), dtype=np.float32)
     (out / "map.bin").write_bytes(albedo.tobytes())
 
     bmin, bmax = _volume_aabb(field)
     return {
-        "schema": "cloudyview.web.demo.v4",
+        "schema": "cloudyview.web.demo.v5",
         "id": spec["id"],
         "title": spec["title"],
         "field": spec["field"],
@@ -265,7 +262,6 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
         "periodic": bool(spec.get("periodic", True)),
         "volume": {
             "shape_xyz": [int(nx), int(ny), int(nz)],
-            "padded_dims_xyz": [nx + 2, ny + 2, nz + 2],
             "format": "r16float",
             "compression": "gzip",
             "file": "volume.bin.gz",
@@ -275,8 +271,6 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
             "bmax": [float(v) for v in bmax],
         },
         "map": {"shape_yx": [int(albedo.shape[0]), int(albedo.shape[1])]},
-        "faces": {"order": ["x_lo", "x_hi", "y_lo", "y_hi"],
-                  "x_shape": [ny + 2, nz + 2], "y_shape": [nx + 2, nz + 2]},
         "sun": spec["sun"],
     }
 
@@ -499,14 +493,21 @@ def main() -> None:
         meta_path = out / "meta.json"
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
         if not args.skip_volume:
+            previous_still = meta.get("still")
             meta = bake_volume(spec, field, out)
+            # bake_volume writes the meta from scratch, which drops the still
+            # block. still.webp is on disk either way, and the landing page
+            # opens flight on the camera that block names, so carry it over
+            # rather than silently shipping a demo that starts nowhere.
+            if args.skip_still and previous_still is not None:
+                meta["still"] = previous_still
         else:
             # --skip-volume keeps the baked arrays, but everything in the meta
             # that is simply a copy of the spec has to follow the spec anyway
             # — otherwise editing the sun or the description here changes the
             # picture and leaves the file still describing the old one, which
             # is a worse failure than a slow re-bake because nothing reports
-            # it. Only volume/map/faces are genuinely derived from the arrays.
+            # it. Only volume/map are genuinely derived from the arrays.
             for key in ("title", "field", "description"):
                 meta[key] = spec[key]
             meta["sun"] = dict(spec["sun"])

@@ -204,21 +204,6 @@ def crop_empty_z(sigma: np.ndarray, z: np.ndarray):
     return sigma[:, :, lo:hi + 1], z[lo:hi + 1], (lo, hi)
 
 
-def _padded(sigma: np.ndarray) -> np.ndarray:
-    """Ghost-pad by one voxel per side; original voxel i lands at i+1.
-
-    The border stays zero so hardware trilinear filtering supplies a linear
-    taper out of the field instead of smearing the edge voxel outward. In a
-    periodic domain the lateral ring is rewritten from the opposite faces
-    instead — SoarRenderer.upload_volume does that, so a caller never has to
-    know which kind of border this is.
-    """
-    nx, ny, nz = sigma.shape
-    out = np.zeros((nx + 2, ny + 2, nz + 2), dtype=np.float16)
-    out[1:-1, 1:-1, 1:-1] = sigma
-    return out
-
-
 def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
                   tone_mapped: bool) -> SoarRenderer:
     """Get or build a session for these levels."""
@@ -230,9 +215,11 @@ def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
         return _session
     renderer = SoarRenderer(periodic=periodic, nested=nested,
                             tone_map=tone_mapped)
-    renderer.upload_volume(_padded(levels[-1].sigma))
+    # The bare field, both levels. What the edges do — taper into zero, or
+    # wrap — is the shader's job now, not a border baked into the upload.
+    renderer.upload_volume(levels[-1].sigma)
     if nested:
-        renderer.upload_nest(_padded(levels[0].sigma))
+        renderer.upload_nest(levels[0].sigma)
     _session, _session_key = renderer, key
     return renderer
 

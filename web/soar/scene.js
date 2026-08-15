@@ -3,11 +3,13 @@
 //
 // The volume's texture layout is the one piece here worth stating plainly.
 // A C-order (nx, ny, nz) array already has z varying fastest, so it maps onto
-// a 3D texture of width nz+2, height ny+2, depth nx+2 with no reshuffling at
-// all; raymarch.wgsl swizzles its sample coordinates to match. The +2 is a
-// ghost ring — original voxel i becomes texel i+1 — so hardware trilinear
-// filtering supplies witness's linear taper into the zero border instead of
-// clamping the edge voxel outward.
+// a 3D texture of width nz, height ny, depth nx with no reshuffling at all;
+// raymarch.wgsl swizzles its sample coordinates to match. Nothing is padded:
+// voxel i is texel i. The boundary behaviour the ghost ring used to buy —
+// witness's linear taper into zero, and the periodic wrap — is a sampler
+// address mode plus an analytic window in the shader (sample_level), which
+// is exact and does not cost a 2048-cell axis the two texels that put it over
+// a browser's 3D texture limit.
 
 "use strict";
 
@@ -16,7 +18,6 @@ import { volumeAABB, minVoxelSize, voxelSizes, validateNestContainment }
 import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
 } from "./gpu.js";
-import { FACE_NAMES, faceLength, ghostPlanes, zeroFaces } from "./ghost.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
@@ -82,19 +83,19 @@ export async function loadOceanTile(device, baseUrl, onProgress) {
   };
 }
 
-/** A zero-initialized r16float volume texture of the padded shape. */
-export async function createVolumeTexture(device, padded, label) {
-  const fit = volumeFits(device.limits, padded);
+/** A zero-initialized r16float volume texture for an (nx, ny, nz) field. */
+export async function createVolumeTexture(device, shape, label) {
+  const fit = volumeFits(device.limits, shape);
   if (!fit.ok) {
     const err = new Error(fit.message);
     err.advice = fit.advice;
     throw err;
   }
-  const [px, py, pz] = padded;
+  const [nx, ny, nz] = shape;
   return guardAllocation(device, label || "the cloud volume", fit.bytes, () =>
     device.createTexture({
       label: label || "soar-volume",
-      size: [pz, py, px],           // width=nz+2, height=ny+2, depth=nx+2
+      size: [nz, ny, nx],           // width=nz, height=ny, depth=nx
       dimension: "3d",
       format: "r16float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
@@ -103,11 +104,11 @@ export async function createVolumeTexture(device, padded, label) {
 }
 
 /**
- * Write a slab of the interior. `data` is fp16 laid out with z fastest, then
- * y, then x — the same order the texture wants, so this is a straight copy.
+ * Write a slab of the field. `data` is fp16 laid out with z fastest, then y,
+ * then x — the same order the texture wants, so this is a straight copy.
  * queue.writeTexture is used rather than a staging buffer on purpose: the
  * 256-byte bytesPerRow rule applies only to buffer-to-texture copies, and
- * (nz+2)*2 is almost never a multiple of 256.
+ * nz*2 is almost never a multiple of 256.
  */
 export function writeVolumeSlab(device, texture, data, origin, size) {
   device.queue.writeTexture(
@@ -116,41 +117,6 @@ export function writeVolumeSlab(device, texture, data, origin, size) {
     { bytesPerRow: size[0] * 2, rowsPerImage: size[1] },
     size,
   );
-}
-
-/**
- * Fill (or clear) the four lateral ghost planes.
- *
- * Periodic domains take their x/y ghost texels from the OPPOSITE face so that
- * filtering across the wrap seam is exact; z always keeps the zero taper,
- * because the vertical is never periodic. Non-periodic writes zeros of the
- * same shape, which is why toggling does not need the volume re-uploaded.
- */
-export function writeGhostBorder(device, texture, faces, periodic, padded) {
-  const [, , pz] = padded;
-  const use = periodic ? faces : zeroFaces(padded);
-  for (const plane of ghostPlanes(padded)) {
-    device.queue.writeTexture(
-      { texture, origin: { x: plane.origin[0], y: plane.origin[1],
-                           z: plane.origin[2] } },
-      use[plane.name],
-      { bytesPerRow: pz * 2, rowsPerImage: plane.rows },
-      plane.size);
-  }
-}
-
-/** Split the packed faces.bin blob into its four planes. */
-export function unpackFaces(bytes, padded) {
-  const words = new Uint16Array(
-    bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-  const faces = {};
-  let offset = 0;
-  for (const name of FACE_NAMES) {
-    const n = faceLength(name, padded);
-    faces[name] = words.subarray(offset, offset + n);
-    offset += n;
-  }
-  return faces;
 }
 
 export class Scene {
@@ -167,16 +133,10 @@ export class Scene {
   /** NetCDF group the nest was read from, null when it came from the root. */
   get nestGroup() { return this._nest?.name || null; }
 
-  writeGhostBorder(periodic) {
-    if (!this._faces) return;
-    writeGhostBorder(
-      this.device, this.volumeTexture, this._faces, periodic, this.padded);
-  }
-
   /**
-   * Attach a finer level. The nest is ALWAYS padded with a zero border, even
-   * in a periodic domain: that taper is how it blends out into the coarse
-   * field at its own edges, which is what witness does per level.
+   * Attach a finer level. The nest ALWAYS tapers to zero at its own edges,
+   * even in a periodic domain: that taper is how it blends out into the
+   * coarse field around it, which is what witness does per level.
    */
   attachNest(nest) {
     const report = validateNestContainment(
@@ -249,19 +209,26 @@ export function createNestDummy(device) {
 export async function loadDemoScene(device, baseUrl, ocean, progress) {
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
-  const padded = meta.volume.padded_dims_xyz;
+  // A pre-v5 bake ships a ghost-padded volume and a faces.bin, which this
+  // renderer would read two texels out of register on every axis. Say so
+  // rather than rendering a subtly wrong field.
+  if (meta.volume.padded_dims_xyz) {
+    throw new Error(
+      `The '${meta.id}' demo was baked ghost-padded (schema ` +
+      `${meta.schema}); soar now uploads fields unpadded. Re-bake it with ` +
+      "tools/prebake_demos.py --skip-still.");
+  }
+  const shape = meta.volume.shape_xyz;
 
   // The volume ships gzipped. It is fp16 either way — the texture is
   // r16float — so this is purely wire size, and DecompressionStream means a
-  // dumb static host works without any Content-Encoding negotiation. Older
-  // bakes wrote a plain volume.bin; meta says which.
+  // dumb static host works without any Content-Encoding negotiation.
   const volumeFile = meta.volume.file ?? "volume.bin";
   const gzipped = meta.volume.compression === "gzip";
   const volumeBytes = await fetchBytes(
     `${baseUrl}/${volumeFile}`,
     (f) => progress?.("Downloading the cloud field…", f * 0.8),
     gzipped ? "gzip" : null);
-  const facesBytes = await fetchBytes(`${baseUrl}/faces.bin`);
   const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
 
   progress?.("Loading the ocean surface…", 0.85);
@@ -269,18 +236,15 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
 
   progress?.("Uploading to the GPU…", 0.92);
   const volumeTexture = await createVolumeTexture(
-    device, padded, "the demo cloud field");
+    device, shape, "the demo cloud field");
   // From here the volume exists on the card and nothing else holds it. Any
   // throw before the Scene takes ownership has to give it back.
   let nestDummy = null;
   try {
-    const [px, py, pz] = padded;
+    const [nx, ny, nz] = shape;
     const words = new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
                                   volumeBytes.byteLength / 2);
-    writeVolumeSlab(device, volumeTexture, words, [0, 0, 0], [pz, py, px]);
-
-    const faces = unpackFaces(facesBytes, padded);
-    writeGhostBorder(device, volumeTexture, faces, true, padded);
+    writeVolumeSlab(device, volumeTexture, words, [0, 0, 0], [nz, ny, nx]);
     nestDummy = createNestDummy(device);
 
     const bmin = meta.volume.bmin;
@@ -288,15 +252,13 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
     const scene = new Scene(device, {
       volumeTexture,
       volumeView: volumeTexture.createView(),
-      padded,
-      shape: meta.volume.shape_xyz,
+      shape,
       bmin, bmax,
-      minVoxelM: minVoxelSize(meta.volume.shape_xyz, bmin, bmax),
+      minVoxelM: minVoxelSize(shape, bmin, bmax),
       oceanView: oceanTile.view,
       oceanFifDx: oceanTile.dx,
       oceanTileExtent: oceanTile.tileExtent,
       oceanMaxLod: oceanTile.maxLod,
-      _faces: faces,
       albedo: new Float32Array(
         mapBytes.buffer, mapBytes.byteOffset, mapBytes.byteLength / 4),
       albedoShape: meta.map.shape_yx,

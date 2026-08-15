@@ -25,7 +25,6 @@ import {
   pluginsNeeded, installPlugins, assertFiltersSupported,
 } from "./filters.js";
 import { makeHalfWriter } from "../half.js";
-import { buildXFace, buildYFace } from "../ghost.js";
 import { markOccupiedPlanes, occupiedBand } from "../zcrop.js";
 
 const MOUNT = "/local";
@@ -217,15 +216,15 @@ async function open({ file }) {
 }
 
 /**
- * Stream one group's extinction field to the main thread, ghost-padded and
- * laid out for the texture.
+ * Stream one group's extinction field to the main thread, laid out for the
+ * texture.
  *
  * The transpose happens here rather than on the GPU. netCDF stores (z, y, x)
  * with x fastest; the texture wants z fastest. r16float is not a storage
  * texture format and copyBufferToTexture's 256-byte row rule does not fit an
- * (nz+2)*2 row, so a compute path would cost either double the memory or a
- * lot of padding. queue.writeTexture has no such rule, and the per-voxel work
- * is a multiply-add against a precomputed rho_air(z) — no exp per voxel.
+ * nz*2 row, so a compute path would cost either double the memory or a lot of
+ * padding. queue.writeTexture has no such rule, and the per-voxel work is a
+ * multiply-add against a precomputed rho_air(z) — no exp per voxel.
  */
 async function extinction({ group, units, label, slabBudget }) {
   const description = describeGroup(root, group);
@@ -522,88 +521,23 @@ async function extinction({ group, units, label, slabBudget }) {
     // comes back has to be able to name the same number.
     const slabBytes = bytes.byteLength;
     await spendCredit(slabBytes);
-    // Ghost ring: original voxel i lands on texel i+1, and z is measured from
-    // the crop's floor rather than the file's.
+    // Voxel i is texel i — nothing is padded — and z is measured from the
+    // crop's floor rather than the file's.
     post({
       type: "slab", label,
-      origin: [lo - zLo + 1, slab.y0 + 1, slab.x0 + 1],
+      origin: [lo - zLo, slab.y0, slab.x0],
       size: [depth, slab.local.y, slab.local.x],  // texture is (w=z, h=y, d=x)
       done: (++sent) / sendable,
       bytes: slabBytes,
       data: bytes,
     }, [bytes.buffer]);
   }
-  // The four lateral ghost planes, for periodic wrapping. Read separately as
-  // four thin hyperslabs rather than accumulated during the sweep: each is
-  // one plane out of the whole field, so the cost is noise and the code is
-  // something a person can check.
-  const plane = (fieldAxis, fieldIndex) => {
-    const storageIndex = flip[fieldAxis]
-      ? fieldExtent[fieldAxis] - 1 - fieldIndex : fieldIndex;
-    const ranges = storageShape.map(() => []);
-    for (const dropped of description.droppedAxes) ranges[dropped] = [0, 1];
-    ranges[axis[fieldAxis]] = [storageIndex, storageIndex + 1];
-    const expected = slabVoxels(storageShape, ranges);
-    const raw = readSlice(dataset, ranges, expected, description.liquidVar);
-    const rawI = iceDataset
-      ? readSlice(iceDataset, ranges, expected, description.iceVar) : null;
-    // The two axes that remain, in field order.
-    const rest = ["x", "y", "z"].filter((a) => a !== fieldAxis);
-    const shape = rest.map((a) => fieldExtent[a]);
-    const slabShape = storageShape.slice();
-    slabShape[axis[fieldAxis]] = 1;
-    for (const dropped of description.droppedAxes) slabShape[dropped] = 1;
-    const strides = new Array(slabShape.length);
-    let acc = 1;
-    for (let i = slabShape.length - 1; i >= 0; i--) {
-      strides[i] = acc; acc *= slabShape[i];
-    }
-    const out = new Float64Array(shape[0] * shape[1]);
-    const idx = new Array(slabShape.length).fill(0);
-    idx[axis[fieldAxis]] = 0;
-    let o = 0;
-    for (let a = 0; a < shape[0]; a++) {
-      idx[axis[rest[0]]] = flip[rest[0]] ? shape[0] - 1 - a : a;
-      for (let b = 0; b < shape[1]; b++) {
-        idx[axis[rest[1]]] = flip[rest[1]] ? shape[1] - 1 - b : b;
-        let flat = 0;
-        for (let i = 0; i < idx.length; i++) flat += idx[i] * strides[i];
-        let q = raw[flat];
-        if (decode) q = decode(q);
-        let qi = 0.0;
-        if (rawI) {
-          qi = rawI[flat];
-          if (decodeIce) qi = decodeIce(qi);
-        }
-        // rest is in field order, so z is the second axis unless the fixed
-        // axis IS z, in which case this plane has no z to index.
-        const zIndex = rest[1] === "z" ? b : (rest[0] === "z" ? a : 0);
-        out[o++] = sigmaAt(q * multiplier, qi * iceMultiplier, rhoAir[zIndex]);
-      }
-    }
-    return { values: out, shape };
-  };
-
-  // The opposite face, with corners that wrap in both x and y because they
-  // are the trilinear support near a domain corner. The placement itself
-  // lives in ../ghost.js so the Python host can be diffed against this exact
-  // code under node — the two hosts disagreed about it silently once already
-  // (tests/test_soar_texture_parity.py).
-  // The wrap faces are lateral, so z is always the second (fastest) axis of
-  // the plane, and the crop that shrank the volume has to shrink them by the
-  // same band or the ghost ring would be filled from the wrong heights.
-  const cropPlaneZ = (source) => {
-    if (!cropped) return source;
-    const rows = source.shape[0];
-    const values = new Float64Array(rows * zCount);
-    for (let r = 0; r < rows; r++) {
-      const src = r * nz + zLo;
-      for (let k = 0; k < zCount; k++) values[r * zCount + k] = source.values[src + k];
-    }
-    return { values, shape: [rows, zCount] };
-  };
-  const buildX = (source) => buildXFace(cropPlaneZ(source).values, ny, zCount);
-  const buildY = (source) => buildYFace(cropPlaneZ(source).values, nx, zCount);
+  // Nothing more is read for the domain edges. A doubly periodic field used
+  // to need its four opposite faces uploaded as a ghost ring so that
+  // filtering across the wrap seam saw the far side; the renderer now wraps
+  // in the sampler (raymarch.wgsl sample_level), which is the same fetch
+  // without the four extra hyperslabs, the extra texels, or the two hosts
+  // that had to agree on where the faces went.
 
   // The minimap image, in glimpse's orientation: (ny, nx) with east to the
   // right and north up. The read already delivered ascending coordinates, so
@@ -616,15 +550,6 @@ async function extinction({ group, units, label, slabBudget }) {
     }
   }
   post({ type: "map", label, shape: [ny, nx], data: albedo }, [albedo.buffer]);
-
-  const faces = {
-    x_lo: buildX(plane("x", nx - 1)),
-    x_hi: buildX(plane("x", 0)),
-    y_lo: buildY(plane("y", ny - 1)),
-    y_hi: buildY(plane("y", 0)),
-  };
-  post({ type: "faces", label, faces },
-       Object.values(faces).map((f) => f.buffer));
 
   return { label, shape: [nx, ny, zCount], zCrop: [zLo, zHi], sourceZ: nz };
 }

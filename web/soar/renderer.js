@@ -289,6 +289,14 @@ export class Renderer {
       addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge",
       addressModeW: "clamp-to-edge", magFilter: "linear", minFilter: "linear",
     });
+    // The periodic read of the same volume. Texture axes: u indexes field z
+    // (never periodic), v field y, w field x. Repeat on the two lateral axes
+    // is what makes filtering exact across the wrap seam now that no ghost
+    // ring is uploaded — see raymarch.wgsl sample_level.
+    this.volWrapSampler = device.createSampler({
+      addressModeU: "clamp-to-edge", addressModeV: "repeat",
+      addressModeW: "repeat", magFilter: "linear", minFilter: "linear",
+    });
     this.oceanSampler = device.createSampler({
       addressModeU: "repeat", addressModeV: "repeat",
       magFilter: "linear", minFilter: "linear", mipmapFilter: "linear",
@@ -306,6 +314,8 @@ export class Renderer {
           sampler: { type: "filtering" } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: "filtering" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
@@ -414,6 +424,7 @@ export class Renderer {
         { binding: 3, resource: scene.oceanView },
         { binding: 4, resource: this.oceanSampler },
         { binding: 5, resource: scene.nestView },
+        { binding: 6, resource: this.volWrapSampler },
       ],
     });
   }
@@ -662,10 +673,9 @@ export class Renderer {
     periodic = Boolean(periodic);
     if (periodic === this.periodic) return;
     this.periodic = periodic;
-    // The ghost texels must agree with the shader's branch; the caller
-    // rewrites the border. Accumulation resets by itself — row 20.x is in
-    // the scene-identity key.
-    this.scene.writeGhostBorder?.(periodic);
+    // Nothing to re-upload: the wrap is a sampler and a shader branch, not
+    // texels. Accumulation resets by itself — row 20.x is in the
+    // scene-identity key — and the specialized module is picked per frame.
   }
 
   // The view march's step and the light march's are separate numbers now; see
@@ -1185,6 +1195,7 @@ export class Renderer {
           { binding: 3, resource: this.scene.oceanView },
           { binding: 4, resource: this.oceanSampler },
           { binding: 5, resource: this.scene.nestView },
+          { binding: 6, resource: this.volWrapSampler },
         ],
       });
       const encoder = this.device.createCommandEncoder();

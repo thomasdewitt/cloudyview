@@ -1,10 +1,9 @@
-// IEEE binary16 conversion, shared by everything that fills an r16float
-// texture: the ingest worker and the periodic ghost faces.
+// IEEE binary16 conversion, used by everything that fills an r16float
+// texture — today that is the ingest worker.
 //
-// It lived inside ingest/worker.js until the ghost-face build had to be
-// importable outside a Worker, so that tests/test_soar_texture_parity.py can
-// run the browser's own construction under node and byte-diff it against the
-// Python host's.
+// It lived inside ingest/worker.js until the conversion had to be importable
+// outside a Worker, so a node test could run the browser's own rounding
+// against numpy's.
 
 "use strict";
 

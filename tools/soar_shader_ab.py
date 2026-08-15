@@ -42,7 +42,7 @@ from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
 )
-from cloudyview.witness import OCEAN_REFLECTANCE, _padded   # noqa: E402
+from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
 # Views the judge set does not cover, for the failure modes that live off it.
 EXTRA_VIEWS = {
@@ -92,7 +92,6 @@ def main():
         power_preference="high-performance").request_device_sync()
 
     level = build_soar_level()
-    padded = _padded(level.sigma)
     periodic = args.periodic == "on"
     dt = min(level.dx) * 2.0
     state = SceneState(
@@ -104,7 +103,7 @@ def main():
     for spec in (args.a, args.b):
         r = SoarRenderer(device=device, periodic=periodic, nested=False,
                          shader_source=source_for(spec))
-        r.upload_volume(padded.copy())
+        r.upload_volume(level.sigma)
         renderers.append(r)
 
     wanted = args.views.split(",") if args.views else list(ALL_VIEWS)

@@ -3,7 +3,7 @@
 // Ray-box entry, hardware-trilinear sampling of resident 3D extinction
 // textures, witness procedural sky, per-pixel jittered ray starts, and the
 // witness cloud-scattering model (adaptive view/light marches, dt-invariant
-// powder, MS octaves, ambient ramp, surface bounce, ghost-zero boundary
+// powder, MS octaves, ambient ramp, surface bounce, analytic boundary
 // taper, and the witness FIF ocean), ported function by function against the
 // numba reference in witness.py (docs/architecture.md).
 //
@@ -116,6 +116,11 @@ struct Uniforms {
 // The finer nested level. Always bound (a 1x1x1 zero texture when there is
 // no nest) so one bind-group layout serves both specializations.
 @group(0) @binding(5) var nest_vol: texture_3d<f32>;
+// The same volume texture read the periodic way: repeat on the two lateral
+// texture axes (w indexes field x, v indexes field y), clamp on the vertical.
+// A doubly periodic domain wraps in hardware rather than through an uploaded
+// ghost ring — see sample_level.
+@group(0) @binding(6) var vol_wrap_samp: sampler;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -690,9 +695,12 @@ struct LevelSample {
     in_nest: bool,
 }
 
+// Data dims in FIELD axis order (nx, ny, nz). The texture is stored
+// transposed — (w=nz, h=ny, d=nx) — and holds nothing but the field, so this
+// is a swizzle and no longer a swizzle-minus-a-border.
 fn level_data_dims(t: texture_3d<f32>) -> vec3<f32> {
     let tex_dims = vec3<f32>(textureDimensions(t, 0));
-    return vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x) - vec3<f32>(2.0);
+    return vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
 }
 
 // Voxel size (m) of whichever level is active at the sample point.
@@ -723,36 +731,62 @@ fn in_nest_box(q: vec3<f32>) -> bool {
     return all(q >= u.nest_bmin.xyz) && all(q <= u.nest_bmax.xyz);
 }
 
+// The linear taper a zero ghost texel used to supply, computed instead.
+//
+// Sampling a zero-bordered volume at data coordinate g gives, along one axis,
+// v_0*(g+1) for g in [-1, 0] and v_{N-1}*(N-g) for g in [N-1, N] — a ramp from
+// the outermost data value down to zero across the outer half-cell either
+// side. Clamp-to-edge on an UNPADDED texture returns exactly those same
+// outermost values over that range and holds them beyond it, so multiplying by
+// this window reproduces the padded result. Trilinear filtering is separable
+// and the border was zero on every axis, so the three windows multiply, which
+// makes the identity hold at edges, at corners, and everywhere between.
+//
+// That is what buys the two texels back: a 2048-cell axis no longer asks a
+// browser clamped to the WebGPU spec floor for 2050.
+fn edge_taper(g: f32, n: f32) -> f32 {
+    return clamp(min(g + 1.0, n - g), 0.0, 1.0);
+}
+
 // Extinction (m^-1) from one level via hardware trilinear filtering.
-// Coordinate swizzle: texture is (w=nz+2, h=ny+2, d=nx+2), see file header.
-// The host uploads original data into padded texels [1..N]. Witness uses
-// gx=(p-bmin)/dx with data value i at gx=i and ghost zeros at -1 and N.
-// Therefore padded_texel = gx+1 and normalized coord = (gx+1.5)/(N+2),
-// preserving every pre-padding world/data sample while hardware filtering
-// supplies the linear taper against the zero border. In a periodic domain
-// the outer level's x/y ghost texels are instead filled from the OPPOSITE
-// faces (engine._write_ghost_border), so filtering across the wrap seam is
-// exact; the nest always keeps the ghost-zero taper, which is what lets it
-// blend out into the coarse field at its own boundary.
+// Coordinate swizzle: texture is (w=nz, h=ny, d=nx), see file header. Witness
+// uses gx=(p-bmin)/dx with data value i at gx=i, so texel i IS data value i
+// and the normalized coord is (gx+0.5)/N — every pre-existing world/data
+// sample preserved, with no border to skip past.
+//
+// `periodic_level` picks how the domain edge behaves. A doubly periodic outer
+// level wraps: the repeat sampler fetches the far face as the trilinear
+// partner across the seam, which is what the uploaded ghost ring used to do,
+// exactly and for free, corners included. Everything else — every nest, and a
+// non-periodic outer level — tapers into zero at its own boundary, which is
+// how a nest blends out into the coarse field around it. Either way the
+// vertical is never periodic and always tapers.
 fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
-                bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
+                bmin: vec3<f32>, bmax: vec3<f32>, periodic_level: bool) -> f32 {
     let tex_dims = vec3<f32>(textureDimensions(t, 0));
-    let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x) - vec3<f32>(2.0);
+    let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
     let data_g = ((q - bmin) / (bmax - bmin)) * dims;
     let tex_coord = vec3<f32>(
-        data_g.z + 1.5,
-        data_g.y + 1.5,
-        data_g.x + 1.5
+        data_g.z + 0.5,
+        data_g.y + 0.5,
+        data_g.x + 0.5
     ) / tex_dims;
-    return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r;
+    let taper_z = edge_taper(data_g.z, dims.z);
+    if (periodic_level) {
+        return textureSampleLevel(t, vol_wrap_samp, tex_coord, 0.0).r * taper_z;
+    }
+    let taper = edge_taper(data_g.x, dims.x) * edge_taper(data_g.y, dims.y)
+              * taper_z;
+    return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r * taper;
 }
 
 // Sample a *chosen* level at an already-wrapped point.
 fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
     if (NESTED && in_nest) {
-        return sample_level(nest_vol, q, u.nest_bmin.xyz, u.nest_bmax.xyz);
+        return sample_level(nest_vol, q, u.nest_bmin.xyz, u.nest_bmax.xyz,
+                            false);
     }
-    return sample_level(vol, q, u.bmin.xyz, u.bmax.xyz);
+    return sample_level(vol, q, u.bmin.xyz, u.bmax.xyz, PERIODIC_DOMAIN);
 }
 
 // Finest level covering p wins (witness._sample_sigma_nested).

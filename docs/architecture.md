@@ -164,9 +164,9 @@ dynamic texture indexing, which core WebGPU does not have.
   every domain copy carries a copy of the nest. The alternative (nest once
   in absolute space) was rejected: it makes the tiled field
   inhomogeneous and fights the distance-LOD step floor.
-- The nest's ghost border stays zero even when the domain is periodic —
-  that taper is how the fine field blends out into the coarse one at its
-  own boundary. Only the outer level's border carries the wrap seam.
+- The nest tapers to zero at its own boundary even when the domain is
+  periodic — that taper is how the fine field blends out into the coarse
+  one. Only the outer level ever wraps.
 - Gradient shading pins the one-voxel fine stencil to the active level, but
   lets the wide coarse stencil re-dispatch per tap. Witness pins at every
   radius, which puts a spurious edge on the nest boundary whenever the
@@ -183,9 +183,13 @@ times, so this cost stands unaddressed rather than merely pending.
 - `data/TWPICE_subvolume_256x256_5km.nc` — dev/test.
 - `/home/thomas/Downloads/experiment/data_twpice/` — full SAM LPT TWPICE,
   1024×1024×255 per variable (~1 GB fp32). QC and QI in separate files.
-  Combined extinction fits GPU memory directly; fp16 halves it. Domains
-  beyond ~2048² will need bricking/LOD — out of scope for now, don't
-  preclude it.
+  Combined extinction fits GPU memory directly; fp16 halves it. 2048² is
+  exactly reachable and not a texel short of it: soar uploads one texel per
+  cell and does its boundary work — the taper into zero, the periodic wrap —
+  analytically in `sample_level`, so Chrome's spec-floor
+  `maxTextureDimension3D` of 2048 admits the 2048-cell fields LES and STEAM
+  actually produce. Domains beyond that still need bricking/LOD — out of
+  scope for now, don't preclude it.
 
 ## App shell — `web/soar/`
 

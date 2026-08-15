@@ -425,37 +425,6 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     return source
 
 
-def write_wrap_ghosts(padded: np.ndarray) -> np.ndarray:
-    """Fill a padded volume's lateral ghost ring from the opposite faces.
-
-    The mirror of web/soar/scene.js writeGhostBorder(periodic=true), which in
-    turn consumes ingest/worker.js's buildX/buildY. A doubly periodic LES
-    field tiles horizontally, so the texel just outside face x=0 is the field
-    at x=nx-1; filling it makes hardware trilinear filtering exact across the
-    wrap seam instead of tapering into a zero that is not there.
-
-    The four corner columns wrap in BOTH x and y — they are the trilinear
-    support for a sample near a domain corner — and the z ghost planes stay
-    zero, because the vertical is never periodic.
-
-    Returns the same array, modified in place.
-    """
-    if padded.ndim != 3 or min(padded.shape) < 3:
-        raise ValueError(
-            "write_wrap_ghosts needs a ghost-padded (nx+2, ny+2, nz+2) "
-            f"volume; got shape {padded.shape}.")
-    core = padded[1:-1, 1:-1, 1:-1]
-    padded[0, 1:-1, 1:-1] = core[-1]
-    padded[-1, 1:-1, 1:-1] = core[0]
-    padded[1:-1, 0, 1:-1] = core[:, -1]
-    padded[1:-1, -1, 1:-1] = core[:, 0]
-    padded[0, 0, 1:-1] = core[-1, -1]
-    padded[0, -1, 1:-1] = core[-1, 0]
-    padded[-1, 0, 1:-1] = core[0, -1]
-    padded[-1, -1, 1:-1] = core[0, 0]
-    return padded
-
-
 class SoarRenderer:
     """A device, the specialized shader, and one uploaded field.
 
@@ -503,6 +472,13 @@ class SoarRenderer:
         self._vol_sampler = device.create_sampler(
             address_mode_u="clamp-to-edge", address_mode_v="clamp-to-edge",
             address_mode_w="clamp-to-edge", mag_filter="linear", min_filter="linear")
+        # The periodic read of the same volume. Texture axes: u indexes field
+        # z (never periodic), v field y, w field x. Repeat on the two lateral
+        # axes is what makes filtering exact across the wrap seam with no
+        # ghost ring uploaded — see raymarch.wgsl sample_level.
+        self._vol_wrap_sampler = device.create_sampler(
+            address_mode_u="clamp-to-edge", address_mode_v="repeat",
+            address_mode_w="repeat", mag_filter="linear", min_filter="linear")
         self._ocean_sampler = device.create_sampler(
             address_mode_u="repeat", address_mode_v="repeat",
             mag_filter="linear", min_filter="linear", mipmap_filter="linear")
@@ -556,68 +532,65 @@ class SoarRenderer:
                 (side, side, 1))
         return tex
 
-    def upload_volume(self, sigma_padded: np.ndarray) -> None:
-        """Upload the ghost-padded extinction field.
+    def upload_volume(self, sigma: np.ndarray) -> None:
+        """Upload the extinction field.
 
-        `sigma_padded` is (nx+2, ny+2, nz+2) — original voxel i at index i+1.
-        A C-order array of that shape is already z-fastest, which is exactly
-        the byte order a texture of size (nz+2, ny+2, nx+2) wants, so there
+        `sigma` is (nx, ny, nz) — the field itself, with no border of any
+        kind. A C-order array of that shape is already z-fastest, which is
+        exactly the byte order a texture of size (nz, ny, nx) wants, so there
         is no transpose here and adding one is a bug.
 
-        In a periodic domain the lateral ghost ring is rewritten from the
-        opposite faces before upload, which is what the browser does
-        (scene.writeGhostBorder) and what the shader's sample_level comment
-        already promises. Callers hand us a zero-bordered array — that is
-        what a ghost pad means — so doing it here rather than asking every
-        caller to is the only way the two hosts cannot drift. That rewrite
-        lands in the caller's array when it is already contiguous fp16; it is
-        idempotent, so re-uploading the same buffer is safe.
+        There is nothing to pad and nothing to wrap. Both boundary behaviours
+        the ghost ring used to carry — the linear taper into zero, and the
+        periodic lateral wrap — are the shader's now (raymarch.wgsl
+        sample_level), computed from the same texel this uploads. That is what
+        keeps a 2048-cell axis inside a 2048-texel limit, and it retires the
+        one surface the two hosts had already drifted on.
         """
         wgpu = self.wgpu
-        data = np.ascontiguousarray(sigma_padded, dtype=np.float16)
-        if self.periodic:
-            data = write_wrap_ghosts(data)
-        px, py, pz = data.shape
+        data = np.ascontiguousarray(sigma, dtype=np.float16)
+        nx, ny, nz = data.shape
         limit = self.device.limits.get("max-texture-dimension-3d", 2048)
-        if max(px, py, pz) > limit:
+        if max(nx, ny, nz) > limit:
             raise ValueError(
-                f"Padded volume {px}x{py}x{pz} exceeds this device's 3D "
-                f"texture limit of {limit} on one axis.")
+                f"Volume {nx}x{ny}x{nz} exceeds this device's 3D texture "
+                f"limit of {limit} on one axis.")
         if self._vol_tex is not None:
             self._vol_tex.destroy()
         self._vol_tex = self.device.create_texture(
-            size=(pz, py, px), dimension="3d", format="r16float",
+            size=(nz, ny, nx), dimension="3d", format="r16float",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
         # queue.write_texture, never copy_buffer_to_texture: the 256-byte
-        # bytes_per_row rule applies to buffer copies, and (nz+2)*2 almost
-        # never satisfies it.
+        # bytes_per_row rule applies to buffer copies, and nz*2 almost never
+        # satisfies it.
         self.device.queue.write_texture(
             {"texture": self._vol_tex}, data.tobytes(),
-            {"bytes_per_row": pz * 2, "rows_per_image": py}, (pz, py, px))
+            {"bytes_per_row": nz * 2, "rows_per_image": ny}, (nz, ny, nx))
         self._bind_group = None
 
-    def upload_nest(self, sigma_padded: np.ndarray) -> None:
+    def upload_nest(self, sigma: np.ndarray) -> None:
         """Upload the finer level bound at binding 5.
 
-        Always zero-bordered, even in a periodic domain: that taper is how
-        the nest blends out into the coarse field at its own edges, which is
-        a different thing from the outer domain's wrap.
+        Always tapered to zero at its edges, even in a periodic domain: that
+        taper is how the nest blends out into the coarse field around it,
+        which is a different thing from the outer domain's wrap. The shader
+        applies it; like the outer level, this is the bare (nx, ny, nz) field.
         """
         if not self.nested:
             raise RuntimeError(
                 "This renderer was built with nested=False, so the shader has "
                 "NESTED baked to false and would ignore the nest.")
         wgpu = self.wgpu
-        data = np.ascontiguousarray(sigma_padded, dtype=np.float16)
-        px, py, pz = data.shape
+        data = np.ascontiguousarray(sigma, dtype=np.float16)
+        nx, ny, nz = data.shape
         if self._nest_tex is not None:
             self._nest_tex.destroy()
         self._nest_tex = self.device.create_texture(
-            size=(pz, py, px), dimension="3d", format="r16float",
+            size=(nz, ny, nx), dimension="3d", format="r16float",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
         self.device.queue.write_texture(
             {"texture": self._nest_tex}, data.tobytes(),
-            {"bytes_per_row": pz * 2, "rows_per_image": py}, (pz, py, px))
+            {"bytes_per_row": nz * 2, "rows_per_image": ny}, (nz, ny, nx))
         self._bind_group = None
 
     # -- pipelines ---------------------------------------------------------
@@ -637,6 +610,8 @@ class SoarRenderer:
             {"binding": 4, "visibility": wgpu.ShaderStage.FRAGMENT,
              "sampler": {"type": "filtering"}},
             {"binding": 5, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
+            {"binding": 6, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "sampler": {"type": "filtering"}},
         ])
         self._ray_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
@@ -692,6 +667,7 @@ class SoarRenderer:
                 {"binding": 3, "resource": self._ocean_tex.create_view()},
                 {"binding": 4, "resource": self._ocean_sampler},
                 {"binding": 5, "resource": self._nest_tex.create_view()},
+                {"binding": 6, "resource": self._vol_wrap_sampler},
             ])
         return self._bind_group
 

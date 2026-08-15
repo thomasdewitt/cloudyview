@@ -29,6 +29,9 @@ export const NEEDED_LIMITS = [
 // the hardware can do; wgpu (Firefox) passes the real value through. Measured
 // 2026-08-04 on an RTX 5080: Chrome 2048, Firefox 16384. Not a bug we can
 // route around — it decides which browser opens a full-resolution LES field.
+// It is a cell count, not a texel count with something subtracted: 2048 is a
+// common LES lateral size and 2046 is not, so soar spends no texel on
+// anything but data (scene.js, raymarch.wgsl sample_level).
 export const SPEC_FLOOR_TEXTURE_3D = 2048;
 
 export class WebGPUUnavailable extends Error {
@@ -175,34 +178,37 @@ export function limitsSummary(adapter) {
 }
 
 /**
- * Can a field of this padded shape become a 3D texture here?
+ * Can a field of this shape become a 3D texture here?
  *
- * `padded` is [nx+2, ny+2, nz+2] in field-axis order; the texture is created
- * transposed (see volume.js), so every axis must clear the same limit and
- * which one is which does not matter. Returns {ok, message, advice}.
+ * `shape` is [nx, ny, nz] in field-axis order — the field itself, with no
+ * border: soar uploads one texel per voxel and does its boundary work in the
+ * shader, so a 2048-cell axis needs exactly 2048 texels and clears the spec
+ * floor rather than missing it by two. The texture is created transposed (see
+ * scene.js), so every axis must clear the same limit and which one is which
+ * does not matter. Returns {ok, message, advice}.
  */
-export function volumeFits(limits, padded, bytesPerVoxel = 2) {
+export function volumeFits(limits, shape, bytesPerVoxel = 2) {
   const cap = limits.maxTextureDimension3D;
-  const worst = Math.max(padded[0], padded[1], padded[2]);
+  const worst = Math.max(shape[0], shape[1], shape[2]);
   if (worst <= cap) {
-    const bytes = padded[0] * padded[1] * padded[2] * bytesPerVoxel;
+    const bytes = shape[0] * shape[1] * shape[2] * bytesPerVoxel;
     return { ok: true, bytes, message: "", advice: "" };
   }
-  const axis = ["x", "y", "z"][padded.indexOf(worst)];
+  const axis = ["x", "y", "z"][shape.indexOf(worst)];
   const clamped = cap <= SPEC_FLOOR_TEXTURE_3D;
   const factor = Math.ceil(worst / cap);
   return {
     ok: false,
     bytes: 0,
     message:
-      `This field needs ${worst} texels on ${axis} (${padded[0]}x${padded[1]}` +
-      `x${padded[2]} once ghost-padded); this browser allows ${cap}.`,
+      `This field needs ${worst} texels on ${axis} (${shape[0]}x${shape[1]}` +
+      `x${shape[2]} cells); this browser allows ${cap}.`,
     advice: clamped
       ? "Chrome reports the WebGPU spec minimum of 2048 no matter what the " +
         "card can do. Firefox reports the hardware's real limit — on this " +
         `field that is the difference between opening it and not. Or ` +
-        `decimate by ${factor}x, or crop to ${cap - 2} cells on ${axis}.`
-      : `Decimate by ${factor}x or crop to ${cap - 2} cells on ${axis}.`,
+        `decimate by ${factor}x, or crop to ${cap} cells on ${axis}.`
+      : `Decimate by ${factor}x or crop to ${cap} cells on ${axis}.`,
   };
 }
 

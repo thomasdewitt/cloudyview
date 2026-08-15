@@ -10,8 +10,7 @@
 "use strict";
 
 import {
-  Scene, createVolumeTexture, writeVolumeSlab, writeGhostBorder,
-  createNestDummy,
+  Scene, createVolumeTexture, writeVolumeSlab, createNestDummy,
 } from "../scene.js";
 import { volumeAABB, minVoxelSize, domainExtent, nestablePairs } from "../field.js";
 import { SPEC_FLOOR_TEXTURE_3D } from "../gpu.js";
@@ -65,7 +64,7 @@ class WorkerLink {
  * it, so the JS heap never holds the whole volume.
  */
 function levelReceiver(device, label, onProgress, ack) {
-  const state = { texture: null, padded: null, faces: null, geometry: null,
+  const state = { texture: null, dims: null, geometry: null,
                   volume: null, tiles: 0, slabsDone: 0, error: null,
                   queuedBytes: 0 };
 
@@ -83,13 +82,12 @@ function levelReceiver(device, label, onProgress, ack) {
       // sentence.
       const [nx, ny] = message.description.shape;
       const cap = device.limits.maxTextureDimension3D;
-      const worst = Math.max(nx + 2, ny + 2);
+      const worst = Math.max(nx, ny);
       if (worst > cap) {
         const axis = nx >= ny ? "x" : "y";
         const err = new Error(
-          `This field needs ${worst} texels on ${axis} once ghost-padded; ` +
-          `this browser allows ${cap}. Cropping empty sky cannot help — it ` +
-          "only ever shrinks z.");
+          `This field needs ${worst} texels on ${axis}; this browser allows ` +
+          `${cap}. Cropping empty sky cannot help — it only ever shrinks z.`);
         // No tool named here on purpose. This used to point at
         // tools/decimate_field.py, which has since been deleted, and advice
         // that names a file the reader cannot find is worse than advice that
@@ -110,10 +108,9 @@ function levelReceiver(device, label, onProgress, ack) {
     } else if (message.type === "volume") {
       state.volume = message;
       state.slabs = message.slabs;
-      const [nx, ny, nz] = message.shape;
-      state.padded = [nx + 2, ny + 2, nz + 2];
+      state.dims = message.shape.slice();
       state.texture = await createVolumeTexture(
-        device, state.padded, `the field in ${label}`);
+        device, state.dims, `the field in ${label}`);
     } else if (message.type === "slab") {
       if (!state.texture) {
         throw new Error(
@@ -136,8 +133,6 @@ function levelReceiver(device, label, onProgress, ack) {
         await device.queue.onSubmittedWorkDone();
       }
       onProgress?.(message.done, state.slabsDone, state.slabs, "upload");
-    } else if (message.type === "faces") {
-      state.faces = message.faces;
     } else if (message.type === "map") {
       state.albedo = message.data;
       state.albedoShape = message.shape;
@@ -310,9 +305,6 @@ export async function loadFileScene(
           `The occupied extent of '${label}' never arrived, so nothing was ` +
           "ever allocated to put it in.");
       }
-      if (!receiver.state.faces) {
-        throw new Error(`The wrap faces for '${label}' never arrived.`);
-      }
       const crop = receiver.state.volume;
       if (crop.zCropped) {
         const [lo, hi] = crop.zCrop;
@@ -344,14 +336,9 @@ export async function loadFileScene(
       outer.receiver.state.volume.coords.y,
       outer.receiver.state.volume.coords.z);
 
-    writeGhostBorder(device, outer.receiver.state.texture,
-                     outer.receiver.state.faces, true,
-                     outer.receiver.state.padded);
-
     const scene = new Scene(device, {
       volumeTexture: outer.receiver.state.texture,
       volumeView: outer.receiver.state.texture.createView(),
-      padded: outer.receiver.state.padded,
       shape: outerShape,
       bmin, bmax,
       minVoxelM: minVoxelSize(outerShape, bmin, bmax),
@@ -359,7 +346,6 @@ export async function loadFileScene(
       oceanFifDx: oceanTile.dx,
       oceanTileExtent: oceanTile.tileExtent,
       oceanMaxLod: oceanTile.maxLod,
-      _faces: outer.receiver.state.faces,
       // The minimap always shows the OUTER domain; the nest is drawn on it as
       // a footprint rectangle, which is why only this level's map is kept.
       albedo: outer.receiver.state.albedo,
@@ -387,8 +373,8 @@ export async function loadFileScene(
         inner.receiver.state.volume.coords.x,
         inner.receiver.state.volume.coords.y,
         inner.receiver.state.volume.coords.z);
-      // The nest keeps a zero border even in a periodic domain: that taper
-      // IS how it blends out into the coarse field at its own edges.
+      // The nest tapers to zero at its edges even in a periodic domain: that
+      // taper IS how it blends out into the coarse field around it.
       const report = scene.attachNest({
         texture: inner.receiver.state.texture,
         bmin: box.bmin, bmax: box.bmax,

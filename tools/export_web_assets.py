@@ -53,38 +53,6 @@ def _volume_aabb(field: CloudField):
     return bmin, bmax
 
 
-def _ghost_face_arrays(sigma: np.ndarray) -> dict:
-    """Periodic x/y ghost-border faces for the padded volume texture.
-
-    The padded texture is (w=nz+2, h=ny+2, d=nx+2); texture depth indexes x
-    and texture rows index y. The x faces are single depth slices of shape
-    (ny+2, nz+2); the y faces span every depth slice with shape
-    (nx+2, 1, nz+2) so one upload covers the whole row. Corner texels wrap in
-    both x and y (they are the trilinear support for samples near a domain
-    corner); the z ghost columns stay zero — the vertical taper is not
-    periodic.
-    """
-    nx, ny, nz = sigma.shape
-    dtype = sigma.dtype
-    x_lo = np.zeros((ny + 2, nz + 2), dtype=dtype)  # texture depth 0
-    x_hi = np.zeros((ny + 2, nz + 2), dtype=dtype)  # texture depth nx+1
-    x_lo[1:-1, 1:-1] = sigma[-1]
-    x_lo[0, 1:-1] = sigma[-1, -1]
-    x_lo[-1, 1:-1] = sigma[-1, 0]
-    x_hi[1:-1, 1:-1] = sigma[0]
-    x_hi[0, 1:-1] = sigma[0, -1]
-    x_hi[-1, 1:-1] = sigma[0, 0]
-    y_lo = np.zeros((nx + 2, 1, nz + 2), dtype=dtype)  # texture row 0
-    y_hi = np.zeros((nx + 2, 1, nz + 2), dtype=dtype)  # texture row ny+1
-    y_lo[1:-1, 0, 1:-1] = sigma[:, -1]
-    y_lo[0, 0, 1:-1] = sigma[-1, -1]
-    y_lo[-1, 0, 1:-1] = sigma[0, -1]
-    y_hi[1:-1, 0, 1:-1] = sigma[:, 0]
-    y_hi[0, 0, 1:-1] = sigma[-1, 0]
-    y_hi[-1, 0, 1:-1] = sigma[0, 0]
-    return {"x_lo": x_lo, "x_hi": x_hi, "y_lo": y_lo, "y_hi": y_hi}
-
-
 def _build_fif_normal_mips(base: np.ndarray) -> list:
     """Average and renormalize a periodic normal-map mip chain on the CPU."""
     mips = [np.ascontiguousarray(base, dtype=np.float32)]

@@ -9,14 +9,16 @@
 // that vacuum twice: once in memory, and again in a march that crosses it
 // sample by sample because nothing tells it there is nothing there.
 //
-// This module is pure array-in / array-out and node-testable, for the same
-// reason ghost.js is: the browser's ingest worker and the
-// Python host must reach the SAME band from the same file, and a rule
-// duplicated in two hosts is a rule that drifts. These two have silently
-// disagreed about texture construction once already — every `witness
-// --periodic` render and all eight goldens tapered into a boundary that was
-// not there, for the entire life of the periodic renderer, and nothing said a
-// word (tests/test_soar_texture_parity.py exists because of it).
+// This module is pure array-in / array-out and node-testable on purpose: the
+// browser's ingest worker and the Python host must reach the SAME band from
+// the same file, and a rule duplicated in two hosts is a rule that drifts.
+// These two have silently disagreed about texture construction once already —
+// the browser wrapped a periodic field's lateral ghost ring and the Python
+// host shipped zeros there, so every `witness --periodic` render and all
+// eight goldens tapered into a boundary that was not there, for the entire
+// life of the periodic renderer, and nothing said a word. (That ring is gone
+// — the wrap is a sampler mode now — but the lesson is why this file is
+// shaped the way it is.)
 
 "use strict";
 

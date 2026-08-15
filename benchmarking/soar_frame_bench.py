@@ -101,11 +101,11 @@ def time_tier(level, tier_name, tier, views, frames, warmup):
     from cloudyview.soar_host import (
         SceneState, SoarRenderer, ViewState, camera_world_origin,
     )
-    from cloudyview.witness import _padded, OCEAN_REFLECTANCE
+    from cloudyview.witness import OCEAN_REFLECTANCE
 
     renderer = SoarRenderer(periodic=True, nested=False,
                             max_light_steps=tier["max_light_steps"])
-    renderer.upload_volume(_padded(level.sigma))
+    renderer.upload_volume(level.sigma)
 
     min_voxel = min(level.dx)
     state = SceneState(
