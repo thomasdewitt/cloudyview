@@ -119,6 +119,47 @@ export function writeVolumeSlab(device, texture, data, origin, size) {
   );
 }
 
+// queue.writeTexture copies into driver-owned staging memory that is only
+// reclaimed once the GPU has consumed it. Nothing in an upload loop submits
+// work, so without a barrier every slab of a multi-gigabyte field piles up at
+// once — which on a 3.5 GB field exhausts system memory and takes the device,
+// and then the browser, down with it. Draining every this-many bytes bounds
+// the pile to roughly one barrier's worth.
+//
+// It is also the chunk size for a whole-field upload below, which makes it do
+// double duty: no single writeTexture call can then approach the 2 GB ceiling
+// a browser puts on one source view.
+export const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Upload a whole field, in x-plane runs.
+ *
+ * NOT one writeTexture call. Firefox rejects a source view larger than 2 GB
+ * outright ("ArrayBufferView ... larger than 2 GB"), which the 4.2 GB STEAM
+ * desert field walked straight into — and even under the ceiling, one call
+ * with several gigabytes behind it is the staging-memory problem above in its
+ * worst form. The file path never hit either, because ingest has always
+ * uploaded slab by slab; this is the demo path learning the same lesson.
+ *
+ * x is the texture's depth axis (width=nz, height=ny, depth=nx), so a run of
+ * x planes is contiguous in the source and needs no repacking.
+ */
+export async function writeWholeVolume(device, texture, words, shape,
+                                       onProgress) {
+  const [nx, ny, nz] = shape;
+  const perPlane = ny * nz;                       // elements in one x plane
+  const planes = Math.max(1, Math.floor(UPLOAD_DRAIN_BYTES / (perPlane * 2)));
+  for (let x0 = 0; x0 < nx; x0 += planes) {
+    const depth = Math.min(planes, nx - x0);
+    writeVolumeSlab(
+      device, texture,
+      words.subarray(x0 * perPlane, (x0 + depth) * perPlane),
+      [0, 0, x0], [nz, ny, depth]);
+    await device.queue.onSubmittedWorkDone();
+    onProgress?.((x0 + depth) / nx);
+  }
+}
+
 export class Scene {
   constructor(device, parts) {
     this.device = device;
@@ -241,10 +282,11 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
   // throw before the Scene takes ownership has to give it back.
   let nestDummy = null;
   try {
-    const [nx, ny, nz] = shape;
     const words = new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
                                   volumeBytes.byteLength / 2);
-    writeVolumeSlab(device, volumeTexture, words, [0, 0, 0], [nz, ny, nx]);
+    await writeWholeVolume(
+      device, volumeTexture, words, shape,
+      (f) => progress?.("Uploading to the GPU…", 0.92 + 0.07 * f));
     nestDummy = createNestDummy(device);
 
     const bmin = meta.volume.bmin;

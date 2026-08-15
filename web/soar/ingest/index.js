@@ -11,12 +11,10 @@
 
 import {
   Scene, createVolumeTexture, writeVolumeSlab, createNestDummy,
+  UPLOAD_DRAIN_BYTES,
 } from "../scene.js";
 import { volumeAABB, minVoxelSize, domainExtent, nestablePairs } from "../field.js";
 import { SPEC_FLOOR_TEXTURE_3D } from "../gpu.js";
-
-// How much uploaded data may be in flight before waiting for the GPU.
-const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
 
 /** Promise-shaped calls over postMessage, plus a channel for streamed data. */
 class WorkerLink {
@@ -122,12 +120,9 @@ function levelReceiver(device, label, onProgress, ack) {
       state.slabsDone += 1;
       state.queuedBytes += message.data.byteLength;
 
-      // queue.writeTexture copies into driver-owned staging memory that is
-      // only reclaimed once the GPU has consumed it. Nothing here submits
-      // work, so without a barrier every slab of a multi-gigabyte field
-      // piles up at once — which on a 3.5 GB variable exhausts system memory
-      // and takes the device, and then the browser, down with it. Draining
-      // periodically bounds that to roughly one barrier's worth.
+      // Bound the staging memory a multi-gigabyte field can pile up — see
+      // UPLOAD_DRAIN_BYTES in scene.js, which the demo path's whole-field
+      // upload chunks by as well.
       if (state.queuedBytes >= UPLOAD_DRAIN_BYTES) {
         state.queuedBytes = 0;
         await device.queue.onSubmittedWorkDone();
