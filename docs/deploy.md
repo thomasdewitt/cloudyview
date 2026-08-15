@@ -6,7 +6,7 @@ beside it, and deploying is copying one directory.
 
     uv run python tools/stage_deploy.py --clean
 
-writes `dist/thought-cloud/soar/` — 270 MB, laid out exactly as it must sit on
+writes `dist/thought-cloud/soar/` — 1.08 GB, laid out exactly as it must sit on
 the site. The repo tree matches the site tree: `web/soar/demos/` here is
 `/thought-cloud/soar/demos/` there.
 
@@ -45,7 +45,7 @@ missing HDF5 filter plugins.
 
 One directory: `dist/thought-cloud/soar/` → `personal-website/thought-cloud/soar/`.
 
-260 MB of it is `demos/`, which only changes when a demo is re-baked. An
+1.07 GB of it is `demos/`, which only changes when a demo is re-baked. An
 app-only change afterwards is ~430 kB — the fingerprinted files at the top
 level of `soar/`; `vendor/`, `ocean/` and `demos/` never change.
 
@@ -55,30 +55,41 @@ them until the bucket held every build ever shipped.
 
 ## Before committing on the site repo
 
-`personal-website/.gitignore` ignores `*.bin`, `*.json` and `*.webp` — which
-covers the ocean tile, the demo volumes' siblings, and the stills. It does
-**not** ignore `*.gz`, and `soar/demos/twpice/volume.bin.gz` is **183 MB**.
-GitHub soft-warns at 50 MB and hard-rejects at 100 MB, so a plain `git add .`
-there stages a file the push cannot carry — and if it ever lands, it is in the
-history permanently.
+**The field data must never enter the site repo's history.** It is what
+Thomas has asked for twice, and it is the one mistake here that cannot be
+undone by a later commit.
 
-You said you would move the `.gz` files to the Mac by hand and keep them out
-of any commit, so nothing needs changing on the site repo. The alternative, if
-you would rather not think about it again, is one line in that `.gitignore`:
+That is now enforced rather than remembered. `personal-website/.gitignore`
+ignores `*.gz` and `*.bin` globally, and un-ignores only `.json`, `.webp` and
+`.so` under `thought-cloud/soar/` — so the metadata, the stills and the HDF5
+filter plugins are versioned and every volume is not. (An earlier version of
+this file said `*.gz` was NOT ignored, which was true when it was written and
+is why the rule exists.)
 
-    thought-cloud/soar/
+Checked on 2026-08-15, against the seven-demo build: a full `git add` there
+stages **43 files, 1.8 MB, no `.gz` and no `.bin`** — the largest is a 250 kB
+still. The largest blob in that repo's whole history is 4.2 MB of vendored
+h5wasm. Worth re-running both checks after adding a demo, since it is the
+`.gitignore` doing the work rather than anybody's care:
 
-cloudyview is the source of truth for the app either way, and `rclone` syncs
-the working tree without reading `.gitignore`, so ignoring it costs nothing at
-deploy time and also stops every deploy committing a fresh set of renamed
-fingerprinted files.
+    git add -An thought-cloud/soar | sed "s/^add '//;s/'$//" | grep -E '\.(gz|bin)$'
+    git rev-list --objects --all \
+      | git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' \
+      | awk '$1=="blob" && $2>1e7 {print $2, $3}'
+
+Both should print nothing.
+
+Ignoring the volumes costs nothing at deploy time: `rclone` syncs the working
+tree and never reads `.gitignore`, so the data still ships. cloudyview is the
+source of truth for it either way — every byte under `demos/` is reproducible
+from `tools/prebake_demos.py` and the source fields.
 
 ### The consequence, which is sharp
 
 `sync-to-r2.sh` runs `rclone sync`, and **sync deletes bucket objects that are
 not in the local tree.** Any tree that lacks `thought-cloud/soar/` — a fresh
 clone, or the Mac before you copy the folder across — will, on a routine
-deploy for some unrelated essay, **silently delete soar and all 260 MB of
+deploy for some unrelated essay, **silently delete soar and all 1.07 GB of
 demos from the live site.**
 
 Worth a guard at the top of `scripts/sync-to-r2.sh`:
@@ -137,4 +148,4 @@ Worth adding to `robots.txt` at that point:
 
     Disallow: /thought-cloud/soar/demos/
 
-so crawlers do not pull 260 MB of binaries.
+so crawlers do not pull 1.07 GB of binaries.
