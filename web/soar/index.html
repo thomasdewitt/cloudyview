@@ -9,7 +9,11 @@
   large-eddy-simulation output or your own netCDF file.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@200;300;400;500&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<!-- Barlow Condensed is gone: the wordmark and the case names are set in the
+     mono face now, because the viewer has no display face and its titles are
+     mono. One less font request, and one less typeface between the landing
+     page and the thing it opens into. -->
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="viewer.css">
 <link rel="canonical" href="https://thomasddewitt.com/thought-cloud/soar/">
@@ -33,31 +37,28 @@
         <span class="sep">/</span>
         <span class="here">Soar</span>
       </nav>
-      <div class="colophon">cloudyview · webgpu</div>
     </header>
 
-    <div class="center">
+    <!-- The cases, down the left. Built from demos/index.json, which is
+         grouped: each group brings its own .rail-head. Only the placeholder
+         is markup. Hovering one drops the rest of the page to near-nothing
+         so its still is most of what is on screen. -->
+    <div class="cases" id="rail">
+      <p class="rail-loading">Loading the demo list…</p>
+    </div>
+
+    <div class="hero">
       <h1>SOAR</h1>
       <p class="tag">Fly through cloud model output</p>
-
       <button class="own" id="choice-open">Render your own 3D cloud volume</button>
-      <p class="own-note">netCDF — or drop one anywhere on this page</p>
       <input type="file" id="file-input" accept=".nc,.nc4,.cdf,.h5,.hdf5">
     </div>
 
-    <div class="base">
-      <!-- The rail is built from web/demos/index.json, which is grouped: each
-           group brings its own .rail-head. Only the placeholder is markup. -->
-      <div class="rail-groups" id="rail">
-        <p class="rail-loading">Loading the demo list…</p>
-      </div>
-
-      <div class="readout">
-        <div id="capability">Checking what this browser can do…</div>
-        <div class="keys">
-          <kbd>W A S D</kbd> fly &nbsp; <kbd>space</kbd> / <kbd>shift</kbd> climb &nbsp;
-          <kbd>scroll</kbd> speed &nbsp; <kbd>esc</kbd> menu
-        </div>
+    <div class="readout">
+      <div id="capability">Checking what this browser can do…</div>
+      <div class="keys">
+        <kbd>W A S D</kbd> fly &nbsp; <kbd>space</kbd> / <kbd>shift</kbd> climb<br>
+        <kbd>scroll</kbd> speed &nbsp; <kbd>esc</kbd> menu
       </div>
     </div>
 

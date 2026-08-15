@@ -351,21 +351,63 @@ async function showReel(demo, root) {
   reelActive = next;
 }
 
-/** One card. Hovering it previews its field behind the whole page. */
-function demoCard(demo, root) {
+/**
+ * The numbers a case shows, from the volume block of its own meta.json.
+ *
+ * Horizontal spacing rather than all three: the vertical is usually
+ * different, and the grid line right next to it already says the shape. If
+ * x and y disagree the pair is printed, because picking one would be a lie.
+ */
+function caseNumbers(meta) {
+  const v = meta?.volume;
+  const n = v?.shape_xyz, lo = v?.bmin, hi = v?.bmax;
+  if (!Array.isArray(n) || !Array.isArray(lo) || !Array.isArray(hi)) return null;
+  const span = [0, 1, 2].map((i) => hi[i] - lo[i]);
+  const dx = span[0] / n[0], dy = span[1] / n[1];
+  const metres = (m) => (m < 10 ? Math.round(m * 10) / 10 : Math.round(m));
+  const across = span[0] / 1000;
+  return {
+    grid: `${n[0]} × ${n[1]} × ${n[2]}`,
+    res: Math.abs(dx - dy) / dx > 0.01
+      ? `${metres(dx)} × ${metres(dy)} m` : `${metres(dx)} m`,
+    domain: `${across < 10 ? Math.round(across * 10) / 10 : Math.round(across)} km`,
+  };
+}
+
+/**
+ * One case. Hovering it previews its field behind the whole page.
+ *
+ * `numbers` may be null — see buildRail for why that is rendered as a card
+ * without a data line rather than as a card that is missing.
+ */
+function demoCard(demo, root, numbers) {
   const button = document.createElement("button");
   button.className = "demo";
   button.type = "button";
-  // The description rides inside the card and is revealed by growing it,
-  // rather than living in a `title` tooltip. A tooltip is the OS's typeface
-  // at the OS's timing in a box this page has no say over, and it lands next
-  // to the cursor rather than on the thing it describes.
+  // The regime and the numbers are always visible rather than revealed on
+  // hover: they are the reason the list is a list of these particular cases,
+  // and comparing them across rows is the point — DYCOMS resolves 5 m over
+  // 3.2 km where TWP-ICE resolves 100 m over 102 km. A number you have to
+  // hover to see cannot be compared with the one above it.
   button.innerHTML =
-    `<span class="name"></span><span class="field"></span>` +
-    `<span class="desc"><span class="desc-inner"></span></span>`;
+    `<span class="top"><span class="name"></span><span class="res"></span></span>` +
+    `<span class="field"></span>` +
+    (numbers
+      ? `<span class="data"><span class="grid"></span>` +
+        `<span><span class="domain"></span> <span class="u">across</span></span></span>`
+      : "");
   button.querySelector(".name").textContent = demo.title;
   button.querySelector(".field").textContent = demo.field ?? "";
-  button.querySelector(".desc-inner").textContent = demo.description ?? "";
+  if (numbers) {
+    button.querySelector(".res").textContent = numbers.res;
+    button.querySelector(".grid").textContent = numbers.grid;
+    button.querySelector(".domain").textContent = numbers.domain;
+  }
+  // The description is no longer on the card. It is a paragraph, the row is
+  // three lines of specification, and the still behind the page says more
+  // about the field than the sentence did. Kept as the accessible name so it
+  // still reaches a screen reader and a long-hover tooltip.
+  if (demo.description) button.title = demo.description;
 
   // `live` is cleared across every card on the page, not just this card's
   // group: the preview is one backdrop shared by all of them.
@@ -406,7 +448,7 @@ function demoCard(demo, root) {
  * with a strip of text; a disabled button would look like something broken
  * rather than something not written yet.
  */
-function renderGroup(group, root) {
+function renderGroup(group, root, numbersById) {
   const section = document.createElement("section");
   section.className = "rail-group";
 
@@ -426,18 +468,49 @@ function renderGroup(group, root) {
     section.appendChild(head);
   }
 
-  const rail = document.createElement("div");
-  rail.className = "rail";
   if (group.status === "coming-soon" && !group.demos.length) {
     const soon = document.createElement("p");
     soon.className = "soon";
     soon.textContent = "Coming soon";
-    rail.appendChild(soon);
+    section.appendChild(soon);
   } else {
-    for (const demo of group.demos) rail.appendChild(demoCard(demo, root));
+    for (const demo of group.demos) {
+      section.appendChild(demoCard(demo, root, numbersById.get(demo.id)));
+    }
   }
-  section.appendChild(rail);
   return section;
+}
+
+/**
+ * The per-case numbers, fetched alongside the index.
+ *
+ * They live in each demo's meta.json rather than in the group index, which
+ * carries only id/title/field/description/base/bytes/still. Reading the metas
+ * is deliberate over adding the fields to the index: the index is baked
+ * output, and hoisting them into it would mean re-baking the demo set to see
+ * them. These files are about a kilobyte each, the app fetches them on load
+ * anyway, and asking early warms that fetch.
+ *
+ * A meta that will not load resolves to null rather than rejecting. That is
+ * not a silent fallback dressed up: a case whose meta.json is missing cannot
+ * be opened either, and the loader has real failure copy for it, so the row
+ * stays clickable and answers on click — the same choice the no-GPU rail
+ * makes. What must not happen is one unreadable file blanking the whole
+ * list. The console says which one.
+ */
+async function fetchNumbers(demos, root) {
+  const pairs = await Promise.all(demos.map(async (demo) => {
+    const url = `${root}/${demo.base}/meta.json`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return [demo.id, caseNumbers(await res.json())];
+    } catch (err) {
+      console.warn(`soar: no numbers for "${demo.id}" — ${url}: ${err.message}`);
+      return [demo.id, null];
+    }
+  }));
+  return new Map(pairs);
 }
 
 async function buildRail() {
@@ -455,10 +528,13 @@ async function buildRail() {
     return;
   }
 
-  dom.rail.replaceChildren(...groups.map((group) => renderGroup(group, root)));
-
   // The reel is one backdrop for the whole rail, so it warms across groups.
   const all = groups.flatMap((group) => group.demos);
+  const numbersById = await fetchNumbers(all, root);
+
+  dom.rail.replaceChildren(
+    ...groups.map((group) => renderGroup(group, root, numbersById)));
+
   // Something is always on screen, so the page is a sky rather than a form.
   if (all.length) await showReel(all[0], root);
 
