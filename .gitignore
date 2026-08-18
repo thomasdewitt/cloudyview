@@ -178,3 +178,6 @@ benchmarking/output/
 data/demos/
 web/soar/demos/
 web/_mockups/media/
+
+# Reference photos/images: kept on disk, not in git (history has the originals)
+references/
