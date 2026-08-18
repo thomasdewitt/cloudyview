@@ -37,15 +37,11 @@ import numpy as np
 
 from . import look
 
-# The shader and ocean tiles live in web/soar/, beside the package, so the
-# browser and the Python host share one file and the look cannot drift. A
-# wheel cannot reach outside its package, so builds snapshot those files into
-# cloudyview/_soar_snapshot/ (see setup.py). A source checkout always wins:
-# there the live web/soar/ files are the single source of truth, and the
-# snapshot only exists in installed copies.
-WEB_SOAR = Path(__file__).resolve().parents[1] / "web" / "soar"
-_SNAPSHOT = Path(__file__).resolve().parent / "_soar_snapshot"
-SOAR_DIR = WEB_SOAR if WEB_SOAR.is_dir() else _SNAPSHOT
+# The shader and ocean tiles live here in the package — the one copy. The
+# browser reaches the same files through symlinks at web/soar/raymarch.wgsl
+# and web/soar/ocean, so there is still exactly one renderer core and the
+# look cannot drift between the Python host and the web app.
+SOAR_DIR = Path(__file__).resolve().parent / "soar"
 SHADER_PATH = SOAR_DIR / "raymarch.wgsl"
 OCEAN_DIR = SOAR_DIR / "ocean"
 
@@ -55,10 +51,9 @@ def read_shader() -> str:
     if not SHADER_PATH.exists():
         raise FileNotFoundError(
             f"the ray-marching shader is missing: {SHADER_PATH}\n"
-            "cloudyview renders from web/soar/raymarch.wgsl in a source "
-            "checkout, or from a build-time snapshot inside the installed "
-            "package. Neither was found, so this install is broken — "
-            "reinstall from PyPI, or work from a checkout:\n"
+            "It ships inside the package (cloudyview/soar/), so this "
+            "install is broken — reinstall from PyPI, or work from a "
+            "checkout:\n"
             "    git clone https://github.com/thomasdewitt/cloudyview\n"
             "    cd cloudyview && uv sync\n"
             "glimpse and behold do not need the shader and still work.")

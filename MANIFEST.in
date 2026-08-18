@@ -1,4 +1,0 @@
-# The sdist must carry the soar render assets so a wheel built from it can
-# snapshot them into the package (see setup.py).
-include web/soar/raymarch.wgsl
-recursive-include web/soar/ocean *

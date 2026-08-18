@@ -62,7 +62,9 @@ Principles:
 
 ## Renderer strategy
 
-**One implementation.** `web/soar/raymarch.wgsl` is the renderer; everything
+**One implementation.** `cloudyview/soar/raymarch.wgsl` is the renderer
+(reached by the browser through the `web/soar/raymarch.wgsl` symlink);
+everything
 else is a host that fills its uniform block and binds its textures. There are
 two hosts — JavaScript in the browser (`web/soar/renderer.js`) and Python via
 wgpu (`cloudyview/soar_host.py`) — and `witness.py` is a thin wrapper around

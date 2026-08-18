@@ -65,7 +65,11 @@ scaleinvariance = { path = "../scaleinvariance", editable = true }
 include = ["cloudyview*"]
 
 [tool.setuptools.package-data]
-cloudyview = ["Mie_tables/*_normalized.txt"]
+cloudyview = [
+    "Mie_tables/*_normalized.txt",
+    "soar/raymarch.wgsl",
+    "soar/ocean/*",
+]
 
 [tool.pytest.ini_options]
 markers = [

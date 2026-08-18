@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import posixpath
 import re
 import shutil
@@ -513,10 +514,14 @@ def is_opaque(relpath: str) -> bool:
 
 def collect_soar_files() -> list[str]:
     files = []
-    for path in sorted(SOAR_SRC.rglob("*")):
-        if path.is_file():
+    # os.walk with followlinks, not rglob: web/soar/ocean is a symlink into
+    # cloudyview/soar/ (the package owns the render assets) and rglob does
+    # not descend into symlinked directories.
+    for dirpath, _dirnames, filenames in os.walk(SOAR_SRC, followlinks=True):
+        for name in filenames:
+            path = Path(dirpath) / name
             files.append(path.relative_to(SOAR_SRC).as_posix())
-    return files
+    return sorted(files)
 
 
 def fingerprint_targets(all_files: list[str]) -> list[str]:

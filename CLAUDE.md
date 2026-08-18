@@ -26,8 +26,9 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 - `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render (Mitsuba 3)
 - `glimpse <file.nc>` - Quick 2D visual-albedo top view
 - `witness <file.nc>` - Volumetric ray-marched render. Drives the same
-  `web/soar/raymarch.wgsl` the browser does, via wgpu, so there is one
-  renderer core and one definition of the look. Needs a GPU.
+  `cloudyview/soar/raymarch.wgsl` the browser does (web/soar/raymarch.wgsl is
+  a symlink to it), via wgpu, so there is one renderer core and one
+  definition of the look. Needs a GPU.
 
 Soar, the real-time fly-through, is a browser app under `web/soar/` — WebGPU, no
 Python at run time. Serve the `web/` directory and open `soar/`:

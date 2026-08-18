@@ -63,12 +63,20 @@ def source_for(spec: str) -> str:
     if spec == "tree":
         return read_shader()
     if spec.startswith("git:"):
-        out = subprocess.run(
-            ["git", "show", f"{spec[4:]}:web/soar/raymarch.wgsl"],
-            cwd=REPO, capture_output=True, text=True)
-        if out.returncode != 0:
-            raise SystemExit(f"git show failed for {spec!r}:\n{out.stderr}")
-        return out.stdout
+        # The shader moved from web/soar/ into the package 2026-08-18;
+        # web/soar/raymarch.wgsl is a symlink since then, and `git show` of a
+        # symlink path yields the link target text, not the shader. Try the
+        # package path first, then the old location for pre-move revisions.
+        errors = []
+        for relpath in ("cloudyview/soar/raymarch.wgsl",
+                        "web/soar/raymarch.wgsl"):
+            out = subprocess.run(
+                ["git", "show", f"{spec[4:]}:{relpath}"],
+                cwd=REPO, capture_output=True, text=True)
+            if out.returncode == 0 and "fn " in out.stdout:
+                return out.stdout
+            errors.append(out.stderr.strip())
+        raise SystemExit(f"git show failed for {spec!r}:\n" + "\n".join(errors))
     return Path(spec).read_text()
 
 

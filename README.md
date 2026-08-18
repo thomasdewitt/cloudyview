@@ -7,12 +7,10 @@ A Python toolkit for 3D cloud field visualization with optical depth calculation
 CloudyView provides three tiers of visualization capabilities for 3D cloud condensate fields (from LES, cloud-resolving models, or other sources):
 
 - **Glimpse** (`glimpse`): Quick optical depth calculation + matplotlib 2D visualization
-- **Witness** (`witness`): Fast volumetric ray marching with multi-scattering approximation
-- **Behold** (`behold`): Photorealistic Monte Carlo path tracing with Mitsuba 3
+- **Witness** (`witness`): Fast volumetric ray marching with visually tuned heuristics
+- **Behold** (`behold`): Physically accurate Monte Carlo path tracing with Mitsuba 3
 
-Plus **Soar**, a real-time fly-through of the witness look — a static WebGPU
-page under [`web/soar/`](web/soar), with no Python at run time. Serve the `web/`
-directory and open `soar/`; see [`web/README.md`](web/README.md).
+Plus **Soar**, a real-time fly-through using `witness` in a browser. 
 
 ## Coordinate System
 
@@ -37,10 +35,10 @@ pip install cloudyview            # glimpse and witness
 pip install 'cloudyview[behold]'  # + Mitsuba 3 for path-traced renders
 ```
 
-`witness` needs a GPU (WebGPU via wgpu-py). The wheel carries a build-time
-snapshot of the soar shader and ocean tiles; in a source checkout the live
-`web/soar/` files are used instead, so the browser and the Python host always
-share one renderer core.
+`witness` needs a GPU (WebGPU via wgpu-py). The soar shader and ocean tiles
+ship inside the package (`cloudyview/soar/`); the web app reaches the same
+files through symlinks under `web/soar/`, so the browser and the Python host
+always share one renderer core.
 
 ### Development install
 
@@ -145,19 +143,19 @@ Quality tiers:
 
 Options:
 
-| Argument                  | Default        | Description                                              |
-| ------------------------- | -------------- | -------------------------------------------------------- |
-| `--output`, `-o`          | `.`            | Output directory for renders                             |
-| `--spp N`                 | varies         | Samples per pixel (for custom quality)                   |
-| `--size W H`              | varies         | Image dimensions in pixels (for custom quality)          |
-| `--max-depth N`           | varies         | Maximum ray bounce depth (for custom quality override)   |
-| `--rr-depth N`            | varies         | Russian roulette depth (for custom quality override)     |
-| `--camera-position X Y Z` | `0 0 -0.999`   | Camera position in relative coords (±1.0 = domain edge)  |
-| `--camera-azimuth`        | `0`            | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W) |
-| `--camera-elevation`      | `35`           | Camera view elevation in degrees (angle above horizon)   |
-| `--fov`                   | `100`          | Camera field of view in degrees                          |
-| `--sun-azimuth`           | `20`           | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
-| `--sun-elevation`         | `55`           | Sun elevation in degrees (angle above horizon)           |
+| Argument                  | Default      | Description                                              |
+| ------------------------- | ------------ | -------------------------------------------------------- |
+| `--output`, `-o`          | `.`          | Output directory for renders                             |
+| `--spp N`                 | varies       | Samples per pixel (for custom quality)                   |
+| `--size W H`              | varies       | Image dimensions in pixels (for custom quality)          |
+| `--max-depth N`           | varies       | Maximum ray bounce depth (for custom quality override)   |
+| `--rr-depth N`            | varies       | Russian roulette depth (for custom quality override)     |
+| `--camera-position X Y Z` | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)  |
+| `--camera-azimuth`        | `0`          | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W) |
+| `--camera-elevation`      | `35`         | Camera view elevation in degrees (angle above horizon)   |
+| `--fov`                   | `100`        | Camera field of view in degrees                          |
+| `--sun-azimuth`           | `20`         | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
+| `--sun-elevation`         | `55`         | Sun elevation in degrees (angle above horizon)           |
 
 ## Input Data Requirements
 
@@ -232,21 +230,21 @@ behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth
   - Supports variable vertical spacing
 
 - **`domain.py`**: Shared domain geometry
-
+  
   - `DomainGeometry`: Dataclass with physical dimensions and aspect ratios
   - `compute_domain_geometry()`: Factory from coordinate arrays (handles non-uniform dz)
 
 - **`config.py`**: Built-in configuration defaults
-
+  
   - `get_witness_config()`: Get witness configuration
   - `get_behold_config()`: Get behold configuration
 
 - **`basic_render.py`**: Matplotlib-based visualization
-
+  
   - Column optical depth visualization
 
 - **`radiative_transfer.py`**: Mitsuba 3 Monte Carlo path tracing
-
+  
   - `load_mie_phase_tables()`: Load Mie scattering phase functions
   - `render_view()`: Render a single RGB view with Mitsuba
   - `look_at_world_up()`: Camera transform helper

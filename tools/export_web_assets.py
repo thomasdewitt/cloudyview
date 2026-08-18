@@ -30,7 +30,9 @@ from cloudyview.ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
 SOAR_OUT = REPO / "web" / "soar"
-OCEAN_OUT = SOAR_OUT / "ocean"
+# The ocean tiles live in the package (cloudyview/soar/ocean); web/soar/ocean
+# is a symlink to them. Write to the real location.
+OCEAN_OUT = REPO / "cloudyview" / "soar" / "ocean"
 
 # 512 rather than the app's 2048: a quarter the texel count for the same
 # physical tile (dx scales to match), which keeps the download honest.
