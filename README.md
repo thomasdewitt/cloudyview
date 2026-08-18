@@ -1,34 +1,123 @@
 # CloudyView
 
-A Python toolkit for 3D cloud field visualization with optical depth calculations and Monte Carlo radiative transfer.
+A toolkit for 3D cloud field visualization with optical depth calculations and Monte Carlo radiative transfer.
 
-## Overview
+## Interactive rendering in browser (recommended)
 
-CloudyView provides three tiers of visualization capabilities for 3D cloud condensate fields (from LES, cloud-resolving models, or other sources):
+Visit [thomasddewitt.com/soar](https://thomasddewitt.com/soar), open your NetCDF file containing cloud condensate, adjust quality and time of day, and render images and videos. Soar uses the `witness` renderer, described below.
 
-- **Glimpse** (`glimpse`): Quick optical depth calculation + matplotlib 2D visualization
-- **Witness** (`witness`): Fast volumetric ray marching with visually tuned heuristics
-- **Behold** (`behold`): Physically accurate Monte Carlo path tracing with Mitsuba 3
+## Programmatic rendering: Overview
 
-Plus **Soar**, a real-time fly-through using `witness` in a browser. 
+For rendering with more fine-grained control, `cloudyview` may be installed to give three terminal commands for renders in three increasing levels of cost:
 
-## Coordinate System
+- **Glimpse** (`glimpse`): Quick optical depth calculation + 2D visualization from above, like a satellite image
+- **Witness** (`witness`): Fast volumetric ray marching with visually tuned heuristics, on GPU
+- **Behold** (`behold`): Physically accurate Monte Carlo path tracing with Mitsuba 3. Very, very expensive for clouds.
 
-CloudyView uses the **meteorological convention**:
+The source code for Soar is in `web/soar`.
 
-- **East** = +x direction
-- **North** = +y direction
-- **Up** = +z direction
+## Quick Start: Terminal Commands
 
-Azimuth angles use the meteorological convention (clockwise from North):
+For `witness` and `behold`, it is recommended to first choose your view in [Soar](https://thomasddewitt.com/soar), and use the "Render this view in terminal" command, which gives a command to copy-paste.
 
-- 0° = North, 90° = East, 180° = South, 270° = West
+All scripts require a NetCDF file with cloud ice/water mixing ratio variables.
 
-Elevation angles are measured from the horizon:
+### Glimpse: Quick 2D View
 
-- 0° = horizon, 90° = zenith, -90° = nadir
+```bash
+glimpse example_cloud.nc
+```
 
-## Installation
+Generates a matplotlib visualization of column optical depth.
+
+Options:
+
+- `--output`, `-o`: Output directory (default: current directory)
+- `--label-dirs`: Label N/S/W/E sections of the domain
+- `--label`: Overlay camera marker and field-of-view on the top view
+- `--camera-position X Y Z`, `--camera-azimuth`, `--camera-elevation`, `--fov`:
+  Camera used by `--label` (same conventions as witness/behold)
+
+### Witness: Fast Volumetric Rendering
+
+```bash
+witness example_cloud.nc
+```
+
+Generates a volumetric ray-marched render with multi-scattering, procedural sky, and ocean surface.
+
+Quality presets (positional argument; image size only): `min` 150×100,
+`low` 300×200, `medium` 600×400 (default), `high` 1600×1200.
+`--size W H` overrides the preset.
+
+Options:
+
+| Argument                       | Default      | Description                                                       |
+| ------------------------------ | ------------ | ----------------------------------------------------------------- |
+| `--output`, `-o`               | `.`          | Output directory                                                  |
+| `--camera-position X Y Z`      | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)           |
+| `--camera-azimuth`             | `0`          | Camera azimuth in degrees (0=N, 90=E, 180=S, 270=W)               |
+| `--camera-elevation`           | `35`         | Camera elevation in degrees (angle above horizon)                 |
+| `--fov`                        | `100`        | Horizontal field of view in degrees                               |
+| `--sun-azimuth`                | `20`         | Sun azimuth in degrees                                            |
+| `--sun-elevation`              | `55`         | Sun elevation in degrees                                          |
+| `--exposure`                   | `4.0`        | Tone-map exposure (soar's "render in terminal" writes its metered value here) |
+| `--gamma`                      | `1.66`       | Tone-map gamma                                                    |
+| `--white-point`                | `15.0`       | Extended-Reinhard white point: the exposed radiance mapping to 1.0 |
+| `--contrast`                   | `1.0`        | Display contrast about mid-grey, applied after the gamma encode   |
+| `--haze`                       | `1.0`        | Aerosol amount, 0 to 2                                            |
+| `--haze-height-dependent`      | off          | Thin the haze with height on a 2500 m scale height                |
+| `--lod`                        | `0.5`        | Angular level of detail; smaller is finer and slower              |
+| `--periodic`                   | off          | Wrap the domain in x and y, as soar does for LES fields           |
+| `--nest-group GROUP`           | —            | NetCDF group in the same file holding a finer field to render as a nest |
+
+The image controls are the same knobs the browser app exposes, so a soar
+view reproduces exactly in the terminal. All three commands also accept the
+dataset-selection overrides described under
+[Input Data Requirements](#input-data-requirements) (`--group`,
+`--liquid-water-var`, `--x-dim`, ...); see `witness --help` for the full
+list.
+
+### Behold: Photorealistic Rendering
+
+```bash
+behold example_cloud.nc --cpu
+```
+
+Generates photorealistic path-traced render using Mitsuba 3.
+
+Arguments:
+
+- `--cpu` or `--gpu`: Backend selection (required)
+- `quality`: `min`, `low`, `medium` (default), `high`, `max`, or `custom`
+
+Quality tiers:
+
+- `min`: 150×100, spp=1, max_depth=4, rr_depth=2 (instant preview)
+- `low`: 300×200, spp=32, max_depth=16, rr_depth=4 (quick preview)
+- `medium`: 600×400, spp=512, max_depth=64, rr_depth=16 (balanced, default)
+- `high`: 960×640, spp=1024, max_depth=64, rr_depth=16 (high quality)
+- `max`: 1200×800, spp=2048, max_depth=96, rr_depth=64 (production quality)
+- `custom`: User-specified spp, resolution, and/or max_depth/rr_depth
+
+Options:
+
+| Argument                  | Default      | Description                                              |
+| ------------------------- | ------------ | -------------------------------------------------------- |
+| `--output`, `-o`          | `.`          | Output directory for renders                             |
+| `--ice FILE`              | —            | Separate NetCDF file with the ice variable (SAM LPT split-file style) |
+| `--spp N`                 | varies       | Samples per pixel (for custom quality)                   |
+| `--size W H`              | varies       | Image dimensions in pixels (for custom quality)          |
+| `--max-depth N`           | varies       | Maximum ray bounce depth (for custom quality override)   |
+| `--rr-depth N`            | varies       | Russian roulette depth (for custom quality override)     |
+| `--camera-position X Y Z` | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)  |
+| `--camera-azimuth`        | `0`          | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W) |
+| `--camera-elevation`      | `35`         | Camera view elevation in degrees (angle above horizon)   |
+| `--fov`                   | `100`        | Camera field of view in degrees                          |
+| `--sun-azimuth`           | `20`         | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
+| `--sun-elevation`         | `55`         | Sun elevation in degrees (angle above horizon)           |
+
+## Installation for programmatic rendering
 
 ```bash
 pip install cloudyview            # glimpse and witness
@@ -92,71 +181,6 @@ Notes:
   same-named submodules on the package namespace; the modules remain
   importable directly (e.g. `from cloudyview.witness import NestedLevel`).
 
-## Quick Start
-
-All scripts require a NetCDF file with a cloud water mixing ratio variable and are designed for single-timestep 3D data.
-
-### Glimpse: Quick 2D View
-
-```bash
-glimpse example_cloud.nc
-```
-
-Generates a matplotlib visualization of column optical depth.
-
-### Witness: Fast Volumetric Rendering
-
-```bash
-witness example_cloud.nc
-```
-
-Generates a volumetric ray-marched render with multi-scattering, procedural sky, and ocean surface.
-
-Options:
-
-- `--camera-position X Y Z`: Camera position in relative coords (default: 0 0 -0.999)
-- `--camera-azimuth`, `--camera-elevation`, `--fov`: Camera orientation
-- `--sun-azimuth`, `--sun-elevation`: Sun position
-- `--size W H`: Image dimensions
-- Quality presets: `min`, `low`, `medium` (default), `high`
-
-### Behold: Photorealistic Rendering
-
-```bash
-behold example_cloud.nc --cpu
-```
-
-Generates photorealistic path-traced render using Mitsuba 3.
-
-Arguments:
-
-- `--cpu` or `--gpu`: Backend selection (required)
-- `quality`: `min`, `low`, `medium` (default), `high`, or `custom`
-
-Quality tiers:
-
-- `min`: 150×100, spp=1, max_depth=4, rr_depth=2 (instant preview)
-- `low`: 300×200, spp=32, max_depth=16, rr_depth=4 (quick preview)
-- `medium`: 600×400, spp=512, max_depth=64, rr_depth=16 (balanced, default)
-- `high`: 1200×800, spp=4096, max_depth=128, rr_depth=32 (production quality)
-- `custom`: User-specified spp, resolution, and/or max_depth/rr_depth
-
-Options:
-
-| Argument                  | Default      | Description                                              |
-| ------------------------- | ------------ | -------------------------------------------------------- |
-| `--output`, `-o`          | `.`          | Output directory for renders                             |
-| `--spp N`                 | varies       | Samples per pixel (for custom quality)                   |
-| `--size W H`              | varies       | Image dimensions in pixels (for custom quality)          |
-| `--max-depth N`           | varies       | Maximum ray bounce depth (for custom quality override)   |
-| `--rr-depth N`            | varies       | Russian roulette depth (for custom quality override)     |
-| `--camera-position X Y Z` | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)  |
-| `--camera-azimuth`        | `0`          | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W) |
-| `--camera-elevation`      | `35`         | Camera view elevation in degrees (angle above horizon)   |
-| `--fov`                   | `100`        | Camera field of view in degrees                          |
-| `--sun-azimuth`           | `20`         | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
-| `--sun-elevation`         | `55`         | Sun elevation in degrees (angle above horizon)           |
-
 ## Input Data Requirements
 
 NetCDF files must contain:
@@ -165,6 +189,31 @@ NetCDF files must contain:
 - **Ice water variable** (optional): One of `qi`, `qice`, `IWC`, `cloud_ice_mixing_ratio`, `ice_water_content`, `q_ice`, or `iwc`
 - **Spatial dimensions**: Must be 3D (e.g., x, y, z or lon, lat, height)
 - **Temporal dimension**: Must contain exactly one timestep
+
+When autodetection is not enough — non-standard names, variables inside
+NetCDF groups, unusual dimension names — all three commands accept the same
+override flags: `--group`, `--liquid-water-var`, `--liquid-water-group`,
+`--ice-water-var`, `--ice-water-group`, `--coords-group`,
+`--x-coord`/`--y-coord`/`--z-coord`, and `--x-dim`/`--y-dim`/`--z-dim`.
+Physical x/y/z coordinates are always required (index axes are not enough:
+optical depth and rendering depend on grid spacing). See `witness --help`
+for the rules and example patterns.
+
+## Coordinate System
+
+CloudyView uses the **meteorological convention**:
+
+- **East** = +x direction
+- **North** = +y direction
+- **Up** = +z direction
+
+Azimuth angles use the meteorological convention (clockwise from North):
+
+- 0° = North, 90° = East, 180° = South, 270° = West
+
+Elevation angles are measured from the horizon:
+
+- 0° = horizon, 90° = zenith, -90° = nadir
 
 ## Usage Examples
 
@@ -204,7 +253,7 @@ behold cloud.nc --cpu
 behold cloud.nc --gpu
 
 # Production quality render
-behold cloud.nc high --gpu --output ./final_renders
+behold cloud.nc max --gpu --output ./final_renders
 
 # Quick GPU preview
 behold cloud.nc low --gpu
@@ -332,7 +381,7 @@ https://www.sciencedirect.com/science/article/pii/S0022407314000867#ab0010
 
 Full ice scattering database downloaded from: http://download.ssec.wisc.edu/files/polarization_models/
 
-**Note**: The complete ice scattering data and processing scripts are located in `ice_models/`, which contains a script to reformat the original data and extract the phase functions needed for rendering.
+**Note**: The complete ice scattering data and processing scripts are located in `data/ice_models/`, which contains a script to reformat the original data and extract the phase functions needed for rendering.
 
 ## Author
 
