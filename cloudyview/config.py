@@ -60,7 +60,9 @@ DEFAULT_BEHOLD_CONFIG = {
         'elevation': 55.0,  # 45° above horizon
     },
     'rendering': {
-        'max_depth': 128,
+        # Matches behold's 'max' preset: custom quality without explicit
+        # --max-depth/--rr-depth inherits these.
+        'max_depth': 96,
         'rr_depth': 64,
         'exposure': 4.0,
         'extinction_multiplier': 1.0,

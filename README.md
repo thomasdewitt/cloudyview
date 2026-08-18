@@ -6,6 +6,8 @@ A toolkit for 3D cloud field visualization with optical depth calculations and M
 
 Visit [thomasddewitt.com/soar](https://thomasddewitt.com/soar), open your NetCDF file containing cloud condensate, adjust quality and time of day, and render images and videos. Soar uses the `witness` renderer, described below.
 
+![Witness render of a STEAM cloud field, looking into the sun](https://raw.githubusercontent.com/thomasdewitt/cloudyview/master/docs/witness_small_c002_s0100_into_sun.png)
+
 ## Programmatic rendering: Overview
 
 For rendering with more fine-grained control, `cloudyview` may be installed to give three terminal commands for renders in three increasing levels of cost:
@@ -52,24 +54,24 @@ Quality presets (positional argument; image size only): `min` 150×100,
 
 Options:
 
-| Argument                       | Default      | Description                                                       |
-| ------------------------------ | ------------ | ----------------------------------------------------------------- |
-| `--output`, `-o`               | `.`          | Output directory                                                  |
-| `--camera-position X Y Z`      | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)           |
-| `--camera-azimuth`             | `0`          | Camera azimuth in degrees (0=N, 90=E, 180=S, 270=W)               |
-| `--camera-elevation`           | `35`         | Camera elevation in degrees (angle above horizon)                 |
-| `--fov`                        | `100`        | Horizontal field of view in degrees                               |
-| `--sun-azimuth`                | `20`         | Sun azimuth in degrees                                            |
-| `--sun-elevation`              | `55`         | Sun elevation in degrees                                          |
-| `--exposure`                   | `4.0`        | Tone-map exposure (soar's "render in terminal" writes its metered value here) |
-| `--gamma`                      | `1.66`       | Tone-map gamma                                                    |
-| `--white-point`                | `15.0`       | Extended-Reinhard white point: the exposed radiance mapping to 1.0 |
-| `--contrast`                   | `1.0`        | Display contrast about mid-grey, applied after the gamma encode   |
-| `--haze`                       | `1.0`        | Aerosol amount, 0 to 2                                            |
-| `--haze-height-dependent`      | off          | Thin the haze with height on a 2500 m scale height                |
-| `--lod`                        | `0.5`        | Angular level of detail; smaller is finer and slower              |
-| `--periodic`                   | off          | Wrap the domain in x and y, as soar does for LES fields           |
-| `--nest-group GROUP`           | —            | NetCDF group in the same file holding a finer field to render as a nest |
+| Argument                  | Default      | Description                                                                   |
+| ------------------------- | ------------ | ----------------------------------------------------------------------------- |
+| `--output`, `-o`          | `.`          | Output directory                                                              |
+| `--camera-position X Y Z` | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)                       |
+| `--camera-azimuth`        | `0`          | Camera azimuth in degrees (0=N, 90=E, 180=S, 270=W)                           |
+| `--camera-elevation`      | `35`         | Camera elevation in degrees (angle above horizon)                             |
+| `--fov`                   | `100`        | Horizontal field of view in degrees                                           |
+| `--sun-azimuth`           | `20`         | Sun azimuth in degrees                                                        |
+| `--sun-elevation`         | `55`         | Sun elevation in degrees                                                      |
+| `--exposure`              | `4.0`        | Tone-map exposure (soar's "render in terminal" writes its metered value here) |
+| `--gamma`                 | `1.66`       | Tone-map gamma                                                                |
+| `--white-point`           | `15.0`       | Extended-Reinhard white point: the exposed radiance mapping to 1.0            |
+| `--contrast`              | `1.0`        | Display contrast about mid-grey, applied after the gamma encode               |
+| `--haze`                  | `1.0`        | Aerosol amount, 0 to 2                                                        |
+| `--haze-height-dependent` | off          | Thin the haze with height on a 2500 m scale height                            |
+| `--lod`                   | `0.5`        | Angular level of detail; smaller is finer and slower                          |
+| `--periodic`              | off          | Wrap the domain in x and y, as soar does for LES fields                       |
+| `--nest-group GROUP`      | —            | NetCDF group in the same file holding a finer field to render as a nest       |
 
 The image controls are the same knobs the browser app exposes, so a soar
 view reproduces exactly in the terminal. All three commands also accept the
@@ -99,6 +101,7 @@ Quality tiers:
 - `high`: 960×640, spp=1024, max_depth=8, rr_depth=4
 - `max`: 1200×800, spp=2048, max_depth=96, rr_depth=64 (untruncated path depths)
 - `custom`: User-specified spp, resolution, and/or max_depth/rr_depth
+  (unspecified depths default to `max`'s)
 
 Clouds bury most of a path tracer's budget in dense multiple scattering, so
 `min` through `high` truncate paths early (`max_depth=8` or less) and accept
@@ -107,20 +110,20 @@ most cloud fields.
 
 Options:
 
-| Argument                  | Default      | Description                                              |
-| ------------------------- | ------------ | -------------------------------------------------------- |
-| `--output`, `-o`          | `.`          | Output directory for renders                             |
+| Argument                  | Default      | Description                                                           |
+| ------------------------- | ------------ | --------------------------------------------------------------------- |
+| `--output`, `-o`          | `.`          | Output directory for renders                                          |
 | `--ice FILE`              | —            | Separate NetCDF file with the ice variable (SAM LPT split-file style) |
-| `--spp N`                 | varies       | Samples per pixel (for custom quality)                   |
-| `--size W H`              | varies       | Image dimensions in pixels (for custom quality)          |
-| `--max-depth N`           | varies       | Maximum ray bounce depth (for custom quality override)   |
-| `--rr-depth N`            | varies       | Russian roulette depth (for custom quality override)     |
-| `--camera-position X Y Z` | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)  |
-| `--camera-azimuth`        | `0`          | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W) |
-| `--camera-elevation`      | `35`         | Camera view elevation in degrees (angle above horizon)   |
-| `--fov`                   | `100`        | Camera field of view in degrees                          |
-| `--sun-azimuth`           | `20`         | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)         |
-| `--sun-elevation`         | `55`         | Sun elevation in degrees (angle above horizon)           |
+| `--spp N`                 | varies       | Samples per pixel (for custom quality)                                |
+| `--size W H`              | varies       | Image dimensions in pixels (for custom quality)                       |
+| `--max-depth N`           | varies       | Maximum ray bounce depth (for custom quality override)                |
+| `--rr-depth N`            | varies       | Russian roulette depth (for custom quality override)                  |
+| `--camera-position X Y Z` | `0 0 -0.999` | Camera position in relative coords (±1.0 = domain edge)               |
+| `--camera-azimuth`        | `0`          | Camera view azimuth in degrees (0=N, 90=E, 180=S, 270=W)              |
+| `--camera-elevation`      | `35`         | Camera view elevation in degrees (angle above horizon)                |
+| `--fov`                   | `100`        | Camera field of view in degrees                                       |
+| `--sun-azimuth`           | `20`         | Sun azimuth in degrees (0=N, 90=E, 180=S, 270=W)                      |
+| `--sun-elevation`         | `55`         | Sun elevation in degrees (angle above horizon)                        |
 
 ## Installation for programmatic rendering
 
