@@ -37,30 +37,31 @@ import numpy as np
 
 from . import look
 
+# The shader and ocean tiles live in web/soar/, beside the package, so the
+# browser and the Python host share one file and the look cannot drift. A
+# wheel cannot reach outside its package, so builds snapshot those files into
+# cloudyview/_soar_snapshot/ (see setup.py). A source checkout always wins:
+# there the live web/soar/ files are the single source of truth, and the
+# snapshot only exists in installed copies.
 WEB_SOAR = Path(__file__).resolve().parents[1] / "web" / "soar"
-SHADER_PATH = WEB_SOAR / "raymarch.wgsl"
-OCEAN_DIR = WEB_SOAR / "ocean"
+_SNAPSHOT = Path(__file__).resolve().parent / "_soar_snapshot"
+SOAR_DIR = WEB_SOAR if WEB_SOAR.is_dir() else _SNAPSHOT
+SHADER_PATH = SOAR_DIR / "raymarch.wgsl"
+OCEAN_DIR = SOAR_DIR / "ocean"
 
 
 def read_shader() -> str:
-    """The shader source, or a diagnosis of why there isn't any.
-
-    `web/soar/` sits beside the package rather than inside it, so this
-    resolves only in a source checkout. `pip install`, from PyPI or from git,
-    copies just `cloudyview/` and leaves the shader behind — at which point
-    the bare FileNotFoundError names a path under site-packages and reads like
-    a bug in the library. Say what actually happened instead.
-    """
+    """The shader source, or a diagnosis of why there isn't any."""
     if not SHADER_PATH.exists():
         raise FileNotFoundError(
             f"the ray-marching shader is missing: {SHADER_PATH}\n"
-            "cloudyview renders from web/soar/raymarch.wgsl, which lives "
-            "beside the package rather than inside it, so witness and soar "
-            "need a source checkout:\n"
+            "cloudyview renders from web/soar/raymarch.wgsl in a source "
+            "checkout, or from a build-time snapshot inside the installed "
+            "package. Neither was found, so this install is broken — "
+            "reinstall from PyPI, or work from a checkout:\n"
             "    git clone https://github.com/thomasdewitt/cloudyview\n"
             "    cd cloudyview && uv sync\n"
-            "A pip install of the package alone does not carry the shader. "
-            "glimpse and behold do not need it and still work.")
+            "glimpse and behold do not need the shader and still work.")
     return SHADER_PATH.read_text()
 
 UNIFORM_ROWS = 23

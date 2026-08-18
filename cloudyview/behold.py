@@ -516,7 +516,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
         sys.exit(1)
     except ImportError as e:
         print(f"✗ Mitsuba 3 required but not installed: {e}", file=sys.stderr)
-        print("  Install with: pip install mitsuba drjit", file=sys.stderr)
+        print("  Install with: pip install 'cloudyview[behold]'", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"✗ Unexpected error: {e}", file=sys.stderr)

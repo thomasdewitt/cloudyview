@@ -32,12 +32,17 @@ Elevation angles are measured from the horizon:
 
 ## Installation
 
-Install from a source checkout, not from a wheel. `witness` and `soar` render
-from `web/soar/raymarch.wgsl`, which sits beside the package rather than
-inside it — deliberately, so the browser and the Python host share one shader
-and the look cannot drift. A plain `pip install` of the package alone does not
-carry it, and `witness` will say so rather than fail obscurely. `glimpse` and
-`behold` do not need it.
+```bash
+pip install cloudyview            # glimpse and witness
+pip install 'cloudyview[behold]'  # + Mitsuba 3 for path-traced renders
+```
+
+`witness` needs a GPU (WebGPU via wgpu-py). The wheel carries a build-time
+snapshot of the soar shader and ocean tiles; in a source checkout the live
+`web/soar/` files are used instead, so the browser and the Python host always
+share one renderer core.
+
+### Development install
 
 ```bash
 git clone https://github.com/thomasdewitt/cloudyview
@@ -45,18 +50,7 @@ cd cloudyview
 uv sync
 ```
 
-### With pip instead
-
-```bash
-cd /path/to/cloudyview
-pip install -e .
-```
-
-### With optional development tools
-
-```bash
-pip install -e ".[dev]"
-```
+or `pip install -e ".[dev]"`.
 
 ## Library usage
 
@@ -304,16 +298,11 @@ behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth
 - `matplotlib>=3.3`: 2D plotting
 - `xarray>=0.18`: NetCDF file handling with labeled arrays
 - `netCDF4>=1.5`: NetCDF4 file support
+- `wgpu>=0.30`: WebGPU for witness (needs a GPU at run time)
+
 ### Optional Dependencies
 
-- **For witness (volumetric rendering)**: `wgpu>=0.30` and a GPU
-- **For behold (photorealistic rendering)**: `mitsuba>=3.0.0`, `drjit>=0.3.0`
-
-Install all optional dependencies:
-
-```bash
-pip install -e ".[all]"
-```
+- **For behold (photorealistic rendering)**: `mitsuba>=3.0.0`, `drjit>=0.3.0` — `pip install 'cloudyview[behold]'`
 
 ## Mie Phase Function Tables
 

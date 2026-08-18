@@ -35,32 +35,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-radiative-transfer = [
+# behold (Mitsuba path tracing) is the only optional feature:
+# pip install cloudyview[behold]
+behold = [
     "mitsuba>=3.0.0",
     "drjit>=0.3.0",
-]
-visualization = [
-    "scikit-image>=0.19.0",
-    "scipy>=1.7.0",
-    "pyvista>=0.37.0",
 ]
 dev = [
     "pytest>=6.0",
-    "black>=21.0",
-    "isort>=5.0",
-    "flake8>=3.9",
     "imageio>=2.28",
     "pillow>=9.0",
-]
-all = [
-    "mitsuba>=3.0.0",
-    "drjit>=0.3.0",
-    "scikit-image>=0.19.0",
-    "scipy>=1.7.0",
-    "pytest>=6.0",
-    "black>=21.0",
-    "isort>=5.0",
-    "flake8>=3.9",
 ]
 
 [project.scripts]
@@ -80,13 +64,8 @@ scaleinvariance = { path = "../scaleinvariance", editable = true }
 [tool.setuptools.packages.find]
 include = ["cloudyview*"]
 
-[tool.black]
-line-length = 88
-target-version = ["py38", "py39", "py310", "py311"]
-
-[tool.isort]
-profile = "black"
-line_length = 88
+[tool.setuptools.package-data]
+cloudyview = ["Mie_tables/*_normalized.txt"]
 
 [tool.pytest.ini_options]
 markers = [
