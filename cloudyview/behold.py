@@ -41,17 +41,15 @@ from .cli_utils import (
 
 
 # Quality presets: resolution, samples per pixel, path-depth budgets.
+# Depths cut hard 2026-08-18 (Thomas: "It's honestly simply not tractable
+# ever as it is"): clouds bury most of the path budget in dense multiple
+# scattering, so min through high now truncate early and eat the bias.
+# 'max' keeps the deep budgets for when time doesn't matter.
 QUALITY_MAP = {
-    'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 2, 'max_depth': 4},
-    'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 4, 'max_depth': 16},
-    'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 16, 'max_depth': 64},
-    # high trimmed 2026-07-07 (Thomas: "turn down resolution a bit, spp a
-    # bit, perhaps max depth"): 1200x800->960x640, spp 2048->1024,
-    # max_depth 96->64, and rr_depth 64->16 — Russian roulette is unbiased,
-    # so earlier termination trades a little variance (where the image is
-    # brightest/smoothest) for a large cut in mean path length in dense
-    # cloud. Old settings preserved as 'max' for when time doesn't matter.
-    'high': {'resolution': (960, 640), 'spp': 1024, 'rr_depth': 16, 'max_depth': 64},
+    'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 1, 'max_depth': 2},
+    'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 2, 'max_depth': 4},
+    'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 4, 'max_depth': 8},
+    'high': {'resolution': (960, 640), 'spp': 1024, 'rr_depth': 4, 'max_depth': 8},
     'max': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96},
 }
 
@@ -384,10 +382,11 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     ice : str, optional
         Separate NetCDF file with the ice variable (SAM LPT split-file style)
     quality : str
-        Render quality: 'min' (150x100, spp=1, max_depth=4, rr_depth=2),
-        'low' (300x200, spp=32, max_depth=16, rr_depth=4),
-        'medium' (600x400, spp=512, max_depth=64, rr_depth=16, default),
-        'high' (1200x800, spp=2048, max_depth=96, rr_depth=64),
+        Render quality: 'min' (150x100, spp=1, max_depth=2, rr_depth=1),
+        'low' (300x200, spp=32, max_depth=4, rr_depth=2),
+        'medium' (600x400, spp=512, max_depth=8, rr_depth=4, default),
+        'high' (960x640, spp=1024, max_depth=8, rr_depth=4),
+        'max' (1200x800, spp=2048, max_depth=96, rr_depth=64),
         or 'custom' (user-specified via --spp, --size, --max-depth, --rr-depth)
     output : str, optional
         Output directory for renders
@@ -549,10 +548,11 @@ def cli():
               --gpu     Use CUDA GPU backend.
 
             Quality presets:
-              - min:    150x100, 1 spp,   max_depth=4,   rr_depth=2
-              - low:    300x200, 32 spp,  max_depth=16,  rr_depth=4
-              - medium: 600x400, 512 spp, max_depth=64,  rr_depth=16
-              - high:   1200x800, 2048 spp, max_depth=96, rr_depth=64
+              - min:    150x100, 1 spp,   max_depth=2,  rr_depth=1
+              - low:    300x200, 32 spp,  max_depth=4,  rr_depth=2
+              - medium: 600x400, 512 spp, max_depth=8,  rr_depth=4
+              - high:   960x640, 1024 spp, max_depth=8, rr_depth=4
+              - max:    1200x800, 2048 spp, max_depth=96, rr_depth=64
 
             Camera and sun conventions:
               - Coordinates are meteorological: +x east, +y north, +z up.
@@ -603,10 +603,11 @@ def cli():
         default='medium',
         choices=['min', 'low', 'medium', 'high', 'max', 'custom'],
         help=(
-            "Render quality: min (150x100, spp=1, max_depth=4, rr_depth=2), "
-            "low (300x200, spp=32, max_depth=16, rr_depth=4), "
-            "medium (600x400, spp=512, max_depth=64, rr_depth=16, default), "
-            "high (1200x800, spp=2048, max_depth=96, rr_depth=64), "
+            "Render quality: min (150x100, spp=1, max_depth=2, rr_depth=1), "
+            "low (300x200, spp=32, max_depth=4, rr_depth=2), "
+            "medium (600x400, spp=512, max_depth=8, rr_depth=4, default), "
+            "high (960x640, spp=1024, max_depth=8, rr_depth=4), "
+            "max (1200x800, spp=2048, max_depth=96, rr_depth=64), "
             "custom (use --spp, --size, --max-depth, --rr-depth)"
         )
     )

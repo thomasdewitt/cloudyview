@@ -23,7 +23,14 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
 
 ## Key Commands
 
-- `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render (Mitsuba 3)
+- `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render
+  (Mitsuba 3). Deep path budgets are catastrophically slow on real clouds:
+  with the old depths (max_depth=64+, rr_depth=16+), medium and high renders
+  of reasonable cloud fields were on the order of MONTHS (Thomas, 2026-08-18:
+  "I am seeing months for medium and high, order of magnitude"). The presets
+  min–high therefore truncate at max_depth≤8; only 'max' keeps deep budgets.
+  Never quote or estimate behold render times; if depth settings come up,
+  assume intractability until Thomas's own timings say otherwise.
 - `glimpse <file.nc>` - Quick 2D visual-albedo top view
 - `witness <file.nc>` - Volumetric ray-marched render. Drives the same
   `cloudyview/soar/raymarch.wgsl` the browser does (web/soar/raymarch.wgsl is

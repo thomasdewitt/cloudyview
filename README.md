@@ -93,12 +93,17 @@ Arguments:
 
 Quality tiers:
 
-- `min`: 150×100, spp=1, max_depth=4, rr_depth=2 (instant preview)
-- `low`: 300×200, spp=32, max_depth=16, rr_depth=4 (quick preview)
-- `medium`: 600×400, spp=512, max_depth=64, rr_depth=16 (balanced, default)
-- `high`: 960×640, spp=1024, max_depth=64, rr_depth=16 (high quality)
-- `max`: 1200×800, spp=2048, max_depth=96, rr_depth=64 (production quality)
+- `min`: 150×100, spp=1, max_depth=2, rr_depth=1
+- `low`: 300×200, spp=32, max_depth=4, rr_depth=2
+- `medium`: 600×400, spp=512, max_depth=8, rr_depth=4 (default)
+- `high`: 960×640, spp=1024, max_depth=8, rr_depth=4
+- `max`: 1200×800, spp=2048, max_depth=96, rr_depth=64 (untruncated path depths)
 - `custom`: User-specified spp, resolution, and/or max_depth/rr_depth
+
+Clouds bury most of a path tracer's budget in dense multiple scattering, so
+`min` through `high` truncate paths early (`max_depth=8` or less) and accept
+the darkening bias; `max` keeps the deep budgets and is not tractable for
+most cloud fields.
 
 Options:
 
