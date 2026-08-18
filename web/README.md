@@ -45,7 +45,7 @@ megabytes of baked demos. Stage exactly what ships:
 
     uv run python tools/stage_deploy.py --clean
 
-That writes `dist/thought-cloud/soar/` — one self-contained folder, demos
+That writes `dist/soar/` — one self-contained folder, demos
 included, with the app's filenames content-fingerprinted so the CDN cannot
 serve a stale mix of modules. See [`docs/deploy.md`](../docs/deploy.md) for
 where it goes and what to check afterwards.

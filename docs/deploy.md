@@ -106,6 +106,12 @@ test -f soar/demos/index.json || {
 
 ## Cloudflare
 
+Since the 2026-08-18 move to the site root, the old URL
+`/thought-cloud/soar/` no longer exists in the bucket. Anyone holding the
+soft-launch link gets a 404 unless a Cloudflare redirect rule maps
+`/thought-cloud/soar/*` → `/soar/$1` (301). Worth adding at the dashboard
+when deploying this move.
+
 Nothing to change, and one thing that got simpler: soar no longer probes for a
 demo root, so there is no request whose 404 depended on your rewrite rules
 behaving. There is one root, relative to the page.

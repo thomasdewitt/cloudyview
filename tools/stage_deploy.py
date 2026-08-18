@@ -556,17 +556,20 @@ def stage(out_root: Path, clean: bool) -> dict:
             "demo set is gitignored — bake it with tools/prebake_demos.py, or "
             "regenerate just the index with --index-only.")
 
-    site_root = out_root
-    app_out = site_root / APP_DIRNAME
+    # Clean and existence checks target <out>/soar, never <out> itself:
+    # --out is dist/ by default and may hold unrelated artifacts (PyPI
+    # wheels), or point at a website checkout. Deleting the whole root
+    # would take those with it.
+    app_out = out_root / APP_DIRNAME
 
-    if site_root.exists():
+    if app_out.exists():
         if not clean:
             raise StagingError(
-                f"{site_root} already exists. Staging into it would mix this "
+                f"{app_out} already exists. Staging into it would mix this "
                 "run's fingerprinted names with a previous run's leftovers, "
                 "which is exactly the stale-asset failure this tool exists to "
                 "prevent. Re-run with --clean.")
-        shutil.rmtree(site_root)
+        shutil.rmtree(app_out)
 
     all_files = collect_soar_files()
     targets = fingerprint_targets(all_files)

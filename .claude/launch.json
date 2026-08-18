@@ -26,7 +26,7 @@
       "name": "soar-dist",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8799",
-                      "--directory", "dist/thought-cloud"],
+                      "--directory", "dist"],
       "port": 8799,
       "url": "http://localhost:8799"
     }
