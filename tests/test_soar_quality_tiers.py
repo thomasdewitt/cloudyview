@@ -161,9 +161,10 @@ def test_hold_ladders_climb_from_the_flight_scale_to_the_hold_scale(js):
             js["presets"][tier]["renderScale"], js["holdScale"][tier]), tier
         if len(rungs) > 1:
             assert rungs[-1]["stepFactor"] == js["presets"]["high"]["stepFactor"], tier
-    assert [r["scale"] for r in js["built"]["minimal"]] == [0.125, 0.25, 0.5]
-    assert [r["scale"] for r in js["built"]["low"]] == [0.3, 0.5, 0.75]
-    assert [r["scale"] for r in js["built"]["medium"]] == [0.6, 1.0]
+    # The 2026-08-18 hand-tuned defaults (Thomas's panel values).
+    assert [r["scale"] for r in js["built"]["minimal"]] == [0.125, 0.25]
+    assert [r["scale"] for r in js["built"]["low"]] == [0.3, 0.5]
+    assert [r["scale"] for r in js["built"]["medium"]] == [0.7, 1.0]
     assert len(js["built"]["high"]) == len(js["built"]["max"]) == 1
 
 
@@ -205,14 +206,17 @@ def test_cheaper_tiers_may_smooth_deeper(js):
     assert js["alphaFloor"]["high"] / js["alphaFloor"]["minimal"] == pytest.approx(2.0)
 
 
-def test_high_keeps_the_motion_blend_it_has_always_had(js):
-    """Changing the units must not change the look on the reference tier."""
+def test_high_smoothing_default_stays_inside_its_own_range(js):
+    """High's default was pinned to the pre-slider legacy alpha until
+    2026-08-18, when Thomas retuned every tier by hand — the hand-set values
+    supersede the legacy-look guarantee. What must still hold: the default
+    maps inside the tier's own alpha range, so the slider can move it both
+    ways."""
     high = js["alphaFor"]["high"]
     at_default = js["defaultSmoothing"]["high"]
     span = js["alphaAtZero"] - js["alphaFloor"]["high"]
-    assert js["alphaAtZero"] - at_default * span == pytest.approx(
-        js["legacyAlpha"], abs=0.005)
-    assert high[0] > js["legacyAlpha"] > high[-1]
+    alpha = js["alphaAtZero"] - at_default * span
+    assert high[0] > alpha > high[-1]
 
 
 def test_cheaper_tiers_get_thicker_air_and_coarser_distance(js):

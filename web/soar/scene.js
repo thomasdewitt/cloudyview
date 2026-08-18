@@ -50,6 +50,36 @@ async function fetchBytes(url, onProgress, decompress = null) {
 }
 
 /**
+ * Open a URL as a stream of decompressed bytes, without ever buffering the
+ * whole body. Progress counts bytes off the wire (compressed), for the same
+ * reason as in fetchBytes above.
+ */
+async function fetchDecompressedStream(url, onProgress, decompress = null) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Could not fetch ${url} (HTTP ${response.status}).`);
+  }
+  if (!response.body) {
+    throw new Error(`Could not fetch ${url}: the response has no body.`);
+  }
+  const total = Number(response.headers.get("content-length")) || 0;
+  let received = 0;
+  let stream = response.body;
+  if (onProgress && total) {
+    stream = stream.pipeThrough(new TransformStream({
+      transform(chunk, controller) {
+        received += chunk.length;
+        onProgress(received / total);
+        controller.enqueue(chunk);
+      },
+    }));
+  }
+  return decompress
+    ? stream.pipeThrough(new DecompressionStream(decompress))
+    : stream;
+}
+
+/**
  * The ocean surface: a periodic ~100 m tile of multifractal normals with a
  * renormalized mip chain. Field-independent, so it ships with the tool and is
  * loaded once per session.
@@ -132,31 +162,79 @@ export function writeVolumeSlab(device, texture, data, origin, size) {
 export const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
 
 /**
- * Upload a whole field, in x-plane runs.
+ * Upload a whole field straight off a byte stream, one slab at a time.
  *
  * NOT one writeTexture call. Firefox rejects a source view larger than 2 GB
  * outright ("ArrayBufferView ... larger than 2 GB"), which the 4.2 GB STEAM
- * desert field walked straight into — and even under the ceiling, one call
- * with several gigabytes behind it is the staging-memory problem above in its
- * worst form. The file path never hit either, because ingest has always
- * uploaded slab by slab; this is the demo path learning the same lesson.
+ * desert field walked straight into. x is the texture's depth axis
+ * (width=nz, height=ny, depth=nx), so a run of x planes is contiguous in
+ * the source and needs no repacking.
  *
- * x is the texture's depth axis (width=nz, height=ny, depth=nx), so a run of
- * x planes is contiguous in the source and needs no repacking.
+ * The demo path used to inflate the entire gzipped volume into one JS
+ * ArrayBuffer and only then upload — which for the 4.15 GB desert field,
+ * on top of the 4.15 GB texture, is more than an 8 GB machine has, and
+ * Chrome kills the fetch mid-stream with a bare "Failed to fetch". Here the
+ * JS heap never holds more than one UPLOAD_DRAIN_BYTES slab: the texture is
+ * the only multi-gigabyte allocation, which is what lets a field of nearly
+ * the machine's memory load at all.
+ *
+ * `stream` yields the DECOMPRESSED bytes, fp16, z fastest (the texture's
+ * own layout, see writeVolumeSlab). Throws if the stream ends short or runs
+ * long against `shape`.
  */
-export async function writeWholeVolume(device, texture, words, shape,
-                                       onProgress) {
+export async function streamWholeVolume(device, texture, stream, shape,
+                                        onProgress) {
   const [nx, ny, nz] = shape;
-  const perPlane = ny * nz;                       // elements in one x plane
-  const planes = Math.max(1, Math.floor(UPLOAD_DRAIN_BYTES / (perPlane * 2)));
-  for (let x0 = 0; x0 < nx; x0 += planes) {
-    const depth = Math.min(planes, nx - x0);
+  const perPlaneBytes = ny * nz * 2;              // one x plane, fp16
+  const planes = Math.max(1, Math.floor(UPLOAD_DRAIN_BYTES / perPlaneBytes));
+  const slab = new Uint8Array(planes * perPlaneBytes);
+  let filled = 0;                                 // bytes waiting in `slab`
+  let x0 = 0;                                     // next x plane to write
+
+  const flush = async () => {
+    const depth = filled / perPlaneBytes;         // integral by construction
+    if (x0 + depth > nx) {
+      throw new Error(
+        `the volume stream carried more than the ${nx} x planes the ` +
+        "metadata promised — wrong file behind the URL?");
+    }
     writeVolumeSlab(
       device, texture,
-      words.subarray(x0 * perPlane, (x0 + depth) * perPlane),
+      new Uint16Array(slab.buffer, 0, filled / 2),
       [0, 0, x0], [nz, ny, depth]);
     await device.queue.onSubmittedWorkDone();
-    onProgress?.((x0 + depth) / nx);
+    x0 += depth;
+    filled = 0;
+    onProgress?.(x0 / nx);
+  };
+
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      let off = 0;
+      while (off < value.length) {
+        const take = Math.min(value.length - off, slab.length - filled);
+        slab.set(value.subarray(off, off + take), filled);
+        filled += take;
+        off += take;
+        if (filled === slab.length) await flush();
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (filled % perPlaneBytes !== 0) {
+    throw new Error(
+      `the volume stream ended mid-plane: ${filled % perPlaneBytes} stray ` +
+      `bytes after ${x0} of ${nx} x planes — truncated download?`);
+  }
+  if (filled) await flush();
+  if (x0 !== nx) {
+    throw new Error(
+      `the volume stream carried ${x0} x planes where the metadata ` +
+      `promised ${nx} — truncated download?`);
   }
 }
 
@@ -261,32 +339,51 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
   }
   const shape = meta.volume.shape_xyz;
 
-  // The volume ships gzipped. It is fp16 either way — the texture is
-  // r16float — so this is purely wire size, and DecompressionStream means a
-  // dumb static host works without any Content-Encoding negotiation.
-  const volumeFile = meta.volume.file ?? "volume.bin";
-  const gzipped = meta.volume.compression === "gzip";
-  const volumeBytes = await fetchBytes(
-    `${baseUrl}/${volumeFile}`,
-    (f) => progress?.("Downloading the cloud field…", f * 0.8),
-    gzipped ? "gzip" : null);
-  const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
-
-  progress?.("Loading the ocean surface…", 0.85);
-  const oceanTile = await ocean();
-
-  progress?.("Uploading to the GPU…", 0.92);
+  // The texture is created BEFORE the download so the volume can stream
+  // straight onto the card slab by slab (streamWholeVolume): the JS heap
+  // never holds the inflated field, which for the multi-gigabyte demos is
+  // the difference between loading and the browser running out of memory.
+  // It also means a field too large for this GPU fails here, in one
+  // sentence, before a single volume byte is downloaded.
   const volumeTexture = await createVolumeTexture(
     device, shape, "the demo cloud field");
   // From here the volume exists on the card and nothing else holds it. Any
   // throw before the Scene takes ownership has to give it back.
   let nestDummy = null;
   try {
-    const words = new Uint16Array(volumeBytes.buffer, volumeBytes.byteOffset,
-                                  volumeBytes.byteLength / 2);
-    await writeWholeVolume(
-      device, volumeTexture, words, shape,
-      (f) => progress?.("Uploading to the GPU…", 0.92 + 0.07 * f));
+    // The volume ships gzipped. It is fp16 either way — the texture is
+    // r16float — so this is purely wire size, and DecompressionStream means
+    // a dumb static host works without any Content-Encoding negotiation.
+    const volumeFile = meta.volume.file ?? "volume.bin";
+    const gzipped = meta.volume.compression === "gzip";
+    try {
+      await streamWholeVolume(
+        device, volumeTexture,
+        await fetchDecompressedStream(
+          `${baseUrl}/${volumeFile}`,
+          (f) => progress?.("Downloading the cloud field…", f * 0.9),
+          gzipped ? "gzip" : null),
+        shape);
+    } catch (err) {
+      // The browser's own message for a stream that dies is a bare
+      // "Failed to fetch", which reads like a server problem. On a machine
+      // with little free memory it usually is not one.
+      const gb = ((meta.volume.bytes_uncompressed
+                   ?? shape[0] * shape[1] * shape[2] * 2) / 2 ** 30);
+      const wrapped = new Error(
+        `Downloading '${meta.id}' failed midway: ` +
+        `${String(err && err.message || err)}`);
+      wrapped.advice =
+        `This field is ${gb.toFixed(1)} GB unpacked. If the connection is ` +
+        "fine, the machine likely ran short of memory — a coarse variant " +
+        "of the same field is in the list, or retry after closing other " +
+        "tabs.";
+      throw wrapped;
+    }
+
+    const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
+    progress?.("Loading the ocean surface…", 0.95);
+    const oceanTile = await ocean();
     nestDummy = createNestDummy(device);
 
     const bmin = meta.volume.bmin;

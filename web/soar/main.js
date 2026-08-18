@@ -234,8 +234,13 @@ async function enterViewerOnce(source) {
   showLoading("Starting WebGPU…");
   let device = null;
   try {
-    const { adapter } = await (gpuProbe ??= probeGPU());
-    device = await acquireDevice(adapter);
+    await (gpuProbe ??= probeGPU());   // the capability gate, run once
+    // A FRESH adapter for every session: WebGPU adapters are single-use —
+    // requestDevice on one that already made a device throws ("adapter is
+    // consumed"). Reusing the probe's adapter across sessions meant the
+    // second session after a Back — e.g. retrying a smaller demo after a
+    // failed load — could never start until a reload.
+    device = await acquireDevice(await acquireAdapter());
     // `session` rather than the module-level `viewer`: this closure must act
     // on the viewer that owns THIS device, whatever has happened since. An
     // old device dying is not a reason to stop a new session.

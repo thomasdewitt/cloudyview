@@ -1428,7 +1428,14 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     // wedge's strength. The ceiling matters at the top of the slider: a gain
     // above 1 would otherwise push the skyline past pure horizon colour and
     // start subtracting zenith blue back out.
-    let haze = u.flags.z;
+    // Clamped at zero: the aerosol coordinate runs NEGATIVE past a 70 km
+    // e-folding (the slider's clear end reaches 200 km), and these sky
+    // cosmetics are written against a non-negative haze — circumsolar_
+    // amplitude takes pow(haze/anchor, 1.4), which is NaN for haze < 0, and
+    // one NaN in sky radiance is a black screen. Extinction handles the
+    // negative range itself (aerialBetaPerKm is sign-preserving); the sky's
+    // wedge and lobe just hold their aerosol-free look from zero down.
+    let haze = max(u.flags.z, 0.0);
     let zc = t / sky_haze_elevation_sigma(haze);
     let w_horizon = min(
         one_minus * one_minus * one_minus * exp(-zc * zc)

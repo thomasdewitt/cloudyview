@@ -82,8 +82,17 @@ export const HAZE_MAX_E_FOLDING_KM = 200.0;
 // (see DEFAULT_HOLD_MODE) rather than the app's, and two machines that
 // auto-pick different tiers will show different weather. Thomas asked for it
 // with that trade named (2026-08-14). A hand-set haze is never overridden.
+// Values are the aerosol coordinate whose sea-level e-folding length is the
+// named distance (hazeFromEFoldingKm in spectral.js — not imported here,
+// that would be circular). Retuned 2026-08-18 to Thomas's hand-set panel
+// values, much clearer across the board; max mirrors high because whatever
+// else max buys, it must never be hazier.
 export const DEFAULT_HAZE_BY_TIER = {
-  max: 1.0, high: 1.0, medium: 1.3, low: 1.6, minimal: 2.0,
+  max: -0.0380,      // 70 km
+  high: -0.0380,     // 70 km
+  medium: 0.4027,    // 25.2 km
+  low: 0.6590,       // 15 km
+  minimal: 1.0905,   // 8 km
 };
 
 // --- engine.py defaults -------------------------------------------------
@@ -227,12 +236,13 @@ export const MOTION_ALPHA_AT_ZERO_SMOOTHING = 0.90;
 export const MOTION_ALPHA_FLOOR_BY_TIER = {
   max: 0.30, high: 0.30, medium: 0.24, low: 0.20, minimal: 0.15,
 };
-// High's default is 0.53 because that is exactly DEFAULT_MOTION_BLEND_ALPHA
-// (0.58) expressed in the new units — the look nobody asked to change.
+// Retuned 2026-08-18 to Thomas's hand-set panel values. Medium smooths LESS
+// than high on purpose: medium flies at a lower render scale, and smoothing
+// stacked on upscale blur reads as smear.
 export const DEFAULT_MOTION_SMOOTHING_BY_TIER = {
   // Max is the one tier that does not need smoothing to hide sampling noise:
   // it has already paid for eight samples by the time the frame is shown.
-  max: 0.30, high: 0.53, medium: 0.65, low: 0.82, minimal: 1.0,
+  max: 0.30, high: 0.55, medium: 0.50, low: 0.60, minimal: 0.80,
 };
 
 export function motionAlphaForSmoothing(smoothing, tier) {
@@ -266,8 +276,11 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // marched twice as finely as the tuned constants alone would ask for
 // (Thomas, 2026-08-15). The two tiers are equal here on purpose: whatever
 // else max buys, it must never march more coarsely than high.
+// Lower tiers retuned 2026-08-18 (Thomas's hand-set values). Minimal's
+// default sits ON the slider ceiling: coarser is off the table there,
+// finer is the only direction that changes anything.
 export const DEFAULT_LOD_STRENGTH_BY_TIER = {
-  max: 0.5, high: 0.5, medium: 1.35, low: 1.7, minimal: 2.2,
+  max: 0.5, high: 0.5, medium: 1.05, low: 2.0, minimal: 3.0,
 };
 // The floor is below the default rather than equal to it: a slider whose
 // default sits on its own end stop cannot be used to ask for anything finer,
@@ -348,7 +361,7 @@ export const QUALITY_PRESETS = {
   high:   { name: "high",   label: "High",   renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 1,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
-  medium: { name: "medium", label: "Medium", renderScale: 0.60,
+  medium: { name: "medium", label: "Medium", renderScale: 0.70,
             stepFactor: 2.5, lightStepFactor: 4.0, sppPerFrame: 1,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
   low:    { name: "low",    label: "Low",    renderScale: 0.30,
@@ -438,7 +451,7 @@ export const QUALITY_HOLD_RUNGS = {
 // sampling. Equal to the flight scale on High and Max, which is why their
 // ladders collapse to one rung and a hold there merely accumulates.
 export const HOLD_RENDER_SCALE_BY_TIER = {
-  max: 1.0, high: 1.0, medium: 1.0, low: 0.75, minimal: 0.5,
+  max: 1.0, high: 1.0, medium: 1.0, low: 0.5, minimal: 0.25,
 };
 // Accumulated frames to spend on a rung before climbing to the next. Small,
 // because the point of the low rungs is to show *something* settled while the

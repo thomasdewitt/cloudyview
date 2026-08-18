@@ -12,11 +12,20 @@ exactly the kind of code that is obviously right and off by one: a wrong
 subarray window writes the field shifted, and a shifted extinction field still
 renders a perfectly plausible cloud. Nothing downstream would report it.
 
-This drives the real writeWholeVolume under node against a stub device that
+Since 2026-08-18 the demo path STREAMS the volume (streamWholeVolume): the
+decompressed bytes go from the network straight into slab-sized writeTexture
+calls, so the JS heap never holds the whole field — which is what lets a
+4.15 GB demo load on an 8 GB machine at all. The chunking arithmetic is the
+same, with one extra hazard: network chunks land at arbitrary offsets
+relative to planes and slabs, so the driver below feeds the stream in
+prime-sized pieces to put a chunk edge everywhere.
+
+This drives the real streamWholeVolume under node against a stub device that
 records every call, then checks the calls TILE the volume: each x plane written
 once, in order, with the source bytes that plane actually holds. It also pins
 the two properties the chunking exists for — no call over the ceiling, and a
-drain between chunks so staging memory cannot pile up unbounded.
+drain between chunks so staging memory cannot pile up unbounded — and that a
+truncated stream fails loudly instead of leaving a silently short field.
 
 Needs node. No GPU: this is arithmetic over a recorded call list.
 """
@@ -42,9 +51,10 @@ pytestmark = pytest.mark.skipif(
 FIREFOX_VIEW_CEILING = 2 * 1024**3
 
 _JS = textwrap.dedent("""
-    import { writeWholeVolume, UPLOAD_DRAIN_BYTES } from "%s";
+    import { streamWholeVolume, UPLOAD_DRAIN_BYTES } from "%s";
 
     const [nx, ny, nz] = JSON.parse(process.env.SHAPE);
+    const truncate = Number(process.env.TRUNCATE || 0);
 
     // Each element fingerprints its own flat index, so a slab taken from the
     // wrong window shows up as values that do not match where it landed.
@@ -77,21 +87,39 @@ _JS = textwrap.dedent("""
       },
     };
 
+    // The network hands the decompressor whatever chunk sizes it likes, so
+    // feed the stream in PRIME-sized pieces: chunk edges land at every
+    // offset relative to planes and slabs, which is where a wrong copy
+    // window would hide.
+    const bytes = new Uint8Array(
+      words.buffer, 0, words.byteLength - truncate);
+    const CHUNK = 65521;
+    const stream = new ReadableStream({
+      start(controller) {
+        for (let off = 0; off < bytes.length; off += CHUNK) {
+          controller.enqueue(
+            bytes.subarray(off, Math.min(off + CHUNK, bytes.length)));
+        }
+        controller.close();
+      },
+    });
+
     const progress = [];
-    await writeWholeVolume(device, {}, words, [nx, ny, nz],
-                           (f) => progress.push(f));
+    await streamWholeVolume(device, {}, stream, [nx, ny, nz],
+                            (f) => progress.push(f));
     process.stdout.write(JSON.stringify(
       { calls, drains, progress, drainBytes: UPLOAD_DRAIN_BYTES }));
 """) % SCENE_JS.as_posix()
 
 
-def upload(shape, tmp_path):
+def upload(shape, tmp_path, truncate=0):
     script = tmp_path / "drive.mjs"
     script.write_text(_JS)
     out = subprocess.run(
         ["node", str(script)], capture_output=True, text=True,
         env={"PATH": "/usr/bin:/bin:/usr/local/bin",
-             "SHAPE": json.dumps(list(shape))})
+             "SHAPE": json.dumps(list(shape)),
+             "TRUNCATE": str(truncate)})
     if out.returncode != 0:
         raise AssertionError(f"node failed:\n{out.stderr}")
     return json.loads(out.stdout)
@@ -167,3 +195,15 @@ def test_progress_runs_to_one(tmp_path):
     assert result["progress"], "no progress was reported"
     assert result["progress"] == sorted(result["progress"])
     assert result["progress"][-1] == 1.0
+
+
+@pytest.mark.parametrize("drop,expected", [
+    # Mid-plane: stray bytes that tile no plane at all.
+    (7, "mid-plane"),
+    # Whole planes short: every byte tiles, but the field is short.
+    (512 * 512 * 2 * 3, "promised"),
+], ids=["mid-plane", "whole-planes-short"])
+def test_a_truncated_stream_fails_loudly(drop, expected, tmp_path):
+    """A short download must throw, not leave a silently truncated field."""
+    with pytest.raises(AssertionError, match=expected):
+        upload((256, 512, 512), tmp_path, truncate=drop)

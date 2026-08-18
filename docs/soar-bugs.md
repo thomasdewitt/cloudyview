@@ -112,30 +112,26 @@ dies.
 
 ---
 
-## 20. After a GPU out-of-memory, the next load misbehaves until a reload
+## 21. Haze distance past ~70 km blacks the screen
 
-**Status:** open, reported 2026-08-15 on macOS against the deployed
-seven-demo build. Thomas:
+**Status:** open, reported 2026-08-18 on macOS (M1, 8 GB) against the
+quality panel's haze slider. Thomas: *"there is also a bug where beyond
+about 70 km for the haze, the screen goes black."*
 
-> "on mac, if I attempt to load a big scene, i get GPU OOM error (fair
-> enough, and shown well), but then i try another and i get weird errors and
-> have to reload. can reproduce on request."
+Suggestive fact: 70 km is where the aerosol coordinate crosses ZERO —
+`hazeFromEFoldingKm(70) ≈ -0.038`, and the slider deliberately runs past
+haze 0 toward the 200 km Rayleigh end (`HAZE_MIN` in spectral.js is
+negative). So the first suspects are consumers of haze that assume it is
+non-negative: `haze * Math.sqrt(Math.abs(haze))` in aerialBetaPerKm is
+sign-preserving on purpose, but anything downstream taking `pow(haze, x)`,
+`log(haze)`, or a division by a beta that has crossed zero would produce a
+NaN, and a NaN anywhere in the tone map is a black screen.
 
-**So the OOM itself is working as intended** — `guardAllocation` catches it,
-names the field and its size, and the failure panel says what to do. The bug
-is the recovery: the session does not come back clean, and only a reload
-fixes it.
-
-**Next step: get the error text.** Thomas can reproduce on request and has
-offered the actual message, so this entry does not carry a list of candidate
-causes — theorising from a symptom when the fact is one question away is how
-a log fills up with readings that later have to be argued down. Reproduce,
-capture the console verbatim, then diagnose.
-
-**One thing ruled out already, because it was free:** our own teardown
-tripping the device-lost reporter. `watchDevice` returns early on
-`info.reason === "destroyed"`, so the `device.destroy()` on the failure path
-does not itself raise a second "GPU device was lost" panel.
-
-**Not to be fixed by making the OOM quieter.** The panel is right; it is the
-state left behind it that is wrong.
+**Candidate fix landed 2026-08-18, same day:** `circumsolar_amplitude` takes
+`pow(haze / HAZE_ANCHOR, 1.4)`, which is NaN in WGSL for negative haze.
+sky_radiance now clamps its haze read at zero (raymarch.wgsl) — extinction
+keeps the sign-preserving negative range, the sky cosmetics hold their
+aerosol-free look below zero. Matters doubly because the high/max tiers now
+DEFAULT to 70 km (aerosol -0.038), on the wrong side of the cliff. Needs
+verification on the Mac against the slider's whole clear end; verified here
+only that the shader compiles and the golden views are unchanged.
