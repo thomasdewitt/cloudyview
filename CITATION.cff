@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "DeWitt"
+    given-names: "Thomas D"
+    email: "thomas.dewitt@utah.edu"
+    orcid: "https://orcid.org/0009-0003-9591-1690"
+title: "cloudyview: 3D cloud field visualization with radiative transfer"
+version: "0.1.0"
+date-released: "2026-08-18"
+url: "https://github.com/thomasdewitt/cloudyview"
+repository-code: "https://github.com/thomasdewitt/cloudyview"
+license: MIT
+keywords:
+  - "clouds"
+  - "visualization"
+  - "radiative-transfer"
+  - "atmospheric-science"
+  - "ray-marching"
+  - "path-tracing"
+  - "webgpu"
+  - "python"
+abstract: >-
+  CloudyView renders 3D cloud condensate fields (from LES, cloud-resolving
+  models, or synthetic cascades) at three levels of physical fidelity:
+  glimpse computes column optical depth for a quick satellite-like view,
+  witness ray-marches the volume on GPU with visually tuned multiple
+  scattering, and behold path-traces it with Mitsuba 3 using Mie scattering
+  phase functions and a physically based sky. The same WGSL ray marcher
+  also powers Soar, a browser-based real-time fly-through.
