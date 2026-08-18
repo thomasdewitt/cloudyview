@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>menu check — real UI, stub app</title>
+<link rel="stylesheet" href="../soar/viewer.css">
+<style>
+  body { margin: 0; min-height: 100vh;
+         background: linear-gradient(#3b6ea8, #9fc0d8 55%, #cbd3c8); }
+  #log { position: fixed; left: 12px; top: 12px; z-index: 99;
+         font: 12px/1.5 ui-monospace, monospace; color: #fff;
+         background: rgba(0,0,0,.55); padding: 8px 10px; white-space: pre; }
+</style>
+<div id="root"></div>
+<div id="log"></div>
+<script type="module">
+import { UI } from "../soar/ui.js";
+import * as K from "../soar/constants.js";
+
+const calls = [];
+const say = () => { document.getElementById("log").textContent =
+  calls.slice(-8).join("\n") || "(no calls yet)"; };
+const note = (s) => { calls.push(s); say(); };
+
+const app = {
+  sunZenith: 42, sunElevation: 48, sunAzimuth: 135, sunCompass: "SE",
+  minimap: true, minimapMode: "corner", flyerLabel: "paper airplane",
+  availableFlyers: ["dart"], isFullscreen: false, sourceLabel: "TWPICE.nc",
+  motionSmoothing: 0.5, exposure: 1.0, autoExposure: true,
+  toneMapGamma: 2.2, haze: 1.0, lodStrength: 1.0,
+  toneMapWhitePoint: 12.0, contrast: 1.0,
+  camera: { fov: 60 },
+  scene: { nested: false, nestCoverageFraction: () => 0 },
+  renderer: { qualityTier: "high", qualityIsCustom: false, periodic: true,
+              flightRenderScale: 1.0, holdRenderScale: 1.0,
+              dtView: 8, dtViewNest: 2 },
+  setExposure(v) { this.exposure = v;
+                   if (this.autoExposure) this.setAutoExposure(false);
+                   note(`setExposure(${v.toFixed(2)})`); },
+  setAutoExposure(on) { this.autoExposure = Boolean(on);
+                        note(`setAutoExposure(${on})`); },
+  togglePeriodic() { this.renderer.periodic = !this.renderer.periodic;
+                     note("togglePeriodic"); },
+  setHoldMode(m) { note(`setHoldMode(${m})`); },
+};
+for (const name of ["setQualityTier", "setRenderScale", "setHoldRenderScale",
+                    "setMotionSmoothing", "setToneMapGamma", "setHaze",
+                    "setLodStrength", "setToneMapWhitePoint", "setContrast",
+                    "setFov", "setSun", "toggleMinimap", "cycleFlyer",
+                    "toggleFullscreen", "pickFile", "leave", "resume"]) {
+  app[name] ??= (...a) => note(`${name}(${a.join(",")})`);
+}
+
+const ui = new UI(document.getElementById("root"), app);
+globalThis.ui = ui; globalThis.app = app;
+ui.open(new URLSearchParams(location.search).get("panel") ?? "main");
+say();
+</script>

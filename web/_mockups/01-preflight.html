@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soar — 01 Preflight</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@200;300;400;500&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ink: #eaf0f6;
+  --dim: #9aa9b8;
+  --faint: #5d6c7b;
+  --amber: #f2a25c;
+  --line: rgba(234, 240, 246, 0.18);
+  --line-soft: rgba(234, 240, 246, 0.10);
+  --display: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: #05080c;
+  color: var(--ink);
+  font-family: var(--mono);
+  overflow: hidden;
+}
+
+/* --- the flight, filling everything --- */
+#bg { position: fixed; inset: 0; overflow: hidden; }
+#bg video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  filter: saturate(0.92) contrast(1.04);
+  transform: scale(1.04);
+  opacity: 0;
+  transition: opacity 0.85s ease;
+}
+#bg video.on { opacity: 1; }
+#bg::after {
+  content: '';
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(120% 90% at 50% 38%, transparent 26%, rgba(5,8,12,0.55) 70%, rgba(5,8,12,0.93) 100%),
+    linear-gradient(to bottom, rgba(5,8,12,0.72) 0%, transparent 20%, transparent 46%, rgba(5,8,12,0.92) 92%);
+  transition: opacity .6s ease;
+}
+body.previewing #bg::after { opacity: 0.86; }
+#bg::before {
+  content: '';
+  position: absolute; inset: 0; z-index: 2;
+  pointer-events: none;
+  opacity: 0.055;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* --- frame --- */
+.frame {
+  position: relative; z-index: 3;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  padding: 1.6rem 2rem 1.5rem;
+}
+.frame::before, .frame::after {
+  content: '';
+  position: absolute;
+  width: 44px; height: 44px;
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+.frame::before { top: 1.1rem; left: 1.2rem; border-right: 0; border-bottom: 0; }
+.frame::after  { bottom: 1.1rem; right: 1.2rem; border-left: 0; border-top: 0; }
+
+/* --- top strip --- */
+.strip {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.6875rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--faint);
+  animation: fade 1.2s 0.1s both;
+}
+.strip a { color: var(--faint); text-decoration: none; }
+.strip a:hover { color: var(--ink); }
+.strip .sep { color: rgba(234,240,246,0.22); margin: 0 0.6rem; }
+
+/* --- centre --- */
+.center { display: grid; align-content: center; justify-items: center; text-align: center; }
+
+h1 {
+  font-family: var(--display);
+  font-weight: 200;
+  font-size: clamp(4.2rem, 14vw, 12rem);
+  line-height: 0.82;
+  letter-spacing: 0.14em;
+  text-indent: 0.14em;
+  margin: 0;
+  text-shadow: 0 0.06em 0.5em rgba(0,0,0,0.45);
+  animation: rise 1.5s 0.15s cubic-bezier(.2,.7,.2,1) both;
+  transition: opacity .5s, transform .5s;
+}
+.tag {
+  font-size: 0.75rem;
+  letter-spacing: 0.4em;
+  text-indent: 0.4em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 1.4rem 0 0;
+  animation: fade 1.4s 0.5s both;
+  transition: opacity .5s;
+}
+/* while previewing a demo the masthead recedes — the sky is the subject */
+body.previewing h1 { opacity: 0.5; transform: translateY(-0.15em) scale(0.985); }
+body.previewing .tag { opacity: 0.35; }
+
+/* --- primary: bring your own --- */
+.own {
+  margin-top: 2.4rem;
+  display: inline-flex; align-items: center; gap: 1.1rem;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: #fff;
+  background: rgba(8, 13, 20, 0.5);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid rgba(242,162,92,0.5);
+  padding: 1.15rem 2.4rem;
+  transition: border-color .25s, background .25s, transform .25s, box-shadow .25s;
+  animation: fade 1.4s 0.85s both;
+}
+.own::before { content: '▸'; color: var(--amber); }
+.own:hover {
+  border-color: var(--amber);
+  background: rgba(20, 13, 6, 0.62);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 4px rgba(242,162,92,0.07);
+}
+.own-note {
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  margin: 0.85rem 0 0;
+  animation: fade 1.4s 1s both;
+  transition: opacity .5s;
+}
+body.previewing .own-note { opacity: 0.4; }
+
+/* --- bottom: demos + readout --- */
+.base { animation: fade 1.6s 1.1s both; }
+
+.demos-head {
+  display: flex; align-items: center; gap: 1rem;
+  font-size: 0.5625rem; letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 0.7rem;
+}
+.demos-head .bar { flex: 1; height: 1px; background: var(--line-soft); }
+
+/* the live pose readout — only meaningful while a preview runs */
+.pose {
+  display: flex; align-items: center; gap: 1.3rem;
+  color: var(--dim);
+  opacity: 0; transition: opacity .35s;
+  white-space: nowrap;
+}
+body.previewing .pose { opacity: 1; }
+.pose .v { color: var(--amber); }
+.pose .enter { color: var(--ink); }
+.pose .enter b { color: var(--amber); font-weight: 400; }
+
+.rail {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.6rem;
+}
+.demo {
+  position: relative;
+  display: block;
+  text-align: left;
+  text-decoration: none;
+  color: var(--ink);
+  background: rgba(8, 13, 20, 0.42);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--line-soft);
+  padding: 0.85rem 1rem 0.9rem;
+  overflow: hidden;
+  transition: border-color .25s, background .25s, transform .25s;
+  cursor: pointer;
+}
+.demo:hover, .demo:focus-visible {
+  border-color: var(--amber);
+  background: rgba(8, 13, 20, 0.62);
+  transform: translateY(-2px);
+  outline: none;
+}
+.demo .name {
+  display: block;
+  font-family: var(--display);
+  font-weight: 400;
+  font-size: 1.375rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.demo .field {
+  display: block;
+  font-size: 0.625rem;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+  margin-top: 0.4rem;
+}
+.demo .blurb {
+  display: block;
+  font-size: 0.625rem;
+  line-height: 1.5;
+  color: var(--faint);
+  margin-top: 0.45rem;
+  max-width: 34ch;
+}
+/* scrub bar showing where in the preview flight you are */
+.demo .scrub {
+  position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+  background: rgba(234,240,246,0.08);
+  opacity: 0; transition: opacity .3s;
+}
+.demo .scrub i {
+  display: block; height: 100%; width: 0;
+  background: var(--amber);
+}
+.demo.live .scrub { opacity: 1; }
+.demo.live { border-color: var(--amber); }
+
+.readout {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  gap: 2rem;
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  margin-top: 1rem;
+}
+.readout kbd {
+  font-family: var(--mono); font-size: 0.625rem;
+  border: 1px solid var(--line); border-radius: 3px;
+  padding: 0.1em 0.42em; color: var(--dim);
+}
+.readout .keys { text-align: right; line-height: 1.9; }
+#gpu.ok { color: #7fd6a0; }
+#gpu.no { color: #ef7a7a; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(0.35em); letter-spacing: 0.34em; } }
+@keyframes fade { from { opacity: 0; } }
+
+@media (max-width: 900px) {
+  .rail { grid-template-columns: repeat(2, 1fr); }
+  .demo .blurb { display: none; }
+}
+@media (max-width: 720px) {
+  .frame { padding: 1rem 1.1rem 1.2rem; }
+  .readout { flex-direction: column; align-items: flex-start; }
+  .readout .keys { text-align: left; }
+  .own { padding: 0.9rem 1.3rem; font-size: 0.75rem; }
+  .pose { display: none; }
+}
+/* no hover on touch — a tap is the entry, and the previews never run */
+@media (hover: none) {
+  .demo .scrub { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div id="bg">
+  <video id="layer-a" muted loop playsinline preload="auto"></video>
+  <video id="layer-b" muted loop playsinline preload="none"></video>
+</div>
+
+<div class="frame">
+
+  <div class="strip">
+    <div><a href="../../index.html">Thomas DeWitt</a><span class="sep">/</span><a href="../">Thought Cloud</a><span class="sep">/</span><span style="color:var(--dim)">Soar</span></div>
+    <div>cloudyview · webgpu</div>
+  </div>
+
+  <div class="center">
+    <h1>SOAR</h1>
+    <p class="tag">Fly through cloud model output</p>
+    <a class="own" href="../soar/">Render your own 3D cloud volume</a>
+    <p class="own-note">netCDF — or drop one anywhere on this page</p>
+  </div>
+
+  <div class="base">
+    <div class="demos-head">
+      <span>Demos</span>
+      <span class="bar"></span>
+      <span class="pose">
+        <span>hdg <span class="v" id="p-hdg">—</span></span>
+        <span>pitch <span class="v" id="p-pitch">—</span></span>
+        <span class="enter">enter <b>here</b> ↵</span>
+      </span>
+    </div>
+
+    <div class="rail" id="rail"></div>
+
+    <div class="readout">
+      <div id="gpu">checking…</div>
+      <div class="keys">
+        <kbd>W A S D</kbd> fly &nbsp; <kbd>space</kbd> / <kbd>shift</kbd> climb &nbsp;
+        <kbd>scroll</kbd> speed &nbsp; <kbd>esc</kbd> menu
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script type="module">
+const gpuEl = document.getElementById('gpu');
+if (navigator.gpu) { gpuEl.textContent = 'WebGPU ready'; gpuEl.className = 'ok'; }
+else { gpuEl.textContent = 'no WebGPU — try Chrome or Edge'; gpuEl.className = 'no'; }
+
+const { demos } = await (await fetch('media/demos.json')).json();
+const rail = document.getElementById('rail');
+const layers = [document.getElementById('layer-a'), document.getElementById('layer-b')];
+const HERO = demos[0];
+
+// Starts at 1 so the first show() lands the hero on layer-a, the one with
+// preload="auto" — otherwise the opening frame waits on a cold fetch.
+let active = 1;        // which layer is showing
+let shown = null;      // which demo that layer holds
+let previewing = null; // the demo being hovered, if any
+let hold = null;       // timer for returning to the hero
+
+/** Put a demo on the idle layer and cross-fade to it. */
+async function show(demo) {
+  if (shown && shown.id === demo.id) { layers[active].play().catch(() => {}); return; }
+  const next = 1 - active;
+  const v = layers[next];
+  if (v.dataset.id !== demo.id) { v.src = demo.video; v.dataset.id = demo.id; }
+  v.currentTime = 0;
+  try { await v.play(); } catch { /* autoplay refused; the poster still shows */ }
+  v.classList.add('on');
+  layers[active].classList.remove('on');
+  const stale = layers[active];
+  setTimeout(() => { if (stale !== layers[active]) stale.pause(); }, 900);
+  active = next;
+  shown = demo;
+}
+
+function enterPreview(demo, card) {
+  clearTimeout(hold);
+  previewing = demo;
+  document.body.classList.add('previewing');
+  for (const el of rail.children) el.classList.toggle('live', el === card);
+  show(demo);
+}
+
+function leavePreview() {
+  clearTimeout(hold);
+  hold = setTimeout(() => {
+    previewing = null;
+    document.body.classList.remove('previewing');
+    for (const el of rail.children) el.classList.remove('live');
+    show(HERO);
+  }, 350);
+}
+
+/** The whole trick: video time indexes the pose table the clip was cut from. */
+function poseAt(demo, t) {
+  const i = Math.max(0, Math.min(demo.poses.length - 1, Math.round(t * demo.hz)));
+  return { i, p: demo.poses[i] };
+}
+
+const hdg = document.getElementById('p-hdg');
+const pitch = document.getElementById('p-pitch');
+
+for (const demo of demos) {
+  const card = document.createElement('a');
+  card.className = 'demo';
+  card.href = '../soar/?demo=' + demo.id;
+  card.innerHTML =
+    `<span class="name">${demo.name}</span>` +
+    `<span class="field">${demo.field}</span>` +
+    `<span class="blurb">${demo.blurb}</span>` +
+    `<span class="scrub"><i></i></span>`;
+  card.addEventListener('mouseenter', () => enterPreview(demo, card));
+  card.addEventListener('focus', () => enterPreview(demo, card));
+  card.addEventListener('mouseleave', leavePreview);
+  card.addEventListener('blur', leavePreview);
+
+  // Click hands over the pose that was on screen at that instant.
+  card.addEventListener('click', (e) => {
+    if (!previewing || previewing.id !== demo.id) return;   // no preview: plain link
+    e.preventDefault();
+    const { p } = poseAt(demo, layers[active].currentTime);
+    const q = new URLSearchParams({ demo: demo.id, pose: p.join(',') });
+    location.href = '../soar/?' + q;
+  });
+
+  rail.appendChild(card);
+}
+
+// Live readout + scrub, driven off the visible layer.
+function tick() {
+  if (previewing) {
+    const v = layers[active];
+    const { i, p } = poseAt(previewing, v.currentTime);
+    hdg.textContent = String(Math.round(p[3])).padStart(3, '0') + '°';
+    pitch.textContent = (p[4] >= 0 ? '+' : '−') + Math.abs(p[4]).toFixed(0) + '°';
+    const card = rail.querySelector('.demo.live .scrub i');
+    if (card) card.style.width = (100 * i / (previewing.poses.length - 1)) + '%';
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// Hero first, then warm the rest so the first hover is not a black frame.
+await show(HERO);
+const warm = () => { for (const d of demos.slice(1)) fetch(d.video).catch(() => {}); };
+if (layers[active].readyState >= 4) warm();
+else layers[active].addEventListener('canplaythrough', warm, { once: true });
+</script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soar landing — five directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=EB+Garamond:ital@0;1&display=swap" rel="stylesheet">
+<style>
+:root { --mono: 'IBM Plex Mono', monospace; --serif: 'EB Garamond', Georgia, serif; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #14161a; color: #e6e9ec;
+  font-family: var(--mono); font-size: 14px; line-height: 1.7;
+  padding: 3rem 2rem 6rem;
+}
+.wrap { max-width: 60rem; margin: 0 auto; }
+h1 { font-family: var(--serif); font-weight: 400; font-size: 2.6rem; margin: 0 0 .3rem; }
+.note { color: #8b939c; max-width: 62ch; font-size: .8125rem; }
+ol { list-style: none; padding: 0; margin: 3rem 0 0; display: grid; gap: 1px; background: #262a30; border: 1px solid #262a30; }
+li { background: #14161a; }
+a.card {
+  display: grid; grid-template-columns: 3.5rem 1fr auto; gap: 1.5rem; align-items: baseline;
+  padding: 1.4rem 1.6rem; text-decoration: none; color: inherit;
+  transition: background .2s;
+}
+a.card:hover { background: #1b1f25; }
+.num { font-size: .75rem; color: #5d656e; letter-spacing: .1em; }
+.name { font-family: var(--serif); font-size: 1.5rem; }
+.desc { color: #8b939c; font-size: .8125rem; margin-top: .2rem; max-width: 56ch; }
+.tags { font-size: .625rem; letter-spacing: .12em; text-transform: uppercase; color: #5d656e; margin-top: .55rem; }
+.go { font-size: .6875rem; letter-spacing: .16em; text-transform: uppercase; color: #5d656e; white-space: nowrap; }
+a.card:hover .go { color: #ff8a5b; }
+footer { margin-top: 3rem; color: #5d656e; font-size: .75rem; }
+footer a { color: #8b939c; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Soar landing — five directions</h1>
+  <p class="note">
+    Placeholder media throughout: real soar captures from <code>~/Downloads</code>
+    and a trimmed clip from one of the July flythrough recordings. Every entry
+    button links to the live <a href="../soar/" style="color:#ff8a5b">soar app</a>.
+  </p>
+
+  <ol>
+    <li><a class="card" href="01-preflight.html">
+      <span class="num">01</span>
+      <span>
+        <span class="name">Preflight <span style="color:#ff8a5b;font-size:.75rem;font-family:var(--mono)">← chosen</span></span>
+        <span class="desc">Full-bleed flythrough with a four-demo rail. Hovering a demo cross-fades the background to that field's recorded flight; clicking hands the exact camera pose on screen at that instant to the renderer.</span>
+        <span class="tags">dark · cinematic · hover-to-preview · pose handoff</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+
+    <li><a class="card" href="02-plate.html">
+      <span class="num">02</span>
+      <span>
+        <span class="name">Plate</span>
+        <span class="desc">The cloud atlas reading: warm paper, a mounted print with the title lapping over its edge, numbered plates below. Keeps your site's palette and type; the prose becomes captions.</span>
+        <span class="tags">light · editorial · stills · fits the site</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+
+    <li><a class="card" href="03-contact-sheet.html">
+      <span class="num">03</span>
+      <span>
+        <span class="name">Contact sheet</span>
+        <span class="desc">The page is the imagery — a viewport-filling mosaic where the title and the call to action are just two more tiles. Hovering isolates a frame and dims the rest.</span>
+        <span class="tags">dark · gallery · maximal · no scrolling</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+
+    <li><a class="card" href="04-horizon.html">
+      <span class="num">04</span>
+      <span>
+        <span class="name">Horizon</span>
+        <span class="desc">Restraint: the video is washed out into pale sky and used as atmosphere, not content. One word, one sentence, one link. Everything else is a whisper at the bottom or behind a disclosure.</span>
+        <span class="tags">light · minimal · serene · least of everything</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+
+    <li><a class="card" href="05-instrument.html">
+      <span class="num">05</span>
+      <span>
+        <span class="name">Instrument</span>
+        <span class="desc">Split screen: a monospace spec panel with a photon-path diagram on the left, a crossfading view with flight HUD on the right. Sells the physics rather than the vibe.</span>
+        <span class="tags">dark · technical · data-forward · credible</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+
+    <li><a class="card" href="06-menu-box.html">
+      <span class="num">06</span>
+      <span>
+        <span class="name">Menu box</span>
+        <span class="desc">Not a landing page: eight skins for the pause menu's box, over four skies, each captioned with the contrast its subtitles hold against the sky behind them. Keys 1-8 pick a look, [ and ] change the sky. Plate was chosen and is now what viewer.css does.</span>
+        <span class="tags">in-flight UI · chosen: plate · frost × 3 · vellum · scrim · aerofoil</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+
+    <li><a class="card" href="08-landing.html">
+      <span class="num">08</span>
+      <span>
+        <span class="name">Landing, in the viewer's language</span>
+        <span class="desc">01 is from Aug 5 and the viewer chrome was redesigned Aug 14, so the landing page and the pause menu now disagree about panels, accent, type and corners — and about frost, which the menu-box measurement rejected for exactly the sky this page sits over. Three directions, all opaque: the landing page as a viewer panel; 01's structure with only the language swapped; and the dock-bottom idiom, with the demos as a table of their real grids and extents. Keys 1-3 pick one, [ and ] change the backdrop, H hides the harness.</span>
+        <span class="tags">landing · real stills · real numbers · 1-3 to switch</span>
+      </span>
+      <span class="go">open →</span>
+    </a></li>
+  </ol>
+
+  <footer>
+    Temporary — lives in <code>web/_mockups/</code>, nothing under <code>web/soar/</code> was touched.
+  </footer>
+</div>
+</body>
+</html>
