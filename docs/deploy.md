@@ -1,20 +1,22 @@
 # Deploying soar to thomasddewitt.com
 
-Soar is static, and it is one folder. A thought-cloud slug is a single
-self-contained artifact, so the demo set lives *inside* the app rather than
-beside it, and deploying is copying one directory.
+Soar is static, and it is one folder at the site root —
+`thomasddewitt.com/soar/` (moved from `/thought-cloud/soar/` on 2026-08-18).
+The folder is a single self-contained artifact, so the demo set lives
+*inside* the app rather than beside it, and deploying is copying one
+directory.
 
     uv run python tools/stage_deploy.py --clean
 
-writes `dist/thought-cloud/soar/` — 1.08 GB, laid out exactly as it must sit on
+writes `dist/soar/` — 1.08 GB, laid out exactly as it must sit on
 the site. The repo tree matches the site tree: `web/soar/demos/` here is
-`/thought-cloud/soar/demos/` there.
+`/soar/demos/` there.
 
-Copy it to `personal-website/thought-cloud/soar/`, then deploy from the Mac
+Copy it to `personal-website/soar/`, then deploy from the Mac
 with `scripts/sync-to-r2.sh` as usual. The result:
 
-    https://thomasddewitt.com/thought-cloud/soar/          the app
-    https://thomasddewitt.com/thought-cloud/soar/demos/    the baked fields
+    https://thomasddewitt.com/soar/          the app
+    https://thomasddewitt.com/soar/demos/    the baked fields
 
 The canonical URL is already in `web/soar/index.html`, and the app finds its
 demos at a plain relative `./demos` — no hostname is compiled in, so the same
@@ -43,7 +45,7 @@ missing HDF5 filter plugins.
 
 ## The flash drive
 
-One directory: `dist/thought-cloud/soar/` → `personal-website/thought-cloud/soar/`.
+One directory: `dist/soar/` → `personal-website/soar/`.
 
 1.07 GB of it is `demos/`, which only changes when a demo is re-baked. An
 app-only change afterwards is ~430 kB — the fingerprinted files at the top
@@ -61,7 +63,7 @@ undone by a later commit.
 
 That is now enforced rather than remembered. `personal-website/.gitignore`
 ignores `*.gz` and `*.bin` globally, and un-ignores only `.json`, `.webp` and
-`.so` under `thought-cloud/soar/` — so the metadata, the stills and the HDF5
+`.so` under `soar/` — so the metadata, the stills and the HDF5
 filter plugins are versioned and every volume is not. (An earlier version of
 this file said `*.gz` was NOT ignored, which was true when it was written and
 is why the rule exists.)
@@ -72,7 +74,7 @@ still. The largest blob in that repo's whole history is 4.2 MB of vendored
 h5wasm. Worth re-running both checks after adding a demo, since it is the
 `.gitignore` doing the work rather than anybody's care:
 
-    git add -An thought-cloud/soar | sed "s/^add '//;s/'$//" | grep -E '\.(gz|bin)$'
+    git add -An soar | sed "s/^add '//;s/'$//" | grep -E '\.(gz|bin)$'
     git rev-list --objects --all \
       | git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' \
       | awk '$1=="blob" && $2>1e7 {print $2, $3}'
@@ -87,7 +89,7 @@ from `tools/prebake_demos.py` and the source fields.
 ### The consequence, which is sharp
 
 `sync-to-r2.sh` runs `rclone sync`, and **sync deletes bucket objects that are
-not in the local tree.** Any tree that lacks `thought-cloud/soar/` — a fresh
+not in the local tree.** Any tree that lacks `soar/` — a fresh
 clone, or the Mac before you copy the folder across — will, on a routine
 deploy for some unrelated essay, **silently delete soar and all 1.07 GB of
 demos from the live site.**
@@ -95,8 +97,8 @@ demos from the live site.**
 Worth a guard at the top of `scripts/sync-to-r2.sh`:
 
 ```bash
-test -f thought-cloud/soar/demos/index.json || {
-  echo "refusing to sync: thought-cloud/soar/ is missing or incomplete."
+test -f soar/demos/index.json || {
+  echo "refusing to sync: soar/ is missing or incomplete."
   echo "rclone sync would delete soar from the live bucket."
   exit 1
 }
@@ -119,7 +121,7 @@ Two Content-Types, one `curl` each. Both are cheap to fix and miserable to
 diagnose from a blank page:
 
 ```bash
-curl -sI https://thomasddewitt.com/thought-cloud/soar/main.<hash>.js | grep -i content-type
+curl -sI https://thomasddewitt.com/soar/main.<hash>.js | grep -i content-type
 ```
 
 must be `text/javascript` or `application/javascript`. If R2 serves
@@ -129,7 +131,7 @@ the page renders nothing. (The staging tool already renames mediabunny's
 MIME table, which is what rclone falls back to on macOS.)
 
 ```bash
-curl -sI https://thomasddewitt.com/thought-cloud/soar/demos/rce/volume.bin.gz | grep -i content
+curl -sI https://thomasddewitt.com/soar/demos/rce/volume.bin.gz | grep -i content
 ```
 
 must **not** carry `Content-Encoding: gzip`. The volume is gzipped on purpose
@@ -146,6 +148,6 @@ shareable. Register it there when the blog post is ready; `build_seo.py` and
 
 Worth adding to `robots.txt` at that point:
 
-    Disallow: /thought-cloud/soar/demos/
+    Disallow: /soar/demos/
 
 so crawlers do not pull 1.07 GB of binaries.

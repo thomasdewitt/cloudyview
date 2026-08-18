@@ -5,16 +5,16 @@ The site is a fully static Cloudflare R2 bucket, deployed with
 
     rclone sync . r2-website:personal-website
 
-run from the root of the separate ``personal-website`` repo. The URL
-convention there is stable — ``thomasddewitt.com/thought-cloud/<slug>/`` — and
-soar's canonical URL is already baked into ``web/soar/index.html``. So this
-tool emits exactly one folder, ready to be dropped into that repo's working
-tree:
+run from the root of the separate ``personal-website`` repo. Soar lives at
+the site root — ``thomasddewitt.com/soar/`` (moved from
+``/thought-cloud/soar/`` 2026-08-18) — and its canonical URL is already
+baked into ``web/soar/index.html``. So this tool emits exactly one folder,
+ready to be dropped into that repo's working tree:
 
-    <out>/thought-cloud/soar/        contents of web/soar/, fingerprinted
+    <out>/soar/        contents of web/soar/, fingerprinted
 
-A thought-cloud folder is one self-contained artifact, so the baked demo set
-lives inside the app at web/soar/demos/ and is staged with it, verbatim.
+The folder is one self-contained artifact, so the baked demo set lives
+inside the app at web/soar/demos/ and is staged with it, verbatim.
 
 Why fingerprinting: the Cloudflare edge plus a 4h browser cache TTL have
 served stale JavaScript against fresh HTML before. The site convention is
@@ -55,7 +55,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOAR_SRC = REPO_ROOT / "web" / "soar"
 
-SITE_SUBDIR = "thought-cloud"
 APP_DIRNAME = "soar"
 
 HASH_CHARS = 8
@@ -557,7 +556,7 @@ def stage(out_root: Path, clean: bool) -> dict:
             "demo set is gitignored — bake it with tools/prebake_demos.py, or "
             "regenerate just the index with --index-only.")
 
-    site_root = out_root / SITE_SUBDIR
+    site_root = out_root
     app_out = site_root / APP_DIRNAME
 
     if site_root.exists():
@@ -848,7 +847,7 @@ def report(result: dict) -> None:
 
     grand = 0
     all_exts: dict[str, int] = defaultdict(int)
-    for label, root in ((f"{SITE_SUBDIR}/{APP_DIRNAME}", app_out),):
+    for label, root in ((APP_DIRNAME, app_out),):
         per, total, exts = folder_totals(root)
         print(f"{label}/")
         for folder in sorted(per):
