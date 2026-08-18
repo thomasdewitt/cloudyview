@@ -276,7 +276,7 @@ async function enterViewerOnce(source) {
     });
     const { boot } = await import("./viewer.js");
     viewer = await boot({
-      device, adapter, source, progress,
+      device, source, progress,
       onReady: hideLoading, onFailure: showFailure,
       // The loader asks questions (which group, what units) and those are
       // menu panels, which live under this overlay.
