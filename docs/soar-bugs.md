@@ -42,6 +42,12 @@ That is fine while cancel ends in a failure panel. Once cancel returns to the
 picker instead, the overlay state has to be put back deliberately or the next
 attempt starts with stale chrome.
 
+One adjacent facet was fixed 2026-08-18 (found by codex review): the landing
+page's persistent file input was never reset, so after a Back from the
+group/units question, re-picking the *same* file fired no `change` event and
+silently did nothing. `main.js` now clears `fileInput.value` on every
+selection. The Back-destination and overlay questions above remain open.
+
 ---
 
 ## 13. (item 3) Editable camera/view boxes in the terminal-render panel

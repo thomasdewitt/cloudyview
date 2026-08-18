@@ -304,25 +304,29 @@ def render_with_progress(scene, spp_total, step_spp=8, seed=0, checkpoint_config
 
         # Check if we've reached any checkpoint
         if checkpoint_config is not None and checkpoints:
-            for checkpoint_spp in checkpoints:
-                if checkpoint_spp <= taken and checkpoint_spp not in checkpoints_saved:
-                    # Save checkpoint image
-                    current_img = acc / taken
-                    img_np = np.array(current_img)
+            crossed = [c for c in checkpoints
+                       if c <= taken and c not in checkpoints_saved]
+            if crossed:
+                # Chunks don't stop at checkpoint boundaries, so every
+                # checkpoint crossed within this chunk would be the same
+                # accumulated image: save it once, and name it by the spp
+                # actually taken rather than the nominal checkpoint value.
+                current_img = acc / taken
+                img_np = np.array(current_img)
 
-                    # Apply tone mapping if provided
-                    if 'tone_map_func' in checkpoint_config:
-                        img_np = checkpoint_config['tone_map_func'](img_np)
+                # Apply tone mapping if provided
+                if 'tone_map_func' in checkpoint_config:
+                    img_np = checkpoint_config['tone_map_func'](img_np)
 
-                    # Generate output filepath
-                    output_pattern = checkpoint_config.get('output_pattern', 'checkpoint_spp={spp}.png')
-                    filepath = output_pattern.format(spp=checkpoint_spp)
+                # Generate output filepath
+                output_pattern = checkpoint_config.get('output_pattern', 'checkpoint_spp={spp}.png')
+                filepath = output_pattern.format(spp=taken)
 
-                    # Save using provided save function
-                    if 'save_func' in checkpoint_config:
-                        checkpoint_config['save_func'](img_np, filepath)
+                # Save using provided save function
+                if 'save_func' in checkpoint_config:
+                    checkpoint_config['save_func'](img_np, filepath)
 
-                    checkpoints_saved.add(checkpoint_spp)
+                checkpoints_saved.update(crossed)
 
         # update ETA based on samples completed
         elapsed = time.perf_counter() - start

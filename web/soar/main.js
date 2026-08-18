@@ -562,6 +562,11 @@ dom.open.addEventListener("click", () =>
   capabilityFailed ? reportNoGPU() : dom.fileInput.click());
 dom.fileInput.addEventListener("change", () => {
   const file = dom.fileInput.files?.[0];
+  // Reset before loading: the input is persistent, and browsers fire no
+  // "change" when the selection is unchanged — without this, re-picking the
+  // same file after a Back from the group/units question (bug 11) or a
+  // failed load silently did nothing.
+  dom.fileInput.value = "";
   if (file) enterViewer({ kind: "file", file });
 });
 
