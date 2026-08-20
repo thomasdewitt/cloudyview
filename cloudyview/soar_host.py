@@ -730,6 +730,13 @@ class SoarRenderer:
         field, or the divisor changes — this host is the offline path, so
         staleness is the caller's to manage, and the browser manages its own.
 
+        The bake's marches step at `state.dt_light` (no distance-LOD
+        coarsening — dt_floor is 0). Pass the finest configuration you will
+        render with: the browser always bakes at High's light step so its
+        cache never goes stale on a tier change, and a caller comparing
+        against a coarser tier should still usually do the same, because a
+        parked view converges to High's sampling on every tier.
+
         Returns the cache dims (nx, ny, nz) in field axis order.
         """
         wgpu = self.wgpu

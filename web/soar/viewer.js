@@ -670,7 +670,7 @@ export class Viewer {
       ? `This GPU renders ${measuredMs.toFixed(0)} ms a frame even at ` +
         `${label} — the lowest quality soar has. Expect a slideshow while ` +
         "you fly. Stop moving and the picture still sharpens and converges."
-      : `Auto quality: ${label} — change any time in the menu.`;
+      : `Auto quality: set to ${label} — change any time in the menu.`;
 
     if (this._loadNotes && performance.now() < this._loadNotesUntil) {
       this.ui.say(`${this._loadNotes}\n\n${line}`, 8);
@@ -746,32 +746,44 @@ export class Viewer {
       g.refusedUntil[refused] = g.refusals[refused] >= 2
         ? Infinity
         : performance.now() + K.GOVERNOR_RETRY_COOLDOWN_MS;
-      const refusedLabel = K.QUALITY_PRESETS[refused].label.split(" —")[0];
-      this._governorSetTier(g.trialFrom, refused, median,
-        "stepped back", `${refusedLabel} didn't hold in flight`);
+      this._governorSetTier(g.trialFrom, refused, median, "stepped back",
+        `set to ${this._tierLabel(g.trialFrom)} — change any time in the menu`);
       g.trialFrom = null;
     } else if (holds) {
+      const wasTrial = g.trialFrom !== null;
       g.trialFrom = null;   // this tier is proven now, trial or not
       const next = at >= 0 && at < order.length - 1 ? order[at + 1] : null;
       if (next && (g.refusedUntil[next] ?? 0) <= performance.now()) {
         const from = this.qualityTier;
-        this._governorSetTier(next, from, median, "raised");
+        this._governorSetTier(next, from, median, "raised",
+          `testing ${this._tierLabel(next)}`);
         g.trialFrom = from;
+      } else if (wasTrial) {
+        // A trial that held and has nowhere further to climb right now:
+        // the testing toast gets its answer.
+        console.info(
+          `soar: auto quality settled at ${this.qualityTier} — measured ` +
+          `${median.toFixed(2)} ms/frame in flight`);
+        this.ui.say(`Auto quality: set to ${this._tierLabel(this.qualityTier)}` +
+                    ` — change any time in the menu.`, 4);
       }
     }
     this._governorReset();
   }
 
+  _tierLabel(tier) {
+    return K.QUALITY_PRESETS[tier].label.split(" —")[0];
+  }
+
   /** One governor tier move: renderer, defaults, and a quiet announcement. */
-  _governorSetTier(tier, from, medianMs, verb, why = "measured in flight") {
+  _governorSetTier(tier, from, medianMs, verb, toast) {
     this.qualityTier = tier;
     this.renderer.setQualityTier(tier);
     this._applyTierDefaults(tier);
-    const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
     console.info(
       `soar: auto quality ${verb} to ${tier} — ${from} measured ` +
       `${medianMs.toFixed(2)} ms/frame in flight`);
-    this.ui.say(`Auto quality: ${label} — ${why}.`, 4);
+    this.ui.say(`Auto quality: ${toast}.`, 4);
   }
 
   /**

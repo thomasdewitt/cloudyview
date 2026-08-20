@@ -1198,6 +1198,12 @@ export class Renderer {
       ...view, outputSize: [cz, cy], renderSize: [cz, cy],
       subpixel: false, jitterScale: 1.0,
     });
+    // Bake at High's light step whatever tier is flying (row 6.w is the
+    // step the bake's marches take). The bake is paid once, so it takes the
+    // finest quadrature any tier would use — which also makes the cache
+    // tier-independent: governor climbs, hold-ladder rungs and tier clicks
+    // never stale it. Only the sun does.
+    u[6 * 4 + 3] = this.scene.minVoxelM * K.QUALITY_PRESETS.high.lightStepFactor;
     this._lightBake = {
       next: 0, cx, cy, cz, sliceTex, u,
       bindGroup: this.device.createBindGroup({
