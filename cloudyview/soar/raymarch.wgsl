@@ -2204,6 +2204,17 @@ struct CityCell {
     palette_bias: f32,
     store_draw: f32,
     plot_min: vec2<f32>, plot_max: vec2<f32>,
+    // The architecture (see the archetype block in city_cell): 0 slab /
+    // setback stack, 2 growth (cantilevered buds), 3 tapered shaft,
+    // 4 spire crown. Archetypes 3 and 4 carry a frustum: a rectangular
+    // cross-section scaling linearly from 1 at fmin.z to fscale at fmax.z.
+    arch: i32,
+    has_frustum: bool,
+    fmin: vec3<f32>, fmax: vec3<f32>,
+    fscale: f32,
+    // One building can own a 2x2 block group in a dense district; every
+    // member cell then reports the same merged plot and seed.
+    merged: bool,
 }
 
 fn city_cell(ci: vec2<i32>) -> CityCell {
@@ -2211,29 +2222,52 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     let cell = u.ocean_params.x;
     let dims = textureDimensions(ocean_normals, 0);
     let n = vec2<i32>(i32(dims.x), i32(dims.y));
-    let ct = ci - vec2<i32>(floor(u.ocean.yz / cell + vec2<f32>(0.5)));
-    let w = ((ct % n) + n) % n;
-    let texel = textureLoad(ocean_normals, w, 0);
-    c.density = texel.r;
-    c.rank = texel.g;
+    let off_cells = vec2<i32>(floor(u.ocean.yz / cell + vec2<f32>(0.5)));
 
-    let cmin = vec2<f32>(ci) * cell;
-    let cmax = cmin + vec2<f32>(cell);
-    // Street half-widths on this block's four edges; avenue boundaries get
-    // extra. The avenue test uses the unwrapped index so the pattern is a
-    // property of world space, not of the tile.
+    // Superblocks: in a dense district a 2x2 group of blocks is sometimes
+    // one building — the internal streets are swallowed and all four cells
+    // report the same plot, seed and cascade values, so the DDA assembles
+    // one seamless structure from whichever member it happens to visit.
+    // The group decision reads the ANCHOR cell's texel, so members agree.
+    let anchor = ci & vec2<i32>(-2);
+    let wa = (((anchor - off_cells) % n) + n) % n;
+    let ta = textureLoad(ocean_normals, wa, 0);
+    let gseed = pcg2d(vec2<u32>(
+        bitcast<u32>(anchor.x) ^ 0x51ed270bu, bitcast<u32>(anchor.y)));
+    let gh = city_rand4(gseed);
+    c.merged = ta.g > 0.50 && gh.x < 0.10;
+
+    var base = ci;
+    if (c.merged) {
+        base = anchor;
+        c.density = ta.r;
+        c.rank = ta.g;
+        c.seed = gseed;
+    } else {
+        let w = (((ci - off_cells) % n) + n) % n;
+        let texel = textureLoad(ocean_normals, w, 0);
+        c.density = texel.r;
+        c.rank = texel.g;
+        c.seed = pcg2d(vec2<u32>(bitcast<u32>(ci.x), bitcast<u32>(ci.y)));
+    }
+
+    // The plot: one cell's, or the whole group's. Street half-widths on the
+    // outer edges; avenue boundaries get extra. The avenue test uses the
+    // unwrapped index so the pattern is a property of world space, not of
+    // the tile.
+    let span = select(1, 2, c.merged);
+    let cmin = vec2<f32>(base) * cell;
+    let cmax = vec2<f32>(base + vec2<i32>(span)) * cell;
     let hx0 = CITY_STREET_HALF
-        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x));
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.x));
     let hx1 = CITY_STREET_HALF
-        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x + 1));
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.x + span));
     let hy0 = CITY_STREET_HALF
-        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.y));
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.y));
     let hy1 = CITY_STREET_HALF
-        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.y + 1));
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.y + span));
     c.plot_min = cmin + vec2<f32>(hx0, hy0);
     c.plot_max = cmax - vec2<f32>(hx1, hy1);
-
-    c.seed = pcg2d(vec2<u32>(bitcast<u32>(ci.x), bitcast<u32>(ci.y)));
     let r4 = city_rand4(c.seed);
     let r4b = city_rand4(c.seed ^ vec2<u32>(0x9e3779b9u, 0x85ebca6bu));
     let r4c = city_rand4(c.seed ^ vec2<u32>(0xdeadbeefu, 0x41c64e6du));
@@ -2256,6 +2290,10 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     c.b2min = vec3<f32>(0.0); c.b2max = vec3<f32>(0.0);
     c.b3min = vec3<f32>(0.0); c.b3max = vec3<f32>(0.0);
     c.mast_min = vec3<f32>(0.0); c.mast_max = vec3<f32>(0.0);
+    c.arch = 0;
+    c.has_frustum = false;
+    c.fmin = vec3<f32>(0.0); c.fmax = vec3<f32>(0.0);
+    c.fscale = 1.0;
     if (!c.built) {
         return c;
     }
@@ -2285,32 +2323,120 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     let bmax2 = bmin2 + fw;
     let bc = 0.5 * (bmin2 + bmax2);
 
-    // Setback tiers: taller draws stack shrinking boxes (the wedding cake).
-    var z1 = h;
-    if (h > 90.0 && r4b.y > 0.45) {
-        c.tiers = 2;
-        z1 = floor(h * 0.60 / CITY_FLOOR_H) * CITY_FLOOR_H;
-        if (h > 180.0 && r4b.y > 0.80) {
-            c.tiers = 3;
-            z1 = floor(h * 0.50 / CITY_FLOOR_H) * CITY_FLOOR_H;
+    // The architecture. Low buildings stay slabs; above 60 m the draw picks
+    // among four archetypes, and the megatowers lean hard toward the two
+    // frustum forms — a 3 km rectangular extrusion is a wall, a 3 km
+    // tapering shaft is a spire (Thomas: not perfect rectangular prisms;
+    // architectures that grow, or have a spire).
+    let r4d = city_rand4(c.seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u));
+    if (h > 60.0) {
+        if (r4d.x < 0.20) {
+            c.arch = 2;                   // growth: cantilevered buds
+        } else if (r4d.x < 0.42) {
+            c.arch = 3;                   // tapered shaft on a podium
+        } else if (r4d.x < 0.55) {
+            c.arch = 4;                   // spire crown
         }
     }
-    c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
-    c.b1max = vec3<f32>(bmax2, z1);
-    if (c.tiers >= 2) {
-        var z2 = h;
-        var f2 = 0.68;
-        if (c.tiers == 3) {
-            z2 = floor(h * 0.78 / CITY_FLOOR_H) * CITY_FLOOR_H;
-            f2 = 0.72;
+    if (h > 600.0 && r4d.y < 0.65) {
+        c.arch = select(3, 4, r4d.y < 0.30);
+    }
+
+    if (c.arch == 3) {
+        // Podium + a shaft whose cross-section closes toward the crown.
+        let zp = max(floor(h * 0.12 / CITY_FLOOR_H) * CITY_FLOOR_H,
+                     CITY_FLOOR_H);
+        c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
+        c.b1max = vec3<f32>(bmax2, zp);
+        let fw_shaft = fw * 0.90;
+        c.has_frustum = true;
+        c.fmin = vec3<f32>(bc - 0.5 * fw_shaft, zp);
+        c.fmax = vec3<f32>(bc + 0.5 * fw_shaft, h);
+        c.fscale = 0.55 + 0.25 * r4d.z;
+    } else if (c.arch == 4) {
+        // A straight shaft to three quarters, then a steep spire.
+        let zs = floor(h * 0.75 / CITY_FLOOR_H) * CITY_FLOOR_H;
+        c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
+        c.b1max = vec3<f32>(bmax2, zs);
+        c.has_frustum = true;
+        c.fmin = vec3<f32>(bmin2, zs);
+        c.fmax = vec3<f32>(bmax2, h);
+        c.fscale = 0.12 + 0.10 * r4d.z;
+    } else if (c.arch == 2) {
+        // Growth: a straight tower with one or two boxes budding from its
+        // upper flanks, cantilevered over the street. Buds stay inside the
+        // cell (or merged group) so the DDA's per-cell testing stays exact.
+        c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
+        c.b1max = vec3<f32>(bmax2, h);
+        c.tiers = 2;
+        let side = i32(floor(r4d.z * 4.0));   // which flank the bud rides
+        let bz0 = floor(h * (0.42 + 0.20 * r4d.w) / CITY_FLOOR_H)
+                  * CITY_FLOOR_H;
+        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * h / CITY_FLOOR_H)
+                            * CITY_FLOOR_H + CITY_FLOOR_H,
+                      h - CITY_FLOOR_H);
+        let reach = 0.22 * min(fw.x, fw.y);
+        var bud_min = vec2<f32>(0.0);
+        var bud_max = vec2<f32>(0.0);
+        if (side == 0) {
+            bud_min = vec2<f32>(bmax2.x - 1.0, bmin2.y + 0.2 * fw.y);
+            bud_max = vec2<f32>(bmax2.x + reach, bmax2.y - 0.2 * fw.y);
+        } else if (side == 1) {
+            bud_min = vec2<f32>(bmin2.x - reach, bmin2.y + 0.2 * fw.y);
+            bud_max = vec2<f32>(bmin2.x + 1.0, bmax2.y - 0.2 * fw.y);
+        } else if (side == 2) {
+            bud_min = vec2<f32>(bmin2.x + 0.2 * fw.x, bmax2.y - 1.0);
+            bud_max = vec2<f32>(bmax2.x - 0.2 * fw.x, bmax2.y + reach);
+        } else {
+            bud_min = vec2<f32>(bmin2.x + 0.2 * fw.x, bmin2.y - reach);
+            bud_max = vec2<f32>(bmax2.x - 0.2 * fw.x, bmin2.y + 1.0);
         }
-        let fw2 = fw * f2;
-        c.b2min = vec3<f32>(bc - 0.5 * fw2, z1);
-        c.b2max = vec3<f32>(bc + 0.5 * fw2, z2);
-        if (c.tiers == 3) {
-            let fw3 = fw * 0.45;
-            c.b3min = vec3<f32>(bc - 0.5 * fw3, z2);
-            c.b3max = vec3<f32>(bc + 0.5 * fw3, h);
+        // Clamped to the cell column minus a hair, so no prim leaves it.
+        bud_min = max(bud_min, cmin + vec2<f32>(0.5));
+        bud_max = min(bud_max, cmax - vec2<f32>(0.5));
+        c.b2min = vec3<f32>(bud_min, bz0);
+        c.b2max = vec3<f32>(bud_max, bz1);
+        if (h > 200.0 && r4b.y > 0.55) {
+            c.tiers = 3;
+            let cz0 = floor(h * (0.68 + 0.12 * r4b.w) / CITY_FLOOR_H)
+                      * CITY_FLOOR_H;
+            let cz1 = min(cz0 + 8.0 * CITY_FLOOR_H, h - CITY_FLOOR_H);
+            // The second bud rides the opposite flank: mirror about bc.
+            let m0 = 2.0 * bc - bud_max;
+            let m1 = 2.0 * bc - bud_min;
+            c.b3min = vec3<f32>(
+                max(min(m0, m1), cmin + vec2<f32>(0.5)), cz0);
+            c.b3max = vec3<f32>(
+                min(max(m0, m1), cmax - vec2<f32>(0.5)), cz1);
+        }
+    } else {
+        // Setback tiers: the wedding cake (the founding archetype).
+        var z1 = h;
+        if (h > 90.0 && r4b.y > 0.45) {
+            c.tiers = 2;
+            z1 = floor(h * 0.60 / CITY_FLOOR_H) * CITY_FLOOR_H;
+            if (h > 180.0 && r4b.y > 0.80) {
+                c.tiers = 3;
+                z1 = floor(h * 0.50 / CITY_FLOOR_H) * CITY_FLOOR_H;
+            }
+        }
+        c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
+        c.b1max = vec3<f32>(bmax2, z1);
+        if (c.tiers >= 2) {
+            var z2 = h;
+            var f2 = 0.68;
+            if (c.tiers == 3) {
+                z2 = floor(h * 0.78 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                f2 = 0.72;
+            }
+            let fw2 = fw * f2;
+            c.b2min = vec3<f32>(bc - 0.5 * fw2, z1);
+            c.b2max = vec3<f32>(bc + 0.5 * fw2, z2);
+            if (c.tiers == 3) {
+                let fw3 = fw * 0.45;
+                c.b3min = vec3<f32>(bc - 0.5 * fw3, z2);
+                c.b3max = vec3<f32>(bc + 0.5 * fw3, h);
+            }
         }
     }
 
@@ -2353,6 +2479,94 @@ fn city_box_normal(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>)
         return vec3<f32>(sign(q.x), 0.0, 0.0);
     }
     return vec3<f32>(0.0, sign(q.y), 0.0);
+}
+
+// Exact intersection with a rectangular frustum: cross-section centred on
+// (fmin.xy+fmax.xy)/2, scale 1 at fmin.z shrinking (or growing) linearly to
+// fscale at fmax.z. Each tilted face is linear in the ray parameter, so the
+// test is the slab method with four sloped slabs — closed form, no
+// iteration. The normal of the entering face comes back with the interval.
+struct CityFrustumHit {
+    t_near: f32,
+    t_far: f32,
+    normal: vec3<f32>,
+}
+
+fn city_frustum_hit(o: vec3<f32>, dir: vec3<f32>,
+                    fmin: vec3<f32>, fmax: vec3<f32>, fscale: f32)
+        -> CityFrustumHit {
+    var res: CityFrustumHit;
+    res.t_near = 1.0;
+    res.t_far = 0.0;   // empty interval = miss unless everything below runs
+    let c2 = 0.5 * (fmin.xy + fmax.xy);
+    let h2 = max(0.5 * (fmax.xy - fmin.xy), vec2<f32>(1e-4));
+    let zspan = max(fmax.z - fmin.z, 1e-4);
+    let sp = (fscale - 1.0) / zspan;          // ds/dz
+    // s along the ray: s(t) = s_a + s_b t
+    let s_a = 1.0 + sp * (o.z - fmin.z);
+    let s_b = sp * dir.z;
+
+    var t_lo = -1e30;
+    var t_hi = 1e30;
+    var n_lo = vec3<f32>(0.0, 0.0, -1.0);
+
+    // z slab.
+    if (abs(dir.z) > 1e-9) {
+        let ta = (fmin.z - o.z) / dir.z;
+        let tb = (fmax.z - o.z) / dir.z;
+        let zn = select(vec3<f32>(0.0, 0.0, 1.0),
+                        vec3<f32>(0.0, 0.0, -1.0), dir.z > 0.0);
+        if (min(ta, tb) > t_lo) {
+            t_lo = min(ta, tb);
+            n_lo = zn;
+        }
+        t_hi = min(t_hi, max(ta, tb));
+    } else if (o.z < fmin.z || o.z > fmax.z) {
+        return res;
+    }
+
+    // Four sloped faces, each "A + B t <= 0". B > 0 caps t from above;
+    // B < 0 raises the floor (and owns the entry normal); B ~ 0 is a
+    // parallel ray, inside or out by the sign of A.
+    for (var f: i32 = 0; f < 4; f = f + 1) {
+        var a: f32;
+        var b: f32;
+        var nf: vec3<f32>;
+        if (f == 0) {
+            a = (o.x - c2.x) - h2.x * s_a;
+            b = dir.x - h2.x * s_b;
+            nf = normalize(vec3<f32>(1.0, 0.0, -h2.x * sp));
+        } else if (f == 1) {
+            a = -(o.x - c2.x) - h2.x * s_a;
+            b = -dir.x - h2.x * s_b;
+            nf = normalize(vec3<f32>(-1.0, 0.0, -h2.x * sp));
+        } else if (f == 2) {
+            a = (o.y - c2.y) - h2.y * s_a;
+            b = dir.y - h2.y * s_b;
+            nf = normalize(vec3<f32>(0.0, 1.0, -h2.y * sp));
+        } else {
+            a = -(o.y - c2.y) - h2.y * s_a;
+            b = -dir.y - h2.y * s_b;
+            nf = normalize(vec3<f32>(0.0, -1.0, -h2.y * sp));
+        }
+        if (abs(b) < 1e-9) {
+            if (a > 0.0) {
+                return res;
+            }
+        } else {
+            let tb = -a / b;
+            if (b > 0.0) {
+                t_hi = min(t_hi, tb);
+            } else if (tb > t_lo) {
+                t_lo = tb;
+                n_lo = nf;
+            }
+        }
+    }
+    res.t_near = t_lo;
+    res.t_far = t_hi;
+    res.normal = n_lo;
+    return res;
 }
 
 struct CityHit {
@@ -2432,6 +2646,7 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
         var best_min = vec3<f32>(0.0);
         var best_max = vec3<f32>(0.0);
         var best_kind = -1;
+        var best_fnormal = vec3<f32>(0.0);
         if (cc.built && min(z_a, z_b) < cc.top_z + 1.0) {
             let h1 = city_box_hit(o, inv3, cc.b1min, cc.b1max);
             if (h1.x <= h1.y && h1.x > 0.0 && h1.x < best_t) {
@@ -2450,6 +2665,16 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
                 if (h3.x <= h3.y && h3.x > 0.0 && h3.x < best_t) {
                     best_t = h3.x; best_min = cc.b3min; best_max = cc.b3max;
                     best_kind = 1;
+                }
+            }
+            if (cc.has_frustum) {
+                let hf = city_frustum_hit(o, dir, cc.fmin, cc.fmax,
+                                          cc.fscale);
+                if (hf.t_near <= hf.t_far && hf.t_near > 0.0
+                    && hf.t_near < best_t) {
+                    best_t = hf.t_near;
+                    best_fnormal = hf.normal;
+                    best_kind = 5;
                 }
             }
             if (cc.has_mast) {
@@ -2474,6 +2699,11 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
             if (best_kind == 0) {
                 res.normal = vec3<f32>(0.0, 0.0, 1.0);
                 res.kind = 0;
+            } else if (best_kind == 5) {
+                // A frustum face carries its own normal; the crown cap is
+                // roof, the sloped skin is facade.
+                res.normal = best_fnormal;
+                res.kind = select(1, 2, res.normal.z > 0.7);
             } else {
                 res.normal = city_box_normal(res.pos, best_min, best_max);
                 if (best_kind == 3) {
@@ -2604,7 +2834,10 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
     }
     if (h.kind == 1) {   // facade
-        let tangent = vec2<f32>(-h.normal.y, h.normal.x);
+        // Normalized horizontal tangent: a frustum face's normal carries a
+        // z tilt, and an unnormalized tangent would stretch the windows.
+        let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
+        let tangent = vec2<f32>(-nh.y, nh.x);
         let uc = dot(h.pos.xy, tangent);
         let vc = h.pos.z;
 

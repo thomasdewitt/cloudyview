@@ -34,6 +34,14 @@ writing — so components compose without their authors coordinating.
    light is `CITY_SKYGLOW` and `CITY_MOONLIGHT`. Emission carries the look;
    albedo-lit surfaces are near-black at night. Stay in that world.
 
+   **Vibe targets (Thomas, 2026-08-20).** *Cloudpunk* is the closest
+   reference for what this city is — layered neon verticality, air traffic,
+   glowing signage — minus its voxel-art construction. *Stray* is the bar
+   for solidity — its streets feel inhabited and physically real — but a
+   notch dirtier than we want; this city is lived-in, not derelict. Unlike
+   Cloudpunk we have a real ground: street-level life and ground cars
+   coexist with flying ones.
+
 ## What the core gives you
 
 Read raymarch.wgsl's city section. You may CALL any core `city_*` /
