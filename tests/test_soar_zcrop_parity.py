@@ -92,7 +92,7 @@ def browser_band(sigma, tile_z, tmp_path):
     script.write_text(_JS)
     out = subprocess.run(
         ["node", str(script)], capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin",
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
              "FIELD_FILE": str(field_file)})
     if out.returncode != 0:
         raise AssertionError(f"node failed:\n{out.stderr}")

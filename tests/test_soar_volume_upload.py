@@ -117,7 +117,7 @@ def upload(shape, tmp_path, truncate=0):
     script.write_text(_JS)
     out = subprocess.run(
         ["node", str(script)], capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin",
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
              "SHAPE": json.dumps(list(shape)),
              "TRUNCATE": str(truncate)})
     if out.returncode != 0:

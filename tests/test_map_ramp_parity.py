@@ -73,7 +73,7 @@ def browser():
     try:
         out = subprocess.run(
             ["node", str(script)], capture_output=True, text=True,
-            env={"PATH": "/usr/bin:/bin:/usr/local/bin"})
+            env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"})
         if out.returncode != 0:
             raise AssertionError(f"node failed:\n{out.stderr}")
         return json.loads(out.stdout)
