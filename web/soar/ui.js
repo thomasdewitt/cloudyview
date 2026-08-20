@@ -437,10 +437,19 @@ export class UI {
     // loop may be asleep in front of it — the viewer's setters are what wake
     // it. Reaching past them would leave a slider that moves and a view that
     // does not.
+    // Auto leads the tier buttons: picking a tier by hand ends the automatic
+    // choice for the session, and this is the way back. Lit alongside the
+    // tier the measurement chose — both are true at once.
     head.append(segmented(
-      K.QUALITY_TIER_NAMES.map((n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
-      (v) => v === r.qualityTier,
-      (v) => { app.setQualityTier(v); this.open("quality"); }));
+      [["Auto", "__auto"],
+       ...K.QUALITY_TIER_NAMES.map(
+         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n])],
+      (v) => v === "__auto" ? app.autoTier : v === r.qualityTier,
+      (v) => {
+        if (v === "__auto") app.enableAutoTier();
+        else app.setQualityTier(v);
+        this.open("quality");
+      }));
     const show = el("div", "seg-group");
     show.append(el("h3", null, "show"));
     show.append(segmented(

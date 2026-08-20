@@ -1350,6 +1350,20 @@ export class Viewer {
    * having the app overrule a deliberate choice a minute later is worse than
    * carrying a stale one.
    */
+  /**
+   * The Quality panel's Auto button: hand the choice back to measurement
+   * after a manual pick ended it. Re-runs the startup probe's walk from the
+   * floor rather than trusting the hand-picked tier — the probe is the only
+   * mechanism that can move DOWN (the governor climbs), and its walk is the
+   * one path already proven never to render an unaffordable frame.
+   */
+  enableAutoTier() {
+    if (this._autoTier) return;
+    this._autoTier = true;
+    this._beginAutoTier();
+    this._wake("auto tier");
+  }
+
   setQualityTier(tier) {
     this._autoTier = false;
     this._probe = null;
