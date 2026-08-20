@@ -281,7 +281,10 @@ async function enterViewerOnce(source) {
       // The loader asks questions (which group, what units) and those are
       // menu panels, which live under this overlay.
       setLoadingVisible: (visible) => { dom.loading.hidden = !visible; },
-      register: (v) => { viewer = v; session.viewer = v; },
+      // window.soar is a read-only debug handle — the only way to inspect
+      // the probe/governor state machines from a console or a headless
+      // driver, since everything real is module-scoped.
+      register: (v) => { viewer = v; session.viewer = v; window.soar = v; },
     });
     session.viewer = viewer;
   } catch (err) {

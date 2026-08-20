@@ -605,6 +605,56 @@ export const AUTO_TIER_CADENCE_HOLD_MS = AUTO_TIER_TARGET_MS * 1.25;
 // one for the switch frame itself, one for the first new-tier frame and its
 // render-target reallocation.
 export const AUTO_TIER_WARMUP_FRAMES_CADENCE = 2;
+// --- the in-flight tier governor ------------------------------------------
+//
+// The startup probe has two blind spots it cannot measure its way out of.
+// It runs in the first half-second after load, inside the window where the
+// machine is still paying for the load itself — and on Thomas's M1 that
+// window is "seconds to tens of seconds", so a steady-state Minimal of
+// 1.5-4.2 ms (measured 2026-08-19, TWPICE at 1440p) that clears the
+// escalation gate with only ~11% headroom on its worst view reliably fails
+// it under startup contention, and the verdict sticks at Minimal on a
+// machine that flies Low at 2x margin. And the right tier is not even a
+// per-field constant: DYCOMS's thick backlit view costs 18x its overview
+// (405 vs 22 ms at Low, same day's numbers), so no one-shot verdict from
+// one camera can be right everywhere.
+//
+// So the probe's verdict is a floor, not a sentence. While the camera is
+// actually flying, the governor watches the rAF deltas of marched frames —
+// the cadence clock, with the cadence clock's semantics: it saturates at
+// vsync, so it cannot predict the tier above, only falsify the tier it is
+// on. The rule is the probe's cadence rule transplanted to steady state:
+// when the current tier has held the beat for a full window, climb one
+// rung; the climbed-to tier is then on trial, and breaking the beat in its
+// first window steps back to the rung that held and puts the refused rung
+// on a cooldown. The one over-step is bounded by adjacent-tier cost ratios,
+// exactly the bound the cadence probe already accepts — so the
+// never-render-the-catastrophic-frame property survives: the governor only
+// ever steps to a tier adjacent to one that just measured affordable, and
+// Max is unreachable (it is not in QUALITY_TIERS_CHEAPEST_FIRST).
+//
+// Climb-only, apart from the trial step-back. A tier that held its trial
+// and later hits a heavy region is left alone: automatic downshift invites
+// tier-bouncing at regime boundaries, and an over-tiered stretch is
+// sluggish, not broken. The user's hand always wins — a tier picked in the
+// Quality panel disables auto-tiering entirely (setQualityTier), and a
+// hand-set render scale pauses the governor rather than being stomped by a
+// climb.
+//
+// A window is both a frame count and a wall-time floor: enough frames for
+// a median to mean something, enough seconds that one easy glide past a
+// gap does not climb onto a tier the next cumulus refutes. The window is
+// CONSECUTIVE marched, camera-moving frames — a hold, a park, or a pause
+// resets it, because the hold ladder's frames measure the wrong
+// configuration (and its top rung can cost 400 ms, which is not evidence
+// about flight).
+export const GOVERNOR_MIN_FRAMES = 60;
+export const GOVERNOR_MIN_SECONDS = 3.0;
+// A rung that failed its trial is not retried before this. Long enough to
+// outlive the regime that refused it (a thick view flown through), short
+// enough that a machine that was merely still warming up gets another look.
+export const GOVERNOR_RETRY_COOLDOWN_MS = 60000.0;
+
 // Ceiling on the timestep the camera, bird and recorder integrate over, so a
 // stall (a tab in the background, a shader compile) does not fling the camera
 // across the domain. It is NOT the clock the FPS readout uses.

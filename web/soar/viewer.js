@@ -136,6 +136,10 @@ export class Viewer {
     // _settleAutoTier and AUTO_TIER_CONFIRM_FROM.
     this._confirmTimer = null;
     this._confirmed = false;
+    // The in-flight tier governor — armed when the probe settles, fed one
+    // rAF delta per marched camera-moving frame. See the GOVERNOR_* block
+    // in constants.js for the whole argument.
+    this._governor = null;
 
     // The loop sleeps on a converged view (see _frame) and only these three
     // fields say so. `_sleeping` means no rAF is pending and only _wake can
@@ -415,6 +419,7 @@ export class Viewer {
     clearTimeout(this._confirmTimer);
     this._confirmTimer = null;
     this._confirmed = false;
+    this._governor = null;
     if (!this._autoTier) { this._probe = null; return; }
     this._armProbe(K.QUALITY_TIERS_CHEAPEST_FIRST[0]);
   }
@@ -672,6 +677,101 @@ export class Viewer {
     } else {
       this.ui.say(line, tier === floor ? 8 : 5);
     }
+    // The verdict is a floor, not a sentence: from here the governor keeps
+    // re-measuring the tier from real flight and climbs when it has proof.
+    this._armGovernor();
+  }
+
+  // --- the in-flight tier governor -----------------------------------------
+  //
+  // The probe's cadence rule transplanted to steady state — see the
+  // GOVERNOR_* block in constants.js. Fed one rAF delta per marched,
+  // camera-moving frame by _frame; anything else resets the window, so a
+  // verdict only ever comes from a consecutive stretch of real flight.
+
+  _armGovernor() {
+    if (!this._autoTier) { this._governor = null; return; }
+    this._governor = {
+      frame: 0, samples: [], startedAt: 0,
+      // The rung climbed FROM into the current one. Non-null means the
+      // current tier is on trial: breaking the beat steps back there.
+      trialFrom: null,
+      // tier -> performance.now() before which a rung that failed its trial
+      // is not climbed onto again, and tier -> how many trials it has failed.
+      // Two strikes refuses the rung for the rest of this field: a rung that
+      // failed twice, a minute apart, is not going to be saved by a third
+      // look, and re-trying it forever means a sluggish stretch every
+      // cooldown for as long as the flight lasts.
+      refusedUntil: {},
+      refusals: {},
+    };
+  }
+
+  _governorReset() {
+    const g = this._governor;
+    if (!g) return;
+    g.frame = 0;
+    g.samples = [];
+  }
+
+  _governorFrame(ms) {
+    const g = this._governor;
+    if (!g || this._probe || !this._autoTier) return;
+    // A hand-set render scale would be stomped by a tier change (that is
+    // setQualityTier's documented rule), so the governor stands down rather
+    // than undoing the user's slider.
+    if (this.renderer.qualityIsCustom) { this._governorReset(); return; }
+    g.frame += 1;
+    // The rAF delta describes the PREVIOUS frame, and the first frames after
+    // a reset may describe a hold rung or a render-target reallocation —
+    // the same lag the cadence probe warms up over.
+    if (g.frame <= K.AUTO_TIER_WARMUP_FRAMES_CADENCE) return;
+    if (g.samples.length === 0) g.startedAt = performance.now();
+    g.samples.push(ms);
+    if (g.samples.length < K.GOVERNOR_MIN_FRAMES
+        || performance.now() - g.startedAt < K.GOVERNOR_MIN_SECONDS * 1000) {
+      return;
+    }
+    const median = [...g.samples].sort((a, b) => a - b)[
+      Math.floor(g.samples.length / 2)];
+    const order = K.QUALITY_TIERS_CHEAPEST_FIRST;
+    const at = order.indexOf(this.qualityTier);
+    const holds = median <= K.AUTO_TIER_CADENCE_HOLD_MS;
+    if (!holds && g.trialFrom) {
+      // The climbed-to tier failed its trial: back to the rung that held,
+      // and this one is not retried until the cooldown passes — or at all,
+      // after a second strike.
+      const refused = this.qualityTier;
+      g.refusals[refused] = (g.refusals[refused] ?? 0) + 1;
+      g.refusedUntil[refused] = g.refusals[refused] >= 2
+        ? Infinity
+        : performance.now() + K.GOVERNOR_RETRY_COOLDOWN_MS;
+      const refusedLabel = K.QUALITY_PRESETS[refused].label.split(" —")[0];
+      this._governorSetTier(g.trialFrom, refused, median,
+        "stepped back", `${refusedLabel} didn't hold in flight`);
+      g.trialFrom = null;
+    } else if (holds) {
+      g.trialFrom = null;   // this tier is proven now, trial or not
+      const next = at >= 0 && at < order.length - 1 ? order[at + 1] : null;
+      if (next && (g.refusedUntil[next] ?? 0) <= performance.now()) {
+        const from = this.qualityTier;
+        this._governorSetTier(next, from, median, "raised");
+        g.trialFrom = from;
+      }
+    }
+    this._governorReset();
+  }
+
+  /** One governor tier move: renderer, defaults, and a quiet announcement. */
+  _governorSetTier(tier, from, medianMs, verb, why = "measured in flight") {
+    this.qualityTier = tier;
+    this.renderer.setQualityTier(tier);
+    this._applyTierDefaults(tier);
+    const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
+    console.info(
+      `soar: auto quality ${verb} to ${tier} — ${from} measured ` +
+      `${medianMs.toFixed(2)} ms/frame in flight`);
+    this.ui.say(`Auto quality: ${label} — ${why}.`, 4);
   }
 
   /**
@@ -1224,6 +1324,7 @@ export class Viewer {
   setQualityTier(tier) {
     this._autoTier = false;
     this._probe = null;
+    this._governor = null;
     clearTimeout(this._confirmTimer);
     this._confirmTimer = null;
     this.qualityTier = tier;
@@ -1964,8 +2065,9 @@ export class Viewer {
     // a velocity: it is what lets the hold ladder start climbing the instant
     // you stop, rather than after a timeout.
     const signature = this.camera.signature();
-    this.renderer.setCameraMoving(
-      this._lastSignature !== null && signature !== this._lastSignature);
+    const cameraMoved =
+      this._lastSignature !== null && signature !== this._lastSignature;
+    this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
 
     if (this._probe) {
@@ -2090,6 +2192,16 @@ export class Viewer {
         // This frame's rAF delta describes the PREVIOUS frame — the cadence
         // warm-up count accounts for the lag.
         : elapsed * 1000);
+    } else if (!this._probe) {
+      // The governor only ever hears about consecutive marched frames flown
+      // with a moving camera — the flight configuration, which is what a
+      // tier verdict is about. Everything else (a hold climb, a park, a
+      // pause) resets its window rather than polluting it.
+      if (march && cameraMoved && !this.paused) {
+        this._governorFrame(elapsed * 1000);
+      } else {
+        this._governorReset();
+      }
     }
 
     // Fire-and-forget: the meter renders ~5k rays on its own uniform buffer
