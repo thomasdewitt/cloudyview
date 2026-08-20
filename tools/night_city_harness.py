@@ -108,6 +108,11 @@ def main(argv=None) -> int:
                              "against a shader that has no CITY yet")
     parser.add_argument("--views", nargs="+", default=None,
                         help=f"subset of {sorted(CITY_VIEWS)}")
+    parser.add_argument("--camera", nargs=6, type=float, default=None,
+                        metavar=("X", "Y", "Z", "AZ", "EL", "FOV"),
+                        help="one free view instead of the named ones: "
+                             "world meters and degrees. The component "
+                             "iteration loop's close-up lens.")
     args = parser.parse_args(argv)
 
     from cloudyview.basic_render import save_image
@@ -190,11 +195,20 @@ def main(argv=None) -> int:
           f"elevation {light_el:g}; exposure {exposure:g}; "
           f"{w}x{h}, {args.frames} accumulated passes\n")
 
+    if args.camera is not None:
+        x, y, z, az, el, fov = args.camera
+        views = {"camera": {"xy": None, "world_xy": (x, y), "z": z,
+                            "azimuth": az, "elevation": el, "fov": fov}}
+
     for name, v in views.items():
-        fx, fy = v["xy"]
-        position = [float(bmin[0] + fx * (bmax[0] - bmin[0])),
-                    float(bmin[1] + fy * (bmax[1] - bmin[1])),
-                    float(v["z"])]
+        if v.get("world_xy") is not None:
+            position = [float(v["world_xy"][0]), float(v["world_xy"][1]),
+                        float(v["z"])]
+        else:
+            fx, fy = v["xy"]
+            position = [float(bmin[0] + fx * (bmax[0] - bmin[0])),
+                        float(bmin[1] + fy * (bmax[1] - bmin[1])),
+                        float(v["z"])]
         view = ViewState(
             camera_position=position,
             azimuth=v["azimuth"], elevation=v["elevation"], fov=v["fov"],

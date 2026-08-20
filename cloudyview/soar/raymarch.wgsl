@@ -2124,6 +2124,38 @@ const CITY_MOON_HALO_G: f32 = 0.78;
 const CITY_MOON_HALO_AMP: f32 = 0.008;
 const CITY_MOON_BLOOM_W: f32 = 0.0008;
 
+// --- City component hooks --------------------------------------------------
+//
+// The city grows by COMPONENTS: small WGSL files under
+// cloudyview/soar/city/components/, each owning one kind of thing (a street
+// prop, a facade layer, an elevated highway), registered in registry.json
+// and spliced into this file by tools/compose_city.py between the GENERATED
+// markers below. The core calls five hooks; the composer generates their
+// dispatchers over whatever is registered, and when nothing is, the
+// defaults below make every hook a no-op — except the shade dispatcher,
+// which returns magenta, because an unclaimed hit kind is a bug and should
+// look like one.
+//
+//   cc_extra_trace       geometry independent of the block grid (highways):
+//                        traced once per ray, nearest hit wins against the
+//                        DDA's.
+//   cc_cell_props_trace  per-cell prop geometry (streetlights, cars, bins),
+//                        called only within CITY_PROP_RANGE of the camera —
+//                        the props' whole cost budget lives inside that
+//                        radius.
+//   cc_component_shade   radiance at a component hit (kind >= 100; each
+//                        component owns kind_base .. kind_base+15).
+//   cc_facade_detail     additive facade emission (balconies, signage,
+//                        fire escapes) on top of the window ladder.
+//   cc_window_glyph      transmission multiplier inside a lit pane
+//                        (curtains, figures, androids) — 1 leaves the
+//                        window exactly as it was.
+//
+// Component hits reuse CityHit with kind >= 100. See components/SPEC.md for
+// the contract agents write against.
+
+const CITY_PROP_RANGE: f32 = 2200.0;
+
 fn city_u01(x: u32) -> f32 {
     return f32(x) * 2.3283064365386963e-10; // 1 / 2^32
 }
@@ -2381,13 +2413,18 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
         ground_t = (CITY_GROUND_Z - o.z) / dir.z;
     }
 
+    // Grid-independent component geometry (elevated highways and their
+    // kin): traced once, and the nearest of it and whatever the DDA finds
+    // wins at every exit below.
+    let extra = cc_extra_trace(o, dir, inv3);
+
     var t_cur = t0;
     for (var i: i32 = 0; i < CITY_TRACE_MAX_CELLS; i = i + 1) {
         let t_exit = min(min(tmax.x, tmax.y), CITY_TRACE_RANGE);
         let z_a = o.z + t_cur * dir.z;
         let z_b = o.z + t_exit * dir.z;
         if (min(z_a, z_b) > CITY_SLAB_TOP && dir.z >= 0.0) {
-            return res;   // climbed out of the slab for good
+            return extra;   // climbed out of the slab for good
         }
 
         let cc = city_cell(ci);
@@ -2447,11 +2484,24 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
                     res.kind = select(1, 2, res.normal.z > 0.5);
                 }
             }
+        }
+        // Near-field props: the whole prop budget lives inside
+        // CITY_PROP_RANGE, so the far city never pays for a garbage can.
+        if (t_cur < CITY_PROP_RANGE) {
+            let ph = cc_cell_props_trace(o, dir, inv3, t_cur, t_exit, ci, cc);
+            if (ph.hit && ph.t < res.t && ph.t <= t_exit + 1e-3) {
+                res = ph;
+            }
+        }
+        if (res.hit) {
+            if (extra.hit && extra.t < res.t) {
+                return extra;
+            }
             return res;
         }
 
         if (t_exit >= CITY_TRACE_RANGE) {
-            return res;
+            return extra;
         }
         if (tmax.x < tmax.y) {
             ci.x = ci.x + stp.x;
@@ -2463,7 +2513,7 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
             tmax.y = tmax.y + tdelta.y;
         }
     }
-    return res;
+    return extra;
 }
 
 // One window's color: a palette draw shifted by the building's own mood.
@@ -2519,6 +2569,9 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
     let local_glow = city_glow_sample(h.pos.xy, 3.0);
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * local_glow);
 
+    if (h.kind >= 100) {   // a component's hit; its shader owns the look
+        return cc_component_shade(h, cc, dir, fp);
+    }
     if (h.kind == 4) {   // beacon
         return CITY_BEACON_COLOR;
     }
@@ -2577,6 +2630,12 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
             let bright = 0.25 + 5.0 * pow(wh.z, 7.0);
             e_win = city_window_color(wh.y, cc.palette_bias)
                     * (CITY_WIN_RADIANCE * bright);
+            // Life inside: whatever the glyph components put between the
+            // light and the glass (curtains, figures, androids).
+            let pane_uv = vec2<f32>(
+                (fu - CITY_WIN_U_LO) / (CITY_WIN_U_HI - CITY_WIN_U_LO),
+                (fv - CITY_WIN_V_LO) / (CITY_WIN_V_HI - CITY_WIN_V_LO));
+            e_win = e_win * cc_window_glyph(cc, wh, pane_uv, fp);
         }
 
         // Far field: an octave ladder rather than one mean. A single flat
@@ -2635,6 +2694,10 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
             e = e + sc * CITY_STORE_RADIANCE
                     * smoothstep(CITY_STORE_H, CITY_STORE_H * 0.4, vc);
         }
+
+        // Whatever the facade-layer components add: balconies, signage,
+        // fire escapes.
+        e = e + cc_facade_detail(cc, h, uc, vc, fp);
 
         return e + CITY_FACADE_ALBEDO * fill
                + CITY_FACADE_ALBEDO * CITY_MOONLIGHT
@@ -2784,6 +2847,45 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
     }
     return col;
 }
+
+// >>> GENERATED CITY COMPONENTS — written by tools/compose_city.py from
+// >>> cloudyview/soar/city/components/; edit the component files and re-run
+// >>> the composer, never this block.
+fn cc_extra_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
+        -> CityHit {
+    var res: CityHit;
+    res.hit = false;
+    res.t = 1e30;
+    return res;
+}
+
+fn cc_cell_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                       t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
+        -> CityHit {
+    var res: CityHit;
+    res.hit = false;
+    res.t = 1e30;
+    return res;
+}
+
+fn cc_component_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    // An unclaimed component kind is a bug, and this is its color.
+    return vec3<f32>(1.0, 0.0, 1.0);
+}
+
+fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
+        -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    return e;
+}
+
+fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>, fp: f32)
+        -> vec3<f32> {
+    var t = vec3<f32>(1.0);
+    return t;
+}
+// <<< GENERATED CITY COMPONENTS
 
 // ---------------------------------------------------------------------------
 // Entry points
