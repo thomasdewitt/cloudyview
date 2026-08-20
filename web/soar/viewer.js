@@ -47,6 +47,7 @@ import { escalateQualityTier } from "./uniforms.js";
 import {
   renderStill, imageDataToPng, download, timestampedName,
   createOfflineTarget, beginOfflineRender, endOfflineRender, renderAccumulated,
+  captureFrames,
   readBack,
 } from "./capture.js";
 import { cameraWorldOrigin, worldToRelative } from "./camera.js";
@@ -105,9 +106,17 @@ export class Viewer {
     // wrap and image settings — where behold path-traces one bare field.
     this.terminalRenderer = "witness";
     this.captureSize = null;
-    this.stillSamples = K.STILL_ACCUMULATE_FRAMES;
     this.videoFps = K.DEFAULT_VIDEO_FPS;
-    this.videoAccumulate = K.DEFAULT_VIDEO_ACCUMULATE;
+    // Captures pick their own tier — a still leans expensive, a video has
+    // hundreds of frames to pay for (Thomas, 2026-08-20). Each capture uses
+    // that tier's flight configuration at the capture resolution, with the
+    // tier's parked sample count as its spp; see capture.captureFrames.
+    this.captureStillTier = "max";
+    this.captureVideoTier = "high";
+    // True once any Advanced quality setting was hand-changed: the tier row
+    // shows a selected "Custom" chip, and the governor stands down. Clicking
+    // any preset (or Auto) resets every Advanced setting and clears this.
+    this.qualityCustom = false;
 
     this.flyerEnabled = true;
     // Which of the two flyers is up. They share a render pass and differ in
@@ -710,10 +719,14 @@ export class Viewer {
   _governorFrame(ms) {
     const g = this._governor;
     if (!g || this._probe || !this._autoTier) return;
-    // A hand-set render scale would be stomped by a tier change (that is
-    // setQualityTier's documented rule), so the governor stands down rather
-    // than undoing the user's slider.
-    if (this.renderer.qualityIsCustom) { this._governorReset(); return; }
+    // A hand-set render scale — or any Advanced override — would be stomped
+    // by a tier change (a preset click resets everything, and that is the
+    // rule), so the governor stands down rather than undoing the user's
+    // hand.
+    if (this.renderer.qualityIsCustom || this.qualityCustom) {
+      this._governorReset();
+      return;
+    }
     g.frame += 1;
     // The rAF delta describes the PREVIOUS frame, and the first frames after
     // a reset may describe a hold rung or a render-target reallocation —
@@ -1117,41 +1130,27 @@ export class Viewer {
   }
 
   /**
-   * The sky-probe override (J): the per-tier presets decide who pays for
-   * the vertical sky-visibility march (Max and High); J cycles a session
-   * override — per preset, forced on, forced off — for judging the look and
-   * the cost anywhere.
+   * J: flip the sky probe. The same setting as the Advanced panel's row, so
+   * flipping it by key also marks the quality Custom.
    */
   toggleSkyProbe() {
-    const r = this.renderer;
-    const next = { auto: "on", on: "off", off: "auto" };
-    r.skyProbeMode = next[r.skyProbeMode];
-    r.resetAccumulation();
-    this.ui.say({
-      auto: "Sky probe: per preset (Max and High).",
-      on: "Sky probe forced on — measured sky visibility everywhere.",
-      off: "Sky probe forced off — shadowed samples assume open sky.",
-    }[r.skyProbeMode], 4);
-    this._wake("sky probe");
+    const on = !this.skyProbeOn;
+    this.setSkyProbe(on);
+    this.markQualityCustom();
+    this.ui.say(on
+      ? "Sky probe on — measured sky visibility in shadow."
+      : "Sky probe off — shadowed samples assume open sky.", 4);
   }
 
-  /**
-   * The sun-tau cache override (K): the per-tier presets decide who reads
-   * the cache (every tier but Max); K cycles the same session override as J
-   * — per preset, forced on, forced off. The cache itself is always kept
-   * baked, so forcing is instant.
-   */
+  /** K: flip the sun-tau cache (on always means the /2 bake). Same setting
+   *  as the Advanced panel's row; marks the quality Custom. */
   toggleLightCache() {
-    const r = this.renderer;
-    const next = { auto: "on", on: "off", off: "auto" };
-    r.lightCacheMode = next[r.lightCacheMode];
-    r.resetAccumulation();
-    this.ui.say({
-      auto: "Light cache: per preset (every tier but Max).",
-      on: "Light cache forced on.",
-      off: "Light cache forced off — live sun march.",
-    }[r.lightCacheMode], 4);
-    this._wake("light cache");
+    const on = !this.lightCacheOn;
+    this.setLightCache(on);
+    this.markQualityCustom();
+    this.ui.say(on
+      ? "Light cache on — baked sun shadows."
+      : "Light cache off — live sun march.", 4);
   }
 
   setToneMapGamma(gamma) {
@@ -1380,8 +1379,10 @@ export class Viewer {
    * one path already proven never to render an unaffordable frame.
    */
   enableAutoTier() {
-    if (this._autoTier) return;
+    if (this._autoTier && !this.qualityCustom) return;
     this._autoTier = true;
+    this._resetQualityOverrides();
+    this._applyTierDefaults(this.qualityTier ?? K.DEFAULT_QUALITY_TIER);
     this._beginAutoTier();
     this._wake("auto tier");
   }
@@ -1393,9 +1394,76 @@ export class Viewer {
     clearTimeout(this._confirmTimer);
     this._confirmTimer = null;
     this.qualityTier = tier;
+    this._resetQualityOverrides();
     this.renderer.setQualityTier(tier);
     this._applyTierDefaults(tier);
     this._wake("quality tier");
+  }
+
+  /**
+   * Clicking a preset (or Auto) means the preset, whole: every Advanced
+   * setting returns to its default — the per-tier ones through
+   * _applyTierDefaults after the byHand marks are cleared here, the global
+   * ones directly — and the Custom chip goes away.
+   */
+  _resetQualityOverrides() {
+    this._byHand.clear();
+    const r = this.renderer;
+    r.lightCacheMode = "auto";
+    r.skyProbeMode = "auto";
+    r.parkedSppOverride = null;
+    this.setToneMapGamma(K.DEFAULT_TONE_MAP_GAMMA);
+    this.setToneMapWhitePoint(K.DEFAULT_TONE_MAP_WHITE_POINT);
+    this.setContrast(K.DEFAULT_CONTRAST);
+    this.setHazeHeightDependent(K.DEFAULT_HAZE_HEIGHT_DEPENDENT);
+    // Directly, not through setExposure — that setter reads a drag on the
+    // slider and turns auto-exposure off, which the tier default about to be
+    // applied may immediately turn back on.
+    this.exposure = K.DEFAULT_EXPOSURE;
+    this.qualityCustom = false;
+  }
+
+  /** Any hand-change in the Advanced panel (or K/J) lands here. */
+  markQualityCustom() {
+    this.qualityCustom = true;
+  }
+
+  /** The flight-time sky probe the current settings ask for. */
+  get skyProbeOn() {
+    const r = this.renderer;
+    if (r.skyProbeMode !== "auto") return r.skyProbeMode === "on";
+    return Boolean(K.QUALITY_PRESETS[r.qualityTier].skyProbe);
+  }
+
+  get lightCacheOn() {
+    const r = this.renderer;
+    if (r.lightCacheMode !== "auto") return r.lightCacheMode === "on";
+    return Boolean(K.QUALITY_PRESETS[r.qualityTier].lightCache);
+  }
+
+  get parkedSpp() {
+    return this.renderer.parkedSppOverride
+      ?? K.PARKED_ACCUM_FRAMES_BY_TIER[this.renderer.qualityTier];
+  }
+
+  setSkyProbe(on) {
+    this.renderer.skyProbeMode = on ? "on" : "off";
+    this.renderer.resetAccumulation();
+    this._marchPending = true;
+    this._wake("sky probe");
+  }
+
+  setLightCache(on) {
+    this.renderer.lightCacheMode = on ? "on" : "off";
+    this.renderer.resetAccumulation();
+    this._marchPending = true;
+    this._wake("light cache");
+  }
+
+  setParkedSpp(spp) {
+    this.renderer.parkedSppOverride = spp;
+    this._marchPending = true;
+    this._wake("parked spp");
   }
 
   /** The Quality panel's render-scale sliders, by hand: what the march runs
@@ -1673,7 +1741,8 @@ export class Viewer {
       for (const warning of writer.warnings ?? []) console.warn(warning);
 
       target = createOfflineTarget(this.device, size, "soar-video");
-      saved = beginOfflineRender(this.renderer);
+      saved = beginOfflineRender(this.renderer, this.captureVideoTier);
+      const framesPerVideoFrame = captureFrames(this.captureVideoTier);
 
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
@@ -1690,7 +1759,7 @@ export class Viewer {
           this.renderer, target.view, size,
           { ...this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }),
             camera: pose, frameIndex: i * 1024 },
-          this.videoAccumulate, overlays);
+          framesPerVideoFrame, overlays);
         await writer.addFrame(
           await readBack(this.device, target.texture, size[0], size[1]), i);
 
@@ -1792,12 +1861,16 @@ export class Viewer {
       render: {
         renderer: "soar-web",
         size,
-        tier: this.renderer.qualityTier,
+        tier: this.captureStillTier,
         render_scale: 1.0,
-        step_factor: this.renderer.stepFactor,
-        max_light_steps: this.renderer.maxLightSteps,
+        step_factor: K.QUALITY_PRESETS[this.captureStillTier].stepFactor,
+        light_step_factor:
+          K.QUALITY_PRESETS[this.captureStillTier].lightStepFactor,
+        light_cache: K.QUALITY_PRESETS[this.captureStillTier].lightCache,
+        sky_probe: K.QUALITY_PRESETS[this.captureStillTier].skyProbe,
+        max_light_steps: K.QUALITY_PRESETS[this.captureStillTier].maxLightSteps,
         periodic: this.renderer.periodic,
-        accumulate_frames: K.STILL_ACCUMULATE_FRAMES,
+        accumulate_frames: K.PARKED_ACCUM_FRAMES_BY_TIER[this.captureStillTier],
         tone_map_gamma: this.toneMapGamma,
         tone_map_white_point: this.toneMapWhitePoint,
         contrast: this.contrast,
@@ -1855,7 +1928,7 @@ export class Viewer {
       const image = await renderStill(
         this.device, this.renderer,
         this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }), size,
-        this.stillSamples, stillOverlays,
+        this.captureStillTier, stillOverlays,
         (fraction) => this.ui.showProgress(
           `Rendering a ${size[0]}x${size[1]} still…`, fraction));
       this.ui.showProgress("Encoding…", 0.95);
@@ -2029,6 +2102,10 @@ export class Viewer {
       // this slider on its own, so a command without it reproduces the view
       // only by luck of which tier was in force.
       "--lod", n(lodStrength),
+      // The still-capture tier: step factors, light cache, sky probe and the
+      // parked sample count, all from the one preset — the same table the
+      // in-app capture uses, so the CLI render matches it in all ways.
+      "--soar-tier", this.captureStillTier,
     ].join(" ");
   }
 

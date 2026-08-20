@@ -66,6 +66,11 @@ _JS = textwrap.dedent("""
       setRenderScale() {},
       flightRenderScale: 1.0,
       qualityTier: "high",
+      lightCacheMode: "auto",
+      skyProbeMode: "auto",
+      parkedSppOverride: null,
+      lightBakePending: false,
+      stepLightBake() { return true; },
       async drawFrame() { this.passes += 1; clock += passMs; },
     });
 
@@ -121,9 +126,11 @@ _JS = textwrap.dedent("""
     globalThis.document = { visibilityState: "visible",
                             addEventListener() {}, removeEventListener() {} };
     const fractions = [];
+    // "minimal" is 8 parked samples of one pass each — the recipe now comes
+    // from the tier rather than a frame count argument.
     await renderStill(
-      stubDevice, stubRenderer(600), { frameIndex: 0 }, [4, 3], 6, null,
-      (fraction) => fractions.push(fraction));
+      stubDevice, stubRenderer(600), { frameIndex: 0 }, [4, 3], "minimal",
+      null, (fraction) => fractions.push(fraction));
 
     process.stdout.write(
       JSON.stringify({ slow, fast, silent, hidden, fractions }));
@@ -186,9 +193,10 @@ def test_no_progress_asked_for_means_no_waiting(result):
 def test_a_still_reports_a_bare_fraction_per_pass_and_then_the_read_back(result):
     """A bar and one sentence from the caller — the stages do not narrate."""
     fractions = result["fractions"]
-    assert len(fractions) == 7          # six passes, then the read-back
+    # minimal's 8 parked samples: one report per slow pass, then the read-back
+    assert len(fractions) == 9
     assert fractions == sorted(fractions)
-    assert fractions[0] == pytest.approx(0.85 / 6)
+    assert fractions[0] == pytest.approx(0.85 / 8)
     # The marching owns 0.85 of the bar; the read-back and the PNG encode own
     # the rest, and the read-back is the one that actually waits on the GPU.
     assert fractions[-2] == pytest.approx(0.85)

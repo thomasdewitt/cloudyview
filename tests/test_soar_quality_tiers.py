@@ -70,7 +70,7 @@ _JS = textwrap.dedent("""
       tierNames: K.QUALITY_TIER_NAMES,
       cheapestFirst: K.QUALITY_TIERS_CHEAPEST_FIRST,
       parked: K.PARKED_ACCUM_FRAMES_BY_TIER,
-      stillFrames: K.STILL_ACCUMULATE_FRAMES,
+      parkedSppLimits: K.PARKED_SPP_LIMITS,
       alphaFloor: K.MOTION_ALPHA_FLOOR_BY_TIER,
       alphaAtZero: K.MOTION_ALPHA_AT_ZERO_SMOOTHING,
       defaultSmoothing: K.DEFAULT_MOTION_SMOOTHING_BY_TIER,
@@ -181,8 +181,10 @@ def test_parked_samples_are_capped_and_rise_with_the_tier(js):
     assert parked["high"] == 32
     counts = [parked[t] for t in TIERS]
     assert counts == sorted(counts)
-    # A capture is explicit and waited on; a park happens every time you stop.
-    assert max(counts) < js["stillFrames"]
+    # A capture's spp IS the tier's parked count now (Thomas, 2026-08-20),
+    # and the Advanced override slider must be able to reach every default.
+    lo, hi = js["parkedSppLimits"]
+    assert lo <= min(counts) and max(counts) <= hi
 
 
 def test_more_smoothing_means_a_smaller_alpha(js):

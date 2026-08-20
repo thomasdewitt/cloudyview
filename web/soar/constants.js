@@ -731,17 +731,17 @@ export const COMPASS_EDGES = [
 
 // --- capture --------------------------------------------------------------
 
-export const STILL_ACCUMULATE_FRAMES = 64;
-// The still capture's samples-per-pixel slider. The default stays
-// STILL_ACCUMULATE_FRAMES; the top is where a 4K still starts costing real
-// wall-clock without a visible return on converged scenes.
-export const STILL_SAMPLES_LIMITS = [8, 256];
+// A capture's spp is no longer its own constant or slider: it is the chosen
+// tier's parked count from PARKED_ACCUM_FRAMES_BY_TIER below, exactly what
+// a parked view at that tier settles at (Thomas, 2026-08-20). The Advanced
+// panel's override slider runs over this range.
+export const PARKED_SPP_LIMITS = [4, 64];
 // Accumulated frames at the top of the ladder, with the scene unchanged,
 // after which the live loop stops marching.
 //
-// This used to BE STILL_ACCUMULATE_FRAMES — 64, the same constant a capture
-// uses, on the argument that a held view and a still are the same picture and
-// must settle at the same point. The argument was right about the picture and
+// This used to be one 64-frame constant shared with captures, on the
+// argument that a held view and a still are the same picture and must settle
+// at the same point. The argument was right about the picture and
 // wrong about the cost. A capture is a thing you asked for and wait on; a held
 // view is what happens every time you stop for a moment, and on a slow machine
 // 64 marches at the top rung is several seconds of saturated GPU that you then
@@ -785,8 +785,6 @@ export const CAPTURE_SIZE_PRESETS = [
 export const CAPTURE_SIZE_LIMITS = [64, 7680];
 export const DEFAULT_VIDEO_FPS = 60.0;
 export const VIDEO_FPS_LIMITS = [12.0, 120.0];
-export const DEFAULT_VIDEO_ACCUMULATE = 24;
-export const VIDEO_ACCUMULATE_LIMITS = [1, 64];
 
 export const BEHOLD_QUALITY_ROWS = [
   ["Min", "min", "fast preview"],

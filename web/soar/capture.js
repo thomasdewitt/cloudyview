@@ -21,13 +21,13 @@ const STILL_FORMAT = "rgba8unorm";
  * untouched, which also means the accumulation the viewer had built up is
  * spent — the caller resets it.
  */
-export async function renderStill(device, renderer, view, size, frames,
+export async function renderStill(device, renderer, view, size, tier,
                                   overlays = null, onProgress = null) {
   const target = createOfflineTarget(device, size, "soar-still");
-  const saved = beginOfflineRender(renderer);
+  const saved = beginOfflineRender(renderer, tier);
   try {
     await renderAccumulated(
-      renderer, target.view, size, view, frames, overlays,
+      renderer, target.view, size, view, captureFrames(tier), overlays,
       onProgress && ((done, total) =>
         onProgress(STILL_MARCH_SHARE * done / total)));
     // The read-back is where the GPU is actually waited on. It gets the rest
@@ -68,15 +68,39 @@ export function createOfflineTarget(device, size, label) {
   return { texture, view: texture.createView(), format: STILL_FORMAT };
 }
 
-/** Force full quality for an offline render; returns what to restore. */
-export function beginOfflineRender(renderer) {
+/**
+ * Accumulation passes for a capture at `tier`: the tier's parked sample
+ * count, in presented frames — Max reaches its 32 samples in 4 passes of 8.
+ */
+export function captureFrames(tier) {
+  const preset = K.QUALITY_PRESETS[tier];
+  if (!preset) throw new Error(`unknown capture tier '${tier}'.`);
+  return Math.max(1, Math.round(
+    K.PARKED_ACCUM_FRAMES_BY_TIER[tier] / (preset.sppPerFrame ?? 1)));
+}
+
+/**
+ * Configure the renderer for an offline render at `tier`, returning what to
+ * restore. A capture is the tier's FLIGHT configuration marched at the
+ * capture resolution — pure preset, no session overrides — with spp from
+ * the parked table (Thomas, 2026-08-20). Pure preset is also what keeps a
+ * capture reproducible from the CLI: witness --soar-tier applies the same
+ * table with nothing invisible mixed in.
+ */
+export function beginOfflineRender(renderer, tier = "high") {
   const saved = { scale: renderer.flightRenderScale,
-                  tier: renderer.qualityTier };
-  renderer.setQualityTier("high");
+                  tier: renderer.qualityTier,
+                  lightCacheMode: renderer.lightCacheMode,
+                  skyProbeMode: renderer.skyProbeMode,
+                  parkedSppOverride: renderer.parkedSppOverride };
+  renderer.setQualityTier(tier);
+  renderer.lightCacheMode = "auto";
+  renderer.skyProbeMode = "auto";
+  renderer.parkedSppOverride = null;
   renderer.setRenderScale(1.0);
-  // High reads the sun-tau cache, so a capture must not race a half-done
-  // bake: the frames before completion would light differently from the
-  // frames after. Finish it here — the capture already owns the GPU.
+  // Most tiers read the sun-tau cache, and a capture must not race a
+  // half-done bake: the frames before completion would light differently
+  // from the frames after. Finish it here — the capture owns the GPU.
   while (renderer.lightBakePending) renderer.stepLightBake(64);
   renderer.resetAccumulation();
   return saved;
@@ -85,6 +109,9 @@ export function beginOfflineRender(renderer) {
 export function endOfflineRender(renderer, saved) {
   renderer.setQualityTier(saved.tier);
   renderer.setRenderScale(saved.scale);
+  renderer.lightCacheMode = saved.lightCacheMode;
+  renderer.skyProbeMode = saved.skyProbeMode;
+  renderer.parkedSppOverride = saved.parkedSppOverride;
   renderer.resetAccumulation();
 }
 

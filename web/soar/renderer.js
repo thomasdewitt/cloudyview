@@ -341,6 +341,9 @@ export class Renderer {
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
     this.skyProbeMode = "auto";
+    // Advanced-panel override for the parked sample count; null follows
+    // PARKED_ACCUM_FRAMES_BY_TIER.
+    this.parkedSppOverride = null;
     this._lightCacheReady = false;
     this.refreshBindGroup();
 
@@ -679,7 +682,8 @@ export class Renderer {
     // a clean still anyway. Converge at the flight sample count instead; the
     // loop still sleeps, holding a frame that looks like the one you fly on.
     if (this._holdMode === "live") return this.sppPerFrame;
-    return K.PARKED_ACCUM_FRAMES_BY_TIER[this.qualityTier];
+    return this.parkedSppOverride
+      ?? K.PARKED_ACCUM_FRAMES_BY_TIER[this.qualityTier];
   }
 
   get holdMode() { return this._holdMode; }

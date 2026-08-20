@@ -437,31 +437,79 @@ export class UI {
     // loop may be asleep in front of it — the viewer's setters are what wake
     // it. Reaching past them would leave a slider that moves and a view that
     // does not.
+    //
     // Auto leads the tier buttons: picking a tier by hand ends the automatic
-    // choice for the session, and this is the way back. Lit alongside the
-    // tier the measurement chose — both are true at once.
-    head.append(segmented(
+    // choice for the session, and this is the way back. A hand-changed
+    // Advanced setting grows a selected "Custom" chip on the right, and any
+    // preset (Auto included) resets every Advanced setting and clears it.
+    let tierRow;
+    const buildTierRow = () => segmented(
       [["Auto", "__auto"],
        ...K.QUALITY_TIER_NAMES.map(
-         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n])],
-      (v) => v === "__auto" ? app.autoTier : v === r.qualityTier,
+         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
+       ...(app.qualityCustom ? [["Custom", "__custom"]] : [])],
+      (v) => app.qualityCustom
+        ? v === "__custom"
+        : (v === "__auto" ? app.autoTier : v === r.qualityTier),
       (v) => {
+        if (v === "__custom") return;      // a state, not a choice
         if (v === "__auto") app.enableAutoTier();
         else app.setQualityTier(v);
         this.open("quality");
-      }));
+      });
+    tierRow = buildTierRow();
+    head.append(tierRow);
+    m.append(head);
+    // Called from every Advanced control's first hand-change: flips the
+    // custom state and re-renders the tier row IN PLACE — the panel must not
+    // rebuild wholesale under a hand still dragging a slider.
+    const noteCustom = () => {
+      if (app.qualityCustom) return;
+      app.markQualityCustom();
+      const fresh = buildTierRow();
+      tierRow.replaceWith(fresh);
+      tierRow = fresh;
+    };
+
+    m.append(item(this._advancedOpen ? "Advanced ▾" : "Advanced ▸",
+                  this._advancedOpen ? null
+                    : "preview, render scales, lighting method, image controls",
+                  () => {
+                    this._advancedOpen = !this._advancedOpen;
+                    this.open("quality");
+                  }));
+    if (!this._advancedOpen) {
+      m.append(el("div", "divider"));
+      m.append(this._backButton());
+      return;
+    }
+
     const show = el("div", "seg-group");
     show.append(el("h3", null, "show"));
     show.append(segmented(
       [["Live", "live"], ["Still", "still"]],
       (v) => v === this._qualityPreview,
       (v) => { this._qualityPreview = v; this.open("quality"); }));
-    head.append(show);
-    m.append(head);
-    if (r.qualityIsCustom) {
-      m.append(el("div", "row", "Render scale has been set by hand, so this " +
-                               "tier is running custom."));
-    }
+    m.append(show);
+
+    // The lighting method, spelled as the two switches the presets set: on
+    // for the cache always means the /2 bake (there is no other resolution).
+    const boolRow = (label, get, set) => {
+      const b = el("button", "mini");
+      const paint = () => {
+        b.textContent = get() ? "on" : "off";
+        b.classList.toggle("on", get());
+      };
+      paint();
+      b.addEventListener("click", () => { set(!get()); paint(); noteCustom(); });
+      const row = el("div", "row");
+      row.append(`${label}: `, b);
+      return row;
+    };
+    m.append(boolRow("Light march cache",
+                     () => app.lightCacheOn, (v) => app.setLightCache(v)));
+    m.append(boolRow("Sky probe",
+                     () => app.skyProbeOn, (v) => app.setSkyProbe(v)));
 
     m.append(el("div", "divider"));
     // Two columns while docked at the bottom: the panel exists to be looked
@@ -478,14 +526,21 @@ export class UI {
       value, format: (v) => `${v.toFixed(3)}x`, onInput,
     });
     sliders.append(scaleRow("Render scale, moving", r.flightRenderScale,
-                            (v) => app.setRenderScale(v)));
+                            (v) => { app.setRenderScale(v); noteCustom(); }));
     sliders.append(scaleRow("Render scale, still", r.holdRenderScale,
-                            (v) => app.setHoldRenderScale(v)));
+                            (v) => { app.setHoldRenderScale(v); noteCustom(); }));
+    // Samples a parked view settles at; also what a capture at this tier
+    // would spend, unless the capture panel's own tier says otherwise.
+    sliders.append(sliderRow("Parked samples", {
+      min: K.PARKED_SPP_LIMITS[0], max: K.PARKED_SPP_LIMITS[1], step: 1,
+      value: app.parkedSpp, format: (v) => `${v}`,
+      onInput: (v) => { app.setParkedSpp(v); noteCustom(); },
+    }));
     // Smoothing, not alpha — up is more. The tier sets how far up goes.
     sliders.append(sliderRow("Motion smoothing", {
       min: 0.0, max: 1.0, step: 0.01, value: app.motionSmoothing,
       format: (v) => v.toFixed(2),
-      onInput: (v) => app.setMotionSmoothing(v),
+      onInput: (v) => { app.setMotionSmoothing(v); noteCustom(); },
     }));
     // Exposure is a slider full stop, with auto as its mode (Thomas,
     // 2026-08-14) — so auto is a word inside the label rather than a row of
@@ -501,18 +556,19 @@ export class UI {
     auto.addEventListener("click", () => {
       app.setAutoExposure(!app.autoExposure);
       paintAuto();
+      noteCustom();
     });
     const exposureRow = sliderRow(["Exposure (auto: ", auto, ")"], {
       min: K.EXPOSURE_LIMITS[0], max: K.EXPOSURE_LIMITS[1], step: 0.05,
       value: app.exposure, format: (v) => v.toFixed(2),
-      onInput: (v) => { app.setExposure(v); paintAuto(); },
+      onInput: (v) => { app.setExposure(v); paintAuto(); noteCustom(); },
     });
     sliders.append(exposureRow);
     this._exposureRow = exposureRow;
     sliders.append(sliderRow("Tone-map gamma", {
       min: K.TONE_MAP_GAMMA_LIMITS[0], max: K.TONE_MAP_GAMMA_LIMITS[1],
       step: 0.01, value: app.toneMapGamma, format: (v) => v.toFixed(2),
-      onInput: (v) => app.setToneMapGamma(v),
+      onInput: (v) => { app.setToneMapGamma(v); noteCustom(); },
     }));
     // Read out as the distance it means. The knob drives four terms and is
     // not a length, but this is the length it implies at sea level, and it is
@@ -531,6 +587,7 @@ export class UI {
     profile.addEventListener("click", () => {
       app.setHazeHeightDependent(!app.hazeHeightDependent);
       paintProfile();
+      noteCustom();
     });
     // Scaled in the distance it reads out, logarithmically, rather than in
     // the aerosol coordinate. The range it has to cover is 2.5 km to 200 km —
@@ -553,24 +610,27 @@ export class UI {
         const km = hazeKm(p);
         return `${km >= 100 ? km.toFixed(0) : km.toFixed(1)} km`;
       },
-      onInput: (p) => app.setHaze(
-        Math.min(K.HAZE_MAX, Math.max(HAZE_MIN, hazeFromEFoldingKm(hazeKm(p))))),
+      onInput: (p) => {
+        app.setHaze(
+          Math.min(K.HAZE_MAX, Math.max(HAZE_MIN, hazeFromEFoldingKm(hazeKm(p)))));
+        noteCustom();
+      },
     }));
     sliders.append(sliderRow("Level of detail", {
       min: K.LOD_STRENGTH_LIMITS[0], max: K.LOD_STRENGTH_LIMITS[1],
       step: 0.05, value: app.lodStrength,
       format: (v) => `${v.toFixed(2)}x`,
-      onInput: (v) => app.setLodStrength(v),
+      onInput: (v) => { app.setLodStrength(v); noteCustom(); },
     }));
     sliders.append(sliderRow("White point", {
       min: 4.0, max: 40.0, step: 0.5, value: app.toneMapWhitePoint,
       format: (v) => v.toFixed(1),
-      onInput: (v) => app.setToneMapWhitePoint(v),
+      onInput: (v) => { app.setToneMapWhitePoint(v); noteCustom(); },
     }));
     sliders.append(sliderRow("Contrast", {
       min: 0.5, max: 1.6, step: 0.01, value: app.contrast,
       format: (v) => v.toFixed(2),
-      onInput: (v) => app.setContrast(v),
+      onInput: (v) => { app.setContrast(v); noteCustom(); },
     }));
     m.append(el("div", "divider"));
     m.append(this._backButton());
@@ -646,8 +706,8 @@ export class UI {
       ["B", "flyer — paper dart, swift, off"],
       ["M", "minimap"],
       ["R", "record a flight track"],
-      ["K", "light cache override — per preset, on, off"],
-      ["J", "sky probe override — per preset, on, off"],
+      ["K", "light cache on/off (goes Custom; a preset resets)"],
+      ["J", "sky probe on/off (goes Custom; a preset resets)"],
       ["F12", "screenshot"],
     ]);
     m.append(el("div", "divider"));
@@ -762,8 +822,10 @@ export class UI {
       const note = render.querySelector(".note");
       if (note) {
         note.textContent =
-          `${app.videoAccumulate} samples per pixel, at ` +
-          `${app.videoFps.toFixed(0)} fps`;
+          `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureVideoTier]} samples ` +
+          `per pixel at the ` +
+          `${K.QUALITY_PRESETS[app.captureVideoTier].label.split(" —")[0]} ` +
+          `preset, ${app.videoFps.toFixed(0)} fps`;
       }
     };
     m.append(sliderRow("Frame rate", {
@@ -771,11 +833,17 @@ export class UI {
       value: app.videoFps, format: (v) => `${v.toFixed(0)} fps`,
       onInput: (v) => { app.videoFps = v; refresh(); },
     }));
-    m.append(sliderRow("Samples per pixel", {
-      min: K.VIDEO_ACCUMULATE_LIMITS[0], max: K.VIDEO_ACCUMULATE_LIMITS[1],
-      step: 1, value: app.videoAccumulate, format: (v) => `${v}`,
-      onInput: (v) => { app.videoAccumulate = v; refresh(); },
-    }));
+    // The video's tier: each rendered frame is that preset's flight
+    // configuration at the capture size, accumulated to its parked spp.
+    // Refreshed in place — reopening the panel would drop its {samples}
+    // context, which is the recording itself.
+    m.append(el("h3", null, "quality"));
+    const tierSeg = segmented(
+      K.QUALITY_TIER_NAMES.map(
+        (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
+      (v) => v === app.captureVideoTier,
+      (v) => { app.captureVideoTier = v; refresh(); tierSeg.refresh(); });
+    m.append(tierSeg);
 
     m.append(el("div", "divider"));
     m.append(render);
@@ -809,23 +877,22 @@ export class UI {
         this.open("capture");
       }));
 
+    // A capture picks its own tier — the still leans expensive by default —
+    // and its spp is that tier's parked sample count. All settings are the
+    // preset's flight configuration, marched at the capture size; witness
+    // --soar-tier reproduces exactly this from the CLI.
+    m.append(el("h3", null, "quality"));
+    m.append(segmented(
+      K.QUALITY_TIER_NAMES.map(
+        (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
+      (v) => v === app.captureStillTier,
+      (v) => { app.captureStillTier = v; this.open("capture"); }));
+
     m.append(el("div", "divider"));
-    const save = item("Save a still", "",
-                      () => app.saveScreenshot({ overlays: true }));
-    const refresh = () => {
-      const note = save.querySelector(".note");
-      if (note) {
-        note.textContent =
-          `${app.stillSamples} samples per pixel, then a PNG download`;
-      }
-    };
-    m.append(sliderRow("Samples per pixel", {
-      min: K.STILL_SAMPLES_LIMITS[0], max: K.STILL_SAMPLES_LIMITS[1],
-      step: 1, value: app.stillSamples, format: (v) => `${v}`,
-      onInput: (v) => { app.stillSamples = v; refresh(); },
-    }));
-    m.append(save);
-    refresh();
+    m.append(item("Save a still",
+                  `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureStillTier]} ` +
+                  "samples per pixel, then a PNG download",
+                  () => app.saveScreenshot({ overlays: true })));
     m.append(item("Save a still, clouds only", "no bird, no minimap",
                   () => app.saveScreenshot({ overlays: false })));
 

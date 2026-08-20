@@ -228,6 +228,26 @@ def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
     return renderer
 
 
+# Soar's per-tier capture recipe, mirrored from web/soar/constants.js
+# (QUALITY_PRESETS + PARKED_ACCUM_FRAMES_BY_TIER, 2026-08-20): flight step
+# factors, the lighting method, and the parked sample count that is also a
+# capture's spp. --soar-tier applies one of these wholesale so a CLI render
+# matches the in-app capture in all ways. Keep in step with the browser.
+SOAR_TIER_PRESETS = {
+    "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
+                "light_cache": False, "sky_probe": True,  "accumulate": 32},
+    "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
+                "light_cache": True,  "sky_probe": True,  "accumulate": 32},
+    "medium":  {"step_factor": 2.5, "light_step_factor": 4.0,
+                "light_cache": True,  "sky_probe": False, "accumulate": 24},
+    "low":     {"step_factor": 3.0, "light_step_factor": 8.0,
+                "light_cache": True,  "sky_probe": False, "accumulate": 16},
+    "minimal": {"step_factor": 4.0, "light_step_factor": 12.0,
+                "light_cache": True,  "sky_probe": False, "accumulate": 8},
+}
+LIGHT_CACHE_DIVISOR = 2       # the one cache resolution; /1 and /4 retired
+
+
 def render_nested(
     levels: Sequence[NestedLevel],
     camera_position,
@@ -248,6 +268,7 @@ def render_nested(
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
     lod: float = DEFAULT_LOD_STRENGTH,
+    soar_tier: Optional[str] = None,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -278,18 +299,33 @@ def render_nested(
     renderer = _renderer_for(levels, periodic=periodic,
                              tone_mapped=not return_linear)
     min_voxel = min(outer.dx)
-    dt = min_voxel * step_voxel_factor
+    # --soar-tier is the whole recipe or none of it: step factors, lighting
+    # method and sample count all come from the one preset, so this render
+    # is the in-app capture at that tier, made from a terminal.
+    tier = None
+    if soar_tier is not None:
+        if soar_tier not in SOAR_TIER_PRESETS:
+            raise ValueError(
+                f"unknown soar tier '{soar_tier}'; expected one of "
+                f"{sorted(SOAR_TIER_PRESETS)}.")
+        tier = SOAR_TIER_PRESETS[soar_tier]
+        accumulate = tier["accumulate"]
+    view_factor = tier["step_factor"] if tier else step_voxel_factor
+    light_factor = tier["light_step_factor"] if tier else step_voxel_factor
     state = SceneState(
         bmin=[float(v) for v in outer.bmin], bmax=[float(v) for v in outer.bmax],
-        dt_view=dt, dt_light=dt, periodic=periodic,
+        dt_view=min_voxel * view_factor, dt_light=min_voxel * light_factor,
+        periodic=periodic,
         ocean_reflectance=OCEAN_REFLECTANCE,
         nested=len(levels) > 1,
     )
+    dt = min_voxel * view_factor
     if len(levels) > 1:
         fine = levels[0]
         state.nest_bmin = [float(v) for v in fine.bmin]
         state.nest_bmax = [float(v) for v in fine.bmax]
-        state.dt_view_nest = state.dt_light_nest = min(fine.dx) * step_voxel_factor
+        state.dt_view_nest = min(fine.dx) * view_factor
+        state.dt_light_nest = min(fine.dx) * light_factor
 
     w, h = image_size
     view = ViewState(
@@ -305,7 +341,11 @@ def render_nested(
         # browser's slider and this argument are the same number.
         light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
         view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
+        light_cache=bool(tier and tier["light_cache"]),
+        sky_probe=(tier["sky_probe"] if tier else True),
     )
+    if tier and tier["light_cache"]:
+        renderer.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)
     if verbose:
         print(f"  Rendering {w}x{h}, {accumulate} accumulated passes, "
               f"{len(levels)} level(s), dt={dt:.1f} m"
@@ -370,6 +410,7 @@ def witness(
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     lod: float = DEFAULT_LOD_STRENGTH,
+    soar_tier: Optional[str] = None,
     verbose: bool = False,
 ) -> np.ndarray:
     """Render a cloud field with soar's volumetric ray marcher.
@@ -447,7 +488,8 @@ def witness(
         exposure=exposure, tone_map_gamma=tone_map_gamma,
         tone_map_white_point=tone_map_white_point, contrast=contrast,
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
-        periodic=periodic, accumulate=accumulate, verbose=verbose)
+        periodic=periodic, accumulate=accumulate, soar_tier=soar_tier,
+        verbose=verbose)
 
 
 def _render_with_nest(filename: str, outer_field: CloudField, camera: Camera,
@@ -521,6 +563,7 @@ def main(filename: str, output: str = None,
          haze: float = None,
          haze_height_dependent: bool = None,
          lod: float = None,
+         soar_tier: str = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -568,6 +611,8 @@ def main(filename: str, output: str = None,
         look_kwargs['lod'] = lod
     if haze_height_dependent is not None:
         look_kwargs['haze_height_dependent'] = haze_height_dependent
+    if soar_tier is not None:
+        look_kwargs['soar_tier'] = soar_tier
 
     try:
         field = _load_field(
@@ -775,6 +820,11 @@ def cli():
                              "floor grows as t*tan(theta), so smaller is finer "
                              "and slower and never coarser. Soar writes its "
                              f"flown value here (default: {DEFAULT_LOD_STRENGTH})")
+    parser.add_argument("--soar-tier", choices=sorted(SOAR_TIER_PRESETS),
+                        help="Render as the in-app capture at this soar "
+                             "quality tier: its step factors, its lighting "
+                             "method (sun-tau cache, sky probe) and its "
+                             "parked sample count, all from the one preset")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",
@@ -799,6 +849,7 @@ def cli():
          contrast=args.contrast,
          haze=args.haze,
          lod=args.lod,
+         soar_tier=args.soar_tier,
          haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,
