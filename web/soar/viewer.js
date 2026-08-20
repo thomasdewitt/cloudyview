@@ -56,6 +56,29 @@ const OCEAN_URL = "ocean";
 const CITY_URL = "city";
 
 /**
+ * The camera's fold distance over a night city, per lateral axis: the
+ * smallest whole number of city tiles that is also a whole number of cloud
+ * domains, so folding moves neither. q is bounded because the periods may be
+ * incommensurate — then the fold is pushed far out (many cloud periods)
+ * rather than made exact, and the city jump becomes a once-per-expedition
+ * event instead of a once-per-crossing one. null for every ocean scene:
+ * the box extent is the right fold, exactly as before.
+ */
+function cityWrapExtent(scene) {
+  if (!scene.city) return null;
+  return [0, 1].map((i) => {
+    const extent = scene.bmax[i] - scene.bmin[i];
+    const ratio = scene.oceanTileExtent / extent;
+    for (let q = 1; q <= 64; q++) {
+      if (Math.abs(q * ratio - Math.round(q * ratio)) < 1e-6) {
+        return q * scene.oceanTileExtent;
+      }
+    }
+    return 1024 * extent;
+  });
+}
+
+/**
  * The canvas must not present through an sRGB format. raymarch.wgsl's tone
  * map already gamma-encodes, and an sRGB swapchain encodes again — which is
  * exactly the bug that made the desktop window render at an effective gamma
@@ -378,7 +401,8 @@ export class Viewer {
     }
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
                                    { periodic: renderer.periodic,
-                                     start: scene.startCamera });
+                                     start: scene.startCamera,
+                                     wrapExtent: cityWrapExtent(scene) });
 
     this.ui.setSubtitle(this.sourceLabel);
 

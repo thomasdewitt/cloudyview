@@ -2027,18 +2027,25 @@ const CITY_WIN_RADIANCE: f32 = 3.5;
 // Mean of the palette draw below, for the far-field facade average.
 const CITY_PALETTE_MEAN: vec3<f32> = vec3<f32>(1.0, 0.55, 0.25);
 const CITY_WIN_BRIGHT_MEAN: f32 = 0.875; // E[0.25 + 5 w^7]
-// Tone-map compensation on the far-field facade mean. The LOD average is
-// taken in linear radiance, but the display transform is compressive: a few
-// blazing windows tone-map to little more than their dim neighbours, so the
-// linear mean reads far brighter than the resolved facade it replaces —
-// mid-distance towers rendered cream-white. The right number is the ratio
-// <T(E)>/T(<E>) of the window population, which for this palette and white
-// point sits around a third.
-const CITY_FACADE_MEAN_COMP: f32 = 0.04;
+// Tone-map compensation per far-field octave. Each LOD average is taken in
+// linear radiance, but the display transform is compressive: a few blazing
+// windows tone-map to little more than their dim neighbours, so an
+// uncompensated mean reads far brighter than the resolved facade it
+// replaces — mid-distance towers rendered cream-white. The right number is
+// the ratio <T(E)>/T(<E>) of the population inside the footprint, which
+// grows toward 1 as the octave's own variance hands the clipping down to
+// it: the block octave keeps bright members (heavy compensation), the flat
+// asymptote keeps none (mild).
+const CITY_MEAN_COMP_BLOCK: f32 = 0.20;
+const CITY_MEAN_COMP_FLAT: f32 = 0.10;
+// Where blocks dissolve into the flat asymptote (m of pixel footprint;
+// the window->block hand-off is CITY_WIN_LOD_*).
+const CITY_BLOCK_LOD_START: f32 = 9.0;
+const CITY_BLOCK_LOD_FULL: f32 = 30.0;
 // Facade LOD: pixel footprint (m) where the window grid starts and finishes
 // dissolving into the facade average.
-const CITY_WIN_LOD_START: f32 = 1.2;
-const CITY_WIN_LOD_FULL: f32 = 5.0;
+const CITY_WIN_LOD_START: f32 = 1.6;
+const CITY_WIN_LOD_FULL: f32 = 6.5;
 // Streets.
 const CITY_LAMP_SPACING: f32 = 26.0;
 const CITY_LAMP_OFFSET: f32 = 2.5;   // lamp line inset from the block edge
@@ -2572,23 +2579,53 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
                     * (CITY_WIN_RADIANCE * bright);
         }
 
-        // Far field: the facade's mean emission, banded. A flat mean paints
-        // a tower as one beige slab; real distant towers keep coarse
-        // structure — a bright hotel block, dark mechanical storeys — so
-        // the mean is modulated per 16-floor band, a scale the LOD blend
-        // cannot yet have dissolved when it engages.
-        let bh = city_rand4(vec2<u32>(
+        // Far field: an octave ladder rather than one mean. A single flat
+        // mean fails twice — averaged in linear radiance ahead of a
+        // compressive tone map it renders cream, and dimmed enough not to,
+        // it renders as a lightless brown slab whose windows visibly
+        // vanish at one distance. So the windows dissolve the way they
+        // were built, scale by scale: individual panes into 4x4-window
+        // BLOCKS (hashed, a few bright, most dim — the speckle character
+        // survives past the point where any one pane does, and a rare
+        // block keeps a neon accent), and blocks into the flat asymptote,
+        // which is the palette mean at the occupancy the statistics say.
+        // Each coarser octave carries its own tone-map compensation, so
+        // the display-space brightness holds across both hand-offs.
+        let e_mean_base = CITY_PALETTE_MEAN
+            * (cc.lit_frac * CITY_PANE_FRAC * (1.0 - CITY_DARK_FLOOR_FRAC)
+               * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN);
+
+        // Octave 1: 4x4-window blocks.
+        let ibu = iu >> 2;
+        let ibv = iv >> 2;
+        let bh1 = city_rand4(vec2<u32>(
+            cc.seed.x ^ (bitcast<u32>(ibu) * 0x85ebca6bu),
+            cc.seed.y ^ (bitcast<u32>(ibv) * 0xc2b2ae35u)
+        ));
+        var block_color = CITY_PALETTE_MEAN;
+        if (bh1.y < 0.03) {
+            block_color = city_window_color(
+                0.90 + 0.09 * bh1.z, cc.palette_bias);
+        }
+        let block_var = 0.10 + 1.8 * pow(bh1.x, 5.0);
+        let e_block = block_color
+            * (cc.lit_frac * CITY_PANE_FRAC * (1.0 - CITY_DARK_FLOOR_FRAC)
+               * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
+               * CITY_MEAN_COMP_BLOCK * block_var);
+
+        // Octave 2: the flat asymptote, softly banded per 16 floors.
+        let bh2 = city_rand4(vec2<u32>(
             cc.seed.x ^ 0x51ed270bu,
             bitcast<u32>(iv >> 4) * 0x9e3779b9u
         ));
-        let band = 0.45 + 1.10 * bh.x;
-        let e_mean = CITY_PALETTE_MEAN
-            * (cc.lit_frac * CITY_PANE_FRAC * (1.0 - CITY_DARK_FLOOR_FRAC)
-               * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
-               * CITY_FACADE_MEAN_COMP * band);
+        let band = 0.70 + 0.60 * bh2.x;
+        let e_flat = e_mean_base * (CITY_MEAN_COMP_FLAT * band);
+
         let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);
-        let blend = smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
-        var e = mix(e_win, e_mean, blend);
+        let b1 = smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
+        let b2 = smoothstep(CITY_BLOCK_LOD_START, CITY_BLOCK_LOD_FULL,
+                            fp_eff);
+        var e = mix(e_win, mix(e_block, e_flat, b2), b1);
 
         // Street-level storefront strip: bright, saturated, and only on
         // buildings whose draw says the ground floor is commercial.
