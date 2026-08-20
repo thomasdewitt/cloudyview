@@ -2036,8 +2036,8 @@ const CITY_WIN_BRIGHT_MEAN: f32 = 0.875; // E[0.25 + 5 w^7]
 // grows toward 1 as the octave's own variance hands the clipping down to
 // it: the block octave keeps bright members (heavy compensation), the flat
 // asymptote keeps none (mild).
-const CITY_MEAN_COMP_BLOCK: f32 = 0.20;
-const CITY_MEAN_COMP_FLAT: f32 = 0.10;
+const CITY_MEAN_COMP_BLOCK: f32 = 0.13;
+const CITY_MEAN_COMP_FLAT: f32 = 0.07;
 // Where blocks dissolve into the flat asymptote (m of pixel footprint;
 // the window->block hand-off is CITY_WIN_LOD_*).
 const CITY_BLOCK_LOD_START: f32 = 9.0;
@@ -2215,6 +2215,13 @@ struct CityCell {
     // One building can own a 2x2 block group in a dense district; every
     // member cell then reports the same merged plot and seed.
     merged: bool,
+    // The window style (see the style block in city_cell): 0 grid,
+    // 1 ribbon bands, 2 vertical strips, 3 curtain wall, 4 punched.
+    // Pitch and pane bounds are per building so no two lattices agree.
+    win_style: i32,
+    win_pitch: f32,
+    pane_lo: vec2<f32>, pane_hi: vec2<f32>,
+    pane_frac: f32,
 }
 
 fn city_cell(ci: vec2<i32>) -> CityCell {
@@ -2439,6 +2446,60 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             }
         }
     }
+
+    // The window style: the lattice itself varies building to building, or
+    // mid-distance towers all wear the same texture and blur together
+    // (Thomas, in flight). Style follows height and architecture loosely —
+    // curtain walls on towers, punched openings on low-rise — and pitch is
+    // jittered so even two buildings sharing a style disagree in period.
+    let r4e = city_rand4(c.seed ^ vec2<u32>(0xb5297a4du, 0x68e31da4u));
+    var style = 0;
+    if (h > 350.0 || c.arch == 3) {
+        if (r4e.x < 0.45) { style = 3; }
+        else if (r4e.x < 0.70) { style = 0; }
+        else if (r4e.x < 0.90) { style = 1; }
+        else { style = 2; }
+    } else if (h < 40.0) {
+        if (r4e.x < 0.50) { style = 4; }
+        else if (r4e.x < 0.80) { style = 0; }
+        else { style = 1; }
+    } else {
+        if (r4e.x < 0.30) { style = 0; }
+        else if (r4e.x < 0.55) { style = 1; }
+        else if (r4e.x < 0.75) { style = 2; }
+        else if (r4e.x < 0.90) { style = 3; }
+        else { style = 4; }
+    }
+    c.win_style = style;
+    if (style == 1) {          // ribbon: low continuous bands, thin mullions
+        c.win_pitch = 3.0 * (0.85 + 0.40 * r4e.y);
+        c.pane_lo = vec2<f32>(0.04, 0.34);
+        c.pane_hi = vec2<f32>(0.96, 0.86);
+    } else if (style == 2) {   // vertical strips: narrow, full-height
+        c.win_pitch = 2.2 * (0.85 + 0.40 * r4e.y);
+        c.pane_lo = vec2<f32>(0.32, 0.10);
+        c.pane_hi = vec2<f32>(0.58, 0.94);
+    } else if (style == 3) {   // curtain wall: all glass, hairline mullions
+        c.win_pitch = 2.8 * (0.85 + 0.40 * r4e.y);
+        c.pane_lo = vec2<f32>(0.05, 0.08);
+        c.pane_hi = vec2<f32>(0.95, 0.94);
+        c.palette_bias = c.palette_bias * 0.5;   // cooler house spectrum
+    } else if (style == 4) {   // punched: small openings in a lot of wall
+        c.win_pitch = 2.6 * (0.85 + 0.40 * r4e.y);
+        c.pane_lo = vec2<f32>(0.30, 0.38);
+        c.pane_hi = vec2<f32>(0.70, 0.80);
+        c.palette_bias = min(c.palette_bias * 1.4 + 0.1, 1.0); // warmer
+    } else {                   // grid: the founding lattice
+        c.win_pitch = 3.4 * (0.85 + 0.40 * r4e.y);
+        c.pane_lo = vec2<f32>(0.14, 0.28);
+        c.pane_hi = vec2<f32>(0.86, 0.90);
+    }
+    let pane_span = c.pane_hi - c.pane_lo;
+    c.pane_frac = pane_span.x * pane_span.y;
+    // Widen the occupancy spread too: some towers near-dark, some ablaze,
+    // so neighbours separate at range by brightness as well as texture.
+    c.lit_frac = clamp(
+        c.lit_frac * (0.45 + 1.35 * r4e.z * r4e.z), 0.02, 0.50);
 
     if (h > CITY_MAST_MIN_H && r4b.z < 0.65) {
         c.has_mast = true;
@@ -2841,8 +2902,12 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         let uc = dot(h.pos.xy, tangent);
         let vc = h.pos.z;
 
-        // Per-window pattern.
-        let iu = i32(floor(uc / CITY_WIN_PITCH_U));
+        // Per-window pattern, on this building's own lattice. The style
+        // decides which UNIT switches on: single panes (grid, punched),
+        // floor-segments (ribbon), multi-storey column runs (strips), or
+        // whole floors (curtain wall) — so towers separate at range by
+        // texture, not just by occupancy.
+        let iu = i32(floor(uc / cc.win_pitch));
         let iv = i32(floor(vc / CITY_FLOOR_H));
         let wh = city_rand4(vec2<u32>(
             cc.seed.x ^ bitcast<u32>(iu),
@@ -2853,11 +2918,28 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
             bitcast<u32>(iv) * 0x9e3779b9u
         ));
         let floor_dark = fh.x < CITY_DARK_FLOOR_FRAC;
-        let fu = fract(uc / CITY_WIN_PITCH_U);
+        let fu = fract(uc / cc.win_pitch);
         let fv = fract(vc / CITY_FLOOR_H);
-        let pane = fu > CITY_WIN_U_LO && fu < CITY_WIN_U_HI
-                && fv > CITY_WIN_V_LO && fv < CITY_WIN_V_HI;
-        let lit = pane && !floor_dark && wh.x < cc.lit_frac;
+        let pane = fu > cc.pane_lo.x && fu < cc.pane_hi.x
+                && fv > cc.pane_lo.y && fv < cc.pane_hi.y;
+        var is_on = wh.x < cc.lit_frac;
+        if (cc.win_style == 1) {
+            let sh = city_rand4(vec2<u32>(
+                cc.seed.x ^ (bitcast<u32>(iu >> 1) * 0x9e3779b9u),
+                cc.seed.y ^ (bitcast<u32>(iv) * 0x51ed270bu)));
+            is_on = sh.x < cc.lit_frac * 1.15;
+        } else if (cc.win_style == 2) {
+            let sh = city_rand4(vec2<u32>(
+                cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u),
+                cc.seed.y ^ (bitcast<u32>(iv >> 2) * 0x51ed270bu)));
+            is_on = sh.x < cc.lit_frac * 1.10;
+        } else if (cc.win_style == 3) {
+            let fl = city_rand4(vec2<u32>(
+                cc.seed.x ^ 0x7feb352du,
+                bitcast<u32>(iv) * 0x846ca68bu));
+            is_on = fl.x < cc.lit_frac * 1.5 && wh.x < 0.88;
+        }
+        let lit = pane && !floor_dark && is_on;
         var e_win = vec3<f32>(0.0);
         if (lit) {
             let bright = 0.25 + 5.0 * pow(wh.z, 7.0);
@@ -2865,9 +2947,8 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
                     * (CITY_WIN_RADIANCE * bright);
             // Life inside: whatever the glyph components put between the
             // light and the glass (curtains, figures, androids).
-            let pane_uv = vec2<f32>(
-                (fu - CITY_WIN_U_LO) / (CITY_WIN_U_HI - CITY_WIN_U_LO),
-                (fv - CITY_WIN_V_LO) / (CITY_WIN_V_HI - CITY_WIN_V_LO));
+            let pane_uv = (vec2<f32>(fu, fv) - cc.pane_lo)
+                          / max(cc.pane_hi - cc.pane_lo, vec2<f32>(1e-4));
             e_win = e_win * cc_window_glyph(cc, wh, pane_uv, fp);
         }
 
@@ -2884,7 +2965,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         // Each coarser octave carries its own tone-map compensation, so
         // the display-space brightness holds across both hand-offs.
         let e_mean_base = CITY_PALETTE_MEAN
-            * (cc.lit_frac * CITY_PANE_FRAC * (1.0 - CITY_DARK_FLOOR_FRAC)
+            * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
                * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN);
 
         // Octave 1: 4x4-window blocks.
@@ -2901,7 +2982,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         }
         let block_var = 0.10 + 1.8 * pow(bh1.x, 5.0);
         let e_block = block_color
-            * (cc.lit_frac * CITY_PANE_FRAC * (1.0 - CITY_DARK_FLOOR_FRAC)
+            * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
                * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
                * CITY_MEAN_COMP_BLOCK * block_var);
 
@@ -3249,7 +3330,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     var t_city = 1e30;
     var city_rgb = vec3<f32>(0.0);
     if (CITY) {
-        let pixel_angle = 2.0 * tan_half_fov / img_w;
+        // The city's resolving angle is the same knob as the cloud march's:
+        // the larger of the true pixel angle and the view-step LOD angle
+        // (u.periodic.z, the app's one LOD slider). Coarsening the slider
+        // dissolves windows into blocks exactly as it coarsens the march —
+        // one lever, one degrees-not-meters law for the whole scene.
+        let pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
         let chit = city_trace(u.cam_origin.xyz, dir);
         if (chit.hit) {
             t_city = chit.t;
