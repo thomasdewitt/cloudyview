@@ -255,8 +255,8 @@ async function enterViewerOnce(source) {
         showFailure(
           "The GPU device was lost.", message,
           "Reload the page to start over. If it keeps happening on the same " +
-          "field, it is probably running out of video memory — try a coarser " +
-          "level or close other GPU-heavy tabs.");
+          "field, it is probably running out of video memory — try a field " +
+          "with a smaller grid size, or close other GPU-heavy tabs.");
       },
       // WebGPU reports validation asynchronously. gpu.js calls both of these
       // fatal, and it is right: an uncaptured validation error means the

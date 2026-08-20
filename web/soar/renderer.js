@@ -1247,7 +1247,8 @@ export class Renderer {
       const err = new Error(
         `This GPU cannot hold the sun-shadow cache (${mb} MB at 1/` +
         `${divisor} resolution) alongside the volume.`);
-      err.advice = "A smaller field, or more GPU memory, would open.";
+      err.advice = "Try a field with a smaller grid size, or close other " +
+        "GPU-heavy tabs and applications.";
       throw err;
     }
     this._lightCacheReady = false;

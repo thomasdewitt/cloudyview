@@ -245,7 +245,8 @@ export async function guardAllocation(device, label, bytes, fn) {
     const gb = bytes ? ` (${(bytes / 1e9).toFixed(2)} GB)` : "";
     throw new AllocationFailed(
       `The GPU ran out of memory allocating ${label}${gb}. Close other ` +
-      "tabs and GPU-heavy applications, or open a coarser level.",
+      "tabs and GPU-heavy applications, or try a field with a smaller " +
+      "grid size.",
       { label, bytes });
   }
   return result;
