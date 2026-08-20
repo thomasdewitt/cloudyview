@@ -1,0 +1,9 @@
+{
+ "schema": "cloudyview.web.city.v1",
+ "n": 1024,
+ "cell_m": 90.0,
+ "mips": 11,
+ "format": "rgba16float",
+ "tile_extent_m": 92160.0,
+ "seed": 20260820
+}

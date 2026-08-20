@@ -26,6 +26,11 @@ from pathlib import Path
 import numpy as np
 
 from cloudyview.cloudfield import CloudField
+from cloudyview.city_fif import (
+    DEFAULT_CELL_M as CITY_CELL_M,
+    DEFAULT_N as CITY_N,
+    generate_city_density,
+)
 from cloudyview.ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
@@ -33,6 +38,10 @@ SOAR_OUT = REPO / "web" / "soar"
 # The ocean tiles live in the package (cloudyview/soar/ocean); web/soar/ocean
 # is a symlink to them. Write to the real location.
 OCEAN_OUT = REPO / "cloudyview" / "soar" / "ocean"
+# The night-city density tile, same arrangement (web/soar/city symlinks it).
+CITY_OUT = REPO / "cloudyview" / "soar" / "city"
+
+CITY_SEED = 20260820
 
 # 512 rather than the app's 2048: a quarter the texel count for the same
 # physical tile (dx scales to match), which keeps the download honest.
@@ -111,9 +120,65 @@ def export_ocean() -> dict:
     return meta
 
 
+def _build_city_mips(base: np.ndarray) -> list:
+    """Plain box-average mip chain — the channels are scalars, not normals.
+
+    The coarse levels ARE the ground-glow field: mip k of the height channel
+    is the mean building density over 2^k blocks, which is exactly the
+    aggregate light a cloud base (or a distant sightline) integrates over.
+    """
+    mips = [np.ascontiguousarray(base, dtype=np.float32)]
+    cur = mips[0]
+    while cur.shape[0] > 1 or cur.shape[1] > 1:
+        h, w, _ = cur.shape
+        nh = max(1, h // 2)
+        nw = max(1, w // 2)
+        down = 0.25 * (
+            cur[0:2 * nh:2, 0:2 * nw:2]
+            + cur[1:2 * nh:2, 0:2 * nw:2]
+            + cur[0:2 * nh:2, 1:2 * nw:2]
+            + cur[1:2 * nh:2, 1:2 * nw:2]
+        )
+        mips.append(np.ascontiguousarray(down, dtype=np.float32))
+        cur = mips[-1]
+    return mips
+
+
+def export_city() -> dict:
+    CITY_OUT.mkdir(parents=True, exist_ok=True)
+    print(f"city density tile {CITY_N}^2 at {CITY_CELL_M} m/block "
+          f"(seeded {CITY_SEED})")
+    height, rank = generate_city_density(
+        rng=np.random.default_rng(CITY_SEED)
+    )
+    base = np.empty((CITY_N, CITY_N, 4), dtype=np.float32)
+    base[..., 0] = height
+    base[..., 1] = rank
+    base[..., 2] = 0.0
+    base[..., 3] = 1.0
+    mips = _build_city_mips(base)
+    for i, mip in enumerate(mips):
+        (CITY_OUT / f"fif_mip{i}.bin").write_bytes(
+            np.ascontiguousarray(mip, dtype=np.float16).tobytes()
+        )
+    meta = {
+        "schema": "cloudyview.web.city.v1",
+        "n": CITY_N,
+        "cell_m": float(CITY_CELL_M),
+        "mips": len(mips),
+        "format": "rgba16float",
+        "tile_extent_m": float(CITY_N * CITY_CELL_M),
+        "seed": CITY_SEED,
+    }
+    (CITY_OUT / "meta.json").write_text(json.dumps(meta, indent=1))
+    print(f"  {len(mips)} mips, tile extent {meta['tile_extent_m'] / 1000:.1f} km")
+    return meta
+
+
 def main() -> None:
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
     export_ocean()
+    export_city()
 
 
 if __name__ == "__main__":
