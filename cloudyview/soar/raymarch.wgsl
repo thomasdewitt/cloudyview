@@ -123,7 +123,10 @@ struct Uniforms {
     //     is exactly what the A/B is judging.
     // y = bake slice index (the fs_bake_light pass only; fs_main never
     //     reads it): the field-x plane of the cache being rendered.
-    // z, w = unused (zero).
+    // z = skip the vertical sky probe (0.0 or 1.0): every consumer of
+    //     t_sky then sees a fully open sky. A cost/look toggle while the
+    //     per-tier fate of these marches is decided.
+    // w = unused (zero).
     light_cache: vec4<f32>,
 };
 
@@ -2370,10 +2373,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             var t_sky = 1.0;
             var shallow_open = 0.0;
             if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
-                t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
-                shallow_open = smoothstep(
-                    SHALLOW_OPEN_TSKY_START, SHALLOW_OPEN_TSKY_FULL, t_sky
-                );
+                if (u.light_cache.z > 0.5) {
+                    // Sky probe disabled (a cost/look toggle, J in the
+                    // browser): every consumer sees a fully open sky, which
+                    // is the neutral the floors already assume. Buried
+                    // samples brighten — that is the look being priced.
+                    shallow_open = 1.0;
+                } else {
+                    t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
+                    shallow_open = smoothstep(
+                        SHALLOW_OPEN_TSKY_START, SHALLOW_OPEN_TSKY_FULL, t_sky
+                    );
+                }
             }
             // A buried storm sample keeps the full tuned suppression; an
             // optically open shallow shadow keeps only a quarter of it.

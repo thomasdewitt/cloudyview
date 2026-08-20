@@ -275,6 +275,10 @@ class ViewState:
     # alone against a stale or absent cache reads the dummy zero texture and
     # renders every cloud unshadowed.
     light_cache: bool = False
+    # The vertical sky-visibility march (row 23.z inverts it): off means
+    # every consumer of t_sky sees a fully open sky, and buried samples
+    # brighten. A cost/look toggle, on by default.
+    sky_probe: bool = True
 
 
 def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
@@ -369,7 +373,8 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     if state.nested:
         u[21] = (*state.nest_bmin, state.dt_view_nest)
         u[22] = (*state.nest_bmax, state.dt_light_nest)
-    u[23] = (1.0 if view.light_cache else 0.0, 0.0, 0.0, 0.0)
+    u[23] = (1.0 if view.light_cache else 0.0, 0.0,
+             0.0 if view.sky_probe else 1.0, 0.0)
     return u
 
 

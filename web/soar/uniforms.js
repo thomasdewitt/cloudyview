@@ -102,6 +102,9 @@ export function packUniforms(state, view) {
     // when the renderer has a finished bake bound at binding 7; the packer
     // just writes the flag.
     lightCache = false,
+    // The vertical sky-visibility march (row 23.z inverts it): off means
+    // every consumer of t_sky sees a fully open sky.
+    skyProbe = true,
   } = view;
 
   const [outputW, outputH] = outputSize;
@@ -214,7 +217,7 @@ export function packUniforms(state, view) {
   }
   // Row 23.y is the bake slice index; the renderer's bake pass writes it
   // into its own copy of the block, never through here.
-  row(23, lightCache ? 1.0 : 0.0, 0.0, 0.0, 0.0);
+  row(23, lightCache ? 1.0 : 0.0, 0.0, skyProbe ? 0.0 : 1.0, 0.0);
   return u;
 }
 

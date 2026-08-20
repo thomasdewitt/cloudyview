@@ -140,6 +140,8 @@ export class Viewer {
     // rAF delta per marched camera-moving frame. See the GOVERNOR_* block
     // in constants.js for the whole argument.
     this._governor = null;
+    // The vertical sky-visibility march (J toggles it; see toggleSkyProbe).
+    this.skyProbeEnabled = true;
 
     // The loop sleeps on a converged view (see _frame) and only these three
     // fields say so. `_sleeping` means no rAF is pending and only _wake can
@@ -662,20 +664,22 @@ export class Viewer {
       `at ${this.canvas.width}x${this.canvas.height} (${clock} clock)`);
 
     const floor = K.QUALITY_TIERS_CHEAPEST_FIRST[0];
-    // No silent misery: when even the floor is over budget there is nothing
-    // to fall back to, so say what the machine is doing instead of letting
-    // the user conclude the app is broken. The parked view is still worth
-    // having on such a GPU, which is worth saying too.
-    const line = (tier === floor && measuredMs > K.AUTO_TIER_FLOOR_WARN_MS)
-      ? `This GPU renders ${measuredMs.toFixed(0)} ms a frame even at ` +
+    // The probe's verdict is provisional now — the governor keeps adjusting
+    // from real flight — so it no longer announces itself (a "set to" here
+    // contradicted the governor's later one; Thomas, 2026-08-20). The one
+    // thing still worth saying out loud is the floor warning: when even the
+    // floor is over budget there is nothing to fall back to, and silence
+    // reads as the app being broken.
+    if (tier === floor && measuredMs > K.AUTO_TIER_FLOOR_WARN_MS) {
+      const line =
+        `This GPU renders ${measuredMs.toFixed(0)} ms a frame even at ` +
         `${label} — the lowest quality soar has. Expect a slideshow while ` +
-        "you fly. Stop moving and the picture still sharpens and converges."
-      : `Auto quality: set to ${label} — change any time in the menu.`;
-
-    if (this._loadNotes && performance.now() < this._loadNotesUntil) {
-      this.ui.say(`${this._loadNotes}\n\n${line}`, 8);
-    } else {
-      this.ui.say(line, tier === floor ? 8 : 5);
+        "you fly. Stop moving and the picture still sharpens and converges.";
+      if (this._loadNotes && performance.now() < this._loadNotesUntil) {
+        this.ui.say(`${this._loadNotes}\n\n${line}`, 8);
+      } else {
+        this.ui.say(line, 8);
+      }
     }
     // The verdict is a floor, not a sentence: from here the governor keeps
     // re-measuring the tier from real flight and climbs when it has proof.
@@ -1046,6 +1050,7 @@ export class Viewer {
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
       case "k": this.toggleLightCache(); return;
+      case "j": this.toggleSkyProbe(); return;
       // Through pause(), not ui.open() directly: the dialog needs the mouse,
       // so the pointer must be released first — opening it under a held lock
       // left the camera turning behind an unusable panel (bug 1).
@@ -1123,6 +1128,22 @@ export class Viewer {
       }
     }
     this._wake("sun");
+  }
+
+  /**
+   * The sky-probe toggle (J): the vertical sky-visibility march that feeds
+   * the skylight fill, the directional AO and the deep-shadow gates. Off,
+   * every consumer sees a fully open sky and buried samples brighten. A
+   * cost/look toggle while the per-tier fate of these marches is decided —
+   * same spirit as K.
+   */
+  toggleSkyProbe() {
+    this.skyProbeEnabled = !(this.skyProbeEnabled ?? true);
+    this.renderer.resetAccumulation();
+    this.ui.say(this.skyProbeEnabled
+      ? "Sky probe on — measured sky visibility in shadow."
+      : "Sky probe off — shadowed samples assume open sky.", 4);
+    this._wake("sky probe");
   }
 
   /**
@@ -2046,6 +2067,7 @@ export class Viewer {
       hazeHeightDependent: this.hazeHeightDependent,
       lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * lodStrength,
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
+      skyProbe: this.skyProbeEnabled,
       frameIndex: this.frameIndex,
     };
   }

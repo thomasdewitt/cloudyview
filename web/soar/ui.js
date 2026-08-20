@@ -647,6 +647,7 @@ export class UI {
       ["M", "minimap"],
       ["R", "record a flight track"],
       ["K", "light cache — baked sun shadows (experimental)"],
+      ["J", "sky probe — measured sky visibility in shadow (experimental)"],
       ["F12", "screenshot"],
     ]);
     m.append(el("div", "divider"));
