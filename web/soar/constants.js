@@ -106,6 +106,17 @@ export const DEFAULT_AMBIENT_STRENGTH = 0.15;
 // reflectance. soar uses this one — do not cross the wires.
 export const DEFAULT_OCEAN_REFLECTANCE = [0.0020, 0.0045, 0.0126];
 
+// The night city's five spectral rows (soar_host NIGHT_*). Fixed values, not
+// the daytime air-mass pipeline: the "sun" is a moon and the sky is dark —
+// there is no elevation-dependent spectrum to compute. Twins of
+// soar_host.py's NIGHT_MOON_CLOUD_COLOR..NIGHT_MOON_DISC; the uniform
+// parity test pins the two lists to each other.
+export const NIGHT_MOON_CLOUD_COLOR = [0.34, 0.42, 0.60];
+export const NIGHT_AMBIENT_TINT = [0.020, 0.026, 0.044];
+export const NIGHT_SKY_HORIZON = [0.012, 0.014, 0.022];
+export const NIGHT_MOON_BLOOM = [0.20, 0.22, 0.26];
+export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
+
 export const DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50;
 export const DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65;
 export const DEFAULT_GRADIENT_COARSE_RADIUS_M = 500.0;

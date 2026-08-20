@@ -51,7 +51,9 @@ struct Uniforms {
     bmax: vec4<f32>,
     // x = image width (px), y = image height (px), z = HG asymmetry g, w = ambient strength
     params: vec4<f32>,
-    // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106)
+    // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106).
+    // Under CITY: x = ground z, yz = city tile world offset (m, a whole
+    // number of blocks — see city_glow_sample), w unused.
     ocean: vec4<f32>,
     // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
     ocean_params: vec4<f32>,
@@ -2004,11 +2006,6 @@ const CITY_AVENUE_EXTRA: f32 = 10.0; // extra half-width on avenue boundaries
 const CITY_AVENUE_PERIOD: i32 = 8;  // avenue every this many blocks
 const CITY_TRACE_MAX_CELLS: i32 = 512;
 const CITY_TRACE_RANGE: f32 = 30000.0;
-// Where the tile sits in world space. The cascade's wildest excursion — a
-// 5 km twin spire ringed by 3.7-3.9 km towers — is placed under the demo
-// field's central cameras rather than left wherever the seed put it: the
-// megatower district is the shot, so it gets the stage.
-const CITY_TILE_OFFSET_CELLS: vec2<i32> = vec2<i32>(837, -189);
 // Building presence and mass. rank below EMPTY -> unbuilt lot; the sprawl
 // ramp suppresses height just above the threshold so the outskirts are
 // low-rise rather than a cliff of towers at the empty-lot boundary.
@@ -2139,10 +2136,13 @@ fn city_is_avenue(k: i32) -> bool {
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
 // sampler so the tile wraps. This is the one number the fog, the sky dome
 // and the cloud uplight all share.
+// Where the tile sits in world space rides in u.ocean.yz (meters, a whole
+// number of cells): the cascade's wildest excursion — a 5 km twin spire
+// ringed by 3.7-3.9 km towers — is placed under each field's central
+// cameras rather than left wherever the seed put it. The megatower district
+// is the shot, so it gets the stage, whatever the domain.
 fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
-    let shifted = xy
-        - vec2<f32>(CITY_TILE_OFFSET_CELLS) * u.ocean_params.x;
-    let uv = shifted / u.ocean_params.y;
+    let uv = (xy - u.ocean.yz) / u.ocean_params.y;
     let l = clamp(lod, 0.0, u.ocean_params.w);
     return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
 }
@@ -2172,7 +2172,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     let cell = u.ocean_params.x;
     let dims = textureDimensions(ocean_normals, 0);
     let n = vec2<i32>(i32(dims.x), i32(dims.y));
-    let ct = ci - CITY_TILE_OFFSET_CELLS;
+    let ct = ci - vec2<i32>(floor(u.ocean.yz / cell + vec2<f32>(0.5)));
     let w = ((ct % n) + n) % n;
     let texel = textureLoad(ocean_normals, w, 0);
     c.density = texel.r;

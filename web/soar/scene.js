@@ -80,14 +80,16 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
 }
 
 /**
- * The ocean surface: a periodic ~100 m tile of multifractal normals with a
- * renormalized mip chain. Field-independent, so it ships with the tool and is
- * loaded once per session.
+ * A surface tile: the ocean's periodic ~100 m patch of multifractal normals,
+ * or the night city's density tile — same rgba16float mip-chain byte format,
+ * different meta key for the texel size (the ocean's dx_m is the city's
+ * cell_m). Field-independent, so each ships with the tool and is loaded once
+ * per session.
  */
 export async function loadOceanTile(device, baseUrl, onProgress) {
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const texture = device.createTexture({
-    label: "ocean-fif-normals",
+    label: `${baseUrl}-surface-tile`,
     size: [meta.n, meta.n, 1],
     format: "rgba16float",
     mipLevelCount: meta.mips,
@@ -104,10 +106,16 @@ export async function loadOceanTile(device, baseUrl, onProgress) {
     );
     onProgress?.((level + 1) / meta.mips);
   }
+  const dx = meta.dx_m ?? meta.cell_m;
+  if (!(dx > 0)) {
+    throw new Error(
+      `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
+      "no texel size.");
+  }
   return {
     view: texture.createView(),
     texture,
-    dx: meta.dx_m,
+    dx,
     tileExtent: meta.tile_extent_m,
     maxLod: meta.mips - 1,
   };
@@ -320,14 +328,22 @@ export function createNestDummy(device) {
  * the download is the slow part on a first visit and the upload is the slow
  * part afterwards, and saying so is better than one bar that stalls.
  *
- * `ocean` is a thunk rather than a URL for the same reason the file loader
- * takes one: the sea surface is field-independent and belongs to the session,
- * so loading the demo after a file (or the other way round) reuses the tile
+ * `surface` is a thunk rather than a URL for the same reason the file loader
+ * takes one: the tiles are field-independent and belong to the session, so
+ * loading the demo after a file (or the other way round) reuses the tile
  * already on the card instead of allocating a second one and abandoning it.
+ * It takes the surface kind — "ocean", or "city" for a night-city demo
+ * (meta.surface) — because which tile a demo stands on is the demo's call.
  */
-export async function loadDemoScene(device, baseUrl, ocean, progress) {
+export async function loadDemoScene(device, baseUrl, surface, progress) {
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
+  const surfaceKind = meta.surface ?? "ocean";
+  if (surfaceKind !== "ocean" && surfaceKind !== "city") {
+    throw new Error(
+      `The '${meta.id}' demo asks for surface '${surfaceKind}', which this ` +
+      "viewer does not know. It knows 'ocean' and 'city'.");
+  }
   // A pre-v5 bake ships a ghost-padded volume and a faces.bin, which this
   // renderer would read two texels out of register on every axis. Say so
   // rather than rendering a subtly wrong field.
@@ -381,9 +397,10 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
       throw wrapped;
     }
 
-    const mapBytes = await fetchBytes(`${baseUrl}/map.bin`);
-    progress?.("Loading the ocean surface…", 0.95);
-    const oceanTile = await ocean();
+    const mapBytes = await fetchBytes(`${baseUrl}/${meta.map.file ?? "map.bin"}`);
+    progress?.(surfaceKind === "city"
+               ? "Raising the city…" : "Loading the ocean surface…", 0.95);
+    const surfaceTile = await surface(surfaceKind);
     nestDummy = createNestDummy(device);
 
     const bmin = meta.volume.bmin;
@@ -394,10 +411,12 @@ export async function loadDemoScene(device, baseUrl, ocean, progress) {
       shape,
       bmin, bmax,
       minVoxelM: minVoxelSize(shape, bmin, bmax),
-      oceanView: oceanTile.view,
-      oceanFifDx: oceanTile.dx,
-      oceanTileExtent: oceanTile.tileExtent,
-      oceanMaxLod: oceanTile.maxLod,
+      oceanView: surfaceTile.view,
+      oceanFifDx: surfaceTile.dx,
+      oceanTileExtent: surfaceTile.tileExtent,
+      oceanMaxLod: surfaceTile.maxLod,
+      city: surfaceKind === "city",
+      cityOffsetM: meta.city?.offset_m ?? [0.0, 0.0],
       albedo: new Float32Array(
         mapBytes.buffer, mapBytes.byteOffset, mapBytes.byteLength / 4),
       albedoShape: meta.map.shape_yx,

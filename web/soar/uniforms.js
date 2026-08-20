@@ -55,6 +55,10 @@ export function packUniforms(state, view) {
     oceanZ, oceanReflectance, oceanFifDx, oceanTileExtent, oceanEnabled,
     oceanMaxLod,
     nested = false, nestBmin, nestBmax, dtViewNest, dtLightNest,
+    // The night city (raymarch.wgsl CITY): the ocean-named fields then
+    // describe the city tile, row 4 is the moon, and cityOffsetM is where
+    // the tile sits in world space (row 8.yz).
+    city = false, cityOffsetM = [0.0, 0.0],
   } = state;
 
   const {
@@ -167,9 +171,25 @@ export function packUniforms(state, view) {
   const sun = directionFromAzimuthElevation(sunAzimuth, sunElevation);
   const tanHalfFov = Math.tan(camera.fov * DEG * 0.5);
 
-  const spec = spectralLightingColors(sun, K.SUN_COLOR, spectralLightingStrength);
-  const lightTransferEff = effectiveLightTransferSplit(
-    lightTransferSplitStrength, sunElevation);
+  // Under CITY the daytime spectral pipeline is bypassed, not scaled: the
+  // moon's rows are fixed night values, the low-sun sky field and the
+  // light-transfer split are daytime-sun machinery with no night meaning.
+  // Mirrors soar_host.pack_uniforms exactly (test_uniform_parity).
+  let spec, lowSunSky, lightTransferEff;
+  if (city) {
+    spec = {
+      cloudSun: K.NIGHT_MOON_CLOUD_COLOR, ambient: K.NIGHT_AMBIENT_TINT,
+      horizon: K.NIGHT_SKY_HORIZON, bloom: K.NIGHT_MOON_BLOOM,
+      disc: K.NIGHT_MOON_DISC,
+    };
+    lowSunSky = 0.0;
+    lightTransferEff = 0.0;
+  } else {
+    spec = spectralLightingColors(sun, K.SUN_COLOR, spectralLightingStrength);
+    lowSunSky = lowSunSkyFieldStrength;
+    lightTransferEff = effectiveLightTransferSplit(
+      lightTransferSplitStrength, sunElevation);
+  }
 
   const u = new Float32Array(K.UNIFORM_ROWS * 4);
   const row = (i, a, b, c, d) => {
@@ -184,7 +204,11 @@ export function packUniforms(state, view) {
   row(5, bmin[0], bmin[1], bmin[2], dtView);
   row(6, bmax[0], bmax[1], bmax[2], dtLight);
   row(7, w, h, gHg, ambientStrength);
-  row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
+  if (city) {
+    row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], 0.0);
+  } else {
+    row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
+  }
   row(9, oceanFifDx, oceanTileExtent, oceanEnabled ? 1.0 : 0.0, oceanMaxLod);
   // x/y are sampling flags, excluded from scene identity; z is haze, which
   // is scene state and is not. See sceneKey.
@@ -194,7 +218,7 @@ export function packUniforms(state, view) {
   row(12, gradientCoarseWeight, gradientCoarseRadiusM, ambientOcclusionFloor,
        Math.tan(coneStencilThetaDeg * DEG));
   row(13, spec.cloudSun[0], spec.cloudSun[1], spec.cloudSun[2],
-       lowSunSkyFieldStrength);
+       lowSunSky);
   row(14, spec.ambient[0], spec.ambient[1], spec.ambient[2], lightTransferEff);
   row(15, spec.horizon[0], spec.horizon[1], spec.horizon[2],
        aerialPerspectiveStrength);

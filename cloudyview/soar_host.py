@@ -252,6 +252,11 @@ class SceneState:
     dt_view_nest: float = 0.0
     dt_light_nest: float = 0.0
     city: bool = False
+    # Where the city tile sits in world space (m, a whole number of blocks;
+    # row 8.yz). The default parks the tile's megatower district — its
+    # wildest cascade excursion — under the TWP-ICE subvolume's central
+    # cameras, which is where the harness flies.
+    city_tile_offset_m: Sequence[float] = (75330.0, -17010.0)
 
 
 @dataclass
@@ -416,8 +421,9 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[6] = (*state.bmax, state.dt_light)
     u[7] = (w, h, view.g_hg, view.ambient_strength)
     # Row 8 is the surface: sea level plus the water's reflectance, or — under
-    # CITY — the ground plane, whose remaining three slots mean nothing.
-    u[8] = ((state.ocean_z, 0.0, 0.0, 0.0) if state.city
+    # CITY — the ground plane and the tile's world offset (which district
+    # sits under this field's cameras).
+    u[8] = ((state.ocean_z, *state.city_tile_offset_m, 0.0) if state.city
             else (state.ocean_z, *state.ocean_reflectance))
     # Row 9 needs no branch: cell size, tile extent, surface flag and top mip
     # are the same four numbers about whichever tile is bound.

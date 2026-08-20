@@ -53,6 +53,7 @@ import {
 import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
 const OCEAN_URL = "ocean";
+const CITY_URL = "city";
 
 /**
  * The canvas must not present through an sRGB format. raymarch.wgsl's tone
@@ -273,22 +274,29 @@ export class Viewer {
     let scene = null, renderer = null, minimap = null, flyers = null;
     let sun = null, minimapProblem = null, flyerProblem = null;
     try {
-      // The ocean is a patch of sea surface, not anything about the data, so
-      // it survives a change of field — and belongs to the viewer, which is
-      // what disposes of it.
-      const ocean = async () => (this._ocean ??=
-        await loadOceanTile(this.device, OCEAN_URL));
+      // The surface tiles are not anything about the data — the ocean is a
+      // patch of sea surface, the city is a patch of city — so they survive
+      // a change of field and belong to the viewer, which is what disposes
+      // of them. Each is loaded on first use and cached for the session.
+      const surface = async (kind) => {
+        if (kind === "city") {
+          return (this._cityTile ??=
+            await loadOceanTile(this.device, CITY_URL));
+        }
+        return (this._ocean ??=
+          await loadOceanTile(this.device, OCEAN_URL));
+      };
 
       if (source.kind === "demo") {
         scene = await loadDemoScene(
-          this.device, source.base, ocean,
+          this.device, source.base, surface,
           (stage, fraction) => progress(stage, fraction));
         sun = scene.sun ?? null;
       } else {
         const { loadFileScene } = await import("./ingest/index.js");
         scene = await loadFileScene(
           this.device, source.file, {
-            ocean,
+            ocean: () => surface("ocean"),
             progress,
             ask: (question) => this._ask(question),
           });
@@ -1647,11 +1655,13 @@ export class Viewer {
     destroyFlyers(this.flyers);
     this.scene?.destroy();
     this._ocean?.texture?.destroy();
+    this._cityTile?.texture?.destroy();
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
     this.scene = null;
     this._ocean = null;
+    this._cityTile = null;
 
     // Unconfigure before destroy: the swapchain holds textures on this device,
     // and leaving it configured against a destroyed device is the state

@@ -204,7 +204,7 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
 
 export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
-                                   toneMap = true }) {
+                                   toneMap = true, city = false }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
@@ -222,6 +222,11 @@ export function specializeShader(source,
     ["const TONE_MAP: bool = true;",
      `const TONE_MAP: bool = ${toneMap ? "true" : "false"};`],
   ];
+  // Demanded only when asked for, like soar_host.specialize: a shader that
+  // predates the night city still serves every daytime render.
+  if (city) {
+    swaps.push(["const CITY: bool = false;", "const CITY: bool = true;"]);
+  }
   let out = source;
   for (const [sentinel, replacement] of swaps) {
     const count = out.split(sentinel).length - 1;
@@ -734,13 +739,17 @@ export class Renderer {
   // --- pipelines ----------------------------------------------------------
 
   _module(periodic, nested, maxLightSteps, toneMap = true) {
-    const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}`;
+    // City is a property of the scene, constant for this renderer's whole
+    // life, so every caller inherits it here rather than threading it.
+    const city = Boolean(this.scene.city);
+    const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}|${city}`;
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
         code: specializeShader(this.shaderSource,
-                               { periodic, nested, maxLightSteps, toneMap }),
+                               { periodic, nested, maxLightSteps, toneMap,
+                                 city }),
       });
       this._modules.set(key, module);
     }
@@ -1511,6 +1520,8 @@ export class Renderer {
       nestBmax: s.nestBmax,
       dtViewNest: this.dtViewNest,
       dtLightNest: this.dtLightNest,
+      city: Boolean(s.city),
+      cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
     };
   }
 }
