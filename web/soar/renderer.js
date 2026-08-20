@@ -528,8 +528,6 @@ export class Renderer {
       stepFactor: preset.stepFactor,
       lightStepFactor: preset.lightStepFactor,
       maxLightSteps: preset.maxLightSteps,
-      lightCache: preset.lightCache,
-      skyProbe: preset.skyProbe,
       costRatio: 1.0,
     }];
     const steps = [
@@ -560,11 +558,6 @@ export class Renderer {
         stepFactor: sampling.stepFactor,
         lightStepFactor: sampling.lightStepFactor,
         maxLightSteps: sampling.maxLightSteps,
-        // The lighting method rides with the sampling tier, so the top rung
-        // — High's sampling on every ladder — parks with cache and probe on
-        // whatever tier flew there.
-        lightCache: sampling.lightCache,
-        skyProbe: sampling.skyProbe,
         // What this rung is expected to cost relative to the one below it.
         // Pixels go as the square of the scale. The view march takes a step
         // every stepFactor voxels, so halving the step factor doubles the
@@ -595,15 +588,11 @@ export class Renderer {
     const changed = rung.scale !== this.renderScale
       || rung.stepFactor !== this.stepFactor
       || rung.lightStepFactor !== this.lightStepFactor
-      || rung.maxLightSteps !== this.maxLightSteps
-      || rung.lightCache !== this._rungLightCache
-      || rung.skyProbe !== this._rungSkyProbe;
+      || rung.maxLightSteps !== this.maxLightSteps;
     this.renderScale = rung.scale;
     this.stepFactor = rung.stepFactor;
     this.lightStepFactor = rung.lightStepFactor;
     this.maxLightSteps = rung.maxLightSteps;
-    this._rungLightCache = rung.lightCache;
-    this._rungSkyProbe = rung.skyProbe;
     if (changed) this._resetAccumulation();
   }
 
@@ -1195,16 +1184,24 @@ export class Renderer {
 
   get lightCacheReady() { return this._lightCacheReady; }
 
-  /** What this frame actually does, mode over rung over readiness. */
+  /**
+   * What this frame actually does: hand override, else the SELECTED tier's
+   * preset — never the hold ladder's sampling tier. Parking sharpens the
+   * sampling toward High's step factors, but it must not switch the
+   * lighting method underneath: the sky probe is never on below High, flying
+   * or parked (Thomas, 2026-08-20), and Max's parked march stays live.
+   */
   get lightCacheActive() {
     const wanted = this.lightCacheMode === "auto"
-      ? this._rungLightCache : this.lightCacheMode === "on";
+      ? K.QUALITY_PRESETS[this.qualityTier].lightCache
+      : this.lightCacheMode === "on";
     return Boolean(wanted && this._lightCacheReady);
   }
 
   get skyProbeActive() {
     return this.skyProbeMode === "auto"
-      ? Boolean(this._rungSkyProbe) : this.skyProbeMode === "on";
+      ? Boolean(K.QUALITY_PRESETS[this.qualityTier].skyProbe)
+      : this.skyProbeMode === "on";
   }
 
   invalidateLightCache() {

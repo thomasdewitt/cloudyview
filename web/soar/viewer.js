@@ -945,7 +945,7 @@ export class Viewer {
     // Firefox refuses a re-lock for about a second after the user pressed
     // Escape, so resuming cannot rely on it. Say what to do instead.
     document.addEventListener("pointerlockerror", () => {
-      if (!this.paused) this.ui.say("Click the view to take the mouse.", 3);
+      if (!this.paused) this.ui.say("Click to look around.", 3);
     }, { signal });
 
     document.addEventListener("mousemove", (e) => {
@@ -1109,7 +1109,7 @@ export class Viewer {
     this._lastTime = performance.now();
     this._syncChrome();
     if (capture) this._requestCapture();
-    else this.ui.say("Click the view to take the mouse.", 2);
+    else this.ui.say("Click to look around.", 2);
     this._wake("resume");
   }
 

@@ -374,11 +374,13 @@ export const QUALITY_PRESETS = {
   // `lightCache` and `skyProbe` are per-tier lighting method choices
   // (Thomas, 2026-08-20): every tier but Max reads the baked sun-tau cache
   // instead of marching to the sun per sample, and only Max and High pay
-  // for the vertical sky probe. Because a hold ladder's top rung samples
-  // like High, a parked still gets cache-plus-probe on every tier — the
-  // studied picture stays tier-independent — and the offline capture paths
-  // force High, so stills and video carry the same treatment. Only Max is
-  // the fully live march.
+  // for the vertical sky probe. The SELECTED tier governs them outright —
+  // the hold ladder sharpens a parked view's sampling toward High's step
+  // factors, but the lighting method never switches underneath it: the sky
+  // probe is never on below High, flying or parked, and Max's march stays
+  // fully live. (This joins haze-by-tier in trading away "every tier parks
+  // to the same picture", deliberately.) A capture uses the tier chosen on
+  // its own panel, whole.
   max:    { name: "max",    label: "Max",    renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
