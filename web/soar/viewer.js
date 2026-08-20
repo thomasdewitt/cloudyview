@@ -658,31 +658,14 @@ export class Viewer {
     // come with it — not during the probe's walk, which passes through tiers
     // it has no intention of settling on.
     this._applyTierDefaults(tier);
-    const label = K.QUALITY_PRESETS[tier].label.split(" —")[0];
     console.info(
       `soar: auto quality ${tier} — ${measuredMs.toFixed(2)} ms/frame probed ` +
       `at ${this.canvas.width}x${this.canvas.height} (${clock} clock)`);
-
-    const floor = K.QUALITY_TIERS_CHEAPEST_FIRST[0];
-    // The probe's verdict is provisional now — the governor keeps adjusting
-    // from real flight — so it no longer announces itself (a "set to" here
-    // contradicted the governor's later one; Thomas, 2026-08-20). The one
-    // thing still worth saying out loud is the floor warning: when even the
-    // floor is over budget there is nothing to fall back to, and silence
-    // reads as the app being broken.
-    if (tier === floor && measuredMs > K.AUTO_TIER_FLOOR_WARN_MS) {
-      const line =
-        `This GPU renders ${measuredMs.toFixed(0)} ms a frame even at ` +
-        `${label} — the lowest quality soar has. Expect a slideshow while ` +
-        "you fly. Stop moving and the picture still sharpens and converges.";
-      if (this._loadNotes && performance.now() < this._loadNotesUntil) {
-        this.ui.say(`${this._loadNotes}\n\n${line}`, 8);
-      } else {
-        this.ui.say(line, 8);
-      }
-    }
-    // The verdict is a floor, not a sentence: from here the governor keeps
-    // re-measuring the tier from real flight and climbs when it has proof.
+    // The probe's verdict is provisional — the governor keeps adjusting from
+    // real flight and announces the settled answer — so nothing is toasted
+    // here, the old "set to" and the floor's "expect a slideshow" both
+    // included (Thomas, 2026-08-20). A machine truly stuck at the floor
+    // shows its state in the fps readout instead.
     this._armGovernor();
   }
 

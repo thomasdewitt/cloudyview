@@ -658,6 +658,13 @@ export class Renderer {
 
   /** Samples a held view settles at, which is a property of the tier. */
   get parkedAccumFrames() {
+    // In live hold mode the point is to LOOK like flight, and flight is
+    // sppPerFrame samples, not a converged average — accumulating further
+    // was exactly the "show Live still goes to parked" bug (Thomas,
+    // 2026-08-20): the resolution dropped but the picture then settled into
+    // a clean still anyway. Converge at the flight sample count instead; the
+    // loop still sleeps, holding a frame that looks like the one you fly on.
+    if (this._holdMode === "live") return this.sppPerFrame;
     return K.PARKED_ACCUM_FRAMES_BY_TIER[this.qualityTier];
   }
 
@@ -678,6 +685,11 @@ export class Renderer {
       this._holdRung = 0;
       this._holdCapped = false;
       this._applyRung();
+      // Explicit, not only via _applyRung's changed-check: on a tier whose
+      // flight and hold configurations coincide (High, Max) the rung numbers
+      // do not move, and without this the converged still would survive into
+      // a mode whose whole point is the un-converged flight look.
+      this._resetAccumulation();
     }
   }
 

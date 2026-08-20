@@ -495,10 +495,12 @@ export const HOLD_MAX_FRAME_MS = 400.0;
 
 // --- the startup auto-tier probe -----------------------------------------
 //
-// What the probe is aiming at: 40 fps flight (Thomas, 2026-08-18 — was a
-// 60 Hz vsync, which auto-picked a tier below what machines could carry).
-// AUTO_TIER_MARGIN below still applies on top of this.
-export const AUTO_TIER_TARGET_MS = 1000.0 / 40.0;
+// What the probe is aiming at: 30 fps flight (Thomas, 2026-08-20: "30fps is
+// not bad" — was 40, and before that a 60 Hz vsync; each step down lets the
+// measurement pick the tier a human actually finds flyable rather than one
+// conservatively below it). AUTO_TIER_MARGIN below still applies on top,
+// and the governor's hold threshold derives from this too.
+export const AUTO_TIER_TARGET_MS = 1000.0 / 30.0;
 // The escalation rule, and the safety property that hangs off it.
 //
 // The probe starts at the cheapest tier and escalates only when the tier it
