@@ -59,8 +59,8 @@ def read_shader() -> str:
             "glimpse and behold do not need the shader and still work.")
     return SHADER_PATH.read_text()
 
-UNIFORM_ROWS = 23
-UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 368; the scene key compares all of it
+UNIFORM_ROWS = 24
+UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 384; the scene key compares all of it
 
 DEG = math.pi / 180.0
 
@@ -269,12 +269,18 @@ class ViewState:
     frame_index: int = 0
     subpixel: bool = False
     jitter_scale: float = 1.0
+    # Read tau_sun for cloud samples from the baked cache instead of marching
+    # to the sun per sample. Only meaningful after
+    # SoarRenderer.bake_light_cache has run for this scene and sun; the flag
+    # alone against a stale or absent cache reads the dummy zero texture and
+    # renders every cloud unshadowed.
+    light_cache: bool = False
 
 
 def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
-    """The 368-byte block, row for row with web/soar/uniforms.js.
+    """The 384-byte block, row for row with web/soar/uniforms.js.
 
-    Returns (23, 4) float32. Every unwritten slot stays zero, which is what
+    Returns (24, 4) float32. Every unwritten slot stays zero, which is what
     the shader's unused components and the absent nest rows require.
     """
     _unit_interval("jitter_scale", view.jitter_scale)
@@ -363,6 +369,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     if state.nested:
         u[21] = (*state.nest_bmin, state.dt_view_nest)
         u[22] = (*state.nest_bmax, state.dt_light_nest)
+    u[23] = (1.0 if view.light_cache else 0.0, 0.0, 0.0, 0.0)
     return u
 
 
@@ -509,6 +516,10 @@ class SoarRenderer:
 
         self._vol_tex = None
         self._nest_tex = self._dummy_volume()
+        # Binding 7 starts as the same always-bound zero dummy the nest uses;
+        # bake_light_cache replaces it with a real cache.
+        self._light_tau_tex = self._dummy_volume()
+        self._light_cache_dims = None
         self._ocean_tex = self._load_ocean()
         self._targets = None
         self._bind_group = None
@@ -636,12 +647,21 @@ class SoarRenderer:
             {"binding": 5, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
             {"binding": 6, "visibility": wgpu.ShaderStage.FRAGMENT,
              "sampler": {"type": "filtering"}},
+            {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
         ])
         self._ray_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
             vertex={"module": self._ray_module, "entry_point": "vs_main"},
             fragment={"module": self._ray_module, "entry_point": "fs_main",
                       "targets": [{"format": SAMPLE_FORMAT}]},
+            primitive={"topology": "triangle-list"})
+        # The sun-tau bake: one field-x plane of the cache per draw, into an
+        # r16float 2D target the caller copies into the 3D cache texture.
+        self._bake_pipeline = d.create_render_pipeline(
+            layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
+            vertex={"module": self._ray_module, "entry_point": "vs_main"},
+            fragment={"module": self._ray_module, "entry_point": "fs_bake_light",
+                      "targets": [{"format": "r16float"}]},
             primitive={"topology": "triangle-list"})
 
         self._accum_layout = d.create_bind_group_layout(entries=[
@@ -692,8 +712,72 @@ class SoarRenderer:
                 {"binding": 4, "resource": self._ocean_sampler},
                 {"binding": 5, "resource": self._nest_tex.create_view()},
                 {"binding": 6, "resource": self._vol_wrap_sampler},
+                {"binding": 7, "resource": self._light_tau_tex.create_view()},
             ])
         return self._bind_group
+
+    # -- the sun-tau cache ---------------------------------------------------
+
+    def bake_light_cache(self, state: SceneState, view: ViewState, *,
+                         divisor: int = 2) -> Tuple[int, int, int]:
+        """Bake sun optical depth for every cache voxel toward `view`'s sun.
+
+        `divisor` is the linear resolution reduction against the volume grid
+        (1 = one cache texel per voxel). The bake is one fs_bake_light draw
+        per field-x plane, copied into the 3D cache; after it returns,
+        rendering with view.light_cache=True reads the cache instead of
+        marching to the sun per cloud sample. Re-bake whenever the sun, the
+        field, or the divisor changes — this host is the offline path, so
+        staleness is the caller's to manage, and the browser manages its own.
+
+        Returns the cache dims (nx, ny, nz) in field axis order.
+        """
+        wgpu = self.wgpu
+        if self._vol_tex is None:
+            raise RuntimeError("No volume uploaded; call upload_volume() first.")
+        if not (1 <= int(divisor) <= 8):
+            raise ValueError(f"divisor must be in [1, 8]; got {divisor}.")
+        divisor = int(divisor)
+        # Volume texture is (w=nz, h=ny, d=nx); the cache mirrors it.
+        vz, vy, vx = self._vol_tex.size
+        cz = max(1, -(-vz // divisor))
+        cy = max(1, -(-vy // divisor))
+        cx = max(1, -(-vx // divisor))
+
+        self._light_tau_tex.destroy()
+        self._light_tau_tex = self.device.create_texture(
+            size=(cz, cy, cx), dimension="3d", format="r16float",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
+        self._light_cache_dims = (cx, cy, cz)
+        self._bind_group = None
+        bind_group = self._ensure_bind_group()
+
+        slice_tex = self.device.create_texture(
+            size=(cz, cy, 1), dimension="2d", format="r16float",
+            usage=(wgpu.TextureUsage.RENDER_ATTACHMENT
+                   | wgpu.TextureUsage.COPY_SRC))
+        slice_view = slice_tex.create_view()
+
+        base = pack_uniforms(state, view)
+        for ix in range(cx):
+            u = base.copy()
+            u[23, 1] = float(ix)
+            self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
+            enc = self.device.create_command_encoder()
+            rp = enc.begin_render_pass(color_attachments=[{
+                "view": slice_view, "load_op": "clear", "store_op": "store",
+                "clear_value": (0.0, 0.0, 0.0, 1.0)}])
+            rp.set_pipeline(self._bake_pipeline)
+            rp.set_bind_group(0, bind_group)
+            rp.draw(3)
+            rp.end()
+            enc.copy_texture_to_texture(
+                {"texture": slice_tex, "mip_level": 0, "origin": (0, 0, 0)},
+                {"texture": self._light_tau_tex, "mip_level": 0,
+                 "origin": (0, 0, ix)},
+                (cz, cy, 1))
+            self.device.queue.submit([enc.finish()])
+        return (cx, cy, cz)
 
     # -- rendering ---------------------------------------------------------
 

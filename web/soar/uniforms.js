@@ -1,4 +1,4 @@
-// The uniform block: 23 rows of 4 floats, 368 bytes, rebuilt every frame.
+// The uniform block: 24 rows of 4 floats, 384 bytes, rebuilt every frame.
 //
 // A direct port of InteractiveRenderer.write_uniforms. Row order and meaning
 // are fixed by raymarch.wgsl, which the browser shares verbatim with the
@@ -98,6 +98,10 @@ export function packUniforms(state, view) {
     frameIndex = 0,
     subpixel = false,
     jitterScale = 1.0,
+    // Read tau_sun from the baked sun-tau cache (row 23). Only meaningful
+    // when the renderer has a finished bake bound at binding 7; the packer
+    // just writes the flag.
+    lightCache = false,
   } = view;
 
   const [outputW, outputH] = outputSize;
@@ -208,6 +212,9 @@ export function packUniforms(state, view) {
     row(21, nestBmin[0], nestBmin[1], nestBmin[2], dtViewNest);
     row(22, nestBmax[0], nestBmax[1], nestBmax[2], dtLightNest);
   }
+  // Row 23.y is the bake slice index; the renderer's bake pass writes it
+  // into its own copy of the block, never through here.
+  row(23, lightCache ? 1.0 : 0.0, 0.0, 0.0, 0.0);
   return u;
 }
 

@@ -1033,6 +1033,7 @@ export class Viewer {
       case "b": this.cycleFlyer(); return;
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
+      case "k": this.toggleLightCache(); return;
       // Through pause(), not ui.open() directly: the dialog needs the mouse,
       // so the pointer must be released first — opening it under a held lock
       // left the camera turning behind an unusable panel (bug 1).
@@ -1100,7 +1101,35 @@ export class Viewer {
       this.sunElevation = Math.min(
         90.0, Math.max(K.MIN_SUN_ELEVATION_DEG, elevation));
     }
+    // The baked sun-tau cache is a function of the sun; while it re-bakes
+    // the march runs live, so dragging the sun is correct throughout and
+    // merely slower until the fresh cache lands.
+    if (this.renderer.lightCacheEnabled || this.renderer.lightBakePending) {
+      this.renderer.invalidateLightCache();
+      if (this.renderer.lightCacheEnabled) {
+        this.renderer.startLightBake(this._viewKwargs());
+      }
+    }
     this._wake("sun");
+  }
+
+  /**
+   * The sun-tau cache toggle (K): bake sun optical depth once per sun
+   * position and read it per sample, instead of marching to the sun from
+   * every cloud sample of every frame. A prototype behind a toggle while
+   * its speed/look trade is being judged — see raymarch.wgsl fs_bake_light.
+   */
+  toggleLightCache() {
+    const r = this.renderer;
+    r.lightCacheEnabled = !r.lightCacheEnabled;
+    if (r.lightCacheEnabled && !r.lightCacheReady && !r.lightBakePending) {
+      r.startLightBake(this._viewKwargs());
+    }
+    r.resetAccumulation();
+    this.ui.say(r.lightCacheEnabled
+      ? "Light cache: baking… reads switch over when it completes."
+      : "Light cache off — live sun march.", 4);
+    this._wake("light cache");
   }
 
   setToneMapGamma(gamma) {
@@ -2081,6 +2110,16 @@ export class Viewer {
       this.renderer.holdTick(this._lastMarchMs);
     }
 
+    // A few planes of the sun-tau bake per frame, ahead of the march so the
+    // frame that completes it is also the first to read it. The reads flip
+    // on inside drawFrame the moment the bake finishes (row 23 is in the
+    // scene key, so accumulation restarts on its own); the explicit
+    // march-pending is for a parked view, which otherwise has no reason to
+    // march again.
+    if (this.renderer.lightBakePending && !this._probe) {
+      if (this.renderer.stepLightBake()) this._marchPending = true;
+    }
+
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const outW = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
     const outH = Math.max(1, Math.floor(this.canvas.clientHeight * dpr));
@@ -2268,7 +2307,7 @@ export class Viewer {
     // throttling, so a parked picture is not merely wasteful, it makes the
     // NEXT flight slower.
     const animating = this._overlaysAnimate() || this.recorder.recording
-      || this._capturing || probing;
+      || this._capturing || probing || this.renderer.lightBakePending;
     if (converged && !this._marchPending && !animating) {
       this._sleeping = true;
       return;                    // no rAF is scheduled; only _wake starts one

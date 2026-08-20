@@ -301,7 +301,7 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
-export const UNIFORM_ROWS = 23;
+export const UNIFORM_ROWS = 24;
 // DERIVED, never written out. These were two independent literals until a row
 // was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.
@@ -311,6 +311,21 @@ export const UNIFORM_ROWS = 23;
 export const UNIFORM_NBYTES = UNIFORM_ROWS * 16;
 
 export const AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024;
+
+// --- the sun-tau cache (prototype, 2026-08-19) ----------------------------
+//
+// Linear reduction of the cache grid against the volume grid. 2 costs an
+// eighth of the texels (and an eighth of full-res bake time and memory) and
+// is the resolution the A/B stills are judged at first; 1 is one texel per
+// voxel and on a gigaLES field is ~0.5 GB of f16, which is why it is not
+// the default.
+export const LIGHT_CACHE_DIVISOR = 2;
+// Field-x planes baked per frame while a bake is pending. Each plane is
+// (nz/d x ny/d) full sun marches; at divisor 2 on a 1024^2 x 206 field a
+// plane is ~26k marches, a few ms of GPU on weak hardware — so a bake rides
+// along at a handful of ms a frame and a 512-plane cache lands in a couple
+// of seconds without ever risking a watchdog-length pass.
+export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 
 // --- quality ------------------------------------------------------------
 

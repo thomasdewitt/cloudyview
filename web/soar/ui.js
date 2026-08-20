@@ -637,6 +637,7 @@ export class UI {
       ["B", "flyer — paper dart, swift, off"],
       ["M", "minimap"],
       ["R", "record a flight track"],
+      ["K", "light cache — baked sun shadows (experimental)"],
       ["F12", "screenshot"],
     ]);
     m.append(el("div", "divider"));

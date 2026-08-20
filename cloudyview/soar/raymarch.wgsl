@@ -112,6 +112,19 @@ struct Uniforms {
     // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
     nest_bmin: vec4<f32>,
     nest_bmax: vec4<f32>,
+    // Row 23: the baked sun-tau cache (2026-08-19 prototype, behind a
+    // toggle while its worth is decided from A/B stills and benches).
+    // x = read tau_sun for CLOUD samples from the light_tau texture instead
+    //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
+    //     shadow marches and the sky probe stay live either way. The cached
+    //     value is the central sun direction at zero quadrature jitter, so
+    //     the solar-disc penumbra sampling (iter_007) does not apply to it —
+    //     trilinear filtering of the cache is the only softening left, which
+    //     is exactly what the A/B is judging.
+    // y = bake slice index (the fs_bake_light pass only; fs_main never
+    //     reads it): the field-x plane of the cache being rendered.
+    // z, w = unused (zero).
+    light_cache: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -127,6 +140,10 @@ struct Uniforms {
 // A doubly periodic domain wraps in hardware rather than through an uploaded
 // ghost ring — see sample_level.
 @group(0) @binding(6) var vol_wrap_samp: sampler;
+// The baked sun-tau cache over the outer AABB — see Uniforms.light_cache and
+// sample_light_tau. Always bound (a 1x1x1 zero texture while the cache is
+// off or stale) so one bind-group layout serves both paths.
+@group(0) @binding(7) var light_tau: texture_3d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -784,6 +801,32 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
     let taper = edge_taper(data_g.x, dims.x) * edge_taper(data_g.y, dims.y)
               * taper_z;
     return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r * taper;
+}
+
+// Sun optical depth from the baked cache — the trilinear read that replaces
+// light_march_tau for cloud samples when u.light_cache.x is on.
+//
+// Same coordinate convention as sample_level over the same outer AABB (the
+// cache's texel i sits AT data coordinate i, see fs_bake_light), same
+// (w=nz, h=ny, d=nx) transposition, same lateral wrap in a periodic domain —
+// but NO edge taper: tau is not extinction, and ramping it to zero at the
+// domain edge would punch sunlight into the boundary column. Clamp-to-edge
+// on the vertical is right at both ends: above the top slice tau is ~0 and
+// below the bottom the nearest baked value is the honest answer.
+fn sample_light_tau(p: vec3<f32>) -> f32 {
+    let q = wrap_to_domain(p);
+    let tex_dims = vec3<f32>(textureDimensions(light_tau, 0));
+    let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
+    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims;
+    let tex_coord = vec3<f32>(
+        data_g.z + 0.5,
+        data_g.y + 0.5,
+        data_g.x + 0.5
+    ) / tex_dims;
+    if (PERIODIC_DOMAIN) {
+        return textureSampleLevel(light_tau, vol_wrap_samp, tex_coord, 0.0).r;
+    }
+    return textureSampleLevel(light_tau, vol_samp, tex_coord, 0.0).r;
 }
 
 // Sample a *chosen* level at an already-wrapped point.
@@ -1923,6 +1966,40 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
+// One field-x plane of the sun-tau cache. The host renders this into a 2D
+// r16float target of size (cache_nz, cache_ny) for slice u.light_cache.y,
+// then copies the target into that depth slice of the light_tau texture —
+// 3D textures are not renderable, and r16float is not a storage format, but
+// it IS renderable, so the bake is a render pass rather than a compute pass.
+// Rendering slice by slice is also what lets the browser spread a bake over
+// frames instead of stalling one.
+//
+// Each texel evaluates the exact live march — light_march_tau through
+// sample_level_at, nest included — at the cache texel's own world position,
+// with dt_floor = 0 (full quadrature: the bake is paid once, so it takes the
+// fine step everywhere) and zero jitter (a static cache cannot average a
+// randomized phase away, so it takes the unbiased-enough left-endpoint rule
+// the near field always used). Texel i sits AT data coordinate i, matching
+// sample_level's convention, so sample_light_tau reads back exactly what was
+// baked at texel centers.
+@fragment
+fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    let tex_dims = vec3<f32>(textureDimensions(light_tau, 0));
+    let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
+    // frag_pos.xy = (iz + 0.5, iy + 0.5) over the (nz, ny) target; the slice
+    // index is the field-x plane.
+    let data_g = vec3<f32>(
+        u.light_cache.y,
+        frag_pos.y - 0.5,
+        frag_pos.x - 0.5
+    );
+    let p = u.bmin.xyz
+        + (data_g / dims) * (u.bmax.xyz - u.bmin.xyz);
+    let tau = light_march_tau(p, u.sun_dir.xyz, 0.0, 0.0);
+    return vec4<f32>(tau, 0.0, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let img_w = u.params.x;
@@ -2255,8 +2332,17 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 )),
                 penumbra_tan
             );
-            let tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
+            // The cache replaces the march, the disc jitter and the
+            // distance-LOD coarsening in one move: it is the central-sun,
+            // zero-jitter tau at the cache's own resolution, trilinearly
+            // filtered. See Uniforms.light_cache.
+            var tau_sun: f32;
+            if (u.light_cache.x > 0.5) {
+                tau_sun = sample_light_tau(p);
+            } else {
+                tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
                                           step_shadow_jitter);
+            }
             let light_transfer_split_strength = u.ambient_tint.w;
             // Unconditional: the diffuse beam and the high-sun skylight
             // consume this gate too, so computing it only when the storm

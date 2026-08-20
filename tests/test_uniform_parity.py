@@ -223,12 +223,12 @@ def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
         f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
 
 
-def test_block_is_368_bytes():
-    """23 rows of 4 floats. Pinned rather than derived on purpose, so that a
-    row added on one side and not the other fails here as well as in the diff
-    above."""
-    assert sh.UNIFORM_NBYTES == 368
-    assert _python_block({}, {}).nbytes == 368
+def test_block_is_384_bytes():
+    """24 rows of 4 floats (row 23 is the sun-tau cache flag, 2026-08-19).
+    Pinned rather than derived on purpose, so that a row added on one side
+    and not the other fails here as well as in the diff above."""
+    assert sh.UNIFORM_NBYTES == 384
+    assert _python_block({}, {}).nbytes == 384
 
 
 def test_periodic_requires_sun_above_horizon():

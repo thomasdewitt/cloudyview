@@ -129,7 +129,7 @@ def build_level_from_demo(demo_dir):
     return level, meta.get("sun")
 
 
-def time_tier(level, tier_name, tier, views, frames, warmup):
+def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=0):
     from cloudyview.soar_host import (
         SceneState, SoarRenderer, ViewState, camera_world_origin,
     )
@@ -154,6 +154,7 @@ def time_tier(level, tier_name, tier, views, frames, warmup):
     rh = max(1, int(OUTPUT_SIZE[1] * scale + 0.5))
 
     rows = []
+    baked = False
     for view_name, v in views.items():
         position = camera_world_origin(v["camera_position"], level.bmin, level.bmax)
         view = ViewState(
@@ -162,7 +163,18 @@ def time_tier(level, tier_name, tier, views, frames, warmup):
             output_size=OUTPUT_SIZE, render_size=(rw, rh),
             sun_azimuth=v.get("sun_azimuth", SUN["sun_azimuth"]),
             sun_elevation=v.get("sun_elevation", SUN["sun_elevation"]),
+            light_cache=light_cache > 0,
         )
+        if light_cache > 0 and not baked:
+            # One sun for every view here, so one bake serves them all. Timed
+            # and reported, but outside the per-frame numbers: the bake is a
+            # per-sun-change cost, not a per-frame one.
+            t0 = time.perf_counter()
+            dims = renderer.bake_light_cache(state, view, divisor=light_cache)
+            bake_s = time.perf_counter() - t0
+            print(f"  {tier_name:7s} light-cache bake /{light_cache} "
+                  f"{dims[0]}x{dims[1]}x{dims[2]}  {bake_s * 1000.0:.0f} ms")
+            baked = True
         renderer.render(state, view, frames=warmup)   # warm caches + pipeline
         t0 = time.perf_counter()
         renderer.render(state, view, frames=frames)
@@ -224,6 +236,10 @@ def main():
     parser.add_argument("--ice", type=Path, default=None,
                         help="separate netCDF file with the ice variable "
                              "(SAM LPT one-variable-per-file style)")
+    parser.add_argument("--light-cache", type=int, default=0,
+                        help="bake the sun-tau cache at this divisor (1, 2, "
+                             "4...) and render with it; 0 = live sun march "
+                             "(default)")
     parser.add_argument("--no-zcrop", action="store_true",
                         help="render the file's whole z extent, including the "
                              "empty sky the app would crop away (for A/B)")
@@ -266,7 +282,8 @@ def main():
     all_rows = []
     for tier_name, tier in tiers.items():
         rows = time_tier(level, tier_name, tier, views,
-                         args.frames, args.warmup)
+                         args.frames, args.warmup,
+                         light_cache=args.light_cache)
         all_rows.extend((tier_name, *r) for r in rows)
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -278,6 +295,8 @@ def main():
                 + (f" — {args.label}" if args.label else "") + "\n\n")
         source = (f"demo {args.demo.name}" if args.demo is not None
                   else f"field {args.field.name}")
+        if args.light_cache > 0:
+            source += f" · light-cache /{args.light_cache}"
         f.write(f"GPU: {gpu_name()} · output {OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}"
                 f" · {args.frames} frames/view"
                 f" · {source}\n\n")

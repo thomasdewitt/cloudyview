@@ -316,11 +316,29 @@ export class Renderer {
           texture: { sampleType: "float", viewDimension: "3d" } },
         { binding: 6, visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" } },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "3d" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.rayLayout],
     });
+    // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
+    // nest's. lightCacheEnabled is the user's toggle; the flag actually
+    // packed into row 23 is enabled AND baked — an unfinished bake reads the
+    // live march, never a half-written cache. See _lightBake.
+    this._lightTauDummy = device.createTexture({
+      label: "soar-light-tau-dummy", size: [1, 1, 1], dimension: "3d",
+      format: "r16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this._lightTauDummy }, new Uint16Array([0]),
+      { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
+    this._lightTauTex = null;
+    this._lightBake = null;           // in-flight bake state, or null
+    this.lightCacheEnabled = false;
+    this._lightCacheReady = false;
     this.refreshBindGroup();
 
     // One layout for both present entry points: a single unfilterable-float
@@ -425,6 +443,8 @@ export class Renderer {
         { binding: 4, resource: this.oceanSampler },
         { binding: 5, resource: scene.nestView },
         { binding: 6, resource: this.volWrapSampler },
+        { binding: 7, resource:
+            (this._lightTauTex ?? this._lightTauDummy).createView() },
       ],
     });
   }
@@ -953,7 +973,13 @@ export class Renderer {
     // else in the block depends on subpixel or jitterScale, and nothing here
     // touches row 10's z or w.
     const state = this._sceneState();
-    const u = packUniforms(state, { ...view, outputSize, renderSize });
+    // The effective flag, not the toggle: an enabled-but-unbaked cache reads
+    // the live march. Row 23 is in the scene key, so completion or a toggle
+    // restarts accumulation by itself.
+    const u = packUniforms(state, {
+      ...view, outputSize, renderSize,
+      lightCache: this.lightCacheEnabled && this._lightCacheReady,
+    });
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
@@ -1124,6 +1150,130 @@ export class Renderer {
     return true;
   }
 
+  // --- the sun-tau cache -----------------------------------------------------
+  //
+  // A 3D texture of sun optical depth over the outer AABB, baked one field-x
+  // plane per draw (see raymarch.wgsl fs_bake_light) and read by the cloud
+  // march instead of a per-sample sun march while lightCacheEnabled. The bake
+  // spreads across frames — the viewer calls stepLightBake with a slice
+  // budget — and the packed row-23 flag stays off until the last slice lands,
+  // so an unfinished cache is never read. A sun change invalidates and, if
+  // the toggle is on, the viewer starts a fresh bake.
+
+  get lightBakePending() { return this._lightBake !== null; }
+
+  get lightCacheReady() { return this._lightCacheReady; }
+
+  invalidateLightCache() {
+    this._lightBake = null;
+    this._lightCacheReady = false;
+  }
+
+  startLightBake(view, divisor = K.LIGHT_CACHE_DIVISOR) {
+    const shape = this.scene.shape;          // [nx, ny, nz], field axes
+    if (!shape) {
+      throw new Error("the scene carries no shape; cannot size the cache.");
+    }
+    const [nx, ny, nz] = shape;
+    const cx = Math.max(1, Math.ceil(nx / divisor));
+    const cy = Math.max(1, Math.ceil(ny / divisor));
+    const cz = Math.max(1, Math.ceil(nz / divisor));
+    this._lightCacheReady = false;
+    this._lightTauTex?.destroy();
+    this._lightTauTex = this.device.createTexture({
+      label: "soar-light-tau", size: [cz, cy, cx], dimension: "3d",
+      format: "r16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.refreshBindGroup();
+    this._bakeUniformBuf ??= this.device.createBuffer({
+      label: "soar-bake-uniforms", size: K.UNIFORM_NBYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const sliceTex = this.device.createTexture({
+      label: "soar-light-tau-slice", size: [cz, cy], format: "r16float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const u = packUniforms(this._sceneState(), {
+      ...view, outputSize: [cz, cy], renderSize: [cz, cy],
+      subpixel: false, jitterScale: 1.0,
+    });
+    this._lightBake = {
+      next: 0, cx, cy, cz, sliceTex, u,
+      bindGroup: this.device.createBindGroup({
+        label: "soar-light-bake",
+        layout: this.rayLayout,
+        entries: [
+          { binding: 0, resource: { buffer: this._bakeUniformBuf } },
+          { binding: 1, resource: this.scene.volumeView },
+          { binding: 2, resource: this.volSampler },
+          { binding: 3, resource: this.scene.oceanView },
+          { binding: 4, resource: this.oceanSampler },
+          { binding: 5, resource: this.scene.nestView },
+          { binding: 6, resource: this.volWrapSampler },
+          { binding: 7, resource: this._lightTauTex.createView() },
+        ],
+      }),
+    };
+  }
+
+  /** Bake up to `slices` planes; true when the cache became complete. */
+  stepLightBake(slices = K.LIGHT_CACHE_BAKE_SLICES_PER_FRAME) {
+    const b = this._lightBake;
+    if (!b) return false;
+    const pipeline = this._bakePipeline();
+    const sliceView = b.sliceTex.createView();
+    const end = Math.min(b.next + Math.max(1, slices), b.cx);
+    for (let ix = b.next; ix < end; ix++) {
+      b.u[23 * 4 + 1] = ix;
+      this.device.queue.writeBuffer(this._bakeUniformBuf, 0, b.u);
+      const encoder = this.device.createCommandEncoder();
+      const p = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: sliceView, loadOp: "clear", storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      p.setPipeline(pipeline);
+      p.setBindGroup(0, b.bindGroup);
+      p.draw(3);
+      p.end();
+      encoder.copyTextureToTexture(
+        { texture: b.sliceTex, origin: [0, 0, 0] },
+        { texture: this._lightTauTex, origin: [0, 0, ix] },
+        [b.cz, b.cy, 1]);
+      this.device.queue.submit([encoder.finish()]);
+    }
+    b.next = end;
+    if (b.next >= b.cx) {
+      b.sliceTex.destroy();
+      this._lightBake = null;
+      this._lightCacheReady = true;
+      return true;
+    }
+    return false;
+  }
+
+  _bakePipeline() {
+    this._bakePipelines ??= new Map();
+    const key = `${this.periodic}|${this.scene.nested}|${this.maxLightSteps}`;
+    let pipeline = this._bakePipelines.get(key);
+    if (!pipeline) {
+      const module = this._module(
+        this.periodic, this.scene.nested, this.maxLightSteps);
+      pipeline = this.device.createRenderPipeline({
+        label: `light-bake(${key})`,
+        layout: this.rayPipelineLayout,
+        vertex: { module, entryPoint: "vs_main" },
+        fragment: { module, entryPoint: "fs_bake_light",
+                    targets: [{ format: "r16float" }] },
+        primitive: { topology: "triangle-list" },
+      });
+      this._bakePipelines.set(key, pipeline);
+    }
+    return pipeline;
+  }
+
   // --- the auto-exposure meter ---------------------------------------------
 
   /**
@@ -1196,6 +1346,8 @@ export class Renderer {
           { binding: 4, resource: this.oceanSampler },
           { binding: 5, resource: this.scene.nestView },
           { binding: 6, resource: this.volWrapSampler },
+          { binding: 7, resource:
+              (this._lightTauTex ?? this._lightTauDummy).createView() },
         ],
       });
       const encoder = this.device.createCommandEncoder();
