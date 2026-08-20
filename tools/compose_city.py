@@ -60,8 +60,11 @@ HOOKS = {
         "        -> vec3<f32>"),
 }
 
+# Module-scope declarations only (column 0): a function-local `var` or
+# `let` is the component's own business (windowlife found the indented
+# variant flagged its locals and had to write let-only code).
 SYMBOL_RE = re.compile(
-    r"^\s*(?:fn|const|var|struct)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
+    r"^(?:fn|const|var|struct)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
 
 
 def load_registry():

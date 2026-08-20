@@ -1,4 +1,13 @@
 {
  "schema": "cloudyview.city.components.v1",
- "components": []
+ "components": [
+  {
+   "file": "windowlife.wgsl",
+   "name": "windowlife",
+   "hooks": {
+    "window_glyph": "cc_windowlife_glyph"
+   },
+   "enabled": true
+  }
+ ]
 }
