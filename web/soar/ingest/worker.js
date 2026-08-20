@@ -19,7 +19,7 @@ import {
 } from "./netcdf.js";
 import {
   rhoAirTable, sigmaAt, cellThickness, opticalDepthFromWaterPaths,
-  twoStreamAlbedo,
+  twoStreamAlbedo, iceExtinctionFraction,
 } from "../optical.js";
 import {
   pluginsNeeded, installPlugins, assertFiltersSupported,
@@ -226,11 +226,15 @@ async function open({ file }) {
  * padding. queue.writeTexture has no such rule, and the per-voxel work is a
  * multiply-add against a precomputed rho_air(z) — no exp per voxel.
  */
-async function extinction({ group, units, label, slabBudget }) {
+async function extinction({ group, units, label, slabBudget, wantIce }) {
   const description = describeGroup(root, group);
   const handle = group ? root.get(group) : root;
   const dataset = handle.get(description.liquidVar);
   const iceDataset = description.iceVar ? handle.get(description.iceVar) : null;
+  // Prototype ice-detection mode: a second streamed volume of per-voxel ice
+  // extinction fraction, only when the caller asked (the outer level) and
+  // the group actually has ice. The extinction itself always includes ice.
+  const streamIce = Boolean(wantIce && iceDataset);
 
   // Each condensate variable takes its OWN declared units, falling back only
   // to what the user was asked for — never to the other variable's. An ice
@@ -413,6 +417,8 @@ async function extinction({ group, units, label, slabBudget }) {
     }
 
     const out = makeHalfWriter(local.x * local.y * local.z);
+    const outIce = streamIce
+      ? makeHalfWriter(local.x * local.y * local.z) : null;
     const idx = new Array(slabShape.length).fill(0);
     let o = 0;
     for (let lx = 0; lx < local.x; lx++) {
@@ -441,6 +447,7 @@ async function extinction({ group, units, label, slabBudget }) {
           const sigma = sigmaAt(lwc, iwc, rhoAir[gz]);
           if (Number.isFinite(sigma)) { if (sigma !== 0) finiteNonZero += 1; }
           else nonFinite += 1;
+          if (outIce) outIce.set(o, iceExtinctionFraction(lwc, iwc));
           out.set(o++, sigma);
 
           const thickness = rhoAir[gz] * dz[gz];
@@ -459,7 +466,8 @@ async function extinction({ group, units, label, slabBudget }) {
     // z is the fastest axis of `out` — o = (lx * local.y + ly) * local.z + lz
     // — so the plane a texel belongs to is its index modulo the tile depth.
     markOccupiedPlanes(bytes, z0, local.z, zOccupied);
-    staged.push({ x0, y0, z0, local: { ...local }, bytes });
+    staged.push({ x0, y0, z0, local: { ...local }, bytes,
+                  iceBytes: outIce ? outIce.bytes() : null });
     post({ type: "read", label, done: (++tilesDone) / tileCount });
   } } }
 
@@ -483,6 +491,8 @@ async function extinction({ group, units, label, slabBudget }) {
   // Coordinates follow the crop; everything downstream derives the domain box
   // from them, so this is what actually moves bmin.z/bmax.z onto the cloud.
   const zCoords = Array.from(coords.z.slice(zLo, zHi + 1));
+  const keptSlabs = staged.reduce(
+    (n, s) => n + (s.z0 + s.local.z > zLo && s.z0 <= zHi ? 1 : 0), 0);
   post({
     type: "volume", label,
     shape: [nx, ny, zCount],
@@ -491,9 +501,23 @@ async function extinction({ group, units, label, slabBudget }) {
     coords: { x: Array.from(coords.x), y: Array.from(coords.y), z: zCoords },
     // Only the slabs that survive the crop are sent, so this is the count the
     // receiver checks against — not the tile count of the read.
-    slabs: staged.reduce(
-      (n, s) => n + (s.z0 + s.local.z > zLo && s.z0 <= zHi ? 1 : 0), 0),
+    slabs: keptSlabs,
+    // Ice-fraction slabs ride alongside, same tiling, tagged field: "ice".
+    iceSlabs: streamIce ? keptSlabs : 0,
   });
+
+  // z is the fastest axis, so a z sub-range is a stride-copy of runs.
+  const trimZ = (bytes, slab, lo, depth) => {
+    if (depth === slab.local.z) return bytes;
+    const trimmed = new Uint16Array(slab.local.x * slab.local.y * depth);
+    const offset = lo - slab.z0;
+    let o = 0;
+    for (let c = 0; c < slab.local.x * slab.local.y; c++) {
+      const src = c * slab.local.z + offset;
+      for (let k = 0; k < depth; k++) trimmed[o++] = bytes[src + k];
+    }
+    return trimmed;
+  };
 
   // Post what the crop kept, clipping the tiles that straddle its edges.
   let sent = 0;
@@ -505,32 +529,25 @@ async function extinction({ group, units, label, slabBudget }) {
     const hi = Math.min(slab.z0 + slab.local.z - 1, zHi);
     if (hi < lo) continue;
     const depth = hi - lo + 1;
-    let bytes = slab.bytes;
-    if (depth !== slab.local.z) {
-      // z is the fastest axis, so a z sub-range is a stride-copy of runs.
-      const trimmed = new Uint16Array(slab.local.x * slab.local.y * depth);
-      const offset = lo - slab.z0;
-      let o = 0;
-      for (let c = 0; c < slab.local.x * slab.local.y; c++) {
-        const src = c * slab.local.z + offset;
-        for (let k = 0; k < depth; k++) trimmed[o++] = bytes[src + k];
-      }
-      bytes = trimmed;
+    sent += 1;
+    for (const field of slab.iceBytes ? ["sigma", "ice"] : ["sigma"]) {
+      const bytes = trimZ(field === "ice" ? slab.iceBytes : slab.bytes,
+                          slab, lo, depth);
+      // Read before the transfer: posting detaches the buffer, and the ack
+      // that comes back has to be able to name the same number.
+      const slabBytes = bytes.byteLength;
+      await spendCredit(slabBytes);
+      // Voxel i is texel i — nothing is padded — and z is measured from the
+      // crop's floor rather than the file's.
+      post({
+        type: "slab", label, field,
+        origin: [lo - zLo, slab.y0, slab.x0],
+        size: [depth, slab.local.y, slab.local.x],  // texture is (w=z, h=y, d=x)
+        done: sent / sendable,
+        bytes: slabBytes,
+        data: bytes,
+      }, [bytes.buffer]);
     }
-    // Read before the transfer: posting detaches the buffer, and the ack that
-    // comes back has to be able to name the same number.
-    const slabBytes = bytes.byteLength;
-    await spendCredit(slabBytes);
-    // Voxel i is texel i — nothing is padded — and z is measured from the
-    // crop's floor rather than the file's.
-    post({
-      type: "slab", label,
-      origin: [lo - zLo, slab.y0, slab.x0],
-      size: [depth, slab.local.y, slab.local.x],  // texture is (w=z, h=y, d=x)
-      done: (++sent) / sendable,
-      bytes: slabBytes,
-      data: bytes,
-    }, [bytes.buffer]);
   }
   // Nothing more is read for the domain edges. A doubly periodic field used
   // to need its four opposite faces uploaded as a ghost ring so that

@@ -42,6 +42,18 @@ export function sigmaAt(lwcGkg, iwcGkg, rhoAir) {
 }
 
 /**
+ * Ice's share of the extinction for one voxel — rho_air cancels, so this is
+ * a pure function of the mixing ratios. Exactly 0 where there is no
+ * condensate; negative condensate (which some models write) and NaN come
+ * through unclamped, same policy as sigmaAt.
+ */
+export function iceExtinctionFraction(lwcGkg, iwcGkg) {
+  const si = SIGMA_ICE_PREFACTOR * iwcGkg;
+  const total = SIGMA_LIQUID_PREFACTOR * lwcGkg + si;
+  return total === 0.0 ? 0.0 : si / total;
+}
+
+/**
  * Cell thickness (m) for cell-centred heights.
  *
  * Interior cells get half the gap below plus half the gap above; the two

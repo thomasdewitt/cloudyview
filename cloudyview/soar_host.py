@@ -524,6 +524,9 @@ class SoarRenderer:
         # Binding 7 starts as the same always-bound zero dummy the nest uses;
         # bake_light_cache replaces it with a real cache.
         self._light_tau_tex = self._dummy_volume()
+        # Binding 8 (prototype ice-detection mode, browser-only for now) is
+        # never read here — row 23.w stays 0 — but the layout requires it.
+        self._ice_frac_tex = self._dummy_volume()
         self._light_cache_dims = None
         self._ocean_tex = self._load_ocean()
         self._targets = None
@@ -653,6 +656,7 @@ class SoarRenderer:
             {"binding": 6, "visibility": wgpu.ShaderStage.FRAGMENT,
              "sampler": {"type": "filtering"}},
             {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
+            {"binding": 8, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
         ])
         self._ray_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
@@ -718,6 +722,7 @@ class SoarRenderer:
                 {"binding": 5, "resource": self._nest_tex.create_view()},
                 {"binding": 6, "resource": self._vol_wrap_sampler},
                 {"binding": 7, "resource": self._light_tau_tex.create_view()},
+                {"binding": 8, "resource": self._ice_frac_tex.create_view()},
             ])
         return self._bind_group
 

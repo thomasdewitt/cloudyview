@@ -296,6 +296,7 @@ export class Scene {
 
   destroy() {
     this.volumeTexture?.destroy();
+    this.iceTexture?.destroy();
     this._nest?.texture?.destroy();
     this._nestDummy?.destroy();
   }

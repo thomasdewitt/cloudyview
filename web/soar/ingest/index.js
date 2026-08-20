@@ -64,7 +64,8 @@ class WorkerLink {
 function levelReceiver(device, label, onProgress, ack) {
   const state = { texture: null, dims: null, geometry: null,
                   volume: null, tiles: 0, slabsDone: 0, error: null,
-                  queuedBytes: 0 };
+                  queuedBytes: 0,
+                  iceTexture: null, iceSlabs: 0, iceSlabsDone: 0 };
 
   const step = async (message) => {
     if (message.type === "geometry") {
@@ -109,15 +110,27 @@ function levelReceiver(device, label, onProgress, ack) {
       state.dims = message.shape.slice();
       state.texture = await createVolumeTexture(
         device, state.dims, `the field in ${label}`);
+      // Prototype ice-detection mode: the ice-fraction volume, same shape.
+      // NOTE this doubles the resident memory of an ice-bearing field. If
+      // the mode ships, the fraction is a [0, 1] quantity and r8unorm would
+      // halve that (1/255 steps are invisible in a color ramp) — at the
+      // price of clamping the negative/NaN condensate fp16 passes through.
+      state.iceSlabs = message.iceSlabs ?? 0;
+      if (state.iceSlabs > 0) {
+        state.iceTexture = await createVolumeTexture(
+          device, state.dims, `the ice fraction in ${label}`);
+      }
     } else if (message.type === "slab") {
-      if (!state.texture) {
+      const target = message.field === "ice" ? state.iceTexture : state.texture;
+      if (!target) {
         throw new Error(
           "A slab arrived before the volume texture existed — the upload " +
           "queue is out of order.");
       }
-      writeVolumeSlab(device, state.texture, message.data,
+      writeVolumeSlab(device, target, message.data,
                       message.origin, message.size);
-      state.slabsDone += 1;
+      if (message.field === "ice") state.iceSlabsDone += 1;
+      else state.slabsDone += 1;
       state.queuedBytes += message.data.byteLength;
 
       // Bound the staging memory a multi-gigabyte field can pile up — see
@@ -282,7 +295,12 @@ export async function loadFileScene(
       // was allocated while `finally` terminates the worker mid-read — which
       // is the whole point, since there is nothing left to receive its output.
       await Promise.race([
-        link.call("extinction", { group: level.path, units, label, slabBudget }),
+        link.call("extinction", {
+          group: level.path, units, label, slabBudget,
+          // Ice fraction streams for the OUTER level only: its AABB covers
+          // any nest, so one texture serves the whole scene.
+          wantIce: index === 0,
+        }),
         receiver.failed,
       ]);
       // The RPC resolving means the worker has SENT everything, not that we
@@ -294,6 +312,12 @@ export async function loadFileScene(
         throw new Error(
           `Only ${receiver.state.slabsDone} of ${receiver.state.slabs} parts ` +
           `of '${label}' reached the GPU. The field would have holes in it.`);
+      }
+      if (receiver.state.iceSlabsDone !== receiver.state.iceSlabs) {
+        throw new Error(
+          `Only ${receiver.state.iceSlabsDone} of ${receiver.state.iceSlabs} ` +
+          `ice-fraction parts of '${label}' reached the GPU. The ice field ` +
+          "would have holes in it.");
       }
       if (!receiver.state.volume) {
         throw new Error(
@@ -359,6 +383,10 @@ export async function loadFileScene(
       title: outer.level.path ? `group ${outer.level.path}` : null,
       liquidVar: outer.level.liquidVar,
       iceVar: outer.level.iceVar,
+      // Prototype ice-detection mode. Null when the field carries no ice
+      // variable; the renderer binds a zero stand-in and the viewer says so.
+      iceTexture: outer.receiver.state.iceTexture,
+      iceView: outer.receiver.state.iceTexture?.createView() ?? null,
     });
 
     if (built.length > 1) {
@@ -389,6 +417,7 @@ export async function loadFileScene(
   } catch (err) {
     for (const receiver of receivers.values()) {
       receiver.state.texture?.destroy();
+      receiver.state.iceTexture?.destroy();
     }
     nestDummy?.destroy();
     throw err;

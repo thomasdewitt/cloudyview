@@ -44,6 +44,8 @@ import {
 import { UI } from "./ui.js";
 import { mod360, HAZE_MIN } from "./spectral.js";
 import { escalateQualityTier } from "./uniforms.js";
+import { rhoAirAt } from "./optical.js";
+import { fromHalf } from "./half.js";
 import {
   renderStill, imageDataToPng, download, timestampedName,
   createOfflineTarget, beginOfflineRender, endOfflineRender, renderAccumulated,
@@ -117,6 +119,13 @@ export class Viewer {
     // shows a selected "Custom" chip, and the governor stands down. Clicking
     // any preset (or Auto) resets every Advanced setting and clears this.
     this.qualityCustom = false;
+
+    // Prototype ice-detection mode (I in flight): false-color ice fraction
+    // plus the dart-tip condensate readout. Off on every load.
+    this.iceModeOn = false;
+    this._iceProbeBuf = null;        // 16-byte readback buffer, made lazily
+    this._iceProbePending = false;
+    this._iceProbeAt = 0;
 
     this.flyerEnabled = true;
     // Which of the two flyers is up. They share a render pass and differ in
@@ -354,6 +363,11 @@ export class Viewer {
 
     this.scene = scene;
     this.renderer = renderer;
+    // Prototype ice-detection mode carries across a change of field only if
+    // the new field can support it.
+    if (this.iceModeOn && !scene.iceView) this.iceModeOn = false;
+    renderer.iceMode = this.iceModeOn;
+    this._syncIceReadout();
     // A renderer is born in DEFAULT_HOLD_MODE; if the UI asked for another
     // one while there was no renderer to ask, it gets it now.
     renderer.setHoldMode(this.holdMode);
@@ -1049,6 +1063,7 @@ export class Viewer {
       case "f": this.toggleFullscreen(); return;
       case "F3": e.preventDefault(); this.ui.cycleStats(); return;
       case "b": this.cycleFlyer(); return;
+      case "i": this.toggleIceMode(); return;
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
       case "k": this.toggleLightCache(); return;
@@ -1151,6 +1166,121 @@ export class Viewer {
     this.ui.say(on
       ? "Light cache on — baked sun shadows."
       : "Light cache off — live sun march.", 4);
+  }
+
+  /**
+   * I: prototype ice-detection mode — false-color ice fraction (liquid red
+   * to ice cyan, alien green sky) plus the dart-tip condensate readout.
+   */
+  toggleIceMode() {
+    if (!this.scene?.iceView) {
+      this.ui.say(
+        "Ice detection needs an ice mixing ratio variable (QI / IWC) in the " +
+        "loaded field, and this one has none.", 5);
+      return;
+    }
+    this.iceModeOn = !this.iceModeOn;
+    this.renderer.iceMode = this.iceModeOn;
+    this._syncIceReadout();
+    this.ui.say(this.iceModeOn
+      ? "Ice detection on — liquid burns red, ice glows cyan."
+      : "Ice detection off.", 4);
+    this._wake("iceMode");
+  }
+
+  _iceReadoutEl() {
+    return document.getElementById("ice-readout");
+  }
+
+  _syncIceReadout() {
+    // Hidden until a probe finds condensate: the readout only shows while
+    // the flyer is actually inside cloud (see _setIceReadout).
+    const el = this._iceReadoutEl();
+    if (el) el.hidden = true;
+  }
+
+  /**
+   * Rate-limited dart-tip probe: two texels — extinction and ice fraction —
+   * read back from the resident volumes at the flyer's position and inverted
+   * through the extinction prefactors to mixing ratios. Nearest voxel, on
+   * the shader's own linear world-to-grid map (a stretched vertical grid is
+   * probed as the march renders it, not as the file stores it).
+   */
+  _iceTick(now) {
+    if (!this.iceModeOn || this._iceProbePending || this._capturing) return;
+    if (now - this._iceProbeAt < 200) return;
+    const scene = this.scene;
+    if (!scene?.iceTexture) return;
+    const [nx, ny, nz] = scene.shape;
+    if (nz < 2) return;              // the 2-texel copy needs the room
+
+    const p = this.flyer && this.flyerEnabled
+      ? this.flyer.position : this.camera.position;
+    const { bmin, bmax } = scene;
+    const frac = (v, i) => (v - bmin[i]) / (bmax[i] - bmin[i]);
+    let gx = frac(p[0], 0), gy = frac(p[1], 1);
+    const gz = frac(p[2], 2);
+    if (this.renderer.periodic) {
+      gx -= Math.floor(gx); gy -= Math.floor(gy);
+    }
+    const outside = gx < 0 || gx >= 1 || gy < 0 || gy >= 1
+                 || gz < 0 || gz >= 1;
+    this._iceProbeAt = now;
+    if (outside) { this._setIceReadout(0.0, 0.0); return; }
+
+    const ix = Math.min(nx - 1, Math.floor(gx * nx));
+    const iy = Math.min(ny - 1, Math.floor(gy * ny));
+    const iz = Math.min(nz - 1, Math.floor(gz * nz));
+    const iz0 = Math.min(iz, nz - 2);   // 4-byte copy alignment wants 2 texels
+    const zCentre = bmin[2] + (iz + 0.5) * (bmax[2] - bmin[2]) / nz;
+
+    this._iceProbeBuf ??= this.device.createBuffer({
+      label: "soar-ice-probe",
+      size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const origin = { x: iz0, y: iy, z: ix };   // texture is (w=z, h=y, d=x)
+    const enc = this.device.createCommandEncoder({ label: "ice-probe" });
+    enc.copyTextureToBuffer(
+      { texture: scene.volumeTexture, origin },
+      { buffer: this._iceProbeBuf, offset: 0 }, [2, 1, 1]);
+    enc.copyTextureToBuffer(
+      { texture: scene.iceTexture, origin },
+      { buffer: this._iceProbeBuf, offset: 8 }, [2, 1, 1]);
+    this.device.queue.submit([enc.finish()]);
+
+    this._iceProbePending = true;
+    this._iceProbeBuf.mapAsync(GPUMapMode.READ).then(() => {
+      const u16 = new Uint16Array(this._iceProbeBuf.getMappedRange().slice(0));
+      this._iceProbeBuf.unmap();
+      this._iceProbePending = false;
+      const k = iz - iz0;
+      const sigma = fromHalf(u16[k]);
+      const f = fromHalf(u16[4 + k]);
+      // sigma = (P_liq * lwc + P_ice * iwc) * rho_air, f = ice share of it.
+      const rho = rhoAirAt(zCentre);
+      const iwc = f * sigma / (K.SIGMA_ICE_PREFACTOR * rho);
+      const lwc = (1.0 - f) * sigma / (K.SIGMA_LIQUID_PREFACTOR * rho);
+      this._setIceReadout(iwc, lwc);
+    }).catch(() => { this._iceProbePending = false; });
+  }
+
+  _setIceReadout(iwcGkg, lwcGkg) {
+    const el = this._iceReadoutEl();
+    if (!el) return;
+    // Only while inside cloud: both values rounding to zero (clear air, or
+    // outside the domain) hides the readout rather than reporting nothing.
+    // A non-finite value still shows — NaN condensate is worth seeing.
+    const seen = (v) => !Number.isFinite(v) || Math.abs(v) >= 5e-4;
+    const show = this.iceModeOn && (seen(iwcGkg) || seen(lwcGkg));
+    el.hidden = !show;
+    if (!show) return;
+    const where = this.flyer && this.flyerEnabled
+      ? (this.flyerKind === "bird" ? "At the beak" : "At dart tip") : "Here";
+    const fmt = (v) => (Number.isFinite(v)
+      ? (Math.abs(v) < 5e-4 ? "0.000" : v.toFixed(3)) : "?");
+    el.textContent =
+      `${where}: ${fmt(iwcGkg)} g/kg ice, ${fmt(lwcGkg)} g/kg liquid`;
   }
 
   setToneMapGamma(gamma) {
@@ -1645,6 +1775,8 @@ export class Viewer {
     this.renderer?.destroy();
     this.minimap?.destroy();
     destroyFlyers(this.flyers);
+    this._iceProbeBuf?.destroy();
+    this._iceProbeBuf = null;
     this.scene?.destroy();
     this._ocean?.texture?.destroy();
     this.renderer = null;
@@ -2359,6 +2491,8 @@ export class Viewer {
     // Fire-and-forget: the meter renders ~5k rays on its own uniform buffer
     // and folds its answer in whenever the readback lands.
     this._aeTick(now, [outW, outH]);
+    // Likewise the dart-tip condensate probe (prototype ice-detection mode).
+    this._iceTick(now);
 
     // Sampled after the frame it describes, so the track records what was on
     // screen rather than what was about to be. The clock is the flight's own

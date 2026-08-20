@@ -318,6 +318,8 @@ export class Renderer {
           sampler: { type: "filtering" } },
         { binding: 7, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
+        { binding: 8, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "3d" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
@@ -337,6 +339,18 @@ export class Renderer {
     device.queue.writeTexture(
       { texture: this._lightTauDummy }, new Uint16Array([0]),
       { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
+    // Binding 8 (prototype ice-detection mode): the scene's ice-fraction
+    // volume when it has one, this zero stand-in otherwise. The mode flag is
+    // packed into row 23.w only when a real texture is bound.
+    this._iceDummy = device.createTexture({
+      label: "soar-ice-frac-dummy", size: [1, 1, 1], dimension: "3d",
+      format: "r16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this._iceDummy }, new Uint16Array([0]),
+      { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
+    this.iceMode = false;
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
@@ -451,8 +465,15 @@ export class Renderer {
         { binding: 6, resource: this.volWrapSampler },
         { binding: 7, resource:
             (this._lightTauTex ?? this._lightTauDummy).createView() },
+        { binding: 8, resource:
+            scene.iceView ?? this._iceDummy.createView() },
       ],
     });
+  }
+
+  /** Ice mode actually reaches the shader only with a real ice texture. */
+  get iceModeActive() {
+    return Boolean(this.iceMode && this.scene.iceView);
   }
 
   // --- quality ------------------------------------------------------------
@@ -999,6 +1020,7 @@ export class Renderer {
       ...view, outputSize, renderSize,
       lightCache: this.lightCacheActive,
       skyProbe: this.skyProbeActive,
+      iceMode: this.iceModeActive,
     });
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
@@ -1293,6 +1315,8 @@ export class Renderer {
           { binding: 5, resource: this.scene.nestView },
           { binding: 6, resource: this.volWrapSampler },
           { binding: 7, resource: this._lightTauTex.createView() },
+          { binding: 8, resource:
+              this.scene.iceView ?? this._iceDummy.createView() },
         ],
       }),
     };
@@ -1429,6 +1453,8 @@ export class Renderer {
           { binding: 6, resource: this.volWrapSampler },
           { binding: 7, resource:
               (this._lightTauTex ?? this._lightTauDummy).createView() },
+          { binding: 8, resource:
+              this.scene.iceView ?? this._iceDummy.createView() },
         ],
       });
       const encoder = this.device.createCommandEncoder();
@@ -1492,6 +1518,7 @@ export class Renderer {
     this._lastPresented = null;
     this.uniformBuf?.destroy();
     this.accumUniformBuf?.destroy();
+    this._iceDummy?.destroy();
   }
 
   _sceneState() {
