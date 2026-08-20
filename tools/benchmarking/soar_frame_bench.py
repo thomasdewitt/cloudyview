@@ -7,10 +7,16 @@ measured here is a statement about the shader, not about the browser host.
 Run before and after an optimization and diff the tables.
 
 Usage:
-    uv run python benchmarking/soar_frame_bench.py
-    uv run python benchmarking/soar_frame_bench.py --frames 64 --views v1,v4,v8
+    uv run python tools/benchmarking/soar_frame_bench.py
+    uv run python tools/benchmarking/soar_frame_bench.py --frames 64 --views v1,v4,v8
 
-Results are appended to benchmarking/soar_frame_results.md.
+Results are appended to tools/benchmarking/soar_frame_results.md.
+
+WARNING (learned 2026-08-19): a full tier sweep at --output 2560x1440
+saturates the GPU for minutes, and on a Mac that is the same GPU the window
+server runs on — it froze Thomas's M1 for ~15 minutes. On shared-GPU
+machines run one tier or one case at a time, or run it when nobody is using
+the machine.
 """
 
 import argparse
@@ -21,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_FILE = PROJECT_ROOT / "data" / "TWPICE_subvolume_256x256_5km.nc"
 RESULTS_FILE = Path(__file__).parent / "soar_frame_results.md"
 
@@ -35,15 +41,15 @@ RESULTS_FILE = Path(__file__).parent / "soar_frame_results.md"
 TIERS = {
     "high":   {"render_scale": 1.0,   "step_factor": 2.0,
                "light_step_factor": 2.0,  "max_light_steps": 512},
-    "medium": {"render_scale": 0.60,  "step_factor": 2.5,
+    "medium": {"render_scale": 0.70,  "step_factor": 2.5,
                "light_step_factor": 4.0,  "max_light_steps": 512},
     "low":    {"render_scale": 0.30,  "step_factor": 3.0,
                "light_step_factor": 8.0,  "max_light_steps": 512},
     "minimal": {"render_scale": 0.125, "step_factor": 4.0,
                "light_step_factor": 12.0, "max_light_steps": 512},
-    "hold_low": {"render_scale": 0.75, "step_factor": 2.0,
+    "hold_low": {"render_scale": 0.50, "step_factor": 2.0,
                "light_step_factor": 2.0,  "max_light_steps": 512},
-    "hold_minimal": {"render_scale": 0.50, "step_factor": 2.0,
+    "hold_minimal": {"render_scale": 0.25, "step_factor": 2.0,
                "light_step_factor": 2.0,  "max_light_steps": 512},
 }
 
@@ -95,6 +101,32 @@ def build_level(data_file=DATA_FILE, ice_file=None, fallback_units=None,
             print(f"z-crop: planes {lo}-{hi} of {source} "
                   f"({100 * (1 - (hi - lo + 1) / source):.0f}% empty)")
     return NestedLevel(sigma=sigma, bmin=bmin, bmax=bmax, name=data_file.stem)
+
+
+def build_level_from_demo(demo_dir):
+    """A NestedLevel from a prebaked demo directory (meta.json + volume.bin.gz)
+    — the exact bytes the browser ships, so a number here is a statement about
+    a deployed case, not about a reconstruction of one."""
+    import gzip
+    import json
+
+    from cloudyview.witness import NestedLevel
+
+    demo_dir = Path(demo_dir)
+    meta = json.loads((demo_dir / "meta.json").read_text())
+    vol = meta["volume"]
+    if vol["format"] != "r16float":
+        raise SystemExit(f"unsupported demo volume format {vol['format']!r}")
+    raw = gzip.decompress((demo_dir / vol["file"]).read_bytes())
+    nx, ny, nz = vol["shape_xyz"]
+    # C-order (nx, ny, nz), z-fastest — the layout upload_volume expects, and
+    # float16 is what it converts to anyway, so this costs no extra copy.
+    sigma = np.frombuffer(raw, dtype=np.float16).reshape(nx, ny, nz)
+    level = NestedLevel(sigma=sigma,
+                        bmin=np.asarray(vol["bmin"], dtype=np.float64),
+                        bmax=np.asarray(vol["bmax"], dtype=np.float64),
+                        name=meta["id"])
+    return level, meta.get("sun")
 
 
 def time_tier(level, tier_name, tier, views, frames, warmup):
@@ -151,6 +183,15 @@ def gpu_name():
             return out.stdout.strip().splitlines()[0]
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPDisplaysDataType"],
+            capture_output=True, text=True, timeout=15)
+        for line in out.stdout.splitlines():
+            if "Chipset Model:" in line:
+                return line.split(":", 1)[1].strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
     return "unknown GPU"
 
 
@@ -176,6 +217,10 @@ def main():
     # it cannot pay.
     parser.add_argument("--field", type=Path, default=DATA_FILE,
                         help=f"netCDF field to render (default {DATA_FILE.name})")
+    parser.add_argument("--demo", type=Path, default=None,
+                        help="prebaked demo directory (meta.json + "
+                             "volume.bin.gz) to bench instead of a netCDF "
+                             "field; uses the case's own sun")
     parser.add_argument("--ice", type=Path, default=None,
                         help="separate netCDF file with the ice variable "
                              "(SAM LPT one-variable-per-file style)")
@@ -186,7 +231,7 @@ def main():
                         help="units to assume when the file's condensate "
                              "variable carries no units attribute (SAM: g/kg)")
     args = parser.parse_args()
-    if not args.field.exists():
+    if args.demo is None and not args.field.exists():
         raise SystemExit(f"no such field: {args.field}")
     if args.ice is not None and not args.ice.exists():
         raise SystemExit(f"no such ice file: {args.ice}")
@@ -210,8 +255,14 @@ def main():
     print(f"output {OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}, "
           f"{args.frames} frames/view, {args.warmup} warmup")
 
-    level = build_level(args.field, args.ice, args.fallback_units,
-                        zcrop=not args.no_zcrop)
+    if args.demo is not None:
+        level, sun = build_level_from_demo(args.demo)
+        if sun:
+            SUN.update(sun_azimuth=sun["azimuth"],
+                       sun_elevation=sun["elevation"])
+    else:
+        level = build_level(args.field, args.ice, args.fallback_units,
+                            zcrop=not args.no_zcrop)
     all_rows = []
     for tier_name, tier in tiers.items():
         rows = time_tier(level, tier_name, tier, views,
@@ -225,9 +276,11 @@ def main():
             f.write("# soar per-frame benchmark results\n")
         f.write(f"\n## {stamp} — {rev}"
                 + (f" — {args.label}" if args.label else "") + "\n\n")
+        source = (f"demo {args.demo.name}" if args.demo is not None
+                  else f"field {args.field.name}")
         f.write(f"GPU: {gpu_name()} · output {OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}"
                 f" · {args.frames} frames/view"
-                f" · field {args.field.name}\n\n")
+                f" · {source}\n\n")
         f.write("| tier | view | render size | ms/frame | fps |\n")
         f.write("|------|------|-------------|----------|-----|\n")
         for tier_name, view_name, rw, rh, ms in all_rows:

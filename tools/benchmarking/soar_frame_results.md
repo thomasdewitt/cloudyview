@@ -333,3 +333,103 @@ GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 32 frames/view · field TWPI
 | hold_low | v4_overview_south | 1920x1080 | 3.136 | 318.8 |
 | hold_minimal | v1_thick_backlit | 1280x720 | 1.948 | 513.4 |
 | hold_minimal | v4_overview_south | 1280x720 | 1.334 | 749.9 |
+
+## 2026-08-19 21:15:22 — cb31036 — M1 MacBook Air 8GB, Metal, tier mirror synced to 26b4b0d retune
+
+GPU: Apple M1 · output 2560x1440 · 64 frames/view · field TWPICE_subvolume_256x256_5km.nc
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 2560x1440 | 158.286 | 6.3 |
+| high | v4_overview_south | 2560x1440 | 101.423 | 9.9 |
+| high | v8_ocean_lod | 2560x1440 | 95.783 | 10.4 |
+| medium | v1_thick_backlit | 1792x1008 | 66.619 | 15.0 |
+| medium | v4_overview_south | 1792x1008 | 43.888 | 22.8 |
+| medium | v8_ocean_lod | 1792x1008 | 39.791 | 25.1 |
+| low | v1_thick_backlit | 768x432 | 12.402 | 80.6 |
+| low | v4_overview_south | 768x432 | 9.617 | 104.0 |
+| low | v8_ocean_lod | 768x432 | 7.218 | 138.5 |
+| minimal | v1_thick_backlit | 320x180 | 2.837 | 352.5 |
+| minimal | v4_overview_south | 320x180 | 4.229 | 236.5 |
+| minimal | v8_ocean_lod | 320x180 | 1.536 | 651.1 |
+| hold_low | v1_thick_backlit | 1280x720 | 43.467 | 23.0 |
+| hold_low | v4_overview_south | 1280x720 | 32.018 | 31.2 |
+| hold_low | v8_ocean_lod | 1280x720 | 26.189 | 38.2 |
+| hold_minimal | v1_thick_backlit | 640x360 | 13.449 | 74.4 |
+| hold_minimal | v4_overview_south | 640x360 | 11.136 | 89.8 |
+| hold_minimal | v8_ocean_lod | 640x360 | 8.202 | 121.9 |
+
+## 2026-08-19 21:20:57 — cb31036 — M1 MacBook Air 8GB, deployed demo case
+
+GPU: Apple M1 · output 2560x1440 · 32 frames/view · demo desert-coarse
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 2560x1440 | 211.116 | 4.7 |
+| high | v4_overview_south | 2560x1440 | 283.199 | 3.5 |
+| high | v8_ocean_lod | 2560x1440 | 203.164 | 4.9 |
+| medium | v1_thick_backlit | 1792x1008 | 82.647 | 12.1 |
+| medium | v4_overview_south | 1792x1008 | 104.630 | 9.6 |
+| medium | v8_ocean_lod | 1792x1008 | 93.860 | 10.7 |
+| low | v1_thick_backlit | 768x432 | 14.187 | 70.5 |
+| low | v4_overview_south | 768x432 | 16.901 | 59.2 |
+| low | v8_ocean_lod | 768x432 | 16.032 | 62.4 |
+| minimal | v1_thick_backlit | 320x180 | 3.894 | 256.8 |
+| minimal | v4_overview_south | 320x180 | 4.831 | 207.0 |
+| minimal | v8_ocean_lod | 320x180 | 4.507 | 221.9 |
+| hold_low | v1_thick_backlit | 1280x720 | 61.897 | 16.2 |
+| hold_low | v4_overview_south | 1280x720 | 82.526 | 12.1 |
+| hold_low | v8_ocean_lod | 1280x720 | 59.875 | 16.7 |
+| hold_minimal | v1_thick_backlit | 640x360 | 20.107 | 49.7 |
+| hold_minimal | v4_overview_south | 640x360 | 24.634 | 40.6 |
+| hold_minimal | v8_ocean_lod | 640x360 | 19.388 | 51.6 |
+
+## 2026-08-19 21:23:08 — cb31036 — M1 MacBook Air 8GB, deployed demo case
+
+GPU: Apple M1 · output 2560x1440 · 32 frames/view · demo rce
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 2560x1440 | 883.865 | 1.1 |
+| high | v4_overview_south | 2560x1440 | 578.982 | 1.7 |
+| high | v8_ocean_lod | 2560x1440 | 390.267 | 2.6 |
+| medium | v1_thick_backlit | 1792x1008 | 269.962 | 3.7 |
+| medium | v4_overview_south | 1792x1008 | 188.991 | 5.3 |
+| medium | v8_ocean_lod | 1792x1008 | 123.516 | 8.1 |
+| low | v1_thick_backlit | 768x432 | 39.478 | 25.3 |
+| low | v4_overview_south | 768x432 | 32.919 | 30.4 |
+| low | v8_ocean_lod | 768x432 | 18.696 | 53.5 |
+| minimal | v1_thick_backlit | 320x180 | 8.482 | 117.9 |
+| minimal | v4_overview_south | 320x180 | 9.357 | 106.9 |
+| minimal | v8_ocean_lod | 320x180 | 4.082 | 245.0 |
+| hold_low | v1_thick_backlit | 1280x720 | 233.392 | 4.3 |
+| hold_low | v4_overview_south | 1280x720 | 163.999 | 6.1 |
+| hold_low | v8_ocean_lod | 1280x720 | 103.170 | 9.7 |
+| hold_minimal | v1_thick_backlit | 640x360 | 72.998 | 13.7 |
+| hold_minimal | v4_overview_south | 640x360 | 58.169 | 17.2 |
+| hold_minimal | v8_ocean_lod | 640x360 | 33.321 | 30.0 |
+
+## 2026-08-19 21:28:04 — cb31036 — M1 MacBook Air 8GB, deployed demo case
+
+GPU: Apple M1 · output 2560x1440 · 32 frames/view · demo dycoms
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| high | v1_thick_backlit | 2560x1440 | 2638.867 | 0.4 |
+| high | v4_overview_south | 2560x1440 | 590.992 | 1.7 |
+| high | v8_ocean_lod | 2560x1440 | 220.557 | 4.5 |
+| medium | v1_thick_backlit | 1792x1008 | 1281.866 | 0.8 |
+| medium | v4_overview_south | 1792x1008 | 165.797 | 6.0 |
+| medium | v8_ocean_lod | 1792x1008 | 118.394 | 8.4 |
+| low | v1_thick_backlit | 768x432 | 405.409 | 2.5 |
+| low | v4_overview_south | 768x432 | 22.373 | 44.7 |
+| low | v8_ocean_lod | 768x432 | 26.553 | 37.7 |
+| minimal | v1_thick_backlit | 320x180 | 124.601 | 8.0 |
+| minimal | v4_overview_south | 320x180 | 4.274 | 234.0 |
+| minimal | v8_ocean_lod | 320x180 | 15.114 | 66.2 |
+| hold_low | v1_thick_backlit | 1280x720 | 997.565 | 1.0 |
+| hold_low | v4_overview_south | 1280x720 | 153.551 | 6.5 |
+| hold_low | v8_ocean_lod | 1280x720 | 61.334 | 16.3 |
+| hold_minimal | v1_thick_backlit | 640x360 | 343.615 | 2.9 |
+| hold_minimal | v4_overview_south | 640x360 | 44.824 | 22.3 |
+| hold_minimal | v8_ocean_lod | 640x360 | 21.633 | 46.2 |
