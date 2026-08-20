@@ -333,7 +333,6 @@ const LIGHT_DEEP_QUAD_TAU_START: f32 = 32.0;
 const LIGHT_DEEP_QUAD_GROWTH: f32 = 1.2;
 const LIGHT_DEEP_QUAD_MAX_BOOST: f32 = 64.0;
 const EMPTY_DTAU_CUTOFF: f32 = 1e-5; // witness.py:701
-const DENSE_SIGMA_CUTOFF: f32 = 0.01; // witness.py:688
 const TAU_STEP_MAX: f32 = 0.5;       // witness.py:689
 // Tone-map gamma is per-frame (u.periodic.w), not a const — see tone_map.
 // witness's own value is 1.4; the app ships a higher default (engine
@@ -1163,11 +1162,13 @@ fn sun_cone_dir(sun: vec3<f32>, frame: mat2x3<f32>, r: vec2<f32>,
     return normalize(d);
 }
 
+// Continuous in sigma on purpose: a threshold (the old DENSE_SIGMA_CUTOFF
+// branch) makes the step length jump discontinuously across an iso-surface
+// of the cloud, and the quadrature bias jumps with it — which printed the
+// iso-contour onto the image as a sharp crease. Thin decks whose sigma sits
+// near the threshold (stratified cirrus) showed it worst.
 fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
-    if (sigma > DENSE_SIGMA_CUTOFF) {
-        return min(dt_max, TAU_STEP_MAX / sigma);
-    }
-    return dt_max;
+    return min(dt_max, TAU_STEP_MAX / max(sigma, 1e-12));
 }
 
 // Sun optical depth from p toward the sun: witness adaptive-step shadow march
