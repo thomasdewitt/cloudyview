@@ -1959,6 +1959,796 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// The night city (CITY specialization, 2026-08-20)
+// ---------------------------------------------------------------------------
+//
+// A procedurally generated city of skyscrapers under the cloud field, at
+// night: the sun becomes a crescent moon, and the buildings are the light.
+//
+// Reuses the ocean tile binding: under CITY the rgba16float mip chain at
+// binding 3 is the CITY density tile (cloudyview/soar/city), one texel per
+// city block. r = the FIF cascade (H=0, C1=0.1, alpha=2) normalized by its
+// 99.5th percentile — the building-height modulator; g = the same field
+// rank-transformed to uniform [0,1] — the thresholdable channel (building
+// presence). The coarse mips of r ARE the ground-glow field: mip k is the
+// mean lit density over 2^k blocks, which is what a cloud base or a long
+// sightline integrates over. Rows 8-9 keep their geometric meaning (surface
+// z; tile texel size / extent / enable / max lod); the five spectral rows
+// arrive packed with night values by the host, and u.sun_dir is the moon.
+//
+// Geometry is exact — a 2D DDA over the block grid with slab tests against
+// up to three stacked boxes per building plus a rooftop mast — because
+// geometry is sacred. The lighting is where the hacks live, as usual:
+// procedural window grids with an analytic far-field average (the facade's
+// mean emission, blended in as the pixel footprint outgrows a window — the
+// degrees-not-meters principle applied to architecture), streetlight pools
+// with the same treatment, and an exponential ground-fog whose in-scatter
+// is the glow mip at the hit point.
+
+const CITY: bool = false;
+
+// Grid. The block pitch and tile extent arrive in u.ocean_params (x, y) so
+// the tile stays self-describing; everything else about the city is a
+// compile-time choice.
+const CITY_GROUND_Z: f32 = 0.0;
+// The height law is deliberately unclipped below this: the cascade's
+// lognormal tail IS the skyline — the p99.5 building lands near 390 m and
+// the rare 5x-8x excursions are the megatowers that reach the cloud deck.
+// The ceiling only exists so the DDA has a z gate, and only the single
+// wildest draw of the shipped tile touches it.
+const CITY_MAX_H: f32 = 5400.0;     // tallest roof (before mast)
+const CITY_SLAB_TOP: f32 = 5600.0;  // roof + tallest mast: the DDA's z gate
+const CITY_FLOOR_H: f32 = 3.6;      // one storey; window rows ride this
+const CITY_STREET_HALF: f32 = 6.0;  // half-width of a minor street (m)
+const CITY_AVENUE_EXTRA: f32 = 10.0; // extra half-width on avenue boundaries
+const CITY_AVENUE_PERIOD: i32 = 8;  // avenue every this many blocks
+const CITY_TRACE_MAX_CELLS: i32 = 512;
+const CITY_TRACE_RANGE: f32 = 30000.0;
+// Where the tile sits in world space. The cascade's wildest excursion — a
+// 5 km twin spire ringed by 3.7-3.9 km towers — is placed under the demo
+// field's central cameras rather than left wherever the seed put it: the
+// megatower district is the shot, so it gets the stage.
+const CITY_TILE_OFFSET_CELLS: vec2<i32> = vec2<i32>(837, -189);
+// Building presence and mass. rank below EMPTY -> unbuilt lot; the sprawl
+// ramp suppresses height just above the threshold so the outskirts are
+// low-rise rather than a cliff of towers at the empty-lot boundary.
+const CITY_EMPTY_RANK: f32 = 0.22;
+const CITY_SPRAWL_RANK_FULL: f32 = 0.60;
+const CITY_SPRAWL_MIN_FRAC: f32 = 0.15;
+const CITY_H_BASE: f32 = 14.0;
+const CITY_H_SCALE: f32 = 390.0;
+const CITY_H_EXP: f32 = 1.2;
+// Windows.
+const CITY_WIN_PITCH_U: f32 = 3.4;  // horizontal window pitch (m)
+const CITY_WIN_U_LO: f32 = 0.14;    // pane bounds within the pitch cell
+const CITY_WIN_U_HI: f32 = 0.86;
+const CITY_WIN_V_LO: f32 = 0.28;
+const CITY_WIN_V_HI: f32 = 0.90;
+const CITY_PANE_FRAC: f32 = 0.446;  // (U_HI-U_LO)*(V_HI-V_LO), for the mean
+const CITY_DARK_FLOOR_FRAC: f32 = 0.10; // whole storeys gone dark
+const CITY_WIN_RADIANCE: f32 = 3.5;
+// Mean of the palette draw below, for the far-field facade average.
+const CITY_PALETTE_MEAN: vec3<f32> = vec3<f32>(1.0, 0.55, 0.25);
+const CITY_WIN_BRIGHT_MEAN: f32 = 0.875; // E[0.25 + 5 w^7]
+// Tone-map compensation on the far-field facade mean. The LOD average is
+// taken in linear radiance, but the display transform is compressive: a few
+// blazing windows tone-map to little more than their dim neighbours, so the
+// linear mean reads far brighter than the resolved facade it replaces —
+// mid-distance towers rendered cream-white. The right number is the ratio
+// <T(E)>/T(<E>) of the window population, which for this palette and white
+// point sits around a third.
+const CITY_FACADE_MEAN_COMP: f32 = 0.04;
+// Facade LOD: pixel footprint (m) where the window grid starts and finishes
+// dissolving into the facade average.
+const CITY_WIN_LOD_START: f32 = 1.2;
+const CITY_WIN_LOD_FULL: f32 = 5.0;
+// Streets.
+const CITY_LAMP_SPACING: f32 = 26.0;
+const CITY_LAMP_OFFSET: f32 = 2.5;   // lamp line inset from the block edge
+const CITY_LAMP_SIGMA: f32 = 4.5;    // light-pool radius on the asphalt
+const CITY_LAMP_RADIANCE: f32 = 0.7;
+const CITY_LAMP_COLOR: vec3<f32> = vec3<f32>(1.0, 0.42, 0.12); // sodium
+// Mean lamp-pool coverage of the street band: 2*pi*sigma^2 over one lamp's
+// street area (spacing * ~2*(half+offset)), times two lamp lines.
+const CITY_STREET_MEAN_POOL: f32 = 0.08;
+const CITY_STREET_LOD_START: f32 = 8.0;
+const CITY_STREET_LOD_FULL: f32 = 26.0;
+// Storefront strip: the bottom of a lit building's facade.
+const CITY_STORE_H: f32 = 4.4;
+const CITY_STORE_RADIANCE: f32 = 2.2;
+// Roof furniture.
+const CITY_MAST_MIN_H: f32 = 150.0;  // buildings shorter than this: no mast
+const CITY_MAST_CROSS: f32 = 1.4;
+const CITY_BEACON_LEN: f32 = 2.5;
+const CITY_BEACON_COLOR: vec3<f32> = vec3<f32>(40.0, 2.0, 1.6);
+// Night materials and fill light.
+const CITY_MOONLIGHT: vec3<f32> = vec3<f32>(0.020, 0.024, 0.032);
+const CITY_SKYGLOW: vec3<f32> = vec3<f32>(0.012, 0.010, 0.016);
+const CITY_FACADE_ALBEDO: f32 = 0.030;
+const CITY_ROOF_ALBEDO: f32 = 0.085;
+const CITY_ASPHALT_ALBEDO: f32 = 0.035;
+// Ground fog: exponential profile, uniform-in-z beyond its scale height
+// none — this is the night twin of the aerial-perspective machinery, kept
+// separate because its in-scatter source is the city itself, not the sky.
+const CITY_FOG_BETA: f32 = 6.0e-5;   // m^-1 at ground level
+const CITY_FOG_H: f32 = 320.0;       // scale height (m)
+const CITY_FOG_GLOW: vec3<f32> = vec3<f32>(1.0, 0.42, 0.15);
+const CITY_FOG_GLOW_AMP: f32 = 0.10;
+const CITY_FOG_BASE: vec3<f32> = vec3<f32>(0.003, 0.004, 0.008);
+// Cloud uplight: the city as the cloud field's second light source. The
+// glow mip under the sample (footprint ~ its height, so the mip level is
+// log2(z / cell)) times the two-stream transmittance of the cloud below.
+const CITY_UPLIGHT_STRENGTH: f32 = 0.5;
+// Only glow above the citywide background lifts a cloud base: the bias is
+// what keeps sprawl bases moonlit blue-grey while the district overhead
+// burns amber. Without it even a 0.02-radiance warm pedestal reads, because
+// the night clouds it lands on sit near 0.05.
+const CITY_UPLIGHT_GLOW_BIAS: f32 = 0.15;
+const CITY_UPLIGHT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.38, 0.10);
+// The glow feeding the uplight saturates: g/(HALF+g). Over the megatower
+// district the raw mip runs to ~3x the p99.5 level, and any linear scaling
+// bright enough to warm an ordinary district's cloud base bleaches the
+// district's whole sky cream — the saturation is what lets both exist.
+const CITY_UPLIGHT_GLOW_HALF: f32 = 0.6;
+const CITY_UP_PROBE_SPAN: f32 = 1400.0;
+const CITY_UP_PROBE_STEPS: i32 = 12;
+const CITY_UPLIGHT_FLOOR: f32 = 0.02;
+// e-folding of the amber in probe tau: 1/0.25 = 4 optical depths of skin.
+const CITY_UPLIGHT_TAU_SCALE: f32 = 0.25;
+// Night sky.
+const CITY_NIGHT_HORIZON: vec3<f32> = vec3<f32>(0.006, 0.007, 0.012);
+const CITY_NIGHT_ZENITH: vec3<f32> = vec3<f32>(0.0008, 0.0011, 0.0024);
+const CITY_SKYGLOW_DOME: vec3<f32> = vec3<f32>(0.90, 0.50, 0.24);
+const CITY_SKYGLOW_DOME_AMP: f32 = 0.050;
+const CITY_SKYGLOW_DOME_DIST: f32 = 3000.0;
+const CITY_SKYGLOW_DOME_SCALE: f32 = 0.09; // e-folding in dir.z
+const CITY_STAR_GRID: f32 = 160.0;
+const CITY_STAR_FRAC: f32 = 0.10;
+const CITY_STAR_RADIUS: f32 = 0.16;  // in star-grid cells
+const CITY_STAR_AMP: f32 = 0.05;
+// Moon: drawn ~4x the true angular radius — at flight FOV the true disc is
+// an unreadable dot, and the crescent is the shot. The crescent's own sun
+// sits mostly behind the disc (phase angle ~120 deg) and a little
+// below-right, which is what makes the lit limb a waxing crescent rather
+// than a half. Earthshine kept near-invisible: an exposed night render
+// lifts it fast, and a glowing dark side reads as a full moon in fog.
+const CITY_MOON_SIN_R: f32 = 0.018;
+const CITY_MOON_DISC: vec3<f32> = vec3<f32>(4.0, 4.1, 4.35);
+const CITY_MOON_EARTHSHINE: f32 = 0.005;
+const CITY_MOON_TERMINATOR_SOFT: f32 = 0.14;
+const CITY_MOON_HALO_G: f32 = 0.78;
+const CITY_MOON_HALO_AMP: f32 = 0.008;
+const CITY_MOON_BLOOM_W: f32 = 0.0008;
+
+fn city_u01(x: u32) -> f32 {
+    return f32(x) * 2.3283064365386963e-10; // 1 / 2^32
+}
+
+fn city_rand4(s: vec2<u32>) -> vec4<f32> {
+    let a = pcg2d(s);
+    let b = pcg2d(a);
+    return vec4<f32>(city_u01(a.x), city_u01(a.y),
+                     city_u01(b.x), city_u01(b.y));
+}
+
+fn city_is_avenue(k: i32) -> bool {
+    return ((k % CITY_AVENUE_PERIOD) + CITY_AVENUE_PERIOD)
+           % CITY_AVENUE_PERIOD == 0;
+}
+
+// The glow field: mean lit density over 2^lod blocks, read with the repeat
+// sampler so the tile wraps. This is the one number the fog, the sky dome
+// and the cloud uplight all share.
+fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
+    let shifted = xy
+        - vec2<f32>(CITY_TILE_OFFSET_CELLS) * u.ocean_params.x;
+    let uv = shifted / u.ocean_params.y;
+    let l = clamp(lod, 0.0, u.ocean_params.w);
+    return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
+}
+
+// Everything the march and the shader need to know about one block.
+struct CityCell {
+    built: bool,
+    density: f32,
+    rank: f32,
+    height: f32,      // main roof z
+    top_z: f32,       // roof + mast: the cell's cheap z reject
+    tiers: i32,
+    b1min: vec3<f32>, b1max: vec3<f32>,
+    b2min: vec3<f32>, b2max: vec3<f32>,
+    b3min: vec3<f32>, b3max: vec3<f32>,
+    has_mast: bool,
+    mast_min: vec3<f32>, mast_max: vec3<f32>,
+    seed: vec2<u32>,
+    lit_frac: f32,
+    palette_bias: f32,
+    store_draw: f32,
+    plot_min: vec2<f32>, plot_max: vec2<f32>,
+}
+
+fn city_cell(ci: vec2<i32>) -> CityCell {
+    var c: CityCell;
+    let cell = u.ocean_params.x;
+    let dims = textureDimensions(ocean_normals, 0);
+    let n = vec2<i32>(i32(dims.x), i32(dims.y));
+    let ct = ci - CITY_TILE_OFFSET_CELLS;
+    let w = ((ct % n) + n) % n;
+    let texel = textureLoad(ocean_normals, w, 0);
+    c.density = texel.r;
+    c.rank = texel.g;
+
+    let cmin = vec2<f32>(ci) * cell;
+    let cmax = cmin + vec2<f32>(cell);
+    // Street half-widths on this block's four edges; avenue boundaries get
+    // extra. The avenue test uses the unwrapped index so the pattern is a
+    // property of world space, not of the tile.
+    let hx0 = CITY_STREET_HALF
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x));
+    let hx1 = CITY_STREET_HALF
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x + 1));
+    let hy0 = CITY_STREET_HALF
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.y));
+    let hy1 = CITY_STREET_HALF
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.y + 1));
+    c.plot_min = cmin + vec2<f32>(hx0, hy0);
+    c.plot_max = cmax - vec2<f32>(hx1, hy1);
+
+    c.seed = pcg2d(vec2<u32>(bitcast<u32>(ci.x), bitcast<u32>(ci.y)));
+    let r4 = city_rand4(c.seed);
+    let r4b = city_rand4(c.seed ^ vec2<u32>(0x9e3779b9u, 0x85ebca6bu));
+    let r4c = city_rand4(c.seed ^ vec2<u32>(0xdeadbeefu, 0x41c64e6du));
+
+    c.built = c.rank > CITY_EMPTY_RANK;
+    // Occupancy follows the cascade: downtown towers burn, outskirts
+    // buildings are mostly asleep. This is what makes the density clusters
+    // read at night — the same field that raised the buildings lights them.
+    c.lit_frac = min(
+        (0.14 + 0.55 * r4c.x * r4c.x)
+            * mix(0.55, 1.5, smoothstep(0.05, 0.50, c.density)),
+        0.40);
+    c.palette_bias = r4c.y;
+    c.store_draw = r4c.z;
+    c.tiers = 1;
+    c.has_mast = false;
+    c.height = 0.0;
+    c.top_z = 0.0;
+    c.b1min = vec3<f32>(0.0); c.b1max = vec3<f32>(0.0);
+    c.b2min = vec3<f32>(0.0); c.b2max = vec3<f32>(0.0);
+    c.b3min = vec3<f32>(0.0); c.b3max = vec3<f32>(0.0);
+    c.mast_min = vec3<f32>(0.0); c.mast_max = vec3<f32>(0.0);
+    if (!c.built) {
+        return c;
+    }
+
+    // Height: base + the cascade raised to a power, jittered, suppressed
+    // toward the outskirts, and quantized to storeys so roofs are flat
+    // shelves rather than a continuum.
+    let sprawl = mix(
+        CITY_SPRAWL_MIN_FRAC, 1.0,
+        smoothstep(CITY_EMPTY_RANK, CITY_SPRAWL_RANK_FULL, c.rank)
+    );
+    var h = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
+            * (0.70 + 0.60 * r4.x) * sprawl;
+    h = clamp(floor(h / CITY_FLOOR_H) * CITY_FLOOR_H,
+              2.0 * CITY_FLOOR_H, CITY_MAX_H);
+    c.height = h;
+
+    // Footprint inside the plot, jittered in size and position. Supertalls
+    // slim down — a 2 km tower on a full-plot footprint is a wall, and the
+    // structural taper is what makes the megatowers read as spires.
+    let plot_size = c.plot_max - c.plot_min;
+    let slender = mix(1.0, 0.55, smoothstep(300.0, 2000.0, h));
+    let fw = plot_size * slender
+        * vec2<f32>(0.55 + 0.40 * r4.y, 0.55 + 0.40 * r4.z);
+    let slack = plot_size - fw;
+    let bmin2 = c.plot_min + slack * vec2<f32>(r4.w, r4b.x);
+    let bmax2 = bmin2 + fw;
+    let bc = 0.5 * (bmin2 + bmax2);
+
+    // Setback tiers: taller draws stack shrinking boxes (the wedding cake).
+    var z1 = h;
+    if (h > 90.0 && r4b.y > 0.45) {
+        c.tiers = 2;
+        z1 = floor(h * 0.60 / CITY_FLOOR_H) * CITY_FLOOR_H;
+        if (h > 180.0 && r4b.y > 0.80) {
+            c.tiers = 3;
+            z1 = floor(h * 0.50 / CITY_FLOOR_H) * CITY_FLOOR_H;
+        }
+    }
+    c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
+    c.b1max = vec3<f32>(bmax2, z1);
+    if (c.tiers >= 2) {
+        var z2 = h;
+        var f2 = 0.68;
+        if (c.tiers == 3) {
+            z2 = floor(h * 0.78 / CITY_FLOOR_H) * CITY_FLOOR_H;
+            f2 = 0.72;
+        }
+        let fw2 = fw * f2;
+        c.b2min = vec3<f32>(bc - 0.5 * fw2, z1);
+        c.b2max = vec3<f32>(bc + 0.5 * fw2, z2);
+        if (c.tiers == 3) {
+            let fw3 = fw * 0.45;
+            c.b3min = vec3<f32>(bc - 0.5 * fw3, z2);
+            c.b3max = vec3<f32>(bc + 0.5 * fw3, h);
+        }
+    }
+
+    if (h > CITY_MAST_MIN_H && r4b.z < 0.65) {
+        c.has_mast = true;
+        let mast_h = 12.0 + 45.0 * r4b.w;
+        let moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * 0.4;
+        let mc = bc + moff;
+        c.mast_min = vec3<f32>(mc - vec2<f32>(0.5 * CITY_MAST_CROSS), h);
+        c.mast_max = vec3<f32>(mc + vec2<f32>(0.5 * CITY_MAST_CROSS),
+                               h + mast_h);
+        c.top_z = h + mast_h;
+    } else {
+        c.top_z = h;
+    }
+    return c;
+}
+
+// Slab test against an arbitrary box (ray_box is hardwired to the volume).
+fn city_box_hit(o: vec3<f32>, inv_dir: vec3<f32>,
+                bmin: vec3<f32>, bmax: vec3<f32>) -> vec2<f32> {
+    let t0 = (bmin - o) * inv_dir;
+    let t1 = (bmax - o) * inv_dir;
+    let tmin = min(t0, t1);
+    let tmax = max(t0, t1);
+    return vec2<f32>(max(max(tmin.x, tmin.y), tmin.z),
+                     min(min(tmax.x, tmax.y), tmax.z));
+}
+
+fn city_box_normal(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>)
+        -> vec3<f32> {
+    let c = 0.5 * (bmin + bmax);
+    let h = max(0.5 * (bmax - bmin), vec3<f32>(1e-4));
+    let q = (p - c) / h;
+    let aq = abs(q);
+    if (aq.z >= aq.x && aq.z >= aq.y) {
+        return vec3<f32>(0.0, 0.0, sign(q.z));
+    }
+    if (aq.x >= aq.y) {
+        return vec3<f32>(sign(q.x), 0.0, 0.0);
+    }
+    return vec3<f32>(0.0, sign(q.y), 0.0);
+}
+
+struct CityHit {
+    hit: bool,
+    t: f32,
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+    kind: i32,   // 0 ground, 1 facade, 2 roof, 3 mast, 4 beacon
+    cell: vec2<i32>,
+}
+
+// 2D DDA over the block grid. Exact: every building the ray passes is slab-
+// tested; the only rejections are cells whose whole z-extent the segment
+// clears. Opaque geometry, so the first hit wins.
+fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
+    var res: CityHit;
+    res.hit = false;
+    res.t = 1e30;
+    let cell = u.ocean_params.x;
+
+    var t0 = 0.0;
+    if (o.z > CITY_SLAB_TOP) {
+        if (dir.z >= -1e-7) {
+            return res;
+        }
+        t0 = (CITY_SLAB_TOP - o.z) / dir.z;
+        if (t0 > CITY_TRACE_RANGE) {
+            return res;
+        }
+    }
+    let p0 = o + t0 * dir;
+
+    var ci = vec2<i32>(floor(p0.xy / cell));
+    let stp = vec2<i32>(select(-1, 1, dir.x > 0.0),
+                        select(-1, 1, dir.y > 0.0));
+    let inv2 = vec2<f32>(
+        select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9)
+    );
+    let cmin0 = vec2<f32>(ci) * cell;
+    var tmax = vec2<f32>(
+        t0 + (select(cmin0.x, cmin0.x + cell, dir.x > 0.0) - p0.x) * inv2.x,
+        t0 + (select(cmin0.y, cmin0.y + cell, dir.y > 0.0) - p0.y) * inv2.y
+    );
+    // A zero direction component never crosses that axis.
+    tmax = vec2<f32>(
+        select(1e30, tmax.x, abs(dir.x) > 1e-9),
+        select(1e30, tmax.y, abs(dir.y) > 1e-9)
+    );
+    let tdelta = vec2<f32>(cell * abs(inv2.x), cell * abs(inv2.y));
+
+    let inv3 = vec3<f32>(
+        inv2.x, inv2.y,
+        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9)
+    );
+    var ground_t = 1e30;
+    if (dir.z < -1e-9) {
+        ground_t = (CITY_GROUND_Z - o.z) / dir.z;
+    }
+
+    var t_cur = t0;
+    for (var i: i32 = 0; i < CITY_TRACE_MAX_CELLS; i = i + 1) {
+        let t_exit = min(min(tmax.x, tmax.y), CITY_TRACE_RANGE);
+        let z_a = o.z + t_cur * dir.z;
+        let z_b = o.z + t_exit * dir.z;
+        if (min(z_a, z_b) > CITY_SLAB_TOP && dir.z >= 0.0) {
+            return res;   // climbed out of the slab for good
+        }
+
+        let cc = city_cell(ci);
+        var best_t = 1e30;
+        var best_min = vec3<f32>(0.0);
+        var best_max = vec3<f32>(0.0);
+        var best_kind = -1;
+        if (cc.built && min(z_a, z_b) < cc.top_z + 1.0) {
+            let h1 = city_box_hit(o, inv3, cc.b1min, cc.b1max);
+            if (h1.x <= h1.y && h1.x > 0.0 && h1.x < best_t) {
+                best_t = h1.x; best_min = cc.b1min; best_max = cc.b1max;
+                best_kind = 1;
+            }
+            if (cc.tiers >= 2) {
+                let h2 = city_box_hit(o, inv3, cc.b2min, cc.b2max);
+                if (h2.x <= h2.y && h2.x > 0.0 && h2.x < best_t) {
+                    best_t = h2.x; best_min = cc.b2min; best_max = cc.b2max;
+                    best_kind = 1;
+                }
+            }
+            if (cc.tiers >= 3) {
+                let h3 = city_box_hit(o, inv3, cc.b3min, cc.b3max);
+                if (h3.x <= h3.y && h3.x > 0.0 && h3.x < best_t) {
+                    best_t = h3.x; best_min = cc.b3min; best_max = cc.b3max;
+                    best_kind = 1;
+                }
+            }
+            if (cc.has_mast) {
+                let hm = city_box_hit(o, inv3, cc.mast_min, cc.mast_max);
+                if (hm.x <= hm.y && hm.x > 0.0 && hm.x < best_t) {
+                    best_t = hm.x; best_min = cc.mast_min;
+                    best_max = cc.mast_max;
+                    best_kind = 3;
+                }
+            }
+        }
+        if (ground_t > t_cur - 1e-4 && ground_t <= t_exit + 1e-4
+            && ground_t < best_t) {
+            best_t = ground_t;
+            best_kind = 0;
+        }
+        if (best_kind >= 0 && best_t <= t_exit + 1e-4) {
+            res.hit = true;
+            res.t = best_t;
+            res.pos = o + best_t * dir;
+            res.cell = ci;
+            if (best_kind == 0) {
+                res.normal = vec3<f32>(0.0, 0.0, 1.0);
+                res.kind = 0;
+            } else {
+                res.normal = city_box_normal(res.pos, best_min, best_max);
+                if (best_kind == 3) {
+                    res.kind = select(
+                        3, 4,
+                        res.pos.z > best_max.z - CITY_BEACON_LEN);
+                } else {
+                    res.kind = select(1, 2, res.normal.z > 0.5);
+                }
+            }
+            return res;
+        }
+
+        if (t_exit >= CITY_TRACE_RANGE) {
+            return res;
+        }
+        if (tmax.x < tmax.y) {
+            ci.x = ci.x + stp.x;
+            t_cur = tmax.x;
+            tmax.x = tmax.x + tdelta.x;
+        } else {
+            ci.y = ci.y + stp.y;
+            t_cur = tmax.y;
+            tmax.y = tmax.y + tdelta.y;
+        }
+    }
+    return res;
+}
+
+// One window's color: a palette draw shifted by the building's own mood.
+fn city_window_color(draw: f32, bias: f32) -> vec3<f32> {
+    let warm_cut = 0.55 + 0.30 * (bias - 0.5);
+    if (draw < warm_cut) {
+        return vec3<f32>(1.0, 0.62, 0.30);        // tungsten / sodium spill
+    }
+    if (draw < warm_cut + 0.30) {
+        return vec3<f32>(0.75, 0.85, 1.00);       // fluorescent / LED
+    }
+    if (draw < warm_cut + 0.38) {
+        return vec3<f32>(0.15, 0.95, 0.85);       // cyan neon
+    }
+    return vec3<f32>(1.00, 0.25, 0.55);           // magenta neon
+}
+
+// Streetlight pools on the asphalt around block edges. Evaluated for the
+// nearest x- and y- boundary lines; each street has a lamp line either side.
+fn city_street_pools(p: vec2<f32>) -> f32 {
+    let cell = u.ocean_params.x;
+    var pool = 0.0;
+    // Nearest x-boundary (a street running along y).
+    let bx = round(p.x / cell) * cell;
+    let bxi = i32(round(p.x / cell));
+    let ax = select(1.0, 3.0, city_is_avenue(bxi));
+    for (var s: i32 = 0; s < 2; s = s + 1) {
+        let lx = bx + select(-CITY_LAMP_OFFSET, CITY_LAMP_OFFSET, s == 1);
+        let ly = round(p.y / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+        let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
+        pool = pool + ax * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
+    }
+    // Nearest y-boundary (a street running along x).
+    let by = round(p.y / cell) * cell;
+    let byi = i32(round(p.y / cell));
+    let ay = select(1.0, 3.0, city_is_avenue(byi));
+    for (var s: i32 = 0; s < 2; s = s + 1) {
+        let ly = by + select(-CITY_LAMP_OFFSET, CITY_LAMP_OFFSET, s == 1);
+        let lx = round(p.x / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+        let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
+        pool = pool + ay * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
+    }
+    return pool;
+}
+
+// Surface radiance at a city hit, before fog. fp is the pixel footprint at
+// the hit (m/px): the analytic LOD that dissolves windows and lamp pools
+// into their means once they are sub-pixel, so the far city is smooth
+// glow rather than shimmer.
+fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
+    let moon = u.sun_dir.xyz;
+    let cc = city_cell(h.cell);
+    let local_glow = city_glow_sample(h.pos.xy, 3.0);
+    let fill = CITY_SKYGLOW * (0.5 + 1.5 * local_glow);
+
+    if (h.kind == 4) {   // beacon
+        return CITY_BEACON_COLOR;
+    }
+    if (h.kind == 3) {   // mast steel
+        return 0.05 * fill
+               + 0.04 * CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0);
+    }
+    if (h.kind == 2) {   // roof
+        var alb = CITY_ROOF_ALBEDO;
+        // Parapet ring: the roof edge catches the street glow from below.
+        // The ring belongs to whichever tier this roof is — pick the box
+        // whose top the hit sits on.
+        var rmin = cc.b1min.xy;
+        var rmax = cc.b1max.xy;
+        if (cc.tiers >= 2 && h.pos.z > cc.b2min.z + 0.5) {
+            rmin = cc.b2min.xy;
+            rmax = cc.b2max.xy;
+        }
+        if (cc.tiers >= 3 && h.pos.z > cc.b3min.z + 0.5) {
+            rmin = cc.b3min.xy;
+            rmax = cc.b3max.xy;
+        }
+        let din = min(
+            min(h.pos.x - rmin.x, rmax.x - h.pos.x),
+            min(h.pos.y - rmin.y, rmax.y - h.pos.y)
+        );
+        if (din < 1.2) {
+            alb = alb * 2.2;
+        }
+        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+    }
+    if (h.kind == 1) {   // facade
+        let tangent = vec2<f32>(-h.normal.y, h.normal.x);
+        let uc = dot(h.pos.xy, tangent);
+        let vc = h.pos.z;
+
+        // Per-window pattern.
+        let iu = i32(floor(uc / CITY_WIN_PITCH_U));
+        let iv = i32(floor(vc / CITY_FLOOR_H));
+        let wh = city_rand4(vec2<u32>(
+            cc.seed.x ^ bitcast<u32>(iu),
+            cc.seed.y ^ bitcast<u32>(iv)
+        ));
+        let fh = city_rand4(vec2<u32>(
+            cc.seed.x ^ 0x2545f491u,
+            bitcast<u32>(iv) * 0x9e3779b9u
+        ));
+        let floor_dark = fh.x < CITY_DARK_FLOOR_FRAC;
+        let fu = fract(uc / CITY_WIN_PITCH_U);
+        let fv = fract(vc / CITY_FLOOR_H);
+        let pane = fu > CITY_WIN_U_LO && fu < CITY_WIN_U_HI
+                && fv > CITY_WIN_V_LO && fv < CITY_WIN_V_HI;
+        let lit = pane && !floor_dark && wh.x < cc.lit_frac;
+        var e_win = vec3<f32>(0.0);
+        if (lit) {
+            let bright = 0.25 + 5.0 * pow(wh.z, 7.0);
+            e_win = city_window_color(wh.y, cc.palette_bias)
+                    * (CITY_WIN_RADIANCE * bright);
+        }
+
+        // Far field: the facade's mean emission, banded. A flat mean paints
+        // a tower as one beige slab; real distant towers keep coarse
+        // structure — a bright hotel block, dark mechanical storeys — so
+        // the mean is modulated per 16-floor band, a scale the LOD blend
+        // cannot yet have dissolved when it engages.
+        let bh = city_rand4(vec2<u32>(
+            cc.seed.x ^ 0x51ed270bu,
+            bitcast<u32>(iv >> 4) * 0x9e3779b9u
+        ));
+        let band = 0.45 + 1.10 * bh.x;
+        let e_mean = CITY_PALETTE_MEAN
+            * (cc.lit_frac * CITY_PANE_FRAC * (1.0 - CITY_DARK_FLOOR_FRAC)
+               * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
+               * CITY_FACADE_MEAN_COMP * band);
+        let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);
+        let blend = smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
+        var e = mix(e_win, e_mean, blend);
+
+        // Street-level storefront strip: bright, saturated, and only on
+        // buildings whose draw says the ground floor is commercial.
+        if (vc < CITY_STORE_H && cc.store_draw < 0.65) {
+            let sc = city_window_color(
+                fract(cc.store_draw * 7.31), 1.0 - cc.palette_bias);
+            e = e + sc * CITY_STORE_RADIANCE
+                    * smoothstep(CITY_STORE_H, CITY_STORE_H * 0.4, vc);
+        }
+
+        return e + CITY_FACADE_ALBEDO * fill
+               + CITY_FACADE_ALBEDO * CITY_MOONLIGHT
+                 * max(dot(h.normal, moon), 0.0);
+    }
+
+    // Ground. Streets carry sodium lamp pools; unbuilt lots stay dark.
+    // Lamp output follows the district: a downtown artery blazes, an
+    // outskirts street is a sparse dim line — the multifractal again, so
+    // the lattice is not wallpaper.
+    let inside_plot = h.pos.x > cc.plot_min.x && h.pos.x < cc.plot_max.x
+                   && h.pos.y > cc.plot_min.y && h.pos.y < cc.plot_max.y;
+    var street = 0.0;
+    if (!inside_plot || !cc.built) {
+        let district = city_glow_sample(h.pos.xy, 2.0);
+        let street_scale = 0.20 + 2.2 * smoothstep(0.02, 0.45, district);
+        let pool_blend = smoothstep(
+            CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+        let pools = mix(
+            city_street_pools(h.pos.xy), CITY_STREET_MEAN_POOL, pool_blend);
+        street = select(0.0,
+                        CITY_LAMP_RADIANCE * street_scale * pools,
+                        !inside_plot);
+    }
+    return CITY_LAMP_COLOR * street
+           + CITY_ASPHALT_ALBEDO * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+}
+
+// Night ground-fog: extinction toward the hit plus in-scattered city glow.
+// The glow source is the mip under the midpoint of the path, coarsened with
+// distance — the fog over downtown is orange, the fog over the outskirts is
+// barely there.
+fn city_fog(radiance: vec3<f32>, o: vec3<f32>, dir: vec3<f32>,
+            t_hit: f32, hit_pos: vec3<f32>) -> vec3<f32> {
+    let z0 = max(o.z, 0.0);
+    let z1 = max(hit_pos.z, 0.0);
+    let mu = dir.z;
+    var tau: f32;
+    if (abs(mu) > 1e-6) {
+        tau = CITY_FOG_BETA * (CITY_FOG_H / mu)
+              * (exp(-z0 / CITY_FOG_H) - exp(-z1 / CITY_FOG_H));
+    } else {
+        tau = CITY_FOG_BETA * t_hit * exp(-z0 / CITY_FOG_H);
+    }
+    let ftrans = exp(-max(tau, 0.0));
+    let mid = mix(o.xy, hit_pos.xy, 0.6);
+    let lod = 5.0 + log2(1.0 + t_hit / 2000.0);
+    // Clamped: over the megatower district the raw mip runs to ~3x the
+    // p99.5 level, and unclamped it bleaches the whole frame sepia.
+    let glow = min(city_glow_sample(mid, lod), 1.2);
+    let in_scatter = (1.0 - ftrans)
+        * (CITY_FOG_GLOW * (CITY_FOG_GLOW_AMP * glow) + CITY_FOG_BASE);
+    return radiance * ftrans + in_scatter;
+}
+
+// Downward twin of sky_probe_transmittance: the optical depth between a
+// sample and the city below it. The caller applies its own decay — NOT the
+// two-stream diffuse transmittance, whose heavy tail (T(20) ~ 0.3) let the
+// city glow soak whole cloud masses ochre; the amber belongs to the base
+// skin, so the uplight uses an exponential in this tau instead.
+fn city_uplight_probe_tau(p: vec3<f32>, jit: f32) -> f32 {
+    let span = min(CITY_UP_PROBE_SPAN, max(p.z - u.bmin.z, 0.0));
+    if (span <= 0.0) {
+        return 0.0;
+    }
+    let dz = span / f32(CITY_UP_PROBE_STEPS);
+    var tau = 0.0;
+    for (var k: i32 = 0; k < CITY_UP_PROBE_STEPS; k = k + 1) {
+        let z_off = (f32(k) + 0.5 + jit) * dz;
+        let q = vec3<f32>(p.x, p.y, p.z - z_off);
+        tau = tau + sample_sigma(q) * dz;
+    }
+    return tau;
+}
+
+// The night sky: gradient, stars, the city's own glow dome at the skyline,
+// and a crescent moon where the sun used to be.
+fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
+    let zc = clamp(dir.z, 0.0, 1.0);
+    var col = mix(CITY_NIGHT_HORIZON, CITY_NIGHT_ZENITH, pow(zc, 0.55));
+
+    // Skyline glow dome: sample the city ahead of the sightline.
+    let probe_xy = u.cam_origin.xy + dir.xy * CITY_SKYGLOW_DOME_DIST;
+    let dome = city_glow_sample(probe_xy, 7.0);
+    col = col + CITY_SKYGLOW_DOME * (CITY_SKYGLOW_DOME_AMP * dome)
+                * exp(-max(dir.z, 0.0) / CITY_SKYGLOW_DOME_SCALE);
+
+    // Stars: hashed cells on the dominant-axis cube face, faded into the
+    // horizon haze and small enough that subpixel jitter antialiases them.
+    let ad = abs(dir);
+    var uv: vec2<f32>;
+    var face: i32;
+    if (ad.z >= ad.x && ad.z >= ad.y) {
+        uv = dir.xy / ad.z;
+        face = 0;
+    } else if (ad.x >= ad.y) {
+        uv = dir.yz / ad.x;
+        face = 1;
+    } else {
+        uv = dir.xz / ad.y;
+        face = 2;
+    }
+    let sc = uv * CITY_STAR_GRID;
+    let cid = vec2<i32>(floor(sc));
+    let sh = city_rand4(pcg2d(vec2<u32>(
+        bitcast<u32>(cid.x * 3 + face),
+        bitcast<u32>(cid.y)
+    )));
+    if (sh.x < CITY_STAR_FRAC) {
+        let spos = vec2<f32>(cid) + vec2<f32>(0.15) + 0.70 * sh.yz;
+        let d = length(sc - spos);
+        if (d < CITY_STAR_RADIUS) {
+            let b = pow(sh.w, 4.0) * (1.0 - d / CITY_STAR_RADIUS);
+            col = col + vec3<f32>(0.9, 0.95, 1.0)
+                * (CITY_STAR_AMP * b * smoothstep(0.05, 0.25, dir.z));
+        }
+    }
+
+    // Moon: halo, tight bloom, then the crescent disc itself.
+    let cm = dot(dir, moon);
+    let g_h = CITY_MOON_HALO_G;
+    let dh = 1.0 + g_h * g_h - 2.0 * g_h * cm;
+    let one_minus_gh = 1.0 - g_h;
+    let halo = (one_minus_gh * one_minus_gh * one_minus_gh)
+        / max(pow(dh, 1.5), 1e-6);
+    col = col + CITY_MOON_HALO_AMP * halo * vec3<f32>(0.75, 0.80, 0.95);
+    if (cm > 0.0) {
+        let a = CITY_MOON_BLOOM_W / ((1.0 - cm) + CITY_MOON_BLOOM_W);
+        col = col + a * u.sky_bloom.xyz;
+    }
+    let off = dir - moon * cm;
+    let sin_r = length(off);
+    if (cm > 0.0 && sin_r < CITY_MOON_SIN_R) {
+        let r = sin_r / CITY_MOON_SIN_R;
+        let t1 = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), moon));
+        let t2 = cross(moon, t1);
+        let a1 = dot(off, t1) / CITY_MOON_SIN_R;
+        let a2 = dot(off, t2) / CITY_MOON_SIN_R;
+        let c = sqrt(max(1.0 - r * r, 0.0));
+        let n = a1 * t1 + a2 * t2 - c * moon;
+        let l = normalize(0.82 * t1 - 0.20 * t2 + 0.55 * moon);
+        let lit = smoothstep(
+            0.0, CITY_MOON_TERMINATOR_SOFT, dot(n, l));
+        let edge = smoothstep(1.0, 0.97, r);
+        col = col + CITY_MOON_DISC * edge
+              * (lit + CITY_MOON_EARTHSHINE);
+    }
+    return col;
+}
+
+// ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
 
@@ -2068,7 +2858,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         t_far = hit.y;
     }
 
-    let ocean_on = u.ocean_params.z > 0.5;
+    // Under CITY the ocean plane is compiled out entirely: the surface below
+    // is the traced city, which fills the same role (an opaque floor at
+    // t_city) through the same guards.
+    let ocean_on = !CITY && u.ocean_params.z > 0.5;
     var t_ocean = 1e30;
     if (ocean_on && dir.z < -1e-8) {
         let t_ocean_candidate = (u.ocean.x - u.cam_origin.z) / dir.z;
@@ -2076,6 +2869,24 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             t_ocean = t_ocean_candidate;
         }
     }
+
+    // The city trace runs once, up front: opaque geometry independent of the
+    // volume march, composited when the march reaches it exactly as the
+    // ocean plane is. The radiance is shaded and fogged here so the march
+    // loop only ever multiplies it by transmittance.
+    var t_city = 1e30;
+    var city_rgb = vec3<f32>(0.0);
+    if (CITY) {
+        let pixel_angle = 2.0 * tan_half_fov / img_w;
+        let chit = city_trace(u.cam_origin.xyz, dir);
+        if (chit.hit) {
+            t_city = chit.t;
+            city_rgb = city_fog(
+                city_shade(chit, dir, pixel_angle * chit.t),
+                u.cam_origin.xyz, dir, chit.t, chit.pos);
+        }
+    }
+    let t_surface = select(t_ocean, t_city, CITY);
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
@@ -2113,16 +2924,22 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let aerial_strength = u.sky_horizon.w;
     var aer = vec3<f32>(0.0);
     if (aerial_strength > 0.0) {
-        let ah_len = length(dir.xy);
-        var ah = dir.xy;
-        if (ah_len > 1e-8) {
-            ah = dir.xy / ah_len;
+        if (CITY) {
+            // At night the horizon asymptote is the host-packed night haze
+            // color directly; the daytime sky model has nothing to add.
+            aer = u.sky_horizon.xyz;
+        } else {
+            let ah_len = length(dir.xy);
+            var ah = dir.xy;
+            if (ah_len > 1e-8) {
+                ah = dir.xy / ah_len;
+            }
+            aer = sky_radiance(
+                vec3<f32>(ah, 0.0), sun,
+                u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
+                u.cloud_sun.w
+            );
         }
-        aer = sky_radiance(
-            vec3<f32>(ah, 0.0), sun,
-            u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
-            u.cloud_sun.w
-        );
     }
 
     // Jittered first step: decorrelates the sampling shells between
@@ -2207,7 +3024,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     var tau_total = 0.0;
     if (t_near >= 0.0 && t_near < t_far) {
         tau_total = premarch_tau_ahead(
-            u.cam_origin.xyz, dir, t_near, min(t_far, t_ocean), ahead_jitter
+            u.cam_origin.xyz, dir, t_near, min(t_far, t_surface), ahead_jitter
         );
     }
 
@@ -2225,6 +3042,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                                 t_ocean, shadow_jitter,
                                 ocean_slope_seed,
                                 jitter_on * jitter_scale);
+                transmittance = 0.0;
+                ocean_consumed = true;
+                break;
+            }
+            if (CITY && t >= t_city) {
+                col = col + transmittance * city_rgb;
                 transmittance = 0.0;
                 ocean_consumed = true;
                 break;
@@ -2280,6 +3103,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
             if (ocean_on && t + dt > t_ocean) {
                 dt = max(0.0001, t_ocean - t);
+            }
+            if (CITY && t + dt > t_city) {
+                dt = max(0.0001, t_city - t);
             }
 
             let d_tau = sigma * dt;
@@ -2669,8 +3495,30 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                             * ISO_PHASE * DIFFUSE_BEAM_TINT * u.cloud_sun.xyz;
             }
 
+            // City uplight: the second light source of the night. The glow
+            // mip under the sample at a footprint of its own height (the
+            // solid-angle average of the city it actually sees), times the
+            // two-stream transmittance of the cloud below, delivered like
+            // the ambient fill. Replaces the daytime surface bounce, which
+            // is gated off under CITY just below.
+            if (CITY) {
+                let up_lod = clamp(
+                    log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
+                    0.0, u.ocean_params.w);
+                let g_raw = max(
+                    city_glow_sample(p.xy, up_lod) - CITY_UPLIGHT_GLOW_BIAS,
+                    0.0);
+                let g_up = g_raw / (CITY_UPLIGHT_GLOW_HALF + g_raw);
+                let tau_dn = city_uplight_probe_tau(p, probe_jitter);
+                let t_dn = exp(-tau_dn * CITY_UPLIGHT_TAU_SCALE);
+                let up = CITY_UPLIGHT_STRENGTH * g_up
+                    * (CITY_UPLIGHT_FLOOR + (1.0 - CITY_UPLIGHT_FLOOR) * t_dn);
+                col = col + transmittance * d_tau * up * air_t
+                            * fill_shape * CITY_UPLIGHT_COLOR;
+            }
+
             // Surface bounce is anchored at physical z=0, not the AABB floor.
-            if (BOUNCE_STRENGTH > 0.0) {
+            if (BOUNCE_STRENGTH > 0.0 && !CITY) {
                 let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
                 var bounce = BOUNCE_STRENGTH * bounce_frac;
                 if (bounce_depth_attenuation > 0.0) {
@@ -2760,12 +3608,28 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    // City for rays that exit or miss the volume without becoming opaque —
+    // the night twin of the far-water fallback above, minus the range clamp
+    // (the city fog has already carried a distant hit onto the haze).
+    if (CITY
+        && !ocean_consumed
+        && transmittance > TRANSMITTANCE_CUTOFF
+        && t_city < 1e29) {
+        col = col + transmittance * city_rgb;
+        transmittance = 0.0;
+    }
+
     if (transmittance > TRANSMITTANCE_CUTOFF) {
-        let sky = sky_radiance(
-            dir, sun,
-            u.sky_horizon.xyz, u.sky_bloom.xyz, u.sky_disc.xyz,
-            u.cloud_sun.w
-        );
+        var sky: vec3<f32>;
+        if (CITY) {
+            sky = night_sky_radiance(dir, sun);
+        } else {
+            sky = sky_radiance(
+                dir, sun,
+                u.sky_horizon.xyz, u.sky_bloom.xyz, u.sky_disc.xyz,
+                u.cloud_sun.w
+            );
+        }
         col = col + transmittance * sky;
     }
     if (!TONE_MAP) {
