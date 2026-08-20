@@ -39,19 +39,30 @@ RESULTS_FILE = Path(__file__).parent / "soar_frame_results.md"
 # by measuring it. The "hold" rows are the top of each tier's hold ladder —
 # High's sampling at the scale that tier is allowed to converge to.
 TIERS = {
+    # light_cache / sky_probe mirror the per-tier lighting methods (Thomas,
+    # 2026-08-20): every tier but Max reads the baked /2 sun-tau cache, and
+    # only Max and High pay for the vertical sky probe. The hold rows sample
+    # like High, so they carry High's methods.
     "high":   {"render_scale": 1.0,   "step_factor": 2.0,
-               "light_step_factor": 2.0,  "max_light_steps": 512},
+               "light_step_factor": 2.0,  "max_light_steps": 512,
+               "light_cache": True, "sky_probe": True},
     "medium": {"render_scale": 0.70,  "step_factor": 2.5,
-               "light_step_factor": 4.0,  "max_light_steps": 512},
+               "light_step_factor": 4.0,  "max_light_steps": 512,
+               "light_cache": True, "sky_probe": False},
     "low":    {"render_scale": 0.30,  "step_factor": 3.0,
-               "light_step_factor": 8.0,  "max_light_steps": 512},
+               "light_step_factor": 8.0,  "max_light_steps": 512,
+               "light_cache": True, "sky_probe": False},
     "minimal": {"render_scale": 0.125, "step_factor": 4.0,
-               "light_step_factor": 12.0, "max_light_steps": 512},
+               "light_step_factor": 12.0, "max_light_steps": 512,
+               "light_cache": True, "sky_probe": False},
     "hold_low": {"render_scale": 0.50, "step_factor": 2.0,
-               "light_step_factor": 2.0,  "max_light_steps": 512},
+               "light_step_factor": 2.0,  "max_light_steps": 512,
+               "light_cache": True, "sky_probe": True},
     "hold_minimal": {"render_scale": 0.25, "step_factor": 2.0,
-               "light_step_factor": 2.0,  "max_light_steps": 512},
+               "light_step_factor": 2.0,  "max_light_steps": 512,
+               "light_cache": True, "sky_probe": True},
 }
+LIGHT_CACHE_DIVISOR = 2       # mirrors web/soar/constants.js
 
 # The frozen judge views this repo already uses (tests/conftest.py), the
 # three that stress different regimes: thick backlit cloud, sky-dominated
@@ -129,7 +140,9 @@ def build_level_from_demo(demo_dir):
     return level, meta.get("sun")
 
 
-def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=0):
+def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=None):
+    """`light_cache` None follows the tier's own preset at /2; 0 forces the
+    live march; N forces the cache at divisor N everywhere."""
     from cloudyview.soar_host import (
         SceneState, SoarRenderer, ViewState, camera_world_origin,
     )
@@ -153,6 +166,11 @@ def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=0):
     rw = max(1, int(OUTPUT_SIZE[0] * scale + 0.5))
     rh = max(1, int(OUTPUT_SIZE[1] * scale + 0.5))
 
+    if light_cache is None:
+        divisor = LIGHT_CACHE_DIVISOR if tier.get("light_cache") else 0
+    else:
+        divisor = int(light_cache)
+
     rows = []
     baked = False
     for view_name, v in views.items():
@@ -163,16 +181,17 @@ def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=0):
             output_size=OUTPUT_SIZE, render_size=(rw, rh),
             sun_azimuth=v.get("sun_azimuth", SUN["sun_azimuth"]),
             sun_elevation=v.get("sun_elevation", SUN["sun_elevation"]),
-            light_cache=light_cache > 0,
+            light_cache=divisor > 0,
+            sky_probe=tier.get("sky_probe", True),
         )
-        if light_cache > 0 and not baked:
+        if divisor > 0 and not baked:
             # One sun for every view here, so one bake serves them all. Timed
             # and reported, but outside the per-frame numbers: the bake is a
             # per-sun-change cost, not a per-frame one.
             t0 = time.perf_counter()
-            dims = renderer.bake_light_cache(state, view, divisor=light_cache)
+            dims = renderer.bake_light_cache(state, view, divisor=divisor)
             bake_s = time.perf_counter() - t0
-            print(f"  {tier_name:7s} light-cache bake /{light_cache} "
+            print(f"  {tier_name:7s} light-cache bake /{divisor} "
                   f"{dims[0]}x{dims[1]}x{dims[2]}  {bake_s * 1000.0:.0f} ms")
             baked = True
         renderer.render(state, view, frames=warmup)   # warm caches + pipeline
@@ -236,10 +255,11 @@ def main():
     parser.add_argument("--ice", type=Path, default=None,
                         help="separate netCDF file with the ice variable "
                              "(SAM LPT one-variable-per-file style)")
-    parser.add_argument("--light-cache", type=int, default=0,
-                        help="bake the sun-tau cache at this divisor (1, 2, "
-                             "4...) and render with it; 0 = live sun march "
-                             "(default)")
+    parser.add_argument("--light-cache", type=int, default=None,
+                        help="override the per-tier presets: bake the "
+                             "sun-tau cache at this divisor everywhere "
+                             "(1, 2, 4...), or 0 to force the live march; "
+                             "default follows the presets at /2")
     parser.add_argument("--no-zcrop", action="store_true",
                         help="render the file's whole z extent, including the "
                              "empty sky the app would crop away (for A/B)")
@@ -295,8 +315,12 @@ def main():
                 + (f" — {args.label}" if args.label else "") + "\n\n")
         source = (f"demo {args.demo.name}" if args.demo is not None
                   else f"field {args.field.name}")
-        if args.light_cache > 0:
-            source += f" · light-cache /{args.light_cache}"
+        if args.light_cache is None:
+            source += " · per-preset lighting (cache /2, tiered sky probe)"
+        elif args.light_cache > 0:
+            source += f" · light-cache /{args.light_cache} forced"
+        else:
+            source += " · live march forced"
         f.write(f"GPU: {gpu_name()} · output {OUTPUT_SIZE[0]}x{OUTPUT_SIZE[1]}"
                 f" · {args.frames} frames/view"
                 f" · {source}\n\n")

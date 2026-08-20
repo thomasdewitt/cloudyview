@@ -324,9 +324,11 @@ export class Renderer {
       bindGroupLayouts: [this.rayLayout],
     });
     // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
-    // nest's. lightCacheEnabled is the user's toggle; the flag actually
-    // packed into row 23 is enabled AND baked — an unfinished bake reads the
-    // live march, never a half-written cache. See _lightBake.
+    // nest's. Whether it is read is a per-tier preset choice (see
+    // QUALITY_PRESETS.lightCache), with lightCacheMode/skyProbeMode as
+    // whole-session overrides for A/B ("auto" follows the rung; "on"/"off"
+    // force). The flag actually packed into row 23 is wanted AND baked — an
+    // unfinished bake reads the live march, never a half-written cache.
     this._lightTauDummy = device.createTexture({
       label: "soar-light-tau-dummy", size: [1, 1, 1], dimension: "3d",
       format: "r16float",
@@ -337,7 +339,8 @@ export class Renderer {
       { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
-    this.lightCacheEnabled = false;
+    this.lightCacheMode = "auto";
+    this.skyProbeMode = "auto";
     this._lightCacheReady = false;
     this.refreshBindGroup();
 
@@ -522,6 +525,8 @@ export class Renderer {
       stepFactor: preset.stepFactor,
       lightStepFactor: preset.lightStepFactor,
       maxLightSteps: preset.maxLightSteps,
+      lightCache: preset.lightCache,
+      skyProbe: preset.skyProbe,
       costRatio: 1.0,
     }];
     const steps = [
@@ -552,6 +557,11 @@ export class Renderer {
         stepFactor: sampling.stepFactor,
         lightStepFactor: sampling.lightStepFactor,
         maxLightSteps: sampling.maxLightSteps,
+        // The lighting method rides with the sampling tier, so the top rung
+        // — High's sampling on every ladder — parks with cache and probe on
+        // whatever tier flew there.
+        lightCache: sampling.lightCache,
+        skyProbe: sampling.skyProbe,
         // What this rung is expected to cost relative to the one below it.
         // Pixels go as the square of the scale. The view march takes a step
         // every stepFactor voxels, so halving the step factor doubles the
@@ -582,11 +592,15 @@ export class Renderer {
     const changed = rung.scale !== this.renderScale
       || rung.stepFactor !== this.stepFactor
       || rung.lightStepFactor !== this.lightStepFactor
-      || rung.maxLightSteps !== this.maxLightSteps;
+      || rung.maxLightSteps !== this.maxLightSteps
+      || rung.lightCache !== this._rungLightCache
+      || rung.skyProbe !== this._rungSkyProbe;
     this.renderScale = rung.scale;
     this.stepFactor = rung.stepFactor;
     this.lightStepFactor = rung.lightStepFactor;
     this.maxLightSteps = rung.maxLightSteps;
+    this._rungLightCache = rung.lightCache;
+    this._rungSkyProbe = rung.skyProbe;
     if (changed) this._resetAccumulation();
   }
 
@@ -985,12 +999,13 @@ export class Renderer {
     // else in the block depends on subpixel or jitterScale, and nothing here
     // touches row 10's z or w.
     const state = this._sceneState();
-    // The effective flag, not the toggle: an enabled-but-unbaked cache reads
-    // the live march. Row 23 is in the scene key, so completion or a toggle
-    // restarts accumulation by itself.
+    // The effective flags, not the wishes: a wanted-but-unbaked cache reads
+    // the live march. Row 23 is in the scene key, so a bake completing, a
+    // rung switching methods, or an override restarts accumulation itself.
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
-      lightCache: this.lightCacheEnabled && this._lightCacheReady,
+      lightCache: this.lightCacheActive,
+      skyProbe: this.skyProbeActive,
     });
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
@@ -1176,12 +1191,33 @@ export class Renderer {
 
   get lightCacheReady() { return this._lightCacheReady; }
 
+  /** What this frame actually does, mode over rung over readiness. */
+  get lightCacheActive() {
+    const wanted = this.lightCacheMode === "auto"
+      ? this._rungLightCache : this.lightCacheMode === "on";
+    return Boolean(wanted && this._lightCacheReady);
+  }
+
+  get skyProbeActive() {
+    return this.skyProbeMode === "auto"
+      ? Boolean(this._rungSkyProbe) : this.skyProbeMode === "on";
+  }
+
   invalidateLightCache() {
     this._lightBake = null;
     this._lightCacheReady = false;
   }
 
-  startLightBake(view, divisor = K.LIGHT_CACHE_DIVISOR) {
+  /**
+   * Allocate the cache texture, with the allocation itself as the memory
+   * probe: WebGPU exposes no free-VRAM query, so the only honest test for
+   * "does the cache fit next to this volume" is to ask for it and listen on
+   * an out-of-memory error scope. Throws a plain-language error when it
+   * does not fit — the loader treats that like any other GPU-OOM and
+   * rejects the field, rather than silently degrading (Thomas, 2026-08-20).
+   * Same-size reallocation is skipped, so sun re-bakes never re-probe.
+   */
+  async allocateLightCache(divisor = K.LIGHT_CACHE_DIVISOR) {
     const shape = this.scene.shape;          // [nx, ny, nz], field axes
     if (!shape) {
       throw new Error("the scene carries no shape; cannot size the cache.");
@@ -1190,14 +1226,39 @@ export class Renderer {
     const cx = Math.max(1, Math.ceil(nx / divisor));
     const cy = Math.max(1, Math.ceil(ny / divisor));
     const cz = Math.max(1, Math.ceil(nz / divisor));
-    this._lightCacheReady = false;
-    this._lightTauTex?.destroy();
-    this._lightTauTex = this.device.createTexture({
+    const d = this._lightCacheDims;
+    if (this._lightTauTex && d && d.cx === cx && d.cy === cy && d.cz === cz) {
+      return;
+    }
+    this.device.pushErrorScope("out-of-memory");
+    const tex = this.device.createTexture({
       label: "soar-light-tau", size: [cz, cy, cx], dimension: "3d",
       format: "r16float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    const oom = await this.device.popErrorScope();
+    if (oom) {
+      tex.destroy();
+      const mb = (cx * cy * cz * 2 / 2 ** 20).toFixed(0);
+      const err = new Error(
+        `This GPU cannot hold the sun-shadow cache (${mb} MB at 1/` +
+        `${divisor} resolution) alongside the volume.`);
+      err.advice = "A smaller field, or more GPU memory, would open.";
+      throw err;
+    }
+    this._lightCacheReady = false;
+    this._lightTauTex?.destroy();
+    this._lightTauTex = tex;
+    this._lightCacheDims = { cx, cy, cz };
     this.refreshBindGroup();
+  }
+
+  startLightBake(view) {
+    if (!this._lightTauTex || !this._lightCacheDims) {
+      throw new Error("allocateLightCache() must succeed before a bake.");
+    }
+    const { cx, cy, cz } = this._lightCacheDims;
+    this._lightCacheReady = false;
     this._bakeUniformBuf ??= this.device.createBuffer({
       label: "soar-bake-uniforms", size: K.UNIFORM_NBYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,

@@ -140,8 +140,6 @@ export class Viewer {
     // rAF delta per marched camera-moving frame. See the GOVERNOR_* block
     // in constants.js for the whole argument.
     this._governor = null;
-    // The vertical sky-visibility march (J toggles it; see toggleSkyProbe).
-    this.skyProbeEnabled = true;
 
     // The loop sleeps on a converged view (see _frame) and only these three
     // fields say so. `_sleeping` means no rAF is pending and only _wake can
@@ -392,6 +390,14 @@ export class Viewer {
       this._loadNotes = null;
       this._loadNotesUntil = 0;
     }
+
+    // The sun-shadow cache is a standing resource now — every tier but Max
+    // reads it — so it is allocated HERE, where failing is still a clean
+    // load rejection: the allocation is the memory probe (WebGPU has no
+    // free-VRAM query), and a field whose cache does not fit fails like any
+    // other GPU-OOM instead of degrading silently.
+    await this.renderer.allocateLightCache();
+    this.renderer.startLightBake(this._viewKwargs());
 
     this._beginAutoTier();
   }
@@ -1103,48 +1109,48 @@ export class Viewer {
     }
     // The baked sun-tau cache is a function of the sun; while it re-bakes
     // the march runs live, so dragging the sun is correct throughout and
-    // merely slower until the fresh cache lands.
-    if (this.renderer.lightCacheEnabled || this.renderer.lightBakePending) {
-      this.renderer.invalidateLightCache();
-      if (this.renderer.lightCacheEnabled) {
-        this.renderer.startLightBake(this._viewKwargs());
-      }
-    }
+    // merely slower until the fresh cache lands. The texture is reused, so
+    // this never re-risks the load-time memory probe.
+    this.renderer.invalidateLightCache();
+    this.renderer.startLightBake(this._viewKwargs());
     this._wake("sun");
   }
 
   /**
-   * The sky-probe toggle (J): the vertical sky-visibility march that feeds
-   * the skylight fill, the directional AO and the deep-shadow gates. Off,
-   * every consumer sees a fully open sky and buried samples brighten. A
-   * cost/look toggle while the per-tier fate of these marches is decided —
-   * same spirit as K.
+   * The sky-probe override (J): the per-tier presets decide who pays for
+   * the vertical sky-visibility march (Max and High); J cycles a session
+   * override — per preset, forced on, forced off — for judging the look and
+   * the cost anywhere.
    */
   toggleSkyProbe() {
-    this.skyProbeEnabled = !(this.skyProbeEnabled ?? true);
-    this.renderer.resetAccumulation();
-    this.ui.say(this.skyProbeEnabled
-      ? "Sky probe on — measured sky visibility in shadow."
-      : "Sky probe off — shadowed samples assume open sky.", 4);
+    const r = this.renderer;
+    const next = { auto: "on", on: "off", off: "auto" };
+    r.skyProbeMode = next[r.skyProbeMode];
+    r.resetAccumulation();
+    this.ui.say({
+      auto: "Sky probe: per preset (Max and High).",
+      on: "Sky probe forced on — measured sky visibility everywhere.",
+      off: "Sky probe forced off — shadowed samples assume open sky.",
+    }[r.skyProbeMode], 4);
     this._wake("sky probe");
   }
 
   /**
-   * The sun-tau cache toggle (K): bake sun optical depth once per sun
-   * position and read it per sample, instead of marching to the sun from
-   * every cloud sample of every frame. A prototype behind a toggle while
-   * its speed/look trade is being judged — see raymarch.wgsl fs_bake_light.
+   * The sun-tau cache override (K): the per-tier presets decide who reads
+   * the cache (every tier but Max); K cycles the same session override as J
+   * — per preset, forced on, forced off. The cache itself is always kept
+   * baked, so forcing is instant.
    */
   toggleLightCache() {
     const r = this.renderer;
-    r.lightCacheEnabled = !r.lightCacheEnabled;
-    if (r.lightCacheEnabled && !r.lightCacheReady && !r.lightBakePending) {
-      r.startLightBake(this._viewKwargs());
-    }
+    const next = { auto: "on", on: "off", off: "auto" };
+    r.lightCacheMode = next[r.lightCacheMode];
     r.resetAccumulation();
-    this.ui.say(r.lightCacheEnabled
-      ? "Light cache: baking… reads switch over when it completes."
-      : "Light cache off — live sun march.", 4);
+    this.ui.say({
+      auto: "Light cache: per preset (every tier but Max).",
+      on: "Light cache forced on.",
+      off: "Light cache forced off — live sun march.",
+    }[r.lightCacheMode], 4);
     this._wake("light cache");
   }
 
@@ -2050,7 +2056,6 @@ export class Viewer {
       hazeHeightDependent: this.hazeHeightDependent,
       lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * lodStrength,
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
-      skyProbe: this.skyProbeEnabled,
       frameIndex: this.frameIndex,
     };
   }

@@ -370,18 +370,31 @@ export const QUALITY_PRESETS = {
   // frames instead; Max pays for the noise up front so that a frame is clean
   // while it is still moving. See drawFrame for why that is eight separate
   // submissions rather than one eight-times-longer pass.
+  //
+  // `lightCache` and `skyProbe` are per-tier lighting method choices
+  // (Thomas, 2026-08-20): every tier but Max reads the baked sun-tau cache
+  // instead of marching to the sun per sample, and only Max and High pay
+  // for the vertical sky probe. Because a hold ladder's top rung samples
+  // like High, a parked still gets cache-plus-probe on every tier — the
+  // studied picture stays tier-independent — and the offline capture paths
+  // force High, so stills and video carry the same treatment. Only Max is
+  // the fully live march.
   max:    { name: "max",    label: "Max",    renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
+            lightCache: false, skyProbe: true },
   high:   { name: "high",   label: "High",   renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 1,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
+            lightCache: true, skyProbe: true },
   medium: { name: "medium", label: "Medium", renderScale: 0.70,
             stepFactor: 2.5, lightStepFactor: 4.0, sppPerFrame: 1,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
+            lightCache: true, skyProbe: false },
   low:    { name: "low",    label: "Low",    renderScale: 0.30,
             stepFactor: 3.0, lightStepFactor: 8.0, sppPerFrame: 1,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
+            lightCache: true, skyProbe: false },
   // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
   // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
   // an eighth is four times fewer pixels than a quarter, which brings that
@@ -390,7 +403,8 @@ export const QUALITY_PRESETS = {
   // machines it used to insult as "Potato".
   minimal: { name: "minimal", label: "Minimal",
             renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
-            sppPerFrame: 1, maxLightSteps: DEFAULT_MAX_LIGHT_STEPS },
+            sppPerFrame: 1, maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
+            lightCache: true, skyProbe: false },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // Cheapest first. This is the order the startup probe walks, and the order

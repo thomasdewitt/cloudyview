@@ -74,6 +74,10 @@ export function beginOfflineRender(renderer) {
                   tier: renderer.qualityTier };
   renderer.setQualityTier("high");
   renderer.setRenderScale(1.0);
+  // High reads the sun-tau cache, so a capture must not race a half-done
+  // bake: the frames before completion would light differently from the
+  // frames after. Finish it here — the capture already owns the GPU.
+  while (renderer.lightBakePending) renderer.stepLightBake(64);
   renderer.resetAccumulation();
   return saved;
 }

@@ -646,8 +646,8 @@ export class UI {
       ["B", "flyer — paper dart, swift, off"],
       ["M", "minimap"],
       ["R", "record a flight track"],
-      ["K", "light cache — baked sun shadows (experimental)"],
-      ["J", "sky probe — measured sky visibility in shadow (experimental)"],
+      ["K", "light cache override — per preset, on, off"],
+      ["J", "sky probe override — per preset, on, off"],
       ["F12", "screenshot"],
     ]);
     m.append(el("div", "divider"));
