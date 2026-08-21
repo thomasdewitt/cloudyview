@@ -146,6 +146,20 @@ def main(argv=None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
+    # One render at a time across every harness process: several component
+    # agents iterate on this GPU concurrently — while Thomas flies on it —
+    # and unserialized they pile up into contention that stutters the flight
+    # and poisons every timing number. The lock queues harness runs; the
+    # flight cannot take the lock, so timings measured here are still only
+    # trustworthy when nobody is flying.
+    import fcntl
+    lock_file = open("/tmp/soar-harness-gpu.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("  (waiting for the GPU — another harness run is rendering…)")
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
     print(f"Field: {field_path}")
     level = build_level(field_path, verbose=True)
     bmin, bmax = level.bmin, level.bmax
