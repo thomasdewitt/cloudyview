@@ -42,6 +42,11 @@ writing — so components compose without their authors coordinating.
    Cloudpunk we have a real ground: street-level life and ground cars
    coexist with flying ones.
 
+   **Detail calibration (Thomas, and it applies to ALL detail, not just
+   vehicles): wiper-blades-level, not tire-brand-name-level.** Distinct
+   functional features — seams, housings, fittings, hardware — never
+   micro-text, logos, or ornament below the functional scale.
+
 ## What the core gives you
 
 Read raymarch.wgsl's city section. You may CALL any core `city_*` /
@@ -108,7 +113,10 @@ Signatures (the composer checks these by compiling):
 
 Props that the camera can get close to (vehicles, street furniture) should
 NOT be bare boxes — Thomas: the micro details should be *very highly
-detailed*, and the budget genuinely allows it. The pattern:
+detailed*, and the budget genuinely allows it. The calibration (his):
+**wiper-blades-level detail, not tire-brand-name-level** — distinct
+functional features (blades, door seams, intakes, antennae, light
+housings, panel lines), no micro-text or logos. The pattern:
 
 1. Keep one cheap axis-aligned **bounding box** per prop for the DDA
    (`city_box_hit`). This is the only cost the wide scene ever pays.
