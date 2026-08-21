@@ -18,6 +18,14 @@
     "shade": "cc_aircars_shade"
    },
    "enabled": true
+  },
+  {
+   "file": "facadeworks.wgsl",
+   "name": "facadeworks",
+   "hooks": {
+    "facade": "cc_facadeworks_detail"
+   },
+   "enabled": true
   }
  ]
 }
