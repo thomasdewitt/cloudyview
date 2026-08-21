@@ -1337,6 +1337,17 @@ export class Viewer {
    * How coarsely the far field is stepped, as a multiple of the tuned angular
    * LOD. Cheap distance, and it degrades along the grain of the look.
    */
+  /**
+   * What a capture marches at: the FINER of the live slider and the capture
+   * default. The default exists so a still never inherits a coarse march
+   * chosen to keep flight smooth; a slider set finer than it (the max tier
+   * bottoms out at a quarter pixel now) is a request the capture should
+   * honor, not sand off (Thomas, 2026-08-20).
+   */
+  _captureLodStrength() {
+    return Math.min(this.lodStrength, K.DEFAULT_LOD_STRENGTH);
+  }
+
   setLodStrength(strength, { byHand = true } = {}) {
     const [lo, hi] = K.LOD_STRENGTH_LIMITS;
     if (!(strength >= lo && strength <= hi)) {
@@ -1791,7 +1802,7 @@ export class Viewer {
         const overlays = this._offlineOverlays(pose, size, 1.0 / this.videoFps);
         await renderAccumulated(
           this.renderer, target.view, size,
-          { ...this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }),
+          { ...this._viewKwargs({ lodStrength: this._captureLodStrength() }),
             camera: pose, frameIndex: i * 1024 },
           framesPerVideoFrame, overlays);
         await writer.addFrame(
@@ -1927,7 +1938,7 @@ export class Viewer {
       // nests, wrap and image controls included. At the capture's LOD rather
       // than the live view's, for the same reason.
       reproduction_command: this.witnessCommand(
-        { lodStrength: K.DEFAULT_LOD_STRENGTH }),
+        { lodStrength: this._captureLodStrength() }),
     };
   }
 
@@ -1961,7 +1972,7 @@ export class Viewer {
     try {
       const image = await renderStill(
         this.device, this.renderer,
-        this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }), size,
+        this._viewKwargs({ lodStrength: this._captureLodStrength() }), size,
         this.captureStillTier, stillOverlays,
         (fraction) => this.ui.showProgress(
           `Rendering a ${size[0]}x${size[1]} still…`, fraction));
