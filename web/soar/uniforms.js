@@ -231,9 +231,17 @@ export function packUniforms(state, view) {
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
   row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
        oceanSkyShadowFloor, contrast);
+  // The view-step angle floors at the render's own pixel angle: below it a
+  // finer march buys sub-pixel steps nobody can see, so the slider's bottom
+  // IS pixel-matched, at any fov and resolution (Thomas, 2026-08-20). An
+  // exact 0 stays 0 — that is the "LOD off, fixed dt" sentinel, distinct
+  // from "as fine as makes sense", and no slider reaches it.
+  const pixelTan = 2.0 * tanHalfFov / w;
+  let viewStepTan = Math.tan(viewStepLodDegrees * DEG);
+  if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, pixelTan);
   row(20, periodic ? 1.0 : 0.0,
        Math.tan(lightMarchLodDegrees * DEG),
-       Math.tan(viewStepLodDegrees * DEG),
+       viewStepTan,
        toneMapGamma);
   if (nested) {
     row(21, nestBmin[0], nestBmin[1], nestBmin[2], dtViewNest);
