@@ -2049,8 +2049,8 @@ const CITY_WIN_LOD_FULL: f32 = 6.5;
 // Streets.
 const CITY_LAMP_SPACING: f32 = 26.0;
 const CITY_LAMP_OFFSET: f32 = 2.5;   // lamp line inset from the block edge
-const CITY_LAMP_SIGMA: f32 = 4.5;    // light-pool radius on the asphalt
-const CITY_LAMP_RADIANCE: f32 = 0.7;
+const CITY_LAMP_SIGMA: f32 = 3.2;    // light-pool radius on the asphalt
+const CITY_LAMP_RADIANCE: f32 = 0.55;
 const CITY_LAMP_COLOR: vec3<f32> = vec3<f32>(1.0, 0.42, 0.12); // sodium
 // Mean lamp-pool coverage of the street band: 2*pi*sigma^2 over one lamp's
 // street area (spacing * ~2*(half+offset)), times two lamp lines.
@@ -2170,6 +2170,21 @@ fn city_rand4(s: vec2<u32>) -> vec4<f32> {
 fn city_is_avenue(k: i32) -> bool {
     return ((k % CITY_AVENUE_PERIOD) + CITY_AVENUE_PERIOD)
            % CITY_AVENUE_PERIOD == 0;
+}
+
+// The lamp line's inset from the CELL BOUNDARY on line k. Lamps stand
+// CITY_LAMP_OFFSET off the KERB — 3.5 m from the boundary of a 12 m minor
+// street, 13.5 m on a 32 m avenue. The old fixed 2.5 m inset measured from
+// the boundary, which on an avenue is the road's CENTERLINE: both lamp
+// lines hugged the median and floodlit the middle of every downtown
+// avenue into clipping (found via streetlife's report, proven by
+// ablation + a numpy rebuild of the pool field, 2026-08-20). streetlife's
+// poles and parking share this function, so light, hardware and cars
+// move together.
+fn city_lamp_inset(k: i32) -> f32 {
+    return CITY_STREET_HALF
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(k))
+        - CITY_LAMP_OFFSET;
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
@@ -2846,9 +2861,10 @@ fn city_street_pools(p: vec2<f32>) -> f32 {
     // Nearest x-boundary (a street running along y).
     let bx = round(p.x / cell) * cell;
     let bxi = i32(round(p.x / cell));
-    let ax = select(1.0, 3.0, city_is_avenue(bxi));
+    let ax = select(1.0, 1.6, city_is_avenue(bxi));
+    let inx = city_lamp_inset(bxi);
     for (var s: i32 = 0; s < 2; s = s + 1) {
-        let lx = bx + select(-CITY_LAMP_OFFSET, CITY_LAMP_OFFSET, s == 1);
+        let lx = bx + select(-inx, inx, s == 1);
         let ly = round(p.y / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
         let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
         pool = pool + ax * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
@@ -2856,9 +2872,10 @@ fn city_street_pools(p: vec2<f32>) -> f32 {
     // Nearest y-boundary (a street running along x).
     let by = round(p.y / cell) * cell;
     let byi = i32(round(p.y / cell));
-    let ay = select(1.0, 3.0, city_is_avenue(byi));
+    let ay = select(1.0, 1.6, city_is_avenue(byi));
+    let iny = city_lamp_inset(byi);
     for (var s: i32 = 0; s < 2; s = s + 1) {
-        let ly = by + select(-CITY_LAMP_OFFSET, CITY_LAMP_OFFSET, s == 1);
+        let ly = by + select(-iny, iny, s == 1);
         let lx = round(p.x / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
         let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
         pool = pool + ay * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
@@ -3056,13 +3073,17 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
     var street = 0.0;
     if (!inside_plot || !cc.built) {
         let district = city_glow_sample(h.pos.xy, 2.0);
-        let street_scale = 0.20 + 2.2 * smoothstep(0.02, 0.45, district);
+        let street_scale = 0.20 + 1.3 * smoothstep(0.02, 0.45, district);
         let pool_blend = smoothstep(
             CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
         let pools = mix(
             city_street_pools(h.pos.xy), CITY_STREET_MEAN_POOL, pool_blend);
+        // Soft knee: a downtown avenue's pools ran to radiance ~10 and
+        // clipped to featureless white (streetlife's report). The knee
+        // passes the dim outskirts untouched and compresses only the top.
+        let raw_street = CITY_LAMP_RADIANCE * street_scale * pools;
         street = select(0.0,
-                        CITY_LAMP_RADIANCE * street_scale * pools,
+                        raw_street / (1.0 + raw_street * 0.30),
                         !inside_plot);
     }
     return CITY_LAMP_COLOR * street
@@ -7456,6 +7477,2419 @@ fn cc_skybridges_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
            + 0.02 * fill;
 }
 
+// --- component: streetlife (streetlife.wgsl) ---
+// streetlife — the city at eye level: the poles the light already comes
+// from, the cars parked under them, and the bins behind those.
+//
+// The core already lights the asphalt: city_street_pools puts a sodium pool
+// every CITY_LAMP_SPACING (26 m) along two lines set CITY_LAMP_OFFSET (2.5 m)
+// in from each block edge, three times brighter on avenues. Those pools had
+// no lamps over them. This component puts the lamps there — on exactly that
+// lattice, derived from the same arithmetic, so the light and its source
+// cannot drift apart. Everything else here is what stands in that light.
+//
+// LAYOUT. A cell owns four KERBS, one per plot edge. Each kerb carries, in
+// its own across-coordinate:
+//   * the lamp line, at the block edge +- CITY_LAMP_OFFSET — the core's
+//     lattice, not a new one. A mast at every lattice point inside the cell,
+//     with the luminaire arm reaching AWAY from the plot, out over the
+//     roadway, which is where a real one hangs.
+//   * the parking line, CAR_PARK_OFF in from the plot edge (the kerb proper).
+//     Slots on a 7 m lattice in world space, so a run of cars lines up
+//     across cell boundaries; ~35% occupied, scaled by the cascade the way
+//     the streetlights and the air traffic are, and ~10% of the rest hold a
+//     dumpster shoved against the wall instead.
+// Every prop lives strictly inside the cell that draws it, because the DDA
+// tests a cell only from the side it enters (the rule aircars states). For
+// merged 2x2 superblocks the plot edge can fall in a sibling's column; that
+// kerb simply has no parking, and the sibling whose column does contain it
+// draws those cars.
+//
+// THE CARS ARE THE POINT. A parked car is the one object in this city the
+// camera can stand next to, and boxes with circles on them would say so
+// immediately. Inside its bounding box, at fp < CAR_SDF_FP, a car is
+// sphere-traced from a real SDF: a tapering lifting-body hull, smooth-min'd
+// to a cabin bubble set back from the nose, wheels in cut arches (or a hover
+// plenum and intake scallops, 38% of them), mirror stalks, wiper blades
+// across the base of the windshield, and lamp housings and a nose intake cut
+// as recesses. Detail to wiper-blade level and no further (Thomas,
+// 2026-08-20): door seams, shut lines and a rocker crease are SHADING bands
+// in the hull's own frame, which is where panel lines belong — no badges, no
+// text, nothing that would be noise at 10 m.
+//
+// Beyond CAR_SDF_FP the hull falls back to two axis-aligned boxes cut to the
+// same silhouette (hull + greenhouse); the 5-degree yaw jitter goes with it,
+// which at that footprint is a sub-pixel corner.
+//
+// LIGHT. One lamp, straight overhead, is the entire lighting situation on a
+// night street, so the shading is built around it: the incident estimate is
+// the core's own asphalt formula (pool x district scale x CITY_LAMP_RADIANCE
+// x CITY_LAMP_COLOR) and the direction is the vector to the nearest lamp
+// HEAD, recovered from the same lattice. Curvature reads through the
+// specular lobe sliding along the hull shoulder — Lambert alone on a dark
+// paint at night is nearly flat, and the glint is what says "this surface is
+// round". 30% of cars carry an underglow strip; the hue draw is aircars'
+// 60/25/15 cyan/magenta/amber, so ground and air read as one traffic system.
+//
+// COST. In order, each gate cheaper than the one it protects:
+//   1. the segment's z range against 12 m — no hash, two multiply-adds, and
+//      it rejects the whole hook for every pixel looking at a facade, a roof,
+//      a cloud or the sky, which is most of them;
+//   2. one slab test per kerb (4), spanning lamp line to parking line;
+//   3. inside a live kerb, a second z test that drops the ground props
+//      (everything under 1.7 m) for a segment that only passes through the
+//      lamp heads;
+//   4. the along-range of the segment picks at most 2 pole slots and 4
+//      parking slots, walked from the near end with an early break, each one
+//      hash-gated before any box test;
+//   5. the SDF runs only for a ray that has already entered a car's bounding
+//      box at fp < 0.5 m/px.
+// Worst case for a ray running the length of a kerb at eye level is 1 slab +
+// 2 poles x 2 boxes + 4 slots x 1 box = 9 box tests for that kerb; the three
+// other kerbs of the same cell are crossed, not followed, and cost 1-3 each.
+// t1 is narrowed by every hit found so far, so later kerbs see shorter
+// segments than earlier ones.
+
+// --- the lamp lattice (the core's, restated) --------------------------------
+const cc_streetlife_Z_GATE: f32 = 12.0;   // whole-hook z reject
+const cc_streetlife_POLE_H: f32 = 9.0;    // mast top
+const cc_streetlife_POLE_TOP: f32 = 9.15; // slab ceiling
+const cc_streetlife_MAST_R: f32 = 0.085;
+const cc_streetlife_ARM_Z: f32 = 8.72;    // the arm's own centre height
+const cc_streetlife_ARM_HZ: f32 = 0.065;
+const cc_streetlife_ARM_REACH: f32 = 1.35;
+const cc_streetlife_HEAD_Z: f32 = 8.56;   // luminaire centre
+const cc_streetlife_HEAD_HZ: f32 = 0.115;
+const cc_streetlife_HEAD_HA: f32 = 0.17;  // half-extent along the kerb
+const cc_streetlife_HEAD_HC: f32 = 0.40;  // half-extent along the arm
+// A sodium luminaire seen from underneath is the brightest thing on the
+// street by a wide margin — an order over the pool it throws (0.7) and twice
+// a lit window (3.5). The housing above it is opaque and near-black, which
+// is what stops a row of lamps reading as floating lozenges.
+const cc_streetlife_HEAD_RAD: f32 = 6.0;
+const cc_streetlife_HEAD_COLOR: vec3<f32> = vec3<f32>(1.0, 0.52, 0.18);
+// The housing is a box, so the lens has to be found in the shader: the lower
+// lip of each side face is the glass, the rest of the side and the whole top
+// are painted aluminium. At a uniform 0.34 of RAD every side face clipped to
+// white along with the underside, and a luminaire whose cowl is as bright as
+// its lamp is the floating lozenge this was supposed to avoid.
+const cc_streetlife_HEAD_SIDE: f32 = 0.62;  // lens lip, fraction of RAD
+const cc_streetlife_HEAD_COWL: f32 = 0.030; // painted housing, same units
+const cc_streetlife_HEAD_LIP: f32 = 0.072;  // how far the lens runs up (m)
+// Galvanised steel, seen at night, lit by a lamp standing on its own axis.
+// The Lambert term is deliberately tiny and the grazing edge does the work:
+// at MAST_ALB 0.10 the first pass rendered a flat gold bar that read as a
+// wooden telegraph pole, because a diffuse fraction of a clipped sodium road
+// is a clipped sodium pole. A dark face between two bright edges is both the
+// correct photometry for a cylinder under an axial source and the only thing
+// that says "round" at this radius (see cc_streetlife_pole_shade).
+const cc_streetlife_MAST_FILL: f32 = 0.06;
+const cc_streetlife_MAST_ALB: f32 = 0.026;
+const cc_streetlife_MAST_EDGE: f32 = 0.105;
+
+// --- parking ----------------------------------------------------------------
+// The parking line is set from the LAMP line, not from the plot edge, and
+// that is a correction the first renders forced. Parking at the kerb is where
+// cars belong on a minor street — the kerb is 3.5 m outboard of the lamps and
+// well inside the pool — but an avenue's plot edge is 16 m out (the avenue
+// gets CITY_AVENUE_EXTRA on both sides while its lamp lines stay 2.5 m off
+// the block edge, so the lamps are effectively a median). Cars parked at an
+// avenue kerb sit 12 m from the nearest lamp, where the pool has fallen by
+// e^-3.5, and rendered as invisible black shapes on black tarmac. So: a lane
+// PARK_LANE outboard of the lamps, pulled in to the kerb whenever the kerb is
+// closer than that. Light and source agree by construction, and the kerb slab
+// gets narrow enough to be a cheap reject as a side effect.
+const cc_streetlife_PARK_LANE: f32 = 3.2;
+const cc_streetlife_PARK_KERB: f32 = 0.25;  // clearance from the plot edge
+const cc_streetlife_SLOT: f32 = 7.0;
+const cc_streetlife_OCC: f32 = 0.35;
+const cc_streetlife_BIN_CUT: f32 = 0.945;  // draws above this are dumpsters
+// Dumpsters belong at block corners — the alley mouth, the service door —
+// far more than they belong in a parking bay, so most of them are placed
+// there instead (cc_streetlife_corner_prop) and the kerb keeps only the
+// occasional one. A quarter of the corners of a built plot carry one.
+const cc_streetlife_CORNER_BIN: f32 = 0.25;
+const cc_streetlife_DENS_LO: f32 = 0.55;
+const cc_streetlife_DENS_HI: f32 = 1.35;
+const cc_streetlife_DENS_START: f32 = 0.005;
+const cc_streetlife_DENS_FULL: f32 = 0.070;
+const cc_streetlife_YAW: f32 = 0.0873;     // +- 5 degrees
+const cc_streetlife_ALONG_JIT: f32 = 0.60;
+const cc_streetlife_LAT_JIT: f32 = 0.16;
+
+// Bounding box, in the car's own (along, across) frame. Wide enough for the
+// hull yawed 5 degrees and for the mirror stalks; nothing but the reject test
+// ever sees it, because the far silhouette is the two proxy boxes below.
+const cc_streetlife_BB_A: f32 = 2.60;
+const cc_streetlife_BB_C: f32 = 1.36;
+const cc_streetlife_BB_Z: f32 = 1.74;
+
+// --- the hull ---------------------------------------------------------------
+const cc_streetlife_HL: f32 = 2.32;    // hull half-length
+const cc_streetlife_HW: f32 = 0.98;    // hull half-width, at its widest
+const cc_streetlife_SILL: f32 = 0.26;  // hull underside
+const cc_streetlife_BELT: f32 = 0.94;  // shoulder line
+const cc_streetlife_ROOF: f32 = 1.46;
+const cc_streetlife_HOVER_CUT: f32 = 0.65;  // draws above this hover
+const cc_streetlife_HOVER_LIFT: f32 = 0.14;
+const cc_streetlife_AXLE_X: f32 = 1.46;
+const cc_streetlife_AXLE_Z: f32 = 0.35;
+const cc_streetlife_TRACK: f32 = 0.82;   // wheel centreplane, |y|
+const cc_streetlife_TYRE_R: f32 = 0.34;
+const cc_streetlife_TYRE_HW: f32 = 0.135; // half the tread width
+const cc_streetlife_ARCH_R: f32 = 0.43;
+const cc_streetlife_ARCH_HW: f32 = 0.31;  // the arch cuts only the flank skin
+const cc_streetlife_ARCH_Z: f32 = 0.29;
+const cc_streetlife_RIM_R: f32 = 0.255;
+
+// The SDF is approximate — the plan-form taper and the falling deck make the
+// hull's half-extents functions of x, so |grad| runs above 1 near the nose.
+// The march steps this fraction of the reported distance, which is what keeps
+// it from stepping through the skin.
+const cc_streetlife_STEP: f32 = 0.72;
+// The march budget, and the reason it is not a compile-time constant. A
+// literal bound here is unrolled by the driver, and because cell_props is
+// inlined into a 512-iteration DDA loop the unrolled body costs occupancy on
+// every city pixel in the frame — including the ones nowhere near a car. The
+// measurement: 32 versus 12 iterations moved the `aerial` view, which never
+// admits a single car to the SDF at all, from 0.52 s to 0.29 s. Selecting
+// between two counts at run time keeps the loop rolled, and doubles as
+// honest LOD: a car ten pixels across does not need a 34-step trace.
+const cc_streetlife_ITERS: i32 = 34;
+const cc_streetlife_ITERS_FAR: i32 = 16;
+const cc_streetlife_ITER_FP: f32 = 0.09;
+
+// --- LOD --------------------------------------------------------------------
+// Below this footprint a car is sphere-traced; above it, two boxes. 0.5 m/px
+// puts a car at ten pixels, which is where a curved shoulder stops being a
+// thing you can see and starts being a thing you can only infer.
+const cc_streetlife_CAR_SDF_FP: f32 = 0.50;
+const cc_streetlife_FINE_FP: f32 = 0.10;   // wipers, and sharp seams
+// Where cars and poles stop being traced at all, and where their emission
+// has already ramped to zero so nothing pops. Set by cost, not by the eye:
+// at fp 2.6 a car is under two pixels long and the sodium road behind it is
+// what that pixel was going to be anyway, while every cell inside
+// CITY_PROP_RANGE pays for the test. A pole is thinner but taller, and its
+// luminaire is the brightest thing on the street, so it runs further.
+const cc_streetlife_CAR_FAR_FP: f32 = 2.6;
+const cc_streetlife_CAR_FAR_FADE: f32 = 1.6;
+const cc_streetlife_POLE_FAR_FP: f32 = 4.0;
+const cc_streetlife_POLE_FAR_FADE: f32 = 2.4;
+// Seams, shut lines and lamp dots hand over to their own means here; past
+// LOD_FULL a car's paint is one colour and its lamp is that lamp's mean over
+// the face it sits on, which is what a long lens does to a parked car.
+const cc_streetlife_DETAIL_LOD: vec2<f32> = vec2<f32>(0.06, 0.26);
+const cc_streetlife_LAMP_LOD: vec2<f32> = vec2<f32>(0.10, 0.45);
+// The population edge at CITY_PROP_RANGE, approached rather than stepped.
+const cc_streetlife_FADE_START: f32 = 0.92;
+
+// --- car light --------------------------------------------------------------
+const cc_streetlife_GLOW_FRAC: f32 = 0.32; // cars carrying an underglow
+const cc_streetlife_GLOW_RAD: f32 = 1.1;
+const cc_streetlife_LAMP_RAD: f32 = 1.9;
+// cc_streetlife_pool returns the core's own asphalt RADIANCE — what city_shade
+// emits for the road, with no albedo applied at all. Everything here is a
+// fraction of THAT, not of an irradiance, and the fractions are small on
+// purpose. A downtown avenue's pool runs near radiance 10, and at exposure 6
+// under a Reinhard with white point 15 anything past ~2.5 is white: the road
+// under these cars is already clipped, so the whole readable range for a
+// painted panel is radiance 0.02 to 0.4. The first pass shaded cars at a
+// physical-looking reflectance of the pool and produced pale ceramic
+// bathtubs. Dark cars against a hot sodium road is both the correct
+// photometry and the shot.
+const cc_streetlife_PAINT_GAIN: f32 = 0.10;
+const cc_streetlife_GLOSS: f32 = 1.2;
+const cc_streetlife_SHEEN: f32 = 0.025;
+const cc_streetlife_GLASS_GLOSS: f32 = 4.0;
+const cc_streetlife_GLASS_ROAD: f32 = 0.055;
+const cc_streetlife_ROAD_BOUNCE: f32 = 0.055;
+const cc_streetlife_TYRE_ALB: f32 = 0.0045;
+const cc_streetlife_RIM_ALB: f32 = 0.055;
+const cc_streetlife_BIN_ALB: f32 = 0.10;
+
+// ---------------------------------------------------------------------------
+// SDF primitives
+// ---------------------------------------------------------------------------
+
+fn cc_streetlife_rbox(p: vec3<f32>, b: vec3<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + vec3<f32>(r);
+    return length(max(q, vec3<f32>(0.0)))
+         + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+// Capped cylinder whose axis is y (the car's across direction: wheels, arches
+// and intake scallops all share it).
+fn cc_streetlife_cyl_y(p: vec3<f32>, rad: f32, h: f32) -> f32 {
+    let d = vec2<f32>(length(vec2<f32>(p.x, p.z)) - rad, abs(p.y) - h);
+    return min(max(d.x, d.y), 0.0) + length(max(d, vec2<f32>(0.0)));
+}
+
+fn cc_streetlife_seg(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, rad: f32)
+        -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * t) - rad;
+}
+
+fn cc_streetlife_smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+fn cc_streetlife_smax(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 - 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) + k * h * (1.0 - h);
+}
+
+fn cc_streetlife_miss(ci: vec2<i32>) -> CityHit {
+    return CityHit(false, 1e30, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0),
+                   0, ci);
+}
+
+fn cc_streetlife_nearer(a: CityHit, b: CityHit) -> CityHit {
+    if (b.hit && (!a.hit || b.t < a.t)) {
+        return b;
+    }
+    return a;
+}
+
+// ---------------------------------------------------------------------------
+// The kerb: where a cell's four edges put their lamp line and parking line
+// ---------------------------------------------------------------------------
+
+struct cc_streetlife_Side {
+    ax: i32,          // 0 = the kerb runs along x, 1 = along y
+    lamp_c: f32,      // lamp line, across coordinate
+    park_c: f32,      // parking line, across coordinate
+    plot_sign: f32,   // which way the plot lies from the kerb
+    a_min: f32, a_max: f32,   // the cell's extent along the kerb
+    c_min: f32, c_max: f32,   // the cell's extent across it
+    park_ok: bool,
+}
+
+fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
+        -> cc_streetlife_Side {
+    let cellm = u.ocean_params.x;
+    let cmin = vec2<f32>(ci) * cellm;
+    let cmax = cmin + vec2<f32>(cellm);
+    var s: cc_streetlife_Side;
+    var plot_c: f32;
+    if (side == 0) {          // the plot's -x edge; kerb runs along y
+        s.ax = 1;
+        s.lamp_c = cmin.x + city_lamp_inset(ci.x);
+        plot_c = cc.plot_min.x;
+        s.plot_sign = 1.0;
+    } else if (side == 1) {   // +x edge
+        s.ax = 1;
+        s.lamp_c = cmax.x - city_lamp_inset(ci.x + 1);
+        plot_c = cc.plot_max.x;
+        s.plot_sign = -1.0;
+    } else if (side == 2) {   // -y edge; kerb runs along x
+        s.ax = 0;
+        s.lamp_c = cmin.y + city_lamp_inset(ci.y);
+        plot_c = cc.plot_min.y;
+        s.plot_sign = 1.0;
+    } else {                  // +y edge
+        s.ax = 0;
+        s.lamp_c = cmax.y - city_lamp_inset(ci.y + 1);
+        plot_c = cc.plot_max.y;
+        s.plot_sign = -1.0;
+    }
+    // Outboard of the lamps by PARK_LANE, or hard against the kerb if the
+    // kerb is nearer than that (see the constant's note).
+    let gap = s.plot_sign * (plot_c - s.lamp_c);
+    let off = min(cc_streetlife_PARK_LANE,
+                  gap - cc_streetlife_BB_C - cc_streetlife_PARK_KERB);
+    s.park_c = s.lamp_c + s.plot_sign * off;
+    s.a_min = select(cmin.y, cmin.x, s.ax == 0);
+    s.a_max = select(cmax.y, cmax.x, s.ax == 0);
+    s.c_min = select(cmin.x, cmin.y, s.ax == 0);
+    s.c_max = select(cmax.x, cmax.y, s.ax == 0);
+    // A merged superblock's plot edge can sit in a sibling's column; that
+    // kerb keeps its lamps (they are on the cell's own lattice) and loses its
+    // parking to whichever member owns the ground.
+    s.park_ok = off > 1.6
+             && s.park_c > s.c_min + cc_streetlife_BB_C
+             && s.park_c < s.c_max - cc_streetlife_BB_C;
+    return s;
+}
+
+// The nearest lamp HEAD to a street point, on the core's own lattice: the
+// four candidates city_street_pools sums over, and the one that wins. Used
+// as the light direction for everything this component shades.
+fn cc_streetlife_nearest_lamp(p: vec2<f32>) -> vec3<f32> {
+    let cellm = u.ocean_params.x;
+    let bx = round(p.x / cellm) * cellm;
+    let by = round(p.y / cellm) * cellm;
+    let inx = city_lamp_inset(i32(round(p.x / cellm)));
+    let iny = city_lamp_inset(i32(round(p.y / cellm)));
+    let lx = round(p.x / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+    let ly = round(p.y / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+    var best = vec2<f32>(bx - inx, ly);
+    var bd = 1e30;
+    for (var k: i32 = 0; k < 4; k = k + 1) {
+        var c: vec2<f32>;
+        if (k == 0) {
+            c = vec2<f32>(bx - inx, ly);
+        } else if (k == 1) {
+            c = vec2<f32>(bx + inx, ly);
+        } else if (k == 2) {
+            c = vec2<f32>(lx, by - iny);
+        } else {
+            c = vec2<f32>(lx, by + iny);
+        }
+        let d = dot(c - p, c - p);
+        if (d < bd) {
+            bd = d;
+            best = c;
+        }
+    }
+    return vec3<f32>(best, cc_streetlife_HEAD_Z);
+}
+
+// The core's own asphalt radiance at a street point, reused verbatim as the
+// incident estimate for anything standing on it. Sharing the formula is the
+// point: a car in a pool is exactly as lit as the tarmac it is parked on.
+fn cc_streetlife_pool(p: vec2<f32>) -> vec3<f32> {
+    let district = city_glow_sample(p, 2.0);
+    let scale = 0.20 + 2.2 * smoothstep(0.02, 0.45, district);
+    return CITY_LAMP_COLOR
+         * (CITY_LAMP_RADIANCE * scale * city_street_pools(p));
+}
+
+fn cc_streetlife_fill(p: vec3<f32>) -> vec3<f32> {
+    return CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(p.xy, 3.0));
+}
+
+// ---------------------------------------------------------------------------
+// Placement
+// ---------------------------------------------------------------------------
+
+struct cc_streetlife_Prop {
+    ok: bool,
+    bin: bool,
+    ctr: vec2<f32>,   // ground point under the prop's centre
+    fwd: vec2<f32>,   // the prop's own forward, yaw included
+    rgt: vec2<f32>,
+    r: vec4<f32>,
+}
+
+fn cc_streetlife_no_prop() -> cc_streetlife_Prop {
+    return cc_streetlife_Prop(false, false, vec2<f32>(0.0),
+                              vec2<f32>(1.0, 0.0), vec2<f32>(0.0, -1.0),
+                              vec4<f32>(0.0));
+}
+
+fn cc_streetlife_slot_draw(ci: vec2<i32>, side: i32, j: i32) -> vec4<f32> {
+    return city_rand4(vec2<u32>(
+        bitcast<u32>(ci.x) * 0x9e3779b9u + u32(side) * 0x2545f491u
+            + bitcast<u32>(j) * 0x85ebca6bu + 0x51ed270bu,
+        bitcast<u32>(ci.y) * 0xc2b2ae35u + u32(side) * 0x27d4eb2fu
+            + bitcast<u32>(j) * 0x165667b1u + 0x9e3779b9u));
+}
+
+// Whatever occupies slot `j` of kerb `side` — deterministic in (cell, side,
+// slot) alone, so the shader re-derives a car from its hit position without
+// anything being smuggled through CityHit.
+fn cc_streetlife_prop(ci: vec2<i32>, cc: CityCell, s: cc_streetlife_Side,
+                      side: i32, j: i32) -> cc_streetlife_Prop {
+    if (!s.park_ok) {
+        return cc_streetlife_no_prop();
+    }
+    let r = cc_streetlife_slot_draw(ci, side, j);
+    let dens = mix(cc_streetlife_DENS_LO, cc_streetlife_DENS_HI,
+                   smoothstep(cc_streetlife_DENS_START,
+                              cc_streetlife_DENS_FULL, cc.density));
+    let occ = cc_streetlife_OCC * dens;
+    let bin = r.x > cc_streetlife_BIN_CUT;
+    if (r.x >= occ && !bin) {
+        return cc_streetlife_no_prop();
+    }
+    // Slot centre on the world lattice, so a run of cars lines up across the
+    // cell boundary rather than restarting inside every block.
+    let along = (f32(j) + 0.5) * cc_streetlife_SLOT
+              + (r.y - 0.5) * 2.0 * cc_streetlife_ALONG_JIT;
+    if (along - cc_streetlife_BB_A < s.a_min
+        || along + cc_streetlife_BB_A > s.a_max) {
+        return cc_streetlife_no_prop();
+    }
+    var across = s.park_c + (r.z - 0.5) * 2.0 * cc_streetlife_LAT_JIT;
+    if (bin) {
+        // Bins get shoved against the wall, not left at the kerb.
+        across = s.park_c + s.plot_sign * 0.85;
+    }
+    var base = vec2<f32>(1.0, 0.0);
+    if (s.ax == 1) {
+        base = vec2<f32>(0.0, 1.0);
+    }
+    let perp = vec2<f32>(-base.y, base.x);
+    var fwd = base;
+    if (!bin) {
+        let yaw = (r.w - 0.5) * 2.0 * cc_streetlife_YAW;
+        fwd = base * cos(yaw) + perp * sin(yaw);
+        if (fract(r.y * 17.31) > 0.5) {
+            fwd = -fwd;
+        }
+    }
+    var p: cc_streetlife_Prop;
+    p.ok = true;
+    p.bin = bin;
+    p.ctr = base * along + perp * across;
+    p.fwd = fwd;
+    p.rgt = vec2<f32>(fwd.y, -fwd.x);
+    p.r = r;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// The car SDF
+// ---------------------------------------------------------------------------
+//
+// Local frame: +x forward, +y left, z up from the road surface. Everything
+// symmetric about the centreline is evaluated once on abs(y), and the wheels
+// and lamp housings once on abs(x) too — four wheels for the price of one
+// cylinder.
+
+// Two draws of shape per car: an overall scale, and where the cabin sits
+// fore and aft. Between them a row of parked cars stops being one model
+// repeated — a short car with the cabin back is a coupe, a long one with it
+// forward is a saloon, and the eye reads the difference before it reads any
+// panel line.
+fn cc_streetlife_car_shape(r: vec4<f32>) -> vec2<f32> {
+    return vec2<f32>(0.92 + 0.13 * fract(r.z * 7.71),
+                     -0.30 + (fract(r.w * 11.37) - 0.5) * 0.34);
+}
+
+// Which cars hover. This must NOT be read off r.x, and that it was is the one
+// outright bug the salvaged draft carried: r.x is the OCCUPANCY draw, and a
+// slot holds a car only where r.x < occ — at most 0.47 even downtown — so a
+// hover test of `r.x > 0.62` was unreachable in every cell of the city. Nobody
+// would ever have seen it fail; the plenum, the skirt and the intake scallops
+// simply never ran. An independent draw off the other three components gives
+// the ~35% the file always claimed.
+fn cc_streetlife_is_hover(r: vec4<f32>) -> bool {
+    return fract(r.y * 43.17 + r.z * 7.31 + r.w * 2.53)
+           > cc_streetlife_HOVER_CUT;
+}
+
+fn cc_streetlife_car_sdf(p: vec3<f32>, r: vec4<f32>, fine: bool) -> f32 {
+    let hover = cc_streetlife_is_hover(r);
+    let lift = select(0.0, cc_streetlife_HOVER_LIFT, hover);
+    let sh = cc_streetlife_car_shape(r);
+    let q = vec3<f32>(p.x, p.y, p.z - lift) / sh.x;
+    let cab_c = sh.y;
+    let off = cab_c + 0.30;
+
+    // Plan-form: the hull narrows toward both ends, hard at the very tips.
+    let xn = clamp(q.x / cc_streetlife_HL, -1.0, 1.0);
+    let xn2 = xn * xn;
+    let xn4 = xn2 * xn2;
+    let hw = cc_streetlife_HW * (1.0 - 0.34 * xn4);
+    // Profile: the deck falls away toward the nose and, less, toward the
+    // tail. A flat deck is what makes a box read as a box.
+    let drop = select(0.08, 0.16, xn > 0.0);
+    let deck = cc_streetlife_BELT - drop * xn2;
+    let hc = 0.5 * (deck + cc_streetlife_SILL);
+    let hh = 0.5 * (deck - cc_streetlife_SILL);
+    var d = cc_streetlife_rbox(vec3<f32>(q.x, q.y, q.z - hc),
+                               vec3<f32>(cc_streetlife_HL, hw, hh), 0.22);
+
+    // The greenhouse: inset from the shoulder, set back from the nose, and
+    // blended only just enough to give it a fillet. A soft blend here is what
+    // turned the first pass into a loaf — the shoulder line has to survive.
+    // Rounded hard, this reads as a bubble stuck on the deck rather than as
+    // a cabin: the roof has to be flat enough to be a roof and the side glass
+    // near enough to vertical to be glass.
+    let cx = q.x - cab_c;
+    var cab = cc_streetlife_rbox(
+        vec3<f32>(cx, q.y, q.z - 1.20),
+        vec3<f32>(0.92, 0.74, 0.26), 0.10);
+    // TUMBLEHOME. The side glass leans in toward the roof, so the greenhouse
+    // is a tapered turret rather than a box, and its widest point is the belt
+    // line where it meets the shoulder. Without this the cabin read as a loaf
+    // of bread set on the deck — full-width, vertical-sided, visibly a second
+    // box. One slanted half-space does the whole job; the 0.958 is 1/|grad|,
+    // which keeps the march from stepping through the lean.
+    cab = cc_streetlife_smax(
+        cab, 0.958 * (abs(q.y) - 0.74 + 0.30 * (q.z - 1.02)), 0.07);
+    // Windshield and backlight rake: two half-spaces that take the front and
+    // rear off the greenhouse, so the cabin is a cabin and not a second box.
+    // Cut into the cabin alone — applied to the whole hull the front plane
+    // would take the bonnet with it. The planes are placed to MEET THE BELT,
+    // not to clip a corner: the first pass's intercepts put the start of the
+    // windshield at cx 1.18, outside the cabin box entirely, so the rake took
+    // only the top corner and everything below it stayed the box's own
+    // vertical wall — which is exactly what the renders showed. Now the glass
+    // starts within 5 mm of the shoulder and the roof comes out 1.14 m long
+    // by 1.22 wide, which is a car; the first pass's would have been 0.66 by
+    // 1.22, which is a bubble canopy.
+    cab = cc_streetlife_smax(cab, 0.824 * cx + 0.567 * q.z - 1.339, 0.10);
+    cab = cc_streetlife_smax(cab, -0.745 * cx + 0.667 * q.z - 1.361, 0.10);
+    d = cc_streetlife_smin(d, cab, 0.11);
+
+    // WHEELS AND ARCHES, both mirrored on abs(y) so there are four of them.
+    //
+    // The first pass mirrored only on abs(x) and gave the cylinders a
+    // half-width of 0.86 — wider than the hull's own 0.98 half-width. That is
+    // not four wheels, it is two drums spanning the full track, and the arch
+    // that cut them free was 1.10 wide, which bored a tunnel clean through
+    // the body. From the side the two errors cancelled and it read correctly;
+    // head-on the drum showed under the nose as a hard dark bar with square
+    // ends, wider than the car, and it is visible in every frontal frame the
+    // draft ever produced. Splitting them fixes the frontal read and makes
+    // the arch what an arch actually is: a cut in the outer skin of a flank.
+    let qa = vec3<f32>(abs(q.x) - cc_streetlife_AXLE_X,
+                       abs(q.y) - cc_streetlife_TRACK,
+                       q.z - cc_streetlife_ARCH_Z);
+    if (hover) {
+        // A plenum instead of wheels, and the arches become intake scallops
+        // cut into the flanks — the same silhouette cue read the other way.
+        let skirt = cc_streetlife_rbox(
+            vec3<f32>(q.x, q.y, q.z - 0.14),
+            vec3<f32>(1.94, 0.80, 0.09), 0.08);
+        d = cc_streetlife_smin(d, skirt, 0.13);
+        let scallop = cc_streetlife_cyl_y(
+            vec3<f32>(qa.x, qa.y - 0.10, qa.z), 0.30,
+            cc_streetlife_ARCH_HW + 0.10);
+        d = cc_streetlife_smax(d, -scallop, 0.05);
+    } else {
+        let arch = cc_streetlife_cyl_y(
+            vec3<f32>(qa.x, qa.y - 0.13, qa.z),
+            cc_streetlife_ARCH_R, cc_streetlife_ARCH_HW);
+        d = cc_streetlife_smax(d, -arch, 0.035);
+        let tyre = cc_streetlife_cyl_y(
+            vec3<f32>(qa.x, qa.y, q.z - cc_streetlife_AXLE_Z),
+            cc_streetlife_TYRE_R, cc_streetlife_TYRE_HW);
+        d = min(d, tyre);
+    }
+
+    // Door mirrors, at the base of the A-pillar. A bare capsule reaching from
+    // the cabin flank to the hull's widest point — which is what the first
+    // pass had — renders as a dark bar floating clear of the car, because a
+    // uniform 10 cm cylinder 30 cm long is a stick and nothing about it says
+    // mirror. A mirror is a SHORT arm carrying a HOUSING, and the housing is
+    // what the eye finds: a flat-backed pod, wider than it is tall.
+    let qm = vec3<f32>(q.x - 0.74 - off, abs(q.y), q.z - 1.01);
+    d = min(d, cc_streetlife_seg(qm, vec3<f32>(0.0, 0.60, 0.0),
+                                 vec3<f32>(0.02, 0.76, 0.03), 0.032));
+    d = min(d, cc_streetlife_rbox(qm - vec3<f32>(0.0, 0.855, 0.035),
+                                  vec3<f32>(0.075, 0.095, 0.055), 0.038));
+
+    // Lamp housings, cut as recesses at nose and tail, and an intake slot
+    // low in the nose. The recess is a LETTERBOX — wider than tall — because
+    // the lens the shader paints inside it is an ellipse of the same aspect,
+    // and a round lens in a round hole is the headlight shape that made the
+    // first pass read as a face with eyes.
+    let ql = vec3<f32>(abs(q.x) - 2.15, abs(q.y) - 0.50, q.z - 0.71);
+    d = cc_streetlife_smax(
+        d, -cc_streetlife_rbox(ql, vec3<f32>(0.13, 0.27, 0.082), 0.04), 0.022);
+    let qi = vec3<f32>(q.x - 2.06, q.y, q.z - 0.40);
+    d = cc_streetlife_smax(
+        d, -cc_streetlife_rbox(qi, vec3<f32>(0.16, 0.44, 0.055), 0.03), 0.03);
+
+    if (fine) {
+        // Wiper blades across the base of the windshield. At the footprint
+        // that admits them a blade is two or three pixels of hard line on a
+        // dark curved reflection, which is exactly what says "windscreen".
+        let qw = vec3<f32>(q.x - off, abs(q.y), q.z);
+        d = min(d, cc_streetlife_seg(qw, vec3<f32>(0.66, 0.07, 0.925),
+                                     vec3<f32>(1.00, 0.52, 0.908), 0.021));
+    }
+    return d * sh.x;
+}
+
+// World point -> the car's own frame.
+fn cc_streetlife_to_local(w: vec3<f32>, ctr: vec2<f32>, fwd: vec2<f32>,
+                          rgt: vec2<f32>) -> vec3<f32> {
+    let rel = w.xy - ctr;
+    return vec3<f32>(dot(rel, fwd), dot(rel, rgt), w.z);
+}
+
+fn cc_streetlife_car_normal(pl: vec3<f32>, r: vec4<f32>, fine: bool, hh: f32)
+        -> vec3<f32> {
+    let e = vec2<f32>(1.0, -1.0) * hh;
+    let n = vec3<f32>(1.0, -1.0, -1.0)
+            * cc_streetlife_car_sdf(pl + vec3<f32>(e.x, e.y, e.y), r, fine)
+          + vec3<f32>(-1.0, -1.0, 1.0)
+            * cc_streetlife_car_sdf(pl + vec3<f32>(e.y, e.y, e.x), r, fine)
+          + vec3<f32>(-1.0, 1.0, -1.0)
+            * cc_streetlife_car_sdf(pl + vec3<f32>(e.y, e.x, e.y), r, fine)
+          + vec3<f32>(1.0, 1.0, 1.0)
+            * cc_streetlife_car_sdf(pl + vec3<f32>(e.x, e.x, e.x), r, fine);
+    return normalize(n);
+}
+
+// Sphere-trace one car inside a bounding box the ray has already entered.
+// A miss inside the box is a real answer, not a failure: rays graze past a
+// curved hull, and that is what makes the hull read as curved.
+fn cc_streetlife_trace_car(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
+                           v: cc_streetlife_Prop, ci: vec2<i32>, side: i32,
+                           fp: f32) -> CityHit {
+    let fine = fp < cc_streetlife_FINE_FP;
+    let eps = max(0.0025, 0.30 * fp);
+    let iters = select(cc_streetlife_ITERS, cc_streetlife_ITERS_FAR,
+                       fp > cc_streetlife_ITER_FP);
+    var t = ta + 0.001;
+    var got = false;
+    for (var i: i32 = 0; i < iters; i = i + 1) {
+        let pl = cc_streetlife_to_local(o + t * dir, v.ctr, v.fwd, v.rgt);
+        let d = cc_streetlife_car_sdf(pl, v.r, fine);
+        if (d < eps) {
+            got = true;
+            break;
+        }
+        t = t + d * cc_streetlife_STEP;
+        if (t > tb) {
+            break;
+        }
+    }
+    if (!got || t > tb) {
+        return cc_streetlife_miss(ci);
+    }
+    let pos = o + t * dir;
+    let pl = cc_streetlife_to_local(pos, v.ctr, v.fwd, v.rgt);
+    let nl = cc_streetlife_car_normal(pl, v.r, fine, max(0.004, 0.4 * fp));
+    let nw = vec3<f32>(v.fwd * nl.x + v.rgt * nl.y, nl.z);
+    return CityHit(true, t, pos, nw, 102 + side, ci);
+}
+
+// The far read: hull and greenhouse as two axis-aligned boxes cut to the
+// SDF's own silhouette. The yaw goes with the SDF, which at this footprint
+// is a sub-pixel corner.
+fn cc_streetlife_trace_car_box(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
+                               t0: f32, t1: f32, v: cc_streetlife_Prop,
+                               ci: vec2<i32>, side: i32) -> CityHit {
+    let hover = cc_streetlife_is_hover(v.r);
+    let lift = select(0.0, cc_streetlife_HOVER_LIFT, hover);
+    let ea = abs(v.fwd) * 2.24 + abs(v.rgt) * 0.90;
+    let eb = abs(v.fwd) * 1.06 + abs(v.rgt) * 0.76;
+    let amin = vec3<f32>(v.ctr - ea, select(0.02, lift + 0.10, hover));
+    let amax = vec3<f32>(v.ctr + ea, lift + 1.00);
+    let bmin = vec3<f32>(v.ctr - eb + v.fwd * -0.24, lift + 0.94);
+    let bmax = vec3<f32>(v.ctr + eb + v.fwd * -0.24,
+                         lift + cc_streetlife_ROOF);
+    var best = 1e30;
+    var bmn = amin;
+    var bmx = amax;
+    let ha = city_box_hit(o, inv_dir, amin, amax);
+    if (ha.x <= ha.y && ha.y > t0 && ha.x <= t1) {
+        best = max(ha.x, t0);
+    }
+    let hb = city_box_hit(o, inv_dir, bmin, bmax);
+    if (hb.x <= hb.y && hb.y > t0 && hb.x <= t1 && max(hb.x, t0) < best) {
+        best = max(hb.x, t0);
+        bmn = bmin;
+        bmx = bmax;
+    }
+    if (best >= 1e30) {
+        return cc_streetlife_miss(ci);
+    }
+    let pos = o + best * dir;
+    return CityHit(true, best, pos, city_box_normal(pos, bmn, bmx),
+                   102 + side, ci);
+}
+
+// A dumpster at one of the plot's four corners, shoved against the wall a
+// couple of metres in from the corner itself. `k` selects the corner: bit 0
+// the x wall, bit 1 the y end.
+//
+// Corners are a per-CELL question, not a per-kerb one, and that is why this
+// does not live in cc_streetlife_kerb with the other ground props. The kerb's
+// bounding slab runs from the lamp line to the parking line, and on an avenue
+// the plot edge is thirteen metres outboard of that — a bin against the wall
+// would sit entirely outside the slab the kerb tests, so a kerb-side test
+// would silently never fire on exactly the streets that are widest and most
+// visible.
+//
+// Placed strictly inside the drawing cell, per the DDA rule: a merged
+// superblock's corner can fall in a sibling's column, and there the sibling
+// that owns the ground draws it.
+fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
+        -> cc_streetlife_Prop {
+    if (!cc.built) {
+        return cc_streetlife_no_prop();
+    }
+    let r = city_rand4(vec2<u32>(
+        bitcast<u32>(ci.x) * 0x27d4eb2fu + u32(k) * 0x9e3779b9u + 0x2f1e3a7bu,
+        bitcast<u32>(ci.y) * 0x165667b1u + u32(k) * 0xc2b2ae35u + 0x7feb352du));
+    if (r.x > cc_streetlife_CORNER_BIN) {
+        return cc_streetlife_no_prop();
+    }
+    let xlo = (k & 1) == 0;
+    let ylo = (k & 2) == 0;
+    let wall_x = select(cc.plot_max.x, cc.plot_min.x, xlo);
+    let out_x = select(1.0, -1.0, xlo);        // away from the plot
+    let corner_y = select(cc.plot_max.y, cc.plot_min.y, ylo);
+    let in_y = select(-1.0, 1.0, ylo);         // along the wall, into the plot
+    let px = wall_x + out_x * (0.92 + 0.28 * r.z);
+    let py = corner_y + in_y * (1.30 + 1.10 * r.y);
+    let cellm = u.ocean_params.x;
+    let cmin = vec2<f32>(ci) * cellm;
+    let cmax = cmin + vec2<f32>(cellm);
+    if (px - 0.62 < cmin.x || px + 0.62 > cmax.x
+        || py - 0.92 < cmin.y || py + 0.92 > cmax.y) {
+        return cc_streetlife_no_prop();
+    }
+    var p: cc_streetlife_Prop;
+    p.ok = true;
+    p.bin = true;
+    p.ctr = vec2<f32>(px, py);
+    p.fwd = vec2<f32>(0.0, 1.0);               // long side along the wall
+    p.rgt = vec2<f32>(1.0, 0.0);
+    p.r = r;
+    return p;
+}
+
+fn cc_streetlife_trace_bin(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
+                           t0: f32, t1: f32, v: cc_streetlife_Prop,
+                           ci: vec2<i32>, side: i32) -> CityHit {
+    let e = abs(v.fwd) * 0.80 + abs(v.rgt) * 0.50;
+    let bmin = vec3<f32>(v.ctr - e, 0.0);
+    let bmax = vec3<f32>(v.ctr + e, 1.20);
+    let hb = city_box_hit(o, inv_dir, bmin, bmax);
+    if (hb.x > hb.y || hb.y <= t0 || hb.x > t1) {
+        return cc_streetlife_miss(ci);
+    }
+    let t = max(hb.x, t0);
+    let pos = o + t * dir;
+    return CityHit(true, t, pos, city_box_normal(pos, bmin, bmax),
+                   106 + side, ci);
+}
+
+// ---------------------------------------------------------------------------
+// One kerb
+// ---------------------------------------------------------------------------
+
+fn cc_streetlife_pole(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, s: cc_streetlife_Side, a: f32,
+                      ci: vec2<i32>, fp: f32) -> CityHit {
+    // The arm hangs AWAY from the plot, out over the roadway.
+    let arm = -s.plot_sign;
+    let head_c = s.lamp_c + arm * cc_streetlife_ARM_REACH;
+    var mmin: vec3<f32>;
+    var mmax: vec3<f32>;
+    var hmin: vec3<f32>;
+    var hmax: vec3<f32>;
+    if (s.ax == 0) {
+        mmin = vec3<f32>(a - cc_streetlife_MAST_R,
+                         s.lamp_c - cc_streetlife_MAST_R, 0.0);
+        mmax = vec3<f32>(a + cc_streetlife_MAST_R,
+                         s.lamp_c + cc_streetlife_MAST_R,
+                         cc_streetlife_POLE_H);
+        hmin = vec3<f32>(a - cc_streetlife_HEAD_HA,
+                         head_c - cc_streetlife_HEAD_HC,
+                         cc_streetlife_HEAD_Z - cc_streetlife_HEAD_HZ);
+        hmax = vec3<f32>(a + cc_streetlife_HEAD_HA,
+                         head_c + cc_streetlife_HEAD_HC,
+                         cc_streetlife_HEAD_Z + cc_streetlife_HEAD_HZ);
+    } else {
+        mmin = vec3<f32>(s.lamp_c - cc_streetlife_MAST_R,
+                         a - cc_streetlife_MAST_R, 0.0);
+        mmax = vec3<f32>(s.lamp_c + cc_streetlife_MAST_R,
+                         a + cc_streetlife_MAST_R, cc_streetlife_POLE_H);
+        hmin = vec3<f32>(head_c - cc_streetlife_HEAD_HC,
+                         a - cc_streetlife_HEAD_HA,
+                         cc_streetlife_HEAD_Z - cc_streetlife_HEAD_HZ);
+        hmax = vec3<f32>(head_c + cc_streetlife_HEAD_HC,
+                         a + cc_streetlife_HEAD_HA,
+                         cc_streetlife_HEAD_Z + cc_streetlife_HEAD_HZ);
+    }
+    var best = 1e30;
+    var bmn = mmin;
+    var bmx = mmax;
+    var kind = 100;
+    let hm = city_box_hit(o, inv_dir, mmin, mmax);
+    if (hm.x <= hm.y && hm.y > t0 && hm.x <= t1) {
+        best = max(hm.x, t0);
+    }
+    let hh = city_box_hit(o, inv_dir, hmin, hmax);
+    if (hh.x <= hh.y && hh.y > t0 && hh.x <= t1 && max(hh.x, t0) < best) {
+        best = max(hh.x, t0);
+        bmn = hmin;
+        bmx = hmax;
+        kind = 101;
+    }
+    // The arm is a 0.13 m bar: it only earns a box test while it is a
+    // resolvable line rather than an aliasing one. Past that the mast and the
+    // luminaire carry the pole, which is what the eye reads anyway.
+    if (fp < 0.30) {
+        var amin: vec3<f32>;
+        var amax: vec3<f32>;
+        let c0 = min(s.lamp_c, head_c);
+        let c1 = max(s.lamp_c, head_c);
+        if (s.ax == 0) {
+            amin = vec3<f32>(a - 0.055, c0,
+                             cc_streetlife_ARM_Z - cc_streetlife_ARM_HZ);
+            amax = vec3<f32>(a + 0.055, c1,
+                             cc_streetlife_ARM_Z + cc_streetlife_ARM_HZ);
+        } else {
+            amin = vec3<f32>(c0, a - 0.055,
+                             cc_streetlife_ARM_Z - cc_streetlife_ARM_HZ);
+            amax = vec3<f32>(c1, a + 0.055,
+                             cc_streetlife_ARM_Z + cc_streetlife_ARM_HZ);
+        }
+        let ha = city_box_hit(o, inv_dir, amin, amax);
+        if (ha.x <= ha.y && ha.y > t0 && ha.x <= t1 && max(ha.x, t0) < best) {
+            best = max(ha.x, t0);
+            bmn = amin;
+            bmx = amax;
+            kind = 100;
+        }
+    }
+    if (best >= 1e30) {
+        return cc_streetlife_miss(ci);
+    }
+    let pos = o + best * dir;
+    return CityHit(true, best, pos, city_box_normal(pos, bmn, bmx), kind, ci);
+}
+
+// What one kerb found. The sphere trace is deliberately NOT run here: a near
+// car is returned as a CANDIDATE and resolved once per cell, after all four
+// kerbs have reported. The reason is measured rather than stylistic — see the
+// note in cc_streetlife_props_trace.
+struct cc_streetlife_Kerb {
+    hit: CityHit,      // already resolved: poles, bins, far cars
+    car_ok: bool,      // a near car whose bounding box the ray entered
+    car: cc_streetlife_Prop,
+    side: i32,
+    ta: f32,
+    tb: f32,           // the box interval to sphere-trace inside
+}
+
+fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell,
+                      side: i32, fp: f32) -> cc_streetlife_Kerb {
+    var out: cc_streetlife_Kerb;
+    out.hit = cc_streetlife_miss(ci);
+    out.car_ok = false;
+    out.car = cc_streetlife_no_prop();
+    out.side = side;
+    out.ta = 0.0;
+    out.tb = 0.0;
+
+    let s = cc_streetlife_side(ci, cc, side);
+    // One slab over the whole kerb: lamp line to parking line, ground to the
+    // top of a mast, clipped to the cell's own column. This is the test the
+    // wide scene pays, and the only one most cells ever reach.
+    let arm_c = s.lamp_c - s.plot_sign * (cc_streetlife_ARM_REACH + 0.5);
+    var lo = min(min(s.lamp_c, arm_c), s.park_c - cc_streetlife_BB_C);
+    var hi = max(max(s.lamp_c, arm_c), s.park_c + cc_streetlife_BB_C);
+    if (!s.park_ok) {
+        lo = min(s.lamp_c, arm_c);
+        hi = max(s.lamp_c, arm_c);
+    }
+    lo = max(lo - 0.2, s.c_min);
+    hi = min(hi + 0.2, s.c_max);
+    if (hi <= lo) {
+        return out;
+    }
+    var bmin: vec3<f32>;
+    var bmax: vec3<f32>;
+    if (s.ax == 0) {
+        bmin = vec3<f32>(s.a_min, lo, 0.0);
+        bmax = vec3<f32>(s.a_max, hi, cc_streetlife_POLE_TOP);
+    } else {
+        bmin = vec3<f32>(lo, s.a_min, 0.0);
+        bmax = vec3<f32>(hi, s.a_max, cc_streetlife_POLE_TOP);
+    }
+    let sb = city_box_hit(o, inv_dir, bmin, bmax);
+    let ta = max(sb.x, t0);
+    let tb = min(sb.y, t1);
+    if (sb.x > sb.y || tb <= ta) {
+        return out;
+    }
+
+    let pa = o + ta * dir;
+    let pb = o + tb * dir;
+    let sa = select(pa.y, pa.x, s.ax == 0);
+    let sc = select(pb.y, pb.x, s.ax == 0);
+    let s_lo = min(sa, sc);
+    let s_hi = max(sa, sc);
+    let z_lo = min(pa.z, pb.z);
+    let fwd_first = select(dir.y, dir.x, s.ax == 0) >= 0.0;
+
+    var res = cc_streetlife_miss(ci);
+    var t_end = tb;
+
+    // Poles, on the core's 26 m lattice, restricted to those standing wholly
+    // inside this cell.
+    if (fp < cc_streetlife_POLE_FAR_FP) {
+        let sp = CITY_LAMP_SPACING;
+        var j0 = i32(ceil((s_lo - 0.45) / sp));
+        var j1 = i32(floor((s_hi + 0.45) / sp));
+        j0 = max(j0, i32(ceil((s.a_min + 0.45) / sp)));
+        j1 = min(j1, i32(floor((s.a_max - 0.45) / sp)));
+        if (j1 >= j0) {
+            let jstart = select(j1, j0, fwd_first);
+            let jstep = select(-1, 1, fwd_first);
+            // Walked from the near end, so the first pole the ray actually
+            // strikes is the nearest and the loop is done.
+            for (var k: i32 = 0; k < 3; k = k + 1) {
+                let j = jstart + k * jstep;
+                if (j < j0 || j > j1) {
+                    break;
+                }
+                let hp = cc_streetlife_pole(o, dir, inv_dir, ta, t_end, s,
+                                            f32(j) * sp, ci, fp);
+                if (hp.hit) {
+                    res = cc_streetlife_nearer(res, hp);
+                    t_end = min(t_end, res.t);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Ground props: everything below is under 1.8 m, so a segment that only
+    // clips the lamp heads stops here.
+    out.hit = res;
+    if (!s.park_ok || z_lo > cc_streetlife_BB_Z + 0.1
+        || fp > cc_streetlife_CAR_FAR_FP) {
+        return out;
+    }
+    let g0 = i32(floor((s_lo - cc_streetlife_BB_A) / cc_streetlife_SLOT));
+    let g1 = i32(floor((s_hi + cc_streetlife_BB_A) / cc_streetlife_SLOT));
+    let gstart = select(g1, g0, fwd_first);
+    let gstep = select(-1, 1, fwd_first);
+    // Same rule as the poles: near end first, stop at the first prop the ray
+    // actually strikes. Five iterations is what an empty run costs, and at
+    // ~40% occupancy the loop usually ends on the first or the second.
+    let near_sdf = fp < cc_streetlife_CAR_SDF_FP;
+    for (var k: i32 = 0; k < 5; k = k + 1) {
+        let j = gstart + k * gstep;
+        if (j < g0 || j > g1) {
+            break;
+        }
+        let v = cc_streetlife_prop(ci, cc, s, side, j);
+        if (!v.ok) {
+            continue;
+        }
+        if (v.bin) {
+            let hb = cc_streetlife_trace_bin(o, inv_dir, dir, ta, t_end, v,
+                                             ci, side);
+            if (hb.hit) {
+                res = cc_streetlife_nearer(res, hb);
+                t_end = min(t_end, res.t);
+                break;
+            }
+            continue;
+        }
+        // The bounding box: the only cost the wide scene pays for a car.
+        let e = abs(v.fwd) * cc_streetlife_BB_A
+              + abs(v.rgt) * cc_streetlife_BB_C;
+        let cmin = vec3<f32>(v.ctr - e, 0.0);
+        let cmax = vec3<f32>(v.ctr + e, cc_streetlife_BB_Z);
+        let hc = city_box_hit(o, inv_dir, cmin, cmax);
+        if (hc.x > hc.y || hc.y <= ta || hc.x > t_end) {
+            continue;
+        }
+        if (near_sdf) {
+            out.car_ok = true;
+            out.car = v;
+            out.ta = max(hc.x, ta);
+            out.tb = min(hc.y, t_end);
+            t_end = min(t_end, out.ta);
+            break;
+        }
+        let hit = cc_streetlife_trace_car_box(o, inv_dir, dir, ta, t_end, v,
+                                              ci, side);
+        if (hit.hit) {
+            res = cc_streetlife_nearer(res, hit);
+            t_end = min(t_end, res.t);
+            break;
+        }
+    }
+    out.hit = res;
+    return out;
+}
+
+fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                             t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
+        -> CityHit {
+    // WHERE THIS COMPONENT'S COST ACTUALLY IS, measured rather than guessed,
+    // so the next reader does not repeat the experiments (RTX 5080, shared,
+    // interleaved on/off, 64 accumulated frames at 960x540):
+    //
+    //     view      off      on     delta
+    //     base     0.34 s  0.40 s   +18%
+    //     aerial   0.22 s  0.30 s   +36%
+    //     horizon  0.31 s  0.40 s   +29%
+    //
+    // All of it is in this hook, none in the shade hook: unregistering
+    // `shade` and leaving `cell_props` reproduced the enabled timings to the
+    // centisecond. And none of it is work — on all three views EVERY call
+    // leaves at gate 1 below, because the nearest ground within
+    // CITY_PROP_RANGE is still a kilometre under the ray. Three attempts to
+    // shrink the inlined body moved nothing at all: hoisting the fp cutoff
+    // above the four kerb slabs, rolling the four-kerb loop behind a bound
+    // the driver cannot fold (the draft's own trick for the march budget),
+    // and generating the normal's four tetrahedron taps in a loop instead of
+    // spelling them out. Two of the three were reverted for being clutter
+    // that bought nothing; the fp cutoff stayed because it is exact.
+    //
+    // What is left is the gate itself, two fused multiply-adds and two
+    // compares, run once per DDA cell within CITY_PROP_RANGE — on the aerial
+    // view roughly 26 million times a frame. 0.08 s over 64 frames is about
+    // three flops per evaluation, which is the whole of it. This is the floor
+    // for ANY cell_props hook in a 512-iteration DDA, not a streetlife
+    // problem, and it is not reducible from inside a component.
+    //
+    // Gate 1, no hash and no memory: does this segment come within reach of
+    // the ground at all? Every pixel looking at a facade, a roof, a cloud or
+    // the sky leaves here.
+    let za = o.z + t0 * dir.z;
+    let zb = o.z + t1 * dir.z;
+    if (min(za, zb) > cc_streetlife_Z_GATE || max(za, zb) < -0.5) {
+        return cc_streetlife_miss(ci);
+    }
+    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
+             * max(t0, 0.0);
+    // Gate 2: past the pole cutoff nothing this component draws survives, and
+    // every prop's emission has already faded to zero before reaching it
+    // (POLE_FAR_FADE 2.4 -> 4.0, CAR_FAR_FADE 1.6 -> 2.6). Hoisting the test
+    // above the four kerb slabs makes it exact rather than merely cheap: it
+    // is the same answer those per-kerb fp tests would have reached, arrived
+    // at before any of the four Side structs is built.
+    if (fp > cc_streetlife_POLE_FAR_FP) {
+        return cc_streetlife_miss(ci);
+    }
+    var res = cc_streetlife_miss(ci);
+    var t_end = t1;
+    var cand: cc_streetlife_Kerb;
+    var have = false;
+    var cand_t = 1e30;
+    for (var side: i32 = 0; side < 4; side = side + 1) {
+        let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
+                                   fp);
+        if (k.hit.hit) {
+            res = cc_streetlife_nearer(res, k.hit);
+            t_end = min(t_end, res.t);
+        }
+        if (k.car_ok && k.ta < cand_t) {
+            cand = k;
+            have = true;
+            cand_t = k.ta;
+            t_end = min(t_end, k.ta);
+        }
+    }
+    // Corner dumpsters. Four hash draws behind a second z gate — a dumpster
+    // is 1.2 m tall, so a segment that only passes through the lamp heads
+    // leaves here — and a box test only for the quarter of corners that draw.
+    // Placed after the kerb loop so t_end is already as short as the kerbs
+    // could make it, and before the sphere trace so a bin standing in front
+    // of a car correctly stops the car being resolved at all.
+    if (cc.built && min(za, zb) < 1.5 && fp < cc_streetlife_CAR_FAR_FP) {
+        for (var k: i32 = 0; k < 4; k = k + 1) {
+            let b = cc_streetlife_corner_prop(ci, cc, k);
+            if (!b.ok) {
+                continue;
+            }
+            let hb = cc_streetlife_trace_bin(o, inv_dir, dir, t0, t_end, b,
+                                             ci, k);
+            if (hb.hit) {
+                res = cc_streetlife_nearer(res, hb);
+                t_end = min(t_end, res.t);
+            }
+        }
+    }
+    // ONE sphere trace per cell, on the nearest car bounding box any kerb
+    // accepted — never one per slot. This is the most consequential
+    // structural decision in the file and it was forced by measurement.
+    // cell_props is inlined into the core's DDA, whose loop runs up to 512
+    // times, and the four-kerb by five-slot loops are small enough that the
+    // driver unrolls them: written at the slot, the trace appeared twenty
+    // times in that loop body, and the register pressure alone cost 1.0 s of
+    // a 1.6 s frame set on the `base` view, where no car is anywhere near
+    // the footprint that admits an SDF. Hoisted here it appears once.
+    // The price is one artifact: a ray that enters a car's box and then
+    // grazes past the hull returns a miss rather than falling through to the
+    // car behind it. Parked cars sit 2.4 m apart, so that is a sliver on a
+    // silhouette edge, and it buys back the whole rest of the scene.
+    if (have && cand_t <= t_end + 1e-4) {
+        let hit = cc_streetlife_trace_car(o, dir, cand.ta, cand.tb, cand.car,
+                                          ci, cand.side, fp);
+        if (hit.hit && (!res.hit || hit.t < res.t)) {
+            res = hit;
+        }
+    }
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// Shading
+// ---------------------------------------------------------------------------
+
+// Underglow palette. Deliberately the same draw as aircars' — 60% cyan, 25%
+// magenta, 15% amber — so a street of parked cars and the lane of flying ones
+// above it are visibly the same fleet.
+fn cc_streetlife_glow_color(d: f32) -> vec3<f32> {
+    if (d < 0.60) {
+        return vec3<f32>(0.16, 0.90, 1.00);
+    }
+    if (d < 0.85) {
+        return vec3<f32>(1.00, 0.20, 0.70);
+    }
+    return vec3<f32>(1.00, 0.60, 0.16);
+}
+
+// Night car paint. Weighted dark on purpose: the road under these cars is a
+// clipped sodium wash, so a car is a hole in it with a lit edge, and a
+// palette of mid-greys renders a street of pale ceramic bathtubs. One car in
+// seven is light enough to be the bright one in the row.
+fn cc_streetlife_paint(d: f32) -> vec3<f32> {
+    if (d < 0.30) {
+        return vec3<f32>(0.055, 0.060, 0.070);  // graphite
+    }
+    if (d < 0.44) {
+        return vec3<f32>(0.320, 0.335, 0.350);  // silver
+    }
+    if (d < 0.58) {
+        return vec3<f32>(0.230, 0.055, 0.055);  // oxblood
+    }
+    if (d < 0.72) {
+        return vec3<f32>(0.045, 0.090, 0.185);  // midnight blue
+    }
+    if (d < 0.82) {
+        return vec3<f32>(0.300, 0.260, 0.170);  // sand
+    }
+    if (d < 0.93) {
+        return vec3<f32>(0.040, 0.155, 0.130);  // deep teal
+    }
+    return vec3<f32>(0.235, 0.085, 0.150);      // faded plum
+}
+
+// A band of width `w` around `x0`, antialiased against the footprint and
+// blended to its own mean coverage once the line is sub-pixel — a seam that
+// simply vanished would take the panel's mean brightness with it.
+fn cc_streetlife_seam(x: f32, x0: f32, w: f32, pitch: f32, fp: f32) -> f32 {
+    let e = 0.5 * w + 0.6 * fp;
+    let sharp = 1.0 - smoothstep(0.5 * w, e + 1e-4, abs(x - x0));
+    let mean = w / max(pitch, 1e-3);
+    return mix(sharp, mean,
+               smoothstep(cc_streetlife_DETAIL_LOD.x,
+                          cc_streetlife_DETAIL_LOD.y, fp));
+}
+
+// The footprint the CAR's own detail is resolved at, which is not the one the
+// core hands the shade hook.
+//
+// The core passes `fp = pixel_angle * t`, where pixel_angle is floored by the
+// app's view-step LOD slider — tan(0.3 deg) by default, four and a half times
+// the actual pixel at 960 px and 60 degrees. That floor is right for what it
+// was built for: it stops sub-pixel window LATTICES from moireing as the
+// camera moves. A car's wiper blade, rim spoke or lamp lens is not a lattice,
+// it is one feature, and blurring it across four pixels throws away detail
+// the accumulation would otherwise resolve — the whole reason the LOD floor
+// dropped to a quarter pixel in the first place.
+//
+// So: sharpen toward the true pixel, but never below about one and a half of
+// them, which is what keeps a moving 1-spp frame from crawling. With the
+// default slider this lands at ~1.5 px; with a fine slider the true-pixel
+// term takes over and holds the floor at 1 px.
+fn cc_streetlife_fp_px(fp: f32, t: f32) -> f32 {
+    return max(0.35 * fp,
+               2.0 * u.cam_origin.w / max(u.params.x, 1.0) * max(t, 0.0));
+}
+
+// One lamp LENS on a face, resolved while it is bigger than a pixel and
+// handed to the face's mean when it is not (aircars' treatment, same
+// reasoning). The lens is an ellipse, not a disc, and it is nested inside the
+// letterbox recess the SDF cut for it: a circular lens of radius 0.12
+// overflowed a housing only 0.16 tall, so it rendered as a white ball with a
+// dark eyebrow, and a row of parked cars looked back at the camera. Real
+// vehicle lamps are wide and shallow; the aspect alone does most of the work.
+const cc_streetlife_LENS_A: f32 = 0.160;   // half-width, along the face
+const cc_streetlife_LENS_B: f32 = 0.049;   // half-height
+fn cc_streetlife_dot(a: f32, b: f32, sa: f32, sb: f32, span: f32, fp: f32)
+        -> f32 {
+    let e = vec2<f32>((a - sa) / cc_streetlife_LENS_A,
+                      (b - sb) / cc_streetlife_LENS_B);
+    let d = length(e);
+    // The edge softens in the ellipse's OWN metric, with the footprint
+    // normalised by the geometric mean of the two semi-axes and then clamped.
+    // Both of the obvious alternatives failed on this shape: dividing fp by
+    // the semi-MINOR axis alone inflates it eighteenfold and blew the lens
+    // into a lobe covering the whole nose, while normalising by the implicit
+    // gradient, (d-1)/|grad d|, looks exact but asymptotes to a constant —
+    // LENS_B, 0.056 — far from an eccentric ellipse, so once the footprint
+    // crossed that constant the test stopped bounding anything at all and the
+    // lens grew vertically without limit. A clamped width in the normalised
+    // metric cannot do either: the lens is never more than 1 + w across.
+    let w = clamp(fp / sqrt(cc_streetlife_LENS_A * cc_streetlife_LENS_B),
+                  0.06, 0.42);
+    let sharp = 1.0 - smoothstep(1.0 - w, 1.0 + w, d);
+    let mean = 3.14159265 * cc_streetlife_LENS_A * cc_streetlife_LENS_B
+             / max(span, 1e-3);
+    return mix(sharp, mean,
+               smoothstep(cc_streetlife_LAMP_LOD.x,
+                          cc_streetlife_LAMP_LOD.y, fp));
+}
+
+// How far into the glazing a point on the greenhouse lies, in body units.
+//
+// The greenhouse is bounded by five planes — windshield, backlight, roof
+// rail, belt line, tumblehome flank — and the window surround is the distance
+// to the nearest of them. The catch is that the border you are STANDING on is
+// at distance zero by definition, so a naive minimum reports "no glass"
+// everywhere. Each border is therefore pushed out of the running in
+// proportion to how closely the surface normal agrees with the border's own,
+// and only when it agrees closely: the ramp starts at dot 0.82, so a
+// windshield is excused from its own plane but not from the roof rail it runs
+// up to, even though the two are only 55 degrees apart.
+//
+// Five dot products buys A-pillars, C-pillars, a roof rail and a belt line
+// that are all the same band, on every face, with no branch and no per-face
+// special case — which is what the first pass tried to get from one `ay`
+// bound and one normal test, and got windowless cars instead.
+fn cc_streetlife_glass_inset(cx: f32, q: vec3<f32>, nl: vec3<f32>) -> f32 {
+    let ay = abs(q.y);
+    let sy = select(-1.0, 1.0, q.y >= 0.0);
+    let nf = vec3<f32>(0.824, 0.0, 0.567);          // windshield
+    let nb = vec3<f32>(-0.745, 0.0, 0.667);         // backlight
+    let ns = vec3<f32>(0.0, sy * 0.958, 0.287);     // flank, leaning in
+    var m = 1.339 - (nf.x * cx + nf.z * q.z)
+          + 12.0 * max(dot(nl, nf) - 0.82, 0.0);
+    m = min(m, 1.361 - (nb.x * cx + nb.z * q.z)
+               + 12.0 * max(dot(nl, nb) - 0.82, 0.0));
+    m = min(m, 1.425 - q.z + 12.0 * max(nl.z - 0.82, 0.0));
+    m = min(m, q.z - 1.045 + 12.0 * max(-nl.z - 0.82, 0.0));
+    m = min(m, 0.958 * (0.74 - 0.30 * (q.z - 1.02) - ay)
+               + 12.0 * max(dot(nl, ns) - 0.82, 0.0));
+    return m;
+}
+
+fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    let fill = cc_streetlife_fill(h.pos);
+    // Two edges to approach, never to step over: the population edge at
+    // CITY_PROP_RANGE, and the footprint at which poles stop being traced.
+    // The second was declared (POLE_FAR_FADE) and then never applied, so a
+    // luminaire at radiance 6 — the brightest thing on the street — simply
+    // switched off the instant fp crossed POLE_FAR_FP. That is the one thing
+    // the SPEC says outright must not happen: sub-pixel detail dissolves into
+    // its own mean, it does not vanish.
+    let fade = (1.0 - smoothstep(cc_streetlife_FADE_START * CITY_PROP_RANGE,
+                                 CITY_PROP_RANGE, h.t))
+             * (1.0 - smoothstep(cc_streetlife_POLE_FAR_FADE,
+                                 cc_streetlife_POLE_FAR_FP, fp));
+    if (h.kind == 101) {
+        // The luminaire. Its underside is the lamp; its sides are the lens
+        // edge; its top is a painted aluminium housing, and dark. A glowing
+        // box would read as a floating lozenge, not as a light fitting.
+        let district = city_glow_sample(h.pos.xy, 2.0);
+        let out = 0.45 + 1.6 * smoothstep(0.02, 0.45, district);
+        if (h.normal.z < -0.5) {
+            return cc_streetlife_HEAD_COLOR
+                   * (cc_streetlife_HEAD_RAD * out * fade);
+        }
+        if (h.normal.z > 0.5) {
+            return 0.10 * fill + vec3<f32>(0.004, 0.003, 0.002);
+        }
+        // A side face is mostly painted cowl, with the lens showing as a lip
+        // along its bottom edge. Uniformly bright, the sides clipped to white
+        // with the lamp and the whole fitting became one glowing lozenge —
+        // the exact failure the head geometry exists to avoid. Antialiased
+        // against fp so the lip fades into the face's own mean rather than
+        // strobing once it is thinner than a pixel.
+        let zl = cc_streetlife_HEAD_Z - cc_streetlife_HEAD_HZ;
+        let lip = 1.0 - smoothstep(zl + cc_streetlife_HEAD_LIP,
+                                   zl + cc_streetlife_HEAD_LIP + 0.5 * fp
+                                       + 0.012,
+                                   h.pos.z);
+        let mean = cc_streetlife_HEAD_LIP
+                 / (2.0 * cc_streetlife_HEAD_HZ);
+        let k = mix(lip, mean, smoothstep(0.010, 0.075, fp));
+        return cc_streetlife_HEAD_COLOR
+               * (cc_streetlife_HEAD_RAD * out * fade
+                  * mix(cc_streetlife_HEAD_COWL,
+                        cc_streetlife_HEAD_SIDE, k))
+             + 0.08 * fill;
+    }
+    // Mast and arm: galvanised steel, lit almost entirely by its own lamp,
+    // and more of it the closer to the head — the falloff up the pole is the
+    // single cue that says the light is at the top.
+    let up = clamp(h.pos.z / cc_streetlife_POLE_H, 0.0, 1.0);
+    let near_lamp = 0.12 + 0.88 * up * up;
+    let pool = cc_streetlife_pool(h.pos.xy);
+    let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    let l = normalize(lamp - h.pos);
+    // The mast is a box because a box is what the DDA wants, but 17 cm of
+    // steel is round, and from two metres away a flat-shaded rectangle says
+    // so loudly. The silhouette stays square — sub-pixel at any distance you
+    // would notice — while the NORMAL is remapped across the width of the
+    // face to the cylinder the box circumscribes.
+    //
+    // The remap has to be driven by WHERE ON THE FACE the hit is, and the
+    // draft drove it by the direction to the lamp instead. On a mast the lamp
+    // is directly overhead, so that vector is nearly zero in xy, the remap
+    // collapsed to the identity, and the note beside it recording that "the
+    // remapped normal on its own changed nothing" was reporting a bug rather
+    // than a fact about the geometry. Every face then carried ONE normal and
+    // one grazing value, which is why a pole came out as a flat gold bar with
+    // a dark side rather than as a cylinder with two bright edges.
+    //
+    // The axis is recoverable exactly: cc_streetlife_nearest_lamp returns the
+    // lattice point, which is where the mast stands. The offset of the hit
+    // from it, resolved along the face, is the cylinder angle.
+    var n = h.normal;
+    let rel = h.pos.xy - lamp.xy;
+    if (abs(h.normal.z) < 0.5
+        && dot(rel, rel) < cc_streetlife_MAST_R * cc_streetlife_MAST_R * 2.9) {
+        let tang = vec2<f32>(-h.normal.y, h.normal.x);
+        let uu = clamp(dot(rel, tang) / cc_streetlife_MAST_R, -1.0, 1.0);
+        n = normalize(vec3<f32>(h.normal.xy * sqrt(max(1.0 - uu * uu, 0.0))
+                                + tang * uu, 0.0));
+    }
+    let lam = 0.30 + 0.70 * max(dot(n, l), 0.0);
+    // A vertical pole lit by a lamp on its own axis has almost no shading
+    // variation around its circumference — that is the geometry, not a bug,
+    // and it is why Lambert alone cannot draw a pole. What makes one look
+    // round at night is the grazing edge: the two sides of the cylinder catch
+    // the street at glancing incidence and the middle of the face returns
+    // almost nothing. So the cylinder is read out through a Fresnel edge —
+    // which needs a normal that actually turns across the face, hence the
+    // remap above.
+    let edge = pow(1.0 - clamp(abs(dot(dir, n)), 0.0, 1.0), 3.0);
+    return (cc_streetlife_MAST_FILL * fill
+            + cc_streetlife_MAST_ALB * pool * (near_lamp * lam)
+            + pool * (cc_streetlife_MAST_EDGE * edge * near_lamp)) * fade;
+}
+
+fn cc_streetlife_bin_shade(h: CityHit, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    let side = h.kind - 106;
+    let fill = cc_streetlife_fill(h.pos);
+    let pool = cc_streetlife_pool(h.pos.xy);
+    let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    let l = normalize(lamp - h.pos);
+    let lam = 0.22 + 0.78 * max(dot(h.normal, l), 0.0);
+    // Steel, painted once and repainted never: a dull olive that the sodium
+    // pulls most of the colour out of anyway.
+    let body = vec3<f32>(0.20, 0.24, 0.18);
+    // The lid, and one rib per side. Both are dark lines, not geometry.
+    var k = 1.0;
+    if (h.normal.z < 0.5) {
+        k = k * (1.0 - 0.55 * cc_streetlife_seam(h.pos.z, 0.98, 0.05, 1.2, fp));
+        let along = select(h.pos.y, h.pos.x, side >= 2);
+        k = k * (1.0 - 0.35 * cc_streetlife_seam(fract(along * 1.6), 0.5,
+                                                 0.07, 1.0, fp));
+    }
+    return cc_streetlife_BIN_ALB * body * pool * lam * k
+         + 0.5 * cc_streetlife_BIN_ALB * body * fill;
+}
+
+fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    let side = h.kind - 102;
+    let s = cc_streetlife_side(h.cell, cc, side);
+    // Recover the slot from the hit itself: the car's centre is within 3.1 m
+    // of its slot centre and the slots are 7 m apart, so the floor is exact.
+    let along = select(h.pos.y, h.pos.x, s.ax == 0);
+    let j = i32(floor(along / cc_streetlife_SLOT));
+    let v = cc_streetlife_prop(h.cell, cc, s, side, j);
+    let r = v.r;
+    let hover = cc_streetlife_is_hover(r);
+    let lift = select(0.0, cc_streetlife_HOVER_LIFT, hover);
+
+    let sh = cc_streetlife_car_shape(r);
+    let cab_c = sh.y;
+    let off = cab_c + 0.30;
+    // The same body frame the SDF works in, scale and all, so every band
+    // below lands on the geometry it names.
+    let q = (cc_streetlife_to_local(h.pos, v.ctr, v.fwd, v.rgt)
+             - vec3<f32>(0.0, 0.0, lift)) / sh.x;
+    let nl = vec3<f32>(dot(h.normal.xy, v.fwd), dot(h.normal.xy, v.rgt),
+                       h.normal.z);
+    let ay = abs(q.y);
+    // Detail resolves at fpd; the distance FADES below still key off the
+    // core's fp, because those follow the app's LOD slider by design and a
+    // car must not outlive the population edge just because it is sharp.
+    let fpd = cc_streetlife_fp_px(fp, h.t);
+
+    let fill = cc_streetlife_fill(h.pos);
+    let pool = cc_streetlife_pool(h.pos.xy);
+    let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    let l = normalize(lamp - h.pos);
+    let fade = (1.0 - smoothstep(cc_streetlife_FADE_START * CITY_PROP_RANGE,
+                                 CITY_PROP_RANGE, h.t))
+             * (1.0 - smoothstep(cc_streetlife_CAR_FAR_FADE,
+                                 cc_streetlife_CAR_FAR_FP, fp));
+
+    // The one specular lobe is what carries curvature. A dark paint under a
+    // single overhead source is nearly flat in Lambert; the glint sliding
+    // along the shoulder is the whole read.
+    let rf = reflect(dir, h.normal);
+    let spec_c = max(dot(rf, l), 0.0);
+    let lam = max(dot(h.normal, l), 0.0);
+
+    // Tyres first: matte rubber, and the only part that wants none of the
+    // clearcoat treatment. The wheel only reads at all because of the rim
+    // face inside it — a black disc on a black car under a dim lamp is
+    // nothing, and the first pass had cars that appeared to float.
+    let qw = vec3<f32>(abs(q.x) - cc_streetlife_AXLE_X,
+                       ay - cc_streetlife_TRACK,
+                       q.z - cc_streetlife_AXLE_Z);
+    let wheel = cc_streetlife_cyl_y(qw, cc_streetlife_TYRE_R,
+                                    cc_streetlife_TYRE_HW);
+    if (!hover && wheel < 0.035) {
+        let rad = length(vec2<f32>(qw.x, qw.z));
+        // The rim: the only part of a wheel that is legible at night, and the
+        // first pass gave it a quarter of the tyre's radius, so it never
+        // showed and the wheels read as flat pale discs. The face is most of
+        // the wheel, as it is on a real one; the tyre is the band around it.
+        if (qw.y > 0.085 && rad < cc_streetlife_RIM_R) {
+            // Brushed metal, five spokes, a hub, and a rolled lip at the rim
+            // edge that catches the road — that lip is what turns a disc into
+            // something with depth.
+            let ang = atan2(qw.z, qw.x) * 0.795774715;   // turns
+            let spoke = cc_streetlife_seam(fract(ang * 5.0), 0.5, 0.30, 1.0,
+                                           fpd * 3.0);
+            let hub = 1.0 - smoothstep(0.048, 0.070, rad);
+            let lip = smoothstep(cc_streetlife_RIM_R - 0.035,
+                                 cc_streetlife_RIM_R - 0.008, rad);
+            let face = max(max(1.0 - 0.80 * spoke, hub), 0.85 * lip);
+            return vec3<f32>(0.94, 0.97, 1.00) * cc_streetlife_RIM_ALB
+                   * pool * (0.26 + 0.74 * lam) * face
+                 + 0.6 * fill;
+        }
+        // Rubber. Weathered tyre reflectance is about 0.02 in daylight and
+        // less than that here, and it has to come out DARKER than graphite
+        // paint or the car floats on four pale coins — which is precisely
+        // what the first pass rendered, because 0.012 of a clipped sodium
+        // road still beats 0.10 of a 0.055 paint.
+        let tread = 1.0 - 0.42 * cc_streetlife_seam(
+            fract(atan2(qw.z, qw.x) * 4.6), 0.5, 0.15, 1.0, fpd * 4.0);
+        return vec3<f32>(cc_streetlife_TYRE_ALB) * pool * (0.18 + 0.82 * lam)
+               * tread
+             + 0.16 * fill
+             + pool * (0.008 * pow(spec_c, 12.0));
+    }
+
+    // GLASS. This test decides whether a car has windows at all, and the
+    // salvaged draft's version answered no everywhere in the city — the two
+    // renders that motivated the rewrite showed a solid loaf of paint where
+    // the cabin should be. Two independent reasons, both worth stating
+    // because both are the kind of test that looks obviously right:
+    //   * `ay < 0.71` against a cabin whose own half-width is 0.70, inflated
+    //     outward by the shoulder's smooth-min: the side glass sat a few
+    //     millimetres OUTSIDE its own window, so the flanks were never glass.
+    //   * `nl.z < 0.72` on a raked windshield, whose normal is (0.82, 0,
+    //     0.57) by construction: the more like a windscreen the windscreen
+    //     got, the more certainly it was classified as bodywork.
+    // So the region is now the greenhouse's own five-plane interior, inset by
+    // a surround (cc_streetlife_glass_inset), with the roof panel taken back
+    // out — a car may have a raked screen at every angle, but not a glass
+    // roof.
+    let cx = q.x - cab_c;
+    let roof_face = q.z > 1.33 && nl.z > 0.80;
+    let gin = cc_streetlife_glass_inset(cx, q, nl);
+    // A B-pillar between the two side lights, while it is wide enough to be a
+    // pillar rather than an aliasing line; past 6 cm/px the greenhouse is
+    // uniform glass, which is that band's honest mean.
+    let b_pillar = select(0.0,
+                          1.0 - smoothstep(0.034, 0.062, abs(cx + 0.02)),
+                          fpd < 0.06);
+    let is_glass = q.z > 1.05 && gin > 0.055 + 0.35 * fpd
+                && !roof_face && b_pillar < 0.5;
+    if (is_glass) {
+        let fres = pow(1.0 - clamp(abs(dot(dir, h.normal)), 0.0, 1.0), 4.0);
+        // What a parked car's glass carries at night, in order of how much of
+        // it there is: the road it is standing on (bright, and reflected by
+        // every window that leans at all), the skyglow, and a wash of the
+        // building opposite. Without the road term a dark car's greenhouse
+        // is the same value as its paint and the whole cabin stops existing.
+        let env = mix(cc_streetlife_GLASS_ROAD * pool,
+                      3.0 * fill
+                      + CITY_PALETTE_MEAN * (0.05 + 0.22 * cc.lit_frac),
+                      clamp(rf.z * 1.8 + 0.45, 0.0, 1.0));
+        let glint = pow(spec_c, 220.0) * cc_streetlife_GLASS_GLOSS;
+        // Wiper blades cross the glass as hard dark lines; the windshield
+        // also carries the demist banding at its base.
+        let wip = cc_streetlife_seg(vec3<f32>(q.x - off, ay, q.z),
+                                    vec3<f32>(0.66, 0.07, 0.925),
+                                    vec3<f32>(1.00, 0.52, 0.908), 0.021);
+        let wmask = select(1.0, 0.30, wip < 0.014);
+        return ((1.0 + 2.2 * fres) * env + pool * glint) * wmask * fade;
+    }
+
+    // Paint.
+    var col = cc_streetlife_paint(fract(r.z * 5.17 + r.w * 0.31));
+    // Panel lines, in the hull's own frame. A shut line at the door, one at
+    // the rear quarter, a rocker crease under the sill, and a hood seam on
+    // the deck: functional lines only, nothing that would be noise at 10 m.
+    var seam = 1.0;
+    if (abs(nl.z) < 0.75) {
+        seam = seam * (1.0 - 0.75 * cc_streetlife_seam(cx, 0.86, 0.05,
+                                                       1.6, fpd));
+        seam = seam * (1.0 - 0.75 * cc_streetlife_seam(cx, -0.78, 0.05,
+                                                       1.6, fpd));
+        seam = seam * (1.0 - 0.40 * cc_streetlife_seam(q.z, 0.46, 0.06,
+                                                       1.0, fpd));
+        // Door handles: one recess per door, on the belt line.
+        let dh = (1.0 - smoothstep(0.10, 0.17, abs(cx + 0.18)))
+               * (1.0 - smoothstep(0.02, 0.045, abs(q.z - 0.80)));
+        seam = seam * (1.0 - 0.55 * select(0.0, dh, fpd < 0.05));
+    } else {
+        seam = seam * (1.0 - 0.55 * cc_streetlife_seam(cx, 1.28, 0.045,
+                                                       2.0, fpd));
+        seam = seam * (1.0 - 0.55 * cc_streetlife_seam(cx, -0.96, 0.045,
+                                                       2.0, fpd));
+    }
+    var e = cc_streetlife_PAINT_GAIN * col * pool * (0.22 + 0.78 * lam) * seam
+          + 1.4 * col * fill;
+    // Clearcoat: a tight lobe on the sodium, plus a broad sheen that picks up
+    // the whole lit street. Both scale with the pool, so a car parked between
+    // lamps stays a silhouette.
+    e = e + pool * (cc_streetlife_GLOSS * pow(spec_c, 60.0)
+                    + cc_streetlife_SHEEN * pow(spec_c, 6.0));
+    // Rim: the skyglow catching the top of a curved shoulder.
+    let graze = pow(1.0 - clamp(abs(dot(dir, h.normal)), 0.0, 1.0), 3.0);
+    e = e + fill * (2.5 * graze * clamp(nl.z + 0.4, 0.0, 1.0));
+    // Road bounce. The single most useful term on the whole car: a vertical
+    // flank at night reflects the sodium wash it is parked on, and it does
+    // so hardest at grazing incidence and lowest on the body. That is what
+    // draws the bright outline around the wheel arch, along the rocker and
+    // over the shoulder crease — the specular lobe cannot, because the lamp
+    // is overhead and a flank never reflects it toward the camera.
+    e = e + pool * (cc_streetlife_ROAD_BOUNCE * graze
+                    * clamp(0.55 - 0.75 * nl.z, 0.0, 1.0));
+
+    // Head and tail lamps, in the housings the SDF cut for them.
+    let facing = nl.x;
+    if (abs(facing) > 0.35) {
+        let fwd_face = facing > 0.0;
+        let dot_e = cc_streetlife_dot(ay, q.z, 0.50, 0.71, 1.2, fpd);
+        // A parked car's lamps are standing lights, not driving beams: white
+        // forward, red aft, and both a good deal under the sodium luminaire
+        // overhead (radiance 6) rather than clipped alongside it. Tails run
+        // brighter than heads because a red lens at this exposure loses two
+        // of its three channels.
+        let col_l = select(vec3<f32>(1.00, 0.06, 0.03),
+                           vec3<f32>(1.00, 0.93, 0.82), fwd_face);
+        let rad_l = cc_streetlife_LAMP_RAD * select(1.15, 0.72, fwd_face);
+        e = e + col_l * (rad_l * dot_e * fade);
+        // A tail light bar on the cars that carry one — the cheapest possible
+        // cyberpunk signature, and it survives to a distance the dots do not.
+        if (!fwd_face && r.z > 0.55) {
+            let bar = (1.0 - smoothstep(0.020, 0.055 + 0.5 * fpd,
+                                        abs(q.z - 0.74)))
+                    * (1.0 - smoothstep(0.55, 0.72, ay));
+            e = e + vec3<f32>(1.00, 0.06, 0.03)
+                    * (1.3 * mix(bar, 0.10, smoothstep(0.05, 0.30, fpd))
+                       * fade);
+        }
+    }
+
+    // Underglow: a strip under the sill, or the whole plenum on a hover car.
+    let glow_on = r.w < cc_streetlife_GLOW_FRAC;
+    if (glow_on) {
+        let gc = cc_streetlife_glow_color(fract(r.y * 3.77 + r.z * 0.13));
+        let hi_z = select(0.34, 0.30, hover);
+        let strip = (1.0 - smoothstep(hi_z - 0.10, hi_z + 0.06, q.z))
+                  * clamp(1.0 - abs(nl.z), 0.12, 1.0);
+        let amp = select(1.0, 1.7, hover);
+        e = e + gc * (cc_streetlife_GLOW_RAD * amp * strip * fade);
+    }
+    return e;
+}
+
+fn cc_streetlife_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    if (h.kind <= 101) {
+        return cc_streetlife_pole_shade(h, dir, fp);
+    }
+    if (h.kind <= 105) {
+        return cc_streetlife_car_shade(h, cc, dir, fp);
+    }
+    return cc_streetlife_bin_shade(h, dir, fp);
+}
+
+// --- component: adscreens (adscreens.wgsl) ---
+// adscreens — the big screens, and the weird things they are selling.
+//
+// About one building in twelve over 50 m carries screens — but weighted by
+// the cascade, so downtown runs nearer one in five and the outskirts one in
+// forty, because advertising clusters where the crowds are and a uniform
+// sprinkle left the megatower district (which is the shot) with almost none.
+// A chosen building offers each of its vertical box facades to a second draw,
+// and the ones that take it get ONE screen — 30-70% of the facade wide (up to
+// 86% on a merged superblock, which is where the giants live), aspect
+// anywhere from 4:3 to 1:2.5. That is a 10-50 m rectangle on an ordinary
+// tower and a 140 m one on a superblock: the loudest thing on the wall.
+//
+// Content features are sized in METRES, not in fractions of the panel —
+// character cells 3-6 m, dead-channel pixel pitch 0.7-1.6 m, test-card bars
+// 1.6-4 m. Sizing them as panel fractions instead (which is what this file
+// did first) gives a small screen 10 cm noise that is sub-pixel from across
+// the street and a superblock 30 m characters, so the same archetype read as
+// flat grey on one wall and as three enormous blobs on another.
+//
+// Six content archetypes, all pure math in screen-local uv, all static:
+//   FACE     a giant face suggestion — two eye blobs and a mouth bar over a
+//            skin vignette, with a neon pinprick in each eye. Abstracted
+//            enough that it reads as a face without ever being one.
+//   PRODUCT  a capsule silhouette, luminous, rimmed, on a saturated gradient
+//            with a halo bleeding off it. The object is never named.
+//   GLYPH    rows of pseudo-ideograms: three axis-aligned strokes per cell,
+//            endpoints snapped to a 3x3 lattice out of one pcg2d draw, so the
+//            characters have the regularity of writing without being any
+//            writing. No real text — the calibration forbids it and it would
+//            be worse if it were legible.
+//   STRIPES  a test card. Bar count a multiple of three, colours cycling
+//            through the screen's three-neon scheme, dark foot band.
+//   STATIC   a dead channel: hash noise, a few rows shear-glitched, a few
+//            more torn bright. Frozen — this is a broken screen, not a
+//            playing one.
+//   EYE      iris rings and radial spokes around a black pupil, one glint.
+//
+// Each screen draws a 3-colour scheme from an 8-hue neon family, and every
+// archetype is written as three scalar FIELDS against those three colours:
+// content = qa*f.x + qb*f.y + qc*f.z. That factoring is what makes the LOD
+// honest — the screen's mean is qa*m.x + qb*m.y + qc*m.z with m the fields'
+// own means, so the far-field colour is computed, not guessed.
+//
+// THE SCREEN IS OPAQUE. The facade hook is additive, so a bright emitter
+// dropped on the wall leaves the wall's own lit windows punching through it —
+// which is exactly what the first cut of this file did, and it read as a
+// projection rather than a panel. So the panel first SUBTRACTS the core's
+// window ladder over its whole outer rectangle (cc_adscreens_wall below
+// recomputes it, at the core's own fp_eff, which we can form because
+// u.cam_origin is in the uniform block) and then adds its own emission. The
+// bezel subtracts and adds nothing, so it is a genuinely dark frame rather
+// than a strip of bare wall, and the screen sits ON the building.
+//
+// BRIGHTNESS, and why it is not the brief's 2.5. At exposure 6 against a
+// white point of 15, radiance 2.5 lands at display 1.0 EXACTLY: a screen
+// normalised to a mean radiance of 2.5 is a wall-sized white rectangle with
+// no hue and no content, which is what it rendered as. The tone map is what
+// sets this scale, so the normalisation targets the mean colour's LARGEST
+// channel (the one that clips first) rather than its luminance, and puts it
+// near 0.6-1.4. The content's own contrast then carries highlights — glints,
+// hot cores, torn static rows — up past 4, where they clip to white on
+// purpose, the way a real LED wall photographs: a white-hot core in a field
+// that still has colour.
+//
+// LOD. Content dissolves into the screen's mean over fp in [0.055, 0.33] x
+// the screen's short side: full detail while the short side is wider than
+// ~18 px, gone by ~3. The screen itself NEVER goes — past the dissolve it is
+// a flat rectangle of exactly the colour its content averaged to, which is
+// what a city mega-screen is at two kilometres. Inside that window the four
+// periodic generators (glyph strokes, test-card bars, noise cells, iris
+// rings) each blend to their OWN mean over their OWN feature size, which is
+// far finer than the screen's, and the point highlights are gaussians
+// widened by the pixel with their integral held. Nothing aliases on the way
+// down and nothing vanishes at the bottom.
+//
+// THE MEANS ARE PER-SCREEN, NOT ENSEMBLE. A single-feature archetype's mean
+// depends strongly on its own hash draw — a fat capsule covers three times
+// the panel a thin one does — so an ensemble constant is wrong by 15-25% for
+// any particular screen, and that error IS the brightness step between the
+// resolved screen and the flat one. Every compact feature here therefore
+// carries a closed form in its own draw: capsule and annulus areas, Steiner
+// offsets for the rim and halo bands, exact gaussian integrals for the
+// glints. The two panel-filling gradients (FACE's vignette, EYE's radial)
+// are cubics in the aspect fitted to their erf integrals (max error 0.02%).
+// The many-cell archetypes (GLYPH, STRIPES, STATIC) need no per-screen form:
+// a screen holds dozens of cells, so the ensemble mean IS the screen's mean —
+// except STRIPES' bar brightness, which is drawn per colour index rather than
+// per bar so that its per-screen mean stays exact with only 2-5 bars a colour.
+//
+// Validation, twice over. On the CPU: a numpy port of these functions,
+// integrated on a 192^2 quadrature grid per screen over 120 screens x 6
+// aspects, against the closed forms. Per-screen error is under 1% on every
+// dominant field for aspects 0.55 and wider, rising to ~7% of the panel mean
+// at the narrowest 1:2.5 banner, where compact features clip against the
+// panel edge and the unclipped areas overstate them. (For contrast, the
+// ensemble constants this file started with were off by 2.8x on GLYPH and 3x
+// on PRODUCT's halo, and gave FACE's glint a NEGATIVE mean.)
+//
+// And on the GPU, which is the claim that matters: fp is inversely
+// proportional to render width at fixed fov, so rendering one parked camera
+// at widths from 1920 down to 120 walks every screen in the frame through
+// the entire LOD ladder with the geometry, the occlusion and the hash draws
+// all held fixed. Over that 16x sweep the panels' mean displayed colour
+// moves by at most 1.3% between adjacent steps and 2.6% end to end, with no
+// step at either hand-off. That is the no-pops-on-a-dolly claim, measured
+// rather than asserted.
+
+const cc_adscreens_MIN_H: f32 = 50.0;      // shorter buildings get no screen
+const cc_adscreens_BLDG_FRAC: f32 = 0.085; // of tall buildings
+const cc_adscreens_FACE_FRAC: f32 = 0.55;  // of a chosen building's facades
+const cc_adscreens_MIN_FACADE_W: f32 = 14.0;
+const cc_adscreens_MIN_SCREEN: f32 = 6.0;
+const cc_adscreens_BASE_LO: f32 = 8.0;     // lower edge above the tier base
+const cc_adscreens_BASE_HI: f32 = 25.0;
+const cc_adscreens_BEZEL_FRAC: f32 = 0.028;
+const cc_adscreens_BEZEL_MIN: f32 = 0.40;
+// Content -> mean, as a fraction of the screen's short side (m/px).
+const cc_adscreens_LOD_LO: f32 = 0.055;
+const cc_adscreens_LOD_HI: f32 = 0.33;
+// Peak-channel radiance of the screen's MEAN colour (see the header): the
+// band a screen's overall level is drawn from.
+const cc_adscreens_WANT_LO: f32 = 0.60;
+const cc_adscreens_WANT_HI: f32 = 1.40;
+// Light the screen throws on the wall around it. A screen this bright with a
+// perfectly sharp edge reads as a decal; a little spill is what puts it in
+// front of the masonry.
+const cc_adscreens_SPILL: f32 = 0.055;
+const cc_adscreens_SPILL_SIG: f32 = 1.6;   // metres, scaled by screen size
+
+// --- field means -----------------------------------------------------------
+// The panel-filling gradients, as cubics in the aspect ratio: the mean of
+// exp(-(a x^2 + b y^2)) over the panel, which is an erf product WGSL has no
+// erf for. Fitted over ar in [0.40, 1.34]; max relative error 0.02%.
+// FACE's vignette, exp(-3 x^2 - 4.05 y^2):
+const cc_adscreens_VIGN_C: vec4<f32> =
+    vec4<f32>(0.743370, 0.012539, -0.231555, 0.069387);
+// EYE's background, exp(-2.2 (x^2 + y^2)):
+const cc_adscreens_EYEBG_C: vec4<f32> =
+    vec4<f32>(0.840833, 0.016997, -0.198110, 0.051518);
+// GLYPH: mean ink of the 3-stroke alphabet, blanks (1 cell in 8) included.
+// Measured over 3000 alphabet draws on a 96^2 grid: 0.1388.
+const cc_adscreens_M_GLYPH: f32 = 0.1388;
+// STRIPES: the bottom 18% of the panel dimmed to 0.15 -> 0.82 + 0.18*0.15.
+const cc_adscreens_STRIPE_FOOT: f32 = 0.847;
+// STATIC: a uniform hash averages to a half; 6% of rows are torn bright.
+const cc_adscreens_M_STATIC: vec2<f32> = vec2<f32>(0.5, 0.06);
+// EYE: E[(0.45 + 0.75*rings)(0.70 + 0.55*spokes)] at rings = spokes = 1/2.
+const cc_adscreens_IRIS_MEAN: f32 = 0.80438;
+const cc_adscreens_TAU: f32 = 6.2831853;
+const cc_adscreens_SQRT_HALF_PI: f32 = 1.2533141;
+
+fn cc_adscreens_cubic(c: vec4<f32>, x: f32) -> f32 {
+    return c.x + x * (c.y + x * (c.z + x * c.w));
+}
+
+// The advertising palette: saturated where the windows are not. Deliberately
+// louder than city_window_color — a screen that shares the facade's spectrum
+// stops being a screen.
+fn cc_adscreens_neon(k: f32) -> vec3<f32> {
+    let i = i32(clamp(k, 0.0, 0.9999) * 8.0);
+    if (i == 0) { return vec3<f32>(1.00, 0.13, 0.42); }  // rose
+    if (i == 1) { return vec3<f32>(0.10, 0.90, 1.00); }  // cyan
+    if (i == 2) { return vec3<f32>(1.00, 0.60, 0.10); }  // amber
+    if (i == 3) { return vec3<f32>(0.52, 1.00, 0.20); }  // acid green
+    if (i == 4) { return vec3<f32>(0.60, 0.30, 1.00); }  // violet
+    if (i == 5) { return vec3<f32>(1.00, 0.22, 0.10); }  // hot red
+    if (i == 6) { return vec3<f32>(0.82, 0.90, 1.00); }  // cold white
+    return vec3<f32>(1.00, 0.84, 0.32);                  // warm yellow
+}
+
+fn cc_adscreens_sd_seg(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * t);
+}
+
+// Area of a disc of radius r centred in a strip of half-width w: the iris of
+// a narrow vertical banner runs off both sides of it, and an unclipped pi r^2
+// would overstate its mean by half.
+fn cc_adscreens_disc_clip(r: f32, w: f32) -> f32 {
+    let full = 3.14159265 * r * r;
+    if (r <= w) {
+        return full;
+    }
+    let seg = r * r * acos(clamp(w / r, -1.0, 1.0))
+            - w * sqrt(max(r * r - w * w, 0.0));
+    return full - 2.0 * seg;
+}
+
+// Does this hit sit on the +nh face of that box? The facade hook gets a
+// position and a normal but not which of the building's boxes it belongs to,
+// and the screen has to be laid out on THAT box's extent.
+fn cc_adscreens_on_face(p: vec3<f32>, nh: vec2<f32>,
+                        bmin: vec3<f32>, bmax: vec3<f32>) -> bool {
+    if (p.z < bmin.z - 0.05 || p.z > bmax.z + 0.05) {
+        return false;
+    }
+    let far_c = select(bmin.xy, bmax.xy, nh > vec2<f32>(0.0));
+    if (abs(dot(p.xy, nh) - dot(far_c, nh)) > 0.06) {
+        return false;
+    }
+    let tg = vec2<f32>(-nh.y, nh.x);
+    let ua = dot(bmin.xy, tg);
+    let ub = dot(bmax.xy, tg);
+    let u = dot(p.xy, tg);
+    return u > min(ua, ub) - 0.06 && u < max(ua, ub) + 0.06;
+}
+
+// --- what the panel covers -------------------------------------------------
+//
+// The core's window ladder at this point on the wall, recomputed so the panel
+// can subtract it. This mirrors the facade branch of city_shade: the same
+// lattice, the same style switch, the same two far-field octaves and the same
+// fp_eff hand-offs. It is the one place this component reaches into core
+// behaviour rather than calling it, and it is duplication only because the
+// core's facade emission is inlined in city_shade rather than factored into a
+// function a component could call. If it is ever factored out, this goes.
+//
+// It includes the cc_window_glyph term, because it has to: the core
+// multiplies a lit pane by whatever the glyph components put behind the
+// glass, and leaving it out left windowlife's occupants standing on the
+// panel as bright silhouettes — visible, and the one defect an
+// occlusion-only test render still showed. That dispatcher is a composer
+// guarantee rather than another component's symbol (it exists, returning
+// 1, whatever is registered), and WGSL resolves module-scope functions out
+// of order, so calling it forward is safe. With it in, the wall under the
+// panel goes exactly black.
+fn cc_adscreens_wall(cc: CityCell, uc: f32, vc: f32, fp: f32,
+                     fp_eff: f32) -> vec3<f32> {
+    let fp_glyph = fp;
+    let iu = i32(floor(uc / cc.win_pitch));
+    let iv = i32(floor(vc / CITY_FLOOR_H));
+    let wh = city_rand4(vec2<u32>(
+        cc.seed.x ^ bitcast<u32>(iu),
+        cc.seed.y ^ bitcast<u32>(iv)
+    ));
+    let fh = city_rand4(vec2<u32>(
+        cc.seed.x ^ 0x2545f491u,
+        bitcast<u32>(iv) * 0x9e3779b9u
+    ));
+    let floor_dark = fh.x < CITY_DARK_FLOOR_FRAC;
+    let fu = fract(uc / cc.win_pitch);
+    let fv = fract(vc / CITY_FLOOR_H);
+    let pane = fu > cc.pane_lo.x && fu < cc.pane_hi.x
+            && fv > cc.pane_lo.y && fv < cc.pane_hi.y;
+    var is_on = wh.x < cc.lit_frac;
+    if (cc.win_style == 1) {
+        let sh = city_rand4(vec2<u32>(
+            cc.seed.x ^ (bitcast<u32>(iu >> 1) * 0x9e3779b9u),
+            cc.seed.y ^ (bitcast<u32>(iv) * 0x51ed270bu)));
+        is_on = sh.x < cc.lit_frac * 1.15;
+    } else if (cc.win_style == 2) {
+        let sh = city_rand4(vec2<u32>(
+            cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u),
+            cc.seed.y ^ (bitcast<u32>(iv >> 2) * 0x51ed270bu)));
+        is_on = sh.x < cc.lit_frac * 1.10;
+    } else if (cc.win_style == 3) {
+        let fl = city_rand4(vec2<u32>(
+            cc.seed.x ^ 0x7feb352du,
+            bitcast<u32>(iv) * 0x846ca68bu));
+        is_on = fl.x < cc.lit_frac * 1.5 && wh.x < 0.88;
+    }
+    let lit = pane && !floor_dark && is_on;
+    var e_win = vec3<f32>(0.0);
+    if (lit) {
+        let style_gain = select(
+            select(1.0, 0.80, cc.win_style == 1),
+            0.55, cc.win_style == 3);
+        let bright = (0.25 + 5.0 * pow(wh.z, 7.0)) * style_gain;
+        var cdraw = wh.y;
+        if (cc.win_mono >= 0.0) {
+            cdraw = clamp(cc.win_mono + (wh.y - 0.5) * 0.08, 0.0, 1.0);
+        }
+        e_win = city_window_color(cdraw, cc.palette_bias)
+                * (CITY_WIN_RADIANCE * bright);
+        let pane_uv = (vec2<f32>(fu, fv) - cc.pane_lo)
+                      / max(cc.pane_hi - cc.pane_lo, vec2<f32>(1e-4));
+        e_win = e_win * cc_window_glyph(cc, wh, pane_uv, fp_glyph);
+    }
+    let e_mean_base = CITY_PALETTE_MEAN
+        * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
+           * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN);
+    let ibu = iu >> 2;
+    let ibv = iv >> 2;
+    let bh1 = city_rand4(vec2<u32>(
+        cc.seed.x ^ (bitcast<u32>(ibu) * 0x85ebca6bu),
+        cc.seed.y ^ (bitcast<u32>(ibv) * 0xc2b2ae35u)
+    ));
+    var block_color = CITY_PALETTE_MEAN;
+    if (bh1.y < 0.03) {
+        block_color = city_window_color(0.90 + 0.09 * bh1.z, cc.palette_bias);
+    }
+    let block_var = 0.10 + 1.8 * pow(bh1.x, 5.0);
+    let e_block = block_color
+        * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
+           * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
+           * CITY_MEAN_COMP_BLOCK * block_var);
+    let bh2 = city_rand4(vec2<u32>(
+        cc.seed.x ^ 0x51ed270bu,
+        bitcast<u32>(iv >> 4) * 0x9e3779b9u
+    ));
+    let band = 0.70 + 0.60 * bh2.x;
+    let e_flat = e_mean_base * (CITY_MEAN_COMP_FLAT * band);
+    let b1 = smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
+    let b2 = smoothstep(CITY_BLOCK_LOD_START, CITY_BLOCK_LOD_FULL, fp_eff);
+    return mix(e_win, mix(e_block, e_flat, b2), b1);
+}
+
+// --- the archetypes --------------------------------------------------------
+//
+// All of them take screen-local coordinates and return the three scalar
+// fields that multiply the screen's three colours, plus — where the mean
+// depends on the screen's own draw — the closed form of those fields' means.
+// px and py are in units of the screen HEIGHT (px = (su - 0.5) * ar), so a
+// circle drawn in them is round on the wall whatever the panel's shape. aa is
+// half a pixel in those units; ps is the pixel's own half-width, for the
+// gaussians that have to conserve their integral rather than shrink out of
+// existence.
+
+// A giant face. The eyes are blobs and the mouth is a bar, because a face
+// assembled from parts you can name is a cartoon; what makes this one land is
+// that the parts are just dark masses in the right places, over a vignette
+// that could as easily be a light. The neon pinpricks in the eyes are the
+// wrongness: nobody's eyes do that.
+fn cc_adscreens_face(ch: vec4<f32>, px: f32, py: f32, aa: f32,
+                     ps: f32) -> vec3<f32> {
+    let sep = 0.13 + 0.07 * ch.x;
+    let ey = 0.10 + 0.06 * ch.y;
+    let er = 0.055 + 0.030 * ch.z;
+    let my = -0.14 - 0.09 * ch.w;
+    let mhw = 0.13 + 0.08 * ch.x;
+    let mhh = 0.016 + 0.022 * ch.y;
+    // Eyes are a little taller than wide, and the mouth is a slab.
+    let d1 = length(vec2<f32>(px + sep, (py - ey) * 0.82));
+    let d2 = length(vec2<f32>(px - sep, (py - ey) * 0.82));
+    let e1 = 1.0 - smoothstep(er * 0.70, er * 1.15 + aa, d1);
+    let e2 = 1.0 - smoothstep(er * 0.70, er * 1.15 + aa, d2);
+    let mo = (1.0 - smoothstep(mhw - 0.02 - aa, mhw + 0.02 + aa, abs(px)))
+           * (1.0 - smoothstep(mhh - aa, mhh + 0.012 + aa, abs(py - my)));
+    let mask = clamp(max(max(e1, e2), mo), 0.0, 1.0);
+    let vign = 0.42 + 0.58 * exp(-3.0 * (px * px + 1.35 * py * py));
+    let skin = vign * (1.0 - 0.90 * mask);
+    // Two point highlights, set off-centre in the eyes so the gaze is not
+    // straight out. Widened by the pixel with the integral held, so they dim
+    // honestly instead of flickering.
+    let s0 = er * 0.26;
+    let s = sqrt(s0 * s0 + ps * ps);
+    let amp = 3.2 * (s0 * s0) / (s * s);
+    let k = -0.5 / (s * s);
+    let o = er * 0.28;
+    let g1 = vec2<f32>(px + sep - o, py - ey - er * 0.18);
+    let g2 = vec2<f32>(px - sep - o, py - ey - er * 0.18);
+    let glint = amp * (exp(k * dot(g1, g1)) + exp(k * dot(g2, g2)));
+    return vec3<f32>(skin, glint, 0.0);
+}
+
+fn cc_adscreens_face_mean(ch: vec4<f32>, ar: f32) -> vec3<f32> {
+    let sep = 0.13 + 0.07 * ch.x;
+    let ey = 0.10 + 0.06 * ch.y;
+    let er = 0.055 + 0.030 * ch.z;
+    let my = -0.14 - 0.09 * ch.w;
+    let mhw = 0.13 + 0.08 * ch.x;
+    let mhh = 0.016 + 0.022 * ch.y;
+    let vign = 0.42 + 0.58 * cc_adscreens_cubic(cc_adscreens_VIGN_C, ar);
+    // The blobs cut the vignette where they sit, so each area is weighted by
+    // the vignette at its own centre, not by the panel average.
+    let re = 0.925 * er;
+    let a_eye = 3.14159265 * re * re / 0.82;
+    let a_mouth = 4.0 * mhw * (mhh + 0.006);
+    let ve = 0.42 + 0.58 * exp(-3.0 * (sep * sep + 1.35 * ey * ey));
+    let vm = 0.42 + 0.58 * exp(-3.0 * (1.35 * my * my));
+    let skin = vign - 0.90 * (2.0 * a_eye * ve + a_mouth * vm) / ar;
+    let s0 = er * 0.26;
+    let glint = 3.2 * cc_adscreens_TAU * s0 * s0 * 2.0 / ar;
+    return vec3<f32>(skin, glint, 0.0);
+}
+
+// A product: one luminous capsule, a rim where the silhouette turns away,
+// and a halo bleeding into a saturated gradient. Bottle, ampoule, pill,
+// canister — the point is that it is never quite any of them.
+fn cc_adscreens_product(ch: vec4<f32>, sv: f32, px: f32, py: f32,
+                        aa: f32) -> vec3<f32> {
+    let th = (ch.x - 0.5) * 0.9;
+    let ln = 0.10 + 0.11 * ch.y;
+    let r = 0.055 + 0.050 * ch.z;
+    let ax = vec2<f32>(sin(th), cos(th));
+    let p = vec2<f32>(px, py + 0.02);
+    let d = cc_adscreens_sd_seg(p, -ax * ln, ax * ln) - r;
+    let body = 1.0 - smoothstep(-aa - 0.004, aa + 0.004, d);
+    let rim = exp(-abs(d) * 22.0);
+    let bg = (0.18 + 0.82 * pow(1.0 - sv, 1.3)) * 0.55;
+    let dh = max(d, 0.0);
+    let halo = 1.1 * exp(-dh * dh / (2.0 * 0.075 * 0.075));
+    return vec3<f32>(bg, body * 2.4 + rim * 1.1, halo);
+}
+
+// Areas by Steiner: a convex body's offset region at distance s has area
+// (perimeter + 2 pi s) ds, which integrates the rim's exponential and the
+// halo's gaussian in closed form. The inward rim saturates at the inradius.
+fn cc_adscreens_product_mean(ch: vec4<f32>, ar: f32) -> vec3<f32> {
+    let ln = 0.10 + 0.11 * ch.y;
+    let r = 0.055 + 0.050 * ch.z;
+    let area = 4.0 * ln * r + 3.14159265 * r * r;
+    let peri = 4.0 * ln + 2.0 * 3.14159265 * r;
+    let k = 22.0;
+    let ekr = exp(-k * r);
+    let rim_out = peri / k + 2.0 * 3.14159265 / (k * k);
+    let rim_in = peri * (1.0 - ekr) / k
+               - 2.0 * 3.14159265 * (1.0 - ekr * (1.0 + k * r)) / (k * k);
+    let sig = 0.075;
+    let halo = 1.1 * (area + peri * sig * cc_adscreens_SQRT_HALF_PI
+                      + 2.0 * 3.14159265 * sig * sig);
+    // The background gradient is exact: mean of (0.18 + 0.82 (1-sv)^1.3)*0.55.
+    return vec3<f32>(0.29509,
+                     (2.4 * area + 1.1 * (rim_out + rim_in)) / ar,
+                     halo / ar);
+}
+
+// A wall of writing that is not writing. Three axis-aligned strokes per cell
+// with endpoints snapped to a 3x3 lattice: that quantization is the whole
+// trick — free-floating segments read as scribble, snapped ones read as
+// characters, and a character set you cannot read is more unsettling than
+// one you can. One cell in eight is blank, which is what gives the rows
+// their rhythm.
+fn cc_adscreens_glyph_cell(bits: vec2<u32>, cu: f32, cv: f32,
+                           aa: f32) -> f32 {
+    if ((bits.y & 7u) == 0u) {
+        return 0.0;
+    }
+    let p = vec2<f32>(cu, cv);
+    let t = 0.075;
+    var m = 0.0;
+    for (var k: u32 = 0u; k < 3u; k = k + 1u) {
+        let sft = k * 8u;
+        let horiz = ((bits.x >> sft) & 1u) == 0u;
+        let c = 0.14 + 0.72 * f32((bits.x >> (sft + 1u)) & 3u) / 3.0;
+        let s = 0.14 + 0.72 * f32((bits.x >> (sft + 3u)) & 3u) / 3.0;
+        let e = min(0.86, s + 0.72 * (0.30 + 0.60
+                    * f32((bits.x >> (sft + 5u)) & 3u) / 3.0));
+        var a: vec2<f32>;
+        var b: vec2<f32>;
+        if (horiz) {
+            a = vec2<f32>(s, c);
+            b = vec2<f32>(e, c);
+        } else {
+            a = vec2<f32>(c, s);
+            b = vec2<f32>(c, e);
+        }
+        let d = cc_adscreens_sd_seg(p, a, b);
+        m = max(m, 1.0 - smoothstep(t - aa, t + aa, d));
+    }
+    return m;
+}
+
+// Iris rings around a black pupil. The staple, and it earns its place: an
+// eye at forty metres across is the one image on this wall that looks back.
+fn cc_adscreens_eye(ch: vec4<f32>, px: f32, py: f32, aa: f32, ps: f32,
+                    damp: f32) -> vec3<f32> {
+    let rr = 0.28 + 0.12 * ch.x;
+    let pu = rr * (0.24 + 0.14 * ch.y);
+    let cx = (ch.z - 0.5) * 0.10;
+    let cy = (ch.w - 0.5) * 0.08;
+    let q = vec2<f32>(px - cx, py - cy);
+    let d = length(q);
+    let bg = 0.12 + 0.55 * exp(-2.2 * d * d);
+    let nr = 14.0 + 10.0 * ch.y;
+    let ns = 14.0 + floor(ch.x * 14.0);
+    // Rings and spokes are the finest periodic structure on this screen and
+    // blend to their own means (1/2 and 1/2) well before the panel does.
+    let rings = mix(0.5 + 0.5 * sin(nr * cc_adscreens_TAU * (d / rr)
+                                    + ch.z * cc_adscreens_TAU), 0.5, damp);
+    let spokes = mix(0.5 + 0.5 * sin(atan2(q.y, q.x) * ns), 0.5, damp);
+    let shape = (1.0 - smoothstep(rr * 0.90, rr + aa, d))
+              * smoothstep(pu * 0.85, pu * 1.15 + aa, d);
+    let iris = shape * (0.45 + 0.75 * rings) * (0.70 + 0.55 * spokes);
+    let s0 = rr * 0.10;
+    let s = sqrt(s0 * s0 + ps * ps);
+    let amp = 5.0 * (s0 * s0) / (s * s);
+    let g = vec2<f32>(q.x + rr * 0.30, q.y - rr * 0.34);
+    let glint = amp * exp(-0.5 * dot(g, g) / (s * s));
+    return vec3<f32>(bg, iris, glint);
+}
+
+fn cc_adscreens_eye_mean(ch: vec4<f32>, ar: f32) -> vec3<f32> {
+    let rr = 0.28 + 0.12 * ch.x;
+    let pu = rr * (0.24 + 0.14 * ch.y);
+    let bg = 0.12 + 0.55 * cc_adscreens_cubic(cc_adscreens_EYEBG_C, ar);
+    // The annulus between the two smoothstep midpoints, clipped by the panel
+    // sides — a tall banner cuts the iris off well inside its radius.
+    let a_ann = cc_adscreens_disc_clip(0.95 * rr, 0.5 * ar)
+              - 3.14159265 * pu * pu;
+    let s0 = rr * 0.10;
+    return vec3<f32>(bg,
+                     cc_adscreens_IRIS_MEAN * a_ann / ar,
+                     5.0 * cc_adscreens_TAU * s0 * s0 / ar);
+}
+
+// --- the hook --------------------------------------------------------------
+
+fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
+                       fp: f32) -> vec3<f32> {
+    if (!cc.built || cc.height < cc_adscreens_MIN_H) {
+        return vec3<f32>(0.0);
+    }
+    // Screens hang on flat vertical wall. A tapered shaft's skin is neither,
+    // and the same rule that keeps antennas off a spire keeps screens off it.
+    if (abs(h.normal.z) > 0.02) {
+        return vec3<f32>(0.0);
+    }
+    // Which buildings. The base rate is one tall building in twelve, but not
+    // spread evenly: screens CLUSTER. A uniform sprinkle put a handful on the
+    // whole skyline and none at all in either canyon the harness frames, and
+    // that is also not how a city works — the walls that carry advertising
+    // are the ones a crowd walks past. So the draw is weighted by the
+    // cascade percentile that already sets height and occupancy: downtown
+    // runs about 2.5x the base rate, the outskirts a quarter of it, and the
+    // megatower district (which is the shot) reliably carries screens.
+    let dens_w = 0.30 + 2.20 * smoothstep(0.50, 0.95, cc.rank);
+    let bd = city_rand4(cc.seed ^ vec2<u32>(0x1f83d9abu, 0x5be0cd19u));
+    if (bd.x >= cc_adscreens_BLDG_FRAC * dens_w) {
+        return vec3<f32>(0.0);
+    }
+
+    let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
+    let tg = vec2<f32>(-nh.y, nh.x);
+    var bmin = cc.b1min;
+    var bmax = cc.b1max;
+    var tier: u32 = 0u;
+    var found = cc_adscreens_on_face(h.pos, nh, cc.b1min, cc.b1max);
+    if (cc.tiers >= 2 && cc_adscreens_on_face(h.pos, nh, cc.b2min, cc.b2max)) {
+        bmin = cc.b2min; bmax = cc.b2max; tier = 1u; found = true;
+    }
+    if (cc.tiers >= 3 && cc_adscreens_on_face(h.pos, nh, cc.b3min, cc.b3max)) {
+        bmin = cc.b3min; bmax = cc.b3max; tier = 2u; found = true;
+    }
+    if (!found) {
+        return vec3<f32>(0.0);
+    }
+    let ua = dot(bmin.xy, tg);
+    let ub = dot(bmax.xy, tg);
+    let u0 = min(ua, ub);
+    let fw = abs(ub - ua);
+    if (fw < cc_adscreens_MIN_FACADE_W) {
+        return vec3<f32>(0.0);
+    }
+
+    var fid: u32 = 0u;
+    if (nh.x < -0.5) { fid = 1u; }
+    else if (nh.y > 0.5) { fid = 2u; }
+    else if (nh.y < -0.5) { fid = 3u; }
+    let key = vec2<u32>(cc.seed.x ^ (fid * 0x9e3779b9u) ^ 0x243f6a88u,
+                        cc.seed.y ^ (tier * 0x85ebca6bu) ^ 0x13198a2eu);
+    let ph = city_rand4(key);
+    if (ph.x >= cc_adscreens_FACE_FRAC) {
+        return vec3<f32>(0.0);
+    }
+    let ph2 = city_rand4(vec2<u32>(key.x ^ 0xa4093822u, key.y ^ 0x299f31d0u));
+
+    // Size. A merged superblock's facade is already twice as wide, and it is
+    // allowed a bigger fraction of it on top: those are the giants.
+    let wlo = select(0.30, 0.35, cc.merged);
+    let whi = select(0.70, 0.86, cc.merged);
+    var sw = fw * mix(wlo, whi, ph.y);
+    let ar = 0.40 + 0.93 * ph.z;          // width : height, 1:2.5 .. 4:3
+    var sz = sw / ar;
+    // Where the screen's lower edge sits. A mid-rise takes the plain law —
+    // 8 to 25 m above the tier it stands on, which is where a screen goes on
+    // a building you walk past. A megatower cannot: its tier-1 wall is
+    // hundreds of metres of facade, soar's camera flies well above the
+    // street, and a 25-m-high mark on a 400 m shaft is a thing no flight
+    // ever sees. So a tall wall places its screen proportionally instead,
+    // anywhere in the lower two thirds of itself — the same argument
+    // facadeworks makes for signage, and the same crossover.
+    let wall_h = bmax.z - bmin.z;
+    let z_low = cc_adscreens_BASE_LO
+              + (cc_adscreens_BASE_HI - cc_adscreens_BASE_LO) * ph.w;
+    let z_tall = wall_h * (0.06 + 0.60 * ph.w);
+    let z0 = bmin.z + mix(z_low, max(z_tall, z_low),
+                          smoothstep(90.0, 320.0, wall_h));
+    let avail = bmax.z - 3.0 - z0;
+    if (avail < cc_adscreens_MIN_SCREEN) {
+        return vec3<f32>(0.0);
+    }
+    if (sz > avail) {                      // keep the aspect, lose the size
+        sw = sw * (avail / sz);
+        sz = avail;
+    }
+    if (sw < cc_adscreens_MIN_SCREEN) {
+        return vec3<f32>(0.0);
+    }
+    let slack = max(fw - 2.0 - sw, 0.0);
+    let su = (uc - (u0 + 1.0 + slack * ph2.x)) / sw;
+    let sv = (vc - z0) / sz;
+    // The spill reaches beyond the panel, so the reject has to as well.
+    let spill_sig = clamp(cc_adscreens_SPILL_SIG * (1.0 + 0.02 * min(sw, sz)),
+                          0.8, 5.0);
+    let mu = 2.6 * spill_sig / sw;
+    let mv = 2.6 * spill_sig / sz;
+    if (su < -mu || su > 1.0 + mu || sv < -mv || sv > 1.0 + mv) {
+        return vec3<f32>(0.0);
+    }
+
+    // The view direction, and with it the core's own foreshortened footprint:
+    // the panel has to subtract the wall at exactly the LOD the core drew it.
+    let dir = normalize(h.pos - u.cam_origin.xyz);
+    let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);
+
+    // The outer rectangle: everything inside it is panel or bezel, and the
+    // wall behind all of it is covered.
+    let au = clamp(0.6 * fp / sw, 0.0015, 0.25);
+    let av = clamp(0.6 * fp / sz, 0.0015, 0.25);
+    let outer =
+        smoothstep(-au, au, su) * (1.0 - smoothstep(1.0 - au, 1.0 + au, su))
+        * smoothstep(-av, av, sv) * (1.0 - smoothstep(1.0 - av, 1.0 + av, sv));
+    // The bezel: a thin dark frame the screen sits inside, so it reads as
+    // mounted on the wall rather than painted into it.
+    let bez = max(cc_adscreens_BEZEL_MIN,
+                  cc_adscreens_BEZEL_FRAC * min(sw, sz));
+    let bu = bez / sw;
+    let bv = bez / sz;
+    let panel =
+        smoothstep(bu - au, bu + au, su)
+        * (1.0 - smoothstep(1.0 - bu - au, 1.0 - bu + au, su))
+        * smoothstep(bv - av, bv + av, sv)
+        * (1.0 - smoothstep(1.0 - bv - av, 1.0 - bv + av, sv));
+
+    // Three colours out of the neon family, never the same one twice.
+    let qa0 = cc_adscreens_neon(ph2.z);
+    let qb0 = cc_adscreens_neon(fract(ph2.z + 0.19 + 0.60 * ph2.w));
+    let qc0 = cc_adscreens_neon(fract(ph2.z + 0.44 + 0.30 * ph.y));
+    let ch = city_rand4(vec2<u32>(key.x ^ 0x082efa98u, key.y ^ 0xec4e6c89u));
+
+    let px = (su - 0.5) * ar;
+    let py = sv - 0.5;
+    let aa = clamp(0.6 * fp / sz, 0.0008, 0.20);
+    let ps = 0.5 * fp / sz;
+
+    var f: vec3<f32>;
+    var m: vec3<f32>;
+    var qa: vec3<f32>;
+    var qb: vec3<f32>;
+    var qc: vec3<f32>;
+    // Not every screen runs at the same level. A dead channel is the dimmest
+    // thing on the street, not the brightest; a face lit to full white loses
+    // the skin it is supposed to have.
+    var lvl = 1.0;
+    let ad = ph2.y;
+    if (ad < 0.17) {                                   // FACE
+        f = cc_adscreens_face(ch, px, py, aa, ps);
+        m = cc_adscreens_face_mean(ch, ar);
+        qa = mix(vec3<f32>(1.00, 0.68, 0.52), qa0, 0.35);
+        qb = qb0;
+        qc = vec3<f32>(0.0);
+        lvl = 0.72;
+    } else if (ad < 0.38) {                            // PRODUCT
+        f = cc_adscreens_product(ch, sv, px, py, aa);
+        m = cc_adscreens_product_mean(ch, ar);
+        qa = qa0 * 0.60;
+        qb = mix(qb0, vec3<f32>(1.0), 0.55);
+        qc = qc0;
+    } else if (ad < 0.59) {                            // GLYPH
+        // Characters are sized in METRES, not in panel fractions: a shop
+        // screen carries three of them and a superblock carries thirty,
+        // which is the difference between a sign and a wall of writing.
+        // Counting rows as a fixed fraction of the panel instead made every
+        // screen three characters tall, so the small ones read as scribble
+        // and the giants as three enormous blobs.
+        let cell_m = 3.2 + 3.0 * ch.x;
+        let nr = clamp(round(sz / cell_m), 2.0, 40.0);
+        let nc = clamp(round(sw / (cell_m * (0.85 + 0.35 * ch.y))),
+                       1.0, 60.0);
+        let gx = su * nc;
+        let gy = sv * nr;
+        let ix = i32(floor(gx));
+        let iy = i32(floor(gy));
+        let bits = pcg2d(vec2<u32>(
+            key.x ^ (bitcast<u32>(ix) * 0x9e3779b9u),
+            key.y ^ (bitcast<u32>(iy) * 0x85ebca6bu)));
+        // Cell size on the wall sets when the strokes stop resolving.
+        let cs = min(sw / nc, sz / nr);
+        let dmp = smoothstep(0.30 * cs, 1.1 * cs, fp);
+        let gm = mix(cc_adscreens_glyph_cell(
+                         bits, fract(gx), fract(gy),
+                         clamp(0.6 * fp / cs, 0.002, 0.25)),
+                     cc_adscreens_M_GLYPH, dmp);
+        f = vec3<f32>(0.40 + 0.30 * (1.0 - sv), gm * 2.6, 0.0);
+        m = vec3<f32>(0.55, cc_adscreens_M_GLYPH * 2.6, 0.0);
+        qa = select(vec3<f32>(0.42, 0.03, 0.06), vec3<f32>(0.04, 0.07, 0.42),
+                    ch.w > 0.5);
+        qb = qa0;
+        qc = vec3<f32>(0.0);
+    } else if (ad < 0.70) {                            // STRIPES
+        // Bars are metres wide too, and their count stays a multiple of
+        // three so each colour gets exactly a third of the panel.
+        let bar_m = 1.6 + 2.4 * ch.y;
+        let nb = 3.0 * clamp(round(sw / (3.0 * bar_m)), 2.0, 12.0);
+        let j = floor(clamp(su, 0.0, 0.99999) * nb);
+        let idx = i32(j) - 3 * (i32(j) / 3);
+        // One brightness per COLOUR, not per bar: with only 2-5 bars to a
+        // colour, a per-bar draw would leave the screen's true mean 15% away
+        // from any constant we could write down, and that gap is the LOD
+        // step. Per colour it is exact.
+        let bh = city_rand4(vec2<u32>(key.x ^ 0x27d4eb2fu, key.y ^ 0x165667b1u));
+        let brs = vec3<f32>(0.55 + 0.90 * bh.x, 0.55 + 0.90 * bh.y,
+                            0.55 + 0.90 * bh.z);
+        let br = select(select(brs.z, brs.y, idx == 1), brs.x, idx == 0);
+        let foot = mix(0.15, 1.0, smoothstep(0.18 - av, 0.18 + av, sv));
+        let v = br * foot;
+        m = brs * (cc_adscreens_STRIPE_FOOT / 3.0);
+        let dmp = smoothstep(0.45 * sw / nb, 1.4 * sw / nb, fp);
+        f = mix(vec3<f32>(select(0.0, v, idx == 0), select(0.0, v, idx == 1),
+                          select(0.0, v, idx == 2)), m, dmp);
+        qa = qa0;
+        qb = qb0;
+        qc = qc0;
+    } else if (ad < 0.81) {                            // STATIC
+        // The dead channel's pixel pitch is a physical size — a coarse LED
+        // module, 0.7-1.6 m — so the grain reads at the same distance on
+        // every screen instead of vanishing on the small ones.
+        let pitch_m = 0.7 + 0.9 * ch.x;
+        let ncx = clamp(round(sw / pitch_m), 6.0, 220.0);
+        let ncy = max(1.0, round(sz / pitch_m));
+        let row = floor(sv * ncy);
+        let rh = city_rand4(vec2<u32>(
+            key.x ^ (bitcast<u32>(i32(row)) * 0x9e3779b9u),
+            key.y ^ 0x51ed270bu));
+        // A tenth of the rows are sheared: a frozen glitch, not a moving one.
+        let uu = fract(su + select(0.0, (rh.y - 0.5) * 0.35, rh.x < 0.10));
+        let nz = city_rand4(vec2<u32>(
+            key.x ^ (bitcast<u32>(i32(floor(uu * ncx))) * 0x85ebca6bu),
+            key.y ^ (bitcast<u32>(i32(row)) * 0xc2b2ae35u)));
+        m = vec3<f32>(cc_adscreens_M_STATIC, 0.0);
+        let cs = min(sw / ncx, sz / ncy);
+        let dmp = smoothstep(0.35 * cs, 1.3 * cs, fp);
+        f = vec3<f32>(mix(nz.x, m.x, dmp),
+                      mix(select(0.0, 1.0, rh.z < 0.06), m.y, dmp), 0.0);
+        qa = vec3<f32>(0.78, 0.82, 0.92);
+        qb = qa0;
+        qc = vec3<f32>(0.0);
+        lvl = 0.55;
+    } else {                                           // EYE
+        let rr = 0.28 + 0.12 * ch.x;
+        let ring_p = rr * sz / (14.0 + 10.0 * ch.y);
+        let dmp = smoothstep(0.40 * ring_p, 1.3 * ring_p, fp);
+        f = cc_adscreens_eye(ch, px, py, aa, ps, dmp);
+        m = cc_adscreens_eye_mean(ch, ar);
+        qa = qa0 * 0.55;
+        qb = qb0;
+        qc = vec3<f32>(1.0, 0.98, 0.95);
+    }
+
+    // The screen's own mean colour: the three colours against the three field
+    // means. It is both the far-field asymptote and the yardstick the content
+    // is normalized against, so the level a screen was designed to have
+    // survives whatever its palette draw turned out to be. Normalising on the
+    // LARGEST channel rather than on luminance is what keeps the hue: the
+    // tone map clips channels one at a time, and a screen normalised by
+    // luminance drives its dominant channel far past the white point and
+    // comes back white.
+    let mean_c = max(qa * m.x + qb * m.y + qc * m.z, vec3<f32>(0.0));
+    let peak = max(max(mean_c.r, mean_c.g), mean_c.b);
+    let want = mix(cc_adscreens_WANT_LO, cc_adscreens_WANT_HI, ph2.x);
+    let gain = want * lvl / max(peak, 1e-3);
+
+    let lod = smoothstep(cc_adscreens_LOD_LO * min(sw, sz),
+                         cc_adscreens_LOD_HI * min(sw, sz), fp);
+    let content = mix(qa * f.x + qb * f.y + qc * f.z, mean_c, lod);
+
+    // Spill: the wall around the panel catches its light. Cheap, and it is
+    // what stops the screen reading as a decal printed on the masonry.
+    let dxu = max(max(-su, su - 1.0), 0.0) * sw;
+    let dyv = max(max(-sv, sv - 1.0), 0.0) * sz;
+    let dout = length(vec2<f32>(dxu, dyv));
+    let spill = cc_adscreens_SPILL
+              * exp(-0.5 * dout * dout / (spill_sig * spill_sig));
+
+    // Opaque: take the wall out over the whole outer rectangle, then put the
+    // screen back inside the bezel.
+    return content * (gain * panel)
+         + mean_c * (gain * spill * (1.0 - outer))
+         - cc_adscreens_wall(cc, uc, vc, fp, fp_eff) * outer;
+}
+
 fn cc_extra_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
         -> CityHit {
     var res: CityHit;
@@ -7478,6 +9912,8 @@ fn cc_cell_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (h_rooftopworks.hit && h_rooftopworks.t < res.t) { res = h_rooftopworks; }
     let h_skybridges = cc_skybridges_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
     if (h_skybridges.hit && h_skybridges.t < res.t) { res = h_skybridges; }
+    let h_streetlife = cc_streetlife_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
+    if (h_streetlife.hit && h_streetlife.t < res.t) { res = h_streetlife; }
     return res;
 }
 
@@ -7495,6 +9931,9 @@ fn cc_component_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     if (h.kind >= 500 && h.kind < 600) {
         return cc_skybridges_shade(h, cc, dir, fp);
     }
+    if (h.kind >= 100 && h.kind < 200) {
+        return cc_streetlife_shade(h, cc, dir, fp);
+    }
     // An unclaimed component kind is a bug, and this is its color.
     return vec3<f32>(1.0, 0.0, 1.0);
 }
@@ -7503,6 +9942,7 @@ fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
         -> vec3<f32> {
     var e = vec3<f32>(0.0);
     e = e + cc_facadeworks_detail(cc, h, uc, vc, fp);
+    e = e + cc_adscreens_facade(cc, h, uc, vc, fp);
     return e;
 }
 

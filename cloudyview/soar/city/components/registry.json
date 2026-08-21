@@ -56,6 +56,25 @@
     "shade": "cc_skybridges_shade"
    },
    "enabled": true
+  },
+  {
+   "file": "streetlife.wgsl",
+   "name": "streetlife",
+   "kind_base": 100,
+   "hooks": {
+    "cell_props": "cc_streetlife_props_trace",
+    "shade": "cc_streetlife_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "adscreens.wgsl",
+   "name": "adscreens",
+   "kind_base": 400,
+   "hooks": {
+    "facade": "cc_adscreens_facade"
+   },
+   "enabled": true
   }
  ]
 }
