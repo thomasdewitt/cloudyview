@@ -104,6 +104,34 @@ Signatures (the composer checks these by compiling):
   `vec3(1.0)` to leave a window alone. Sub-pixel glyphs (fp much larger
   than a pane) must return your glyph's mean transmission, not 1.
 
+## Detailed micro-geometry: the SDF-in-a-box pattern
+
+Props that the camera can get close to (vehicles, street furniture) should
+NOT be bare boxes — Thomas: the micro details should be *very highly
+detailed*, and the budget genuinely allows it. The pattern:
+
+1. Keep one cheap axis-aligned **bounding box** per prop for the DDA
+   (`city_box_hit`). This is the only cost the wide scene ever pays.
+2. When the bounding box IS hit and `fp` is small (say < 0.5 m/px),
+   **sphere-trace your own SDF inside the box**: 16-24 iterations from the
+   box entry, rounded boxes / capsules / smooth-min unions, small yaw
+   rotations applied to the local point (props need not be axis-aligned
+   inside their box). Normal by 4-tap SDF gradient. Return the refined hit;
+   if the SDF misses inside the box, return miss (rays graze past a curved
+   hull — that is what makes it read as curved).
+3. Beyond the `fp` gate, fall back to the box silhouette (or your own
+   coarse union of 2-3 boxes) — the SDF's job is the close read, the far
+   read is lights anyway.
+4. Shade with the SDF normal: curvature is visible almost entirely through
+   the normal's effect on rim fill and emissive-panel falloff. Panel lines
+   and intakes are cheaper as dark shading bands in the SDF's local frame
+   than as geometry.
+
+Cost honesty: only pixels whose rays enter a prop's bounding box pay for
+the SDF, so a 20-iteration trace on a handful of props per frame is noise
+next to the cloud march. Do not sphere-trace anything the box test has not
+already accepted.
+
 ## Iterating on your look
 
 The harness renders the real scene headlessly (RTX 5080, ~0.1 s/view):
