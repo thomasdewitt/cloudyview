@@ -26,6 +26,16 @@
     "facade": "cc_facadeworks_detail"
    },
    "enabled": true
+  },
+  {
+   "file": "skyway.wgsl",
+   "name": "skyway",
+   "kind_base": 200,
+   "hooks": {
+    "extra_trace": "cc_skyway_trace",
+    "shade": "cc_skyway_shade"
+   },
+   "enabled": true
   }
  ]
 }

@@ -136,9 +136,14 @@ housings, panel lines), no micro-text or logos. The pattern:
    than as geometry.
 
 Cost honesty: only pixels whose rays enter a prop's bounding box pay for
-the SDF, so a 20-iteration trace on a handful of props per frame is noise
-next to the cloud march. Do not sphere-trace anything the box test has not
-already accepted.
+EXECUTING the SDF — but every pixel pays for its REGISTER PRESSURE. The
+city and the clouds share one kernel, and a big unrolled SDF (the classic
+offender: four inline copies of the field for a 4-tap gradient) collapses
+occupancy for the whole frame even when no prop is in view — the aircars
+refit measured +65% on craft-free vistas from exactly this, fixed
+pixel-identically by rolling the gradient taps into a loop. Keep your SDF
+in ONE function, roll your gradient taps, and A/B a craft-free vista, not
+just your close-up.
 
 ## Iterating on your look
 
