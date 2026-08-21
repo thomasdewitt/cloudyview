@@ -2222,6 +2222,10 @@ struct CityCell {
     win_pitch: f32,
     pane_lo: vec2<f32>, pane_hi: vec2<f32>,
     pane_frac: f32,
+    // Monochrome house palette: below 0 the building draws window colors
+    // freely; at or above 0 it is THE cyan (or amber, or magenta) tower —
+    // every window draws near this one palette coordinate.
+    win_mono: f32,
 }
 
 fn city_cell(ci: vec2<i32>) -> CityCell {
@@ -2496,15 +2500,27 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     }
     let pane_span = c.pane_hi - c.pane_lo;
     c.pane_frac = pane_span.x * pane_span.y;
+    // A fifth of buildings keep a house color: every window draws near one
+    // palette coordinate, so a tower can be THE cyan tower — the color
+    // balance is a property of the building, not only of the window
+    // (Thomas, 2026-08-20).
+    let mono_draw = city_rand4(
+        c.seed ^ vec2<u32>(0x3c6ef372u, 0xa54ff53au));
+    c.win_mono = select(-1.0, mono_draw.y, mono_draw.x < 0.20);
     // Widen the occupancy spread too: some towers near-dark, some ablaze,
     // so neighbours separate at range by brightness as well as texture.
     c.lit_frac = clamp(
         c.lit_frac * (0.45 + 1.35 * r4e.z * r4e.z), 0.02, 0.50);
 
-    if (h > CITY_MAST_MIN_H && r4b.z < 0.65) {
+    // Roof furniture belongs on roofs: a spire crown has no flat top to
+    // stand a mast on, and a tapered shaft only offers its shrunken crown
+    // cap (Thomas, 2026-08-20: bridges/antennas only on the building types
+    // that can carry them — components read cc.arch for the same rule).
+    if (h > CITY_MAST_MIN_H && r4b.z < 0.65 && c.arch != 4) {
         c.has_mast = true;
         let mast_h = 12.0 + 45.0 * r4b.w;
-        let moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * 0.4;
+        let crown = select(1.0, c.fscale * 0.85, c.arch == 3);
+        let moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * (0.4 * crown);
         let mc = bc + moff;
         c.mast_min = vec3<f32>(mc - vec2<f32>(0.5 * CITY_MAST_CROSS), h);
         c.mast_max = vec3<f32>(mc + vec2<f32>(0.5 * CITY_MAST_CROSS),
@@ -2943,7 +2959,13 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         var e_win = vec3<f32>(0.0);
         if (lit) {
             let bright = 0.25 + 5.0 * pow(wh.z, 7.0);
-            e_win = city_window_color(wh.y, cc.palette_bias)
+            // A monochrome house draws every window near its one palette
+            // coordinate; a mixed house draws freely.
+            var cdraw = wh.y;
+            if (cc.win_mono >= 0.0) {
+                cdraw = clamp(cc.win_mono + (wh.y - 0.5) * 0.08, 0.0, 1.0);
+            }
+            e_win = city_window_color(cdraw, cc.palette_bias)
                     * (CITY_WIN_RADIANCE * bright);
             // Life inside: whatever the glyph components put between the
             // light and the glass (curtains, figures, androids).

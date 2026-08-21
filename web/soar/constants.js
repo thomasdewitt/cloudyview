@@ -291,12 +291,16 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // default sits ON the slider ceiling: coarser is off the table there,
 // finer is the only direction that changes anything.
 export const DEFAULT_LOD_STRENGTH_BY_TIER = {
-  max: 0.5, high: 0.5, medium: 1.05, low: 2.0, minimal: 3.0,
+  max: 0.2, high: 0.2, medium: 1.05, low: 2.0, minimal: 3.0,
 };
 // The floor is below the default rather than equal to it: a slider whose
 // default sits on its own end stop cannot be used to ask for anything finer,
-// and finer is only ever slower — never wrong.
-export const LOD_STRENGTH_LIMITS = [0.25, 3.0];
+// and finer is only ever slower — never wrong. Floor lowered 0.25 -> 0.05
+// and the high/max default 0.5 -> 0.2 for the night city (Thomas,
+// 2026-08-20: "slammed at 0.25 and wanting probably .05"): the city's
+// window LOD rides the same knob now, and sub-pixel windows resolve
+// usefully far below where the cloud march alone had anything to gain.
+export const LOD_STRENGTH_LIMITS = [0.05, 3.0];
 
 // The strength anything that is not holding a framerate renders at: a still,
 // a video frame, witness, and the uniform block's own default. A capture is

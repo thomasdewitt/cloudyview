@@ -50,9 +50,17 @@ you may not redefine them. The structs you exchange with the core:
 
 - `CityCell` — everything about one block: `built`, `density`, `rank`,
   `height`, `plot_min/max`, tier boxes `b1min..b3max`, `seed: vec2<u32>`,
-  `lit_frac`, `palette_bias`, `store_draw`. Blocks are `u.ocean_params.x`
-  meters on a side (90 on the shipped tile); streets run between plots,
-  avenues every 8 blocks (`city_is_avenue`).
+  `lit_frac`, `palette_bias`, `store_draw`, plus the architecture: `arch`
+  (0 slab/setback, 2 growth, 3 tapered shaft, 4 spire crown, with `fmin/
+  fmax/fscale` describing the frustum of 3 and 4), the window style
+  (`win_style/win_pitch/pane_lo/pane_hi/pane_frac/win_mono`), and `merged`
+  (a 2x2 superblock building). Blocks are `u.ocean_params.x` meters on a
+  side (90 on the shipped tile); streets run between plots, avenues every
+  8 blocks (`city_is_avenue`).
+  **Respect the architecture**: rooftop furniture (antennas, clutter,
+  bridge landings) belongs only on buildings with a flat top to stand it
+  on — arch 0 and 2 anywhere, arch 3 only within the shrunken crown
+  (footprint scaled by `fscale` about the plot centre), arch 4 never.
 - `CityHit` — `hit, t, pos, normal, kind, cell`. Component hits use
   `kind = <your kind_base> + local`, local in [0, 15]; core kinds are
   0 ground, 1 facade, 2 roof, 3 mast, 4 beacon.
