@@ -36,6 +36,26 @@
     "shade": "cc_skyway_shade"
    },
    "enabled": true
+  },
+  {
+   "file": "rooftopworks.wgsl",
+   "name": "rooftopworks",
+   "kind_base": 600,
+   "hooks": {
+    "cell_props": "cc_rooftopworks_props_trace",
+    "shade": "cc_rooftopworks_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "skybridges.wgsl",
+   "name": "skybridges",
+   "kind_base": 500,
+   "hooks": {
+    "cell_props": "cc_skybridges_props_trace",
+    "shade": "cc_skybridges_shade"
+   },
+   "enabled": true
   }
  ]
 }
