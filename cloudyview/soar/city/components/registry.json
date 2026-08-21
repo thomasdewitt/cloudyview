@@ -8,6 +8,16 @@
     "window_glyph": "cc_windowlife_glyph"
    },
    "enabled": true
+  },
+  {
+   "file": "aircars.wgsl",
+   "name": "aircars",
+   "kind_base": 300,
+   "hooks": {
+    "cell_props": "cc_aircars_props_trace",
+    "shade": "cc_aircars_shade"
+   },
+   "enabled": true
   }
  ]
 }
