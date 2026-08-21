@@ -231,14 +231,16 @@ export function packUniforms(state, view) {
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
   row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
        oceanSkyShadowFloor, contrast);
-  // The view-step angle floors at the render's own pixel angle: below it a
-  // finer march buys sub-pixel steps nobody can see, so the slider's bottom
-  // IS pixel-matched, at any fov and resolution (Thomas, 2026-08-20). An
-  // exact 0 stays 0 — that is the "LOD off, fixed dt" sentinel, distinct
-  // from "as fine as makes sense", and no slider reaches it.
+  // The view-step angle floors at a QUARTER of the render's pixel angle.
+  // Not the full pixel: the accumulation is jittered, so a converged image
+  // resolves sub-pixel, and a floor at exactly one pixel dissolves the very
+  // detail accumulation would have antialiased (Thomas, in flight: pixel-
+  // matched still read substantially coarser than a pixel). A quarter is
+  // where the return genuinely ends. An exact 0 stays 0 — the "LOD off,
+  // fixed dt" sentinel, unreachable from the slider.
   const pixelTan = 2.0 * tanHalfFov / w;
   let viewStepTan = Math.tan(viewStepLodDegrees * DEG);
-  if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, pixelTan);
+  if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, 0.25 * pixelTan);
   row(20, periodic ? 1.0 : 0.0,
        Math.tan(lightMarchLodDegrees * DEG),
        viewStepTan,

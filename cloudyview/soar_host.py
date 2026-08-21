@@ -447,15 +447,16 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[19] = (view.ocean_slope_draw_fraction,
              look.ocean_haze_extinction_per_km(view.haze) * 1e-3,
              view.ocean_sky_shadow_floor, view.contrast)
-    # The view-step angle floors at the render's own pixel angle: below it a
-    # finer march buys sub-pixel steps nobody can see, so a slider's bottom
-    # IS pixel-matched at any fov and resolution. An exact 0 stays 0 — the
-    # "LOD off, fixed dt" sentinel. Twin of the packer in uniforms.js
+    # The view-step angle floors at a QUARTER of the render's pixel angle:
+    # the accumulation is jittered, so a converged image resolves sub-pixel,
+    # and a floor at exactly one pixel dissolves the very detail
+    # accumulation would have antialiased. An exact 0 stays 0 — the "LOD
+    # off, fixed dt" sentinel. Twin of the packer in uniforms.js
     # (test_uniform_parity pins them to each other).
     pixel_tan = 2.0 * math.tan(view.fov * DEG * 0.5) / w
     view_step_tan = math.tan(view.view_step_lod_degrees * DEG)
     if view_step_tan > 0.0:
-        view_step_tan = max(view_step_tan, pixel_tan)
+        view_step_tan = max(view_step_tan, 0.25 * pixel_tan)
     u[20] = (1.0 if state.periodic else 0.0,
              math.tan(view.light_march_lod_degrees * DEG),
              view_step_tan,
