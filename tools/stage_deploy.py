@@ -23,8 +23,10 @@ import each other by plain relative name, so fingerprinting means rewriting
 the import graph, not just renaming files.
 
 Only the app's own mutable source is fingerprinted. ``index.html`` keeps its
-name (it *is* the canonical URL), and ``vendor/``, ``ocean/`` and the demo
-assets are left alone — they are immutable blobs or runtime-resolved data.
+name (it *is* the canonical URL), and ``vendor/``, ``ocean/``, ``city/`` and
+the demo assets are left alone — they are immutable blobs or runtime-resolved
+data. ``city/components/`` does not ship at all: it is shader source that
+tools/compose_city.py has already spliced into raymarch.wgsl.
 
 The hash is transitive: a file's name changes when the file changes *or* when
 anything in its transitive dependency set changes, so a fresh ``constants.js``
@@ -68,6 +70,7 @@ FINGERPRINT_PATTERNS = (
     "raymarch.wgsl",
     "hud.wgsl",
     "bird.wgsl",
+    "dart.wgsl",
     "style.css",
     "viewer.css",
 )
@@ -77,8 +80,16 @@ FINGERPRINT_PATTERNS = (
 # third-party output that never names an app file (verified by grep), and the
 # ocean tile is binary.
 # Copied through untouched: never imported, fetched by constructed paths,
-# and immutable in practice. `demos/` is baked output, hundreds of MB.
-OPAQUE_DIRS = ("vendor/", "ocean/", "demos/")
+# and immutable in practice. `demos/` is baked output, hundreds of MB, and
+# `city/` is the night-city tile — same shape as the ocean tile, loaded by
+# scene.js from a constructed base URL.
+OPAQUE_DIRS = ("vendor/", "ocean/", "demos/", "city/")
+
+# Build-time source that sits inside the asset tree and must not ship.
+# `city/components/` holds the WGSL components and the registry that
+# tools/compose_city.py splices into raymarch.wgsl; the browser never fetches
+# them, and SPEC.md would fail the extension gate on a static host besides.
+EXCLUDED_PREFIXES = ("city/components/",)
 
 # rclone sets each object's Content-Type from its file extension via Go's mime
 # table. On macOS — where the deploy runs — that falls back to a builtin list
@@ -519,7 +530,10 @@ def collect_soar_files() -> list[str]:
     for dirpath, _dirnames, filenames in os.walk(SOAR_SRC, followlinks=True):
         for name in filenames:
             path = Path(dirpath) / name
-            files.append(path.relative_to(SOAR_SRC).as_posix())
+            relpath = path.relative_to(SOAR_SRC).as_posix()
+            if relpath.startswith(EXCLUDED_PREFIXES):
+                continue
+            files.append(relpath)
     return sorted(files)
 
 
