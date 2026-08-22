@@ -327,7 +327,11 @@ export class Viewer {
       if (source.kind === "demo") {
         scene = await loadDemoScene(
           this.device, source.base, surface,
-          (stage, fraction) => progress(stage, fraction));
+          (stage, fraction) => progress(stage, fraction),
+          // Cyberpunk mode flies the same demos every other mode does and
+          // stands them on the city; the landing page is what decides that,
+          // so it arrives with the source rather than being read here.
+          { surfaceKind: source.surfaceKind ?? null });
         sun = scene.sun ?? null;
       } else {
         const { loadFileScene } = await import("./ingest/index.js");
@@ -1428,7 +1432,8 @@ export class Viewer {
                            { byHand: false });
     }
     if (!this._byHand.has("lod")) {
-      this.setLodStrength(K.DEFAULT_LOD_STRENGTH_BY_TIER[tier], { byHand: false });
+      this.setLodStrength(
+        K.lodStrengthByTier(this.scene?.city)[tier], { byHand: false });
     }
     const smoothing = this._byHand.has("smoothing")
       ? this.motionSmoothing

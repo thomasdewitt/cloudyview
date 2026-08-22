@@ -117,6 +117,22 @@ export const NIGHT_SKY_HORIZON = [0.012, 0.014, 0.022];
 export const NIGHT_MOON_BLOOM = [0.20, 0.22, 0.26];
 export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
 
+// Where cyberpunk mode stands the city under the field it is flying, and the
+// moon it flies under. Both are the mode's, not the demo's: the mode borrows
+// the two desert demos, whose meta carries a DAYTIME sun chosen for a desert,
+// and a scene whose light is a moon cannot inherit it.
+//
+// The offset lands the tile's megatower district — its wildest cascade
+// excursion, and the part of the city worth arriving over — under the middle
+// of the 51.2 km desert domain, which is the same choice soar_host's harness
+// default makes for the field the harness flies. Whole blocks (90 m), so the
+// street grid meets the domain edge where a street would be anyway.
+export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
+// Low and behind: a moon on the horizon rims the cloud tops and leaves the
+// streets to their own light, which is the picture the city was tuned for
+// (the night-city harness flew this pair).
+export const CITY_MOON = { azimuth: 310.0, elevation: 22.0 };
+
 export const DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50;
 export const DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65;
 export const DEFAULT_GRADIENT_COARSE_RADIUS_M = 500.0;
@@ -291,18 +307,43 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // default sits ON the slider ceiling: coarser is off the table there,
 // finer is the only direction that changes anything.
 export const DEFAULT_LOD_STRENGTH_BY_TIER = {
-  // max sits on the slider floor: with the pixel-angle floor in the packer,
-  // the bottom of the slider IS "march at the pixel angle", so max asks for
-  // exactly that and cannot overshoot into sub-pixel waste.
+  max: 0.5, high: 0.5, medium: 1.05, low: 2.0, minimal: 3.0,
+};
+
+// The night city's own tier defaults. A separate table rather than a shift of
+// the one above, because the two scenes want different things from the same
+// knob and the daytime numbers are tuned: over clouds this angle only sets
+// the far-field march, and below ~0.5 there is nothing left for it to buy
+// (the note above). Under CITY it also drives the window octave ladder — the
+// slider dissolves windows into blocks by the same degrees-not-meters law —
+// so the city keeps resolving detail far below where the cloud march stops
+// (night-city e3a593b, "one LOD law for clouds and city").
+//
+// The values are the branch's, not invented here: high 0.2 is what the city
+// was authored and looked at against (78a1957, Thomas 2026-08-20: "slammed
+// at 0.25 and wanting probably .05"), and max 0.01 is the slider floor,
+// which under the packer's quarter-pixel clamp MEANS "march at a quarter of
+// the pixel angle" rather than any particular small number — the clamp is
+// what makes it resolution-independent instead of an extreme constant
+// (e99cf3e, 471b5bf). Medium and below are shared with the day: those tiers
+// are holding a framerate, and that is the same problem in both scenes.
+export const CITY_LOD_STRENGTH_BY_TIER = {
   max: 0.01, high: 0.2, medium: 1.05, low: 2.0, minimal: 3.0,
 };
+
+/** The tier table this scene flies by. */
+export function lodStrengthByTier(city) {
+  return city ? CITY_LOD_STRENGTH_BY_TIER : DEFAULT_LOD_STRENGTH_BY_TIER;
+}
+
 // The floor is below the default rather than equal to it: a slider whose
 // default sits on its own end stop cannot be used to ask for anything finer,
-// and finer is only ever slower — never wrong. Floor lowered 0.25 -> 0.05
-// and the high/max default 0.5 -> 0.2 for the night city (Thomas,
-// 2026-08-20: "slammed at 0.25 and wanting probably .05"): the city's
-// window LOD rides the same knob now, and sub-pixel windows resolve
-// usefully far below where the cloud march alone had anything to gain.
+// and finer is only ever slower — never wrong. Floor lowered 0.25 -> 0.01
+// for the night city: the bottom of the slider is the packer's quarter-pixel
+// clamp at any fov and resolution, so it is a reachable "as fine as the
+// image can show" rather than a number. The day tiers do not move onto it —
+// only the city's max asks for it — but the slider is one control and a
+// research pilot over clouds may still drag it down.
 export const LOD_STRENGTH_LIMITS = [0.01, 3.0];
 
 // The strength anything that is not holding a framerate renders at: a still,

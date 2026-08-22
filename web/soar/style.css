@@ -447,33 +447,16 @@ body.intro .modes { animation: fade 1.4s 1s both; }
   transition: color var(--transition-fast), background var(--transition-fast);
 }
 .modes .mode + .mode { border-left: 1px solid var(--panel-line); }
-.modes .mode:hover:not([disabled]) { color: var(--ink); }
+.modes .mode:hover { color: var(--ink); }
 /* Only the ink changes here; the block behind it is the thumb. */
 .modes .mode[aria-checked="true"] { color: var(--ink-bright); }
 .modes .mode:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
-/* Not yet built. Greyed and inert, and it says why on hover rather than on
-   click, because clicking it is defined to do nothing. */
-.modes .mode[disabled] { opacity: 0.4; cursor: var(--cursor-dart); }
-.modes .mode .soon-note {
-  position: absolute; left: 50%; bottom: calc(100% + 0.5rem);
-  transform: translateX(-50%);
-  white-space: nowrap;
-  padding: 0.3rem 0.55rem;
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-line);
-  border-radius: var(--panel-radius);
-  color: var(--dim);
-  letter-spacing: 0.12em;
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-  pointer-events: none;
-}
-.modes .mode:hover .soon-note,
-.modes .mode:focus-visible .soon-note { opacity: 1; }
 
 /* --- basic vs research ----------------------------------------------------
    Basic drops the rail and the file picker; the hero then belongs in the
    middle of the sky rather than in the middle of what the rail leaves.
+   Cyberpunk is basic's page with a city under it, so it takes every rule
+   here: the same two buttons, no rail, no upload.
 
    It has to GET there rather than appear there. The first cut switched
    grid-template-columns between two tracks and one, which is a discrete
@@ -508,17 +491,21 @@ body.switched .cases { transition: width .42s cubic-bezier(.4, .1, .2, 1),
                                    opacity .26s ease; }
 body.switched .frame { transition: column-gap .42s cubic-bezier(.4, .1, .2, 1); }
 
-body.mode-basic .cases {
+body.mode-basic .cases,
+body.mode-cyberpunk .cases {
   width: 0;
   padding-left: 0; padding-right: 0;
   opacity: 0;
   pointer-events: none;
 }
-body.mode-basic .frame { column-gap: 0; }
+body.mode-basic .frame,
+body.mode-cyberpunk .frame { column-gap: 0; }
 /* #choice-open, not .own — the two demo buttons are .own too now, and they
    are the whole of what basic offers. */
 body.mode-basic #choice-open,
-body.mode-basic #file-input { display: none; }
+body.mode-basic #file-input,
+body.mode-cyberpunk #choice-open,
+body.mode-cyberpunk #file-input { display: none; }
 /* Revealed by a click rather than by page load, so it gets the short reveal
    and not the intro's 0.85s hold. Scoped to body.switched so it never runs
    for someone whose stored mode is already research. */
@@ -813,7 +800,8 @@ body.intro .cases { animation: fade 1.6s 1.1s both; }
   /* display, not a zero width: there is no second column here for the hero to
      slide across, so there is no animation to keep alive — and a zero-width
      rail in a one-column grid still holds its padding and its row gap open. */
-  body.mode-basic .cases { display: none; }
+  body.mode-basic .cases,
+  body.mode-cyberpunk .cases { display: none; }
   .readout { order: 3; flex-direction: column; align-items: flex-start; }
   .own { padding: 0.75rem 1.8rem; }
   /* The arrow keeps its inset equal to the (smaller) vertical padding here. */

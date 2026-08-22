@@ -29,17 +29,28 @@ export const MODE_KEY = "soar.mode";
 export const MODES = {
   basic: {
     label: "Basic mode",
-    available: true,
     items: ["sun", "capture", "controls", "tutorial", "leave"],
   },
-  research: { label: "Research mode", available: true, items: null },
+  research: { label: "Research mode", items: null },
   cyberpunk: {
     label: "Cyberpunk mode",
-    available: false,
-    note: "in development",
+    // Basic's menu exactly: cyberpunk is basic's complexity over a different
+    // scene, not a third set of controls.
     items: ["sun", "capture", "controls", "tutorial", "leave"],
+    // Entered and left from the start page only. Basic and research differ by
+    // which rows a menu carries, which a menu can change about itself
+    // mid-flight; cyberpunk differs by which shader is compiled and which
+    // surface tile is on the card, which is a load. Rather than pretend a
+    // toggle can do it, the toggle says so and points at the way out that
+    // every menu already has.
+    landingOnly: true,
   },
 };
+
+/** Why the other segments are inert while the city is up. */
+const LANDING_ONLY_NOTE =
+  "Cyberpunk mode is chosen on the start page — leave with " +
+  "\"Back to the start page\" to switch.";
 
 export const DEFAULT_MODE = "basic";
 
@@ -59,9 +70,9 @@ export function readMode() {
     return DEFAULT_MODE;         // storage denied (private mode, file://)
   }
   if (stored === null) return DEFAULT_MODE;
-  if (MODES[stored]?.available) return stored;
-  console.warn(`soar: stored mode '${stored}' is not available; using ` +
-               `'${DEFAULT_MODE}'.`);
+  if (MODES[stored]) return stored;
+  console.warn(`soar: stored mode '${stored}' is not one this build has; ` +
+               `using '${DEFAULT_MODE}'.`);
   return DEFAULT_MODE;
 }
 
@@ -106,8 +117,9 @@ const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]
 
 /**
  * A row of mutually exclusive chips. An option may carry a third element,
- * `{ disabled, title }` — a segment that names something the build does not
- * do yet has to be visible to be honest about, and unclickable to be true.
+ * `{ disabled, title }` — a segment naming something real that this menu
+ * cannot reach has to be visible to be honest about, unclickable to be true,
+ * and to say why on hover rather than on a click defined to do nothing.
  */
 function segmented(options, isOn, onPick) {
   const wrap = el("div", "segmented");
@@ -166,14 +178,19 @@ export class UI {
    * Switch modes. Takes effect on the next menu build, which is immediate —
    * the caller re-opens the panel it is standing in.
    *
-   * A mode this table does not have, or one that is not built yet, is a bug
-   * in the caller rather than something to interpret.
+   * A mode this table does not have, or one that can only be entered from
+   * the start page, is a bug in the caller rather than something to
+   * interpret.
    */
   setMode(mode) {
     const spec = MODES[mode];
     if (!spec) throw new Error(`no such mode: ${mode}`);
-    if (!spec.available) throw new Error(`mode '${mode}' is not available`);
     if (this.mode === mode) return;
+    if (spec.landingOnly) {
+      throw new Error(
+        `mode '${mode}' is entered from the start page, not in flight: it ` +
+        "compiles a different shader and loads a different surface tile.");
+    }
     this.mode = mode;
     try {
       localStorage.setItem(MODE_KEY, mode);
@@ -440,10 +457,20 @@ export class UI {
    * the one thing worth a control on the title line.
    */
   _modeToggle() {
+    // A landing-only mode is on the toggle only when it is the one you are
+    // in — it has to say which menu this is — and then it is the only live
+    // segment, with the other two showing what exists and why they are not
+    // reachable from the air. Flying anything else, it is simply not there:
+    // a segment that could never be clicked from this menu would be a
+    // permanent piece of greyed furniture in a menu built to shed rows.
+    const landingOnly = MODES[this.mode].landingOnly;
+    const shown = Object.entries(MODES).filter(
+      ([name, spec]) => !spec.landingOnly || name === this.mode);
     const toggle = segmented(
-      Object.entries(MODES).map(([name, spec]) => [
+      shown.map(([name, spec]) => [
         spec.label, name,
-        spec.available ? {} : { disabled: true, title: spec.note },
+        landingOnly && name !== this.mode
+          ? { disabled: true, title: LANDING_ONLY_NOTE } : {},
       ]),
       (name) => name === this.mode,
       (name) => { this.setMode(name); this.open("main"); });

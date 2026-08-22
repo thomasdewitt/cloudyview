@@ -465,7 +465,7 @@ function demoCard(demo, root, numbers) {
   button.addEventListener("click", () =>
     capabilityFailed
       ? reportNoGPU()
-      : enterViewer({ kind: "demo", base: `${root}/${demo.base}` }));
+      : enterViewer(demoSource(root, demo)));
   return button;
 }
 
@@ -584,37 +584,37 @@ async function buildRail() {
 //
 // One page, three audiences. `basic` is the default and the one most visitors
 // get: no rail, no file picker, two buttons and a sky. `research` is the page
-// as it was, plus those two buttons. `cyberpunk` is the night-city branch and
-// is not merged, so it is a real position on the toggle that cannot be chosen
-// — a mode listed and greyed says "later"; a mode absent says "never", and
-// the page would then have to announce it somewhere else when it lands.
+// as it was, plus those two buttons. `cyberpunk` is basic's page — the same
+// two buttons, the same absent rail — flying the same two demos at night over
+// the multifractal city.
 //
-// `ready: false` is the whole of the not-yet: flip it and the segment works.
+// It is chosen HERE and nowhere else. The pause menu offers basic and
+// research to each other because those two differ only in which controls a
+// menu carries, and a menu can change that mid-flight; cyberpunk is a
+// different scene compiled into the shader and standing on a different
+// surface tile, which is a load, not a preference. So the way out of it is
+// the way into it — the start page (see ui.js MODES.cyberpunk.landingOnly).
 
 // The labels say "mode" out loud. A row of three bare adjectives over a
 // button that says "Fly less detailed demo" reads as a property of the demo;
 // the word is what makes the control name what it switches.
 const MODES = [
-  { id: "research", label: "research mode", ready: true },
-  { id: "basic", label: "basic mode", ready: true },
-  {
-    id: "cyberpunk", label: "cyberpunk mode", ready: false,
-    note: "in development",
-  },
+  { id: "research", label: "research mode" },
+  { id: "basic", label: "basic mode" },
+  { id: "cyberpunk", label: "cyberpunk mode" },
 ];
 
 const MODE_KEY = "soar.mode";
 const DEFAULT_MODE = "basic";
 
-/** The stored mode, if it is one we still offer and can still enter. */
+/** The stored mode, if it is one we still offer. */
 function storedMode() {
   let saved = null;
   // Private windows and file:// in some browsers throw on access rather than
   // returning null, and a page that will not load because of a preference is
   // a worse page than one that forgets the preference.
   try { saved = localStorage.getItem(MODE_KEY); } catch { /* no storage */ }
-  const mode = MODES.find((m) => m.id === saved);
-  return mode?.ready ? mode.id : DEFAULT_MODE;
+  return MODES.find((m) => m.id === saved)?.id ?? DEFAULT_MODE;
 }
 
 let mode = storedMode();
@@ -650,8 +650,8 @@ function applyMode(next, { save = true } = {}) {
   // rule that was not there when the change was made.
   if (save) document.body.classList.add("switched");
   for (const m of MODES) document.body.classList.toggle(`mode-${m.id}`, m.id === next);
-  // basic and research both want the pair; it starts hidden only so the
-  // stack does not reflow between first paint and the stored mode landing.
+  // Every mode wants the pair; it starts hidden only so the stack does not
+  // reflow between first paint and the stored mode landing.
   dom.flyLess.hidden = false;
   dom.flyMore.hidden = false;
   for (const button of dom.modeToggle.children) {
@@ -675,19 +675,7 @@ function buildModeToggle() {
     const label = document.createElement("span");
     label.textContent = m.label;
     button.appendChild(label);
-    if (!m.ready) {
-      // disabled would take it out of the tab order, and the note is on focus
-      // as well as hover — so it is aria-disabled instead, with the class for
-      // the greying and no click handler attached at all.
-      button.disabled = true;
-      button.setAttribute("aria-disabled", "true");
-      const note = document.createElement("span");
-      note.className = "soon-note";
-      note.textContent = m.note ?? "in development";
-      button.appendChild(note);
-    } else {
-      button.addEventListener("click", () => applyMode(m.id));
-    }
+    button.addEventListener("click", () => applyMode(m.id));
     return button;
   }));
   applyMode(mode, { save: false });   // reflect the stored value, don't re-store
@@ -719,6 +707,21 @@ setTimeout(() => document.body.classList.remove("intro"), 2700);
 // its two bakes, and the rail shows the same two rows in research mode.
 const FLY_LESS_ID = "desert-coarse";
 const FLY_MORE_ID = "desert";
+
+/**
+ * What flying this demo means, in the mode the page is in.
+ *
+ * Read at click time rather than at wire time: the buttons are wired once,
+ * when the index resolves, and the mode can be switched any number of times
+ * after that without the pair being rebuilt.
+ */
+function demoSource(root, demo) {
+  return {
+    kind: "demo",
+    base: `${root}/${demo.base}`,
+    ...(mode === "cyberpunk" ? { surfaceKind: "city" } : {}),
+  };
+}
 
 /** An id the manifest does not have is an error on the button, not a swap. */
 function flyMissing(button, id) {
@@ -764,7 +767,7 @@ async function wireFlyPair(railTask) {
     button.addEventListener("click", () =>
       capabilityFailed
         ? reportNoGPU()
-        : enterViewer({ kind: "demo", base: `${root}/${demo.base}` }));
+        : enterViewer(demoSource(root, demo)));
   }
   if (!more) return;
 

@@ -18,6 +18,7 @@ import { volumeAABB, minVoxelSize, voxelSizes, validateNestContainment }
 import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
 } from "./gpu.js";
+import * as K from "./constants.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
@@ -332,13 +333,20 @@ export function createNestDummy(device) {
  * takes one: the tiles are field-independent and belong to the session, so
  * loading the demo after a file (or the other way round) reuses the tile
  * already on the card instead of allocating a second one and abandoning it.
- * It takes the surface kind — "ocean", or "city" for a night-city demo
- * (meta.surface) — because which tile a demo stands on is the demo's call.
+ * It takes the surface kind — "ocean", or "city" for the night city — because
+ * which tile a demo stands on is the demo's call (meta.surface)…
+ *
+ * …unless the PAGE overrides it. `surfaceKind` does that, and cyberpunk mode
+ * is its only caller: the mode flies the same two desert demos every other
+ * mode does, standing them on the city instead of the sea. The alternative
+ * was a parallel pair of city-surfaced demo bakes, which would be the same
+ * volumes twice on disk and in the index to carry one boolean.
  */
-export async function loadDemoScene(device, baseUrl, surface, progress) {
+export async function loadDemoScene(device, baseUrl, surface, progress,
+                                    { surfaceKind: forcedSurface = null } = {}) {
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
-  const surfaceKind = meta.surface ?? "ocean";
+  const surfaceKind = forcedSurface ?? meta.surface ?? "ocean";
   if (surfaceKind !== "ocean" && surfaceKind !== "city") {
     throw new Error(
       `The '${meta.id}' demo asks for surface '${surfaceKind}', which this ` +
@@ -416,7 +424,11 @@ export async function loadDemoScene(device, baseUrl, surface, progress) {
       oceanTileExtent: surfaceTile.tileExtent,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
-      cityOffsetM: meta.city?.offset_m ?? [0.0, 0.0],
+      // The demo's own offset when the demo asked for a city; the mode's when
+      // the mode did, because a borrowed demo has no opinion about where a
+      // city it never expected should sit under it.
+      cityOffsetM: meta.city?.offset_m ?? (
+        forcedSurface === "city" ? K.CITY_TILE_OFFSET_M : [0.0, 0.0]),
       albedo: new Float32Array(
         mapBytes.buffer, mapBytes.byteOffset, mapBytes.byteLength / 4),
       albedoShape: meta.map.shape_yx,
@@ -430,7 +442,10 @@ export async function loadDemoScene(device, baseUrl, surface, progress) {
       title: meta.title,
       description: meta.description,
       sourceName: meta.source,
-      sun: meta.sun,
+      // Under a forced city the demo's sun is a desert afternoon and the
+      // scene's light is a moon, so the mode's moon replaces it. A demo that
+      // asked for the city itself carries a moon in this field already.
+      sun: forcedSurface === "city" ? K.CITY_MOON : meta.sun,
       // Where the landing page's still was taken from, so flight can open
       // there — see Camera.applyStart and viewer boot.
       startCamera: meta.still?.camera ?? null,

@@ -127,12 +127,17 @@ const MENU_STEPS = [
   {
     // Two modes, one sentence each: a list, because that is what it is. Read
     // as a paragraph they ran together into one long claim about "modes".
+    //
+    // Only the first is a switch on the toggle this step points at. The
+    // second says where it is instead, because a reader who has just been
+    // shown a toggle will look for it there and it is not going to be there.
     menuKey: "mode",
     text: "Try other modes:",
     bullets: [
       "Research mode allows more visual control, more cloud volumes " +
       "including custom uploads, and false color diagnostics.",
-      "Cyberpunk mode replaces the surface with a multifractal city.",
+      "Cyberpunk mode flies these same demos at night over a multifractal " +
+      "city. It is chosen on the start page rather than here.",
     ],
   },
 ];
