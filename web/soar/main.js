@@ -617,7 +617,7 @@ async function buildRail() {
 // the way into it — the start page (see ui.js MODES.cyberpunk.landingOnly).
 
 // The labels say "mode" out loud. A row of three bare adjectives over a
-// button that says "Fly less detailed demo" reads as a property of the demo;
+// button that says "Fly less detailed clouds" reads as a property of the demo;
 // the word is what makes the control name what it switches.
 const MODES = [
   { id: "research", label: "research mode" },
@@ -725,9 +725,9 @@ function buildModeToggle() {
 
 // The entry animations belong to the first paint only. Left on the elements
 // they re-run, with their hold, every time a mode switch reveals one — see
-// body.intro in style.css. 2.7 s clears the longest (1.6 s at 1.1 s).
+// body.intro in style.css. 1.35 s clears the longest (0.8 s at 0.55 s).
 document.body.classList.add("intro");
-setTimeout(() => document.body.classList.remove("intro"), 2700);
+setTimeout(() => document.body.classList.remove("intro"), 1350);
 
 // --- the two-button way in ------------------------------------------------
 
