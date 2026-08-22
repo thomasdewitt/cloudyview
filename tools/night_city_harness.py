@@ -156,6 +156,11 @@ def main(argv=None) -> int:
                         help="tone-map white point (default: the app's)")
     parser.add_argument("--contrast", type=float, default=None,
                         help="contrast (default: the app's)")
+    parser.add_argument("--moon", nargs=2, type=float, metavar=("AZ", "EL"),
+                        default=[MOON_AZIMUTH, MOON_ELEVATION],
+                        help="moon azimuth/elevation in city mode "
+                             "(default: %(default)s; constants.js CITY_MOON "
+                             "is the app's)")
     parser.add_argument("--haze", type=float, default=None,
                         help="aerosol, the app's one haze number "
                              "(default: the app's)")
@@ -243,8 +248,8 @@ def main(argv=None) -> int:
            if args.city_offset is not None else {}),
     )
 
-    light_az = MOON_AZIMUTH if args.city else DAY_AZIMUTH
-    light_el = MOON_ELEVATION if args.city else DAY_ELEVATION
+    light_az = args.moon[0] if args.city else DAY_AZIMUTH
+    light_el = args.moon[1] if args.city else DAY_ELEVATION
     exposure = args.exposure
     if exposure is None:
         exposure = NIGHT_EXPOSURE if args.city else DAY_EXPOSURE

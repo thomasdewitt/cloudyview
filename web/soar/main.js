@@ -743,7 +743,7 @@ setTimeout(() => document.body.classList.remove("intro"), 2700);
 const FLY_PAIRS = {
   research: { less: "desert-coarse", more: "desert" },
   basic: { less: "desert-coarse", more: "desert" },
-  cyberpunk: { less: "marine-congestus-coarse", more: "marine-congestus" },
+  cyberpunk: { less: "marine-congestus-coarse", more: "congestus" },
 };
 
 /** The two ids this mode's buttons load. */
