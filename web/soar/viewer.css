@@ -228,6 +228,12 @@ button.resume kbd {
   border-radius: var(--control-radius);
   padding: 0 4px;
 }
+/* The tutorial owns Escape while it runs — it swallows the key with the menu
+   up (see Tutorial.interceptEscape), so the hint would be advertising a
+   shortcut that answers "not yet". The button itself keeps working: it is the
+   walkthrough's own way back to the flight, and the hint is back the moment
+   the walkthrough ends, without the menu being rebuilt. */
+#viewer.tutorial button.resume kbd { display: none; }
 
 .menu-cols {
   display: grid;

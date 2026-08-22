@@ -55,6 +55,15 @@ import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 const OCEAN_URL = "ocean";
 const CITY_URL = "city";
 
+// Every key _onKeyDown's switch answers, and nothing else. It is the set the
+// tutorial refuses while a chapter is running: each of these opens a panel or
+// cycles a mode, and a walkthrough that has just told the reader to press
+// Space cannot survive being somewhere else. Escape is deliberately absent —
+// it has its own rule (Tutorial.interceptEscape), because one flight step
+// asks for it.
+const TUTORIAL_REFUSED = new Set(
+  ["Tab", "f", "F3", "`", "b", "m", "r", "k", "j", "p", "F12"]);
+
 /**
  * The camera's fold distance over a night city, per lateral axis: the
  * smallest whole number of city tiles that is also a whole number of cloud
@@ -1066,6 +1075,21 @@ export class Viewer {
     // camera or changes what is drawn, and the ones that do neither cost one
     // frame to find that out.
     this._wake("keydown");
+
+    // While the walkthrough runs, the flight is the walkthrough's. Every key
+    // in the switch below either opens a panel the tutorial is not expecting
+    // (P/F12 onto capture, R's track panel once a recording stops) or cycles
+    // state a later prompt was written against, and the tutorial's menu is
+    // already inert to clicks — a shortcut past it stranded the reader with
+    // only Skip live (Thomas, 2026-08-22). Refused at the source, with the
+    // prompt's own "not yet" note; the flight keys below the switch — WASD,
+    // Space, Shift — and the wheel are untouched, as is every key here the
+    // moment the tutorial ends.
+    if (this.tutorial?.active && TUTORIAL_REFUSED.has(key)) {
+      e.preventDefault();
+      this.tutorial.refuse();
+      return;
+    }
 
     if (key === "Escape") {
       // Escape reaches us by three routes that can all fire for one physical

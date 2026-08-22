@@ -226,7 +226,7 @@ export class Tutorial {
       if (event.target.closest(".resume")) return;
       event.preventDefault();
       event.stopPropagation();
-      this.note.hidden = false;
+      this.refuse();
     }, true);
   }
 
@@ -325,6 +325,19 @@ export class Tutorial {
       // the flight and menu chapters run as one list, so this fires once.
       setFlag(this.steps === this._researchSteps ? RESEARCH_DONE_KEY : DONE_KEY);
       this.end();
+      return;
+    }
+    // Entering the menu chapter means the pause menu is up and showing its
+    // main panel — the last flight step is cleared by exactly that, and every
+    // step here dims the screen around one of that panel's rows. A pause onto
+    // any other panel is a place this chapter cannot point at, so the flight
+    // chapter starts over instead of advancing blind. Every source of such a
+    // pause is refused while a chapter runs (TUTORIAL_REFUSED in viewer.js);
+    // this is the guard that keeps the silent void unreachable rather than a
+    // path anything is expected to take.
+    if (this.step.menuKey && this.steps !== this._researchSteps
+        && this.app.ui.panel !== "main") {
+      this._restartFlight();
       return;
     }
     this._show();
@@ -448,6 +461,20 @@ export class Tutorial {
    */
   interceptEscape() {
     if (!this.active || !this._menuOpen()) return false;
+    return this.refuse();
+  }
+
+  /**
+   * "Not yet" — the one answer to anything the running step did not ask for.
+   *
+   * Shared by the click interceptor, interceptEscape and the viewer's keyboard
+   * refusal (see TUTORIAL_REFUSED in viewer.js) so that a shortcut, a row and
+   * Escape all say the same sentence in the same place.
+   *
+   * @returns {boolean} true if a chapter is running and was told to say so.
+   */
+  refuse() {
+    if (!this.active) return false;
     this.note.hidden = false;
     return true;
   }
@@ -538,15 +565,18 @@ export class Tutorial {
     // The chapter starts over rather than stepping forward. Its first prompt
     // is "click once and move the mouse", which is exactly what the reader is
     // about to do to get back into the flight, and Resume then clears it.
-    if (kind === "menu") {
-      this.index = 0;
-      this._unpinSpeed();
-      this._show();
-      // _show clears the note, so this says it after: the menu is the same
-      // "not yet" as clicking a row of it, and a walkthrough that silently
-      // rewound would look broken rather than deliberate.
-      this.note.hidden = false;
-    }
+    if (kind === "menu") this._restartFlight();
+  }
+
+  /** The first prompt of the flight chapter again, with the reason showing. */
+  _restartFlight() {
+    this.index = 0;
+    this._unpinSpeed();
+    this._show();
+    // _show clears the note, so this says it after: the interruption is the
+    // same "not yet" as clicking a row of the menu, and a walkthrough that
+    // silently rewound would look broken rather than deliberate.
+    this.note.hidden = false;
   }
 
   /**

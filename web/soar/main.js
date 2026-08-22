@@ -641,6 +641,10 @@ function placeThumb() {
  * the two things set here.
  */
 function applyMode(next, { save = true } = {}) {
+  // Re-clicking the segment already lit changes nothing, and must not arm the
+  // switch transition either: `switched` is what makes the rail glide, so a
+  // no-op click was buying a reveal animation for controls that never moved.
+  const changed = next !== mode;
   mode = next;
   // Before the mode class, not after. It marks this as a switch rather than a
   // page load — which is what tells the newly revealed controls to use the
@@ -648,7 +652,7 @@ function applyMode(next, { save = true } = {}) {
   // (see body.switched in style.css). Set it after the layout change and the
   // very first switch of a session is asking the engine to transition on a
   // rule that was not there when the change was made.
-  if (save) document.body.classList.add("switched");
+  if (save && changed) document.body.classList.add("switched");
   for (const m of MODES) document.body.classList.toggle(`mode-${m.id}`, m.id === next);
   // Every mode wants the pair; it starts hidden only so the stack does not
   // reflow between first paint and the stored mode landing.
