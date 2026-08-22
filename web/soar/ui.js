@@ -236,6 +236,14 @@ export class UI {
     this.speed.id = "speed";
     this.speed.hidden = true;
 
+    // The minimap's coordinate caption. The map itself is drawn by the GPU
+    // and has no text of any kind, so this is a DOM chip parked against the
+    // map's own rectangle; it is shown over a city and nowhere else, because
+    // an ocean scene has no second frame to be in.
+    this.mapCoords = el("div", "panel");
+    this.mapCoords.id = "map-coords";
+    this.mapCoords.hidden = true;
+
     this.toolbar = el("div", "panel");
     this.toolbar.id = "toolbar";
     // No "menu" chip here. It only ever existed as a rescue for the state
@@ -261,8 +269,8 @@ export class UI {
 
     // #speed before #stats: viewer.css lifts the overlay off the chip with a
     // sibling selector, and a sibling selector only looks forwards.
-    root.append(this.hint, this.speed, this.stats, this.toolbar, this.progress,
-                this.menu, this.toast);
+    root.append(this.hint, this.speed, this.stats, this.mapCoords,
+                this.toolbar, this.progress, this.menu, this.toast);
   }
 
   // --- transient messages --------------------------------------------------
@@ -316,7 +324,8 @@ export class UI {
   drawStats({ fps, camera, tier, renderScale, frame, minimap, flyer,
               recording, showSpeed, parked = false, converged = false,
               probing = false, autoTier = false, wakeReason = null, spp = 0,
-              holdRung = 0, holdRungCount = 1, holdCapped = false }) {
+              holdRung = 0, holdRungCount = 1, holdCapped = false,
+              cityPosition = null }) {
     // The corner chip: speed while it is flashing, and the recording dot for
     // as long as a track is being taken — the one piece of flight state with
     // no other home once the stats overlay is off.
@@ -351,6 +360,14 @@ export class UI {
         .map((axis, i) => `${axis} ${distance(camera.position[i])}`)
         .join(" · ")],
       ["rel", `(${rel.map((v) => v.toFixed(2)).join(", ")})`],
+      // Both frames, labelled, and only over a city. The relative triple is
+      // still the one the reproduction commands take and still describes the
+      // CLOUD field; the city triple is the only one that names a street,
+      // because the tile sits at fixed world metres under a box whose size
+      // varies from field to field. See scene.cityFramePosition.
+      ...(cityPosition ? [["city", ["x", "y", "z"]
+        .map((axis, i) => `${axis} ${distance(cityPosition[i])}`)
+        .join(" · ")]] : []),
       ["view", `az ${camera.azimuth.toFixed(0)}° · el ` +
                `${camera.elevation.toFixed(0)}° · fov ${camera.fov.toFixed(0)}°`],
       ["speed", `${camera.speed.toFixed(0)} m/s`],
@@ -363,6 +380,34 @@ export class UI {
     this.stats.innerHTML = rows
       .map(([k, v]) => `<div><span class="k">${k}</span> ${v}</div>`)
       .join("");
+  }
+
+  /**
+   * The city coordinates under the minimap.
+   *
+   * `position` is the camera in the city tile's frame (scene.cityPosition) or
+   * null — an ocean scene, or no map on screen — which hides the chip. `rect`
+   * is the map's rectangle in CSS pixels, `[x, y, w, h]` from rectForSize
+   * called at the canvas's CSS size: the map is placed by the GPU from the
+   * framebuffer size, so the caption has to be told where it landed rather
+   * than assume a corner.
+   *
+   * Labelled "city", not "pos": the stats overlay carries the domain-relative
+   * position and a reader who mixes the two gets the wrong street.
+   */
+  drawMapCoords(position, rect) {
+    if (!position || !rect) {
+      this.mapCoords.hidden = true;
+      return;
+    }
+    this.mapCoords.hidden = false;
+    this.mapCoords.textContent =
+      "city " + ["x", "y", "z"]
+        .map((axis, i) => `${axis} ${distance(position[i])}`).join(" · ");
+    const [x, y, w, h] = rect;
+    this.mapCoords.style.left = `${Math.round(x)}px`;
+    this.mapCoords.style.width = `${Math.round(w)}px`;
+    this.mapCoords.style.top = `${Math.round(y + h + 6)}px`;
   }
 
   // --- menu ----------------------------------------------------------------

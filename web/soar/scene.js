@@ -270,10 +270,53 @@ export async function streamWholeVolume(device, texture, stream, shape,
   }
 }
 
+/**
+ * A world position in the city tile's own frame, or null off a city scene.
+ *
+ * This is raymarch.wgsl's city_glow_sample mapping and nothing else:
+ *
+ *     uv = (xy - u.ocean.yz) / u.ocean_params.y
+ *
+ * with the tile sampler repeating, i.e. only the fractional part of uv
+ * selects a block. So the city coordinate of a camera is
+ * `(worldXY - cityOffsetM) mod tileExtent`, folded into `[0, tileExtent)`,
+ * and z is world z unchanged (the tile is 2D; CITY_GROUND_Z is world).
+ *
+ * The fold is what makes the number worth showing. Relative coordinates
+ * measure across the CLOUD box, so the same relative triple lands in a
+ * different district under every differently-sized field; the tile frame is
+ * fixed in world metres and periodic, so this triple names one place in the
+ * city whatever field is flying over it.
+ *
+ * Callers must pass the scene's own `cityOffsetM` and `oceanTileExtent` —
+ * the same two values uniforms.js writes into rows 8 and 9 — so the readout
+ * and the shader cannot disagree.
+ */
+export function cityFramePosition(position, cityOffsetM, tileExtentM) {
+  if (!(tileExtentM > 0)) return null;
+  const fold = (v, offset) => {
+    const t = (v - offset) % tileExtentM;
+    return t < 0 ? t + tileExtentM : t;
+  };
+  return [fold(position[0], cityOffsetM[0]),
+          fold(position[1], cityOffsetM[1]),
+          position[2]];
+}
+
 export class Scene {
   constructor(device, parts) {
     this.device = device;
     Object.assign(this, parts);
+  }
+
+  /**
+   * Where a world position is in the city, or null when this is not a city
+   * scene. See cityFramePosition — the ocean scenes have no second frame and
+   * must not grow a meaningless one.
+   */
+  cityPosition(position) {
+    if (!this.city) return null;
+    return cityFramePosition(position, this.cityOffsetM, this.oceanTileExtent);
   }
 
   get nested() { return Boolean(this._nest); }

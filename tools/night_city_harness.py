@@ -142,6 +142,17 @@ def main(argv=None) -> int:
                              "[-1, 1] from the ground to the box top. This is "
                              "what a capture's metadata and meta.json record, "
                              "so a view can be moved between them unchanged.")
+    parser.add_argument("--city-camera", nargs=6, type=float, default=None,
+                        metavar=("CX", "CY", "Z", "AZ", "EL", "FOV"),
+                        help="--camera in the CITY tile's frame: x and y in "
+                             "metres from the tile origin, z in world metres. "
+                             "This is what a capture's metadata records under "
+                             "`city`, and unlike the relative camera it names "
+                             "the same street whatever field is standing over "
+                             "the tile — so a still's city coordinates "
+                             "reproduce over ANY field. Uses --city-offset, "
+                             "so give the same offset the still was taken "
+                             "with (its metadata records that too).")
     parser.add_argument("--city-offset", nargs=2, type=float, default=None,
                         metavar=("X", "Y"),
                         help="where the city tile sits in world metres. "
@@ -165,9 +176,18 @@ def main(argv=None) -> int:
                         help="aerosol, the app's one haze number "
                              "(default: the app's)")
     args = parser.parse_args(argv)
-    if args.camera is not None and args.relative_camera is not None:
-        print("--camera and --relative-camera are two ways to say the same "
-              "thing; give one.", file=sys.stderr)
+    given_cameras = [name for name, value in (
+        ("--camera", args.camera),
+        ("--relative-camera", args.relative_camera),
+        ("--city-camera", args.city_camera),
+    ) if value is not None]
+    if len(given_cameras) > 1:
+        print(f"{', '.join(given_cameras)} are ways to say the same thing; "
+              "give one.", file=sys.stderr)
+        return 2
+    if args.city_camera is not None and not args.city:
+        print("--city-camera has no meaning in --no-city mode: there is no "
+              "city tile to be in.", file=sys.stderr)
         return 2
 
     field_path = Path(args.field)
@@ -273,6 +293,27 @@ def main(argv=None) -> int:
         z = (rz + 1.0) * 0.5 * bmax[2]
         print(f"  Relative camera ({rx:g}, {ry:g}, {rz:g}) is "
               f"({x:.1f}, {y:.1f}, {z:.1f}) m in this box.")
+        views = {"camera": {"xy": None, "world_xy": (x, y), "z": z,
+                            "azimuth": az, "elevation": el, "fov": fov}}
+    if args.city_camera is not None:
+        # The inverse of raymarch.wgsl's city_glow_sample mapping
+        # (uv = (xy - offset) / extent, sampler repeating), which is the same
+        # arithmetic web/soar/scene.js cityFramePosition does forwards:
+        #   world_xy = city_xy + offset  (mod the tile extent, which the
+        #   repeating sampler and the periodic volume both absorb).
+        # Deliberately NOT folded into the cloud box: folding by the box
+        # extent moves the camera by a whole domain, and a domain is not a
+        # whole number of tiles, so it would land in a different district.
+        # The volume is periodic here, so a camera outside the box still has
+        # the field around it.
+        cx, cy, z, az, el, fov = args.city_camera
+        offset = (tuple(args.city_offset) if args.city_offset is not None
+                  else tuple(SceneState.city_tile_offset_m))
+        x = cx + offset[0]
+        y = cy + offset[1]
+        print(f"  City camera ({cx:g}, {cy:g}) m in the tile, offset "
+              f"({offset[0]:g}, {offset[1]:g}) m, is ({x:.1f}, {y:.1f}, "
+              f"{z:.1f}) m in world coordinates.")
         views = {"camera": {"xy": None, "world_xy": (x, y), "z": z,
                             "azimuth": az, "elevation": el, "fov": fov}}
 

@@ -11,7 +11,7 @@ import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
-import { Minimap } from "./minimap.js";
+import { Minimap, rectForSize } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
 
@@ -2262,6 +2262,7 @@ export class Viewer {
   /** What made this picture, so the picture can be made again. */
   renderMetadata(size) {
     const rel = this.camera.relativePosition();
+    const cityPos = this.scene.cityPosition(this.camera.position);
     return {
       schema: "cloudyview.render.v1",
       source: {
@@ -2277,6 +2278,24 @@ export class Viewer {
         fov: this.camera.fov,
       },
       sun: { azimuth: this.sunAzimuth, elevation: this.sunElevation },
+      // Where in the CITY this still was taken, present only over a city.
+      // The camera block above is relative to the cloud box, so on its own it
+      // does not pin a place: stand a different-sized field over the same
+      // tile and the same relative triple is a different district. The tile
+      // frame is fixed world metres, so these three numbers do pin one —
+      // hand them to night_city_harness.py --city-camera.
+      //
+      // Additive, and the schema string stays v1: every reader keys on the
+      // presence of a block, and cloudyview/render_metadata.py's SCHEMA is
+      // the only other copy of that string. Do not bump one without the
+      // other.
+      ...(cityPos ? {
+        city: {
+          position_m: cityPos,
+          tile_offset_m: [...this.scene.cityOffsetM],
+          tile_extent_m: this.scene.oceanTileExtent,
+        },
+      } : {}),
       render: {
         renderer: "soar-web",
         size,
@@ -2684,6 +2703,15 @@ export class Viewer {
                           this.minimapMode === "full");
       overlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
+      // The caption is DOM, so it wants the map's rectangle in CSS pixels —
+      // the same rectForSize the GPU pass used, asked at the CSS size rather
+      // than the framebuffer's. Null off a city: no second frame to report.
+      this.ui.drawMapCoords(
+        this.scene.cityPosition(this.camera.position),
+        rectForSize([this.canvas.clientWidth, this.canvas.clientHeight],
+                    this.minimap.albedoShape, this.minimapMode === "full"));
+    } else {
+      this.ui.drawMapCoords(null, null);
     }
 
     // Marching is the expensive half — a full traversal of the volume for
@@ -2825,6 +2853,7 @@ export class Viewer {
       holdRung: this.renderer.holdRung,
       holdRungCount: this.renderer.holdRungCount,
       holdCapped: this.renderer.holdCapped,
+      cityPosition: this.scene.cityPosition(this.camera.position),
     });
 
     // Sleep on a converged view.
