@@ -239,16 +239,12 @@ DEMOS = [
     # member is made here, by averaging the mixing ratios before any optics
     # happen (see `coarsen`). The two read the same on the landing page and
     # they are not the same experiment; that difference is worth knowing when
-    # comparing them, which is what the description says.
+    # comparing them.
     dict(
         id="marine-congestus-coarse",
         group="steam",
         title="STEAM marine cumulus congestus (coarse)",
         field="Maritime congestus on a coarser grid",
-        description="The marine congestus field block-averaged 2x2x2 — the "
-                    "same simulation resampled, not a second run at lower "
-                    "resolution. Flies on far more machines than the full "
-                    "field does.",
         liquid=("demo_marine-congestus.nc", "qc"),
         ice=("demo_marine-congestus.nc", "qi"),
         src=STEAM_SRC,
