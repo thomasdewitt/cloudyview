@@ -128,16 +128,16 @@ export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
 // the field the harness flies. Whole blocks (90 m), so the street grid meets
 // the domain edge where a street would be anyway.
 export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
-// From the 2026-08-22 11:52 capture, the same still the start camera and the
+// From the 2026-08-22 12:31 capture, the same still the start camera and the
 // landing backdrop come from: the moon the view was composed under is part
 // of the view.
-export const CITY_MOON = { azimuth: 198.0, elevation: 31.0 };
+export const CITY_MOON = { azimuth: 181.0, elevation: 20.0 };
 
 // Where a cyberpunk flight opens, in the app's relative coordinates: x and y
 // across the domain box, z from the ground to the box top. Down in the
 // streets, looking north-west along a canyon with the moon off the right
 // shoulder — Thomas flew to it and took a still there (the capture of
-// 2026-08-22 11:52, whose metadata these six numbers are), and the landing
+// 2026-08-22 12:31, whose metadata these six numbers are), and the landing
 // page's cyberpunk backdrop is the same view rendered offline.
 //
 // The mode's, not the demo's: a borrowed demo carries the camera ITS landing
@@ -146,9 +146,9 @@ export const CITY_MOON = { azimuth: 198.0, elevation: 31.0 };
 // metres so the same six numbers open either case of the pair, whose domains
 // are different sizes.
 export const CITY_START_CAMERA = {
-  position: [0.03018284974334895, 0.008322118576506998, -0.9430401704863525],
-  azimuth: 202.92,
-  elevation: 10.80,
+  position: [-0.5099984733293184, 0.7051286812163227, -0.8408204917524384],
+  azimuth: 168.60,
+  elevation: -1.20,
   fov: 100.0,
 };
 
