@@ -190,8 +190,8 @@ fn cc_skybridges_eid(clo: vec2<i32>, axis: i32) -> vec2<u32> {
 // gates, and the simpler thing when the complicated thing cannot be shown to
 // pay.
 fn cc_skybridges_gate(clo: vec2<i32>, axis: i32) -> bool {
-    var h = bitcast<u32>(2 * clo.x + (1 - axis)) * 0x9e3779b9u
-          ^ bitcast<u32>(2 * clo.y + axis) * 0x85ebca6bu;
+    var h = (bitcast<u32>(2 * clo.x + (1 - axis)) * 0x9e3779b9u)
+          ^ (bitcast<u32>(2 * clo.y + axis) * 0x85ebca6bu);
     h = h ^ (h >> 16u);
     h = h * 0x7feb352du;
     h = h ^ (h >> 15u);

@@ -3375,10 +3375,10 @@ struct cc_windowlife_Pose {
 // conditioned on the window being lit and correlated with its colour. Mix
 // all four back through the city's own hash instead.
 fn cc_windowlife_hash(wh: vec4<f32>) -> vec4<f32> {
-    let a = u32(wh.x * 16777216.0) * 0x9e3779b9u
-          ^ u32(wh.w * 16777216.0) * 0x85ebca6bu;
-    let b = u32(wh.y * 16777216.0) * 0xc2b2ae35u
-          ^ u32(wh.z * 16777216.0) * 0x27d4eb2fu;
+    let a = (u32(wh.x * 16777216.0) * 0x9e3779b9u)
+          ^ (u32(wh.w * 16777216.0) * 0x85ebca6bu);
+    let b = (u32(wh.y * 16777216.0) * 0xc2b2ae35u)
+          ^ (u32(wh.z * 16777216.0) * 0x27d4eb2fu);
     return city_rand4(vec2<u32>(a ^ 0x7f4a7c15u, b ^ 0x1b56c4e9u));
 }
 
@@ -7125,8 +7125,8 @@ fn cc_skybridges_eid(clo: vec2<i32>, axis: i32) -> vec2<u32> {
 // gates, and the simpler thing when the complicated thing cannot be shown to
 // pay.
 fn cc_skybridges_gate(clo: vec2<i32>, axis: i32) -> bool {
-    var h = bitcast<u32>(2 * clo.x + (1 - axis)) * 0x9e3779b9u
-          ^ bitcast<u32>(2 * clo.y + axis) * 0x85ebca6bu;
+    var h = (bitcast<u32>(2 * clo.x + (1 - axis)) * 0x9e3779b9u)
+          ^ (bitcast<u32>(2 * clo.y + axis) * 0x85ebca6bu);
     h = h ^ (h >> 16u);
     h = h * 0x7feb352du;
     h = h ^ (h >> 15u);
