@@ -157,7 +157,13 @@ export class Viewer {
     // dart-tip condensate readout. Off on every load, and its volume is not
     // read until the first activation — see toggleIceMode.
     this.iceModeOn = false;
-    this._iceLoading = false;
+    // The scene whose ice read is in flight, or null. A scene rather than a
+    // flag: the read outlives the field it was started for, and a bare
+    // boolean cleared by whichever of the two finished first let a second
+    // read start for the new scene and race the first one's attachment.
+    this._iceLoadingFor = null;
+    // Bumped to discard a pending activation (a mode switch out of research).
+    this._iceRequest = 0;
     this._iceProbeBuf = null;        // 16-byte readback buffer, made lazily
     this._iceProbePending = false;
     this._iceProbeAt = 0;
@@ -427,7 +433,9 @@ export class Viewer {
     // field's fraction has not been read — that is the point of reading it on
     // demand — so the mode starts off and the next I pays for it.
     this.iceModeOn = false;
-    this._iceLoading = false;
+    // Any read still in flight is for the scene it names, not for this one,
+    // and toggleIceMode's guard compares against the scene rather than being
+    // cleared here.
     renderer.iceMode = false;
     this._syncIceReadout();
     // A renderer is born in DEFAULT_HOLD_MODE; if the UI asked for another
@@ -1283,14 +1291,17 @@ export class Viewer {
    */
   async toggleIceMode() {
     if (this.iceModeOn) {                 // off is always free
-      this.iceModeOn = false;
-      this.renderer.iceMode = false;
-      this._syncIceReadout();
+      this.disableIceMode();
       this.ui.say("Ice detection off.", 4);
-      this._wake("iceMode");
       return;
     }
-    if (this._iceLoading) return;         // the toast is already saying so
+    // The read in flight is for this scene: the toast is already saying so.
+    // Before the token is taken, so a second press does not cancel the
+    // activation the first one is waiting for.
+    if (this._iceLoadingFor === this.scene) return;
+    // Taken before the await so that anything which cancels the activation
+    // while the volume is being read — disableIceMode — is seen below.
+    const request = ++this._iceRequest;
     if (!this.scene?.iceAvailable) {
       this.ui.say(this.scene.iceNote, 6);
       return;
@@ -1302,7 +1313,7 @@ export class Viewer {
       // would tint one field by another's ice — so the scene is held here and
       // the texture is given back if it is no longer the one being flown.
       const scene = this.scene;
-      this._iceLoading = true;
+      this._iceLoadingFor = scene;
       try {
         const { loadIceVolume } = await import("./ingest/index.js");
         const texture = await loadIceVolume(
@@ -1318,13 +1329,35 @@ export class Viewer {
           `The ice fraction could not be read: ${err.message}`, 8);
         return;
       } finally {
-        this._iceLoading = false;
+        // Only this request's own claim is released. A read that outlived its
+        // field must not clear the flag a later scene's read set.
+        if (this._iceLoadingFor === scene) this._iceLoadingFor = null;
       }
     }
+    // The activation can be cancelled while the volume is read — leaving
+    // research mode does that. The volume is kept (it was paid for and
+    // belongs to this scene); the mode does not come on behind a menu that
+    // has no row to turn it off again.
+    if (request !== this._iceRequest) return;
     this.iceModeOn = true;
     this.renderer.iceMode = true;
     this._syncIceReadout();
     this.ui.say("Ice detection on — liquid burns red, ice glows cyan.", 4);
+    this._wake("iceMode");
+  }
+
+  /**
+   * Turn ice detection off and cancel any activation still waiting on a read.
+   *
+   * Called by the toggle and by ui.setMode when the mode being entered has no
+   * ice control. Silent: the caller says whatever needs saying.
+   */
+  disableIceMode() {
+    this._iceRequest += 1;         // discards a pending activation
+    if (!this.iceModeOn) return;
+    this.iceModeOn = false;
+    this.renderer.iceMode = false;
+    this._syncIceReadout();
     this._wake("iceMode");
   }
 

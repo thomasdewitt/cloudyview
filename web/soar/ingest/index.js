@@ -147,7 +147,11 @@ function levelReceiver(device, label, onProgress, ack, { iceOnly = false } = {})
         state.queuedBytes = 0;
         await device.queue.onSubmittedWorkDone();
       }
-      onProgress?.(message.done, state.slabsDone, state.slabs, "upload");
+      // The ice-only pass counts its own slabs — the extinction counters stay
+      // at zero there, and reporting them read as "part 0 of 0".
+      onProgress?.(message.done,
+                   iceOnly ? state.iceSlabsDone : state.slabsDone,
+                   iceOnly ? state.iceSlabs : state.slabs, "upload");
     } else if (message.type === "map") {
       state.albedo = message.data;
       state.albedoShape = message.shape;

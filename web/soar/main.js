@@ -845,7 +845,10 @@ if (wanted !== null) {
   resolveDemos().then(({ root, groups }) => {
     const all = groups.flatMap((group) => group.demos);
     const demo = all.find((d) => d.id === wanted) ?? all[0];
-    if (demo) enterViewer({ kind: "demo", base: `${root}/${demo.base}` });
+    // Through demoSource like every other way in, so the stored mode decides
+    // the surface here too — a raw source flew the daytime ocean while the
+    // in-flight UI said Cyberpunk.
+    if (demo) enterViewer(demoSource(root, demo));
     // buildRail shares this promise and reports the failure on the page, so
     // there is nothing to say here beyond not raising it twice.
   }).catch(() => {});

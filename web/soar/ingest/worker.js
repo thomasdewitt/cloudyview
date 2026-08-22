@@ -538,9 +538,11 @@ async function extinction({ group, units, label, slabBudget,
   };
 
   // Post what the crop kept, clipping the tiles that straddle its edges.
+  // `done` is measured against what the crop KEEPS (keptSlabs, the same count
+  // the receiver checks against), not against everything staged: dividing by
+  // the staged count meant a cropped field's upload stopped short of 100%.
   let sent = 0;
-  const sendable = staged.length;
-  for (let i = 0; i < sendable; i++) {
+  for (let i = 0; i < staged.length; i++) {
     const slab = staged[i];
     staged[i] = null;                     // release as we go, not at the end
     const lo = Math.max(slab.z0, zLo);
@@ -563,7 +565,7 @@ async function extinction({ group, units, label, slabBudget,
         type: "slab", label, field,
         origin: [lo - zLo, slab.y0, slab.x0],
         size: [depth, slab.local.y, slab.local.x],  // texture is (w=z, h=y, d=x)
-        done: sent / sendable,
+        done: sent / keptSlabs,
         bytes: slabBytes,
         data: bytes,
       }, [bytes.buffer]);

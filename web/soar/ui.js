@@ -198,6 +198,11 @@ export class UI {
       // Storage denied. The mode still applies to this session; only its
       // memory is lost, and there is nothing to do about that here.
     }
+    // A mode that does not carry a control cannot leave that control on: the
+    // new menu has no ice row and the new mode refuses I, so ice detection
+    // left running would be a picture with no way back out of it. Cancels a
+    // pending activation too — see viewer.disableIceMode.
+    if (!this.allows("ice")) this.app.disableIceMode?.();
     this.app.tutorial?.onModeChange(mode);
   }
 
@@ -546,8 +551,13 @@ export class UI {
       iceNote ?? "false-color the ice fraction — liquid red, ice cyan",
       // Reopened after the toggle settles, not before: the first activation
       // reads a volume, and a row that said "on" while it was still loading
-      // would be describing a picture that is not on screen yet.
-      () => { app.toggleIceMode().then(() => this.open("main")); },
+      // would be describing a picture that is not on screen yet. Only if the
+      // main menu is still what is showing — the read takes seconds, and a
+      // load started meanwhile puts its own question panel there, which this
+      // would replace, leaving that load waiting on controls nobody has.
+      () => { app.toggleIceMode().then(() => {
+        if (this.panel === "main") this.open("main");
+      }); },
       { disabled: Boolean(iceNote) }));
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two
