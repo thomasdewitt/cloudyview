@@ -74,6 +74,14 @@ CASES = [
     # default to off, which would leave the on-state untested.
     ("haze_height_dependent", {}, {"haze_height_dependent": True}),
     ("haze_uniform", {}, {"haze_height_dependent": False}),
+    # The night city: five fixed spectral rows replace the daytime air-mass
+    # pipeline, row 8 becomes ground z + tile offset, and both hosts must
+    # agree on every one of those numbers or the browser flies a different
+    # night than the harness tuned.
+    ("city_night", {"city": True, "city_tile_offset_m": [136080.0, -18630.0],
+                    "ocean_fif_dx": 90.0, "ocean_tile_extent": 92160.0,
+                    "ocean_max_lod": 10, "periodic": False},
+     {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
 ]
 
 BASE_SCENE = dict(
@@ -113,7 +121,11 @@ def _js_state(extra):
     remap = {"periodic": "periodic", "ocean_enabled": "oceanEnabled",
              "nested": "nested", "nest_bmin": "nestBmin",
              "nest_bmax": "nestBmax", "dt_view_nest": "dtViewNest",
-             "dt_light_nest": "dtLightNest"}
+             "dt_light_nest": "dtLightNest",
+             "city": "city", "city_tile_offset_m": "cityOffsetM",
+             "ocean_fif_dx": "oceanFifDx",
+             "ocean_tile_extent": "oceanTileExtent",
+             "ocean_max_lod": "oceanMaxLod"}
     for k, v in extra.items():
         s[remap[k]] = v
     return s

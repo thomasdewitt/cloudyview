@@ -93,10 +93,18 @@ function startCamera(start) {
 }
 
 export class FlightCamera {
-  constructor(bmin, bmax, { periodic = true, start = null } = {}) {
+  constructor(bmin, bmax, { periodic = true, start = null,
+                            wrapExtent = null } = {}) {
     this.bmin = bmin;
     this.bmax = bmax;
     this.periodic = periodic;
+    // Fold distance per lateral axis, when it is not the box's own extent.
+    // The night city needs one: the shader wraps the CLOUDS at the domain
+    // width wherever the camera is, but the city is read in absolute world
+    // coordinates — folding the camera at the cloud period teleported the
+    // city by a fraction of a tile every crossing. Folding at a common
+    // multiple of both periods instead makes both resets invisible.
+    this.wrapExtent = wrapExtent;
     // Held so `reset` returns to this field's own opening view rather than to
     // the global default — on a demo those are different places, and the one
     // worth going back to is the one the page promised.
@@ -184,7 +192,7 @@ export class FlightCamera {
     const p = this.position;
     if (this.periodic) {
       for (const i of [0, 1]) {
-        const extent = this.bmax[i] - this.bmin[i];
+        const extent = this.wrapExtent?.[i] ?? (this.bmax[i] - this.bmin[i]);
         p[i] = this.bmin[i] +
           (((p[i] - this.bmin[i]) % extent) + extent) % extent;
       }
@@ -193,6 +201,17 @@ export class FlightCamera {
   }
 
   relativePosition() {
-    return worldToRelative(this.position, this.bmin, this.bmax);
+    // Folded into the box whatever the wrap extent: the minimap and every
+    // relative readout describe the cloud domain, and a camera nine periods
+    // out is still over the same cloud.
+    const p = [...this.position];
+    if (this.periodic) {
+      for (const i of [0, 1]) {
+        const extent = this.bmax[i] - this.bmin[i];
+        p[i] = this.bmin[i] +
+          (((p[i] - this.bmin[i]) % extent) + extent) % extent;
+      }
+    }
+    return worldToRelative(p, this.bmin, this.bmax);
   }
 }

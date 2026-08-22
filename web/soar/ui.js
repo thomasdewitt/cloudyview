@@ -774,7 +774,7 @@ export class UI {
     }));
     sliders.append(sliderRow("Level of detail", {
       min: K.LOD_STRENGTH_LIMITS[0], max: K.LOD_STRENGTH_LIMITS[1],
-      step: 0.05, value: app.lodStrength,
+      step: 0.01, value: app.lodStrength,
       format: (v) => `${v.toFixed(2)}x`,
       onInput: (v) => { app.setLodStrength(v); noteCustom(); },
     }));

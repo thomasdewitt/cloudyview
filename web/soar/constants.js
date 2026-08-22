@@ -106,6 +106,17 @@ export const DEFAULT_AMBIENT_STRENGTH = 0.15;
 // reflectance. soar uses this one — do not cross the wires.
 export const DEFAULT_OCEAN_REFLECTANCE = [0.0020, 0.0045, 0.0126];
 
+// The night city's five spectral rows (soar_host NIGHT_*). Fixed values, not
+// the daytime air-mass pipeline: the "sun" is a moon and the sky is dark —
+// there is no elevation-dependent spectrum to compute. Twins of
+// soar_host.py's NIGHT_MOON_CLOUD_COLOR..NIGHT_MOON_DISC; the uniform
+// parity test pins the two lists to each other.
+export const NIGHT_MOON_CLOUD_COLOR = [0.34, 0.42, 0.60];
+export const NIGHT_AMBIENT_TINT = [0.020, 0.026, 0.044];
+export const NIGHT_SKY_HORIZON = [0.012, 0.014, 0.022];
+export const NIGHT_MOON_BLOOM = [0.20, 0.22, 0.26];
+export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
+
 export const DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50;
 export const DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65;
 export const DEFAULT_GRADIENT_COARSE_RADIUS_M = 500.0;
@@ -280,12 +291,19 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // default sits ON the slider ceiling: coarser is off the table there,
 // finer is the only direction that changes anything.
 export const DEFAULT_LOD_STRENGTH_BY_TIER = {
-  max: 0.5, high: 0.5, medium: 1.05, low: 2.0, minimal: 3.0,
+  // max sits on the slider floor: with the pixel-angle floor in the packer,
+  // the bottom of the slider IS "march at the pixel angle", so max asks for
+  // exactly that and cannot overshoot into sub-pixel waste.
+  max: 0.01, high: 0.2, medium: 1.05, low: 2.0, minimal: 3.0,
 };
 // The floor is below the default rather than equal to it: a slider whose
 // default sits on its own end stop cannot be used to ask for anything finer,
-// and finer is only ever slower — never wrong.
-export const LOD_STRENGTH_LIMITS = [0.25, 3.0];
+// and finer is only ever slower — never wrong. Floor lowered 0.25 -> 0.05
+// and the high/max default 0.5 -> 0.2 for the night city (Thomas,
+// 2026-08-20: "slammed at 0.25 and wanting probably .05"): the city's
+// window LOD rides the same knob now, and sub-pixel windows resolve
+// usefully far below where the cloud march alone had anything to gain.
+export const LOD_STRENGTH_LIMITS = [0.01, 3.0];
 
 // The strength anything that is not holding a framerate renders at: a still,
 // a video frame, witness, and the uniform block's own default. A capture is

@@ -53,6 +53,30 @@ import {
 import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
 const OCEAN_URL = "ocean";
+const CITY_URL = "city";
+
+/**
+ * The camera's fold distance over a night city, per lateral axis: the
+ * smallest whole number of city tiles that is also a whole number of cloud
+ * domains, so folding moves neither. q is bounded because the periods may be
+ * incommensurate — then the fold is pushed far out (many cloud periods)
+ * rather than made exact, and the city jump becomes a once-per-expedition
+ * event instead of a once-per-crossing one. null for every ocean scene:
+ * the box extent is the right fold, exactly as before.
+ */
+function cityWrapExtent(scene) {
+  if (!scene.city) return null;
+  return [0, 1].map((i) => {
+    const extent = scene.bmax[i] - scene.bmin[i];
+    const ratio = scene.oceanTileExtent / extent;
+    for (let q = 1; q <= 64; q++) {
+      if (Math.abs(q * ratio - Math.round(q * ratio)) < 1e-6) {
+        return q * scene.oceanTileExtent;
+      }
+    }
+    return 1024 * extent;
+  });
+}
 
 /**
  * The canvas must not present through an sRGB format. raymarch.wgsl's tone
@@ -287,22 +311,29 @@ export class Viewer {
     let scene = null, renderer = null, minimap = null, flyers = null;
     let sun = null, minimapProblem = null, flyerProblem = null;
     try {
-      // The ocean is a patch of sea surface, not anything about the data, so
-      // it survives a change of field — and belongs to the viewer, which is
-      // what disposes of it.
-      const ocean = async () => (this._ocean ??=
-        await loadOceanTile(this.device, OCEAN_URL));
+      // The surface tiles are not anything about the data — the ocean is a
+      // patch of sea surface, the city is a patch of city — so they survive
+      // a change of field and belong to the viewer, which is what disposes
+      // of them. Each is loaded on first use and cached for the session.
+      const surface = async (kind) => {
+        if (kind === "city") {
+          return (this._cityTile ??=
+            await loadOceanTile(this.device, CITY_URL));
+        }
+        return (this._ocean ??=
+          await loadOceanTile(this.device, OCEAN_URL));
+      };
 
       if (source.kind === "demo") {
         scene = await loadDemoScene(
-          this.device, source.base, ocean,
+          this.device, source.base, surface,
           (stage, fraction) => progress(stage, fraction));
         sun = scene.sun ?? null;
       } else {
         const { loadFileScene } = await import("./ingest/index.js");
         scene = await loadFileScene(
           this.device, source.file, {
-            ocean,
+            ocean: () => surface("ocean"),
             progress,
             ask: (question) => this._ask(question),
           });
@@ -384,7 +415,8 @@ export class Viewer {
     }
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
                                    { periodic: renderer.periodic,
-                                     start: scene.startCamera });
+                                     start: scene.startCamera,
+                                     wrapExtent: cityWrapExtent(scene) });
 
     this.ui.setSubtitle(this.sourceLabel);
 
@@ -1339,6 +1371,17 @@ export class Viewer {
    * How coarsely the far field is stepped, as a multiple of the tuned angular
    * LOD. Cheap distance, and it degrades along the grain of the look.
    */
+  /**
+   * What a capture marches at: the FINER of the live slider and the capture
+   * default. The default exists so a still never inherits a coarse march
+   * chosen to keep flight smooth; a slider set finer than it (the max tier
+   * bottoms out at a quarter pixel now) is a request the capture should
+   * honor, not sand off (Thomas, 2026-08-20).
+   */
+  _captureLodStrength() {
+    return Math.min(this.lodStrength, K.DEFAULT_LOD_STRENGTH);
+  }
+
   setLodStrength(strength, { byHand = true } = {}) {
     const [lo, hi] = K.LOD_STRENGTH_LIMITS;
     if (!(strength >= lo && strength <= hi)) {
@@ -1699,11 +1742,13 @@ export class Viewer {
     destroyFlyers(this.flyers);
     this.scene?.destroy();
     this._ocean?.texture?.destroy();
+    this._cityTile?.texture?.destroy();
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
     this.scene = null;
     this._ocean = null;
+    this._cityTile = null;
 
     // Unconfigure before destroy: the swapchain holds textures on this device,
     // and leaving it configured against a destroyed device is the state
@@ -1809,7 +1854,7 @@ export class Viewer {
         const overlays = this._offlineOverlays(pose, size, 1.0 / this.videoFps);
         await renderAccumulated(
           this.renderer, target.view, size,
-          { ...this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }),
+          { ...this._viewKwargs({ lodStrength: this._captureLodStrength() }),
             camera: pose, frameIndex: i * 1024 },
           framesPerVideoFrame, overlays);
         await writer.addFrame(
@@ -1945,7 +1990,7 @@ export class Viewer {
       // nests, wrap and image controls included. At the capture's LOD rather
       // than the live view's, for the same reason.
       reproduction_command: this.witnessCommand(
-        { lodStrength: K.DEFAULT_LOD_STRENGTH }),
+        { lodStrength: this._captureLodStrength() }),
     };
   }
 
@@ -1979,7 +2024,7 @@ export class Viewer {
     try {
       const image = await renderStill(
         this.device, this.renderer,
-        this._viewKwargs({ lodStrength: K.DEFAULT_LOD_STRENGTH }), size,
+        this._viewKwargs({ lodStrength: this._captureLodStrength() }), size,
         this.captureStillTier, stillOverlays,
         (fraction) => this.ui.showProgress(
           `Rendering a ${size[0]}x${size[1]} still…`, fraction));

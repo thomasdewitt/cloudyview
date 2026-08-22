@@ -44,6 +44,12 @@ from . import look
 SOAR_DIR = Path(__file__).resolve().parent / "soar"
 SHADER_PATH = SOAR_DIR / "raymarch.wgsl"
 OCEAN_DIR = SOAR_DIR / "ocean"
+# The night-city surface tile. Same byte format and same binding as the ocean
+# tile (rgba16float mip chain, binding 3) — under CITY the shader reads it as
+# a building-density field instead of a water normal field, so exactly one of
+# the two is ever loaded. Its meta names the cell size "cell_m" where the
+# ocean's names it "dx_m"; the keys "n" and "mips" are common to both.
+CITY_DIR = SOAR_DIR / "city"
 
 
 def read_shader() -> str:
@@ -124,6 +130,24 @@ CONTRAST_LIMITS = (0.5, 1.6)
 MIN_SUN_ELEVATION_DEG = 0.5
 STILL_ACCUMULATE_FRAMES = 64
 
+# --- night, for CITY -------------------------------------------------------
+#
+# The five spectral rows carry a sun's radiance and the sky it lights, all
+# derived by look._spectral_lighting_colors from an air-mass model of a
+# DAYTIME atmosphere. None of that applies at night: there is no air mass to
+# redden a moon that is 4e-6 of the sun's irradiance, and the sky's own
+# radiance is not scattered moonlight at all. So city mode does not scale the
+# daytime pipeline down — it packs measured-ish night values straight into the
+# same five rows, and look's daytime path is not called.
+#
+# The row layout does not move: these go where cloud_sun / ambient / horizon /
+# bloom / disc go, so the shader reads the same slots either way.
+NIGHT_MOON_CLOUD_COLOR = (0.34, 0.42, 0.60)     # row 13.xyz, direct beam
+NIGHT_AMBIENT_TINT = (0.020, 0.026, 0.044)      # row 14.xyz, ambient fill
+NIGHT_SKY_HORIZON = (0.012, 0.014, 0.022)       # row 15.xyz, haze/horizon
+NIGHT_MOON_BLOOM = (0.20, 0.22, 0.26)           # row 16.xyz, circum-lunar
+NIGHT_MOON_DISC = (4.0, 4.2, 4.6)               # row 17.xyz, the disc itself
+
 
 # --- validation, ported from uniforms.js -----------------------------------
 
@@ -191,7 +215,26 @@ def effective_light_transfer_split(strength: float, elevation_deg: float) -> flo
 
 @dataclass
 class SceneState:
-    """Everything about the field, independent of where the camera is."""
+    """Everything about the field, independent of where the camera is.
+
+    `city` selects the night-city scene, which the shader compiles in through
+    the CITY constant (see `specialize`). It does not add uniform rows — the
+    block is the same 384 bytes in either mode — it REINTERPRETS a few of
+    them, and the fields keep their ocean names because the slots are literally
+    the ocean's:
+
+      * `ocean_z` is the ground plane; `ocean_reflectance` is unused and packs
+        as zeros.
+      * `ocean_fif_dx` is the city cell size in metres and `ocean_tile_extent`
+        the tile's extent in metres, both from the tile's meta.json
+        ("cell_m" / "tile_extent_m"); `ocean_max_lod` is its top mip.
+      * `ocean_enabled` still means "draw the surface", and must be True — a
+        city with the surface off is an empty ground plane, so pack_uniforms
+        raises rather than render it.
+
+    The ViewState's ocean realism knobs (glint, slope draw, mip bias) are
+    simply ignored by the shader under CITY; they are not validated away.
+    """
     bmin: Sequence[float]
     bmax: Sequence[float]
     dt_view: float
@@ -208,6 +251,12 @@ class SceneState:
     nest_bmax: Optional[Sequence[float]] = None
     dt_view_nest: float = 0.0
     dt_light_nest: float = 0.0
+    city: bool = False
+    # Where the city tile sits in world space (m, a whole number of blocks;
+    # row 8.yz). The default parks the tile's megatower district — its
+    # wildest cascade excursion — under the TWP-ICE subvolume's central
+    # cameras, which is where the harness flies.
+    city_tile_offset_m: Sequence[float] = (75330.0, -17010.0)
 
 
 @dataclass
@@ -286,6 +335,11 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
 
     Returns (24, 4) float32. Every unwritten slot stays zero, which is what
     the shader's unused components and the absent nest rows require.
+
+    With `state.city` the layout is untouched and a handful of rows change
+    MEANING — the surface rows describe the city tile rather than the sea, the
+    sun row is the moon, and the five spectral rows carry the night palette
+    instead of look's daytime air-mass model. See SceneState.
     """
     _unit_interval("jitter_scale", view.jitter_scale)
     _unit_interval("spectral_lighting_strength", view.spectral_lighting_strength)
@@ -325,13 +379,34 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
             "A periodic domain needs the sun above the horizon; got "
             f"sun_elevation={view.sun_elevation}. The light march exits "
             f"through the domain top, so keep it >= {MIN_SUN_ELEVATION_DEG}.")
+    # The surface flag is what draws the city; with it off the ground plane is
+    # empty and the scene is a night sky over nothing, which looks like a
+    # renderer bug rather than a choice.
+    if state.city and not state.ocean_enabled:
+        raise ValueError(
+            "city mode needs the surface enabled: ocean_enabled is the "
+            "surface flag under CITY (row 9.z) and it is False, which would "
+            "render an empty ground plane.")
 
     forward, right, up = camera_basis(view.azimuth, view.elevation)
+    # Under CITY this is the MOON: same azimuth/elevation fields, same
+    # packing, same row — only the light it stands for is different.
     sun = direction_from_azimuth_elevation(view.sun_azimuth, view.sun_elevation)
-    cloud_sun, ambient, horizon, bloom, disc = look._spectral_lighting_colors(
-        tuple(sun), look.SUN_COLOR, view.spectral_lighting_strength)
-    split = effective_light_transfer_split(
-        view.light_transfer_split_strength, view.sun_elevation)
+    if state.city:
+        cloud_sun, ambient, horizon, bloom, disc = (
+            NIGHT_MOON_CLOUD_COLOR, NIGHT_AMBIENT_TINT, NIGHT_SKY_HORIZON,
+            NIGHT_MOON_BLOOM, NIGHT_MOON_DISC)
+        # Both of these are daytime-sun machinery: the low-sun sky field
+        # reddens a setting sun's sky, and the light-transfer split fades in
+        # as that sun drops. Neither has a night meaning, so both are off.
+        low_sun_sky = 0.0
+        split = 0.0
+    else:
+        cloud_sun, ambient, horizon, bloom, disc = look._spectral_lighting_colors(
+            tuple(sun), look.SUN_COLOR, view.spectral_lighting_strength)
+        low_sun_sky = view.low_sun_sky_field_strength
+        split = effective_light_transfer_split(
+            view.light_transfer_split_strength, view.sun_elevation)
 
     out_w, out_h = view.output_size
     w, h = view.render_size
@@ -345,7 +420,13 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[5] = (*state.bmin, state.dt_view)
     u[6] = (*state.bmax, state.dt_light)
     u[7] = (w, h, view.g_hg, view.ambient_strength)
-    u[8] = (state.ocean_z, *state.ocean_reflectance)
+    # Row 8 is the surface: sea level plus the water's reflectance, or — under
+    # CITY — the ground plane and the tile's world offset (which district
+    # sits under this field's cameras).
+    u[8] = ((state.ocean_z, *state.city_tile_offset_m, 0.0) if state.city
+            else (state.ocean_z, *state.ocean_reflectance))
+    # Row 9 needs no branch: cell size, tile extent, surface flag and top mip
+    # are the same four numbers about whichever tile is bound.
     u[9] = (state.ocean_fif_dx, state.ocean_tile_extent,
             1.0 if state.ocean_enabled else 0.0, float(state.ocean_max_lod))
     u[10] = (1.0 if view.subpixel else 0.0, view.jitter_scale, view.haze,
@@ -355,7 +436,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[12] = (view.gradient_coarse_weight, view.gradient_coarse_radius_m,
              view.ambient_occlusion_floor,
              math.tan(view.cone_stencil_theta_deg * DEG))
-    u[13] = (*cloud_sun, view.low_sun_sky_field_strength)
+    u[13] = (*cloud_sun, low_sun_sky)
     u[14] = (*ambient, split)
     u[15] = (*horizon, view.aerial_perspective_strength)
     u[16] = (*bloom, look.aerial_beta_per_km(view.haze) * 1e-3)
@@ -366,9 +447,19 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[19] = (view.ocean_slope_draw_fraction,
              look.ocean_haze_extinction_per_km(view.haze) * 1e-3,
              view.ocean_sky_shadow_floor, view.contrast)
+    # The view-step angle floors at a QUARTER of the render's pixel angle:
+    # the accumulation is jittered, so a converged image resolves sub-pixel,
+    # and a floor at exactly one pixel dissolves the very detail
+    # accumulation would have antialiased. An exact 0 stays 0 — the "LOD
+    # off, fixed dt" sentinel. Twin of the packer in uniforms.js
+    # (test_uniform_parity pins them to each other).
+    pixel_tan = 2.0 * math.tan(view.fov * DEG * 0.5) / w
+    view_step_tan = math.tan(view.view_step_lod_degrees * DEG)
+    if view_step_tan > 0.0:
+        view_step_tan = max(view_step_tan, 0.25 * pixel_tan)
     u[20] = (1.0 if state.periodic else 0.0,
              math.tan(view.light_march_lod_degrees * DEG),
-             math.tan(view.view_step_lod_degrees * DEG),
+             view_step_tan,
              view.tone_map_gamma)
     if state.nested:
         u[21] = (*state.nest_bmin, state.dt_view_nest)
@@ -432,15 +523,30 @@ ACCUM_FORMAT = "rgba32float"
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
-               max_light_steps: int, tone_map: bool = True) -> str:
-    """Bake the three compile-time constants into the shader source.
+               max_light_steps: int, tone_map: bool = True,
+               city: bool = False) -> str:
+    """Bake the compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
     bounds a loop. Each sentinel must appear exactly once — a miss renders
     the wrong thing at full speed and says nothing.
+
+    CITY is only rewritten when it is being turned ON. Its declared value is
+    already `false`, so asking for the daytime scene is a no-op rewrite, and
+    requiring the sentinel there would make every ordinary render depend on a
+    shader edit it does not use. Turning it on demands the declaration and
+    raises without it.
     """
     if not (1 <= int(max_light_steps) <= 512):
         raise ValueError(f"max_light_steps must be in [1, 512]; got {max_light_steps}.")
+    if city and source.count("const CITY: bool = false;") != 1:
+        raise RuntimeError(
+            "city=True needs `const CITY: bool = false;` in "
+            f"{SHADER_PATH.name}, and it is not there (found "
+            f"{source.count('const CITY: bool = false;')} occurrences). The "
+            "night-city specialization has not landed in the shader yet, or "
+            "the declaration has been reworded — either way this host cannot "
+            "compile a city.")
     swaps = [
         ("const PERIODIC_DOMAIN: bool = true;",
          f"const PERIODIC_DOMAIN: bool = {'true' if periodic else 'false'};"),
@@ -451,6 +557,9 @@ def specialize(source: str, *, periodic: bool, nested: bool,
         ("const TONE_MAP: bool = true;",
          f"const TONE_MAP: bool = {'true' if tone_map else 'false'};"),
     ]
+    if city:
+        swaps.append(("const CITY: bool = false;",
+                      "const CITY: bool = true;"))
     for sentinel, replacement in swaps:
         if source.count(sentinel) != 1:
             raise RuntimeError(
@@ -471,7 +580,7 @@ class SoarRenderer:
 
     def __init__(self, *, periodic: bool = True, nested: bool = False,
                  max_light_steps: int = DEFAULT_MAX_LIGHT_STEPS,
-                 tone_map: bool = True, device=None,
+                 tone_map: bool = True, city: bool = False, device=None,
                  shader_source: Optional[str] = None):
         """`shader_source` overrides the checked-in shader.
 
@@ -479,6 +588,12 @@ class SoarRenderer:
         other on one device, in raw float, without a checkout — which is how
         a change claiming to preserve the image gets to prove it (see
         tools/soar_shader_ab.py). Everything else reads the file.
+
+        `city` is the night-city scene: it compiles CITY into the shader and
+        binds the city density tile at binding 3 in place of the ocean's. It
+        is a property of the renderer rather than of a frame because both of
+        those are fixed at construction. The SceneState passed to each render
+        must agree — set `SceneState.city` to match.
         """
         import wgpu                                    # local: GPU only on use
         self.wgpu = wgpu
@@ -490,12 +605,13 @@ class SoarRenderer:
         self.nested = bool(nested)
         self.max_light_steps = int(max_light_steps)
         self.tone_map = bool(tone_map)
+        self.city = bool(city)
 
         source = specialize(shader_source if shader_source is not None
                             else read_shader(), periodic=self.periodic,
                             nested=self.nested,
                             max_light_steps=self.max_light_steps,
-                            tone_map=self.tone_map)
+                            tone_map=self.tone_map, city=self.city)
         self._ray_module = device.create_shader_module(code=source)
         self._accum_module = device.create_shader_module(code=_ACCUM_SHADER)
 
@@ -525,7 +641,7 @@ class SoarRenderer:
         # bake_light_cache replaces it with a real cache.
         self._light_tau_tex = self._dummy_volume()
         self._light_cache_dims = None
-        self._ocean_tex = self._load_ocean()
+        self._ocean_tex = self._load_surface_tile()
         self._targets = None
         self._bind_group = None
         self._build_pipelines()
@@ -543,29 +659,38 @@ class SoarRenderer:
             {"bytes_per_row": 2, "rows_per_image": 1}, (1, 1, 1))
         return tex
 
-    def _load_ocean(self):
-        """The FIF normal tile: 10 pre-renormalised mips, uploaded level by level.
+    def _load_surface_tile(self):
+        """The tile bound at binding 3: pre-renormalised mips, level by level.
 
         Not GPU-generated mips — the shader hand-blends two levels because a
         single hardware trilinear fetch's half-texel offset only fits level 0.
+
+        Which tile depends on the scene: the ocean's FIF normal field, or —
+        under `city` — the city density field. One byte format, one binding,
+        one loader; the two differ only in the directory and in what the
+        shader makes of the four channels. `self.surface_meta` is the loaded
+        meta.json, and is where a caller reads the cell size and tile extent
+        that SceneState has to be told about.
         """
         import json
         wgpu = self.wgpu
-        meta = json.loads((OCEAN_DIR / "meta.json").read_text())
+        tile_dir = CITY_DIR if self.city else OCEAN_DIR
+        meta = json.loads((tile_dir / "meta.json").read_text())
         n, mips = int(meta["n"]), int(meta["mips"])
-        self.ocean_meta = meta
+        self.surface_meta = meta
         tex = self.device.create_texture(
             size=(n, n, 1), dimension="2d", format="rgba16float",
             mip_level_count=mips,
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
         for level in range(mips):
             side = max(1, n >> level)
-            raw = (OCEAN_DIR / f"fif_mip{level}.bin").read_bytes()
+            raw = (tile_dir / f"fif_mip{level}.bin").read_bytes()
             expected = side * side * 4 * 2
             if len(raw) != expected:
                 raise RuntimeError(
-                    f"ocean/fif_mip{level}.bin is {len(raw)} bytes, expected "
-                    f"{expected} for a {side}x{side} rgba16float level.")
+                    f"{tile_dir.name}/fif_mip{level}.bin is {len(raw)} bytes, "
+                    f"expected {expected} for a {side}x{side} rgba16float "
+                    "level.")
             self.device.queue.write_texture(
                 {"texture": tex, "mip_level": level}, raw,
                 {"bytes_per_row": side * 8, "rows_per_image": side},
@@ -721,6 +846,21 @@ class SoarRenderer:
             ])
         return self._bind_group
 
+    def _check_scene(self, state: SceneState) -> None:
+        """CITY is compiled in and its tile is bound at construction.
+
+        A SceneState that disagrees would pack the night palette into a shader
+        reading it as sunlight (or the reverse) and render something plausible
+        and wrong, which is the failure mode worth a loud error.
+        """
+        if bool(state.city) != self.city:
+            raise RuntimeError(
+                f"This renderer was built with city={self.city}, so it has "
+                f"CITY baked to {str(self.city).lower()} and the "
+                f"{'city' if self.city else 'ocean'} tile bound, but the "
+                f"scene says city={bool(state.city)}. Build a renderer for "
+                "the scene you mean to render.")
+
     # -- the sun-tau cache ---------------------------------------------------
 
     def bake_light_cache(self, state: SceneState, view: ViewState, *,
@@ -747,6 +887,7 @@ class SoarRenderer:
         wgpu = self.wgpu
         if self._vol_tex is None:
             raise RuntimeError("No volume uploaded; call upload_volume() first.")
+        self._check_scene(state)
         if not (1 <= int(divisor) <= 8):
             raise ValueError(f"divisor must be in [1, 8]; got {divisor}.")
         divisor = int(divisor)
@@ -810,6 +951,7 @@ class SoarRenderer:
         """
         if frames < 1:
             raise ValueError(f"frames must be >= 1; got {frames}.")
+        self._check_scene(state)
         w, h = view.render_size
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()

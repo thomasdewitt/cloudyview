@@ -1,0 +1,80 @@
+{
+ "schema": "cloudyview.city.components.v1",
+ "components": [
+  {
+   "file": "windowlife.wgsl",
+   "name": "windowlife",
+   "hooks": {
+    "window_glyph": "cc_windowlife_glyph"
+   },
+   "enabled": true
+  },
+  {
+   "file": "aircars.wgsl",
+   "name": "aircars",
+   "kind_base": 300,
+   "hooks": {
+    "cell_props": "cc_aircars_props_trace",
+    "shade": "cc_aircars_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "facadeworks.wgsl",
+   "name": "facadeworks",
+   "hooks": {
+    "facade": "cc_facadeworks_detail"
+   },
+   "enabled": true
+  },
+  {
+   "file": "skyway.wgsl",
+   "name": "skyway",
+   "kind_base": 200,
+   "hooks": {
+    "extra_trace": "cc_skyway_trace",
+    "shade": "cc_skyway_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "rooftopworks.wgsl",
+   "name": "rooftopworks",
+   "kind_base": 600,
+   "hooks": {
+    "cell_props": "cc_rooftopworks_props_trace",
+    "shade": "cc_rooftopworks_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "skybridges.wgsl",
+   "name": "skybridges",
+   "kind_base": 500,
+   "hooks": {
+    "cell_props": "cc_skybridges_props_trace",
+    "shade": "cc_skybridges_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "streetlife.wgsl",
+   "name": "streetlife",
+   "kind_base": 100,
+   "hooks": {
+    "cell_props": "cc_streetlife_props_trace",
+    "shade": "cc_streetlife_shade"
+   },
+   "enabled": true
+  },
+  {
+   "file": "adscreens.wgsl",
+   "name": "adscreens",
+   "kind_base": 400,
+   "hooks": {
+    "facade": "cc_adscreens_facade"
+   },
+   "enabled": true
+  }
+ ]
+}
