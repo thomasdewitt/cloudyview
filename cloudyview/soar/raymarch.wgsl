@@ -128,7 +128,11 @@ struct Uniforms {
     // z = skip the vertical sky probe (0.0 or 1.0): every consumer of
     //     t_sky then sees a fully open sky. A cost/look toggle while the
     //     per-tier fate of these marches is decided.
-    // w = unused (zero).
+    // w = ice-detection mode (0.0 or 1.0), a false-color view:
+    //     cloud source terms are tinted by the per-voxel ice fraction
+    //     (binding 8) and the sky is remapped to an alien green. At 0.0
+    //     every multiply below is by exactly 1.0 and the frame is
+    //     bit-identical to a build without the mode.
     light_cache: vec4<f32>,
 };
 
@@ -149,6 +153,12 @@ struct Uniforms {
 // sample_light_tau. Always bound (a 1x1x1 zero texture while the cache is
 // off or stale) so one bind-group layout serves both paths.
 @group(0) @binding(7) var light_tau: texture_3d<f32>;
+// Ice-detection mode: per-voxel ice extinction fraction
+// sigma_ice / (sigma_liq + sigma_ice) over the OUTER level's grid, same
+// texel layout as `vol`. Always bound — a 1x1x1 zero stand-in when the field
+// carries no ice variable — so one bind-group layout serves both. Read only
+// when u.light_cache.w is set.
+@group(0) @binding(8) var ice_frac: texture_3d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -832,6 +842,82 @@ fn sample_light_tau(p: vec3<f32>) -> f32 {
     }
     return textureSampleLevel(light_tau, vol_samp, tex_coord, 0.0).r;
 }
+
+// Ice-detection mode (false-color phase) ------------------------------------
+//
+// Ice extinction fraction at a world point, from the outer level's grid —
+// the outer AABB covers any nest, so one texture serves both levels. Same
+// coordinate convention as sample_light_tau: no edge taper (a fraction is
+// not extinction; ramping it to zero at the boundary would paint the domain
+// edge liquid-red), lateral wrap in a periodic domain, clamp vertically.
+fn ice_fraction_at(p: vec3<f32>) -> f32 {
+    let q = wrap_to_domain(p);
+    let tex_dims = vec3<f32>(textureDimensions(ice_frac, 0));
+    let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
+    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims;
+    let tex_coord = vec3<f32>(
+        data_g.z + 0.5,
+        data_g.y + 0.5,
+        data_g.x + 0.5
+    ) / tex_dims;
+    if (PERIODIC_DOMAIN) {
+        return textureSampleLevel(ice_frac, vol_wrap_samp, tex_coord, 0.0).r;
+    }
+    return textureSampleLevel(ice_frac, vol_samp, tex_coord, 0.0).r;
+}
+
+// The false-color ramp: liquid burns crimson, ice glows cyan, and the mixed
+// phase between them crosses through electric violet. NOT luminance-
+// normalized: dividing by the hue's luminance blows the red channel far past
+// the tone map's shoulder and deep red comes out pink. Max-component ~1
+// instead, so red reads darker than cyan — deep red to vibrant cyan, which
+// is the intended reading.
+fn ice_tint(f_in: f32) -> vec3<f32> {
+    let f = clamp(f_in, 0.0, 1.0);
+    // Authored for the display: the tone map's gamma lifts weak channels,
+    // so the linear palette is deeper than the hue it lands on.
+    let c_liquid = vec3<f32>(1.00, 0.010, 0.030);
+    let c_mixed  = vec3<f32>(0.60, 0.015, 1.00);
+    let c_ice    = vec3<f32>(0.010, 0.85, 1.00);
+    return mix(mix(c_liquid, c_mixed, smoothstep(0.0, 0.5, f)),
+               c_ice, smoothstep(0.5, 1.0, f));
+}
+
+const ICE_LUM: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+
+// The sea under the alien sky: its shaded luminance on a dark teal, so the
+// glint and wave structure survive the recolor.
+const ICE_OCEAN_TINT: vec3<f32> = vec3<f32>(0.04, 0.30, 0.24);
+
+// A cloud source term recolored for the false-color view: its luminance —
+// which carries all the shading, shadowing and silhouette structure — on the
+// ramp's hue. With the mode off the term passes through untouched, so every
+// call site is bit-identical to the pre-mode shader.
+fn ice_recolor(x: vec3<f32>, tint: vec3<f32>, on: bool) -> vec3<f32> {
+    if (on) {
+        return dot(x, ICE_LUM) * tint;
+    }
+    return x;
+}
+
+// The alien sky: the physical sky's own luminance — gradients, circumsolar
+// bloom, disc, haze behavior all intact — recolored onto a green palette,
+// acid chartreuse at the horizon falling to deep emerald-teal overhead.
+// Luminance-preserving, so exposure, tone map and aerial haze all keep
+// working; `disc` is passed through so the aerial-perspective caller can
+// exclude the solar disc exactly as it does from the physical sky.
+fn alien_sky(dir: vec3<f32>, sun: vec3<f32>, disc: vec3<f32>) -> vec3<f32> {
+    let phys = sky_radiance(dir, sun, u.sky_horizon.xyz, u.sky_bloom.xyz,
+                            disc, u.cloud_sun.w);
+    let lum = dot(phys, ICE_LUM);
+    let up = clamp(dir.z, 0.0, 1.0);
+    // Dimmer than the physical sky it replaces (the ramp luminances are
+    // ~0.7 and ~0.3, not 1), so the red/cyan clouds carry the frame.
+    let horizon = vec3<f32>(0.35, 0.90, 0.10);
+    let zenith  = vec3<f32>(0.01, 0.38, 0.26);
+    return lum * mix(horizon, zenith, pow(up, 0.45));
+}
+// ---------------------------------------------------------------------------
 
 // Sample a *chosen* level at an already-wrapped point.
 fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
@@ -10132,7 +10218,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Aerial perspective (witness iter_008): this sightline's horizon sky
     // color (solar disc excluded) — the same asymptotic target the ocean
     // haze uses, so cloud and water converge to one haze color.
-    let aerial_strength = u.sky_horizon.w;
+    // Ice-detection mode: 0.0 unless research mode has switched it on, and
+    // every branch on it below leaves the math bit-identical when off.
+    let ice_on = u.light_cache.w > 0.5;
+    // In ice mode most of the aerial haze is given up (select is 1.0 with
+    // the mode off): full strength converges every distant cloud onto the
+    // one horizon color and the phase information drowns in it.
+    let aerial_strength = u.sky_horizon.w * select(1.0, 0.3, ice_on);
     var aer = vec3<f32>(0.0);
     if (aerial_strength > 0.0) {
         if (CITY) {
@@ -10145,11 +10237,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             if (ah_len > 1e-8) {
                 ah = dir.xy / ah_len;
             }
-            aer = sky_radiance(
-                vec3<f32>(ah, 0.0), sun,
-                u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
-                u.cloud_sun.w
-            );
+            if (ice_on) {
+                // Distance fades into the alien horizon, not the blue one.
+                aer = alien_sky(vec3<f32>(ah, 0.0), sun, vec3<f32>(0.0));
+            } else {
+                aer = sky_radiance(
+                    vec3<f32>(ah, 0.0), sun,
+                    u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
+                    u.cloud_sun.w
+                );
+            }
         }
     }
 
@@ -10245,14 +10342,15 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // ocean plane coincident with the box floor is still shaded.
             if (ocean_on && t >= t_ocean) {
                 let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
-                col = col + transmittance
+                col = col + ice_recolor(transmittance
                             * ocean_shade_dispatch(
                                 ocean_hit, dir, sun,
                                 sun_cone_dir(sun, sun_frame,
                                              sun_cone_seed, penumbra_tan),
                                 t_ocean, shadow_jitter,
                                 ocean_slope_seed,
-                                jitter_on * jitter_scale);
+                                jitter_on * jitter_scale),
+                            ICE_OCEAN_TINT, ice_on);
                 transmittance = 0.0;
                 ocean_consumed = true;
                 break;
@@ -10328,6 +10426,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             tau_depth = tau_depth + d_tau;
             tau_view = tau_view + d_tau;
+
+            // Ice-detection tint for this sample's cloud source terms.
+            // Exactly 1.0 with the mode off, so the multiplies below are
+            // bit-exact no-ops.
+            var phase_tint = vec3<f32>(1.0);
+            if (ice_on) {
+                phase_tint = ice_tint(ice_fraction_at(p));
+            }
 
             // Aerial perspective: clear-air transmittance camera->sample via
             // the closed-form exponential atmosphere (witness._render_image).
@@ -10567,7 +10673,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // the edges, which is where the physics lives.
             let powder = 1.0 - powder_weight * exp(-POWDER_COEFF * tau_depth);
             let scatter_weight = d_tau * powder * transmittance * air_t;
-            col = col + scatter_weight * ms;
+            col = col + ice_recolor(scatter_weight * ms, phase_tint, ice_on);
 
             // (t_sky and shallow_open were measured above the MS loop.)
 
@@ -10644,9 +10750,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let amb_w_deep = ao_s * ambient_occlusion_floor;
             let amb_w_sky = (1.0 - ao_s)
                 + ao_s * (1.0 - ambient_occlusion_floor) * t_sky;
-            col = col + transmittance * d_tau * amb * air_t
-                        * (amb_w_sky * u.ambient_tint.xyz
-                           + amb_w_deep * fill_tint);
+            col = col + ice_recolor(
+                transmittance * d_tau * amb * air_t
+                * (amb_w_sky * u.ambient_tint.xyz
+                   + amb_w_deep * fill_tint), phase_tint, ice_on);
 
             // Light-transfer split, cool side: a skylight floor restored only
             // in saturated sun shadow; lit faces keep their contrast. The
@@ -10665,9 +10772,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     * LIGHT_TRANSFER_SHADOW_SKYLIGHT
                     * height_ramp
                     * deep_shadow_gate * ahead_factor * fill_shape;
-                col = col + transmittance * d_tau * sky_fill * air_t
-                            * (fill_w_sky * u.ambient_tint.xyz
-                               + fill_w_deep * fill_tint);
+                col = col + ice_recolor(
+                    transmittance * d_tau * sky_fill * air_t
+                    * (fill_w_sky * u.ambient_tint.xyz
+                       + fill_w_deep * fill_tint), phase_tint, ice_on);
             }
 
             // High-sun shadow skylight (2026-08-11): where the split above
@@ -10687,8 +10795,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             if (high_sun_fill > 0.0) {
                 let vis = SKY_PROBE_FILL_FLOOR
                     + (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky;
-                col = col + transmittance * d_tau * high_sun_fill * air_t
-                            * vis * u.ambient_tint.xyz;
+                col = col + ice_recolor(
+                    transmittance * d_tau * high_sun_fill * air_t
+                    * vis * u.ambient_tint.xyz, phase_tint, ice_on);
             }
 
             // Diffused-beam glow (see the constants block): isotropic
@@ -10702,8 +10811,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                       deep_shadow_gate * (1.0 - shallow_open))
                 * fill_shape;
             if (diffuse_beam > 0.0) {
-                col = col + transmittance * d_tau * diffuse_beam * air_t
-                            * ISO_PHASE * DIFFUSE_BEAM_TINT * u.cloud_sun.xyz;
+                col = col + ice_recolor(
+                    transmittance * d_tau * diffuse_beam * air_t
+                    * ISO_PHASE * DIFFUSE_BEAM_TINT * u.cloud_sun.xyz,
+                    phase_tint, ice_on);
             }
 
             // City uplight: the second light source of the night. The glow
@@ -10762,8 +10873,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         BOUNCE_LATERAL_FLOOR),
                     deep_shadow_gate
                 );
-                col = col + transmittance * d_tau * bounce * air_t
-                            * BOUNCE_TINT;
+                col = col + ice_recolor(
+                    transmittance * d_tau * bounce * air_t * BOUNCE_TINT,
+                    phase_tint, ice_on);
             }
 
             // This step's attenuation, computed once. The aerial in-scatter
@@ -10808,13 +10920,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         let center = 0.5 * (u.bmin.xy + u.bmax.xy);
         if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
             && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
-            col = col + transmittance
+            col = col + ice_recolor(transmittance
                         * ocean_shade_dispatch(
                             ocean_hit, dir, sun,
                             sun_cone_dir(sun, sun_frame, sun_cone_seed,
                                          penumbra_tan),
                             t_ocean, shadow_jitter,
-                            ocean_slope_seed, jitter_on * jitter_scale);
+                            ocean_slope_seed, jitter_on * jitter_scale),
+                        ICE_OCEAN_TINT, ice_on);
             transmittance = 0.0;
         }
     }
@@ -10834,6 +10947,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         var sky: vec3<f32>;
         if (CITY) {
             sky = night_sky_radiance(dir, sun);
+        } else if (ice_on) {
+            sky = alien_sky(dir, sun, u.sky_disc.xyz);
         } else {
             sky = sky_radiance(
                 dir, sun,

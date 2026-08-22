@@ -536,6 +536,19 @@ export class UI {
       "Quality…",
       K.QUALITY_PRESETS[app.renderer.qualityTier].label.split(" —")[0],
       () => this.open("quality")));
+    // False-color phase. Research only, and the row appears whatever the
+    // field carries: a row that vanishes for most fields reads as a bug,
+    // where one that states the field has no ice data answers the question
+    // it was going to raise.
+    const iceNote = app.scene.iceNote;
+    add(appearance, "ice", item(
+      `Ice detection: ${app.iceModeOn ? "on" : "off"}`,
+      iceNote ?? "false-color the ice fraction — liquid red, ice cyan",
+      // Reopened after the toggle settles, not before: the first activation
+      // reads a volume, and a row that said "on" while it was still loading
+      // would be describing a picture that is not on screen yet.
+      () => { app.toggleIceMode().then(() => this.open("main")); },
+      { disabled: Boolean(iceNote) }));
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two
     // that change the picture, above the overlay and window rows.
@@ -906,6 +919,15 @@ export class UI {
       ...(this.allows("quality")
         ? [["K", "light cache on/off (goes Custom; a preset resets)"],
            ["J", "sky probe on/off (goes Custom; a preset resets)"]]
+        : []),
+      // Like B and M above: a field that cannot carry the mode owes the
+      // reason, and the first press is a load, which is worth saying before
+      // somebody waits on it wondering.
+      ...(this.allows("ice")
+        ? [["I", app.scene.iceAvailable
+             ? "ice detection on/off — false-color the ice fraction " +
+               "(the first use reads the ice volume)"
+             : app.scene.iceNote]]
         : []),
     ]);
     // Replay lives in the pause menu's session column now — see _panel_main.

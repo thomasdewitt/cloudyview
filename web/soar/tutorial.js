@@ -166,6 +166,11 @@ const RESEARCH_STEPS = [
     text: "Give a terminal command to render this view programmatically " +
           "using the cloudyview CLI.",
   },
+  {
+    menuKey: "ice",
+    text: "Activate false colors indicating cloud ice fraction (magenta for " +
+          "liquid, cyan for ice).",
+  },
   { menuKey: "periodic", text: "Wrap the domain horizontally." },
 ];
 

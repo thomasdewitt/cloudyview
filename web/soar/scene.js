@@ -262,6 +262,43 @@ export class Scene {
   get nestGroup() { return this._nest?.name || null; }
 
   /**
+   * The ice-fraction volume for the ice-detection mode, or null until
+   * somebody asks for it. A getter for the same reason nestView is one: the
+   * bind group is rebuilt from the scene, and a view cached beside a texture
+   * that has since been attached is a frame sampling the stand-in.
+   */
+  get iceView() { return this.iceTexture?.createView() ?? null; }
+
+  /**
+   * Whether the ice fraction is here or could be fetched. False is a fact
+   * about the field — a demo bake carries no ice variable and neither do
+   * plenty of files — not a failure, and the menu says so in those words.
+   */
+  get iceAvailable() { return Boolean(this.iceTexture || this.iceSource); }
+
+  /**
+   * Why the ice fraction is not on offer, or null when it is. Both cases are
+   * facts about the data rather than failures, and they are different facts:
+   * a bake threw the phase split away, a file may simply not have carried
+   * one.
+   */
+  get iceNote() {
+    if (this.iceAvailable) return null;
+    return this.prebaked
+      ? "This field has no ice data — the prebaked demos carry extinction " +
+        "only, and the liquid/ice split cannot be recovered from it. Open a " +
+        "NetCDF file with an ice mixing ratio to use this."
+      : "This field has no ice data — ice detection needs an ice mixing " +
+        "ratio variable (QI / IWC) and this file carries none.";
+  }
+
+  /** Take ownership of a lazily-read ice-fraction volume (loadIceVolume). */
+  attachIce(texture) {
+    this.iceTexture?.destroy();
+    this.iceTexture = texture;
+  }
+
+  /**
    * Attach a finer level. The nest ALWAYS tapers to zero at its own edges,
    * even in a periodic domain: that taper is how it blends out into the
    * coarse field around it, which is what witness does per level.
@@ -305,6 +342,7 @@ export class Scene {
 
   destroy() {
     this.volumeTexture?.destroy();
+    this.iceTexture?.destroy();
     this._nest?.texture?.destroy();
     this._nestDummy?.destroy();
   }
@@ -442,6 +480,11 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       title: meta.title,
       description: meta.description,
       sourceName: meta.source,
+      // A bake is extinction and nothing else: the liquid and ice mixing
+      // ratios went into it and cannot be taken back out. Said here rather
+      // than inferred from an absent variable name, because the ice-detection
+      // mode has to tell the two cases apart to explain either.
+      prebaked: true,
       // Under a forced city the demo's sun is a desert afternoon and the
       // scene's light is a moon, so the mode's moon replaces it. A demo that
       // asked for the city itself carries a moon in this field already.

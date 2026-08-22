@@ -109,6 +109,10 @@ export function packUniforms(state, view) {
     // The vertical sky-visibility march (row 23.z inverts it): off means
     // every consumer of t_sky sees a fully open sky.
     skyProbe = true,
+    // Ice-detection false-color mode (row 23.w). Only meaningful
+    // when a real ice-fraction texture is bound at binding 8; the packer
+    // just writes the flag, same contract as lightCache.
+    iceMode = false,
   } = view;
 
   const [outputW, outputH] = outputSize;
@@ -251,7 +255,8 @@ export function packUniforms(state, view) {
   }
   // Row 23.y is the bake slice index; the renderer's bake pass writes it
   // into its own copy of the block, never through here.
-  row(23, lightCache ? 1.0 : 0.0, 0.0, skyProbe ? 0.0 : 1.0, 0.0);
+  row(23, lightCache ? 1.0 : 0.0, 0.0, skyProbe ? 0.0 : 1.0,
+      iceMode ? 1.0 : 0.0);
   return u;
 }
 

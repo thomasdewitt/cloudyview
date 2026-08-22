@@ -60,11 +60,16 @@ class WorkerLink {
 /**
  * Upload one level's extinction field, slab by slab as the worker produces
  * it, so the JS heap never holds the whole volume.
+ *
+ * `iceOnly` is the deferred ice-fraction pass (loadIceVolume): the same
+ * stream carrying only slabs tagged field:"ice", so no extinction texture is
+ * allocated and no minimap arrives.
  */
-function levelReceiver(device, label, onProgress, ack) {
+function levelReceiver(device, label, onProgress, ack, { iceOnly = false } = {}) {
   const state = { texture: null, dims: null, geometry: null,
                   volume: null, tiles: 0, slabsDone: 0, error: null,
-                  queuedBytes: 0 };
+                  queuedBytes: 0,
+                  iceTexture: null, iceSlabs: 0, iceSlabsDone: 0 };
 
   const step = async (message) => {
     if (message.type === "geometry") {
@@ -107,17 +112,32 @@ function levelReceiver(device, label, onProgress, ack) {
       state.volume = message;
       state.slabs = message.slabs;
       state.dims = message.shape.slice();
-      state.texture = await createVolumeTexture(
-        device, state.dims, `the field in ${label}`);
+      if (!iceOnly) {
+        state.texture = await createVolumeTexture(
+          device, state.dims, `the field in ${label}`);
+      }
+      // Ice-detection mode: the ice-fraction volume, same shape. NOTE this
+      // adds the field's own size again in video memory, which is why it is
+      // loaded on demand rather than with the field. The fraction is a
+      // [0, 1] quantity and r8unorm would halve it (1/255 steps are
+      // invisible in a color ramp) — at the price of clamping the
+      // negative/NaN condensate fp16 passes through.
+      state.iceSlabs = message.iceSlabs ?? 0;
+      if (state.iceSlabs > 0) {
+        state.iceTexture = await createVolumeTexture(
+          device, state.dims, `the ice fraction in ${label}`);
+      }
     } else if (message.type === "slab") {
-      if (!state.texture) {
+      const target = message.field === "ice" ? state.iceTexture : state.texture;
+      if (!target) {
         throw new Error(
           "A slab arrived before the volume texture existed — the upload " +
           "queue is out of order.");
       }
-      writeVolumeSlab(device, state.texture, message.data,
+      writeVolumeSlab(device, target, message.data,
                       message.origin, message.size);
-      state.slabsDone += 1;
+      if (message.field === "ice") state.iceSlabsDone += 1;
+      else state.slabsDone += 1;
       state.queuedBytes += message.data.byteLength;
 
       // Bound the staging memory a multi-gigabyte field can pile up — see
@@ -282,6 +302,9 @@ export async function loadFileScene(
       // was allocated while `finally` terminates the worker mid-read — which
       // is the whole point, since there is nothing left to receive its output.
       await Promise.race([
+        // No ice fraction here. It is a second volume the size of this one
+        // and most flights never ask for it, so it is read on demand
+        // (loadIceVolume) rather than paid for by everybody at load.
         link.call("extinction", { group: level.path, units, label, slabBudget }),
         receiver.failed,
       ]);
@@ -359,6 +382,14 @@ export async function loadFileScene(
       title: outer.level.path ? `group ${outer.level.path}` : null,
       liquidVar: outer.level.liquidVar,
       iceVar: outer.level.iceVar,
+      // Ice-detection mode: what it would take to read the ice fraction, not
+      // the fraction itself. Null when the field carries no ice variable, and
+      // then the viewer says so instead of offering the mode. Holding the
+      // File is holding a handle, not the bytes — the same one this load
+      // already streamed through.
+      iceSource: outer.level.iceVar
+        ? { file, group: outer.level.path, units, label: outer.level.path || "(root)" }
+        : null,
     });
 
     if (built.length > 1) {
@@ -389,8 +420,71 @@ export async function loadFileScene(
   } catch (err) {
     for (const receiver of receivers.values()) {
       receiver.state.texture?.destroy();
+      receiver.state.iceTexture?.destroy();
     }
     nestDummy?.destroy();
+    throw err;
+  } finally {
+    link.close();
+  }
+}
+
+/**
+ * Read just the ice-fraction volume of a field already on screen.
+ *
+ * The deferred half of the ice-detection mode: nothing about it is paid for
+ * until somebody asks for it, and the price when they do is one more pass
+ * over the same file. The crop is not passed in — the pass re-derives it from
+ * the same occupancy test the extinction read used, so the two bands agree by
+ * construction and the texture lines up texel for texel with the field it
+ * tints.
+ *
+ * `source` is the scene's `iceSource`. Returns the texture; the caller owns
+ * it from then on.
+ */
+export async function loadIceVolume(device, source, { progress, slabBudget } = {}) {
+  const { file, group, units, label } = source;
+  const receivers = new Map();
+  const link = new WorkerLink((message) => {
+    receivers.get(message.label)?.handle(message);
+  });
+  const receiver = levelReceiver(
+    device, label,
+    (done, n, of, phase) => progress?.(
+      phase === "read"
+        ? `Reading the ice fraction — part ${Math.round(done * (of || 1))}` +
+          ` of ${of || "?"}`
+        : `Uploading the ice fraction — part ${n} of ${of}`,
+      phase === "read" ? 0.5 * done : 0.5 + 0.5 * done),
+    (bytes) => link.notify("ack", { bytes }),
+    { iceOnly: true });
+  receivers.set(label, receiver);
+
+  try {
+    progress?.("Opening the file again…", 0.0);
+    await link.call("open", { file });
+    await Promise.race([
+      link.call("extinction",
+                { group, units, label, slabBudget, iceOnly: true }),
+      receiver.failed,
+    ]);
+    await receiver.settled();
+    if (receiver.state.error) throw receiver.state.error;
+    if (!receiver.state.iceTexture) {
+      throw new Error(
+        `No ice fraction ever arrived for '${label}', so there is nothing to ` +
+        "show. The field's ice variable read as empty.");
+    }
+    if (receiver.state.iceSlabsDone !== receiver.state.iceSlabs) {
+      throw new Error(
+        `Only ${receiver.state.iceSlabsDone} of ${receiver.state.iceSlabs} ` +
+        `ice-fraction parts of '${label}' reached the GPU. The ice field ` +
+        "would have holes in it.");
+    }
+    progress?.("Ready.", 1);
+    return receiver.state.iceTexture;
+  } catch (err) {
+    receiver.state.iceTexture?.destroy();
     throw err;
   } finally {
     link.close();

@@ -54,6 +54,24 @@ export function toHalf(value) {
   return sign | half;
 }
 
+/** IEEE binary16 to binary32 — the readback direction (dart-tip probe). */
+export function fromHalf(h) {
+  const sign = (h & 0x8000) << 16;
+  const exp = (h >>> 10) & 0x1f;
+  const mant = h & 0x3ff;
+  if (exp === 0x1f) {
+    _u32[0] = sign | 0x7f800000 | (mant << 13);       // inf / NaN
+    return _f32[0];
+  }
+  if (exp === 0) {
+    if (mant === 0) { _u32[0] = sign; return _f32[0]; }
+    // Subnormal: exact in f32.
+    return (sign ? -1 : 1) * mant * 2 ** -24;
+  }
+  _u32[0] = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+  return _f32[0];
+}
+
 export function makeHalfWriter(length) {
   if (HAS_F16) {
     const view = new Float16Array(length);
