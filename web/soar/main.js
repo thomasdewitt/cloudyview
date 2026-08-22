@@ -591,11 +591,14 @@ async function buildRail() {
 //
 // `ready: false` is the whole of the not-yet: flip it and the segment works.
 
+// The labels say "mode" out loud. A row of three bare adjectives over a
+// button that says "Fly less detailed demo" reads as a property of the demo;
+// the word is what makes the control name what it switches.
 const MODES = [
-  { id: "research", label: "research", ready: true },
-  { id: "basic", label: "basic", ready: true },
+  { id: "research", label: "research mode", ready: true },
+  { id: "basic", label: "basic mode", ready: true },
   {
-    id: "cyberpunk", label: "cyberpunk", ready: false,
+    id: "cyberpunk", label: "cyberpunk mode", ready: false,
     note: "in development",
   },
 ];
@@ -639,6 +642,13 @@ function placeThumb() {
  */
 function applyMode(next, { save = true } = {}) {
   mode = next;
+  // Before the mode class, not after. It marks this as a switch rather than a
+  // page load — which is what tells the newly revealed controls to use the
+  // short reveal instead of the intro, and what arms the rail's glide at all
+  // (see body.switched in style.css). Set it after the layout change and the
+  // very first switch of a session is asking the engine to transition on a
+  // rule that was not there when the change was made.
+  if (save) document.body.classList.add("switched");
   for (const m of MODES) document.body.classList.toggle(`mode-${m.id}`, m.id === next);
   // basic and research both want the pair; it starts hidden only so the
   // stack does not reflow between first paint and the stored mode landing.
@@ -650,9 +660,6 @@ function applyMode(next, { save = true } = {}) {
   }
   placeThumb();
   if (!save) return;
-  // Marks this as a switch rather than a page load, which is what tells the
-  // newly revealed controls to use the short reveal instead of the intro.
-  document.body.classList.add("switched");
   try { localStorage.setItem(MODE_KEY, next); } catch { /* no storage */ }
 }
 

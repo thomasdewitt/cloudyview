@@ -20,21 +20,24 @@ export const MODE_KEY = "soar.mode";
  * item — spreads one decision across a dozen call sites, and the thing being
  * decided is a list.
  *
- * Fullscreen and the way back to the start page are on every list: neither is
- * a research control, and a mode with no exit is not a mode.
+ * The tutorial and the way back to the start page are on every list: neither
+ * is a research control, and a mode with no exit is not a mode.
+ *
+ * The labels carry the word "mode" — the toggle stands where "Paused" used to
+ * and has to say what it switches, not just which of three.
  */
 export const MODES = {
   basic: {
-    label: "Basic",
+    label: "Basic mode",
     available: true,
-    items: ["sun", "capture", "controls", "fullscreen", "leave"],
+    items: ["sun", "capture", "controls", "tutorial", "leave"],
   },
-  research: { label: "Research", available: true, items: null },
+  research: { label: "Research mode", available: true, items: null },
   cyberpunk: {
-    label: "Cyberpunk",
+    label: "Cyberpunk mode",
     available: false,
     note: "in development",
-    items: ["sun", "capture", "controls", "fullscreen", "leave"],
+    items: ["sun", "capture", "controls", "tutorial", "leave"],
   },
 };
 
@@ -486,9 +489,19 @@ export class UI {
       col.append(node);
     };
 
-    add(appearance, "sun", item("Time of day…",
-                                `${app.sunZenith.toFixed(0)}° zenith`,
-                                () => this.open("sun")));
+    // "Current: …", like the file row, and named where it has a name: the
+    // panel's own presets are the vocabulary, so a sun sitting on one is
+    // reported as that rather than as the angle it happens to be (the same
+    // test the panel's segmented control uses to light a segment).
+    const sunPreset = K.SUN_PRESETS.find(
+      (p) => Math.abs(app.sunElevation - p.elevation) < 0.05
+             && Math.abs((app.sunAzimuth - p.azimuth) % 360.0) < 0.05);
+    add(appearance, "sun", item(
+      "Time of day…",
+      `Current: ${sunPreset
+        ? sunPreset.name
+        : `${app.sunZenith.toFixed(0)}° zenith, sun to the ${app.sunCompass}`}`,
+      () => this.open("sun")));
     // The tier's name and nothing else. The render scale, and whether the
     // machine chose the tier, are the quality panel's business (Thomas,
     // 2026-08-14).
@@ -503,34 +516,11 @@ export class UI {
         item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
              "wrap the field laterally",
              () => { app.togglePeriodic(); this.open("main"); }));
-    add(appearance, "minimap", item(
-      `Minimap: ${!app.minimap ? "off" : { corner: "on", full: "fullscreen", off: "off" }[app.minimapMode]}`,
-      app.minimap
-        ? "Keyboard shortcut: M"
-        : (app._minimapProblem ?? "not available for this field"),
-      () => {
-        app.toggleMinimap();
-        // Landing on fullscreen, the whole point is the map this menu would
-        // cover — and "click to travel" cannot work under it (bug 12). The
-        // menu closes (mouse stays free for the map; Escape brings it back);
-        // the other modes re-open it so the row's label updates.
-        if (app.minimapMode === "full") this.close();
-        else this.open("main");
-      }));
-    // Like the minimap row above: the label carries the state and the key
-    // cycles it, because there are three states and a checkbox has two. The
-    // second branch of the subtitle has to survive — a field that cannot
-    // carry a flyer still owes an explanation of why.
-    add(appearance, "flyer", item(
-      `Flyer: ${app.flyerLabel}`,
-      app.availableFlyers.length
-        ? "Keyboard shortcut: B"
-        : (app._flyerProblem ?? "not available for this field"),
-      () => { app.cycleFlyer(); this.open("main"); }));
-    add(appearance, "fullscreen",
-        item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
-             "Keyboard shortcut: F",
-             () => { app.toggleFullscreen(); this.open("main"); }));
+    // No minimap, flyer or fullscreen row. Each was a row whose whole content
+    // was a state and the key that cycles it, and the Controls panel is where
+    // the keys are — so they are stated there, once, with their availability
+    // (Thomas, 2026-08-22). Nothing is lost but three rows off the menu: the
+    // keys work from the flight, which is where you are when you want them.
 
     // What is loaded belongs on the control that would replace it, not in a
     // block of its own at the foot (Thomas, 2026-08-14).
@@ -549,11 +539,19 @@ export class UI {
           item(`Remove the nest (${app.nestName ?? "nested field"})`,
                null, () => app.removeNest()));
     }
+    // The panel does video too, and says so; the row is named for the thing
+    // people open it to do. The ellipsis is the menu's mark for a row that
+    // opens a panel rather than acting.
     add(session, "capture",
-        item("Capture…", "stills and video", () => this.open("capture")));
+        item("Capture a still…", null, () => this.open("capture")));
     add(session, "terminal", item("Render this view in a terminal…", null,
                                   () => this.open("terminal")));
     add(session, "controls", item("Controls", null, () => this.open("controls")));
+    // Up here rather than at the foot of the Controls panel, where it was: the
+    // walkthrough is a thing you do with this session, like Capture and
+    // Controls, and nobody opens a key-binding list looking for it.
+    add(session, "tutorial",
+        item("Replay the tutorial", null, () => this.app.tutorial?.replay()));
     const fov = sliderRow("Field of view", {
       min: K.FOV_LIMITS[0], max: K.FOV_LIMITS[1], step: 1,
       value: app.camera.fov, format: (v) => `${v.toFixed(0)}°`,
@@ -838,6 +836,7 @@ export class UI {
   }
 
   _panel_controls() {
+    const app = this.app;
     const m = this.menu;
     m.append(this._header(null, "Controls"));
     const section = (title, rows) => {
@@ -859,12 +858,22 @@ export class UI {
     ]);
     // F-keys are Fn-gated on most laptops, so every one of them has a plain
     // key that does the same thing. F3 and ` are one binding, not two modes.
+    //
+    // The minimap and flyer keys carry their state and, when the field cannot
+    // have one, the reason — this is the only place either is said now that
+    // the menu rows are gone, and a field that cannot carry a flyer still owes
+    // an explanation of why.
     section("While flying", [
       ["Esc", "menu"],
       ["F", "fullscreen"],
       ["F3 or `", "stats overlay on/off"],
-      ["B", "flyer — paper dart, swift, off"],
-      ["M", "minimap"],
+      ["B", app.availableFlyers.length
+        ? `flyer — paper dart, swift, off (now: ${app.flyerLabel})`
+        : `flyer — ${app._flyerProblem ?? "not available for this field"}`],
+      ["M", app.minimap
+        ? `minimap — corner, fullscreen, off (now: ${
+            { corner: "corner", full: "fullscreen", off: "off" }[app.minimapMode]})`
+        : `minimap — ${app._minimapProblem ?? "not available for this field"}`],
       ["R", "record a flight track — R again to stop"],
       ["P", "capture a still"],
       ...(this.allows("quality")
@@ -872,11 +881,7 @@ export class UI {
            ["J", "sky probe on/off (goes Custom; a preset resets)"]]
         : []),
     ]);
-    m.append(el("div", "divider"));
-    const replay = item("Replay the tutorial", "the flight and menu walkthrough",
-                        () => this.app.tutorial?.replay());
-    replay.dataset.menuKey = "tutorial";
-    m.append(replay);
+    // Replay lives in the pause menu's session column now — see _panel_main.
     m.append(this._backButton());
   }
 

@@ -186,10 +186,21 @@ DEMOS = [
         crop=dict(y=(0, 512), x=(0, 512), z="auto"),
         scale=1e3,
         sun=dict(azimuth=0.0, elevation=45.5),
+        # This one starts where the tutorial starts, and the still is that view
+        # (Thomas, 2026-08-22). It is the demo the landing page's "less
+        # detailed" button loads and so the one a first flight lands in, and
+        # FlyThroughApp.tutorialSpawn puts the camera on the water looking at
+        # the horizon — the picture you clicked has to be the place you arrive,
+        # tutorial or no tutorial, or entering flight is a jump cut.
+        #
+        # z is that spawn in this field's relative units: the spawn is 4 ×
+        # OCEAN_FLOOR_MARGIN_M = 50 m of real altitude, and rel z is anchored
+        # to the surface, so 2 × 50 / 14750 − 1 over this domain's 14750 m top.
+        # Elevation 0 is the horizon, which is the other half of the spawn.
         still=dict(
             size=(1920, 963),
-            position=(0.917919995217, -0.696861762887, -0.673006416282),
-            azimuth=358.68, elevation=4.16, fov=100.0,
+            position=(0.917919995217, -0.696861762887, -0.993220338983),
+            azimuth=358.68, elevation=0.0, fov=100.0,
             exposure=2.98704821995, haze=0.92,
         ),
     ),

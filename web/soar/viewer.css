@@ -408,11 +408,26 @@ button.mini.on {
 #ui > .tutorial-spot,
 #ui > .tutorial-spot-label { pointer-events: none; }
 .tutorial-box[hidden] { display: none; }
-/* A spotlit step: the menu owns the middle of the window and the speed chip
-   owns the bottom corner, so the box goes to the top. */
-.tutorial-box.top {
+/* A menu step: the box hangs under the menu, whose height it cannot know, so
+   `top` is set per frame from the menu's own rect — see Tutorial._dockBox.
+   The value here is only what it looks like for the frame before that runs. */
+.tutorial-box.docked {
   top: 24px;
   transform: translateX(-50%);
+}
+/* And the menu makes room for it — without moving: the pause menu lives in the
+   middle of the window and that is where someone who has hit Escape before
+   expects to find it, tutorial or no tutorial. All that changes is the cap on
+   its height, and only for a menu tall enough to reach the cap; every menu
+   shorter than that sits exactly where it always does.
+   Twice the reservation, because the menu is centred: half of every pixel it
+   gives up goes to the top, where nothing needs it. --tutorial-dock is the
+   measured height of the prompt plus its gaps, set by Tutorial._dockBox, since
+   how tall a prompt is, is the step's business and not a number to guess at.
+   :not(.dock-bottom) — the sun, quality and terminal panels dock to the bottom
+   edge, and a menu step can leave one of them open. */
+#viewer.tutorial #menu:not(.dock-bottom) {
+  max-height: calc(100vh - 4rem - 2 * var(--tutorial-dock, 0px));
 }
 .tutorial-text {
   margin: 0;
@@ -420,17 +435,32 @@ button.mini.on {
   line-height: 1.6;
   color: var(--ink-bright);
 }
+/* A step that is a list of cases rather than a paragraph. Left-aligned inside
+   the centred box, because a centred bullet list is neither. */
+.tutorial-list {
+  margin: 10px 0 0;
+  padding-left: 1.2em;
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.tutorial-list[hidden] { display: none; }
+.tutorial-list li + li { margin-top: 6px; }
+.tutorial-list li::marker { color: var(--hot); }
 .tutorial-graphic { margin-top: 14px; }
 .tutorial-graphic[hidden] { display: none; }
 
 .keycaps { display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .keycap-row { display: flex; gap: 5px; }
-/* Ghosts: the shape of the keys, not a button anyone should try to press. */
+/* Ghosts: the shape of the keys, not a button anyone should try to press.
+   Two rows inside each: the letter, and under it the direction it flies. */
 .keycap {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  row-gap: 1px;
+  width: 34px;
+  height: 34px;
   font-family: var(--ui-mono);
   font-size: 12px;
   color: var(--ink-dim);
@@ -438,6 +468,24 @@ button.mini.on {
   border-radius: var(--control-radius);
   background: rgba(150, 175, 210, 0.07);
 }
+/* Quieter than the letter and half its size: it is a gloss on the key, not a
+   second key. */
+.keycap .cap-arrow {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ink-dim);
+  opacity: 0.65;
+}
+
+/* Answers a click on a menu row the walkthrough is not ready for — see the
+   interceptor in Tutorial._build. Amber, because it is the one line in the box
+   that is about what just happened rather than about the step. */
+.tutorial-note {
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--hot);
+}
+.tutorial-note[hidden] { display: none; }
 
 .tutorial-actions {
   display: flex;
@@ -475,20 +523,37 @@ button.tutorial-skip:hover { color: var(--ink); border-bottom-color: var(--hot);
 
 /* The dim is one enormous spread shadow on a transparent box, so the hole is
    the box itself — no four-rect layout to keep in agreement with a rect that
-   moves every frame. */
+   moves every frame.
+   The spread has to clear the window's far corner, and the number that decides
+   that is not the distance to it. A spread shadow's own corners are rounded by
+   the spread: the outer radius is (border-radius + spread), so the arc cuts
+   about 0.29 × spread back in along the diagonal. At 100vmax and a ring in the
+   bottom-right corner — which is exactly where the speed step puts it — that
+   arc fell several hundred pixels inside the top-left corner of the window and
+   left a bright undimmed wedge there. The ring can be at most a window
+   diagonal (≈1.42 vmax) from a corner, so a spread of 200vmax puts the arc
+   outside the viewport from anywhere on screen. */
 .tutorial-spot {
   position: absolute;
   border: 1px solid var(--hot);
   border-radius: var(--control-radius);
-  box-shadow: 0 0 0 100vmax rgba(3, 5, 8, 0.76);
+  /* Glow first: a box-shadow list paints earliest on top, and behind the dim
+     a 16 px halo is 16 px of dim. */
+  box-shadow: 0 0 16px rgba(232, 131, 74, 0.45),
+              0 0 0 200vmax rgba(3, 5, 8, 0.76);
   z-index: 2;
 }
 .tutorial-spot[hidden] { display: none; }
+/* The one caption on the screen, in the corner the eye is least likely to be
+   in: at 11.5px it was as quiet as the readout it is there to point out. */
 .tutorial-spot-label {
   position: absolute;
   font-family: var(--ui-mono);
-  font-size: 11.5px;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   color: var(--hot);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.85);
   white-space: nowrap;
   z-index: 3;
 }

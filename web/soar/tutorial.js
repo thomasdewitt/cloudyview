@@ -47,12 +47,24 @@ function setFlag(key) {
   }
 }
 
-/** The ghost keycaps under the WASD prompt. */
+/**
+ * The ghost keycaps under the WASD prompt.
+ *
+ * Each carries the direction it flies as well as its letter: the shape of the
+ * cluster says "these four go together" but not which way any of them goes,
+ * and the arrow is how everyone who has not played this kind of game already
+ * knows reads a key like this.
+ */
 function keycaps() {
   const wrap = el("div", "keycaps");
+  const arrows = { W: "↑", A: "←", S: "↓", D: "→" };
   for (const row of [["W"], ["A", "S", "D"]]) {
     const line = el("div", "keycap-row");
-    for (const cap of row) line.append(el("span", "keycap", cap));
+    for (const cap of row) {
+      const key = el("span", "keycap");
+      key.append(el("span", "cap-key", cap), el("span", "cap-arrow", arrows[cap]));
+      line.append(key);
+    }
     wrap.append(line);
   }
   return wrap;
@@ -64,8 +76,8 @@ function keycaps() {
  */
 const FLIGHT_STEPS = [
   {
-    text: "Click once to take the mouse. Then just move it to look around. " +
-          "Esc gives it back.",
+    text: "Click once and move the mouse to look around. " +
+          "Escape returns the mouse.",
     when: (kind) => kind === "capture",
   },
   {
@@ -108,13 +120,20 @@ const MENU_STEPS = [
           "stop.",
   },
   { menuKey: "sun", text: "Sun location can be changed." },
-  { menuKey: "controls", text: "View flight controls." },
   {
+    menuKey: "controls",
+    text: "View keyboard shortcuts and flight controls.",
+  },
+  {
+    // Two modes, one sentence each: a list, because that is what it is. Read
+    // as a paragraph they ran together into one long claim about "modes".
     menuKey: "mode",
-    text: "Try other modes. Research mode allows more visual control, more " +
-          "cloud volumes including custom uploads, and false color " +
-          "diagnostics. Cyberpunk mode replaces the surface with a " +
-          "multifractal city.",
+    text: "Try other modes:",
+    bullets: [
+      "Research mode allows more visual control, more cloud volumes " +
+      "including custom uploads, and false color diagnostics.",
+      "Cyberpunk mode replaces the surface with a multifractal city.",
+    ],
   },
 ];
 
@@ -129,17 +148,20 @@ const RESEARCH_STEPS = [
     menuKey: "quality",
     text: "Custom control over ray marching and quality settings.",
   },
+  // Second, not last: bringing your own field is the reason to be in research
+  // mode at all, and a walkthrough that reaches it after two rows about how
+  // the picture is drawn buries the offer (Thomas, 2026-08-22).
+  {
+    menuKey: "open",
+    text: "Supply your own cloud volume in a NetCDF file. Liquid and ice " +
+          "variables are auto-detected and converted to extinction fields.",
+  },
   {
     menuKey: "terminal",
     text: "Give a terminal command to render this view programmatically " +
           "using the cloudyview CLI.",
   },
   { menuKey: "periodic", text: "Wrap the domain horizontally." },
-  {
-    menuKey: "open",
-    text: "Supply your own cloud volume in a NetCDF file. Liquid and ice " +
-          "variables are auto-detected and converted to extinction fields.",
-  },
 ];
 
 export class Tutorial {
@@ -151,6 +173,8 @@ export class Tutorial {
     this.index = 0;
     this._raf = null;
     this._pendingResearch = false;
+    this._forceResearch = false;   // an explicit replay asked for the coda
+    this._reserved = null;      // the room the menu is keeping for the box
     this._build();
   }
 
@@ -165,16 +189,40 @@ export class Tutorial {
     this.box = el("div", "panel tutorial-box");
     this.box.hidden = true;
     this.body = el("p", "tutorial-text");
+    this.list = el("ul", "tutorial-list");
     this.graphic = el("div", "tutorial-graphic");
+    this.note = el("div", "tutorial-note",
+                   "Try this after finishing the tutorial.");
+    this.note.hidden = true;
     this.actions = el("div", "tutorial-actions");
     this.ok = el("button", "tutorial-ok", "OK");
     this.ok.addEventListener("click", () => this._next());
     this.skip = el("button", "tutorial-skip", "Skip tutorial");
     this.skip.addEventListener("click", () => this.skipAll());
     this.actions.append(this.ok, this.skip);
-    this.box.append(this.body, this.graphic, this.actions);
+    this.box.append(this.body, this.list, this.graphic, this.note, this.actions);
 
     this.root.append(this.spot, this.spotLabel, this.box);
+
+    // While a chapter is running the menu is a diagram, not a control. Every
+    // menu step names a row that opens a panel, and opening one takes the
+    // walkthrough somewhere it was not going: clicking Capture at the Capture
+    // step left the capture panel up, the spotlight aimed at a row that was no
+    // longer there, and no way on but Skip (Thomas, 2026-08-22).
+    // Capture phase, so the row's own handler never runs — stopping the event
+    // here stops it before the target phase.
+    // Resume is the exception, and has to be: a flight step interrupted by
+    // Escape (see onInput) puts this prompt under an open menu, and clicking
+    // Resume is how the reader gets back to the flight the prompt is about.
+    this.root.addEventListener("click", (event) => {
+      if (!this.active) return;
+      const menu = document.getElementById("menu");
+      if (!menu || menu.hidden || !menu.contains(event.target)) return;
+      if (event.target.closest(".resume")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.note.hidden = false;
+    }, true);
   }
 
   // --- starting and stopping ----------------------------------------------
@@ -185,11 +233,25 @@ export class Tutorial {
     this.replay();
   }
 
-  /** From the menu's Replay item, and from maybeStart. */
+  /**
+   * From the menu's Replay item, and from maybeStart.
+   *
+   * In research mode "the tutorial" includes the research coda — asking for
+   * the walkthrough from a menu with the research rows in it and being shown
+   * only the rows basic mode has would be answering a different question.
+   * Queued rather than concatenated: RESEARCH_STEPS are filtered against the
+   * menu rows that actually exist, and at this moment the menu is closed and
+   * the flight has not started, so the filter would drop all of them. `end()`
+   * runs it, by which point the menu chapter has the menu open.
+   */
   replay() {
     this.app.ui.close();
     if (this.app.paused) this.app.resume({ capture: false });
     this.app.tutorialSpawn();
+    this._pendingResearch = this.app.ui.mode === "research";
+    // An explicit replay overrides "already seen once" — that flag is what
+    // stops the coda running twice on its own, not a ban on asking for it.
+    this._forceResearch = this._pendingResearch;
     this._run([...FLIGHT_STEPS, ...MENU_STEPS]);
   }
 
@@ -205,6 +267,12 @@ export class Tutorial {
   end() {
     this.steps = null;
     this._unpinSpeed();
+    // The menu keeps room for a prompt only while there is one — see
+    // _dockBox and `#viewer.tutorial #menu` in viewer.css.
+    this._reserved = null;
+    document.documentElement.style.removeProperty("--tutorial-dock");
+    this.box.style.top = "";
+    this.box.classList.remove("docked");
     this.box.hidden = true;
     this.spot.hidden = true;
     this.spotLabel.hidden = true;
@@ -222,6 +290,7 @@ export class Tutorial {
   /** The Skip affordance: this chapter, and every chapter, for good. */
   skipAll() {
     this._pendingResearch = false;
+    this._forceResearch = false;
     setFlag(DONE_KEY);
     setFlag(RESEARCH_DONE_KEY);
     this.end();
@@ -229,6 +298,7 @@ export class Tutorial {
 
   destroy() {
     this._pendingResearch = false;
+    this._forceResearch = false;
     clearTimeout(this._researchTimer);
     this._researchTimer = null;
     this.end();
@@ -258,6 +328,11 @@ export class Tutorial {
   _show() {
     const step = this.step;
     this.body.textContent = step.text;
+    this.list.replaceChildren(
+      ...(step.bullets ?? []).map((line) => el("li", null, line)));
+    this.list.hidden = !step.bullets;
+    // The note answers one click, not the whole chapter.
+    this.note.hidden = true;
     this.graphic.replaceChildren();
     if (step.graphic) this.graphic.append(step.graphic());
     this.graphic.hidden = !step.graphic;
@@ -284,20 +359,26 @@ export class Tutorial {
       cancelAnimationFrame(this._raf);
       this._raf = null;
     }
-    if (!selector) {
+    if (!step) {
+      this._setDocked(false);
       this.spot.hidden = true;
       this.spotLabel.hidden = true;
-      this.box.classList.remove("top");
       return;
     }
-    // A spotlit step puts its box at the top of the window: the menu owns the
-    // middle and the speed readout owns the bottom corner, and the box must
-    // not sit on the thing it is pointing at.
-    this.box.classList.add("top");
     const track = () => {
       this._raf = null;
       if (!this.active) return;
-      const target = document.querySelector(selector);
+      // Whenever the menu is up the box hangs under it — see _dockBox. That is
+      // every menu step, and also a flight step during the restart in onInput,
+      // where the prompt would otherwise be over the menu the reader has to
+      // click. Asked per frame rather than per step, because the menu opens
+      // and closes under a flight step without the step changing.
+      // A spotlight is not by itself a reason to move: the speed step points
+      // at the bottom-right corner with no menu open, so its prompt stays
+      // where every other flight prompt is — the middle.
+      const docked = Boolean(step.menuKey) || this._menuOpen();
+      this._setDocked(docked);
+      const target = selector ? document.querySelector(selector) : null;
       if (!target) {
         // The item is not on screen right now — a submenu is up, or the row
         // belongs to a mode that has just been switched away from. Wait for
@@ -321,11 +402,14 @@ export class Tutorial {
           // readout is 12 px off the bottom of the window, and a label under
           // that one is a label nobody sees. The label does not wrap (a
           // two-line caption pushed back over the ring it labels), so it is
-          // measured and pulled left of the window edge instead.
+          // measured and pulled left of the window edge instead. Its height is
+          // measured too rather than assumed: the caption is set large enough
+          // to be noticed now, and a fixed 20 px lift put it over the ring.
+          const height = this.spotLabel.offsetHeight;
           const below = r.bottom + pad + 8;
-          const room = below + 24 < window.innerHeight;
+          const room = below + height + 4 < window.innerHeight;
           this.spotLabel.style.top = room
-            ? `${below}px` : `${r.top - pad - 20}px`;
+            ? `${below}px` : `${r.top - pad - height - 6}px`;
           const width = this.spotLabel.offsetWidth;
           this.spotLabel.style.left =
             `${Math.max(8, Math.min(r.left - pad,
@@ -334,9 +418,81 @@ export class Tutorial {
           this.spotLabel.hidden = true;
         }
       }
+      // A step with neither a spotlight nor a menu under it has nothing left
+      // to watch, and holding a frame callback open for it would keep the
+      // window ticking for the rest of the step.
+      if (!selector && !docked) return;
       this._raf = requestAnimationFrame(track);
     };
     track();
+  }
+
+  /**
+   * Escape, offered to the tutorial before the viewer acts on it.
+   *
+   * The click interceptor in _build makes the menu inert while a chapter runs,
+   * and Escape is a way of clicking Resume without the button: it closed the
+   * menu out from under the step that was pointing at it, silently. Same
+   * answer as a row: not yet, and here is the line that says so.
+   *
+   * Only with the menu actually up. Escape from the flight has to keep
+   * pausing — it is the browser's own way out of a pointer lock, and a flight
+   * step's interruption rule (see onInput) is written against that pause.
+   *
+   * @returns {boolean} true if the tutorial swallowed the key.
+   */
+  interceptEscape() {
+    if (!this.active || !this._menuOpen()) return false;
+    this.note.hidden = false;
+    return true;
+  }
+
+  /** Is the pause menu on screen? */
+  _menuOpen() {
+    const menu = document.getElementById("menu");
+    return Boolean(menu) && !menu.hidden;
+  }
+
+  /** The box hangs under the menu, or sits in the middle of the window. */
+  _setDocked(on) {
+    this.box.classList.toggle("docked", on);
+    if (on) { this._dockBox(); return; }
+    if (this._reserved === null) return;
+    this._reserved = null;
+    this.box.style.top = "";
+    document.documentElement.style.removeProperty("--tutorial-dock");
+  }
+
+  /**
+   * Put the box under the menu rather than over it.
+   *
+   * The menu chapter talks about rows of the menu, so it cannot cover it: the
+   * box used to sit at the top of the window, which is where a tall menu's own
+   * top edge is. Under the menu is the one place that is out of the way and
+   * still obviously attached to what is being pointed at.
+   *
+   * The menu keeps room for it — see `#viewer.tutorial #menu` in viewer.css —
+   * so this normally lands as written; the clamp is for a window short enough
+   * that the reservation is not enough, where the last resort is a box the
+   * reader can read rather than one tidily off the bottom edge.
+   */
+  _dockBox() {
+    const gap = 14;
+    const height = this.box.offsetHeight;
+    // Reserved before the menu is measured, because the menu's max-height is
+    // a function of it. Written only when it changes: this runs every frame,
+    // and a custom property set to the value it already has still costs a
+    // style recalculation of everything under it.
+    const reserve = `${Math.round(height + gap + 12)}px`;
+    if (this._reserved !== reserve) {
+      this._reserved = reserve;
+      document.documentElement.style.setProperty("--tutorial-dock", reserve);
+    }
+    const menu = document.getElementById("menu");
+    const bottom = menu && !menu.hidden
+      ? menu.getBoundingClientRect().bottom : 24 - gap;
+    const top = Math.min(bottom + gap, window.innerHeight - height - 12);
+    this.box.style.top = `${Math.max(12, top)}px`;
   }
 
   /**
@@ -368,7 +524,24 @@ export class Tutorial {
   onInput(kind, detail) {
     const step = this.step;
     if (!step?.when) return;
-    if (step.when(kind, detail)) this._next();
+    if (step.when(kind, detail)) { this._next(); return; }
+    // The flight chapter, interrupted. Every one of its steps is cleared by
+    // flying, and a paused flight cannot fly: pressing Escape at the WASD
+    // prompt — or switching apps, which drops the pointer lock and pauses the
+    // same way — left a step up that no key could satisfy and no button could
+    // advance, so the only way on was Skip (Thomas, 2026-08-22).
+    // The chapter starts over rather than stepping forward. Its first prompt
+    // is "click once and move the mouse", which is exactly what the reader is
+    // about to do to get back into the flight, and Resume then clears it.
+    if (kind === "menu") {
+      this.index = 0;
+      this._unpinSpeed();
+      this._show();
+      // _show clears the note, so this says it after: the menu is the same
+      // "not yet" as clicking a row of it, and a walkthrough that silently
+      // rewound would look broken rather than deliberate.
+      this.note.hidden = false;
+    }
   }
 
   /**
@@ -390,7 +563,11 @@ export class Tutorial {
     clearTimeout(this._researchTimer);
     this._researchTimer = setTimeout(() => {
       this._researchTimer = null;
-      if (flag(RESEARCH_DONE_KEY) || this.active) return;
+      // The flag is what keeps the coda from running twice on its own; an
+      // explicit replay asked for it, so it is cleared rather than obeyed.
+      const forced = this._forceResearch;
+      this._forceResearch = false;
+      if ((flag(RESEARCH_DONE_KEY) && !forced) || this.active) return;
       const steps = RESEARCH_STEPS.filter(
         (s) => document.querySelector(`#menu [data-menu-key="${s.menuKey}"]`));
       if (!steps.length) return;   // nothing this field and mode can show

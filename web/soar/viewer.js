@@ -1046,6 +1046,12 @@ export class Viewer {
       if (now - (this._lockLostAt ?? -1e9) < 400) return;
       if (now - (this._lastEscapeAt ?? -1e9) < 350) return;
       this._lastEscapeAt = now;
+      // With the menu up and a walkthrough running, the menu belongs to the
+      // walkthrough — closing it by key is the same "not yet" as clicking one
+      // of its rows, and the tutorial says so. It swallows nothing while the
+      // menu is closed: Escape from the flight still pauses, which is what a
+      // flight step's own interruption rule is written against.
+      if (this.tutorial?.interceptEscape()) return;
       if (this.ui.isOpen) this.ui.back(false);
       else this.pause();
       return;
