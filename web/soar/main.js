@@ -788,7 +788,7 @@ function flyMissing(button, id) {
  */
 // The resolved index, once, so a mode switch re-reads the pair without
 // re-fetching anything. Null until it lands (or for good, if it fails).
-let demoIndex = null;
+let flyIndex = null;
 let railSettled = null;
 
 async function wireFlyPair(railTask) {
@@ -807,7 +807,7 @@ async function wireFlyPair(railTask) {
       `The demo list could not be loaded (${err.message}).`;
     return;
   }
-  demoIndex = { root, all: groups.flatMap((group) => group.demos) };
+  flyIndex = { root, all: groups.flatMap((group) => group.demos) };
 
   // Wired once and for both modes: the handler resolves the id at CLICK time,
   // the same reading demoSource does of the surface. A listener per mode
@@ -821,7 +821,7 @@ async function wireFlyPair(railTask) {
       // Only reachable if the index lost a case between refresh and click;
       // refreshFlyPair has already disabled the button for a missing id.
       if (!demo) return;
-      return enterViewer(demoSource(demoIndex.root, demo));
+      return enterViewer(demoSource(flyIndex.root, demo));
     });
   }
   await refreshFlyPair();
@@ -829,7 +829,7 @@ async function wireFlyPair(railTask) {
 
 /** This mode's demo for one of the two buttons, or undefined. */
 function flyDemo(which) {
-  return demoIndex?.all.find((d) => d.id === flyPair()[which]);
+  return flyIndex?.all.find((d) => d.id === flyPair()[which]);
 }
 
 /**
@@ -842,7 +842,7 @@ function flyDemo(which) {
  * switch costs no request.
  */
 async function refreshFlyPair() {
-  if (!demoIndex) return;
+  if (!flyIndex) return;
   for (const which of ["less", "more"]) {
     const button = which === "less" ? dom.flyLess : dom.flyMore;
     const demo = flyDemo(which);
