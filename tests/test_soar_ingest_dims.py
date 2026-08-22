@@ -17,11 +17,20 @@ anything at all, and when it fires it must report itself — `assumptions` is
 what the load toast states on screen. A silent positional guess would be worse
 than the error it replaces.
 
-The third thing here is the variable chooser. `QN` is in the liquid-water name
-list and it is SAM's TOTAL non-precipitating condensate — water and ice
-together (Thomas, 2026-08-22) — so taking it as the cloud water variable is
-the same class of error: right-looking, entirely wrong, silent. Finding it, or
-finding two plausible candidates at all, has to become a question.
+The third thing here is the variable chooser, which was rebuilt on 2026-08-22
+after a UCLA file made the old shape untenable. It used to encode judgements
+about names — `QN` was flagged as SAM's total condensate and forced a
+question, two plausible candidates forced a question — while a file whose
+variables matched no list at all could not be opened to ask anything. That is
+backwards: inference either succeeds or it does not, and the case that needs a
+question is precisely the one it could not handle. So there are no special
+cases now. A name in the list is taken silently, first hit wins, and a miss
+raises a chooser offering EVERY three-dimensional variable in the group —
+which is the only thing that helps when the water is called `clw` and the ice
+is called `ice`.
+
+The fourth is the timestep. A file of several was refused outright; it is a
+question, and the answer has to reach the read, where index 0 was hardcoded.
 
 Driven under node against stub handles shaped like h5wasm's, because
 netcdf.js is deliberately pure — no DOM, no wasm, no WebGPU. Skips only
@@ -47,7 +56,7 @@ pytestmark = pytest.mark.skipif(
 
 _JS = textwrap.dedent("""
     import {
-      resolveSpatialDims, describeGroup, condensateCandidates,
+      resolveSpatialDims, describeGroup, listVariables,
       axisFromAttrs, assertSameGrid,
     } from "%s";
 
@@ -171,78 +180,194 @@ _JS = textwrap.dedent("""
     const axesOf = (g) => ({ zt: coord(96), yt: coord(256), xt: coord(512),
                              ...g });
 
-    // A file with qc AND QN: two plausible readings of the same field.
-    const multi = group(axesOf({
-      qc: dataset([96, 256, 512], dims, { units: "g/kg" }),
-      QN: dataset([96, 256, 512], dims, { units: "g/kg",
-                  long_name: "Non-precipitating condensate" }),
-      qi: dataset([96, 256, 512], dims, { units: "g/kg" }),
-    }));
-    out.multiVariable = attempt(() => {
-      const d = describeGroup(multi, "");
-      return {
-        liquidVar: d.liquidVar, iceVar: d.iceVar,
-        needsLiquidChoice: d.needsLiquidChoice,
-        needsIceChoice: d.needsIceChoice,
-        candidates: d.liquidCandidates.map(
-          (c) => ({ name: c.name, ambiguous: c.ambiguous })),
-      };
-    });
-    // Answered: the choice is honoured and the question stops being asked.
-    out.multiAnswered = attempt(() => {
-      const d = describeGroup(multi, "", { liquidVar: "QN", iceVar: null });
-      return { liquidVar: d.liquidVar, iceVar: d.iceVar,
-               needsLiquidChoice: d.needsLiquidChoice };
-    });
-
-    // The liquid question answered, the ice question NOT yet asked. The two
-    // are asked one after the other, so the ice question is always evaluated
-    // on a description that already carries the liquid answer — and reading
-    // "there is a choice object" as "everything is settled" would skip it.
-    const bothAmbiguous = group(axesOf({
-      qc: dataset([96, 256, 512], dims, { units: "g/kg" }),
-      QN: dataset([96, 256, 512], dims, { units: "g/kg" }),
-      qi: dataset([96, 256, 512], dims, { units: "g/kg" }),
-      QICE: dataset([96, 256, 512], dims, { units: "g/kg" }),
-    }));
-    out.iceStillAsked = attempt(() => {
-      const d = describeGroup(bothAmbiguous, "", { liquidVar: "qc" });
-      return { liquidVar: d.liquidVar,
-               needsLiquidChoice: d.needsLiquidChoice,
-               needsIceChoice: d.needsIceChoice };
-    });
-
-    // QN alone. One candidate, no competition — and still a question,
-    // because the name does not say which phase it holds.
-    const lone = group(axesOf({
-      QN: dataset([96, 256, 512], dims, { units: "g/kg" }),
-    }));
-    out.loneAmbiguous = attempt(() => {
-      const d = describeGroup(lone, "");
-      return { liquidVar: d.liquidVar,
-               needsLiquidChoice: d.needsLiquidChoice };
-    });
-
-    // An unambiguous single candidate asks nothing — the common file must
-    // not have acquired a panel.
+    // Inference succeeds on both roles: no question, whatever else the file
+    // carries. The regression that matters most — an ordinary file must not
+    // have acquired a panel between it and the sky.
     const plain = group(axesOf({
       qc: dataset([96, 256, 512], dims, { units: "g/kg" }),
+      qi: dataset([96, 256, 512], dims, { units: "g/kg" }),
     }));
     out.plain = attempt(() => {
       const d = describeGroup(plain, "");
       return { liquidVar: d.liquidVar, iceVar: d.iceVar,
                needsLiquidChoice: d.needsLiquidChoice,
                needsIceChoice: d.needsIceChoice,
+               needsTimestepChoice: d.needsTimestepChoice,
                shape: d.shape, assumptions: d.assumptions };
+    });
+
+    // QN is SAM's TOTAL condensate, water and ice together, so it is not in
+    // the liquid list at all. A run whose only condensate is QN asks, and
+    // offers QN among the answers.
+    const qn = group(axesOf({
+      QN: dataset([96, 256, 512], dims, { units: "g/kg" }),
+    }));
+    out.qnNotInferred = attempt(() => {
+      const d = describeGroup(qn, "");
+      return { liquidVar: d.liquidVar,
+               needsLiquidChoice: d.needsLiquidChoice,
+               variables: d.variables.map((v) => v.name) };
+    });
+    // And it can still be chosen, by someone who knows their own run.
+    out.qnChosen = attempt(() => {
+      const d = describeGroup(qn, "", { liquidVar: "QN", iceVar: null });
+      return { liquidVar: d.liquidVar,
+               needsLiquidChoice: d.needsLiquidChoice };
+    });
+
+    // First hit in list order wins when several names match. `qc` precedes
+    // `ql`, and that is the whole rule — no question, no ranking.
+    const several = group(axesOf({
+      ql: dataset([96, 256, 512], dims, { units: "g/kg" }),
+      qc: dataset([96, 256, 512], dims, { units: "g/kg" }),
+    }));
+    out.firstHitWins = attempt(() => {
+      const d = describeGroup(several, "");
+      return { liquidVar: d.liquidVar,
+               needsLiquidChoice: d.needsLiquidChoice };
+    });
+
+    // Nothing recognizable at all: a file of temperature. The old code threw
+    // here (and, for a netCDF-3 file, threw out of libhdf5 with "error -
+    // name not defined!"). It is a question now, and the question offers
+    // EVERY 3-D variable rather than only names the lists know.
+    const unnamed = group(axesOf({
+      ta: dataset([96, 256, 512], dims, { units: "K" }),
+      hus: dataset([96, 256, 512], dims, { units: "kg/kg" }),
+    }));
+    out.nothingInferred = attempt(() => {
+      const d = describeGroup(unnamed, "");
+      return { liquidVar: d.liquidVar,
+               needsLiquidChoice: d.needsLiquidChoice,
+               variables: d.variables.map((v) => v.name) };
+    });
+    // Answered, and the answer is a name no condensate list contains.
+    out.unnamedAnswered = attempt(() => {
+      const d = describeGroup(unnamed, "", { liquidVar: "hus", iceVar: null });
+      return { liquidVar: d.liquidVar, iceVar: d.iceVar,
+               needsLiquidChoice: d.needsLiquidChoice,
+               needsIceChoice: d.needsIceChoice, shape: d.shape };
+    });
+
+    // Liquid inferred, ice not: the ice question, on its own.
+    const warm = group(axesOf({
+      clw: dataset([96, 256, 512], dims, { units: "kg/kg" }),
+    }));
+    out.iceAsked = attempt(() => {
+      const d = describeGroup(warm, "");
+      return { liquidVar: d.liquidVar, iceVar: d.iceVar,
+               needsIceChoice: d.needsIceChoice,
+               variables: d.variables.map((v) => v.name) };
+    });
+    // "No ice" is a real answer, not an absent one, and stops the asking.
+    out.iceAnswered = attempt(() => {
+      const d = describeGroup(warm, "", { iceVar: null });
+      return { iceVar: d.iceVar, needsIceChoice: d.needsIceChoice };
+    });
+
+    // Only volumes are on offer: a 1-D profile and a (time, y, x) slice are
+    // not fields however they are named.
+    out.listing = attempt(() => listVariables(group(axesOf({
+      qc: dataset([96, 256, 512], dims, { units: "g/kg" }),
+      slice: dataset([1, 256, 512], { 0: "time", 1: "yt", 2: "xt" }),
+      profile: coord(96),
+    }))).map((v) => v.name));
+
+    // --- which variable the coordinates come from -------------------------
+
+    // netCDF-4's placeholder for a dimension with no coordinate variable.
+    const PHONY = {
+      NAME: "This is a netCDF dimension but not a netCDF variable.      512",
+    };
+    const scaled = (n, factor, attrs = {}) => ({
+      shape: [n], attrs,
+      value: Float64Array.from({ length: n }, (_, i) => i * factor),
+      get_attached_scales: () => [],
+    });
+
+    // CM1: fields are dimensioned (nk, nj, ni) and every one of those has a
+    // placeholder of the right length beside the real coordinate. Taking the
+    // placeholder gave three all-zero axes and a zero-size domain.
+    out.phonyScales = attempt(() => {
+      const d = describeGroup(group({
+        ni: coord(512, PHONY), nj: coord(256, PHONY), nk: coord(96, PHONY),
+        x: scaled(512, 3000, { units: "m" }),
+        y: scaled(256, 3000, { units: "m" }),
+        z: scaled(96, 400, { units: "m" }),
+        clw: dataset([96, 256, 512], { 0: "nk", 1: "nj", 2: "ni" },
+                     { units: "g/g" }),
+      }), "");
+      return { coordNames: d.coordNames, xEnd: d.coords.x[511],
+               assumptions: d.assumptions };
+    });
+
+    // UM: the dimension's own coordinate is dimensionless hybrid height, and
+    // the metres are in a variable beside it.
+    out.dimensionlessVertical = attempt(() => {
+      const d = describeGroup(group({
+        x: scaled(512, 3000, { units: "m" }),
+        y: scaled(256, 3000, { units: "m" }),
+        rholev_eta_rho: scaled(96, 0.01),
+        rholev_zsea_rho: scaled(96, 400, { units: "m" }),
+        clw: dataset([96, 256, 512],
+                     { 0: "rholev_eta_rho", 1: "y", 2: "x" }, { units: "g/g" }),
+      }), "");
+      return { coordNames: d.coordNames, zEnd: d.coords.z[95],
+               assumptions: d.assumptions };
+    });
+
+    // A length is a length; the numbers just are not metres yet.
+    out.kilometres = attempt(() => {
+      const d = describeGroup(group({
+        x: scaled(512, 3, { units: "km" }),
+        y: scaled(256, 3, { units: "km" }),
+        z: scaled(96, 0.4, { units: "km" }),
+        qc: dataset([96, 256, 512], { 0: "z", 1: "y", 2: "x" },
+                    { units: "g/kg" }),
+      }), "");
+      return { xEnd: d.coords.x[511], zEnd: d.coords.z[95],
+               assumptions: d.assumptions };
+    });
+
+    // --- the timestep -----------------------------------------------------
+
+    const tdims = { 0: "time", 1: "zt", 2: "yt", 3: "xt" };
+    const stepped = group({
+      time: coord(3), zt: coord(96), yt: coord(256), xt: coord(512),
+      qc: dataset([3, 96, 256, 512], tdims, { units: "g/kg" }),
+    });
+    out.multiStep = attempt(() => {
+      const d = describeGroup(stepped, "");
+      return { needsTimestepChoice: d.needsTimestepChoice,
+               timeDim: d.timeDim, timestep: d.timestep,
+               timeSelect: d.timeSelect, shape: d.shape };
+    });
+    out.stepChosen = attempt(() => {
+      const d = describeGroup(stepped, "", { timestep: 2 });
+      return { needsTimestepChoice: d.needsTimestepChoice,
+               timestep: d.timestep, timeSelect: d.timeSelect };
+    });
+    out.stepOutOfRange = attempt(() => describeGroup(stepped, "",
+                                                    { timestep: 3 }));
+    // One step is not a question.
+    out.singleStep = attempt(() => {
+      const d = describeGroup(group({
+        time: coord(1), zt: coord(96), yt: coord(256), xt: coord(512),
+        qc: dataset([1, 96, 256, 512], tdims, { units: "g/kg" }),
+      }), "");
+      return { needsTimestepChoice: d.needsTimestepChoice,
+               timeSelect: d.timeSelect };
     });
 
     // --- the attached ice file's grid check -------------------------------
 
     const grid = {
       shape: [512, 256, 96], storageShape: [96, 256, 512],
-      storageAxis: { x: 2, y: 1, z: 0 }, droppedAxes: [],
+      storageAxis: { x: 2, y: 1, z: 0 }, droppedAxes: [], timestep: 0,
       coords: { x: [0, 10, 20], y: [0, 10, 20], z: [0, 10, 20] },
     };
+    out.stepMismatch = attempt(() => assertSameGrid(
+      grid, { ...grid, timestep: 1 }, "ice.nc"));
     out.sameGrid = attempt(() => {
       assertSameGrid(grid, { ...grid }, "ice.nc"); return true;
     });
@@ -370,61 +495,158 @@ def test_one_dimension_cannot_be_two_axes(result):
     assert "more than one" in got["message"]
 
 
-# --- the variable chooser ---------------------------------------------------
-
-def test_two_plausible_water_variables_become_a_question(result):
-    got = result["multiVariable"]
-    assert got["ok"], got.get("message")
-    assert got["value"]["needsLiquidChoice"] is True
-    assert [c["name"] for c in got["value"]["candidates"]] == ["qc", "QN"]
-
-
-def test_qn_is_flagged_as_total_condensate(result):
-    """Water and ice together — never silently the water variable."""
-    flags = {c["name"]: c["ambiguous"]
-             for c in result["multiVariable"]["value"]["candidates"]}
-    assert flags == {"qc": False, "QN": True}
-
-
-def test_a_lone_qn_is_still_a_question(result):
-    """No competition does not make it unambiguous. The name is the problem."""
-    got = result["loneAmbiguous"]
-    assert got["ok"], got.get("message")
-    assert got["value"]["liquidVar"] == "QN"
-    assert got["value"]["needsLiquidChoice"] is True
-
-
-def test_an_answered_choice_is_honoured_and_not_re_asked(result):
-    got = result["multiAnswered"]
-    assert got["ok"], got.get("message")
-    assert got["value"]["liquidVar"] == "QN"
-    # null is a real answer for ice — "none of these" — not an absent one.
-    assert got["value"]["iceVar"] is None
-    assert got["value"]["needsLiquidChoice"] is False
-
-
-def test_answering_the_water_question_does_not_swallow_the_ice_question(result):
-    """Both are open; answering one must leave the other open. A blanket
-    "a choice exists, so stop asking" would have silently taken the first
-    ice candidate after the user picked the water variable."""
-    got = result["iceStillAsked"]
-    assert got["ok"], got.get("message")
-    assert got["value"]["liquidVar"] == "qc"
-    assert got["value"]["needsLiquidChoice"] is False
-    assert got["value"]["needsIceChoice"] is True
-
+# --- inference, and the question when it misses ------------------------------
 
 def test_an_ordinary_file_asks_nothing(result):
-    """The regression that matters most: a plain qc file must not have
-    acquired a panel between it and the sky."""
+    """The regression that matters most: a file whose names both infer must
+    not have acquired a panel between it and the sky."""
     got = result["plain"]
     assert got["ok"], got.get("message")
     assert got["value"]["liquidVar"] == "qc"
+    assert got["value"]["iceVar"] == "qi"
+    assert got["value"]["needsLiquidChoice"] is False
+    assert got["value"]["needsIceChoice"] is False
+    assert got["value"]["needsTimestepChoice"] is False
+    assert got["value"]["shape"] == [512, 256, 96]
+    assert got["value"]["assumptions"] == []
+
+
+def test_qn_is_not_a_liquid_name(result):
+    """SAM's QN is water and ice together, so it is not the liquid variable.
+    It was in the list with a special case bolted on to force a question;
+    both are gone, which is the same intent said once."""
+    got = result["qnNotInferred"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["liquidVar"] is None
+    assert got["value"]["needsLiquidChoice"] is True
+    # Absent from the list is not absent from the offer.
+    assert got["value"]["variables"] == ["QN"]
+
+
+def test_qn_can_still_be_chosen(result):
+    got = result["qnChosen"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["liquidVar"] == "QN"
+    assert got["value"]["needsLiquidChoice"] is False
+
+
+def test_several_matching_names_take_the_first_in_list_order(result):
+    """Two plausible readings used to be a question. Inference succeeding is
+    not a failure, so it does not ask."""
+    got = result["firstHitWins"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["liquidVar"] == "qc"
+    assert got["value"]["needsLiquidChoice"] is False
+
+
+def test_nothing_recognizable_is_a_question_offering_every_volume(result):
+    """The ta case. Not an error, and not limited to names the lists know."""
+    got = result["nothingInferred"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["liquidVar"] is None
+    assert got["value"]["needsLiquidChoice"] is True
+    assert got["value"]["variables"] == ["ta", "hus"]
+
+
+def test_a_variable_no_list_contains_can_be_chosen(result):
+    got = result["unnamedAnswered"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["liquidVar"] == "hus"
     assert got["value"]["iceVar"] is None
     assert got["value"]["needsLiquidChoice"] is False
     assert got["value"]["needsIceChoice"] is False
     assert got["value"]["shape"] == [512, 256, 96]
+
+
+def test_liquid_inferred_but_ice_not_asks_only_about_ice(result):
+    """Thomas's example: 'Inferred liquid condensate as clw. Could not infer
+    ice condensate variable. Which variable is ice?'"""
+    got = result["iceAsked"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["liquidVar"] == "clw"
+    assert got["value"]["iceVar"] is None
+    assert got["value"]["needsIceChoice"] is True
+    assert got["value"]["variables"] == ["clw"]
+
+
+def test_no_ice_is_an_answer_not_an_absence(result):
+    got = result["iceAnswered"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["iceVar"] is None
+    assert got["value"]["needsIceChoice"] is False
+
+
+def test_only_volumes_are_offered(result):
+    """A 1-D profile and a (time, y, x) slice are not fields."""
+    got = result["listing"]
+    assert got["ok"], got.get("message")
+    assert got["value"] == ["qc"]
+
+
+# --- which variable the coordinates come from --------------------------------
+
+def test_placeholder_dimension_scales_are_not_coordinates(result):
+    """CM1: ni/nj/nk are netCDF-4 placeholders, all zeros, sitting beside the
+    real x/y/z. Taking them gave a zero-size domain — an empty sky with no
+    ocean in it."""
+    got = result["phonyScales"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["coordNames"] == {"x": "x", "y": "y", "z": "z"}
+    assert got["value"]["xEnd"] == 511 * 3000
+    # Nothing was overridden, only skipped: there is nothing to report.
     assert got["value"]["assumptions"] == []
+
+
+def test_a_dimensionless_vertical_loses_to_one_in_metres(result):
+    """UM: rholev_eta_rho runs 0 to 1, so the domain came out 0.99 m tall."""
+    got = result["dimensionlessVertical"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["coordNames"]["z"] == "rholev_zsea_rho"
+    assert got["value"]["zEnd"] == 95 * 400
+    assert "rholev_zsea_rho" in got["value"]["assumptions"][0]
+
+
+def test_kilometres_are_converted_and_said_so(result):
+    got = result["kilometres"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["xEnd"] == 511 * 3 * 1000
+    assert got["value"]["zEnd"] == 95 * 0.4 * 1000
+    assert len(got["value"]["assumptions"]) == 3
+
+
+# --- the timestep ------------------------------------------------------------
+
+def test_several_timesteps_are_a_question_not_a_refusal(result):
+    got = result["multiStep"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["needsTimestepChoice"] is True
+    assert got["value"]["timeDim"]["size"] == 3
+    assert got["value"]["timeDim"]["values"] == [0, 10, 20]
+    # The spatial shape is unaffected by which step is picked.
+    assert got["value"]["shape"] == [512, 256, 96]
+
+
+def test_the_chosen_step_reaches_the_read(result):
+    """timeSelect is what the read pins the dropped axis at; 0 was hardcoded
+    there, so every multi-step file rendered its first step or nothing."""
+    got = result["stepChosen"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["needsTimestepChoice"] is False
+    assert got["value"]["timestep"] == 2
+    assert got["value"]["timeSelect"] == {"0": 2}
+
+
+def test_a_step_outside_the_file_is_refused(result):
+    got = result["stepOutOfRange"]
+    assert got["ok"] is False
+    assert "out of range" in got["message"]
+
+
+def test_one_timestep_asks_nothing(result):
+    got = result["singleStep"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["needsTimestepChoice"] is False
+    assert got["value"]["timeSelect"] == {"0": 0}
 
 
 # --- the attached ice file --------------------------------------------------
@@ -440,6 +662,14 @@ def test_a_different_shape_is_refused_with_both_numbers(result):
     # Stated as a refusal, not repaired: cropping or interpolating someone's
     # ice onto someone else's grid is a choice about their data.
     assert "regrid" in got["message"]
+
+
+def test_a_different_timestep_is_refused(result):
+    """The attached file is pinned at the field's step; if it somehow is not,
+    the two are read with one set of indices out of different moments."""
+    got = result["stepMismatch"]
+    assert got["ok"] is False
+    assert "timestep" in got["message"]
 
 
 def test_coordinates_that_disagree_are_refused_too(result):

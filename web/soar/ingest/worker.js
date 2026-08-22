@@ -14,9 +14,10 @@
 
 import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
 import {
-  describeGroup, describeIceGroup, findLiquidWaterGroups, findIceGroups,
-  assertSameGrid, decoderFor, unitsMultiplier, attrString, ICE_WATER_NAMES,
+  describeGroup, describeIceGroup, findVolumeGroups,
+  assertSameGrid, decoderFor, unitsMultiplier, attrString,
 } from "./netcdf.js";
+import { T } from "./strings.js";
 import {
   rhoAirTable, sigmaAt, cellThickness, opticalDepthFromWaterPaths,
   twoStreamAlbedo, iceExtinctionFraction,
@@ -169,6 +170,26 @@ function readSlice(dataset, ranges, expected, name) {
 
 let installedPlugins = new Set();
 
+/**
+ * Refuse a netCDF-3 file before libhdf5 ever sees it.
+ *
+ * Classic-format netCDF is not HDF5 and h5wasm cannot open it at all. What
+ * it says when asked to is "error - name not defined!", which is libhdf5
+ * failing to find a root object in bytes that were never an HDF5 file — a
+ * message with nothing in it for the person holding the file. Four bytes of
+ * magic tell the two apart for certain: "CDF\x01" is classic, "CDF\x02" is
+ * 64-bit offset, and HDF5 starts with "\x89HDF".
+ */
+async function assertHdf5(file) {
+  const magic = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  const isCdf = magic[0] === 0x43 && magic[1] === 0x44 && magic[2] === 0x46
+             && (magic[3] === 0x01 || magic[3] === 0x02);
+  if (!isCdf) return;
+  const err = new Error(T.notNetcdf4(file.name));
+  err.advice = T.notNetcdf4Advice;
+  throw err;
+}
+
 /** Walk every 3-D dataset's filter list and fetch the plugins it implies. */
 async function installNeededPlugins(handle = null) {
   const module = await ensureReady();
@@ -211,6 +232,7 @@ async function installNeededPlugins(handle = null) {
  * silently misregistered volume.
  */
 async function openIce({ file }) {
+  await assertHdf5(file);
   const { FS } = await ensureReady();
   if (!iceMounted) {
     try { FS.mkdir(ICE_MOUNT); } catch { /* already there */ }
@@ -220,12 +242,9 @@ async function openIce({ file }) {
   iceRoot = new h5wasm.File(`${ICE_MOUNT}/${file.name}`, "r");
   await installNeededPlugins(iceRoot);
 
-  const paths = findIceGroups(iceRoot);
-  if (!paths.length) {
-    throw new Error(
-      `'${file.name}' holds no cloud ice field. cloudyview looks for a ` +
-      `three-dimensional variable named one of: ${ICE_WATER_NAMES.join(", ")}.`);
-  }
+  const paths = findVolumeGroups(iceRoot);
+  if (!paths.length) throw new Error(T.noVariables(file.name));
+
   const groups = [];
   const problems = [];
   for (const path of paths) {
@@ -236,9 +255,9 @@ async function openIce({ file }) {
     }
   }
   if (!groups.length) {
-    throw new Error(
-      `Found cloud ice in '${file.name}', but no group could be read.\n` +
-      problems.join("\n"));
+    const err = new Error(T.noGroupReadable(file.name));
+    err.advice = problems.join("\n");
+    throw err;
   }
   return { groups, problems, filename: file.name };
 }
@@ -256,6 +275,7 @@ async function iceGrid({ group, choice, waterGroup, waterChoice, filename }) {
 }
 
 async function open({ file, choice = null }) {
+  await assertHdf5(file);
   const { FS } = await ensureReady();
   if (!mounted) {
     try { FS.mkdir(MOUNT); } catch { /* already there */ }
@@ -269,13 +289,11 @@ async function open({ file, choice = null }) {
   // filters it uses — that is metadata, and costs no decompression.
   await installNeededPlugins();
 
-  const paths = findLiquidWaterGroups(root);
-  if (!paths.length) {
-    throw new Error(
-      "No cloud water field in this file. cloudyview looks for a variable " +
-      "named one of: qc, QC, ql, QL, LWC, clw, cloud_liquid_water_mixing_" +
-      "ratio, liquid_water_content, lwc — with three spatial dimensions.");
-  }
+  // Groups holding a 3-D variable, whatever it is called. Recognizing the
+  // NAME is inference's job and a miss there is a question, not a refusal —
+  // so the only file with nothing to offer is one with no volume in it.
+  const paths = findVolumeGroups(root);
+  if (!paths.length) throw new Error(T.noVariables(file.name));
 
   const groups = [];
   const problems = [];
@@ -299,8 +317,8 @@ async function open({ file, choice = null }) {
     }
   }
   if (!groups.length) {
-    const err = new Error(
-      `Found cloud water, but no group could be read.\n${problems.join("\n")}`);
+    const err = new Error(T.noGroupReadable(file.name));
+    err.advice = problems.join("\n");
     // One group with answerable axes is enough to offer the panel; with
     // several, the first is the one the panel asks about, and answering it
     // re-opens the file with that assignment applied to every group.
@@ -534,7 +552,13 @@ async function extinction({ group, units, label, slabBudget, choice = null,
     // Field indices map to storage indices through the flip, which reverses
     // the range as well as the direction.
     const ranges = storageShape.map(() => []);
-    for (const dropped of description.droppedAxes) ranges[dropped] = [0, 1];
+    // Pinned at the chosen step, not at 0. `timeSelect` carries every dropped
+    // axis, so a file with a length-1 time dimension beside the real one
+    // still resolves without the read knowing which was which.
+    for (const dropped of description.droppedAxes) {
+      const t = description.timeSelect?.[dropped] ?? 0;
+      ranges[dropped] = [t, t + 1];
+    }
     const rangeStart = {};
     for (const a of AXES) {
       const n = fieldExtent[a];
@@ -779,6 +803,7 @@ self.onmessage = async (event) => {
     let result;
     if (op === "open") result = await open(args);
     else if (op === "describe") result = describeGroup(root, args.group, args.choice ?? null);
+    else if (op === "describeIce") result = describeIceGroup(iceRoot, args.group, args.choice ?? null);
     else if (op === "openIce") result = await openIce(args);
     else if (op === "iceGrid") result = await iceGrid(args);
     else if (op === "extinction") { resetCredit(); result = await extinction(args); }

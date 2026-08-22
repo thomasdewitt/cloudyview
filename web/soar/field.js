@@ -110,7 +110,7 @@ export function validateNestContainment(bmin, bmax, nestMin, nestMax,
     }
     throw new Error(
       "The nested field must lie inside the outer field's bounding box " +
-      `(absolute metres); it does not. ${detail}. The worst axis ` +
+      `(absolute meters); it does not. ${detail}. The worst axis ` +
       `(${AXES[worst]}) overhangs by ${overhang[worst].toFixed(1)} m, past ` +
       `the ${allowance[worst].toFixed(1)} m that gets clipped away. Check ` +
       "that both fields carry absolute coordinates on the same origin and " +

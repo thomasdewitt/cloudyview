@@ -9,6 +9,7 @@
 
 import * as K from "./constants.js";
 import { hazeEFoldingKm, hazeFromEFoldingKm, HAZE_MIN } from "./spectral.js";
+import { T } from "./ingest/strings.js";
 
 /** Where the mode lives between sessions. Shared with tutorial.js. */
 export const MODE_KEY = "soar.mode";
@@ -1144,43 +1145,54 @@ export class UI {
   /** Which of several groups in one file to open, and whether to nest. */
   _panel_groups({ groups, pairs, filename, onPick, onPickPair, onCancel }) {
     const m = this.menu;
-    m.append(this._header("open file", "Which group?"));
+    m.append(this._header(T.kicker, T.groupsTitle));
     m.append(el("div", "row", filename));
     if (pairs.length) {
-      m.append(el("div", "row",
-        pairs.length === 1
-          ? `'${pairs[0][1]}' lies inside '${pairs[0][0]}' and is finer — ` +
-            "they can be rendered together, the finer one taking over where " +
-            "it covers."
-          : "These nest — two levels render together, the finer taking over " +
-            "where it covers:"));
+      m.append(el("div", "row", T.groupsNestable));
       for (const [outer, inner] of pairs) {
-        m.append(item(`${outer}  +  ${inner}`, "both, nested",
+        m.append(item(T.groupsNestRow(outer, inner), T.groupsNestNote,
                       () => onPickPair([outer, inner])));
       }
       m.append(el("div", "divider"));
-      m.append(el("h3", null, "or just one"));
-    } else {
-      m.append(el("div", "row",
-        "The root group holds no cloud field. These groups do:"));
+      m.append(el("h3", null, T.groupsOrOne));
     }
-    for (const g of groups) m.append(item(g || "(root)", null, () => onPick(g)));
+    for (const g of groups) {
+      m.append(item(g || T.groupsRootLabel, null, () => onPick(g)));
+    }
     m.append(el("div", "divider"));
-    m.append(item("Back", "choose a different file", onCancel));
+    m.append(item(T.back, T.backNote, onCancel));
   }
 
   /** Condensate units, when the file does not say. */
   _panel_units({ variables, filename, onPick, onCancel }) {
     const m = this.menu;
-    m.append(this._header("open file", "Which units?"));
+    m.append(this._header(T.kicker, T.askUnits));
     m.append(el("div", "row", filename));
-    m.append(el("div", "row",
-      `No units attribute on ${variables.join(", ")}. Mixing ratios are ` +
-      "usually kg/kg; SAM-style output is g/kg."));
-    m.append(item("g/kg", null, () => onPick("g/kg")));
-    m.append(item("kg/kg", null, () => onPick("kg/kg")));
+    m.append(el("div", "row", T.unitsMissing(variables)));
+    m.append(item(T.unitsGkg, null, () => onPick("g/kg")));
+    m.append(item(T.unitsKgkg, null, () => onPick("kg/kg")));
     m.append(el("div", "divider"));
-    m.append(item("Back", "choose a different file", onCancel));
+    m.append(item(T.back, T.backNote, onCancel));
+  }
+
+  /**
+   * Which timestep, when the file holds more than one.
+   *
+   * A multi-step file used to be refused outright. It is a question with an
+   * obvious answer shape — the steps are right there, and the time
+   * coordinate labels them — so it is asked rather than sent back.
+   */
+  _panel_timestep({ timeDim, filename, group, onPick, onCancel }) {
+    const m = this.menu;
+    m.append(this._header(T.kicker, T.askTimestep));
+    m.append(el("div", "row", T.source(filename, group)));
+    m.append(el("div", "row", T.timestepCount(timeDim.size)));
+    for (let i = 0; i < timeDim.size; i++) {
+      m.append(item(T.timestepRow(i, timeDim.values?.[i] ?? null), null,
+                    () => onPick(i)));
+    }
+    m.append(el("div", "divider"));
+    m.append(item(T.back, T.backNote, onCancel));
   }
 
   /**
@@ -1205,7 +1217,7 @@ export class UI {
     const draw = () => {
       this.menu.replaceChildren();
       const mm = this.menu;
-      mm.append(this._header("open file", "Which dimension is which?"));
+      mm.append(this._header(T.kicker, T.askAxes));
       mm.append(el("div", "row", filename));
       if (reason && !Object.keys(picked).length) {
         mm.append(el("div", "row", reason));
@@ -1214,110 +1226,75 @@ export class UI {
       for (const axis of order) {
         if (axis in picked) {
           const d = dims.find((q) => q.axis === picked[axis]);
-          mm.append(el("div", "row", `${axis} = ${d.name} (${d.size})`));
+          mm.append(el("div", "row", T.axisAssigned(axis, d.name, d.size)));
         }
       }
       if (next) {
         mm.append(el("div", "divider"));
-        mm.append(el("h3", null, `Which dimension is ${next}?`));
+        mm.append(el("h3", null, T.askAxis(next)));
         for (const d of dims) {
           if (Object.values(picked).includes(d.axis)) continue;
-          mm.append(item(d.name, `${d.size} points, storage axis ${d.axis}`,
+          mm.append(item(d.name, T.axisRow(d.name, d.size, d.axis),
                          () => { picked[next] = d.axis; draw(); }));
         }
       } else {
         mm.append(el("div", "divider"));
-        mm.append(item("Load with these axes", null,
-                       () => onPick({ ...picked })));
+        mm.append(item(T.axesConfirm, null, () => onPick({ ...picked })));
       }
       mm.append(el("div", "divider"));
       if (Object.keys(picked).length) {
-        mm.append(item("Start over", null, () => {
+        mm.append(item(T.axesRestart, null, () => {
           for (const a of order) delete picked[a];
           draw();
         }));
       }
-      mm.append(item("Back", "choose a different file", onCancel));
+      mm.append(item(T.back, T.backNote, onCancel));
     };
     draw();
   }
 
   /**
-   * Which variable is the cloud water, or the cloud ice.
+   * Which variable is the liquid condensate, or the ice.
    *
-   * Only raised when the answer is genuinely open — several candidates, or a
-   * name that does not settle the phase. The QN row carries its own warning:
-   * SAM's QN is water and ice together, and someone who does not know that
-   * would pick it as water without hesitating.
+   * Raised when inference did not settle it, and offering EVERY
+   * three-dimensional variable in the group rather than only names the
+   * condensate lists recognize. That is the point: the files this exists for
+   * are the ones whose variables are called something the lists have never
+   * heard of, and a chooser that could only offer recognized names had
+   * nothing to say about exactly those.
+   *
+   * `status` is what the load already knows, composed by the caller —
+   * what it inferred, and what it could not.
    */
-  _panel_variable({ role, candidates, picked, filename, group, onPick,
-                    onCancel }) {
+  _panel_variable({ role, title, status, variables, filename, group,
+                    offerFile, onPick, onPickFile, onCancel }) {
     const m = this.menu;
-    const noun = role === "ice" ? "cloud ice" : "cloud water";
-    m.append(this._header("open file", `Which variable is the ${noun}?`));
-    m.append(el("div", "row",
-      group ? `${filename} — group ${group}` : filename));
-    m.append(el("div", "row",
-      candidates.length > 1
-        ? `This file has ${candidates.length} variables that could be the ` +
-          `${noun}. cloudyview will not choose for you: the wrong one ` +
-          "renders a completely plausible cloud."
-        : `'${picked}' is the only candidate, but its name does not say ` +
-          "which phase it holds."));
-    for (const c of candidates) {
-      const notes = [];
-      if (c.ambiguous) {
-        notes.push("total condensate — water AND ice together in SAM output");
-      }
-      if (c.longName) notes.push(c.longName);
-      if (c.units) notes.push(`units ${c.units}`);
-      notes.push(`[${c.shape.join(" x ")}]`);
-      m.append(item(c.name, notes.join(" · "), () => onPick(c.name)));
+    m.append(this._header(T.kicker, title));
+    m.append(el("div", "row", T.source(filename, group)));
+    for (const line of status ?? []) m.append(el("div", "row", line));
+    for (const v of variables) {
+      m.append(item(v.name, T.variableNote(v), () => onPick(v.name)));
     }
     if (role === "ice") {
       m.append(el("div", "divider"));
-      // Only offered for ice. A field with no water is not a field; a field
+      // Only offered for ice. A field with no liquid is not a field; a field
       // with no ice is most fields.
-      m.append(item("None of these", "load the field without ice",
-                    () => onPick(null)));
+      m.append(item(T.iceNoneOption, T.iceNoneNote, () => onPick(null)));
+      if (offerFile) {
+        const input = el("input");
+        input.type = "file";
+        input.accept = ".nc,.nc4,.h5,.hdf5";
+        input.style.display = "none";
+        input.addEventListener("change", () => {
+          if (input.files?.length) onPickFile(input.files[0]);
+        });
+        m.append(input);
+        m.append(item(T.iceFileChoose, T.iceFileChooseNote,
+                      () => input.click()));
+      }
     }
     m.append(el("div", "divider"));
-    m.append(item("Back", "choose a different file", onCancel));
-  }
-
-  /**
-   * Attach a second file's ice to a water-only field.
-   *
-   * Offered at load rather than at the first press of I, because the
-   * extinction being computed right now includes ice: attaching later would
-   * mean the field had been rendered without it. Skipping is the first row a
-   * thumb lands on for a reason — most fields are warm.
-   */
-  _panel_iceFile({ filename, liquidVar, group, onPick, onSkip, onCancel }) {
-    const m = this.menu;
-    m.append(this._header("open file", "Is there ice in another file?"));
-    m.append(el("div", "row",
-      group ? `${filename} — group ${group}` : filename));
-    m.append(el("div", "row",
-      `'${liquidVar}' is the only condensate here — this field has no ice ` +
-      "variable. If the run wrote its ice to a separate file on the same " +
-      "grid, it can be read alongside."));
-    m.append(item("Continue without ice", "the usual answer for a warm field",
-                  onSkip));
-    m.append(el("div", "divider"));
-    const input = el("input");
-    input.type = "file";
-    input.accept = ".nc,.nc4,.h5,.hdf5";
-    input.style.display = "none";
-    input.addEventListener("change", () => {
-      if (input.files?.length) onPick(input.files[0]);
-    });
-    m.append(input);
-    m.append(item("Choose an ice file…",
-                  "must be the same grid — nothing is cropped or interpolated",
-                  () => input.click()));
-    m.append(el("div", "divider"));
-    m.append(item("Back", "choose a different file", onCancel));
+    m.append(item(T.back, T.backNote, onCancel));
   }
 
   _panel_message({ kicker, title, body, advice, actions }) {

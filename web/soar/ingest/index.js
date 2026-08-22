@@ -15,6 +15,7 @@ import {
 } from "../scene.js";
 import { volumeAABB, minVoxelSize, domainExtent, nestablePairs } from "../field.js";
 import { SPEC_FLOOR_TEXTURE_3D } from "../gpu.js";
+import { T } from "./strings.js";
 
 /** Promise-shaped calls over postMessage, plus a channel for streamed data. */
 class WorkerLink {
@@ -264,10 +265,9 @@ export async function loadFileScene(
         dims: err.axisChoice.dims, reason: err.message,
       });
       choice = { axes: answer.axes };
-      assumptions.push(
-        `Axes assigned by hand: ${["x", "y", "z"].map((a) =>
-          `${a} = ${err.axisChoice.dims.find(
-            (d) => d.axis === answer.axes[a]).name}`).join(", ")}.`);
+      assumptions.push(T.axesByHand(["x", "y", "z"].map((a) =>
+        `${a} = ${err.axisChoice.dims.find(
+          (d) => d.axis === answer.axes[a]).name}`)));
       opened = await link.call("open", { file, choice });
     }
     const { groups, problems } = opened;
@@ -278,7 +278,11 @@ export async function loadFileScene(
     }
 
     // Which level, or which two.
-    const pairs = nestablePairs(groups.map((g) => {
+    //
+    // Only groups that described fully can be ranked for nesting: a group
+    // still waiting on a variable answer has no coordinates yet, so there is
+    // no box to compare. It stays on offer as a single level.
+    const pairs = nestablePairs(groups.filter((g) => g.coords).map((g) => {
       const { bmin, bmax, spacing } = domainExtent(
         g.coords.x, g.coords.y, g.coords.z);
       return { name: g.path, bmin, bmax, spacing };
@@ -295,32 +299,55 @@ export async function loadFileScene(
         : [groups.find((g) => g.path === answer.group)];
     }
 
-    // Which variable is the cloud water, and which is the ice.
+    // Which variable is the liquid condensate, and which is the ice.
     //
-    // Only asked when it is genuinely a question — several candidates, or a
-    // single candidate whose name does not settle the phase. `QN` is the one
-    // that forces this: SAM writes it for water AND ice together, so taking
-    // it as the liquid variable renders every ice cloud as water and looks
-    // entirely correct while doing so (Thomas, 2026-08-22).
+    // Inference gets first go and is silent when it works. A miss is a
+    // question — never a refusal, never a guess — and the chooser lists
+    // EVERY three-dimensional variable in the group rather than only names
+    // the condensate lists already know. That is the whole point: a file
+    // whose water is called something else, or a file of temperature with no
+    // water at all, is a question this can ask instead of an error it has to
+    // report.
     //
     // Asked once and applied to every chosen level, because a nested pair is
     // one model's output written twice and the same variable means the same
-    // thing in both. A level that does not carry the chosen name keeps its
-    // own detection rather than failing — the describe call below is what
-    // rejects a name the group really does not have.
+    // thing in both. The describe call below is what rejects a name a group
+    // really does not have.
+    const inferredLiquid = chosen[0].liquidVar;
+    // Offered only for a single level: one attached file cannot be the ice
+    // for two different grids.
+    const mayAttachIce = chosen.length === 1;
+    let iceFile = null;
+
     for (const role of ["liquid", "ice"]) {
       const flag = role === "liquid" ? "needsLiquidChoice" : "needsIceChoice";
-      const list = role === "liquid" ? "liquidCandidates" : "iceCandidates";
       const level = chosen.find((g) => g[flag]);
       if (!level) continue;
+      // Composed here rather than in the panel, so that what the load says
+      // about itself lives beside the decisions it is reporting.
+      const status = role === "liquid"
+        ? (level.inferredIce
+            ? [T.inferredIce(level.inferredIce), T.noLiquid]
+            : [T.noneInferred])
+        : [inferredLiquid ? T.inferredLiquid(inferredLiquid) : null, T.noIce]
+            .filter(Boolean);
       const answer = await ask({
-        panel: "variable", role, filename: file.name,
-        group: level.path, candidates: level[list],
-        picked: role === "liquid" ? level.liquidVar : level.iceVar,
+        panel: "variable", role, filename: file.name, group: level.path,
+        title: role === "liquid" ? T.askLiquid : T.askIce,
+        variables: level.variables, status,
+        offerFile: role === "ice" && mayAttachIce,
       });
       choice = { ...(choice ?? {}) };
-      if (role === "liquid") choice.liquidVar = answer.variable;
-      else choice.iceVar = answer.variable;      // may be null: "none of these"
+      if (role === "liquid") {
+        choice.liquidVar = answer.variable;
+      } else if (answer.file) {
+        // The ice is in a second file: this group has none, and the attach
+        // below is what supplies it.
+        iceFile = answer.file;
+        choice.iceVar = null;
+      } else {
+        choice.iceVar = answer.variable;         // may be null: "No ice"
+      }
       // Re-describe with the answer, so everything downstream — dimensions,
       // coordinates, units, chunking — comes from the variable the user
       // actually picked rather than from the one detection guessed.
@@ -329,6 +356,22 @@ export async function loadFileScene(
           "describe", { group: chosen[i].path, choice });
       }
     }
+
+    // Which timestep. Silent on the single-step files that are most of them;
+    // a multi-step file used to be refused outright here.
+    const stepped = chosen.find((g) => g.needsTimestepChoice);
+    if (stepped) {
+      const answer = await ask({
+        panel: "timestep", filename: file.name, group: stepped.path,
+        timeDim: stepped.timeDim,
+      });
+      choice = { ...(choice ?? {}), timestep: answer.timestep };
+      for (let i = 0; i < chosen.length; i++) {
+        chosen[i] = await link.call(
+          "describe", { group: chosen[i].path, choice });
+      }
+    }
+
     for (const g of chosen) {
       for (const note of g.assumptions ?? []) {
         if (!assumptions.includes(note)) assumptions.push(note);
@@ -366,68 +409,67 @@ export async function loadFileScene(
     // Single-level loads only. A nested pair is two grids, so one attached
     // file cannot be the ice for both, and asking twice for a case nobody has
     // yet asked for is a guess about an interface rather than about data.
+    //
+    // Reached from the ice VARIABLE question rather than from a second panel
+    // of its own: "which variable is the ice" and "the ice is in another
+    // file" are answers to one question, and asking them one after the other
+    // made every warm field answer the same thing twice.
     let iceFrom = null;
-    let iceFile = null;
-    if (chosen.length === 1 && !chosen[0].iceVar) {
-      const answer = await ask({
-        panel: "iceFile", filename: file.name,
-        liquidVar: chosen[0].liquidVar, group: chosen[0].path,
-      });
-      if (answer.file) {
-        iceFile = answer.file;
-        progress("Reading the ice file's structure…", 0.03);
-        const iceOpen = await link.call("openIce", { file: iceFile });
-        let iceLevel = iceOpen.groups[0];
-        if (iceOpen.groups.length > 1) {
-          const pick = await ask({
-            panel: "groups", filename: iceFile.name, pairs: [],
-            groups: iceOpen.groups.map((g) => g.path),
-          });
-          iceLevel = iceOpen.groups.find((g) => g.path === pick.group);
-        }
-        let iceChoice = null;
-        if (iceLevel.needsIceChoice) {
-          const pick = await ask({
-            panel: "variable", role: "ice", filename: iceFile.name,
-            group: iceLevel.path, candidates: iceLevel.iceCandidates,
-            picked: iceLevel.iceVar,
-          });
-          if (!pick.variable) {
-            throw new Error(
-              `No ice variable was chosen from '${iceFile.name}', so there ` +
-              "is nothing to attach. Load the field again to pick one, or " +
-              "continue without ice.");
-          }
-          iceChoice = { iceVar: pick.variable };
-        }
-        let iceUnits = null;
-        if (!iceLevel.iceUnitsKnown) {
-          iceUnits = (await ask({
-            panel: "units", filename: iceFile.name,
-            variables: [iceChoice?.iceVar ?? iceLevel.iceVar],
-          })).units;
-        }
-        // Checked BEFORE anything is read: a grid mismatch is a sentence, not
-        // a wasted pass over two multi-gigabyte files. It is checked again in
-        // the read itself — see worker.js — because that read happens later
-        // and nothing in between keeps the two descriptions in step.
-        const attached = await link.call("iceGrid", {
-          group: iceLevel.path, choice: iceChoice,
-          waterGroup: chosen[0].path, waterChoice: choice,
-          filename: iceFile.name,
+    if (iceFile) {
+      progress("Reading the ice file's structure…", 0.03);
+      const iceOpen = await link.call("openIce", { file: iceFile });
+      let iceLevel = iceOpen.groups[0];
+      if (iceOpen.groups.length > 1) {
+        const pick = await ask({
+          panel: "groups", filename: iceFile.name, pairs: [],
+          groups: iceOpen.groups.map((g) => g.path),
         });
-        iceFrom = {
-          group: iceLevel.path, choice: iceChoice,
-          units: iceUnits, filename: iceFile.name,
-        };
-        for (const note of attached.assumptions ?? []) {
-          const said = `In ${iceFile.name}: ${note}`;
-          if (!assumptions.includes(said)) assumptions.push(said);
-        }
-        console.info(
-          `cloudyview: ice attached from '${iceFile.name}' — ` +
-          `'${attached.iceVar}' on the same ${attached.shape.join(" x ")} grid.`);
+        iceLevel = iceOpen.groups.find((g) => g.path === pick.group);
       }
+      // Pinned at the same step as the field it is joining.
+      let iceChoice = choice && "timestep" in choice
+        ? { timestep: choice.timestep } : null;
+      if (iceLevel.needsIceChoice) {
+        const pick = await ask({
+          panel: "variable", role: "ice", filename: iceFile.name,
+          group: iceLevel.path, title: T.askIce,
+          variables: iceLevel.variables, status: [T.noIce],
+          offerFile: false,
+        });
+        if (!pick.variable) {
+          throw new Error(T.noIceInFile(iceFile.name));
+        }
+        iceChoice = { ...(iceChoice ?? {}), iceVar: pick.variable };
+        iceLevel = await link.call(
+          "describeIce", { group: iceLevel.path, choice: iceChoice });
+      }
+      let iceUnits = null;
+      if (!iceLevel.iceUnitsKnown) {
+        iceUnits = (await ask({
+          panel: "units", filename: iceFile.name,
+          variables: [iceLevel.iceVar],
+        })).units;
+      }
+      // Checked BEFORE anything is read: a grid mismatch is a sentence, not
+      // a wasted pass over two multi-gigabyte files. It is checked again in
+      // the read itself — see worker.js — because that read happens later
+      // and nothing in between keeps the two descriptions in step.
+      const attached = await link.call("iceGrid", {
+        group: iceLevel.path, choice: iceChoice,
+        waterGroup: chosen[0].path, waterChoice: choice,
+        filename: iceFile.name,
+      });
+      iceFrom = {
+        group: iceLevel.path, choice: iceChoice,
+        units: iceUnits, filename: iceFile.name,
+      };
+      for (const note of attached.assumptions ?? []) {
+        const said = T.inFile(iceFile.name, note);
+        if (!assumptions.includes(said)) assumptions.push(said);
+      }
+      console.info(
+        `cloudyview: ice attached from '${iceFile.name}' — ` +
+        `'${attached.iceVar}' on the same ${attached.shape.join(" x ")} grid.`);
     }
 
     for (const level of chosen) {

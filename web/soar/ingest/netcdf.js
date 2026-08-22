@@ -1,41 +1,45 @@
-// netCDF-4 semantics, ported from cloudyview/io.py.
+// netCDF-4 semantics. Originally ported from cloudyview/io.py.
 //
 // Deliberately pure: it takes an h5wasm-like handle and returns descriptions,
 // so the same code runs in the ingest worker and under node in the tests. No
 // DOM, no WebGPU, no h5wasm import.
 //
-// The rule followed throughout is that the browser must behave like the
-// desktop tool, quirks included — a file that opens one way there and another
-// way here is worse than one that refuses. Where Python gets a behaviour for
-// free from xarray (fill values, scale/offset), it is reimplemented here,
-// because h5wasm hands back raw storage.
+// Where Python gets a behaviour for free from xarray (fill values,
+// scale/offset), it is reimplemented here, because h5wasm hands back raw
+// storage.
+//
+// This module used to say it must behave like the desktop tool, quirks
+// included. It no longer does, and the divergence is deliberate rather than
+// drift: this side can ASK — which axis is which, which variable is the
+// condensate, which timestep — and io.py, on a terminal, cannot. So the rules
+// here are the richer ones, and what the browser resolves is meant to come
+// back out as CLI flags (see viewer.beholdCommand / witnessCommand) rather
+// than be independently re-derived by a weaker copy of this file.
 
 "use strict";
 
+import { T } from "./strings.js";
+
 // Order matters: first hit wins, and matching is exact-case, exactly as
 // io.py does it. `qc` really does beat `QC`.
+//
+// `QN`/`qn` are deliberately ABSENT. SAM writes QN for total
+// non-precipitating condensate — cloud water AND cloud ice together (Thomas,
+// 2026-08-22) — so it is not the liquid variable, and inferring it as one
+// renders every ice cloud as water. It was in this list, with a special case
+// bolted alongside to force a question whenever it turned up; the special
+// case is gone and so is the entry, which is the same intent expressed once.
+// A SAM run whose only condensate is QN now fails to infer and asks, with QN
+// among the variables offered — so it can still be chosen, by someone who
+// knows what their run wrote.
 export const LIQUID_WATER_NAMES = [
-  "qc", "QC", "ql", "QL", "QN", "qn", "LWC", "clw",
+  "qc", "QC", "ql", "QL", "LWC", "clw",
   "cloud_liquid_water_mixing_ratio", "liquid_water_content", "q_liquid", "lwc",
 ];
 export const ICE_WATER_NAMES = [
   "qi", "QI", "qice", "QICE", "IWC", "cli",
   "cloud_ice_mixing_ratio", "ice_water_content", "q_ice", "iwc",
 ];
-
-/**
- * Names that are in the lists above but do NOT mean what the list means.
- *
- * SAM writes `QN` for total non-precipitating condensate — cloud water AND
- * cloud ice together (Thomas, 2026-08-22). Loaded as the liquid variable it
- * renders every ice cloud as water, which looks entirely like a cloud and is
- * the wrong phase everywhere; used as the ice fraction's denominator it
- * double-counts. It stays in LIQUID_WATER_NAMES because a warm run's QN
- * really is the water field and refusing it would break files that work
- * today — but it can never be taken SILENTLY. Finding one sends the load to
- * the variable chooser, where the person who made the file says which it is.
- */
-export const AMBIGUOUS_CONDENSATE_NAMES = new Set(["QN", "qn"]);
 
 // Dimension matching, unlike variable matching, is case-insensitive.
 //
@@ -102,74 +106,87 @@ export function walkGroups(root, visit, prefix = "") {
 }
 
 /**
- * Groups that hold something renderable: a variable named in
- * LIQUID_WATER_NAMES with at least three dimensions. A 1-D `qc` profile does
- * not qualify, and ice-only groups are invisible — same as the desktop.
- */
-export function findCondensateGroups(root, candidates) {
-  const found = [];
-  walkGroups(root, (path, group) => {
-    const names = new Set(group.keys());
-    for (const candidate of candidates) {
-      if (!names.has(candidate)) continue;
-      const dataset = group.get(candidate);
-      if (dataset?.shape?.length >= 3) { found.push(path); return; }
-    }
-  });
-  return found;
-}
-
-export const findLiquidWaterGroups = (root) =>
-  findCondensateGroups(root, LIQUID_WATER_NAMES);
-
-/**
- * Groups holding an ICE field, whether or not they hold water.
+ * How many of a dataset's dimensions are spatial — i.e. not time.
  *
- * Only the separate-ice-file path uses this. A file written to carry the ice
- * a water run left out has no liquid variable at all, so findLiquidWaterGroups
- * reports it as unreadable — correct for the main load, useless here.
+ * The test for "could this be a field" throughout. A (time, y, x, z) variable
+ * has four dimensions and three spatial ones; a (time, y, x) variable has
+ * three and two, and is not a volume however it is named.
  */
-export const findIceGroups = (root) =>
-  findCondensateGroups(root, ICE_WATER_NAMES);
-
-/** First candidate present in the group, or null. Exact-case. */
-export function inferVariable(group, candidates) {
-  const names = new Set(group.keys());
-  for (const candidate of candidates) {
-    if (names.has(candidate)) return candidate;
+export function spatialRank(dataset) {
+  const shape = dataset?.shape;
+  if (!shape?.length) return 0;
+  const names = datasetDimNames(dataset);
+  let n = 0;
+  for (let i = 0; i < shape.length; i++) {
+    if (!isTimeDim(names[i] ?? `dim_${i}`)) n += 1;
   }
-  return null;
+  return n;
 }
 
 /**
- * EVERY candidate present in the group with at least three dimensions, in
- * the candidate list's own order.
+ * EVERY three-dimensional variable in the group, in file order, with what the
+ * chooser needs to describe it.
  *
- * inferVariable's first hit is the answer only when it is the ONLY hit. A
- * file carrying both `qc` and `QN`, or both `qi` and `QICE`, has two
- * plausible readings, and the tool used to take whichever the list happened
- * to name first — a choice about the person's own data, made silently, in a
- * fixed order they cannot see. This is what the chooser is offered from.
+ * This is what the variable question is asked from, and it is deliberately
+ * not filtered by name. The old chooser offered only names already in the
+ * condensate lists, which meant a file whose water is called something else
+ * had nothing to offer and failed instead of asking — the whole reason a
+ * temperature-only file died on an h5wasm error rather than a question.
  */
-export function condensateCandidates(group, candidates) {
-  const names = new Set(group.keys());
+export function listVariables(group) {
   const found = [];
-  for (const candidate of candidates) {
-    if (!names.has(candidate)) continue;
+  for (const key of group.keys()) {
     let dataset = null;
-    try { dataset = group.get(candidate); } catch { continue; }
-    if (!(dataset?.shape?.length >= 3)) continue;
+    try { dataset = group.get(key); } catch { continue; }
+    if (!dataset || dataset.type === "Group") continue;
+    if (spatialRank(dataset) < 3) continue;
     found.push({
-      name: candidate,
+      name: key,
       shape: Array.from(dataset.shape),
       units: attrString(dataset.attrs, "units"),
       longName: attrString(dataset.attrs, "long_name")
              ?? attrString(dataset.attrs, "description"),
-      // What makes this a question rather than a detection, per name.
-      ambiguous: AMBIGUOUS_CONDENSATE_NAMES.has(candidate),
     });
   }
   return found;
+}
+
+/**
+ * Groups holding at least one three-dimensional variable.
+ *
+ * NOT "groups holding a recognized condensate name", which is what this used
+ * to be. That test doubled as the test for whether the file was openable at
+ * all, so a file whose variables are named something the lists do not carry
+ * was refused before anything could be asked about it. Openability and
+ * recognition are now separate questions: this one decides whether there is
+ * anything here to render, and inference decides whether we know which of it
+ * is which.
+ */
+export function findVolumeGroups(root) {
+  const found = [];
+  walkGroups(root, (path, group) => {
+    if (listVariables(group).length) found.push(path);
+  });
+  return found;
+}
+
+/**
+ * First candidate present in the group as a 3-D variable, or null.
+ *
+ * Exact-case, first hit wins, and a miss is not an error — it is the question
+ * the chooser exists to ask. There are no special cases: a name in the list
+ * is taken, a name not in the list is not, and anything else is the user's
+ * call rather than a rule encoded here.
+ */
+export function inferCondensate(group, candidates) {
+  const names = new Set(group.keys());
+  for (const candidate of candidates) {
+    if (!names.has(candidate)) continue;
+    let dataset = null;
+    try { dataset = group.get(candidate); } catch { continue; }
+    if (spatialRank(dataset) >= 3) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -290,23 +307,24 @@ function axisChoiceError(message, dims, assumptions) {
  * Anything still unsettled, or settled two contradictory ways, throws an
  * error carrying `.axisChoice` so the caller can ask instead of giving up.
  *
- * Returns `{ resolved, dropped, assumptions }`. `assumptions` is a list of
- * sentences about guesses that were made — empty when every axis was named
- * or declared outright.
+ * Returns `{ resolved, dropped, timeDims, assumptions }`. `assumptions` is a
+ * list of sentences about guesses that were made — empty when every axis was
+ * named or declared outright. `timeDims` is what the timestep question is
+ * asked from; `dropped` is the same axes as bare indices.
  */
 export function resolveSpatialDims(dimNames, shape,
                                    { hints = null, override = null } = {}) {
   const dims = [];
   const dropped = [];
+  const timeDims = [];
   for (let i = 0; i < dimNames.length; i++) {
     const name = dimNames[i] ?? `dim_${i}`;
     if (isTimeDim(name)) {
-      if (shape[i] > 1) {
-        throw new Error(
-          `This file has ${shape[i]} timesteps ('${name}'). Only ` +
-          "single-timestep fields are supported — extract one first.");
-      }
+      // Dropped from the spatial mapping either way; WHICH step is dropped
+      // to is the caller's question (see describeGroup's `timeDim`). A
+      // multi-step file used to be refused outright here.
       dropped.push(i);
+      timeDims.push({ axis: i, name, size: shape[i] });
     } else {
       dims.push({ axis: i, name, size: shape[i] });
     }
@@ -347,7 +365,7 @@ export function resolveSpatialDims(dimNames, shape,
       }
       take(axis, d);
     }
-    return { resolved, dropped, assumptions };
+    return { resolved, dropped, timeDims, assumptions };
   }
 
   // 2. Name.
@@ -377,8 +395,7 @@ export function resolveSpatialDims(dimNames, shape,
       for (const [axis, matches] of byAxis) {
         if (matches.length !== 1) continue;   // ambiguous: leave it unclaimed
         take(axis, matches[0]);
-        assumptions.push(
-          `Took '${matches[0].name}' as ${axis} from its ${rule} attribute.`);
+        assumptions.push(T.axisFromAttribute(axis, matches[0].name, rule));
       }
     }
   }
@@ -399,11 +416,7 @@ export function resolveSpatialDims(dimNames, shape,
   if (missing.length === 3 && spare.length === 3) {
     const order = ["z", "y", "x"];            // C order, slowest axis first
     for (let i = 0; i < 3; i++) take(order[i], spare[i]);
-    assumptions.push(
-      `Assumed ${spare.map((d) => d.name).join(", ")} are ` +
-      `${order.join(", ")} by position (netCDF C order), because nothing in ` +
-      "the file identifies them individually. Check the field is not " +
-      "rendered with its axes swapped.");
+    assumptions.push(T.axesByPosition(spare.map((d) => d.name), order));
     missing = [];
   }
 
@@ -416,52 +429,139 @@ export function resolveSpatialDims(dimNames, shape,
       "attribute is used.",
       dims, assumptions);
   }
-  return { resolved, dropped, assumptions };
+  return { resolved, dropped, timeDims, assumptions };
 }
 
 /**
- * The 1-D coordinate array for one axis.
+ * netCDF-4 writes a placeholder HDF5 dataset for a dimension that has no
+ * coordinate variable of its own, and marks it with this NAME. It is all
+ * zeros — a dimension scale to hang DIMENSION_LIST references on, not data.
  *
- * Tried in io.py's order: the dimension's own variable, then the axis name
- * candidates, then any 1-D variable of the right length. That last rule is
- * loose enough to pick the wrong thing on a cubic grid — it is loose in the
- * desktop tool too, and diverging here would be a different kind of wrong.
+ * Recognizing it is not a nicety. CM1 output dimensions its fields
+ * (nk, nj, ni) and puts the real coordinates in x, y and z, so every axis
+ * has BOTH a same-named placeholder and a real coordinate elsewhere. Taking
+ * the placeholder gives three all-zero coordinate arrays, which is a
+ * bounding box of zero size, which renders as an empty sky with no ocean in
+ * it (Thomas, 2026-08-22).
  */
-export function findCoordinate(group, root, dim) {
-  const seen = [];
+export function isPhonyDimensionScale(variable) {
+  const name = attrString(variable?.attrs, "NAME");
+  return Boolean(name && name.startsWith(
+    "This is a netCDF dimension but not a netCDF variable"));
+}
+
+/** Metres per unit of a coordinate, or null when it is not a length at all. */
+const LENGTH_UNITS = new Map([
+  ["m", 1], ["metre", 1], ["metres", 1], ["meter", 1], ["meters", 1],
+  ["km", 1000], ["kilometre", 1000], ["kilometres", 1000],
+  ["kilometer", 1000], ["kilometers", 1000],
+]);
+
+export function metresPerUnit(units) {
+  if (units === null || units === undefined) return null;
+  return LENGTH_UNITS.get(String(units).trim().toLowerCase()) ?? null;
+}
+
+/**
+ * The 1-D coordinate array for one axis, in metres.
+ *
+ * Every 1-D variable of the right length is collected, in order of how well
+ * it claims the axis:
+ *
+ *   1. The dimension's own variable — the CF coordinate-variable convention,
+ *      and the strongest signal there is.
+ *   2. This axis's candidate names. THIS axis's: the sweep used to run the
+ *      x, y and z lists concatenated, which on a cubic grid could hand z the
+ *      variable called `x`.
+ *   3. Any 1-D variable of the right length. Loose, and last.
+ *
+ * Placeholder dimension scales are excluded throughout — see
+ * isPhonyDimensionScale, which is what CM1 output turns on.
+ *
+ * Then one override: a first choice that is NOT a length loses to a length
+ * further down the list. UM output dimensions its fields by
+ * `rholev_eta_rho`, a dimensionless hybrid-height coordinate running 0 to 1,
+ * and carries the actual height in `rholev_zsea_rho` — so rule 1 produced a
+ * domain 6000 km wide and 0.99 m tall (Thomas, 2026-08-22). A coordinate
+ * that cannot be a distance cannot place a field in space, whatever its name
+ * says.
+ *
+ * Returns `{ name, values, note }`; `note` is non-empty when a choice was
+ * made that the load should say out loud.
+ */
+export function findCoordinate(group, root, dim, axis) {
+  const containers = [];
+  for (const c of [group, root]) if (c && !containers.includes(c)) containers.push(c);
+
+  const found = [];
   const consider = (container, name) => {
-    if (!container) return null;
     let variable = null;
-    try { variable = container.get(name); } catch { return null; }
-    if (!variable || variable.shape?.length !== 1) return null;
-    if (variable.shape[0] !== dim.size) return null;
-    return variable;
+    try { variable = container.get(name); } catch { return; }
+    if (!variable || variable.shape?.length !== 1) return;
+    if (variable.shape[0] !== dim.size) return;
+    if (isPhonyDimensionScale(variable)) return;
+    if (found.some((f) => f.name === name)) return;
+    found.push({ name, variable, units: attrString(variable.attrs, "units") });
   };
-  for (const container of [group, root]) {
-    if (!container || seen.includes(container)) continue;
-    seen.push(container);
-    const direct = consider(container, dim.name);
-    if (direct) return { name: dim.name, values: readNumeric(direct) };
-    for (const candidate of AXIS_CANDIDATES.x.concat(
-        AXIS_CANDIDATES.y, AXIS_CANDIDATES.z)) {
-      const hit = consider(container, candidate);
-      if (hit) return { name: candidate, values: readNumeric(hit) };
+
+  for (const container of containers) consider(container, dim.name);
+  for (const container of containers) {
+    for (const candidate of AXIS_CANDIDATES[axis]) consider(container, candidate);
+  }
+  for (const container of containers) {
+    for (const key of container.keys()) consider(container, key);
+  }
+
+  if (!found.length) {
+    throw new Error(
+      `No coordinate variable found for dimension '${dim.name}' ` +
+      `(${dim.size} points). Cell-center coordinates in meters are required ` +
+      "for all three axes — they are what places the field in space.");
+  }
+
+  let chosen = found[0];
+  const notes = [];
+  if (metresPerUnit(chosen.units) === null) {
+    const measured = found.find((f) => metresPerUnit(f.units) !== null);
+    if (measured) {
+      notes.push(T.coordChosen(axis, measured.name));
+      chosen = measured;
     }
   }
-  for (const container of seen) {
-    for (const key of container.keys()) {
-      const hit = consider(container, key);
-      if (hit) return { name: key, values: readNumeric(hit) };
-    }
+
+  const scale = metresPerUnit(chosen.units);
+  let values = readNumeric(chosen.variable);
+  if (scale !== null && scale !== 1) {
+    // Everything downstream — the AABB, the voxel sizes, the march — is in
+    // metres. A coordinate in km left unconverted is a domain a thousand
+    // times too small, which is the same failure as the eta one above.
+    values = values.map((v) => v * scale);
+    notes.push(T.coordConverted(axis));
   }
-  throw new Error(
-    `No coordinate variable found for dimension '${dim.name}' ` +
-    `(${dim.size} points). Cell-centre coordinates in metres are required ` +
-    "for all three axes — they are what places the field in space.");
+  return { name: chosen.name, values, note: notes.join(" ") };
 }
 
 function readNumeric(variable) {
   return Float64Array.from(variable.value ?? variable.to_array());
+}
+
+/**
+ * A named 1-D variable's values, or null when there isn't one.
+ *
+ * Unlike findCoordinate this never searches and never throws: it is for
+ * labelling a question (which timestep is which), not for placing a field in
+ * space, and a file with no time variable is perfectly ordinary.
+ */
+export function readCoordValues(group, root, name, size) {
+  for (const container of [group, root]) {
+    if (!container) continue;
+    let variable = null;
+    try { variable = container.get(name); } catch { continue; }
+    if (!variable || variable.shape?.length !== 1) continue;
+    if (variable.shape[0] !== size) continue;
+    try { return Array.from(readNumeric(variable)); } catch { return null; }
+  }
+  return null;
 }
 
 /**
@@ -550,6 +650,9 @@ export function assertSameGrid(water, ice, iceFilename) {
   if (String(ice.droppedAxes) !== String(water.droppedAxes)) {
     say("dropped (time) axes", `[${ice.droppedAxes}]`, `[${water.droppedAxes}]`);
   }
+  if (ice.timestep !== water.timestep) {
+    say("timestep", ice.timestep, water.timestep);
+  }
   for (const axis of ["x", "y", "z"]) {
     const a = ice.coords?.[axis], b = water.coords?.[axis];
     if (!a || !b || a.length !== b.length) continue;   // shape already said so
@@ -593,61 +696,86 @@ export function describeGroup(root, path, choice = null) {
   const group = path ? root.get(path) : root;
   const where = path ? `group '${path}'` : "the root group";
 
-  // Every plausible reading of this group, so that the caller can ask rather
-  // than the list order deciding. `choice` is the answer coming back.
-  const liquidCandidates = condensateCandidates(group, LIQUID_WATER_NAMES);
-  const iceCandidates = condensateCandidates(group, ICE_WATER_NAMES);
+  // Everything in this group that could be a field, named or not. The
+  // chooser is offered from here, so it is not filtered by the condensate
+  // lists — those decide what can be INFERRED, not what can be picked.
+  const variables = listVariables(group);
+  if (!variables.length) {
+    throw new Error(`No three-dimensional variable in ${where}.`);
+  }
+  const has = (name) => variables.some((v) => v.name === name);
 
-  let liquidVar = choice?.liquidVar ?? null;
-  if (liquidVar && !liquidCandidates.some((c) => c.name === liquidVar)) {
+  // `choice.liquidVar`/`choice.iceVar` set to null is a real answer — "none
+  // of these" — and must not read as "nothing was asked". Hence `in` rather
+  // than `??` throughout.
+  const answered = (role) => Boolean(choice && role in choice);
+
+  const liquidVar = answered("liquidVar")
+    ? choice.liquidVar
+    : inferCondensate(group, LIQUID_WATER_NAMES);
+  if (liquidVar && !has(liquidVar)) {
     throw new Error(
-      `'${liquidVar}' was chosen as the cloud water variable but ${where} ` +
-      "has no such three-dimensional variable.");
+      `'${liquidVar}' was chosen as the liquid condensate but ${where} has ` +
+      "no such three-dimensional variable.");
   }
+
+  // Inference failed and nobody has answered yet. Nothing below this point
+  // can be worked out — dimensions, coordinates and units all come off the
+  // liquid variable — so the description stops here and says what it needs.
+  // This is the path a file of temperature takes, and it used to be an
+  // error thrown out of h5wasm rather than a question.
   if (!liquidVar) {
-    liquidVar = liquidCandidates.length ? liquidCandidates[0].name : null;
-  }
-  if (!liquidVar) {
-    throw new Error(
-      `No cloud liquid water variable in ${where}. ` +
-      `Looked for ${LIQUID_WATER_NAMES.join(", ")}.`);
+    return { path, variables, liquidVar: null, iceVar: null,
+             needsLiquidChoice: true, needsIceChoice: false,
+             needsTimestepChoice: false, assumptions: [],
+             // Provisional, and for the question's wording only: it says
+             // "inferred the ice, could not infer the liquid" rather than
+             // the blanker "could not infer variables". Not validated
+             // against the liquid variable's layout — there isn't one yet —
+             // so nothing may read it as the answer.
+             inferredIce: inferCondensate(group, ICE_WATER_NAMES) };
   }
   const dataset = group.get(liquidVar);
 
-  // `choice.iceVar === null` is a real answer — "this file's ice is not any
-  // of these" — and must not be read as "nothing was asked". Hence the `in`
-  // test rather than `??`.
-  let iceVar = choice && "iceVar" in choice
+  const iceVar = answered("iceVar")
     ? choice.iceVar
-    : (iceCandidates.length ? iceCandidates[0].name : null);
-  if (iceVar && !iceCandidates.some((c) => c.name === iceVar)) {
+    : inferCondensate(group, ICE_WATER_NAMES);
+  if (iceVar && !has(iceVar)) {
     throw new Error(
-      `'${iceVar}' was chosen as the cloud ice variable but ${where} has no ` +
+      `'${iceVar}' was chosen as the ice condensate but ${where} has no ` +
       "such three-dimensional variable.");
   }
-
-  // Whether the caller must ask before this description can be used. Two
-  // separate reasons, and they are separate questions:
-  //   - more than one candidate, so the list order would be deciding;
-  //   - a single candidate whose NAME is ambiguous about phase (QN is water
-  //     and ice together), so even an unopposed match is not an answer.
-  //
-  // Answered PER ROLE, not per describe. The two questions are asked one
-  // after the other, so the ice question is always evaluated on a
-  // description that already carries the liquid answer — and a blanket
-  // `!choice` would read that as "the user has settled everything" and
-  // never ask about the ice at all.
-  const answered = (role) => Boolean(
-    choice && (role === "liquid" ? "liquidVar" in choice : "iceVar" in choice));
-  const needsChoice = (role, candidates, picked) =>
-    !answered(role) && candidates.length > 0
-    && (candidates.length > 1
-        || candidates.some((c) => c.ambiguous && c.name === picked));
+  // Asked whenever inference did not settle it. There is no list of names
+  // that makes a miss safe to take silently: a field rendered without its
+  // ice is a different picture, and one rendered with the wrong variable as
+  // ice is a plausible-looking lie.
+  const needsIceChoice = !answered("iceVar") && iceVar === null;
 
   const dimNames = datasetDimNames(dataset);
-  const { resolved, dropped, assumptions } = resolveSpatialDims(
+  const { resolved, dropped, timeDims, assumptions } = resolveSpatialDims(
     dimNames, dataset.shape,
     { hints: dimHints(group, root, dimNames), override: choice?.axes ?? null });
+
+  // Which timestep, when there is more than one. Two time dimensions both
+  // longer than one step is not a file this can describe — there is no
+  // single index to ask for.
+  const manyStepped = timeDims.filter((d) => d.size > 1);
+  if (manyStepped.length > 1) {
+    throw new Error(
+      `${where} has more than one time dimension with several steps ` +
+      `(${manyStepped.map((d) => `${d.name}=${d.size}`).join(", ")}).`);
+  }
+  const timeDim = manyStepped[0] ?? null;
+  const timestep = answered("timestep") ? choice.timestep : 0;
+  if (timeDim && !(timestep >= 0 && timestep < timeDim.size)) {
+    throw new Error(
+      `Timestep ${timestep} is out of range for '${timeDim.name}' ` +
+      `(${timeDim.size} steps).`);
+  }
+  // Storage axis -> the index the read pins it at. Every dropped axis is in
+  // here, so the read never has to know which one was the chosen one.
+  const timeSelect = {};
+  for (const d of timeDims) timeSelect[d.axis] = d === timeDim ? timestep : 0;
 
   // The ice variable is read with the liquid variable's ranges, strides and
   // flat index — one sweep, one hyperslab pair, one loop. That is only
@@ -694,7 +822,10 @@ export function describeGroup(root, path, choice = null) {
 
   const coords = {};
   for (const axis of ["x", "y", "z"]) {
-    coords[axis] = findCoordinate(group, root, resolved[axis]);
+    coords[axis] = findCoordinate(group, root, resolved[axis], axis);
+    // Choosing one coordinate variable over another, or rescaling one, is a
+    // decision about where the field IS. Stated, like the axis guesses.
+    if (coords[axis].note) assumptions.push(coords[axis].note);
   }
 
   const units = attrString(dataset.attrs, "units");
@@ -705,10 +836,19 @@ export function describeGroup(root, path, choice = null) {
     // Carried out so the caller can put a question on screen. The worker
     // cannot ask anything itself — it has no DOM — so every "we do not know
     // which one" has to travel as data.
-    liquidCandidates,
-    iceCandidates,
-    needsLiquidChoice: needsChoice("liquid", liquidCandidates, liquidVar),
-    needsIceChoice: needsChoice("ice", iceCandidates, iceVar),
+    variables,
+    needsLiquidChoice: false,          // settled, or this would have returned
+    needsIceChoice,
+    // Null on a single-step file, which is most of them, and then no
+    // question is asked. `values` is the time coordinate where the file has
+    // one, so the rows can say when rather than only which index.
+    timeDim: timeDim
+      ? { name: timeDim.name, size: timeDim.size,
+          values: readCoordValues(group, root, timeDim.name, timeDim.size) }
+      : null,
+    timestep,
+    timeSelect,
+    needsTimestepChoice: timeDim !== null && !answered("timestep"),
     // Guesses the axis resolution made, in plain sentences. Empty on a file
     // that named or declared all three; non-empty means the load toast has
     // something it MUST say (see loadFileScene) rather than something it may.
@@ -720,6 +860,11 @@ export function describeGroup(root, path, choice = null) {
     storageAxis: { x: resolved.x.axis, y: resolved.y.axis, z: resolved.z.axis },
     droppedAxes: dropped,
     dimNames: { x: resolved.x.name, y: resolved.y.name, z: resolved.z.name },
+    // Which VARIABLE each axis's coordinates came from, which is not always
+    // the dimension's name — see findCoordinate. Carried out because it is
+    // exactly what `--x-coord`/`--y-coord`/`--z-coord` would have to say for
+    // a terminal render to place the field where this one did.
+    coordNames: { x: coords.x.name, y: coords.y.name, z: coords.z.name },
     coords: {
       x: Array.from(coords.x.values),
       y: Array.from(coords.y.values),
@@ -756,40 +901,68 @@ export function describeIceGroup(root, path, choice = null) {
   const group = path ? root.get(path) : root;
   const where = path ? `group '${path}'` : "the root group";
 
-  const iceCandidates = condensateCandidates(group, ICE_WATER_NAMES);
-  let iceVar = choice?.iceVar ?? null;
-  if (iceVar && !iceCandidates.some((c) => c.name === iceVar)) {
+  const variables = listVariables(group);
+  if (!variables.length) {
+    throw new Error(`No three-dimensional variable in ${where}.`);
+  }
+  const answered = Boolean(choice && "iceVar" in choice);
+  const iceVar = answered
+    ? choice.iceVar
+    : inferCondensate(group, ICE_WATER_NAMES);
+  if (iceVar && !variables.some((v) => v.name === iceVar)) {
     throw new Error(
-      `'${iceVar}' was chosen as the cloud ice variable but ${where} has no ` +
+      `'${iceVar}' was chosen as the ice condensate but ${where} has no ` +
       "such three-dimensional variable.");
   }
-  if (!iceVar) iceVar = iceCandidates.length ? iceCandidates[0].name : null;
+  // The ice variable IS the field here, so unlike describeGroup's optional
+  // ice there is nothing to describe without one. The caller asks and comes
+  // back rather than this failing.
   if (!iceVar) {
-    throw new Error(
-      `No cloud ice variable in ${where}. ` +
-      `Looked for ${ICE_WATER_NAMES.join(", ")}.`);
+    return { path, variables, liquidVar: null, iceVar: null,
+             needsIceChoice: true, assumptions: [] };
   }
   const dataset = group.get(iceVar);
   const dimNames = datasetDimNames(dataset);
-  const { resolved, dropped, assumptions } = resolveSpatialDims(
+  const { resolved, dropped, timeDims, assumptions } = resolveSpatialDims(
     dimNames, dataset.shape,
     { hints: dimHints(group, root, dimNames), override: choice?.axes ?? null });
 
+  // The attached file has to be pinned at the same step as the field it is
+  // joining; the water description's `timestep` is what says which.
+  const manyStepped = timeDims.filter((d) => d.size > 1);
+  if (manyStepped.length > 1) {
+    throw new Error(
+      `${where} has more than one time dimension with several steps ` +
+      `(${manyStepped.map((d) => `${d.name}=${d.size}`).join(", ")}).`);
+  }
+  const timeDim = manyStepped[0] ?? null;
+  const timestep = choice && "timestep" in choice ? choice.timestep : 0;
+  if (timeDim && !(timestep >= 0 && timestep < timeDim.size)) {
+    throw new Error(
+      `Timestep ${timestep} is out of range for '${timeDim.name}' ` +
+      `(${timeDim.size} steps).`);
+  }
+  const timeSelect = {};
+  for (const d of timeDims) timeSelect[d.axis] = d === timeDim ? timestep : 0;
+
   const coords = {};
   for (const axis of ["x", "y", "z"]) {
-    coords[axis] = findCoordinate(group, root, resolved[axis]);
+    coords[axis] = findCoordinate(group, root, resolved[axis], axis);
+    if (coords[axis].note) assumptions.push(coords[axis].note);
   }
   const units = attrString(dataset.attrs, "units");
   return {
     path,
     liquidVar: null,
     iceVar,
-    iceCandidates,
-    // Same rule as describeGroup's: more than one candidate, or a single one
-    // whose name does not settle the phase (QN), is a question.
-    needsIceChoice: !choice && iceCandidates.length > 0
-      && (iceCandidates.length > 1
-          || iceCandidates.some((c) => c.ambiguous && c.name === iceVar)),
+    variables,
+    needsIceChoice: false,             // settled, or this would have returned
+    timeDim: timeDim
+      ? { name: timeDim.name, size: timeDim.size,
+          values: readCoordValues(group, root, timeDim.name, timeDim.size) }
+      : null,
+    timestep,
+    timeSelect,
     assumptions,
     shape: [resolved.x.size, resolved.y.size, resolved.z.size],
     storageShape: dataset.shape,

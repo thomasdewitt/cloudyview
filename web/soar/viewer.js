@@ -979,20 +979,22 @@ export class Viewer {
         });
       } else if (question.panel === "variable") {
         this.ui.open("variable", {
-          role: question.role, candidates: question.candidates,
-          picked: question.picked, filename: question.filename,
-          group: question.group,
-          // null is a real answer for the ice role — "none of these" — and
-          // has to reach the loader as null rather than as a cancellation.
+          role: question.role, title: question.title,
+          status: question.status, variables: question.variables,
+          filename: question.filename, group: question.group,
+          offerFile: question.offerFile,
+          // null is a real answer for the ice role — "No ice" — and has to
+          // reach the loader as null rather than as a cancellation.
           onPick: (variable) => done({ variable }),
+          // The other first-class ice answer: it is in a second file.
+          onPickFile: (chosen) => done({ file: chosen }),
           onCancel: cancel,
         });
-      } else if (question.panel === "iceFile") {
-        this.ui.open("iceFile", {
-          filename: question.filename, liquidVar: question.liquidVar,
+      } else if (question.panel === "timestep") {
+        this.ui.open("timestep", {
+          timeDim: question.timeDim, filename: question.filename,
           group: question.group,
-          onPick: (chosen) => done({ file: chosen }),
-          onSkip: () => done({ file: null }),
+          onPick: (timestep) => done({ timestep }),
           onCancel: cancel,
         });
       } else {

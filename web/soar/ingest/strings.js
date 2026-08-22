@@ -59,6 +59,8 @@ export const T = {
   /** Ice question only. */
   iceNoneOption: "No ice",
   iceNoneNote: "load the field without ice",
+  /** "No ice" picked in the attached file, which leaves nothing to attach. */
+  noIceInFile: (filename) => `No ice variable chosen from ${filename}.`,
 
   // --- which timestep -------------------------------------------------------
 
@@ -86,14 +88,34 @@ export const T = {
   axesRestart: "Start over",
 
   // --- ice in another file --------------------------------------------------
+  // A row on the ice question rather than a panel of its own: "which variable
+  // is the ice" and "the ice is in another file" answer the same question.
 
-  askIceFile: "Is there ice in another file?",
-  iceFileWhy: (liquidVar) =>
-    `${liquidVar} is the only condensate here. A separate ice file on the ` +
-    "same grid can be read alongside.",
-  iceFileSkip: "Continue without ice",
   iceFileChoose: "Choose an ice file…",
   iceFileChooseNote: "",
+
+  // --- assumptions ----------------------------------------------------------
+  // Guesses and substitutions the load made and stuck with. Shown on the
+  // toast when the field appears — never only in the console, because each
+  // one renders a perfectly plausible cloud in the wrong place or the wrong
+  // shape, and being told is the only defence.
+
+  /** An axis resolved from a coordinate variable's own metadata. */
+  axisFromAttribute: (axis, name, rule) =>
+    `Took '${name}' as ${axis} from its ${rule} attribute.`,
+  /** Nothing in the file identified the axes, so C order was assumed. */
+  axesByPosition: (names, order) =>
+    `Assumed ${names.join(", ")} are ${order.join(", ")} by position ` +
+    "(netCDF C order), because nothing in the file identifies them " +
+    "individually. Check the field is not rendered with its axes swapped.",
+  /** The manual assignment panel's answer. */
+  axesByHand: (pairs) => `Axes assigned by hand: ${pairs.join(", ")}.`,
+  /** A coordinate variable was preferred over the dimension's own. */
+  coordChosen: (axis, name) => `Took '${name}' as the ${axis} coordinate.`,
+  /** A coordinate was a length, but not in meters. */
+  coordConverted: (axis) => `Converted the ${axis} coordinate to meters.`,
+  /** An assumption made about the attached ice file rather than the field. */
+  inFile: (filename, note) => `In ${filename}: ${note}`,
 
   // --- shared ---------------------------------------------------------------
 
