@@ -10,7 +10,7 @@ import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
-import { loadDemoScene, loadOceanTile } from "./scene.js";
+import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -464,6 +464,11 @@ export class Viewer {
     // would show the fourth and quietly lose the other three — which is the
     // same silence these messages exist to break.
     const notes = [];
+    // First, because it is the one that changes what you are looking at
+    // rather than what is missing from it. A field whose axes were taken by
+    // position renders a completely plausible cloud with x and z swapped;
+    // the only defence against that is saying so. Never suppressed.
+    if (scene.assumptions?.length) notes.push(scene.assumptions.join("\n"));
     if (scene.nestNote) notes.push(scene.nestNote);
     if (minimapProblem) notes.push(`Flying without the minimap: ${minimapProblem}`);
     if (flyerProblem) notes.push(`Flying without a flyer: ${flyerProblem}`);
@@ -916,6 +921,34 @@ export class Viewer {
           onPick: (units) => done({ units }),
           onCancel: cancel,
         });
+      } else if (question.panel === "axes") {
+        // Detection could not tell the dimensions apart. This is the reason
+        // a failed load is no longer a dead end: the panel is offered
+        // INSTEAD of the error, not after it.
+        this.ui.open("axes", {
+          dims: question.dims, filename: question.filename,
+          reason: question.reason,
+          onPick: (axes) => done({ axes }),
+          onCancel: cancel,
+        });
+      } else if (question.panel === "variable") {
+        this.ui.open("variable", {
+          role: question.role, candidates: question.candidates,
+          picked: question.picked, filename: question.filename,
+          group: question.group,
+          // null is a real answer for the ice role — "none of these" — and
+          // has to reach the loader as null rather than as a cancellation.
+          onPick: (variable) => done({ variable }),
+          onCancel: cancel,
+        });
+      } else if (question.panel === "iceFile") {
+        this.ui.open("iceFile", {
+          filename: question.filename, liquidVar: question.liquidVar,
+          group: question.group,
+          onPick: (chosen) => done({ file: chosen }),
+          onSkip: () => done({ file: null }),
+          onCancel: cancel,
+        });
       } else {
         reject(new Error(`unknown question '${question.panel}'`));
       }
@@ -1315,12 +1348,18 @@ export class Viewer {
       const scene = this.scene;
       this._iceLoadingFor = scene;
       try {
-        const { loadIceVolume } = await import("./ingest/index.js");
-        const texture = await loadIceVolume(
-          this.device, scene.iceSource,
-          { progress: (message, done) => this.ui.say(
-              `${message}${done > 0 && done < 1
-                ? ` (${(done * 100).toFixed(0)}%)` : ""}`, 6) });
+        const options = { progress: (message, done) => this.ui.say(
+          `${message}${done > 0 && done < 1
+            ? ` (${(done * 100).toFixed(0)}%)` : ""}`, 6) };
+        // Two sources, one shape of load: a demo's fraction is a prebaked
+        // file beside its volume, a file's is a second pass over the NetCDF.
+        // The demo path deliberately does not import ./ingest — a baked
+        // field needs no HDF5 reader, and pulling one in would be megabytes
+        // of wasm to tint a volume that is already quantized.
+        const texture = scene.iceSource.kind === "demo"
+          ? await loadDemoIceVolume(this.device, scene.iceSource, options)
+          : await (await import("./ingest/index.js"))
+              .loadIceVolume(this.device, scene.iceSource, options);
         if (this.scene !== scene) { texture.destroy(); return; }
         scene.attachIce(texture);
         this.renderer.refreshBindGroup();
@@ -1424,12 +1463,17 @@ export class Viewer {
 
     this._iceProbePending = true;
     this._iceProbeBuf.mapAsync(GPUMapMode.READ).then(() => {
-      const u16 = new Uint16Array(this._iceProbeBuf.getMappedRange().slice(0));
+      const raw = this._iceProbeBuf.getMappedRange().slice(0);
       this._iceProbeBuf.unmap();
       this._iceProbePending = false;
       const k = iz - iz0;
-      const sigma = fromHalf(u16[k]);
-      const f = fromHalf(u16[4 + k]);
+      // Two texels of each texture, in the two formats they are stored in:
+      // fp16 extinction from byte 0, uint8 ice fraction from byte 8. The
+      // fraction comes back through the same 1/255 the write quantized with,
+      // so the readout is what the shader is sampling rather than what the
+      // file said.
+      const sigma = fromHalf(new Uint16Array(raw, 0, 2)[k]);
+      const f = new Uint8Array(raw, 8, 2)[k] / 255.0;
       // sigma = (P_liq * lwc + P_ice * iwc) * rho_air, f = ice share of it.
       const rho = rhoAirAt(zCentre);
       const iwc = f * sigma / (K.SIGMA_ICE_PREFACTOR * rho);

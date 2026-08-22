@@ -347,14 +347,20 @@ export class Renderer {
     // Binding 8 (ice-detection mode): the scene's ice-fraction
     // volume when it has one, this zero stand-in otherwise. The mode flag is
     // packed into row 23.w only when a real texture is bound.
+    // r8unorm, the one format the ice fraction is stored in anywhere — the
+    // demo bake writes it (tools/prebake_demos.py), the NetCDF ingest
+    // quantizes to it (ingest/worker.js), and the real texture is created as
+    // it. The binding takes either, since the layout only asks for a float
+    // sample type; matching it anyway is so that "what format is the ice
+    // fraction" has one answer rather than one answer and an exception.
     this._iceDummy = device.createTexture({
       label: "soar-ice-frac-dummy", size: [1, 1, 1], dimension: "3d",
-      format: "r16float",
+      format: "r8unorm",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     device.queue.writeTexture(
-      { texture: this._iceDummy }, new Uint16Array([0]),
-      { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
+      { texture: this._iceDummy }, new Uint8Array([0]),
+      { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
     this.iceMode = false;
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null

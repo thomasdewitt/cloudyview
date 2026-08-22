@@ -32,6 +32,11 @@ class WorkerLink {
       else {
         const err = new Error(data.error);
         err.advice = data.advice;
+        // Structured cloning drops an Error's own properties, so the worker
+        // sends this alongside rather than on the error. It is what turns
+        // "could not tell which dimensions are x, y and z" from a dead end
+        // into the manual-assignment panel.
+        err.axisChoice = data.axisChoice || null;
         entry.reject(err);
       }
     };
@@ -116,16 +121,18 @@ function levelReceiver(device, label, onProgress, ack, { iceOnly = false } = {})
         state.texture = await createVolumeTexture(
           device, state.dims, `the field in ${label}`);
       }
-      // Ice-detection mode: the ice-fraction volume, same shape. NOTE this
-      // adds the field's own size again in video memory, which is why it is
-      // loaded on demand rather than with the field. The fraction is a
-      // [0, 1] quantity and r8unorm would halve it (1/255 steps are
-      // invisible in a color ramp) — at the price of clamping the
-      // negative/NaN condensate fp16 passes through.
+      // Ice-detection mode: the ice-fraction volume, same shape, half the
+      // texel. NOTE this still adds half the field's size again in video
+      // memory, which is why it is loaded on demand rather than with the
+      // field. r8unorm because the fraction is a [0, 1] quantity read
+      // through a color ramp, where 1/255 steps are invisible — at the
+      // price of clamping the negative/NaN condensate fp16 passes through,
+      // which the worker does explicitly. Same format the demo bake writes
+      // (tools/prebake_demos.py), so both paths give the same picture.
       state.iceSlabs = message.iceSlabs ?? 0;
       if (state.iceSlabs > 0) {
         state.iceTexture = await createVolumeTexture(
-          device, state.dims, `the ice fraction in ${label}`);
+          device, state.dims, `the ice fraction in ${label}`, "r8unorm");
       }
     } else if (message.type === "slab") {
       const target = message.field === "ice" ? state.iceTexture : state.texture;
@@ -231,7 +238,39 @@ export async function loadFileScene(
   let nestDummy = null;
   try {
     progress("Reading the file structure…", 0.02);
-    const { groups, problems } = await link.call("open", { file });
+
+    // Everything the user has settled that detection could not, carried into
+    // every later describe: which variable is the cloud water, which is the
+    // ice, and which storage axis is x, y and z. One object, because a
+    // describe that saw the axis answer but not the variable answer would
+    // resolve a different variable's dimensions and could disagree.
+    let choice = null;
+    // Guesses that WERE made and stuck — stated on screen at the end of the
+    // load rather than only in the console (see the toast below). A detection
+    // that had to fall back to position is not a failure and does not stop
+    // the load, but it is never allowed to be invisible.
+    const assumptions = [];
+
+    let opened;
+    try {
+      opened = await link.call("open", { file });
+    } catch (err) {
+      // No dead end. If the only thing missing is which dimension is which,
+      // ask — the same question shape as the group and units panels — and
+      // open the file again with the answer.
+      if (!err.axisChoice) throw err;
+      const answer = await ask({
+        panel: "axes", filename: file.name,
+        dims: err.axisChoice.dims, reason: err.message,
+      });
+      choice = { axes: answer.axes };
+      assumptions.push(
+        `Axes assigned by hand: ${["x", "y", "z"].map((a) =>
+          `${a} = ${err.axisChoice.dims.find(
+            (d) => d.axis === answer.axes[a]).name}`).join(", ")}.`);
+      opened = await link.call("open", { file, choice });
+    }
+    const { groups, problems } = opened;
     if (problems?.length) {
       // Kept, not just logged. Offering three of a file's five groups with no
       // explanation is how someone concludes the tool cannot read their data.
@@ -256,6 +295,46 @@ export async function loadFileScene(
         : [groups.find((g) => g.path === answer.group)];
     }
 
+    // Which variable is the cloud water, and which is the ice.
+    //
+    // Only asked when it is genuinely a question — several candidates, or a
+    // single candidate whose name does not settle the phase. `QN` is the one
+    // that forces this: SAM writes it for water AND ice together, so taking
+    // it as the liquid variable renders every ice cloud as water and looks
+    // entirely correct while doing so (Thomas, 2026-08-22).
+    //
+    // Asked once and applied to every chosen level, because a nested pair is
+    // one model's output written twice and the same variable means the same
+    // thing in both. A level that does not carry the chosen name keeps its
+    // own detection rather than failing — the describe call below is what
+    // rejects a name the group really does not have.
+    for (const role of ["liquid", "ice"]) {
+      const flag = role === "liquid" ? "needsLiquidChoice" : "needsIceChoice";
+      const list = role === "liquid" ? "liquidCandidates" : "iceCandidates";
+      const level = chosen.find((g) => g[flag]);
+      if (!level) continue;
+      const answer = await ask({
+        panel: "variable", role, filename: file.name,
+        group: level.path, candidates: level[list],
+        picked: role === "liquid" ? level.liquidVar : level.iceVar,
+      });
+      choice = { ...(choice ?? {}) };
+      if (role === "liquid") choice.liquidVar = answer.variable;
+      else choice.iceVar = answer.variable;      // may be null: "none of these"
+      // Re-describe with the answer, so everything downstream — dimensions,
+      // coordinates, units, chunking — comes from the variable the user
+      // actually picked rather than from the one detection guessed.
+      for (let i = 0; i < chosen.length; i++) {
+        chosen[i] = await link.call(
+          "describe", { group: chosen[i].path, choice });
+      }
+    }
+    for (const g of chosen) {
+      for (const note of g.assumptions ?? []) {
+        if (!assumptions.includes(note)) assumptions.push(note);
+      }
+    }
+
     // Units, once, covering every condensate variable of every level chosen —
     // ice as well as liquid. A variable whose units the file does not declare
     // is a question, never an inference from its neighbour.
@@ -269,6 +348,86 @@ export async function loadFileScene(
       units = (await ask({
         panel: "units", filename: file.name, variables: [...new Set(unknown)],
       })).units;
+    }
+
+    // A warm-looking file plus the ice somebody has beside it.
+    //
+    // Asked HERE, at load, and not when the ice-detection mode is first
+    // pressed (Thomas, 2026-08-22). The reason is not interface tidiness: the
+    // extinction this load is about to compute INCLUDES ice, so a second file
+    // that turned up later would mean the field on screen had been rendered
+    // without its ice all along and the fraction would then be measured
+    // against a denominator that did not contain it. Attaching at load makes
+    // one field out of the two files; attaching afterwards would make two.
+    //
+    // Skipping is a first-class answer, not a nag dismissed: most fields are
+    // warm and have no ice anywhere to attach.
+    //
+    // Single-level loads only. A nested pair is two grids, so one attached
+    // file cannot be the ice for both, and asking twice for a case nobody has
+    // yet asked for is a guess about an interface rather than about data.
+    let iceFrom = null;
+    let iceFile = null;
+    if (chosen.length === 1 && !chosen[0].iceVar) {
+      const answer = await ask({
+        panel: "iceFile", filename: file.name,
+        liquidVar: chosen[0].liquidVar, group: chosen[0].path,
+      });
+      if (answer.file) {
+        iceFile = answer.file;
+        progress("Reading the ice file's structure…", 0.03);
+        const iceOpen = await link.call("openIce", { file: iceFile });
+        let iceLevel = iceOpen.groups[0];
+        if (iceOpen.groups.length > 1) {
+          const pick = await ask({
+            panel: "groups", filename: iceFile.name, pairs: [],
+            groups: iceOpen.groups.map((g) => g.path),
+          });
+          iceLevel = iceOpen.groups.find((g) => g.path === pick.group);
+        }
+        let iceChoice = null;
+        if (iceLevel.needsIceChoice) {
+          const pick = await ask({
+            panel: "variable", role: "ice", filename: iceFile.name,
+            group: iceLevel.path, candidates: iceLevel.iceCandidates,
+            picked: iceLevel.iceVar,
+          });
+          if (!pick.variable) {
+            throw new Error(
+              `No ice variable was chosen from '${iceFile.name}', so there ` +
+              "is nothing to attach. Load the field again to pick one, or " +
+              "continue without ice.");
+          }
+          iceChoice = { iceVar: pick.variable };
+        }
+        let iceUnits = null;
+        if (!iceLevel.iceUnitsKnown) {
+          iceUnits = (await ask({
+            panel: "units", filename: iceFile.name,
+            variables: [iceChoice?.iceVar ?? iceLevel.iceVar],
+          })).units;
+        }
+        // Checked BEFORE anything is read: a grid mismatch is a sentence, not
+        // a wasted pass over two multi-gigabyte files. It is checked again in
+        // the read itself — see worker.js — because that read happens later
+        // and nothing in between keeps the two descriptions in step.
+        const attached = await link.call("iceGrid", {
+          group: iceLevel.path, choice: iceChoice,
+          waterGroup: chosen[0].path, waterChoice: choice,
+          filename: iceFile.name,
+        });
+        iceFrom = {
+          group: iceLevel.path, choice: iceChoice,
+          units: iceUnits, filename: iceFile.name,
+        };
+        for (const note of attached.assumptions ?? []) {
+          const said = `In ${iceFile.name}: ${note}`;
+          if (!assumptions.includes(said)) assumptions.push(said);
+        }
+        console.info(
+          `cloudyview: ice attached from '${iceFile.name}' — ` +
+          `'${attached.iceVar}' on the same ${attached.shape.join(" x ")} grid.`);
+      }
     }
 
     for (const level of chosen) {
@@ -306,10 +465,17 @@ export async function loadFileScene(
       // was allocated while `finally` terminates the worker mid-read — which
       // is the whole point, since there is nothing left to receive its output.
       await Promise.race([
-        // No ice fraction here. It is a second volume the size of this one
+        // No ice FRACTION here. It is a second volume the size of this one
         // and most flights never ask for it, so it is read on demand
-        // (loadIceVolume) rather than paid for by everybody at load.
-        link.call("extinction", { group: level.path, units, label, slabBudget }),
+        // (loadIceVolume) rather than paid for by everybody at load. The ice
+        // itself is read now either way — it is part of the extinction.
+        link.call("extinction", {
+          group: level.path, units, label, slabBudget, choice,
+          // Only the outer level. iceFrom is offered for single-level loads
+          // (see above), so `index` is 0 whenever it is set; the guard is
+          // there so that a later nested case cannot pick it up by accident.
+          iceFrom: index === 0 ? iceFrom : null,
+        }),
         receiver.failed,
       ]);
       // The RPC resolving means the worker has SENT everything, not that we
@@ -391,10 +557,26 @@ export async function loadFileScene(
       // then the viewer says so instead of offering the mode. Holding the
       // File is holding a handle, not the bytes — the same one this load
       // already streamed through.
-      iceSource: outer.level.iceVar
-        ? { file, group: outer.level.path, units, label: outer.level.path || "(root)" }
+      // A second file attached at load counts exactly as much as the field's
+      // own ice variable: the extinction on screen already includes it, so
+      // the mode is available and the fraction is one more pass — over two
+      // files instead of one. `kind` is what tells the viewer which loader
+      // to use; a demo's prebaked fraction needs no HDF5 reader at all.
+      iceSource: (outer.level.iceVar || iceFrom)
+        ? { kind: "netcdf", file, iceFile, iceFrom, choice,
+            group: outer.level.path, units,
+            label: outer.level.path || "(root)" }
         : null,
+      // Why the mode is not on offer, when it is not. Distinguishes "this
+      // file has no ice" from "you were offered an ice file and skipped",
+      // because the second one has an obvious remedy and the first does not.
+      iceSkipped: !outer.level.iceVar && !iceFrom && chosen.length === 1,
     });
+
+    // Guesses, stated. Never a silent detection: a field whose axes were
+    // taken by position renders a perfectly plausible cloud with x and z
+    // swapped, and the only defence is that the person was told.
+    scene.assumptions = assumptions;
 
     if (built.length > 1) {
       const inner = built[1];
@@ -447,7 +629,7 @@ export async function loadFileScene(
  * it from then on.
  */
 export async function loadIceVolume(device, source, { progress, slabBudget } = {}) {
-  const { file, group, units, label } = source;
+  const { file, iceFile, iceFrom, choice, group, units, label } = source;
   const receivers = new Map();
   const link = new WorkerLink((message) => {
     receivers.get(message.label)?.handle(message);
@@ -466,10 +648,18 @@ export async function loadIceVolume(device, source, { progress, slabBudget } = {
 
   try {
     progress?.("Opening the file again…", 0.0);
-    await link.call("open", { file });
+    // A fresh worker, so the mounts and the h5wasm handles this pass needs
+    // are its own — including the attached ice file, which the load-time
+    // worker opened and then terminated with itself.
+    await link.call("open", { file, choice });
+    if (iceFrom) {
+      progress?.("Opening the ice file again…", 0.0);
+      await link.call("openIce", { file: iceFile });
+    }
     await Promise.race([
       link.call("extinction",
-                { group, units, label, slabBudget, iceOnly: true }),
+                { group, units, label, slabBudget, choice, iceFrom,
+                  iceOnly: true }),
       receiver.failed,
     ]);
     await receiver.settled();

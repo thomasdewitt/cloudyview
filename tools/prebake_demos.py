@@ -9,6 +9,12 @@ Two products per demo, both written to web/soar/demos/<id>/:
       the GPU, and deflate is HDF5/browser builtin territory rather than a
       bespoke codec.
 
+  ice.bin.gz
+      The ice-detection mode's per-voxel ice extinction fraction, quantized
+      to uint8 and voxel-aligned with volume.bin.gz. Fetched only when
+      somebody presses I, which is why it is a second file rather than a
+      second channel. Absent for a demo whose source carries no ice.
+
   still.webp
       One converged ground-level frame for the landing page, rendered with
       witness — which is now the same shader the browser runs, so the preview
@@ -16,6 +22,7 @@ Two products per demo, both written to web/soar/demos/<id>/:
 
     uv run python tools/prebake_demos.py            # everything
     uv run python tools/prebake_demos.py --only rce --skip-volume
+    uv run python tools/prebake_demos.py --ice-only     # just ice.bin.gz
     uv run python tools/prebake_demos.py --index-only   # regroup, no baking
 """
 
@@ -224,6 +231,51 @@ DEMOS = [
             exposure=3.86833683967, haze=1.0,
         ),
     ),
+    # The marine case block-averaged 2x2x2, which is a DIFFERENT kind of pair
+    # from desert/desert-coarse: that one is two separate source files, two
+    # cascades carried to different depths, so its coarse member has structure
+    # of its own down to its own cell size. This one has no second source
+    # file — turbulon-model wrote only the fine marine field — so the coarse
+    # member is made here, by averaging the mixing ratios before any optics
+    # happen (see `coarsen`). The two read the same on the landing page and
+    # they are not the same experiment; that difference is worth knowing when
+    # comparing them, which is what the description says.
+    dict(
+        id="marine-congestus-coarse",
+        group="steam",
+        title="STEAM marine cumulus congestus (coarse)",
+        field="Maritime congestus on a coarser grid",
+        description="The marine congestus field block-averaged 2x2x2 — the "
+                    "same simulation resampled, not a second run at lower "
+                    "resolution. Flies on far more machines than the full "
+                    "field does.",
+        liquid=("demo_marine-congestus.nc", "qc"),
+        ice=("demo_marine-congestus.nc", "qi"),
+        src=STEAM_SRC,
+        dims="xyz",
+        crop=dict(y=(0, 2048), x=(0, 2048), z="auto"),
+        # Mixing ratios are averaged over 2x2x2 source cells before the
+        # extinction and the ice fraction are computed. Averaging the
+        # CONDENSATE rather than the extinction is the physical order: sigma
+        # is linear in each mixing ratio at fixed r_eff, so for the liquid and
+        # ice parts separately the two agree — but the ice FRACTION is a ratio
+        # of them and is not linear, and coarsening it after the divide would
+        # give a mean of ratios where the field wants a ratio of means.
+        coarsen=2,
+        scale=1e3,
+        sun=dict(azimuth=100.0, elevation=51.5),
+        # The fine case's camera, unchanged. Positions in a still block are
+        # relative to the domain box and the box is the same 51.2 km either
+        # way, so this is the same view of the same world — which is the point
+        # of shipping the pair, and it makes the two cards on the landing page
+        # a before/after rather than two unrelated pictures.
+        still=dict(
+            size=(1920, 963),
+            position=(0.516654156817, -0.285165086182, -0.993548387097),
+            azimuth=249.48, elevation=45.92, fov=100.0,
+            exposure=3.86833683967, haze=1.0,
+        ),
+    ),
     dict(
         id="stratified",
         group="steam",
@@ -339,6 +391,64 @@ def _read(path: Path, var: str, dims: str, crop: dict) -> np.ndarray:
     return np.ascontiguousarray(a)
 
 
+def coarsen_factor(spec: dict) -> int:
+    """How many source cells per shipped cell, per axis. 1 = ship as read."""
+    return int(spec.get("coarsen", 1) or 1)
+
+
+def _block_mean(a: np.ndarray, f: int) -> np.ndarray:
+    """Average (x, y, z) over f x f x f blocks, accumulating in float64.
+
+    float64 for the sum even though the inputs and the output are float32:
+    a block is only f**3 terms, but the terms are mixing ratios that span
+    many orders of magnitude across a cascade field, and a float32 sum of
+    eight of those loses the small one entirely. Cheap insurance at this size.
+
+    Requires every axis to divide exactly. A partial edge block would be an
+    average over fewer cells than its neighbours — a quietly different
+    quantity at the domain edge, which then wraps against the opposite face
+    in a periodic field. Better to refuse the crop.
+    """
+    if f == 1:
+        return a
+    if any(n % f for n in a.shape):
+        raise ValueError(
+            f"cannot block-average {a.shape} by {f}: every axis must divide "
+            "exactly, or the edge blocks would average fewer cells than the "
+            "interior and the periodic wrap would meet a seam")
+    nx, ny, nz = (n // f for n in a.shape)
+    out = np.empty((nx, ny, nz), dtype=np.float32)
+    # Slabbed over x so the float64 view of the field never exists whole: the
+    # marine case is 2048 x 2048 x 385 float32 (6.5 GB), and .astype(float64)
+    # on all of it is 13 GB on top of the copy already in memory. 128 output
+    # planes at a time is under a gigabyte and x is the slowest axis, so the
+    # slabs are exactly the whole-array result.
+    for o0 in range(0, nx, 128):
+        o1 = min(o0 + 128, nx)
+        block = a[o0 * f:o1 * f].astype(np.float64)
+        out[o0:o1] = (block.reshape(o1 - o0, f, ny, f, nz, f)
+                           .mean(axis=(1, 3, 5))
+                           .astype(np.float32))
+    return out
+
+
+def _axis_mean(a: np.ndarray, f: int) -> np.ndarray:
+    """One coordinate axis under the same block average.
+
+    The centre of a merged block is the mean of the centres it merges, which
+    is exact for a uniform grid and the right answer for a stretched one too:
+    the coarse cell spans the fine cells' union either way, and its centre is
+    where the march should sample it. Already float64 — coordinates are read
+    that way — so no accumulator question arises.
+    """
+    if f == 1:
+        return a
+    if a.size % f:
+        raise ValueError(
+            f"cannot block-average a {a.size}-point axis by {f}")
+    return a.reshape(-1, f).mean(axis=1)
+
+
 def _coords(path: Path, crop: dict):
     with Dataset(path) as ds:
         x = np.asarray(ds.variables["x"][crop["x"][0]:crop["x"][1]], np.float64)
@@ -351,6 +461,17 @@ def _extinction(lwc, z, iwc):
     """The one extinction the whole toolkit renders — re 10 um / 30 um ice."""
     return optical_depth.compute_extinction_field(lwc, z, re=10.0, iwc=iwc,
                                                   re_ice=30.0)
+
+
+# Ice's share of the extinction, with the SAME prefactors _extinction uses:
+# 3 Q_ext / 4 = 1.5 over rho_particle * r_eff, at re = 10 um liquid and
+# 30 um ice. Written out here rather than called out of compute_extinction_field
+# because rho_air cancels in the ratio — the fraction is a pure function of the
+# two mixing ratios, which is exactly what optical.js's iceExtinctionFraction
+# is, and the browser has to agree with this bake voxel for voxel or a demo
+# and an uploaded copy of the same field would paint different phases.
+SIGMA_LIQUID_PREFACTOR = 1.5 / (1e6 * 10.0e-6)        # m^2/g, 0.15
+SIGMA_ICE_PREFACTOR = 1.5 / (917e3 * 30.0e-6)         # m^2/g, 0.0545...
 
 
 def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
@@ -398,27 +519,93 @@ def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
     return lo, hi + 1
 
 
+def _write_gz(path: Path, raw: bytes) -> int:
+    """Write gzip whose bytes depend only on the data. Returns the size.
+
+    gzip.open embeds the wall-clock time AND the output filename in the
+    header, so baking the same array twice gives two different files. That
+    makes "did this re-bake change anything?" unanswerable by checksum, which
+    is the only cheap way to ask it about a multi-gigabyte artifact that is
+    not in the repo. mtime=0 and an empty filename remove both.
+
+    (The volume.bin.gz files on disk predate this and carry a timestamp in
+    their headers; their payloads are unaffected, and the first re-bake of
+    each will change its header bytes once and then stay put.)
+    """
+    with gzip.GzipFile(filename="", mode="wb", compresslevel=6, mtime=0,
+                       fileobj=open(path, "wb")) as fh:
+        fh.write(raw)
+    return path.stat().st_size
+
+
+def _z_planes(spec: dict) -> int:
+    """How many z planes the source file has, for aligning an auto band."""
+    with Dataset(source_dir(spec) / spec["liquid"][0]) as ds:
+        return int(ds.variables["z"].size)
+
+
 def resolved_crop(spec: dict) -> dict:
-    """The spec's crop with an `auto` z resolved to the occupied band."""
+    """The spec's crop with an `auto` z resolved to the occupied band.
+
+    A coarsened case needs every axis of that crop to be a whole number of
+    blocks (see `_block_mean`). x and y are typed in the spec and are simply
+    required to divide; z is FOUND, so it is grown here — outward from the
+    occupied band, never inward, because trimming to fit would drop planes
+    that hold cloud.
+    """
     crop = dict(spec["crop"])
     if crop.get("z") == "auto":
         crop["z"] = occupied_z_band(spec)
+    f = coarsen_factor(spec)
+    if f > 1:
+        for axis in ("x", "y"):
+            lo, hi = crop[axis]
+            if (hi - lo) % f:
+                raise ValueError(
+                    f"{spec['id']}: the {axis} crop {lo}:{hi} is "
+                    f"{hi - lo} cells, which {f} does not divide")
+        lo, hi = crop["z"]
+        top = _z_planes(spec)
+        while (hi - lo) % f:
+            if hi < top:
+                hi += 1
+            elif lo > 0:
+                lo -= 1
+            else:
+                raise ValueError(
+                    f"{spec['id']}: the whole {top}-plane column is not a "
+                    f"multiple of {f}, so no z band can be")
+        if (lo, hi) != crop["z"]:
+            print(f"    z band grown to {lo}:{hi} so {f} divides it "
+                  "(coarsening blocks must be whole)")
+        crop["z"] = (lo, hi)
     return crop
 
 
 def load_demo(spec: dict) -> CloudField:
     src = source_dir(spec)
     crop = resolved_crop(spec)
-    lwc = _read(src / spec["liquid"][0], spec["liquid"][1], spec["dims"], crop)
-    iwc = None
-    if spec["ice"]:
-        iwc = _read(src / spec["ice"][0], spec["ice"][1], spec["dims"], crop)
     s = np.float32(spec["scale"])
-    if s != 1.0:
-        lwc *= s
-        if iwc is not None:
-            iwc *= s
-    x, y, z = _coords(src / spec["liquid"][0], crop)
+    f = coarsen_factor(spec)
+
+    # Each variable is read, scaled and coarsened before the next is touched,
+    # so the fine-resolution array — 6.5 GB on the marine case — exists for
+    # one variable at a time rather than two. Coarsening the MIXING RATIO
+    # here, ahead of any optics, is the physical order: see the `coarsen`
+    # note on the spec that uses it.
+    def read(path: Path, var: str) -> np.ndarray:
+        a = _read(path, var, spec["dims"], crop)
+        if s != 1.0:
+            a *= s
+        if f > 1:
+            coarse = _block_mean(a, f)
+            del a
+            return coarse
+        return a
+
+    lwc = read(src / spec["liquid"][0], spec["liquid"][1])
+    iwc = read(src / spec["ice"][0], spec["ice"][1]) if spec["ice"] else None
+    x, y, z = (_axis_mean(a, f) for a in _coords(src / spec["liquid"][0], crop))
     return CloudField(lwc=lwc, iwc=iwc, x=x, y=y, z=z,
                       source=str(src / spec["liquid"][0]),
                       liquid_var=spec["liquid"][1],
@@ -436,9 +623,7 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
     # browser tapers and wraps in the shader, so toggling periodic still
     # needs no second download and a 2048-cell axis still fits.
     raw = sigma.tobytes()
-    with gzip.open(out / "volume.bin.gz", "wb", compresslevel=6) as fh:
-        fh.write(raw)
-    gz_bytes = (out / "volume.bin.gz").stat().st_size
+    gz_bytes = _write_gz(out / "volume.bin.gz", raw)
     print(f"    volume.bin.gz {gz_bytes/1e6:7.1f} MB "
           f"(from {len(raw)/1e6:.1f} MB, {len(raw)/gz_bytes:.1f}x)")
     stale = out / "faces.bin"
@@ -460,6 +645,12 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
         # empty string would open a card onto a blank line.
         **{k: spec[k] for k in ("description", "warning") if spec.get(k)},
         "source": Path(spec["liquid"][0]).name,
+        # Present only when this case was coarsened, and then it is the one
+        # place on disk that says the shipped grid is not the source's. A
+        # reader comparing this case against its fine partner needs to know
+        # that, and the spec is not deployed beside the volume.
+        **({"coarsen": coarsen_factor(spec)} if coarsen_factor(spec) > 1
+           else {}),
         "periodic": bool(spec.get("periodic", True)),
         "volume": {
             "shape_xyz": [int(nx), int(ny), int(nz)],
@@ -473,6 +664,89 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
         },
         "map": {"shape_yx": [int(albedo.shape[0]), int(albedo.shape[1])]},
         "sun": spec["sun"],
+    }
+
+
+# --- the shipped ice fraction ----------------------------------------------
+
+# uint8, not fp16. The fraction is a [0, 1] quantity read only through a
+# color ramp and a condensate readout, so 1/255 steps are invisible, and at
+# demo sizes the halving is real money — 1.6 GB rather than 3.2 GB of texture
+# for the desert field, on top of the extinction volume it sits beside. Both
+# the demo bake and the browser's own ingest quantize the same way (see
+# ingest/worker.js), so a field flown as a demo and the same field opened as
+# a NetCDF give the same picture.
+ICE_QUANT = 255.0
+
+
+def _ice_fraction_u8(lwc: np.ndarray, iwc: np.ndarray) -> np.ndarray:
+    """Per-voxel ice share of the extinction, quantized to uint8 0-255.
+
+    float64 throughout the ratio: the inputs are float32 mixing ratios that
+    can differ by many orders of magnitude between the two phases, and a
+    float32 divide near the ends of the range walks a whole quantization step.
+
+    Non-finite input (NaN condensate, which some models write and which the
+    extinction volume passes through as NaN) stores as 0 — r8unorm has no
+    NaN to carry it. That is the price of the format, and it is stated here
+    and in ingest/worker.js rather than discovered.
+    """
+    si = SIGMA_ICE_PREFACTOR * iwc.astype(np.float64)
+    total = SIGMA_LIQUID_PREFACTOR * lwc.astype(np.float64) + si
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f = np.where(total == 0.0, 0.0, si / total)
+    f = np.where(np.isfinite(f), np.clip(f, 0.0, 1.0), 0.0)
+    return np.rint(f * ICE_QUANT).astype(np.uint8)
+
+
+def bake_ice(spec: dict, field: CloudField, meta: dict, out: Path) -> dict:
+    """Write ice.bin.gz beside volume.bin.gz, voxel-aligned by construction.
+
+    Same array plumbing as bake_volume — the same CloudField, hence the same
+    window, crop and flips — so the two textures index the same voxel with
+    the same triple. The alignment is checked against the volume block that
+    is already in meta.json rather than assumed: an ice volume of a different
+    shape from the extinction it tints is a silent mis-registration, and z
+    crops are recomputed from the source.
+    """
+    if field.iwc is None:
+        raise ValueError(f"{spec['id']} has no ice variable; nothing to bake")
+    shape = tuple(int(v) for v in meta["volume"]["shape_xyz"])
+    if tuple(field.lwc.shape) != shape:
+        raise ValueError(
+            f"{spec['id']}: this load is {field.lwc.shape} but the baked "
+            f"volume is {shape} — the crops disagree, so an ice volume from "
+            "this run would be misregistered against the extinction on disk. "
+            "Re-bake the volume too.")
+
+    # Slabbed over x so the float64 ratio never exists for the whole field:
+    # the desert case is 2048 x 2048 x 385, which is 12.9 GB in float64 all
+    # at once and 0.8 GB a slab at a time. x is the slowest axis, so the
+    # slabs concatenate into exactly the whole-array result.
+    frac = np.empty(shape, dtype=np.uint8)
+    for i0 in range(0, shape[0], 128):
+        i1 = min(i0 + 128, shape[0])
+        frac[i0:i1] = _ice_fraction_u8(field.lwc[i0:i1], field.iwc[i0:i1])
+
+    raw = np.ascontiguousarray(frac).tobytes()
+    gz_bytes = _write_gz(out / "ice.bin.gz", raw)
+    icy = float((frac > 0).mean())
+    print(f"    ice.bin.gz    {gz_bytes/1e6:7.1f} MB "
+          f"(from {len(raw)/1e6:.1f} MB, {len(raw)/gz_bytes:.1f}x), "
+          f"{100*icy:.1f}% of voxels carry ice")
+    return {
+        "format": "r8unorm",
+        "compression": "gzip",
+        "file": "ice.bin.gz",
+        "bytes": int(gz_bytes),
+        "bytes_uncompressed": int(len(raw)),
+        # The quantity, named. The viewer divides by this to recover the
+        # fraction, and a bake that ever changed the scale would say so here
+        # rather than tinting every cloud wrong.
+        "quantity": "ice_extinction_fraction",
+        "scale": 1.0 / ICE_QUANT,
+        "source": Path(spec["ice"][0]).name,
+        "variable": spec["ice"][1],
     }
 
 
@@ -652,6 +926,42 @@ def write_index(strict: bool) -> None:
     print(f"\n{path} — {count} demos ({shape}), {total/1e6:.0f} MB of volume")
 
 
+def bake_ice_only(only) -> None:
+    """--ice-only: add ice.bin.gz to demos that are already baked.
+
+    Deliberately additive. The extinction volume, the minimap and the still
+    are not touched and meta.json gains exactly one key, so an existing
+    deployment can be given the ice-detection mode without re-uploading (or
+    re-rendering) anything it already ships. The index is not rewritten
+    either: no row of it names the ice volume.
+
+    A demo whose spec carries no ice variable is reported rather than
+    skipped in silence — that is a fact about the case (DYCOMS is liquid
+    only), and the reader of the log should see which cases got nothing.
+    """
+    for spec in DEMOS:
+        if only and spec["id"] not in only:
+            continue
+        out = OUT / spec["id"]
+        meta_path = out / "meta.json"
+        print(f"\n=== {spec['id']}: {spec['title']} ===", flush=True)
+        if not spec["ice"]:
+            print("    no ice variable in the spec — nothing to bake")
+            continue
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"{meta_path} — {spec['id']} has no extinction bake for an "
+                "ice volume to line up with; run a full bake first")
+        meta = json.loads(meta_path.read_text())
+        t0 = time.time()
+        field = load_demo(spec)
+        print(f"    loaded {field.lwc.shape} + ice in {time.time()-t0:.0f}s",
+              flush=True)
+        meta["ice"] = bake_ice(spec, field, meta, out)
+        meta_path.write_text(json.dumps(meta, indent=1))
+        del field
+
+
 # --- driver ----------------------------------------------------------------
 
 def main() -> None:
@@ -663,6 +973,13 @@ def main() -> None:
                          "to reshuffle grouping without the sources or a GPU")
     ap.add_argument("--skip-still", action="store_true")
     ap.add_argument("--skip-volume", action="store_true")
+    ap.add_argument("--skip-ice", action="store_true",
+                    help="leave the ice-fraction volume alone")
+    ap.add_argument("--ice-only", action="store_true",
+                    help="bake ONLY the ice-fraction volume, adding its block "
+                         "to the existing meta.json and touching nothing else "
+                         "on disk; the way to give already-baked demos ice "
+                         "without re-baking gigabytes of extinction")
     ap.add_argument("--size", type=int, nargs=2, default=[3840, 2160],
                     help="still resolution (default 4K)")
     ap.add_argument("--accumulate", type=int, default=192,
@@ -679,6 +996,12 @@ def main() -> None:
         write_index(strict=True)
         return
 
+    if args.ice_only:
+        if args.skip_ice:
+            ap.error("--ice-only --skip-ice asks for nothing")
+        bake_ice_only(args.only)
+        return
+
     for spec in DEMOS:
         if args.only and spec["id"] not in args.only:
             continue
@@ -691,7 +1014,8 @@ def main() -> None:
         # source files — which are not in the repo — between anyone and a
         # one-word edit to a card.
         field = None
-        if not (args.skip_volume and args.skip_still):
+        wants_ice = bool(spec["ice"]) and not args.skip_ice
+        if not (args.skip_volume and args.skip_still and not wants_ice):
             t0 = time.time()
             field = load_demo(spec)
             print(f"    loaded {field.lwc.shape}"
@@ -702,6 +1026,7 @@ def main() -> None:
         meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
         if not args.skip_volume:
             previous_still = meta.get("still")
+            previous_ice = meta.get("ice")
             meta = bake_volume(spec, field, out)
             # bake_volume writes the meta from scratch, which drops the still
             # block. still.webp is on disk either way, and the landing page
@@ -709,6 +1034,19 @@ def main() -> None:
             # rather than silently shipping a demo that starts nowhere.
             if args.skip_still and previous_still is not None:
                 meta["still"] = previous_still
+            # Same for the ice block, and with a sharper edge: a re-baked
+            # extinction volume and a kept ice.bin.gz are only aligned if the
+            # crop came out the same, so carrying it over is allowed ONLY
+            # when the shape still matches what is on disk.
+            if args.skip_ice and previous_ice is not None:
+                if previous_ice.get("bytes_uncompressed") != int(
+                        np.prod(meta["volume"]["shape_xyz"])):
+                    raise ValueError(
+                        f"{spec['id']}: --skip-ice would keep an ice volume of "
+                        f"{previous_ice['bytes_uncompressed']} voxels beside a "
+                        f"freshly baked {meta['volume']['shape_xyz']} field. "
+                        "Re-bake the ice too.")
+                meta["ice"] = previous_ice
         else:
             # --skip-volume keeps the baked arrays, but everything in the meta
             # that is simply a copy of the spec has to follow the spec anyway
@@ -729,6 +1067,17 @@ def main() -> None:
                     meta.pop(key, None)
             meta["sun"] = dict(spec["sun"])
             meta["periodic"] = bool(spec.get("periodic", True))
+        if wants_ice:
+            meta["ice"] = bake_ice(spec, field, meta, out)
+        elif not spec["ice"]:
+            # A demo whose spec drops the ice variable must lose the block and
+            # the file with it: leaving either behind offers the viewer a
+            # fraction that no longer belongs to this field.
+            meta.pop("ice", None)
+            stale = out / "ice.bin.gz"
+            if stale.exists():
+                stale.unlink()
+                print("    removed ice.bin.gz (this demo has no ice variable)")
         if not args.skip_still:
             meta["still"] = render_still(spec, field, out, tuple(args.size),
                                          args.accumulate, args.quality)

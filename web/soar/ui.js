@@ -1174,6 +1174,143 @@ export class UI {
     m.append(item("Back", "choose a different file", onCancel));
   }
 
+  /**
+   * Which storage dimension is x, which is y, which is z.
+   *
+   * The panel that exists so that detection failing is a question rather
+   * than a dead end. Three rows of three, picked in order — x, then y, then
+   * z — with each pick removing that dimension from the ones still on offer,
+   * so an assignment that used one dimension twice cannot be expressed.
+   *
+   * Sizes are shown beside the names because they are usually the tell: a
+   * (512, 512, 96) field is almost never 96 wide, and the person looking at
+   * this panel knows their own run.
+   */
+  _panel_axes({ dims, filename, reason, onPick, onCancel }) {
+    const picked = {};
+    const order = ["x", "y", "z"];
+    // Redrawn in place after each pick rather than built once with live
+    // toggles: the offer changes with every answer (a dimension already
+    // spoken for stops being on offer), and rebuilding is the only way that
+    // stays true without a second representation of the same state.
+    const draw = () => {
+      this.menu.replaceChildren();
+      const mm = this.menu;
+      mm.append(this._header("open file", "Which dimension is which?"));
+      mm.append(el("div", "row", filename));
+      if (reason && !Object.keys(picked).length) {
+        mm.append(el("div", "row", reason));
+      }
+      const next = order.find((a) => !(a in picked));
+      for (const axis of order) {
+        if (axis in picked) {
+          const d = dims.find((q) => q.axis === picked[axis]);
+          mm.append(el("div", "row", `${axis} = ${d.name} (${d.size})`));
+        }
+      }
+      if (next) {
+        mm.append(el("div", "divider"));
+        mm.append(el("h3", null, `Which dimension is ${next}?`));
+        for (const d of dims) {
+          if (Object.values(picked).includes(d.axis)) continue;
+          mm.append(item(d.name, `${d.size} points, storage axis ${d.axis}`,
+                         () => { picked[next] = d.axis; draw(); }));
+        }
+      } else {
+        mm.append(el("div", "divider"));
+        mm.append(item("Load with these axes", null,
+                       () => onPick({ ...picked })));
+      }
+      mm.append(el("div", "divider"));
+      if (Object.keys(picked).length) {
+        mm.append(item("Start over", null, () => {
+          for (const a of order) delete picked[a];
+          draw();
+        }));
+      }
+      mm.append(item("Back", "choose a different file", onCancel));
+    };
+    draw();
+  }
+
+  /**
+   * Which variable is the cloud water, or the cloud ice.
+   *
+   * Only raised when the answer is genuinely open — several candidates, or a
+   * name that does not settle the phase. The QN row carries its own warning:
+   * SAM's QN is water and ice together, and someone who does not know that
+   * would pick it as water without hesitating.
+   */
+  _panel_variable({ role, candidates, picked, filename, group, onPick,
+                    onCancel }) {
+    const m = this.menu;
+    const noun = role === "ice" ? "cloud ice" : "cloud water";
+    m.append(this._header("open file", `Which variable is the ${noun}?`));
+    m.append(el("div", "row",
+      group ? `${filename} — group ${group}` : filename));
+    m.append(el("div", "row",
+      candidates.length > 1
+        ? `This file has ${candidates.length} variables that could be the ` +
+          `${noun}. cloudyview will not choose for you: the wrong one ` +
+          "renders a completely plausible cloud."
+        : `'${picked}' is the only candidate, but its name does not say ` +
+          "which phase it holds."));
+    for (const c of candidates) {
+      const notes = [];
+      if (c.ambiguous) {
+        notes.push("total condensate — water AND ice together in SAM output");
+      }
+      if (c.longName) notes.push(c.longName);
+      if (c.units) notes.push(`units ${c.units}`);
+      notes.push(`[${c.shape.join(" x ")}]`);
+      m.append(item(c.name, notes.join(" · "), () => onPick(c.name)));
+    }
+    if (role === "ice") {
+      m.append(el("div", "divider"));
+      // Only offered for ice. A field with no water is not a field; a field
+      // with no ice is most fields.
+      m.append(item("None of these", "load the field without ice",
+                    () => onPick(null)));
+    }
+    m.append(el("div", "divider"));
+    m.append(item("Back", "choose a different file", onCancel));
+  }
+
+  /**
+   * Attach a second file's ice to a water-only field.
+   *
+   * Offered at load rather than at the first press of I, because the
+   * extinction being computed right now includes ice: attaching later would
+   * mean the field had been rendered without it. Skipping is the first row a
+   * thumb lands on for a reason — most fields are warm.
+   */
+  _panel_iceFile({ filename, liquidVar, group, onPick, onSkip, onCancel }) {
+    const m = this.menu;
+    m.append(this._header("open file", "Is there ice in another file?"));
+    m.append(el("div", "row",
+      group ? `${filename} — group ${group}` : filename));
+    m.append(el("div", "row",
+      `'${liquidVar}' is the only condensate here — this field has no ice ` +
+      "variable. If the run wrote its ice to a separate file on the same " +
+      "grid, it can be read alongside."));
+    m.append(item("Continue without ice", "the usual answer for a warm field",
+                  onSkip));
+    m.append(el("div", "divider"));
+    const input = el("input");
+    input.type = "file";
+    input.accept = ".nc,.nc4,.h5,.hdf5";
+    input.style.display = "none";
+    input.addEventListener("change", () => {
+      if (input.files?.length) onPick(input.files[0]);
+    });
+    m.append(input);
+    m.append(item("Choose an ice file…",
+                  "must be the same grid — nothing is cropped or interpolated",
+                  () => input.click()));
+    m.append(el("div", "divider"));
+    m.append(item("Back", "choose a different file", onCancel));
+  }
+
   _panel_message({ kicker, title, body, advice, actions }) {
     const m = this.menu;
     m.append(this._header(kicker, title));

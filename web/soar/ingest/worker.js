@@ -14,8 +14,8 @@
 
 import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
 import {
-  describeGroup, findLiquidWaterGroups, decoderFor, unitsMultiplier,
-  attrString,
+  describeGroup, describeIceGroup, findLiquidWaterGroups, findIceGroups,
+  assertSameGrid, decoderFor, unitsMultiplier, attrString, ICE_WATER_NAMES,
 } from "./netcdf.js";
 import {
   rhoAirTable, sigmaAt, cellThickness, opticalDepthFromWaterPaths,
@@ -28,6 +28,7 @@ import { makeHalfWriter } from "../half.js";
 import { markOccupiedPlanes, occupiedBand } from "../zcrop.js";
 
 const MOUNT = "/local";
+const ICE_MOUNT = "/local-ice";
 // Bytes of decoded source per slab, per variable.
 //
 // Kept modest because libhdf5 runs in a 32-bit wasm heap and a filtered read
@@ -44,6 +45,21 @@ const MOUNT = "/local";
 // 16.4 MB, under MAX_OUTSTANDING_BYTES, so two are still in flight at once.
 const SLAB_BUDGET_BYTES = 64 * 1024 * 1024;
 
+/**
+ * Ice fraction to the r8unorm texel that carries it.
+ *
+ * Written as two comparisons rather than a clamp so that NaN — which
+ * unclamped condensate propagates into the fraction, and which r8unorm has
+ * no way to represent — fails both and stores as 0 rather than as whatever
+ * `Math.round(NaN) | 0` happens to be. The same rule, and the same
+ * rounding, as tools/prebake_demos.py: a demo and an uploaded copy of the
+ * same field have to agree texel for texel.
+ */
+function quantizeIceFraction(f) {
+  if (!(f > 0.0)) return 0;               // 0, negative, or NaN
+  return f >= 1.0 ? 255 : Math.round(f * 255.0);
+}
+
 // The most a single chunk may drag the budget up to (see `chunkFloor` below).
 // A file chunked larger than this gets split and re-inflated, because a
 // 32-bit heap holding two of these plus libhdf5's own scratch is the failure
@@ -53,6 +69,11 @@ const SLAB_BUDGET_CEILING_BYTES = 256 * 1024 * 1024;
 let ready = null;
 let root = null;
 let mounted = false;
+// The optional second file supplying ice for a water-only field. Its own
+// mount point and its own handle, because WORKERFS mounts a fixed file list
+// at a directory and the water file's mount is already made by then.
+let iceRoot = null;
+let iceMounted = false;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -149,7 +170,7 @@ function readSlice(dataset, ranges, expected, name) {
 let installedPlugins = new Set();
 
 /** Walk every 3-D dataset's filter list and fetch the plugins it implies. */
-async function installNeededPlugins() {
+async function installNeededPlugins(handle = null) {
   const module = await ensureReady();
   const filterLists = [];
   const visit = (group) => {
@@ -160,7 +181,7 @@ async function installNeededPlugins() {
       if (item.shape?.length >= 3 && item.filters) filterLists.push(item.filters);
     }
   };
-  visit(root);
+  visit(handle ?? root);
   const { plugins, unknown } = pluginsNeeded(filterLists);
   if (unknown !== null) {
     console.warn(
@@ -174,7 +195,67 @@ async function installNeededPlugins() {
 
 // --- operations ------------------------------------------------------------
 
-async function open({ file }) {
+/**
+ * Open a SECOND file purely as a source of cloud ice.
+ *
+ * The counterpart of `open` for the separate-ice-file path: a water-only run
+ * plus the ice field somebody has beside it. Groups are found by their ice
+ * variable rather than their water one, because a file written to supply
+ * exactly this has no water variable to find.
+ *
+ * Nothing is validated against the loaded field here. That comparison needs
+ * the water group the user picked, which is settled later, so it happens in
+ * `iceGrid` below and again in `extinction` — the second time is not
+ * redundant: the ice read is deferred to the first press of I, and by then
+ * the check is the only thing standing between a mismatched pair and a
+ * silently misregistered volume.
+ */
+async function openIce({ file }) {
+  const { FS } = await ensureReady();
+  if (!iceMounted) {
+    try { FS.mkdir(ICE_MOUNT); } catch { /* already there */ }
+    FS.mount(FS.filesystems.WORKERFS, { files: [file] }, ICE_MOUNT);
+    iceMounted = true;
+  }
+  iceRoot = new h5wasm.File(`${ICE_MOUNT}/${file.name}`, "r");
+  await installNeededPlugins(iceRoot);
+
+  const paths = findIceGroups(iceRoot);
+  if (!paths.length) {
+    throw new Error(
+      `'${file.name}' holds no cloud ice field. cloudyview looks for a ` +
+      `three-dimensional variable named one of: ${ICE_WATER_NAMES.join(", ")}.`);
+  }
+  const groups = [];
+  const problems = [];
+  for (const path of paths) {
+    try {
+      groups.push(describeIceGroup(iceRoot, path));
+    } catch (err) {
+      problems.push(`${path || "(root)"}: ${err.message}`);
+    }
+  }
+  if (!groups.length) {
+    throw new Error(
+      `Found cloud ice in '${file.name}', but no group could be read.\n` +
+      problems.join("\n"));
+  }
+  return { groups, problems, filename: file.name };
+}
+
+/**
+ * Re-describe one ice group with the user's choices, and check it against the
+ * water group it is to be paired with. Returns the ice description; throws
+ * with the grids side by side if they are not the same grid.
+ */
+async function iceGrid({ group, choice, waterGroup, waterChoice, filename }) {
+  const water = describeGroup(root, waterGroup, waterChoice ?? null);
+  const ice = describeIceGroup(iceRoot, group, choice ?? null);
+  assertSameGrid(water, ice, filename);
+  return ice;
+}
+
+async function open({ file, choice = null }) {
   const { FS } = await ensureReady();
   if (!mounted) {
     try { FS.mkdir(MOUNT); } catch { /* already there */ }
@@ -198,21 +279,35 @@ async function open({ file }) {
 
   const groups = [];
   const problems = [];
+  // Groups that failed only because the axes could not be told apart. Kept
+  // separately from `problems` because they are not the same kind of news:
+  // an unreadable coordinate variable is a fact about the file, but this is
+  // a question the user can answer, and dropping it into a list of warnings
+  // is exactly the dead end this path exists to remove.
+  const unresolvedAxes = [];
   for (const path of paths) {
     try {
-      groups.push(describeGroup(root, path));
+      groups.push(describeGroup(root, path, choice));
     } catch (err) {
       // A group with unusable coordinates just drops out of the list, but
       // say so — silently offering fewer choices is how people conclude the
       // tool cannot read their file.
       problems.push(`${path || "(root)"}: ${err.message}`);
+      if (err.axisChoice) {
+        unresolvedAxes.push({ path, message: err.message, ...err.axisChoice });
+      }
     }
   }
   if (!groups.length) {
-    throw new Error(
+    const err = new Error(
       `Found cloud water, but no group could be read.\n${problems.join("\n")}`);
+    // One group with answerable axes is enough to offer the panel; with
+    // several, the first is the one the panel asks about, and answering it
+    // re-opens the file with that assignment applied to every group.
+    if (unresolvedAxes.length) err.axisChoice = unresolvedAxes[0];
+    throw err;
   }
-  return { groups, problems, filename: file.name };
+  return { groups, problems, filename: file.name, unresolvedAxes };
 }
 
 /**
@@ -233,12 +328,44 @@ async function open({ file }) {
  * band the extinction pass established, by construction rather than by a
  * remembered number the two passes could disagree about.
  */
-async function extinction({ group, units, label, slabBudget,
-                            iceOnly = false }) {
-  const description = describeGroup(root, group);
+async function extinction({ group, units, label, slabBudget, choice = null,
+                            iceFrom = null, iceOnly = false }) {
+  const description = describeGroup(root, group, choice);
   const handle = group ? root.get(group) : root;
   const dataset = handle.get(description.liquidVar);
-  const iceDataset = description.iceVar ? handle.get(description.iceVar) : null;
+
+  // The ice comes either from this group or, when the water file has none
+  // and the user attached one, from a second file entirely. The read loop
+  // does not know the difference: the cross-file dataset is used with the
+  // water variable's own ranges and strides, which is only correct if the
+  // two are stored identically — hence assertSameGrid, checked HERE and not
+  // only when the file was attached. The attach happens at load; this read
+  // happens at the first press of I, and nothing in between guarantees the
+  // description has not moved.
+  let iceDataset = description.iceVar ? handle.get(description.iceVar) : null;
+  let iceVarName = description.iceVar;
+  let iceDeclaredUnits = iceDataset
+    ? attrString(iceDataset.attrs, "units") : null;
+  if (iceFrom) {
+    if (!iceRoot) {
+      throw new Error(
+        "An ice file was attached to this field, but the worker has no ice " +
+        "file open. Reload the field and attach it again.");
+    }
+    if (iceDataset) {
+      throw new Error(
+        `'${label}' already carries '${description.iceVar}', so the attached ` +
+        "ice file would be shadowing the field's own ice. This is a bug: " +
+        "the attach is only offered for a field with no ice variable.");
+    }
+    const attached = describeIceGroup(
+      iceRoot, iceFrom.group, iceFrom.choice ?? null);
+    assertSameGrid(description, attached, iceFrom.filename);
+    const iceHandle = iceFrom.group ? iceRoot.get(iceFrom.group) : iceRoot;
+    iceDataset = iceHandle.get(attached.iceVar);
+    iceVarName = attached.iceVar;
+    iceDeclaredUnits = attached.iceUnits ?? iceFrom.units ?? null;
+  }
   // Ice-detection mode: a volume of per-voxel ice extinction fraction, which
   // only the on-demand pass produces. The extinction itself always includes
   // ice, whoever is reading. The caller checks for the variable before it
@@ -261,13 +388,13 @@ async function extinction({ group, units, label, slabBudget,
   };
   const multiplier = multiplierFor(description.units, description.liquidVar);
   const iceMultiplier = iceDataset
-    ? multiplierFor(attrString(iceDataset.attrs, "units"), description.iceVar)
+    ? multiplierFor(iceDeclaredUnits, iceVarName)
     : 0.0;
 
   assertFiltersSupported(dataset.filters, installedPlugins, description.liquidVar);
   if (iceDataset) {
     assertFiltersSupported(
-      iceDataset.filters, installedPlugins, description.iceVar);
+      iceDataset.filters, installedPlugins, iceVarName);
   }
 
   const decode = decoderFor(dataset.attrs);
@@ -419,7 +546,7 @@ async function extinction({ group, units, label, slabBudget,
     const expected = slabVoxels(storageShape, ranges);
     const raw = readSlice(dataset, ranges, expected, description.liquidVar);
     const rawIce = iceDataset
-      ? readSlice(iceDataset, ranges, expected, description.iceVar) : null;
+      ? readSlice(iceDataset, ranges, expected, iceVarName) : null;
 
     const slabShape = storageShape.slice();
     for (const a of AXES) slabShape[axis[a]] = local[a];
@@ -431,8 +558,12 @@ async function extinction({ group, units, label, slabBudget,
     }
 
     const out = makeHalfWriter(local.x * local.y * local.z);
+    // uint8, not fp16: the ice texture is r8unorm (see createVolumeTexture).
+    // Quantized here rather than on the GPU because this is where the value
+    // already is, and quantizing on the host is what lets the demo bake do
+    // the identical arithmetic in numpy.
     const outIce = iceOnly
-      ? makeHalfWriter(local.x * local.y * local.z) : null;
+      ? new Uint8Array(local.x * local.y * local.z) : null;
     const idx = new Array(slabShape.length).fill(0);
     let o = 0;
     for (let lx = 0; lx < local.x; lx++) {
@@ -461,7 +592,8 @@ async function extinction({ group, units, label, slabBudget,
           const sigma = sigmaAt(lwc, iwc, rhoAir[gz]);
           if (Number.isFinite(sigma)) { if (sigma !== 0) finiteNonZero += 1; }
           else nonFinite += 1;
-          if (outIce) outIce.set(o, iceExtinctionFraction(lwc, iwc));
+          if (outIce) outIce[o] = quantizeIceFraction(
+            iceExtinctionFraction(lwc, iwc));
           out.set(o++, sigma);
 
           const thickness = rhoAir[gz] * dz[gz];
@@ -485,7 +617,7 @@ async function extinction({ group, units, label, slabBudget,
     // slabs nobody is going to send.
     staged.push({ x0, y0, z0, local: { ...local },
                   bytes: iceOnly ? null : bytes,
-                  iceBytes: outIce ? outIce.bytes() : null });
+                  iceBytes: outIce });
     post({ type: "read", label, done: (++tilesDone) / tileCount });
   } } }
 
@@ -525,9 +657,12 @@ async function extinction({ group, units, label, slabBudget,
   });
 
   // z is the fastest axis, so a z sub-range is a stride-copy of runs.
+  // Typed to the input rather than to fp16: the extinction arrives as a
+  // Uint16Array and the ice fraction as a Uint8Array, and a trim that
+  // widened the latter would upload two texels per voxel.
   const trimZ = (bytes, slab, lo, depth) => {
     if (depth === slab.local.z) return bytes;
-    const trimmed = new Uint16Array(slab.local.x * slab.local.y * depth);
+    const trimmed = new bytes.constructor(slab.local.x * slab.local.y * depth);
     const offset = lo - slab.z0;
     let o = 0;
     for (let c = 0; c < slab.local.x * slab.local.y; c++) {
@@ -643,12 +778,19 @@ self.onmessage = async (event) => {
   try {
     let result;
     if (op === "open") result = await open(args);
+    else if (op === "describe") result = describeGroup(root, args.group, args.choice ?? null);
+    else if (op === "openIce") result = await openIce(args);
+    else if (op === "iceGrid") result = await iceGrid(args);
     else if (op === "extinction") { resetCredit(); result = await extinction(args); }
     else if (op === "probe") result = await probe(args);
     else throw new Error(`unknown ingest operation '${op}'`);
     post({ id, ok: true, result });
   } catch (err) {
     post({ id, ok: false, error: String(err?.message || err),
-           advice: err?.advice || "" });
+           advice: err?.advice || "",
+           // The manual-assignment panel is built from this. Carried across
+           // the worker boundary as plain data, because an Error's own
+           // properties do not survive structured cloning.
+           axisChoice: err?.axisChoice || null });
   }
 };

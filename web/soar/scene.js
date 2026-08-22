@@ -122,9 +122,26 @@ export async function loadOceanTile(device, baseUrl, onProgress) {
   };
 }
 
-/** A zero-initialized r16float volume texture for an (nx, ny, nz) field. */
-export async function createVolumeTexture(device, shape, label) {
-  const fit = volumeFits(device.limits, shape);
+// The two volume formats, and the bytes a texel of each costs. Extinction is
+// r16float: it spans orders of magnitude and has no bounded range to quantize
+// against. The ice fraction is r8unorm — a [0, 1] quantity read through a
+// color ramp, where 1/255 steps are invisible and the halving is a whole
+// field's worth of video memory, since the fraction sits BESIDE the
+// extinction rather than replacing it. Both the demo bake
+// (tools/prebake_demos.py) and the NetCDF ingest quantize the same way, so a
+// field flown as a demo and the same field opened from disk agree.
+export const VOLUME_TEXEL_BYTES = { r16float: 2, r8unorm: 1 };
+
+/** A zero-initialized volume texture for an (nx, ny, nz) field. */
+export async function createVolumeTexture(device, shape, label,
+                                          format = "r16float") {
+  const texelBytes = VOLUME_TEXEL_BYTES[format];
+  if (!texelBytes) {
+    throw new Error(
+      `createVolumeTexture does not know the format '${format}'; it knows ` +
+      `${Object.keys(VOLUME_TEXEL_BYTES).join(" and ")}.`);
+  }
+  const fit = volumeFits(device.limits, shape, texelBytes);
   if (!fit.ok) {
     const err = new Error(fit.message);
     err.advice = fit.advice;
@@ -136,15 +153,18 @@ export async function createVolumeTexture(device, shape, label) {
       label: label || "soar-volume",
       size: [nz, ny, nx],           // width=nz, height=ny, depth=nx
       dimension: "3d",
-      format: "r16float",
+      format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
            | GPUTextureUsage.COPY_SRC,
     }));
 }
 
 /**
- * Write a slab of the field. `data` is fp16 laid out with z fastest, then y,
- * then x — the same order the texture wants, so this is a straight copy.
+ * Write a slab of the field. `data` is laid out with z fastest, then y, then
+ * x — the same order the texture wants, so this is a straight copy. The row
+ * pitch comes from the view's own element size rather than a constant 2:
+ * fp16 extinction arrives as a Uint16Array, the uint8 ice fraction as a
+ * Uint8Array, and both go through here.
  * queue.writeTexture is used rather than a staging buffer on purpose: the
  * 256-byte bytesPerRow rule applies only to buffer-to-texture copies, and
  * nz*2 is almost never a multiple of 256.
@@ -153,7 +173,8 @@ export function writeVolumeSlab(device, texture, data, origin, size) {
   device.queue.writeTexture(
     { texture, origin: { x: origin[0], y: origin[1], z: origin[2] } },
     data,
-    { bytesPerRow: size[0] * 2, rowsPerImage: size[1] },
+    { bytesPerRow: size[0] * data.BYTES_PER_ELEMENT,
+      rowsPerImage: size[1] },
     size,
   );
 }
@@ -187,14 +208,15 @@ export const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
  * the only multi-gigabyte allocation, which is what lets a field of nearly
  * the machine's memory load at all.
  *
- * `stream` yields the DECOMPRESSED bytes, fp16, z fastest (the texture's
- * own layout, see writeVolumeSlab). Throws if the stream ends short or runs
- * long against `shape`.
+ * `stream` yields the DECOMPRESSED bytes, z fastest (the texture's own
+ * layout, see writeVolumeSlab). `texelBytes` says which volume this is: 2
+ * for the fp16 extinction field, 1 for the uint8 ice fraction beside it.
+ * Throws if the stream ends short or runs long against `shape`.
  */
 export async function streamWholeVolume(device, texture, stream, shape,
-                                        onProgress) {
+                                        onProgress, texelBytes = 2) {
   const [nx, ny, nz] = shape;
-  const perPlaneBytes = ny * nz * 2;              // one x plane, fp16
+  const perPlaneBytes = ny * nz * texelBytes;     // one x plane
   const planes = Math.max(1, Math.floor(UPLOAD_DRAIN_BYTES / perPlaneBytes));
   const slab = new Uint8Array(planes * perPlaneBytes);
   let filled = 0;                                 // bytes waiting in `slab`
@@ -209,7 +231,8 @@ export async function streamWholeVolume(device, texture, stream, shape,
     }
     writeVolumeSlab(
       device, texture,
-      new Uint16Array(slab.buffer, 0, filled / 2),
+      texelBytes === 2 ? new Uint16Array(slab.buffer, 0, filled / 2)
+                       : new Uint8Array(slab.buffer, 0, filled),
       [0, 0, x0], [nz, ny, depth]);
     await device.queue.onSubmittedWorkDone();
     x0 += depth;
@@ -277,17 +300,29 @@ export class Scene {
   get iceAvailable() { return Boolean(this.iceTexture || this.iceSource); }
 
   /**
-   * Why the ice fraction is not on offer, or null when it is. Both cases are
-   * facts about the data rather than failures, and they are different facts:
-   * a bake threw the phase split away, a file may simply not have carried
-   * one.
+   * Why the ice fraction is not on offer, or null when it is. A fact about
+   * the data rather than a failure, and since the demos gained their own
+   * prebaked ice volumes it is the SAME fact in both cases: the source this
+   * field came from carried no ice. (It used to be two — a bake threw the
+   * phase split away — and that is no longer true of any case that has one
+   * to throw.)
    */
   get iceNote() {
     if (this.iceAvailable) return null;
-    return this.prebaked
-      ? "This field has no ice data — the prebaked demos carry extinction " +
-        "only, and the liquid/ice split cannot be recovered from it. Open a " +
-        "NetCDF file with an ice mixing ratio to use this."
+    if (this.prebaked) {
+      return "This demo has no ice data — its source field is liquid only, " +
+             "so there is no phase split to show. The other cases carry one.";
+    }
+    // An upload that was OFFERED a second file and declined it gets a
+    // different sentence from one that was never asked: the first has an
+    // obvious remedy and saying "this file carries none" would be true and
+    // useless. The offer is made at load and only at load, because the
+    // extinction on screen already includes whatever ice there is — see
+    // ingest/index.js.
+    return this.iceSkipped
+      ? "This field has no ice data. You were offered an ice file when it " +
+        "loaded and continued without one — load the field again to attach " +
+        "an ice file on the same grid."
       : "This field has no ice data — ice detection needs an ice mixing " +
         "ratio variable (QI / IWC) and this file carries none.";
   }
@@ -485,6 +520,21 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       // than inferred from an absent variable name, because the ice-detection
       // mode has to tell the two cases apart to explain either.
       prebaked: true,
+      // …which is why the phase split ships as its OWN file when the source
+      // had one. What it takes to fetch, not the fraction itself: it is a
+      // third of a gigabyte on the larger cases and most flights never press
+      // I. `kind` is what tells toggleIceMode which loader to hand this to —
+      // a demo needs no NetCDF reader, and pulling h5wasm in to tint a baked
+      // field would be the download all over again. Absent `ice` block means
+      // the source carried no ice variable (DYCOMS), and iceAvailable is
+      // then false and the menu says why.
+      iceSource: meta.ice ? {
+        kind: "demo",
+        url: `${baseUrl}/${meta.ice.file}`,
+        shape,
+        compression: meta.ice.compression === "gzip" ? "gzip" : null,
+        format: meta.ice.format,
+      } : null,
       // Under a forced city the demo's sun is a desert afternoon and the
       // scene's light is a moon, so the mode's moon replaces it. A demo that
       // asked for the city itself carries a moon in this field already.
@@ -500,6 +550,47 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
     nestDummy?.destroy();
     throw err;
   }
+}
+
+/**
+ * Fetch a demo's prebaked ice fraction and upload it.
+ *
+ * The demo counterpart of ingest's loadIceVolume, and the same bargain: a
+ * second volume the size of the field, paid for only when somebody asks for
+ * the ice-detection mode. `source` is the scene's `iceSource` when its kind
+ * is "demo". Returns the texture; the caller owns it from then on.
+ *
+ * No crop is negotiated and none is possible: the bake wrote this volume
+ * from the same array the extinction came out of, with the same window and
+ * the same z band, so the two line up texel for texel by construction. The
+ * shape here is the SCENE's — if the file behind the URL disagrees,
+ * streamWholeVolume says so rather than uploading a shifted field.
+ */
+export async function loadDemoIceVolume(device, source, { progress } = {}) {
+  if (source.format !== "r8unorm") {
+    throw new Error(
+      `This demo's ice fraction is baked as '${source.format}'; the viewer ` +
+      "uploads r8unorm. Re-bake it with tools/prebake_demos.py --ice-only.");
+  }
+  progress?.("Downloading the ice fraction…", 0);
+  const texture = await createVolumeTexture(
+    device, source.shape, "the demo ice fraction", "r8unorm");
+  try {
+    await streamWholeVolume(
+      device, texture,
+      await fetchDecompressedStream(
+        source.url,
+        (f) => progress?.("Downloading the ice fraction…", f * 0.9),
+        source.compression),
+      source.shape,
+      (f) => progress?.("Uploading the ice fraction…", 0.9 + 0.1 * f),
+      VOLUME_TEXEL_BYTES.r8unorm);
+  } catch (err) {
+    texture.destroy();
+    throw err;
+  }
+  progress?.("Ready.", 1);
+  return texture;
 }
 
 export { volumeAABB, minVoxelSize };
