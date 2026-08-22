@@ -1,4 +1,6 @@
-// The minimap: a top-down glimpse albedo map with the camera drawn on it.
+// The minimap: a top-down map with the camera drawn on it — the cloud field's
+// glimpse albedo, or, over a night city, the city itself (see "the city map"
+// below).
 //
 // Port of cloudyview/soar/hud.py. The shader (hud.wgsl) is copied verbatim
 // from the desktop, so everything here is host-side: colorizing the albedo
@@ -6,6 +8,8 @@
 // geometry per frame.
 //
 //     const map = new Minimap(device, { albedo, shape: [ny, nx] });
+//     // …or, over a night city, the city itself:
+//     const map = new Minimap(device, { albedo, shape, cityCells });
 //     await map.init(targetFormat);
 //     map.update(camera, scene, [canvasWidth, canvasHeight]);
 //     map.encodePass(encoder, targetView, targetFormat);
@@ -20,6 +24,7 @@
 import {
   MAP_HEIGHT_FRAC, MAP_MAX_WIDTH_FRAC, MAP_MARGIN_FRAC, MAP_OPACITY,
   MAP_CLOUD_RAMP,
+  MAP_CITY_GROUND, MAP_CITY_ROOF,
   MAP_ACCENT,
 } from "./constants.js";
 import { cameraBasis } from "./camera.js";
@@ -74,6 +79,112 @@ export function sampleCloudRamp(t) {
     }
   }
   return stops[stops.length - 1][1];
+}
+
+// --- the city map ----------------------------------------------------------
+//
+// Over a night city the minimap shows the CITY, not the cloud field above it.
+// The cloud map would be the wrong picture in the wrong frame: the tile sits
+// at fixed world metres under a domain whose size changes with the field, so
+// a marker placed in domain coordinates does not say which district you are
+// over, and the district is the only thing there is to navigate by down in
+// the streets.
+//
+// The image is the same cascade the shader raises the buildings out of —
+// scene.cityCells, the mip-0 texels of cloudyview/soar/city that the CITY
+// specialization samples — so a bright patch on the map is a tower district
+// on screen, and not an illustration of one.
+//
+// These six are raymarch.wgsl's, restated because a shader constant cannot
+// be imported and this arithmetic runs on the CPU.
+// tests/test_city_frame_parity.py fails if any of them drifts.
+const CITY_MAP_EMPTY_RANK = 0.22;
+const CITY_MAP_SPRAWL_RANK_FULL = 0.60;
+const CITY_MAP_SPRAWL_MIN_FRAC = 0.15;
+const CITY_MAP_H_BASE = 14.0;
+const CITY_MAP_H_SCALE = 390.0;
+const CITY_MAP_H_EXP = 1.2;
+
+// Where the brightness ramp tops out (m). The tile's tallest blocks run to
+// CITY_MAX_H and beyond, and scaling to the maximum would put the whole city
+// in the bottom tenth of the ramp with three white pixels downtown. This is
+// a skyline height: everything above it reads as "tall", which is the only
+// distinction a 200 px map can carry anyway.
+const CITY_MAP_H_FULL = 700.0;
+
+/**
+ * Mean building height per block, in metres, from the city tile's cells.
+ *
+ * city_cell's height, with its per-building random factor dropped — that
+ * factor is `0.70 + 0.60 * rand`, mean exactly 1, so leaving it out gives the
+ * expected height of the block rather than a different field. Unbuilt blocks
+ * (rank at or below CITY_MAP_EMPTY_RANK) are zero, which is what makes the
+ * empty outskirts read as empty.
+ *
+ * Returns the field in the tile's own texel order, row 0 at y = 0 — the same
+ * order the texture was uploaded in, so tile x/y are map x/y and the map is
+ * world-aligned and north-up like the cloud one.
+ */
+export function cityBlockHeights({ n, density, rank }) {
+  const heights = new Float32Array(n * n);
+  for (let i = 0; i < n * n; i++) {
+    if (!(rank[i] > CITY_MAP_EMPTY_RANK)) continue;
+    const t = clamp01((rank[i] - CITY_MAP_EMPTY_RANK) /
+                      (CITY_MAP_SPRAWL_RANK_FULL - CITY_MAP_EMPTY_RANK));
+    const smooth = t * t * (3.0 - 2.0 * t);          // smoothstep, as WGSL's
+    const sprawl = CITY_MAP_SPRAWL_MIN_FRAC
+      + (1.0 - CITY_MAP_SPRAWL_MIN_FRAC) * smooth;
+    heights[i] = (CITY_MAP_H_BASE
+                  + CITY_MAP_H_SCALE * Math.pow(Math.max(density[i], 0.0),
+                                                CITY_MAP_H_EXP)) * sprawl;
+  }
+  return heights;
+}
+
+/**
+ * The city map's colours: height as brightness, on the night city's own
+ * sodium-over-ink palette rather than the cloud ramp's sky blue.
+ *
+ * Same shape of thing as colorizeAlbedo — a scalar field in, RGBA8 out — so
+ * the Minimap's texture path, sampler and shader are untouched. The street
+ * grid is below one texel here; what the map carries is the district
+ * structure, which is what the cascade actually decides.
+ */
+export function colorizeCityHeights(heights) {
+  const rgba = new Uint8Array(heights.length * 4);
+  for (let i = 0; i < heights.length; i++) {
+    // sqrt rather than linear: block heights are a multiplicative cascade,
+    // so a linear map spends most of the ramp on the few tallest blocks and
+    // leaves the body of the city one flat dark tone.
+    const t = Math.sqrt(clamp01(heights[i] / CITY_MAP_H_FULL));
+    const [r, g, b] = [
+      MAP_CITY_GROUND[0] + (MAP_CITY_ROOF[0] - MAP_CITY_GROUND[0]) * t,
+      MAP_CITY_GROUND[1] + (MAP_CITY_ROOF[1] - MAP_CITY_GROUND[1]) * t,
+      MAP_CITY_GROUND[2] + (MAP_CITY_ROOF[2] - MAP_CITY_GROUND[2]) * t,
+    ];
+    rgba[i * 4 + 0] = Math.round(r * 255.0);
+    rgba[i * 4 + 1] = Math.round(g * 255.0);
+    rgba[i * 4 + 2] = Math.round(b * 255.0);
+    rgba[i * 4 + 3] = 255;
+  }
+  return rgba;
+}
+
+/**
+ * The camera in the city tile's frame, as the relative triple
+ * cameraOverlayGeometry takes: x and y in [-1, 1] across ONE tile.
+ *
+ * This is the whole reason the city map places the marker correctly — the
+ * map image is one tile, so the marker's position on it is the camera's
+ * position in the tile, which is scene.cityPosition (raymarch.wgsl's
+ * world->tile map, see scene.js cityFramePosition). z is passed through
+ * unused: nothing on a top-down map depends on it.
+ */
+export function cityRelativePosition(scene, position) {
+  const city = scene.cityPosition(position);
+  if (!city) return null;
+  const extent = scene.oceanTileExtent;
+  return [2.0 * city[0] / extent - 1.0, 2.0 * city[1] / extent - 1.0, 0.0];
 }
 
 /** Project a 3D direction to unit top-down XY, falling back to an azimuth. */
@@ -196,13 +307,42 @@ export function nestMapUV(scene) {
 }
 
 export class Minimap {
-  constructor(device, { albedo, shape }) {
-    const [ny, nx] = shape;
+  /**
+   * `cityCells` builds the CITY map instead of the cloud one — see the city
+   * map block above. It replaces the cloud map outright rather than being a
+   * second image M cycles through: the minimap holds ONE texture, built at
+   * construction, and the marker's frame is a property of which image that
+   * is (domain-relative over a cloud field, tile-relative over a city). Two
+   * images would mean two frames behind one dot, which is the confusion this
+   * whole change exists to remove. M keeps its three states untouched.
+   *
+   * `albedo`/`shape` stay required either way and stay validated either way,
+   * so a caller that gets the pair wrong is told so whichever map it asked
+   * for. A city scene whose tile arrived without its cells does NOT quietly
+   * get the cloud map — the caller has to pass cityCells or not, and passing
+   * something malformed throws.
+   */
+  constructor(device, { albedo, shape, cityCells = null }) {
+    let [ny, nx] = shape;
     if (albedo.length !== nx * ny) {
       throw new Error(
         `The minimap was given ${albedo.length} albedo values for a ` +
         `${nx}x${ny} map, which needs ${nx * ny}.`);
     }
+    let image;
+    if (cityCells) {
+      if (!(cityCells.n > 0)
+          || cityCells.density?.length !== cityCells.n * cityCells.n) {
+        throw new Error(
+          "The city minimap was given a cell field that is not n x n; the " +
+          "tile's mip 0 is where it comes from.");
+      }
+      nx = ny = cityCells.n;
+      image = colorizeCityHeights(cityBlockHeights(cityCells));
+    } else {
+      image = colorizeAlbedo(albedo);
+    }
+    this.frame = cityCells ? "city" : "domain";
     const maxDim = device.limits.maxTextureDimension2D;
     if (Math.max(nx, ny) > maxDim) {
       throw new Error(
@@ -211,6 +351,11 @@ export class Minimap {
     }
 
     this.device = device;
+    // The image's shape, whichever image it is: the cloud map's (ny, nx) or
+    // the city tile's (n, n). Everything downstream — the rect's aspect, the
+    // overlay geometry — reads it from here, so the two maps need no second
+    // path. Still called albedoShape because it is still what the map is
+    // made of, and renaming it would touch every caller for nothing.
     this.albedoShape = [ny, nx];
     this.uniforms = new Float32Array(6 * 4);
 
@@ -221,7 +366,7 @@ export class Minimap {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     device.queue.writeTexture(
-      { texture: this.texture }, colorizeAlbedo(albedo),
+      { texture: this.texture }, image,
       { bytesPerRow: nx * 4, rowsPerImage: ny }, [nx, ny, 1]);
 
     this.sampler = device.createSampler({
@@ -301,12 +446,46 @@ export class Minimap {
     return pipeline;
   }
 
+  /**
+   * The camera's position in THIS map's frame, as the relative triple
+   * cameraOverlayGeometry takes.
+   *
+   * One place decides it, because the marker, the still and the fullscreen
+   * click all have to agree about what the picture is a picture of. It
+   * throws on a mismatch instead of drawing a plausible dot in the wrong
+   * frame: a map built for a city and handed an ocean scene (or the reverse)
+   * is a bug in the caller, and a silently wrong minimap is the worst thing
+   * a navigation aid can be.
+   */
+  _relativeIn(camera, scene) {
+    if (this.frame === "city") {
+      if (!scene.city) {
+        throw new Error(
+          "The minimap was built as a city map and handed a scene with no " +
+          "city tile.");
+      }
+      const rel = cityRelativePosition(scene, camera.position);
+      if (!rel) {
+        throw new Error(
+          "The city scene has no tile extent, so there is no city frame to " +
+          "put the camera in.");
+      }
+      return rel;
+    }
+    if (scene.city) {
+      throw new Error(
+        "The minimap was built from the cloud field and handed a city " +
+        "scene; the marker would be in the wrong frame.");
+    }
+    return camera.relativePosition();
+  }
+
   /** The marker centre in screen pixels — for tests and diagnostics. */
-  markerPixel(camera, size) {
+  markerPixel(camera, size, scene) {
     const rect = rectForSize(size, this.albedoShape);
     const { cameraUV } = cameraOverlayGeometry(
-      camera.relativePosition(), camera.azimuth, camera.elevation, camera.fov,
-      this.albedoShape, size[0] / size[1]);
+      this._relativeIn(camera, scene), camera.azimuth, camera.elevation,
+      camera.fov, this.albedoShape, size[0] / size[1]);
     return [rect[0] + cameraUV[0] * rect[2],
             rect[1] + (1.0 - cameraUV[1]) * rect[3]];
   }
@@ -316,12 +495,31 @@ export class Minimap {
    * Inverse of the marker placement: map u = (rel_x + 1) / 2, and the map
    * is drawn north-up, so screen y runs against world y.
    */
-  worldXYFromPixel(px, py, scene) {
+  worldXYFromPixel(px, py, scene, camera = null) {
     if (!this._rect) return null;
     const [x, y, w, h] = this._rect;
     if (px < x || py < y || px > x + w || py > y + h) return null;
     const u = (px - x) / w;
     const v = 1.0 - (py - y) / h;
+    if (this.frame === "city") {
+      // The city map is ONE tile of a periodic city, so a point on it names
+      // infinitely many world positions. The one meant is the nearest — a
+      // click three streets over must not be a jump of a whole tile — so the
+      // travel is measured from where the camera already is.
+      if (!camera) {
+        throw new Error(
+          "A city map needs the camera to turn a click into a world " +
+          "position: the tile repeats, and the nearest copy is the one " +
+          "meant.");
+      }
+      const extent = scene.oceanTileExtent;
+      const offset = scene.cityOffsetM;
+      return [0, 1].map((i) => {
+        const target = offset[i] + (i === 0 ? u : v) * extent;
+        return target + Math.round((camera.position[i] - target) / extent)
+               * extent;
+      });
+    }
     const { bmin, bmax } = scene;
     return [bmin[0] + u * (bmax[0] - bmin[0]),
             bmin[1] + v * (bmax[1] - bmin[1])];
@@ -333,8 +531,8 @@ export class Minimap {
     const rect = rectForSize(size, this.albedoShape, fullscreen);
     const [ny, nx] = this.albedoShape;
     const overlay = cameraOverlayGeometry(
-      camera.relativePosition(), camera.azimuth, camera.elevation, camera.fov,
-      this.albedoShape, screenW / screenH);
+      this._relativeIn(camera, scene), camera.azimuth, camera.elevation,
+      camera.fov, this.albedoShape, screenW / screenH);
     const [camU, camV] = overlay.cameraUV;
 
     const minSide = Math.min(rect[2], rect[3]);
@@ -358,7 +556,11 @@ export class Minimap {
       circleRadius = overlay.circleRadiusPx * rect[2] / Math.max(nx - 1, 1);
     }
 
-    const nest = nestMapUV(scene);
+    // The nest footprint is a rectangle in DOMAIN uv. On the city map that
+    // is a rectangle over the wrong picture, so it is simply not drawn —
+    // and a nested field over a city does not arise today anyway, since only
+    // the demos are ever city-surfaced.
+    const nest = this.frame === "city" ? null : nestMapUV(scene);
     const u = this.uniforms;
     u.set([screenW, screenH, fullscreen ? 0.95 : MAP_OPACITY, markerRadius], 0);
     u.set(rect, 4);

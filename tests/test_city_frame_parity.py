@@ -1,10 +1,11 @@
 """The city coordinate is one mapping, written down in three places.
 
-soar shows a camera's position in the city tile's frame (the minimap caption
-and the F3 overlay), records it in a still's metadata, and `night_city_harness
---city-camera` turns it back into world metres. All three have to be the SAME
-map as the one the shader samples the tile with, or the readout names a street
-the picture does not show.
+Over a night city, soar draws the minimap in the city tile's frame (and out of
+the tile's own cascade), shows the camera's tile position in the F3 overlay,
+records it in a still's metadata, and `night_city_harness --city-camera` turns
+it back into world metres. All of them have to be the SAME map as the one the
+shader samples the tile with, or the marker sits on a district the picture
+does not show.
 
 The shader's map is one line of raymarch.wgsl:
 
@@ -13,8 +14,8 @@ The shader's map is one line of raymarch.wgsl:
 with a repeating sampler, so only the fractional part of uv picks a block.
 That line is pinned here as text — it is the definition, and a change to it
 has to come here and break this test rather than silently desynchronise the
-caption. The JS forward map and the harness's inverse are then checked
-against it.
+map. The JS forward map, the minimap's city image, and the harness's inverse
+are then checked against it.
 
 Skips when node is unavailable. Needs no GPU: this is arithmetic.
 """
@@ -30,6 +31,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCENE_JS = REPO / "web" / "soar" / "scene.js"
+MINIMAP_JS = REPO / "web" / "soar" / "minimap.js"
 WGSL = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
 
 pytestmark = pytest.mark.skipif(
@@ -51,7 +53,8 @@ def test_shader_samples_the_tile_at_xy_minus_offset_over_extent():
     assert re.search(r"let\s+uv\s*=\s*\(xy\s*-\s*u\.ocean\.yz\)\s*/\s*"
                      r"u\.ocean_params\.y\s*;", body.group(0)), (
         "the city tile's world->tile map changed; scene.js cityFramePosition, "
-        "the minimap caption, the capture metadata and night_city_harness "
+        "the minimap's city image, the capture metadata and "
+        "night_city_harness "
         "--city-camera all have to change with it")
 
 
@@ -101,3 +104,98 @@ def test_harness_city_camera_inverts_the_forward_map():
     city = _city_frame([[1234.0 + OFFSET[0], 99.0 + OFFSET[1], 20.0]])[0]
     assert city[0] == pytest.approx(1234.0)
     assert city[1] == pytest.approx(99.0)
+
+
+# --- the city minimap ------------------------------------------------------
+#
+# Over a night city the minimap draws the city tile instead of the cloud
+# field, out of the same mip-0 cascade the CITY shader raises buildings from.
+# Its arithmetic runs on the CPU in JavaScript and the shader's runs on the
+# GPU in WGSL, so the constants are written down twice; these pin the second
+# copy to the first.
+
+# (JS name in minimap.js, WGSL name in raymarch.wgsl)
+_CITY_MAP_CONSTANTS = [
+    ("CITY_MAP_EMPTY_RANK", "CITY_EMPTY_RANK"),
+    ("CITY_MAP_SPRAWL_RANK_FULL", "CITY_SPRAWL_RANK_FULL"),
+    ("CITY_MAP_SPRAWL_MIN_FRAC", "CITY_SPRAWL_MIN_FRAC"),
+    ("CITY_MAP_H_BASE", "CITY_H_BASE"),
+    ("CITY_MAP_H_SCALE", "CITY_H_SCALE"),
+    ("CITY_MAP_H_EXP", "CITY_H_EXP"),
+]
+
+
+def _number(source, pattern):
+    m = re.search(pattern, source)
+    assert m, f"no match for {pattern!r}"
+    return float(m.group(1))
+
+
+@pytest.mark.parametrize("js_name,wgsl_name", _CITY_MAP_CONSTANTS)
+def test_the_map_raises_its_buildings_on_the_shaders_numbers(js_name, wgsl_name):
+    js = _number(MINIMAP_JS.read_text(),
+                 rf"const\s+{js_name}\s*=\s*([-\d.eE+]+)\s*;")
+    wgsl = _number(WGSL.read_text(),
+                   rf"const\s+{wgsl_name}\s*:\s*f32\s*=\s*([-\d.eE+]+)\s*;")
+    assert js == wgsl, (
+        f"minimap.js {js_name} is {js} and raymarch.wgsl {wgsl_name} is "
+        f"{wgsl}; the map would show a city the renderer does not build")
+
+
+def _height(density, rank):
+    """city_cell's height with the per-building jitter (mean 1) left out."""
+    empty, full, floor_ = 0.22, 0.60, 0.15
+    if not rank > empty:
+        return 0.0
+    t = min(max((rank - empty) / (full - empty), 0.0), 1.0)
+    sprawl = floor_ + (1.0 - floor_) * (t * t * (3.0 - 2.0 * t))
+    return (14.0 + 390.0 * density ** 1.2) * sprawl
+
+
+def test_the_map_height_is_the_shaders_height_without_the_jitter():
+    cells = [(0.02, 0.10), (0.05, 0.30), (0.20, 0.55), (0.60, 0.95),
+             (0.90, 0.99), (0.40, 0.22)]
+    js = textwrap.dedent(f"""
+        import {{ cityBlockHeights }} from "{MINIMAP_JS.as_uri()}";
+        const cells = {json.dumps(cells)};
+        const n = 1;
+        const out = cells.map(([d, r]) => cityBlockHeights({{
+          n, density: Float32Array.of(d), rank: Float32Array.of(r) }})[0]);
+        process.stdout.write(JSON.stringify(out));
+    """)
+    got = json.loads(subprocess.run(["node", "--input-type=module", "--eval", js],
+                                    capture_output=True, text=True,
+                                    check=True).stdout)
+    for (density, rank), height in zip(cells, got):
+        assert height == pytest.approx(_height(density, rank), rel=1e-6)
+    # The rank-0.22 case is exactly the empty threshold: not built, no height.
+    assert got[-1] == 0.0
+
+
+def test_the_marker_is_placed_in_the_frame_the_map_is_drawn_in():
+    """Tile origin at the map's lower-left, tile centre at its middle."""
+    js = textwrap.dedent(f"""
+        import {{ cityRelativePosition }} from "{MINIMAP_JS.as_uri()}";
+        import {{ cityFramePosition }} from "{SCENE_JS.as_uri()}";
+        const scene = {{
+          city: true,
+          cityOffsetM: {list(OFFSET)},
+          oceanTileExtent: {EXTENT},
+          cityPosition(p) {{
+            return cityFramePosition(p, this.cityOffsetM, this.oceanTileExtent);
+          }},
+        }};
+        const at = (x, y) => cityRelativePosition(scene, [x, y, 30.0]);
+        process.stdout.write(JSON.stringify([
+          at({OFFSET[0]}, {OFFSET[1]}),
+          at({OFFSET[0]} + {EXTENT} / 2, {OFFSET[1]} + {EXTENT} / 2),
+          at({OFFSET[0]} + {EXTENT} * 3.25, {OFFSET[1]} - {EXTENT} * 0.25),
+        ]));
+    """)
+    origin, centre, wrapped = json.loads(
+        subprocess.run(["node", "--input-type=module", "--eval", js],
+                       capture_output=True, text=True, check=True).stdout)
+    assert origin[:2] == pytest.approx([-1.0, -1.0])
+    assert centre[:2] == pytest.approx([0.0, 0.0])
+    # Whole tiles away is the same spot on the map — the map is one tile.
+    assert wrapped[:2] == pytest.approx([-0.5, 0.5])

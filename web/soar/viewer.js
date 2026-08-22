@@ -11,7 +11,7 @@ import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
-import { Minimap, rectForSize } from "./minimap.js";
+import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
 
@@ -343,8 +343,13 @@ export class Viewer {
       // of them. Each is loaded on first use and cached for the session.
       const surface = async (kind) => {
         if (kind === "city") {
+          // keepCells: the minimap draws the city out of the tile's own mip
+          // 0, and the tile is the only place those bytes ever arrive. Held
+          // for the session with the tile itself (8 MB beside a multi-GB
+          // volume) rather than re-downloaded per field.
           return (this._cityTile ??=
-            await loadOceanTile(this.device, CITY_URL));
+            await loadOceanTile(this.device, CITY_URL, undefined,
+                                { keepCells: true }));
         }
         return (this._ocean ??=
           await loadOceanTile(this.device, OCEAN_URL));
@@ -385,8 +390,11 @@ export class Viewer {
       // hold one (or a field too wide for a 2D texture) is a reason to fly
       // without it and say so, not a reason to fail the load. Said now rather
       // than only when the menu is next opened.
+      // Over a city the map IS the city: same image the shader builds from,
+      // in the tile's frame, replacing the cloud map outright. See Minimap.
       const map = new Minimap(this.device, {
         albedo: scene.albedo, shape: scene.albedoShape,
+        cityCells: scene.cityCells ?? null,
       });
       try {
         minimap = await map.init(this.canvasFormat, this.hudSource);
@@ -1045,7 +1053,7 @@ export class Viewer {
         const hit = this.minimap.worldXYFromPixel(
           e.offsetX * (canvas.width / canvas.clientWidth),
           e.offsetY * (canvas.height / canvas.clientHeight),
-          this.scene);
+          this.scene, this.camera);
         if (hit) {
           this.camera.position[0] = hit[0];
           this.camera.position[1] = hit[1];
@@ -2703,15 +2711,6 @@ export class Viewer {
                           this.minimapMode === "full");
       overlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
-      // The caption is DOM, so it wants the map's rectangle in CSS pixels —
-      // the same rectForSize the GPU pass used, asked at the CSS size rather
-      // than the framebuffer's. Null off a city: no second frame to report.
-      this.ui.drawMapCoords(
-        this.scene.cityPosition(this.camera.position),
-        rectForSize([this.canvas.clientWidth, this.canvas.clientHeight],
-                    this.minimap.albedoShape, this.minimapMode === "full"));
-    } else {
-      this.ui.drawMapCoords(null, null);
     }
 
     // Marching is the expensive half — a full traversal of the volume for

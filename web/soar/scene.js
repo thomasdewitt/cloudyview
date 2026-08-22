@@ -19,6 +19,7 @@ import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
 } from "./gpu.js";
 import * as K from "./constants.js";
+import { fromHalf } from "./half.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
@@ -87,8 +88,10 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
  * cell_m). Field-independent, so each ships with the tool and is loaded once
  * per session.
  */
-export async function loadOceanTile(device, baseUrl, onProgress) {
+export async function loadOceanTile(device, baseUrl, onProgress,
+                                    { keepCells = false } = {}) {
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
+  let cells = null;
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
     size: [meta.n, meta.n, 1],
@@ -99,6 +102,22 @@ export async function loadOceanTile(device, baseUrl, onProgress) {
   for (let level = 0; level < meta.mips; level++) {
     const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin`);
     const n = Math.max(1, meta.n >> level);
+    // The city minimap draws the same cascade the shader raises buildings
+    // out of, so it reads the SAME bytes rather than fetching anything of
+    // its own: level 0 is one texel per block, which is the resolution the
+    // districts actually have. Decoded on the way past and the fp16 dropped;
+    // only the two channels city_cell reads are kept.
+    if (keepCells && level === 0) {
+      const halves = new Uint16Array(
+        bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+      const density = new Float32Array(n * n);
+      const rank = new Float32Array(n * n);
+      for (let i = 0; i < n * n; i++) {
+        density[i] = fromHalf(halves[i * 4]);
+        rank[i] = fromHalf(halves[i * 4 + 1]);
+      }
+      cells = { n, density, rank };
+    }
     device.queue.writeTexture(
       { texture, mipLevel: level },
       bytes,
@@ -113,12 +132,18 @@ export async function loadOceanTile(device, baseUrl, onProgress) {
       `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
       "no texel size.");
   }
+  if (keepCells && !cells) {
+    throw new Error(
+      `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
+      "them from.");
+  }
   return {
     view: texture.createView(),
     texture,
     dx,
     tileExtent: meta.tile_extent_m,
     maxLod: meta.mips - 1,
+    cells,
   };
 }
 
@@ -540,6 +565,10 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       oceanTileExtent: surfaceTile.tileExtent,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
+      // The city tile's per-block cascade, for the minimap to draw the city
+      // with. Null for an ocean scene, and null is what makes the minimap
+      // build the cloud map instead — see Minimap's constructor.
+      cityCells: surfaceTile.cells,
       // The demo's own offset when the demo asked for a city; the mode's when
       // the mode did, because a borrowed demo has no opinion about where a
       // city it never expected should sit under it.

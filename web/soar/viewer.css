@@ -133,24 +133,6 @@
    is the one that moves. */
 #speed:not([hidden]) ~ #stats { bottom: 48px; }
 
-/* The minimap's city-coordinate caption. left/top/width come from the map's
-   own rectangle each frame (Ui.drawMapCoords), so there is no corner rule
-   here to drift out of step with rectForSize. */
-#map-coords {
-  position: absolute;
-  box-sizing: border-box;
-  font-family: var(--ui-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  padding: 4px 8px;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  pointer-events: none;
-  color: rgba(220, 232, 246, 0.9);
-}
-#map-coords[hidden] { display: none; }
-
 #toolbar {
   right: 14px;
   top: 14px;

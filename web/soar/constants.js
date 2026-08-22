@@ -972,6 +972,16 @@ export const MAP_CLOUD_RAMP = [
 // against it.
 export const MAP_SKY_BLUE = MAP_CLOUD_RAMP[0][1];
 
+// The night city's map, which is a different picture of a different thing:
+// mean building height per block, over the city tile rather than the cloud
+// field. Two stops, not a ramp — an unbuilt block and a megatower roof —
+// because what the map has to carry is where the towers are, and a six-stop
+// ramp on a fractal height field reads as noise. Dark ink to sodium: the
+// colours the scene itself is lit in, so the map looks like the view out of
+// the window, and the MAP_ACCENT marker sits on top of both.
+export const MAP_CITY_GROUND = [0x0a / 255, 0x0c / 255, 0x14 / 255];
+export const MAP_CITY_ROOF = [0xf2 / 255, 0xcf / 255, 0x9a / 255];
+
 // The overlay drawn ON the map — camera dot, field-of-view rays, nest
 // footprint. One warm colour against a blue-to-white field, and the same
 // value as the chrome's --hot and the landing page's --amber, so the marker
