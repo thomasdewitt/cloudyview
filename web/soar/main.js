@@ -28,6 +28,7 @@ const dom = {
   flyMore: el("fly-more"),
   flyMoreWarn: el("fly-more-warn"),
   reel: [el("reel-a"), el("reel-b")],
+  cyberBack: el("reel-cyberpunk"),
   loading: el("loading"),
   stage: el("loading-stage"),
   bar: el("loading-bar"),
@@ -367,6 +368,26 @@ async function showReel(demo, root) {
   reelActive = next;
 }
 
+// The cyberpunk backdrop: one offline render of the view a cyberpunk flight
+// opens on (constants.js CITY_START_CAMERA), over the C1=0.07 city tile and
+// under the mode's moon, at the max preset. It ships with the city tile it is
+// a picture of rather than with a demo, because it is a picture of the MODE:
+// no demo owns it, and the field under it is the same field the pair loads.
+const CYBERPUNK_BACKDROP = "city/landing.webp";
+
+/**
+ * The mode's own backdrop, in place of the demo reel.
+ *
+ * The reel is not stopped or rewound — CSS covers it while the body carries
+ * mode-cyberpunk, and uncovers it on the way out, so leaving cyberpunk shows
+ * whatever the hover had left on top. All this does is decline to download a
+ * quarter of a megabyte until somebody asks for the mode.
+ */
+function showCyberpunkBackdrop(on) {
+  if (!on || dom.cyberBack.src) return;
+  dom.cyberBack.src = CYBERPUNK_BACKDROP;
+}
+
 /**
  * The numbers a case shows, from the volume block of its own meta.json.
  *
@@ -655,9 +676,13 @@ function applyMode(next, { save = true } = {}) {
   if (save && changed) document.body.classList.add("switched");
   for (const m of MODES) document.body.classList.toggle(`mode-${m.id}`, m.id === next);
   // Every mode wants the pair; it starts hidden only so the stack does not
-  // reflow between first paint and the stored mode landing.
+  // reflow between first paint and the stored mode landing. WHICH two cases
+  // it loads is the mode's — a no-op until the index lands, after which the
+  // switch is a lookup.
   dom.flyLess.hidden = false;
   dom.flyMore.hidden = false;
+  refreshFlyPair();
+  showCyberpunkBackdrop(next === "cyberpunk");
   for (const button of dom.modeToggle.children) {
     if (button.dataset.mode === undefined) continue;   // the thumb
     button.setAttribute("aria-checked", String(button.dataset.mode === next));
@@ -706,11 +731,27 @@ setTimeout(() => document.body.classList.remove("intro"), 2700);
 
 // --- the two-button way in ------------------------------------------------
 
-// The coarse/full twin. Two ids from demos/index.json rather than two more
-// copies of the fields: the pair IS the STEAM high-based convection case at
-// its two bakes, and the rail shows the same two rows in research mode.
-const FLY_LESS_ID = "desert-coarse";
-const FLY_MORE_ID = "desert";
+// The coarse/full twin. Ids from demos/index.json rather than two more copies
+// of the fields: a pair IS one case at its two bakes, and the rail shows the
+// same two rows in research mode.
+//
+// Cyberpunk flies its own pair (Thomas, 2026-08-22). The daylight pair is the
+// 51.2 km desert domain, which under a city is 51 km of streets to cross at
+// 20 m/s; marine congestus is a fifth of that box and its cloud base sits
+// where a skyline can reach it. Two ids, not two bakes: the same volumes the
+// rail lists, stood on the city by demoSource.
+const FLY_PAIRS = {
+  research: { less: "desert-coarse", more: "desert" },
+  basic: { less: "desert-coarse", more: "desert" },
+  cyberpunk: { less: "marine-congestus-coarse", more: "marine-congestus" },
+};
+
+/** The two ids this mode's buttons load. */
+function flyPair() {
+  const pair = FLY_PAIRS[mode];
+  if (!pair) throw new Error(`no fly pair for mode '${mode}'.`);
+  return pair;
+}
 
 /**
  * What flying this demo means, in the mode the page is in.
@@ -745,7 +786,13 @@ function flyMissing(button, id) {
  * buttons are live from the moment the index resolves; the limits check only
  * ever takes one away, and it lands whenever the adapter probe does.
  */
+// The resolved index, once, so a mode switch re-reads the pair without
+// re-fetching anything. Null until it lands (or for good, if it fails).
+let demoIndex = null;
+let railSettled = null;
+
 async function wireFlyPair(railTask) {
+  railSettled = railTask.catch(() => {});
   let root, groups;
   try {
     ({ root, groups } = await resolveDemos());
@@ -760,29 +807,64 @@ async function wireFlyPair(railTask) {
       `The demo list could not be loaded (${err.message}).`;
     return;
   }
-  const all = groups.flatMap((group) => group.demos);
-  const less = all.find((d) => d.id === FLY_LESS_ID);
-  const more = all.find((d) => d.id === FLY_MORE_ID);
-  if (!less) flyMissing(dom.flyLess, FLY_LESS_ID);
-  if (!more) flyMissing(dom.flyMore, FLY_MORE_ID);
+  demoIndex = { root, all: groups.flatMap((group) => group.demos) };
 
-  for (const [button, demo] of [[dom.flyLess, less], [dom.flyMore, more]]) {
-    if (!demo) continue;
-    button.addEventListener("click", () =>
-      capabilityFailed
-        ? reportNoGPU()
-        : enterViewer(demoSource(root, demo)));
+  // Wired once and for both modes: the handler resolves the id at CLICK time,
+  // the same reading demoSource does of the surface. A listener per mode
+  // switch would stack, and removing them again is a second thing to keep
+  // right about a button whose behaviour is one lookup.
+  for (const which of ["less", "more"]) {
+    const button = which === "less" ? dom.flyLess : dom.flyMore;
+    button.addEventListener("click", () => {
+      if (capabilityFailed) return reportNoGPU();
+      const demo = flyDemo(which);
+      // Only reachable if the index lost a case between refresh and click;
+      // refreshFlyPair has already disabled the button for a missing id.
+      if (!demo) return;
+      return enterViewer(demoSource(demoIndex.root, demo));
+    });
   }
-  if (!more) return;
+  await refreshFlyPair();
+}
 
-  // The caution the rail card carries, in the same words and from the same
-  // field of the same file — not a second sentence about the same fact.
-  dom.flyMoreWarn.textContent = more.warning ?? "";
+/** This mode's demo for one of the two buttons, or undefined. */
+function flyDemo(which) {
+  return demoIndex?.all.find((d) => d.id === flyPair()[which]);
+}
+
+/**
+ * Put this mode's pair on the two buttons: the ids, the caution, and whether
+ * the full-resolution one fits on this GPU.
+ *
+ * Re-run on every mode switch, because all three of those are per-case and
+ * cyberpunk's case is not basic's. It only ever reads state that is already
+ * in hand — the index, the metas the rail fetched, the adapter probe — so a
+ * switch costs no request.
+ */
+async function refreshFlyPair() {
+  if (!demoIndex) return;
+  for (const which of ["less", "more"]) {
+    const button = which === "less" ? dom.flyLess : dom.flyMore;
+    const demo = flyDemo(which);
+    if (!demo) {
+      flyMissing(button, flyPair()[which]);
+      continue;
+    }
+    button.classList.remove("missing");
+    button.disabled = false;
+    // The caution the rail card carries, in the same words and from the same
+    // field of the same file — not a second sentence about the same fact.
+    // Cleared when this mode's case has none, or the previous mode's warning
+    // would sit under the new one's label.
+    button.querySelector(".warn").textContent = demo.warning ?? "";
+  }
+  const more = flyDemo("more");
+  if (!more) return;
 
   // Now the harder claim: not "this is heavy" but "this will not fit". Both
   // halves can be late (the meta comes with the rail, the limits with the
   // adapter probe) and neither is on the path to a first paint.
-  await railTask.catch(() => {});
+  await railSettled;
   const shape = metaById.get(more.id)?.volume?.shape_xyz;
   // No meta means no claim. fetchNumbers already logged it, and a case whose
   // meta is unreadable fails loudly in the loader — the same choice the rail
@@ -795,6 +877,10 @@ async function wireFlyPair(railTask) {
     return;   // renderCapability owns this failure; capabilityFailed is set
   }
   const fits = volumeFits(limits, shape);
+  // A mode switch during the awaits above: this verdict is about a case that
+  // is no longer on the button, and writing it there would caution about the
+  // wrong field.
+  if (flyDemo("more")?.id !== more.id) return;
   if (fits.ok) return;
   dom.flyMore.disabled = true;
   dom.flyMoreWarn.textContent = `${fits.message} ${fits.advice}`;

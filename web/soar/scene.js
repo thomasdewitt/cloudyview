@@ -540,8 +540,12 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       // asked for the city itself carries a moon in this field already.
       sun: forcedSurface === "city" ? K.CITY_MOON : meta.sun,
       // Where the landing page's still was taken from, so flight can open
-      // there — see Camera.applyStart and viewer boot.
-      startCamera: meta.still?.camera ?? null,
+      // there — see Camera.applyStart and viewer boot. Under a forced city
+      // the mode's own opening view replaces it, for the same reason the
+      // mode's moon replaces the demo's sun: the demo's camera is a daylight
+      // aerial over cloud tops, and cyberpunk is a street.
+      startCamera: forcedSurface === "city"
+        ? K.CITY_START_CAMERA : (meta.still?.camera ?? null),
     });
     progress?.("Ready.", 1);
     return scene;

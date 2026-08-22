@@ -87,6 +87,18 @@ def build_level(nc_path: Path, verbose: bool = True):
 
 
 def main(argv=None) -> int:
+    # Imported before the parser rather than after it because the defaults
+    # ARE these constants: a help text that names its own default and a
+    # default that is a copy of the app's number cannot both be true unless
+    # they are the same object.
+    from cloudyview.basic_render import save_image
+    from cloudyview.soar_host import (
+        STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
+        APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
+        SceneState, SoarRenderer, ViewState,
+    )
+    from cloudyview.witness import OCEAN_REFLECTANCE
+
     parser = argparse.ArgumentParser(
         description="Render soar's night-city views to PNG.")
     parser.add_argument("--field", default=DEFAULT_FIELD,
@@ -113,15 +125,45 @@ def main(argv=None) -> int:
                         help="one free view instead of the named ones: "
                              "world meters and degrees. The component "
                              "iteration loop's close-up lens.")
+    # The rest of the app's view state, for the one job this harness has that
+    # is not iteration: rendering a picture the browser also renders, at the
+    # browser's own numbers. Without them a harness frame is the app's LOD and
+    # the app's image controls whatever the app is actually set to, which is
+    # fine while judging a shader change and wrong when the output is shipped
+    # as a still of the scene.
+    parser.add_argument("--lod", type=float, default=None,
+                        help="LOD strength, the app's slider (default: "
+                             f"{DEFAULT_LOD_STRENGTH}). Cyberpunk's max "
+                             "tier flies and captures at 0.01.")
+    parser.add_argument("--relative-camera", nargs=6, type=float, default=None,
+                        metavar=("RX", "RY", "RZ", "AZ", "EL", "FOV"),
+                        help="--camera in the app's relative coordinates: "
+                             "x and y in [-1, 1] across the domain box, z in "
+                             "[-1, 1] from the ground to the box top. This is "
+                             "what a capture's metadata and meta.json record, "
+                             "so a view can be moved between them unchanged.")
+    parser.add_argument("--city-offset", nargs=2, type=float, default=None,
+                        metavar=("X", "Y"),
+                        help="where the city tile sits in world metres. "
+                             "Defaults to soar_host's, which is the "
+                             "night-city demo's; cyberpunk mode stands a "
+                             "borrowed demo on constants.js's "
+                             "CITY_TILE_OFFSET_M instead, and the two show "
+                             "different districts.")
+    parser.add_argument("--gamma", type=float, default=None,
+                        help="tone-map gamma (default: the app's)")
+    parser.add_argument("--white-point", type=float, default=None,
+                        help="tone-map white point (default: the app's)")
+    parser.add_argument("--contrast", type=float, default=None,
+                        help="contrast (default: the app's)")
+    parser.add_argument("--haze", type=float, default=None,
+                        help="aerosol, the app's one haze number "
+                             "(default: the app's)")
     args = parser.parse_args(argv)
-
-    from cloudyview.basic_render import save_image
-    from cloudyview.soar_host import (
-        STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
-        APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
-        SceneState, SoarRenderer, ViewState,
-    )
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    if args.camera is not None and args.relative_camera is not None:
+        print("--camera and --relative-camera are two ways to say the same "
+              "thing; give one.", file=sys.stderr)
+        return 2
 
     field_path = Path(args.field)
     if not field_path.is_absolute():
@@ -197,6 +239,8 @@ def main(argv=None) -> int:
         ocean_max_lod=max_lod,
         ocean_enabled=True,
         city=args.city,
+        **({"city_tile_offset_m": tuple(args.city_offset)}
+           if args.city_offset is not None else {}),
     )
 
     light_az = MOON_AZIMUTH if args.city else DAY_AZIMUTH
@@ -213,6 +257,32 @@ def main(argv=None) -> int:
         x, y, z, az, el, fov = args.camera
         views = {"camera": {"xy": None, "world_xy": (x, y), "z": z,
                             "azimuth": az, "elevation": el, "fov": fov}}
+    if args.relative_camera is not None:
+        # camera.js cameraWorldOrigin, in Python. x and y span the box, z is
+        # measured from the ground (0) rather than from bmin — which is the
+        # app's convention, not an approximation of it: a demo's box floor is
+        # the first occupied plane, and a camera in the streets is below it.
+        rx, ry, rz, az, el, fov = args.relative_camera
+        x = bmin[0] + (rx + 1.0) * 0.5 * (bmax[0] - bmin[0])
+        y = bmin[1] + (ry + 1.0) * 0.5 * (bmax[1] - bmin[1])
+        z = (rz + 1.0) * 0.5 * bmax[2]
+        print(f"  Relative camera ({rx:g}, {ry:g}, {rz:g}) is "
+              f"({x:.1f}, {y:.1f}, {z:.1f}) m in this box.")
+        views = {"camera": {"xy": None, "world_xy": (x, y), "z": z,
+                            "azimuth": az, "elevation": el, "fov": fov}}
+
+    lod = DEFAULT_LOD_STRENGTH if args.lod is None else args.lod
+    # Only the numbers actually given override the app's defaults; ViewState
+    # holds those and there is no second copy of them here.
+    look = {k: v for k, v in (
+        ("tone_map_gamma", args.gamma),
+        ("tone_map_white_point", args.white_point),
+        ("contrast", args.contrast),
+        ("haze", args.haze),
+    ) if v is not None}
+    print(f"  LOD strength {lod:g}"
+          + (f"; {', '.join(f'{k}={v:g}' for k, v in look.items())}"
+             if look else "") + "\n")
 
     for name, v in views.items():
         if v.get("world_xy") is not None:
@@ -230,10 +300,9 @@ def main(argv=None) -> int:
             jitter=True, subpixel=True,
             sun_azimuth=light_az, sun_elevation=light_el,
             exposure=exposure,
-            light_march_lod_degrees=(APP_LIGHT_MARCH_LOD_DEGREES
-                                     * DEFAULT_LOD_STRENGTH),
-            view_step_lod_degrees=(APP_VIEW_STEP_LOD_DEGREES
-                                   * DEFAULT_LOD_STRENGTH),
+            light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
+            view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
+            **look,
         )
         t0 = time.perf_counter()
         # renderer.render IS the accumulation: `frames` passes averaged in a

@@ -119,19 +119,45 @@ export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
 
 // Where cyberpunk mode stands the city under the field it is flying, and the
 // moon it flies under. Both are the mode's, not the demo's: the mode borrows
-// the two desert demos, whose meta carries a DAYTIME sun chosen for a desert,
-// and a scene whose light is a moon cannot inherit it.
+// two demos whose meta carries a DAYTIME sun chosen for a cloud field, and a
+// scene whose light is a moon cannot inherit it.
 //
 // The offset lands the tile's megatower district — its wildest cascade
-// excursion, and the part of the city worth arriving over — under the middle
-// of the 51.2 km desert domain, which is the same choice soar_host's harness
-// default makes for the field the harness flies. Whole blocks (90 m), so the
-// street grid meets the domain edge where a street would be anyway.
+// excursion, and the part of the city worth arriving over — near the middle of
+// the domain, which is the same choice soar_host's harness default makes for
+// the field the harness flies. Whole blocks (90 m), so the street grid meets
+// the domain edge where a street would be anyway.
 export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // Low and behind: a moon on the horizon rims the cloud tops and leaves the
 // streets to their own light, which is the picture the city was tuned for
 // (the night-city harness flew this pair).
 export const CITY_MOON = { azimuth: 310.0, elevation: 22.0 };
+
+// Where a cyberpunk flight opens, in the app's relative coordinates: x and y
+// across the domain box, z from the ground to the box top. Down in the
+// streets, looking north-west along a canyon with the moon off the right
+// shoulder — Thomas flew to it and took a still there (the capture of
+// 2026-08-22 10:33, whose metadata these six numbers are), and the landing
+// page's cyberpunk backdrop is the same view rendered offline.
+//
+// The mode's, not the demo's: a borrowed demo carries the camera ITS landing
+// still was taken from, which is a daylight aerial over cloud tops, and
+// arriving 4 km up in the dark is arriving nowhere. Relative rather than
+// metres so the same six numbers open either case of the pair, whose domains
+// are different sizes.
+export const CITY_START_CAMERA = {
+  position: [0.2565505140281652, -0.005218180210715628, -0.998326359832636],
+  azimuth: 303.96,
+  elevation: 6.92,
+  fov: 100.0,
+};
+
+// Flight speed a cyberpunk session opens at, m/s (Thomas, 2026-08-22). The
+// day default is 1500 m/s, which is a speed for crossing a 50 km cloud field
+// and is a blur between two buildings 20 m apart. The wheel still reaches
+// anything SPEED_LIMITS allows; this is only where the session starts, and
+// where R returns it to.
+export const CITY_DEFAULT_SPEED = 20.0;
 
 export const DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50;
 export const DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65;
@@ -319,16 +345,24 @@ export const DEFAULT_LOD_STRENGTH_BY_TIER = {
 // so the city keeps resolving detail far below where the cloud march stops
 // (night-city e3a593b, "one LOD law for clouds and city").
 //
-// The values are the branch's, not invented here: high 0.2 is what the city
-// was authored and looked at against (78a1957, Thomas 2026-08-20: "slammed
-// at 0.25 and wanting probably .05"), and max 0.01 is the slider floor,
-// which under the packer's quarter-pixel clamp MEANS "march at a quarter of
-// the pixel angle" rather than any particular small number — the clamp is
-// what makes it resolution-independent instead of an extreme constant
-// (e99cf3e, 471b5bf). Medium and below are shared with the day: those tiers
-// are holding a framerate, and that is the same problem in both scenes.
+// The whole table is the city's, day values included, because none of the day
+// numbers survived contact with the scene: the tier that reads as "fine" over
+// clouds reads as a smear of blocks in a street. Max and high are both 0.01 —
+// the slider floor, which under the packer's quarter-pixel clamp MEANS "march
+// at a quarter of the pixel angle" rather than any particular small number,
+// so it is resolution-independent rather than an extreme constant (e99cf3e,
+// 471b5bf). High joins max there (Thomas, 2026-08-22) because high is the
+// tier the auto ladder actually settles on — QUALITY_TIERS_CHEAPEST_FIRST
+// tops out at it — so a city that only looks right at max looks right for
+// nobody. The rest step by a factor of ~3 down to minimal at 0.5, which is
+// the DAY default: the city's coarsest is the cloud scene's normal.
+//
+// These are the flight numbers AND the capture numbers. A capture takes the
+// finer of the slider and DEFAULT_LOD_STRENGTH (ddc6012), and every value
+// here is already finer than that, so in the city the two are the same march
+// — which is what makes a still look like the flight it was taken from.
 export const CITY_LOD_STRENGTH_BY_TIER = {
-  max: 0.01, high: 0.2, medium: 1.05, low: 2.0, minimal: 3.0,
+  max: 0.01, high: 0.01, medium: 0.03, low: 0.1, minimal: 0.5,
 };
 
 /** The tier table this scene flies by. */

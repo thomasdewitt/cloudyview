@@ -455,7 +455,14 @@ export class Viewer {
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
                                    { periodic: renderer.periodic,
                                      start: scene.startCamera,
-                                     wrapExtent: cityWrapExtent(scene) });
+                                     wrapExtent: cityWrapExtent(scene),
+                                     // Streets, not a cloud field: the city
+                                     // is the only scene with anything within
+                                     // 20 m of the camera. Day scenes keep
+                                     // DEFAULT_SPEED, untouched.
+                                     ...(scene.city
+                                       ? { speed: K.CITY_DEFAULT_SPEED }
+                                       : {}) });
 
     this.ui.setSubtitle(this.sourceLabel);
 
@@ -766,11 +773,23 @@ export class Viewer {
     console.info(
       `soar: auto quality ${tier} — ${measuredMs.toFixed(2)} ms/frame probed ` +
       `at ${this.canvas.width}x${this.canvas.height} (${clock} clock)`);
-    // The probe's verdict is provisional — the governor keeps adjusting from
-    // real flight and announces the settled answer — so nothing is toasted
-    // here, the old "set to" and the floor's "expect a slideshow" both
-    // included (Thomas, 2026-08-20). A machine truly stuck at the floor
-    // shows its state in the fps readout instead.
+    // The verdict, said out loud — once, here, whatever the mode.
+    //
+    // This was retired on the reasoning that the probe's answer is
+    // provisional and the governor announces the settled one (Thomas,
+    // 2026-08-20). The governor only ever speaks when it MOVES, and
+    // QUALITY_TIERS_CHEAPEST_FIRST tops out at High: a machine that probes
+    // straight to High has no rung left to climb, so it moves never and said
+    // nothing at all — no message about quality on the whole flight, on
+    // exactly the hardware most likely to be flying. Announcing the verdict
+    // costs one toast and restores the invariant that the tier is never
+    // changed silently, which the governor's own two toasts assume.
+    //
+    // The floor's old "expect a slideshow" stays retired: that was a
+    // judgement about the machine, and the fps readout is the honest form of
+    // it.
+    this._announceAutoTier(
+      `set to ${this._tierLabel(tier)} — change any time in the menu`);
     this._armGovernor();
   }
 
@@ -879,7 +898,26 @@ export class Viewer {
     console.info(
       `soar: auto quality ${verb} to ${tier} — ${from} measured ` +
       `${medianMs.toFixed(2)} ms/frame in flight`);
-    this.ui.say(`Auto quality: ${toast}.`, 4);
+    this._announceAutoTier(toast);
+  }
+
+  /**
+   * Every auto-quality toast, in one place.
+   *
+   * say() replaces what is on screen rather than queueing, and the load's own
+   * notes — assumed units, a skipped group, flying without the minimap — land
+   * a second or two before the probe's verdict does. Wiping those with a
+   * sentence about quality loses the messages that exist to break exactly
+   * that silence, so while they are still on screen this repeats them above
+   * the tier line rather than replacing them.
+   */
+  _announceAutoTier(line) {
+    const message = `Auto quality: ${line}.`;
+    if (this._loadNotes && performance.now() < this._loadNotesUntil) {
+      this.ui.say(`${this._loadNotes}\n\n${message}`, 8);
+      return;
+    }
+    this.ui.say(message, 4);
   }
 
   /**
@@ -2261,12 +2299,16 @@ export class Viewer {
         // constants. This used to write K.APP_*_LOD_DEGREES unscaled, so a
         // sidecar claimed 1.4/0.6 whatever the slider said — and the tier
         // moves that slider on its own, so most captures below "high" were
-        // misreported.
-        lod_strength: K.DEFAULT_LOD_STRENGTH,
+        // misreported. _captureLodStrength rather than the constant for the
+        // same reason once more removed: since ddc6012 a capture takes the
+        // FINER of the slider and the constant, so a night-city still at 0.01
+        // was rendering an order of magnitude finer than it reported, and the
+        // reproduction command beside this block already said so.
+        lod_strength: this._captureLodStrength(),
         light_march_lod_degrees:
-          K.APP_LIGHT_MARCH_LOD_DEGREES * K.DEFAULT_LOD_STRENGTH,
+          K.APP_LIGHT_MARCH_LOD_DEGREES * this._captureLodStrength(),
         view_step_lod_degrees:
-          K.APP_VIEW_STEP_LOD_DEGREES * K.DEFAULT_LOD_STRENGTH,
+          K.APP_VIEW_STEP_LOD_DEGREES * this._captureLodStrength(),
       },
       timestamp: new Date().toISOString(),
       // witness, not behold: the still was rendered by the witness/soar

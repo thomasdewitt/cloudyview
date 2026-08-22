@@ -126,6 +126,14 @@ html, body {
   transition: opacity 0.9s ease;
 }
 #reel img.on { opacity: 1; }
+/* Cyberpunk's backdrop sits OVER the reel rather than in it: the mode has one
+   picture of itself, not a case per row, and the rail is not on the page to
+   hover anyway. Over rather than instead of, so nothing about the reel's own
+   state has to be unwound — leaving the mode uncovers whatever it was
+   showing, mid-fade included. The cross-fade is the reel's, on purpose: the
+   two directions of a mode switch should look the same. */
+#reel-cyberpunk { z-index: 1; }
+body.mode-cyberpunk #reel-cyberpunk { opacity: 1; }
 #reel::after {
   content: '';
   position: absolute; inset: 0;

@@ -94,7 +94,13 @@ function startCamera(start) {
 
 export class FlightCamera {
   constructor(bmin, bmax, { periodic = true, start = null,
-                            wrapExtent = null } = {}) {
+                            wrapExtent = null,
+                            // The speed this session opens at, and the one R
+                            // returns to. A scene's, not a global: 1500 m/s
+                            // crosses a cloud field and goes through a city
+                            // block before the frame lands (see
+                            // CITY_DEFAULT_SPEED).
+                            speed = DEFAULT_SPEED } = {}) {
     this.bmin = bmin;
     this.bmax = bmax;
     this.periodic = periodic;
@@ -113,7 +119,8 @@ export class FlightCamera {
     this.azimuth = this.start.azimuth;
     this.elevation = this.start.elevation;
     this.fov = this.start.fov;
-    this.speed = DEFAULT_SPEED;
+    this.startSpeed = speed;
+    this.speed = this.startSpeed;
     this.keys = new Set();
     this.speedFlashUntil = 0;
     this.constrain();
@@ -123,7 +130,7 @@ export class FlightCamera {
     this.position = cameraWorldOrigin(this.start.position, this.bmin, this.bmax);
     this.azimuth = this.start.azimuth;
     this.elevation = this.start.elevation;
-    this.speed = DEFAULT_SPEED;
+    this.speed = this.startSpeed;
     this.constrain();
   }
 

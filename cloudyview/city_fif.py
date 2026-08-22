@@ -8,7 +8,7 @@ far outside the visible range at the shipped values.
 
 Parameters follow the cyberpunk brief rather than any ocean: H=0 keeps the
 field rough at every scale (a dense block can sit next to an empty lot),
-C1=0.1 gives real intermittency — the "crazy clusters" are the cascade's
+C1=0.07 gives real intermittency — the "crazy clusters" are the cascade's
 extreme excursions — and alpha=2 keeps the tails lognormal rather than
 Levy-wild, so the tallest district is dramatic but not a single spike.
 """
@@ -21,7 +21,9 @@ from scaleinvariance.simulation.FIF import extremal_levy
 DEFAULT_N = 1024
 DEFAULT_H = 0.0
 DEFAULT_ALPHA = 2.0
-DEFAULT_C1 = 0.1
+# Lowered 0.1 -> 0.07 (Thomas, 2026-08-22). Less extreme clustering: the
+# districts stay legible instead of collapsing onto a few runaway spikes.
+DEFAULT_C1 = 0.07
 # Districts: the largest coherent structure the cascade builds, in cells.
 DEFAULT_OUTER_SCALE_CELLS = 256.0
 DEFAULT_CELL_M = 90.0
