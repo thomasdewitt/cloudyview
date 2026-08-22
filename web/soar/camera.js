@@ -5,6 +5,7 @@
 
 import {
   MOUSE_SENS, DEFAULT_SPEED, SPEED_LIMITS, SPEED_WHEEL_FACTOR,
+  VERTICAL_SPEED_FRACTION,
   ELEVATION_LIMITS, OCEAN_FLOOR_MARGIN_M, FOV_LIMITS, DEFAULT_CAMERA,
 } from "./constants.js";
 import { directionFromAzimuthElevation, mod360 } from "./spectral.js";
@@ -143,18 +144,33 @@ export class FlightCamera {
     this.fov = clamp(fov, FOV_LIMITS[0], FOV_LIMITS[1]);
   }
 
+  /**
+   * WASD is the ground plane; Space and Shift are the only way to change
+   * altitude.
+   *
+   * W used to walk the full view direction, so looking up and holding W
+   * climbed — which meant altitude was coupled to where you happened to be
+   * pointing and could not be held while looking at anything. Splitting the
+   * two lets you fly level across the domain and look wherever you like.
+   *
+   * The horizontal forward comes from the azimuth directly rather than by
+   * flattening the view vector, which would shrink to nothing (and then
+   * normalize to noise) as the view approached vertical.
+   */
   move(dt) {
     if (this.keys.size === 0) return false;
-    const [f, r] = cameraBasis(this.azimuth, this.elevation);
+    const [, r] = cameraBasis(this.azimuth, this.elevation);
+    const f = directionFromAzimuthElevation(this.azimuth, 0.0);
     const d = this.speed * Math.min(dt, 0.1);
     const p = this.position;
     const k = this.keys;
-    if (k.has("w")) { p[0] += f[0] * d; p[1] += f[1] * d; p[2] += f[2] * d; }
-    if (k.has("s")) { p[0] -= f[0] * d; p[1] -= f[1] * d; p[2] -= f[2] * d; }
+    if (k.has("w")) { p[0] += f[0] * d; p[1] += f[1] * d; }
+    if (k.has("s")) { p[0] -= f[0] * d; p[1] -= f[1] * d; }
     if (k.has("a")) { p[0] -= r[0] * d; p[1] -= r[1] * d; }
     if (k.has("d")) { p[0] += r[0] * d; p[1] += r[1] * d; }
-    if (k.has(" ")) p[2] += d;
-    if (k.has("shift") || k.has("c")) p[2] -= d;
+    const dz = d * VERTICAL_SPEED_FRACTION;
+    if (k.has(" ")) p[2] += dz;
+    if (k.has("shift") || k.has("c")) p[2] -= dz;
     this.constrain();
     return true;
   }

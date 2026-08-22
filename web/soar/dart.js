@@ -47,9 +47,14 @@ const DROP = 0.62;
 const SCALE = 1.0;            // real A4: 0.174 m span, 0.297 m nose to tail
 
 // --- The phugoid ------------------------------------------------------------
+// Cut to a third on 2026-08-21, to match the bird's bob — the porpoise was
+// too much vertical travel against a parked camera. BOTH amplitudes scale,
+// and they have to: the height IS the pitch swing integrated, so shrinking
+// the travel while keeping the attitude swing would show a dart pitching up
+// and down without going anywhere.
 const PHUGOID_PERIOD = 2.15;      // s
-const PHUGOID_PITCH_DEG = 7.5;    // amplitude of the pitch swing
-const PHUGOID_BOB_M = 0.085;      // and of the height it trades for
+const PHUGOID_PITCH_DEG = 2.5;    // amplitude of the pitch swing
+const PHUGOID_BOB_M = 0.028;      // and of the height it trades for
 // Altitude lags attitude by a quarter cycle: the aeroplane is highest a
 // quarter cycle AFTER it is most nose-up, because it has to climb first.
 const PHUGOID_BOB_LAG = Math.PI / 2;
@@ -127,7 +132,7 @@ export class Dart extends Flyer {
 
   /** Local->world rotation columns for the current attitude. */
   _frame() {
-    return attitudeFrame(this.heading, this.pitch + BODY_PITCH,
+    return attitudeFrame(this.course, this.pitch + BODY_PITCH,
                          this.bank + BANK_TRIM);
   }
 
@@ -197,8 +202,10 @@ export class Dart extends Flyer {
       this._place(camera.position, bob);
       return;
     }
-    const { daz, vel } = tracked;
-    const headingRate = daz / dt;   // deg/s
+    // The rate the FLIGHT PATH is turning at — a thrown sheet rolls and rings
+    // because its course changed, not because you looked somewhere else.
+    const { dcourse, vel } = tracked;
+    const headingRate = dcourse / dt;   // deg/s
 
     // Roll: the steady part follows the turn, and the ring is laid over it.
     const bankTarget = clamp(headingRate * BANK_PER_DEG_S, -BANK_MAX, BANK_MAX);
@@ -245,6 +252,7 @@ export class Dart extends Flyer {
    */
   setStatic(camera, t = 0.0, { bank = null, pitch = null, phugoidPhase = null } = {}) {
     this.heading = camera.azimuth;
+    this.course = camera.azimuth;   // a still is of a dart flying straight
     this.viewElevation = camera.elevation;
     this._clock = t;
     this.phugoidPhase = phugoidPhase === null

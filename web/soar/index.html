@@ -50,8 +50,43 @@
     <div class="hero">
       <h1>SOAR</h1>
       <p class="tag">Fly through cloud model output</p>
-      <button class="own" id="choice-open">Render your own 3D cloud volume</button>
-      <input type="file" id="file-input" accept=".nc,.nc4,.cdf,.h5,.hdf5">
+      <!-- One column of identical controls, widest to narrowest audience: the
+           two prepared demos, then your own file. All three are .own — there
+           is one primary-control treatment on this page and these are three
+           instances of it, not a new kind of button next to the old one.
+           `hidden` on the pair until main.js knows the mode, so the stack does
+           not reflow under the reader on first paint. -->
+      <div class="choices">
+        <button class="own" type="button" id="fly-less" hidden>
+          <!-- Same inner structure as the button below even though this one
+               has nothing to caution about, so an error state has somewhere
+               to be said rather than having to replace the label. -->
+          <span class="own-in">
+            <span class="label">Fly less detailed demo</span>
+            <span class="warn" id="fly-less-warn"></span>
+          </span>
+        </button>
+        <button class="own" type="button" id="fly-more" hidden>
+          <!-- Column inside the button so the caution sits under the label
+               rather than beside it, between the two arrow flex items. -->
+          <span class="own-in">
+            <span class="label">Fly more detailed demo</span>
+            <!-- Always open. This is the one caution on the page that is not
+                 a disclosure: there is no list to keep tidy here, and it is
+                 the difference between a flight and a stalled tab. -->
+            <span class="warn" id="fly-more-warn"></span>
+          </span>
+        </button>
+        <button class="own" id="choice-open">Render your own 3D cloud volume</button>
+        <input type="file" id="file-input" accept=".nc,.nc4,.cdf,.h5,.hdf5">
+      </div>
+
+      <!-- Which page you get. `basic` is the default and hides the rail and
+           the file picker, leaving the pair above; `research` is everything.
+           Cyberpunk is a real position rather than a promise elsewhere on the
+           page, greyed until the night-city branch lands — see MODES in
+           main.js, where enabling it is one `ready: true`. -->
+      <div class="modes" id="mode-toggle" role="radiogroup" aria-label="Mode"></div>
     </div>
 
     <div class="readout">

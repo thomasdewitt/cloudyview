@@ -112,7 +112,26 @@
   color: rgba(220, 232, 246, 0.9);
 }
 #stats .k { color: var(--ink-dim); }
-#stats.compact .full { display: none; }
+#stats[hidden] { display: none; }
+
+/* The speed chip sits in the corner the stats overlay would use, and the
+   overlay steps up above it when both are on — speed is glanced at in
+   flight, the overlay is read while parked. */
+#speed {
+  right: 14px;
+  bottom: 12px;
+  font-family: var(--ui-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 6px 10px;
+  pointer-events: none;
+  color: rgba(220, 232, 246, 0.9);
+}
+#speed[hidden] { display: none; }
+/* #speed precedes #stats in the DOM precisely so this rule can exist: the
+   chip keeps the corner (the tutorial points at that corner) and the overlay
+   is the one that moves. */
+#speed:not([hidden]) ~ #stats { bottom: 48px; }
 
 #toolbar {
   right: 14px;
@@ -349,7 +368,133 @@ button.mini.on {
   background: rgba(232, 131, 74, 0.14);
 }
 
+.segmented button[disabled] {
+  opacity: 0.4;
+  cursor: var(--cursor-dart);
+}
+.segmented button[disabled]:hover { color: var(--ink-dim); }
+
+/* The mode toggle stands in the pause menu's title line, where the word
+   "Paused" was, so it carries the title's weight. */
+.segmented.mode button {
+  font-family: var(--ui-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  padding: 5px 12px;
+}
+
 .divider { height: 1px; background: var(--panel-line); margin: 14px 0; }
+
+/* --- the first-flight tutorial --- */
+
+/* The prompts replace the hint strip for as long as they are up; the strip
+   says the same six things at once, which is what the tutorial exists not to
+   do. */
+#viewer.tutorial #hint { display: none; }
+
+.tutorial-box {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(30rem, calc(100vw - 3rem));
+  padding: 18px 20px;
+  text-align: center;
+}
+/* `#ui > *` turns pointer events on for every child, and its ID beats a
+   class — so the three tutorial layers have to say so at the same weight.
+   The box must not eat the click that takes the mouse: step one is "click
+   once", and the box is in the middle of the window. */
+#ui > .tutorial-box,
+#ui > .tutorial-spot,
+#ui > .tutorial-spot-label { pointer-events: none; }
+.tutorial-box[hidden] { display: none; }
+/* A spotlit step: the menu owns the middle of the window and the speed chip
+   owns the bottom corner, so the box goes to the top. */
+.tutorial-box.top {
+  top: 24px;
+  transform: translateX(-50%);
+}
+.tutorial-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink-bright);
+}
+.tutorial-graphic { margin-top: 14px; }
+.tutorial-graphic[hidden] { display: none; }
+
+.keycaps { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.keycap-row { display: flex; gap: 5px; }
+/* Ghosts: the shape of the keys, not a button anyone should try to press. */
+.keycap {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  font-family: var(--ui-mono);
+  font-size: 12px;
+  color: var(--ink-dim);
+  border: 1px solid var(--panel-line-lit);
+  border-radius: var(--control-radius);
+  background: rgba(150, 175, 210, 0.07);
+}
+
+.tutorial-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+.tutorial-actions > * { pointer-events: auto; }
+
+button.tutorial-ok {
+  font-family: var(--ui-font);
+  font-size: 13px;
+  color: var(--ink-bright);
+  background: rgba(232, 131, 74, 0.14);
+  border: 1px solid var(--hot);
+  border-radius: var(--control-radius);
+  padding: 5px 18px;
+  cursor: var(--cursor-dart-click);
+}
+button.tutorial-ok:hover { background: rgba(232, 131, 74, 0.24); }
+button.tutorial-ok[hidden] { display: none; }
+
+button.tutorial-skip {
+  font-family: var(--ui-font);
+  font-size: 12px;
+  color: var(--ink-dim);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--panel-line);
+  padding: 2px 0;
+  cursor: var(--cursor-dart-click);
+}
+button.tutorial-skip:hover { color: var(--ink); border-bottom-color: var(--hot); }
+
+/* The dim is one enormous spread shadow on a transparent box, so the hole is
+   the box itself — no four-rect layout to keep in agreement with a rect that
+   moves every frame. */
+.tutorial-spot {
+  position: absolute;
+  border: 1px solid var(--hot);
+  border-radius: var(--control-radius);
+  box-shadow: 0 0 0 100vmax rgba(3, 5, 8, 0.76);
+  z-index: 2;
+}
+.tutorial-spot[hidden] { display: none; }
+.tutorial-spot-label {
+  position: absolute;
+  font-family: var(--ui-mono);
+  font-size: 11.5px;
+  color: var(--hot);
+  white-space: nowrap;
+  z-index: 3;
+}
+.tutorial-spot-label[hidden] { display: none; }
+/* Above the dim, or the prompt naming the thing is dimmer than the thing. */
+.tutorial-box { z-index: 4; }
 
 /* --- transient toast (screenshot saved, command copied, …) --- */
 

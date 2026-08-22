@@ -703,9 +703,14 @@ export const DEFAULT_CAMERA = {
 };
 export const FOV_LIMITS = [30.0, 110.0];
 export const MOUSE_SENS = 0.12;             // degrees per pixel
-export const DEFAULT_SPEED = 60.0;          // m/s
+export const DEFAULT_SPEED = 1500.0;        // m/s
 export const SPEED_LIMITS = [0.5, 5000.0];
 export const SPEED_WHEEL_FACTOR = 1.25;     // per notch
+// Flight is anisotropic: Space and Shift climb at half the ground speed.
+// Once W stopped carrying the view's vertical component, altitude became a
+// control of its own, and the domain is far wider than it is tall — a speed
+// that crosses it laterally in a reasonable time overshoots vertically.
+export const VERTICAL_SPEED_FRACTION = 0.5;
 export const ELEVATION_LIMITS = [-89.0, 89.0];
 // How close to the sea the camera — and so the bird, which flies off it and
 // has no floor of its own — may get. Halved from 25 m on 2026-08-14. It is

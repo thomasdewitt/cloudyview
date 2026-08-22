@@ -168,7 +168,10 @@ body.previewing #reel::after { opacity: 0.45; }
   position: relative; z-index: 3;
   height: 100%;
   display: grid;
-  grid-template-columns: minmax(18rem, 21rem) 1fr;
+  /* `auto`, sized by .cases's own width, so the column can be animated —
+     see "basic vs research" below. It was minmax(18rem, 21rem); .cases now
+     carries the 21rem itself and the max-width keeps it off narrow screens. */
+  grid-template-columns: auto 1fr;
   grid-template-rows: auto 1fr auto;
   column-gap: 3rem;
   padding: 1.6rem 2rem 1.5rem;
@@ -297,8 +300,7 @@ body.previewing .hero { opacity: 0; }
    panel's — a panel-weight shadow under a control this small reads as a slab
    sitting on the sky rather than as lift. */
 .own {
-  margin-top: 2.2rem;
-  display: inline-flex; align-items: center; gap: 0.9rem;
+  display: flex; align-items: center; justify-content: center; gap: 0.9rem;
   font-family: var(--ui-font);
   font-size: 0.8125rem;
   color: var(--ink);
@@ -311,8 +313,56 @@ body.previewing .hero { opacity: 0; }
   cursor: var(--cursor-dart-click);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   transition: background .15s ease;
-  animation: fade 1.4s 0.85s both;
 }
+/* The entry animations run ONCE, on the first paint, and are then taken off
+   the elements entirely — see body.intro in main.js.
+   They cannot stay: a `display: none` element does not run its animation, it
+   runs it when it is first displayed. So `animation: fade 1.4s 0.85s both` on
+   a control that basic mode hides meant that switching to research left the
+   newly revealed button invisible for 0.85 s and then fading for 1.4 s, long
+   after the click that asked for it. The intro is an intro; a mode switch is
+   an interaction, and it gets the .3s reveal below instead. */
+body.intro .own { animation: fade 1.4s 0.85s both; }
+/* hidden must beat display:flex, and does not on its own. */
+.own[hidden] { display: none; }
+
+/* One column, widest control setting the width for all of them: three
+   buttons of three different widths stacked centre-aligned is a ragged edge
+   down both sides, and these are three instances of one control rather than
+   three different offers. width: max-content on the column resolves to the
+   widest item, and stretch then gives every button that width. */
+.choices {
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 0.6rem;
+  /* The min-width is not decoration. Without it the column is max-content,
+     which in basic mode is the widest of two buttons and in research the
+     widest of three — so revealing "Render your own…" widened the stack by
+     14 px and the centred hero jumped sideways at the very moment it was
+     supposed to start gliding. A floor wider than the longest label makes the
+     width mode-independent and the jump disappears.
+     The max-width is the other end of the same argument: the caution inside
+     the more button becomes a full sentence when the limits reject the field,
+     and max-content on a sentence is one very long line. */
+  width: max-content;
+  min-width: 19rem;
+  max-width: min(100%, 24rem);
+  margin: 2.2rem auto 0;
+}
+/* Label over caution, inside the button, between the two arrows. */
+.own .own-in {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+/* The caution is not a disclosure here — it is open from the moment main.js
+   knows what it says. Left-aligned inside a centred label because it is a
+   sentence with a hanging indent under its mark (see .demo .warn), and a
+   centred sentence with a hanging indent is neither. */
+.own .warn { text-align: left; }
+.own .warn:empty { display: none; }
+/* The manifest did not have the case. An error state rather than a quiet
+   substitution of some other field — see wireFlyPair in main.js. */
+.own.missing { border-color: var(--alarm); border-style: dashed; }
 /* The marker, and its counterweight.
    With only the ::before, flex centres the arrow-plus-label as one group —
    which is correct by the box model and wrong to look at, because the eye
@@ -333,6 +383,127 @@ body.previewing .hero { opacity: 0; }
 .own.dropping { border-style: dashed; }
 #file-input { display: none; }
 
+/* --- the mode toggle ------------------------------------------------------
+   One panel divided into three, rather than three buttons: the segments are
+   exclusive and the shared surface says so.
+
+   The selection is a single amber block that SLIDES between segments rather
+   than a wash that switches on in one and off in another. Three washes
+   crossfading say "this one is on now"; one block moving says "this is the
+   same selection, and it is over there now" — which is what an exclusive
+   control means, and it also carries the eye to the segment whose page is
+   about to change underneath it. Its geometry is measured from the segments
+   in main.js (placeThumb) because the labels are different lengths and
+   nothing in CSS can know them. */
+
+.modes {
+  position: relative;
+  display: inline-flex;
+  margin-top: 1.4rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--panel-radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+body.intro .modes { animation: fade 1.4s 1s both; }
+
+/* Behind the labels, above the panel. Left and width are set from JS; the
+   transition is added only once it has been placed for the first time
+   (.modes.ready), or the block would slide in from the left edge on load. */
+.modes .thumb {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 0;
+  background: linear-gradient(rgba(232, 131, 74, 0.22), rgba(232, 131, 74, 0.22));
+  border-bottom: 2px solid var(--amber);
+  pointer-events: none;
+}
+.modes.ready .thumb {
+  transition: transform .32s cubic-bezier(.4, .1, .2, 1), width .32s cubic-bezier(.4, .1, .2, 1);
+}
+.modes .mode {
+  position: relative;
+  z-index: 1;
+  font-family: var(--mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  padding: 0.6rem 1.1rem;
+  cursor: var(--cursor-dart-click);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.modes .mode + .mode { border-left: 1px solid var(--panel-line); }
+.modes .mode:hover:not([disabled]) { color: var(--ink); }
+/* Only the ink changes here; the block behind it is the thumb. */
+.modes .mode[aria-checked="true"] { color: var(--ink-bright); }
+.modes .mode:focus-visible { outline: 1px solid var(--amber); outline-offset: -2px; }
+/* Not yet built. Greyed and inert, and it says why on hover rather than on
+   click, because clicking it is defined to do nothing. */
+.modes .mode[disabled] { opacity: 0.4; cursor: var(--cursor-dart); }
+.modes .mode .soon-note {
+  position: absolute; left: 50%; bottom: calc(100% + 0.5rem);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 0.3rem 0.55rem;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--panel-radius);
+  color: var(--dim);
+  letter-spacing: 0.12em;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+  pointer-events: none;
+}
+.modes .mode:hover .soon-note,
+.modes .mode:focus-visible .soon-note { opacity: 1; }
+
+/* --- basic vs research ----------------------------------------------------
+   Basic drops the rail and the file picker; the hero then belongs in the
+   middle of the sky rather than in the middle of what the rail leaves.
+
+   It has to GET there rather than appear there. The first cut switched
+   grid-template-columns between two tracks and one, which is a discrete
+   change — the wordmark teleported a hundred and eighty pixels the instant
+   the toggle was clicked, and the eye reads a jump as a glitch rather than as
+   a layout.
+
+   Animating grid-template-columns directly does not work: the two values have
+   different track counts, and even matched they interpolate inconsistently
+   across engines. So the track is `auto` and the WIDTH OF THE RAIL is what
+   moves — an ordinary length on an ordinary element, which every engine
+   transitions. The track follows it each frame, column 2 takes up the slack,
+   and the centred hero glides. The gap goes with it, or a zero-width rail
+   would still be pushing the hero 3rem right of centre.
+
+   The rail keeps `display` throughout: display is not animatable, and a
+   display:none rail has no width to transition from. pointer-events and the
+   opacity fade do the hiding. */
+
+.cases { transition: width .42s cubic-bezier(.4, .1, .2, 1),
+                     padding .42s cubic-bezier(.4, .1, .2, 1),
+                     opacity .26s ease; }
+.frame { transition: column-gap .42s cubic-bezier(.4, .1, .2, 1); }
+
+body.mode-basic .cases {
+  width: 0;
+  padding-left: 0; padding-right: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+body.mode-basic .frame { column-gap: 0; }
+/* #choice-open, not .own — the two demo buttons are .own too now, and they
+   are the whole of what basic offers. */
+body.mode-basic #choice-open,
+body.mode-basic #file-input { display: none; }
+/* Revealed by a click rather than by page load, so it gets the short reveal
+   and not the intro's 0.85s hold. Scoped to body.switched so it never runs
+   for someone whose stored mode is already research. */
+body.switched.mode-research #choice-open { animation: fade .3s both; }
+
 /* --- the cases ------------------------------------------------------------
    One row per case, each its own opaque surface rather than rows sharing one
    panel. That is what makes the fade work: with a single container the
@@ -341,6 +512,8 @@ body.previewing .hero { opacity: 0; }
 
 .cases {
   align-self: center;
+  width: 21rem;
+  max-width: 40vw;
   /* Setting overflow-y alone does not leave overflow-x at `visible`: the spec
      computes the other axis to `auto` whenever one axis is not visible. So
      this is a scroll container in both directions, and a scroll container
@@ -362,8 +535,8 @@ body.previewing .hero { opacity: 0; }
   scrollbar-gutter: stable;
   padding: 0.5rem 0.5rem;
   margin: 0 -0.5rem;
-  animation: fade 1.6s 1.1s both;
 }
+body.intro .cases { animation: fade 1.6s 1.1s both; }
 
 /* The group headings are the only type on the page that names what the list
    below it IS, and they were the hardest thing on it to read: --faint at 10px
@@ -536,7 +709,7 @@ body.previewing .hero { opacity: 0; }
    sentences. The numbers above are mono because they are meant to be read
    down the column against each other, and prose in that face would join a
    table it is not part of. */
-.demo .warn, .demo .note {
+.demo .warn, .demo .note, .own .warn {
   display: block;
   padding-top: 0.45rem;
   font-size: 0.6875rem;
@@ -550,7 +723,7 @@ body.previewing .hero { opacity: 0; }
    reached into the mark's own inline formatting context and laid its glyph
    out 20 px to the left of itself, which on the page looked like an empty
    box with nothing in it. */
-.demo .warn {
+.demo .warn, .own .warn {
   color: var(--alarm);
   display: flex;
   align-items: baseline;
@@ -562,7 +735,7 @@ body.previewing .hero { opacity: 0; }
    14 px square holding an 11 px glyph and read as small print about small
    print (Thomas, 2026-08-15). flex: none so it never gets squeezed by a
    long first word. */
-.demo .warn::before {
+.demo .warn::before, .own .warn::before {
   content: '!';
   flex: none;
   font-size: 1.35em;
@@ -620,10 +793,17 @@ body.previewing .hero { opacity: 0; }
     row-gap: 2rem;
   }
   .hero { order: 1; margin-top: 1.5rem; }
-  .cases { order: 2; overflow: visible; max-height: none; }
+  /* Full width, and no column to slide: one column already. */
+  .cases { order: 2; overflow: visible; max-height: none;
+           width: auto; max-width: none; }
+  /* display, not a zero width: there is no second column here for the hero to
+     slide across, so there is no animation to keep alive — and a zero-width
+     rail in a one-column grid still holds its padding and its row gap open. */
+  body.mode-basic .cases { display: none; }
   .readout { order: 3; flex-direction: column; align-items: flex-start; }
   .readout .keys { text-align: left; white-space: normal; }
   .own { padding: 0.75rem 1.3rem; }
+  .choices { width: auto; }
 }
 
 /* --- loading / error takeover --- */

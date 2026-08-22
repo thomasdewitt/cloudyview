@@ -2,13 +2,65 @@
 //
 // Menus are click-only. Keys are reserved for things you do WHILE flying —
 // where reaching for a menu would mean losing the shot — so the desktop's key
-// state machine does not come across. Esc, Tab, F, F3, B, M, R and F12 are
+// state machine does not come across. Esc, Tab, F, F3, B, M, R and P are
 // the whole keyboard surface once you are in the air.
 
 "use strict";
 
 import * as K from "./constants.js";
 import { hazeEFoldingKm, hazeFromEFoldingKm, HAZE_MIN } from "./spectral.js";
+
+/** Where the mode lives between sessions. Shared with tutorial.js. */
+export const MODE_KEY = "soar.mode";
+
+/**
+ * What each mode's pause menu may show, as data.
+ *
+ * `items: null` means every item. The alternative — a conditional at each
+ * item — spreads one decision across a dozen call sites, and the thing being
+ * decided is a list.
+ *
+ * Fullscreen and the way back to the start page are on every list: neither is
+ * a research control, and a mode with no exit is not a mode.
+ */
+export const MODES = {
+  basic: {
+    label: "Basic",
+    available: true,
+    items: ["sun", "capture", "controls", "fullscreen", "leave"],
+  },
+  research: { label: "Research", available: true, items: null },
+  cyberpunk: {
+    label: "Cyberpunk",
+    available: false,
+    note: "in development",
+    items: ["sun", "capture", "controls", "fullscreen", "leave"],
+  },
+};
+
+export const DEFAULT_MODE = "basic";
+
+/**
+ * The stored mode, or the default.
+ *
+ * localStorage is writable by hand and survives a rename here, so an
+ * unreadable value is a fact about the browser rather than an impossible
+ * state: it is said out loud and replaced. A mode named in CODE that this
+ * table does not have is a bug, and setMode throws on it.
+ */
+export function readMode() {
+  let stored = null;
+  try {
+    stored = localStorage.getItem(MODE_KEY);
+  } catch {
+    return DEFAULT_MODE;         // storage denied (private mode, file://)
+  }
+  if (stored === null) return DEFAULT_MODE;
+  if (MODES[stored]?.available) return stored;
+  console.warn(`soar: stored mode '${stored}' is not available; using ` +
+               `'${DEFAULT_MODE}'.`);
+  return DEFAULT_MODE;
+}
 
 const el = (tag, className, text) => {
   const node = document.createElement(tag);
@@ -49,11 +101,21 @@ function sliderRow(label, { min, max, step, value, format, onInput }) {
 // centred.
 const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]);
 
+/**
+ * A row of mutually exclusive chips. An option may carry a third element,
+ * `{ disabled, title }` — a segment that names something the build does not
+ * do yet has to be visible to be honest about, and unclickable to be true.
+ */
 function segmented(options, isOn, onPick) {
   const wrap = el("div", "segmented");
-  const buttons = options.map(([label, value]) => {
+  const buttons = options.map(([label, value, opts = {}]) => {
     const b = el("button", null, label);
-    b.addEventListener("click", () => onPick(value));
+    if (opts.disabled) {
+      b.disabled = true;
+      if (opts.title) b.title = opts.title;
+    } else {
+      b.addEventListener("click", () => onPick(value));
+    }
     b.dataset.value = String(value);
     return b;
   });
@@ -63,6 +125,13 @@ function segmented(options, isOn, onPick) {
   };
   wrap.refresh();
   return wrap;
+}
+
+/** A length in the unit that reads at its own magnitude. */
+function distance(metres) {
+  return Math.abs(metres) < 1000.0
+    ? `${metres.toFixed(0)} m`
+    : `${(metres / 1000.0).toFixed(2)} km`;
 }
 
 function item(label, note, onClick, { disabled = false } = {}) {
@@ -84,7 +153,38 @@ export class UI {
     // session. It is a preview, not a setting: only the panel turns it on and
     // leaving the panel always turns it off. See HOLD_MODES.
     this._qualityPreview = K.DEFAULT_QUALITY_PREVIEW;
+    // Which menu the pause screen offers. Persisted, so a research session
+    // stays a research session across a reload.
+    this.mode = readMode();
     this._build();
+  }
+
+  /**
+   * Switch modes. Takes effect on the next menu build, which is immediate —
+   * the caller re-opens the panel it is standing in.
+   *
+   * A mode this table does not have, or one that is not built yet, is a bug
+   * in the caller rather than something to interpret.
+   */
+  setMode(mode) {
+    const spec = MODES[mode];
+    if (!spec) throw new Error(`no such mode: ${mode}`);
+    if (!spec.available) throw new Error(`mode '${mode}' is not available`);
+    if (this.mode === mode) return;
+    this.mode = mode;
+    try {
+      localStorage.setItem(MODE_KEY, mode);
+    } catch {
+      // Storage denied. The mode still applies to this session; only its
+      // memory is lost, and there is nothing to do about that here.
+    }
+    this.app.tutorial?.onModeChange(mode);
+  }
+
+  /** Whether the current mode's menu carries this item. */
+  allows(key) {
+    const allow = MODES[this.mode].items;
+    return allow === null || allow.includes(key);
   }
 
   _build() {
@@ -101,6 +201,15 @@ export class UI {
 
     this.stats = el("div", "panel");
     this.stats.id = "stats";
+    this.stats.hidden = true;
+
+    // The speed readout is its own corner chip rather than a line of the
+    // stats overlay: speed flashes for a second and a half after the wheel
+    // moves, whatever the overlay is doing, and the tutorial points at it.
+    // fps lives in the stats overlay and nowhere else.
+    this.speed = el("div", "panel");
+    this.speed.id = "speed";
+    this.speed.hidden = true;
 
     this.toolbar = el("div", "panel");
     this.toolbar.id = "toolbar";
@@ -125,7 +234,9 @@ export class UI {
     this.progress.innerHTML =
       '<div class="stage"></div><div class="bar"><span></span></div>';
 
-    root.append(this.hint, this.stats, this.toolbar, this.progress,
+    // #speed before #stats: viewer.css lifts the overlay off the chip with a
+    // sibling selector, and a sibling selector only looks forwards.
+    root.append(this.hint, this.speed, this.stats, this.toolbar, this.progress,
                 this.menu, this.toast);
   }
 
@@ -152,13 +263,17 @@ export class UI {
 
   // --- stats ---------------------------------------------------------------
 
-  /** subtle -> expanded -> hidden, and round again. */
+  /**
+   * Off, or the whole instrument. Two states, not three.
+   *
+   * The middle rung used to be a one-line "42 fps · 180 m/s", which is two
+   * numbers that now have homes of their own: the speed chip is always in the
+   * corner, and fps is a diagnostic. A diagnostic that is half on is a third
+   * state to reason about and answers no question the full one does not.
+   */
   cycleStats() {
-    const order = ["subtle", "expanded", "hidden"];
-    this.statsMode = order[(order.indexOf(this.statsMode ?? "subtle") + 1)
-                           % order.length];
-    this.stats.hidden = this.statsMode === "hidden";
-    this.stats.classList.toggle("compact", this.statsMode === "subtle");
+    this.statsMode = this.statsMode === "full" ? "off" : "full";
+    this.stats.hidden = this.statsMode === "off";
     return this.statsMode;
   }
 
@@ -173,31 +288,26 @@ export class UI {
    * Same for the startup probe, whose frames are deliberately serialized
    * against the GPU queue and so have a frame rate that means nothing at all.
    */
-  drawStats({ fps, frameMs, camera, tier, renderScale, frame, minimap, flyer,
+  drawStats({ fps, camera, tier, renderScale, frame, minimap, flyer,
               recording, showSpeed, parked = false, converged = false,
               probing = false, autoTier = false, wakeReason = null, spp = 0,
               holdRung = 0, holdRungCount = 1, holdCapped = false }) {
-    // `fps` is null until the first half-second of marching has been
-    // averaged, which on a slow machine is a while — but the probe is running
-    // in exactly that window and has something to say, so a null rate is no
-    // longer on its own a reason to hide.
-    if (this.statsMode === "hidden" || (fps == null && !probing && !converged)) {
+    // The corner chip: speed while it is flashing, and the recording dot for
+    // as long as a track is being taken — the one piece of flight state with
+    // no other home once the stats overlay is off.
+    const rec = recording ? "● REC" : "";
+    const speed = showSpeed ? `${camera.speed.toFixed(0)} m/s` : "";
+    this.speed.textContent = [rec, speed].filter(Boolean).join(" · ");
+    this.speed.hidden = !(rec || speed);
+
+    if (this.statsMode !== "full") {
       this.stats.hidden = true;
       return;
     }
     this.stats.hidden = false;
-    const rate = fps == null
-      ? "—"
-      : `${fps.toFixed(0)} fps · ${frameMs.toFixed(1)} ms`;
-    if (this.statsMode !== "expanded") {
-      const speed = showSpeed ? ` · ${camera.speed.toFixed(0)} m/s` : "";
-      const rec = recording ? "● " : "";
-      const state = probing ? "measuring quality…"
-        : converged ? `parked · ${spp} spp`
-        : rate;
-      this.stats.textContent = `${rec}${state}${speed}`;
-      return;
-    }
+    // `fps` is null until the first half-second of marching has been
+    // averaged, which on a slow machine is a while.
+    const rate = fps == null ? "—" : `${fps.toFixed(0)} fps`;
     // Which half of the loop is running, in the words the code uses for it.
     const loop = probing ? `probing ${tier}`
       : converged ? (parked ? "parked · presenting only" : "parked")
@@ -205,11 +315,17 @@ export class UI {
       : holdRung > 0 ? `holding — rung ${holdRung + 1}/${holdRungCount}`
       : "flying";
     const rel = camera.relativePosition();
+    // Where the camera actually is, in the units the field is measured in.
+    // The relative triple below is the reproduction commands' convention and
+    // means nothing on its own; a metre is a metre.
     const rows = [
       ["fps", converged ? `parked · ${spp} spp` : rate],
       ["loop", loop +
                (converged && wakeReason ? ` · last woke: ${wakeReason}` : "")],
-      ["pos", `(${rel.map((v) => v.toFixed(2)).join(", ")})`],
+      ["pos", ["x", "y", "z"]
+        .map((axis, i) => `${axis} ${distance(camera.position[i])}`)
+        .join(" · ")],
+      ["rel", `(${rel.map((v) => v.toFixed(2)).join(", ")})`],
       ["view", `az ${camera.azimuth.toFixed(0)}° · el ` +
                `${camera.elevation.toFixed(0)}° · fov ${camera.fov.toFixed(0)}°`],
       ["speed", `${camera.speed.toFixed(0)} m/s`],
@@ -314,20 +430,41 @@ export class UI {
   }
 
   /**
+   * The mode toggle, which stands where the word "Paused" used to.
+   *
+   * "Paused" was the state and the menu around it already said so. What the
+   * menu cannot say for itself is which of several menus it is, and that is
+   * the one thing worth a control on the title line.
+   */
+  _modeToggle() {
+    const toggle = segmented(
+      Object.entries(MODES).map(([name, spec]) => [
+        spec.label, name,
+        spec.available ? {} : { disabled: true, title: spec.note },
+      ]),
+      (name) => name === this.mode,
+      (name) => { this.setMode(name); this.open("main"); });
+    toggle.classList.add("mode");
+    toggle.dataset.menuKey = "mode";
+    return toggle;
+  }
+
+  /**
    * The pause menu: two columns, and Resume sits in the title line.
    *
-   * "Paused" is the state and Resume is the way out of it, so the way out
-   * belongs on the same line as the state rather than as the first of a dozen
-   * identical rows. Left column is how the picture looks; right column is the
-   * field you are flying and what you take away from it. Leaving is neither,
-   * so it sits alone at the foot (Thomas, 2026-08-14).
+   * Which rows appear is the mode's business and nothing else's — every row
+   * is built into a table keyed by name and then filtered once, so the modes
+   * differ by a list in MODES rather than by conditionals scattered through
+   * here. Left column is how the picture looks; right column is the field you
+   * are flying and what you take away from it. Leaving is neither, so it sits
+   * alone at the foot (Thomas, 2026-08-14).
    */
   _panel_main() {
     const app = this.app;
     const m = this.menu;
 
     const head = el("div", "menu-head");
-    head.append(el("p", "menu-title", "Paused"));
+    head.append(this._modeToggle());
     const resume = el("button", "resume");
     resume.append(el("span", null, "Resume"));
     resume.append(el("kbd", null, "Esc"));
@@ -338,28 +475,35 @@ export class UI {
     const cols = el("div", "menu-cols");
     const appearance = el("div", "col");
     const session = el("div", "col");
-    appearance.append(el("h3", null, "appearance"));
-    session.append(el("h3", null, "session"));
     cols.append(appearance, session);
     m.append(cols);
 
-    appearance.append(item("Time of day…",
-                           `${app.sunZenith.toFixed(0)}° zenith`,
-                           () => this.open("sun")));
+    // Every row, by name. The key is also what the tutorial's spotlight
+    // aims at, so renaming one moves both.
+    const add = (col, key, node) => {
+      if (!this.allows(key)) return;
+      node.dataset.menuKey = key;
+      col.append(node);
+    };
+
+    add(appearance, "sun", item("Time of day…",
+                                `${app.sunZenith.toFixed(0)}° zenith`,
+                                () => this.open("sun")));
     // The tier's name and nothing else. The render scale, and whether the
     // machine chose the tier, are the quality panel's business (Thomas,
     // 2026-08-14).
-    appearance.append(item(
+    add(appearance, "quality", item(
       "Quality…",
       K.QUALITY_PRESETS[app.renderer.qualityTier].label.split(" —")[0],
       () => this.open("quality")));
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two
     // that change the picture, above the overlay and window rows.
-    appearance.append(item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
-                           "wrap the field laterally",
-                           () => { app.togglePeriodic(); this.open("main"); }));
-    appearance.append(item(
+    add(appearance, "periodic",
+        item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
+             "wrap the field laterally",
+             () => { app.togglePeriodic(); this.open("main"); }));
+    add(appearance, "minimap", item(
       `Minimap: ${!app.minimap ? "off" : { corner: "on", full: "fullscreen", off: "off" }[app.minimapMode]}`,
       app.minimap
         ? "Keyboard shortcut: M"
@@ -377,15 +521,16 @@ export class UI {
     // cycles it, because there are three states and a checkbox has two. The
     // second branch of the subtitle has to survive — a field that cannot
     // carry a flyer still owes an explanation of why.
-    appearance.append(item(
+    add(appearance, "flyer", item(
       `Flyer: ${app.flyerLabel}`,
       app.availableFlyers.length
         ? "Keyboard shortcut: B"
         : (app._flyerProblem ?? "not available for this field"),
       () => { app.cycleFlyer(); this.open("main"); }));
-    appearance.append(item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
-                           "Keyboard shortcut: F",
-                           () => { app.toggleFullscreen(); this.open("main"); }));
+    add(appearance, "fullscreen",
+        item(app.isFullscreen ? "Exit fullscreen" : "Enter fullscreen",
+             "Keyboard shortcut: F",
+             () => { app.toggleFullscreen(); this.open("main"); }));
 
     // What is loaded belongs on the control that would replace it, not in a
     // block of its own at the foot (Thomas, 2026-08-14).
@@ -398,26 +543,39 @@ export class UI {
         `× finer, covering ${(coverage * 100).toFixed(0)}% of the domain` +
         (coverage > 0.75 ? " — little of the outer field is visible" : "")));
     }
-    session.append(open);
+    add(session, "open", open);
     if (app.scene.nested) {
-      session.append(item(`Remove the nest (${app.nestName ?? "nested field"})`,
-                          null, () => app.removeNest()));
+      add(session, "removeNest",
+          item(`Remove the nest (${app.nestName ?? "nested field"})`,
+               null, () => app.removeNest()));
     }
-    session.append(item("Capture…", null, () => this.open("capture")));
-    session.append(item("Render this view in a terminal…", null,
-                        () => this.open("terminal")));
-    session.append(item("Controls", null, () => this.open("controls")));
+    add(session, "capture",
+        item("Capture…", "stills and video", () => this.open("capture")));
+    add(session, "terminal", item("Render this view in a terminal…", null,
+                                  () => this.open("terminal")));
+    add(session, "controls", item("Controls", null, () => this.open("controls")));
     const fov = sliderRow("Field of view", {
       min: K.FOV_LIMITS[0], max: K.FOV_LIMITS[1], step: 1,
       value: app.camera.fov, format: (v) => `${v.toFixed(0)}°`,
       onInput: (v) => app.setFov(v),
     });
     fov.classList.add("tight");
-    session.append(fov);
+    add(session, "fov", fov);
+
+    // Headers only over a column that got rows: basic mode empties neither,
+    // but a mode list that did would otherwise leave a heading over nothing.
+    if (appearance.childElementCount) {
+      appearance.prepend(el("h3", null, "appearance"));
+    }
+    if (session.childElementCount) session.prepend(el("h3", null, "session"));
 
     m.append(el("div", "divider"));
     const foot = el("div", "menu-foot");
-    foot.append(item("Back to the start page", null, () => app.leave()));
+    if (this.allows("leave")) {
+      const leave = item("Back to the start page", null, () => app.leave());
+      leave.dataset.menuKey = "leave";
+      foot.append(leave);
+    }
     m.append(foot);
   }
 
@@ -699,18 +857,26 @@ export class UI {
       ["mouse", "look — Tab releases it, click takes it back"],
       ["scroll", "flight speed"],
     ]);
+    // F-keys are Fn-gated on most laptops, so every one of them has a plain
+    // key that does the same thing. F3 and ` are one binding, not two modes.
     section("While flying", [
       ["Esc", "menu"],
       ["F", "fullscreen"],
-      ["F3", "stats: brief, full, off"],
+      ["F3 or `", "stats overlay on/off"],
       ["B", "flyer — paper dart, swift, off"],
       ["M", "minimap"],
-      ["R", "record a flight track"],
-      ["K", "light cache on/off (goes Custom; a preset resets)"],
-      ["J", "sky probe on/off (goes Custom; a preset resets)"],
-      ["F12", "screenshot"],
+      ["R", "record a flight track — R again to stop"],
+      ["P", "capture a still"],
+      ...(this.allows("quality")
+        ? [["K", "light cache on/off (goes Custom; a preset resets)"],
+           ["J", "sky probe on/off (goes Custom; a preset resets)"]]
+        : []),
     ]);
     m.append(el("div", "divider"));
+    const replay = item("Replay the tutorial", "the flight and menu walkthrough",
+                        () => this.app.tutorial?.replay());
+    replay.dataset.menuKey = "tutorial";
+    m.append(replay);
     m.append(this._backButton());
   }
 
@@ -891,7 +1057,7 @@ export class UI {
     m.append(el("div", "divider"));
     m.append(item("Save a still",
                   `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureStillTier]} ` +
-                  "samples per pixel, then a PNG download",
+                  "samples per pixel, then a PNG download · shortcut: P",
                   () => app.saveScreenshot({ overlays: true })));
     m.append(item("Save a still, clouds only", "no bird, no minimap",
                   () => app.saveScreenshot({ overlays: false })));

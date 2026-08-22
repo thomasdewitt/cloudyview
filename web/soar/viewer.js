@@ -127,10 +127,13 @@ export class Viewer {
     // be clicked to travel; M cycles through all three.
     this.minimapMode = "corner";
     this.recorder = new TrackRecorder();
+    // Built after the first field loads, and null on every path that never
+    // gets that far. Everything that notifies it does so optionally.
+    this.tutorial = null;
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
-    this._fpsAcc = 0; this._fpsN = 0; this._fps = null; this._frameMs = null;
+    this._fpsAcc = 0; this._fpsN = 0; this._fps = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
 
@@ -213,7 +216,10 @@ export class Viewer {
     // The UI is built before the field loads, because loading a file asks
     // questions — which group, what units — and those are menu panels.
     this.ui = new UI(this.uiRoot, this);
-    this.ui.statsMode = "subtle";
+    // Off until asked for. The overlay is a diagnostic — fps, loop state,
+    // tier — and the two numbers a flyer wants without asking (speed, and
+    // whether a track is recording) are in the corner chip regardless.
+    this.ui.statsMode = "off";
 
     this.context = this.canvas.getContext("webgpu");
     this.canvasFormat = presentFormat(navigator.gpu.getPreferredCanvasFormat());
@@ -225,6 +231,14 @@ export class Viewer {
     this._bindInput();
     this.paused = false;
     this._startLoop();
+
+    // After the field, because the first prompt puts the camera somewhere and
+    // there is no camera until a field has been loaded. Built whatever the
+    // entry point or the mode; `maybeStart` is what decides it has been run
+    // before.
+    const { Tutorial } = await import("./tutorial.js");
+    this.tutorial = new Tutorial(this.uiRoot, this);
+    this.tutorial.maybeStart();
   }
 
   /**
@@ -928,6 +942,7 @@ export class Viewer {
           this._lastTime = performance.now();
           this._syncChrome();
         }
+        this.tutorial?.onInput("capture");
         return;
       }
 
@@ -962,6 +977,7 @@ export class Viewer {
       if (!this.captured) return;
       this.camera.scrollSpeed(e.deltaY, performance.now() / 1000);
       this._wake("wheel");
+      this.tutorial?.onInput("wheel");
     }, { passive: true, signal });
 
     document.addEventListener("keydown", (e) => this._onKeyDown(e), { signal });
@@ -1047,20 +1063,31 @@ export class Viewer {
         }
         return;
       case "f": this.toggleFullscreen(); return;
-      case "F3": e.preventDefault(); this.ui.cycleStats(); return;
+      // One binding, two keys. F-keys are Fn-gated on most laptop keyboards,
+      // so an F-key alone is a shortcut half the machines cannot press.
+      case "F3":
+      case "`": e.preventDefault(); this.ui.cycleStats(); return;
       case "b": this.cycleFlyer(); return;
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
-      case "k": this.toggleLightCache(); return;
-      case "j": this.toggleSkyProbe(); return;
+      // Quality is the research mode's business; in basic the tier is
+      // whatever the probe measured, and these two keys would move it.
+      case "k": if (this.ui.allows("quality")) this.toggleLightCache(); return;
+      case "j": if (this.ui.allows("quality")) this.toggleSkyProbe(); return;
       // Through pause(), not ui.open() directly: the dialog needs the mouse,
       // so the pointer must be released first — opening it under a held lock
       // left the camera turning behind an unusable panel (bug 1).
+      //
+      // P is the binding; F12 stays a silent alias because it was the one
+      // people learned, and because the browser's own F12 is a devtools key
+      // this preventDefault is worth keeping in front of.
+      case "p":
       case "F12": e.preventDefault(); this.pause("capture"); return;
       default: break;
     }
     if ("wasdc ".includes(key)) this.camera.keys.add(key);
     if (key === "Shift") this.camera.keys.add("shift");
+    this.tutorial?.onInput("key", key);
   }
 
   // --- state changes -------------------------------------------------------
@@ -1084,6 +1111,7 @@ export class Viewer {
     if (this.captured) document.exitPointerLock();
     this.ui.open(panel);
     this._syncChrome();
+    this.tutorial?.onInput("menu", panel);
     // Pausing does not put the loop to sleep and resuming does not wake it:
     // sleep is decided purely by whether the picture is finished. This wake
     // is only here because pausing stops the bird, which changes what the
@@ -1595,6 +1623,22 @@ export class Viewer {
     this._wake("flyer");
   }
 
+  /**
+   * Put the camera down on the water, looking at the horizon.
+   *
+   * The tutorial's opening position, and only that. Low is the point: the
+   * first prompt asks for the mouse, and a beginner who moves it wants the
+   * sea and the sky to swing past — a start high above the field looks the
+   * same whichever way it is turned. The x/y of whatever view was loaded is
+   * kept, so it is still this field's own place.
+   */
+  tutorialSpawn() {
+    this.camera.position[2] = K.OCEAN_FLOOR_MARGIN_M * 4.0;
+    this.camera.elevation = 0.0;
+    this.camera.constrain();
+    this._wake("tutorial spawn");
+  }
+
   toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen();
@@ -1629,6 +1673,8 @@ export class Viewer {
     clearTimeout(this._confirmTimer);
     this._confirmTimer = null;
     this._videoAbort = true;
+    this.tutorial?.destroy();
+    this.tutorial = null;
     this._listeners.abort();
     // Not covered by the abort signal: ResizeObserver has no signal option,
     // and it holds the canvas, which holds this viewer.
@@ -2378,15 +2424,13 @@ export class Viewer {
     if (march) {
       this._fpsAcc += elapsed; this._fpsN += 1;
       if (this._fpsAcc >= 0.5) {
-        const meanDt = this._fpsAcc / this._fpsN;
-        this._fps = 1 / meanDt;
-        this._frameMs = meanDt * 1000;
+        this._fps = this._fpsN / this._fpsAcc;
         this._fpsAcc = 0; this._fpsN = 0;
       }
     }
     const converged = this.renderer.converged;
     this.ui.drawStats({
-      fps: this._fps, frameMs: this._frameMs, camera: this.camera,
+      fps: this._fps, camera: this.camera,
       tier: this.renderer.qualityTier, renderScale: this.renderer.renderScale,
       frame: this.frameIndex,
       minimap: Boolean(this.minimap && this.minimapMode !== "off"),

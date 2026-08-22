@@ -9,7 +9,7 @@
 "use strict";
 
 import {
-  acquireAdapter, acquireDevice, limitsSummary, watchDevice,
+  acquireAdapter, acquireDevice, limitsSummary, watchDevice, volumeFits,
   WebGPUUnavailable, browserGuess,
 } from "./gpu.js";
 
@@ -23,6 +23,10 @@ const dom = {
   rail: el("rail"),
   open: el("choice-open"),
   fileInput: el("file-input"),
+  modeToggle: el("mode-toggle"),
+  flyLess: el("fly-less"),
+  flyMore: el("fly-more"),
+  flyMoreWarn: el("fly-more-warn"),
   reel: [el("reel-a"), el("reel-b")],
   loading: el("loading"),
   stage: el("loading-stage"),
@@ -127,7 +131,11 @@ async function renderCapability() {
     capabilityError = { message: err.message, detail };
     capabilityFailed = true;
     dom.rail.classList.add("unavailable");
-    dom.open.classList.add("unavailable");
+    // All three .own buttons, not just the file picker: they are one control
+    // in three instances and there is no GPU for any of them.
+    for (const button of [dom.open, dom.flyLess, dom.flyMore]) {
+      button.classList.add("unavailable");
+    }
   }
 }
 
@@ -520,13 +528,19 @@ function renderGroup(group, root, numbersById) {
  * makes. What must not happen is one unreadable file blanking the whole
  * list. The console says which one.
  */
+const metaById = new Map();
+
 async function fetchNumbers(demos, root) {
   const pairs = await Promise.all(demos.map(async (demo) => {
     const url = `${root}/${demo.base}/meta.json`;
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return [demo.id, caseNumbers(await res.json())];
+      const meta = await res.json();
+      // Kept whole, not just the derived numbers: the fly-pair gate below
+      // needs volume.shape_xyz, and this is already the one fetch of it.
+      metaById.set(demo.id, meta);
+      return [demo.id, caseNumbers(meta)];
     } catch (err) {
       console.warn(`soar: no numbers for "${demo.id}" — ${url}: ${err.message}`);
       return [demo.id, null];
@@ -566,6 +580,212 @@ async function buildRail() {
   }
 }
 
+// --- modes ----------------------------------------------------------------
+//
+// One page, three audiences. `basic` is the default and the one most visitors
+// get: no rail, no file picker, two buttons and a sky. `research` is the page
+// as it was, plus those two buttons. `cyberpunk` is the night-city branch and
+// is not merged, so it is a real position on the toggle that cannot be chosen
+// — a mode listed and greyed says "later"; a mode absent says "never", and
+// the page would then have to announce it somewhere else when it lands.
+//
+// `ready: false` is the whole of the not-yet: flip it and the segment works.
+
+const MODES = [
+  { id: "research", label: "research", ready: true },
+  { id: "basic", label: "basic", ready: true },
+  {
+    id: "cyberpunk", label: "cyberpunk", ready: false,
+    note: "in development",
+  },
+];
+
+const MODE_KEY = "soar.mode";
+const DEFAULT_MODE = "basic";
+
+/** The stored mode, if it is one we still offer and can still enter. */
+function storedMode() {
+  let saved = null;
+  // Private windows and file:// in some browsers throw on access rather than
+  // returning null, and a page that will not load because of a preference is
+  // a worse page than one that forgets the preference.
+  try { saved = localStorage.getItem(MODE_KEY); } catch { /* no storage */ }
+  const mode = MODES.find((m) => m.id === saved);
+  return mode?.ready ? mode.id : DEFAULT_MODE;
+}
+
+let mode = storedMode();
+
+/**
+ * Put the sliding block over the selected segment.
+ *
+ * Measured rather than declared: the three labels are different lengths, so
+ * the geometry only exists once the segments have been laid out in the real
+ * face. transform rather than `left` because it is the property that moves
+ * without asking for layout on every frame of the slide.
+ */
+function placeThumb() {
+  const thumb = dom.modeToggle.querySelector(".thumb");
+  const current = dom.modeToggle.querySelector('.mode[aria-checked="true"]');
+  if (!thumb || !current) return;
+  thumb.style.width = `${current.offsetWidth}px`;
+  thumb.style.transform = `translateX(${current.offsetLeft}px)`;
+}
+
+/**
+ * Everything mode-dependent is one body class and CSS; the pair, which two of
+ * the three modes want, and the thumb, whose geometry CSS cannot know, are
+ * the two things set here.
+ */
+function applyMode(next, { save = true } = {}) {
+  mode = next;
+  for (const m of MODES) document.body.classList.toggle(`mode-${m.id}`, m.id === next);
+  // basic and research both want the pair; it starts hidden only so the
+  // stack does not reflow between first paint and the stored mode landing.
+  dom.flyLess.hidden = false;
+  dom.flyMore.hidden = false;
+  for (const button of dom.modeToggle.children) {
+    if (button.dataset.mode === undefined) continue;   // the thumb
+    button.setAttribute("aria-checked", String(button.dataset.mode === next));
+  }
+  placeThumb();
+  if (!save) return;
+  // Marks this as a switch rather than a page load, which is what tells the
+  // newly revealed controls to use the short reveal instead of the intro.
+  document.body.classList.add("switched");
+  try { localStorage.setItem(MODE_KEY, next); } catch { /* no storage */ }
+}
+
+function buildModeToggle() {
+  const thumb = document.createElement("span");
+  thumb.className = "thumb";
+  dom.modeToggle.replaceChildren(thumb, ...MODES.map((m) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mode";
+    button.dataset.mode = m.id;
+    button.setAttribute("role", "radio");
+    const label = document.createElement("span");
+    label.textContent = m.label;
+    button.appendChild(label);
+    if (!m.ready) {
+      // disabled would take it out of the tab order, and the note is on focus
+      // as well as hover — so it is aria-disabled instead, with the class for
+      // the greying and no click handler attached at all.
+      button.disabled = true;
+      button.setAttribute("aria-disabled", "true");
+      const note = document.createElement("span");
+      note.className = "soon-note";
+      note.textContent = m.note ?? "in development";
+      button.appendChild(note);
+    } else {
+      button.addEventListener("click", () => applyMode(m.id));
+    }
+    return button;
+  }));
+  applyMode(mode, { save: false });   // reflect the stored value, don't re-store
+
+  // The thumb is placed before the webfont arrives, so the segments it was
+  // measured against are the fallback face's width. Re-place it when the real
+  // one lands and on any resize; `.ready` is added after the first placement
+  // so none of that first correction is animated — a block sliding in from
+  // the left edge on load would look like the toggle was being demonstrated.
+  const settle = () => {
+    placeThumb();
+    dom.modeToggle.classList.add("ready");
+  };
+  requestAnimationFrame(settle);
+  document.fonts?.ready.then(placeThumb).catch(() => {});
+  addEventListener("resize", placeThumb);
+}
+
+// The entry animations belong to the first paint only. Left on the elements
+// they re-run, with their hold, every time a mode switch reveals one — see
+// body.intro in style.css. 2.7 s clears the longest (1.6 s at 1.1 s).
+document.body.classList.add("intro");
+setTimeout(() => document.body.classList.remove("intro"), 2700);
+
+// --- the two-button way in ------------------------------------------------
+
+// The coarse/full twin. Two ids from demos/index.json rather than two more
+// copies of the fields: the pair IS the STEAM high-based convection case at
+// its two bakes, and the rail shows the same two rows in research mode.
+const FLY_LESS_ID = "desert-coarse";
+const FLY_MORE_ID = "desert";
+
+/** An id the manifest does not have is an error on the button, not a swap. */
+function flyMissing(button, id) {
+  button.classList.add("missing");
+  button.disabled = true;
+  button.querySelector(".warn").textContent =
+    `The demo "${id}" is not in the demo list.`;
+  console.error(`soar: fly-pair case "${id}" missing from the demo index`);
+}
+
+/**
+ * Wire the pair, and decide whether the full-resolution one can be opened.
+ *
+ * Deliberately hung off the work the rail already does — resolveDemos() is
+ * the shared index promise and metaById is filled by the meta fetch the rail
+ * makes anyway — so this adds no request and nothing blocks on it. The
+ * buttons are live from the moment the index resolves; the limits check only
+ * ever takes one away, and it lands whenever the adapter probe does.
+ */
+async function wireFlyPair(railTask) {
+  let root, groups;
+  try {
+    ({ root, groups } = await resolveDemos());
+  } catch (err) {
+    for (const button of [dom.flyLess, dom.flyMore]) {
+      button.classList.add("missing");
+      button.disabled = true;
+    }
+    dom.flyMoreWarn.textContent =
+      `The demo list could not be loaded (${err.message}).`;
+    el("fly-less-warn").textContent =
+      `The demo list could not be loaded (${err.message}).`;
+    return;
+  }
+  const all = groups.flatMap((group) => group.demos);
+  const less = all.find((d) => d.id === FLY_LESS_ID);
+  const more = all.find((d) => d.id === FLY_MORE_ID);
+  if (!less) flyMissing(dom.flyLess, FLY_LESS_ID);
+  if (!more) flyMissing(dom.flyMore, FLY_MORE_ID);
+
+  for (const [button, demo] of [[dom.flyLess, less], [dom.flyMore, more]]) {
+    if (!demo) continue;
+    button.addEventListener("click", () =>
+      capabilityFailed
+        ? reportNoGPU()
+        : enterViewer({ kind: "demo", base: `${root}/${demo.base}` }));
+  }
+  if (!more) return;
+
+  // The caution the rail card carries, in the same words and from the same
+  // field of the same file — not a second sentence about the same fact.
+  dom.flyMoreWarn.textContent = more.warning ?? "";
+
+  // Now the harder claim: not "this is heavy" but "this will not fit". Both
+  // halves can be late (the meta comes with the rail, the limits with the
+  // adapter probe) and neither is on the path to a first paint.
+  await railTask.catch(() => {});
+  const shape = metaById.get(more.id)?.volume?.shape_xyz;
+  // No meta means no claim. fetchNumbers already logged it, and a case whose
+  // meta is unreadable fails loudly in the loader — the same choice the rail
+  // makes for a row with no numbers.
+  if (!Array.isArray(shape) || shape.length !== 3) return;
+  let limits;
+  try {
+    ({ limits } = await (gpuProbe ??= probeGPU()));
+  } catch {
+    return;   // renderCapability owns this failure; capabilityFailed is set
+  }
+  const fits = volumeFits(limits, shape);
+  if (fits.ok) return;
+  dom.flyMore.disabled = true;
+  dom.flyMoreWarn.textContent = `${fits.message} ${fits.advice}`;
+}
+
 dom.open.addEventListener("click", () =>
   capabilityFailed ? reportNoGPU() : dom.fileInput.click());
 dom.fileInput.addEventListener("change", () => {
@@ -598,8 +818,9 @@ document.addEventListener("drop", (e) => {
   if (file) enterViewer({ kind: "file", file });
 });
 
+buildModeToggle();
 renderCapability();
-buildRail();
+wireFlyPair(buildRail());
 
 // ?demo=<id> goes straight in — useful for linking to a particular field
 // rather than to the page that offers them. Bare ?demo takes the first.

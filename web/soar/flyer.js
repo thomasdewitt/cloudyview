@@ -77,6 +77,11 @@ export const DEG = Math.PI / 180.0;
 const NEAR = 0.5, FAR = 400.0;
 const DEPTH_FORMAT = "depth24plus";
 
+// Horizontal speed below which the flight path has no direction worth reading
+// and the flyer holds the course it already had. Well under a walking pace, so
+// only a genuinely parked camera is ever below it.
+const COURSE_MIN_SPEED = 0.5;   // m/s
+
 export const TWO_PI = 2.0 * Math.PI;
 export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -255,8 +260,12 @@ export class Flyer {
     this._depth = null;            // {w, h, texture, view}
 
     // --- Shared flight state (world units / degrees as noted) ---
+    //
+    // `heading` and `course` were one number until they had to stop being
+    // one: see _track. Placement is the first, attitude is the second.
     this.position = [0.0, 0.0, 0.0];   // world metres
-    this.heading = 0.0;                // smoothed met azimuth, deg
+    this.heading = 0.0;                // smoothed VIEW azimuth, deg
+    this.course = 0.0;                 // smoothed MOTION azimuth, deg
     this.viewElevation = 0.0;          // smoothed camera elevation, deg
     this.bank = 0.0;                   // deg, + rolls right
     this.pitch = 0.0;                  // deg, + climbs
@@ -352,19 +361,36 @@ export class Flyer {
   }
 
   /**
-   * Track the camera: velocity, heading lag, and the vertical rate. Returns
-   * the smoothed heading change in degrees this step, which is what banking
-   * is driven from — subclasses bank differently and this is the raw material
-   * they share.
+   * Track the camera: velocity, the two headings, and the vertical rate.
    *
-   * Returns null on the first frame, where there is nothing to differentiate
-   * and the flyer snaps into place instead.
+   * There are two azimuths here and they are not the same thing:
+   *
+   *   heading — where the camera is LOOKING. `_place` flies the subject out
+   *             along this, so it stays in frame no matter what it is doing.
+   *   course  — where the camera is GOING. `_frame` points the subject along
+   *             this, so strafing turns it sideways across the view and
+   *             flying backwards turns it to face you.
+   *
+   * They agree whenever you hold W, which is most of the time, and that is
+   * why one number served for so long. They part on the strafe keys, and a
+   * subject that kept flying nose-first through a sideways translation was
+   * the tell that it was riding the camera rather than flying.
+   *
+   * Below COURSE_MIN_SPEED there is no motion to have a direction, so the
+   * last course is held rather than snapped to anything: a parked subject
+   * keeps the heading it arrived on, and you orbit it by looking around.
+   *
+   * Returns the smoothed COURSE change in degrees this step — what banking is
+   * driven from, since a turn is a turn of the flight path — or null on the
+   * first frame, where there is nothing to differentiate and the flyer snaps
+   * into place instead.
    */
   _track(dt, camera, { tauHeading, tauSpeed }) {
     const origin = camera.position;
     if (this._prevOrigin === null) {
       this._prevOrigin = [...origin];
       this.heading = camera.azimuth;
+      this.course = camera.azimuth;
       this.viewElevation = camera.elevation;
       return null;
     }
@@ -382,7 +408,14 @@ export class Flyer {
     const daz = mod360(camera.azimuth - this.heading + 180.0) - 180.0;
     this.heading = mod360(this.heading + daz * kh);
     this.viewElevation += (camera.elevation - this.viewElevation) * kh;
-    return { daz: daz * kh, vel, kh };
+
+    let dcourse = 0.0;
+    if (Math.hypot(vel[0], vel[1]) > COURSE_MIN_SPEED) {
+      const target = mod360(90.0 - Math.atan2(vel[1], vel[0]) / DEG);
+      dcourse = (mod360(target - this.course + 180.0) - 180.0) * kh;
+      this.course = mod360(this.course + dcourse);
+    }
+    return { dcourse, vel, kh };
   }
 
   // ------------------------------------------------------------------

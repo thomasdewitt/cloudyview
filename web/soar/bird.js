@@ -54,8 +54,12 @@ const FLAP_HZ_SLOW = 4.2;     // wingbeat when hovering / slow
 const FLAP_HZ_FAST = 2.2;     // wingbeat just below the glide threshold
 const GLIDE_LO = 70.0;        // m/s: flap starts fading into a glide
 const GLIDE_HI = 110.0;       // m/s: fully tucked into the glide
-const BOB_AMPLITUDE = 0.10;   // m, body bob coupled to the wingbeat
-const IDLE_BOB = 0.05;        // m, slow ambient bob so a parked bird still breathes
+// Both bobs were cut to a third on 2026-08-21. They are at their largest
+// exactly when the camera is parked — a hovering swift flaps hardest and at
+// full amplitude — and a third of a metre of travel against a still frame read
+// as the bird being jostled rather than holding station.
+const BOB_AMPLITUDE = 0.033;  // m, body bob coupled to the wingbeat
+const IDLE_BOB = 0.017;       // m, slow ambient bob so a parked bird still breathes
 const IDLE_BOB_HZ = 0.45;
 
 // --- Feel (exponential smoothing time constants, seconds) -------------------
@@ -99,7 +103,7 @@ export class Bird extends Flyer {
 
   /** Local->world rotation columns for the current attitude. */
   _frame() {
-    return attitudeFrame(this.heading, this.pitch + BODY_PITCH, this.bank);
+    return attitudeFrame(this.course, this.pitch + BODY_PITCH, this.bank);
   }
 
   /** The slots bird.wgsl reads as its own: flap angle, wrist, twist, tail. */
@@ -155,10 +159,12 @@ export class Bird extends Flyer {
       this._place(camera.position, this._flap(dt));
       return;
     }
-    const { daz, vel } = tracked;
+    const { dcourse, vel } = tracked;
 
-    // Bank into turns: roll follows the smoothed heading rate.
-    const headingRate = daz / dt;   // deg/s
+    // Bank into turns: roll follows the rate the FLIGHT PATH is turning at,
+    // which is what a bird rolls for. Swinging the view while flying straight
+    // no longer rolls it.
+    const headingRate = dcourse / dt;   // deg/s
     const bankTarget = clamp(headingRate * BANK_PER_DEG_S, -BANK_MAX, BANK_MAX);
     const kb = 1.0 - Math.exp(-dt / TAU_BANK);
     this.bank += (bankTarget - this.bank) * kb;
@@ -189,6 +195,7 @@ export class Bird extends Flyer {
    */
   setStatic(camera, t = 0.0, { bank = null, pitch = null, flapPhase = null } = {}) {
     this.heading = camera.azimuth;
+    this.course = camera.azimuth;   // a still is of a bird cruising straight
     this.viewElevation = camera.elevation;
     this.bank = bank === null ? 0.0 : Number(bank);
     this.pitch = pitch === null
