@@ -1705,14 +1705,25 @@ export class Viewer {
    * LOD. Cheap distance, and it degrades along the grain of the look.
    */
   /**
-   * What a capture marches at: the FINER of the live slider and the capture
-   * default. The default exists so a still never inherits a coarse march
-   * chosen to keep flight smooth; a slider set finer than it (the max tier
-   * bottoms out at a quarter pixel now) is a request the capture should
+   * What a capture at `tier` marches at: the FINER of the live slider and the
+   * capture default. The default exists so a still never inherits a coarse
+   * march chosen to keep flight smooth; a slider set finer than it (the max
+   * tier bottoms out at a quarter pixel now) is a request the capture should
    * honor, not sand off (Thomas, 2026-08-20).
+   *
+   * Over the city the default is the CAPTURE tier's own city LOD, not the
+   * flat day constant. The live slider follows the LIVE tier, and on a
+   * machine whose auto verdict settles below high that is the city's coarse
+   * end (0.5) — while the capture runs at max/high, whose city entry is the
+   * quarter-pixel floor. min(slider, 0.5) then marched a still 50x coarser
+   * than the tier it claimed, dissolving windows into blocks; the table's
+   * "flight numbers AND capture numbers" promise only held when the two
+   * tiers happened to agree.
    */
-  _captureLodStrength() {
-    return Math.min(this.lodStrength, K.DEFAULT_LOD_STRENGTH);
+  _captureLodStrength(tier) {
+    const cap = this.scene?.city
+      ? K.CITY_LOD_STRENGTH_BY_TIER[tier] : K.DEFAULT_LOD_STRENGTH;
+    return Math.min(this.lodStrength, cap);
   }
 
   setLodStrength(strength, { byHand = true } = {}) {
@@ -2192,7 +2203,8 @@ export class Viewer {
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
-          { ...this._viewKwargs({ lodStrength: this._captureLodStrength() }),
+          { ...this._viewKwargs({ lodStrength:
+              this._captureLodStrength(this.captureVideoTier) }),
             camera: pose, frameIndex: i * 1024 },
           framesPerVideoFrame, overlays);
         await writer.addFrame(
@@ -2339,11 +2351,13 @@ export class Viewer {
         // FINER of the slider and the constant, so a night-city still at 0.01
         // was rendering an order of magnitude finer than it reported, and the
         // reproduction command beside this block already said so.
-        lod_strength: this._captureLodStrength(),
+        lod_strength: this._captureLodStrength(this.captureStillTier),
         light_march_lod_degrees:
-          K.APP_LIGHT_MARCH_LOD_DEGREES * this._captureLodStrength(),
+          K.APP_LIGHT_MARCH_LOD_DEGREES
+          * this._captureLodStrength(this.captureStillTier),
         view_step_lod_degrees:
-          K.APP_VIEW_STEP_LOD_DEGREES * this._captureLodStrength(),
+          K.APP_VIEW_STEP_LOD_DEGREES
+          * this._captureLodStrength(this.captureStillTier),
       },
       timestamp: new Date().toISOString(),
       // witness, not behold: the still was rendered by the witness/soar
@@ -2351,7 +2365,7 @@ export class Viewer {
       // nests, wrap and image controls included. At the capture's LOD rather
       // than the live view's, for the same reason.
       reproduction_command: this.witnessCommand(
-        { lodStrength: this._captureLodStrength() }),
+        { lodStrength: this._captureLodStrength(this.captureStillTier) }),
     };
   }
 
@@ -2386,7 +2400,9 @@ export class Viewer {
     try {
       const image = await renderStill(
         this.device, this.renderer,
-        this._viewKwargs({ lodStrength: this._captureLodStrength() }), size,
+        this._viewKwargs(
+          { lodStrength: this._captureLodStrength(this.captureStillTier) }),
+        size,
         this.captureStillTier, stillOverlays,
         (fraction) => this.ui.showProgress(
           `Rendering a ${size[0]}x${size[1]} still…`, fraction));

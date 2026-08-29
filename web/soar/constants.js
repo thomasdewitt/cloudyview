@@ -362,10 +362,13 @@ export const DEFAULT_LOD_STRENGTH_BY_TIER = {
 // nobody. The rest step by a factor of ~3 down to minimal at 0.5, which is
 // the DAY default: the city's coarsest is the cloud scene's normal.
 //
-// These are the flight numbers AND the capture numbers. A capture takes the
-// finer of the slider and DEFAULT_LOD_STRENGTH (ddc6012), and every value
-// here is already finer than that, so in the city the two are the same march
-// — which is what makes a still look like the flight it was taken from.
+// These are the flight numbers AND the capture numbers — but not by the
+// accident this comment used to claim. A capture takes the finer of the
+// slider and its default (viewer._captureLodStrength), and over the city the
+// default is THIS table at the CAPTURE's tier: the live slider follows the
+// live tier, which on a slower machine settles at the coarse end of this
+// table, while the capture runs at max/high — trusting the slider alone
+// marched stills 50x coarser than the tier they claimed.
 export const CITY_LOD_STRENGTH_BY_TIER = {
   max: 0.01, high: 0.01, medium: 0.03, low: 0.1, minimal: 0.5,
 };
