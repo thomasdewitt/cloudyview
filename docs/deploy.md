@@ -8,12 +8,22 @@ directory.
 
     uv run python tools/stage_deploy.py --clean
 
-writes `dist/soar/` — 1.08 GB, laid out exactly as it must sit on
+writes `dist/soar/` — ~1.2 GB, laid out exactly as it must sit on
 the site. The repo tree matches the site tree: `web/soar/demos/` here is
-`/soar/demos/` there.
+`/soar/demos/` there — literally, since 2026-08-19: `web/soar/demos` is a
+**symlink into the site repo** (`personal-webpage/soar/demos`), which is the
+canonical home of the baked set. Staging follows the link and copies the
+demos into `dist/` like any other opaque asset.
 
-Copy it to `personal-website/soar/`, then deploy from the Mac
-with `scripts/sync-to-r2.sh` as usual. The result:
+Copy it into the site repo (the working directory is `personal-webpage`;
+the R2 bucket it deploys to is named `personal-website`) with
+
+    rsync -a --delete dist/soar/ ../personal-webpage/soar/
+
+then deploy from the Mac with `scripts/sync-to-r2.sh` as usual.
+`--delete` is what drops the previous build's fingerprinted names —
+see "Stale fingerprints" below for why it must be rsync in place and
+NOT a delete-then-copy of the folder. The result:
 
     https://thomasddewitt.com/soar/          the app
     https://thomasddewitt.com/soar/demos/    the baked fields
@@ -43,17 +53,23 @@ it cannot resolve, a renamed file still named somewhere by its old name, a
 module that does not parse (`node --check`), an unexpected file extension, or
 missing HDF5 filter plugins.
 
-## The flash drive
+## Stale fingerprints
 
-One directory: `dist/soar/` → `personal-website/soar/`.
+Fingerprinting means old builds leave files nothing references, and
+`rclone sync` would keep uploading them until the bucket held every build
+ever shipped — so the copy has to remove the previous build's names, not
+merge over them.
 
-1.07 GB of it is `demos/`, which only changes when a demo is re-baked. An
-app-only change afterwards is ~430 kB — the fingerprinted files at the top
-level of `soar/`; `vendor/`, `ocean/` and `demos/` never change.
-
-Replace the folder wholesale rather than merging. Fingerprinting means old
-builds leave files nothing references, and `rclone sync` would keep uploading
-them until the bucket held every build ever shipped.
+This used to say "replace the folder wholesale". **Do not** — and do not
+point `--out` at the site repo either. Since the demos symlink
+(2026-08-19), `personal-webpage/soar/demos` IS the canonical demo store,
+and `web/soar/demos` reaches it through the link: deleting the folder
+first destroys the only local copy of 1.2 GB of baked fields before the
+copy restores it (or doesn't, if it fails midway) — and `stage_deploy
+--clean --out <site repo>` would rmtree it and then find its own source
+gone. `rsync -a --delete` in place does the same cleanup with no such
+moment: staging preserves mtimes, so the unchanged demos are skipped
+outright and an app-only deploy touches ~500 kB of fingerprinted files.
 
 ## Before committing on the site repo
 
@@ -94,15 +110,8 @@ clone, or the Mac before you copy the folder across — will, on a routine
 deploy for some unrelated essay, **silently delete soar and all 1.07 GB of
 demos from the live site.**
 
-Worth a guard at the top of `scripts/sync-to-r2.sh`:
-
-```bash
-test -f soar/demos/index.json || {
-  echo "refusing to sync: soar/ is missing or incomplete."
-  echo "rclone sync would delete soar from the live bucket."
-  exit 1
-}
-```
+That guard is now in `scripts/sync-to-r2.sh` (added 2026-08-28): it
+refuses to sync unless `soar/demos/index.json` exists in the tree.
 
 ## Cloudflare
 
