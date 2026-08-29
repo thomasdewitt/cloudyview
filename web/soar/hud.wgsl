@@ -18,6 +18,9 @@ struct HudUniforms {
     style: vec4<f32>,
     // Nested field footprint in map UV: xy = min corner, zw = max corner.
     nest: vec4<f32>,
+    // x/y = haze e-folding distance as a radius in screen px per axis (an
+    // ellipse when the map is not square in metres); z/w unused.
+    haze: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: HudUniforms;
@@ -86,16 +89,12 @@ fn edge(a: vec2<f32>, b: vec2<f32>, p: vec2<f32>) -> f32 {
     return ab.x * ap.y - ab.y * ap.x;
 }
 
-fn inside_triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>,
-                   c: vec2<f32>) -> bool {
-    let area = edge(a, b, c);
-    let e0 = edge(a, b, p);
-    let e1 = edge(b, c, p);
-    let e2 = edge(c, a, p);
-    if (area >= 0.0) {
-        return e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0;
-    }
-    return e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0;
+// Inside the ellipse of the haze e-folding distance around the camera —
+// the region the view actually reaches. Per-axis radii because a metric
+// distance is an ellipse on a map that is not square in metres.
+fn within_haze(p: vec2<f32>, cam: vec2<f32>) -> bool {
+    let q = (p - cam) / max(u.haze.xy, vec2<f32>(1e-4));
+    return dot(q, q) <= 1.0;
 }
 
 fn stroke_coverage(distance_px: f32, half_width_px: f32) -> f32 {
@@ -165,10 +164,19 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     if (u.camera.z < 0.5) {
+        // The endpoints sit ON the haze ellipse (minimap.js puts them there),
+        // so the rays end where the view does, and the shaded region is the
+        // pie slice between them: inside the angular wedge AND closer than
+        // the haze distance. The wedge test is two half-planes rather than
+        // the endpoint triangle, whose straight far edge would cut the pie's
+        // arc off.
         let left = uv_to_screen(u.rays.xy);
         let right = uv_to_screen(u.rays.zw);
 
-        if (inside_triangle(p, cam, left, right)) {
+        let s = edge(cam, left, right);
+        let in_wedge = edge(cam, left, p) * s >= 0.0
+            && edge(cam, right, p) * s <= 0.0;
+        if (in_wedge && within_haze(p, cam)) {
             out = over(out, vec4<f32>(ACCENT, 0.05));
         }
 
@@ -189,6 +197,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
             out = over(out, vec4<f32>(ACCENT, ray));
         }
     } else {
+        // Straight up or down: every bearing is in frame, so the whole
+        // closer-than-haze ellipse is the visible region.
+        if (within_haze(p, cam)) {
+            out = over(out, vec4<f32>(ACCENT, 0.05));
+        }
         let ring_d = abs(length(p - cam) - u.camera.w);
         let halo = stroke_coverage(ring_d, line_hw + halo_hw);
         if (halo > 0.0) {

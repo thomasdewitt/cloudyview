@@ -28,10 +28,10 @@ import {
   MAP_ACCENT,
 } from "./constants.js";
 import { cameraBasis } from "./camera.js";
-import { mod360 } from "./spectral.js";
+import { mod360, hazeEFoldingKm } from "./spectral.js";
 
 const DEG = Math.PI / 180.0;
-const UNIFORM_NBYTES = 6 * 16;   // 6 vec4<f32>
+const UNIFORM_NBYTES = 7 * 16;   // 7 vec4<f32>
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 /** Meteorological azimuth (clockwise from north) to internal (CCW from east). */
@@ -245,9 +245,16 @@ export function rectForSize(size, albedoShape, fullscreen = false) {
  *
  * Straight up or straight down in view makes a top-down wedge meaningless —
  * every horizontal bearing is in frame — so that case draws a ring instead.
+ *
+ * `hazeUV`, when given, is the haze e-folding length as a map-UV radius per
+ * axis (the two differ when the map is not square in metres): the wedge's
+ * rays then TERMINATE there instead of running to the map edge, because past
+ * that distance the view holds air, not field, and a ray across the whole
+ * map claims you can see across the whole map.
  */
 export function cameraOverlayGeometry(
   relativePosition, azimuth, elevation, fov, albedoShape, renderAspect,
+  hazeUV = null,
 ) {
   const [ny, nx] = albedoShape;
   const nxm1 = Math.max(nx - 1, 1);
@@ -280,6 +287,19 @@ export function cameraOverlayGeometry(
   const leftXY = unitXY(ray(-1), azInternalRad - halfHfov);
   const rightXY = unitXY(ray(+1), azInternalRad + halfHfov);
 
+  // leftXY/rightXY are unit in world XY, so scaling each component by the
+  // per-axis UV radius lands the endpoint exactly on the haze ellipse.
+  if (hazeUV) {
+    return {
+      cameraUV,
+      fovEndpoints: [
+        [cameraUV[0] + hazeUV[0] * leftXY[0],
+         cameraUV[1] + hazeUV[1] * leftXY[1]],
+        [cameraUV[0] + hazeUV[0] * rightXY[0],
+         cameraUV[1] + hazeUV[1] * rightXY[1]],
+      ],
+    };
+  }
   const rayLength = 1.5 * Math.max(nx, ny);
   return {
     cameraUV,
@@ -357,7 +377,7 @@ export class Minimap {
     // path. Still called albedoShape because it is still what the map is
     // made of, and renaming it would touch every caller for nothing.
     this.albedoShape = [ny, nx];
-    this.uniforms = new Float32Array(6 * 4);
+    this.uniforms = new Float32Array(7 * 4);
 
     this.texture = device.createTexture({
       label: "hud-minimap",
@@ -526,13 +546,26 @@ export class Minimap {
   }
 
   /** Pack the layout and overlay geometry for this frame. */
-  update(camera, scene, size, fullscreen = false) {
+  update(camera, scene, size, fullscreen = false, haze = null) {
+    if (!Number.isFinite(haze)) {
+      throw new Error(
+        "The minimap needs the haze setting: the FOV rays end at the haze " +
+        "e-folding distance, and without it there is nothing to end them at.");
+    }
     const [screenW, screenH] = [Number(size[0]), Number(size[1])];
     const rect = rectForSize(size, this.albedoShape, fullscreen);
     const [ny, nx] = this.albedoShape;
+    // The haze e-folding length as a map-UV radius per axis: how far the
+    // view actually reaches, in the frame this map is drawn in. On the city
+    // map that frame is the tile; on the cloud map it is the domain box.
+    const hazeM = hazeEFoldingKm(haze) * 1000.0;
+    const extentM = this.frame === "city"
+      ? [scene.oceanTileExtent, scene.oceanTileExtent]
+      : [scene.bmax[0] - scene.bmin[0], scene.bmax[1] - scene.bmin[1]];
+    const hazeUV = [hazeM / extentM[0], hazeM / extentM[1]];
     const overlay = cameraOverlayGeometry(
       this._relativeIn(camera, scene), camera.azimuth, camera.elevation,
-      camera.fov, this.albedoShape, screenW / screenH);
+      camera.fov, this.albedoShape, screenW / screenH, hazeUV);
     const [camU, camV] = overlay.cameraUV;
 
     const minSide = Math.min(rect[2], rect[3]);
@@ -568,6 +601,9 @@ export class Minimap {
     u.set([leftU, leftV, rightU, rightV], 12);
     u.set([lineWidth, borderWidth, haloWidth, nest ? 1.0 : 0.0], 16);
     u.set(nest ?? [0, 0, 0, 0], 20);
+    // The haze radius in screen pixels per axis (an ellipse when the map is
+    // not square in metres) — what the shader shades the visible region with.
+    u.set([hazeUV[0] * rect[2], hazeUV[1] * rect[3], 0.0, 0.0], 24);
     this.device.queue.writeBuffer(this.uniformBuf, 0, u);
 
     this._rect = rect;

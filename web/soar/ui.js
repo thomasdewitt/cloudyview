@@ -150,6 +150,19 @@ function distance(metres) {
     : `${(metres / 1000.0).toFixed(2)} km`;
 }
 
+/** A labelled flip switch. The whole control — label included — greys out
+ *  when off, so the state reads without finding the knob. */
+function flipSwitch(label, isOn, onFlip) {
+  const b = el("button", "flip");
+  const track = el("span", "flip-track");
+  track.append(el("span", "flip-knob"));
+  b.append(el("span", null, label), track);
+  b.refresh = () => b.classList.toggle("on", isOn());
+  b.addEventListener("click", () => { onFlip(!isOn()); b.refresh(); });
+  b.refresh();
+  return b;
+}
+
 function item(label, note, onClick, { disabled = false } = {}) {
   const b = el("button", "item");
   b.append(el("span", null, label));
@@ -1077,13 +1090,22 @@ export class UI {
     // configuration at the capture size, accumulated to its parked spp.
     // Refreshed in place — reopening the panel would drop its {samples}
     // context, which is the recording itself.
-    m.append(el("h3", null, "quality"));
+    const qualityRow = el("div", "seg-row");
+    const qualityGroup = el("div", "seg-group");
+    qualityGroup.append(el("h3", null, "quality"));
     const tierSeg = segmented(
       K.QUALITY_TIER_NAMES.map(
         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
       (v) => v === app.captureVideoTier,
       (v) => { app.captureVideoTier = v; refresh(); tierSeg.refresh(); });
-    m.append(tierSeg);
+    qualityGroup.append(tierSeg);
+    // One switch for both overlays: a video either shows the flight
+    // apparatus or it doesn't.
+    qualityRow.append(qualityGroup, flipSwitch(
+      "Include flyer and minimap",
+      () => app.videoOverlays,
+      (v) => { app.videoOverlays = v; }));
+    m.append(qualityRow);
 
     m.append(el("div", "divider"));
     m.append(render);
@@ -1133,7 +1155,7 @@ export class UI {
                   `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureStillTier]} ` +
                   "samples per pixel, then a PNG download · shortcut: P",
                   () => app.saveScreenshot({ overlays: true })));
-    m.append(item("Save a still, clouds only", "no bird, no minimap",
+    m.append(item("Save a still, clouds only", "no flyer, no minimap",
                   () => app.saveScreenshot({ overlays: false })));
 
     m.append(el("div", "row",

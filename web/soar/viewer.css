@@ -374,6 +374,54 @@ button.mini.on {
   background: rgba(232, 131, 74, 0.14);
 }
 
+/* A labelled flip switch — the video panel's overlays toggle. Off greys the
+   whole control, label included, so the state reads without the knob. */
+button.flip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--ui-font);
+  font-size: 12px;
+  color: var(--ink-bright);
+  cursor: var(--cursor-dart-click);
+}
+.flip-track {
+  flex: none;
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border-radius: 9px;
+  border: 1px solid var(--hot);
+  background: rgba(232, 131, 74, 0.14);
+  transition: background 0.15s, border-color 0.15s;
+}
+.flip-knob {
+  position: absolute;
+  top: 1px;
+  left: 14px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--hot);
+  transition: left 0.15s, background 0.15s;
+}
+button.flip:not(.on) {
+  color: var(--ink-dim);
+  opacity: 0.55;
+}
+button.flip:not(.on):hover { opacity: 0.8; }
+button.flip:not(.on) .flip-track {
+  border-color: var(--panel-line);
+  background: rgba(150, 175, 210, 0.07);
+}
+button.flip:not(.on) .flip-knob {
+  left: 1px;
+  background: var(--ink-dim);
+}
+
 .segmented button[disabled] {
   opacity: 0.4;
   cursor: var(--cursor-dart);

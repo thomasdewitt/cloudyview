@@ -148,6 +148,10 @@ export class Viewer {
     // tier's parked sample count as its spp; see capture.captureFrames.
     this.captureStillTier = "max";
     this.captureVideoTier = "high";
+    // Whether a rendered video draws the flyer and the minimap over the
+    // clouds. One switch for both: a video either shows the flight
+    // apparatus or it doesn't.
+    this.videoOverlays = true;
     // True once any Advanced quality setting was hand-changed: the tier row
     // shows a selected "Custom" chip, and the governor stands down. Clicking
     // any preset (or Auto) resets every Advanced setting and clears this.
@@ -2183,7 +2187,9 @@ export class Viewer {
           elevation: frames[i].elevation,
           fov: frames[i].fov,
         };
-        const overlays = this._offlineOverlays(pose, size, 1.0 / this.videoFps);
+        const overlays = this.videoOverlays
+          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps)
+          : [];
         await renderAccumulated(
           this.renderer, target.view, size,
           { ...this._viewKwargs({ lodStrength: this._captureLodStrength() }),
@@ -2248,7 +2254,7 @@ export class Viewer {
         ...pose,
         relativePosition: () => worldToRelative(
           pose.position, this.scene.bmin, this.scene.bmax),
-      }, this.scene, size);
+      }, this.scene, size, false, this.haze);
       overlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
     }
@@ -2372,7 +2378,7 @@ export class Viewer {
         this.flyer.encodePass(enc, view, format, size));
     }
     if (overlays && this.minimap && this.minimapMode !== "off") {
-      this.minimap.update(this.camera, this.scene, size);
+      this.minimap.update(this.camera, this.scene, size, false, this.haze);
       stillOverlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
     }
@@ -2710,7 +2716,7 @@ export class Viewer {
     }
     if (this.minimap && this.minimapMode !== "off") {
       this.minimap.update(this.camera, this.scene, [outW, outH],
-                          this.minimapMode === "full");
+                          this.minimapMode === "full", this.haze);
       overlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
     }
