@@ -186,6 +186,8 @@ DEMOS = [
         group="steam",
         title="STEAM high-based convection (coarse)",
         field="Utah cumulus on a coarser grid",
+        description="STEAM high-based convection (above) at coarser "
+                    "resolution.",
         liquid=("demo_desert-convection-coarse.nc", "qc"),
         ice=("demo_desert-convection-coarse.nc", "qi"),
         src=STEAM_SRC,
@@ -245,6 +247,8 @@ DEMOS = [
         group="steam",
         title="STEAM marine cumulus congestus (coarse)",
         field="Maritime congestus on a coarser grid",
+        description="STEAM marine cumulus congestus (above) at coarser "
+                    "resolution.",
         liquid=("demo_marine-congestus.nc", "qc"),
         ice=("demo_marine-congestus.nc", "qi"),
         src=STEAM_SRC,
