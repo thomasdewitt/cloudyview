@@ -137,7 +137,7 @@ const MENU_STEPS = [
       "Research mode allows more visual control, more cloud volumes " +
       "including custom uploads, and false color diagnostics.",
       "Cyberpunk mode flies these same demos at night over a multifractal " +
-      "city. It is chosen on the start page rather than here.",
+      "city. It is chosen from the start page.",
     ],
   },
 ];
@@ -172,6 +172,11 @@ const RESEARCH_STEPS = [
           "liquid, cyan for ice).",
   },
   { menuKey: "periodic", text: "Wrap the domain horizontally." },
+  {
+    menuKey: "leave",
+    text: "From the start page, fly other cloud fields from STEAM or common " +
+          "LES cloud models.",
+  },
 ];
 
 export class Tutorial {
