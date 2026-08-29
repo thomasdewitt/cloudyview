@@ -148,10 +148,10 @@ export class Viewer {
     // tier's parked sample count as its spp; see capture.captureFrames.
     this.captureStillTier = "max";
     this.captureVideoTier = "high";
-    // Whether a rendered video draws the flyer and the minimap over the
-    // clouds. One switch for both: a video either shows the flight
-    // apparatus or it doesn't.
-    this.videoOverlays = true;
+    // Whether a capture — still or video — draws the flyer and the minimap
+    // over the clouds. One switch for both overlays, shared by both panels:
+    // a capture either shows the flight apparatus or it doesn't.
+    this.captureOverlays = true;
     // True once any Advanced quality setting was hand-changed: the tier row
     // shows a selected "Custom" chip, and the governor stands down. Clicking
     // any preset (or Auto) resets every Advanced setting and clears this.
@@ -2187,7 +2187,7 @@ export class Viewer {
           elevation: frames[i].elevation,
           fov: frames[i].fov,
         };
-        const overlays = this.videoOverlays
+        const overlays = this.captureOverlays
           ? this._offlineOverlays(pose, size, 1.0 / this.videoFps)
           : [];
         await renderAccumulated(
@@ -2355,7 +2355,8 @@ export class Viewer {
     };
   }
 
-  async saveScreenshot({ overlays = true } = {}) {
+  async saveScreenshot() {
+    const overlays = this.captureOverlays;
     if (this._capturing) return;
     this._capturing = true;
     this._wake("capture");

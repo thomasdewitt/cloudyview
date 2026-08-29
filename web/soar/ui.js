@@ -1099,12 +1099,12 @@ export class UI {
       (v) => v === app.captureVideoTier,
       (v) => { app.captureVideoTier = v; refresh(); tierSeg.refresh(); });
     qualityGroup.append(tierSeg);
-    // One switch for both overlays: a video either shows the flight
-    // apparatus or it doesn't.
+    // One switch for both overlays, shared with the still panel: a capture
+    // either shows the flight apparatus or it doesn't.
     qualityRow.append(qualityGroup, flipSwitch(
       "Include flyer and minimap",
-      () => app.videoOverlays,
-      (v) => { app.videoOverlays = v; }));
+      () => app.captureOverlays,
+      (v) => { app.captureOverlays = v; }));
     m.append(qualityRow);
 
     m.append(el("div", "divider"));
@@ -1143,20 +1143,28 @@ export class UI {
     // and its spp is that tier's parked sample count. All settings are the
     // preset's flight configuration, marched at the capture size; witness
     // --soar-tier reproduces exactly this from the CLI.
-    m.append(el("h3", null, "quality"));
-    m.append(segmented(
+    // The same line the track panel draws: tiers on the left, the shared
+    // overlays switch on the right, so the two capture panels read as one
+    // design.
+    const qualityRow = el("div", "seg-row");
+    const qualityGroup = el("div", "seg-group");
+    qualityGroup.append(el("h3", null, "quality"));
+    qualityGroup.append(segmented(
       K.QUALITY_TIER_NAMES.map(
         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
       (v) => v === app.captureStillTier,
       (v) => { app.captureStillTier = v; this.open("capture"); }));
+    qualityRow.append(qualityGroup, flipSwitch(
+      "Include flyer and minimap",
+      () => app.captureOverlays,
+      (v) => { app.captureOverlays = v; }));
+    m.append(qualityRow);
 
     m.append(el("div", "divider"));
     m.append(item("Save a still",
                   `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureStillTier]} ` +
                   "samples per pixel, then a PNG download · shortcut: P",
-                  () => app.saveScreenshot({ overlays: true })));
-    m.append(item("Save a still, clouds only", "no flyer, no minimap",
-                  () => app.saveScreenshot({ overlays: false })));
+                  () => app.saveScreenshot()));
 
     m.append(el("div", "row",
       "For video: press R while flying to record a track."));
