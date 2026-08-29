@@ -42,8 +42,10 @@ export async function renderStill(device, renderer, view, size, tier,
 }
 
 /** How much of a still's progress bar the marching owns; the rest is the
- *  read-back and the PNG encode. */
-const STILL_MARCH_SHARE = 0.85;
+ *  read-back and the PNG encode. Progress is measured in completed passes
+ *  (see renderAccumulated), so the march genuinely owns almost all of the
+ *  wall time and the tail is small. */
+const STILL_MARCH_SHARE = 0.95;
 
 /**
  * One offscreen colour target for an offline render.
@@ -119,26 +121,24 @@ export function endOfflineRender(renderer, saved) {
  * Accumulate `frames` jittered passes of one camera into `targetView`.
  *
  * `onProgress(done, total)` is optional, and asking for it changes how the
- * loop runs: drawFrame only SUBMITS work, so without a yield the whole
- * accumulation is one unbroken run of microtasks and the browser cannot paint
- * until the last pass is in — which is why a still's progress bar used to sit
- * at 0 and then jump to done. Reporting therefore comes with a wait for the
- * next paint, which is also what paces the loop honestly: a frame callback
- * cannot arrive faster than the compositor can present, and the compositor is
- * behind the same GPU doing the marching. (The same feedback the tier probe's
- * cadence clock runs on.)
+ * loop runs: drawFrame only SUBMITS work, so a loop that counts submissions
+ * counts the CPU racing ahead of the GPU — the bar used to reach the march's
+ * whole share almost immediately and then sit there while the read-back's
+ * mapAsync waited out all the actual marching. Reporting therefore waits for
+ * `queue.onSubmittedWorkDone()` after each pass, so `done` counts passes the
+ * GPU has FINISHED and the bar moves at the speed the work does. The await
+ * also frees the event loop, which is what lets the browser paint the bar at
+ * all, and it works in a hidden tab (a frame-callback wait would not).
  *
- * The wait is time-gated rather than per-pass. A fast card can finish a pass
- * in less than a frame interval, and stopping for a paint after every one of
- * them would cost more than the marching does; twice a second is enough for a
- * bar to read as moving, and cheap enough that the account of the work cannot
- * measurably slow the work.
+ * The sync costs one CPU/GPU bubble per pass, which is noise against a pass
+ * that marches the whole volume at capture resolution — and the video path,
+ * which read-backs every frame anyway, does not ask for progress and keeps
+ * its unsynchronized loop.
  */
 export async function renderAccumulated(renderer, targetView, size, view,
                                         frames, overlays = null,
                                         onProgress = null) {
   renderer.resetAccumulation();
-  let lastReport = performance.now();
   for (let i = 0; i < frames; i++) {
     await renderer.drawFrame(
       targetView, STILL_FORMAT, size,
@@ -147,39 +147,10 @@ export async function renderAccumulated(renderer, targetView, size, view,
       // overlays each time composites them once, not sixty-four times.
       { deltaSeconds: null, overlays });
     if (!onProgress) continue;
-    const now = performance.now();
-    if (now - lastReport < PROGRESS_INTERVAL_MS && i < frames - 1) continue;
-    lastReport = now;
+    await renderer.device.queue.onSubmittedWorkDone();
     onProgress(i + 1, frames);
-    await nextPaint();
   }
 }
-
-const PROGRESS_INTERVAL_MS = 500;
-
-/**
- * Wait for the browser to paint — or don't, if it isn't going to.
- *
- * A hidden tab is served no frame callbacks at all, so waiting for one there
- * would park a capture the moment its user switched away to wait for it, and
- * a timer instead of the callback runs into background throttling. A tab
- * nobody is looking at has no bar to redraw either, so the honest thing is to
- * stop waiting: the capture runs the way it did before there was a bar.
- */
-const nextPaint = () => {
-  const doc = globalThis.document;
-  if (doc?.visibilityState === "hidden") return Promise.resolve();
-  return new Promise((resolve) => {
-    // Switching away mid-wait is the same situation arriving a moment later,
-    // and the pending frame callback would never come.
-    const done = () => {
-      doc?.removeEventListener("visibilitychange", done);
-      resolve();
-    };
-    doc?.addEventListener("visibilitychange", done, { once: true });
-    requestAnimationFrame(done);
-  });
-};
 
 /** Copy a texture to the CPU, undoing the 256-byte row padding. */
 export async function readBack(device, texture, w, h) {
