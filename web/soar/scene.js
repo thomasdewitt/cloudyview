@@ -19,6 +19,7 @@ import {
   guardAllocation, volumeFits, retireAfterSubmittedWork,
 } from "./gpu.js";
 import * as K from "./constants.js";
+import { worldToRelative } from "./camera.js";
 import { fromHalf } from "./half.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
@@ -328,6 +329,28 @@ export function cityFramePosition(position, cityOffsetM, tileExtentM) {
           position[2]];
 }
 
+/**
+ * Cyberpunk's opening view, in the loaded field's own relative frame.
+ *
+ * CITY_START_CAMERA is pinned in city metres because that is the frame the
+ * view lives in — a street canyon is a place in the TILE, not a fraction of
+ * whatever cloud box is flying over it. The un-fold picks the tile copy the
+ * capture was actually taken in (offset + city coordinates, no wrapping):
+ * the camera's own constrain() folds at the common multiple of both periods,
+ * which moves nothing visible, whereas wrapping here at the cloud period is
+ * precisely the drift this frame exists to end.
+ */
+function cityStartCamera(bmin, bmax) {
+  const [cx, cy, cz] = K.CITY_START_CAMERA.positionCityM;
+  const world = [K.CITY_TILE_OFFSET_M[0] + cx, K.CITY_TILE_OFFSET_M[1] + cy, cz];
+  return {
+    position: worldToRelative(world, bmin, bmax),
+    azimuth: K.CITY_START_CAMERA.azimuth,
+    elevation: K.CITY_START_CAMERA.elevation,
+    fov: K.CITY_START_CAMERA.fov,
+  };
+}
+
 export class Scene {
   constructor(device, parts) {
     this.device = device;
@@ -615,9 +638,11 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       // there — see Camera.applyStart and viewer boot. Under a forced city
       // the mode's own opening view replaces it, for the same reason the
       // mode's moon replaces the demo's sun: the demo's camera is a daylight
-      // aerial over cloud tops, and cyberpunk is a street.
+      // aerial over cloud tops, and cyberpunk is a street. The mode's view
+      // is pinned in the city frame (see CITY_START_CAMERA) and converted to
+      // THIS field's relative frame here, where the box is known.
       startCamera: forcedSurface === "city"
-        ? K.CITY_START_CAMERA : (meta.still?.camera ?? null),
+        ? cityStartCamera(bmin, bmax) : (meta.still?.camera ?? null),
     });
     progress?.("Ready.", 1);
     return scene;

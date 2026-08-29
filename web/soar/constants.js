@@ -133,20 +133,25 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // of the view.
 export const CITY_MOON = { azimuth: 181.0, elevation: 20.0 };
 
-// Where a cyberpunk flight opens, in the app's relative coordinates: x and y
-// across the domain box, z from the ground to the box top. Down in the
-// streets, looking north-west along a canyon with the moon off the right
-// shoulder — Thomas flew to it and took a still there (the capture of
-// 2026-08-22 12:31, whose metadata these six numbers are), and the landing
-// page's cyberpunk backdrop is the same view rendered offline.
+// Where a cyberpunk flight opens: down in the streets, looking north-west
+// along a canyon with the moon off the right shoulder — Thomas flew to it and
+// took a still there (the capture of 2026-08-22 12:31, whose metadata these
+// six numbers are), and the landing page's cyberpunk backdrop is the same
+// view rendered offline.
 //
 // The mode's, not the demo's: a borrowed demo carries the camera ITS landing
 // still was taken from, which is a daylight aerial over cloud tops, and
-// arriving 4 km up in the dark is arriving nowhere. Relative rather than
-// metres so the same six numbers open either case of the pair, whose domains
-// are different sizes.
+// arriving 4 km up in the dark is arriving nowhere. Pinned in the CITY frame
+// (x/y metres in the tile, z world metres — the capture metadata's own city
+// block), not in domain-relative coordinates: relative x/y measure across
+// the CLOUD box, so the same triple lands in a different district under
+// every differently-sized field — and worse, wrapping it into [-1, 1] moves
+// the camera by a cloud period, which leaves the clouds identical and
+// shifts the CITY by a fifth of a tile. That wrap is exactly how the spawn
+// drifted a domain-width off the backdrop's street. scene.js converts this
+// to the loaded field's relative frame at build time.
 export const CITY_START_CAMERA = {
-  position: [-0.5099984733293184, 0.7051286812163227, -0.8408204917524384],
+  positionCityM: [17393.0, 61646.0, 309.0],
   azimuth: 168.60,
   elevation: -1.20,
   fov: 100.0,
