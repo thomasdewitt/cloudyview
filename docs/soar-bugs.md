@@ -112,6 +112,58 @@ dies.
 
 ---
 
+## 22. Firefox+NVIDIA: compiling the CITY shader segfaults the driver
+
+**Status:** open upstream; nothing wrong in soar. Found 2026-08-31, bisected
+to a construct the same day; full evidence and a one-command repro harness in
+`temp/firefox-city-crash/`.
+
+Clicking either fly button in cyberpunk mode dies deterministically on
+Firefox 154 + NVIDIA 595.80 + RTX 5080 (Fedora 44, Wayland):
+`createRenderPipeline` on the CITY-specialized module SIGSEGVs inside
+`libnvidia-gpucomp` (the driver's SPIR-V compiler), and because Firefox runs
+WebGPU in its MAIN process on Linux, the whole browser goes. Reproduced
+>10/10 with a compile-only page — no volume, no flying, fresh profile — and
+at the city's first commit (4138575), so cyberpunk has been
+crash-on-compile on this stack since it landed. **Not bug 14** (different
+fingerprint, different trigger); the "crashing more" impression since late
+August is this bug stacked on that one.
+
+The bisected trigger: the euclidean wrap `(((a % n) + n) % n)` in
+`city_cell`, with `n` from `textureDimensions()`, live, in a shader this
+large (stubbing either big caller of `city_cell` also hides it — a minimal
+standalone sample will likely not reproduce). The WGSL is valid; Chrome
+(Dawn/Tint) compiles the identical source on the same driver, and native
+wgpu always has — the differential is Firefox's naga-generated SPIR-V
+meeting NVIDIA's compiler. A floor-div rewrite of the two wrap lines was
+verified to compile (twice) as part of the bisection, but is exactly the
+finely-tuned-for-one-driver workaround this codebase does not want
+(Thomas, 2026-08-31: "I don't really want like some brittle or finely tuned
+workaround for firefox specifically… The code should be the most 'correct'
+in a general sense"). The move is the upstream report, with the full
+specialized WGSL attached; the crash-report fields worth quoting are in the
+repro kit's README.
+
+**Upstream state (researched 2026-08-31).** Signed `%` on NVIDIA Vulkan is
+known territory: wgpu #8191 (wrong values; closed) and #9578 (open) — naga
+emitted `OpSRem`, which the Vulkan SPIR-V environment leaves *poison* for
+negative operands without `VK_KHR_maintenance8`. Merged fix wgpu PR #9674
+(2026-07-01) makes naga lower signed `%` unconditionally to a guarded
+`a - b*(a/b)` (SDiv/IMul/ISub) wrapper — and that revision IS an ancestor
+of Firefox 154's vendored wgpu (f7ebc07, verified in the vendored
+writer.rs). So this crash is the driver's compiler segfaulting on the
+*well-defined polyfill*, not on OpSRem poison: a pure NVIDIA robustness
+bug on valid SPIR-V, unreported as far as searching shows. Mozilla
+crash-stats has one matching wild signature (`<.text ELF section in
+libnvidia-gpucomp.so.595.91.07>`, Firefox 154) — note 595.91.07, not this
+box's pinned 595.80, so the box's driver-pin hybrid is not implicated and
+the production-branch driver crashes too. File with NVIDIA (compiler
+segfault, attach SPIR-V) and Mozilla (content must not kill a main-process
+browser; maintenance8 + plain OpSRem may also sidestep — 595.80 exposes
+it).
+
+---
+
 ## 21. Haze distance past ~70 km blacks the screen
 
 **Status:** open, reported 2026-08-18 on macOS (M1, 8 GB) against the
