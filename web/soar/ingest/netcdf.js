@@ -604,12 +604,26 @@ export function decoderFor(attrs) {
  */
 export function unitsMultiplier(units) {
   if (units === null || units === undefined) return null;
-  const u = String(units).trim().toLowerCase();
+  const u = normalizeUnits(units);
   if (u === "") return 1.0;          // SAM convention: empty means g/kg
   if (u === "g/kg") return 1.0;
   if (u === "g/g" || u === "kg/kg") return 1000.0;
   throw new Error(
     `Unsupported units '${units}'. Expected 'g/kg', 'g/g' or 'kg/kg'.`);
+}
+
+/**
+ * Fold the CF spellings of a mixing-ratio unit onto the slash form.
+ *
+ * CF writes a ratio as a product of powers — 'kg kg-1', 'g kg**-1' — so the
+ * same unit reaches us half a dozen ways. Rewrite the negative-exponent
+ * denominator as a division and the rest is a plain string compare.
+ */
+export function normalizeUnits(units) {
+  let u = String(units).trim().toLowerCase();
+  u = u.replace(/\s*\*\*\s*-\s*1\b/g, "-1").replace(/\s*\^\s*-\s*1\b/g, "-1");
+  u = u.replace(/^(\S+)\s+(\S+?)\s*-\s*1$/, "$1/$2");
+  return u.replace(/\s+/g, "");
 }
 
 /**

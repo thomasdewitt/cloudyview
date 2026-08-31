@@ -1,6 +1,7 @@
 """NetCDF I/O utilities and variable inference for CloudyView."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -397,6 +398,22 @@ def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str) -> None
             )
 
 
+_UNITS_EXPONENT_RE = re.compile(r"\s*(?:\*\*|\^)\s*-\s*1\b")
+_UNITS_RATIO_RE = re.compile(r"^(\S+)\s+(\S+?)\s*-\s*1$")
+
+
+def _normalize_units(units: str) -> str:
+    """Fold the CF spellings of a mixing-ratio unit onto the slash form.
+
+    CF writes a ratio as a product of powers — 'kg kg-1', 'g kg**-1' — so
+    the same unit reaches us half a dozen ways. Rewrite the negative-exponent
+    denominator as a division and the rest is a plain string compare.
+    """
+    normalized = _UNITS_EXPONENT_RE.sub("-1", units.strip().lower())
+    normalized = _UNITS_RATIO_RE.sub(r"\1/\2", normalized)
+    return re.sub(r"\s+", "", normalized)
+
+
 def check_and_convert_units(
     data_array: xr.DataArray,
     var_name: str,
@@ -442,7 +459,7 @@ def check_and_convert_units(
                         "Units must be specified as 'g/kg', 'g/g', or 'kg/kg'.")
 
     # Normalize units string (strip whitespace, handle case variations)
-    units_normalized = units.strip().lower()
+    units_normalized = _normalize_units(units)
 
     if units_normalized == '':
         # SAM LPT 3D output writes an empty units attribute on QC/QI even
