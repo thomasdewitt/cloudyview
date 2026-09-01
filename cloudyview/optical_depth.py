@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 # Liquid is the geometric-optics limit with Q_ext = 2 exactly:
 # tau = 3 Q_ext LWP / (4 rho_w r_e) = 1.5 LWP / r_e for LWP in g/m^2 and
 # r_e in microns (rho_w = 1e6 g/m^3 folds in). Petty (2006), "A First Course
-# in Atmospheric Radiation", 2nd ed., Eq. 7.86. This is the same Q_ext = 2
-# that compute_extinction_field assumes, so the column integral and the
-# volume renderers agree on liquid.
+# in Atmospheric Radiation", 2nd ed., Eq. 7.86. compute_extinction_field
+# uses the same coefficients for both species, so the column integral and
+# the volume renderers agree.
 TAU_PER_LWP_UM = np.float32(1.5)          # m^2 um / g
 
 # Ice is Ebert & Curry (1992), JGR 97(D4), 3831-3836, doi:10.1029/91JD02472,
@@ -26,6 +26,27 @@ TAU_PER_LWP_UM = np.float32(1.5)          # m^2 um / g
 # tau / IWP = a + b / r_e  [IWP g/m^2, r_e um].
 EC92_BAND1_A = np.float32(3.448e-3)       # m^2 / g
 EC92_BAND1_B = np.float32(2.431)          # m^2 um / g
+
+
+def liquid_mass_extinction(re_um: float) -> np.float32:
+    """Liquid mass-extinction coefficient (m^2/g): 1.5 / r_e, Q_ext = 2."""
+    return TAU_PER_LWP_UM / np.float32(re_um)
+
+
+def ice_mass_extinction(re_um: float) -> np.float32:
+    """Ice mass-extinction coefficient (m^2/g): Ebert & Curry (1992) band 1.
+
+    THE ice coefficient, everywhere: the volume renderers used to convert
+    ice with the geometric-optics sphere at bulk ice density
+    (1.5 / (rho_ice r_e) = 0.0545 m^2/g at 30 um) while the column optical
+    depth used this fit (0.0845 m^2/g at 30 um) — a 1.55x disagreement
+    between glimpse and witness/behold from the same file. Ebert & Curry is
+    the one with a physical case for the visible band: it is fitted to real
+    (nonspherical) ice cloud optics, whose area per unit mass exceeds the
+    mass-equivalent sphere's, which is exactly what the geometric prefactor
+    understates.
+    """
+    return EC92_BAND1_A + EC92_BAND1_B / np.float32(re_um)
 
 
 def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
@@ -64,18 +85,17 @@ def compute_extinction_field(lwc: np.ndarray, z: np.ndarray, re: float = 10.0,
     rho_air = (pressures / (R * T)).astype(np.float32)
 
     # Liquid water contribution. The 1.5 is 3 Q_ext / 4 with Q_ext = 2, the
-    # geometric-optics limit — Petty (2006), Eq. 7.86.
+    # geometric-optics limit — Petty (2006), Eq. 7.86. For r_e in um this is
+    # 1.5 / r_e m^2/g, the same coefficient the column optical depth uses.
     lwc_g_m3 = lwc * rho_air[np.newaxis, np.newaxis, :]
-    rho_water = 1e6  # g/m³
-    r_eff_liquid_m = re * 1e-6  # Convert μm to m
-    sigma_ext_liquid = np.float32(1.5 / (rho_water * r_eff_liquid_m)) * lwc_g_m3
+    sigma_ext_liquid = liquid_mass_extinction(re) * lwc_g_m3
 
-    # Ice water contribution (if present)
+    # Ice water contribution (if present): Ebert & Curry (1992) band 1, the
+    # same coefficient the column optical depth uses — see
+    # ice_mass_extinction for why the geometric sphere it replaced is wrong.
     if iwc is not None:
         iwc_g_m3 = iwc * rho_air[np.newaxis, np.newaxis, :]
-        rho_ice = 917e3  # g/m³ (ice density ~917 kg/m³)
-        r_eff_ice_m = re_ice * 1e-6  # Convert μm to m
-        sigma_ext_ice = np.float32(1.5 / (rho_ice * r_eff_ice_m)) * iwc_g_m3
+        sigma_ext_ice = ice_mass_extinction(re_ice) * iwc_g_m3
         sigma_ext = sigma_ext_liquid + sigma_ext_ice
     else:
         logger.info("No ice water content detected; using liquid-only extinction.")
@@ -121,17 +141,17 @@ def optical_depth_from_water_paths(
     ice is Ebert & Curry (1992) Table 2 band 1 exactly. See the module header.
     """
     # Liquid: tau = 1.5 * LWP / r_e — Petty (2006), Eq. 7.86 with Q_ext = 2.
-    tau_liquid = lwp * (TAU_PER_LWP_UM / np.float32(liquid_re))
+    tau_liquid = lwp * liquid_mass_extinction(liquid_re)
 
     # Ice: tau = IWP * (a + b / r_e) — Ebert & Curry (1992), Table 2 band 1.
-    tau_ice = iwp * (EC92_BAND1_A + EC92_BAND1_B / np.float32(ice_re))
+    tau_ice = iwp * ice_mass_extinction(ice_re)
 
     # Snow: same relationship as ice. r_e = 300 um is well outside the range
     # Ebert & Curry fit (ice cloud, r_e ~ 5-130 um); extrapolating rather than
     # splitting snow onto its own parameterization is a deliberate choice.
     tau_snow = np.zeros_like(tau_ice)
     if swp is not None:
-        tau_snow = swp * (EC92_BAND1_A + EC92_BAND1_B / np.float32(snow_re))
+        tau_snow = swp * ice_mass_extinction(snow_re)
     else:
         logger.info("No snow water path detected; using liquid+ice optical depth only.")
 

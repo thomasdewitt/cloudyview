@@ -85,9 +85,35 @@ def _prepare_extinction(field: CloudField, verbose: bool = False):
     """Extinction field + ice fraction + geometry from a CloudField.
 
     Returns (sigma_ext, ice_fraction, geom, dx, dy, dz).
+
+    The vertical is CROPPED to the occupied band, with witness's own rule
+    (see crop_empty_z), before the geometry is computed. This is not an
+    optimization here — it is what makes behold agree with witness and the
+    browser about where the domain box IS. Soar's behold hand-off measures
+    `--camera-position` against the cropped box; an uncropped behold read
+    rel_z against the file's full z extent and put the camera at an altitude
+    scaled by z_top_file / z_top_cropped — a silently wrong picture.
     """
-    x_coord, y_coord, z_coord = field.x, field.y, field.z
+    from .witness import crop_empty_z
+
+    x_coord, y_coord = field.x, field.y
     lw_np = field.lwc
+    iw_np_full = field.iwc
+
+    # The crop band is judged on extinction (what the renderers march), so
+    # liquid-only planes and ice-only planes both count as occupied.
+    sigma_full = optical_depth.compute_extinction_field(
+        lw_np, field.z, re=10.0, iwc=iw_np_full, re_ice=30.0)
+    _, z_coord, (z_lo, z_hi) = crop_empty_z(sigma_full, field.z)
+    if z_hi - z_lo + 1 < len(field.z):
+        lw_np = lw_np[:, :, z_lo:z_hi + 1]
+        if iw_np_full is not None:
+            iw_np_full = iw_np_full[:, :, z_lo:z_hi + 1]
+        if verbose:
+            print(f"  Cropped to z planes {z_lo}-{z_hi} of {len(field.z)} "
+                  "(the rest hold no cloud); the domain box follows the crop")
+
+    iw_np = iw_np_full
     nx, ny, nz = lw_np.shape
 
     # Domain geometry (shared with witness)
@@ -100,8 +126,7 @@ def _prepare_extinction(field: CloudField, verbose: bool = False):
         print(f"  Domain: {geom.width_x:.0f} x {geom.width_y:.0f} x {geom.height_z:.0f} m, "
               f"aspect ratio: {geom.ar_x:.2f} x {geom.ar_y:.2f}")
 
-    # Process ice water content if present
-    iw_np = field.iwc
+    # Process ice water content if present (already cropped above)
     ice_fraction = None
 
     if iw_np is not None:
@@ -110,12 +135,18 @@ def _prepare_extinction(field: CloudField, verbose: bool = False):
             if verbose:
                 print(f"  Ice water content detected (max: {np.max(iw_np):.6f} g/kg)")
 
-            # Compute ice fraction (0 = liquid, 1 = ice)
-            # Avoid division by zero
-            total_water = lw_np + iw_np
-            ice_fraction = np.divide(iw_np, total_water,
+            # Ice fraction (0 = liquid, 1 = ice) BY EXTINCTION, not by mass:
+            # this weight drives the liquid/ice phase-function blend, and a
+            # gram of ice does not scatter as much light as a gram of liquid
+            # (the mass-extinction coefficients differ; optical_depth.py).
+            # Air density cancels, so mixing ratios suffice. Matches soar's
+            # extinction-weighted ice fraction (web/soar/optical.js).
+            ext_liquid = lw_np * optical_depth.liquid_mass_extinction(10.0)
+            ext_ice = iw_np * optical_depth.ice_mass_extinction(30.0)
+            total_ext = ext_liquid + ext_ice
+            ice_fraction = np.divide(ext_ice, total_ext,
                                     out=np.zeros_like(iw_np),
-                                    where=total_water > 1e-10)
+                                    where=total_ext > 0)
         else:
             if verbose:
                 print("  Ice water content negligible, using liquid-only rendering")
@@ -127,9 +158,8 @@ def _prepare_extinction(field: CloudField, verbose: bool = False):
     if iw_np is None and verbose:
         print("  No ice water content detected; using liquid-only extinction.")
 
-    # Compute extinction coefficient (liquid + ice if present)
-    sigma_ext = optical_depth.compute_extinction_field(lw_np, z_coord, re=10.0,
-                                                      iwc=iw_np, re_ice=30.0)
+    # Already computed on the full column for the crop; take the band.
+    sigma_ext = sigma_full[:, :, z_lo:z_hi + 1]
 
     return sigma_ext, ice_fraction, geom, dx, dy, dz
 
@@ -367,7 +397,12 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
          x_dim: str = None,
          y_dim: str = None,
          z_dim: str = None,
-         ice: str = None) -> None:
+         ice: str = None,
+         timestep: int = None,
+         fallback_units: str = None,
+         fallback_ice_units: str = None,
+         fallback_coord_units: str = None,
+         no_ice: bool = False) -> None:
     """CLI wrapper: load, build the scene, progressively render and save PNGs.
 
     Composes the same helpers as the library :func:`behold`; the file
@@ -457,6 +492,11 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             x_dim=x_dim,
             y_dim=y_dim,
             z_dim=z_dim,
+            timestep=timestep,
+            fallback_units=fallback_units,
+            fallback_ice_units=fallback_ice_units,
+            fallback_coord_units=fallback_coord_units,
+            no_ice=no_ice,
         )
 
         camera = Camera(
@@ -575,7 +615,7 @@ def cli():
             Examples:
               behold cloud.nc --cpu
               behold cloud.nc high --gpu --output renders
-              behold cloud_QC.nc low --gpu --ice cloud_QI.nc
+              behold cloud_QC.nc low --gpu --ice-file cloud_QI.nc
               behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
               behold cloud.nc --cpu --camera-position 0 -0.99 -0.99 --camera-azimuth 0 --camera-elevation 35 --sun-azimuth 20 --sun-elevation 55
               behold cloud.nc --help
@@ -586,7 +626,7 @@ def cli():
     )
     parser.add_argument(
         "filename",
-        help="NetCDF file with cloud data (must contain qc/ql/LWC variable and be 3D single-timestep)"
+        help="NetCDF file with cloud data (liquid water variable required; one timestep, chosen with --timestep on multi-step files)"
     )
     backend_group = parser.add_mutually_exclusive_group(required=True)
     backend_group.add_argument(
@@ -614,10 +654,6 @@ def cli():
     parser.add_argument(
         "--output", "-o",
         help="Output directory for saving renders (default: current directory)"
-    )
-    parser.add_argument(
-        "--ice",
-        help="separate NetCDF file with the ice variable (SAM LPT split-file style)"
     )
     parser.add_argument(
         "--spp",
@@ -683,7 +719,6 @@ def cli():
     args = parser.parse_args()
     backend = 'llvm' if args.cpu else 'cuda'
     main(args.filename, backend, args.quality, args.output,
-         ice=args.ice,
          custom_spp=args.spp,
          custom_size=tuple(args.size) if args.size else None,
          custom_max_depth=args.max_depth,

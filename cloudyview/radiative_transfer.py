@@ -443,8 +443,13 @@ def create_mitsuba_scene(sigma_ext, dx, dy, dz, camera_config, spp=256,
     if ar_y is None:
         ar_y = (ny * dy) / height_z
 
-    # Prepare extinction data for Mitsuba
-    extinction_data = (sigma_ext * camera_config['extinction_multiplier'] * height_z)[
+    # Prepare extinction data for Mitsuba. sigma_ext is per metre and
+    # Mitsuba's sigma_t is per scene unit; the cube's local z runs [-1, 1],
+    # so height_z metres span 2 scene units and one scene unit is
+    # height_z / 2 metres (uniformly — the x/y aspect scaling keeps the
+    # metre-per-unit ratio the same on every axis).
+    extinction_data = (sigma_ext * camera_config['extinction_multiplier']
+                       * (0.5 * height_z))[
         ..., np.newaxis
     ].astype(np.float32)
     extinction_data = np.ascontiguousarray(

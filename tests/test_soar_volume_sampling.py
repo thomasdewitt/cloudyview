@@ -301,14 +301,23 @@ HARNESS = """
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= arrayLength(&queries)) { return; }
-    // bmin = 0 and bmax = the field dims makes the query BE the data
-    // coordinate, so nothing about the AABB is under test here.
+    // A deliberately non-trivial AABB (matching AABB_BMIN / AABB_VOXEL on
+    // the Python side), so the world-to-data mapping is under test too:
+    // cell centre i sits at box fraction (i + 0.5) / N, and the probe's
+    // world points only land back on integer data coordinates if
+    // sample_level applies exactly that convention.
     let td = vec3<f32>(textureDimensions(vol, 0));
     let dims = vec3<f32>(td.z, td.y, td.x);
-    results[i] = sample_level(vol, queries[i].xyz, vec3<f32>(0.0), dims,
+    let vox = vec3<f32>(12.5, 3.0, 90.0);
+    let bmin = vec3<f32>(100.0, -40.0, 7.0);
+    results[i] = sample_level(vol, queries[i].xyz, bmin, bmin + dims * vox,
                               queries[i].w > 0.5);
 }
 """
+
+# Must match `vox` and `bmin` in HARNESS above.
+AABB_VOXEL = np.array([12.5, 3.0, 90.0])
+AABB_BMIN = np.array([100.0, -40.0, 7.0])
 
 
 @pytest.fixture(scope="module")
@@ -333,6 +342,10 @@ def gpu_sampler_probe():
     module = device.create_shader_module(code=code)
 
     def probe(field, points, periodic):
+        # Queries arrive in data coordinates; the buffer carries world
+        # points inside the harness AABB. Cell centre g sits at world
+        # bmin + (g + 0.5) * voxel — the half-cell-padded convention.
+        points = AABB_BMIN + (np.asarray(points, np.float64) + 0.5) * AABB_VOXEL
         data = np.ascontiguousarray(field, np.float16)
         nx, ny, nz = data.shape
         texture = device.create_texture(

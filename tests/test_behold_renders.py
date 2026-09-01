@@ -168,14 +168,6 @@ TEST_CASES = [
 @pytest.mark.slow
 @pytest.mark.parametrize("dataset_name,view_name", TEST_CASES)
 def test_render_matches_reference(dataset_name: str, view_name: str, tmp_path: Path):
-    if view_name == "overhead_view":
-        pytest.xfail(
-            "overhead_view references are stale since the deliberate 2026-06 "
-            "turbidity/ocean retune (renders verified byte-identical across "
-            "the library refactor at this camera). Thomas declined regen "
-            "2026-07-07; refresh via tests/generate_references.py (~1 min) "
-            "whenever desired."
-        )
     """
     Test that a rendered view matches its reference image within tolerance.
 

@@ -3,7 +3,14 @@
 import numpy as np
 import pytest
 
-from cloudyview.optical_depth import vertically_integrated_optical_depth
+from cloudyview.optical_depth import (
+    EC92_BAND1_A,
+    EC92_BAND1_B,
+    compute_extinction_field,
+    ice_mass_extinction,
+    liquid_mass_extinction,
+    vertically_integrated_optical_depth,
+)
 
 
 def test_optical_depth_linearity():
@@ -67,3 +74,56 @@ def test_optical_depth_zero_padding_invariance():
     assert tau_long > 0, "Optical depth should be positive for nonzero LWC"
     np.testing.assert_allclose(tau_long, tau_short, rtol=1e-4,
                                err_msg="Zero padding around cloud layer should not change tau")
+
+
+def test_one_ice_coefficient_for_every_renderer():
+    """glimpse's column integral and the volume sigma must agree on ice.
+
+    They used to differ 1.55x: the column used Ebert & Curry band 1 and the
+    volume conversion a geometric-optics sphere at bulk ice density. One
+    coefficient now — Ebert & Curry — so integrating sigma over the column
+    reproduces tau for an ice-only cloud (and a liquid-only one).
+    """
+    n = 4
+    dz = 50.0
+    z = 1000.0 + np.arange(n) * dz
+    zeros = np.zeros((1, 1, n))
+    ones = np.full((1, 1, n), 1.0)
+
+    for lwc, iwc in ((ones, zeros), (zeros, ones), (ones, ones)):
+        sigma = compute_extinction_field(lwc, z, re=10.0, iwc=iwc,
+                                         re_ice=30.0)
+        # Same cell-thickness rule the column integral uses.
+        thickness = np.full(n, dz)
+        tau_from_sigma = float((sigma[0, 0] * thickness).sum())
+        tau = float(vertically_integrated_optical_depth(
+            lwc, z, iwc=iwc)[0, 0])
+        assert tau_from_sigma == pytest.approx(tau, rel=1e-4)
+
+    assert float(ice_mass_extinction(30.0)) == pytest.approx(
+        float(EC92_BAND1_A + EC92_BAND1_B / np.float32(30.0)))
+
+
+def test_behold_ice_fraction_is_extinction_weighted():
+    """Equal masses of liquid and ice are NOT equal shares of the light.
+
+    The phase-function blend weight must be ice's share of the extinction:
+    with lwc = iwc, that is k_ice / (k_liq + k_ice) ~ 0.36 at the standard
+    effective radii, not the 0.5 a mass weighting gives.
+    """
+    from cloudyview.behold import _prepare_extinction
+    from cloudyview.cloudfield import CloudField
+
+    n = 4
+    coords = np.arange(n, dtype=np.float64) * 100.0
+    field = CloudField(
+        lwc=np.full((n, n, n), 1.0, dtype=np.float32),
+        iwc=np.full((n, n, n), 1.0, dtype=np.float32),
+        x=coords, y=coords, z=coords + 1000.0)
+
+    _, ice_fraction, _, _, _, _ = _prepare_extinction(field)
+    k_liq = float(liquid_mass_extinction(10.0))
+    k_ice = float(ice_mass_extinction(30.0))
+    expected = k_ice / (k_liq + k_ice)
+    assert expected == pytest.approx(0.36, abs=0.01)
+    np.testing.assert_allclose(ice_fraction, expected, rtol=1e-6)

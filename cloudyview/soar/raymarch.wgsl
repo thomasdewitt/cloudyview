@@ -786,10 +786,11 @@ fn edge_taper(g: f32, n: f32) -> f32 {
 }
 
 // Extinction (m^-1) from one level via hardware trilinear filtering.
-// Coordinate swizzle: texture is (w=nz, h=ny, d=nx), see file header. Witness
-// uses gx=(p-bmin)/dx with data value i at gx=i, so texel i IS data value i
-// and the normalized coord is (gx+0.5)/N — every pre-existing world/data
-// sample preserved, with no border to skip past.
+// Coordinate swizzle: texture is (w=nz, h=ny, d=nx), see file header. The
+// AABB is half-cell padded, so cell centre i sits at fraction (i+0.5)/N of
+// the box: data_g = fraction*N - 0.5 puts data value i at data_g=i, texel i
+// IS data value i, and the normalized coord is (data_g+0.5)/N — which is the
+// box fraction itself, with no border to skip past.
 //
 // `periodic_level` picks how the domain edge behaves. A doubly periodic outer
 // level wraps: the repeat sampler fetches the far face as the trilinear
@@ -802,7 +803,7 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
                 bmin: vec3<f32>, bmax: vec3<f32>, periodic_level: bool) -> f32 {
     let tex_dims = vec3<f32>(textureDimensions(t, 0));
     let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
-    let data_g = ((q - bmin) / (bmax - bmin)) * dims;
+    let data_g = ((q - bmin) / (bmax - bmin)) * dims - 0.5;
     let tex_coord = vec3<f32>(
         data_g.z + 0.5,
         data_g.y + 0.5,
@@ -831,7 +832,7 @@ fn sample_light_tau(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(light_tau, 0));
     let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
-    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims;
+    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims - 0.5;
     let tex_coord = vec3<f32>(
         data_g.z + 0.5,
         data_g.y + 0.5,
@@ -854,7 +855,7 @@ fn ice_fraction_at(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(ice_frac, 0));
     let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
-    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims;
+    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims - 0.5;
     let tex_coord = vec3<f32>(
         data_g.z + 0.5,
         data_g.y + 0.5,
@@ -10080,8 +10081,11 @@ fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
         frag_pos.y - 0.5,
         frag_pos.x - 0.5
     );
+    // Texel i sits at box fraction (i+0.5)/N — the same half-cell-padded
+    // convention sample_level and sample_light_tau map with, so the read-back
+    // at texel centers returns exactly what was baked.
     let p = u.bmin.xyz
-        + (data_g / dims) * (u.bmax.xyz - u.bmin.xyz);
+        + ((data_g + 0.5) / dims) * (u.bmax.xyz - u.bmin.xyz);
     let tau = light_march_tau(p, u.sun_dir.xyz, 0.0, 0.0);
     return vec4<f32>(tau, 0.0, 0.0, 1.0);
 }
