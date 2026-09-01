@@ -422,6 +422,7 @@ def witness(
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     lod: float = DEFAULT_LOD_STRENGTH,
     quality: Optional[str] = None,
+    return_linear: bool = False,
     verbose: bool = False,
 ) -> np.ndarray:
     """Render a cloud field with soar's volumetric ray marcher.
@@ -454,13 +455,21 @@ def witness(
         the sun above the horizon.
     accumulate : int, optional
         Accumulated passes; more is less noise (default 64).
+    return_linear : bool, optional
+        Compile the tone map out and return unbounded linear HDR radiance
+        instead of an encoded image. This is what soar's auto-exposure
+        meters, so it is also how an offline render reproduces the exposure
+        the app would settle on. Already the contract of
+        :func:`render_nested`; exposed here so a caller holding a
+        ``CloudField`` does not have to build the level itself.
     verbose : bool, optional
         Print diagnostics.
 
     Returns
     -------
     ndarray
-        (height, width, 3) float64 in [0, 1], tone mapped.
+        (height, width, 3) float64 in [0, 1], tone mapped — or unbounded
+        linear radiance when ``return_linear`` is set.
     """
     witness_config = config.get_witness_config()
     rendering = witness_config['rendering']
@@ -500,7 +509,7 @@ def witness(
         tone_map_white_point=tone_map_white_point, contrast=contrast,
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
         periodic=periodic, accumulate=accumulate, quality=quality,
-        verbose=verbose)
+        return_linear=return_linear, verbose=verbose)
 
 
 def _render_with_nest(filename: str, outer_field: CloudField, camera: Camera,

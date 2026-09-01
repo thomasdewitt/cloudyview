@@ -96,6 +96,14 @@ OUT = REPO / "web" / "soar" / "demos"
 # says so — there is nothing here to fall back to.
 STEAM_SRC = REPO.parent / "turbulon-model" / "demos" / "fields"
 
+# The RCEMIP small-domain intercomparison output — one RCE protocol run by
+# several models — lives on the external drive rather than in data/demos: the
+# set is tens of gigabytes and it is shared with the STEAM comparison figures,
+# so there is one copy of it and this is where it is. A spec that names it
+# only bakes on the machine with the drive mounted; the baked products in
+# web/soar/demos/ are what the repo carries.
+RCEMIP_SRC = Path("/Volumes/BLUE/STEAM visuals and demos/RCEMIP LES comparison")
+
 # The rail on the landing page is grouped, and the grouping lives here: each
 # spec names a group, and every group is declared below whether or not it has
 # anything in it yet. A group with no demos ships as "coming-soon", which the
@@ -342,10 +350,19 @@ DEMOS = [
             exposure=2.83618562719, haze=1.43,
         ),
     ),
+    # --- RCEMIP ------------------------------------------------------------
+    # Three models on ONE protocol: the RCEMIP small-domain RCE case at
+    # SST 300 K, run by CM1, SAM and DALES. They are named as a family and
+    # sit together on the rail because that is what makes them worth
+    # shipping — the same forcing, the same equilibrium, three codes'
+    # answers to it, which is exactly the comparison the STEAM work is for.
+    # The regime line repeats across the three deliberately; it is the same
+    # regime, and saying so three times is the point rather than an
+    # oversight.
     dict(
         id="rce",
         group="hydrodynamics",
-        title="CM1 RCE",
+        title="CM1 RCEMIP",
         field="Radiative–convective equilibrium",
         liquid=("CM1_RCE_small_les300_3D_allvars_hour1200.nc", "clw"),
         ice=("CM1_RCE_small_les300_3D_allvars_hour1200.nc", "cli"),
@@ -358,6 +375,56 @@ DEMOS = [
             position=(-0.00633639238438, 0.0177418162348, -0.947201859468),
             azimuth=256.08, elevation=18.8, fov=100.0,
             exposure=1.66376086725, haze=1.3,
+        ),
+    ),
+    # SAM writes QN — cloud water and cloud ice in one variable — and this run
+    # wrote nothing else, so the two phases are recovered from TABS by SAM's
+    # own ramp rather than named. See _split_phases for why that is reading
+    # the model back rather than choosing a look.
+    dict(
+        id="rce-sam",
+        group="hydrodynamics",
+        title="SAM RCEMIP",
+        field="Radiative–convective equilibrium",
+        liquid=("RCEMIP_SST300_480x480x146-200m-2s_480_0002160000.nc", "QN"),
+        ice=None,
+        split=dict(var="TABS", t_ice=253.16, t_liquid=273.16),
+        src=RCEMIP_SRC,
+        dims="zyx",
+        crop=dict(y=(0, 480), x=(0, 480), z="auto"),
+        scale=1.0,                       # QN units attribute says g/kg
+        sun=dict(azimuth=20.0, elevation=55.0),
+        # Thomas's framing, flown 2026-08-31. The exposure that came back with
+        # it was metered against a field that counted QN as both phases, so it
+        # does not transfer to this bake and the meter is asked again.
+        still=dict(
+            size=(1920, 961),
+            position=(0.573153097861, -0.509558749967, -0.998447204969),
+            azimuth=52.08, elevation=20.84, fov=100.0,
+            exposure="auto", haze=-0.038,
+        ),
+    ),
+    dict(
+        id="rce-dales",
+        group="hydrodynamics",
+        title="DALES RCEMIP",
+        field="Radiative–convective equilibrium",
+        liquid=("DALES_RCE_small_les300_3D_clw_t30.nc", "clw"),
+        ice=("DALES_RCE_small_les300_3D_cli_t30.nc", "cli"),
+        src=RCEMIP_SRC,
+        dims="zyx",
+        # DALES writes cell centres as xt/yt/zt rather than x/y/z.
+        coords=("xt", "yt", "zt"),
+        crop=dict(y=(0, 504), x=(0, 504), z="auto"),
+        scale=1e3,                       # kg/kg -> g/kg
+        sun=dict(azimuth=20.0, elevation=55.0),
+        # Thomas's framing, flown 2026-08-31, and the exposure metered here
+        # for the same reason it is on every fresh bake.
+        still=dict(
+            size=(1920, 961),
+            position=(-0.251072780761, 0.238920408802, -0.998201438849),
+            azimuth=306.72, elevation=20.84, fov=100.0,
+            exposure="auto", haze=-0.038,
         ),
     ),
     # The FIF cascade was shipped here until 2026-08-08 and was dropped: it is
@@ -449,11 +516,36 @@ def _axis_mean(a: np.ndarray, f: int) -> np.ndarray:
     return a.reshape(-1, f).mean(axis=1)
 
 
-def _coords(path: Path, crop: dict):
+def has_ice(spec: dict) -> bool:
+    """Whether this spec produces an ice phase at all.
+
+    Not the same question as `spec["ice"]`, which is only the two-variable
+    way of answering it: a `split` case has no ice VARIABLE and still has
+    ice, and asking the narrow question is how a SAM demo ships with no
+    ice.bin.gz beside it. One predicate, so the bake, the ice-only pass and
+    the "this demo has none, remove the stale file" branch all agree.
+    """
+    return bool(spec["ice"]) or bool(spec.get("split"))
+
+
+def coord_names(spec: dict) -> tuple:
+    """The (x, y, z) coordinate variables this spec's grid is read from.
+
+    The bare axis letters by default, which is what SAM and CM1 write. DALES
+    writes cell centres as xt/yt/zt, so its spec says so. cloudyview.io infers
+    this for a file a user hands the app; a demo spec is a place where the
+    answer is already known, and naming it keeps the inference rules out of
+    the bake.
+    """
+    return tuple(spec.get("coords", ("x", "y", "z")))
+
+
+def _coords(path: Path, crop: dict, names=("x", "y", "z")):
+    xn, yn, zn = names
     with Dataset(path) as ds:
-        x = np.asarray(ds.variables["x"][crop["x"][0]:crop["x"][1]], np.float64)
-        y = np.asarray(ds.variables["y"][crop["y"][0]:crop["y"][1]], np.float64)
-        z = np.asarray(ds.variables["z"][crop["z"][0]:crop["z"][1]], np.float64)
+        x = np.asarray(ds.variables[xn][crop["x"][0]:crop["x"][1]], np.float64)
+        y = np.asarray(ds.variables[yn][crop["y"][0]:crop["y"][1]], np.float64)
+        z = np.asarray(ds.variables[zn][crop["z"][0]:crop["z"][1]], np.float64)
     return x, y, z
 
 
@@ -472,6 +564,83 @@ def _extinction(lwc, z, iwc):
 # and an uploaded copy of the same field would paint different phases.
 SIGMA_LIQUID_PREFACTOR = 1.5 / (1e6 * 10.0e-6)        # m^2/g, 0.15
 SIGMA_ICE_PREFACTOR = 1.5 / (917e3 * 30.0e-6)         # m^2/g, 0.0545...
+
+
+def _split_phases(spec: dict, src: Path, qn: np.ndarray, dims: str,
+                  crop: dict) -> tuple:
+    """Take a combined-condensate variable apart into liquid and ice.
+
+    SAM writes QN — cloud water and cloud ice added together — and nothing
+    else, so a spec that names QN as its condensate has to say how the two
+    phases are recovered or the bake has to guess. It does not guess: it
+    reads back the partition the model itself used. SAM1MOM carries the
+    liquid share as a linear ramp in temperature,
+
+        omega = clip((T - t_ice) / (t_liquid - t_ice), 0, 1)
+
+    all liquid at or above t_liquid, all ice at or below t_ice, mixed
+    between, and QN is split by it. That is not a rendering convention
+    invented here; it is what the run meant by QN.
+
+    The alternative — naming QN as BOTH phases, which is what the app allows
+    a curious user to do — adds the two extinctions of one condensate and
+    tints every cloudy voxel with the same flat ice fraction. It renders,
+    and it is wrong.
+    """
+    split = spec["split"]
+    t = _read(src / split.get("file", spec["liquid"][0]), split["var"],
+              dims, crop)
+    lo, hi = float(split["t_ice"]), float(split["t_liquid"])
+    omega = np.clip((t - lo) / (hi - lo), 0.0, 1.0, out=t)   # in place: t dies
+    ice = qn * (1.0 - omega)
+    liquid = qn * omega
+    return liquid, ice
+
+
+def read_condensate(spec: dict, crop: dict, src: Path = None,
+                    post=None) -> tuple:
+    """The (liquid, ice) mixing ratios this spec asks for, in g/kg.
+
+    Two shapes of source. Most cases name a variable per phase — TWP-ICE
+    reads QC and QI out of two files, DALES clw and cli out of two more. A
+    run that wrote only a combined condensate names `split` instead, and the
+    phases are recovered from temperature; see _split_phases. `ice` is None
+    for a case that really is liquid only, and DYCOMS is one.
+
+    Scaling to g/kg happens here so the two paths cannot disagree about it,
+    and so the split's ramp sees a temperature in kelvin either way.
+
+    `post` is applied to each phase the moment that phase is finished —
+    which on the two-variable path means the second variable is not read
+    until the first has been reduced. That ordering is the whole reason it
+    is a callback and not something the caller does afterwards: the marine
+    case is 6.5 GB per variable at source resolution and coarsening it a
+    phase at a time is the difference between fitting and not.
+    """
+    src = src if src is not None else source_dir(spec)
+    scale = np.float32(spec["scale"])
+    post = post or (lambda a: a)
+
+    def read(path: Path, var: str) -> np.ndarray:
+        a = _read(path, var, spec["dims"], crop)
+        if scale != 1.0:
+            a *= scale
+        return a
+
+    if spec.get("split"):
+        if spec["ice"]:
+            raise ValueError(
+                f"{spec['id']}: `split` recovers both phases from one "
+                "condensate variable, so an `ice` variable as well is two "
+                "answers to one question")
+        lwc, iwc = _split_phases(spec, src, read(src / spec["liquid"][0],
+                                                 spec["liquid"][1]),
+                                 spec["dims"], crop)
+        return post(lwc), post(iwc)
+    lwc = post(read(src / spec["liquid"][0], spec["liquid"][1]))
+    if not spec["ice"]:
+        return lwc, None
+    return lwc, post(read(src / spec["ice"][0], spec["ice"][1]))
 
 
 def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
@@ -494,20 +663,13 @@ def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
     src = source_dir(spec)
     path = src / spec["liquid"][0]
     with Dataset(path) as ds:
-        z = np.asarray(ds.variables["z"][:], np.float64)
+        z = np.asarray(ds.variables[coord_names(spec)[2]][:], np.float64)
     full_z = (0, int(z.size))
     xs = spec["crop"]["x"]
-    scale = np.float32(spec["scale"])
     peak = np.zeros(z.size, dtype=np.float64)
     for i0 in range(xs[0], xs[1], slab):
         window = dict(spec["crop"], x=(i0, min(i0 + slab, xs[1])), z=full_z)
-        lwc = _read(path, spec["liquid"][1], spec["dims"], window)
-        iwc = (_read(src / spec["ice"][0], spec["ice"][1], spec["dims"], window)
-               if spec["ice"] else None)
-        if scale != 1.0:
-            lwc *= scale
-            if iwc is not None:
-                iwc *= scale
+        lwc, iwc = read_condensate(spec, window, src)
         sigma = _extinction(lwc, z, iwc)
         peak = np.maximum(peak, np.nanmax(sigma, axis=(0, 1)))
         print(f"    scanning for cloud: x {min(i0 + slab, xs[1])}/{xs[1]}",
@@ -541,7 +703,7 @@ def _write_gz(path: Path, raw: bytes) -> int:
 def _z_planes(spec: dict) -> int:
     """How many z planes the source file has, for aligning an auto band."""
     with Dataset(source_dir(spec) / spec["liquid"][0]) as ds:
-        return int(ds.variables["z"].size)
+        return int(ds.variables[coord_names(spec)[2]].size)
 
 
 def resolved_crop(spec: dict) -> dict:
@@ -585,31 +747,29 @@ def resolved_crop(spec: dict) -> dict:
 def load_demo(spec: dict) -> CloudField:
     src = source_dir(spec)
     crop = resolved_crop(spec)
-    s = np.float32(spec["scale"])
     f = coarsen_factor(spec)
 
-    # Each variable is read, scaled and coarsened before the next is touched,
-    # so the fine-resolution array — 6.5 GB on the marine case — exists for
-    # one variable at a time rather than two. Coarsening the MIXING RATIO
-    # here, ahead of any optics, is the physical order: see the `coarsen`
-    # note on the spec that uses it.
-    def read(path: Path, var: str) -> np.ndarray:
-        a = _read(path, var, spec["dims"], crop)
-        if s != 1.0:
-            a *= s
-        if f > 1:
-            coarse = _block_mean(a, f)
-            del a
-            return coarse
-        return a
-
-    lwc = read(src / spec["liquid"][0], spec["liquid"][1])
-    iwc = read(src / spec["ice"][0], spec["ice"][1]) if spec["ice"] else None
-    x, y, z = (_axis_mean(a, f) for a in _coords(src / spec["liquid"][0], crop))
+    # Coarsening the MIXING RATIO, ahead of any optics, is the physical
+    # order: see the `coarsen` note on the spec that uses it. A `split` case
+    # is partitioned before this for the same reason — the temperature ramp
+    # belongs to the source cell, and averaging phases is not averaging a
+    # ramp of an average temperature.
+    lwc, iwc = read_condensate(spec, crop, src,
+                               post=(lambda a: _block_mean(a, f)) if f > 1
+                               else None)
+    x, y, z = (_axis_mean(a, f)
+               for a in _coords(src / spec["liquid"][0], crop,
+                                coord_names(spec)))
     return CloudField(lwc=lwc, iwc=iwc, x=x, y=y, z=z,
                       source=str(src / spec["liquid"][0]),
                       liquid_var=spec["liquid"][1],
-                      ice_var=spec["ice"][1] if spec["ice"] else None)
+                      # A split case has no ice VARIABLE — the ice is a share
+                      # of the one condensate the file wrote — so the name
+                      # recorded is the split it came out of rather than a
+                      # variable a reader could go and look up.
+                      ice_var=(f"{spec['liquid'][1]} split by "
+                               f"{spec['split']['var']}" if spec.get("split")
+                               else spec["ice"][1] if spec["ice"] else None))
 
 
 # --- the shipped volume ----------------------------------------------------
@@ -710,7 +870,7 @@ def bake_ice(spec: dict, field: CloudField, meta: dict, out: Path) -> dict:
     crops are recomputed from the source.
     """
     if field.iwc is None:
-        raise ValueError(f"{spec['id']} has no ice variable; nothing to bake")
+        raise ValueError(f"{spec['id']} has no ice phase; nothing to bake")
     shape = tuple(int(v) for v in meta["volume"]["shape_xyz"])
     if tuple(field.lwc.shape) != shape:
         raise ValueError(
@@ -745,9 +905,82 @@ def bake_ice(spec: dict, field: CloudField, meta: dict, out: Path) -> dict:
         # rather than tinting every cloud wrong.
         "quantity": "ice_extinction_fraction",
         "scale": 1.0 / ICE_QUANT,
-        "source": Path(spec["ice"][0]).name,
-        "variable": spec["ice"][1],
+        "source": Path(spec["ice"][0] if spec["ice"]
+                       else spec["liquid"][0]).name,
+        # Where the ice came from. On a `split` case that is not a variable
+        # in the file but a partition of one, and saying so here is the only
+        # record a reader of the deployed demo gets.
+        **({"variable": spec["ice"][1]} if spec["ice"] else {
+            "variable": spec["liquid"][1],
+            "split": {"by": spec["split"]["var"],
+                      "t_ice": spec["split"]["t_ice"],
+                      "t_liquid": spec["split"]["t_liquid"]},
+        }),
     }
+
+
+# --- auto exposure ----------------------------------------------------------
+
+# soar's auto-exposure rule, restated from web/soar/constants.js and
+# viewer.js::_aeTick. This is the second copy and it has to stay the first
+# one's equal: a still baked at a hand-chosen exposure and a flight that
+# opens on the same camera and immediately meters its way somewhere else is
+# the jump cut the whole `still` block exists to prevent.
+#
+# The meter itself is the real march with the tone map compiled out (see
+# witness's return_linear), reduced to the MEAN LUMINANCE ABOVE the 99th
+# percentile — the mean and not the percentile, so a handful of specular
+# glints cannot be outvoted by the sky behind them.
+AE_PERCENTILE = 0.99
+AE_HIGHLIGHT_FRACTION = 0.90
+AE_RESPONSE = 0.5
+AE_LIMITS = (1.0, 4.0)
+# 64 x 36 in the browser, which is a 16:9 ray grid. Here the aspect follows
+# the still's — the browser meters the real aspect too (it passes the output
+# size for the projection and the meter size only for the ray count), and a
+# still is not always 16:9.
+AE_METER_WIDTH = 96
+
+
+def auto_exposure(spec: dict, field: CloudField, view: dict,
+                  white_point: float) -> float:
+    """The exposure soar's auto-exposure would settle on for this view.
+
+    Metered rather than tuned. The numbers in the `still` blocks that predate
+    this were copied out of the app after AE had converged, so this is the
+    same quantity arrived at by the same rule instead of by hand — and it is
+    the honest answer for a freshly baked field, whose extinction no earlier
+    hand-tuned number was chosen against.
+    """
+    w = AE_METER_WIDTH
+    h = max(1, int(round(w * view["size"][1] / view["size"][0])))
+    hdr = cv.witness(
+        field,
+        cv.Camera(position=view["position"], azimuth=view["azimuth"],
+                  elevation=view["elevation"], fov=view["fov"]),
+        size=(w, h), sun_azimuth=spec["sun"]["azimuth"],
+        sun_elevation=spec["sun"]["elevation"],
+        periodic=spec.get("periodic", True), accumulate=1,
+        return_linear=True,
+        **{_LOOK_ARG[k]: v for k, v in view["look"].items()
+           if k != "exposure"})
+    lum = np.sort((np.asarray(hdr, np.float64)
+                   * (0.2126, 0.7152, 0.0722)).sum(-1).ravel())
+    rank = min(lum.size - 1, int(AE_PERCENTILE * lum.size))
+    highlight = float(lum[rank:].mean())
+    lo, hi = AE_LIMITS
+    if not highlight > 0:
+        raise ValueError(
+            f"{spec['id']}: the auto-exposure meter saw no light at all from "
+            "this camera, so there is no exposure to derive. Check the "
+            "framing and the sun.")
+    full = AE_HIGHLIGHT_FRACTION * white_point / highlight
+    target = hi if full >= hi else hi * (full / hi) ** AE_RESPONSE
+    exposure = min(hi, max(lo, target))
+    print(f"    auto exposure: highlight {highlight:.3f} -> "
+          f"exposure {exposure:.3f}"
+          + (" (clamped)" if exposure != target else ""))
+    return exposure
 
 
 # --- the preview still ------------------------------------------------------
@@ -786,6 +1019,17 @@ def render_still(spec: dict, field: CloudField, out: Path, size,
     # them alone, and "the rest were the defaults" is only a reproduction if
     # you also know which day it was.
     look = {**LOOK_DEFAULTS, **{k: still[k] for k in LOOK_DEFAULTS if k in still}}
+    # exposure="auto" hands the number to the same meter the app uses rather
+    # than to a value somebody read off a slider. A case whose extinction was
+    # never flown at all — a fresh bake, or one whose physics changed under
+    # it — has no hand-tuned exposure that means anything, and this is what
+    # it should say instead of a plausible-looking constant.
+    if look["exposure"] == "auto":
+        look["exposure"] = auto_exposure(
+            spec, field,
+            dict(position=position, azimuth=azimuth, elevation=elevation,
+                 fov=fov, size=size, look=look),
+            look["white_point"])
     differs = {k: v for k, v in look.items() if v != LOOK_DEFAULTS[k]}
 
     print(f"    still: {size[0]}x{size[1]}, {accumulate} passes, "
@@ -812,9 +1056,14 @@ def render_still(spec: dict, field: CloudField, out: Path, size,
         # WebP rather than AVIF: supported everywhere WebGPU is, and an AVIF
         # trial came out an order of magnitude worse than JPEG rather than
         # better, so it is not paying for its complexity here.
-        subprocess.run(["magick", str(master), "-quality", str(quality),
-                        "-define", "webp:method=6", "-strip",
-                        str(out / "still.webp")], check=True)
+        # cwebp rather than ImageMagick: `magick -quality N -define
+        # webp:method=6` was calling libwebp anyway, so this is the same
+        # encoder with one less thing to have installed — and it is present
+        # on both of Thomas's machines, which magick is not. cwebp writes no
+        # metadata, so there is nothing left to -strip.
+        subprocess.run(["cwebp", "-quiet", "-q", str(quality), "-m", "6",
+                        str(master), "-o", str(out / "still.webp")],
+                       check=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -945,8 +1194,8 @@ def bake_ice_only(only) -> None:
         out = OUT / spec["id"]
         meta_path = out / "meta.json"
         print(f"\n=== {spec['id']}: {spec['title']} ===", flush=True)
-        if not spec["ice"]:
-            print("    no ice variable in the spec — nothing to bake")
+        if not has_ice(spec):
+            print("    no ice phase in the spec — nothing to bake")
             continue
         if not meta_path.exists():
             raise FileNotFoundError(
@@ -1014,7 +1263,7 @@ def main() -> None:
         # source files — which are not in the repo — between anyone and a
         # one-word edit to a card.
         field = None
-        wants_ice = bool(spec["ice"]) and not args.skip_ice
+        wants_ice = has_ice(spec) and not args.skip_ice
         if not (args.skip_volume and args.skip_still and not wants_ice):
             t0 = time.time()
             field = load_demo(spec)
@@ -1069,7 +1318,7 @@ def main() -> None:
             meta["periodic"] = bool(spec.get("periodic", True))
         if wants_ice:
             meta["ice"] = bake_ice(spec, field, meta, out)
-        elif not spec["ice"]:
+        elif not has_ice(spec):
             # A demo whose spec drops the ice variable must lose the block and
             # the file with it: leaving either behind offers the viewer a
             # fraction that no longer belongs to this field.
