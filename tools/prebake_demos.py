@@ -233,12 +233,25 @@ DEMOS = [
         dims="xyz",
         crop=dict(y=(0, 2048), x=(0, 2048), z="auto"),
         scale=1e3,
-        sun=dict(azimuth=100.0, elevation=51.5),
+        # A near-horizon sun, reframed 2026-09-01. The previous view was a
+        # high midday sun at 51.5 degrees; this is 4.5, which is a different
+        # picture of the same field rather than a different angle on the same
+        # picture. `sun` is demo-level and not part of the still block, so
+        # this relights the flight too — which is the point: the app opens on
+        # the still's camera, and a still lit one way opening onto a scene lit
+        # another is the jump cut the block exists to prevent.
+        sun=dict(azimuth=17.0, elevation=4.5),
         still=dict(
-            size=(1920, 963),
-            position=(0.516654156817, -0.285165086182, -0.993548387097),
-            azimuth=249.48, elevation=45.92, fov=100.0,
-            exposure=3.86833683967, haze=1.0,
+            # Thomas's aspect, reduced by the same factor on both axes
+            # (2548x1464 = 4 x 637x366, this is 3 x 637x366) so the doubled
+            # output lands at 3822x2196 rather than 5096x2928. Identical
+            # framing — the projection reads the ratio — at the ~4K width the
+            # rest of the set renders at, which on the heaviest field in the
+            # set is worth the arithmetic.
+            size=(1911, 1098),
+            position=(0.143706839143, -0.506586793566, -0.993548387097),
+            azimuth=344.40, elevation=22.64, fov=100.0,
+            exposure="auto", haze=-0.038,
         ),
     ),
     # The marine case block-averaged 2x2x2, which is a DIFFERENT kind of pair
@@ -271,17 +284,23 @@ DEMOS = [
         # give a mean of ratios where the field wants a ratio of means.
         coarsen=2,
         scale=1e3,
-        sun=dict(azimuth=100.0, elevation=51.5),
-        # The fine case's camera, unchanged. Positions in a still block are
+        # Follows the fine case, sun included. Positions in a still block are
         # relative to the domain box and the box is the same 51.2 km either
         # way, so this is the same view of the same world — which is the point
         # of shipping the pair, and it makes the two cards on the landing page
-        # a before/after rather than two unrelated pictures.
+        # a before/after rather than two unrelated pictures. Reframing one and
+        # not the other would end that, which is why this block moved with the
+        # one above on 2026-09-01 rather than being left where it was.
+        sun=dict(azimuth=17.0, elevation=4.5),
         still=dict(
-            size=(1920, 963),
-            position=(0.516654156817, -0.285165086182, -0.993548387097),
-            azimuth=249.48, elevation=45.92, fov=100.0,
-            exposure=3.86833683967, haze=1.0,
+            size=(1911, 1098),
+            position=(0.143706839143, -0.506586793566, -0.993548387097),
+            azimuth=344.40, elevation=22.64, fov=100.0,
+            # Metered per case rather than copied from the fine one: the
+            # coarse field is the same world with its small scales averaged
+            # away, so its highlights are not the fine field's and AE would
+            # not have settled in the same place.
+            exposure="auto", haze=-0.038,
         ),
     ),
     dict(
