@@ -13,6 +13,7 @@ All validation and variable/coordinate inference lives in
 :class:`CloudField`.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 from pathlib import Path
@@ -20,6 +21,8 @@ from pathlib import Path
 import numpy as np
 
 from . import io
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,13 +62,13 @@ class CloudField:
     ice_group: Optional[str] = None
 
     def __post_init__(self):
-        self.lwc = np.asarray(self.lwc, dtype=np.float32)
+        self.lwc = self._checked_condensate("lwc", self.lwc)
         if self.lwc.ndim != 3:
             raise ValueError(
                 f"lwc must be 3D (x, y, z); got shape {self.lwc.shape}."
             )
         if self.iwc is not None:
-            self.iwc = np.asarray(self.iwc, dtype=np.float32)
+            self.iwc = self._checked_condensate("iwc", self.iwc)
             if self.iwc.shape != self.lwc.shape:
                 raise ValueError(
                     "iwc shape must match lwc shape; "
@@ -82,12 +85,50 @@ class CloudField:
                     f"{name} coordinate must be 1D with length {n}; "
                     f"got shape {coord.shape}."
                 )
+            if not np.isfinite(coord).all():
+                raise ValueError(
+                    f"{name} coordinate contains non-finite values."
+                )
             if coord.size > 1 and np.all(np.diff(coord) < 0):
                 coord = coord[::-1].copy()
                 self.lwc = np.flip(self.lwc, axis=axis).copy()
                 if self.iwc is not None:
                     self.iwc = np.flip(self.iwc, axis=axis).copy()
+            # After any flip: strictly ascending, or the voxels do not have
+            # a defined place in space. An unsorted, folded or repeated
+            # coordinate renders a spatially scrambled field that still
+            # looks like a cloud, which is worse than an error.
+            if coord.size > 1 and not np.all(np.diff(coord) > 0):
+                raise ValueError(
+                    f"{name} coordinate must be strictly monotonic; it is "
+                    "neither ascending nor descending, so the grid has no "
+                    "defined spatial order."
+                )
             setattr(self, name, coord)
+
+    @staticmethod
+    def _checked_condensate(name: str, values) -> np.ndarray:
+        """float32 copy with the value policy io.load applies at load time.
+
+        Fields built in memory get the same contract as loaded ones: any
+        non-finite value raises (there is no fill declaration to excuse it
+        here), and negative condensate — normal LES numerics — clamps to
+        zero, loudly.
+        """
+        values = np.asarray(values, dtype=np.float32)
+        finite = np.isfinite(values)
+        if not finite.all():
+            raise ValueError(
+                f"{name} has {int((~finite).sum())} non-finite value(s)."
+            )
+        negative = values < 0
+        if negative.any():
+            logger.warning(
+                "Clamped %d negative value(s) in %s to zero (most "
+                "negative: %g).", int(negative.sum()), name,
+                float(values.min()))
+            values = np.where(negative, 0.0, values).astype(np.float32)
+        return values
 
     @property
     def shape(self) -> tuple:
@@ -119,6 +160,10 @@ def load(
     y_dim: Optional[str] = None,
     z_dim: Optional[str] = None,
     fallback_units: Optional[str] = None,
+    fallback_ice_units: Optional[str] = None,
+    fallback_coord_units: Optional[str] = None,
+    timestep: Optional[int] = None,
+    no_ice: bool = False,
     stage_callback: Optional[Callable[[str], None]] = None,
 ) -> CloudField:
     """Load a cloud field from NetCDF into a :class:`CloudField`.
@@ -141,9 +186,21 @@ def load(
     x_dim, y_dim, z_dim : str, optional
         Explicit dimension names for the x/y/z axes.
     fallback_units : str, optional
-        Units to assume for condensate variables that carry no 'units'
-        attribute at all ('g/kg' or 'kg/kg'). Without it a missing
+        Units to assume for condensate variables whose 'units' attribute is
+        missing or empty ('g/kg' or 'kg/kg'). Without it a missing
         attribute stays an error.
+    fallback_ice_units : str, optional
+        Same, for the ice variable specifically; falls back to
+        `fallback_units` when not given.
+    fallback_coord_units : str, optional
+        'm' or 'km': units to assume for a spatial coordinate whose units
+        attribute is present but unrecognized. Without it an unrecognized
+        units string stays an error.
+    timestep : int, optional
+        Which step to take from a multi-timestep file. A multi-step file
+        without it is an error; a single-step file needs no choice.
+    no_ice : bool, optional
+        Skip the ice variable even when one could be inferred.
     stage_callback : callable, optional
         Receives coarse loading stage strings for interactive callers.
 
@@ -176,6 +233,10 @@ def load(
         z_dim=z_dim,
         ice_filepath=str(ice) if ice is not None else None,
         fallback_units=fallback_units,
+        fallback_ice_units=fallback_ice_units,
+        fallback_coord_units=fallback_coord_units,
+        timestep=timestep,
+        no_ice=no_ice,
     )
 
     if stage_callback is not None:

@@ -110,37 +110,9 @@ def _write_nested_render_file(path: Path, *, with_units: bool = True) -> None:
         ).to_netcdf(path, mode="a", group=group)
 
 
-def test_find_liquid_water_groups_reports_root_and_nested_fields(tmp_path: Path):
-    nested = tmp_path / "nests.nc"
-    _write_nested_render_file(nested)
-    assert io.find_liquid_water_groups(str(nested)) == ["render_a", "render_b"]
-
-    flat = tmp_path / "flat.nc"
-    xr.Dataset(
-        data_vars={
-            "qc": (
-                ("x", "y", "z"),
-                np.zeros((2, 3, 4), dtype=np.float64),
-                {"units": "g/kg"},
-            )
-        }
-    ).to_netcdf(flat)
-    # The root group is reported as "" — the loader's own default.
-    assert io.find_liquid_water_groups(str(flat)) == [""]
-
-    grouped = tmp_path / "grouped.nc"
-    _write_grouped_dataset(grouped)
-    # Non-standard variable names are not candidates without an override.
-    assert io.find_liquid_water_groups(str(grouped)) == []
-
-
-def test_condensate_vars_missing_units_and_fallback(tmp_path: Path):
+def test_fallback_units_convert_like_an_attribute_would(tmp_path: Path):
     path = tmp_path / "nests_no_units.nc"
     _write_nested_render_file(path, with_units=False)
-
-    assert io.condensate_vars_missing_units(str(path), group="render_a") == [
-        "qc", "qi",
-    ]
 
     data = io.load_and_validate(
         str(path),
@@ -157,10 +129,148 @@ def test_units_attribute_present_needs_no_fallback(tmp_path: Path):
     path = tmp_path / "nests.nc"
     _write_nested_render_file(path)
 
-    assert io.condensate_vars_missing_units(str(path), group="render_b") == []
-
     data = io.load_and_validate(str(path), liquid_water_group="render_b")
     np.testing.assert_allclose(data["liquid_water_data"].values, 1.0)
+
+
+def test_explicit_units_beat_the_empty_string_heuristic(tmp_path: Path):
+    """units='' plus --units kg/kg must convert, not assume SAM g/kg.
+
+    The empty attribute says nothing; letting it outrank an explicit answer
+    loaded such files 1000x too thin.
+    """
+    path = tmp_path / "empty_units.nc"
+    xr.Dataset(
+        data_vars={"qc": (("x", "y", "z"),
+                          np.full((2, 3, 4), 0.001), {"units": ""})},
+        coords={"x": ("x", [0.0, 1000.0], {"units": "m"}),
+                "y": ("y", [0.0, 2000.0, 4000.0], {"units": "m"}),
+                "z": ("z", [100.0, 300.0, 800.0, 1600.0], {"units": "m"})},
+    ).to_netcdf(path)
+
+    with_flag = io.load_and_validate(str(path), fallback_units="kg/kg")
+    np.testing.assert_allclose(with_flag["liquid_water_data"].values, 1.0)
+    # No flag: the SAM empty-string convention still stands, unconverted.
+    without = io.load_and_validate(str(path))
+    np.testing.assert_allclose(without["liquid_water_data"].values, 0.001)
+
+
+def _write_pair(tmp_path: Path, ice_coords: dict, ice_coord_attrs=None,
+                ice_units="g/kg"):
+    """A liquid file and a split ice file on (z, y, x), 2x3x4 voxels."""
+    lw_coords = {"z": ("z", [100.0, 300.0], {"units": "m"}),
+                 "y": ("y", [0.0, 2000.0, 4000.0], {"units": "m"}),
+                 "x": ("x", [0.0, 1000.0, 2000.0, 3000.0], {"units": "m"})}
+    lw_path = tmp_path / "liquid.nc"
+    xr.Dataset(
+        data_vars={"qc": (("z", "y", "x"), np.full((2, 3, 4), 0.1),
+                          {"units": "g/kg"})},
+        coords=lw_coords).to_netcdf(lw_path)
+
+    attrs = {"units": ice_units} if ice_units is not None else {}
+    ice_path = tmp_path / "ice.nc"
+    xr.Dataset(
+        data_vars={"qi": (("z", "y", "x"), np.full((2, 3, 4), 0.2), attrs)},
+        coords={name: (name, values,
+                       (ice_coord_attrs or {}).get(name, {"units": "m"}))
+                for name, values in ice_coords.items()},
+    ).to_netcdf(ice_path)
+    return str(lw_path), str(ice_path)
+
+
+def test_split_ice_matching_grid_loads(tmp_path: Path):
+    lw, ice = _write_pair(tmp_path, {
+        "z": [100.0, 300.0], "y": [0.0, 2000.0, 4000.0],
+        "x": [0.0, 1000.0, 2000.0, 3000.0]})
+    data = io.load_and_validate(lw, ice_filepath=ice)
+    assert data["ice_water_var"] == "qi"
+    np.testing.assert_allclose(data["ice_water_data"].values, 0.2)
+
+
+def test_split_ice_mismatch_caught_even_when_another_axis_fails(tmp_path):
+    """A missing z coordinate must not blind the x comparison.
+
+    The old check extracted all three ice coordinates in one call inside a
+    blanket except: any one axis failing threw the other two away and let a
+    provably mismatched grid in by shape alone.
+    """
+    lw, ice = _write_pair(tmp_path, {
+        # z coordinate absent entirely; x shifted off the liquid grid.
+        "y": [0.0, 2000.0, 4000.0],
+        "x": [500.0, 1500.0, 2500.0, 3500.0]})
+    with pytest.raises(ValueError, match="different x-coordinate"):
+        io.load_and_validate(lw, ice_filepath=ice)
+
+
+def test_split_ice_missing_axis_is_recorded_not_silent(tmp_path: Path):
+    lw, ice = _write_pair(tmp_path, {
+        "y": [0.0, 2000.0, 4000.0],
+        "x": [0.0, 1000.0, 2000.0, 3000.0]})
+    data = io.load_and_validate(lw, ice_filepath=ice)
+    assert any("no z coordinate" in a for a in data["assumptions"])
+
+
+def test_split_ice_non_length_coordinate_refuses(tmp_path: Path):
+    """Ice coordinates in degrees are a different grid, not a shape match."""
+    lw, ice = _write_pair(
+        tmp_path,
+        {"z": [100.0, 300.0], "y": [0.0, 2000.0, 4000.0],
+         "x": [0.0, 1000.0, 2000.0, 3000.0]},
+        ice_coord_attrs={"x": {"units": "degrees_east"}})
+    with pytest.raises(ValueError, match="unit of length|not a unit"):
+        io.load_and_validate(lw, ice_filepath=ice)
+
+
+def test_ice_units_flag_answers_the_ice_file(tmp_path: Path):
+    """--ice-units mirrors --units, for the ice variable specifically."""
+    lw, ice = _write_pair(
+        tmp_path,
+        {"z": [100.0, 300.0], "y": [0.0, 2000.0, 4000.0],
+         "x": [0.0, 1000.0, 2000.0, 3000.0]},
+        ice_units=None)
+    with pytest.raises(ValueError, match="units"):
+        io.load_and_validate(lw, ice_filepath=ice)
+    data = io.load_and_validate(lw, ice_filepath=ice,
+                                fallback_ice_units="kg/kg")
+    np.testing.assert_allclose(data["ice_water_data"].values, 200.0)
+    # The liquid keeps its own attribute: --ice-units touches ice only.
+    np.testing.assert_allclose(data["liquid_water_data"].values, 0.1)
+
+
+def test_ice_units_attribute_beats_the_flag(tmp_path: Path):
+    lw, ice = _write_pair(
+        tmp_path,
+        {"z": [100.0, 300.0], "y": [0.0, 2000.0, 4000.0],
+         "x": [0.0, 1000.0, 2000.0, 3000.0]},
+        ice_units="g/kg")
+    data = io.load_and_validate(lw, ice_filepath=ice,
+                                fallback_ice_units="kg/kg")
+    np.testing.assert_allclose(data["ice_water_data"].values, 0.2)
+
+
+def test_same_file_ice_may_use_its_own_dimension_names(tmp_path: Path):
+    """qc(zt, yt, xt) + qi(z, y, x) on one logical grid must load."""
+    path = tmp_path / "two_spellings.nc"
+    xr.Dataset(
+        data_vars={
+            "qc": (("zt", "yt", "xt"), np.full((2, 3, 4), 0.1),
+                   {"units": "g/kg"}),
+            "qi": (("z", "y", "x"), np.full((2, 3, 4), 0.2),
+                   {"units": "g/kg"}),
+        },
+        coords={
+            "zt": ("zt", [100.0, 300.0], {"units": "m"}),
+            "yt": ("yt", [0.0, 2000.0, 4000.0], {"units": "m"}),
+            "xt": ("xt", [0.0, 1000.0, 2000.0, 3000.0], {"units": "m"}),
+            "z": ("z", [100.0, 300.0], {"units": "m"}),
+            "y": ("y", [0.0, 2000.0, 4000.0], {"units": "m"}),
+            "x": ("x", [0.0, 1000.0, 2000.0, 3000.0], {"units": "m"}),
+        },
+    ).to_netcdf(path)
+    data = io.load_and_validate(str(path))
+    assert data["ice_water_var"] == "qi"
+    assert data["ice_water_data"].shape == data["liquid_water_data"].shape
+    assert any("independently" in a for a in data["assumptions"])
 
 
 # --- Nest detection: fineness is a per-axis relation -----------------------
@@ -205,21 +315,9 @@ def _write_refinement_file(path: Path, groups: dict) -> None:
         ).to_netcdf(path, mode="a", group=name)
 
 
-def test_nest_sharing_vertical_levels_is_offered(tmp_path: Path):
-    path = tmp_path / "shared_z.nc"
-    _write_refinement_file(path, {"parent": PARENT_COORDS, "nest": NEST_COORDS})
-    assert io.find_nestable_group_pairs(str(path)) == [("parent", "nest")]
-
-
-def test_candidate_coarser_on_one_axis_is_refused(tmp_path: Path):
-    path = tmp_path / "mixed.nc"
-    _write_refinement_file(path, {"parent": PARENT_COORDS, "mixed": MIXED_COORDS})
-    assert io.find_nestable_group_pairs(str(path)) == []
-
-
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
-def test_nestable_pairs_agree_with_browser(tmp_path: Path):
-    """field.js must reach the same verdicts on the same grids."""
+def test_nestable_pairs_per_axis_fineness_gate(tmp_path: Path):
+    """field.js offers the shared-z nest and refuses the mixed one."""
     repo = Path(__file__).resolve().parents[1]
     script = """
     import { domainExtent, nestablePairs } from %s;
@@ -232,13 +330,11 @@ def test_nestable_pairs_agree_with_browser(tmp_path: Path):
     process.stdout.write(JSON.stringify(nestablePairs(domains)));
     """ % json.dumps(str(repo / "web" / "soar" / "field.js"))
     cases = {
-        "shared_z": {"parent": PARENT_COORDS, "nest": NEST_COORDS},
-        "mixed": {"parent": PARENT_COORDS, "mixed": MIXED_COORDS},
+        "shared_z": ({"parent": PARENT_COORDS, "nest": NEST_COORDS},
+                     [["parent", "nest"]]),
+        "mixed": ({"parent": PARENT_COORDS, "mixed": MIXED_COORDS}, []),
     }
-    for label, groups in cases.items():
-        path = tmp_path / f"{label}.nc"
-        _write_refinement_file(path, groups)
-        expected = [list(p) for p in io.find_nestable_group_pairs(str(path))]
+    for label, (groups, expected) in cases.items():
         payload = json.dumps([
             {"name": n, **{a: list(c[a]) for a in ("x", "y", "z")}}
             for n, c in groups.items()])

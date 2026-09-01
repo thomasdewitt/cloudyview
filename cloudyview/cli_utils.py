@@ -97,6 +97,43 @@ def add_dataset_selection_arguments(parser: argparse.ArgumentParser) -> None:
         "--z-dim",
         help="Explicit name of the vertical dimension.",
     )
+    parser.add_argument(
+        "--timestep", type=int, metavar="N",
+        help="Which step to take from a multi-timestep file (0-based). "
+             "Required when the file has several; a single-step file needs "
+             "no choice.",
+    )
+    parser.add_argument(
+        "--units", choices=["g/kg", "kg/kg", "g/g"],
+        help="Units to assume for a condensate variable whose 'units' "
+             "attribute is missing or empty. Without it a missing attribute "
+             "is an error.",
+    )
+    parser.add_argument(
+        "--ice-units", choices=["g/kg", "kg/kg", "g/g"],
+        help="Units to assume for the ice variable specifically, when its "
+             "'units' attribute is missing or empty. Falls back to --units "
+             "when not given.",
+    )
+    parser.add_argument(
+        "--coord-units", choices=["m", "km"],
+        help="Units to assume for a spatial coordinate whose units "
+             "attribute is present but not recognized. Recognized length "
+             "units convert on their own; without this flag an unrecognized "
+             "units string is an error.",
+    )
+    ice = parser.add_mutually_exclusive_group()
+    ice.add_argument(
+        "--ice-file", "--ice", dest="ice_file", metavar="FILE",
+        help="Second NetCDF file containing the ice water variable, for "
+             "output that writes one variable per file (SAM LPT style). "
+             "The ice variable is then required, in that file only.",
+    )
+    ice.add_argument(
+        "--no-ice", action="store_true",
+        help="Render liquid only, skipping the ice variable even when one "
+             "could be inferred.",
+    )
 
 
 def dataset_selection_kwargs(args: argparse.Namespace) -> dict:
@@ -114,4 +151,10 @@ def dataset_selection_kwargs(args: argparse.Namespace) -> dict:
         "x_dim": args.x_dim,
         "y_dim": args.y_dim,
         "z_dim": args.z_dim,
+        "timestep": args.timestep,
+        "fallback_units": args.units,
+        "fallback_ice_units": args.ice_units,
+        "fallback_coord_units": args.coord_units,
+        "ice": args.ice_file,
+        "no_ice": args.no_ice,
     }

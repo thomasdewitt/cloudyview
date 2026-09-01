@@ -244,11 +244,11 @@ behold my_cloud_data.nc high --gpu --output ./renders
 # Default render
 witness cloud.nc
 
-# High quality with custom camera
-witness cloud.nc high --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
+# Soar's max capture tier, custom camera
+witness cloud.nc --quality max --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
 
-# Custom size
-witness cloud.nc medium --size 1200 800
+# Custom size (default 600x400)
+witness cloud.nc --size 1200 800
 ```
 
 ### Behold Examples

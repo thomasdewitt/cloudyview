@@ -131,6 +131,11 @@ def tone_map(image, exposure=4.0, gamma=1.4):
 # so the last session is kept and reused when the field has not changed.
 _session = None
 _session_key = None
+# Strong references to the arrays the key identifies by id(): an id is only
+# unique while its object lives, so a cache that lets the arrays die can be
+# hit by a NEW field that happens to reuse a freed id — and serve it the
+# previous field's texture.
+_session_arrays = None
 
 
 def _volume_aabb(field: CloudField):
@@ -203,15 +208,20 @@ def crop_empty_z(sigma: np.ndarray, z: np.ndarray):
     hi = int(len(occupied) - 1 - np.argmax(occupied[::-1]))
     # The AABB needs two z coordinates to size its outer half-cells, and a
     # one-plane field is not something the march can do anything with anyway.
+    # Widen upward when possible, else downward — the sole occupied plane
+    # can be the topmost one. (Mirrored in web/soar/zcrop.js.)
     if hi == lo:
-        hi = min(len(occupied) - 1, lo + 1)
+        if lo + 1 < len(occupied):
+            hi = lo + 1
+        else:
+            lo = max(0, lo - 1)
     return sigma[:, :, lo:hi + 1], z[lo:hi + 1], (lo, hi)
 
 
 def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
                   tone_mapped: bool) -> SoarRenderer:
     """Get or build a session for these levels."""
-    global _session, _session_key
+    global _session, _session_key, _session_arrays
     nested = len(levels) > 1
     key = (tuple((id(l.sigma), l.sigma.shape, float(l.bmin[0]), float(l.bmax[0]))
                  for l in levels), periodic, nested, tone_mapped)
@@ -225,15 +235,16 @@ def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
     if nested:
         renderer.upload_nest(levels[0].sigma)
     _session, _session_key = renderer, key
+    _session_arrays = tuple(l.sigma for l in levels)
     return renderer
 
 
 # Soar's per-tier capture recipe, mirrored from web/soar/constants.js
 # (QUALITY_PRESETS + PARKED_ACCUM_FRAMES_BY_TIER, 2026-08-20): flight step
 # factors, the lighting method, and the parked sample count that is also a
-# capture's spp. --soar-tier applies one of these wholesale so a CLI render
+# capture's spp. --quality applies one of these wholesale so a CLI render
 # matches the in-app capture in all ways. Keep in step with the browser.
-SOAR_TIER_PRESETS = {
+QUALITY_PRESETS = {
     "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
                 "light_cache": False, "sky_probe": True,  "accumulate": 32},
     "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
@@ -268,7 +279,7 @@ def render_nested(
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
     lod: float = DEFAULT_LOD_STRENGTH,
-    soar_tier: Optional[str] = None,
+    quality: Optional[str] = None,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -299,16 +310,16 @@ def render_nested(
     renderer = _renderer_for(levels, periodic=periodic,
                              tone_mapped=not return_linear)
     min_voxel = min(outer.dx)
-    # --soar-tier is the whole recipe or none of it: step factors, lighting
+    # --quality is the whole recipe or none of it: step factors, lighting
     # method and sample count all come from the one preset, so this render
     # is the in-app capture at that tier, made from a terminal.
     tier = None
-    if soar_tier is not None:
-        if soar_tier not in SOAR_TIER_PRESETS:
+    if quality is not None:
+        if quality not in QUALITY_PRESETS:
             raise ValueError(
-                f"unknown soar tier '{soar_tier}'; expected one of "
-                f"{sorted(SOAR_TIER_PRESETS)}.")
-        tier = SOAR_TIER_PRESETS[soar_tier]
+                f"unknown quality tier '{quality}'; expected one of "
+                f"{sorted(QUALITY_PRESETS)}.")
+        tier = QUALITY_PRESETS[quality]
         accumulate = tier["accumulate"]
     view_factor = tier["step_factor"] if tier else step_voxel_factor
     light_factor = tier["light_step_factor"] if tier else step_voxel_factor
@@ -410,7 +421,7 @@ def witness(
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     lod: float = DEFAULT_LOD_STRENGTH,
-    soar_tier: Optional[str] = None,
+    quality: Optional[str] = None,
     verbose: bool = False,
 ) -> np.ndarray:
     """Render a cloud field with soar's volumetric ray marcher.
@@ -488,7 +499,7 @@ def witness(
         exposure=exposure, tone_map_gamma=tone_map_gamma,
         tone_map_white_point=tone_map_white_point, contrast=contrast,
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
-        periodic=periodic, accumulate=accumulate, soar_tier=soar_tier,
+        periodic=periodic, accumulate=accumulate, quality=quality,
         verbose=verbose)
 
 
@@ -563,7 +574,7 @@ def main(filename: str, output: str = None,
          haze: float = None,
          haze_height_dependent: bool = None,
          lod: float = None,
-         soar_tier: str = None,
+         quality: str = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -577,7 +588,13 @@ def main(filename: str, output: str = None,
          z_coord_name: str = None,
          x_dim: str = None,
          y_dim: str = None,
-         z_dim: str = None) -> None:
+         z_dim: str = None,
+         timestep: int = None,
+         fallback_units: str = None,
+         fallback_ice_units: str = None,
+         fallback_coord_units: str = None,
+         ice: str = None,
+         no_ice: bool = False) -> None:
     """CLI wrapper around :func:`witness`: load, render, save a PNG."""
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
@@ -611,12 +628,22 @@ def main(filename: str, output: str = None,
         look_kwargs['lod'] = lod
     if haze_height_dependent is not None:
         look_kwargs['haze_height_dependent'] = haze_height_dependent
-    if soar_tier is not None:
-        look_kwargs['soar_tier'] = soar_tier
+    if quality is not None:
+        look_kwargs['quality'] = quality
 
     try:
+        if nest_group and ice:
+            # The nest loads from its own group of the MAIN file; a split
+            # ice file describes the outer grid and has no counterpart for
+            # the nest, which would come out silently ice-free.
+            raise ValueError(
+                "--ice-file and --nest-group are not supported together: "
+                "the nest field has no separate ice file to pair with, so "
+                "it would render ice-free without saying so. Merge the ice "
+                "into the file's groups, or drop one of the flags.")
         field = _load_field(
             filename,
+            ice=ice,
             liquid_water_var=liquid_water_var,
             ice_water_var=ice_water_var,
             dataset_group=dataset_group,
@@ -629,6 +656,11 @@ def main(filename: str, output: str = None,
             x_dim=x_dim,
             y_dim=y_dim,
             z_dim=z_dim,
+            timestep=timestep,
+            fallback_units=fallback_units,
+            fallback_ice_units=fallback_ice_units,
+            fallback_coord_units=fallback_coord_units,
+            no_ice=no_ice,
         )
 
         camera = Camera(
@@ -655,6 +687,11 @@ def main(filename: str, output: str = None,
                     x_dim=x_dim,
                     y_dim=y_dim,
                     z_dim=z_dim,
+                    timestep=timestep,
+                    fallback_units=fallback_units,
+                    fallback_ice_units=fallback_ice_units,
+                    fallback_coord_units=fallback_coord_units,
+                    no_ice=no_ice,
                 ),
             )
         else:
@@ -695,14 +732,6 @@ def main(filename: str, output: str = None,
         sys.exit(1)
 
 
-QUALITY_PRESETS = {
-    'min':    (150, 100),
-    'low':    (300, 200),
-    'medium': (600, 400),
-    'high':   (1600, 1200),
-}
-
-
 def cli():
     """Command-line interface for witness.py"""
     parser = argparse.ArgumentParser(
@@ -732,12 +761,10 @@ def cli():
               - Elevation is degrees above the horizon.
 
             Quality:
-              Positional `quality` chooses a size preset:
-              - min: 150x100
-              - low: 300x200
-              - medium: 600x400
-              - high: 1600x1200
-              `--size WIDTH HEIGHT` overrides the preset.
+              `--quality` renders as the in-app capture at that soar tier
+              (minimal/low/medium/high/max): its step factors, lighting method
+              and sample count, all from the one preset the browser uses.
+              `--size WIDTH HEIGHT` sets the image size (default 600x400).
 
             Image controls (the same knobs the browser app exposes):
               `--gamma`, `--white-point`, `--contrast` and `--haze` set the tone
@@ -760,19 +787,16 @@ def cli():
 
             Examples:
               witness cloud.nc
-              witness cloud.nc high --output renders
-              witness cloud.nc medium --size 1200 800 --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
+              witness cloud.nc --quality max --output renders
+              witness cloud.nc --size 1200 800 --camera-position 0 -0.9 -0.99 --camera-azimuth 0 --camera-elevation 35
               witness cloud.nc --group /physics/clouds --liquid-water-var QCLOUD --ice-water-var QICE
-              witness cloud.nc high --nest-group /nest --white-point 15 --gamma 1.66 --haze 1.0 --periodic
+              witness cloud.nc --nest-group /nest --white-point 15 --gamma 1.66 --haze 1.0 --periodic
               witness custom.nc --liquid-water-group /state/liquid --ice-water-group /state/ice --coords-group /grid --x-dim ni --y-dim nj --z-dim nk --x-coord xh --y-coord yh --z-coord zh
             """
         ),
     )
     parser.add_argument("filename",
                         help="NetCDF file with cloud data")
-    parser.add_argument("quality", nargs='?', default='medium',
-                        choices=QUALITY_PRESETS.keys(),
-                        help="Quality preset (default: medium)")
     parser.add_argument("--output", "-o",
                         help="Output directory")
     parser.add_argument("--camera-position", type=float, nargs=3,
@@ -820,7 +844,7 @@ def cli():
                              "floor grows as t*tan(theta), so smaller is finer "
                              "and slower and never coarser. Soar writes its "
                              f"flown value here (default: {DEFAULT_LOD_STRENGTH})")
-    parser.add_argument("--soar-tier", choices=sorted(SOAR_TIER_PRESETS),
+    parser.add_argument("--quality", choices=sorted(QUALITY_PRESETS),
                         help="Render as the in-app capture at this soar "
                              "quality tier: its step factors, its lighting "
                              "method (sun-tau cache, sky probe) and its "
@@ -833,7 +857,7 @@ def cli():
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
-    size = tuple(args.size) if args.size else QUALITY_PRESETS[args.quality]
+    size = tuple(args.size) if args.size else None
 
     main(args.filename, args.output,
          camera_position=args.camera_position,
@@ -849,7 +873,7 @@ def cli():
          contrast=args.contrast,
          haze=args.haze,
          lod=args.lod,
-         soar_tier=args.soar_tier,
+         quality=args.quality,
          haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,

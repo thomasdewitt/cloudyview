@@ -187,6 +187,12 @@ def main(
     x_dim: str = None,
     y_dim: str = None,
     z_dim: str = None,
+    timestep: int = None,
+    fallback_units: str = None,
+    fallback_ice_units: str = None,
+    fallback_coord_units: str = None,
+    ice: str = None,
+    no_ice: bool = False,
 ) -> None:
     """
     Main function for glimpse.py
@@ -247,6 +253,7 @@ def main(
         # Load and validate data
         field = _load_field(
             filename,
+            ice=ice,
             liquid_water_var=liquid_water_var,
             ice_water_var=ice_water_var,
             dataset_group=dataset_group,
@@ -259,6 +266,11 @@ def main(
             x_dim=x_dim,
             y_dim=y_dim,
             z_dim=z_dim,
+            timestep=timestep,
+            fallback_units=fallback_units,
+            fallback_ice_units=fallback_ice_units,
+            fallback_coord_units=fallback_coord_units,
+            no_ice=no_ice,
         )
 
         print(f"✓ Loaded {field.liquid_var} variable (liquid water)")
@@ -384,7 +396,7 @@ def cli():
     )
     parser.add_argument(
         "filename",
-        help="NetCDF file with cloud data (must contain qc/ql/LWC variable; qi/QI/IWC optional; must be 3D single-timestep)"
+        help="NetCDF file with cloud data (liquid water variable required, ice optional; one timestep, chosen with --timestep on multi-step files)"
     )
     parser.add_argument(
         "--output", "-o", default=".",

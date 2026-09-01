@@ -80,6 +80,7 @@ def test_witness_cli_passes_dataset_override_args(monkeypatch):
         [
             "witness",
             "input.nc",
+            "--quality",
             "high",
             "--liquid-water-group",
             "state/liquid",
@@ -102,10 +103,47 @@ def test_witness_cli_passes_dataset_override_args(monkeypatch):
     assert captured["kwargs"]["liquid_water_group"] == "state/liquid"
     assert captured["kwargs"]["ice_water_group"] == "state/ice"
     assert captured["kwargs"]["coords_group"] == "grid"
-    assert captured["kwargs"]["custom_size"] == witness.QUALITY_PRESETS["high"]
+    # No size preset any more: size defaults inside witness() when None,
+    # and the quality tier is soar's capture recipe.
+    assert captured["kwargs"]["custom_size"] is None
+    assert captured["kwargs"]["quality"] == "high"
     assert captured["kwargs"]["x_dim"] == "ni"
     assert captured["kwargs"]["y_dim"] == "nj"
     assert captured["kwargs"]["z_dim"] == "nk"
+
+
+@pytest.mark.parametrize("module", [glimpse, witness, behold])
+def test_cli_passes_units_fallback_flags(monkeypatch, module):
+    """--units / --ice-units / --coord-units reach main() by these names.
+
+    The browser's `copy command` button emits exactly these flags, so the
+    spelling is a cross-boundary contract with web/soar.
+    """
+    captured = {}
+    monkeypatch.setattr(module, "main", lambda *a, **k: captured.update(k))
+    argv = [module.__name__.split(".")[-1], "input.nc",
+            "--units", "kg/kg", "--ice-units", "g/kg", "--coord-units", "km"]
+    if module is behold:
+        argv.insert(2, "--cpu")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    module.cli()
+
+    assert captured["fallback_units"] == "kg/kg"
+    assert captured["fallback_ice_units"] == "g/kg"
+    assert captured["fallback_coord_units"] == "km"
+
+
+def test_witness_ice_file_with_nest_group_is_refused(monkeypatch, tmp_path):
+    """--ice-file + --nest-group would render the nest silently ice-free."""
+    loads = []
+    monkeypatch.setattr(witness, "_load_field",
+                        lambda *a, **k: loads.append(k) or "field")
+    with pytest.raises(SystemExit) as excinfo:
+        witness.main("input.nc", str(tmp_path), nest_group="fine",
+                     ice="ice.nc")
+    assert excinfo.value.code == 1
+    assert loads == []
 
 
 def test_witness_cli_passes_image_control_args(monkeypatch):
@@ -311,6 +349,9 @@ def test_behold_cli_passes_dataset_override_args(monkeypatch):
         ("cloudyview.glimpse", "--liquid-water-group"),
         ("cloudyview.witness", "--coords-group"),
         ("cloudyview.behold", "--x-dim"),
+        ("cloudyview.glimpse", "--coord-units"),
+        ("cloudyview.witness", "--ice-units"),
+        ("cloudyview.behold", "--coord-units"),
     ],
 )
 def test_cli_help_lists_dataset_override_flags(module_name: str, required_text: str):
