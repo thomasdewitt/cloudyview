@@ -103,6 +103,31 @@ export function presentFormat(preferred) {
     : preferred;
 }
 
+/**
+ * The auto-exposure target for a metered highlight: the exposure that places
+ * the highlight statistic AUTO_EXPOSURE_HIGHLIGHT_FRACTION under the white
+ * point, softened by AUTO_EXPOSURE_RESPONSE and clamped to the auto range.
+ * `highlight` is exposure-independent (the meter's march has the tone map —
+ * and with it the exposure multiply — compiled out), so the result is an
+ * absolute exposure, not a correction.
+ *
+ * The ONE statement of the formula: _aeTick glides toward it, a capture
+ * applies it directly, and tools/prebake_demos.py restates it in Python
+ * (auto_exposure — change one, change both). Callers own the non-positive-
+ * highlight case (the live loop ignores the reading; a capture keeps
+ * DEFAULT_EXPOSURE), so a meter that saw no light at all is an error here,
+ * not a silent 4.0.
+ */
+export function autoExposureTarget(highlight, whitePoint) {
+  if (!(highlight > 0)) {
+    throw new Error(`autoExposureTarget needs a positive highlight; got ${highlight}.`);
+  }
+  const [lo, hi] = K.AUTO_EXPOSURE_LIMITS;
+  const full = K.AUTO_EXPOSURE_HIGHLIGHT_FRACTION * whitePoint / highlight;
+  return Math.min(hi, Math.max(
+    lo, full >= hi ? hi : hi * Math.pow(full / hi, K.AUTO_EXPOSURE_RESPONSE)));
+}
+
 // Exported for tests, which drive its prototype methods against stubs —
 // see tests/test_soar_load_panels.py. boot() is still the way to build one.
 export class Viewer {
@@ -144,11 +169,15 @@ export class Viewer {
     this.captureSize = null;
     this.videoFps = K.DEFAULT_VIDEO_FPS;
     // Captures pick their own tier — a still leans expensive, a video has
-    // hundreds of frames to pay for (Thomas, 2026-08-20). Each capture uses
-    // that tier's flight configuration at the capture resolution, with the
-    // tier's parked sample count as its spp; see capture.captureFrames.
-    this.captureStillTier = "max";
-    this.captureVideoTier = "high";
+    // hundreds of frames to pay for (Thomas, 2026-08-20). A capture at a
+    // named tier is what a PARKED view at that tier converges to, at the
+    // capture size (2026-09-01): the tier's lighting method, parked spp and
+    // look defaults, sampled like the top hold rung. Stored null = "not
+    // explicitly picked", which the captureStillTier/-VideoTier getters
+    // resolve to the usual defaults — or to "custom" (the session's hand-set
+    // look, verbatim) the moment any of haze/lod/autoExposure is by hand.
+    this._captureStillTier = null;
+    this._captureVideoTier = null;
     // Whether a capture — still or video — draws the flyer and the minimap
     // over the clouds. One switch for both overlays, shared by both panels:
     // a capture either shows the flight apparatus or it doesn't.
@@ -1648,16 +1677,9 @@ export class Viewer {
     this.renderer.meterLuminance(outputSize, this._viewKwargs())
       .then((highlight) => {
         if (!(highlight > 0) || this._disposed || !this.autoExposure) return;
-        const [lo, hi] = K.AUTO_EXPOSURE_LIMITS;
-        // Full protection would place the highlight at the fraction of the
-        // white point; the response exponent applies only that share of the
-        // log-distance below the ceiling (see AUTO_EXPOSURE_RESPONSE).
-        const full = K.AUTO_EXPOSURE_HIGHLIGHT_FRACTION
-          * this.toneMapWhitePoint / highlight;
-        const target = Math.min(hi, Math.max(
-          lo,
-          full >= hi ? hi
-                     : hi * Math.pow(full / hi, K.AUTO_EXPOSURE_RESPONSE)));
+        // The one statement of the target formula (a capture applies the
+        // same one directly, with no glide) — see autoExposureTarget.
+        const target = autoExposureTarget(highlight, this.toneMapWhitePoint);
         const err = Math.abs(Math.log2(target / this.exposure));
         if (this._aeSettled) {
           if (err < K.AUTO_EXPOSURE_DEADBAND_START_LOG2) return;
@@ -1717,31 +1739,120 @@ export class Viewer {
   }
 
   /**
+   * Whether any of the three look settings a capture tier owns is hand-set.
+   * When it is, the capture panels select "Custom" by default: the session's
+   * values verbatim, because a named tier is now the PURE preset and would
+   * silently discard exactly what the user just set (Thomas, 2026-09-01).
+   */
+  get _lookIsCustom() {
+    return this._byHand.has("haze") || this._byHand.has("lod")
+      || this._byHand.has("autoExposure");
+  }
+
+  /** The still panel's tier. Stored null = not explicitly picked. */
+  get captureStillTier() {
+    return this._captureStillTier ?? (this._lookIsCustom ? "custom" : "max");
+  }
+  set captureStillTier(tier) { this._captureStillTier = tier; }
+
+  get captureVideoTier() {
+    return this._captureVideoTier ?? (this._lookIsCustom ? "custom" : "high");
+  }
+  set captureVideoTier(tier) { this._captureVideoTier = tier; }
+
+  /**
+   * The QUALITY_PRESETS tier a capture at `tier` renders with. "Custom" is
+   * the session's look on the LIVE tier's lighting method and parked spp —
+   * there is no custom row in the preset table, deliberately.
+   */
+  capturePresetTier(tier) {
+    if (tier === "custom") return this.qualityTier ?? K.DEFAULT_QUALITY_TIER;
+    if (!(tier in K.QUALITY_PRESETS)) {
+      throw new Error(`unknown capture tier '${tier}'.`);
+    }
+    return tier;
+  }
+
+  /**
+   * Everything a capture at `tier` marches that is not the camera: the tier
+   * name it will be recorded under, the preset that supplies lighting method
+   * and spp, and the look — haze, LOD, exposure.
+   *
+   * A NAMED tier is the pure parked preset, full stop (Thomas, 2026-09-01):
+   * the tier's haze default and its parked LOD — the tier table over clouds,
+   * CITY_PARKED_LOD_STRENGTH over the city — with the session's hand-set
+   * values deliberately NOT mixed in. This supersedes the 2026-08-20 "honor
+   * the finer slider" ruling (min(slider, default)): a hand-set look now
+   * selects the Custom tier instead, which carries it verbatim, and a named
+   * tier means the same picture on every machine and every session.
+   *
+   * `meter` says the exposure is still to be measured: the tier's AE default
+   * is on, so _meterCaptureExposure replaces `exposure` with the converged
+   * target before the march. Custom never meters — the session's exposure is
+   * already where the live loop (or the hand) put it. hazeHeightDependent is
+   * not tier-varying, so the session value rides through either way.
+   */
+  _captureLook(tier) {
+    if (tier === "custom") {
+      return {
+        tier: "custom", preset: this.capturePresetTier(tier),
+        haze: this.haze, hazeHeightDependent: this.hazeHeightDependent,
+        lodStrength: this.lodStrength,
+        exposure: this.exposure, meter: false,
+      };
+    }
+    this.capturePresetTier(tier);   // validates the name
+    return {
+      tier, preset: tier,
+      haze: K.DEFAULT_HAZE_BY_TIER[tier],
+      hazeHeightDependent: this.hazeHeightDependent,
+      lodStrength: this.scene?.city
+        ? K.CITY_PARKED_LOD_STRENGTH : K.DEFAULT_LOD_STRENGTH_BY_TIER[tier],
+      exposure: K.DEFAULT_EXPOSURE,
+      meter: Boolean(K.AUTO_EXPOSURE_DEFAULT_BY_TIER[tier]),
+    };
+  }
+
+  /** The per-frame view kwargs a capture at `look` marches. */
+  _captureViewKwargs(look) {
+    return {
+      ...this._viewKwargs({ lodStrength: look.lodStrength }),
+      haze: look.haze,
+      hazeHeightDependent: look.hazeHeightDependent,
+      exposure: look.exposure,
+    };
+  }
+
+  /**
+   * The exposure a capture applies, decided ONCE at capture start — no
+   * glide, no deadband: nobody watches a capture converge, and for a video a
+   * per-frame meter would flicker, so one metered still exposure holds for
+   * the whole file. Metered with the CAPTURE's view kwargs (its haze and
+   * LOD change the luminance), against the live renderer state — the meter's
+   * march is the same specialized module whatever the tier, since every
+   * tier shares maxLightSteps. A live meter's readback may still be in
+   * flight (one is ever allowed); it always resolves, so wait it out rather
+   * than skipping the metering. A meter that saw no light keeps
+   * DEFAULT_EXPOSURE, the live loop's own ignore rule.
+   */
+  async _meterCaptureExposure(look, size) {
+    if (!look.meter) return look.exposure;
+    for (;;) {
+      const highlight = await this.renderer.meterLuminance(
+        size, this._captureViewKwargs(look));
+      if (highlight !== null) {
+        return highlight > 0
+          ? autoExposureTarget(highlight, this.toneMapWhitePoint)
+          : K.DEFAULT_EXPOSURE;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /**
    * How coarsely the far field is stepped, as a multiple of the tuned angular
    * LOD. Cheap distance, and it degrades along the grain of the look.
    */
-  /**
-   * What a capture at `tier` marches at: the FINER of the live slider and the
-   * capture default. The default exists so a still never inherits a coarse
-   * march chosen to keep flight smooth; a slider set finer than it (the max
-   * tier bottoms out at a quarter pixel now) is a request the capture should
-   * honor, not sand off (Thomas, 2026-08-20).
-   *
-   * Over the city the default is the CAPTURE tier's own city LOD, not the
-   * flat day constant. The live slider follows the LIVE tier, and on a
-   * machine whose auto verdict settles below high that is the city's coarse
-   * end (0.5) — while the capture runs at max/high, whose city entry is the
-   * quarter-pixel floor. min(slider, 0.5) then marched a still 50x coarser
-   * than the tier it claimed, dissolving windows into blocks; the table's
-   * "flight numbers AND capture numbers" promise only held when the two
-   * tiers happened to agree.
-   */
-  _captureLodStrength(tier) {
-    const cap = this.scene?.city
-      ? K.CITY_LOD_STRENGTH_BY_TIER[tier] : K.DEFAULT_LOD_STRENGTH;
-    return Math.min(this.lodStrength, cap);
-  }
-
   setLodStrength(strength, { byHand = true } = {}) {
     const [lo, hi] = K.LOD_STRENGTH_LIMITS;
     if (!(strength >= lo && strength <= hi)) {
@@ -2207,9 +2318,16 @@ export class Viewer {
       const chosen = await writer.init();
       for (const warning of writer.warnings ?? []) console.warn(warning);
 
+      // The capture's look, decided once for the whole video — including
+      // the exposure, metered here on the first frame's view and then HELD:
+      // a per-frame meter would flicker, and a video wants a still exposure
+      // the way a camera on a tripod does.
+      const look = this._captureLook(this.captureVideoTier);
+      look.exposure = await this._meterCaptureExposure(look, size);
+
       target = createOfflineTarget(this.device, size, "soar-video");
-      saved = beginOfflineRender(this.renderer, this.captureVideoTier);
-      const framesPerVideoFrame = captureFrames(this.captureVideoTier);
+      saved = beginOfflineRender(this.renderer, look.preset);
+      const framesPerVideoFrame = captureFrames(look.preset);
 
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
@@ -2222,12 +2340,11 @@ export class Viewer {
           fov: frames[i].fov,
         };
         const overlays = this.captureOverlays
-          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps)
+          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze)
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
-          { ...this._viewKwargs({ lodStrength:
-              this._captureLodStrength(this.captureVideoTier) }),
+          { ...this._captureViewKwargs(look),
             camera: pose, frameIndex: i * 1024 },
           framesPerVideoFrame, overlays);
         await writer.addFrame(
@@ -2270,8 +2387,10 @@ export class Viewer {
     }
   }
 
-  /** The overlays an offline frame draws, laid out for that frame's size. */
-  _offlineOverlays(pose, size, dt) {
+  /** The overlays an offline frame draws, laid out for that frame's size.
+   *  `haze` is the CAPTURE's, so the minimap reads like the picture it sits
+   *  on rather than like the session it was launched from. */
+  _offlineOverlays(pose, size, dt, haze = this.haze) {
     const overlays = [];
     if (this.flyer && this.flyerEnabled) {
       this.flyer.update(dt, pose);
@@ -2289,7 +2408,7 @@ export class Viewer {
         ...pose,
         relativePosition: () => worldToRelative(
           pose.position, this.scene.bmin, this.scene.bmax),
-      }, this.scene, size, false, this.haze);
+      }, this.scene, size, false, haze);
       overlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
     }
@@ -2310,8 +2429,24 @@ export class Viewer {
     return this.captureSize ?? [this.canvas.width, this.canvas.height];
   }
 
-  /** What made this picture, so the picture can be made again. */
-  renderMetadata(size) {
+  /**
+   * What made this picture, so the picture can be made again.
+   *
+   * `look` is what the capture actually marched (_captureLook, with the
+   * metered exposure filled in) — the honesty trail: a named-tier capture no
+   * longer marches the session's haze, LOD or exposure, so recording the live
+   * values would misreport every one of them. When no capture has run (the
+   * track download), the still tier's look is described with the session's
+   * exposure standing in on a metering tier — the capture meters at render
+   * time and there is no reading to write down yet.
+   */
+  renderMetadata(size, look = null) {
+    if (!look) {
+      look = this._captureLook(this.captureStillTier);
+      if (look.meter) look.exposure = this.exposure;
+    }
+    const preset = K.QUALITY_PRESETS[look.preset];
+    const parked = K.QUALITY_PRESETS.high;   // the top hold rung's sampling
     const rel = this.camera.relativePosition();
     const cityPos = this.scene.cityPosition(this.camera.position);
     return {
@@ -2350,45 +2485,54 @@ export class Viewer {
       render: {
         renderer: "soar-web",
         size,
-        tier: this.captureStillTier,
+        // "custom" when the capture carried the session's hand-set look;
+        // `quality` is then the preset that supplied lighting method and spp
+        // (the live tier), which is also what --quality below names.
+        tier: look.tier,
+        quality: look.preset,
         render_scale: 1.0,
-        step_factor: K.QUALITY_PRESETS[this.captureStillTier].stepFactor,
-        light_step_factor:
-          K.QUALITY_PRESETS[this.captureStillTier].lightStepFactor,
-        light_cache: K.QUALITY_PRESETS[this.captureStillTier].lightCache,
-        sky_probe: K.QUALITY_PRESETS[this.captureStillTier].skyProbe,
-        max_light_steps: K.QUALITY_PRESETS[this.captureStillTier].maxLightSteps,
+        // Parked sampling — High's, for every tier (the top hold rung's
+        // rule): what the capture actually marched, not the preset's flight
+        // stepping.
+        step_factor: parked.stepFactor,
+        light_step_factor: parked.lightStepFactor,
+        max_light_steps: parked.maxLightSteps,
+        light_cache: preset.lightCache,
+        sky_probe: preset.skyProbe,
         periodic: this.renderer.periodic,
-        accumulate_frames: K.PARKED_ACCUM_FRAMES_BY_TIER[this.captureStillTier],
+        accumulate_frames: K.PARKED_ACCUM_FRAMES_BY_TIER[look.preset],
         tone_map_gamma: this.toneMapGamma,
         tone_map_white_point: this.toneMapWhitePoint,
         contrast: this.contrast,
-        haze: this.haze,
-        haze_height_dependent: this.hazeHeightDependent,
-        // The LOD a CAPTURE runs at, not the live view's and not the bare
-        // constants. This used to write K.APP_*_LOD_DEGREES unscaled, so a
-        // sidecar claimed 1.4/0.6 whatever the slider said — and the tier
-        // moves that slider on its own, so most captures below "high" were
-        // misreported. _captureLodStrength rather than the constant for the
-        // same reason once more removed: since ddc6012 a capture takes the
-        // FINER of the slider and the constant, so a night-city still at 0.01
-        // was rendering an order of magnitude finer than it reported, and the
-        // reproduction command beside this block already said so.
-        lod_strength: this._captureLodStrength(this.captureStillTier),
+        // The look the CAPTURE marched, not the session's (2026-09-01): a
+        // named tier is the pure parked preset — its haze default, its
+        // parked LOD, a once-metered exposure — and Custom is the session's
+        // values, so `look` is right in both cases where the live fields
+        // were right in neither. This block has misreported before (the
+        // unscaled-constants bug, then the finer-slider bug); the rule now
+        // is that everything here comes from `look`.
+        haze: look.haze,
+        haze_height_dependent: look.hazeHeightDependent,
+        exposure: look.exposure,
+        lod_strength: look.lodStrength,
         light_march_lod_degrees:
-          K.APP_LIGHT_MARCH_LOD_DEGREES
-          * this._captureLodStrength(this.captureStillTier),
+          K.APP_LIGHT_MARCH_LOD_DEGREES * look.lodStrength,
         view_step_lod_degrees:
-          K.APP_VIEW_STEP_LOD_DEGREES
-          * this._captureLodStrength(this.captureStillTier),
+          K.APP_VIEW_STEP_LOD_DEGREES * look.lodStrength,
       },
       timestamp: new Date().toISOString(),
       // witness, not behold: the still was rendered by the witness/soar
       // renderer, so this is the command that reproduces THIS image —
-      // nests, wrap and image controls included. At the capture's LOD rather
-      // than the live view's, for the same reason.
-      reproduction_command: this.witnessCommand(
-        { lodStrength: this._captureLodStrength(this.captureStillTier) }),
+      // nests, wrap and image controls included. At the capture's look
+      // rather than the live view's, for the same reason as the render
+      // block above.
+      reproduction_command: this.witnessCommand({
+        lodStrength: look.lodStrength,
+        haze: look.haze,
+        hazeHeightDependent: look.hazeHeightDependent,
+        exposure: look.exposure,
+        quality: look.preset,
+      }),
     };
   }
 
@@ -2415,22 +2559,25 @@ export class Viewer {
       stillOverlays.push((enc, view, format) =>
         this.flyer.encodePass(enc, view, format, size));
     }
+    // The capture's look, not the session's: a named tier is the pure parked
+    // preset (Custom carries the session's values). Built before the minimap
+    // below so the overlay draws the haze the picture actually has.
+    const look = this._captureLook(this.captureStillTier);
     if (overlays && this.minimap && this.minimapMode !== "off") {
-      this.minimap.update(this.camera, this.scene, size, false, this.haze);
+      this.minimap.update(this.camera, this.scene, size, false, look.haze);
       stillOverlays.push((enc, view, format) =>
         this.minimap.encodePass(enc, view, format));
     }
     try {
+      look.exposure = await this._meterCaptureExposure(look, size);
       const image = await renderStill(
         this.device, this.renderer,
-        this._viewKwargs(
-          { lodStrength: this._captureLodStrength(this.captureStillTier) }),
-        size,
-        this.captureStillTier, stillOverlays,
+        this._captureViewKwargs(look), size,
+        look.preset, stillOverlays,
         (fraction) => this.ui.showProgress(
           `Rendering a ${size[0]}x${size[1]} still…`, fraction));
       this.ui.showProgress("Encoding…", 0.95);
-      const blob = await imageDataToPng(image, this.renderMetadata(size));
+      const blob = await imageDataToPng(image, this.renderMetadata(size, look));
       download(blob, timestampedName("cloudyview_soar", ".png"));
       this.ui.say(`Saved a ${size[0]}x${size[1]} still.`, 3);
     } catch (err) {
@@ -2635,8 +2782,18 @@ export class Viewer {
    * default render would not carry. The image controls are always written
    * out rather than only when non-default, because "exactly this view" must
    * survive a change of defaults.
+   *
+   * The overrides are the capture's honesty trail: renderMetadata passes the
+   * look the capture actually marched (a named tier's parked defaults, or
+   * Custom's session values), so the command reproduces the CAPTURE. With no
+   * overrides — the terminal panel — the live values go out.
    */
-  witnessCommand({ lodStrength = this.lodStrength } = {}) {
+  witnessCommand({ lodStrength = this.lodStrength,
+                   haze = this.haze,
+                   hazeHeightDependent = this.hazeHeightDependent,
+                   exposure = this.exposure,
+                   quality = this.capturePresetTier(this.captureStillTier),
+                 } = {}) {
     const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
     const q = (v) => (/\s/.test(String(v))
       ? JSON.stringify(String(v)) : String(v));
@@ -2657,35 +2814,58 @@ export class Viewer {
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
       ...(this.renderer.periodic ? ["--periodic"] : []),
-      "--exposure", n(this.exposure),
+      "--exposure", n(exposure),
       "--gamma", n(this.toneMapGamma),
       "--white-point", n(this.toneMapWhitePoint),
       "--contrast", n(this.contrast),
-      "--haze", n(this.haze),
-      ...(this.hazeHeightDependent
+      "--haze", n(haze),
+      ...(hazeHeightDependent
           ? ["--haze-height-dependent"] : ["--no-haze-height-dependent"]),
       // Always written, like the image controls above: the quality tier moves
       // this slider on its own, so a command without it reproduces the view
       // only by luck of which tier was in force.
       "--lod", n(lodStrength),
-      // The still-capture tier: step factors, light cache, sky probe and the
-      // parked sample count, all from the one preset — the same table the
-      // in-app capture uses, so the CLI render matches it in all ways.
-      "--quality", this.captureStillTier,
+      // A PRESET name, never "custom" — the CLI has no custom row; a Custom
+      // capture reproduces as its preset tier with the look flags above
+      // carrying the hand-set values. The preset supplies parked sampling,
+      // light cache, sky probe and the parked sample count, the same recipe
+      // the in-app capture marches.
+      "--quality", quality,
     ].join(" ");
   }
 
   // --- the loop ------------------------------------------------------------
 
   /**
+   * The LOD the LIVE view marches this frame. The flight slider, except over
+   * a parked city: there a held view sharpens to CITY_PARKED_LOD_STRENGTH —
+   * the quarter-pixel floor the city's high/max fly at — because the city's
+   * lower flight tiers trade windows for frame rate and a parked view has no
+   * frame to protect. Only when the slider is not hand-set (a hand-set
+   * slider is the user's, moving or parked) and the hold mode is not "live"
+   * (what you flew on is what you keep). The LOD angles sit in the scene key
+   * (uniform row 20.y/z), so the flip restarts accumulation by itself, once,
+   * at the moment of parking — which parking does anyway.
+   */
+  _liveLodStrength() {
+    if (this.scene?.city && this.holdMode !== "live"
+        && !this._byHand.has("lod")
+        && this.renderer && !this.renderer.cameraMoving) {
+      return K.CITY_PARKED_LOD_STRENGTH;
+    }
+    return this.lodStrength;
+  }
+
+  /**
    * The per-frame view state.
    *
-   * `lodStrength` is overridable because an offline render should not inherit
-   * a march chosen to keep flight smooth — captures pass
-   * K.DEFAULT_LOD_STRENGTH. Everything else follows the live view, which is
-   * the point of a capture: it is what you were looking at.
+   * `lodStrength` is overridable because an offline render should not
+   * inherit a march chosen to keep flight smooth — captures pass their
+   * tier's parked LOD (see _captureLook). Everything else follows the live
+   * view; a capture overrides haze and exposure on top, in
+   * _captureViewKwargs.
    */
-  _viewKwargs({ lodStrength = this.lodStrength } = {}) {
+  _viewKwargs({ lodStrength = this._liveLodStrength() } = {}) {
     return {
       camera: this.camera,
       jitter: true,

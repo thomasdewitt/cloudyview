@@ -1074,10 +1074,15 @@ export class UI {
       if (render.disabled) return;   // the capability line owns the note
       const note = render.querySelector(".note");
       if (note) {
+        // "custom" has no preset row; its lighting method and spp are the
+        // live tier's (capturePresetTier resolves it).
+        const tier = app.captureVideoTier;
+        const preset = app.capturePresetTier(tier);
         note.textContent =
-          `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureVideoTier]} samples ` +
+          `${K.PARKED_ACCUM_FRAMES_BY_TIER[preset]} samples ` +
           `per pixel at the ` +
-          `${K.QUALITY_PRESETS[app.captureVideoTier].label.split(" —")[0]} ` +
+          `${tier === "custom" ? "Custom"
+             : K.QUALITY_PRESETS[preset].label.split(" —")[0]} ` +
           `preset, ${app.videoFps.toFixed(0)} fps`;
       }
     };
@@ -1086,16 +1091,20 @@ export class UI {
       value: app.videoFps, format: (v) => `${v.toFixed(0)} fps`,
       onInput: (v) => { app.videoFps = v; refresh(); },
     }));
-    // The video's tier: each rendered frame is that preset's flight
-    // configuration at the capture size, accumulated to its parked spp.
-    // Refreshed in place — reopening the panel would drop its {samples}
-    // context, which is the recording itself.
+    // The video's tier: each rendered frame is what a PARKED view at that
+    // tier converges to, at the capture size, accumulated to its parked spp.
+    // "Custom" is the session's hand-set look verbatim, and is what the
+    // panel selects on its own the moment any of haze/LOD/auto-exposure is
+    // by hand — a named tier is the pure preset and would silently discard
+    // exactly what the user just set. Refreshed in place — reopening the
+    // panel would drop its {samples} context, which is the recording itself.
     const qualityRow = el("div", "seg-row");
     const qualityGroup = el("div", "seg-group");
     qualityGroup.append(el("h3", null, "quality"));
     const tierSeg = segmented(
-      K.QUALITY_TIER_NAMES.map(
+      [...K.QUALITY_TIER_NAMES.map(
         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
+       ["Custom", "custom"]],
       (v) => v === app.captureVideoTier,
       (v) => { app.captureVideoTier = v; refresh(); tierSeg.refresh(); });
     qualityGroup.append(tierSeg);
@@ -1140,9 +1149,12 @@ export class UI {
       }));
 
     // A capture picks its own tier — the still leans expensive by default —
-    // and its spp is that tier's parked sample count. All settings are the
-    // preset's flight configuration, marched at the capture size; witness
-    // --quality reproduces exactly this from the CLI.
+    // and marches what a PARKED view at that tier converges to, at the
+    // capture size, with that tier's parked sample count as its spp; witness
+    // --quality reproduces exactly this from the CLI. "Custom" is the
+    // session's hand-set look verbatim, and is the panel's own selection
+    // whenever any of haze/LOD/auto-exposure is by hand (see the track
+    // panel's note).
     // The same line the track panel draws: tiers on the left, the shared
     // overlays switch on the right, so the two capture panels read as one
     // design.
@@ -1150,8 +1162,9 @@ export class UI {
     const qualityGroup = el("div", "seg-group");
     qualityGroup.append(el("h3", null, "quality"));
     qualityGroup.append(segmented(
-      K.QUALITY_TIER_NAMES.map(
+      [...K.QUALITY_TIER_NAMES.map(
         (n) => [K.QUALITY_PRESETS[n].label.split(" —")[0], n]),
+       ["Custom", "custom"]],
       (v) => v === app.captureStillTier,
       (v) => { app.captureStillTier = v; this.open("capture"); }));
     qualityRow.append(qualityGroup, flipSwitch(
@@ -1162,7 +1175,8 @@ export class UI {
 
     m.append(el("div", "divider"));
     m.append(item("Save a still",
-                  `${K.PARKED_ACCUM_FRAMES_BY_TIER[app.captureStillTier]} ` +
+                  `${K.PARKED_ACCUM_FRAMES_BY_TIER[
+                    app.capturePresetTier(app.captureStillTier)]} ` +
                   "samples per pixel, then a PNG download · shortcut: P",
                   () => app.saveScreenshot()));
 

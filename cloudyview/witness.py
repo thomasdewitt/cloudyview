@@ -240,20 +240,24 @@ def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
 
 
 # Soar's per-tier capture recipe, mirrored from web/soar/constants.js
-# (QUALITY_PRESETS + PARKED_ACCUM_FRAMES_BY_TIER, 2026-08-20): flight step
-# factors, the lighting method, and the parked sample count that is also a
-# capture's spp. --quality applies one of these wholesale so a CLI render
-# matches the in-app capture in all ways. Keep in step with the browser.
+# (QUALITY_PRESETS + PARKED_ACCUM_FRAMES_BY_TIER). Since 2026-09-01 a capture
+# marches PARKED sampling — the hold ladder's top rung, which samples like the
+# browser's High tier for every tier — so the step factors here are High's
+# across the board, and the tiers differ in lighting method, spp, and (in the
+# app) look defaults, not in stepping. --quality applies one of these
+# wholesale so a CLI render matches the in-app capture in all ways; the
+# capture's haze/LOD/exposure arrive as explicit flags in the reproduction
+# command, never through this table. Keep in step with the browser.
 QUALITY_PRESETS = {
     "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
                 "light_cache": False, "sky_probe": True,  "accumulate": 32},
     "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
                 "light_cache": True,  "sky_probe": True,  "accumulate": 32},
-    "medium":  {"step_factor": 2.5, "light_step_factor": 4.0,
+    "medium":  {"step_factor": 2.0, "light_step_factor": 2.0,
                 "light_cache": True,  "sky_probe": False, "accumulate": 24},
-    "low":     {"step_factor": 3.0, "light_step_factor": 8.0,
+    "low":     {"step_factor": 2.0, "light_step_factor": 2.0,
                 "light_cache": True,  "sky_probe": False, "accumulate": 16},
-    "minimal": {"step_factor": 4.0, "light_step_factor": 12.0,
+    "minimal": {"step_factor": 2.0, "light_step_factor": 2.0,
                 "light_cache": True,  "sky_probe": False, "accumulate": 8},
 }
 LIGHT_CACHE_DIVISOR = 2       # the one cache resolution; /1 and /4 retired
@@ -310,9 +314,10 @@ def render_nested(
     renderer = _renderer_for(levels, periodic=periodic,
                              tone_mapped=not return_linear)
     min_voxel = min(outer.dx)
-    # --quality is the whole recipe or none of it: step factors, lighting
-    # method and sample count all come from the one preset, so this render
-    # is the in-app capture at that tier, made from a terminal.
+    # --quality is the whole recipe or none of it: step factors (parked —
+    # High's for every tier), lighting method and sample count all come from
+    # the one preset, so this render is the in-app capture at that tier,
+    # made from a terminal.
     tier = None
     if quality is not None:
         if quality not in QUALITY_PRESETS:
@@ -855,9 +860,10 @@ def cli():
                              f"flown value here (default: {DEFAULT_LOD_STRENGTH})")
     parser.add_argument("--quality", choices=sorted(QUALITY_PRESETS),
                         help="Render as the in-app capture at this soar "
-                             "quality tier: its step factors, its lighting "
-                             "method (sun-tau cache, sky probe) and its "
-                             "parked sample count, all from the one preset")
+                             "quality tier: parked (High) sampling, the "
+                             "tier's lighting method (sun-tau cache, sky "
+                             "probe) and its parked sample count, all from "
+                             "the one preset")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",

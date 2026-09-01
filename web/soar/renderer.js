@@ -526,6 +526,10 @@ export class Renderer {
     this._applyEffectiveQuality();
   }
 
+  /** Whether the camera moved this frame — the viewer's parked-vs-flying
+   *  question (the parked city LOD reads it; see viewer._liveLodStrength). */
+  get cameraMoving() { return this._cameraMoving; }
+
   setCameraMoving(moving) {
     moving = Boolean(moving);
     if (moving === this._cameraMoving) return;

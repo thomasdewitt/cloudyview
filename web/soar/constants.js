@@ -81,7 +81,10 @@ export const HAZE_MAX_E_FOLDING_KM = 200.0;
 // hold ladder was built to guarantee. That guarantee is now the Still mode's
 // (see DEFAULT_HOLD_MODE) rather than the app's, and two machines that
 // auto-pick different tiers will show different weather. Thomas asked for it
-// with that trade named (2026-08-14). A hand-set haze is never overridden.
+// with that trade named (2026-08-14). A hand-set haze is never overridden in
+// FLIGHT — no tier change moves it. A capture at a named tier is the pure
+// preset and takes this table's value regardless; a hand-set haze rides into
+// a capture only through the capture panels' "Custom" tier (2026-09-01).
 // Values are the aerosol coordinate whose sea-level e-folding length is the
 // named distance (hazeFromEFoldingKm in spectral.js — not imported here,
 // that would be circular). Retuned 2026-08-18 to Thomas's hand-set panel
@@ -362,16 +365,24 @@ export const DEFAULT_LOD_STRENGTH_BY_TIER = {
 // nobody. The rest step by a factor of ~3 down to minimal at 0.5, which is
 // the DAY default: the city's coarsest is the cloud scene's normal.
 //
-// These are the flight numbers AND the capture numbers — but not by the
-// accident this comment used to claim. A capture takes the finer of the
-// slider and its default (viewer._captureLodStrength), and over the city the
-// default is THIS table at the CAPTURE's tier: the live slider follows the
-// live tier, which on a slower machine settles at the coarse end of this
-// table, while the capture runs at max/high — trusting the slider alone
-// marched stills 50x coarser than the tier they claimed.
+// These are the FLIGHT numbers only (2026-09-01; they were briefly the
+// capture numbers too). A parked city view and a city capture march at
+// CITY_PARKED_LOD_STRENGTH below — nobody is holding a framerate there, and
+// the whole point of parking in a street is that the windows resolve.
 export const CITY_LOD_STRENGTH_BY_TIER = {
   max: 0.01, high: 0.01, medium: 0.03, low: 0.1, minimal: 0.5,
 };
+
+// What a PARKED or captured city view marches at, whatever tier flew it
+// there: the table's high/max entry — the slider floor, which under the
+// packer's quarter-pixel clamp means "march at a quarter of the pixel angle"
+// rather than any particular small number, so it is resolution-independent.
+// City only, and only when the LOD slider is not hand-set and the hold mode
+// is not "live": over clouds the day tiers' own defaults already are the
+// parked numbers, but the city's lower tiers trade windows for frame rate,
+// and a parked view has no frame to protect. A hand-set slider is the
+// user's, moving or parked.
+export const CITY_PARKED_LOD_STRENGTH = 0.01;
 
 /** The tier table this scene flies by. */
 export function lodStrengthByTier(city) {
@@ -388,10 +399,10 @@ export function lodStrengthByTier(city) {
 // research pilot over clouds may still drag it down.
 export const LOD_STRENGTH_LIMITS = [0.01, 3.0];
 
-// The strength anything that is not holding a framerate renders at: a still,
-// a video frame, witness, and the uniform block's own default. A capture is
-// already paying for hundreds of accumulated passes, so it has no business
-// inheriting a coarse march chosen to keep flight smooth.
+// witness's default and the uniform block's own default. Captures no longer
+// read it (2026-09-01): a capture at tier T takes T's own parked look —
+// DEFAULT_LOD_STRENGTH_BY_TIER[T] over clouds, CITY_PARKED_LOD_STRENGTH over
+// the city — so what a still marches is what a parked T view marches.
 //
 // Mirrors soar_host.DEFAULT_LOD_STRENGTH, and tests/test_uniform_parity.py
 // compares the two hosts' defaults directly — it caught them disagreeing the
@@ -480,8 +491,11 @@ export const QUALITY_PRESETS = {
   // factors, but the lighting method never switches underneath it: the sky
   // probe is never on below High, flying or parked, and Max's march stays
   // fully live. (This joins haze-by-tier in trading away "every tier parks
-  // to the same picture", deliberately.) A capture uses the tier chosen on
-  // its own panel, whole.
+  // to the same picture", deliberately.) A capture at the tier chosen on its
+  // own panel marches what a PARKED view at that tier converges to (Thomas,
+  // 2026-09-01): the tier's lighting method, spp and look defaults, but the
+  // top hold rung's sampling — High's step factors — never the flight
+  // stepping below. See capture.beginOfflineRender.
   max:    { name: "max",    label: "Max",    renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
             maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
