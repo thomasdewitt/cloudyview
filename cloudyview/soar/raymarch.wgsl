@@ -52,8 +52,11 @@ struct Uniforms {
     // x = image width (px), y = image height (px), z = HG asymmetry g, w = ambient strength
     params: vec4<f32>,
     // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106).
-    // Under CITY: x = ground z, yz = city tile world offset (m, a whole
-    // number of blocks — see city_glow_sample), w unused.
+    // Under CITY: x = ground z, yz = the tile's STATIC world offset, w
+    // unused. yz is informational since row 24 — the shader builds the
+    // city frame from the per-frame offset there (city_camera_origin) and
+    // no longer reads this pair; hosts keep writing it as the scene's own
+    // statement of where the tile was pinned.
     ocean: vec4<f32>,
     // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
     ocean_params: vec4<f32>,
@@ -134,6 +137,21 @@ struct Uniforms {
     //     every multiply below is by exactly 1.0 and the frame is
     //     bit-identical to a build without the mode.
     light_cache: vec4<f32>,
+    // Row 24: the surface offset (2026-09-01). xy = where the surface tile
+    // sits in the world THIS FRAME renders, folded into [0, tile extent).
+    // The water-normal reads sample at (world - offset), and the city
+    // system derives its whole frame from it (see city_camera_origin). The
+    // hosts write it per frame as cam.xy - surfacePosition — the camera's
+    // own tile phase — so a cloud-period camera fold moves the offset with
+    // the camera and the surface never jumps; a static render writes the
+    // scene's static offset, folded. The fold is harmless BECAUSE the city
+    // is a pure function of the tile frame: every cell index folds at the
+    // tile (city_tile_cell) before it seeds anything, so only the offset
+    // mod the tile can matter. A day scene with a parked camera writes
+    // exactly 0.0, making the water subtraction bit-neutral — which is
+    // what keeps the frozen judge-view goldens byte-identical.
+    // z, w unused (0.0).
+    surface_offset: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -1700,7 +1718,9 @@ fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
 
 fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, 0));
-    let coord = world_xy / u.ocean_params.y + 0.5 / dims;
+    // Drift-corrected, not raw world: see u.surface_offset (row 24).
+    let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
+        + 0.5 / dims;
     let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
     return normalize(n);
 }
@@ -1839,7 +1859,9 @@ fn ocean_slope_sample(n: vec3<f32>, sigma: f32,
 // hardware trilinear fetch whose half-texel offset would only fit level 0.
 fn ocean_normal_mip_sample(world_xy: vec2<f32>, level: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, i32(level)));
-    let coord = world_xy / u.ocean_params.y + 0.5 / dims;
+    // Drift-corrected, not raw world: see u.surface_offset (row 24).
+    let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
+        + 0.5 / dims;
     return textureSampleLevel(ocean_normals, ocean_samp, coord, level).rgb;
 }
 
@@ -2254,6 +2276,38 @@ fn city_rand4(s: vec2<u32>) -> vec4<f32> {
                      city_u01(b.x), city_u01(b.y));
 }
 
+// The city repeats at the tile, exactly. One texel is one block, so the
+// block count per tile IS the glow texture's mip-0 dimension (1024 at the
+// shipped bake, with the tile extent defined as n * cell — no rounding),
+// and every draw seeded by a cell index folds the index into [0, n) first.
+// That is what makes the city a pure function of the tile frame: a tile
+// coordinate names a building, so a replayed track — which serializes only
+// the tile phase — renders the very buildings that were flown past, and the
+// whole-tile ambiguity in row 24's folded offset is invisible.
+fn city_tile_cell(ci: vec2<i32>) -> vec2<i32> {
+    let dims = textureDimensions(ocean_normals, 0);
+    let n = vec2<i32>(i32(dims.x), i32(dims.y));
+    return ((ci % n) + n) % n;
+}
+
+// World xy into the canonical city frame: the offset removed, then folded
+// into the primary tile. Everything tile-periodic is invariant under the
+// fold; the one pattern whose period does not divide the tile (skyway's
+// 24-block route lattice — 1024 is not a multiple of 24) is pinned by it to
+// one canonical alignment, so live flight and replay agree there too.
+fn city_fold_xy(xy: vec2<f32>) -> vec2<f32> {
+    let t = u.ocean_params.y;
+    let q = (xy - u.surface_offset.xy) / t;
+    return t * (q - floor(q));
+}
+
+// The camera in the city frame — the ONE place a ray enters it. city_trace,
+// the sky-dome glow probe and any component that needs the view origin all
+// take it from here, so the frame cannot be entered two different ways.
+fn city_camera_origin() -> vec3<f32> {
+    return vec3<f32>(city_fold_xy(u.cam_origin.xy), u.cam_origin.z);
+}
+
 fn city_is_avenue(k: i32) -> bool {
     return ((k % CITY_AVENUE_PERIOD) + CITY_AVENUE_PERIOD)
            % CITY_AVENUE_PERIOD == 0;
@@ -2276,14 +2330,12 @@ fn city_lamp_inset(k: i32) -> f32 {
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
 // sampler so the tile wraps. This is the one number the fog, the sky dome
-// and the cloud uplight all share.
-// Where the tile sits in world space rides in u.ocean.yz (meters, a whole
-// number of cells): the cascade's wildest excursion — a 5 km twin spire
-// ringed by 3.7-3.9 km towers — is placed under each field's central
-// cameras rather than left wherever the seed put it. The megatower district
-// is the shot, so it gets the stage, whatever the domain.
+// and the cloud uplight all share. `xy` is in the CITY FRAME (world minus
+// the row-24 offset — see city_camera_origin), whose origin IS the tile's
+// origin, so the uv is simply the coordinate over the extent: which
+// district sits where is decided entirely by the offset the host wrote.
 fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
-    let uv = (xy - u.ocean.yz) / u.ocean_params.y;
+    let uv = xy / u.ocean_params.y;
     let l = clamp(lod, 0.0, u.ocean_params.w);
     return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
 }
@@ -2333,20 +2385,22 @@ struct CityCell {
 fn city_cell(ci: vec2<i32>) -> CityCell {
     var c: CityCell;
     let cell = u.ocean_params.x;
-    let dims = textureDimensions(ocean_normals, 0);
-    let n = vec2<i32>(i32(dims.x), i32(dims.y));
-    let off_cells = vec2<i32>(floor(u.ocean.yz / cell + vec2<f32>(0.5)));
 
     // Superblocks: in a dense district a 2x2 group of blocks is sometimes
     // one building — the internal streets are swallowed and all four cells
     // report the same plot, seed and cascade values, so the DDA assembles
     // one seamless structure from whichever member it happens to visit.
     // The group decision reads the ANCHOR cell's texel, so members agree.
+    // Texels AND seeds read the tile-wrapped index (city_tile_cell): the
+    // city frame's origin is the tile's, cell i maps to texel i, and the
+    // wrap before pcg2d is what makes a building a property of its tile
+    // coordinate rather than of how many domains the camera has crossed.
+    // (n is even, so wrapping commutes with the & -2 anchoring.)
     let anchor = ci & vec2<i32>(-2);
-    let wa = (((anchor - off_cells) % n) + n) % n;
+    let wa = city_tile_cell(anchor);
     let ta = textureLoad(ocean_normals, wa, 0);
     let gseed = pcg2d(vec2<u32>(
-        bitcast<u32>(anchor.x) ^ 0x51ed270bu, bitcast<u32>(anchor.y)));
+        bitcast<u32>(wa.x) ^ 0x51ed270bu, bitcast<u32>(wa.y)));
     let gh = city_rand4(gseed);
     c.merged = ta.g > 0.50 && gh.x < 0.10;
 
@@ -2357,17 +2411,17 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.rank = ta.g;
         c.seed = gseed;
     } else {
-        let w = (((ci - off_cells) % n) + n) % n;
+        let w = city_tile_cell(ci);
         let texel = textureLoad(ocean_normals, w, 0);
         c.density = texel.r;
         c.rank = texel.g;
-        c.seed = pcg2d(vec2<u32>(bitcast<u32>(ci.x), bitcast<u32>(ci.y)));
+        c.seed = pcg2d(vec2<u32>(bitcast<u32>(w.x), bitcast<u32>(w.y)));
     }
 
     // The plot: one cell's, or the whole group's. Street half-widths on the
-    // outer edges; avenue boundaries get extra. The avenue test uses the
-    // unwrapped index so the pattern is a property of world space, not of
-    // the tile.
+    // outer edges; avenue boundaries get extra. The avenue test can take the
+    // unwrapped index: its period (8) divides the blocks per tile (1024), so
+    // it is already the same function of the tile coordinate.
     let span = select(1, 2, c.merged);
     let cmin = vec2<f32>(base) * cell;
     let cmax = vec2<f32>(base + vec2<i32>(span)) * cell;
@@ -3231,7 +3285,8 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
     var col = mix(CITY_NIGHT_HORIZON, CITY_NIGHT_ZENITH, pow(zc, 0.55));
 
     // Skyline glow dome: sample the city ahead of the sightline.
-    let probe_xy = u.cam_origin.xy + dir.xy * CITY_SKYGLOW_DOME_DIST;
+    // Into the city frame, through the one entry the trace itself uses.
+    let probe_xy = city_camera_origin().xy + dir.xy * CITY_SKYGLOW_DOME_DIST;
     let dome = city_glow_sample(probe_xy, 7.0);
     col = col + CITY_SKYGLOW_DOME * (CITY_SKYGLOW_DOME_AMP * dome)
                 * exp(-max(dir.z, 0.0) / CITY_SKYGLOW_DOME_SCALE);
@@ -3792,18 +3847,23 @@ const cc_aircars_FADE_FULL: f32 = 1.00;
 // Per-craft placement draw. One city_rand4 (two pcg2d) carries everything the
 // geometry needs; appearance draws its own hash in the shader, where the cost
 // is one per hit pixel rather than one per visited cell.
+// Seeded by the TILE-WRAPPED cell index (city_tile_cell): a craft belongs
+// to its tile coordinate, so live flight and a replayed track — which only
+// carries the tile phase — draw the same traffic.
 fn cc_aircars_draw(ci: vec2<i32>, lane: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     let l = u32(lane);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x9e3779b9u + l * 0x2545f491u + 0x165667b1u,
-        bitcast<u32>(ci.y) * 0x85ebca6bu + l * 0xc2b2ae35u + 0x27d4eb2fu));
+        bitcast<u32>(cw.x) * 0x9e3779b9u + l * 0x2545f491u + 0x165667b1u,
+        bitcast<u32>(cw.y) * 0x85ebca6bu + l * 0xc2b2ae35u + 0x27d4eb2fu));
 }
 
 fn cc_aircars_look(ci: vec2<i32>, lane: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     let l = u32(lane);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0xc2b2ae35u + l * 0x9e3779b9u + 0x51ed270bu,
-        bitcast<u32>(ci.y) * 0x27d4eb2fu + l * 0x85ebca6bu + 0xdeadbeefu));
+        bitcast<u32>(cw.x) * 0xc2b2ae35u + l * 0x9e3779b9u + 0x51ed270bu,
+        bitcast<u32>(cw.y) * 0x27d4eb2fu + l * 0x85ebca6bu + 0xdeadbeefu));
 }
 
 // Underglow palette: 60% cyan, 25% magenta, 15% amber. Cyan carries the layer
@@ -6241,9 +6301,12 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
     // WHETHER; a cell-level draw decides the shape, so the two penthouses on
     // a superblock are not identical twins.
     let gh = city_rand4(cc.seed ^ vec2<u32>(0x1b56c4e9u, 0x0d2f1a37u));
+    // Tile-wrapped, like every cell-index draw (city_tile_cell); the
+    // quadrant test below is wrap-invariant on its own (n is even).
+    let cw = city_tile_cell(ci);
     let lh = city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x9e3779b9u + 0x2545f491u,
-        bitcast<u32>(ci.y) * 0x85ebca6bu + 0x27d4eb2fu));
+        bitcast<u32>(cw.x) * 0x9e3779b9u + 0x2545f491u,
+        bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
     // Which quadrant of a superblock this cell is.
     let q = (ci.x & 1) + 2 * (ci.y & 1);
 
@@ -6319,10 +6382,11 @@ fn cc_rooftopworks_mech_on(cc: CityCell) -> bool {
 }
 
 fn cc_rooftopworks_slot_draw(ci: vec2<i32>, s: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     let l = u32(s);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x85ebca6bu + l * 0x9e3779b9u + 0x7feb352du,
-        bitcast<u32>(ci.y) * 0xc2b2ae35u + l * 0x51ed270bu + 0x846ca68bu));
+        bitcast<u32>(cw.x) * 0x85ebca6bu + l * 0x9e3779b9u + 0x7feb352du,
+        bitcast<u32>(cw.y) * 0xc2b2ae35u + l * 0x51ed270bu + 0x846ca68bu));
 }
 
 // Slot `s` of cell `ci`: which deck it stands on, where, and what it is.
@@ -7106,9 +7170,13 @@ struct cc_skybridges_Span {
 // edge crosses. Computed from the LOWER cell of the pair, which both sides
 // can name.
 fn cc_skybridges_eid(clo: vec2<i32>, axis: i32) -> vec2<u32> {
+    // Tile-wrapped (city_tile_cell) so an edge is a property of its tile
+    // coordinate: both cells beside it name the same lower cell, wrapped
+    // the same way, on every copy of the tile.
+    let cw = city_tile_cell(clo);
     return vec2<u32>(
-        bitcast<u32>(2 * clo.x + (1 - axis)) ^ 0x5bf03635u,
-        bitcast<u32>(2 * clo.y + axis) ^ 0x9e3779b9u);
+        bitcast<u32>(2 * cw.x + (1 - axis)) ^ 0x5bf03635u,
+        bitcast<u32>(2 * cw.y + axis) ^ 0x9e3779b9u);
 }
 
 // The gate. This is the component's hottest instruction by a wide margin —
@@ -7968,11 +8036,14 @@ fn cc_streetlife_no_prop() -> cc_streetlife_Prop {
                               vec4<f32>(0.0));
 }
 
+// Tile-wrapped (city_tile_cell): kerb furniture belongs to its tile
+// coordinate, so live and replay place the same bins on the same corners.
 fn cc_streetlife_slot_draw(ci: vec2<i32>, side: i32, j: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x9e3779b9u + u32(side) * 0x2545f491u
+        bitcast<u32>(cw.x) * 0x9e3779b9u + u32(side) * 0x2545f491u
             + bitcast<u32>(j) * 0x85ebca6bu + 0x51ed270bu,
-        bitcast<u32>(ci.y) * 0xc2b2ae35u + u32(side) * 0x27d4eb2fu
+        bitcast<u32>(cw.y) * 0xc2b2ae35u + u32(side) * 0x27d4eb2fu
             + bitcast<u32>(j) * 0x165667b1u + 0x9e3779b9u));
 }
 
@@ -8297,9 +8368,10 @@ fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
     if (!cc.built) {
         return cc_streetlife_no_prop();
     }
+    let cw = city_tile_cell(ci);
     let r = city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x27d4eb2fu + u32(k) * 0x9e3779b9u + 0x2f1e3a7bu,
-        bitcast<u32>(ci.y) * 0x165667b1u + u32(k) * 0xc2b2ae35u + 0x7feb352du));
+        bitcast<u32>(cw.x) * 0x27d4eb2fu + u32(k) * 0x9e3779b9u + 0x2f1e3a7bu,
+        bitcast<u32>(cw.y) * 0x165667b1u + u32(k) * 0xc2b2ae35u + 0x7feb352du));
     if (r.x > cc_streetlife_CORNER_BIN) {
         return cc_streetlife_no_prop();
     }
@@ -9798,7 +9870,9 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 
     // The view direction, and with it the core's own foreshortened footprint:
     // the panel has to subtract the wall at exactly the LOD the core drew it.
-    let dir = normalize(h.pos - u.cam_origin.xyz);
+    // h.pos is in the CITY FRAME, so the camera comes from the frame's one
+    // entry (city_camera_origin) rather than from u.cam_origin raw.
+    let dir = normalize(h.pos - city_camera_origin());
     let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);
 
     // The outer rectangle: everything inside it is panel or bezel, and the
@@ -10179,12 +10253,23 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         // dissolves windows into blocks exactly as it coarsens the march —
         // one lever, one degrees-not-meters law for the whole scene.
         let pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
-        let chit = city_trace(u.cam_origin.xyz, dir);
+        // THE CITY FRAME: world xy minus the row-24 surface offset, folded
+        // into the primary tile (city_camera_origin — the one entry). The
+        // whole city system — the DDA, every cell index and pcg2d seed,
+        // plot slabs, street lines, component routes, hit positions, the
+        // fog's glow probe — runs in this frame, and because the city is a
+        // pure function of it, the frame's whole-tile ambiguity is
+        // invisible. t values are translation-invariant, so depth
+        // compositing against the cloud march needs no conversion; the one
+        // city input that must STAY world is the uplight probe's cloud
+        // sampling (see the city_glow_sample call in the march loop).
+        let city_o = city_camera_origin();
+        let chit = city_trace(city_o, dir);
         if (chit.hit) {
             t_city = chit.t;
             city_rgb = city_fog(
                 city_shade(chit, dir, pixel_angle * chit.t),
-                u.cam_origin.xyz, dir, chit.t, chit.pos);
+                city_o, dir, chit.t, chit.pos);
         }
     }
     let t_surface = select(t_ocean, t_city, CITY);
@@ -10832,7 +10917,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
                     0.0, u.ocean_params.w);
                 let g_raw = max(
-                    city_glow_sample(p.xy, up_lod) - CITY_UPLIGHT_GLOW_BIAS,
+                    // p is a WORLD cloud sample: convert for the glow
+                    // (city frame), keep world for the tau probe below.
+                    city_glow_sample(city_fold_xy(p.xy), up_lod)
+                        - CITY_UPLIGHT_GLOW_BIAS,
                     0.0);
                 let g_up = g_raw / (CITY_UPLIGHT_GLOW_HALF + g_raw);
                 let tau_dn = city_uplight_probe_tau(p, probe_jitter);

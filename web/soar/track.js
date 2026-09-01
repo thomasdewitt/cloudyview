@@ -10,14 +10,24 @@
 //
 // Track schema is shared with the desktop, so a track recorded in the browser
 // can be re-rendered by `render_track` in Python and vice versa:
-//   {"schema": "cloudyview.track.v1",
+//   {"schema": "cloudyview.track.v2",
 //    "header": <render metadata>,
-//    "samples": [[t, x, y, z, azimuth, elevation, fov], ...]}
-// with the camera fields in the relative-coordinate convention.
+//    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}
+// with x/y/z in the relative-coordinate convention — the CLOUD frame, folded
+// at the cloud period, exactly as v1 wrote them — and sx/sy the camera's
+// position in the scene's surface-tile frame, in TILE-RELATIVE units
+// (surfacePosition / tileExtent, so the period is 1.0 and the schema needs
+// no tile size). The two frames wrap at independent periods, which is why a
+// sample carries both: fold one into the other and a recorded city flight
+// replays over the wrong district — or the day ocean teleports under a
+// replayed crossing. Every scene's camera carries a surface frame (the day
+// ocean's included), so v2 samples are 9 columns with the first seven
+// byte-identical to v1's; a camera without one writes 7 columns, and a v1
+// track loads and resamples the same way.
 
 "use strict";
 
-export const TRACK_SCHEMA = "cloudyview.track.v1";
+export const TRACK_SCHEMA = "cloudyview.track.v2";
 
 // Relative x/y span the domain as [-1, 1], so a periodic flight-path wrap is
 // a near-full-span jump between consecutive samples and nothing else is.
@@ -97,10 +107,12 @@ export function catmullRom(times, values, tOut) {
 /**
  * Resample hand-flown samples at exact 1/fps steps.
  *
- * Returns `[{t, position, azimuth, elevation, fov}, ...]` with position in
- * relative coordinates. Azimuth is unwrapped before interpolation so 359 to 1
- * goes through 0 rather than the long way round; in a periodic domain the
- * x/y wrap is unwrapped the same way and re-wrapped afterwards.
+ * Returns `[{t, position, azimuth, elevation, fov, surfacePosition}, ...]`
+ * with position in relative coordinates and surfacePosition tile-relative
+ * (or null — see below). Azimuth is unwrapped before interpolation so 359 to
+ * 1 goes through 0 rather than the long way round; in a periodic domain each
+ * wrapped position column is unwrapped the same way at its own frame's
+ * period and re-wrapped afterwards.
  */
 const frameCountBetween = (t0, t1, fps) =>
   Math.floor((t1 - t0 + 1e-9) * fps) + 1;
@@ -142,12 +154,36 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
       `The track collapses to ${unique.length} sample(s) with distinct ` +
       "times, which is not enough to interpolate. Fly for longer.");
   }
+  // 9 columns is a v2 sample (every scene's camera carries a surface frame
+  // now, the day ocean's included); 7 is a v1 recording — those predate the
+  // surface frame and replay with zero drift (the old behavior, not
+  // repairable: the fold already lost which tile copy the flight was in).
+  // A mix is a corrupt track, not a choice to make quietly.
+  const widths = new Set(unique.map((s) => s.length));
+  if (widths.size !== 1 || !(widths.has(7) || widths.has(9))) {
+    throw new Error(
+      "Track samples must uniformly have 7 columns (v1 / no surface frame) " +
+      `or 9 (v2 with one); got widths {${[...widths].join(", ")}}.`);
+  }
+  const hasSurface = widths.has(9);
 
   const column = (j) => unique.map((s) => s[j]);
   const times = column(0);
+  // Each column unwraps and folds at ITS OWN frame's period: the cloud
+  // frame's x/y at REL_PERIOD as ever, the surface frame's sx/sy at 1.0
+  // (tile-relative units). Callers do not choose periods — the columns carry
+  // their frames, and folding either at the other's period is precisely the
+  // district drift the two-frame schema exists to prevent.
   let x = column(1), y = column(2);
   if (periodic) { x = unwrapPeriodic(x); y = unwrapPeriodic(y); }
   const az = unwrapDegrees(column(4));
+  let sx = null, sy = null;
+  if (hasSurface && periodic) {
+    sx = unwrapPeriodic(column(7), 1.0, 0.5);
+    sy = unwrapPeriodic(column(8), 1.0, 0.5);
+  } else if (hasSurface) {
+    sx = column(7); sy = column(8);
+  }
 
   const count = frameCountBetween(times[0], times[times.length - 1], fps);
   const t0 = times[0];
@@ -161,12 +197,22 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
     az: catmullRom(times, az, tOut),
     el: catmullRom(times, column(5), tOut),
     fov: catmullRom(times, column(6), tOut),
+    ...(hasSurface ? { sx: catmullRom(times, sx, tOut),
+                       sy: catmullRom(times, sy, tOut) } : {}),
   };
   if (periodic) {
+    // Fold back at the same period each unwrap used: x/y centred into
+    // [-1, 1) bit for bit as v1 did, sx/sy into [0, 1) — the tile frame's
+    // own convention.
     for (const key of ["x", "y"]) {
       for (let k = 0; k < count; k++) {
         cols[key][k] = (((cols[key][k] + 1.0) % REL_PERIOD) + REL_PERIOD)
                        % REL_PERIOD - 1.0;
+      }
+    }
+    for (const key of hasSurface ? ["sx", "sy"] : []) {
+      for (let k = 0; k < count; k++) {
+        cols[key][k] = ((cols[key][k] % 1.0) + 1.0) % 1.0;
       }
     }
   }
@@ -179,6 +225,9 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
       azimuth: ((cols.az[k] % 360.0) + 360.0) % 360.0,
       elevation: Math.min(90.0, Math.max(-90.0, cols.el[k])),
       fov: cols.fov[k],
+      // Tile-relative, like the samples; null on a track with no surface
+      // frame, and the replay then folds against the static offset.
+      surfacePosition: hasSurface ? [cols.sx[k], cols.sy[k]] : null,
     });
   }
   return frames;
@@ -238,11 +287,20 @@ export class TrackRecorder {
   sample(camera) {
     if (!this._recording) return;
     const rel = camera.relativePosition();
-    this.samples.push([
+    const s = [
       this.elapsed,
       rel[0], rel[1], rel[2],
       camera.azimuth, camera.elevation, camera.fov,
-    ]);
+    ];
+    // The surface frame, tile-relative: x/y above are folded at the cloud
+    // period, which loses which tile copy the flight is in — sx/sy is where
+    // that lives (the city district, or the day ocean's phase). Appended, so
+    // the first seven columns stay byte-identical to a v1 sample.
+    if (camera.surfacePosition) {
+      s.push(camera.surfacePosition[0] / camera.surfaceTileExtent,
+             camera.surfacePosition[1] / camera.surfaceTileExtent);
+    }
+    this.samples.push(s);
   }
 
   stop() {

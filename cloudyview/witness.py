@@ -284,6 +284,7 @@ def render_nested(
     step_voxel_factor: float = STEP_VOXEL_FACTOR,
     lod: float = DEFAULT_LOD_STRENGTH,
     quality: Optional[str] = None,
+    surface_origin: Optional[Sequence[float]] = None,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -328,12 +329,28 @@ def render_nested(
         accumulate = tier["accumulate"]
     view_factor = tier["step_factor"] if tier else step_voxel_factor
     light_factor = tier["light_step_factor"] if tier else step_voxel_factor
+    # --surface-origin: the row-24 surface offset of the flight being
+    # reproduced (SceneState.surface_offset_m — where the surface tile sat
+    # in the world that flight rendered). Omitted means the static offset,
+    # which is every fresh render; a browser flight whose camera folds moved
+    # the offset writes its value into the reproduction command, so the
+    # water phase — and over a city, the streets and buildings — land where
+    # the flight actually rendered them.
+    state_kwargs = {}
+    if surface_origin is not None:
+        origin = [float(v) for v in surface_origin]
+        if len(origin) != 2:
+            raise ValueError(
+                f"surface_origin needs exactly two values (x y metres); "
+                f"got {surface_origin!r}.")
+        state_kwargs["surface_offset_m"] = tuple(origin)
     state = SceneState(
         bmin=[float(v) for v in outer.bmin], bmax=[float(v) for v in outer.bmax],
         dt_view=min_voxel * view_factor, dt_light=min_voxel * light_factor,
         periodic=periodic,
         ocean_reflectance=OCEAN_REFLECTANCE,
         nested=len(levels) > 1,
+        **state_kwargs,
     )
     dt = min_voxel * view_factor
     if len(levels) > 1:
@@ -427,6 +444,7 @@ def witness(
     accumulate: int = STILL_ACCUMULATE_FRAMES,
     lod: float = DEFAULT_LOD_STRENGTH,
     quality: Optional[str] = None,
+    surface_origin: Optional[Sequence[float]] = None,
     return_linear: bool = False,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -460,6 +478,12 @@ def witness(
         the sun above the horizon.
     accumulate : int, optional
         Accumulated passes; more is less noise (default 64).
+    surface_origin : (x, y), optional
+        The surface offset of the flight being reproduced, in world metres
+        (uniform row 24; the shader derives the water pattern and the
+        city's frame from world minus this, mod the tile). Omitted means
+        the scene's static offset, which is every fresh render; soar's
+        reproduction commands write a flight's own offset here.
     return_linear : bool, optional
         Compile the tone map out and return unbounded linear HDR radiance
         instead of an encoded image. This is what soar's auto-exposure
@@ -514,6 +538,7 @@ def witness(
         tone_map_white_point=tone_map_white_point, contrast=contrast,
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
         periodic=periodic, accumulate=accumulate, quality=quality,
+        surface_origin=surface_origin,
         return_linear=return_linear, verbose=verbose)
 
 
@@ -589,6 +614,7 @@ def main(filename: str, output: str = None,
          haze_height_dependent: bool = None,
          lod: float = None,
          quality: str = None,
+         surface_origin: list = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -644,6 +670,8 @@ def main(filename: str, output: str = None,
         look_kwargs['haze_height_dependent'] = haze_height_dependent
     if quality is not None:
         look_kwargs['quality'] = quality
+    if surface_origin is not None:
+        look_kwargs['surface_origin'] = surface_origin
 
     try:
         if nest_group and ice:
@@ -864,6 +892,16 @@ def cli():
                              "tier's lighting method (sun-tau cache, sky "
                              "probe) and its parked sample count, all from "
                              "the one preset")
+    parser.add_argument("--surface-origin", type=float, nargs=2,
+                        metavar=('X', 'Y'),
+                        help="The surface offset of the flight being "
+                             "reproduced, in metres (uniform row 24). "
+                             "Omitted means the scene's static offset, "
+                             "which is every fresh render; a soar "
+                             "reproduction command writes the flown "
+                             "offset so the water phase (and over a "
+                             "city, the streets) land where that flight "
+                             "rendered them")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",
@@ -889,6 +927,7 @@ def cli():
          haze=args.haze,
          lod=args.lod,
          quality=args.quality,
+         surface_origin=args.surface_origin,
          haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,

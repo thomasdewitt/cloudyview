@@ -9,13 +9,19 @@ does not show.
 
 The shader's map is one line of raymarch.wgsl:
 
-    let uv = (xy - u.ocean.yz) / u.ocean_params.y;
+    let uv = xy / u.ocean_params.y;
 
-with a repeating sampler, so only the fractional part of uv picks a block.
-That line is pinned here as text — it is the definition, and a change to it
-has to come here and break this test rather than silently desynchronise the
-map. The JS forward map, the minimap's city image, and the harness's inverse
-are then checked against it.
+where `xy` is the CITY FRAME — world minus the row-24 surface offset, folded
+into the tile (city_camera_origin) — and the sampler repeats, so only the
+fractional part of uv picks a block. The row-24 offset is cam - sp for a
+flying camera and the static cityOffsetM folded for every static render, and
+in BOTH cases it is congruent to cityOffsetM mod the tile wherever a tile
+position is quoted (the camera's own surfacePosition derives against the
+static offset). So the composite world->tile map is unchanged:
+fract((world - cityOffsetM) / extent). That composite is what scene.js
+cityFramePosition, the minimap's city image, the capture metadata and
+night_city_harness --city-camera all implement, and this file checks them
+against each other.
 
 Skips when node is unavailable. Needs no GPU: this is arithmetic.
 """
@@ -45,17 +51,33 @@ OFFSET = (8100.0, -44190.0)
 EXTENT = 46080.0
 
 
-def test_shader_samples_the_tile_at_xy_minus_offset_over_extent():
-    """The definition, as it stands in the shader."""
+def test_shader_samples_the_tile_at_the_city_frame_over_extent():
+    """The definition, as it stands in the shader.
+
+    Since the tile-periodic city (row 24, 2026-09-01), the glow's uv is a
+    plain read of the city frame — xy / extent — and the frame itself is
+    world minus the row-24 offset (city_camera_origin). The offset is
+    congruent to cityOffsetM mod the tile in every context that quotes a
+    tile position, so the composite world->tile map is unchanged:
+    fract((world - cityOffsetM) / extent). See the module docstring; a
+    change to either line has to come here and break this test rather than
+    silently desynchronise the map.
+    """
     source = WGSL.read_text()
     body = re.search(r"fn city_glow_sample\(.*?\n\}", source, re.S)
     assert body is not None, "city_glow_sample is gone from raymarch.wgsl"
-    assert re.search(r"let\s+uv\s*=\s*\(xy\s*-\s*u\.ocean\.yz\)\s*/\s*"
-                     r"u\.ocean_params\.y\s*;", body.group(0)), (
+    assert re.search(r"let\s+uv\s*=\s*xy\s*/\s*u\.ocean_params\.y\s*;",
+                     body.group(0)), (
         "the city tile's world->tile map changed; scene.js cityFramePosition, "
         "the minimap's city image, the capture metadata and "
         "night_city_harness "
-        "--city-camera all have to change with it")
+        "--city-camera all have to change with it — unless the change "
+        "preserves the composite map (see this test's docstring)")
+    entry = re.search(r"fn city_camera_origin\(.*?\n\}", source, re.S)
+    assert entry is not None, "city_camera_origin is gone from raymarch.wgsl"
+    assert "city_fold_xy(u.cam_origin.xy)" in entry.group(0), (
+        "the city frame's one entry no longer folds world minus the row-24 "
+        "offset; the composite map has changed")
 
 
 def _city_frame(points):

@@ -401,11 +401,14 @@ fn cc_streetlife_no_prop() -> cc_streetlife_Prop {
                               vec4<f32>(0.0));
 }
 
+// Tile-wrapped (city_tile_cell): kerb furniture belongs to its tile
+// coordinate, so live and replay place the same bins on the same corners.
 fn cc_streetlife_slot_draw(ci: vec2<i32>, side: i32, j: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x9e3779b9u + u32(side) * 0x2545f491u
+        bitcast<u32>(cw.x) * 0x9e3779b9u + u32(side) * 0x2545f491u
             + bitcast<u32>(j) * 0x85ebca6bu + 0x51ed270bu,
-        bitcast<u32>(ci.y) * 0xc2b2ae35u + u32(side) * 0x27d4eb2fu
+        bitcast<u32>(cw.y) * 0xc2b2ae35u + u32(side) * 0x27d4eb2fu
             + bitcast<u32>(j) * 0x165667b1u + 0x9e3779b9u));
 }
 
@@ -730,9 +733,10 @@ fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
     if (!cc.built) {
         return cc_streetlife_no_prop();
     }
+    let cw = city_tile_cell(ci);
     let r = city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x27d4eb2fu + u32(k) * 0x9e3779b9u + 0x2f1e3a7bu,
-        bitcast<u32>(ci.y) * 0x165667b1u + u32(k) * 0xc2b2ae35u + 0x7feb352du));
+        bitcast<u32>(cw.x) * 0x27d4eb2fu + u32(k) * 0x9e3779b9u + 0x2f1e3a7bu,
+        bitcast<u32>(cw.y) * 0x165667b1u + u32(k) * 0xc2b2ae35u + 0x7feb352du));
     if (r.x > cc_streetlife_CORNER_BIN) {
         return cc_streetlife_no_prop();
     }

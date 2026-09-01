@@ -334,11 +334,12 @@ export function cityFramePosition(position, cityOffsetM, tileExtentM) {
  *
  * CITY_START_CAMERA is pinned in city metres because that is the frame the
  * view lives in — a street canyon is a place in the TILE, not a fraction of
- * whatever cloud box is flying over it. The un-fold picks the tile copy the
- * capture was actually taken in (offset + city coordinates, no wrapping):
- * the camera's own constrain() folds at the common multiple of both periods,
- * which moves nothing visible, whereas wrapping here at the cloud period is
- * precisely the drift this frame exists to end.
+ * whatever cloud box is flying over it. The conversion here places the
+ * CLOUD frame: offset + city metres, made relative to this field's box. The
+ * camera then derives its own surface frame from that world position
+ * (FlightCamera._resyncSurface), which recovers positionCityM folded at the
+ * tile — so both frames open on the street the capture named, whatever the
+ * domain size.
  */
 function cityStartCamera(bmin, bmax) {
   const [cx, cy, cz] = K.CITY_START_CAMERA.positionCityM;

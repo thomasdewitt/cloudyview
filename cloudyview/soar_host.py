@@ -65,8 +65,10 @@ def read_shader() -> str:
             "glimpse and behold do not need the shader and still work.")
     return SHADER_PATH.read_text()
 
-UNIFORM_ROWS = 24
-UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 384; the scene key compares all of it
+# Row 24 (the 25th) is the surface offset the water samples and the city
+# frame are derived from — see raymarch.wgsl's surface_offset.
+UNIFORM_ROWS = 25
+UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 400; the scene key compares all of it
 
 DEG = math.pi / 180.0
 
@@ -219,7 +221,7 @@ class SceneState:
 
     `city` selects the night-city scene, which the shader compiles in through
     the CITY constant (see `specialize`). It does not add uniform rows — the
-    block is the same 384 bytes in either mode — it REINTERPRETS a few of
+    block is the same 400 bytes in either mode — it REINTERPRETS a few of
     them, and the fields keep their ocean names because the slots are literally
     the ocean's:
 
@@ -257,6 +259,16 @@ class SceneState:
     # wildest cascade excursion — under the TWP-ICE subvolume's central
     # cameras, which is where the harness flies.
     city_tile_offset_m: Sequence[float] = (75330.0, -17010.0)
+    # Row 24: explicit override of the surface offset — where the surface
+    # tile sits in the world this render draws (the shader derives the city
+    # frame and the water uv as world minus row 24, folded into
+    # [0, tile extent)). None means the scene's static offset:
+    # city_tile_offset_m under CITY, the origin otherwise — which folds to
+    # exactly 0.0 for a day scene, keeping the water samples bit-identical
+    # to a shader with no surface frame at all. witness's --surface-origin
+    # lands here so a reproduction command from a flight whose camera folds
+    # moved the offset carries the value that flight rendered with.
+    surface_offset_m: Optional[Sequence[float]] = None
 
 
 @dataclass
@@ -331,9 +343,9 @@ class ViewState:
 
 
 def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
-    """The 384-byte block, row for row with web/soar/uniforms.js.
+    """The 400-byte block, row for row with web/soar/uniforms.js.
 
-    Returns (24, 4) float32. Every unwritten slot stays zero, which is what
+    Returns (25, 4) float32. Every unwritten slot stays zero, which is what
     the shader's unused components and the absent nest rows require.
 
     With `state.city` the layout is untouched and a handful of rows change
@@ -466,6 +478,22 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
         u[22] = (*state.nest_bmax, state.dt_light_nest)
     u[23] = (1.0 if view.light_cache else 0.0, 0.0,
              0.0 if view.sky_probe else 1.0, 0.0)
+    # Row 24: the surface offset, folded into [0, tile extent) — see
+    # SceneState.surface_offset_m and the raymarch.wgsl surface_offset
+    # comment. witness has no flight, so this is always the static offset
+    # folded; for a day scene that is fold(0) = exactly 0.0, which is what
+    # keeps the judge-view goldens byte-identical (the shader then subtracts
+    # a bit-neutral zero). Fold spelled exactly as the browser's
+    # (uniforms.js foldTile): one fmod, then a conditional add.
+    tile = state.ocean_tile_extent
+
+    def _fold_tile(v: float) -> float:
+        r = math.fmod(float(v), tile)
+        return r + tile if r < 0 else r
+
+    base = (state.surface_offset_m if state.surface_offset_m is not None
+            else (state.city_tile_offset_m if state.city else (0.0, 0.0)))
+    u[24] = (_fold_tile(base[0]), _fold_tile(base[1]), 0.0, 0.0)
     return u
 
 

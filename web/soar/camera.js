@@ -94,7 +94,25 @@ function startCamera(start) {
 
 export class FlightCamera {
   constructor(bmin, bmax, { periodic = true, start = null,
-                            wrapExtent = null,
+                            // The scene's SECOND periodic frame: the surface
+                            // tile — the night city's block grid, or the day
+                            // ocean's wave patch. The clouds wrap at the
+                            // domain extent; the tile wraps at its own — and
+                            // the two are independent, so the camera keeps a
+                            // coordinate in EACH frame rather than trying to
+                            // fold one world position at a period both can
+                            // live with (the abandoned common-multiple
+                            // approach, whose fold leaked through every
+                            // serialization). Every scene passes its tile
+                            // extent; null/0 = no surface frame
+                            // (surfacePosition stays null), kept for
+                            // frame-less callers and v1-era tracks.
+                            surfaceTileExtent = null,
+                            // Where the tile sits in world space at spawn —
+                            // the scene's cityOffsetM. Only used to DERIVE
+                            // surfacePosition on absolute repositions; flight
+                            // never reads it again.
+                            surfaceOffsetM = [0.0, 0.0],
                             // The speed this session opens at, and the one R
                             // returns to. A scene's, not a global: 1500 m/s
                             // crosses a cloud field and goes through a city
@@ -104,13 +122,8 @@ export class FlightCamera {
     this.bmin = bmin;
     this.bmax = bmax;
     this.periodic = periodic;
-    // Fold distance per lateral axis, when it is not the box's own extent.
-    // The night city needs one: the shader wraps the CLOUDS at the domain
-    // width wherever the camera is, but the city is read in absolute world
-    // coordinates — folding the camera at the cloud period teleported the
-    // city by a fraction of a tile every crossing. Folding at a common
-    // multiple of both periods instead makes both resets invisible.
-    this.wrapExtent = wrapExtent;
+    this.surfaceTileExtent = surfaceTileExtent > 0 ? surfaceTileExtent : null;
+    this.surfaceOffsetM = surfaceOffsetM;
     // Held so `reset` returns to this field's own opening view rather than to
     // the global default — on a demo those are different places, and the one
     // worth going back to is the one the page promised.
@@ -123,6 +136,12 @@ export class FlightCamera {
     this.speed = this.startSpeed;
     this.keys = new Set();
     this.speedFlashUntil = 0;
+    // BEFORE constrain(): the fold at the cloud period is invisible to the
+    // clouds and meaningless to the tile, so the surface frame derives from
+    // the unfolded world position. For the cyberpunk spawn that position is
+    // cityOffsetM + positionCityM (scene.js cityStartCamera), so the initial
+    // surfacePosition IS positionCityM folded at the tile.
+    this._resyncSurface();
     this.constrain();
   }
 
@@ -131,6 +150,57 @@ export class FlightCamera {
     this.azimuth = this.start.azimuth;
     this.elevation = this.start.elevation;
     this.speed = this.startSpeed;
+    this._resyncSurface();
+    this.constrain();
+  }
+
+  /**
+   * Re-derive the surface frame from the current world position — for
+   * construction, reset, and any other ABSOLUTE reposition. Flight must not
+   * come through here: constrain() folds `position` at the cloud period, so
+   * after the first crossing the world position no longer knows which tile
+   * copy the flight is in; only the incrementally-tracked surfacePosition
+   * does. (At an absolute reposition there is no accumulated phase to keep —
+   * the fold against the static offset is exact by definition.)
+   */
+  _resyncSurface() {
+    const t = this.surfaceTileExtent;
+    if (t == null) { this.surfacePosition = null; return; }
+    this.surfacePosition = [0, 1].map((i) => {
+      const v = (this.position[i] - this.surfaceOffsetM[i]) % t;
+      return v < 0 ? v + t : v;
+    });
+  }
+
+
+  /**
+   * The ONE flight move path: every in-flight lateral displacement goes
+   * through here so `position` (cloud frame) and `surfacePosition` (tile
+   * frame) advance by the SAME world-space delta and cannot diverge. Each is
+   * then folded at its own period — the cloud fold in constrain(), the tile
+   * fold here.
+   */
+  _translate(dx, dy, dz) {
+    const p = this.position;
+    p[0] += dx; p[1] += dy; p[2] += dz;
+    if (this.surfacePosition) {
+      const t = this.surfaceTileExtent;
+      const s = this.surfacePosition;
+      s[0] = (((s[0] + dx) % t) + t) % t;
+      s[1] = (((s[1] + dy) % t) + t) % t;
+    }
+    this.constrain();
+  }
+
+  /**
+   * Absolute lateral reposition (the minimap travel click): world x/y in
+   * metres. The surface frame re-derives from the static offset — the map
+   * names a place in the tile, and that fold is exactly the place named.
+   */
+  teleport(x, y) {
+    this.position[0] = x;
+    this.position[1] = y;
+    this._resyncSurface();
     this.constrain();
   }
 
@@ -177,29 +247,32 @@ export class FlightCamera {
     const [, r] = cameraBasis(this.azimuth, this.elevation);
     const f = directionFromAzimuthElevation(this.azimuth, 0.0);
     const d = this.speed * Math.min(dt, 0.1);
-    const p = this.position;
     const k = this.keys;
-    if (k.has("w")) { p[0] += f[0] * d; p[1] += f[1] * d; }
-    if (k.has("s")) { p[0] -= f[0] * d; p[1] -= f[1] * d; }
-    if (k.has("a")) { p[0] -= r[0] * d; p[1] -= r[1] * d; }
-    if (k.has("d")) { p[0] += r[0] * d; p[1] += r[1] * d; }
-    const dz = d * VERTICAL_SPEED_FRACTION;
-    if (k.has(" ")) p[2] += dz;
-    if (k.has("shift") || k.has("c")) p[2] -= dz;
-    this.constrain();
+    let dx = 0.0, dy = 0.0, dz = 0.0;
+    if (k.has("w")) { dx += f[0] * d; dy += f[1] * d; }
+    if (k.has("s")) { dx -= f[0] * d; dy -= f[1] * d; }
+    if (k.has("a")) { dx -= r[0] * d; dy -= r[1] * d; }
+    if (k.has("d")) { dx += r[0] * d; dy += r[1] * d; }
+    const dv = d * VERTICAL_SPEED_FRACTION;
+    if (k.has(" ")) dz += dv;
+    if (k.has("shift") || k.has("c")) dz -= dv;
+    this._translate(dx, dy, dz);
     return true;
   }
 
   /**
    * Keep the camera above the ocean, and — in a periodic domain — inside the
    * box by wrapping rather than stopping. Crossing a lateral face puts you at
-   * the opposite one; flight is endless.
+   * the opposite one; flight is endless. The fold is at the CLOUD period and
+   * nothing else: the surface tile's frame keeps its own phase in
+   * surfacePosition, so this fold no longer has to be one the tile can live
+   * with.
    */
   constrain() {
     const p = this.position;
     if (this.periodic) {
       for (const i of [0, 1]) {
-        const extent = this.wrapExtent?.[i] ?? (this.bmax[i] - this.bmin[i]);
+        const extent = this.bmax[i] - this.bmin[i];
         p[i] = this.bmin[i] +
           (((p[i] - this.bmin[i]) % extent) + extent) % extent;
       }
@@ -208,17 +281,6 @@ export class FlightCamera {
   }
 
   relativePosition() {
-    // Folded into the box whatever the wrap extent: the minimap and every
-    // relative readout describe the cloud domain, and a camera nine periods
-    // out is still over the same cloud.
-    const p = [...this.position];
-    if (this.periodic) {
-      for (const i of [0, 1]) {
-        const extent = this.bmax[i] - this.bmin[i];
-        p[i] = this.bmin[i] +
-          (((p[i] - this.bmin[i]) % extent) + extent) % extent;
-      }
-    }
-    return worldToRelative(p, this.bmin, this.bmax);
+    return worldToRelative(this.position, this.bmin, this.bmax);
   }
 }

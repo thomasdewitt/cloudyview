@@ -386,9 +386,12 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
     // WHETHER; a cell-level draw decides the shape, so the two penthouses on
     // a superblock are not identical twins.
     let gh = city_rand4(cc.seed ^ vec2<u32>(0x1b56c4e9u, 0x0d2f1a37u));
+    // Tile-wrapped, like every cell-index draw (city_tile_cell); the
+    // quadrant test below is wrap-invariant on its own (n is even).
+    let cw = city_tile_cell(ci);
     let lh = city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x9e3779b9u + 0x2545f491u,
-        bitcast<u32>(ci.y) * 0x85ebca6bu + 0x27d4eb2fu));
+        bitcast<u32>(cw.x) * 0x9e3779b9u + 0x2545f491u,
+        bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
     // Which quadrant of a superblock this cell is.
     let q = (ci.x & 1) + 2 * (ci.y & 1);
 
@@ -464,10 +467,11 @@ fn cc_rooftopworks_mech_on(cc: CityCell) -> bool {
 }
 
 fn cc_rooftopworks_slot_draw(ci: vec2<i32>, s: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     let l = u32(s);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x85ebca6bu + l * 0x9e3779b9u + 0x7feb352du,
-        bitcast<u32>(ci.y) * 0xc2b2ae35u + l * 0x51ed270bu + 0x846ca68bu));
+        bitcast<u32>(cw.x) * 0x85ebca6bu + l * 0x9e3779b9u + 0x7feb352du,
+        bitcast<u32>(cw.y) * 0xc2b2ae35u + l * 0x51ed270bu + 0x846ca68bu));
 }
 
 // Slot `s` of cell `ci`: which deck it stands on, where, and what it is.

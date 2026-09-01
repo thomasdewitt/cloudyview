@@ -1,4 +1,4 @@
-// The uniform block: 24 rows of 4 floats, 384 bytes, rebuilt every frame.
+// The uniform block: 25 rows of 4 floats, 400 bytes, rebuilt every frame.
 //
 // A direct port of InteractiveRenderer.write_uniforms. Row order and meaning
 // are fixed by raymarch.wgsl, which the browser shares verbatim with the
@@ -59,6 +59,10 @@ export function packUniforms(state, view) {
     // describe the city tile, row 4 is the moon, and cityOffsetM is where
     // the tile sits in world space (row 8.yz).
     city = false, cityOffsetM = [0.0, 0.0],
+    // Explicit override of the surface offset row 24 folds and writes;
+    // null means the scene's static offset (cityOffsetM under CITY, the
+    // origin otherwise). Mirrors SceneState.surface_offset_m.
+    surfaceOffsetM = null,
   } = state;
 
   const {
@@ -209,6 +213,11 @@ export function packUniforms(state, view) {
   row(6, bmax[0], bmax[1], bmax[2], dtLight);
   row(7, w, h, gHg, ambientStrength);
   if (city) {
+    // Row 8.yz is the tile's static world offset, unchanged per frame. The
+    // live city frame is row 24's job now (the folded per-frame offset the
+    // shader builds p_city from); this row is kept as the scene's own
+    // statement of where the tile was pinned — metadata, the harness and
+    // the parity test read it, the shader no longer does.
     row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], 0.0);
   } else {
     row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
@@ -257,6 +266,36 @@ export function packUniforms(state, view) {
   // into its own copy of the block, never through here.
   row(23, lightCache ? 1.0 : 0.0, 0.0, skyProbe ? 0.0 : 1.0,
       iceMode ? 1.0 : 0.0);
+  // Row 24: the surface offset — where the surface tile sits in the world
+  // THIS FRAME renders, folded into [0, tileExtent). The shader derives the
+  // city frame (and the water uv) as world minus this, and because the city
+  // is a pure function of the tile frame — every cell index folds at the
+  // tile before it seeds anything — the fold here is invisible: only the
+  // offset mod the tile can matter. Per frame: a camera (or replay pose)
+  // that carries its own tile phase defines the offset as cam.xy minus
+  // surfacePosition, so a cloud-period fold of the camera moves the offset
+  // with it and the surface never jumps. fold(origin) is computed FIRST and
+  // surfacePosition subtracted after: at zero drift fold(origin) is the
+  // very expression surfacePosition was derived from (day scenes; static 0),
+  // so the difference is the literal 0.0 — bit-exact, which is what keeps
+  // the day judge-view goldens byte-identical (the water reads then
+  // subtract exactly 0.0). A camera with no surface frame writes the static
+  // offset, folded. Mirrored in soar_host.pack_uniforms.
+  const foldTile = (v) => {
+    const r = v % oceanTileExtent;
+    return r < 0 ? r + oceanTileExtent : r;
+  };
+  let surfaceOff;
+  if (camera.surfacePosition) {
+    surfaceOff = [
+      foldTile(foldTile(origin[0]) - camera.surfacePosition[0]),
+      foldTile(foldTile(origin[1]) - camera.surfacePosition[1]),
+    ];
+  } else {
+    const stat = surfaceOffsetM ?? (city ? cityOffsetM : [0.0, 0.0]);
+    surfaceOff = [foldTile(stat[0]), foldTile(stat[1])];
+  }
+  row(24, surfaceOff[0], surfaceOff[1], 0.0, 0.0);
   return u;
 }
 

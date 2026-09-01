@@ -413,7 +413,9 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
-export const UNIFORM_ROWS = 24;
+// Row 24 (the 25th) is the surface offset the water samples and the city
+// frame are derived from — see raymarch.wgsl's surface_offset.
+export const UNIFORM_ROWS = 25;
 // DERIVED, never written out. These were two independent literals until a row
 // was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.

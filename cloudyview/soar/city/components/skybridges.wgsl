@@ -170,9 +170,13 @@ struct cc_skybridges_Span {
 // edge crosses. Computed from the LOWER cell of the pair, which both sides
 // can name.
 fn cc_skybridges_eid(clo: vec2<i32>, axis: i32) -> vec2<u32> {
+    // Tile-wrapped (city_tile_cell) so an edge is a property of its tile
+    // coordinate: both cells beside it name the same lower cell, wrapped
+    // the same way, on every copy of the tile.
+    let cw = city_tile_cell(clo);
     return vec2<u32>(
-        bitcast<u32>(2 * clo.x + (1 - axis)) ^ 0x5bf03635u,
-        bitcast<u32>(2 * clo.y + axis) ^ 0x9e3779b9u);
+        bitcast<u32>(2 * cw.x + (1 - axis)) ^ 0x5bf03635u,
+        bitcast<u32>(2 * cw.y + axis) ^ 0x9e3779b9u);
 }
 
 // The gate. This is the component's hottest instruction by a wide margin —

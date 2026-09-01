@@ -603,7 +603,9 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 
     // The view direction, and with it the core's own foreshortened footprint:
     // the panel has to subtract the wall at exactly the LOD the core drew it.
-    let dir = normalize(h.pos - u.cam_origin.xyz);
+    // h.pos is in the CITY FRAME, so the camera comes from the frame's one
+    // entry (city_camera_origin) rather than from u.cam_origin raw.
+    let dir = normalize(h.pos - city_camera_origin());
     let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);
 
     // The outer rectangle: everything inside it is panel or bezel, and the

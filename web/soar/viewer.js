@@ -68,29 +68,6 @@ const TUTORIAL_REFUSED = new Set(
   ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "j", "p", "F12"]);
 
 /**
- * The camera's fold distance over a night city, per lateral axis: the
- * smallest whole number of city tiles that is also a whole number of cloud
- * domains, so folding moves neither. q is bounded because the periods may be
- * incommensurate — then the fold is pushed far out (many cloud periods)
- * rather than made exact, and the city jump becomes a once-per-expedition
- * event instead of a once-per-crossing one. null for every ocean scene:
- * the box extent is the right fold, exactly as before.
- */
-function cityWrapExtent(scene) {
-  if (!scene.city) return null;
-  return [0, 1].map((i) => {
-    const extent = scene.bmax[i] - scene.bmin[i];
-    const ratio = scene.oceanTileExtent / extent;
-    for (let q = 1; q <= 64; q++) {
-      if (Math.abs(q * ratio - Math.round(q * ratio)) < 1e-6) {
-        return q * scene.oceanTileExtent;
-      }
-    }
-    return 1024 * extent;
-  });
-}
-
-/**
  * The canvas must not present through an sRGB format. raymarch.wgsl's tone
  * map already gamma-encodes, and an sRGB swapchain encodes again — which is
  * exactly the bug that made the desktop window render at an effective gamma
@@ -497,11 +474,24 @@ export class Viewer {
     this.camera = new FlightCamera(scene.bmin, scene.bmax,
                                    { periodic: renderer.periodic,
                                      start: scene.startCamera,
-                                     wrapExtent: cityWrapExtent(scene),
+                                     // EVERY scene has a second periodic
+                                     // frame — the surface tile: the city's
+                                     // block grid, or the day ocean's wave
+                                     // patch. The camera tracks its position
+                                     // in it alongside the cloud one (see
+                                     // FlightCamera's surfacePosition), so
+                                     // neither the city nor the water jumps
+                                     // when the cloud frame folds ("the
+                                     // ocean should never jump" — Thomas,
+                                     // 2026-09-01).
+                                     surfaceTileExtent: scene.oceanTileExtent,
+                                     surfaceOffsetM:
+                                       scene.city ? scene.cityOffsetM
+                                                  : [0.0, 0.0],
                                      // Streets, not a cloud field: the city
-                                     // is the only scene with anything within
-                                     // 20 m of the camera. Day scenes keep
-                                     // DEFAULT_SPEED, untouched.
+                                     // is the only scene with anything
+                                     // within 20 m of the camera, so it
+                                     // flies slower too.
                                      ...(scene.city
                                        ? { speed: K.CITY_DEFAULT_SPEED }
                                        : {}) });
@@ -1097,9 +1087,10 @@ export class Viewer {
           e.offsetY * (canvas.height / canvas.clientHeight),
           this.scene, this.camera);
         if (hit) {
-          this.camera.position[0] = hit[0];
-          this.camera.position[1] = hit[1];
-          this.camera.constrain();
+          // An absolute reposition, so the camera re-derives its surface
+          // frame too — the map names a place in the tile, and teleport's
+          // fold against the static offset is exactly the place named.
+          this.camera.teleport(hit[0], hit[1]);
           this._wake("minimap travel");
           return;
         }
@@ -2332,12 +2323,26 @@ export class Viewer {
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
         if (this._videoAbort) throw new Error("Cancelled.");
+        const position = cameraWorldOrigin(
+          frames[i].position, this.scene.bmin, this.scene.bmax);
+        // The frame's surface offset rides on the pose the same way the
+        // camera origin does — packUniforms derives row 24 from a pose
+        // that carries a surfacePosition (world metres, like the live
+        // camera's). A v1 track has no surface frame: over a city the
+        // frame's world xy folds against the static offset instead, and
+        // over the day ocean the null pose frame makes packUniforms write
+        // the static offset folded (exactly 0.0) — the un-shifted surface
+        // either way, which is what those recordings meant.
+        const sp = frames[i].surfacePosition;
         const pose = {
-          position: cameraWorldOrigin(
-            frames[i].position, this.scene.bmin, this.scene.bmax),
+          position,
           azimuth: frames[i].azimuth,
           elevation: frames[i].elevation,
           fov: frames[i].fov,
+          surfacePosition: sp
+            ? [sp[0] * this.scene.oceanTileExtent,
+               sp[1] * this.scene.oceanTileExtent]
+            : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
         };
         const overlays = this.captureOverlays
           ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze)
@@ -2447,8 +2452,18 @@ export class Viewer {
     }
     const preset = K.QUALITY_PRESETS[look.preset];
     const parked = K.QUALITY_PRESETS.high;   // the top hold rung's sampling
+    // The cloud-folded relative position, as ever — with the city block
+    // below carrying the district, the cloud frame is unambiguous on its own.
     const rel = this.camera.relativePosition();
-    const cityPos = this.scene.cityPosition(this.camera.position);
+    // The camera's OWN surface frame, not a recompute from the world
+    // position: with two independently-folded frames the recompute is the
+    // thing that can drift from what was rendered. Gated on the scene, not
+    // on the frame — every camera carries a surface frame now (the day
+    // ocean's included), and the city block only means something over a
+    // city.
+    const cityPos = this.scene.city && this.camera.surfacePosition
+      ? [...this.camera.surfacePosition, this.camera.position[2]]
+      : null;
     return {
       schema: "cloudyview.render.v1",
       source: {
@@ -2480,6 +2495,12 @@ export class Viewer {
           position_m: cityPos,
           tile_offset_m: [...this.scene.cityOffsetM],
           tile_extent_m: this.scene.oceanTileExtent,
+          // The surface offset this render carried (uniform row 24; the
+          // static offset mod the tile until a period crossing moves it).
+          // With the folded camera position above, this — not
+          // tile_offset_m — is what reproduces the district and the water
+          // phase: hand it to --surface-origin.
+          surface_offset_m: this._surfaceOffsetM(),
         },
       } : {}),
       render: {
@@ -2788,6 +2809,39 @@ export class Viewer {
    * Custom's session values), so the command reproduces the CAPTURE. With no
    * overrides — the terminal panel — the live values go out.
    */
+  /**
+   * The surface offset this view renders with (uniform row 24, folded into
+   * [0, tileExtent)): the same fold-first subtraction packUniforms makes,
+   * or null when the camera has no surface frame.
+   */
+  _surfaceOffsetM() {
+    const sp = this.camera.surfacePosition;
+    if (!sp) return null;
+    const t = this.camera.surfaceTileExtent;
+    const fold = (v) => { const r = v % t; return r < 0 ? r + t : r; };
+    return [fold(fold(this.camera.position[0]) - sp[0]),
+            fold(fold(this.camera.position[1]) - sp[1])];
+  }
+
+  /**
+   * `--surface-origin` for the reproduction command, or nothing: the
+   * baseline is the scene's static offset folded — the value every fresh
+   * CLI render uses — so the flag appears exactly when this flight's cloud
+   * crossings have moved the surface frame off it.
+   */
+  _surfaceOriginFlags(n) {
+    const off = this._surfaceOffsetM();
+    if (!off) return [];
+    const t = this.camera.surfaceTileExtent;
+    const fold = (v) => { const r = v % t; return r < 0 ? r + t : r; };
+    const stat = this.scene.city ? this.scene.cityOffsetM : [0.0, 0.0];
+    if (off.every((v, i) => {
+      const d = fold(v - fold(stat[i]));
+      return Math.min(d, t - d) < 1e-6 * t;
+    })) return [];
+    return ["--surface-origin", n(off[0]), n(off[1])];
+  }
+
   witnessCommand({ lodStrength = this.lodStrength,
                    haze = this.haze,
                    hazeHeightDependent = this.hazeHeightDependent,
@@ -2814,6 +2868,10 @@ export class Viewer {
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
       ...(this.renderer.periodic ? ["--periodic"] : []),
+      // Only when period crossings moved this view off the scene's static
+      // surface offset: the folded camera position above no longer says
+      // which district is underneath, so the offset has to.
+      ...this._surfaceOriginFlags(n),
       "--exposure", n(exposure),
       "--gamma", n(this.toneMapGamma),
       "--white-point", n(this.toneMapWhitePoint),
@@ -3148,7 +3206,13 @@ export class Viewer {
       holdRung: this.renderer.holdRung,
       holdRungCount: this.renderer.holdRungCount,
       holdCapped: this.renderer.holdCapped,
-      cityPosition: this.scene.cityPosition(this.camera.position),
+      // The camera's own surface frame, not a recompute from the world
+      // position — the recompute is what can drift once the two frames fold
+      // independently. Scene-gated: day cameras carry a surface frame too
+      // (the ocean's), and that one is not a city readout.
+      cityPosition: this.scene.city && this.camera.surfacePosition
+        ? [...this.camera.surfacePosition, this.camera.position[2]]
+        : null,
     });
 
     // Sleep on a converged view.

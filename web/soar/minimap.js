@@ -484,6 +484,15 @@ export class Minimap {
           "The minimap was built as a city map and handed a scene with no " +
           "city tile.");
       }
+      // The camera's own surface frame when it carries one (the live
+      // FlightCamera, and replay poses): with the cloud and tile frames
+      // folding at independent periods, a recompute from the world position
+      // is the thing that can drift from what is rendered.
+      if (camera.surfacePosition) {
+        const e = scene.oceanTileExtent;
+        return [2.0 * camera.surfacePosition[0] / e - 1.0,
+                2.0 * camera.surfacePosition[1] / e - 1.0, 0.0];
+      }
       const rel = cityRelativePosition(scene, camera.position);
       if (!rel) {
         throw new Error(

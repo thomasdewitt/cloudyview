@@ -226,18 +226,23 @@ const cc_aircars_FADE_FULL: f32 = 1.00;
 // Per-craft placement draw. One city_rand4 (two pcg2d) carries everything the
 // geometry needs; appearance draws its own hash in the shader, where the cost
 // is one per hit pixel rather than one per visited cell.
+// Seeded by the TILE-WRAPPED cell index (city_tile_cell): a craft belongs
+// to its tile coordinate, so live flight and a replayed track — which only
+// carries the tile phase — draw the same traffic.
 fn cc_aircars_draw(ci: vec2<i32>, lane: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     let l = u32(lane);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0x9e3779b9u + l * 0x2545f491u + 0x165667b1u,
-        bitcast<u32>(ci.y) * 0x85ebca6bu + l * 0xc2b2ae35u + 0x27d4eb2fu));
+        bitcast<u32>(cw.x) * 0x9e3779b9u + l * 0x2545f491u + 0x165667b1u,
+        bitcast<u32>(cw.y) * 0x85ebca6bu + l * 0xc2b2ae35u + 0x27d4eb2fu));
 }
 
 fn cc_aircars_look(ci: vec2<i32>, lane: i32) -> vec4<f32> {
+    let cw = city_tile_cell(ci);
     let l = u32(lane);
     return city_rand4(vec2<u32>(
-        bitcast<u32>(ci.x) * 0xc2b2ae35u + l * 0x9e3779b9u + 0x51ed270bu,
-        bitcast<u32>(ci.y) * 0x27d4eb2fu + l * 0x85ebca6bu + 0xdeadbeefu));
+        bitcast<u32>(cw.x) * 0xc2b2ae35u + l * 0x9e3779b9u + 0x51ed270bu,
+        bitcast<u32>(cw.y) * 0x27d4eb2fu + l * 0x85ebca6bu + 0xdeadbeefu));
 }
 
 // Underglow palette: 60% cyan, 25% magenta, 15% amber. Cyan carries the layer

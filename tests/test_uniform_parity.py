@@ -1,4 +1,4 @@
-"""The Python host and the browser must fill the same 368 bytes.
+"""The Python host and the browser must fill the same 400 bytes.
 
 There is one renderer core — web/soar/raymarch.wgsl — driven by two hosts:
 JavaScript in the tab and Python via wgpu. The shader is shared by
@@ -82,6 +82,25 @@ CASES = [
                     "ocean_fif_dx": 90.0, "ocean_tile_extent": 92160.0,
                     "ocean_max_lod": 10, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
+    # Row 24, the surface offset the water samples and the city frame are
+    # derived from (2026-09-01). Both hosts must fold it into
+    # [0, tile extent) with the SAME arithmetic: an explicit override whose
+    # negative component wraps, and one far beyond the tile (a flight's
+    # offset shifts by cloud periods, which dwarf the day tile) — on a day
+    # scene and a city scene respectively. The city case also pins the
+    # static default: with no override, row 24 is city_tile_offset_m folded.
+    ("ocean_surface_offset", {"surface_offset_m": [-18630.2, 136143.7]}, {}),
+    ("city_surface_offset",
+     {"city": True, "city_tile_offset_m": [75330.0, -17010.0],
+      "surface_offset_m": [-102400.0, 204800.0],
+      "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
+      "ocean_max_lod": 8, "periodic": False},
+     {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
+    ("city_surface_static",
+     {"city": True, "city_tile_offset_m": [75330.0, -17010.0],
+      "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
+      "ocean_max_lod": 8, "periodic": False},
+     {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
 ]
 
 BASE_SCENE = dict(
@@ -123,6 +142,7 @@ def _js_state(extra):
              "nest_bmax": "nestBmax", "dt_view_nest": "dtViewNest",
              "dt_light_nest": "dtLightNest",
              "city": "city", "city_tile_offset_m": "cityOffsetM",
+             "surface_offset_m": "surfaceOffsetM",
              "ocean_fif_dx": "oceanFifDx",
              "ocean_tile_extent": "oceanTileExtent",
              "ocean_max_lod": "oceanMaxLod"}
@@ -235,12 +255,12 @@ def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
         f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
 
 
-def test_block_is_384_bytes():
-    """24 rows of 4 floats (row 23 is the sun-tau cache flag, 2026-08-19).
+def test_block_is_400_bytes():
+    """25 rows of 4 floats (row 24 is the surface offset, 2026-09-01).
     Pinned rather than derived on purpose, so that a row added on one side
     and not the other fails here as well as in the diff above."""
-    assert sh.UNIFORM_NBYTES == 384
-    assert _python_block({}, {}).nbytes == 384
+    assert sh.UNIFORM_NBYTES == 400
+    assert _python_block({}, {}).nbytes == 400
 
 
 def test_periodic_requires_sun_above_horizon():
