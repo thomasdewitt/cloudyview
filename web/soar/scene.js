@@ -507,6 +507,19 @@ export function createNestDummy(device) {
  * was a parallel pair of city-surfaced demo bakes, which would be the same
  * volumes twice on disk and in the index to carry one boolean.
  */
+/**
+ * A demo's sun as flight should OPEN on it: the demo's own light, with a
+ * near-horizon sun raised to K.MIN_START_SUN_ELEVATION.
+ *
+ * Upward only, and azimuth is never touched. A demo with no sun at all is
+ * passed through as-is — the viewer has its own default for that, and
+ * inventing one here would hide the absence.
+ */
+function startSun(sun) {
+  if (!sun || !(sun.elevation < K.MIN_START_SUN_ELEVATION)) return sun;
+  return { ...sun, elevation: K.MIN_START_SUN_ELEVATION };
+}
+
 export async function loadDemoScene(device, baseUrl, surface, progress,
                                     { surfaceKind: forcedSurface = null } = {}) {
   progress?.("Downloading the cloud field…", 0);
@@ -634,7 +647,14 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       // Under a forced city the demo's sun is a desert afternoon and the
       // scene's light is a moon, so the mode's moon replaces it. A demo that
       // asked for the city itself carries a moon in this field already.
-      sun: forcedSurface === "city" ? K.CITY_MOON : meta.sun,
+      //
+      // Otherwise the demo's own sun, with a low one raised to
+      // MIN_START_SUN_ELEVATION for the first frame — see that constant. The
+      // clamp is here rather than in the bake so it governs what the app
+      // OPENS at while meta.json keeps saying what the still was lit by,
+      // which is the honest split: the card and the file are the record of a
+      // picture, and this is a choice about flying.
+      sun: forcedSurface === "city" ? K.CITY_MOON : startSun(meta.sun),
       // Where the landing page's still was taken from, so flight can open
       // there — see Camera.applyStart and viewer boot. Under a forced city
       // the mode's own opening view replaces it, for the same reason the
