@@ -51,11 +51,10 @@ import {
   WebMOutputFormat,
 } from "./vendor/mediabunny/mediabunny.min.mjs";
 
-// Tried in order. H.264 first because it is what Chrome and Safari have and
-// what every editor, phone and web page will play back without argument.
-// Firefox has no H.264 VideoEncoder at all (bugzilla 2049470 — the decoder is
-// there, the encoder is not), so it falls through to VP9. VP8 is last: it is
-// a worse picture, but it is a video, and a video is the deliverable.
+// Tried in order. H.264 first because it is what every editor, phone and web
+// page will play back without argument. A browser without an H.264 encoder
+// falls through to VP9. VP8 is last: it is a worse picture, but it is a
+// video, and a video is the deliverable.
 const CANDIDATES = [
   { codec: "avc1.640034", family: "avc", label: "H.264 High 5.2" },
   { codec: "avc1.640028", family: "avc", label: "H.264 High 4.0" },
@@ -279,6 +278,96 @@ function vetColorSpace(colorSpace) {
   return { colorSpace: { primaries, transfer, matrix, fullRange }, warning: null };
 }
 
+// --- AVCC repair ----------------------------------------------------------
+
+const NAL_SPS = 7;
+const NAL_PPS = 8;
+
+/** View a WebCodecs `description` as a Uint8Array over exactly its own bytes. */
+function asBytes(description) {
+  if (description instanceof Uint8Array) return description;
+  if (ArrayBuffer.isView(description)) {
+    return new Uint8Array(description.buffer, description.byteOffset,
+                          description.byteLength);
+  }
+  return new Uint8Array(description);
+}
+
+/**
+ * Strip a duplicated leading NAL header byte from each parameter set in an
+ * AVCDecoderConfigurationRecord.
+ *
+ * Firefox's x264-backed H.264 VideoEncoder writes every SPS and PPS with its
+ * NAL header byte twice: `67 67 64 00 34 ...` where the record should read
+ * `67 64 00 34 ...`, and `68 68 eb ec b2 2c` for `68 eb ec b2 2c`. The extra
+ * byte shifts every bitfield after it, so the SPS parses as nonsense --
+ * pic_order_cnt_type reads as 4 (legal range 0-2) and seq_parameter_set_id
+ * as 1. ffmpeg survives by falling back to the in-band parameter sets in
+ * mdat, which are correct; VideoToolbox trusts the record and refuses the
+ * file, so QuickTime, QuickLook and Keynote all call the movie damaged. The
+ * bitstream itself is fine, so repairing the record is the whole fix.
+ *
+ * Returns the repaired bytes plus a warning, or the description untouched
+ * and a null warning. Anything that does not parse as a configuration record
+ * is passed through and reported rather than rewritten: a record we cannot
+ * read is not one we should be editing.
+ */
+function repairAvccDescription(description) {
+  const src = asBytes(description);
+  const suspect = (why) => ({ description, warning:
+    `The encoder's AVCC description ${why}, so it was written through ` +
+    "unchanged. If the file will not open, look here first." });
+
+  if (src.length < 7 || src[0] !== 1) {
+    return suspect("does not begin like an AVCDecoderConfigurationRecord");
+  }
+
+  // configurationVersion, profile, compatibility, level, lengthSizeMinusOne.
+  const out = Array.from(src.subarray(0, 5));
+  let p = 5;
+  let repaired = 0;
+
+  // Two counted lists follow: SPS (count in the low 5 bits) then PPS (all 8).
+  for (const [nalType, countMask] of [[NAL_SPS, 0x1f], [NAL_PPS, 0xff]]) {
+    if (p >= src.length) return suspect("ends before its parameter sets do");
+    const count = src[p] & countMask;
+    out.push(src[p]);
+    p += 1;
+    for (let i = 0; i < count; i++) {
+      if (p + 2 > src.length) {
+        return suspect("ends inside a parameter set length");
+      }
+      let len = (src[p] << 8) | src[p + 1];
+      p += 2;
+      if (p + len > src.length) {
+        return suspect("claims a parameter set longer than the record itself");
+      }
+      let ps = src.subarray(p, p + len);
+      p += len;
+      if (len > 1 && ps[0] === ps[1] && (ps[0] & 0x1f) === nalType) {
+        ps = ps.subarray(1);
+        len -= 1;
+        repaired += 1;
+      } else if (len < 1 || (ps[0] & 0x1f) !== nalType) {
+        const found = len < 1 ? "an empty NAL" : `a type ${ps[0] & 0x1f} NAL`;
+        return suspect(`holds ${found} where type ${nalType} belongs`);
+      }
+      out.push(len >> 8, len & 0xff, ...ps);
+    }
+  }
+  // Whatever trails the parameter sets -- the high-profile extension, when
+  // the encoder writes one -- is copied through verbatim.
+  out.push(...src.subarray(p));
+
+  if (!repaired) return { description, warning: null };
+  return { description: new Uint8Array(out), warning:
+    `This browser wrote ${repaired} parameter set` +
+    `${repaired === 1 ? "" : "s"} in its AVCC description with the NAL ` +
+    "header byte duplicated, which makes VideoToolbox (QuickTime, Keynote, " +
+    "Preview) reject the file as damaged. The description was repaired; the " +
+    "video data was already correct and is untouched." };
+}
+
 /** Replace meta.decoderConfig.colorSpace with the vetted one (or drop it). */
 function vetMeta(meta) {
   const decoderConfig = meta?.decoderConfig;
@@ -291,7 +380,17 @@ function vetMeta(meta) {
   const out = { ...meta, decoderConfig: { ...decoderConfig } };
   if (colorSpace) out.decoderConfig.colorSpace = colorSpace;
   else delete out.decoderConfig.colorSpace;
-  return { meta: out, colorSpace, warning };
+
+  // Only AVC carries an AVCDecoderConfigurationRecord; av1C and vpcC are
+  // different records entirely and must not be run through this.
+  let descriptionWarning = null;
+  if (decoderConfig.description &&
+      /^avc/i.test(decoderConfig.codec ?? "")) {
+    const fixed = repairAvccDescription(decoderConfig.description);
+    out.decoderConfig.description = fixed.description;
+    descriptionWarning = fixed.warning;
+  }
+  return { meta: out, colorSpace, warning, descriptionWarning };
 }
 
 // --- trial encode ---------------------------------------------------------
@@ -382,6 +481,7 @@ export async function chooseCodec({ width, height, fps, bitrate } = {}) {
         decoderConfig: vetted.meta.decoderConfig,
         colorSpace: vetted.colorSpace,
         colorSpaceWarning: vetted.warning,
+        descriptionWarning: vetted.descriptionWarning,
         trialBytes: chunks[0],
         frameSource: converter.path,
         rejected,
@@ -393,9 +493,8 @@ export async function chooseCodec({ width, height, fps, bitrate } = {}) {
 
   throw new Error(
     `No codec in this browser could encode a ${width}x${height} frame at ` +
-    `${fps} fps. Tried: ${rejected.join("; ")}. Firefox has no H.264 ` +
-    "VideoEncoder (bugzilla 2049470) and needs VP9; if VP9 was refused too, " +
-    "record in Chrome, Edge or Safari 16.4+, or try a smaller capture size.");
+    `${fps} fps. Tried: ${rejected.join("; ")}. Try recording in Chrome, ` +
+    "Edge or Safari 16.4+, or with a smaller capture size.");
 }
 
 // --- the writer -----------------------------------------------------------
@@ -456,6 +555,9 @@ export class VideoWriter {
     this.container = chosen.container;
     this.fileExtension = chosen.fileExtension;
     if (chosen.colorSpaceWarning) this.warnings.push(chosen.colorSpaceWarning);
+    if (chosen.descriptionWarning) {
+      this.warnings.push(chosen.descriptionWarning);
+    }
 
     this._converter = makeImageDataConverter(this.width, this.height);
     this._source = new EncodedVideoPacketSource(chosen.codecFamily);
@@ -643,9 +745,11 @@ export class VideoWriter {
     let packetMeta;
     if (!this._sawFirstMeta) {
       const vetted = vetMeta(meta);
-      if (vetted.warning && !this.warnings.includes(vetted.warning)) {
-        this.warnings.push(vetted.warning);
-        console.warn(`soar video: ${vetted.warning}`);
+      for (const w of [vetted.warning, vetted.descriptionWarning]) {
+        if (w && !this.warnings.includes(w)) {
+          this.warnings.push(w);
+          console.warn(`soar video: ${w}`);
+        }
       }
       this.colorSpace = vetted.colorSpace;
       packetMeta = vetted.meta;
