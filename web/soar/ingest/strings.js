@@ -77,6 +77,17 @@ export const T = {
   unitsGkg: "g/kg",
   unitsKgkg: "kg/kg",
 
+  // --- which coordinate units ----------------------------------------------
+  // A coordinate declared units, but nothing recognized the string as a
+  // length or as a known non-length. Same shape as the condensate question:
+  // the file did not settle it, so the person is asked, never guessed for.
+
+  askCoordUnits: "Which coordinate units?",
+  coordUnitsMissing: (coords) =>
+    `Unrecognized units on ${coords.join(", ")}.`,
+  coordUnitsM: "m",
+  coordUnitsKm: "km",
+
   // --- which dimension is which --------------------------------------------
 
   askAxes: "Which dimension is which?",
@@ -112,8 +123,22 @@ export const T = {
   axesByHand: (pairs) => `Axes assigned by hand: ${pairs.join(", ")}.`,
   /** A coordinate variable was preferred over the dimension's own. */
   coordChosen: (axis, name) => `Took '${name}' as the ${axis} coordinate.`,
+  /** The loose last-resort sweep adopted a variable for an axis. */
+  coordAdopted: (axis, name, dimName) =>
+    `Took '${name}' as the ${axis} coordinate for dimension '${dimName}' — ` +
+    "nothing better claimed it.",
   /** A coordinate was a length, but not in meters. */
   coordConverted: (axis) => `Converted the ${axis} coordinate to meters.`,
+  /** The coordinate-units answer, applied to a unit nothing recognized. */
+  coordUnitsApplied: (axis, name, declared, answer) =>
+    `Read the ${axis} coordinate '${name}' (units '${declared}') as ` +
+    `${answer}, as answered.`,
+  /** Fill-valued voxels read as cloud-free. */
+  fillAsZero: (name, count) =>
+    `${count} fill-valued voxels of '${name}' read as cloud-free (zero).`,
+  /** Negative condensate clamped on the way in. */
+  negativeClamped: (name, count) =>
+    `${count} negative values of '${name}' clamped to zero.`,
   /** An assumption made about the attached ice file rather than the field. */
   inFile: (filename, note) => `In ${filename}: ${note}`,
 

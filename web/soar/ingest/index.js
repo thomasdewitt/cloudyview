@@ -14,8 +14,22 @@ import {
   UPLOAD_DRAIN_BYTES,
 } from "../scene.js";
 import { volumeAABB, minVoxelSize, domainExtent, nestablePairs } from "../field.js";
-import { SPEC_FLOOR_TEXTURE_3D } from "../gpu.js";
+import { SPEC_FLOOR_TEXTURE_3D, retireAfterSubmittedWork } from "../gpu.js";
 import { T } from "./strings.js";
+
+// The most the worker may stage in host RAM while the z-crop is unknown.
+//
+// The read holds the complete uncropped fp16 volume (plus the ice fraction
+// on an ice-only pass) until the last tile has been seen, so a tall field —
+// or a malformed header claiming one — costs this much before any GPU
+// feasibility is known, and overrunning it kills the tab with no message at
+// all. 4 GiB, a constant rather than a probe, because browsers expose no
+// honest free-RAM query: it is chosen so that anything under it also stands
+// a chance on the GPU (the same bytes again as r16float, beside the light
+// cache), and anything over it exceeds the VRAM of every card this app has
+// been aimed at — refusing at geometry time trades minutes of decompression
+// for a sentence.
+const MAX_STAGED_HOST_BYTES = 4 * 2 ** 30;
 
 /** Promise-shaped calls over postMessage, plus a channel for streamed data. */
 class WorkerLink {
@@ -89,8 +103,32 @@ function levelReceiver(device, label, onProgress, ack, { iceOnly = false } = {})
       // so here rather than after the read is the difference between a
       // sentence and several minutes of decompression followed by the same
       // sentence.
-      const [nx, ny] = message.description.shape;
+      const [nx, ny, nz] = message.description.shape;
       const cap = device.limits.maxTextureDimension3D;
+      // z CAN shrink under the crop, but only after the whole uncropped
+      // column has been read and staged — so a z extent past the texture
+      // limit is refused here too, rather than gambling a full read on a
+      // crop nobody has measured yet.
+      if (nz > cap) {
+        throw new Error(
+          `This field is ${nz} cells tall; this browser allows ${cap} ` +
+          "texels per axis. Cropping empty sky could shrink z, but the " +
+          "full column must be read first and the crop cannot be known in " +
+          `advance. Box-average or crop the field to ${cap} levels first.`);
+      }
+      // The read stages the complete uncropped volume in host RAM until the
+      // last tile lands (see worker.js `staged`) — bound that before any of
+      // it is decompressed. fp16 for the field, one byte per voxel for an
+      // ice-only pass.
+      const stagedBytes = nx * ny * nz * (iceOnly ? 1 : 2);
+      if (stagedBytes > MAX_STAGED_HOST_BYTES) {
+        const gb = (n) => (n / 2 ** 30).toFixed(1);
+        throw new Error(
+          `This field is ${nx} x ${ny} x ${nz} cells — ${gb(stagedBytes)} ` +
+          `GiB to stage before the empty-sky crop, against the ` +
+          `${gb(MAX_STAGED_HOST_BYTES)} GiB this app will hold in memory. ` +
+          "Box-average the field down, or crop it, before loading.");
+      }
       const worst = Math.max(nx, ny);
       if (worst > cap) {
         const axis = nx >= ny ? "x" : "y";
@@ -372,6 +410,24 @@ export async function loadFileScene(
       }
     }
 
+    // Which unit the coordinates are in, when a declared units string is one
+    // nothing recognizes — "m AGL", "meters above sea level". The same shape
+    // as the condensate-units question, and the same rule: a wrong guess
+    // renders a plausible domain at the wrong scale, so nobody guesses. One
+    // answer applies to every coordinate in that state.
+    const coordAsk = chosen.find((g) => g.needsCoordUnitsChoice);
+    if (coordAsk) {
+      const answer = await ask({
+        panel: "coordUnits", filename: file.name,
+        coords: coordAsk.coordUnitsUnrecognized,
+      });
+      choice = { ...(choice ?? {}), coordUnits: answer.coordUnits };
+      for (let i = 0; i < chosen.length; i++) {
+        chosen[i] = await link.call(
+          "describe", { group: chosen[i].path, choice });
+      }
+    }
+
     for (const g of chosen) {
       for (const note of g.assumptions ?? []) {
         if (!assumptions.includes(note)) assumptions.push(note);
@@ -426,9 +482,15 @@ export async function loadFileScene(
         });
         iceLevel = iceOpen.groups.find((g) => g.path === pick.group);
       }
-      // Pinned at the same step as the field it is joining.
+      // Pinned at the same step as the field it is joining, and reading its
+      // coordinates with the same units answer: the grids must compare equal
+      // in metres, and an answer that applied to one file and not the other
+      // would report a unit mismatch as the file's fault.
       let iceChoice = choice && "timestep" in choice
         ? { timestep: choice.timestep } : null;
+      if (choice?.coordUnits) {
+        iceChoice = { ...(iceChoice ?? {}), coordUnits: choice.coordUnits };
+      }
       if (iceLevel.needsIceChoice) {
         const pick = await ask({
           panel: "variable", role: "ice", filename: iceFile.name,
@@ -440,6 +502,17 @@ export async function loadFileScene(
           throw new Error(T.noIceInFile(iceFile.name));
         }
         iceChoice = { ...(iceChoice ?? {}), iceVar: pick.variable };
+        iceLevel = await link.call(
+          "describeIce", { group: iceLevel.path, choice: iceChoice });
+      }
+      // The ice file's own coordinates can carry an unrecognized units
+      // string the water file did not — same question, asked for this file.
+      if (iceLevel.needsCoordUnitsChoice && !iceChoice?.coordUnits) {
+        const answer = await ask({
+          panel: "coordUnits", filename: iceFile.name,
+          coords: iceLevel.coordUnitsUnrecognized,
+        });
+        iceChoice = { ...(iceChoice ?? {}), coordUnits: answer.coordUnits };
         iceLevel = await link.call(
           "describeIce", { group: iceLevel.path, choice: iceChoice });
       }
@@ -462,6 +535,9 @@ export async function loadFileScene(
       iceFrom = {
         group: iceLevel.path, choice: iceChoice,
         units: iceUnits, filename: iceFile.name,
+        // The resolved name, not only the choice: when it was inferred there
+        // is no choice, and the CLI hand-off still has to say which variable.
+        iceVar: attached.iceVar,
       };
       for (const note of attached.assumptions ?? []) {
         const said = T.inFile(iceFile.name, note);
@@ -506,7 +582,7 @@ export async function loadFileScene(
       // Losing the race throws out of here, and the catch below releases what
       // was allocated while `finally` terminates the worker mid-read — which
       // is the whole point, since there is nothing left to receive its output.
-      await Promise.race([
+      const read = await Promise.race([
         // No ice FRACTION here. It is a second volume the size of this one
         // and most flights never ask for it, so it is read on demand
         // (loadIceVolume) rather than paid for by everybody at load. The ice
@@ -520,20 +596,27 @@ export async function loadFileScene(
         }),
         receiver.failed,
       ]);
+      // What the read repaired on the way past — fills zeroed, negatives
+      // clamped — stated with the rest of the load's assumptions.
+      for (const note of read?.notes ?? []) {
+        if (!assumptions.includes(note)) assumptions.push(note);
+      }
       // The RPC resolving means the worker has SENT everything, not that we
       // have finished writing it. Wait for the upload queue to drain, and
       // surface anything it swallowed.
       await receiver.settled();
       if (receiver.state.error) throw receiver.state.error;
-      if (receiver.state.slabsDone !== receiver.state.slabs) {
-        throw new Error(
-          `Only ${receiver.state.slabsDone} of ${receiver.state.slabs} parts ` +
-          `of '${label}' reached the GPU. The field would have holes in it.`);
-      }
+      // Volume first: `state.slabs` is set BY the volume message, so checking
+      // the counts without it reported "0 of undefined parts".
       if (!receiver.state.volume) {
         throw new Error(
           `The occupied extent of '${label}' never arrived, so nothing was ` +
           "ever allocated to put it in.");
+      }
+      if (receiver.state.slabsDone !== receiver.state.slabs) {
+        throw new Error(
+          `Only ${receiver.state.slabsDone} of ${receiver.state.slabs} parts ` +
+          `of '${label}' reached the GPU. The field would have holes in it.`);
       }
       const crop = receiver.state.volume;
       if (crop.zCropped) {
@@ -594,6 +677,24 @@ export async function loadFileScene(
       title: outer.level.path ? `group ${outer.level.path}` : null,
       liquidVar: outer.level.liquidVar,
       iceVar: outer.level.iceVar,
+      // The rest of the resolved selection — which storage dimension and
+      // which coordinate variable each axis came from, the timestep, the
+      // units the user supplied, the attached ice file. Carried out so
+      // witnessCommand/beholdCommand can emit it as CLI flags: a terminal
+      // render must place the field where this one did, whatever was
+      // inferred or answered along the way.
+      dimNames: outer.level.dimNames ?? null,
+      coordNames: outer.level.coordNames ?? null,
+      // Non-null exactly when the file has several steps — which is when
+      // the CLI needs --timestep and when the loader asked.
+      timeDim: outer.level.timeDim ?? null,
+      timestep: outer.level.timestep ?? 0,
+      unitsAssumed: units ?? null,
+      // The coordinate-units answer, when the question was asked — what
+      // `--coord-units` has to say for a terminal render to place the field
+      // where this one did.
+      coordUnitsAssumed: choice?.coordUnits ?? null,
+      iceFrom,
       // Ice-detection mode: what it would take to read the ice fraction, not
       // the fraction itself. Null when the field carries no ice variable, and
       // then the viewer says so instead of offering the mode. Holding the
@@ -646,11 +747,18 @@ export async function loadFileScene(
     progress("Ready.", 1);
     return scene;
   } catch (err) {
+    // Each receiver's chain is drained first: a volume allocation still in
+    // flight when the race above throws assigns state.texture only when it
+    // resolves, and looking before then leaked one full-size 3D texture.
+    // The destroys are fenced — slab writes for these textures may still be
+    // queued, and destroying under them is what takes GPU processes down
+    // (see gpu.retireAfterSubmittedWork).
     for (const receiver of receivers.values()) {
-      receiver.state.texture?.destroy();
-      receiver.state.iceTexture?.destroy();
+      await receiver.settled().catch(() => {});
+      retireAfterSubmittedWork(
+        device, receiver.state.texture, receiver.state.iceTexture);
     }
-    nestDummy?.destroy();
+    retireAfterSubmittedWork(device, nestDummy);
     throw err;
   } finally {
     link.close();
@@ -720,7 +828,9 @@ export async function loadIceVolume(device, source, { progress, slabBudget } = {
     progress?.("Ready.", 1);
     return receiver.state.iceTexture;
   } catch (err) {
-    receiver.state.iceTexture?.destroy();
+    // Same drain-then-fence as loadFileScene's cleanup, same reasons.
+    await receiver.settled().catch(() => {});
+    retireAfterSubmittedWork(device, receiver.state.iceTexture);
     throw err;
   } finally {
     link.close();

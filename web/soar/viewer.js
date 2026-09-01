@@ -43,6 +43,7 @@ import {
 } from "./track.js";
 import { UI } from "./ui.js";
 import { mod360, HAZE_MIN } from "./spectral.js";
+import { retireAfterSubmittedWork } from "./gpu.js";
 import { escalateQualityTier } from "./uniforms.js";
 import { rhoAirAt } from "./optical.js";
 import { fromHalf } from "./half.js";
@@ -971,6 +972,12 @@ export class Viewer {
           onPick: (units) => done({ units }),
           onCancel: cancel,
         });
+      } else if (question.panel === "coordUnits") {
+        this.ui.open("coordUnits", {
+          coords: question.coords, filename: question.filename,
+          onPick: (coordUnits) => done({ coordUnits }),
+          onCancel: cancel,
+        });
       } else if (question.panel === "axes") {
         // Detection could not tell the dimensions apart. This is the reason
         // a failed load is no longer a dead end: the panel is offered
@@ -1387,7 +1394,10 @@ export class Viewer {
     // Taken before the await so that anything which cancels the activation
     // while the volume is being read — disableIceMode — is seen below.
     const request = ++this._iceRequest;
-    if (!this.scene?.iceAvailable) {
+    // No scene at all — the gap while a load is in flight. Nothing to say
+    // about ice that does not exist yet; this used to read iceNote off null.
+    if (!this.scene) return;
+    if (!this.scene.iceAvailable) {
       this.ui.say(this.scene.iceNote, 6);
       return;
     }
@@ -1412,7 +1422,13 @@ export class Viewer {
           ? await loadDemoIceVolume(this.device, scene.iceSource, options)
           : await (await import("./ingest/index.js"))
               .loadIceVolume(this.device, scene.iceSource, options);
-        if (this.scene !== scene) { texture.destroy(); return; }
+        // Fenced: the upload's writes for this texture may still be queued,
+        // and destroying under them crashes GPU processes rather than
+        // raising (see gpu.retireAfterSubmittedWork).
+        if (this.scene !== scene) {
+          retireAfterSubmittedWork(this.device, texture);
+          return;
+        }
         scene.attachIce(texture);
         this.renderer.refreshBindGroup();
       } catch (err) {
@@ -1922,6 +1938,13 @@ export class Viewer {
     this.renderer.setPeriodic(!this.renderer.periodic);
     this.camera.periodic = this.renderer.periodic;
     this.camera.constrain();
+    // The baked sun-tau cache marched its shadows under the OLD wrap: baked
+    // non-periodic, the sun ray tapers into zero at the domain wall, and
+    // reading that cache in a periodic fly paints a lighting seam on every
+    // lateral face. Same recovery as setSun: live march while the fresh
+    // bake lands.
+    this.renderer.invalidateLightCache();
+    this.renderer.startLightBake(this._viewKwargs());
     this.ui.say(`Periodic domain ${this.renderer.periodic ? "on" : "off"}.`);
     this._wake("periodic");
   }
@@ -2521,16 +2544,81 @@ export class Viewer {
     return this.beholdTarget().group;
   }
 
+  /**
+   * The loader's resolved selection, as the CLI flags that reproduce it.
+   *
+   * Everything the loader inferred or asked — variables, axis assignment,
+   * coordinate names, units, timestep, an attached ice file — written out
+   * unconditionally, on the same argument as the image controls: what a
+   * terminal render needs to place the field where this one did must not
+   * depend on the CLI's own inference happening to agree. `--group` is NOT
+   * here: behold renders the nest group when there is one, so each command
+   * names its own.
+   *
+   * A demo scene carries none of these fields and gets no flags, which is
+   * right — its command already names a file the browser never had.
+   */
+  _selectionFlags(quote) {
+    const s = this.scene;
+    const flags = [];
+    if (s?.liquidVar) flags.push("--liquid-water-var", quote(s.liquidVar));
+    if (s?.iceFrom) {
+      flags.push("--ice-file", quote(s.iceFrom.filename));
+      if (s.iceFrom.iceVar) {
+        flags.push("--ice-water-var", quote(s.iceFrom.iceVar));
+      }
+      if (s.iceFrom.group) {
+        flags.push("--ice-water-group", quote(s.iceFrom.group));
+      }
+      if (s.iceFrom.units) {
+        // The ice units the browser ASKED for, when the attached file's
+        // variable declared none. --units covers only the main file's
+        // variables, so without this the answer was dropped and the CLI
+        // render of a split-file load failed or guessed where the browser
+        // had asked.
+        flags.push("--ice-units", quote(s.iceFrom.units));
+      }
+    } else if (s?.iceVar) {
+      flags.push("--ice-water-var", quote(s.iceVar));
+    } else if (s?.liquidVar) {
+      // A fact, not a default: this view has no ice in it, and the flag
+      // keeps it that way even for a file the CLI could infer ice from.
+      flags.push("--no-ice");
+    }
+    // Emitted only when the file has several steps — exactly when the CLI
+    // demands the flag and the loader asked the question.
+    if (s?.timeDim) flags.push("--timestep", String(s.timestep ?? 0));
+    if (s?.unitsAssumed) flags.push("--units", quote(s.unitsAssumed));
+    // The coordinate-units answer: which length a units string nothing
+    // recognized turned out to mean. Same argument as --units — the CLI's
+    // own reading must not be trusted to reach the same answer.
+    if (s?.coordUnitsAssumed) {
+      flags.push("--coord-units", quote(s.coordUnitsAssumed));
+    }
+    for (const axis of ["x", "y", "z"]) {
+      if (s?.dimNames?.[axis]) {
+        flags.push(`--${axis}-dim`, quote(s.dimNames[axis]));
+      }
+      if (s?.coordNames?.[axis]) {
+        flags.push(`--${axis}-coord`, quote(s.coordNames[axis]));
+      }
+    }
+    return flags;
+  }
+
   beholdCommand() {
     const { group, bmin, bmax } = this.beholdTarget();
     const rel = worldToRelative(this.camera.position, bmin, bmax);
     const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
+    const q = (v) => (/\s/.test(String(v))
+      ? JSON.stringify(String(v)) : String(v));
     // A browser never learns where the file it was handed lives, so the
     // path here is a name to be completed in the terminal, not a path.
     const source = this.scene.sourceName ?? "<your-file.nc>";
     return [
-      "behold", source, this.beholdQuality, "--gpu",
-      ...(group ? ["--group", group] : []),
+      "behold", q(source), this.beholdQuality, "--gpu",
+      ...(group ? ["--group", q(group)] : []),
+      ...this._selectionFlags(q),
       "--camera-position", n(rel[0]), n(rel[1]), n(rel[2]),
       "--camera-azimuth", n(this.camera.azimuth),
       "--camera-elevation", n(this.camera.elevation),
@@ -2550,15 +2638,18 @@ export class Viewer {
    */
   witnessCommand({ lodStrength = this.lodStrength } = {}) {
     const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
+    const q = (v) => (/\s/.test(String(v))
+      ? JSON.stringify(String(v)) : String(v));
     const source = this.scene.sourceName ?? "<your-file.nc>";
     const rel = worldToRelative(
       this.camera.position, this.scene.bmin, this.scene.bmax);
     return [
-      "witness", source,
+      "witness", q(source),
       "--size", this.canvas.width, this.canvas.height,
-      ...(this.scene.groupPath ? ["--group", this.scene.groupPath] : []),
+      ...(this.scene.groupPath ? ["--group", q(this.scene.groupPath)] : []),
       ...(this.scene.nested && this.scene.nestGroup
-          ? ["--nest-group", this.scene.nestGroup] : []),
+          ? ["--nest-group", q(this.scene.nestGroup)] : []),
+      ...this._selectionFlags(q),
       "--camera-position", n(rel[0]), n(rel[1]), n(rel[2]),
       "--camera-azimuth", n(this.camera.azimuth),
       "--camera-elevation", n(this.camera.elevation),
@@ -2580,7 +2671,7 @@ export class Viewer {
       // The still-capture tier: step factors, light cache, sky probe and the
       // parked sample count, all from the one preset — the same table the
       // in-app capture uses, so the CLI render matches it in all ways.
-      "--soar-tier", this.captureStillTier,
+      "--quality", this.captureStillTier,
     ].join(" ");
   }
 

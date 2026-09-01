@@ -15,7 +15,8 @@
 import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
 import {
   describeGroup, describeIceGroup, findVolumeGroups,
-  assertSameGrid, decoderFor, unitsMultiplier, attrString,
+  assertSameGrid, assertAscendingCoordinate, decoderFor, fillMatcher,
+  unitsMultiplier, attrString,
 } from "./netcdf.js";
 import { T } from "./strings.js";
 import {
@@ -178,12 +179,13 @@ let installedPlugins = new Set();
  * failing to find a root object in bytes that were never an HDF5 file — a
  * message with nothing in it for the person holding the file. Four bytes of
  * magic tell the two apart for certain: "CDF\x01" is classic, "CDF\x02" is
- * 64-bit offset, and HDF5 starts with "\x89HDF".
+ * 64-bit offset, "CDF\x05" is CDF5 (64-bit data), and HDF5 starts with
+ * "\x89HDF".
  */
 async function assertHdf5(file) {
   const magic = new Uint8Array(await file.slice(0, 4).arrayBuffer());
   const isCdf = magic[0] === 0x43 && magic[1] === 0x44 && magic[2] === 0x46
-             && (magic[3] === 0x01 || magic[3] === 0x02);
+             && (magic[3] === 0x01 || magic[3] === 0x02 || magic[3] === 0x05);
   if (!isCdf) return;
   const err = new Error(T.notNetcdf4(file.name));
   err.advice = T.notNetcdf4Advice;
@@ -349,6 +351,14 @@ async function open({ file, choice = null }) {
 async function extinction({ group, units, label, slabBudget, choice = null,
                             iceFrom = null, iceOnly = false }) {
   const description = describeGroup(root, group, choice);
+  // The loader asks this question before any read; reaching here without an
+  // answer is a bug in the asking, and reading anyway would place the field
+  // with unconverted numbers.
+  if (description.needsCoordUnitsChoice) {
+    throw new Error(
+      `Coordinate units were never resolved for ` +
+      `${description.coordUnitsUnrecognized.join(", ")}.`);
+  }
   const handle = group ? root.get(group) : root;
   const dataset = handle.get(description.liquidVar);
 
@@ -417,18 +427,28 @@ async function extinction({ group, units, label, slabBudget, choice = null,
 
   const decode = decoderFor(dataset.attrs);
   const decodeIce = iceDataset ? decoderFor(iceDataset.attrs) : null;
+  // Fills are matched on the RAW stored value, before scale/offset — that is
+  // what the attribute declares — and become zero, not NaN: a fill means "no
+  // cloud here", and a NaN would store as a nonzero fp16 bit pattern, defeat
+  // the z-crop's occupancy test, and bleed through trilinear filtering.
+  const fillLiquid = fillMatcher(dataset.attrs);
+  const fillIce = iceDataset ? fillMatcher(iceDataset.attrs) : null;
 
   const [nx, ny, nz] = description.shape;
   const axis = description.storageAxis;         // field axis -> storage axis
   const storageShape = description.storageShape;
 
-  // Ascending coordinates, and the flip that gets us there.
+  // Ascending coordinates, and the flip that gets us there. After the flip
+  // each axis must be strictly ascending and finite — an unsorted or folded
+  // coordinate renders a spatially scrambled field that still looks entirely
+  // like a cloud, so it is refused by name (see assertAscendingCoordinate).
   const flip = {};
   const coords = {};
   for (const a of ["x", "y", "z"]) {
     const values = Float64Array.from(description.coords[a]);
     flip[a] = strictlyDescending(values);
     coords[a] = flip[a] ? values.slice().reverse() : values;
+    assertAscendingCoordinate(coords[a], a, description.coordNames?.[a] ?? a);
   }
 
   // rho_air is a function of height alone, so it is a table, not a per-voxel
@@ -504,6 +524,12 @@ async function extinction({ group, units, label, slabBudget, choice = null,
 
   let finiteNonZero = 0;
   let nonFinite = 0;
+  // Per-variable repairs and refusals. Fill-as-zero and the negative clamp
+  // are assumptions the load states; a non-finite value that is NOT a
+  // declared fill has no honest reading at all and refuses the file after
+  // the counts are complete.
+  const fixed = { fillLiquid: 0, fillIce: 0, negLiquid: 0, negIce: 0,
+                  badLiquid: 0, badIce: 0 };
 
   // Which z planes hold anything at all, and the slabs waiting on the answer.
   //
@@ -605,11 +631,21 @@ async function extinction({ group, units, label, slabBudget, choice = null,
           for (let i = 0; i < idx.length; i++) flat += idx[i] * strides[i];
 
           let q = raw[flat];
-          if (decode) q = decode(q);
+          if (fillLiquid && fillLiquid(q)) { q = 0.0; fixed.fillLiquid += 1; }
+          else {
+            if (decode) q = decode(q);
+            if (!Number.isFinite(q)) { q = 0.0; fixed.badLiquid += 1; }
+            else if (q < 0.0) { q = 0.0; fixed.negLiquid += 1; }
+          }
           let qi = 0.0;
           if (rawIce) {
             qi = rawIce[flat];
-            if (decodeIce) qi = decodeIce(qi);
+            if (fillIce && fillIce(qi)) { qi = 0.0; fixed.fillIce += 1; }
+            else {
+              if (decodeIce) qi = decodeIce(qi);
+              if (!Number.isFinite(qi)) { qi = 0.0; fixed.badIce += 1; }
+              else if (qi < 0.0) { qi = 0.0; fixed.negIce += 1; }
+            }
           }
           const lwc = q * multiplier;
           const iwc = qi * iceMultiplier;
@@ -644,6 +680,33 @@ async function extinction({ group, units, label, slabBudget, choice = null,
                   iceBytes: outIce });
     post({ type: "read", label, done: (++tilesDone) / tileCount });
   } } }
+
+  // Non-finite values the file did NOT declare as fills are a refusal, not a
+  // repair: zeroing them silently would render a hole where the data is
+  // broken. Counted through the whole read so the message can say how much.
+  const bad = [
+    [fixed.badLiquid, description.liquidVar],
+    [fixed.badIce, iceVarName],
+  ].filter(([n]) => n > 0);
+  if (bad.length) {
+    throw new Error(
+      bad.map(([n, name]) => `'${name}' holds ${n} non-finite values`)
+         .join(" and ") +
+      " that the file does not declare as fill values. NaN or infinite " +
+      "condensate cannot be rendered; clean the variable or declare a " +
+      "_FillValue for the missing cells.");
+  }
+  // Repairs with a defensible reading, stated rather than silent: the load
+  // toast carries these alongside the axis and coordinate assumptions.
+  const readNotes = [];
+  if (fixed.fillLiquid) {
+    readNotes.push(T.fillAsZero(description.liquidVar, fixed.fillLiquid));
+  }
+  if (fixed.fillIce) readNotes.push(T.fillAsZero(iceVarName, fixed.fillIce));
+  if (fixed.negLiquid) {
+    readNotes.push(T.negativeClamped(description.liquidVar, fixed.negLiquid));
+  }
+  if (fixed.negIce) readNotes.push(T.negativeClamped(iceVarName, fixed.negIce));
 
   // A field that is entirely zero apart from a scattering of infinities is
   // not a cloud field, it is a failed read. Say so instead of rendering it.
@@ -754,7 +817,11 @@ async function extinction({ group, units, label, slabBudget, choice = null,
     post({ type: "map", label, shape: [ny, nx], data: albedo }, [albedo.buffer]);
   }
 
-  return { label, shape: [nx, ny, zCount], zCrop: [zLo, zHi], sourceZ: nz };
+  // `notes` are the read's own assumptions (fills zeroed, negatives
+  // clamped); the caller merges them into the load's list so the toast
+  // states them with the rest.
+  return { label, shape: [nx, ny, zCount], zCrop: [zLo, zHi], sourceZ: nz,
+           notes: readNotes };
 }
 
 /**

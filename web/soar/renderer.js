@@ -10,7 +10,7 @@
 import * as K from "./constants.js";
 import { packUniforms, sceneKey, keysEqual, renderTargetSize,
          motionAlphaForDt } from "./uniforms.js";
-import { guardAllocation } from "./gpu.js";
+import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -1242,6 +1242,13 @@ export class Renderer {
   }
 
   invalidateLightCache() {
+    // The abandoned bake's slice texture, not just the reference to it: a
+    // sun drag invalidates once per event, and each orphaned slice held its
+    // cz*cy r16float until the tab closed. Fenced — the bake's last copy
+    // into the cache may still be in flight.
+    if (this._lightBake) {
+      retireAfterSubmittedWork(this.device, this._lightBake.sliceTex);
+    }
     this._lightBake = null;
     this._lightCacheReady = false;
   }
@@ -1286,7 +1293,8 @@ export class Renderer {
       throw err;
     }
     this._lightCacheReady = false;
-    this._lightTauTex?.destroy();
+    // The outgoing cache may still be read by frames already submitted.
+    retireAfterSubmittedWork(this.device, this._lightTauTex);
     this._lightTauTex = tex;
     this._lightCacheDims = { cx, cy, cz };
     this.refreshBindGroup();
@@ -1366,7 +1374,9 @@ export class Renderer {
     }
     b.next = end;
     if (b.next >= b.cx) {
-      b.sliceTex.destroy();
+      // Fenced, not destroyed outright: the copy of the last slice into the
+      // cache was submitted a moment ago and may still reference it.
+      retireAfterSubmittedWork(this.device, b.sliceTex);
       this._lightBake = null;
       this._lightCacheReady = true;
       return true;
@@ -1534,6 +1544,16 @@ export class Renderer {
     this.uniformBuf?.destroy();
     this.accumUniformBuf?.destroy();
     this._iceDummy?.destroy();
+    // The sun-tau cache is volume/8 bytes — hundreds of MB on a large field
+    // — and none of these were released here before: every change of field
+    // leaked the lot. Fenced, because a frame or a bake submitted just
+    // before teardown may still reference them.
+    retireAfterSubmittedWork(
+      this.device, this._lightTauTex, this._lightTauDummy,
+      this._bakeUniformBuf, this._lightBake?.sliceTex);
+    this._lightTauTex = this._lightTauDummy = this._bakeUniformBuf = null;
+    this._lightBake = null;
+    this._lightCacheReady = false;
   }
 
   _sceneState() {

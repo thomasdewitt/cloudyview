@@ -86,7 +86,7 @@ export function captureFrames(tier) {
  * restore. A capture is the tier's FLIGHT configuration marched at the
  * capture resolution — pure preset, no session overrides — with spp from
  * the parked table (Thomas, 2026-08-20). Pure preset is also what keeps a
- * capture reproducible from the CLI: witness --soar-tier applies the same
+ * capture reproducible from the CLI: witness --quality applies the same
  * table with nothing invisible mixed in.
  */
 export function beginOfflineRender(renderer, tier = "high") {

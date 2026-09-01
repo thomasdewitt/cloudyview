@@ -1,11 +1,11 @@
 // Domain geometry: bounding boxes, voxel sizes, and the rules for nesting one
 // field inside another.
 //
-// Ported from cloudyview/soar/engine.py (_volume_aabb, _min_voxel_size,
-// _validate_nest_containment) and cloudyview/io.py (nest_overhang,
-// find_nestable_group_pairs). The arithmetic must agree with Python to the
-// float — these numbers decide what the shader samples, and a browser that
-// places a nest differently from the desktop is worse than one that refuses.
+// Originally ported from Python (soar's engine.py and io.py's nest-pair
+// finder, both since deleted — this is now the only copy). The AABB
+// arithmetic must still agree with cloudyview/soar_host.py to the float —
+// these numbers decide what the shader samples, and a browser that places a
+// nest differently from the desktop is worse than one that refuses.
 //
 // Conventions: coordinates are CELL CENTRES in metres, ascending, and every
 // bounding box pads by half a cell. Array layout is (x, y, z) with z fastest.

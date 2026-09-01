@@ -48,6 +48,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 NETCDF_JS = REPO / "web" / "soar" / "ingest" / "netcdf.js"
+ZCROP_JS = REPO / "web" / "soar" / "zcrop.js"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None or not NETCDF_JS.exists(),
@@ -57,8 +58,10 @@ pytestmark = pytest.mark.skipif(
 _JS = textwrap.dedent("""
     import {
       resolveSpatialDims, describeGroup, listVariables,
-      axisFromAttrs, assertSameGrid,
+      axisFromAttrs, assertSameGrid, assertAscendingCoordinate,
+      fillMatcher, decoderFor, unitsMultiplier,
     } from "%s";
+    import { occupiedBand } from "%s";
 
     // --- an h5wasm-shaped stand-in ----------------------------------------
     //
@@ -279,10 +282,13 @@ _JS = textwrap.dedent("""
     const PHONY = {
       NAME: "This is a netCDF dimension but not a netCDF variable.      512",
     };
-    const scaled = (n, factor, attrs = {}) => ({
+    // `dim` is the dimension the variable is attached to, as a dimension
+    // scale — what the last-resort sweep now requires (a variable with none
+    // recorded is not adopted for an axis it merely matches in length).
+    const scaled = (n, factor, attrs = {}, dim = null) => ({
       shape: [n], attrs,
       value: Float64Array.from({ length: n }, (_, i) => i * factor),
-      get_attached_scales: () => [],
+      get_attached_scales: () => (dim ? [dim] : []),
     });
 
     // CM1: fields are dimensioned (nk, nj, ni) and every one of those has a
@@ -308,12 +314,28 @@ _JS = textwrap.dedent("""
         x: scaled(512, 3000, { units: "m" }),
         y: scaled(256, 3000, { units: "m" }),
         rholev_eta_rho: scaled(96, 0.01),
-        rholev_zsea_rho: scaled(96, 400, { units: "m" }),
+        rholev_zsea_rho: scaled(96, 400, { units: "m" }, "rholev_eta_rho"),
         clw: dataset([96, 256, 512],
                      { 0: "rholev_eta_rho", 1: "y", 2: "x" }, { units: "g/g" }),
       }), "");
       return { coordNames: d.coordNames, zEnd: d.coords.z[95],
                assumptions: d.assumptions };
+    });
+
+    // ICON RCEMIP: lon/lat in degrees on a reduced-radius planet, height a
+    // bare level index. NOTHING is a length, and using the numbers anyway
+    // built a "360 m" wide domain taller than it was deep — which reads on
+    // screen as axes swapped (Thomas, 2026-08-31). A dead end, said out
+    // loud, not a box with nonsense proportions.
+    out.nothingIsALength = attempt(() => {
+      const d = describeGroup(group({
+        lon: scaled(512, 0.7, { units: "degrees_east" }),
+        lat: scaled(256, 0.08, { units: "degrees_north" }),
+        height: scaled(96, 1),
+        clw: dataset([96, 256, 512], { 0: "height", 1: "lat", 2: "lon" },
+                     { units: "kg/kg" }),
+      }), "");
+      return { coordNames: d.coordNames };
     });
 
     // A length is a length; the numbers just are not metres yet.
@@ -377,8 +399,131 @@ _JS = textwrap.dedent("""
       grid, { ...grid, coords: { ...grid.coords, z: [0, 10, 21] } },
       "ice.nc"));
 
+    // --- coordinate units nothing recognizes -------------------------------
+
+    // "m AGL" is not in the length table and not a recognized non-length
+    // either: it used to refuse like ICON's degrees, though the file loaded
+    // fine before the table existed. It is a QUESTION now — same shape as
+    // the condensate one — and the answer applies to every coordinate in
+    // that state.
+    const oddUnits = (attrs) => group({
+      x: scaled(512, 3000, { units: "m" }),
+      y: scaled(256, 3000, { units: "m" }),
+      z: scaled(96, 400, attrs),
+      qc: dataset([96, 256, 512], { 0: "z", 1: "y", 2: "x" },
+                  { units: "g/kg" }),
+    });
+    out.coordUnitsAsked = attempt(() => {
+      const d = describeGroup(oddUnits({ units: "m AGL" }), "");
+      return { needsCoordUnitsChoice: d.needsCoordUnitsChoice,
+               unrecognized: d.coordUnitsUnrecognized };
+    });
+    out.coordUnitsAnswered = attempt(() => {
+      const d = describeGroup(oddUnits({ units: "m AGL" }), "",
+                              { coordUnits: "km" });
+      return { needsCoordUnitsChoice: d.needsCoordUnitsChoice,
+               zEnd: d.coords.z[95], xEnd: d.coords.x[511],
+               assumptions: d.assumptions };
+    });
+    // A recognized NON-length still refuses hard — a level index answers
+    // the question wrongly whichever of m and km is picked.
+    out.coordUnitsLevelIndex = attempt(() =>
+      describeGroup(oddUnits({ units: "level" }), ""));
+
+    // --- the last-resort sweep needs the axis's own dimension --------------
+
+    // Cubic grid, no variable named like z or zt: the sweep used to adopt
+    // ANY 1-D variable of matching length in key order, so `stray` (attached
+    // to xt) became the z coordinate with no note. It must take `zvals`
+    // (attached to zt) and say so.
+    out.sweepAssociation = attempt(() => {
+      const d = describeGroup(group({
+        stray: scaled(96, 5, { units: "m" }, "xt"),
+        zvals: scaled(96, 400, { units: "m" }, "zt"),
+        xt: scaled(96, 100, { units: "m" }),
+        yt: scaled(96, 100, { units: "m" }),
+        qc: dataset([96, 96, 96], { 0: "zt", 1: "yt", 2: "xt" },
+                    { units: "g/kg" }),
+      }), "");
+      return { coordNames: d.coordNames, zEnd: d.coords.z[95],
+               assumptions: d.assumptions };
+    });
+    // With no associated variable at all the axis is a refusal, not a grab
+    // of whatever 1-D array is the right length.
+    out.sweepNothingAssociated = attempt(() => describeGroup(group({
+      stray: scaled(96, 5, { units: "m" }, "xt"),
+      xt: scaled(96, 100, { units: "m" }),
+      yt: scaled(96, 100, { units: "m" }),
+      qc: dataset([96, 96, 96], { 0: "zt", 1: "yt", 2: "xt" },
+                  { units: "g/kg" }),
+    }), ""));
+
+    // --- scale_factor/add_offset on coordinates ----------------------------
+
+    out.packedCoords = attempt(() => {
+      const d = describeGroup(group({
+        x: scaled(512, 3000, { units: "m" }),
+        y: scaled(256, 3000, { units: "m" }),
+        z: scaled(96, 1, { units: "m", scale_factor: 400, add_offset: 50 }),
+        qc: dataset([96, 256, 512], { 0: "z", 1: "y", 2: "x" },
+                    { units: "g/kg" }),
+      }), "");
+      return { zFirst: d.coords.z[0], zEnd: d.coords.z[95] };
+    });
+
+    // --- CF dimensionless "1" is a question --------------------------------
+
+    out.unitsOne = attempt(() => {
+      const d = describeGroup(group(axesOf({
+        qc: dataset([96, 256, 512], dims, { units: "1" }),
+      })), "");
+      return { unitsKnown: d.unitsKnown, units: d.units };
+    });
+    out.unitsOneMultiplier = attempt(() => ({
+      bare: unitsMultiplier("1"), padded: unitsMultiplier(" 1 "),
+      sam: unitsMultiplier(""),
+    }));
+
+    // --- monotonicity ------------------------------------------------------
+
+    out.monotonic = {
+      folded: attempt(() => assertAscendingCoordinate([0, 10, 5], "z", "zt")),
+      repeated: attempt(() =>
+        assertAscendingCoordinate([0, 10, 10], "y", "yt")),
+      nonFinite: attempt(() =>
+        assertAscendingCoordinate([0, NaN, 20], "x", "xt")),
+      ascending: attempt(() => {
+        assertAscendingCoordinate([0, 10, 20], "x", "xt"); return true;
+      }),
+    };
+
+    // --- fill values -------------------------------------------------------
+
+    out.fills = attempt(() => {
+      const m = fillMatcher({ _FillValue: -9999 });
+      const nanM = fillMatcher({ _FillValue: NaN });
+      const dec = decoderFor({ scale_factor: 2, add_offset: 1,
+                               _FillValue: -9999 });
+      return {
+        matchesFill: m(-9999), missesData: m(3),
+        // The NaN-valued _FillValue attribute that `v === fill` never hit.
+        nanMatches: nanM(NaN), nanMissesFinite: nanM(3),
+        noneIsNull: fillMatcher({}) === null,
+        decoded: dec(4),
+        // Fills are the read's business, not the decoder's: the raw value
+        // scales through so the read can zero it from the RAW match.
+        fillDecodedFinite: Number.isFinite(dec(-9999)),
+      };
+    });
+
+    // --- the z-crop's minimum band -----------------------------------------
+
+    out.zcropTop = attempt(() => occupiedBand(Uint8Array.from([0, 0, 1])));
+    out.zcropBottom = attempt(() => occupiedBand(Uint8Array.from([1, 0, 0])));
+    out.zcropMiddle = attempt(() => occupiedBand(Uint8Array.from([0, 1, 0])));
+
     process.stdout.write(JSON.stringify(out));
-""") % (NETCDF_JS.as_posix(),)
+""") % (NETCDF_JS.as_posix(), ZCROP_JS.as_posix())
 
 
 @pytest.fixture(scope="module")
@@ -614,6 +759,14 @@ def test_kilometres_are_converted_and_said_so(result):
     assert len(got["value"]["assumptions"]) == 3
 
 
+def test_declared_non_length_coordinates_are_refused(result):
+    """ICON's degrees and level indices: an error, not a nonsense box."""
+    got = result["nothingIsALength"]
+    assert not got["ok"]
+    assert "unit of length" in got["message"]
+    assert "degrees_east" in got["message"]
+
+
 # --- the timestep ------------------------------------------------------------
 
 def test_several_timesteps_are_a_question_not_a_refusal(result):
@@ -678,3 +831,128 @@ def test_coordinates_that_disagree_are_refused_too(result):
     got = result["coordMismatch"]
     assert got["ok"] is False
     assert "z coordinate" in got["message"]
+
+
+# --- coordinate units nothing recognizes -------------------------------------
+
+def test_unrecognized_coordinate_units_are_a_question(result):
+    """'m AGL' loaded fine before the length table existed; the table must
+    not turn it into a refusal. Unrecognized is a question, not a verdict."""
+    got = result["coordUnitsAsked"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["needsCoordUnitsChoice"] is True
+    assert any("m AGL" in u for u in got["value"]["unrecognized"])
+
+
+def test_the_coordinate_units_answer_is_applied_and_stated(result):
+    got = result["coordUnitsAnswered"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["needsCoordUnitsChoice"] is False
+    assert got["value"]["zEnd"] == 95 * 400 * 1000       # answered km
+    assert got["value"]["xEnd"] == 511 * 3000            # 'm' untouched
+    assert any("m AGL" in a for a in got["value"]["assumptions"])
+
+
+def test_recognized_non_length_units_still_refuse(result):
+    """A level index is KNOWN not to be a length; m-or-km cannot answer it."""
+    got = result["coordUnitsLevelIndex"]
+    assert got["ok"] is False
+    assert "unit of length" in got["message"]
+
+
+# --- the last-resort sweep needs the axis's own dimension ---------------------
+
+def test_the_sweep_takes_only_variables_on_the_axis_dimension(result):
+    """On a cubic grid a stray length-nz variable used to become z in key
+    order, silently. Association is required, and the adoption is stated."""
+    got = result["sweepAssociation"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["coordNames"]["z"] == "zvals"
+    assert got["value"]["zEnd"] == 95 * 400
+    assert any("zvals" in a for a in got["value"]["assumptions"])
+
+
+def test_no_associated_variable_is_a_refusal_not_a_grab(result):
+    got = result["sweepNothingAssociated"]
+    assert got["ok"] is False
+    assert "No coordinate variable found" in got["message"]
+    assert "zt" in got["message"]
+
+
+# --- packed coordinates -------------------------------------------------------
+
+def test_scale_factor_and_add_offset_apply_to_coordinates(result):
+    """The decoder used to run on field data only; a packed coordinate
+    placed the field at the stored integers."""
+    got = result["packedCoords"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["zFirst"] == 50
+    assert got["value"]["zEnd"] == 95 * 400 + 50
+
+
+# --- CF dimensionless "1" -----------------------------------------------------
+
+def test_units_of_one_ask_the_condensate_question(result):
+    """'1' says the quantity is a ratio, not which one; counting it as known
+    skipped the panel and then threw with no way to answer."""
+    got = result["unitsOne"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["unitsKnown"] is False
+    mult = result["unitsOneMultiplier"]
+    assert mult["ok"], mult.get("message")
+    assert mult["value"]["bare"] is None
+    assert mult["value"]["padded"] is None
+    assert mult["value"]["sam"] == 1.0        # SAM's empty string stays g/kg
+
+
+# --- monotonicity -------------------------------------------------------------
+
+@pytest.mark.parametrize("case,fragment", [
+    ("folded", "not monotonic"),
+    ("repeated", "not monotonic"),
+    ("nonFinite", "non-finite"),
+])
+def test_scrambled_coordinates_are_refused_by_name(result, case, fragment):
+    got = result["monotonic"][case]
+    assert got["ok"] is False
+    assert fragment in got["message"]
+
+
+def test_an_ascending_coordinate_passes(result):
+    assert result["monotonic"]["ascending"]["ok"]
+
+
+# --- fill values --------------------------------------------------------------
+
+def test_fill_matching_is_nan_aware(result):
+    got = result["fills"]
+    assert got["ok"], got.get("message")
+    v = got["value"]
+    assert v["matchesFill"] is True and v["missesData"] is False
+    # The NaN-valued _FillValue attribute that `v === fill` never matched.
+    assert v["nanMatches"] is True and v["nanMissesFinite"] is False
+    assert v["noneIsNull"] is True
+    assert v["decoded"] == 9                  # scale/offset still applied
+    assert v["fillDecodedFinite"] is True     # fills are the read's business
+
+
+# --- the z-crop's minimum band ------------------------------------------------
+
+def test_a_single_occupied_top_plane_widens_downward(result):
+    """lo = hi = n-1: widening upward was a no-op, the band came back one
+    plane deep, and volumeAABB produced a NaN box."""
+    got = result["zcropTop"]
+    assert got["ok"], got.get("message")
+    assert got["value"] == {"lo": 1, "hi": 2, "count": 2, "cropped": True}
+
+
+def test_a_single_occupied_bottom_plane_widens_upward(result):
+    got = result["zcropBottom"]
+    assert got["ok"], got.get("message")
+    assert got["value"] == {"lo": 0, "hi": 1, "count": 2, "cropped": True}
+
+
+def test_a_single_occupied_middle_plane_widens_upward(result):
+    got = result["zcropMiddle"]
+    assert got["ok"], got.get("message")
+    assert got["value"] == {"lo": 1, "hi": 2, "count": 2, "cropped": True}

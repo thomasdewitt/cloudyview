@@ -1142,7 +1142,7 @@ export class UI {
     // A capture picks its own tier — the still leans expensive by default —
     // and its spp is that tier's parked sample count. All settings are the
     // preset's flight configuration, marched at the capture size; witness
-    // --soar-tier reproduces exactly this from the CLI.
+    // --quality reproduces exactly this from the CLI.
     // The same line the track panel draws: tiers on the left, the shared
     // overlays switch on the right, so the two capture panels read as one
     // design.
@@ -1201,6 +1201,21 @@ export class UI {
     m.append(el("div", "row", T.unitsMissing(variables)));
     m.append(item(T.unitsGkg, null, () => onPick("g/kg")));
     m.append(item(T.unitsKgkg, null, () => onPick("kg/kg")));
+    m.append(el("div", "divider"));
+    m.append(item(T.back, T.backNote, onCancel));
+  }
+
+  /**
+   * Coordinate units, when a coordinate declares a units string nothing
+   * recognizes. Same shape as the condensate panel: two answers, no guess.
+   */
+  _panel_coordUnits({ coords, filename, onPick, onCancel }) {
+    const m = this.menu;
+    m.append(this._header(T.kicker, T.askCoordUnits));
+    m.append(el("div", "row", filename));
+    m.append(el("div", "row", T.coordUnitsMissing(coords)));
+    m.append(item(T.coordUnitsM, null, () => onPick("m")));
+    m.append(item(T.coordUnitsKm, null, () => onPick("km")));
     m.append(el("div", "divider"));
     m.append(item(T.back, T.backNote, onCancel));
   }

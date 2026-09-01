@@ -463,6 +463,17 @@ export function metresPerUnit(units) {
 }
 
 /**
+ * The dimension a 1-D variable is attached to, via its own dimension scale.
+ * Null when the file recorded none — plain HDF5 output, mostly.
+ */
+function ownDimension(variable) {
+  try {
+    const scales = variable.get_attached_scales?.(0) ?? [];
+    return scales.length ? String(scales[0]).replace(/^.*\//, "") : null;
+  } catch { return null; }
+}
+
+/**
  * The 1-D coordinate array for one axis, in metres.
  *
  * Every 1-D variable of the right length is collected, in order of how well
@@ -486,30 +497,52 @@ export function metresPerUnit(units) {
  * that cannot be a distance cannot place a field in space, whatever its name
  * says.
  *
- * Returns `{ name, values, note }`; `note` is non-empty when a choice was
- * made that the load should say out loud.
+ * Declared units split three ways rather than two. A recognized length
+ * converts; a recognized NON-length (degrees of longitude, pascals, a bare
+ * level index — anything UNITS_AXIS knows) is a dead end, because using the
+ * numbers anyway renders a plausible-looking box with nonsense proportions:
+ * an ICON RCEMIP file with lon/lat in degrees came out 360 m wide and taller
+ * than it was deep, which reads on screen as axes swapped (Thomas,
+ * 2026-08-31). But a units string this table has never SEEN — "m AGL",
+ * "meters above sea level" — is not evidence the coordinate is not a length;
+ * it is a question, the same shape as the condensate-units one, and the
+ * answer arrives as `coordUnits` ("m" or "km") and applies to every
+ * coordinate in that state. Unanswered, the values come back raw and
+ * `unrecognizedUnits` says so, so the caller can ask instead of rendering.
+ *
+ * Returns `{ name, values, note, unrecognizedUnits }`; `note` is non-empty
+ * when a choice was made that the load should say out loud.
  */
-export function findCoordinate(group, root, dim, axis) {
+export function findCoordinate(group, root, dim, axis, coordUnits = null) {
   const containers = [];
   for (const c of [group, root]) if (c && !containers.includes(c)) containers.push(c);
 
   const found = [];
-  const consider = (container, name) => {
+  const consider = (container, name, rule) => {
     let variable = null;
     try { variable = container.get(name); } catch { return; }
     if (!variable || variable.shape?.length !== 1) return;
     if (variable.shape[0] !== dim.size) return;
     if (isPhonyDimensionScale(variable)) return;
+    // The last-resort sweep must be ASSOCIATED with this axis, not merely the
+    // right length: on a cubic grid a stray length-nz variable called `x`
+    // used to become the z coordinate in key order, silently. A dimension
+    // scale attached to the axis's own dimension is that association; a
+    // variable with none recorded is not adopted here.
+    if (rule === "sweep" && ownDimension(variable) !== dim.name) return;
     if (found.some((f) => f.name === name)) return;
-    found.push({ name, variable, units: attrString(variable.attrs, "units") });
+    found.push({ name, variable, rule,
+                 units: attrString(variable.attrs, "units") });
   };
 
-  for (const container of containers) consider(container, dim.name);
+  for (const container of containers) consider(container, dim.name, "dimension");
   for (const container of containers) {
-    for (const candidate of AXIS_CANDIDATES[axis]) consider(container, candidate);
+    for (const candidate of AXIS_CANDIDATES[axis]) {
+      consider(container, candidate, "name");
+    }
   }
   for (const container of containers) {
-    for (const key of container.keys()) consider(container, key);
+    for (const key of container.keys()) consider(container, key, "sweep");
   }
 
   if (!found.length) {
@@ -521,15 +554,51 @@ export function findCoordinate(group, root, dim, axis) {
 
   let chosen = found[0];
   const notes = [];
-  if (metresPerUnit(chosen.units) === null) {
+  let unrecognizedUnits = null;
+  let scale = metresPerUnit(chosen.units);
+  if (scale === null) {
     const measured = found.find((f) => metresPerUnit(f.units) !== null);
     if (measured) {
       notes.push(T.coordChosen(axis, measured.name));
       chosen = measured;
+      scale = metresPerUnit(chosen.units);
+    } else if (chosen.units !== null && chosen.units !== undefined
+               && String(chosen.units).trim() !== "") {
+      // No units at all is assumed to be metres — the long-standing
+      // convention most LES output relies on (and that path never reaches
+      // here). A declared unit lands in one of the two cases the docstring
+      // above describes: known-not-a-length refuses, never-seen asks.
+      const u = String(chosen.units).trim().toLowerCase();
+      if (UNITS_AXIS[u] !== undefined) {
+        const described = found
+          .map((f) => `'${f.name}' (${f.units || "no units"})`).join(", ");
+        throw new Error(
+          `No ${axis} coordinate in a unit of length: found ${described}. ` +
+          "Cell-center coordinates in meters are required — they are what " +
+          "places the field in space. If the grid spacing is known, write " +
+          "coordinate variables in meters into the file.");
+      }
+      if (coordUnits !== null) {
+        scale = metresPerUnit(coordUnits);
+        if (scale === null) {
+          throw new Error(
+            `'${coordUnits}' is not a coordinate unit this can apply — ` +
+            "the answer must be m or km.");
+        }
+        notes.push(T.coordUnitsApplied(axis, chosen.name,
+                                       String(chosen.units), coordUnits));
+      } else {
+        unrecognizedUnits = String(chosen.units);
+      }
     }
   }
+  // The loose sweep fired and stuck (a measured override already said so
+  // through coordChosen). That adoption is a guess about which variable
+  // places this axis, and it is stated like the axis guesses are.
+  if (chosen.rule === "sweep" && chosen === found[0]) {
+    notes.push(T.coordAdopted(axis, chosen.name, dim.name));
+  }
 
-  const scale = metresPerUnit(chosen.units);
   let values = readNumeric(chosen.variable);
   if (scale !== null && scale !== 1) {
     // Everything downstream — the AABB, the voxel sizes, the march — is in
@@ -538,11 +607,48 @@ export function findCoordinate(group, root, dim, axis) {
     values = values.map((v) => v * scale);
     notes.push(T.coordConverted(axis));
   }
-  return { name: chosen.name, values, note: notes.join(" ") };
+  return { name: chosen.name, values, note: notes.join(" "),
+           unrecognizedUnits };
+}
+
+/**
+ * Refuse a coordinate that is not strictly ascending and finite.
+ *
+ * Called by the read AFTER a wholly-descending axis has been flipped, so
+ * descending order never reaches here — what does is a folded, repeated,
+ * unsorted or fill-holed coordinate, and every one of those renders a
+ * spatially scrambled field that still looks entirely like a cloud.
+ * Everything downstream (the AABB, the linear world-to-grid map,
+ * cellThickness) assumes sorted; sorting FOR the file would reorder its
+ * axis against its data, so this refuses by name instead.
+ */
+export function assertAscendingCoordinate(values, axis, varName) {
+  for (let i = 0; i < values.length; i++) {
+    if (!Number.isFinite(values[i])) {
+      throw new Error(
+        `The ${axis} coordinate '${varName}' has a non-finite value at ` +
+        `index ${i}. Coordinates must be finite cell centers — they are ` +
+        "what places the field in space.");
+    }
+    if (i > 0 && !(values[i] > values[i - 1])) {
+      throw new Error(
+        `The ${axis} coordinate '${varName}' is not monotonic: index ${i} ` +
+        `holds ${values[i]} after ${values[i - 1]}. An unsorted or ` +
+        "repeated coordinate would render the field spatially scrambled, " +
+        "so it is refused rather than sorted.");
+    }
+  }
 }
 
 function readNumeric(variable) {
-  return Float64Array.from(variable.value ?? variable.to_array());
+  const values = Float64Array.from(variable.value ?? variable.to_array());
+  // scale_factor/add_offset apply to coordinates exactly as to field data —
+  // xarray decodes both, and a packed coordinate left raw places the field
+  // at the packed integers instead of the metres they stand for. Fill values
+  // are NOT zeroed here: a fill in a coordinate has no honest repair, and
+  // the read's monotonicity check refuses it by name.
+  const decode = decoderFor(variable.attrs, { fillsAsNaN: true });
+  return decode ? values.map(decode) : values;
 }
 
 /**
@@ -564,36 +670,50 @@ export function readCoordValues(group, root, name, size) {
   return null;
 }
 
+/** One numeric attribute, tolerating h5wasm's several shapes. */
+function attrNumber(attrs, name) {
+  const attr = attrs?.[name];
+  if (attr === undefined || attr === null) return null;
+  const raw = attr.value ?? attr;
+  return Array.isArray(raw) || ArrayBuffer.isView(raw)
+    ? Number(raw[0]) : Number(raw);
+}
+
 /**
- * xarray applies these on open; h5wasm does not, so we must.
+ * A predicate matching the RAW stored values a variable declares as missing,
+ * or null when it declares none.
  *
- * Without the fill-value step a file that stores -9999 as "missing" renders
- * a wall of enormous negative extinction. Returns a decode function or null
- * when nothing needs doing (the common, fast case).
+ * Separate from decoderFor because what happens to a matched voxel differs
+ * by caller: the extinction read zeroes it (fill means "no cloud here", and
+ * a NaN would reach the GPU texture and bleed through trilinear filtering),
+ * while a coordinate has no honest repair and gets refused downstream. The
+ * comparison is NaN-aware — a file whose _FillValue attribute is itself NaN
+ * used to never match, because `v === NaN` never does.
  */
-export function decoderFor(attrs) {
-  const value = (name) => {
-    const attr = attrs?.[name];
-    if (attr === undefined || attr === null) return null;
-    const raw = attr.value ?? attr;
-    return Array.isArray(raw) || ArrayBuffer.isView(raw)
-      ? Number(raw[0]) : Number(raw);
-  };
-  const fill = value("_FillValue");
-  const missing = value("missing_value");
-  const scale = value("scale_factor");
-  const offset = value("add_offset");
-  if (fill === null && missing === null && scale === null && offset === null) {
-    return null;
-  }
+export function fillMatcher(attrs) {
+  const fill = attrNumber(attrs, "_FillValue");
+  const missing = attrNumber(attrs, "missing_value");
+  if (fill === null && missing === null) return null;
+  const matches = (v, f) => (Number.isNaN(f) ? Number.isNaN(v) : v === f);
+  return (v) => (fill !== null && matches(v, fill))
+             || (missing !== null && matches(v, missing));
+}
+
+/**
+ * xarray applies scale_factor/add_offset on open; h5wasm does not, so we
+ * must. Returns a decode function or null when nothing needs doing (the
+ * common, fast case). Fill values are the caller's business — see
+ * fillMatcher — except under `fillsAsNaN`, the coordinate-reading mode,
+ * where a fill decodes to NaN so the monotonicity check can name it.
+ */
+export function decoderFor(attrs, { fillsAsNaN = false } = {}) {
+  const scale = attrNumber(attrs, "scale_factor");
+  const offset = attrNumber(attrs, "add_offset");
+  const fills = fillsAsNaN ? fillMatcher(attrs) : null;
+  if (scale === null && offset === null && fills === null) return null;
   const s = scale ?? 1.0;
   const o = offset ?? 0.0;
-  return (v) => {
-    if ((fill !== null && v === fill) || (missing !== null && v === missing)) {
-      return NaN;
-    }
-    return v * s + o;
-  };
+  return (v) => (fills && fills(v) ? NaN : v * s + o);
 }
 
 /**
@@ -606,10 +726,25 @@ export function unitsMultiplier(units) {
   if (units === null || units === undefined) return null;
   const u = normalizeUnits(units);
   if (u === "") return 1.0;          // SAM convention: empty means g/kg
+  // CF's dimensionless "1" says only that the quantity is a ratio, not
+  // WHICH ratio — g/kg and kg/kg are both dimensionless. Treated like
+  // absent units (a question), not like known ones: counting it as known
+  // used to skip the units panel and then throw here with no way to answer.
+  if (u === "1") return null;
   if (u === "g/kg") return 1.0;
   if (u === "g/g" || u === "kg/kg") return 1000.0;
   throw new Error(
     `Unsupported units '${units}'. Expected 'g/kg', 'g/g' or 'kg/kg'.`);
+}
+
+/**
+ * Whether a declared units attribute actually settles the condensate units.
+ * Absent, and CF's dimensionless "1", both mean the question gets asked —
+ * see unitsMultiplier for why "1" answers nothing.
+ */
+export function condensateUnitsKnown(units) {
+  return units !== null && units !== undefined
+      && normalizeUnits(units) !== "1";
 }
 
 /**
@@ -835,11 +970,19 @@ export function describeGroup(root, path, choice = null) {
   }
 
   const coords = {};
+  // Coordinates whose declared units nothing recognized — the state the
+  // coordinate-units question exists for. One answer covers all of them.
+  const coordUnitsUnrecognized = [];
   for (const axis of ["x", "y", "z"]) {
-    coords[axis] = findCoordinate(group, root, resolved[axis], axis);
+    coords[axis] = findCoordinate(group, root, resolved[axis], axis,
+                                  choice?.coordUnits ?? null);
     // Choosing one coordinate variable over another, or rescaling one, is a
     // decision about where the field IS. Stated, like the axis guesses.
     if (coords[axis].note) assumptions.push(coords[axis].note);
+    if (coords[axis].unrecognizedUnits) {
+      coordUnitsUnrecognized.push(
+        `'${coords[axis].name}' (${coords[axis].unrecognizedUnits})`);
+    }
   }
 
   const units = attrString(dataset.attrs, "units");
@@ -885,13 +1028,18 @@ export function describeGroup(root, path, choice = null) {
       z: Array.from(coords.z.values),
     },
     units,
-    unitsKnown: units !== null,
+    unitsKnown: condensateUnitsKnown(units),
     // Asked about separately from the liquid variable's. Inheriting them was
     // a factor-of-1000 error waiting to happen: qc in g/kg beside a qi with
     // no units that is really kg/kg renders ice a thousand times too thin,
     // and still looks entirely like a cloud.
     iceUnits,
-    iceUnitsKnown: iceVar === null || iceUnits !== null,
+    iceUnitsKnown: iceVar === null || condensateUnitsKnown(iceUnits),
+    // A units string on a coordinate that nothing recognized — the caller
+    // asks (m or km) and re-describes with `choice.coordUnits`; until then
+    // the coords above are the raw numbers and must not place a field.
+    needsCoordUnitsChoice: coordUnitsUnrecognized.length > 0,
+    coordUnitsUnrecognized,
     chunks: dataset.metadata?.chunks ?? null,
     filters: (dataset.filters ?? []).map((f) => f.name ?? String(f.id)),
     dtype: dataset.dtype ?? null,
@@ -960,9 +1108,15 @@ export function describeIceGroup(root, path, choice = null) {
   for (const d of timeDims) timeSelect[d.axis] = d === timeDim ? timestep : 0;
 
   const coords = {};
+  const coordUnitsUnrecognized = [];
   for (const axis of ["x", "y", "z"]) {
-    coords[axis] = findCoordinate(group, root, resolved[axis], axis);
+    coords[axis] = findCoordinate(group, root, resolved[axis], axis,
+                                  choice?.coordUnits ?? null);
     if (coords[axis].note) assumptions.push(coords[axis].note);
+    if (coords[axis].unrecognizedUnits) {
+      coordUnitsUnrecognized.push(
+        `'${coords[axis].name}' (${coords[axis].unrecognizedUnits})`);
+    }
   }
   const units = attrString(dataset.attrs, "units");
   return {
@@ -989,7 +1143,9 @@ export function describeIceGroup(root, path, choice = null) {
       z: Array.from(coords.z.values),
     },
     iceUnits: units,
-    iceUnitsKnown: units !== null,
+    iceUnitsKnown: condensateUnitsKnown(units),
+    needsCoordUnitsChoice: coordUnitsUnrecognized.length > 0,
+    coordUnitsUnrecognized,
     chunks: dataset.metadata?.chunks ?? null,
     filters: (dataset.filters ?? []).map((f) => f.name ?? String(f.id)),
   };

@@ -88,6 +88,14 @@ export function occupiedBand(occupied) {
   }
   let hi = n - 1;
   while (hi > lo && !occupied[hi]) hi--;
-  if (hi === lo) hi = Math.min(n - 1, lo + 1);
+  // Widen upward when there is room, else downward: when the only occupied
+  // plane is the LAST one, `hi = min(n-1, lo+1)` was a no-op, the band came
+  // back one plane deep, and volumeAABB read c[1] of a one-element z array —
+  // a NaN box and a silently garbage render. witness.py/behold.py apply the
+  // identical rule; the two hosts must reach the same band.
+  if (hi === lo) {
+    if (lo + 1 < n) hi = lo + 1;
+    else lo = Math.max(0, lo - 1);
+  }
   return { lo, hi, count: hi - lo + 1, cropped: hi - lo + 1 < n };
 }
