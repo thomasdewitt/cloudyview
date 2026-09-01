@@ -1,23 +1,26 @@
-"""A still's progress bar has to move while the still is being made.
+"""A still's progress bar has to move at the speed of the actual work.
 
-It did not. `renderAccumulated` submitted every accumulation pass in one
-unbroken run of microtasks, so the browser had no chance to paint between
-them: the bar showed 0 for the whole march and then jumped to done. Nothing
-was wrong with the picture, only with the account of it — which is exactly the
-class of bug that is invisible to an image golden.
+Two bugs shaped this contract. First the bar did not move at all:
+`renderAccumulated` submitted every accumulation pass in one unbroken run of
+microtasks, so the browser had no chance to paint between them. Then it moved
+at the wrong speed: drawFrame only SUBMITS work, so a loop that counts
+submissions counts the CPU racing ahead of the GPU — the bar reached the
+march's whole share almost immediately and then sat there while the
+read-back's mapAsync waited out all the actual marching (ebc1065).
 
 So this pins the reporting contract of the real module, under node, with a
-stub renderer whose passes cost a controlled amount of fake time:
+stub renderer and a stub GPU queue:
 
-- every report is followed by a wait for a paint (that wait is the fix),
-- the final report is always the last pass, so the bar reaches the end of the
-  marching stage,
-- reporting is time-gated (twice a second), not per-pass — a card fast enough
-  to finish a pass inside a frame interval must not be made to stop for the
-  compositor after each one, so that the account of the work cannot slow the
-  work,
-- and asking for no progress (the video path, which paces itself on a
-  read-back per frame) still submits with no waits at all.
+- a report is made after every pass, and only after the GPU sync for that
+  pass (`queue.onSubmittedWorkDone`) has resolved — `done` counts passes the
+  GPU has FINISHED, and the await is also what frees the event loop so the
+  browser can paint the bar at all,
+- the final report is always the last pass, so the bar reaches the end of
+  the marching stage,
+- asking for no progress (the video path, which paces itself on a read-back
+  per frame) never touches the device and never waits,
+- and a still's fractions give the march STILL_MARCH_SHARE of the bar, per
+  finished pass, with the read-back owning the rest.
 
 No GPU is needed to count callbacks, which is the point. Skips only without
 node.
@@ -43,37 +46,6 @@ pytestmark = pytest.mark.skipif(
 _JS = textwrap.dedent("""
     import { renderAccumulated, renderStill } from "%s";
 
-    // A clock the test drives, so "a pass costs 600 ms" is a fact rather than
-    // a hope about the machine the suite runs on.
-    let clock = 0;
-    Object.defineProperty(globalThis, "performance", {
-      value: { now: () => clock }, configurable: true, writable: true,
-    });
-    let paints = 0;
-    globalThis.requestAnimationFrame = (fn) => {
-      paints += 1;
-      // A real frame callback lands on a later task, not a later microtask —
-      // and a microtask would not let a browser paint, so it would not be a
-      // fair stand-in for one.
-      setTimeout(() => fn(clock), 0);
-      return paints;
-    };
-
-    const stubRenderer = (passMs) => ({
-      passes: 0,
-      resetAccumulation() {},
-      setQualityTier() {},
-      setRenderScale() {},
-      flightRenderScale: 1.0,
-      qualityTier: "high",
-      lightCacheMode: "auto",
-      skyProbeMode: "auto",
-      parkedSppOverride: null,
-      lightBakePending: false,
-      stepLightBake() { return true; },
-      async drawFrame() { this.passes += 1; clock += passMs; },
-    });
-
     // Enough of WebGPU for the offline target and the read-back.
     globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 1, COPY_SRC: 2 };
     globalThis.GPUBufferUsage = { COPY_DST: 1, MAP_READ: 2 };
@@ -84,7 +56,8 @@ _JS = textwrap.dedent("""
         this.data = new Uint8ClampedArray(w * h * 4);
       }
     };
-    const stubDevice = {
+    const makeDevice = () => ({
+      syncs: 0,
       limits: { maxTextureDimension2D: 8192 },
       createTexture: () => ({ createView: () => ({}), destroy() {} }),
       createBuffer: ({ size }) => ({
@@ -94,46 +67,71 @@ _JS = textwrap.dedent("""
       createCommandEncoder: () => ({
         copyTextureToBuffer() {}, finish: () => ({}),
       }),
-      queue: { submit() {} },
+      queue: {
+        submit() {},
+        async onSubmittedWorkDone() { this.device.syncs += 1; },
+      },
+    });
+    const stubDevice = () => {
+      const device = makeDevice();
+      device.queue.device = device;   // so the sync can count itself
+      return device;
     };
 
-    const run = async (frames, passMs, { report = true, hidden = false } = {}) => {
-      clock = 0; paints = 0;
-      globalThis.document = {
-        visibilityState: hidden ? "hidden" : "visible",
-        addEventListener() {}, removeEventListener() {},
-      };
-      const renderer = stubRenderer(passMs);
+    const stubRenderer = (device) => ({
+      device,
+      passes: 0,
+      // A report must only happen after the sync for its pass has resolved.
+      syncsAtReport: [],
+      resetAccumulation() {},
+      setQualityTier() {},
+      setRenderScale() {},
+      flightRenderScale: 1.0,
+      qualityTier: "high",
+      lightCacheMode: "auto",
+      skyProbeMode: "auto",
+      parkedSppOverride: null,
+      lightBakePending: false,
+      stepLightBake() { return true; },
+      async drawFrame() { this.passes += 1; },
+    });
+
+    const run = async (frames, { report = true } = {}) => {
+      const device = stubDevice();
+      const renderer = stubRenderer(device);
       const reports = [];
       await renderAccumulated(
         renderer, {}, [8, 8], { frameIndex: 0 }, frames, null,
-        report ? (done, total) => reports.push([done, total]) : null);
-      return { reports, paints, passes: renderer.passes };
+        report ? (done, total) => {
+          reports.push([done, total]);
+          renderer.syncsAtReport.push(device.syncs);
+        } : null);
+      return { reports, passes: renderer.passes, syncs: device.syncs,
+               syncsAtReport: renderer.syncsAtReport };
     };
 
-    // A slow card: every pass costs longer than the reporting interval.
-    const slow = await run(8, 600);
-    // A fast one: eight passes inside a single interval.
-    const fast = await run(8, 1);
+    const reported = await run(8);
     // The video path, which asks for nothing and must wait for nothing.
-    const silent = await run(8, 600, { report: false });
-    // A tab nobody is looking at: no frame callbacks are coming, so none are
-    // waited for, and the capture finishes anyway.
-    const hidden = await run(8, 600, { hidden: true });
+    const silent = await run(8, { report: false });
+
+    // The device with no renderer attached: the silent path must never
+    // reach for renderer.device at all — pin that by omitting it.
+    const bare = stubRenderer(undefined);
+    await renderAccumulated(
+      bare, {}, [8, 8], { frameIndex: 0 }, 8, null, null);
+    const silentNoDevice = { passes: bare.passes };
 
     // And the whole still, to pin the fractions the bar is given.
-    clock = 0; paints = 0;
-    globalThis.document = { visibilityState: "visible",
-                            addEventListener() {}, removeEventListener() {} };
+    // "minimal" is 8 parked samples of one pass each — the recipe comes from
+    // the tier rather than a frame count argument.
+    const device = stubDevice();
     const fractions = [];
-    // "minimal" is 8 parked samples of one pass each — the recipe now comes
-    // from the tier rather than a frame count argument.
     await renderStill(
-      stubDevice, stubRenderer(600), { frameIndex: 0 }, [4, 3], "minimal",
+      device, stubRenderer(device), { frameIndex: 0 }, [4, 3], "minimal",
       null, (fraction) => fractions.push(fraction));
 
-    process.stdout.write(
-      JSON.stringify({ slow, fast, silent, hidden, fractions }));
+    process.stdout.write(JSON.stringify(
+      { reported, silent, silentNoDevice, fractions }));
 """) % CAPTURE_JS.as_posix()
 
 
@@ -147,57 +145,43 @@ def result():
     return json.loads(proc.stdout)
 
 
-def test_every_pass_is_reported_when_each_one_is_slow(result):
-    slow = result["slow"]
-    assert slow["passes"] == 8
-    assert slow["reports"] == [[i, 8] for i in range(1, 9)]
+def test_every_pass_is_reported(result):
+    reported = result["reported"]
+    assert reported["passes"] == 8
+    assert reported["reports"] == [[i, 8] for i in range(1, 9)]
 
 
-def test_each_report_waits_for_a_paint(result):
-    """The wait IS the fix: without it the bar cannot be redrawn."""
-    for case in ("slow", "fast"):
-        assert result[case]["paints"] == len(result[case]["reports"]), case
+def test_each_report_waits_for_its_gpu_sync(result):
+    """The sync IS the fix: `done` counts passes the GPU has finished, and
+    the await is what frees the event loop so the bar can be painted."""
+    reported = result["reported"]
+    assert reported["syncs"] == 8
+    assert reported["syncsAtReport"] == list(range(1, 9))
 
 
-def test_the_march_always_ends_on_a_full_report(result):
-    for case in ("slow", "fast"):
-        reports = result[case]["reports"]
-        assert reports[-1] == [8, 8], case
-        counts = [done for done, _ in reports]
-        assert counts == sorted(counts), case
-
-
-def test_reporting_is_time_gated_not_per_pass(result):
-    """Eight passes inside one interval cost one stop, not eight."""
-    fast = result["fast"]
-    assert fast["passes"] == 8
-    assert fast["reports"] == [[8, 8]]
-
-
-def test_a_hidden_tab_is_never_waited_on(result):
-    """No frame callback is coming, and background timers are throttled — so
-    a capture whose user switched away still finishes."""
-    hidden = result["hidden"]
-    assert hidden["passes"] == 8
-    assert hidden["paints"] == 0
-    assert hidden["reports"][-1] == [8, 8]
+def test_the_march_ends_on_a_full_report(result):
+    assert result["reported"]["reports"][-1] == [8, 8]
 
 
 def test_no_progress_asked_for_means_no_waiting(result):
     silent = result["silent"]
     assert silent["passes"] == 8
     assert silent["reports"] == []
-    assert silent["paints"] == 0
+    assert silent["syncs"] == 0
+    # And the device is never even reached for — the video path's renderer
+    # need not carry one.
+    assert result["silentNoDevice"]["passes"] == 8
 
 
-def test_a_still_reports_a_bare_fraction_per_pass_and_then_the_read_back(result):
+def test_a_still_reports_a_fraction_per_pass_and_then_the_read_back(result):
     """A bar and one sentence from the caller — the stages do not narrate."""
     fractions = result["fractions"]
-    # minimal's 8 parked samples: one report per slow pass, then the read-back
+    # minimal's 8 parked samples: one report per finished pass, then the
+    # read-back's report at the top of the march's share.
     assert len(fractions) == 9
     assert fractions == sorted(fractions)
-    assert fractions[0] == pytest.approx(0.85 / 8)
-    # The marching owns 0.85 of the bar; the read-back and the PNG encode own
+    assert fractions[0] == pytest.approx(0.95 / 8)
+    # The marching owns 0.95 of the bar; the read-back and the PNG encode own
     # the rest, and the read-back is the one that actually waits on the GPU.
-    assert fractions[-2] == pytest.approx(0.85)
-    assert fractions[-1] == pytest.approx(0.85)
+    assert fractions[-2] == pytest.approx(0.95)
+    assert fractions[-1] == pytest.approx(0.95)
