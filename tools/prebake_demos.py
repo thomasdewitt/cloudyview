@@ -50,7 +50,8 @@ from cloudyview.soar_host import (
     DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_HAZE_HEIGHT_DEPENDENT,
     DEFAULT_LOD_STRENGTH, DEFAULT_TONE_MAP_GAMMA, DEFAULT_TONE_MAP_WHITE_POINT,
 )
-from cloudyview.witness import crop_empty_z
+from cloudyview.soar_host import camera_world_origin
+from cloudyview.witness import NestedLevel, crop_empty_z, render_nested
 from export_web_assets import _volume_aabb
 
 # The tone map the app flies with, imported rather than restated: a still that
@@ -935,6 +936,83 @@ def bake_ice(spec: dict, field: CloudField, meta: dict, out: Path) -> dict:
     }
 
 
+# --- what a still is rendered FROM -------------------------------------------
+
+def baked_level(spec: dict, out: Path) -> NestedLevel:
+    """The demo's own volume.bin.gz, as something the marcher can render.
+
+    A still does not actually need the source field. It needs the extinction,
+    and the extinction is what the bake already wrote and what the browser
+    already downloads — so a still can be re-rendered from the shipped bytes
+    on any machine, with no netCDF, no coordinate variables and no memory
+    headroom for two phases of a 2048-cell cascade.
+
+    It is not a reconstruction. bmin/bmax are read out of meta.json rather
+    than inferred, the fp16 quantization is the one the GPU receives either
+    way, and the config's extinction_multiplier is 1.0 — so this and the
+    source-field path are the same picture. If anything it is the truer one:
+    it is the volume the demo serves, not a fresh float64 derivation that no
+    viewer will ever see.
+
+    What it CANNOT do is re-bake the volume or the ice, which are the two
+    things sigma does not contain. --from-baked refuses those rather than
+    quietly writing a wrong one.
+    """
+    meta_path = out / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"{meta_path} — {spec['id']} has no bake to render from")
+    volume = json.loads(meta_path.read_text())["volume"]
+    if volume["format"] != "r16float" or volume["compression"] != "gzip":
+        raise ValueError(
+            f"{spec['id']}: volume.bin.gz is {volume['format']}/"
+            f"{volume['compression']}, which this path does not read")
+    raw = gzip.decompress((out / volume["file"]).read_bytes())
+    if len(raw) != volume["bytes_uncompressed"]:
+        raise ValueError(
+            f"{out / volume['file']} unpacks to {len(raw)} bytes, meta.json "
+            f"says {volume['bytes_uncompressed']} — re-bake {spec['id']}")
+    shape = tuple(int(v) for v in volume["shape_xyz"])
+    sigma = np.frombuffer(raw, dtype=np.float16).reshape(shape)
+    print(f"    rendering from the baked volume: {shape}, "
+          f"{len(raw)/1e6:.0f} MB fp16")
+    return NestedLevel(sigma=sigma.astype(np.float64),
+                       bmin=np.asarray(volume["bmin"], np.float64),
+                       bmax=np.asarray(volume["bmax"], np.float64),
+                       name=spec["id"])
+
+
+def march(spec: dict, subject, *, position, azimuth, elevation, fov, size,
+          accumulate: int, look: dict, return_linear: bool = False):
+    """One frame of `subject`, which is a loaded field or a baked level.
+
+    Two subjects, one signature, so render_still and the auto-exposure meter
+    do not each have to know which one they were handed. A CloudField goes
+    through witness, which turns condensate into extinction on the way; a
+    NestedLevel already IS the extinction and goes straight to the marcher
+    with the camera converted to absolute metres the way witness converts it.
+    """
+    kw = {_LOOK_ARG[k]: v for k, v in look.items()
+          # With the tone map compiled out there is no exposure to apply, and
+          # passing one would only suggest the meter's reading depended on it.
+          if not (return_linear and k == "exposure")}
+    common = dict(sun_azimuth=spec["sun"]["azimuth"],
+                  sun_elevation=spec["sun"]["elevation"],
+                  periodic=spec.get("periodic", True),
+                  accumulate=accumulate, return_linear=return_linear)
+    if isinstance(subject, NestedLevel):
+        return render_nested(
+            [subject],
+            camera_world_origin(position, subject.bmin, subject.bmax),
+            azimuth=azimuth, elevation=elevation, fov_degrees=fov,
+            image_size=tuple(size), verbose=False, **common, **kw)
+    return cv.witness(
+        subject,
+        cv.Camera(position=position, azimuth=azimuth, elevation=elevation,
+                  fov=fov),
+        size=tuple(size), **common, **kw)
+
+
 # --- auto exposure ----------------------------------------------------------
 
 # soar's auto-exposure rule, restated from web/soar/constants.js and
@@ -958,7 +1036,7 @@ AE_LIMITS = (1.0, 4.0)
 AE_METER_WIDTH = 96
 
 
-def auto_exposure(spec: dict, field: CloudField, view: dict,
+def auto_exposure(spec: dict, subject, view: dict,
                   white_point: float) -> float:
     """The exposure soar's auto-exposure would settle on for this view.
 
@@ -970,16 +1048,10 @@ def auto_exposure(spec: dict, field: CloudField, view: dict,
     """
     w = AE_METER_WIDTH
     h = max(1, int(round(w * view["size"][1] / view["size"][0])))
-    hdr = cv.witness(
-        field,
-        cv.Camera(position=view["position"], azimuth=view["azimuth"],
-                  elevation=view["elevation"], fov=view["fov"]),
-        size=(w, h), sun_azimuth=spec["sun"]["azimuth"],
-        sun_elevation=spec["sun"]["elevation"],
-        periodic=spec.get("periodic", True), accumulate=1,
-        return_linear=True,
-        **{_LOOK_ARG[k]: v for k, v in view["look"].items()
-           if k != "exposure"})
+    hdr = march(spec, subject, position=view["position"],
+                azimuth=view["azimuth"], elevation=view["elevation"],
+                fov=view["fov"], size=(w, h), accumulate=1,
+                look=view["look"], return_linear=True)
     lum = np.sort((np.asarray(hdr, np.float64)
                    * (0.2126, 0.7152, 0.0722)).sum(-1).ravel())
     rank = min(lum.size - 1, int(AE_PERCENTILE * lum.size))
@@ -1001,7 +1073,7 @@ def auto_exposure(spec: dict, field: CloudField, view: dict,
 
 # --- the preview still ------------------------------------------------------
 
-def render_still(spec: dict, field: CloudField, out: Path, size,
+def render_still(spec: dict, subject, out: Path, size,
                  accumulate: int, quality: int) -> dict:
     """One converged frame, which is what a hover preview should be.
 
@@ -1042,7 +1114,7 @@ def render_still(spec: dict, field: CloudField, out: Path, size,
     # it should say instead of a plausible-looking constant.
     if look["exposure"] == "auto":
         look["exposure"] = auto_exposure(
-            spec, field,
+            spec, subject,
             dict(position=position, azimuth=azimuth, elevation=elevation,
                  fov=fov, size=size, look=look),
             look["white_point"])
@@ -1055,14 +1127,9 @@ def render_still(spec: dict, field: CloudField, out: Path, size,
           flush=True)
 
     t0 = time.time()
-    img = cv.witness(
-        field,
-        cv.Camera(position=position, azimuth=azimuth,
-                  elevation=elevation, fov=fov),
-        size=size, sun_azimuth=spec["sun"]["azimuth"],
-        sun_elevation=spec["sun"]["elevation"],
-        periodic=spec.get("periodic", True), accumulate=accumulate,
-        **{_LOOK_ARG[k]: v for k, v in look.items()})
+    img = march(spec, subject, position=position, azimuth=azimuth,
+                elevation=elevation, fov=fov, size=size,
+                accumulate=accumulate, look=look)
     render_s = time.time() - t0
 
     tmp = Path(tempfile.mkdtemp(prefix=f"soar-{spec['id']}-"))
@@ -1251,6 +1318,14 @@ def main() -> None:
                     help="accumulated passes; it is one frame (default 192)")
     ap.add_argument("--quality", type=int, default=82,
                     help="WebP quality (default 82)")
+    ap.add_argument("--from-baked", action="store_true",
+                    help="render the still from the demo's own "
+                         "volume.bin.gz instead of from the source field. "
+                         "The way to re-frame a case on a machine that does "
+                         "not have the netCDF, or has not the memory to hold "
+                         "it. Requires --skip-volume --skip-ice rather than "
+                         "assuming them: sigma does not contain the two "
+                         "mixing ratios, so neither can be re-derived.")
     args = ap.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -1260,6 +1335,17 @@ def main() -> None:
             ap.error("--index-only rewrites the whole index; --only means nothing")
         write_index(strict=True)
         return
+
+    if args.from_baked:
+        if not (args.skip_volume and args.skip_ice):
+            ap.error("--from-baked renders from the baked extinction, which "
+                     "is not enough to re-bake the volume or the ice. Pass "
+                     "--skip-volume --skip-ice, or run a full bake from the "
+                     "source field.")
+        if args.skip_still:
+            ap.error("--from-baked --skip-still renders nothing")
+        if args.ice_only:
+            ap.error("--from-baked cannot bake ice; see --skip-ice above")
 
     if args.ice_only:
         if args.skip_ice:
@@ -1280,7 +1366,9 @@ def main() -> None:
         # one-word edit to a card.
         field = None
         wants_ice = has_ice(spec) and not args.skip_ice
-        if not (args.skip_volume and args.skip_still and not wants_ice):
+        if args.from_baked:
+            field = baked_level(spec, out)
+        elif not (args.skip_volume and args.skip_still and not wants_ice):
             t0 = time.time()
             field = load_demo(spec)
             print(f"    loaded {field.lwc.shape}"
