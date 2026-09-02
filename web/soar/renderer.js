@@ -278,6 +278,9 @@ export class Renderer {
     // Scratch for the per-frame accumulation weights; see drawFrame.
     this._accumWeights = new Float32Array(4);
     this._resetAccumulation();
+    // Offline renders cap the GPU queue at two marches; see _submit.
+    this.boundedQueue = false;
+    this._queueFences = [];
 
     this.uniformBuf = device.createBuffer({
       label: "soar-uniforms",
@@ -1076,7 +1079,7 @@ export class Renderer {
       this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
                        exact);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
-      this.device.queue.submit([encoder.finish()]);
+      await this._submit(encoder.finish());
       return;
     }
 
@@ -1143,12 +1146,52 @@ export class Renderer {
                          renderSize[0] === outputW && renderSize[1] === outputH);
         encodeOverlays(overlays, enc, targetView, targetFormat);
       }
-      this.device.queue.submit([enc.finish()]);
+      await this._submit(enc.finish());
 
       this._accumIndex = 1 - this._accumIndex;
       this._accumCount = step.nextCount;
     }
     this._lastPresented = outTex;
+  }
+
+  /**
+   * Submit one march — and, for an offline render, never let more than two
+   * sit in the GPU's queue.
+   *
+   * The compositor shares the GPU, and it is not patient. Chrome on Linux
+   * with Vulkan compositing gives vkAcquireNextImageKHR two seconds
+   * (ui/ozone/platform/x11/vulkan_surface_x11.cc, a workaround for an X
+   * server vblank bug); a present that sits behind more than that much
+   * queued work times out, Chrome calls the swapchain hung, and it
+   * restarts the GPU process — which loses every WebGPU device with "A
+   * valid external Instance reference no longer exists". The video loop
+   * used to queue a whole video frame's marches before the read-back
+   * synced: 32 of them at Max, 1.5–2.5 s at 1080p on a 5080, so a heavier
+   * frame crossed the line and the render died an hour in (Thomas,
+   * 2026-09-01: seven minutes in, at the same signature in his journal).
+   * Metal's command-buffer watchdog is the same shape of limit.
+   *
+   * Two in flight rather than one: the GPU always has the next march ready
+   * when the current one ends, so this costs no bubble — the CPU just
+   * waits for the march before last instead of racing ahead. The queue is
+   * then at most two marches deep, and a single march is the unit nothing
+   * here can split; one longer than a second would need tiling, which
+   * this does not do. onSubmittedWorkDone promises resolve in submission
+   * order, so the oldest fence is always the one to wait on.
+   *
+   * Offline only. The live loop draws into a swapchain texture that is
+   * valid until the end of its animation-frame callback, and an await in
+   * the middle of that frame is exactly the crash drawFrame's doc
+   * describes; the live loop bounds its depth by drawing once per frame.
+   */
+  async _submit(commandBuffer) {
+    if (!this.boundedQueue) {
+      this.device.queue.submit([commandBuffer]);
+      return;
+    }
+    while (this._queueFences.length >= 2) await this._queueFences.shift();
+    this.device.queue.submit([commandBuffer]);
+    this._queueFences.push(this.device.queue.onSubmittedWorkDone());
   }
 
   /**

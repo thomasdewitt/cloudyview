@@ -122,10 +122,15 @@ export function beginOfflineRender(renderer, tier = "high") {
   // from the frames after. Finish it here — the capture owns the GPU.
   while (renderer.lightBakePending) renderer.stepLightBake(64);
   renderer.resetAccumulation();
+  // Never more than two marches queued: the compositor shares the GPU and
+  // Chrome gives its swapchain acquire two seconds (renderer._submit).
+  renderer.boundedQueue = true;
   return saved;
 }
 
 export function endOfflineRender(renderer, saved) {
+  renderer.boundedQueue = false;
+  renderer._queueFences = [];
   renderer.setQualityTier(saved.tier);
   renderer.setRenderScale(saved.scale);
   renderer.lightCacheMode = saved.lightCacheMode;
@@ -138,19 +143,19 @@ export function endOfflineRender(renderer, saved) {
  * Accumulate `frames` jittered passes of one camera into `targetView`.
  *
  * `onProgress(done, total)` is optional, and asking for it changes how the
- * loop runs: drawFrame only SUBMITS work, so a loop that counts submissions
- * counts the CPU racing ahead of the GPU — the bar used to reach the march's
- * whole share almost immediately and then sit there while the read-back's
- * mapAsync waited out all the actual marching. Reporting therefore waits for
- * `queue.onSubmittedWorkDone()` after each pass, so `done` counts passes the
- * GPU has FINISHED and the bar moves at the speed the work does. The await
- * also frees the event loop, which is what lets the browser paint the bar at
- * all, and it works in a hidden tab (a frame-callback wait would not).
+ * loop runs: drawFrame returns once its marches are SUBMITTED (at most two
+ * are ever queued — renderer._submit), so a loop that counts returns still
+ * counts the CPU a march or two ahead of the GPU. Reporting therefore waits
+ * for `queue.onSubmittedWorkDone()` after each pass, so `done` counts passes
+ * the GPU has FINISHED and the bar moves at the speed the work does. The
+ * await also frees the event loop, which is what lets the browser paint the
+ * bar at all, and it works in a hidden tab (a frame-callback wait would
+ * not).
  *
  * The sync costs one CPU/GPU bubble per pass, which is noise against a pass
- * that marches the whole volume at capture resolution — and the video path,
- * which read-backs every frame anyway, does not ask for progress and keeps
- * its unsynchronized loop.
+ * that marches the whole volume at capture resolution. The video path,
+ * which read-backs every frame anyway, does not ask for progress; its queue
+ * depth is bounded by _submit like every other offline render's.
  */
 export async function renderAccumulated(renderer, targetView, size, view,
                                         frames, overlays = null,
