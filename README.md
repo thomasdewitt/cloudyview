@@ -80,6 +80,36 @@ dataset-selection overrides described under
 `--liquid-water-var`, `--x-dim`, ...); see `witness --help` for the full
 list.
 
+### Soar: Render a Recorded Flight
+
+```bash
+soar cloudyview_track_20260901.json
+```
+
+Re-renders a flight track recorded in the browser app (R to record, then
+"Save the track") into an H.264 mp4 next to the track. Every frame is
+rendered with the quality tier's converged accumulation — the still the app
+reaches when the camera stops — so the video has none of the in-flight
+motion speckle, and the frame timing is the track's, whatever each frame
+cost. Everything about the picture (field, sun, exposure, tone map, haze,
+LOD, quality tier, size, the night city) comes from the track's header, so
+the command needs only the track; the flags override one thing at a time.
+
+| Argument             | Default              | Description                                                       |
+| -------------------- | -------------------- | ----------------------------------------------------------------- |
+| `--output`, `-o`     | track name + `.mp4`  | Video path                                                        |
+| `--field FILE.nc`    | the header's path    | The cloud field, when it is not where the header says             |
+| `--size W H`         | the capture size     | Video size (odd sizes round down to even)                         |
+| `--fps`              | `60`                 | Frame rate                                                        |
+| `--quality`          | the header's tier    | Render at another soar tier                                       |
+| `--crf`              | `18`                 | x264 quality, lower is better                                     |
+| `--nest-group GROUP` | —                    | As for `witness`                                                  |
+
+Needs a GPU and the `ffmpeg` binary on PATH; there is no fallback encoder.
+The browser renders the same track in the tab ("Render it to video") — this
+is for a GPU under your own control, a render that survives the tab, and a
+terminal to watch it from.
+
 ### Behold: Photorealistic Rendering
 
 ```bash

@@ -8,8 +8,8 @@
 // sample stream is irregular, and every output frame here takes as long as it
 // takes without changing the video's timing by a millisecond.
 //
-// Track schema is shared with the desktop, so a track recorded in the browser
-// can be re-rendered by `render_track` in Python and vice versa:
+// Track schema is shared with the Python side, so a track recorded in the browser
+// can be re-rendered by `soar TRACK.json` (cloudyview/track.py) and vice versa:
 //   {"schema": "cloudyview.track.v2",
 //    "header": <render metadata>,
 //    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}

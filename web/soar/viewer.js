@@ -2420,7 +2420,7 @@ export class Viewer {
     return overlays;
   }
 
-  /** The track as a file, readable by cloudyview's own `render_track`. */
+  /** The track as a file, which `soar TRACK.json` renders on the desktop. */
   downloadTrack(samples) {
     const size = this.captureDimensions();
     const payload = trackPayload(this.renderMetadata(size), samples);

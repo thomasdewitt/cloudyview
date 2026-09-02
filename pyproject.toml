@@ -51,6 +51,7 @@ dev = [
 glimpse = "cloudyview.glimpse:cli"
 witness = "cloudyview.witness:cli"
 behold = "cloudyview.behold:cli"
+soar = "cloudyview.track:cli"
 
 [project.urls]
 Homepage = "https://github.com/thomasdewitt/cloudyview"

@@ -36,6 +36,11 @@ CloudyView is a 3D cloud field visualization toolkit with radiative transfer cap
   `cloudyview/soar/raymarch.wgsl` the browser does (web/soar/raymarch.wgsl is
   a symlink to it), via wgpu, so there is one renderer core and one
   definition of the look. Needs a GPU.
+- `soar <track.json>` - Re-render a flight track recorded in the browser
+  app into an mp4 (`cloudyview/track.py`; frames piped to ffmpeg). Every
+  setting comes from the track's header; `--field` when the NetCDF is not
+  where the header says. The resampler is a port of `web/soar/track.js`,
+  pinned against it by `tests/test_track_resample.py`.
 
 Soar, the real-time fly-through, is a browser app under `web/soar/` — WebGPU, no
 Python at run time. Serve the `web/` directory and open `soar/`:

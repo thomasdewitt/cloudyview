@@ -1126,7 +1126,7 @@ export class UI {
       const note = render.querySelector(".note");
       if (note) note.textContent = caps.why;
     });
-    m.append(item("Save the track", "a .json cloudyview's render_track reads",
+    m.append(item("Save the track", "a .json the soar command renders to video",
                   () => { app.downloadTrack(samples); this.open("main"); }));
     m.append(item("Discard it", null, () => this.open("main")));
   }
