@@ -85,7 +85,18 @@ _JS = textwrap.dedent("""
         },
         onSubmittedWorkDone() { drains++; return Promise.resolve(); },
       },
+      // Each slab goes in under a validation scope so a refused write is a
+      // sentence. REFUSE_AT names a slab index to refuse, or -1 for none.
+      pushErrorScope() { scopes++; },
+      popErrorScope() {
+        scopes--;
+        const refuse = Number(process.env.REFUSE_AT ?? -1) === calls.length - 1;
+        return Promise.resolve(
+          refuse ? { message: "Buffer size (4294967296) exceeds the max " +
+                             "buffer size limit (2147483648)." } : null);
+      },
     };
+    let scopes = 0;
 
     // The network hands the decompressor whatever chunk sizes it likes, so
     // feed the stream in PRIME-sized pieces: chunk edges land at every
@@ -105,21 +116,29 @@ _JS = textwrap.dedent("""
     });
 
     const progress = [];
-    await streamWholeVolume(device, {}, stream, [nx, ny, nz],
-                            (f) => progress.push(f));
+    let refused = null;
+    try {
+      await streamWholeVolume(device, {}, stream, [nx, ny, nz],
+                              (f) => progress.push(f));
+    } catch (err) {
+      if (Number(process.env.REFUSE_AT ?? -1) < 0) throw err;
+      refused = { message: err.message, advice: err.advice ?? null };
+    }
     process.stdout.write(JSON.stringify(
-      { calls, drains, progress, drainBytes: UPLOAD_DRAIN_BYTES }));
+      { calls, drains, progress, refused, openScopes: scopes,
+        drainBytes: UPLOAD_DRAIN_BYTES }));
 """) % SCENE_JS.as_posix()
 
 
-def upload(shape, tmp_path, truncate=0):
+def upload(shape, tmp_path, truncate=0, refuse_at=-1):
     script = tmp_path / "drive.mjs"
     script.write_text(_JS)
     out = subprocess.run(
         ["node", str(script)], capture_output=True, text=True,
         env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
              "SHAPE": json.dumps(list(shape)),
-             "TRUNCATE": str(truncate)})
+             "TRUNCATE": str(truncate),
+             "REFUSE_AT": str(refuse_at)})
     if out.returncode != 0:
         raise AssertionError(f"node failed:\n{out.stderr}")
     return json.loads(out.stdout)
@@ -207,3 +226,72 @@ def test_a_truncated_stream_fails_loudly(drop, expected, tmp_path):
     """A short download must throw, not leave a silently truncated field."""
     with pytest.raises(AssertionError, match=expected):
         upload((256, 512, 512), tmp_path, truncate=drop)
+
+
+def test_every_slab_goes_in_under_a_closed_error_scope(tmp_path):
+    result = upload((301, 512, 512), tmp_path)
+    assert result["openScopes"] == 0
+    assert result["refused"] is None
+
+
+def test_a_refused_write_names_the_field_not_a_bug(tmp_path):
+    """The browser's refusal arrives as a sentence about THIS upload.
+
+    The 2026-09-13 report: Chrome on Windows zero-fills a fresh texture by
+    staging the whole thing in one buffer, so the first 64 MB slab of a 4 GB
+    field asked for a 4 GB buffer and the page said "a bug in cloudyview".
+    The refusal is caught at the slab, and the message carries the numbers
+    a reader needs: which planes, which volume, and how big it is.
+    """
+    result = upload((301, 512, 512), tmp_path, refuse_at=1)
+    refused = result["refused"]
+    assert refused is not None
+    assert "4294967296" in refused["message"]
+    assert "301x512x512" in refused["message"]
+    assert "of 301" in refused["message"]
+    assert refused["advice"] and "GB on the card" in refused["advice"]
+    assert result["openScopes"] == 0
+    # Nothing after the refusal: the upload stopped at the refused slab.
+    assert len(result["calls"]) == 2
+
+
+_USAGE_JS = textwrap.dedent("""
+    import { createVolumeTexture } from "%s";
+    globalThis.GPUTextureUsage = {
+      COPY_SRC: 1, COPY_DST: 2, TEXTURE_BINDING: 4, STORAGE_BINDING: 8,
+      RENDER_ATTACHMENT: 16,
+    };
+    const made = [];
+    const device = {
+      limits: { maxTextureDimension3D: 2048 },
+      pushErrorScope() {}, popErrorScope() { return Promise.resolve(null); },
+      createTexture(desc) { made.push(desc); return { destroy() {} }; },
+    };
+    await createVolumeTexture(device, [512, 2048, 2048], "t");
+    await createVolumeTexture(device, [512, 2048, 2048], "t", "r8unorm");
+    process.stdout.write(JSON.stringify(made));
+""") % SCENE_JS.as_posix()
+
+
+def test_volume_textures_allow_the_render_target_clear(tmp_path):
+    """Both volume textures carry RENDER_ATTACHMENT, which nothing draws to.
+
+    It selects Dawn's D3D12 clear path: a render-target clear over the depth
+    slices instead of a staging copy sized for the whole texture, which is
+    what put a 2048x2048x512 fp16 field (exactly 4 GiB) over D3D12's 2 GiB
+    buffer cap. Pinned so a tidy-up of the usage flags cannot bring the
+    Windows failure back without a test naming why the flag is there.
+    """
+    script = tmp_path / "usage.mjs"
+    script.write_text(_USAGE_JS)
+    out = subprocess.run(
+        ["node", str(script)], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"})
+    assert out.returncode == 0, out.stderr
+    made = json.loads(out.stdout)
+    assert [d["format"] for d in made] == ["r16float", "r8unorm"]
+    for desc in made:
+        assert desc["dimension"] == "3d"
+        assert desc["size"] == [2048, 2048, 512]
+        assert desc["usage"] & 16, "RENDER_ATTACHMENT missing"
+        assert desc["usage"] & 4 and desc["usage"] & 2
