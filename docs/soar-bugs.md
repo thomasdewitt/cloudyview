@@ -187,3 +187,46 @@ aerosol-free look below zero. Matters doubly because the high/max tiers now
 DEFAULT to 70 km (aerosol -0.038), on the wrong side of the cliff. Needs
 verification on the Mac against the slider's whole clear end; verified here
 only that the shader compiles and the golden views are unchanged.
+
+## 23. Chrome/Windows: a ≥2 GiB volume dies at the first slab upload
+
+**Status:** fix pushed 2026-09-13 (`dcabe7b`, branch
+`claude/cyberpunk-detailed-bug-wxt72c`), reasoned from Dawn's source, **not
+yet confirmed on the reporting machine**. Close this entry once a Windows
+Chrome flies the fine congestus demo.
+
+Reported 2026-09-13, Windows, RTX 5060, cyberpunk "Fly more detailed
+clouds": during "Downloading the cloud field…",
+
+    Buffer size (4294967296) exceeds the max buffer size limit
+    (2147483648). - While validating [BufferDescriptor
+    "Dawn_DynamicUploaderStaging"] - While calling %s.WriteTexture(...)
+
+surfaced through the uncaptured-error handler as "The GPU rejected a
+command … a bug in cloudyview". The coarse member of the pair flew.
+
+The number is the whole texture, not the write. Slabs are 64 MB
+(`UPLOAD_DRAIN_BYTES`), but 2048 × 2048 × 512 fp16 is exactly 2³² bytes,
+and Dawn zero-initialises a texture the first time a *partial* write
+touches it. On D3D12 (`TextureD3D12.cpp`, `ClearTexture`) a texture whose
+resource lacks `ALLOW_RENDER_TARGET` is cleared by copying zeros from one
+staging buffer of `Align(rowBytes, 256) × height × depth` — the full
+level, one `DynamicUploader` allocation — and D3D12's buffer cap is 2 GiB.
+So on Windows any volume of 2 GiB or more could never load, whatever the
+card's memory; the same demos load on the Mac because Metal's buffer
+limit is far larger and the same staging copy fits. Not an OOM: nothing
+was allocated, the descriptor was refused at validation.
+
+The fix is the other branch of that `if`: both volume textures now carry
+`RENDER_ATTACHMENT` (never drawn into), which makes the clear a
+`ClearRenderTargetView` over the depth slices, no staging at all. WebGPU
+allows the usage on 3D textures (the `depthSlice` attachment addition);
+r16float and r8unorm are both renderable. A refused `writeTexture` is
+also now captured at the slab (`streamWholeVolume`) and reported with the
+planes, the volume shape and its size, instead of as a bug.
+
+Things to check when it is confirmed: whether the `RENDER_ATTACHMENT` flag
+costs anything measurable on the Mac (it should not), and whether Firefox
+on Windows — wgpu, not Dawn — was ever affected (its clear path is
+different; the fine desert demo loaded fine in Firefox on the Fedora box
+before this).
