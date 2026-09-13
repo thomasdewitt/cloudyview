@@ -188,14 +188,15 @@ DEFAULT to 70 km (aerosol -0.038), on the wrong side of the cliff. Needs
 verification on the Mac against the slider's whole clear end; verified here
 only that the shader compiles and the golden views are unchanged.
 
-## 23. Chrome/Windows: a ≥2 GiB volume dies at the first slab upload
+## 23. Edge or Chrome on Windows: a ≥2 GiB volume dies at the first slab upload
 
 **Status:** fix pushed 2026-09-13 (`dcabe7b`, branch
 `claude/cyberpunk-detailed-bug-wxt72c`), reasoned from Dawn's source, **not
 yet confirmed on the reporting machine**. Close this entry once a Windows
 Chrome flies the fine congestus demo.
 
-Reported 2026-09-13, Windows, RTX 5060, cyberpunk "Fly more detailed
+Reported 2026-09-13, Windows, **Edge** (Chromium, so Dawn — the same
+backend as Chrome), RTX 5060, cyberpunk "Fly more detailed
 clouds": during "Downloading the cloud field…",
 
     Buffer size (4294967296) exceeds the max buffer size limit
