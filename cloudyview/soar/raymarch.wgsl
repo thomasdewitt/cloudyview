@@ -3420,16 +3420,25 @@ fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
                 continue;
             }
             let d = length(p - m.xy);
+            let lq = p - m.xy;
+            // Resolved, the disc with its edge antialiased over a pixel.
+            // Unresolved, the equal-area square box-filtered in both axes,
+            // whose integral IS the disc's area at every footprint — a 1-D
+            // ramp in d would claim half the pixel at fp = 10 m for a cover
+            // that is 0.4% of it.
             let h = 0.5 * max(fp, 1e-4);
-            let disc = clamp((CITY_MH_R - d + h) / (2.0 * h), 0.0, 1.0);
+            let sq = CITY_MH_R * 1.7724539;          // sqrt(pi) R
+            let disc = mix(clamp((CITY_MH_R - d + h) / (2.0 * h), 0.0, 1.0),
+                           city_band(lq.x, -0.5 * sq, sq, fp)
+                           * city_band(lq.y, -0.5 * sq, sq, fp),
+                           smoothstep(0.05, 0.25, fp));
             if (disc <= 0.0) {
                 continue;
             }
             // The cast pattern: a raised grid, and the rim ring. Both are
             // stripes, so both dissolve to their duty cycle.
-            let lp = p - m.xy;
-            let grid = max(city_stripes(lp.x, 0.0, 0.025, 0.075, fp),
-                           city_stripes(lp.y, 0.0, 0.025, 0.075, fp));
+            let grid = max(city_stripes(lq.x, 0.0, 0.025, 0.075, fp),
+                           city_stripes(lq.y, 0.0, 0.025, 0.075, fp));
             let rim = city_band(d, CITY_MH_R - 0.035, 0.035, fp);
             cov = max(cov, disc);
             tone = mix(1.0, 0.72 + 0.55 * grid, 1.0 - rim) * (1.0 + 0.6 * rim);
@@ -8963,7 +8972,12 @@ fn cc_streetlife_prop(ci: vec2<i32>, cc: CityCell, s: cc_streetlife_Side,
     if (s.ax == 1) {
         base = vec2<f32>(0.0, 1.0);
     }
-    let perp = vec2<f32>(-base.y, base.x);
+    // The across axis, positive: `across` is an absolute coordinate on the
+    // other axis, so it must map onto it with a + sign on both kinds of kerb.
+    // (A rotation, (-base.y, base.x), put every car of a y-running kerb at
+    // x = -park_c, outside its cell and never drawn; no car parked anywhere
+    // while that code was written, so nothing showed it.)
+    let perp = vec2<f32>(base.y, base.x);
     var fwd = base;
     if (!bin) {
         let yaw = (r.w - 0.5) * 2.0 * cc_streetlife_YAW;

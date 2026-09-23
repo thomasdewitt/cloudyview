@@ -467,7 +467,12 @@ fn cc_streetlife_prop(ci: vec2<i32>, cc: CityCell, s: cc_streetlife_Side,
     if (s.ax == 1) {
         base = vec2<f32>(0.0, 1.0);
     }
-    let perp = vec2<f32>(-base.y, base.x);
+    // The across axis, positive: `across` is an absolute coordinate on the
+    // other axis, so it must map onto it with a + sign on both kinds of kerb.
+    // (A rotation, (-base.y, base.x), put every car of a y-running kerb at
+    // x = -park_c, outside its cell and never drawn; no car parked anywhere
+    // while that code was written, so nothing showed it.)
+    let perp = vec2<f32>(base.y, base.x);
     var fwd = base;
     if (!bin) {
         let yaw = (r.w - 0.5) * 2.0 * cc_streetlife_YAW;
