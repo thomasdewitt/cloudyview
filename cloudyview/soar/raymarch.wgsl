@@ -3309,6 +3309,122 @@ fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
     return bit < 8u && ((cc.streets >> bit) & 1u) != 0u;
 }
 
+// --- The industrial belt's floodlights -----------------------------------
+//
+// The fringe is dark on purpose — a foil for the neon core — and what light
+// it has comes from a few floods: sodium or LED fixtures over a warehouse's
+// loading court, and poles at the corners of a yard. A lot's fixtures are a
+// pure function of its cell (the building box says which long wall faces
+// the court), so the ground pools here, the wall wash and the fixture
+// geometry in the industry component all agree on where each lamp is.
+// Pools are Gaussians on the ground, like the street lamps, so the far
+// field has an exact mean: sum(peak * 2 pi sigma^2) over the lot's area.
+
+const CITY_FLOOD_MAX: i32 = 4;
+const CITY_FLOOD_PEAK: f32 = 0.85;       // ground radiance at a pool centre
+const CITY_FLOOD_SIGMA_WALL: f32 = 7.0;  // pool radius, wall-mounted (m)
+const CITY_FLOOD_SIGMA_POLE: f32 = 10.0; // pool radius, pole-mounted (m)
+const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(1.0, 0.45, 0.14);
+const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.78, 0.88, 1.00);
+
+struct CityFlood {
+    on: bool,
+    head: vec3<f32>,   // the fixture (city frame, m)
+    aim: vec2<f32>,    // horizontal direction it throws its light (unit)
+    pool: vec2<f32>,   // centre of its pool on the ground
+    sigma: f32,
+    color: vec3<f32>,  // radiance at the pool centre
+}
+
+// Fixture k (0 .. CITY_FLOOD_MAX-1) of the lot this cell belongs to.
+fn city_flood(cc: CityCell, k: i32) -> CityFlood {
+    var f: CityFlood;
+    f.on = false;
+    f.head = vec3<f32>(0.0);
+    f.aim = vec2<f32>(1.0, 0.0);
+    f.pool = vec2<f32>(0.0);
+    f.sigma = 1.0;
+    f.color = vec3<f32>(0.0);
+    let fh = city_rand4(cc.seed ^ vec2<u32>(0x1f83d9abu, 0x5be0cd19u));
+    let kh = city_rand4(cc.seed ^ vec2<u32>(
+        0x9b05688cu * u32(k + 1), 0x510e527fu));
+    let tint = select(CITY_FLOOD_LED, CITY_FLOOD_SODIUM, fh.x < 0.55);
+    if (cc.land_use == CITY_USE_INDUSTRIAL) {
+        // Along the court wall: one slot per ~32 m, most of them lit.
+        let long_x = (cc.b1max.x - cc.b1min.x) >= (cc.b1max.y - cc.b1min.y);
+        var a0 = cc.b1min.y;
+        var a1 = cc.b1max.y;
+        var gap_lo = cc.b1min.x - cc.plot_min.x;
+        var gap_hi = cc.plot_max.x - cc.b1max.x;
+        if (long_x) {
+            a0 = cc.b1min.x;
+            a1 = cc.b1max.x;
+            gap_lo = cc.b1min.y - cc.plot_min.y;
+            gap_hi = cc.plot_max.y - cc.b1max.y;
+        }
+        let n = clamp(i32(floor((a1 - a0) / 32.0)), 1, CITY_FLOOD_MAX);
+        if (k >= n || kh.x > 0.72) {
+            return f;
+        }
+        let court_hi = gap_hi >= gap_lo;
+        let along = mix(a0, a1, (f32(k) + 0.5) / f32(n));
+        let z = min(cc.height - 1.2, 7.5);
+        if (long_x) {
+            let wall = select(cc.b1min.y, cc.b1max.y, court_hi);
+            f.aim = vec2<f32>(0.0, select(-1.0, 1.0, court_hi));
+            f.head = vec3<f32>(along, wall + 0.8 * f.aim.y, z);
+        } else {
+            let wall = select(cc.b1min.x, cc.b1max.x, court_hi);
+            f.aim = vec2<f32>(select(-1.0, 1.0, court_hi), 0.0);
+            f.head = vec3<f32>(wall + 0.8 * f.aim.x, along, z);
+        }
+        f.sigma = CITY_FLOOD_SIGMA_WALL;
+        f.pool = f.head.xy + f.aim * 5.0;
+    } else if (cc.land_use == CITY_USE_YARD) {
+        // Poles at two opposite corners of the plot, when the yard is lit
+        // at all; a third of yards are dark.
+        if (k >= 2 || fh.y < 0.33 || kh.x > 0.80) {
+            return f;
+        }
+        let diag = select(0, 1, fh.z < 0.5);
+        let corner = select(vec2<f32>(f32(diag), f32(1 - diag)),
+                            vec2<f32>(f32(1 - diag), f32(diag)), k == 1);
+        let at = mix(cc.plot_min + vec2<f32>(1.5),
+                     cc.plot_max - vec2<f32>(1.5), corner);
+        f.aim = normalize(vec2<f32>(1.0) - 2.0 * corner);
+        f.head = vec3<f32>(at, 10.0);
+        f.sigma = CITY_FLOOD_SIGMA_POLE;
+        f.pool = at + f.aim * 7.0;
+    } else {
+        return f;
+    }
+    f.on = true;
+    f.color = tint * (CITY_FLOOD_PEAK * (0.75 + 0.5 * kh.y));
+    return f;
+}
+
+// Flood light on the ground at p: the lot's pools, dissolving into their
+// exact mean over the lot as the pixel footprint outgrows a pool.
+fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
+    if (cc.land_use != CITY_USE_INDUSTRIAL && cc.land_use != CITY_USE_YARD) {
+        return vec3<f32>(0.0);
+    }
+    var near = vec3<f32>(0.0);
+    var flux = vec3<f32>(0.0);
+    for (var k: i32 = 0; k < CITY_FLOOD_MAX; k = k + 1) {
+        let f = city_flood(cc, k);
+        if (f.on) {
+            let d = p - f.pool;
+            near = near + f.color
+                * exp(-dot(d, d) / (2.0 * f.sigma * f.sigma));
+            flux = flux + f.color * (6.2831853 * f.sigma * f.sigma);
+        }
+    }
+    let area = (cc.lot_max.x - cc.lot_min.x) * (cc.lot_max.y - cc.lot_min.y);
+    let blend = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+    return mix(near, flux / area, blend);
+}
+
 // Surface radiance at a city hit, before fog. fp is the pixel footprint at
 // the hit (m/px): the analytic LOD that dissolves windows and lamp pools
 // into their means once they are sub-pixel, so the far city is smooth
@@ -3518,6 +3634,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         alb = CITY_SCRUB_ALBEDO;
     }
     return CITY_LAMP_COLOR * street
+           + city_flood_ground(cc, h.pos.xy, fp)
            + alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
 
