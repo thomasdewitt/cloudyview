@@ -118,7 +118,8 @@ def _sample_cells(texels, count_per_kind=300, seed=20260923):
     span = np.maximum((lot >> 4) & 3, (lot >> 6) & 3) + 1
     density = texels[..., 0]
     kinds = {
-        "tower lot": span >= 3,
+        "supertall lot": span == 4,
+        "tower lot": span == 3,
         "multi-cell lot": span == 2,
         "industrial": use == 1,
         "yard": use == 2,
@@ -320,3 +321,8 @@ def test_js_city_cell_matches_the_wgsl_on_the_gpu():
         assert (gpu[:, DISCRETE.index(field)] == 1).sum() > 20, field
     for tiers in (1, 2, 3):
         assert (gpu[:, DISCRETE.index("tiers")] == tiers).sum() > 20, tiers
+    # Supertall needles: a mast up to ~10 m thick, centred on the crown.
+    height = gpu[:, len(DISCRETE) + 3 * len(VEC3) + 2 * len(VEC2)]
+    needles = ((gpu[:, DISCRETE.index("arch")] == 3) & (height > 1200.0)
+               & (gpu[:, DISCRETE.index("has_mast")] == 1))
+    assert needles.sum() > 20

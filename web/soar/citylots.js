@@ -51,6 +51,7 @@ export const CITY_TOWER_H = 60.0;
 export const CITY_TOWER_SIDE_K = 4.2;
 export const CITY_TOWER_KNEE_H = 800.0;
 export const CITY_SLENDER_MAX = 20.0;
+export const CITY_SUPERTALL_H = 1200.0;
 export const CITY_USE_URBAN = 0;
 export const CITY_USE_INDUSTRIAL = 1;
 export const CITY_USE_YARD = 2;
@@ -369,7 +370,7 @@ export function cityCell(tile, cx, cy) {
       c.arch = 4;                   // spire crown
     }
   }
-  if (h > 600.0 && r4d[1] < (h > 1200.0 ? 0.85 : 0.65)) {
+  if (h > 600.0 && r4d[1] < (h > CITY_SUPERTALL_H ? 0.85 : 0.65)) {
     c.arch = r4d[1] < 0.30 ? 4 : 3;
   }
 
@@ -429,10 +430,12 @@ export function cityCell(tile, cx, cy) {
     c.has_frustum = true;
     c.fmin = [bc[0] - 0.5 * fw_shaft[0], bc[1] - 0.5 * fw_shaft[1], zp];
     c.fmax = [bc[0] + 0.5 * fw_shaft[0], bc[1] + 0.5 * fw_shaft[1], h];
-    c.fscale = 0.55 + 0.25 * r4d[2];
+    c.fscale = h > CITY_SUPERTALL_H ? 0.28 + 0.22 * r4d[2]
+                                    : 0.55 + 0.25 * r4d[2];
   } else if (c.arch === 4) {
     // A straight shaft to three quarters, then a steep spire.
-    const zs = storeyZ(ns * f(0.75));
+    const zs = storeyZ(ns * (h > CITY_SUPERTALL_H
+      ? f(f(0.55) + f(f(0.10) * r4d[3])) : f(0.75)));
     if (podium) {
       c.tiers = 2;
       c.b1min = vec3(pod_min, CITY_GROUND_Z);
@@ -539,18 +542,26 @@ export function cityCell(tile, cx, cy) {
   // (The WGSL's window style, house palette and occupancy draws go here.
   // None of them is geometry.)
 
-  // Roof furniture belongs on roofs.
-  if (h > CITY_MAST_MIN_H && r4b[2] < 0.65 && c.arch !== 4) {
+  // Roof furniture belongs on roofs; a supertall's tapered shaft always
+  // ends in a needle, scaled to the tower and centred on its crown.
+  const needle = c.arch === 3 && h > CITY_SUPERTALL_H;
+  if (h > CITY_MAST_MIN_H && (r4b[2] < 0.65 || needle) && c.arch !== 4) {
     c.has_mast = true;
-    const mast_h = f(12.0 + f(45.0 * r4b[3]));
-    const crown = c.arch === 3 ? c.fscale * 0.85 : 1.0;
-    const moff = [(r4c[3] - 0.5) * fw[0] * (0.4 * crown),
-                  (r4[0] - 0.5) * fw[1] * (0.4 * crown)];
+    let mast_h = f(12.0 + f(45.0 * r4b[3]));
+    let cross = CITY_MAST_CROSS;
+    let moff = [0.0, 0.0];
+    if (needle) {
+      mast_h = Math.min(f(h * f(f(0.06) + f(f(0.05) * r4b[3]))),
+                        f(f(CITY_SLAB_TOP - h) - 1.0));
+      cross = Math.max(CITY_MAST_CROSS, 0.03 * mast_h);
+    } else {
+      const crown = c.arch === 3 ? c.fscale * 0.85 : 1.0;
+      moff = [(r4c[3] - 0.5) * fw[0] * (0.4 * crown),
+              (r4[0] - 0.5) * fw[1] * (0.4 * crown)];
+    }
     const mc = [bc[0] + moff[0], bc[1] + moff[1]];
-    c.mast_min = [mc[0] - 0.5 * CITY_MAST_CROSS,
-                  mc[1] - 0.5 * CITY_MAST_CROSS, h];
-    c.mast_max = [mc[0] + 0.5 * CITY_MAST_CROSS,
-                  mc[1] + 0.5 * CITY_MAST_CROSS, f(h + mast_h)];
+    c.mast_min = [mc[0] - 0.5 * cross, mc[1] - 0.5 * cross, h];
+    c.mast_max = [mc[0] + 0.5 * cross, mc[1] + 0.5 * cross, f(h + mast_h)];
     c.top_z = f(h + mast_h);
   } else {
     c.top_z = h;
