@@ -31,6 +31,7 @@ from cloudyview.city_fif import (
     DEFAULT_N as CITY_N,
     generate_city_density,
 )
+from cloudyview.city_lots import bake_lots, pack_channels
 from cloudyview.ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
@@ -155,14 +156,27 @@ def export_city() -> dict:
     base[..., 0] = height
     base[..., 1] = rank
     base[..., 2] = 0.0
-    base[..., 3] = 1.0
+    base[..., 3] = 0.0
     mips = _build_city_mips(base)
+    # Lots, zoning and streets (cloudyview/city_lots.py), baked from the
+    # channels as the renderer will see them — float16, the stored precision
+    # — so a lot boundary is decided on exactly the numbers city_cell reads.
+    lot_word, street_word = bake_lots(
+        mips[0][..., 0].astype(np.float16).astype(np.float32),
+        mips[0][..., 1].astype(np.float16).astype(np.float32),
+    )[:2]
+    # b and a are packed integer words at mip 0 ONLY: every packed field is
+    # at most 12 bits, stored offset to [-2048, 2047] where float16 is exact
+    # (pack_channels asserts the round trip). Their coarse mips stay zero:
+    # an average of bitfields means nothing, and nothing samples it — the
+    # renderer reads b and a with textureLoad at mip 0 and filters only r.
+    mips[0][..., 2], mips[0][..., 3] = pack_channels(lot_word, street_word)
     for i, mip in enumerate(mips):
         (CITY_OUT / f"fif_mip{i}.bin").write_bytes(
             np.ascontiguousarray(mip, dtype=np.float16).tobytes()
         )
     meta = {
-        "schema": "cloudyview.web.city.v1",
+        "schema": "cloudyview.web.city.v2",
         "n": CITY_N,
         "cell_m": float(CITY_CELL_M),
         "mips": len(mips),
