@@ -51,7 +51,7 @@ import {
   renderStill, imageDataToPng, download, timestampedName,
   createOfflineTarget, beginOfflineRender, endOfflineRender, renderAccumulated,
   captureFrames,
-  readBack,
+  Readback,
 } from "./capture.js";
 import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
@@ -2301,7 +2301,7 @@ export class Viewer {
     this.ui.close();
     this.ui.showProgress("Choosing a codec…", 0);
 
-    let writer = null, target = null, saved = null;
+    let writer = null, target = null, readback = null, saved = null;
     try {
       writer = new VideoWriter({
         width: size[0], height: size[1], fps: this.videoFps,
@@ -2317,6 +2317,10 @@ export class Viewer {
       look.exposure = await this._meterCaptureExposure(look, size);
 
       target = createOfflineTarget(this.device, size, "soar-video");
+      // One staging buffer for the whole video, like the target: made per
+      // frame, their freed memory outran the driver's reclaiming on long
+      // videos (capture.js Readback).
+      readback = new Readback(this.device, size);
       saved = beginOfflineRender(this.renderer, look.preset);
       const framesPerVideoFrame = captureFrames(look.preset);
 
@@ -2352,8 +2356,7 @@ export class Viewer {
           { ...this._captureViewKwargs(look),
             camera: pose, frameIndex: i * 1024 },
           framesPerVideoFrame, overlays);
-        await writer.addFrame(
-          await readBack(this.device, target.texture, size[0], size[1]), i);
+        await writer.addFrame(await readback.read(target.texture), i);
 
         const done = (i + 1) / frames.length;
         const rate = (i + 1) / ((performance.now() - t0) / 1000);
@@ -2377,6 +2380,7 @@ export class Viewer {
         : `Could not make the video: ${err.message}`, 6);
     } finally {
       target?.texture.destroy();
+      readback?.destroy();
       // The renderer is gone when the session was disposed mid-render — the
       // abort flag is what woke this loop up. There is then no state left to
       // restore, and reaching for it would throw inside a finally.
