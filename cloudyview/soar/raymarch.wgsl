@@ -3356,10 +3356,14 @@ fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
 // forward from the wall foot, long along the wall and short out from it; a
 // pole flood throws an ellipse down its aim, centred well ahead of the pole.
 // Both are anisotropic Gaussians in the fixture's own (aim, across) frame,
-// so the far field keeps an exact mean: sum(peak * 2 pi sigma_a sigma_b),
-// halved for a wall pack, over the lot's area. Fixtures are spaced wider
-// than their pools, so a court reads as a run of lit patches with dark
-// between them, not as a lit floor.
+// and every aim is along a grid axis, so the far field keeps an exact mean:
+// each pool's integral over the ground the near field actually shows — the
+// lot's rectangle (a pool's tail past the lot edge is painted by nobody),
+// cut at the wall for a wall pack, which also keeps it off the warehouse
+// footprint — is a separable product of erf differences, and the mean is
+// their sum over the visible ground's area (the lot less the footprint).
+// Fixtures are spaced wider than their pools, so a court reads as a run of
+// lit patches with dark between them, not as a lit floor.
 //
 // Colour follows the lot, the way a site is fitted out in one go: sodium,
 // metal halide, cool LED or warm LED, with the odd fixture replaced by
@@ -3373,13 +3377,14 @@ const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(0.60, 0.27, 0.075);
 const CITY_FLOOD_HALIDE: vec3<f32> = vec3<f32>(0.42, 0.39, 0.30);
 const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.31, 0.37, 0.45);
 const CITY_FLOOD_LED_WARM: vec3<f32> = vec3<f32>(0.46, 0.36, 0.23);
-const CITY_FLOOD_WALL_OUT: f32 = 5.0;    // pool sigma out from the wall (m)
-const CITY_FLOOD_WALL_ALONG: f32 = 6.5;  // ... and along it
+const CITY_FLOOD_WALL_OUT: f32 = 7.0;    // pool sigma out from the wall (m)
+const CITY_FLOOD_WALL_ALONG: f32 = 7.0;  // ... and along it
 const CITY_FLOOD_WALL_SPACING: f32 = 30.0;
 const CITY_FLOOD_WALL_Z: f32 = 7.5;      // wall-pack mounting height
 const CITY_FLOOD_POLE_THROW: f32 = 9.0;  // pool sigma down the aim
 const CITY_FLOOD_POLE_SIDE: f32 = 5.5;   // ... and across it
 const CITY_FLOOD_POLE_REACH: f32 = 8.0;  // pool centre ahead of the pole
+const CITY_FLOOD_POLE_SLEW: f32 = 3.0;   // ... and at most this far aside
 const CITY_FLOOD_POLE_SPACING: f32 = 38.0;
 const CITY_FLOOD_POLE_INSET: f32 = 1.1;  // pole line inside the plot edge
 const CITY_FLOOD_POLE_H: f32 = 10.0;
@@ -3487,14 +3492,14 @@ fn city_flood(cc: CityCell, k: i32) -> CityFlood {
             at = vec2<f32>(select(lo.x, hi.x, side_hi), mix(lo.y, hi.y, s));
             inward = vec2<f32>(select(1.0, -1.0, side_hi), 0.0);
         }
-        // Heads are aimed by hand: up to 20 degrees off square.
-        let ang = 0.35 * (fract(kh.y * 7.31) - 0.5) * 2.0;
-        let ca = cos(ang);
-        let sa = sin(ang);
-        f.aim = vec2<f32>(ca * inward.x - sa * inward.y,
-                          sa * inward.x + ca * inward.y);
+        // Heads are aimed by hand: the pool lands a few metres to one side
+        // of square. The throw stays on the grid axis (a slewed pool, not a
+        // rotated one) so its integral over the lot stays separable.
+        let slew = CITY_FLOOD_POLE_SLEW * (2.0 * fract(kh.y * 7.31) - 1.0);
+        f.aim = inward;
         f.head = vec3<f32>(at, CITY_FLOOD_POLE_H);
-        f.pool = at + f.aim * CITY_FLOOD_POLE_REACH * size;
+        f.pool = at + inward * (CITY_FLOOD_POLE_REACH * size)
+                 + vec2<f32>(inward.y, inward.x) * slew;
         f.sigma = vec2<f32>(CITY_FLOOD_POLE_THROW, CITY_FLOOD_POLE_SIDE)
                   * size;
     } else {
@@ -3520,9 +3525,42 @@ fn city_flood_pool(f: CityFlood, p: vec2<f32>) -> f32 {
     return exp(-0.5 * (qa * qa + qb * qb));
 }
 
-// The integral of city_flood_pool over the ground (m^2).
-fn city_flood_area(f: CityFlood) -> f32 {
-    return select(6.2831853, 3.1415927, f.half) * f.sigma.x * f.sigma.y;
+// erf, Abramowitz & Stegun 7.1.26 (|error| < 1.5e-7). tests/test_city_floods.py
+// pins these coefficients and the integral below against brute force.
+fn city_erf(x: f32) -> f32 {
+    let a = abs(x);
+    let t = 1.0 / (1.0 + 0.3275911 * a);
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+               + t * (-1.453152027 + t * 1.061405429))));
+    return sign(x) * (1.0 - poly * exp(-a * a));
+}
+
+// The integral of exp(-x^2 / 2 sigma^2) over [x0, x1].
+fn city_gauss_int(x0: f32, x1: f32, sigma: f32) -> f32 {
+    let k = 0.70710678 / sigma;
+    return sigma * 1.2533141 * (city_erf(x1 * k) - city_erf(x0 * k));
+}
+
+// The integral of city_flood_pool over the rectangle [lo, hi] (m^2). The aim
+// is along x or y, so the pool is separable in world axes: along the aim the
+// wall-pack cut is the half-line a >= 0, across it the Gaussian is whole.
+fn city_flood_visible(f: CityFlood, lo: vec2<f32>, hi: vec2<f32>) -> f32 {
+    let rlo = lo - f.pool;
+    let rhi = hi - f.pool;
+    let along_x = abs(f.aim.x) > 0.5;
+    let s = select(f.aim.y, f.aim.x, along_x);
+    let u0 = select(rlo.y, rlo.x, along_x);
+    let u1 = select(rhi.y, rhi.x, along_x);
+    // In the aim's own sense: a = s u.
+    var a0 = select(-u1, u0, s > 0.0);
+    var a1 = select(-u0, u1, s > 0.0);
+    if (f.half) {
+        a0 = max(a0, 0.0);
+        a1 = max(a1, 0.0);
+    }
+    let b0 = select(rlo.x, rlo.y, along_x);
+    let b1 = select(rhi.x, rhi.y, along_x);
+    return city_gauss_int(a0, a1, f.sigma.x) * city_gauss_int(b0, b1, f.sigma.y);
 }
 
 // Flood light on the ground at p: the lot's pools, dissolving into their
@@ -3537,10 +3575,15 @@ fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
         let f = city_flood(cc, k);
         if (f.on) {
             near = near + f.color * city_flood_pool(f, p);
-            flux = flux + f.color * city_flood_area(f);
+            flux = flux + f.color * city_flood_visible(f, cc.lot_min,
+                                                       cc.lot_max);
         }
     }
-    let area = (cc.lot_max.x - cc.lot_min.x) * (cc.lot_max.y - cc.lot_min.y);
+    // The ground the near field shows: the lot, less the warehouse on it
+    // (b1 is zero-sized on a yard).
+    let foot = (cc.b1max.x - cc.b1min.x) * (cc.b1max.y - cc.b1min.y);
+    let area = (cc.lot_max.x - cc.lot_min.x) * (cc.lot_max.y - cc.lot_min.y)
+               - foot;
     let blend = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
     return mix(near, flux / area, blend);
 }
@@ -10600,7 +10643,7 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 //      m apart and 2.5-3.5 m tall, each a sloped sheet with a vertical glazed
 //      face, all facing one way; MONITOR (30%) — a raised clerestory strip
 //      down the long axis, glazed along both sides; FLAT (30%) — the core's
-//      own roof, carrying rows of translucent skylights. About half the
+//      own roof, carrying rows of translucent skylights. About a third of the
 //      buildings are working a night shift, and on those the glazing glows
 //      from the high-bays inside: the belt's signature from the air, stripes
 //      of cool or amber light ruled across dark roofs.
@@ -10675,19 +10718,29 @@ const cc_industry_ROOF_TOP: f32 = 3.6;        // tallest roof feature above h
 // A working night shift: the glazing is lit from the high-bays inside. Dim
 // against a lit window (3.5) — this is light seen through a dirty wired
 // pane from across a factory floor — but a whole roof of it.
-const cc_industry_NIGHT_SHIFT: f32 = 0.50;
-const cc_industry_GLAZE_RAD: f32 = 1.10;
-const cc_industry_BAY: f32 = 6.0;             // lighting zone along a ridge
-const cc_industry_BAY_LIT: f32 = 0.72;
-const cc_industry_MULL: f32 = 1.5;            // mullion pitch (m)
-const cc_industry_MULL_W: f32 = 0.10;
+const cc_industry_NIGHT_SHIFT: f32 = 0.38;
+const cc_industry_GLAZE_RAD: f32 = 0.12;
+// The high-bays behind the glass: a luminaire every LAMP_P along the ridge,
+// each a soft hot spot on the pane over a floor glow. Uniform glass at this
+// level read as grey sheet material, not as light.
+const cc_industry_LAMP_P: f32 = 6.0;
+const cc_industry_LAMP_SIG: f32 = 1.1;
+const cc_industry_LAMP_FLOOR: f32 = 0.15;
+// Its mean along the ridge, the Gaussian cut at +-P/2 by the next lamp's
+// cell: FLOOR + (1 - FLOOR) sqrt(2 pi) SIG / P erf(P / (2 sqrt(2) SIG)).
+const cc_industry_LAMP_MEAN: f32 = 0.5381;
+const cc_industry_BAY: f32 = 12.0;            // lighting zone along a ridge
+const cc_industry_BAY_LIT: f32 = 0.80;
+const cc_industry_MULL: f32 = 1.8;            // mullion pitch (m)
+const cc_industry_MULL_W: f32 = 0.14;
+const cc_industry_TRANSOM_W: f32 = 0.10;      // the bar across mid-pane
 const cc_industry_SILL: f32 = 0.35;           // flashing at a pane's foot
 const cc_industry_HEAD_BAND: f32 = 0.22;      // and its head
 // Glazing's mean emission over a face, as a fraction of GLAZE_RAD: lit bays
-// x mean bay level x the glass between the mullions and the flashing. Kept
-// as one function (cc_industry_glaze_mean) because the shader's far field
-// and the roof hook must agree on it exactly.
-const cc_industry_BAY_MEAN: f32 = 0.95;       // E[0.55 + 0.8 u] for u ~ U(0,1)
+// x mean bay level x the glass fraction of the framed face. Kept as one
+// function (cc_industry_glaze_mean) because the shader's far field and the
+// roof hook must agree on it exactly.
+const cc_industry_BAY_MEAN: f32 = 1.0;        // E[0.7 + 0.6 u] for u ~ U(0,1)
 // Tone-map compensation on the far-field mean, the correction the core
 // applies to its own window octaves: a mean taken in linear radiance ahead
 // of the Reinhard curve renders brighter than the pattern it replaces.
@@ -10706,7 +10759,7 @@ const cc_industry_SKY_L: f32 = 3.0;
 const cc_industry_SKY_PITCH: f32 = 6.0;
 const cc_industry_SKY_ROW: f32 = 10.0;
 const cc_industry_SKY_H: f32 = 0.32;
-const cc_industry_SKY_RAD: f32 = 0.55;
+const cc_industry_SKY_RAD: f32 = 0.35;
 const cc_industry_SKY_FP: f32 = 0.45;
 
 // --- flood fixtures ---------------------------------------------------------
@@ -10721,10 +10774,11 @@ const cc_industry_POLE_REACH: f32 = 0.35;     // head overhang past the pole
 // fraction of a pixel, so its box grows to a pixel and its emission drops by
 // the same area ratio — a far lamp is a steady dim point, never a strobe.
 const cc_industry_HEAD_WIDEN: f32 = 0.45;
+const cc_industry_HEAD_WIDEN_MAX: f32 = 1.0;
 // Wall wash: the scallop a wall-pack throws down the wall under it. Narrow
 // at the fixture, widening with depth; rises over the first half metre (the
 // housing shades the wall right behind it) and fades over WASH_FADE.
-const cc_industry_WASH_GAIN: f32 = 1.1;
+const cc_industry_WASH_GAIN: f32 = 0.6;
 const cc_industry_WASH_W0: f32 = 0.7;
 const cc_industry_WASH_W1: f32 = 0.45;
 const cc_industry_WASH_RISE: f32 = 0.5;
@@ -10732,7 +10786,9 @@ const cc_industry_WASH_FADE: f32 = 5.0;
 
 // --- props ------------------------------------------------------------------
 const cc_industry_PROP_TOP: f32 = 7.9;        // three containers high
-const cc_industry_YARD_TOP: f32 = 10.6;       // a yard's pole-top floods
+// A yard's tallest thing: a pole-top flood at its widest.
+const cc_industry_YARD_TOP: f32 = CITY_FLOOD_POLE_H + cc_industry_HEAD_WIDEN_MAX
+                                  + 0.1;
 const cc_industry_EDGE: f32 = 1.5;            // props stay this far inside
 const cc_industry_TIER: f32 = 2.59;           // ISO container height
 const cc_industry_BOX_L: f32 = 12.19;         // 40 ft
@@ -10832,10 +10888,10 @@ fn cc_industry_box(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
     return best;
 }
 
-// The pixel footprint at distance t (m/px), as the other components take it.
-fn cc_industry_fp(t: f32) -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-           * max(t, 0.0);
+// The pixel's angular size: the footprint at distance t is px * t (m/px),
+// the core's own pixel_angle.
+fn cc_industry_px() -> f32 {
+    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
 }
 
 // ============================================================================
@@ -10886,9 +10942,9 @@ fn cc_industry_roof_of(cc: CityCell) -> cc_industry_Roof {
     r.mhi = vec3<f32>(hi, cc.height + 2.6 + 0.9 * e.z);
     r.lit = e.w < cc_industry_NIGHT_SHIFT;
     let tc = fract(e.w * 17.3);
-    r.tint = select(select(vec3<f32>(1.00, 0.55, 0.22),     // sodium high-bay
-                           vec3<f32>(0.95, 0.93, 0.82), tc < 0.70),  // halide
-                    vec3<f32>(0.78, 0.88, 1.00), tc < 0.40);          // LED
+    r.tint = select(select(vec3<f32>(1.00, 0.52, 0.18),     // sodium high-bay
+                           vec3<f32>(1.00, 0.84, 0.58), tc < 0.70),  // halide
+                    vec3<f32>(0.72, 0.85, 1.00), tc < 0.30);          // LED
     return r;
 }
 
@@ -11014,7 +11070,7 @@ fn cc_industry_saw_trace(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
             // down-slope, against the facing); at the walk's start it is the
             // box face the ray entered by, if it entered by one rather than
             // by the cell's column boundary.
-            if (i > 0 || sb.x >= t0) {
+            if (i > 0 || sb.x > max(t0, 1e-3)) {
                 let q = o + t * dir;
                 var n = city_box_normal(q, bmin, bmax);
                 var kind = cc_industry_K_ROOF;
@@ -11052,7 +11108,13 @@ fn cc_industry_saw_trace(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 
 // The head box of fixture f: a wall-pack sits on f.head, 0.8 m off the wall;
 // a pole head overhangs its pole toward the aim. Half extents are (along the
-// aim, across it, vertical), widened toward a pixel as fp grows.
+// aim, across it, vertical), widened toward a pixel as the footprint grows —
+// the footprint AT THE HEAD, from the camera's distance to it, which is what
+// both the trace and the shader compute, so the box a ray met and the
+// dilution it is shaded with always agree. The widening stops at
+// HEAD_WIDEN_MAX, which keeps every head inside its own lot and inside the
+// trace's fixed z gates; past that (fp ~2.2 m/px) a lamp is a fixed-size
+// spark, as a real one is.
 fn cc_industry_head_c(cc: CityCell, f: CityFlood) -> vec3<f32> {
     if (cc.land_use == CITY_USE_YARD) {
         return f.head + vec3<f32>(f.aim * cc_industry_POLE_REACH, 0.0);
@@ -11060,14 +11122,18 @@ fn cc_industry_head_c(cc: CityCell, f: CityFlood) -> vec3<f32> {
     return f.head;
 }
 
-fn cc_industry_head_hw(cc: CityCell, fp: f32) -> vec3<f32> {
-    let real = select(cc_industry_HEAD_HW_WALL, cc_industry_HEAD_HW_POLE,
-                      cc.land_use == CITY_USE_YARD);
-    return max(real, vec3<f32>(cc_industry_HEAD_WIDEN * fp));
+fn cc_industry_head_real(cc: CityCell) -> vec3<f32> {
+    return select(cc_industry_HEAD_HW_WALL, cc_industry_HEAD_HW_POLE,
+                  cc.land_use == CITY_USE_YARD);
 }
 
-// World half extents of a head whose aim is `aim` (the yard's diagonal aim
-// is boxed by its larger axis — the housing is square-ish at that scale).
+fn cc_industry_head_hw(cc: CityCell, fp: f32) -> vec3<f32> {
+    return max(cc_industry_head_real(cc),
+               vec3<f32>(min(cc_industry_HEAD_WIDEN * fp,
+                             cc_industry_HEAD_WIDEN_MAX)));
+}
+
+// World half extents of a head whose aim is `aim` (along x or y).
 fn cc_industry_head_box_hw(hw: vec3<f32>, aim: vec2<f32>) -> vec3<f32> {
     let ax = abs(aim.x) >= abs(aim.y);
     return vec3<f32>(select(hw.y, hw.x, ax), select(hw.x, hw.y, ax), hw.z);
@@ -11075,41 +11141,40 @@ fn cc_industry_head_box_hw(hw: vec3<f32>, aim: vec2<f32>) -> vec3<f32> {
 
 fn cc_industry_fixtures(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
                         inv_dir: vec3<f32>, t0: f32, t1: f32, cc: CityCell,
-                        ci: vec2<i32>, fp: f32) -> CityHit {
+                        ci: vec2<i32>, px: f32) -> CityHit {
     var best = best_in;
     let yard = cc.land_use == CITY_USE_YARD;
-    let hw = cc_industry_head_hw(cc, fp);
-    // A runtime count keeps the loop rolled.
-    let nk = select(CITY_FLOOD_MAX, 2, yard);
+    // A runtime count (always CITY_FLOOD_MAX here: open land never gets this
+    // far) keeps the loop rolled.
+    let nk = select(CITY_FLOOD_MAX, 0, cc.land_use == CITY_USE_OPEN);
     for (var k: i32 = 0; k < nk; k = k + 1) {
         let f = city_flood(cc, k);
         if (!f.on) {
             continue;
         }
         let c = cc_industry_head_c(cc, f);
-        let bh = cc_industry_head_box_hw(hw, f.aim);
+        let fp = px * distance(o, c);
+        let bh = cc_industry_head_box_hw(cc_industry_head_hw(cc, fp), f.aim);
         best = cc_industry_box(best, o, dir, inv_dir, t0, t1, c - bh, c + bh,
                                cc_industry_K_HEAD, ci);
+        // The hardware: dark, 0.2 m, gone under a pixel past FINE_FP.
         if (fp < cc_industry_FINE_FP * 2.0) {
+            var lo = vec3<f32>(0.0);
+            var hi = vec3<f32>(0.0);
             if (yard) {
-                let ph = vec3<f32>(cc_industry_POLE_HW, cc_industry_POLE_HW,
-                                   0.0);
-                best = cc_industry_box(
-                    best, o, dir, inv_dir, t0, t1,
-                    vec3<f32>(f.head.xy, 0.0) - ph,
-                    vec3<f32>(f.head.xy, f.head.z - 0.1) + ph,
-                    cc_industry_K_STEEL, ci);
+                let ph = vec2<f32>(cc_industry_POLE_HW);
+                lo = vec3<f32>(f.head.xy - ph, 0.0);
+                hi = vec3<f32>(f.head.xy + ph, f.head.z - 0.1);
             } else {
                 // The bracket: from the wall out to the head's back.
                 let wall = f.head.xy - f.aim * 0.8;
                 let back = f.head.xy - f.aim * 0.2;
                 let lat = vec2<f32>(abs(f.aim.y), abs(f.aim.x)) * 0.04;
-                best = cc_industry_box(
-                    best, o, dir, inv_dir, t0, t1,
-                    vec3<f32>(min(wall, back) - lat, f.head.z + 0.05),
-                    vec3<f32>(max(wall, back) + lat, f.head.z + 0.13),
-                    cc_industry_K_STEEL, ci);
+                lo = vec3<f32>(min(wall, back) - lat, f.head.z + 0.05);
+                hi = vec3<f32>(max(wall, back) + lat, f.head.z + 0.13);
             }
+            best = cc_industry_box(best, o, dir, inv_dir, t0, t1, lo, hi,
+                                   cc_industry_K_STEEL, ci);
         }
     }
     return best;
@@ -11119,12 +11184,16 @@ fn cc_industry_fixtures(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // PROP LAYOUT
 // ============================================================================
 //
-// Grid i of the lot (i < cc_industry_N_GRIDS). Everything is sized from the
-// plot and the building, so a narrow court gets pallets, a deep one trailers
-// and a row of boxes along its far fence.
+// Grid i of the lot (i < cc_industry_N_GRIDS; -1 is a flat roof's skylights).
+// Everything is sized from the plot and the building, so a narrow court gets
+// pallets, a deep one trailers and a row of boxes along its far fence. No
+// two grids of a lot overlap: the shader finds a hit's slot by position.
 const cc_industry_N_GRIDS: i32 = 6;
 
 fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
+    if (i < 0) {
+        return cc_industry_sky_grid(cc);
+    }
     let l = cc_industry_lot(cc);
     let E = cc_industry_EDGE;
     let box_cell_l = cc_industry_BOX_L + 0.5;
@@ -11165,13 +11234,14 @@ fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
         }
         if (i == 1) {
             if (depth >= trl_c + 2.0 + 12.0) {
-                // A deep court: a line of boxes along its far fence,
-                // end to end, one or two high.
-                let n = i32(floor((l.pa.y - l.pa.x - 2.0 * E) / box_cell_l
+                // A deep court: a line of boxes along its far fence, end to
+                // end, one or two high — along the building's own run, so
+                // it never reaches into an end yard's grid.
+                let n = i32(floor((l.ba.y - l.ba.x) / box_cell_l
                                   * (0.5 + 0.35 * d.y)));
                 let c_lo = select(far + E, far - E - box_cell_w, l.court_hi);
                 return cc_industry_mk_grid(
-                    l, cc_industry_K_BOX, vec2<f32>(l.pa.x + E, c_lo),
+                    l, cc_industry_K_BOX, vec2<f32>(l.ba.x, c_lo),
                     vec2<f32>(box_cell_l, box_cell_w), vec2<i32>(n, 1),
                     box_obj, 0.0, 2.0 * cc_industry_TIER, 0.80, 2, 0, 22u);
             }
@@ -11235,8 +11305,9 @@ fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
             return cc_industry_no_grid();
         }
         if (i == 4) {
-            // A skip against the court's far edge, at the end away from the
-            // row of boxes.
+            // A skip against the court's far edge, at the end of the
+            // building's run away from the row of boxes (which stops short
+            // of it: that row covers at most 85% of a run of 130 m or more).
             let fits = depth >= trl_c + 2.0 + skip_cell.y + 2.0
                        || (!has_docks && depth >= skip_cell.y + 4.0);
             if (!fits || d.x > 0.55) {
@@ -11245,7 +11316,7 @@ fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
             let c_lo = select(far + E, far - E - skip_cell.y, l.court_hi);
             return cc_industry_mk_grid(
                 l, cc_industry_K_SKIP,
-                vec2<f32>(l.pa.y - E - skip_cell.x - 6.0 * d.y, c_lo),
+                vec2<f32>(l.ba.y - 2.0 - skip_cell.x - 6.0 * d.y, c_lo),
                 skip_cell, vec2<i32>(1, 1), skip_obj, 0.0,
                 cc_industry_SKIP_H, 1.0, 1, 0, 25u);
         }
@@ -11431,19 +11502,26 @@ fn cc_industry_fork_part(i: i32) -> cc_industry_Box {
     return cc_industry_Box(lo, hi);
 }
 
-// A semi-trailer, rear (doors) at -u: the box body on its deck, the tandem
-// bogie under the rear, the landing legs under the nose, the chassis rails
-// and the under-ride bar. Part 0-1 is the far-field set.
+// A semi-trailer, rear (doors) at -u: the box body on its deck; under the
+// rear the tandem bogie's two tyre banks with the axles between them; under
+// the nose the two landing legs; the chassis rails and the under-ride bar.
+// Under a trailer you see through to the yard beyond — legs and tyres, not
+// a skirt — and that gap is most of what says "trailer" rather than "box".
+// Parts 0-2 are the far-field set.
 fn cc_industry_trl_part(i: i32) -> cc_industry_Box {
     let hl = 0.5 * cc_industry_TRL_L;
     let hw = 0.5 * cc_industry_TRL_W;
+    let dk = cc_industry_TRL_DECK;
     var lo = vec3<f32>(0.0);
     var hi = vec3<f32>(0.0);
     switch i {
-        case 0: { lo = vec3<f32>(-hl, -hw, cc_industry_TRL_DECK); hi = vec3<f32>(hl, hw, cc_industry_TRL_H); }
-        case 1: { lo = vec3<f32>(-hl + 0.6, -hw + 0.03, 0.0); hi = vec3<f32>(-hl + 4.6, hw - 0.03, 1.05); }
-        case 2: { lo = vec3<f32>(hl - 3.4, -1.0, 0.0); hi = vec3<f32>(hl - 3.1, 1.0, cc_industry_TRL_DECK); }
-        case 3: { lo = vec3<f32>(-hl + 0.4, -0.55, 1.0); hi = vec3<f32>(hl - 0.3, 0.55, cc_industry_TRL_DECK); }
+        case 0: { lo = vec3<f32>(-hl, -hw, dk); hi = vec3<f32>(hl, hw, cc_industry_TRL_H); }
+        case 1: { lo = vec3<f32>(-hl + 0.6, 0.62, 0.0); hi = vec3<f32>(-hl + 4.6, hw - 0.03, 1.05); }
+        case 2: { lo = vec3<f32>(-hl + 0.6, -hw + 0.03, 0.0); hi = vec3<f32>(-hl + 4.6, -0.62, 1.05); }
+        case 3: { lo = vec3<f32>(hl - 3.40, 0.80, 0.0); hi = vec3<f32>(hl - 3.22, 0.98, dk); }
+        case 4: { lo = vec3<f32>(hl - 3.40, -0.98, 0.0); hi = vec3<f32>(hl - 3.22, -0.80, dk); }
+        case 5: { lo = vec3<f32>(-hl + 0.4, -0.55, 1.0); hi = vec3<f32>(hl - 0.3, 0.55, dk); }
+        case 6: { lo = vec3<f32>(-hl + 0.9, -0.62, 0.38); hi = vec3<f32>(-hl + 4.3, 0.62, 0.62); }
         default: { lo = vec3<f32>(-hl + 0.05, -hw + 0.1, 0.50); hi = vec3<f32>(-hl + 0.20, hw - 0.1, 0.68); }
     }
     return cc_industry_Box(lo, hi);
@@ -11463,7 +11541,7 @@ fn cc_industry_obj(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
     }
     if (g.kind == cc_industry_K_TRAILER || g.kind == cc_industry_K_FORK) {
         let is_fork = g.kind == cc_industry_K_FORK;
-        let n = select(select(2, 5, fp < cc_industry_PART_FP),
+        let n = select(select(3, 8, fp < cc_industry_PART_FP),
                        select(5, 15, fp < cc_industry_PART_FP), is_fork);
         var r = best;
         let c = vec3<f32>(ctr, g.lo.z);
@@ -11519,10 +11597,22 @@ fn cc_industry_obj(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // A grid against the segment: its bounding box, then a 2D DDA over the slots
 // the ray crosses in order. Objects stay inside their slots, so the first
 // slot that reports a hit holds the nearest one.
+//
+// LOD is decided here, at the footprint where the ray enters the grid — not
+// at the segment's start, which for the camera's own cell is the camera: a
+// skylight grid seen from 5 km straight down would otherwise be traced
+// skylight by skylight and shaded as their mean, and lose the coverage
+// factor twice. `fp0` (the footprint at t0, a lower bound) rejects the
+// small, dark props before their box is even tested.
 fn cc_industry_grid_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
                         inv_dir: vec3<f32>, t0: f32, t1: f32, cc: CityCell,
-                        g: cc_industry_Grid, ci: vec2<i32>, fp: f32)
+                        g: cc_industry_Grid, ci: vec2<i32>, px: f32, fp0: f32)
         -> CityHit {
+    let small = g.kind == cc_industry_K_PALLET || g.kind == cc_industry_K_REBAR
+                || g.kind == cc_industry_K_FORK;
+    if (small && fp0 >= cc_industry_FINE_FP) {
+        return best;
+    }
     let span = vec2<f32>(g.n) * g.cell;
     let gmin = g.lo;
     let gmax = vec3<f32>(g.lo.xy + span, g.lo.z + g.zmax);
@@ -11531,6 +11621,15 @@ fn cc_industry_grid_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
     let tb = min(min(sb.y, t1), best.t);
     if (sb.x > sb.y || ta > tb) {
         return best;
+    }
+    let fp = px * ta;
+    if (g.kind == cc_industry_K_SKY && fp >= cc_industry_SKY_FP) {
+        // Sub-pixel relief: the whole grid as one thin panel, shaded with
+        // the skylights' pattern dissolving into its mean
+        // (cc_industry_sky_shade).
+        return cc_industry_box(best, o, dir, inv_dir, t0, t1, gmin,
+                               vec3<f32>(gmax.xy, gmin.z + 0.02),
+                               cc_industry_K_SKY, ci);
     }
     let p = o + ta * dir - g.lo;
     var ij = clamp(vec2<i32>(floor(p.xy / g.cell)), vec2<i32>(0), g.n - 1);
@@ -11570,8 +11669,8 @@ fn cc_industry_grid_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 }
 
 // --- debris mounds (yards) ----------------------------------------------------
-// A mound is three overlapping half-ellipsoids — a main heap and two lobes
-// slumped off it — so the silhouette is lumpy rather than a dome.
+// A mound is three to five overlapping half-ellipsoids — a main heap and the
+// lobes slumped off it — so the silhouette is lumpy rather than a dome.
 struct cc_industry_Pile {
     ok: bool,
     c: vec2<f32>,
@@ -11605,7 +11704,7 @@ fn cc_industry_pile(cc: CityCell, i: i32) -> cc_industry_Pile {
     let d = cc_industry_draw(cc, 70u, i, 0);
     m.r = 2.0 + 2.5 * d.x;
     m.h = 0.8 + 1.4 * d.y;
-    let marg = 1.25 * m.r + cc_industry_EDGE;
+    let marg = 1.6 * m.r + cc_industry_EDGE;   // the lobes reach 1.55 r
     let a_hi = select(l.pa.y, l.pa.x + 0.40 * (l.pa.y - l.pa.x), refuse);
     let a = mix(l.pa.x + marg, max(a_hi - marg, l.pa.x + marg), d.z);
     let c = mix(l.pc.x + marg, l.pc.y - marg, d.w);
@@ -11617,13 +11716,18 @@ fn cc_industry_pile(cc: CityCell, i: i32) -> cc_industry_Pile {
 
 // Lobe j of a mound: (centre xy, horizontal radius, height).
 fn cc_industry_lobe(m: cc_industry_Pile, j: i32) -> vec4<f32> {
+    // The main heap is kept small enough that the lobes break its outline
+    // rather than hiding inside it.
     if (j == 0) {
-        return vec4<f32>(m.c, m.r, m.h);
+        return vec4<f32>(m.c, 0.8 * m.r, m.h);
     }
-    let ang = 6.2831853 * (m.seed.x + 0.37 * f32(j));
-    let off = vec2<f32>(cos(ang), sin(ang)) * m.r * (0.45 + 0.2 * m.seed.y);
-    let k = select(0.55, 0.62, j == 1);
-    return vec4<f32>(m.c + off, m.r * k, m.h * (k + 0.08 * m.seed.z));
+    let fj = f32(j);
+    let ang = 6.2831853 * m.seed.x + 1.7 * fj;
+    let off = vec2<f32>(cos(ang), sin(ang)) * m.r
+              * (0.50 + 0.40 * fract(m.seed.y + 0.31 * fj));
+    let k = 0.40 + 0.25 * fract(m.seed.z + 0.53 * fj);
+    return vec4<f32>(m.c + off, m.r * k,
+                     m.h * (0.55 + 0.30 * fract(m.seed.w + 0.71 * fj)));
 }
 
 fn cc_industry_piles_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
@@ -11636,7 +11740,8 @@ fn cc_industry_piles_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
         if (!m.ok) {
             continue;
         }
-        for (var j: i32 = 0; j < 3; j = j + 1) {
+        let nl = 3 + i32(m.seed.w * 2.999);
+        for (var j: i32 = 0; j < nl; j = j + 1) {
             let e = cc_industry_lobe(m, j);
             let rad = vec3<f32>(e.z, e.z, e.w);
             let qo = (o - vec3<f32>(e.xy, 0.0)) / rad;
@@ -11663,10 +11768,21 @@ fn cc_industry_piles_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
 }
 
 // --- the fence (yards) --------------------------------------------------------
-// Chain-link on galvanised posts, around 75% of yards, with a gate gap on a
-// street edge. The mesh itself is not drawn: it has no opaque surface to
-// shade, and seen through at night it is invisible against the dark yard.
-// Posts every 3 m and a top rail are what reads, and only close in.
+// Chain-link on galvanised posts, around 75% of yards, with a gate gap in
+// one side. The mesh itself is not drawn: it has no opaque surface to shade,
+// and seen through at night it is invisible against the dark yard. Posts
+// every 3 m and a top rail are what reads, and only close in.
+//
+// Written for the register file, not for generality: a first version found
+// its gate by probing the neighbouring lots' land use in a loop, broke the
+// rail in two around it and walked the posts over the ray's run, and that
+// body alone cost 12% on URBAN vistas that never reach it (inlined into the
+// core's DDA, its registers are paid by every city pixel; measured by
+// ablation, 2026-09-23). The gate is now a drawn side, the rail one box
+// whose hit is refused inside the gap, and the posts the two nearest the
+// ray's run through the fence line — a ray is inside that 8 cm slab for a
+// post pitch or less unless it runs down the fence, where the nearest post
+// hides the rest.
 fn cc_industry_fence_on(cc: CityCell) -> vec4<f32> {
     return cc_industry_draw(cc, 80u, 0, 0);
 }
@@ -11682,42 +11798,12 @@ fn cc_industry_fence_edge(cc: CityCell, e: i32) -> vec4<f32> {
     return vec4<f32>(hi.y, lo.x, hi.x, 1.0);
 }
 
-// The gate: the first street-bearing edge in a drawn order carries a gap.
-// Returns (edge, gap start, gap end) along that edge's run.
-fn cc_industry_gate(cc: CityCell, fo: vec4<f32>) -> vec3<f32> {
-    let e0 = i32(fo.y * 3.999);
-    for (var k: i32 = 0; k < 4; k = k + 1) {
-        let e = (e0 + k) & 3;
-        let ln = cc_industry_fence_edge(cc, e);
-        // The lot's street edges are the member cells' — test at the run's
-        // middle cell, which is the one the gate lands in.
-        let mid = 0.5 * (ln.y + ln.z);
-        let at = select(vec2<f32>(ln.x, mid), vec2<f32>(mid, ln.x),
-                        ln.w > 0.5);
-        let side_out = select(select(-1.0, 1.0, e == 1),
-                              select(-1.0, 1.0, e == 3), ln.w > 0.5);
-        let probe = at + side_out * select(vec2<f32>(8.0, 0.0),
-                                           vec2<f32>(0.0, 8.0), ln.w > 0.5);
-        let pc = vec2<i32>(floor(probe / u.ocean_params.x));
-        let tex = textureLoad(ocean_normals, city_tile_cell(pc), 0);
-        let use_out = i32((city_word(tex.a) >> 8u) & 3u);
-        if (use_out != CITY_USE_OPEN) {
-            let g0 = mix(ln.y + 2.0, ln.z - 2.0 - cc_industry_GATE_W, fo.z);
-            return vec3<f32>(f32(e), g0, g0 + cc_industry_GATE_W);
-        }
-    }
-    return vec3<f32>(-1.0, 0.0, 0.0);
-}
-
 fn cc_industry_fence_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
                          inv_dir: vec3<f32>, t0: f32, t1: f32, cc: CityCell,
                          ci: vec2<i32>) -> CityHit {
     var best = best_in;
     let fo = cc_industry_fence_on(cc);
-    if (fo.x >= cc_industry_FENCE_FRAC) {
-        return best;
-    }
-    let gate = cc_industry_gate(cc, fo);
+    let gate_e = i32(fo.y * 3.999);
     let pw = 0.04;       // post half-width
     let rw = 0.025;      // rail half-width
     let ne = select(0, 4, fo.x < cc_industry_FENCE_FRAC);
@@ -11730,49 +11816,46 @@ fn cc_industry_fence_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
         let hi = select(vec2<f32>(ln.x + pw, ln.z + pw),
                         vec2<f32>(ln.z + pw, ln.x + pw), along_x);
         let sb = city_box_hit(o, inv_dir, vec3<f32>(lo, 0.0),
-                              vec3<f32>(hi, cc_industry_FENCE_H));
+                              vec3<f32>(hi, cc_industry_FENCE_H + 0.06));
         let ta = max(max(sb.x, t0), 1e-3);
         let tb = min(min(sb.y, t1), best.t);
         if (sb.x > sb.y || ta > tb) {
             continue;
         }
-        let is_gate = f32(e) == gate.x;
-        // The top rail, broken at the gate.
-        let r0 = select(ln.y, gate.z, is_gate);
-        let rails = select(1, 2, is_gate);
-        for (var r: i32 = 0; r < rails; r = r + 1) {
-            let a0 = select(ln.y, r0, r == 1);
-            let a1 = select(select(ln.z, gate.y, is_gate), ln.z, r == 1);
-            let rlo = select(vec2<f32>(ln.x - rw, a0), vec2<f32>(a0, ln.x - rw),
-                             along_x);
-            let rhi = select(vec2<f32>(ln.x + rw, a1), vec2<f32>(a1, ln.x + rw),
-                             along_x);
-            best = cc_industry_box(
-                best, o, dir, inv_dir, t0, t1,
-                vec3<f32>(rlo, cc_industry_FENCE_H - 0.05),
-                vec3<f32>(rhi, cc_industry_FENCE_H), cc_industry_K_FENCE, ci);
-        }
-        // Posts on a 3 m lattice from the run's start, over the run of the
-        // line the ray spends inside the slab (a post or two, unless the ray
-        // grazes down the fence).
-        let pa = o + ta * dir;
-        let pb = o + tb * dir;
-        let sa = select(pa.y, pa.x, along_x) - ln.y;
-        let sbb = select(pb.y, pb.x, along_x) - ln.y;
-        let k0 = i32(floor(min(sa, sbb) / cc_industry_FENCE_POST + 0.5));
-        let k1 = i32(floor(max(sa, sbb) / cc_industry_FENCE_POST + 0.5));
-        let kmax = i32(floor((ln.z - ln.y) / cc_industry_FENCE_POST));
-        for (var k: i32 = max(k0, 0); k <= min(k1, kmax); k = k + 1) {
-            let s = ln.y + f32(k) * cc_industry_FENCE_POST;
-            if (is_gate && s > gate.y && s < gate.z) {
-                continue;
-            }
-            let c = select(vec2<f32>(ln.x, s), vec2<f32>(s, ln.x), along_x);
-            best = cc_industry_box(
-                best, o, dir, inv_dir, t0, t1,
+        let g0 = select(1e30, mix(ln.y + 2.0, ln.z - 2.0 - cc_industry_GATE_W,
+                                  fo.z), e == gate_e);
+        var cand = best;
+        // The top rail.
+        let rlo = select(vec2<f32>(ln.x - rw, ln.y), vec2<f32>(ln.y, ln.x - rw),
+                         along_x);
+        let rhi = select(vec2<f32>(ln.x + rw, ln.z), vec2<f32>(ln.z, ln.x + rw),
+                         along_x);
+        cand = cc_industry_box(cand, o, dir, inv_dir, t0, t1,
+                               vec3<f32>(rlo, cc_industry_FENCE_H - 0.05),
+                               vec3<f32>(rhi, cc_industry_FENCE_H),
+                               cc_industry_K_FENCE, ci);
+        // The two posts nearest the ray's entry and exit of the slab.
+        let sa = select((o + ta * dir).y, (o + ta * dir).x, along_x) - ln.y;
+        let se = select((o + tb * dir).y, (o + tb * dir).x, along_x) - ln.y;
+        let kmax = floor((ln.z - ln.y) / cc_industry_FENCE_POST);
+        for (var j: i32 = 0; j < 2; j = j + 1) {
+            let k = clamp(round(select(se, sa, j == 0)
+                                / cc_industry_FENCE_POST), 0.0, kmax);
+            let c = select(vec2<f32>(ln.x, ln.y + k * cc_industry_FENCE_POST),
+                           vec2<f32>(ln.y + k * cc_industry_FENCE_POST, ln.x),
+                           along_x);
+            cand = cc_industry_box(
+                cand, o, dir, inv_dir, t0, t1,
                 vec3<f32>(c - vec2<f32>(pw), 0.0),
                 vec3<f32>(c + vec2<f32>(pw), cc_industry_FENCE_H + 0.06),
                 cc_industry_K_FENCE, ci);
+        }
+        // Nothing stands in the gate.
+        if (cand.hit && cand.t < best.t) {
+            let s = select(cand.pos.y, cand.pos.x, along_x);
+            if (s < g0 || s > g0 + cc_industry_GATE_W) {
+                best = cand;
+            }
         }
     }
     return best;
@@ -11801,11 +11884,19 @@ fn cc_industry_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (z_lo > top) {
         return best;
     }
-    let fp = cc_industry_fp(t0);
+    // LOD decisions take the footprint at the thing they decide about (see
+    // cc_industry_grid_hit, cc_industry_fixtures); fp at the segment's start
+    // is only a lower bound, good for rejecting whole families of small
+    // props at once.
+    let px = cc_industry_px();
+    let fp0 = px * max(t0, 0.0);
 
-    // Roofs.
+    // Roofs: the sawtooth and the clerestory here; a flat roof's skylights
+    // are a grid, and go through the grid loop below as grid -1.
+    var roof_kind = 0;
     if (ind && z_hi >= cc.height - 0.1) {
         let r = cc_industry_roof_of(cc);
+        roof_kind = r.kind;
         if (r.kind == 1) {
             best = cc_industry_saw_trace(best, o, dir, inv_dir, t0, t1, cc, r,
                                          ci);
@@ -11821,53 +11912,38 @@ fn cc_industry_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                                select(cc_industry_K_ROOF, cc_industry_K_GLAZE,
                                       glazed), ci);
             }
-        } else if (z_lo <= cc.height + cc_industry_SKY_H) {
-            let g = cc_industry_sky_grid(cc);
-            if (g.ok) {
-                if (fp < cc_industry_SKY_FP) {
-                    best = cc_industry_grid_hit(best, o, dir, inv_dir, t0, t1,
-                                                cc, g, ci, fp);
-                } else {
-                    // Sub-pixel relief: the whole grid as one thin panel,
-                    // shaded with the skylights' mean (cc_industry_sky_shade).
-                    best = cc_industry_box(
-                        best, o, dir, inv_dir, t0, t1, g.lo,
-                        vec3<f32>(g.lo.xy + vec2<f32>(g.n) * g.cell,
-                                  g.lo.z + 0.02),
-                        cc_industry_K_SKY, ci);
-                }
-            }
         }
     }
 
     // Flood fixtures: a wall-pack band on a warehouse, the poles in a yard.
-    let fx_lo = select(0.0, 7.5 - 0.6, ind);
-    if (z_hi >= fx_lo && z_lo <= select(10.5, 8.2, ind)) {
-        best = cc_industry_fixtures(best, o, dir, inv_dir, t0, t1, cc, ci, fp);
+    let fx_lo = select(0.0, CITY_FLOOD_WALL_Z - cc_industry_HEAD_WIDEN_MAX
+                            - 0.1, ind);
+    let fx_hi = select(cc_industry_YARD_TOP,
+                       CITY_FLOOD_WALL_Z + cc_industry_HEAD_WIDEN_MAX + 0.2,
+                       ind);
+    if (z_hi >= fx_lo && z_lo <= fx_hi) {
+        best = cc_industry_fixtures(best, o, dir, inv_dir, t0, t1, cc, ci, px);
     }
 
-    // Ground props.
-    if (z_lo <= cc_industry_PROP_TOP) {
-        let ng = select(5, cc_industry_N_GRIDS, ind);
-        for (var i: i32 = 0; i < ng; i = i + 1) {
-            let g = cc_industry_grid(cc, i);
-            if (!g.ok) {
-                continue;
-            }
-            let small = g.kind == cc_industry_K_PALLET
-                || g.kind == cc_industry_K_REBAR
-                || g.kind == cc_industry_K_FORK;
-            if (small && fp >= cc_industry_FINE_FP) {
-                continue;
-            }
+    // The grids: -1 is a flat roof's skylights, 0.. the ground props. One
+    // loop, one call site, so the per-object detail is inlined once.
+    let sky = ind && roof_kind == 0 && z_hi >= cc.height - 0.1
+              && z_lo <= cc.height + cc_industry_SKY_H;
+    let ground = z_lo <= cc_industry_PROP_TOP;
+    let g_first = select(0, -1, sky);
+    let g_end = select(0, select(5, cc_industry_N_GRIDS, ind), ground);
+    for (var i: i32 = g_first; i < g_end; i = i + 1) {
+        let g = cc_industry_grid(cc, i);
+        if (g.ok) {
             best = cc_industry_grid_hit(best, o, dir, inv_dir, t0, t1, cc, g,
-                                        ci, fp);
+                                        ci, px, fp0);
         }
-        if (!ind && z_lo <= 2.4) {
+    }
+    if (ground && !ind) {
+        if (z_lo <= 2.4) {
             best = cc_industry_piles_hit(best, o, dir, t0, t1, cc, ci);
         }
-        if (!ind && fp < cc_industry_FINE_FP
-            && z_lo <= cc_industry_FENCE_H + 0.1) {
+        if (fp0 < cc_industry_FINE_FP && z_lo <= cc_industry_FENCE_H + 0.1) {
             best = cc_industry_fence_hit(best, o, dir, inv_dir, t0, t1, cc,
                                          ci);
         }
@@ -11937,10 +12013,17 @@ fn cc_industry_glaze_mean(r: cc_industry_Roof, hgt: f32) -> vec3<f32> {
     if (!r.lit) {
         return vec3<f32>(0.0);
     }
-    let glass = max(hgt - cc_industry_SILL - cc_industry_HEAD_BAND, 0.0) / hgt;
     return r.tint * (cc_industry_GLAZE_RAD * cc_industry_BAY_LIT
-                     * cc_industry_BAY_MEAN
-                     * (1.0 - cc_industry_MULL_W / cc_industry_MULL) * glass);
+                     * cc_industry_BAY_MEAN * cc_industry_LAMP_MEAN
+                     * cc_industry_glass_frac(hgt));
+}
+
+// The fraction of a glazed face that is glass: the band between the sill and
+// head flashing, less a transom across it and the mullions down it.
+fn cc_industry_glass_frac(hgt: f32) -> f32 {
+    let pane = max(hgt - cc_industry_SILL - cc_industry_HEAD_BAND, 0.0);
+    return (pane - cc_industry_TRANSOM_W) / hgt
+           * (1.0 - cc_industry_MULL_W / cc_industry_MULL);
 }
 
 fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
@@ -11959,16 +12042,31 @@ fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     let face_id = i32(round(dot(h.pos.xy, nh) * 0.5));
     let bay = i32(floor(uc / cc_industry_BAY));
     let dl = cc_industry_draw(cc, 14u, face_id, bay);
-    let bay_on = select(0.0, 0.55 + 0.8 * dl.y, dl.x < cc_industry_BAY_LIT);
+    let bay_on = select(0.0, 0.7 + 0.6 * dl.y, dl.x < cc_industry_BAY_LIT);
+    // The frame, as it was built: flashing bands, a transom, mullions. Each
+    // goes to its own mean as it goes sub-pixel, so what is left at range is
+    // exactly cc_industry_glass_frac.
+    let mid = 0.5 * (cc_industry_SILL + hgt - cc_industry_HEAD_BAND);
     let band = select(0.0, 1.0,
-                      v > cc_industry_SILL && v < hgt - cc_industry_HEAD_BAND);
+                      v > cc_industry_SILL && v < hgt - cc_industry_HEAD_BAND
+                      && abs(v - mid) > 0.5 * cc_industry_TRANSOM_W);
+    let band_k = cc_industry_band(
+        band, cc_industry_glass_frac(hgt)
+              / (1.0 - cc_industry_MULL_W / cc_industry_MULL),
+        cc_industry_TRANSOM_W, fp);
     let mull = select(1.0, 0.0,
                       fract(uc / cc_industry_MULL)
                       < cc_industry_MULL_W / cc_industry_MULL);
     let mull_k = cc_industry_band(mull,
                                   1.0 - cc_industry_MULL_W / cc_industry_MULL,
                                   cc_industry_MULL_W, fp);
-    let near = r.tint * (cc_industry_GLAZE_RAD * bay_on * band * mull_k);
+    let dq = (fract(uc / cc_industry_LAMP_P) - 0.5) * cc_industry_LAMP_P;
+    let spot = cc_industry_LAMP_FLOOR + (1.0 - cc_industry_LAMP_FLOOR)
+        * exp(-0.5 * dq * dq / (cc_industry_LAMP_SIG * cc_industry_LAMP_SIG));
+    let spot_k = cc_industry_band(spot, cc_industry_LAMP_MEAN,
+                                  cc_industry_LAMP_SIG, fp);
+    let near = r.tint * (cc_industry_GLAZE_RAD * bay_on * band_k * mull_k
+                         * spot_k);
     let far = cc_industry_glaze_mean(r, hgt) * cc_industry_GLAZE_MEAN_COMP;
     let k = smoothstep(cc_industry_GLAZE_LOD_START, cc_industry_GLAZE_LOD_FULL,
                        fp);
@@ -12025,7 +12123,7 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     }
     let cover = (g.obj.x * g.obj.y) / (g.cell.x * g.cell.y);
     let mean = cc_industry_sky_mean(cc, g, r) * cc_industry_GLAZE_MEAN_COMP
-               + cc_industry_ROOF_ALB * light * (1.0 - 0.6 * cover);
+               + light * (cc_industry_ROOF_ALB * (1.0 - cover) + 0.25 * cover);
     return mix(pat, mean, smoothstep(1.0, 4.0, fp));
 }
 
@@ -12037,7 +12135,8 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 //
 // "Drawn" is the core's own test: props run for a cell whose ray segment
 // starts inside CITY_PROP_RANGE, and that start is where the ray enters the
-// hit cell's column — recomputed here from the camera, since the hook is
+// hit cell's column, or enters the city slab from above if that is later
+// (city_trace's t_cur) — recomputed here from the camera, since the hook is
 // not handed the ray.
 //
 // The sawtooth mean is view-dependent, and exactly so. In the tooth's own
@@ -12067,7 +12166,11 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32) -> vec3<f32> {
                         select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
     let cmin = vec3<f32>(vec2<f32>(h.cell) * cell, -1e6);
     let col = city_box_hit(o, inv, cmin, cmin + vec3<f32>(cell, cell, 2e6));
-    if (max(col.x, 0.0) < CITY_PROP_RANGE) {
+    var t_slab = 0.0;
+    if (o.z > CITY_SLAB_TOP) {
+        t_slab = (CITY_SLAB_TOP - o.z) * inv.z;
+    }
+    if (max(col.x, t_slab) < CITY_PROP_RANGE) {
         return vec3<f32>(0.0);
     }
     let dz = max(abs(dir.z), 1e-3);
@@ -12086,7 +12189,11 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32) -> vec3<f32> {
         let d_c = abs(select(dir.x, dir.y, long_x));
         let hm = r.mhi.z - cc.height;
         let area = (cc.b1max.x - cc.b1min.x) * (cc.b1max.y - cc.b1min.y);
-        let frac = min(len * hm * d_c / (dz * area), 1.0);
+        // Unlike a sawtooth's, a lone clerestory face has no next tooth to
+        // hide it, and its projection can outgrow the roof it is averaged
+        // over; the cap only stops a grazing ray from turning a sliver of
+        // roof into a searchlight.
+        let frac = min(len * hm * d_c / (dz * area), 3.0);
         return cc_industry_glaze_mean(r, hm)
                * (frac * cc_industry_GLAZE_MEAN_COMP);
     }
@@ -12121,11 +12228,12 @@ fn cc_industry_nearest_flood(cc: CityCell, p: vec3<f32>) -> CityFlood {
     return best;
 }
 
-fn cc_industry_head_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
+fn cc_industry_head_shade(h: CityHit, cc: CityCell) -> vec3<f32> {
     let f = cc_industry_nearest_flood(cc, h.pos);
     let c = cc_industry_head_c(cc, f);
-    let real = select(cc_industry_HEAD_HW_WALL, cc_industry_HEAD_HW_POLE,
-                      cc.land_use == CITY_USE_YARD);
+    // The footprint at the head, exactly as the trace sized the box.
+    let fp = cc_industry_px() * distance(city_camera_origin(), c);
+    let real = cc_industry_head_real(cc);
     let hw = cc_industry_head_hw(cc, fp);
     // The lens: the underside, and the lower half of the face toward the
     // aim — a flood is tilted down into its pool. Housing everywhere else.
@@ -12135,10 +12243,13 @@ fn cc_industry_head_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
                             / max(max(f.color.r, f.color.g), f.color.b));
     let housing = 0.06 * cc_industry_fill(h.pos) + 0.02 * f.color;
     let near = select(housing, e_lens, lens);
-    // Widened past a pixel: the whole box glows at the lens's mean over
-    // the housing (about half of it seen), diluted by the area it grew.
-    let dilute = (real.x * real.y) / (hw.x * hw.y);
-    let far = e_lens * (0.5 * dilute);
+    // Widened toward a pixel: the whole box glows at the lens's mean over
+    // the housing (about half of what is seen), diluted by the area it grew
+    // — the sum of its three face areas, so the dilution holds from any
+    // side.
+    let a_real = real.x * real.y + real.y * real.z + real.x * real.z;
+    let a_wide = hw.x * hw.y + hw.y * hw.z + hw.x * hw.z;
+    let far = e_lens * (0.5 * a_real / a_wide);
     return mix(near, far, smoothstep(0.6 * real.x / cc_industry_HEAD_WIDEN,
                                      real.x / cc_industry_HEAD_WIDEN, fp));
 }
@@ -12195,38 +12306,47 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
 // PROP SHADING
 // ============================================================================
 
-// The grid of `kind` holding world point p, and its slot there. Re-derived
-// from the lot, so nothing is smuggled through CityHit.
+// The object a hit landed on: its grid's slot, re-derived from the lot so
+// nothing is smuggled through CityHit. A grid of the right kind must hold a
+// filled slot whose object contains the point — grids may share ground (a
+// forklift works an empty dock slot), objects never do. The dispatcher
+// finds it once and hands it to whichever shader needs it.
 struct cc_industry_Slot {
     ok: bool,
-    g: cc_industry_Grid,
-    ij: vec2<i32>,
     ctr: vec2<f32>,
     d: vec4<f32>,
+    obj: vec2<f32>,
+    front: i32,
 }
 
 fn cc_industry_find(cc: CityCell, p: vec3<f32>, kind: i32)
         -> cc_industry_Slot {
     var s: cc_industry_Slot;
     s.ok = false;
-    s.ij = vec2<i32>(0);
     s.ctr = p.xy;
     s.d = vec4<f32>(0.0);
-    s.g = cc_industry_no_grid();
-    for (var i: i32 = 0; i < cc_industry_N_GRIDS; i = i + 1) {
+    s.obj = vec2<f32>(1.0);
+    s.front = 0;
+    let ng = select(0, cc_industry_N_GRIDS,
+                    cc.land_use == CITY_USE_INDUSTRIAL
+                    || cc.land_use == CITY_USE_YARD);
+    for (var i: i32 = 0; i < ng; i = i + 1) {
         let g = cc_industry_grid(cc, i);
         if (!g.ok || g.kind != kind) {
             continue;
         }
         let rel = p.xy - g.lo.xy;
-        let span = vec2<f32>(g.n) * g.cell;
-        if (all(rel > vec2<f32>(-0.05)) && all(rel < span + 0.05)) {
+        let ij = clamp(vec2<i32>(floor(rel / g.cell)), vec2<i32>(0), g.n - 1);
+        let ctr = g.lo.xy + (vec2<f32>(ij) + 0.5) * g.cell;
+        let d = cc_industry_slot_draw(cc, g, ij);
+        let hgt = cc_industry_slot_h(g, d);
+        if (hgt > 0.0 && all(abs(p.xy - ctr) < 0.5 * g.obj + 0.05)
+            && p.z < g.lo.z + hgt + 0.05) {
             s.ok = true;
-            s.g = g;
-            s.ij = clamp(vec2<i32>(floor(rel / g.cell)), vec2<i32>(0),
-                         g.n - 1);
-            s.ctr = g.lo.xy + (vec2<f32>(s.ij) + 0.5) * g.cell;
-            s.d = cc_industry_slot_draw(cc, g, s.ij);
+            s.ctr = ctr;
+            s.d = d;
+            s.obj = g.obj;
+            s.front = g.front;
             return s;
         }
     }
@@ -12245,13 +12365,13 @@ fn cc_industry_box_color(x: f32) -> vec3<f32> {
     return vec3<f32>(0.20, 0.11, 0.06);
 }
 
-fn cc_industry_container_shade(h: CityHit, cc: CityCell, fp: f32)
+fn cc_industry_container_shade(h: CityHit, cc: CityCell,
+        s: cc_industry_Slot, fp: f32)
         -> vec3<f32> {
-    let s = cc_industry_find(cc, h.pos, cc_industry_K_BOX);
     let tier = floor(max(h.pos.z - 1e-3, 0.0) / cc_industry_TIER);
     let hc = fract(s.d.w * 7.31 + tier * 0.618);
     let col = cc_industry_box_color(hc);
-    let long_x = s.g.obj.x > s.g.obj.y;
+    let long_x = s.obj.x > s.obj.y;
     let lu = select(h.pos.y - s.ctr.y, h.pos.x - s.ctr.x, long_x);
     let lv = select(h.pos.x - s.ctr.x, h.pos.y - s.ctr.y, long_x);
     let zt = h.pos.z - tier * cc_industry_TIER;
@@ -12288,9 +12408,9 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell, fp: f32)
     return cc_industry_lit(cc, h.pos, h.normal, col * m);
 }
 
-fn cc_industry_trailer_shade(h: CityHit, cc: CityCell, fp: f32)
+fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
+        s: cc_industry_Slot, fp: f32)
         -> vec3<f32> {
-    let s = cc_industry_find(cc, h.pos, cc_industry_K_TRAILER);
     if (h.pos.z < cc_industry_TRL_DECK - 0.01) {
         // Running gear: tyres, legs, rails — near-black.
         return cc_industry_lit(cc, h.pos, h.normal, vec3<f32>(0.03));
@@ -12300,7 +12420,7 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell, fp: f32)
     if (s.d.z > 0.75) { col = vec3<f32>(0.07, 0.12, 0.26); }
     if (s.d.z > 0.85) { col = vec3<f32>(0.28, 0.06, 0.05); }
     if (s.d.z > 0.95) { col = vec3<f32>(0.08, 0.18, 0.10); }
-    let fwd = cc_industry_fwd(s.g.front);
+    let fwd = cc_industry_fwd(s.front);
     let u = dot(h.pos.xy - s.ctr, fwd);
     let z = h.pos.z;
     var m = 1.0;
@@ -12322,8 +12442,8 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell, fp: f32)
     return cc_industry_lit(cc, h.pos, h.normal, col * m);
 }
 
-fn cc_industry_pallet_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
-    let s = cc_industry_find(cc, h.pos, cc_industry_K_PALLET);
+fn cc_industry_pallet_shade(h: CityHit, cc: CityCell,
+        s: cc_industry_Slot, fp: f32) -> vec3<f32> {
     let wood = vec3<f32>(0.34, 0.27, 0.18) * (0.7 + 0.5 * s.d.z);
     var m = 1.0;
     if (abs(h.normal.z) < 0.5) {
@@ -12332,7 +12452,7 @@ fn cc_industry_pallet_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
         let fz = fract(h.pos.z / cc_industry_PALLET_H);
         let lat = select(h.pos.x - s.ctr.x, h.pos.y - s.ctr.y,
                          abs(h.normal.x) > 0.5);
-        let half_w = 0.5 * select(s.g.obj.x, s.g.obj.y,
+        let half_w = 0.5 * select(s.obj.x, s.obj.y,
                                   abs(h.normal.x) > 0.5);
         let q = abs(lat) / half_w;
         let block = q > 0.84 || q < 0.12;
@@ -12342,11 +12462,11 @@ fn cc_industry_pallet_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     return cc_industry_lit(cc, h.pos, h.normal, wood * m);
 }
 
-fn cc_industry_rebar_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
-    let s = cc_industry_find(cc, h.pos, cc_industry_K_REBAR);
+fn cc_industry_rebar_shade(h: CityHit, cc: CityCell,
+        s: cc_industry_Slot, fp: f32) -> vec3<f32> {
     let rust = vec3<f32>(0.20, 0.09, 0.05) * (0.8 + 0.4 * s.d.z);
     // Bars run along the bundle's long axis; across it, the bar pitch.
-    let long_x = s.g.obj.x > s.g.obj.y;
+    let long_x = s.obj.x > s.obj.y;
     let lat = select(h.pos.x, h.pos.y, long_x);
     let along_n = abs(select(h.normal.y, h.normal.x, long_x)) > 0.5;
     var p = 0.75 + 0.5 * (0.5 + 0.5 * cos(6.2831853 * lat / 0.032));
@@ -12359,8 +12479,8 @@ fn cc_industry_rebar_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     return cc_industry_lit(cc, h.pos, h.normal, rust * m);
 }
 
-fn cc_industry_skip_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
-    let s = cc_industry_find(cc, h.pos, cc_industry_K_SKIP);
+fn cc_industry_skip_shade(h: CityHit, cc: CityCell,
+        s: cc_industry_Slot, fp: f32) -> vec3<f32> {
     var col = vec3<f32>(0.07, 0.16, 0.09);
     if (s.d.w > 0.45) { col = vec3<f32>(0.38, 0.26, 0.03); }
     if (s.d.w > 0.75) { col = vec3<f32>(0.25, 0.07, 0.04); }
@@ -12372,27 +12492,54 @@ fn cc_industry_skip_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     return cc_industry_lit(cc, h.pos, h.normal, col * m);
 }
 
-// Refuse and rubble share one texture: a lattice of fragments, each its own
-// material — plaster, timber, dark wrap, concrete — with a tilted facet.
+// Refuse and rubble share one texture: irregular fragments — the cells of a
+// Voronoi lattice, so chunks are polygons, not tiles — each its own material
+// (soil, broken concrete, brick, a dark void, or the heap's own tint: timber
+// and plaster in a skip) on its own tilted facet, with a dark crack where two
+// fragments meet. The lattice is taken in a plane sheared by height so a
+// heap's flanks are not stretched. A first cut on a square lattice read as a
+// quilted dome; one spanning albedo 0.04 to 0.26 read as a checkerboard.
 fn cc_industry_rubble(h: CityHit, cc: CityCell, fp: f32, cell: f32,
                       tint: vec3<f32>) -> vec3<f32> {
-    let q = floor(h.pos.xy / cell + vec2<f32>(0.0, h.pos.z / cell));
-    let r = hash22(q);
-    let alb_frag = select(select(select(vec3<f32>(0.04),
-                                        vec3<f32>(0.26, 0.24, 0.21),
-                                        r.x < 0.75),
-                                 vec3<f32>(0.22, 0.15, 0.08), r.x < 0.45),
-                          tint, r.x < 0.25);
-    let alb_mean = 0.25 * tint + vec3<f32>(0.12, 0.10, 0.08);
+    let q = (h.pos.xy + vec2<f32>(0.6, -0.4) * h.pos.z) / cell;
+    let qi = floor(q);
+    var d1 = 1e9;
+    var d2 = 1e9;
+    var id = qi;
+    // The 3x3 neighbourhood, behind a bound the compiler cannot fold (a
+    // literal one is unrolled into the monolithic kernel's register file).
+    let nn = select(9, 0, fp > 1e6);
+    for (var k: i32 = 0; k < nn; k = k + 1) {
+        let c = qi + vec2<f32>(f32(k % 3 - 1), f32(k / 3 - 1));
+        let d = distance(q, c + hash22(c));
+        if (d < d1) {
+            d2 = d1;
+            d1 = d;
+            id = c;
+        } else if (d < d2) {
+            d2 = d;
+        }
+    }
+    let r = hash22(id + vec2<f32>(0.37, 0.71));
+    var alb_frag = vec3<f32>(0.10, 0.08, 0.06);                 // soil
+    if (r.x < 0.62) { alb_frag = vec3<f32>(0.15, 0.14, 0.12); } // concrete
+    if (r.x < 0.40) { alb_frag = vec3<f32>(0.16, 0.08, 0.05); } // brick
+    if (r.x < 0.25) { alb_frag = tint; }
+    if (r.x < 0.10) { alb_frag = vec3<f32>(0.05); }             // voids
+    let crack = smoothstep(0.02, 0.10, d2 - d1);
+    // The mean of the fragments above (and of the 0.8-1.2 level spread),
+    // less the cracks, which cover about a tenth of the surface.
+    let alb_mean = (0.15 * tint + vec3<f32>(0.100, 0.078, 0.062)) * 0.93;
     let k = smoothstep(0.5 * cell, 2.0 * cell, fp);
     let tilt = (r - 0.5) * 0.9 * (1.0 - k);
     let n = normalize(h.normal + vec3<f32>(tilt, 0.0));
-    return cc_industry_lit(cc, h.pos, n, mix(alb_frag, alb_mean, k));
+    let frag = alb_frag * ((0.8 + 0.4 * r.y) * (0.35 + 0.65 * crack));
+    return cc_industry_lit(cc, h.pos, n, mix(frag, alb_mean, k));
 }
 
-fn cc_industry_fork_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
-    let s = cc_industry_find(cc, h.pos, cc_industry_K_FORK);
-    let fwd = cc_industry_fwd(s.g.front);
+fn cc_industry_fork_shade(h: CityHit, cc: CityCell,
+        s: cc_industry_Slot, fp: f32) -> vec3<f32> {
+    let fwd = cc_industry_fwd(s.front);
     let u = dot(h.pos.xy - s.ctr, fwd);
     let v = abs(fwd.x * (h.pos.y - s.ctr.y) - fwd.y * (h.pos.x - s.ctr.x));
     let z = h.pos.z;
@@ -12418,32 +12565,40 @@ fn cc_industry_fork_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // ============================================================================
 fn cc_industry_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
+    // Roofs and lamps first; everything else stands in a grid slot, found
+    // once here. (The refuse is the skip's.)
     switch h.kind {
         case 700: { return cc_industry_roof_shade(h, cc, fp); }
         case 701: { return cc_industry_glaze_shade(h, cc, fp); }
         case 702: { return cc_industry_sky_shade(h, cc, fp); }
-        case 703: { return cc_industry_head_shade(h, cc, fp); }
+        case 703: { return cc_industry_head_shade(h, cc); }
         case 704: {
             return cc_industry_lit(cc, h.pos, h.normal, vec3<f32>(0.10));
         }
-        case 705: { return cc_industry_container_shade(h, cc, fp); }
-        case 706: { return cc_industry_trailer_shade(h, cc, fp); }
-        case 707: { return cc_industry_pallet_shade(h, cc, fp); }
-        case 708: { return cc_industry_rebar_shade(h, cc, fp); }
-        case 709: { return cc_industry_skip_shade(h, cc, fp); }
-        case 710: {
-            return cc_industry_rubble(h, cc, fp, 0.28,
-                                      vec3<f32>(0.30, 0.22, 0.10));
-        }
         case 711: {
-            return cc_industry_rubble(h, cc, fp, 0.45,
-                                      vec3<f32>(0.16, 0.13, 0.10));
+            return cc_industry_rubble(h, cc, fp, 0.22,
+                                      vec3<f32>(0.13, 0.12, 0.11));
         }
-        case 712: { return cc_industry_fork_shade(h, cc, fp); }
-        default: {
+        case 713: {
             // The fence: galvanised posts and rail.
             return cc_industry_lit(cc, h.pos, h.normal, vec3<f32>(0.22));
         }
+        default: {}
+    }
+    let s = cc_industry_find(cc, h.pos,
+                             select(h.kind, cc_industry_K_SKIP,
+                                    h.kind == cc_industry_K_REFUSE));
+    switch h.kind {
+        case 705: { return cc_industry_container_shade(h, cc, s, fp); }
+        case 706: { return cc_industry_trailer_shade(h, cc, s, fp); }
+        case 707: { return cc_industry_pallet_shade(h, cc, s, fp); }
+        case 708: { return cc_industry_rebar_shade(h, cc, s, fp); }
+        case 709: { return cc_industry_skip_shade(h, cc, s, fp); }
+        case 710: {
+            return cc_industry_rubble(h, cc, fp, 0.28,
+                                      vec3<f32>(0.22, 0.17, 0.10));
+        }
+        default: { return cc_industry_fork_shade(h, cc, s, fp); }
     }
 }
 
