@@ -835,6 +835,12 @@ export const ELEVATION_LIMITS = [-89.0, 89.0];
 // own peak-to-trough, so nothing here is about clipping through a wave: it is
 // how low you are allowed to fly, and lower is better flying.
 export const OCEAN_FLOOR_MARGIN_M = 12.5;
+// Over the desert the floor follows the ground: the camera may come down to
+// this far above the terrain, which is what "fly within a couple of metres"
+// asks of it. Measured from the tile's own surface plus the most the
+// sub-tile octaves can raise it (scene.js desertFloorAt), so it is a floor
+// under the drawn ground and not an estimate of it.
+export const DESERT_FLOOR_CLEARANCE_M = 1.0;
 
 // --- sun ------------------------------------------------------------------
 

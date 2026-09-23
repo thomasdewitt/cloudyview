@@ -59,17 +59,28 @@ TILE_EXTENT_M = 4096.0
 
 # The bajada.
 REGIONAL_SLOPE = 0.02          # the fall the flow law sees, and nothing else does
-LOSS_LENGTH_M = 1500.0         # transmission-loss e-folding length
-ROUTING_EXPONENT = 1.5         # discharge shared as slope^this
+LOSS_LENGTH_M = 400.0         # transmission-loss e-folding length
+ROUTING_EXPONENT = 2.5         # discharge shared as slope^this
 ROUGHNESS_M = 0.6              # std of the FIF roughness
 UNDULATION_M = 5.0             # std of the broad fBm undulation
 # The washes.
-CHANNEL_THRESHOLD = 4.0        # channelized beyond this many sheetflows
+CHANNEL_THRESHOLD = 1.2        # channelized beyond this many sheetflows
 DEPTH_MAX_M = 2.0              # the deepest wash's banks
 DEPTH_SCALE = 30.0             # sheetflows past threshold to reach ~0.76 DEPTH_MAX
 WIDTH_MIN_M = 2.0
 WIDTH_MAX_M = 40.0
 CARVE_ITERATIONS = 12
+# The surface's age, as lightness (see generate).
+SOIL_LIGHTNESS = 0.5
+SOIL_PATCHINESS = 0.08
+PAVEMENT_LIGHTNESS = 0.08
+PAVEMENT_DRAINAGE_RADIUS_M = 40.0   # "the local drainage" a surface stands above
+BAR_DARKENING = 0.25
+
+
+def _smoothstep(a: float, b: float, x: np.ndarray) -> np.ndarray:
+    t = np.clip((x - a) / (b - a), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
 
 
 def _disc(radius_cells: float) -> np.ndarray:
@@ -168,13 +179,27 @@ def generate(n: int, seed: int = SEED, verbose: bool = True):
             print(f"  carve {k}: channelized {(depth > 0.1).mean():.3f} of the "
                   f"ground, deepest {depth.max():.2f} m", flush=True)
 
-    # Lightness: the wash floors are fresh sand, and the ground darkens with
-    # distance from them as the surface ages into varnished pavement.
+    # Lightness, by the age of the surface. The active wash floors are fresh
+    # sand (1). The interfluves are tan soil, patchy on a cascade of its own.
+    # The oldest surfaces — standing highest above the local drainage and
+    # farthest from a wash — have had the time to armour into varnished
+    # pavement (0), and they do so in patches, not everywhere at once.
+    np.random.seed(int(rng.integers(2**31)))
+    patch = si.fBm_ND_circulant((n, n), H=0.4, periodic=True).astype(np.float64)
+    patch = (patch - patch.mean()) / patch.std()
     wash = np.clip(depth / (0.25 * DEPTH_MAX_M), 0.0, 1.0)
     dist = ndimage.distance_transform_edt(
         np.tile(wash < 0.5, (3, 3)))[n:2 * n, n:2 * n] * dx
-    age = 1.0 - np.exp(-dist / 60.0)
-    light = np.maximum(wash, 0.55 * (1.0 - age) + 0.08)
+    ring = _disc(PAVEMENT_DRAINAGE_RADIUS_M / dx)
+    above = h - ndimage.minimum_filter(h, footprint=ring, mode="wrap")
+    old = (_smoothstep(0.4, 1.4, above)
+           * _smoothstep(15.0, 70.0, dist)
+           * _smoothstep(-1.0, 0.2, patch))
+    soil = SOIL_LIGHTNESS + SOIL_PATCHINESS * np.tanh(patch)
+    ground = soil + (PAVEMENT_LIGHTNESS - soil) * old
+    # Gravel bars: the coarser, darker patches a flood leaves on a wash floor.
+    bars = BAR_DARKENING * _smoothstep(0.8, 1.6, patch)
+    light = wash * (1.0 - bars) + (1.0 - wash) * ground
     # 1/64 steps: far finer than any albedo difference an eye resolves, and
     # coarse enough that the channel compresses to almost nothing.
     return h - h.mean(), np.round(light * 64.0) / 64.0
@@ -272,7 +297,9 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
         "height_min_m": float(h16.min()),
         "height_max_m": float(h16.max()),
         "seed": seed,
-        "mean_lightness": round(float(mips[-1][0, 0, 1]), 4),
+        # From the stored (half-precision) top mip, which is what a reader
+        # of the tile sees.
+        "mean_lightness": round(float(np.float16(mips[-1][0, 0, 1])), 4),
         **relief_stats(heights),
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=1))

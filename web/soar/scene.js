@@ -132,6 +132,39 @@ export function desertReliefM(meta) {
 }
 
 /**
+ * The camera's floor over the desert: a function of the surface-frame
+ * position (tile metres, the camera's surfacePosition) returning the lowest
+ * z the camera may take. The tile's own height, read bilinearly the way the
+ * GPU reads it (texel i centred at (i + 1/2) cells, periodic), plus the most
+ * the sub-tile octaves can add (band_max_m times raymarch.wgsl's
+ * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
+ * shader samples, so the floor is under the drawn ground by construction.
+ */
+export const DESERT_OCTAVE_MARGIN = 0.463;
+
+export function desertFloorAt(tile, groundZ = 0.0) {
+  const { heights, meta } = tile;
+  if (!heights) throw new Error("the desert tile was loaded without heights.");
+  const n = meta.n;
+  const cell = meta.cell_m;
+  const lift = meta.band_max_m * DESERT_OCTAVE_MARGIN
+    + K.DESERT_FLOOR_CLEARANCE_M + groundZ;
+  const at = (i, j) =>
+    fromHalf(heights[(((j % n) + n) % n) * n + (((i % n) + n) % n)]);
+  return ([x, y]) => {
+    const gx = x / cell - 0.5;
+    const gy = y / cell - 0.5;
+    const i = Math.floor(gx);
+    const j = Math.floor(gy);
+    const fx = gx - i;
+    const fy = gy - j;
+    const h = (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy)
+            + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
+    return h + lift;
+  };
+}
+
+/**
  * A surface tile: the ocean's periodic ~100 m patch of multifractal normals,
  * the night city's density tile, or the desert's eroded terrain — one
  * mip-chain loader, each tile's meta saying its format, files, encoding and
@@ -702,6 +735,8 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       desert: surfaceKind === "desert",
       desertReliefM: surfaceKind === "desert"
         ? desertReliefM(surfaceTile.meta) : [0.0, 0.0, 0.0],
+      desertFloorAt: surfaceKind === "desert"
+        ? desertFloorAt(surfaceTile) : null,
       // The city tile's per-block cascade, for the minimap to draw the city
       // with. Null for an ocean scene, and null is what makes the minimap
       // build the cloud map instead — see Minimap's constructor.

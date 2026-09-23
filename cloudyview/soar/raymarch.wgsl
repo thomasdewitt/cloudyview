@@ -10211,14 +10211,24 @@ const DESERT: bool = false;
 // lies inside [ground_min, ground_max + this].
 const DESERT_FLORA_SLAB_H: f32 = 13.0;
 
-// Visible-band albedos of the two endmembers the lightness channel mixes,
-// linear. Provisional until judged against the references.
-const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.36, 0.30, 0.23);
-const DESERT_ALBEDO_PAVEMENT: vec3<f32> = vec3<f32>(0.15, 0.11, 0.08);
+// Visible-band albedos, linear, of the three surfaces the lightness channel
+// runs through by age: varnished pavement (0), tan intershrub soil (1/2) and
+// fresh wash sand (1). Soil is the most saturated of the three and wash sand
+// the lightest and least (temp/references/desert: soil ~(185,150,110) sRGB
+// beside wash sand ~(204,184,162) in the same light; pavement a grey-brown
+// ~(150,135,120)). Piecewise linear, with the knot at soil: a wash is
+// bordered by soil and soil by pavement, so a footprint's average stays on
+// one segment and the mips' mean lightness is still its mean albedo.
+const DESERT_ALBEDO_PAVEMENT: vec3<f32> = vec3<f32>(0.17, 0.14, 0.115);
+const DESERT_ALBEDO_SOIL: vec3<f32> = vec3<f32>(0.33, 0.22, 0.13);
+const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.42, 0.35, 0.27);
 
 fn desert_albedo(lightness: f32) -> vec3<f32> {
-    return mix(DESERT_ALBEDO_PAVEMENT, DESERT_ALBEDO_WASH,
-               clamp(lightness, 0.0, 1.0));
+    let l = clamp(lightness, 0.0, 1.0);
+    if (l < 0.5) {
+        return mix(DESERT_ALBEDO_PAVEMENT, DESERT_ALBEDO_SOIL, 2.0 * l);
+    }
+    return mix(DESERT_ALBEDO_SOIL, DESERT_ALBEDO_WASH, 2.0 * l - 1.0);
 }
 
 // A sunlit surface stands to a sunlit cloud face as their albedos do. The
@@ -10226,10 +10236,10 @@ fn desert_albedo(lightness: f32) -> vec3<f32> {
 // never to one another, so the textbook a*E*mu/pi with E = u.cloud_sun is
 // not in the cloud's units; this is the one constant that puts it there
 // (the parked surfaces branch's argument, re-measured on this look).
-const DESERT_BEAM_CALIBRATION: f32 = 0.45;
+const DESERT_BEAM_CALIBRATION: f32 = 0.27;
 // Clear-sky diffuse irradiance on the horizontal as a fraction of the
 // beam's, in the visible — why a shadow on sand is blue and not black.
-const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.15;
+const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.20;
 // Skylight does not switch off with the solar cosine.
 const DESERT_SKY_MU_FLOOR: f32 = 0.12;
 
@@ -10363,12 +10373,12 @@ const DESERT_OCTAVE_MARGIN: f32 = 0.463;
 // into meta.json as slope_max; tests/test_desert_tile.py holds this to it).
 // This is what lets the trace step by clearance without tunnelling.
 const DESERT_SLOPE_MAX = array<f32, 12>(
-    1.008, 0.684, 0.385, 0.189, 0.096, 0.061,
-    0.044, 0.035, 0.025, 0.017, 0.002, 0.0
+    0.992, 0.651, 0.368, 0.199, 0.102, 0.060,
+    0.045, 0.036, 0.025, 0.017, 0.002, 0.0
 );
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
-const DESERT_OCTAVE_SLOPE_MAX: f32 = 0.908;  // meta band_slope_max
+const DESERT_OCTAVE_SLOPE_MAX: f32 = 0.888;  // meta band_slope_max
 const DESERT_OCTAVE_SLOPE_GROWTH: f32 = 1.620657; // 5^0.3
 
 fn desert_slope_bound(fp: f32) -> f32 {
@@ -10608,15 +10618,24 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     // The lid: beam that the cloud overhead spread rather than stopped,
     // arriving on the horizontal.
     let lid = max(open - t_up, 0.0) * mu_sun * beam;
-    // Clear sky: chroma from the rendered sky overhead, magnitude from the
-    // beam (the look's zenith is far dimmer than its own sunlit cloud, so
-    // reading the magnitude off it would put shadowed sand near black).
+    // Clear sky: chroma from the rendered sky's hemispheric mean, magnitude
+    // from the beam. The look's zenith is a deep cobalt far dimmer than its
+    // own sunlit cloud, so reading the magnitude off it would put shadowed
+    // sand near black, and reading the chroma off it alone would paint every
+    // cloud shadow saturated blue — the references' shadows are neutral to
+    // blue-grey, because the ground sees the whole dome, pale horizon and
+    // all. The cosine-weighted dome is mostly zenith (0.62, the analytic
+    // hemispheric mean of this sky's profile, from the surfaces branch).
     let zen = sky_radiance(vec3<f32>(0.0, 0.0, 1.0), sun, u.sky_horizon.xyz,
                            u.sky_bloom.xyz, vec3<f32>(0.0), u.cloud_sun.w);
-    let zen_luma = max(dot(zen, LUMA_WEIGHTS), 1e-6);
+    let hor = sky_radiance(normalize(vec3<f32>(-sun.xy + vec2<f32>(1e-6), 0.0)),
+                           sun, u.sky_horizon.xyz, u.sky_bloom.xyz,
+                           vec3<f32>(0.0), u.cloud_sun.w);
+    let dome = mix(hor, zen, 0.62);
+    let dome_luma = max(dot(dome, LUMA_WEIGHTS), 1e-6);
     let beam_luma = max(dot(beam, LUMA_WEIGHTS), 1e-6);
     let sky_clear = DESERT_SKY_DIFFUSE_FRACTION
-        * max(mu_sun, DESERT_SKY_MU_FLOOR) * beam_luma * (zen / zen_luma);
+        * max(mu_sun, DESERT_SKY_MU_FLOOR) * beam_luma * (dome / dome_luma);
 
     var L: DesertLight;
     L.sun_dir = sun;
@@ -10631,7 +10650,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
 }
 
 // The shipped tile's mean lightness (its top mip), for the regional albedo.
-const DESERT_MEAN_LIGHTNESS: f32 = 0.4177;
+const DESERT_MEAN_LIGHTNESS: f32 = 0.5664;
 
 // Shadow the terrain throws on itself: a short march toward the sun over
 // the same footprint-filtered surface, with the penumbra of the sun's own
@@ -10770,7 +10789,7 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
 // Mean hemispherical albedo of the ground as a cloud base sees it, for the
 // surface bounce: the tile's mean lightness. The ocean's bounce constant was
 // tuned over water, so the desert's scales it by the ratio of the two.
-const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.237, 0.190, 0.143);
+const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.342, 0.237, 0.149);
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 
 // === END DESERT GROUND ===
