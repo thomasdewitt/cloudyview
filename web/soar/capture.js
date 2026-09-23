@@ -34,7 +34,12 @@ export async function renderStill(device, renderer, view, size, tier,
     // of the bar rather than a stage name of its own — the caller says what
     // is happening once, and the bar says how far along it is.
     onProgress?.(STILL_MARCH_SHARE);
-    return await readBack(device, target.texture, size[0], size[1]);
+    const readback = new Readback(device, size);
+    try {
+      return await readback.read(target.texture);
+    } finally {
+      readback.destroy();
+    }
   } finally {
     target.texture.destroy();
     endOfflineRender(renderer, saved);
@@ -174,30 +179,66 @@ export async function renderAccumulated(renderer, targetView, size, view,
   }
 }
 
-/** Copy a texture to the CPU, undoing the 256-byte row padding. */
-export async function readBack(device, texture, w, h) {
-  const rowBytes = Math.ceil((w * 4) / 256) * 256;
-  const buffer = device.createBuffer({
-    size: rowBytes * h,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-  const encoder = device.createCommandEncoder();
-  encoder.copyTextureToBuffer(
-    { texture },
-    { buffer, bytesPerRow: rowBytes, rowsPerImage: h },
-    [w, h, 1]);
-  device.queue.submit([encoder.finish()]);
-  await buffer.mapAsync(GPUMapMode.READ);
-  const src = new Uint8Array(buffer.getMappedRange());
-  const image = new ImageData(w, h);
-  for (let y = 0; y < h; y++) {
-    image.data.set(
-      src.subarray(y * rowBytes, y * rowBytes + w * 4), y * w * 4);
+/**
+ * A staging buffer for copying `size` frames to the CPU, made once and
+ * reused for every read.
+ *
+ * A video used to create and destroy one per frame — 33 MB at 4K — and a
+ * destroyed buffer's memory goes back to the driver only when the browser
+ * gets round to it, so a long video could run the GPU out of memory with
+ * nothing actually live (the 2026-08-31 VRAM OOM). One buffer is enough:
+ * every caller awaits `read` before the next frame's march, so no two reads
+ * are ever in flight, and `read` refuses rather than queueing if one is.
+ */
+export class Readback {
+  constructor(device, size) {
+    const [w, h] = size;
+    this.device = device;
+    this.w = w;
+    this.h = h;
+    this.rowBytes = Math.ceil((w * 4) / 256) * 256;
+    this.buffer = device.createBuffer({
+      label: "soar-readback",
+      size: this.rowBytes * h,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this._busy = false;
   }
-  for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255;
-  buffer.unmap();
-  buffer.destroy();
-  return image;
+
+  /** Copy `texture` to an ImageData, undoing the 256-byte row padding. */
+  async read(texture) {
+    if (this._busy) {
+      throw new Error(
+        "Readback.read called while a read was still in flight; the " +
+        "staging buffer is single-use until mapAsync resolves.");
+    }
+    this._busy = true;
+    const { device, buffer, w, h, rowBytes } = this;
+    try {
+      const encoder = device.createCommandEncoder();
+      encoder.copyTextureToBuffer(
+        { texture },
+        { buffer, bytesPerRow: rowBytes, rowsPerImage: h },
+        [w, h, 1]);
+      device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const src = new Uint8Array(buffer.getMappedRange());
+      const image = new ImageData(w, h);
+      for (let y = 0; y < h; y++) {
+        image.data.set(
+          src.subarray(y * rowBytes, y * rowBytes + w * 4), y * w * 4);
+      }
+      for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255;
+      buffer.unmap();
+      return image;
+    } finally {
+      this._busy = false;
+    }
+  }
+
+  destroy() {
+    this.buffer.destroy();
+  }
 }
 
 // --- PNG metadata ---------------------------------------------------------
