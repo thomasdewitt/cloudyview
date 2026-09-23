@@ -14,6 +14,8 @@ import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
+import { CityTile, CityLots } from "./citylots.js";
+import { CityCollider } from "./collide.js";
 
 /**
  * The flyers, in the order B cycles them — and so the first is the default.
@@ -38,7 +40,7 @@ function destroyFlyers(flyers) {
   for (const flyer of Object.values(flyers ?? {})) flyer?.destroy();
 }
 import {
-  TrackRecorder, trackPayload, resampleTrack, resampledFrameCount,
+  TrackRecorder, trackPayload, resampleTrack, resampledFrameCount, knocksDue,
   MAX_TRACK_SECONDS,
 } from "./track.js";
 import { UI } from "./ui.js";
@@ -327,6 +329,7 @@ export class Viewer {
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
+    this.collider = null;
     this.frameIndex = 0;
     this._lastSignature = null;
     this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
@@ -356,7 +359,8 @@ export class Viewer {
       const surface = async (kind) => {
         if (kind === "city") {
           // keepCells: the minimap draws the city out of the tile's own mip
-          // 0, and the tile is the only place those bytes ever arrive. Held
+          // 0, the flight collider builds its buildings from it too, and
+          // the tile is the only place those bytes ever arrive. Held
           // for the session with the tile itself (8 MB beside a multi-GB
           // volume) rather than re-downloaded per field.
           return (this._cityTile ??=
@@ -500,9 +504,19 @@ export class Viewer {
                                      // is the only scene with anything
                                      // within 20 m of the camera, so it
                                      // flies slower too.
+                                     // And the street is solid ground
+                                     // the collider owns, not a floor.
                                      ...(scene.city
-                                       ? { speed: K.CITY_DEFAULT_SPEED }
+                                       ? { speed: K.CITY_DEFAULT_SPEED,
+                                           floorZ: null }
                                        : {}) });
+    // Over the night city the buildings are solid (collide.js): the same
+    // buildings the shader raises, stood up on the CPU from the same tile.
+    // The day scenes have nothing to fly into and get no collider at all.
+    this.collider = scene.city
+      ? new CityCollider(new CityLots(new CityTile(scene.cityCells)),
+                         scene.oceanTileExtent)
+      : null;
 
     this.ui.setSubtitle(this.sourceLabel);
 
@@ -2285,7 +2299,7 @@ export class Viewer {
         "which is the longest track cloudyview records. Here is what it " +
         "caught.", 6);
     }
-    this.ui.open("track", { samples });
+    this.ui.open("track", { samples, knocks: this.recorder.knocks });
   }
 
   /** How many video frames a track becomes at the chosen rate. */
@@ -2302,19 +2316,25 @@ export class Viewer {
    * That is the whole argument for WebCodecs over screen capture: a frame
    * may take six seconds to converge and the video is still 30 seconds long.
    */
-  async renderTrackVideo(samples) {
+  async renderTrackVideo(samples, knocks = []) {
     if (this._capturing) return;
     const { VideoWriter, evenSize } = await import("./video.js");
 
     // Even before the offscreen texture is made, not after: H.264 refuses odd
     // dimensions, and every frame has to be the size the encoder was told.
     const size = evenSize(this.captureDimensions());
+    // Over the city the positions go straight between samples: those are
+    // the moves the collider cleared (track.js linear()).
     const frames = resampleTrack(samples, this.videoFps,
-                                 { periodic: this.renderer.periodic });
+                                 { periodic: this.renderer.periodic,
+                                   linearPosition: Boolean(this.scene.city) });
 
     this._capturing = true;
     this._wake("capture");
     this._videoAbort = false;
+    // The replay flies the flyer from the track's first pose, not from
+    // wherever the live flight left it.
+    this.flyer?.calm();
     this.ui.close();
     this.ui.showProgress("Choosing a codec…", 0);
 
@@ -2366,7 +2386,10 @@ export class Viewer {
             : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
         };
         const overlays = this.captureOverlays
-          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze)
+          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze,
+                                  knocksDue(knocks,
+                                            i > 0 ? frames[i - 1].t : -Infinity,
+                                            frames[i].t))
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
@@ -2404,6 +2427,8 @@ export class Viewer {
       if (saved && this.renderer) endOfflineRender(this.renderer, saved);
       this.ui.hideProgress();
       this._capturing = false;
+      // And back to the live flight, which the replay's last pose is not.
+      this.flyer?.calm();
       // The capture owned the renderer's quality state and its accumulation;
       // whatever the live view was converging towards is gone, and the loop
       // may have been asleep when the capture began.
@@ -2416,10 +2441,14 @@ export class Viewer {
   /** The overlays an offline frame draws, laid out for that frame's size.
    *  `haze` is the CAPTURE's, so the minimap reads like the picture it sits
    *  on rather than like the session it was launched from. */
-  _offlineOverlays(pose, size, dt, haze = this.haze) {
+  _offlineOverlays(pose, size, dt, haze = this.haze, knocks = []) {
     const overlays = [];
     if (this.flyer && this.flyerEnabled) {
       this.flyer.update(dt, pose);
+      // A crash in the recorded flight: the pose already carries the
+      // bounce, fall and shake; the tumble is the flyer's, handed over here
+      // at the age it has on this frame.
+      for (const knock of knocks) this.flyer.knock(knock);
       this.flyer.writeUniforms(pose, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
         toneMapGamma: this.toneMapGamma,
@@ -2442,9 +2471,9 @@ export class Viewer {
   }
 
   /** The track as a file, which `soar TRACK.json` renders on the desktop. */
-  downloadTrack(samples) {
+  downloadTrack(samples, knocks = []) {
     const size = this.captureDimensions();
-    const payload = trackPayload(this.renderMetadata(size), samples);
+    const payload = trackPayload(this.renderMetadata(size), samples, knocks);
     download(new Blob([JSON.stringify(payload)], { type: "application/json" }),
              timestampedName("cloudyview_track", ".json"));
     this.ui.say(`Saved ${samples.length} samples.`, 3);
@@ -3050,8 +3079,22 @@ export class Viewer {
     // climb", which is the direction this clock is honest in.
     if (this._prevFrameMarched) this._lastMarchMs = elapsed * 1000;
 
-    if (!this.paused) this.camera.move(dt);
+    // The flight, in the order collide.js lays out: the episode's clock,
+    // the player's move, the flyer placed off the camera, and then the
+    // whole frame's motion made legal against the city. The flyer is
+    // updated here rather than with its overlay below because the collider
+    // needs it where it is going to be drawn.
+    if (!this.paused) {
+      this.collider?.advance(dt, this.camera);
+      this.camera.move(dt);
+    }
     this.camera.constrain();
+    const flyer = this.flyer && this.flyerEnabled ? this.flyer : null;
+    flyer?.update(this.paused ? 0 : dt, this.camera);
+    if (!this.paused && this.collider) {
+      const knock = this.collider.resolve(dt, this.camera, flyer);
+      if (knock) this.recorder.noteKnock(knock);
+    }
 
     // "Moving" is an exact comparison against the previous frame's view, not
     // a velocity: it is what lets the hold ladder start climbing the instant
@@ -3094,9 +3137,8 @@ export class Viewer {
     // Bird first, minimap second: the bird lives in the scene and takes the
     // scene's depth, the map is chrome laid over the finished picture.
     const overlays = [];
-    if (this.flyer && this.flyerEnabled) {
-      this.flyer.update(this.paused ? 0 : dt, this.camera);
-      this.flyer.writeUniforms(this.camera, [outW, outH], {
+    if (flyer) {
+      flyer.writeUniforms(this.camera, [outW, outH], {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
         exposure: this.exposure,
         toneMapGamma: this.toneMapGamma,
@@ -3104,7 +3146,7 @@ export class Viewer {
         contrast: this.contrast,
       });
       overlays.push((enc, view, format) =>
-        this.flyer.encodePass(enc, view, format, [outW, outH]));
+        flyer.encodePass(enc, view, format, [outW, outH]));
     }
     if (this.minimap && this.minimapMode !== "off") {
       this.minimap.update(this.camera, this.scene, [outW, outH],
@@ -3290,12 +3332,15 @@ export class Viewer {
    * Whether anything drawn over the finished picture is still moving.
    *
    * Only the bird is, and only while the view is unpaused — _frame hands it a
-   * dt of zero when paused, so a paused bird is a still image. The minimap
+   * dt of zero when paused, so a paused bird is a still image. A city crash
+   * (collide.js) is also motion nobody is steering: the fall, the bounce and
+   * the shake play out over a second whether a flyer is up or not. The minimap
    * changes when the camera or the mode does, and both of those go through
    * _wake, so it does not hold the loop open.
    */
   _overlaysAnimate() {
-    return Boolean(this.flyer && this.flyerEnabled && !this.paused);
+    return Boolean(this.flyer && this.flyerEnabled && !this.paused)
+      || Boolean(this.collider?.active && !this.paused);
   }
 }
 

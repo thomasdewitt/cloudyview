@@ -21,7 +21,7 @@
 
 "use strict";
 
-import { Flyer, attitudeFrame, clamp, mod2pi, smoothstep,
+import { Flyer, clamp, mod2pi, smoothstep,
          TWO_PI, DEG } from "./flyer.js";
 import { buildBirdMesh } from "./birdmesh.js";
 
@@ -103,7 +103,7 @@ export class Bird extends Flyer {
 
   /** Local->world rotation columns for the current attitude. */
   _frame() {
-    return attitudeFrame(this.course, this.pitch + BODY_PITCH, this.bank);
+    return this._attitude(this.course, this.pitch + BODY_PITCH, this.bank);
   }
 
   /** The slots bird.wgsl reads as its own: flap angle, wrist, twist, tail. */
