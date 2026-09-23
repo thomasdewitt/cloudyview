@@ -117,7 +117,9 @@ function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
                // The CLOUD domain, which the camera's world position folds
                // at — independent of the city tile's frame.
                domain = [[-200000, -200000, 0], [200000, 200000, 6000]],
-               videoFps = null }) {
+               videoFps = null,
+               // Mouse look between frames, deg/s of azimuth.
+               turn = 0.0 }) {
   const [BMIN, BMAX] = domain;
   const recorder = new TrackRecorder();
   recorder.start();
@@ -132,6 +134,7 @@ function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
   const dt = 1 / fps;
   const frames = [];
   for (let i = 0; i < Math.round(seconds * fps); i++) {
+    camera.azimuth = ((camera.azimuth + turn * dt) %% 360 + 360) %% 360;
     collider.advance(dt, camera);
     camera.move(dt);
     camera.constrain();
@@ -419,3 +422,17 @@ def test_starting_inside_a_building_puts_you_on_its_roof():
     assert frames[0]["fly"][2] == pytest.approx(500.0 + 0.21, abs=1e-6)
     assert frames[0]["cam"][2] == pytest.approx(500.0 + 0.21 + 0.62,
                                                 abs=1e-6)
+
+
+def test_looking_round_beside_a_wall_is_not_a_crash():
+    # Hovering 2 m off a wall, facing along it, then swinging round to face
+    # it at 360 deg/s: the flyer sweeps into the wall at ~15 m/s. It is
+    # stopped there (and the camera backed off), but nothing flew into
+    # anything, so there is no knock.
+    r = fly(boxes=WALL, start=[48.0, 0.0, 60.0], azimuth=0.0,
+            elevation=0.0, speed=20.0, keys=[], fps=60, seconds=0.25,
+            turn=360.0)
+    frames = r["frames"]
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+    assert max(f["fly"][0] for f in frames) <= 50.0 - 0.2 + 1e-9
+    assert r["knocks"] == []

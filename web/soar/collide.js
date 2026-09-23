@@ -38,8 +38,9 @@
 //
 //   the camera's path      last frame's eye -> this frame's
 //   the flyer's path       last frame's plane -> this frame's (this includes
-//                          the plane swinging round when you turn — a whip
-//                          turn beside a wall can knock it)
+//                          the plane swinging round when you look round —
+//                          stopped by a wall like anything else, though
+//                          only the flight's own motion counts as a crash)
 //   the tether             this frame's eye -> this frame's plane: nothing
 //                          may stand between you and the thing you are
 //                          following, or it is drawn over that thing
@@ -340,23 +341,26 @@ export class CityCollider {
   /**
    * The first blocked segment, as {point, normal, end, arrival}: the body's
    * centre where it meets a surface, the surface's outward normal, the
-   * moving centre's end position (the one to back out), and the body's
-   * displacement over the frame.
+   * moving centre's end position (the one to back out), and the FLIGHT's
+   * displacement over the frame — the camera's, whichever body touched.
+   *
+   * The flight's and not the body's because the flyer also moves when you
+   * only look round: it hangs 2.6 m out along the view, so a quick glance
+   * sweeps it through a few metres a frame. Beside a wall that glance
+   * pushes it into the wall, and it is stopped there like anything else —
+   * but it has not flown into anything, and a crash for looking at a
+   * building would make hovering beside one impossible.
    */
   _firstBlock(c0, c1, f0, f1) {
     const legs = [[c0, c1, CAMERA_RADIUS_M]];
     if (f1 !== null) {
       legs.push([f0, f1, FLYER_RADIUS_M], [c1, f1, FLYER_RADIUS_M]);
     }
-    for (let i = 0; i < legs.length; i++) {
-      const [a, b, radius] = legs[i];
+    for (const [a, b, radius] of legs) {
       const hit = this.city.sweep(a, b, radius);
       if (hit === null) continue;
-      // The tether is a line held at one instant, not a path: its arrival
-      // is the flyer's own motion over the frame.
-      const from = i === 2 ? f0 : a;
       return { point: hit.point, normal: hit.normal, end: b,
-               arrival: sub(b, from) };
+               arrival: sub(c1, c0) };
     }
     return null;
   }
