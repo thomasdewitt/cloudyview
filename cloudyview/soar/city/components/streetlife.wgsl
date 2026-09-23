@@ -275,6 +275,7 @@ fn cc_streetlife_nearer(a: CityHit, b: CityHit) -> CityHit {
 
 struct cc_streetlife_Side {
     ax: i32,          // 0 = the kerb runs along x, 1 = along y
+    line: i32,        // the centreline this kerb faces
     lamp_c: f32,      // lamp line, across coordinate
     park_c: f32,      // parking line, across coordinate
     plot_sign: f32,   // which way the plot lies from the kerb
@@ -318,6 +319,7 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
         kerb_c = kr.w;
         s.plot_sign = -1.0;
     }
+    s.line = line;
     s.park_c = kerb_c - s.plot_sign * cc_streetlife_PARK_OFF;
     s.a_min = select(cmin.y, cmin.x, s.ax == 0);
     s.a_max = select(cmax.y, cmax.x, s.ax == 0);
@@ -354,10 +356,12 @@ fn cc_streetlife_nearest_lamp(p: vec2<f32>) -> vec3<f32> {
     let cellm = u.ocean_params.x;
     let bx = round(p.x / cellm) * cellm;
     let by = round(p.y / cellm) * cellm;
-    let inx = city_lamp_inset(i32(round(p.x / cellm)));
-    let iny = city_lamp_inset(i32(round(p.y / cellm)));
-    let lx = round(p.x / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
-    let ly = round(p.y / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+    let kx = i32(round(p.x / cellm));
+    let ky = i32(round(p.y / cellm));
+    let inx = city_lamp_inset(kx);
+    let iny = city_lamp_inset(ky);
+    let lx = city_lamp_station(ky, p.x);
+    let ly = city_lamp_station(kx, p.y);
     var best = vec2<f32>(bx - inx, ly);
     var bd = 1e30;
     for (var k: i32 = 0; k < 4; k = k + 1) {
@@ -888,14 +892,16 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var res = cc_streetlife_miss(ci);
     var t_end = tb;
 
-    // Poles, on the core's 26 m lattice, restricted to those standing wholly
-    // inside this cell.
+    // Poles, on the core's lamp lattice for this street
+    // (city_lamp_lattice), restricted to those standing wholly inside this
+    // cell.
     if (fp < cc_streetlife_POLE_FAR_FP) {
-        let sp = CITY_LAMP_SPACING;
-        var j0 = i32(ceil((s_lo - 0.45) / sp));
-        var j1 = i32(floor((s_hi + 0.45) / sp));
-        j0 = max(j0, i32(ceil((s.a_min + 0.45) / sp)));
-        j1 = min(j1, i32(floor((s.a_max - 0.45) / sp)));
+        let lat = city_lamp_lattice(s.line);
+        let sp = lat.x;
+        var j0 = i32(ceil((s_lo - 0.45 - lat.y) / sp));
+        var j1 = i32(floor((s_hi + 0.45 - lat.y) / sp));
+        j0 = max(j0, i32(ceil((s.a_min + 0.45 - lat.y) / sp)));
+        j1 = min(j1, i32(floor((s.a_max - 0.45 - lat.y) / sp)));
         if (j1 >= j0) {
             let jstart = select(j1, j0, fwd_first);
             let jstep = select(-1, 1, fwd_first);
@@ -907,7 +913,7 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                     break;
                 }
                 let hp = cc_streetlife_pole(o, dir, inv_dir, ta, t_end, s,
-                                            f32(j) * sp, ci, fp);
+                                            lat.y + f32(j) * sp, ci, fp);
                 if (hp.hit) {
                     res = cc_streetlife_nearer(res, hp);
                     t_end = min(t_end, res.t);

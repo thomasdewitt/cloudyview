@@ -97,11 +97,32 @@ def pcg2d(x, y):
     return x, y
 
 
+TILE_N = 1024   # blocks per tile: city_line_seed folds a centreline index
+
+
+def line_seed(k):
+    """city_line_seed: the centreline index folded at the tile."""
+    k = np.mod(np.asarray(k).astype(np.int64), TILE_N)
+    return k.astype(np.uint64)
+
+
 def park_side_bits(k):
     """The low bit city_park_side reads."""
-    k = np.asarray(k).astype(np.int64).astype(np.uint32).astype(np.uint64)
+    k = line_seed(k)
     hx, _ = pcg2d(k ^ np.uint64(0x6c8e9cf5), np.full_like(k, 0x2c1b3c6d))
     return (hx & np.uint64(1)).astype(np.int64)
+
+
+def lamp_station(k, a):
+    """city_lamp_station: minor streets draw a spacing (22-31 m) and phase."""
+    k = np.asarray(k)
+    seed = line_seed(k)
+    hx, hy = pcg2d(seed ^ np.uint64(0x3c6ef372), np.full_like(seed, 0xa54ff53a))
+    sp = 22.0 + 3.0 * (hx & np.uint64(3)).astype(np.float64)
+    ph = sp * hy.astype(np.float64) * 2.3283064365386963e-10
+    sp = np.where(is_avenue(k), LAMP_SPACING, sp)
+    ph = np.where(is_avenue(k), 0.0, ph)
+    return ph + np.round((a - ph) / sp) * sp
 
 
 def smoothstep(e0, e1, x):
@@ -137,7 +158,7 @@ def pools(x, y):
     bxi = np.round(x / CELL)
     bx = bxi * CELL
     amp = np.where(is_avenue(bxi), 1.6, 1.0)
-    ly = np.round(y / LAMP_SPACING) * LAMP_SPACING
+    ly = lamp_station(bxi, y)
     for s in (-1.0, 1.0):
         lx = bx + s * lamp_inset(bxi)
         out += amp * np.exp(-((x - lx) ** 2 + (y - ly) ** 2)
@@ -145,7 +166,7 @@ def pools(x, y):
     byi = np.round(y / CELL)
     by = byi * CELL
     amp = np.where(is_avenue(byi), 1.6, 1.0)
-    lx = np.round(x / LAMP_SPACING) * LAMP_SPACING
+    lx = lamp_station(byi, x)
     for s in (-1.0, 1.0):
         lyy = by + s * lamp_inset(byi)
         out += amp * np.exp(-((x - lx) ** 2 + (y - lyy) ** 2)
@@ -273,19 +294,23 @@ def main():
     plot_acc = np.zeros_like(S_GRID)
     street_w = plot_w = 0.0
     for (ix, iy), weight in types.items():
-        ci = (8 * 10 + ix * 3, 8 * 7 + iy * 3)
-        x, y = np.meshgrid(ci[0] * CELL + g, ci[1] * CELL + g, indexing="ij")
-        pl = pools(x, y)
-        for rep in range(3):
-            off = rng.uniform(0, 5000, 2)
-            alb, inside = ground(ci, x, y, off)
-            for k, s in enumerate(S_GRID):
-                raw = s * pl
-                lamp = raw / (1 + POOL_KNEE * raw) * alb
-                street_acc[k] += weight * lamp[~inside].mean()
-                plot_acc[k] += weight * lamp[inside].mean()
-            street_w += weight
-            plot_w += weight
+        # Spacing and phase are per street, so each type is sampled over
+        # several blocks (moving by whole avenue periods keeps the type).
+        for blk in range(4):
+            ci = (8 * (10 + 3 * blk) + ix * 3, 8 * (7 + 5 * blk) + iy * 3)
+            x, y = np.meshgrid(ci[0] * CELL + g, ci[1] * CELL + g,
+                               indexing="ij")
+            pl = pools(x, y)
+            for rep in range(2):
+                off = rng.uniform(0, 5000, 2)
+                alb, inside = ground(ci, x, y, off)
+                for k, s in enumerate(S_GRID):
+                    raw = s * pl
+                    lamp = raw / (1 + POOL_KNEE * raw) * alb
+                    street_acc[k] += weight * lamp[~inside].mean()
+                    plot_acc[k] += weight * lamp[inside].mean()
+                street_w += weight
+                plot_w += weight
     street = street_acc / street_w
     plot = plot_acc / plot_w
     for name, m in (("CITY_GROUND_FAR_STREET", street),

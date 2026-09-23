@@ -238,6 +238,7 @@ struct cc_streetfurniture_Edge {
     avenue: bool,
     park: bool,       // a parking lane runs beside this kerb
     pole_kerb: bool,  // the lamp line falls inside the kerb lane
+    line: i32,        // the centreline this edge faces (its lamp lattice)
 }
 
 fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
@@ -260,6 +261,7 @@ fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
     let a_top = select(cmax.x, cmax.y, xs);
     e.w = city_sidewalk_w(e.bl);
     let kb = i32(round(e.bl / cellm));
+    e.line = kb;
     e.avenue = city_is_avenue(kb);
     // Our kerb sits on the -out side of the centreline; a minor street
     // parks on one side only (city_park_side), an avenue on both.
@@ -388,7 +390,7 @@ fn cc_streetfurniture_prop(ci: vec2<i32>, cc: CityCell,
     var u_c = e.w - cc_streetfurniture_KERB_IN;   // distance from building line
     if (kerb) {
         // The nearest lamp mast, and whether it stands in this slot.
-        let pole_a = round(mid / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+        let pole_a = city_lamp_station(e.line, mid);
         let pole_in = e.pole_kerb && pole_a > s0 - 0.45 && pole_a < s1 + 0.45;
         let from_lo = k - k_lo;
         let from_hi = k_hi - k;
@@ -480,7 +482,7 @@ fn cc_streetfurniture_prop(ci: vec2<i32>, cc: CityCell,
     }
     along = clamp(along, s0 + hb.x + 0.02, s1 - hb.x - 0.02);
     if (kerb && e.pole_kerb && typ != cc_streetfurniture_T_BAGS) {
-        let pole_a = round(along / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+        let pole_a = city_lamp_station(e.line, along);
         if (abs(along - pole_a) < hb.x + cc_streetfurniture_POLE_CLEAR) {
             return cc_streetfurniture_none();
         }
@@ -1537,12 +1539,13 @@ fn cc_streetfurniture_glints(p: vec3<f32>, n: vec3<f32>, rf: vec3<f32>,
         let k = i32(round(c / cellm));
         let amp = select(1.0, 1.6, city_is_avenue(k));
         let inset = city_lamp_inset(k);
-        let j0 = floor(a / CITY_LAMP_SPACING);
+        let lat = city_lamp_lattice(k);
+        let j0 = floor((a - lat.y) / lat.x);
         for (var sd: i32 = 0; sd < 2; sd = sd + 1) {
             let sg = select(-1.0, 1.0, sd == 1);
             let hc = f32(k) * cellm + sg * (inset - CITY_LAMP_ARM);
             for (var jj: i32 = 0; jj < 2; jj = jj + 1) {
-                let ha = (j0 + f32(jj)) * CITY_LAMP_SPACING;
+                let ha = lat.y + (j0 + f32(jj)) * lat.x;
                 let head = select(vec3<f32>(ha, hc, CITY_LAMP_HEAD_Z),
                                   vec3<f32>(hc, ha, CITY_LAMP_HEAD_Z), along_y);
                 let lv = head - p;
