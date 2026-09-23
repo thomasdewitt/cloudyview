@@ -125,7 +125,8 @@ struct Uniforms {
     // side on every sample. The hosts still pack both, from the same flags
     // that pick the specialization, because the row is part of the
     // accumulation's scene key: a bake completing or a tier switching
-    // methods restarts the average through it.
+    // methods is a scene change (and the browser restarts a parked view's
+    // average on it outright — renderer.js drawFrame).
     //
     // x = read tau_sun for CLOUD samples from the light_tau texture instead
     //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
@@ -772,7 +773,7 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // same insight about sparseness, applied to storage rather than traversal,
 // where nothing has to be asked per sample. See web/soar/zcrop.js.
 
-// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Four
+// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Five
 // measurements from one day, all the same fact:
 //   - the empty-space guard above cost 14-20% while never firing;
 //   - compiling out the lighting method a tier does not use (LIGHT_CACHE,
@@ -783,6 +784,11 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 //   - a function-local `var c: array<f32, 4>` in CITY-only code moved DAY
 //     frames by 2^-11 — a specialization that was compiled out still
 //     changed how the rest of the kernel was compiled. Scalars fixed it.
+//   - running the forward pre-march lazily, at a ray's first deep-shadow
+//     sample instead of before the loop, was exact and saves the march for
+//     every ray that never gets there — and cost 28-213% on the views where
+//     rays do get there, because a call inside the loop is paid in
+//     registers, and lanes reaching it at different steps serialize.
 // So a change's cost is not where its code runs, and a bit-identity claim
 // has to be proven on scenes the change does not touch. Measure with
 // tools/benchmarking/soar_pass_timer.py and prove with

@@ -1017,9 +1017,13 @@ export class Renderer {
     // each passing state would compile variants no frame will use — each
     // compile a chance at bug 22.
     if (!this._prefetchArmed) return;
+    // The current tier first: compiles run roughly in request order, and
+    // the variant a frame is waiting on must not queue behind a neighbour's.
     const order = K.QUALITY_TIER_NAMES;
     const at = order.indexOf(this.qualityTier);
-    for (const tier of order.slice(Math.max(0, at - 1), at + 2)) {
+    const reachable = [this.qualityTier, order[at - 1], order[at + 1]]
+      .filter(Boolean);
+    for (const tier of reachable) {
       for (const cacheReady of [true, false]) {
         const lighting = this._lightingFor(tier, cacheReady);
         try {
@@ -1306,12 +1310,29 @@ export class Renderer {
     const state = this._sceneState();
     // The effective flags, not the wishes: a wanted-but-unbaked cache reads
     // the live march. Row 23 is in the scene key, so a bake completing, a
-    // rung switching methods, or an override restarts accumulation itself.
+    // rung switching methods or an override is a scene change: never
+    // averaged with the old method, and with a parked camera a clean
+    // restart (see methodKey below).
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
     });
+    // A change of lighting method under a parked camera restarts the
+    // average instead of blending into it. Any scene-key change with a
+    // still camera takes the one-frame motion blend (_accumulationPlan),
+    // which suits a value that glides — exposure, haze — but a method switch
+    // is a step: a bake finishing, a tier changing methods or a K/J toggle
+    // replaces one lighting model with another, and the blend would hold a
+    // ~42% ghost of the old one for a frame before the average restarted.
+    // In flight the key changes every frame anyway, and the motion blend is
+    // the point, so a moving camera is left to it.
+    const methodKey = `${lighting.lightCache}|${lighting.skyProbe}`;
+    if (this._accumMethod !== undefined && methodKey !== this._accumMethod
+        && !this._cameraMoving) {
+      this._resetAccumulation();
+    }
+    this._accumMethod = methodKey;
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
@@ -1731,6 +1752,16 @@ export class Renderer {
     };
   }
 
+  /**
+   * The bake pipeline's compile while it is still in flight, else null — for
+   * a caller that must finish a bake synchronously-in-spirit (a capture) and
+   * so has to yield until the pipeline exists. Throws a failed compile.
+   */
+  bakePipelinePending() {
+    const pipeline = this._bakePipeline();
+    return isPending(pipeline) ? pipeline : null;
+  }
+
   /** Bake up to `slices` planes; true when the cache became complete. */
   stepLightBake(slices = K.LIGHT_CACHE_BAKE_SLICES_PER_FRAME) {
     const b = this._lightBake;
@@ -1795,8 +1826,9 @@ export class Renderer {
   /**
    * One tiny linear-radiance render of `view`, read back and reduced to the
    * luminance at AUTO_EXPOSURE_PERCENTILE. Returns null when a previous
-   * meter's readback is still in flight (one is ever allowed; the AE loop
-   * just tries again next interval).
+   * meter's readback is still in flight (one is ever allowed), or while its
+   * pipelines are still compiling: either way the AE loop just tries again
+   * next interval.
    *
    * The march is the real shader with TONE_MAP compiled out, at
    * AUTO_EXPOSURE_METER_SIZE — the same footprint-per-cost trade renderScale
@@ -1833,38 +1865,20 @@ export class Renderer {
       // same method the row carries.
       const lighting = { lightCache: false, skyProbe: true };
       const spec = this._shaderSpec({ toneMap: false, lighting });
-      const module = this._module(spec);
-      this._meterPipeline ??= new Map();
-      const pipeKey = shaderVariantKey(spec);
-      let pipeline = this._meterPipeline.get(pipeKey);
-      if (!pipeline) {
-        pipeline = this.device.createRenderPipeline({
-          label: `meter(${pipeKey})`,
-          layout: this.rayPipelineLayout,
-          vertex: { module, entryPoint: "vs_main" },
-          fragment: { module, entryPoint: "fs_main",
-                      targets: [{ format: ACCUM_FORMAT }] },
-          primitive: { topology: "triangle-list" },
-        });
-        this._meterPipeline.set(pipeKey, pipeline);
-      }
-      // Its surface pre-pass, on the same specialization, into the meter's
-      // own meter-sized surface target (_encodeMarch makes it on first use).
-      let surfacePipeline = null;
-      if (this._hasSurfacePass()) {
-        this._meterSurfacePipeline ??= new Map();
-        surfacePipeline = this._meterSurfacePipeline.get(pipeKey);
-        if (!surfacePipeline) {
-          surfacePipeline = this.device.createRenderPipeline({
-            label: `meter-surface(${pipeKey})`,
-            layout: this.rayPipelineLayout,
-            vertex: { module, entryPoint: "vs_main" },
-            fragment: { module, entryPoint: "fs_surface",
-                        targets: [{ format: SURFACE_FORMAT }] },
-            primitive: { topology: "triangle-list" },
-          });
-          this._meterSurfacePipeline.set(pipeKey, surfacePipeline);
-        }
+      // Its march and its surface pre-pass (city/desert), on that
+      // specialization, through the same async cache as the frame's: a
+      // first meter in a city scene would otherwise compile the whole city
+      // trace on the main thread, right after load, on the live AE path.
+      // While either is still compiling this interval has no answer; the
+      // next one asks again, and a pipeline that failed throws from here.
+      const pipeline = this._pipeline("fs_main", ACCUM_FORMAT, spec);
+      const surfacePipeline = this._hasSurfacePass()
+        ? this._pipeline("fs_surface", SURFACE_FORMAT, spec) : null;
+      const compiling = [pipeline, surfacePipeline]
+        .filter((q) => q && isPending(q));
+      if (compiling.length > 0) {
+        for (const q of compiling) q.catch(() => {});
+        return null;
       }
       this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
       await this._ensureSurfaceTarget(this._meterTargets);
@@ -1919,11 +1933,11 @@ export class Renderer {
       let sum = 0.0;
       for (let i = rank; i < lums.length; i++) sum += lums[i];
       return sum / (lums.length - rank);
-    } catch (err) {
-      // A lost device or an unmapped-in-teardown buffer ends metering, not
-      // the app: the AE loop treats null as "no reading this interval".
-      return null;
     } finally {
+      // Errors are the caller's: null means only "not now" (a reading in
+      // flight, or its pipelines compiling — both end). A meter that failed
+      // used to return null as well, and a capture waiting for a reading
+      // then asked again forever.
       this._meterBusy = false;
     }
   }

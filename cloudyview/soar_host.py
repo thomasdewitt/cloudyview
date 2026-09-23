@@ -709,18 +709,16 @@ class SoarRenderer:
         self.tone_map = bool(tone_map)
         self.surface = check_surface(surface)
 
-        # One module per lighting method (see specialize), compiled when a
-        # render first asks for it. The declared default — the live march with
-        # the sky probe, Max's method — is compiled here, because the bake
-        # pipeline is built from it (fs_bake_light reads none of the three)
-        # and because a shader that does not compile should fail at
-        # construction, not at the first frame.
+        # One module per specialization (see specialize and _spec), compiled
+        # when a render first asks for it. The declared default lighting —
+        # the live march with the sky probe, Max's method — is compiled here
+        # so that a shader that does not compile fails at construction, not
+        # at the first frame.
         self._shader_source = (shader_source if shader_source is not None
                                else read_shader())
-        self._ray_modules = {}
-        self._ray_pipelines = {}
-        self._surface_pipelines = {}
-        self._ray_module = self._module_for(light_cache=False, sky_probe=True)
+        self._modules = {}
+        self._pipelines = {}
+        self._module_for(self._spec(light_cache=False, sky_probe=True))
         self._accum_module = device.create_shader_module(code=_ACCUM_SHADER)
 
         self._uniform_buf = device.create_buffer(
@@ -915,14 +913,6 @@ class SoarRenderer:
         ])
         self._march_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout, self._surface_layout])
-        # The sun-tau bake: one field-x plane of the cache per draw, into an
-        # r16float 2D target the caller copies into the 3D cache texture.
-        self._bake_pipeline = d.create_render_pipeline(
-            layout=self._ray_pipeline_layout,
-            vertex={"module": self._ray_module, "entry_point": "vs_main"},
-            fragment={"module": self._ray_module, "entry_point": "fs_bake_light",
-                      "targets": [{"format": "r16float"}]},
-            primitive={"topology": "triangle-list"})
 
         self._accum_layout = d.create_bind_group_layout(entries=[
             {"binding": 0, "visibility": wgpu.ShaderStage.FRAGMENT,
@@ -944,55 +934,68 @@ class SoarRenderer:
                       "targets": [{"format": ACCUM_FORMAT}]},
             primitive={"topology": "triangle-list"})
 
-    def _module_for(self, *, light_cache: bool, sky_probe: bool):
-        """The fs_main module for one lighting method."""
-        key = (bool(light_cache), bool(sky_probe))
-        module = self._ray_modules.get(key)
+    def _spec(self, *, light_cache: bool, sky_probe: bool) -> dict:
+        """Everything specialize() takes, from this renderer's attributes as
+        they stand now plus a lighting method. Every module and pipeline
+        cache here keys on the whole of it, so an attribute changed after
+        construction can never be served a module compiled for the old
+        value."""
+        return dict(periodic=self.periodic, nested=self.nested,
+                    max_light_steps=self.max_light_steps,
+                    tone_map=self.tone_map, surface=self.surface,
+                    light_cache=bool(light_cache), sky_probe=bool(sky_probe))
+
+    def _module_for(self, spec: dict):
+        key = tuple(sorted(spec.items()))
+        module = self._modules.get(key)
         if module is None:
-            module = self.device.create_shader_module(code=specialize(
-                self._shader_source, periodic=self.periodic,
-                nested=self.nested, max_light_steps=self.max_light_steps,
-                tone_map=self.tone_map, surface=self.surface,
-                light_cache=key[0], sky_probe=key[1]))
-            self._ray_modules[key] = module
+            module = self.device.create_shader_module(
+                code=specialize(self._shader_source, **spec))
+            self._modules[key] = module
         return module
+
+    def _pipeline_for(self, entry_point: str, target_format: str, spec: dict,
+                      layout=None):
+        """`layout` defaults to the scene group alone; the march, which also
+        reads the surface pre-pass's target, passes _march_pipeline_layout."""
+        key = (entry_point, target_format, tuple(sorted(spec.items())))
+        pipeline = self._pipelines.get(key)
+        if pipeline is None:
+            module = self._module_for(spec)
+            pipeline = self.device.create_render_pipeline(
+                layout=layout or self._ray_pipeline_layout,
+                vertex={"module": module, "entry_point": "vs_main"},
+                fragment={"module": module, "entry_point": entry_point,
+                          "targets": [{"format": target_format}]},
+                primitive={"topology": "triangle-list"})
+            self._pipelines[key] = pipeline
+        return pipeline
 
     def _ray_pipeline_for(self, view: "ViewState"):
         """The march pipeline for the method `view` asks for — the same two
         flags pack_uniforms writes into row 23, so the row and the compiled
         method cannot disagree."""
-        key = (bool(view.light_cache), bool(view.sky_probe))
-        pipeline = self._ray_pipelines.get(key)
-        if pipeline is None:
-            module = self._module_for(light_cache=key[0], sky_probe=key[1])
-            pipeline = self.device.create_render_pipeline(
-                layout=self._march_pipeline_layout,
-                vertex={"module": module, "entry_point": "vs_main"},
-                fragment={"module": module, "entry_point": "fs_main",
-                          "targets": [{"format": SAMPLE_FORMAT}]},
-                primitive={"topology": "triangle-list"})
-            self._ray_pipelines[key] = pipeline
-        return pipeline
+        return self._pipeline_for("fs_main", SAMPLE_FORMAT, self._spec(
+            light_cache=view.light_cache, sky_probe=view.sky_probe),
+            layout=self._march_pipeline_layout)
+
+    def _bake_pipeline(self):
+        """The sun-tau bake: one field-x plane of the cache per draw, into an
+        r16float 2D target the caller copies into the 3D cache texture.
+        fs_bake_light reads neither lighting constant, so it is built on the
+        declared default method (as the browser's is)."""
+        return self._pipeline_for("fs_bake_light", "r16float", self._spec(
+            light_cache=False, sky_probe=True))
 
     def _surface_pipeline_for(self, view: "ViewState"):
-        """The surface pre-pass pipeline (raymarch.wgsl fs_surface) for the
+        """The surface pre-pass pipeline (raymarch.wgsl fs_surface) on the
         same specialization as `view`'s march — the traced city or desert,
         one texel per render pixel, drawn before every march — or None in a
         scene with no traced surface."""
         if self.surface not in SURFACE_PASS_SURFACES:
             return None
-        key = (bool(view.light_cache), bool(view.sky_probe))
-        pipeline = self._surface_pipelines.get(key)
-        if pipeline is None:
-            module = self._module_for(light_cache=key[0], sky_probe=key[1])
-            pipeline = self.device.create_render_pipeline(
-                layout=self._ray_pipeline_layout,
-                vertex={"module": module, "entry_point": "vs_main"},
-                fragment={"module": module, "entry_point": "fs_surface",
-                          "targets": [{"format": SURFACE_FORMAT}]},
-                primitive={"topology": "triangle-list"})
-            self._surface_pipelines[key] = pipeline
-        return pipeline
+        return self._pipeline_for("fs_surface", SURFACE_FORMAT, self._spec(
+            light_cache=view.light_cache, sky_probe=view.sky_probe))
 
     def _ensure_targets(self, size):
         wgpu = self.wgpu
@@ -1113,6 +1116,7 @@ class SoarRenderer:
         slice_view = slice_tex.create_view()
 
         base = pack_uniforms(state, view)
+        bake_pipeline = self._bake_pipeline()
         for ix in range(cx):
             u = base.copy()
             u[23, 1] = float(ix)
@@ -1121,7 +1125,7 @@ class SoarRenderer:
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": slice_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])
-            rp.set_pipeline(self._bake_pipeline)
+            rp.set_pipeline(bake_pipeline)
             rp.set_bind_group(0, bind_group)
             rp.draw(3)
             rp.end()

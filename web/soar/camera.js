@@ -118,7 +118,15 @@ export class FlightCamera {
                             // crosses a cloud field and goes through a city
                             // block before the frame lands (see
                             // CITY_DEFAULT_SPEED).
-                            speed = DEFAULT_SPEED } = {}) {
+                            speed = DEFAULT_SPEED,
+                            // The lowest the eye may go, in world z — the
+                            // sea's margin by default. null = no floor of
+                            // the camera's own: over the night city the
+                            // street is a solid surface like any roof, and
+                            // the collider (collide.js) owns it, crash and
+                            // all. A floor here would clamp a dive before
+                            // the collider ever saw it reach the ground.
+                            floorZ = OCEAN_FLOOR_MARGIN_M } = {}) {
     this.bmin = bmin;
     this.bmax = bmax;
     this.periodic = periodic;
@@ -134,8 +142,22 @@ export class FlightCamera {
     this.fov = this.start.fov;
     this.startSpeed = speed;
     this.speed = this.startSpeed;
+    this.floorZ = floorZ;
     this.keys = new Set();
     this.speedFlashUntil = 0;
+    // What a city collision does to the flight (collide.js), held here
+    // because it is flight state. `control` scales the player's move: 1
+    // except while a crash has knocked the controls out. `shake` is the
+    // [azimuth, elevation] offset in degrees currently added to the look —
+    // on for the frame's render, off before the next move, so the look the
+    // player steers is never the shaken one. Both stay at their identities
+    // in every scene without a collider.
+    this.control = 1.0;
+    this.shake = [0.0, 0.0];
+    // Bumped by every ABSOLUTE reposition (construction, reset, a map
+    // click): whatever tracks the flight from frame to frame — the
+    // collider's swept paths — must start again rather than sweep a jump.
+    this.epoch = 0;
     // BEFORE constrain(): the fold at the cloud period is invisible to the
     // clouds and meaningless to the tile, so the surface frame derives from
     // the unfolded world position. For the cyberpunk spawn that position is
@@ -150,6 +172,8 @@ export class FlightCamera {
     this.azimuth = this.start.azimuth;
     this.elevation = this.start.elevation;
     this.speed = this.startSpeed;
+    // The look was just written absolutely: no shake is on it any more.
+    this.shake = [0.0, 0.0];
     this._resyncSurface();
     this.constrain();
   }
@@ -164,6 +188,7 @@ export class FlightCamera {
    * the fold against the static offset is exact by definition.)
    */
   _resyncSurface() {
+    this.epoch += 1;
     const t = this.surfaceTileExtent;
     if (t == null) { this.surfacePosition = null; return; }
     this.surfacePosition = [0, 1].map((i) => {
@@ -190,6 +215,31 @@ export class FlightCamera {
       s[1] = (((s[1] + dy) % t) + t) % t;
     }
     this.constrain();
+  }
+
+  /**
+   * A displacement that is not the player's — the collider's bounce, fall
+   * and wall clipping — through the same one move path, so both frames
+   * move together.
+   */
+  displace(dx, dy, dz) {
+    this._translate(dx, dy, dz);
+  }
+
+  /**
+   * Put a shake of [dAz, dEl] degrees on the look in place of whatever
+   * shake was on it. Elevation stays inside its limits, and what is
+   * recorded is the offset actually applied, so taking it off later
+   * restores the look exactly.
+   */
+  setShake(dAz, dEl) {
+    const [az0, el0] = this.shake;
+    if (az0 === dAz && el0 === dEl) return;
+    const baseEl = this.elevation - el0;
+    this.azimuth = mod360(this.azimuth - az0 + dAz);
+    this.elevation = clamp(
+      baseEl + dEl, ELEVATION_LIMITS[0], ELEVATION_LIMITS[1]);
+    this.shake = [dAz, this.elevation - baseEl];
   }
 
   /**
@@ -246,7 +296,7 @@ export class FlightCamera {
     if (this.keys.size === 0) return false;
     const [, r] = cameraBasis(this.azimuth, this.elevation);
     const f = directionFromAzimuthElevation(this.azimuth, 0.0);
-    const d = this.speed * Math.min(dt, 0.1);
+    const d = this.speed * Math.min(dt, 0.1) * this.control;
     const k = this.keys;
     let dx = 0.0, dy = 0.0, dz = 0.0;
     if (k.has("w")) { dx += f[0] * d; dy += f[1] * d; }
@@ -261,7 +311,8 @@ export class FlightCamera {
   }
 
   /**
-   * Keep the camera above the ocean, and — in a periodic domain — inside the
+   * Keep the camera above its floor (the sea's margin; over the city there
+   * is none — see floorZ), and — in a periodic domain — inside the
    * box by wrapping rather than stopping. Crossing a lateral face puts you at
    * the opposite one; flight is endless. The fold is at the CLOUD period and
    * nothing else: the surface tile's frame keeps its own phase in
@@ -277,7 +328,7 @@ export class FlightCamera {
           (((p[i] - this.bmin[i]) % extent) + extent) % extent;
       }
     }
-    p[2] = Math.max(p[2], OCEAN_FLOOR_MARGIN_M);
+    if (this.floorZ !== null) p[2] = Math.max(p[2], this.floorZ);
   }
 
   relativePosition() {
