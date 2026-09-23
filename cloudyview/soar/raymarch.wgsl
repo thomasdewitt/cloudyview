@@ -202,9 +202,13 @@ const TONE_MAP: bool = true;
 // the vertical sky-visibility march. Specialized rather than branched on
 // because the untaken side of a branch still costs registers on every
 // sample: compiling out the method a tier does not use bought 3-14% at Low
-// and Minimal (2026-09-23), bit-identically. The declared values are the
-// host defaults — the live march with the probe — so an unspecialized
-// compile is Max's shader.
+// and Minimal (2026-09-23). The specialization is semantically exact; the
+// A/B against the run-time branches was bit-identical in 17 of 20
+// configurations, and in the other 3 one channel of a single frame's sample
+// differed by one float16 ulp, from the driver fusing multiply-adds
+// differently once the branches were gone (soar_shader_ab.py's docstring).
+// The declared values are the host defaults — the live march with the
+// probe — so an unspecialized compile is Max's shader.
 //
 // Ice mode (row 23.w) is deliberately NOT one of these. Compiling it out
 // would buy another 3-5%, but it is the one switch whose removal changes
