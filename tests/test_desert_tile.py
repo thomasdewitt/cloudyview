@@ -75,11 +75,15 @@ def test_the_measured_numbers_are_the_bytes():
     assert META["height_max_m"] == heights[0].max()
 
 
-def test_the_mean_lightness_is_the_top_mip():
+def test_the_regional_albedo_is_the_mean_of_the_albedos():
     top = _level(META["mips"] - 1)
     assert top.shape == (1, 1, 2)
-    assert _const("DESERT_MEAN_LIGHTNESS") == META["mean_lightness"]
     assert META["mean_lightness"] == round(float(top[0, 0, 1]), 4)
+    m = re.search(r"const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>"
+                  r"\(([^)]*)\);", SHADER)
+    shader = tuple(float(v) for v in m.group(1).split(","))
+    truth = export_desert_tile.albedo_of(_level(0)[..., 1]).reshape(-1, 3)
+    assert shader == tuple(round(float(v), 3) for v in truth.mean(0))
 
 
 def test_the_octave_margin_is_the_sum_of_the_gains():
@@ -196,3 +200,25 @@ def test_the_desert_refuses_to_render_without_its_relief():
     with pytest.raises(ValueError, match="desert's"):
         sh.pack_uniforms(sh.SceneState(**{**base, "surface": "ocean"},
                                        desert_relief_m=(0, 0, 0)), view)
+
+
+def _vec3(name):
+    m = re.search(rf"const {name}: vec3<f32> = vec3<f32>\(([^)]*)\);", SHADER)
+    assert m, f"{name} is not declared in raymarch.wgsl"
+    return tuple(float(v) for v in m.group(1).split(","))
+
+
+def test_the_far_field_colour_correction_is_the_tiles():
+    """The bake's albedo endmembers are the shader's, and the per-level
+    correction it measured with them is the one the shader applies."""
+    assert _vec3("DESERT_ALBEDO_PAVEMENT") == export_desert_tile.ALBEDO_PAVEMENT
+    assert _vec3("DESERT_ALBEDO_SOIL") == export_desert_tile.ALBEDO_SOIL
+    assert _vec3("DESERT_ALBEDO_WASH") == export_desert_tile.ALBEDO_WASH
+    lights = [_level(k)[..., 1] for k in range(META["mips"])]
+    assert export_desert_tile.albedo_correction(lights) == \
+        META["albedo_correction"]
+    body = re.search(r"const DESERT_ALBEDO_CORRECTION = array<vec3<f32>, 12>"
+                     r"\((.*?)\n\);", SHADER, re.S).group(1)
+    rows = [tuple(float(v) for v in r.split(","))
+            for r in re.findall(r"vec3<f32>\(([^)]*)\)", body)]
+    assert rows == [tuple(r) for r in META["albedo_correction"]]

@@ -492,6 +492,10 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     if not desert and state.desert_relief_m is not None:
         raise ValueError("desert_relief_m is the desert's; this scene is the "
                          f"{state.surface}.")
+    if desert and not state.ocean_enabled:
+        raise ValueError(
+            "the desert needs the surface enabled: ocean_enabled is the "
+            "surface flag (row 9.z) and the desert is drawn regardless.")
     if city and not state.ocean_enabled:
         raise ValueError(
             "city mode needs the surface enabled: ocean_enabled is the "

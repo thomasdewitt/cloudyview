@@ -1410,15 +1410,30 @@ export class Viewer {
     if (this.scene?.city || kind === this.surfaceKind || this._surfacing) {
       return;
     }
+    // A recorded track stands on one ground: its header names it, and its
+    // samples' surface positions are fractions of that ground's tile. A
+    // switch mid-recording would replay half the flight over the wrong one.
+    if (this.recorder?.recording) {
+      this.ui.say("A flight track stands on one ground — stop the " +
+                  "recording (R) before switching.", 4);
+      return;
+    }
     this._surfacing = true;
     try {
       if (kind === "desert" && !this._desertTile) {
         this.ui.say("Laying out the desert…", 30);
       }
+      // Everything that can wait or fail first — the download, the
+      // pipeline — while the flight keeps drawing the ground it has; then
+      // the renderer and the camera change together, in one tick, so no
+      // frame is drawn with the new shader over the old frame or floor
+      // (codex review: an ocean camera at 12.5 m under a +16 m dune).
       const tile = await this._surfaceTile(kind);
-      await this.renderer.setSurface(kind, tile);
-      this.scene.desertFloorAt = kind === "desert" ? desertFloorAt(tile) : null;
-      this.camera.setSurface(tile.tileExtent, this.scene.desertFloorAt);
+      await this.renderer.prepareSurface(kind);
+      const floorAt = kind === "desert" ? desertFloorAt(tile) : null;
+      this.renderer.commitSurface(kind, tile);
+      this.scene.desertFloorAt = floorAt;
+      this.camera.setSurface(tile.tileExtent, floorAt);
       this.ui.say(kind === "desert"
         ? "The Sonoran desert (G for the ocean)."
         : "The ocean (G for the desert).", 4);

@@ -10703,6 +10703,36 @@ const DESERT_ALBEDO_PAVEMENT: vec3<f32> = vec3<f32>(0.19, 0.15, 0.115);
 const DESERT_ALBEDO_SOIL: vec3<f32> = vec3<f32>(0.33, 0.22, 0.13);
 const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.38, 0.32, 0.25);
 
+// The far field's colour kept honest. Lightness mips are exact box means,
+// but albedo bends at the soil knot, so a footprint mixing wash sand with
+// pavement reads redder and duller through its mean lightness than its
+// albedos average to — by ~9% in blue at the top of the chain. This is the
+// tile-wide ratio of the two at each mip (tools/export_desert_tile.py
+// albedo_correction; held to the tile by tests/test_desert_tile.py), applied
+// at the footprint's level so no seam appears where detail drops out.
+const DESERT_ALBEDO_CORRECTION = array<vec3<f32>, 12>(
+    vec3<f32>(1.0000, 1.0000, 1.0000),
+    vec3<f32>(0.9995, 1.0002, 1.0013),
+    vec3<f32>(0.9984, 1.0007, 1.0039),
+    vec3<f32>(0.9961, 1.0018, 1.0099),
+    vec3<f32>(0.9886, 1.0054, 1.0295),
+    vec3<f32>(0.9774, 1.0109, 1.0609),
+    vec3<f32>(0.9710, 1.0141, 1.0801),
+    vec3<f32>(0.9691, 1.0151, 1.0862),
+    vec3<f32>(0.9684, 1.0155, 1.0884),
+    vec3<f32>(0.9683, 1.0155, 1.0885),
+    vec3<f32>(0.9683, 1.0155, 1.0885),
+    vec3<f32>(0.9682, 1.0155, 1.0885)
+);
+
+fn desert_albedo_correction(fp: f32) -> vec3<f32> {
+    let lod = desert_lod(fp);
+    let l0 = min(i32(floor(lod)), 11);
+    let l1 = min(l0 + 1, 11);
+    return mix(DESERT_ALBEDO_CORRECTION[l0], DESERT_ALBEDO_CORRECTION[l1],
+               lod - f32(l0));
+}
+
 fn desert_albedo(lightness: f32) -> vec3<f32> {
     let l = clamp(lightness, 0.0, 1.0);
     if (l < 0.5) {
@@ -10862,8 +10892,8 @@ const DESERT_OCTAVE_MARGIN: f32 = 0.463;
 // into meta.json as slope_max; tests/test_desert_tile.py holds this to it).
 // This is what lets the trace step by clearance without tunnelling.
 const DESERT_SLOPE_MAX = array<f32, 12>(
-    0.992, 0.669, 0.381, 0.169, 0.089, 0.060,
-    0.045, 0.036, 0.025, 0.017, 0.002, 0.0
+    1.012, 0.673, 0.392, 0.170, 0.100, 0.064,
+    0.050, 0.040, 0.029, 0.021, 0.002, 0.0
 );
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
@@ -10947,8 +10977,8 @@ fn desert_octave_margin(fp: f32) -> f32 {
 // test_desert_tile.py holds this to it). Mip k plus this is a lid over the
 // ground that is as smooth as mip k — see desert_terrain_trace.
 const DESERT_ENVELOPE_M = array<f32, 12>(
-    0.0, 0.800, 1.246, 1.265, 1.175, 1.604,
-    2.388, 3.619, 6.361, 9.421, 17.194, 17.703
+    0.0, 0.800, 1.246, 1.266, 1.176, 1.604,
+    2.388, 3.619, 6.361, 9.421, 17.194, 17.704
 );
 
 // The trace's budget, and its floor: a step is never shorter than this many
@@ -10957,12 +10987,12 @@ const DESERT_ENVELOPE_M = array<f32, 12>(
 const DESERT_MAX_STEPS: i32 = 192;
 const DESERT_MIN_STEP_FP: f32 = 0.75;
 // The coarsest lid the trace steps against: mip 7 (256 m texels), whose
-// envelope is still a few metres.
+// envelope is still a few metres. Far rays read coarser still — the drawn
+// surface's own mip grows with the footprint, all the way to the top level,
+// which IS the datum plane — so there is no hand-over to a plane anywhere
+// short of it (a hand-over at a footprint threshold was a range ring: a
+// grazing ray shifts its hit by kilometres per metre of height).
 const DESERT_LID_MAX_LEVEL: f32 = 7.0;
-// Past the footprint at which the tile's whole relief spans half a pixel,
-// the ground is a plane at the datum as far as any pixel can tell, and the
-// trace hands over to it.
-const DESERT_PLANE_RELIEF_PIXELS: f32 = 0.5;
 
 // The ground's own trace, in two regimes.
 //
@@ -10995,16 +11025,12 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
     }
     let hlen = length(dir.xy);
     let closing = max(-dir.z, 0.0);
-    let relief = zr.y - zr.x;
     var lid = DESERT_LID_MAX_LEVEL;
     var t_prev = -1.0;
     var gap_prev = 0.0;
     for (var i: i32 = 0; i < DESERT_MAX_STEPS; i = i + 1) {
         let fp = pixel_angle * t;
         let p = o + t * dir;
-        if (fp * DESERT_PLANE_RELIEF_PIXELS > relief) {
-            break;
-        }
         // A rising ray above every ground there is will never come down.
         if (dir.z >= 0.0 && p.z > zr.y) {
             return desert_miss();
@@ -11048,11 +11074,11 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
                 pb.z - desert_surface(pb.xy, pixel_angle * t_floor).x));
         }
     }
-    // Every pixel that reaches here is either beyond the footprint where
-    // the relief is sub-pixel, or out of budget. Either way the ground this
-    // ray meets is within [t, the slab floor], and it stands on the plane of
-    // the tile's mean height as closely as any pixel can resolve: land it
-    // there, and never earlier than where the march got to. A rising ray
+    // Out of budget — rare now that far steps are lid steps, and only on
+    // the longest grazing rays. The ground this ray meets is within [t, the
+    // slab floor], and at a footprint that has spent the budget it stands on
+    // the plane of the tile's mean height as closely as the pixel resolves:
+    // land it there, never earlier than where the march got to. A rising ray
     // (possible only from a camera inside the slab) that has not met ground
     // leaves it.
     if (dir.z < 0.0) {
@@ -11657,10 +11683,24 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     // The slant path to the sun. The baked cache, where it is valid, reads
     // the same tau at the point this path enters the cloud box: below the
     // box floor the path crosses only clear air.
+    //
+    // In a periodic domain that entry is the box floor. In a bounded one
+    // the path may enter through a side face, or miss the box entirely —
+    // then it is the ray-box entry that is read, and a miss is a clear sun
+    // (clamp-sampling the floor plane there read an unrelated edge column).
     var tau_sun: f32;
     if (u.light_cache.x > 0.5 && p_world.z < u.bmin.z && sun.z > 1e-4) {
-        let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
-        tau_sun = sample_light_tau(entry);
+        if (PERIODIC_DOMAIN) {
+            let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
+            tau_sun = sample_light_tau(entry);
+        } else {
+            let hit = ray_box(p_world, 1.0 / sun);
+            if (hit.x > hit.y || hit.y <= 0.0) {
+                tau_sun = 0.0;
+            } else {
+                tau_sun = sample_light_tau(p_world + sun * max(hit.x, 0.0));
+            }
+        }
     } else {
         tau_sun = light_march_tau(p_world, sun_shadow, t_hit * u.periodic.y,
                                   jit);
@@ -11701,21 +11741,21 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     L.sky = sky_clear * open + lid;
     L.t_sun = t_sun;
     L.sky_open = open;
-    // The surroundings' reflected light, from the tile's mean lightness as
-    // the regional albedo.
-    L.ground = desert_albedo(DESERT_MEAN_LIGHTNESS) * (L.sun * mu_sun + L.sky);
+    // The surroundings' reflected light, from the tile's mean albedo.
+    L.ground = DESERT_BOUNCE_ALBEDO * (L.sun * mu_sun + L.sky);
     return L;
 }
 
-// The shipped tile's mean lightness (its top mip), for the regional albedo.
-const DESERT_MEAN_LIGHTNESS: f32 = 0.4109;
 
 // Shadow the terrain throws on itself: a short march toward the sun over
 // the same footprint-filtered surface, with the penumbra of the sun's own
 // disc (a gap that closes within the disc's angular radius is partial
 // light). Cut banks in a wash at low sun are the case that needs it.
-const DESERT_SHADOW_STEPS: i32 = 20;
-const DESERT_SHADOW_REACH_M: f32 = 160.0;
+// Geometric steps out to 1.5 km: at a sunset-low sun a ridge that far
+// up-sun still shades the lee (the footprint of the read grows with the
+// distance, so the far steps read the coarse relief that matters there).
+const DESERT_SHADOW_STEPS: i32 = 24;
+const DESERT_SHADOW_REACH_M: f32 = 1500.0;
 
 fn desert_terrain_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
     if (sun.z <= 0.0) {
@@ -11825,8 +11865,9 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // The silt between the drawn stones, textured below them by the
     // stones it averages over.
     let fpg = fp / max(abs(dot(dir, n)), 0.08);
-    let albedo = desert_matrix_albedo(desert_albedo(light), m, fp)
-                 * desert_grain(h.pos.xy, fp, fpg, m);
+    let albedo = desert_matrix_albedo(
+            desert_albedo(light) * desert_albedo_correction(fp), m, fp)
+        * desert_grain(h.pos.xy, fp, fpg, m);
     // The kernel BRF is the statistical form of the stones' shadows and
     // hot spot; where the stones are geometry, geometry casts them instead.
     let statistical = 1.0 - desert_stone_resolve(0, fp);
@@ -11955,9 +11996,10 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
 }
 
 // Mean hemispherical albedo of the ground as a cloud base sees it, for the
-// surface bounce: the tile's mean lightness. The ocean's bounce constant was
-// tuned over water, so the desert's scales it by the ratio of the two.
-const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.305, 0.208, 0.127);
+// surface bounce and the upwelling light a facet sees: the mean of the
+// tile's level-0 albedos (tests/test_desert_tile.py). The ocean's bounce
+// constant was tuned over water, so the desert's scales it by the ratio.
+const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.295, 0.211, 0.139);
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 
 // === END DESERT GROUND ===

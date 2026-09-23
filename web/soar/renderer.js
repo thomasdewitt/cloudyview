@@ -495,16 +495,13 @@ export class Renderer {
   }
 
   /**
-   * Stand the scene on the other day surface — "ocean" or "desert" — in
-   * flight. `tile` is the loaded surface tile (scene.js loadOceanTile). The
-   * specialization follows scene.desert through every pipeline key, so this
-   * is the tile, the four row-9 numbers and the flag, then a rebind and a
-   * fresh accumulation. The new pipeline is built and validated here, before
-   * a frame is drawn with it, so a shader that will not compile says so at
-   * the switch rather than as a black frame. The night city is not a day
-   * surface and never comes or goes through here.
+   * Build and validate the pipeline for a day surface — "ocean" or
+   * "desert" — WITHOUT standing the scene on it. The first half of an
+   * in-flight switch: everything that can fail or wait happens here, while
+   * the scene keeps rendering what it stands on, so a shader that will not
+   * compile says so and leaves the flight as it was.
    */
-  async setSurface(kind, tile) {
+  async prepareSurface(kind) {
     if (this.scene.city) {
       throw new Error("the night city has no other surface to switch to.");
     }
@@ -512,6 +509,22 @@ export class Renderer {
       throw new Error(`unknown day surface '${kind}'; expected 'ocean' or ` +
                       "'desert'.");
     }
+    this.device.pushErrorScope("validation");
+    this._rayPipeline(SAMPLE_FORMAT, kind);
+    const error = await this.device.popErrorScope();
+    if (error) {
+      throw new Error(`The ${kind} shader failed to build: ${error.message}`);
+    }
+  }
+
+  /**
+   * The second half: stand the scene on `kind`, whose pipeline
+   * prepareSurface has already built. Synchronous, so the caller can move
+   * the camera onto the new surface's frame and floor in the same tick and
+   * no frame is ever drawn half-switched. `tile` is the loaded surface tile
+   * (scene.js loadOceanTile).
+   */
+  commitSurface(kind, tile) {
     const s = this.scene;
     s.desert = kind === "desert";
     s.oceanView = tile.view;
@@ -519,12 +532,6 @@ export class Renderer {
     s.oceanTileExtent = tile.tileExtent;
     s.oceanMaxLod = tile.maxLod;
     s.desertReliefM = s.desert ? desertReliefM(tile.meta) : null;
-    this.device.pushErrorScope("validation");
-    this._rayPipeline(SAMPLE_FORMAT);
-    const error = await this.device.popErrorScope();
-    if (error) {
-      throw new Error(`The ${kind} shader failed to build: ${error.message}`);
-    }
     this.refreshBindGroup();
     this._resetAccumulation();
   }
@@ -821,15 +828,18 @@ export class Renderer {
     return this.scene.city ? "city" : (this.scene.desert ? "desert" : "ocean");
   }
 
-  _module(periodic, nested, maxLightSteps, toneMap = true) {
+  _module(periodic, nested, maxLightSteps, toneMap = true,
+          surface = this._surfaceKey()) {
     // The surface is a property of the scene, so every caller inherits it
     // here rather than threading it. The city is constant for this
     // renderer's whole life; ocean and desert can trade places in flight
-    // (setSurface), which is why the surface is in every cache key.
-    const city = Boolean(this.scene.city);
-    const desert = Boolean(this.scene.desert);
+    // (prepareSurface / commitSurface), which is why the surface is in every
+    // cache key — and why it can be named explicitly, to build a surface's
+    // pipeline before the scene stands on it.
+    const city = surface === "city";
+    const desert = surface === "desert";
     const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}|` +
-                this._surfaceKey();
+                surface;
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
@@ -843,13 +853,13 @@ export class Renderer {
     return module;
   }
 
-  _rayPipeline(targetFormat) {
+  _rayPipeline(targetFormat, surface = this._surfaceKey()) {
     const key = `${targetFormat}|${this.periodic}|${this.scene.nested}|` +
-                `${this.maxLightSteps}|${this._surfaceKey()}`;
+                `${this.maxLightSteps}|${surface}`;
     let pipeline = this._pipelines.get(key);
     if (!pipeline) {
       const module = this._module(
-        this.periodic, this.scene.nested, this.maxLightSteps);
+        this.periodic, this.scene.nested, this.maxLightSteps, true, surface);
       pipeline = this.device.createRenderPipeline({
         label: `raymarch(${key})`,
         layout: this.rayPipelineLayout,
