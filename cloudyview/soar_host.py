@@ -593,6 +593,13 @@ SAMPLE_FORMAT = "rgba16float"
 # (~10 levels from 1 to 1024 frames — see the journal, iter_012). Full
 # precision costs one texture's worth of bandwidth and removes it entirely.
 ACCUM_FORMAT = "rgba32float"
+# The surface pre-pass target: (radiance, t) of the traced city or desert
+# under each render pixel. t runs to 1e30 on a miss and to tens of km on a
+# hit, so it needs float32; fs_main only ever textureLoad()s it.
+SURFACE_FORMAT = "rgba32float"
+# The scenes whose opaque surface is traced by that pass rather than in the
+# march (raymarch.wgsl: the surface pre-pass section).
+SURFACE_PASS_SURFACES = ("city", "desert")
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
@@ -712,6 +719,12 @@ class SoarRenderer:
         # Binding 8 (ice-detection mode, browser-only) is never read here —
         # row 23.w stays 0 — but the layout requires it.
         self._ice_frac_tex = self._dummy_volume()
+        # Binding 10's stand-in: what every pass that is not the march reads
+        # there (the surface pass cannot bind the target it is writing), and
+        # what the march reads in a scene with no traced surface.
+        self._surface_dummy = self.device.create_texture(
+            size=(1, 1, 1), dimension="2d", format=SURFACE_FORMAT,
+            usage=self.wgpu.TextureUsage.TEXTURE_BINDING)
         self._light_cache_dims = None
         self._ocean_tex = self._load_surface_tile()
         self._targets = None
@@ -851,6 +864,11 @@ class SoarRenderer:
              "sampler": {"type": "filtering"}},
             {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
             {"binding": 8, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
+            # The surface pre-pass's (radiance, t), textureLoad()ed only, so
+            # rgba32float's unfilterability is exactly right.
+            {"binding": 10, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "unfilterable-float",
+                         "view_dimension": "2d"}},
         ])
         self._ray_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
@@ -858,6 +876,19 @@ class SoarRenderer:
             fragment={"module": self._ray_module, "entry_point": "fs_main",
                       "targets": [{"format": SAMPLE_FORMAT}]},
             primitive={"topology": "triangle-list"})
+        # The surface pre-pass: the traced city or desert, one texel per
+        # render pixel, drawn before every march (raymarch.wgsl fs_surface).
+        # Scenes without a traced surface have no such pass.
+        self._surface_pipeline = None
+        if self.surface in SURFACE_PASS_SURFACES:
+            self._surface_pipeline = d.create_render_pipeline(
+                layout=d.create_pipeline_layout(
+                    bind_group_layouts=[self._ray_layout]),
+                vertex={"module": self._ray_module, "entry_point": "vs_main"},
+                fragment={"module": self._ray_module,
+                          "entry_point": "fs_surface",
+                          "targets": [{"format": SURFACE_FORMAT}]},
+                primitive={"topology": "triangle-list"})
         # The sun-tau bake: one field-x plane of the cache per draw, into an
         # r16float 2D target the caller copies into the 3D cache texture.
         self._bake_pipeline = d.create_render_pipeline(
@@ -897,15 +928,37 @@ class SoarRenderer:
         make = lambda fmt: self.device.create_texture(
             size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
         self._targets = {"size": size, "sample": make(SAMPLE_FORMAT),
-                         "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)]}
+                         "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)],
+                         "surface": (make(SURFACE_FORMAT)
+                                     if self._surface_pipeline is not None
+                                     else None),
+                         "march_bg": None}
         return self._targets
 
     def _ensure_bind_group(self):
+        """The bind group every pass but the march uses: binding 10 is the
+        stand-in, since the surface pass cannot bind the target it writes."""
         if self._bind_group is not None:
             return self._bind_group
+        self._bind_group = self._make_bind_group(self._surface_dummy)
+        return self._bind_group
+
+    def _march_bind_group(self, targets):
+        """The march's bind group: binding 10 is this size's surface target
+        when the scene traces one, the stand-in otherwise."""
+        if targets["surface"] is None:
+            return self._ensure_bind_group()
+        # Rebuilt whenever the base group is (a new volume, nest or cache).
+        base = self._ensure_bind_group()
+        if targets["march_bg"] is None or targets["march_bg"][0] is not base:
+            targets["march_bg"] = (base, self._make_bind_group(
+                targets["surface"]))
+        return targets["march_bg"][1]
+
+    def _make_bind_group(self, surface_tex):
         if self._vol_tex is None:
             raise RuntimeError("No volume uploaded; call upload_volume() first.")
-        self._bind_group = self.device.create_bind_group(
+        return self.device.create_bind_group(
             layout=self._ray_layout, entries=[
                 {"binding": 0, "resource": {"buffer": self._uniform_buf,
                                             "offset": 0, "size": UNIFORM_NBYTES}},
@@ -917,8 +970,8 @@ class SoarRenderer:
                 {"binding": 6, "resource": self._vol_wrap_sampler},
                 {"binding": 7, "resource": self._light_tau_tex.create_view()},
                 {"binding": 8, "resource": self._ice_frac_tex.create_view()},
+                {"binding": 10, "resource": surface_tex.create_view()},
             ])
-        return self._bind_group
 
     def _check_scene(self, state: SceneState) -> None:
         """The surface is compiled in and its tile is bound at construction.
@@ -1029,7 +1082,10 @@ class SoarRenderer:
         w, h = view.render_size
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()
+        march_bg = self._march_bind_group(targets)
         sample_view = targets["sample"].create_view()
+        surface_view = (targets["surface"].create_view()
+                        if targets["surface"] is not None else None)
 
         accum_index = 0
         for i in range(frames):
@@ -1056,11 +1112,22 @@ class SoarRenderer:
                 ])
 
             enc = self.device.create_command_encoder()
+            if surface_view is not None:
+                # The surface under this frame's rays, for the march below:
+                # same uniforms, same frame, same pixels.
+                sp = enc.begin_render_pass(color_attachments=[{
+                    "view": surface_view, "load_op": "clear",
+                    "store_op": "store",
+                    "clear_value": (0.0, 0.0, 0.0, 1e30)}])
+                sp.set_pipeline(self._surface_pipeline)
+                sp.set_bind_group(0, bind_group)
+                sp.draw(3)
+                sp.end()
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": sample_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])
             rp.set_pipeline(self._ray_pipeline)
-            rp.set_bind_group(0, bind_group)
+            rp.set_bind_group(0, march_bg)
             rp.draw(3)
             rp.end()
 
