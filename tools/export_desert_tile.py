@@ -257,7 +257,15 @@ def relief_stats(heights: list) -> dict:
     band = heights[0] - coarse
     bg = np.hypot((np.roll(band, -1, 1) - band) / cell,
                   (np.roll(band, -1, 0) - band) / cell)
+    # envelope_m: how far the full surface can stand ABOVE mip k read at the
+    # same point — the lid the trace can step against from far above, with
+    # mip k's gentle slope bound in place of level 0's (a tenth again for
+    # the bilinear corners between texel centres).
+    envelope = [round(1.1 * float((heights[0]
+                                   - _bilinear_periodic(h, n)).max()), 3)
+                for h in heights]
     return {"slope_max": slope_max,
+            "envelope_m": envelope,
             "band_max_m": round(float(np.abs(band).max()), 4),
             "band_slope_max": round(1.25 * float(bg.max()), 3)}
 

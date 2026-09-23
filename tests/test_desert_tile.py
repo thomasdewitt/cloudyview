@@ -52,6 +52,12 @@ def test_the_shader_slope_table_is_the_tiles():
     assert int(m.group(1)) == len(table) == META["mips"]
     assert table == META["slope_max"]
     assert _const("DESERT_OCTAVE_SLOPE_MAX") == META["band_slope_max"]
+    m = re.search(r"const DESERT_ENVELOPE_M = array<f32, (\d+)>\(([^)]*)\);",
+                  SHADER)
+    assert m, "DESERT_ENVELOPE_M is not declared in raymarch.wgsl"
+    env = [float(v) for v in m.group(2).replace("\n", " ").split(",")
+           if v.strip()]
+    assert env == META["envelope_m"]
 
 
 def test_the_measured_numbers_are_the_bytes():

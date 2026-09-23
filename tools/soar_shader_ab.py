@@ -53,7 +53,7 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
-    surface_cell_m,
+    desert_relief_m, surface_cell_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
@@ -203,6 +203,9 @@ def main():
         state.ocean_fif_dx = surface_cell_m(surface, meta)
         state.ocean_tile_extent = float(meta["tile_extent_m"])
         state.ocean_max_lod = int(meta["mips"]) - 1
+    if surface == "desert":
+        # Row 8.yzw: the tile's relief, without which the desert is a plane.
+        state.desert_relief_m = desert_relief_m(meta)
 
     views = ALL_VIEWS
     if city:
