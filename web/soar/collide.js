@@ -275,13 +275,15 @@ export class CityCollider {
    * this frame's shake on.
    *
    * `flyer` is the flyer that is up (placed off this frame's camera
-   * already), or null.
+   * already), or null. Returns the knock this frame started —
+   * {severity, side, duration, landing}, what Flyer.knock takes — or null,
+   * so a track being recorded can carry it (track.js).
    */
   resolve(dt, camera, flyer) {
     dt = clamp(dt, 1e-4, MAX_DT);
     if (camera.epoch !== this._epoch || this._cam === null) {
       this._seed(camera, flyer);
-      return;
+      return null;
     }
     const c0 = this._cam;
     const c1 = this._cityPosition(camera);
@@ -323,13 +325,14 @@ export class CityCollider {
       this._move(camera, flyer, sub(c0, cam));
     }
 
-    if (contact !== null) this._contact(contact, dt, flyer);
+    const knock = contact !== null ? this._contact(contact, dt, flyer) : null;
     if (this.episode !== null && this.episode.done) this.episode = null;
     if (this.episode === null) camera.control = 1.0;
     const [saz, sel] = this.episode ? this.episode.shake(this.episode.t)
                                     : [0.0, 0.0];
     camera.setShake(saz, sel);
     this._remember(camera, flyer);
+    return knock;
   }
 
   // ---------------------------------------------------------------------------
@@ -358,15 +361,18 @@ export class CityCollider {
     return null;
   }
 
-  /** A contact: a scrape, a crash, or something that happens mid-episode. */
+  /**
+   * A contact: a scrape, a crash, or something that happens mid-episode.
+   * Returns the knock a crash hands the flyer, or null.
+   */
   _contact(block, dt, flyer) {
     if (this.episode !== null) {
       this.episode.touch(block.normal);
-      return;
+      return null;
     }
     const n = block.normal;
     const speed = -dot(n, block.arrival) / dt;
-    if (speed < IMPACT_MIN_SPEED) return;
+    if (speed < IMPACT_MIN_SPEED) return null;
     const severity = clamp(speed / IMPACT_FULL_SPEED, 0.0, 1.0);
     const landing = n[2] > 0.7;
     const e = new Episode({
@@ -377,15 +383,27 @@ export class CityCollider {
     // towards, from the arrival's sense round the normal. Head-on has no
     // side worth reading and gets one anyway.
     const across = n[0] * block.arrival[1] - n[1] * block.arrival[0];
-    flyer?.knock({ severity, landing, duration: e.duration,
-                   side: across < 0.0 ? -1.0 : 1.0 });
+    const knock = { severity, landing, duration: e.duration,
+                    side: across < 0.0 ? -1.0 : 1.0 };
+    flyer?.knock(knock);
+    return knock;
   }
 
-  /** Move camera and flyer together by a city-frame (= world) vector. */
+  /**
+   * Move camera and flyer together by a city-frame (= world) vector.
+   *
+   * The flyer moves by what the camera's world position ACTUALLY did, not
+   * by `d`: a correction that carries the camera across the cloud domain's
+   * edge comes back folded by a whole cloud period (constrain()), and a
+   * flyer moved by `d` alone would be left a domain-width from the camera
+   * it hangs off — drawn nowhere this frame, and next frame swept from
+   * fifty kilometres away.
+   */
   _move(camera, flyer, d) {
     if (d[0] === 0.0 && d[1] === 0.0 && d[2] === 0.0) return;
+    const before = [...camera.position];
     camera.displace(d[0], d[1], d[2]);
-    flyer?.shift(d);
+    flyer?.shift(sub(camera.position, before));
   }
 
   /** The camera in the city frame, unwrapped against the last position. */
@@ -432,6 +450,22 @@ export class CityCollider {
       }
       this._move(camera, flyer, [0.0, 0.0,
         solid.top + CAMERA_RADIUS_M + CLEARANCE_M - p[2]]);
+    }
+    // And the flyer off whatever it was placed into — a reset or a map
+    // click beside a wall, looking at it — by backing both off along the
+    // tether's blocking face, as resolve() would, as long as that move is
+    // itself clear for the camera.
+    for (let i = 0; flyer && i < MAX_CLIPS; i++) {
+      const cam = this._cityPosition(camera);
+      const fly = add(cam, sub(flyer.position, camera.position));
+      const hit = this.city.sweep(cam, fly, FLYER_RADIUS_M);
+      if (hit === null) break;
+      const corr = scale(hit.normal,
+        dot(hit.normal, sub(hit.point, fly)) + CLEARANCE_M);
+      const to = add(cam, corr);
+      if (this.city.sweep(cam, to, CAMERA_RADIUS_M) !== null
+          || this.city.inside(to, CAMERA_RADIUS_M) !== null) break;
+      this._move(camera, flyer, corr);
     }
     this._remember(camera, flyer);
   }

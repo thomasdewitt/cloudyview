@@ -40,7 +40,7 @@ function destroyFlyers(flyers) {
   for (const flyer of Object.values(flyers ?? {})) flyer?.destroy();
 }
 import {
-  TrackRecorder, trackPayload, resampleTrack, resampledFrameCount,
+  TrackRecorder, trackPayload, resampleTrack, resampledFrameCount, knocksDue,
   MAX_TRACK_SECONDS,
 } from "./track.js";
 import { UI } from "./ui.js";
@@ -2289,7 +2289,7 @@ export class Viewer {
         "which is the longest track cloudyview records. Here is what it " +
         "caught.", 6);
     }
-    this.ui.open("track", { samples });
+    this.ui.open("track", { samples, knocks: this.recorder.knocks });
   }
 
   /** How many video frames a track becomes at the chosen rate. */
@@ -2306,7 +2306,7 @@ export class Viewer {
    * That is the whole argument for WebCodecs over screen capture: a frame
    * may take six seconds to converge and the video is still 30 seconds long.
    */
-  async renderTrackVideo(samples) {
+  async renderTrackVideo(samples, knocks = []) {
     if (this._capturing) return;
     const { VideoWriter, evenSize } = await import("./video.js");
 
@@ -2370,7 +2370,10 @@ export class Viewer {
             : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
         };
         const overlays = this.captureOverlays
-          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze)
+          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze,
+                                  knocksDue(knocks,
+                                            i > 0 ? frames[i - 1].t : -Infinity,
+                                            frames[i].t))
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
@@ -2420,10 +2423,14 @@ export class Viewer {
   /** The overlays an offline frame draws, laid out for that frame's size.
    *  `haze` is the CAPTURE's, so the minimap reads like the picture it sits
    *  on rather than like the session it was launched from. */
-  _offlineOverlays(pose, size, dt, haze = this.haze) {
+  _offlineOverlays(pose, size, dt, haze = this.haze, knocks = []) {
     const overlays = [];
     if (this.flyer && this.flyerEnabled) {
       this.flyer.update(dt, pose);
+      // A crash in the recorded flight: the pose already carries the
+      // bounce, fall and shake; the tumble is the flyer's, handed over here
+      // at the age it has on this frame.
+      for (const knock of knocks) this.flyer.knock(knock);
       this.flyer.writeUniforms(pose, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
         toneMapGamma: this.toneMapGamma,
@@ -2446,9 +2453,9 @@ export class Viewer {
   }
 
   /** The track as a file, which `soar TRACK.json` renders on the desktop. */
-  downloadTrack(samples) {
+  downloadTrack(samples, knocks = []) {
     const size = this.captureDimensions();
-    const payload = trackPayload(this.renderMetadata(size), samples);
+    const payload = trackPayload(this.renderMetadata(size), samples, knocks);
     download(new Blob([JSON.stringify(payload)], { type: "application/json" }),
              timestampedName("cloudyview_track", ".json"));
     this.ui.say(`Saved ${samples.length} samples.`, 3);
@@ -3054,7 +3061,10 @@ export class Viewer {
     this.camera.constrain();
     const flyer = this.flyer && this.flyerEnabled ? this.flyer : null;
     flyer?.update(this.paused ? 0 : dt, this.camera);
-    if (!this.paused) this.collider?.resolve(dt, this.camera, flyer);
+    if (!this.paused && this.collider) {
+      const knock = this.collider.resolve(dt, this.camera, flyer);
+      if (knock) this.recorder.noteKnock(knock);
+    }
 
     // "Moving" is an exact comparison against the previous frame's view, not
     // a velocity: it is what lets the hold ladder start climbing the instant

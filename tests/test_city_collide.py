@@ -92,12 +92,12 @@ class BoxCity {
 FLY_JS = """
 import { FlightCamera, cameraBasis, worldToRelative } from "%(soar)s/camera.js";
 import { CityCollider } from "%(soar)s/collide.js";
+import { TrackRecorder, resampleTrack, knocksDue } from "%(soar)s/track.js";
 import { CityTile, CityLots, cityCell } from "%(soar)s/citylots.js";
 import { readFileSync } from "node:fs";
 %(box_city)s
 
 const EXTENT = 92160.0;
-const BMIN = [-200000, -200000, 0], BMAX = [200000, 200000, 6000];
 
 // flyer.js _place, without the smoothing: ahead by `distance` along the
 // look, below by `drop`.
@@ -113,7 +113,14 @@ class StandInFlyer {
 }
 
 function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
-               releaseOnKnock = true }) {
+               releaseOnKnock = true,
+               // The CLOUD domain, which the camera's world position folds
+               // at — independent of the city tile's frame.
+               domain = [[-200000, -200000, 0], [200000, 200000, 6000]],
+               videoFps = null }) {
+  const [BMIN, BMAX] = domain;
+  const recorder = new TrackRecorder();
+  recorder.start();
   const camera = new FlightCamera(BMIN, BMAX, {
     start: { position: worldToRelative(start, BMIN, BMAX),
              azimuth, elevation, fov: 90 },
@@ -129,7 +136,10 @@ function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
     camera.move(dt);
     camera.constrain();
     flyer.update(dt, camera);
-    collider.resolve(dt, camera, flyer);
+    const knock = collider.resolve(dt, camera, flyer);
+    if (knock) recorder.noteKnock(knock);
+    recorder.advance(dt);
+    recorder.sample(camera);
     if (releaseOnKnock && flyer.knocks.length) camera.keys.clear();
     const sp = camera.surfacePosition;
     const cam = [sp[0], sp[1], camera.position[2]];
@@ -139,11 +149,23 @@ function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
       t: (i + 1) * dt, cam, fly,
       az: camera.azimuth, el: camera.elevation,
       control: camera.control, active: collider.active,
+      tether: Math.hypot(...[0, 1, 2].map(
+        (k) => flyer.position[k] - camera.position[k])),
       camInside: city.inside(cam, 0.35) !== null,
       flyInside: city.inside(fly, 0.2) !== null,
     });
   }
-  return { frames, knocks: flyer.knocks };
+  const out = { frames, knocks: flyer.knocks,
+                recorded: { samples: recorder.samples,
+                            knocks: recorder.knocks } };
+  if (videoFps !== null) {
+    // What the video pass hands the flyer, frame by frame.
+    const video = resampleTrack(recorder.samples, videoFps);
+    out.replayKnocks = video.map((f, i) => knocksDue(
+      recorder.knocks, i > 0 ? video[i - 1].t : -Infinity, f.t));
+    out.videoT = video.map((f) => f.t);
+  }
+  return out;
 }
 
 const spec = JSON.parse(readFileSync(0, "utf8"));
@@ -317,3 +339,83 @@ def test_a_real_building_of_the_shipped_tile():
     assert max(f["fly"][0] for f in frames) <= r["wallX"] - 0.2 + 1e-6
     assert len(r["knocks"]) == 1
     _episode(frames)
+
+
+def test_a_correction_across_the_cloud_domain_edge_keeps_the_flyer_on():
+    # A 200 m cloud domain, so the camera's world x folds at +-100 while the
+    # city frame runs straight on. The flight crosses the fold and is thrown
+    # back across it by the wall: the flyer must stay on its 2.7 m tether
+    # (it once kept the unfolded correction and landed a domain away).
+    # The first frame's move carries the camera from 99.9 to 100.23
+    # (folded to -99.77); the wall at 102.8 throws it back by 0.24 m, to
+    # 99.99, across the fold again.
+    r = fly(boxes=[[[102.8, -1000.0, 0.0], [130.0, 1000.0, 500.0]]],
+            start=[99.9, 0.0, 60.0], azimuth=EAST, elevation=0.0,
+            speed=20.0, keys=["w"], fps=60, seconds=2.0,
+            domain=[[-100.0, -100.0, 0.0], [100.0, 100.0, 6000.0]])
+    frames = r["frames"]
+    assert len(r["knocks"]) == 1
+    assert max(f["tether"] for f in frames) < 3.0
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+
+
+def test_a_recorded_crash_replays_with_its_tumble():
+    r = fly(boxes=WALL, start=[0.0, 0.0, 60.0], azimuth=EAST, elevation=0.0,
+            speed=20.0, keys=["w"], fps=60, seconds=5.0, videoFps=30)
+    frames, rec = r["frames"], r["recorded"]
+    first, last = _episode(frames)
+    # The knock is on the track at the time of the first sample showing it.
+    assert len(rec["knocks"]) == 1
+    tk, severity, side, duration, landing = rec["knocks"][0]
+    assert tk == pytest.approx(rec["samples"][first][0], abs=1e-12)
+    assert (severity, side, duration, landing) == pytest.approx(
+        (r["knocks"][0]["severity"], r["knocks"][0]["side"],
+         r["knocks"][0]["duration"], 0.0))
+    # The shake is in the samples themselves: the recorded look moves.
+    az = [s[4] for s in rec["samples"][first:last + 1]]
+    assert max(abs(a - EAST) for a in az) > 0.3
+    # The video pass hands the flyer that knock exactly once, on the first
+    # frame at or after it, aged by how far past it that frame falls.
+    handed = [(i, k) for i, ks in enumerate(r["replayKnocks"]) for k in ks]
+    assert len(handed) == 1
+    i, k = handed[0]
+    assert 0.0 <= k["age"] < 1.0 / 30 + 1e-9
+    assert r["videoT"][i] - k["age"] == pytest.approx(tk, abs=1e-9)
+    assert k["landing"] is False and k["duration"] == duration
+
+
+def test_python_reads_a_track_that_carries_knocks(tmp_path):
+    from cloudyview.track import load_track, resample_track
+    r = fly(boxes=WALL, start=[0.0, 0.0, 60.0], azimuth=EAST, elevation=0.0,
+            speed=20.0, keys=["w"], fps=60, seconds=4.0)
+    payload = {"schema": "cloudyview.track.v2", "header": {},
+               "samples": r["recorded"]["samples"],
+               "knocks": r["recorded"]["knocks"]}
+    path = tmp_path / "crash.json"
+    path.write_text(json.dumps(payload))
+    _, samples = load_track(path)
+    assert samples.shape[1] == 9
+    assert len(resample_track(samples, 30.0, periodic=True)) > 100
+
+
+def test_starting_with_the_flyer_in_a_wall_backs_off_before_the_first_frame():
+    # Parked 2 m from a wall, looking at it: the flyer (2.6 m ahead) is
+    # placed inside it. The very first frame must already show it outside.
+    r = fly(boxes=WALL, start=[48.0, 0.0, 60.0], azimuth=EAST,
+            elevation=0.0, speed=20.0, keys=[], fps=60, seconds=0.5)
+    frames = r["frames"]
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+    assert frames[0]["fly"][0] == pytest.approx(50.0 - 0.21, abs=1e-6)
+    assert r["knocks"] == []   # a placement, not a crash
+
+
+def test_starting_inside_a_building_puts_you_on_its_roof():
+    r = fly(boxes=WALL, start=[60.0, 0.0, 60.0], azimuth=EAST,
+            elevation=0.0, speed=20.0, keys=[], fps=60, seconds=0.5)
+    frames = r["frames"]
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+    # Lifted until the eye clears the roof, then until the flyer — hanging
+    # 0.62 m below it — does: the flyer rests on the roof.
+    assert frames[0]["fly"][2] == pytest.approx(500.0 + 0.21, abs=1e-6)
+    assert frames[0]["cam"][2] == pytest.approx(500.0 + 0.21 + 0.62,
+                                                abs=1e-6)

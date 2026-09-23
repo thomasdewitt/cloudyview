@@ -1033,7 +1033,7 @@ export class UI {
   /** What R offers when you stop recording — including every video option.
    *  Video settings live HERE, not in the capture panel: they only mean
    *  anything once a track exists (Thomas, 2026-08-11). */
-  _panel_track({ samples }) {
+  _panel_track({ samples, knocks }) {
     const app = this.app;
     const m = this.menu;
     const duration = samples[samples.length - 1][0];
@@ -1050,14 +1050,14 @@ export class UI {
       (v) => v === (app.captureSize ? app.captureSize.join("x") : "window"),
       (v) => {
         app.captureSize = v === "window" ? null : v.split("x").map(Number);
-        this.open("track", { samples });
+        this.open("track", { samples, knocks });
       }));
 
     // Whether video works at all is a question only video.js can answer, and
     // it answers it by encoding a frame — so the button is built optimistically
     // and the capability line is filled in once the module has loaded.
     const render = item("Render it to video", "",
-                        () => app.renderTrackVideo(samples));
+                        () => app.renderTrackVideo(samples, knocks));
     const refresh = () => {
       let frames = null, problem = "";
       try {
@@ -1127,7 +1127,10 @@ export class UI {
       if (note) note.textContent = caps.why;
     });
     m.append(item("Save the track", "a .json the soar command renders to video",
-                  () => { app.downloadTrack(samples); this.open("main"); }));
+                  () => {
+                    app.downloadTrack(samples, knocks);
+                    this.open("main");
+                  }));
     m.append(item("Discard it", null, () => this.open("main")));
   }
 

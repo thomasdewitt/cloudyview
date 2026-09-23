@@ -22,7 +22,12 @@ Track schema (shared with the browser, which wrote it):
 
     {"schema": "cloudyview.track.v2",
      "header": <render metadata: source, camera, sun, [city|desert], render>,
-     "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}
+     "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...],
+     "knocks": [[t, severity, side, duration, landing], ...]}
+
+`knocks` (optional) are the night city's crashes, for the browser's flyer to
+tumble at on replay; everything a crash does to the CAMERA is in the samples
+already, and this render draws no flyer, so it reads no further than that.
 
 x/y/z are the relative-coordinate convention (the CLOUD frame, folded at the
 cloud period — exactly what `witness --camera-position` takes) and sx/sy the

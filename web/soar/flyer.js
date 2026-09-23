@@ -371,10 +371,12 @@ export class Flyer {
   /**
    * The flight hit something (collide.js): tumble for `duration` seconds.
    * `severity` is 0..1, `side` +-1 is which way the impact threw it, and a
-   * `landing` — the street or a roof, from above — tumbles less.
+   * `landing` — the street or a roof, from above — tumbles less. `age` is
+   * how long ago it happened: a replayed track (viewer.js) lands its video
+   * frames between the recorded ones, so its knock starts part-way in.
    */
-  knock({ severity, side, duration, landing }) {
-    this._knock = { t: 0.0, duration,
+  knock({ severity, side, duration, landing, age = 0.0 }) {
+    this._knock = { t: age, duration,
                     size: severity * (landing ? LANDING_KNOCK : 1.0), side };
   }
 
