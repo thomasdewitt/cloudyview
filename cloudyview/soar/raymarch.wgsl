@@ -11001,6 +11001,33 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
 const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.25, 0.20, 0.15);
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 
+// The desert's entry into the surface pre-pass (fs_surface): the desert under this ray: hazed radiance and distance, t = 1e30 on a
+// miss. Traced in the desert frame (desert_camera_origin) and shaded with
+// the cloud shadow at the world hit; t is translation-invariant, so depth
+// needs no conversion. Its own draws on the sun-march and solar-cone
+// streams: the ocean's take the same streams, and the two are never both
+// compiled in.
+fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
+                       strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
+    let sun = u.sun_dir.xyz;
+    let desert_o = desert_camera_origin();
+    let dhit = desert_trace(desert_o, dir, pixel_angle);
+    if (!dhit.hit) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    }
+    let d_jit = jitter_amp * strat1(frame_index, strat_pixel,
+                                    STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
+    let d_cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
+                        vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
+    let d_sun_shadow = sun_cone_dir(
+        sun, sun_tangent_frame(sun), d_cone,
+        SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_amp);
+    return vec4<f32>(desert_shade(dhit, desert_o,
+                                  u.cam_origin.xyz + dhit.t * dir, dir,
+                                  sun, d_sun_shadow, d_jit, pixel_angle),
+                     dhit.t);
+}
+
 // === END DESERT GROUND ===
 
 // ===========================================================================
@@ -11116,7 +11143,8 @@ struct CameraRay {
     dir: vec3<f32>,
     frame_index: u32,       // this frame's index in the accumulation
     strat_pixel: vec2<u32>, // the pixel that seeds the stratified scrambles
-    pixel_angle: f32,       // the surfaces' resolving angle (rad/px)
+    pixel_angle: f32,       // the city's resolving angle (rad/px)
+    true_pixel_angle: f32,  // one pixel's angle, without the LOD slider
     jitter_amp: f32,        // jitter_on * jitter_scale
 }
 
@@ -11154,7 +11182,8 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     // (u.periodic.z, the app's one LOD slider). Coarsening the slider
     // dissolves windows into blocks exactly as it coarsens the march — one
     // lever, one degrees-not-meters law for the whole scene.
-    cr.pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
+    cr.true_pixel_angle = 2.0 * tan_half_fov / img_w;
+    cr.pixel_angle = max(cr.true_pixel_angle, u.periodic.z);
     cr.jitter_amp = u.cam_up.w * jitter_scale;
     return cr;
 }
@@ -11180,33 +11209,6 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
                               city_o, dir, chit.t, chit.pos), chit.t);
 }
 
-// The desert under this ray: hazed radiance and distance, t = 1e30 on a
-// miss. Traced in the desert frame (desert_camera_origin) and shaded with
-// the cloud shadow at the world hit; t is translation-invariant, so depth
-// needs no conversion. Its own draws on the sun-march and solar-cone
-// streams: the ocean's take the same streams, and the two are never both
-// compiled in.
-fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
-                       strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
-    let sun = u.sun_dir.xyz;
-    let desert_o = desert_camera_origin();
-    let dhit = desert_trace(desert_o, dir, pixel_angle);
-    if (!dhit.hit) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1e30);
-    }
-    let d_jit = jitter_amp * strat1(frame_index, strat_pixel,
-                                    STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
-    let d_cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
-                        vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
-    let d_sun_shadow = sun_cone_dir(
-        sun, sun_tangent_frame(sun), d_cone,
-        SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_amp);
-    return vec4<f32>(desert_shade(dhit, desert_o,
-                                  u.cam_origin.xyz + dhit.t * dir, dir,
-                                  sun, d_sun_shadow, d_jit, pixel_angle),
-                     dhit.t);
-}
-
 // The pass itself. Only the CITY and DESERT specializations are ever run
 // through it; any other scene returns a miss and the host never draws it.
 @fragment
@@ -11216,8 +11218,13 @@ fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> 
         return surface_pass_city(cr.dir, cr.pixel_angle);
     }
     if (DESERT) {
-        return desert_surface_pass(cr.dir, cr.pixel_angle, cr.frame_index,
-                                   cr.strat_pixel, cr.jitter_amp);
+        // The desert resolves at the true pixel angle: the view-step LOD
+        // angle is several pixels wide at the day tiers and would dissolve
+        // the stones and plants meant to be seen from a couple of metres
+        // (desert-ground's decision; its cost is kept by its own laws).
+        return desert_surface_pass(cr.dir, cr.true_pixel_angle,
+                                   cr.frame_index, cr.strat_pixel,
+                                   cr.jitter_amp);
     }
     return vec4<f32>(0.0, 0.0, 0.0, 1e30);
 }
