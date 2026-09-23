@@ -39,6 +39,10 @@ const SAMPLE_FORMAT = "rgba16float";
 // textureLoad and declare `unfilterable-float`. Nothing here needs a
 // filtering sampler, so no optional feature is involved.
 const ACCUM_FORMAT = "rgba32float";
+// The surface pre-pass target: (radiance, t) of the traced city or desert
+// under each render pixel (raymarch.wgsl fs_surface). t runs to 1e30 on a
+// miss, so it is float32; the march only textureLoad()s it.
+const SURFACE_FORMAT = "rgba32float";
 
 const ACCUM_SHADER = `
 struct AccumUniforms {
@@ -196,6 +200,14 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
  * load-op-"load" pass; nulls are skipped so a caller can pass a fixed-shape
  * list of things that are individually on or off.
  */
+/** The lighting method the sun-tau bake is compiled with; see _bakePipeline. */
+const BAKE_LIGHTING = Object.freeze({ lightCache: false, skyProbe: true });
+
+/** Whether a _pipeline answer is still a compile in flight. */
+function isPending(pipelineOrPromise) {
+  return typeof pipelineOrPromise?.then === "function";
+}
+
 function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   if (!overlays) return;
   for (const overlay of overlays) {
@@ -206,11 +218,20 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
 export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
                                    toneMap = true, city = false,
-                                   desert = false }) {
+                                   desert = false, lightCache, skyProbe }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
       `got ${maxLightSteps}.`);
+  }
+  // The lighting method has no default here on purpose: it is the same pair
+  // of flags packUniforms writes into row 23, and a caller that forgot to
+  // say which method it compiled would render one method under the other's
+  // scene key. See Renderer.lighting.
+  if (typeof lightCache !== "boolean" || typeof skyProbe !== "boolean") {
+    throw new Error(
+      "specializeShader needs the lighting method: lightCache and skyProbe " +
+      `as booleans; got ${lightCache} and ${skyProbe}.`);
   }
   const swaps = [
     ["const PERIODIC_DOMAIN: bool = true;",
@@ -223,6 +244,10 @@ export function specializeShader(source,
     // the same switch witness's return_linear uses (soar_host.specialize).
     ["const TONE_MAP: bool = true;",
      `const TONE_MAP: bool = ${toneMap ? "true" : "false"};`],
+    ["const LIGHT_CACHE: bool = false;",
+     `const LIGHT_CACHE: bool = ${lightCache ? "true" : "false"};`],
+    ["const SKY_PROBE: bool = true;",
+     `const SKY_PROBE: bool = ${skyProbe ? "true" : "false"};`],
   ];
   // Demanded only when asked for, like soar_host.specialize: a shader that
   // predates the night city still serves every daytime render.
@@ -247,6 +272,19 @@ export function specializeShader(source,
     out = out.replace(sentinel, replacement);
   }
   return out;
+}
+
+/**
+ * The one cache key for a raymarch.wgsl specialization: every field of
+ * specializeShader's argument, in a fixed order. Every module and pipeline
+ * cache in this file keys on it (plus the entry point and target format),
+ * so a new specialization axis is added here once rather than threaded
+ * through each cache's own string.
+ */
+export function shaderVariantKey(spec) {
+  const surface = spec.city ? "city" : (spec.desert ? "desert" : "ocean");
+  return [spec.periodic, spec.nested, spec.maxLightSteps, spec.toneMap,
+          surface, spec.lightCache, spec.skyProbe].join("|");
 }
 
 export class Renderer {
@@ -283,6 +321,9 @@ export class Renderer {
 
     this._modules = new Map();
     this._pipelines = new Map();
+    this._pendingPipelines = new Map();
+    this._failedPipelines = new Map();
+    this._prefetchArmed = false;          // see prefetchPipelines
     this._targets = null;
     // Scratch for the per-frame accumulation weights; see drawFrame.
     this._accumWeights = new Float32Array(4);
@@ -339,8 +380,28 @@ export class Renderer {
           texture: { sampleType: "float", viewDimension: "3d" } },
       ],
     });
+    // Group 1: the surface pre-pass's target, which only the march reads.
+    // Every raymarch pipeline shares this one layout, so every pass sets
+    // group 1 — the stand-in everywhere but the march of a scene with a
+    // traced surface, which binds that target size's own.
+    this.surfaceLayout = device.createBindGroupLayout({
+      label: "soar-surface-layout",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
+      ],
+    });
     this.rayPipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [this.rayLayout],
+      bindGroupLayouts: [this.rayLayout, this.surfaceLayout],
+    });
+    this._surfaceDummy = device.createTexture({
+      label: "soar-surface-dummy", size: [1, 1], format: SURFACE_FORMAT,
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.surfaceDummyGroup = device.createBindGroup({
+      label: "soar-surface-dummy",
+      layout: this.surfaceLayout,
+      entries: [{ binding: 0, resource: this._surfaceDummy.createView() }],
     });
     // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
     // nest's. Whether it is read is a per-tier preset choice (see
@@ -440,8 +501,7 @@ export class Renderer {
    * error text, which the failure panel then shows.
    */
   async init() {
-    this._shaderModules.push(this._module(
-      this.periodic, this.scene.nested, this.maxLightSteps));
+    this._shaderModules.push(this._module(this._shaderSpec()));
 
     const problems = [];
     for (const module of this._shaderModules) {
@@ -456,16 +516,19 @@ export class Renderer {
       throw new Error(`The shader did not compile.\n${problems.join("\n")}`);
     }
 
-    this.device.pushErrorScope("validation");
     // The march only ever targets the float intermediate now; everything
-    // reaches the canvas through the (dithering) present pass.
-    this._rayPipeline(SAMPLE_FORMAT);
+    // reaches the canvas through the (dithering) present pass. Awaited, so a
+    // pipeline that fails to build rejects here with its own message.
+    await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
+    this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
     const error = await this.device.popErrorScope();
     if (error) {
       throw new Error(`Setting up the render pipelines failed: ${error.message}`);
     }
+    this._prefetchArmed = true;
+    this.prefetchPipelines();
   }
 
   /**
@@ -474,6 +537,8 @@ export class Renderer {
    * points at the 1x1x1 stand-in and the nest renders as nothing at all.
    */
   refreshBindGroup() {
+    // A nest attached or removed moves the NESTED specialization.
+    this.prefetchPipelines();
     const scene = this.scene;
     this.rayBindGroup = this.device.createBindGroup({
       label: "soar-raymarch",
@@ -509,11 +574,17 @@ export class Renderer {
       throw new Error(`unknown day surface '${kind}'; expected 'ocean' or ` +
                       "'desert'.");
     }
-    this.device.pushErrorScope("validation");
-    this._rayPipeline(SAMPLE_FORMAT, kind);
-    const error = await this.device.popErrorScope();
-    if (error) {
-      throw new Error(`The ${kind} shader failed to build: ${error.message}`);
+    // Both entries the target surface draws with, at the current lighting,
+    // on a specialization named explicitly: the scene is not touched.
+    const spec = { ...this._shaderSpec(), desert: kind === "desert" };
+    try {
+      await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
+      if (kind === "desert") {
+        await this._pipeline("fs_surface", SURFACE_FORMAT, spec);
+      }
+    } catch (err) {
+      throw new Error(`The ${kind} shader failed to build: ` +
+                      `${err?.message || err}`);
     }
   }
 
@@ -532,6 +603,7 @@ export class Renderer {
     s.oceanTileExtent = tile.tileExtent;
     s.oceanMaxLod = tile.maxLod;
     s.desertReliefM = s.desert ? desertReliefM(tile.meta) : null;
+    this.prefetchPipelines();
     this.refreshBindGroup();
     this._resetAccumulation();
   }
@@ -565,6 +637,7 @@ export class Renderer {
     this._flightRenderScale = K.QUALITY_PRESETS[tier].renderScale;
     this._holdRenderScale = K.HOLD_RENDER_SCALE_BY_TIER[tier];
     this._applyEffectiveQuality();
+    this.prefetchPipelines();
   }
 
   setRenderScale(scale) {
@@ -805,6 +878,7 @@ export class Renderer {
     // Nothing to re-upload: the wrap is a sampler and a shader branch, not
     // texels. Accumulation resets by itself — row 20.x is in the
     // scene-identity key — and the specialized module is picked per frame.
+    this.prefetchPipelines();
   }
 
   // The view march's step and the light march's are separate numbers now; see
@@ -823,54 +897,164 @@ export class Renderer {
 
   // --- pipelines ----------------------------------------------------------
 
-  /** The surface specialization, as a pipeline-cache key fragment. */
-  _surfaceKey() {
-    return this.scene.city ? "city" : (this.scene.desert ? "desert" : "ocean");
+  /**
+   * Everything the shader is specialized on for a march from this renderer
+   * now — specializeShader's argument. `lighting` is the method (see
+   * `lighting`); the surface is a property of the scene, which every caller
+   * inherits here rather than threading it. The city is constant for a
+   * renderer's whole life; ocean and desert can trade places in flight
+   * (prepareSurface / commitSurface), which is why the surface is in every
+   * key.
+   */
+  _shaderSpec({ toneMap = true, lighting = this.lighting } = {}) {
+    return {
+      periodic: this.periodic,
+      nested: Boolean(this.scene.nested),
+      maxLightSteps: this.maxLightSteps,
+      toneMap,
+      city: Boolean(this.scene.city),
+      desert: Boolean(this.scene.desert),
+      lightCache: lighting.lightCache,
+      skyProbe: lighting.skyProbe,
+    };
   }
 
-  _module(periodic, nested, maxLightSteps, toneMap = true,
-          surface = this._surfaceKey()) {
-    // The surface is a property of the scene, so every caller inherits it
-    // here rather than threading it. The city is constant for this
-    // renderer's whole life; ocean and desert can trade places in flight
-    // (prepareSurface / commitSurface), which is why the surface is in every
-    // cache key — and why it can be named explicitly, to build a surface's
-    // pipeline before the scene stands on it.
-    const city = surface === "city";
-    const desert = surface === "desert";
-    const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}|` +
-                surface;
+  _module(spec) {
+    const key = shaderVariantKey(spec);
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
-        code: specializeShader(this.shaderSource,
-                               { periodic, nested, maxLightSteps, toneMap,
-                                 city, desert }),
+        code: specializeShader(this.shaderSource, spec),
       });
       this._modules.set(key, module);
     }
     return module;
   }
 
-  _rayPipeline(targetFormat, surface = this._surfaceKey()) {
-    const key = `${targetFormat}|${this.periodic}|${this.scene.nested}|` +
-                `${this.maxLightSteps}|${surface}`;
-    let pipeline = this._pipelines.get(key);
-    if (!pipeline) {
-      const module = this._module(
-        this.periodic, this.scene.nested, this.maxLightSteps, true, surface);
-      pipeline = this.device.createRenderPipeline({
+  /** The march pipeline for `lighting` at the current specialization. */
+  _rayPipeline(targetFormat, lighting) {
+    return this._pipeline("fs_main", targetFormat,
+                          this._shaderSpec({ lighting }));
+  }
+
+  /** Whether this scene's opaque surface is traced by the pre-pass. */
+  _hasSurfacePass() {
+    return Boolean(this.scene.city || this.scene.desert);
+  }
+
+  /**
+   * The surface pre-pass pipeline (fs_surface) on the same specialization
+   * as the march for `lighting` — same module, so no extra compile — or
+   * null for a scene with no traced surface.
+   */
+  _surfacePipeline(lighting) {
+    if (!this._hasSurfacePass()) return null;
+    return this._pipeline("fs_surface", SURFACE_FORMAT,
+                          this._shaderSpec({ lighting }));
+  }
+
+  /**
+   * A raymarch.wgsl render pipeline — entry point `entryPoint` into
+   * `targetFormat`, for the specialization `spec` — as the pipeline itself
+   * once it is built, or a promise of it while it is compiling (isPending
+   * tells which). Every raymarch.wgsl pipeline that can be compiled while
+   * flying goes through here, so they share one cache, one key and one
+   * failure rule.
+   *
+   * Compiled with createRenderPipelineAsync, and asked for ahead of need
+   * (prefetchPipelines), because the lighting method is a specialization: a
+   * tier switch, a bake finishing, or a sky-probe toggle can each need a
+   * shader this session has not compiled yet, and a synchronous compile of
+   * fs_main is a visible stall — long ones on Metal. The live loop never
+   * waits on one (see drawFrame's waitForPipeline).
+   *
+   * A pipeline that fails to build is kept, per key, and THROWN by every
+   * later request for that key — synchronously, so the frame that needs it
+   * stops loudly — and never replaced by another pipeline: none would render
+   * the same picture. A failure in a prefetch the session never uses is
+   * logged when it happens and is otherwise harmless.
+   *
+   * Every compile is also a chance to meet a driver's compiler bugs: bug 22
+   * (docs/soar-bugs.md) is Firefox+NVIDIA segfaulting on compiling a
+   * specialization, and the lighting method multiplies the specializations a
+   * session compiles. Prefetch is kept to the tiers a session can actually
+   * reach next for that reason, not only for time.
+   */
+  _pipeline(entryPoint, targetFormat, spec) {
+    const key = `${entryPoint}|${targetFormat}|${shaderVariantKey(spec)}`;
+    const ready = this._pipelines.get(key);
+    if (ready) return ready;
+    const failed = this._failedPipelines.get(key);
+    if (failed) throw failed;
+    let pending = this._pendingPipelines.get(key);
+    if (!pending) {
+      const module = this._module(spec);
+      pending = this.device.createRenderPipelineAsync({
         label: `raymarch(${key})`,
         layout: this.rayPipelineLayout,
         vertex: { module, entryPoint: "vs_main" },
-        fragment: { module, entryPoint: "fs_main",
+        fragment: { module, entryPoint,
                     targets: [{ format: targetFormat }] },
         primitive: { topology: "triangle-list" },
+      }).then((pipeline) => {
+        this._pipelines.set(key, pipeline);
+        this._pendingPipelines.delete(key);
+        return pipeline;
+      }, (err) => {
+        this._pendingPipelines.delete(key);
+        const failure = new Error(
+          `The raymarch shader (${key}) failed to build: ` +
+          `${err?.message || err}`);
+        this._failedPipelines.set(key, failure);
+        console.error(`soar: ${failure.message}`);
+        throw failure;
       });
-      this._pipelines.set(key, pipeline);
+      this._pendingPipelines.set(key, pending);
     }
-    return pipeline;
+    return pending;
+  }
+
+  /**
+   * Start compiling, in the background, every march pipeline this session
+   * can reach from here without a reload: the current tier and its two
+   * neighbours in QUALITY_TIER_NAMES (the probe, the governor and a click
+   * all move one rung at a time), each with its cache ready and with its
+   * bake still in flight. Called on init and whenever the specialization
+   * moves under the renderer (tier, periodicity, surface). Compiles already
+   * done or in flight are not repeated.
+   */
+  prefetchPipelines() {
+    // Not before init(): the constructor and the viewer's setup move the
+    // tier, periodicity and nest before the first frame, and prefetching for
+    // each passing state would compile variants no frame will use — each
+    // compile a chance at bug 22.
+    if (!this._prefetchArmed) return;
+    const order = K.QUALITY_TIER_NAMES;
+    const at = order.indexOf(this.qualityTier);
+    for (const tier of order.slice(Math.max(0, at - 1), at + 2)) {
+      for (const cacheReady of [true, false]) {
+        const lighting = this._lightingFor(tier, cacheReady);
+        try {
+          // A promise while compiling: its rejection is recorded (and
+          // logged) by _rayPipeline itself, so the prefetch just lets go.
+          const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
+          if (isPending(p)) p.catch(() => {});
+          const sp = this._surfacePipeline(lighting);
+          if (sp && isPending(sp)) sp.catch(() => {});
+        } catch {
+          // Already failed and recorded; thrown again if it is ever needed.
+        }
+      }
+    }
+    // The bake's one pipeline (see _bakePipeline): every tier but Max bakes
+    // on the first sun, and a sun change re-bakes.
+    try {
+      const bake = this._bakePipeline();
+      if (isPending(bake)) bake.catch(() => {});
+    } catch {
+      // Recorded; thrown by the bake that needs it.
+    }
   }
 
   /**
@@ -937,6 +1121,7 @@ export class Renderer {
         await this.device.queue.onSubmittedWorkDone();
         for (const old of this._targetPool.values()) {
           old.sample.destroy(); old.accumA.destroy(); old.accumB.destroy();
+          old.surface?.tex.destroy();
         }
         this._targetPool.clear();
       }
@@ -1075,15 +1260,47 @@ export class Renderer {
    * and back whenever the canvas has just been resized. Taking the view
    * before that await meant drawing into a texture the compositor had
    * already reclaimed, which is not an exception, it is a crashed browser.
+   *
+   * Resolves true when it marched. With `waitForPipeline: false` (the live
+   * loop) it resolves false instead of waiting when the shader variant this
+   * frame needs is still compiling — nothing marched, nothing presented, no
+   * state touched.
    */
   async drawFrame(target, targetFormat, outputSize, view,
                   { deltaSeconds = null, accumulate = true,
-                    overlays = null } = {}) {
+                    overlays = null, waitForPipeline = true } = {}) {
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
     const renderSize = renderTargetSize(outputSize, this.renderScale);
     const targets = await this._targetsFor(renderSize[0], renderSize[1]);
+    // The march pipeline for the state as it stands after the LAST await:
+    // from here to the first submit nothing awaits, so the specialization,
+    // the lighting method and the uniforms below all describe one moment.
+    // The method is read once — it picks the pipeline and it is what row 23
+    // packs — or a bake finishing between two reads would march one method
+    // under the other's scene key. A variant still compiling is waited out
+    // only when the caller asks (offline renders, which own the renderer);
+    // the live loop gets `false` back, marches nothing, keeps its last
+    // picture and asks again next frame, so no frame of it is ever
+    // suspended on a compile while the field or a capture changes under it.
+    // The surface pre-pass pipeline resolves in the same loop, so a frame
+    // never encodes one of the pair without the other.
+    let lighting;
+    let rayPipeline;
+    let surfacePipeline;
+    for (;;) {
+      lighting = this.lighting;
+      const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
+      const sp = this._surfacePipeline(lighting);
+      const waiting = isPending(p) ? p : (sp && isPending(sp) ? sp : null);
+      if (!waiting) { rayPipeline = p; surfacePipeline = sp; break; }
+      if (!waitForPipeline) {
+        waiting.catch(() => {});  // recorded; thrown when next requested
+        return false;
+      }
+      await waiting;
+    }
     const targetView = typeof target === "function" ? target() : target;
 
     // Pack ONCE, learn the scene key from it, then write the sampling flags
@@ -1103,8 +1320,7 @@ export class Renderer {
     // rung switching methods, or an override restarts accumulation itself.
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
-      lightCache: this.lightCacheActive,
-      skyProbe: this.skyProbeActive,
+      ...lighting,
       iceMode: this.iceModeActive,
     });
     const plan = accumulate && view.jitter !== false
@@ -1119,12 +1335,6 @@ export class Renderer {
     this.device.queue.writeBuffer(this.uniformBuf, 0, u);
 
     const encoder = this.device.createCommandEncoder();
-    const pass = (viewRef) => encoder.beginRenderPass({
-      colorAttachments: [{
-        view: viewRef, loadOp: "clear", storeOp: "store",
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      }],
-    });
 
     if (!plan) {
       // No accumulation: march at a float intermediate and present from it.
@@ -1134,16 +1344,13 @@ export class Renderer {
       // present pass's dither. One full-screen blit is cheaper than a second
       // encode point.
       const exact = renderSize[0] === outputW && renderSize[1] === outputH;
-      const p = pass(targets.sample.createView());
-      p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
-      p.setBindGroup(0, this.rayBindGroup);
-      p.draw(3);
-      p.end();
+      this._encodeMarch(encoder, targets, this.rayBindGroup, rayPipeline,
+                        surfacePipeline);
       this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
                        exact);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
       await this._submit(encoder.finish());
-      return;
+      return true;
     }
 
     // How many jittered marches go into this one presented frame. Every tier
@@ -1184,11 +1391,10 @@ export class Renderer {
         }],
       });
 
-      let p = sPass(targets.sample.createView());
-      p.setPipeline(this._rayPipeline(SAMPLE_FORMAT));
-      p.setBindGroup(0, this.rayBindGroup);
-      p.draw(3);
-      p.end();
+      // The surface pass runs per SAMPLE, after this sample's uniform
+      // rewrite: its ray is this sample's ray.
+      this._encodeMarch(enc, targets, this.rayBindGroup, rayPipeline,
+                        surfacePipeline);
 
       // The accumulator ping-pongs between two textures, so there are exactly
       // two bind groups for the whole life of a target set. They were being
@@ -1196,7 +1402,7 @@ export class Renderer {
       // a pair of resources that only change when the render target is
       // reallocated, which is where they are now built instead.
       outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
-      p = sPass(outTex.createView());
+      const p = sPass(outTex.createView());
       p.setPipeline(this.accumPipeline);
       p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
       p.draw(3);
@@ -1215,6 +1421,7 @@ export class Renderer {
       this._accumCount = step.nextCount;
     }
     this._lastPresented = outTex;
+    return true;
   }
 
   /**
@@ -1276,6 +1483,71 @@ export class Renderer {
   }
 
   /**
+   * One march into `targets.sample`, preceded — in a scene with a traced
+   * surface — by the surface pre-pass (raymarch.wgsl fs_surface) into
+   * `targets.surface`, which the march then reads at group 1. The two use
+   * the same uniforms, so the pass traces exactly the rays the march
+   * composites. Every march in the renderer goes through here or through
+   * the meter, which mirrors it on its own targets.
+   */
+  _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfacePipeline) {
+    let surfaceGroup = this.surfaceDummyGroup;
+    if (surfacePipeline) {
+      const surface = this._surfaceTargetFor(targets);
+      const sp = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: surface.view, loadOp: "clear", storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1e30 },
+        }],
+      });
+      sp.setPipeline(surfacePipeline);
+      sp.setBindGroup(0, rayBindGroup);
+      sp.setBindGroup(1, this.surfaceDummyGroup);
+      sp.draw(3);
+      sp.end();
+      surfaceGroup = surface.group;
+    }
+    const p = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: targets.sample.createView(), loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    p.setPipeline(rayPipeline);
+    p.setBindGroup(0, rayBindGroup);
+    p.setBindGroup(1, surfaceGroup);
+    p.draw(3);
+    p.end();
+  }
+
+  /**
+   * A target set's surface target and the march's group 1 over it, made on
+   * first need: a set is pooled by size, and the scene can gain a traced
+   * surface after the set was made (commitSurface, ocean -> desert). 16 bytes
+   * a pixel.
+   */
+  _surfaceTargetFor(targets) {
+    if (!targets.surface) {
+      const tex = this.device.createTexture({
+        label: `soar-surface-${targets.w}x${targets.h}`,
+        size: [targets.w, targets.h], format: SURFACE_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+             | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      targets.surface = {
+        tex,
+        view: tex.createView(),
+        group: this.device.createBindGroup({
+          label: `soar-surface-${targets.w}x${targets.h}`,
+          layout: this.surfaceLayout,
+          entries: [{ binding: 0, resource: tex.createView() }],
+        }),
+      };
+    }
+    return targets.surface;
+  }
+
+  /**
    * Overlays are encoded into the SAME command buffer as the frame they sit
    * on, after the blit that put it on screen. A separate submit would work
    * but would let the compositor pick up the bare frame in between, which
@@ -1332,23 +1604,34 @@ export class Renderer {
   get lightCacheReady() { return this._lightCacheReady; }
 
   /**
+   * The lighting method a march from this renderer runs now: the flags
+   * packUniforms writes into row 23 AND the constants the march pipeline is
+   * specialized on (raymarch.wgsl LIGHT_CACHE, SKY_PROBE), from this one
+   * getter so the two can never disagree.
+   *
    * What this frame actually does: hand override, else the SELECTED tier's
    * preset — never the hold ladder's sampling tier. Parking sharpens the
    * sampling toward High's step factors, but it must not switch the
    * lighting method underneath: the sky probe is never on below High, flying
-   * or parked (Thomas, 2026-08-20), and Max's parked march stays live.
+   * or parked (Thomas, 2026-08-20), and Max's parked march stays live. A
+   * wanted cache is read only once its bake has finished.
    */
-  get lightCacheActive() {
-    const wanted = this.lightCacheMode === "auto"
-      ? K.QUALITY_PRESETS[this.qualityTier].lightCache
-      : this.lightCacheMode === "on";
-    return Boolean(wanted && this._lightCacheReady);
+  get lighting() {
+    return this._lightingFor(this.qualityTier, this._lightCacheReady);
   }
 
-  get skyProbeActive() {
-    return this.skyProbeMode === "auto"
-      ? Boolean(K.QUALITY_PRESETS[this.qualityTier].skyProbe)
-      : this.skyProbeMode === "on";
+  /** The method `tier` runs with the cache ready or not — see `lighting`. */
+  _lightingFor(tier, cacheReady) {
+    const preset = K.QUALITY_PRESETS[tier];
+    const wanted = this.lightCacheMode === "auto"
+      ? preset.lightCache
+      : this.lightCacheMode === "on";
+    return {
+      lightCache: Boolean(wanted && cacheReady),
+      skyProbe: this.skyProbeMode === "auto"
+        ? Boolean(preset.skyProbe)
+        : this.skyProbeMode === "on",
+    };
   }
 
   invalidateLightCache() {
@@ -1459,7 +1742,13 @@ export class Renderer {
   stepLightBake(slices = K.LIGHT_CACHE_BAKE_SLICES_PER_FRAME) {
     const b = this._lightBake;
     if (!b) return false;
+    // Still compiling: no slices this frame. The frames keep marching live
+    // (the cache is not ready) and the bake resumes when the pipeline is.
     const pipeline = this._bakePipeline();
+    if (isPending(pipeline)) {
+      pipeline.catch(() => {});    // recorded; thrown when next requested
+      return false;
+    }
     const sliceView = b.sliceTex.createView();
     const end = Math.min(b.next + Math.max(1, slices), b.cx);
     for (let ix = b.next; ix < end; ix++) {
@@ -1474,6 +1763,7 @@ export class Renderer {
       });
       p.setPipeline(pipeline);
       p.setBindGroup(0, b.bindGroup);
+      p.setBindGroup(1, this.surfaceDummyGroup);
       p.draw(3);
       p.end();
       encoder.copyTextureToTexture(
@@ -1494,26 +1784,18 @@ export class Renderer {
     return false;
   }
 
+  /**
+   * The sun-tau bake's pipeline, through the same async cache as the march.
+   * fs_bake_light reads neither lighting constant, so it is built on ONE
+   * fixed method — the shader's declared default — rather than on flight's:
+   * keyed on flight's, a tier change or probe toggle mid-bake would compile
+   * a second bake pipeline identical to the first.
+   */
   _bakePipeline() {
-    this._bakePipelines ??= new Map();
-    const key = `${this.periodic}|${this.scene.nested}|${this.maxLightSteps}|` +
-                this._surfaceKey();
-    let pipeline = this._bakePipelines.get(key);
-    if (!pipeline) {
-      const module = this._module(
-        this.periodic, this.scene.nested, this.maxLightSteps);
-      pipeline = this.device.createRenderPipeline({
-        label: `light-bake(${key})`,
-        layout: this.rayPipelineLayout,
-        vertex: { module, entryPoint: "vs_main" },
-        fragment: { module, entryPoint: "fs_bake_light",
-                    targets: [{ format: "r16float" }] },
-        primitive: { topology: "triangle-list" },
-      });
-      this._bakePipelines.set(key, pipeline);
-    }
-    return pipeline;
+    return this._pipeline("fs_bake_light", "r16float",
+                          this._shaderSpec({ lighting: BAKE_LIGHTING }));
   }
+
 
   // --- the auto-exposure meter ---------------------------------------------
 
@@ -1552,11 +1834,15 @@ export class Renderer {
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
       }
-      const module = this._module(
-        this.periodic, this.scene.nested, this.maxLightSteps, false);
+      // The meter's lighting is the live march with the probe — what its
+      // packUniforms call below has always packed (no lighting flags given,
+      // so the defaults). Named here so the module is specialized on the
+      // same method the row carries.
+      const lighting = { lightCache: false, skyProbe: true };
+      const spec = this._shaderSpec({ toneMap: false, lighting });
+      const module = this._module(spec);
       this._meterPipeline ??= new Map();
-      const pipeKey = `${this.periodic}|${this.scene.nested}|` +
-                      `${this.maxLightSteps}|${this._surfaceKey()}`;
+      const pipeKey = shaderVariantKey(spec);
       let pipeline = this._meterPipeline.get(pipeKey);
       if (!pipeline) {
         pipeline = this.device.createRenderPipeline({
@@ -1569,11 +1855,30 @@ export class Renderer {
         });
         this._meterPipeline.set(pipeKey, pipeline);
       }
+      // Its surface pre-pass, on the same specialization, into the meter's
+      // own meter-sized surface target (_encodeMarch makes it on first use).
+      let surfacePipeline = null;
+      if (this._hasSurfacePass()) {
+        this._meterSurfacePipeline ??= new Map();
+        surfacePipeline = this._meterSurfacePipeline.get(pipeKey);
+        if (!surfacePipeline) {
+          surfacePipeline = this.device.createRenderPipeline({
+            label: `meter-surface(${pipeKey})`,
+            layout: this.rayPipelineLayout,
+            vertex: { module, entryPoint: "vs_main" },
+            fragment: { module, entryPoint: "fs_surface",
+                        targets: [{ format: SURFACE_FORMAT }] },
+            primitive: { topology: "triangle-list" },
+          });
+          this._meterSurfacePipeline.set(pipeKey, surfacePipeline);
+        }
+      }
+      this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.
       const u = packUniforms(this._sceneState(), {
         ...view, outputSize, renderSize: [mw, mh],
-        subpixel: false, jitterScale: 1.0,
+        subpixel: false, jitterScale: 1.0, ...lighting,
       });
       this.device.queue.writeBuffer(this._meterUniformBuf, 0, u);
       const bindGroup = this.device.createBindGroup({
@@ -1594,17 +1899,8 @@ export class Renderer {
         ],
       });
       const encoder = this.device.createCommandEncoder();
-      const p = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: this._meterTex.createView(),
-          loadOp: "clear", storeOp: "store",
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        }],
-      });
-      p.setPipeline(pipeline);
-      p.setBindGroup(0, bindGroup);
-      p.draw(3);
-      p.end();
+      this._encodeMarch(encoder, this._meterTargets, bindGroup, pipeline,
+                        surfacePipeline);
       encoder.copyTextureToBuffer(
         { texture: this._meterTex },
         { buffer: this._meterReadBuf, bytesPerRow: mw * 16 },
@@ -1641,13 +1937,17 @@ export class Renderer {
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
     this._meterTex?.destroy();
+    this._meterTargets?.surface?.tex.destroy();
     this._meterReadBuf?.destroy();
     this._meterUniformBuf?.destroy();
     this._meterTex = this._meterReadBuf = this._meterUniformBuf = null;
+    this._meterTargets = null;
+    this._surfaceDummy?.destroy();
     for (const targets of this._targetPool?.values() ?? []) {
       targets.sample.destroy();
       targets.accumA.destroy();
       targets.accumB.destroy();
+      targets.surface?.tex.destroy();
     }
     this._targetPool?.clear();
     this._targets = null;

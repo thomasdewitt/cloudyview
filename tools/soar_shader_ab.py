@@ -84,6 +84,11 @@ TIERS = {
     "medium":  (2.5, 4.0, True, False),
     "low":     (3.0, 8.0, True, False),
     "minimal": (4.0, 12.0, True, False),
+    # Not a preset: the method a cache tier flies with while its sun-tau bake
+    # is still in flight (the renderer reads the live march until the cache
+    # is ready). Low's sampling, no cache, no probe — the fourth lighting
+    # specialization the browser compiles.
+    "baking":  (3.0, 8.0, False, False),
 }
 LIGHT_CACHE_DIVISOR = 2       # constants.js
 
