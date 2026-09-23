@@ -73,6 +73,21 @@ fn scan(@builtin(global_invocation_id) gid: vec3<u32>) {
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.w, it.a.z);
 }
+
+// The small cells of the tile's first 1024 m, where the harness looks.
+@compute @workgroup_size(16, 16)
+fn scan_small(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = 256u;
+    if (gid.x >= n || gid.y >= n) {
+        return;
+    }
+    let ci = vec2<i32>(gid.xy);
+    let org = vec2<f32>(ci) * DF_SMALL_CELL;
+    let it = df_small_item(ci, org);
+    let i = (gid.y * n + gid.x) * 2u;
+    scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
+    scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.y, it.a.z);
+}
 """
 
 
@@ -90,9 +105,11 @@ def extract_fn(src: str, name: str) -> str:
     return m.group(0)
 
 
-def scan_plants():
-    """Every big cell's item, as the shader places it: rows of
-    (kind, x, y, height, radius, arms, age, ribs) in the desert frame."""
+def scan_plants(entry="scan"):
+    """Items as the shader places them, desert frame. `scan`: every big
+    cell, rows (kind, x, y, height, radius, arms, age, ribs). `scan_small`:
+    the small cells of the first 1024 m, rows (kind, x, y, height,
+    half-width, variant, flowering, stems)."""
     import wgpu
     src = SHADER.read_text()
     code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
@@ -101,7 +118,7 @@ def scan_plants():
     device = adapter.request_device_sync()
     module = device.create_shader_module(code=code)
     pipe = device.create_compute_pipeline(
-        layout="auto", compute={"module": module, "entry_point": "scan"})
+        layout="auto", compute={"module": module, "entry_point": entry})
     n = 256
     size = n * n * 2 * 16
     buf = device.create_buffer(size=size, usage=wgpu.BufferUsage.STORAGE
@@ -125,7 +142,7 @@ def scan_plants():
     return raw.reshape(-1, 8)
 
 
-def pick_hero(plants, near=(2048.0, 2048.0)):
+def pick_hero(plants, near=(512.0, 512.0)):
     """The tallest saguaro with three or more arms nearest `near`."""
     sag = plants[(plants[:, 0] == 8) & (plants[:, 5] >= 3)]
     if len(sag) == 0:
@@ -149,6 +166,60 @@ def load_demo(demo, cache_dir: Path):
     return meta, sigma
 
 
+def pick_shrub(small, hero):
+    """The biggest creosote (not bursage) within 60 m of the hero."""
+    c = small[(small[:, 0] == 9) & (small[:, 5] < 0.5)]
+    d = np.hypot(c[:, 1] - hero[1], c[:, 2] - hero[2])
+    c = c[d < 60.0]
+    return c[np.argmax(c[:, 3])]
+
+
+def shrub_views(s, sun_az, sun_el):
+    x, y, h = s[1], s[2], s[3]
+
+    def at(dist, z, look_z, fov, from_az, s_az=sun_az, s_el=sun_el):
+        a = math.radians(from_az)
+        cx, cy = x + dist * math.sin(a), y + dist * math.cos(a)
+        el = math.degrees(math.atan2(look_z - z, dist))
+        return (cx, cy, z, (from_az + 180.0) % 360.0, el, fov, s_az, s_el)
+
+    side = sun_az + 25.0
+    return {
+        "creo_1m": at(1.0 + s[4], 1.2, 0.6 * h, 70.0, side),
+        "creo_5m": at(5.0, 1.6, 0.5 * h, 45.0, side),
+        "creo_30m": at(30.0, 3.0, 0.5 * h, 25.0, side),
+        "creo_top": (x + 0.3, y - 12.0, 9.0, 0.0, -35.0, 50.0, sun_az, sun_el),
+    }
+
+
+def nearest(plants, kind, hero):
+    c = plants[plants[:, 0] == kind]
+    return c[np.argmin(np.hypot(c[:, 1] - hero[1], c[:, 2] - hero[2]))]
+
+
+def aim(x, y, h, dist, z, look_z, fov, from_az, s_az, s_el):
+    a = math.radians(from_az)
+    cx, cy = x + dist * math.sin(a), y + dist * math.cos(a)
+    el = math.degrees(math.atan2(look_z - z, dist))
+    return (cx, cy, z, (from_az + 180.0) % 360.0, el, fov, s_az, s_el)
+
+
+def other_views(plants, hero, sun_az, sun_el):
+    oc = nearest(plants, 10, hero)
+    rk = nearest(plants, 14, hero)
+    print(f"ocotillo at ({oc[1]:.1f}, {oc[2]:.1f}): H {oc[3]:.2f} m, "
+          f"{int(oc[4])} canes; boulders at ({rk[1]:.1f}, {rk[2]:.1f})")
+    side = sun_az + 25.0
+    return {
+        "oco_1m": aim(oc[1], oc[2], oc[3], 1.3, 1.6, 1.9, 60.0, side,
+                      sun_az, sun_el),
+        "oco_8m": aim(oc[1], oc[2], oc[3], 8.0, 1.7, 0.5 * oc[3], 60.0, side,
+                      sun_az, sun_el),
+        "rock_4m": aim(rk[1], rk[2], 1.0, 5.0, 1.8, 0.6, 60.0, side,
+                       sun_az, sun_el),
+    }
+
+
 def hero_views(h, sun_az, sun_el):
     """Cameras framed on the hero: (x, y, z, az, el, fov, sun_az, sun_el),
     desert frame. The close views stand on the sun's side so the plant is
@@ -167,6 +238,7 @@ def hero_views(h, sun_az, sun_el):
     side = sun_az + 25.0
     return {
         "1m": at(r + 0.55, 1.7, 1.55, 55.0, side),
+        "trunk4m": at(4.0, 2.0, 2.0, 20.0, side),
         "5m": at(5.0, 1.8, 0.45 * height, 80.0, side),
         "30m": at(30.0, 2.5, 0.5 * height, 45.0, side),
         "300m": at(300.0, 60.0, 0.4 * height, 30.0, side),
@@ -191,11 +263,13 @@ def main(argv=None) -> int:
                     help="render size (default: the low tier's 768x432)")
     ap.add_argument("--frames", type=int, default=32)
     ap.add_argument("--quality", default="low")
-    ap.add_argument("--exposure", type=float, default=2.0)
+    ap.add_argument("--exposure", type=float, default=1.2)
     ap.add_argument("--haze", type=float, default=0.55)
     ap.add_argument("--lod", type=float, default=0.5)
-    ap.add_argument("--sun", type=float, nargs=2, default=None,
-                    metavar=("AZ", "EL"), help="default: the demo's")
+    # The demo's own sun stands behind a cloud over the hero; this one is
+    # in the clear there.
+    ap.add_argument("--sun", type=float, nargs=2, default=(120.0, 50.0),
+                    metavar=("AZ", "EL"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--tag", default="")
     ap.add_argument("--time", action="store_true",
@@ -206,7 +280,29 @@ def main(argv=None) -> int:
     ap.add_argument("--hero-offset", type=float, nargs=3, default=None,
                     metavar=("DX", "DY", "Z"),
                     help="--camera relative to the hero's foot; aims at it")
+    ap.add_argument("--patch", action="append", default=[],
+                    metavar="OLD=>NEW",
+                    help="substitute in the shader source before compiling "
+                         "(each OLD must occur exactly once): forcing one "
+                         "LOD representation for a calibration, say")
+    ap.add_argument("--npy", action="store_true",
+                    help="also save the linear float image")
     args = ap.parse_args(argv)
+
+    if args.patch:
+        import cloudyview.soar_host as host
+        original = host.read_shader
+
+        def patched() -> str:
+            src = original()
+            for p in args.patch:
+                old, new = p.split("=>")
+                if src.count(old) != 1:
+                    raise RuntimeError(f"--patch: {old!r} occurs "
+                                       f"{src.count(old)} times")
+                src = src.replace(old, new)
+            return src
+        host.read_shader = patched
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -222,8 +318,7 @@ def main(argv=None) -> int:
 
     meta, sigma = load_demo(args.demo, out)
     bmin, bmax = meta["volume"]["bmin"], meta["volume"]["bmax"]
-    sun_az, sun_el = (args.sun if args.sun is not None
-                      else (meta["sun"]["azimuth"], meta["sun"]["elevation"]))
+    sun_az, sun_el = args.sun
     preset = QUALITY_PRESETS[args.quality]
     r = SoarRenderer(periodic=bool(meta.get("periodic", True)),
                      surface="desert")
@@ -242,7 +337,13 @@ def main(argv=None) -> int:
         surface="desert",
     )
 
-    views = hero_views(hero, sun_az, sun_el)
+    small = scan_plants("scan_small")
+    shrub = pick_shrub(small, hero)
+    print(f"creosote at ({shrub[1]:.2f}, {shrub[2]:.2f}): H {shrub[3]:.2f} m, "
+          f"W {shrub[4]:.2f} m, {int(shrub[7])} stems")
+    views = {**hero_views(hero, sun_az, sun_el),
+             **shrub_views(shrub, sun_az, sun_el),
+             **other_views(plants, hero, sun_az, sun_el)}
     if args.views != "all":
         views = {k: views[k] for k in args.views.split(",")}
     if args.camera is not None:
@@ -285,6 +386,8 @@ def main(argv=None) -> int:
         png = out / f"{name}{args.tag}.png"
         rgb = np.clip(np.asarray(img), 0.0, 1.0)
         Image.fromarray((rgb * 255.0 + 0.5).astype(np.uint8)).save(png)
+        if args.npy:
+            np.save(png.with_suffix(".npy"), np.asarray(img, np.float32))
         print(f"  {name:<14} {el_s:6.2f} s{ms}  -> {png}")
     return 0
 
