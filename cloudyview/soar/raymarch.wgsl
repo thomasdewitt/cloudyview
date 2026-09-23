@@ -2193,6 +2193,8 @@ const CITY_LOWRISE_H: f32 = 22.0;
 const CITY_TOWER_H: f32 = 60.0;
 const CITY_TOWER_SIDE_K: f32 = 4.2;
 const CITY_TOWER_KNEE_H: f32 = 800.0;
+// Above this a tower is a supertall: sharper taper, longer spire, a needle.
+const CITY_SUPERTALL_H: f32 = 1200.0;
 const CITY_SLENDER_MAX: f32 = 20.0;
 // Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
 // is an integer of at most 12 bits stored offset by -2048, where float16
@@ -2262,6 +2264,10 @@ const CITY_ROOF_ALBEDO: f32 = 0.085;
 const CITY_ASPHALT_ALBEDO: f32 = 0.035;
 const CITY_YARD_ALBEDO: f32 = 0.060;   // gravel, packed dirt, old concrete
 const CITY_SCRUB_ALBEDO: f32 = 0.050;  // dry scrub and bare soil
+// The city-lit cloud deck and sky as open fringe ground sees them (see the
+// ground branch of city_shade): a floor plus the wide glow, warm.
+const CITY_OPEN_SKY: vec3<f32> = vec3<f32>(0.060, 0.042, 0.030);
+const CITY_OPEN_SKY_BASE: f32 = 0.25;
 // Ground fog: exponential profile, uniform-in-z beyond its scale height
 // none — this is the night twin of the aerial-perspective machinery, kept
 // separate because its in-scatter source is the city itself, not the sky.
@@ -2414,16 +2420,16 @@ fn city_lamp_inset(k: i32) -> f32 {
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
-// sampler so the tile wraps. Callers keep lod >= 1: the tile's r is the raw
+// sampler so the tile wraps. Never below mip 1: the tile's r is the raw
 // density at mip 0 (heights) and the land-use-weighted glow from mip 1 up
-// (tools/export_web_assets.py). This is the one number the fog, the sky dome
+// (tools/export_web_assets.py), so the clamp is here, not a convention. This is the one number the fog, the sky dome
 // and the cloud uplight all share. `xy` is in the CITY FRAME (world minus
 // the row-24 offset — see city_camera_origin), whose origin IS the tile's
 // origin, so the uv is simply the coordinate over the extent: which
 // district sits where is decided entirely by the offset the host wrote.
 fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
     let uv = xy / u.ocean_params.y;
-    let l = clamp(lod, 0.0, u.ocean_params.w);
+    let l = clamp(lod, 1.0, u.ocean_params.w);
     return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
 }
 
@@ -2707,7 +2713,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             c.arch = 4;                   // spire crown
         }
     }
-    if (h > 600.0 && r4d.y < select(0.65, 0.85, h > 1200.0)) {
+    if (h > 600.0 && r4d.y < select(0.65, 0.85, h > CITY_SUPERTALL_H)) {
         c.arch = select(3, 4, r4d.y < 0.30);
     }
 
@@ -2772,11 +2778,17 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.has_frustum = true;
         c.fmin = vec3<f32>(bc - 0.5 * fw_shaft, zp);
         c.fmax = vec3<f32>(bc + 0.5 * fw_shaft, h);
-        c.fscale = 0.55 + 0.25 * r4d.z;
+        // A supertall's shaft closes much further: its elegance is the
+        // taper, and a 3 km prism that only narrows by a third reads as a
+        // wall however wide its base is right to be.
+        c.fscale = select(0.55 + 0.25 * r4d.z, 0.28 + 0.22 * r4d.z,
+                          h > CITY_SUPERTALL_H);
     } else if (c.arch == 4) {
         // A straight shaft to three quarters, then a steep spire — on the
         // podium, when there is one, as a stacked tier.
-        let zs = floor(ns * 0.75) * CITY_FLOOR_H;
+        // Supertalls give the spire a longer run: the top 35-45%.
+        let zs = floor(ns * select(0.75, 0.55 + 0.10 * r4d.w,
+                                   h > CITY_SUPERTALL_H)) * CITY_FLOOR_H;
         if (podium) {
             c.tiers = 2;
             c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
@@ -2820,9 +2832,16 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             bud_min = vec2<f32>(bmin2.x + 0.2 * fw.x, bmin2.y - reach);
             bud_max = vec2<f32>(bmax2.x - 0.2 * fw.x, bmin2.y + 1.0);
         }
-        // Clamped to the lot minus a hair, so no prim leaves it.
-        bud_min = max(bud_min, cmin + vec2<f32>(0.5));
-        bud_max = min(bud_max, cmax - vec2<f32>(0.5));
+        // Clamped to the lot minus a hair, so no prim leaves it — and to
+        // the plot on avenue edges, whose corridor is skyway's empty air.
+        let bud_lo = cmin + vec2<f32>(
+            select(0.5, hx0, city_is_avenue(base.x)),
+            select(0.5, hy0, city_is_avenue(base.y)));
+        let bud_hi = cmax - vec2<f32>(
+            select(0.5, hx1, city_is_avenue(base.x + span.x)),
+            select(0.5, hy1, city_is_avenue(base.y + span.y)));
+        bud_min = max(bud_min, bud_lo);
+        bud_max = min(bud_max, bud_hi);
         c.b2min = vec3<f32>(bud_min, bz0);
         c.b2max = vec3<f32>(bud_max, bz1);
         if (h > 200.0 && r4b.y > 0.55) {
@@ -2833,10 +2852,8 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             // The second bud rides the opposite flank: mirror about bc.
             let m0 = 2.0 * bc - bud_max;
             let m1 = 2.0 * bc - bud_min;
-            c.b3min = vec3<f32>(
-                max(min(m0, m1), cmin + vec2<f32>(0.5)), cz0);
-            c.b3max = vec3<f32>(
-                min(max(m0, m1), cmax - vec2<f32>(0.5)), cz1);
+            c.b3min = vec3<f32>(max(min(m0, m1), bud_lo), cz0);
+            c.b3max = vec3<f32>(min(max(m0, m1), bud_hi), cz1);
         }
     } else if (podium) {
         // Podium, tower, crown: the setback stack with the street wall at
@@ -2947,15 +2964,25 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // stand a mast on, and a tapered shaft only offers its shrunken crown
     // cap (Thomas, 2026-08-20: bridges/antennas only on the building types
     // that can carry them — components read cc.arch for the same rule).
-    if (h > CITY_MAST_MIN_H && r4b.z < 0.65 && c.arch != 4) {
+    // A supertall's tapered shaft always ends in a needle: a mast scaled to
+    // the tower (6-11% of its height, as thick as a needle that long must
+    // be), centred on the crown, and kept under the DDA's z gate.
+    let needle = c.arch == 3 && h > CITY_SUPERTALL_H;
+    if (h > CITY_MAST_MIN_H && (r4b.z < 0.65 || needle) && c.arch != 4) {
         c.has_mast = true;
-        let mast_h = 12.0 + 45.0 * r4b.w;
-        let crown = select(1.0, c.fscale * 0.85, c.arch == 3);
-        let moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * (0.4 * crown);
+        var mast_h = 12.0 + 45.0 * r4b.w;
+        var cross = CITY_MAST_CROSS;
+        var moff = vec2<f32>(0.0);
+        if (needle) {
+            mast_h = min(h * (0.06 + 0.05 * r4b.w), CITY_SLAB_TOP - h - 1.0);
+            cross = max(CITY_MAST_CROSS, 0.03 * mast_h);
+        } else {
+            let crown = select(1.0, c.fscale * 0.85, c.arch == 3);
+            moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * (0.4 * crown);
+        }
         let mc = bc + moff;
-        c.mast_min = vec3<f32>(mc - vec2<f32>(0.5 * CITY_MAST_CROSS), h);
-        c.mast_max = vec3<f32>(mc + vec2<f32>(0.5 * CITY_MAST_CROSS),
-                               h + mast_h);
+        c.mast_min = vec3<f32>(mc - vec2<f32>(0.5 * cross), h);
+        c.mast_max = vec3<f32>(mc + vec2<f32>(0.5 * cross), h + mast_h);
         c.top_z = h + mast_h;
     } else {
         c.top_z = h;
@@ -3588,6 +3615,43 @@ fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
     return mix(near, flux / area, blend);
 }
 
+// One lattice corner of the ground mottle's octave o: a uniform draw at the
+// corner, wrapped at the tile's `per` lattice cells.
+fn city_mottle_corner(j: vec2<i32>, per: i32, o: i32) -> f32 {
+    let jw = ((j % per) + per) % per;
+    return city_u01(pcg2d(vec2<u32>(
+        bitcast<u32>(jw.x) ^ 0x2c1b3c6du,
+        bitcast<u32>(jw.y) ^ (u32(o) * 0x297a2d39u))).x);
+}
+
+// Patchy value noise over lot ground, mean one: scrub clumps at 14.4 m and
+// grit at 3.6 m. Both lattices divide the tile (92160 m = 6400 x 14.4 =
+// 25600 x 3.6), and the corners wrap at it,
+// so the pattern is as tile-periodic as everything else in the city. Each
+// octave fades to its mean (one) as the footprint approaches its scale.
+fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
+    var m = 1.0;
+    for (var o: i32 = 0; o < 2; o = o + 1) {
+        let scale = select(3.6, 14.4, o == 0);
+        let amp = select(0.35, 0.65, o == 0)
+                  * (1.0 - smoothstep(0.25 * scale, scale, fp));
+        if (amp > 0.0) {
+            let per = i32(round(u.ocean_params.y / scale));
+            let q = p / scale;
+            let i = vec2<i32>(floor(q));
+            let f = q - floor(q);
+            let w = f * f * (3.0 - 2.0 * f);
+            let c00 = city_mottle_corner(i, per, o);
+            let c10 = city_mottle_corner(i + vec2<i32>(1, 0), per, o);
+            let c01 = city_mottle_corner(i + vec2<i32>(0, 1), per, o);
+            let c11 = city_mottle_corner(i + vec2<i32>(1, 1), per, o);
+            let v = mix(mix(c00, c10, w.x), mix(c01, c11, w.x), w.y);
+            m = m * (1.0 + amp * (2.0 * v - 1.0));
+        }
+    }
+    return m;
+}
+
 // Surface radiance at a city hit, before fog. fp is the pixel footprint at
 // the hit (m/px): the analytic LOD that dissolves windows and lamp pools
 // into their means once they are sub-pixel, so the far city is smooth
@@ -3791,15 +3855,25 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         // passes the dim outskirts untouched and compresses only the top.
         let raw_street = CITY_LAMP_RADIANCE * street_scale * pools;
         street = raw_street / (1.0 + raw_street * 0.30);
-    } else if (cc.land_use == CITY_USE_YARD
-               || cc.land_use == CITY_USE_INDUSTRIAL) {
-        alb = CITY_YARD_ALBEDO;
-    } else if (cc.land_use == CITY_USE_OPEN) {
-        alb = CITY_SCRUB_ALBEDO;
+    }
+    var sky = fill;
+    if (!paved && cc.land_use != CITY_USE_URBAN) {
+        // Open ground on the fringe. It sees the whole sky where a canyon
+        // floor sees a slot of it, and on a city night that sky is the
+        // cloud deck lit from below by the whole city — the wide glow mip
+        // is exactly that light's source — so the fringe's ground reads,
+        // faintly, as moonlit and city-lit dirt rather than a void.
+        // Scrub and soil break it up into patches; the mottle has mean one
+        // and dissolves into it as the pixel footprint outgrows a patch.
+        alb = select(CITY_YARD_ALBEDO, CITY_SCRUB_ALBEDO,
+                     cc.land_use == CITY_USE_OPEN)
+              * city_ground_mottle(h.pos.xy, fp);
+        sky = sky + CITY_OPEN_SKY
+            * (CITY_OPEN_SKY_BASE + city_glow_sample(h.pos.xy, 8.0));
     }
     return CITY_LAMP_COLOR * street
            + city_flood_ground(cc, h.pos.xy, fp)
-           + alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+           + alb * (sky + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
 
 // Night ground-fog: extinction toward the hit plus in-scattered city glow.
@@ -4314,6 +4388,7 @@ const cc_aircars_Z_HIGH: f32 = 95.0;
 const cc_aircars_Z_JIT: f32 = 8.0;
 const cc_aircars_HIGH_CUT: f32 = 0.55;   // hash above this -> the high deck
 const cc_aircars_LANE_P: f32 = 0.72;     // slot occupancy at full density
+const cc_aircars_THROUGH_FRAC: f32 = 0.12; // ... over an unbuilt avenue
 const cc_aircars_DENS_LO: f32 = 0.50;    // occupancy scale, outskirts
 const cc_aircars_DENS_HI: f32 = 1.35;    // occupancy scale, downtown
 // The window the occupancy ramp spans, in block density. Set against the
@@ -4675,11 +4750,18 @@ fn cc_aircars_craft(ci: vec2<i32>, cc: CityCell, lane: i32)
         return cc_aircars_no_craft();
     }
     let r = cc_aircars_draw(ci, lane);
-    // Traffic clusters where the city does.
-    let p = cc_aircars_LANE_P * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
-                                    smoothstep(cc_aircars_DENS_START,
-                                               cc_aircars_DENS_FULL,
-                                               cc.density));
+    // Traffic clusters where the city does. And a lane follows the avenue
+    // on the ground: where that avenue was never built — across open scrub
+    // and the gaps in the belt — only through-traffic between districts
+    // flies it, a thin fraction, so the sky over the gaps is neither dead
+    // nor a floating copy of downtown.
+    let side = select(select(3, 2, lo_edge), select(1, 0, lo_edge), lane == 0);
+    let served = select(cc_aircars_THROUGH_FRAC, 1.0,
+                        city_edge_street(cc, side));
+    let p = cc_aircars_LANE_P * served
+            * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
+                  smoothstep(cc_aircars_DENS_START, cc_aircars_DENS_FULL,
+                             cc.density));
     if (r.x >= p) {
         return cc_aircars_no_craft();
     }
@@ -5619,10 +5701,10 @@ fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // a 32 m corridor of guaranteed empty air centred on the line. A 16 m deck on
 // the centreline therefore clears the facades by 8 m on each side BY
 // CONSTRUCTION, at any height — the flat-roof rule in SPEC's "Respect the
-// architecture" is satisfied without a single building test. (Superblocks
-// cannot break this either: `merged` groups are anchored on even indices and
-// swallow only their odd internal boundary, and avenues are at multiples of
-// 8.)
+// architecture" is satisfied without a single building test. (Multi-block
+// lots cannot break this either: cloudyview/city_lots.py never lets a lot
+// contain an avenue line, and city_cell clamps growth buds to the plot on
+// avenue edges.)
 //
 // PROFILE. The x-family runs dead flat at 26 m. Where the two families cross,
 // the y-family climbs to 34 m and passes over — a real interchange decision,
@@ -8938,7 +9020,9 @@ fn cc_streetlife_trace_car_box(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
 // that owns the ground draws it.
 fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
         -> cc_streetlife_Prop {
-    if (!cc.built) {
+    // The bin stands on the sidewalk of the corner's x-side kerb, so it
+    // needs that street.
+    if (!cc.built || !city_edge_street(cc, select(1, 0, (k & 1) == 0))) {
         return cc_streetlife_no_prop();
     }
     let cw = city_tile_cell(ci);
@@ -9292,6 +9376,11 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var have = false;
     var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
+        // Poles and parked cars stand only on a kerb that has a street
+        // (the bake removes streets from open land and lot interiors).
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
                                    fp);
         if (k.hit.hit) {

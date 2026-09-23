@@ -194,3 +194,19 @@ def test_shared_int_constants_agree(py_name, wgsl_name):
                   WGSL.read_text())
     assert m, f"{wgsl_name} is gone from raymarch.wgsl"
     assert int(m.group(1)) == getattr(city_lots, py_name)
+
+
+def test_every_surface_tile_carries_the_schema_both_hosts_expect():
+    """A new shader must never read an old tile as if it were new."""
+    import json
+
+    from cloudyview.soar_host import SURFACE_DIRS, SURFACE_TILE_SCHEMAS
+
+    js = (REPO / "web" / "soar" / "constants.js").read_text()
+    block = re.search(r"SURFACE_TILE_SCHEMAS\s*=\s*\{(.*?)\}", js, re.S)
+    assert block, "constants.js SURFACE_TILE_SCHEMAS is gone"
+    js_schemas = dict(re.findall(r'(\w+):\s*"([^"]+)"', block.group(1)))
+    assert js_schemas == SURFACE_TILE_SCHEMAS
+    for surface, tile_dir in SURFACE_DIRS.items():
+        meta = json.loads((tile_dir / "meta.json").read_text())
+        assert meta["schema"] == SURFACE_TILE_SCHEMAS[surface], surface
