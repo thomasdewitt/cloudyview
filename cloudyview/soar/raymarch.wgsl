@@ -12523,6 +12523,9 @@ const DF_SAG_RADIALS: i32 = 14;
 const DF_SAG_CENTRALS: i32 = 4;
 const DF_SAG_EXACT_FP0: f32 = 0.005;
 const DF_SAG_EXACT_FP1: f32 = 0.009;
+// Columns become capsule chains past this footprint (ribs sub-pixel).
+const DF_CACT_CAPS_FP0: f32 = 0.020;
+const DF_CACT_CAPS_FP1: f32 = 0.035;
 const DF_SAG_FUZZ_FP0: f32 = 0.025;
 const DF_SAG_FUZZ_FP1: f32 = 0.045;
 // Projected needle area per unit volume at the skin, falling linearly to
@@ -12744,6 +12747,98 @@ fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
     return best;
 }
 
+// Ray against a capsule (segment pa-pb, radius r): the entry t, or -1.
+// The cylinder's quadratic, then whichever end sphere the ray meets
+// outside the barrel (Quilez's closed form).
+fn df_capsule(ro: vec3<f32>, rd: vec3<f32>, pa: vec3<f32>, pb: vec3<f32>,
+              r: f32) -> f32 {
+    let ba = pb - pa;
+    let oa = ro - pa;
+    let baba = max(dot(ba, ba), 1e-12);
+    let bard = dot(ba, rd);
+    let baoa = dot(ba, oa);
+    let rdoa = dot(rd, oa);
+    let oaoa = dot(oa, oa);
+    let a = baba - bard * bard;
+    let b = baba * rdoa - baoa * bard;
+    let c = baba * oaoa - baoa * baoa - r * r * baba;
+    let h = b * b - a * c;
+    if (h < 0.0) {
+        return -1.0;
+    }
+    if (a > 1e-9 * baba) {
+        let t = (-b - sqrt(h)) / a;
+        let y = baoa + t * bard;
+        if (y > 0.0 && y < baba) {
+            return t;
+        }
+    }
+    let y0 = baoa + select(0.0, ((-b - sqrt(h)) / a) * bard, a > 1e-9 * baba);
+    let oc = select(ro - pb, oa, y0 <= 0.0);
+    let b2 = dot(rd, oc);
+    let c2 = dot(oc, oc) - r * r;
+    let h2 = b2 * b2 - c2;
+    if (h2 > 0.0) {
+        return -b2 - sqrt(h2);
+    }
+    return -1.0;
+}
+
+// A column's far form: its J as four capsules (the straight run, the elbow
+// in two, the vertical run) at the pleats' mean radius, r (1 - depth / 3) —
+// the crest-to-groove profile averaged over a rib. Returns (t, the along-
+// axis parameter's segment point) folded into the running best; `best_n`
+// receives the capsule normal.
+struct DfCapHit {
+    t: f32,
+    n: vec3<f32>,
+    comp: i32,
+    s: f32,
+}
+
+fn df_col_capsules(c: DfColumn, comp: i32, q0: vec3<f32>, dir: vec3<f32>,
+                   best_in: DfCapHit) -> DfCapHit {
+    var best = best_in;
+    let arc = c.rb * (0.5 * DF_PI - c.alpha);
+    let len = df_col_len(c);
+    // Knots along the J: root, end of the run, mid-elbow, end of the elbow,
+    // tip; zero-length pieces are spheres and cost a quadratic.
+    for (var k: i32 = 0; k < 4; k = k + 1) {
+        var s0 = 0.0;
+        var s1 = c.l1;
+        if (k == 1) {
+            s0 = c.l1;
+            s1 = c.l1 + 0.5 * arc;
+        } else if (k == 2) {
+            s0 = c.l1 + 0.5 * arc;
+            s1 = c.l1 + arc;
+        } else if (k == 3) {
+            s0 = c.l1 + arc;
+            s1 = len;
+        }
+        if (k < 3 && s1 <= s0) {
+            continue;
+        }
+        let w3 = vec2<f32>(c.u.x, c.u.y);
+        let p0 = df_jpath_at(c, s0).p;
+        let p1 = df_jpath_at(c, s1).p;
+        let a = c.root + vec3<f32>(w3 * p0.x, p0.y);
+        let b = c.root + vec3<f32>(w3 * p1.x, p1.y);
+        let r = df_col_radius(c, 0.5 * (s0 + s1)) * (1.0 - c.depth / 3.0);
+        let t = df_capsule(q0, dir, a, b, r);
+        if (t > 0.0 && t < best.t) {
+            let hp = q0 + dir * t;
+            let ba = b - a;
+            let f = clamp(dot(hp - a, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
+            best.t = t;
+            best.n = normalize(hp - (a + ba * f));
+            best.comp = comp;
+            best.s = mix(s0, s1, f);
+        }
+    }
+    return best;
+}
+
 // The fluted cacti — saguaro and barrel — share one march: sphere-traced
 // columns, the needles of the areoles the ray passes near, and the three
 // needle representations. Only the numbers and the areole differ.
@@ -12786,8 +12881,9 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let slope = 2.0 * it.b.z * it.a.z / DF_PI;
     let inv_lip = 1.0 / sqrt(1.0 + slope * slope);
 
-    // Spine representation, chosen once per plant on the ray dither.
-    let fp_in = pixel_angle * ta;
+    // Spine representation, chosen once per plant on the ray dither. A
+    // shadow ray carries its receiver's footprint in pixel_angle.
+    let fp_in = select(pixel_angle * ta, pixel_angle, shadow);
     var mode = 2;
     if (!shadow) {
         if (fp_in < mix(DF_SAG_EXACT_FP0, DF_SAG_EXACT_FP1, dither.x)) {
@@ -12795,6 +12891,61 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         } else if (fp_in < mix(DF_SAG_FUZZ_FP0, DF_SAG_FUZZ_FP1, dither.x)) {
             mode = 1;
         }
+    }
+    // Past a couple of centimetres of footprint the ribs are a pixel or
+    // less and the columns are drawn as their capsule chains instead of
+    // sphere-traced pleats: the far form (and the shadow form for a
+    // receiver that far), with the pleats' shading averaged in.
+    if (fp_in > mix(DF_CACT_CAPS_FP0, DF_CACT_CAPS_FP1, dither.x)) {
+        var ch: DfCapHit;
+        ch.t = tb;
+        ch = df_col_capsules(cols.c0, 0, q0, dir, ch);
+        if (cols.n > 1) {
+            ch = df_col_capsules(cols.c1, 1, q0, dir, ch);
+        }
+        if (cols.n > 2) {
+            ch = df_col_capsules(cols.c2, 2, q0, dir, ch);
+        }
+        if (cols.n > 3) {
+            ch = df_col_capsules(cols.c3, 3, q0, dir, ch);
+        }
+        if (cols.n > 4) {
+            ch = df_col_capsules(cols.c4, 4, q0, dir, ch);
+        }
+        if (ch.t >= tb || ch.t < ta) {
+            return res;
+        }
+        res.hit = true;
+        res.t = ch.t;
+        res.kind = it.kind;
+        if (shadow) {
+            return res;
+        }
+        res.normal = ch.n;
+        let qh = q0 + dir * ch.t;
+        let hz = pcg2d(it.seed).x;
+        let tint = df_u01(hz) * 0.9;
+        let age = it.b.w;
+        let boot_h = DF_SAG_BOOT_H * smoothstep(0.35, 0.9, age)
+            * (0.7 + 0.3 * fract(it.a.w * 13.1));
+        if (!barrel && ch.comp == 0 && qh.z < boot_h) {
+            res.mat = vec4<f32>(f32(DF_MAT_BARK) + tint, 0.5, qh.z, age);
+            return res;
+        }
+        let c = df_cols_get(&cols, ch.comp);
+        // The felt pads' mean coverage of a rib and the folded needles'
+        // coverage along this sightline, as the pleated far form has them.
+        let r_c = df_col_radius(c, ch.s);
+        let pad_mean = DF_PI * DF_SAG_FELT_R * DF_SAG_FELT_R
+            / (areole_ds * DF_TAU * r_c / c.ribs) * 0.4;
+        let mu = max(abs(dot(ch.n, dir)), 0.08);
+        let cov = 1.0 - exp(-select(DF_SAG_FOLD_TAU, DF_BAR_FOLD_TAU, barrel)
+                            / mu);
+        // x = 0.5: the rib-averaged groove shading (E[mix(0.62, 1, x)] over
+        // a rib is its value at x = 1/2).
+        res.mat = vec4<f32>(f32(DF_MAT_SKIN_FUZZ) + tint, 0.5,
+                            round(pad_mean * 255.0) + 0.99 * cov, age);
+        return res;
     }
     let shell = select(0.0, shell_w, mode < 2 && !shadow);
     let tau_hit = df_item_free_path(dither, it.seed);
@@ -13461,8 +13612,8 @@ const DF_CREO_LEAF_HW: f32 = 0.0034;   // leaflet half-width (m)
 const DF_CREO_MAX_CLUMPS: i32 = 6;     // per twig per ray
 const DF_CREO_EXACT_FP0: f32 = 0.012;
 const DF_CREO_EXACT_FP1: f32 = 0.022;
-const DF_CREO_CAPS_FP0: f32 = 0.18;
-const DF_CREO_CAPS_FP1: f32 = 0.30;
+const DF_CREO_CAPS_FP0: f32 = 0.04;
+const DF_CREO_CAPS_FP1: f32 = 0.07;
 // Leaf-area optical depth per metre inside a foliage capsule and inside the
 // whole-bush envelope. Measured, not derived: the values at which each form
 // averages to what the exact leaves average to (tools/desert_flora_harness.py,
@@ -14703,11 +14854,18 @@ fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                       t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
     let dither = df_ray_dither(dir);
     let t1 = min(t1_in, df_far_cut(dir));
-    var h = df_walk(o, dir, inv_dir, t0, t1, pixel_angle, true, dither, false);
-    let hs = df_walk(o, dir, inv_dir, t0, h.t, pixel_angle, false, dither,
-                     false);
-    if (hs.hit) {
-        h = hs;
+    // Both grids through ONE call of the walk: every call site inlines the
+    // walk and every species' trace behind it, and the kernel's register
+    // budget is set by the largest.
+    var h: DesertHit;
+    h.hit = false;
+    h.t = t1;
+    for (var g: i32 = 0; g < 2; g = g + 1) {
+        let hg = df_walk(o, dir, inv_dir, t0, h.t, pixel_angle, g == 0,
+                         dither, false);
+        if (hg.hit) {
+            h = hg;
+        }
     }
     return h;
 }
@@ -14722,12 +14880,13 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     let t1 = max((top - p.z) / sun_dir.z, 0.0);
     let inv = 1.0 / sun_dir;
     let dither = vec2<f32>(0.5);
-    let hb = df_walk(p, sun_dir, inv, 0.0, t1, fp, true, dither, true);
-    if (hb.hit) {
-        return 0.0;
+    // One call of the walk for both grids (see desert_flora_trace).
+    for (var g: i32 = 0; g < 2; g = g + 1) {
+        if (df_walk(p, sun_dir, inv, 0.0, t1, fp, g == 0, dither, true).hit) {
+            return 0.0;
+        }
     }
-    let hs = df_walk(p, sun_dir, inv, 0.0, t1, fp, false, dither, true);
-    return select(1.0, 0.0, hs.hit);
+    return 1.0;
 }
 
 // How much of the plants' shadow on a ground point of footprint fp is the
@@ -14824,7 +14983,17 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
     let code = i32(floor(h.mat.x));
     let tint = fract(h.mat.x);
     let n = h.normal;
-    let sun_vis = df_shadow_exact(h.pos + n * max(2e-3, fp), L.sun_dir, fp);
+    // One shadow ray per plant hit. A folded needle shell stands out from
+    // the skin, so its point sees the sun from the shell's outer half —
+    // what lights the rim of a backlit plant — and the skin under it takes
+    // the same ray: its own facing is n.l's business, and what else shades
+    // it (another plant) the outer point sees too.
+    var lift = max(2e-3, fp);
+    if (code == DF_MAT_SKIN_FUZZ) {
+        lift = 0.6 * select(DF_SAG_SHELL, DF_BAR_SHELL,
+                            h.kind == DF_KIND_BARREL);
+    }
+    let sun_vis = df_shadow_exact(h.pos + n * lift, L.sun_dir, fp);
     var Ls = L;
     Ls.sun = L.sun * sun_vis;
     if (h.kind == DF_KIND_SAGUARO || h.kind == DF_KIND_BARREL) {
@@ -14874,15 +15043,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
               * (1.0 - felt_w);
         if (code == DF_MAT_SKIN_FUZZ) {
             // The shell has folded into the skin: its coverage at this view.
-            // Its needles stand out from the skin, so they see the sun from
-            // the shell's outer half, not from the skin's own point — which
-            // is what lights the rim of a backlit plant while the skin
-            // beneath it is in its own shadow.
-            let shell_w = select(DF_SAG_SHELL, DF_BAR_SHELL, barrel);
-            var Lf = L;
-            Lf.sun = L.sun * df_shadow_exact(h.pos + n * (0.6 * shell_w),
-                                             L.sun_dir, fp);
-            col = mix(col, df_spine_medium(spine_mean, dir, L, Lf), cov);
+            col = mix(col, df_spine_medium(spine_mean, dir, L, Ls), cov);
         }
         return col;
     }
@@ -14915,22 +15076,19 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
 // meets per unit descent (a crown's upper half, -dA/dz). theta is the ray's
 // zenith angle, so a grazing ray sees plant sides and a nadir ray crowns:
 // the whole reason a bajada is stipple from above and a wall of saguaros at
-// the horizon. The view transmittance is integrated in a few samples along
-// the part of the ray past the cut, at the height above the ground each
-// sample actually has.
+// the horizon. The view transmittance is integrated analytically in height
+// over a few stretches of the part of the ray past the cut, each with the
+// ground read at its ends.
 //
 // The ground's shadow is the same medium along the sun ray, with the hot
-// spot: looking down a sun ray the visible ground is sunlit, because the
-// plant that would shade it is the plant that would hide it. The two paths
-// share a plant with a probability that decays with how far apart they
-// run through a plant's height, measured in its width.
+// spot (df_far_shadow_stat, mixed into desert_flora_shadow): looking down a
+// sun ray the visible ground is sunlit, because the plant that would shade
+// it is the plant that would hide it.
 //
 // Densities are each species' base frequency per cell times df_keep at the
 // local habitat — the same expectation the explicit placement draws from.
 struct DesertCover {
     cover: f32,
-    albedo: vec3<f32>,
-    shadow: f32,
     // The plants' mean radiance is (sun sun_k + sky sky_k + ground gnd_k)/pi
     // under the ground point's DesertLight; the view/sun geometry is folded
     // into these here, where the view and sun directions are known.
@@ -15102,11 +15260,6 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                     pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
     var c: DesertCover;
     c.cover = 0.0;
-    c.albedo = vec3<f32>(0.0);
-    // The plants' shadow on the ground is handed off inside
-    // desert_flora_shadow, where the exact and statistical forms are
-    // mixed once; nothing is left for the cover to add.
-    c.shadow = 0.0;
     c.sun_k = vec3<f32>(0.0);
     c.sky_k = vec3<f32>(0.0);
     c.gnd_k = vec3<f32>(0.0);
@@ -15183,7 +15336,6 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     let a_oco = DF_FAR_OCO_ALB * (w_oco * inv);
     let a_rock = DF_FAR_ROCK_ALB * (w_rock * inv);
     let a_pear = DF_FAR_PEAR_ALB * (w_pear * inv);
-    c.albedo = a_sag + a_creo + a_burs + a_oco + a_rock + a_pear;
     c.sun_k = a_sag * (0.85 * cyl) + (a_creo + a_burs + a_pear) * (0.75 * sph)
         + a_oco * cyl + a_rock * sph;
     c.sky_k = a_sag * 0.40 + a_creo * 0.45 + a_burs * 0.50 + a_oco * 0.50
