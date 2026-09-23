@@ -14838,7 +14838,10 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         let z_a = o.z + t_cur * dir.z;
         let z_b = o.z + t_exit * dir.z;
         let cc = city_cell(ci);
-        if (cc.built && min(z_a, z_b) < cc.top_z + 1.0) {
+        // Industrial walls are the industry component's (city-layout's):
+        // cladding, dock doors and their own relief. The shell leaves them.
+        if (cc.built && cc.land_use != CITY_USE_INDUSTRIAL
+            && min(z_a, z_b) < cc.top_z + 1.0) {
             let st = city_shell_style(cc);
             for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
                 let bx = city_tier_box(cc, k);
