@@ -95,16 +95,19 @@ const expression = `(async () => {
     return { label, errors, warnings };
   };
   const raymarch = await text("raymarch.wgsl");
-  // The lighting recipes the quality tiers can ask for, deduplicated. A host
+  // Every lighting recipe the app can reach: each tier's light-step cap,
+  // crossed with the sun-tau cache and the sky probe on and off — the tiers
+  // pick three of those four, and the hand toggles reach the fourth. A host
   // whose specializeShader takes fewer options ignores the rest, and the
-  // identical sources that leaves are compiled once.
+  // identical sources that leaves are compiled once (below).
+  const caps = [...new Set(Object.values(K.QUALITY_PRESETS)
+    .map((p) => p.maxLightSteps ?? K.DEFAULT_MAX_LIGHT_STEPS))];
   const recipes = [];
-  for (const p of Object.values(K.QUALITY_PRESETS)) {
-    const r = { maxLightSteps: p.maxLightSteps ?? K.DEFAULT_MAX_LIGHT_STEPS,
-                lightCache: Boolean(p.lightCache),
-                skyProbe: Boolean(p.skyProbe) };
-    if (!recipes.some((q) => JSON.stringify(q) === JSON.stringify(r))) {
-      recipes.push(r);
+  for (const maxLightSteps of caps) {
+    for (const lightCache of [false, true]) {
+      for (const skyProbe of [false, true]) {
+        recipes.push({ maxLightSteps, lightCache, skyProbe });
+      }
     }
   }
   const out = [];
