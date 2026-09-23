@@ -10787,7 +10787,16 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // with a lamp behind it blazes, the look of every reference photograph),
 // the storefront bands on both sides of the street (an infinite emitting
 // strip, its solid angle exact, its phase approximated about the strip's
-// nearest point), and a little skyglow fill.
+// nearest point), and the two hemispheres — the lit street below, the
+// night sky above. Two density taps toward the light give the billows lit
+// tops and grey undersides, and a knee on the source keeps a plume inside
+// a lamp's reach from clipping to one flat sheet.
+//
+// By the city's own calibration the lamps light a parcel of steam about
+// twenty times harder than a storefront does (a pool of 0.7 on asphalt of
+// albedo 0.035 is an irradiance of ~60; a 2.2 storefront filling 1.6 sr is
+// ~3.5), so downtown steam is sodium amber, and a storefront's colour shows
+// only in plumes standing away from the lamp lines.
 //
 // THE COST. The medium is marched only where a ray enters a plume's box,
 // and finding those boxes is the part every city pixel pays for, so it is
@@ -10808,8 +10817,19 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 //      steps over the entered interval, jittered by the pixel's stratified
 //      uniform so the accumulation integrates what a few steps sample.
 // The loops are all rolled with run-time bounds and the density and the
-// lighting are single functions called once, in one loop: the city and the
-// clouds share one kernel, and occupancy is every pixel's cost.
+// lighting are single functions called once, in one loop (the shadow taps
+// share the sample's call site): the city and the clouds share one kernel,
+// and occupancy is every pixel's cost.
+//
+// Measured (RTX 5080, 768x432, 256 frames at LOD 0.01, min of two
+// back-to-back runs, component unregistered vs registered, ms/frame):
+//     eye level, two plumes and a stack in view   2.11 -> 2.30   (+9%)
+//     aerial                                       4.34 -> 4.38
+//     base                                         5.31 -> 5.35
+//     street                                       0.98 -> 0.98
+//     horizon                                      5.86 -> 5.94
+// The wide views pay ~1% — the gates plus the register footprint — and the
+// eye-level view pays for its enumeration and its marches.
 
 // --- where steam is ----------------------------------------------------------
 // Share of PRESENT sites that steam, by district. A block owns about 3.3
@@ -10830,45 +10850,58 @@ const cc_manholesteam_WIND: vec2<f32> = vec2<f32>(0.4472136, 0.8944272);
 // The source radius of a plume from a bare cover. Steam leaves through the
 // vent holes and the rim gap and billows out at once, so the visible plume
 // starts wider than the iron (CITY_MH_R); a stack's leaves its own mouth.
-const cc_manholesteam_R0_COVER: f32 = 0.6;
+const cc_manholesteam_R0_COVER: f32 = 0.9;
 const cc_manholesteam_H_MIN: f32 = 6.0;    // plume height above its source
 const cc_manholesteam_H_MAX: f32 = 12.0;
 // Radius growth per metre of rise. 0.12 is a pure plume in still air; a
 // plume bent over by a crosswind entrains faster, and steam also sheds
 // visible mass as it mixes, which the thinning law below carries.
-const cc_manholesteam_SPREAD: f32 = 0.28;
-// Density falls as (r0 / r)^THIN: 2 would conserve the steam mass of a
+const cc_manholesteam_SPREAD: f32 = 0.24;
+// Density falls as (R0_COVER / r)^THIN: 2 would conserve the steam mass of a
 // plume of constant speed, but condensate evaporates as it mixes AND the
 // plume decelerates, and the two roughly cancel in what the eye sees — a
-// plume that stays readable to its top. 1.1 is set by the references.
-const cc_manholesteam_THIN: f32 = 1.6;
+// plume that stays readable to its top. 1.4 is set against the references.
+const cc_manholesteam_THIN: f32 = 1.4;
 // Downwind drift of the top, as a fraction of the plume height; the
 // centreline bends as the square of the rise (it leaves the source
 // vertical, which is what a jet does, and bends over as it slows).
 const cc_manholesteam_LEAN_LO: f32 = 0.35;
 const cc_manholesteam_LEAN_HI: f32 = 0.80;
 const cc_manholesteam_LEAN_STACK: f32 = 0.95; // a stack's plume lies over
-// Extinction at the source core (m^-1): a metre of the jet at the cover is
-// nearly opaque.
+// Extinction at a cover's source core (m^-1): a metre of it takes four
+// fifths of the light. A stack's mouth is denser still (see the density).
 const cc_manholesteam_SIGMA: f32 = 1.6;
-// The billows: the noise (n, centred) moves the plume's edge by BILLOW n
-// (in units of its cut radius) over a soft shoulder SOFT wide, and
-// modulates the density inside by 1 + LUMP n.
-const cc_manholesteam_BILLOW: f32 = 3.0;
-const cc_manholesteam_SOFT: f32 = 0.35;
-const cc_manholesteam_LUMP: f32 = 2.5;
+// The billows. n, the noise centred on zero, lies in [-0.5, 0.5]; the
+// plume's edge sits at EDGE + BILLOW n radii from the axis, with a soft
+// shoulder SOFT radii wide, and the density inside is scaled by
+// 1 + LUMP n. CUT = EDGE + BILLOW / 2 is the farthest a billow can reach,
+// so the profile is zero there by construction — a bound, never a visible
+// edge. (The first pass cut a noise-displaced edge at a fixed radius, and
+// every plume showed the straight silhouette of that cone.)
+const cc_manholesteam_EDGE: f32 = 1.0;
+const cc_manholesteam_BILLOW: f32 = 2.2;
+const cc_manholesteam_SOFT: f32 = 0.3;
+const cc_manholesteam_LUMP: f32 = 4.0;
+const cc_manholesteam_CUT: f32 = 2.1;
 // Light that has crossed the plume's own steam keeps this share even when
 // the single-scattering estimate says it is gone: multiple scattering is
 // what makes a dense cloud grey inside rather than black.
-const cc_manholesteam_MS_FLOOR: f32 = 0.35;
-// The plume's edge, in radii: the billows reach out to it.
-const cc_manholesteam_CUT: f32 = 1.5;
+const cc_manholesteam_MS_FLOOR: f32 = 0.30;
+// Self-shadowing: two density taps toward the light, at these distances in
+// local radii, each weighted by SHADOW_SEG radii of path. This is what
+// gives the billows lit tops and grey undersides.
+const cc_manholesteam_SHADOW_TAP: vec2<f32> = vec2<f32>(0.4, 1.2);
+const cc_manholesteam_SHADOW_SEG: f32 = 0.8;
 
 // --- the stack ---------------------------------------------------------------
 const cc_manholesteam_STACK_R: f32 = 0.45;
 const cc_manholesteam_STACK_H: f32 = 3.0;
 // Reflective sheeting, banded: an orange band of ORANGE_W every BAND_P,
-// white between, the lowest band starting at the foot.
+// white between, the lowest band starting at the foot. The albedos are
+// DIFFUSE albedos, about half what the white looks like in a headlight:
+// retroreflective sheeting sends most of what it returns back toward its
+// source. At the paint's full 0.6 the lamp light (in asphalt-relative
+// units, divided by 0.035) clipped both bands to one cream colour.
 const cc_manholesteam_BAND_P: f32 = 0.42;
 const cc_manholesteam_ORANGE_W: f32 = 0.24;
 const cc_manholesteam_ORANGE: vec3<f32> = vec3<f32>(0.32, 0.05, 0.006);
@@ -10884,9 +10917,9 @@ const cc_manholesteam_INNER: f32 = 0.02;   // the tube's sooty inside
 // Tallest plume top: a stack's mouth plus the tallest plume.
 const cc_manholesteam_ZTOP: f32 = 15.0;
 // Farthest a plume box reaches from its site in xy: the most-bent plume's
-// drift, LEAN_STACK x H_MAX = 11.4, plus CUT x (STACK_R + SPREAD x H_MAX)
-// = 5.7.
-const cc_manholesteam_REACH: f32 = 17.2;
+// drift, LEAN_STACK x H_MAX = 11.4, plus CUT x (the larger source radius,
+// R0_COVER, + SPREAD x H_MAX) = 7.9.
+const cc_manholesteam_REACH: f32 = 19.4;
 // A site's lateral offset from its centreline (city_manhole): at most
 // 1.6 + 3.1 x 2 on an avenue, 1.1 + 0.8 on a minor street; and its along
 // jitter, +-3 m about the lattice point.
@@ -10903,9 +10936,12 @@ const cc_manholesteam_RANGE: f32 = 360.0;
 const cc_manholesteam_RANGE_FADE: f32 = 240.0;
 const cc_manholesteam_FP_START: f32 = 0.6;
 const cc_manholesteam_FP_END: f32 = 1.5;
-// The finest noise octave is a tenth of a local radius; past this footprint
-// it is sub-pixel everywhere in the plume and is dropped.
-const cc_manholesteam_FINE_FP: f32 = 0.15;
+// Noise octaves by footprint. The base lattice is r / 1.6, so octave k is
+// r / (1.6 x 2^k) — at the widest plume (r ~ 3.8 m) 0.3 m for the fourth,
+// 0.6 m for the third. Each is dropped once it is under a couple of pixels
+// everywhere in the plume, which leaves its mean (the noise is centred).
+const cc_manholesteam_OCT4_FP: f32 = 0.05;
+const cc_manholesteam_OCT3_FP: f32 = 0.15;
 // The march: STEP metres per step, 8 to 16 steps.
 const cc_manholesteam_STEP: f32 = 0.7;
 const cc_manholesteam_STEPS_MIN: i32 = 8;
@@ -11016,29 +11052,26 @@ fn cc_manholesteam_vnoise3(p: vec3<f32>) -> f32 {
 }
 
 // The plume at p, in its own coordinates: rise z above the source, radius
-// r(z), and the offset q from the bent centreline. Returns (density
-// relative to a full-vigour source core, optical depth from p to the
-// plume's edge — the self-shadowing estimate the light is attenuated by).
+// r(z), and the offset q from the bent centreline. Returns the density
+// relative to a full-vigour source core.
 fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
-                           octaves: i32) -> vec2<f32> {
+                           octaves: i32) -> f32 {
     let z = p.z - s.z0;
     if (z < 0.0 || z > s.h) {
-        return vec2<f32>(0.0);
+        return 0.0;
     }
     let rise = z / s.h;
     let r = s.r0 + cc_manholesteam_SPREAD * z;
     let q = p.xy - s.c - cc_manholesteam_WIND * (s.lean * s.h * rise * rise);
-    // Distance to the edge, in units of the cut radius: 0 on the axis, 1 at
-    // the cut — and the top counts as an edge, reached over the upper half.
-    let edge = max(length(q) / (cc_manholesteam_CUT * r),
-                   smoothstep(0.45, 1.0, rise));
-    if (edge >= 1.0) {
-        return vec2<f32>(0.0);
+    // Distance from the axis in local radii. Past CUT nothing can reach.
+    let d = length(q) / r;
+    if (d >= cc_manholesteam_CUT) {
+        return 0.0;
     }
     // Lumps in local radii: across by q / r, up by zeta = integral of
     // dz / r = ln(r / r0) / SPREAD.
     let zeta = log(r / s.r0) / cc_manholesteam_SPREAD;
-    var x = vec3<f32>(1.1 * q / r + s.seed, 0.9 * zeta);
+    var x = vec3<f32>(1.6 * q / r + s.seed, 1.3 * zeta);
     var n = 0.0;
     var amp = 0.5;
     var norm = 0.0;
@@ -11049,15 +11082,19 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
         amp = 0.5 * amp;
     }
     n = n / norm - 0.5;
-    // The noise moves the boundary (a billow pushes it out, a gap pulls it
-    // in) and modulates the inside; the steam thins as the plume widens.
-    let cover = smoothstep(0.0, cc_manholesteam_SOFT,
-                           1.0 - edge + cc_manholesteam_BILLOW * n);
-    let rho = s.vigor * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
-            * pow(s.r0 / r, cc_manholesteam_THIN);
-    let tau_edge = cc_manholesteam_SIGMA * rho * cc_manholesteam_CUT * r
-                 * (1.0 - edge);
-    return vec2<f32>(rho, tau_edge);
+    // The noise moves the boundary (a billow pushes it out, a gap pulls
+    // it in) about EDGE radii, and pulls it in to nothing over the top half
+    // of the rise, so the top is billowed too; inside, it modulates the
+    // density. The steam thins as the plume widens.
+    let boundary = (cc_manholesteam_EDGE + cc_manholesteam_BILLOW * n)
+                 * (1.0 - smoothstep(0.6, 1.0, rise));
+    // The thinning is referred to a cover's source radius for every
+    // plume: a stack carries the same leak through a narrower mouth, so it
+    // leaves denser — the opaque burst at the top of every stack — and
+    // thins to the same plume aloft.
+    let cover = smoothstep(0.0, cc_manholesteam_SOFT, boundary - d);
+    return s.vigor * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
+           * pow(cc_manholesteam_R0_COVER / r, cc_manholesteam_THIN);
 }
 
 // ---------------------------------------------------------------------------
@@ -11141,15 +11178,42 @@ fn cc_manholesteam_march(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
     var trans = 1.0;
     for (var i: i32 = 0; i < n; i = i + 1) {
         let p = o + (ta + (f32(i) + rnd) * dt) * dir;
-        let dens = fade * cc_manholesteam_density(p, s, octaves);
-        if (dens.x <= 1e-4) {
+        // The sample, then two shadow taps toward the light, SHADOW_TAP
+        // local radii out, each standing for SHADOW_SEG radii of path. The
+        // light comes from above below the lamp heads and from below above
+        // them (the heads, then the lit street), so the taps go vertically
+        // toward whichever it is, and shrink to nothing through the heads'
+        // own height, where the light arrives sideways — continuous, so the
+        // plume has no seam there. The lateral offset of the head is what
+        // this ignores. Rolled, with one call site for the density.
+        let r = s.r0 + cc_manholesteam_SPREAD * max(p.z - s.z0, 0.0);
+        let up = clamp(0.5 * (CITY_LAMP_HEAD_Z - p.z), -1.0, 1.0);
+        var rho = 0.0;
+        var tau_l = 0.0;
+        for (var tap: i32 = 0; tap < 3; tap = tap + 1) {
+            let off = select(0.0, select(cc_manholesteam_SHADOW_TAP.x,
+                                         cc_manholesteam_SHADOW_TAP.y,
+                                         tap == 2), tap > 0);
+            let d = fade * cc_manholesteam_density(
+                p + vec3<f32>(0.0, 0.0, up * off * r), s,
+                select(octaves, 2, tap > 0));
+            if (tap == 0) {
+                rho = d;
+                if (rho <= 1e-4) {
+                    break;
+                }
+            } else {
+                tau_l = tau_l + cc_manholesteam_SIGMA * d
+                              * cc_manholesteam_SHADOW_SEG * r;
+            }
+        }
+        if (rho <= 1e-4) {
             continue;
         }
-        // Albedo 1: what the step removes from the beam it scatters in. The
-        // light reaching p has crossed the steam between it and the edge;
-        // multiple scattering keeps a floor under that.
-        let a = 1.0 - exp(-cc_manholesteam_SIGMA * dens.x * dt);
-        let shadow = mix(exp(-dens.y), 1.0, cc_manholesteam_MS_FLOOR);
+        // Albedo 1: what the step removes from the beam it scatters in.
+        // Multiple scattering keeps a floor under the shadowed light.
+        let a = 1.0 - exp(-cc_manholesteam_SIGMA * rho * dt);
+        let shadow = mix(exp(-tau_l), 1.0, cc_manholesteam_MS_FLOOR);
         rad = rad + trans * a * shadow * cc_manholesteam_light(p, dir, st);
         trans = trans * (1.0 - a);
     }
@@ -11250,7 +11314,8 @@ fn cc_manholesteam_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                 if (fade <= 0.0) {
                     continue;
                 }
-                let octaves = select(2, 3, fp < cc_manholesteam_FINE_FP);
+                let octaves = 2 + select(0, 1, fp < cc_manholesteam_OCT3_FP)
+                              + select(0, 1, fp < cc_manholesteam_OCT4_FP);
                 let m = cc_manholesteam_march(
                     o, dir, pa, pb, s, cc_manholesteam_street(s, k, along_y),
                     fade, octaves, rnd);
