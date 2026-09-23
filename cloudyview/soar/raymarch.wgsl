@@ -125,7 +125,7 @@ struct Uniforms {
     // side on every sample. The hosts still pack both, from the same flags
     // that pick the specialization, because the row is part of the
     // accumulation's scene key: a bake completing or a tier switching
-    // methods restarts the average through it.
+    // methods moves the average on through it, as any scene change does.
     //
     // x = read tau_sun for CLOUD samples from the light_tau texture instead
     //     of marching to the sun per sample (0.0 or 1.0). The ocean's two

@@ -2358,7 +2358,7 @@ export class Viewer {
       // frame, their freed memory outran the driver's reclaiming on long
       // videos (capture.js Readback).
       readback = new Readback(this.device, size);
-      saved = beginOfflineRender(this.renderer, look.preset);
+      saved = await beginOfflineRender(this.renderer, look.preset);
       const framesPerVideoFrame = captureFrames(look.preset);
 
       const t0 = performance.now();
@@ -3046,6 +3046,13 @@ export class Viewer {
     }
   }
 
+  /** The live loop's one way to stop on an error: loudly, and for good. */
+  _failRendering(err) {
+    this.stop = true;
+    this.onFailure?.("Rendering stopped.", String(err.message || err),
+                     err.advice || "");
+  }
+
   /** Whether the frame that is asking is still the one that should be running. */
   _loopAlive(generation) {
     return !this.stop && !this._disposed
@@ -3119,11 +3126,19 @@ export class Viewer {
     // A few planes of the sun-tau bake per frame, ahead of the march so the
     // frame that completes it is also the first to read it. The reads flip
     // on inside drawFrame the moment the bake finishes (row 23 is in the
-    // scene key, so accumulation restarts on its own); the explicit
-    // march-pending is for a parked view, which otherwise has no reason to
-    // march again.
+    // scene key, so the picture moves on to the cached method by itself);
+    // the explicit march-pending is for a parked view, which otherwise has
+    // no reason to march again. Inside the frame's failure path: a bake
+    // pipeline that failed to compile throws here, and that must stop the
+    // renderer loudly like any other pipeline failure, not end the loop
+    // without a word.
     if (this.renderer.lightBakePending && !this._probe) {
-      if (this.renderer.stepLightBake()) this._marchPending = true;
+      try {
+        if (this.renderer.stepLightBake()) this._marchPending = true;
+      } catch (err) {
+        this._failRendering(err);
+        return;
+      }
     }
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -3230,9 +3245,7 @@ export class Viewer {
         measuring = await this._awaitQueueIdle();
       }
     } catch (err) {
-      this.stop = true;
-      this.onFailure?.("Rendering stopped.", String(err.message || err),
-                       err.advice || "");
+      this._failRendering(err);
       return;
     }
     // The draw is the loop's one long await. A field replaced (or the viewer

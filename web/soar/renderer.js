@@ -974,9 +974,13 @@ export class Renderer {
     // each passing state would compile variants no frame will use — each
     // compile a chance at bug 22.
     if (!this._prefetchArmed) return;
+    // The current tier first: compiles run roughly in request order, and
+    // the variant a frame is waiting on must not queue behind a neighbour's.
     const order = K.QUALITY_TIER_NAMES;
     const at = order.indexOf(this.qualityTier);
-    for (const tier of order.slice(Math.max(0, at - 1), at + 2)) {
+    const reachable = [this.qualityTier, order[at - 1], order[at + 1]]
+      .filter(Boolean);
+    for (const tier of reachable) {
       for (const cacheReady of [true, false]) {
         const lighting = this._lightingFor(tier, cacheReady);
         try {
@@ -1253,7 +1257,9 @@ export class Renderer {
     const state = this._sceneState();
     // The effective flags, not the wishes: a wanted-but-unbaked cache reads
     // the live march. Row 23 is in the scene key, so a bake completing, a
-    // rung switching methods, or an override restarts accumulation itself.
+    // rung switching methods or an override is a scene change like any
+    // other: the accumulation moves on through the one-frame motion blend
+    // (_accumulationPlan), rather than averaging the two methods together.
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
       ...lighting,
@@ -1617,6 +1623,16 @@ export class Renderer {
         ],
       }),
     };
+  }
+
+  /**
+   * The bake pipeline's compile while it is still in flight, else null — for
+   * a caller that must finish a bake synchronously-in-spirit (a capture) and
+   * so has to yield until the pipeline exists. Throws a failed compile.
+   */
+  bakePipelinePending() {
+    const pipeline = this._bakePipeline();
+    return isPending(pipeline) ? pipeline : null;
   }
 
   /** Bake up to `slices` planes; true when the cache became complete. */
