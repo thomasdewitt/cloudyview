@@ -75,6 +75,16 @@
     "facade": "cc_adscreens_facade"
    },
    "enabled": true
+  },
+  {
+   "file": "streetfurniture.wgsl",
+   "name": "streetfurniture",
+   "kind_base": 800,
+   "hooks": {
+    "cell_props": "cc_streetfurniture_props_trace",
+    "shade": "cc_streetfurniture_shade"
+   },
+   "enabled": true
   }
  ]
 }
