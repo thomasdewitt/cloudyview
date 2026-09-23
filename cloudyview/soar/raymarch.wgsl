@@ -2420,16 +2420,16 @@ fn city_lamp_inset(k: i32) -> f32 {
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
-// sampler so the tile wraps. Callers keep lod >= 1: the tile's r is the raw
+// sampler so the tile wraps. Never below mip 1: the tile's r is the raw
 // density at mip 0 (heights) and the land-use-weighted glow from mip 1 up
-// (tools/export_web_assets.py). This is the one number the fog, the sky dome
+// (tools/export_web_assets.py), so the clamp is here, not a convention. This is the one number the fog, the sky dome
 // and the cloud uplight all share. `xy` is in the CITY FRAME (world minus
 // the row-24 offset — see city_camera_origin), whose origin IS the tile's
 // origin, so the uv is simply the coordinate over the extent: which
 // district sits where is decided entirely by the offset the host wrote.
 fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
     let uv = xy / u.ocean_params.y;
-    let l = clamp(lod, 0.0, u.ocean_params.w);
+    let l = clamp(lod, 1.0, u.ocean_params.w);
     return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
 }
 
@@ -2832,9 +2832,16 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             bud_min = vec2<f32>(bmin2.x + 0.2 * fw.x, bmin2.y - reach);
             bud_max = vec2<f32>(bmax2.x - 0.2 * fw.x, bmin2.y + 1.0);
         }
-        // Clamped to the lot minus a hair, so no prim leaves it.
-        bud_min = max(bud_min, cmin + vec2<f32>(0.5));
-        bud_max = min(bud_max, cmax - vec2<f32>(0.5));
+        // Clamped to the lot minus a hair, so no prim leaves it — and to
+        // the plot on avenue edges, whose corridor is skyway's empty air.
+        let bud_lo = cmin + vec2<f32>(
+            select(0.5, hx0, city_is_avenue(base.x)),
+            select(0.5, hy0, city_is_avenue(base.y)));
+        let bud_hi = cmax - vec2<f32>(
+            select(0.5, hx1, city_is_avenue(base.x + span.x)),
+            select(0.5, hy1, city_is_avenue(base.y + span.y)));
+        bud_min = max(bud_min, bud_lo);
+        bud_max = min(bud_max, bud_hi);
         c.b2min = vec3<f32>(bud_min, bz0);
         c.b2max = vec3<f32>(bud_max, bz1);
         if (h > 200.0 && r4b.y > 0.55) {
@@ -2845,10 +2852,8 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             // The second bud rides the opposite flank: mirror about bc.
             let m0 = 2.0 * bc - bud_max;
             let m1 = 2.0 * bc - bud_min;
-            c.b3min = vec3<f32>(
-                max(min(m0, m1), cmin + vec2<f32>(0.5)), cz0);
-            c.b3max = vec3<f32>(
-                min(max(m0, m1), cmax - vec2<f32>(0.5)), cz1);
+            c.b3min = vec3<f32>(max(min(m0, m1), bud_lo), cz0);
+            c.b3max = vec3<f32>(min(max(m0, m1), bud_hi), cz1);
         }
     } else if (podium) {
         // Podium, tower, crown: the setback stack with the street wall at
@@ -3481,14 +3486,15 @@ fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
     return mix(near, flux / area, blend);
 }
 
-// Patchy value noise over lot ground, mean one: scrub clumps at 14 m and
-// grit at 3.5 m. Both lattices divide the tile, and the corners wrap at it,
+// Patchy value noise over lot ground, mean one: scrub clumps at 14.4 m and
+// grit at 3.6 m. Both lattices divide the tile (92160 m = 6400 x 14.4 =
+// 25600 x 3.6), and the corners wrap at it,
 // so the pattern is as tile-periodic as everything else in the city. Each
 // octave fades to its mean (one) as the footprint approaches its scale.
 fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
     var m = 1.0;
     for (var o: i32 = 0; o < 2; o = o + 1) {
-        let scale = select(3.5, 14.0, o == 0);
+        let scale = select(3.6, 14.4, o == 0);
         let amp = select(0.35, 0.65, o == 0)
                   * (1.0 - smoothstep(0.25 * scale, scale, fp));
         if (amp > 0.0) {
@@ -5561,10 +5567,10 @@ fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // a 32 m corridor of guaranteed empty air centred on the line. A 16 m deck on
 // the centreline therefore clears the facades by 8 m on each side BY
 // CONSTRUCTION, at any height — the flat-roof rule in SPEC's "Respect the
-// architecture" is satisfied without a single building test. (Superblocks
-// cannot break this either: `merged` groups are anchored on even indices and
-// swallow only their odd internal boundary, and avenues are at multiples of
-// 8.)
+// architecture" is satisfied without a single building test. (Multi-block
+// lots cannot break this either: cloudyview/city_lots.py never lets a lot
+// contain an avenue line, and city_cell clamps growth buds to the plot on
+// avenue edges.)
 //
 // PROFILE. The x-family runs dead flat at 26 m. Where the two families cross,
 // the y-family climbs to 34 m and passes over — a real interchange decision,
@@ -8880,7 +8886,9 @@ fn cc_streetlife_trace_car_box(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
 // that owns the ground draws it.
 fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
         -> cc_streetlife_Prop {
-    if (!cc.built) {
+    // The bin stands on the sidewalk of the corner's x-side kerb, so it
+    // needs that street.
+    if (!cc.built || !city_edge_street(cc, select(1, 0, (k & 1) == 0))) {
         return cc_streetlife_no_prop();
     }
     let cw = city_tile_cell(ci);
@@ -9234,6 +9242,11 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var have = false;
     var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
+        // Poles and parked cars stand only on a kerb that has a street
+        // (the bake removes streets from open land and lot interiors).
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
                                    fp);
         if (k.hit.hit) {
