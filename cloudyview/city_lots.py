@@ -90,6 +90,25 @@ MIDRISE_MERGE_RANK = 0.50
 
 WORD_OFFSET = 2048.0
 
+# The glow (the r channel's mips 1 and up, read by the fog, the sky dome and
+# the clouds' city uplight) is density weighted by how much of it the land
+# use actually lights. Before zoning the glow was plain density, which is
+# right for the core; the fringe now keeps a warehouse's few floods and
+# office windows instead of lit low-rise and a full lamp grid, and open
+# scrub keeps nothing. The weights are the resolved emission of each use
+# relative to an urban block of the same density, estimated from the
+# shader's means (window ladder, storefront strip, lamp pools, flood pools).
+GLOW_WEIGHT = {USE_URBAN: 1.0, USE_INDUSTRIAL: 0.45, USE_YARD: 0.30,
+               USE_OPEN: 0.0}
+
+
+def glow_weight(street_word: np.ndarray) -> np.ndarray:
+    use = (street_word.astype(np.int64) >> 8) & 3
+    w = np.zeros(use.shape, dtype=np.float32)
+    for u, g in GLOW_WEIGHT.items():
+        w[use == u] = g
+    return w
+
 
 def potential_height(density: np.ndarray, rank: np.ndarray) -> np.ndarray:
     """city_cell's height law with the per-building jitter (mean 1) left out."""

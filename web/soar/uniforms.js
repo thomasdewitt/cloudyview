@@ -59,11 +59,19 @@ export function packUniforms(state, view) {
     // describe the city tile, row 4 is the moon, and cityOffsetM is where
     // the tile sits in world space (row 8.yz).
     city = false, cityOffsetM = [0.0, 0.0],
+    // The Sonoran desert (raymarch.wgsl DESERT): the ocean-named fields
+    // describe the desert tile and row 8 is only the ground datum.
+    desert = false,
     // Explicit override of the surface offset row 24 folds and writes;
     // null means the scene's static offset (cityOffsetM under CITY, the
     // origin otherwise). Mirrors SceneState.surface_offset_m.
     surfaceOffsetM = null,
   } = state;
+
+  if (city && desert) {
+    throw new Error("a scene stands on one surface: city and desert are " +
+                    "both set.");
+  }
 
   const {
     camera, outputSize, renderSize,
@@ -219,6 +227,10 @@ export function packUniforms(state, view) {
     // statement of where the tile was pinned — metadata, the harness and
     // the parity test read it, the shader no longer does.
     row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], 0.0);
+  } else if (desert) {
+    // The desert has no reflectance row: its albedos are properties of the
+    // materials and live in the shader.
+    row(8, oceanZ, 0.0, 0.0, 0.0);
   } else {
     row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
   }

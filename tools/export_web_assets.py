@@ -31,7 +31,7 @@ from cloudyview.city_fif import (
     DEFAULT_N as CITY_N,
     generate_city_density,
 )
-from cloudyview.city_lots import bake_lots, pack_channels
+from cloudyview.city_lots import bake_lots, glow_weight, pack_channels
 from cloudyview.ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
@@ -152,19 +152,25 @@ def export_city() -> dict:
     height, rank = generate_city_density(
         rng=np.random.default_rng(CITY_SEED)
     )
-    base = np.empty((CITY_N, CITY_N, 4), dtype=np.float32)
-    base[..., 0] = height
-    base[..., 1] = rank
-    base[..., 2] = 0.0
-    base[..., 3] = 0.0
-    mips = _build_city_mips(base)
     # Lots, zoning and streets (cloudyview/city_lots.py), baked from the
     # channels as the renderer will see them — float16, the stored precision
     # — so a lot boundary is decided on exactly the numbers city_cell reads.
     lot_word, street_word = bake_lots(
-        mips[0][..., 0].astype(np.float16).astype(np.float32),
-        mips[0][..., 1].astype(np.float16).astype(np.float32),
+        height.astype(np.float16).astype(np.float32),
+        rank.astype(np.float16).astype(np.float32),
     )[:2]
+    # r is two things. At mip 0 it is the density city_cell raises buildings
+    # from; from mip 1 up it is the GLOW, the density weighted by what its
+    # land use lights (city_lots.GLOW_WEIGHT), so the fog, the sky dome and
+    # the clouds' uplight follow the city that is actually drawn rather than
+    # a fringe that is now dark. Every glow read is at lod >= 1.
+    base = np.empty((CITY_N, CITY_N, 4), dtype=np.float32)
+    base[..., 0] = height * glow_weight(street_word)
+    base[..., 1] = rank
+    base[..., 2] = 0.0
+    base[..., 3] = 0.0
+    mips = _build_city_mips(base)
+    mips[0][..., 0] = height
     # b and a are packed integer words at mip 0 ONLY: every packed field is
     # at most 12 bits, stored offset to [-2048, 2047] where float16 is exact
     # (pack_channels asserts the round trip). Their coarse mips stay zero:

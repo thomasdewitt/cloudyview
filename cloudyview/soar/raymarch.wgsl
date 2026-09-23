@@ -2155,6 +2155,8 @@ const CITY_GROUND_Z: f32 = 0.0;
 const CITY_MAX_H: f32 = 5400.0;     // tallest roof (before mast)
 const CITY_SLAB_TOP: f32 = 5600.0;  // roof + tallest mast: the DDA's z gate
 const CITY_FLOOR_H: f32 = 3.6;      // one storey; window rows ride this
+const CITY_PER_STOREY: f32 = 0.2777777777777778;  // 1 / CITY_FLOOR_H
+const CITY_MAX_STOREYS: f32 = 1500.0;             // CITY_MAX_H / CITY_FLOOR_H
 const CITY_STREET_HALF: f32 = 6.0;  // half-width of a minor street (m)
 const CITY_AVENUE_EXTRA: f32 = 10.0; // extra half-width on avenue boundaries
 const CITY_AVENUE_PERIOD: i32 = 8;  // avenue every this many blocks
@@ -2171,11 +2173,13 @@ const CITY_H_SCALE: f32 = 390.0;
 const CITY_H_EXP: f32 = 1.2;
 // Massing bands (see the footprint block in city_cell). Below LOWRISE a
 // block is a row of frontages; from TOWER up a building is a tower whose
-// side is K sqrt(h) metres, never slenderer than SLENDER_MAX.
+// side is K sqrt(h) metres to the KNEE and K sqrt(KNEE) (h/KNEE)^0.3 above
+// it, never slenderer than SLENDER_MAX.
 const CITY_LOWRISE_H: f32 = 22.0;
 const CITY_TOWER_H: f32 = 60.0;
 const CITY_TOWER_SIDE_K: f32 = 4.2;
-const CITY_SLENDER_MAX: f32 = 14.0;
+const CITY_TOWER_KNEE_H: f32 = 800.0;
+const CITY_SLENDER_MAX: f32 = 20.0;
 // Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
 // is an integer of at most 12 bits stored offset by -2048, where float16
 // holds every integer exactly.
@@ -2303,7 +2307,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 // cloudyview/soar/city/components/, each owning one kind of thing (a street
 // prop, a facade layer, an elevated highway), registered in registry.json
 // and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls five hooks; the composer generates their
+// markers below. The core calls six hooks; the composer generates their
 // dispatchers over whatever is registered, and when nothing is, the
 // defaults below make every hook a no-op — except the shade dispatcher,
 // which returns magenta, because an unclaimed hit kind is a bug and should
@@ -2323,6 +2327,9 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //   cc_window_glyph      transmission multiplier inside a lit pane
 //                        (curtains, figures, androids) — 1 leaves the
 //                        window exactly as it was.
+//   cc_roof_detail       additive roof emission (a warehouse's lit
+//                        sawtooth glazing) at EVERY range — the far-field
+//                        mean of roof geometry that props draw only near.
 //
 // Component hits reuse CityHit with kind >= 100. See components/SPEC.md for
 // the contract agents write against.
@@ -2393,7 +2400,9 @@ fn city_lamp_inset(k: i32) -> f32 {
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
-// sampler so the tile wraps. This is the one number the fog, the sky dome
+// sampler so the tile wraps. Callers keep lod >= 1: the tile's r is the raw
+// density at mip 0 (heights) and the land-use-weighted glow from mip 1 up
+// (tools/export_web_assets.py). This is the one number the fog, the sky dome
 // and the cloud uplight all share. `xy` is in the CITY FRAME (world minus
 // the row-24 offset — see city_camera_origin), whose origin IS the tile's
 // origin, so the uv is simply the coordinate over the extent: which
@@ -2609,33 +2618,44 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
 
     // Height: base + the cascade raised to a power, jittered, suppressed
     // toward the outskirts, and quantized to storeys so roofs are flat
-    // shelves rather than a continuum.
+    // shelves rather than a continuum. Every level below is a whole number
+    // of storeys, carried as the count ns and multiplied, never divided:
+    // WGSL rounds a product exactly but a quotient only to 2.5 ulp (NVIDIA
+    // divides by 3.6 as a multiply by its reciprocal), so floor(h * 0.75 /
+    // 3.6) lands a storey high on one GPU and not on another whenever
+    // 0.75 ns is whole — and the city must be the same city on every GPU,
+    // and in the JavaScript collision mirror (web/soar/citylots.js).
     let sprawl = mix(
         CITY_SPRAWL_MIN_FRAC, 1.0,
         smoothstep(CITY_EMPTY_RANK, CITY_SPRAWL_RANK_FULL, c.rank)
     );
-    var h = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
-            * (0.70 + 0.60 * r4.x) * sprawl;
-    h = clamp(floor(h / CITY_FLOOR_H) * CITY_FLOOR_H,
-              2.0 * CITY_FLOOR_H, CITY_MAX_H);
+    let h_raw = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
+                * (0.70 + 0.60 * r4.x) * sprawl;
+    let ns = clamp(floor(h_raw * CITY_PER_STOREY), 2.0, CITY_MAX_STOREYS);
+    let h = ns * CITY_FLOOR_H;
     c.height = h;
 
     // Footprint grows with height, the way a real city's does. Low-rise is
     // a row of narrow frontages that fills its block; mid-rise fills the
     // block with one mass; a tower's side grows as the square root of its
-    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 190 m at 2 km, the
-    // run real towers follow from floor-plate economics and sway — floored
-    // by a slenderness limit (height over width at most 14) that only the
-    // supertalls reach. So the tallest towers are also the broadest, and a
-    // supertall needs the multi-block lot its peak claimed. Where the tower
-    // leaves most of its plot open it stands on a podium that fills the
-    // plot: the street wall every real downtown tower keeps.
+    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 120 m at 800, the
+    // run real towers follow from floor-plate economics and sway — and more
+    // slowly above that (h^0.3: 150 m at 1.5 km, 180 m at 3 km), because
+    // what carries a supertall is taper, not bulk; a slenderness limit
+    // (height over width at most 20) floors the extremes. So the tallest
+    // towers are also the broadest, and a supertall needs the multi-block
+    // lot its peak claimed. Where the tower leaves most of its plot open it
+    // stands on a podium that fills the plot: the street wall every real
+    // downtown tower keeps.
     let r4f = city_rand4(c.seed ^ vec2<u32>(0x6a09e667u, 0xbb67ae85u));
     var fw = plot_size * vec2<f32>(0.80 + 0.17 * r4.y, 0.80 + 0.17 * r4.z);
     var podium = false;
     var zp = 0.0;
     if (h >= CITY_TOWER_H) {
-        let side = max(CITY_TOWER_SIDE_K * sqrt(h) * (0.80 + 0.40 * r4.y),
+        let h_eff = select(h, CITY_TOWER_KNEE_H
+                              * pow(h / CITY_TOWER_KNEE_H, 0.6),
+                           h > CITY_TOWER_KNEE_H);
+        let side = max(CITY_TOWER_SIDE_K * sqrt(h_eff) * (0.80 + 0.40 * r4.y),
                        h / CITY_SLENDER_MAX);
         let aspect = 0.72 + 0.28 * r4.z;
         let sides = select(vec2<f32>(side * aspect, side),
@@ -2648,7 +2668,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             podium = true;
             let storeys = floor(mix(3.0, select(8.0, 12.0, c.merged), r4f.z));
             zp = min(storeys * CITY_FLOOR_H,
-                     floor(h / (3.0 * CITY_FLOOR_H)) * CITY_FLOOR_H);
+                     floor(ns * 0.33333334) * CITY_FLOOR_H);
         }
     }
     let slack = plot_size - fw;
@@ -2673,7 +2693,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             c.arch = 4;                   // spire crown
         }
     }
-    if (h > 600.0 && r4d.y < 0.65) {
+    if (h > 600.0 && r4d.y < select(0.65, 0.85, h > 1200.0)) {
         c.arch = select(3, 4, r4d.y < 0.30);
     }
 
@@ -2730,7 +2750,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         // Podium + a shaft whose cross-section closes toward the crown. The
         // podium is the plot-wide one where the tower left room for it,
         // otherwise a base course of the tower's own footprint.
-        zp = select(max(floor(h * 0.12 / CITY_FLOOR_H) * CITY_FLOOR_H,
+        zp = select(max(floor(ns * 0.12) * CITY_FLOOR_H,
                         CITY_FLOOR_H), zp, podium);
         c.b1min = vec3<f32>(select(bmin2, pod_min, podium), CITY_GROUND_Z);
         c.b1max = vec3<f32>(select(bmax2, pod_max, podium), zp);
@@ -2742,7 +2762,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     } else if (c.arch == 4) {
         // A straight shaft to three quarters, then a steep spire — on the
         // podium, when there is one, as a stacked tier.
-        let zs = floor(h * 0.75 / CITY_FLOOR_H) * CITY_FLOOR_H;
+        let zs = floor(ns * 0.75) * CITY_FLOOR_H;
         if (podium) {
             c.tiers = 2;
             c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
@@ -2765,9 +2785,9 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.b1max = vec3<f32>(bmax2, h);
         c.tiers = 2;
         let side = i32(floor(r4d.z * 4.0));   // which flank the bud rides
-        let bz0 = floor(h * (0.42 + 0.20 * r4d.w) / CITY_FLOOR_H)
+        let bz0 = floor(ns * (0.42 + 0.20 * r4d.w))
                   * CITY_FLOOR_H;
-        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * h / CITY_FLOOR_H)
+        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * ns)
                             * CITY_FLOOR_H + CITY_FLOOR_H,
                       h - CITY_FLOOR_H);
         let reach = 0.22 * min(fw.x, fw.y);
@@ -2793,7 +2813,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.b2max = vec3<f32>(bud_max, bz1);
         if (h > 200.0 && r4b.y > 0.55) {
             c.tiers = 3;
-            let cz0 = floor(h * (0.68 + 0.12 * r4b.w) / CITY_FLOOR_H)
+            let cz0 = floor(ns * (0.68 + 0.12 * r4b.w))
                       * CITY_FLOOR_H;
             let cz1 = min(cz0 + 8.0 * CITY_FLOOR_H, h - CITY_FLOOR_H);
             // The second bud rides the opposite flank: mirror about bc.
@@ -2808,7 +2828,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         // Podium, tower, crown: the setback stack with the street wall at
         // the bottom and the tower's own crown setback at the top.
         c.tiers = 3;
-        let zc = floor(h * (0.70 + 0.15 * r4b.w) / CITY_FLOOR_H)
+        let zc = floor(ns * (0.70 + 0.15 * r4b.w))
                  * CITY_FLOOR_H;
         c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
         c.b1max = vec3<f32>(pod_max, zp);
@@ -2822,10 +2842,10 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         var z1 = h;
         if (h > 90.0 && r4b.y > 0.45) {
             c.tiers = 2;
-            z1 = floor(h * 0.60 / CITY_FLOOR_H) * CITY_FLOOR_H;
+            z1 = floor(ns * 0.60) * CITY_FLOOR_H;
             if (h > 180.0 && r4b.y > 0.80) {
                 c.tiers = 3;
-                z1 = floor(h * 0.50 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                z1 = floor(ns * 0.50) * CITY_FLOOR_H;
             }
         }
         c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
@@ -2834,7 +2854,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             var z2 = h;
             var f2 = 0.68;
             if (c.tiers == 3) {
-                z2 = floor(h * 0.78 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                z2 = floor(ns * 0.78) * CITY_FLOOR_H;
                 f2 = 0.72;
             }
             let fw2 = fw * f2;
@@ -3309,6 +3329,122 @@ fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
     return bit < 8u && ((cc.streets >> bit) & 1u) != 0u;
 }
 
+// --- The industrial belt's floodlights -----------------------------------
+//
+// The fringe is dark on purpose — a foil for the neon core — and what light
+// it has comes from a few floods: sodium or LED fixtures over a warehouse's
+// loading court, and poles at the corners of a yard. A lot's fixtures are a
+// pure function of its cell (the building box says which long wall faces
+// the court), so the ground pools here, the wall wash and the fixture
+// geometry in the industry component all agree on where each lamp is.
+// Pools are Gaussians on the ground, like the street lamps, so the far
+// field has an exact mean: sum(peak * 2 pi sigma^2) over the lot's area.
+
+const CITY_FLOOD_MAX: i32 = 4;
+const CITY_FLOOD_PEAK: f32 = 0.85;       // ground radiance at a pool centre
+const CITY_FLOOD_SIGMA_WALL: f32 = 7.0;  // pool radius, wall-mounted (m)
+const CITY_FLOOD_SIGMA_POLE: f32 = 10.0; // pool radius, pole-mounted (m)
+const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(1.0, 0.45, 0.14);
+const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.78, 0.88, 1.00);
+
+struct CityFlood {
+    on: bool,
+    head: vec3<f32>,   // the fixture (city frame, m)
+    aim: vec2<f32>,    // horizontal direction it throws its light (unit)
+    pool: vec2<f32>,   // centre of its pool on the ground
+    sigma: f32,
+    color: vec3<f32>,  // radiance at the pool centre
+}
+
+// Fixture k (0 .. CITY_FLOOD_MAX-1) of the lot this cell belongs to.
+fn city_flood(cc: CityCell, k: i32) -> CityFlood {
+    var f: CityFlood;
+    f.on = false;
+    f.head = vec3<f32>(0.0);
+    f.aim = vec2<f32>(1.0, 0.0);
+    f.pool = vec2<f32>(0.0);
+    f.sigma = 1.0;
+    f.color = vec3<f32>(0.0);
+    let fh = city_rand4(cc.seed ^ vec2<u32>(0x1f83d9abu, 0x5be0cd19u));
+    let kh = city_rand4(cc.seed ^ vec2<u32>(
+        0x9b05688cu * u32(k + 1), 0x510e527fu));
+    let tint = select(CITY_FLOOD_LED, CITY_FLOOD_SODIUM, fh.x < 0.55);
+    if (cc.land_use == CITY_USE_INDUSTRIAL) {
+        // Along the court wall: one slot per ~32 m, most of them lit.
+        let long_x = (cc.b1max.x - cc.b1min.x) >= (cc.b1max.y - cc.b1min.y);
+        var a0 = cc.b1min.y;
+        var a1 = cc.b1max.y;
+        var gap_lo = cc.b1min.x - cc.plot_min.x;
+        var gap_hi = cc.plot_max.x - cc.b1max.x;
+        if (long_x) {
+            a0 = cc.b1min.x;
+            a1 = cc.b1max.x;
+            gap_lo = cc.b1min.y - cc.plot_min.y;
+            gap_hi = cc.plot_max.y - cc.b1max.y;
+        }
+        let n = clamp(i32(floor((a1 - a0) / 32.0)), 1, CITY_FLOOD_MAX);
+        if (k >= n || kh.x > 0.72) {
+            return f;
+        }
+        let court_hi = gap_hi >= gap_lo;
+        let along = mix(a0, a1, (f32(k) + 0.5) / f32(n));
+        let z = min(cc.height - 1.2, 7.5);
+        if (long_x) {
+            let wall = select(cc.b1min.y, cc.b1max.y, court_hi);
+            f.aim = vec2<f32>(0.0, select(-1.0, 1.0, court_hi));
+            f.head = vec3<f32>(along, wall + 0.8 * f.aim.y, z);
+        } else {
+            let wall = select(cc.b1min.x, cc.b1max.x, court_hi);
+            f.aim = vec2<f32>(select(-1.0, 1.0, court_hi), 0.0);
+            f.head = vec3<f32>(wall + 0.8 * f.aim.x, along, z);
+        }
+        f.sigma = CITY_FLOOD_SIGMA_WALL;
+        f.pool = f.head.xy + f.aim * 5.0;
+    } else if (cc.land_use == CITY_USE_YARD) {
+        // Poles at two opposite corners of the plot, when the yard is lit
+        // at all; a third of yards are dark.
+        if (k >= 2 || fh.y < 0.33 || kh.x > 0.80) {
+            return f;
+        }
+        let diag = select(0, 1, fh.z < 0.5);
+        let corner = select(vec2<f32>(f32(diag), f32(1 - diag)),
+                            vec2<f32>(f32(1 - diag), f32(diag)), k == 1);
+        let at = mix(cc.plot_min + vec2<f32>(1.5),
+                     cc.plot_max - vec2<f32>(1.5), corner);
+        f.aim = normalize(vec2<f32>(1.0) - 2.0 * corner);
+        f.head = vec3<f32>(at, 10.0);
+        f.sigma = CITY_FLOOD_SIGMA_POLE;
+        f.pool = at + f.aim * 7.0;
+    } else {
+        return f;
+    }
+    f.on = true;
+    f.color = tint * (CITY_FLOOD_PEAK * (0.75 + 0.5 * kh.y));
+    return f;
+}
+
+// Flood light on the ground at p: the lot's pools, dissolving into their
+// exact mean over the lot as the pixel footprint outgrows a pool.
+fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
+    if (cc.land_use != CITY_USE_INDUSTRIAL && cc.land_use != CITY_USE_YARD) {
+        return vec3<f32>(0.0);
+    }
+    var near = vec3<f32>(0.0);
+    var flux = vec3<f32>(0.0);
+    for (var k: i32 = 0; k < CITY_FLOOD_MAX; k = k + 1) {
+        let f = city_flood(cc, k);
+        if (f.on) {
+            let d = p - f.pool;
+            near = near + f.color
+                * exp(-dot(d, d) / (2.0 * f.sigma * f.sigma));
+            flux = flux + f.color * (6.2831853 * f.sigma * f.sigma);
+        }
+    }
+    let area = (cc.lot_max.x - cc.lot_min.x) * (cc.lot_max.y - cc.lot_min.y);
+    let blend = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+    return mix(near, flux / area, blend);
+}
+
 // Surface radiance at a city hit, before fog. fp is the pixel footprint at
 // the hit (m/px): the analytic LOD that dissolves windows and lamp pools
 // into their means once they are sub-pixel, so the far city is smooth
@@ -3351,7 +3487,8 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         if (din < 1.2) {
             alb = alb * 2.2;
         }
-        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0))
+               + cc_roof_detail(cc, h, fp);
     }
     if (h.kind == 1) {   // facade
         // Normalized horizontal tangent: a frustum face's normal carries a
@@ -3518,6 +3655,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         alb = CITY_SCRUB_ALBEDO;
     }
     return CITY_LAMP_COLOR * street
+           + city_flood_ground(cc, h.pos.xy, fp)
            + alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
 
@@ -7007,9 +7145,10 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
                                inv_dir: vec3<f32>, t0: f32, t1: f32,
                                ci: vec2<i32>, cc: CityCell) -> CityHit {
     // Gate 0, no hash, no arithmetic: unbuilt lots and spire crowns are not
-    // ours. The architecture rule is enforced here first and in the deck
-    // function second, so neither can be got around.
-    if (!cc.built || cc.arch == 4) {
+    // ours, and neither are warehouse roofs (the industry component's
+    // sawtooth and monitor ridges). The architecture rule is enforced here
+    // first and in the deck function second, so neither can be got around.
+    if (!cc.built || cc.arch == 4 || cc.land_use == CITY_USE_INDUSTRIAL) {
         return cc_rooftopworks_miss(ci);
     }
     let za = o.z + t0 * dir.z;
@@ -10404,7 +10543,361 @@ fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>, fp: f32)
     t = t * cc_windowlife_glyph(cc, wh, pane_uv, fp);
     return t;
 }
+
+fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
+        -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    return e;
+}
 // <<< GENERATED CITY COMPONENTS
+
+// ===========================================================================
+// === DESERT GROUND (desert-ground) ===
+// ===========================================================================
+//
+// The Sonoran floor under the daytime clouds (DESERT specialization,
+// 2026-09-23). Compile-time, beside CITY and exclusive with it: the host
+// swaps the declaration below and binds the desert tile at binding 3 in the
+// ocean tile's place, exactly as CITY binds the city tile. With DESERT false
+// every branch on it folds away and the ocean frame is untouched.
+//
+// Under DESERT the ocean-named uniforms describe the desert tile:
+//   u.ocean.x          the ground datum (m) the tile's heights stand on;
+//   u.ocean_params.x   the tile's texel size (m), .y its extent (m),
+//                      .z the surface flag, .w its top mip;
+//   u.surface_offset   where the tile sits this frame (row 24).
+// Nothing else in the block changes meaning.
+//
+// THE DESERT FRAME is world xy minus the row-24 offset, folded into
+// [0, extent) — city_fold_xy's construction with this tile's extent. Every
+// hashed thing on the ground (pebbles here, plants in the flora section)
+// seeds from a cell index folded at the tile, so the desert is a pure
+// function of this frame and a replayed track flies over the same stones.
+const DESERT: bool = false;
+
+// How far above the terrain the flora slab reaches: the tallest saguaro
+// plus margin. The flora trace is called only over the part of a ray that
+// lies inside [ground_min, ground_max + this].
+const DESERT_FLORA_SLAB_H: f32 = 13.0;
+
+// Visible-band albedos of the ground's endmembers, linear. Provisional
+// until judged against the references.
+const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.36, 0.30, 0.23);
+const DESERT_ALBEDO_PAVEMENT: vec3<f32> = vec3<f32>(0.15, 0.11, 0.08);
+const DESERT_ALBEDO_SOIL: vec3<f32> = vec3<f32>(0.27, 0.21, 0.15);
+
+// A sunlit surface stands to a sunlit cloud face as their albedos do. The
+// renderer's sun, sky and cloud scales were each fitted to photographs and
+// never to one another, so the textbook a*E*mu/pi with E = u.cloud_sun is
+// not in the cloud's units; this is the one constant that puts it there
+// (the parked surfaces branch's argument, re-measured on this look).
+const DESERT_BEAM_CALIBRATION: f32 = 0.45;
+// Clear-sky diffuse irradiance on the horizontal as a fraction of the
+// beam's, in the visible — why a shadow on sand is blue and not black.
+const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.15;
+// Skylight does not switch off with the solar cosine.
+const DESERT_SKY_MU_FLOOR: f32 = 0.12;
+
+const DESERT_PI: f32 = 3.14159265358979;
+
+// World xy into the desert frame (see the section header).
+fn desert_fold_xy(xy: vec2<f32>) -> vec2<f32> {
+    let t = u.ocean_params.y;
+    let q = (xy - u.surface_offset.xy) / t;
+    return t * (q - floor(q));
+}
+
+// The camera in the desert frame — the ONE place a ray enters it.
+fn desert_camera_origin() -> vec3<f32> {
+    return vec3<f32>(desert_fold_xy(u.cam_origin.xy), u.cam_origin.z);
+}
+
+// Terrain height (m, absolute z) at a desert-frame point, at full detail.
+// STUB: a flat plane at the datum until the eroded tile lands.
+fn desert_height(xy: vec2<f32>) -> f32 {
+    return u.ocean.x;
+}
+
+// Unit terrain normal at a desert-frame point, at full detail. STUB.
+fn desert_normal(xy: vec2<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+// The terrain's absolute z range over the whole tile (min, max), for the
+// slab tests. STUB.
+fn desert_height_range() -> vec2<f32> {
+    return vec2<f32>(u.ocean.x, u.ocean.x);
+}
+
+// One hit on the desert: the terrain, a stone, or a plant. Kinds 0..7 are
+// the ground's (DESERT_KIND_*); the flora section owns kinds >= 8. `mat` is
+// a per-hit payload whose meaning belongs to whoever owns the kind.
+struct DesertHit {
+    hit: bool,
+    t: f32,
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+    kind: i32,
+    mat: vec4<f32>,
+};
+
+const DESERT_KIND_TERRAIN: i32 = 0;
+const DESERT_KIND_STONE: i32 = 1;
+
+fn desert_miss() -> DesertHit {
+    var h: DesertHit;
+    h.hit = false;
+    h.t = 1e30;
+    h.pos = vec3<f32>(0.0);
+    h.normal = vec3<f32>(0.0, 0.0, 1.0);
+    h.kind = DESERT_KIND_TERRAIN;
+    h.mat = vec4<f32>(0.0);
+    return h;
+}
+
+// The light arriving at one ground point, shared by everything standing
+// there — sand, stones and plants shade through the same numbers, which is
+// what keeps the far-field average of a plant the colour of its resolved
+// form. All in surface-calibrated units:
+//   sun     the beam after cloud shadow; a white Lambertian facet facing
+//           the sun returns sun / pi;
+//   sky     diffuse irradiance on the horizontal from the sky and from the
+//           cloud lid overhead; a white horizontal facet returns sky / pi;
+//   ground  irradiance reflected up by the surrounding ground, arriving on
+//           a downward-facing facet; returns ground / pi.
+struct DesertLight {
+    sun_dir: vec3<f32>,
+    sun: vec3<f32>,
+    sky: vec3<f32>,
+    ground: vec3<f32>,
+    t_sun: f32,
+    sky_open: f32,
+};
+
+// A Lambertian facet of albedo `albedo` and unit normal `n` under `L`. The
+// sky and ground terms weight by the fraction of each hemisphere the facet
+// sees, (1 + n.z)/2 and (1 - n.z)/2 — exact for an unobstructed tilted plane.
+fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight)
+        -> vec3<f32> {
+    let mu = max(dot(n, L.sun_dir), 0.0);
+    let sky_view = 0.5 * (1.0 + n.z);
+    return albedo * (1.0 / DESERT_PI)
+        * (L.sun * mu + L.sky * sky_view + L.ground * (1.0 - sky_view));
+}
+
+// STUB: the ground's own trace, a plane at the datum.
+fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>) -> DesertHit {
+    var h = desert_miss();
+    if (dir.z < -1e-8) {
+        let t = (u.ocean.x - o.z) / dir.z;
+        if (t > 0.0) {
+            h.hit = true;
+            h.t = t;
+            h.pos = o + t * dir;
+            h.normal = vec3<f32>(0.0, 0.0, 1.0);
+            h.kind = DESERT_KIND_TERRAIN;
+        }
+    }
+    return h;
+}
+
+// The whole desert along one view ray, in the desert frame: the terrain,
+// then whatever stands on it in front of the terrain hit.
+fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
+        -> DesertHit {
+    let inv_dir = 1.0 / dir;
+    var best = desert_terrain_trace(o, dir);
+    // The flora slab, clipped to the part of the ray in front of the ground.
+    let zr = desert_height_range();
+    let slab_lo = zr.x;
+    let slab_hi = zr.y + DESERT_FLORA_SLAB_H;
+    var t0 = 0.0;
+    var t1 = best.t;
+    if (abs(dir.z) > 1e-8) {
+        let ta = (slab_lo - o.z) * inv_dir.z;
+        let tb = (slab_hi - o.z) * inv_dir.z;
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    } else if (o.z < slab_lo || o.z > slab_hi) {
+        t1 = -1.0;
+    }
+    if (t1 > t0) {
+        let fh = desert_flora_trace(o, dir, inv_dir, t0, t1, pixel_angle);
+        if (fh.hit && fh.t < best.t) {
+            best = fh;
+        }
+    }
+    return best;
+}
+
+// The cloud's shadow on one ground point, and the light that comes through
+// it anyway.
+//
+// A cloud is not an occluder: it is a conservative scatterer, and nearly
+// all of what the beam loses to it arrives anyway, from the whole lid
+// instead of from one direction. diffuse_transmittance is the Eddington
+// two-stream TOTAL downward flux through a conservative slab and exp(-tau)
+// its unscattered part, so their difference is exactly what got through by
+// scattering — identically zero under clear sky.
+//
+// And what is overhead is not what is between here and the sun. At 25 deg
+// elevation a ground point's slant path crosses kilometres of cumulus field
+// and piles up hundreds of optical depths, but the diffuse light that
+// reaches it came down through whatever is straight above. So the lid is
+// measured by its own march, straight up: the only ray that can tell "under
+// a cloud" from "in its shadow".
+fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
+                t_hit: f32, jit: f32) -> DesertLight {
+    let g = u.params.z;
+    // The slant path to the sun. The baked cache, where it is valid, reads
+    // the same tau at the point this path enters the cloud box: below the
+    // box floor the path crosses only clear air.
+    var tau_sun: f32;
+    if (u.light_cache.x > 0.5 && p_world.z < u.bmin.z && sun.z > 1e-4) {
+        let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
+        tau_sun = sample_light_tau(entry);
+    } else {
+        tau_sun = light_march_tau(p_world, sun_shadow, t_hit * u.periodic.y,
+                                  jit);
+    }
+    let t_sun = exp(-tau_sun);
+    let tau_up = light_march_tau(p_world, vec3<f32>(0.0, 0.0, 1.0),
+                                 t_hit * u.periodic.y, jit);
+    let t_up = exp(-tau_up);
+    let open = diffuse_transmittance(tau_up, g);
+
+    let beam = DESERT_BEAM_CALIBRATION * u.cloud_sun.xyz;
+    let mu_sun = max(sun.z, 0.0);
+    // The lid: beam that the cloud overhead spread rather than stopped,
+    // arriving on the horizontal.
+    let lid = max(open - t_up, 0.0) * mu_sun * beam;
+    // Clear sky: chroma from the rendered sky overhead, magnitude from the
+    // beam (the look's zenith is far dimmer than its own sunlit cloud, so
+    // reading the magnitude off it would put shadowed sand near black).
+    let zen = sky_radiance(vec3<f32>(0.0, 0.0, 1.0), sun, u.sky_horizon.xyz,
+                           u.sky_bloom.xyz, vec3<f32>(0.0), u.cloud_sun.w);
+    let zen_luma = max(dot(zen, LUMA_WEIGHTS), 1e-6);
+    let beam_luma = max(dot(beam, LUMA_WEIGHTS), 1e-6);
+    let sky_clear = DESERT_SKY_DIFFUSE_FRACTION * max(mu_sun, DESERT_SKY_MU_FLOOR)
+        * beam_luma * (zen / zen_luma);
+
+    var L: DesertLight;
+    L.sun_dir = sun;
+    L.sun = t_sun * beam;
+    L.sky = sky_clear * open + lid;
+    L.t_sun = t_sun;
+    L.sky_open = open;
+    // The surroundings' reflected light, from the soil endmember as the
+    // regional mean.
+    L.ground = DESERT_ALBEDO_SOIL * (L.sun * mu_sun + L.sky);
+    return L;
+}
+
+// Aerial perspective toward the horizon sky, the water's own (row 19.y),
+// so the ground meets the sky without a seam.
+fn desert_haze(rgb: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32)
+        -> vec3<f32> {
+    let haze_tau = u.ocean_realism_b.y * t_hit;
+    if (haze_tau <= 0.0) {
+        return rgb;
+    }
+    let h_len = length(dir.xy);
+    var hdir = dir.xy;
+    if (h_len > 1e-8) {
+        hdir = dir.xy / h_len;
+    }
+    let haze_col = sky_radiance(vec3<f32>(hdir, 0.0), sun, u.sky_horizon.xyz,
+                                u.sky_bloom.xyz, vec3<f32>(0.0),
+                                u.cloud_sun.w);
+    return mix(rgb, haze_col, 1.0 - exp(-haze_tau));
+}
+
+// Radiance of one desert hit, hazed. `o` is the ray origin and `h` the hit,
+// both in the desert frame; `pos_world` is the same hit in world
+// coordinates, because the cloud shadow is a world-frame question.
+fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
+                dir: vec3<f32>,
+                sun: vec3<f32>, sun_shadow: vec3<f32>, jit: f32,
+                pixel_angle: f32) -> vec3<f32> {
+    let fp = pixel_angle * h.t;
+    let L = desert_light(pos_world, sun, sun_shadow, h.t, jit);
+    var rgb: vec3<f32>;
+    if (h.kind >= 8) {
+        rgb = desert_flora_shade(h, dir, fp, L);
+    } else {
+        // STUB ground: the soil endmember, Lambertian, under the plants.
+        let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
+        var Lg = L;
+        Lg.sun = L.sun * desert_flora_shadow(h.pos, sun, fp)
+                 * (1.0 - far.shadow);
+        rgb = desert_lambert(DESERT_ALBEDO_SOIL, h.normal, Lg)
+              * (1.0 - far.cover)
+              + far.cover * desert_flora_far_shade(far, dir, L);
+    }
+    return desert_haze(rgb, dir, sun, h.t);
+}
+
+// Mean hemispherical albedo of the ground as a cloud base sees it, for the
+// surface bounce. The ocean's bounce constant was tuned over water, so the
+// desert's scales it by the ratio of the two albedos.
+const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.25, 0.20, 0.15);
+const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
+
+// === END DESERT GROUND ===
+
+// ===========================================================================
+// === DESERT FLORA (desert-flora) ===
+// ===========================================================================
+//
+// STUBS, owned by desert-flora: the hooks desert-ground calls. Replace the
+// bodies; keep the signatures (or agree changes with desert-ground).
+
+// The plants a far pixel sees but the explicit trace no longer draws: the
+// statistical canopy over the part of the ray past the explicit plants'
+// own LOD distance. `cover` is 1 - the view transmittance through that
+// part of the slab, `albedo` the mean albedo of the plants seen, `shadow`
+// the fraction of the visible ground lying in plant shadow (hot-spot
+// correlation included). Must equal what the resolved plants average to,
+// so no seam appears where they drop out.
+struct DesertCover {
+    cover: f32,
+    albedo: vec3<f32>,
+    shadow: f32,
+};
+
+fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
+    return desert_miss();
+}
+
+fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
+                      L: DesertLight) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+
+// Transmittance of the plants between ground point p (desert frame) and
+// the sun.
+fn desert_flora_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
+    return 1.0;
+}
+
+fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
+                    pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
+    var c: DesertCover;
+    c.cover = 0.0;
+    c.albedo = vec3<f32>(0.0);
+    c.shadow = 0.0;
+    return c;
+}
+
+// Mean radiance of the far-field plants a pixel sees under `L`.
+fn desert_flora_far_shade(c: DesertCover, dir: vec3<f32>, L: DesertLight)
+        -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+
+// === END DESERT FLORA ===
+
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -10522,7 +11015,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Under CITY the ocean plane is compiled out entirely: the surface below
     // is the traced city, which fills the same role (an opaque floor at
     // t_city) through the same guards.
-    let ocean_on = !CITY && u.ocean_params.z > 0.5;
+    // Under DESERT likewise: the traced desert is the floor.
+    let ocean_on = !CITY && !DESERT && u.ocean_params.z > 0.5;
     var t_ocean = 1e30;
     if (ocean_on && dir.z < -1e-8) {
         let t_ocean_candidate = (u.ocean.x - u.cam_origin.z) / dir.z;
@@ -10563,7 +11057,36 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 city_o, dir, chit.t, chit.pos);
         }
     }
-    let t_surface = select(t_ocean, t_city, CITY);
+
+    // The desert trace runs up front for the same reason the city's does,
+    // and is composited through the same guards. It is traced in the desert
+    // frame (desert_camera_origin) and shaded with the cloud shadow at the
+    // world hit; t is translation-invariant, so depth needs no conversion.
+    // Its own draws on the sun-march and solar-cone streams: the ocean's
+    // take the same streams, and the two are never both compiled in.
+    var t_desert = 1e30;
+    var desert_rgb = vec3<f32>(0.0);
+    if (DESERT) {
+        let pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
+        let desert_o = desert_camera_origin();
+        let dhit = desert_trace(desert_o, dir, pixel_angle);
+        if (dhit.hit) {
+            t_desert = dhit.t;
+            let d_jit = jitter_on * jitter_scale
+                        * strat1(frame_index, strat_pixel,
+                                 STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
+            let d_cone = strat2(frame_index, strat_pixel,
+                                STRAT_STREAM_SUN_CONE,
+                                vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
+            let d_sun_shadow = sun_cone_dir(
+                sun, sun_tangent_frame(sun), d_cone,
+                SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_on * jitter_scale);
+            desert_rgb = desert_shade(dhit, desert_o,
+                                      u.cam_origin.xyz + dhit.t * dir, dir,
+                                      sun, d_sun_shadow, d_jit, pixel_angle);
+        }
+    }
+    let t_surface = select(select(t_ocean, t_city, CITY), t_desert, DESERT);
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
@@ -10741,6 +11264,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ocean_consumed = true;
                 break;
             }
+            if (DESERT && t >= t_desert) {
+                col = col + ice_recolor(transmittance * desert_rgb,
+                                        ICE_OCEAN_TINT, ice_on);
+                transmittance = 0.0;
+                ocean_consumed = true;
+                break;
+            }
 
             if (t >= t_far || transmittance < TRANSMITTANCE_CUTOFF) {
                 break;
@@ -10795,6 +11325,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
             if (CITY && t + dt > t_city) {
                 dt = max(0.0001, t_city - t);
+            }
+            if (DESERT && t + dt > t_desert) {
+                dt = max(0.0001, t_desert - t);
             }
 
             let d_tau = sigma * dt;
@@ -11217,9 +11750,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // the ambient fill. Replaces the daytime surface bounce, which
             // is gated off under CITY just below.
             if (CITY) {
+                // Never below mip 1: mip 0's r is the density the heights
+                // come from, the glow starts at mip 1 (export_web_assets).
                 let up_lod = clamp(
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
-                    0.0, u.ocean_params.w);
+                    1.0, u.ocean_params.w);
                 let g_raw = max(
                     // p is a WORLD cloud sample: convert for the glow
                     // (city frame), keep world for the tau probe below.
@@ -11269,8 +11804,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         BOUNCE_LATERAL_FLOOR),
                     deep_shadow_gate
                 );
+                // Over the desert the pedestal scales with the ground's own
+                // albedo against the water's the constant was tuned over.
+                let bounce_tint = select(
+                    BOUNCE_TINT,
+                    BOUNCE_TINT * DESERT_BOUNCE_ALBEDO / OCEAN_BOUNCE_ALBEDO,
+                    DESERT);
                 col = col + ice_recolor(
-                    transmittance * d_tau * bounce * air_t * BOUNCE_TINT,
+                    transmittance * d_tau * bounce * air_t * bounce_tint,
                     phase_tint, ice_on);
             }
 
@@ -11336,6 +11877,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         && transmittance > TRANSMITTANCE_CUTOFF
         && t_city < 1e29) {
         col = col + transmittance * city_rgb;
+        transmittance = 0.0;
+    }
+
+    // The desert's twin of the same fallback.
+    if (DESERT
+        && !ocean_consumed
+        && transmittance > TRANSMITTANCE_CUTOFF
+        && t_desert < 1e29) {
+        col = col + ice_recolor(transmittance * desert_rgb, ICE_OCEAN_TINT,
+                                ice_on);
         transmittance = 0.0;
     }
 
