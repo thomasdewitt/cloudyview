@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Serialize GPU work across concurrent sessions on this box.
+#
+#   tools/gpulock <command...>
+#
+# Every render, test run, bench or harness that touches the GPU goes through
+# this. It takes one exclusive lock, so a benchmark never shares the card
+# with someone else's render (its timings would be fiction) and seven
+# sessions never each park a multi-GB field in the 16 GB of VRAM at once.
+# Waits up to GPULOCK_WAIT seconds (default 1800) and then fails loudly
+# rather than running unlocked.
+#
+# Keep each locked command short (a few renders, one bench) so others are
+# not starved; loop outside the lock, not inside it.
+set -euo pipefail
+LOCK=/tmp/soar-gpu.lock
+if [[ $# -eq 0 ]]; then
+    echo "usage: tools/gpulock <command...>" >&2
+    exit 2
+fi
+exec flock -x -w "${GPULOCK_WAIT:-1800}" -E 75 "$LOCK" "$@"
