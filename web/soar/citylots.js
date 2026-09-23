@@ -32,6 +32,8 @@ import { fromHalf } from "./half.js";
 
 // --- raymarch.wgsl constants (names identical; pinned by the mirror test) ---
 export const CITY_GROUND_Z = 0.0;
+export const CITY_PER_STOREY = 0.2777777777777778;
+export const CITY_MAX_STOREYS = 1500.0;
 export const CITY_MAX_H = 5400.0;
 export const CITY_SLAB_TOP = 5600.0;
 export const CITY_FLOOR_H = 3.6;
@@ -47,7 +49,8 @@ export const CITY_H_EXP = 1.2;
 export const CITY_LOWRISE_H = 22.0;
 export const CITY_TOWER_H = 60.0;
 export const CITY_TOWER_SIDE_K = 4.2;
-export const CITY_SLENDER_MAX = 14.0;
+export const CITY_TOWER_KNEE_H = 800.0;
+export const CITY_SLENDER_MAX = 20.0;
 export const CITY_USE_URBAN = 0;
 export const CITY_USE_INDUSTRIAL = 1;
 export const CITY_USE_YARD = 2;
@@ -60,30 +63,28 @@ export const CITY_MAST_CROSS = 1.4;
 //
 // Most of city_cell is continuous, and there float64 lands within a few
 // micrometres of the GPU's float32 — far inside anything a collision can
-// feel. The exceptions are the floors: every setback, podium and bud height
-// is floor(h * frac / CITY_FLOOR_H) * CITY_FLOOR_H with h itself a whole
-// number of storeys, so the argument sits EXACTLY on an integer whenever
-// frac times the storey count does (a fifth of all 60 % setbacks, say), and
-// which side of it float32 rounds to decides a whole storey. Those chains are
-// evaluated through f() and quantize(), operation by operation, as the
-// shader evaluates them.
+// feel. The exceptions are the floors: the height is a whole number of
+// storeys ns, and every setback, podium and bud level is
+// floor(ns * frac) * CITY_FLOOR_H, whose argument sits EXACTLY on an
+// integer whenever frac times the storey count does (every fourth spire's
+// 0.75, say). Which side of it float32 rounds to decides a whole storey, so
+// those chains are evaluated through f() and storeyZ(), operation by
+// operation, as the shader evaluates them — with the constants rounded to
+// float32 first, because the shader's literals are.
 //
-// "As the shader evaluates them" includes how the DRIVER divides. WGSL
-// allows 2.5 ulp for f32 division, and NVIDIA's Vulkan compiler takes that
-// licence: x / CITY_FLOOR_H is compiled as x times the rounded reciprocal
-// of the constant, which lands a quarter-integer argument like h * 0.75 /
-// 3.6 one ulp ABOVE the integer where IEEE division lands one below — a
-// whole storey on every fourth spire (found by the mirror test on the RTX
-// 5080, 2026-09-23). So the mirror divides the way the card does. A GPU
-// that divides exactly would put those same few setbacks a storey lower
-// than this file does; nothing here can know which card drew the frame.
+// The shader carries ns and multiplies because it once divided: NVIDIA
+// compiles x / 3.6 as x times the rounded reciprocal, which put those
+// quarter-integer levels a storey high on one GPU and not on another (found
+// by this file's mirror test, 2026-09-23; city_cell changed to products,
+// which float32 rounds exactly everywhere). What still differs between GPUs
+// is pow() in the height law, at the ulp level: a building whose raw height
+// sits within an ulp of a storey boundary can come out a storey different.
 const f = Math.fround;
 const F32_FLOOR_H = f(CITY_FLOOR_H);
-const F32_INV_FLOOR_H = f(1.0 / F32_FLOOR_H);
 
-/** WGSL's floor(a / CITY_FLOOR_H) * CITY_FLOOR_H, as the GPU computes it. */
-function quantize(a) {
-  return f(Math.floor(f(f(a) * F32_INV_FLOOR_H)) * F32_FLOOR_H);
+/** WGSL's floor(x) * CITY_FLOOR_H for a float32 storey product x. */
+function storeyZ(x) {
+  return f(Math.floor(f(x)) * F32_FLOOR_H);
 }
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -312,13 +313,16 @@ export function cityCell(tile, cx, cy) {
   }
 
   // Height: base + the cascade to a power, jittered, sprawl-suppressed, and
-  // quantized to storeys. float32 from end to end — see quantize().
+  // made a whole number of storeys ns. float32 from end to end.
   const sprawl = f(mix(
     CITY_SPRAWL_MIN_FRAC, 1.0,
     smoothstep(CITY_EMPTY_RANK, CITY_SPRAWL_RANK_FULL, c.rank)));
-  let h = f(f(f(CITY_H_BASE + f(CITY_H_SCALE * f(Math.pow(c.density, CITY_H_EXP))))
-              * f(0.70 + f(0.60 * r4[0]))) * sprawl);
-  h = clamp(quantize(h), f(2.0 * F32_FLOOR_H), CITY_MAX_H);
+  const h_raw = f(f(f(CITY_H_BASE
+                      + f(CITY_H_SCALE * f(Math.pow(c.density, CITY_H_EXP))))
+                    * f(f(0.70) + f(f(0.60) * r4[0]))) * sprawl);
+  const ns = clamp(Math.floor(f(h_raw * f(CITY_PER_STOREY))),
+                   2.0, CITY_MAX_STOREYS);
+  const h = f(ns * F32_FLOOR_H);
   c.height = h;
 
   // Footprint grows with height (the WGSL tells the story).
@@ -328,8 +332,10 @@ export function cityCell(tile, cx, cy) {
   let podium = false;
   let zp = 0.0;
   if (h >= CITY_TOWER_H) {
+    const h_eff = h > CITY_TOWER_KNEE_H
+      ? CITY_TOWER_KNEE_H * Math.pow(h / CITY_TOWER_KNEE_H, 0.6) : h;
     const side = Math.max(
-      CITY_TOWER_SIDE_K * Math.sqrt(h) * (0.80 + 0.40 * r4[1]),
+      CITY_TOWER_SIDE_K * Math.sqrt(h_eff) * (0.80 + 0.40 * r4[1]),
       h / CITY_SLENDER_MAX);
     const aspect = 0.72 + 0.28 * r4[2];
     const sides = r4f[1] < 0.5 ? [side, side * aspect]
@@ -340,7 +346,7 @@ export function cityCell(tile, cx, cy) {
       podium = true;
       const storeys = Math.floor(f(mix(3.0, c.merged ? 12.0 : 8.0, r4f[2])));
       zp = Math.min(f(storeys * F32_FLOOR_H),
-                    f(Math.floor(f(h / f(3.0 * F32_FLOOR_H))) * F32_FLOOR_H));
+                    storeyZ(ns * f(0.33333334)));
     }
   }
   const slack = [plot_size[0] - fw[0], plot_size[1] - fw[1]];
@@ -363,7 +369,7 @@ export function cityCell(tile, cx, cy) {
       c.arch = 4;                   // spire crown
     }
   }
-  if (h > 600.0 && r4d[1] < 0.65) {
+  if (h > 600.0 && r4d[1] < (h > 1200.0 ? 0.85 : 0.65)) {
     c.arch = r4d[1] < 0.30 ? 4 : 3;
   }
 
@@ -415,7 +421,7 @@ export function cityCell(tile, cx, cy) {
   } else if (c.arch === 3) {
     // Podium + a shaft whose cross-section closes toward the crown.
     zp = podium ? zp
-                : Math.max(quantize(f(h * f(0.12))), F32_FLOOR_H);
+                : Math.max(storeyZ(ns * f(0.12)), F32_FLOOR_H);
     c.b1min = vec3(podium ? pod_min : bmin2, CITY_GROUND_Z);
     c.b1max = vec3(podium ? pod_max : bmax2, zp);
     const s = podium ? 1.0 : 0.90;
@@ -426,7 +432,7 @@ export function cityCell(tile, cx, cy) {
     c.fscale = 0.55 + 0.25 * r4d[2];
   } else if (c.arch === 4) {
     // A straight shaft to three quarters, then a steep spire.
-    const zs = quantize(f(h * f(0.75)));
+    const zs = storeyZ(ns * f(0.75));
     if (podium) {
       c.tiers = 2;
       c.b1min = vec3(pod_min, CITY_GROUND_Z);
@@ -447,9 +453,10 @@ export function cityCell(tile, cx, cy) {
     c.b1max = vec3(bmax2, h);
     c.tiers = 2;
     const side = Math.floor(f(r4d[2] * 4.0));   // which flank the bud rides
-    const bz0 = quantize(f(h * f(0.42 + f(0.20 * r4d[3]))));
+    const bz0 = storeyZ(ns * f(f(0.42) + f(f(0.20) * r4d[3])));
     const bz1 = Math.min(
-      f(f(bz0 + quantize(f(f(0.10 + f(0.10 * r4b[1])) * h))) + F32_FLOOR_H),
+      f(f(bz0 + storeyZ(f(f(0.10) + f(f(0.10) * r4b[1])) * ns))
+        + F32_FLOOR_H),
       f(h - F32_FLOOR_H));
     const reach = 0.22 * Math.min(fw[0], fw[1]);
     let bud_min, bud_max;
@@ -475,7 +482,7 @@ export function cityCell(tile, cx, cy) {
     c.b2max = vec3(bud_max, bz1);
     if (h > 200.0 && r4b[1] > 0.55) {
       c.tiers = 3;
-      const cz0 = quantize(f(h * f(0.68 + f(0.12 * r4b[3]))));
+      const cz0 = storeyZ(ns * f(f(0.68) + f(f(0.12) * r4b[3])));
       const cz1 = Math.min(f(cz0 + f(8.0 * F32_FLOOR_H)),
                            f(h - F32_FLOOR_H));
       // The second bud rides the opposite flank: mirror about bc.
@@ -489,7 +496,7 @@ export function cityCell(tile, cx, cy) {
   } else if (podium) {
     // Podium, tower, crown.
     c.tiers = 3;
-    const zc = quantize(f(h * f(0.70 + f(0.15 * r4b[3]))));
+    const zc = storeyZ(ns * f(f(0.70) + f(f(0.15) * r4b[3])));
     c.b1min = vec3(pod_min, CITY_GROUND_Z);
     c.b1max = vec3(pod_max, zp);
     c.b2min = vec3(bmin2, zp);
@@ -503,10 +510,10 @@ export function cityCell(tile, cx, cy) {
     let z1 = h;
     if (h > 90.0 && r4b[1] > 0.45) {
       c.tiers = 2;
-      z1 = quantize(f(h * f(0.60)));
+      z1 = storeyZ(ns * f(0.60));
       if (h > 180.0 && r4b[1] > 0.80) {
         c.tiers = 3;
-        z1 = quantize(f(h * f(0.50)));
+        z1 = storeyZ(ns * f(0.50));
       }
     }
     c.b1min = vec3(bmin2, CITY_GROUND_Z);
@@ -515,7 +522,7 @@ export function cityCell(tile, cx, cy) {
       let z2 = h;
       let f2 = 0.68;
       if (c.tiers === 3) {
-        z2 = quantize(f(h * f(0.78)));
+        z2 = storeyZ(ns * f(0.78));
         f2 = 0.72;
       }
       const fw2 = [fw[0] * f2, fw[1] * f2];

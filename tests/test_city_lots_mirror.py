@@ -17,6 +17,14 @@ block's ocean_params (x = block pitch, y = tile extent) and the city tile at
 ocean_normals. So a change to city_cell is tested as written, and a new
 function it starts calling shows up here as a compile error naming it.
 
+What float32 cannot promise is pow(): the height law's pow() is the GPU's
+approximation, so a building whose raw height lands within an ulp of a
+storey boundary can come out a storey different in the mirror. A sweep of
+every cell of the shipped tile (1,048,576) on 2026-09-23 found exactly one
+such building; the fixed sample here does not contain it, and the check
+stays tolerance-free on the discrete fields so that anything more than that
+shows up.
+
 Skips when node or a real GPU adapter is missing. Run it through
 tools/gpulock.
 """
