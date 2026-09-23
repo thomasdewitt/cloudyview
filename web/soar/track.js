@@ -114,6 +114,31 @@ export function catmullRom(times, values, tOut) {
 }
 
 /**
+ * Straight lines between the samples — for positions over the night city.
+ *
+ * There the samples are not free: each is the end of a frame's move that
+ * the collider (collide.js) swept and found clear, so the straight line
+ * from one to the next is known to miss every building, and any curve
+ * through them is not. A spline overshoots a hard stop: at the frame rates
+ * a slow machine flies, a wall hit at speed replayed through the wall and
+ * out of the far side of it. Mirrored in cloudyview/track.py linear().
+ */
+export function linear(times, values, tOut) {
+  const n = times.length;
+  const out = new Float64Array(tOut.length);
+  let i = 0;
+  for (let k = 0; k < tOut.length; k++) {
+    const t = tOut[k];
+    while (i + 1 < n && times[i + 1] <= t) i++;
+    i = Math.min(Math.max(i, 0), n - 2);
+    const ta = times[i], tb = times[i + 1];
+    out[k] = tb <= ta ? values[i]
+      : values[i] + (values[i + 1] - values[i]) * ((t - ta) / (tb - ta));
+  }
+  return out;
+}
+
+/**
  * Resample hand-flown samples at exact 1/fps steps.
  *
  * Returns `[{t, position, azimuth, elevation, fov, surfacePosition}, ...]`
@@ -121,7 +146,10 @@ export function catmullRom(times, values, tOut) {
  * (or null — see below). Azimuth is unwrapped before interpolation so 359 to
  * 1 goes through 0 rather than the long way round; in a periodic domain each
  * wrapped position column is unwrapped the same way at its own frame's
- * period and re-wrapped afterwards.
+ * period and re-wrapped afterwards. `linearPosition` draws the position
+ * columns straight between samples instead of through a spline — for a
+ * track flown over the night city (see linear()); the look is splined
+ * either way.
  */
 const frameCountBetween = (t0, t1, fps) =>
   Math.floor((t1 - t0 + 1e-9) * fps) + 1;
@@ -152,7 +180,8 @@ function distinctAscendingTimes(samples, fps) {
   return distinct;
 }
 
-export function resampleTrack(samples, fps, { periodic = true } = {}) {
+export function resampleTrack(samples, fps,
+                              { periodic = true, linearPosition = false } = {}) {
   if (!(fps > 0)) throw new Error(`fps must be positive; got ${fps}.`);
 
   const sorted = samples.map((s) => Array.from(s))
@@ -199,15 +228,16 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
   const tOut = new Float64Array(count);
   for (let k = 0; k < count; k++) tOut[k] = t0 + k / fps;
 
+  const place = linearPosition ? linear : catmullRom;
   const cols = {
-    x: catmullRom(times, x, tOut),
-    y: catmullRom(times, y, tOut),
-    z: catmullRom(times, column(3), tOut),
+    x: place(times, x, tOut),
+    y: place(times, y, tOut),
+    z: place(times, column(3), tOut),
     az: catmullRom(times, az, tOut),
     el: catmullRom(times, column(5), tOut),
     fov: catmullRom(times, column(6), tOut),
-    ...(hasSurface ? { sx: catmullRom(times, sx, tOut),
-                       sy: catmullRom(times, sy, tOut) } : {}),
+    ...(hasSurface ? { sx: place(times, sx, tOut),
+                       sy: place(times, sy, tOut) } : {}),
   };
   if (periodic) {
     // Fold back at the same period each unwrap used: x/y centred into

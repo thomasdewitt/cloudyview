@@ -244,6 +244,7 @@ export class CityCollider {
     // resolve seeds them.
     this._cam = null;
     this._flyer = null;
+    this._flyerShown = null;   // the flyer _flyer is the position of
     this._epoch = null;
   }
 
@@ -289,9 +290,15 @@ export class CityCollider {
     const c0 = this._cam;
     const c1 = this._cityPosition(camera);
     const offset = flyer ? sub(flyer.position, camera.position) : null;
-    // A flyer that was not up last frame starts on its tether: the tether
-    // sweep is what catches it if that is through a wall.
-    const f0 = flyer ? (this._flyer ?? add(c0, offset)) : null;
+    // A flyer that was not the one up last frame — just switched on, or
+    // the other species (the swift flies 4.6 m out, the dart 2.6) — starts
+    // on its tether: there is no path from where the other one was, and
+    // the tether sweep is what catches it if it came up through a wall.
+    // Whatever it was doing when it was last drawn is over.
+    if (flyer && flyer !== this._flyerShown) flyer.calm();
+    const f0 = flyer ? (flyer === this._flyerShown ? this._flyer
+                                                   : add(c0, offset))
+                     : null;
 
     let corr = [0.0, 0.0, 0.0];
     let contact = null;
@@ -352,15 +359,23 @@ export class CityCollider {
    * building would make hovering beside one impossible.
    */
   _firstBlock(c0, c1, f0, f1) {
-    const legs = [[c0, c1, CAMERA_RADIUS_M]];
-    if (f1 !== null) {
-      legs.push([f0, f1, FLYER_RADIUS_M], [c1, f1, FLYER_RADIUS_M]);
+    const arrival = sub(c1, c0);
+    // The two paths are the same frame's motion, parameterized alike, so
+    // the one blocked EARLIER is what the flight met first — and it decides
+    // what kind of crash it was (the dart into a wall before the eye comes
+    // down on a roof is a wall).
+    const cam = this.city.sweep(c0, c1, CAMERA_RADIUS_M);
+    const fly = f1 === null ? null : this.city.sweep(f0, f1, FLYER_RADIUS_M);
+    if (cam !== null && (fly === null || cam.t <= fly.t)) {
+      return { point: cam.point, normal: cam.normal, end: c1, arrival };
     }
-    for (const [a, b, radius] of legs) {
-      const hit = this.city.sweep(a, b, radius);
-      if (hit === null) continue;
-      return { point: hit.point, normal: hit.normal, end: b,
-               arrival: sub(c1, c0) };
+    if (fly !== null) {
+      return { point: fly.point, normal: fly.normal, end: f1, arrival };
+    }
+    // Both paths clear: the tether, which is a line held at one instant.
+    const tether = f1 === null ? null : this.city.sweep(c1, f1, FLYER_RADIUS_M);
+    if (tether !== null) {
+      return { point: tether.point, normal: tether.normal, end: f1, arrival };
     }
     return null;
   }
@@ -430,6 +445,7 @@ export class CityCollider {
     this._cam = [sp[0], sp[1], camera.position[2]];
     this._flyer = flyer
       ? add(this._cam, sub(flyer.position, camera.position)) : null;
+    this._flyerShown = flyer;
     this._epoch = camera.epoch;
   }
 
@@ -442,6 +458,7 @@ export class CityCollider {
     this.episode = null;
     camera.control = 1.0;
     camera.setShake(0.0, 0.0);
+    flyer?.calm();
     this._cam = null;
     for (let i = 0; ; i++) {
       const p = this._cityPosition(camera);

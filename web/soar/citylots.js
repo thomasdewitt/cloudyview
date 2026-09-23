@@ -579,26 +579,60 @@ export function cityCell(tile, cx, cy) {
 // to z = r. (A grown box's edges are square where the true grown shape is
 // rounded — a few centimetres of extra caution at a corner.)
 //
+// The buildings grow sideways by more than that: the facade shell
+// (city-facades) hangs relief — sills, air-conditioning units, fire escapes,
+// balconies — up to CITY_SHELL_OUT_MAX outside every building box and
+// frustum, and a camera inside that relief sees it vanish exactly as it saw
+// whole buildings vanish. So b1..b3 and the frustum grow horizontally by
+// the shell as well; roofs stay exact (nothing stands on them from the
+// shell) and nothing hangs below a box. Masts carry no shell.
+//
 // A hit reports the ENTRY — a segment that starts inside does not hit. That
 // is the right answer for a sweep (a body already inside cannot be stopped
 // at a face it is behind), and the collider never starts one inside: it
 // backs every body out a hair beyond the grown surface and asks inside()
 // separately.
 //
-// The radius has to stay under half a metre. The DDA only visits the cells
-// the centre passes through, which is exact only while every grown solid
-// still lies in the columns of the cells that report it — and the tightest
-// margin city_cell leaves is the budding tier's, clamped 0.5 m inside its
-// lot.
+// Grown, a solid can reach out of the columns of the cells that report it
+// (a bud is clamped only half a metre inside its lot), so every cell the
+// walk visits tests its eight neighbours as well. That is exact as long as
+// the growth is under a cell, which checkReach() holds.
+
+// raymarch.wgsl CITY_SHELL_OUT_MAX, in the facade shell's section (the
+// city-facades branch): how far relief stands off a building box.
+export const CITY_SHELL_OUT_MAX = 1.5;
 
 const EPS_DIR = 1e-12;
-const MAX_RADIUS = 0.5;
 
-/** Segment vs a box grown by r: {t, normal} of the entry, or null. */
-function segmentBox(p0, d, bmin, bmax, r) {
+/**
+ * Exported for tests: a cell's solids grown for a body of radius r, each {min, max, grow} for a
+ * box (grow per axis) or {frustum, grow} for the tapered shaft. Cached on
+ * the cell per radius — there are two radii in use.
+ */
+export function cellSolids(cc, r) {
+  cc._solids ??= new Map();
+  let list = cc._solids.get(r);
+  if (list !== undefined) return list;
+  list = [];
+  const building = [CITY_SHELL_OUT_MAX + r, CITY_SHELL_OUT_MAX + r, r];
+  list.push({ min: cc.b1min, max: cc.b1max, grow: building });
+  if (cc.tiers >= 2) list.push({ min: cc.b2min, max: cc.b2max, grow: building });
+  if (cc.tiers >= 3) list.push({ min: cc.b3min, max: cc.b3max, grow: building });
+  if (cc.has_mast) {
+    list.push({ min: cc.mast_min, max: cc.mast_max, grow: [r, r, r] });
+  }
+  if (cc.has_frustum) {
+    list.push({ frustum: frustumShape(cc.fmin, cc.fmax, cc.fscale, r) });
+  }
+  cc._solids.set(r, list);
+  return list;
+}
+
+/** Segment vs a grown box: {t, normal} of the entry, or null. */
+function segmentBox(p0, d, { min, max, grow }) {
   let tLo = -Infinity, tHi = Infinity, axis = -1;
   for (let k = 0; k < 3; k++) {
-    const lo = bmin[k] - r, hi = bmax[k] + r;
+    const lo = min[k] - grow[k], hi = max[k] + grow[k];
     if (Math.abs(d[k]) < EPS_DIR) {
       if (p0[k] < lo || p0[k] > hi) return null;
       continue;
@@ -618,27 +652,29 @@ function segmentBox(p0, d, bmin, bmax, r) {
 /**
  * The rectangular frustum of archetypes 3 and 4, as raymarch.wgsl
  * city_frustum_hit builds it (cross-section centred on the footprint,
- * scale 1 at fmin.z running linearly to fscale at fmax.z), grown by r.
+ * scale 1 at fmin.z running linearly to fscale at fmax.z), grown by the
+ * shell sideways and by r along every face.
  */
 function frustumShape(fmin, fmax, fscale, r) {
   const h2 = [Math.max(0.5 * (fmax[0] - fmin[0]), 1e-4),
               Math.max(0.5 * (fmax[1] - fmin[1]), 1e-4)];
   const sp = (fscale - 1.0) / Math.max(fmax[2] - fmin[2], 1e-4);  // ds/dz
   return {
+    fz: fmin[2],
     c2: [0.5 * (fmin[0] + fmax[0]), 0.5 * (fmin[1] + fmax[1])],
     h2, sp,
     z0: fmin[2] - r, z1: fmax[2] + r,
     // A sloped face moved out by r along its normal moves out by
-    // r sqrt(1 + slope^2) horizontally.
-    grow: [r * Math.hypot(1.0, h2[0] * sp), r * Math.hypot(1.0, h2[1] * sp)],
+    // r sqrt(1 + slope^2) horizontally; the shell is horizontal already.
+    grow: [CITY_SHELL_OUT_MAX + r * Math.hypot(1.0, h2[0] * sp),
+           CITY_SHELL_OUT_MAX + r * Math.hypot(1.0, h2[1] * sp)],
   };
 }
 
 /** Segment vs a grown frustum: the z slab and four sloped slabs. */
-function segmentFrustum(p0, d, fmin, fmax, fscale, r) {
-  const { c2, h2, sp, z0, z1, grow } = frustumShape(fmin, fmax, fscale, r);
+function segmentFrustum(p0, d, { fz, c2, h2, sp, z0, z1, grow }) {
   // The half-width along the segment: h2 s(t) + grow, s(t) = sA + sB t.
-  const sA = 1.0 + sp * (p0[2] - fmin[2]);
+  const sA = 1.0 + sp * (p0[2] - fz);
   const sB = sp * d[2];
   let tLo = -Infinity, tHi = Infinity;
   let nLo = null;
@@ -676,33 +712,29 @@ function segmentFrustum(p0, d, fmin, fmax, fscale, r) {
   return { t: tLo, normal: nLo };
 }
 
-function insideBox(p, bmin, bmax, r) {
-  return p[0] > bmin[0] - r && p[0] < bmax[0] + r
-      && p[1] > bmin[1] - r && p[1] < bmax[1] + r
-      && p[2] > bmin[2] - r && p[2] < bmax[2] + r;
+function segmentSolid(p0, d, solid) {
+  return solid.frustum ? segmentFrustum(p0, d, solid.frustum)
+                       : segmentBox(p0, d, solid);
 }
 
-function insideFrustum(p, fmin, fmax, fscale, r) {
-  const { c2, h2, sp, z0, z1, grow } = frustumShape(fmin, fmax, fscale, r);
-  if (!(p[2] > z0 && p[2] < z1)) return false;
-  const s = 1.0 + sp * (p[2] - fmin[2]);
-  return Math.abs(p[0] - c2[0]) < h2[0] * s + grow[0]
-      && Math.abs(p[1] - c2[1]) < h2[1] * s + grow[1];
+/** Whether p is inside one grown solid of cellSolids (exported for tests). */
+export function insideSolid(p, solid) {
+  if (solid.frustum) {
+    const { fz, c2, h2, sp, z0, z1, grow } = solid.frustum;
+    if (!(p[2] > z0 && p[2] < z1)) return false;
+    const s = 1.0 + sp * (p[2] - fz);
+    return Math.abs(p[0] - c2[0]) < h2[0] * s + grow[0]
+        && Math.abs(p[1] - c2[1]) < h2[1] * s + grow[1];
+  }
+  const { min, max, grow } = solid;
+  return [0, 1, 2].every(
+    (k) => p[k] > min[k] - grow[k] && p[k] < max[k] + grow[k]);
 }
 
-/** A built cell's solid boxes, as city_trace tests them. */
-function cellBoxes(cc) {
-  const boxes = [[cc.b1min, cc.b1max]];
-  if (cc.tiers >= 2) boxes.push([cc.b2min, cc.b2max]);
-  if (cc.tiers >= 3) boxes.push([cc.b3min, cc.b3max]);
-  if (cc.has_mast) boxes.push([cc.mast_min, cc.mast_max]);
-  return boxes;
-}
-
-function checkRadius(r) {
-  if (!(r >= 0.0 && r < MAX_RADIUS)) {
-    throw new Error(
-      `A city sweep's body radius must be in [0, ${MAX_RADIUS}) m; got ${r}.`);
+/** The 3 x 3 block of cells about (cx, cy), as [cx, cy] pairs. */
+function* neighbourhood(cx, cy) {
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) yield [cx + dx, cy + dy];
   }
 }
 
@@ -747,9 +779,12 @@ export class CityLots {
    * member cell, so a hit found while visiting one cell may lie beyond it.
    * The nearest hit so far is kept across cells and the walk stops once the
    * current cell's exit is past it — no nearer surface can lie further on.
+   * Each visited cell tests its neighbours' solids too (see the growth note
+   * above); a surface the segment meets at t lies within reach of the cell
+   * the segment is in at t, so the stopping rule still holds.
    */
   sweep(p0, p1, r = 0.0) {
-    checkRadius(r);
+    this._checkReach(r);
     const cell = this.tile.cellM;
     const d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
     let best = null;
@@ -778,20 +813,22 @@ export class CityLots {
     const tdX = cell * Math.abs(invX), tdY = cell * Math.abs(invY);
 
     let tCur = 0.0;
+    const tested = new Set();
     // A segment crosses at most this many cells; the bound is the walk's
     // termination guarantee, not a range limit.
     const maxCells = 4 + Math.ceil((Math.abs(d[0]) + Math.abs(d[1])) / cell);
     for (let i = 0; i <= maxCells; i++) {
       const tExit = Math.min(tmaxX, tmaxY, 1.0);
       if (best !== null && best.t <= tCur) break;
-      const za = p0[2] + tCur * d[2], zb = p0[2] + tExit * d[2];
-      const cc = this.cell(cx, cy);
-      if (cc.built && Math.min(za, zb) < cc.top_z + 1.0 + r) {
-        for (const [bmin, bmax] of cellBoxes(cc)) {
-          take(segmentBox(p0, d, bmin, bmax, r));
-        }
-        if (cc.has_frustum) {
-          take(segmentFrustum(p0, d, cc.fmin, cc.fmax, cc.fscale, r));
+      const zLow = Math.min(p0[2] + tCur * d[2], p0[2] + tExit * d[2]);
+      for (const [nx, ny] of neighbourhood(cx, cy)) {
+        const key = `${nx},${ny}`;
+        if (tested.has(key)) continue;
+        const cc = this.cell(nx, ny);
+        if (!cc.built || zLow >= cc.top_z + 1.0 + r) continue;
+        tested.add(key);
+        for (const solid of cellSolids(cc, r)) {
+          take(segmentSolid(p0, d, solid));
         }
       }
       if (tExit >= 1.0 || (best !== null && best.t <= tExit)) break;
@@ -807,22 +844,33 @@ export class CityLots {
   /**
    * Whether a sphere of radius r at p overlaps a solid: null if not, else
    * {top} — the z its underside has to be lifted to in order to stand clear
-   * on top (the cell's roof-and-mast z; the street's for the ground).
+   * on top (the roof-and-mast z of the cell it overlaps; the street's for
+   * the ground).
    */
   inside(p, r = 0.0) {
-    checkRadius(r);
+    this._checkReach(r);
     if (p[2] < CITY_GROUND_Z + r) return { top: CITY_GROUND_Z };
     const cell = this.tile.cellM;
-    const cc = this.cell(Math.floor(p[0] / cell), Math.floor(p[1] / cell));
-    if (!cc.built || p[2] >= cc.top_z + r) return null;
-    for (const [bmin, bmax] of cellBoxes(cc)) {
-      if (insideBox(p, bmin, bmax, r)) return { top: cc.top_z };
+    let top = null;
+    for (const [nx, ny] of neighbourhood(Math.floor(p[0] / cell),
+                                         Math.floor(p[1] / cell))) {
+      const cc = this.cell(nx, ny);
+      if (!cc.built || p[2] >= cc.top_z + r) continue;
+      if (cellSolids(cc, r).some((solid) => insideSolid(p, solid))) {
+        top = Math.max(top ?? -Infinity, cc.top_z);
+      }
     }
-    if (cc.has_frustum
-        && insideFrustum(p, cc.fmin, cc.fmax, cc.fscale, r)) {
-      return { top: cc.top_z };
+    return top === null ? null : { top };
+  }
+
+  /** The growth must stay under a cell for the 3 x 3 walk to be exact. */
+  _checkReach(r) {
+    if (!(r >= 0.0 && CITY_SHELL_OUT_MAX + r < this.tile.cellM)) {
+      throw new Error(
+        `A city sweep's body radius ${r} m plus the facade shell ` +
+        `(${CITY_SHELL_OUT_MAX} m) must stay under a block ` +
+        `(${this.tile.cellM} m).`);
     }
-    return null;
   }
 }
 

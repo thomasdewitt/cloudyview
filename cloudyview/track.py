@@ -191,6 +191,31 @@ def catmull_rom(times, values, t_out) -> np.ndarray:
     return out
 
 
+def linear(times, values, t_out) -> np.ndarray:
+    """Straight lines between the samples — positions over the night city.
+
+    There each sample is the end of a frame's move the collider swept and
+    found clear (web/soar/collide.js), so the straight line to the next one
+    misses every building and a spline through them need not: it overshoots
+    a hard stop, and a wall hit at speed replayed through the wall. The
+    arithmetic is track.js linear()'s, step for step.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    t_out = np.asarray(t_out, dtype=np.float64)
+    n = len(times)
+    out = np.empty(len(t_out), dtype=np.float64)
+    i = 0
+    for k, t in enumerate(t_out):
+        while i + 1 < n and times[i + 1] <= t:
+            i += 1
+        i = min(max(i, 0), n - 2)
+        ta, tb = times[i], times[i + 1]
+        out[k] = values[i] if tb <= ta else \
+            values[i] + (values[i + 1] - values[i]) * ((t - ta) / (tb - ta))
+    return out
+
+
 def frame_count_between(t0: float, t1: float, fps: float) -> int:
     return int(math.floor((t1 - t0 + 1e-9) * fps)) + 1
 
@@ -207,14 +232,17 @@ class TrackFrame:
     surface_position: Optional[tuple[float, float]]
 
 
-def resample_track(samples, fps: float, *,
-                   periodic: bool = True) -> list[TrackFrame]:
+def resample_track(samples, fps: float, *, periodic: bool = True,
+                   linear_position: bool = False) -> list[TrackFrame]:
     """Resample hand-flown samples at exact 1/fps steps.
 
     Azimuth is unwrapped before interpolation so 359 to 1 goes through 0
     rather than the long way round; in a periodic domain each wrapped
     position column is unwrapped the same way at its own frame's period and
     re-wrapped afterwards — x/y at the cloud period, sx/sy at 1.0.
+    `linear_position` draws the position columns straight between samples
+    rather than through the spline (a track over the night city; see
+    linear()); the look is splined either way.
     """
     if not fps > 0:
         raise ValueError(f"fps must be positive; got {fps}.")
@@ -249,17 +277,18 @@ def resample_track(samples, fps: float, *,
     count = frame_count_between(times[0], times[-1], fps)
     t_out = times[0] + np.arange(count, dtype=np.float64) / fps
 
+    place = linear if linear_position else catmull_rom
     cols = {
-        "x": catmull_rom(times, x, t_out),
-        "y": catmull_rom(times, y, t_out),
-        "z": catmull_rom(times, unique[:, 3], t_out),
+        "x": place(times, x, t_out),
+        "y": place(times, y, t_out),
+        "z": place(times, unique[:, 3], t_out),
         "az": catmull_rom(times, az, t_out),
         "el": catmull_rom(times, unique[:, 5], t_out),
         "fov": catmull_rom(times, unique[:, 6], t_out),
     }
     if has_surface:
-        cols["sx"] = catmull_rom(times, sx, t_out)
-        cols["sy"] = catmull_rom(times, sy, t_out)
+        cols["sx"] = place(times, sx, t_out)
+        cols["sy"] = place(times, sy, t_out)
     if periodic:
         # Fold back at the same period each unwrap used: x/y centred into
         # [-1, 1), sx/sy into [0, 1). math.fmod, not %, because the browser
@@ -512,7 +541,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
                              field_path=field_path, size=size, fps=fps,
                              quality=quality)
     preset = QUALITY_PRESETS[s.quality]
-    frames = resample_track(samples, s.fps, periodic=s.periodic)
+    frames = resample_track(samples, s.fps, periodic=s.periodic,
+                            linear_position=s.surface == "city")
     w, h = s.size
     print(f"soar: {track_path.name}: {len(samples)} samples over "
           f"{samples[-1, 0] - samples[0, 0]:.1f} s -> {len(frames)} frames "

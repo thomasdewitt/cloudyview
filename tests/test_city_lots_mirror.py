@@ -89,15 +89,33 @@ def _js_constants(source):
         r"^export\s+const\s+(CITY_\w+)\s*=\s*([-\d.eE+]+)\s*;", source, re.M)}
 
 
+# Mirrored ahead of the shader: city-facades' facade-shell reach, which the
+# collider grows every building by. It lands in raymarch.wgsl with their
+# branch; until then it is pinned by its own, skipping, test below.
+PENDING_IN_WGSL = {"CITY_SHELL_OUT_MAX"}
+
+
 def test_every_mirrored_constant_is_the_shaders():
     wgsl = _wgsl_constants(WGSL.read_text())
     js = _js_constants(CITYLOTS_JS.read_text())
     assert js, "citylots.js exports no CITY_ constants"
+    js = {k: v for k, v in js.items() if k not in PENDING_IN_WGSL or k in wgsl}
     missing = sorted(set(js) - set(wgsl))
     assert not missing, (
         f"citylots.js mirrors constants raymarch.wgsl no longer has: {missing}")
     differ = {k: (js[k], wgsl[k]) for k in js if js[k] != wgsl[k]}
     assert not differ, f"citylots.js disagrees with raymarch.wgsl: {differ}"
+
+
+def test_the_facade_shell_reach_is_the_shaders():
+    wgsl = _wgsl_constants(WGSL.read_text())
+    if "CITY_SHELL_OUT_MAX" not in wgsl:
+        pytest.skip("CITY_SHELL_OUT_MAX is not in raymarch.wgsl yet "
+                    "(city-facades' shell)")
+    js = _js_constants(CITYLOTS_JS.read_text())
+    assert js["CITY_SHELL_OUT_MAX"] == wgsl["CITY_SHELL_OUT_MAX"], (
+        "the collider grows buildings by a different facade-shell reach "
+        "than the shell the renderer draws")
 
 
 # --- the cells ---------------------------------------------------------------

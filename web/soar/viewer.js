@@ -2313,12 +2313,18 @@ export class Viewer {
     // Even before the offscreen texture is made, not after: H.264 refuses odd
     // dimensions, and every frame has to be the size the encoder was told.
     const size = evenSize(this.captureDimensions());
+    // Over the city the positions go straight between samples: those are
+    // the moves the collider cleared (track.js linear()).
     const frames = resampleTrack(samples, this.videoFps,
-                                 { periodic: this.renderer.periodic });
+                                 { periodic: this.renderer.periodic,
+                                   linearPosition: Boolean(this.scene.city) });
 
     this._capturing = true;
     this._wake("capture");
     this._videoAbort = false;
+    // The replay flies the flyer from the track's first pose, not from
+    // wherever the live flight left it.
+    this.flyer?.calm();
     this.ui.close();
     this.ui.showProgress("Choosing a codec…", 0);
 
@@ -2411,6 +2417,8 @@ export class Viewer {
       if (saved && this.renderer) endOfflineRender(this.renderer, saved);
       this.ui.hideProgress();
       this._capturing = false;
+      // And back to the live flight, which the replay's last pose is not.
+      this.flyer?.calm();
       // The capture owned the renderer's quality state and its accumulation;
       // whatever the live view was converging towards is gone, and the loop
       // may have been asleep when the capture began.

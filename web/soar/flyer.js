@@ -388,6 +388,26 @@ export class Flyer {
   shift(d) {
     this.position = [this.position[0] + d[0], this.position[1] + d[1],
                      this.position[2] + d[2]];
+    // And the origin its next velocity is measured from, so that velocity
+    // runs from where the camera was drawn — not across a cloud-period
+    // fold the correction happened to carry it over.
+    if (this._prevOrigin !== null) {
+      this._prevOrigin = [this._prevOrigin[0] + d[0],
+                          this._prevOrigin[1] + d[1],
+                          this._prevOrigin[2] + d[2]];
+    }
+  }
+
+  /**
+   * Forget the flight so far: no tumble in progress, no velocity history —
+   * the next update snaps into place off the camera as a first frame does.
+   * For a flight that did not happen continuously from the last update: a
+   * reset, a map click, the flyer switched back on, a track replayed from
+   * its own first pose.
+   */
+  calm() {
+    this._knock = null;
+    this._prevOrigin = null;
   }
 
   /**
