@@ -545,10 +545,10 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const surfaceKind = forcedSurface ?? meta.surface ?? "ocean";
-  if (surfaceKind !== "ocean" && surfaceKind !== "city") {
+  if (!["ocean", "desert", "city"].includes(surfaceKind)) {
     throw new Error(
       `The '${meta.id}' demo asks for surface '${surfaceKind}', which this ` +
-      "viewer does not know. It knows 'ocean' and 'city'.");
+      "viewer does not know. It knows 'ocean', 'desert' and 'city'.");
   }
   // A pre-v5 bake ships a ghost-padded volume and a faces.bin, which this
   // renderer would read two texels out of register on every axis. Say so
@@ -607,8 +607,9 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
     }
 
     const mapBytes = await fetchBytes(`${baseUrl}/${meta.map.file ?? "map.bin"}`);
-    progress?.(surfaceKind === "city"
-               ? "Raising the city…" : "Loading the ocean surface…", 0.95);
+    progress?.({ city: "Raising the city…",
+                 desert: "Laying out the desert…" }[surfaceKind]
+               ?? "Loading the ocean surface…", 0.95);
     const surfaceTile = await surface(surfaceKind);
     nestDummy = createNestDummy(device);
 
@@ -625,6 +626,7 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       oceanTileExtent: surfaceTile.tileExtent,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
+      desert: surfaceKind === "desert",
       // The city tile's per-block cascade, for the minimap to draw the city
       // with. Null for an ocean scene, and null is what makes the minimap
       // build the cloud map instead — see Minimap's constructor.

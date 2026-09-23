@@ -50,6 +50,35 @@ OCEAN_DIR = SOAR_DIR / "ocean"
 # the two is ever loaded. Its meta names the cell size "cell_m" where the
 # ocean's names it "dx_m"; the keys "n" and "mips" are common to both.
 CITY_DIR = SOAR_DIR / "city"
+# The Sonoran desert tile (DESERT, 2026-09-23): terrain height, its two
+# slopes and a material channel, same byte format and same binding again.
+DESERT_DIR = SOAR_DIR / "desert"
+
+# What the world stands on. "ocean" and "desert" are day scenes over the
+# same sky; "city" is the night city. Each compiles its own specialization
+# and binds its own tile at binding 3 — see `specialize` and SoarRenderer.
+SURFACES = ("ocean", "desert", "city")
+SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
+
+
+def check_surface(surface: str) -> str:
+    """The surface name, or a ValueError naming the ones that exist."""
+    if surface not in SURFACES:
+        raise ValueError(
+            f"surface must be one of {', '.join(SURFACES)}; got {surface!r}.")
+    return surface
+
+
+def surface_cell_m(surface: str, meta: dict) -> float:
+    """A surface tile's texel size from its meta.json.
+
+    The one place the key difference lives: the ocean names it "dx_m" (a
+    sampling step of a wave field), the city and the desert "cell_m".
+    """
+    key = "dx_m" if check_surface(surface) == "ocean" else "cell_m"
+    if key not in meta:
+        raise KeyError(f"the {surface} tile's meta.json has no {key!r}.")
+    return float(meta[key])
 
 
 def read_shader() -> str:
@@ -219,11 +248,12 @@ def effective_light_transfer_split(strength: float, elevation_deg: float) -> flo
 class SceneState:
     """Everything about the field, independent of where the camera is.
 
-    `city` selects the night-city scene, which the shader compiles in through
-    the CITY constant (see `specialize`). It does not add uniform rows — the
-    block is the same 400 bytes in either mode — it REINTERPRETS a few of
-    them, and the fields keep their ocean names because the slots are literally
-    the ocean's:
+    `surface` is what the world stands on: "ocean", "desert" or "city". The
+    desert and the city each compile in through their own constant (DESERT,
+    CITY — see `specialize`). Neither adds uniform rows — the block is the
+    same 400 bytes in every mode — they REINTERPRET a few of them, and the
+    fields keep their ocean names because the slots are literally the
+    ocean's. Under "city":
 
       * `ocean_z` is the ground plane; `ocean_reflectance` is unused and packs
         as zeros.
@@ -234,8 +264,14 @@ class SceneState:
         city with the surface off is an empty ground plane, so pack_uniforms
         raises rather than render it.
 
+    Under "desert" the same four row-9 numbers describe the desert tile,
+    `ocean_z` is the datum its heights stand on, and `ocean_reflectance`
+    packs as zeros. The ocean's haze extinction (row 19.y) still applies —
+    it is the aerial perspective over whatever ground there is.
+
     The ViewState's ocean realism knobs (glint, slope draw, mip bias) are
-    simply ignored by the shader under CITY; they are not validated away.
+    simply ignored by the shader under CITY and DESERT; they are not
+    validated away.
     """
     bmin: Sequence[float]
     bmax: Sequence[float]
@@ -253,7 +289,7 @@ class SceneState:
     nest_bmax: Optional[Sequence[float]] = None
     dt_view_nest: float = 0.0
     dt_light_nest: float = 0.0
-    city: bool = False
+    surface: str = "ocean"
     # Where the city tile sits in world space (m, a whole number of blocks;
     # row 8.yz). The default parks the tile's megatower district — its
     # wildest cascade excursion — under the TWP-ICE subvolume's central
@@ -348,7 +384,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     Returns (25, 4) float32. Every unwritten slot stays zero, which is what
     the shader's unused components and the absent nest rows require.
 
-    With `state.city` the layout is untouched and a handful of rows change
+    Under the city the layout is untouched and a handful of rows change
     MEANING — the surface rows describe the city tile rather than the sea, the
     sun row is the moon, and the five spectral rows carry the night palette
     instead of look's daytime air-mass model. See SceneState.
@@ -394,7 +430,10 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # The surface flag is what draws the city; with it off the ground plane is
     # empty and the scene is a night sky over nothing, which looks like a
     # renderer bug rather than a choice.
-    if state.city and not state.ocean_enabled:
+    check_surface(state.surface)
+    city = state.surface == "city"
+    desert = state.surface == "desert"
+    if city and not state.ocean_enabled:
         raise ValueError(
             "city mode needs the surface enabled: ocean_enabled is the "
             "surface flag under CITY (row 9.z) and it is False, which would "
@@ -404,7 +443,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # Under CITY this is the MOON: same azimuth/elevation fields, same
     # packing, same row — only the light it stands for is different.
     sun = direction_from_azimuth_elevation(view.sun_azimuth, view.sun_elevation)
-    if state.city:
+    if city:
         cloud_sun, ambient, horizon, bloom, disc = (
             NIGHT_MOON_CLOUD_COLOR, NIGHT_AMBIENT_TINT, NIGHT_SKY_HORIZON,
             NIGHT_MOON_BLOOM, NIGHT_MOON_DISC)
@@ -435,8 +474,14 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # Row 8 is the surface: sea level plus the water's reflectance, or — under
     # CITY — the ground plane and the tile's world offset (which district
     # sits under this field's cameras).
-    u[8] = ((state.ocean_z, *state.city_tile_offset_m, 0.0) if state.city
-            else (state.ocean_z, *state.ocean_reflectance))
+    # Under DESERT only the datum: the desert has no reflectance row, its
+    # albedos are properties of the materials and live in the shader.
+    if city:
+        u[8] = (state.ocean_z, *state.city_tile_offset_m, 0.0)
+    elif desert:
+        u[8] = (state.ocean_z, 0.0, 0.0, 0.0)
+    else:
+        u[8] = (state.ocean_z, *state.ocean_reflectance)
     # Row 9 needs no branch: cell size, tile extent, surface flag and top mip
     # are the same four numbers about whichever tile is bound.
     u[9] = (state.ocean_fif_dx, state.ocean_tile_extent,
@@ -492,7 +537,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
         return r + tile if r < 0 else r
 
     base = (state.surface_offset_m if state.surface_offset_m is not None
-            else (state.city_tile_offset_m if state.city else (0.0, 0.0)))
+            else (state.city_tile_offset_m if city else (0.0, 0.0)))
     u[24] = (_fold_tile(base[0]), _fold_tile(base[1]), 0.0, 0.0)
     return u
 
@@ -552,29 +597,21 @@ ACCUM_FORMAT = "rgba32float"
 
 def specialize(source: str, *, periodic: bool, nested: bool,
                max_light_steps: int, tone_map: bool = True,
-               city: bool = False) -> str:
+               surface: str = "ocean") -> str:
     """Bake the compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
     bounds a loop. Each sentinel must appear exactly once — a miss renders
     the wrong thing at full speed and says nothing.
 
-    CITY is only rewritten when it is being turned ON. Its declared value is
-    already `false`, so asking for the daytime scene is a no-op rewrite, and
-    requiring the sentinel there would make every ordinary render depend on a
-    shader edit it does not use. Turning it on demands the declaration and
-    raises without it.
+    `surface` turns on at most one of CITY and DESERT, and each is only
+    rewritten when it is being turned ON: its declared value is already
+    `false`, so the ocean is a no-op rewrite of both. Turning one on demands
+    its declaration, like every other sentinel here.
     """
     if not (1 <= int(max_light_steps) <= 512):
         raise ValueError(f"max_light_steps must be in [1, 512]; got {max_light_steps}.")
-    if city and source.count("const CITY: bool = false;") != 1:
-        raise RuntimeError(
-            "city=True needs `const CITY: bool = false;` in "
-            f"{SHADER_PATH.name}, and it is not there (found "
-            f"{source.count('const CITY: bool = false;')} occurrences). The "
-            "night-city specialization has not landed in the shader yet, or "
-            "the declaration has been reworded — either way this host cannot "
-            "compile a city.")
+    check_surface(surface)
     swaps = [
         ("const PERIODIC_DOMAIN: bool = true;",
          f"const PERIODIC_DOMAIN: bool = {'true' if periodic else 'false'};"),
@@ -585,9 +622,12 @@ def specialize(source: str, *, periodic: bool, nested: bool,
         ("const TONE_MAP: bool = true;",
          f"const TONE_MAP: bool = {'true' if tone_map else 'false'};"),
     ]
-    if city:
+    if surface == "city":
         swaps.append(("const CITY: bool = false;",
                       "const CITY: bool = true;"))
+    if surface == "desert":
+        swaps.append(("const DESERT: bool = false;",
+                      "const DESERT: bool = true;"))
     for sentinel, replacement in swaps:
         if source.count(sentinel) != 1:
             raise RuntimeError(
@@ -608,7 +648,7 @@ class SoarRenderer:
 
     def __init__(self, *, periodic: bool = True, nested: bool = False,
                  max_light_steps: int = DEFAULT_MAX_LIGHT_STEPS,
-                 tone_map: bool = True, city: bool = False, device=None,
+                 tone_map: bool = True, surface: str = "ocean", device=None,
                  shader_source: Optional[str] = None):
         """`shader_source` overrides the checked-in shader.
 
@@ -617,11 +657,12 @@ class SoarRenderer:
         a change claiming to preserve the image gets to prove it (see
         tools/soar_shader_ab.py). Everything else reads the file.
 
-        `city` is the night-city scene: it compiles CITY into the shader and
-        binds the city density tile at binding 3 in place of the ocean's. It
-        is a property of the renderer rather than of a frame because both of
-        those are fixed at construction. The SceneState passed to each render
-        must agree — set `SceneState.city` to match.
+        `surface` is what the world stands on — "ocean", "desert", or the
+        night "city". The desert and the city each compile their own constant
+        into the shader and bind their own tile at binding 3 in place of the
+        ocean's. It is a property of the renderer rather than of a frame
+        because both of those are fixed at construction. The SceneState
+        passed to each render must agree — set `SceneState.surface` to match.
         """
         import wgpu                                    # local: GPU only on use
         self.wgpu = wgpu
@@ -633,13 +674,13 @@ class SoarRenderer:
         self.nested = bool(nested)
         self.max_light_steps = int(max_light_steps)
         self.tone_map = bool(tone_map)
-        self.city = bool(city)
+        self.surface = check_surface(surface)
 
         source = specialize(shader_source if shader_source is not None
                             else read_shader(), periodic=self.periodic,
                             nested=self.nested,
                             max_light_steps=self.max_light_steps,
-                            tone_map=self.tone_map, city=self.city)
+                            tone_map=self.tone_map, surface=self.surface)
         self._ray_module = device.create_shader_module(code=source)
         self._accum_module = device.create_shader_module(code=_ACCUM_SHADER)
 
@@ -696,16 +737,16 @@ class SoarRenderer:
         Not GPU-generated mips — the shader hand-blends two levels because a
         single hardware trilinear fetch's half-texel offset only fits level 0.
 
-        Which tile depends on the scene: the ocean's FIF normal field, or —
-        under `city` — the city density field. One byte format, one binding,
-        one loader; the two differ only in the directory and in what the
-        shader makes of the four channels. `self.surface_meta` is the loaded
-        meta.json, and is where a caller reads the cell size and tile extent
-        that SceneState has to be told about.
+        Which tile depends on the surface: the ocean's FIF normal field, the
+        desert's eroded terrain, or the city density field. One byte format,
+        one binding, one loader; they differ only in the directory and in
+        what the shader makes of the four channels. `self.surface_meta` is
+        the loaded meta.json, and is where a caller reads the cell size and
+        tile extent that SceneState has to be told about (surface_cell_m).
         """
         import json
         wgpu = self.wgpu
-        tile_dir = CITY_DIR if self.city else OCEAN_DIR
+        tile_dir = SURFACE_DIRS[self.surface]
         meta = json.loads((tile_dir / "meta.json").read_text())
         n, mips = int(meta["n"]), int(meta["mips"])
         self.surface_meta = meta
@@ -880,18 +921,18 @@ class SoarRenderer:
         return self._bind_group
 
     def _check_scene(self, state: SceneState) -> None:
-        """CITY is compiled in and its tile is bound at construction.
+        """The surface is compiled in and its tile is bound at construction.
 
         A SceneState that disagrees would pack the night palette into a shader
-        reading it as sunlight (or the reverse) and render something plausible
-        and wrong, which is the failure mode worth a loud error.
+        reading it as sunlight (or the reverse), or describe one tile to a
+        shader holding another, and render something plausible and wrong,
+        which is the failure mode worth a loud error.
         """
-        if bool(state.city) != self.city:
+        if state.surface != self.surface:
             raise RuntimeError(
-                f"This renderer was built with city={self.city}, so it has "
-                f"CITY baked to {str(self.city).lower()} and the "
-                f"{'city' if self.city else 'ocean'} tile bound, but the "
-                f"scene says city={bool(state.city)}. Build a renderer for "
+                f"This renderer was built for the {self.surface} — its "
+                "specialization is compiled and its tile bound — but the "
+                f"scene says surface={state.surface!r}. Build a renderer for "
                 "the scene you mean to render.")
 
     # -- the sun-tau cache ---------------------------------------------------

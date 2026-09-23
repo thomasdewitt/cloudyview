@@ -10826,6 +10826,354 @@ fn cc_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t_max: f32,
 }
 // <<< GENERATED CITY COMPONENTS
 
+// ===========================================================================
+// === DESERT GROUND (desert-ground) ===
+// ===========================================================================
+//
+// The Sonoran floor under the daytime clouds (DESERT specialization,
+// 2026-09-23). Compile-time, beside CITY and exclusive with it: the host
+// swaps the declaration below and binds the desert tile at binding 3 in the
+// ocean tile's place, exactly as CITY binds the city tile. With DESERT false
+// every branch on it folds away and the ocean frame is untouched.
+//
+// Under DESERT the ocean-named uniforms describe the desert tile:
+//   u.ocean.x          the ground datum (m) the tile's heights stand on;
+//   u.ocean_params.x   the tile's texel size (m), .y its extent (m),
+//                      .z the surface flag, .w its top mip;
+//   u.surface_offset   where the tile sits this frame (row 24).
+// Nothing else in the block changes meaning.
+//
+// THE DESERT FRAME is world xy minus the row-24 offset, folded into
+// [0, extent) — city_fold_xy's construction with this tile's extent. Every
+// hashed thing on the ground (pebbles here, plants in the flora section)
+// seeds from a cell index folded at the tile, so the desert is a pure
+// function of this frame and a replayed track flies over the same stones.
+const DESERT: bool = false;
+
+// How far above the terrain the flora slab reaches: the tallest saguaro
+// plus margin. The flora trace is called only over the part of a ray that
+// lies inside [ground_min, ground_max + this].
+const DESERT_FLORA_SLAB_H: f32 = 13.0;
+
+// Visible-band albedos of the ground's endmembers, linear. Provisional
+// until judged against the references.
+const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.36, 0.30, 0.23);
+const DESERT_ALBEDO_PAVEMENT: vec3<f32> = vec3<f32>(0.15, 0.11, 0.08);
+const DESERT_ALBEDO_SOIL: vec3<f32> = vec3<f32>(0.27, 0.21, 0.15);
+
+// A sunlit surface stands to a sunlit cloud face as their albedos do. The
+// renderer's sun, sky and cloud scales were each fitted to photographs and
+// never to one another, so the textbook a*E*mu/pi with E = u.cloud_sun is
+// not in the cloud's units; this is the one constant that puts it there
+// (the parked surfaces branch's argument, re-measured on this look).
+const DESERT_BEAM_CALIBRATION: f32 = 0.45;
+// Clear-sky diffuse irradiance on the horizontal as a fraction of the
+// beam's, in the visible — why a shadow on sand is blue and not black.
+const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.15;
+// Skylight does not switch off with the solar cosine.
+const DESERT_SKY_MU_FLOOR: f32 = 0.12;
+
+const DESERT_PI: f32 = 3.14159265358979;
+
+// World xy into the desert frame (see the section header).
+fn desert_fold_xy(xy: vec2<f32>) -> vec2<f32> {
+    let t = u.ocean_params.y;
+    let q = (xy - u.surface_offset.xy) / t;
+    return t * (q - floor(q));
+}
+
+// The camera in the desert frame — the ONE place a ray enters it.
+fn desert_camera_origin() -> vec3<f32> {
+    return vec3<f32>(desert_fold_xy(u.cam_origin.xy), u.cam_origin.z);
+}
+
+// Terrain height (m, absolute z) at a desert-frame point, at full detail.
+// STUB: a flat plane at the datum until the eroded tile lands.
+fn desert_height(xy: vec2<f32>) -> f32 {
+    return u.ocean.x;
+}
+
+// Unit terrain normal at a desert-frame point, at full detail. STUB.
+fn desert_normal(xy: vec2<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+// The terrain's absolute z range over the whole tile (min, max), for the
+// slab tests. STUB.
+fn desert_height_range() -> vec2<f32> {
+    return vec2<f32>(u.ocean.x, u.ocean.x);
+}
+
+// One hit on the desert: the terrain, a stone, or a plant. Kinds 0..7 are
+// the ground's (DESERT_KIND_*); the flora section owns kinds >= 8. `mat` is
+// a per-hit payload whose meaning belongs to whoever owns the kind.
+struct DesertHit {
+    hit: bool,
+    t: f32,
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+    kind: i32,
+    mat: vec4<f32>,
+};
+
+const DESERT_KIND_TERRAIN: i32 = 0;
+const DESERT_KIND_STONE: i32 = 1;
+
+fn desert_miss() -> DesertHit {
+    var h: DesertHit;
+    h.hit = false;
+    h.t = 1e30;
+    h.pos = vec3<f32>(0.0);
+    h.normal = vec3<f32>(0.0, 0.0, 1.0);
+    h.kind = DESERT_KIND_TERRAIN;
+    h.mat = vec4<f32>(0.0);
+    return h;
+}
+
+// The light arriving at one ground point, shared by everything standing
+// there — sand, stones and plants shade through the same numbers, which is
+// what keeps the far-field average of a plant the colour of its resolved
+// form. All in surface-calibrated units:
+//   sun     the beam after cloud shadow; a white Lambertian facet facing
+//           the sun returns sun / pi;
+//   sky     diffuse irradiance on the horizontal from the sky and from the
+//           cloud lid overhead; a white horizontal facet returns sky / pi;
+//   ground  irradiance reflected up by the surrounding ground, arriving on
+//           a downward-facing facet; returns ground / pi.
+struct DesertLight {
+    sun_dir: vec3<f32>,
+    sun: vec3<f32>,
+    sky: vec3<f32>,
+    ground: vec3<f32>,
+    t_sun: f32,
+    sky_open: f32,
+};
+
+// A Lambertian facet of albedo `albedo` and unit normal `n` under `L`. The
+// sky and ground terms weight by the fraction of each hemisphere the facet
+// sees, (1 + n.z)/2 and (1 - n.z)/2 — exact for an unobstructed tilted plane.
+fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight)
+        -> vec3<f32> {
+    let mu = max(dot(n, L.sun_dir), 0.0);
+    let sky_view = 0.5 * (1.0 + n.z);
+    return albedo * (1.0 / DESERT_PI)
+        * (L.sun * mu + L.sky * sky_view + L.ground * (1.0 - sky_view));
+}
+
+// STUB: the ground's own trace, a plane at the datum.
+fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>) -> DesertHit {
+    var h = desert_miss();
+    if (dir.z < -1e-8) {
+        let t = (u.ocean.x - o.z) / dir.z;
+        if (t > 0.0) {
+            h.hit = true;
+            h.t = t;
+            h.pos = o + t * dir;
+            h.normal = vec3<f32>(0.0, 0.0, 1.0);
+            h.kind = DESERT_KIND_TERRAIN;
+        }
+    }
+    return h;
+}
+
+// The whole desert along one view ray, in the desert frame: the terrain,
+// then whatever stands on it in front of the terrain hit.
+fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
+        -> DesertHit {
+    let inv_dir = 1.0 / dir;
+    var best = desert_terrain_trace(o, dir);
+    // The flora slab, clipped to the part of the ray in front of the ground.
+    let zr = desert_height_range();
+    let slab_lo = zr.x;
+    let slab_hi = zr.y + DESERT_FLORA_SLAB_H;
+    var t0 = 0.0;
+    var t1 = best.t;
+    if (abs(dir.z) > 1e-8) {
+        let ta = (slab_lo - o.z) * inv_dir.z;
+        let tb = (slab_hi - o.z) * inv_dir.z;
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    } else if (o.z < slab_lo || o.z > slab_hi) {
+        t1 = -1.0;
+    }
+    if (t1 > t0) {
+        let fh = desert_flora_trace(o, dir, inv_dir, t0, t1, pixel_angle);
+        if (fh.hit && fh.t < best.t) {
+            best = fh;
+        }
+    }
+    return best;
+}
+
+// The cloud's shadow on one ground point, and the light that comes through
+// it anyway.
+//
+// A cloud is not an occluder: it is a conservative scatterer, and nearly
+// all of what the beam loses to it arrives anyway, from the whole lid
+// instead of from one direction. diffuse_transmittance is the Eddington
+// two-stream TOTAL downward flux through a conservative slab and exp(-tau)
+// its unscattered part, so their difference is exactly what got through by
+// scattering — identically zero under clear sky.
+//
+// And what is overhead is not what is between here and the sun. At 25 deg
+// elevation a ground point's slant path crosses kilometres of cumulus field
+// and piles up hundreds of optical depths, but the diffuse light that
+// reaches it came down through whatever is straight above. So the lid is
+// measured by its own march, straight up: the only ray that can tell "under
+// a cloud" from "in its shadow".
+fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
+                t_hit: f32, jit: f32) -> DesertLight {
+    let g = u.params.z;
+    // The slant path to the sun. The baked cache, where it is valid, reads
+    // the same tau at the point this path enters the cloud box: below the
+    // box floor the path crosses only clear air.
+    var tau_sun: f32;
+    if (u.light_cache.x > 0.5 && p_world.z < u.bmin.z && sun.z > 1e-4) {
+        let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
+        tau_sun = sample_light_tau(entry);
+    } else {
+        tau_sun = light_march_tau(p_world, sun_shadow, t_hit * u.periodic.y,
+                                  jit);
+    }
+    let t_sun = exp(-tau_sun);
+    let tau_up = light_march_tau(p_world, vec3<f32>(0.0, 0.0, 1.0),
+                                 t_hit * u.periodic.y, jit);
+    let t_up = exp(-tau_up);
+    let open = diffuse_transmittance(tau_up, g);
+
+    let beam = DESERT_BEAM_CALIBRATION * u.cloud_sun.xyz;
+    let mu_sun = max(sun.z, 0.0);
+    // The lid: beam that the cloud overhead spread rather than stopped,
+    // arriving on the horizontal.
+    let lid = max(open - t_up, 0.0) * mu_sun * beam;
+    // Clear sky: chroma from the rendered sky overhead, magnitude from the
+    // beam (the look's zenith is far dimmer than its own sunlit cloud, so
+    // reading the magnitude off it would put shadowed sand near black).
+    let zen = sky_radiance(vec3<f32>(0.0, 0.0, 1.0), sun, u.sky_horizon.xyz,
+                           u.sky_bloom.xyz, vec3<f32>(0.0), u.cloud_sun.w);
+    let zen_luma = max(dot(zen, LUMA_WEIGHTS), 1e-6);
+    let beam_luma = max(dot(beam, LUMA_WEIGHTS), 1e-6);
+    let sky_clear = DESERT_SKY_DIFFUSE_FRACTION * max(mu_sun, DESERT_SKY_MU_FLOOR)
+        * beam_luma * (zen / zen_luma);
+
+    var L: DesertLight;
+    L.sun_dir = sun;
+    L.sun = t_sun * beam;
+    L.sky = sky_clear * open + lid;
+    L.t_sun = t_sun;
+    L.sky_open = open;
+    // The surroundings' reflected light, from the soil endmember as the
+    // regional mean.
+    L.ground = DESERT_ALBEDO_SOIL * (L.sun * mu_sun + L.sky);
+    return L;
+}
+
+// Aerial perspective toward the horizon sky, the water's own (row 19.y),
+// so the ground meets the sky without a seam.
+fn desert_haze(rgb: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32)
+        -> vec3<f32> {
+    let haze_tau = u.ocean_realism_b.y * t_hit;
+    if (haze_tau <= 0.0) {
+        return rgb;
+    }
+    let h_len = length(dir.xy);
+    var hdir = dir.xy;
+    if (h_len > 1e-8) {
+        hdir = dir.xy / h_len;
+    }
+    let haze_col = sky_radiance(vec3<f32>(hdir, 0.0), sun, u.sky_horizon.xyz,
+                                u.sky_bloom.xyz, vec3<f32>(0.0),
+                                u.cloud_sun.w);
+    return mix(rgb, haze_col, 1.0 - exp(-haze_tau));
+}
+
+// Radiance of one desert hit, hazed. `o` is the ray origin and `h` the hit,
+// both in the desert frame; `pos_world` is the same hit in world
+// coordinates, because the cloud shadow is a world-frame question.
+fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
+                dir: vec3<f32>,
+                sun: vec3<f32>, sun_shadow: vec3<f32>, jit: f32,
+                pixel_angle: f32) -> vec3<f32> {
+    let fp = pixel_angle * h.t;
+    let L = desert_light(pos_world, sun, sun_shadow, h.t, jit);
+    var rgb: vec3<f32>;
+    if (h.kind >= 8) {
+        rgb = desert_flora_shade(h, dir, fp, L);
+    } else {
+        // STUB ground: the soil endmember, Lambertian, under the plants.
+        let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
+        var Lg = L;
+        Lg.sun = L.sun * desert_flora_shadow(h.pos, sun, fp)
+                 * (1.0 - far.shadow);
+        rgb = desert_lambert(DESERT_ALBEDO_SOIL, h.normal, Lg)
+              * (1.0 - far.cover)
+              + far.cover * desert_flora_far_shade(far, dir, L);
+    }
+    return desert_haze(rgb, dir, sun, h.t);
+}
+
+// Mean hemispherical albedo of the ground as a cloud base sees it, for the
+// surface bounce. The ocean's bounce constant was tuned over water, so the
+// desert's scales it by the ratio of the two albedos.
+const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.25, 0.20, 0.15);
+const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
+
+// === END DESERT GROUND ===
+
+// ===========================================================================
+// === DESERT FLORA (desert-flora) ===
+// ===========================================================================
+//
+// STUBS, owned by desert-flora: the hooks desert-ground calls. Replace the
+// bodies; keep the signatures (or agree changes with desert-ground).
+
+// The plants a far pixel sees but the explicit trace no longer draws: the
+// statistical canopy over the part of the ray past the explicit plants'
+// own LOD distance. `cover` is 1 - the view transmittance through that
+// part of the slab, `albedo` the mean albedo of the plants seen, `shadow`
+// the fraction of the visible ground lying in plant shadow (hot-spot
+// correlation included). Must equal what the resolved plants average to,
+// so no seam appears where they drop out.
+struct DesertCover {
+    cover: f32,
+    albedo: vec3<f32>,
+    shadow: f32,
+};
+
+fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
+    return desert_miss();
+}
+
+fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
+                      L: DesertLight) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+
+// Transmittance of the plants between ground point p (desert frame) and
+// the sun.
+fn desert_flora_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
+    return 1.0;
+}
+
+fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
+                    pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
+    var c: DesertCover;
+    c.cover = 0.0;
+    c.albedo = vec3<f32>(0.0);
+    c.shadow = 0.0;
+    return c;
+}
+
+// Mean radiance of the far-field plants a pixel sees under `L`.
+fn desert_flora_far_shade(c: DesertCover, dir: vec3<f32>, L: DesertLight)
+        -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+
+// === END DESERT FLORA ===
+
+
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
@@ -10942,7 +11290,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Under CITY the ocean plane is compiled out entirely: the surface below
     // is the traced city, which fills the same role (an opaque floor at
     // t_city) through the same guards.
-    let ocean_on = !CITY && u.ocean_params.z > 0.5;
+    // Under DESERT likewise: the traced desert is the floor.
+    let ocean_on = !CITY && !DESERT && u.ocean_params.z > 0.5;
     var t_ocean = 1e30;
     if (ocean_on && dir.z < -1e-8) {
         let t_ocean_candidate = (u.ocean.x - u.cam_origin.z) / dir.z;
@@ -10998,7 +11347,36 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             city_rgb = med.rgb + med.a * city_rgb;
         }
     }
-    let t_surface = select(t_ocean, t_city, CITY);
+
+    // The desert trace runs up front for the same reason the city's does,
+    // and is composited through the same guards. It is traced in the desert
+    // frame (desert_camera_origin) and shaded with the cloud shadow at the
+    // world hit; t is translation-invariant, so depth needs no conversion.
+    // Its own draws on the sun-march and solar-cone streams: the ocean's
+    // take the same streams, and the two are never both compiled in.
+    var t_desert = 1e30;
+    var desert_rgb = vec3<f32>(0.0);
+    if (DESERT) {
+        let pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
+        let desert_o = desert_camera_origin();
+        let dhit = desert_trace(desert_o, dir, pixel_angle);
+        if (dhit.hit) {
+            t_desert = dhit.t;
+            let d_jit = jitter_on * jitter_scale
+                        * strat1(frame_index, strat_pixel,
+                                 STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
+            let d_cone = strat2(frame_index, strat_pixel,
+                                STRAT_STREAM_SUN_CONE,
+                                vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
+            let d_sun_shadow = sun_cone_dir(
+                sun, sun_tangent_frame(sun), d_cone,
+                SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_on * jitter_scale);
+            desert_rgb = desert_shade(dhit, desert_o,
+                                      u.cam_origin.xyz + dhit.t * dir, dir,
+                                      sun, d_sun_shadow, d_jit, pixel_angle);
+        }
+    }
+    let t_surface = select(select(t_ocean, t_city, CITY), t_desert, DESERT);
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
@@ -11176,6 +11554,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ocean_consumed = true;
                 break;
             }
+            if (DESERT && t >= t_desert) {
+                col = col + ice_recolor(transmittance * desert_rgb,
+                                        ICE_OCEAN_TINT, ice_on);
+                transmittance = 0.0;
+                ocean_consumed = true;
+                break;
+            }
 
             if (t >= t_far || transmittance < TRANSMITTANCE_CUTOFF) {
                 break;
@@ -11230,6 +11615,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
             if (CITY && t + dt > t_city) {
                 dt = max(0.0001, t_city - t);
+            }
+            if (DESERT && t + dt > t_desert) {
+                dt = max(0.0001, t_desert - t);
             }
 
             let d_tau = sigma * dt;
@@ -11704,8 +12092,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         BOUNCE_LATERAL_FLOOR),
                     deep_shadow_gate
                 );
+                // Over the desert the pedestal scales with the ground's own
+                // albedo against the water's the constant was tuned over.
+                let bounce_tint = select(
+                    BOUNCE_TINT,
+                    BOUNCE_TINT * DESERT_BOUNCE_ALBEDO / OCEAN_BOUNCE_ALBEDO,
+                    DESERT);
                 col = col + ice_recolor(
-                    transmittance * d_tau * bounce * air_t * BOUNCE_TINT,
+                    transmittance * d_tau * bounce * air_t * bounce_tint,
                     phase_tint, ice_on);
             }
 
@@ -11771,6 +12165,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         && transmittance > TRANSMITTANCE_CUTOFF
         && t_city < 1e29) {
         col = col + transmittance * city_rgb;
+        transmittance = 0.0;
+    }
+
+    // The desert's twin of the same fallback.
+    if (DESERT
+        && !ocean_consumed
+        && transmittance > TRANSMITTANCE_CUTOFF
+        && t_desert < 1e29) {
+        col = col + ice_recolor(transmittance * desert_rgb, ICE_OCEAN_TINT,
+                                ice_on);
         transmittance = 0.0;
     }
 
