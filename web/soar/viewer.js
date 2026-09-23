@@ -14,6 +14,8 @@ import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
+import { CityTile, CityLots } from "./citylots.js";
+import { CityCollider } from "./collide.js";
 
 /**
  * The flyers, in the order B cycles them — and so the first is the default.
@@ -327,6 +329,7 @@ export class Viewer {
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
+    this.collider = null;
     this.frameIndex = 0;
     this._lastSignature = null;
     this.sunAzimuth = K.DEFAULT_SUN_AZIMUTH;
@@ -356,7 +359,8 @@ export class Viewer {
       const surface = async (kind) => {
         if (kind === "city") {
           // keepCells: the minimap draws the city out of the tile's own mip
-          // 0, and the tile is the only place those bytes ever arrive. Held
+          // 0, the flight collider builds its buildings from it too, and
+          // the tile is the only place those bytes ever arrive. Held
           // for the session with the tile itself (8 MB beside a multi-GB
           // volume) rather than re-downloaded per field.
           return (this._cityTile ??=
@@ -497,9 +501,19 @@ export class Viewer {
                                      // is the only scene with anything
                                      // within 20 m of the camera, so it
                                      // flies slower too.
+                                     // And the street is solid ground
+                                     // the collider owns, not a floor.
                                      ...(scene.city
-                                       ? { speed: K.CITY_DEFAULT_SPEED }
+                                       ? { speed: K.CITY_DEFAULT_SPEED,
+                                           floorZ: null }
                                        : {}) });
+    // Over the night city the buildings are solid (collide.js): the same
+    // buildings the shader raises, stood up on the CPU from the same tile.
+    // The day scenes have nothing to fly into and get no collider at all.
+    this.collider = scene.city
+      ? new CityCollider(new CityLots(new CityTile(scene.cityCells)),
+                         scene.oceanTileExtent)
+      : null;
 
     this.ui.setSubtitle(this.sourceLabel);
 
@@ -3028,8 +3042,19 @@ export class Viewer {
     // climb", which is the direction this clock is honest in.
     if (this._prevFrameMarched) this._lastMarchMs = elapsed * 1000;
 
-    if (!this.paused) this.camera.move(dt);
+    // The flight, in the order collide.js lays out: the episode's clock,
+    // the player's move, the flyer placed off the camera, and then the
+    // whole frame's motion made legal against the city. The flyer is
+    // updated here rather than with its overlay below because the collider
+    // needs it where it is going to be drawn.
+    if (!this.paused) {
+      this.collider?.advance(dt, this.camera);
+      this.camera.move(dt);
+    }
     this.camera.constrain();
+    const flyer = this.flyer && this.flyerEnabled ? this.flyer : null;
+    flyer?.update(this.paused ? 0 : dt, this.camera);
+    if (!this.paused) this.collider?.resolve(dt, this.camera, flyer);
 
     // "Moving" is an exact comparison against the previous frame's view, not
     // a velocity: it is what lets the hold ladder start climbing the instant
@@ -3072,9 +3097,8 @@ export class Viewer {
     // Bird first, minimap second: the bird lives in the scene and takes the
     // scene's depth, the map is chrome laid over the finished picture.
     const overlays = [];
-    if (this.flyer && this.flyerEnabled) {
-      this.flyer.update(this.paused ? 0 : dt, this.camera);
-      this.flyer.writeUniforms(this.camera, [outW, outH], {
+    if (flyer) {
+      flyer.writeUniforms(this.camera, [outW, outH], {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
         exposure: this.exposure,
         toneMapGamma: this.toneMapGamma,
@@ -3082,7 +3106,7 @@ export class Viewer {
         contrast: this.contrast,
       });
       overlays.push((enc, view, format) =>
-        this.flyer.encodePass(enc, view, format, [outW, outH]));
+        flyer.encodePass(enc, view, format, [outW, outH]));
     }
     if (this.minimap && this.minimapMode !== "off") {
       this.minimap.update(this.camera, this.scene, [outW, outH],
@@ -3268,12 +3292,15 @@ export class Viewer {
    * Whether anything drawn over the finished picture is still moving.
    *
    * Only the bird is, and only while the view is unpaused — _frame hands it a
-   * dt of zero when paused, so a paused bird is a still image. The minimap
+   * dt of zero when paused, so a paused bird is a still image. A city crash
+   * (collide.js) is also motion nobody is steering: the fall, the bounce and
+   * the shake play out over a second whether a flyer is up or not. The minimap
    * changes when the camera or the mode does, and both of those go through
    * _wake, so it does not hold the loop open.
    */
   _overlaysAnimate() {
-    return Boolean(this.flyer && this.flyerEnabled && !this.paused);
+    return Boolean(this.flyer && this.flyerEnabled && !this.paused)
+      || Boolean(this.collider?.active && !this.paused);
   }
 }
 
