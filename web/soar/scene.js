@@ -180,8 +180,22 @@ export async function createVolumeTexture(device, shape, label,
       size: [nz, ny, nx],           // width=nz, height=ny, depth=nx
       dimension: "3d",
       format,
+      // RENDER_ATTACHMENT is never drawn into. It is here for how Chrome
+      // zero-fills a texture the first time a partial write touches it.
+      // Dawn's D3D12 backend (TextureD3D12.cpp, ClearTexture) has two ways
+      // to do that: a render-target clear when the resource allows one, and
+      // otherwise a copy from a staging buffer it allocates for the WHOLE
+      // texture at once — 256-aligned rows x height x depth, in one
+      // Dawn_DynamicUploaderStaging buffer. The first 64 MB slab written
+      // into a 2048x2048x512 fp16 field therefore asked Windows for a
+      // 4294967296-byte staging buffer, twice D3D12's 2147483648 cap, and
+      // the upload died with "Buffer size exceeds the max buffer size
+      // limit" (bug report, RTX 5060, 2026-09-13; the same field loads on
+      // Metal, whose buffers are allowed to be that large). Allowing the
+      // render-target path costs nothing and makes the clear a
+      // ClearRenderTargetView over the depth slices, no staging at all.
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-           | GPUTextureUsage.COPY_SRC,
+           | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
     }));
 }
 
@@ -255,11 +269,30 @@ export async function streamWholeVolume(device, texture, stream, shape,
         `the volume stream carried more than the ${nx} x planes the ` +
         "metadata promised — wrong file behind the URL?");
     }
+    // A writeTexture the browser refuses is reported asynchronously, as an
+    // uncaptured validation error that main.js can only call "a bug in
+    // cloudyview". Catch it here, where the field and the numbers are
+    // known, and say what was being uploaded and how big it is.
+    device.pushErrorScope("validation");
     writeVolumeSlab(
       device, texture,
       texelBytes === 2 ? new Uint16Array(slab.buffer, 0, filled / 2)
                        : new Uint8Array(slab.buffer, 0, filled),
       [0, 0, x0], [nz, ny, depth]);
+    const refused = await device.popErrorScope();
+    if (refused) {
+      const gb = (nx * ny * nz * texelBytes) / 2 ** 30;
+      const err = new Error(
+        `The GPU refused the upload of x planes ${x0}-${x0 + depth - 1} ` +
+        `(of ${nx}) into the ${nx}x${ny}x${nz} volume: ${refused.message}`);
+      err.advice =
+        `This volume is ${gb.toFixed(1)} GB on the card. The slab itself ` +
+        `was ${(filled / 2 ** 20).toFixed(0)} MB, so the number the ` +
+        "browser objects to is one it chose for the whole texture, not " +
+        "something the page asked for. A coarser variant of the same " +
+        "field is in the list.";
+      throw err;
+    }
     await device.queue.onSubmittedWorkDone();
     x0 += depth;
     filled = 0;
@@ -562,7 +595,10 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       const wrapped = new Error(
         `Downloading '${meta.id}' failed midway: ` +
         `${String(err && err.message || err)}`);
-      wrapped.advice =
+      // An error that already knows what to advise (a refused writeTexture,
+      // see streamWholeVolume) keeps its own; the memory guess below is for
+      // the bare "Failed to fetch" that knows nothing.
+      wrapped.advice = err?.advice ||
         `This field is ${gb.toFixed(1)} GB unpacked. If the connection is ` +
         "fine, the machine likely ran short of memory — a coarse variant " +
         "of the same field is in the list, or retry after closing other " +
