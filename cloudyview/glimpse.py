@@ -191,6 +191,8 @@ def main(
     fallback_units: str = None,
     fallback_ice_units: str = None,
     fallback_coord_units: str = None,
+    grid_spacing: dict = None,
+    z_first: str = None,
     ice: str = None,
     no_ice: bool = False,
 ) -> None:
@@ -270,6 +272,8 @@ def main(
             fallback_units=fallback_units,
             fallback_ice_units=fallback_ice_units,
             fallback_coord_units=fallback_coord_units,
+            grid_spacing=grid_spacing,
+            z_first=z_first,
             no_ice=no_ice,
         )
 
