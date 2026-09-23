@@ -21,9 +21,11 @@ is low the city thins into an INDUSTRIAL belt — warehouses on 180 m
 superblocks served by a street grid of half the density — and its unbuilt
 blocks become YARDS (vacant lots, container and trailer storage, construction
 refuse) where they front development, or OPEN scrub where they do not.
-OPEN land has no streets at all: the road network is exactly the one that
-serves something (Thomas, 2026-09-23: "regions with no buildings should also
-omit the streets").
+OPEN land has no streets of its own: the road network is exactly the one
+that serves something (Thomas, 2026-09-23: "regions with no buildings should
+also omit the streets"), and the only roads across open scrub are the
+connectors that join a stranded works to the network (under 1% of open-open
+edges).
 
 Massing that needs agreement lives here too. A tower's footprint grows with
 its height, and a supertall's footprint is larger than one block: the peak
