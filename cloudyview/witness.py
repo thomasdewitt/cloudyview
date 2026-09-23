@@ -55,11 +55,14 @@ from .soar_host import (
     DEFAULT_CONTRAST,
     STILL_ACCUMULATE_FRAMES,
     STEP_VOXEL_FACTOR,
+    SURFACES,
     TONE_MAP_GAMMA_WITNESS,
     SceneState,
     SoarRenderer,
     ViewState,
     camera_world_origin,
+    check_surface,
+    surface_cell_m,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,16 +222,16 @@ def crop_empty_z(sigma: np.ndarray, z: np.ndarray):
 
 
 def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
-                  tone_mapped: bool) -> SoarRenderer:
+                  tone_mapped: bool, surface: str) -> SoarRenderer:
     """Get or build a session for these levels."""
     global _session, _session_key, _session_arrays
     nested = len(levels) > 1
     key = (tuple((id(l.sigma), l.sigma.shape, float(l.bmin[0]), float(l.bmax[0]))
-                 for l in levels), periodic, nested, tone_mapped)
+                 for l in levels), periodic, nested, tone_mapped, surface)
     if _session is not None and _session_key == key:
         return _session
     renderer = SoarRenderer(periodic=periodic, nested=nested,
-                            tone_map=tone_mapped)
+                            tone_map=tone_mapped, surface=surface)
     # The bare field, both levels. What the edges do — taper into zero, or
     # wrap — is the shader's job now, not a border baked into the upload.
     renderer.upload_volume(levels[-1].sigma)
@@ -285,6 +288,7 @@ def render_nested(
     lod: float = DEFAULT_LOD_STRENGTH,
     quality: Optional[str] = None,
     surface_origin: Optional[Sequence[float]] = None,
+    surface: str = "ocean",
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -298,9 +302,17 @@ def render_nested(
     in one place (soar_host.camera_basis) so it cannot disagree with the
     browser's.
 
+    `surface` is what the world stands on: "ocean" or "desert" (the night
+    "city" is not built here yet).
+
     With return_linear=True the shader's tone map is compiled out and the
     linear HDR radiance comes back unbounded.
     """
+    check_surface(surface)
+    if surface == "city":
+        raise NotImplementedError(
+            "witness has no night-city path yet; it lands with the city "
+            "copy-command work (surface='city').")
     levels = list(levels)
     if not levels:
         raise ValueError("render_nested needs at least one level.")
@@ -313,7 +325,7 @@ def render_nested(
 
     outer = levels[-1]
     renderer = _renderer_for(levels, periodic=periodic,
-                             tone_mapped=not return_linear)
+                             tone_mapped=not return_linear, surface=surface)
     min_voxel = min(outer.dx)
     # --quality is the whole recipe or none of it: step factors (parked —
     # High's for every tier), lighting method and sample count all come from
@@ -344,12 +356,20 @@ def render_nested(
                 f"surface_origin needs exactly two values (x y metres); "
                 f"got {surface_origin!r}.")
         state_kwargs["surface_offset_m"] = tuple(origin)
+    # Row 9 describes whichever tile the renderer bound, so it comes from
+    # that tile's own meta.json rather than from SceneState's defaults (which
+    # are the ocean tile's numbers, and so leave the ocean bit-identical).
+    meta = renderer.surface_meta
     state = SceneState(
         bmin=[float(v) for v in outer.bmin], bmax=[float(v) for v in outer.bmax],
         dt_view=min_voxel * view_factor, dt_light=min_voxel * light_factor,
         periodic=periodic,
         ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_fif_dx=surface_cell_m(surface, meta),
+        ocean_tile_extent=float(meta["tile_extent_m"]),
+        ocean_max_lod=int(meta["mips"]) - 1,
         nested=len(levels) > 1,
+        surface=surface,
         **state_kwargs,
     )
     dt = min_voxel * view_factor
@@ -445,6 +465,7 @@ def witness(
     lod: float = DEFAULT_LOD_STRENGTH,
     quality: Optional[str] = None,
     surface_origin: Optional[Sequence[float]] = None,
+    surface: str = "ocean",
     return_linear: bool = False,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -484,6 +505,9 @@ def witness(
         city's frame from world minus this, mod the tile). Omitted means
         the scene's static offset, which is every fresh render; soar's
         reproduction commands write a flight's own offset here.
+    surface : str, optional
+        What the world stands on: "ocean" (default) or "desert", soar's
+        two day grounds.
     return_linear : bool, optional
         Compile the tone map out and return unbounded linear HDR radiance
         instead of an encoded image. This is what soar's auto-exposure
@@ -538,7 +562,7 @@ def witness(
         tone_map_white_point=tone_map_white_point, contrast=contrast,
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
         periodic=periodic, accumulate=accumulate, quality=quality,
-        surface_origin=surface_origin,
+        surface_origin=surface_origin, surface=surface,
         return_linear=return_linear, verbose=verbose)
 
 
@@ -615,6 +639,7 @@ def main(filename: str, output: str = None,
          lod: float = None,
          quality: str = None,
          surface_origin: list = None,
+         surface: str = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -672,6 +697,8 @@ def main(filename: str, output: str = None,
         look_kwargs['quality'] = quality
     if surface_origin is not None:
         look_kwargs['surface_origin'] = surface_origin
+    if surface is not None:
+        look_kwargs['surface'] = surface
 
     try:
         if nest_group and ice:
@@ -902,6 +929,10 @@ def cli():
                              "offset so the water phase (and over a "
                              "city, the streets) land where that flight "
                              "rendered them")
+    parser.add_argument("--surface", choices=SURFACES,
+                        help="What the world stands on: the ocean "
+                             "(default) or the Sonoran desert — soar's two "
+                             "day grounds. Soar writes the flown one here")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",
@@ -928,6 +959,7 @@ def cli():
          lod=args.lod,
          quality=args.quality,
          surface_origin=args.surface_origin,
+         surface=args.surface,
          haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,

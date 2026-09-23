@@ -57,6 +57,7 @@ import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
 const OCEAN_URL = "ocean";
 const CITY_URL = "city";
+const DESERT_URL = "desert";
 
 // Every key _onKeyDown's switch answers, and nothing else. It is the set the
 // tutorial refuses while a chapter is running: each of these opens a panel or
@@ -361,6 +362,10 @@ export class Viewer {
           return (this._cityTile ??=
             await loadOceanTile(this.device, CITY_URL, undefined,
                                 { keepCells: true }));
+        }
+        if (kind === "desert") {
+          return (this._desertTile ??=
+            await loadOceanTile(this.device, DESERT_URL));
         }
         return (this._ocean ??=
           await loadOceanTile(this.device, OCEAN_URL));
@@ -2215,12 +2220,14 @@ export class Viewer {
     this.scene?.destroy();
     this._ocean?.texture?.destroy();
     this._cityTile?.texture?.destroy();
+    this._desertTile?.texture?.destroy();
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
     this.scene = null;
     this._ocean = null;
     this._cityTile = null;
+    this._desertTile = null;
 
     // Unconfigure before destroy: the swapchain holds textures on this device,
     // and leaving it configured against a destroyed device is the state
