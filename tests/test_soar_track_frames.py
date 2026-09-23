@@ -472,8 +472,12 @@ def test_the_shader_derives_water_and_city_from_the_tile_frame():
     # use it; nothing calls city_trace with a raw world origin.
     assert "fn city_camera_origin()" in src
     assert src.count("city_camera_origin()") >= 4   # def + trace + probe + adscreens
-    assert src.count("city_trace(city_o, dir)") == 1
+    assert src.count("city_trace(city_o, dir, CITY_TRACE_RANGE, true)") == 1
     assert "city_trace(u.cam_origin.xyz" not in src
+    # The wet street's reflected ray starts at the view ray's CITY-frame hit
+    # (h.pos), never at a world position.
+    assert src.count("let ro = vec3<f32>(h.pos.xy, h.pos.z + 0.02);") == 1
+    assert src.count("city_trace(ro, lobe.r, CITY_REFL_RANGE, false)") == 1
     # The glow is a plain tile read of the city frame — no offset algebra.
     assert "let uv = xy / u.ocean_params.y;" in src
     assert "(u.ocean.yz - u.surface_offset.xy)" not in src
