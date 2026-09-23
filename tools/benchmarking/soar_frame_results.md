@@ -433,3 +433,111 @@ GPU: Apple M1 · output 2560x1440 · 32 frames/view · demo dycoms
 | hold_minimal | v1_thick_backlit | 640x360 | 343.615 | 2.9 |
 | hold_minimal | v4_overview_south | 640x360 | 44.824 | 22.3 |
 | hold_minimal | v8_ocean_lod | 640x360 | 21.633 | 46.2 |
+
+
+## 2026-09-23 — the bit-identical performance round: how to read the next six sections
+
+Six runs of this bench on the tip of `bigday/perf` (shader identical to the
+tip of that day's round): TWP-ICE plus the deployed rce and dycoms demos,
+low and minimal, at 2560x1440 output so the render sizes are the ones the
+2026-08-19 M1 rows used. The first three run on the RTX 5080 as it ships.
+The last three run with the card clock-locked as a stand-in for the M1:
+`nvidia-smi -lgc 180,180 -lmc 405,405` (the lowest graphics and memory
+clocks this driver allows), applied and reset inside one `tools/gpulock`
+command with a trap. Calibrated the same day by running the M1's own
+revision (cb31036, with the bench as it was then) under the lock: the locked
+5080 renders these frames in roughly 0.65-0.8x the M1's time, except the
+memory-heavy dycoms v1 view, where the M1 is ~2.5x slower still (cache size
+cannot be clocked down). So the locked rows are a proxy — trends, not
+Mac numbers — and the Mac remains the measurement that decides.
+
+What changed between the M1 rows and these is everything merged since
+cb31036, not only the round; for the round alone, see the per-change
+ray-pass GPU timings in the commit messages (tools/benchmarking/
+soar_pass_timer.py, GPU timestamps, revisions interleaved). Against the
+morning's master (a01ae03) the round took the locked ray pass down by 0-26%,
+median ~9%, largest on thin/ice cloud (rce) and at Minimal.
+
+One row below is noise, left as measured: unlocked TWP-ICE minimal v1 read
+1.348 ms here and 0.172 ms on an immediate 64-frame re-run. At minimal size
+a wall-clock frame is mostly host overhead on this card, which is why the
+per-change numbers use GPU timestamps instead.
+
+## 2026-09-23 17:10:00 — 9b20cda — perf round tip, unlocked, TWP-ICE field
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 32 frames/view · field TWPICE_subvolume_256x256_5km.nc · per-preset lighting (cache /2, tiered sky probe)
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| low | v1_thick_backlit | 768x432 | 0.473 | 2115.5 |
+| low | v4_overview_south | 768x432 | 0.441 | 2265.6 |
+| low | v8_ocean_lod | 768x432 | 0.283 | 3530.7 |
+| minimal | v1_thick_backlit | 320x180 | 1.348 | 742.1 |
+| minimal | v4_overview_south | 320x180 | 0.162 | 6187.7 |
+| minimal | v8_ocean_lod | 320x180 | 0.142 | 7047.9 |
+
+## 2026-09-23 17:10:01 — 9b20cda — perf round tip, unlocked, deployed demo rce
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 16 frames/view · demo rce · per-preset lighting (cache /2, tiered sky probe)
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| low | v1_thick_backlit | 768x432 | 0.783 | 1276.7 |
+| low | v4_overview_south | 768x432 | 0.569 | 1758.8 |
+| low | v8_ocean_lod | 768x432 | 0.415 | 2410.1 |
+| minimal | v1_thick_backlit | 320x180 | 0.223 | 4477.1 |
+| minimal | v4_overview_south | 320x180 | 0.151 | 6602.7 |
+| minimal | v8_ocean_lod | 320x180 | 0.140 | 7137.9 |
+
+## 2026-09-23 17:10:03 — 9b20cda — perf round tip, unlocked, deployed demo dycoms
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 16 frames/view · demo dycoms · per-preset lighting (cache /2, tiered sky probe)
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| low | v1_thick_backlit | 768x432 | 1.807 | 553.3 |
+| low | v4_overview_south | 768x432 | 0.462 | 2164.3 |
+| low | v8_ocean_lod | 768x432 | 0.540 | 1851.7 |
+| minimal | v1_thick_backlit | 320x180 | 0.608 | 1644.7 |
+| minimal | v4_overview_south | 320x180 | 0.140 | 7135.9 |
+| minimal | v8_ocean_lod | 320x180 | 0.217 | 4601.5 |
+
+## 2026-09-23 17:10:05 — 9b20cda — perf round tip, RTX 5080 clock-locked 180/405 MHz (M1 proxy), TWP-ICE field
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 32 frames/view · field TWPICE_subvolume_256x256_5km.nc · per-preset lighting (cache /2, tiered sky probe)
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| low | v1_thick_backlit | 768x432 | 6.040 | 165.6 |
+| low | v4_overview_south | 768x432 | 6.140 | 162.9 |
+| low | v8_ocean_lod | 768x432 | 3.764 | 265.7 |
+| minimal | v1_thick_backlit | 320x180 | 2.306 | 433.6 |
+| minimal | v4_overview_south | 320x180 | 2.176 | 459.6 |
+| minimal | v8_ocean_lod | 320x180 | 1.154 | 866.6 |
+
+## 2026-09-23 17:10:08 — 9b20cda — perf round tip, RTX 5080 clock-locked 180/405 MHz (M1 proxy), deployed demo rce
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 16 frames/view · demo rce · per-preset lighting (cache /2, tiered sky probe)
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| low | v1_thick_backlit | 768x432 | 10.794 | 92.6 |
+| low | v4_overview_south | 768x432 | 8.631 | 115.9 |
+| low | v8_ocean_lod | 768x432 | 5.003 | 199.9 |
+| minimal | v1_thick_backlit | 320x180 | 2.932 | 341.0 |
+| minimal | v4_overview_south | 320x180 | 1.978 | 505.6 |
+| minimal | v8_ocean_lod | 320x180 | 1.451 | 689.4 |
+
+## 2026-09-23 17:10:11 — 9b20cda — perf round tip, RTX 5080 clock-locked 180/405 MHz (M1 proxy), deployed demo dycoms
+
+GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 16 frames/view · demo dycoms · per-preset lighting (cache /2, tiered sky probe)
+
+| tier | view | render size | ms/frame | fps |
+|------|------|-------------|----------|-----|
+| low | v1_thick_backlit | 768x432 | 29.831 | 33.5 |
+| low | v4_overview_south | 768x432 | 5.913 | 169.1 |
+| low | v8_ocean_lod | 768x432 | 7.158 | 139.7 |
+| minimal | v1_thick_backlit | 320x180 | 14.438 | 69.3 |
+| minimal | v4_overview_south | 320x180 | 1.481 | 675.4 |
+| minimal | v8_ocean_lod | 320x180 | 2.768 | 361.3 |
+
