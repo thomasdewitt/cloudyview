@@ -1019,6 +1019,13 @@ export class Viewer {
           onPick: (coordUnits) => done({ coordUnits }),
           onCancel: cancel,
         });
+      } else if (question.panel === "gridSpacing") {
+        this.ui.open("gridSpacing", {
+          axes: question.axes, filename: question.filename,
+          group: question.group,
+          onPick: (gridSpacing, zFirst) => done({ gridSpacing, zFirst }),
+          onCancel: cancel,
+        });
       } else if (question.panel === "axes") {
         // Detection could not tell the dimensions apart. This is the reason
         // a failed load is no longer a dead end: the panel is offered
@@ -2806,6 +2813,18 @@ export class Viewer {
     // own reading must not be trusted to reach the same answer.
     if (s?.coordUnitsAssumed) {
       flags.push("--coord-units", quote(s.coordUnitsAssumed));
+    }
+    // The grid-spacing answer, for the axes it placed and only those: the
+    // CLI refuses a spacing on an axis with meters of its own, the same rule
+    // that made the browser ask for exactly these.
+    const gs = s?.gridSpacingAssumed;
+    if (gs) {
+      for (const axis of ["x", "y", "z"]) {
+        if (gs.spacing[axis] !== undefined) {
+          flags.push(`--d${axis}`, String(gs.spacing[axis]));
+        }
+      }
+      if (gs.zFirst) flags.push("--z-first", gs.zFirst);
     }
     for (const axis of ["x", "y", "z"]) {
       if (s?.dimNames?.[axis]) {

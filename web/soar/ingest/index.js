@@ -428,6 +428,26 @@ export async function loadFileScene(
       }
     }
 
+    // The grid spacing, when an axis has no coordinate in meters at all —
+    // none, or degrees, or a level index. The refusal that nothing else gets
+    // past; this answer is the only way, and only for a regular grid. Asked
+    // last among the coordinate questions because it needs the axes settled.
+    // A group waiting on it has no box, so it was never offered as half of a
+    // nested pair: `chosen` is one level here.
+    const spacingAsk = chosen.find((g) => g.needsGridSpacing);
+    if (spacingAsk) {
+      const answer = await ask({
+        panel: "gridSpacing", filename: file.name, group: spacingAsk.path,
+        axes: spacingAsk.gridSpacingNeeded,
+      });
+      choice = { ...(choice ?? {}), gridSpacing: answer.gridSpacing,
+                 ...(answer.zFirst ? { zFirst: answer.zFirst } : {}) };
+      for (let i = 0; i < chosen.length; i++) {
+        chosen[i] = await link.call(
+          "describe", { group: chosen[i].path, choice });
+      }
+    }
+
     for (const g of chosen) {
       for (const note of g.assumptions ?? []) {
         if (!assumptions.includes(note)) assumptions.push(note);
@@ -490,6 +510,13 @@ export async function loadFileScene(
         ? { timestep: choice.timestep } : null;
       if (choice?.coordUnits) {
         iceChoice = { ...(iceChoice ?? {}), coordUnits: choice.coordUnits };
+      }
+      // And with the same grid spacing: it places the ice file's cells
+      // exactly as it placed the water's, and an ice file with meters where
+      // the water had none refuses on its own (a different grid).
+      if (choice?.gridSpacing) {
+        iceChoice = { ...(iceChoice ?? {}), gridSpacing: choice.gridSpacing,
+                      ...(choice.zFirst ? { zFirst: choice.zFirst } : {}) };
       }
       if (iceLevel.needsIceChoice) {
         const pick = await ask({
@@ -694,6 +721,11 @@ export async function loadFileScene(
       // `--coord-units` has to say for a terminal render to place the field
       // where this one did.
       coordUnitsAssumed: choice?.coordUnits ?? null,
+      // The grid-spacing answer: {axis: meters} and, with z, which end the
+      // first level is — `--dx/--dy/--dz` and `--z-first` for the CLI.
+      gridSpacingAssumed: choice?.gridSpacing
+        ? { spacing: choice.gridSpacing, zFirst: choice.zFirst ?? null }
+        : null,
       iceFrom,
       // Ice-detection mode: what it would take to read the ice fraction, not
       // the fraction itself. Null when the field carries no ice variable, and
