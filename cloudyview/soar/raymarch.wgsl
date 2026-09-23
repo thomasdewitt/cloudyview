@@ -2168,15 +2168,22 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // and sky-field haze along the ocean sightline.
 // ---------------------------------------------------------------------------
 
-// Legacy reflected sky with its fixed glint lobe faded by the master gate
-// (witness._reflection_sky_realism). At ocean_realism = 1 the legacy lobe is
-// fully off and the GGX glint replaces it.
+// The sky the water reflects: the rendered sky (solar disc excluded — the GGX
+// glint is the sun's reflection), faded by the master gate toward the legacy
+// fixed gradient and its fixed glint lobe (witness._reflection_sky_realism).
+// At ocean_realism = 1 the water mirrors the same sky the camera sees, so a
+// sunset sea takes the sunset's colour; the legacy gradient was the sky of a
+// 55-degree sun and left the water blue under every other.
 fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
                           legacy_glint_weight: f32) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
     t = 1.0 - one_minus * one_minus * one_minus;
-    var col = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
+    let legacy = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
+    let rendered = sky_radiance(vec3<f32>(dir.xy, max(dir.z, 0.0)), sun,
+                                u.sky_horizon.xyz, u.sky_bloom.xyz,
+                                vec3<f32>(0.0), u.cloud_sun.w);
+    var col = mix(rendered, legacy, legacy_glint_weight);
     let cos_rs = dot(dir, sun);
     if (cos_rs > 0.0 && legacy_glint_weight > 0.0) {
         let glint_w = 0.02;
