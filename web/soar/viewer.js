@@ -370,13 +370,17 @@ export class Viewer {
           // volume) rather than re-downloaded per field.
           return (this._cityTile ??=
             await loadOceanTile(this.device, CITY_URL, undefined,
-                                { keepCells: true }));
+                                { keepCells: true,
+                                  schema: K.SURFACE_TILE_SCHEMAS.city }));
         }
         if (kind === "desert") {
           return (this._desertTile ??=
-            await loadOceanTile(this.device, DESERT_URL));
+            await loadOceanTile(this.device, DESERT_URL, undefined,
+                                { schema: K.SURFACE_TILE_SCHEMAS.desert }));
         }
-        return (this._ocean ??= await loadSea(this.device, OCEAN_URL));
+        return (this._ocean ??=
+          await loadSea(this.device, OCEAN_URL, undefined,
+                        { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
       };
 
       if (source.kind === "demo") {

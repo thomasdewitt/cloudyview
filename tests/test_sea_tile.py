@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from cloudyview import sea_tile
+from cloudyview.soar_host import SURFACE_TILE_SCHEMAS
 
 REPO = Path(__file__).resolve().parents[1]
 SEA_DIR = REPO / "cloudyview" / "soar" / "ocean"
@@ -30,7 +31,7 @@ SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
 
 @pytest.fixture(scope="module")
 def sea():
-    return sea_tile.read(SEA_DIR)
+    return sea_tile.read(SEA_DIR, SURFACE_TILE_SCHEMAS["ocean"])
 
 
 def _wgsl_pairs(src, name):

@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA = "cloudyview.web.ocean.v2"
+# The schema this layout is registered under is soar_host.SURFACE_TILE_SCHEMAS
+# ["ocean"] (mirrored in web/soar/constants.js).
 FILE = "sea.bin.gz"
 CHANNELS = 4
 # Slopes are stored signed about 128 over +-127 steps of their own scale;
@@ -83,14 +84,15 @@ def mip_chain(level0: np.ndarray) -> list:
     return mips
 
 
-def read(tile_dir: Path) -> tuple:
-    """(meta, uint8 planes (4, nt, n, n)) from a sea directory, checked."""
+def read(tile_dir: Path, schema: str) -> tuple:
+    """(meta, uint8 planes (4, nt, n, n)) from a sea directory, checked
+    against the schema the caller decodes."""
     tile_dir = Path(tile_dir)
     meta = json.loads((tile_dir / "meta.json").read_text())
-    if meta.get("schema") != SCHEMA:
+    if meta.get("schema") != schema:
         raise RuntimeError(
             f"{tile_dir}/meta.json has schema {meta.get('schema')!r}; this "
-            f"reader knows {SCHEMA!r}. Re-run tools/export_web_assets.py.")
+            f"reader knows {schema!r}. Re-run tools/export_web_assets.py.")
     n, nt = int(meta["n"]), int(meta["frames"])
     raw = gzip.decompress((tile_dir / meta["file"]).read_bytes())
     expected = CHANNELS * nt * n * n

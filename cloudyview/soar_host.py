@@ -60,6 +60,15 @@ DESERT_DIR = SOAR_DIR / "desert"
 # and binds its own tile at binding 3 — see `specialize` and SoarRenderer.
 SURFACES = ("ocean", "desert", "city")
 SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
+# The meta.json schema each surface tile must carry: the layout the shader
+# decodes it with. Mirrors web/soar/constants.js SURFACE_TILE_SCHEMAS (pinned
+# by tests/test_city_lots.py); a tile of another schema is refused, because
+# the city's v1 tile decoded as v2 raises a different city without an error.
+SURFACE_TILE_SCHEMAS = {
+    "ocean": "cloudyview.web.ocean.v2",
+    "desert": "cloudyview.web.desert.v1",
+    "city": "cloudyview.web.city.v2",
+}
 
 
 def check_surface(surface: str) -> str:
@@ -104,7 +113,7 @@ def _sea_levels(tile_dir: str):
     renderers a test session builds all upload the same ~90 MB.
     """
     from . import sea_tile
-    meta, planes = sea_tile.read(Path(tile_dir))
+    meta, planes = sea_tile.read(Path(tile_dir), SURFACE_TILE_SCHEMAS["ocean"])
     nt = int(meta["frames"])
     chains = [sea_tile.mip_chain(sea_tile.decode_frame(planes, t, meta))
               for t in range(nt)]
@@ -837,6 +846,12 @@ class SoarRenderer:
         wgpu = self.wgpu
         tile_dir = SURFACE_DIRS[self.surface]
         meta = json.loads((tile_dir / "meta.json").read_text())
+        expected = SURFACE_TILE_SCHEMAS[self.surface]
+        if meta.get("schema") != expected:
+            raise RuntimeError(
+                f"{tile_dir}/meta.json is schema {meta.get('schema')!r}; this "
+                f"renderer reads {expected!r}. Re-run "
+                "tools/export_web_assets.py, or update the shader with it.")
         n, mips = int(meta["n"]), int(meta["mips"])
         self.surface_meta = meta
         tex = self.device.create_texture(

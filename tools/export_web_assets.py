@@ -34,6 +34,8 @@ from cloudyview.city_fif import (
     generate_city_density,
 )
 from cloudyview import ocean_fif, sea_tile
+from cloudyview.soar_host import SURFACE_TILE_SCHEMAS
+from cloudyview.city_lots import bake_lots, glow_weight, pack_channels
 
 REPO = Path(__file__).resolve().parents[1]
 SOAR_OUT = REPO / "web" / "soar"
@@ -152,7 +154,7 @@ def export_ocean() -> dict:
     payload = gzip.compress(planes.tobytes(), compresslevel=9, mtime=0)
     (OCEAN_OUT / sea_tile.FILE).write_bytes(payload)
     meta = {
-        "schema": sea_tile.SCHEMA,
+        "schema": SURFACE_TILE_SCHEMAS["ocean"],
         "file": sea_tile.FILE,
         "encoding": "gzip, uint8 planes [slope x, slope y, foam, crest][t][y][x]",
         "n": ocean_fif.N,
@@ -215,18 +217,37 @@ def export_city() -> dict:
     height, rank = generate_city_density(
         rng=np.random.default_rng(CITY_SEED)
     )
+    # Lots, zoning and streets (cloudyview/city_lots.py), baked from the
+    # channels as the renderer will see them — float16, the stored precision
+    # — so a lot boundary is decided on exactly the numbers city_cell reads.
+    lot_word, street_word = bake_lots(
+        height.astype(np.float16).astype(np.float32),
+        rank.astype(np.float16).astype(np.float32),
+    )[:2]
+    # r is two things. At mip 0 it is the density city_cell raises buildings
+    # from; from mip 1 up it is the GLOW, the density weighted by what its
+    # land use lights (city_lots.GLOW_WEIGHT), so the fog, the sky dome and
+    # the clouds' uplight follow the city that is actually drawn rather than
+    # a fringe that is now dark. Every glow read is at lod >= 1.
     base = np.empty((CITY_N, CITY_N, 4), dtype=np.float32)
-    base[..., 0] = height
+    base[..., 0] = height * glow_weight(street_word)
     base[..., 1] = rank
     base[..., 2] = 0.0
-    base[..., 3] = 1.0
+    base[..., 3] = 0.0
     mips = _build_city_mips(base)
+    mips[0][..., 0] = height
+    # b and a are packed integer words at mip 0 ONLY: every packed field is
+    # at most 12 bits, stored offset to [-2048, 2047] where float16 is exact
+    # (pack_channels asserts the round trip). Their coarse mips stay zero:
+    # an average of bitfields means nothing, and nothing samples it — the
+    # renderer reads b and a with textureLoad at mip 0 and filters only r.
+    mips[0][..., 2], mips[0][..., 3] = pack_channels(lot_word, street_word)
     for i, mip in enumerate(mips):
         (CITY_OUT / f"fif_mip{i}.bin").write_bytes(
             np.ascontiguousarray(mip, dtype=np.float16).tobytes()
         )
     meta = {
-        "schema": "cloudyview.web.city.v1",
+        "schema": "cloudyview.web.city.v2",
         "n": CITY_N,
         "cell_m": float(CITY_CELL_M),
         "mips": len(mips),

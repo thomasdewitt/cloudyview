@@ -88,10 +88,29 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
  * terrain — one rgba16float mip-chain byte format (the sea has its own, see
  * loadSea). Field-independent, so each ships with the tool and is loaded
  * once per session.
+ *
+ * `schema` is the meta.json schema the caller's shader decodes
+ * (constants.js SURFACE_TILE_SCHEMAS); anything else is refused. The deploy
+ * copies tile directories through unfingerprinted, so the cache-safety is
+ * here instead: meta.json is always revalidated, and the bins are fetched
+ * under the schema as a version query, so a schema bump is a new URL for
+ * every edge and browser cache while a stale meta.json fails loudly rather
+ * than pairing a new shader with an old tile.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
-                                    { keepCells = false } = {}) {
-  const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
+                                    { keepCells = false, schema } = {}) {
+  if (!schema) {
+    throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
+  }
+  const meta = await (await fetch(`${baseUrl}/meta.json`,
+                                  { cache: "no-cache" })).json();
+  if (meta.schema !== schema) {
+    throw new Error(
+      `${baseUrl}/meta.json is schema ${JSON.stringify(meta.schema)}; this ` +
+      `soar reads ${schema}. The tile and the app are from different ` +
+      "releases — reload the page; if it persists the deploy is mixed.");
+  }
+  const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
@@ -101,7 +120,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
   for (let level = 0; level < meta.mips; level++) {
-    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin`);
+    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin${version}`);
     const n = Math.max(1, meta.n >> level);
     // The city minimap draws the same cascade the shader raises buildings
     // out of, so it reads the SAME bytes rather than fetching anything of
@@ -153,8 +172,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
 
 // The sea's shipped encoding (cloudyview/sea_tile.py, whose arithmetic this
 // mirrors float32 op for float32 op; tests/test_sea_tile.py holds the two
-// to each other).
-const SEA_SCHEMA = "cloudyview.web.ocean.v2";
+// to each other). Its schema is constants.js SURFACE_TILE_SCHEMAS.ocean.
 const SEA_CHANNELS = 4;
 const SEA_SLOPE_OFFSET = 128;
 const SEA_SLOPE_STEPS = 127;
@@ -226,17 +244,27 @@ function toHalfBits(f32) {
  *
  * Returns the surface record the scene takes: `view` is null (binding 3
  * binds its stand-in over the ocean), `seaView` the array.
+ *
+ * `schema` and the cache rules are loadOceanTile's: meta.json revalidated
+ * every time, the payload fetched under the schema as a version query.
  */
-export async function loadSea(device, baseUrl, onProgress) {
-  const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
-  if (meta.schema !== SEA_SCHEMA) {
-    throw new Error(
-      `${baseUrl}/meta.json has schema '${meta.schema}'; this viewer reads ` +
-      `'${SEA_SCHEMA}'.`);
+export async function loadSea(device, baseUrl, onProgress, { schema } = {}) {
+  if (!schema) {
+    throw new Error(`loadSea(${baseUrl}) needs the schema it expects.`);
   }
+  const meta = await (await fetch(`${baseUrl}/meta.json`,
+                                  { cache: "no-cache" })).json();
+  if (meta.schema !== schema) {
+    throw new Error(
+      `${baseUrl}/meta.json is schema ${JSON.stringify(meta.schema)}; this ` +
+      `soar reads ${schema}. The tile and the app are from different ` +
+      "releases — reload the page; if it persists the deploy is mixed.");
+  }
+  const version = `?v=${encodeURIComponent(meta.schema)}`;
   const n = meta.n, nt = meta.frames;
   const planes = await fetchBytes(
-    `${baseUrl}/${meta.file}`, (f) => onProgress?.(0.8 * f), "gzip");
+    `${baseUrl}/${meta.file}${version}`, (f) => onProgress?.(0.8 * f),
+    "gzip");
   if (planes.length !== SEA_CHANNELS * nt * n * n) {
     throw new Error(
       `${baseUrl}/${meta.file} unpacks to ${planes.length} bytes; expected ` +
