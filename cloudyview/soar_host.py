@@ -602,6 +602,13 @@ SAMPLE_FORMAT = "rgba16float"
 # (~10 levels from 1 to 1024 frames — see the journal, iter_012). Full
 # precision costs one texture's worth of bandwidth and removes it entirely.
 ACCUM_FORMAT = "rgba32float"
+# The surface pre-pass target: (radiance, t) of the traced city or desert
+# under each render pixel. t runs to 1e30 on a miss and to tens of km on a
+# hit, so it needs float32; fs_main only ever textureLoad()s it.
+SURFACE_FORMAT = "rgba32float"
+# The scenes whose opaque surface is traced by that pass rather than in the
+# march (raymarch.wgsl: the surface pre-pass section).
+SURFACE_PASS_SURFACES = ("city", "desert")
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
@@ -721,6 +728,11 @@ class SoarRenderer:
         # Binding 8 (ice-detection mode, browser-only) is never read here —
         # row 23.w stays 0 — but the layout requires it.
         self._ice_frac_tex = self._dummy_volume()
+        # Group 1's stand-in: what the march reads there in a scene with no
+        # traced surface.
+        self._surface_dummy = self.device.create_texture(
+            size=(1, 1, 1), dimension="2d", format=SURFACE_FORMAT,
+            usage=self.wgpu.TextureUsage.TEXTURE_BINDING)
         self._light_cache_dims = None
         self._ocean_tex = self._load_surface_tile()
         self._targets = None
@@ -867,12 +879,35 @@ class SoarRenderer:
             {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
             {"binding": 8, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
         ])
+        # Group 1: the surface pre-pass's target (raymarch.wgsl), read by the
+        # march alone. textureLoad()ed only, so rgba32float's unfilterability
+        # is exactly right. The passes that do not read it (the bake, the
+        # surface pass itself) are laid out without it.
+        self._surface_layout = d.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "unfilterable-float",
+                         "view_dimension": "2d"}},
+        ])
         self._ray_pipeline = d.create_render_pipeline(
-            layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
+            layout=d.create_pipeline_layout(
+                bind_group_layouts=[self._ray_layout, self._surface_layout]),
             vertex={"module": self._ray_module, "entry_point": "vs_main"},
             fragment={"module": self._ray_module, "entry_point": "fs_main",
                       "targets": [{"format": SAMPLE_FORMAT}]},
             primitive={"topology": "triangle-list"})
+        # The surface pre-pass: the traced city or desert, one texel per
+        # render pixel, drawn before every march (raymarch.wgsl fs_surface).
+        # Scenes without a traced surface have no such pass.
+        self._surface_pipeline = None
+        if self.surface in SURFACE_PASS_SURFACES:
+            self._surface_pipeline = d.create_render_pipeline(
+                layout=d.create_pipeline_layout(
+                    bind_group_layouts=[self._ray_layout]),
+                vertex={"module": self._ray_module, "entry_point": "vs_main"},
+                fragment={"module": self._ray_module,
+                          "entry_point": "fs_surface",
+                          "targets": [{"format": SURFACE_FORMAT}]},
+                primitive={"topology": "triangle-list"})
         # The sun-tau bake: one field-x plane of the cache per draw, into an
         # r16float 2D target the caller copies into the 3D cache texture.
         self._bake_pipeline = d.create_render_pipeline(
@@ -911,8 +946,19 @@ class SoarRenderer:
                  | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC)
         make = lambda fmt: self.device.create_texture(
             size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
-        self._targets = {"size": size, "sample": make(SAMPLE_FORMAT),
-                         "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)]}
+        surface = (make(SURFACE_FORMAT)
+                   if self._surface_pipeline is not None else None)
+        self._targets = {
+            "size": size, "sample": make(SAMPLE_FORMAT),
+            "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)],
+            "surface": surface,
+            # The march's group 1: this size's surface, or the stand-in.
+            "surface_group": self.device.create_bind_group(
+                layout=self._surface_layout, entries=[
+                    {"binding": 0,
+                     "resource": (surface or self._surface_dummy).create_view()},
+                ]),
+        }
         return self._targets
 
     def _ensure_bind_group(self):
@@ -1045,6 +1091,8 @@ class SoarRenderer:
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()
         sample_view = targets["sample"].create_view()
+        surface_view = (targets["surface"].create_view()
+                        if targets["surface"] is not None else None)
 
         accum_index = 0
         for i in range(frames):
@@ -1071,11 +1119,23 @@ class SoarRenderer:
                 ])
 
             enc = self.device.create_command_encoder()
+            if surface_view is not None:
+                # The surface under this frame's rays, for the march below:
+                # same uniforms, same frame, same pixels.
+                sp = enc.begin_render_pass(color_attachments=[{
+                    "view": surface_view, "load_op": "clear",
+                    "store_op": "store",
+                    "clear_value": (0.0, 0.0, 0.0, 1e30)}])
+                sp.set_pipeline(self._surface_pipeline)
+                sp.set_bind_group(0, bind_group)
+                sp.draw(3)
+                sp.end()
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": sample_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])
             rp.set_pipeline(self._ray_pipeline)
             rp.set_bind_group(0, bind_group)
+            rp.set_bind_group(1, targets["surface_group"])
             rp.draw(3)
             rp.end()
 

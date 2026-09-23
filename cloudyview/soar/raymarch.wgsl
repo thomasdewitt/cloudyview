@@ -177,6 +177,14 @@ struct Uniforms {
 // carries no ice variable — so one bind-group layout serves both. Read only
 // when u.light_cache.w is set.
 @group(0) @binding(8) var ice_frac: texture_3d<f32>;
+// Group 1: the surface pre-pass's target, size-specific, so it lives apart
+// from the scene resources in group 0 (which every pass shares unchanged):
+// the opaque surface under the clouds — the traced city or desert — as the
+// pre-pass left it for this frame, (radiance, t) per render pixel, t = 1e30
+// on a miss. The march reads it, and only under CITY or DESERT; other scenes
+// bind a 1x1 stand-in and never run the pass. See the surface pre-pass
+// section.
+@group(1) @binding(0) var surface_buf: texture_2d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -11030,6 +11038,143 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // the near field always used). Texel i sits AT data coordinate i, matching
 // sample_level's convention, so sample_light_tau reads back exactly what was
 // baked at texel centers.
+// ---------------------------------------------------------------------------
+// The surface pre-pass
+// ---------------------------------------------------------------------------
+//
+// The city and the desert are opaque surfaces traced in closed form — a DDA
+// over the block grid, a terrain with its plants — and their tracing is
+// register-hungry. In fs_main it shared a kernel with the cloud march, so
+// its registers were the march's too: every surface feature compiled in cost
+// every march pixel occupancy, whether its rays ever reached that feature or
+// not. So the surface is traced in a pass of its own, fs_surface, one
+// fragment per render pixel, before every fs_main pass of a frame, into the
+// target fs_main reads at group 1. The march keeps only the composite (the t >= t_surface test,
+// the dt clamp and the post-loop fallback), with the same radiance at the
+// same t as when it traced the surface itself.
+//
+// Both entries take their ray from camera_ray, so the pass traces exactly
+// the ray the march composites: the same pixel, subpixel stream and frame
+// index, which is what keeps sub-pixel surface detail accumulating.
+//
+// One function per surface, chosen by the scene's specialization. Anything
+// that belongs to the surface and sits in front of it along the ray (city
+// fog, a component's in-scatter at street level) is folded into its rgb here
+// — it was already, when fs_main did the tracing. A semi-transparent layer
+// in front of the surface (a far canopy over the sky) would need a second
+// target; there is room for one (24 bytes per sample with an rgba16float
+// premultiplied layer beside this rgba32float), and none is built.
+
+struct CameraRay {
+    dir: vec3<f32>,
+    frame_index: u32,       // this frame's index in the accumulation
+    strat_pixel: vec2<u32>, // the pixel that seeds the stratified scrambles
+    pixel_angle: f32,       // the surfaces' resolving angle (rad/px)
+    jitter_amp: f32,        // jitter_on * jitter_scale
+}
+
+fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
+    var cr: CameraRay;
+    let img_w = u.params.x;
+    let img_h = u.params.y;
+    let tan_half_fov = u.cam_origin.w;
+    let aspect = u.cam_forward.w;
+    let subpixel_on = u.flags.x;
+    let jitter_scale = clamp(u.flags.y, 0.0, 1.0);
+    // This frame's index in the accumulation, the sequence coordinate every
+    // stratified stream is indexed by, and this pixel, which seeds their
+    // scrambles (see the strat1/strat2 block).
+    cr.frame_index = u32(max(u.sun_dir.w, 0.0));
+    cr.strat_pixel = vec2<u32>(frag_pos.xy);
+
+    // Pixel -> camera ray. Framebuffer y=0 is the image top, matching the
+    // witness convention ndc_y = 1 - 2*(py+0.5)/h.
+    var sample_pos = frag_pos.xy;
+    if (subpixel_on > 0.5) {
+        let subpixel_offset = strat2(cr.frame_index, cr.strat_pixel,
+                                     STRAT_STREAM_SUBPIXEL,
+                                     vec2<f32>(STRAT_ALPHA_1, STRAT_ALPHA_2));
+        sample_pos = sample_pos
+                     + (subpixel_offset - vec2<f32>(0.5)) * jitter_scale;
+    }
+    let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * tan_half_fov;
+    let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov / aspect;
+    cr.dir = normalize(u.cam_forward.xyz
+                       + ndc_x * u.cam_right.xyz
+                       + ndc_y * u.cam_up.xyz);
+    // The surfaces' resolving angle is the same knob as the cloud march's:
+    // the larger of the true pixel angle and the view-step LOD angle
+    // (u.periodic.z, the app's one LOD slider). Coarsening the slider
+    // dissolves windows into blocks exactly as it coarsens the march — one
+    // lever, one degrees-not-meters law for the whole scene.
+    cr.pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
+    cr.jitter_amp = u.cam_up.w * jitter_scale;
+    return cr;
+}
+
+// The city under this ray: fogged radiance and distance, t = 1e30 on a miss.
+fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
+    // THE CITY FRAME: world xy minus the row-24 surface offset, folded into
+    // the primary tile (city_camera_origin — the one entry). The whole city
+    // system — the DDA, every cell index and pcg2d seed, plot slabs, street
+    // lines, component routes, hit positions, the fog's glow probe — runs in
+    // this frame, and because the city is a pure function of it, the
+    // frame's whole-tile ambiguity is invisible. t values are
+    // translation-invariant, so depth compositing against the cloud march
+    // needs no conversion; the one city input that must STAY world is the
+    // uplight probe's cloud sampling (see the city_glow_sample call in the
+    // march loop).
+    let city_o = city_camera_origin();
+    let chit = city_trace(city_o, dir);
+    if (!chit.hit) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    }
+    return vec4<f32>(city_fog(city_shade(chit, dir, pixel_angle * chit.t),
+                              city_o, dir, chit.t, chit.pos), chit.t);
+}
+
+// The desert under this ray: hazed radiance and distance, t = 1e30 on a
+// miss. Traced in the desert frame (desert_camera_origin) and shaded with
+// the cloud shadow at the world hit; t is translation-invariant, so depth
+// needs no conversion. Its own draws on the sun-march and solar-cone
+// streams: the ocean's take the same streams, and the two are never both
+// compiled in.
+fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
+                       strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
+    let sun = u.sun_dir.xyz;
+    let desert_o = desert_camera_origin();
+    let dhit = desert_trace(desert_o, dir, pixel_angle);
+    if (!dhit.hit) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    }
+    let d_jit = jitter_amp * strat1(frame_index, strat_pixel,
+                                    STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
+    let d_cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
+                        vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
+    let d_sun_shadow = sun_cone_dir(
+        sun, sun_tangent_frame(sun), d_cone,
+        SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_amp);
+    return vec4<f32>(desert_shade(dhit, desert_o,
+                                  u.cam_origin.xyz + dhit.t * dir, dir,
+                                  sun, d_sun_shadow, d_jit, pixel_angle),
+                     dhit.t);
+}
+
+// The pass itself. Only the CITY and DESERT specializations are ever run
+// through it; any other scene returns a miss and the host never draws it.
+@fragment
+fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let cr = camera_ray(frag_pos);
+    if (CITY) {
+        return surface_pass_city(cr.dir, cr.pixel_angle);
+    }
+    if (DESERT) {
+        return desert_surface_pass(cr.dir, cr.pixel_angle, cr.frame_index,
+                                   cr.strat_pixel, cr.jitter_amp);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+}
+
 @fragment
 fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
@@ -11072,27 +11217,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let gradient_coarse_radius_m = u.cb_params.y;
     let ambient_occlusion_floor = u.cb_params.z;
 
-    // This frame's index in the accumulation, the sequence coordinate every
-    // stratified stream below is indexed by, and this pixel, which seeds their
-    // scrambles (see the strat1/strat2 block).
-    let frame_index = u32(max(u.sun_dir.w, 0.0));
-    let strat_pixel = vec2<u32>(frag_pos.xy);
-
-    // Pixel -> camera ray. Framebuffer y=0 is the image top, matching the
-    // witness convention ndc_y = 1 - 2*(py+0.5)/h.
-    var sample_pos = frag_pos.xy;
-    if (subpixel_on > 0.5) {
-        let subpixel_offset = strat2(frame_index, strat_pixel,
-                                     STRAT_STREAM_SUBPIXEL,
-                                     vec2<f32>(STRAT_ALPHA_1, STRAT_ALPHA_2));
-        sample_pos = sample_pos
-                     + (subpixel_offset - vec2<f32>(0.5)) * jitter_scale;
-    }
-    let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * tan_half_fov;
-    let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov / aspect;
-    let dir = normalize(u.cam_forward.xyz
-                        + ndc_x * u.cam_right.xyz
-                        + ndc_y * u.cam_up.xyz);
+    // The camera ray, shared with the surface pre-pass (camera_ray), so the
+    // surface it traced is the surface this march composites.
+    let cr = camera_ray(frag_pos);
+    let frame_index = cr.frame_index;
+    let strat_pixel = cr.strat_pixel;
+    let dir = cr.dir;
 
     let inv_dir = 1.0 / dir;
     let periodic_on = PERIODIC_DOMAIN;
@@ -11128,65 +11258,25 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    // The city trace runs once, up front: opaque geometry independent of the
-    // volume march, composited when the march reaches it exactly as the
-    // ocean plane is. The radiance is shaded and fogged here so the march
-    // loop only ever multiplies it by transmittance.
+    // The opaque surface below — the traced city or the traced desert — was
+    // found by the surface pre-pass (fs_surface) for this very ray: its
+    // fogged or hazed radiance and its distance, one texel per pixel. It is
+    // composited when the march reaches it, exactly as the ocean plane is,
+    // so the march loop only ever multiplies it by transmittance. Reading it
+    // rather than tracing it here keeps every surface register out of this
+    // kernel (see the surface pre-pass section).
     var t_city = 1e30;
     var city_rgb = vec3<f32>(0.0);
-    if (CITY) {
-        // The city's resolving angle is the same knob as the cloud march's:
-        // the larger of the true pixel angle and the view-step LOD angle
-        // (u.periodic.z, the app's one LOD slider). Coarsening the slider
-        // dissolves windows into blocks exactly as it coarsens the march —
-        // one lever, one degrees-not-meters law for the whole scene.
-        let pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
-        // THE CITY FRAME: world xy minus the row-24 surface offset, folded
-        // into the primary tile (city_camera_origin — the one entry). The
-        // whole city system — the DDA, every cell index and pcg2d seed,
-        // plot slabs, street lines, component routes, hit positions, the
-        // fog's glow probe — runs in this frame, and because the city is a
-        // pure function of it, the frame's whole-tile ambiguity is
-        // invisible. t values are translation-invariant, so depth
-        // compositing against the cloud march needs no conversion; the one
-        // city input that must STAY world is the uplight probe's cloud
-        // sampling (see the city_glow_sample call in the march loop).
-        let city_o = city_camera_origin();
-        let chit = city_trace(city_o, dir);
-        if (chit.hit) {
-            t_city = chit.t;
-            city_rgb = city_fog(
-                city_shade(chit, dir, pixel_angle * chit.t),
-                city_o, dir, chit.t, chit.pos);
-        }
-    }
-
-    // The desert trace runs up front for the same reason the city's does,
-    // and is composited through the same guards. It is traced in the desert
-    // frame (desert_camera_origin) and shaded with the cloud shadow at the
-    // world hit; t is translation-invariant, so depth needs no conversion.
-    // Its own draws on the sun-march and solar-cone streams: the ocean's
-    // take the same streams, and the two are never both compiled in.
     var t_desert = 1e30;
     var desert_rgb = vec3<f32>(0.0);
-    if (DESERT) {
-        let pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
-        let desert_o = desert_camera_origin();
-        let dhit = desert_trace(desert_o, dir, pixel_angle);
-        if (dhit.hit) {
-            t_desert = dhit.t;
-            let d_jit = jitter_on * jitter_scale
-                        * strat1(frame_index, strat_pixel,
-                                 STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
-            let d_cone = strat2(frame_index, strat_pixel,
-                                STRAT_STREAM_SUN_CONE,
-                                vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
-            let d_sun_shadow = sun_cone_dir(
-                sun, sun_tangent_frame(sun), d_cone,
-                SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_on * jitter_scale);
-            desert_rgb = desert_shade(dhit, desert_o,
-                                      u.cam_origin.xyz + dhit.t * dir, dir,
-                                      sun, d_sun_shadow, d_jit, pixel_angle);
+    if (CITY || DESERT) {
+        let sp = textureLoad(surface_buf, vec2<i32>(frag_pos.xy), 0);
+        if (CITY) {
+            t_city = sp.w;
+            city_rgb = sp.xyz;
+        } else {
+            t_desert = sp.w;
+            desert_rgb = sp.xyz;
         }
     }
     let t_surface = select(select(t_ocean, t_city, CITY), t_desert, DESERT);
