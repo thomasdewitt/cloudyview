@@ -24,7 +24,7 @@ const STILL_FORMAT = "rgba8unorm";
 export async function renderStill(device, renderer, view, size, tier,
                                   overlays = null, onProgress = null) {
   const target = createOfflineTarget(device, size, "soar-still");
-  const saved = beginOfflineRender(renderer, tier);
+  const saved = await beginOfflineRender(renderer, tier);
   try {
     await renderAccumulated(
       renderer, target.view, size, view, captureFrames(tier), overlays,
@@ -104,7 +104,7 @@ export function captureFrames(tier) {
  * concessions — a frame someone is waiting to fly out of — and a capture
  * has no frame to protect.
  */
-export function beginOfflineRender(renderer, tier = "high") {
+export async function beginOfflineRender(renderer, tier = "high") {
   const saved = { scale: renderer.flightRenderScale,
                   tier: renderer.qualityTier,
                   lightCacheMode: renderer.lightCacheMode,
@@ -124,8 +124,24 @@ export function beginOfflineRender(renderer, tier = "high") {
   renderer.maxLightSteps = parked.maxLightSteps;
   // Most tiers read the sun-tau cache, and a capture must not race a
   // half-done bake: the frames before completion would light differently
-  // from the frames after. Finish it here — the capture owns the GPU.
-  while (renderer.lightBakePending) renderer.stepLightBake(64);
+  // from the frames after. Finish it here — the capture owns the GPU. The
+  // bake's pipeline may still be compiling (a periodicity toggle, say, moves
+  // its specialization), and a compile can only finish if this yields to
+  // the event loop, so it is awaited rather than spun on; a failed compile
+  // throws, and the session is put back the way it was before rethrowing.
+  try {
+    while (renderer.lightBakePending) {
+      const compiling = renderer.bakePipelinePending();
+      if (compiling) {
+        await compiling;
+        continue;
+      }
+      renderer.stepLightBake(64);
+    }
+  } catch (err) {
+    endOfflineRender(renderer, saved);
+    throw err;
+  }
   renderer.resetAccumulation();
   // Never more than two marches queued: the compositor shares the GPU and
   // Chrome gives its swapchain acquire two seconds (renderer._submit).

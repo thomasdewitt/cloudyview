@@ -1694,7 +1694,17 @@ export class Viewer {
     if (!this.autoExposure || this._probe) return;
     if (nowMs - this._aeLastMeterMs < K.AUTO_EXPOSURE_INTERVAL_MS) return;
     this._aeLastMeterMs = nowMs;
-    this.renderer.meterLuminance(outputSize, this._viewKwargs())
+    const renderer = this.renderer;
+    renderer.meterLuminance(outputSize, this._viewKwargs())
+      .catch((err) => {
+        // A readback abandoned because its renderer was torn down (a field
+        // change, leaving the viewer) is not a failure of anything live.
+        // Anything else is, and stops rendering as loudly as a draw would.
+        if (!this._disposed && this.renderer === renderer) {
+          this._failRendering(err);
+        }
+        return null;
+      })
       .then((highlight) => {
         if (!(highlight > 0) || this._disposed || !this.autoExposure) return;
         // The one statement of the target formula (a capture applies the
@@ -1851,8 +1861,9 @@ export class Viewer {
    * LOD change the luminance), against the live renderer state — the meter's
    * march is the same specialized module whatever the tier, since every
    * tier shares maxLightSteps. A live meter's readback may still be in
-   * flight (one is ever allowed); it always resolves, so wait it out rather
-   * than skipping the metering. A meter that saw no light keeps
+   * flight (one is ever allowed; that is the only null); it always resolves,
+   * so wait it out rather than skipping the metering. A meter that fails
+   * throws, and fails the capture with it. A meter that saw no light keeps
    * DEFAULT_EXPOSURE, the live loop's own ignore rule.
    */
   async _meterCaptureExposure(look, size) {
@@ -2358,7 +2369,7 @@ export class Viewer {
       // frame, their freed memory outran the driver's reclaiming on long
       // videos (capture.js Readback).
       readback = new Readback(this.device, size);
-      saved = beginOfflineRender(this.renderer, look.preset);
+      saved = await beginOfflineRender(this.renderer, look.preset);
       const framesPerVideoFrame = captureFrames(look.preset);
 
       const t0 = performance.now();
@@ -3046,6 +3057,13 @@ export class Viewer {
     }
   }
 
+  /** The live loop's one way to stop on an error: loudly, and for good. */
+  _failRendering(err) {
+    this.stop = true;
+    this.onFailure?.("Rendering stopped.", String(err.message || err),
+                     err.advice || "");
+  }
+
   /** Whether the frame that is asking is still the one that should be running. */
   _loopAlive(generation) {
     return !this.stop && !this._disposed
@@ -3118,12 +3136,20 @@ export class Viewer {
 
     // A few planes of the sun-tau bake per frame, ahead of the march so the
     // frame that completes it is also the first to read it. The reads flip
-    // on inside drawFrame the moment the bake finishes (row 23 is in the
-    // scene key, so accumulation restarts on its own); the explicit
-    // march-pending is for a parked view, which otherwise has no reason to
-    // march again.
+    // on inside drawFrame the moment the bake finishes, and a parked view's
+    // average restarts on the cached method there (drawFrame's methodKey);
+    // the explicit march-pending is for a parked view, which otherwise has
+    // no reason to march again. Inside the frame's failure path: a bake
+    // pipeline that failed to compile throws here, and that must stop the
+    // renderer loudly like any other pipeline failure, not end the loop
+    // without a word.
     if (this.renderer.lightBakePending && !this._probe) {
-      if (this.renderer.stepLightBake()) this._marchPending = true;
+      try {
+        if (this.renderer.stepLightBake()) this._marchPending = true;
+      } catch (err) {
+        this._failRendering(err);
+        return;
+      }
     }
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -3159,7 +3185,7 @@ export class Viewer {
     // every pixel. Presenting is a blit. Once the view has converged there is
     // nothing left for a march to add, so the loop keeps presenting (the bird
     // still flies over it) and stops marching.
-    const march = this._marchPending
+    let march = this._marchPending
       || !this.renderer.converged
       || !this.renderer.canPresentLast;
     const probing = Boolean(this._probe);
@@ -3200,10 +3226,22 @@ export class Viewer {
         this._marchPending = false;
         // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
         // must not be acquired until every await inside the draw has resolved.
-        await this.renderer.drawFrame(
+        const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
-          { deltaSeconds: dt, overlays });
+          { deltaSeconds: dt, overlays, waitForPipeline: false });
+        if (!marched) {
+          // The shader variant this frame needs is still compiling (a tier,
+          // bake or toggle moved the lighting specialization; see
+          // Renderer._rayPipeline). Nothing was drawn and the canvas keeps
+          // its last picture. Asking again next frame rather than waiting
+          // inside the draw is what keeps a compile from holding a frame
+          // open while the field or a capture changes underneath it. The
+          // frame did not march, so no clock may count it.
+          this._marchPending = true;
+          march = false;
+          measuring = false;
+        }
       } else {
         this.renderer.presentLast(
           this.context.getCurrentTexture().createView(), this.canvasFormat,
@@ -3218,9 +3256,7 @@ export class Viewer {
         measuring = await this._awaitQueueIdle();
       }
     } catch (err) {
-      this.stop = true;
-      this.onFailure?.("Rendering stopped.", String(err.message || err),
-                       err.advice || "");
+      this._failRendering(err);
       return;
     }
     // The draw is the loop's one long await. A field replaced (or the viewer
