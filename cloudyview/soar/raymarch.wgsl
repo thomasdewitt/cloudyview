@@ -10413,8 +10413,963 @@ const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 // === DESERT FLORA (desert-flora) ===
 // ===========================================================================
 //
-// STUBS, owned by desert-flora: the hooks desert-ground calls. Replace the
-// bodies; keep the signatures (or agree changes with desert-ground).
+// The plants and boulders of a Sonoran bajada, ray-traced as solid objects
+// inside the march exactly as the city's props are, and for the reason the
+// grass taught (2026-08-15): a density field has no silhouette, and a desert
+// plant is defined by its boundary — the saguaro's pleats against the sky,
+// the spine halo when the sun is behind it, the ocotillo's whips.
+//
+// Placement is two jittered cell grids in the desert frame, each walked by a
+// 2D DDA over the slice of the ray the ground hands us (the flora slab):
+// 16 m cells hold the big plants (saguaro, ocotillo, palo verde, boulders),
+// 4 m cells the matrix (creosote, bursage, prickly pear, barrel cactus,
+// rocks). Every item fits inside its own cell, so the first cell with a hit
+// is the nearest hit and the walk stops there. Per-item parameters are pcg2d
+// draws on the cell index wrapped into the 4096 m tile with a bit mask (the
+// cell counts are powers of two; no `%`, which is what crashes NVIDIA's
+// SPIR-V compiler under Firefox — soar bug 22). All sub-centimetre geometry
+// is computed in cell-local coordinates: at 4096 m the f32 ulp is 0.5 mm,
+// which is the width of a spine.
+//
+// Level of detail keys on the pixel footprint fp = pixel_angle * t, never on
+// metres, and every transition is a stochastic blend on a per-ray dither
+// (a hash of the ray direction, so it decorrelates across the accumulation's
+// sub-pixel jitter): the resolved form and its average then accumulate to
+// the same pixel value, which is the no-seam rule.
+
+const DF_PI: f32 = 3.14159265358979;
+const DF_TAU: f32 = 6.28318530717959;
+
+const DF_BIG_CELL: f32 = 16.0;
+const DF_BIG_N: i32 = 256;        // 4096 m / 16 m
+const DF_SMALL_CELL: f32 = 4.0;
+const DF_SMALL_N: i32 = 1024;     // 4096 m / 4 m
+const DF_MAX_CELLS: i32 = 320;
+
+// DesertHit.kind for flora; 0..7 belong to the ground.
+const DF_KIND_SAGUARO: i32 = 8;
+const DF_KIND_CREOSOTE: i32 = 9;
+const DF_KIND_OCOTILLO: i32 = 10;
+const DF_KIND_PRICKLY: i32 = 11;
+const DF_KIND_BARREL: i32 = 12;
+const DF_KIND_PALOVERDE: i32 = 13;
+const DF_KIND_BOULDER: i32 = 14;
+
+// DesertHit.mat.x = material code + a payload in [0, 0.9] (tint draw).
+const DF_MAT_SKIN: i32 = 0;
+const DF_MAT_SPINE: i32 = 1;    // mat.yzw = spine axis (unit)
+const DF_MAT_FELT: i32 = 2;
+const DF_MAT_BARK: i32 = 3;
+const DF_MAT_FUZZ: i32 = 4;     // the spine shell as a sub-pixel medium
+const DF_MAT_SKIN_FUZZ: i32 = 5; // skin whose spines are sub-pixel shell
+
+fn df_u01(x: u32) -> f32 {
+    return f32(x) * 2.3283064365386963e-10;
+}
+
+fn df_rand4(s: vec2<u32>) -> vec4<f32> {
+    let a = pcg2d(s);
+    let b = pcg2d(a ^ vec2<u32>(0x68bc21ebu, 0x02e5be93u));
+    return vec4<f32>(df_u01(a.x), df_u01(a.y), df_u01(b.x), df_u01(b.y));
+}
+
+fn df_cell_seed(ci: vec2<i32>, n: i32, salt: u32) -> vec2<u32> {
+    let w = vec2<u32>(ci & vec2<i32>(n - 1));
+    return pcg2d(w + vec2<u32>(salt, salt * 0x9e3779b9u));
+}
+
+// A per-ray uniform for the stochastic LOD blends. The ray direction is
+// jittered sub-pixel every accumulation frame, so its bits are a fresh draw
+// per sample; two independent outputs.
+fn df_ray_dither(dir: vec3<f32>) -> vec2<f32> {
+    let b = bitcast<vec3<u32>>(dir);
+    let h = pcg2d(vec2<u32>(b.x ^ (b.z * 0x27d4eb2du), b.y ^ (b.z >> 7u)));
+    return vec2<f32>(df_u01(h.x), df_u01(h.y));
+}
+
+fn df_smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+fn df_box(o: vec3<f32>, inv_dir: vec3<f32>, bmin: vec3<f32>,
+          bmax: vec3<f32>) -> vec2<f32> {
+    let a = (bmin - o) * inv_dir;
+    let b = (bmax - o) * inv_dir;
+    let lo = min(a, b);
+    let hi = max(a, b);
+    return vec2<f32>(max(max(lo.x, lo.y), lo.z), min(min(hi.x, hi.y), hi.z));
+}
+
+// One placed thing. `base` is its foot in CELL-LOCAL metres (terrain height
+// included); a..f are per-species parameters, documented where each species
+// builds them; the box is cell-local and lies inside the cell.
+struct DfItem {
+    kind: i32,
+    base: vec3<f32>,
+    a: vec4<f32>,
+    b: vec4<f32>,
+    c: vec4<f32>,
+    d: vec4<f32>,
+    e: vec4<f32>,
+    f: vec4<f32>,
+    bmin: vec3<f32>,
+    bmax: vec3<f32>,
+    seed: vec2<u32>,
+}
+
+// --- Fluted columns ----------------------------------------------------------
+//
+// A saguaro trunk, a saguaro arm and a barrel cactus are one shape: a pleated
+// tube around an axis. The axis is a "J" in a vertical plane — a straight run
+// leaving the root at elevation alpha, an elbow of radius rb turning it
+// vertical, then a vertical run — which covers a trunk (alpha = pi/2, no run,
+// no elbow) and the saguaro arm's characteristic upturned elbow with the same
+// closest-point code. Distance to a planar curve is exact in 3D: the
+// out-of-plane offset only adds in quadrature. The tip is the end cap of the
+// distance-to-curve, i.e. a dome, which is what a saguaro crown is.
+//
+// The pleats: rib k's crest sits at theta_k = (k - phase) 2 pi / ribs, and
+// across a rib the surface radius is R (1 - depth (1 - x)^2) with x = 1 at
+// the crest and 0 in the groove: a rounded crest and a V groove, as in the
+// photographs. On the dome the groove depth fades with the lateral fraction
+// of the offset, so the ribs converge on the apex instead of pinching it.
+struct DfColumn {
+    root: vec3<f32>,   // plant-local start of the axis
+    u: vec2<f32>,      // horizontal unit direction of the axis' plane
+    alpha: f32,        // initial elevation of the axis (pi/2: straight up)
+    l1: f32,           // straight run before the elbow
+    rb: f32,           // elbow radius
+    l2: f32,           // vertical run after the elbow
+    r: f32,            // radius
+    taper: f32,        // fraction of r lost from root to tip
+    neck: f32,         // fractional pinch at the root (an arm's junction)
+    neck_s: f32,       // where the pinch starts releasing
+    neck_len: f32,     // over what length it releases
+    ribs: f32,
+    phase: f32,
+    depth: f32,        // groove depth as a fraction of the radius
+}
+
+struct DfPathPt {
+    s: f32,
+    p: vec2<f32>,
+    tng: vec2<f32>,
+}
+
+fn df_col_len(c: DfColumn) -> f32 {
+    return c.l1 + c.rb * (0.5 * DF_PI - c.alpha) + c.l2;
+}
+
+// Closest point on the J to q = (along u, z), both relative to the root.
+fn df_jpath_closest(c: DfColumn, q: vec2<f32>) -> DfPathPt {
+    let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
+    var best: DfPathPt;
+    let s1 = clamp(dot(q, d1), 0.0, c.l1);
+    best.s = s1;
+    best.p = d1 * s1;
+    best.tng = d1;
+    var bd = dot(q - best.p, q - best.p);
+
+    let n1 = vec2<f32>(-d1.y, d1.x);
+    let ctr = d1 * c.l1 + c.rb * n1;
+    let v = q - ctr;
+    let beta = clamp(atan2(v.x, -v.y), c.alpha, 0.5 * DF_PI);
+    let pa = ctr + c.rb * vec2<f32>(sin(beta), -cos(beta));
+    let da = dot(q - pa, q - pa);
+    if (da < bd) {
+        bd = da;
+        best.s = c.l1 + c.rb * (beta - c.alpha);
+        best.p = pa;
+        best.tng = vec2<f32>(cos(beta), sin(beta));
+    }
+
+    let e2 = ctr + vec2<f32>(c.rb, 0.0);
+    let s2 = clamp(q.y - e2.y, 0.0, c.l2);
+    let p2 = e2 + vec2<f32>(0.0, s2);
+    let d2 = dot(q - p2, q - p2);
+    if (d2 < bd) {
+        best.s = c.l1 + c.rb * (0.5 * DF_PI - c.alpha) + s2;
+        best.p = p2;
+        best.tng = vec2<f32>(0.0, 1.0);
+    }
+    return best;
+}
+
+// The J at arc length s (the inverse of the above, for placing areoles).
+fn df_jpath_at(c: DfColumn, s: f32) -> DfPathPt {
+    let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
+    var r: DfPathPt;
+    r.s = s;
+    let arc = c.rb * (0.5 * DF_PI - c.alpha);
+    let ctr = d1 * c.l1 + c.rb * vec2<f32>(-d1.y, d1.x);
+    if (s <= c.l1) {
+        r.p = d1 * s;
+        r.tng = d1;
+    } else if (s <= c.l1 + arc) {
+        let beta = c.alpha + (s - c.l1) / max(c.rb, 1e-6);
+        r.p = ctr + c.rb * vec2<f32>(sin(beta), -cos(beta));
+        r.tng = vec2<f32>(cos(beta), sin(beta));
+    } else {
+        r.p = ctr + vec2<f32>(c.rb, s - c.l1 - arc);
+        r.tng = vec2<f32>(0.0, 1.0);
+    }
+    return r;
+}
+
+fn df_col_radius(c: DfColumn, s: f32) -> f32 {
+    let len = df_col_len(c);
+    let tap = 1.0 - c.taper * clamp(s / max(len, 1e-3), 0.0, 1.0);
+    let neck = 1.0 - c.neck
+        * (1.0 - smoothstep(c.neck_s, c.neck_s + c.neck_len, s));
+    return c.r * tap * neck;
+}
+
+struct DfColSample {
+    d: f32,       // signed distance to the pleated surface (not Lipschitz-1)
+    theta: f32,   // angle around the axis
+    s: f32,       // arc length along the axis (continued over the tip dome)
+    x: f32,       // 1 on a rib crest, 0 in a groove
+    r: f32,       // crest radius here
+}
+
+fn df_col_eval(c: DfColumn, q: vec3<f32>) -> DfColSample {
+    let qr = q - c.root;
+    let w = vec2<f32>(-c.u.y, c.u.x);
+    let q2 = vec2<f32>(dot(qr.xy, c.u), qr.z);
+    let vv = dot(qr.xy, w);
+    let pp = df_jpath_closest(c, q2);
+    let o2 = q2 - pp.p;
+    let n2 = vec2<f32>(-pp.tng.y, pp.tng.x);
+    let a_n = dot(o2, n2);
+    let a_t = dot(o2, pp.tng);
+    let lat2 = a_n * a_n + vv * vv;
+    let rho = sqrt(lat2 + a_t * a_t);
+    let lat_frac = lat2 / max(rho * rho, 1e-12);
+    var sm: DfColSample;
+    sm.theta = atan2(vv, a_n);
+    let rr = df_col_radius(c, pp.s);
+    sm.r = rr;
+    sm.s = pp.s;
+    if (a_t > 0.0) {
+        // Over the tip dome: continue the arc length down the meridian.
+        sm.s = pp.s + rr * atan2(a_t, sqrt(lat2));
+    }
+    let ph = fract(sm.theta * c.ribs / DF_TAU + c.phase);
+    sm.x = abs(2.0 * ph - 1.0);
+    let g = (1.0 - sm.x) * (1.0 - sm.x);
+    sm.d = rho - rr * (1.0 - c.depth * lat_frac * g);
+    return sm;
+}
+
+// The areole frame at (s, theta): a point on the crest surface and the local
+// outward / around / along unit vectors. Continues over the tip dome.
+struct DfFrame {
+    p: vec3<f32>,
+    er: vec3<f32>,
+    et: vec3<f32>,
+    es: vec3<f32>,
+}
+
+fn df_col_frame(c: DfColumn, s: f32, theta: f32) -> DfFrame {
+    let len = df_col_len(c);
+    let pp = df_jpath_at(c, min(s, len));
+    let w3 = vec3<f32>(-c.u.y, c.u.x, 0.0);
+    let t3 = vec3<f32>(c.u * pp.tng.x, pp.tng.y);
+    let n3 = vec3<f32>(c.u * (-pp.tng.y), pp.tng.x);
+    let radial = cos(theta) * n3 + sin(theta) * w3;
+    var f: DfFrame;
+    f.et = -sin(theta) * n3 + cos(theta) * w3;
+    let axis_p = c.root + vec3<f32>(c.u * pp.p.x, pp.p.y);
+    let rr = df_col_radius(c, min(s, len));
+    if (s <= len) {
+        f.p = axis_p + rr * radial;
+        f.er = radial;
+        f.es = t3;
+    } else {
+        let phi = min((s - len) / max(rr, 1e-3), 0.5 * DF_PI - 0.05);
+        f.er = cos(phi) * radial + sin(phi) * t3;
+        f.es = -sin(phi) * radial + cos(phi) * t3;
+        f.p = axis_p + rr * f.er;
+    }
+    return f;
+}
+
+// --- Spines ----------------------------------------------------------------
+//
+// A spine is a straight tapered needle, and a ray against a needle has a
+// closed form good to a fraction of its own radius: the closest approach of
+// two lines, clamped to the needle's length, with the chord half-length
+// sqrt(r^2 - d^2) / sin(angle) taken off the front. At half a millimetre the
+// error in that is invisible and the cost is two dozen flops.
+struct DfSpineHit {
+    t: f32,
+    n: vec3<f32>,
+    axis: vec3<f32>,
+    tint: f32,
+}
+
+fn df_needle(o: vec3<f32>, dir: vec3<f32>, a: vec3<f32>, ax: vec3<f32>,
+             len: f32, r0: f32, best: DfSpineHit, tint: f32) -> DfSpineHit {
+    let w0 = o - a;
+    let b = dot(dir, ax);
+    let dd = dot(dir, w0);
+    let e = dot(ax, w0);
+    let den = max(1.0 - b * b, 1e-6);
+    let sp = clamp((e - b * dd) / den, 0.0, len);
+    let c = a + ax * sp;
+    let tr = dot(c - o, dir);
+    let diff = o + dir * tr - c;
+    let dist2 = dot(diff, diff);
+    let r = r0 * (1.0 - 0.85 * sp / len);
+    if (dist2 >= r * r) {
+        return best;
+    }
+    let th = tr - sqrt((r * r - dist2) / den);
+    if (th <= 0.0 || th >= best.t) {
+        return best;
+    }
+    var out: DfSpineHit;
+    out.t = th;
+    var nn = (o + dir * th) - c;
+    nn = nn - ax * dot(nn, ax);
+    let nl = length(nn);
+    out.n = select(-dir, nn / nl, nl > 1e-9);
+    out.axis = ax;
+    out.tint = tint;
+    return out;
+}
+
+// --- Saguaro -----------------------------------------------------------------
+//
+// Carnegiea gigantea. Item parameters:
+//   a = (height H, trunk radius R, ribs, rib phase)
+//   b = (arm count, arm radius / R, groove depth, age in [0,1])
+//   c..f = arms: (azimuth, attach height, horizontal run beyond the trunk,
+//          vertical run after the elbow)
+// Young plants are armless spears; arms appear from ~5 m and multiply with
+// height. The lowest metre of an old trunk is the grey woody "boot", ribs
+// still showing but the grooves filled in and the skin cracked across.
+//
+// Spines: every areole on every crest carries DF_SAG_RADIALS short radials
+// fanned across the rib and DF_SAG_CENTRALS longer centrals, the longest
+// pointing down, as in close-ups. Three representations, blended on the
+// ray dither by footprint:
+//   fp < ~7 mm   every needle is exact geometry (df_needle), found by
+//                 walking the areoles the ray passes within a shell's width
+//                 of (the march steps through the shell at a centimetre);
+//   fp < ~4 cm   the shell is a sub-pixel medium with the needles' projected
+//                 area density, hit by a per-ray exponential threshold —
+//                 the same coverage in expectation, a fuzzy rim;
+//   beyond       the shell is thinner than a pixel and folds into the skin:
+//                 the body is inflated by the shell's mean opaque thickness
+//                 and its colour mixes toward the spines' by the view-angle
+//                 coverage, which is what keeps the backlit rim.
+const DF_SAG_AREOLE_DS: f32 = 0.022;   // areole spacing along a crest (m)
+const DF_SAG_SHELL: f32 = 0.048;       // outermost reach of the spines (m)
+const DF_SAG_SHELL_STEP: f32 = 0.009;  // march step inside the shell (m)
+const DF_SAG_FELT_R: f32 = 0.0042;     // areole felt pad radius (m)
+const DF_SAG_RADIALS: i32 = 10;
+const DF_SAG_CENTRALS: i32 = 3;
+const DF_SAG_MAX_ARMS: i32 = 4;
+const DF_SAG_EXACT_FP0: f32 = 0.005;
+const DF_SAG_EXACT_FP1: f32 = 0.009;
+const DF_SAG_FUZZ_FP0: f32 = 0.025;
+const DF_SAG_FUZZ_FP1: f32 = 0.045;
+// Projected needle area per unit volume at the skin, falling linearly to
+// zero at the shell's edge (radials fill the inner half, centrals reach
+// out): 10 radials of 1.7 cm x 0.7 mm and 3 centrals of 3.5 cm x 1 mm per
+// areole, areoles 2.2 cm x ~8 cm apart, times the 2/pi mean projection of a
+// randomly oriented needle. Measured against the exact needles (see the
+// harness's --calibrate), not tuned by eye.
+const DF_SAG_FUZZ_SIGMA0: f32 = 9.0;
+// Mean opaque thickness of the shell, the inflation of the far body.
+const DF_SAG_SIL_INFLATE: f32 = 0.010;
+const DF_SAG_BOOT_H: f32 = 0.9;        // woody boot height on the oldest
+
+const DF_SAG_SKIN: vec3<f32> = vec3<f32>(0.090, 0.135, 0.070);
+const DF_SAG_SKIN_OLD: vec3<f32> = vec3<f32>(0.105, 0.130, 0.080);
+const DF_SAG_BARK: vec3<f32> = vec3<f32>(0.200, 0.175, 0.140);
+const DF_SAG_FELT: vec3<f32> = vec3<f32>(0.330, 0.300, 0.250);
+const DF_SPINE_STRAW: vec3<f32> = vec3<f32>(0.560, 0.450, 0.290);
+const DF_SPINE_GREY: vec3<f32> = vec3<f32>(0.400, 0.380, 0.350);
+const DF_SPINE_RED: vec3<f32> = vec3<f32>(0.380, 0.190, 0.110);
+
+fn df_sag_arm_params(it: DfItem, i: i32) -> vec4<f32> {
+    return select(select(select(it.f, it.e, i == 2), it.d, i == 1),
+                  it.c, i == 0);
+}
+
+fn df_sag_trunk(it: DfItem) -> DfColumn {
+    var c: DfColumn;
+    let h = it.a.x;
+    let r = it.a.y;
+    c.root = vec3<f32>(0.0, 0.0, -0.4);
+    c.u = vec2<f32>(1.0, 0.0);
+    c.alpha = 0.5 * DF_PI;
+    c.l1 = 0.0;
+    c.rb = 0.0;
+    c.taper = 0.16;
+    c.r = r;
+    c.l2 = h + 0.4 - r * (1.0 - c.taper);
+    // A slight pinch at the foot: old saguaros stand on a narrower boot.
+    c.neck = 0.10 * it.b.w;
+    c.neck_s = 0.2;
+    c.neck_len = 1.2;
+    c.ribs = it.a.z;
+    c.phase = it.a.w;
+    c.depth = it.b.z;
+    return c;
+}
+
+fn df_sag_arm(it: DfItem, i: i32) -> DfColumn {
+    let ap = df_sag_arm_params(it, i);
+    var c: DfColumn;
+    let r = it.a.y;
+    c.root = vec3<f32>(0.0, 0.0, ap.y);
+    c.u = vec2<f32>(cos(ap.x), sin(ap.x));
+    c.alpha = 0.12 + 0.5 * fract(ap.x * 3.71);
+    c.l1 = r + ap.z;
+    c.rb = 0.20 + 0.22 * fract(ap.y * 5.31);
+    c.l2 = ap.w;
+    c.r = r * it.b.y;
+    c.taper = 0.10;
+    // Arms are pinched where they leave the trunk and swell out beyond it.
+    c.neck = 0.38;
+    c.neck_s = 0.55 * r;
+    c.neck_len = 0.45;
+    c.ribs = floor(it.a.z * 0.8);
+    c.phase = fract(ap.x * 7.77);
+    c.depth = it.b.z;
+    return c;
+}
+
+fn df_saguaro_item(it_in: DfItem, r0: vec4<f32>) -> DfItem {
+    var it = it_in;
+    it.kind = DF_KIND_SAGUARO;
+    let r1 = df_rand4(pcg2d(it.seed + vec2<u32>(11u, 3u)));
+    let age = r0.y;
+    let h = mix(1.3, 12.5, pow(age, 1.15));
+    let r = (0.15 + 0.07 * h / 12.5) * (0.85 + 0.3 * r0.z);
+    let ribs = floor(18.0 + 7.0 * r0.w);
+    let depth = 0.13 + 0.07 * r1.y;
+    let arm_cap = clamp((h - 4.8) / 1.5, 0.0, 4.0);
+    let n_arms = min(floor(arm_cap * (0.3 + 0.9 * r1.z)), 4.0);
+    it.a = vec4<f32>(h, r, ribs, r1.x);
+    it.b = vec4<f32>(n_arms, 0.80 + 0.12 * r1.w, depth, age);
+    // Arms, spread in azimuth by the golden angle so they never stack.
+    let psi0 = r1.x * DF_TAU;
+    var arms: array<vec4<f32>, 4>;
+    for (var i: i32 = 0; i < DF_SAG_MAX_ARMS; i = i + 1) {
+        let ri = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) + 23u, 7u)));
+        let psi = psi0 + f32(i) * 2.39996 + 0.5 * (ri.w - 0.5);
+        let za = mix(2.4, max(2.5, h * 0.62), ri.x);
+        let run = 0.10 + 0.32 * ri.y;
+        let alpha = 0.12 + 0.5 * fract(psi * 3.71);
+        let rb = 0.20 + 0.22 * fract(za * 5.31);
+        let rise = (r + run) * sin(alpha) + rb * cos(alpha);
+        let up_max = max(h - 0.5 - za - rise - r, 0.3);
+        let up = max(mix(0.5, up_max, 0.35 + 0.65 * ri.z), 0.3);
+        arms[i] = vec4<f32>(psi, za, run, min(up, up_max));
+    }
+    it.c = arms[0];
+    it.d = arms[1];
+    it.e = arms[2];
+    it.f = arms[3];
+    let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL;
+    it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach), it.base.z - 0.05);
+    it.bmax = vec3<f32>(it.base.xy + vec2<f32>(reach),
+                        it.base.z + h + DF_SAG_SHELL + 0.05);
+    return it;
+}
+
+struct DfSagSample {
+    d: f32,
+    comp: i32,
+    cs: DfColSample,
+}
+
+fn df_sag_eval(cols: ptr<function, array<DfColumn, 5>>, n: i32,
+               q: vec3<f32>, blend: f32) -> DfSagSample {
+    var out: DfSagSample;
+    out.cs = df_col_eval((*cols)[0], q);
+    out.d = out.cs.d;
+    out.comp = 0;
+    var raw = out.cs.d;
+    for (var i: i32 = 1; i < n; i = i + 1) {
+        let cs = df_col_eval((*cols)[i], q);
+        out.d = df_smin(out.d, cs.d, blend);
+        if (cs.d < raw) {
+            raw = cs.d;
+            out.cs = cs;
+            out.comp = i;
+        }
+    }
+    return out;
+}
+
+// All needles of one areole against the ray.
+fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
+                 best_in: DfSpineHit) -> DfSpineHit {
+    var best = best_in;
+    // Quick reject: the whole cluster lies within DF_SAG_SHELL of its pad.
+    let w = f.p - o;
+    let tc = dot(w, dir);
+    if (dot(w, w) - tc * tc > DF_SAG_SHELL * DF_SAG_SHELL
+        || tc - DF_SAG_SHELL > best.t) {
+        return best;
+    }
+    let a = f.p - 0.002 * f.er;
+    // Tint: straw young spines, grey with age, a draw per areole.
+    let tint = h.w * 0.9;
+    let step = DF_TAU / f32(DF_SAG_RADIALS);
+    for (var i: i32 = 0; i < DF_SAG_RADIALS; i = i + 1) {
+        let hi = fract(h.y * 31.7 + f32(i) * 0.6180339);
+        let beta = h.x * DF_TAU + f32(i) * step + 0.35 * (hi - 0.5);
+        let ax = normalize(cos(beta) * f.et + sin(beta) * f.es
+                           + (0.45 + 0.3 * hi) * f.er);
+        best = df_needle(o, dir, a, ax, 0.012 + 0.010 * hi, 0.00035,
+                         best, tint);
+    }
+    for (var i: i32 = 0; i < DF_SAG_CENTRALS; i = i + 1) {
+        let hi = fract(h.z * 17.3 + f32(i) * 0.7548776);
+        let fi = f32(i);
+        // The longest points down and out; the others fan above it.
+        let ax = normalize(f.er + (-0.85 + 0.55 * fi) * f.es
+                           + (fi - 1.0) * 0.45 * f.et
+                           + 0.2 * (hi - 0.5) * f.et);
+        let len = select(0.022 + 0.010 * hi, 0.035 + 0.012 * hi, i == 0);
+        best = df_needle(o, dir, a, ax, len, 0.00050, best, tint);
+    }
+    return best;
+}
+
+fn df_sag_fuzz_sigma(d: f32) -> f32 {
+    return DF_SAG_FUZZ_SIGMA0 * max(1.0 - d / DF_SAG_SHELL, 0.0);
+}
+
+fn df_saguaro_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
+                    tb: f32, pixel_angle: f32, dither: vec2<f32>,
+                    shadow: bool) -> DesertHit {
+    var res: DesertHit;
+    res.hit = false;
+    res.t = tb;
+    let q0 = o - it.base;
+    var cols: array<DfColumn, 5>;
+    cols[0] = df_sag_trunk(it);
+    let n_arms = i32(it.b.x);
+    for (var i: i32 = 0; i < n_arms; i = i + 1) {
+        cols[i + 1] = df_sag_arm(it, i);
+    }
+    let n = n_arms + 1;
+    let blend = 0.10 * it.a.y;
+    // Lipschitz bound of the pleated distance: the steepest groove wall.
+    let slope = 2.0 * it.b.z * it.a.z / DF_PI;
+    let inv_lip = 1.0 / sqrt(1.0 + slope * slope);
+
+    // Spine representation, chosen once per plant on the ray dither.
+    let fp_in = pixel_angle * ta;
+    var mode = 2;
+    if (!shadow) {
+        if (fp_in < mix(DF_SAG_EXACT_FP0, DF_SAG_EXACT_FP1, dither.x)) {
+            mode = 0;
+        } else if (fp_in < mix(DF_SAG_FUZZ_FP0, DF_SAG_FUZZ_FP1, dither.x)) {
+            mode = 1;
+        }
+    }
+    let shell = select(0.0, DF_SAG_SHELL, mode < 2 && !shadow);
+    let inflate = select(0.0, DF_SAG_SIL_INFLATE, mode == 2 && !shadow);
+    let tau_hit = -log(max(dither.y, 1e-7));
+
+    var sp: DfSpineHit;
+    sp.t = tb;
+    var sp_found = false;
+    var tau = 0.0;
+    var fuzz_t = 1e30;
+    var last_key = 0xffffffffu;
+    var t = ta;
+    var body_t = 1e30;
+    var body: DfSagSample;
+    for (var i: i32 = 0; i < 220; i = i + 1) {
+        if (t > tb || t > sp.t + shell) {
+            break;
+        }
+        let q = q0 + dir * t;
+        let sm = df_sag_eval(&cols, n, q, blend);
+        let d = sm.d - inflate;
+        // A shadow ray carries the receiver's footprint in pixel_angle
+        // (see desert_flora_shadow): its own t says nothing about pixels.
+        let eps = select(max(1.5e-4, 0.3 * pixel_angle * t),
+                         max(1e-3, 0.3 * pixel_angle), shadow);
+        if (d < eps) {
+            body_t = t;
+            body = sm;
+            break;
+        }
+        var stp = d * inv_lip;
+        if (d < shell) {
+            if (mode == 0) {
+                let c = cols[sm.comp];
+                let k = round(sm.cs.theta * c.ribs / DF_TAU + c.phase);
+                let odd = f32(i32(k) & 1);
+                let j = round(sm.cs.s / DF_SAG_AREOLE_DS - 0.5 * odd);
+                let key = (u32(sm.comp) << 28u)
+                    ^ ((u32(i32(k)) & 0xfffu) << 16u)
+                    ^ (u32(i32(j)) & 0xffffu);
+                if (key != last_key) {
+                    last_key = key;
+                    let th = (k - c.phase) * DF_TAU / c.ribs;
+                    for (var dj: i32 = -1; dj <= 1; dj = dj + 1) {
+                        let sj = (j + f32(dj) + 0.5 * odd) * DF_SAG_AREOLE_DS;
+                        if (sj < 0.45) {
+                            continue;   // below ground
+                        }
+                        let fr = df_col_frame(c, sj, th);
+                        let hh = df_rand4(pcg2d(it.seed
+                            ^ vec2<u32>(u32(i32(j) + dj) * 0x9e3779b9u,
+                                        u32(i32(k)) + u32(sm.comp) * 977u)));
+                        sp = df_sag_areole(q0, dir, fr, hh, sp);
+                    }
+                    sp_found = sp.t < tb;
+                }
+            } else {
+                let dl = min(max(DF_SAG_SHELL_STEP, 0.5 * pixel_angle * t),
+                             stp);
+                tau = tau + df_sag_fuzz_sigma(d) * dl;
+                if (tau > tau_hit) {
+                    fuzz_t = t;
+                    break;
+                }
+                stp = dl;
+            }
+            stp = min(stp, DF_SAG_SHELL_STEP);
+        } else if (shell > 0.0) {
+            stp = max((d - shell) * inv_lip, 0.004);
+        }
+        t = t + max(stp, 0.5 * eps);
+    }
+
+    if (sp_found && sp.t < body_t) {
+        res.hit = true;
+        res.t = sp.t;
+        res.kind = DF_KIND_SAGUARO;
+        res.normal = sp.n;
+        res.mat = vec4<f32>(f32(DF_MAT_SPINE) + sp.tint, sp.axis);
+        return res;
+    }
+    if (fuzz_t < body_t) {
+        res.hit = true;
+        res.t = fuzz_t;
+        res.kind = DF_KIND_SAGUARO;
+        res.normal = -dir;
+        res.mat = vec4<f32>(f32(DF_MAT_FUZZ) + 0.45, 0.0, 0.0, 0.0);
+        return res;
+    }
+    if (body_t > tb) {
+        return res;
+    }
+    res.hit = true;
+    res.t = body_t;
+    res.kind = DF_KIND_SAGUARO;
+    if (shadow) {
+        return res;
+    }
+    // Tetrahedral gradient, at a spacing matched to the footprint.
+    let qh = q0 + dir * body_t;
+    let e = max(2e-4, 0.5 * pixel_angle * body_t);
+    let k1 = vec3<f32>(1.0, -1.0, -1.0);
+    let k2 = vec3<f32>(-1.0, -1.0, 1.0);
+    let k3 = vec3<f32>(-1.0, 1.0, -1.0);
+    let k4 = vec3<f32>(1.0, 1.0, 1.0);
+    let g = k1 * df_sag_eval(&cols, n, qh + e * k1, blend).d
+          + k2 * df_sag_eval(&cols, n, qh + e * k2, blend).d
+          + k3 * df_sag_eval(&cols, n, qh + e * k3, blend).d
+          + k4 * df_sag_eval(&cols, n, qh + e * k4, blend).d;
+    res.normal = normalize(g);
+
+    // Material: the boot, an areole's felt pad, or skin.
+    let c = cols[body.comp];
+    let age = it.b.w;
+    let boot_h = DF_SAG_BOOT_H * smoothstep(0.35, 0.9, age)
+        * (0.7 + 0.3 * fract(it.a.w * 13.1));
+    let hz = pcg2d(it.seed).x;
+    let tint = df_u01(hz) * 0.9;
+    if (body.comp == 0 && qh.z < boot_h) {
+        res.mat = vec4<f32>(f32(DF_MAT_BARK) + tint, body.cs.x, qh.z, age);
+        return res;
+    }
+    let kf = round(body.cs.theta * c.ribs / DF_TAU + c.phase);
+    let oddf = f32(i32(kf) & 1);
+    let jf = round(body.cs.s / DF_SAG_AREOLE_DS - 0.5 * oddf);
+    let ds = body.cs.s - (jf + 0.5 * oddf) * DF_SAG_AREOLE_DS;
+    let dth = (body.cs.theta * c.ribs / DF_TAU + c.phase - kf)
+        * DF_TAU / c.ribs * body.cs.r;
+    let felt = sqrt(ds * ds + dth * dth);
+    // The pad resolves or averages: its coverage of the crest band once the
+    // footprint outgrows it (degrees, not metres).
+    let fp_h = pixel_angle * body_t;
+    let pad = 1.0 - smoothstep(DF_SAG_FELT_R - 0.5 * fp_h,
+                               DF_SAG_FELT_R + 0.5 * fp_h, felt);
+    let pad_mean = DF_PI * DF_SAG_FELT_R * DF_SAG_FELT_R
+        / (DF_SAG_AREOLE_DS * 0.25 * DF_TAU * body.cs.r / c.ribs)
+        * smoothstep(0.6, 1.0, body.cs.x);
+    let felt_w = mix(pad, pad_mean,
+                     smoothstep(DF_SAG_FELT_R, 4.0 * DF_SAG_FELT_R, fp_h));
+    let code = select(DF_MAT_SKIN, DF_MAT_SKIN_FUZZ, mode == 2);
+    res.mat = vec4<f32>(f32(code) + tint, body.cs.x, felt_w, age);
+    return res;
+}
+
+// --- Item generation ----------------------------------------------------------
+
+const DF_P_SAGUARO: f32 = 0.42;
+
+fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>) -> DfItem {
+    var it: DfItem;
+    it.kind = 0;
+    it.seed = df_cell_seed(ci, DF_BIG_N, 0x5a17u);
+    let r0 = df_rand4(it.seed);
+    let rp = df_rand4(pcg2d(it.seed ^ vec2<u32>(0xb5297a4du, 0x68e31da4u)));
+    let margin = 2.3;
+    let xy = vec2<f32>(margin) + (DF_BIG_CELL - 2.0 * margin) * rp.xy;
+    it.base = vec3<f32>(xy, 0.0);
+    if (r0.x < DF_P_SAGUARO) {
+        it.base.z = desert_height(cell_org + xy);
+        // Re-draw the shape parameters from an independent stream: r0.x has
+        // been spent on the species choice.
+        it = df_saguaro_item(it, vec4<f32>(0.0, rp.z, rp.w, r0.y));
+    }
+    return it;
+}
+
+fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>) -> DfItem {
+    var it: DfItem;
+    it.kind = 0;
+    it.seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
+    return it;
+}
+
+fn df_item_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
+                 pixel_angle: f32, dither: vec2<f32>,
+                 shadow: bool) -> DesertHit {
+    var h: DesertHit;
+    h.hit = false;
+    h.t = tb;
+    if (it.kind == DF_KIND_SAGUARO) {
+        h = df_saguaro_trace(it, o, dir, ta, tb, pixel_angle, dither, shadow);
+    }
+    return h;
+}
+
+// One grid's DDA over [t0, t1]. Cells are visited front to back and every
+// item lies inside its cell, so the first hit is the nearest.
+fn df_walk(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t0: f32,
+           t1: f32, pixel_angle: f32, big: bool, dither: vec2<f32>,
+           shadow: bool) -> DesertHit {
+    var res: DesertHit;
+    res.hit = false;
+    res.t = t1;
+    if (t1 <= t0) {
+        return res;
+    }
+    let cell = select(DF_SMALL_CELL, DF_BIG_CELL, big);
+    let p0 = o + t0 * dir;
+    var ci = vec2<i32>(floor(p0.xy / cell));
+    let stp = vec2<i32>(select(-1, 1, dir.x > 0.0), select(-1, 1, dir.y > 0.0));
+    let inv2 = vec2<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                         select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9));
+    let cmin0 = vec2<f32>(ci) * cell;
+    var tmax = vec2<f32>(
+        t0 + (select(cmin0.x, cmin0.x + cell, dir.x > 0.0) - p0.x) * inv2.x,
+        t0 + (select(cmin0.y, cmin0.y + cell, dir.y > 0.0) - p0.y) * inv2.y);
+    tmax = vec2<f32>(select(1e30, tmax.x, abs(dir.x) > 1e-9),
+                     select(1e30, tmax.y, abs(dir.y) > 1e-9));
+    let tdelta = cell * abs(inv2);
+    var t_cur = t0;
+    for (var i: i32 = 0; i < DF_MAX_CELLS; i = i + 1) {
+        let t_exit = min(min(tmax.x, tmax.y), t1);
+        let org = vec2<f32>(ci) * cell;
+        var it: DfItem;
+        if (big) {
+            it = df_big_item(ci, org);
+        } else {
+            it = df_small_item(ci, org);
+        }
+        if (it.kind != 0) {
+            let ol = o - vec3<f32>(org, 0.0);
+            let hb = df_box(ol, inv_dir, it.bmin, it.bmax);
+            let ta = max(hb.x, t0);
+            let tb = min(hb.y, res.t);
+            if (ta < tb) {
+                let h = df_item_trace(it, ol, dir, ta, tb, pixel_angle,
+                                      dither, shadow);
+                if (h.hit && h.t < res.t) {
+                    res = h;
+                    res.pos = o + dir * h.t;
+                }
+            }
+        }
+        if (res.hit || t_exit >= t1) {
+            return res;
+        }
+        if (tmax.x < tmax.y) {
+            ci.x = ci.x + stp.x;
+            t_cur = tmax.x;
+            tmax.x = tmax.x + tdelta.x;
+        } else {
+            ci.y = ci.y + stp.y;
+            t_cur = tmax.y;
+            tmax.y = tmax.y + tdelta.y;
+        }
+    }
+    return res;
+}
+
+// --- Hooks the ground calls ------------------------------------------------------
+
+fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
+    let dither = df_ray_dither(dir);
+    var h = df_walk(o, dir, inv_dir, t0, t1, pixel_angle, true, dither, false);
+    let hs = df_walk(o, dir, inv_dir, t0, h.t, pixel_angle, false, dither,
+                     false);
+    if (hs.hit) {
+        h = hs;
+    }
+    return h;
+}
+
+// Transmittance of plants along the sun ray from p (the ground or a plant).
+fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
+    if (sun_dir.z <= 1e-3) {
+        return 0.0;
+    }
+    let top = desert_height_range().y + DESERT_FLORA_SLAB_H;
+    let t1 = max((top - p.z) / sun_dir.z, 0.0);
+    let inv = 1.0 / sun_dir;
+    let dither = vec2<f32>(0.5);
+    // Shadow walks trace bodies only, to the receiver's footprint `fp`,
+    // which travels in the pixel_angle slot.
+    let hb = df_walk(p, sun_dir, inv, 0.0, t1, fp, true, dither, true);
+    if (hb.hit) {
+        return 0.0;
+    }
+    let hs = df_walk(p, sun_dir, inv, 0.0, t1, fp, false, dither, true);
+    return select(1.0, 0.0, hs.hit);
+}
+
+// Fiber lighting for a needle of axis `ax`: Kajiya-Kay diffuse and sheen,
+// plus the forward transmission lobe that makes a backlit saguaro glow gold.
+fn df_fiber(albedo: vec3<f32>, ax: vec3<f32>, dir: vec3<f32>,
+            L: DesertLight, sun_vis: f32) -> vec3<f32> {
+    let ct = dot(ax, L.sun_dir);
+    let st = sqrt(max(1.0 - ct * ct, 0.0));
+    let cv = dot(ax, -dir);
+    let sv = sqrt(max(1.0 - cv * cv, 0.0));
+    let diffuse = albedo / DF_PI * (L.sun * sun_vis * st * 0.785 + L.sky * 0.6);
+    let sheen_c = max(ct * cv + st * sv, 0.0);
+    let sheen = 0.04 * pow(sheen_c, 40.0) * 41.0 / DF_TAU
+        * L.sun * sun_vis * st;
+    // Transmission: forward-peaked around the sun, width ~25 degrees.
+    let c = dot(dir, L.sun_dir);
+    let w = 0.10;
+    let tt = exp((c - 1.0) / w) / (DF_TAU * w);
+    let trans = albedo * 0.55 * tt * st * L.sun * sun_vis;
+    return diffuse + sheen + trans;
+}
+
+fn df_spine_albedo(tint: f32) -> vec3<f32> {
+    let g = tint / 0.9;
+    return mix(mix(DF_SPINE_STRAW, DF_SPINE_GREY, smoothstep(0.35, 0.8, g)),
+               DF_SPINE_RED, step(0.93, fract(g * 7.0)) * 0.6);
+}
+
+fn df_ggx_spec(n: vec3<f32>, dir: vec3<f32>, l: vec3<f32>, alpha: f32,
+               f0: f32) -> f32 {
+    let v = -dir;
+    let nl = dot(n, l);
+    let nv = dot(n, v);
+    if (nl <= 0.0 || nv <= 0.0) {
+        return 0.0;
+    }
+    let hv = normalize(l + v);
+    let nh = max(dot(n, hv), 0.0);
+    let a2 = alpha * alpha;
+    let den = nh * nh * (a2 - 1.0) + 1.0;
+    let dd = a2 / (DF_PI * den * den);
+    let k = alpha * 0.5;
+    let g = nl / (nl * (1.0 - k) + k) * nv / (nv * (1.0 - k) + k);
+    let vh = max(dot(v, hv), 0.0);
+    let f = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+    // Returned as a multiplier on L.sun (which is irradiance-like: a white
+    // Lambert facet returns sun/pi): BRDF * cos.
+    return dd * g * f / (4.0 * nv);
+}
+
+fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
+                      L: DesertLight) -> vec3<f32> {
+    let code = i32(floor(h.mat.x));
+    let tint = fract(h.mat.x);
+    let n = h.normal;
+    let sun_vis = desert_flora_shadow(h.pos + n * max(2e-3, fp),
+                                      L.sun_dir, fp);
+    var Ls = L;
+    Ls.sun = L.sun * sun_vis;
+    if (h.kind == DF_KIND_SAGUARO) {
+        if (code == DF_MAT_SPINE) {
+            return df_fiber(df_spine_albedo(tint), h.mat.yzw, dir, L,
+                            sun_vis);
+        }
+        if (code == DF_MAT_FUZZ) {
+            // Random needle orientations: the axis-averaged fiber terms.
+            let alb = mix(DF_SPINE_STRAW, DF_SPINE_GREY, 0.45);
+            let c = dot(dir, L.sun_dir);
+            let w = 0.10;
+            let tt = exp((c - 1.0) / w) / (DF_TAU * w);
+            return alb / DF_PI * (Ls.sun * 0.785 * 0.785 + L.sky * 0.6)
+                + alb * 0.55 * tt * 0.785 * Ls.sun;
+        }
+        if (code == DF_MAT_BARK) {
+            // Cracked across: dark seams every few centimetres of height.
+            let z = h.mat.z;
+            let seam = smoothstep(0.75, 0.95,
+                fract(z * 23.0 + 0.3 * sin(z * 7.0 + tint * 20.0)));
+            let seam_w = mix(seam, 0.2, smoothstep(0.004, 0.02, fp));
+            let alb = DF_SAG_BARK * (0.8 + 0.4 * tint) * (1.0 - 0.45 * seam_w)
+                * mix(0.75, 1.0, h.mat.y);
+            return desert_lambert(alb, n, Ls);
+        }
+        let x = h.mat.y;
+        let felt_w = h.mat.z;
+        let age = h.mat.w;
+        var skin = mix(DF_SAG_SKIN, DF_SAG_SKIN_OLD, age)
+            * (0.85 + 0.3 * tint);
+        // Grooves see less sky and less of the sun's bounce.
+        let ao = mix(0.62, 1.0, x);
+        let alb = mix(skin * ao, DF_SAG_FELT, felt_w);
+        var col = desert_lambert(alb, n, Ls)
+            + Ls.sun * df_ggx_spec(n, dir, L.sun_dir, 0.38, 0.045)
+              * (1.0 - felt_w);
+        if (code == DF_MAT_SKIN_FUZZ) {
+            // The shell has folded into the skin: its coverage at this view.
+            let mu = max(abs(dot(n, dir)), 0.12);
+            let tau_n = DF_SAG_FUZZ_SIGMA0 * 0.5 * DF_SAG_SHELL;
+            let cov = 1.0 - exp(-tau_n / mu);
+            let alb_s = mix(DF_SPINE_STRAW, DF_SPINE_GREY, 0.45);
+            let c = dot(dir, L.sun_dir);
+            let w = 0.10;
+            let tt = exp((c - 1.0) / w) / (DF_TAU * w);
+            let fuzz = alb_s / DF_PI * (Ls.sun * 0.785 * 0.785 + L.sky * 0.6)
+                + alb_s * 0.55 * tt * 0.785 * Ls.sun;
+            col = mix(col, fuzz, cov);
+        }
+        return col;
+    }
+    return vec3<f32>(1.0, 0.0, 1.0);
+}
+
+
+// --- Far field -----------------------------------------------------------------
 
 // The plants a far pixel sees but the explicit trace no longer draws: the
 // statistical canopy over the part of the ray past the explicit plants'
@@ -10428,22 +11383,6 @@ struct DesertCover {
     albedo: vec3<f32>,
     shadow: f32,
 };
-
-fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                      t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
-    return desert_miss();
-}
-
-fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
-                      L: DesertLight) -> vec3<f32> {
-    return vec3<f32>(0.0);
-}
-
-// Transmittance of the plants between ground point p (desert frame) and
-// the sun.
-fn desert_flora_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
-    return 1.0;
-}
 
 fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                     pixel_angle: f32, sun: vec3<f32>) -> DesertCover {

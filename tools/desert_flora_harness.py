@@ -1,0 +1,293 @@
+#!/usr/bin/env python
+"""Render soar's desert flora from a terminal, framed on a chosen plant.
+
+The iteration loop for the DESERT FLORA section of raymarch.wgsl: the same
+shader, uniform block and accumulation the browser runs (SoarRenderer with
+surface="desert"), over a prebaked demo's cloud field, with the cameras
+placed relative to a plant the shader itself put there.
+
+Finding the plant is the one thing the full renderer cannot do, so a small
+compute pass does it: the flora section is lifted out of raymarch.wgsl by
+its markers, compiled beside stubs of the ground's API, and asked for every
+big cell's item. What it reports is what the render draws, because it is the
+same code — there is no Python mirror of the placement to drift out of step.
+
+    tools/gpulock uv run python tools/desert_flora_harness.py --views all
+    tools/gpulock uv run python tools/desert_flora_harness.py --time
+
+Views are named by their distance from the hero saguaro (1m, 5m, 30m, 300m)
+plus `backlit`, a low sun behind it. `--camera` takes a free view in the
+desert frame.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import json
+import math
+import re
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+SHADER = ROOT / "cloudyview" / "soar" / "raymarch.wgsl"
+FLORA_BEGIN = "// === DESERT FLORA (desert-flora) ==="
+FLORA_END = "// === END DESERT FLORA ==="
+DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
+
+# Stubs of the ground API, for the placement scan only: nothing it computes
+# depends on them except the foot height, which the scan does not report.
+SCAN_PRELUDE = """
+const DESERT_FLORA_SLAB_H: f32 = 13.0;
+fn desert_height(xy: vec2<f32>) -> f32 { return 0.0; }
+fn desert_normal(xy: vec2<f32>) -> vec3<f32> { return vec3<f32>(0.0, 0.0, 1.0); }
+fn desert_height_range() -> vec2<f32> { return vec2<f32>(0.0, 0.0); }
+struct DesertHit { hit: bool, t: f32, pos: vec3<f32>, normal: vec3<f32>,
+                   kind: i32, mat: vec4<f32>, };
+struct DesertLight { sun_dir: vec3<f32>, sun: vec3<f32>, sky: vec3<f32>,
+                     ground: vec3<f32>, t_sun: f32, sky_open: f32, };
+fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight) -> vec3<f32> {
+    return albedo;
+}
+"""
+
+SCAN_MAIN = """
+@group(0) @binding(0) var<storage, read_write> scan_out: array<vec4<f32>>;
+
+@compute @workgroup_size(16, 16)
+fn scan(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = u32(DF_BIG_N);
+    if (gid.x >= n || gid.y >= n) {
+        return;
+    }
+    let ci = vec2<i32>(gid.xy);
+    let org = vec2<f32>(ci) * DF_BIG_CELL;
+    let it = df_big_item(ci, org);
+    let i = (gid.y * n + gid.x) * 2u;
+    scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
+    scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.w, it.a.z);
+}
+"""
+
+
+def extract(src: str, begin: str, end: str) -> str:
+    if src.count(begin) != 1 or src.count(end) != 1:
+        raise RuntimeError(f"{SHADER.name} must hold exactly one "
+                           f"'{begin}' ... '{end}' block.")
+    return src[src.index(begin):src.index(end) + len(end)]
+
+
+def extract_fn(src: str, name: str) -> str:
+    m = re.search(rf"^fn {name}\(.*?^}}\n", src, re.S | re.M)
+    if m is None:
+        raise RuntimeError(f"fn {name} not found in {SHADER.name}")
+    return m.group(0)
+
+
+def scan_plants():
+    """Every big cell's item, as the shader places it: rows of
+    (kind, x, y, height, radius, arms, age, ribs) in the desert frame."""
+    import wgpu
+    src = SHADER.read_text()
+    code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
+            + extract(src, FLORA_BEGIN, FLORA_END) + SCAN_MAIN)
+    adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
+    device = adapter.request_device_sync()
+    module = device.create_shader_module(code=code)
+    pipe = device.create_compute_pipeline(
+        layout="auto", compute={"module": module, "entry_point": "scan"})
+    n = 256
+    size = n * n * 2 * 16
+    buf = device.create_buffer(size=size, usage=wgpu.BufferUsage.STORAGE
+                               | wgpu.BufferUsage.COPY_SRC)
+    rb = device.create_buffer(size=size, usage=wgpu.BufferUsage.COPY_DST
+                              | wgpu.BufferUsage.MAP_READ)
+    bg = device.create_bind_group(layout=pipe.get_bind_group_layout(0),
+                                  entries=[{"binding": 0,
+                                            "resource": {"buffer": buf}}])
+    enc = device.create_command_encoder()
+    cp = enc.begin_compute_pass()
+    cp.set_pipeline(pipe)
+    cp.set_bind_group(0, bg)
+    cp.dispatch_workgroups(n // 16, n // 16)
+    cp.end()
+    enc.copy_buffer_to_buffer(buf, 0, rb, 0, size)
+    device.queue.submit([enc.finish()])
+    rb.map_sync(wgpu.MapMode.READ)
+    raw = np.frombuffer(bytearray(rb.read_mapped()), np.float32)
+    rb.unmap()
+    return raw.reshape(-1, 8)
+
+
+def pick_hero(plants, near=(2048.0, 2048.0)):
+    """The tallest saguaro with three or more arms nearest `near`."""
+    sag = plants[(plants[:, 0] == 8) & (plants[:, 5] >= 3)]
+    if len(sag) == 0:
+        raise RuntimeError("no saguaro with three arms anywhere in the tile")
+    d = np.hypot(sag[:, 1] - near[0], sag[:, 2] - near[1])
+    close = sag[d < np.percentile(d, 5)]
+    return close[np.argmax(close[:, 3])]
+
+
+def load_demo(demo, cache_dir: Path):
+    base = DEMOS / demo
+    meta = json.loads((base / "meta.json").read_text())
+    shape = tuple(meta["volume"]["shape_xyz"])
+    cache = cache_dir / f"{demo}.npy"
+    if cache.exists():
+        sigma = np.load(cache)
+    else:
+        raw = gzip.decompress((base / meta["volume"]["file"]).read_bytes())
+        sigma = np.frombuffer(raw, np.float16).reshape(shape)
+        np.save(cache, sigma)
+    return meta, sigma
+
+
+def hero_views(h, sun_az, sun_el):
+    """Cameras framed on the hero: (x, y, z, az, el, fov, sun_az, sun_el),
+    desert frame. The close views stand on the sun's side so the plant is
+    front-lit; `backlit` stands opposite a low sun."""
+    x, y, height, r = h[1], h[2], h[3], h[4]
+
+    def at(dist, z, look_z, fov, from_az, s_az=sun_az, s_el=sun_el):
+        # from_az: compass bearing from the plant to the camera.
+        a = math.radians(from_az)
+        cx = x + dist * math.sin(a)
+        cy = y + dist * math.cos(a)
+        az = (from_az + 180.0) % 360.0
+        el = math.degrees(math.atan2(look_z - z, dist))
+        return (cx, cy, z, az, el, fov, s_az, s_el)
+
+    side = sun_az + 25.0
+    return {
+        "1m": at(r + 0.55, 1.7, 1.55, 55.0, side),
+        "5m": at(5.0, 1.8, 0.45 * height, 80.0, side),
+        "30m": at(30.0, 2.5, 0.5 * height, 45.0, side),
+        "300m": at(300.0, 60.0, 0.4 * height, 30.0, side),
+        "backlit": at(9.0, 1.6, 0.55 * height, 70.0, sun_az + 180.0 + 8.0,
+                      sun_az, 7.0),
+        "backlit_close": at(r + 0.9, 2.2, 2.4, 50.0, sun_az + 180.0 + 12.0,
+                            sun_az, 9.0),
+    }
+
+
+def main(argv=None) -> int:
+    from cloudyview.soar_host import (
+        APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES, SceneState,
+        SoarRenderer, ViewState, surface_cell_m)
+    from cloudyview.witness import OCEAN_REFLECTANCE, QUALITY_PRESETS
+    from PIL import Image
+
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--demo", default="desert-coarse")
+    ap.add_argument("--views", default="all")
+    ap.add_argument("--size", type=int, nargs=2, default=(768, 432),
+                    help="render size (default: the low tier's 768x432)")
+    ap.add_argument("--frames", type=int, default=32)
+    ap.add_argument("--quality", default="low")
+    ap.add_argument("--exposure", type=float, default=2.0)
+    ap.add_argument("--haze", type=float, default=0.55)
+    ap.add_argument("--lod", type=float, default=0.5)
+    ap.add_argument("--sun", type=float, nargs=2, default=None,
+                    metavar=("AZ", "EL"), help="default: the demo's")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--time", action="store_true",
+                    help="also report ms/frame (median of single passes)")
+    ap.add_argument("--camera", type=float, nargs=6, default=None,
+                    metavar=("X", "Y", "Z", "AZ", "EL", "FOV"),
+                    help="a free view in the desert frame")
+    ap.add_argument("--hero-offset", type=float, nargs=3, default=None,
+                    metavar=("DX", "DY", "Z"),
+                    help="--camera relative to the hero's foot; aims at it")
+    args = ap.parse_args(argv)
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    plants = scan_plants()
+    kinds, counts = np.unique(plants[:, 0], return_counts=True)
+    print("tile census (big cells):",
+          ", ".join(f"kind {int(k)}: {c}" for k, c in zip(kinds, counts)))
+    hero = pick_hero(plants)
+    print(f"hero saguaro at ({hero[1]:.2f}, {hero[2]:.2f}): "
+          f"H {hero[3]:.2f} m, R {hero[4]:.3f} m, {int(hero[5])} arms, "
+          f"{int(hero[7])} ribs, age {hero[6]:.2f}")
+
+    meta, sigma = load_demo(args.demo, out)
+    bmin, bmax = meta["volume"]["bmin"], meta["volume"]["bmax"]
+    sun_az, sun_el = (args.sun if args.sun is not None
+                      else (meta["sun"]["azimuth"], meta["sun"]["elevation"]))
+    preset = QUALITY_PRESETS[args.quality]
+    r = SoarRenderer(periodic=bool(meta.get("periodic", True)),
+                     surface="desert")
+    r.upload_volume(sigma)
+    tile = r.surface_meta
+    dx = (bmax[0] - bmin[0]) / sigma.shape[0]
+    state = SceneState(
+        bmin=bmin, bmax=bmax,
+        dt_view=dx * preset["step_factor"],
+        dt_light=dx * preset["light_step_factor"],
+        periodic=bool(meta.get("periodic", True)),
+        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_fif_dx=surface_cell_m("desert", tile),
+        ocean_tile_extent=float(tile["tile_extent_m"]),
+        ocean_max_lod=int(tile["mips"]) - 1,
+        surface="desert",
+    )
+
+    views = hero_views(hero, sun_az, sun_el)
+    if args.views != "all":
+        views = {k: views[k] for k in args.views.split(",")}
+    if args.camera is not None:
+        c = args.camera
+        views = {"camera": (*c, sun_az, sun_el)}
+    if args.hero_offset is not None:
+        dxo, dyo, z = args.hero_offset
+        x, y = hero[1] + dxo, hero[2] + dyo
+        az = math.degrees(math.atan2(-dxo, -dyo)) % 360.0
+        el = math.degrees(math.atan2(0.5 * hero[3] - z, math.hypot(dxo, dyo)))
+        views = {"hero_offset": (x, y, z, az, el, 60.0, sun_az, sun_el)}
+
+    baked = None
+    w, h = args.size
+    for name, (x, y, z, az, el, fov, s_az, s_el) in views.items():
+        view = ViewState(
+            camera_position=[x, y, z], azimuth=az, elevation=el, fov=fov,
+            output_size=(w, h), render_size=(w, h),
+            sun_azimuth=s_az, sun_elevation=s_el,
+            exposure=args.exposure, haze=args.haze,
+            light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * args.lod,
+            view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * args.lod,
+            light_cache=bool(preset["light_cache"]),
+            sky_probe=bool(preset["sky_probe"]),
+        )
+        if preset["light_cache"] and baked != (s_az, s_el):
+            r.bake_light_cache(state, view, divisor=2)
+            baked = (s_az, s_el)
+        t0 = time.perf_counter()
+        img = r.render(state, view, frames=args.frames)
+        el_s = time.perf_counter() - t0
+        ms = ""
+        if args.time:
+            times = []
+            for _ in range(9):
+                t1 = time.perf_counter()
+                r.render(state, view, frames=1)
+                times.append(time.perf_counter() - t1)
+            ms = f"  {1000 * float(np.median(times)):7.2f} ms/frame"
+        png = out / f"{name}{args.tag}.png"
+        rgb = np.clip(np.asarray(img), 0.0, 1.0)
+        Image.fromarray((rgb * 255.0 + 0.5).astype(np.uint8)).save(png)
+        print(f"  {name:<14} {el_s:6.2f} s{ms}  -> {png}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
