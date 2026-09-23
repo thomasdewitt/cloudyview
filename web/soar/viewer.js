@@ -3136,8 +3136,8 @@ export class Viewer {
 
     // A few planes of the sun-tau bake per frame, ahead of the march so the
     // frame that completes it is also the first to read it. The reads flip
-    // on inside drawFrame the moment the bake finishes (row 23 is in the
-    // scene key, so the picture moves on to the cached method by itself);
+    // on inside drawFrame the moment the bake finishes, and a parked view's
+    // average restarts on the cached method there (drawFrame's methodKey);
     // the explicit march-pending is for a parked view, which otherwise has
     // no reason to march again. Inside the frame's failure path: a bake
     // pipeline that failed to compile throws here, and that must stop the

@@ -1257,14 +1257,29 @@ export class Renderer {
     const state = this._sceneState();
     // The effective flags, not the wishes: a wanted-but-unbaked cache reads
     // the live march. Row 23 is in the scene key, so a bake completing, a
-    // rung switching methods or an override is a scene change like any
-    // other: the accumulation moves on through the one-frame motion blend
-    // (_accumulationPlan), rather than averaging the two methods together.
+    // rung switching methods or an override is a scene change: never
+    // averaged with the old method, and with a parked camera a clean
+    // restart (see methodKey below).
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
     });
+    // A change of lighting method under a parked camera restarts the
+    // average instead of blending into it. Any scene-key change with a
+    // still camera takes the one-frame motion blend (_accumulationPlan),
+    // which suits a value that glides — exposure, haze — but a method switch
+    // is a step: a bake finishing, a tier changing methods or a K/J toggle
+    // replaces one lighting model with another, and the blend would hold a
+    // ~42% ghost of the old one for a frame before the average restarted.
+    // In flight the key changes every frame anyway, and the motion blend is
+    // the point, so a moving camera is left to it.
+    const methodKey = `${lighting.lightCache}|${lighting.skyProbe}`;
+    if (this._accumMethod !== undefined && methodKey !== this._accumMethod
+        && !this._cameraMoving) {
+      this._resetAccumulation();
+    }
+    this._accumMethod = methodKey;
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
