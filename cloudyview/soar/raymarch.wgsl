@@ -10843,11 +10843,9 @@ const DF_SAG_EXACT_FP1: f32 = 0.009;
 const DF_SAG_FUZZ_FP0: f32 = 0.025;
 const DF_SAG_FUZZ_FP1: f32 = 0.045;
 // Projected needle area per unit volume at the skin, falling linearly to
-// zero at the shell's edge (radials fill the inner half, centrals reach
-// out): 10 radials of 1.7 cm x 0.7 mm and 3 centrals of 3.5 cm x 1 mm per
-// areole, areoles 2.2 cm x ~8 cm apart, times the 2/pi mean projection of a
-// randomly oriented needle. Measured against the exact needles (see the
-// harness's --calibrate), not tuned by eye.
+// zero at the shell's edge. Measured: the value at which the shell medium
+// averages to what the exact needles average to over a trunk (harness view
+// trunk4m, each form forced in turn with --patch).
 const DF_SAG_FUZZ_SIGMA0: f32 = 2.7;
 // The folded shell's optical depth at normal incidence, measured: the value
 // at which the far form's mean over the trunk equals the exact needles'
@@ -11225,23 +11223,24 @@ fn df_saguaro_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
 //                 so the pixel's coverage in expectation is the leaves';
 //   beyond        the bush is one ellipsoid of the same mean density.
 const DF_CREO_TWIGS: i32 = 8;
-const DF_CREO_CLUMP_DS: f32 = 0.028;
-const DF_CREO_CLUMP_R: f32 = 0.020;
-const DF_CREO_LEAVES: i32 = 7;
-const DF_CREO_LEAF_HL: f32 = 0.0065;   // leaflet half-length (m)
-const DF_CREO_LEAF_HW: f32 = 0.0030;   // leaflet half-width (m)
+const DF_CREO_CLUMP_DS: f32 = 0.022;
+const DF_CREO_CLUMP_R: f32 = 0.022;
+const DF_CREO_LEAVES: i32 = 10;
+const DF_CREO_LEAF_HL: f32 = 0.0075;   // leaflet half-length (m)
+const DF_CREO_LEAF_HW: f32 = 0.0034;   // leaflet half-width (m)
 const DF_CREO_MAX_CLUMPS: i32 = 6;     // per twig per ray
 const DF_CREO_EXACT_FP0: f32 = 0.012;
 const DF_CREO_EXACT_FP1: f32 = 0.022;
 const DF_CREO_CAPS_FP0: f32 = 0.18;
 const DF_CREO_CAPS_FP1: f32 = 0.30;
 // Leaf-area optical depth per metre inside a foliage capsule and inside the
-// whole-bush envelope, from the clump counts above (calibrated against the
-// exact leaves by the harness, see --calibrate).
-const DF_CREO_CAPS_SIGMA: f32 = 11.0;
-const DF_CREO_ENV_SIGMA: f32 = 1.6;
+// whole-bush envelope. Measured, not derived: the values at which each form
+// averages to what the exact leaves average to (tools/desert_flora_harness.py,
+// view creo_5m, each form forced in turn with --patch).
+const DF_CREO_CAPS_SIGMA: f32 = 1.5;
+const DF_CREO_ENV_SIGMA: f32 = 0.35;
 
-const DF_CREO_LEAF: vec3<f32> = vec3<f32>(0.095, 0.150, 0.028);
+const DF_CREO_LEAF: vec3<f32> = vec3<f32>(0.100, 0.150, 0.016);
 const DF_CREO_LEAF_TRANS: vec3<f32> = vec3<f32>(0.060, 0.110, 0.010);
 const DF_CREO_STEM: vec3<f32> = vec3<f32>(0.230, 0.220, 0.200);
 const DF_CREO_FLOWER: vec3<f32> = vec3<f32>(0.600, 0.450, 0.020);
