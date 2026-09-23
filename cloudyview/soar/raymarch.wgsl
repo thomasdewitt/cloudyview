@@ -3161,7 +3161,7 @@ const CITY_PUDDLE_DARKEN: f32 = 0.85;
 const CITY_PUDDLE_THR: f32 = 0.67;
 const CITY_PUDDLE_EDGE: f32 = 0.035;
 const CITY_PUDDLE_LOD: vec2<f32> = vec2<f32>(0.30, 1.20);
-const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0620);
+const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
 
 // Manholes: CITY_MH_PITCH apart along every centreline (a divisor of the
 // block, so the lattice is the same on every block), set in a travel lane,
@@ -3205,9 +3205,8 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.20, 0.30);
-const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.05, 0.30);
-const CITY_GROUND_ALB_MEAN: f32 = 1.0;
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.1655, 0.2178);
+const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0269, 0.1010);
 
 // STUB for city-layout's predicate (bits 0-3 of cc.streets, on
 // bigday/city-layout). Theirs replaces this at merge: two definitions will
