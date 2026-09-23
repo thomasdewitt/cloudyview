@@ -360,16 +360,20 @@ export class Viewer {
       // volume) rather than re-downloaded per field.
       return (this._cityTile ??=
         await loadOceanTile(this.device, CITY_URL, undefined,
-                            { keepCells: true }));
+                            { keepCells: true,
+                              schema: K.SURFACE_TILE_SCHEMAS.city }));
     }
     if (kind === "desert") {
       // keepHeights: the camera's floor follows the terrain, read from the
       // same level-0 bytes the shader samples.
       return (this._desertTile ??=
         await loadOceanTile(this.device, DESERT_URL, undefined,
-                            { keepHeights: true }));
+                            { keepHeights: true,
+                              schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
-    return (this._ocean ??= await loadOceanTile(this.device, OCEAN_URL));
+    return (this._ocean ??= await loadOceanTile(
+      this.device, OCEAN_URL, undefined,
+      { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
   }
 
   async loadField(source, progress) {

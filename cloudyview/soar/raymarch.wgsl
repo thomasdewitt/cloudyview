@@ -2169,6 +2169,8 @@ const CITY_GROUND_Z: f32 = 0.0;
 const CITY_MAX_H: f32 = 5400.0;     // tallest roof (before mast)
 const CITY_SLAB_TOP: f32 = 5600.0;  // roof + tallest mast: the DDA's z gate
 const CITY_FLOOR_H: f32 = 3.6;      // one storey; window rows ride this
+const CITY_PER_STOREY: f32 = 0.2777777777777778;  // 1 / CITY_FLOOR_H
+const CITY_MAX_STOREYS: f32 = 1500.0;             // CITY_MAX_H / CITY_FLOOR_H
 const CITY_STREET_HALF: f32 = 6.0;  // half-width of a minor street (m)
 const CITY_AVENUE_EXTRA: f32 = 10.0; // extra half-width on avenue boundaries
 const CITY_AVENUE_PERIOD: i32 = 8;  // avenue every this many blocks
@@ -2183,6 +2185,27 @@ const CITY_SPRAWL_MIN_FRAC: f32 = 0.15;
 const CITY_H_BASE: f32 = 14.0;
 const CITY_H_SCALE: f32 = 390.0;
 const CITY_H_EXP: f32 = 1.2;
+// Massing bands (see the footprint block in city_cell). Below LOWRISE a
+// block is a row of frontages; from TOWER up a building is a tower whose
+// side is K sqrt(h) metres to the KNEE and K sqrt(KNEE) (h/KNEE)^0.3 above
+// it, never slenderer than SLENDER_MAX.
+const CITY_LOWRISE_H: f32 = 22.0;
+const CITY_TOWER_H: f32 = 60.0;
+const CITY_TOWER_SIDE_K: f32 = 4.2;
+const CITY_TOWER_KNEE_H: f32 = 800.0;
+// Above this a tower is a supertall: sharper taper, longer spire, a needle.
+const CITY_SUPERTALL_H: f32 = 1200.0;
+const CITY_SLENDER_MAX: f32 = 20.0;
+// Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
+// is an integer of at most 12 bits stored offset by -2048, where float16
+// holds every integer exactly.
+const CITY_USE_URBAN: i32 = 0;
+const CITY_USE_INDUSTRIAL: i32 = 1;
+const CITY_USE_YARD: i32 = 2;
+const CITY_USE_OPEN: i32 = 3;
+const CITY_WORD_OFFSET: f32 = 2048.0;
+// A warehouse's occupancy: a few office windows at one end, the rest dark.
+const CITY_INDUSTRY_LIT_FRAC: f32 = 0.03;
 // Windows.
 const CITY_WIN_PITCH_U: f32 = 3.4;  // horizontal window pitch (m)
 const CITY_WIN_U_LO: f32 = 0.14;    // pane bounds within the pitch cell
@@ -2239,6 +2262,12 @@ const CITY_SKYGLOW: vec3<f32> = vec3<f32>(0.012, 0.010, 0.016);
 const CITY_FACADE_ALBEDO: f32 = 0.030;
 const CITY_ROOF_ALBEDO: f32 = 0.085;
 const CITY_ASPHALT_ALBEDO: f32 = 0.035;
+const CITY_YARD_ALBEDO: f32 = 0.060;   // gravel, packed dirt, old concrete
+const CITY_SCRUB_ALBEDO: f32 = 0.050;  // dry scrub and bare soil
+// The city-lit cloud deck and sky as open fringe ground sees them (see the
+// ground branch of city_shade): a floor plus the wide glow, warm.
+const CITY_OPEN_SKY: vec3<f32> = vec3<f32>(0.060, 0.042, 0.030);
+const CITY_OPEN_SKY_BASE: f32 = 0.25;
 // Ground fog: exponential profile, uniform-in-z beyond its scale height
 // none — this is the night twin of the aerial-perspective machinery, kept
 // separate because its in-scatter source is the city itself, not the sky.
@@ -2298,7 +2327,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 // cloudyview/soar/city/components/, each owning one kind of thing (a street
 // prop, a facade layer, an elevated highway), registered in registry.json
 // and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls five hooks; the composer generates their
+// markers below. The core calls six hooks; the composer generates their
 // dispatchers over whatever is registered, and when nothing is, the
 // defaults below make every hook a no-op — except the shade dispatcher,
 // which returns magenta, because an unclaimed hit kind is a bug and should
@@ -2318,6 +2347,9 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //   cc_window_glyph      transmission multiplier inside a lit pane
 //                        (curtains, figures, androids) — 1 leaves the
 //                        window exactly as it was.
+//   cc_roof_detail       additive roof emission (a warehouse's lit
+//                        sawtooth glazing) at EVERY range — the far-field
+//                        mean of roof geometry that props draw only near.
 //
 // Component hits reuse CityHit with kind >= 100. See components/SPEC.md for
 // the contract agents write against.
@@ -2388,14 +2420,16 @@ fn city_lamp_inset(k: i32) -> f32 {
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
-// sampler so the tile wraps. This is the one number the fog, the sky dome
+// sampler so the tile wraps. Never below mip 1: the tile's r is the raw
+// density at mip 0 (heights) and the land-use-weighted glow from mip 1 up
+// (tools/export_web_assets.py), so the clamp is here, not a convention. This is the one number the fog, the sky dome
 // and the cloud uplight all share. `xy` is in the CITY FRAME (world minus
 // the row-24 offset — see city_camera_origin), whose origin IS the tile's
 // origin, so the uv is simply the coordinate over the extent: which
 // district sits where is decided entirely by the offset the host wrote.
 fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
     let uv = xy / u.ocean_params.y;
-    let l = clamp(lod, 0.0, u.ocean_params.w);
+    let l = clamp(lod, 1.0, u.ocean_params.w);
     return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
 }
 
@@ -2425,8 +2459,9 @@ struct CityCell {
     has_frustum: bool,
     fmin: vec3<f32>, fmax: vec3<f32>,
     fscale: f32,
-    // One building can own a 2x2 block group in a dense district; every
-    // member cell then reports the same merged plot and seed.
+    // One building can own a lot of several blocks — up to 4x4 under a
+    // supertall, 2x1 or 2x2 under a warehouse; every member cell then
+    // reports the same plot, seed and boxes.
     merged: bool,
     // The window style (see the style block in city_cell): 0 grid,
     // 1 ribbon bands, 2 vertical strips, 3 curtain wall, 4 punched.
@@ -2439,66 +2474,98 @@ struct CityCell {
     // freely; at or above 0 it is THE cyan (or amber, or magenta) tower —
     // every window draws near this one palette coordinate.
     win_mono: f32,
+    // What the lot is (CITY_USE_*): URBAN and INDUSTRIAL are built (a
+    // warehouse is a building); a YARD fronts a street but carries no
+    // building (vacant lot, container and trailer storage, refuse); OPEN
+    // land is scrub with no street at all.
+    land_use: i32,
+    // Which of this CELL's edges carry a street (bits 0-3: -x, +x, -y, +y)
+    // and which of its corner squares are paved (bits 4-7: (-x,-y) (+x,-y)
+    // (-x,+y) (+x,+y)). Per cell, not per lot: the edges inside a lot carry
+    // none. Read it through city_edge_street / city_ground_paved.
+    streets: u32,
+    // The whole lot's rectangle of cells (city frame, metres): the column
+    // every prim of the lot's building stays inside.
+    lot_min: vec2<f32>, lot_max: vec2<f32>,
+}
+
+// A packed lot word from its float16 channel (see CITY_WORD_OFFSET).
+fn city_word(v: f32) -> u32 {
+    return u32(v + CITY_WORD_OFFSET);
+}
+
+// Does this cell's `side` edge carry a street? 0 -x, 1 +x, 2 -y, 3 +y.
+fn city_edge_street(cc: CityCell, side: i32) -> bool {
+    return ((cc.streets >> u32(side)) & 1u) != 0u;
 }
 
 fn city_cell(ci: vec2<i32>) -> CityCell {
     var c: CityCell;
     let cell = u.ocean_params.x;
 
-    // Superblocks: in a dense district a 2x2 group of blocks is sometimes
-    // one building — the internal streets are swallowed and all four cells
-    // report the same plot, seed and cascade values, so the DDA assembles
-    // one seamless structure from whichever member it happens to visit.
-    // The group decision reads the ANCHOR cell's texel, so members agree.
-    // Texels AND seeds read the tile-wrapped index (city_tile_cell): the
-    // city frame's origin is the tile's, cell i maps to texel i, and the
-    // wrap before pcg2d is what makes a building a property of its tile
-    // coordinate rather than of how many domains the camera has crossed.
-    // (n is even, so wrapping commutes with the & -2 anchoring.)
-    let anchor = ci & vec2<i32>(-2);
-    let wa = city_tile_cell(anchor);
-    let ta = textureLoad(ocean_normals, wa, 0);
-    let gseed = pcg2d(vec2<u32>(
-        bitcast<u32>(wa.x) ^ 0x51ed270bu, bitcast<u32>(wa.y)));
-    let gh = city_rand4(gseed);
-    c.merged = ta.g > 0.50 && gh.x < 0.10;
-
-    var base = ci;
-    if (c.merged) {
-        base = anchor;
-        c.density = ta.r;
-        c.rank = ta.g;
-        c.seed = gseed;
-    } else {
-        let w = city_tile_cell(ci);
-        let texel = textureLoad(ocean_normals, w, 0);
-        c.density = texel.r;
-        c.rank = texel.g;
-        c.seed = pcg2d(vec2<u32>(bitcast<u32>(w.x), bitcast<u32>(w.y)));
+    // The lot. Which blocks belong together, what the land is used for and
+    // where the streets run were decided offline (cloudyview/city_lots.py)
+    // and packed into b and a at mip 0, because every one of those answers
+    // is non-local: a supertall claims the blocks around its peak, and a
+    // street exists only if it joins the network. Every member cell of a lot
+    // decodes the same rectangle and reads the same OWNER texel, so the DDA
+    // assembles one seamless building from whichever member it visits, and
+    // the owner — the lot's peak — keeps exactly the height it had as a
+    // block of its own. Texels AND seeds read the tile-wrapped index
+    // (city_tile_cell): the city frame's origin is the tile's, cell i maps
+    // to texel i, and the wrap before pcg2d is what makes a building a
+    // property of its tile coordinate rather than of how many domains the
+    // camera has crossed. The lot arithmetic runs on the UNWRAPPED index, so
+    // a lot that straddles the tile seam is still one rectangle.
+    let w = city_tile_cell(ci);
+    let texel = textureLoad(ocean_normals, w, 0);
+    let lot = city_word(texel.b);
+    let st = city_word(texel.a);
+    let back = vec2<i32>(i32(lot & 3u), i32((lot >> 2u) & 3u));
+    let span = vec2<i32>(i32((lot >> 4u) & 3u), i32((lot >> 6u) & 3u))
+               + vec2<i32>(1);
+    let own = vec2<i32>(i32((lot >> 8u) & 3u), i32((lot >> 10u) & 3u));
+    let base = ci - back;
+    c.merged = span.x > 1 || span.y > 1;
+    c.streets = st & 0xffu;
+    c.land_use = i32((st >> 8u) & 3u);
+    let wo = city_tile_cell(base + own);
+    var t_own = texel;
+    if (any(wo != w)) {
+        t_own = textureLoad(ocean_normals, wo, 0);
     }
+    c.density = t_own.r;
+    c.rank = t_own.g;
+    c.seed = pcg2d(vec2<u32>(bitcast<u32>(wo.x), bitcast<u32>(wo.y)));
 
-    // The plot: one cell's, or the whole group's. Street half-widths on the
-    // outer edges; avenue boundaries get extra. The avenue test can take the
-    // unwrapped index: its period (8) divides the blocks per tile (1024), so
-    // it is already the same function of the tile coordinate.
-    let span = select(1, 2, c.merged);
+    // The plot: the lot's rectangle less half a street on every outer edge,
+    // avenue boundaries wider. The inset holds on an edge that carries no
+    // street too — there the strip is bare lot ground rather than asphalt —
+    // so a plot edge is a kerb line wherever a street runs, and an avenue
+    // corridor is empty air whatever runs on it (skyway's decks rely on
+    // that). The avenue test can take the unwrapped index: its period (8)
+    // divides the blocks per tile (1024), so it is already the same function
+    // of the tile coordinate.
     let cmin = vec2<f32>(base) * cell;
-    let cmax = vec2<f32>(base + vec2<i32>(span)) * cell;
+    let cmax = vec2<f32>(base + span) * cell;
+    c.lot_min = cmin;
+    c.lot_max = cmax;
     let hx0 = CITY_STREET_HALF
         + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.x));
     let hx1 = CITY_STREET_HALF
-        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.x + span));
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.x + span.x));
     let hy0 = CITY_STREET_HALF
         + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.y));
     let hy1 = CITY_STREET_HALF
-        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.y + span));
+        + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(base.y + span.y));
     c.plot_min = cmin + vec2<f32>(hx0, hy0);
     c.plot_max = cmax - vec2<f32>(hx1, hy1);
     let r4 = city_rand4(c.seed);
     let r4b = city_rand4(c.seed ^ vec2<u32>(0x9e3779b9u, 0x85ebca6bu));
     let r4c = city_rand4(c.seed ^ vec2<u32>(0xdeadbeefu, 0x41c64e6du));
 
-    c.built = c.rank > CITY_EMPTY_RANK;
+    c.built = c.land_use == CITY_USE_URBAN
+           || c.land_use == CITY_USE_INDUSTRIAL;
     // Occupancy follows the cascade: downtown towers burn, outskirts
     // buildings are mostly asleep. This is what makes the density clusters
     // read at night — the same field that raised the buildings lights them.
@@ -2524,37 +2591,119 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         return c;
     }
 
+    let plot_size = c.plot_max - c.plot_min;
+    let pc = 0.5 * (c.plot_min + c.plot_max);
+    let r4d = city_rand4(c.seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u));
+
+    if (c.land_use == CITY_USE_INDUSTRIAL) {
+        // A warehouse: one low box across most of the lot, pushed to one
+        // long side so the other is the truck court its loading docks face.
+        // Clear heights run 9-15 m; the roof is flat to the core (the
+        // sawtooth and monitor ridges are the industry component's roof
+        // geometry). No mast, no setbacks, almost no windows.
+        let h = floor((9.0 + 6.0 * r4.x) * 2.0) * 0.5;
+        c.height = h;
+        c.top_z = h;
+        let long_x = plot_size.x > plot_size.y
+            || (plot_size.x == plot_size.y && r4.y < 0.5);
+        let along = select(plot_size.y, plot_size.x, long_x);
+        let across = select(plot_size.x, plot_size.y, long_x);
+        let fa = along * (0.78 + 0.17 * r4.z);
+        let fc = across * (0.58 + 0.22 * r4.w);
+        let slack_a = (along - fa) * r4b.x;
+        // The court side: the building hugs one long edge.
+        let slack_c = select(across - fc - 2.0, 2.0, r4b.y < 0.5);
+        var lo = c.plot_min;
+        var hi = c.plot_min;
+        if (long_x) {
+            lo = c.plot_min + vec2<f32>(slack_a, slack_c);
+            hi = lo + vec2<f32>(fa, fc);
+        } else {
+            lo = c.plot_min + vec2<f32>(slack_c, slack_a);
+            hi = lo + vec2<f32>(fc, fa);
+        }
+        c.b1min = vec3<f32>(lo, CITY_GROUND_Z);
+        c.b1max = vec3<f32>(hi, h);
+        c.win_style = 4;
+        c.win_pitch = 3.2 * (0.85 + 0.40 * r4b.z);
+        c.pane_lo = vec2<f32>(0.30, 0.45);
+        c.pane_hi = vec2<f32>(0.70, 0.80);
+        let span_p = c.pane_hi - c.pane_lo;
+        c.pane_frac = span_p.x * span_p.y;
+        c.win_mono = -1.0;
+        c.palette_bias = min(c.palette_bias * 1.4 + 0.1, 1.0);
+        c.lit_frac = CITY_INDUSTRY_LIT_FRAC * (0.3 + 1.4 * r4c.x);
+        return c;
+    }
+
     // Height: base + the cascade raised to a power, jittered, suppressed
     // toward the outskirts, and quantized to storeys so roofs are flat
-    // shelves rather than a continuum.
+    // shelves rather than a continuum. Every level below is a whole number
+    // of storeys, carried as the count ns and multiplied, never divided:
+    // WGSL rounds a product exactly but a quotient only to 2.5 ulp (NVIDIA
+    // divides by 3.6 as a multiply by its reciprocal), so floor(h * 0.75 /
+    // 3.6) lands a storey high on one GPU and not on another whenever
+    // 0.75 ns is whole — and the city must be the same city on every GPU,
+    // and in the JavaScript collision mirror (web/soar/citylots.js).
     let sprawl = mix(
         CITY_SPRAWL_MIN_FRAC, 1.0,
         smoothstep(CITY_EMPTY_RANK, CITY_SPRAWL_RANK_FULL, c.rank)
     );
-    var h = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
-            * (0.70 + 0.60 * r4.x) * sprawl;
-    h = clamp(floor(h / CITY_FLOOR_H) * CITY_FLOOR_H,
-              2.0 * CITY_FLOOR_H, CITY_MAX_H);
+    let h_raw = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
+                * (0.70 + 0.60 * r4.x) * sprawl;
+    let ns = clamp(floor(h_raw * CITY_PER_STOREY), 2.0, CITY_MAX_STOREYS);
+    let h = ns * CITY_FLOOR_H;
     c.height = h;
 
-    // Footprint inside the plot, jittered in size and position. Supertalls
-    // slim down — a 2 km tower on a full-plot footprint is a wall, and the
-    // structural taper is what makes the megatowers read as spires.
-    let plot_size = c.plot_max - c.plot_min;
-    let slender = mix(1.0, 0.55, smoothstep(300.0, 2000.0, h));
-    let fw = plot_size * slender
-        * vec2<f32>(0.55 + 0.40 * r4.y, 0.55 + 0.40 * r4.z);
+    // Footprint grows with height, the way a real city's does. Low-rise is
+    // a row of narrow frontages that fills its block; mid-rise fills the
+    // block with one mass; a tower's side grows as the square root of its
+    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 120 m at 800, the
+    // run real towers follow from floor-plate economics and sway — and more
+    // slowly above that (h^0.3: 150 m at 1.5 km, 180 m at 3 km), because
+    // what carries a supertall is taper, not bulk; a slenderness limit
+    // (height over width at most 20) floors the extremes. So the tallest
+    // towers are also the broadest, and a supertall needs the multi-block
+    // lot its peak claimed. Where the tower leaves most of its plot open it
+    // stands on a podium that fills the plot: the street wall every real
+    // downtown tower keeps.
+    let r4f = city_rand4(c.seed ^ vec2<u32>(0x6a09e667u, 0xbb67ae85u));
+    var fw = plot_size * vec2<f32>(0.80 + 0.17 * r4.y, 0.80 + 0.17 * r4.z);
+    var podium = false;
+    var zp = 0.0;
+    if (h >= CITY_TOWER_H) {
+        let h_eff = select(h, CITY_TOWER_KNEE_H
+                              * pow(h / CITY_TOWER_KNEE_H, 0.6),
+                           h > CITY_TOWER_KNEE_H);
+        let side = max(CITY_TOWER_SIDE_K * sqrt(h_eff) * (0.80 + 0.40 * r4.y),
+                       h / CITY_SLENDER_MAX);
+        let aspect = 0.72 + 0.28 * r4.z;
+        let sides = select(vec2<f32>(side * aspect, side),
+                           vec2<f32>(side, side * aspect), r4f.y < 0.5);
+        fw = min(sides, plot_size * 0.94);
+        // A podium where the tower leaves most of the plot open: three to
+        // eight storeys (up to twelve under a supertall), nearly plot-wide,
+        // and never more than a third of the tower.
+        if (min(fw.x / plot_size.x, fw.y / plot_size.y) < 0.75) {
+            podium = true;
+            let storeys = floor(mix(3.0, select(8.0, 12.0, c.merged), r4f.z));
+            zp = min(storeys * CITY_FLOOR_H,
+                     floor(ns * 0.33333334) * CITY_FLOOR_H);
+        }
+    }
     let slack = plot_size - fw;
     let bmin2 = c.plot_min + slack * vec2<f32>(r4.w, r4b.x);
     let bmax2 = bmin2 + fw;
     let bc = 0.5 * (bmin2 + bmax2);
+    let pod_fw = plot_size * (0.92 + 0.06 * r4f.w);
+    let pod_min = pc - 0.5 * pod_fw;
+    let pod_max = pc + 0.5 * pod_fw;
 
     // The architecture. Low buildings stay slabs; above 60 m the draw picks
     // among four archetypes, and the megatowers lean hard toward the two
     // frustum forms — a 3 km rectangular extrusion is a wall, a 3 km
     // tapering shaft is a spire (Thomas: not perfect rectangular prisms;
     // architectures that grow, or have a spire).
-    let r4d = city_rand4(c.seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u));
     if (h > 60.0) {
         if (r4d.x < 0.20) {
             c.arch = 2;                   // growth: cantilevered buds
@@ -2564,26 +2713,92 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             c.arch = 4;                   // spire crown
         }
     }
-    if (h > 600.0 && r4d.y < 0.65) {
+    if (h > 600.0 && r4d.y < select(0.65, 0.85, h > CITY_SUPERTALL_H)) {
         c.arch = select(3, 4, r4d.y < 0.30);
     }
 
-    if (c.arch == 3) {
-        // Podium + a shaft whose cross-section closes toward the crown.
-        let zp = max(floor(h * 0.12 / CITY_FLOOR_H) * CITY_FLOOR_H,
-                     CITY_FLOOR_H);
+    if (h < CITY_LOWRISE_H) {
+        // Low-rise: a row of frontages, not one box. The block is filled at
+        // the lower height and one run of it — a third to two thirds of the
+        // long side, flush to one end — rises one to three storeys higher,
+        // with sometimes a third step on that; from the street the block
+        // reads as neighbours of different heights sharing party walls.
+        c.arch = 0;
+        let long_x = fw.x >= fw.y;
+        let n_up = 1.0 + floor(3.0 * r4d.z);
+        let z1 = max(h - n_up * CITY_FLOOR_H, CITY_FLOOR_H);
         c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
-        c.b1max = vec3<f32>(bmax2, zp);
-        let fw_shaft = fw * 0.90;
+        c.b1max = vec3<f32>(bmax2, z1);
+        if (z1 < h) {
+            c.tiers = 2;
+            let run = 0.33 + 0.34 * r4d.w;
+            let at_hi = r4b.w < 0.5;
+            var lo = bmin2;
+            var hi = bmax2;
+            if (long_x) {
+                let len = fw.x * run;
+                lo.x = select(bmin2.x, bmax2.x - len, at_hi);
+                hi.x = lo.x + len;
+            } else {
+                let len = fw.y * run;
+                lo.y = select(bmin2.y, bmax2.y - len, at_hi);
+                hi.y = lo.y + len;
+            }
+            c.b2min = vec3<f32>(lo, z1);
+            c.b2max = vec3<f32>(hi, h);
+            if (h - z1 >= 2.0 * CITY_FLOOR_H && r4f.x < 0.40) {
+                // A last storey or two over the far half of the run.
+                c.tiers = 3;
+                let z2 = h - CITY_FLOOR_H;
+                c.b2max.z = z2;
+                var lo3 = lo;
+                var hi3 = hi;
+                if (long_x) {
+                    let len3 = 0.5 * (hi.x - lo.x);
+                    lo3.x = select(lo.x, hi.x - len3, at_hi);
+                    hi3.x = lo3.x + len3;
+                } else {
+                    let len3 = 0.5 * (hi.y - lo.y);
+                    lo3.y = select(lo.y, hi.y - len3, at_hi);
+                    hi3.y = lo3.y + len3;
+                }
+                c.b3min = vec3<f32>(lo3, z2);
+                c.b3max = vec3<f32>(hi3, h);
+            }
+        }
+    } else if (c.arch == 3) {
+        // Podium + a shaft whose cross-section closes toward the crown. The
+        // podium is the plot-wide one where the tower left room for it,
+        // otherwise a base course of the tower's own footprint.
+        zp = select(max(floor(ns * 0.12) * CITY_FLOOR_H,
+                        CITY_FLOOR_H), zp, podium);
+        c.b1min = vec3<f32>(select(bmin2, pod_min, podium), CITY_GROUND_Z);
+        c.b1max = vec3<f32>(select(bmax2, pod_max, podium), zp);
+        let fw_shaft = fw * select(0.90, 1.0, podium);
         c.has_frustum = true;
         c.fmin = vec3<f32>(bc - 0.5 * fw_shaft, zp);
         c.fmax = vec3<f32>(bc + 0.5 * fw_shaft, h);
-        c.fscale = 0.55 + 0.25 * r4d.z;
+        // A supertall's shaft closes much further: its elegance is the
+        // taper, and a 3 km prism that only narrows by a third reads as a
+        // wall however wide its base is right to be.
+        c.fscale = select(0.55 + 0.25 * r4d.z, 0.28 + 0.22 * r4d.z,
+                          h > CITY_SUPERTALL_H);
     } else if (c.arch == 4) {
-        // A straight shaft to three quarters, then a steep spire.
-        let zs = floor(h * 0.75 / CITY_FLOOR_H) * CITY_FLOOR_H;
-        c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
-        c.b1max = vec3<f32>(bmax2, zs);
+        // A straight shaft to three quarters, then a steep spire — on the
+        // podium, when there is one, as a stacked tier.
+        // Supertalls give the spire a longer run: the top 35-45%.
+        let zs = floor(ns * select(0.75, 0.55 + 0.10 * r4d.w,
+                                   h > CITY_SUPERTALL_H)) * CITY_FLOOR_H;
+        if (podium) {
+            c.tiers = 2;
+            c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
+            c.b1max = vec3<f32>(pod_max, zp);
+            c.b2min = vec3<f32>(bmin2, zp);
+            c.b2max = vec3<f32>(bmax2, zs);
+        } else {
+            c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
+            c.b1max = vec3<f32>(bmax2, zs);
+        }
         c.has_frustum = true;
         c.fmin = vec3<f32>(bmin2, zs);
         c.fmax = vec3<f32>(bmax2, h);
@@ -2591,14 +2806,14 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     } else if (c.arch == 2) {
         // Growth: a straight tower with one or two boxes budding from its
         // upper flanks, cantilevered over the street. Buds stay inside the
-        // cell (or merged group) so the DDA's per-cell testing stays exact.
+        // lot so the DDA's per-cell testing stays exact.
         c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
         c.b1max = vec3<f32>(bmax2, h);
         c.tiers = 2;
         let side = i32(floor(r4d.z * 4.0));   // which flank the bud rides
-        let bz0 = floor(h * (0.42 + 0.20 * r4d.w) / CITY_FLOOR_H)
+        let bz0 = floor(ns * (0.42 + 0.20 * r4d.w))
                   * CITY_FLOOR_H;
-        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * h / CITY_FLOOR_H)
+        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * ns)
                             * CITY_FLOOR_H + CITY_FLOOR_H,
                       h - CITY_FLOOR_H);
         let reach = 0.22 * min(fw.x, fw.y);
@@ -2617,33 +2832,51 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             bud_min = vec2<f32>(bmin2.x + 0.2 * fw.x, bmin2.y - reach);
             bud_max = vec2<f32>(bmax2.x - 0.2 * fw.x, bmin2.y + 1.0);
         }
-        // Clamped to the cell column minus a hair, so no prim leaves it.
-        bud_min = max(bud_min, cmin + vec2<f32>(0.5));
-        bud_max = min(bud_max, cmax - vec2<f32>(0.5));
+        // Clamped to the lot minus a hair, so no prim leaves it — and to
+        // the plot on avenue edges, whose corridor is skyway's empty air.
+        let bud_lo = cmin + vec2<f32>(
+            select(0.5, hx0, city_is_avenue(base.x)),
+            select(0.5, hy0, city_is_avenue(base.y)));
+        let bud_hi = cmax - vec2<f32>(
+            select(0.5, hx1, city_is_avenue(base.x + span.x)),
+            select(0.5, hy1, city_is_avenue(base.y + span.y)));
+        bud_min = max(bud_min, bud_lo);
+        bud_max = min(bud_max, bud_hi);
         c.b2min = vec3<f32>(bud_min, bz0);
         c.b2max = vec3<f32>(bud_max, bz1);
         if (h > 200.0 && r4b.y > 0.55) {
             c.tiers = 3;
-            let cz0 = floor(h * (0.68 + 0.12 * r4b.w) / CITY_FLOOR_H)
+            let cz0 = floor(ns * (0.68 + 0.12 * r4b.w))
                       * CITY_FLOOR_H;
             let cz1 = min(cz0 + 8.0 * CITY_FLOOR_H, h - CITY_FLOOR_H);
             // The second bud rides the opposite flank: mirror about bc.
             let m0 = 2.0 * bc - bud_max;
             let m1 = 2.0 * bc - bud_min;
-            c.b3min = vec3<f32>(
-                max(min(m0, m1), cmin + vec2<f32>(0.5)), cz0);
-            c.b3max = vec3<f32>(
-                min(max(m0, m1), cmax - vec2<f32>(0.5)), cz1);
+            c.b3min = vec3<f32>(max(min(m0, m1), bud_lo), cz0);
+            c.b3max = vec3<f32>(min(max(m0, m1), bud_hi), cz1);
         }
+    } else if (podium) {
+        // Podium, tower, crown: the setback stack with the street wall at
+        // the bottom and the tower's own crown setback at the top.
+        c.tiers = 3;
+        let zc = floor(ns * (0.70 + 0.15 * r4b.w))
+                 * CITY_FLOOR_H;
+        c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
+        c.b1max = vec3<f32>(pod_max, zp);
+        c.b2min = vec3<f32>(bmin2, zp);
+        c.b2max = vec3<f32>(bmax2, zc);
+        let fw3 = fw * (0.62 + 0.18 * r4b.z);
+        c.b3min = vec3<f32>(bc - 0.5 * fw3, zc);
+        c.b3max = vec3<f32>(bc + 0.5 * fw3, h);
     } else {
         // Setback tiers: the wedding cake (the founding archetype).
         var z1 = h;
         if (h > 90.0 && r4b.y > 0.45) {
             c.tiers = 2;
-            z1 = floor(h * 0.60 / CITY_FLOOR_H) * CITY_FLOOR_H;
+            z1 = floor(ns * 0.60) * CITY_FLOOR_H;
             if (h > 180.0 && r4b.y > 0.80) {
                 c.tiers = 3;
-                z1 = floor(h * 0.50 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                z1 = floor(ns * 0.50) * CITY_FLOOR_H;
             }
         }
         c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
@@ -2652,7 +2885,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             var z2 = h;
             var f2 = 0.68;
             if (c.tiers == 3) {
-                z2 = floor(h * 0.78 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                z2 = floor(ns * 0.78) * CITY_FLOOR_H;
                 f2 = 0.72;
             }
             let fw2 = fw * f2;
@@ -2731,15 +2964,25 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // stand a mast on, and a tapered shaft only offers its shrunken crown
     // cap (Thomas, 2026-08-20: bridges/antennas only on the building types
     // that can carry them — components read cc.arch for the same rule).
-    if (h > CITY_MAST_MIN_H && r4b.z < 0.65 && c.arch != 4) {
+    // A supertall's tapered shaft always ends in a needle: a mast scaled to
+    // the tower (6-11% of its height, as thick as a needle that long must
+    // be), centred on the crown, and kept under the DDA's z gate.
+    let needle = c.arch == 3 && h > CITY_SUPERTALL_H;
+    if (h > CITY_MAST_MIN_H && (r4b.z < 0.65 || needle) && c.arch != 4) {
         c.has_mast = true;
-        let mast_h = 12.0 + 45.0 * r4b.w;
-        let crown = select(1.0, c.fscale * 0.85, c.arch == 3);
-        let moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * (0.4 * crown);
+        var mast_h = 12.0 + 45.0 * r4b.w;
+        var cross = CITY_MAST_CROSS;
+        var moff = vec2<f32>(0.0);
+        if (needle) {
+            mast_h = min(h * (0.06 + 0.05 * r4b.w), CITY_SLAB_TOP - h - 1.0);
+            cross = max(CITY_MAST_CROSS, 0.03 * mast_h);
+        } else {
+            let crown = select(1.0, c.fscale * 0.85, c.arch == 3);
+            moff = (vec2<f32>(r4c.w, r4.x) - 0.5) * fw * (0.4 * crown);
+        }
         let mc = bc + moff;
-        c.mast_min = vec3<f32>(mc - vec2<f32>(0.5 * CITY_MAST_CROSS), h);
-        c.mast_max = vec3<f32>(mc + vec2<f32>(0.5 * CITY_MAST_CROSS),
-                               h + mast_h);
+        c.mast_min = vec3<f32>(mc - vec2<f32>(0.5 * cross), h);
+        c.mast_max = vec3<f32>(mc + vec2<f32>(0.5 * cross), h + mast_h);
         c.top_z = h + mast_h;
     } else {
         c.top_z = h;
@@ -3054,33 +3297,230 @@ fn city_window_color(draw: f32, bias: f32) -> vec3<f32> {
 }
 
 // Streetlight pools on the asphalt around block edges. Evaluated for the
-// nearest x- and y- boundary lines; each street has a lamp line either side.
+// nearest x- and y- boundary lines; each street has a lamp line either side
+// — where the street exists. The nearest boundary lines are always the
+// cell's own edges, so the cell's one street word says which of the two
+// lines carries lamps; a line through open scrub is dark.
 fn city_street_pools(p: vec2<f32>) -> f32 {
     let cell = u.ocean_params.x;
+    let ci = vec2<i32>(floor(p / cell));
+    let st = city_word(textureLoad(ocean_normals, city_tile_cell(ci), 0).a);
     var pool = 0.0;
     // Nearest x-boundary (a street running along y).
     let bx = round(p.x / cell) * cell;
     let bxi = i32(round(p.x / cell));
-    let ax = select(1.0, 1.6, city_is_avenue(bxi));
-    let inx = city_lamp_inset(bxi);
-    for (var s: i32 = 0; s < 2; s = s + 1) {
-        let lx = bx + select(-inx, inx, s == 1);
-        let ly = round(p.y / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
-        let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
-        pool = pool + ax * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
+    if (((st >> select(0u, 1u, bxi > ci.x)) & 1u) != 0u) {
+        let ax = select(1.0, 1.6, city_is_avenue(bxi));
+        let inx = city_lamp_inset(bxi);
+        for (var s: i32 = 0; s < 2; s = s + 1) {
+            let lx = bx + select(-inx, inx, s == 1);
+            let ly = round(p.y / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+            let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
+            pool = pool
+                + ax * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
+        }
     }
     // Nearest y-boundary (a street running along x).
     let by = round(p.y / cell) * cell;
     let byi = i32(round(p.y / cell));
-    let ay = select(1.0, 1.6, city_is_avenue(byi));
-    let iny = city_lamp_inset(byi);
-    for (var s: i32 = 0; s < 2; s = s + 1) {
-        let ly = by + select(-iny, iny, s == 1);
-        let lx = round(p.x / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
-        let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
-        pool = pool + ay * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
+    if (((st >> select(2u, 3u, byi > ci.y)) & 1u) != 0u) {
+        let ay = select(1.0, 1.6, city_is_avenue(byi));
+        let iny = city_lamp_inset(byi);
+        for (var s: i32 = 0; s < 2; s = s + 1) {
+            let ly = by + select(-iny, iny, s == 1);
+            let lx = round(p.x / CITY_LAMP_SPACING) * CITY_LAMP_SPACING;
+            let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
+            pool = pool
+                + ay * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
+        }
     }
     return pool;
+}
+
+// Is the ground at p (inside cell ci) street asphalt? The strips along the
+// cell's edges, half a street wide, are asphalt where that edge carries a
+// street; the corner squares where any street meets there. Everything else
+// is lot ground — including a strip along an edge with no street, and
+// every boundary inside a multi-block lot.
+fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
+    let cell = u.ocean_params.x;
+    let q = p - vec2<f32>(ci) * cell;
+    let hw0 = vec2<f32>(
+        CITY_STREET_HALF + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x)),
+        CITY_STREET_HALF + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.y)));
+    let hw1 = vec2<f32>(
+        CITY_STREET_HALF
+            + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x + 1)),
+        CITY_STREET_HALF
+            + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.y + 1)));
+    let lo = q < hw0;
+    let hi = q > vec2<f32>(cell) - hw1;
+    var bit = 99u;
+    if ((lo.x || hi.x) && (lo.y || hi.y)) {
+        bit = 4u + select(0u, 1u, hi.x) + select(0u, 2u, hi.y);
+    } else if (lo.x) {
+        bit = 0u;
+    } else if (hi.x) {
+        bit = 1u;
+    } else if (lo.y) {
+        bit = 2u;
+    } else if (hi.y) {
+        bit = 3u;
+    }
+    return bit < 8u && ((cc.streets >> bit) & 1u) != 0u;
+}
+
+// --- The industrial belt's floodlights -----------------------------------
+//
+// The fringe is dark on purpose — a foil for the neon core — and what light
+// it has comes from a few floods: sodium or LED fixtures over a warehouse's
+// loading court, and poles at the corners of a yard. A lot's fixtures are a
+// pure function of its cell (the building box says which long wall faces
+// the court), so the ground pools here, the wall wash and the fixture
+// geometry in the industry component all agree on where each lamp is.
+// Pools are Gaussians on the ground, like the street lamps, so the far
+// field has an exact mean: sum(peak * 2 pi sigma^2) over the lot's area.
+
+const CITY_FLOOD_MAX: i32 = 4;
+const CITY_FLOOD_PEAK: f32 = 0.85;       // ground radiance at a pool centre
+const CITY_FLOOD_SIGMA_WALL: f32 = 7.0;  // pool radius, wall-mounted (m)
+const CITY_FLOOD_SIGMA_POLE: f32 = 10.0; // pool radius, pole-mounted (m)
+const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(1.0, 0.45, 0.14);
+const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.78, 0.88, 1.00);
+
+struct CityFlood {
+    on: bool,
+    head: vec3<f32>,   // the fixture (city frame, m)
+    aim: vec2<f32>,    // horizontal direction it throws its light (unit)
+    pool: vec2<f32>,   // centre of its pool on the ground
+    sigma: f32,
+    color: vec3<f32>,  // radiance at the pool centre
+}
+
+// Fixture k (0 .. CITY_FLOOD_MAX-1) of the lot this cell belongs to.
+fn city_flood(cc: CityCell, k: i32) -> CityFlood {
+    var f: CityFlood;
+    f.on = false;
+    f.head = vec3<f32>(0.0);
+    f.aim = vec2<f32>(1.0, 0.0);
+    f.pool = vec2<f32>(0.0);
+    f.sigma = 1.0;
+    f.color = vec3<f32>(0.0);
+    let fh = city_rand4(cc.seed ^ vec2<u32>(0x1f83d9abu, 0x5be0cd19u));
+    let kh = city_rand4(cc.seed ^ vec2<u32>(
+        0x9b05688cu * u32(k + 1), 0x510e527fu));
+    let tint = select(CITY_FLOOD_LED, CITY_FLOOD_SODIUM, fh.x < 0.55);
+    if (cc.land_use == CITY_USE_INDUSTRIAL) {
+        // Along the court wall: one slot per ~32 m, most of them lit.
+        let long_x = (cc.b1max.x - cc.b1min.x) >= (cc.b1max.y - cc.b1min.y);
+        var a0 = cc.b1min.y;
+        var a1 = cc.b1max.y;
+        var gap_lo = cc.b1min.x - cc.plot_min.x;
+        var gap_hi = cc.plot_max.x - cc.b1max.x;
+        if (long_x) {
+            a0 = cc.b1min.x;
+            a1 = cc.b1max.x;
+            gap_lo = cc.b1min.y - cc.plot_min.y;
+            gap_hi = cc.plot_max.y - cc.b1max.y;
+        }
+        let n = clamp(i32(floor((a1 - a0) / 32.0)), 1, CITY_FLOOD_MAX);
+        if (k >= n || kh.x > 0.72) {
+            return f;
+        }
+        let court_hi = gap_hi >= gap_lo;
+        let along = mix(a0, a1, (f32(k) + 0.5) / f32(n));
+        let z = min(cc.height - 1.2, 7.5);
+        if (long_x) {
+            let wall = select(cc.b1min.y, cc.b1max.y, court_hi);
+            f.aim = vec2<f32>(0.0, select(-1.0, 1.0, court_hi));
+            f.head = vec3<f32>(along, wall + 0.8 * f.aim.y, z);
+        } else {
+            let wall = select(cc.b1min.x, cc.b1max.x, court_hi);
+            f.aim = vec2<f32>(select(-1.0, 1.0, court_hi), 0.0);
+            f.head = vec3<f32>(wall + 0.8 * f.aim.x, along, z);
+        }
+        f.sigma = CITY_FLOOD_SIGMA_WALL;
+        f.pool = f.head.xy + f.aim * 5.0;
+    } else if (cc.land_use == CITY_USE_YARD) {
+        // Poles at two opposite corners of the plot, when the yard is lit
+        // at all; a third of yards are dark.
+        if (k >= 2 || fh.y < 0.33 || kh.x > 0.80) {
+            return f;
+        }
+        let diag = select(0, 1, fh.z < 0.5);
+        let corner = select(vec2<f32>(f32(diag), f32(1 - diag)),
+                            vec2<f32>(f32(1 - diag), f32(diag)), k == 1);
+        let at = mix(cc.plot_min + vec2<f32>(1.5),
+                     cc.plot_max - vec2<f32>(1.5), corner);
+        f.aim = normalize(vec2<f32>(1.0) - 2.0 * corner);
+        f.head = vec3<f32>(at, 10.0);
+        f.sigma = CITY_FLOOD_SIGMA_POLE;
+        f.pool = at + f.aim * 7.0;
+    } else {
+        return f;
+    }
+    f.on = true;
+    f.color = tint * (CITY_FLOOD_PEAK * (0.75 + 0.5 * kh.y));
+    return f;
+}
+
+// Flood light on the ground at p: the lot's pools, dissolving into their
+// exact mean over the lot as the pixel footprint outgrows a pool.
+fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
+    if (cc.land_use != CITY_USE_INDUSTRIAL && cc.land_use != CITY_USE_YARD) {
+        return vec3<f32>(0.0);
+    }
+    var near = vec3<f32>(0.0);
+    var flux = vec3<f32>(0.0);
+    for (var k: i32 = 0; k < CITY_FLOOD_MAX; k = k + 1) {
+        let f = city_flood(cc, k);
+        if (f.on) {
+            let d = p - f.pool;
+            near = near + f.color
+                * exp(-dot(d, d) / (2.0 * f.sigma * f.sigma));
+            flux = flux + f.color * (6.2831853 * f.sigma * f.sigma);
+        }
+    }
+    let area = (cc.lot_max.x - cc.lot_min.x) * (cc.lot_max.y - cc.lot_min.y);
+    let blend = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+    return mix(near, flux / area, blend);
+}
+
+// One lattice corner of the ground mottle's octave o: a uniform draw at the
+// corner, wrapped at the tile's `per` lattice cells.
+fn city_mottle_corner(j: vec2<i32>, per: i32, o: i32) -> f32 {
+    let jw = ((j % per) + per) % per;
+    return city_u01(pcg2d(vec2<u32>(
+        bitcast<u32>(jw.x) ^ 0x2c1b3c6du,
+        bitcast<u32>(jw.y) ^ u32(o) * 0x297a2d39u)).x);
+}
+
+// Patchy value noise over lot ground, mean one: scrub clumps at 14.4 m and
+// grit at 3.6 m. Both lattices divide the tile (92160 m = 6400 x 14.4 =
+// 25600 x 3.6), and the corners wrap at it,
+// so the pattern is as tile-periodic as everything else in the city. Each
+// octave fades to its mean (one) as the footprint approaches its scale.
+fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
+    var m = 1.0;
+    for (var o: i32 = 0; o < 2; o = o + 1) {
+        let scale = select(3.6, 14.4, o == 0);
+        let amp = select(0.35, 0.65, o == 0)
+                  * (1.0 - smoothstep(0.25 * scale, scale, fp));
+        if (amp > 0.0) {
+            let per = i32(round(u.ocean_params.y / scale));
+            let q = p / scale;
+            let i = vec2<i32>(floor(q));
+            let f = q - floor(q);
+            let w = f * f * (3.0 - 2.0 * f);
+            let c00 = city_mottle_corner(i, per, o);
+            let c10 = city_mottle_corner(i + vec2<i32>(1, 0), per, o);
+            let c01 = city_mottle_corner(i + vec2<i32>(0, 1), per, o);
+            let c11 = city_mottle_corner(i + vec2<i32>(1, 1), per, o);
+            let v = mix(mix(c00, c10, w.x), mix(c01, c11, w.x), w.y);
+            m = m * (1.0 + amp * (2.0 * v - 1.0));
+        }
+    }
+    return m;
 }
 
 // Surface radiance at a city hit, before fog. fp is the pixel footprint at
@@ -3125,7 +3565,8 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         if (din < 1.2) {
             alb = alb * 2.2;
         }
-        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0))
+               + cc_roof_detail(cc, h, fp);
     }
     if (h.kind == 1) {   // facade
         // Normalized horizontal tangent: a frustum face's normal carries a
@@ -3248,7 +3689,8 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
 
         // Street-level storefront strip: bright, saturated, and only on
         // buildings whose draw says the ground floor is commercial.
-        if (vc < CITY_STORE_H && cc.store_draw < 0.65) {
+        if (vc < CITY_STORE_H && cc.store_draw < 0.65
+            && cc.land_use == CITY_USE_URBAN) {
             let sc = city_window_color(
                 fract(cc.store_draw * 7.31), 1.0 - cc.palette_bias);
             e = e + sc * CITY_STORE_RADIANCE
@@ -3264,14 +3706,15 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
                  * max(dot(h.normal, moon), 0.0);
     }
 
-    // Ground. Streets carry sodium lamp pools; unbuilt lots stay dark.
-    // Lamp output follows the district: a downtown artery blazes, an
-    // outskirts street is a sparse dim line — the multifractal again, so
-    // the lattice is not wallpaper.
-    let inside_plot = h.pos.x > cc.plot_min.x && h.pos.x < cc.plot_max.x
-                   && h.pos.y > cc.plot_min.y && h.pos.y < cc.plot_max.y;
+    // Ground. Streets carry sodium lamp pools; lots stay dark. Lamp output
+    // follows the district: a downtown artery blazes, an outskirts street
+    // is a sparse dim line — the multifractal again, so the lattice is not
+    // wallpaper. Where no street runs the ground is the lot's own: paving
+    // in the city, gravel in a yard, scrub on open land.
+    let paved = city_ground_paved(cc, h.cell, h.pos.xy);
     var street = 0.0;
-    if (!inside_plot || !cc.built) {
+    var alb = CITY_ASPHALT_ALBEDO;
+    if (paved) {
         let district = city_glow_sample(h.pos.xy, 2.0);
         let street_scale = 0.20 + 1.3 * smoothstep(0.02, 0.45, district);
         let pool_blend = smoothstep(
@@ -3282,12 +3725,26 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         // clipped to featureless white (streetlife's report). The knee
         // passes the dim outskirts untouched and compresses only the top.
         let raw_street = CITY_LAMP_RADIANCE * street_scale * pools;
-        street = select(0.0,
-                        raw_street / (1.0 + raw_street * 0.30),
-                        !inside_plot);
+        street = raw_street / (1.0 + raw_street * 0.30);
+    }
+    var sky = fill;
+    if (!paved && cc.land_use != CITY_USE_URBAN) {
+        // Open ground on the fringe. It sees the whole sky where a canyon
+        // floor sees a slot of it, and on a city night that sky is the
+        // cloud deck lit from below by the whole city — the wide glow mip
+        // is exactly that light's source — so the fringe's ground reads,
+        // faintly, as moonlit and city-lit dirt rather than a void.
+        // Scrub and soil break it up into patches; the mottle has mean one
+        // and dissolves into it as the pixel footprint outgrows a patch.
+        alb = select(CITY_YARD_ALBEDO, CITY_SCRUB_ALBEDO,
+                     cc.land_use == CITY_USE_OPEN)
+              * city_ground_mottle(h.pos.xy, fp);
+        sky = sky + CITY_OPEN_SKY
+            * (CITY_OPEN_SKY_BASE + city_glow_sample(h.pos.xy, 8.0));
     }
     return CITY_LAMP_COLOR * street
-           + CITY_ASPHALT_ALBEDO * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+           + city_flood_ground(cc, h.pos.xy, fp)
+           + alb * (sky + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
 
 // Night ground-fog: extinction toward the hit plus in-scattered city glow.
@@ -3802,6 +4259,7 @@ const cc_aircars_Z_HIGH: f32 = 95.0;
 const cc_aircars_Z_JIT: f32 = 8.0;
 const cc_aircars_HIGH_CUT: f32 = 0.55;   // hash above this -> the high deck
 const cc_aircars_LANE_P: f32 = 0.72;     // slot occupancy at full density
+const cc_aircars_THROUGH_FRAC: f32 = 0.12; // ... over an unbuilt avenue
 const cc_aircars_DENS_LO: f32 = 0.50;    // occupancy scale, outskirts
 const cc_aircars_DENS_HI: f32 = 1.35;    // occupancy scale, downtown
 // The window the occupancy ramp spans, in block density. Set against the
@@ -4163,11 +4621,18 @@ fn cc_aircars_craft(ci: vec2<i32>, cc: CityCell, lane: i32)
         return cc_aircars_no_craft();
     }
     let r = cc_aircars_draw(ci, lane);
-    // Traffic clusters where the city does.
-    let p = cc_aircars_LANE_P * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
-                                    smoothstep(cc_aircars_DENS_START,
-                                               cc_aircars_DENS_FULL,
-                                               cc.density));
+    // Traffic clusters where the city does. And a lane follows the avenue
+    // on the ground: where that avenue was never built — across open scrub
+    // and the gaps in the belt — only through-traffic between districts
+    // flies it, a thin fraction, so the sky over the gaps is neither dead
+    // nor a floating copy of downtown.
+    let side = select(select(3, 2, lo_edge), select(1, 0, lo_edge), lane == 0);
+    let served = select(cc_aircars_THROUGH_FRAC, 1.0,
+                        city_edge_street(cc, side));
+    let p = cc_aircars_LANE_P * served
+            * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
+                  smoothstep(cc_aircars_DENS_START, cc_aircars_DENS_FULL,
+                             cc.density));
     if (r.x >= p) {
         return cc_aircars_no_craft();
     }
@@ -5107,10 +5572,10 @@ fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // a 32 m corridor of guaranteed empty air centred on the line. A 16 m deck on
 // the centreline therefore clears the facades by 8 m on each side BY
 // CONSTRUCTION, at any height — the flat-roof rule in SPEC's "Respect the
-// architecture" is satisfied without a single building test. (Superblocks
-// cannot break this either: `merged` groups are anchored on even indices and
-// swallow only their odd internal boundary, and avenues are at multiples of
-// 8.)
+// architecture" is satisfied without a single building test. (Multi-block
+// lots cannot break this either: cloudyview/city_lots.py never lets a lot
+// contain an avenue line, and city_cell clamps growth buds to the plot on
+// avenue edges.)
 //
 // PROFILE. The x-family runs dead flat at 26 m. Where the two families cross,
 // the y-family climbs to 34 m and passes over — a real interchange decision,
@@ -6366,12 +6831,13 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
     let lh = city_rand4(vec2<u32>(
         bitcast<u32>(cw.x) * 0x9e3779b9u + 0x2545f491u,
         bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
-    // Which quadrant of a superblock this cell is.
-    let q = (ci.x & 1) + 2 * (ci.y & 1);
-
-    // Helipad first: it wants the same real estate and it is the rarer thing.
-    let pad_q = i32(gh.z * 4.0);
-    let pad_here = !cc.merged || q == pad_q;
+    // Helipad first: it wants the same real estate and it is the rarer
+    // thing. A building gets one pad, in the member cell under a point of
+    // its top deck that the building-level draw picks — lots run up to 4x4
+    // and a tower's crown covers only some of their cells, so neither a
+    // parity rule nor a pick among the lot's cells would do.
+    let pad_at = mix(d.lo, d.hi, vec2<f32>(0.25) + 0.5 * gh.zw);
+    let pad_here = all(ci == vec2<i32>(floor(pad_at / u.ocean_params.x)));
     if (pad_size && pad_here
         && cc.height > cc_rooftopworks_PAD_MIN_H
         && gh.x < cc_rooftopworks_PAD_FRAC) {
@@ -6393,8 +6859,8 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
             return res;
         }
     }
-    // Penthouse. On a superblock only the two diagonal quadrants may carry
-    // one, so a big roof gets at most two and they sit apart.
+    // Penthouse. On a multi-block roof only a checkerboard of its cells may
+    // carry one, so neighbouring penthouses never share a party wall.
     let pent_here = !cc.merged || ((ci.x + ci.y) & 1) == 0;
     if (cc.height > cc_rooftopworks_PENT_MIN_H && pent_here
         && gh.y < cc_rooftopworks_PENT_FRAC) {
@@ -6775,9 +7241,10 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
                                inv_dir: vec3<f32>, t0: f32, t1: f32,
                                ci: vec2<i32>, cc: CityCell) -> CityHit {
     // Gate 0, no hash, no arithmetic: unbuilt lots and spire crowns are not
-    // ours. The architecture rule is enforced here first and in the deck
-    // function second, so neither can be got around.
-    if (!cc.built || cc.arch == 4) {
+    // ours, and neither are warehouse roofs (the industry component's
+    // sawtooth and monitor ridges). The architecture rule is enforced here
+    // first and in the deck function second, so neither can be got around.
+    if (!cc.built || cc.arch == 4 || cc.land_use == CITY_USE_INDUSTRIAL) {
         return cc_rooftopworks_miss(ci);
     }
     let za = o.z + t0 * dir.z;
@@ -8424,7 +8891,9 @@ fn cc_streetlife_trace_car_box(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
 // that owns the ground draws it.
 fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
         -> cc_streetlife_Prop {
-    if (!cc.built) {
+    // The bin stands on the sidewalk of the corner's x-side kerb, so it
+    // needs that street.
+    if (!cc.built || !city_edge_street(cc, select(1, 0, (k & 1) == 0))) {
         return cc_streetlife_no_prop();
     }
     let cw = city_tile_cell(ci);
@@ -8778,6 +9247,11 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var have = false;
     var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
+        // Poles and parked cars stand only on a kerb that has a street
+        // (the bake removes streets from open land and lot interiors).
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
                                    fp);
         if (k.hit.hit) {
@@ -10171,6 +10645,12 @@ fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>, fp: f32)
     var t = vec3<f32>(1.0);
     t = t * cc_windowlife_glyph(cc, wh, pane_uv, fp);
     return t;
+}
+
+fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
+        -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    return e;
 }
 // <<< GENERATED CITY COMPONENTS
 
@@ -12334,9 +12814,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // the ambient fill. Replaces the daytime surface bounce, which
             // is gated off under CITY just below.
             if (CITY) {
+                // Never below mip 1: mip 0's r is the density the heights
+                // come from, the glow starts at mip 1 (export_web_assets).
                 let up_lod = clamp(
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
-                    0.0, u.ocean_params.w);
+                    1.0, u.ocean_params.w);
                 let g_raw = max(
                     // p is a WORLD cloud sample: convert for the glow
                     // (city frame), keep world for the tau probe below.

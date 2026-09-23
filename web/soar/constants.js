@@ -131,6 +131,19 @@ export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
 // the field the harness flies. Whole blocks (90 m), so the street grid meets
 // the domain edge where a street would be anyway.
 export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
+
+// The meta.json schema each surface tile must carry — the byte layout the
+// shader decodes it with. A tile of another schema is refused rather than
+// read: the city's v1 tile has no lot and street words, and decoded as v2 it
+// would raise a different, wrong city without a single error. The schema also
+// versions the tile's bin URLs (scene.js loadOceanTile), so a bump reaches
+// every visitor past any cache. Pinned against the tiles and against
+// soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
+export const SURFACE_TILE_SCHEMAS = {
+  ocean: "cloudyview.web.ocean.v1",
+  desert: "cloudyview.web.desert.v2",
+  city: "cloudyview.web.city.v2",
+};
 // From the 2026-08-22 12:31 capture, the same still the start camera and the
 // landing backdrop come from: the moon the view was composed under is part
 // of the view.

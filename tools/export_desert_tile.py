@@ -298,7 +298,7 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
     heights = [m[..., 0].astype(np.float16).astype(np.float64) for m in mips]
     h16 = heights[0]
     meta = {
-        "schema": "cloudyview.web.desert.v1",
+        "schema": "cloudyview.web.desert.v2",
         "n": n,
         "cell_m": TILE_EXTENT_M / n,
         "mips": len(mips),

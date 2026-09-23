@@ -1,5 +1,5 @@
 {
- "schema": "cloudyview.web.desert.v1",
+ "schema": "cloudyview.web.desert.v2",
  "n": 2048,
  "cell_m": 2.0,
  "mips": 12,

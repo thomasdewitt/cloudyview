@@ -1,5 +1,5 @@
 {
- "schema": "cloudyview.web.city.v1",
+ "schema": "cloudyview.web.city.v2",
  "n": 1024,
  "cell_m": 90.0,
  "mips": 11,
