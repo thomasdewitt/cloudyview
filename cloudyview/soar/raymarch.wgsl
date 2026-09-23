@@ -3492,7 +3492,7 @@ fn city_mottle_corner(j: vec2<i32>, per: i32, o: i32) -> f32 {
     let jw = ((j % per) + per) % per;
     return city_u01(pcg2d(vec2<u32>(
         bitcast<u32>(jw.x) ^ 0x2c1b3c6du,
-        bitcast<u32>(jw.y) ^ u32(o) * 0x297a2d39u)).x);
+        bitcast<u32>(jw.y) ^ (u32(o) * 0x297a2d39u))).x);
 }
 
 // Patchy value noise over lot ground, mean one: scrub clumps at 14.4 m and

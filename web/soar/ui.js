@@ -1250,6 +1250,69 @@ export class UI {
   }
 
   /**
+   * The grid spacing of a regular grid whose file carries no coordinate in
+   * meters for some axes — none at all, or degrees, or a level index.
+   *
+   * One input per axis that needs it, in meters, empty to start: nothing in
+   * the file is evidence of the spacing, so nothing is pre-filled. With z,
+   * which end the first level is, unselected to start for the same reason —
+   * a level index does not say, and a wrong answer renders the field upside
+   * down. Continue stays refused until every answer is usable.
+   */
+  _panel_gridSpacing({ axes, filename, group, onPick, onCancel }) {
+    const m = this.menu;
+    m.append(this._header(T.kicker, T.askGridSpacing));
+    m.append(el("div", "row", T.source(filename, group)));
+    for (const a of axes) {
+      m.append(el("div", "row", T.gridSpacingWhy(a.axis, a.dim, a.found)));
+    }
+    m.append(el("div", "row", T.gridSpacingRegular));
+    const inputs = {};
+    for (const a of axes) {
+      const row = el("div", "row spacing");
+      const input = el("input");
+      input.type = "number";
+      input.min = "0";
+      input.step = "any";
+      input.inputMode = "decimal";
+      // Typing here must not fly the camera or open a panel.
+      input.addEventListener("keydown", (e) => e.stopPropagation());
+      row.append(el("label", null, T.gridSpacingAxis(a.axis, a.size)), input);
+      m.append(row);
+      inputs[a.axis] = input;
+    }
+    let zFirst = null;
+    if (inputs.z) {
+      m.append(el("div", "row", T.gridSpacingZFirst));
+      const chips = segmented(
+        [[T.gridSpacingBottom, "bottom"], [T.gridSpacingTop, "top"]],
+        (v) => v === zFirst,
+        (v) => { zFirst = v; chips.refresh(); });
+      m.append(chips);
+    }
+    const problem = el("div", "row warn");
+    m.append(problem);
+    m.append(el("div", "divider"));
+    m.append(item(T.gridSpacingConfirm, null, () => {
+      const spacing = {};
+      for (const [axis, input] of Object.entries(inputs)) {
+        const d = Number(input.value);
+        if (input.value.trim() === "" || !(Number.isFinite(d) && d > 0)) {
+          problem.textContent = T.gridSpacingInvalid(axis);
+          return;
+        }
+        spacing[axis] = d;
+      }
+      if (inputs.z && !zFirst) {
+        problem.textContent = T.gridSpacingPickZFirst;
+        return;
+      }
+      onPick(spacing, zFirst);
+    }));
+    m.append(item(T.back, T.backNote, onCancel));
+  }
+
+  /**
    * Which timestep, when the file holds more than one.
    *
    * A multi-step file used to be refused outright. It is a question with an
