@@ -63,6 +63,7 @@ fn desert_tile(xy: vec2<f32>, lod: f32) -> vec2<f32> {
 fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
     return desert_tile(xy, 0.0);
 }
+
 struct DesertHit { hit: bool, t: f32, pos: vec3<f32>, normal: vec3<f32>,
                    kind: i32, mat: vec4<f32>, };
 struct DesertLight { sun_dir: vec3<f32>, sun: vec3<f32>, sky: vec3<f32>,
@@ -83,7 +84,7 @@ fn scan(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let ci = vec2<i32>(gid.xy);
     let org = vec2<f32>(ci) * DF_BIG_CELL;
-    let it = df_big_item(ci, org);
+    let it = df_big_item(ci, org, 0.1, df_big_foot(ci));
     let i = (gid.y * n + gid.x) * 2u;
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.w, it.a.z);
@@ -98,7 +99,7 @@ fn scan_small(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let ci = vec2<i32>(gid.xy);
     let org = vec2<f32>(ci) * DF_SMALL_CELL;
-    let it = df_small_item(ci, org);
+    let it = df_small_item(ci, org, 0.1, df_small_foot(ci));
     let i = (gid.y * n + gid.x) * 2u;
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.y, it.a.z);
@@ -127,7 +128,11 @@ def scan_plants(entry="scan"):
     half-width, variant, flowering, stems)."""
     import wgpu
     src = SHADER.read_text()
+    # The ground's habitat accessors are lifted from the shader like the
+    # flora section itself, over the stub tile read above.
     code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
+            + extract_fn(src, "desert_wash") + extract_fn(src, "desert_wash_near")
+            + extract_fn(src, "desert_material")
             + extract(src, FLORA_BEGIN, FLORA_END) + SCAN_MAIN)
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
