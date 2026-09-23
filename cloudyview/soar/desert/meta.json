@@ -21,16 +21,16 @@
   "mip11.bin.gz"
  ],
  "tile_extent_m": 4096.0,
- "height_min_m": -13.9375,
- "height_max_m": 16.140625,
+ "height_min_m": -13.9609375,
+ "height_max_m": 16.09375,
  "seed": 20260923,
- "mean_lightness": 0.5664,
+ "mean_lightness": 0.4109,
  "slope_max": [
   0.992,
-  0.651,
-  0.368,
-  0.199,
-  0.102,
+  0.669,
+  0.381,
+  0.169,
+  0.089,
   0.06,
   0.045,
   0.036,
@@ -39,6 +39,6 @@
   0.002,
   0.0
  ],
- "band_max_m": 1.3766,
- "band_slope_max": 0.888
+ "band_max_m": 1.1844,
+ "band_slope_max": 0.915
 }
