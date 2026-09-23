@@ -392,12 +392,13 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
     let lh = city_rand4(vec2<u32>(
         bitcast<u32>(cw.x) * 0x9e3779b9u + 0x2545f491u,
         bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
-    // Which quadrant of a superblock this cell is.
-    let q = (ci.x & 1) + 2 * (ci.y & 1);
-
-    // Helipad first: it wants the same real estate and it is the rarer thing.
-    let pad_q = i32(gh.z * 4.0);
-    let pad_here = !cc.merged || q == pad_q;
+    // Helipad first: it wants the same real estate and it is the rarer
+    // thing. A building gets one pad, in the member cell under a point of
+    // its top deck that the building-level draw picks — lots run up to 4x4
+    // and a tower's crown covers only some of their cells, so neither a
+    // parity rule nor a pick among the lot's cells would do.
+    let pad_at = mix(d.lo, d.hi, vec2<f32>(0.25) + 0.5 * gh.zw);
+    let pad_here = all(ci == vec2<i32>(floor(pad_at / u.ocean_params.x)));
     if (pad_size && pad_here
         && cc.height > cc_rooftopworks_PAD_MIN_H
         && gh.x < cc_rooftopworks_PAD_FRAC) {
@@ -419,8 +420,8 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
             return res;
         }
     }
-    // Penthouse. On a superblock only the two diagonal quadrants may carry
-    // one, so a big roof gets at most two and they sit apart.
+    // Penthouse. On a multi-block roof only a checkerboard of its cells may
+    // carry one, so neighbouring penthouses never share a party wall.
     let pent_here = !cc.merged || ((ci.x + ci.y) & 1) == 0;
     if (cc.height > cc_rooftopworks_PENT_MIN_H && pent_here
         && gh.y < cc_rooftopworks_PENT_FRAC) {
@@ -801,9 +802,10 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
                                inv_dir: vec3<f32>, t0: f32, t1: f32,
                                ci: vec2<i32>, cc: CityCell) -> CityHit {
     // Gate 0, no hash, no arithmetic: unbuilt lots and spire crowns are not
-    // ours. The architecture rule is enforced here first and in the deck
-    // function second, so neither can be got around.
-    if (!cc.built || cc.arch == 4) {
+    // ours, and neither are warehouse roofs (the industry component's
+    // sawtooth and monitor ridges). The architecture rule is enforced here
+    // first and in the deck function second, so neither can be got around.
+    if (!cc.built || cc.arch == 4 || cc.land_use == CITY_USE_INDUSTRIAL) {
         return cc_rooftopworks_miss(ci);
     }
     let za = o.z + t0 * dir.z;

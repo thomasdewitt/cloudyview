@@ -59,6 +59,15 @@ DESERT_DIR = SOAR_DIR / "desert"
 # and binds its own tile at binding 3 — see `specialize` and SoarRenderer.
 SURFACES = ("ocean", "desert", "city")
 SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
+# The meta.json schema each surface tile must carry: the layout the shader
+# decodes it with. Mirrors web/soar/constants.js SURFACE_TILE_SCHEMAS (pinned
+# by tests/test_city_lots.py); a tile of another schema is refused, because
+# the city's v1 tile decoded as v2 raises a different city without an error.
+SURFACE_TILE_SCHEMAS = {
+    "ocean": "cloudyview.web.ocean.v1",
+    "desert": "cloudyview.web.desert.v1",
+    "city": "cloudyview.web.city.v2",
+}
 
 
 def check_surface(surface: str) -> str:
@@ -600,6 +609,8 @@ SURFACE_FORMAT = "rgba32float"
 # The scenes whose opaque surface is traced by that pass rather than in the
 # march (raymarch.wgsl: the surface pre-pass section).
 SURFACE_PASS_SURFACES = ("city", "desert")
+# ... and those whose surface pass has the facade-shell refinement stage.
+SURFACE_REFINE_SURFACES = ("city",)
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
@@ -761,6 +772,12 @@ class SoarRenderer:
         wgpu = self.wgpu
         tile_dir = SURFACE_DIRS[self.surface]
         meta = json.loads((tile_dir / "meta.json").read_text())
+        expected = SURFACE_TILE_SCHEMAS[self.surface]
+        if meta.get("schema") != expected:
+            raise RuntimeError(
+                f"{tile_dir}/meta.json is schema {meta.get('schema')!r}; this "
+                f"renderer reads {expected!r}. Re-run "
+                "tools/export_web_assets.py, or update the shader with it.")
         n, mips = int(meta["n"]), int(meta["mips"])
         self.surface_meta = meta
         tex = self.device.create_texture(
@@ -869,6 +886,10 @@ class SoarRenderer:
             {"binding": 10, "visibility": wgpu.ShaderStage.FRAGMENT,
              "texture": {"sample_type": "unfilterable-float",
                          "view_dimension": "2d"}},
+            # The city's plain surface, read by its refinement stage.
+            {"binding": 11, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "unfilterable-float",
+                         "view_dimension": "2d"}},
         ])
         self._ray_pipeline = d.create_render_pipeline(
             layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
@@ -878,17 +899,23 @@ class SoarRenderer:
             primitive={"topology": "triangle-list"})
         # The surface pre-pass: the traced city or desert, one texel per
         # render pixel, drawn before every march (raymarch.wgsl fs_surface).
-        # Scenes without a traced surface have no such pass.
-        self._surface_pipeline = None
-        if self.surface in SURFACE_PASS_SURFACES:
-            self._surface_pipeline = d.create_render_pipeline(
+        # The city's has a second stage, the facade shell over the plain
+        # surface (fs_surface_refine). Scenes without a traced surface have
+        # neither.
+        def surface_stage(entry):
+            return d.create_render_pipeline(
                 layout=d.create_pipeline_layout(
                     bind_group_layouts=[self._ray_layout]),
                 vertex={"module": self._ray_module, "entry_point": "vs_main"},
-                fragment={"module": self._ray_module,
-                          "entry_point": "fs_surface",
+                fragment={"module": self._ray_module, "entry_point": entry,
                           "targets": [{"format": SURFACE_FORMAT}]},
                 primitive={"topology": "triangle-list"})
+        self._surface_pipeline = None
+        self._refine_pipeline = None
+        if self.surface in SURFACE_PASS_SURFACES:
+            self._surface_pipeline = surface_stage("fs_surface")
+        if self.surface in SURFACE_REFINE_SURFACES:
+            self._refine_pipeline = surface_stage("fs_surface_refine")
         # The sun-tau bake: one field-x plane of the cache per draw, into an
         # r16float 2D target the caller copies into the 3D cache texture.
         self._bake_pipeline = d.create_render_pipeline(
@@ -932,7 +959,10 @@ class SoarRenderer:
                          "surface": (make(SURFACE_FORMAT)
                                      if self._surface_pipeline is not None
                                      else None),
-                         "march_bg": None}
+                         "plain": (make(SURFACE_FORMAT)
+                                   if self._refine_pipeline is not None
+                                   else None),
+                         "groups": None}
         return self._targets
 
     def _ensure_bind_group(self):
@@ -940,22 +970,26 @@ class SoarRenderer:
         stand-in, since the surface pass cannot bind the target it writes."""
         if self._bind_group is not None:
             return self._bind_group
-        self._bind_group = self._make_bind_group(self._surface_dummy)
+        self._bind_group = self._make_bind_group(self._surface_dummy,
+                                                 self._surface_dummy)
         return self._bind_group
 
-    def _march_bind_group(self, targets):
-        """The march's bind group: binding 10 is this size's surface target
-        when the scene traces one, the stand-in otherwise."""
-        if targets["surface"] is None:
-            return self._ensure_bind_group()
-        # Rebuilt whenever the base group is (a new volume, nest or cache).
+    def _stage_bind_groups(self, targets):
+        """(refine, march) bind groups for this size's targets: the refine
+        stage reads the plain surface at binding 11, the march reads the
+        final one at binding 10, and neither binds the target it writes.
+        Rebuilt whenever the base group is (a new volume, nest or cache)."""
         base = self._ensure_bind_group()
-        if targets["march_bg"] is None or targets["march_bg"][0] is not base:
-            targets["march_bg"] = (base, self._make_bind_group(
-                targets["surface"]))
-        return targets["march_bg"][1]
+        if targets["groups"] is None or targets["groups"][0] is not base:
+            dummy = self._surface_dummy
+            refine = (self._make_bind_group(dummy, targets["plain"])
+                      if targets["plain"] is not None else base)
+            march = (self._make_bind_group(targets["surface"], dummy)
+                     if targets["surface"] is not None else base)
+            targets["groups"] = (base, refine, march)
+        return targets["groups"][1], targets["groups"][2]
 
-    def _make_bind_group(self, surface_tex):
+    def _make_bind_group(self, surface_tex, plain_tex):
         if self._vol_tex is None:
             raise RuntimeError("No volume uploaded; call upload_volume() first.")
         return self.device.create_bind_group(
@@ -971,6 +1005,7 @@ class SoarRenderer:
                 {"binding": 7, "resource": self._light_tau_tex.create_view()},
                 {"binding": 8, "resource": self._ice_frac_tex.create_view()},
                 {"binding": 10, "resource": surface_tex.create_view()},
+                {"binding": 11, "resource": plain_tex.create_view()},
             ])
 
     def _check_scene(self, state: SceneState) -> None:
@@ -1082,10 +1117,12 @@ class SoarRenderer:
         w, h = view.render_size
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()
-        march_bg = self._march_bind_group(targets)
+        refine_bg, march_bg = self._stage_bind_groups(targets)
         sample_view = targets["sample"].create_view()
         surface_view = (targets["surface"].create_view()
                         if targets["surface"] is not None else None)
+        plain_view = (targets["plain"].create_view()
+                      if targets["plain"] is not None else None)
 
         accum_index = 0
         for i in range(frames):
@@ -1114,15 +1151,23 @@ class SoarRenderer:
             enc = self.device.create_command_encoder()
             if surface_view is not None:
                 # The surface under this frame's rays, for the march below:
-                # same uniforms, same frame, same pixels.
-                sp = enc.begin_render_pass(color_attachments=[{
-                    "view": surface_view, "load_op": "clear",
-                    "store_op": "store",
-                    "clear_value": (0.0, 0.0, 0.0, 1e30)}])
-                sp.set_pipeline(self._surface_pipeline)
-                sp.set_bind_group(0, bind_group)
-                sp.draw(3)
-                sp.end()
+                # same uniforms, same frame, same pixels. With a refinement
+                # stage the first pass writes the plain surface and the
+                # second the final one.
+                stages = [(self._surface_pipeline, bind_group,
+                           plain_view or surface_view)]
+                if plain_view is not None:
+                    stages.append((self._refine_pipeline, refine_bg,
+                                   surface_view))
+                for pipeline, group, view_ in stages:
+                    sp = enc.begin_render_pass(color_attachments=[{
+                        "view": view_, "load_op": "clear",
+                        "store_op": "store",
+                        "clear_value": (0.0, 0.0, 0.0, 1e30)}])
+                    sp.set_pipeline(pipeline)
+                    sp.set_bind_group(0, group)
+                    sp.draw(3)
+                    sp.end()
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": sample_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])

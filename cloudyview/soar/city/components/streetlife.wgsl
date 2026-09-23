@@ -730,7 +730,9 @@ fn cc_streetlife_trace_car_box(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
 // that owns the ground draws it.
 fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
         -> cc_streetlife_Prop {
-    if (!cc.built) {
+    // The bin stands on the sidewalk of the corner's x-side kerb, so it
+    // needs that street.
+    if (!cc.built || !city_edge_street(cc, select(1, 0, (k & 1) == 0))) {
         return cc_streetlife_no_prop();
     }
     let cw = city_tile_cell(ci);
@@ -1084,6 +1086,11 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var have = false;
     var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
+        // Poles and parked cars stand only on a kerb that has a street
+        // (the bake removes streets from open land and lot interiors).
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
                                    fp);
         if (k.hit.hit) {

@@ -112,6 +112,11 @@ Signatures (the composer checks these by compiling):
   yours covers. Covered wall shows no windows and, up close, no shell
   relief: the core takes them out, so an opaque panel only adds its own
   emission through `facade`.
+- `roof` — `fn (cc: CityCell, h: CityHit, fp: f32) -> vec3<f32>` —
+  ADDITIVE emission on a core roof hit (kind 2), at every distance. This is
+  where roof geometry that `cell_props` only draws near (inside
+  `CITY_PROP_RANGE`) keeps its far-field mean: a warehouse's lit sawtooth
+  glazing must not vanish at 2.2 km. Return zero where you add nothing.
 - `window_glyph` — `fn (cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
   deep_uv: vec2<f32>, fp: f32) -> vec3<f32>` — transmission MULTIPLIER
   inside a lit pane (`pane_uv` in [0,1]^2 at the glass, `wh` is that

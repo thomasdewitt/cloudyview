@@ -63,6 +63,9 @@ HOOKS = {
         "pane_uv: vec2<f32>,\n"
         "                   deep_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
+    "roof": (
+        "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
+        "        -> vec3<f32>"),
 }
 
 # Module-scope declarations only (column 0): a function-local `var` or
@@ -179,6 +182,15 @@ def dispatcher(comps):
         "    var t = vec3<f32>(1.0);\n"
         + ("\n".join(glyph_body) + "\n" if glyph_body else "")
         + "    return t;\n}")
+
+    roof_body = [
+        f"    e = e + {c['hooks']['roof']}(cc, h, fp);"
+        for c in hooked("roof")]
+    out.append(
+        f"{HOOKS['roof']} {{\n"
+        "    var e = vec3<f32>(0.0);\n"
+        + ("\n".join(roof_body) + "\n" if roof_body else "")
+        + "    return e;\n}")
     return "\n\n".join(out)
 
 
