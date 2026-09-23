@@ -3442,7 +3442,7 @@ const CITY_REL_SLOT: f32 = 0.08;        // the dark between grate bars
 // thing on a street, which is exactly what lets the reflections read.
 const CITY_WET_ROAD: f32 = 0.90;
 const CITY_WET_WALK: f32 = 0.85;
-const CITY_WET_DARKEN: f32 = 0.88;
+const CITY_WET_DARKEN: f32 = 0.93;
 // Of a wet surface, the share whose film is smooth enough to be glossy: damp
 // asphalt is a patchwork of film and dull aggregate, not a sheet of water.
 const CITY_FILM_GLOSS: f32 = 0.6;
@@ -3452,9 +3452,9 @@ const CITY_PUDDLE_DARKEN: f32 = 0.85;
 // is its own expected coverage at that bias, a logistic fitted to the
 // noise's measured distribution (tools/street_means.py).
 const CITY_PUDDLE_THR: f32 = 0.67;
-const CITY_PUDDLE_EDGE: f32 = 0.035;
+const CITY_PUDDLE_EDGE: f32 = 0.015;
 const CITY_PUDDLE_LOD: vec2<f32> = vec2<f32>(0.30, 1.20);
-const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
+const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0945);
 
 // Manholes: CITY_MH_PITCH apart along every centreline (a divisor of the
 // block, so the lattice is the same on every block), set in a travel lane,
@@ -3473,8 +3473,8 @@ const CITY_GRATE_HL: f32 = 0.45;      // half-length along the kerb
 // one — rough enough at grazing incidence to stretch every light source into
 // the long vertical streak that IS the wet-street look.
 const CITY_REFL_F0: f32 = 0.02;
-const CITY_REFL_ALPHA_PUDDLE: f32 = 0.03;
-const CITY_REFL_ALPHA_DAMP: f32 = 0.22;
+const CITY_REFL_ALPHA_PUDDLE: f32 = 0.02;
+const CITY_REFL_ALPHA_DAMP: f32 = 0.13;
 // How far a reflected ray looks for the city. Far enough to cross any
 // canyon and reach the towers beyond it; a rising ray that has found nothing
 // by then sees sky.
@@ -3498,8 +3498,8 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0905, 0.2170);
-const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0118, 0.1010);
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0755, 0.2172);
+const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0098, 0.1010);
 
 // STUB for city-facades' storefront glow, same arrangement: the mean emitted
 // radiance of the cell's storefront band, zero where there is no store.
@@ -3866,8 +3866,24 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     let region = city_vnoise(p * 0.025 + 5.3) - 0.5;
     let crown = 1.0 - smoothstep(0.0, 2.5, min(select(1e3, ex, on_x),
                                                select(1e3, ey, on_y)));
-    let bias = 0.22 * (1.0 - smoothstep(0.0, 1.0, abs(d - 0.2)))
-             - 0.12 * crown - 0.22 * (w_kerb + w_in) + 0.20 * region;
+    // Where water actually stands: along the foot of the kerb (the gutter
+    // is the wettest line on any wet street, and it ends AT the kerb — the
+    // raised sidewalk sheds), and in the tyre ruts worn into every lane,
+    // 0.85 m either side of its centre. Noise only decides where along
+    // those the water breaks.
+    let gutter = select(0.0, 1.0 - smoothstep(0.10, 0.70, d), d > 0.0);
+    var lane_c = 1e3;
+    if (on_x && ey > rd.hy) {
+        lane_c = select(rd.sx + city_park_side(rd.kx) * 1.2,
+                        ex - 1.6 - round((ex - 1.6) / 3.1) * 3.1, rd.ave_x);
+    }
+    if (on_y && ex > rd.hx) {
+        lane_c = select(rd.sy + city_park_side(rd.ky) * 1.2,
+                        ey - 1.6 - round((ey - 1.6) / 3.1) * 3.1, rd.ave_y);
+    }
+    let rut = 1.0 - smoothstep(0.10, 0.30, abs(abs(lane_c) - 0.85));
+    let bias = 0.38 * gutter + 0.14 * rut * w_road
+             - 0.12 * crown - 0.35 * (w_kerb + w_in) + 0.12 * region;
     let pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
                                CITY_PUDDLE_THR + CITY_PUDDLE_EDGE, n + bias);
     let pud_mean = 1.0 / (1.0 + exp(-(bias + 0.5 - CITY_PUDDLE_FIT.x)

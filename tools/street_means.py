@@ -58,10 +58,10 @@ PAINT_WEAR_MEAN = 0.8
 
 WET_ROAD = 0.90
 WET_WALK = 0.85
-WET_DARKEN = 0.88
+WET_DARKEN = 0.93
 PUDDLE_DARKEN = 0.85
 PUDDLE_THR = 0.67
-PUDDLE_EDGE = 0.035
+PUDDLE_EDGE = 0.015
 
 # The district lamp scale s = CITY_LAMP_RADIANCE (0.55) x (0.20 .. 1.50).
 S_GRID = 0.55 * np.linspace(0.20, 1.50, 14)
@@ -77,6 +77,31 @@ def half(k):
 
 def lamp_inset(k):
     return half(k) - LAMP_OFFSET
+
+
+def pcg2d(x, y):
+    """raymarch.wgsl pcg2d, in uint32 arithmetic."""
+    m = np.uint64(0xFFFFFFFF)
+    x = np.asarray(x, np.uint64) & m
+    y = np.asarray(y, np.uint64) & m
+    x = (x * 1664525 + 1013904223) & m
+    y = (y * 1664525 + 1013904223) & m
+    x = (x + y * 1664525) & m
+    y = (y + x * 1664525) & m
+    x ^= x >> np.uint64(16)
+    y ^= y >> np.uint64(16)
+    x = (x + y * 1664525) & m
+    y = (y + x * 1664525) & m
+    x ^= x >> np.uint64(16)
+    y ^= y >> np.uint64(16)
+    return x, y
+
+
+def park_side_bits(k):
+    """The low bit city_park_side reads."""
+    k = np.asarray(k).astype(np.int64).astype(np.uint32).astype(np.uint64)
+    hx, _ = pcg2d(k ^ np.uint64(0x6c8e9cf5), np.full_like(k, 0x2c1b3c6d))
+    return (hx & np.uint64(1)).astype(np.int64)
 
 
 def smoothstep(e0, e1, x):
@@ -207,8 +232,19 @@ def ground(ci, x, y, noise_off):
     region = vnoise(px * 0.025 + 5.3, py * 0.025 + 5.3) - 0.5
     crown = 1 - smoothstep(0, 2.5, np.minimum(np.where(on_x, ex, 1e3),
                                                np.where(on_y, ey, 1e3)))
-    bias = (0.22 * (1 - smoothstep(0, 1, np.abs(d - 0.2)))
-            - 0.12 * crown - 0.22 * (w_kerb | w_in) + 0.20 * region)
+    gutter = np.where(d > 0, 1 - smoothstep(0.10, 0.70, d), 0.0)
+    park_side = lambda k: np.where(
+        park_side_bits(k) == 1, 1.0, -1.0)
+    lane_c = np.full_like(x, 1e3)
+    m = on_x & (ey > hy)
+    lane_c = np.where(m, np.where(ax, ex - 1.6 - np.round((ex - 1.6) / 3.1) * 3.1,
+                                  sx + park_side(kx) * 1.2), lane_c)
+    m = on_y & (ex > hx)
+    lane_c = np.where(m, np.where(ay, ey - 1.6 - np.round((ey - 1.6) / 3.1) * 3.1,
+                                  sy + park_side(ky) * 1.2), lane_c)
+    rut = 1 - smoothstep(0.10, 0.30, np.abs(np.abs(lane_c) - 0.85))
+    bias = (0.38 * gutter + 0.14 * rut * w_road
+            - 0.12 * crown - 0.35 * (w_kerb | w_in) + 0.12 * region)
     puddle = smoothstep(PUDDLE_THR - PUDDLE_EDGE, PUDDLE_THR + PUDDLE_EDGE,
                         n + bias)
     alb = dry * (1 - WET_DARKEN * film * (1 - puddle)
