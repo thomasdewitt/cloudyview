@@ -113,7 +113,7 @@ def test_resample_rejects_mixed_widths_and_short_tracks(tmp_path):
 
 # --- the header ------------------------------------------------------------
 
-def _header(tmp_path, *, city=True, size=(1920, 961)):
+def _header(tmp_path, *, surface="city", size=(1920, 961)):
     field = tmp_path / "demo.nc"
     field.write_bytes(b"")
     h = {
@@ -131,11 +131,15 @@ def _header(tmp_path, *, city=True, size=(1920, 961)):
             "exposure": 3.88, "lod_strength": 0.01,
         },
     }
-    if city:
+    if surface == "city":
         h["city"] = {"position_m": [1, 2, 3],
                      "tile_offset_m": [75330.0, -17010.0],
                      "tile_extent_m": 92160.0,
                      "surface_offset_m": [79780.0, 47970.0]}
+    if surface == "desert":
+        h["desert"] = {"position_m": [1, 2, 3],
+                       "tile_extent_m": 4096.0,
+                       "surface_offset_m": [1780.5, 3970.25]}
     return h
 
 
@@ -149,17 +153,29 @@ def test_settings_come_from_the_header(tmp_path):
     assert s.exposure == 3.88 and s.haze == -0.038 and s.lod_strength == 0.01
     assert s.haze_height_dependent is False
     assert s.liquid_var == "QC" and s.ice_var is None
-    assert s.city is True
+    assert s.surface == "city"
     assert s.city_tile_offset_m == (75330.0, -17010.0)
-    assert s.city_tile_extent_m == 92160.0
+    assert s.surface_tile_extent_m == 92160.0
     assert s.surface_offset_m == (79780.0, 47970.0)
 
 
 def test_overrides_and_day_scene(tmp_path):
-    s = tr.settings_from_header(_header(tmp_path, city=False),
+    s = tr.settings_from_header(_header(tmp_path, surface="ocean"),
                                 size=(640, 361), fps=24, quality="low")
-    assert s.city is False and s.surface_offset_m is None
+    assert s.surface == "ocean" and s.surface_offset_m is None
     assert s.size == (640, 360) and s.fps == 24.0 and s.quality == "low"
+
+
+def test_a_desert_flight_names_its_ground(tmp_path):
+    s = tr.settings_from_header(_header(tmp_path, surface="desert"))
+    assert s.surface == "desert"
+    assert s.surface_tile_extent_m == 4096.0
+    assert s.surface_offset_m == (1780.5, 3970.25)
+    assert s.city_tile_offset_m is None
+    both = _header(tmp_path)
+    both["desert"] = _header(tmp_path, surface="desert")["desert"]
+    with pytest.raises(ValueError, match="one surface"):
+        tr.settings_from_header(both)
 
 
 def test_missing_field_and_missing_keys_are_named(tmp_path):

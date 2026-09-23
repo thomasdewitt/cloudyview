@@ -204,7 +204,8 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
 
 export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
-                                   toneMap = true, city = false }) {
+                                   toneMap = true, city = false,
+                                   desert = false }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
@@ -224,8 +225,15 @@ export function specializeShader(source,
   ];
   // Demanded only when asked for, like soar_host.specialize: a shader that
   // predates the night city still serves every daytime render.
+  if (city && desert) {
+    throw new Error("a scene stands on one surface: city and desert are " +
+                    "both set.");
+  }
   if (city) {
     swaps.push(["const CITY: bool = false;", "const CITY: bool = true;"]);
+  }
+  if (desert) {
+    swaps.push(["const DESERT: bool = false;", "const DESERT: bool = true;"]);
   }
   let out = source;
   for (const [sentinel, replacement] of swaps) {
@@ -483,6 +491,40 @@ export class Renderer {
             scene.iceView ?? this._iceDummy.createView() },
       ],
     });
+  }
+
+  /**
+   * Stand the scene on the other day surface — "ocean" or "desert" — in
+   * flight. `tile` is the loaded surface tile (scene.js loadOceanTile). The
+   * specialization follows scene.desert through every pipeline key, so this
+   * is the tile, the four row-9 numbers and the flag, then a rebind and a
+   * fresh accumulation. The new pipeline is built and validated here, before
+   * a frame is drawn with it, so a shader that will not compile says so at
+   * the switch rather than as a black frame. The night city is not a day
+   * surface and never comes or goes through here.
+   */
+  async setSurface(kind, tile) {
+    if (this.scene.city) {
+      throw new Error("the night city has no other surface to switch to.");
+    }
+    if (kind !== "ocean" && kind !== "desert") {
+      throw new Error(`unknown day surface '${kind}'; expected 'ocean' or ` +
+                      "'desert'.");
+    }
+    const s = this.scene;
+    s.desert = kind === "desert";
+    s.oceanView = tile.view;
+    s.oceanFifDx = tile.dx;
+    s.oceanTileExtent = tile.tileExtent;
+    s.oceanMaxLod = tile.maxLod;
+    this.device.pushErrorScope("validation");
+    this._rayPipeline(SAMPLE_FORMAT);
+    const error = await this.device.popErrorScope();
+    if (error) {
+      throw new Error(`The ${kind} shader failed to build: ${error.message}`);
+    }
+    this.refreshBindGroup();
+    this._resetAccumulation();
   }
 
   /** Ice mode actually reaches the shader only with a real ice texture. */
@@ -772,18 +814,27 @@ export class Renderer {
 
   // --- pipelines ----------------------------------------------------------
 
+  /** The surface specialization, as a pipeline-cache key fragment. */
+  _surfaceKey() {
+    return this.scene.city ? "city" : (this.scene.desert ? "desert" : "ocean");
+  }
+
   _module(periodic, nested, maxLightSteps, toneMap = true) {
-    // City is a property of the scene, constant for this renderer's whole
-    // life, so every caller inherits it here rather than threading it.
+    // The surface is a property of the scene, so every caller inherits it
+    // here rather than threading it. The city is constant for this
+    // renderer's whole life; ocean and desert can trade places in flight
+    // (setSurface), which is why the surface is in every cache key.
     const city = Boolean(this.scene.city);
-    const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}|${city}`;
+    const desert = Boolean(this.scene.desert);
+    const key = `${periodic}|${nested}|${maxLightSteps}|${toneMap}|` +
+                this._surfaceKey();
     let module = this._modules.get(key);
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
         code: specializeShader(this.shaderSource,
                                { periodic, nested, maxLightSteps, toneMap,
-                                 city }),
+                                 city, desert }),
       });
       this._modules.set(key, module);
     }
@@ -792,7 +843,7 @@ export class Renderer {
 
   _rayPipeline(targetFormat) {
     const key = `${targetFormat}|${this.periodic}|${this.scene.nested}|` +
-                `${this.maxLightSteps}`;
+                `${this.maxLightSteps}|${this._surfaceKey()}`;
     let pipeline = this._pipelines.get(key);
     if (!pipeline) {
       const module = this._module(
@@ -1433,7 +1484,8 @@ export class Renderer {
 
   _bakePipeline() {
     this._bakePipelines ??= new Map();
-    const key = `${this.periodic}|${this.scene.nested}|${this.maxLightSteps}`;
+    const key = `${this.periodic}|${this.scene.nested}|${this.maxLightSteps}|` +
+                this._surfaceKey();
     let pipeline = this._bakePipelines.get(key);
     if (!pipeline) {
       const module = this._module(
@@ -1492,7 +1544,7 @@ export class Renderer {
         this.periodic, this.scene.nested, this.maxLightSteps, false);
       this._meterPipeline ??= new Map();
       const pipeKey = `${this.periodic}|${this.scene.nested}|` +
-                      `${this.maxLightSteps}`;
+                      `${this.maxLightSteps}|${this._surfaceKey()}`;
       let pipeline = this._meterPipeline.get(pipeKey);
       if (!pipeline) {
         pipeline = this.device.createRenderPipeline({
@@ -1622,6 +1674,7 @@ export class Renderer {
       dtLightNest: this.dtLightNest,
       city: Boolean(s.city),
       cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
+      desert: Boolean(s.desert),
     };
   }
 }
