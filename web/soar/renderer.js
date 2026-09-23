@@ -1811,11 +1811,10 @@ export class Renderer {
       let sum = 0.0;
       for (let i = rank; i < lums.length; i++) sum += lums[i];
       return sum / (lums.length - rank);
-    } catch (err) {
-      // A lost device or an unmapped-in-teardown buffer ends metering, not
-      // the app: the AE loop treats null as "no reading this interval".
-      return null;
     } finally {
+      // Errors are the caller's: null means only "a reading is already in
+      // flight". A meter that failed used to return null as well, and a
+      // capture waiting for a reading then asked again forever.
       this._meterBusy = false;
     }
   }

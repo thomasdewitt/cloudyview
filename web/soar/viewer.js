@@ -1694,7 +1694,17 @@ export class Viewer {
     if (!this.autoExposure || this._probe) return;
     if (nowMs - this._aeLastMeterMs < K.AUTO_EXPOSURE_INTERVAL_MS) return;
     this._aeLastMeterMs = nowMs;
-    this.renderer.meterLuminance(outputSize, this._viewKwargs())
+    const renderer = this.renderer;
+    renderer.meterLuminance(outputSize, this._viewKwargs())
+      .catch((err) => {
+        // A readback abandoned because its renderer was torn down (a field
+        // change, leaving the viewer) is not a failure of anything live.
+        // Anything else is, and stops rendering as loudly as a draw would.
+        if (!this._disposed && this.renderer === renderer) {
+          this._failRendering(err);
+        }
+        return null;
+      })
       .then((highlight) => {
         if (!(highlight > 0) || this._disposed || !this.autoExposure) return;
         // The one statement of the target formula (a capture applies the
@@ -1851,8 +1861,9 @@ export class Viewer {
    * LOD change the luminance), against the live renderer state — the meter's
    * march is the same specialized module whatever the tier, since every
    * tier shares maxLightSteps. A live meter's readback may still be in
-   * flight (one is ever allowed); it always resolves, so wait it out rather
-   * than skipping the metering. A meter that saw no light keeps
+   * flight (one is ever allowed; that is the only null); it always resolves,
+   * so wait it out rather than skipping the metering. A meter that fails
+   * throws, and fails the capture with it. A meter that saw no light keeps
    * DEFAULT_EXPOSURE, the live loop's own ignore rule.
    */
   async _meterCaptureExposure(look, size) {
