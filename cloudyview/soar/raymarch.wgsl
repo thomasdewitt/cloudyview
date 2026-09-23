@@ -700,18 +700,32 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 //               5080 texture-latency measurements wearing the costume of a
 //               measurement about an algorithm.
 //
-// The mechanism, consistent across all three: this march is texture-LATENCY
+//   2026-09-23  no skipping at all, only the READ: an 8^3 max-sigma grid
+//               (one compute pass, dilated for the trilinear footprint),
+//               cached per brick crossing, so a step the grid proves empty
+//               takes sigma = 0 in place of the fetch and runs the same
+//               arithmetic at the same t. Exact (A/B max|diff| == 0) and it
+//               removed the fetch from 60-77% of all view steps on TWP-ICE —
+//               and was 16-43% SLOWER on the 5080, 18-49% at the clock lock
+//               that stands in for an M1; only DYCOMS's view from inside
+//               the deck gained (4-8%). The control that settles it: the
+//               same code compiled in behind a guard that never fires cost
+//               14-20% by itself. The fetches it removed were nearly free;
+//               fs_main's register budget is not.
+//
+// The mechanism, consistent across all four: this march is texture-LATENCY
 // bound, and every scheme that knows where the empty space is must ask
 // something to find out. In occupied space that ask lands on the critical
 // path of a loop that tolerates no added control flow (a bit-identical
 // micro-opt — reusing the view sample as the light march's first tap — also
 // regressed). The skip cannot outrun the question.
 //
-// Two things worth knowing before a fourth attempt. The one lever left
-// untried is hoisting the page fetch to one per brick CROSSING instead of one
-// per tap, which needs the march restructured around brick crossings rather
-// than around samples. And bricking has a memory break-even that is lower
-// than it looks: an 8^3 brick with its apron stores 1000 texels to hold 512,
+// Two things worth knowing before a fifth attempt. The per-crossing fetch
+// that the third attempt left untried has now been tried (the fourth) and it
+// is not the fetch that costs: any per-step machinery in fs_main pays for
+// its registers whether it fires or not. And bricking has a memory
+// break-even that is lower than it looks: an 8^3 brick with its apron stores
+// 1000 texels to hold 512,
 // so it only shrinks a field below 51% brick occupancy (16^3: 70%, 32^3:
 // 83%). The whole attempt is in git — see the commit that reverted it for
 // the entry point, and benchmarking/soar_frame_results.md for the numbers.
@@ -12121,6 +12135,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // reachable with periodicity off and the camera just outside the domain
     // looking down.
     var ocean_consumed = false;
+    // The march reached the water. Shading it is left to the one
+    // ocean_shade_dispatch call after the loop rather than done here: the
+    // ocean shader carries two sun marches, and inlining it twice into
+    // fs_main cost the ocean views 7-9% for nothing (2026-09-23). The two
+    // paths computed the same expression on the same values — transmittance
+    // is not touched between this break and that call — so it is one call
+    // with two ways in.
+    var ocean_in_march = false;
     // Optical depth this ray has already crossed, so the pre-march total can
     // be turned into "what is still ahead of this sample". Unlike tau_depth
     // this never resets: it is the ray's own coordinate along its chord.
@@ -12154,18 +12176,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         for (var i: i32 = 0; i < max_view_steps; i = i + 1) {
             // witness.py:621-646 tests ocean before the t_far break so an
             // ocean plane coincident with the box floor is still shaded.
+            // The water is shaded after the loop, by the same call that
+            // shades water the march never reached (see ocean_in_march).
             if (ocean_on && t >= t_ocean) {
-                let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
-                col = col + ice_recolor(transmittance
-                            * ocean_shade_dispatch(
-                                ocean_hit, dir, sun,
-                                sun_cone_dir(sun, sun_frame,
-                                             sun_cone_seed, penumbra_tan),
-                                t_ocean, shadow_jitter,
-                                ocean_slope_seed,
-                                jitter_on * jitter_scale),
-                            ICE_OCEAN_TINT, ice_on);
-                transmittance = 0.0;
+                ocean_in_march = true;
                 ocean_consumed = true;
                 break;
             }
@@ -12757,6 +12771,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // horizon sky colour, so the seam is invisible at the shipped settings
     // and only appears with the legacy no-haze ocean. Removing it is a look
     // change — water drawn to the edge of the float — not a bug fix.
+    var shade_ocean = ocean_in_march;
     if (ocean_on
         && !ocean_consumed
         && transmittance > TRANSMITTANCE_CUTOFF
@@ -12764,18 +12779,20 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
         let outer_size = u.bmax.xyz - u.bmin.xyz;
         let center = 0.5 * (u.bmin.xy + u.bmax.xy);
-        if (abs(ocean_hit.x - center.x) < outer_size.x * 50.0
-            && abs(ocean_hit.y - center.y) < outer_size.y * 50.0) {
-            col = col + ice_recolor(transmittance
-                        * ocean_shade_dispatch(
-                            ocean_hit, dir, sun,
-                            sun_cone_dir(sun, sun_frame, sun_cone_seed,
-                                         penumbra_tan),
-                            t_ocean, shadow_jitter,
-                            ocean_slope_seed, jitter_on * jitter_scale),
-                        ICE_OCEAN_TINT, ice_on);
-            transmittance = 0.0;
-        }
+        shade_ocean = abs(ocean_hit.x - center.x) < outer_size.x * 50.0
+            && abs(ocean_hit.y - center.y) < outer_size.y * 50.0;
+    }
+    if (shade_ocean) {
+        let ocean_hit = u.cam_origin.xyz + t_ocean * dir;
+        col = col + ice_recolor(transmittance
+                    * ocean_shade_dispatch(
+                        ocean_hit, dir, sun,
+                        sun_cone_dir(sun, sun_frame, sun_cone_seed,
+                                     penumbra_tan),
+                        t_ocean, shadow_jitter,
+                        ocean_slope_seed, jitter_on * jitter_scale),
+                    ICE_OCEAN_TINT, ice_on);
+        transmittance = 0.0;
     }
 
     // City for rays that exit or miss the volume without becoming opaque —
