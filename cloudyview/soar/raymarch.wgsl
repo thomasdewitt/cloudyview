@@ -177,15 +177,17 @@ struct Uniforms {
 // carries no ice variable — so one bind-group layout serves both. Read only
 // when u.light_cache.w is set.
 @group(0) @binding(8) var ice_frac: texture_3d<f32>;
-// The opaque surface under the clouds — the traced city or desert — as the
-// surface pre-pass left it for this frame: (radiance, t) per render pixel,
-// t = 1e30 on a miss. Read only under CITY or DESERT; the other scenes bind a
-// 1x1 stand-in and never run the pass. See the surface pre-pass section.
-@group(0) @binding(10) var surface_buf: texture_2d<f32>;
-// The city's plain surface (every building a box), read by the refinement
-// stage that traces the facade shell over it; a 1x1 stand-in everywhere
-// else.
-@group(0) @binding(11) var surface_plain: texture_2d<f32>;
+// Group 1: the surface pre-pass's targets, size-specific, so they live apart
+// from the scene resources in group 0 (which every pass shares unchanged).
+// surface_buf is the opaque surface under the clouds — the traced city or
+// desert — as the pre-pass left it for this frame: (radiance, t) per render
+// pixel, t = 1e30 on a miss; the march reads it, and only under CITY or
+// DESERT (other scenes bind 1x1 stand-ins and never run the pass).
+// surface_plain is the city's plain surface (every building a box), read by
+// the refinement stage that traces the facade shell over it. See the
+// surface pre-pass section.
+@group(1) @binding(0) var surface_buf: texture_2d<f32>;
+@group(1) @binding(1) var surface_plain: texture_2d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -12352,7 +12354,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // shell merely being compiled in (occupancy, not work). So the surface is
 // traced in a pass of its own, fs_surface, one fragment per render pixel,
 // before every fs_main pass of a frame, into a target fs_main reads at
-// binding 10. The march keeps only the composite (the t >= t_surface test,
+// group 1. The march keeps only the composite (the t >= t_surface test,
 // the dt clamp and the post-loop fallback), with the same radiance at the
 // same t as when it traced the surface itself.
 //
@@ -12567,7 +12569,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
 // The pass itself. Only the CITY and DESERT specializations are ever run
 // through it; any other scene returns a miss and the host never draws it.
 // The city's result is the PLAIN surface (every building a box), which the
-// refinement stage (fs_surface_refine) reads at binding 11; the desert's is
+// refinement stage (fs_surface_refine) reads from group 1; the desert's is
 // final.
 @fragment
 fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
