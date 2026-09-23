@@ -75,6 +75,18 @@
     "facade": "cc_adscreens_facade"
    },
    "enabled": true
+  },
+  {
+   "file": "industry.wgsl",
+   "name": "industry",
+   "kind_base": 700,
+   "hooks": {
+    "cell_props": "cc_industry_props_trace",
+    "shade": "cc_industry_shade",
+    "facade": "cc_industry_facade",
+    "roof": "cc_industry_roof"
+   },
+   "enabled": true
   }
  ]
 }
