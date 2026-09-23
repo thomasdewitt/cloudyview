@@ -53,6 +53,7 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
+    surface_cell_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
@@ -145,7 +146,7 @@ def main():
     ap.add_argument("--periodic", default="on", choices=("on", "off"))
     ap.add_argument("--views", default="",
                     help="comma-separated names, default all")
-    ap.add_argument("--scene", default="day", choices=("day", "city", "nested"))
+    ap.add_argument("--scene", default="day", choices=("day", "city", "nested", "desert"))
     ap.add_argument("--field", type=Path, default=None,
                     help="netCDF field (default: the judge views' TWP-ICE "
                          "subvolume). An optimization that gates on the cloud "
@@ -173,13 +174,15 @@ def main():
     periodic = args.periodic == "on"
     city = args.scene == "city"
     nested = args.scene == "nested"
+    surface = {"day": "ocean", "nested": "ocean", "city": "city",
+               "desert": "desert"}[args.scene]
     step_factor, light_factor, light_cache, sky_probe = (
         TIERS[args.tier] if args.tier else (2.0, 2.0, False, True))
     state = SceneState(
         bmin=[float(v) for v in level.bmin], bmax=[float(v) for v in level.bmax],
         dt_view=min(level.dx) * step_factor,
         dt_light=min(level.dx) * light_factor, periodic=periodic,
-        ocean_reflectance=OCEAN_REFLECTANCE, city=city, nested=nested)
+        ocean_reflectance=OCEAN_REFLECTANCE, surface=surface, nested=nested)
     nest = synthetic_nest(level) if nested else None
     if nested:
         state.nest_bmin = [float(v) for v in nest.bmin]
@@ -190,14 +193,14 @@ def main():
     renderers = []
     for spec in (args.a, args.b):
         r = SoarRenderer(device=device, periodic=periodic, nested=nested,
-                         city=city, shader_source=source_for(spec))
+                         surface=surface, shader_source=source_for(spec))
         r.upload_volume(level.sigma)
         if nested:
             r.upload_nest(nest.sigma)
         renderers.append(r)
-    if city:
+    if surface != "ocean":
         meta = renderers[0].surface_meta
-        state.ocean_fif_dx = float(meta["cell_m"])
+        state.ocean_fif_dx = surface_cell_m(surface, meta)
         state.ocean_tile_extent = float(meta["tile_extent_m"])
         state.ocean_max_lod = int(meta["mips"]) - 1
 

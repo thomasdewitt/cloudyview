@@ -1598,7 +1598,9 @@ fn cc_streetfurniture_material(m: f32, v: cc_streetfurniture_Prop)
 }
 
 // The lamp heads' glints: the eight heads city_street_light sums, as point
-// sources seen in a lobe of exponent `shine` about the reflected ray. The
+// sources seen in a lobe of exponent `shine` about the reflected ray — and
+// only on the lamp lines city_lamp_lines lights, so a glint never shows a
+// lamp that the pools and city_street_light say is not there. The
 // lobe is normalised ((n + 2) / 2 pi), so tightening it concentrates the same
 // energy into a smaller, brighter spark rather than dimming it — which is
 // what black plastic does: the highlight is small and it clips.
@@ -1607,9 +1609,13 @@ fn cc_streetfurniture_glints(p: vec3<f32>, n: vec3<f32>, rf: vec3<f32>,
     let cellm = u.ocean_params.x;
     let h2 = CITY_LAMP_HEAD_Z * CITY_LAMP_HEAD_Z;
     let norm = (shine + 2.0) * 0.15915494;
+    let lit = city_lamp_lines(p.xy);
     var e = 0.0;
     for (var dirn: i32 = 0; dirn < 2; dirn = dirn + 1) {
         let along_y = dirn == 0;
+        if (!select(lit.y, lit.x, along_y)) {
+            continue;
+        }
         let c = select(p.y, p.x, along_y);
         let a = select(p.x, p.y, along_y);
         let k = i32(round(c / cellm));
@@ -1749,7 +1755,8 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                      lane == 0);
     let fade = smoothstep(far.x, far.y, fpx);
     if (fade > 0.0) {
-        col = mix(col, city_ground_radiance(vec3<f32>(h.pos.xy, 0.0), cc, fp),
+        col = mix(col, city_ground_radiance(vec3<f32>(h.pos.xy, 0.0), h.cell, cc,
+                                            dir, fp),
                   fade);
     }
     return col;

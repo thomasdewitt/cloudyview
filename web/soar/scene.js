@@ -88,10 +88,29 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
  * different meta key for the texel size (the ocean's dx_m is the city's
  * cell_m). Field-independent, so each ships with the tool and is loaded once
  * per session.
+ *
+ * `schema` is the meta.json schema the caller's shader decodes
+ * (constants.js SURFACE_TILE_SCHEMAS); anything else is refused. The deploy
+ * copies tile directories through unfingerprinted, so the cache-safety is
+ * here instead: meta.json is always revalidated, and the bins are fetched
+ * under the schema as a version query, so a schema bump is a new URL for
+ * every edge and browser cache while a stale meta.json fails loudly rather
+ * than pairing a new shader with an old tile.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
-                                    { keepCells = false } = {}) {
-  const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
+                                    { keepCells = false, schema } = {}) {
+  if (!schema) {
+    throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
+  }
+  const meta = await (await fetch(`${baseUrl}/meta.json`,
+                                  { cache: "no-cache" })).json();
+  if (meta.schema !== schema) {
+    throw new Error(
+      `${baseUrl}/meta.json is schema ${JSON.stringify(meta.schema)}; this ` +
+      `soar reads ${schema}. The tile and the app are from different ` +
+      "releases — reload the page; if it persists the deploy is mixed.");
+  }
+  const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
@@ -101,7 +120,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
   for (let level = 0; level < meta.mips; level++) {
-    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin`);
+    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin${version}`);
     const n = Math.max(1, meta.n >> level);
     // The city minimap draws the same cascade the shader raises buildings
     // out of, so it reads the SAME bytes rather than fetching anything of
@@ -545,10 +564,10 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const surfaceKind = forcedSurface ?? meta.surface ?? "ocean";
-  if (surfaceKind !== "ocean" && surfaceKind !== "city") {
+  if (!["ocean", "desert", "city"].includes(surfaceKind)) {
     throw new Error(
       `The '${meta.id}' demo asks for surface '${surfaceKind}', which this ` +
-      "viewer does not know. It knows 'ocean' and 'city'.");
+      "viewer does not know. It knows 'ocean', 'desert' and 'city'.");
   }
   // A pre-v5 bake ships a ghost-padded volume and a faces.bin, which this
   // renderer would read two texels out of register on every axis. Say so
@@ -607,8 +626,9 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
     }
 
     const mapBytes = await fetchBytes(`${baseUrl}/${meta.map.file ?? "map.bin"}`);
-    progress?.(surfaceKind === "city"
-               ? "Raising the city…" : "Loading the ocean surface…", 0.95);
+    progress?.({ city: "Raising the city…",
+                 desert: "Laying out the desert…" }[surfaceKind]
+               ?? "Loading the ocean surface…", 0.95);
     const surfaceTile = await surface(surfaceKind);
     nestDummy = createNestDummy(device);
 
@@ -625,6 +645,7 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       oceanTileExtent: surfaceTile.tileExtent,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
+      desert: surfaceKind === "desert",
       // The city tile's per-block cascade, for the minimap to draw the city
       // with. Null for an ocean scene, and null is what makes the minimap
       // build the cloud map instead — see Minimap's constructor.

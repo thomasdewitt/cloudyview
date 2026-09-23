@@ -77,6 +77,17 @@
    "enabled": true
   },
   {
+   "file": "manholesteam.wgsl",
+   "name": "manholesteam",
+   "kind_base": 900,
+   "hooks": {
+    "cell_props": "cc_manholesteam_props_trace",
+    "shade": "cc_manholesteam_shade",
+    "media": "cc_manholesteam_media"
+   },
+   "enabled": true
+  },
+  {
    "file": "streetfurniture.wgsl",
    "name": "streetfurniture",
    "kind_base": 800,

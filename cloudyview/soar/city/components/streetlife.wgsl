@@ -108,19 +108,21 @@ const cc_streetlife_MAST_ALB: f32 = 0.026;
 const cc_streetlife_MAST_EDGE: f32 = 0.105;
 
 // --- parking ----------------------------------------------------------------
-// The parking line is set from the LAMP line, not from the plot edge, and
-// that is a correction the first renders forced. Parking at the kerb is where
-// cars belong on a minor street — the kerb is 3.5 m outboard of the lamps and
-// well inside the pool — but an avenue's plot edge is 16 m out (the avenue
-// gets CITY_AVENUE_EXTRA on both sides while its lamp lines stay 2.5 m off
-// the block edge, so the lamps are effectively a median). Cars parked at an
-// avenue kerb sit 12 m from the nearest lamp, where the pool has fallen by
-// e^-3.5, and rendered as invisible black shapes on black tarmac. So: a lane
-// PARK_LANE outboard of the lamps, pulled in to the kerb whenever the kerb is
-// closer than that. Light and source agree by construction, and the kerb slab
-// gets narrow enough to be a cheap reject as a side effect.
-const cc_streetlife_PARK_LANE: f32 = 3.2;
-const cc_streetlife_PARK_KERB: f32 = 0.25;  // clearance from the plot edge
+// Cars park in the core's parking lane: the first CITY_PARK_W of carriageway
+// outward from the kerb line (city_kerb_rect), on both kerbs of an avenue and
+// on the one kerb city_park_side picks on a 6 m minor carriageway. The lamps
+// stand on the sidewalk just inboard of that kerb, so a parked car is always
+// in the brightest part of its pool.
+//
+// (Until 2026-09-23 the lane was set PARK_LANE outboard of the lamp line and
+// required 1.6 m of clearance to the plot edge. The lamp-inset fix of
+// 2026-08-20 put the lamp line 2.5 m from the plot edge on every street,
+// which left 0.89 m, so no car parked anywhere in the city from then on —
+// every kerb failed park_ok and the renders simply had no cars in them.)
+const cc_streetlife_PARK_OFF: f32 = 1.20;   // kerb line to the car's centre
+// No parking this close to the cross street's building line: the corner
+// radius, the crosswalk and the stop line are all inside it.
+const cc_streetlife_PARK_CLEAR: f32 = 6.0;
 const cc_streetlife_SLOT: f32 = 7.0;
 const cc_streetlife_OCC: f32 = 0.35;
 const cc_streetlife_DENS_LO: f32 = 0.55;
@@ -278,6 +280,7 @@ struct cc_streetlife_Side {
     plot_sign: f32,   // which way the plot lies from the kerb
     a_min: f32, a_max: f32,   // the cell's extent along the kerb
     c_min: f32, c_max: f32,   // the cell's extent across it
+    p_min: f32, p_max: f32,   // where along the kerb a car may stand
     park_ok: bool,
 }
 
@@ -286,43 +289,59 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
     let cellm = u.ocean_params.x;
     let cmin = vec2<f32>(ci) * cellm;
     let cmax = cmin + vec2<f32>(cellm);
+    let kr = city_kerb_rect(cc);
     var s: cc_streetlife_Side;
-    var plot_c: f32;
+    var kerb_c: f32;
+    var line: i32;            // the centreline this kerb faces
     if (side == 0) {          // the plot's -x edge; kerb runs along y
         s.ax = 1;
-        s.lamp_c = cmin.x + city_lamp_inset(ci.x);
-        plot_c = cc.plot_min.x;
+        line = ci.x;
+        s.lamp_c = cmin.x + city_lamp_inset(line);
+        kerb_c = kr.x;
         s.plot_sign = 1.0;
     } else if (side == 1) {   // +x edge
         s.ax = 1;
-        s.lamp_c = cmax.x - city_lamp_inset(ci.x + 1);
-        plot_c = cc.plot_max.x;
+        line = ci.x + 1;
+        s.lamp_c = cmax.x - city_lamp_inset(line);
+        kerb_c = kr.z;
         s.plot_sign = -1.0;
     } else if (side == 2) {   // -y edge; kerb runs along x
         s.ax = 0;
-        s.lamp_c = cmin.y + city_lamp_inset(ci.y);
-        plot_c = cc.plot_min.y;
+        line = ci.y;
+        s.lamp_c = cmin.y + city_lamp_inset(line);
+        kerb_c = kr.y;
         s.plot_sign = 1.0;
     } else {                  // +y edge
         s.ax = 0;
-        s.lamp_c = cmax.y - city_lamp_inset(ci.y + 1);
-        plot_c = cc.plot_max.y;
+        line = ci.y + 1;
+        s.lamp_c = cmax.y - city_lamp_inset(line);
+        kerb_c = kr.w;
         s.plot_sign = -1.0;
     }
-    // Outboard of the lamps by PARK_LANE, or hard against the kerb if the
-    // kerb is nearer than that (see the constant's note).
-    let gap = s.plot_sign * (plot_c - s.lamp_c);
-    let off = min(cc_streetlife_PARK_LANE,
-                  gap - cc_streetlife_BB_C - cc_streetlife_PARK_KERB);
-    s.park_c = s.lamp_c + s.plot_sign * off;
+    s.park_c = kerb_c - s.plot_sign * cc_streetlife_PARK_OFF;
     s.a_min = select(cmin.y, cmin.x, s.ax == 0);
     s.a_max = select(cmax.y, cmax.x, s.ax == 0);
     s.c_min = select(cmin.x, cmin.y, s.ax == 0);
     s.c_max = select(cmax.x, cmax.y, s.ax == 0);
+    // Along the kerb, clear of the two cross streets' corners.
+    let cm = u.ocean_params.x;
+    let k0 = i32(round(s.a_min / cm));
+    let k1 = i32(round(s.a_max / cm));
+    s.p_min = s.a_min + CITY_STREET_HALF
+            + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(k0))
+            + cc_streetlife_PARK_CLEAR;
+    s.p_max = s.a_max - CITY_STREET_HALF
+            - select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(k1))
+            - cc_streetlife_PARK_CLEAR;
+    // The kerb this parking lane runs along sits on the plot's side of the
+    // centreline: + for a -x/-y edge, - for the others. A minor street parks
+    // on one side only.
+    let side_ok = city_is_avenue(line)
+               || city_park_side(line) == s.plot_sign;
     // A merged superblock's plot edge can sit in a sibling's column; that
     // kerb keeps its lamps (they are on the cell's own lattice) and loses its
     // parking to whichever member owns the ground.
-    s.park_ok = off > 1.6
+    s.park_ok = side_ok
              && s.park_c > s.c_min + cc_streetlife_BB_C
              && s.park_c < s.c_max - cc_streetlife_BB_C;
     return s;
@@ -424,8 +443,8 @@ fn cc_streetlife_prop(ci: vec2<i32>, cc: CityCell, s: cc_streetlife_Side,
     // cell boundary rather than restarting inside every block.
     let along = (f32(j) + 0.5) * cc_streetlife_SLOT
               + (r.y - 0.5) * 2.0 * cc_streetlife_ALONG_JIT;
-    if (along - cc_streetlife_BB_A < s.a_min
-        || along + cc_streetlife_BB_A > s.a_max) {
+    if (along - cc_streetlife_BB_A < s.p_min
+        || along + cc_streetlife_BB_A > s.p_max) {
         return cc_streetlife_no_prop();
     }
     let across = s.park_c + (r.z - 0.5) * 2.0 * cc_streetlife_LAT_JIT;
@@ -433,7 +452,12 @@ fn cc_streetlife_prop(ci: vec2<i32>, cc: CityCell, s: cc_streetlife_Side,
     if (s.ax == 1) {
         base = vec2<f32>(0.0, 1.0);
     }
-    let perp = vec2<f32>(-base.y, base.x);
+    // The across axis, positive: `across` is an absolute coordinate on the
+    // other axis, so it must map onto it with a + sign on both kinds of kerb.
+    // (A rotation, (-base.y, base.x), put every car of a y-running kerb at
+    // x = -park_c, outside its cell and never drawn; no car parked anywhere
+    // while that code was written, so nothing showed it.)
+    let perp = vec2<f32>(base.y, base.x);
     let yaw = (r.w - 0.5) * 2.0 * cc_streetlife_YAW;
     var fwd = base * cos(yaw) + perp * sin(yaw);
     if (fract(r.y * 17.31) > 0.5) {
@@ -933,6 +957,103 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// The sidewalk slab
+// ---------------------------------------------------------------------------
+//
+// The raised sidewalk around a plot that has one (city_has_walk): the prism
+// over the core's kerb rectangle, CITY_KERB_H tall, its corners rounded
+// exactly as city_kerb_sd rounds them. Its TOP is ground, returned as kind
+// 0, so the core shades it — and reflects off it — with the same function
+// that shades the z = 0 plane beyond this hook's reach; the step itself is
+// sub-pixel by then, and the two cannot disagree about anything but it.
+// Only the kerb FACE is this component's (kind 110).
+//
+// The prism is convex, so its entry is the box's entry — unless that entry
+// lands in a corner square the rounding cut away. Then the only way into the
+// prism is through that corner's capped cylinder: inside the box, leaving
+// the cut-away sliver means crossing its arc or leaving the box. One slab
+// test, and one cylinder for the rays that clip a corner.
+
+const cc_streetlife_SLAB_FP: f32 = 1.2;   // past this the step is 0.1 px
+
+fn cc_streetlife_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
+        -> CityHit {
+    let miss = cc_streetlife_miss(ci);
+    if (!city_has_walk(cc)) {
+        return miss;
+    }
+    let kr = city_kerb_rect(cc);
+    let bmin = vec3<f32>(kr.xy, 0.0);
+    let bmax = vec3<f32>(kr.zw, CITY_KERB_H);
+    let hb = city_box_hit(o, inv_dir, bmin, bmax);
+    if (hb.x > hb.y || hb.y <= t0 || hb.x > t1 || hb.x < 0.0) {
+        return miss;
+    }
+    var t = hb.x;
+    let pe = o + t * dir;
+    var n = city_box_normal(pe, bmin, bmax);
+    if (city_kerb_sd(pe.xy, cc, kr) > 1e-3) {
+        // A cut-away corner. Which one, and its circle.
+        let c = 0.5 * (kr.xy + kr.zw);
+        let hs = 0.5 * (kr.zw - kr.xy);
+        let r = min(CITY_KERB_R, min(hs.x, hs.y));
+        let sg = sign(pe.xy - c);
+        let cc0 = c + sg * (hs - vec2<f32>(r));
+        let oc = o.xy - cc0;
+        let a = dot(dir.xy, dir.xy);
+        let b = dot(oc, dir.xy);
+        let disc = b * b - a * (dot(oc, oc) - r * r);
+        if (disc < 0.0 || a < 1e-12) {
+            return miss;
+        }
+        let sq = sqrt(disc);
+        let tc0 = (-b - sq) / a;
+        let tc1 = (-b + sq) / a;
+        // z slab of the prism, [0, CITY_KERB_H].
+        let tz0 = (0.0 - o.z) * inv_dir.z;
+        let tz1 = (CITY_KERB_H - o.z) * inv_dir.z;
+        let tzn = min(tz0, tz1);
+        let tzf = max(tz0, tz1);
+        let tin = max(tc0, tzn);
+        if (tin > min(tc1, tzf) || tin < 0.0) {
+            return miss;
+        }
+        t = tin;
+        let pc = o + t * dir;
+        n = select(vec3<f32>(normalize(pc.xy - cc0), 0.0),
+                   vec3<f32>(0.0, 0.0, 1.0), tin == tzn);
+    }
+    if (t < t0 - 1e-4 || t > t1) {
+        return miss;
+    }
+    let pos = o + t * dir;
+    // The top is ground; the side is the kerb face.
+    let kind = select(110, 0, n.z > 0.5);
+    return CityHit(true, t, pos, n, kind, ci);
+}
+
+// The kerb face: granite, lit by the lamps across the road it faces, with
+// the arris along its top catching them — the bright line along every kerb
+// in the wet-street photographs.
+fn cc_streetlife_kerb_shade(h: CityHit, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    let light = city_street_light(h.pos, h.normal);
+    let fill = cc_streetlife_fill(h.pos);
+    let wet = 1.0 - CITY_WET_DARKEN * CITY_WET_WALK;
+    let arris = city_band(h.pos.z, CITY_KERB_H - 0.022, 0.022, fp);
+    // A wet arris reflects the lamp it faces: tight, bright, and only where
+    // the eye sits on the mirror side of it.
+    let head = cc_streetlife_nearest_lamp(h.pos.xy);
+    let l = normalize(head - h.pos);
+    let rf = reflect(dir, normalize(h.normal + vec3<f32>(0.0, 0.0, 1.0)));
+    let glint = pow(max(dot(rf, l), 0.0), 40.0);
+    return light * (CITY_REL_KERB * wet * (1.0 + 1.5 * arris)
+                    + 0.9 * arris * glint)
+         + CITY_ASPHALT_ALBEDO * CITY_REL_KERB * wet * fill;
+}
+
 fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                              t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
         -> CityHit {
@@ -985,10 +1106,23 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     }
     var res = cc_streetlife_miss(ci);
     var t_end = t1;
+    // The sidewalk first: it is the nearest thing to the ground on most of
+    // these rays, and whatever it stops shortens every test after it.
+    if (fp < cc_streetlife_SLAB_FP && min(za, zb) < CITY_KERB_H) {
+        res = cc_streetlife_slab(o, dir, inv_dir, t0, t1, ci, cc);
+        if (res.hit) {
+            t_end = res.t;
+        }
+    }
     var cand: cc_streetlife_Kerb;
     var have = false;
     var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
+        // Poles and parked cars stand only on a kerb that has a street
+        // (the bake removes streets from open land and lot interiors).
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
                                    fp);
         if (k.hit.hit) {
@@ -1482,6 +1616,9 @@ fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 
 fn cc_streetlife_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
+    if (h.kind == 110) {
+        return cc_streetlife_kerb_shade(h, dir, fp);
+    }
     if (h.kind <= 101) {
         return cc_streetlife_pole_shade(h, dir, fp);
     }

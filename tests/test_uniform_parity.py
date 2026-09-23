@@ -78,7 +78,7 @@ CASES = [
     # pipeline, row 8 becomes ground z + tile offset, and both hosts must
     # agree on every one of those numbers or the browser flies a different
     # night than the harness tuned.
-    ("city_night", {"city": True, "city_tile_offset_m": [136080.0, -18630.0],
+    ("city_night", {"surface": "city", "city_tile_offset_m": [136080.0, -18630.0],
                     "ocean_fif_dx": 90.0, "ocean_tile_extent": 92160.0,
                     "ocean_max_lod": 10, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
@@ -91,16 +91,24 @@ CASES = [
     # static default: with no override, row 24 is city_tile_offset_m folded.
     ("ocean_surface_offset", {"surface_offset_m": [-18630.2, 136143.7]}, {}),
     ("city_surface_offset",
-     {"city": True, "city_tile_offset_m": [75330.0, -17010.0],
+     {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "surface_offset_m": [-102400.0, 204800.0],
       "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
       "ocean_max_lod": 8, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
     ("city_surface_static",
-     {"city": True, "city_tile_offset_m": [75330.0, -17010.0],
+     {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
       "ocean_max_lod": 8, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
+    # The desert (2026-09-23): row 8 is the datum alone, rows 9 and 24
+    # describe the 4096 m terrain tile, and the daytime spectral rows are
+    # the ocean's. A far-flung surface offset checks the fold at its tile.
+    ("desert_day",
+     {"surface": "desert", "ocean_z": 12.5, "ocean_fif_dx": 2.0,
+      "ocean_tile_extent": 4096.0, "ocean_max_lod": 11,
+      "surface_offset_m": [-18630.2, 136143.7]},
+     {"sun_elevation": 38.0}),
 ]
 
 BASE_SCENE = dict(
@@ -141,13 +149,19 @@ def _js_state(extra):
              "nested": "nested", "nest_bmin": "nestBmin",
              "nest_bmax": "nestBmax", "dt_view_nest": "dtViewNest",
              "dt_light_nest": "dtLightNest",
-             "city": "city", "city_tile_offset_m": "cityOffsetM",
+             "ocean_z": "oceanZ", "city_tile_offset_m": "cityOffsetM",
              "surface_offset_m": "surfaceOffsetM",
              "ocean_fif_dx": "oceanFifDx",
              "ocean_tile_extent": "oceanTileExtent",
              "ocean_max_lod": "oceanMaxLod"}
     for k, v in extra.items():
-        s[remap[k]] = v
+        if k == "surface":
+            # Python names the surface; the browser's scene carries one flag
+            # per specialization.
+            s["city"] = v == "city"
+            s["desert"] = v == "desert"
+        else:
+            s[remap[k]] = v
     return s
 
 
