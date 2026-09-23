@@ -13364,8 +13364,8 @@ const DESERT_STONE_LEVELS: i32 = 2;
 const DESERT_STONE_CELL = array<f32, 2>(0.03125, 0.125);   // m: 1/32, 1/8
 const DESERT_STONE_CELL_BITS = array<u32, 2>(131071u, 32767u); // n - 1
 const DESERT_STONE_SEED = array<u32, 2>(0x9e3779b9u, 0x85ebca6bu);
-// Semi-axis a as a fraction of the cell; b = a * [0.6, 1]; height c = a *
-// DESERT_STONE_FLAT.
+// Semi-axis a as a fraction of the cell (times desert_stone_scale); b = a *
+// [0.6, 1]; height c = a * DESERT_STONE_FLAT.
 const DESERT_STONE_A_LO: f32 = 0.26;
 const DESERT_STONE_A_HI: f32 = 0.46;
 const DESERT_STONE_FLAT: f32 = 0.6;
@@ -13386,16 +13386,24 @@ const DESERT_STONE_MAX_CELLS: i32 = 40;
 // Stone colours: varnished dark brown, grey, red-brown, pale quartz and
 // feldspar, tan — and how each surface draws from them (pavement is the
 // varnished one; a wash's stones are fresh and paler).
-const DESERT_STONE_PALETTE = array<vec3<f32>, 5>(
+const DESERT_STONE_PALETTE = array<vec3<f32>, 7>(
     vec3<f32>(0.060, 0.045, 0.035),
     vec3<f32>(0.160, 0.148, 0.128),
     vec3<f32>(0.170, 0.115, 0.085),
     vec3<f32>(0.340, 0.310, 0.270),
-    vec3<f32>(0.280, 0.210, 0.150)
+    vec3<f32>(0.280, 0.210, 0.150),
+    vec3<f32>(0.210, 0.105, 0.060),
+    vec3<f32>(0.290, 0.200, 0.170)
 );
-const DESERT_STONE_MIX_PAVEMENT = array<f32, 5>(0.45, 0.20, 0.20, 0.05, 0.10);
-const DESERT_STONE_MIX_SOIL = array<f32, 5>(0.15, 0.25, 0.25, 0.10, 0.25);
-const DESERT_STONE_MIX_WASH = array<f32, 5>(0.05, 0.30, 0.15, 0.30, 0.20);
+// The same seven, as fractions of each surface's stones: varnish-dark on
+// the pavement, fresh and pale in a wash, rust and rose throughout (the
+// references' clasts run through rust, pink, grey, black and white quartz).
+const DESERT_STONE_MIX_PAVEMENT = array<f32, 7>(0.36, 0.16, 0.16, 0.04, 0.08,
+                                                0.12, 0.08);
+const DESERT_STONE_MIX_SOIL = array<f32, 7>(0.12, 0.20, 0.20, 0.08, 0.20,
+                                            0.10, 0.10);
+const DESERT_STONE_MIX_WASH = array<f32, 7>(0.04, 0.26, 0.13, 0.26, 0.17,
+                                            0.07, 0.07);
 
 fn desert_stone_mix(m: vec3<f32>, i: i32) -> f32 {
     return m.x * DESERT_STONE_MIX_PAVEMENT[i] + m.y * DESERT_STONE_MIX_SOIL[i]
@@ -13405,7 +13413,7 @@ fn desert_stone_mix(m: vec3<f32>, i: i32) -> f32 {
 // The mean albedo of the stones on a surface of material `m`.
 fn desert_stone_mean_albedo(m: vec3<f32>) -> vec3<f32> {
     var a = vec3<f32>(0.0);
-    for (var i: i32 = 0; i < 5; i = i + 1) {
+    for (var i: i32 = 0; i < 7; i = i + 1) {
         a = a + desert_stone_mix(m, i) * DESERT_STONE_PALETTE[i];
     }
     return a;
@@ -13421,12 +13429,20 @@ fn desert_stone_resolve(k: i32, fp: f32) -> f32 {
     return smoothstep(0.5 * c, 0.12 * c, fp);
 }
 
+// A pavement is PACKED — interlocking clasts with fines only in the gaps,
+// not stones scattered over silt — so its stones are larger for their cell
+// (up to 2/3 of it, reaching into the neighbours the walk tests).
+fn desert_stone_scale(m: vec3<f32>) -> f32 {
+    return 1.0 + 0.45 * m.x;
+}
+
 // The fraction of the ground drawn as stones at footprint `fp`.
 fn desert_stone_cover(m: vec3<f32>, fp: f32) -> f32 {
+    let area = DESERT_STONE_AREA * desert_stone_scale(m) * desert_stone_scale(m);
     let p0 = dot(m, DESERT_STONE_P_GRAVEL) * desert_stone_resolve(0, fp);
     let p1 = dot(m, DESERT_STONE_P_PEBBLE) * desert_stone_resolve(1, fp);
     // Independent levels: the uncovered fraction is the product.
-    return 1.0 - (1.0 - p0 * DESERT_STONE_AREA) * (1.0 - p1 * DESERT_STONE_AREA);
+    return min(1.0 - (1.0 - p0 * area) * (1.0 - p1 * area), 0.9);
 }
 
 // The silt between the drawn stones: whatever albedo keeps the footprint's
@@ -13472,7 +13488,8 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
         return s;
     }
     let c = DESERT_STONE_CELL[k];
-    let a = c * mix(DESERT_STONE_A_LO, DESERT_STONE_A_HI, r.y);
+    let a = c * desert_stone_scale(m)
+              * mix(DESERT_STONE_A_LO, DESERT_STONE_A_HI, r.y);
     let b = a * mix(0.6, 1.0, fract(r.y * 13.7));
     let h = a * DESERT_STONE_FLAT * mix(0.7, 1.2, fract(r.y * 29.1));
     // Anywhere in the cell; a < c/2, so the stone reaches at most into the
@@ -13488,8 +13505,8 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
     // Colour: a palette draw weighted by the material, and a brightness
     // jitter of mean one.
     var pick = fract(r.w * 11.3 + r.y * 2.9);
-    var col = DESERT_STONE_PALETTE[4];
-    for (var i: i32 = 0; i < 5; i = i + 1) {
+    var col = DESERT_STONE_PALETTE[6];
+    for (var i: i32 = 0; i < 7; i = i + 1) {
         let wi = desert_stone_mix(m, i);
         if (pick < wi) {
             col = DESERT_STONE_PALETTE[i];
@@ -13644,8 +13661,11 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit,
     if (closing <= 1e-4) {
         return best;
     }
+    // No gravel on a cut-bank wall: stones laid on a steep face from a
+    // plan-view grid read as texture dragged down it.
+    let open_ground = 1.0 - th.mat.y;
     for (var k: i32 = 0; k < DESERT_STONE_LEVELS; k = k + 1) {
-        let w = desert_stone_resolve(k, fp);
+        let w = desert_stone_resolve(k, fp) * open_ground;
         if (w <= 0.0) {
             continue;
         }
@@ -13723,6 +13743,41 @@ fn desert_stone_shadow(p: vec3<f32>, sun: vec3<f32>, n: vec3<f32>,
     return 1.0;
 }
 
+// --- cut banks --------------------------------------------------------------
+
+// How much of a cut-bank wall a surface of unit normal n is: none on
+// anything a person would walk up, all of it past ~50 degrees.
+fn desert_wall(n: vec3<f32>) -> f32 {
+    return smoothstep(0.8, 0.6, n.z);
+}
+
+// A wash's cut bank is a section through the alluvium: tan silt in layers,
+// with the pale nodular caliche horizon the soil built at depth (temp/
+// references/desert wash_santa_cruz_river_cut_banks, caliche_jornada_*).
+// Banded by height, not by plan position, so it reads as strata and not as
+// a texture dragged down the face; the bands wander a little along the bank.
+// The bank is the soil in section, no lighter: a sunlit wall already reads
+// brighter by its orientation, and a lighter albedo on top drew every bank
+// as a white stroke (the blind judge's "contour lines"). The caliche is a
+// faint, nodular band, not a continuous white seam.
+const DESERT_ALBEDO_BANK: vec3<f32> = vec3<f32>(0.31, 0.21, 0.13);
+const DESERT_ALBEDO_CALICHE: vec3<f32> = vec3<f32>(0.40, 0.36, 0.30);
+const DESERT_CALICHE_WEIGHT: f32 = 0.5;
+const DESERT_STRATUM_M: f32 = 0.35;
+
+fn desert_wall_albedo(p: vec3<f32>) -> vec3<f32> {
+    let wander = 0.25 * sin(dot(p.xy, vec2<f32>(0.21, 0.13)))
+               + 0.15 * sin(dot(p.xy, vec2<f32>(-0.9, 1.3)));
+    let band = fract(p.z / DESERT_STRATUM_M + wander);
+    let nodules = smoothstep(0.1, 0.6, sin(dot(p.xy, vec2<f32>(7.3, -5.1)))
+                                       * sin(dot(p.xy, vec2<f32>(-3.7, 6.9))));
+    let caliche = DESERT_CALICHE_WEIGHT * nodules
+        * smoothstep(0.55, 0.62, band) * smoothstep(0.85, 0.78, band);
+    let layer = 0.92 + 0.16 * smoothstep(0.1, 0.3, band)
+                           * smoothstep(0.5, 0.35, band);
+    return mix(DESERT_ALBEDO_BANK * layer, DESERT_ALBEDO_CALICHE, caliche);
+}
+
 // --- the ground's own texture below the stones ---------------------------
 
 // Between the stones' own scale and a metre of footprint, a pixel holds
@@ -13774,7 +13829,7 @@ fn desert_grain(xy: vec2<f32>, fp: f32, fpg: f32, m: vec3<f32>) -> f32 {
 // side steeper than the stoss. A normal perturbation on sand only, faded in
 // once the footprint resolves them.
 const DESERT_RIPPLE_M: f32 = 0.09;
-const DESERT_RIPPLE_SLOPE: f32 = 0.12;
+const DESERT_RIPPLE_SLOPE: f32 = 0.07;
 const DESERT_WIND: vec2<f32> = vec2<f32>(0.8, 0.6);
 
 fn desert_ripple_slope(xy: vec2<f32>, fp: f32, sand: f32) -> vec2<f32> {
@@ -13784,8 +13839,9 @@ fn desert_ripple_slope(xy: vec2<f32>, fp: f32, sand: f32) -> vec2<f32> {
         return vec2<f32>(0.0);
     }
     // A slow meander of the crest line, so the ripples are not a grating.
-    let bend = 0.35 * sin(dot(xy, vec2<f32>(0.37, -0.52)))
-             + 0.2 * sin(dot(xy, vec2<f32>(-1.31, 0.87)));
+    let bend = 0.9 * sin(dot(xy, vec2<f32>(0.37, -0.52)))
+             + 0.5 * sin(dot(xy, vec2<f32>(-1.31, 0.87)))
+             + 0.3 * sin(dot(xy, vec2<f32>(3.1, 2.3)));
     let phase = fract(dot(xy, DESERT_WIND) / DESERT_RIPPLE_M + bend);
     // Stoss for 70% of the wavelength rising, lee for 30% falling.
     let d = select(-0.7 / 0.3, 1.0, phase < 0.7);
@@ -13805,8 +13861,9 @@ fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
         // the stones sit on.
         let fp = pixel_angle * best.t;
         let s = desert_surface(best.pos.xy, fp);
-        best.mat = vec4<f32>(s.y, 0.0, 0.0, 0.0);
         best.normal = desert_normal_fp(best.pos.xy, fp);
+        // mat.y: how much of a cut-bank wall this is (desert_wall).
+        best.mat = vec4<f32>(s.y, desert_wall(best.normal), 0.0, 0.0);
         let ground = best;
         best = desert_stone_trace(o, dir, ground, pixel_angle);
         if (best.kind == DESERT_KIND_TERRAIN) {
@@ -13989,7 +14046,14 @@ fn desert_terrain_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
         if (q.z > u.ocean.x + u.ocean.z + u.ocean.w * DESERT_OCTAVE_MARGIN) {
             break;
         }
-        let gap = q.z - desert_surface(q.xy, max(fp, t * 0.01)).x;
+        // Like with like: the rise of the surface read at this step's
+        // footprint, measured from the SAME filtered surface under p. The
+        // far reads are coarse mips, and comparing p's fine height with them
+        // put every point below its local mean in its own smoothed shadow —
+        // a whole far field shaded, with jagged edges along the washes.
+        let fps = max(fp, t * 0.01);
+        let rise = desert_surface(q.xy, fps).x - desert_surface(p.xy, fps).x;
+        let gap = t * sun.z - rise;
         lit = min(lit, clamp(0.5 + 0.5 * gap
                              / (t * SUN_ANGULAR_RADIUS * 2.0), 0.0, 1.0));
         if (lit <= 0.0) {
@@ -14084,9 +14148,11 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // The silt between the drawn stones, textured below them by the
     // stones it averages over.
     let fpg = fp / max(abs(dot(dir, n)), 0.08);
-    let albedo = desert_matrix_albedo(
+    let wall = h.mat.y;
+    let floor_albedo = desert_matrix_albedo(
             desert_albedo(light) * desert_albedo_correction(fp), m, fp)
         * desert_grain(h.pos.xy, fp, fpg, m);
+    let albedo = mix(floor_albedo, desert_wall_albedo(h.pos), wall);
     // The kernel BRF is the statistical form of the stones' shadows and
     // hot spot; where the stones are geometry, geometry casts them instead.
     let statistical = 1.0 - desert_stone_resolve(0, fp);
