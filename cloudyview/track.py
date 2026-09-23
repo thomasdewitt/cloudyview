@@ -64,8 +64,12 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-TRACK_SCHEMAS = ("cloudyview.track.v1", "cloudyview.track.v2",
-                 "cloudyview.track.v3")
+# Each schema's sample width: the width decides how a row is read (surface
+# frame, scene clock, and whether sx/sy are fractions of the tile or of the
+# period), so a file whose rows disagree with its schema is corrupt.
+TRACK_WIDTHS = {"cloudyview.track.v1": 7, "cloudyview.track.v2": 9,
+                "cloudyview.track.v3": 10}
+TRACK_SCHEMAS = tuple(TRACK_WIDTHS)
 HEADER_SCHEMA = "cloudyview.render.v1"
 
 # Relative x/y span the domain as [-1, 1], so a periodic flight-path wrap is
@@ -107,10 +111,10 @@ def load_track(path) -> tuple[dict, np.ndarray]:
     if len(rows) < 2:
         raise ValueError(
             f"{path}: {len(rows)} sample(s) is not enough to interpolate.")
-    if len(widths) != 1 or not (widths <= {7, 9, 10}):
+    if widths != {TRACK_WIDTHS[schema]}:
         raise ValueError(
-            f"{path}: track samples must uniformly have 7 columns (v1 / no "
-            f"surface frame), 9 (v2 with one) or 10 (v3 with the scene "
+            f"{path}: a {schema} track has {TRACK_WIDTHS[schema]}-column "
+            f"samples (v1: no surface frame, v2: with one, v3: and the scene "
             f"clock); got widths {sorted(widths)}.")
     samples = np.asarray(rows, dtype=np.float64)
     if not np.all(np.isfinite(samples)):
