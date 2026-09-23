@@ -10711,15 +10711,24 @@ fn desert_albedo(lightness: f32) -> vec3<f32> {
     return mix(DESERT_ALBEDO_SOIL, DESERT_ALBEDO_WASH, 2.0 * l - 1.0);
 }
 
-// A sunlit surface stands to a sunlit cloud face as their albedos do. The
-// renderer's sun, sky and cloud scales were each fitted to photographs and
-// never to one another, so the textbook a*E*mu/pi with E = u.cloud_sun is
-// not in the cloud's units; this is the one constant that puts it there
-// (the parked surfaces branch's argument, re-measured on this look).
-const DESERT_BEAM_CALIBRATION: f32 = 0.27;
-// Clear-sky diffuse irradiance on the horizontal as a fraction of the
-// beam's, in the visible — why a shadow on sand is blue and not black.
-const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.20;
+// The ground's brightness in this renderer's units. The sun, sky and cloud
+// scales here were each fitted to photographs and never to one another, so
+// the textbook a*E*mu/pi with E = u.cloud_sun is not in any photograph's
+// units — and the one authority is the photographs (temp/references/
+// desert). Both constants are fitted on views of known lighting, measured
+// in display space against the references: sunlit soil displays near 0.65
+// under the look's own auto-exposure (the Superstition and Kitt Peak
+// frames), and a cloud shadow on it near 0.73 of that (Kitt Peak's near
+// shadows read 0.65-0.77). Fitted on a SUNLIT view on purpose: this STEAM
+// field shades ~70% of its ground at a 45 deg sun (median slant optical
+// depth 13), so a frame's median is mostly shadow, and a first fit to
+// medians made the sunlit ground a fifth too bright.
+const DESERT_BEAM_CALIBRATION: f32 = 0.15;
+// Diffuse irradiance on the horizontal as a fraction of the beam's. Well
+// above a clear sky's visible-band 0.15-0.25, and deliberately: a shadowed
+// point also sees the sunlit sides of the clouds that shade it, and the
+// fitted shadow ratio needs it.
+const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.35;
 // Skylight does not switch off with the solar cosine.
 const DESERT_SKY_MU_FLOOR: f32 = 0.12;
 
@@ -11776,6 +11785,31 @@ fn desert_brf(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     return clamp((1.0 + vol_w * k_vol + geo_w * k_geo) / white, 0.35, 3.0);
 }
 
+// The slope variance the tile's mip chain has filtered out of the normal at
+// each level (tools/export_desert_tile.py slope_variance_removed; held to the
+// tile by tests/test_desert_tile.py) — the ocean's FIF_SLOPE_VARIANCE_REMOVED
+// for the ground. A far pixel is shaded at the footprint's MEAN normal,
+// which has lost the facets that turn away from a low sun and the shadows
+// the ridges throw; this puts them back as Smith shadowing on the beam, so
+// the far bajada at low sun is as dark as its resolved form averages to
+// rather than flat and bright.
+const DESERT_SLOPE_VARIANCE_REMOVED = array<f32, 12>(
+    0.000000, 0.004998, 0.008783, 0.010107, 0.010435, 0.010565,
+    0.010652, 0.010723, 0.010783, 0.010829, 0.010850, 0.010850
+);
+
+fn desert_unresolved_shadow(n: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
+    let lod = desert_lod(fp);
+    let l0 = min(i32(floor(lod)), 11);
+    let l1 = min(l0 + 1, 11);
+    let a2 = mix(DESERT_SLOPE_VARIANCE_REMOVED[l0],
+                 DESERT_SLOPE_VARIANCE_REMOVED[l1], lod - f32(l0));
+    if (a2 <= 0.0) {
+        return 1.0;
+    }
+    return ggx_smith_g1(max(dot(n, sun), 1e-3), a2);
+}
+
 // Kernel weights for the two endmembers. Pavement is a close mosaic of
 // pebbles and so the strongly geometric surface; sand is smoother.
 const DESERT_VOL_W_PAVEMENT: f32 = 0.25;
@@ -11802,6 +11836,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                          statistical * mix(DESERT_GEO_W_PAVEMENT,
                                            DESERT_GEO_W_SAND, light));
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp)
+        * desert_unresolved_shadow(n, L.sun_dir, fp)
         * desert_stone_shadow(h.pos, L.sun_dir, n, light, fp)
         * desert_flora_shadow(h.pos, L.sun_dir, fp) * (1.0 - far.shadow);
     let mu = max(dot(n, L.sun_dir), 0.0);
@@ -11816,10 +11851,11 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
 // and the polished tops of pavement clasts throw a soft forward glare
 // toward the viewer (temp/references/desert lowsun_backlit_*). A weak,
 // rough dielectric lobe — Fresnel at F0 = 0.04, GGX at alpha 0.35, Smith
-// masking — which is zero anywhere but near the forward-scattering
-// geometry, so the high-sun look is untouched.
+// masking, weighted to grazing views — which is zero anywhere but near the
+// forward-scattering geometry seen edge-on, so the high-sun look is
+// untouched.
 const DESERT_SHEEN_F0: f32 = 0.04;
-const DESERT_SHEEN_ALPHA: f32 = 0.35;
+const DESERT_SHEEN_ALPHA: f32 = 0.2;
 
 fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
     let v = -dir;
@@ -11837,7 +11873,11 @@ fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
     let den = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
     let d = a2 / (DESERT_PI * den * den);
     let g = ggx_smith_g1(n_dot_v, a2) * ggx_smith_g1(n_dot_l, a2);
-    return d * g * fresnel / (4.0 * n_dot_v);
+    // A grazing phenomenon: the glare comes off the tops of grains and
+    // clasts seen edge-on, and a view from well above sees their shadowed
+    // flanks instead (the RossLi kernel's forward darkening).
+    let edge = 1.0 - n_dot_v;
+    return d * g * fresnel / (4.0 * n_dot_v) * edge * edge;
 }
 
 // Aerial perspective toward the horizon sky, the water's own (row 19.y),

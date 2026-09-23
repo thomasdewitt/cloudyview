@@ -264,8 +264,20 @@ def relief_stats(heights: list) -> dict:
     envelope = [round(1.1 * float((heights[0]
                                    - _bilinear_periodic(h, n)).max()), 3)
                 for h in heights]
+    # slope_variance_removed: mean squared slope (central differences) at
+    # level 0 minus the same at level k — what the far field's filtered
+    # normal no longer carries, and what the shader puts back as shadowing
+    # on the direct beam (raymarch.wgsl DESERT_SLOPE_VARIANCE_REMOVED).
+    msq = []
+    for k, h in enumerate(heights):
+        dx = cell * 2 ** k
+        gx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) / (2 * dx)
+        gy = (np.roll(h, -1, 0) - np.roll(h, 1, 0)) / (2 * dx)
+        msq.append(float((gx * gx + gy * gy).mean()))
+    removed = [round(msq[0] - v, 6) for v in msq]
     return {"slope_max": slope_max,
             "envelope_m": envelope,
+            "slope_variance_removed": removed,
             "band_max_m": round(float(np.abs(band).max()), 4),
             "band_slope_max": round(1.25 * float(bg.max()), 3)}
 
