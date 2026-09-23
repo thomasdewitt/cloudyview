@@ -476,11 +476,16 @@ export function cityCell(tile, cx, cy) {
       bud_min = [bmin2[0] + 0.2 * fw[0], bmin2[1] - reach];
       bud_max = [bmax2[0] - 0.2 * fw[0], bmin2[1] + 1.0];
     }
-    // Clamped to the lot minus a hair, so no prim leaves it.
-    bud_min = [Math.max(bud_min[0], cmin[0] + 0.5),
-               Math.max(bud_min[1], cmin[1] + 0.5)];
-    bud_max = [Math.min(bud_max[0], cmax[0] - 0.5),
-               Math.min(bud_max[1], cmax[1] - 0.5)];
+    // Clamped to the lot minus a hair, so no prim leaves it — and to the
+    // plot on avenue edges, whose corridor is skyway's empty air.
+    const bud_lo = [cmin[0] + (isAvenue(base[0]) ? hx0 : 0.5),
+                    cmin[1] + (isAvenue(base[1]) ? hy0 : 0.5)];
+    const bud_hi = [cmax[0] - (isAvenue(base[0] + span[0]) ? hx1 : 0.5),
+                    cmax[1] - (isAvenue(base[1] + span[1]) ? hy1 : 0.5)];
+    bud_min = [Math.max(bud_min[0], bud_lo[0]),
+               Math.max(bud_min[1], bud_lo[1])];
+    bud_max = [Math.min(bud_max[0], bud_hi[0]),
+               Math.min(bud_max[1], bud_hi[1])];
     c.b2min = vec3(bud_min, bz0);
     c.b2max = vec3(bud_max, bz1);
     if (h > 200.0 && r4b[1] > 0.55) {
@@ -491,10 +496,10 @@ export function cityCell(tile, cx, cy) {
       // The second bud rides the opposite flank: mirror about bc.
       const m0 = [2.0 * bc[0] - bud_max[0], 2.0 * bc[1] - bud_max[1]];
       const m1 = [2.0 * bc[0] - bud_min[0], 2.0 * bc[1] - bud_min[1]];
-      c.b3min = [Math.max(Math.min(m0[0], m1[0]), cmin[0] + 0.5),
-                 Math.max(Math.min(m0[1], m1[1]), cmin[1] + 0.5), cz0];
-      c.b3max = [Math.min(Math.max(m0[0], m1[0]), cmax[0] - 0.5),
-                 Math.min(Math.max(m0[1], m1[1]), cmax[1] - 0.5), cz1];
+      c.b3min = [Math.max(Math.min(m0[0], m1[0]), bud_lo[0]),
+                 Math.max(Math.min(m0[1], m1[1]), bud_lo[1]), cz0];
+      c.b3max = [Math.min(Math.max(m0[0], m1[0]), bud_hi[0]),
+                 Math.min(Math.max(m0[1], m1[1]), bud_hi[1]), cz1];
     }
   } else if (podium) {
     // Podium, tower, crown.
