@@ -14141,7 +14141,7 @@ const DESERT_VOL_W_SAND: f32 = 0.15;
 const DESERT_GEO_W_SAND: f32 = 0.08;
 
 fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
-                          L: DesertLight, far: DesertCover) -> vec3<f32> {
+                          L: DesertLight) -> vec3<f32> {
     let n = h.normal;
     let light = clamp(h.mat.x, 0.0, 1.0);
     let m = desert_material(light);
@@ -14261,7 +14261,7 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
         rgb = desert_lambert(h.mat.xyz, h.normal, Ls);
     } else {
         let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
-        rgb = desert_ground_radiance(h, dir, fp, L, far) * (1.0 - far.cover)
+        rgb = desert_ground_radiance(h, dir, fp, L) * (1.0 - far.cover)
               + far.cover * desert_flora_far_shade(far, dir, L);
     }
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
