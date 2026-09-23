@@ -11417,9 +11417,12 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         let sm = df_sag_eval(&cols, n, q, blend);
         let d = sm.d;
         // A shadow ray carries the receiver's footprint in pixel_angle
-        // (see desert_flora_shadow): its own t says nothing about pixels.
+        // (see df_shadow_exact): its own t says nothing about pixels. Its
+        // tolerance stays well inside the footprint, because what it
+        // decides is whether a point a centimetre off the skin — a needle
+        // on a backlit rim — sees past the body.
         let eps = select(max(1.5e-4, 0.3 * pixel_angle * t),
-                         max(1e-3, 0.3 * pixel_angle), shadow);
+                         max(5e-4, 0.05 * pixel_angle), shadow);
         if (d < eps) {
             body_t = t;
             body = sm;
@@ -13188,6 +13191,20 @@ fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     return mix(df_shadow_exact(p, sun_dir, fp), 1.0, w);
 }
 
+// A needle is thin translucent keratin: most of the light that crosses it
+// goes on forward, into a lobe about the sun direction. DF_FIBER_TT is the
+// forward-transmitted fraction relative to the albedo, DF_FIBER_TT_W the
+// lobe's width in cos(angle) (0.16: about 33 degrees) — broad and bright
+// enough that a saguaro's whole outline glows with the sun hidden behind it,
+// as in the backlit references.
+const DF_FIBER_TT: f32 = 0.9;
+const DF_FIBER_TT_W: f32 = 0.16;
+
+fn df_fiber_lobe(dir: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
+    return exp((dot(dir, sun_dir) - 1.0) / DF_FIBER_TT_W)
+        / (DF_TAU * DF_FIBER_TT_W);
+}
+
 // Fiber lighting for a needle of axis `ax`: Kajiya-Kay diffuse and sheen,
 // plus the forward transmission lobe that makes a backlit saguaro glow gold.
 fn df_fiber(albedo: vec3<f32>, ax: vec3<f32>, dir: vec3<f32>,
@@ -13200,11 +13217,8 @@ fn df_fiber(albedo: vec3<f32>, ax: vec3<f32>, dir: vec3<f32>,
     let sheen_c = max(ct * cv + st * sv, 0.0);
     let sheen = 0.04 * pow(sheen_c, 40.0) * 41.0 / DF_TAU
         * L.sun * sun_vis * st;
-    // Transmission: forward-peaked around the sun, width ~25 degrees.
-    let c = dot(dir, L.sun_dir);
-    let w = 0.10;
-    let tt = exp((c - 1.0) / w) / (DF_TAU * w);
-    let trans = albedo * 0.55 * tt * st * L.sun * sun_vis;
+    let trans = albedo * DF_FIBER_TT * df_fiber_lobe(dir, L.sun_dir) * st
+        * L.sun * sun_vis;
     return diffuse + sheen + trans;
 }
 
@@ -13212,12 +13226,9 @@ fn df_fiber(albedo: vec3<f32>, ax: vec3<f32>, dir: vec3<f32>,
 // directions (the mean of sin(axis, light) over a sphere is pi/4).
 fn df_spine_medium(alb: vec3<f32>, dir: vec3<f32>, L: DesertLight,
                    Ls: DesertLight) -> vec3<f32> {
-    let c = dot(dir, L.sun_dir);
-    let w = 0.10;
-    let tt = exp((c - 1.0) / w) / (DF_TAU * w);
     let q = 0.25 * DF_PI;
     return alb / DF_PI * (Ls.sun * q * q + L.sky * 0.6)
-        + alb * 0.55 * tt * q * Ls.sun;
+        + alb * DF_FIBER_TT * df_fiber_lobe(dir, L.sun_dir) * q * Ls.sun;
 }
 
 fn df_ggx_spec(n: vec3<f32>, dir: vec3<f32>, l: vec3<f32>, alpha: f32,
@@ -13297,7 +13308,15 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
               * (1.0 - felt_w);
         if (code == DF_MAT_SKIN_FUZZ) {
             // The shell has folded into the skin: its coverage at this view.
-            col = mix(col, df_spine_medium(spine_mean, dir, L, Ls), cov);
+            // Its needles stand out from the skin, so they see the sun from
+            // the shell's outer half, not from the skin's own point — which
+            // is what lights the rim of a backlit plant while the skin
+            // beneath it is in its own shadow.
+            let shell_w = select(DF_SAG_SHELL, DF_BAR_SHELL, barrel);
+            var Lf = L;
+            Lf.sun = L.sun * df_shadow_exact(h.pos + n * (0.6 * shell_w),
+                                             L.sun_dir, fp);
+            col = mix(col, df_spine_medium(spine_mean, dir, L, Lf), cov);
         }
         return col;
     }

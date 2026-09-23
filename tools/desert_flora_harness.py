@@ -300,6 +300,9 @@ def hero_views(g, h, sun_az, sun_el):
                        sun_az, 7.0),
         "backlit_close": aim(g, x, y, r + 0.9, 2.2, 2.4, 50.0, back + 12.0,
                              sun_az, 9.0),
+        # Level with the arms, the low sun just off the trunk's edge.
+        "backlit_low": aim(g, x, y, 7.0, 3.0, 4.2, 55.0, back + 4.0,
+                           sun_az, sun_el),
     }
 
 
@@ -339,6 +342,10 @@ def main(argv=None) -> int:
                     help="substitute in the shader source before compiling "
                          "(each OLD must occur exactly once): forcing one "
                          "LOD representation for a calibration, say")
+    ap.add_argument("--no-clouds", action="store_true",
+                    help="an empty volume: the sun in clear sky, for judging "
+                         "the plants' own optics (the backlit halo) without "
+                         "the demo's cloud standing in front of a low sun")
     ap.add_argument("--npy", action="store_true",
                     help="also save the linear float image")
     args = ap.parse_args(argv)
@@ -376,6 +383,8 @@ def main(argv=None) -> int:
     preset = QUALITY_PRESETS[args.quality]
     r = SoarRenderer(periodic=bool(meta.get("periodic", True)),
                      surface="desert")
+    if args.no_clouds:
+        sigma = np.zeros_like(sigma)
     r.upload_volume(sigma)
     tile = r.surface_meta
     dx = (bmax[0] - bmin[0]) / sigma.shape[0]
