@@ -690,6 +690,8 @@ def main(filename: str, output: str = None,
          fallback_units: str = None,
          fallback_ice_units: str = None,
          fallback_coord_units: str = None,
+         grid_spacing: dict = None,
+         z_first: str = None,
          ice: str = None,
          no_ice: bool = False) -> None:
     """CLI wrapper around :func:`witness`: load, render, save a PNG."""
@@ -744,6 +746,14 @@ def main(filename: str, output: str = None,
                 "the nest field has no separate ice file to pair with, so "
                 "it would render ice-free without saying so. Merge the ice "
                 "into the file's groups, or drop one of the flags.")
+        if nest_group and grid_spacing:
+            # A nest is a finer grid inside the outer one: the outer spacing
+            # does not describe it, and with no meters of its own there is
+            # nothing to place it inside the outer box by.
+            raise ValueError(
+                "--dx/--dy/--dz and --nest-group are not supported together: "
+                "the stated spacing describes the outer grid only, and a nest "
+                "without meters cannot be placed inside it.")
         field = _load_field(
             filename,
             ice=ice,
@@ -763,6 +773,8 @@ def main(filename: str, output: str = None,
             fallback_units=fallback_units,
             fallback_ice_units=fallback_ice_units,
             fallback_coord_units=fallback_coord_units,
+            grid_spacing=grid_spacing,
+            z_first=z_first,
             no_ice=no_ice,
         )
 

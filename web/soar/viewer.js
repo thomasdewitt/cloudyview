@@ -360,16 +360,20 @@ export class Viewer {
       // volume) rather than re-downloaded per field.
       return (this._cityTile ??=
         await loadOceanTile(this.device, CITY_URL, undefined,
-                            { keepCells: true }));
+                            { keepCells: true,
+                              schema: K.SURFACE_TILE_SCHEMAS.city }));
     }
     if (kind === "desert") {
       // keepHeights: the camera's floor follows the terrain, read from the
       // same level-0 bytes the shader samples.
       return (this._desertTile ??=
         await loadOceanTile(this.device, DESERT_URL, undefined,
-                            { keepHeights: true }));
+                            { keepHeights: true,
+                              schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
-    return (this._ocean ??= await loadOceanTile(this.device, OCEAN_URL));
+    return (this._ocean ??= await loadOceanTile(
+      this.device, OCEAN_URL, undefined,
+      { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
   }
 
   async loadField(source, progress) {
@@ -1012,6 +1016,13 @@ export class Viewer {
           onPick: (coordUnits) => done({ coordUnits }),
           onCancel: cancel,
         });
+      } else if (question.panel === "gridSpacing") {
+        this.ui.open("gridSpacing", {
+          axes: question.axes, filename: question.filename,
+          group: question.group,
+          onPick: (gridSpacing, zFirst) => done({ gridSpacing, zFirst }),
+          onCancel: cancel,
+        });
       } else if (question.panel === "axes") {
         // Detection could not tell the dimensions apart. This is the reason
         // a failed load is no longer a dead end: the panel is offered
@@ -1399,15 +1410,30 @@ export class Viewer {
     if (this.scene?.city || kind === this.surfaceKind || this._surfacing) {
       return;
     }
+    // A recorded track stands on one ground: its header names it, and its
+    // samples' surface positions are fractions of that ground's tile. A
+    // switch mid-recording would replay half the flight over the wrong one.
+    if (this.recorder?.recording) {
+      this.ui.say("A flight track stands on one ground — stop the " +
+                  "recording (R) before switching.", 4);
+      return;
+    }
     this._surfacing = true;
     try {
       if (kind === "desert" && !this._desertTile) {
         this.ui.say("Laying out the desert…", 30);
       }
+      // Everything that can wait or fail first — the download, the
+      // pipeline — while the flight keeps drawing the ground it has; then
+      // the renderer and the camera change together, in one tick, so no
+      // frame is drawn with the new shader over the old frame or floor
+      // (codex review: an ocean camera at 12.5 m under a +16 m dune).
       const tile = await this._surfaceTile(kind);
-      await this.renderer.setSurface(kind, tile);
-      this.scene.desertFloorAt = kind === "desert" ? desertFloorAt(tile) : null;
-      this.camera.setSurface(tile.tileExtent, this.scene.desertFloorAt);
+      await this.renderer.prepareSurface(kind);
+      const floorAt = kind === "desert" ? desertFloorAt(tile) : null;
+      this.renderer.commitSurface(kind, tile);
+      this.scene.desertFloorAt = floorAt;
+      this.camera.setSurface(tile.tileExtent, floorAt);
       this.ui.say(kind === "desert"
         ? "The Sonoran desert (G for the ocean)."
         : "The ocean (G for the desert).", 4);
@@ -2846,6 +2872,18 @@ export class Viewer {
     if (s?.coordUnitsAssumed) {
       flags.push("--coord-units", quote(s.coordUnitsAssumed));
     }
+    // The grid-spacing answer, for the axes it placed and only those: the
+    // CLI refuses a spacing on an axis with meters of its own, the same rule
+    // that made the browser ask for exactly these.
+    const gs = s?.gridSpacingAssumed;
+    if (gs) {
+      for (const axis of ["x", "y", "z"]) {
+        if (gs.spacing[axis] !== undefined) {
+          flags.push(`--d${axis}`, String(gs.spacing[axis]));
+        }
+      }
+      if (gs.zFirst) flags.push("--z-first", gs.zFirst);
+    }
     for (const axis of ["x", "y", "z"]) {
       if (s?.dimNames?.[axis]) {
         flags.push(`--${axis}-dim`, quote(s.dimNames[axis]));
@@ -3166,7 +3204,7 @@ export class Viewer {
     // every pixel. Presenting is a blit. Once the view has converged there is
     // nothing left for a march to add, so the loop keeps presenting (the bird
     // still flies over it) and stops marching.
-    const march = this._marchPending
+    let march = this._marchPending
       || !this.renderer.converged
       || !this.renderer.canPresentLast;
     const probing = Boolean(this._probe);
@@ -3207,10 +3245,22 @@ export class Viewer {
         this._marchPending = false;
         // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
         // must not be acquired until every await inside the draw has resolved.
-        await this.renderer.drawFrame(
+        const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
-          { deltaSeconds: dt, overlays });
+          { deltaSeconds: dt, overlays, waitForPipeline: false });
+        if (!marched) {
+          // The shader variant this frame needs is still compiling (a tier,
+          // bake or toggle moved the lighting specialization; see
+          // Renderer._rayPipeline). Nothing was drawn and the canvas keeps
+          // its last picture. Asking again next frame rather than waiting
+          // inside the draw is what keeps a compile from holding a frame
+          // open while the field or a capture changes underneath it. The
+          // frame did not march, so no clock may count it.
+          this._marchPending = true;
+          march = false;
+          measuring = false;
+        }
       } else {
         this.renderer.presentLast(
           this.context.getCurrentTexture().createView(), this.canvasFormat,

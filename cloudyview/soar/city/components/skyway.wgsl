@@ -31,10 +31,10 @@
 // a 32 m corridor of guaranteed empty air centred on the line. A 16 m deck on
 // the centreline therefore clears the facades by 8 m on each side BY
 // CONSTRUCTION, at any height — the flat-roof rule in SPEC's "Respect the
-// architecture" is satisfied without a single building test. (Superblocks
-// cannot break this either: `merged` groups are anchored on even indices and
-// swallow only their odd internal boundary, and avenues are at multiples of
-// 8.)
+// architecture" is satisfied without a single building test. (Multi-block
+// lots cannot break this either: cloudyview/city_lots.py never lets a lot
+// contain an avenue line, and city_cell clamps growth buds to the plot on
+// avenue edges.)
 //
 // PROFILE. The x-family runs dead flat at 26 m. Where the two families cross,
 // the y-family climbs to 34 m and passes over — a real interchange decision,

@@ -65,6 +65,11 @@ _JS = textwrap.dedent("""
       noIce: flags(noIce),
       sameFileIce: flags(bare),
       demo: flags({}),            // a demo scene carries no selection
+      // A metric-less regular grid, placed by the grid-spacing answer: x
+      // and z asked (y had meters), z with its first level at the top.
+      spaced: flags({ liquidVar: "qc",
+                      gridSpacingAssumed: { spacing: { x: 250, z: 40.5 },
+                                            zFirst: "top" } }),
     }));
 """) % ((REPO / "web" / "soar" / "viewer.js").as_posix(), json.dumps(SCENE))
 
@@ -139,6 +144,18 @@ def test_same_file_ice_names_the_variable(monkeypatch, emitted):
     assert kwargs["ice_water_var"] == "qi"
     assert kwargs["ice"] is None
     assert kwargs["no_ice"] is False
+
+
+def test_the_grid_spacing_answer_round_trips(monkeypatch, emitted):
+    """Exactly the axes the browser asked about, and the vertical order
+    with them — the CLI refuses a spacing on an axis with meters, so an
+    extra flag would break the reproduction rather than be ignored."""
+    assert "--dy" not in emitted["spaced"]
+    kwargs = _parse_with_witness_cli(monkeypatch, emitted["spaced"])
+    assert kwargs["grid_spacing"] == {"x": 250.0, "z": 40.5}
+    assert kwargs["z_first"] == "top"
+    plain = _parse_with_witness_cli(monkeypatch, emitted["noIce"])
+    assert plain["grid_spacing"] is None and plain["z_first"] is None
 
 
 def test_a_demo_scene_emits_no_selection(emitted):

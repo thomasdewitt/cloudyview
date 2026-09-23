@@ -8,12 +8,14 @@ rg16float texels and a meta.json. Each level ships as its two channel planes,
 byte-shuffled (every texel's low bytes, then its high bytes) and gzipped —
 the arrangement that lets gzip see the smoothness of a height field, which
 interleaved half floats hide from it (13.6 MiB -> 5.7 for level 0). The
-loaders undo it: cloudyview.soar_host.decode_surface_level and scene.js. Channel r is the
+loaders undo it: cloudyview.soar_host.decode_surface_level and scene.js.
+Channel r is the
 ground's height in metres about its own mean; channel g is its LIGHTNESS, the
-linear mixing weight between varnished pavement (0) and fresh wash sand (1).
-Lightness rather than a material id because albedo is linear in it, so its
-box-averaged mips are exactly the far field's mean albedo and a distant
-bajada is the colour its resolved washes average to.
+surface's age from varnished pavement (0) through soil (1/2) to fresh wash
+sand (1). Albedo is piecewise linear in it (the knot at soil), so its box
+means are the far field's mean albedo up to a per-level colour factor the
+bake measures and ships (albedo_correction): a distant bajada is the colour
+its resolved washes average to.
 
 THE SLOPE, AND WHY THE TILE HAS NONE. A bajada falls a few percent away from
 its mountain front, and the washes are what that fall organizes: they run
@@ -80,6 +82,46 @@ SOIL_PATCHINESS = 0.08
 PAVEMENT_LIGHTNESS = 0.08
 PAVEMENT_DRAINAGE_RADIUS_M = 40.0   # "the local drainage" a surface stands above
 BAR_DARKENING = 0.25
+
+
+def _round_up(v: float, digits: int = 3) -> float:
+    """A bound, written to `digits` places without ever shrinking it."""
+    q = 10 ** digits
+    return float(np.ceil(v * q) / q)
+
+
+# The shader's albedo endmembers (raymarch.wgsl DESERT_ALBEDO_*; the tile
+# test holds the two to each other): pavement, soil, wash sand, at
+# lightness 0, 1/2 and 1.
+ALBEDO_PAVEMENT = (0.19, 0.15, 0.115)
+ALBEDO_SOIL = (0.33, 0.22, 0.13)
+ALBEDO_WASH = (0.34, 0.29, 0.23)
+
+
+def albedo_of(lightness: np.ndarray) -> np.ndarray:
+    """raymarch.wgsl desert_albedo: piecewise linear, the knot at soil."""
+    l = np.clip(lightness, 0.0, 1.0)[..., None]
+    p, s, w = (np.asarray(c) for c in (ALBEDO_PAVEMENT, ALBEDO_SOIL,
+                                        ALBEDO_WASH))
+    return np.where(l < 0.5, p + (s - p) * 2.0 * l,
+                    s + (w - s) * (2.0 * l - 1.0))
+
+
+def albedo_correction(lights: list) -> list:
+    """Per mip level, the RGB factor that restores the far field's mean.
+
+    Lightness is box-averaged exactly, but albedo is piecewise linear in it,
+    and a footprint that mixes wash sand with pavement straddles the knot:
+    the albedo OF its mean lightness is redder and duller than the MEAN of
+    its albedos (by ~10% in blue at the top of the chain). The factor is the
+    tile-wide ratio of the two at each level — the far field's average
+    brought back to the near field's, which is the rule that keeps a seam
+    from appearing where detail drops out.
+    """
+    truth = albedo_of(lights[0]).reshape(-1, 3).mean(0)
+    return [[round(float(v), 4)
+             for v in truth / albedo_of(l).reshape(-1, 3).mean(0)]
+            for l in lights]
 
 
 def _smoothstep(a: float, b: float, x: np.ndarray) -> np.ndarray:
@@ -153,9 +195,11 @@ def carve(discharge: np.ndarray, dx: float):
         if m.any():
             out = np.maximum(out, ndimage.grey_dilation(
                 m, footprint=_disc(0.5 * wb / dx), mode="wrap"))
-    # Banks are steep, not vertical: a 0.6-cell blur is the angle of repose
-    # at this texel size.
-    return ndimage.gaussian_filter(out, 0.6, mode="wrap"), ch
+    # Banks are steep, not vertical — and not soft: a 0.4-cell blur is the
+    # least that keeps the 2 m bilinear surface from stair-stepping, and a
+    # wider one (0.6 was tried) turned the cut banks into gentle swales that
+    # read as painted lines rather than channels.
+    return ndimage.gaussian_filter(out, 0.4, mode="wrap"), ch
 
 
 def generate(n: int, seed: int = SEED, verbose: bool = True):
@@ -245,10 +289,17 @@ def relief_stats(heights: list) -> dict:
     cell = TILE_EXTENT_M / n
     slope_max = []
     for k, h in enumerate(heights):
+        # The bilinear cell's gradient is (x-difference on one of its two
+        # rows, y-difference on one of its two columns), so its maximum is
+        # over all four pairings, not only the pair at one corner.
         dx = cell * 2 ** k
-        gx = (np.roll(h, -1, 1) - h) / dx
-        gy = (np.roll(h, -1, 0) - h) / dx
-        slope_max.append(round(1.25 * float(np.hypot(gx, gy).max()), 3))
+        gx0 = (np.roll(h, -1, 1) - h) / dx
+        gx1 = np.roll(gx0, -1, 0)
+        gy0 = (np.roll(h, -1, 0) - h) / dx
+        gy1 = np.roll(gy0, -1, 1)
+        worst = max(float(np.hypot(a, b).max())
+                    for a in (gx0, gx1) for b in (gy0, gy1))
+        slope_max.append(_round_up(1.25 * worst))
     lod = np.log2(5.0)
     lo = int(np.floor(lod))
     f = lod - lo
@@ -261,13 +312,25 @@ def relief_stats(heights: list) -> dict:
     # same point — the lid the trace can step against from far above, with
     # mip k's gentle slope bound in place of level 0's (a tenth again for
     # the bilinear corners between texel centres).
-    envelope = [round(1.1 * float((heights[0]
-                                   - _bilinear_periodic(h, n)).max()), 3)
+    envelope = [_round_up(1.1 * float((heights[0]
+                                       - _bilinear_periodic(h, n)).max()))
                 for h in heights]
+    # slope_variance_removed: mean squared slope (central differences) at
+    # level 0 minus the same at level k — what the far field's filtered
+    # normal no longer carries, and what the shader puts back as shadowing
+    # on the direct beam (raymarch.wgsl DESERT_SLOPE_VARIANCE_REMOVED).
+    msq = []
+    for k, h in enumerate(heights):
+        dx = cell * 2 ** k
+        gx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) / (2 * dx)
+        gy = (np.roll(h, -1, 0) - np.roll(h, 1, 0)) / (2 * dx)
+        msq.append(float((gx * gx + gy * gy).mean()))
+    removed = [round(msq[0] - v, 6) for v in msq]
     return {"slope_max": slope_max,
             "envelope_m": envelope,
+            "slope_variance_removed": removed,
             "band_max_m": round(float(np.abs(band).max()), 4),
-            "band_slope_max": round(1.25 * float(bg.max()), 3)}
+            "band_slope_max": _round_up(1.25 * float(bg.max()))}
 
 
 def encode_level(level: np.ndarray) -> bytes:
@@ -296,9 +359,10 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
         (out / files[-1]).write_bytes(packed)
         wire += len(packed)
     heights = [m[..., 0].astype(np.float16).astype(np.float64) for m in mips]
+    lights = [m[..., 1].astype(np.float16).astype(np.float64) for m in mips]
     h16 = heights[0]
     meta = {
-        "schema": "cloudyview.web.desert.v1",
+        "schema": "cloudyview.web.desert.v2",
         "n": n,
         "cell_m": TILE_EXTENT_M / n,
         "mips": len(mips),
@@ -314,6 +378,7 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
         # of the tile sees.
         "mean_lightness": round(float(np.float16(mips[-1][0, 0, 1])), 4),
         **relief_stats(heights),
+        "albedo_correction": albedo_correction(lights),
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     print(f"  {len(mips)} mips, heights {meta['height_min_m']:.2f} to "

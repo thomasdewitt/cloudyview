@@ -103,6 +103,11 @@ Signatures (the composer checks these by compiling):
   -> vec3<f32>` — ADDITIVE facade emission. `uc` runs along the facade in
   meters, `vc` is height; the window grid is `CITY_WIN_PITCH_U` x
   `CITY_FLOOR_H`. Return zero where you add nothing.
+- `roof` — `fn (cc: CityCell, h: CityHit, fp: f32) -> vec3<f32>` —
+  ADDITIVE emission on a core roof hit (kind 2), at every distance. This is
+  where roof geometry that `cell_props` only draws near (inside
+  `CITY_PROP_RANGE`) keeps its far-field mean: a warehouse's lit sawtooth
+  glazing must not vanish at 2.2 km. Return zero where you add nothing.
 - `window_glyph` — `fn (cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
   fp: f32) -> vec3<f32>` — transmission MULTIPLIER inside a lit pane
   (`pane_uv` in [0,1]^2, `wh` is that window's hash draw). Return

@@ -140,7 +140,7 @@ export function desertReliefM(meta) {
  * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
  * shader samples, so the floor is under the drawn ground by construction.
  */
-export const DESERT_OCTAVE_MARGIN = 0.463;
+export const DESERT_OCTAVE_MARGIN = 0.429;
 
 export function desertFloorAt(tile, groundZ = 0.0) {
   const { heights, meta } = tile;
@@ -173,13 +173,32 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  * cell_m for the others. Field-independent, so each ships with the tool and
  * is loaded once per session, on first use.
  *
+ * `schema` is the meta.json schema the caller's shader decodes
+ * (constants.js SURFACE_TILE_SCHEMAS); anything else is refused. The deploy
+ * copies tile directories through unfingerprinted, so the cache-safety is
+ * here instead: meta.json is always revalidated, and the bins are fetched
+ * under the schema as a version query, so a schema bump is a new URL for
+ * every edge and browser cache while a stale meta.json fails loudly rather
+ * than pairing a new shader with an old tile.
+ *
  * keepHeights holds the desert's level-0 height channel (as half-float bits)
  * for the camera's floor — the same bytes the shader reads.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
-                                    { keepCells = false,
-                                      keepHeights = false } = {}) {
-  const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
+                                    { keepCells = false, keepHeights = false,
+                                      schema } = {}) {
+  if (!schema) {
+    throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
+  }
+  const meta = await (await fetch(`${baseUrl}/meta.json`,
+                                  { cache: "no-cache" })).json();
+  if (meta.schema !== schema) {
+    throw new Error(
+      `${baseUrl}/meta.json is schema ${JSON.stringify(meta.schema)}; this ` +
+      `soar reads ${schema}. The tile and the app are from different ` +
+      "releases — reload the page; if it persists the deploy is mixed.");
+  }
+  const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
   let heights = null;
   const format = meta.format ?? "rgba16float";
@@ -195,7 +214,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   });
   for (let level = 0; level < meta.mips; level++) {
     const n = Math.max(1, meta.n >> level);
-    const url = `${baseUrl}/${files[level]}`;
+    const url = `${baseUrl}/${files[level]}${version}`;
     const stored = meta.compression === "gzip"
       ? new Uint8Array(await new Response(
           await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())

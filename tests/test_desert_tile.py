@@ -58,6 +58,12 @@ def test_the_shader_slope_table_is_the_tiles():
     env = [float(v) for v in m.group(2).replace("\n", " ").split(",")
            if v.strip()]
     assert env == META["envelope_m"]
+    m = re.search(r"const DESERT_SLOPE_VARIANCE_REMOVED = array<f32, (\d+)>"
+                  r"\(([^)]*)\);", SHADER)
+    assert m, "DESERT_SLOPE_VARIANCE_REMOVED is not declared in raymarch.wgsl"
+    var = [float(v) for v in m.group(2).replace("\n", " ").split(",")
+           if v.strip()]
+    assert var == META["slope_variance_removed"]
 
 
 def test_the_measured_numbers_are_the_bytes():
@@ -69,11 +75,15 @@ def test_the_measured_numbers_are_the_bytes():
     assert META["height_max_m"] == heights[0].max()
 
 
-def test_the_mean_lightness_is_the_top_mip():
+def test_the_regional_albedo_is_the_mean_of_the_albedos():
     top = _level(META["mips"] - 1)
     assert top.shape == (1, 1, 2)
-    assert _const("DESERT_MEAN_LIGHTNESS") == META["mean_lightness"]
     assert META["mean_lightness"] == round(float(top[0, 0, 1]), 4)
+    m = re.search(r"const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>"
+                  r"\(([^)]*)\);", SHADER)
+    shader = tuple(float(v) for v in m.group(1).split(","))
+    truth = export_desert_tile.albedo_of(_level(0)[..., 1]).reshape(-1, 3)
+    assert shader == tuple(round(float(v), 3) for v in truth.mean(0))
 
 
 def test_the_octave_margin_is_the_sum_of_the_gains():
@@ -170,3 +180,45 @@ def test_the_camera_floor_stands_above_the_drawn_ground(tmp_path):
     lift = META["band_max_m"] * _const("DESERT_OCTAVE_MARGIN") + clearance
     want = [h0[j, i] + lift for i, j in ij] + [h0[n - 1, n - 1] + lift]
     assert got == pytest.approx(want, abs=1e-9)
+
+
+def test_the_desert_refuses_to_render_without_its_relief():
+    """Without row 8's relief every ray lands on the flat datum and the
+    picture still looks plausible — so both hosts refuse it."""
+    from cloudyview import soar_host as sh
+    base = dict(bmin=[0.0, 0.0, 1000.0], bmax=[1000.0, 1000.0, 5000.0],
+                dt_view=50.0, dt_light=50.0, surface="desert",
+                ocean_fif_dx=2.0, ocean_tile_extent=4096.0, ocean_max_lod=11)
+    view = sh.ViewState(camera_position=[500.0, 500.0, 50.0], azimuth=0.0,
+                        elevation=0.0, fov=90.0, output_size=(64, 36),
+                        render_size=(64, 36))
+    with pytest.raises(ValueError, match="relief"):
+        sh.pack_uniforms(sh.SceneState(**base), view)
+    ok = sh.pack_uniforms(sh.SceneState(**base, desert_relief_m=(-1, 2, 3)),
+                          view)
+    assert tuple(ok[8]) == (0.0, -1.0, 2.0, 3.0)
+    with pytest.raises(ValueError, match="desert's"):
+        sh.pack_uniforms(sh.SceneState(**{**base, "surface": "ocean"},
+                                       desert_relief_m=(0, 0, 0)), view)
+
+
+def _vec3(name):
+    m = re.search(rf"const {name}: vec3<f32> = vec3<f32>\(([^)]*)\);", SHADER)
+    assert m, f"{name} is not declared in raymarch.wgsl"
+    return tuple(float(v) for v in m.group(1).split(","))
+
+
+def test_the_far_field_colour_correction_is_the_tiles():
+    """The bake's albedo endmembers are the shader's, and the per-level
+    correction it measured with them is the one the shader applies."""
+    assert _vec3("DESERT_ALBEDO_PAVEMENT") == export_desert_tile.ALBEDO_PAVEMENT
+    assert _vec3("DESERT_ALBEDO_SOIL") == export_desert_tile.ALBEDO_SOIL
+    assert _vec3("DESERT_ALBEDO_WASH") == export_desert_tile.ALBEDO_WASH
+    lights = [_level(k)[..., 1] for k in range(META["mips"])]
+    assert export_desert_tile.albedo_correction(lights) == \
+        META["albedo_correction"]
+    body = re.search(r"const DESERT_ALBEDO_CORRECTION = array<vec3<f32>, 12>"
+                     r"\((.*?)\n\);", SHADER, re.S).group(1)
+    rows = [tuple(float(v) for v in r.split(","))
+            for r in re.findall(r"vec3<f32>\(([^)]*)\)", body)]
+    assert rows == [tuple(r) for r in META["albedo_correction"]]

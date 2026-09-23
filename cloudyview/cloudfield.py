@@ -162,6 +162,8 @@ def load(
     fallback_units: Optional[str] = None,
     fallback_ice_units: Optional[str] = None,
     fallback_coord_units: Optional[str] = None,
+    grid_spacing: Optional[dict] = None,
+    z_first: Optional[str] = None,
     timestep: Optional[int] = None,
     no_ice: bool = False,
     stage_callback: Optional[Callable[[str], None]] = None,
@@ -201,6 +203,13 @@ def load(
         without it is an error; a single-step file needs no choice.
     no_ice : bool, optional
         Skip the ice variable even when one could be inferred.
+    grid_spacing : dict, optional
+        {axis: meters} for a regular grid whose file has no coordinate in a
+        unit of length on those axes: cells are placed at (i + 0.5) * d,
+        uniformly, and the load says so. Refused on an axis with meters.
+    z_first : str, optional
+        'top' or 'bottom': which end the first vertical level is. Required
+        with a z spacing, and only with it.
     stage_callback : callable, optional
         Receives coarse loading stage strings for interactive callers.
 
@@ -235,6 +244,8 @@ def load(
         fallback_units=fallback_units,
         fallback_ice_units=fallback_ice_units,
         fallback_coord_units=fallback_coord_units,
+        grid_spacing=grid_spacing,
+        z_first=z_first,
         timestep=timestep,
         no_ice=no_ice,
     )

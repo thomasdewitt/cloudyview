@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-five hook dispatchers the core calls (see the hook comment block in
+six hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -58,6 +58,9 @@ HOOKS = {
         "fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, "
         "pane_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
+    "roof": (
+        "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
+        "        -> vec3<f32>"),
 }
 
 # Module-scope declarations only (column 0): a function-local `var` or
@@ -102,7 +105,7 @@ def validate_component(comp, source):
 
 
 def dispatcher(comps):
-    """The five hook dispatchers over whatever is registered."""
+    """The six hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 
@@ -164,6 +167,15 @@ def dispatcher(comps):
         "    var t = vec3<f32>(1.0);\n"
         + ("\n".join(glyph_body) + "\n" if glyph_body else "")
         + "    return t;\n}")
+
+    roof_body = [
+        f"    e = e + {c['hooks']['roof']}(cc, h, fp);"
+        for c in hooked("roof")]
+    out.append(
+        f"{HOOKS['roof']} {{\n"
+        "    var e = vec3<f32>(0.0);\n"
+        + ("\n".join(roof_body) + "\n" if roof_body else "")
+        + "    return e;\n}")
     return "\n\n".join(out)
 
 
