@@ -182,7 +182,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.0776818342067, -0.27879259066, -0.998326359833),
             azimuth=44.28, elevation=25.76, fov=100.0,
-            exposure=1.17125651993, haze=0.55,
+            exposure="auto", haze=0.55,
         ),
     ),
     # The same world as the case above — same seed, same outer scale, same
@@ -218,7 +218,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.917919995217, -0.696861762887, -0.993220338983),
             azimuth=358.68, elevation=0.0, fov=100.0,
-            exposure=2.98704821995, haze=0.92,
+            exposure="auto", haze=0.92,
         ),
     ),
     dict(
@@ -238,7 +238,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.516654156817, -0.285165086182, -0.993548387097),
             azimuth=249.48, elevation=45.92, fov=100.0,
-            exposure=3.86833683967, haze=1.0,
+            exposure="auto", haze=1.0,
         ),
     ),
     # The marine case block-averaged 2x2x2, which is a DIFFERENT kind of pair
@@ -281,7 +281,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.516654156817, -0.285165086182, -0.993548387097),
             azimuth=249.48, elevation=45.92, fov=100.0,
-            exposure=3.86833683967, haze=1.0,
+            exposure="auto", haze=1.0,
         ),
     ),
     dict(
@@ -301,7 +301,7 @@ DEMOS = [
             size=(1920, 963),
             position=(-0.488904823109, 0.653836399367, -0.998325965182),
             azimuth=278.16, elevation=21.8, fov=100.0,
-            exposure=3.55906028557, haze=0.0,
+            exposure="auto", haze=0.0,
         ),
     ),
     # --- hydrodynamic LES --------------------------------------------------
@@ -329,7 +329,7 @@ DEMOS = [
             size=(1920, 963),
             position=(-0.169577212547, -0.394411429582, -0.875680961028),
             azimuth=50.16, elevation=23.0, fov=100.0,
-            exposure=3.87150512286, haze=0.36,
+            exposure="auto", haze=0.36,
         ),
     ),
     dict(
@@ -347,7 +347,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.0, 0.0, -0.971830985915),
             azimuth=231.84, elevation=11.84, fov=100.0,
-            exposure=2.83618562719, haze=1.43,
+            exposure="auto", haze=1.43,
         ),
     ),
     # --- RCEMIP ------------------------------------------------------------
@@ -374,7 +374,7 @@ DEMOS = [
             size=(1920, 963),
             position=(-0.00633639238438, 0.0177418162348, -0.947201859468),
             azimuth=256.08, elevation=18.8, fov=100.0,
-            exposure=1.66376086725, haze=1.3,
+            exposure="auto", haze=1.3,
         ),
     ),
     # SAM writes QN — cloud water and cloud ice in one variable — and this run
@@ -946,11 +946,14 @@ def auto_exposure(spec: dict, field: CloudField, view: dict,
                   white_point: float) -> float:
     """The exposure soar's auto-exposure would settle on for this view.
 
-    Metered rather than tuned. The numbers in the `still` blocks that predate
-    this were copied out of the app after AE had converged, so this is the
-    same quantity arrived at by the same rule instead of by hand — and it is
-    the honest answer for a freshly baked field, whose extinction no earlier
-    hand-tuned number was chosen against.
+    Metered rather than tuned, for every demo. The `still` blocks used to
+    carry numbers copied out of the app after AE had converged, and those
+    went stale the moment the renderer under them changed: after the
+    2026-09-01 physics fixes (one ice coefficient, the half-voxel
+    convention) every hand-copied still sat darker than the flight it opens
+    onto, by 3-61%. The same quantity arrived at by the same rule cannot
+    drift that way — and it is the only honest answer for a freshly baked
+    field, whose extinction no earlier hand-tuned number was chosen against.
     """
     w = AE_METER_WIDTH
     h = max(1, int(round(w * view["size"][1] / view["size"][0])))

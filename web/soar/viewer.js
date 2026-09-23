@@ -51,7 +51,7 @@ import {
   renderStill, imageDataToPng, download, timestampedName,
   createOfflineTarget, beginOfflineRender, endOfflineRender, renderAccumulated,
   captureFrames,
-  readBack,
+  Readback,
 } from "./capture.js";
 import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
@@ -2308,7 +2308,7 @@ export class Viewer {
     this.ui.close();
     this.ui.showProgress("Choosing a codec…", 0);
 
-    let writer = null, target = null, saved = null;
+    let writer = null, target = null, readback = null, saved = null;
     try {
       writer = new VideoWriter({
         width: size[0], height: size[1], fps: this.videoFps,
@@ -2324,6 +2324,10 @@ export class Viewer {
       look.exposure = await this._meterCaptureExposure(look, size);
 
       target = createOfflineTarget(this.device, size, "soar-video");
+      // One staging buffer for the whole video, like the target: made per
+      // frame, their freed memory outran the driver's reclaiming on long
+      // videos (capture.js Readback).
+      readback = new Readback(this.device, size);
       saved = beginOfflineRender(this.renderer, look.preset);
       const framesPerVideoFrame = captureFrames(look.preset);
 
@@ -2359,8 +2363,7 @@ export class Viewer {
           { ...this._captureViewKwargs(look),
             camera: pose, frameIndex: i * 1024 },
           framesPerVideoFrame, overlays);
-        await writer.addFrame(
-          await readBack(this.device, target.texture, size[0], size[1]), i);
+        await writer.addFrame(await readback.read(target.texture), i);
 
         const done = (i + 1) / frames.length;
         const rate = (i + 1) / ((performance.now() - t0) / 1000);
@@ -2384,6 +2387,7 @@ export class Viewer {
         : `Could not make the video: ${err.message}`, 6);
     } finally {
       target?.texture.destroy();
+      readback?.destroy();
       // The renderer is gone when the session was disposed mid-render — the
       // abort flag is what woke this loop up. There is then no state left to
       // restore, and reaching for it would throw inside a finally.
@@ -2555,6 +2559,7 @@ export class Viewer {
       // rather than the live view's, for the same reason as the render
       // block above.
       reproduction_command: this.witnessCommand({
+        size,
         lodStrength: look.lodStrength,
         haze: look.haze,
         hazeHeightDependent: look.hazeHeightDependent,
@@ -2813,7 +2818,8 @@ export class Viewer {
    *
    * The overrides are the capture's honesty trail: renderMetadata passes the
    * look the capture actually marched (a named tier's parked defaults, or
-   * Custom's session values), so the command reproduces the CAPTURE. With no
+   * Custom's session values), so the command reproduces the CAPTURE — at
+   * the capture's pixel size too, which is not the canvas's. With no
    * overrides — the terminal panel — the live values go out.
    */
   /**
@@ -2849,7 +2855,8 @@ export class Viewer {
     return ["--surface-origin", n(off[0]), n(off[1])];
   }
 
-  witnessCommand({ lodStrength = this.lodStrength,
+  witnessCommand({ size = [this.canvas.width, this.canvas.height],
+                   lodStrength = this.lodStrength,
                    haze = this.haze,
                    hazeHeightDependent = this.hazeHeightDependent,
                    exposure = this.exposure,
@@ -2863,7 +2870,7 @@ export class Viewer {
       this.camera.position, this.scene.bmin, this.scene.bmax);
     return [
       "witness", q(source),
-      "--size", this.canvas.width, this.canvas.height,
+      "--size", size[0], size[1],
       ...(this.scene.groupPath ? ["--group", q(this.scene.groupPath)] : []),
       ...(this.scene.nested && this.scene.nestGroup
           ? ["--nest-group", q(this.scene.nestGroup)] : []),
@@ -2874,6 +2881,16 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
+      // What the world stands on, always written: without it a cyberpunk
+      // still's command rendered the day ocean. The city's tile offset picks
+      // the district under the field, and the CLI has no default to agree
+      // with (cyberpunk and the night-city harness park different ones), so
+      // it travels with the surface.
+      "--surface",
+      this.scene.city ? "city" : this.scene.desert ? "desert" : "ocean",
+      ...(this.scene.city
+          ? ["--city-offset", n(this.scene.cityOffsetM[0]),
+             n(this.scene.cityOffsetM[1])] : []),
       ...(this.renderer.periodic ? ["--periodic"] : []),
       // Only when period crossings moved this view off the scene's static
       // surface offset: the folded camera position above no longer says

@@ -13,6 +13,18 @@ without ever passing through 8 bits.
     uv run python tools/soar_shader_ab.py --a git:HEAD~3 --b git:HEAD
     uv run python tools/soar_shader_ab.py --frames 64 --jitter
     uv run python tools/soar_shader_ab.py --periodic off --views repro
+    uv run python tools/soar_shader_ab.py --tier low --frames 4 --jitter
+    uv run python tools/soar_shader_ab.py --scene city --frames 4 --jitter
+    uv run python tools/soar_shader_ab.py --scene nested --frames 4 --jitter
+
+`--tier` renders with a quality preset's flight sampling and lighting methods
+(step factors, the baked sun-tau cache, the sky probe) rather than the judge
+views' High-style live march, because those are different code paths: every
+tier but Max reads the cache, and a change that is neutral on one can move the
+other. `--scene city` compiles CITY in and renders the night-city harness's
+views under its moon; `--scene nested` binds a synthetic nest (the outer
+field's central box, refined 2x) so the NESTED paths run. A claim of
+bit-identity should be backed by all three scenes, not just the day one.
 
 One thing to know before reading a result, because it cost an afternoon to
 learn: a difference of order 1e-4 on a handful of channels does NOT
@@ -41,8 +53,14 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
+    surface_cell_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
+
+sys.path.insert(0, str(REPO / "tools"))
+from night_city_harness import (                            # noqa: E402
+    CITY_VIEWS, MOON_AZIMUTH, MOON_ELEVATION, NIGHT_EXPOSURE,
+)
 
 # Views the judge set does not cover, for the failure modes that live off it.
 EXTRA_VIEWS = {
@@ -56,6 +74,41 @@ EXTRA_VIEWS = {
               "elevation": -35, "fov": 95},
 }
 ALL_VIEWS = {**SOAR_VIEWS, **EXTRA_VIEWS}
+
+# Mirrors web/soar/constants.js QUALITY_PRESETS (flight sampling):
+# (step_factor, light_step_factor, light cache, sky probe). Max is High with
+# the live sun march.
+TIERS = {
+    "max":     (2.0, 2.0, False, True),
+    "high":    (2.0, 2.0, True, True),
+    "medium":  (2.5, 4.0, True, False),
+    "low":     (3.0, 8.0, True, False),
+    "minimal": (4.0, 12.0, True, False),
+}
+LIGHT_CACHE_DIVISOR = 2       # constants.js
+
+
+def synthetic_nest(level):
+    """The outer field's central box, refined 2x by trilinear resampling and
+    given a mild multiplicative texture so it is not the parent's own values.
+    Only its code paths are under test, not its look."""
+    from scipy.ndimage import zoom
+    from cloudyview.witness import NestedLevel
+
+    sigma = np.asarray(level.sigma, dtype=np.float64)
+    n = np.array(sigma.shape)
+    lo = n * np.array([0.3, 0.3, 0.2])
+    hi = n * np.array([0.7, 0.7, 0.8])
+    lo, hi = lo.astype(int), hi.astype(int)
+    sub = sigma[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    fine = zoom(sub, 2, order=1)
+    i, j, k = np.meshgrid(*[np.arange(m) for m in fine.shape], indexing="ij")
+    fine = fine * (1.0 + 0.3 * np.sin(0.7 * i) * np.cos(0.5 * j + 0.3 * k))
+    dx = (np.asarray(level.bmax) - np.asarray(level.bmin)) / n
+    bmin = np.asarray(level.bmin) + lo * dx
+    bmax = np.asarray(level.bmin) + hi * dx
+    return NestedLevel(sigma=np.ascontiguousarray(fine), bmin=bmin, bmax=bmax,
+                       name="synthetic_nest")
 
 
 def source_for(spec: str) -> str:
@@ -93,44 +146,103 @@ def main():
     ap.add_argument("--periodic", default="on", choices=("on", "off"))
     ap.add_argument("--views", default="",
                     help="comma-separated names, default all")
+    ap.add_argument("--scene", default="day", choices=("day", "city", "nested", "desert"))
+    ap.add_argument("--field", type=Path, default=None,
+                    help="netCDF field (default: the judge views' TWP-ICE "
+                         "subvolume). An optimization that gates on the cloud "
+                         "should be proven on the fields where it fires.")
+    ap.add_argument("--demo", type=Path, default=None,
+                    help="a prebaked demo directory (meta.json + "
+                         "volume.bin.gz) instead of a netCDF field: the "
+                         "exact bytes the browser ships")
+    ap.add_argument("--tier", default=None, choices=sorted(TIERS),
+                    help="a quality preset's flight sampling and lighting "
+                         "methods (default: the judge views' 2-voxel live "
+                         "march with the sky probe)")
     args = ap.parse_args()
 
     import wgpu
     device = wgpu.gpu.request_adapter_sync(
         power_preference="high-performance").request_device_sync()
 
-    level = build_soar_level()
+    if args.demo is not None:
+        sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
+        from soar_frame_bench import build_level_from_demo
+        level, _ = build_level_from_demo(args.demo)
+    else:
+        level = build_soar_level(args.field)
     periodic = args.periodic == "on"
-    dt = min(level.dx) * 2.0
+    city = args.scene == "city"
+    nested = args.scene == "nested"
+    surface = {"day": "ocean", "nested": "ocean", "city": "city",
+               "desert": "desert"}[args.scene]
+    step_factor, light_factor, light_cache, sky_probe = (
+        TIERS[args.tier] if args.tier else (2.0, 2.0, False, True))
     state = SceneState(
         bmin=[float(v) for v in level.bmin], bmax=[float(v) for v in level.bmax],
-        dt_view=dt, dt_light=dt, periodic=periodic,
-        ocean_reflectance=OCEAN_REFLECTANCE)
+        dt_view=min(level.dx) * step_factor,
+        dt_light=min(level.dx) * light_factor, periodic=periodic,
+        ocean_reflectance=OCEAN_REFLECTANCE, surface=surface, nested=nested)
+    nest = synthetic_nest(level) if nested else None
+    if nested:
+        state.nest_bmin = [float(v) for v in nest.bmin]
+        state.nest_bmax = [float(v) for v in nest.bmax]
+        state.dt_view_nest = min(nest.dx) * step_factor
+        state.dt_light_nest = min(nest.dx) * light_factor
 
     renderers = []
     for spec in (args.a, args.b):
-        r = SoarRenderer(device=device, periodic=periodic, nested=False,
-                         shader_source=source_for(spec))
+        r = SoarRenderer(device=device, periodic=periodic, nested=nested,
+                         surface=surface, shader_source=source_for(spec))
         r.upload_volume(level.sigma)
+        if nested:
+            r.upload_nest(nest.sigma)
         renderers.append(r)
+    if surface != "ocean":
+        meta = renderers[0].surface_meta
+        state.ocean_fif_dx = surface_cell_m(surface, meta)
+        state.ocean_tile_extent = float(meta["tile_extent_m"])
+        state.ocean_max_lod = int(meta["mips"]) - 1
 
-    wanted = args.views.split(",") if args.views else list(ALL_VIEWS)
+    views = ALL_VIEWS
+    if city:
+        bmin, bmax = level.bmin, level.bmax
+        views = {
+            name: {"world": [float(bmin[0] + v["xy"][0] * (bmax[0] - bmin[0])),
+                             float(bmin[1] + v["xy"][1] * (bmax[1] - bmin[1])),
+                             float(v["z"])],
+                   "azimuth": v["azimuth"], "elevation": v["elevation"],
+                   "fov": v["fov"], "sun_azimuth": MOON_AZIMUTH,
+                   "sun_elevation": MOON_ELEVATION,
+                   "exposure": NIGHT_EXPOSURE}
+            for name, v in CITY_VIEWS.items()}
+    wanted = args.views.split(",") if args.views else list(views)
     w, h = args.size
     print(f"A = {args.a}\nB = {args.b}")
     print(f"{w}x{h}, {args.frames} frame(s), jitter "
-          f"{'on' if args.jitter else 'off'}, periodic {args.periodic}\n")
+          f"{'on' if args.jitter else 'off'}, periodic {args.periodic}, "
+          f"scene {args.scene}, tier {args.tier or 'judge (live march)'}\n")
     print(f"{'view':22s} {'max |diff|':>12s} {'channels':>10s} {'fraction':>10s}")
     worst = 0.0
+    baked_sun = None
     for name in wanted:
-        v = ALL_VIEWS[name]
-        pos = camera_world_origin(v["camera_position"], level.bmin, level.bmax)
+        v = views[name]
+        pos = v["world"] if "world" in v else camera_world_origin(
+            v["camera_position"], level.bmin, level.bmax)
+        extra = {"exposure": v["exposure"]} if "exposure" in v else {}
         view = ViewState(
             camera_position=[float(p) for p in pos],
             azimuth=v["azimuth"], elevation=v["elevation"],
             fov=v.get("fov", 70), output_size=(w, h), render_size=(w, h),
             sun_azimuth=v.get("sun_azimuth", 20.0),
             sun_elevation=v.get("sun_elevation", 55.0),
-            jitter=args.jitter)
+            jitter=args.jitter, light_cache=light_cache,
+            sky_probe=sky_probe, **extra)
+        sun = (view.sun_azimuth, view.sun_elevation)
+        if light_cache and sun != baked_sun:
+            for r in renderers:
+                r.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)
+            baked_sun = sun
         a = renderers[0].render(state, view, frames=args.frames)
         b = renderers[1].render(state, view, frames=args.frames)
         d = np.abs(a - b)
