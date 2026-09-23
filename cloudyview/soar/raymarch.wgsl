@@ -3610,14 +3610,22 @@ fn city_ground_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
 // (city_lamp_inset, CITY_LAMP_SPACING) are point sources hung CITY_LAMP_ARM
 // out over the road at CITY_LAMP_HEAD_Z, with a downward cosine lobe, scaled
 // so that the ground straight under a head receives the peak of its pool.
-// So the result is radiance-scale, in the ground's units: multiply by a
+// The result is radiance-scale, in the ground's units: multiply by a
 // surface's albedo relative to asphalt, as city_ground_radiance does. The
 // eight heads nearest p (the lamp line either side of the nearest boundary,
 // in each direction, at the two nearest lattice stations) carry it.
-fn city_street_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+//
+// `view` selects the receiver. For a surface, pass its normal as `n` and
+// g = 2 (no phase): each head is weighted by max(n.l, 0). For a medium,
+// pass the view ray's direction as `n` and g in (-1, 1): each head is
+// weighted by the Henyey-Greenstein phase between the light and the eye,
+// times 4 pi so that isotropic (g = 0) matches a surface facing the lamp —
+// strong forward g is what makes steam blaze where a lamp stands behind it.
+fn city_street_light_g(p: vec3<f32>, n: vec3<f32>, g: f32) -> vec3<f32> {
     let cellm = u.ocean_params.x;
     let s = city_lamp_scale(p.xy);
     let h2 = CITY_LAMP_HEAD_Z * CITY_LAMP_HEAD_Z;
+    let medium = g < 1.5;
     var e = 0.0;
     for (var dirn: i32 = 0; dirn < 2; dirn = dirn + 1) {
         let along_y = dirn == 0;            // the street runs along y
@@ -3639,13 +3647,25 @@ fn city_street_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
                 let v = head - p;
                 let r2 = max(dot(v, v), 0.25);
                 let l = v * inverseSqrt(r2);
-                e = e + amp * h2 / r2 * max(l.z, 0.0)
-                      * max(dot(n, l), 0.0);
+                var w = max(dot(n, l), 0.0);
+                if (medium) {
+                    // The light propagates along -l and leaves toward the
+                    // eye along -n, so the scattering cosine is
+                    // dot(-l, -n) = dot(l, n): 1 for a lamp straight
+                    // behind the medium.
+                    w = 12.566371 * hg_phase(dot(l, n), g);
+                }
+                e = e + amp * h2 / r2 * max(l.z, 0.0) * w;
             }
         }
     }
     let raw = s * e;
     return CITY_LAMP_COLOR * (raw / (1.0 + CITY_POOL_KNEE * raw));
+}
+
+// The surface form: sodium light on a face with normal n.
+fn city_street_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return city_street_light_g(p, n, 2.0);
 }
 
 // --- the reflected ray ----------------------------------------------------------
