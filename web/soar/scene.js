@@ -88,10 +88,29 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
  * different meta key for the texel size (the ocean's dx_m is the city's
  * cell_m). Field-independent, so each ships with the tool and is loaded once
  * per session.
+ *
+ * `schema` is the meta.json schema the caller's shader decodes
+ * (constants.js SURFACE_TILE_SCHEMAS); anything else is refused. The deploy
+ * copies tile directories through unfingerprinted, so the cache-safety is
+ * here instead: meta.json is always revalidated, and the bins are fetched
+ * under the schema as a version query, so a schema bump is a new URL for
+ * every edge and browser cache while a stale meta.json fails loudly rather
+ * than pairing a new shader with an old tile.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
-                                    { keepCells = false } = {}) {
-  const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
+                                    { keepCells = false, schema } = {}) {
+  if (!schema) {
+    throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
+  }
+  const meta = await (await fetch(`${baseUrl}/meta.json`,
+                                  { cache: "no-cache" })).json();
+  if (meta.schema !== schema) {
+    throw new Error(
+      `${baseUrl}/meta.json is schema ${JSON.stringify(meta.schema)}; this ` +
+      `soar reads ${schema}. The tile and the app are from different ` +
+      "releases — reload the page; if it persists the deploy is mixed.");
+  }
+  const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
@@ -101,7 +120,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
   for (let level = 0; level < meta.mips; level++) {
-    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin`);
+    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin${version}`);
     const n = Math.max(1, meta.n >> level);
     // The city minimap draws the same cascade the shader raises buildings
     // out of, so it reads the SAME bytes rather than fetching anything of
