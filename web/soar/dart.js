@@ -29,7 +29,7 @@
 
 "use strict";
 
-import { Flyer, attitudeFrame, clamp, mod2pi, TWO_PI, DEG } from "./flyer.js";
+import { Flyer, clamp, mod2pi, TWO_PI, DEG } from "./flyer.js";
 import { buildDartMesh, DEFAULT_WEAR } from "./dartmesh.js";
 
 const SHADER_URL = new URL("./dart.wgsl", import.meta.url);
@@ -132,8 +132,19 @@ export class Dart extends Flyer {
 
   /** Local->world rotation columns for the current attitude. */
   _frame() {
-    return attitudeFrame(this.course, this.pitch + BODY_PITCH,
-                         this.bank + BANK_TRIM);
+    return this._attitude(this.course, this.pitch + BODY_PITCH,
+                          this.bank + BANK_TRIM);
+  }
+
+  /**
+   * A crash sets the roll-yaw ring going at full strength too: the tumble
+   * dies away into the dart's own wobble rather than into stillness, which
+   * is how a real one recovers — rocking, a second or two after it has its
+   * nose back.
+   */
+  knock(args) {
+    super.knock(args);
+    this.wobbleAmp = 1.0;
   }
 
   /** The slots dart.wgsl reads as its own: wing flex, flutter, keel. */

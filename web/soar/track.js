@@ -12,7 +12,8 @@
 // can be re-rendered by `soar TRACK.json` (cloudyview/track.py) and vice versa:
 //   {"schema": "cloudyview.track.v2",
 //    "header": <render metadata>,
-//    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}
+//    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...],
+//    "knocks": [[t, severity, side, duration, landing], ...]}
 // with x/y/z in the relative-coordinate convention — the CLOUD frame, folded
 // at the cloud period, exactly as v1 wrote them — and sx/sy the camera's
 // position in the scene's surface-tile frame, in TILE-RELATIVE units
@@ -24,6 +25,14 @@
 // ocean's included), so v2 samples are 9 columns with the first seven
 // byte-identical to v1's; a camera without one writes 7 columns, and a v1
 // track loads and resamples the same way.
+//
+// `knocks` are the night city's crashes (collide.js), at the flight time of
+// the sample that first showed them. Everything else a crash does — the
+// bounce, the fall, the shake — happened to the camera and is in the
+// samples already; the flyer's tumble is the one part that lives in the
+// flyer, which a replay re-flies from the poses, so the replay is handed
+// the knock at the same moment. Optional: a track without the key had no
+// crashes, and the Python re-render draws no flyer and ignores it.
 
 "use strict";
 
@@ -105,6 +114,31 @@ export function catmullRom(times, values, tOut) {
 }
 
 /**
+ * Straight lines between the samples — for positions over the night city.
+ *
+ * There the samples are not free: each is the end of a frame's move that
+ * the collider (collide.js) swept and found clear, so the straight line
+ * from one to the next is known to miss every building, and any curve
+ * through them is not. A spline overshoots a hard stop: at the frame rates
+ * a slow machine flies, a wall hit at speed replayed through the wall and
+ * out of the far side of it. Mirrored in cloudyview/track.py linear().
+ */
+export function linear(times, values, tOut) {
+  const n = times.length;
+  const out = new Float64Array(tOut.length);
+  let i = 0;
+  for (let k = 0; k < tOut.length; k++) {
+    const t = tOut[k];
+    while (i + 1 < n && times[i + 1] <= t) i++;
+    i = Math.min(Math.max(i, 0), n - 2);
+    const ta = times[i], tb = times[i + 1];
+    out[k] = tb <= ta ? values[i]
+      : values[i] + (values[i + 1] - values[i]) * ((t - ta) / (tb - ta));
+  }
+  return out;
+}
+
+/**
  * Resample hand-flown samples at exact 1/fps steps.
  *
  * Returns `[{t, position, azimuth, elevation, fov, surfacePosition}, ...]`
@@ -112,7 +146,10 @@ export function catmullRom(times, values, tOut) {
  * (or null — see below). Azimuth is unwrapped before interpolation so 359 to
  * 1 goes through 0 rather than the long way round; in a periodic domain each
  * wrapped position column is unwrapped the same way at its own frame's
- * period and re-wrapped afterwards.
+ * period and re-wrapped afterwards. `linearPosition` draws the position
+ * columns straight between samples instead of through a spline — for a
+ * track flown over the night city (see linear()); the look is splined
+ * either way.
  */
 const frameCountBetween = (t0, t1, fps) =>
   Math.floor((t1 - t0 + 1e-9) * fps) + 1;
@@ -143,7 +180,8 @@ function distinctAscendingTimes(samples, fps) {
   return distinct;
 }
 
-export function resampleTrack(samples, fps, { periodic = true } = {}) {
+export function resampleTrack(samples, fps,
+                              { periodic = true, linearPosition = false } = {}) {
   if (!(fps > 0)) throw new Error(`fps must be positive; got ${fps}.`);
 
   const sorted = samples.map((s) => Array.from(s))
@@ -190,15 +228,16 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
   const tOut = new Float64Array(count);
   for (let k = 0; k < count; k++) tOut[k] = t0 + k / fps;
 
+  const place = linearPosition ? linear : catmullRom;
   const cols = {
-    x: catmullRom(times, x, tOut),
-    y: catmullRom(times, y, tOut),
-    z: catmullRom(times, column(3), tOut),
+    x: place(times, x, tOut),
+    y: place(times, y, tOut),
+    z: place(times, column(3), tOut),
     az: catmullRom(times, az, tOut),
     el: catmullRom(times, column(5), tOut),
     fov: catmullRom(times, column(6), tOut),
-    ...(hasSurface ? { sx: catmullRom(times, sx, tOut),
-                       sy: catmullRom(times, sy, tOut) } : {}),
+    ...(hasSurface ? { sx: place(times, sx, tOut),
+                       sy: place(times, sy, tOut) } : {}),
   };
   if (periodic) {
     // Fold back at the same period each unwrap used: x/y centred into
@@ -260,8 +299,10 @@ export const MAX_TRACK_SECONDS = 600.0;
 export class TrackRecorder {
   constructor() {
     this.samples = [];
+    this.knocks = [];
     this.elapsed = 0.0;
     this._recording = false;
+    this._pendingKnock = null;
   }
 
   get recording() { return this._recording; }
@@ -273,8 +314,20 @@ export class TrackRecorder {
 
   start() {
     this.samples = [];
+    this.knocks = [];
     this.elapsed = 0.0;
     this._recording = true;
+    this._pendingKnock = null;
+  }
+
+  /**
+   * A crash this frame (CityCollider.resolve's return). Stamped with the
+   * time of the frame's own sample, taken after the frame — the frame
+   * whose picture first shows it.
+   */
+  noteKnock(knock) {
+    if (!this._recording) return;
+    this._pendingKnock = knock;
   }
 
   /** Advance the flight clock by one rendered frame. */
@@ -301,6 +354,12 @@ export class TrackRecorder {
              camera.surfacePosition[1] / camera.surfaceTileExtent);
     }
     this.samples.push(s);
+    const k = this._pendingKnock;
+    if (k !== null) {
+      this.knocks.push([this.elapsed, k.severity, k.side, k.duration,
+                        k.landing ? 1 : 0]);
+      this._pendingKnock = null;
+    }
   }
 
   stop() {
@@ -310,10 +369,24 @@ export class TrackRecorder {
 }
 
 /** The JSON a track file holds, ready for download or for Python. */
-export function trackPayload(header, samples) {
+export function trackPayload(header, samples, knocks = []) {
   return {
     schema: TRACK_SCHEMA,
     header,
     samples: samples.map((s) => Array.from(s, Number)),
+    knocks: knocks.map((k) => Array.from(k, Number)),
   };
+}
+
+/**
+ * The knocks a replayed frame at time t has to hand its flyer: those that
+ * happened since the previous frame (tPrev, t], each as Flyer.knock's
+ * argument with its age at t. The first frame passes tPrev = -Infinity and
+ * picks up any knock at or before it.
+ */
+export function knocksDue(knocks, tPrev, t) {
+  return knocks
+    .filter(([tk]) => tk > tPrev && tk <= t)
+    .map(([tk, severity, side, duration, landing]) => ({
+      severity, side, duration, landing: landing !== 0, age: t - tk }));
 }
