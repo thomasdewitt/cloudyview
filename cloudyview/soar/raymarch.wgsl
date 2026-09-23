@@ -999,6 +999,36 @@ fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>,
     );
 }
 
+// One component of the coarse gradient, taken from the fine gradient where the
+// two stencils' radii coincide on that axis. The cone stencil's radius is
+// floored at a voxel, so for every sample nearer than a voxel / tan(theta) —
+// ~29 voxels at the shipped 2 degrees — coarse_h equals fine_h on that axis,
+// and the coarse pair of taps IS the fine pair: the same two points, read from
+// the same level, differenced over the same radius. The fine component is
+// therefore not an approximation of this one but the same number, and taking
+// it saves two of the twelve texture reads per cloud sample (on a flat grid
+// like DYCOMS, where dz is half of dx, that is the x and y pairs for nearly
+// every visible sample).
+//
+// "The same level" is the one thing to check. The fine taps are pinned to the
+// sample's level and the coarse ones are not, so under NESTED the fine
+// component only stands in if neither tap lands across the nest boundary.
+fn coarse_gradient_component(p: vec3<f32>, offset: vec3<f32>, h: f32,
+                             same_radius: bool, fine_component: f32,
+                             in_nest: bool) -> f32 {
+    var borrow = same_radius;
+    if (NESTED && borrow) {
+        borrow = in_nest_box(wrap_to_domain(p + offset)) == in_nest
+              && in_nest_box(wrap_to_domain(p - offset)) == in_nest;
+    }
+    if (borrow) {
+        return fine_component;
+    }
+    let sp = sigma_tap(p + offset, false, in_nest);
+    let sm = sigma_tap(p - offset, false, in_nest);
+    return (sp - sm) / (2.0 * h);
+}
+
 fn sigma_gradient(p: vec3<f32>, sigma: f32,
                   coarse_weight_in: f32,
                   coarse_radius_m: f32,
@@ -1044,7 +1074,22 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         );
     }
     coarse_h = max(coarse_h, fine_h);
-    let coarse_grad = sigma_gradient_at_radius(p, coarse_h, false, in_nest);
+    var coarse_grad: vec3<f32>;
+    if (any(coarse_h == fine_h)) {
+        coarse_grad = vec3<f32>(
+            coarse_gradient_component(p, vec3<f32>(coarse_h.x, 0.0, 0.0),
+                                      coarse_h.x, coarse_h.x == fine_h.x,
+                                      fine_grad.x, in_nest),
+            coarse_gradient_component(p, vec3<f32>(0.0, coarse_h.y, 0.0),
+                                      coarse_h.y, coarse_h.y == fine_h.y,
+                                      fine_grad.y, in_nest),
+            coarse_gradient_component(p, vec3<f32>(0.0, 0.0, coarse_h.z),
+                                      coarse_h.z, coarse_h.z == fine_h.z,
+                                      fine_grad.z, in_nest)
+        );
+    } else {
+        coarse_grad = sigma_gradient_at_radius(p, coarse_h, false, in_nest);
+    }
     let coarse_len = length(coarse_grad);
     let coarse_conf = (
         coarse_len * min(min(coarse_h.x, coarse_h.y), coarse_h.z)
@@ -10639,10 +10684,23 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // tail can be weighted by the beam's incidence on the skin; the
             // gradient *shading* below consumes exactly these values in exactly
             // the same way it did, so that term is untouched.
+            //
+            // The stencil is skipped on the entry skin, where it cannot
+            // matter. surface_gate's depth factor is a smoothstep that is
+            // exactly 0 at or below GRADIENT_SHADING_TAU_START, and with the
+            // gate at exactly 0 every consumer of the gradient is exactly
+            // neutral: tail_mu_factor is mix(1, x, 0), gradient_factor is
+            // max(0.2, 1 + 0) and fill_shape is mix(1, 1, w). Leaving grad at
+            // zero takes the grad_len guards below instead, which leave the
+            // same three ones in place. That saves twelve texture reads per
+            // sample over the first quarter optical depth after every cloud
+            // entry — most of a thin field's samples, a few percent of a
+            // thick one's.
             var grad = vec3<f32>(0.0);
             var grad_len = 0.0;
             var surface_gate = 0.0;
-            if (gradient_shading_strength > 0.0) {
+            if (gradient_shading_strength > 0.0
+                && tau_depth > GRADIENT_SHADING_TAU_START) {
                 let grad_conf_v = sigma_gradient(
                     p, sigma, gradient_coarse_weight, gradient_coarse_radius_m,
                     t, u.cb_params.w, level.in_nest
