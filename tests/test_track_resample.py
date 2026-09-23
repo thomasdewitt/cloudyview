@@ -66,11 +66,13 @@ def _synthetic_samples(version: int, seed: int = 7):
     return samples
 
 
-def _js_resample(samples, fps, periodic=True):
+def _js_resample(samples, fps, periodic=True, linear_position=False):
     script = textwrap.dedent(f"""
         import {{ resampleTrack }} from "{TRACK_JS.as_uri()}";
         const frames = resampleTrack({json.dumps(samples.tolist())}, {fps},
-                                     {{ periodic: {str(periodic).lower()} }});
+                                     {{ periodic: {str(periodic).lower()},
+                                        linearPosition:
+                                          {str(linear_position).lower()} }});
         console.log(JSON.stringify(frames));
     """)
     out = subprocess.run(["node", "--input-type=module", "-e", script],
@@ -79,12 +81,14 @@ def _js_resample(samples, fps, periodic=True):
 
 
 @needs_node
+@pytest.mark.parametrize("linear_position", [False, True])
 @pytest.mark.parametrize("version", [3, 2, 1])
-def test_python_resample_matches_track_js(version):
+def test_python_resample_matches_track_js(version, linear_position):
     samples = _synthetic_samples(version)
     fps = 30.0
-    py = tr.resample_track(samples, fps, periodic=True)
-    js = _js_resample(samples, fps)
+    py = tr.resample_track(samples, fps, periodic=True,
+                           linear_position=linear_position)
+    js = _js_resample(samples, fps, linear_position=linear_position)
     assert len(py) == len(js) == tr.frame_count_between(
         samples[0, 0], samples[-1, 0], fps)
     for p, j in zip(py, js):
@@ -105,6 +109,29 @@ def test_python_resample_matches_track_js(version):
         if version < 3:
             assert p.scene_time == 0.0
         assert -1.0 <= p.position[0] < 1.0
+
+
+def test_a_v3_city_track_with_knocks_loads_and_replays(tmp_path):
+    """The two track changes of 2026-09-23 together: v3's scene-clock column
+    and the city's top-level knocks. The knocks ride beside the samples, on
+    the flight's clock, and this render reads no further than accepting
+    them; the city replays with linear positions and the clock resamples."""
+    samples = _synthetic_samples(3)
+    path = tmp_path / "city.json"
+    path.write_text(json.dumps({
+        "schema": "cloudyview.track.v3",
+        "header": {"schema": tr.HEADER_SCHEMA},
+        "samples": samples.tolist(),
+        "knocks": [[float(samples[20, 0]), 0.7, 1, 0.8, 0],
+                   [float(samples[40, 0]), 0.3, -1, 0.5, 1]]}))
+    _, loaded = tr.load_track(path)
+    assert loaded.shape == samples.shape
+    frames = tr.resample_track(loaded, 30.0, periodic=True,
+                               linear_position=True)
+    clocks = [f.scene_time for f in frames]
+    assert clocks[0] == pytest.approx(samples[0, 9])
+    assert samples[0, 9] <= min(clocks) and max(clocks) <= samples[-1, 9]
+    assert all(b >= a - 1e-9 for a, b in zip(clocks, clocks[1:]))
 
 
 def test_resample_rejects_mixed_widths_and_short_tracks(tmp_path):
