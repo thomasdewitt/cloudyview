@@ -1806,19 +1806,29 @@ fn scene_time() -> f32 {
 // Measured on the shipped tile by tools/export_web_assets.py and recorded in
 // cloudyview/soar/ocean/meta.json; tests/test_sea_tile.py holds these to it.
 const SEA_LOOP_S: f32 = 25.6;
-// Entry k: mean(sx^2 + sy^2) at level 0 minus the same at level k. By the
-// top level the whole 0.088 RMS slope of the tile is filtered out of the
-// normal and lives here instead. A variance: it adds to alpha^2, not alpha.
-const SEA_SLOPE_VARIANCE_REMOVED = array<f32, 9>(
-    0.0, 0.0005511, 0.0017613, 0.0036112, 0.0061415,
-    0.0076499, 0.0077109, 0.0077394, 0.0077479
-);
-// Entry k: at level k, mean(s(t) . s(t)) minus mean(s(t) . s(t+1)). Blending
-// two frames at fraction f removes 2 f (1 - f) of it — the finest ripples
-// decorrelate within a frame or two and would otherwise dim between frames.
-const SEA_SLOPE_VARIANCE_TEMPORAL = array<f32, 9>(
-    0.0015768, 0.0013141, 0.0008822, 0.0004952, 0.0001696,
-    9.9e-06, 3.8e-06, 9e-07, 0.0
+// x of entry k: mean(sx^2 + sy^2) at level 0 minus the same at level k. By
+// the top level the whole 0.088 RMS slope of the tile is filtered out of
+// the normal and lives here instead. A variance: it adds to alpha^2, not
+// alpha.
+//
+// y of entry k: at level k, mean(s(t) . s(t)) minus mean(s(t) . s(t+1)).
+// Blending two frames at fraction f removes 2 f (1 - f) of it — the finest
+// ripples decorrelate within a frame or two and would otherwise dim between
+// frames.
+//
+// One array of pairs, like the static tile's one table before it: every
+// runtime-indexed const array costs a private variable at fs_main's entry
+// (see SWELL_PERIOD_M), and one more moved the other scenes' bits.
+const SEA_SLOPE_VARIANCE = array<vec2<f32>, 9>(
+    vec2<f32>(0.0, 0.0015768),
+    vec2<f32>(0.0005511, 0.0013141),
+    vec2<f32>(0.0017613, 0.0008822),
+    vec2<f32>(0.0036112, 0.0004952),
+    vec2<f32>(0.0061415, 0.0001696),
+    vec2<f32>(0.0076499, 9.9e-06),
+    vec2<f32>(0.0077109, 3.8e-06),
+    vec2<f32>(0.0077394, 9e-07),
+    vec2<f32>(0.0077479, 0.0)
 );
 // The tile's foam rank covers this much of the sea at a full gate.
 const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
@@ -1844,20 +1854,13 @@ const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
 // RMS elevation 0.40 m, RMS slope 0.010: a real swell is that gentle, which
 // is why it shows mostly through what it does to the wind sea (below) and
 // in the glitter. Normals only: geometry stays the plane at u.ocean.x.
-const SWELL_COUNT: i32 = 10;
+//
+// The trains are written out as ten calls in sea_swell rather than looped
+// over const arrays: a runtime-indexed module-scope array becomes a private
+// variable initialized at fs_main's entry, and that alone moves the city's
+// and the desert's compiled code off bit-identity (measured, 2026-09-23,
+// tools/soar_shader_ab.py) though they never shade water.
 const SWELL_PERIOD_M: f32 = 819.2;
-const SWELL_MN = array<vec2<f32>, 10>(
-    vec2<f32>(2.0, -1.0), vec2<f32>(2.0, 1.0), vec2<f32>(3.0, 0.0),
-    vec2<f32>(3.0, -1.0), vec2<f32>(3.0, 1.0), vec2<f32>(3.0, -2.0),
-    vec2<f32>(3.0, 2.0), vec2<f32>(4.0, 0.0), vec2<f32>(4.0, -1.0),
-    vec2<f32>(4.0, 1.0)
-);
-const SWELL_AMP = array<f32, 10>(
-    0.155, 0.155, 0.218, 0.200, 0.200, 0.156, 0.156, 0.187, 0.174, 0.174
-);
-const SWELL_PHASE = array<f32, 10>(
-    6.219, 3.262, 5.356, 1.358, 1.887, 6.231, 0.260, 0.812, 1.683, 4.767
-);
 // The elevation the gate and the modulation are normalized by: ~2.5 sigma.
 // Beyond it they clip, which biases the far-field foam mean by well under
 // a percent of itself.
@@ -1926,11 +1929,8 @@ fn sea_tile_variance_removed(lod: f32, f: f32) -> f32 {
     let l0 = clamp(floor(lod), 0.0, 8.0);
     let l1 = min(l0 + 1.0, 8.0);
     let w = clamp(lod - l0, 0.0, 1.0);
-    let spatial = mix(SEA_SLOPE_VARIANCE_REMOVED[i32(l0)],
-                      SEA_SLOPE_VARIANCE_REMOVED[i32(l1)], w);
-    let temporal = mix(SEA_SLOPE_VARIANCE_TEMPORAL[i32(l0)],
-                       SEA_SLOPE_VARIANCE_TEMPORAL[i32(l1)], w);
-    return spatial + 2.0 * f * (1.0 - f) * temporal;
+    let v = mix(SEA_SLOPE_VARIANCE[i32(l0)], SEA_SLOPE_VARIANCE[i32(l1)], w);
+    return v.x + 2.0 * f * (1.0 - f) * v.y;
 }
 
 struct Swell {
@@ -1942,28 +1942,43 @@ struct Swell {
     variance_removed: f32,
 };
 
+// One train, (m, n) cycles across the surface period, amplitude a (m),
+// phase phi, added into `s`.
+fn sea_swell_train(s: ptr<function, Swell>, m: f32, n: f32, a: f32,
+                   phi: f32, p: vec2<f32>, t: f32, h: vec2<f32>,
+                   along: f32, across: f32) {
+    let k = (6.283185307179586 / SWELL_PERIOD_M) * vec2<f32>(m, n);
+    let kk = length(k);
+    let omega = sqrt(SEA_G * kk);
+    let phase = dot(k, p) - omega * t + phi;
+    let ka = dot(k, h) * along;
+    let kc = (k.x * h.y - k.y * h.x) * across;
+    let gain = exp(-0.5 * (ka * ka + kc * kc));
+    (*s).slope = (*s).slope - (a * gain * sin(phase)) * k;
+    (*s).eta = (*s).eta + a * gain * cos(phase);
+    (*s).variance_removed = (*s).variance_removed
+        + 0.5 * (a * kk) * (a * kk) * (1.0 - gain * gain);
+}
+
 // The swell at a surface-frame point, seen through a pixel footprint that
 // is `along` metres long in the horizontal view direction `h` and `across`
 // metres wide. Each train is Gaussian-filtered by it (gain
 // exp(-((k.h along)^2 + (k x h across)^2) / 2)), so a train the pixel cannot
-// resolve fades into the lobe instead of aliasing.
+// resolve fades into the lobe instead of aliasing. The ten trains are the
+// table above, row for row.
 fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
              across: f32) -> Swell {
     var s = Swell(vec2<f32>(0.0), 0.0, 0.0);
-    for (var i = 0; i < SWELL_COUNT; i = i + 1) {
-        let k = (6.283185307179586 / SWELL_PERIOD_M) * SWELL_MN[i];
-        let kk = length(k);
-        let omega = sqrt(SEA_G * kk);
-        let phase = dot(k, p) - omega * t + SWELL_PHASE[i];
-        let ka = dot(k, h) * along;
-        let kc = (k.x * h.y - k.y * h.x) * across;
-        let gain = exp(-0.5 * (ka * ka + kc * kc));
-        let a = SWELL_AMP[i];
-        s.slope = s.slope - (a * gain * sin(phase)) * k;
-        s.eta = s.eta + a * gain * cos(phase);
-        s.variance_removed = s.variance_removed
-            + 0.5 * (a * kk) * (a * kk) * (1.0 - gain * gain);
-    }
+    sea_swell_train(&s, 2.0, -1.0, 0.155, 6.219, p, t, h, along, across);
+    sea_swell_train(&s, 2.0,  1.0, 0.155, 3.262, p, t, h, along, across);
+    sea_swell_train(&s, 3.0,  0.0, 0.218, 5.356, p, t, h, along, across);
+    sea_swell_train(&s, 3.0, -1.0, 0.200, 1.358, p, t, h, along, across);
+    sea_swell_train(&s, 3.0,  1.0, 0.200, 1.887, p, t, h, along, across);
+    sea_swell_train(&s, 3.0, -2.0, 0.156, 6.231, p, t, h, along, across);
+    sea_swell_train(&s, 3.0,  2.0, 0.156, 0.260, p, t, h, along, across);
+    sea_swell_train(&s, 4.0,  0.0, 0.187, 0.812, p, t, h, along, across);
+    sea_swell_train(&s, 4.0, -1.0, 0.174, 1.683, p, t, h, along, across);
+    sea_swell_train(&s, 4.0,  1.0, 0.174, 4.767, p, t, h, along, across);
     s.eta = clamp(s.eta / SWELL_ETA_SCALE_M, -1.0, 1.0);
     return s;
 }

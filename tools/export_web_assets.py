@@ -109,10 +109,10 @@ def _slope_variance_tables(planes: np.ndarray, meta: dict):
 def export_ocean() -> dict:
     """The moving sea: generate, quantize, and measure what the shader needs.
 
-    The two variance tables and the loop length also live in raymarch.wgsl as
-    constants (SEA_SLOPE_VARIANCE_REMOVED, SEA_SLOPE_VARIANCE_TEMPORAL,
-    SEA_LOOP_S); tests/test_sea_tile.py fails until the shader is updated to
-    match a re-export.
+    The two variance tables, the loop length and the foam cap also live in
+    raymarch.wgsl as constants (SEA_SLOPE_VARIANCE — one (removed, temporal)
+    pair per level — SEA_LOOP_S, SEA_FOAM_MAX_COVERAGE); tests/test_sea_tile.py
+    fails until the shader is updated to match a re-export.
     """
     OCEAN_OUT.mkdir(parents=True, exist_ok=True)
     print(f"sea {ocean_fif.N}^2 x {ocean_fif.NT} frames (seeded {SEA_SEED})")

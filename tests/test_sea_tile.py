@@ -33,13 +33,14 @@ def sea():
     return sea_tile.read(SEA_DIR)
 
 
-def _wgsl_array(src, name):
-    m = re.search(rf"const {name} = array<f32, (\d+)>\((.*?)\);", src, re.S)
+def _wgsl_pairs(src, name):
+    m = re.search(rf"const {name} = array<vec2<f32>, (\d+)>\((.*?)\n\);",
+                  src, re.S)
     assert m, f"{name} not found in raymarch.wgsl"
-    vals = [float(v) for v in m.group(2).replace("\n", " ").split(",")
-            if v.strip()]
-    assert len(vals) == int(m.group(1))
-    return vals
+    pairs = [(float(a), float(b)) for a, b in re.findall(
+        r"vec2<f32>\(([-0-9.eE+]+), ([-0-9.eE+]+)\)", m.group(2))]
+    assert len(pairs) == int(m.group(1))
+    return pairs
 
 
 def _wgsl_scalar(src, name):
@@ -51,11 +52,12 @@ def _wgsl_scalar(src, name):
 def test_the_shader_carries_the_tiles_own_numbers(sea):
     meta, _ = sea
     src = SHADER.read_text()
-    assert _wgsl_array(src, "SEA_SLOPE_VARIANCE_REMOVED") == pytest.approx(
+    pairs = _wgsl_pairs(src, "SEA_SLOPE_VARIANCE")
+    assert [a for a, _ in pairs] == pytest.approx(
         meta["slope_variance_removed"], rel=1e-6, abs=1e-12)
-    assert _wgsl_array(src, "SEA_SLOPE_VARIANCE_TEMPORAL") == pytest.approx(
+    assert [b for _, b in pairs] == pytest.approx(
         meta["slope_variance_temporal"], rel=1e-6, abs=1e-12)
-    assert len(meta["slope_variance_removed"]) == meta["mips"]
+    assert len(pairs) == meta["mips"]
     assert _wgsl_scalar(src, "SEA_LOOP_S") == pytest.approx(meta["loop_s"])
     assert _wgsl_scalar(src, "SEA_FOAM_MAX_COVERAGE") == pytest.approx(
         meta["foam_max_coverage"])
@@ -68,11 +70,9 @@ def test_the_shader_carries_the_tiles_own_numbers(sea):
 
 def test_every_swell_train_is_whole_cycles_across_the_period():
     src = SHADER.read_text()
-    m = re.search(r"const SWELL_MN = array<vec2<f32>, (\d+)>\((.*?)\);",
-                  src, re.S)
-    pairs = re.findall(r"vec2<f32>\(([-0-9.]+), ([-0-9.]+)\)", m.group(2))
-    assert len(pairs) == int(m.group(1))
-    for a, b in pairs:
+    calls = re.findall(r"sea_swell_train\(&s, ([-0-9. ]+), ([-0-9. ]+),", src)
+    assert len(calls) == 10
+    for a, b in calls:
         assert float(a) == int(float(a)) and float(b) == int(float(b))
 
 
