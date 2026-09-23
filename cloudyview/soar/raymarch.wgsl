@@ -3381,8 +3381,13 @@ fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
 //
 // A pool is shaped by its fixture. A wall pack throws a half-ellipse
 // forward from the wall foot, long along the wall and short out from it; a
-// pole flood throws an ellipse down its aim, centred well ahead of the pole.
-// Both are anisotropic Gaussians in the fixture's own (aim, across) frame,
+// pole flood throws a lopsided ellipse down its aim, centred well ahead of
+// the pole, long ahead and short behind — a symmetric one reached back past
+// the pole and out of the lot, where the next lot's ground stops painting it
+// and its tail ended on a hard line across the street (a blind judge's
+// first catch). Both are Gaussians in the fixture's own (aim, across) frame
+// with a sigma ahead, a sigma behind (zero: cut, the wall pack) and one
+// across,
 // and every aim is along a grid axis, so the far field keeps an exact mean:
 // each pool's integral over the ground the near field actually shows — the
 // lot's rectangle (a pool's tail past the lot edge is painted by nobody),
@@ -3409,6 +3414,7 @@ const CITY_FLOOD_WALL_ALONG: f32 = 7.0;  // ... and along it
 const CITY_FLOOD_WALL_SPACING: f32 = 30.0;
 const CITY_FLOOD_WALL_Z: f32 = 7.5;      // wall-pack mounting height
 const CITY_FLOOD_POLE_THROW: f32 = 9.0;  // pool sigma down the aim
+const CITY_FLOOD_POLE_BACK: f32 = 3.5;   // ... back toward the pole
 const CITY_FLOOD_POLE_SIDE: f32 = 5.5;   // ... and across it
 const CITY_FLOOD_POLE_REACH: f32 = 8.0;  // pool centre ahead of the pole
 const CITY_FLOOD_POLE_SLEW: f32 = 3.0;   // ... and at most this far aside
@@ -3421,8 +3427,9 @@ struct CityFlood {
     head: vec3<f32>,   // the fixture (city frame, m)
     aim: vec2<f32>,    // horizontal direction it throws its light (unit)
     pool: vec2<f32>,   // centre of its pool on the ground
-    sigma: vec2<f32>,  // pool sigmas along the aim and across it
-    half: bool,        // a wall pack: only the half ahead of the wall is lit
+    // Pool sigmas: ahead along the aim, behind (0: cut, as a wall pack's is
+    // at the wall), and across.
+    sigma: vec3<f32>,
     color: vec3<f32>,  // radiance at the pool centre
 }
 
@@ -3446,8 +3453,7 @@ fn city_flood(cc: CityCell, k: i32) -> CityFlood {
     f.head = vec3<f32>(0.0);
     f.aim = vec2<f32>(1.0, 0.0);
     f.pool = vec2<f32>(0.0);
-    f.sigma = vec2<f32>(1.0);
-    f.half = false;
+    f.sigma = vec3<f32>(1.0);
     f.color = vec3<f32>(0.0);
     let fh = city_rand4(cc.seed ^ vec2<u32>(0x1f83d9abu, 0x5be0cd19u));
     let kh = city_rand4(cc.seed ^ vec2<u32>(
@@ -3493,8 +3499,8 @@ fn city_flood(cc: CityCell, k: i32) -> CityFlood {
         }
         f.head = vec3<f32>(wall_foot + 0.8 * f.aim, z);
         f.pool = wall_foot;
-        f.sigma = vec2<f32>(CITY_FLOOD_WALL_OUT, CITY_FLOOD_WALL_ALONG) * size;
-        f.half = true;
+        f.sigma = vec3<f32>(CITY_FLOOD_WALL_OUT, 0.0, CITY_FLOOD_WALL_ALONG)
+                  * size;
     } else if (cc.land_use == CITY_USE_YARD) {
         // A row of poles along one long side of the yard, throwing across
         // it; a third of yards are dark, and the odd lamp is dead.
@@ -3527,8 +3533,8 @@ fn city_flood(cc: CityCell, k: i32) -> CityFlood {
         f.head = vec3<f32>(at, CITY_FLOOD_POLE_H);
         f.pool = at + inward * (CITY_FLOOD_POLE_REACH * size)
                  + vec2<f32>(inward.y, inward.x) * slew;
-        f.sigma = vec2<f32>(CITY_FLOOD_POLE_THROW, CITY_FLOOD_POLE_SIDE)
-                  * size;
+        f.sigma = vec3<f32>(CITY_FLOOD_POLE_THROW, CITY_FLOOD_POLE_BACK,
+                            CITY_FLOOD_POLE_SIDE) * size;
     } else {
         return f;
     }
@@ -3538,17 +3544,18 @@ fn city_flood(cc: CityCell, k: i32) -> CityFlood {
 }
 
 // Fixture f's pool at ground point p, in [0, 1] (times f.color for the
-// radiance): the anisotropic Gaussian in the fixture's own frame, cut at the
-// wall for a wall pack.
+// radiance): the lopsided Gaussian in the fixture's own frame, cut behind
+// the centre where its back sigma is zero.
 fn city_flood_pool(f: CityFlood, p: vec2<f32>) -> f32 {
     let d = p - f.pool;
     let a = dot(d, f.aim);
     let b = f.aim.x * d.y - f.aim.y * d.x;
-    if (f.half && a < 0.0) {
+    let sa = select(f.sigma.y, f.sigma.x, a >= 0.0);
+    if (sa <= 0.0) {
         return 0.0;
     }
-    let qa = a / f.sigma.x;
-    let qb = b / f.sigma.y;
+    let qa = a / sa;
+    let qb = b / f.sigma.z;
     return exp(-0.5 * (qa * qa + qb * qb));
 }
 
@@ -3569,8 +3576,9 @@ fn city_gauss_int(x0: f32, x1: f32, sigma: f32) -> f32 {
 }
 
 // The integral of city_flood_pool over the rectangle [lo, hi] (m^2). The aim
-// is along x or y, so the pool is separable in world axes: along the aim the
-// wall-pack cut is the half-line a >= 0, across it the Gaussian is whole.
+// is along x or y, so the pool is separable in world axes: along the aim it
+// is two half-Gaussians, the one behind absent for a wall pack; across it
+// the Gaussian is whole.
 fn city_flood_visible(f: CityFlood, lo: vec2<f32>, hi: vec2<f32>) -> f32 {
     let rlo = lo - f.pool;
     let rhi = hi - f.pool;
@@ -3579,15 +3587,15 @@ fn city_flood_visible(f: CityFlood, lo: vec2<f32>, hi: vec2<f32>) -> f32 {
     let u0 = select(rlo.y, rlo.x, along_x);
     let u1 = select(rhi.y, rhi.x, along_x);
     // In the aim's own sense: a = s u.
-    var a0 = select(-u1, u0, s > 0.0);
-    var a1 = select(-u0, u1, s > 0.0);
-    if (f.half) {
-        a0 = max(a0, 0.0);
-        a1 = max(a1, 0.0);
+    let a0 = select(-u1, u0, s > 0.0);
+    let a1 = select(-u0, u1, s > 0.0);
+    var along = city_gauss_int(max(a0, 0.0), max(a1, 0.0), f.sigma.x);
+    if (f.sigma.y > 0.0) {
+        along = along + city_gauss_int(min(a0, 0.0), min(a1, 0.0), f.sigma.y);
     }
     let b0 = select(rlo.x, rlo.y, along_x);
     let b1 = select(rhi.x, rhi.y, along_x);
-    return city_gauss_int(a0, a1, f.sigma.x) * city_gauss_int(b0, b1, f.sigma.y);
+    return along * city_gauss_int(b0, b1, f.sigma.z);
 }
 
 // Flood light on the ground at p: the lot's pools, dissolving into their
@@ -10808,7 +10816,7 @@ const cc_industry_ROOF_TOP: f32 = 3.6;        // tallest roof feature above h
 // against a lit window (3.5) — this is light seen through a dirty wired
 // pane from across a factory floor — but a whole roof of it.
 const cc_industry_NIGHT_SHIFT: f32 = 0.38;
-const cc_industry_GLAZE_RAD: f32 = 0.12;
+const cc_industry_GLAZE_RAD: f32 = 0.08;
 // The high-bays behind the glass: a luminaire every LAMP_P along the ridge,
 // each a soft hot spot on the pane over a floor glow. Uniform glass at this
 // level read as grey sheet material, not as light.
@@ -10819,7 +10827,7 @@ const cc_industry_LAMP_FLOOR: f32 = 0.15;
 // cell: FLOOR + (1 - FLOOR) sqrt(2 pi) SIG / P erf(P / (2 sqrt(2) SIG)).
 const cc_industry_LAMP_MEAN: f32 = 0.5381;
 const cc_industry_BAY: f32 = 12.0;            // lighting zone along a ridge
-const cc_industry_BAY_LIT: f32 = 0.80;
+const cc_industry_BAY_LIT: f32 = 0.65;
 const cc_industry_MULL: f32 = 1.8;            // mullion pitch (m)
 const cc_industry_MULL_W: f32 = 0.14;
 const cc_industry_TRANSOM_W: f32 = 0.10;      // the bar across mid-pane
@@ -10829,7 +10837,7 @@ const cc_industry_HEAD_BAND: f32 = 0.22;      // and its head
 // x mean bay level x the glass fraction of the framed face. Kept as one
 // function (cc_industry_glaze_mean) because the shader's far field and the
 // roof hook must agree on it exactly.
-const cc_industry_BAY_MEAN: f32 = 1.0;        // E[0.7 + 0.6 u] for u ~ U(0,1)
+const cc_industry_BAY_MEAN: f32 = 0.9;        // E[0.4 + u] for u ~ U(0,1)
 // Tone-map compensation on the far-field mean, the correction the core
 // applies to its own window octaves: a mean taken in linear radiance ahead
 // of the Reinhard curve renders brighter than the pattern it replaces.
@@ -10910,7 +10918,7 @@ const cc_industry_PART_FP: f32 = 0.25;
 // A surface's response to the flood pools is measured against the ground
 // the pools are painted on: a prop of this albedo facing the lamp the way
 // the ground does returns the pool's own radiance.
-const cc_industry_ALB_REF: f32 = 0.30;
+const cc_industry_ALB_REF: f32 = 0.35;
 const cc_industry_FACING_MAX: f32 = 2.5;
 
 // --- the lot's frame ----------------------------------------------------------
@@ -12131,7 +12139,7 @@ fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     let face_id = i32(round(dot(h.pos.xy, nh) * 0.5));
     let bay = i32(floor(uc / cc_industry_BAY));
     let dl = cc_industry_draw(cc, 14u, face_id, bay);
-    let bay_on = select(0.0, 0.7 + 0.6 * dl.y, dl.x < cc_industry_BAY_LIT);
+    let bay_on = select(0.0, 0.4 + dl.y, dl.x < cc_industry_BAY_LIT);
     // The frame, as it was built: flashing bands, a transom, mullions. Each
     // goes to its own mean as it goes sub-pixel, so what is left at range is
     // exactly cc_industry_glass_frac.
@@ -12504,7 +12512,7 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
         // Running gear: tyres, legs, rails — near-black.
         return cc_industry_lit(cc, h.pos, h.normal, vec3<f32>(0.03));
     }
-    var col = vec3<f32>(0.48, 0.48, 0.46);             // white box van
+    var col = vec3<f32>(0.38, 0.38, 0.36);             // white box van
     if (s.d.z > 0.55) { col = vec3<f32>(0.24, 0.24, 0.25); }
     if (s.d.z > 0.75) { col = vec3<f32>(0.07, 0.12, 0.26); }
     if (s.d.z > 0.85) { col = vec3<f32>(0.28, 0.06, 0.05); }

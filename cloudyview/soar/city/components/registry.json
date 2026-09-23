@@ -86,7 +86,8 @@
     "facade": "cc_industry_facade",
     "roof": "cc_industry_roof"
    },
-   "enabled": true
+   "enabled": true,
+   "note": "The industrial belt above its ground: warehouse roofs (sawtooth, clerestory, skylights), flood heads and poles, yard and court props. cell_props traces them; facade adds each wall pack's wash to the court wall; roof carries the lit glazing's exact view-dependent mean on core roof hits wherever the roof geometry is not drawn (beyond CITY_PROP_RANGE)."
   }
  ]
 }

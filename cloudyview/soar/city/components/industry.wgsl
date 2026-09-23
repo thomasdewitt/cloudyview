@@ -92,7 +92,7 @@ const cc_industry_ROOF_TOP: f32 = 3.6;        // tallest roof feature above h
 // against a lit window (3.5) — this is light seen through a dirty wired
 // pane from across a factory floor — but a whole roof of it.
 const cc_industry_NIGHT_SHIFT: f32 = 0.38;
-const cc_industry_GLAZE_RAD: f32 = 0.12;
+const cc_industry_GLAZE_RAD: f32 = 0.08;
 // The high-bays behind the glass: a luminaire every LAMP_P along the ridge,
 // each a soft hot spot on the pane over a floor glow. Uniform glass at this
 // level read as grey sheet material, not as light.
@@ -103,7 +103,7 @@ const cc_industry_LAMP_FLOOR: f32 = 0.15;
 // cell: FLOOR + (1 - FLOOR) sqrt(2 pi) SIG / P erf(P / (2 sqrt(2) SIG)).
 const cc_industry_LAMP_MEAN: f32 = 0.5381;
 const cc_industry_BAY: f32 = 12.0;            // lighting zone along a ridge
-const cc_industry_BAY_LIT: f32 = 0.80;
+const cc_industry_BAY_LIT: f32 = 0.65;
 const cc_industry_MULL: f32 = 1.8;            // mullion pitch (m)
 const cc_industry_MULL_W: f32 = 0.14;
 const cc_industry_TRANSOM_W: f32 = 0.10;      // the bar across mid-pane
@@ -113,7 +113,7 @@ const cc_industry_HEAD_BAND: f32 = 0.22;      // and its head
 // x mean bay level x the glass fraction of the framed face. Kept as one
 // function (cc_industry_glaze_mean) because the shader's far field and the
 // roof hook must agree on it exactly.
-const cc_industry_BAY_MEAN: f32 = 1.0;        // E[0.7 + 0.6 u] for u ~ U(0,1)
+const cc_industry_BAY_MEAN: f32 = 0.9;        // E[0.4 + u] for u ~ U(0,1)
 // Tone-map compensation on the far-field mean, the correction the core
 // applies to its own window octaves: a mean taken in linear radiance ahead
 // of the Reinhard curve renders brighter than the pattern it replaces.
@@ -194,7 +194,7 @@ const cc_industry_PART_FP: f32 = 0.25;
 // A surface's response to the flood pools is measured against the ground
 // the pools are painted on: a prop of this albedo facing the lamp the way
 // the ground does returns the pool's own radiance.
-const cc_industry_ALB_REF: f32 = 0.30;
+const cc_industry_ALB_REF: f32 = 0.35;
 const cc_industry_FACING_MAX: f32 = 2.5;
 
 // --- the lot's frame ----------------------------------------------------------
@@ -1415,7 +1415,7 @@ fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     let face_id = i32(round(dot(h.pos.xy, nh) * 0.5));
     let bay = i32(floor(uc / cc_industry_BAY));
     let dl = cc_industry_draw(cc, 14u, face_id, bay);
-    let bay_on = select(0.0, 0.7 + 0.6 * dl.y, dl.x < cc_industry_BAY_LIT);
+    let bay_on = select(0.0, 0.4 + dl.y, dl.x < cc_industry_BAY_LIT);
     // The frame, as it was built: flashing bands, a transom, mullions. Each
     // goes to its own mean as it goes sub-pixel, so what is left at range is
     // exactly cc_industry_glass_frac.
@@ -1788,7 +1788,7 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
         // Running gear: tyres, legs, rails — near-black.
         return cc_industry_lit(cc, h.pos, h.normal, vec3<f32>(0.03));
     }
-    var col = vec3<f32>(0.48, 0.48, 0.46);             // white box van
+    var col = vec3<f32>(0.38, 0.38, 0.36);             // white box van
     if (s.d.z > 0.55) { col = vec3<f32>(0.24, 0.24, 0.25); }
     if (s.d.z > 0.75) { col = vec3<f32>(0.07, 0.12, 0.26); }
     if (s.d.z > 0.85) { col = vec3<f32>(0.28, 0.06, 0.05); }
