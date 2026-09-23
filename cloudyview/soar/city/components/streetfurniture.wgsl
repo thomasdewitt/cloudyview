@@ -39,7 +39,8 @@
 //
 // Everything is deterministic in (tile-wrapped cell, side, lane, slot), so
 // the shader re-derives a prop from its hit position and nothing but the
-// lane rides in CityHit. Every prop lies strictly inside the cell column
+// lane rides in CityHit: kind 800 + 2 side + lane for an SDF hit, and 808 +
+// the same for the proxy a reflected ray meets. Every prop lies strictly inside the cell column
 // that draws it, because the DDA tests a cell only from the side it enters.
 //
 // COST. The wide scene pays gate 1 below (two multiply-adds against the
@@ -51,10 +52,12 @@
 // into the core's 512-iteration DDA once per slot, and the register pressure
 // of those copies costs occupancy on every city pixel). The march budget and
 // the candidate count are run-time values so the driver cannot unroll either.
-// There is no box-proxy LOD: the SDF runs to the far cutoff with its own
-// detail ladder, because only pixels whose rays enter a prop's box pay for
-// it, and a dumpster at the footprint where a proxy would take over is six
-// pixels — the proxy would save six pixels of work and cost a pop.
+// There is no box-proxy LOD for the eye: the SDF runs to the far cutoff with
+// its own detail ladder, because only pixels whose rays enter a prop's box
+// pay for it, and a dumpster at the footprint where a proxy would take over
+// is six pixels — the proxy would save six pixels of work and cost a pop.
+// REFLECTED rays are the exception, and the measurement that forced it is in
+// cc_streetfurniture_props_trace.
 
 const cc_streetfurniture_FLOOR: f32 = CITY_KERB_H;  // the sidewalk top
 const cc_streetfurniture_Z_GATE: f32 = 2.6;   // an open dumpster lid, + kerb
@@ -359,6 +362,33 @@ fn cc_streetfurniture_extent(typ: i32, n: i32) -> vec3<f32> {
     return vec3<f32>(0.33 * nf + 0.48, 0.62, 1.36);
 }
 
+// The prop's main mass, for the proxy a reflected ray sees: (half along,
+// half across, top) and whether it is boxy (a box) or round (the ellipsoid
+// inscribed in that box).
+fn cc_streetfurniture_mass(v: cc_streetfurniture_Prop) -> vec4<f32> {
+    let t = v.typ;
+    if (t == cc_streetfurniture_T_HYDRANT) {
+        return vec4<f32>(0.15, 0.15, 0.72, 0.0);
+    }
+    if (t == cc_streetfurniture_T_METER) {
+        return vec4<f32>(v.hb.x - 0.03, 0.08, 1.40, 0.0);
+    }
+    if (t == cc_streetfurniture_T_BASKET || t == cc_streetfurniture_T_CAN) {
+        return vec4<f32>(0.30, 0.30, 1.00, 0.0);
+    }
+    if (t == cc_streetfurniture_T_BAGS) {
+        return vec4<f32>(v.hb.x - 0.12, v.hb.y - 0.10, v.hb.z - 0.10, 0.0);
+    }
+    if (t == cc_streetfurniture_T_DUMPSTER) {
+        return vec4<f32>(0.92, 0.53, 1.20, 1.0);
+    }
+    if (t == cc_streetfurniture_T_NEWS) {
+        return vec4<f32>(v.hb.x - 0.04, 0.22, 1.05, 1.0);
+    }
+    return vec4<f32>(v.hb.x - 0.05, v.hb.y - 0.05, v.hb.z - 0.05,
+                     select(0.0, 1.0, t != cc_streetfurniture_T_BOLLARD));
+}
+
 // Whatever stands in slot k of lane `lane` on edge `side`.
 fn cc_streetfurniture_prop(ci: vec2<i32>, cc: CityCell,
                            e: cc_streetfurniture_Edge, side: i32, lane: i32,
@@ -515,12 +545,17 @@ fn cc_streetfurniture_to_world(v: cc_streetfurniture_Prop, d: vec3<f32>)
                   vec3<f32>(d.x, v.out * d.y, d.z), v.ax == 0);
 }
 
-fn cc_streetfurniture_box(v: cc_streetfurniture_Prop)
-        -> array<vec3<f32>, 2> {
+// The world bounding box. A struct and not a two-element array: a CITY-only
+// function-local array has moved DAY pixels in this kernel before.
+struct cc_streetfurniture_Box {
+    lo: vec3<f32>,
+    hi: vec3<f32>,
+}
+
+fn cc_streetfurniture_box(v: cc_streetfurniture_Prop) -> cc_streetfurniture_Box {
     let hx = select(vec2<f32>(v.hb.y, v.hb.x), v.hb.xy, v.ax == 0);
-    return array<vec3<f32>, 2>(
-        vec3<f32>(v.ctr.xy - hx, v.ctr.z - 0.03),
-        vec3<f32>(v.ctr.xy + hx, v.ctr.z + v.hb.z));
+    return cc_streetfurniture_Box(vec3<f32>(v.ctr.xy - hx, v.ctr.z - 0.03),
+                                  vec3<f32>(v.ctr.xy + hx, v.ctr.z + v.hb.z));
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,6 +1288,20 @@ fn cc_streetfurniture_props_trace(o: vec3<f32>, dir: vec3<f32>,
     if (fpx > cc_streetfurniture_WALL_FAR.y) {
         return cc_streetfurniture_miss(ci);
     }
+    // A REFLECTED ray (the wet street's second trace, city_wet_reflection)
+    // does not start at the camera. It sees each prop as an analytic proxy,
+    // never the SDF. Measured on the RTX 5080, 768x432, 128 frames, at eye
+    // level on a downtown sidewalk: 0.31 s without this component, 0.50 s
+    // with the SDF in reflections, 0.34 s with no props in reflections at
+    // all, 0.38 s with box proxies. Neither a coarser LOD rung, a shorter
+    // march, one candidate, nor a cheaper shade moved the SDF figure below
+    // 0.45 s: the cost is divergence — GGX-jittered reflection rays scatter,
+    // a few in each warp enter a prop's box, and the whole warp waits on
+    // their marches, where the camera's rays hit a prop together. A wet film
+    // blurs what it reflects into a dark smear anyway; a puddle's mirror at
+    // arm's length is the one place the proxy shows, as a smooth blob.
+    let reflected = any(o != city_camera_origin());
+    var res = cc_streetfurniture_miss(ci);
     var t_end = t1;
     var c0: cc_streetfurniture_Cand;
     var c1: cc_streetfurniture_Cand;
@@ -1304,10 +1353,49 @@ fn cc_streetfurniture_props_trace(o: vec3<f32>, dir: vec3<f32>,
                     continue;
                 }
                 let bx = cc_streetfurniture_box(v);
-                let hb = city_box_hit(o, inv_dir, bx[0], bx[1]);
+                let hb = city_box_hit(o, inv_dir, bx.lo, bx.hi);
                 let ta = max(hb.x, la);
                 let tb = min(hb.y, t_end);
                 if (hb.x > hb.y || tb <= ta) {
+                    continue;
+                }
+                if (reflected) {
+                    // The proxy, analytic, in world space (the frame is an
+                    // axis permutation, so the mass box is axis-aligned).
+                    let m = cc_streetfurniture_mass(v);
+                    let hx = select(vec2<f32>(m.y, m.x), m.xy, v.ax == 0);
+                    let lo = vec3<f32>(v.ctr.xy - hx, v.ctr.z - 0.03);
+                    let hi = vec3<f32>(v.ctr.xy + hx, v.ctr.z + m.z);
+                    var tp = -1.0;
+                    var np = vec3<f32>(0.0, 0.0, 1.0);
+                    if (m.w > 0.5) {
+                        let hm = city_box_hit(o, inv_dir, lo, hi);
+                        if (hm.x <= hm.y && hm.x >= ta && hm.x <= tb) {
+                            tp = hm.x;
+                            np = city_box_normal(o + tp * dir, lo, hi);
+                        }
+                    } else {
+                        let c = 0.5 * (lo + hi);
+                        let rr = 0.5 * (hi - lo);
+                        let oc = (o - c) / rr;
+                        let dd = dir / rr;
+                        let a = dot(dd, dd);
+                        let b = dot(oc, dd);
+                        let disc = b * b - a * (dot(oc, oc) - 1.0);
+                        if (disc > 0.0) {
+                            let te = (-b - sqrt(disc)) / a;
+                            if (te >= ta && te <= tb) {
+                                tp = te;
+                                np = normalize((o + te * dir - c) / (rr * rr));
+                            }
+                        }
+                    }
+                    if (tp > 0.0 && tp < t_end) {
+                        res = CityHit(true, tp, o + tp * dir, np,
+                                      808 + 2 * side + lane, ci);
+                        t_end = tp;
+                        break;
+                    }
                     continue;
                 }
                 let c = cc_streetfurniture_Cand(side, lane, k, ta, tb);
@@ -1337,6 +1425,9 @@ fn cc_streetfurniture_props_trace(o: vec3<f32>, dir: vec3<f32>,
     // second only if the ray grazed past the first — without it, a ray
     // through the empty corner of a hydrant's box would lose the bench
     // behind it, and a ghost of the hydrant's box would cut the bench.
+    if (reflected) {
+        return res;
+    }
     for (var j: i32 = 0; j < nc; j = j + 1) {
         var c = c0;
         if (j == 1) {
@@ -1546,7 +1637,7 @@ fn cc_streetfurniture_glints(p: vec3<f32>, n: vec3<f32>, rf: vec3<f32>,
 
 fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
-    let local = h.kind - 800;
+    let local = (h.kind - 800) % 8;
     let side = local / 2;
     let lane = local % 2;
     let e = cc_streetfurniture_edge(h.cell, cc, side);
@@ -1563,9 +1654,17 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let fpx = max(0.35 * fp, 2.0 * u.cam_origin.w / max(u.params.x, 1.0)
                              * max(h.t, 0.0));
     let pl = cc_streetfurniture_to_local(v, h.pos);
+    let n = h.normal;
+    if (h.kind >= 808) {
+        // A reflected ray's proxy: the prop's main material, lamp-lit.
+        let pm = cc_streetfurniture_material(
+            select(cc_streetfurniture_M_PAINT, cc_streetfurniture_M_BAG_BLACK,
+                   v.typ == cc_streetfurniture_T_BAGS), v);
+        return (cc_streetfurniture_ALB_GAIN * pm.alb)
+             * city_street_light(h.pos, n);
+    }
     let mid = cc_streetfurniture_sdf(pl, v, cc_streetfurniture_lod(fpx)).y;
     let mat = cc_streetfurniture_material(mid, v);
-    let n = h.normal;
     let rf = reflect(dir, n);
     let cosv = clamp(-dot(dir, n), 0.0, 1.0);
     let schlick = pow(1.0 - cosv, 5.0);
