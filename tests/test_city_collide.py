@@ -167,6 +167,9 @@ function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
     out.replayKnocks = video.map((f, i) => knocksDue(
       recorder.knocks, i > 0 ? video[i - 1].t : -Infinity, f.t));
     out.videoT = video.map((f) => f.t);
+    out.videoCam = video.map((f) => [f.surfacePosition[0] * EXTENT,
+                                     f.surfacePosition[1] * EXTENT,
+                                     (f.position[2] + 1) * 0.5 * BMAX[2]]);
   }
   return out;
 }
@@ -436,3 +439,23 @@ def test_looking_round_beside_a_wall_is_not_a_crash():
     assert not any(f["camInside"] or f["flyInside"] for f in frames)
     assert max(f["fly"][0] for f in frames) <= 50.0 - 0.2 + 1e-9
     assert r["knocks"] == []
+
+
+@pytest.mark.parametrize("speed", [20.0, 5000.0])
+def test_a_replayed_crash_stays_out_of_the_wall(speed):
+    # The video pass interpolates the recorded poses (Catmull-Rom at the
+    # video rate). An interpolant can overshoot a sudden stop; this one has
+    # to stay out of the wall the live flight stopped at — at the city's
+    # opening speed and at the fastest the wheel allows.
+    wall = [[[3000.0, -1000.0, 0.0], [3030.0, 1000.0, 500.0]]]
+    start = [2900.0, 0.0, 60.0] if speed < 100 else [0.0, 0.0, 60.0]
+    r = fly(boxes=wall, start=start, azimuth=EAST, elevation=0.0,
+            speed=speed, keys=["w"], fps=60, seconds=7.0 if speed < 100
+            else 2.0, videoFps=30)
+    assert len(r["knocks"]) == 1
+    live = max(f["cam"][0] for f in r["frames"])
+    replay = max(c[0] for c in r["videoCam"])
+    assert replay <= live + 1e-6
+    # And the replayed flyer, placed 2.6 m ahead of that camera, is short
+    # of the face too.
+    assert replay + 2.6 <= 3000.0 - 0.2 + 1e-6
