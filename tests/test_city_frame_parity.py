@@ -33,6 +33,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -144,6 +145,11 @@ _CITY_MAP_CONSTANTS = [
     ("CITY_MAP_H_BASE", "CITY_H_BASE"),
     ("CITY_MAP_H_SCALE", "CITY_H_SCALE"),
     ("CITY_MAP_H_EXP", "CITY_H_EXP"),
+    ("CITY_MAP_WORD_OFFSET", "CITY_WORD_OFFSET"),
+]
+_CITY_MAP_INT_CONSTANTS = [
+    ("CITY_MAP_USE_URBAN", "CITY_USE_URBAN"),
+    ("CITY_MAP_USE_INDUSTRIAL", "CITY_USE_INDUSTRIAL"),
 ]
 
 
@@ -164,8 +170,26 @@ def test_the_map_raises_its_buildings_on_the_shaders_numbers(js_name, wgsl_name)
         f"{wgsl}; the map would show a city the renderer does not build")
 
 
+@pytest.mark.parametrize("js_name,wgsl_name", _CITY_MAP_INT_CONSTANTS)
+def test_the_map_reads_land_use_with_the_shaders_codes(js_name, wgsl_name):
+    js = _number(MINIMAP_JS.read_text(),
+                 rf"const\s+{js_name}\s*=\s*(-?\d+)\s*;")
+    wgsl = _number(WGSL.read_text(),
+                   rf"const\s+{wgsl_name}\s*:\s*i32\s*=\s*(-?\d+)\s*;")
+    assert js == wgsl
+
+
+def test_the_map_warehouse_is_the_shaders_mean_warehouse():
+    """city_cell's warehouse roof is floor((9 + 6 r) * 2) / 2 for uniform r."""
+    r = (np.arange(200000) + 0.5) / 200000
+    mean = np.mean(np.floor((9.0 + 6.0 * r) * 2.0) * 0.5)
+    js = _number(MINIMAP_JS.read_text(),
+                 r"const\s+CITY_MAP_WAREHOUSE_H\s*=\s*([-\d.eE+]+)\s*;")
+    assert js == pytest.approx(mean, abs=1e-3)
+
+
 def _height(density, rank):
-    """city_cell's height with the per-building jitter (mean 1) left out."""
+    """city_cell's urban height with the per-building jitter (mean 1) left out."""
     empty, full, floor_ = 0.22, 0.60, 0.15
     if not rank > empty:
         return 0.0
@@ -174,24 +198,56 @@ def _height(density, rank):
     return (14.0 + 390.0 * density ** 1.2) * sprawl
 
 
-def test_the_map_height_is_the_shaders_height_without_the_jitter():
-    cells = [(0.02, 0.10), (0.05, 0.30), (0.20, 0.55), (0.60, 0.95),
-             (0.90, 0.99), (0.40, 0.22)]
+def _map_heights(n, density, rank, lot_words, street_words):
     js = textwrap.dedent(f"""
         import {{ cityBlockHeights }} from "{MINIMAP_JS.as_uri()}";
-        const cells = {json.dumps(cells)};
-        const n = 1;
-        const out = cells.map(([d, r]) => cityBlockHeights({{
-          n, density: Float32Array.of(d), rank: Float32Array.of(r) }})[0]);
-        process.stdout.write(JSON.stringify(out));
+        const off = 2048;
+        const h = cityBlockHeights({{
+          n: {n},
+          density: Float32Array.from({json.dumps(density)}),
+          rank: Float32Array.from({json.dumps(rank)}),
+          lot: Float32Array.from({json.dumps(lot_words)}.map((w) => w - off)),
+          street: Float32Array.from({json.dumps(street_words)}
+                                    .map((w) => w - off)),
+        }});
+        process.stdout.write(JSON.stringify(Array.from(h)));
     """)
-    got = json.loads(subprocess.run(["node", "--input-type=module", "--eval", js],
-                                    capture_output=True, text=True,
-                                    check=True).stdout)
-    for (density, rank), height in zip(cells, got):
-        assert height == pytest.approx(_height(density, rank), rel=1e-6)
-    # The rank-0.22 case is exactly the empty threshold: not built, no height.
-    assert got[-1] == 0.0
+    return json.loads(subprocess.run(
+        ["node", "--input-type=module", "--eval", js],
+        capture_output=True, text=True, check=True).stdout)
+
+
+def test_the_map_height_is_the_shaders_height_without_the_jitter():
+    """One-block urban lots: the plain height law, block by block."""
+    cells = [(0.02, 0.30), (0.05, 0.30), (0.20, 0.55), (0.60, 0.95),
+             (0.90, 0.99)]
+    for density, rank in cells:
+        got = _map_heights(1, [density], [rank], [0], [0])[0]
+        assert got == pytest.approx(_height(density, rank), rel=1e-6)
+
+
+def test_the_map_shows_lots_and_land_use_as_the_shader_builds_them():
+    """A 2x2 tower lot shows its owner's height on every member; a
+    warehouse its mean roof; a yard and open scrub nothing."""
+    n = 4
+    density = [0.1] * 16
+    rank = [0.5] * 16
+    density[5], rank[5] = 3.0, 0.99      # the owner: cell (1, 1)
+    lot = [0] * 16
+    street = [0] * 16
+    # Lot min (0, 0), 2x2, owner at (1, 1) within it.
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+        lot[y * n + x] = x | (y << 2) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 10)
+    street[2] = 1 << 8        # (2, 0) industrial
+    street[3] = 2 << 8        # (3, 0) yard
+    street[7] = 3 << 8        # (3, 1) open
+    h = _map_heights(n, density, rank, lot, street)
+    tower = _height(3.0, 0.99)
+    for i in (0, 1, 4, 5):
+        assert h[i] == pytest.approx(tower, rel=1e-6)
+    assert h[2] == pytest.approx(11.75)
+    assert h[3] == 0.0 and h[7] == 0.0
+    assert h[6] == pytest.approx(_height(0.1, 0.5), rel=1e-6)
 
 
 def test_the_marker_is_placed_in_the_frame_the_map_is_drawn_in():
