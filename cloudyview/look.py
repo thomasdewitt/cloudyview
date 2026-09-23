@@ -55,7 +55,12 @@ AERIAL_SCALE_HEIGHT_M = 2500.0
 OCEAN_REALISM = 1.0
 OCEAN_MIP_BIAS = -0.5
 OCEAN_GLINT_STRENGTH = 0.85
-OCEAN_GLINT_ROUGHNESS = 0.28
+# The glint's base roughness: the slope variance below the detail octave's
+# 5 cm (raymarch.wgsl SEA_DETAIL_*), as alpha = sqrt(mss). Set so the whole
+# sea's mean square slope is Cox & Munk's at 8 m/s — 0.003 + 0.00512 U =
+# 0.044 — the wind the ~1% whitecap cover implies: the tile resolves 0.0077,
+# the detail octave 0.0059, the swell 0.0001, and this carries the rest.
+OCEAN_GLINT_ROUGHNESS = 0.174
 # How much of the slope variance the normal-mip filter removed is drawn
 # stochastically per pixel per frame (lighting-loop iter_008). The remainder
 # stays as extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.

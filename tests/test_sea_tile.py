@@ -72,7 +72,7 @@ def test_the_shader_carries_the_tiles_own_numbers(sea):
 def test_every_swell_train_is_whole_cycles_across_the_period():
     src = SHADER.read_text()
     calls = re.findall(r"sea_swell_train\(&s, ([-0-9. ]+), ([-0-9. ]+),", src)
-    assert len(calls) == 10
+    assert len(calls) == 16
     for a, b in calls:
         assert float(a) == int(float(a)) and float(b) == int(float(b))
 
@@ -140,3 +140,25 @@ def test_the_browser_decodes_and_mips_the_sea_as_python_does(sea):
             got = np.frombuffer(base64.b64decode(theirs[str(t)][k]),
                                 np.float32).reshape(level.shape)
             assert np.array_equal(got, level), f"frame {t} level {k}"
+
+
+def test_the_whitecaps_far_field_is_their_resolved_mean(sea):
+    """The far field's whitecap cover and tint are the means the resolved
+    foam averages to: the lace table the shader reads (measured on the tile)
+    integrated against the shader's own opacity and tint ramps."""
+    meta, _ = sea
+    src = SHADER.read_text()
+    for k, v in enumerate(meta["lace_cover"]):
+        assert _wgsl_scalar(src, f"SEA_LACE_COVER_{k}") == pytest.approx(v)
+    tint = [float(v) for v in re.search(
+        r"const SEA_FOAM_TINT_OLD: vec3<f32> = vec3<f32>\(([^)]*)\);",
+        src).group(1).split(",")]
+    cover, mean_tint = sea_tile.foam_far_field(
+        meta["lace_cover"], _wgsl_scalar(src, "SEA_FOAM_OPACITY_OLD"),
+        _wgsl_scalar(src, "SEA_FOAM_OPACITY_FRESH"), tint)
+    assert _wgsl_scalar(src, "SEA_FOAM_FAR_COVER") == pytest.approx(
+        cover, abs=1e-6)
+    far_tint = [float(v) for v in re.search(
+        r"const SEA_FOAM_FAR_TINT: vec3<f32> = vec3<f32>\(([^)]*)\);",
+        src).group(1).split(",")]
+    assert far_tint == pytest.approx(list(mean_tint), abs=1e-6)

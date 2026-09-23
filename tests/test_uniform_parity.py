@@ -93,7 +93,7 @@ CASES = [
     # The moving sea (2026-09-23): the ocean folds row 24 at its swell's
     # period rather than its tile, and row 24.z carries the scene clock.
     ("ocean_moving",
-     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 819.2},
+     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 1638.4},
      {"scene_time": 1234.5678}),
     ("city_surface_offset",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],

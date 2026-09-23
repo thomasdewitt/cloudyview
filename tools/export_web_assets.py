@@ -53,7 +53,7 @@ SEA_SEED = 20260923
 # percentile, and the clip fraction is printed on export.
 SEA_SLOPE_SCALE = (0.75, 0.40)
 # The surface frame folds at this many tiles: the swell's period.
-SEA_SURFACE_TILES = 8
+SEA_SURFACE_TILES = 16
 
 
 def _volume_aabb(field: CloudField):
@@ -115,7 +115,7 @@ def _slope_variance_tables(planes: np.ndarray, meta: dict):
 # The shader needs the mean cover each cut leaves, which is a property of the
 # tile: measured here at five thresholds.
 LACE_REACH = 0.25
-LACE_EDGE = 0.05
+LACE_EDGE = 0.10
 LACE_POINTS = 5
 
 

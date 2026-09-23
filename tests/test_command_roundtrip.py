@@ -184,10 +184,10 @@ CITY_OFFSET = [8100.0, -44190.0]          # K.CITY_TILE_OFFSET_M
 # (name, scene flags, tile extent, the period the surface frame folds at,
 # whether the flight's folds moved the surface frame off the static offset —
 # which is when --surface-origin must appear and carry it). The sea folds at
-# its swell's period, eight of its tiles; the city at its tile.
+# its swell's period, sixteen of its tiles; the city at its tile.
 SURFACE_CASES = [
-    ("ocean", {}, 102.4, 819.2, False),
-    ("ocean-drifted", {}, 102.4, 819.2, True),
+    ("ocean", {}, 102.4, 1638.4, False),
+    ("ocean-drifted", {}, 102.4, 1638.4, True),
     ("city", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0, 92160.0,
      False),
     ("city-drifted", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0,
