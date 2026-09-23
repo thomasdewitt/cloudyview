@@ -2864,8 +2864,11 @@ struct CityHit {
 // clears. Opaque geometry, so the first hit wins. `t_max` bounds the walk:
 // the view ray passes CITY_TRACE_RANGE, a wet street's reflected ray its own
 // short range (a rising ray would otherwise walk cells until it cleared
-// CITY_SLAB_TOP, kilometres up).
-fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32) -> CityHit {
+// CITY_SLAB_TOP, kilometres up). `props` = false skips the component hooks
+// (extra_trace, cell_props): every call site passes a constant, so a
+// props-free call inlines none of their code (see the reflection in fs_main).
+fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, props: bool)
+        -> CityHit {
     var res: CityHit;
     res.hit = false;
     res.t = 1e30;
@@ -2914,7 +2917,12 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32) -> CityHit {
     // Grid-independent component geometry (elevated highways and their
     // kin): traced once, and the nearest of it and whatever the DDA finds
     // wins at every exit below.
-    let extra = cc_extra_trace(o, dir, inv3);
+    var extra: CityHit;
+    extra.hit = false;
+    extra.t = 1e30;
+    if (props) {
+        extra = cc_extra_trace(o, dir, inv3);
+    }
 
     var t_cur = t0;
     for (var i: i32 = 0; i < CITY_TRACE_MAX_CELLS; i = i + 1) {
@@ -3001,7 +3009,7 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32) -> CityHit {
         }
         // Near-field props: the whole prop budget lives inside
         // CITY_PROP_RANGE, so the far city never pays for a garbage can.
-        if (t_cur < CITY_PROP_RANGE) {
+        if (props && t_cur < CITY_PROP_RANGE) {
             let ph = cc_cell_props_trace(o, dir, inv3, t_cur, t_exit, ci, cc);
             if (ph.hit && ph.t < res.t && ph.t <= t_exit + 1e-3) {
                 res = ph;
@@ -3125,7 +3133,7 @@ const CITY_JOINT_W: f32 = 0.018;       // the joint between two flags
 // what the lamp pools were calibrated on (the pool is the asphalt's
 // radiance). Concrete under sodium is the bright band of every night street
 // photograph; paint brighter still, and worn.
-const CITY_REL_WALK: f32 = 2.1;
+const CITY_REL_WALK: f32 = 1.7;
 const CITY_REL_KERB: f32 = 2.6;
 const CITY_REL_GUTTER: f32 = 1.7;
 const CITY_REL_LOT: f32 = 1.3;          // unpaved yards and empty lots
@@ -3139,9 +3147,12 @@ const CITY_REL_SLOT: f32 = 0.08;        // the dark between grate bars
 // standing water (a mirror). Water fills the pores of asphalt and concrete
 // and takes most of their diffuse light with it — wet asphalt is the darkest
 // thing on a street, which is exactly what lets the reflections read.
-const CITY_WET_ROAD: f32 = 0.80;
-const CITY_WET_WALK: f32 = 0.50;
-const CITY_WET_DARKEN: f32 = 0.50;
+const CITY_WET_ROAD: f32 = 0.90;
+const CITY_WET_WALK: f32 = 0.60;
+const CITY_WET_DARKEN: f32 = 0.82;
+// Of a wet surface, the share whose film is smooth enough to be glossy: damp
+// asphalt is a patchwork of film and dull aggregate, not a sheet of water.
+const CITY_FILM_GLOSS: f32 = 0.5;
 const CITY_PUDDLE_DARKEN: f32 = 0.85;
 // Puddle mask: two octaves of value noise plus a bias per zone (gutters
 // collect, the road crown sheds), thresholded. Past CITY_PUDDLE_LOD the mask
@@ -3164,7 +3175,7 @@ const CITY_MH_PRESENT: f32 = 0.55;
 const CITY_GRATE_AT: f32 = 5.2;       // past the cross street's building line
 const CITY_GRATE_HL: f32 = 0.45;      // half-length along the kerb
 
-// The reflected ray (city_wet_reflection). Water's F0 is 0.02; a puddle is
+// The reflected ray (city_wet_lobe). Water's F0 is 0.02; a puddle is
 // a near-mirror whose ripples still blur it a little, a damp film a rough
 // one — rough enough at grazing incidence to stretch every light source into
 // the long vertical streak that IS the wet-street look.
@@ -3203,6 +3214,14 @@ const CITY_GROUND_ALB_MEAN: f32 = 1.0;
 // not compile, so the merge cannot keep both by accident.
 fn city_edge_street(cc: CityCell, side: i32) -> bool {
     return true;
+}
+
+// STUB for city-layout's city_ground_paved, same arrangement: is the ground
+// at p (inside cell ci) street rather than lot? Theirs reads the baked
+// street word; until it lands, everything outside the plot is street.
+fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
+    return !(p.x > cc.plot_min.x && p.x < cc.plot_max.x
+             && p.y > cc.plot_min.y && p.y < cc.plot_max.y);
 }
 
 // STUB for city-facades' storefront glow, same arrangement: the mean emitted
@@ -3429,7 +3448,8 @@ struct CityGround {
     walk: f32,        // how much of the footprint is raised (sidewalk/plaza)
 }
 
-fn city_ground(p: vec2<f32>, cc: CityCell, fp: f32) -> CityGround {
+fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
+        -> CityGround {
     let kr = city_kerb_rect(cc);
     let d = city_kerb_sd(p, cc, kr);
     let rd = city_road(p);
@@ -3545,7 +3565,7 @@ fn city_ground(p: vec2<f32>, cc: CityCell, fp: f32) -> CityGround {
     let crown = 1.0 - smoothstep(0.0, 2.5, min(select(1e3, ex, on_x),
                                                select(1e3, ey, on_y)));
     let bias = 0.22 * (1.0 - smoothstep(0.0, 1.0, abs(d - 0.2)))
-             - 0.12 * crown - 0.10 * (w_kerb + w_in) + 0.20 * region;
+             - 0.12 * crown - 0.22 * (w_kerb + w_in) + 0.20 * region;
     let pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
                                CITY_PUDDLE_THR + CITY_PUDDLE_EDGE, n + bias);
     let pud_mean = 1.0 / (1.0 + exp(-(bias + 0.5 - CITY_PUDDLE_FIT.x)
@@ -3560,6 +3580,17 @@ fn city_ground(p: vec2<f32>, cc: CityCell, fp: f32) -> CityGround {
     g.wet = film;
     g.puddle = puddle;
     g.walk = select(0.0, w_in + w_kerb, walk_ok);
+    // Outside the plot on an edge that carries no street there is no
+    // street at all: lot ground, and no kerb to collect water against.
+    let inside_plot = p.x > cc.plot_min.x && p.x < cc.plot_max.x
+                   && p.y > cc.plot_min.y && p.y < cc.plot_max.y;
+    if (!inside_plot && !city_ground_paved(cc, ci, p)) {
+        g.alb = vec3<f32>(CITY_REL_LOT * stain
+                          * (1.0 - CITY_WET_DARKEN * CITY_WET_WALK));
+        g.wet = CITY_WET_WALK;
+        g.puddle = 0.0;
+        g.walk = 0.0;
+    }
     return g;
 }
 
@@ -3586,8 +3617,9 @@ fn city_lamp_scale(p: vec2<f32>) -> f32 {
 // resolved and each lands on the albedo under it; far, the whole product is
 // its measured area mean, split street / plot interior as the old ground
 // was, so a district's floor keeps its brightness as it dissolves.
-fn city_ground_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
-    let g = city_ground(p.xy, cc, fp);
+fn city_ground_radiance(p: vec3<f32>, ci: vec2<i32>, cc: CityCell,
+                        dir: vec3<f32>, fp: f32) -> vec3<f32> {
+    let g = city_ground(p.xy, ci, cc, fp);
     let moon = u.sun_dir.xyz;
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(p.xy, 3.0));
     let s = city_lamp_scale(p.xy);
@@ -3601,6 +3633,7 @@ fn city_ground_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
     let lamp = mix(near, far, smoothstep(CITY_STREET_LOD_START,
                                          CITY_STREET_LOD_FULL, fp));
     return lamp + city_storefront_spill(p.xy, cc) * g.alb
+         + city_lamp_glint(p, dir, g)
          + CITY_ASPHALT_ALBEDO * g.alb
            * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
@@ -3668,29 +3701,116 @@ fn city_street_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return city_street_light_g(p, n, 2.0);
 }
 
+// The lamps in the wet ground: each head a point source, reflected by the
+// puddle lobe and the film lobe analytically (GGX), because a lamp is far
+// too small for one reflected ray a frame to find — and it is the brightest
+// thing a wet street reflects. At grazing incidence the GGX lobe stretches
+// toward the eye, which is the long streak under every lamp in the
+// photographs; the traced ray carries everything else (neon, windows, sky)
+// and never sees a lamp head (it skips the prop hooks, see fs_main), so
+// nothing is counted twice. Irradiance in the pools' units: the pool is asphalt's radiance,
+// rho E / pi, so E / pi is the pool over CITY_LAMP_SPEC_RHO.
+const CITY_LAMP_SPEC_RHO: f32 = 0.30;
+const CITY_LAMP_SPEC_MAX: f32 = 40.0;
+fn city_ggx_d(nh: f32, a2: f32) -> f32 {
+    let k = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * k * k);
+}
+fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
+    let film = CITY_FILM_GLOSS * g.wet * (1.0 - g.puddle);
+    if (film + g.puddle <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let cellm = u.ocean_params.x;
+    let s = city_lamp_scale(p.xy);
+    let h2 = CITY_LAMP_HEAD_Z * CITY_LAMP_HEAD_Z;
+    let v = -dir;
+    let nv = max(v.z, 1e-3);
+    let ap = CITY_REFL_ALPHA_PUDDLE * CITY_REFL_ALPHA_PUDDLE;
+    let ad = CITY_REFL_ALPHA_DAMP * CITY_REFL_ALPHA_DAMP;
+    let g1v_p = 2.0 * nv / (nv + sqrt(ap + (1.0 - ap) * nv * nv));
+    let g1v_d = 2.0 * nv / (nv + sqrt(ad + (1.0 - ad) * nv * nv));
+    var e = 0.0;
+    for (var dirn: i32 = 0; dirn < 2; dirn = dirn + 1) {
+        let along_y = dirn == 0;
+        let c = select(p.y, p.x, along_y);
+        let a = select(p.x, p.y, along_y);
+        let k = i32(round(c / cellm));
+        let amp = select(1.0, 1.6, city_is_avenue(k));
+        let inset = city_lamp_inset(k);
+        let j0 = floor(a / CITY_LAMP_SPACING);
+        for (var sd: i32 = 0; sd < 2; sd = sd + 1) {
+            let hc = f32(k) * cellm
+                   + select(-1.0, 1.0, sd == 1) * (inset - CITY_LAMP_ARM);
+            for (var jj: i32 = 0; jj < 2; jj = jj + 1) {
+                let ha = (j0 + f32(jj)) * CITY_LAMP_SPACING;
+                let head = select(vec3<f32>(ha, hc, CITY_LAMP_HEAD_Z),
+                                  vec3<f32>(hc, ha, CITY_LAMP_HEAD_Z),
+                                  along_y);
+                let lv = head - p;
+                let r2 = max(dot(lv, lv), 0.25);
+                let l = lv * inverseSqrt(r2);
+                let nl = max(l.z, 1e-3);
+                // The pool's own irradiance law (downward lobe x cosine).
+                let e_pool = amp * h2 / r2 * nl * nl;
+                let hv = normalize(v + l);
+                let nh = max(hv.z, 0.0);
+                let fres = CITY_REFL_F0 + (1.0 - CITY_REFL_F0)
+                         * pow(1.0 - clamp(dot(v, hv), 0.0, 1.0), 5.0);
+                let g1l_p = 2.0 * nl / (nl + sqrt(ap + (1.0 - ap) * nl * nl));
+                let g1l_d = 2.0 * nl / (nl + sqrt(ad + (1.0 - ad) * nl * nl));
+                let lobe = g.puddle * city_ggx_d(nh, ap) * g1v_p * g1l_p
+                         + film * city_ggx_d(nh, ad) * g1v_d * g1l_d;
+                e = e + e_pool * fres * lobe / (4.0 * nv * nl);
+            }
+        }
+    }
+    let raw = s * e * (3.14159265 / CITY_LAMP_SPEC_RHO);
+    return CITY_LAMP_COLOR * min(raw, CITY_LAMP_SPEC_MAX);
+}
+
 // --- the reflected ray ----------------------------------------------------------
 
-// What a wet ground point reflects (added to its radiance before fog). One
-// microfacet sample per frame: a puddle's near-mirror lobe with probability
-// equal to the puddle share, a damp film's rough lobe otherwise, weighted by
-// the film's coverage — so the accumulation converges to the mixture, and
-// the rough lobe's samples, stretched at grazing incidence, ARE the long
-// streaks under every light. The sample is traced as a second city_trace,
-// shaded with city_shade (which never reflects: no recursion), fogged along
-// its own path. Past CITY_REFL_LOD it is the environment estimate instead,
-// and costs nothing; a ray that finds no city within CITY_REFL_RANGE sees
-// the night sky.
+// What a wet ground point reflects. One microfacet sample per frame: a
+// puddle's near-mirror lobe with probability equal to the puddle share, a
+// damp film's rough lobe otherwise, weighted by the film's glossy coverage —
+// so the accumulation converges to the mixture, and the rough lobe's
+// samples, stretched at grazing incidence, smear every sign and window into
+// the streaks of a wet street (the lamps have their own analytic term,
+// city_lamp_glint). This returns the sampled direction and its weight; the
+// call site in fs_main follows it with city_trace — without the component
+// prop hooks (see the note there) — and city_shade, fogged along its own
+// path. Past
+// CITY_REFL_LOD the sample is the environment estimate instead, and costs
+// no trace; a ray that finds no city within CITY_REFL_RANGE sees the sky.
 //
 // rnd: three uniforms from this pixel's stratified stream.
-fn city_wet_reflection(h: CityHit, cc: CityCell, dir: vec3<f32>,
-                       pixel_angle: f32, rnd: vec3<f32>) -> vec3<f32> {
+struct CityWetLobe {
+    ok: bool,          // anything to add at all
+    r: vec3<f32>,      // the reflected direction
+    w: f32,            // estimator weight: lobe share x F G (v.m)/((n.v)(n.m))
+    blend: f32,        // 0 traced .. 1 environment estimate
+    alpha: f32,        // the lobe's roughness, which widens the footprint
+    env: vec3<f32>,    // the environment estimate, where blend > 0
+}
+
+fn city_wet_lobe(h: CityHit, cc: CityCell, dir: vec3<f32>,
+                 pixel_angle: f32, rnd: vec3<f32>) -> CityWetLobe {
+    var out: CityWetLobe;
+    out.ok = false;
+    out.r = vec3<f32>(0.0, 0.0, 1.0);
+    out.w = 0.0;
+    out.blend = 1.0;
+    out.alpha = 0.0;
+    out.env = vec3<f32>(0.0);
     let fp = pixel_angle * h.t;
-    let g = city_ground(h.pos.xy, cc, fp);
+    let g = city_ground(h.pos.xy, h.cell, cc, fp);
     let puddle_lobe = rnd.z < g.puddle;
-    let weight = select(g.wet * (1.0 - g.puddle), g.puddle, puddle_lobe)
+    let weight = select(CITY_FILM_GLOSS * g.wet * (1.0 - g.puddle), g.puddle,
+                        puddle_lobe)
                / max(select(1.0 - g.puddle, g.puddle, puddle_lobe), 1e-4);
     if (weight <= 0.0) {
-        return vec3<f32>(0.0);
+        return out;
     }
     let alpha = select(CITY_REFL_ALPHA_DAMP, CITY_REFL_ALPHA_PUDDLE,
                        puddle_lobe);
@@ -3702,11 +3822,11 @@ fn city_wet_reflection(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let m = vec3<f32>(st * cos(phi), st * sin(phi), ct);
     let vm = -dot(dir, m);
     if (vm <= 0.0) {
-        return vec3<f32>(0.0);
+        return out;
     }
     let r = dir + 2.0 * vm * m;
     if (r.z <= 1e-3) {
-        return vec3<f32>(0.0);   // into the ground: masked
+        return out;   // into the ground: masked
     }
     // Estimator: F G2 (v.m) / ((n.v)(n.m)), Smith's G1 for each direction.
     let nv = max(-dir.z, 1e-4);
@@ -3714,26 +3834,56 @@ fn city_wet_reflection(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let g1v = 2.0 * nv / (nv + sqrt(a2 + (1.0 - a2) * nv * nv));
     let g1l = 2.0 * nl / (nl + sqrt(a2 + (1.0 - a2) * nl * nl));
     let fres = CITY_REFL_F0 + (1.0 - CITY_REFL_F0) * pow(1.0 - vm, 5.0);
-    let est = min(fres * g1v * g1l * vm / (nv * ct), 1.0);
+    out.ok = true;
+    out.r = r;
+    out.w = weight * min(fres * g1v * g1l * vm / (nv * ct), 1.0);
+    out.alpha = alpha;
+    out.blend = smoothstep(CITY_REFL_LOD.x, CITY_REFL_LOD.y, fp);
+    if (out.blend > 0.0) {
+        out.env = city_reflect_env(h.pos.xy, r);
+    }
+    return out;
+}
 
-    let blend = smoothstep(CITY_REFL_LOD.x, CITY_REFL_LOD.y, fp);
-    var l_tr = vec3<f32>(0.0);
-    if (blend < 1.0) {
-        let o_r = vec3<f32>(h.pos.xy, h.pos.z + 0.02);
-        let rh = city_trace(o_r, r, CITY_REFL_RANGE);
-        if (rh.hit) {
-            let fp_r = pixel_angle * (h.t + rh.t) + 0.5 * alpha * rh.t;
-            l_tr = city_fog(city_shade(rh, r, fp_r), o_r, r, rh.t, rh.pos);
-        } else {
-            l_tr = night_sky_radiance(r, u.sun_dir.xyz);
+// A reflected ray that leaves the city sees the night sky — and, over a
+// lit city, the cloud deck the city lights from below, which is half of
+// what a wet street shows. A short probe of the optical depth along the ray
+// through the cloud slab, and the base's own radiance in front of the sky
+// it hides: the uplight the march delivers to a base (CITY_UPLIGHT_*,
+// integrated over the skin, 1 - e^-tau), with the glow taken under the
+// point where the probe first becomes opaque. `world_o` is the reflection
+// point in WORLD coordinates: the clouds live there, not in the city frame.
+const CITY_REFL_CLOUD_STEPS: i32 = 10;
+const CITY_REFL_CLOUD_SPAN: f32 = 4000.0;
+fn city_reflect_sky(world_o: vec3<f32>, r: vec3<f32>, jit: f32) -> vec3<f32> {
+    let sky = night_sky_radiance(r, u.sun_dir.xyz);
+    let ta = max((u.bmin.z - world_o.z) / r.z, 0.0);
+    let tb = min((u.bmax.z - world_o.z) / r.z, ta + CITY_REFL_CLOUD_SPAN);
+    if (tb <= ta) {
+        return sky;
+    }
+    let dt = (tb - ta) / f32(CITY_REFL_CLOUD_STEPS);
+    var tau = 0.0;
+    var base = world_o + tb * r;
+    for (var k: i32 = 0; k < CITY_REFL_CLOUD_STEPS; k = k + 1) {
+        let q = world_o + (ta + (f32(k) + jit) * dt) * r;
+        let was_thin = tau < 1.0;
+        tau = tau + sample_sigma(q) * dt;
+        if (was_thin && tau >= 1.0) {
+            base = q;
         }
     }
-    var l_far = vec3<f32>(0.0);
-    if (blend > 0.0) {
-        l_far = city_reflect_env(h.pos.xy, r);
-    }
-    return (weight * est) * mix(l_tr, l_far, blend);
+    let lod = clamp(log2(max(base.z, u.ocean_params.x) / u.ocean_params.x),
+                    0.0, u.ocean_params.w);
+    let g_raw = max(city_glow_sample(city_fold_xy(base.xy), lod)
+                    - CITY_UPLIGHT_GLOW_BIAS, 0.0);
+    let g_up = g_raw / (CITY_UPLIGHT_GLOW_HALF + g_raw);
+    let lit = CITY_UPLIGHT_COLOR * (CITY_UPLIGHT_STRENGTH * g_up)
+            + CITY_REFL_CLOUD_FLOOR;
+    return mix(sky, lit, 1.0 - exp(-tau));
 }
+// What an unlit cloud base still returns at night (moon and skyglow).
+const CITY_REFL_CLOUD_FLOOR: vec3<f32> = vec3<f32>(0.010, 0.011, 0.015);
 
 // The mean of what a reflected ray sees, for pixels too far to trace one:
 // the night sky above the local skyline, and below it the district's own
@@ -3933,15 +4083,17 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
     }
 
     // Ground: the street surface (see THE STREET SURFACE above).
-    return city_ground_radiance(h.pos, cc, fp);
+    return city_ground_radiance(h.pos, h.cell, cc, dir, fp);
 }
 
 // Night ground-fog: extinction toward the hit plus in-scattered city glow.
 // The glow source is the mip under the midpoint of the path, coarsened with
 // distance — the fog over downtown is orange, the fog over the outskirts is
 // barely there.
-fn city_fog(radiance: vec3<f32>, o: vec3<f32>, dir: vec3<f32>,
-            t_hit: f32, hit_pos: vec3<f32>) -> vec3<f32> {
+// The fog's transmittance alone: what a reflection seen THROUGH the
+// primary path's fog is multiplied by (city_fog is affine in radiance).
+fn city_fog_trans(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
+                  hit_pos: vec3<f32>) -> f32 {
     let z0 = max(o.z, 0.0);
     let z1 = max(hit_pos.z, 0.0);
     let mu = dir.z;
@@ -3952,7 +4104,12 @@ fn city_fog(radiance: vec3<f32>, o: vec3<f32>, dir: vec3<f32>,
     } else {
         tau = CITY_FOG_BETA * t_hit * exp(-z0 / CITY_FOG_H);
     }
-    let ftrans = exp(-max(tau, 0.0));
+    return exp(-max(tau, 0.0));
+}
+
+fn city_fog(radiance: vec3<f32>, o: vec3<f32>, dir: vec3<f32>,
+            t_hit: f32, hit_pos: vec3<f32>) -> vec3<f32> {
+    let ftrans = city_fog_trans(o, dir, t_hit, hit_pos);
     let mid = mix(o.xy, hit_pos.xy, 0.6);
     let lod = 5.0 + log2(1.0 + t_hit / 2000.0);
     // Clamped: over the megatower district the raw mip runs to ~3x the
@@ -8448,19 +8605,21 @@ const cc_streetlife_MAST_ALB: f32 = 0.026;
 const cc_streetlife_MAST_EDGE: f32 = 0.105;
 
 // --- parking ----------------------------------------------------------------
-// The parking line is set from the LAMP line, not from the plot edge, and
-// that is a correction the first renders forced. Parking at the kerb is where
-// cars belong on a minor street — the kerb is 3.5 m outboard of the lamps and
-// well inside the pool — but an avenue's plot edge is 16 m out (the avenue
-// gets CITY_AVENUE_EXTRA on both sides while its lamp lines stay 2.5 m off
-// the block edge, so the lamps are effectively a median). Cars parked at an
-// avenue kerb sit 12 m from the nearest lamp, where the pool has fallen by
-// e^-3.5, and rendered as invisible black shapes on black tarmac. So: a lane
-// PARK_LANE outboard of the lamps, pulled in to the kerb whenever the kerb is
-// closer than that. Light and source agree by construction, and the kerb slab
-// gets narrow enough to be a cheap reject as a side effect.
-const cc_streetlife_PARK_LANE: f32 = 3.2;
-const cc_streetlife_PARK_KERB: f32 = 0.25;  // clearance from the plot edge
+// Cars park in the core's parking lane: the first CITY_PARK_W of carriageway
+// outward from the kerb line (city_kerb_rect), on both kerbs of an avenue and
+// on the one kerb city_park_side picks on a 6 m minor carriageway. The lamps
+// stand on the sidewalk just inboard of that kerb, so a parked car is always
+// in the brightest part of its pool.
+//
+// (Until 2026-09-23 the lane was set PARK_LANE outboard of the lamp line and
+// required 1.6 m of clearance to the plot edge. The lamp-inset fix of
+// 2026-08-20 put the lamp line 2.5 m from the plot edge on every street,
+// which left 0.89 m, so no car parked anywhere in the city from then on —
+// every kerb failed park_ok and the renders simply had no cars in them.)
+const cc_streetlife_PARK_OFF: f32 = 1.20;   // kerb line to the car's centre
+// No parking this close to the cross street's building line: the corner
+// radius, the crosswalk and the stop line are all inside it.
+const cc_streetlife_PARK_CLEAR: f32 = 6.0;
 const cc_streetlife_SLOT: f32 = 7.0;
 const cc_streetlife_OCC: f32 = 0.35;
 const cc_streetlife_BIN_CUT: f32 = 0.945;  // draws above this are dumpsters
@@ -8620,11 +8779,13 @@ fn cc_streetlife_nearer(a: CityHit, b: CityHit) -> CityHit {
 
 struct cc_streetlife_Side {
     ax: i32,          // 0 = the kerb runs along x, 1 = along y
+    street: bool,     // this edge carries a street at all (city_edge_street)
     lamp_c: f32,      // lamp line, across coordinate
     park_c: f32,      // parking line, across coordinate
     plot_sign: f32,   // which way the plot lies from the kerb
     a_min: f32, a_max: f32,   // the cell's extent along the kerb
     c_min: f32, c_max: f32,   // the cell's extent across it
+    p_min: f32, p_max: f32,   // where along the kerb a car may stand
     park_ok: bool,
 }
 
@@ -8633,43 +8794,60 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
     let cellm = u.ocean_params.x;
     let cmin = vec2<f32>(ci) * cellm;
     let cmax = cmin + vec2<f32>(cellm);
+    let kr = city_kerb_rect(cc);
     var s: cc_streetlife_Side;
-    var plot_c: f32;
+    var kerb_c: f32;
+    var line: i32;            // the centreline this kerb faces
     if (side == 0) {          // the plot's -x edge; kerb runs along y
         s.ax = 1;
-        s.lamp_c = cmin.x + city_lamp_inset(ci.x);
-        plot_c = cc.plot_min.x;
+        line = ci.x;
+        s.lamp_c = cmin.x + city_lamp_inset(line);
+        kerb_c = kr.x;
         s.plot_sign = 1.0;
     } else if (side == 1) {   // +x edge
         s.ax = 1;
-        s.lamp_c = cmax.x - city_lamp_inset(ci.x + 1);
-        plot_c = cc.plot_max.x;
+        line = ci.x + 1;
+        s.lamp_c = cmax.x - city_lamp_inset(line);
+        kerb_c = kr.z;
         s.plot_sign = -1.0;
     } else if (side == 2) {   // -y edge; kerb runs along x
         s.ax = 0;
-        s.lamp_c = cmin.y + city_lamp_inset(ci.y);
-        plot_c = cc.plot_min.y;
+        line = ci.y;
+        s.lamp_c = cmin.y + city_lamp_inset(line);
+        kerb_c = kr.y;
         s.plot_sign = 1.0;
     } else {                  // +y edge
         s.ax = 0;
-        s.lamp_c = cmax.y - city_lamp_inset(ci.y + 1);
-        plot_c = cc.plot_max.y;
+        line = ci.y + 1;
+        s.lamp_c = cmax.y - city_lamp_inset(line);
+        kerb_c = kr.w;
         s.plot_sign = -1.0;
     }
-    // Outboard of the lamps by PARK_LANE, or hard against the kerb if the
-    // kerb is nearer than that (see the constant's note).
-    let gap = s.plot_sign * (plot_c - s.lamp_c);
-    let off = min(cc_streetlife_PARK_LANE,
-                  gap - cc_streetlife_BB_C - cc_streetlife_PARK_KERB);
-    s.park_c = s.lamp_c + s.plot_sign * off;
+    s.street = city_edge_street(cc, side);
+    s.park_c = kerb_c - s.plot_sign * cc_streetlife_PARK_OFF;
     s.a_min = select(cmin.y, cmin.x, s.ax == 0);
     s.a_max = select(cmax.y, cmax.x, s.ax == 0);
     s.c_min = select(cmin.x, cmin.y, s.ax == 0);
     s.c_max = select(cmax.x, cmax.y, s.ax == 0);
+    // Along the kerb, clear of the two cross streets' corners.
+    let cm = u.ocean_params.x;
+    let k0 = i32(round(s.a_min / cm));
+    let k1 = i32(round(s.a_max / cm));
+    s.p_min = s.a_min + CITY_STREET_HALF
+            + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(k0))
+            + cc_streetlife_PARK_CLEAR;
+    s.p_max = s.a_max - CITY_STREET_HALF
+            - select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(k1))
+            - cc_streetlife_PARK_CLEAR;
+    // The kerb this parking lane runs along sits on the plot's side of the
+    // centreline: + for a -x/-y edge, - for the others. A minor street parks
+    // on one side only.
+    let side_ok = city_is_avenue(line)
+               || city_park_side(line) == s.plot_sign;
     // A merged superblock's plot edge can sit in a sibling's column; that
     // kerb keeps its lamps (they are on the cell's own lattice) and loses its
     // parking to whichever member owns the ground.
-    s.park_ok = off > 1.6
+    s.park_ok = s.street && side_ok
              && s.park_c > s.c_min + cc_streetlife_BB_C
              && s.park_c < s.c_max - cc_streetlife_BB_C;
     return s;
@@ -8773,8 +8951,8 @@ fn cc_streetlife_prop(ci: vec2<i32>, cc: CityCell, s: cc_streetlife_Side,
     // cell boundary rather than restarting inside every block.
     let along = (f32(j) + 0.5) * cc_streetlife_SLOT
               + (r.y - 0.5) * 2.0 * cc_streetlife_ALONG_JIT;
-    if (along - cc_streetlife_BB_A < s.a_min
-        || along + cc_streetlife_BB_A > s.a_max) {
+    if (along - cc_streetlife_BB_A < s.p_min
+        || along + cc_streetlife_BB_A > s.p_max) {
         return cc_streetlife_no_prop();
     }
     var across = s.park_c + (r.z - 0.5) * 2.0 * cc_streetlife_LAT_JIT;
@@ -9233,6 +9411,10 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     out.tb = 0.0;
 
     let s = cc_streetlife_side(ci, cc, side);
+    // An edge without a street has no lamps and no kerb to park at.
+    if (!s.street) {
+        return out;
+    }
     // One slab over the whole kerb: lamp line to parking line, ground to the
     // top of a mast, clipped to the cell's own column. This is the test the
     // wide scene pays, and the only one most cells ever reach.
@@ -9368,6 +9550,103 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// The sidewalk slab
+// ---------------------------------------------------------------------------
+//
+// The raised sidewalk around a plot that has one (city_has_walk): the prism
+// over the core's kerb rectangle, CITY_KERB_H tall, its corners rounded
+// exactly as city_kerb_sd rounds them. Its TOP is ground, returned as kind
+// 0, so the core shades it — and reflects off it — with the same function
+// that shades the z = 0 plane beyond this hook's reach; the step itself is
+// sub-pixel by then, and the two cannot disagree about anything but it.
+// Only the kerb FACE is this component's (kind 110).
+//
+// The prism is convex, so its entry is the box's entry — unless that entry
+// lands in a corner square the rounding cut away. Then the only way into the
+// prism is through that corner's capped cylinder: inside the box, leaving
+// the cut-away sliver means crossing its arc or leaving the box. One slab
+// test, and one cylinder for the rays that clip a corner.
+
+const cc_streetlife_SLAB_FP: f32 = 1.2;   // past this the step is 0.1 px
+
+fn cc_streetlife_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
+        -> CityHit {
+    let miss = cc_streetlife_miss(ci);
+    if (!city_has_walk(cc)) {
+        return miss;
+    }
+    let kr = city_kerb_rect(cc);
+    let bmin = vec3<f32>(kr.xy, 0.0);
+    let bmax = vec3<f32>(kr.zw, CITY_KERB_H);
+    let hb = city_box_hit(o, inv_dir, bmin, bmax);
+    if (hb.x > hb.y || hb.y <= t0 || hb.x > t1 || hb.x < 0.0) {
+        return miss;
+    }
+    var t = hb.x;
+    let pe = o + t * dir;
+    var n = city_box_normal(pe, bmin, bmax);
+    if (city_kerb_sd(pe.xy, cc, kr) > 1e-3) {
+        // A cut-away corner. Which one, and its circle.
+        let c = 0.5 * (kr.xy + kr.zw);
+        let hs = 0.5 * (kr.zw - kr.xy);
+        let r = min(CITY_KERB_R, min(hs.x, hs.y));
+        let sg = sign(pe.xy - c);
+        let cc0 = c + sg * (hs - vec2<f32>(r));
+        let oc = o.xy - cc0;
+        let a = dot(dir.xy, dir.xy);
+        let b = dot(oc, dir.xy);
+        let disc = b * b - a * (dot(oc, oc) - r * r);
+        if (disc < 0.0 || a < 1e-12) {
+            return miss;
+        }
+        let sq = sqrt(disc);
+        let tc0 = (-b - sq) / a;
+        let tc1 = (-b + sq) / a;
+        // z slab of the prism, [0, CITY_KERB_H].
+        let tz0 = (0.0 - o.z) * inv_dir.z;
+        let tz1 = (CITY_KERB_H - o.z) * inv_dir.z;
+        let tzn = min(tz0, tz1);
+        let tzf = max(tz0, tz1);
+        let tin = max(tc0, tzn);
+        if (tin > min(tc1, tzf) || tin < 0.0) {
+            return miss;
+        }
+        t = tin;
+        let pc = o + t * dir;
+        n = select(vec3<f32>(normalize(pc.xy - cc0), 0.0),
+                   vec3<f32>(0.0, 0.0, 1.0), tin == tzn);
+    }
+    if (t < t0 - 1e-4 || t > t1) {
+        return miss;
+    }
+    let pos = o + t * dir;
+    // The top is ground; the side is the kerb face.
+    let kind = select(110, 0, n.z > 0.5);
+    return CityHit(true, t, pos, n, kind, ci);
+}
+
+// The kerb face: granite, lit by the lamps across the road it faces, with
+// the arris along its top catching them — the bright line along every kerb
+// in the wet-street photographs.
+fn cc_streetlife_kerb_shade(h: CityHit, dir: vec3<f32>, fp: f32)
+        -> vec3<f32> {
+    let light = city_street_light(h.pos, h.normal);
+    let fill = cc_streetlife_fill(h.pos);
+    let wet = 1.0 - CITY_WET_DARKEN * CITY_WET_WALK;
+    let arris = city_band(h.pos.z, CITY_KERB_H - 0.022, 0.022, fp);
+    // A wet arris reflects the lamp it faces: tight, bright, and only where
+    // the eye sits on the mirror side of it.
+    let head = cc_streetlife_nearest_lamp(h.pos.xy);
+    let l = normalize(head - h.pos);
+    let rf = reflect(dir, normalize(h.normal + vec3<f32>(0.0, 0.0, 1.0)));
+    let glint = pow(max(dot(rf, l), 0.0), 40.0);
+    return light * (CITY_REL_KERB * wet * (1.0 + 1.5 * arris)
+                    + 0.9 * arris * glint)
+         + CITY_ASPHALT_ALBEDO * CITY_REL_KERB * wet * fill;
+}
+
 fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                              t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
         -> CityHit {
@@ -9420,6 +9699,14 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     }
     var res = cc_streetlife_miss(ci);
     var t_end = t1;
+    // The sidewalk first: it is the nearest thing to the ground on most of
+    // these rays, and whatever it stops shortens every test after it.
+    if (fp < cc_streetlife_SLAB_FP && min(za, zb) < CITY_KERB_H) {
+        res = cc_streetlife_slab(o, dir, inv_dir, t0, t1, ci, cc);
+        if (res.hit) {
+            t_end = res.t;
+        }
+    }
     var cand: cc_streetlife_Kerb;
     var have = false;
     var cand_t = 1e30;
@@ -9960,6 +10247,9 @@ fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 
 fn cc_streetlife_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
+    if (h.kind == 110) {
+        return cc_streetlife_kerb_shade(h, dir, fp);
+    }
     if (h.kind <= 101) {
         return cc_streetlife_pole_shade(h, dir, fp);
     }
@@ -11324,23 +11614,65 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         // city input that must STAY world is the uplight probe's cloud
         // sampling (see the city_glow_sample call in the march loop).
         let city_o = city_camera_origin();
-        let chit = city_trace(city_o, dir, CITY_TRACE_RANGE);
-        if (chit.hit) {
-            t_city = chit.t;
-            var surf = city_shade(chit, dir, pixel_angle * chit.t);
-            // A wet street reflects (THE STREET SURFACE: the second trace).
-            if (chit.kind == 0) {
+        // The view ray and — off wet ground — its reflection, through ONE
+        // city_trace and ONE city_shade in a loop whose second pass is data-
+        // dependent. Written as a second call, the reflection inlined a
+        // second copy of the whole city (every component's prop and shade
+        // hook) and cost 20-36% at the low tier on views that never trace a
+        // reflection at all (aerial, base, horizon; measured 2026-09-23) —
+        // the register-pressure lesson components/SPEC.md records for
+        // props, again. The reflection adds to the pixel through the view
+        // path's fog: city_fog is affine, so it enters times that path's
+        // transmittance.
+        // The view ray and — off wet ground — its reflection. The reflected
+        // ray is traced WITHOUT the component prop hooks (props = false):
+        // the second inlined copy of every component's cell_props code is
+        // what a reflection costs where it is never traced, and it was 20-36%
+        // at the low tier on the aerial, base and horizon views (measured
+        // 2026-09-23; rolling both rays through one call site in a loop cost
+        // the same, from the loop nest alone). Without them a reflection
+        // costs nothing where it is not taken. What the puddles lose is the
+        // parked cars, the poles and the skyway; the lamps they would have
+        // shown are city_lamp_glint's, analytically.
+        let h = city_trace(city_o, dir, CITY_TRACE_RANGE, true);
+        if (h.hit) {
+            t_city = h.t;
+            city_rgb = city_fog(city_shade(h, dir, pixel_angle * h.t),
+                                city_o, dir, h.t, h.pos);
+            if (h.kind == 0) {
                 let rnd = vec3<f32>(
                     strat2(frame_index, strat_pixel, STRAT_STREAM_CITY_REFLECT,
                            vec2<f32>(STRAT_ALPHA_1, STRAT_ALPHA_2)),
                     strat1(frame_index, strat_pixel, STRAT_STREAM_CITY_REFLECT,
                            STRAT_ALPHA_3));
-                surf = surf + city_wet_reflection(
-                    chit, city_cell(chit.cell), dir, pixel_angle, rnd);
+                let lobe = city_wet_lobe(h, city_cell(h.cell), dir,
+                                         pixel_angle, rnd);
+                if (lobe.ok) {
+                    let w = lobe.w * city_fog_trans(city_o, dir, h.t, h.pos);
+                    city_rgb = city_rgb + (w * lobe.blend) * lobe.env;
+                    if (lobe.blend < 1.0) {
+                        let ro = vec3<f32>(h.pos.xy, h.pos.z + 0.02);
+                        let hr = city_trace(ro, lobe.r, CITY_REFL_RANGE, false);
+                        var l = vec3<f32>(0.0);
+                        if (!hr.hit) {
+                            l = city_reflect_sky(
+                                u.cam_origin.xyz + h.t * dir, lobe.r,
+                                fract(f32(frame_index) * 0.618034
+                                      + hash12(vec2<f32>(strat_pixel))));
+                        } else {
+                            let fp_r = pixel_angle * (h.t + hr.t)
+                                     + 0.5 * lobe.alpha * hr.t;
+                            l = city_fog(city_shade(hr, lobe.r, fp_r), ro,
+                                         lobe.r, hr.t, hr.pos);
+                        }
+                        city_rgb = city_rgb + (w * (1.0 - lobe.blend)) * l;
+                    }
+                }
             }
-            city_rgb = city_fog(surf, city_o, dir, chit.t, chit.pos);
+        }
+        if (t_city < 1e30) {
             // Media between the eye and the hit (steam over the manholes).
-            let med = cc_media(city_o, dir, inv_dir, chit.t, pixel_angle,
+            let med = cc_media(city_o, dir, inv_dir, t_city, pixel_angle,
                                strat1(frame_index, strat_pixel,
                                       STRAT_STREAM_CITY_MEDIA,
                                       STRAT_ALPHA_1));
