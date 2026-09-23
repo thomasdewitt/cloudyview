@@ -227,20 +227,27 @@ export async function loadOceanTile(device, baseUrl, onProgress,
       for (let i = 0; i < n * n; i++) heights[i] = halves[i * channels];
     }
     // The city minimap draws the same cascade the shader raises buildings
-    // out of, so it reads the SAME bytes rather than fetching anything of
-    // its own: level 0 is one texel per block, which is the resolution the
-    // districts actually have. Decoded on the way past and the fp16 dropped;
-    // only the two channels city_cell reads are kept.
+    // out of, and the flight collider (collide.js) stands the same
+    // buildings up again on the CPU, so both read the SAME bytes rather
+    // than fetching anything of their own: level 0 is one texel per block,
+    // which is the resolution the districts actually have. Decoded on the
+    // way past and the fp16 dropped; all four channels city_cell reads —
+    // density, rank, and the lot and street words — are kept.
     if (keepCells && level === 0) {
       const halves = new Uint16Array(
         bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
       const density = new Float32Array(n * n);
       const rank = new Float32Array(n * n);
+      const lot = new Float32Array(n * n);
+      const street = new Float32Array(n * n);
       for (let i = 0; i < n * n; i++) {
         density[i] = fromHalf(halves[i * 4]);
         rank[i] = fromHalf(halves[i * 4 + 1]);
+        lot[i] = fromHalf(halves[i * 4 + 2]);
+        street[i] = fromHalf(halves[i * 4 + 3]);
       }
-      cells = { n, density, rank };
+      cells = { n, cellM: meta.dx_m ?? meta.cell_m, density, rank, lot,
+                street };
     }
     device.queue.writeTexture(
       { texture, mipLevel: level },
