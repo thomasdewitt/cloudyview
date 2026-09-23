@@ -21,6 +21,10 @@ export const T = {
 
   /** Nothing in the file has three spatial dimensions. */
   noVariables: (filename) => `${filename} has no 3D variables.`,
+  /** DRAFT (2026-09-23). Says why the grid-spacing question cannot help. */
+  noVariablesAdvice:
+    "Soar renders fields on a regular 3D grid. Unstructured output, such " +
+    "as ICON's native cells, needs regridding onto one first.",
 
   /** Every group had a 3D variable, but none could be described. */
   noGroupReadable: (filename) => `Nothing in ${filename} could be read.`,
@@ -88,6 +92,36 @@ export const T = {
   coordUnitsM: "m",
   coordUnitsKm: "km",
 
+  // --- which grid spacing --------------------------------------------------
+  // DRAFTS (2026-09-23), all of this block. An axis with no coordinate in a
+  // unit of length — none at all, or degrees, or a level index. The only way
+  // past that refusal: the person states the spacing of a REGULAR grid, and
+  // the vertical order goes with a vertical spacing, because a level index
+  // does not say which end is the ground.
+
+  askGridSpacing: "What is the grid spacing?",
+  /** One line per axis that needs it. `found` is what the file offered. */
+  gridSpacingWhy: (axis, dim, found) =>
+    `No ${axis} coordinate in meters for dimension '${dim}' ` +
+    `(found ${found}).`,
+  gridSpacingFoundNothing: "no coordinate variable",
+  gridSpacingRegular:
+    "For a regular grid only: the cells are placed evenly, this far apart.",
+  /** Label of one input. */
+  gridSpacingAxis: (axis, n) => `${axis} spacing, meters (${n} cells)`,
+  gridSpacingZFirst: "The first vertical level is at the",
+  gridSpacingBottom: "bottom",
+  gridSpacingTop: "top",
+  gridSpacingConfirm: "Load with this spacing",
+  /** Shown under the inputs when an answer is not usable. */
+  gridSpacingInvalid: (axis) =>
+    `Enter a positive number of meters for ${axis}.`,
+  gridSpacingPickZFirst: "Choose which end the first level is.",
+  /** The load refuses a spacing for an axis that has meters of its own. */
+  gridSpacingHasMeters: (axis, name) =>
+    `The ${axis} axis already has meters in '${name}'; a grid spacing is ` +
+    "only for an axis without them.",
+
   // --- which dimension is which --------------------------------------------
 
   askAxes: "Which dimension is which?",
@@ -133,6 +167,11 @@ export const T = {
   coordUnitsApplied: (axis, name, declared, answer) =>
     `Read the ${axis} coordinate '${name}' (units '${declared}') as ` +
     `${answer}, as answered.`,
+  /** DRAFT (2026-09-23). The grid-spacing answer, applied. */
+  gridSpacingApplied: (axis, n, d, first) =>
+    `No ${axis} coordinate in meters: placed the ${n} cells ${d} m apart` +
+    (first ? `, first level at the ${first}` : "") + ", as entered. " +
+    "The spacing is uniform; a stretched grid cannot be entered this way.",
   /** Fill-valued voxels read as cloud-free. */
   fillAsZero: (name, count) =>
     `${count} fill-valued voxels of '${name}' read as cloud-free (zero).`,
