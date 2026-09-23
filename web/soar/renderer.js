@@ -517,8 +517,10 @@ export class Renderer {
 
     // The march only ever targets the float intermediate now; everything
     // reaches the canvas through the (dithering) present pass. Awaited, so a
-    // pipeline that fails to build rejects here with its own message.
+    // pipeline that fails to build rejects here with its own message — and
+    // with it the scene's surface pre-pass, which every march needs.
     await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
+    await this._surfacePipeline(this.lighting);
     this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
@@ -584,6 +586,7 @@ export class Renderer {
     s.oceanMaxLod = tile.maxLod;
     try {
       await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
+      await this._surfacePipeline(this.lighting);
     } catch (err) {
       throw new Error(`The ${kind} shader failed to build: ` +
                       `${err?.message || err}`);
@@ -1258,6 +1261,7 @@ export class Renderer {
     this._outputH = outputH;
     const renderSize = renderTargetSize(outputSize, this.renderScale);
     const targets = await this._targetsFor(renderSize[0], renderSize[1]);
+    await this._ensureSurfaceTarget(targets);
     // The march pipeline for the state as it stands after the LAST await:
     // from here to the first submit nothing awaits, so the specialization,
     // the lighting method and the uniforms below all describe one moment.
@@ -1277,13 +1281,14 @@ export class Renderer {
       lighting = this.lighting;
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
       const sp = this._surfacePipeline(lighting);
-      const waiting = isPending(p) ? p : (sp && isPending(sp) ? sp : null);
-      if (!waiting) { rayPipeline = p; surfacePipeline = sp; break; }
+      const pending = [p, sp].filter((q) => q && isPending(q));
+      if (pending.length === 0) { rayPipeline = p; surfacePipeline = sp; break; }
       if (!waitForPipeline) {
-        waiting.catch(() => {});  // recorded; thrown when next requested
+        // Recorded; thrown when next requested.
+        for (const q of pending) q.catch(() => {});
         return false;
       }
-      await waiting;
+      await Promise.all(pending);
     }
     const targetView = typeof target === "function" ? target() : target;
 
@@ -1477,7 +1482,7 @@ export class Renderer {
   _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfacePipeline) {
     let surfaceGroup = this.surfaceDummyGroup;
     if (surfacePipeline) {
-      const surface = this._surfaceTargetFor(targets);
+      const surface = targets.surface;
       const sp = encoder.beginRenderPass({
         colorAttachments: [{
           view: surface.view, loadOp: "clear", storeOp: "store",
@@ -1505,30 +1510,34 @@ export class Renderer {
   }
 
   /**
-   * A target set's surface target and the march's group 1 over it, made on
-   * first need: a set is pooled by size, and the scene can gain a traced
-   * surface after the set was made (setSurface, ocean -> desert). 16 bytes
-   * a pixel.
+   * Give a target set its surface target and the march's group 1 over it,
+   * if the scene traces a surface and the set has none yet: a set is pooled
+   * by size, and the scene can gain a traced surface after the set was made
+   * (setSurface, ocean -> desert). 16 bytes a pixel, allocated under the
+   * same out-of-memory guard as the rest of the set. Awaited by every caller
+   * BEFORE it resolves pipelines and encodes, so _encodeMarch only ever
+   * reads it.
    */
-  _surfaceTargetFor(targets) {
-    if (!targets.surface) {
-      const tex = this.device.createTexture({
-        label: `soar-surface-${targets.w}x${targets.h}`,
-        size: [targets.w, targets.h], format: SURFACE_FORMAT,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT
-             | GPUTextureUsage.TEXTURE_BINDING,
+  async _ensureSurfaceTarget(targets) {
+    if (!this._hasSurfacePass() || targets.surface) return;
+    const label = `soar-surface-${targets.w}x${targets.h}`;
+    targets.surface = await guardAllocation(
+      this.device, `${targets.w}x${targets.h} surface target`,
+      targets.w * targets.h * 16, () => {
+        const tex = this.device.createTexture({
+          label, size: [targets.w, targets.h], format: SURFACE_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+               | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        return {
+          tex,
+          view: tex.createView(),
+          group: this.device.createBindGroup({
+            label, layout: this.surfaceLayout,
+            entries: [{ binding: 0, resource: tex.createView() }],
+          }),
+        };
       });
-      targets.surface = {
-        tex,
-        view: tex.createView(),
-        group: this.device.createBindGroup({
-          label: `soar-surface-${targets.w}x${targets.h}`,
-          layout: this.surfaceLayout,
-          entries: [{ binding: 0, resource: tex.createView() }],
-        }),
-      };
-    }
-    return targets.surface;
   }
 
   /**
@@ -1858,6 +1867,7 @@ export class Renderer {
         }
       }
       this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
+      await this._ensureSurfaceTarget(this._meterTargets);
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.
       const u = packUniforms(this._sceneState(), {
