@@ -95,7 +95,7 @@ def _round_up(v: float, digits: int = 3) -> float:
 # lightness 0, 1/2 and 1.
 ALBEDO_PAVEMENT = (0.19, 0.15, 0.115)
 ALBEDO_SOIL = (0.33, 0.22, 0.13)
-ALBEDO_WASH = (0.38, 0.32, 0.25)
+ALBEDO_WASH = (0.34, 0.29, 0.23)
 
 
 def albedo_of(lightness: np.ndarray) -> np.ndarray:
@@ -195,9 +195,11 @@ def carve(discharge: np.ndarray, dx: float):
         if m.any():
             out = np.maximum(out, ndimage.grey_dilation(
                 m, footprint=_disc(0.5 * wb / dx), mode="wrap"))
-    # Banks are steep, not vertical: a 0.6-cell blur is the angle of repose
-    # at this texel size.
-    return ndimage.gaussian_filter(out, 0.6, mode="wrap"), ch
+    # Banks are steep, not vertical — and not soft: a 0.4-cell blur is the
+    # least that keeps the 2 m bilinear surface from stair-stepping, and a
+    # wider one (0.6 was tried) turned the cut banks into gentle swales that
+    # read as painted lines rather than channels.
+    return ndimage.gaussian_filter(out, 0.4, mode="wrap"), ch
 
 
 def generate(n: int, seed: int = SEED, verbose: bool = True):

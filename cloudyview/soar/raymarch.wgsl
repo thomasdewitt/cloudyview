@@ -10701,7 +10701,7 @@ const DESERT_FLORA_SLAB_H: f32 = 13.0;
 // one segment and the mips' mean lightness is still its mean albedo.
 const DESERT_ALBEDO_PAVEMENT: vec3<f32> = vec3<f32>(0.19, 0.15, 0.115);
 const DESERT_ALBEDO_SOIL: vec3<f32> = vec3<f32>(0.33, 0.22, 0.13);
-const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.38, 0.32, 0.25);
+const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.34, 0.29, 0.23);
 
 // The far field's colour kept honest. Lightness mips are exact box means,
 // but albedo bends at the soil knot, so a footprint mixing wash sand with
@@ -10712,17 +10712,17 @@ const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.38, 0.32, 0.25);
 // at the footprint's level so no seam appears where detail drops out.
 const DESERT_ALBEDO_CORRECTION = array<vec3<f32>, 12>(
     vec3<f32>(1.0000, 1.0000, 1.0000),
-    vec3<f32>(0.9995, 1.0002, 1.0013),
-    vec3<f32>(0.9984, 1.0007, 1.0039),
-    vec3<f32>(0.9961, 1.0018, 1.0099),
-    vec3<f32>(0.9886, 1.0054, 1.0295),
-    vec3<f32>(0.9774, 1.0109, 1.0609),
-    vec3<f32>(0.9710, 1.0141, 1.0801),
-    vec3<f32>(0.9691, 1.0151, 1.0862),
-    vec3<f32>(0.9684, 1.0155, 1.0884),
-    vec3<f32>(0.9683, 1.0155, 1.0885),
-    vec3<f32>(0.9683, 1.0155, 1.0885),
-    vec3<f32>(0.9682, 1.0155, 1.0885)
+    vec3<f32>(0.9991, 1.0000, 1.0012),
+    vec3<f32>(0.9975, 1.0000, 1.0035),
+    vec3<f32>(0.9940, 1.0000, 1.0085),
+    vec3<f32>(0.9830, 1.0000, 1.0247),
+    vec3<f32>(0.9673, 1.0000, 1.0496),
+    vec3<f32>(0.9591, 1.0000, 1.0633),
+    vec3<f32>(0.9563, 1.0000, 1.0681),
+    vec3<f32>(0.9555, 1.0000, 1.0695),
+    vec3<f32>(0.9555, 1.0000, 1.0696),
+    vec3<f32>(0.9555, 1.0000, 1.0696),
+    vec3<f32>(0.9555, 1.0000, 1.0696)
 );
 
 fn desert_albedo_correction(fp: f32) -> vec3<f32> {
@@ -10759,6 +10759,8 @@ const DESERT_BEAM_CALIBRATION: f32 = 0.15;
 // point also sees the sunlit sides of the clouds that shade it, and the
 // fitted shadow ratio needs it.
 const DESERT_SKY_DIFFUSE_FRACTION: f32 = 0.35;
+// How far the diffuse light's colour is pulled from the sky dome's to white.
+const DESERT_SHADOW_NEUTRAL: f32 = 0.6;
 // Skylight does not switch off with the solar cosine.
 const DESERT_SKY_MU_FLOOR: f32 = 0.12;
 
@@ -10806,7 +10808,7 @@ fn desert_tile(xy: vec2<f32>, lod: f32) -> vec2<f32> {
 // its own texel and its parent's. Zero-mean by construction, so the far
 // field is untouched by it; self-affine in amplitude (5^-H per octave), and
 // faded in by footprint — degrees, not metres.
-const DESERT_OCTAVES: i32 = 3;
+const DESERT_OCTAVES: i32 = 2;
 const DESERT_OCTAVE_LOD: f32 = 2.321928;     // log2(5)
 const DESERT_OCTAVE_GAIN: f32 = 0.324131;    // 5^-0.7: height, H = 0.7
 const DESERT_OCTAVE_LIGHT_GAIN: f32 = 0.1;   // lightness patchiness per octave
@@ -10847,7 +10849,10 @@ fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
         }
         q = desert_octave_step(q);
         let band = desert_tile(q, 0.0) - desert_tile(q, DESERT_OCTAVE_LOD);
-        s = s + fade * vec2<f32>(amp * band.x, lamp * band.y);
+        // Lightness from the first octave only: deeper copies of the wash
+        // pattern read as worm-like streaks in the silt, not as ground.
+        s = s + fade * vec2<f32>(amp * band.x,
+                                 select(0.0, lamp * band.y, k == 0));
     }
     return vec2<f32>(u.ocean.x + s.x, s.y);
 }
@@ -10861,7 +10866,7 @@ fn desert_height(xy: vec2<f32>) -> f32 {
 // differences over half a footprint (never finer than the finest octave's
 // half texel, where the bilinear surface is flat anyway).
 fn desert_normal_fp(xy: vec2<f32>, fp: f32) -> vec3<f32> {
-    let finest = u.ocean_params.x * 0.008;     // octave 3's texel
+    let finest = u.ocean_params.x * 0.04;      // octave 2's texel
     let e = max(0.5 * fp, 0.5 * finest);
     let hx = desert_surface(xy + vec2<f32>(e, 0.0), fp).x
            - desert_surface(xy - vec2<f32>(e, 0.0), fp).x;
@@ -10883,21 +10888,21 @@ fn desert_height_range() -> vec2<f32> {
                      u.ocean.x + u.ocean.z + margin);
 }
 
-// Sum of the octave gains, g + g^2 + g^3: how far the octaves together can
+// Sum of the octave gains, g + g^2: how far the octaves together can
 // move the surface, in units of one octave's band excursion.
-const DESERT_OCTAVE_MARGIN: f32 = 0.463;
+const DESERT_OCTAVE_MARGIN: f32 = 0.429;
 
 // Steepest slope at each mip level of the shipped tile, with a quarter
 // again for safety (tools/export_desert_tile.py writes the measured table
 // into meta.json as slope_max; tests/test_desert_tile.py holds this to it).
 // This is what lets the trace step by clearance without tunnelling.
 const DESERT_SLOPE_MAX = array<f32, 12>(
-    1.012, 0.673, 0.392, 0.170, 0.100, 0.064,
-    0.050, 0.040, 0.029, 0.021, 0.002, 0.0
+    1.627, 0.804, 0.412, 0.180, 0.087, 0.063,
+    0.049, 0.040, 0.029, 0.021, 0.002, 0.0
 );
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
-const DESERT_OCTAVE_SLOPE_MAX: f32 = 0.915;  // meta band_slope_max
+const DESERT_OCTAVE_SLOPE_MAX: f32 = 1.495;  // meta band_slope_max
 const DESERT_OCTAVE_SLOPE_GROWTH: f32 = 1.620657; // 5^0.3
 
 fn desert_slope_bound(fp: f32) -> f32 {
@@ -10977,8 +10982,8 @@ fn desert_octave_margin(fp: f32) -> f32 {
 // test_desert_tile.py holds this to it). Mip k plus this is a lid over the
 // ground that is as smooth as mip k — see desert_terrain_trace.
 const DESERT_ENVELOPE_M = array<f32, 12>(
-    0.0, 0.800, 1.246, 1.266, 1.176, 1.604,
-    2.388, 3.619, 6.361, 9.421, 17.194, 17.704
+    0.0, 1.283, 1.619, 1.389, 1.276, 1.601,
+    2.406, 3.619, 6.348, 9.413, 17.207, 17.704
 );
 
 // The trace's budget, and its floor: a step is never shorter than this many
@@ -11163,7 +11168,10 @@ fn desert_wash_near(xy: vec2<f32>) -> f32 {
 // intersected in closed form, with a faceted normal for the broken faces.
 //
 // Two levels of hashed cells, gravel and pebbles, at most one stone per
-// cell, each stone kept inside its own cell so a cell can be tested alone.
+// cell, centred anywhere in it — so a stone may overhang into the cells
+// around it, and every cell the ray crosses is tested with its eight
+// neighbours. (Keeping each stone inside its own cell, the first version,
+// left it so little room to move that the gravel sat on a visible grid.)
 // Cell sizes divide the tile (powers of two), and a cell index is folded at
 // the tile with a mask before it seeds anything, so the stones are a pure
 // function of the desert frame.
@@ -11185,8 +11193,8 @@ const DESERT_STONE_A_LO: f32 = 0.26;
 const DESERT_STONE_A_HI: f32 = 0.46;
 const DESERT_STONE_FLAT: f32 = 0.6;
 // Occupancy of a cell, by material (pavement, soil, wash), per level.
-const DESERT_STONE_P_GRAVEL: vec3<f32> = vec3<f32>(1.0, 0.45, 0.12);
-const DESERT_STONE_P_PEBBLE: vec3<f32> = vec3<f32>(0.6, 0.18, 0.10);
+const DESERT_STONE_P_GRAVEL: vec3<f32> = vec3<f32>(1.0, 0.45, 0.35);
+const DESERT_STONE_P_PEBBLE: vec3<f32> = vec3<f32>(0.6, 0.18, 0.30);
 // Projected area of one occupied cell's stone, as a fraction of the cell:
 // pi E[a^2] E[b/a] / cell^2 with a uniform in [LO, HI], b/a in [0.6, 1].
 const DESERT_STONE_AREA: f32 = 0.3066;
@@ -11203,9 +11211,9 @@ const DESERT_STONE_MAX_CELLS: i32 = 40;
 // varnished one; a wash's stones are fresh and paler).
 const DESERT_STONE_PALETTE = array<vec3<f32>, 5>(
     vec3<f32>(0.060, 0.045, 0.035),
-    vec3<f32>(0.160, 0.155, 0.150),
+    vec3<f32>(0.160, 0.148, 0.128),
     vec3<f32>(0.170, 0.115, 0.085),
-    vec3<f32>(0.420, 0.390, 0.350),
+    vec3<f32>(0.340, 0.310, 0.270),
     vec3<f32>(0.280, 0.210, 0.150)
 );
 const DESERT_STONE_MIX_PAVEMENT = array<f32, 5>(0.45, 0.20, 0.20, 0.05, 0.10);
@@ -11226,12 +11234,14 @@ fn desert_stone_mean_albedo(m: vec3<f32>) -> vec3<f32> {
     return a;
 }
 
-// How far a footprint `fp` resolves level k: 1 at a quarter of its cell,
-// 0 at its cell. Below the stone's own size it is geometry; above, it is
-// part of the surface average.
+// How far a footprint `fp` resolves level k: 0 until a stone spans a few
+// pixels (a pixel at half the cell, where a typical stone is ~1.4 px wide),
+// 1 once it spans ~6. Below that a stone drawn as geometry is a dot that
+// does not grow with nearness — the uniform speckle a blind judge read as
+// texture, not stones — and the surface average says it better.
 fn desert_stone_resolve(k: i32, fp: f32) -> f32 {
     let c = DESERT_STONE_CELL[k];
-    return smoothstep(c, 0.25 * c, fp);
+    return smoothstep(0.5 * c, 0.12 * c, fp);
 }
 
 // The fraction of the ground drawn as stones at footprint `fp`.
@@ -11288,11 +11298,9 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
     let a = c * mix(DESERT_STONE_A_LO, DESERT_STONE_A_HI, r.y);
     let b = a * mix(0.6, 1.0, fract(r.y * 13.7));
     let h = a * DESERT_STONE_FLAT * mix(0.7, 1.2, fract(r.y * 29.1));
-    // Inside the cell whatever the yaw: the half-diagonal of the footprint
-    // is at most a.
-    let room = max(0.5 * c - a, 0.0);
-    let xy = (vec2<f32>(ci) + 0.5) * c
-           + (vec2<f32>(r.z, fract(r.z * 17.9)) * 2.0 - 1.0) * room;
+    // Anywhere in the cell; a < c/2, so the stone reaches at most into the
+    // eight cells around it.
+    let xy = (vec2<f32>(ci) + vec2<f32>(r.z, fract(r.z * 17.9))) * c;
     let yaw = 6.283185 * r.w;
     s.on = true;
     s.axes = vec3<f32>(a, b, h);
@@ -11424,6 +11432,26 @@ fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(x, y, nl.z));
 }
 
+// Test the stone of cell `ci` (level k) against the ray, keeping the
+// nearer hit.
+fn desert_stone_try(best: ptr<function, DesertHit>, k: i32, ci: vec2<i32>,
+                    o: vec3<f32>, dir: vec3<f32>, th: DesertHit,
+                    grad: vec2<f32>, m: vec3<f32>, w: f32) {
+    let s = desert_stone(k, ci, th.pos.z, th.pos.xy, grad, m, w);
+    if (!s.on) {
+        return;
+    }
+    let sh = desert_stone_hit(s, o, dir);
+    if (sh.x > 0.0 && sh.x < (*best).t) {
+        (*best).hit = true;
+        (*best).t = sh.x;
+        (*best).pos = o + sh.x * dir;
+        (*best).normal = desert_stone_normal(s, sh.yzw);
+        (*best).kind = DESERT_KIND_STONE;
+        (*best).mat = vec4<f32>(s.albedo, th.mat.x);
+    }
+}
+
 // The stone layers over the stretch of the ray just before its terrain hit
 // `th`: a 2D walk over each level's cells, nearest stone wins. `n` is the
 // terrain normal at the hit.
@@ -11457,29 +11485,34 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit,
                                            dir.xy >= vec2<f32>(0.0))) * c;
         var tm = t0 + abs(next - p0.xy) * inv;
         let dt = c * inv;
+        // The first cell with its eight neighbours; after that each step
+        // adds only the three cells it newly brings within one cell of the
+        // track (the column or row beyond the new cell).
+        for (var e: i32 = 0; e < 9; e = e + 1) {
+            desert_stone_try(&best, k, ci + vec2<i32>(e % 3 - 1, e / 3 - 1),
+                             o, dir, th, grad, m, w);
+        }
         for (var i: i32 = 0; i < DESERT_STONE_MAX_CELLS; i = i + 1) {
-            let s = desert_stone(k, ci, th.pos.z, th.pos.xy, grad, m, w);
-            if (s.on) {
-                let sh = desert_stone_hit(s, o, dir);
-                if (sh.x > 0.0 && sh.x < best.t) {
-                    best.hit = true;
-                    best.t = sh.x;
-                    best.pos = o + sh.x * dir;
-                    best.normal = desert_stone_normal(s, sh.yzw);
-                    best.kind = DESERT_KIND_STONE;
-                    best.mat = vec4<f32>(s.albedo, th.mat.x);
-                }
-            }
             let t_exit = min(tm.x, tm.y);
             if (t_exit > th.t) {
                 break;
             }
+            var edge: vec2<i32>;
+            var along: vec2<i32>;
             if (tm.x < tm.y) {
                 tm.x = tm.x + dt.x;
                 ci.x = ci.x + step.x;
+                edge = vec2<i32>(ci.x + step.x, ci.y);
+                along = vec2<i32>(0, 1);
             } else {
                 tm.y = tm.y + dt.y;
                 ci.y = ci.y + step.y;
+                edge = vec2<i32>(ci.x, ci.y + step.y);
+                along = vec2<i32>(1, 0);
+            }
+            for (var e: i32 = -1; e <= 1; e = e + 1) {
+                desert_stone_try(&best, k, edge + e * along, o, dir, th, grad,
+                                 m, w);
             }
         }
     }
@@ -11500,11 +11533,10 @@ fn desert_stone_shadow(p: vec3<f32>, sun: vec3<f32>, n: vec3<f32>,
         }
         let c = DESERT_STONE_CELL[k];
         let home = vec2<i32>(floor(p.xy / c));
-        // Toward the sun's azimuth: this cell and the next two along it.
-        let dir2 = vec2<i32>(select(-1, 1, sun.x >= 0.0),
-                             select(-1, 1, sun.y >= 0.0));
-        for (var j: i32 = 0; j < 4; j = j + 1) {
-            let ci = home + vec2<i32>(j & 1, (j >> 1) & 1) * dir2;
+        // This cell and its eight neighbours: every stone that can reach
+        // over the point (a stone overhangs by less than a cell).
+        for (var j: i32 = 0; j < 9; j = j + 1) {
+            let ci = home + vec2<i32>(j % 3 - 1, j / 3 - 1);
             let s = desert_stone(k, ci, p.z, p.xy, grad, m, w);
             if (s.on && desert_stone_hit(s, p + 1e-4 * sun, sun).x > 0.0) {
                 return 0.0;
@@ -11565,11 +11597,11 @@ fn desert_grain(xy: vec2<f32>, fp: f32, fpg: f32, m: vec3<f32>) -> f32 {
 // side steeper than the stoss. A normal perturbation on sand only, faded in
 // once the footprint resolves them.
 const DESERT_RIPPLE_M: f32 = 0.09;
-const DESERT_RIPPLE_SLOPE: f32 = 0.2;
+const DESERT_RIPPLE_SLOPE: f32 = 0.12;
 const DESERT_WIND: vec2<f32> = vec2<f32>(0.8, 0.6);
 
 fn desert_ripple_slope(xy: vec2<f32>, fp: f32, sand: f32) -> vec2<f32> {
-    let fade = sand * smoothstep(0.5 * DESERT_RIPPLE_M, 0.12 * DESERT_RIPPLE_M,
+    let fade = sand * smoothstep(0.3 * DESERT_RIPPLE_M, 0.08 * DESERT_RIPPLE_M,
                                  fp);
     if (fade <= 0.0) {
         return vec2<f32>(0.0);
@@ -11601,7 +11633,11 @@ fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
         let ground = best;
         best = desert_stone_trace(o, dir, ground, pixel_angle);
         if (best.kind == DESERT_KIND_TERRAIN) {
-            let rs = desert_ripple_slope(best.pos.xy, fp,
+            // Ripples fade on the footprint ON THE GROUND: seen obliquely
+            // a 9 cm crest spacing aliases into moiré long before the
+            // isotropic footprint reaches it.
+            let fpg = fp / max(abs(dot(dir, best.normal)), 0.08);
+            let rs = desert_ripple_slope(best.pos.xy, fpg,
                                          desert_material(s.y).z);
             best.normal = normalize(best.normal - vec3<f32>(rs, 0.0));
         }
@@ -11732,8 +11768,14 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     let dome = mix(hor, zen, 0.62);
     let dome_luma = max(dot(dome, LUMA_WEIGHTS), 1e-6);
     let beam_luma = max(dot(beam, LUMA_WEIGHTS), 1e-6);
+    // Most of the way to neutral: a shadowed point is lit as much by the
+    // white sunlit sides of the clouds shading it (the reason the diffuse
+    // fraction is as high as it is) as by blue sky, and the references'
+    // cloud shadows are a darkening that keeps the ground's own colour,
+    // neutral to faintly blue-grey (Kitt Peak ~(161,162,166)) — not a tint.
+    let chroma = mix(dome / dome_luma, vec3<f32>(1.0), DESERT_SHADOW_NEUTRAL);
     let sky_clear = DESERT_SKY_DIFFUSE_FRACTION
-        * max(mu_sun, DESERT_SKY_MU_FLOOR) * beam_luma * (dome / dome_luma);
+        * max(mu_sun, DESERT_SKY_MU_FLOOR) * beam_luma * chroma;
 
     var L: DesertLight;
     L.sun_dir = sun;
@@ -11834,8 +11876,8 @@ fn desert_brf(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // the far bajada at low sun is as dark as its resolved form averages to
 // rather than flat and bright.
 const DESERT_SLOPE_VARIANCE_REMOVED = array<f32, 12>(
-    0.000000, 0.004998, 0.008783, 0.010107, 0.010435, 0.010565,
-    0.010652, 0.010723, 0.010783, 0.010829, 0.010850, 0.010850
+    0.000000, 0.007491, 0.011578, 0.012876, 0.013192, 0.013319,
+    0.013406, 0.013477, 0.013537, 0.013583, 0.013604, 0.013604
 );
 
 fn desert_unresolved_shadow(n: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
@@ -11879,7 +11921,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
         * desert_stone_shadow(h.pos, L.sun_dir, n, light, fp)
-        * desert_flora_shadow(h.pos, L.sun_dir, fp) * (1.0 - far.shadow);
+        * desert_flora_shadow(h.pos, L.sun_dir, fp);
     let mu = max(dot(n, L.sun_dir), 0.0);
     let sky_view = 0.5 * (1.0 + n.z);
     return albedo * (1.0 / DESERT_PI)
@@ -11921,14 +11963,31 @@ fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
     return d * g * fresnel / (4.0 * n_dot_v) * edge * edge;
 }
 
-// Aerial perspective toward the horizon sky, the water's own (row 19.y),
-// so the ground meets the sky without a seam.
-fn desert_haze(rgb: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32)
-        -> vec3<f32> {
-    let haze_tau = u.ocean_realism_b.y * t_hit;
-    if (haze_tau <= 0.0) {
+// Aerial perspective: the SAME air the clouds are seen through — fs_main's
+// closed-form exponential atmosphere (row 16.w extinction, row 17.w scale
+// height, row 15.w strength) toward the same horizon colour — so a cloud and
+// the ground under it at one distance are one haze. The water's own, weaker
+// extinction (row 19.y, 0.34 of this) was tuned for a surface that is dark
+// already; on bright land it left a crisp far field no photograph shows.
+fn desert_haze(rgb: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32,
+               z_hit: f32) -> vec3<f32> {
+    let strength = u.sky_horizon.w;
+    if (strength <= 0.0) {
         return rgb;
     }
+    let beta0 = u.sky_bloom.w;
+    let hs = u.sky_disc.w;
+    let z0 = max(u.cam_origin.z, 0.0);
+    let z1 = max(z_hit, 0.0);
+    var tau_air: f32;
+    if (hs <= 0.0) {
+        tau_air = beta0 * t_hit;
+    } else if (abs(dir.z) > 1e-6) {
+        tau_air = beta0 * (hs / dir.z) * (exp(-z0 / hs) - exp(-z1 / hs));
+    } else {
+        tau_air = beta0 * t_hit * exp(-z0 / hs);
+    }
+    let air_t = exp(-strength * tau_air);
     let h_len = length(dir.xy);
     var hdir = dir.xy;
     if (h_len > 1e-8) {
@@ -11937,7 +11996,7 @@ fn desert_haze(rgb: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32)
     let haze_col = sky_radiance(vec3<f32>(hdir, 0.0), sun, u.sky_horizon.xyz,
                                 u.sky_bloom.xyz, vec3<f32>(0.0),
                                 u.cloud_sun.w);
-    return mix(rgb, haze_col, 1.0 - exp(-haze_tau));
+    return rgb * air_t + (1.0 - air_t) * haze_col;
 }
 
 // Radiance of one desert hit, hazed. `o` is the ray origin and `h` the hit,
@@ -11962,7 +12021,7 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
         rgb = desert_ground_radiance(h, dir, fp, L, far) * (1.0 - far.cover)
               + far.cover * desert_flora_far_shade(far, dir, L);
     }
-    return desert_haze(rgb, dir, sun, h.t);
+    return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
 
 // THE ENTRY: the whole desert for one view ray, (hazed radiance, t) — t is
@@ -11999,7 +12058,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
 // surface bounce and the upwelling light a facet sees: the mean of the
 // tile's level-0 albedos (tests/test_desert_tile.py). The ocean's bounce
 // constant was tuned over water, so the desert's scales it by the ratio.
-const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.295, 0.211, 0.139);
+const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.291, 0.207, 0.136);
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 
 // === END DESERT GROUND ===

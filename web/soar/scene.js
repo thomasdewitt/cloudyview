@@ -140,7 +140,7 @@ export function desertReliefM(meta) {
  * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
  * shader samples, so the floor is under the drawn ground by construction.
  */
-export const DESERT_OCTAVE_MARGIN = 0.463;
+export const DESERT_OCTAVE_MARGIN = 0.429;
 
 export function desertFloorAt(tile, groundZ = 0.0) {
   const { heights, meta } = tile;
