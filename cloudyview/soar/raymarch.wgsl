@@ -3486,6 +3486,15 @@ fn city_flood_ground(cc: CityCell, p: vec2<f32>, fp: f32) -> vec3<f32> {
     return mix(near, flux / area, blend);
 }
 
+// One lattice corner of the ground mottle's octave o: a uniform draw at the
+// corner, wrapped at the tile's `per` lattice cells.
+fn city_mottle_corner(j: vec2<i32>, per: i32, o: i32) -> f32 {
+    let jw = ((j % per) + per) % per;
+    return city_u01(pcg2d(vec2<u32>(
+        bitcast<u32>(jw.x) ^ 0x2c1b3c6du,
+        bitcast<u32>(jw.y) ^ u32(o) * 0x297a2d39u)).x);
+}
+
 // Patchy value noise over lot ground, mean one: scrub clumps at 14.4 m and
 // grit at 3.6 m. Both lattices divide the tile (92160 m = 6400 x 14.4 =
 // 25600 x 3.6), and the corners wrap at it,
@@ -3503,15 +3512,11 @@ fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
             let i = vec2<i32>(floor(q));
             let f = q - floor(q);
             let w = f * f * (3.0 - 2.0 * f);
-            var c: array<f32, 4>;
-            for (var k: i32 = 0; k < 4; k = k + 1) {
-                let j = (i + vec2<i32>(k & 1, k >> 1)) % per;
-                let jw = (j + per) % per;
-                c[k] = city_u01(pcg2d(vec2<u32>(
-                    bitcast<u32>(jw.x) ^ 0x2c1b3c6du,
-                    bitcast<u32>(jw.y) ^ u32(o) * 0x297a2d39u)).x);
-            }
-            let v = mix(mix(c[0], c[1], w.x), mix(c[2], c[3], w.x), w.y);
+            let c00 = city_mottle_corner(i, per, o);
+            let c10 = city_mottle_corner(i + vec2<i32>(1, 0), per, o);
+            let c01 = city_mottle_corner(i + vec2<i32>(0, 1), per, o);
+            let c11 = city_mottle_corner(i + vec2<i32>(1, 1), per, o);
+            let v = mix(mix(c00, c10, w.x), mix(c01, c11, w.x), w.y);
             m = m * (1.0 + amp * (2.0 * v - 1.0));
         }
     }
