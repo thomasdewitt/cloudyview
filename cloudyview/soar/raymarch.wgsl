@@ -117,8 +117,17 @@ struct Uniforms {
     // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
     nest_bmin: vec4<f32>,
     nest_bmax: vec4<f32>,
-    // Row 23: the baked sun-tau cache (2026-08-19 prototype, behind a
-    // toggle while its worth is decided from A/B stills and benches).
+    // Row 23: the lighting method, and the bake's slice index.
+    //
+    // x and z are NOT read by fs_main any more (2026-09-23): each is a
+    // compile-time specialization (LIGHT_CACHE, SKY_PROBE — see their
+    // declarations), because a run-time branch here paid for its untaken
+    // side on every sample. The hosts still pack both, from the same flags
+    // that pick the specialization, because the row is part of the
+    // accumulation's scene key: a bake completing or a tier switching
+    // methods is a scene change (and the browser restarts a parked view's
+    // average on it outright — renderer.js drawFrame).
+    //
     // x = read tau_sun for CLOUD samples from the light_tau texture instead
     //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
     //     shadow marches and the sky probe stay live either way. The cached
@@ -188,6 +197,28 @@ const NESTED: bool = false;
 // in Python. The browser always leaves this on: it is presenting to a canvas,
 // and this is the only place the encode may happen.
 const TONE_MAP: bool = true;
+// The lighting method (row 23's x and z as compile-time constants; the host
+// packs the row from the same flags). LIGHT_CACHE reads the baked sun-tau
+// cache for cloud samples instead of marching to the sun; SKY_PROBE runs
+// the vertical sky-visibility march. Specialized rather than branched on
+// because the untaken side of a branch still costs registers on every
+// sample: compiling out the method a tier does not use bought 3-14% at Low
+// and Minimal (2026-09-23). The specialization is semantically exact; the
+// A/B against the run-time branches was bit-identical in 17 of 20
+// configurations, and in the other 3 one channel of a single frame's sample
+// differed by one float16 ulp, from the driver fusing multiply-adds
+// differently once the branches were gone (soar_shader_ab.py's docstring).
+// The declared values are the host defaults — the live march with the
+// probe — so an unspecialized compile is Max's shader.
+//
+// Ice mode (row 23.w) is deliberately NOT one of these. Compiling it out
+// would buy another 3-5%, but it is the one switch whose removal changes
+// the arithmetic: with its branch gone the driver fuses the cloud source
+// terms' multiply-adds (FMA) where the branch used to stand between them,
+// which moves ~1e-5 of all channels by one float16 ulp. Measured, and left
+// for a deliberate call rather than taken silently.
+const LIGHT_CACHE: bool = false;
+const SKY_PROBE: bool = true;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -734,6 +765,28 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // same insight about sparseness, applied to storage rather than traversal,
 // where nothing has to be asked per sample. See web/soar/zcrop.js.
 
+// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Five
+// measurements from one day, all the same fact:
+//   - the empty-space guard above cost 14-20% while never firing;
+//   - compiling out the lighting method a tier does not use (LIGHT_CACHE,
+//     SKY_PROBE) bought 3-14%, where the branch it replaced was never taken;
+//   - the city's 3D facade shell cost 35-50% on pixels that never run it,
+//     by pushing the whole kernel over a register threshold (which is why
+//     the opaque surfaces are moving to their own pass);
+//   - a function-local `var c: array<f32, 4>` in CITY-only code moved DAY
+//     frames by 2^-11 — a specialization that was compiled out still
+//     changed how the rest of the kernel was compiled. Scalars fixed it.
+//   - running the forward pre-march lazily, at a ray's first deep-shadow
+//     sample instead of before the loop, was exact and saves the march for
+//     every ray that never gets there — and cost 28-213% on the views where
+//     rays do get there, because a call inside the loop is paid in
+//     registers, and lanes reaching it at different steps serialize.
+// So a change's cost is not where its code runs, and a bit-identity claim
+// has to be proven on scenes the change does not touch. Measure with
+// tools/benchmarking/soar_pass_timer.py and prove with
+// tools/soar_shader_ab.py --scene day|city|nested|desert, both on the
+// specialization the app actually compiles.
+
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
 // Both levels always share one format.
@@ -851,7 +904,7 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
 }
 
 // Sun optical depth from the baked cache — the trilinear read that replaces
-// light_march_tau for cloud samples when u.light_cache.x is on.
+// light_march_tau for cloud samples under LIGHT_CACHE.
 //
 // Same coordinate convention as sample_level over the same outer AABB (the
 // cache's texel i sits AT data coordinate i, see fs_bake_light), same
@@ -13115,7 +13168,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     // the same tau at the point this path enters the cloud box: below the
     // box floor the path crosses only clear air.
     var tau_sun: f32;
-    if (u.light_cache.x > 0.5 && p_world.z < u.bmin.z && sun.z > 1e-4) {
+    if (LIGHT_CACHE && p_world.z < u.bmin.z && sun.z > 1e-4) {
         let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
         tau_sun = sample_light_tau(entry);
     } else {
@@ -13759,7 +13812,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // zero-jitter tau at the cache's own resolution, trilinearly
             // filtered. See Uniforms.light_cache.
             var tau_sun: f32;
-            if (u.light_cache.x > 0.5) {
+            if (LIGHT_CACHE) {
                 tau_sun = sample_light_tau(p);
             } else {
                 tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
@@ -13792,7 +13845,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             var t_sky = 1.0;
             var shallow_open = 0.0;
             if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
-                if (u.light_cache.z > 0.5) {
+                if (!SKY_PROBE) {
                     // Sky probe disabled (a cost/look toggle, J in the
                     // browser): every consumer sees a fully open sky, which
                     // is the neutral the floors already assume. Buried
