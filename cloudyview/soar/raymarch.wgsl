@@ -4248,6 +4248,7 @@ const cc_aircars_Z_HIGH: f32 = 95.0;
 const cc_aircars_Z_JIT: f32 = 8.0;
 const cc_aircars_HIGH_CUT: f32 = 0.55;   // hash above this -> the high deck
 const cc_aircars_LANE_P: f32 = 0.72;     // slot occupancy at full density
+const cc_aircars_THROUGH_FRAC: f32 = 0.12; // ... over an unbuilt avenue
 const cc_aircars_DENS_LO: f32 = 0.50;    // occupancy scale, outskirts
 const cc_aircars_DENS_HI: f32 = 1.35;    // occupancy scale, downtown
 // The window the occupancy ramp spans, in block density. Set against the
@@ -4609,11 +4610,18 @@ fn cc_aircars_craft(ci: vec2<i32>, cc: CityCell, lane: i32)
         return cc_aircars_no_craft();
     }
     let r = cc_aircars_draw(ci, lane);
-    // Traffic clusters where the city does.
-    let p = cc_aircars_LANE_P * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
-                                    smoothstep(cc_aircars_DENS_START,
-                                               cc_aircars_DENS_FULL,
-                                               cc.density));
+    // Traffic clusters where the city does. And a lane follows the avenue
+    // on the ground: where that avenue was never built — across open scrub
+    // and the gaps in the belt — only through-traffic between districts
+    // flies it, a thin fraction, so the sky over the gaps is neither dead
+    // nor a floating copy of downtown.
+    let side = select(select(3, 2, lo_edge), select(1, 0, lo_edge), lane == 0);
+    let served = select(cc_aircars_THROUGH_FRAC, 1.0,
+                        city_edge_street(cc, side));
+    let p = cc_aircars_LANE_P * served
+            * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
+                  smoothstep(cc_aircars_DENS_START, cc_aircars_DENS_FULL,
+                             cc.density));
     if (r.x >= p) {
         return cc_aircars_no_craft();
     }
