@@ -21,7 +21,7 @@ pinned against each other by tests/test_track_resample.py.
 Track schema (shared with the browser, which wrote it):
 
     {"schema": "cloudyview.track.v2",
-     "header": <render metadata: source, camera, sun, [city], render>,
+     "header": <render metadata: source, camera, sun, [city|desert], render>,
      "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}
 
 x/y/z are the relative-coordinate convention (the CLOUD frame, folded at the
@@ -305,9 +305,13 @@ class TrackSettings:
     haze: float
     haze_height_dependent: bool
     lod_strength: float
-    city: bool
+    # What the flight stood on: "ocean", "desert" or "city", from which
+    # surface block the header carries (none means the ocean).
+    surface: str
     city_tile_offset_m: Optional[tuple[float, float]]
-    city_tile_extent_m: Optional[float]
+    # The extent of the surface tile the flight flew over, when it matters
+    # which one (the city's blocks, the desert's stones); None over the sea.
+    surface_tile_extent_m: Optional[float]
     # The static row-24 surface offset the flight recorded — what a v1 track
     # (no per-sample surface frame) renders every frame with.
     surface_offset_m: Optional[tuple[float, float]]
@@ -349,6 +353,10 @@ def settings_from_header(header: dict, *, track_path=None,
     render = _need(header, "render", "header")
     sun = _need(header, "sun", "header")
     city = header.get("city")
+    desert = header.get("desert")
+    if city is not None and desert is not None:
+        raise ValueError("the track header carries both a 'city' and a "
+                         "'desert' block; a flight stands on one surface.")
 
     if field_path is None:
         field_path = _need(source, "path", "source")
@@ -376,13 +384,12 @@ def settings_from_header(header: dict, *, track_path=None,
     if not (0 < float(fps) <= 240):
         raise ValueError(f"fps must be in (0, 240]; got {fps!r}.")
 
-    city_block = None
+    surface, block, tile_offset = "ocean", None, None
     if city is not None:
-        city_block = dict(
-            tile_offset_m=tuple(float(v) for v in _need(city, "tile_offset_m", "city")),
-            tile_extent_m=float(_need(city, "tile_extent_m", "city")),
-            surface_offset_m=tuple(float(v) for v in _need(city, "surface_offset_m", "city")),
-        )
+        surface, block = "city", city
+        tile_offset = tuple(float(v) for v in _need(city, "tile_offset_m", "city"))
+    elif desert is not None:
+        surface, block = "desert", desert
 
     return TrackSettings(
         field_path=field_path,
@@ -402,10 +409,13 @@ def settings_from_header(header: dict, *, track_path=None,
         haze=float(_need(render, "haze", "render")),
         haze_height_dependent=bool(_need(render, "haze_height_dependent", "render")),
         lod_strength=float(_need(render, "lod_strength", "render")),
-        city=city_block is not None,
-        city_tile_offset_m=city_block["tile_offset_m"] if city_block else None,
-        city_tile_extent_m=city_block["tile_extent_m"] if city_block else None,
-        surface_offset_m=city_block["surface_offset_m"] if city_block else None,
+        surface=surface,
+        city_tile_offset_m=tile_offset,
+        surface_tile_extent_m=(float(_need(block, "tile_extent_m", surface))
+                               if block else None),
+        surface_offset_m=(tuple(float(v) for v in
+                                _need(block, "surface_offset_m", surface))
+                          if block else None),
     )
 
 
@@ -484,7 +494,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     from .cloudfield import load as load_field
     from .soar_host import (SceneState, SoarRenderer, ViewState,
                             APP_LIGHT_MARCH_LOD_DEGREES,
-                            APP_VIEW_STEP_LOD_DEGREES, camera_world_origin)
+                            APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
+                            surface_cell_m)
     from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
                           QUALITY_PRESETS, _field_level)
 
@@ -501,7 +512,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     print(f"soar: {track_path.name}: {len(samples)} samples over "
           f"{samples[-1, 0] - samples[0, 0]:.1f} s -> {len(frames)} frames "
           f"at {s.fps:g} fps, {w}x{h}, quality {s.quality}"
-          f"{', city' if s.city else ''}", flush=True)
+          f"{'' if s.surface == 'ocean' else ', ' + s.surface}", flush=True)
 
     # The field, with the header's variable names beneath the caller's.
     kwargs = dict(load_kwargs or {})
@@ -524,7 +535,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         levels = [_field_level(nest_field, nest_group, verbose=True), outer]
 
     renderer = SoarRenderer(periodic=s.periodic, nested=len(levels) > 1,
-                            tone_map=True, city=s.city)
+                            tone_map=True, surface=s.surface)
     renderer.upload_volume(outer.sigma)
     if len(levels) > 1:
         renderer.upload_nest(levels[0].sigma)
@@ -534,11 +545,13 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     # be the same tile for sx/sy — tile-relative — to mean the same metres.
     meta = renderer.surface_meta
     tile = float(meta["tile_extent_m"])
-    if s.city and s.city_tile_extent_m != tile:
+    if (s.surface_tile_extent_m is not None
+            and s.surface_tile_extent_m != tile):
         raise RuntimeError(
-            f"the track was flown over a city tile of {s.city_tile_extent_m:g} "
-            f"m, but the installed city tile is {tile:g} m; the flight's "
-            "surface positions would land on the wrong blocks.")
+            f"the track was flown over a {s.surface} tile of "
+            f"{s.surface_tile_extent_m:g} m, but the installed {s.surface} "
+            f"tile is {tile:g} m; the flight's surface positions would land "
+            "in the wrong places.")
 
     min_voxel = min(outer.dx)
     state = SceneState(
@@ -548,12 +561,13 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         dt_light=min_voxel * preset["light_step_factor"],
         periodic=s.periodic,
         ocean_reflectance=OCEAN_REFLECTANCE,
-        ocean_fif_dx=float(meta["cell_m"] if s.city else meta["dx_m"]),
+        ocean_fif_dx=surface_cell_m(s.surface, meta),
         ocean_tile_extent=tile,
         ocean_max_lod=int(meta["mips"]) - 1,
         nested=len(levels) > 1,
-        city=s.city,
-        **({"city_tile_offset_m": s.city_tile_offset_m} if s.city else {}),
+        surface=s.surface,
+        **({"city_tile_offset_m": s.city_tile_offset_m}
+           if s.surface == "city" else {}),
         surface_offset_m=s.surface_offset_m,
     )
     if len(levels) > 1:
