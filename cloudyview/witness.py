@@ -289,6 +289,7 @@ def render_nested(
     quality: Optional[str] = None,
     surface_origin: Optional[Sequence[float]] = None,
     surface: str = "ocean",
+    city_offset: Optional[Sequence[float]] = None,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -302,17 +303,35 @@ def render_nested(
     in one place (soar_host.camera_basis) so it cannot disagree with the
     browser's.
 
-    `surface` is what the world stands on: "ocean" or "desert" (the night
-    "city" is not built here yet).
+    `surface` is what the world stands on: "ocean", "desert", or "city" —
+    the night city, which also turns the sun into the moon (the sun angles
+    are then the moon's). A city needs `city_offset`, the world position of
+    its tile, because that is what picks the district under the field.
 
     With return_linear=True the shader's tone map is compiled out and the
     linear HDR radiance comes back unbounded.
     """
     check_surface(surface)
+    # Which district stands under the field is the tile's world offset, and
+    # there is no neutral value to default to: soar's cyberpunk mode and the
+    # night-city harness each park a different one. So a city says which,
+    # and nothing else takes an offset it would silently ignore.
     if surface == "city":
-        raise NotImplementedError(
-            "witness has no night-city path yet; it lands with the city "
-            "copy-command work (surface='city').")
+        if city_offset is None:
+            raise ValueError(
+                "surface='city' needs city_offset, the city tile's world "
+                "offset in metres (x y): it picks the district under the "
+                "field. Soar's cyberpunk mode flies (8100, -44190); a soar "
+                "reproduction command always writes the one it flew.")
+        city_offset = [float(v) for v in city_offset]
+        if len(city_offset) != 2:
+            raise ValueError(
+                f"city_offset needs exactly two values (x y metres); got "
+                f"{city_offset!r}.")
+    elif city_offset is not None:
+        raise ValueError(
+            f"city_offset places the night city's tile, but surface is "
+            f"'{surface}'; pass surface='city' or drop the offset.")
     levels = list(levels)
     if not levels:
         raise ValueError("render_nested needs at least one level.")
@@ -356,6 +375,8 @@ def render_nested(
                 f"surface_origin needs exactly two values (x y metres); "
                 f"got {surface_origin!r}.")
         state_kwargs["surface_offset_m"] = tuple(origin)
+    if surface == "city":
+        state_kwargs["city_tile_offset_m"] = tuple(city_offset)
     # Row 9 describes whichever tile the renderer bound, so it comes from
     # that tile's own meta.json rather than from SceneState's defaults (which
     # are the ocean tile's numbers, and so leave the ocean bit-identical).
@@ -466,6 +487,7 @@ def witness(
     quality: Optional[str] = None,
     surface_origin: Optional[Sequence[float]] = None,
     surface: str = "ocean",
+    city_offset: Optional[Sequence[float]] = None,
     return_linear: bool = False,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -507,7 +529,12 @@ def witness(
         reproduction commands write a flight's own offset here.
     surface : str, optional
         What the world stands on: "ocean" (default) or "desert", soar's
-        two day grounds.
+        two day grounds, or "city", the night city of soar's cyberpunk
+        mode — under which the sun angles are the moon's.
+    city_offset : (x, y), optional
+        The city tile's world offset in metres, which picks the district
+        standing under the field. Required with surface="city" and refused
+        otherwise; soar's cyberpunk mode flies (8100, -44190).
     return_linear : bool, optional
         Compile the tone map out and return unbounded linear HDR radiance
         instead of an encoded image. This is what soar's auto-exposure
@@ -563,6 +590,7 @@ def witness(
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
         periodic=periodic, accumulate=accumulate, quality=quality,
         surface_origin=surface_origin, surface=surface,
+        city_offset=city_offset,
         return_linear=return_linear, verbose=verbose)
 
 
@@ -640,6 +668,7 @@ def main(filename: str, output: str = None,
          quality: str = None,
          surface_origin: list = None,
          surface: str = None,
+         city_offset: list = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -699,6 +728,8 @@ def main(filename: str, output: str = None,
         look_kwargs['surface_origin'] = surface_origin
     if surface is not None:
         look_kwargs['surface'] = surface
+    if city_offset is not None:
+        look_kwargs['city_offset'] = city_offset
 
     try:
         if nest_group and ice:
@@ -932,7 +963,16 @@ def cli():
     parser.add_argument("--surface", choices=SURFACES,
                         help="What the world stands on: the ocean "
                              "(default) or the Sonoran desert — soar's two "
-                             "day grounds. Soar writes the flown one here")
+                             "day grounds — or the night city of cyberpunk "
+                             "mode, where the sun angles are the moon's "
+                             "(needs --city-offset). Soar writes the flown "
+                             "one here")
+    parser.add_argument("--city-offset", type=float, nargs=2,
+                        metavar=('X', 'Y'),
+                        help="With --surface city: the city tile's world "
+                             "offset in metres, which picks the district "
+                             "under the field. Cyberpunk mode flies "
+                             "8100 -44190; soar writes the flown one here")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",
@@ -960,6 +1000,7 @@ def cli():
          quality=args.quality,
          surface_origin=args.surface_origin,
          surface=args.surface,
+         city_offset=args.city_offset,
          haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,

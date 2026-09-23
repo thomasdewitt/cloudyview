@@ -21,6 +21,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 # The package exports witness the FUNCTION; the CLI lives on the module.
@@ -142,3 +143,182 @@ def test_same_file_ice_names_the_variable(monkeypatch, emitted):
 
 def test_a_demo_scene_emits_no_selection(emitted):
     assert emitted["demo"] == ""
+
+
+# --- the surface: what the world stands on ---------------------------------
+#
+# A cyberpunk still's command used to carry no surface at all, so `witness`
+# rendered the day ocean under it. This half drives the browser's real
+# witnessCommand for each surface and runs what comes out through the real
+# witness CLI all the way to pack_uniforms — only the GPU is stubbed — and
+# checks that the rows which say where the world stands are the browser's:
+# the specialization, row 8 (the city tile's world offset), row 9 (the bound
+# tile's cell, extent and top mip), row 24 (the surface offset the view
+# rendered with) and row 0 (the camera, through the relative round trip).
+
+witness_module = witness
+
+# The field the fake loader hands the CLI: 8 x 8 x 4 cells of 100 m, cloud in
+# every cell so the z crop keeps the whole box.
+_NX, _NZ, _DX = 8, 4, 100.0
+
+CITY_OFFSET = [8100.0, -44190.0]          # K.CITY_TILE_OFFSET_M
+
+# (name, scene flags, tile extent, whether the flight's folds moved the
+# surface frame off the static offset — which is when --surface-origin must
+# appear and carry it).
+SURFACE_CASES = [
+    ("ocean", {}, 102.4, False),
+    ("city", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0, False),
+    ("city-drifted", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0,
+     True),
+]
+
+_SURFACE_JS = textwrap.dedent("""
+    import { Viewer } from "%s";
+    const cases = %s;
+    const P = Viewer.prototype;
+    const fold = (v, t) => { const r = v %% t; return r < 0 ? r + t : r; };
+    const out = {};
+    for (const c of cases) {
+      const t = c.tile;
+      const position = [c.bmin[0] + 312.5, c.bmin[1] + 587.25, 1234.5];
+      const stat = c.scene.city ? c.scene.cityOffsetM : [0.0, 0.0];
+      // The camera's surface frame: where the static offset puts it, or
+      // three blocks along when the flight's folds have moved it.
+      const sp = [0, 1].map((i) =>
+        fold(fold(position[i], t) - fold(stat[i], t) + (c.drift ? 270.0 : 0.0), t));
+      const self = {
+        scene: { ...c.scene, bmin: c.bmin, bmax: c.bmax,
+                 sourceName: "field.nc", oceanTileExtent: t },
+        camera: { position, azimuth: 301.25, elevation: 12.5, fov: 90.0,
+                  surfacePosition: sp, surfaceTileExtent: t },
+        canvas: { width: 1920, height: 961 },
+        renderer: { periodic: true },
+        sunAzimuth: 181.0, sunElevation: 20.0,
+        toneMapGamma: 1.66, toneMapWhitePoint: 15.0, contrast: 1.0,
+        _selectionFlags: P._selectionFlags,
+        _surfaceOffsetM: P._surfaceOffsetM,
+        _surfaceOriginFlags: P._surfaceOriginFlags,
+      };
+      out[c.name] = {
+        command: P.witnessCommand.call(self, {
+          size: [640, 360], lodStrength: 1.0, haze: 0.35,
+          hazeHeightDependent: false, exposure: 2.5, quality: "high" }),
+        surfaceOffsetM: P._surfaceOffsetM.call(self),
+        position,
+      };
+    }
+    process.stdout.write(JSON.stringify(out));
+""")
+
+
+def _surface_field():
+    from cloudyview.cloudfield import CloudField
+    x = (np.arange(_NX) + 0.5) * _DX
+    z = (np.arange(_NZ) + 0.5) * _DX
+    return CloudField(lwc=np.full((_NX, _NX, _NZ), 0.5, np.float32),
+                      x=x, y=x.copy(), z=z)
+
+
+@pytest.fixture(scope="module")
+def surface_commands():
+    bmin, bmax = witness_module._volume_aabb(_surface_field())
+    cases = [dict(name=name, scene=scene, tile=tile, drift=drift,
+                  bmin=list(bmin), bmax=list(bmax))
+             for name, scene, tile, drift in SURFACE_CASES]
+    js = _SURFACE_JS % ((REPO / "web" / "soar" / "viewer.js").as_posix(),
+                        json.dumps(cases))
+    proc = subprocess.run(["node", "--input-type=module", "-e", js],
+                          capture_output=True, text=True, cwd=REPO,
+                          env={**os.environ})
+    if proc.returncode != 0:
+        pytest.fail(f"node failed:\n{proc.stderr[-3000:]}")
+    return json.loads(proc.stdout)
+
+
+class _FakeRenderer:
+    """What render_nested needs of a SoarRenderer, minus the GPU: the bound
+    tile's meta, and a render that keeps the uniforms it would have drawn."""
+
+    def __init__(self, surface):
+        from cloudyview.soar_host import pack_uniforms
+        self._pack = pack_uniforms
+        self.surface = surface
+        self.surface_meta = json.loads(
+            (REPO / "cloudyview" / "soar" / surface / "meta.json").read_text())
+        self.uniforms = None
+
+    def bake_light_cache(self, state, view, divisor):
+        pass
+
+    def render(self, state, view, frames):
+        self.uniforms = self._pack(state, view)
+        w, h = view.output_size
+        return np.zeros((h, w, 3))
+
+
+@pytest.mark.parametrize("name", [c[0] for c in SURFACE_CASES])
+def test_the_surface_round_trips_to_the_uniforms(
+        monkeypatch, tmp_path, surface_commands, name):
+    emitted = surface_commands[name]
+    made = []
+
+    def fake_renderer_for(levels, *, periodic, tone_mapped, surface):
+        made.append(_FakeRenderer(surface))
+        return made[-1]
+
+    monkeypatch.setattr(witness_module, "_renderer_for", fake_renderer_for)
+    monkeypatch.setattr(witness_module, "_load_field",
+                        lambda *a, **k: _surface_field())
+    argv = shlex.split(emitted["command"])
+    monkeypatch.setattr(sys, "argv",
+                        argv + ["--output", str(tmp_path)])
+    witness_module.cli()
+
+    (renderer,) = made
+    u = renderer.uniforms
+    scene, tile, drift = next((s, t, d) for n, s, t, d in SURFACE_CASES
+                              if n == name)
+    kind = "city" if scene.get("city") else "ocean"
+    meta = renderer.surface_meta
+    assert renderer.surface == kind
+    # Row 9: cell size, tile extent, surface on, top mip — the bound tile's.
+    cell = meta["cell_m"] if kind == "city" else meta["dx_m"]
+    assert tuple(u[9]) == pytest.approx(
+        (cell, tile, 1.0, meta["mips"] - 1), rel=0, abs=0)
+    # Row 24: the offset the browser view rendered with, float32-exact.
+    assert tuple(u[24][:2]) == tuple(
+        np.float32(emitted["surfaceOffsetM"]))
+    assert ("--surface-origin" in argv) == drift
+    # Row 0: the camera, through worldToRelative and back.
+    assert u[0][:3] == pytest.approx(emitted["position"], rel=1e-9, abs=1e-6)
+    if kind == "city":
+        assert tuple(u[8][1:3]) == tuple(np.float32(CITY_OFFSET))
+        # Under CITY the sun row is the moon the browser flew under.
+        assert "--sun-elevation 20" in emitted["command"]
+
+
+def test_a_city_command_says_which_district(surface_commands):
+    """The offset travels with the surface: the CLI's own default is the
+    night-city harness's district, not cyberpunk's."""
+    city = surface_commands["city"]["command"]
+    assert "--surface city --city-offset 8100 -44190" in city
+    assert "--surface ocean" in surface_commands["ocean"]["command"]
+    assert "--city-offset" not in surface_commands["ocean"]["command"]
+
+
+def test_a_still_command_carries_the_capture_size(surface_commands):
+    # The capture size, not the canvas's (1920 x 961 in the fake viewer).
+    assert "--size 640 360" in surface_commands["ocean"]["command"]
+
+
+def test_witness_refuses_a_city_without_a_district():
+    from cloudyview.witness import render_nested
+    with pytest.raises(ValueError, match="city_offset"):
+        render_nested([None], (0, 0, 0), azimuth=0, elevation=0,
+                      sun_azimuth=0, sun_elevation=20, surface="city")
+    with pytest.raises(ValueError, match="surface='city'"):
+        render_nested([None], (0, 0, 0), azimuth=0, elevation=0,
+                      sun_azimuth=0, sun_elevation=20, surface="ocean",
+                      city_offset=(0, 0))
