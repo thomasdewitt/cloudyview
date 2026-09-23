@@ -20,19 +20,27 @@ pinned against each other by tests/test_track_resample.py.
 
 Track schema (shared with the browser, which wrote it):
 
-    {"schema": "cloudyview.track.v2",
+    {"schema": "cloudyview.track.v3",
      "header": <render metadata: source, camera, sun, [city|desert], render>,
-     "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}
+     "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy, scene_t],
+                 ...]}
 
 x/y/z are the relative-coordinate convention (the CLOUD frame, folded at the
 cloud period — exactly what `witness --camera-position` takes) and sx/sy the
-camera's position in the scene's surface-tile frame in TILE-RELATIVE units
-(period 1.0), so the schema needs no tile size. The two frames wrap at
-independent periods, which is why a sample carries both: fold one into the
-other and a recorded city flight replays over the wrong district. A v1 track
-(7 columns, no surface frame) still renders; its surface then holds the
-static offset the header recorded, which is the un-shifted surface those
-recordings meant.
+camera's position in the scene's surface frame as fractions of the frame's
+period (period 1.0), so the schema needs no tile size. The two frames wrap
+at independent periods, which is why a sample carries both: fold one into
+the other and a recorded city flight replays over the wrong district.
+scene_t is the scene clock the frame was drawn at — where the moving sea was
+— so a re-render has the flight's waves.
+
+Older tracks still render. A v2 track (9 columns) has no clock and replays
+with the sea at 0; its sx/sy were fractions of the TILE, which for the city
+and the desert is still the period and for the sea was the 102.4 m wave tile
+before the swell widened the ocean's period — so v2 sx/sy are read against
+the tile, which puts the waves back where they were. A v1 track (7 columns,
+no surface frame) holds the static offset the header recorded, the
+un-shifted surface those recordings meant.
 
 Everything about the picture comes from the header — field, sun, look,
 quality tier, size — so the command needs nothing but the track. The flags
@@ -56,7 +64,8 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-TRACK_SCHEMAS = ("cloudyview.track.v1", "cloudyview.track.v2")
+TRACK_SCHEMAS = ("cloudyview.track.v1", "cloudyview.track.v2",
+                 "cloudyview.track.v3")
 HEADER_SCHEMA = "cloudyview.render.v1"
 
 # Relative x/y span the domain as [-1, 1], so a periodic flight-path wrap is
@@ -78,11 +87,11 @@ FRAME_INDEX_STRIDE = 1024
 # --- the file --------------------------------------------------------------
 
 def load_track(path) -> tuple[dict, np.ndarray]:
-    """Read a track file -> (header, samples[n, 7 or 9]).
+    """Read a track file -> (header, samples[n, 7, 9 or 10]).
 
-    The width check is the whole validation: 9 columns is a v2 sample, 7 a
-    v1 recording, and a mix is a corrupt track rather than a choice to make
-    quietly. Everything else about the header is checked where it is used,
+    The width check is the whole validation: 10 columns is a v3 sample, 9 a
+    v2, 7 a v1 recording, and a mix is a corrupt track rather than a choice
+    to make quietly. Everything else about the header is checked where it is used,
     with the key that was missing named.
     """
     path = Path(path)
@@ -98,11 +107,11 @@ def load_track(path) -> tuple[dict, np.ndarray]:
     if len(rows) < 2:
         raise ValueError(
             f"{path}: {len(rows)} sample(s) is not enough to interpolate.")
-    if len(widths) != 1 or not (widths <= {7, 9}):
+    if len(widths) != 1 or not (widths <= {7, 9, 10}):
         raise ValueError(
             f"{path}: track samples must uniformly have 7 columns (v1 / no "
-            f"surface frame) or 9 (v2 with one); got widths "
-            f"{sorted(widths)}.")
+            f"surface frame), 9 (v2 with one) or 10 (v3 with the scene "
+            f"clock); got widths {sorted(widths)}.")
     samples = np.asarray(rows, dtype=np.float64)
     if not np.all(np.isfinite(samples)):
         raise ValueError(f"{path}: track samples contain non-finite values.")
@@ -192,14 +201,16 @@ def frame_count_between(t0: float, t1: float, fps: float) -> int:
 
 @dataclasses.dataclass(frozen=True)
 class TrackFrame:
-    """One output frame's camera: relative cloud-frame position, angles, and
-    the tile-relative surface position (None on a v1 track)."""
+    """One output frame's camera: relative cloud-frame position, angles, the
+    period-relative surface position (None on a v1 track) and the scene
+    clock (0 on a track from before it was recorded)."""
     t: float
     position: tuple[float, float, float]
     azimuth: float
     elevation: float
     fov: float
     surface_position: Optional[tuple[float, float]]
+    scene_time: float
 
 
 def resample_track(samples, fps: float, *,
@@ -214,10 +225,10 @@ def resample_track(samples, fps: float, *,
     if not fps > 0:
         raise ValueError(f"fps must be positive; got {fps}.")
     samples = np.asarray(samples, dtype=np.float64)
-    if samples.ndim != 2 or samples.shape[1] not in (7, 9):
+    if samples.ndim != 2 or samples.shape[1] not in (7, 9, 10):
         raise ValueError(
-            "samples must be [n, 7] (v1) or [n, 9] (v2); got shape "
-            f"{samples.shape}.")
+            "samples must be [n, 7] (v1), [n, 9] (v2) or [n, 10] (v3); got "
+            f"shape {samples.shape}.")
     order = np.argsort(samples[:, 0], kind="stable")
     samples = samples[order]
     keep = np.ones(len(samples), dtype=bool)
@@ -227,7 +238,8 @@ def resample_track(samples, fps: float, *,
         raise ValueError(
             f"The track collapses to {len(unique)} sample(s) with distinct "
             "times, which is not enough to interpolate. Fly for longer.")
-    has_surface = unique.shape[1] == 9
+    has_surface = unique.shape[1] in (9, 10)
+    has_clock = unique.shape[1] == 10
 
     times = unique[:, 0]
     x, y = unique[:, 1], unique[:, 2]
@@ -255,6 +267,8 @@ def resample_track(samples, fps: float, *,
     if has_surface:
         cols["sx"] = catmull_rom(times, sx, t_out)
         cols["sy"] = catmull_rom(times, sy, t_out)
+    if has_clock:
+        cols["st"] = catmull_rom(times, unique[:, 9], t_out)
     if periodic:
         # Fold back at the same period each unwrap used: x/y centred into
         # [-1, 1), sx/sy into [0, 1). math.fmod, not %, because the browser
@@ -279,6 +293,7 @@ def resample_track(samples, fps: float, *,
             fov=float(cols["fov"][k]),
             surface_position=((float(cols["sx"][k]), float(cols["sy"][k]))
                               if has_surface else None),
+            scene_time=float(cols["st"][k]) if has_clock else 0.0,
         ))
     return frames
 
@@ -495,7 +510,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     from .soar_host import (SceneState, SoarRenderer, ViewState,
                             APP_LIGHT_MARCH_LOD_DEGREES,
                             APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
-                            surface_cell_m)
+                            surface_cell_m, surface_period_m)
     from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
                           QUALITY_PRESETS, _field_level)
 
@@ -542,9 +557,15 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
 
     # The surface tile the shader will read is the one installed with this
     # package; the header says which one the flight flew over. They have to
-    # be the same tile for sx/sy — tile-relative — to mean the same metres.
+    # be the same tile for sx/sy to mean the same metres. sx/sy are fractions
+    # of the surface period (v3) — the tile for the city and the desert, the
+    # swell's period for the sea — or, on a v2 track, of the tile itself,
+    # which is what the sea folded at before its swell (see the module
+    # docstring); the offset still folds at the period either way.
     meta = renderer.surface_meta
     tile = float(meta["tile_extent_m"])
+    period = surface_period_m(s.surface, meta)
+    sample_unit = period if samples.shape[1] == 10 else tile
     if (s.surface_tile_extent_m is not None
             and s.surface_tile_extent_m != tile):
         raise RuntimeError(
@@ -564,6 +585,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         ocean_fif_dx=surface_cell_m(s.surface, meta),
         ocean_tile_extent=tile,
         ocean_max_lod=int(meta["mips"]) - 1,
+        surface_period_m=period,
         nested=len(levels) > 1,
         surface=s.surface,
         **({"city_tile_offset_m": s.city_tile_offset_m}
@@ -592,6 +614,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             light_cache=bool(preset["light_cache"]),
             sky_probe=bool(preset["sky_probe"]),
             frame_index=index * FRAME_INDEX_STRIDE,
+            scene_time=frame.scene_time,
         )
 
     def state_for(frame: TrackFrame, view: ViewState) -> SceneState:
@@ -599,10 +622,11 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         # one; otherwise the static offset the header recorded, every frame.
         if frame.surface_position is None:
             return state
-        sp = (frame.surface_position[0] * tile, frame.surface_position[1] * tile)
+        sp = (frame.surface_position[0] * sample_unit,
+              frame.surface_position[1] * sample_unit)
         return dataclasses.replace(
             state, surface_offset_m=surface_offset_for(
-                view.camera_position[:2], sp, tile))
+                view.camera_position[:2], sp, period))
 
     # The sun-tau cache depends on the field and the sun, neither of which
     # moves along a track, so it is baked once — at the first frame's view,

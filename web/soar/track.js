@@ -10,9 +10,10 @@
 //
 // Track schema is shared with the Python side, so a track recorded in the browser
 // can be re-rendered by `soar TRACK.json` (cloudyview/track.py) and vice versa:
-//   {"schema": "cloudyview.track.v2",
+//   {"schema": "cloudyview.track.v3",
 //    "header": <render metadata>,
-//    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy], ...]}
+//    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy, scene_t],
+//                ...]}
 // with x/y/z in the relative-coordinate convention — the CLOUD frame, folded
 // at the cloud period, exactly as v1 wrote them — and sx/sy the camera's
 // position in the scene's surface-tile frame, in TILE-RELATIVE units
@@ -24,10 +25,19 @@
 // ocean's included), so v2 samples are 9 columns with the first seven
 // byte-identical to v1's; a camera without one writes 7 columns, and a v1
 // track loads and resamples the same way.
+//
+// v3 appends scene_t, the scene clock (s) the frame was drawn at — where the
+// moving sea was — so a re-render has the waves the flight had. It is its
+// own column rather than a function of t because the clock is the scene's,
+// not the recording's. v1 and v2 tracks have none and replay at clock 0.
+// sx/sy are fractions of the surface PERIOD, which for the sea is the
+// swell's 819.2 m, not the 102.4 m wave tile a v2 day track was folded at;
+// a v2 ocean track therefore replays over a different patch of the (by now
+// moving) sea — nothing else about it changes.
 
 "use strict";
 
-export const TRACK_SCHEMA = "cloudyview.track.v2";
+export const TRACK_SCHEMA = "cloudyview.track.v3";
 
 // Relative x/y span the domain as [-1, 1], so a periodic flight-path wrap is
 // a near-full-span jump between consecutive samples and nothing else is.
@@ -107,9 +117,10 @@ export function catmullRom(times, values, tOut) {
 /**
  * Resample hand-flown samples at exact 1/fps steps.
  *
- * Returns `[{t, position, azimuth, elevation, fov, surfacePosition}, ...]`
- * with position in relative coordinates and surfacePosition tile-relative
- * (or null — see below). Azimuth is unwrapped before interpolation so 359 to
+ * Returns `[{t, position, azimuth, elevation, fov, surfacePosition,
+ * sceneTime}, ...]` with position in relative coordinates, surfacePosition
+ * period-relative (or null — see below) and sceneTime the scene clock (0 on
+ * a track from before it was recorded). Azimuth is unwrapped before interpolation so 359 to
  * 1 goes through 0 rather than the long way round; in a periodic domain each
  * wrapped position column is unwrapped the same way at its own frame's
  * period and re-wrapped afterwards.
@@ -154,18 +165,21 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
       `The track collapses to ${unique.length} sample(s) with distinct ` +
       "times, which is not enough to interpolate. Fly for longer.");
   }
-  // 9 columns is a v2 sample (every scene's camera carries a surface frame
-  // now, the day ocean's included); 7 is a v1 recording — those predate the
-  // surface frame and replay with zero drift (the old behavior, not
-  // repairable: the fold already lost which tile copy the flight was in).
-  // A mix is a corrupt track, not a choice to make quietly.
+  // 10 columns is a v3 sample (surface frame and scene clock); 9 is v2 (no
+  // clock: replays at 0); 7 is a v1 recording — those predate the surface
+  // frame and replay with zero drift (the old behavior, not repairable: the
+  // fold already lost which tile copy the flight was in). A mix is a
+  // corrupt track, not a choice to make quietly.
   const widths = new Set(unique.map((s) => s.length));
-  if (widths.size !== 1 || !(widths.has(7) || widths.has(9))) {
+  if (widths.size !== 1
+      || !(widths.has(7) || widths.has(9) || widths.has(10))) {
     throw new Error(
-      "Track samples must uniformly have 7 columns (v1 / no surface frame) " +
-      `or 9 (v2 with one); got widths {${[...widths].join(", ")}}.`);
+      "Track samples must uniformly have 7 columns (v1 / no surface frame), " +
+      "9 (v2 with one) or 10 (v3 with the scene clock); got widths " +
+      `{${[...widths].join(", ")}}.`);
   }
-  const hasSurface = widths.has(9);
+  const hasSurface = widths.has(9) || widths.has(10);
+  const hasClock = widths.has(10);
 
   const column = (j) => unique.map((s) => s[j]);
   const times = column(0);
@@ -199,6 +213,7 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
     fov: catmullRom(times, column(6), tOut),
     ...(hasSurface ? { sx: catmullRom(times, sx, tOut),
                        sy: catmullRom(times, sy, tOut) } : {}),
+    ...(hasClock ? { st: catmullRom(times, column(9), tOut) } : {}),
   };
   if (periodic) {
     // Fold back at the same period each unwrap used: x/y centred into
@@ -228,6 +243,9 @@ export function resampleTrack(samples, fps, { periodic = true } = {}) {
       // Tile-relative, like the samples; null on a track with no surface
       // frame, and the replay then folds against the static offset.
       surfacePosition: hasSurface ? [cols.sx[k], cols.sy[k]] : null,
+      // The scene clock; a track from before the sea moved has none, and
+      // replays with the sea held at 0.
+      sceneTime: hasClock ? cols.st[k] : 0.0,
     });
   }
   return frames;
@@ -283,8 +301,11 @@ export class TrackRecorder {
     this.elapsed += Math.max(0.0, deltaSeconds);
   }
 
-  /** One sample at the current flight time. `camera` is the live FlightCamera. */
-  sample(camera) {
+  /**
+   * One sample at the current flight time. `camera` is the live
+   * FlightCamera, `sceneTime` the scene clock the frame was drawn at.
+   */
+  sample(camera, sceneTime) {
     if (!this._recording) return;
     const rel = camera.relativePosition();
     const s = [
@@ -292,14 +313,22 @@ export class TrackRecorder {
       rel[0], rel[1], rel[2],
       camera.azimuth, camera.elevation, camera.fov,
     ];
-    // The surface frame, tile-relative: x/y above are folded at the cloud
-    // period, which loses which tile copy the flight is in — sx/sy is where
-    // that lives (the city district, or the day ocean's phase). Appended, so
-    // the first seven columns stay byte-identical to a v1 sample.
-    if (camera.surfacePosition) {
-      s.push(camera.surfacePosition[0] / camera.surfaceTileExtent,
-             camera.surfacePosition[1] / camera.surfaceTileExtent);
+    // The surface frame, as fractions of its period: x/y above are folded
+    // at the cloud period, which loses which tile copy the flight is in —
+    // sx/sy is where that lives (the city district, or where on the sea).
+    // Appended, so the first seven columns stay byte-identical to a v1
+    // sample; the scene clock follows them.
+    if (!camera.surfacePosition) {
+      // v3 is 10 columns or nothing: the clock comes after the surface
+      // frame, and every scene's camera has one.
+      throw new Error("the camera has no surface frame to record.");
     }
+    if (!Number.isFinite(sceneTime)) {
+      throw new Error(`the scene clock must be finite; got ${sceneTime}.`);
+    }
+    s.push(camera.surfacePosition[0] / camera.surfaceTileExtent,
+           camera.surfacePosition[1] / camera.surfaceTileExtent,
+           sceneTime);
     this.samples.push(s);
   }
 

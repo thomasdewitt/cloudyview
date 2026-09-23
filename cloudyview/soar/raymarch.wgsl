@@ -1810,18 +1810,18 @@ const SEA_LOOP_S: f32 = 25.6;
 // top level the whole 0.088 RMS slope of the tile is filtered out of the
 // normal and lives here instead. A variance: it adds to alpha^2, not alpha.
 const SEA_SLOPE_VARIANCE_REMOVED = array<f32, 9>(
-    0.0, 0.0006671, 0.0020362, 0.0037592, 0.0053212,
-    0.0064345, 0.0070186, 0.0074561, 0.0077476
+    0.0, 0.0005511, 0.0017613, 0.0036112, 0.0061415,
+    0.0076499, 0.0077109, 0.0077394, 0.0077479
 );
 // Entry k: at level k, mean(s(t) . s(t)) minus mean(s(t) . s(t+1)). Blending
 // two frames at fraction f removes 2 f (1 - f) of it — the finest ripples
 // decorrelate within a frame or two and would otherwise dim between frames.
 const SEA_SLOPE_VARIANCE_TEMPORAL = array<f32, 9>(
-    0.0016409, 0.0013028, 0.0007689, 0.0003483, 0.0001253,
-    3.68e-05, 1.2e-05, 3.8e-06, 0.0
+    0.0015768, 0.0013141, 0.0008822, 0.0004952, 0.0001696,
+    9.9e-06, 3.8e-06, 9e-07, 0.0
 );
 // The tile's foam rank covers this much of the sea at a full gate.
-const SEA_FOAM_MAX_COVERAGE: f32 = 0.03;
+const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
 
 // The swell: a Pierson-Moskowitz peak at ~220 m with cos^2s (s = 6)
 // spreading about the wind (+x of the surface frame), significant height
@@ -1877,7 +1877,7 @@ const SEA_SWELL_MODULATION: f32 = 0.3;
 const SEA_FOAM_ALBEDO_RESIDUAL: f32 = 0.30;
 const SEA_FOAM_ALBEDO_ACTIVE: f32 = 0.75;
 // Half-width of the cut's soft edge, in rank.
-const SEA_FOAM_EDGE: f32 = 0.04;
+const SEA_FOAM_EDGE: f32 = 0.12;
 // The foam is a Lambertian surface in the cloud's units, lit the way
 // desert_light lights the sand: the same three numbers, for the same reason
 // (DESERT_BEAM_CALIBRATION and its neighbours), kept as the sea's own so a

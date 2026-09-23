@@ -14,7 +14,8 @@ every Fourier mode advances its phase at omega = sqrt(g k), with omega
 rounded to a whole number of cycles per loop so the sea is still exactly
 periodic in time. The cascade decides where the steep, intermittent patches
 are and how they come and go; the phase carries them the way water carries
-waves. A cos^2s spreading about the wind axis gives crests their length.
+waves. A cos^2s spreading about the wind axis gives crests their length,
+and a spectral peak at the dominant wave (PEAK_*) gives the sea its crests.
 
 Three channels come out, plus a fourth derived one:
 
@@ -45,13 +46,30 @@ DX_M = 0.4              # tile 102.4 m, as the static tile before it
 NT = 128                # frames per loop
 DT_S = 0.2              # loop 25.6 s
 H = 0.9                 # height roughness: near the Phillips saturation range
-ALPHA = 1.8
-C1 = 0.01
+# Nearly Gaussian, as the sea is: at alpha 1.8 or C1 0.01 and up, one Levy
+# burst held most of the tile's slope variance and the rest lay flat. Mild
+# lognormal intermittency still clusters the steepest crests into groups,
+# which is where the whitecaps come from.
+ALPHA = 2.0
+C1 = 0.005
 # How many of its own wave periods a structure of size L lives. Sets the GSI
 # spheroscale; see _spheroscale.
 LIFE_PERIODS = 3.0
 # cos^2s directional spreading about the wind axis.
 SPREAD_S = 2.0
+# The spectral peak. A cascade is scale-free and a wind sea is not: its
+# energy sits at the dominant wave, with little below that wavenumber, and
+# that peak is what draws crests. The FIF's spectrum is rolled off below
+# k_p and lifted by a JONSWAP-style enhancement about it: an amplitude
+# factor over a Gaussian in wavenumber (relative width) and in direction off
+# the wind axis (degrees) — the dominant waves are the long-crested,
+# well-aligned part of a sea, and without the directional narrowing the peak
+# draws no rows. 12 m is a young sea under a moderate breeze and close to
+# where the static tile put its dominant waves (10 m).
+PEAK_WAVELENGTH_M = 12.0
+PEAK_ENHANCEMENT = 6.0
+PEAK_WIDTH = 0.15
+PEAK_HEADING_DEG = 12.0
 # RMS slope of the resolved sea (both axes). The static tile resolved 0.0908
 # at 0.2 m; its own mip table put 5% of that variance in the finest octave,
 # so the same sea resolved at 0.4 m is 0.088.
@@ -60,9 +78,9 @@ RMS_SLOPE = 0.088
 CREST_LOWPASS_M = 6.0
 # The top fraction of the tile that can carry foam at a full gate; the swell
 # gate (raymarch.wgsl) halves it on average.
-FOAM_MAX_COVERAGE = 0.03
-# Residual foam decays over a few seconds after the crest has moved on.
-FOAM_DECAY_S = 2.5
+FOAM_MAX_COVERAGE = 0.02
+# Residual foam decays over a couple of seconds after the crest has moved on.
+FOAM_DECAY_S = 2.0
 # The breaking source: slope above this multiple of the tile's RMS slope, on
 # a crest.
 BREAKING_SLOPE_RMS = 2.5
@@ -123,7 +141,13 @@ def generate_sea(seed: int, n: int = N, nt: int = NT, dx_m: float = DX_M,
     # here, and the phase below decides which way each mode travels.
     spread = np.abs(cos_wind) ** (2.0 * SPREAD_S)
     spread /= spread[K > 0].mean()
-    F *= np.sqrt(spread)[None]
+    k_p = 2.0 * np.pi / PEAK_WAVELENGTH_M
+    off_axis = np.arccos(np.clip(np.abs(cos_wind), 0.0, 1.0))
+    peak = (np.sqrt(1.0 - np.exp(-(K / k_p) ** 4))
+            * (1.0 + (PEAK_ENHANCEMENT - 1.0)
+               * np.exp(-0.5 * ((K - k_p) / (PEAK_WIDTH * k_p)) ** 2)
+               * np.exp(-0.5 * (off_axis / np.radians(PEAK_HEADING_DEG)) ** 2)))
+    F *= (np.sqrt(spread) * peak)[None]
 
     # Dispersion, quantized to the loop. `travel` is odd in k, so the
     # multiplier at -k is the conjugate of the one at k and the field stays
