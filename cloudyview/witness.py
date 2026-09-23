@@ -62,6 +62,7 @@ from .soar_host import (
     ViewState,
     camera_world_origin,
     check_surface,
+    desert_relief_m,
     surface_cell_m,
 )
 
@@ -391,6 +392,8 @@ def render_nested(
         ocean_max_lod=int(meta["mips"]) - 1,
         nested=len(levels) > 1,
         surface=surface,
+        **({"desert_relief_m": desert_relief_m(meta)}
+           if surface == "desert" else {}),
         **state_kwargs,
     )
     dt = min_voxel * view_factor

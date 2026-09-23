@@ -11,6 +11,7 @@ import * as K from "./constants.js";
 import { packUniforms, sceneKey, keysEqual, renderTargetSize,
          motionAlphaForDt } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
+import { desertReliefM } from "./scene.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -517,6 +518,7 @@ export class Renderer {
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
     s.oceanMaxLod = tile.maxLod;
+    s.desertReliefM = s.desert ? desertReliefM(tile.meta) : [0.0, 0.0, 0.0];
     this.device.pushErrorScope("validation");
     this._rayPipeline(SAMPLE_FORMAT);
     const error = await this.device.popErrorScope();
@@ -1675,6 +1677,7 @@ export class Renderer {
       city: Boolean(s.city),
       cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
       desert: Boolean(s.desert),
+      desertReliefM: s.desertReliefM ?? [0.0, 0.0, 0.0],
     };
   }
 }

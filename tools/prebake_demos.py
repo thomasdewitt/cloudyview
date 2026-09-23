@@ -171,6 +171,9 @@ DEMOS = [
         title="STEAM high-based convection",
         field="Utah summer cumulus congestus",
         warning="Needs a highly capable GPU",
+        # High-based summer convection is a desert sky, and it stands on the
+        # desert (2026-09-23). The ground its bases see is part of the case.
+        surface="desert",
         liquid=("demo_desert-convection.nc", "qc"),
         ice=("demo_desert-convection.nc", "qi"),
         src=STEAM_SRC,
@@ -196,6 +199,7 @@ DEMOS = [
         field="Utah cumulus on a coarser grid",
         description="STEAM high-based convection (above) at coarser "
                     "resolution.",
+        surface="desert",
         liquid=("demo_desert-convection-coarse.nc", "qc"),
         ice=("demo_desert-convection-coarse.nc", "qi"),
         src=STEAM_SRC,
@@ -812,6 +816,9 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
         **({"coarsen": coarsen_factor(spec)} if coarsen_factor(spec) > 1
            else {}),
         "periodic": bool(spec.get("periodic", True)),
+        # What the case stands on (scene.js reads meta.surface; absent is the
+        # ocean). The spec's call, like the sun.
+        "surface": spec.get("surface", "ocean"),
         "volume": {
             "shape_xyz": [int(nx), int(ny), int(nz)],
             "format": "r16float",
@@ -964,6 +971,7 @@ def auto_exposure(spec: dict, field: CloudField, view: dict,
         size=(w, h), sun_azimuth=spec["sun"]["azimuth"],
         sun_elevation=spec["sun"]["elevation"],
         periodic=spec.get("periodic", True), accumulate=1,
+        surface=spec.get("surface", "ocean"),
         return_linear=True,
         **{_LOOK_ARG[k]: v for k, v in view["look"].items()
            if k != "exposure"})
@@ -1049,6 +1057,7 @@ def render_still(spec: dict, field: CloudField, out: Path, size,
         size=size, sun_azimuth=spec["sun"]["azimuth"],
         sun_elevation=spec["sun"]["elevation"],
         periodic=spec.get("periodic", True), accumulate=accumulate,
+        surface=spec.get("surface", "ocean"),
         **{_LOOK_ARG[k]: v for k, v in look.items()})
     render_s = time.time() - t0
 
@@ -1319,6 +1328,7 @@ def main() -> None:
                     meta.pop(key, None)
             meta["sun"] = dict(spec["sun"])
             meta["periodic"] = bool(spec.get("periodic", True))
+            meta["surface"] = spec.get("surface", "ocean")
         if wants_ice:
             meta["ice"] = bake_ice(spec, field, meta, out)
         elif not has_ice(spec):

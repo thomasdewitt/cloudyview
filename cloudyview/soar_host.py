@@ -81,6 +81,42 @@ def surface_cell_m(surface: str, meta: dict) -> float:
     return float(meta[key])
 
 
+# Channels per texel of each surface-tile format. The ocean and the city are
+# rgba16float; the desert is rg16float (height and lightness).
+SURFACE_FORMAT_CHANNELS = {"rgba16float": 4, "rg16float": 2}
+
+
+def surface_level_files(meta: dict) -> list:
+    """The file of each mip level: named in the meta, or the legacy scheme."""
+    if "files" in meta:
+        return list(meta["files"])
+    return [f"fif_mip{level}.bin" for level in range(int(meta["mips"]))]
+
+
+def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
+    """One stored mip level -> the interleaved texel bytes the texture wants.
+
+    A level is stored either as the texels themselves, or (encoding
+    "planar-byte-shuffle", the desert's) as each channel's plane with every
+    half float's low bytes before its high bytes — the arrangement that lets
+    gzip see a height field's smoothness. `raw` is already decompressed.
+    web/soar/scene.js decodeSurfaceLevel is the twin.
+    """
+    channels = SURFACE_FORMAT_CHANNELS[meta.get("format", "rgba16float")]
+    expected = side * side * channels * 2
+    if len(raw) != expected:
+        raise RuntimeError(
+            f"a {side}x{side} {meta.get('format', 'rgba16float')} level is "
+            f"{expected} bytes; this one is {len(raw)}.")
+    encoding = meta.get("encoding", "interleaved")
+    if encoding == "interleaved":
+        return raw
+    if encoding != "planar-byte-shuffle":
+        raise RuntimeError(f"unknown surface-tile encoding {encoding!r}.")
+    b = np.frombuffer(raw, np.uint8).reshape(channels, 2, side * side)
+    return np.ascontiguousarray(b.transpose(2, 0, 1)).tobytes()
+
+
 def read_shader() -> str:
     """The shader source, or a diagnosis of why there isn't any."""
     if not SHADER_PATH.exists():
@@ -265,8 +301,10 @@ class SceneState:
         raises rather than render it.
 
     Under "desert" the same four row-9 numbers describe the desert tile,
-    `ocean_z` is the datum its heights stand on, and `ocean_reflectance`
-    packs as zeros. The ocean's haze extinction (row 19.y) still applies —
+    `ocean_z` is the datum its heights stand on, and row 8's other three
+    slots carry the tile's height range and its largest band-pass excursion
+    (`desert_relief_m`, from the tile's meta: height_min_m, height_max_m,
+    band_max_m) — what the shader's slab tests are built from. The ocean's haze extinction (row 19.y) still applies —
     it is the aerial perspective over whatever ground there is.
 
     The ViewState's ocean realism knobs (glint, slope draw, mip bias) are
@@ -305,6 +343,8 @@ class SceneState:
     # lands here so a reproduction command from a flight whose camera folds
     # moved the offset carries the value that flight rendered with.
     surface_offset_m: Optional[Sequence[float]] = None
+    # Row 8.yzw under DESERT — see above.
+    desert_relief_m: Sequence[float] = (0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -474,12 +514,13 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # Row 8 is the surface: sea level plus the water's reflectance, or — under
     # CITY — the ground plane and the tile's world offset (which district
     # sits under this field's cameras).
-    # Under DESERT only the datum: the desert has no reflectance row, its
-    # albedos are properties of the materials and live in the shader.
+    # Under DESERT the datum and the tile's relief: the desert has no
+    # reflectance row, its albedos are properties of the materials and live
+    # in the shader.
     if city:
         u[8] = (state.ocean_z, *state.city_tile_offset_m, 0.0)
     elif desert:
-        u[8] = (state.ocean_z, 0.0, 0.0, 0.0)
+        u[8] = (state.ocean_z, *state.desert_relief_m)
     else:
         u[8] = (state.ocean_z, *state.ocean_reflectance)
     # Row 9 needs no branch: cell size, tile extent, surface flag and top mip
@@ -744,28 +785,31 @@ class SoarRenderer:
         the loaded meta.json, and is where a caller reads the cell size and
         tile extent that SceneState has to be told about (surface_cell_m).
         """
+        import gzip
         import json
         wgpu = self.wgpu
         tile_dir = SURFACE_DIRS[self.surface]
         meta = json.loads((tile_dir / "meta.json").read_text())
         n, mips = int(meta["n"]), int(meta["mips"])
+        fmt = meta.get("format", "rgba16float")
+        texel_bytes = SURFACE_FORMAT_CHANNELS[fmt] * 2
         self.surface_meta = meta
         tex = self.device.create_texture(
-            size=(n, n, 1), dimension="2d", format="rgba16float",
+            size=(n, n, 1), dimension="2d", format=fmt,
             mip_level_count=mips,
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        for level in range(mips):
+        for level, name in enumerate(surface_level_files(meta)):
             side = max(1, n >> level)
-            raw = (tile_dir / f"fif_mip{level}.bin").read_bytes()
-            expected = side * side * 4 * 2
-            if len(raw) != expected:
-                raise RuntimeError(
-                    f"{tile_dir.name}/fif_mip{level}.bin is {len(raw)} bytes, "
-                    f"expected {expected} for a {side}x{side} rgba16float "
-                    "level.")
+            raw = (tile_dir / name).read_bytes()
+            if meta.get("compression") == "gzip":
+                raw = gzip.decompress(raw)
+            try:
+                data = decode_surface_level(raw, side, meta)
+            except RuntimeError as exc:
+                raise RuntimeError(f"{tile_dir.name}/{name}: {exc}") from None
             self.device.queue.write_texture(
-                {"texture": tex, "mip_level": level}, raw,
-                {"bytes_per_row": side * 8, "rows_per_image": side},
+                {"texture": tex, "mip_level": level}, data,
+                {"bytes_per_row": side * texel_bytes, "rows_per_image": side},
                 (side, side, 1))
         return tex
 
@@ -1098,3 +1142,9 @@ class SoarRenderer:
         img = raw.reshape(h, row // np.dtype(dtype).itemsize)[:, :w * 4]
         img = img.reshape(h, w, 4)
         return np.ascontiguousarray(img[:, :, :3], dtype=np.float64)
+
+
+def desert_relief_m(meta: dict) -> Tuple[float, float, float]:
+    """Row 8.yzw under DESERT, from the desert tile's meta.json."""
+    return (float(meta["height_min_m"]), float(meta["height_max_m"]),
+            float(meta["band_max_m"]))

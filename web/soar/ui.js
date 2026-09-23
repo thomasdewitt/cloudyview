@@ -2,7 +2,7 @@
 //
 // Menus are click-only. Keys are reserved for things you do WHILE flying —
 // where reaching for a menu would mean losing the shot — so the desktop's key
-// state machine does not come across. Esc, Tab, F, F3, B, M, R and P are
+// state machine does not come across. Esc, Tab, F, F3, B, G, M, R and P are
 // the whole keyboard surface once you are in the air.
 
 "use strict";
@@ -30,7 +30,7 @@ export const MODE_KEY = "soar.mode";
 export const MODES = {
   basic: {
     label: "Basic mode",
-    items: ["sun", "capture", "controls", "tutorial", "leave"],
+    items: ["sun", "ground", "capture", "controls", "tutorial", "leave"],
   },
   research: { label: "Research mode", items: null },
   cyberpunk: {
@@ -582,6 +582,19 @@ export class UI {
         if (this.panel === "main") this.open("main");
       }); },
       { disabled: Boolean(iceNote) }));
+    // What the day scene stands on. The night city is its own scene and has
+    // no row: it is chosen on the start page. Reopened once the switch has
+    // landed, so the row never names a ground that is not on screen yet (the
+    // desert's first use is a download).
+    if (!app.scene.city) {
+      const desert = app.surfaceKind === "desert";
+      add(appearance, "ground", item(
+        `Ground: ${desert ? "Sonoran desert" : "ocean"}`,
+        `switch to the ${desert ? "ocean" : "desert"} — G in flight`,
+        () => { app.setSurface(desert ? "ocean" : "desert").then(() => {
+          if (this.panel === "main") this.open("main");
+        }); }));
+    }
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two
     // that change the picture, above the overlay and window rows.
@@ -943,6 +956,8 @@ export class UI {
       ["B", app.availableFlyers.length
         ? `flyer — paper dart, swift, off (now: ${app.flyerLabel})`
         : `flyer — ${app._flyerProblem ?? "not available for this field"}`],
+      ...(app.scene.city ? [] : [["G", "ground — the ocean or the Sonoran " +
+                                    `desert (now: ${app.surfaceKind})`]]),
       ["M", app.minimap
         ? `minimap — corner, fullscreen, off (now: ${
             { corner: "corner", full: "fullscreen", off: "off" }[app.minimapMode]})`
