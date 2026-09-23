@@ -95,7 +95,7 @@ def main(argv=None) -> int:
     from cloudyview.soar_host import (
         STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
         APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
-        SceneState, SoarRenderer, ViewState,
+        SceneState, SoarRenderer, ViewState, surface_cell_m,
     )
     from cloudyview.witness import OCEAN_REFLECTANCE
 
@@ -236,8 +236,9 @@ def main(argv=None) -> int:
 
     # The shader is specialized at construction, so a missing CITY declaration
     # fails here, before a GPU has been asked to do anything.
+    surface = "city" if args.city else "ocean"
     try:
-        renderer = SoarRenderer(periodic=True, city=args.city)
+        renderer = SoarRenderer(periodic=True, surface=surface)
     except RuntimeError as exc:
         print(f"\nCannot build the {'city' if args.city else 'ocean'} "
               f"renderer:\n  {exc}", file=sys.stderr)
@@ -245,7 +246,7 @@ def main(argv=None) -> int:
     renderer.upload_volume(level.sigma)
 
     meta = renderer.surface_meta
-    cell_m = float(meta["cell_m"] if args.city else meta["dx_m"])
+    cell_m = surface_cell_m(surface, meta)
     tile_extent_m = float(meta["tile_extent_m"])
     max_lod = int(meta["mips"]) - 1
     print(f"  Surface tile: {'city' if args.city else 'ocean'}, "
@@ -263,7 +264,7 @@ def main(argv=None) -> int:
         ocean_tile_extent=tile_extent_m,
         ocean_max_lod=max_lod,
         ocean_enabled=True,
-        city=args.city,
+        surface=surface,
         **({"city_tile_offset_m": tuple(args.city_offset)}
            if args.city_offset is not None else {}),
     )

@@ -1,0 +1,9 @@
+{
+ "schema": "cloudyview.web.desert.v1",
+ "n": 64,
+ "cell_m": 64.0,
+ "mips": 7,
+ "format": "rgba16float",
+ "tile_extent_m": 4096.0,
+ "note": "PLACEHOLDER: flat, until tools/export_desert_tile.py bakes the eroded tile"
+}
