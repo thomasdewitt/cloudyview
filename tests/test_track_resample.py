@@ -58,11 +58,13 @@ def _synthetic_samples(with_surface: bool, seed: int = 7):
     return samples
 
 
-def _js_resample(samples, fps, periodic=True):
+def _js_resample(samples, fps, periodic=True, linear_position=False):
     script = textwrap.dedent(f"""
         import {{ resampleTrack }} from "{TRACK_JS.as_uri()}";
         const frames = resampleTrack({json.dumps(samples.tolist())}, {fps},
-                                     {{ periodic: {str(periodic).lower()} }});
+                                     {{ periodic: {str(periodic).lower()},
+                                        linearPosition:
+                                          {str(linear_position).lower()} }});
         console.log(JSON.stringify(frames));
     """)
     out = subprocess.run(["node", "--input-type=module", "-e", script],
@@ -71,12 +73,14 @@ def _js_resample(samples, fps, periodic=True):
 
 
 @needs_node
+@pytest.mark.parametrize("linear_position", [False, True])
 @pytest.mark.parametrize("with_surface", [True, False])
-def test_python_resample_matches_track_js(with_surface):
+def test_python_resample_matches_track_js(with_surface, linear_position):
     samples = _synthetic_samples(with_surface)
     fps = 30.0
-    py = tr.resample_track(samples, fps, periodic=True)
-    js = _js_resample(samples, fps)
+    py = tr.resample_track(samples, fps, periodic=True,
+                           linear_position=linear_position)
+    js = _js_resample(samples, fps, linear_position=linear_position)
     assert len(py) == len(js) == tr.frame_count_between(
         samples[0, 0], samples[-1, 0], fps)
     for p, j in zip(py, js):

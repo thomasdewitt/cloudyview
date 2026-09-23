@@ -1033,7 +1033,7 @@ export class UI {
   /** What R offers when you stop recording — including every video option.
    *  Video settings live HERE, not in the capture panel: they only mean
    *  anything once a track exists (Thomas, 2026-08-11). */
-  _panel_track({ samples }) {
+  _panel_track({ samples, knocks }) {
     const app = this.app;
     const m = this.menu;
     const duration = samples[samples.length - 1][0];
@@ -1050,14 +1050,14 @@ export class UI {
       (v) => v === (app.captureSize ? app.captureSize.join("x") : "window"),
       (v) => {
         app.captureSize = v === "window" ? null : v.split("x").map(Number);
-        this.open("track", { samples });
+        this.open("track", { samples, knocks });
       }));
 
     // Whether video works at all is a question only video.js can answer, and
     // it answers it by encoding a frame — so the button is built optimistically
     // and the capability line is filled in once the module has loaded.
     const render = item("Render it to video", "",
-                        () => app.renderTrackVideo(samples));
+                        () => app.renderTrackVideo(samples, knocks));
     const refresh = () => {
       let frames = null, problem = "";
       try {
@@ -1127,7 +1127,10 @@ export class UI {
       if (note) note.textContent = caps.why;
     });
     m.append(item("Save the track", "a .json the soar command renders to video",
-                  () => { app.downloadTrack(samples); this.open("main"); }));
+                  () => {
+                    app.downloadTrack(samples, knocks);
+                    this.open("main");
+                  }));
     m.append(item("Discard it", null, () => this.open("main")));
   }
 
@@ -1231,6 +1234,69 @@ export class UI {
     m.append(item(T.coordUnitsM, null, () => onPick("m")));
     m.append(item(T.coordUnitsKm, null, () => onPick("km")));
     m.append(el("div", "divider"));
+    m.append(item(T.back, T.backNote, onCancel));
+  }
+
+  /**
+   * The grid spacing of a regular grid whose file carries no coordinate in
+   * meters for some axes — none at all, or degrees, or a level index.
+   *
+   * One input per axis that needs it, in meters, empty to start: nothing in
+   * the file is evidence of the spacing, so nothing is pre-filled. With z,
+   * which end the first level is, unselected to start for the same reason —
+   * a level index does not say, and a wrong answer renders the field upside
+   * down. Continue stays refused until every answer is usable.
+   */
+  _panel_gridSpacing({ axes, filename, group, onPick, onCancel }) {
+    const m = this.menu;
+    m.append(this._header(T.kicker, T.askGridSpacing));
+    m.append(el("div", "row", T.source(filename, group)));
+    for (const a of axes) {
+      m.append(el("div", "row", T.gridSpacingWhy(a.axis, a.dim, a.found)));
+    }
+    m.append(el("div", "row", T.gridSpacingRegular));
+    const inputs = {};
+    for (const a of axes) {
+      const row = el("div", "row spacing");
+      const input = el("input");
+      input.type = "number";
+      input.min = "0";
+      input.step = "any";
+      input.inputMode = "decimal";
+      // Typing here must not fly the camera or open a panel.
+      input.addEventListener("keydown", (e) => e.stopPropagation());
+      row.append(el("label", null, T.gridSpacingAxis(a.axis, a.size)), input);
+      m.append(row);
+      inputs[a.axis] = input;
+    }
+    let zFirst = null;
+    if (inputs.z) {
+      m.append(el("div", "row", T.gridSpacingZFirst));
+      const chips = segmented(
+        [[T.gridSpacingBottom, "bottom"], [T.gridSpacingTop, "top"]],
+        (v) => v === zFirst,
+        (v) => { zFirst = v; chips.refresh(); });
+      m.append(chips);
+    }
+    const problem = el("div", "row warn");
+    m.append(problem);
+    m.append(el("div", "divider"));
+    m.append(item(T.gridSpacingConfirm, null, () => {
+      const spacing = {};
+      for (const [axis, input] of Object.entries(inputs)) {
+        const d = Number(input.value);
+        if (input.value.trim() === "" || !(Number.isFinite(d) && d > 0)) {
+          problem.textContent = T.gridSpacingInvalid(axis);
+          return;
+        }
+        spacing[axis] = d;
+      }
+      if (inputs.z && !zFirst) {
+        problem.textContent = T.gridSpacingPickZFirst;
+        return;
+      }
+      onPick(spacing, zFirst);
+    }));
     m.append(item(T.back, T.backNote, onCancel));
   }
 

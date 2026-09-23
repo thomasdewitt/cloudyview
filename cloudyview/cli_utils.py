@@ -122,6 +122,21 @@ def add_dataset_selection_arguments(parser: argparse.ArgumentParser) -> None:
              "units convert on their own; without this flag an unrecognized "
              "units string is an error.",
     )
+    for axis in ("x", "y", "z"):
+        parser.add_argument(
+            f"--d{axis}", type=float, metavar="METERS",
+            help=f"Grid spacing of the {axis} axis, for a regular grid whose "
+                 f"file has no {axis} coordinate in a unit of length (none, "
+                 "degrees, a level index). Cells are placed this far apart "
+                 "from 0, uniformly. Refused on an axis that has meters of "
+                 "its own.",
+        )
+    parser.add_argument(
+        "--z-first", choices=["top", "bottom"],
+        help="With --dz: which end the file's first vertical level is. "
+             "Required, because a level index does not say which end is the "
+             "ground.",
+    )
     ice = parser.add_mutually_exclusive_group()
     ice.add_argument(
         "--ice-file", "--ice", dest="ice_file", metavar="FILE",
@@ -157,4 +172,8 @@ def dataset_selection_kwargs(args: argparse.Namespace) -> dict:
         "fallback_coord_units": args.coord_units,
         "ice": args.ice_file,
         "no_ice": args.no_ice,
+        "grid_spacing": {axis: getattr(args, f"d{axis}")
+                         for axis in ("x", "y", "z")
+                         if getattr(args, f"d{axis}") is not None} or None,
+        "z_first": args.z_first,
     }
