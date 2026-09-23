@@ -2155,6 +2155,8 @@ const CITY_GROUND_Z: f32 = 0.0;
 const CITY_MAX_H: f32 = 5400.0;     // tallest roof (before mast)
 const CITY_SLAB_TOP: f32 = 5600.0;  // roof + tallest mast: the DDA's z gate
 const CITY_FLOOR_H: f32 = 3.6;      // one storey; window rows ride this
+const CITY_PER_STOREY: f32 = 0.2777777777777778;  // 1 / CITY_FLOOR_H
+const CITY_MAX_STOREYS: f32 = 1500.0;             // CITY_MAX_H / CITY_FLOOR_H
 const CITY_STREET_HALF: f32 = 6.0;  // half-width of a minor street (m)
 const CITY_AVENUE_EXTRA: f32 = 10.0; // extra half-width on avenue boundaries
 const CITY_AVENUE_PERIOD: i32 = 8;  // avenue every this many blocks
@@ -2305,7 +2307,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 // cloudyview/soar/city/components/, each owning one kind of thing (a street
 // prop, a facade layer, an elevated highway), registered in registry.json
 // and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls five hooks; the composer generates their
+// markers below. The core calls six hooks; the composer generates their
 // dispatchers over whatever is registered, and when nothing is, the
 // defaults below make every hook a no-op — except the shade dispatcher,
 // which returns magenta, because an unclaimed hit kind is a bug and should
@@ -2325,6 +2327,9 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //   cc_window_glyph      transmission multiplier inside a lit pane
 //                        (curtains, figures, androids) — 1 leaves the
 //                        window exactly as it was.
+//   cc_roof_detail       additive roof emission (a warehouse's lit
+//                        sawtooth glazing) at EVERY range — the far-field
+//                        mean of roof geometry that props draw only near.
 //
 // Component hits reuse CityHit with kind >= 100. See components/SPEC.md for
 // the contract agents write against.
@@ -2613,15 +2618,21 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
 
     // Height: base + the cascade raised to a power, jittered, suppressed
     // toward the outskirts, and quantized to storeys so roofs are flat
-    // shelves rather than a continuum.
+    // shelves rather than a continuum. Every level below is a whole number
+    // of storeys, carried as the count ns and multiplied, never divided:
+    // WGSL rounds a product exactly but a quotient only to 2.5 ulp (NVIDIA
+    // divides by 3.6 as a multiply by its reciprocal), so floor(h * 0.75 /
+    // 3.6) lands a storey high on one GPU and not on another whenever
+    // 0.75 ns is whole — and the city must be the same city on every GPU,
+    // and in the JavaScript collision mirror (web/soar/citylots.js).
     let sprawl = mix(
         CITY_SPRAWL_MIN_FRAC, 1.0,
         smoothstep(CITY_EMPTY_RANK, CITY_SPRAWL_RANK_FULL, c.rank)
     );
-    var h = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
-            * (0.70 + 0.60 * r4.x) * sprawl;
-    h = clamp(floor(h / CITY_FLOOR_H) * CITY_FLOOR_H,
-              2.0 * CITY_FLOOR_H, CITY_MAX_H);
+    let h_raw = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
+                * (0.70 + 0.60 * r4.x) * sprawl;
+    let ns = clamp(floor(h_raw * CITY_PER_STOREY), 2.0, CITY_MAX_STOREYS);
+    let h = ns * CITY_FLOOR_H;
     c.height = h;
 
     // Footprint grows with height, the way a real city's does. Low-rise is
@@ -2657,7 +2668,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             podium = true;
             let storeys = floor(mix(3.0, select(8.0, 12.0, c.merged), r4f.z));
             zp = min(storeys * CITY_FLOOR_H,
-                     floor(h / (3.0 * CITY_FLOOR_H)) * CITY_FLOOR_H);
+                     floor(ns * 0.33333334) * CITY_FLOOR_H);
         }
     }
     let slack = plot_size - fw;
@@ -2739,7 +2750,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         // Podium + a shaft whose cross-section closes toward the crown. The
         // podium is the plot-wide one where the tower left room for it,
         // otherwise a base course of the tower's own footprint.
-        zp = select(max(floor(h * 0.12 / CITY_FLOOR_H) * CITY_FLOOR_H,
+        zp = select(max(floor(ns * 0.12) * CITY_FLOOR_H,
                         CITY_FLOOR_H), zp, podium);
         c.b1min = vec3<f32>(select(bmin2, pod_min, podium), CITY_GROUND_Z);
         c.b1max = vec3<f32>(select(bmax2, pod_max, podium), zp);
@@ -2751,7 +2762,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     } else if (c.arch == 4) {
         // A straight shaft to three quarters, then a steep spire — on the
         // podium, when there is one, as a stacked tier.
-        let zs = floor(h * 0.75 / CITY_FLOOR_H) * CITY_FLOOR_H;
+        let zs = floor(ns * 0.75) * CITY_FLOOR_H;
         if (podium) {
             c.tiers = 2;
             c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
@@ -2774,9 +2785,9 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.b1max = vec3<f32>(bmax2, h);
         c.tiers = 2;
         let side = i32(floor(r4d.z * 4.0));   // which flank the bud rides
-        let bz0 = floor(h * (0.42 + 0.20 * r4d.w) / CITY_FLOOR_H)
+        let bz0 = floor(ns * (0.42 + 0.20 * r4d.w))
                   * CITY_FLOOR_H;
-        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * h / CITY_FLOOR_H)
+        let bz1 = min(bz0 + floor((0.10 + 0.10 * r4b.y) * ns)
                             * CITY_FLOOR_H + CITY_FLOOR_H,
                       h - CITY_FLOOR_H);
         let reach = 0.22 * min(fw.x, fw.y);
@@ -2802,7 +2813,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.b2max = vec3<f32>(bud_max, bz1);
         if (h > 200.0 && r4b.y > 0.55) {
             c.tiers = 3;
-            let cz0 = floor(h * (0.68 + 0.12 * r4b.w) / CITY_FLOOR_H)
+            let cz0 = floor(ns * (0.68 + 0.12 * r4b.w))
                       * CITY_FLOOR_H;
             let cz1 = min(cz0 + 8.0 * CITY_FLOOR_H, h - CITY_FLOOR_H);
             // The second bud rides the opposite flank: mirror about bc.
@@ -2817,7 +2828,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         // Podium, tower, crown: the setback stack with the street wall at
         // the bottom and the tower's own crown setback at the top.
         c.tiers = 3;
-        let zc = floor(h * (0.70 + 0.15 * r4b.w) / CITY_FLOOR_H)
+        let zc = floor(ns * (0.70 + 0.15 * r4b.w))
                  * CITY_FLOOR_H;
         c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
         c.b1max = vec3<f32>(pod_max, zp);
@@ -2831,10 +2842,10 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         var z1 = h;
         if (h > 90.0 && r4b.y > 0.45) {
             c.tiers = 2;
-            z1 = floor(h * 0.60 / CITY_FLOOR_H) * CITY_FLOOR_H;
+            z1 = floor(ns * 0.60) * CITY_FLOOR_H;
             if (h > 180.0 && r4b.y > 0.80) {
                 c.tiers = 3;
-                z1 = floor(h * 0.50 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                z1 = floor(ns * 0.50) * CITY_FLOOR_H;
             }
         }
         c.b1min = vec3<f32>(bmin2, CITY_GROUND_Z);
@@ -2843,7 +2854,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             var z2 = h;
             var f2 = 0.68;
             if (c.tiers == 3) {
-                z2 = floor(h * 0.78 / CITY_FLOOR_H) * CITY_FLOOR_H;
+                z2 = floor(ns * 0.78) * CITY_FLOOR_H;
                 f2 = 0.72;
             }
             let fw2 = fw * f2;
@@ -3476,7 +3487,8 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
         if (din < 1.2) {
             alb = alb * 2.2;
         }
-        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0))
+               + cc_roof_detail(cc, h, fp);
     }
     if (h.kind == 1) {   // facade
         // Normalized horizontal tangent: a frustum face's normal carries a
@@ -7133,9 +7145,10 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
                                inv_dir: vec3<f32>, t0: f32, t1: f32,
                                ci: vec2<i32>, cc: CityCell) -> CityHit {
     // Gate 0, no hash, no arithmetic: unbuilt lots and spire crowns are not
-    // ours. The architecture rule is enforced here first and in the deck
-    // function second, so neither can be got around.
-    if (!cc.built || cc.arch == 4) {
+    // ours, and neither are warehouse roofs (the industry component's
+    // sawtooth and monitor ridges). The architecture rule is enforced here
+    // first and in the deck function second, so neither can be got around.
+    if (!cc.built || cc.arch == 4 || cc.land_use == CITY_USE_INDUSTRIAL) {
         return cc_rooftopworks_miss(ci);
     }
     let za = o.z + t0 * dir.z;
@@ -10529,6 +10542,12 @@ fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>, fp: f32)
     var t = vec3<f32>(1.0);
     t = t * cc_windowlife_glyph(cc, wh, pane_uv, fp);
     return t;
+}
+
+fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
+        -> vec3<f32> {
+    var e = vec3<f32>(0.0);
+    return e;
 }
 // <<< GENERATED CITY COMPONENTS
 
