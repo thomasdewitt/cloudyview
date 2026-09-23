@@ -335,7 +335,9 @@ _JS = textwrap.dedent("""
         clw: dataset([96, 256, 512], { 0: "height", 1: "lat", 2: "lon" },
                      { units: "kg/kg" }),
       }), "");
-      return { coordNames: d.coordNames };
+      return { coordNames: d.coordNames, coords: d.coords,
+               needsGridSpacing: d.needsGridSpacing,
+               gridSpacingNeeded: d.gridSpacingNeeded };
     });
 
     // A length is a length; the numbers just are not metres yet.
@@ -760,11 +762,16 @@ def test_kilometres_are_converted_and_said_so(result):
 
 
 def test_declared_non_length_coordinates_are_refused(result):
-    """ICON's degrees and level indices: an error, not a nonsense box."""
+    """ICON's degrees and level indices: never a nonsense box. Since
+    2026-09-23 the refusal is the grid-spacing question rather than an
+    error — no coordinates, nothing placed, until a spacing is stated (see
+    tests/test_grid_spacing.py for the answer's side)."""
     got = result["nothingIsALength"]
-    assert not got["ok"]
-    assert "unit of length" in got["message"]
-    assert "degrees_east" in got["message"]
+    assert got["ok"], got.get("message")
+    v = got["value"]
+    assert v["needsGridSpacing"] is True and v["coords"] is None
+    found = {a["axis"]: a["found"] for a in v["gridSpacingNeeded"]}
+    assert "degrees_east" in found["x"] and "degrees_north" in found["y"]
 
 
 # --- the timestep ------------------------------------------------------------
@@ -856,8 +863,10 @@ def test_the_coordinate_units_answer_is_applied_and_stated(result):
 def test_recognized_non_length_units_still_refuse(result):
     """A level index is KNOWN not to be a length; m-or-km cannot answer it."""
     got = result["coordUnitsLevelIndex"]
-    assert got["ok"] is False
-    assert "unit of length" in got["message"]
+    assert got["ok"], got.get("message")
+    assert got["value"]["needsCoordUnitsChoice"] is False
+    assert got["value"]["needsGridSpacing"] is True
+    assert got["value"]["coords"] is None
 
 
 # --- the last-resort sweep needs the axis's own dimension ---------------------
@@ -874,9 +883,11 @@ def test_the_sweep_takes_only_variables_on_the_axis_dimension(result):
 
 def test_no_associated_variable_is_a_refusal_not_a_grab(result):
     got = result["sweepNothingAssociated"]
-    assert got["ok"] is False
-    assert "No coordinate variable found" in got["message"]
-    assert "zt" in got["message"]
+    assert got["ok"], got.get("message")
+    (need,) = got["value"]["gridSpacingNeeded"]
+    assert need["axis"] == "z" and need["dim"] == "zt"
+    assert need["found"] == "no coordinate variable"
+    assert got["value"]["coords"] is None
 
 
 # --- packed coordinates -------------------------------------------------------

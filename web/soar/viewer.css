@@ -298,6 +298,24 @@ button.resume kbd {
   font-size: 12px;
   color: var(--ink-bright);
 }
+/* The grid-spacing question: one meters box per axis that needs it. */
+.row.spacing input[type="number"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--ui-mono);
+  font-size: 13px;
+  color: var(--ink-bright);
+  background: transparent;
+  border: 1px solid var(--ink-dim);
+  border-radius: var(--control-radius);
+  padding: 4px 6px;
+}
+.row.spacing input[type="number"]:focus {
+  outline: none;
+  border-color: var(--hot);
+}
+.row.warn { color: var(--hot); }
+.row.warn:empty { display: none; }
 .row input[type="range"] {
   flex: 1 1 auto;
   min-width: 0;

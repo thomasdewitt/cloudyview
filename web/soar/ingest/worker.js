@@ -245,7 +245,11 @@ async function openIce({ file }) {
   await installNeededPlugins(iceRoot);
 
   const paths = findVolumeGroups(iceRoot);
-  if (!paths.length) throw new Error(T.noVariables(file.name));
+  if (!paths.length) {
+    const err = new Error(T.noVariables(file.name));
+    err.advice = T.noVariablesAdvice;
+    throw err;
+  }
 
   const groups = [];
   const problems = [];
@@ -265,6 +269,21 @@ async function openIce({ file }) {
 }
 
 /**
+ * A description with an axis still waiting on its grid spacing has no
+ * coordinates to place or compare, and assertSameGrid would skip what it
+ * cannot see. The loader asks before anything reads; reaching here without
+ * the answer means an axis the water file placed has no meters in this one,
+ * which is two different grids.
+ */
+function refuseUnplaced(description, name) {
+  if (!description.needsGridSpacing) return;
+  throw new Error(
+    `${name}: no coordinate in meters for ` +
+    description.gridSpacingNeeded.map((g) => g.axis).join(", ") +
+    ", and no grid spacing was given for it.");
+}
+
+/**
  * Re-describe one ice group with the user's choices, and check it against the
  * water group it is to be paired with. Returns the ice description; throws
  * with the grids side by side if they are not the same grid.
@@ -272,6 +291,7 @@ async function openIce({ file }) {
 async function iceGrid({ group, choice, waterGroup, waterChoice, filename }) {
   const water = describeGroup(root, waterGroup, waterChoice ?? null);
   const ice = describeIceGroup(iceRoot, group, choice ?? null);
+  refuseUnplaced(ice, filename);
   assertSameGrid(water, ice, filename);
   return ice;
 }
@@ -295,7 +315,11 @@ async function open({ file, choice = null }) {
   // NAME is inference's job and a miss there is a question, not a refusal —
   // so the only file with nothing to offer is one with no volume in it.
   const paths = findVolumeGroups(root);
-  if (!paths.length) throw new Error(T.noVariables(file.name));
+  if (!paths.length) {
+    const err = new Error(T.noVariables(file.name));
+    err.advice = T.noVariablesAdvice;
+    throw err;
+  }
 
   const groups = [];
   const problems = [];
@@ -359,6 +383,7 @@ async function extinction({ group, units, label, slabBudget, choice = null,
       `Coordinate units were never resolved for ` +
       `${description.coordUnitsUnrecognized.join(", ")}.`);
   }
+  refuseUnplaced(description, label);
   const handle = group ? root.get(group) : root;
   const dataset = handle.get(description.liquidVar);
 
@@ -388,6 +413,7 @@ async function extinction({ group, units, label, slabBudget, choice = null,
     }
     const attached = describeIceGroup(
       iceRoot, iceFrom.group, iceFrom.choice ?? null);
+    refuseUnplaced(attached, iceFrom.filename);
     assertSameGrid(description, attached, iceFrom.filename);
     const iceHandle = iceFrom.group ? iceRoot.get(iceFrom.group) : iceRoot;
     iceDataset = iceHandle.get(attached.iceVar);

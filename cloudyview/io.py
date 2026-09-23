@@ -310,8 +310,11 @@ def validate_data(ds: xr.Dataset, data_var: xr.DataArray, var_name: str,
     # Check 3D spatial data (should have at least 3 non-time dimensions)
     spatial_dims = [d for d in data_var.dims if 'time' not in d.lower()]
     if len(spatial_dims) < 3:
-        raise ValueError(f"Data has {len(spatial_dims)} spatial dimensions. "
-                       "3D spatial data is required (e.g., x, y, z).")
+        raise ValueError(
+            f"Data has {len(spatial_dims)} spatial dimensions. 3D spatial "
+            "data on a regular grid is required (e.g., x, y, z). "
+            "Unstructured output, such as ICON's native cells, needs "
+            "regridding onto one first; --dx/--dy/--dz cannot place it.")
 
     # Each spatial dimension must have at least 2 points for grid spacing
     for dim in spatial_dims:
@@ -765,6 +768,60 @@ def _candidate_coords(
     return found
 
 
+class NoLengthCoordinate(ValueError):
+    """An axis with no coordinate in a unit of length: the refusal that a
+    stated grid spacing (--dx/--dy/--dz) is the only way past."""
+
+
+GRID_SPACING_FLAGS = {"x": "--dx", "y": "--dy", "z": "--dz"}
+
+
+def check_grid_spacing(grid_spacing: Optional[dict],
+                       z_first: Optional[str]) -> dict:
+    """Validate a stated grid spacing: {axis: metres} and the z orientation.
+
+    The vertical order goes with a vertical spacing and nowhere else: a
+    level index says nothing about which end is the ground (ICON counts its
+    levels DOWN from the model top), and assuming renders a plausible
+    upside-down field.
+    """
+    spacing = dict(grid_spacing or {})
+    for axis, d in spacing.items():
+        if axis not in GRID_SPACING_FLAGS:
+            raise ValueError(f"grid_spacing axis must be x, y or z; got "
+                             f"'{axis}'.")
+        if not (np.isfinite(d) and d > 0):
+            raise ValueError(
+                f"{GRID_SPACING_FLAGS[axis]} must be a positive number of "
+                f"meters; got {d}.")
+    if "z" in spacing and z_first not in ("top", "bottom"):
+        raise ValueError(
+            "--dz needs --z-first top|bottom: a level index does not say "
+            "which end is the ground, and guessing renders the field upside "
+            "down.")
+    if "z" not in spacing and z_first is not None:
+        raise ValueError("--z-first only goes with --dz.")
+    return spacing
+
+
+def _spaced_coordinate(axis: str, n: int, d: float, z_first: Optional[str],
+                       assumptions: list):
+    """Cell centres `d` metres apart from 0, as stated — uniform, never
+    inferred. A top-first vertical is written descending, which the load's
+    own flip then puts in ascending order with the data."""
+    values = (np.arange(n, dtype=np.float64) + 0.5) * float(d)
+    where = ""
+    if axis == "z":
+        if z_first == "top":
+            values = values[::-1].copy()
+        where = f", first level at the {z_first}"
+    assumptions.append(
+        f"No {axis} coordinate in a unit of length; placed the {n} cells "
+        f"{d:g} m apart{where}, as given ({GRID_SPACING_FLAGS[axis]}). The "
+        "spacing is uniform: a stretched grid cannot be stated this way.")
+    return values
+
+
 def _coordinate_in_metres(name, var, axis, assumptions: list,
                           fallback_coord_units: Optional[str] = None):
     """A chosen coordinate variable's values, converted to metres.
@@ -792,10 +849,12 @@ def _coordinate_in_metres(name, var, axis, assumptions: list,
     scale = _metres_per_unit(units)
     if scale is None:
         if _is_non_length_unit(units):
-            raise ValueError(
+            raise NoLengthCoordinate(
                 f"The {axis} coordinate '{name}' is in '{units}', which is "
                 "not a unit of length and cannot place the field in space. "
-                "Cell-center coordinates in meters are required.")
+                "Cell-center coordinates in meters are required. On a "
+                "regular grid whose spacing is known, state it with "
+                f"{GRID_SPACING_FLAGS[axis]}.")
         if fallback_coord_units is None:
             raise ValueError(
                 f"The {axis} coordinate '{name}' has unrecognized units "
@@ -863,11 +922,12 @@ def _lookup_axis_coord(
     if not usable(var) and _is_non_length_unit(var.attrs.get("units")):
         described = ", ".join(
             f"'{n}' ({v.attrs.get('units') or 'no units'})" for n, v in found)
-        raise ValueError(
+        raise NoLengthCoordinate(
             f"No {axis} coordinate in a unit of length: found {described}. "
             "Cell-center coordinates in meters are required — they are what "
-            "places the field in space. If the grid spacing is known, write "
-            "coordinate variables in meters into the file."
+            "places the field in space. On a regular grid whose spacing is "
+            f"known, state it with {GRID_SPACING_FLAGS[axis]} (meters); "
+            "otherwise write coordinate variables in meters into the file."
         )
 
     return name, _coordinate_in_metres(
@@ -897,11 +957,19 @@ def _extract_coords(
     timestep: Optional[int] = None,
     assumptions: Optional[list] = None,
     fallback_coord_units: Optional[str] = None,
+    grid_spacing: Optional[dict] = None,
+    z_first: Optional[str] = None,
 ):
     """
     Extract x, y, z coordinate arrays (in metres) from a data array, handling
     cases where coordinate variable names differ from dimension names (e.g.,
     dim 'ni' with coord 'x(ni)').
+
+    `grid_spacing` ({axis: metres}, with `z_first` for z) is the stated way
+    past the one refusal that has no other: an axis with no coordinate in a
+    unit of length, or none at all. It applies only there. Stated for an axis
+    that has meters of its own, or together with that axis's --x-coord, it
+    refuses — it can never quietly replace real coordinates.
 
     Returns ``(coords, dims_map, coord_names)`` where `coords` maps axis to
     a value array or None, `dims_map` maps axis to the storage dimension
@@ -910,6 +978,7 @@ def _extract_coords(
     """
     if assumptions is None:
         assumptions = []
+    spacing = check_grid_spacing(grid_spacing, z_first)
     datasets = _unique_datasets(datasets)
     data_array, dims_map = _resolve_spatial_dims(
         data_array,
@@ -932,6 +1001,27 @@ def _extract_coords(
     for axis in ("x", "y", "z"):
         axis_dim = dims_map[axis]
         coord_name = coord_overrides[axis]
+        if axis in spacing:
+            if coord_name is not None:
+                raise ValueError(
+                    f"{GRID_SPACING_FLAGS[axis]} and --{axis}-coord both "
+                    f"describe the {axis} axis; pass one of them.")
+            try:
+                name, values = _lookup_axis_coord(
+                    data_array, datasets, axis, axis_dim, [],
+                    fallback_coord_units)
+            except NoLengthCoordinate:
+                name, values = None, None
+            if values is not None:
+                raise ValueError(
+                    f"The {axis} axis already has meters in '{name}'; "
+                    f"{GRID_SPACING_FLAGS[axis]} is only for an axis with "
+                    "no coordinate in a unit of length.")
+            coords[axis] = _spaced_coordinate(
+                axis, int(data_array.sizes[axis_dim]), spacing[axis],
+                z_first, assumptions)
+            coord_names[axis] = None
+            continue
         if coord_name is not None:
             var = _named_coord_var(data_array, datasets, coord_name, axis_dim)
             if var is None:
@@ -1021,6 +1111,8 @@ def load_and_validate(
     fallback_coord_units: Optional[str] = None,
     timestep: Optional[int] = None,
     no_ice: bool = False,
+    grid_spacing: Optional[dict] = None,
+    z_first: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Load NetCDF file and validate it, inferring variable names and checking units.
@@ -1073,6 +1165,13 @@ def load_and_validate(
     no_ice : bool, optional
         Skip the ice variable even when one could be inferred — the CLI
         spelling of the browser's "No ice" answer.
+    grid_spacing : dict, optional
+        {axis: meters} for axes with no coordinate in a unit of length
+        (--dx/--dy/--dz): cell centres at (i + 0.5) * d, uniform, stated.
+        Refused on an axis that has a length coordinate.
+    z_first : str, optional
+        'top' or 'bottom': which end the first vertical level is. Required
+        with a z spacing and only with it (--z-first).
 
     Returns
     -------
@@ -1160,6 +1259,8 @@ def load_and_validate(
         timestep=timestep,
         assumptions=assumptions,
         fallback_coord_units=fallback_coord_units,
+        grid_spacing=grid_spacing,
+        z_first=z_first,
     )
     x_coord, y_coord, z_coord = coords["x"], coords["y"], coords["z"]
 
@@ -1212,6 +1313,10 @@ def load_and_validate(
             ice_coord_overrides = {
                 "x": x_coord_name, "y": y_coord_name, "z": z_coord_name}
             for axis in ("x", "y", "z") if ice_dims_map else ():
+                if axis in (grid_spacing or {}):
+                    # The stated spacing places both files' cells; the
+                    # shape check below is what holds them together.
+                    continue
                 lw_c = {"x": x_coord, "y": y_coord, "z": z_coord}[axis]
                 axis_dim = ice_dims_map[axis]
                 # Conversion notes for the ice file's own coordinates are
@@ -1290,10 +1395,13 @@ def load_and_validate(
     if x_coord is None or y_coord is None or z_coord is None:
         missing = [a for a, c in zip("xyz", (x_coord, y_coord, z_coord))
                    if c is None]
-        raise ValueError(
+        raise NoLengthCoordinate(
             f"No coordinate variable found for the {', '.join(missing)} "
             "dimension(s). Cell-center coordinates in meters are required "
-            "for all three axes — they are what places the field in space."
+            "for all three axes — they are what places the field in space. "
+            "On a regular grid whose spacing is known, state it with "
+            + ", ".join(GRID_SPACING_FLAGS[a] for a in missing)
+            + " (meters)."
         )
 
     for sentence in assumptions:
