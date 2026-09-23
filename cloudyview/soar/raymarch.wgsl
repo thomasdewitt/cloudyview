@@ -3191,8 +3191,8 @@ const CITY_REFL_RANGE: f32 = 600.0;
 const CITY_REFL_LOD: vec2<f32> = vec2<f32>(0.30, 0.80);
 
 // Storefront light spilling onto the pavement in front of it.
-const CITY_STORE_SPILL: f32 = 0.05;
-const CITY_STORE_SPILL_L: f32 = 1.8;
+const CITY_STORE_SPILL: f32 = 0.12;
+const CITY_STORE_SPILL_L: f32 = 2.5;
 
 // The lamp heads, as streetlife hangs them: CITY_LAMP_ARM out over the road
 // from the lamp line, at CITY_LAMP_HEAD_Z.

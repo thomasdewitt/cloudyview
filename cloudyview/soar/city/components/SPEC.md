@@ -108,6 +108,34 @@ Signatures (the composer checks these by compiling):
   (`pane_uv` in [0,1]^2, `wh` is that window's hash draw). Return
   `vec3(1.0)` to leave a window alone. Sub-pixel glyphs (fp much larger
   than a pane) must return your glyph's mean transmission, not 1.
+- `media` — `fn (o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+  t_max: f32, pixel_angle: f32, rnd: f32) -> vec4<f32>` — participating
+  media between the eye and the city hit at `t_max` (steam): in-scattered
+  radiance in rgb, transmittance in a. The core applies it as
+  `rgb + a * city`; `(0, 0, 0, 1)` is the identity. `rnd` is a per-pixel
+  stratified uniform over the accumulation, for jittering a march.
+
+## The street (core section THE STREET SURFACE)
+
+The ground is a cross-section around each plot: sidewalk (`CITY_SIDEWALK_W`,
+`_AVE` on avenues), kerb (`CITY_KERB_H` high), gutter, parking lane, travel
+lanes. `city_kerb_rect(cc)` / `city_kerb_sd(p, cc, kr)` give the kerb line
+(negative on the sidewalk), `city_road(p)` where a point sits in the network,
+`city_manhole(k, j, along_y)` the manhole lattice, and
+`city_street_light(p, n)` / `city_street_light_g(p, n, g)` the sodium light
+of the lamp lattice on a surface or in a medium — light props with it. Gate
+anything that stands along an edge on `city_edge_street(cc, side)`.
+
+**The sidewalk slab reports its top as ground.** streetlife traces the
+raised slab and returns kind 0 for its top face, so the core shades it (and
+reflects off it) exactly as it shades the z = 0 plane beyond the prop range.
+That is the one sanctioned exception to "component hits use your own kinds".
+
+**Wet reflections do not see props.** The reflected ray off wet ground is
+traced with `props = false`: no `cell_props` or `extra_trace` hook runs for
+it (their second inlined copy cost 20-36% on views that never reflect). A
+component's geometry therefore never appears in a puddle; its facade and
+window hooks do, because the reflected hit is shaded by `city_shade`.
 
 ## Detailed micro-geometry: the SDF-in-a-box pattern
 
