@@ -4898,9 +4898,12 @@ fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (fp < cc_aircars_SDF_FP) {
         return cc_aircars_sdf_hit(o, dir, inv_dir, t0, t1, v, lane, ci, fp);
     }
-    let hx = cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W);
-    let hmin = vec3<f32>(v.base.xy - hx, v.base.z);
-    let hmax = vec3<f32>(v.base.xy + hx, v.base.z + cc_aircars_HULL_H);
+    // The hull box, grown toward a pixel once the craft is smaller than one
+    // (cc_aircars_grown); the shader dilutes it by the same factor.
+    let hc = cc_aircars_hull_centre(v);
+    let he = cc_aircars_grown(v);
+    let hmin = hc - he;
+    let hmax = hc + he;
     let sh = city_box_hit(o, inv_dir, hmin, hmax);
     let t_hull = select(1e30, sh.x,
                         sh.x <= sh.y && sh.x > t0 && sh.x <= t1);
@@ -4935,6 +4938,42 @@ fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // The belly of the hull is the underglow panel.
     let part = select(select(0, 1, nrm.z < -0.5), 2, is_canopy);
     return CityHit(true, t, pos, nrm, 300 + 4 * lane + part, ci);
+}
+
+// --- sub-pixel craft ---------------------------------------------------------
+// A craft narrower than a pixel is either hit by a pixel's one ray, and then
+// drawn at its full panel radiance, or missed: flying, that is a scatter of
+// saturated colored specks winking on and off — confetti — where the eye
+// sees a faint steady point. So below a pixel the hull box GROWS to about
+// one pixel (half-extent MIN_PX footprints) and its radiance is DILUTED by
+// the ratio of the true box's projected area to the grown one's: every pixel
+// the craft touches carries radiance x coverage, which is what a lens
+// integrates, and the light a craft adds to the frame is the same at every
+// distance. The footprint is the craft's own — its distance from the camera,
+// not the ray's cell — so the tracer and the shader agree on it exactly.
+const cc_aircars_MIN_PX: f32 = 0.6;
+
+fn cc_aircars_hull_centre(v: cc_aircars_Craft) -> vec3<f32> {
+    return vec3<f32>(v.base.xy, v.base.z + 0.5 * cc_aircars_HULL_H);
+}
+
+fn cc_aircars_half(v: cc_aircars_Craft) -> vec3<f32> {
+    return vec3<f32>(
+        cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W),
+        0.5 * cc_aircars_HULL_H);
+}
+
+fn cc_aircars_grown(v: cc_aircars_Craft) -> vec3<f32> {
+    let d = length(cc_aircars_hull_centre(v) - city_camera_origin());
+    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * d;
+    return max(cc_aircars_half(v), vec3<f32>(cc_aircars_MIN_PX * fp));
+}
+
+// Projected area of a box of half-extents e seen along dir (up to a common
+// factor, which cancels in the ratio).
+fn cc_aircars_proj(e: vec3<f32>, dir: vec3<f32>) -> f32 {
+    let a = abs(dir);
+    return a.x * e.y * e.z + a.y * e.x * e.z + a.z * e.x * e.y;
 }
 
 fn cc_aircars_nearer(a: CityHit, b: CityHit) -> CityHit {
@@ -5240,6 +5279,26 @@ fn cc_aircars_shade_sdf(h: CityHit, v: cc_aircars_Craft, glow: vec3<f32>,
 
 fn cc_aircars_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
+    // A grown (sub-pixel) hull is shaded at the true hull's nearest point and
+    // diluted by true over grown projected area; a resolved craft has
+    // grown == true and passes through untouched.
+    let code = h.kind - 300;
+    let v = cc_aircars_craft(h.cell, cc, code / 4);
+    let e = cc_aircars_half(v);
+    let eg = cc_aircars_grown(v);
+    var hh = h;
+    var dilution = 1.0;
+    if (code % 4 != 3 && any(eg > e)) {
+        let c = cc_aircars_hull_centre(v);
+        hh.pos = clamp(h.pos, c - e, c + e);
+        dilution = cc_aircars_proj(e, dir) / max(cc_aircars_proj(eg, dir),
+                                                 1e-6);
+    }
+    return cc_aircars_shade_resolved(hh, cc, dir, fp) * dilution;
+}
+
+fn cc_aircars_shade_resolved(h: CityHit, cc: CityCell, dir: vec3<f32>,
+                             fp: f32) -> vec3<f32> {
     let code = h.kind - 300;
     let lane = code / 4;
     let part = code % 4;
