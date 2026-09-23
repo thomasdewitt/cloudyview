@@ -2171,11 +2171,13 @@ const CITY_H_SCALE: f32 = 390.0;
 const CITY_H_EXP: f32 = 1.2;
 // Massing bands (see the footprint block in city_cell). Below LOWRISE a
 // block is a row of frontages; from TOWER up a building is a tower whose
-// side is K sqrt(h) metres, never slenderer than SLENDER_MAX.
+// side is K sqrt(h) metres to the KNEE and K sqrt(KNEE) (h/KNEE)^0.3 above
+// it, never slenderer than SLENDER_MAX.
 const CITY_LOWRISE_H: f32 = 22.0;
 const CITY_TOWER_H: f32 = 60.0;
 const CITY_TOWER_SIDE_K: f32 = 4.2;
-const CITY_SLENDER_MAX: f32 = 14.0;
+const CITY_TOWER_KNEE_H: f32 = 800.0;
+const CITY_SLENDER_MAX: f32 = 20.0;
 // Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
 // is an integer of at most 12 bits stored offset by -2048, where float16
 // holds every integer exactly.
@@ -2393,7 +2395,9 @@ fn city_lamp_inset(k: i32) -> f32 {
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
-// sampler so the tile wraps. This is the one number the fog, the sky dome
+// sampler so the tile wraps. Callers keep lod >= 1: the tile's r is the raw
+// density at mip 0 (heights) and the land-use-weighted glow from mip 1 up
+// (tools/export_web_assets.py). This is the one number the fog, the sky dome
 // and the cloud uplight all share. `xy` is in the CITY FRAME (world minus
 // the row-24 offset — see city_camera_origin), whose origin IS the tile's
 // origin, so the uv is simply the coordinate over the extent: which
@@ -2623,19 +2627,24 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // Footprint grows with height, the way a real city's does. Low-rise is
     // a row of narrow frontages that fills its block; mid-rise fills the
     // block with one mass; a tower's side grows as the square root of its
-    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 190 m at 2 km, the
-    // run real towers follow from floor-plate economics and sway — floored
-    // by a slenderness limit (height over width at most 14) that only the
-    // supertalls reach. So the tallest towers are also the broadest, and a
-    // supertall needs the multi-block lot its peak claimed. Where the tower
-    // leaves most of its plot open it stands on a podium that fills the
-    // plot: the street wall every real downtown tower keeps.
+    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 120 m at 800, the
+    // run real towers follow from floor-plate economics and sway — and more
+    // slowly above that (h^0.3: 150 m at 1.5 km, 180 m at 3 km), because
+    // what carries a supertall is taper, not bulk; a slenderness limit
+    // (height over width at most 20) floors the extremes. So the tallest
+    // towers are also the broadest, and a supertall needs the multi-block
+    // lot its peak claimed. Where the tower leaves most of its plot open it
+    // stands on a podium that fills the plot: the street wall every real
+    // downtown tower keeps.
     let r4f = city_rand4(c.seed ^ vec2<u32>(0x6a09e667u, 0xbb67ae85u));
     var fw = plot_size * vec2<f32>(0.80 + 0.17 * r4.y, 0.80 + 0.17 * r4.z);
     var podium = false;
     var zp = 0.0;
     if (h >= CITY_TOWER_H) {
-        let side = max(CITY_TOWER_SIDE_K * sqrt(h) * (0.80 + 0.40 * r4.y),
+        let h_eff = select(h, CITY_TOWER_KNEE_H
+                              * pow(h / CITY_TOWER_KNEE_H, 0.6),
+                           h > CITY_TOWER_KNEE_H);
+        let side = max(CITY_TOWER_SIDE_K * sqrt(h_eff) * (0.80 + 0.40 * r4.y),
                        h / CITY_SLENDER_MAX);
         let aspect = 0.72 + 0.28 * r4.z;
         let sides = select(vec2<f32>(side * aspect, side),
@@ -2673,7 +2682,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
             c.arch = 4;                   // spire crown
         }
     }
-    if (h > 600.0 && r4d.y < 0.65) {
+    if (h > 600.0 && r4d.y < select(0.65, 0.85, h > 1200.0)) {
         c.arch = select(3, 4, r4d.y < 0.30);
     }
 
@@ -11722,9 +11731,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // the ambient fill. Replaces the daytime surface bounce, which
             // is gated off under CITY just below.
             if (CITY) {
+                // Never below mip 1: mip 0's r is the density the heights
+                // come from, the glow starts at mip 1 (export_web_assets).
                 let up_lod = clamp(
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
-                    0.0, u.ocean_params.w);
+                    1.0, u.ocean_params.w);
                 let g_raw = max(
                     // p is a WORLD cloud sample: convert for the glow
                     // (city frame), keep world for the tau probe below.
