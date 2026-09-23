@@ -71,10 +71,20 @@ def test_the_shader_carries_the_tiles_own_numbers(sea):
 
 def test_every_swell_train_is_whole_cycles_across_the_period():
     src = SHADER.read_text()
-    calls = re.findall(r"sea_swell_train\(&s, ([-0-9. ]+), ([-0-9. ]+),", src)
+    import math
+    period = _wgsl_scalar(src, "SWELL_PERIOD_M")
+    calls = re.findall(
+        r"sea_swell_train\(&s, vec2<f32>\(([-0-9.]+), ([-0-9.]+)\), "
+        r"([0-9.]+), ([0-9.]+),", src)
     assert len(calls) == 16
-    for a, b in calls:
-        assert float(a) == int(float(a)) and float(b) == int(float(b))
+    for kx, ky, kk, omega in calls:
+        m, n = (float(v) * period / (2.0 * math.pi) for v in (kx, ky))
+        assert m == pytest.approx(round(m), abs=1e-5)
+        assert n == pytest.approx(round(n), abs=1e-5)
+        assert float(kk) == pytest.approx(math.hypot(float(kx), float(ky)),
+                                          rel=1e-6)
+        assert float(omega) == pytest.approx(math.sqrt(9.81 * float(kk)),
+                                             rel=1e-6)
 
 
 def test_the_foam_rank_covers_exactly_what_the_gate_asks(sea):

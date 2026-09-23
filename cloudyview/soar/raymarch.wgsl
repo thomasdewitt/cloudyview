@@ -2047,14 +2047,14 @@ struct Swell {
     variance_removed: f32,
 };
 
-// One train, (m, n) cycles across the surface period, amplitude a (m),
-// phase phi, added into `s`.
-fn sea_swell_train(s: ptr<function, Swell>, m: f32, n: f32, a: f32,
-                   phi: f32, p: vec2<f32>, t: f32, h: vec2<f32>,
-                   along: f32, across: f32) {
-    let k = (6.283185307179586 / SWELL_PERIOD_M) * vec2<f32>(m, n);
-    let kk = length(k);
-    let omega = sqrt(SEA_G * kk);
+// One train of wavevector k (rad/m, a whole number of cycles across the
+// surface period: 2 pi (m, n) / SWELL_PERIOD_M), |k| and deep-water
+// frequency omega = sqrt(g |k|) — all three precomputed from (m, n) in the
+// calls below, so the per-pixel work is the phase and the filter —
+// amplitude a (m) and phase phi, added into `s`.
+fn sea_swell_train(s: ptr<function, Swell>, k: vec2<f32>, kk: f32,
+                   omega: f32, a: f32, phi: f32, p: vec2<f32>, t: f32,
+                   h: vec2<f32>, along: f32, across: f32) {
     let phase = dot(k, p) - omega * t + phi;
     let ka = dot(k, h) * along;
     let kc = (k.x * h.y - k.y * h.x) * across;
@@ -2076,22 +2076,54 @@ fn sea_swell_train(s: ptr<function, Swell>, m: f32, n: f32, a: f32,
 fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
              across: f32) -> Swell {
     var s = Swell(vec2<f32>(0.0), 0.0, 0.0, 0.0);
-    sea_swell_train(&s, 5.0,   0.0, 0.141, 0.260, p, t, h, along, across);
-    sea_swell_train(&s, 5.0,  -1.0, 0.141, 1.683, p, t, h, along, across);
-    sea_swell_train(&s, 5.0,   1.0, 0.141, 0.812, p, t, h, along, across);
-    sea_swell_train(&s, 5.0,  -2.0, 0.140, 6.011, p, t, h, along, across);
-    sea_swell_train(&s, 5.0,   2.0, 0.140, 1.110, p, t, h, along, across);
-    sea_swell_train(&s, 5.0,   3.0, 0.134, 4.988, p, t, h, along, across);
-    sea_swell_train(&s, 6.0,   0.0, 0.150, 6.219, p, t, h, along, across);
-    sea_swell_train(&s, 6.0,  -1.0, 0.148, 5.356, p, t, h, along, across);
-    sea_swell_train(&s, 6.0,   1.0, 0.148, 3.262, p, t, h, along, across);
-    sea_swell_train(&s, 6.0,  -2.0, 0.143, 1.887, p, t, h, along, across);
-    sea_swell_train(&s, 6.0,   2.0, 0.143, 1.358, p, t, h, along, across);
-    sea_swell_train(&s, 7.0,   0.0, 0.142, 6.231, p, t, h, along, across);
-    sea_swell_train(&s, 7.0,  -1.0, 0.140, 4.441, p, t, h, along, across);
-    sea_swell_train(&s, 7.0,   1.0, 0.140, 4.767, p, t, h, along, across);
-    sea_swell_train(&s, 7.0,  -2.0, 0.135, 4.097, p, t, h, along, across);
-    sea_swell_train(&s, 7.0,   2.0, 0.135, 2.771, p, t, h, along, across);
+    // (5, +0)
+    sea_swell_train(&s, vec2<f32>(0.01917476, 0.00000000), 0.01917476, 0.43371003,
+                    0.141, 0.260, p, t, h, along, across);
+    // (5, -1)
+    sea_swell_train(&s, vec2<f32>(0.01917476, -0.00383495), 0.01955449, 0.43798356,
+                    0.141, 1.683, p, t, h, along, across);
+    // (5, +1)
+    sea_swell_train(&s, vec2<f32>(0.01917476, 0.00383495), 0.01955449, 0.43798356,
+                    0.141, 0.812, p, t, h, along, across);
+    // (5, -2)
+    sea_swell_train(&s, vec2<f32>(0.01917476, -0.00766990), 0.02065185, 0.45010514,
+                    0.140, 6.011, p, t, h, along, across);
+    // (5, +2)
+    sea_swell_train(&s, vec2<f32>(0.01917476, 0.00766990), 0.02065185, 0.45010514,
+                    0.140, 1.110, p, t, h, along, across);
+    // (5, +3)
+    sea_swell_train(&s, vec2<f32>(0.01917476, 0.01150486), 0.02236142, 0.46836475,
+                    0.134, 4.988, p, t, h, along, across);
+    // (6, +0)
+    sea_swell_train(&s, vec2<f32>(0.02300971, 0.00000000), 0.02300971, 0.47510554,
+                    0.150, 6.219, p, t, h, along, across);
+    // (6, -1)
+    sea_swell_train(&s, vec2<f32>(0.02300971, -0.00383495), 0.02332710, 0.47837106,
+                    0.148, 5.356, p, t, h, along, across);
+    // (6, +1)
+    sea_swell_train(&s, vec2<f32>(0.02300971, 0.00383495), 0.02332710, 0.47837106,
+                    0.148, 3.262, p, t, h, along, across);
+    // (6, -2)
+    sea_swell_train(&s, vec2<f32>(0.02300971, -0.00766990), 0.02425437, 0.48778615,
+                    0.143, 1.887, p, t, h, along, across);
+    // (6, +2)
+    sea_swell_train(&s, vec2<f32>(0.02300971, 0.00766990), 0.02425437, 0.48778615,
+                    0.143, 1.358, p, t, h, along, across);
+    // (7, +0)
+    sea_swell_train(&s, vec2<f32>(0.02684466, 0.00000000), 0.02684466, 0.51317263,
+                    0.142, 6.231, p, t, h, along, across);
+    // (7, -1)
+    sea_swell_train(&s, vec2<f32>(0.02684466, -0.00383495), 0.02711721, 0.51577106,
+                    0.140, 4.441, p, t, h, along, across);
+    // (7, +1)
+    sea_swell_train(&s, vec2<f32>(0.02684466, 0.00383495), 0.02711721, 0.51577106,
+                    0.140, 4.767, p, t, h, along, across);
+    // (7, -2)
+    sea_swell_train(&s, vec2<f32>(0.02684466, -0.00766990), 0.02791887, 0.52333940,
+                    0.135, 4.097, p, t, h, along, across);
+    // (7, +2)
+    sea_swell_train(&s, vec2<f32>(0.02684466, 0.00766990), 0.02791887, 0.52333940,
+                    0.135, 2.771, p, t, h, along, across);
     s.eta = clamp(s.eta / SWELL_ETA_SCALE_M, -1.0, 1.0);
     s.eta_raw = s.eta_raw / SWELL_ETA_SCALE_M;
     return s;
