@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-five hook dispatchers the core calls (see the hook comment block in
+six hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -54,9 +54,14 @@ HOOKS = {
         "fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
         "fp: f32)\n"
         "        -> vec3<f32>"),
+    "facade_cover": (
+        "fn cc_facade_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
+        "fp: f32)\n"
+        "        -> f32"),
     "window_glyph": (
         "fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, "
-        "pane_uv: vec2<f32>, fp: f32)\n"
+        "pane_uv: vec2<f32>,\n"
+        "                   deep_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
 }
 
@@ -102,7 +107,7 @@ def validate_component(comp, source):
 
 
 def dispatcher(comps):
-    """The five hook dispatchers over whatever is registered."""
+    """The six hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 
@@ -156,8 +161,18 @@ def dispatcher(comps):
         + ("\n".join(facade_body) + "\n" if facade_body else "")
         + "    return e;\n}")
 
+    cover_body = [
+        f"    m = max(m, {c['hooks']['facade_cover']}(cc, h, uc, vc, fp));"
+        for c in hooked("facade_cover")]
+    out.append(
+        f"{HOOKS['facade_cover']} {{\n"
+        "    var m = 0.0;\n"
+        + ("\n".join(cover_body) + "\n" if cover_body else "")
+        + "    return m;\n}")
+
     glyph_body = [
-        f"    t = t * {c['hooks']['window_glyph']}(cc, wh, pane_uv, fp);"
+        f"    t = t * {c['hooks']['window_glyph']}(cc, wh, pane_uv, deep_uv, "
+        "fp);"
         for c in hooked("window_glyph")]
     out.append(
         f"{HOOKS['window_glyph']} {{\n"

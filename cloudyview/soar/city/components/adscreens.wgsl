@@ -44,12 +44,12 @@
 // THE SCREEN IS OPAQUE. The facade hook is additive, so a bright emitter
 // dropped on the wall leaves the wall's own lit windows punching through it —
 // which is exactly what the first cut of this file did, and it read as a
-// projection rather than a panel. So the panel first SUBTRACTS the core's
-// window ladder over its whole outer rectangle (cc_adscreens_wall below
-// recomputes it, at the core's own fp_eff, which we can form because
-// u.cam_origin is in the uniform block) and then adds its own emission. The
-// bezel subtracts and adds nothing, so it is a genuinely dark frame rather
-// than a strip of bare wall, and the screen sits ON the building.
+// projection rather than a panel. So the panel reports its outer rectangle
+// through the facade_cover hook, and the core takes its windows (and, up
+// close, the facade shell's relief) out from under it; this file then adds
+// only the panel's own emission. The bezel adds nothing, so it is a
+// genuinely dark frame rather than a strip of bare wall, and the screen sits
+// ON the building.
 //
 // BRIGHTNESS, and why it is not the brief's 2.5. At exposure 6 against a
 // white point of 15, radiance 2.5 lands at display 1.0 EXACTLY: a screen
@@ -186,125 +186,6 @@ fn cc_adscreens_disc_clip(r: f32, w: f32) -> f32 {
     let seg = r * r * acos(clamp(w / r, -1.0, 1.0))
             - w * sqrt(max(r * r - w * w, 0.0));
     return full - 2.0 * seg;
-}
-
-// Does this hit sit on the +nh face of that box? The facade hook gets a
-// position and a normal but not which of the building's boxes it belongs to,
-// and the screen has to be laid out on THAT box's extent.
-fn cc_adscreens_on_face(p: vec3<f32>, nh: vec2<f32>,
-                        bmin: vec3<f32>, bmax: vec3<f32>) -> bool {
-    if (p.z < bmin.z - 0.05 || p.z > bmax.z + 0.05) {
-        return false;
-    }
-    let far_c = select(bmin.xy, bmax.xy, nh > vec2<f32>(0.0));
-    if (abs(dot(p.xy, nh) - dot(far_c, nh)) > 0.06) {
-        return false;
-    }
-    let tg = vec2<f32>(-nh.y, nh.x);
-    let ua = dot(bmin.xy, tg);
-    let ub = dot(bmax.xy, tg);
-    let u = dot(p.xy, tg);
-    return u > min(ua, ub) - 0.06 && u < max(ua, ub) + 0.06;
-}
-
-// --- what the panel covers -------------------------------------------------
-//
-// The core's window ladder at this point on the wall, recomputed so the panel
-// can subtract it. This mirrors the facade branch of city_shade: the same
-// lattice, the same style switch, the same two far-field octaves and the same
-// fp_eff hand-offs. It is the one place this component reaches into core
-// behaviour rather than calling it, and it is duplication only because the
-// core's facade emission is inlined in city_shade rather than factored into a
-// function a component could call. If it is ever factored out, this goes.
-//
-// It includes the cc_window_glyph term, because it has to: the core
-// multiplies a lit pane by whatever the glyph components put behind the
-// glass, and leaving it out left windowlife's occupants standing on the
-// panel as bright silhouettes — visible, and the one defect an
-// occlusion-only test render still showed. That dispatcher is a composer
-// guarantee rather than another component's symbol (it exists, returning
-// 1, whatever is registered), and WGSL resolves module-scope functions out
-// of order, so calling it forward is safe. With it in, the wall under the
-// panel goes exactly black.
-fn cc_adscreens_wall(cc: CityCell, uc: f32, vc: f32, fp: f32,
-                     fp_eff: f32) -> vec3<f32> {
-    let fp_glyph = fp;
-    let iu = i32(floor(uc / cc.win_pitch));
-    let iv = i32(floor(vc / CITY_FLOOR_H));
-    let wh = city_rand4(vec2<u32>(
-        cc.seed.x ^ bitcast<u32>(iu),
-        cc.seed.y ^ bitcast<u32>(iv)
-    ));
-    let fh = city_rand4(vec2<u32>(
-        cc.seed.x ^ 0x2545f491u,
-        bitcast<u32>(iv) * 0x9e3779b9u
-    ));
-    let floor_dark = fh.x < CITY_DARK_FLOOR_FRAC;
-    let fu = fract(uc / cc.win_pitch);
-    let fv = fract(vc / CITY_FLOOR_H);
-    let pane = fu > cc.pane_lo.x && fu < cc.pane_hi.x
-            && fv > cc.pane_lo.y && fv < cc.pane_hi.y;
-    var is_on = wh.x < cc.lit_frac;
-    if (cc.win_style == 1) {
-        let sh = city_rand4(vec2<u32>(
-            cc.seed.x ^ (bitcast<u32>(iu >> 1) * 0x9e3779b9u),
-            cc.seed.y ^ (bitcast<u32>(iv) * 0x51ed270bu)));
-        is_on = sh.x < cc.lit_frac * 1.15;
-    } else if (cc.win_style == 2) {
-        let sh = city_rand4(vec2<u32>(
-            cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u),
-            cc.seed.y ^ (bitcast<u32>(iv >> 2) * 0x51ed270bu)));
-        is_on = sh.x < cc.lit_frac * 1.10;
-    } else if (cc.win_style == 3) {
-        let fl = city_rand4(vec2<u32>(
-            cc.seed.x ^ 0x7feb352du,
-            bitcast<u32>(iv) * 0x846ca68bu));
-        is_on = fl.x < cc.lit_frac * 1.5 && wh.x < 0.88;
-    }
-    let lit = pane && !floor_dark && is_on;
-    var e_win = vec3<f32>(0.0);
-    if (lit) {
-        let style_gain = select(
-            select(1.0, 0.80, cc.win_style == 1),
-            0.55, cc.win_style == 3);
-        let bright = (0.25 + 5.0 * pow(wh.z, 7.0)) * style_gain;
-        var cdraw = wh.y;
-        if (cc.win_mono >= 0.0) {
-            cdraw = clamp(cc.win_mono + (wh.y - 0.5) * 0.08, 0.0, 1.0);
-        }
-        e_win = city_window_color(cdraw, cc.palette_bias)
-                * (CITY_WIN_RADIANCE * bright);
-        let pane_uv = (vec2<f32>(fu, fv) - cc.pane_lo)
-                      / max(cc.pane_hi - cc.pane_lo, vec2<f32>(1e-4));
-        e_win = e_win * cc_window_glyph(cc, wh, pane_uv, fp_glyph);
-    }
-    let e_mean_base = CITY_PALETTE_MEAN
-        * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
-           * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN);
-    let ibu = iu >> 2;
-    let ibv = iv >> 2;
-    let bh1 = city_rand4(vec2<u32>(
-        cc.seed.x ^ (bitcast<u32>(ibu) * 0x85ebca6bu),
-        cc.seed.y ^ (bitcast<u32>(ibv) * 0xc2b2ae35u)
-    ));
-    var block_color = CITY_PALETTE_MEAN;
-    if (bh1.y < 0.03) {
-        block_color = city_window_color(0.90 + 0.09 * bh1.z, cc.palette_bias);
-    }
-    let block_var = 0.10 + 1.8 * pow(bh1.x, 5.0);
-    let e_block = block_color
-        * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
-           * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
-           * CITY_MEAN_COMP_BLOCK * block_var);
-    let bh2 = city_rand4(vec2<u32>(
-        cc.seed.x ^ 0x51ed270bu,
-        bitcast<u32>(iv >> 4) * 0x9e3779b9u
-    ));
-    let band = 0.70 + 0.60 * bh2.x;
-    let e_flat = e_mean_base * (CITY_MEAN_COMP_FLAT * band);
-    let b1 = smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
-    let b2 = smoothstep(CITY_BLOCK_LOD_START, CITY_BLOCK_LOD_FULL, fp_eff);
-    return mix(e_win, mix(e_block, e_flat, b2), b1);
 }
 
 // --- the archetypes --------------------------------------------------------
@@ -498,15 +379,35 @@ fn cc_adscreens_eye_mean(ch: vec4<f32>, ar: f32) -> vec3<f32> {
 
 // --- the hook --------------------------------------------------------------
 
-fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                       fp: f32) -> vec3<f32> {
+// Where this wall's screen hangs, if it has one, and where (uc, vc) falls on
+// it: the placement the emission and the cover both read.
+struct cc_adscreens_Place {
+    on: bool,
+    su: f32,
+    sv: f32,
+    sw: f32,
+    sz: f32,
+    ar: f32,
+    ph: vec4<f32>,
+    ph2: vec4<f32>,
+    key: vec2<u32>,
+    spill_sig: f32,
+}
+
+fn cc_adscreens_none() -> cc_adscreens_Place {
+    return cc_adscreens_Place(false, 0.0, 0.0, 1.0, 1.0, 1.0, vec4<f32>(0.0),
+                              vec4<f32>(0.0), vec2<u32>(0u), 1.0);
+}
+
+fn cc_adscreens_place(cc: CityCell, h: CityHit, uc: f32,
+                      vc: f32) -> cc_adscreens_Place {
     if (!cc.built || cc.height < cc_adscreens_MIN_H) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
     // Screens hang on flat vertical wall. A tapered shaft's skin is neither,
     // and the same rule that keeps antennas off a spire keeps screens off it.
     if (abs(h.normal.z) > 0.02) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
     // Which buildings. The base rate is one tall building in twelve, but not
     // spread evenly: screens CLUSTER. A uniform sprinkle put a handful on the
@@ -519,41 +420,29 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     let dens_w = 0.30 + 2.20 * smoothstep(0.50, 0.95, cc.rank);
     let bd = city_rand4(cc.seed ^ vec2<u32>(0x1f83d9abu, 0x5be0cd19u));
     if (bd.x >= cc_adscreens_BLDG_FRAC * dens_w) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
 
-    let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
-    let tg = vec2<f32>(-nh.y, nh.x);
-    var bmin = cc.b1min;
-    var bmax = cc.b1max;
-    var tier: u32 = 0u;
-    var found = cc_adscreens_on_face(h.pos, nh, cc.b1min, cc.b1max);
-    if (cc.tiers >= 2 && cc_adscreens_on_face(h.pos, nh, cc.b2min, cc.b2max)) {
-        bmin = cc.b2min; bmax = cc.b2max; tier = 1u; found = true;
+    // The core's face: uc runs from its start corner, and the screen is laid
+    // out on THAT box's extent.
+    let face = city_face_at(cc, h.pos, h.normal);
+    if (!face.aligned) {
+        return cc_adscreens_none();
     }
-    if (cc.tiers >= 3 && cc_adscreens_on_face(h.pos, nh, cc.b3min, cc.b3max)) {
-        bmin = cc.b3min; bmax = cc.b3max; tier = 2u; found = true;
-    }
-    if (!found) {
-        return vec3<f32>(0.0);
-    }
-    let ua = dot(bmin.xy, tg);
-    let ub = dot(bmax.xy, tg);
-    let u0 = min(ua, ub);
-    let fw = abs(ub - ua);
+    let bmin = vec3<f32>(0.0, face.z0, 0.0);
+    let bmax = vec3<f32>(0.0, face.z1, 0.0);
+    let tier = u32(face.tier);
+    let u0 = 0.0;
+    let fw = face.len;
     if (fw < cc_adscreens_MIN_FACADE_W) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
-
-    var fid: u32 = 0u;
-    if (nh.x < -0.5) { fid = 1u; }
-    else if (nh.y > 0.5) { fid = 2u; }
-    else if (nh.y < -0.5) { fid = 3u; }
+    let fid = u32(face.side);
     let key = vec2<u32>(cc.seed.x ^ (fid * 0x9e3779b9u) ^ 0x243f6a88u,
                         cc.seed.y ^ (tier * 0x85ebca6bu) ^ 0x13198a2eu);
     let ph = city_rand4(key);
     if (ph.x >= cc_adscreens_FACE_FRAC) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
     let ph2 = city_rand4(vec2<u32>(key.x ^ 0xa4093822u, key.y ^ 0x299f31d0u));
 
@@ -572,22 +461,22 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     // ever sees. So a tall wall places its screen proportionally instead,
     // anywhere in the lower two thirds of itself — the same argument
     // facadeworks makes for signage, and the same crossover.
-    let wall_h = bmax.z - bmin.z;
+    let wall_h = bmax.y - bmin.y;
     let z_low = cc_adscreens_BASE_LO
               + (cc_adscreens_BASE_HI - cc_adscreens_BASE_LO) * ph.w;
     let z_tall = wall_h * (0.06 + 0.60 * ph.w);
-    let z0 = bmin.z + mix(z_low, max(z_tall, z_low),
+    let z0 = bmin.y + mix(z_low, max(z_tall, z_low),
                           smoothstep(90.0, 320.0, wall_h));
-    let avail = bmax.z - 3.0 - z0;
+    let avail = bmax.y - 3.0 - z0;
     if (avail < cc_adscreens_MIN_SCREEN) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
     if (sz > avail) {                      // keep the aspect, lose the size
         sw = sw * (avail / sz);
         sz = avail;
     }
     if (sw < cc_adscreens_MIN_SCREEN) {
-        return vec3<f32>(0.0);
+        return cc_adscreens_none();
     }
     let slack = max(fw - 2.0 - sw, 0.0);
     let su = (uc - (u0 + 1.0 + slack * ph2.x)) / sw;
@@ -598,23 +487,53 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     let mu = 2.6 * spill_sig / sw;
     let mv = 2.6 * spill_sig / sz;
     if (su < -mu || su > 1.0 + mu || sv < -mv || sv > 1.0 + mv) {
+        return cc_adscreens_none();
+    }
+    return cc_adscreens_Place(true, su, sv, sw, sz, ar, ph, ph2, key,
+                              spill_sig);
+}
+
+// The outer rectangle, antialiased by the footprint: everything inside it
+// is panel or bezel.
+fn cc_adscreens_outer(p: cc_adscreens_Place, fp: f32) -> f32 {
+    let au = clamp(0.6 * fp / p.sw, 0.0015, 0.25);
+    let av = clamp(0.6 * fp / p.sz, 0.0015, 0.25);
+    return smoothstep(-au, au, p.su)
+        * (1.0 - smoothstep(1.0 - au, 1.0 + au, p.su))
+        * smoothstep(-av, av, p.sv)
+        * (1.0 - smoothstep(1.0 - av, 1.0 + av, p.sv));
+}
+
+fn cc_adscreens_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32,
+                      fp: f32) -> f32 {
+    let p = cc_adscreens_place(cc, h, uc, vc);
+    if (!p.on) {
+        return 0.0;
+    }
+    return cc_adscreens_outer(p, fp);
+}
+
+fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
+                       fp: f32) -> vec3<f32> {
+    let p = cc_adscreens_place(cc, h, uc, vc);
+    if (!p.on) {
         return vec3<f32>(0.0);
     }
-
-    // The view direction, and with it the core's own foreshortened footprint:
-    // the panel has to subtract the wall at exactly the LOD the core drew it.
-    // h.pos is in the CITY FRAME, so the camera comes from the frame's one
-    // entry (city_camera_origin) rather than from u.cam_origin raw.
-    let dir = normalize(h.pos - city_camera_origin());
-    let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);
+    let su = p.su;
+    let sv = p.sv;
+    let sw = p.sw;
+    let sz = p.sz;
+    let ar = p.ar;
+    let ph = p.ph;
+    let ph2 = p.ph2;
+    let key = p.key;
+    let spill_sig = p.spill_sig;
 
     // The outer rectangle: everything inside it is panel or bezel, and the
-    // wall behind all of it is covered.
+    // core has taken the wall out from under all of it (the cover hook).
     let au = clamp(0.6 * fp / sw, 0.0015, 0.25);
     let av = clamp(0.6 * fp / sz, 0.0015, 0.25);
-    let outer =
-        smoothstep(-au, au, su) * (1.0 - smoothstep(1.0 - au, 1.0 + au, su))
-        * smoothstep(-av, av, sv) * (1.0 - smoothstep(1.0 - av, 1.0 + av, sv));
+    let outer = cc_adscreens_outer(p, fp);
     // The bezel: a thin dark frame the screen sits inside, so it reads as
     // mounted on the wall rather than painted into it.
     let bez = max(cc_adscreens_BEZEL_MIN,
@@ -777,9 +696,8 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     let spill = cc_adscreens_SPILL
               * exp(-0.5 * dout * dout / (spill_sig * spill_sig));
 
-    // Opaque: take the wall out over the whole outer rectangle, then put the
-    // screen back inside the bezel.
+    // Opaque: the core took the wall out over the whole outer rectangle
+    // (cover), so the screen only puts itself back inside the bezel.
     return content * (gain * panel)
-         + mean_c * (gain * spill * (1.0 - outer))
-         - cc_adscreens_wall(cc, uc, vc, fp, fp_eff) * outer;
+         + mean_c * (gain * spill * (1.0 - outer));
 }

@@ -105,19 +105,12 @@ struct cc_facadeworks_Face {
     side: i32,    // 0 = +x wall, 1 = -x, 2 = +y, 3 = -y
 }
 
+// The core's own face lookup, so our uc (metres from the face's start
+// corner) is exactly the core's. A frustum skin is no one's base wall.
 fn cc_facadeworks_face(cc: CityCell, h: CityHit) -> cc_facadeworks_Face {
-    let t2 = cc.tiers >= 2 && h.pos.z > cc.b2min.z;
-    let t3 = cc.tiers >= 3 && h.pos.z > cc.b3min.z;
-    let bmn = select(select(cc.b1min, cc.b2min, t2), cc.b3min, t3);
-    let bmx = select(select(cc.b1max, cc.b2max, t2), cc.b3max, t3);
-    // The core's facade tangent, so our uc is exactly the core's uc.
-    let tangent = vec2<f32>(-h.normal.y, h.normal.x);
-    let a = dot(bmn.xy, tangent);
-    let b = dot(bmx.xy, tangent);
-    let side = select(
-        select(select(3, 2, h.normal.y > 0.5), 1, h.normal.x < -0.5),
-        0, h.normal.x > 0.5);
-    return cc_facadeworks_Face(min(a, b), max(a, b), bmx.z, !(t2 || t3), side);
+    let f = city_face_at(cc, h.pos, h.normal);
+    return cc_facadeworks_Face(0.0, f.len, f.z1, f.aligned && f.tier == 0,
+                               f.side);
 }
 
 // One glyph block: up to five strokes from an alphabet of three horizontals
@@ -136,9 +129,11 @@ fn cc_facadeworks_glyph(bits: u32, gu: f32, gv: f32) -> f32 {
     return select(0.0, 1.0, on);
 }
 
-// Layer 1. `s` is the building's structural draw (see cc_facadeworks_detail).
-fn cc_facadeworks_sign(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
-                       uc: f32, vc: f32, fp: f32) -> vec3<f32> {
+// Where this wall's sign strip sits, if it has one: (u of the strip's
+// centre, half-width, v0, v1), half-width 0 for none. Shared by the sign
+// and by the cover it reports, so the wall it blanks is the wall it lights.
+fn cc_facadeworks_sign_box(cc: CityCell, f: cc_facadeworks_Face,
+                           s: vec2<u32>) -> vec4<f32> {
     // Cheap rejects first: one bit-slice of the building draw, then whether
     // this wall carries the sign, then whether this mass can carry one at
     // all. Signs live on tier 1 only — one that climbed onto a setback would
@@ -162,7 +157,7 @@ fn cc_facadeworks_sign(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
     if ((s.x & 255u) >= cc_facadeworks_SIGN_FRAC
         || !(right_edge || corner == c0)
         || !f.base || f.z1 <= 17.0 || (f.u1 - f.u0) <= 6.5) {
-        return vec3<f32>(0.0);
+        return vec4<f32>(0.0);
     }
     // The sign is sized to the mass it hangs on. A fixed 12-40 m strip
     // starting at 6 m is right for a mid-rise and invisible on everything
@@ -180,15 +175,30 @@ fn cc_facadeworks_sign(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
     let len = max(12.0 + 28.0 * r_len, tall * f.z1);
     let gscale = sqrt(clamp(len / 26.0, 1.0, 12.0));
     let hw0 = cc_facadeworks_SIGN_HW * gscale;
-    let seg_pitch = cc_facadeworks_SEG_PITCH * gscale;
-    let seg_h = cc_facadeworks_SEG_H * gscale;
 
     let v0 = cc_facadeworks_SIGN_V0;
     let v1 = min(v0 + len, f.z1 - 2.0);
-    if (v1 - v0 < 6.0 || vc < v0 - 1.0 || vc > v1 + 1.0) {
-        return vec3<f32>(0.0);
+    if (v1 - v0 < 6.0) {
+        return vec4<f32>(0.0);
     }
     let uanch = select(f.u0 + 1.9 * gscale, f.u1 - 1.9 * gscale, right_edge);
+    return vec4<f32>(uanch, hw0, v0, v1);
+}
+
+// Layer 1. `s` is the building's structural draw (see cc_facadeworks_detail).
+fn cc_facadeworks_sign(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
+                       uc: f32, vc: f32, fp: f32) -> vec3<f32> {
+    let sbox = cc_facadeworks_sign_box(cc, f, s);
+    let hw0 = sbox.y;
+    let v0 = sbox.z;
+    let v1 = sbox.w;
+    if (hw0 <= 0.0 || vc < v0 - 1.0 || vc > v1 + 1.0) {
+        return vec3<f32>(0.0);
+    }
+    let gscale = hw0 / cc_facadeworks_SIGN_HW;
+    let seg_pitch = cc_facadeworks_SEG_PITCH * gscale;
+    let seg_h = cc_facadeworks_SEG_H * gscale;
+    let uanch = sbox.x;
     let du = abs(uc - uanch);
     // The strip's cross-section, widened to the pixel once it is thinner
     // than one and dimmed by the same factor: the integral across u is
@@ -352,6 +362,10 @@ fn cc_facadeworks_escape(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
            * (cc_facadeworks_FE_RADIANCE * reach * val);
 }
 
+fn cc_facadeworks_draw(cc: CityCell) -> vec2<u32> {
+    return pcg2d(cc.seed ^ vec2<u32>(0x7f4a7c15u, 0x2b3d8e11u));
+}
+
 fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
                          fp: f32) -> vec3<f32> {
     // One draw per building for everything structural. pcg2d gives 64 bits;
@@ -364,9 +378,23 @@ fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     //        20-27  escape presence   28-29  escape wall     30  escape edge
     // (bit 10 is spare: signage picks a corner, so it needs no edge bit.)
     //   s.y         sign length
-    let s = pcg2d(cc.seed ^ vec2<u32>(0x7f4a7c15u, 0x2b3d8e11u));
+    let s = cc_facadeworks_draw(cc);
     let f = cc_facadeworks_face(cc, h);
     return cc_facadeworks_sign(cc, f, s, uc, vc, fp)
          + cc_facadeworks_balcony(cc, f, s, uc, vc, fp)
          + cc_facadeworks_escape(cc, f, s, uc, vc, fp);
+}
+
+// The sign box is a box on the wall: where it hangs there are no windows
+// and no relief behind it, only the sign.
+fn cc_facadeworks_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32,
+                        fp: f32) -> f32 {
+    let s = cc_facadeworks_draw(cc);
+    if ((s.x & 255u) >= cc_facadeworks_SIGN_FRAC) {
+        return 0.0;
+    }
+    let sb = cc_facadeworks_sign_box(cc, cc_facadeworks_face(cc, h), s);
+    let inside = sb.y > 0.0 && abs(uc - sb.x) < sb.y
+              && vc > sb.z && vc < sb.w;
+    return select(0.0, 1.0, inside);
 }

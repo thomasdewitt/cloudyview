@@ -101,13 +101,27 @@ Signatures (the composer checks these by compiling):
   whose kind is in your range.
 - `facade` — `fn (cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
   -> vec3<f32>` — ADDITIVE facade emission. `uc` runs along the facade in
-  meters, `vc` is height; the window grid is `CITY_WIN_PITCH_U` x
-  `CITY_FLOOR_H`. Return zero where you add nothing.
+  meters FROM THE FACE'S OWN START CORNER (`city_face_at(cc, h.pos,
+  h.normal)` gives the face: its length, tier and bay lattice), `vc` is
+  height; the window grid is the face's bays (`f.pitch` x `CITY_FLOOR_H`,
+  between corner margins). On a frustum skin (`!f.aligned`) uc is the old
+  world-anchored coordinate. `h` is always on the wall plane. Return zero
+  where you add nothing.
+- `facade_cover` — `fn (cc: CityCell, h: CityHit, uc: f32, vc: f32,
+  fp: f32) -> f32` — the share (0..1) of the wall at this point that a panel of
+  yours covers. Covered wall shows no windows and, up close, no shell
+  relief: the core takes them out, so an opaque panel only adds its own
+  emission through `facade`.
 - `window_glyph` — `fn (cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
-  fp: f32) -> vec3<f32>` — transmission MULTIPLIER inside a lit pane
-  (`pane_uv` in [0,1]^2, `wh` is that window's hash draw). Return
-  `vec3(1.0)` to leave a window alone. Sub-pixel glyphs (fp much larger
-  than a pane) must return your glyph's mean transmission, not 1.
+  deep_uv: vec2<f32>, fp: f32) -> vec3<f32>` — transmission MULTIPLIER
+  inside a lit pane (`pane_uv` in [0,1]^2 at the glass, `wh` is that
+  window's hash draw). `deep_uv` is where the same ray crosses the
+  occupant's plane inside the room, in the same pane units — draw things
+  that stand IN the room (figures) at `deep_uv` and things AT the glass
+  (curtains, blinds) at `pane_uv`, and parallax comes for free; on a flat
+  facade the two are equal. Return `vec3(1.0)` to leave a window alone.
+  Sub-pixel glyphs (fp much larger than a pane) must return your glyph's
+  mean transmission, not 1.
 
 ## Detailed micro-geometry: the SDF-in-a-box pattern
 
