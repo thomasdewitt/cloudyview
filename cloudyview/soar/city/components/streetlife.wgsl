@@ -282,7 +282,6 @@ fn cc_streetlife_nearer(a: CityHit, b: CityHit) -> CityHit {
 
 struct cc_streetlife_Side {
     ax: i32,          // 0 = the kerb runs along x, 1 = along y
-    street: bool,     // this edge carries a street at all (city_edge_street)
     lamp_c: f32,      // lamp line, across coordinate
     park_c: f32,      // parking line, across coordinate
     plot_sign: f32,   // which way the plot lies from the kerb
@@ -326,7 +325,6 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
         kerb_c = kr.w;
         s.plot_sign = -1.0;
     }
-    s.street = city_edge_street(cc, side);
     s.park_c = kerb_c - s.plot_sign * cc_streetlife_PARK_OFF;
     s.a_min = select(cmin.y, cmin.x, s.ax == 0);
     s.a_max = select(cmax.y, cmax.x, s.ax == 0);
@@ -350,7 +348,7 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
     // A merged superblock's plot edge can sit in a sibling's column; that
     // kerb keeps its lamps (they are on the cell's own lattice) and loses its
     // parking to whichever member owns the ground.
-    s.park_ok = s.street && side_ok
+    s.park_ok = side_ok
              && s.park_c > s.c_min + cc_streetlife_BB_C
              && s.park_c < s.c_max - cc_streetlife_BB_C;
     return s;
@@ -756,7 +754,9 @@ fn cc_streetlife_trace_car_box(o: vec3<f32>, inv_dir: vec3<f32>, dir: vec3<f32>,
 // that owns the ground draws it.
 fn cc_streetlife_corner_prop(ci: vec2<i32>, cc: CityCell, k: i32)
         -> cc_streetlife_Prop {
-    if (!cc.built) {
+    // The bin stands on the sidewalk of the corner's x-side kerb, so it
+    // needs that street.
+    if (!cc.built || !city_edge_street(cc, select(1, 0, (k & 1) == 0))) {
         return cc_streetlife_no_prop();
     }
     let cw = city_tile_cell(ci);
@@ -919,10 +919,6 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     out.tb = 0.0;
 
     let s = cc_streetlife_side(ci, cc, side);
-    // An edge without a street has no lamps and no kerb to park at.
-    if (!s.street) {
-        return out;
-    }
     // One slab over the whole kerb: lamp line to parking line, ground to the
     // top of a mast, clipped to the cell's own column. This is the test the
     // wide scene pays, and the only one most cells ever reach.
@@ -1219,6 +1215,11 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var have = false;
     var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
+        // Poles and parked cars stand only on a kerb that has a street
+        // (the bake removes streets from open land and lot interiors).
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
                                    fp);
         if (k.hit.hit) {
