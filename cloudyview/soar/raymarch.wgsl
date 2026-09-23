@@ -1238,8 +1238,7 @@ const STRAT_STREAM_SUN_CONE: u32 = 5u;
 const STRAT_STREAM_OCEAN_SLOPE: u32 = 6u;
 const STRAT_STREAM_PREMARCH: u32 = 7u;
 const STRAT_STREAM_NEST_SEAM: u32 = 8u;
-const STRAT_STREAM_CITY_REFLECT: u32 = 9u;
-const STRAT_STREAM_CITY_MEDIA: u32 = 10u;
+
 
 const STRAT_INV_2P32: f32 = 2.3283064365386963e-10;
 
@@ -2322,6 +2321,33 @@ fn city_rand4(s: vec2<u32>) -> vec4<f32> {
     let b = pcg2d(a);
     return vec4<f32>(city_u01(a.x), city_u01(a.y),
                      city_u01(b.x), city_u01(b.y));
+}
+
+// Four independent uniforms for this pixel and accumulation frame, one draw
+// per `stream`. White, not stratified: all ten dimensions of the strat
+// lattice (strat1/strat2) already drive the camera and cloud jitters, and
+// sharing one of them — a different stream only rotates it — would lock a
+// city draw to, say, the subpixel offset for every frame of a pixel. Adding
+// dimensions would change every existing alpha, and the day scene with them.
+fn city_frame_rand(pixel: vec2<u32>, frame: u32, stream: u32) -> vec4<f32> {
+    return city_rand4(vec2<u32>(pixel.x ^ (frame * 0x9e3779b9u),
+                                pixel.y + frame * 0x85ebca6bu
+                                + stream * 0xc2b2ae35u));
+}
+const CITY_RAND_REFLECT: u32 = 1u;
+const CITY_RAND_MEDIA: u32 = 2u;
+
+// The media hook (steam) composited over a city surface at distance t along
+// the view ray from o (city frame): rgb + a * surface. One definition for
+// every pass that lands a city hit, so the steam in front of a refined facade
+// is the steam in front of the raw one, draw for draw.
+fn city_media_over(rgb: vec3<f32>, o: vec3<f32>, dir: vec3<f32>, t: f32,
+                   pixel_angle: f32, frame_index: u32,
+                   strat_pixel: vec2<u32>) -> vec3<f32> {
+    let med = cc_media(o, dir, 1.0 / dir, t, pixel_angle,
+                       city_frame_rand(strat_pixel, frame_index,
+                                       CITY_RAND_MEDIA).x);
+    return med.rgb + med.a * rgb;
 }
 
 // The city repeats at the tile, exactly. One texel is one block, so the
@@ -3792,7 +3818,7 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
 // CITY_REFL_LOD the sample is the environment estimate instead, and costs
 // no trace; a ray that finds no city within CITY_REFL_RANGE sees the sky.
 //
-// rnd: three uniforms from this pixel's stratified stream.
+// rnd: three independent uniforms for this pixel and frame (city_frame_rand).
 struct CityWetLobe {
     ok: bool,          // anything to add at all
     r: vec3<f32>,      // the reflected direction
@@ -3828,7 +3854,7 @@ fn city_wet_lobe(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let st = sqrt(max(1.0 - ct * ct, 0.0));
     let phi = 6.2831853 * rnd.y;
     let m = vec3<f32>(st * cos(phi), st * sin(phi), ct);
-    let vm = -dot(dir, m);
+    let vm = min(-dot(dir, m), 1.0);
     if (vm <= 0.0) {
         return out;
     }
@@ -3844,6 +3870,9 @@ fn city_wet_lobe(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let fres = CITY_REFL_F0 + (1.0 - CITY_REFL_F0) * pow(1.0 - vm, 5.0);
     out.ok = true;
     out.r = r;
+    // Capped at 1: at n.v near 0.01 single samples reach 5.5 (puddle) and
+    // 1.75 (film), and one such sample in a 1-spp flight frame is a
+    // firefly. The cap biases grazing reflections slightly dark, knowingly.
     out.w = weight * min(fres * g1v * g1l * vm / (nv * ct), 1.0);
     out.alpha = alpha;
     out.blend = smoothstep(CITY_REFL_LOD.x, CITY_REFL_LOD.y, fp);
@@ -12339,16 +12368,6 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         // city input that must STAY world is the uplight probe's cloud
         // sampling (see the city_glow_sample call in the march loop).
         let city_o = city_camera_origin();
-        // The view ray and — off wet ground — its reflection, through ONE
-        // city_trace and ONE city_shade in a loop whose second pass is data-
-        // dependent. Written as a second call, the reflection inlined a
-        // second copy of the whole city (every component's prop and shade
-        // hook) and cost 20-36% at the low tier on views that never trace a
-        // reflection at all (aerial, base, horizon; measured 2026-09-23) —
-        // the register-pressure lesson components/SPEC.md records for
-        // props, again. The reflection adds to the pixel through the view
-        // path's fog: city_fog is affine, so it enters times that path's
-        // transmittance.
         // The view ray and — off wet ground — its reflection. The reflected
         // ray is traced WITHOUT the component prop hooks (props = false):
         // the second inlined copy of every component's cell_props code is
@@ -12358,20 +12377,19 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         // the same, from the loop nest alone). Without them a reflection
         // costs nothing where it is not taken. What the puddles lose is the
         // parked cars, the poles and the skyway; the lamps they would have
-        // shown are city_lamp_glint's, analytically.
+        // shown are city_lamp_glint's, analytically. The reflection adds to
+        // the pixel through the view path's fog: city_fog is affine, so it
+        // enters times that path's transmittance.
         let h = city_trace(city_o, dir, CITY_TRACE_RANGE, true);
         if (h.hit) {
             t_city = h.t;
             city_rgb = city_fog(city_shade(h, dir, pixel_angle * h.t),
                                 city_o, dir, h.t, h.pos);
             if (h.kind == 0) {
-                let rnd = vec3<f32>(
-                    strat2(frame_index, strat_pixel, STRAT_STREAM_CITY_REFLECT,
-                           vec2<f32>(STRAT_ALPHA_1, STRAT_ALPHA_2)),
-                    strat1(frame_index, strat_pixel, STRAT_STREAM_CITY_REFLECT,
-                           STRAT_ALPHA_3));
+                let rnd = city_frame_rand(strat_pixel, frame_index,
+                                          CITY_RAND_REFLECT);
                 let lobe = city_wet_lobe(h, city_cell(h.cell), dir,
-                                         pixel_angle, rnd);
+                                         pixel_angle, rnd.xyz);
                 if (lobe.ok) {
                     let w = lobe.w * city_fog_trans(city_o, dir, h.t, h.pos);
                     city_rgb = city_rgb + (w * lobe.blend) * lobe.env;
@@ -12380,10 +12398,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         let hr = city_trace(ro, lobe.r, CITY_REFL_RANGE, false);
                         var l = vec3<f32>(0.0);
                         if (!hr.hit) {
-                            l = city_reflect_sky(
-                                u.cam_origin.xyz + h.t * dir, lobe.r,
-                                fract(f32(frame_index) * 0.618034
-                                      + hash12(vec2<f32>(strat_pixel))));
+                            // Fogged over the range it searched, as a hit
+                            // at the range would have been.
+                            let far = ro + CITY_REFL_RANGE * lobe.r;
+                            l = city_fog(city_reflect_sky(
+                                             u.cam_origin.xyz + h.t * dir,
+                                             lobe.r, rnd.w),
+                                         ro, lobe.r, CITY_REFL_RANGE, far);
                         } else {
                             let fp_r = pixel_angle * (h.t + hr.t)
                                      + 0.5 * lobe.alpha * hr.t;
@@ -12397,11 +12418,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
         if (t_city < 1e30) {
             // Media between the eye and the hit (steam over the manholes).
-            let med = cc_media(city_o, dir, inv_dir, t_city, pixel_angle,
-                               strat1(frame_index, strat_pixel,
-                                      STRAT_STREAM_CITY_MEDIA,
-                                      STRAT_ALPHA_1));
-            city_rgb = med.rgb + med.a * city_rgb;
+            city_rgb = city_media_over(city_rgb, city_o, dir, t_city,
+                                       pixel_angle, frame_index, strat_pixel);
         }
     }
 
