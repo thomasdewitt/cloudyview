@@ -1872,15 +1872,47 @@ const SEA_G: f32 = 9.81;
 // what makes the swell legible in the sun glitter from altitude, where its
 // own slope is far inside the lobe.
 const SEA_SWELL_MODULATION: f32 = 0.3;
+// The wind-sea tile repeats every 102.4 m, and from a few hundred metres up
+// the repeat shows as a woven lattice. A real sea has no two patches at the
+// same moment, so neither does this one: the tile is read at scene time
+// plus this many seconds times the swell's normalized elevation, a smooth
+// field varying over the swell's hundreds of metres. Neighbouring copies
+// of the tile then sit seconds apart in the loop — decorrelated at every
+// scale that lives shorter than that — while the local motion is untouched
+// (d/dt of the shifted time is still 1). The cost is a gentle stretching
+// of the waves along the shift's gradient, a few tens of percent at most
+// and only over hundreds of metres, which reads as the wave groups a real
+// sea has anyway.
+const SEA_PHASE_SPREAD_S: f32 = 6.0;
 
-// Whitecaps. Albedo runs with the foam rank from residual (dim, streaky) to
-// active (bright): the rank is uniform over the foam that survives a cut at
-// theta, so its mean there is (1 + theta) / 2 and the far field keeps the
-// same mean albedo the resolved foam has.
-const SEA_FOAM_ALBEDO_RESIDUAL: f32 = 0.30;
-const SEA_FOAM_ALBEDO_ACTIVE: f32 = 0.75;
+// Whitecaps: fresh foam's visible-band albedo (Koepke's ~0.5-0.6).
+const SEA_FOAM_ALBEDO: f32 = 0.6;
 // Half-width of the cut's soft edge, in rank.
 const SEA_FOAM_EDGE: f32 = 0.12;
+// The lace. A whitecap is solid white while it breaks and falls apart into
+// streaks and holes as it ages, and the rank says which: it is uniform over
+// the foam a cut keeps, so (rank - theta) / (1 - theta) is the foam's
+// activeness, 1 at the freshest. Inside the cut the foam is cut again, by
+// the tile's own crest channel read at 1/SEA_LACE_SCALE of its size and
+// transposed — so its filaments run along the wind, as residual foam's
+// streaks do — at a threshold running from -SEA_LACE_EDGE (solid) for an
+// active whitecap to SEA_LACE_REACH - SEA_LACE_EDGE for the oldest foam.
+// The mean cover of that cut at five thresholds is a property of the tile,
+// measured by tools/export_web_assets.py (meta.json "lace_cover"); with the
+// activeness uniform, the mean over all foam is their trapezoid. So the
+// lace fades into its mean as its texels go sub-pixel, and the far field
+// knows the whole whitecap cover with no sample, as before.
+const SEA_LACE_SCALE: f32 = 8.0;
+const SEA_LACE_REACH: f32 = 0.25;
+const SEA_LACE_EDGE: f32 = 0.05;
+const SEA_LACE_COVER_0: f32 = 1.0;
+const SEA_LACE_COVER_1: f32 = 0.634911;
+const SEA_LACE_COVER_2: f32 = 0.399297;
+const SEA_LACE_COVER_3: f32 = 0.321714;
+const SEA_LACE_COVER_4: f32 = 0.252481;
+const SEA_LACE_COVER_MEAN: f32 = 0.25 * (0.5 * SEA_LACE_COVER_0
+    + SEA_LACE_COVER_1 + SEA_LACE_COVER_2 + SEA_LACE_COVER_3
+    + 0.5 * SEA_LACE_COVER_4);
 // The foam is a Lambertian surface in the cloud's units, lit the way
 // desert_light lights the sand: the same three numbers, for the same reason
 // (DESERT_BEAM_CALIBRATION and its neighbours), kept as the sea's own so a
@@ -1902,10 +1934,10 @@ struct SeaFrames {
     f: f32,
 };
 
-// The two frames the clock falls between, and how far between.
-fn sea_frames() -> SeaFrames {
+// The two frames time `t` falls between, and how far between.
+fn sea_frames(t: f32) -> SeaFrames {
     let n = textureNumLayers(ocean_waves);
-    let x = fract(scene_time() / SEA_LOOP_S) * f32(n);
+    let x = fract(t / SEA_LOOP_S) * f32(n);
     let a = min(u32(x), n - 1u);
     return SeaFrames(i32(a), i32((a + 1u) % n), clamp(x - f32(a), 0.0, 1.0));
 }
@@ -1938,6 +1970,9 @@ struct Swell {
     // Elevation over SWELL_ETA_SCALE_M, footprint-filtered, clipped to
     // [-1, 1]; 0 once the footprint has averaged every train away.
     eta: f32,
+    // The same elevation unfiltered and unclipped: the phase field of
+    // SEA_PHASE_SPREAD_S, which must not collapse where the pixel is large.
+    eta_raw: f32,
     // Slope variance the footprint filter took out of the trains.
     variance_removed: f32,
 };
@@ -1955,7 +1990,9 @@ fn sea_swell_train(s: ptr<function, Swell>, m: f32, n: f32, a: f32,
     let kc = (k.x * h.y - k.y * h.x) * across;
     let gain = exp(-0.5 * (ka * ka + kc * kc));
     (*s).slope = (*s).slope - (a * gain * sin(phase)) * k;
-    (*s).eta = (*s).eta + a * gain * cos(phase);
+    let c = a * cos(phase);
+    (*s).eta = (*s).eta + gain * c;
+    (*s).eta_raw = (*s).eta_raw + c;
     (*s).variance_removed = (*s).variance_removed
         + 0.5 * (a * kk) * (a * kk) * (1.0 - gain * gain);
 }
@@ -1968,7 +2005,7 @@ fn sea_swell_train(s: ptr<function, Swell>, m: f32, n: f32, a: f32,
 // table above, row for row.
 fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
              across: f32) -> Swell {
-    var s = Swell(vec2<f32>(0.0), 0.0, 0.0);
+    var s = Swell(vec2<f32>(0.0), 0.0, 0.0, 0.0);
     sea_swell_train(&s, 2.0, -1.0, 0.155, 6.219, p, t, h, along, across);
     sea_swell_train(&s, 2.0,  1.0, 0.155, 3.262, p, t, h, along, across);
     sea_swell_train(&s, 3.0,  0.0, 0.218, 5.356, p, t, h, along, across);
@@ -1980,7 +2017,44 @@ fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
     sea_swell_train(&s, 4.0, -1.0, 0.174, 1.683, p, t, h, along, across);
     sea_swell_train(&s, 4.0,  1.0, 0.174, 4.767, p, t, h, along, across);
     s.eta = clamp(s.eta / SWELL_ETA_SCALE_M, -1.0, 1.0);
+    s.eta_raw = s.eta_raw / SWELL_ETA_SCALE_M;
     return s;
+}
+
+// The lace's mean cover at threshold index k in [0, 4] (see SEA_LACE_*),
+// linear between the measured points.
+fn sea_lace_mean(k: f32) -> f32 {
+    let c = clamp(k, 0.0, 4.0);
+    let lo = select(select(select(SEA_LACE_COVER_0, SEA_LACE_COVER_1, c >= 1.0),
+                           SEA_LACE_COVER_2, c >= 2.0), SEA_LACE_COVER_3,
+                    c >= 3.0);
+    let hi = select(select(select(SEA_LACE_COVER_1, SEA_LACE_COVER_2, c >= 1.0),
+                           SEA_LACE_COVER_3, c >= 2.0), SEA_LACE_COVER_4,
+                    c >= 3.0);
+    return mix(lo, hi, c - min(floor(c), 3.0));
+}
+
+// How much of a foam texel the lace keeps (see SEA_LACE_*): resolved where
+// its 5 cm texels are larger than the pixel, their measured mean where they
+// are not, blended over two levels as the tile's own foam is.
+fn sea_lace(p: vec2<f32>, rank: f32, theta: f32, along: f32,
+            fr: SeaFrames) -> f32 {
+    let fresh = clamp((rank - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0);
+    let k = 4.0 * (1.0 - fresh);
+    let cut = -SEA_LACE_EDGE + 0.25 * k * SEA_LACE_REACH;
+    let mean = sea_lace_mean(k);
+    let texel = u.ocean_params.x / SEA_LACE_SCALE;
+    let lod = log2(max(along / texel, 1.0));
+    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
+    if (resolved <= 0.0) {
+        return mean;
+    }
+    let uv = vec2<f32>(p.y, p.x) * (SEA_LACE_SCALE / u.ocean_params.y);
+    let crest = mix(
+        textureSampleLevel(ocean_waves, ocean_samp, uv, fr.a, lod).w,
+        textureSampleLevel(ocean_waves, ocean_samp, uv, fr.b, lod).w, fr.f);
+    let lace = smoothstep(cut - SEA_LACE_EDGE, cut + SEA_LACE_EDGE, crest);
+    return mix(mean, lace, resolved);
 }
 
 struct SeaSurface {
@@ -2003,9 +2077,11 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     // Drift-corrected, not raw world: see u.surface_offset (row 24).
     let p = world_xy - u.surface_offset.xy;
     let t = scene_time();
-    let fr = sea_frames();
-    let tile = sea_sample(p, lod, fr);
     let swell = sea_swell(p, t, h, along, across);
+    // Each patch of sea at its own moment of the loop: see
+    // SEA_PHASE_SPREAD_S.
+    let fr = sea_frames(t + SEA_PHASE_SPREAD_S * swell.eta_raw);
+    let tile = sea_sample(p, lod, fr);
 
     let m = 1.0 + SEA_SWELL_MODULATION * swell.eta;
     var out: SeaSurface;
@@ -2021,18 +2097,16 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     // them, only a sharpening as the footprint shrinks under a texel.
     let gate = clamp(0.5 * (1.0 + swell.eta), 0.0, 1.0);
     let theta = clamp(1.0 - gate, SEA_FOAM_EDGE, 1.0);
-    let far_cover = SEA_FOAM_MAX_COVERAGE * (1.0 - theta);
-    let far_albedo = mix(SEA_FOAM_ALBEDO_RESIDUAL, SEA_FOAM_ALBEDO_ACTIVE,
-                         0.5 * (1.0 + theta));
-    let near_cover = smoothstep(theta - SEA_FOAM_EDGE, theta + SEA_FOAM_EDGE,
+    let far_cover = SEA_FOAM_MAX_COVERAGE * (1.0 - theta) * SEA_LACE_COVER_MEAN;
+    var near_cover = smoothstep(theta - SEA_FOAM_EDGE, theta + SEA_FOAM_EDGE,
                                 tile.z);
-    let near_albedo = mix(SEA_FOAM_ALBEDO_RESIDUAL, SEA_FOAM_ALBEDO_ACTIVE,
-                          clamp(tile.z, 0.0, 1.0));
     // Sharp below a texel, the analytic mean by two levels up.
     let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
+    if (resolved > 0.0 && near_cover > 0.0) {
+        near_cover = near_cover * sea_lace(p, tile.z, theta, along, fr);
+    }
     out.foam = mix(far_cover, near_cover, resolved);
-    let lit = mix(far_cover * far_albedo, near_cover * near_albedo, resolved);
-    out.foam_albedo = select(0.0, lit / out.foam, out.foam > 1e-6);
+    out.foam_albedo = SEA_FOAM_ALBEDO;
     out.crest = tile.w;
     return out;
 }
@@ -2047,7 +2121,8 @@ fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
 
 // The legacy shader's normal: the wind-sea tile alone, at the clock.
 fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
-    let s = sea_sample(world_xy - u.surface_offset.xy, lod, sea_frames()).xy;
+    let s = sea_sample(world_xy - u.surface_offset.xy, lod,
+                       sea_frames(scene_time())).xy;
     return normalize(vec3<f32>(-s, 1.0));
 }
 

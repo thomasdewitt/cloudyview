@@ -106,6 +106,32 @@ def _slope_variance_tables(planes: np.ndarray, meta: dict):
     return levels, removed, temporal
 
 
+# The whitecaps' lace (raymarch.wgsl sea_surface): foam is cut again inside
+# by the tile's own crest channel read at 1/8 scale, at a threshold that
+# runs from -LACE_EDGE (solid) for an active whitecap to LACE_REACH -
+# LACE_EDGE for the oldest residual foam, with a soft edge of +-LACE_EDGE.
+# The shader needs the mean cover each cut leaves, which is a property of the
+# tile: measured here at five thresholds.
+LACE_REACH = 0.25
+LACE_EDGE = 0.05
+LACE_POINTS = 5
+
+
+def _smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _lace_cover(planes: np.ndarray) -> list:
+    """Mean of smoothstep(a - e, a + e, crest) over the whole tile, for the
+    LACE_POINTS thresholds a = -e + k * reach / (points - 1)."""
+    crest = planes[3].astype(np.float64) / 255.0
+    cuts = [-LACE_EDGE + k * LACE_REACH / (LACE_POINTS - 1)
+            for k in range(LACE_POINTS)]
+    return [float(np.mean(_smoothstep(a - LACE_EDGE, a + LACE_EDGE, crest)))
+            for a in cuts]
+
+
 def export_ocean() -> dict:
     """The moving sea: generate, quantize, and measure what the shader needs.
 
@@ -143,6 +169,9 @@ def export_ocean() -> dict:
         "seed": SEA_SEED,
         "scaleinvariance": scaleinvariance.__version__,
     }
+    meta["lace_reach"] = LACE_REACH
+    meta["lace_edge"] = LACE_EDGE
+    meta["lace_cover"] = [round(v, 6) for v in _lace_cover(planes)]
     levels, removed, temporal = _slope_variance_tables(planes, meta)
     meta["mips"] = levels
     meta["slope_variance_removed"] = [round(float(v), 7) for v in removed]

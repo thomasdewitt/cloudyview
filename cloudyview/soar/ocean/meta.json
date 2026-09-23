@@ -16,6 +16,15 @@
  "foam_max_coverage": 0.02,
  "seed": 20260923,
  "scaleinvariance": "0.13.1",
+ "lace_reach": 0.25,
+ "lace_edge": 0.05,
+ "lace_cover": [
+  1.0,
+  0.634911,
+  0.399297,
+  0.321714,
+  0.252481
+ ],
  "mips": 9,
  "slope_variance_removed": [
   0.0,
