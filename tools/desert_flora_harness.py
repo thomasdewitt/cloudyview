@@ -41,13 +41,28 @@ FLORA_BEGIN = "// === DESERT FLORA (desert-flora) ==="
 FLORA_END = "// === END DESERT FLORA ==="
 DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
 
-# Stubs of the ground API, for the placement scan only: nothing it computes
-# depends on them except the foot height, which the scan does not report.
+# Stubs of the ground API, for the placement scan only. The tile itself is
+# bound (the habitat reads its lightness), without the sub-tile octaves;
+# the foot heights it reports are the tile's, and the harness does not use
+# them.
 SCAN_PRELUDE = """
 const DESERT_FLORA_SLAB_H: f32 = 13.0;
+struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>, };
+var<private> u: ScanUniforms;
+fn desert_camera_origin() -> vec3<f32> { return vec3<f32>(0.0); }
 fn desert_height(xy: vec2<f32>) -> f32 { return 0.0; }
 fn desert_normal(xy: vec2<f32>) -> vec3<f32> { return vec3<f32>(0.0, 0.0, 1.0); }
 fn desert_height_range() -> vec2<f32> { return vec2<f32>(0.0, 0.0); }
+@group(0) @binding(1) var scan_tile: texture_2d<f32>;
+@group(0) @binding(2) var scan_samp: sampler;
+fn desert_tile(xy: vec2<f32>, lod: f32) -> vec2<f32> {
+    return textureSampleLevel(scan_tile, scan_samp, xy / 4096.0, lod).rg;
+}
+// The tile alone, without the octaves: the habitat reads lightness at
+// decimetres, where the octaves are a small correction.
+fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
+    return desert_tile(xy, 0.0);
+}
 struct DesertHit { hit: bool, t: f32, pos: vec3<f32>, normal: vec3<f32>,
                    kind: i32, mat: vec4<f32>, };
 struct DesertLight { sun_dir: vec3<f32>, sun: vec3<f32>, sky: vec3<f32>,
@@ -125,9 +140,31 @@ def scan_plants(entry="scan"):
                                | wgpu.BufferUsage.COPY_SRC)
     rb = device.create_buffer(size=size, usage=wgpu.BufferUsage.COPY_DST
                               | wgpu.BufferUsage.MAP_READ)
+    from cloudyview.soar_host import DESERT_DIR, decode_surface_level
+    meta = json.loads((DESERT_DIR / "meta.json").read_text())
+    side = int(meta["n"])
+    tex = device.create_texture(
+        size=(side, side, 1), format=wgpu.TextureFormat.rg16float,
+        mip_level_count=len(meta["files"]),
+        usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
+    for lvl, name in enumerate(meta["files"]):
+        sd = max(side >> lvl, 1)
+        raw = gzip.decompress((DESERT_DIR / name).read_bytes())
+        device.queue.write_texture(
+            {"texture": tex, "mip_level": lvl, "origin": (0, 0, 0)},
+            decode_surface_level(raw, sd, meta),
+            {"offset": 0, "bytes_per_row": sd * 4, "rows_per_image": sd},
+            (sd, sd, 1))
+    samp = device.create_sampler(address_mode_u="repeat",
+                                 address_mode_v="repeat",
+                                 mag_filter="linear", min_filter="linear",
+                                 mipmap_filter="linear")
     bg = device.create_bind_group(layout=pipe.get_bind_group_layout(0),
                                   entries=[{"binding": 0,
-                                            "resource": {"buffer": buf}}])
+                                            "resource": {"buffer": buf}},
+                                           {"binding": 1,
+                                            "resource": tex.create_view()},
+                                           {"binding": 2, "resource": samp}])
     enc = device.create_command_encoder()
     cp = enc.begin_compute_pass()
     cp.set_pipeline(pipe)
@@ -174,78 +211,95 @@ def pick_shrub(small, hero):
     return c[np.argmax(c[:, 3])]
 
 
-def shrub_views(s, sun_az, sun_el):
-    x, y, h = s[1], s[2], s[3]
-
-    def at(dist, z, look_z, fov, from_az, s_az=sun_az, s_el=sun_el):
-        a = math.radians(from_az)
-        cx, cy = x + dist * math.sin(a), y + dist * math.cos(a)
-        el = math.degrees(math.atan2(look_z - z, dist))
-        return (cx, cy, z, (from_az + 180.0) % 360.0, el, fov, s_az, s_el)
-
-    side = sun_az + 25.0
-    return {
-        "creo_1m": at(1.0 + s[4], 1.2, 0.6 * h, 70.0, side),
-        "creo_5m": at(5.0, 1.6, 0.5 * h, 45.0, side),
-        "creo_30m": at(30.0, 3.0, 0.5 * h, 25.0, side),
-        "creo_top": (x + 0.3, y - 12.0, 9.0, 0.0, -35.0, 50.0, sun_az, sun_el),
-    }
-
-
 def nearest(plants, kind, hero):
     c = plants[plants[:, 0] == kind]
     return c[np.argmin(np.hypot(c[:, 1] - hero[1], c[:, 2] - hero[2]))]
 
 
-def aim(x, y, h, dist, z, look_z, fov, from_az, s_az, s_el):
+class Ground:
+    """The terrain height under a desert-frame point: the tile's mip 0,
+    bilinear with the GPU's texel-centre convention, over the datum. The
+    sub-tile octaves (decimetres) are left out: this only places cameras."""
+
+    def __init__(self, datum=0.0):
+        from cloudyview.soar_host import DESERT_DIR, decode_surface_level
+        meta = json.loads((DESERT_DIR / "meta.json").read_text())
+        n = int(meta["n"])
+        raw = gzip.decompress((DESERT_DIR / meta["files"][0]).read_bytes())
+        texels = np.frombuffer(decode_surface_level(raw, n, meta), np.float16)
+        self.h = texels.reshape(n, n, 2)[:, :, 0].astype(np.float64)
+        self.cell = float(meta["cell_m"])
+        self.n = n
+        self.datum = datum
+
+    def __call__(self, x, y):
+        u = x / self.cell - 0.5
+        v = y / self.cell - 0.5
+        i0, j0 = math.floor(u), math.floor(v)
+        fu, fv = u - i0, v - j0
+        n = self.n
+        h = self.h
+
+        def at(i, j):
+            return h[j % n, i % n]
+        return self.datum + (
+            (1 - fu) * (1 - fv) * at(i0, j0) + fu * (1 - fv) * at(i0 + 1, j0)
+            + (1 - fu) * fv * at(i0, j0 + 1) + fu * fv * at(i0 + 1, j0 + 1))
+
+
+def aim(g, x, y, dist, z, look_z, fov, from_az, s_az, s_el):
+    """A camera `dist` from the plant at (x, y) on bearing `from_az`, `z`
+    above the ground under it, looking at `look_z` above the plant's foot."""
     a = math.radians(from_az)
     cx, cy = x + dist * math.sin(a), y + dist * math.cos(a)
-    el = math.degrees(math.atan2(look_z - z, dist))
-    return (cx, cy, z, (from_az + 180.0) % 360.0, el, fov, s_az, s_el)
+    zc = g(cx, cy) + z
+    el = math.degrees(math.atan2(g(x, y) + look_z - zc, dist))
+    return (cx, cy, zc, (from_az + 180.0) % 360.0, el, fov, s_az, s_el)
 
 
-def other_views(plants, hero, sun_az, sun_el):
+def shrub_views(g, s, sun_az, sun_el):
+    x, y, h, w = s[1], s[2], s[3], s[4]
+    side = sun_az + 25.0
+    return {
+        "creo_1m": aim(g, x, y, 1.0 + w, 1.2, 0.6 * h, 70.0, side, sun_az, sun_el),
+        "creo_5m": aim(g, x, y, 5.0, 1.6, 0.5 * h, 45.0, side, sun_az, sun_el),
+        "creo_30m": aim(g, x, y, 30.0, 3.0, 0.5 * h, 25.0, side, sun_az, sun_el),
+        "creo_top": aim(g, x, y, 12.0, 9.0, 0.0, 50.0, 180.0, sun_az, sun_el),
+    }
+
+
+def other_views(g, plants, hero, sun_az, sun_el):
     oc = nearest(plants, 10, hero)
     rk = nearest(plants, 14, hero)
     print(f"ocotillo at ({oc[1]:.1f}, {oc[2]:.1f}): H {oc[3]:.2f} m, "
           f"{int(oc[4])} canes; boulders at ({rk[1]:.1f}, {rk[2]:.1f})")
     side = sun_az + 25.0
     return {
-        "oco_1m": aim(oc[1], oc[2], oc[3], 1.3, 1.6, 1.9, 60.0, side,
+        "oco_1m": aim(g, oc[1], oc[2], 1.3, 1.6, 1.9, 60.0, side, sun_az, sun_el),
+        "oco_8m": aim(g, oc[1], oc[2], 8.0, 1.7, 0.5 * oc[3], 60.0, side,
                       sun_az, sun_el),
-        "oco_8m": aim(oc[1], oc[2], oc[3], 8.0, 1.7, 0.5 * oc[3], 60.0, side,
-                      sun_az, sun_el),
-        "rock_4m": aim(rk[1], rk[2], 1.0, 5.0, 1.8, 0.6, 60.0, side,
-                       sun_az, sun_el),
+        "rock_4m": aim(g, rk[1], rk[2], 5.0, 1.8, 0.6, 60.0, side, sun_az, sun_el),
     }
 
 
-def hero_views(h, sun_az, sun_el):
+def hero_views(g, h, sun_az, sun_el):
     """Cameras framed on the hero: (x, y, z, az, el, fov, sun_az, sun_el),
     desert frame. The close views stand on the sun's side so the plant is
     front-lit; `backlit` stands opposite a low sun."""
     x, y, height, r = h[1], h[2], h[3], h[4]
-
-    def at(dist, z, look_z, fov, from_az, s_az=sun_az, s_el=sun_el):
-        # from_az: compass bearing from the plant to the camera.
-        a = math.radians(from_az)
-        cx = x + dist * math.sin(a)
-        cy = y + dist * math.cos(a)
-        az = (from_az + 180.0) % 360.0
-        el = math.degrees(math.atan2(look_z - z, dist))
-        return (cx, cy, z, az, el, fov, s_az, s_el)
-
     side = sun_az + 25.0
+    back = sun_az + 180.0
     return {
-        "1m": at(r + 0.55, 1.7, 1.55, 55.0, side),
-        "trunk4m": at(4.0, 2.0, 2.0, 20.0, side),
-        "5m": at(5.0, 1.8, 0.45 * height, 80.0, side),
-        "30m": at(30.0, 2.5, 0.5 * height, 45.0, side),
-        "300m": at(300.0, 60.0, 0.4 * height, 30.0, side),
-        "backlit": at(9.0, 1.6, 0.55 * height, 70.0, sun_az + 180.0 + 8.0,
-                      sun_az, 7.0),
-        "backlit_close": at(r + 0.9, 2.2, 2.4, 50.0, sun_az + 180.0 + 12.0,
-                            sun_az, 9.0),
+        "1m": aim(g, x, y, r + 0.55, 1.7, 1.55, 55.0, side, sun_az, sun_el),
+        "trunk4m": aim(g, x, y, 4.0, 2.0, 2.0, 20.0, side, sun_az, sun_el),
+        "5m": aim(g, x, y, 5.0, 1.8, 0.45 * height, 80.0, side, sun_az, sun_el),
+        "30m": aim(g, x, y, 30.0, 2.5, 0.5 * height, 45.0, side, sun_az, sun_el),
+        "300m": aim(g, x, y, 300.0, 60.0, 0.4 * height, 30.0, side,
+                    sun_az, sun_el),
+        "backlit": aim(g, x, y, 9.0, 1.6, 0.55 * height, 70.0, back + 8.0,
+                       sun_az, 7.0),
+        "backlit_close": aim(g, x, y, r + 0.9, 2.2, 2.4, 50.0, back + 12.0,
+                             sun_az, 9.0),
     }
 
 
@@ -341,9 +395,10 @@ def main(argv=None) -> int:
     shrub = pick_shrub(small, hero)
     print(f"creosote at ({shrub[1]:.2f}, {shrub[2]:.2f}): H {shrub[3]:.2f} m, "
           f"W {shrub[4]:.2f} m, {int(shrub[7])} stems")
-    views = {**hero_views(hero, sun_az, sun_el),
-             **shrub_views(shrub, sun_az, sun_el),
-             **other_views(plants, hero, sun_az, sun_el)}
+    g = Ground()
+    views = {**hero_views(g, hero, sun_az, sun_el),
+             **shrub_views(g, shrub, sun_az, sun_el),
+             **other_views(g, plants, hero, sun_az, sun_el)}
     if args.views != "all":
         views = {k: views[k] for k in args.views.split(",")}
     if args.camera is not None:
@@ -353,7 +408,9 @@ def main(argv=None) -> int:
         dxo, dyo, z = args.hero_offset
         x, y = hero[1] + dxo, hero[2] + dyo
         az = math.degrees(math.atan2(-dxo, -dyo)) % 360.0
-        el = math.degrees(math.atan2(0.5 * hero[3] - z, math.hypot(dxo, dyo)))
+        z = g(x, y) + z
+        el = math.degrees(math.atan2(g(hero[1], hero[2]) + 0.5 * hero[3] - z,
+                                     math.hypot(dxo, dyo)))
         views = {"hero_offset": (x, y, z, az, el, 60.0, sun_az, sun_el)}
 
     baked = None

@@ -11642,7 +11642,7 @@ fn df_creo_stem(it: DfItem, i: i32) -> DfSeg {
     let tip = vec3<f32>(dxy * w * spread,
         h * (0.62 + 0.38 * (1.0 - 0.6 * spread * spread))
           * (0.85 + 0.15 * hh.z));
-    let a = vec3<f32>(dxy * 0.05 * hh.w, -0.05);
+    let a = vec3<f32>(dxy * 0.05 * hh.w, -0.3);
     var sg: DfSeg;
     sg.a = a;
     sg.len = length(tip - a);
@@ -12037,7 +12037,7 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
     let tilt = it.a.z * sqrt(hh.y);
     let len = h * (0.7 + 0.3 * hh.z) / cos(tilt);
     let dxy = vec2<f32>(cos(phi), sin(phi));
-    let foot = vec3<f32>(dxy * 0.10 * hh.w, -0.1);
+    let foot = vec3<f32>(dxy * 0.10 * hh.w, -0.3);
     let ax0 = vec3<f32>(dxy * sin(tilt), cos(tilt));
     let t1 = tilt + 0.10 + 0.08 * hh.w;
     let ax1 = vec3<f32>(dxy * sin(t1), cos(t1));
@@ -12415,12 +12415,73 @@ const DF_P_BURSAGE: f32 = 0.24;
 const DF_P_ROCK: f32 = 0.05;
 const DF_BOULDER_REACH: f32 = 3.1;
 
+// --- Habitat -------------------------------------------------------------------
+//
+// Where things grow. An active wash floor (the ground tile's lightness toward
+// its sand end) is scoured bare; its banks — a wash seen at a 32 m footprint —
+// are where shrubs crowd and grow big, which is what makes a drainage net
+// read as dark threads from the air; between them a slow patchiness, value
+// noise on a 128 m lattice that divides the tile, gathers the saguaros into
+// stands and thins them between. Everything is a draw on the desert frame, so
+// it is as tile-periodic as the ground it reads.
+struct DfHabitat {
+    wash: f32,    // 1 on an active wash floor
+    bank: f32,    // 1 on a wash's banks, 0 far from any
+    stand: f32,   // the slow patchiness, uniform-ish on [0, 1]
+}
+
+const DF_STAND_CELL: f32 = 128.0;
+const DF_STAND_N: i32 = 32;           // 4096 m / 128 m
+
+fn df_stand_corner(c: vec2<i32>) -> f32 {
+    let w = vec2<u32>(c & vec2<i32>(DF_STAND_N - 1));
+    return df_u01(pcg2d(w + vec2<u32>(0x7f4a7c15u, 0x94d049bbu)).x);
+}
+
+// `light` is the ground's fine lightness at xy, which the caller already
+// has from the same desert_surface read that gave it the foot height.
+fn df_habitat(xy: vec2<f32>, light: f32) -> DfHabitat {
+    var hb: DfHabitat;
+    hb.wash = smoothstep(0.78, 0.92, light);
+    hb.bank = smoothstep(0.58, 0.72, desert_tile(xy, 4.0).y) * (1.0 - hb.wash);
+    let g = xy / DF_STAND_CELL - 0.5;
+    let c = vec2<i32>(floor(g));
+    let f = g - floor(g);
+    let sm = f * f * (3.0 - 2.0 * f);
+    let v = mix(mix(df_stand_corner(c), df_stand_corner(c + vec2<i32>(1, 0)),
+                    sm.x),
+                mix(df_stand_corner(c + vec2<i32>(0, 1)),
+                    df_stand_corner(c + vec2<i32>(1, 1)), sm.x), sm.y);
+    // Bilinear value noise piles up in the middle; stretch it back out.
+    hb.stand = clamp(0.5 + 1.6 * (v - 0.5), 0.0, 1.0);
+    return hb;
+}
+
+// How often each species keeps its draw at a habitat, relative to its base
+// frequency (so the far field can take the same expectation).
+fn df_keep(kind: i32, hb: DfHabitat) -> f32 {
+    let open = 1.0 - hb.wash;
+    if (kind == DF_KIND_SAGUARO) {
+        return open * mix(0.15, 1.0, hb.stand) * (1.0 - 0.5 * hb.bank);
+    }
+    if (kind == DF_KIND_OCOTILLO) {
+        return open * mix(0.9, 0.35, hb.stand);
+    }
+    if (kind == DF_KIND_BOULDER) {
+        return open * mix(0.4, 1.0, hb.stand);
+    }
+    // The shrubs: everywhere but the wash floor, thicker on the banks.
+    return open;
+}
+
 // The cheap part of a big cell's draw: its species and foot (cell-local xy)
-// and the radius around the foot that the small plants keep clear of.
+// and the radius around the foot that the small plants keep clear of. `surf`
+// is the ground there (desert_surface at 0.1 m), for the caller's foot.
 struct DfFoot {
     kind: i32,
     xy: vec2<f32>,
     clear: f32,
+    surf: vec2<f32>,
 }
 
 fn df_big_foot(ci: vec2<i32>) -> DfFoot {
@@ -12430,6 +12491,7 @@ fn df_big_foot(ci: vec2<i32>) -> DfFoot {
     var f: DfFoot;
     f.kind = 0;
     f.clear = 0.0;
+    f.surf = vec2<f32>(0.0);
     var margin = 2.3;
     if (r0.x < DF_P_SAGUARO) {
         f.kind = DF_KIND_SAGUARO;
@@ -12445,6 +12507,14 @@ fn df_big_foot(ci: vec2<i32>) -> DfFoot {
         f.clear = 2.2;
     }
     f.xy = vec2<f32>(margin) + (DF_BIG_CELL - 2.0 * margin) * rp.xy;
+    if (f.kind != 0) {
+        f.surf = desert_surface(vec2<f32>(ci) * DF_BIG_CELL + f.xy, 0.1);
+        let hb = df_habitat(vec2<f32>(ci) * DF_BIG_CELL + f.xy, f.surf.y);
+        if (r0.w >= df_keep(f.kind, hb)) {
+            f.kind = 0;
+            f.clear = 0.0;
+        }
+    }
     return f;
 }
 
@@ -12457,7 +12527,7 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>) -> DfItem {
     if (foot.kind == 0) {
         return it;
     }
-    it.base.z = desert_height(cell_org + foot.xy);
+    it.base.z = foot.surf.x;
     let r0 = df_rand4(it.seed);
     let rp = df_rand4(pcg2d(it.seed ^ vec2<u32>(0xb5297a4du, 0x68e31da4u)));
     let rs = df_rand4(pcg2d(it.seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
@@ -12467,7 +12537,7 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>) -> DfItem {
     } else if (foot.kind == DF_KIND_OCOTILLO) {
         it = df_ocotillo_item(it, rs);
         let reach = df_ocotillo_reach(it.a.x, it.a.z);
-        it.bmin = vec3<f32>(foot.xy - vec2<f32>(reach), it.base.z - 0.15);
+        it.bmin = vec3<f32>(foot.xy - vec2<f32>(reach), it.base.z - 0.35);
         it.bmax = vec3<f32>(foot.xy + vec2<f32>(reach),
                             it.base.z + 1.05 * it.a.x + 0.3);
     } else {
@@ -12515,9 +12585,15 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>) -> DfItem {
             return it;
         }
     }
-    it.base = vec3<f32>(xy, desert_height(org_w));
+    let surf = desert_surface(org_w, 0.1);
+    let hb = df_habitat(org_w, surf.y);
+    if (r0.w >= df_keep(it.kind, hb)) {
+        it.kind = 0;
+        return it;
+    }
+    it.base = vec3<f32>(xy, surf.x);
     let dz = it.base.z;
-    it.bmin = vec3<f32>(xy - vec2<f32>(reach), dz - 0.15);
+    it.bmin = vec3<f32>(xy - vec2<f32>(reach), dz - 0.35);
     it.bmax = vec3<f32>(xy + vec2<f32>(reach), dz + top);
     return it;
 }
@@ -12607,10 +12683,35 @@ fn df_walk(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t0: f32,
 }
 
 // --- Hooks the ground calls ------------------------------------------------------
+//
+// The explicit plants stop where the footprint reaches DF_FAR_FP (a pixel of
+// about a saguaro's width); past that every plant is sub-pixel and the
+// statistical canopy (desert_flora_far) stands in for them. That footprint
+// is the TRUE pixel's, not the LOD angle the hooks are handed (which the
+// app's LOD slider can set to several pixels, and which the plants' inner
+// detail — needles, leaves — does follow, as the city's windows do): whether
+// a plant is there at all is geometry, and an average stands in for it only
+// once it is smaller than a pixel. The cut is
+// dithered per ray over [DF_FAR_FP0, DF_FAR_FP1] — the same dither the far
+// integral starts from — so a pixel's samples split between the two forms in
+// the proportion the blend asks for, and the far integral covers exactly the
+// part of the ray the explicit walk did not.
+const DF_FAR_FP0: f32 = 0.30;
+const DF_FAR_FP1: f32 = 0.50;
+
+fn df_true_pixel_angle() -> f32 {
+    return 2.0 * u.cam_origin.w / u.params.x;
+}
+
+fn df_far_cut(dir: vec3<f32>) -> f32 {
+    let d = df_ray_dither(dir);
+    return mix(DF_FAR_FP0, DF_FAR_FP1, d.x) / df_true_pixel_angle();
+}
 
 fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                      t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
+                      t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
     let dither = df_ray_dither(dir);
+    let t1 = min(t1_in, df_far_cut(dir));
     var h = df_walk(o, dir, inv_dir, t0, t1, pixel_angle, true, dither, false);
     let hs = df_walk(o, dir, inv_dir, t0, h.t, pixel_angle, false, dither,
                      false);
@@ -12620,8 +12721,9 @@ fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     return h;
 }
 
-// Transmittance of plants along the sun ray from p (the ground or a plant).
-fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
+// Plants between p and the sun, exactly: 0 or 1. Bodies only, traced to the
+// receiver's footprint `fp` (which travels in the walk's pixel_angle slot).
+fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     if (sun_dir.z <= 1e-3) {
         return 0.0;
     }
@@ -12629,14 +12731,32 @@ fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     let t1 = max((top - p.z) / sun_dir.z, 0.0);
     let inv = 1.0 / sun_dir;
     let dither = vec2<f32>(0.5);
-    // Shadow walks trace bodies only, to the receiver's footprint `fp`,
-    // which travels in the pixel_angle slot.
     let hb = df_walk(p, sun_dir, inv, 0.0, t1, fp, true, dither, true);
     if (hb.hit) {
         return 0.0;
     }
     let hs = df_walk(p, sun_dir, inv, 0.0, t1, fp, false, dither, true);
     return select(1.0, 0.0, hs.hit);
+}
+
+// How much of the plants' shadow on a ground point of footprint fp is the
+// statistical one: 0 while the shadow-casters are drawn, 1 once they are
+// not. Deterministic in fp (a shadow is light, not geometry, so an expected
+// value blend is exact), and the same weight scales far.shadow.
+fn df_far_shadow_weight(fp: f32) -> f32 {
+    return smoothstep(DF_FAR_FP0, DF_FAR_FP1, fp);
+}
+
+// The ground's hook: exact plant shadow near, fading to 1 where the far
+// field's statistical shadow takes over.
+fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
+    // fp is the LOD footprint; the cut is the true pixel's (see above).
+    let w = df_far_shadow_weight(df_true_pixel_angle()
+                                 * length(p - desert_camera_origin()));
+    if (w >= 1.0) {
+        return 1.0;
+    }
+    return mix(df_shadow_exact(p, sun_dir, fp), 1.0, w);
 }
 
 // Fiber lighting for a needle of axis `ax`: Kajiya-Kay diffuse and sheen,
@@ -12698,8 +12818,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
     let code = i32(floor(h.mat.x));
     let tint = fract(h.mat.x);
     let n = h.normal;
-    let sun_vis = desert_flora_shadow(h.pos + n * max(2e-3, fp),
-                                      L.sun_dir, fp);
+    let sun_vis = df_shadow_exact(h.pos + n * max(2e-3, fp), L.sun_dir, fp);
     var Ls = L;
     Ls.sun = L.sun * sun_vis;
     if (h.kind == DF_KIND_SAGUARO) {
@@ -12756,19 +12875,133 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
 
 
 // --- Far field -----------------------------------------------------------------
-
-// The plants a far pixel sees but the explicit trace no longer draws: the
-// statistical canopy over the part of the ray past the explicit plants'
-// own LOD distance. `cover` is 1 - the view transmittance through that
-// part of the slab, `albedo` the mean albedo of the plants seen, `shadow`
-// the fraction of the visible ground lying in plant shadow (hot-spot
-// correlation included). Must equal what the resolved plants average to,
-// so no seam appears where they drop out.
+//
+// Past the explicit plants' cut, each species is a population of objects
+// of known mean shape, Poisson in the plane at its local density, and the
+// part of a ray inside the flora slab crosses it as a medium whose
+// extinction per unit length at height z above the ground is
+//     sigma(z) = n [ 2 rho(z) sin(theta) + a(z) |cos(theta)| ]
+// — rho the mean half-width of a plant's horizontal section at z (what a
+// sideways ray sweeps) and a(z) the horizontal area a downward ray first
+// meets per unit descent (a crown's upper half, -dA/dz). theta is the ray's
+// zenith angle, so a grazing ray sees plant sides and a nadir ray crowns:
+// the whole reason a bajada is stipple from above and a wall of saguaros at
+// the horizon. The view transmittance is integrated in a few samples along
+// the part of the ray past the cut, at the height above the ground each
+// sample actually has.
+//
+// The ground's shadow is the same medium along the sun ray, with the hot
+// spot: looking down a sun ray the visible ground is sunlit, because the
+// plant that would shade it is the plant that would hide it. The two paths
+// share a plant with a probability that decays with how far apart they
+// run through a plant's height, measured in its width.
+//
+// Densities are each species' base frequency per cell times df_keep at the
+// local habitat — the same expectation the explicit placement draws from.
 struct DesertCover {
     cover: f32,
     albedo: vec3<f32>,
     shadow: f32,
+    // The plants' mean radiance is (sun sun_k + sky sky_k + ground gnd_k)/pi
+    // under the ground point's DesertLight; the view/sun geometry is folded
+    // into these here, where the view and sun directions are known.
+    sun_k: vec3<f32>,
+    sky_k: vec3<f32>,
+    gnd_k: vec3<f32>,
 };
+
+// The species' far descriptors.
+const DF_FAR_SAG_R: f32 = 0.26;       // trunk + arms, mean half-width
+const DF_FAR_CREO_A: f32 = 0.70;      // crown radius
+const DF_FAR_CREO_ZC: f32 = 0.78;     // crown centre height
+const DF_FAR_CREO_B: f32 = 0.62;      // crown vertical semi-axis
+const DF_FAR_CREO_KAPPA: f32 = 0.30;  // crown opacity (envelope medium)
+const DF_FAR_BURS_A: f32 = 0.30;
+const DF_FAR_BURS_ZC: f32 = 0.28;
+const DF_FAR_BURS_B: f32 = 0.26;
+const DF_FAR_BURS_KAPPA: f32 = 0.55;
+const DF_FAR_OCO_RHO: f32 = 0.16;     // canes' equivalent half-width
+const DF_FAR_OCO_H: f32 = 3.6;
+const DF_FAR_ROCK_A: f32 = 1.3;       // a heap's equivalent dome
+const DF_FAR_ROCK_B: f32 = 0.8;
+
+// Saguaro heights are 1.3 + 11.2 a^1.15 with a uniform: the fraction of
+// plants taller than z.
+fn df_far_sag_taller(z: f32) -> f32 {
+    return 1.0 - pow(clamp((z - 1.3) / 11.2, 0.0, 1.0), 1.0 / 1.15);
+}
+
+// A crown ellipsoid (radius ca, centre zc, semi-axis cb): its section's
+// half-width at z, and -dA/dz over its upper half.
+fn df_far_crown(z: f32, ca: f32, zc: f32, cb: f32) -> vec2<f32> {
+    let u = (z - zc) / cb;
+    if (abs(u) >= 1.0) {
+        return vec2<f32>(0.0);
+    }
+    let rho = ca * sqrt(1.0 - u * u);
+    // A = pi ca^2 (1 - u^2): -dA/dz = 2 pi ca^2 u / cb above the centre.
+    return vec2<f32>(rho, select(0.0, 2.0 * DF_PI * ca * ca * u / cb, u > 0.0));
+}
+
+// Per-species base densities (plants per m^2 before df_keep).
+fn df_far_density(hb: DfHabitat) -> array<f32, 5> {
+    let big = 1.0 / (DF_BIG_CELL * DF_BIG_CELL);
+    let small = 1.0 / (DF_SMALL_CELL * DF_SMALL_CELL);
+    return array<f32, 5>(
+        DF_P_SAGUARO * big * df_keep(DF_KIND_SAGUARO, hb),
+        DF_P_CREOSOTE * small * df_keep(DF_KIND_CREOSOTE, hb),
+        DF_P_BURSAGE * small * df_keep(DF_KIND_CREOSOTE, hb),
+        DF_P_OCOTILLO * big * df_keep(DF_KIND_OCOTILLO, hb),
+        DF_P_BOULDERS * big * df_keep(DF_KIND_BOULDER, hb));
+}
+
+// sigma(z) per species for a ray of |sin|, |cos| of zenith angle (s, c).
+fn df_far_sigma(z: f32, s: f32, c: f32, n: array<f32, 5>) -> array<f32, 5> {
+    let sag = DF_FAR_SAG_R * df_far_sag_taller(z);
+    let creo = df_far_crown(z, DF_FAR_CREO_A, DF_FAR_CREO_ZC, DF_FAR_CREO_B)
+        * DF_FAR_CREO_KAPPA;
+    let burs = df_far_crown(z, DF_FAR_BURS_A, DF_FAR_BURS_ZC, DF_FAR_BURS_B)
+        * DF_FAR_BURS_KAPPA;
+    let oco = select(0.0, DF_FAR_OCO_RHO, z > 0.0 && z < DF_FAR_OCO_H);
+    let rock = df_far_crown(z, DF_FAR_ROCK_A, 0.0, DF_FAR_ROCK_B);
+    return array<f32, 5>(
+        n[0] * 2.0 * sag * s,
+        n[1] * (2.0 * creo.x * s + creo.y * c),
+        n[2] * (2.0 * burs.x * s + burs.y * c),
+        n[3] * 2.0 * oco * s,
+        n[4] * (2.0 * rock.x * s + rock.y * c));
+}
+
+// The species' shadow footprint on the ground from the sun at zenith
+// angle theta_s (tan ts): what one plant hides of the ground below it.
+fn df_far_shadow_area(ts: f32) -> array<f32, 5> {
+    return array<f32, 5>(
+        // Saguaro: a strip 2r wide, mean height x tan.
+        2.0 * DF_FAR_SAG_R * 5.2 * ts,
+        DF_FAR_CREO_KAPPA * DF_PI * DF_FAR_CREO_A
+            * sqrt(DF_FAR_CREO_A * DF_FAR_CREO_A + DF_FAR_CREO_B * DF_FAR_CREO_B * ts * ts
+                   + 2.0 * DF_FAR_CREO_ZC * DF_FAR_CREO_B * ts * ts * 0.0)
+            + DF_FAR_CREO_KAPPA * 2.0 * DF_FAR_CREO_A * DF_FAR_CREO_ZC * ts,
+        DF_FAR_BURS_KAPPA * DF_PI * DF_FAR_BURS_A
+            * sqrt(DF_FAR_BURS_A * DF_FAR_BURS_A + DF_FAR_BURS_B * DF_FAR_BURS_B * ts * ts)
+            + DF_FAR_BURS_KAPPA * 2.0 * DF_FAR_BURS_A * DF_FAR_BURS_ZC * ts,
+        2.0 * DF_FAR_OCO_RHO * DF_FAR_OCO_H * ts,
+        0.5 * DF_PI * DF_FAR_ROCK_A
+            * sqrt(DF_FAR_ROCK_A * DF_FAR_ROCK_A + DF_FAR_ROCK_B * DF_FAR_ROCK_B * ts * ts));
+}
+
+// Each species' height scale and width for the hot-spot correlation.
+const DF_FAR_HOT_H: array<f32, 5> = array<f32, 5>(5.2, 0.78, 0.28, 2.0, 0.4);
+const DF_FAR_HOT_W: array<f32, 5> = array<f32, 5>(0.52, 1.4, 0.6, 1.0, 2.6);
+
+// Mean albedos of what a far pixel sees of each species.
+const DF_FAR_SAG_ALB: vec3<f32> = vec3<f32>(0.095, 0.130, 0.065);
+const DF_FAR_CREO_ALB: vec3<f32> = vec3<f32>(0.100, 0.130, 0.035);
+const DF_FAR_BURS_ALB: vec3<f32> = vec3<f32>(0.170, 0.175, 0.125);
+const DF_FAR_OCO_ALB: vec3<f32> = vec3<f32>(0.170, 0.170, 0.135);
+const DF_FAR_ROCK_ALB: vec3<f32> = vec3<f32>(0.150, 0.110, 0.085);
+
+const DF_FAR_SAMPLES: i32 = 6;
 
 fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                     pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
@@ -12776,13 +13009,103 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     c.cover = 0.0;
     c.albedo = vec3<f32>(0.0);
     c.shadow = 0.0;
+    c.sun_k = vec3<f32>(0.0);
+    c.sky_k = vec3<f32>(0.0);
+    c.gnd_k = vec3<f32>(0.0);
+    let p_hit = o + dir * t_hit;
+    let fp_hit = pixel_angle * t_hit;
+    let cz = abs(dir.z);
+    let sz = sqrt(max(1.0 - dir.z * dir.z, 0.0));
+
+    // --- The view: the medium over the part of the ray past the cut, from
+    // the top of the slab down to the hit.
+    let top = desert_height_range().y + DESERT_FLORA_SLAB_H;
+    var ta = df_far_cut(dir);
+    if (dir.z < -1e-6) {
+        ta = max(ta, (top - o.z) / dir.z);
+    }
+    var tau = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+    if (t_hit > ta) {
+        let dt = (t_hit - ta) / f32(DF_FAR_SAMPLES);
+        for (var k: i32 = 0; k < DF_FAR_SAMPLES; k = k + 1) {
+            let t = ta + (f32(k) + 0.5) * dt;
+            let p = o + dir * t;
+            let surf = desert_surface(p.xy, pixel_angle * t);
+            let z = p.z - surf.x;
+            if (z < 0.0 || z > DESERT_FLORA_SLAB_H) {
+                continue;
+            }
+            let n = df_far_density(df_habitat(p.xy, surf.y));
+            let sg = df_far_sigma(z, sz, cz, n);
+            for (var q: i32 = 0; q < 5; q = q + 1) {
+                tau[q] = tau[q] + sg[q] * dt;
+            }
+        }
+    }
+    let tau_v = tau[0] + tau[1] + tau[2] + tau[3] + tau[4];
+    c.cover = 1.0 - exp(-tau_v);
+
+    // --- What the covered part looks like: each species' radiance, weighted
+    // by its share of the optical depth. The phase factors are the mean
+    // cosine to the sun over the visible part of each shape: a vertical
+    // cylinder (saguaro, ocotillo canes) seen from azimuth difference D gives
+    // sin(theta_sun) ((pi - D) cos D + sin D) / 4 per unit projected area;
+    // a Lambert sphere (crowns, rocks) at phase angle g gives
+    // (2/3)(sin g + (pi - g) cos g) / pi.
+    if (tau_v > 0.0) {
+        let vh = normalize(vec2<f32>(-dir.x, -dir.y) + vec2<f32>(1e-7, 0.0));
+        let sh_len = length(sun.xy);
+        let sh = select(vh, sun.xy / max(sh_len, 1e-7), sh_len > 1e-5);
+        let dd = acos(clamp(dot(vh, sh), -1.0, 1.0));
+        let cyl = max(sh_len, 0.0) * ((DF_PI - dd) * cos(dd) + sin(dd)) * 0.25;
+        let g = acos(clamp(dot(-dir, sun), -1.0, 1.0));
+        let sph = max((2.0 / 3.0) * (sin(g) + (DF_PI - g) * cos(g)) / DF_PI, 0.0);
+        // Crowns are porous: the leaves inside are lit through the gaps in
+        // proportion to how open the crown is.
+        let w = array<f32, 5>(tau[0], tau[1], tau[2], tau[3], tau[4]);
+        let inv = 1.0 / tau_v;
+        let alb = array<vec3<f32>, 5>(DF_FAR_SAG_ALB, DF_FAR_CREO_ALB,
+                                      DF_FAR_BURS_ALB, DF_FAR_OCO_ALB,
+                                      DF_FAR_ROCK_ALB);
+        let ksun = array<f32, 5>(0.85 * cyl, 0.75 * sph, 0.75 * sph, cyl, sph);
+        let ksky = array<f32, 5>(0.40, 0.45, 0.50, 0.50, 0.70);
+        let kgnd = array<f32, 5>(0.50, 0.40, 0.40, 0.50, 0.30);
+        for (var q: i32 = 0; q < 5; q = q + 1) {
+            let f = w[q] * inv;
+            c.albedo = c.albedo + f * alb[q];
+            c.sun_k = c.sun_k + f * alb[q] * ksun[q];
+            c.sky_k = c.sky_k + f * alb[q] * ksky[q];
+            c.gnd_k = c.gnd_k + f * alb[q] * kgnd[q];
+        }
+    }
+
+    // --- The ground's shadow, once its casters are no longer drawn.
+    let wsh = df_far_shadow_weight(df_true_pixel_angle() * t_hit);
+    if (wsh > 0.0 && sun.z > 1e-3) {
+        let surf = desert_surface(p_hit.xy, fp_hit);
+        let n = df_far_density(df_habitat(p_hit.xy, surf.y));
+        let ts = sqrt(max(1.0 - sun.z * sun.z, 0.0)) / sun.z;
+        let area = df_far_shadow_area(ts);
+        // The view path's horizontal run per metre of height, toward the
+        // camera, against the sun path's, toward the sun.
+        let tv = sz / max(cz, 1e-3);
+        let vrun = select(vec2<f32>(0.0), -dir.xy / max(sz, 1e-7), sz > 1e-7) * tv;
+        let srun = sun.xy / sun.z;
+        var tau_s = 0.0;
+        for (var q: i32 = 0; q < 5; q = q + 1) {
+            let sep = length(vrun - srun) * DF_FAR_HOT_H[q];
+            let corr = exp(-sep / DF_FAR_HOT_W[q]);
+            tau_s = tau_s + n[q] * area[q] * (1.0 - corr);
+        }
+        c.shadow = wsh * (1.0 - exp(-tau_s));
+    }
     return c;
 }
 
 // Mean radiance of the far-field plants a pixel sees under `L`.
 fn desert_flora_far_shade(c: DesertCover, dir: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
-    return vec3<f32>(0.0);
+    return (L.sun * c.sun_k + L.sky * c.sky_k + L.ground * c.gnd_k) / DF_PI;
 }
 
 // === END DESERT FLORA ===
