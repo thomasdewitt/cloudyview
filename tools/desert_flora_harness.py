@@ -306,7 +306,7 @@ def hero_views(g, h, sun_az, sun_el):
 def main(argv=None) -> int:
     from cloudyview.soar_host import (
         APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES, SceneState,
-        SoarRenderer, ViewState, surface_cell_m)
+        SoarRenderer, ViewState, desert_relief_m, surface_cell_m)
     from cloudyview.witness import OCEAN_REFLECTANCE, QUALITY_PRESETS
     from PIL import Image
 
@@ -389,6 +389,7 @@ def main(argv=None) -> int:
         ocean_tile_extent=float(tile["tile_extent_m"]),
         ocean_max_lod=int(tile["mips"]) - 1,
         surface="desert",
+        desert_relief_m=desert_relief_m(tile),
     )
 
     small = scan_plants("scan_small")
@@ -396,7 +397,19 @@ def main(argv=None) -> int:
     print(f"creosote at ({shrub[1]:.2f}, {shrub[2]:.2f}): H {shrub[3]:.2f} m, "
           f"W {shrub[4]:.2f} m, {int(shrub[7])} stems")
     g = Ground()
-    views = {**hero_views(g, hero, sun_az, sun_el),
+    bar = nearest(small, 12, hero)
+    pp = nearest(small, 11, hero)
+    print(f"barrel at ({bar[1]:.2f}, {bar[2]:.2f}): H {bar[3]:.2f} m")
+    side = sun_az + 25.0
+    small_views = {
+        "barrel_1m": aim(g, bar[1], bar[2], 0.9 + bar[4], 1.1, 0.6 * bar[3],
+                         55.0, side, sun_az, sun_el),
+        "barrel_3m": aim(g, bar[1], bar[2], 3.0, 1.4, 0.5 * bar[3], 45.0, side,
+                         sun_az, sun_el),
+        "pear_1m": aim(g, pp[1], pp[2], 1.4, 1.0, 0.4, 60.0, side, sun_az, sun_el),
+        "pear_4m": aim(g, pp[1], pp[2], 4.0, 1.5, 0.4, 45.0, side, sun_az, sun_el),
+    }
+    views = {**small_views, **hero_views(g, hero, sun_az, sun_el),
              **shrub_views(g, shrub, sun_az, sun_el),
              **other_views(g, plants, hero, sun_az, sun_el)}
     if args.views != "all":
