@@ -3098,7 +3098,7 @@ export class Viewer {
     // every pixel. Presenting is a blit. Once the view has converged there is
     // nothing left for a march to add, so the loop keeps presenting (the bird
     // still flies over it) and stops marching.
-    const march = this._marchPending
+    let march = this._marchPending
       || !this.renderer.converged
       || !this.renderer.canPresentLast;
     const probing = Boolean(this._probe);
@@ -3139,10 +3139,22 @@ export class Viewer {
         this._marchPending = false;
         // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
         // must not be acquired until every await inside the draw has resolved.
-        await this.renderer.drawFrame(
+        const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
-          { deltaSeconds: dt, overlays });
+          { deltaSeconds: dt, overlays, waitForPipeline: false });
+        if (!marched) {
+          // The shader variant this frame needs is still compiling (a tier,
+          // bake or toggle moved the lighting specialization; see
+          // Renderer._rayPipeline). Nothing was drawn and the canvas keeps
+          // its last picture. Asking again next frame rather than waiting
+          // inside the draw is what keeps a compile from holding a frame
+          // open while the field or a capture changes underneath it. The
+          // frame did not march, so no clock may count it.
+          this._marchPending = true;
+          march = false;
+          measuring = false;
+        }
       } else {
         this.renderer.presentLast(
           this.context.getCurrentTexture().createView(), this.canvasFormat,

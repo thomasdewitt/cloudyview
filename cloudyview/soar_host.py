@@ -606,7 +606,8 @@ ACCUM_FORMAT = "rgba32float"
 
 def specialize(source: str, *, periodic: bool, nested: bool,
                max_light_steps: int, tone_map: bool = True,
-               surface: str = "ocean") -> str:
+               surface: str = "ocean", light_cache: bool = False,
+               sky_probe: bool = True) -> str:
     """Bake the compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
@@ -617,6 +618,15 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     rewritten when it is being turned ON: its declared value is already
     `false`, so the ocean is a no-op rewrite of both. Turning one on demands
     its declaration, like every other sentinel here.
+
+    `light_cache` and `sky_probe` are the lighting method (raymarch.wgsl
+    LIGHT_CACHE, SKY_PROBE): the same two flags pack_uniforms writes into
+    row 23, compiled in because a run-time branch on them cost every sample
+    its untaken side. A shader revision from before they were constants
+    (2026-09-23) declares neither and reads row 23 instead —
+    tools/soar_shader_ab.py replays such revisions through this host — so
+    for it there is nothing to rewrite. Any revision that declares one must
+    declare both, exactly once, like every other sentinel.
     """
     if not (1 <= int(max_light_steps) <= 512):
         raise ValueError(f"max_light_steps must be in [1, 512]; got {max_light_steps}.")
@@ -637,6 +647,13 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     if surface == "desert":
         swaps.append(("const DESERT: bool = false;",
                       "const DESERT: bool = true;"))
+    if "const LIGHT_CACHE: bool" in source:
+        swaps += [
+            ("const LIGHT_CACHE: bool = false;",
+             f"const LIGHT_CACHE: bool = {'true' if light_cache else 'false'};"),
+            ("const SKY_PROBE: bool = true;",
+             f"const SKY_PROBE: bool = {'true' if sky_probe else 'false'};"),
+        ]
     for sentinel, replacement in swaps:
         if source.count(sentinel) != 1:
             raise RuntimeError(
@@ -685,12 +702,17 @@ class SoarRenderer:
         self.tone_map = bool(tone_map)
         self.surface = check_surface(surface)
 
-        source = specialize(shader_source if shader_source is not None
-                            else read_shader(), periodic=self.periodic,
-                            nested=self.nested,
-                            max_light_steps=self.max_light_steps,
-                            tone_map=self.tone_map, surface=self.surface)
-        self._ray_module = device.create_shader_module(code=source)
+        # One module per lighting method (see specialize), compiled when a
+        # render first asks for it. The declared default — the live march with
+        # the sky probe, Max's method — is compiled here, because the bake
+        # pipeline is built from it (fs_bake_light reads none of the three)
+        # and because a shader that does not compile should fail at
+        # construction, not at the first frame.
+        self._shader_source = (shader_source if shader_source is not None
+                               else read_shader())
+        self._ray_modules = {}
+        self._ray_pipelines = {}
+        self._ray_module = self._module_for(light_cache=False, sky_probe=True)
         self._accum_module = device.create_shader_module(code=_ACCUM_SHADER)
 
         self._uniform_buf = device.create_buffer(
@@ -867,16 +889,12 @@ class SoarRenderer:
             {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
             {"binding": 8, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
         ])
-        self._ray_pipeline = d.create_render_pipeline(
-            layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
-            vertex={"module": self._ray_module, "entry_point": "vs_main"},
-            fragment={"module": self._ray_module, "entry_point": "fs_main",
-                      "targets": [{"format": SAMPLE_FORMAT}]},
-            primitive={"topology": "triangle-list"})
+        self._ray_pipeline_layout = d.create_pipeline_layout(
+            bind_group_layouts=[self._ray_layout])
         # The sun-tau bake: one field-x plane of the cache per draw, into an
         # r16float 2D target the caller copies into the 3D cache texture.
         self._bake_pipeline = d.create_render_pipeline(
-            layout=d.create_pipeline_layout(bind_group_layouts=[self._ray_layout]),
+            layout=self._ray_pipeline_layout,
             vertex={"module": self._ray_module, "entry_point": "vs_main"},
             fragment={"module": self._ray_module, "entry_point": "fs_bake_light",
                       "targets": [{"format": "r16float"}]},
@@ -901,6 +919,36 @@ class SoarRenderer:
             fragment={"module": self._accum_module, "entry_point": "fs_main",
                       "targets": [{"format": ACCUM_FORMAT}]},
             primitive={"topology": "triangle-list"})
+
+    def _module_for(self, *, light_cache: bool, sky_probe: bool):
+        """The fs_main module for one lighting method."""
+        key = (bool(light_cache), bool(sky_probe))
+        module = self._ray_modules.get(key)
+        if module is None:
+            module = self.device.create_shader_module(code=specialize(
+                self._shader_source, periodic=self.periodic,
+                nested=self.nested, max_light_steps=self.max_light_steps,
+                tone_map=self.tone_map, surface=self.surface,
+                light_cache=key[0], sky_probe=key[1]))
+            self._ray_modules[key] = module
+        return module
+
+    def _ray_pipeline_for(self, view: "ViewState"):
+        """The march pipeline for the method `view` asks for — the same two
+        flags pack_uniforms writes into row 23, so the row and the compiled
+        method cannot disagree."""
+        key = (bool(view.light_cache), bool(view.sky_probe))
+        pipeline = self._ray_pipelines.get(key)
+        if pipeline is None:
+            module = self._module_for(light_cache=key[0], sky_probe=key[1])
+            pipeline = self.device.create_render_pipeline(
+                layout=self._ray_pipeline_layout,
+                vertex={"module": module, "entry_point": "vs_main"},
+                fragment={"module": module, "entry_point": "fs_main",
+                          "targets": [{"format": SAMPLE_FORMAT}]},
+                primitive={"topology": "triangle-list"})
+            self._ray_pipelines[key] = pipeline
+        return pipeline
 
     def _ensure_targets(self, size):
         wgpu = self.wgpu
@@ -936,7 +984,7 @@ class SoarRenderer:
         return self._bind_group
 
     def _check_scene(self, state: SceneState) -> None:
-        """The surface is compiled in and its tile is bound at construction.
+        """The surface, periodicity and nest are compiled in at construction.
 
         A SceneState that disagrees would pack the night palette into a shader
         reading it as sunlight (or the reverse), or describe one tile to a
@@ -949,6 +997,15 @@ class SoarRenderer:
                 "specialization is compiled and its tile bound — but the "
                 f"scene says surface={state.surface!r}. Build a renderer for "
                 "the scene you mean to render.")
+        # Periodicity and the nest are compiled in the same way (the
+        # PERIODIC_DOMAIN and NESTED constants); the scene's rows 20.x and
+        # 21-22 describing something else would be packed and ignored.
+        if bool(state.periodic) != self.periodic or bool(state.nested) != self.nested:
+            raise RuntimeError(
+                f"This renderer was compiled with periodic={self.periodic}, "
+                f"nested={self.nested}, but the scene says "
+                f"periodic={bool(state.periodic)}, nested={bool(state.nested)}. "
+                "Build a renderer for the scene you mean to render.")
 
     # -- the sun-tau cache ---------------------------------------------------
 
@@ -1045,6 +1102,7 @@ class SoarRenderer:
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()
         sample_view = targets["sample"].create_view()
+        ray_pipeline = self._ray_pipeline_for(view)
 
         accum_index = 0
         for i in range(frames):
@@ -1074,7 +1132,7 @@ class SoarRenderer:
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": sample_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])
-            rp.set_pipeline(self._ray_pipeline)
+            rp.set_pipeline(ray_pipeline)
             rp.set_bind_group(0, bind_group)
             rp.draw(3)
             rp.end()
