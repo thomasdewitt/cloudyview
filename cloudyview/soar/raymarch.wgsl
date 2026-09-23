@@ -3159,7 +3159,7 @@ const CITY_JOINT_W: f32 = 0.018;       // the joint between two flags
 // what the lamp pools were calibrated on (the pool is the asphalt's
 // radiance). Concrete under sodium is the bright band of every night street
 // photograph; paint brighter still, and worn.
-const CITY_REL_WALK: f32 = 1.7;
+const CITY_REL_WALK: f32 = 1.5;
 const CITY_REL_KERB: f32 = 2.6;
 const CITY_REL_GUTTER: f32 = 1.7;
 const CITY_REL_LOT: f32 = 1.3;          // unpaved yards and empty lots
@@ -3174,11 +3174,11 @@ const CITY_REL_SLOT: f32 = 0.08;        // the dark between grate bars
 // and takes most of their diffuse light with it — wet asphalt is the darkest
 // thing on a street, which is exactly what lets the reflections read.
 const CITY_WET_ROAD: f32 = 0.90;
-const CITY_WET_WALK: f32 = 0.60;
-const CITY_WET_DARKEN: f32 = 0.82;
+const CITY_WET_WALK: f32 = 0.85;
+const CITY_WET_DARKEN: f32 = 0.88;
 // Of a wet surface, the share whose film is smooth enough to be glossy: damp
 // asphalt is a patchwork of film and dull aggregate, not a sheet of water.
-const CITY_FILM_GLOSS: f32 = 0.5;
+const CITY_FILM_GLOSS: f32 = 0.6;
 const CITY_PUDDLE_DARKEN: f32 = 0.85;
 // Puddle mask: two octaves of value noise plus a bias per zone (gutters
 // collect, the road crown sheds), thresholded. Past CITY_PUDDLE_LOD the mask
@@ -3479,6 +3479,7 @@ struct CityGround {
     alb: vec3<f32>,   // diffuse response, bare dry asphalt = 1
     wet: f32,         // share of the surface under a thin film, 0..1
     puddle: f32,      // standing water, a mirror, 0..1
+    gloss: f32,       // glossy film weight: CITY_FILM_GLOSS x wet x mottle
     walk: f32,        // how much of the footprint is raised (sidewalk/plaza)
 }
 
@@ -3608,11 +3609,17 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                      smoothstep(CITY_PUDDLE_LOD.x, CITY_PUDDLE_LOD.y, fp))
                * (1.0 - mh.x);
 
+    // The film is not a sheet: it pools in the texture and drains off the
+    // high spots, so its gloss mottles at half a metre and the joints hold
+    // water. Mean 1, so the far field keeps the film's average sheen.
+    let mottle = mix(1.0 + 1.4 * (city_vnoise(p * 1.7 + 11.3) - 0.5), 1.0,
+                     smoothstep(0.3, 1.2, fp));
     var g: CityGround;
     g.alb = dry * (1.0 - CITY_WET_DARKEN * film * (1.0 - puddle)
                    - CITY_PUDDLE_DARKEN * puddle);
     g.wet = film;
     g.puddle = puddle;
+    g.gloss = CITY_FILM_GLOSS * film * max(mottle, 0.0);
     g.walk = select(0.0, w_in + w_kerb, walk_ok);
     // Outside the plot on an edge that carries no street there is no
     // street at all: lot ground, and no kerb to collect water against.
@@ -3623,6 +3630,7 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                           * (1.0 - CITY_WET_DARKEN * CITY_WET_WALK));
         g.wet = CITY_WET_WALK;
         g.puddle = 0.0;
+        g.gloss = CITY_FILM_GLOSS * CITY_WET_WALK * max(mottle, 0.0);
         g.walk = 0.0;
     }
     return g;
@@ -3744,14 +3752,14 @@ fn city_street_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 // and never sees a lamp head (it skips the prop hooks, see fs_main), so
 // nothing is counted twice. Irradiance in the pools' units: the pool is asphalt's radiance,
 // rho E / pi, so E / pi is the pool over CITY_LAMP_SPEC_RHO.
-const CITY_LAMP_SPEC_RHO: f32 = 0.30;
+const CITY_LAMP_SPEC_RHO: f32 = 0.20;
 const CITY_LAMP_SPEC_MAX: f32 = 40.0;
 fn city_ggx_d(nh: f32, a2: f32) -> f32 {
     let k = nh * nh * (a2 - 1.0) + 1.0;
     return a2 / (3.14159265 * k * k);
 }
 fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
-    let film = CITY_FILM_GLOSS * g.wet * (1.0 - g.puddle);
+    let film = g.gloss * (1.0 - g.puddle);
     if (film + g.puddle <= 0.0) {
         return vec3<f32>(0.0);
     }
@@ -3840,8 +3848,7 @@ fn city_wet_lobe(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let fp = pixel_angle * h.t;
     let g = city_ground(h.pos.xy, h.cell, cc, fp);
     let puddle_lobe = rnd.z < g.puddle;
-    let weight = select(CITY_FILM_GLOSS * g.wet * (1.0 - g.puddle), g.puddle,
-                        puddle_lobe)
+    let weight = select(g.gloss * (1.0 - g.puddle), g.puddle, puddle_lobe)
                / max(select(1.0 - g.puddle, g.puddle, puddle_lobe), 1e-4);
     if (weight <= 0.0) {
         return out;
