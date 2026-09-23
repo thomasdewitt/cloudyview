@@ -33,7 +33,7 @@ loss that makes desert washes lose flow downstream, and the reason discharge
 stays finite on a domain with no outlet. Where the discharge concentrates
 beyond the sheetflow a uniform surface would carry, a wash is cut to the
 hydraulic geometry that discharge asks for: depth saturating with
-discharge, width growing as its square root (Leopold and Maddock), a flat
+discharge, width growing as a power of it (WIDTH_EXPONENT), a flat
 sandy floor and steep banks. The carved surface re-routes the water, which
 deepens the washes that captured it, and the loop is iterated to
 self-consistency.
@@ -68,7 +68,11 @@ CHANNEL_THRESHOLD = 1.2        # channelized beyond this many sheetflows
 DEPTH_MAX_M = 2.0              # the deepest wash's banks
 DEPTH_SCALE = 30.0             # sheetflows past threshold to reach ~0.76 DEPTH_MAX
 WIDTH_MIN_M = 2.0
-WIDTH_MAX_M = 40.0
+WIDTH_MAX_M = 24.0
+# Width goes as a power of discharge. Leopold and Maddock's at-a-station
+# 0.5 is for perennial rivers; ephemeral washes on a fan split rather than
+# widen, and the references' threads stay a few metres wide for kilometres.
+WIDTH_EXPONENT = 0.35
 CARVE_ITERATIONS = 12
 # The surface's age, as lightness (see generate).
 SOIL_LIGHTNESS = 0.5
@@ -130,7 +134,7 @@ def carve(discharge: np.ndarray, dx: float):
 
     Channelization is discharge over the sheetflow a uniform surface would
     carry (1 / loss per cell). Depth saturates with it; width goes as its
-    square root. Each width band is laid down by a disc-shaped grey dilation
+    WIDTH_EXPONENT power. Each width band is laid down by a disc-shaped grey dilation
     of its own depth, which is what gives a wash a flat floor and banks.
     """
     sheetflow = LOSS_LENGTH_M / dx
@@ -138,8 +142,8 @@ def carve(discharge: np.ndarray, dx: float):
     depth = np.where(ch > CHANNEL_THRESHOLD,
                      DEPTH_MAX_M * np.tanh((ch - CHANNEL_THRESHOLD) / DEPTH_SCALE),
                      0.0)
-    width = np.clip(WIDTH_MIN_M * np.sqrt(np.maximum(ch, CHANNEL_THRESHOLD)
-                                          / CHANNEL_THRESHOLD),
+    width = np.clip(WIDTH_MIN_M * (np.maximum(ch, CHANNEL_THRESHOLD)
+                                   / CHANNEL_THRESHOLD) ** WIDTH_EXPONENT,
                     WIDTH_MIN_M, WIDTH_MAX_M)
     bands = [2.0, 4.0, 8.0, 16.0, 32.0]
     edges = [0.0] + [0.5 * (a + b) for a, b in zip(bands[:-1], bands[1:])] + [1e9]
@@ -187,14 +191,15 @@ def generate(n: int, seed: int = SEED, verbose: bool = True):
     np.random.seed(int(rng.integers(2**31)))
     patch = si.fBm_ND_circulant((n, n), H=0.4, periodic=True).astype(np.float64)
     patch = (patch - patch.mean()) / patch.std()
-    wash = np.clip(depth / (0.25 * DEPTH_MAX_M), 0.0, 1.0)
+    # Sand is the wash FLOOR: the blurred shoulder of a bank is not bed.
+    wash = _smoothstep(0.12, 0.3, depth / DEPTH_MAX_M)
     dist = ndimage.distance_transform_edt(
         np.tile(wash < 0.5, (3, 3)))[n:2 * n, n:2 * n] * dx
     ring = _disc(PAVEMENT_DRAINAGE_RADIUS_M / dx)
     above = h - ndimage.minimum_filter(h, footprint=ring, mode="wrap")
-    old = (_smoothstep(0.4, 1.4, above)
-           * _smoothstep(15.0, 70.0, dist)
-           * _smoothstep(-1.0, 0.2, patch))
+    old = (_smoothstep(0.15, 0.7, above)
+           * _smoothstep(6.0, 30.0, dist)
+           * _smoothstep(-0.9, 0.1, patch))
     soil = SOIL_LIGHTNESS + SOIL_PATCHINESS * np.tanh(patch)
     ground = soil + (PAVEMENT_LIGHTNESS - soil) * old
     # Gravel bars: the coarser, darker patches a flood leaves on a wash floor.
@@ -252,7 +257,15 @@ def relief_stats(heights: list) -> dict:
     band = heights[0] - coarse
     bg = np.hypot((np.roll(band, -1, 1) - band) / cell,
                   (np.roll(band, -1, 0) - band) / cell)
+    # envelope_m: how far the full surface can stand ABOVE mip k read at the
+    # same point — the lid the trace can step against from far above, with
+    # mip k's gentle slope bound in place of level 0's (a tenth again for
+    # the bilinear corners between texel centres).
+    envelope = [round(1.1 * float((heights[0]
+                                   - _bilinear_periodic(h, n)).max()), 3)
+                for h in heights]
     return {"slope_max": slope_max,
+            "envelope_m": envelope,
             "band_max_m": round(float(np.abs(band).max()), 4),
             "band_slope_max": round(1.25 * float(bg.max()), 3)}
 

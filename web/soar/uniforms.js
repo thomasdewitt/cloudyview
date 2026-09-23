@@ -60,11 +60,12 @@ export function packUniforms(state, view) {
     // the tile sits in world space (row 8.yz).
     city = false, cityOffsetM = [0.0, 0.0],
     // The Sonoran desert (raymarch.wgsl DESERT): the ocean-named fields
-    // describe the desert tile and row 8 is only the ground datum.
+    // describe the desert tile, and row 8 is the datum and the relief.
     desert = false,
     // Under DESERT, row 8.yzw: the tile's height range and its largest
     // band-pass excursion (meta height_min_m, height_max_m, band_max_m).
-    desertReliefM = [0.0, 0.0, 0.0],
+    // Required for the desert — see the check below.
+    desertReliefM = null,
     // Explicit override of the surface offset row 24 folds and writes;
     // null means the scene's static offset (cityOffsetM under CITY, the
     // origin otherwise). Mirrors SceneState.surface_offset_m.
@@ -74,6 +75,12 @@ export function packUniforms(state, view) {
   if (city && desert) {
     throw new Error("a scene stands on one surface: city and desert are " +
                     "both set.");
+  }
+  // No default: without its relief the desert collapses onto the datum and
+  // still looks plausible. Mirrors soar_host.pack_uniforms.
+  if (desert && !desertReliefM) {
+    throw new Error("the desert needs its relief (desertReliefM, from the " +
+                    "tile's meta); without it every ray lands on the datum.");
   }
 
   const {

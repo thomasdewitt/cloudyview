@@ -518,7 +518,7 @@ export class Renderer {
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
     s.oceanMaxLod = tile.maxLod;
-    s.desertReliefM = s.desert ? desertReliefM(tile.meta) : [0.0, 0.0, 0.0];
+    s.desertReliefM = s.desert ? desertReliefM(tile.meta) : null;
     this.device.pushErrorScope("validation");
     this._rayPipeline(SAMPLE_FORMAT);
     const error = await this.device.popErrorScope();
@@ -1677,7 +1677,7 @@ export class Renderer {
       city: Boolean(s.city),
       cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
       desert: Boolean(s.desert),
-      desertReliefM: s.desertReliefM ?? [0.0, 0.0, 0.0],
+      desertReliefM: s.desert ? s.desertReliefM : null,
     };
   }
 }

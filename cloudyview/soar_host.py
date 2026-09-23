@@ -343,8 +343,10 @@ class SceneState:
     # lands here so a reproduction command from a flight whose camera folds
     # moved the offset carries the value that flight rendered with.
     surface_offset_m: Optional[Sequence[float]] = None
-    # Row 8.yzw under DESERT — see above.
-    desert_relief_m: Sequence[float] = (0.0, 0.0, 0.0)
+    # Row 8.yzw under DESERT — see above. Required for the desert, and
+    # refused anywhere else: without it the terrain collapses onto the datum
+    # plane and still looks plausible, which is the failure worth a raise.
+    desert_relief_m: Optional[Sequence[float]] = None
 
 
 @dataclass
@@ -473,6 +475,14 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     check_surface(state.surface)
     city = state.surface == "city"
     desert = state.surface == "desert"
+    if desert and state.desert_relief_m is None:
+        raise ValueError(
+            "the desert needs its relief (SceneState.desert_relief_m, from the "
+            "tile's meta: soar_host.desert_relief_m(renderer.surface_meta)); "
+            "without it every ray lands on the flat datum.")
+    if not desert and state.desert_relief_m is not None:
+        raise ValueError("desert_relief_m is the desert's; this scene is the "
+                         f"{state.surface}.")
     if city and not state.ocean_enabled:
         raise ValueError(
             "city mode needs the surface enabled: ocean_enabled is the "

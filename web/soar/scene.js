@@ -734,7 +734,7 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       city: surfaceKind === "city",
       desert: surfaceKind === "desert",
       desertReliefM: surfaceKind === "desert"
-        ? desertReliefM(surfaceTile.meta) : [0.0, 0.0, 0.0],
+        ? desertReliefM(surfaceTile.meta) : null,
       desertFloorAt: surfaceKind === "desert"
         ? desertFloorAt(surfaceTile) : null,
       // The city tile's per-block cascade, for the minimap to draw the city
