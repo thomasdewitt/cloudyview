@@ -546,10 +546,14 @@ export function findCoordinate(group, root, dim, axis, coordUnits = null) {
   }
 
   if (!found.length) {
-    throw new Error(
+    const err = new Error(
       `No coordinate variable found for dimension '${dim.name}' ` +
       `(${dim.size} points). Cell-center coordinates in meters are required ` +
       "for all three axes — they are what places the field in space.");
+    // The refusal a stated grid spacing is the only way past: see
+    // resolveCoordinates, which turns it into the question.
+    err.noLengthFound = T.gridSpacingFoundNothing;
+    throw err;
   }
 
   let chosen = found[0];
@@ -572,11 +576,12 @@ export function findCoordinate(group, root, dim, axis, coordUnits = null) {
       if (UNITS_AXIS[u] !== undefined) {
         const described = found
           .map((f) => `'${f.name}' (${f.units || "no units"})`).join(", ");
-        throw new Error(
+        throw Object.assign(new Error(
           `No ${axis} coordinate in a unit of length: found ${described}. ` +
           "Cell-center coordinates in meters are required — they are what " +
           "places the field in space. If the grid spacing is known, write " +
-          "coordinate variables in meters into the file.");
+          "coordinate variables in meters into the file."),
+          { noLengthFound: described });
       }
       if (coordUnits !== null) {
         scale = metresPerUnit(coordUnits);
@@ -609,6 +614,75 @@ export function findCoordinate(group, root, dim, axis, coordUnits = null) {
   }
   return { name: chosen.name, values, note: notes.join(" "),
            unrecognizedUnits };
+}
+
+/**
+ * Cell centres `d` meters apart from 0: the coordinate a stated grid spacing
+ * stands for. Uniform, and never inferred from anything in the file. A
+ * top-first vertical is written descending, which the read's own flip then
+ * puts in ascending order with the data — the same path a file that stores
+ * its levels top-down already takes.
+ */
+export function spacedCoordinate(n, d, topFirst = false) {
+  const values = new Array(n);
+  for (let i = 0; i < n; i++) values[i] = (i + 0.5) * d;
+  return topFirst ? values.reverse() : values;
+}
+
+/**
+ * Every axis's coordinate, plus what the loader still has to ask.
+ *
+ * `choice.gridSpacing` ({axis: meters}, with `choice.zFirst` "top" or
+ * "bottom" for z) is the stated way past the one refusal nothing else gets
+ * past: an axis with no coordinate in a unit of length, or none at all.
+ * Such an axis comes back in `gridSpacingNeeded` instead of throwing, so the
+ * caller can ask. A spacing stated for an axis that HAS meters refuses — it
+ * can never quietly replace a real coordinate.
+ */
+function resolveCoordinates(group, root, resolved, choice, assumptions) {
+  const coords = {};
+  const coordUnitsUnrecognized = [];
+  const gridSpacingNeeded = [];
+  for (const axis of ["x", "y", "z"]) {
+    const dim = resolved[axis];
+    const spacing = choice?.gridSpacing?.[axis];
+    let found = null;
+    try {
+      found = findCoordinate(group, root, dim, axis,
+                             choice?.coordUnits ?? null);
+    } catch (err) {
+      if (err.noLengthFound === undefined) throw err;
+      if (spacing === undefined) {
+        gridSpacingNeeded.push({ axis, dim: dim.name, size: dim.size,
+                                 found: err.noLengthFound });
+        continue;
+      }
+    }
+    if (spacing !== undefined) {
+      if (found) throw new Error(T.gridSpacingHasMeters(axis, found.name));
+      if (!(Number.isFinite(spacing) && spacing > 0)) {
+        throw new Error(T.gridSpacingInvalid(axis));
+      }
+      const first = axis === "z" ? choice?.zFirst : null;
+      if (axis === "z" && first !== "top" && first !== "bottom") {
+        throw new Error(T.gridSpacingPickZFirst);
+      }
+      coords[axis] = { name: null,
+                       values: spacedCoordinate(dim.size, spacing,
+                                                first === "top") };
+      assumptions.push(T.gridSpacingApplied(axis, dim.size, spacing, first));
+      continue;
+    }
+    coords[axis] = found;
+    // Choosing one coordinate variable over another, or rescaling one, is a
+    // decision about where the field IS. Stated, like the axis guesses.
+    if (found.note) assumptions.push(found.note);
+    if (found.unrecognizedUnits) {
+      coordUnitsUnrecognized.push(
+        `'${found.name}' (${found.unrecognizedUnits})`);
+    }
+  }
+  return { coords, coordUnitsUnrecognized, gridSpacingNeeded };
 }
 
 /**
@@ -969,21 +1043,12 @@ export function describeGroup(root, path, choice = null) {
     iceUnits = attrString(iceDataset.attrs, "units");
   }
 
-  const coords = {};
   // Coordinates whose declared units nothing recognized — the state the
-  // coordinate-units question exists for. One answer covers all of them.
-  const coordUnitsUnrecognized = [];
-  for (const axis of ["x", "y", "z"]) {
-    coords[axis] = findCoordinate(group, root, resolved[axis], axis,
-                                  choice?.coordUnits ?? null);
-    // Choosing one coordinate variable over another, or rescaling one, is a
-    // decision about where the field IS. Stated, like the axis guesses.
-    if (coords[axis].note) assumptions.push(coords[axis].note);
-    if (coords[axis].unrecognizedUnits) {
-      coordUnitsUnrecognized.push(
-        `'${coords[axis].name}' (${coords[axis].unrecognizedUnits})`);
-    }
-  }
+  // coordinate-units question exists for, one answer covering all of them —
+  // and axes with no meters at all, which the grid-spacing question is for.
+  const { coords, coordUnitsUnrecognized, gridSpacingNeeded } =
+    resolveCoordinates(group, root, resolved, choice, assumptions);
+  const spaced = gridSpacingNeeded.length === 0;
 
   const units = attrString(dataset.attrs, "units");
   return {
@@ -1021,12 +1086,17 @@ export function describeGroup(root, path, choice = null) {
     // the dimension's name — see findCoordinate. Carried out because it is
     // exactly what `--x-coord`/`--y-coord`/`--z-coord` would have to say for
     // a terminal render to place the field where this one did.
-    coordNames: { x: coords.x.name, y: coords.y.name, z: coords.z.name },
-    coords: {
+    // Null for an axis placed by a stated grid spacing: there is no
+    // variable, and the spacing travels as --dx/--dy/--dz instead.
+    coordNames: { x: coords.x?.name ?? null, y: coords.y?.name ?? null,
+                  z: coords.z?.name ?? null },
+    // Null until every axis is placed. A group still waiting on its grid
+    // spacing has no box, so it is neither nestable nor readable yet.
+    coords: spaced ? {
       x: Array.from(coords.x.values),
       y: Array.from(coords.y.values),
       z: Array.from(coords.z.values),
-    },
+    } : null,
     units,
     unitsKnown: condensateUnitsKnown(units),
     // Asked about separately from the liquid variable's. Inheriting them was
@@ -1040,6 +1110,10 @@ export function describeGroup(root, path, choice = null) {
     // the coords above are the raw numbers and must not place a field.
     needsCoordUnitsChoice: coordUnitsUnrecognized.length > 0,
     coordUnitsUnrecognized,
+    // Axes with no coordinate in meters: the caller asks for their spacing
+    // and re-describes with `choice.gridSpacing` (and `choice.zFirst`).
+    needsGridSpacing: !spaced,
+    gridSpacingNeeded,
     chunks: dataset.metadata?.chunks ?? null,
     filters: (dataset.filters ?? []).map((f) => f.name ?? String(f.id)),
     dtype: dataset.dtype ?? null,
@@ -1107,17 +1181,9 @@ export function describeIceGroup(root, path, choice = null) {
   const timeSelect = {};
   for (const d of timeDims) timeSelect[d.axis] = d === timeDim ? timestep : 0;
 
-  const coords = {};
-  const coordUnitsUnrecognized = [];
-  for (const axis of ["x", "y", "z"]) {
-    coords[axis] = findCoordinate(group, root, resolved[axis], axis,
-                                  choice?.coordUnits ?? null);
-    if (coords[axis].note) assumptions.push(coords[axis].note);
-    if (coords[axis].unrecognizedUnits) {
-      coordUnitsUnrecognized.push(
-        `'${coords[axis].name}' (${coords[axis].unrecognizedUnits})`);
-    }
-  }
+  const { coords, coordUnitsUnrecognized, gridSpacingNeeded } =
+    resolveCoordinates(group, root, resolved, choice, assumptions);
+  const spaced = gridSpacingNeeded.length === 0;
   const units = attrString(dataset.attrs, "units");
   return {
     path,
@@ -1137,15 +1203,17 @@ export function describeIceGroup(root, path, choice = null) {
     storageAxis: { x: resolved.x.axis, y: resolved.y.axis, z: resolved.z.axis },
     droppedAxes: dropped,
     dimNames: { x: resolved.x.name, y: resolved.y.name, z: resolved.z.name },
-    coords: {
+    coords: spaced ? {
       x: Array.from(coords.x.values),
       y: Array.from(coords.y.values),
       z: Array.from(coords.z.values),
-    },
+    } : null,
     iceUnits: units,
     iceUnitsKnown: condensateUnitsKnown(units),
     needsCoordUnitsChoice: coordUnitsUnrecognized.length > 0,
     coordUnitsUnrecognized,
+    needsGridSpacing: !spaced,
+    gridSpacingNeeded,
     chunks: dataset.metadata?.chunks ?? null,
     filters: (dataset.filters ?? []).map((f) => f.name ?? String(f.id)),
   };

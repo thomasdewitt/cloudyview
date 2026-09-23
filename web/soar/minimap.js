@@ -104,6 +104,15 @@ const CITY_MAP_SPRAWL_MIN_FRAC = 0.15;
 const CITY_MAP_H_BASE = 14.0;
 const CITY_MAP_H_SCALE = 390.0;
 const CITY_MAP_H_EXP = 1.2;
+// The lot and street words (cloudyview/city_lots.py) and what the shader
+// raises on each land use: an urban block shows its LOT OWNER's height — a
+// supertall's whole lot is the tower, not its members' own cascade values —
+// a warehouse its mean roof (city_cell's warehouse law, 9-14.5 m in half
+// metres, averages 11.75), and yards and open scrub are ground.
+const CITY_MAP_WORD_OFFSET = 2048.0;
+const CITY_MAP_USE_URBAN = 0;
+const CITY_MAP_USE_INDUSTRIAL = 1;
+const CITY_MAP_WAREHOUSE_H = 11.75;
 
 // Where the brightness ramp tops out (m). The tile's tallest blocks run to
 // CITY_MAX_H and beyond, and scaling to the maximum would put the whole city
@@ -117,26 +126,46 @@ const CITY_MAP_H_FULL = 700.0;
  *
  * city_cell's height, with its per-building random factor dropped — that
  * factor is `0.70 + 0.60 * rand`, mean exactly 1, so leaving it out gives the
- * expected height of the block rather than a different field. Unbuilt blocks
- * (rank at or below CITY_MAP_EMPTY_RANK) are zero, which is what makes the
- * empty outskirts read as empty.
+ * expected height of the block rather than a different field — taken from
+ * the block's LOT OWNER, because every member of a lot reports the owner's
+ * building. Warehouses show their mean roof, and blocks with no building
+ * (yards, open scrub) are zero, which is what makes the empty land read as
+ * empty.
  *
  * Returns the field in the tile's own texel order, row 0 at y = 0 — the same
  * order the texture was uploaded in, so tile x/y are map x/y and the map is
  * world-aligned and north-up like the cloud one.
  */
-export function cityBlockHeights({ n, density, rank }) {
+export function cityBlockHeights({ n, density, rank, lot, street }) {
+  if (lot?.length !== n * n || street?.length !== n * n) {
+    throw new Error(
+      "The city minimap needs the tile's lot and street words (b and a at " +
+      "mip 0) as well as its density and rank.");
+  }
   const heights = new Float32Array(n * n);
-  for (let i = 0; i < n * n; i++) {
-    if (!(rank[i] > CITY_MAP_EMPTY_RANK)) continue;
-    const t = clamp01((rank[i] - CITY_MAP_EMPTY_RANK) /
-                      (CITY_MAP_SPRAWL_RANK_FULL - CITY_MAP_EMPTY_RANK));
-    const smooth = t * t * (3.0 - 2.0 * t);          // smoothstep, as WGSL's
-    const sprawl = CITY_MAP_SPRAWL_MIN_FRAC
-      + (1.0 - CITY_MAP_SPRAWL_MIN_FRAC) * smooth;
-    heights[i] = (CITY_MAP_H_BASE
-                  + CITY_MAP_H_SCALE * Math.pow(Math.max(density[i], 0.0),
-                                                CITY_MAP_H_EXP)) * sprawl;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = y * n + x;
+      const use = ((street[i] + CITY_MAP_WORD_OFFSET) >> 8) & 3;
+      if (use === CITY_MAP_USE_INDUSTRIAL) {
+        heights[i] = CITY_MAP_WAREHOUSE_H;
+        continue;
+      }
+      if (use !== CITY_MAP_USE_URBAN) continue;
+      const w = lot[i] + CITY_MAP_WORD_OFFSET;
+      const ox = (((x - (w & 3) + ((w >> 8) & 3)) % n) + n) % n;
+      const oy = (((y - ((w >> 2) & 3) + ((w >> 10) & 3)) % n) + n) % n;
+      const j = oy * n + ox;
+      if (!(rank[j] > CITY_MAP_EMPTY_RANK)) continue;
+      const t = clamp01((rank[j] - CITY_MAP_EMPTY_RANK) /
+                        (CITY_MAP_SPRAWL_RANK_FULL - CITY_MAP_EMPTY_RANK));
+      const smooth = t * t * (3.0 - 2.0 * t);        // smoothstep, as WGSL's
+      const sprawl = CITY_MAP_SPRAWL_MIN_FRAC
+        + (1.0 - CITY_MAP_SPRAWL_MIN_FRAC) * smooth;
+      heights[i] = (CITY_MAP_H_BASE
+                    + CITY_MAP_H_SCALE * Math.pow(Math.max(density[j], 0.0),
+                                                  CITY_MAP_H_EXP)) * sprawl;
+    }
   }
   return heights;
 }

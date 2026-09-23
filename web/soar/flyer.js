@@ -82,6 +82,23 @@ const DEPTH_FORMAT = "depth24plus";
 // only a genuinely parked camera is ever below it.
 const COURSE_MIN_SPEED = 0.5;   // m/s
 
+// --- Knocked (a city collision; collide.js) ----------------------------------
+// The tumble when the flight hits a building: a roll, a pitch and a yaw
+// kick, each a ring at its own frequency dying away with KNOCK_TAU and
+// faded to exactly zero by the end of the episode, so the attitude the
+// flyer comes out with is the one it would have had. The roll is the big
+// one — a wing catches, the thing goes over — and the yaw is what a wall
+// does to a nose that meets it off-square. A landing (the street, a roof)
+// is the same at LANDING_KNOCK of the size: a stumble, not a tumble.
+const KNOCK_ROLL_DEG = 70.0;
+const KNOCK_PITCH_DEG = 28.0;
+const KNOCK_YAW_DEG = 40.0;
+const KNOCK_ROLL_HZ = 1.5;
+const KNOCK_PITCH_HZ = 2.2;
+const KNOCK_YAW_HZ = 0.9;
+const KNOCK_TAU = 0.45;           // s
+const LANDING_KNOCK = 0.4;
+
 export const TWO_PI = 2.0 * Math.PI;
 export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -273,6 +290,7 @@ export class Flyer {
     this._vz = 0.0;                    // smoothed vertical velocity m/s
     this._clock = 0.0;
     this._prevOrigin = null;           // for velocity estimation
+    this._knock = null;                // {t, duration, size, side}, see knock()
   }
 
   _refreshBindGroup() {
@@ -350,6 +368,64 @@ export class Flyer {
   // Animation
   // ------------------------------------------------------------------
 
+  /**
+   * The flight hit something (collide.js): tumble for `duration` seconds.
+   * `severity` is 0..1, `side` +-1 is which way the impact threw it, and a
+   * `landing` — the street or a roof, from above — tumbles less. `age` is
+   * how long ago it happened: a replayed track (viewer.js) lands its video
+   * frames between the recorded ones, so its knock starts part-way in.
+   */
+  knock({ severity, side, duration, landing, age = 0.0 }) {
+    this._knock = { t: age, duration,
+                    size: severity * (landing ? LANDING_KNOCK : 1.0), side };
+  }
+
+  /**
+   * Move the flyer with the camera when the collider moves the camera after
+   * this frame's update — it was placed off the camera, and has to stay on
+   * its tether for the picture this frame draws.
+   */
+  shift(d) {
+    this.position = [this.position[0] + d[0], this.position[1] + d[1],
+                     this.position[2] + d[2]];
+    // And the origin its next velocity is measured from, so that velocity
+    // runs from where the camera was drawn — not across a cloud-period
+    // fold the correction happened to carry it over.
+    if (this._prevOrigin !== null) {
+      this._prevOrigin = [this._prevOrigin[0] + d[0],
+                          this._prevOrigin[1] + d[1],
+                          this._prevOrigin[2] + d[2]];
+    }
+  }
+
+  /**
+   * Forget the flight so far: no tumble in progress, no velocity history —
+   * the next update snaps into place off the camera as a first frame does.
+   * For a flight that did not happen continuously from the last update: a
+   * reset, a map click, the flyer switched back on, a track replayed from
+   * its own first pose.
+   */
+  calm() {
+    this._knock = null;
+    this._prevOrigin = null;
+  }
+
+  /**
+   * Local->world rotation for a course, pitch and bank (deg), with the
+   * knock's tumble laid over them. Both species' _frame come through here.
+   */
+  _attitude(course, pitch, bank) {
+    const k = this._knock;
+    if (k === null) return attitudeFrame(course, pitch, bank);
+    const env = k.size * Math.exp(-k.t / KNOCK_TAU)
+              * (1.0 - smoothstep(k.t, 0.6 * k.duration, k.duration));
+    const ring = (hz) => Math.sin(TWO_PI * hz * k.t);
+    return attitudeFrame(
+      course + k.side * KNOCK_YAW_DEG * env * ring(KNOCK_YAW_HZ),
+      pitch + KNOCK_PITCH_DEG * env * ring(KNOCK_PITCH_HZ),
+      bank + k.side * KNOCK_ROLL_DEG * env * ring(KNOCK_ROLL_HZ));
+  }
+
   /** Anchor the flyer ahead of / below the smoothed view direction. */
   _place(origin, bob) {
     const [forward, , up] = cameraBasis(this.heading, this.viewElevation);
@@ -386,6 +462,10 @@ export class Flyer {
    * into place instead.
    */
   _track(dt, camera, { tauHeading, tauSpeed }) {
+    if (this._knock !== null) {
+      this._knock.t += dt;
+      if (this._knock.t >= this._knock.duration) this._knock = null;
+    }
     const origin = camera.position;
     if (this._prevOrigin === null) {
       this._prevOrigin = [...origin];
@@ -409,8 +489,11 @@ export class Flyer {
     this.heading = mod360(this.heading + daz * kh);
     this.viewElevation += (camera.elevation - this.viewElevation) * kh;
 
+    // While knocked, the course holds. The flight is being thrown back off
+    // a wall, and a course that followed it would swing the flyer round to
+    // face you — the tumble is the knock's to draw, not the tracker's.
     let dcourse = 0.0;
-    if (Math.hypot(vel[0], vel[1]) > COURSE_MIN_SPEED) {
+    if (this._knock === null && Math.hypot(vel[0], vel[1]) > COURSE_MIN_SPEED) {
       const target = mod360(90.0 - Math.atan2(vel[1], vel[0]) / DEG);
       dcourse = (mod360(target - this.course + 180.0) - 180.0) * kh;
       this.course = mod360(this.course + dcourse);

@@ -117,8 +117,17 @@ struct Uniforms {
     // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
     nest_bmin: vec4<f32>,
     nest_bmax: vec4<f32>,
-    // Row 23: the baked sun-tau cache (2026-08-19 prototype, behind a
-    // toggle while its worth is decided from A/B stills and benches).
+    // Row 23: the lighting method, and the bake's slice index.
+    //
+    // x and z are NOT read by fs_main any more (2026-09-23): each is a
+    // compile-time specialization (LIGHT_CACHE, SKY_PROBE — see their
+    // declarations), because a run-time branch here paid for its untaken
+    // side on every sample. The hosts still pack both, from the same flags
+    // that pick the specialization, because the row is part of the
+    // accumulation's scene key: a bake completing or a tier switching
+    // methods is a scene change (and the browser restarts a parked view's
+    // average on it outright — renderer.js drawFrame).
+    //
     // x = read tau_sun for CLOUD samples from the light_tau texture instead
     //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
     //     shadow marches and the sky probe stay live either way. The cached
@@ -177,16 +186,17 @@ struct Uniforms {
 // carries no ice variable — so one bind-group layout serves both. Read only
 // when u.light_cache.w is set.
 @group(0) @binding(8) var ice_frac: texture_3d<f32>;
-// Group 1: the surface pre-pass's targets, size-specific, so they live apart
-// from the scene resources in group 0 (which every pass shares unchanged).
-// surface_buf is the opaque surface under the clouds — the traced city or
-// desert — as the pre-pass left it for this frame: (radiance, t) per render
-// pixel, t = 1e30 on a miss; the march reads it, and only under CITY or
-// DESERT (other scenes bind 1x1 stand-ins and never run the pass).
-// surface_plain is the city's plain surface (every building a box), read by
-// the refinement stage that traces the facade shell over it. See the
-// surface pre-pass section.
+// Group 1: the surface pre-pass's target, size-specific, so it lives apart
+// from the scene resources in group 0 (which every pass shares unchanged):
+// the opaque surface under the clouds — the traced city or desert — as the
+// pre-pass left it for this frame, (radiance, t) per render pixel, t = 1e30
+// on a miss. The march reads it, and only under CITY or DESERT; other scenes
+// bind a 1x1 stand-in and never run the pass. See the surface pre-pass
+// section.
 @group(1) @binding(0) var surface_buf: texture_2d<f32>;
+// The city's plain surface (every building a box), read by the refinement
+// stage that traces the facade shell over it (fs_surface_refine); a 1x1
+// stand-in for every other pass.
 @group(1) @binding(1) var surface_plain: texture_2d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
@@ -199,6 +209,28 @@ const NESTED: bool = false;
 // in Python. The browser always leaves this on: it is presenting to a canvas,
 // and this is the only place the encode may happen.
 const TONE_MAP: bool = true;
+// The lighting method (row 23's x and z as compile-time constants; the host
+// packs the row from the same flags). LIGHT_CACHE reads the baked sun-tau
+// cache for cloud samples instead of marching to the sun; SKY_PROBE runs
+// the vertical sky-visibility march. Specialized rather than branched on
+// because the untaken side of a branch still costs registers on every
+// sample: compiling out the method a tier does not use bought 3-14% at Low
+// and Minimal (2026-09-23). The specialization is semantically exact; the
+// A/B against the run-time branches was bit-identical in 17 of 20
+// configurations, and in the other 3 one channel of a single frame's sample
+// differed by one float16 ulp, from the driver fusing multiply-adds
+// differently once the branches were gone (soar_shader_ab.py's docstring).
+// The declared values are the host defaults — the live march with the
+// probe — so an unspecialized compile is Max's shader.
+//
+// Ice mode (row 23.w) is deliberately NOT one of these. Compiling it out
+// would buy another 3-5%, but it is the one switch whose removal changes
+// the arithmetic: with its branch gone the driver fuses the cloud source
+// terms' multiply-adds (FMA) where the branch used to stand between them,
+// which moves ~1e-5 of all channels by one float16 ulp. Measured, and left
+// for a deliberate call rather than taken silently.
+const LIGHT_CACHE: bool = false;
+const SKY_PROBE: bool = true;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -745,6 +777,28 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // same insight about sparseness, applied to storage rather than traversal,
 // where nothing has to be asked per sample. See web/soar/zcrop.js.
 
+// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Five
+// measurements from one day, all the same fact:
+//   - the empty-space guard above cost 14-20% while never firing;
+//   - compiling out the lighting method a tier does not use (LIGHT_CACHE,
+//     SKY_PROBE) bought 3-14%, where the branch it replaced was never taken;
+//   - the city's 3D facade shell cost 35-50% on pixels that never run it,
+//     by pushing the whole kernel over a register threshold (which is why
+//     the opaque surfaces are moving to their own pass);
+//   - a function-local `var c: array<f32, 4>` in CITY-only code moved DAY
+//     frames by 2^-11 — a specialization that was compiled out still
+//     changed how the rest of the kernel was compiled. Scalars fixed it.
+//   - running the forward pre-march lazily, at a ray's first deep-shadow
+//     sample instead of before the loop, was exact and saves the march for
+//     every ray that never gets there — and cost 28-213% on the views where
+//     rays do get there, because a call inside the loop is paid in
+//     registers, and lanes reaching it at different steps serialize.
+// So a change's cost is not where its code runs, and a bit-identity claim
+// has to be proven on scenes the change does not touch. Measure with
+// tools/benchmarking/soar_pass_timer.py and prove with
+// tools/soar_shader_ab.py --scene day|city|nested|desert, both on the
+// specialization the app actually compiles.
+
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
 // Both levels always share one format.
@@ -862,7 +916,7 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
 }
 
 // Sun optical depth from the baked cache — the trilinear read that replaces
-// light_march_tau for cloud samples when u.light_cache.x is on.
+// light_march_tau for cloud samples under LIGHT_CACHE.
 //
 // Same coordinate convention as sample_level over the same outer AABB (the
 // cache's texel i sits AT data coordinate i, see fs_bake_light), same
@@ -3509,7 +3563,7 @@ fn city_mottle_corner(j: vec2<i32>, per: i32, o: i32) -> f32 {
     let jw = ((j % per) + per) % per;
     return city_u01(pcg2d(vec2<u32>(
         bitcast<u32>(jw.x) ^ 0x2c1b3c6du,
-        bitcast<u32>(jw.y) ^ u32(o) * 0x297a2d39u)).x);
+        bitcast<u32>(jw.y) ^ (u32(o) * 0x297a2d39u))).x);
 }
 
 // Patchy value noise over lot ground, mean one: scrub clumps at 14.4 m and
@@ -12168,7 +12222,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     // the same tau at the point this path enters the cloud box: below the
     // box floor the path crosses only clear air.
     var tau_sun: f32;
-    if (u.light_cache.x > 0.5 && p_world.z < u.bmin.z && sun.z > 1e-4) {
+    if (LIGHT_CACHE && p_world.z < u.bmin.z && sun.z > 1e-4) {
         let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
         tau_sun = sample_light_tau(entry);
     } else {
@@ -12257,6 +12311,33 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
 // desert's scales it by the ratio of the two albedos.
 const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.25, 0.20, 0.15);
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
+
+// The desert's entry into the surface pre-pass (fs_surface): the desert under this ray: hazed radiance and distance, t = 1e30 on a
+// miss. Traced in the desert frame (desert_camera_origin) and shaded with
+// the cloud shadow at the world hit; t is translation-invariant, so depth
+// needs no conversion. Its own draws on the sun-march and solar-cone
+// streams: the ocean's take the same streams, and the two are never both
+// compiled in.
+fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
+                       strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
+    let sun = u.sun_dir.xyz;
+    let desert_o = desert_camera_origin();
+    let dhit = desert_trace(desert_o, dir, pixel_angle);
+    if (!dhit.hit) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    }
+    let d_jit = jitter_amp * strat1(frame_index, strat_pixel,
+                                    STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
+    let d_cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
+                        vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
+    let d_sun_shadow = sun_cone_dir(
+        sun, sun_tangent_frame(sun), d_cone,
+        SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_amp);
+    return vec4<f32>(desert_shade(dhit, desert_o,
+                                  u.cam_origin.xyz + dhit.t * dir, dir,
+                                  sun, d_sun_shadow, d_jit, pixel_angle),
+                     dhit.t);
+}
 
 // === END DESERT GROUND ===
 
@@ -12347,14 +12428,13 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // ---------------------------------------------------------------------------
 //
 // The city and the desert are opaque surfaces traced in closed form — a DDA
-// over the block grid with facade shells, a terrain with its plants — and
-// their tracing is register-hungry. In fs_main it shared a kernel with the
-// cloud march, so its registers were the march's too: a city view whose rays
-// never reached a facade shell still paid a third more per frame for the
-// shell merely being compiled in (occupancy, not work). So the surface is
-// traced in a pass of its own, fs_surface, one fragment per render pixel,
-// before every fs_main pass of a frame, into a target fs_main reads at
-// group 1. The march keeps only the composite (the t >= t_surface test,
+// over the block grid, a terrain with its plants — and their tracing is
+// register-hungry. In fs_main it shared a kernel with the cloud march, so
+// its registers were the march's too: every surface feature compiled in cost
+// every march pixel occupancy, whether its rays ever reached that feature or
+// not. So the surface is traced in a pass of its own, fs_surface, one
+// fragment per render pixel, before every fs_main pass of a frame, into the
+// target fs_main reads at group 1. The march keeps only the composite (the t >= t_surface test,
 // the dt clamp and the post-loop fallback), with the same radiance at the
 // same t as when it traced the surface itself.
 //
@@ -12374,7 +12454,8 @@ struct CameraRay {
     dir: vec3<f32>,
     frame_index: u32,       // this frame's index in the accumulation
     strat_pixel: vec2<u32>, // the pixel that seeds the stratified scrambles
-    pixel_angle: f32,       // the surfaces' resolving angle (rad/px)
+    pixel_angle: f32,       // the city's resolving angle (rad/px)
+    true_pixel_angle: f32,  // one pixel's angle, without the LOD slider
     jitter_amp: f32,        // jitter_on * jitter_scale
 }
 
@@ -12412,7 +12493,8 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     // (u.periodic.z, the app's one LOD slider). Coarsening the slider
     // dissolves windows into blocks exactly as it coarsens the march — one
     // lever, one degrees-not-meters law for the whole scene.
-    cr.pixel_angle = max(2.0 * tan_half_fov / img_w, u.periodic.z);
+    cr.true_pixel_angle = 2.0 * tan_half_fov / img_w;
+    cr.pixel_angle = max(cr.true_pixel_angle, u.periodic.z);
     cr.jitter_amp = u.cam_up.w * jitter_scale;
     return cr;
 }
@@ -12539,38 +12621,8 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     return res;
 }
 
-// The desert under this ray: hazed radiance and distance, t = 1e30 on a
-// miss. Traced in the desert frame (desert_camera_origin) and shaded with
-// the cloud shadow at the world hit; t is translation-invariant, so depth
-// needs no conversion. Its own draws on the sun-march and solar-cone
-// streams: the ocean's take the same streams, and the two are never both
-// compiled in.
-fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
-                       strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
-    let sun = u.sun_dir.xyz;
-    let desert_o = desert_camera_origin();
-    let dhit = desert_trace(desert_o, dir, pixel_angle);
-    if (!dhit.hit) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1e30);
-    }
-    let d_jit = jitter_amp * strat1(frame_index, strat_pixel,
-                                    STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
-    let d_cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
-                        vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
-    let d_sun_shadow = sun_cone_dir(
-        sun, sun_tangent_frame(sun), d_cone,
-        SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN * jitter_amp);
-    return vec4<f32>(desert_shade(dhit, desert_o,
-                                  u.cam_origin.xyz + dhit.t * dir, dir,
-                                  sun, d_sun_shadow, d_jit, pixel_angle),
-                     dhit.t);
-}
-
 // The pass itself. Only the CITY and DESERT specializations are ever run
 // through it; any other scene returns a miss and the host never draws it.
-// The city's result is the PLAIN surface (every building a box), which the
-// refinement stage (fs_surface_refine) reads from group 1; the desert's is
-// final.
 @fragment
 fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let cr = camera_ray(frag_pos);
@@ -12578,8 +12630,13 @@ fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> 
         return surface_pass_city(cr.dir, cr.pixel_angle);
     }
     if (DESERT) {
-        return desert_surface_pass(cr.dir, cr.pixel_angle, cr.frame_index,
-                                   cr.strat_pixel, cr.jitter_amp);
+        // The desert resolves at the true pixel angle: the view-step LOD
+        // angle is several pixels wide at the day tiers and would dissolve
+        // the stones and plants meant to be seen from a couple of metres
+        // (desert-ground's decision; its cost is kept by its own laws).
+        return desert_surface_pass(cr.dir, cr.true_pixel_angle,
+                                   cr.frame_index, cr.strat_pixel,
+                                   cr.jitter_amp);
     }
     return vec4<f32>(0.0, 0.0, 0.0, 1e30);
 }
@@ -13020,7 +13077,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // zero-jitter tau at the cache's own resolution, trilinearly
             // filtered. See Uniforms.light_cache.
             var tau_sun: f32;
-            if (u.light_cache.x > 0.5) {
+            if (LIGHT_CACHE) {
                 tau_sun = sample_light_tau(p);
             } else {
                 tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
@@ -13053,7 +13110,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             var t_sky = 1.0;
             var shallow_open = 0.0;
             if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
-                if (u.light_cache.z > 0.5) {
+                if (!SKY_PROBE) {
                     // Sky probe disabled (a cost/look toggle, J in the
                     // browser): every consumer sees a fully open sky, which
                     // is the neutral the floors already assume. Buried

@@ -96,7 +96,7 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
             timestamp_writes={"query_set": query_set,
                               "beginning_of_pass_write_index": 2 * i,
                               "end_of_pass_write_index": 2 * i + 1})
-        rp.set_pipeline(renderer._ray_pipeline)
+        rp.set_pipeline(renderer._ray_pipeline_for(view))
         rp.set_bind_group(0, bind_group)
         rp.draw(3)
         rp.end()
