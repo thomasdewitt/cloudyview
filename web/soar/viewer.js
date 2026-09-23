@@ -2559,6 +2559,7 @@ export class Viewer {
       // rather than the live view's, for the same reason as the render
       // block above.
       reproduction_command: this.witnessCommand({
+        size,
         lodStrength: look.lodStrength,
         haze: look.haze,
         hazeHeightDependent: look.hazeHeightDependent,
@@ -2817,7 +2818,8 @@ export class Viewer {
    *
    * The overrides are the capture's honesty trail: renderMetadata passes the
    * look the capture actually marched (a named tier's parked defaults, or
-   * Custom's session values), so the command reproduces the CAPTURE. With no
+   * Custom's session values), so the command reproduces the CAPTURE — at
+   * the capture's pixel size too, which is not the canvas's. With no
    * overrides — the terminal panel — the live values go out.
    */
   /**
@@ -2853,7 +2855,8 @@ export class Viewer {
     return ["--surface-origin", n(off[0]), n(off[1])];
   }
 
-  witnessCommand({ lodStrength = this.lodStrength,
+  witnessCommand({ size = [this.canvas.width, this.canvas.height],
+                   lodStrength = this.lodStrength,
                    haze = this.haze,
                    hazeHeightDependent = this.hazeHeightDependent,
                    exposure = this.exposure,
@@ -2867,7 +2870,7 @@ export class Viewer {
       this.camera.position, this.scene.bmin, this.scene.bmax);
     return [
       "witness", q(source),
-      "--size", this.canvas.width, this.canvas.height,
+      "--size", size[0], size[1],
       ...(this.scene.groupPath ? ["--group", q(this.scene.groupPath)] : []),
       ...(this.scene.nested && this.scene.nestGroup
           ? ["--nest-group", q(this.scene.nestGroup)] : []),
@@ -2878,6 +2881,16 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
+      // What the world stands on, always written: without it a cyberpunk
+      // still's command rendered the day ocean. The city's tile offset picks
+      // the district under the field, and the CLI has no default to agree
+      // with (cyberpunk and the night-city harness park different ones), so
+      // it travels with the surface.
+      "--surface",
+      this.scene.city ? "city" : this.scene.desert ? "desert" : "ocean",
+      ...(this.scene.city
+          ? ["--city-offset", n(this.scene.cityOffsetM[0]),
+             n(this.scene.cityOffsetM[1])] : []),
       ...(this.renderer.periodic ? ["--periodic"] : []),
       // Only when period crossings moved this view off the scene's static
       // surface offset: the folded camera position above no longer says
