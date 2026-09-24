@@ -158,7 +158,9 @@ function fly({ city, start, azimuth, elevation, speed, keys, fps, seconds,
     const knock = collider.resolve(dt, camera, flyer);
     if (knock) { recorder.noteKnock(knock); knocks.push(knock); }
     recorder.advance(dt);
-    recorder.sample(camera);
+    // v3: the scene clock rides with the flight, as the viewer's does
+    // while a track records.
+    recorder.sample(camera, recorder.elapsed);
     if (releaseOnKnock && knocks.length) camera.keys.clear();
     const sp = camera.surfacePosition;
     const cam = [sp[0], sp[1], camera.position[2]];
@@ -412,14 +414,17 @@ def test_python_reads_a_track_that_carries_knocks(tmp_path):
     from cloudyview.track import load_track, resample_track
     r = fly(boxes=WALL, start=[0.0, 0.0, 60.0], azimuth=EAST, elevation=0.0,
             speed=20.0, keys=["w"], fps=60, seconds=4.0)
-    payload = {"schema": "cloudyview.track.v2", "header": {},
+    payload = {"schema": "cloudyview.track.v3", "header": {},
                "samples": r["recorded"]["samples"],
                "knocks": r["recorded"]["knocks"]}
     path = tmp_path / "crash.json"
     path.write_text(json.dumps(payload))
     _, samples = load_track(path)
-    assert samples.shape[1] == 9
-    assert len(resample_track(samples, 30.0, periodic=True)) > 100
+    # v3: the surface frame, then the scene clock, which ran with the flight.
+    assert samples.shape[1] == 10
+    assert samples[:, 9] == pytest.approx(samples[:, 0])
+    assert len(resample_track(samples, 30.0, periodic=True,
+                              linear_position=True)) > 100
 
 
 def test_starting_with_the_flyer_in_a_wall_backs_off_before_the_first_frame():
