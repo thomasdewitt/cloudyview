@@ -79,36 +79,44 @@ def load_case(name, demos: Path):
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     """GPU ms of `frames` consecutive frames as (surface, march) arrays: the
-    surface pre-pass (fs_surface, zeros in a scene without one) and the ray
-    pass (fs_main), a timestamp pair each, encoded as SoarRenderer.render
+    surface stages summed (fs_surface, fs_surface_refine, fs_surface_street
+    — whichever the scene has; zeros in a scene with none) and the ray pass
+    (fs_main), a timestamp pair per pass, encoded as SoarRenderer.render
     encodes them."""
     import wgpu
     device = renderer.device
     targets = renderer._ensure_targets(view.render_size)
     bind_group = renderer._ensure_bind_group()
     sample_view = targets["sample"].create_view()
-    surface_pipeline = renderer._surface_pipeline_for(view)
-    surface_view = (targets["surface"].create_view()
-                    if targets["surface"] is not None else None)
+    stage_pipelines = {"surface": renderer._surface_pipeline_for(view),
+                       "refine": renderer._refine_pipeline_for(view),
+                       "street": renderer._street_pipeline_for(view)}
+    stages = targets["stages"]
     # One timestamp pair per pass actually encoded: resolving a query no
     # pass wrote fails validation, and the readback below then never maps.
-    per = 4 if surface_pipeline is not None else 2
+    per = 2 + 2 * len(stages)
     for i in range(frames):
         pass_view = ViewState(**{**view.__dict__, "frame_index": i,
                                  "subpixel": i >= 1})
         device.queue.write_buffer(renderer._uniform_buf, 0,
                                   pack_uniforms(state, pass_view).tobytes())
         enc = device.create_command_encoder()
-        if surface_pipeline is not None:
+        for k, (name, group1, writes) in enumerate(stages):
             sp = enc.begin_render_pass(
-                color_attachments=[{"view": surface_view, "load_op": "clear",
-                                    "store_op": "store",
-                                    "clear_value": (0.0, 0.0, 0.0, 1e30)}],
-                timestamp_writes={"query_set": query_set,
-                                  "beginning_of_pass_write_index": per * i + 2,
-                                  "end_of_pass_write_index": per * i + 3})
-            sp.set_pipeline(surface_pipeline)
+                color_attachments=[
+                    {"view": tex.create_view(), "load_op": "clear",
+                     "store_op": "store",
+                     "clear_value": ((0.0, 0.0, 0.0, 1e30) if j == 0
+                                     else (0, 0, 0, 0))}
+                    for j, tex in enumerate(writes)],
+                timestamp_writes={
+                    "query_set": query_set,
+                    "beginning_of_pass_write_index": per * i + 2 + 2 * k,
+                    "end_of_pass_write_index": per * i + 3 + 2 * k})
+            sp.set_pipeline(stage_pipelines[name])
             sp.set_bind_group(0, bind_group)
+            if group1 is not None:
+                sp.set_bind_group(1, group1)
             sp.draw(3)
             sp.end()
         rp = enc.begin_render_pass(
@@ -138,8 +146,9 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     readback.unmap()
     ts = ts.astype(np.float64).reshape(frames, per)
     march = (ts[:, 1] - ts[:, 0]) * 1e-6         # WebGPU timestamps are ns
-    surface = ((ts[:, 3] - ts[:, 2]) * 1e-6 if surface_pipeline is not None
-               else np.zeros(frames))
+    surface = np.zeros(frames)
+    for k in range(len(stages)):
+        surface += (ts[:, 3 + 2 * k] - ts[:, 2 + 2 * k]) * 1e-6
     return surface, march
 
 
@@ -168,9 +177,10 @@ def main():
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync(required_features=["timestamp-query"])
-    query_set = device.create_query_set(type="timestamp", count=4 * args.frames)
+    # Room for the march and up to three surface stages a frame.
+    query_set = device.create_query_set(type="timestamp", count=8 * args.frames)
     query_buf = device.create_buffer(
-        size=32 * args.frames,
+        size=64 * args.frames,
         usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC)
 
     variants = [v.split("=", 1) for v in args.variant]

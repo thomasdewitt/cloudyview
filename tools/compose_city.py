@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-seven hook dispatchers the core calls (see the hook comment block in
+eight hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -65,6 +65,15 @@ HOOKS = {
     "roof": (
         "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
         "        -> vec3<f32>"),
+    # Street-level props traced only by the street stage (fs_surface_street,
+    # city_trace's CITY_TRACE_NEAR mode), never by the view ray's first
+    # stage: detail that would cost every city pixel occupancy there.
+    "near_props": (
+        "fn cc_near_props_trace(o: vec3<f32>, dir: vec3<f32>, "
+        "inv_dir: vec3<f32>,\n"
+        "                       t0: f32, t1: f32, ci: vec2<i32>, "
+        "cc: CityCell)\n"
+        "        -> CityHit"),
 }
 
 # Module-scope declarations only (column 0): a function-local `var` or
@@ -102,14 +111,14 @@ def validate_component(comp, source):
                              f"'{hook}' but does not define it")
     kb = comp.get("kind_base")
     needs_kinds = any(h in comp.get("hooks", {})
-                      for h in ("extra_trace", "cell_props"))
+                      for h in ("extra_trace", "cell_props", "near_props"))
     if needs_kinds and (kb is None or kb < 100 or kb % 100 != 0):
         raise SystemExit(f"component '{name}' traces geometry and needs a "
                          f"kind_base >= 100 in multiples of 100; got {kb!r}")
 
 
 def dispatcher(comps):
-    """The seven hook dispatchers over whatever is registered."""
+    """The eight hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 
@@ -189,6 +198,19 @@ def dispatcher(comps):
         "    var acc = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n"
         + ("\n".join(media_body) + "\n" if media_body else "")
         + "    return acc;\n}")
+
+    near_body = []
+    for c in hooked("near_props"):
+        near_body.append(
+            f"    let h_{c['name']} = {c['hooks']['near_props']}"
+            "(o, dir, inv_dir, t0, t1, ci, cc);\n"
+            f"    if (h_{c['name']}.hit && h_{c['name']}.t < res.t) "
+            f"{{ res = h_{c['name']}; }}")
+    out.append(
+        f"{HOOKS['near_props']} {{\n"
+        "    var res: CityHit;\n    res.hit = false;\n    res.t = 1e30;\n"
+        + ("\n".join(near_body) + "\n" if near_body else "")
+        + "    return res;\n}")
 
     roof_body = [
         f"    e = e + {c['hooks']['roof']}(cc, h, fp);"

@@ -105,8 +105,8 @@
    "name": "streetfurniture",
    "kind_base": 800,
    "hooks": {
-    "cell_props": "cc_streetfurniture_props_trace",
-    "shade": "cc_streetfurniture_shade"
+    "shade": "cc_streetfurniture_shade",
+    "near_props": "cc_streetfurniture_props_trace"
    },
    "enabled": true
   }

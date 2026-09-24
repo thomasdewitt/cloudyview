@@ -1,6 +1,11 @@
 //! regcount: what the NVIDIA Vulkan driver compiled a WGSL entry point into.
 //!
-//!   regcount <file.wgsl> <fragment-entry> <rgba16f|rgba32f|r16f> [vertex-entry]
+//!   regcount <file.wgsl> <fragment-entry> <formats> [vertex-entry]
+//!
+//! <formats> is one colour-attachment format per fragment output, comma
+//! separated, from rgba16f, rgba32f, rgba32ui, r16f — a stage with two
+//! outputs (the surface stages write the surface and the veil) must be given
+//! both, or the driver may discard an output and compile its work away.
 //!
 //! WGSL -> SPIR-V with naga (the compiler wgpu-native uses), a graphics
 //! pipeline built with VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR, and the
@@ -14,17 +19,21 @@ use std::ffi::{CStr, CString};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: regcount <file.wgsl> <fragment-entry> <rgba16f|rgba32f|r16f> [vertex-entry]");
+        eprintln!("usage: regcount <file.wgsl> <fragment-entry> <formats> [vertex-entry]");
         std::process::exit(2);
     }
     let src = std::fs::read_to_string(&args[1]).expect("read wgsl");
     let frag_entry = args[2].clone();
-    let format = match args[3].as_str() {
-        "rgba16f" => vk::Format::R16G16B16A16_SFLOAT,
-        "rgba32f" => vk::Format::R32G32B32A32_SFLOAT,
-        "r16f" => vk::Format::R16_SFLOAT,
-        other => panic!("unknown format {other}"),
-    };
+    let formats: Vec<vk::Format> = args[3]
+        .split(',')
+        .map(|f| match f {
+            "rgba16f" => vk::Format::R16G16B16A16_SFLOAT,
+            "rgba32f" => vk::Format::R32G32B32A32_SFLOAT,
+            "rgba32ui" => vk::Format::R32G32B32A32_UINT,
+            "r16f" => vk::Format::R16_SFLOAT,
+            other => panic!("unknown format {other}"),
+        })
+        .collect();
     let vert_entry = args.get(4).cloned().unwrap_or_else(|| "vs_main".into());
 
     // --- WGSL -> SPIR-V ------------------------------------------------------
@@ -140,11 +149,14 @@ fn main() {
             .cull_mode(vk::CullModeFlags::NONE)
             .line_width(1.0);
         let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let att = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let att: Vec<_> = formats
+            .iter()
+            .map(|_| vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA))
+            .collect();
         let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
         let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
-        let fmts = [format];
+        let fmts = formats.clone();
         let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&fmts);
         let t0 = std::time::Instant::now();
         let gpci = vk::GraphicsPipelineCreateInfo::default()

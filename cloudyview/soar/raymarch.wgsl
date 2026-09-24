@@ -208,6 +208,12 @@ struct Uniforms {
 // stage (fs_surface_refine) — the city's plain boxes, the desert's far plant
 // forms — and a 1x1 stand-in for every other pass.
 @group(1) @binding(1) var surface_plain: texture_2d<f32>;
+// The VEIL: one semi-transparent layer per pixel in front of the surface —
+// the city's steam, the desert's far canopy — as the last surface stage left
+// it: premultiplied in-scattered radiance, transmittance, and the depth the
+// march composites it at (veil_pack / veil_unpack). Read by the march only
+// under CITY or DESERT; a 1x1 stand-in everywhere else.
+@group(1) @binding(2) var veil_buf: texture_2d<u32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -3583,10 +3589,21 @@ struct CityHit {
 // clears. Opaque geometry, so the first hit wins. `t_max` bounds the walk:
 // the view ray passes CITY_TRACE_RANGE, a wet street's reflected ray its own
 // short range (a rising ray would otherwise walk cells until it cleared
-// CITY_SLAB_TOP, kilometres up). `props` = false skips the component hooks
-// (extra_trace, cell_props): every call site passes a constant, so a
-// props-free call inlines none of their code (see the reflection in fs_main).
-fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, props: bool)
+// CITY_SLAB_TOP, kilometres up). `mode` picks what is traced; every call
+// site passes a constant, so each call inlines only its own mode's code:
+//   CITY_TRACE_ALL    buildings, ground, extra_trace and cell_props hooks —
+//                     the view ray (surface_pass_city);
+//   CITY_TRACE_PLAIN  buildings and ground only — the wet street's reflected
+//                     ray (a second inlined copy of every component's hooks
+//                     is what a reflection costs where none is traced);
+//   CITY_TRACE_NEAR   the near_props hooks only (street furniture), for the
+//                     street stage (surface_street_city), which already
+//                     knows the nearest opaque surface and asks only what
+//                     stands in front of it.
+const CITY_TRACE_ALL: i32 = 0;
+const CITY_TRACE_PLAIN: i32 = 1;
+const CITY_TRACE_NEAR: i32 = 2;
+fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, mode: i32)
         -> CityHit {
     var res: CityHit;
     res.hit = false;
@@ -3639,7 +3656,7 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, props: bool)
     var extra: CityHit;
     extra.hit = false;
     extra.t = 1e30;
-    if (props) {
+    if (mode == CITY_TRACE_ALL) {
         extra = cc_extra_trace(o, dir, inv3);
     }
 
@@ -3658,7 +3675,8 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, props: bool)
         var best_max = vec3<f32>(0.0);
         var best_kind = -1;
         var best_fnormal = vec3<f32>(0.0);
-        if (cc.built && min(z_a, z_b) < cc.top_z + 1.0) {
+        if (mode != CITY_TRACE_NEAR && cc.built
+            && min(z_a, z_b) < cc.top_z + 1.0) {
             let h1 = city_box_hit(o, inv3, cc.b1min, cc.b1max);
             if (h1.x <= h1.y && h1.x > 0.0 && h1.x < best_t) {
                 best_t = h1.x; best_min = cc.b1min; best_max = cc.b1max;
@@ -3697,7 +3715,8 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, props: bool)
                 }
             }
         }
-        if (ground_t > t_cur - 1e-4 && ground_t <= t_exit + 1e-4
+        if (mode != CITY_TRACE_NEAR
+            && ground_t > t_cur - 1e-4 && ground_t <= t_exit + 1e-4
             && ground_t < best_t) {
             best_t = ground_t;
             best_kind = 0;
@@ -3728,7 +3747,13 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_max: f32, props: bool)
         }
         // Near-field props: the whole prop budget lives inside
         // CITY_PROP_RANGE, so the far city never pays for a garbage can.
-        if (props && t_cur < CITY_PROP_RANGE) {
+        if (mode == CITY_TRACE_NEAR) {
+            let nh = cc_near_props_trace(o, dir, inv3, t_cur, t_exit, ci, cc);
+            if (nh.hit && nh.t < res.t && nh.t <= t_exit + 1e-3) {
+                res = nh;
+            }
+        }
+        if (mode == CITY_TRACE_ALL && t_cur < CITY_PROP_RANGE) {
             let ph = cc_cell_props_trace(o, dir, inv3, t_cur, t_exit, ci, cc);
             if (ph.hit && ph.t < res.t && ph.t <= t_exit + 1e-3) {
                 res = ph;
@@ -4570,7 +4595,10 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
     // incidence that is far down the street, not beside the point. Summing
     // the two stations beside the point lost every lamp past ~35 m from an
     // eye-level camera (the Claude review, 2026-09-23). The rough lobe
-    // centres on the same direction, so the same two stations serve both.
+    // centres on the same direction, so the same stations serve both: the
+    // three nearest the mirror point, because with only the two bracketing
+    // it the set switched as the point crossed a station and dropped a lamp
+    // the film lobe still saw — a hard band across every wet road.
     let t_head = min((CITY_LAMP_HEAD_Z - p.z) / max(-dir.z, 0.02), 300.0);
     var e = 0.0;
     for (var dirn: i32 = 0; dirn < 2; dirn = dirn + 1) {
@@ -4585,11 +4613,11 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
         let inset = city_lamp_inset(k);
         let lat = city_lamp_lattice(k);
         let a_m = a + select(dir.x, dir.y, along_y) * t_head;
-        let j0 = floor((a_m - lat.y) / lat.x);
+        let j0 = round((a_m - lat.y) / lat.x) - 1.0;
         for (var sd: i32 = 0; sd < 2; sd = sd + 1) {
             let hc = f32(k) * cellm
                    + select(-1.0, 1.0, sd == 1) * (inset - CITY_LAMP_ARM);
-            for (var jj: i32 = 0; jj < 2; jj = jj + 1) {
+            for (var jj: i32 = 0; jj < 3; jj = jj + 1) {
                 let ha = lat.y + (j0 + f32(jj)) * lat.x;
                 let head = select(vec3<f32>(ha, hc, CITY_LAMP_HEAD_Z),
                                   vec3<f32>(hc, ha, CITY_LAMP_HEAD_Z),
@@ -17162,8 +17190,6 @@ fn cc_cell_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (h_manholesteam.hit && h_manholesteam.t < res.t) { res = h_manholesteam; }
     let h_industry = cc_industry_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
     if (h_industry.hit && h_industry.t < res.t) { res = h_industry; }
-    let h_streetfurniture = cc_streetfurniture_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
-    if (h_streetfurniture.hit && h_streetfurniture.t < res.t) { res = h_streetfurniture; }
     return res;
 }
 
@@ -17219,6 +17245,17 @@ fn cc_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t_max: f32,
     let m_manholesteam = cc_manholesteam_media(o, dir, inv_dir, t_max, pixel_angle, rnd);
     acc = vec4<f32>(acc.rgb + acc.a * m_manholesteam.rgb, acc.a * m_manholesteam.a);
     return acc;
+}
+
+fn cc_near_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                       t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
+        -> CityHit {
+    var res: CityHit;
+    res.hit = false;
+    res.t = 1e30;
+    let h_streetfurniture = cc_streetfurniture_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
+    if (h_streetfurniture.hit && h_streetfurniture.t < res.t) { res = h_streetfurniture; }
+    return res;
 }
 
 fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
@@ -17730,8 +17767,7 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
 }
 
 // The city under this ray: fogged radiance and distance, t = 1e30 on a miss.
-fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
-                     strat_pixel: vec2<u32>) -> vec4<f32> {
+fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
     // THE CITY FRAME: world xy minus the row-24 surface offset, folded into
     // the primary tile (city_camera_origin — the one entry). The whole city
     // system — the DDA, every cell index and pcg2d seed, plot slabs, street
@@ -17742,82 +17778,23 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
     // needs no conversion; the one city input that must STAY world is the
     // uplight probe's cloud sampling (see the city_glow_sample call in the
     // march loop).
+    //
+    // This stage traces and shades only. What stands on the street and what
+    // the street reflects are the street stage's (surface_street_city): kept
+    // out of here, this stage stays in master's register tier (128 on the
+    // 5080; the wet reflection, the steam and the street furniture compiled
+    // in took it to 168, and every city pixel paid for that occupancy). A
+    // ground hit is FLAGGED for that stage by a negative t — city-facades'
+    // refinement passes it through, sign and all — and the street stage
+    // writes it back positive.
     let city_o = city_camera_origin();
-    // The view ray and — off wet ground — its reflection. The reflected ray
-    // is traced WITHOUT the component prop hooks (props = false): the second
-    // inlined copy of every component's cell_props code is what a reflection
-    // costs where it is never traced, and it was 20-36% at the low tier on
-    // the aerial, base and horizon views (measured 2026-09-23, when this ran
-    // inside fs_main; rolling both rays through one call site in a loop cost
-    // the same, from the loop nest alone). Without them a reflection costs
-    // nothing where it is not taken. What the puddles lose is the parked
-    // cars, the poles and the skyway; the lamps they would have shown are
-    // city_lamp_glint's, analytically. The reflection adds to the pixel
-    // through the view path's fog: city_fog is affine, so it enters times
-    // that path's transmittance.
-    let h = city_trace(city_o, dir, CITY_TRACE_RANGE, true);
+    let h = city_trace(city_o, dir, CITY_TRACE_RANGE, CITY_TRACE_ALL);
     if (!h.hit) {
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
-    let fp = pixel_angle * h.t;
-    var rgb = vec3<f32>(0.0);
-    if (h.kind != 0) {
-        rgb = city_fog(city_shade(h, dir, fp), city_o, dir, h.t, h.pos);
-    } else {
-        // Ground: the cell, the paving question and the material once, for
-        // both the surface and its wet lobe.
-        let cc = city_cell(h.cell);
-        let paved = city_ground_paved(cc, h.cell, h.pos.xy);
-        if (city_ground_is_lot(paved, cc)) {
-            rgb = city_fog(city_lot_radiance(h.pos, cc, fp), city_o, dir,
-                           h.t, h.pos);
-        } else {
-            let g = city_ground(h.pos.xy, h.cell, cc, fp);
-            rgb = city_fog(city_ground_lit(h.pos, cc, dir, fp, g, paved),
-                           city_o, dir, h.t, h.pos);
-            let rnd = city_frame_rand(strat_pixel, frame_index,
-                                      CITY_RAND_REFLECT);
-            let lobe = city_wet_lobe(h, g, dir, pixel_angle, rnd.xyz);
-            if (lobe.ok) {
-                let w = lobe.w * city_fog_trans(city_o, dir, h.t, h.pos);
-                rgb = rgb + (w * lobe.blend) * lobe.env;
-                // Russian roulette on what is left to trace: a lobe whose
-                // weight is under CITY_REFL_RR (a steep view, a damp film,
-                // a far pixel) is traced with probability w / RR and
-                // counted RR / w times over when it is — unbiased, and most
-                // of the ground stops paying for a 600 m ray that carries a
-                // few percent (the review's M1).
-                let wt = w * (1.0 - lobe.blend);
-                let p_tr = min(wt / CITY_REFL_RR, 1.0);
-                let roll = city_frame_rand(strat_pixel, frame_index,
-                                           CITY_RAND_ROULETTE).x;
-                if (wt > 0.0 && roll < p_tr) {
-                    let ro = vec3<f32>(h.pos.xy, h.pos.z + 0.02);
-                    let hr = city_trace(ro, lobe.r, CITY_REFL_RANGE, false);
-                    var l = vec3<f32>(0.0);
-                    if (!hr.hit) {
-                        // Fogged over the range it searched, as a hit at
-                        // the range would have been.
-                        let far = ro + CITY_REFL_RANGE * lobe.r;
-                        l = city_fog(city_reflect_sky(
-                                         u.cam_origin.xyz + h.t * dir,
-                                         lobe.r, rnd.w),
-                                     ro, lobe.r, CITY_REFL_RANGE, far);
-                    } else {
-                        let fp_r = pixel_angle * (h.t + hr.t)
-                                 + 0.5 * lobe.alpha * hr.t;
-                        l = city_fog(city_shade(hr, lobe.r, fp_r), ro,
-                                     lobe.r, hr.t, hr.pos);
-                    }
-                    rgb = rgb + (wt / p_tr) * l;
-                }
-            }
-        }
-    }
-    // Media between the eye and the hit (steam over the manholes).
-    rgb = city_media_over(rgb, city_o, dir, h.t, pixel_angle, frame_index,
-                          strat_pixel);
-    return vec4<f32>(rgb, h.t);
+    let rgb = city_fog(city_shade(h, dir, pixel_angle * h.t),
+                       city_o, dir, h.t, h.pos);
+    return vec4<f32>(rgb, select(h.t, -h.t, h.kind == 0));
 }
 
 // The city's second stage: the facade shell over the plain surface. Until
@@ -17827,25 +17804,184 @@ fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     return plain;
 }
 
+// --- the street stage -----------------------------------------------------------
+//
+// The third city stage (fs_surface_street), after the facade refinement: it
+// reads the surface as the first two left it and adds what belongs to the
+// street — the furniture standing in front of it, the wet reflection off
+// it, and the steam over it, which goes to the VEIL so it shows against the
+// sky and in front of any wall. A pixel whose ray never comes down within
+// CITY_NEAR_TOP of the street, within CITY_NEAR_RANGE, and did not land on
+// the ground, leaves at once with the surface unchanged.
+const CITY_NEAR_TOP: f32 = 15.0;     // the tallest near thing: a plume
+const CITY_NEAR_RANGE: f32 = 400.0;  // past the furniture and steam cutoffs
+
+fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
+    let dir = cr.dir;
+    let pixel_angle = cr.pixel_angle;
+    let ground_hit = prev.w < 0.0;
+    let t_prev = abs(prev.w);
+    var out: SurfaceOut;
+    out.surf = vec4<f32>(prev.xyz, t_prev);
+    out.veil = veil_none();
+    let city_o = city_camera_origin();
+    // Where the ray first comes down to CITY_NEAR_TOP.
+    var t_low = 0.0;
+    if (city_o.z > CITY_NEAR_TOP) {
+        t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
+    }
+    let t_near = min(t_prev, CITY_NEAR_RANGE);
+    let near = t_low < t_near;
+    if (!near && !ground_hit) {
+        return out;
+    }
+    var rgb = prev.xyz;
+    var t = t_prev;
+    var ground = ground_hit;
+    if (near) {
+        // The street furniture (the near_props hooks), up to the surface it
+        // already has. Traced from the camera, not from t_low: the props
+        // take their footprint from t, which must be the distance from the
+        // eye; the cells above CITY_NEAR_TOP cost a z test each.
+        let hp = city_trace(city_o, dir, t_near, CITY_TRACE_NEAR);
+        if (hp.hit) {
+            t = hp.t;
+            rgb = city_fog(city_shade(hp, dir, pixel_angle * t), city_o, dir,
+                           t, hp.pos);
+            ground = false;
+        }
+    }
+    if (ground) {
+        rgb = rgb + city_wet_reflection(city_o, dir, t, pixel_angle,
+                                        cr.frame_index, cr.strat_pixel);
+    }
+    if (near) {
+        // The steam in front of whatever is there — or of nothing: over the
+        // sky the veil is all that shows of it.
+        let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                            select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
+                            select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
+        let med = cc_media(city_o, dir, inv, t, pixel_angle,
+                           city_frame_rand(cr.strat_pixel, cr.frame_index,
+                                           CITY_RAND_MEDIA).x);
+        out.veil = veil_pack(med.rgb, med.a, t_low);
+    }
+    out.surf = vec4<f32>(rgb, t);
+    return out;
+}
+
+// What the wet street at distance t along the view ray reflects, through the
+// view path's fog (city_fog is affine, so it enters times that path's
+// transmittance). One microfacet sample per frame (city_wet_lobe); the
+// reflected ray is traced PLAIN — buildings and ground, no component hooks —
+// and a lobe carrying under CITY_REFL_RR is traced only by Russian
+// roulette. What the puddles lose is the parked cars, the poles, the skyway
+// and the furniture; the lamps they would have shown are city_lamp_glint's,
+// analytically, in the ground's own shading.
+fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
+                       pixel_angle: f32, frame_index: u32,
+                       strat_pixel: vec2<u32>) -> vec3<f32> {
+    let pos = city_o + t * dir;
+    let cell = vec2<i32>(floor(pos.xy / u.ocean_params.x));
+    let cc = city_cell(cell);
+    let paved = city_ground_paved(cc, cell, pos.xy);
+    if (city_ground_is_lot(paved, cc)) {
+        return vec3<f32>(0.0);   // yards and scrub are dry dirt
+    }
+    let h = CityHit(true, t, pos, vec3<f32>(0.0, 0.0, 1.0), 0, cell);
+    let fp = pixel_angle * t;
+    let g = city_ground(pos.xy, cell, cc, fp);
+    let rnd = city_frame_rand(strat_pixel, frame_index, CITY_RAND_REFLECT);
+    let lobe = city_wet_lobe(h, g, dir, pixel_angle, rnd.xyz);
+    if (!lobe.ok) {
+        return vec3<f32>(0.0);
+    }
+    let w = lobe.w * city_fog_trans(city_o, dir, t, pos);
+    var add = (w * lobe.blend) * lobe.env;
+    // Russian roulette on what is left to trace: a lobe whose weight is
+    // under CITY_REFL_RR (a steep view, a damp film, a far pixel) is traced
+    // with probability w / RR and counted RR / w times over when it is.
+    let wt = w * (1.0 - lobe.blend);
+    let p_tr = min(wt / CITY_REFL_RR, 1.0);
+    let roll = city_frame_rand(strat_pixel, frame_index,
+                               CITY_RAND_ROULETTE).x;
+    if (wt > 0.0 && roll < p_tr) {
+        let ro = vec3<f32>(pos.xy, pos.z + 0.02);
+        let hr = city_trace(ro, lobe.r, CITY_REFL_RANGE, CITY_TRACE_PLAIN);
+        var l = vec3<f32>(0.0);
+        if (!hr.hit) {
+            // Fogged over the range it searched, as a hit at the range
+            // would have been.
+            let far = ro + CITY_REFL_RANGE * lobe.r;
+            l = city_fog(city_reflect_sky(u.cam_origin.xyz + t * dir, lobe.r,
+                                          rnd.w),
+                         ro, lobe.r, CITY_REFL_RANGE, far);
+        } else {
+            let fp_r = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;
+            l = city_fog(city_shade(hr, lobe.r, fp_r), ro, lobe.r, hr.t,
+                         hr.pos);
+        }
+        add = add + (wt / p_tr) * l;
+    }
+    return add;
+}
+
+// --- the veil ------------------------------------------------------------------
+
+// What every surface stage writes to the veil target (@location(1)), and
+// what the march reads back at group 1 binding 2: premultiplied radiance
+// (half floats), transmittance, and the composite depth (a full f32 — up to
+// 40 km over the desert). Packed into a uint target so no driver's float
+// path ever touches the bits.
+struct SurfaceOut {
+    @location(0) surf: vec4<f32>,
+    @location(1) veil: vec4<u32>,
+}
+
+fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
+    return vec4<u32>(pack2x16float(rgb.xy),
+                     pack2x16float(vec2<f32>(rgb.z, trans)),
+                     bitcast<u32>(t), 0u);
+}
+
+// No veil: nothing scattered in, everything let through.
+fn veil_none() -> vec4<u32> {
+    return veil_pack(vec3<f32>(0.0), 1.0, 1e30);
+}
+
+struct Veil {
+    rgb: vec3<f32>,
+    trans: f32,
+    t: f32,
+}
+
+fn veil_unpack(v: vec4<u32>) -> Veil {
+    let rg = unpack2x16float(v.x);
+    let bt = unpack2x16float(v.y);
+    return Veil(vec3<f32>(rg, bt.x), bt.y, bitcast<f32>(v.z));
+}
+
 // The pass itself. Only the CITY and DESERT specializations are ever run
 // through it; any other scene returns a miss and the host never draws it.
 @fragment
-fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
     let cr = camera_ray(frag_pos);
+    var out: SurfaceOut;
+    out.surf = vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    out.veil = veil_none();
     if (CITY) {
-        return surface_pass_city(cr.dir, cr.pixel_angle, cr.frame_index,
-                                 cr.strat_pixel);
+        out.surf = surface_pass_city(cr.dir, cr.pixel_angle);
     }
     if (DESERT) {
         // The desert resolves at the true pixel angle: the view-step LOD
         // angle is several pixels wide at the day tiers and would dissolve
         // the stones and plants meant to be seen from a couple of metres
         // (desert-ground's decision; its cost is kept by its own laws).
-        return desert_surface_pass(cr.dir, cr.true_pixel_angle,
-                                   cr.frame_index, cr.strat_pixel,
-                                   cr.jitter_amp);
+        out.surf = desert_surface_pass(cr.dir, cr.true_pixel_angle,
+                                       cr.frame_index, cr.strat_pixel,
+                                       cr.jitter_amp);
     }
-    return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    return out;
 }
 
 // The second stage, for a surface that has one. Most pixels leave at once;
@@ -17862,6 +17998,23 @@ fn fs_surface_refine(@builtin(position) frag_pos: vec4<f32>)
         return desert_surface_refine(cr, plain);
     }
     return plain;
+}
+
+// The third stage, for a surface that has one: the city's street
+// (surface_street_city). It reads the second stage's surface at group 1
+// binding 1, as the second reads the first's, and writes the final surface
+// and the veil.
+@fragment
+fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
+    let prev = textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    let cr = camera_ray(frag_pos);
+    if (CITY) {
+        return surface_street_city(cr, prev);
+    }
+    var out: SurfaceOut;
+    out.surf = prev;
+    out.veil = veil_none();
+    return out;
 }
 
 @fragment
@@ -17969,6 +18122,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
     let t_surface = select(select(t_ocean, t_city, CITY), t_desert, DESERT);
+    // The veil (steam over the city, far canopy over the desert): composited
+    // once, where the march passes its depth — so a cloud in front of it
+    // stays in front and a cloud behind it is seen through it — and only if
+    // it lies in front of the surface.
+    var veil = Veil(vec3<f32>(0.0), 1.0, 1e30);
+    if (CITY || DESERT) {
+        veil = veil_unpack(textureLoad(veil_buf, vec2<i32>(frag_pos.xy), 0));
+    }
+    var veil_pending = (CITY || DESERT) && veil.trans < 1.0
+                       && veil.t < t_surface;
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
@@ -18140,6 +18303,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ocean_consumed = true;
                 break;
             }
+            if (veil_pending && t >= veil.t) {
+                col = col + transmittance * veil.rgb;
+                transmittance = transmittance * veil.trans;
+                veil_pending = false;
+            }
             if (CITY && t >= t_city) {
                 col = col + transmittance * city_rgb;
                 transmittance = 0.0;
@@ -18204,6 +18372,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
             if (ocean_on && t + dt > t_ocean) {
                 dt = max(0.0001, t_ocean - t);
+            }
+            if (veil_pending && t + dt > veil.t) {
+                dt = max(0.0001, veil.t - t);
             }
             if (CITY && t + dt > t_city) {
                 dt = max(0.0001, t_city - t);
@@ -18752,6 +18923,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         ocean_slope_seed, jitter_on * jitter_scale),
                     ICE_OCEAN_TINT, ice_on);
         transmittance = 0.0;
+    }
+
+    // A veil the march never reached (the ray left the volume first, or
+    // never entered it): in front of the surface and the sky, behind every
+    // cloud the march did see.
+    if (veil_pending) {
+        col = col + transmittance * veil.rgb;
+        transmittance = transmittance * veil.trans;
     }
 
     // City for rays that exit or miss the volume without becoming opaque —
