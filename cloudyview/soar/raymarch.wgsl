@@ -6131,15 +6131,23 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     var e = mix(e_win, mix(e_block, e_flat, b2), b1);
 
     // Glass reflects: panes on a punched or gridded wall, the whole skin on
-    // a curtain wall, each dissolving into its share of the face.
+    // a curtain wall. The reflection goes with the panes it lives on and
+    // dissolves across the ladder's pane band, as the per-bay covers do
+    // below, rather than into its share of the face: at grazing angles that
+    // share is a uniform lift several times the wall's own diffuse, and it
+    // washed out the block octave the far city is drawn in. So the octaves
+    // past the panes keep the look they always had. (The band starts past
+    // the shell's reach, CITY_SHELL_FP_FLAT, so the shell still hands off
+    // to a wall that reflects exactly as it does.)
     let skin = cc.win_style == 3;
     let glass = select(select(0.0, 1.0, pane), select(0.0, 1.0, b.in_bay),
                        skin);
-    let glass_mean = select(cc.pane_frac, 1.0, skin) * bay_frac;
-    e = e + city_glass_fresnel(cosv)
-            * city_glass_env(reflect(dir, h.normal), h.pos,
-                             city_glow_sample(h.pos.xy, 3.0))
-            * mix(glass, glass_mean, b1);
+    if (b1 < 1.0) {
+        e = e + city_glass_fresnel(cosv)
+                * city_glass_env(reflect(dir, h.normal), h.pos,
+                                 city_glow_sample(h.pos.xy, 3.0))
+                * (glass * (1.0 - b1));
+    }
     // A warehouse's ground band is its doors, which the industry component
     // draws: no windows there, and no glass.
     let warehouse = cc.land_use == CITY_USE_INDUSTRIAL;
