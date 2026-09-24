@@ -128,6 +128,35 @@ Signatures (the composer checks these by compiling):
   Sub-pixel glyphs (fp much larger than a pane) must return your glyph's
   mean transmission, not 1.
 
+## The facade shell (core)
+
+Up close a building face is not a box face: the core traces it as a SHELL
+(raymarch.wgsl, "Facade shell"), in the city's second surface stage
+(`fs_surface_refine`) — recessed windows with the glass set back, sills,
+hoods, ledges, cornices, fins and mullion caps, AC units, drainpipes on
+brackets, rain canopies, balconies, fire escapes, and an interior-mapped
+room behind every lit pane. What that means for a component:
+
+- **Face frame.** `city_face_at(cc, h.pos, h.normal)` returns the face a
+  facade hit lies on: `side`, `tier`, `len`, and its bay lattice (`margin`,
+  `pitch`, `nbays`). `uc` in the facade hooks is metres from the face's
+  own start corner. Windows sit in an integer number of bays between two
+  corner margins (`CITY_SHELL_CORNER`), so nothing of yours should assume a
+  window lattice anchored to world coordinates.
+- **Relief extent.** Nothing of the shell stands more than
+  `CITY_SHELL_OUT_MAX` (1.5 m) off its wall; the flyer's collider inflates
+  every building box by exactly that. Props within 1.5 m of a wall share
+  space with the shell — keep bins and bollards out of it, or expect a
+  balcony slab above them.
+- **Panels.** A component that hangs an opaque panel on a wall (a screen, a
+  sign box, a roll-up door) reports it through `facade_cover`, and the core
+  takes the windows and the relief out from under it.
+- **LOD.** The shell's depths flatten to the wall over pixel footprints
+  0.4 -> 1.2 m, and its shading hands off to the flat facade at the same
+  point on the wall, so a facade hook sees the same wall at every range.
+- **Industrial walls** (`land_use == CITY_USE_INDUSTRIAL`) are the industry
+  component's; the shell leaves them alone.
+
 ## Detailed micro-geometry: the SDF-in-a-box pattern
 
 Props that the camera can get close to (vehicles, street furniture) should
