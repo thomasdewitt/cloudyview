@@ -86,8 +86,15 @@ try {
 
 const expression = `(async () => {
   const base = ${JSON.stringify(base)};
-  const adapter = await navigator.gpu?.requestAdapter();
-  if (!adapter) return { fatal: "no WebGPU adapter in this Chrome" };
+  // A Chrome just launched while other sessions hold VRAM can answer the
+  // first requests with no adapter and then settle (seen 2026-09-23), so a
+  // few seconds of retries before calling it absent.
+  let adapter = null;
+  for (let i = 0; i < 6 && !adapter; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 1000));
+    adapter = await navigator.gpu?.requestAdapter();
+  }
+  if (!adapter) return { fatal: "no WebGPU adapter in this Chrome (6 tries over 5 s)" };
   const device = await adapter.requestDevice();
   const R = await import(base + "/soar/renderer.js");
   const K = await import(base + "/soar/constants.js");
