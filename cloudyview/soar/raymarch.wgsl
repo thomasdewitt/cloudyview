@@ -4430,6 +4430,9 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
     if (st.pipes > 0) {
         st.depth = max(st.depth, 0.24);
     }
+    if (city_escape_building(cc)) {
+        st.depth = max(st.depth, CITY_ESCAPE_OUT);
+    }
     st.depth = min(st.depth + 0.02, CITY_SHELL_OUT_MAX);
     return st;
 }
@@ -4757,6 +4760,166 @@ fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
     return best;
 }
 
+// --- the fire escape ------------------------------------------------------------
+//
+// The walk-up's iron: a two-bay column of platforms, one per storey, joined
+// by switchback stairs, railed along the front and at both ends, from the
+// first floor to the last. It spans cells, so it is one structure per face
+// rather than a bay feature: tested once, beside the cell walk, nearest hit
+// wins. Its flat twin (city_facade_flat) paints the same lattice on the wall
+// and dissolves it into its mean coverage, so where the shell flattens into
+// the flat facade the escape does too.
+const CITY_ESCAPE_OUT: f32 = 1.25;     // platform depth off the wall (m)
+const CITY_ESCAPE_BAR: f32 = 0.12;     // baluster pitch
+const CITY_ESCAPE_COVER: f32 = 0.26;   // mean lattice coverage seen face-on
+const CITY_ESCAPE_ALBEDO: vec3<f32> = vec3<f32>(0.06, 0.055, 0.05); // black paint
+
+struct CityEscape {
+    on: bool,
+    u0: f32,
+    u1: f32,
+    v0: f32,     // first platform
+    v1: f32,     // last platform
+}
+
+// Whether a building carries an escape at all: brick or concrete walk-ups
+// of five to eighteen storeys, a quarter of them.
+fn city_escape_building(cc: CityCell) -> bool {
+    let h = city_rand4(cc.seed ^ vec2<u32>(0x1b873593u, 0xcc9e2d51u));
+    return (cc.win_style == 4 || cc.win_style == 0)
+        && cc.height >= 18.0 && cc.height <= 66.0 && h.x < 0.25;
+}
+
+fn city_escape(cc: CityCell, f: CityFace) -> CityEscape {
+    var e = CityEscape(false, 0.0, 0.0, 0.0, 0.0);
+    if (!f.aligned || f.tier != 0 || f.nbays < 4
+        || !city_escape_building(cc)) {
+        return e;
+    }
+    let h = city_rand4(cc.seed ^ vec2<u32>(0x85ebca77u, 0xc2b2ae3du));
+    if (i32(floor(h.x * 3.999)) != f.side) {
+        return e;
+    }
+    let k0 = 1 + i32(floor(h.y * f32(f.nbays - 3)));
+    e.on = true;
+    e.u0 = f.margin + f32(k0) * f.pitch - 0.15;
+    e.u1 = f.margin + f32(k0 + 2) * f.pitch + 0.15;
+    e.v0 = f.z0 + CITY_FLOOR_H;
+    e.v1 = f.z0 + (floor((f.z1 - f.z0) / CITY_FLOOR_H) - 1.0) * CITY_FLOOR_H;
+    return e;
+}
+
+// The stair of storey k: a steel plate rising from platform k to k+1,
+// switching direction each storey, against the wall.
+fn city_escape_stair(ol: vec3<f32>, dl: vec3<f32>, e: CityEscape, k: f32,
+                     s: f32, best: CityShellHit) -> CityShellHit {
+    let run = min(e.u1 - e.u0 - 0.9, 2.4);
+    let up = (k - 2.0 * floor(0.5 * k)) < 0.5;
+    let ua = select(e.u1 - 0.3, e.u0 + 0.3, up);
+    let ub = select(ua - run, ua + run, up);
+    let va = e.v0 + k * CITY_FLOOR_H;
+    let d2 = vec2<f32>(ub - ua, CITY_FLOOR_H);
+    let len = length(d2);
+    let ea = d2 / len;
+    let eb = vec2<f32>(-ea.y, ea.x);
+    // The ray in the plate's own frame: along the run, across the plate,
+    // out from the wall.
+    let rel = ol.xy - vec2<f32>(ua, va);
+    let o2 = vec3<f32>(dot(rel, ea), dot(rel, eb), ol.z);
+    let d3 = vec3<f32>(dot(dl.xy, ea), dot(dl.xy, eb), dl.z);
+    let i3 = vec3<f32>(
+        select(1e30, 1.0 / d3.x, abs(d3.x) > 1e-9),
+        select(1e30, 1.0 / d3.y, abs(d3.y) > 1e-9),
+        select(1e30, 1.0 / d3.z, abs(d3.z) > 1e-9));
+    let bmin = vec3<f32>(0.0, -0.07, 0.12 * s);
+    let bmax = vec3<f32>(len, 0.0, 0.64 * s);
+    let hh = city_box_hit(o2, i3, bmin, bmax);
+    if (hh.x <= hh.y && hh.x > 0.0 && hh.x < best.t) {
+        let nl = city_box_normal(o2 + hh.x * d3, bmin, bmax);
+        let nuv = ea * nl.x + eb * nl.y;
+        return CityShellHit(hh.x, vec3<f32>(nuv, nl.z), CITY_PART_STEEL);
+    }
+    return best;
+}
+
+fn city_shell_escape(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
+                     e: CityEscape, s: f32) -> CityShellHit {
+    var best = city_shell_miss();
+    let out = CITY_ESCAPE_OUT * s;
+    let hb = city_box_hit(ol, il, vec3<f32>(e.u0, e.v0 - 0.08, 0.0),
+                          vec3<f32>(e.u1, e.v1 + 1.05, out));
+    if (hb.x > hb.y || hb.y <= 0.0) {
+        return best;
+    }
+    // The storeys the ray passes through inside the structure.
+    let va = ol.y + max(hb.x, 0.0) * dl.y;
+    let vb = ol.y + hb.y * dl.y;
+    let k_lo = max(floor((min(va, vb) - e.v0) / CITY_FLOOR_H) - 1.0, 0.0);
+    let k_hi = min(floor((max(va, vb) - e.v0) / CITY_FLOOR_H),
+                   (e.v1 - e.v0) / CITY_FLOOR_H);
+    for (var i: i32 = 0; i < 6; i = i + 1) {
+        let k = k_lo + f32(i);
+        if (k > k_hi + 0.5) {
+            break;
+        }
+        let vk = e.v0 + k * CITY_FLOOR_H;
+        // The platform grating, and the rails along its front and ends.
+        best = city_shell_try(best, ol, dl, il,
+            vec3<f32>(e.u0, vk - 0.06, 0.05 * s),
+            vec3<f32>(e.u1, vk, out), CITY_PART_STEEL);
+        for (var r: i32 = 0; r < 2; r = r + 1) {
+            let vr = vk + select(0.50, 0.97, r == 1);
+            best = city_shell_try(best, ol, dl, il,
+                vec3<f32>(e.u0, vr, out - 0.05 * s),
+                vec3<f32>(e.u1, vr + 0.04, out), CITY_PART_STEEL);
+            best = city_shell_try(best, ol, dl, il,
+                vec3<f32>(e.u0, vr, 0.0),
+                vec3<f32>(e.u0 + 0.04, vr + 0.04, out), CITY_PART_STEEL);
+            best = city_shell_try(best, ol, dl, il,
+                vec3<f32>(e.u1 - 0.04, vr, 0.0),
+                vec3<f32>(e.u1, vr + 0.04, out), CITY_PART_STEEL);
+        }
+        // Balusters: a thin plane that is solid only on the bars.
+        let bmin = vec3<f32>(e.u0, vk, out - 0.04 * s);
+        let bmax = vec3<f32>(e.u1, vk + 0.97, out - 0.01 * s);
+        let hbar = city_box_hit(ol, il, bmin, bmax);
+        if (hbar.x <= hbar.y && hbar.x > 0.0 && hbar.x < best.t) {
+            let pb = ol + hbar.x * dl;
+            if (fract((pb.x - e.u0) / CITY_ESCAPE_BAR) < 0.18) {
+                best = CityShellHit(hbar.x, city_box_normal(pb, bmin, bmax),
+                                    CITY_PART_STEEL);
+            }
+        }
+        if (vk < e.v1 - 0.5) {
+            best = city_escape_stair(ol, dl, e, k, s, best);
+        }
+    }
+    return best;
+}
+
+// The lattice's coverage of the wall seen face-on at (u, v), for the flat
+// twin: platforms, rails, bars and stair, dissolving into their mean.
+fn city_escape_cover(e: CityEscape, uu: f32, v: f32, fp_eff: f32) -> f32 {
+    if (!e.on || uu < e.u0 || uu > e.u1 || v < e.v0 - 0.08
+        || v > e.v1 + 1.05) {
+        return 0.0;
+    }
+    let k = floor((v - e.v0 + 0.08) / CITY_FLOOR_H);
+    let dv = v - (e.v0 + k * CITY_FLOOR_H);
+    let rails = (dv > -0.06 && dv < 0.0) || abs(dv - 0.52) < 0.02
+             || abs(dv - 0.99) < 0.02;
+    let bars = dv > 0.0 && dv < 0.97
+             && fract((uu - e.u0) / CITY_ESCAPE_BAR) < 0.18;
+    let run = min(e.u1 - e.u0 - 0.9, 2.4);
+    let up = (k - 2.0 * floor(0.5 * k)) < 0.5;
+    let ua = select(e.u1 - 0.3, e.u0 + 0.3, up);
+    let x = (uu - ua) * select(-1.0, 1.0, up);
+    let stair = k * CITY_FLOOR_H + e.v0 < e.v1 - 0.5 && x > 0.0 && x < run
+             && abs(dv - x * CITY_FLOOR_H / run) < 0.09;
+    let c = select(0.0, 1.0, rails || bars || stair);
+    return mix(c, CITY_ESCAPE_COVER, smoothstep(0.10, 0.45, fp_eff));
+}
+
 // One face's shell layer, [t_lo, t_hi] of the ray inside it: walk its bay
 // cells in order and return the first hit.
 fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
@@ -4768,10 +4931,19 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
         select(1e30, 1.0 / dl.x, abs(dl.x) > 1e-9),
         select(1e30, 1.0 / dl.y, abs(dl.y) > 1e-9),
         select(1e30, 1.0 / dl.z, abs(dl.z) > 1e-9));
+    // The escape, if this face carries one: its hit bounds the walk.
+    let esc = city_escape(cc, f);
+    var fe_hit = city_shell_miss();
+    if (esc.on && s > 0.0) {
+        fe_hit = city_shell_escape(ol, dl, il, esc, s);
+    }
     let p0 = ol + (t_lo + CITY_SHELL_EPS) * dl;
     var b = city_bay(f, p0.x, p0.y);
     var t = t_lo;
     for (var i: i32 = 0; i < CITY_SHELL_MAX_CELLS; i = i + 1) {
+        if (t >= fe_hit.t) {
+            return fe_hit;
+        }
         var cb = b.ca + f.pitch;
         if (b.iu < 0) { cb = f.margin; }
         if (b.iu >= f.nbays) { cb = 1e9; }
@@ -4788,10 +4960,13 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
                                 b, cb, max(va, f.z0), min(vb, f.z1), t,
                                 t_exit);
         if (h.part >= 0) {
+            if (fe_hit.t < h.t) {
+                return fe_hit;
+            }
             return h;
         }
         if (t_exit >= t_hi) {
-            return city_shell_miss();
+            return fe_hit;
         }
         t = t_exit;
         if (tu < tv) {
@@ -4804,18 +4979,18 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
             b.iv = b.iv + select(-1, 1, dl.y > 0.0);
         }
     }
-    // Out of cells before the layer ended: a wall seen this close to edge-on
-    // has flattened almost fully (fp_eff grows as 1/cos), so take the wall
-    // plane where the ray meets it.
+    // Out of cells before the layer ended. city_shell_scale flattens the
+    // relief so a ray's walk fits the cap, so this is a numerical edge: take
+    // the wall plane where the ray meets it, or the escape if nearer.
     if (dl.z < -1e-6) {
         let tw = -ol.z / dl.z;
         let pw = ol + tw * dl;
-        if (tw > 0.0 && pw.x >= 0.0 && pw.x <= f.len
+        if (tw > 0.0 && tw < fe_hit.t && pw.x >= 0.0 && pw.x <= f.len
             && pw.y >= f.z0 && pw.y <= f.z1) {
             return CityShellHit(tw, vec3<f32>(0.0, 0.0, 1.0), CITY_PART_WALL);
         }
     }
-    return city_shell_miss();
+    return fe_hit;
 }
 
 // The shell depth scale for one face along one ray: 1 resolved, 0 flat.
@@ -5233,7 +5408,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         alb = select(vec3<f32>(0.07, 0.07, 0.075),
                      vec3<f32>(0.32, 0.31, 0.29), city_u01(ph.x) < 0.4);
     } else if (part == CITY_PART_STEEL) {
-        alb = vec3<f32>(0.08, 0.075, 0.07);
+        alb = CITY_ESCAPE_ALBEDO;
     } else {
         // The wall. Brick is coursed in running bond — 65 mm courses and
         // 215 mm bricks in 10 mm of lighter mortar, each brick its own shade
@@ -5395,8 +5570,10 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
             * city_glass_env(reflect(dir, h.normal), h.pos,
                              city_glow_sample(h.pos.xy, 3.0))
             * mix(glass, glass_mean, b1);
-    // Under a component's panel there are no windows to see.
-    e = e * (1.0 - cc_facade_cover(cc, h, uc, vc, fp));
+    // Under a component's panel there are no windows to see; behind a fire
+    // escape, only what its lattice leaves.
+    let esc_cover = city_escape_cover(city_escape(cc, f), uc, vc, fp_eff);
+    e = e * (1.0 - cc_facade_cover(cc, h, uc, vc, fp)) * (1.0 - esc_cover);
 
     // Street-level storefront strip: bright, saturated, and only on
     // buildings whose draw says the ground floor is commercial.
@@ -5410,7 +5587,8 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     e = e + cc_facade_detail(cc, h, uc, vc, fp);
 
     let st = city_shell_style(cc);
-    return e + st.albedo
+    let alb = mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover);
+    return e + alb
         * (CITY_SHELL_FILL_K
            * (fill + CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0))
            + city_shell_lamp_stub(h.pos, h.normal));
