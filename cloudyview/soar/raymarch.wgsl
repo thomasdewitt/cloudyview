@@ -18950,6 +18950,20 @@ fn df_item_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
     return df_boulder_far(it, o, dir, ta, tb, pixel_angle);
 }
 
+// The refine stage's dispatch: inside the refine reach the plain pass
+// leaves the whole pixel to this stage, and a plant there may already be
+// past its own near-to-far switch (a creosote's at ~1 cm), so each item
+// answers with whichever form its footprint and dither select — its near
+// and far functions are complements, exactly one of them draws.
+fn df_item_refine(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
+                  pixel_angle: f32, dither: vec2<f32>) -> DesertHit {
+    let h = df_item_near(it, o, dir, ta, tb, pixel_angle, dither);
+    if (h.hit) {
+        return h;
+    }
+    return df_item_far(it, o, dir, ta, tb, pixel_angle, dither);
+}
+
 // The refinement stage's dispatch: near forms only.
 fn df_item_near(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
                 pixel_angle: f32, dither: vec2<f32>) -> DesertHit {
@@ -19194,7 +19208,7 @@ fn df_walk_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                                        t_exit, t0, res.t, pixel_angle);
             var hb = res;
             if (cb.it.kind != 0) {
-                hb = df_accept(df_item_near(cb.it, cb.ol, dir, cb.ta, cb.tb,
+                hb = df_accept(df_item_refine(cb.it, cb.ol, dir, cb.ta, cb.tb,
                                            pixel_angle, dither), cb, o, dir);
             }
             if (hb.hit) {
@@ -19216,7 +19230,7 @@ fn df_walk_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                 var hs = res;
                 hs.hit = false;
                 if (cs.it.kind != 0) {
-                    hs = df_accept(df_item_near(cs.it, cs.ol, dir, cs.ta, cs.tb,
+                    hs = df_accept(df_item_refine(cs.it, cs.ol, dir, cs.ta, cs.tb,
                                                pixel_angle, dither), cs, o,
                                    dir);
                 }
