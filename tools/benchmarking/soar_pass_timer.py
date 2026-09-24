@@ -47,7 +47,7 @@ sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
-    desert_relief_m, surface_cell_m, surface_period_m,
+    DESERT_LITE_TIERS, desert_relief_m, surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
@@ -78,53 +78,58 @@ def load_case(name, demos: Path):
 
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
-    """GPU ms of `frames` consecutive frames as (surface, march) arrays: the
-    surface pre-pass (fs_surface, zeros in a scene without one) and the ray
-    pass (fs_main), a timestamp pair each, encoded as SoarRenderer.render
-    encodes them."""
+    """GPU ms of `frames` consecutive frames as (surface, refine, march)
+    arrays, every stage encoded exactly as SoarRenderer.render encodes it:
+    the surface pre-pass (fs_surface) — into the first-stage target when the
+    surface has a second stage, the final one otherwise — then its
+    refinement (fs_surface_refine) into the final surface, then the march
+    (fs_main). A stage the scene does not have reads as zeros. One timestamp
+    pair per pass actually encoded: resolving a query no pass wrote fails
+    validation, and the readback below then never maps."""
     import wgpu
     device = renderer.device
     targets = renderer._ensure_targets(view.render_size)
     bind_group = renderer._ensure_bind_group()
     sample_view = targets["sample"].create_view()
     surface_pipeline = renderer._surface_pipeline_for(view)
+    refine_pipeline = renderer._refine_pipeline_for(view)
     surface_view = (targets["surface"].create_view()
                     if targets["surface"] is not None else None)
-    # One timestamp pair per pass actually encoded: resolving a query no
-    # pass wrote fails validation, and the readback below then never maps.
-    per = 4 if surface_pipeline is not None else 2
+    plain_view = (targets["plain"].create_view()
+                  if targets["plain"] is not None else None)
+    stages = []                 # (name, pipeline, group 1, target view)
+    if surface_pipeline is not None:
+        stages.append(("surface", surface_pipeline, None,
+                       plain_view if refine_pipeline is not None
+                       else surface_view))
+        if refine_pipeline is not None:
+            stages.append(("refine", refine_pipeline,
+                           targets["refine_group"], surface_view))
+    stages.append(("march", renderer._ray_pipeline_for(view),
+                   targets["surface_group"], sample_view))
+    per = 2 * len(stages)
     for i in range(frames):
         pass_view = ViewState(**{**view.__dict__, "frame_index": i,
                                  "subpixel": i >= 1})
         device.queue.write_buffer(renderer._uniform_buf, 0,
                                   pack_uniforms(state, pass_view).tobytes())
         enc = device.create_command_encoder()
-        if surface_pipeline is not None:
-            sp = enc.begin_render_pass(
-                color_attachments=[{"view": surface_view, "load_op": "clear",
+        for k, (name, pipeline, group1, target) in enumerate(stages):
+            clear = ((0.0, 0.0, 0.0, 1.0) if name == "march"
+                     else (0.0, 0.0, 0.0, 1e30))
+            rp = enc.begin_render_pass(
+                color_attachments=[{"view": target, "load_op": "clear",
                                     "store_op": "store",
-                                    "clear_value": (0.0, 0.0, 0.0, 1e30)}],
+                                    "clear_value": clear}],
                 timestamp_writes={"query_set": query_set,
-                                  "beginning_of_pass_write_index": per * i + 2,
-                                  "end_of_pass_write_index": per * i + 3})
-            sp.set_pipeline(surface_pipeline)
-            sp.set_bind_group(0, bind_group)
-            sp.draw(3)
-            sp.end()
-        rp = enc.begin_render_pass(
-            color_attachments=[{"view": sample_view, "load_op": "clear",
-                                "store_op": "store",
-                                "clear_value": (0.0, 0.0, 0.0, 1.0)}],
-            timestamp_writes={"query_set": query_set,
-                              "beginning_of_pass_write_index": per * i,
-                              "end_of_pass_write_index": per * i + 1})
-        rp.set_pipeline(renderer._ray_pipeline_for(view))
-        rp.set_bind_group(0, bind_group)
-        # Group 1: the surface pre-pass's target, or its stand-in — every
-        # march pipeline declares it since the surface pass landed.
-        rp.set_bind_group(1, targets["surface_group"])
-        rp.draw(3)
-        rp.end()
+                                  "beginning_of_pass_write_index": per * i + 2 * k,
+                                  "end_of_pass_write_index": per * i + 2 * k + 1})
+            rp.set_pipeline(pipeline)
+            rp.set_bind_group(0, bind_group)
+            if group1 is not None:
+                rp.set_bind_group(1, group1)
+            rp.draw(3)
+            rp.end()
         device.queue.submit([enc.finish()])
     enc = device.create_command_encoder()
     enc.resolve_query_set(query_set, 0, per * frames, query_buf, 0)
@@ -137,10 +142,10 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     ts = np.frombuffer(bytearray(readback.read_mapped()), np.uint64)
     readback.unmap()
     ts = ts.astype(np.float64).reshape(frames, per)
-    march = (ts[:, 1] - ts[:, 0]) * 1e-6         # WebGPU timestamps are ns
-    surface = ((ts[:, 3] - ts[:, 2]) * 1e-6 if surface_pipeline is not None
-               else np.zeros(frames))
-    return surface, march
+    out = {name: np.zeros(frames) for name in ("surface", "refine", "march")}
+    for k, (name, *_rest) in enumerate(stages):
+        out[name] = (ts[:, 2 * k + 1] - ts[:, 2 * k]) * 1e-6   # ns -> ms
+    return out["surface"], out["refine"], out["march"]
 
 
 def main():
@@ -168,9 +173,9 @@ def main():
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync(required_features=["timestamp-query"])
-    query_set = device.create_query_set(type="timestamp", count=4 * args.frames)
+    query_set = device.create_query_set(type="timestamp", count=6 * args.frames)
     query_buf = device.create_buffer(
-        size=32 * args.frames,
+        size=48 * args.frames,
         usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC)
 
     variants = [v.split("=", 1) for v in args.variant]
@@ -225,32 +230,39 @@ def main():
                     azimuth=v["azimuth"], elevation=v["elevation"],
                     fov=v["fov"], output_size=OUTPUT, render_size=size,
                     light_cache=tier["light_cache"],
-                    sky_probe=tier["sky_probe"], **sun)
+                    sky_probe=tier["sky_probe"],
+                    # The simplified desert at the tiers the app flies it.
+                    desert_lite=(args.surface == "desert"
+                                 and tier_name in DESERT_LITE_TIERS),
+                    **sun)
                 if tier["light_cache"] and not baked:
                     for r in renderers:
                         r.bake_light_cache(state, view,
                                            divisor=LIGHT_CACHE_DIVISOR)
                     baked = True
                 surf = [[] for _ in renderers]
+                refine = [[] for _ in renderers]
                 march = [[] for _ in renderers]
                 for rnd in range(args.rounds):
                     for k, r in enumerate(renderers):
-                        ds, dm = pass_times_ms(r, state, view, args.frames,
-                                               query_set, query_buf)
+                        ds, dr, dm = pass_times_ms(r, state, view, args.frames,
+                                                   query_set, query_buf)
                         if rnd > 0 or args.rounds == 1:
                             surf[k].extend(ds)
+                            refine[k].extend(dr)
                             march[k].extend(dm)
-                meds = [float(np.median(np.add(a, b)))
-                        for a, b in zip(surf, march)]
+                meds = [float(np.median(np.add(np.add(a, b), c)))
+                        for a, b, c in zip(surf, refine, march)]
                 line = f"{case:10s} {tier_name:8s} {view_name:4s} " + " ".join(
                     f"{m:9.3f}" for m in meds)
                 if len(meds) > 1:
                     line += "  " + " ".join(f"{m / meds[0]:12.3f}"
                                             for m in meds[1:])
                 if args.surface != "ocean":
-                    line += "   [surface+march " + ", ".join(
+                    line += "   [surface+refine+march " + ", ".join(
                         f"{np.median(a):.3f}+{np.median(b):.3f}"
-                        for a, b in zip(surf, march)) + "]"
+                        f"+{np.median(c):.3f}"
+                        for a, b, c in zip(surf, refine, march)) + "]"
                 print(line, flush=True)
         for r in renderers:
             r._vol_tex.destroy()
