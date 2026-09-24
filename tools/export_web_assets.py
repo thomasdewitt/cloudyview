@@ -179,6 +179,9 @@ def export_ocean() -> dict:
     meta["lace_reach"] = LACE_REACH
     meta["lace_edge"] = LACE_EDGE
     meta["lace_cover"] = [round(v, 6) for v in _lace_cover(planes)]
+    # What the detail octave's crest is centred on when it jitters the
+    # whitecaps' edge (raymarch.wgsl SEA_CREST_MEAN).
+    meta["crest_mean"] = round(float(np.mean(planes[3] / 255.0)), 6)
     levels, removed, temporal = _slope_variance_tables(planes, meta)
     meta["mips"] = levels
     meta["slope_variance_removed"] = [round(float(v), 7) for v in removed]

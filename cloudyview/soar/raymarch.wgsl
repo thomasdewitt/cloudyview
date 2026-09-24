@@ -1998,6 +1998,9 @@ const SEA_FOAM_FAR_COVER: f32 = 0.320837;
 const SEA_FOAM_FAR_TINT: vec3<f32> = vec3<f32>(0.927799, 0.977027, 0.967182);
 // Half-width of the cut's soft edge, in rank.
 const SEA_FOAM_EDGE: f32 = 0.2;
+// How strongly the detail octave's crest (zero mean) scales the rank at the
+// foam's edge.
+const SEA_FOAM_BREAKUP: f32 = 1.5;
 // The lace. A whitecap is solid white while it breaks and falls apart into
 // streaks and holes as it ages, and the rank says which: it is uniform over
 // the foam a cut keeps, so (rank - theta) / (1 - theta) is the foam's
@@ -2098,10 +2101,16 @@ const SEA_DETAIL_TIME_SCALE: f32 = 3.0;
 // The octave's clock starts elsewhere in the loop, so it is not the tile's
 // own phase replayed small.
 const SEA_DETAIL_TIME_OFFSET_S: f32 = 11.3;
+// The crest channel's mean over the tile (meta.json crest_mean): what the
+// detail octave's crest is centred on before it jitters the foam edge.
+const SEA_CREST_MEAN: f32 = 0.124119;
 
 struct SeaDetail {
     slope: vec2<f32>,
     variance: f32,
+    // The octave's crest channel minus its tile mean, faded out as the
+    // octave goes unresolved: zero-mean 5 cm structure for the foam edge.
+    crest: f32,
 };
 
 fn sea_detail(p: vec2<f32>, t: f32, along: f32) -> SeaDetail {
@@ -2109,14 +2118,16 @@ fn sea_detail(p: vec2<f32>, t: f32, along: f32) -> SeaDetail {
     let lod = clamp(log2(max(along / texel, 1.0)) + u.ocean_realism_a.y,
                     0.0, 3.0);
     let g2 = SEA_DETAIL_GAIN * SEA_DETAIL_GAIN;
-    var d = SeaDetail(vec2<f32>(0.0), g2 * sea_variance_table(lod).x);
+    var d = SeaDetail(vec2<f32>(0.0), g2 * sea_variance_table(lod).x, 0.0);
     if (lod >= 3.0) {
         return d;
     }
     let fr = sea_frames(SEA_DETAIL_TIME_SCALE * t + SEA_DETAIL_TIME_OFFSET_S);
     let q = p * SEA_DETAIL_SCALE;
-    let band = sea_sample(q, lod, fr).xy - sea_sample(q, 3.0, fr).xy;
+    let fine = sea_sample(q, lod, fr);
+    let band = fine.xy - sea_sample(q, 3.0, fr).xy;
     d.slope = SEA_DETAIL_GAIN * band;
+    d.crest = (fine.w - SEA_CREST_MEAN) * clamp(3.0 - lod, 0.0, 1.0);
     // What the frame blend took out of the resolved band.
     let v = sea_variance_table(lod).y - sea_variance_table(3.0).y;
     d.variance = d.variance + g2 * 2.0 * fr.f * (1.0 - fr.f) * max(v, 0.0);
@@ -2215,6 +2226,41 @@ fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
     return s;
 }
 
+// The foam rank at level 0 as a cubic B-spline rather than bilinearly: at
+// close range a bilinear rank between 0.4 m texels draws whitecaps as
+// straight-edged diamonds. Four bilinear taps per frame (the standard
+// B-spline-from-linear construction), only for foam pixels well under a
+// texel.
+fn sea_rank_smooth(p: vec2<f32>, fr: SeaFrames) -> f32 {
+    let n = vec2<f32>(textureDimensions(ocean_waves, 0));
+    let st = p / u.ocean_params.y * n - 0.5;
+    let i = floor(st);
+    let f = st - i;
+    let w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;
+    let w1 = (4.0 - 6.0 * f * f + 3.0 * f * f * f) / 6.0;
+    let w2 = (1.0 + 3.0 * f + 3.0 * f * f - 3.0 * f * f * f) / 6.0;
+    let w3 = f * f * f / 6.0;
+    let g0 = w0 + w1;
+    let g1 = w2 + w3;
+    let h0 = (i - 0.5 + w1 / g0) / n;
+    let h1 = (i + 1.5 + w3 / g1) / n;
+    var r = 0.0;
+    for (var k = 0; k < 2; k = k + 1) {
+        let layer = select(fr.a, fr.b, k == 1);
+        let a = textureSampleLevel(ocean_waves, ocean_samp,
+                                   vec2<f32>(h0.x, h0.y), layer, 0.0).z;
+        let b = textureSampleLevel(ocean_waves, ocean_samp,
+                                   vec2<f32>(h1.x, h0.y), layer, 0.0).z;
+        let c = textureSampleLevel(ocean_waves, ocean_samp,
+                                   vec2<f32>(h0.x, h1.y), layer, 0.0).z;
+        let d = textureSampleLevel(ocean_waves, ocean_samp,
+                                   vec2<f32>(h1.x, h1.y), layer, 0.0).z;
+        let v = g0.y * (g0.x * a + g1.x * b) + g1.y * (g0.x * c + g1.x * d);
+        r = r + select(1.0 - fr.f, fr.f, k == 1) * v;
+    }
+    return r;
+}
+
 // The fraction of the foam rank's (0, 1] that a soft cut
 // smoothstep(theta - e, theta + e, rank) keeps, e = SEA_FOAM_EDGE: exactly
 // 1 - theta while the ramp lies inside (0, 1], and the ramp's own clipped
@@ -2273,7 +2319,14 @@ fn sea_lace(p: vec2<f32>, rank: f32, theta: f32, along: f32,
     let mean = sea_lace_mean(k);
     let texel = u.ocean_params.x / SEA_LACE_SCALE;
     let lod = log2(max(along / texel, 1.0));
-    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
+    // Two-sided: the lace is resolved only while its texels are about a
+    // pixel. Below that its 5 cm texels are magnified into blocks and
+    // bilinear smears (the stretched axis four times over), and a foam
+    // mat seen that close is its mean cover, broken up by the rank edge
+    // below, not a magnified lace texture.
+    let magnified = smoothstep(0.25, 1.0,
+                               along / (texel * SEA_LACE_STRETCH));
+    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0) * magnified;
     if (resolved <= 0.0) {
         return mean;
     }
@@ -2305,7 +2358,7 @@ struct SeaSurface {
     crest: f32,
     // The glitter's draw for this footprint (two uniforms, anchored to the
     // sea — see SEA_GLITTER_*) and how many facets the footprint holds.
-    glitter_u: vec2<f32>,
+    glitter_seed: vec2<u32>,
     glitter_facets: f32,
 };
 
@@ -2375,8 +2428,20 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
         + (1.0 - theta) * SEA_FOAM_FAR_COVER * SEA_FOAM_FAR_TINT)
         / max(formula, 1e-9);
     let far_tinted = far_cover * far_tint;
+    // The rank is bilinear between 0.4 m texels, so close up a cut on it
+    // draws straight-edged polygons. The detail octave's 5 cm crest, zero
+    // mean, scales the rank the cut sees: ragged edges where the octave is
+    // resolved, and nothing (the jitter fades with it) where it is not.
+    // Multiplicative, so rank-0 water stays foam-free. Well under a texel
+    // the rank itself is read as a B-spline (sea_rank_smooth).
+    var base_rank = tile.z;
+    let smooth_w = 1.0 - smoothstep(0.25, 0.75, along / u.ocean_params.x);
+    if (smooth_w > 0.0 && tile.z > 0.0) {
+        base_rank = mix(tile.z, sea_rank_smooth(p, fr), smooth_w);
+    }
+    let rank = base_rank * max(1.0 + SEA_FOAM_BREAKUP * detail.crest, 0.0);
     var near_cover = smoothstep(theta - SEA_FOAM_EDGE, theta + SEA_FOAM_EDGE,
-                                tile.z);
+                                rank);
     let fresh = clamp((tile.z - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0);
     let near_tint = mix(SEA_FOAM_TINT_OLD, vec3<f32>(1.0), fresh);
     // Sharp below a texel, the analytic mean by two levels up.
@@ -2402,11 +2467,44 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     let ij = vec2<u32>(floor(q / cell));
     let seed = pcg2d(ij + vec2<u32>((u32(fr.a) * 2654435761u)
                                     + (u32(level) * 40503u), 0u));
-    // 24 bits, so the uniforms stay below 1 in float32 (a full u32 rounds
-    // to 1.0 at the top).
-    out.glitter_u = vec2<f32>(seed >> vec2<u32>(8u)) * (1.0 / 16777216.0);
+    out.glitter_seed = seed;
     out.glitter_facets = exp2(2.0 * level);
     return out;
+}
+
+// Two uniforms in [0, 1) from a seed: 24 bits each, so they stay below 1 in
+// float32 (a full u32 rounds to 1.0 at the top).
+fn sea_uniforms(seed: vec2<u32>) -> vec2<f32> {
+    return vec2<f32>(seed >> vec2<u32>(8u)) * (1.0 / 16777216.0);
+}
+
+// How bright the K facets that catch the sun are, in units of the mean
+// facet. A facet's contribution goes as its area and as how squarely it
+// holds the disc, and neither is the same from facet to facet: most glints
+// are faint and a few are blinding. So each facet is a lognormal draw of
+// mean exactly 1 (sigma SEA_GLITTER_SPREAD) and the K are summed, which
+// keeps E[sum / lambda] = 1 — the far field untouched — while a lone
+// sparkle is no longer always the same clipped dot. Past a few facets the
+// sum is its mean, K: the pixel holds enough of them to average.
+const SEA_GLITTER_SPREAD: f32 = 1.3;
+
+fn sea_glitter_brightness(k: f32, seed: vec2<u32>) -> f32 {
+    if (k >= 4.0 || k <= 0.0) {
+        return k;
+    }
+    let s2 = SEA_GLITTER_SPREAD * SEA_GLITTER_SPREAD;
+    var total = 0.0;
+    for (var i = 0u; i < 3u; i = i + 1u) {
+        if (f32(i) >= k) {
+            break;
+        }
+        let r = sea_uniforms(pcg2d(seed + vec2<u32>(0x9e3779b9u * (i + 1u),
+                                                   0x85ebca6bu)));
+        let z = sqrt(-2.0 * log(max(r.x, 1e-7)))
+            * cos(6.283185307179586 * r.y);
+        total = total + exp(SEA_GLITTER_SPREAD * z - 0.5 * s2);
+    }
+    return total;
 }
 
 // K ~ Poisson(lambda) from two uniforms: inversion while lambda is small,
@@ -2665,7 +2763,9 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                     * SEA_SUN_SOLID_ANGLE / (4.0 * max(v_dot_h, 1e-4));
                 var sparkle = 1.0;
                 if (lambda > 0.0) {
-                    sparkle = sea_poisson(lambda, sea.glitter_u) / lambda;
+                    let k = sea_poisson(lambda, sea_uniforms(sea.glitter_seed));
+                    sparkle = sea_glitter_brightness(k, sea.glitter_seed)
+                        / lambda;
                 }
                 glint = spec * sparkle * u.cloud_sun.xyz;
             }

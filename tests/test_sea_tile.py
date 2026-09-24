@@ -161,6 +161,8 @@ def test_the_whitecaps_far_field_is_their_resolved_mean(sea):
     src = SHADER.read_text()
     for k, v in enumerate(meta["lace_cover"]):
         assert _wgsl_scalar(src, f"SEA_LACE_COVER_{k}") == pytest.approx(v)
+    assert _wgsl_scalar(src, "SEA_CREST_MEAN") == pytest.approx(
+        meta["crest_mean"])
     # The table was measured at these; the shader must cut at the same.
     assert _wgsl_scalar(src, "SEA_LACE_EDGE") == pytest.approx(meta["lace_edge"])
     assert _wgsl_scalar(src, "SEA_LACE_REACH") == pytest.approx(
