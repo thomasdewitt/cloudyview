@@ -222,3 +222,37 @@ def test_the_far_field_colour_correction_is_the_tiles():
     rows = [tuple(float(v) for v in r.split(","))
             for r in re.findall(r"vec3<f32>\(([^)]*)\)", body)]
     assert rows == [tuple(r) for r in META["albedo_correction"]]
+
+
+def _array(name):
+    m = re.search(rf"const {name} = array<[^>]+>?, \d+>\((.*?)\);", SHADER, re.S)
+    assert m, f"{name} is not declared in raymarch.wgsl"
+    body = re.sub(r"//[^\n]*", "", m.group(1))
+    rows = re.findall(r"vec3<f32>\(([^)]*)\)", body)
+    if rows:
+        return np.array([[float(v) for v in r.split(",")] for r in rows])
+    return np.array([float(v) for v in body.replace("\n", " ").split(",")
+                     if v.strip()])
+
+
+def test_the_silt_between_resolved_stones_stays_warm():
+    """desert_matrix_albedo, with both stone levels resolved, on each pure
+    surface: the silt that keeps the footprint's mean must be a warm soil
+    colour (R >= G >= B), and not propped up by the solve's floor. A stone
+    mix redder than its surface drove the pavement's silt teal-grey."""
+    palette = _array("DESERT_STONE_PALETTE")
+    area = _const("DESERT_STONE_AREA")
+    gravel, pebble = _vec3("DESERT_STONE_P_GRAVEL"), _vec3("DESERT_STONE_P_PEBBLE")
+    scale_gain = float(re.search(
+        r"fn desert_stone_scale\(m: vec3<f32>\) -> f32 \{\s*return 1\.0 \+ "
+        r"([0-9.]+) \* m\.x;", SHADER).group(1))
+    surfaces = {"PAVEMENT": (1, 0, 0), "SOIL": (0, 1, 0), "WASH": (0, 0, 1)}
+    for name, m in surfaces.items():
+        m = np.array(m, float)
+        mean = np.array(_vec3(f"DESERT_ALBEDO_{name}"))
+        stones = _array(f"DESERT_STONE_MIX_{name}") @ palette
+        a = area * (1.0 + scale_gain * m[0]) ** 2
+        cover = min(1 - (1 - m @ gravel * a) * (1 - m @ pebble * a), 0.9)
+        silt = (mean - cover * stones) / (1 - cover)
+        assert np.all(silt > 0.35 * mean), (name, silt)
+        assert silt[0] >= silt[1] >= silt[2], (name, silt)

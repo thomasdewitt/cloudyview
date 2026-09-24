@@ -814,14 +814,15 @@ export function createNestDummy(device) {
  * takes one: the tiles are field-independent and belong to the session, so
  * loading the demo after a file (or the other way round) reuses the tile
  * already on the card instead of allocating a second one and abandoning it.
- * It takes the surface kind — "ocean", or "city" for the night city — because
- * which tile a demo stands on is the demo's call (meta.surface)…
+ * It takes the surface kind — "ocean", "desert", or "city" for the night
+ * city — because which tile a demo stands on is the demo's call
+ * (meta.surface)…
  *
- * …unless the PAGE overrides it. `surfaceKind` does that, and cyberpunk mode
- * is its only caller: the mode flies the same two desert demos every other
- * mode does, standing them on the city instead of the sea. The alternative
- * was a parallel pair of city-surfaced demo bakes, which would be the same
- * volumes twice on disk and in the index to carry one boolean.
+ * …unless the PAGE overrides it. `surfaceKind` does that, for two callers:
+ * cyberpunk mode, which flies the same demos every other mode does standing
+ * them on the city (the alternative was a parallel set of city-surfaced
+ * bakes, the same volumes twice on disk to carry one boolean), and
+ * ?surface= (main.js), which stands a demo on either day surface.
  */
 export async function loadDemoScene(device, baseUrl, surface, progress,
                                     { surfaceKind: forcedSurface = null } = {}) {
