@@ -83,11 +83,95 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
     : stream;
 }
 
+// Channels per texel of each surface-tile format (soar_host's
+// SURFACE_FORMAT_CHANNELS): the ocean and the city are rgba16float, the
+// desert rg16float.
+const SURFACE_FORMAT_CHANNELS = { rgba16float: 4, rg16float: 2 };
+
 /**
- * A binding-3 surface tile: the night city's density tile or the desert's
- * terrain — one rgba16float mip-chain byte format (the sea has its own, see
- * loadSea). Field-independent, so each ships with the tool and is loaded
- * once per session.
+ * One stored mip level -> the interleaved texel bytes the texture wants.
+ * A level is either the texels themselves, or (encoding
+ * "planar-byte-shuffle", the desert's) each channel's plane with every half
+ * float's low bytes before its high bytes, the arrangement that lets gzip
+ * see a height field's smoothness. Twin of soar_host.decode_surface_level.
+ */
+export function decodeSurfaceLevel(bytes, side, meta) {
+  const format = meta.format ?? "rgba16float";
+  const channels = SURFACE_FORMAT_CHANNELS[format];
+  if (!channels) throw new Error(`unknown surface-tile format '${format}'.`);
+  const texels = side * side;
+  if (bytes.byteLength !== texels * channels * 2) {
+    throw new Error(
+      `a ${side}x${side} ${format} level is ${texels * channels * 2} bytes; ` +
+      `this one is ${bytes.byteLength}.`);
+  }
+  const encoding = meta.encoding ?? "interleaved";
+  if (encoding === "interleaved") return bytes;
+  if (encoding !== "planar-byte-shuffle") {
+    throw new Error(`unknown surface-tile encoding '${encoding}'.`);
+  }
+  const out = new Uint8Array(bytes.byteLength);
+  for (let c = 0; c < channels; c++) {
+    const lo = bytes.subarray((2 * c) * texels, (2 * c + 1) * texels);
+    const hi = bytes.subarray((2 * c + 1) * texels, (2 * c + 2) * texels);
+    for (let i = 0, o = 2 * c; i < texels; i++, o += 2 * channels) {
+      out[o] = lo[i];
+      out[o + 1] = hi[i];
+    }
+  }
+  return out;
+}
+
+/** Row 8.yzw under DESERT, from the desert tile's meta (soar_host twin). */
+export function desertReliefM(meta) {
+  for (const key of ["height_min_m", "height_max_m", "band_max_m"]) {
+    if (!Number.isFinite(meta?.[key])) {
+      throw new Error(`the desert tile's meta.json has no ${key}.`);
+    }
+  }
+  return [meta.height_min_m, meta.height_max_m, meta.band_max_m];
+}
+
+/**
+ * The camera's floor over the desert: a function of the surface-frame
+ * position (tile metres, the camera's surfacePosition) returning the lowest
+ * z the camera may take. The tile's own height, read bilinearly the way the
+ * GPU reads it (texel i centred at (i + 1/2) cells, periodic), plus the most
+ * the sub-tile octaves can add (band_max_m times raymarch.wgsl's
+ * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
+ * shader samples, so the floor is under the drawn ground by construction.
+ */
+export const DESERT_OCTAVE_MARGIN = 0.429;
+
+export function desertFloorAt(tile, groundZ = 0.0) {
+  const { heights, meta } = tile;
+  if (!heights) throw new Error("the desert tile was loaded without heights.");
+  const n = meta.n;
+  const cell = meta.cell_m;
+  const lift = meta.band_max_m * DESERT_OCTAVE_MARGIN
+    + K.DESERT_FLOOR_CLEARANCE_M + groundZ;
+  const at = (i, j) =>
+    fromHalf(heights[(((j % n) + n) % n) * n + (((i % n) + n) % n)]);
+  return ([x, y]) => {
+    const gx = x / cell - 0.5;
+    const gy = y / cell - 0.5;
+    const i = Math.floor(gx);
+    const j = Math.floor(gy);
+    const fx = gx - i;
+    const fy = gy - j;
+    const h = (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy)
+            + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
+    return h + lift;
+  };
+}
+
+/**
+ * A binding-3 surface tile: the night city's density tile (rgba16float) or
+ * the desert's eroded terrain (rg16float, planar-byte-shuffled) — one
+ * mip-chain loader, each tile's meta saying its format, files, encoding and
+ * compression (the sea has its own, see loadSea). The texel size is cell_m.
+ * Field-independent, so each ships with the tool and is loaded once per
+ * session.
  *
  * `schema` is the meta.json schema the caller's shader decodes
  * (constants.js SURFACE_TILE_SCHEMAS); anything else is refused. The deploy
@@ -96,9 +180,13 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
  * under the schema as a version query, so a schema bump is a new URL for
  * every edge and browser cache while a stale meta.json fails loudly rather
  * than pairing a new shader with an old tile.
+ *
+ * keepHeights holds the desert's level-0 height channel (as half-float bits)
+ * for the camera's floor — the same bytes the shader reads.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
-                                    { keepCells = false, schema } = {}) {
+                                    { keepCells = false, keepHeights = false,
+                                      schema } = {}) {
   if (!schema) {
     throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
   }
@@ -112,57 +200,83 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   }
   const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
-  const texture = device.createTexture({
-    label: `${baseUrl}-surface-tile`,
-    size: [meta.n, meta.n, 1],
-    format: "rgba16float",
-    mipLevelCount: meta.mips,
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
-  for (let level = 0; level < meta.mips; level++) {
-    const bytes = await fetchBytes(`${baseUrl}/fif_mip${level}.bin${version}`);
-    const n = Math.max(1, meta.n >> level);
-    // The city minimap draws the same cascade the shader raises buildings
-    // out of, and the flight collider (collide.js) stands the same
-    // buildings up again on the CPU, so both read the SAME bytes rather
-    // than fetching anything of their own: level 0 is one texel per block,
-    // which is the resolution the districts actually have. Decoded on the
-    // way past and the fp16 dropped; all four channels city_cell reads —
-    // density, rank, and the lot and street words — are kept.
-    if (keepCells && level === 0) {
-      const halves = new Uint16Array(
-        bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-      const density = new Float32Array(n * n);
-      const rank = new Float32Array(n * n);
-      const lot = new Float32Array(n * n);
-      const street = new Float32Array(n * n);
-      for (let i = 0; i < n * n; i++) {
-        density[i] = fromHalf(halves[i * 4]);
-        rank[i] = fromHalf(halves[i * 4 + 1]);
-        lot[i] = fromHalf(halves[i * 4 + 2]);
-        street[i] = fromHalf(halves[i * 4 + 3]);
-      }
-      cells = { n, cellM: meta.dx_m ?? meta.cell_m, density, rank, lot,
-                street };
-    }
-    device.queue.writeTexture(
-      { texture, mipLevel: level },
-      bytes,
-      { bytesPerRow: n * 8, rowsPerImage: n },
-      [n, n, 1],
-    );
-    onProgress?.((level + 1) / meta.mips);
-  }
+  let heights = null;
+  const format = meta.format ?? "rgba16float";
+  const channels = SURFACE_FORMAT_CHANNELS[format];
+  const files = meta.files
+    ?? Array.from({ length: meta.mips }, (_, k) => `fif_mip${k}.bin`);
+  // Checked before anything is allocated, and outside the try below: the
+  // return reads it.
   const dx = meta.dx_m ?? meta.cell_m;
   if (!(dx > 0)) {
     throw new Error(
       `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
       "no texel size.");
   }
-  if (keepCells && !cells) {
-    throw new Error(
-      `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
-      "them from.");
+  const texture = device.createTexture({
+    label: `${baseUrl}-surface-tile`,
+    size: [meta.n, meta.n, 1],
+    format,
+    mipLevelCount: meta.mips,
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  // From here the tile exists on the card and nothing else holds it: a
+  // download or decode that fails part-way must give it back, or every
+  // retry abandons another mip chain.
+  try {
+    for (let level = 0; level < meta.mips; level++) {
+      const n = Math.max(1, meta.n >> level);
+      const url = `${baseUrl}/${files[level]}${version}`;
+      const stored = meta.compression === "gzip"
+        ? new Uint8Array(await new Response(
+            await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())
+        : await fetchBytes(url);
+      const bytes = decodeSurfaceLevel(stored, n, meta);
+      if (keepHeights && level === 0) {
+        const halves = new Uint16Array(
+          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+        heights = new Uint16Array(n * n);
+        for (let i = 0; i < n * n; i++) heights[i] = halves[i * channels];
+      }
+      // The city minimap draws the same cascade the shader raises buildings
+      // out of, and the flight collider (collide.js) stands the same
+      // buildings up again on the CPU, so both read the SAME bytes rather
+      // than fetching anything of their own: level 0 is one texel per block,
+      // which is the resolution the districts actually have. Decoded on the
+      // way past and the fp16 dropped; all four channels city_cell reads —
+      // density, rank, and the lot and street words — are kept.
+      if (keepCells && level === 0) {
+        const halves = new Uint16Array(
+          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+        const density = new Float32Array(n * n);
+        const rank = new Float32Array(n * n);
+        const lot = new Float32Array(n * n);
+        const street = new Float32Array(n * n);
+        for (let i = 0; i < n * n; i++) {
+          density[i] = fromHalf(halves[i * 4]);
+          rank[i] = fromHalf(halves[i * 4 + 1]);
+          lot[i] = fromHalf(halves[i * 4 + 2]);
+          street[i] = fromHalf(halves[i * 4 + 3]);
+        }
+        cells = { n, cellM: meta.dx_m ?? meta.cell_m, density, rank, lot,
+                  street };
+      }
+      device.queue.writeTexture(
+        { texture, mipLevel: level },
+        bytes,
+        { bytesPerRow: n * channels * 2, rowsPerImage: n },
+        [n, n, 1],
+      );
+      onProgress?.((level + 1) / meta.mips);
+    }
+    if (keepCells && !cells) {
+      throw new Error(
+        `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
+        "them from.");
+    }
+  } catch (err) {
+    texture.destroy();
+    throw err;
   }
   return {
     view: texture.createView(),
@@ -174,6 +288,8 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     surfacePeriod: meta.tile_extent_m,
     maxLod: meta.mips - 1,
     cells,
+    heights,
+    meta,
   };
 }
 
@@ -797,6 +913,10 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
       desert: surfaceKind === "desert",
+      desertReliefM: surfaceKind === "desert"
+        ? desertReliefM(surfaceTile.meta) : null,
+      desertFloorAt: surfaceKind === "desert"
+        ? desertFloorAt(surfaceTile) : null,
       // The city tile's per-block cascade, for the minimap to draw the city
       // with. Null for an ocean scene, and null is what makes the minimap
       // build the cloud map instead — see Minimap's constructor.
