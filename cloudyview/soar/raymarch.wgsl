@@ -15704,6 +15704,16 @@ const DF_PP_GROW1: f32 = 0.85;
 const DF_PP_GROW2: f32 = 0.65;
 const DF_PP_GROW3: f32 = 0.40;
 
+// The clump's envelope, sized by its pads.
+fn df_pp_envelope(it: DfItem) -> DfEnvelope {
+    let a = it.a.z;
+    var e: DfEnvelope;
+    e.c = vec3<f32>(0.0, 0.0, 2.6 * a);
+    e.r = vec3<f32>(5.0 * a, 5.0 * a, 3.2 * a);
+    e.sigma = DF_PP_ENV_SIGMA / a;
+    return e;
+}
+
 fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     tb: f32, pixel_angle: f32, dither: vec2<f32>,
                     stage: i32) -> DesertHit {
@@ -15721,12 +15731,11 @@ fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         return res;
     }
     if (far) {
-        let a = it.a.z;
-        let ec = vec3<f32>(0.0, 0.0, 2.6 * a);
-        let er = vec3<f32>(5.0 * a, 5.0 * a, 3.2 * a);
+        let env = df_pp_envelope(it);
+        let ec = env.c;
+        let er = env.r;
         let tt = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, tb,
-                               DF_PP_ENV_SIGMA / a,
-                               df_item_free_path(dither, it.seed));
+                               env.sigma, df_item_free_path(dither, it.seed));
         if (tt >= tb) {
             return res;
         }
@@ -15921,6 +15930,21 @@ fn df_cone_chord(q0: vec3<f32>, dir: vec3<f32>, apex: vec3<f32>, tn: f32,
         return vec2<f32>(1.0, -1.0);
     }
     return vec2<f32>(lo, hi);
+}
+
+// An ellipsoid envelope (centre, radii) and the extinction of the medium
+// that fills it: a crown's far form, and its occluder for shadows.
+struct DfEnvelope {
+    c: vec3<f32>,
+    r: vec3<f32>,
+    sigma: f32,
+}
+
+// Transmittance of an envelope's medium along the ray over [ta, tb].
+fn df_envelope_transmit(e: DfEnvelope, q0: vec3<f32>, dir: vec3<f32>,
+                        ta: f32, tb: f32) -> f32 {
+    let ch = df_ellipsoid_chord(q0, dir, e.c, e.r);
+    return exp(-e.sigma * max(min(ch.y, tb) - max(ch.x, ta), 0.0));
 }
 
 // The first collision in a uniform medium over chord ch clipped to [ta,
@@ -16158,6 +16182,15 @@ fn df_capsule_chord(o: vec3<f32>, dir: vec3<f32>, sg: DfSeg,
     return vec2<f32>(t0, max(t1 - t0, 0.0));
 }
 
+// The crown envelope: an ellipsoid over the upper crown.
+fn df_creo_envelope(it: DfItem) -> DfEnvelope {
+    var e: DfEnvelope;
+    e.c = vec3<f32>(0.0, 0.0, 0.62 * it.a.x);
+    e.r = vec3<f32>(it.a.y + 0.08, it.a.y + 0.08, 0.50 * it.a.x);
+    e.sigma = DF_CREO_ENV_SIGMA;
+    return e;
+}
+
 fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                      tb: f32, pixel_angle: f32, dither: vec2<f32>,
                      stage: i32) -> DesertHit {
@@ -16183,12 +16216,12 @@ fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let h = it.a.x;
     let w = it.a.y;
     // The envelope: an ellipsoid over the upper crown.
-    let ec = vec3<f32>(0.0, 0.0, 0.62 * h);
-    let er = vec3<f32>(w + 0.08, w + 0.08, 0.50 * h);
+    let env = df_creo_envelope(it);
+    let ec = env.c;
+    let er = env.r;
     if (mode == 2) {
         let tt = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, tb,
-                               DF_CREO_ENV_SIGMA,
-                               df_item_free_path(dither, it.seed));
+                               env.sigma, df_item_free_path(dither, it.seed));
         if (tt >= tb) {
             return res;
         }
@@ -16465,6 +16498,24 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
     return sg;
 }
 
+// The fan as a cone of cane medium, standing on its apex just below the
+// crown, as wide as the fan and its outward bend: the ray's chord through
+// it and the extinction there, (t_in, t_out, sigma). Canes of mean width
+// DF_OCO_FAR_W spread over the cone's section at mid-chord: N w / (pi R^2),
+// more when in leaf.
+fn df_oco_medium(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
+                 tb: f32) -> vec3<f32> {
+    let tn = tan(it.a.z + 0.16);
+    let apex = vec3<f32>(0.0, 0.0, -0.3 - 0.12 / tn);
+    let top = it.a.x * 1.02 - apex.z;
+    let ch = df_cone_chord(q0, dir, apex, tn, 0.3 - apex.z, top);
+    let zm = clamp(q0.z + dir.z * 0.5 * (max(ch.x, ta) + min(ch.y, tb))
+                   - apex.z, 0.3 - apex.z, top);
+    let rr = zm * tn;
+    let leafy = select(1.0, 2.2, i32(it.a.w) == 1);
+    return vec3<f32>(ch, it.a.y * DF_OCO_FAR_W * leafy / (DF_PI * rr * rr));
+}
+
 fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                      tb: f32, pixel_angle: f32, dither: vec2<f32>,
                      stage: i32) -> DesertHit {
@@ -16483,18 +16534,8 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         return res;
     }
     if (far) {
-        let tn = tan(it.a.z + 0.16);
-        let apex = vec3<f32>(0.0, 0.0, -0.3 - 0.12 / tn);
-        let top = it.a.x * 1.02 - apex.z;
-        let ch = df_cone_chord(q0, dir, apex, tn, 0.3 - apex.z, top);
-        // Canes of mean width DF_OCO_FAR_W, spread over the cone's section
-        // at mid-chord: extinction N w / (pi R^2), more when in leaf.
-        let zm = clamp(q0.z + dir.z * 0.5 * (max(ch.x, ta) + min(ch.y, tb))
-                       - apex.z, 0.3 - apex.z, top);
-        let rr = zm * tn;
-        let leafy = select(1.0, 2.2, state == 1);
-        let sigma = it.a.y * DF_OCO_FAR_W * leafy / (DF_PI * rr * rr);
-        let tt = df_medium_hit(ch, ta, tb, sigma,
+        let m = df_oco_medium(it, q0, dir, ta, tb);
+        let tt = df_medium_hit(m.xy, ta, tb, m.z,
                                df_item_free_path(dither, it.seed));
         if (tt >= tb) {
             return res;
@@ -16764,6 +16805,15 @@ fn df_pv_limb(it: DfItem, i: i32, k: i32) -> DfSeg {
     return sg;
 }
 
+// The whole crown as one envelope of the clumps' mean medium.
+fn df_pv_crown(it: DfItem) -> DfEnvelope {
+    var e: DfEnvelope;
+    e.c = vec3<f32>(0.0, 0.0, 0.68 * it.a.x);
+    e.r = vec3<f32>(it.a.y, it.a.y, 0.32 * it.a.x);
+    e.sigma = DF_PV_CROWN_SIGMA;
+    return e;
+}
+
 fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                       tb: f32, pixel_angle: f32, dither: vec2<f32>,
                       stage: i32) -> DesertHit {
@@ -16792,10 +16842,11 @@ fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             let hp = q0 + dir * tt;
             nrm = normalize(vec3<f32>(hp.xy, 0.0) + vec3<f32>(1e-6, 0.0, 0.0));
         }
-        let ec = vec3<f32>(0.0, 0.0, 0.68 * h);
-        let er = vec3<f32>(cr, cr, 0.32 * h);
+        let env = df_pv_crown(it);
+        let ec = env.c;
+        let er = env.r;
         let tc = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, best,
-                               DF_PV_CROWN_SIGMA, fpath);
+                               env.sigma, fpath);
         if (tc < best) {
             best = tc;
             code = DF_MAT_PV_CROWN;
@@ -16974,6 +17025,36 @@ fn df_stone_draw(seed: vec2<u32>, i: i32, big: bool) -> vec4<f32> {
                      size * (0.05 + 0.25 * hs.w), size);
 }
 
+// A heap's far form: each stone its ellipsoid, the joints and undulations
+// (a few centimetres) sub-pixel. (t, unnormalized normal), t = tb on a miss.
+fn df_boulder_far(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
+                  tb: f32) -> vec4<f32> {
+    var best = tb;
+    var bn = vec3<f32>(0.0, 0.0, 1.0);
+    let n = i32(it.e.x);
+    for (var i: i32 = 0; i < n; i = i + 1) {
+        let st = df_stone_param(it, i);
+        let hs = pcg2d(vec2<u32>(it.seed.x + u32(i) * 747u,
+                                 (it.seed.x + u32(i) * 747u) ^ 0x68bc21ebu));
+        let h1 = df_u01(hs.x);
+        let h2 = df_u01(hs.y);
+        let cy = cos(h1 * DF_TAU);
+        let sy = sin(h1 * DF_TAU);
+        let rot = mat3x3<f32>(vec3<f32>(cy, -sy, 0.0), vec3<f32>(sy, cy, 0.0),
+                              vec3<f32>(0.0, 0.0, 1.0));
+        let r = st.w * vec3<f32>(1.0 + 0.35 * h2, 1.0 - 0.15 * h1,
+                                 0.72 + 0.2 * h2);
+        let lo = rot * (q0 - st.xyz);
+        let ld = rot * dir;
+        let ch = df_ellipsoid_chord(lo, ld, vec3<f32>(0.0), r);
+        if (ch.x < ch.y && ch.x > ta && ch.x < best) {
+            best = ch.x;
+            bn = transpose(rot) * ((lo + ld * ch.x) / (r * r));
+        }
+    }
+    return vec4<f32>(best, bn);
+}
+
 fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     tb: f32, pixel_angle: f32, stage: i32) -> DesertHit {
     let shadow = stage == DF_STAGE_SHADOW;
@@ -16989,37 +17070,15 @@ fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         return res;
     }
     if (far) {
-        var best = tb;
-        var bn = vec3<f32>(0.0, 0.0, 1.0);
-        let n = i32(it.e.x);
-        for (var i: i32 = 0; i < n; i = i + 1) {
-            let st = df_stone_param(it, i);
-            let hs = pcg2d(vec2<u32>(it.seed.x + u32(i) * 747u,
-                                     (it.seed.x + u32(i) * 747u) ^ 0x68bc21ebu));
-            let h1 = df_u01(hs.x);
-            let h2 = df_u01(hs.y);
-            let cy = cos(h1 * DF_TAU);
-            let sy = sin(h1 * DF_TAU);
-            let rot = mat3x3<f32>(vec3<f32>(cy, -sy, 0.0), vec3<f32>(sy, cy, 0.0),
-                                  vec3<f32>(0.0, 0.0, 1.0));
-            let r = st.w * vec3<f32>(1.0 + 0.35 * h2, 1.0 - 0.15 * h1,
-                                     0.72 + 0.2 * h2);
-            let lo = rot * (q0 - st.xyz);
-            let ld = rot * dir;
-            let ch = df_ellipsoid_chord(lo, ld, vec3<f32>(0.0), r);
-            if (ch.x < ch.y && ch.x > ta && ch.x < best) {
-                best = ch.x;
-                bn = transpose(rot) * ((lo + ld * ch.x) / (r * r));
-            }
-        }
-        if (best >= tb) {
+        let fh = df_boulder_far(it, q0, dir, ta, tb);
+        if (fh.x >= tb) {
             return res;
         }
         res.hit = true;
-        res.t = best;
+        res.t = fh.x;
         res.kind = DF_KIND_BOULDER;
-        let qh = q0 + dir * best;
-        res.normal = normalize(bn);
+        let qh = q0 + dir * fh.x;
+        res.normal = normalize(fh.yzw);
         res.mat = vec4<f32>(f32(DF_MAT_ROCK) + 0.9 * df_u01(it.seed.y),
                             qh.z, qh.x, qh.y);
         return res;
@@ -17551,8 +17610,121 @@ fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     return h;
 }
 
-// Plants between p and the sun, exactly: 0 or 1. Bodies only, traced to the
-// receiver's footprint `fp` (which travels in the walk's pixel_angle slot).
+// --- Plant shadows ---------------------------------------------------------------
+//
+// A shadow ray asks only how much light gets past, and it asks it for most
+// pixels on the screen (every ground point near enough to have its casters
+// drawn), so it has its own lean path: the same cells and the same plants,
+// but each plant as one analytic occluder — a cactus's capsule chain, a
+// stone's ellipsoid, a trunk's capsule block the ray; a crown's envelope
+// (creosote, prickly pear, palo verde) or the ocotillo's cone of canes lets
+// through exp(-sigma chord) of it. Soft, exact-in-expectation crown shadows,
+// and none of the species traces compiled into the pixel-wide kernel a
+// second time (they measured half of it).
+
+fn df_item_transmit(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
+                    tb: f32) -> f32 {
+    if (it.kind == DF_KIND_SAGUARO || it.kind == DF_KIND_BARREL) {
+        var ch: DfCapHit;
+        ch.t = tb;
+        let ncol = df_cactus_ncols(it);
+        for (var i: i32 = 0; i < ncol; i = i + 1) {
+            ch = df_col_capsules(df_cactus_col(it, i), i, q0, dir, ch);
+        }
+        return select(1.0, 0.0, ch.t < tb && ch.t > ta);
+    }
+    if (it.kind == DF_KIND_CREOSOTE) {
+        return df_envelope_transmit(df_creo_envelope(it), q0, dir, ta, tb);
+    }
+    if (it.kind == DF_KIND_PRICKLY) {
+        return df_envelope_transmit(df_pp_envelope(it), q0, dir, ta, tb);
+    }
+    if (it.kind == DF_KIND_OCOTILLO) {
+        let m = df_oco_medium(it, q0, dir, ta, tb);
+        return exp(-m.z * max(min(m.y, tb) - max(m.x, ta), 0.0));
+    }
+    if (it.kind == DF_KIND_PALOVERDE) {
+        let tt = df_capsule(q0, dir, vec3<f32>(0.0, 0.0, -0.3),
+                            vec3<f32>(0.0, 0.0, 0.45 * it.a.x), 0.13);
+        if (tt > ta && tt < tb) {
+            return 0.0;
+        }
+        return df_envelope_transmit(df_pv_crown(it), q0, dir, ta, tb);
+    }
+    // Stones.
+    return select(1.0, 0.0, df_boulder_far(it, q0, dir, ta, tb).x < tb);
+}
+
+// Transmittance of one grid's plants along the sun ray from p over [0, t1]:
+// the view walk's cells and feet, without its traces.
+fn df_occlusion_walk(p: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                     t1: f32, fp: f32, big: bool) -> f32 {
+    let cell = select(DF_SMALL_CELL, DF_BIG_CELL, big);
+    var ci = vec2<i32>(floor(p.xy / cell));
+    let stp = vec2<i32>(select(-1, 1, dir.x > 0.0), select(-1, 1, dir.y > 0.0));
+    let inv2 = vec2<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                         select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9));
+    let cmin0 = vec2<f32>(ci) * cell;
+    var tmax = vec2<f32>(
+        (select(cmin0.x, cmin0.x + cell, dir.x > 0.0) - p.x) * inv2.x,
+        (select(cmin0.y, cmin0.y + cell, dir.y > 0.0) - p.y) * inv2.y);
+    tmax = vec2<f32>(select(1e30, tmax.x, abs(dir.x) > 1e-9),
+                     select(1e30, tmax.y, abs(dir.y) > 1e-9));
+    let tdelta = cell * abs(inv2);
+    var t_cur = 0.0;
+    var vis = 1.0;
+    for (var i: i32 = 0; i < DF_MAX_CELLS; i = i + 1) {
+        let t_exit = min(min(tmax.x, tmax.y), t1);
+        let org = vec2<f32>(ci) * cell;
+        var foot: DfFoot;
+        if (big) {
+            foot = df_big_foot(ci);
+        } else {
+            foot = df_small_foot(ci);
+        }
+        if (foot.kind != 0) {
+            let q = org + foot.xy - p.xy;
+            let l2 = dot(dir.xy, dir.xy);
+            let tc = select(t_cur, clamp(dot(q, dir.xy) / max(l2, 1e-12),
+                                         t_cur, t_exit), l2 > 1e-12);
+            if (length(q - dir.xy * tc) <= foot.reach) {
+                var it: DfItem;
+                if (big) {
+                    it = df_big_item(ci, org, fp, foot);
+                } else {
+                    it = df_small_item(ci, org, fp, foot);
+                }
+                if (it.kind != 0) {
+                    let ol = p - vec3<f32>(org, 0.0);
+                    let hb = df_box(ol, inv_dir, it.bmin, it.bmax);
+                    let ta = max(hb.x, 0.0);
+                    let tb = min(hb.y, t1);
+                    if (ta < tb) {
+                        vis = vis * df_item_transmit(it, ol, dir, ta, tb);
+                        if (vis < 0.004) {
+                            return 0.0;
+                        }
+                    }
+                }
+            }
+        }
+        if (t_exit >= t1) {
+            return vis;
+        }
+        if (tmax.x < tmax.y) {
+            ci.x = ci.x + stp.x;
+            t_cur = tmax.x;
+            tmax.x = tmax.x + tdelta.x;
+        } else {
+            ci.y = ci.y + stp.y;
+            t_cur = tmax.y;
+            tmax.y = tmax.y + tdelta.y;
+        }
+    }
+    return vis;
+}
+
+// Plants between p and the sun: the transmittance of their occluders.
 fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     if (sun_dir.z <= 1e-3) {
         return 0.0;
@@ -17560,18 +17732,12 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     let top = desert_height_range().y + DESERT_FLORA_SLAB_H;
     let t1 = max((top - p.z) / sun_dir.z, 0.0);
     let inv = 1.0 / sun_dir;
-    // The media's free paths along a sun ray, drawn per receiver point (its
-    // bits hashed) — a crown's shadow is a dapple that accumulates to its
-    // transmittance, not one hard threshold shared by the whole shadow.
-    let dither = df_ray_dither(p + sun_dir);
-    // One call of the walk for both grids (see desert_flora_trace).
+    var vis = 1.0;
+    // One call of the walk for both grids.
     for (var g: i32 = 0; g < 2; g = g + 1) {
-        if (df_walk(p, sun_dir, inv, 0.0, t1, fp, g == 0, dither,
-                    DF_STAGE_SHADOW).hit) {
-            return 0.0;
-        }
+        vis = vis * df_occlusion_walk(p, sun_dir, inv, t1, fp, g == 0);
     }
-    return 1.0;
+    return vis;
 }
 
 // How much of the plants' shadow on a ground point of footprint fp is the
