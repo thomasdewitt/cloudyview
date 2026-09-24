@@ -14752,7 +14752,7 @@ const DF_SAG_BARK: vec3<f32> = vec3<f32>(0.250, 0.195, 0.120);
 const DF_SAG_FELT: vec3<f32> = vec3<f32>(0.075, 0.070, 0.065);
 // The exact needles' albedo averaged over their projected area (pale root,
 // brown tip, the taper weighting the root): what the sub-pixel forms use.
-const DF_SPINE_MEAN: vec3<f32> = vec3<f32>(0.351, 0.323, 0.290);
+const DF_SPINE_MEAN: vec3<f32> = vec3<f32>(0.267, 0.239, 0.212);
 const DF_SPINE_GREY: vec3<f32> = vec3<f32>(0.330, 0.315, 0.290);
 const DF_SPINE_TIP: vec3<f32> = vec3<f32>(0.220, 0.140, 0.090);
 
@@ -14907,11 +14907,17 @@ fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
     let step = DF_TAU / f32(DF_SAG_RADIALS);
     for (var i: i32 = 0; i < DF_SAG_RADIALS; i = i + 1) {
         let hi = fract(h.y * 31.7 + f32(i) * 0.6180339);
-        let beta = h.x * DF_TAU + f32(i) * step + 0.35 * (hi - 0.5);
+        let hj = fract(h.w * 23.9 + f32(i) * 0.7548776);
+        // Irregular, as in the close-ups: a few radials missing, the rest
+        // off their even spacing, of mixed lengths and tilts.
+        if (hj < 0.15) {
+            continue;
+        }
+        let beta = h.x * DF_TAU + f32(i) * step + 0.9 * (hi - 0.5);
         let ax = normalize(cos(beta) * f.et + sin(beta) * f.es
-                           + (0.22 + 0.3 * hi) * f.er);
-        best = df_rod(o, dir, a, ax, 0.018 + 0.014 * hi, 0.00050, 0.00008,
-                      best, tint);
+                           + (0.15 + 0.45 * hj) * f.er);
+        best = df_rod(o, dir, a, ax, 0.014 + 0.022 * hi * hi, 0.00050,
+                      0.00008, best, tint);
     }
     for (var i: i32 = 0; i < DF_SAG_CENTRALS; i = i + 1) {
         let hi = fract(h.z * 17.3 + f32(i) * 0.7548776);
@@ -15098,8 +15104,9 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         let mu = max(abs(dot(ch.n, dir)), 0.08);
         let cov = 1.0 - exp(-select(DF_SAG_FOLD_TAU, DF_BAR_FOLD_TAU, barrel)
                             / mu);
-        // x = 0.5: the rib-averaged groove shading (E[mix(0.62, 1, x)] over
-        // a rib is its value at x = 1/2).
+        // x = 0.5: the rib average of the skin's crest-to-groove shading,
+        // which is linear in x (desert_flora_shade), so its mean over a rib
+        // is its value at x = 1/2.
         res.mat = vec4<f32>(f32(DF_MAT_SKIN_FUZZ) + tint, 0.5,
                             round(pad_mean * 255.0) + 0.99 * cov, age);
         return res;
@@ -17395,9 +17402,10 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
                              mix(DF_BAR_CENTRAL, DF_SPINE_GREY, 0.5 * along),
                              central);
             } else {
-                // Pale at the root, browning toward the tip (close-ups).
-                alb = mix(DF_SPINE_GREY * 1.15, DF_SPINE_TIP,
-                          smoothstep(0.35, 1.0, along));
+                // Grey at the root, browning over the outer three quarters
+                // (close-ups).
+                alb = mix(DF_SPINE_GREY * 0.85, DF_SPINE_TIP,
+                          smoothstep(0.25, 1.0, along));
             }
             return df_fiber(alb, h.mat.yzw, dir, L, sun_vis);
         }
@@ -17420,10 +17428,13 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         let age = h.mat.w;
         var skin = select(mix(DF_SAG_SKIN, DF_SAG_SKIN_OLD, age), DF_BAR_SKIN,
                           barrel) * (0.85 + 0.3 * tint);
-        // Grooves see less sky and less of the sun's bounce.
-        let ao = mix(0.62, 1.0, x);
-        let alb = mix(skin * ao, select(DF_SAG_FELT, DF_BAR_FELT, barrel),
-                      felt_w);
+        // Grooves see less sky and less of the sun's bounce; the crests are
+        // the yellower green of new, sun-facing skin. Both linear in x, so
+        // the far forms' rib average (x = 1/2) is exactly their mean.
+        let ao = mix(0.45, 1.0, x);
+        let crest = mix(vec3<f32>(1.0), vec3<f32>(1.12, 1.08, 0.82), x);
+        let alb = mix(skin * ao * crest,
+                      select(DF_SAG_FELT, DF_BAR_FELT, barrel), felt_w);
         var col = desert_lambert(alb, n, Ls)
             + Ls.sun * df_ggx_spec(n, dir, L.sun_dir, 0.38, 0.045)
               * (1.0 - felt_w);
