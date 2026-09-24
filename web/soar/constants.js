@@ -430,8 +430,12 @@ export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
 // Row 24 (the 25th) is the surface offset the water samples and the city
-// frame are derived from — see raymarch.wgsl's surface_offset.
-export const UNIFORM_ROWS = 25;
+// frame are derived from — see raymarch.wgsl's surface_offset. Rows 25..46
+// are the desert tile's own numbers (raymarch.wgsl desert_tile; zero off the
+// desert).
+export const DESERT_TILE_ROW0 = 25;
+export const DESERT_TILE_ROWS = 22;
+export const UNIFORM_ROWS = DESERT_TILE_ROW0 + DESERT_TILE_ROWS;
 // DERIVED, never written out. These were two independent literals until a row
 // was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.

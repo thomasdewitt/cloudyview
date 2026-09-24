@@ -11,7 +11,7 @@ import * as K from "./constants.js";
 import { packUniforms, sceneKey, keysEqual, renderTargetSize,
          motionAlphaForDt } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
-import { desertReliefM } from "./scene.js";
+import { desertReliefM, desertTileRows } from "./scene.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -646,8 +646,10 @@ export class Renderer {
    */
   commitSurface(kind, tile) {
     // Everything that can throw, before anything is changed: a tile whose
-    // meta lacks the relief must leave the scene standing where it was.
+    // meta lacks the relief or its tables must leave the scene standing
+    // where it was.
     const relief = kind === "desert" ? desertReliefM(tile.meta) : null;
+    const tables = kind === "desert" ? desertTileRows(tile.meta) : null;
     const s = this.scene;
     s.desert = kind === "desert";
     // The desert's tile at binding 3, or the sea at binding 9 — see
@@ -661,6 +663,7 @@ export class Renderer {
     s.clockPeriod = tile.clockPeriod ?? null;
     s.oceanMaxLod = tile.maxLod;
     s.desertReliefM = relief;
+    s.desertTileRows = tables;
     this.prefetchPipelines();
     this.refreshBindGroup();
     this._resetAccumulation();
@@ -2174,6 +2177,7 @@ export class Renderer {
       cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
       desert: Boolean(s.desert),
       desertReliefM: s.desert ? s.desertReliefM : null,
+      desertTileRows: s.desert ? s.desertTileRows : null,
     };
   }
 }

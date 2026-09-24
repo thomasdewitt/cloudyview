@@ -133,6 +133,47 @@ export function desertReliefM(meta) {
 }
 
 /**
+ * Rows 25..46 under DESERT (raymarch.wgsl desert_tile), from the desert
+ * tile's meta: its per-level tables four levels to a row, its per-level
+ * colour correction a level to a row, then (bounce albedo, band_slope_max).
+ * Twin of soar_host.desert_tile_rows.
+ */
+export function desertTileRows(meta) {
+  const mips = meta?.mips;
+  if (mips !== 12) {
+    throw new Error(`the desert tile has ${mips} mips; the shader's tables ` +
+                    "are laid out for 12.");
+  }
+  const rows = [];
+  for (const key of ["slope_max", "envelope_m", "slope_variance_removed"]) {
+    const table = meta[key];
+    if (!Array.isArray(table) || table.length !== mips) {
+      throw new Error(`the desert tile's meta.json ${key} is not ${mips} ` +
+                      "levels.");
+    }
+    for (let i = 0; i < mips; i += 4) rows.push(table.slice(i, i + 4));
+  }
+  const correction = meta.albedo_correction;
+  if (!Array.isArray(correction) || correction.length !== mips) {
+    throw new Error("the desert tile's meta.json albedo_correction is not " +
+                    `${mips} levels.`);
+  }
+  for (const rgb of correction) rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
+  const bounce = meta.bounce_albedo;
+  if (!Array.isArray(bounce) || bounce.length !== 3
+      || !Number.isFinite(meta.band_slope_max)) {
+    throw new Error("the desert tile's meta.json has no bounce_albedo or " +
+                    "band_slope_max.");
+  }
+  rows.push([bounce[0], bounce[1], bounce[2], meta.band_slope_max]);
+  if (rows.length !== K.DESERT_TILE_ROWS) {
+    throw new Error(`desertTileRows made ${rows.length} rows; the shader ` +
+                    `reads ${K.DESERT_TILE_ROWS}.`);
+  }
+  return rows;
+}
+
+/**
  * The camera's floor over the desert: a function of the surface-frame
  * position (tile metres, the camera's surfacePosition) returning the lowest
  * z the camera may take. The tile's own height, read bilinearly the way the
@@ -916,6 +957,8 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       desert: surfaceKind === "desert",
       desertReliefM: surfaceKind === "desert"
         ? desertReliefM(surfaceTile.meta) : null,
+      desertTileRows: surfaceKind === "desert"
+        ? desertTileRows(surfaceTile.meta) : null,
       desertFloorAt: surfaceKind === "desert"
         ? desertFloorAt(surfaceTile) : null,
       // The city tile's per-block cascade, for the minimap to draw the city

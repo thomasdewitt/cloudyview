@@ -161,6 +161,18 @@ struct Uniforms {
     // what keeps the frozen judge-view goldens byte-identical.
     // z, w unused (0.0).
     surface_offset: vec4<f32>,
+    // Rows 25..46, under DESERT only (zero elsewhere): the desert tile's own
+    // numbers, from its meta.json, written by both hosts
+    // (soar_host.desert_tile_rows, scene.js desertTileRows). Data of the
+    // tile, not of the shader: a re-baked tile brings its own. By level k
+    // of the tile's 12 mips, four to a row:
+    //   0..2   slope_max            the steepest texel slope of mip k
+    //   3..5   envelope_m           how far the surface stands above mip k
+    //   6..8   slope_variance_removed   what mip k's normal no longer carries
+    //   9..20  albedo_correction    xyz: mip k's far-field colour factor
+    //   21     xyz: the bounce albedo (the mean of the level-0 albedos);
+    //          w: band_slope_max, the octave band's steepest slope
+    desert_tile: array<vec4<f32>, 22>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -14283,23 +14295,16 @@ const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.33, 0.285, 0.22);
 // pavement reads redder and duller through its mean lightness than its
 // albedos average to — by ~9% in blue at the top of the chain. This is the
 // tile-wide ratio of the two at each mip (tools/export_desert_tile.py
-// albedo_correction; held to the tile by tests/test_desert_tile.py), applied
+// albedo_correction, in the tile's meta and so in u.desert_tile), applied
 // at the footprint's level so no seam appears where detail drops out.
+// Level i of the tile table that starts at u.desert_tile row `row0`, four
+// levels to a row.
+fn desert_tile_level(row0: i32, i: i32) -> f32 {
+    return u.desert_tile[row0 + (i >> 2u)][i & 3];
+}
+
 fn desert_albedo_correction_at(i: i32) -> vec3<f32> {
-    switch i {
-        case 0: { return vec3<f32>(1.0000, 1.0000, 1.0000); }
-        case 1: { return vec3<f32>(0.9996, 0.9998, 1.0002); }
-        case 2: { return vec3<f32>(0.9988, 0.9995, 1.0006); }
-        case 3: { return vec3<f32>(0.9966, 0.9986, 1.0015); }
-        case 4: { return vec3<f32>(0.9902, 0.9958, 1.0045); }
-        case 5: { return vec3<f32>(0.9754, 0.9895, 1.0114); }
-        case 6: { return vec3<f32>(0.9618, 0.9835, 1.0181); }
-        case 7: { return vec3<f32>(0.9514, 0.9789, 1.0235); }
-        case 8: { return vec3<f32>(0.9474, 0.9771, 1.0255); }
-        case 9: { return vec3<f32>(0.9451, 0.9760, 1.0268); }
-        case 10: { return vec3<f32>(0.9421, 0.9747, 1.0283); }
-        default: { return vec3<f32>(0.9421, 0.9747, 1.0283); }
-    }
+    return u.desert_tile[9 + i].xyz;
 }
 
 fn desert_albedo_correction(fp: f32) -> vec3<f32> {
@@ -14509,29 +14514,18 @@ fn desert_height_range() -> vec2<f32> {
 // move the surface, in units of one octave's band excursion.
 const DESERT_OCTAVE_MARGIN: f32 = 0.429;
 
-// Steepest slope at each mip level of the shipped tile, with a quarter
-// again for safety (tools/export_desert_tile.py writes the measured table
-// into meta.json as slope_max; tests/test_desert_tile.py holds this to it).
+// Steepest slope at each mip level of the tile, with a quarter again for
+// safety (tools/export_desert_tile.py measures it into meta.json as
+// slope_max; the hosts carry it here in u.desert_tile).
 // This is what lets the trace step by clearance without tunnelling.
 fn desert_slope_max_at(i: i32) -> f32 {
-    switch i {
-        case 0: { return 1.775; }
-        case 1: { return 0.924; }
-        case 2: { return 0.478; }
-        case 3: { return 0.225; }
-        case 4: { return 0.111; }
-        case 5: { return 0.070; }
-        case 6: { return 0.050; }
-        case 7: { return 0.041; }
-        case 8: { return 0.029; }
-        case 9: { return 0.021; }
-        case 10: { return 0.002; }
-        default: { return 0.0; }
-    }
+    return desert_tile_level(0, i);
 }
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
-const DESERT_OCTAVE_SLOPE_MAX: f32 = 1.611;  // meta band_slope_max
+fn desert_octave_slope_max() -> f32 {
+    return u.desert_tile[21].w;               // meta band_slope_max
+}
 const DESERT_OCTAVE_SLOPE_GROWTH: f32 = 1.620657; // 5^0.3
 
 fn desert_slope_bound(fp: f32) -> f32 {
@@ -14551,7 +14545,7 @@ fn desert_slope_bound(fp: f32) -> f32 {
         if (fade <= 0.0) {
             break;
         }
-        s = s + fade * DESERT_OCTAVE_SLOPE_MAX * grow;
+        s = s + fade * desert_octave_slope_max() * grow;
     }
     return s;
 }
@@ -14609,25 +14603,12 @@ fn desert_octave_margin(fp: f32) -> f32 {
 }
 
 // How far the full surface can stand above mip k of the tile read at the
-// same point, measured on the shipped tile with a tenth to spare
-// (tools/export_desert_tile.py writes it as envelope_m; tests/
-// test_desert_tile.py holds this to it). Mip k plus this is a lid over the
+// same point, measured on the tile with a tenth to spare
+// (tools/export_desert_tile.py writes it as envelope_m; the hosts carry it
+// here in u.desert_tile). Mip k plus this is a lid over the
 // ground that is as smooth as mip k — see desert_terrain_trace.
 fn desert_envelope_m_at(i: i32) -> f32 {
-    switch i {
-        case 0: { return 0.0; }
-        case 1: { return 1.084; }
-        case 2: { return 1.630; }
-        case 3: { return 1.761; }
-        case 4: { return 1.411; }
-        case 5: { return 1.933; }
-        case 6: { return 2.454; }
-        case 7: { return 3.674; }
-        case 8: { return 6.395; }
-        case 9: { return 9.452; }
-        case 10: { return 17.279; }
-        default: { return 17.772; }
-    }
+    return desert_tile_level(3, i);
 }
 
 // The trace's budget, and its floor: a step is never shorter than this many
@@ -15676,7 +15657,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     L.t_sun = t_sun;
     L.sky_open = open;
     // The surroundings' reflected light, from the tile's mean albedo.
-    L.ground = DESERT_BOUNCE_ALBEDO * (L.sun * mu_sun + L.sky);
+    L.ground = desert_bounce_albedo() * (L.sun * mu_sun + L.sky);
     return L;
 }
 
@@ -15770,28 +15751,15 @@ fn desert_brf(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 }
 
 // The slope variance the tile's mip chain has filtered out of the normal at
-// each level (tools/export_desert_tile.py slope_variance_removed; held to the
-// tile by tests/test_desert_tile.py) — the ocean's FIF_SLOPE_VARIANCE_REMOVED
+// each level (tools/export_desert_tile.py slope_variance_removed, carried in
+// u.desert_tile) — the ocean's FIF_SLOPE_VARIANCE_REMOVED
 // for the ground. A far pixel is shaded at the footprint's MEAN normal,
 // which has lost the facets that turn away from a low sun and the shadows
 // the ridges throw; this puts them back as Smith shadowing on the beam, so
 // the far bajada at low sun is as dark as its resolved form averages to
 // rather than flat and bright.
 fn desert_slope_variance_removed_at(i: i32) -> f32 {
-    switch i {
-        case 0: { return 0.000000; }
-        case 1: { return 0.003600; }
-        case 2: { return 0.006006; }
-        case 3: { return 0.007218; }
-        case 4: { return 0.007616; }
-        case 5: { return 0.007761; }
-        case 6: { return 0.007850; }
-        case 7: { return 0.007922; }
-        case 8: { return 0.007982; }
-        case 9: { return 0.008028; }
-        case 10: { return 0.008049; }
-        default: { return 0.008049; }
-    }
+    return desert_tile_level(6, i);
 }
 
 fn desert_unresolved_shadow(n: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
@@ -16096,9 +16064,11 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
 
 // Mean hemispherical albedo of the ground as a cloud base sees it, for the
 // surface bounce and the upwelling light a facet sees: the mean of the
-// tile's level-0 albedos (tests/test_desert_tile.py). The ocean's bounce
+// tile's level-0 albedos (the tile's meta, u.desert_tile). The ocean's bounce
 // constant was tuned over water, so the desert's scales it by the ratio.
-const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.280, 0.221, 0.156);
+fn desert_bounce_albedo() -> vec3<f32> {
+    return u.desert_tile[21].xyz;
+}
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 
 // === END DESERT GROUND ===
@@ -17177,7 +17147,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // albedo against the water's the constant was tuned over.
                 let bounce_tint = select(
                     BOUNCE_TINT,
-                    BOUNCE_TINT * DESERT_BOUNCE_ALBEDO / OCEAN_BOUNCE_ALBEDO,
+                    BOUNCE_TINT * desert_bounce_albedo() / OCEAN_BOUNCE_ALBEDO,
                     DESERT);
                 col = col + ice_recolor(
                     transmittance * d_tau * bounce * air_t * bounce_tint,
