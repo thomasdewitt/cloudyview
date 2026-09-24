@@ -596,13 +596,16 @@ export class Renderer {
    * (scene.js loadOceanTile).
    */
   commitSurface(kind, tile) {
+    // Everything that can throw, before anything is changed: a tile whose
+    // meta lacks the relief must leave the scene standing where it was.
+    const relief = kind === "desert" ? desertReliefM(tile.meta) : null;
     const s = this.scene;
     s.desert = kind === "desert";
     s.oceanView = tile.view;
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
     s.oceanMaxLod = tile.maxLod;
-    s.desertReliefM = s.desert ? desertReliefM(tile.meta) : null;
+    s.desertReliefM = relief;
     this.prefetchPipelines();
     this.refreshBindGroup();
     this._resetAccumulation();

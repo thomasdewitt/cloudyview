@@ -212,61 +212,69 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     mipLevelCount: meta.mips,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
-  for (let level = 0; level < meta.mips; level++) {
-    const n = Math.max(1, meta.n >> level);
-    const url = `${baseUrl}/${files[level]}${version}`;
-    const stored = meta.compression === "gzip"
-      ? new Uint8Array(await new Response(
-          await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())
-      : await fetchBytes(url);
-    const bytes = decodeSurfaceLevel(stored, n, meta);
-    if (keepHeights && level === 0) {
-      const halves = new Uint16Array(
-        bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-      heights = new Uint16Array(n * n);
-      for (let i = 0; i < n * n; i++) heights[i] = halves[i * channels];
-    }
-    // The city minimap draws the same cascade the shader raises buildings
-    // out of, and the flight collider (collide.js) stands the same
-    // buildings up again on the CPU, so both read the SAME bytes rather
-    // than fetching anything of their own: level 0 is one texel per block,
-    // which is the resolution the districts actually have. Decoded on the
-    // way past and the fp16 dropped; all four channels city_cell reads —
-    // density, rank, and the lot and street words — are kept.
-    if (keepCells && level === 0) {
-      const halves = new Uint16Array(
-        bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-      const density = new Float32Array(n * n);
-      const rank = new Float32Array(n * n);
-      const lot = new Float32Array(n * n);
-      const street = new Float32Array(n * n);
-      for (let i = 0; i < n * n; i++) {
-        density[i] = fromHalf(halves[i * 4]);
-        rank[i] = fromHalf(halves[i * 4 + 1]);
-        lot[i] = fromHalf(halves[i * 4 + 2]);
-        street[i] = fromHalf(halves[i * 4 + 3]);
+  // From here the tile exists on the card and nothing else holds it: a
+  // download or decode that fails part-way must give it back, or every
+  // retry abandons another mip chain.
+  try {
+    for (let level = 0; level < meta.mips; level++) {
+      const n = Math.max(1, meta.n >> level);
+      const url = `${baseUrl}/${files[level]}${version}`;
+      const stored = meta.compression === "gzip"
+        ? new Uint8Array(await new Response(
+            await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())
+        : await fetchBytes(url);
+      const bytes = decodeSurfaceLevel(stored, n, meta);
+      if (keepHeights && level === 0) {
+        const halves = new Uint16Array(
+          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+        heights = new Uint16Array(n * n);
+        for (let i = 0; i < n * n; i++) heights[i] = halves[i * channels];
       }
-      cells = { n, cellM: meta.dx_m ?? meta.cell_m, density, rank, lot,
-                street };
+      // The city minimap draws the same cascade the shader raises buildings
+      // out of, and the flight collider (collide.js) stands the same
+      // buildings up again on the CPU, so both read the SAME bytes rather
+      // than fetching anything of their own: level 0 is one texel per block,
+      // which is the resolution the districts actually have. Decoded on the
+      // way past and the fp16 dropped; all four channels city_cell reads —
+      // density, rank, and the lot and street words — are kept.
+      if (keepCells && level === 0) {
+        const halves = new Uint16Array(
+          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+        const density = new Float32Array(n * n);
+        const rank = new Float32Array(n * n);
+        const lot = new Float32Array(n * n);
+        const street = new Float32Array(n * n);
+        for (let i = 0; i < n * n; i++) {
+          density[i] = fromHalf(halves[i * 4]);
+          rank[i] = fromHalf(halves[i * 4 + 1]);
+          lot[i] = fromHalf(halves[i * 4 + 2]);
+          street[i] = fromHalf(halves[i * 4 + 3]);
+        }
+        cells = { n, cellM: meta.dx_m ?? meta.cell_m, density, rank, lot,
+                  street };
+      }
+      device.queue.writeTexture(
+        { texture, mipLevel: level },
+        bytes,
+        { bytesPerRow: n * channels * 2, rowsPerImage: n },
+        [n, n, 1],
+      );
+      onProgress?.((level + 1) / meta.mips);
     }
-    device.queue.writeTexture(
-      { texture, mipLevel: level },
-      bytes,
-      { bytesPerRow: n * channels * 2, rowsPerImage: n },
-      [n, n, 1],
-    );
-    onProgress?.((level + 1) / meta.mips);
-  }
-  const dx = meta.dx_m ?? meta.cell_m;
-  if (!(dx > 0)) {
-    throw new Error(
-      `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
-      "no texel size.");
-  }
-  if (keepCells && !cells) {
-    throw new Error(
-      `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
-      "them from.");
+    const dx = meta.dx_m ?? meta.cell_m;
+    if (!(dx > 0)) {
+      throw new Error(
+        `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
+        "no texel size.");
+    }
+    if (keepCells && !cells) {
+      throw new Error(
+        `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
+        "them from.");
+    }
+  } catch (err) {
+    texture.destroy();
+    throw err;
   }
   return {
     view: texture.createView(),
