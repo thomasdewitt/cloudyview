@@ -84,7 +84,7 @@ fn scan(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let ci = vec2<i32>(gid.xy);
     let org = vec2<f32>(ci) * DF_BIG_CELL;
-    let it = df_big_item(ci, org, 0.1, df_big_foot(ci));
+    let it = df_big_item(ci, org, 0.1, df_big_foot(ci), -1e9);
     let i = (gid.y * n + gid.x) * 2u;
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.w, it.a.z);
@@ -99,7 +99,7 @@ fn scan_small(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let ci = vec2<i32>(gid.xy);
     let org = vec2<f32>(ci) * DF_SMALL_CELL;
-    let it = df_small_item(ci, org, 0.1, df_small_foot(ci));
+    let it = df_small_item(ci, org, 0.1, df_small_foot(ci), -1e9);
     let i = (gid.y * n + gid.x) * 2u;
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.y, it.a.z);

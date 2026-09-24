@@ -17728,12 +17728,33 @@ fn df_big_foot(ci: vec2<i32>) -> DfFoot {
 // `fp` is the footprint the ground is drawn at here: a plant roots on the
 // ground as drawn (desert_surface at that footprint), so it neither floats
 // nor sinks at range.
+// The tallest a species stands above its foot, for the height cull.
+fn df_kind_top(kind: i32) -> f32 {
+    if (kind == DF_KIND_SAGUARO) {
+        return 12.6;
+    }
+    if (kind == DF_KIND_OCOTILLO || kind == DF_KIND_PALOVERDE) {
+        return 6.4;
+    }
+    if (kind == DF_KIND_BOULDER || kind == DF_KIND_CREOSOTE) {
+        return 3.1;
+    }
+    return 1.8;
+}
+
+// `zlo` is the lowest the ray comes over this cell: a candidate the ray
+// passes wholly above is dropped on the ground's height alone, before its
+// habitat is read (the texture reads are what an item costs).
 fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
-               foot: DfFoot) -> DfItem {
+               foot: DfFoot, zlo: f32) -> DfItem {
     var it: DfItem;
     it.seed = df_cell_seed(ci, DF_BIG_N, 0x5a17u);
     it.kind = 0;
     if (foot.kind == 0) {
+        return it;
+    }
+    let zg = desert_surface(cell_org + foot.xy, fp).x;
+    if (zlo > zg + df_kind_top(foot.kind)) {
         return it;
     }
     let r0 = df_rand4(it.seed);
@@ -17741,7 +17762,7 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
         return it;
     }
     it.kind = foot.kind;
-    it.base = vec3<f32>(foot.xy, desert_surface(cell_org + foot.xy, fp).x);
+    it.base = vec3<f32>(foot.xy, zg);
     let rp = df_rand4(pcg2d(it.seed ^ vec2<u32>(0xb5297a4du, 0x68e31da4u)));
     let rs = df_rand4(pcg2d(it.seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
     if (foot.kind == DF_KIND_SAGUARO) {
@@ -17804,7 +17825,7 @@ fn df_small_foot(ci: vec2<i32>) -> DfFoot {
 }
 
 fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
-                 foot: DfFoot) -> DfItem {
+                 foot: DfFoot, zlo: f32) -> DfItem {
     var it: DfItem;
     it.kind = 0;
     it.seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
@@ -17820,6 +17841,10 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
         if (length(org_w - fw) < big.clear + foot.reach) {
             return it;
         }
+    }
+    let zg = desert_surface(org_w, fp).x;
+    if (zlo > zg + df_kind_top(foot.kind)) {
+        return it;
     }
     let r0 = df_rand4(it.seed);
     if (r0.w >= df_keep(foot.kind, df_habitat(org_w))) {
@@ -17840,7 +17865,7 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
         it = df_prickly_item(it, rs);
         top = foot.reach;
     }
-    it.base = vec3<f32>(foot.xy, desert_surface(org_w, fp).x);
+    it.base = vec3<f32>(foot.xy, zg);
     let dz = it.base.z;
     // Below the foot: buried stems (0.3 m), a barrel's root cap (0.25 m
     // plus its radius), a stone's lower half.
@@ -17923,10 +17948,11 @@ fn df_walk(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t0: f32,
         var it: DfItem;
         it.kind = 0;
         if (near) {
+            let zlo = o.z + dir.z * select(t_cur, t_exit, dir.z < 0.0);
             if (big) {
-                it = df_big_item(ci, org, fp_cell, foot);
+                it = df_big_item(ci, org, fp_cell, foot, zlo);
             } else {
-                it = df_small_item(ci, org, fp_cell, foot);
+                it = df_small_item(ci, org, fp_cell, foot, zlo);
             }
         }
         if (it.kind != 0) {
@@ -18126,10 +18152,11 @@ fn df_occlusion_walk(p: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                                          t_cur, t_exit), l2 > 1e-12);
             if (length(q - dir.xy * tc) <= foot.reach) {
                 var it: DfItem;
+                let zlo = p.z + dir.z * t_cur;
                 if (big) {
-                    it = df_big_item(ci, org, fp, foot);
+                    it = df_big_item(ci, org, fp, foot, zlo);
                 } else {
-                    it = df_small_item(ci, org, fp, foot);
+                    it = df_small_item(ci, org, fp, foot, zlo);
                 }
                 if (it.kind != 0) {
                     let ol = p - vec3<f32>(org, 0.0);
