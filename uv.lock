@@ -225,7 +225,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=9.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "pyyaml", specifier = ">=5.4" },
-    { name = "scaleinvariance", editable = "../scaleinvariance" },
+    { name = "scaleinvariance", specifier = ">=0.14.0" },
     { name = "wgpu", specifier = ">=0.30" },
     { name = "xarray", specifier = ">=0.18" },
 ]
@@ -1392,22 +1392,18 @@ wheels = [
 
 [[package]]
 name = "scaleinvariance"
-version = "0.13.1"
-source = { editable = "../scaleinvariance" }
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy" },
-    { name = "scipy" },
-    { name = "torch", marker = "extra == 'torch'" },
+sdist = { url = "https://files.pythonhosted.org/packages/60/73/507e757bbc2287f6f5a9ce23197a0008d74a9f71e585f6212b4911fc5e1c/scaleinvariance-0.14.0.tar.gz", hash = "sha256:41c3442e90be3b72a1ed40dcf6352792d9b126ef3f86bb39bbc056ec505dd18f", size = 59605, upload-time = "2026-08-17T18:54:59.554Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/15/2c/41cf0c8df761d039586ed91980955dbfcd3c47841b46dc69f2bbeb68d81c/scaleinvariance-0.14.0-py3-none-any.whl", hash = "sha256:1b4ea57c9017a401b6897fa3c38d8ddaec9f8cb59e884c9ce36b6940b1d88e1d", size = 65092, upload-time = "2026-08-17T18:54:58.352Z" },
 ]
-provides-extras = ["torch"]
 
 [[package]]
 name = "scipy"

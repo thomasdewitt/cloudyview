@@ -34,14 +34,16 @@ def sea():
     return sea_tile.read(SEA_DIR, SURFACE_TILE_SCHEMAS["ocean"])
 
 
-def _wgsl_pairs(src, name):
-    m = re.search(rf"const {name} = array<vec2<f32>, (\d+)>\((.*?)\n\);",
+def _wgsl_pairs(src, fn):
+    """The vec2 cases of a `fn fn(k: i32) -> vec2<f32> { switch k {...} }`."""
+    m = re.search(rf"fn {fn}\(k: i32\) -> vec2<f32> \{{\s*switch k \{{(.*?)\n    \}}\n\}}",
                   src, re.S)
-    assert m, f"{name} not found in raymarch.wgsl"
-    pairs = [(float(a), float(b)) for a, b in re.findall(
-        r"vec2<f32>\(([-0-9.eE+]+), ([-0-9.eE+]+)\)", m.group(2))]
-    assert len(pairs) == int(m.group(1))
-    return pairs
+    assert m, f"{fn} not found in raymarch.wgsl"
+    rows = re.findall(r"(case (\d+)|default): \{ return vec2<f32>\(([-0-9.eE+]+), "
+                      r"([-0-9.eE+]+)\); \}", m.group(1))
+    assert [r[1] for r in rows[:-1]] == [str(k) for k in range(len(rows) - 1)]
+    assert rows[-1][0] == "default"
+    return [(float(a), float(b)) for _, _, a, b in rows]
 
 
 def _wgsl_scalar(src, name):
@@ -53,7 +55,7 @@ def _wgsl_scalar(src, name):
 def test_the_shader_carries_the_tiles_own_numbers(sea):
     meta, _ = sea
     src = SHADER.read_text()
-    pairs = _wgsl_pairs(src, "SEA_SLOPE_VARIANCE")
+    pairs = _wgsl_pairs(src, "sea_slope_variance")
     assert [a for a, _ in pairs] == pytest.approx(
         meta["slope_variance_removed"], rel=1e-6, abs=1e-12)
     assert [b for _, b in pairs] == pytest.approx(
@@ -247,3 +249,72 @@ def test_the_clock_is_refused_where_nothing_moves(surface):
                       surface=surface, scene_time=5.0,
                       city_offset=(8100.0, -44190.0) if surface == "city"
                       else None)
+
+
+def _wgsl_gain_rows(src):
+    body = re.search(r"fn sea_foam_gain_row\(k: i32\) -> SeaGainRow \{"
+                     r"\s*switch k \{(.*?)\n    \}\n\}", src, re.S)
+    assert body, "sea_foam_gain_row not found in raymarch.wgsl"
+    num = r"([-0-9.eE+]+)"
+    rows = re.findall(
+        r"(case (\d+)|default): \{ return SeaGainRow\(vec4<f32>\("
+        + ", ".join([num] * 4) + r"\), vec4<f32>\(" + ", ".join([num] * 4)
+        + r"\), " + num + r"\); \}", body.group(1))
+    assert [r[1] for r in rows[:-1]] == [str(k) for k in range(len(rows) - 1)]
+    assert rows[-1][0] == "default"
+    return [[float(v) for v in r[2:]] for r in rows]
+
+
+def _gain_lookup(table, theta, along_over_dx):
+    """raymarch.wgsl sea_foam_near_gain, on the meta's table."""
+    import math
+    g = np.asarray(table["gain"])
+    x = min(max(2.0 * (math.log2(along_over_dx) + 3.0), 0.0), len(g) - 1.0)
+    k = min(math.floor(x), len(g) - 2)
+    c = min(max(10.0 * (theta - 0.2), 0.0), 8.0)
+    i = min(math.floor(c), 7)
+
+    def pick(row):
+        return row[i] + (row[i + 1] - row[i]) * (c - i)
+    return pick(g[k]) + (pick(g[k + 1]) - pick(g[k])) * (x - k)
+
+
+def test_the_shader_reads_the_near_gain_the_tile_measured(sea):
+    """The shader's gain rows are meta.json's foam_near_gain, on the axes
+    its lookup assumes, measured with the shader's own near-field constants
+    — change one of those and the table has to be measured again."""
+    from cloudyview import look
+    meta, _ = sea
+    table = meta["foam_near_gain"]
+    src = SHADER.read_text()
+    assert table["x"] == pytest.approx([-3.0 + 0.5 * i for i in range(12)])
+    assert table["theta"] == pytest.approx([0.2 + 0.1 * i for i in range(9)])
+    # Measured where it is read, but for a closed gate (see the exporter).
+    assert table["theta_measured"] == pytest.approx(table["theta"][:-1] + [0.99])
+    np.testing.assert_allclose(_wgsl_gain_rows(src), table["gain"], atol=5e-6)
+    assert table["constants"] == sea_tile.shader_scalars(
+        src, sea_tile.FOAM_NEAR_CONSTANTS)
+    assert table["mip_bias"] == look.OCEAN_MIP_BIAS
+
+
+@pytest.mark.parametrize("x, theta", [
+    (-2.0, 0.5), (0.0, 0.3), (0.0, 0.7), (1.5, 0.5), (2.5, 0.4),
+    (-2.0, 0.95), (2.5, 0.95),
+    # Between rows and columns: the bilinear read, not a measured cell.
+    (-1.25, 0.45), (1.25, 0.65), (2.25, 0.35)])
+def test_the_near_field_has_the_far_fields_cover(sea, x, theta):
+    """With its gain, as the shader reads the table, the near field's
+    whitecaps average to the far field's cover (foam_resolved_cover) — the
+    no-seam promise, re-measured on pixels the exporter never drew."""
+    from cloudyview import look
+    meta, planes = sea
+    table = meta["foam_near_gain"]
+    c = table["constants"]
+    near = sea_tile.NearFoam(meta, planes, c, look.OCEAN_MIP_BIAS)
+    s = near.samples(meta["dx_m"] * 2.0 ** x, 3_000_000, seed=7)
+    far = sea_tile.foam_resolved_cover(
+        theta, meta["lace_cover"], c["SEA_FOAM_OPACITY_OLD"],
+        c["SEA_FOAM_OPACITY_FRESH"], c["SEA_LACE_FRESH_K"],
+        c["SEA_FOAM_EDGE"])
+    gain = _gain_lookup(table, theta, 2.0 ** x)
+    assert near.cover(s, theta, gain) == pytest.approx(far, rel=0.03)
