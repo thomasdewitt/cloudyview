@@ -27,10 +27,8 @@
 // Exit 0 clean; 1 on any compile error; 2 when it cannot run at all (no
 // Chrome, no adapter); 3 when the served shader is not the expected one.
 
-import { createServer } from "node:http";
-import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
-import { extname, join, resolve, sep } from "node:path";
+import { join } from "node:path";
+import { openTab, serveTree, servedShaderHash } from "./soar_cdp.mjs";
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -57,109 +55,34 @@ if (base && !expectFile) {
   process.exit(2);
 }
 
-const TYPES = { ".js": "text/javascript", ".mjs": "text/javascript",
-                ".wgsl": "text/plain", ".json": "application/json",
-                ".html": "text/html", ".css": "text/css" };
 let server = null;
 if (webDir) {
-  const root = resolve(webDir);
-  server = createServer(async (req, res) => {
-    try {
-      const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
-      if (path === "/") {
-        // The page the modules are imported into. It must be a real 200
-        // document: Chrome replaces an empty 404 with its own error page,
-        // which has no WebGPU.
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end("<!doctype html><title>tint_check</title>");
-        return;
-      }
-      const file = resolve(join(root, path));
-      if (file !== root && !file.startsWith(root + sep)) throw new Error("outside");
-      // Symlinks are followed: web/soar/raymarch.wgsl is one, into the
-      // package, and that is the file the app really serves.
-      const body = await readFile(await realpath(file));
-      res.writeHead(200, { "Content-Type": TYPES[extname(file)] ?? "text/html" });
-      res.end(body);
-    } catch {
-      res.writeHead(404);
-      res.end();
-    }
-  });
-  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-  base = `http://127.0.0.1:${server.address().port}`;
-  expectFile = join(root, "soar", "raymarch.wgsl");
+  server = await serveTree(webDir);
+  base = server.base;
+  expectFile = join(server.root, "soar", "raymarch.wgsl");
 }
-const done = (code) => { server?.close(); process.exit(code); };
+let tab = null;
+const done = async (code) => {
+  await tab?.close();
+  server?.close();
+  process.exit(code);
+};
+const fail = async (err) => {
+  console.error(`tint_check: ${err.message}`);
+  await done(err.code ?? 2);
+};
 
 // The served shader must be the local one, byte for byte.
-const sha = (buf) => createHash("sha256").update(buf).digest("hex");
-const local = await readFile(await realpath(expectFile));
-let served;
+let shaderHash;
 try {
-  const r = await fetch(`${base}/soar/raymarch.wgsl`, { cache: "no-store" });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  served = Buffer.from(await r.arrayBuffer());
+  shaderHash = await servedShaderHash(base, expectFile);
+  tab = await openTab(cdpPort);
+  // A same-origin page to import the app's modules from; the app itself is
+  // not booted.
+  await tab.goto(`${base}/`);
 } catch (err) {
-  console.error(`tint_check: could not fetch ${base}/soar/raymarch.wgsl ` +
-                `(${err.message})`);
-  done(2);
+  await fail(err);
 }
-if (sha(served) !== sha(local)) {
-  console.error(`tint_check: ${base} serves a raymarch.wgsl that is NOT ` +
-                `${expectFile} (served sha256 ${sha(served).slice(0, 16)}, ` +
-                `local ${sha(local).slice(0, 16)}). Another tree is being ` +
-                "served on that port; nothing was compiled.");
-  done(3);
-}
-const shaderHash = sha(served).slice(0, 16);
-
-async function page(port) {
-  let targets;
-  try {
-    targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
-  } catch (err) {
-    console.error(`tint_check: no Chrome DevTools endpoint on port ${port}`);
-    done(2);
-  }
-  // A tab of its own, closed at the end: the same Chrome may be driving a
-  // QA pass in its other tabs, and navigating theirs would break it.
-  void targets;
-  const t = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`,
-                               { method: "PUT" })).json();
-  const ws = new WebSocket(t.webSocketDebuggerUrl);
-  await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = bad; });
-  let id = 0;
-  const waiting = new Map();
-  const events = [];
-  ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.id && waiting.has(m.id)) {
-      const { ok, bad } = waiting.get(m.id);
-      waiting.delete(m.id);
-      m.error ? bad(new Error(JSON.stringify(m.error))) : ok(m.result);
-    } else if (m.method) {
-      for (const f of events) f(m);
-    }
-  };
-  const send = (method, params = {}) => new Promise((ok, bad) => {
-    waiting.set(++id, { ok, bad });
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-  await send("Page.enable");
-  const close = () => fetch(`http://127.0.0.1:${port}/json/close/${t.id}`)
-    .catch(() => {});
-  return { ws, send, events, close };
-}
-
-const { ws, send, events, close } = await page(cdpPort);
-// A same-origin page to import the app's modules from. The directory listing
-// is enough; the app itself is not booted.
-const loaded = new Promise((ok) => events.push((m) => {
-  if (m.method === "Page.loadEventFired") ok();
-}));
-await send("Page.navigate", { url: `${base}/` });
-await loaded;
 
 const expression = `(async () => {
   const base = ${JSON.stringify(base)};
@@ -241,20 +164,13 @@ const expression = `(async () => {
                            .filter(Boolean).join(" ") };
 })()`;
 
-const r = await send("Runtime.evaluate",
-                     { expression, awaitPromise: true, returnByValue: true });
-ws.close();
-await close();
-if (r.exceptionDetails) {
-  console.error("tint_check: " + (r.exceptionDetails.exception?.description
-                                  ?? r.exceptionDetails.text));
-  done(2);
+let result;
+try {
+  result = await tab.eval(expression);
+} catch (err) {
+  await fail(err);
 }
-const result = r.result.value;
-if (result.fatal) {
-  console.error(`tint_check: ${result.fatal}`);
-  done(2);
-}
+if (result.fatal) await fail(new Error(result.fatal));
 let failed = 0;
 const seen = new Set();
 for (const m of result.out) {
@@ -269,4 +185,4 @@ for (const m of result.out) {
 }
 console.log(`tint_check: ${result.out.length} modules, ${failed} failed ` +
             `(raymarch.wgsl sha256 ${shaderHash}; ${result.adapter})`);
-done(failed ? 1 : 0);
+await done(failed ? 1 : 0);

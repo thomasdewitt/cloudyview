@@ -204,6 +204,10 @@ struct Uniforms {
 // bind a 1x1 stand-in and never run the pass. See the surface pre-pass
 // section.
 @group(1) @binding(0) var surface_buf: texture_2d<f32>;
+// The first stage's surface, for a surface that is refined in a second
+// stage (fs_surface_refine) — the city's plain boxes, the desert's far plant
+// forms — and a 1x1 stand-in for every other pass.
+@group(1) @binding(1) var surface_plain: texture_2d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -14052,6 +14056,13 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
                      dhit.t);
 }
 
+// The desert's second surface stage (fs_surface_refine): the near plants
+// over the plain surface, re-walked only within their reach up to plain.w.
+// A pass-through until desert-ground's and desert-flora's land.
+fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
+
 // === END DESERT GROUND ===
 
 // ===========================================================================
@@ -14155,6 +14166,20 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // the ray the march composites: the same pixel, subpixel stream and frame
 // index, which is what keeps sub-pixel surface detail accumulating.
 //
+// A surface whose full detail is too register-hungry even for its own pass
+// splits in two: fs_surface draws what every pixel needs cheaply, and
+// fs_surface_refine re-traces only the pixels that need more, reading the
+// first stage's result at group 1 binding 1 and writing the final one. The
+// second stage's registers are paid only by its own kernel, which most
+// pixels leave at once. Each surface decides its own early-out from the
+// first stage's t alone, with no flag: the second stage re-walks only the
+// reach its detail lives in (the city's facade shell, the desert's near
+// plants) up to that t, and a pixel whose surface lies beyond the reach is
+// returned exactly as it came. Its result is the one fs_main reads, so t
+// stays >= 0 (1e30 on a miss) as in the first stage.
+// Which surfaces have the second stage is the hosts' list
+// (soar_host.SURFACE_REFINE_SURFACES, renderer.js _hasRefineStage).
+//
 // One function per surface, chosen by the scene's specialization. Anything
 // that belongs to the surface and sits in front of it along the ray (city
 // fog, a component's in-scatter at street level) is folded into its rgb here
@@ -14233,6 +14258,13 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
                               city_o, dir, chit.t, chit.pos), chit.t);
 }
 
+// The city's second stage: the facade shell over the plain surface. Until
+// the shell lands it is the identity, which is what proves the stage's
+// machinery exact.
+fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
+
 // The pass itself. Only the CITY and DESERT specializations are ever run
 // through it; any other scene returns a miss and the host never draws it.
 @fragment
@@ -14251,6 +14283,22 @@ fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> 
                                    cr.jitter_amp);
     }
     return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+}
+
+// The second stage, for a surface that has one. Most pixels leave at once;
+// see each surface's refine function for when.
+@fragment
+fn fs_surface_refine(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    let plain = textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    let cr = camera_ray(frag_pos);
+    if (CITY) {
+        return surface_refine_city(cr, plain);
+    }
+    if (DESERT) {
+        return desert_surface_refine(cr, plain);
+    }
+    return plain;
 }
 
 @fragment
