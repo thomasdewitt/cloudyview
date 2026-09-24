@@ -239,6 +239,7 @@ struct cc_streetfurniture_Edge {
     park: bool,       // a parking lane runs beside this kerb
     pole_kerb: bool,  // the lamp line falls inside the kerb lane
     line: i32,        // the centreline this edge faces (its lamp lattice)
+    wall_ok: bool,    // the building's face stands on the building line
 }
 
 fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
@@ -277,6 +278,12 @@ fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
     e.pole_kerb = CITY_LAMP_OFFSET > lane_lo - 0.2
                && CITY_LAMP_OFFSET < lane_hi + 0.2;
     e.ok = inside && e.a_hi > e.a_lo + 1.0 && city_edge_street(cc, side);
+    // The wall lane stands against a wall only if there is one: where the
+    // building is set back into its plot, a dumpster "against the wall" at
+    // the plot edge would stand alone in the plaza (the review's M6).
+    let face = select(select(cc.b1min.y, cc.b1max.y, hi_side),
+                      select(cc.b1min.x, cc.b1max.x, hi_side), xs);
+    e.wall_ok = abs(face - e.bl) < 0.6;
     return e;
 }
 
@@ -1274,6 +1281,9 @@ fn cc_streetfurniture_props_trace(o: vec3<f32>, dir: vec3<f32>,
         for (var lane: i32 = 0; lane < 2; lane = lane + 1) {
             let kerb = lane == 0;
             if (kerb && fpx > cc_streetfurniture_KERB_FAR.y) {
+                continue;
+            }
+            if (!kerb && !e.wall_ok) {
                 continue;
             }
             // The lane's slab: its across band, the usable along range, and

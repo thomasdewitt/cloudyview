@@ -130,24 +130,26 @@ def smoothstep(e0, e1, x):
     return t * t * (3.0 - 2.0 * t)
 
 
-# --- the shader's noise, in float64 -------------------------------------------
-def hash12(px, py):
-    p3x = np.mod(px * 0.1031, 1.0)
-    p3y = np.mod(py * 0.1031, 1.0)
-    p3z = np.mod(px * 0.1031, 1.0)
-    d = p3x * (p3y + 33.33) + p3y * (p3z + 33.33) + p3z * (p3x + 33.33)
-    p3x, p3y, p3z = p3x + d, p3y + d, p3z + d
-    return np.mod((p3x + p3y) * p3z, 1.0)
-
-
-def vnoise(px, py):
-    ix, iy = np.floor(px), np.floor(py)
-    fx, fy = px - ix, py - iy
+# --- the shader's noise ----------------------------------------------------------
+def vnoise(px, py, freq, off):
+    """city_vnoise: value noise of p * freq + off on an integer lattice
+    wrapped at 1000 m, hashed by pcg2d."""
+    n = max(round(1000.0 * freq), 1.0)
+    qx = np.mod(px, 1000.0) * freq + off
+    qy = np.mod(py, 1000.0) * freq + off
+    ix, iy = np.floor(qx), np.floor(qy)
+    fx, fy = qx - ix, qy - iy
     wx, wy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
-    a = hash12(ix, iy)
-    b = hash12(ix + 1, iy)
-    c = hash12(ix, iy + 1)
-    d = hash12(ix + 1, iy + 1)
+    i0x, i0y = np.mod(ix, n), np.mod(iy, n)
+    i1x = np.where(i0x + 1 >= n, 0.0, i0x + 1)
+    i1y = np.where(i0y + 1 >= n, 0.0, i0y + 1)
+
+    def h(x, y):
+        hx, _ = pcg2d(x.astype(np.uint64), y.astype(np.uint64))
+        return hx.astype(np.float64) * 2.3283064365386963e-10
+
+    a, b = h(i0x, i0y), h(i1x, i0y)
+    c, d = h(i0x, i1y), h(i1x, i1y)
     return (a + (b - a) * wx) * (1 - wy) + (c + (d - c) * wx) * wy
 
 
@@ -248,9 +250,9 @@ def ground(ci, x, y, noise_off):
 
     film = w_road * WET_ROAD + w_gutter * 1.0 + (w_kerb | w_in) * WET_WALK
     px, py = x + noise_off[0], y + noise_off[1]
-    n = 0.62 * vnoise(px * 0.38, py * 0.38) \
-        + 0.38 * vnoise(px * 1.1 + 37.1, py * 1.1 + 37.1)
-    region = vnoise(px * 0.025 + 5.3, py * 0.025 + 5.3) - 0.5
+    n = 0.62 * vnoise(px, py, 0.38, 0.0) \
+        + 0.38 * vnoise(px, py, 1.1, 37.1)
+    region = vnoise(px, py, 0.025, 5.3) - 0.5
     crown = 1 - smoothstep(0, 2.5, np.minimum(np.where(on_x, ex, 1e3),
                                                np.where(on_y, ey, 1e3)))
     gutter = np.where(d > 0, 1 - smoothstep(0.10, 0.70, d), 0.0)
@@ -323,8 +325,8 @@ def main():
     # Puddle coverage against the bias, over many noise positions.
     px = rng.uniform(0, 2e4, 2_000_000)
     py = rng.uniform(0, 2e4, 2_000_000)
-    n = 0.62 * vnoise(px * 0.38, py * 0.38) \
-        + 0.38 * vnoise(px * 1.1 + 37.1, py * 1.1 + 37.1)
+    n = 0.62 * vnoise(px, py, 0.38, 0.0) \
+        + 0.38 * vnoise(px, py, 1.1, 37.1)
     b = np.linspace(-0.4, 0.6, 51)
     cov = np.array([smoothstep(PUDDLE_THR - PUDDLE_EDGE,
                                PUDDLE_THR + PUDDLE_EDGE, n + bb).mean()

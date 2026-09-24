@@ -241,10 +241,13 @@ fn cc_manholesteam_site(k: i32, j: i32, along_y: bool) -> cc_manholesteam_Site {
     if (v >= 1.0) {
         return s;
     }
+    // Seeded like the site itself (city_manhole): the street and the along
+    // index folded at the tile, so a plume keeps its shape across the seam.
+    let jn = i32(round(u.ocean_params.y / CITY_MH_PITCH));
     let r = city_rand4(vec2<u32>(
-        bitcast<u32>(k) * 0x2545f491u + select(0x6a09e667u, 0xbb67ae85u,
-                                              along_y),
-        bitcast<u32>(j) * 0x9e3779b9u + 0x3c6ef372u));
+        city_line_seed(k) * 0x2545f491u + select(0x6a09e667u, 0xbb67ae85u,
+                                                 along_y),
+        bitcast<u32>(((j % jn) + jn) % jn) * 0x9e3779b9u + 0x3c6ef372u));
     s.on = true;
     s.stack = v < cc_manholesteam_STACK_SHARE;
     s.c = m.xy;
@@ -462,6 +465,10 @@ fn cc_manholesteam_march(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
         let shadow = mix(exp(-tau_l), 1.0, cc_manholesteam_MS_FLOOR);
         rad = rad + trans * a * shadow * cc_manholesteam_light(p, dir, st);
         trans = trans * (1.0 - a);
+        // Opaque enough that nothing behind can show: stop marching.
+        if (trans < 0.01) {
+            break;
+        }
     }
     return vec4<f32>(rad, trans);
 }
@@ -667,8 +674,15 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
             if (zn >= 0.0 && zn <= cc_manholesteam_STACK_H) {
                 th = tn;
             } else if (zn > cc_manholesteam_STACK_H) {
+                // In over the rim — but only if the far wall is met below
+                // it: a ray that crosses the whole circle above 3 m passes
+                // clean over the mouth.
+                let zf = o.z + tf * dir.z;
+                if (zf > cc_manholesteam_STACK_H) {
+                    continue;
+                }
                 inner = true;
-                th = select(tf, -o.z / dir.z, o.z + tf * dir.z < 0.0);
+                th = select(tf, -o.z / dir.z, zf < 0.0);
             }
             if (th < t0 || th >= t_end) {
                 continue;

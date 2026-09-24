@@ -118,7 +118,7 @@ Signatures (the composer checks these by compiling):
   media between the eye and the city hit at `t_max` (steam): in-scattered
   radiance in rgb, transmittance in a. The core applies it as
   `rgb + a * city`; `(0, 0, 0, 1)` is the identity. `rnd` is a per-pixel
-  stratified uniform over the accumulation, for jittering a march.
+  independent (white) uniform per frame, for jittering a march.
 
 ## The street (core section THE STREET SURFACE)
 

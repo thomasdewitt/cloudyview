@@ -2769,6 +2769,7 @@ fn city_frame_rand(pixel: vec2<u32>, frame: u32, stream: u32) -> vec4<f32> {
 }
 const CITY_RAND_REFLECT: u32 = 1u;
 const CITY_RAND_MEDIA: u32 = 2u;
+const CITY_RAND_ROULETTE: u32 = 3u;
 
 // The media hook (steam) composited over a city surface at distance t along
 // the view ray from o (city frame): rgb + a * surface. One definition for
@@ -2777,7 +2778,10 @@ const CITY_RAND_MEDIA: u32 = 2u;
 fn city_media_over(rgb: vec3<f32>, o: vec3<f32>, dir: vec3<f32>, t: f32,
                    pixel_angle: f32, frame_index: u32,
                    strat_pixel: vec2<u32>) -> vec3<f32> {
-    let med = cc_media(o, dir, 1.0 / dir, t, pixel_angle,
+    let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
+                        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
+    let med = cc_media(o, dir, inv, t, pixel_angle,
                        city_frame_rand(strat_pixel, frame_index,
                                        CITY_RAND_MEDIA).x);
     return med.rgb + med.a * rgb;
@@ -3870,7 +3874,7 @@ const CITY_PUDDLE_DARKEN: f32 = 0.85;
 const CITY_PUDDLE_THR: f32 = 0.67;
 const CITY_PUDDLE_EDGE: f32 = 0.015;
 const CITY_PUDDLE_LOD: vec2<f32> = vec2<f32>(0.30, 1.20);
-const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0945);
+const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
 
 // Manholes: CITY_MH_PITCH apart along every centreline (a divisor of the
 // block, so the lattice is the same on every block), set in a travel lane,
@@ -3895,6 +3899,8 @@ const CITY_REFL_ALPHA_DAMP: f32 = 0.08;
 // canyon and reach the towers beyond it; a rising ray that has found nothing
 // by then sees sky.
 const CITY_REFL_RANGE: f32 = 600.0;
+// Lobes that carry less than this are traced only by Russian roulette.
+const CITY_REFL_RR: f32 = 0.15;
 // Footprint over which the traced reflection hands over to its mean. Past
 // it a wet pixel reflects the environment estimate, and pays nothing.
 const CITY_REFL_LOD: vec2<f32> = vec2<f32>(0.30, 0.80);
@@ -3914,7 +3920,7 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0695, 0.2251);
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0694, 0.2250);
 const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0084, 0.1047);
 
 // STUB for city-facades' storefront glow, same arrangement: the mean emitted
@@ -4058,16 +4064,26 @@ fn city_step(x: f32, a: f32, fp: f32) -> f32 {
     return clamp((x - a + h) / (2.0 * h), 0.0, 1.0);
 }
 
-// Value noise, mean 0.5 by symmetry — which is what lets a texture built as
-// 1 + k (n - 0.5) dissolve into exactly 1.
-fn city_vnoise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = p - i;
+// Value noise of p * freq + off, mean 0.5 by symmetry — which is what lets a
+// texture built as 1 + k (n - 0.5) dissolve into exactly 1. Periodic in p
+// with period 1000 m: p is folded first and the lattice wraps with it (every
+// frequency used here times 1000 m is a whole number of cells), so the hash
+// only ever sees small integers. Fed raw city-frame coordinates (up to
+// 92 km, times 4 for the aggregate) an f32 float hash collapses — the review
+// measured the aggregate repeating every ~24 m in the far tile.
+fn city_vnoise(p: vec2<f32>, freq: f32, off: f32) -> f32 {
+    let q = p - 1000.0 * floor(p / 1000.0);
+    let n = max(round(1000.0 * freq), 1.0);
+    let x = q * freq + vec2<f32>(off);
+    let i = floor(x);
+    let f = x - i;
     let w = f * f * (3.0 - 2.0 * f);
-    let a = hash12(i);
-    let b = hash12(i + vec2<f32>(1.0, 0.0));
-    let c = hash12(i + vec2<f32>(0.0, 1.0));
-    let d = hash12(i + vec2<f32>(1.0, 1.0));
+    let i0 = i - n * floor(i / n);
+    let i1 = select(i0 + 1.0, vec2<f32>(0.0), i0 + 1.0 >= vec2<f32>(n));
+    let a = city_u01(pcg2d(vec2<u32>(u32(i0.x), u32(i0.y))).x);
+    let b = city_u01(pcg2d(vec2<u32>(u32(i1.x), u32(i0.y))).x);
+    let c = city_u01(pcg2d(vec2<u32>(u32(i0.x), u32(i1.y))).x);
+    let d = city_u01(pcg2d(vec2<u32>(u32(i1.x), u32(i1.y))).x);
     return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
 }
 
@@ -4148,8 +4164,12 @@ fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
             }
             // The cast pattern: a raised grid, and the rim ring. Both are
             // stripes, so both dissolve to their duty cycle.
-            let grid = max(city_stripes(lq.x, 0.0, 0.025, 0.075, fp),
-                           city_stripes(lq.y, 0.0, 0.025, 0.075, fp));
+            // Union of the two bar sets as 1 - (1-a)(1-b): exact in the
+            // mean (independent axes), where max() dissolved to 1/3 of a
+            // resolved 5/9 (the review).
+            let grid = 1.0 - (1.0 - city_stripes(lq.x, 0.0, 0.025, 0.075, fp))
+                           * (1.0 - city_stripes(lq.y, 0.0, 0.025, 0.075,
+                                                 fp));
             let rim = city_band(d, CITY_MH_R - 0.035, 0.035, fp);
             cov = max(cov, disc);
             tone = mix(1.0, 0.72 + 0.55 * grid, 1.0 - rim) * (1.0 + 0.6 * rim);
@@ -4193,18 +4213,20 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                     * (1.0 - city_stripes(lp.y, -0.5 * CITY_JOINT_W,
                                           CITY_JOINT_W, CITY_FLAG, fp));
     let fid = floor(lp / CITY_FLAG);
-    let ftone = mix(1.0 + 0.30 * (hash12(fid + kr.xy * 0.37) - 0.5), 1.0,
+    let fh = pcg2d(vec2<u32>(bitcast<u32>(i32(fid.x)) ^ cc.seed.x,
+                             bitcast<u32>(i32(fid.y)) ^ cc.seed.y));
+    let ftone = mix(1.0 + 0.30 * (city_u01(fh.x) - 0.5), 1.0,
                     smoothstep(0.4 * CITY_FLAG, 1.5 * CITY_FLAG, fp));
     // Stains: the dark blots every city sidewalk carries, mean 1.
-    let stain = mix(1.0 + 0.40 * (city_vnoise(p * 0.9 + 3.7) - 0.5), 1.0,
+    let stain = mix(1.0 + 0.40 * (city_vnoise(p, 0.9, 3.7) - 0.5), 1.0,
                     smoothstep(0.5, 2.0, fp));
     let rel_walk = CITY_REL_WALK * ftone * stain * (1.0 - 0.6 * joint);
     let rel_in = select(CITY_REL_LOT * stain, rel_walk, walk_ok);
 
     // Asphalt: aggregate at a quarter metre, patching at six. Both mean 1.
-    let agg = mix(1.0 + 0.30 * (city_vnoise(p * 4.0) - 0.5), 1.0,
+    let agg = mix(1.0 + 0.30 * (city_vnoise(p, 4.0, 0.0) - 0.5), 1.0,
                   smoothstep(0.08, 0.30, fp));
-    let patching = mix(1.0 + 0.45 * (city_vnoise(p * 0.17 + 31.7) - 0.5), 1.0,
+    let patching = mix(1.0 + 0.45 * (city_vnoise(p, 0.17, 31.7) - 0.5), 1.0,
                     smoothstep(2.0, 8.0, fp));
     var road = vec3<f32>(agg * patching);
 
@@ -4253,7 +4275,7 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                       * city_stripes(rd.sy, 0.25, 0.5, 1.0, fp);
     }
     // Paint wears through where the tyres run; mean 0.8.
-    let wear = mix(0.6 + 0.4 * city_vnoise(p * 1.3 + 9.1), 0.8,
+    let wear = mix(0.6 + 0.4 * city_vnoise(p, 1.3, 9.1), 0.8,
                    smoothstep(0.3, 1.2, fp));
     white = min(white, 1.0) * wear;
     yellow = min(yellow, 1.0) * wear;
@@ -4280,8 +4302,8 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     // gutter and off the crown of the road.
     let film = w_road * CITY_WET_ROAD + w_gutter
              + (w_kerb + w_in) * CITY_WET_WALK;
-    let n = 0.62 * city_vnoise(p * 0.38) + 0.38 * city_vnoise(p * 1.1 + 37.1);
-    let region = city_vnoise(p * 0.025 + 5.3) - 0.5;
+    let n = 0.62 * city_vnoise(p, 0.38, 0.0) + 0.38 * city_vnoise(p, 1.1, 37.1);
+    let region = city_vnoise(p, 0.025, 5.3) - 0.5;
     let crown = 1.0 - smoothstep(0.0, 2.5, min(select(1e3, ex, on_x),
                                                select(1e3, ey, on_y)));
     // Where water actually stands: along the foot of the kerb (the gutter
@@ -4289,7 +4311,13 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     // raised sidewalk sheds), and in the tyre ruts worn into every lane,
     // 0.85 m either side of its centre. Noise only decides where along
     // those the water breaks.
-    let gutter = select(0.0, 1.0 - smoothstep(0.10, 0.70, d), d > 0.0);
+    // Both are narrow bands and both feed the puddle threshold, so both are
+    // footprint-filtered or they alias into sparkle at a few m/px (the
+    // Claude review): the gutter widens with fp at constant area, and the
+    // ruts hand over to their duty cycle inside the travel lanes (two
+    // ~0.4 m ruts per 3.1 m lane).
+    let gutter = select(0.0, (1.0 - smoothstep(0.10, 0.70 + fp, d))
+                             * (0.4 / (0.4 + 0.5 * fp)), d > 0.0);
     var lane_c = 1e3;
     if (on_x && ey > rd.hy) {
         lane_c = select(rd.sx + city_park_side(rd.kx) * 1.2,
@@ -4299,7 +4327,9 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
         lane_c = select(rd.sy + city_park_side(rd.ky) * 1.2,
                         ey - 1.6 - round((ey - 1.6) / 3.1) * 3.1, rd.ave_y);
     }
-    let rut = 1.0 - smoothstep(0.10, 0.30, abs(abs(lane_c) - 0.85));
+    let rut = mix(1.0 - smoothstep(0.10, 0.30, abs(abs(lane_c) - 0.85)),
+                  select(0.0, 0.26, lane_c < 100.0),
+                  smoothstep(0.3, 1.2, fp));
     let bias = 0.38 * gutter + 0.14 * rut * w_road
              - 0.12 * crown - 0.35 * (w_kerb + w_in) + 0.12 * region;
     let pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
@@ -4313,7 +4343,7 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     // The film is not a sheet: it pools in the texture and drains off the
     // high spots, so its gloss mottles at half a metre and the joints hold
     // water. Mean 1, so the far field keeps the film's average sheen.
-    let mottle = mix(1.0 + 1.4 * (city_vnoise(p * 1.7 + 11.3) - 0.5), 1.0,
+    let mottle = mix(1.0 + 1.4 * (city_vnoise(p, 1.7, 11.3) - 0.5), 1.0,
                      smoothstep(0.3, 1.2, fp));
     var g: CityGround;
     g.alb = dry * (1.0 - CITY_WET_DARKEN * film * (1.0 - puddle)
@@ -4362,36 +4392,57 @@ fn city_lamp_scale(p: vec2<f32>) -> f32 {
 // was, so a district's floor keeps its brightness as it dissolves.
 fn city_ground_radiance(p: vec3<f32>, ci: vec2<i32>, cc: CityCell,
                         dir: vec3<f32>, fp: f32) -> vec3<f32> {
+    let paved = city_ground_paved(cc, ci, p.xy);
+    if (city_ground_is_lot(paved, cc)) {
+        return city_lot_radiance(p, cc, fp);
+    }
+    return city_ground_lit(p, cc, dir, fp, city_ground(p.xy, ci, cc, fp),
+                           paved);
+}
+
+// Open ground on the fringe (city-layout's yard / scrub / industrial lot):
+// no street, no sidewalk, and no wet reflection traced off it.
+fn city_ground_is_lot(paved: bool, cc: CityCell) -> bool {
+    return !paved && cc.land_use != CITY_USE_URBAN;
+}
+
+// It sees the whole sky where a canyon floor sees a slot of it, and on a
+// city night that sky is the cloud deck lit from below by the whole city —
+// the wide glow mip is that light's source — so yards and scrub read,
+// faintly, as moonlit and city-lit dirt rather than a void. Their mottle has
+// mean one and dissolves as the footprint outgrows a patch.
+fn city_lot_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
     let moon = u.sun_dir.xyz;
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(p.xy, 3.0));
-    let floods = city_flood_ground(cc, p.xy, fp);
-    if (!city_ground_paved(cc, ci, p.xy) && cc.land_use != CITY_USE_URBAN) {
-        // Open ground on the fringe (city-layout's): it sees the whole sky
-        // where a canyon floor sees a slot of it, and on a city night that
-        // sky is the cloud deck lit from below by the whole city — the wide
-        // glow mip is that light's source — so yards and scrub read, faintly,
-        // as moonlit and city-lit dirt rather than a void. Their mottle has
-        // mean one and dissolves as the footprint outgrows a patch.
-        let alb = select(CITY_YARD_ALBEDO, CITY_SCRUB_ALBEDO,
-                         cc.land_use == CITY_USE_OPEN)
-                * city_ground_mottle(p.xy, fp);
-        let sky = fill + CITY_OPEN_SKY
-                * (CITY_OPEN_SKY_BASE + city_glow_sample(p.xy, 8.0));
-        return floods + alb * (sky + CITY_MOONLIGHT * max(moon.z, 0.0));
-    }
-    let g = city_ground(p.xy, ci, cc, fp);
+    let alb = select(CITY_YARD_ALBEDO, CITY_SCRUB_ALBEDO,
+                     cc.land_use == CITY_USE_OPEN)
+            * city_ground_mottle(p.xy, fp);
+    let sky = fill + CITY_OPEN_SKY
+            * (CITY_OPEN_SKY_BASE + city_glow_sample(p.xy, 8.0));
+    return city_flood_ground(cc, p.xy, fp)
+         + alb * (sky + CITY_MOONLIGHT * max(moon.z, 0.0));
+}
+
+// The street and sidewalk under their lights, from a material already
+// evaluated (the view ray's pass evaluates it once and hands the same one to
+// the wet lobe). The far field's lamp term is the measured mean for the
+// street (tools/street_means.py) only where the ground IS street: inside the
+// plot, and on a streetless edge's strip (whose own lamps city-layout's gate
+// has switched off), it is the mean of the neighbouring pools' tails.
+fn city_ground_lit(p: vec3<f32>, cc: CityCell, dir: vec3<f32>, fp: f32,
+                   g: CityGround, paved: bool) -> vec3<f32> {
+    let moon = u.sun_dir.xyz;
+    let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(p.xy, 3.0));
     let s = city_lamp_scale(p.xy);
     let raw = s * city_street_pools(p.xy);
     let near = CITY_LAMP_COLOR * (raw / (1.0 + CITY_POOL_KNEE * raw)) * g.alb;
-    let inside_plot = p.x > cc.plot_min.x && p.x < cc.plot_max.x
-                   && p.y > cc.plot_min.y && p.y < cc.plot_max.y;
-    let fit = select(CITY_GROUND_FAR_STREET, CITY_GROUND_FAR_PLOT,
-                     inside_plot);
+    let fit = select(CITY_GROUND_FAR_PLOT, CITY_GROUND_FAR_STREET, paved);
     let far = CITY_LAMP_COLOR * (fit.x * s / (1.0 + fit.y * s));
     let lamp = mix(near, far, smoothstep(CITY_STREET_LOD_START,
                                          CITY_STREET_LOD_FULL, fp));
-    return lamp + floods + city_storefront_spill(p.xy, cc) * g.alb
-         + city_lamp_glint(p, dir, g)
+    return lamp + city_flood_ground(cc, p.xy, fp)
+         + city_storefront_spill(p.xy, cc) * g.alb
+         + city_lamp_glint(p, dir, g, fp)
          + CITY_ASPHALT_ALBEDO * g.alb
            * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
@@ -4400,7 +4451,10 @@ fn city_ground_radiance(p: vec3<f32>, ci: vec2<i32>, cc: CityCell,
 // sill, a plume of steam. The lamp heads on the core's lattice
 // (city_lamp_inset, CITY_LAMP_SPACING) are point sources hung CITY_LAMP_ARM
 // out over the road at CITY_LAMP_HEAD_Z, with a downward cosine lobe, scaled
-// so that the ground straight under a head receives the peak of its pool.
+// so that the ground straight under a head receives the peak of one pool.
+// (The pools themselves centre on the pole's foot, CITY_LAMP_ARM inboard of
+// the head — well inside their CITY_LAMP_SIGMA, so the two agree to within
+// what the eye can place.)
 // The result is radiance-scale, in the ground's units: multiply by a
 // surface's albedo relative to asphalt, as city_ground_radiance does. The
 // eight heads nearest p (the lamp line either side of the nearest boundary,
@@ -4479,7 +4533,8 @@ fn city_ggx_d(nh: f32, a2: f32) -> f32 {
     let k = nh * nh * (a2 - 1.0) + 1.0;
     return a2 / (3.14159265 * k * k);
 }
-fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
+fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
+        -> vec3<f32> {
     let film = g.gloss * (1.0 - g.puddle);
     if (film + g.puddle <= 0.0) {
         return vec3<f32>(0.0);
@@ -4494,6 +4549,13 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
     let g1v_p = 2.0 * nv / (nv + sqrt(ap + (1.0 - ap) * nv * nv));
     let g1v_d = 2.0 * nv / (nv + sqrt(ad + (1.0 - ad) * nv * nv));
     let lit = city_lamp_lines(p.xy);
+    // The heads a mirror shows are the ones near where the MIRROR ray (the
+    // view ray reflected about the ground) reaches head height — at grazing
+    // incidence that is far down the street, not beside the point. Summing
+    // the two stations beside the point lost every lamp past ~35 m from an
+    // eye-level camera (the Claude review, 2026-09-23). The rough lobe
+    // centres on the same direction, so the same two stations serve both.
+    let t_head = min((CITY_LAMP_HEAD_Z - p.z) / max(-dir.z, 0.02), 300.0);
     var e = 0.0;
     for (var dirn: i32 = 0; dirn < 2; dirn = dirn + 1) {
         let along_y = dirn == 0;
@@ -4506,7 +4568,8 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
         let amp = select(1.0, 1.6, city_is_avenue(k));
         let inset = city_lamp_inset(k);
         let lat = city_lamp_lattice(k);
-        let j0 = floor((a - lat.y) / lat.x);
+        let a_m = a + select(dir.x, dir.y, along_y) * t_head;
+        let j0 = floor((a_m - lat.y) / lat.x);
         for (var sd: i32 = 0; sd < 2; sd = sd + 1) {
             let hc = f32(k) * cellm
                    + select(-1.0, 1.0, sd == 1) * (inset - CITY_LAMP_ARM);
@@ -4527,8 +4590,14 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround) -> vec3<f32> {
                          * pow(1.0 - clamp(dot(v, hv), 0.0, 1.0), 5.0);
                 let g1l_p = 2.0 * nl / (nl + sqrt(ap + (1.0 - ap) * nl * nl));
                 let g1l_d = 2.0 * nl / (nl + sqrt(ad + (1.0 - ad) * nl * nl));
-                let lobe = g.puddle * city_ggx_d(nh, ap) * g1v_p * g1l_p
-                         + film * city_ggx_d(nh, ad) * g1v_d * g1l_d;
+                // Each lobe widened by the pixel's footprint as the lamp
+                // sees it (fp / r radians, half of it in half-vector
+                // angle): D is normalised, so a distant puddle's mirror
+                // image of a lamp spreads into its mean rather than
+                // sparkling on the one pixel that happens to catch it.
+                let wide = 0.25 * fp * fp / r2;
+                let lobe = g.puddle * city_ggx_d(nh, ap + wide) * g1v_p * g1l_p
+                         + film * city_ggx_d(nh, ad + wide) * g1v_d * g1l_d;
                 e = e + e_pool * fres * lobe / (4.0 * nv * nl);
             }
         }
@@ -4562,7 +4631,7 @@ struct CityWetLobe {
     env: vec3<f32>,    // the environment estimate, where blend > 0
 }
 
-fn city_wet_lobe(h: CityHit, cc: CityCell, dir: vec3<f32>,
+fn city_wet_lobe(h: CityHit, g: CityGround, dir: vec3<f32>,
                  pixel_angle: f32, rnd: vec3<f32>) -> CityWetLobe {
     var out: CityWetLobe;
     out.ok = false;
@@ -4572,7 +4641,6 @@ fn city_wet_lobe(h: CityHit, cc: CityCell, dir: vec3<f32>,
     out.alpha = 0.0;
     out.env = vec3<f32>(0.0);
     let fp = pixel_angle * h.t;
-    let g = city_ground(h.pos.xy, h.cell, cc, fp);
     let puddle_lobe = rnd.z < g.puddle;
     let weight = select(g.gloss * (1.0 - g.puddle), g.puddle, puddle_lobe)
                / max(select(1.0 - g.puddle, g.puddle, puddle_lobe), 1e-4);
@@ -4668,7 +4736,13 @@ fn city_reflect_env(p: vec2<f32>, r: vec3<f32>) -> vec3<f32> {
                 * exp(-max(r.z, 0.0) / CITY_REFL_ENV_ELEV);
     let facade = CITY_PALETTE_MEAN * (CITY_REFL_ENV_FACADE
                                       * (0.3 + 1.4 * district));
-    return mix(night_sky_radiance(r, u.sun_dir.xyz), facade, skyline);
+    // Fogged over half the traced range, as the traced reflections it
+    // stands in for are over theirs (the review's M2: unfogged, the far wet
+    // street stepped at the hand-off under a lit sky).
+    let o = vec3<f32>(p, 0.0);
+    let l = 0.5 * CITY_REFL_RANGE;
+    return city_fog(mix(night_sky_radiance(r, u.sun_dir.xyz), facade, skyline),
+                    o, r, l, o + l * r);
 }
 
 // Is the ground at p (inside cell ci) street asphalt? The strips along the
@@ -10342,17 +10416,24 @@ fn cc_streetlife_trace_car(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
         }
     }
     if (!got || t > tb) {
-        // Past the hull and down to the road inside the car's box: the
-        // road there is in the car's shadow, and says so (kind 106 + side,
-        // cc_streetlife_under_shade). Without it a parked car floats.
+        // Past the hull and down to the road inside the car's box: where
+        // the car shades it, the road says so (kind 106 + side,
+        // cc_streetlife_under_shade) — without it a parked car floats.
+        // Where it does not, this is a miss and the core's own ground (wet,
+        // and reflecting) is what the ray meets, so the shadow ends where
+        // its ramp does and not at the box.
         if (dir.z < 0.0) {
             // A millimetre in front of the road, because the core's own
             // ground hit lands at the same t and a prop must be strictly
             // nearer to win the DDA's comparison.
             let tg = -o.z / dir.z - 1e-3;
             if (tg >= ta && tg <= tb) {
-                return CityHit(true, tg, o + tg * dir,
-                               vec3<f32>(0.0, 0.0, 1.0), 106 + side, ci);
+                let pg = o + tg * dir;
+                let pl = cc_streetlife_to_local(pg, v.ctr, v.fwd, v.rgt);
+                if (cc_streetlife_under_occ(pl.xy, v.r) < 1.0) {
+                    return CityHit(true, tg, pg, vec3<f32>(0.0, 0.0, 1.0),
+                                   106 + side, ci);
+                }
             }
         }
         return cc_streetlife_miss(ci);
@@ -11083,12 +11164,27 @@ fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
 
 // The road under and around a parked car: the core's own ground radiance,
 // occluded by the car above it — near black under the sills, back to open
-// road cc_streetlife_UNDER_REACH out from the hull, which is inside the car's box (the
-// box is where this hit can come from, so the shadow has no seam at its
-// edge). Occlusion takes the lamp pool, the glints and the fill alike; the
-// wet reflection is not traced here, and under a car there is none.
-const cc_streetlife_UNDER_REACH: f32 = 0.35;
+// road UNDER_REACH out from the hull. The reach must end inside the car's
+// box (whose along margin is 0.16 m at the largest car scale), because past
+// the ramp the trace hands the ray back to the core's ground. Occlusion
+// takes the lamp pool, the glints and the fill alike; the wet reflection is
+// not traced where the car shades the road, and under a car there is none.
+const cc_streetlife_UNDER_REACH: f32 = 0.15;
 const cc_streetlife_UNDER_FLOOR: f32 = 0.08;
+
+// How much of the open road a point at pl (the car's own plan frame) keeps:
+// the floor under the sills, 1 from UNDER_REACH outside the hull's plan (a
+// rounded rectangle) and beyond.
+fn cc_streetlife_under_occ(pl: vec2<f32>, r: vec4<f32>) -> f32 {
+    let sh = cc_streetlife_car_shape(r);
+    let q = abs(pl) - sh.x * vec2<f32>(cc_streetlife_HL - 0.25,
+                                       cc_streetlife_HW - 0.25);
+    let dout = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0)
+             - 0.25 * sh.x;
+    let open = smoothstep(-0.30, cc_streetlife_UNDER_REACH, dout);
+    return mix(cc_streetlife_UNDER_FLOOR, 1.0, open * open);
+}
+
 fn cc_streetlife_under_shade(h: CityHit, cc: CityCell, dir: vec3<f32>,
                              fp: f32) -> vec3<f32> {
     let side = h.kind - 106;
@@ -11096,16 +11192,9 @@ fn cc_streetlife_under_shade(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let along = select(h.pos.y, h.pos.x, s.ax == 0);
     let j = i32(floor(along / cc_streetlife_SLOT));
     let v = cc_streetlife_prop(h.cell, cc, s, side, j);
-    let sh = cc_streetlife_car_shape(v.r);
     let pl = cc_streetlife_to_local(h.pos, v.ctr, v.fwd, v.rgt);
-    // Distance outside the hull's plan (a rounded rectangle), in metres.
-    let q = abs(pl.xy) - sh.x * vec2<f32>(cc_streetlife_HL - 0.25,
-                                          cc_streetlife_HW - 0.25);
-    let dout = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0)
-             - 0.25 * sh.x;
-    let open = smoothstep(-0.30, cc_streetlife_UNDER_REACH, dout);
-    let occ = mix(cc_streetlife_UNDER_FLOOR, 1.0, open * open);
-    return occ * city_ground_radiance(h.pos, h.cell, cc, dir, fp);
+    return cc_streetlife_under_occ(pl.xy, v.r)
+         * city_ground_radiance(h.pos, h.cell, cc, dir, fp);
 }
 
 fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
@@ -12368,10 +12457,13 @@ fn cc_manholesteam_site(k: i32, j: i32, along_y: bool) -> cc_manholesteam_Site {
     if (v >= 1.0) {
         return s;
     }
+    // Seeded like the site itself (city_manhole): the street and the along
+    // index folded at the tile, so a plume keeps its shape across the seam.
+    let jn = i32(round(u.ocean_params.y / CITY_MH_PITCH));
     let r = city_rand4(vec2<u32>(
-        bitcast<u32>(k) * 0x2545f491u + select(0x6a09e667u, 0xbb67ae85u,
-                                              along_y),
-        bitcast<u32>(j) * 0x9e3779b9u + 0x3c6ef372u));
+        city_line_seed(k) * 0x2545f491u + select(0x6a09e667u, 0xbb67ae85u,
+                                                 along_y),
+        bitcast<u32>(((j % jn) + jn) % jn) * 0x9e3779b9u + 0x3c6ef372u));
     s.on = true;
     s.stack = v < cc_manholesteam_STACK_SHARE;
     s.c = m.xy;
@@ -12589,6 +12681,10 @@ fn cc_manholesteam_march(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
         let shadow = mix(exp(-tau_l), 1.0, cc_manholesteam_MS_FLOOR);
         rad = rad + trans * a * shadow * cc_manholesteam_light(p, dir, st);
         trans = trans * (1.0 - a);
+        // Opaque enough that nothing behind can show: stop marching.
+        if (trans < 0.01) {
+            break;
+        }
     }
     return vec4<f32>(rad, trans);
 }
@@ -12794,8 +12890,15 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
             if (zn >= 0.0 && zn <= cc_manholesteam_STACK_H) {
                 th = tn;
             } else if (zn > cc_manholesteam_STACK_H) {
+                // In over the rim — but only if the far wall is met below
+                // it: a ray that crosses the whole circle above 3 m passes
+                // clean over the mouth.
+                let zf = o.z + tf * dir.z;
+                if (zf > cc_manholesteam_STACK_H) {
+                    continue;
+                }
                 inner = true;
-                th = select(tf, -o.z / dir.z, o.z + tf * dir.z < 0.0);
+                th = select(tf, -o.z / dir.z, zf < 0.0);
             }
             if (th < t0 || th >= t_end) {
                 continue;
@@ -15130,6 +15233,7 @@ struct cc_streetfurniture_Edge {
     park: bool,       // a parking lane runs beside this kerb
     pole_kerb: bool,  // the lamp line falls inside the kerb lane
     line: i32,        // the centreline this edge faces (its lamp lattice)
+    wall_ok: bool,    // the building's face stands on the building line
 }
 
 fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
@@ -15168,6 +15272,12 @@ fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
     e.pole_kerb = CITY_LAMP_OFFSET > lane_lo - 0.2
                && CITY_LAMP_OFFSET < lane_hi + 0.2;
     e.ok = inside && e.a_hi > e.a_lo + 1.0 && city_edge_street(cc, side);
+    // The wall lane stands against a wall only if there is one: where the
+    // building is set back into its plot, a dumpster "against the wall" at
+    // the plot edge would stand alone in the plaza (the review's M6).
+    let face = select(select(cc.b1min.y, cc.b1max.y, hi_side),
+                      select(cc.b1min.x, cc.b1max.x, hi_side), xs);
+    e.wall_ok = abs(face - e.bl) < 0.6;
     return e;
 }
 
@@ -16165,6 +16275,9 @@ fn cc_streetfurniture_props_trace(o: vec3<f32>, dir: vec3<f32>,
         for (var lane: i32 = 0; lane < 2; lane = lane + 1) {
             let kerb = lane == 0;
             if (kerb && fpx > cc_streetfurniture_KERB_FAR.y) {
+                continue;
+            }
+            if (!kerb && !e.wall_ok) {
                 continue;
             }
             // The lane's slab: its across band, the usable along range, and
@@ -17168,33 +17281,58 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
     if (!h.hit) {
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
-    var rgb = city_fog(city_shade(h, dir, pixel_angle * h.t),
-                       city_o, dir, h.t, h.pos);
-    if (h.kind == 0) {
-        let rnd = city_frame_rand(strat_pixel, frame_index, CITY_RAND_REFLECT);
-        let lobe = city_wet_lobe(h, city_cell(h.cell), dir, pixel_angle,
-                                 rnd.xyz);
-        if (lobe.ok) {
-            let w = lobe.w * city_fog_trans(city_o, dir, h.t, h.pos);
-            rgb = rgb + (w * lobe.blend) * lobe.env;
-            if (lobe.blend < 1.0) {
-                let ro = vec3<f32>(h.pos.xy, h.pos.z + 0.02);
-                let hr = city_trace(ro, lobe.r, CITY_REFL_RANGE, false);
-                var l = vec3<f32>(0.0);
-                if (!hr.hit) {
-                    // Fogged over the range it searched, as a hit at the
-                    // range would have been.
-                    let far = ro + CITY_REFL_RANGE * lobe.r;
-                    l = city_fog(city_reflect_sky(u.cam_origin.xyz + h.t * dir,
-                                                  lobe.r, rnd.w),
-                                 ro, lobe.r, CITY_REFL_RANGE, far);
-                } else {
-                    let fp_r = pixel_angle * (h.t + hr.t)
-                             + 0.5 * lobe.alpha * hr.t;
-                    l = city_fog(city_shade(hr, lobe.r, fp_r), ro, lobe.r,
-                                 hr.t, hr.pos);
+    let fp = pixel_angle * h.t;
+    var rgb = vec3<f32>(0.0);
+    if (h.kind != 0) {
+        rgb = city_fog(city_shade(h, dir, fp), city_o, dir, h.t, h.pos);
+    } else {
+        // Ground: the cell, the paving question and the material once, for
+        // both the surface and its wet lobe.
+        let cc = city_cell(h.cell);
+        let paved = city_ground_paved(cc, h.cell, h.pos.xy);
+        if (city_ground_is_lot(paved, cc)) {
+            rgb = city_fog(city_lot_radiance(h.pos, cc, fp), city_o, dir,
+                           h.t, h.pos);
+        } else {
+            let g = city_ground(h.pos.xy, h.cell, cc, fp);
+            rgb = city_fog(city_ground_lit(h.pos, cc, dir, fp, g, paved),
+                           city_o, dir, h.t, h.pos);
+            let rnd = city_frame_rand(strat_pixel, frame_index,
+                                      CITY_RAND_REFLECT);
+            let lobe = city_wet_lobe(h, g, dir, pixel_angle, rnd.xyz);
+            if (lobe.ok) {
+                let w = lobe.w * city_fog_trans(city_o, dir, h.t, h.pos);
+                rgb = rgb + (w * lobe.blend) * lobe.env;
+                // Russian roulette on what is left to trace: a lobe whose
+                // weight is under CITY_REFL_RR (a steep view, a damp film,
+                // a far pixel) is traced with probability w / RR and
+                // counted RR / w times over when it is — unbiased, and most
+                // of the ground stops paying for a 600 m ray that carries a
+                // few percent (the review's M1).
+                let wt = w * (1.0 - lobe.blend);
+                let p_tr = min(wt / CITY_REFL_RR, 1.0);
+                let roll = city_frame_rand(strat_pixel, frame_index,
+                                           CITY_RAND_ROULETTE).x;
+                if (wt > 0.0 && roll < p_tr) {
+                    let ro = vec3<f32>(h.pos.xy, h.pos.z + 0.02);
+                    let hr = city_trace(ro, lobe.r, CITY_REFL_RANGE, false);
+                    var l = vec3<f32>(0.0);
+                    if (!hr.hit) {
+                        // Fogged over the range it searched, as a hit at
+                        // the range would have been.
+                        let far = ro + CITY_REFL_RANGE * lobe.r;
+                        l = city_fog(city_reflect_sky(
+                                         u.cam_origin.xyz + h.t * dir,
+                                         lobe.r, rnd.w),
+                                     ro, lobe.r, CITY_REFL_RANGE, far);
+                    } else {
+                        let fp_r = pixel_angle * (h.t + hr.t)
+                                 + 0.5 * lobe.alpha * hr.t;
+                        l = city_fog(city_shade(hr, lobe.r, fp_r), ro,
+                                     lobe.r, hr.t, hr.pos);
+                    }
+                    rgb = rgb + (wt / p_tr) * l;
                 }
-                rgb = rgb + (w * (1.0 - lobe.blend)) * l;
             }
         }
     }

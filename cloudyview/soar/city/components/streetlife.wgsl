@@ -679,17 +679,24 @@ fn cc_streetlife_trace_car(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
         }
     }
     if (!got || t > tb) {
-        // Past the hull and down to the road inside the car's box: the
-        // road there is in the car's shadow, and says so (kind 106 + side,
-        // cc_streetlife_under_shade). Without it a parked car floats.
+        // Past the hull and down to the road inside the car's box: where
+        // the car shades it, the road says so (kind 106 + side,
+        // cc_streetlife_under_shade) — without it a parked car floats.
+        // Where it does not, this is a miss and the core's own ground (wet,
+        // and reflecting) is what the ray meets, so the shadow ends where
+        // its ramp does and not at the box.
         if (dir.z < 0.0) {
             // A millimetre in front of the road, because the core's own
             // ground hit lands at the same t and a prop must be strictly
             // nearer to win the DDA's comparison.
             let tg = -o.z / dir.z - 1e-3;
             if (tg >= ta && tg <= tb) {
-                return CityHit(true, tg, o + tg * dir,
-                               vec3<f32>(0.0, 0.0, 1.0), 106 + side, ci);
+                let pg = o + tg * dir;
+                let pl = cc_streetlife_to_local(pg, v.ctr, v.fwd, v.rgt);
+                if (cc_streetlife_under_occ(pl.xy, v.r) < 1.0) {
+                    return CityHit(true, tg, pg, vec3<f32>(0.0, 0.0, 1.0),
+                                   106 + side, ci);
+                }
             }
         }
         return cc_streetlife_miss(ci);
@@ -1420,12 +1427,27 @@ fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
 
 // The road under and around a parked car: the core's own ground radiance,
 // occluded by the car above it — near black under the sills, back to open
-// road cc_streetlife_UNDER_REACH out from the hull, which is inside the car's box (the
-// box is where this hit can come from, so the shadow has no seam at its
-// edge). Occlusion takes the lamp pool, the glints and the fill alike; the
-// wet reflection is not traced here, and under a car there is none.
-const cc_streetlife_UNDER_REACH: f32 = 0.35;
+// road UNDER_REACH out from the hull. The reach must end inside the car's
+// box (whose along margin is 0.16 m at the largest car scale), because past
+// the ramp the trace hands the ray back to the core's ground. Occlusion
+// takes the lamp pool, the glints and the fill alike; the wet reflection is
+// not traced where the car shades the road, and under a car there is none.
+const cc_streetlife_UNDER_REACH: f32 = 0.15;
 const cc_streetlife_UNDER_FLOOR: f32 = 0.08;
+
+// How much of the open road a point at pl (the car's own plan frame) keeps:
+// the floor under the sills, 1 from UNDER_REACH outside the hull's plan (a
+// rounded rectangle) and beyond.
+fn cc_streetlife_under_occ(pl: vec2<f32>, r: vec4<f32>) -> f32 {
+    let sh = cc_streetlife_car_shape(r);
+    let q = abs(pl) - sh.x * vec2<f32>(cc_streetlife_HL - 0.25,
+                                       cc_streetlife_HW - 0.25);
+    let dout = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0)
+             - 0.25 * sh.x;
+    let open = smoothstep(-0.30, cc_streetlife_UNDER_REACH, dout);
+    return mix(cc_streetlife_UNDER_FLOOR, 1.0, open * open);
+}
+
 fn cc_streetlife_under_shade(h: CityHit, cc: CityCell, dir: vec3<f32>,
                              fp: f32) -> vec3<f32> {
     let side = h.kind - 106;
@@ -1433,16 +1455,9 @@ fn cc_streetlife_under_shade(h: CityHit, cc: CityCell, dir: vec3<f32>,
     let along = select(h.pos.y, h.pos.x, s.ax == 0);
     let j = i32(floor(along / cc_streetlife_SLOT));
     let v = cc_streetlife_prop(h.cell, cc, s, side, j);
-    let sh = cc_streetlife_car_shape(v.r);
     let pl = cc_streetlife_to_local(h.pos, v.ctr, v.fwd, v.rgt);
-    // Distance outside the hull's plan (a rounded rectangle), in metres.
-    let q = abs(pl.xy) - sh.x * vec2<f32>(cc_streetlife_HL - 0.25,
-                                          cc_streetlife_HW - 0.25);
-    let dout = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0)
-             - 0.25 * sh.x;
-    let open = smoothstep(-0.30, cc_streetlife_UNDER_REACH, dout);
-    let occ = mix(cc_streetlife_UNDER_FLOOR, 1.0, open * open);
-    return occ * city_ground_radiance(h.pos, h.cell, cc, dir, fp);
+    return cc_streetlife_under_occ(pl.xy, v.r)
+         * city_ground_radiance(h.pos, h.cell, cc, dir, fp);
 }
 
 fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
