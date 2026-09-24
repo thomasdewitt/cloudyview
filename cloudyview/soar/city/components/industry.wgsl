@@ -195,7 +195,13 @@ const cc_industry_PART_FP: f32 = 0.25;
 // the pools are painted on: a prop of this albedo facing the lamp the way
 // the ground does returns the pool's own radiance.
 const cc_industry_ALB_REF: f32 = 0.35;
-const cc_industry_FACING_MAX: f32 = 2.5;
+// Where lamp light reflected off a prop starts to roll off: exposure 6 puts
+// 0.3 at 1.8, below the Reinhard curve's shoulder.
+const cc_industry_LAMP_KNEE: f32 = 0.3;
+// Weathering's means over a face (tools: a brute-force average of the
+// patterns in cc_industry_weather and the container roof, 4e5 samples).
+const cc_industry_WEATHER_MEAN: vec3<f32> = vec3<f32>(0.962, 0.960, 0.959);
+const cc_industry_ROOF_MEAN: vec3<f32> = vec3<f32>(0.769, 0.745, 0.728);
 
 // --- the lot's frame ----------------------------------------------------------
 // Everything is laid out along the lot's long axis `a` and across it `c`, and
@@ -1333,11 +1339,16 @@ fn cc_industry_fill(p: vec3<f32>) -> vec3<f32> {
 }
 
 // What lights a prop surface, as the radiance a surface of ALB_REF would
-// return: each of the lot's pools at the prop's own ground position, times
-// how squarely the surface faces the fixture compared with the ground it
-// was painted on (a container side facing a flood catches more than the
-// asphalt under it, one facing away catches none); then the street lamps,
-// for the yards that front one, falling mostly on up-facing surfaces.
+// return: each of the lot's pools at the prop's own ground position — the
+// beam's footprint there — times how squarely the surface faces the
+// fixture, relative to the ground under it, and never more than the ground
+// gets: a surface facing away catches none, one squarely facing catches
+// what the ground does. The pools' peaks are calibrated for ground a head's
+// height below the lamp; a container top two metres under it, lit with the
+// inverse square, would take several times that, and first renders showed
+// exactly that as flat white tops (the lead, 2026-09-23). Then the street
+// lamps, for the yards that front one, falling mostly on up-facing
+// surfaces.
 fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     var e = vec3<f32>(0.0);
     let nk = select(0, CITY_FLOOD_MAX,
@@ -1347,8 +1358,7 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let f = city_flood(cc, k);
         if (f.on) {
             let l = normalize(f.head - p);
-            let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2),
-                             cc_industry_FACING_MAX);
+            let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2), 1.0);
             e = e + f.color * (city_flood_pool(f, p.xy) * facing);
         }
     }
@@ -1360,10 +1370,14 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return e;
 }
 
+// The lamp-lit part passes a soft knee before it is returned: a bright
+// painted box under a bright pool still keeps its shading instead of
+// meeting the tone map's shoulder as a flat white face.
 fn cc_industry_lit(cc: CityCell, p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>)
         -> vec3<f32> {
     let moon = u.sun_dir.xyz;
-    return (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n)
+    let lamp = (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n);
+    return lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
            + alb * (cc_industry_fill(p)
                     + CITY_MOONLIGHT * max(dot(n, moon), 0.0));
 }
@@ -1738,6 +1752,53 @@ fn cc_industry_box_color(x: f32) -> vec3<f32> {
     return vec3<f32>(0.20, 0.11, 0.06);
 }
 
+// Weathering on a painted steel side, as an albedo multiplier: rust
+// streaks bleeding down from the roof rail (a third of the 0.9 m cells, of
+// hashed width and length, redder than the paint), grime darkening the
+// bottom 0.9 m where the yard's dust sits, and a paint level that varies
+// panel to panel (2.4 m). `u` runs along the face, `zt` is height in the
+// box, `hgt` its height, `seed` the box's own draw. Dissolves to
+// WEATHER_MEAN, the pattern's own average, as the streaks go sub-pixel.
+fn cc_industry_weather(u: f32, zt: f32, hgt: f32, seed: f32, fp: f32)
+        -> vec3<f32> {
+    let r = hash22(vec2<f32>(floor(u / 0.9), seed * 97.0));
+    let x = fract(u / 0.9);
+    let w = 0.15 + 0.35 * r.y;
+    let len = 0.4 + 1.8 * r.x;
+    let depth = hgt - zt;
+    var streak = 0.0;
+    if (r.x < 0.35 && abs(x - 0.5) < 0.5 * w && depth < len) {
+        streak = (1.0 - depth / len) * (0.5 + 0.5 * r.x);
+    }
+    let rust = vec3<f32>(1.0) - streak * 0.6
+               * (vec3<f32>(1.0) - vec3<f32>(1.0, 0.62, 0.45));
+    let dirt = 0.78 + 0.22 * smoothstep(0.0, 0.9, zt);
+    let panel = 0.88 + 0.24 * hash12(vec2<f32>(floor(u / 2.4), seed * 53.0));
+    return mix(rust * (dirt * panel), cc_industry_WEATHER_MEAN,
+               smoothstep(0.08, 0.4, fp));
+}
+
+// A container roof: shallow transverse corrugation every 0.5 m, two dents
+// as local shading hollows at spots the box's draw picks (periodic swells
+// read as stripes, not dents), and a fifth of its 1.2 m panels carrying a
+// dark wet rust patch; the whole deck dirtier than the sides. Dissolves to
+// ROOF_MEAN.
+fn cc_industry_box_roof(lu: f32, lv: f32, seed: f32, fp: f32) -> vec3<f32> {
+    let rib = 0.85 + 0.30 * (0.5 + 0.5 * cos(6.2831853 * lu / 0.5));
+    let rib_k = cc_industry_band(rib, 1.0, 0.25, fp);
+    let span = vec2<f32>(cc_industry_BOX_L - 2.0, cc_industry_BOX_W - 1.0);
+    let c1 = (fract(seed * vec2<f32>(13.7, 29.1)) - 0.5) * span;
+    let c2 = (fract(seed * vec2<f32>(41.3, 57.9)) - 0.5) * span;
+    let q = vec2<f32>(lu, lv);
+    let d1 = dot(q - c1, q - c1) / (2.0 * 0.8 * 0.8);
+    let d2 = dot(q - c2, q - c2) / (2.0 * 0.6 * 0.6);
+    let dent = (1.0 - 0.25 * exp(-d1)) * (1.0 - 0.18 * exp(-d2));
+    let pr = hash12(vec2<f32>(floor(lu / 1.2), seed * 71.0));
+    let rust = select(vec3<f32>(1.0), vec3<f32>(0.70, 0.55, 0.45), pr < 0.2);
+    let pat = rust * (rib_k * dent * 0.85);
+    return mix(pat, cc_industry_ROOF_MEAN, smoothstep(0.3, 1.2, fp));
+}
+
 fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         s: cc_industry_Slot, fp: f32)
         -> vec3<f32> {
@@ -1775,10 +1836,14 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
                           zt < 0.12 || zt > cc_industry_TIER - 0.10);
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
-    } else {
-        m = 0.9;
+        let wu = select(lu, lv, abs(n_long) > 0.5);
+        return cc_industry_lit(cc, h.pos, h.normal,
+                               col * m * cc_industry_weather(
+                                   wu, zt, cc_industry_TIER, hc, fp));
     }
-    return cc_industry_lit(cc, h.pos, h.normal, col * m);
+    // The top of the stack, or a box seen from above.
+    return cc_industry_lit(cc, h.pos, h.normal,
+                           col * cc_industry_box_roof(lu, lv, hc, fp));
 }
 
 fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
@@ -1811,8 +1876,19 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
             p = p * select(1.0, 1.35, abs(abs(lv) - 0.62) < 0.03);
         }
         m = cc_industry_band(p, 0.92, 0.06, fp);
+        let wu = u + dot(h.pos.xy - s.ctr, vec2<f32>(-fwd.y, fwd.x));
+        return cc_industry_lit(
+            cc, h.pos, h.normal,
+            col * m * cc_industry_weather(
+                wu, z - cc_industry_TRL_DECK,
+                cc_industry_TRL_H - cc_industry_TRL_DECK, s.d.w, fp));
     }
-    return cc_industry_lit(cc, h.pos, h.normal, col * m);
+    // The roof: bows every 0.6 m under a grey film of road grime, heavier
+    // toward the nose where the tractor's exhaust lands.
+    let bow = cc_industry_band(select(1.0, 0.8, fract(u / 0.6) < 0.08),
+                               0.984, 0.05, fp);
+    let grime = 0.72 + 0.12 * smoothstep(-6.8, 6.8, -u);
+    return cc_industry_lit(cc, h.pos, h.normal, col * (bow * grime));
 }
 
 fn cc_industry_pallet_shade(h: CityHit, cc: CityCell,

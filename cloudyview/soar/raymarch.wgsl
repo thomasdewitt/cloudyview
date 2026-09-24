@@ -117,8 +117,17 @@ struct Uniforms {
     // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
     nest_bmin: vec4<f32>,
     nest_bmax: vec4<f32>,
-    // Row 23: the baked sun-tau cache (2026-08-19 prototype, behind a
-    // toggle while its worth is decided from A/B stills and benches).
+    // Row 23: the lighting method, and the bake's slice index.
+    //
+    // x and z are NOT read by fs_main any more (2026-09-23): each is a
+    // compile-time specialization (LIGHT_CACHE, SKY_PROBE — see their
+    // declarations), because a run-time branch here paid for its untaken
+    // side on every sample. The hosts still pack both, from the same flags
+    // that pick the specialization, because the row is part of the
+    // accumulation's scene key: a bake completing or a tier switching
+    // methods is a scene change (and the browser restarts a parked view's
+    // average on it outright — renderer.js drawFrame).
+    //
     // x = read tau_sun for CLOUD samples from the light_tau texture instead
     //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
     //     shadow marches and the sky probe stay live either way. The cached
@@ -188,6 +197,28 @@ const NESTED: bool = false;
 // in Python. The browser always leaves this on: it is presenting to a canvas,
 // and this is the only place the encode may happen.
 const TONE_MAP: bool = true;
+// The lighting method (row 23's x and z as compile-time constants; the host
+// packs the row from the same flags). LIGHT_CACHE reads the baked sun-tau
+// cache for cloud samples instead of marching to the sun; SKY_PROBE runs
+// the vertical sky-visibility march. Specialized rather than branched on
+// because the untaken side of a branch still costs registers on every
+// sample: compiling out the method a tier does not use bought 3-14% at Low
+// and Minimal (2026-09-23). The specialization is semantically exact; the
+// A/B against the run-time branches was bit-identical in 17 of 20
+// configurations, and in the other 3 one channel of a single frame's sample
+// differed by one float16 ulp, from the driver fusing multiply-adds
+// differently once the branches were gone (soar_shader_ab.py's docstring).
+// The declared values are the host defaults — the live march with the
+// probe — so an unspecialized compile is Max's shader.
+//
+// Ice mode (row 23.w) is deliberately NOT one of these. Compiling it out
+// would buy another 3-5%, but it is the one switch whose removal changes
+// the arithmetic: with its branch gone the driver fuses the cloud source
+// terms' multiply-adds (FMA) where the branch used to stand between them,
+// which moves ~1e-5 of all channels by one float16 ulp. Measured, and left
+// for a deliberate call rather than taken silently.
+const LIGHT_CACHE: bool = false;
+const SKY_PROBE: bool = true;
 
 // ---------------------------------------------------------------------------
 // Constants (witness.py values where the concept carries over)
@@ -734,6 +765,28 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // same insight about sparseness, applied to storage rather than traversal,
 // where nothing has to be asked per sample. See web/soar/zcrop.js.
 
+// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Five
+// measurements from one day, all the same fact:
+//   - the empty-space guard above cost 14-20% while never firing;
+//   - compiling out the lighting method a tier does not use (LIGHT_CACHE,
+//     SKY_PROBE) bought 3-14%, where the branch it replaced was never taken;
+//   - the city's 3D facade shell cost 35-50% on pixels that never run it,
+//     by pushing the whole kernel over a register threshold (which is why
+//     the opaque surfaces are moving to their own pass);
+//   - a function-local `var c: array<f32, 4>` in CITY-only code moved DAY
+//     frames by 2^-11 — a specialization that was compiled out still
+//     changed how the rest of the kernel was compiled. Scalars fixed it.
+//   - running the forward pre-march lazily, at a ray's first deep-shadow
+//     sample instead of before the loop, was exact and saves the march for
+//     every ray that never gets there — and cost 28-213% on the views where
+//     rays do get there, because a call inside the loop is paid in
+//     registers, and lanes reaching it at different steps serialize.
+// So a change's cost is not where its code runs, and a bit-identity claim
+// has to be proven on scenes the change does not touch. Measure with
+// tools/benchmarking/soar_pass_timer.py and prove with
+// tools/soar_shader_ab.py --scene day|city|nested|desert, both on the
+// specialization the app actually compiles.
+
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
 // Both levels always share one format.
@@ -851,7 +904,7 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
 }
 
 // Sun optical depth from the baked cache — the trilinear read that replaces
-// light_march_tau for cloud samples when u.light_cache.x is on.
+// light_march_tau for cloud samples under LIGHT_CACHE.
 //
 // Same coordinate convention as sample_level over the same outer AABB (the
 // cache's texel i sits AT data coordinate i, see fs_bake_light), same
@@ -4349,13 +4402,15 @@ fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
 // another family. The first cut used one 0.85 peak for every family and
 // rendered each LED pool as a clipped white disc; each family now carries
 // its own radiance, set so the brightest family at the brightest draw stays
-// under the tone map's knee at the reference exposure.
+// under the tone map's knee at the reference exposure — a second cut, 30%
+// down, after a close view under a cool LED pole still read as white
+// ground (the lead, 2026-09-23).
 
 const CITY_FLOOD_MAX: i32 = 4;
-const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(0.60, 0.27, 0.075);
-const CITY_FLOOD_HALIDE: vec3<f32> = vec3<f32>(0.42, 0.39, 0.30);
-const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.31, 0.37, 0.45);
-const CITY_FLOOD_LED_WARM: vec3<f32> = vec3<f32>(0.46, 0.36, 0.23);
+const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(0.42, 0.19, 0.052);
+const CITY_FLOOD_HALIDE: vec3<f32> = vec3<f32>(0.29, 0.27, 0.21);
+const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.22, 0.26, 0.31);
+const CITY_FLOOD_LED_WARM: vec3<f32> = vec3<f32>(0.32, 0.25, 0.16);
 const CITY_FLOOD_WALL_OUT: f32 = 7.0;    // pool sigma out from the wall (m)
 const CITY_FLOOD_WALL_ALONG: f32 = 7.0;  // ... and along it
 const CITY_FLOOD_WALL_SPACING: f32 = 30.0;
@@ -5813,9 +5868,12 @@ fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (fp < cc_aircars_SDF_FP) {
         return cc_aircars_sdf_hit(o, dir, inv_dir, t0, t1, v, lane, ci, fp);
     }
-    let hx = cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W);
-    let hmin = vec3<f32>(v.base.xy - hx, v.base.z);
-    let hmax = vec3<f32>(v.base.xy + hx, v.base.z + cc_aircars_HULL_H);
+    // The hull box, grown toward a pixel once the craft is smaller than one
+    // (cc_aircars_grown); the shader dilutes it by the same factor.
+    let hc = cc_aircars_hull_centre(v);
+    let he = cc_aircars_grown(v);
+    let hmin = hc - he;
+    let hmax = hc + he;
     let sh = city_box_hit(o, inv_dir, hmin, hmax);
     let t_hull = select(1e30, sh.x,
                         sh.x <= sh.y && sh.x > t0 && sh.x <= t1);
@@ -5850,6 +5908,42 @@ fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // The belly of the hull is the underglow panel.
     let part = select(select(0, 1, nrm.z < -0.5), 2, is_canopy);
     return CityHit(true, t, pos, nrm, 300 + 4 * lane + part, ci);
+}
+
+// --- sub-pixel craft ---------------------------------------------------------
+// A craft narrower than a pixel is either hit by a pixel's one ray, and then
+// drawn at its full panel radiance, or missed: flying, that is a scatter of
+// saturated colored specks winking on and off — confetti — where the eye
+// sees a faint steady point. So below a pixel the hull box GROWS to about
+// one pixel (half-extent MIN_PX footprints) and its radiance is DILUTED by
+// the ratio of the true box's projected area to the grown one's: every pixel
+// the craft touches carries radiance x coverage, which is what a lens
+// integrates, and the light a craft adds to the frame is the same at every
+// distance. The footprint is the craft's own — its distance from the camera,
+// not the ray's cell — so the tracer and the shader agree on it exactly.
+const cc_aircars_MIN_PX: f32 = 0.6;
+
+fn cc_aircars_hull_centre(v: cc_aircars_Craft) -> vec3<f32> {
+    return vec3<f32>(v.base.xy, v.base.z + 0.5 * cc_aircars_HULL_H);
+}
+
+fn cc_aircars_half(v: cc_aircars_Craft) -> vec3<f32> {
+    return vec3<f32>(
+        cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W),
+        0.5 * cc_aircars_HULL_H);
+}
+
+fn cc_aircars_grown(v: cc_aircars_Craft) -> vec3<f32> {
+    let d = length(cc_aircars_hull_centre(v) - city_camera_origin());
+    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * d;
+    return max(cc_aircars_half(v), vec3<f32>(cc_aircars_MIN_PX * fp));
+}
+
+// Projected area of a box of half-extents e seen along dir (up to a common
+// factor, which cancels in the ratio).
+fn cc_aircars_proj(e: vec3<f32>, dir: vec3<f32>) -> f32 {
+    let a = abs(dir);
+    return a.x * e.y * e.z + a.y * e.x * e.z + a.z * e.x * e.y;
 }
 
 fn cc_aircars_nearer(a: CityHit, b: CityHit) -> CityHit {
@@ -6155,6 +6249,26 @@ fn cc_aircars_shade_sdf(h: CityHit, v: cc_aircars_Craft, glow: vec3<f32>,
 
 fn cc_aircars_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
+    // A grown (sub-pixel) hull is shaded at the true hull's nearest point and
+    // diluted by true over grown projected area; a resolved craft has
+    // grown == true and passes through untouched.
+    let code = h.kind - 300;
+    let v = cc_aircars_craft(h.cell, cc, code / 4);
+    let e = cc_aircars_half(v);
+    let eg = cc_aircars_grown(v);
+    var hh = h;
+    var dilution = 1.0;
+    if (code % 4 != 3 && any(eg > e)) {
+        let c = cc_aircars_hull_centre(v);
+        hh.pos = clamp(h.pos, c - e, c + e);
+        dilution = cc_aircars_proj(e, dir) / max(cc_aircars_proj(eg, dir),
+                                                 1e-6);
+    }
+    return cc_aircars_shade_resolved(hh, cc, dir, fp) * dilution;
+}
+
+fn cc_aircars_shade_resolved(h: CityHit, cc: CityCell, dir: vec3<f32>,
+                             fp: f32) -> vec3<f32> {
     let code = h.kind - 300;
     let lane = code / 4;
     let part = code % 4;
@@ -12579,7 +12693,13 @@ const cc_industry_PART_FP: f32 = 0.25;
 // the pools are painted on: a prop of this albedo facing the lamp the way
 // the ground does returns the pool's own radiance.
 const cc_industry_ALB_REF: f32 = 0.35;
-const cc_industry_FACING_MAX: f32 = 2.5;
+// Where lamp light reflected off a prop starts to roll off: exposure 6 puts
+// 0.3 at 1.8, below the Reinhard curve's shoulder.
+const cc_industry_LAMP_KNEE: f32 = 0.3;
+// Weathering's means over a face (tools: a brute-force average of the
+// patterns in cc_industry_weather and the container roof, 4e5 samples).
+const cc_industry_WEATHER_MEAN: vec3<f32> = vec3<f32>(0.962, 0.960, 0.959);
+const cc_industry_ROOF_MEAN: vec3<f32> = vec3<f32>(0.769, 0.745, 0.728);
 
 // --- the lot's frame ----------------------------------------------------------
 // Everything is laid out along the lot's long axis `a` and across it `c`, and
@@ -13717,11 +13837,16 @@ fn cc_industry_fill(p: vec3<f32>) -> vec3<f32> {
 }
 
 // What lights a prop surface, as the radiance a surface of ALB_REF would
-// return: each of the lot's pools at the prop's own ground position, times
-// how squarely the surface faces the fixture compared with the ground it
-// was painted on (a container side facing a flood catches more than the
-// asphalt under it, one facing away catches none); then the street lamps,
-// for the yards that front one, falling mostly on up-facing surfaces.
+// return: each of the lot's pools at the prop's own ground position — the
+// beam's footprint there — times how squarely the surface faces the
+// fixture, relative to the ground under it, and never more than the ground
+// gets: a surface facing away catches none, one squarely facing catches
+// what the ground does. The pools' peaks are calibrated for ground a head's
+// height below the lamp; a container top two metres under it, lit with the
+// inverse square, would take several times that, and first renders showed
+// exactly that as flat white tops (the lead, 2026-09-23). Then the street
+// lamps, for the yards that front one, falling mostly on up-facing
+// surfaces.
 fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     var e = vec3<f32>(0.0);
     let nk = select(0, CITY_FLOOD_MAX,
@@ -13731,8 +13856,7 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let f = city_flood(cc, k);
         if (f.on) {
             let l = normalize(f.head - p);
-            let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2),
-                             cc_industry_FACING_MAX);
+            let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2), 1.0);
             e = e + f.color * (city_flood_pool(f, p.xy) * facing);
         }
     }
@@ -13744,10 +13868,14 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return e;
 }
 
+// The lamp-lit part passes a soft knee before it is returned: a bright
+// painted box under a bright pool still keeps its shading instead of
+// meeting the tone map's shoulder as a flat white face.
 fn cc_industry_lit(cc: CityCell, p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>)
         -> vec3<f32> {
     let moon = u.sun_dir.xyz;
-    return (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n)
+    let lamp = (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n);
+    return lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
            + alb * (cc_industry_fill(p)
                     + CITY_MOONLIGHT * max(dot(n, moon), 0.0));
 }
@@ -14122,6 +14250,53 @@ fn cc_industry_box_color(x: f32) -> vec3<f32> {
     return vec3<f32>(0.20, 0.11, 0.06);
 }
 
+// Weathering on a painted steel side, as an albedo multiplier: rust
+// streaks bleeding down from the roof rail (a third of the 0.9 m cells, of
+// hashed width and length, redder than the paint), grime darkening the
+// bottom 0.9 m where the yard's dust sits, and a paint level that varies
+// panel to panel (2.4 m). `u` runs along the face, `zt` is height in the
+// box, `hgt` its height, `seed` the box's own draw. Dissolves to
+// WEATHER_MEAN, the pattern's own average, as the streaks go sub-pixel.
+fn cc_industry_weather(u: f32, zt: f32, hgt: f32, seed: f32, fp: f32)
+        -> vec3<f32> {
+    let r = hash22(vec2<f32>(floor(u / 0.9), seed * 97.0));
+    let x = fract(u / 0.9);
+    let w = 0.15 + 0.35 * r.y;
+    let len = 0.4 + 1.8 * r.x;
+    let depth = hgt - zt;
+    var streak = 0.0;
+    if (r.x < 0.35 && abs(x - 0.5) < 0.5 * w && depth < len) {
+        streak = (1.0 - depth / len) * (0.5 + 0.5 * r.x);
+    }
+    let rust = vec3<f32>(1.0) - streak * 0.6
+               * (vec3<f32>(1.0) - vec3<f32>(1.0, 0.62, 0.45));
+    let dirt = 0.78 + 0.22 * smoothstep(0.0, 0.9, zt);
+    let panel = 0.88 + 0.24 * hash12(vec2<f32>(floor(u / 2.4), seed * 53.0));
+    return mix(rust * (dirt * panel), cc_industry_WEATHER_MEAN,
+               smoothstep(0.08, 0.4, fp));
+}
+
+// A container roof: shallow transverse corrugation every 0.5 m, two dents
+// as local shading hollows at spots the box's draw picks (periodic swells
+// read as stripes, not dents), and a fifth of its 1.2 m panels carrying a
+// dark wet rust patch; the whole deck dirtier than the sides. Dissolves to
+// ROOF_MEAN.
+fn cc_industry_box_roof(lu: f32, lv: f32, seed: f32, fp: f32) -> vec3<f32> {
+    let rib = 0.85 + 0.30 * (0.5 + 0.5 * cos(6.2831853 * lu / 0.5));
+    let rib_k = cc_industry_band(rib, 1.0, 0.25, fp);
+    let span = vec2<f32>(cc_industry_BOX_L - 2.0, cc_industry_BOX_W - 1.0);
+    let c1 = (fract(seed * vec2<f32>(13.7, 29.1)) - 0.5) * span;
+    let c2 = (fract(seed * vec2<f32>(41.3, 57.9)) - 0.5) * span;
+    let q = vec2<f32>(lu, lv);
+    let d1 = dot(q - c1, q - c1) / (2.0 * 0.8 * 0.8);
+    let d2 = dot(q - c2, q - c2) / (2.0 * 0.6 * 0.6);
+    let dent = (1.0 - 0.25 * exp(-d1)) * (1.0 - 0.18 * exp(-d2));
+    let pr = hash12(vec2<f32>(floor(lu / 1.2), seed * 71.0));
+    let rust = select(vec3<f32>(1.0), vec3<f32>(0.70, 0.55, 0.45), pr < 0.2);
+    let pat = rust * (rib_k * dent * 0.85);
+    return mix(pat, cc_industry_ROOF_MEAN, smoothstep(0.3, 1.2, fp));
+}
+
 fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         s: cc_industry_Slot, fp: f32)
         -> vec3<f32> {
@@ -14159,10 +14334,14 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
                           zt < 0.12 || zt > cc_industry_TIER - 0.10);
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
-    } else {
-        m = 0.9;
+        let wu = select(lu, lv, abs(n_long) > 0.5);
+        return cc_industry_lit(cc, h.pos, h.normal,
+                               col * m * cc_industry_weather(
+                                   wu, zt, cc_industry_TIER, hc, fp));
     }
-    return cc_industry_lit(cc, h.pos, h.normal, col * m);
+    // The top of the stack, or a box seen from above.
+    return cc_industry_lit(cc, h.pos, h.normal,
+                           col * cc_industry_box_roof(lu, lv, hc, fp));
 }
 
 fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
@@ -14195,8 +14374,19 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
             p = p * select(1.0, 1.35, abs(abs(lv) - 0.62) < 0.03);
         }
         m = cc_industry_band(p, 0.92, 0.06, fp);
+        let wu = u + dot(h.pos.xy - s.ctr, vec2<f32>(-fwd.y, fwd.x));
+        return cc_industry_lit(
+            cc, h.pos, h.normal,
+            col * m * cc_industry_weather(
+                wu, z - cc_industry_TRL_DECK,
+                cc_industry_TRL_H - cc_industry_TRL_DECK, s.d.w, fp));
     }
-    return cc_industry_lit(cc, h.pos, h.normal, col * m);
+    // The roof: bows every 0.6 m under a grey film of road grime, heavier
+    // toward the nose where the tractor's exhaust lands.
+    let bow = cc_industry_band(select(1.0, 0.8, fract(u / 0.6) < 0.08),
+                               0.984, 0.05, fp);
+    let grime = 0.72 + 0.12 * smoothstep(-6.8, 6.8, -u);
+    return cc_industry_lit(cc, h.pos, h.normal, col * (bow * grime));
 }
 
 fn cc_industry_pallet_shade(h: CityHit, cc: CityCell,
@@ -16332,7 +16522,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     // the same tau at the point this path enters the cloud box: below the
     // box floor the path crosses only clear air.
     var tau_sun: f32;
-    if (u.light_cache.x > 0.5 && p_world.z < u.bmin.z && sun.z > 1e-4) {
+    if (LIGHT_CACHE && p_world.z < u.bmin.z && sun.z > 1e-4) {
         let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
         tau_sun = sample_light_tau(entry);
     } else {
@@ -17022,7 +17212,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // zero-jitter tau at the cache's own resolution, trilinearly
             // filtered. See Uniforms.light_cache.
             var tau_sun: f32;
-            if (u.light_cache.x > 0.5) {
+            if (LIGHT_CACHE) {
                 tau_sun = sample_light_tau(p);
             } else {
                 tau_sun = light_march_tau(p, sun_shadow, t * u.periodic.y,
@@ -17055,7 +17245,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             var t_sky = 1.0;
             var shallow_open = 0.0;
             if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
-                if (u.light_cache.z > 0.5) {
+                if (!SKY_PROBE) {
                     // Sky probe disabled (a cost/look toggle, J in the
                     // browser): every consumer sees a fully open sky, which
                     // is the neutral the floors already assume. Buried
