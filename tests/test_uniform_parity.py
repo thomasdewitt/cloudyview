@@ -90,6 +90,11 @@ CASES = [
     # scene and a city scene respectively. The city case also pins the
     # static default: with no override, row 24 is city_tile_offset_m folded.
     ("ocean_surface_offset", {"surface_offset_m": [-18630.2, 136143.7]}, {}),
+    # The moving sea (2026-09-23): the ocean folds row 24 at its swell's
+    # period rather than its tile, and row 24.z carries the scene clock.
+    ("ocean_moving",
+     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 819.2},
+     {"scene_time": 1234.5678}),
     ("city_surface_offset",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "surface_offset_m": [-102400.0, 204800.0],
@@ -142,7 +147,7 @@ def _js_state(extra):
         dtView=BASE_SCENE["dt_view"], dtLight=BASE_SCENE["dt_light"],
         periodic=True, oceanZ=0.0,
         oceanReflectance=list(sh.DEFAULT_OCEAN_REFLECTANCE),
-        oceanFifDx=0.2, oceanTileExtent=102.4, oceanEnabled=True, oceanMaxLod=9,
+        oceanFifDx=0.4, oceanTileExtent=102.4, oceanEnabled=True, oceanMaxLod=8,
         nested=False,
     )
     remap = {"periodic": "periodic", "ocean_enabled": "oceanEnabled",
@@ -151,6 +156,7 @@ def _js_state(extra):
              "dt_light_nest": "dtLightNest",
              "ocean_z": "oceanZ", "city_tile_offset_m": "cityOffsetM",
              "surface_offset_m": "surfaceOffsetM",
+             "surface_period_m": "surfacePeriodM",
              "ocean_fif_dx": "oceanFifDx",
              "ocean_tile_extent": "oceanTileExtent",
              "ocean_max_lod": "oceanMaxLod"}
@@ -188,6 +194,7 @@ def _js_view(extra):
         "cone_stencil_theta_deg": "coneStencilThetaDeg",
         "haze": "haze", "haze_height_dependent": "hazeHeightDependent",
         "tone_map_white_point": "toneMapWhitePoint", "contrast": "contrast",
+        "scene_time": "sceneTime",
     }
     for k, val in extra.items():
         if k == "render_size":
