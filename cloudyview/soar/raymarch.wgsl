@@ -15890,17 +15890,13 @@ fn df_box(o: vec3<f32>, inv_dir: vec3<f32>, bmin: vec3<f32>,
 }
 
 // One placed thing. `base` is its foot in CELL-LOCAL metres (terrain height
-// included); a..f are per-species parameters, documented where each species
+// included); a, b are per-species parameters, documented where each species
 // builds them; the box is cell-local and lies inside the cell.
 struct DfItem {
     kind: i32,
     base: vec3<f32>,
     a: vec4<f32>,
     b: vec4<f32>,
-    c: vec4<f32>,
-    d: vec4<f32>,
-    e: vec4<f32>,
-    f: vec4<f32>,
     bmin: vec3<f32>,
     bmax: vec3<f32>,
     seed: vec2<u32>,
@@ -16166,8 +16162,9 @@ fn df_seg_approach(o: vec3<f32>, dir: vec3<f32>, a: vec3<f32>,
 // Carnegiea gigantea. Item parameters:
 //   a = (height H, trunk radius R, ribs, rib phase)
 //   b = (arm count, arm radius / R, groove depth, age in [0,1])
-//   c..f = arms: (azimuth, attach height, horizontal run beyond the trunk,
-//          vertical run after the elbow)
+// Arm i is drawn from the seed where it is needed (df_sag_arm_draw), not
+// carried in the item: four arms held through a walk would cost every
+// kernel that walks the plants 32 registers, whichever species it meets.
 // Young plants are armless spears; arms appear from ~5 m and multiply with
 // height. The lowest metre of an old trunk is the grey woody "boot", ribs
 // still showing but the grooves filled in and the skin cracked across.
@@ -16218,11 +16215,6 @@ const DF_SPINE_MEAN: vec3<f32> = vec3<f32>(0.267, 0.239, 0.212);
 const DF_SPINE_GREY: vec3<f32> = vec3<f32>(0.330, 0.315, 0.290);
 const DF_SPINE_TIP: vec3<f32> = vec3<f32>(0.220, 0.140, 0.090);
 
-fn df_sag_arm_params(it: DfItem, i: i32) -> vec4<f32> {
-    return select(select(select(it.f, it.e, i == 2), it.d, i == 1),
-                  it.c, i == 0);
-}
-
 fn df_sag_trunk(it: DfItem) -> DfColumn {
     var c: DfColumn;
     let h = it.a.x;
@@ -16246,7 +16238,7 @@ fn df_sag_trunk(it: DfItem) -> DfColumn {
 }
 
 fn df_sag_arm(it: DfItem, i: i32) -> DfColumn {
-    let ap = df_sag_arm_params(it, i);
+    let ap = df_sag_arm_draw(it, i);
     var c: DfColumn;
     let r = it.a.y;
     c.root = vec3<f32>(0.0, 0.0, ap.y);
@@ -16298,10 +16290,6 @@ fn df_saguaro_item(it_in: DfItem, r0: vec4<f32>) -> DfItem {
     let n_arms = min(floor(arm_cap * (0.3 + 0.9 * r1.z)), 4.0);
     it.a = vec4<f32>(h, r, ribs, r1.x);
     it.b = vec4<f32>(n_arms, 0.80 + 0.12 * r1.w, depth, age);
-    it.c = df_sag_arm_draw(it, 0);
-    it.d = df_sag_arm_draw(it, 1);
-    it.e = df_sag_arm_draw(it, 2);
-    it.f = df_sag_arm_draw(it, 3);
     let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL;
     // The trunk's axis starts 0.4 m down and ends in a cap of its radius.
     it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach), it.base.z - 0.4 - r);
@@ -18386,8 +18374,9 @@ fn df_paloverde_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight,
 //
 // Granite corestones, rounded by weathering along their joints, half buried,
 // in clusters. Item parameters:
-//   a..d = up to four stones: (centre x, y, z relative to the foot, size)
-//   e    = (stone count, horizontal extent, top, unused)
+//   a = (stone count, horizontal extent, top, 1 for a big cell's heap)
+// Stone i (centre relative to the foot, size) is drawn from the seed where
+// it is needed (df_stone_draw), as a saguaro's arms are.
 // A stone is an ellipsoid (its own axes and yaw from its hash) with two
 // joint planes cutting it flat and a few long-wavelength undulations: the
 // distance is a bound (the undulations' slope is under 0.35), so the sphere
@@ -18400,8 +18389,7 @@ const DF_MAT_ROCK: i32 = 14;
 const DF_ROCK_FAR_FP: f32 = 0.02;
 
 fn df_stone_param(it: DfItem, i: i32) -> vec4<f32> {
-    return select(select(select(it.d, it.c, i == 2), it.b, i == 1),
-                  it.a, i == 0);
+    return df_stone_draw(it.seed, i, it.a.w > 0.5);
 }
 
 fn df_stone_sdf(q: vec3<f32>, st: vec4<f32>, seed: u32) -> f32 {
@@ -18433,7 +18421,7 @@ fn df_stone_sdf(q: vec3<f32>, st: vec4<f32>, seed: u32) -> f32 {
 
 fn df_boulder_sdf(it: DfItem, q: vec3<f32>) -> vec2<f32> {
     var best = vec2<f32>(1e9, 0.0);
-    let n = i32(it.e.x);
+    let n = i32(it.a.x);
     for (var i: i32 = 0; i < n; i = i + 1) {
         let d = df_stone_sdf(q, df_stone_param(it, i), it.seed.x + u32(i) * 747u);
         if (d < best.x) {
@@ -18452,18 +18440,14 @@ fn df_boulder_item(it_in: DfItem, r: vec4<f32>, big: bool) -> DfItem {
     if (big) {
         n = 1 + i32(r.x * 3.99);
     }
-    it.a = df_stone_draw(it.seed, 0, big);
-    it.b = df_stone_draw(it.seed, 1, big);
-    it.c = df_stone_draw(it.seed, 2, big);
-    it.d = df_stone_draw(it.seed, 3, big);
     var ext = 0.0;
     var top = 0.0;
     for (var i: i32 = 0; i < n; i = i + 1) {
-        let st = df_stone_param(it, i);
+        let st = df_stone_draw(it.seed, i, big);
         ext = max(ext, length(st.xy) + 1.45 * st.w);
         top = max(top, st.z + st.w);
     }
-    it.e = vec4<f32>(f32(n), ext, top, 0.0);
+    it.a = vec4<f32>(f32(n), ext, top, select(0.0, 1.0, big));
     return it;
 }
 
@@ -18486,7 +18470,7 @@ fn df_boulder_ellipsoids(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
                   tb: f32) -> vec4<f32> {
     var best = tb;
     var bn = vec3<f32>(0.0, 0.0, 1.0);
-    let n = i32(it.e.x);
+    let n = i32(it.a.x);
     for (var i: i32 = 0; i < n; i = i + 1) {
         let st = df_stone_param(it, i);
         let hs = pcg2d(vec2<u32>(it.seed.x + u32(i) * 747u,
@@ -18813,8 +18797,8 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
     } else {
         it = df_boulder_item(it, rs, true);
         it.base.z = it.base.z - 0.1;
-        it.bmin = vec3<f32>(foot.xy - vec2<f32>(it.e.y), it.base.z - 1.6);
-        it.bmax = vec3<f32>(foot.xy + vec2<f32>(it.e.y), it.base.z + it.e.z);
+        it.bmin = vec3<f32>(foot.xy - vec2<f32>(it.a.y), it.base.z - 1.6);
+        it.bmax = vec3<f32>(foot.xy + vec2<f32>(it.a.y), it.base.z + it.a.z);
     }
     return it;
 }
@@ -18894,7 +18878,7 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
         top = 1.4 * it.a.x;
     } else if (foot.kind == DF_KIND_BOULDER) {
         it = df_boulder_item(it, rs, false);
-        top = it.e.z;
+        top = it.a.z;
     } else if (foot.kind == DF_KIND_BARREL) {
         it = df_barrel_item(it, rs);
         top = it.a.x + DF_BAR_SHELL;
