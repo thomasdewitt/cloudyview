@@ -14919,13 +14919,13 @@ const DF_MAT_SKIN_FUZZ: i32 = 5; // skin whose spines are sub-pixel shell
 // (fs_surface) draws every plant in its far form and SKIPS those inside
 // their near band, drawing the ground behind them; the refinement pass
 // (fs_surface_refine) walks only the near band again and draws its plants
-// in full — needles, leaves, pleats. Shadow rays always see far forms. The
-// stage is a literal at every call site, so each kernel compiles only its
-// own half of every trace. A plant picks near or far on the same per-ray
-// dither in both passes, so between them every plant is drawn exactly once.
+// in full — needles, leaves, pleats. (Shadow rays have their own lean path,
+// df_occlusion_walk.) The stage is a literal at every call site, so each
+// kernel compiles only its own half of every trace. A plant picks near or
+// far on the same per-ray dither in both passes, so between them every
+// plant is drawn exactly once.
 const DF_STAGE_PLAIN: i32 = 0;
 const DF_STAGE_REFINE: i32 = 1;
-const DF_STAGE_SHADOW: i32 = 2;
 
 // Whether this stage leaves a plant in form `far` to the other stage.
 fn df_stage_skips(stage: i32, far: bool) -> bool {
@@ -15287,8 +15287,6 @@ const DF_SAG_EXACT_FP1: f32 = 0.009;
 // Columns become capsule chains past this footprint (ribs sub-pixel).
 const DF_CACT_CAPS_FP0: f32 = 0.020;
 const DF_CACT_CAPS_FP1: f32 = 0.035;
-const DF_SAG_FUZZ_FP0: f32 = 0.025;
-const DF_SAG_FUZZ_FP1: f32 = 0.045;
 // Projected needle area per unit volume at the skin, falling linearly to
 // zero at the shell's edge. Measured: the value at which the shell medium
 // averages to what the exact needles average to over a trunk (harness view
@@ -15585,7 +15583,6 @@ fn df_col_capsules(c: DfColumn, comp: i32, q0: vec3<f32>, dir: vec3<f32>,
 fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                    tb: f32, pixel_angle: f32, dither: vec2<f32>,
                    stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = tb;
@@ -15602,23 +15599,16 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let slope = 2.0 * it.b.z * it.a.z / DF_PI;
     let inv_lip = 1.0 / sqrt(1.0 + slope * slope);
 
-    // Spine representation, chosen once per plant on the ray dither. A
-    // shadow ray carries its receiver's footprint in pixel_angle.
-    let fp_in = select(pixel_angle * ta, pixel_angle, shadow);
-    var mode = 2;
-    if (!shadow) {
-        if (fp_in < mix(DF_SAG_EXACT_FP0, DF_SAG_EXACT_FP1, dither.x)) {
-            mode = 0;
-        } else if (fp_in < mix(DF_SAG_FUZZ_FP0, DF_SAG_FUZZ_FP1, dither.x)) {
-            mode = 1;
-        }
-    }
+    // Spine representation, chosen once per plant on the ray dither: exact
+    // needles, the shell medium, or — past the capsule hand-off below — the
+    // far form's folded shell.
+    let fp_in = pixel_angle * ta;
+    let exact = fp_in < mix(DF_SAG_EXACT_FP0, DF_SAG_EXACT_FP1, dither.x);
     // Past a couple of centimetres of footprint the ribs are a pixel or
     // less and the columns are drawn as their capsule chains instead of
-    // sphere-traced pleats: the far form (and the shadow form for a
-    // receiver that far), with the pleats' shading averaged in.
-    let far = shadow
-        || fp_in > mix(DF_CACT_CAPS_FP0, DF_CACT_CAPS_FP1, dither.x);
+    // sphere-traced pleats: the far form, with the pleats' shading and the
+    // needle shell averaged in.
+    let far = fp_in > mix(DF_CACT_CAPS_FP0, DF_CACT_CAPS_FP1, dither.x);
     if (df_stage_skips(stage, far)) {
         return res;
     }
@@ -15635,9 +15625,6 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         res.hit = true;
         res.t = ch.t;
         res.kind = it.kind;
-        if (shadow) {
-            return res;
-        }
         res.normal = ch.n;
         let qh = q0 + dir * ch.t;
         let hz = pcg2d(it.seed).x;
@@ -15665,7 +15652,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                             round(pad_mean * 255.0) + 0.99 * cov, age);
         return res;
     }
-    let shell = select(0.0, shell_w, mode < 2 && !shadow);
+    let shell = shell_w;
     let tau_hit = df_item_free_path(dither, it.seed);
 
     var sp: DfRodHit;
@@ -15686,13 +15673,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         let q = q0 + dir * t;
         let sm = df_sag_eval(it, q, blend);
         let d = sm.d;
-        // A shadow ray carries the receiver's footprint in pixel_angle
-        // (see df_shadow_exact): its own t says nothing about pixels. Its
-        // tolerance stays well inside the footprint, because what it
-        // decides is whether a point a centimetre off the skin — a needle
-        // on a backlit rim — sees past the body.
-        let eps = select(max(1.5e-4, 0.3 * pixel_angle * t),
-                         max(5e-4, 0.05 * pixel_angle), shadow);
+        let eps = max(1.5e-4, 0.3 * pixel_angle * t);
         if (d < eps) {
             body_t = t;
             body = sm;
@@ -15700,7 +15681,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         }
         var stp = d * inv_lip;
         if (d < shell) {
-            if (mode == 0) {
+            if (exact) {
                 let c = df_cactus_col(it, sm.comp);
                 let kf = sm.cs.theta * c.ribs / DF_TAU + c.phase;
                 let k = round(kf);
@@ -15781,9 +15762,6 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.hit = true;
     res.t = body_t;
     res.kind = it.kind;
-    if (shadow) {
-        return res;
-    }
     // Tetrahedral gradient, at a spacing matched to the footprint.
     let qh = q0 + dir * body_t;
     let e = max(2e-4, 0.5 * pixel_angle * body_t);
@@ -15828,19 +15806,10 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         * smoothstep(0.6, 1.0, body.cs.x);
     let felt_w = mix(pad, pad_mean,
                      smoothstep(DF_SAG_FELT_R, 4.0 * DF_SAG_FELT_R, fp_h));
-    // Folded shell: its coverage along this sightline, through the shell
-    // as the unpleated surface bounds it (a groove wall is not where the
-    // needles stand).
-    var cov = 0.0;
-    if (mode == 2) {
-        let mu = max(abs(dot(normalize(body.cs.off), dir)), 0.08);
-        cov = 1.0 - exp(-select(DF_SAG_FOLD_TAU, DF_BAR_FOLD_TAU, barrel) / mu);
-    }
-    let code = select(DF_MAT_SKIN, DF_MAT_SKIN_FUZZ, mode == 2);
-    // mat.z carries both the felt weight (on a 1/255 lattice) and the
-    // shell's coverage (the fraction).
-    res.mat = vec4<f32>(f32(code) + tint, body.cs.x,
-                        round(felt_w * 255.0) + 0.99 * cov, age);
+    // mat.z carries the felt weight on a 1/255 lattice (and, for the far
+    // form's folded shell, its coverage as the fraction; none here).
+    res.mat = vec4<f32>(f32(DF_MAT_SKIN) + tint, body.cs.x,
+                        round(felt_w * 255.0), age);
     return res;
 }
 
@@ -15972,8 +15941,8 @@ const DF_PP_FOLD_TAU: f32 = 0.044;
 // Past this footprint a clump is one ellipsoid of pad medium, of extinction
 // DF_PP_ENV_SIGMA per pad half-length (a clump's gaps let about a third of
 // the rays through its middle, as the drawn pads do).
-const DF_PP_FAR_FP0: f32 = 0.030;
-const DF_PP_FAR_FP1: f32 = 0.050;
+const DF_PP_FAR_FP0: f32 = 0.020;
+const DF_PP_FAR_FP1: f32 = 0.035;
 const DF_PP_ENV_SIGMA: f32 = 0.20;
 const DF_PP_SKIN: vec3<f32> = vec3<f32>(0.105, 0.150, 0.080);
 const DF_PP_GLOCHID: vec3<f32> = vec3<f32>(0.120, 0.080, 0.050);
@@ -16191,16 +16160,14 @@ fn df_pp_envelope(it: DfItem) -> DfEnvelope {
 fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     tb: f32, pixel_angle: f32, dither: vec2<f32>,
                     stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = tb;
     let q0 = o - it.base;
-    let fp = select(pixel_angle * ta, pixel_angle, shadow);
-    let exact = !shadow
-        && fp < mix(DF_PP_EXACT_FP0, DF_PP_EXACT_FP1, dither.x);
+    let fp = pixel_angle * ta;
+    let exact = fp < mix(DF_PP_EXACT_FP0, DF_PP_EXACT_FP1, dither.x);
     // Far form: the clump as one ellipsoid of pad medium.
-    let far = shadow || fp > mix(DF_PP_FAR_FP0, DF_PP_FAR_FP1, dither.x);
+    let far = fp > mix(DF_PP_FAR_FP0, DF_PP_FAR_FP1, dither.x);
     if (df_stage_skips(stage, far)) {
         return res;
     }
@@ -16266,9 +16233,6 @@ fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.hit = true;
     res.t = best.t;
     res.kind = DF_KIND_PRICKLY;
-    if (shadow) {
-        return res;
-    }
     if (st.code == DF_MAT_PAD) {
         let pd = st.pad;
         let q = q0 + dir * best.t - pd.c;
@@ -16449,14 +16413,10 @@ fn df_medium_hit(ch: vec2<f32>, ta: f32, tb: f32, sigma: f32,
 // from a twig's points to the ray is quadratic in the twig parameter, so the
 // clumps within reach are an interval — and tests each leaf as a disc.
 //
-// Representations by footprint, blended on the ray dither:
-//   fp < ~2 cm    stems, twigs and every leaf exact;
-//   fp < ~25 cm   the stems stay exact; each twig's foliage is a capsule of
-//                 leaf-area density, and a capsule blocks the ray with the
-//                 probability its chord's optical depth gives, at a uniform
-//                 point along the chord — independent Poisson per capsule,
-//                 so the pixel's coverage in expectation is the leaves';
-//   beyond        the bush is one ellipsoid of the same mean density.
+// Two representations by footprint, blended on the ray dither: under ~2 cm
+// the stems, twigs and every leaf are exact (the refinement stage); past it
+// the bush is its far form, a heart and a ring of lobes of leaf medium (the
+// plain stage), whose mean coverage is the exact leaves'.
 const DF_CREO_TWIGS: i32 = 8;
 const DF_CREO_CLUMP_DS: f32 = 0.022;
 const DF_CREO_CLUMP_R: f32 = 0.022;
@@ -16466,14 +16426,11 @@ const DF_CREO_LEAF_HW: f32 = 0.0034;   // leaflet half-width (m)
 const DF_CREO_MAX_CLUMPS: i32 = 6;     // per twig per ray
 const DF_CREO_EXACT_FP0: f32 = 0.012;
 const DF_CREO_EXACT_FP1: f32 = 0.022;
-const DF_CREO_CAPS_FP0: f32 = 0.04;
-const DF_CREO_CAPS_FP1: f32 = 0.07;
-// Leaf-area optical depth per metre inside a foliage capsule and inside the
-// whole-bush envelope. Measured, not derived: the values at which each form
-// averages to what the exact leaves average to (tools/desert_flora_harness.py,
-// view creo_5m, each form forced in turn with --patch).
-const DF_CREO_CAPS_SIGMA: f32 = 1.5;
-const DF_CREO_ENV_SIGMA: f32 = 0.35;
+// Leaf-area optical depth per metre inside a far lobe. Measured, not
+// derived: the value at which the lobes average to what the exact leaves
+// average to (tools/desert_flora_harness.py, view creo_5m, each form forced
+// in turn with --patch).
+const DF_CREO_LOBE_SIGMA: f32 = 0.28;
 
 const DF_CREO_LEAF: vec3<f32> = vec3<f32>(0.100, 0.150, 0.016);
 const DF_CREO_LEAF_TRANS: vec3<f32> = vec3<f32>(0.060, 0.110, 0.010);
@@ -16656,54 +16613,70 @@ fn df_capsule_chord(o: vec3<f32>, dir: vec3<f32>, sg: DfSeg,
     return vec2<f32>(t0, max(t1 - t0, 0.0));
 }
 
-// The crown envelope: an ellipsoid over the upper crown.
-fn df_creo_envelope(it: DfItem) -> DfEnvelope {
+// Far form: the crown as DF_CREO_LOBES ellipsoids of leaf medium — a
+// heart over the crown's centre and a ring of lobes out over the stems — so a
+// bush a few dozen pixels across keeps its lumpy, see-through outline
+// instead of reading as one blob. Lobe k's placement is a draw of the
+// plant's own; its extinction is measured (see DF_CREO_LOBE_SIGMA).
+const DF_CREO_LOBES: i32 = 7;
+
+fn df_creo_lobe(it: DfItem, k: i32) -> DfEnvelope {
+    let h = it.a.x;
+    let w = it.a.y;
     var e: DfEnvelope;
-    e.c = vec3<f32>(0.0, 0.0, 0.62 * it.a.x);
-    e.r = vec3<f32>(it.a.y + 0.08, it.a.y + 0.08, 0.50 * it.a.x);
-    e.sigma = DF_CREO_ENV_SIGMA;
+    e.sigma = DF_CREO_LOBE_SIGMA;
+    if (k == 0) {
+        e.c = vec3<f32>(0.0, 0.0, 0.58 * h);
+        e.r = vec3<f32>(0.45 * w, 0.45 * w, 0.26 * h);
+        return e;
+    }
+    let r = df_rand4(pcg2d(it.seed + vec2<u32>(u32(k) * 53u + 601u, 59u)));
+    let az = it.b.z + DF_TAU * (f32(k - 1) + 0.4 * r.x) / f32(DF_CREO_LOBES - 1);
+    e.c = vec3<f32>(vec2<f32>(cos(az), sin(az)) * (0.50 + 0.15 * r.y) * w,
+                    (0.55 + 0.15 * r.z) * h);
+    e.r = vec3<f32>(0.42 * w, 0.42 * w, (0.20 + 0.06 * r.w) * h);
     return e;
 }
 
 fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                      tb: f32, pixel_angle: f32, dither: vec2<f32>,
                      stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = tb;
     let q0 = o - it.base;
     let bursage = it.b.x > 0.5;
-    // Shadow rays carry the receiver's footprint in pixel_angle.
-    let fp = select(pixel_angle * ta, pixel_angle, shadow);
-    var mode = 2;
-    if (!shadow) {
-        if (fp < mix(DF_CREO_EXACT_FP0, DF_CREO_EXACT_FP1, dither.x)) {
-            mode = 0;
-        } else if (fp < mix(DF_CREO_CAPS_FP0, DF_CREO_CAPS_FP1, dither.x)) {
-            mode = 1;
-        }
-    }
-    if (df_stage_skips(stage, mode == 2)) {
+    let fp = pixel_angle * ta;
+    let far = fp >= mix(DF_CREO_EXACT_FP0, DF_CREO_EXACT_FP1, dither.x);
+    if (df_stage_skips(stage, far)) {
         return res;
     }
     let h = it.a.x;
     let w = it.a.y;
-    // The envelope: an ellipsoid over the upper crown.
-    let env = df_creo_envelope(it);
-    let ec = env.c;
-    let er = env.r;
-    if (mode == 2) {
-        let tt = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, tb,
-                               env.sigma, df_item_free_path(dither, it.seed));
+    // The whole crown, for the leaves' own occlusion of the sky below.
+    let ec = vec3<f32>(0.0, 0.0, 0.62 * h);
+    let er = vec3<f32>(w + 0.08, w + 0.08, 0.50 * h);
+    if (far) {
+        var tt = tb;
+        var nrm = -dir;
+        for (var k: i32 = 0; k < DF_CREO_LOBES; k = k + 1) {
+            let e = df_creo_lobe(it, k);
+            let tk = df_medium_hit(df_ellipsoid_chord(q0, dir, e.c, e.r), ta,
+                                   tt, e.sigma, df_item_free_path(
+                                       dither, it.seed + vec2<u32>(u32(k), 0u)));
+            if (tk < tt) {
+                tt = tk;
+                nrm = normalize((q0 + dir * tk - e.c) / (e.r * e.r));
+            }
+        }
         if (tt >= tb) {
             return res;
         }
         res.hit = true;
         res.t = tt;
         res.kind = DF_KIND_CREOSOTE;
+        res.normal = nrm;
         let pn = (q0 + dir * tt - ec) / er;
-        res.normal = normalize(pn / er);
         res.mat = vec4<f32>(f32(DF_MAT_CANOPY) + 0.45,
                             clamp(length(pn), 0.0, 1.0), it.b.x, it.a.w);
         return res;
@@ -16716,9 +16689,6 @@ fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let n_stems = i32(it.a.z);
     let reach = 0.45 * max(h / 1.5, 0.35) + DF_CREO_CLUMP_R + 0.03;
     let rc = DF_CREO_CLUMP_R + 2.0 * DF_CREO_LEAF_HL + 0.012;
-    // Capsule medium: one uniform per capsule, from the ray dither and the
-    // capsule's index (independent Poisson trials, see the header).
-    var cap_seed = pcg2d(bitcast<vec2<u32>>(dither) ^ it.seed);
     for (var i: i32 = 0; i < n_stems; i = i + 1) {
         let st = df_creo_stem(it, i);
         let ap = df_seg_approach(q0, dir, st.a, st.ax, st.len);
@@ -16737,33 +16707,13 @@ fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             if (tp.x > rc + 0.016) {
                 continue;
             }
-            if (f > 0 && mode == 0) {
+            if (f > 0) {
                 let bt = df_rod(q0, dir, tw.a, tw.ax, tw.len, tw.r0, tw.r1,
                                 best, 0.0);
                 if (bt.t < best.t) {
                     best = bt;
                     code = DF_MAT_STEM;
                 }
-            }
-            if (mode == 1) {
-                let ch = df_capsule_chord(q0, dir, tw, rc);
-                if (ch.y > 0.0 && ch.x < best.t) {
-                    cap_seed = pcg2d(cap_seed + vec2<u32>(u32(f), u32(i)));
-                    let u1 = df_u01(cap_seed.x);
-                    let pc = 1.0 - exp(-DF_CREO_CAPS_SIGMA * ch.y);
-                    if (u1 < pc) {
-                        let th = ch.x + df_first_collision(u1 / pc, pc,
-                                                           DF_CREO_CAPS_SIGMA);
-                        if (th < best.t) {
-                            best.t = th;
-                            best.n = -dir;
-                            best.axis = tw.ax;
-                            best.tint = df_u01(cap_seed.y ^ 0x5bd1e995u);
-                            code = DF_MAT_CANOPY;
-                        }
-                    }
-                }
-                continue;
             }
             // The clumps within reach of the ray: an interval of the twig.
             let half = sqrt(max(rc * rc - tp.w * tp.w, 0.0)) / max(tp.z, 0.05);
@@ -16916,8 +16866,8 @@ const DF_MAT_OCO_LEAF: i32 = 12;
 const DF_MAT_OCO_FLOWER: i32 = 13;
 const DF_MAT_OCO_CANOPY: i32 = 18;   // a leafy cane's capsule medium
 const DF_MAT_OCO_FAR: i32 = 19;      // the fan as a cone of medium
-const DF_OCO_FAR_FP0: f32 = 0.06;
-const DF_OCO_FAR_FP1: f32 = 0.10;
+const DF_OCO_FAR_FP0: f32 = 0.025;
+const DF_OCO_FAR_FP1: f32 = 0.035;
 const DF_OCO_FAR_W: f32 = 0.020;     // mean cane width over its length
 
 // Horizontal reach of an ocotillo from its foot.
@@ -16993,17 +16943,16 @@ fn df_oco_medium(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
 fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                      tb: f32, pixel_angle: f32, dither: vec2<f32>,
                      stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = tb;
     let q0 = o - it.base;
-    let fp = select(pixel_angle * ta, pixel_angle, shadow);
+    let fp = pixel_angle * ta;
     let exact = fp < mix(DF_OCO_EXACT_FP0, DF_OCO_EXACT_FP1, dither.x);
     let state = i32(it.a.w);
     // Far form: the fan as a cone of cane medium, standing on its apex just
     // below the crown, as wide as the fan and its outward bend.
-    let far = shadow || fp > mix(DF_OCO_FAR_FP0, DF_OCO_FAR_FP1, dither.x);
+    let far = fp > mix(DF_OCO_FAR_FP0, DF_OCO_FAR_FP1, dither.x);
     if (df_stage_skips(stage, far)) {
         return res;
     }
@@ -17223,8 +17172,8 @@ const DF_PV_CLUMPS: i32 = 7;
 const DF_PV_CLUMP_SIGMA: f32 = 3.0;   // twig-and-leaflet medium in a clump
 // The whole crown's mean: the clumps fill about 0.6 of its envelope.
 const DF_PV_CROWN_SIGMA: f32 = 1.8;
-const DF_PV_FAR_FP0: f32 = 0.05;
-const DF_PV_FAR_FP1: f32 = 0.08;
+const DF_PV_FAR_FP0: f32 = 0.025;
+const DF_PV_FAR_FP1: f32 = 0.035;
 const DF_PV_BARK: vec3<f32> = vec3<f32>(0.150, 0.190, 0.075);
 const DF_PV_LEAF: vec3<f32> = vec3<f32>(0.095, 0.140, 0.040);
 const DF_MAT_PV_BARK: i32 = 20;
@@ -17291,13 +17240,12 @@ fn df_pv_crown(it: DfItem) -> DfEnvelope {
 fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                       tb: f32, pixel_angle: f32, dither: vec2<f32>,
                       stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = tb;
     let q0 = o - it.base;
-    let fp = select(pixel_angle * ta, pixel_angle, shadow);
-    let far = shadow || fp > mix(DF_PV_FAR_FP0, DF_PV_FAR_FP1, dither.x);
+    let fp = pixel_angle * ta;
+    let far = fp > mix(DF_PV_FAR_FP0, DF_PV_FAR_FP1, dither.x);
     if (df_stage_skips(stage, far)) {
         return res;
     }
@@ -17416,7 +17364,7 @@ const DF_ROCK: vec3<f32> = vec3<f32>(0.330, 0.285, 0.245);
 const DF_ROCK_VARNISH: vec3<f32> = vec3<f32>(0.090, 0.058, 0.040);
 const DF_ROCK_RIND: vec3<f32> = vec3<f32>(0.380, 0.240, 0.140);
 const DF_MAT_ROCK: i32 = 14;
-const DF_ROCK_FAR_FP: f32 = 0.05;
+const DF_ROCK_FAR_FP: f32 = 0.03;
 
 fn df_stone_param(it: DfItem, i: i32) -> vec4<f32> {
     return select(select(select(it.d, it.c, i == 2), it.b, i == 1),
@@ -17531,15 +17479,14 @@ fn df_boulder_far(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
 
 fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     tb: f32, pixel_angle: f32, stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = tb;
     let q0 = o - it.base;
-    let fp = select(pixel_angle * ta, pixel_angle, shadow);
+    let fp = pixel_angle * ta;
     // Far form: each stone its ellipsoid, the joints and undulations (a few
     // centimetres) sub-pixel.
-    let far = shadow || fp > DF_ROCK_FAR_FP;
+    let far = fp > DF_ROCK_FAR_FP;
     if (df_stage_skips(stage, far)) {
         return res;
     }
@@ -17564,8 +17511,7 @@ fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             return res;
         }
         let d = df_boulder_sdf(it, q0 + dir * t).x;
-        let eps = select(max(2e-4, 0.3 * pixel_angle * t),
-                         max(2e-3, 0.3 * pixel_angle), shadow);
+        let eps = max(2e-4, 0.3 * pixel_angle * t);
         if (d < eps) {
             converged = true;
             break;
@@ -17579,9 +17525,6 @@ fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.hit = true;
     res.t = t;
     res.kind = DF_KIND_BOULDER;
-    if (shadow) {
-        return res;
-    }
     let qh = q0 + dir * t;
     let e = max(1e-3, 0.5 * pixel_angle * t);
     let k1 = vec3<f32>(1.0, -1.0, -1.0);
@@ -17891,7 +17834,6 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
 fn df_item_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
                  pixel_angle: f32, dither: vec2<f32>,
                  stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var h: DesertHit;
     h.hit = false;
     h.t = tb;
@@ -17918,7 +17860,6 @@ fn df_item_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
 fn df_walk(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t0: f32,
            t1: f32, pixel_angle: f32, big: bool, dither: vec2<f32>,
            stage: i32) -> DesertHit {
-    let shadow = stage == DF_STAGE_SHADOW;
     var res: DesertHit;
     res.hit = false;
     res.t = t1;
@@ -17942,10 +17883,8 @@ fn df_walk(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t0: f32,
     for (var i: i32 = 0; i < DF_MAX_CELLS; i = i + 1) {
         let t_exit = min(min(tmax.x, tmax.y), t1);
         let org = vec2<f32>(ci) * cell;
-        // The footprint the ground is drawn at in this cell: the ray's own
-        // for a view walk, the receiver's (carried in pixel_angle) for a
-        // shadow walk.
-        let fp_cell = select(pixel_angle * max(t_cur, 0.0), pixel_angle, shadow);
+        // The footprint the ground is drawn at in this cell.
+        let fp_cell = pixel_angle * max(t_cur, 0.0);
         var foot: DfFoot;
         if (big) {
             foot = df_big_foot(ci);
@@ -18059,10 +17998,11 @@ fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 
 // The refinement stage's hook: the plants inside their near band, in full,
 // over [t0, t1] (t1 = what the plain pass found). The band ends where the
-// widest near band ends, DESERT_FLORA_REFINE_FP_M (the ocotillo's far
-// threshold), which desert_surface_refine also uses to leave early — a
-// camera high over the desert has nothing to walk here.
-const DESERT_FLORA_REFINE_FP_M: f32 = 0.10;
+// widest near band ends, DESERT_FLORA_REFINE_FP_M (every species hands
+// its near form to its far one by this footprint), which
+// desert_surface_refine also uses to leave early — a camera high over the
+// desert has nothing to walk here.
+const DESERT_FLORA_REFINE_FP_M: f32 = 0.035;
 
 fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                        t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
@@ -18108,7 +18048,12 @@ fn df_item_transmit(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
         return select(1.0, 0.0, ch.t < tb && ch.t > ta);
     }
     if (it.kind == DF_KIND_CREOSOTE) {
-        return df_envelope_transmit(df_creo_envelope(it), q0, dir, ta, tb);
+        var vis = 1.0;
+        for (var k: i32 = 0; k < DF_CREO_LOBES; k = k + 1) {
+            vis = vis * df_envelope_transmit(df_creo_lobe(it, k), q0, dir,
+                                             ta, tb);
+        }
+        return vis;
     }
     if (it.kind == DF_KIND_PRICKLY) {
         return df_envelope_transmit(df_pp_envelope(it), q0, dir, ta, tb);
@@ -18224,7 +18169,7 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
 // never compiles the walk. The hand-off is deterministic in the true
 // footprint: a shadow is light, not geometry, so an expected-value blend is
 // exact.
-const DF_SHADOW_EXACT_FP0: f32 = 0.06;
+const DF_SHADOW_EXACT_FP0: f32 = 0.02;
 const DF_SHADOW_EXACT_FP1: f32 = DESERT_FLORA_REFINE_FP_M;
 
 fn df_far_shadow_weight(fp: f32) -> f32 {
