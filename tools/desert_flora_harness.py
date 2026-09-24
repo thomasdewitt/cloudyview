@@ -48,7 +48,7 @@ DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
 SCAN_PRELUDE = """
 const DESERT_FLORA_SLAB_H: f32 = 13.0;
 struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>,
-                     ocean: vec4<f32>, };
+                     ocean: vec4<f32>, sun_dir: vec4<f32>, };
 var<private> u: ScanUniforms;
 fn desert_camera_origin() -> vec3<f32> { return vec3<f32>(0.0); }
 fn desert_height(xy: vec2<f32>) -> f32 { return 0.0; }
