@@ -4735,6 +4735,14 @@ const CITY_SHELL_ROOM_D: f32 = 4.2;   // room depth behind the glass (m)
 const CITY_SHELL_FILL_K: f32 = 0.15;
 const CITY_SHELL_EPS: f32 = 1e-4;
 
+// The tolerance at distance t: relative past 1 m. The same crossing reached
+// two ways (a division here, a multiply by the reciprocal in city_box_hit)
+// differs by an ulp, and past 1024 m one float32 ulp is already more than
+// CITY_SHELL_EPS; WGSL allows division 2.5 ulp besides.
+fn city_shell_eps(t: f32) -> f32 {
+    return CITY_SHELL_EPS * max(1.0, t);
+}
+
 const CITY_PART_WALL: i32 = 0;
 const CITY_PART_REVEAL: i32 = 1;
 const CITY_PART_GLASS: i32 = 2;
@@ -5567,7 +5575,8 @@ fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
     // The wall plane, and through the opening the recess behind it.
     if (dl.z < -1e-6) {
         let tw = -ol.z / dl.z;
-        if (tw > 0.0 && tw >= ta - CITY_SHELL_EPS && tw <= tb + CITY_SHELL_EPS) {
+        let ew = city_shell_eps(tw);
+        if (tw > 0.0 && tw >= ta - ew && tw <= tb + ew) {
             let pw = ol + tw * dl;
             let on_face = pw.x >= 0.0 && pw.x <= f.len
                        && pw.y >= f.z0 && pw.y <= f.z1;
@@ -5878,7 +5887,7 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
         fe_hit = city_shell_escape(ol, dl, il, esc, s);
     }
     let fd = city_face_draw(cc, f, st);
-    let p0 = ol + (t_lo + CITY_SHELL_EPS) * dl;
+    let p0 = ol + (t_lo + city_shell_eps(t_lo)) * dl;
     var b = city_bay(f, p0.x, p0.y);
     var t = t_lo;
     for (var i: i32 = 0; i < CITY_SHELL_MAX_CELLS; i = i + 1) {
@@ -5938,7 +5947,8 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
                                      pixel_angle * tw, bw, cbw,
                                      max(vaw, f.z0),
                                      min(vaw + CITY_FLOOR_H, f.z1),
-                                     tw - CITY_SHELL_EPS, tw + CITY_SHELL_EPS);
+                                     tw - city_shell_eps(tw),
+                                     tw + city_shell_eps(tw));
             if (hw.part >= 0 && hw.t < fe_hit.t) {
                 return hw;
             }
@@ -6000,9 +6010,17 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
     }
     var best = city_shell_miss();
     var best_side = 0;
-    // Whether the slab hit is a wall this pass re-traces as a shell, and so
-    // must give way to whatever that shell yields (the glass behind it).
-    var replaces_core = false;
+    // The side whose wall the slab hit is on (-1: a roof, or no slab hit).
+    // Only that wall's own shell may put the hit behind the slab's (the
+    // glass behind its reveal); every other side's must stand in front of
+    // it. Without that, a ray whose facing walk came up empty found the far
+    // wall's sills from inside the building.
+    var core_side = -1;
+    if (core && abs(core_n.z) < 0.5) {
+        core_side = select(select(3, 2, core_n.y > 0.0),
+                           select(1, 0, core_n.x > 0.0),
+                           abs(core_n.x) > abs(core_n.y));
+    }
     for (var side: i32 = 0; side < 4; side = side + 1) {
         // The layer: the box grown by the shell depth, its inner bound on
         // this face's axis pinned to the wall plane. Every face whose layer
@@ -6015,7 +6033,12 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         if (side == 2) { lmin.y = bmax.y; }
         if (side == 3) { lmax.y = bmin.y; }
         let hl = city_box_hit(o, inv3, lmin, lmax);
-        if (hl.x > hl.y || hl.y <= 0.0 || max(hl.x, 0.0) >= best.t) {
+        // A side other than the slab hit's can only matter in front of it.
+        var t_cap = best.t;
+        if (core && side != core_side) {
+            t_cap = min(t_cap, res.t);
+        }
+        if (hl.x > hl.y || hl.y <= 0.0 || max(hl.x, 0.0) >= t_cap) {
             continue;
         }
         let f = city_face_make(cc, bmin, bmax, side, tier);
@@ -6027,9 +6050,6 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         let s = city_shell_scale(pixel_angle, t_ref, dl, st.depth, f.pitch);
         if (s <= 0.0) {
             continue;   // flat: the core slab hit already is this wall
-        }
-        if (core && dot(core_n.xy, f.n) > 0.5) {
-            replaces_core = true;
         }
         // Walk only the layer the SCALED relief occupies: the full-depth
         // layer's outer part is empty once s < 1, and walking it would spend
@@ -6049,12 +6069,12 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         }
         let sh = city_shell_face(o, dir, cc, f, st, s, pixel_angle,
                                  max(hs.x, 0.0), hs.y);
-        if (sh.t < best.t) {
+        if (sh.t < t_cap) {
             best = sh;
             best_side = side;
         }
     }
-    if (best.part >= 0 && (replaces_core || !core || best.t < res.t)) {
+    if (best.part >= 0) {
         let f = city_face_make(cc, bmin, bmax, best_side, tier);
         return CityBoxHit(best.t, city_face_world(f, best.n),
                           CITY_KIND_SHELL + best.part
