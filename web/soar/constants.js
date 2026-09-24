@@ -140,7 +140,7 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // every visitor past any cache. Pinned against the tiles and against
 // soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
-  ocean: "cloudyview.web.ocean.v1",
+  ocean: "cloudyview.web.ocean.v2",
   desert: "cloudyview.web.desert.v1",
   city: "cloudyview.web.city.v2",
 };

@@ -5,7 +5,8 @@ cloudyview/track.py for the desktop one — and a track is meant to render to
 the same frames from either. So the Python port is pinned against the real
 JavaScript, run under node on the same synthetic track: every column of every
 frame agrees to floating-point noise, including the periodic folds and the
-azimuth unwrap, for a v2 (9-column) and a v1 (7-column) track.
+azimuth unwrap, for a v3 (10-column, with the scene clock), a v2 (9-column)
+and a v1 (7-column) track.
 
 The header reader is pinned on the schema soar writes today: every render
 setting comes from the header, a v1 header (no city block) is a day scene,
@@ -33,7 +34,7 @@ needs_node = pytest.mark.skipif(
     reason="needs node and web/soar/track.js")
 
 
-def _synthetic_samples(with_surface: bool, seed: int = 7):
+def _synthetic_samples(version: int, seed: int = 7):
     """A hand-flown-looking track: irregular timing, a cloud-period crossing
     in x, a north crossing in azimuth, a tile crossing in sx."""
     rng = np.random.default_rng(seed)
@@ -48,10 +49,17 @@ def _synthetic_samples(with_surface: bool, seed: int = 7):
     el = 10.0 * np.cos(np.linspace(0, 2, n))
     fov = np.full(n, 100.0)
     cols = [t, x, y, z, az, el, fov]
-    if with_surface:
+    if version >= 2:
         sx = (0.9 + np.linspace(0, 0.3, n)) % 1.0       # tile crossing
         sy = 0.4 + 0.05 * np.sin(np.linspace(0, 4, n))
         cols += [sx, sy]
+    if version >= 3:
+        # The scene clock: runs with the flight from wherever it stood, and
+        # held for a stretch (a pause) — the column carries it either way.
+        clock = 812.25 + t.copy()
+        clock[30:36] = clock[30]
+        clock[36:] -= clock[36] - clock[30]
+        cols += [clock]
     samples = np.stack(cols, axis=1)
     # A duplicated timestamp, as a stalled frame writes one.
     samples[10, 0] = samples[9, 0]
@@ -74,9 +82,9 @@ def _js_resample(samples, fps, periodic=True, linear_position=False):
 
 @needs_node
 @pytest.mark.parametrize("linear_position", [False, True])
-@pytest.mark.parametrize("with_surface", [True, False])
-def test_python_resample_matches_track_js(with_surface, linear_position):
-    samples = _synthetic_samples(with_surface)
+@pytest.mark.parametrize("version", [3, 2, 1])
+def test_python_resample_matches_track_js(version, linear_position):
+    samples = _synthetic_samples(version)
     fps = 30.0
     py = tr.resample_track(samples, fps, periodic=True,
                            linear_position=linear_position)
@@ -89,13 +97,41 @@ def test_python_resample_matches_track_js(with_surface, linear_position):
         assert p.azimuth == pytest.approx(j["azimuth"], abs=1e-9)
         assert p.elevation == pytest.approx(j["elevation"], abs=1e-12)
         assert p.fov == pytest.approx(j["fov"], abs=1e-12)
-        if with_surface:
+        if version >= 2:
             np.testing.assert_allclose(
                 p.surface_position, j["surfacePosition"], atol=1e-12)
             assert 0.0 <= p.surface_position[0] < 1.0
         else:
             assert p.surface_position is None and j["surfacePosition"] is None
+        # The scene clock: resampled like any column on a v3 track, and the
+        # sea held at 0 on anything older.
+        assert p.scene_time == pytest.approx(j["sceneTime"], abs=1e-9)
+        if version < 3:
+            assert p.scene_time == 0.0
         assert -1.0 <= p.position[0] < 1.0
+
+
+def test_a_v3_city_track_with_knocks_loads_and_replays(tmp_path):
+    """The two track changes of 2026-09-23 together: v3's scene-clock column
+    and the city's top-level knocks. The knocks ride beside the samples, on
+    the flight's clock, and this render reads no further than accepting
+    them; the city replays with linear positions and the clock resamples."""
+    samples = _synthetic_samples(3)
+    path = tmp_path / "city.json"
+    path.write_text(json.dumps({
+        "schema": "cloudyview.track.v3",
+        "header": {"schema": tr.HEADER_SCHEMA},
+        "samples": samples.tolist(),
+        "knocks": [[float(samples[20, 0]), 0.7, 1, 0.8, 0],
+                   [float(samples[40, 0]), 0.3, -1, 0.5, 1]]}))
+    _, loaded = tr.load_track(path)
+    assert loaded.shape == samples.shape
+    frames = tr.resample_track(loaded, 30.0, periodic=True,
+                               linear_position=True)
+    clocks = [f.scene_time for f in frames]
+    assert clocks[0] == pytest.approx(samples[0, 9])
+    assert samples[0, 9] <= min(clocks) and max(clocks) <= samples[-1, 9]
+    assert all(b >= a - 1e-9 for a, b in zip(clocks, clocks[1:]))
 
 
 def test_resample_rejects_mixed_widths_and_short_tracks(tmp_path):
@@ -104,7 +140,14 @@ def test_resample_rejects_mixed_widths_and_short_tracks(tmp_path):
     path.write_text(json.dumps({
         "schema": tr.TRACK_SCHEMAS[1], "header": header,
         "samples": [[0.0] * 9, [1.0] * 7]}))
-    with pytest.raises(ValueError, match="7 columns"):
+    with pytest.raises(ValueError, match="9-column"):
+        tr.load_track(path)
+    # The schema decides how a row reads, so a row of the wrong width for
+    # its schema is corrupt even when the width is some schema's.
+    path.write_text(json.dumps({
+        "schema": "cloudyview.track.v3", "header": header,
+        "samples": [[0.0] * 9, [1.0] * 9]}))
+    with pytest.raises(ValueError, match="10-column"):
         tr.load_track(path)
     path.write_text(json.dumps({
         "schema": tr.TRACK_SCHEMAS[1], "header": header,

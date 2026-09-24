@@ -289,8 +289,11 @@ export function shaderVariantKey(spec) {
 export class Renderer {
   /**
    * `scene` supplies the resident GPU resources and the field geometry:
-   * {volumeView, nestView, oceanView, bmin, bmax, minVoxelM, minVoxelNestM,
-   *  nested, nestBmin, nestBmax, oceanFifDx, oceanTileExtent, oceanMaxLod}.
+   * {volumeView, nestView, oceanView, seaView, bmin, bmax, minVoxelM,
+   *  minVoxelNestM, nested, nestBmin, nestBmax, oceanFifDx, oceanTileExtent,
+   *  surfacePeriod, oceanMaxLod}. oceanView (binding 3, the city's or the
+   *  desert's tile) and seaView (binding 9, the moving sea) are each null
+   *  on the scenes that do not read them.
    */
   constructor(device, shaderSource, scene, { canvasFormat }) {
     this.device = device;
@@ -377,6 +380,8 @@ export class Renderer {
           texture: { sampleType: "float", viewDimension: "3d" } },
         { binding: 8, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
+        { binding: 9, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d-array" } },
       ],
     });
     // Group 1: the surface pre-pass's targets — the final surface, which
@@ -440,6 +445,17 @@ export class Renderer {
       { texture: this._iceDummy }, new Uint8Array([0]),
       { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
     this.iceMode = false;
+    // Bindings 3 and 9 are the two surface slots: the city's or the
+    // desert's tile at 3, the moving sea at 9. A scene fills the one it
+    // reads; the other gets this 1x1 zero stand-in, viewed as a 2D texture
+    // or as a one-layer array.
+    this._surfaceDummy = device.createTexture({
+      label: "soar-surface-dummy", size: [1, 1, 1], format: "rgba16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this._surfaceDummy }, new Uint16Array(4),
+      { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
@@ -539,6 +555,16 @@ export class Renderer {
     this.prefetchPipelines();
   }
 
+  /** Binding 3's stand-in over the ocean, whose sea is at binding 9. */
+  _tileDummyView() {
+    return this._surfaceDummy.createView();
+  }
+
+  /** Binding 9's stand-in under the city and the desert: one layer. */
+  _seaDummyView() {
+    return this._surfaceDummy.createView({ dimension: "2d-array" });
+  }
+
   /**
    * Rebuild the bind group against the scene's current textures. Must be
    * called whenever a nest is attached or removed — binding 5 otherwise still
@@ -555,7 +581,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: this.uniformBuf } },
         { binding: 1, resource: scene.volumeView },
         { binding: 2, resource: this.volSampler },
-        { binding: 3, resource: scene.oceanView },
+        { binding: 3, resource: scene.oceanView ?? this._tileDummyView() },
         { binding: 4, resource: this.oceanSampler },
         { binding: 5, resource: scene.nestView },
         { binding: 6, resource: this.volWrapSampler },
@@ -563,6 +589,7 @@ export class Renderer {
             (this._lightTauTex ?? this._lightTauDummy).createView() },
         { binding: 8, resource:
             scene.iceView ?? this._iceDummy.createView() },
+        { binding: 9, resource: scene.seaView ?? this._seaDummyView() },
       ],
     });
   }
@@ -587,9 +614,14 @@ export class Renderer {
     }
     const s = this.scene;
     s.desert = kind === "desert";
+    // The desert's tile at binding 3, or the sea at binding 9 — see
+    // loadOceanTile / loadSea. Whichever this surface does not use is
+    // null and binds the stand-in.
     s.oceanView = tile.view;
+    s.seaView = tile.seaView ?? null;
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
+    s.surfacePeriod = tile.surfacePeriod;
     s.oceanMaxLod = tile.maxLod;
     try {
       await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
@@ -1313,6 +1345,14 @@ export class Renderer {
       const sp = this._surfacePipeline(lighting);
       const rp = this._refinePipeline(lighting);
       const pending = [p, sp, rp].filter((q) => q && isPending(q));
+      if (pending.length === 0 && sp && !targets.surface) {
+        // The scene gained a traced surface while this frame waited on a
+        // compile (setSurface to the desert): give the target set its
+        // surface target, then resolve the pair again — the await means the
+        // state must be read afresh.
+        await this._ensureSurfaceTarget(targets);
+        continue;
+      }
       if (pending.length === 0) {
         rayPipeline = p;
         surfacePipelines = { surface: sp, refine: rp };
@@ -1794,13 +1834,16 @@ export class Renderer {
           { binding: 0, resource: { buffer: this._bakeUniformBuf } },
           { binding: 1, resource: this.scene.volumeView },
           { binding: 2, resource: this.volSampler },
-          { binding: 3, resource: this.scene.oceanView },
+          { binding: 3, resource:
+              this.scene.oceanView ?? this._tileDummyView() },
           { binding: 4, resource: this.oceanSampler },
           { binding: 5, resource: this.scene.nestView },
           { binding: 6, resource: this.volWrapSampler },
           { binding: 7, resource: this._lightTauTex.createView() },
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
+          { binding: 9, resource:
+              this.scene.seaView ?? this._seaDummyView() },
         ],
       }),
     };
@@ -1917,6 +1960,10 @@ export class Renderer {
       // packUniforms call below has always packed (no lighting flags given,
       // so the defaults). Named here so the module is specialized on the
       // same method the row carries.
+      // Its targets first: this is the meter's last await, so the
+      // specialization, pipelines and uniforms below all describe one moment.
+      this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
+      await this._ensureSurfaceTarget(this._meterTargets);
       const lighting = { lightCache: false, skyProbe: true };
       const spec = this._shaderSpec({ toneMap: false, lighting });
       // Its march and its surface pre-pass (city/desert), on that
@@ -1938,8 +1985,6 @@ export class Renderer {
         for (const q of compiling) q.catch(() => {});
         return null;
       }
-      this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
-      await this._ensureSurfaceTarget(this._meterTargets);
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.
       const u = packUniforms(this._sceneState(), {
@@ -1954,7 +1999,8 @@ export class Renderer {
           { binding: 0, resource: { buffer: this._meterUniformBuf } },
           { binding: 1, resource: this.scene.volumeView },
           { binding: 2, resource: this.volSampler },
-          { binding: 3, resource: this.scene.oceanView },
+          { binding: 3, resource:
+              this.scene.oceanView ?? this._tileDummyView() },
           { binding: 4, resource: this.oceanSampler },
           { binding: 5, resource: this.scene.nestView },
           { binding: 6, resource: this.volWrapSampler },
@@ -1962,6 +2008,8 @@ export class Renderer {
               (this._lightTauTex ?? this._lightTauDummy).createView() },
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
+          { binding: 9, resource:
+              this.scene.seaView ?? this._seaDummyView() },
         ],
       });
       const encoder = this.device.createCommandEncoder();
@@ -2023,6 +2071,7 @@ export class Renderer {
     this.uniformBuf?.destroy();
     this.accumUniformBuf?.destroy();
     this._iceDummy?.destroy();
+    this._surfaceDummy?.destroy();
     // The sun-tau cache is volume/8 bytes — hundreds of MB on a large field
     // — and none of these were released here before: every change of field
     // leaked the lot. Fenced, because a frame or a bake submitted just
@@ -2045,6 +2094,7 @@ export class Renderer {
       oceanReflectance: K.DEFAULT_OCEAN_REFLECTANCE,
       oceanFifDx: s.oceanFifDx,
       oceanTileExtent: s.oceanTileExtent,
+      surfacePeriodM: s.surfacePeriod,
       oceanEnabled: true,
       oceanMaxLod: s.oceanMaxLod,
       nested: s.nested,

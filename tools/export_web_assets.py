@@ -1,13 +1,13 @@
 """Export the browser build's binary assets.
 
-One destination:
+Destinations (name the ones to write):
 
-  web/soar/ocean/   the FIF ocean normal tile. Field-independent (it is a
-                    periodic 100 m patch of sea surface, not anything about
-                    your data), generated from a multifractal that only
-                    exists in Python, so it ships WITH the tool and works
-                    offline. Committed, and the seed is fixed, so a re-run
-                    must reproduce the same bytes.
+  web/soar/ocean/   the moving sea: a periodic 100 m, 25.6 s patch of sea
+                    surface (cloudyview/ocean_fif.py). Field-independent,
+                    generated from a multifractal that only exists in
+                    Python, so it ships WITH the tool and works offline.
+                    Committed, and the seed is fixed, so a re-run must
+                    reproduce the same bytes.
 
 Cloud fields are not exported here. Each demo field is baked separately by
 tools/prebake_demos.py into web/soar/demos/<id>/, which is what the browser
@@ -17,13 +17,15 @@ The WGSL under web/soar/ is edited in place. It used to be copied from the
 desktop engine, which was the source; the desktop app is gone and the browser
 copy is now the original.
 
-    uv run python tools/export_web_assets.py
+    uv run python tools/export_web_assets.py ocean
 """
 
+import gzip
 import json
 from pathlib import Path
 
 import numpy as np
+import scaleinvariance
 
 from cloudyview.cloudfield import CloudField
 from cloudyview.city_fif import (
@@ -31,8 +33,9 @@ from cloudyview.city_fif import (
     DEFAULT_N as CITY_N,
     generate_city_density,
 )
+from cloudyview import ocean_fif, sea_tile
+from cloudyview.soar_host import SURFACE_TILE_SCHEMAS
 from cloudyview.city_lots import bake_lots, glow_weight, pack_channels
-from cloudyview.ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
 SOAR_OUT = REPO / "web" / "soar"
@@ -44,11 +47,13 @@ CITY_OUT = REPO / "cloudyview" / "soar" / "city"
 
 CITY_SEED = 20260820
 
-# 512 rather than the app's 2048: a quarter the texel count for the same
-# physical tile (dx scales to match), which keeps the download honest.
-FIF_N = 512
-FIF_DX_M = 0.2
-FIF_SEED = 20260717
+SEA_SEED = 20260923
+# Quantization range of the two slopes. The sea's crests run across the wind
+# (+x), so its x slopes reach further; each is set just past its 99.999th
+# percentile, and the clip fraction is printed on export.
+SEA_SLOPE_SCALE = (0.75, 0.40)
+# The surface frame folds at this many tiles: the swell's period.
+SEA_SURFACE_TILES = 8
 
 
 def _volume_aabb(field: CloudField):
@@ -65,59 +70,119 @@ def _volume_aabb(field: CloudField):
     return bmin, bmax
 
 
-def _build_fif_normal_mips(base: np.ndarray) -> list:
-    """Average and renormalize a periodic normal-map mip chain on the CPU."""
-    mips = [np.ascontiguousarray(base, dtype=np.float32)]
-    cur = mips[0]
-    while cur.shape[0] > 1 or cur.shape[1] > 1:
-        h, w, _ = cur.shape
-        nh = max(1, h // 2)
-        nw = max(1, w // 2)
-        y0 = (np.arange(nh) * 2) % h
-        y1 = (y0 + 1) % h
-        x0 = (np.arange(nw) * 2) % w
-        x1 = (x0 + 1) % w
-        down = (
-            cur[y0[:, None], x0[None, :], :3]
-            + cur[y1[:, None], x0[None, :], :3]
-            + cur[y0[:, None], x1[None, :], :3]
-            + cur[y1[:, None], x1[None, :], :3]
-        ) * np.float32(0.25)
-        length = np.linalg.norm(down, axis=-1, keepdims=True)
-        down = down / np.maximum(length, np.float32(1e-12))
-        level = np.empty((nh, nw, 4), dtype=np.float32)
-        level[..., :3] = down
-        level[..., 3] = 1.0
-        mips.append(np.ascontiguousarray(level))
-        cur = mips[-1]
-    return mips
+def _slope_variance_tables(planes: np.ndarray, meta: dict):
+    """The two variance budgets the shader's microfacet lobe puts back.
+
+    `removed[k]`: mean(sx^2 + sy^2) at level 0 minus the same at level k —
+    what box-filtering to level k takes out of the slope distribution.
+    `temporal[k]`: at level k, mean(s(t) . s(t)) minus mean(s(t) . s(t+1)).
+    The shader blends two frames, and a blend at fraction f of two fields
+    with variance v and covariance c has variance v - 2 f (1 - f) (v - c):
+    the finest scales, which decorrelate fastest, dim between frames unless
+    the lobe carries what the blend removed. Both are measured on the bytes
+    the hosts decode, through the mip recipe they run.
+    """
+    nt = planes.shape[1]
+    levels = None
+    power = None
+    lag = None
+    first = sea_tile.mip_chain(sea_tile.decode_frame(planes, 0, meta))
+    prev = first
+    for t in range(nt):
+        cur = prev if t == 0 else sea_tile.mip_chain(
+            sea_tile.decode_frame(planes, t, meta))
+        nxt = first if t == nt - 1 else sea_tile.mip_chain(
+            sea_tile.decode_frame(planes, t + 1, meta))
+        if levels is None:
+            levels = len(cur)
+            power = np.zeros(levels)
+            lag = np.zeros(levels)
+        for k in range(levels):
+            a = cur[k][..., :2].astype(np.float64)
+            b = nxt[k][..., :2].astype(np.float64)
+            power[k] += np.mean(np.sum(a * a, axis=-1)) / nt
+            lag[k] += np.mean(np.sum(a * b, axis=-1)) / nt
+        prev = nxt
+    removed = power[0] - power
+    temporal = power - lag
+    return levels, removed, temporal
+
+
+# The whitecaps' lace (raymarch.wgsl sea_surface): foam is cut again inside
+# by the tile's own crest channel read at 1/8 scale, at a threshold that
+# runs from -LACE_EDGE (solid) for an active whitecap to LACE_REACH -
+# LACE_EDGE for the oldest residual foam, with a soft edge of +-LACE_EDGE.
+# The shader needs the mean cover each cut leaves, which is a property of the
+# tile: measured here at five thresholds.
+LACE_REACH = 0.25
+LACE_EDGE = 0.05
+LACE_POINTS = 5
+
+
+def _smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _lace_cover(planes: np.ndarray) -> list:
+    """Mean of smoothstep(a - e, a + e, crest) over the whole tile, for the
+    LACE_POINTS thresholds a = -e + k * reach / (points - 1)."""
+    crest = planes[3].astype(np.float64) / 255.0
+    cuts = [-LACE_EDGE + k * LACE_REACH / (LACE_POINTS - 1)
+            for k in range(LACE_POINTS)]
+    return [float(np.mean(_smoothstep(a - LACE_EDGE, a + LACE_EDGE, crest)))
+            for a in cuts]
 
 
 def export_ocean() -> dict:
+    """The moving sea: generate, quantize, and measure what the shader needs.
+
+    The two variance tables, the loop length and the foam cap also live in
+    raymarch.wgsl as constants (SEA_SLOPE_VARIANCE — one (removed, temporal)
+    pair per level — SEA_LOOP_S, SEA_FOAM_MAX_COVERAGE); tests/test_sea_tile.py
+    fails until the shader is updated to match a re-export.
+    """
     OCEAN_OUT.mkdir(parents=True, exist_ok=True)
-    print(f"FIF ocean tile {FIF_N}^2 at dx={FIF_DX_M} m (seeded {FIF_SEED})")
-    nx, ny, nz, dx = generate_fif_normals(
-        N=FIF_N, dx_m=FIF_DX_M, rng=np.random.default_rng(FIF_SEED)
-    )
-    base = np.empty((FIF_N, FIF_N, 4), dtype=np.float32)
-    base[..., 0], base[..., 1], base[..., 2] = nx, ny, nz
-    base[..., 3] = 1.0
-    mips = _build_fif_normal_mips(base)
-    for i, mip in enumerate(mips):
-        (OCEAN_OUT / f"fif_mip{i}.bin").write_bytes(
-            np.ascontiguousarray(mip, dtype=np.float16).tobytes()
-        )
+    print(f"sea {ocean_fif.N}^2 x {ocean_fif.NT} frames (seeded {SEA_SEED})")
+    sea = ocean_fif.generate_sea(SEA_SEED)
+    planes = sea_tile.encode(sea, SEA_SLOPE_SCALE)
+    clipped = [float(np.mean(np.abs(planes[c].astype(np.int16) - 128) == 127))
+               for c in (0, 1)]
+    print(f"  slope clip fraction x {clipped[0]:.2e}, y {clipped[1]:.2e}")
+    for old in OCEAN_OUT.glob("fif_mip*.bin"):
+        old.unlink()                   # the static tile this replaces
+    payload = gzip.compress(planes.tobytes(), compresslevel=9, mtime=0)
+    (OCEAN_OUT / sea_tile.FILE).write_bytes(payload)
     meta = {
-        "schema": "cloudyview.web.ocean.v1",
-        "n": FIF_N,
-        "dx_m": float(dx),
-        "mips": len(mips),
-        "format": "rgba16float",
-        "tile_extent_m": float(FIF_N * dx),
-        "seed": FIF_SEED,
+        "schema": SURFACE_TILE_SCHEMAS["ocean"],
+        "file": sea_tile.FILE,
+        "encoding": "gzip, uint8 planes [slope x, slope y, foam, crest][t][y][x]",
+        "n": ocean_fif.N,
+        "frames": ocean_fif.NT,
+        "dx_m": ocean_fif.DX_M,
+        "dt_s": ocean_fif.DT_S,
+        "loop_s": ocean_fif.NT * ocean_fif.DT_S,
+        "tile_extent_m": ocean_fif.N * ocean_fif.DX_M,
+        # The swell trains are periodic here, not at the tile; the surface
+        # frame folds at this period (raymarch.wgsl SWELL_*).
+        "surface_period_m": SEA_SURFACE_TILES * ocean_fif.N * ocean_fif.DX_M,
+        "slope_scale": list(SEA_SLOPE_SCALE),
+        "foam_max_coverage": ocean_fif.FOAM_MAX_COVERAGE,
+        "seed": SEA_SEED,
+        "scaleinvariance": scaleinvariance.__version__,
     }
+    meta["lace_reach"] = LACE_REACH
+    meta["lace_edge"] = LACE_EDGE
+    meta["lace_cover"] = [round(v, 6) for v in _lace_cover(planes)]
+    levels, removed, temporal = _slope_variance_tables(planes, meta)
+    meta["mips"] = levels
+    meta["slope_variance_removed"] = [round(float(v), 7) for v in removed]
+    meta["slope_variance_temporal"] = [round(float(v), 7) for v in temporal]
     (OCEAN_OUT / "meta.json").write_text(json.dumps(meta, indent=1))
-    print(f"  {len(mips)} mips, tile extent {meta['tile_extent_m']:.1f} m")
+    print(f"  {len(payload) / 1e6:.2f} MB gzipped, {levels} mips, loop "
+          f"{meta['loop_s']:.1f} s, surface period {meta['surface_period_m']:.1f} m")
+    print(f"  removed  {np.array2string(removed, precision=6)}")
+    print(f"  temporal {np.array2string(temporal, precision=6)}")
     return meta
 
 
@@ -195,10 +260,21 @@ def export_city() -> dict:
     return meta
 
 
+EXPORTS = {"ocean": export_ocean, "city": export_city}
+
+
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    # Named, not all-by-default: each tile is committed, and re-exporting one
+    # under a newer scaleinvariance than it was baked with is a change to
+    # that scene, not a no-op (0.14's N-D normalization fix scaled every N-D
+    # FIF by ~1.57).
+    parser.add_argument("tiles", nargs="+", choices=sorted(EXPORTS))
+    args = parser.parse_args()
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
-    export_ocean()
-    export_city()
+    for name in args.tiles:
+        EXPORTS[name]()
 
 
 if __name__ == "__main__":

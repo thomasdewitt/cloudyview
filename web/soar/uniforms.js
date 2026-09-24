@@ -66,6 +66,10 @@ export function packUniforms(state, view) {
     // null means the scene's static offset (cityOffsetM under CITY, the
     // origin otherwise). Mirrors SceneState.surface_offset_m.
     surfaceOffsetM = null,
+    // The period row 24 folds at: null is the tile extent (the city's and
+    // the desert's rule); the sea folds at its swell's period. Mirrors
+    // SceneState.surface_period_m.
+    surfacePeriodM = null,
   } = state;
 
   if (city && desert) {
@@ -125,6 +129,8 @@ export function packUniforms(state, view) {
     // when a real ice-fraction texture is bound at binding 8; the packer
     // just writes the flag, same contract as lightCache.
     iceMode = false,
+    // The scene clock, seconds (row 24.z): where the moving sea is.
+    sceneTime = 0.0,
   } = view;
 
   const [outputW, outputH] = outputSize;
@@ -279,7 +285,9 @@ export function packUniforms(state, view) {
   row(23, lightCache ? 1.0 : 0.0, 0.0, skyProbe ? 0.0 : 1.0,
       iceMode ? 1.0 : 0.0);
   // Row 24: the surface offset — where the surface tile sits in the world
-  // THIS FRAME renders, folded into [0, tileExtent). The shader derives the
+  // THIS FRAME renders, folded into [0, surface period) — and in z the
+  // scene clock. The period is the tile's for the city and the desert and
+  // the swell's for the sea (surfacePeriodM). The shader derives the
   // city frame (and the water uv) as world minus this, and because the city
   // is a pure function of the tile frame — every cell index folds at the
   // tile before it seeds anything — the fold here is invisible: only the
@@ -293,9 +301,10 @@ export function packUniforms(state, view) {
   // the day judge-view goldens byte-identical (the water reads then
   // subtract exactly 0.0). A camera with no surface frame writes the static
   // offset, folded. Mirrored in soar_host.pack_uniforms.
+  const period = surfacePeriodM ?? oceanTileExtent;
   const foldTile = (v) => {
-    const r = v % oceanTileExtent;
-    return r < 0 ? r + oceanTileExtent : r;
+    const r = v % period;
+    return r < 0 ? r + period : r;
   };
   let surfaceOff;
   if (camera.surfacePosition) {
@@ -307,7 +316,10 @@ export function packUniforms(state, view) {
     const stat = surfaceOffsetM ?? (city ? cityOffsetM : [0.0, 0.0]);
     surfaceOff = [foldTile(stat[0]), foldTile(stat[1])];
   }
-  row(24, surfaceOff[0], surfaceOff[1], 0.0, 0.0);
+  if (!Number.isFinite(Number(sceneTime))) {
+    throw new Error(`scene_time must be finite; got ${sceneTime}.`);
+  }
+  row(24, surfaceOff[0], surfaceOff[1], sceneTime, 0.0);
   return u;
 }
 
