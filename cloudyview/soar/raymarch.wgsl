@@ -3525,23 +3525,11 @@ struct CityHit {
 // 2D DDA over the block grid. Exact: every building the ray passes is slab-
 // tested; the only rejections are cells whose whole z-extent the segment
 // clears. Opaque geometry, so the first hit wins.
-// The facade shell's early-out, recorded by the plain pass's own DDA: when
-// city_shell_probe is set, city_trace notes the nearest entry of the ray into
-// any building box it tests within city_shell_reach (the shell's reach, set
-// by the caller), grown by the deepest relief (CITY_SHELL_OUT_MAX). A pixel
-// whose ray entered none can hold no shell hit, so the refinement stage
-// leaves it alone. Only the plain pass's primary ray sets the probe; a
-// reflection or other secondary trace leaves it off and pays nothing.
-var<private> city_shell_probe: bool;
-var<private> city_shell_reach: f32;
-var<private> city_shell_near_t: f32;
-
 fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
     var res: CityHit;
     res.hit = false;
     res.t = 1e30;
     let cell = u.ocean_params.x;
-    city_shell_near_t = 1e30;
 
     var t0 = 0.0;
     if (o.z > CITY_SLAB_TOP) {
@@ -3668,21 +3656,6 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>) -> CityHit {
                         res.pos.z > best_max.z - CITY_BEACON_LEN);
                 } else {
                     res.kind = select(1, 2, res.normal.z > 0.5);
-                }
-            }
-        }
-        if (city_shell_probe && t_cur < city_shell_reach && cc.built
-            && cc.land_use == CITY_USE_URBAN
-            && min(z_a, z_b) < cc.top_z + 1.0) {
-            let grow = vec3<f32>(CITY_SHELL_OUT_MAX, CITY_SHELL_OUT_MAX,
-                                 0.0);
-            for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
-                let bx = city_tier_box(cc, k);
-                let hg = city_box_hit(o, inv3, bx.bmin - grow,
-                                      bx.bmax + grow);
-                if (hg.x <= hg.y && hg.y > 0.0) {
-                    city_shell_near_t = min(city_shell_near_t,
-                                            max(hg.x, 0.0));
                 }
             }
         }
@@ -4915,6 +4888,33 @@ fn city_shell_pipe_r(cc: CityCell, f: CityFace, k: i32) -> f32 {
     return 0.050 + 0.025 * city_u01(h.x);
 }
 
+// What a face's features draw once, rather than in every bay cell the walk
+// crosses: its two pipes' places (u < -1e8: none) and radii, and its
+// balcony rhythm.
+struct CityFaceDraw {
+    pipe_u: vec2<f32>,
+    pipe_r: vec2<f32>,
+    bal: CityBalconyRhythm,
+}
+
+fn city_face_draw(cc: CityCell, f: CityFace, st: CityShellStyle)
+        -> CityFaceDraw {
+    var d: CityFaceDraw;
+    d.pipe_u = vec2<f32>(-1e9);
+    d.pipe_r = vec2<f32>(0.05);
+    if (st.pipes > 0) {
+        d.pipe_u = vec2<f32>(city_shell_pipe_u(cc, f, st, 0),
+                             city_shell_pipe_u(cc, f, st, 1));
+        d.pipe_r = vec2<f32>(city_shell_pipe_r(cc, f, 0),
+                             city_shell_pipe_r(cc, f, 1));
+    }
+    d.bal = CityBalconyRhythm(1, -1, false);
+    if (st.balcony) {
+        d.bal = city_balcony_rhythm(cc, f);
+    }
+    return d;
+}
+
 // --- the shell trace ---------------------------------------------------------
 
 struct CityShellHit {
@@ -4952,9 +4952,9 @@ struct CityShellFeature {
     hi: vec3<f32>,
 }
 
-fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
-                      b: CityBay, cb: f32, va: f32, vb: f32,
-                      k: i32) -> CityShellFeature {
+fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle,
+                      fd: CityFaceDraw, s: f32, b: CityBay, cb: f32, va: f32,
+                      vb: f32, k: i32) -> CityShellFeature {
     var fe = CityShellFeature(0, 0, vec3<f32>(0.0), vec3<f32>(0.0));
     let ca = b.ca;
     let vfl = f32(b.iv) * CITY_FLOOR_H;
@@ -5029,8 +5029,8 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
         // pipe to the wall every 2.4 m.
         let j = (k - 6) >> 1;
         if (j < st.pipes) {
-            let up = city_shell_pipe_u(cc, f, st, j);
-            let pr = city_shell_pipe_r(cc, f, j);
+            let up = select(fd.pipe_u.x, fd.pipe_u.y, j == 1);
+            let pr = select(fd.pipe_r.x, fd.pipe_r.y, j == 1);
             let wc = (0.04 + pr) * s;
             let rw = pr * max(s, 1e-3);
             if ((k & 1) == 0) {
@@ -5050,7 +5050,7 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
     } else {
         // A balcony (k 10-14): slab, front railing, its top rail and the two
         // side panels, on the bays and storeys city_balcony gives.
-        let bal = city_balcony(cc, f, st, b);
+        let bal = city_balcony_at(fd.bal, f, st, b);
         if (bal.x > 0.0) {
             let out = CITY_BALCONY_OUT * s;
             let u0 = ca + 0.08;
@@ -5099,21 +5099,36 @@ fn city_balcony_building(cc: CityCell) -> bool {
         && !city_escape_building(cc);
 }
 
-// This bay's balcony: x > 0 when it has one, y > 0.5 for a glass railing.
-fn city_balcony(cc: CityCell, f: CityFace, st: CityShellStyle,
-                b: CityBay) -> vec2<f32> {
-    if (!st.balcony || !b.in_bay || !f.aligned || b.iv < 1
-        || f32(b.iv + 1) * CITY_FLOOR_H > f.z1 - 1.0) {
-        return vec2<f32>(0.0);
-    }
+// A face's balcony columns: every `period`-th bay from `phase`, and whether
+// they are glass railed.
+struct CityBalconyRhythm {
+    period: i32,
+    phase: i32,
+    glass: bool,
+}
+
+fn city_balcony_rhythm(cc: CityCell, f: CityFace) -> CityBalconyRhythm {
     let h = city_rand4(cc.seed ^ vec2<u32>(0x9e3779b1u, 0x7f4a7c15u)
                        ^ vec2<u32>(f.salt));
     let period = 2 + i32(floor(h.x * 1.999));
-    let phase = i32(floor(h.y * f32(period) * 0.999));
-    if (b.iu % period != phase) {
+    return CityBalconyRhythm(period, i32(floor(h.y * f32(period) * 0.999)),
+                             h.z < 0.5);
+}
+
+// This bay's balcony: x > 0 when it has one, y > 0.5 for a glass railing.
+fn city_balcony_at(rh: CityBalconyRhythm, f: CityFace, st: CityShellStyle,
+                   b: CityBay) -> vec2<f32> {
+    if (!st.balcony || !b.in_bay || !f.aligned || b.iv < 1
+        || f32(b.iv + 1) * CITY_FLOOR_H > f.z1 - 1.0
+        || b.iu % rh.period != rh.phase) {
         return vec2<f32>(0.0);
     }
-    return vec2<f32>(1.0, select(0.0, 1.0, h.z < 0.5));
+    return vec2<f32>(1.0, select(0.0, 1.0, rh.glass));
+}
+
+fn city_balcony(cc: CityCell, f: CityFace, st: CityShellStyle,
+                b: CityBay) -> vec2<f32> {
+    return city_balcony_at(city_balcony_rhythm(cc, f), f, st, b);
 }
 
 // The balcony's coverage of the wall seen face-on at bay-local (bu, bv),
@@ -5138,9 +5153,10 @@ fn city_balcony_cover(cc: CityCell, f: CityFace, st: CityShellStyle,
 // behind it, and whatever stands proud of the wall. `s` scales every depth
 // (see the LOD note at the top); u in [ca, cb], v in [va, vb].
 fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
-                   cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
-                   fp_cell: f32, b: CityBay, cb: f32, va: f32, vb: f32,
-                   ta: f32, tb: f32) -> CityShellHit {
+                   cc: CityCell, f: CityFace, st: CityShellStyle,
+                   fd: CityFaceDraw, s: f32, fp_cell: f32, b: CityBay,
+                   cb: f32, va: f32, vb: f32, ta: f32, tb: f32)
+        -> CityShellHit {
     var best = city_shell_miss();
     let ca = b.ca;
     let plo = city_pane_lo(cc, f);
@@ -5227,7 +5243,7 @@ fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
     let clo = max(max(b.ca, -st.depth), f.col_u0);
     let chi = min(min(cb, f.len + st.depth), f.col_u1);
     for (var k: i32 = 0; k < CITY_SHELL_FEATURES; k = k + 1) {
-        let fe = city_shell_feature(cc, f, st, s, b, cb, va, vb, k);
+        let fe = city_shell_feature(cc, f, st, fd, s, b, cb, va, vb, k);
         if (fe.shape == 1) {
             best = city_shell_try(best, ol, dl, il,
                                   vec3<f32>(max(fe.lo.x, clo), fe.lo.yz),
@@ -5471,6 +5487,7 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
     if (esc.on && s > 0.0) {
         fe_hit = city_shell_escape(ol, dl, il, esc, s);
     }
+    let fd = city_face_draw(cc, f, st);
     let p0 = ol + (t_lo + CITY_SHELL_EPS) * dl;
     var b = city_bay(f, p0.x, p0.y);
     var t = t_lo;
@@ -5490,9 +5507,9 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
         let tv = select((fv - ol.y) / select(1.0, dl.y, abs(dl.y) > 1e-9),
                         1e30, abs(dl.y) <= 1e-9);
         let t_exit = min(min(tu, tv), t_hi);
-        let h = city_shell_cell(ol, dl, il, cc, f, st, s, pixel_angle * t,
-                                b, cb, max(va, f.z0), min(vb, f.z1), t,
-                                t_exit);
+        let h = city_shell_cell(ol, dl, il, cc, f, st, fd, s,
+                                pixel_angle * t, b, cb, max(va, f.z0),
+                                min(vb, f.z1), t, t_exit);
         if (h.part >= 0) {
             if (fe_hit.t < h.t) {
                 return fe_hit;
@@ -5527,7 +5544,7 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
             if (bw.iu < 0) { cbw = f.margin; }
             if (bw.iu >= f.nbays) { cbw = 1e9; }
             let vaw = f32(bw.iv) * CITY_FLOOR_H;
-            let hw = city_shell_cell(ol, dl, il, cc, f, st, s,
+            let hw = city_shell_cell(ol, dl, il, cc, f, st, fd, s,
                                      pixel_angle * tw, bw, cbw,
                                      max(vaw, f.z0),
                                      min(vaw + CITY_FLOOR_H, f.z1),
@@ -5597,8 +5614,6 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
     // must give way to whatever that shell yields (the glass behind it).
     var replaces_core = false;
     for (var side: i32 = 0; side < 4; side = side + 1) {
-        let n2 = city_side_normal(side);
-        let f = city_face_make(cc, bmin, bmax, side, tier);
         // The layer: the box grown by the shell depth, its inner bound on
         // this face's axis pinned to the wall plane. Every face whose layer
         // the ray passes through is walked — a ray running parallel to a
@@ -5613,6 +5628,7 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         if (hl.x > hl.y || hl.y <= 0.0 || max(hl.x, 0.0) >= best.t) {
             continue;
         }
+        let f = city_face_make(cc, bmin, bmax, side, tier);
         let dl = city_face_dir(f, dir);
         var t_ref = max(hl.x, 0.0);
         if (dl.z < -1e-3) {
@@ -5622,7 +5638,7 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         if (s <= 0.0) {
             continue;   // flat: the core slab hit already is this wall
         }
-        if (core && dot(core_n.xy, n2) > 0.5) {
+        if (core && dot(core_n.xy, f.n) > 0.5) {
             replaces_core = true;
         }
         // Walk only the layer the SCALED relief occupies: the full-depth
@@ -15795,10 +15811,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // needs only the first stage's t: its second stage re-walks the reach its
 // near plants live in up to that t, and a pixel whose surface lies beyond is
 // returned as it came. The city marks the pixels its facade shell can touch
-// in the sign of t (surface_pass_city: negative for a ray that entered a
-// building's relief envelope within the shell's reach), and returns every
-// other one untouched. The second stage's result is the one fs_main reads,
-// so t leaves it >= 0 (1e30 on a miss) whatever the first stage wrote.
+// in the sign bit of red (CITY_SHELL_MARK: set by surface_pass_city for a
+// ray that entered a building's relief envelope within the shell's reach),
+// returns every other one untouched, and clears the mark on the rest; t
+// leaves it as t came, sign included, unless the shell replaced the hit.
 // Which surfaces have the second stage is the hosts' list
 // (soar_host.SURFACE_REFINE_SURFACES, renderer.js _hasRefineStage).
 //
@@ -15872,23 +15888,27 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
     // uplight probe's cloud sampling (see the city_glow_sample call in the
     // march loop).
     let city_o = city_camera_origin();
-    city_shell_probe = true;
-    city_shell_reach = CITY_SHELL_FP_FLAT / max(pixel_angle, 1e-9);
     let chit = city_trace(city_o, dir);
-    city_shell_probe = false;
-    // The refinement stage's flag, in the sign of t: negative marks a pixel
-    // whose ray entered a building's relief envelope within the shell's
-    // reach before its plain hit, the only pixels the facade shell can
-    // change (surface_refine_city returns every other one untouched, and
-    // gives every marked one its t back positive).
-    let near = city_shell_near_t * pixel_angle < CITY_SHELL_FP_FLAT
-               && city_shell_near_t < select(1e30, chit.t, chit.hit);
-    let mark = select(1.0, -1.0, near);
+    // The refinement stage's flag, CITY_SHELL_MARK: the sign bit of red
+    // (radiance is never negative) marks a pixel whose ray entered a
+    // building's relief envelope within the shell's reach before its plain
+    // hit, the only pixels the facade shell can change. surface_refine_city
+    // returns every other pixel untouched and clears the bit on every marked
+    // one, so no later reader sees it. A bit rather than a negated value: a
+    // miss has red 0, and -0.0 only survives as a bit. (t's sign is not the
+    // shell's: later city stages may carry their own flag there.)
+    let t_lim = min(select(1e30, chit.t, chit.hit),
+                    CITY_SHELL_FP_FLAT / max(pixel_angle, 1e-9));
+    let near = city_shell_on_wall(chit, t_lim)
+               || city_shell_envelope(city_o, dir, t_lim);
+    let mark = select(0u, CITY_SHELL_MARK, near);
     if (!chit.hit) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1e30 * mark);
+        return vec4<f32>(bitcast<f32>(mark), 0.0, 0.0, 1e30);
     }
-    return vec4<f32>(city_fog(city_shade(chit, dir, pixel_angle * chit.t),
-                              city_o, dir, chit.t, chit.pos), chit.t * mark);
+    let rgb = city_fog(city_shade(chit, dir, pixel_angle * chit.t),
+                       city_o, dir, chit.t, chit.pos);
+    return vec4<f32>(bitcast<f32>(bitcast<u32>(rgb.x) | mark), rgb.yz,
+                     chit.t);
 }
 
 // The refinement stage: the facade shell, traced where the plain surface
@@ -15903,57 +15923,161 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
 // Everything else the plain pass found stands. Returns the hit that
 // replaces t_prev, or no hit when t_prev stands.
 const CITY_SHELL_REFINE_MAX_CELLS: i32 = 64;
+// surface_pass_city's mark for the refinement: the sign bit of red.
+const CITY_SHELL_MARK: u32 = 0x80000000u;
+
+// The block-grid walk the shell's two passes share: the envelope probe and
+// the refinement. The same DDA as city_trace, from the slab top.
+struct CityWalk {
+    ci: vec2<i32>,
+    stp: vec2<i32>,
+    inv3: vec3<f32>,
+    tmax: vec2<f32>,
+    tdelta: vec2<f32>,
+    t_cur: f32,
+}
+
+// `live` false: the ray never enters the slab.
+fn city_walk_start(o: vec3<f32>, dir: vec3<f32>, w: ptr<function, CityWalk>)
+        -> bool {
+    let cell = u.ocean_params.x;
+    var t0 = 0.0;
+    if (o.z > CITY_SLAB_TOP) {
+        if (dir.z >= -1e-7) {
+            return false;
+        }
+        t0 = (CITY_SLAB_TOP - o.z) / dir.z;
+    }
+    let p0 = o + t0 * dir;
+    let ci = vec2<i32>(floor(p0.xy / cell));
+    let inv3 = vec3<f32>(
+        select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
+        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
+    let cmin0 = vec2<f32>(ci) * cell;
+    (*w).ci = ci;
+    (*w).stp = vec2<i32>(select(-1, 1, dir.x > 0.0),
+                         select(-1, 1, dir.y > 0.0));
+    (*w).inv3 = inv3;
+    (*w).tmax = vec2<f32>(
+        select(1e30, t0 + (select(cmin0.x, cmin0.x + cell, dir.x > 0.0)
+                           - p0.x) * inv3.x, abs(dir.x) > 1e-9),
+        select(1e30, t0 + (select(cmin0.y, cmin0.y + cell, dir.y > 0.0)
+                           - p0.y) * inv3.y, abs(dir.y) > 1e-9));
+    (*w).tdelta = vec2<f32>(cell * abs(inv3.x), cell * abs(inv3.y));
+    (*w).t_cur = t0;
+    return true;
+}
+
+fn city_walk_step(w: ptr<function, CityWalk>) {
+    if ((*w).tmax.x < (*w).tmax.y) {
+        (*w).ci.x = (*w).ci.x + (*w).stp.x;
+        (*w).t_cur = (*w).tmax.x;
+        (*w).tmax.x = (*w).tmax.x + (*w).tdelta.x;
+    } else {
+        (*w).ci.y = (*w).ci.y + (*w).stp.y;
+        (*w).t_cur = (*w).tmax.y;
+        (*w).tmax.y = (*w).tmax.y + (*w).tdelta.y;
+    }
+}
+
+// Does the ray enter this building's relief envelope (every tier's box grown
+// by CITY_SHELL_OUT_MAX) by t_lim? Everything the shell can return for it —
+// relief, glass, its plain slab — lies inside.
+fn city_shell_enters(o: vec3<f32>, inv3: vec3<f32>, cc: CityCell,
+                     t_lim: f32) -> bool {
+    let grow = vec3<f32>(CITY_SHELL_OUT_MAX, CITY_SHELL_OUT_MAX, 0.0);
+    for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
+        let bx = city_tier_box(cc, k);
+        let hg = city_box_hit(o, inv3, bx.bmin - grow, bx.bmax + grow);
+        if (hg.x <= hg.y && hg.y > 0.0 && max(hg.x, 0.0) <= t_lim) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A plain hit on a building's wall, inside the shell's reach, is inside that
+// building's envelope, which the ray entered strictly before it: the 1.5 m
+// the envelope stands out from the wall. Most marked pixels are these, and
+// they need no walk. (The z bounds are open: a hit on a box edge is left to
+// the walk.)
+fn city_shell_on_wall(h: CityHit, t_lim: f32) -> bool {
+    if (!h.hit || h.kind != 1 || h.t >= t_lim) {
+        return false;
+    }
+    let cc = city_cell(h.cell);
+    if (!cc.built || cc.land_use == CITY_USE_INDUSTRIAL) {
+        return false;
+    }
+    let grow = CITY_SHELL_OUT_MAX - 0.01;
+    for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
+        let bx = city_tier_box(cc, k);
+        if (all(h.pos.xy > bx.bmin.xy - grow)
+            && all(h.pos.xy < bx.bmax.xy + grow)
+            && h.pos.z > bx.bmin.z && h.pos.z < bx.bmax.z) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Does the ray enter any building's relief envelope (its boxes grown by the
+// deepest relief, CITY_SHELL_OUT_MAX) before t_lim? Only such a pixel can
+// hold a shell hit. The plain pass asks after its own trace, with a walk of
+// its own: carried through city_trace's loop, even one running minimum cost
+// that kernel 32 registers.
+fn city_shell_envelope(o: vec3<f32>, dir: vec3<f32>, t_lim: f32) -> bool {
+    var w: CityWalk;
+    if (!city_walk_start(o, dir, &w)) {
+        return false;
+    }
+    for (var i: i32 = 0; i < CITY_SHELL_REFINE_MAX_CELLS; i = i + 1) {
+        if (w.t_cur >= t_lim) {
+            return false;
+        }
+        let t_exit = min(w.tmax.x, w.tmax.y);
+        let z_lo = min(o.z + w.t_cur * dir.z, o.z + t_exit * dir.z);
+        let cc = city_cell(w.ci);
+        if (cc.built && cc.land_use != CITY_USE_INDUSTRIAL
+            && z_lo < cc.top_z + 1.0
+            && city_shell_enters(o, w.inv3, cc, t_lim)) {
+            return true;
+        }
+        city_walk_step(&w);
+    }
+    return false;
+}
 
 fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                      t_prev: f32) -> CityHit {
     var res: CityHit;
     res.hit = false;
     res.t = 1e30;
-    let cell = u.ocean_params.x;
     // Past this every box is its plain slab, which the plain pass has done.
     let t_reach = min(t_prev, CITY_SHELL_FP_FLAT / max(pixel_angle, 1e-9));
-    var t0 = 0.0;
-    if (o.z > CITY_SLAB_TOP) {
-        if (dir.z >= -1e-7) {
-            return res;
-        }
-        t0 = (CITY_SLAB_TOP - o.z) / dir.z;
-    }
-    if (t0 >= t_reach) {
+    var w: CityWalk;
+    if (!city_walk_start(o, dir, &w)) {
         return res;
     }
-    let p0 = o + t0 * dir;
-    var ci = vec2<i32>(floor(p0.xy / cell));
-    let stp = vec2<i32>(select(-1, 1, dir.x > 0.0),
-                        select(-1, 1, dir.y > 0.0));
-    let inv3 = vec3<f32>(
-        select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
-        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
-        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
-    let cmin0 = vec2<f32>(ci) * cell;
-    var tmax = vec2<f32>(
-        select(1e30, t0 + (select(cmin0.x, cmin0.x + cell, dir.x > 0.0)
-                           - p0.x) * inv3.x, abs(dir.x) > 1e-9),
-        select(1e30, t0 + (select(cmin0.y, cmin0.y + cell, dir.y > 0.0)
-                           - p0.y) * inv3.y, abs(dir.y) > 1e-9));
-    let tdelta = vec2<f32>(cell * abs(inv3.x), cell * abs(inv3.y));
-
+    let inv3 = w.inv3;
     var best = CityBoxHit(1e30, vec3<f32>(0.0), -1);
-    var best_cell = ci;
+    var best_cell = w.ci;
     var owns_prev = false;
-    var t_cur = t0;
     for (var i: i32 = 0; i < CITY_SHELL_REFINE_MAX_CELLS; i = i + 1) {
-        if (t_cur >= t_reach || t_cur >= best.t) {
+        if (w.t_cur >= t_reach || w.t_cur >= best.t) {
             break;
         }
-        let t_exit = min(tmax.x, tmax.y);
-        let z_a = o.z + t_cur * dir.z;
+        let ci = w.ci;
+        let t_exit = min(w.tmax.x, w.tmax.y);
+        let z_a = o.z + w.t_cur * dir.z;
         let z_b = o.z + t_exit * dir.z;
         let cc = city_cell(ci);
         // Industrial walls are the industry component's (city-layout's):
         // cladding, dock doors and their own relief. The shell leaves them.
         if (cc.built && cc.land_use != CITY_USE_INDUSTRIAL
-            && min(z_a, z_b) < cc.top_z + 1.0) {
+            && min(z_a, z_b) < cc.top_z + 1.0
+            && city_shell_enters(o, inv3, cc, min(best.t, t_reach))) {
             let st = city_shell_style(cc);
             for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
                 let bx = city_tier_box(cc, k);
@@ -15970,15 +16094,7 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                 }
             }
         }
-        if (tmax.x < tmax.y) {
-            ci.x = ci.x + stp.x;
-            t_cur = tmax.x;
-            tmax.x = tmax.x + tdelta.x;
-        } else {
-            ci.y = ci.y + stp.y;
-            t_cur = tmax.y;
-            tmax.y = tmax.y + tdelta.y;
-        }
+        city_walk_step(&w);
     }
     // Only a shell hit changes anything: a plain one is what t_prev already
     // is. A shell hit stands if it is nearer, or if it belongs to the
@@ -16000,14 +16116,17 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
 // step of the plain pass's DDA — and this one only walks the few cells
 // within the shell's reach.
 fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
-    if (plain.w >= 0.0) {
+    let red = bitcast<u32>(plain.x);
+    if ((red & CITY_SHELL_MARK) == 0u) {
         return plain;   // no relief envelope on this ray (surface_pass_city)
     }
-    let t_prev = -plain.w;
+    // t is read by magnitude, and a pixel the shell leaves keeps its sign
+    // bit for bit: its sign belongs to whatever stage follows.
+    let t_prev = abs(plain.w);
     let city_o = city_camera_origin();
     let h = city_shell_refine(city_o, cr.dir, cr.pixel_angle, t_prev);
     if (!h.hit) {
-        return vec4<f32>(plain.xyz, t_prev);
+        return vec4<f32>(bitcast<f32>(red & ~CITY_SHELL_MARK), plain.yzw);
     }
     let cc = city_cell(h.cell);
     let glow = city_glow_sample(h.pos.xy, 3.0);
