@@ -10,8 +10,8 @@ import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
-import { desertFloorAt, loadDemoIceVolume, loadDemoScene,
-         loadOceanTile } from "./scene.js";
+import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile,
+         loadSea } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -198,6 +198,13 @@ export class Viewer {
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
+    // The scene clock (s): where the moving sea is in its motion, uniform
+    // row 24.z. It runs only while the view is flying or a track is being
+    // recorded, never while paused — so a parked view is a still scene and
+    // its accumulation converges, and a held shot keeps the waves it was
+    // held on. Captures take it from the view (a still) or from the track
+    // (a video), never from the wall.
+    this.sceneTime = 0.0;
     this._fpsAcc = 0; this._fpsN = 0; this._fps = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
@@ -375,9 +382,9 @@ export class Viewer {
                             { keepHeights: true,
                               schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
-    return (this._ocean ??= await loadOceanTile(
-      this.device, OCEAN_URL, undefined,
-      { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
+    return (this._ocean ??=
+      await loadSea(this.device, OCEAN_URL, undefined,
+                    { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
   }
 
   async loadField(source, progress) {
@@ -506,7 +513,11 @@ export class Viewer {
                                      // when the cloud frame folds ("the
                                      // ocean should never jump" — Thomas,
                                      // 2026-09-01).
-                                     surfaceTileExtent: scene.oceanTileExtent,
+                                     // Folded at the surface's own period:
+                                     // the tile for the city and the
+                                     // desert, several tiles for the sea,
+                                     // whose swell repeats only there.
+                                     surfaceTileExtent: scene.surfacePeriod,
                                      surfaceOffsetM:
                                        scene.city ? scene.cityOffsetM
                                                   : [0.0, 0.0],
@@ -1465,7 +1476,9 @@ export class Viewer {
       }
       this.renderer.commitSurface(kind, tile);
       this.scene.desertFloorAt = floorAt;
-      this.camera.setSurface(tile.tileExtent, floorAt);
+      // The camera folds at the surface frame's period: the sea's swell
+      // repeats over several tiles, the desert at its tile.
+      this.camera.setSurface(tile.surfacePeriod, floorAt);
       this.ui.say(kind === "desert"
         ? "The Sonoran desert (G for the ocean)."
         : "The ocean (G for the desert).", 4);
@@ -1784,7 +1797,17 @@ export class Viewer {
     if (!this.autoExposure || this._probe) return;
     if (nowMs - this._aeLastMeterMs < K.AUTO_EXPOSURE_INTERVAL_MS) return;
     this._aeLastMeterMs = nowMs;
-    this.renderer.meterLuminance(outputSize, this._viewKwargs())
+    const renderer = this.renderer;
+    renderer.meterLuminance(outputSize, this._viewKwargs())
+      .catch((err) => {
+        // A readback abandoned because its renderer was torn down (a field
+        // change, leaving the viewer) is not a failure of anything live.
+        // Anything else is, and stops rendering as loudly as a draw would.
+        if (!this._disposed && this.renderer === renderer) {
+          this._failRendering(err);
+        }
+        return null;
+      })
       .then((highlight) => {
         if (!(highlight > 0) || this._disposed || !this.autoExposure) return;
         // The one statement of the target formula (a capture applies the
@@ -1941,8 +1964,9 @@ export class Viewer {
    * LOD change the luminance), against the live renderer state — the meter's
    * march is the same specialized module whatever the tier, since every
    * tier shares maxLightSteps. A live meter's readback may still be in
-   * flight (one is ever allowed); it always resolves, so wait it out rather
-   * than skipping the metering. A meter that saw no light keeps
+   * flight (one is ever allowed; that is the only null); it always resolves,
+   * so wait it out rather than skipping the metering. A meter that fails
+   * throws, and fails the capture with it. A meter that saw no light keeps
    * DEFAULT_EXPOSURE, the live loop's own ignore rule.
    */
   async _meterCaptureExposure(look, size) {
@@ -2285,6 +2309,12 @@ export class Viewer {
   removeNest() {
     if (this.scene.removeNest()) {
       this.renderer.refreshBindGroup();
+      // The baked sun-tau cache marched its shadows through the nest (the
+      // light march integrates it at its own resolution), and a bake still
+      // in flight would finish its remaining slices without it. Same
+      // recovery as setSun: live march while the fresh bake lands.
+      this.renderer.invalidateLightCache();
+      this.renderer.startLightBake(this._viewKwargs());
       this.renderer.resetAccumulation();
       this.frameIndex = 0;
       this.ui.say("Nested field removed.");
@@ -2454,7 +2484,7 @@ export class Viewer {
       // frame, their freed memory outran the driver's reclaiming on long
       // videos (capture.js Readback).
       readback = new Readback(this.device, size);
-      saved = beginOfflineRender(this.renderer, look.preset);
+      saved = await beginOfflineRender(this.renderer, look.preset);
       const framesPerVideoFrame = captureFrames(look.preset);
 
       const t0 = performance.now();
@@ -2477,8 +2507,8 @@ export class Viewer {
           elevation: frames[i].elevation,
           fov: frames[i].fov,
           surfacePosition: sp
-            ? [sp[0] * this.scene.oceanTileExtent,
-               sp[1] * this.scene.oceanTileExtent]
+            ? [sp[0] * this.scene.surfacePeriod,
+               sp[1] * this.scene.surfacePeriod]
             : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
         };
         const overlays = this.captureOverlays
@@ -2489,8 +2519,12 @@ export class Viewer {
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
+          // The frame's own scene clock: the sea moves as it moved in
+          // flight, one video frame at a time, however many passes each
+          // frame accumulates.
           { ...this._captureViewKwargs(look),
-            camera: pose, frameIndex: i * 1024 },
+            camera: pose, frameIndex: i * 1024,
+            sceneTime: frames[i].sceneTime },
           framesPerVideoFrame, overlays);
         await writer.addFrame(await readback.read(target.texture), i);
 
@@ -2695,6 +2729,8 @@ export class Viewer {
         // is that everything here comes from `look`.
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
+        // The scene clock the still was taken at (witness --time).
+        scene_time: this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
         light_march_lod_degrees:
@@ -3043,6 +3079,8 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
+      // The scene clock the view was held at: where the sea was.
+      "--time", n(this.sceneTime),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree
@@ -3124,6 +3162,7 @@ export class Viewer {
       lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * lodStrength,
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
       frameIndex: this.frameIndex,
+      sceneTime: this.sceneTime,
     };
   }
 
@@ -3155,6 +3194,13 @@ export class Viewer {
       cancelAnimationFrame(this._raf);
       this._raf = null;
     }
+  }
+
+  /** The live loop's one way to stop on an error: loudly, and for good. */
+  _failRendering(err) {
+    this.stop = true;
+    this.onFailure?.("Rendering stopped.", String(err.message || err),
+                     err.advice || "");
   }
 
   /** Whether the frame that is asking is still the one that should be running. */
@@ -3215,6 +3261,13 @@ export class Viewer {
       this._lastSignature !== null && signature !== this._lastSignature;
     this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
+    // The clock runs with the flight, on the simulation's dt (the camera's
+    // clock, so a stall cannot jump the sea either). It is in the scene key,
+    // so a frame it moves restarts accumulation — which a moving camera has
+    // done already.
+    if (!this.paused && (cameraMoved || this.recorder.recording)) {
+      this.sceneTime += dt;
+    }
 
     if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
@@ -3229,12 +3282,20 @@ export class Viewer {
 
     // A few planes of the sun-tau bake per frame, ahead of the march so the
     // frame that completes it is also the first to read it. The reads flip
-    // on inside drawFrame the moment the bake finishes (row 23 is in the
-    // scene key, so accumulation restarts on its own); the explicit
-    // march-pending is for a parked view, which otherwise has no reason to
-    // march again.
+    // on inside drawFrame the moment the bake finishes, and a parked view's
+    // average restarts on the cached method there (drawFrame's methodKey);
+    // the explicit march-pending is for a parked view, which otherwise has
+    // no reason to march again. Inside the frame's failure path: a bake
+    // pipeline that failed to compile throws here, and that must stop the
+    // renderer loudly like any other pipeline failure, not end the loop
+    // without a word.
     if (this.renderer.lightBakePending && !this._probe) {
-      if (this.renderer.stepLightBake()) this._marchPending = true;
+      try {
+        if (this.renderer.stepLightBake()) this._marchPending = true;
+      } catch (err) {
+        this._failRendering(err);
+        return;
+      }
     }
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -3341,9 +3402,7 @@ export class Viewer {
         measuring = await this._awaitQueueIdle();
       }
     } catch (err) {
-      this.stop = true;
-      this.onFailure?.("Rendering stopped.", String(err.message || err),
-                       err.advice || "");
+      this._failRendering(err);
       return;
     }
     // The draw is the loop's one long await. A field replaced (or the viewer
@@ -3382,7 +3441,7 @@ export class Viewer {
     // accumulated time, not the wall's: see TrackRecorder.
     if (this.recorder.recording && !this.paused) {
       this.recorder.advance(dt);
-      this.recorder.sample(this.camera);
+      this.recorder.sample(this.camera, this.sceneTime);
       if (this.recorder.full) this._finishTrackRecording(true);
     }
 

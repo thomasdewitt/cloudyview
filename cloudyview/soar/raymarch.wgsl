@@ -125,7 +125,8 @@ struct Uniforms {
     // side on every sample. The hosts still pack both, from the same flags
     // that pick the specialization, because the row is part of the
     // accumulation's scene key: a bake completing or a tier switching
-    // methods restarts the average through it.
+    // methods is a scene change (and the browser restarts a parked view's
+    // average on it outright — renderer.js drawFrame).
     //
     // x = read tau_sun for CLOUD samples from the light_tau texture instead
     //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
@@ -165,7 +166,12 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var vol: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
+// The city's or the desert's surface tile. The name is the slot's history:
+// the day ocean read its normals here until the sea began to move
+// (2026-09-23); it now lives at binding 9 and an ocean scene binds a 1x1
+// stand-in here.
 @group(0) @binding(3) var ocean_normals: texture_2d<f32>;
+// Repeat-wrapping trilinear sampler shared by binding 3 and binding 9.
 @group(0) @binding(4) var ocean_samp: sampler;
 // The finer nested level. Always bound (a 1x1x1 zero texture when there is
 // no nest) so one bind-group layout serves both specializations.
@@ -185,6 +191,11 @@ struct Uniforms {
 // carries no ice variable — so one bind-group layout serves both. Read only
 // when u.light_cache.w is set.
 @group(0) @binding(8) var ice_frac: texture_3d<f32>;
+// The moving sea: one layer per frame of the (x, y, t) tile, each with its
+// own spatial mips — see "The moving sea". Always bound (a 1x1, one-layer
+// stand-in under the city and the desert) so one layout serves every scene.
+@group(0) @binding(9) var ocean_waves: texture_2d_array<f32>;
+
 // Group 1: the surface pre-pass's target, size-specific, so it lives apart
 // from the scene resources in group 0 (which every pass shares unchanged):
 // the opaque surface under the clouds — the traced city or desert — as the
@@ -193,6 +204,10 @@ struct Uniforms {
 // bind a 1x1 stand-in and never run the pass. See the surface pre-pass
 // section.
 @group(1) @binding(0) var surface_buf: texture_2d<f32>;
+// The first stage's surface, for a surface that is refined in a second
+// stage (fs_surface_refine) — the city's plain boxes, the desert's far plant
+// forms — and a 1x1 stand-in for every other pass.
+@group(1) @binding(1) var surface_plain: texture_2d<f32>;
 
 // Compile-time, rather than dynamically read in hot loops: the host rewrites
 // these two declarations per specialization (engine._shader_for), so the
@@ -772,7 +787,7 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // same insight about sparseness, applied to storage rather than traversal,
 // where nothing has to be asked per sample. See web/soar/zcrop.js.
 
-// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Four
+// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Five
 // measurements from one day, all the same fact:
 //   - the empty-space guard above cost 14-20% while never firing;
 //   - compiling out the lighting method a tier does not use (LIGHT_CACHE,
@@ -783,6 +798,11 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 //   - a function-local `var c: array<f32, 4>` in CITY-only code moved DAY
 //     frames by 2^-11 — a specialization that was compiled out still
 //     changed how the rest of the kernel was compiled. Scalars fixed it.
+//   - running the forward pre-march lazily, at a ray's first deep-shadow
+//     sample instead of before the loop, was exact and saves the march for
+//     every ray that never gets there — and cost 28-213% on the views where
+//     rays do get there, because a call inside the loop is paid in
+//     registers, and lanes reaching it at different steps serialize.
 // So a change's cost is not where its code runs, and a bit-identity claim
 // has to be proven on scenes the change does not touch. Measure with
 // tools/benchmarking/soar_pass_timer.py and prove with
@@ -1820,9 +1840,344 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
     return col;
 }
 
-// FIF normal sampling follows witness._ocean_wave_normal_fif
-// (witness.py lines 417-442): periodic wrap, bilinear interpolation, then
-// renormalization. The host uploads the generated nx/ny/nz arrays as RGB.
+// ---------------------------------------------------------------------------
+// The moving sea (2026-09-23)
+// ---------------------------------------------------------------------------
+//
+// The water's surface is three things added together, all functions of the
+// surface frame (world xy minus the row-24 offset) and the scene clock:
+//
+//   the wind sea    an (x, y, t) FIF, periodic in all three: 102.4 m of sea
+//                   over a 25.6 s loop, 128 frames (cloudyview/ocean_fif.py).
+//                   Bound at 9 as a 2D array, one layer per frame, each with
+//                   its own spatial mips; two frames are read and blended.
+//   the swell       a narrow-band spectrum about the same wind, ten
+//                   analytic trains, deep-water dispersion (SWELL_*).
+//   the whitecaps   the tile's foam rank, cut by a gate that rides the swell
+//                   crests (sea_surface).
+//
+// Everything the footprint cannot resolve is handed to the microfacet lobe
+// as variance, from each of the three sources: what the mip removed, what
+// the blend between two frames removed, and what the swell filter removed.
+// Nothing is averaged away without being put back.
+
+// The scene clock (s, row 24.z). Frozen while the view is parked, so the
+// accumulation of a held view converges; advanced by the host while flying
+// or recording, carried per sample in a recorded track (track.js v3), and
+// set by `witness --time`. Anything in the scene that moves reads it here.
+fn scene_time() -> f32 {
+    return u.surface_offset.z;
+}
+
+// Measured on the shipped tile by tools/export_web_assets.py and recorded in
+// cloudyview/soar/ocean/meta.json; tests/test_sea_tile.py holds these to it.
+const SEA_LOOP_S: f32 = 25.6;
+// x of entry k: mean(sx^2 + sy^2) at level 0 minus the same at level k. By
+// the top level the whole 0.088 RMS slope of the tile is filtered out of
+// the normal and lives here instead. A variance: it adds to alpha^2, not
+// alpha.
+//
+// y of entry k: at level k, mean(s(t) . s(t)) minus mean(s(t) . s(t+1)).
+// Blending two frames at fraction f removes 2 f (1 - f) of it — the finest
+// ripples decorrelate within a frame or two and would otherwise dim between
+// frames.
+//
+// One array of pairs, like the static tile's one table before it: every
+// runtime-indexed const array costs a private variable at fs_main's entry
+// (see SWELL_PERIOD_M), and one more moved the other scenes' bits.
+const SEA_SLOPE_VARIANCE = array<vec2<f32>, 9>(
+    vec2<f32>(0.0, 0.0015768),
+    vec2<f32>(0.0005511, 0.0013141),
+    vec2<f32>(0.0017613, 0.0008822),
+    vec2<f32>(0.0036112, 0.0004952),
+    vec2<f32>(0.0061415, 0.0001696),
+    vec2<f32>(0.0076499, 9.9e-06),
+    vec2<f32>(0.0077109, 3.8e-06),
+    vec2<f32>(0.0077394, 9e-07),
+    vec2<f32>(0.0077479, 0.0)
+);
+// The tile's foam rank covers this much of the sea at a full gate.
+const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
+
+// The swell: a Pierson-Moskowitz peak at ~220 m with cos^2s (s = 6)
+// spreading about the wind (+x of the surface frame), significant height
+// 1.6 m, sampled as its ten strongest components on the lattice the surface
+// frame allows. Each wavevector is a whole number of cycles across the
+// surface period so the frame can fold there without a seam (k = 2 pi (m, n)
+// / 819.2 m; the tile's 102.4 m divides it), which is also why a narrow band
+// is the most this can be: the lattice spacing is 1/819.2 cycles per metre.
+// A single train reads as a grating from altitude; a band has groups and
+// crests of finite length. Phases are fixed draws.
+//
+//   (m, n)    wavelength   heading   period   amplitude
+//   (2, +-1)  366.4 m      +-26.6    15.3 s   0.155 m
+//   (3,  0)   273.1 m        0.0     13.2 s   0.218 m
+//   (3, +-1)  259.1 m      +-18.4    12.9 s   0.200 m
+//   (3, +-2)  227.2 m      +-33.7    12.1 s   0.156 m
+//   (4,  0)   204.8 m        0.0     11.5 s   0.187 m
+//   (4, +-1)  198.7 m      +-14.0    11.3 s   0.174 m
+//
+// RMS elevation 0.40 m, RMS slope 0.010: a real swell is that gentle, which
+// is why it shows mostly through what it does to the wind sea (below) and
+// in the glitter. Normals only: geometry stays the plane at u.ocean.x.
+//
+// The trains are written out as ten calls in sea_swell rather than looped
+// over const arrays: a runtime-indexed module-scope array becomes a private
+// variable initialized at fs_main's entry, and that alone moves the city's
+// and the desert's compiled code off bit-identity (measured, 2026-09-23,
+// tools/soar_shader_ab.py) though they never shade water.
+const SWELL_PERIOD_M: f32 = 819.2;
+// The elevation the gate and the modulation are normalized by: ~2.5 sigma.
+// Beyond it they clip, which biases the far-field foam mean by well under
+// a percent of itself.
+const SWELL_ETA_SCALE_M: f32 = 1.0;
+const SEA_G: f32 = 9.81;
+// Hydrodynamic modulation: short waves steepen on the crests of long ones
+// and relax in the troughs (Longuet-Higgins & Stewart). The wind sea's slope
+// is scaled by 1 + this times the swell's normalized elevation, which is also
+// what makes the swell legible in the sun glitter from altitude, where its
+// own slope is far inside the lobe.
+const SEA_SWELL_MODULATION: f32 = 0.3;
+// The wind-sea tile repeats every 102.4 m, and from a few hundred metres up
+// the repeat shows as a woven lattice. A real sea has no two patches at the
+// same moment, so neither does this one: the tile is read at scene time
+// plus this many seconds times the swell's normalized elevation, a smooth
+// field varying over the swell's hundreds of metres. Neighbouring copies
+// of the tile then sit seconds apart in the loop — decorrelated at every
+// scale that lives shorter than that — while the local motion is untouched
+// (d/dt of the shifted time is still 1). The cost is a gentle stretching
+// of the waves along the shift's gradient, a few tens of percent at most
+// and only over hundreds of metres, which reads as the wave groups a real
+// sea has anyway.
+const SEA_PHASE_SPREAD_S: f32 = 6.0;
+
+// Whitecaps: fresh foam's visible-band albedo (Koepke's ~0.5-0.6).
+const SEA_FOAM_ALBEDO: f32 = 0.6;
+// Half-width of the cut's soft edge, in rank.
+const SEA_FOAM_EDGE: f32 = 0.12;
+// The lace. A whitecap is solid white while it breaks and falls apart into
+// streaks and holes as it ages, and the rank says which: it is uniform over
+// the foam a cut keeps, so (rank - theta) / (1 - theta) is the foam's
+// activeness, 1 at the freshest. Inside the cut the foam is cut again, by
+// the tile's own crest channel read at 1/SEA_LACE_SCALE of its size and
+// transposed — so its filaments run along the wind, as residual foam's
+// streaks do — at a threshold running from -SEA_LACE_EDGE (solid) for an
+// active whitecap to SEA_LACE_REACH - SEA_LACE_EDGE for the oldest foam.
+// The mean cover of that cut at five thresholds is a property of the tile,
+// measured by tools/export_web_assets.py (meta.json "lace_cover"); with the
+// activeness uniform, the mean over all foam is their trapezoid. So the
+// lace fades into its mean as its texels go sub-pixel, and the far field
+// knows the whole whitecap cover with no sample, as before.
+const SEA_LACE_SCALE: f32 = 8.0;
+const SEA_LACE_REACH: f32 = 0.25;
+const SEA_LACE_EDGE: f32 = 0.05;
+const SEA_LACE_COVER_0: f32 = 1.0;
+const SEA_LACE_COVER_1: f32 = 0.634911;
+const SEA_LACE_COVER_2: f32 = 0.399297;
+const SEA_LACE_COVER_3: f32 = 0.321714;
+const SEA_LACE_COVER_4: f32 = 0.252481;
+const SEA_LACE_COVER_MEAN: f32 = 0.25 * (0.5 * SEA_LACE_COVER_0
+    + SEA_LACE_COVER_1 + SEA_LACE_COVER_2 + SEA_LACE_COVER_3
+    + 0.5 * SEA_LACE_COVER_4);
+// The foam is a Lambertian surface in the cloud's units, lit the way
+// desert_light lights the sand: the same three numbers, for the same reason
+// (DESERT_BEAM_CALIBRATION and its neighbours), kept as the sea's own so a
+// retune of the desert does not silently move the whitecaps.
+const SEA_FOAM_BEAM_CALIBRATION: f32 = 0.45;
+const SEA_FOAM_SKY_FRACTION: f32 = 0.15;
+const SEA_FOAM_SKY_MU_FLOOR: f32 = 0.12;
+
+// Subsurface glow: sunlight that enters a crest's sunward face, is scattered
+// forward through a few tens of centimetres of water and leaves the face the
+// viewer sees. Green-blue because that is what a short path of clear sea
+// water passes (pure-water absorption: red goes within a metre).
+const SEA_GLOW_TINT: vec3<f32> = vec3<f32>(0.06, 0.40, 0.34);
+const SEA_GLOW_STRENGTH: f32 = 0.10;
+
+struct SeaFrames {
+    a: i32,
+    b: i32,
+    f: f32,
+};
+
+// The two frames time `t` falls between, and how far between.
+fn sea_frames(t: f32) -> SeaFrames {
+    let n = textureNumLayers(ocean_waves);
+    let x = fract(t / SEA_LOOP_S) * f32(n);
+    let a = min(u32(x), n - 1u);
+    return SeaFrames(i32(a), i32((a + 1u) % n), clamp(x - f32(a), 0.0, 1.0));
+}
+
+// The tile at a surface-frame point: (slope x, slope y, foam rank, crest),
+// the footprint's mean at `lod` (hardware trilinear across levels — the
+// levels are box filters of each other, texel-centre aligned, so one fetch
+// per frame is exact), blended between the clock's two frames.
+fn sea_sample(p: vec2<f32>, lod: f32, fr: SeaFrames) -> vec4<f32> {
+    let uv = p / u.ocean_params.y;
+    let a = textureSampleLevel(ocean_waves, ocean_samp, uv, fr.a, lod);
+    let b = textureSampleLevel(ocean_waves, ocean_samp, uv, fr.b, lod);
+    return mix(a, b, fr.f);
+}
+
+// Slope variance the tile's footprint mean does not carry at `lod`: what
+// the mip removed plus what the frame blend removed. Both tables are
+// interpolated between levels the way the trilinear fetch interpolates the
+// slope itself, so the lobe and the mean describe the same surface.
+fn sea_tile_variance_removed(lod: f32, f: f32) -> f32 {
+    let l0 = clamp(floor(lod), 0.0, 8.0);
+    let l1 = min(l0 + 1.0, 8.0);
+    let w = clamp(lod - l0, 0.0, 1.0);
+    let v = mix(SEA_SLOPE_VARIANCE[i32(l0)], SEA_SLOPE_VARIANCE[i32(l1)], w);
+    return v.x + 2.0 * f * (1.0 - f) * v.y;
+}
+
+struct Swell {
+    slope: vec2<f32>,
+    // Elevation over SWELL_ETA_SCALE_M, footprint-filtered, clipped to
+    // [-1, 1]; 0 once the footprint has averaged every train away.
+    eta: f32,
+    // The same elevation unfiltered and unclipped: the phase field of
+    // SEA_PHASE_SPREAD_S, which must not collapse where the pixel is large.
+    eta_raw: f32,
+    // Slope variance the footprint filter took out of the trains.
+    variance_removed: f32,
+};
+
+// One train, (m, n) cycles across the surface period, amplitude a (m),
+// phase phi, added into `s`.
+fn sea_swell_train(s: ptr<function, Swell>, m: f32, n: f32, a: f32,
+                   phi: f32, p: vec2<f32>, t: f32, h: vec2<f32>,
+                   along: f32, across: f32) {
+    let k = (6.283185307179586 / SWELL_PERIOD_M) * vec2<f32>(m, n);
+    let kk = length(k);
+    let omega = sqrt(SEA_G * kk);
+    let phase = dot(k, p) - omega * t + phi;
+    let ka = dot(k, h) * along;
+    let kc = (k.x * h.y - k.y * h.x) * across;
+    let gain = exp(-0.5 * (ka * ka + kc * kc));
+    (*s).slope = (*s).slope - (a * gain * sin(phase)) * k;
+    let c = a * cos(phase);
+    (*s).eta = (*s).eta + gain * c;
+    (*s).eta_raw = (*s).eta_raw + c;
+    (*s).variance_removed = (*s).variance_removed
+        + 0.5 * (a * kk) * (a * kk) * (1.0 - gain * gain);
+}
+
+// The swell at a surface-frame point, seen through a pixel footprint that
+// is `along` metres long in the horizontal view direction `h` and `across`
+// metres wide. Each train is Gaussian-filtered by it (gain
+// exp(-((k.h along)^2 + (k x h across)^2) / 2)), so a train the pixel cannot
+// resolve fades into the lobe instead of aliasing. The ten trains are the
+// table above, row for row.
+fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
+             across: f32) -> Swell {
+    var s = Swell(vec2<f32>(0.0), 0.0, 0.0, 0.0);
+    sea_swell_train(&s, 2.0, -1.0, 0.155, 6.219, p, t, h, along, across);
+    sea_swell_train(&s, 2.0,  1.0, 0.155, 3.262, p, t, h, along, across);
+    sea_swell_train(&s, 3.0,  0.0, 0.218, 5.356, p, t, h, along, across);
+    sea_swell_train(&s, 3.0, -1.0, 0.200, 1.358, p, t, h, along, across);
+    sea_swell_train(&s, 3.0,  1.0, 0.200, 1.887, p, t, h, along, across);
+    sea_swell_train(&s, 3.0, -2.0, 0.156, 6.231, p, t, h, along, across);
+    sea_swell_train(&s, 3.0,  2.0, 0.156, 0.260, p, t, h, along, across);
+    sea_swell_train(&s, 4.0,  0.0, 0.187, 0.812, p, t, h, along, across);
+    sea_swell_train(&s, 4.0, -1.0, 0.174, 1.683, p, t, h, along, across);
+    sea_swell_train(&s, 4.0,  1.0, 0.174, 4.767, p, t, h, along, across);
+    s.eta = clamp(s.eta / SWELL_ETA_SCALE_M, -1.0, 1.0);
+    s.eta_raw = s.eta_raw / SWELL_ETA_SCALE_M;
+    return s;
+}
+
+// The lace's mean cover at threshold index k in [0, 4] (see SEA_LACE_*),
+// linear between the measured points.
+fn sea_lace_mean(k: f32) -> f32 {
+    let c = clamp(k, 0.0, 4.0);
+    let lo = select(select(select(SEA_LACE_COVER_0, SEA_LACE_COVER_1, c >= 1.0),
+                           SEA_LACE_COVER_2, c >= 2.0), SEA_LACE_COVER_3,
+                    c >= 3.0);
+    let hi = select(select(select(SEA_LACE_COVER_1, SEA_LACE_COVER_2, c >= 1.0),
+                           SEA_LACE_COVER_3, c >= 2.0), SEA_LACE_COVER_4,
+                    c >= 3.0);
+    return mix(lo, hi, c - min(floor(c), 3.0));
+}
+
+// How much of a foam texel the lace keeps (see SEA_LACE_*): resolved where
+// its 5 cm texels are larger than the pixel, their measured mean where they
+// are not, blended over two levels as the tile's own foam is.
+fn sea_lace(p: vec2<f32>, rank: f32, theta: f32, along: f32,
+            fr: SeaFrames) -> f32 {
+    let fresh = clamp((rank - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0);
+    let k = 4.0 * (1.0 - fresh);
+    let cut = -SEA_LACE_EDGE + 0.25 * k * SEA_LACE_REACH;
+    let mean = sea_lace_mean(k);
+    let texel = u.ocean_params.x / SEA_LACE_SCALE;
+    let lod = log2(max(along / texel, 1.0));
+    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
+    if (resolved <= 0.0) {
+        return mean;
+    }
+    let uv = vec2<f32>(p.y, p.x) * (SEA_LACE_SCALE / u.ocean_params.y);
+    let crest = mix(
+        textureSampleLevel(ocean_waves, ocean_samp, uv, fr.a, lod).w,
+        textureSampleLevel(ocean_waves, ocean_samp, uv, fr.b, lod).w, fr.f);
+    let lace = smoothstep(cut - SEA_LACE_EDGE, cut + SEA_LACE_EDGE, crest);
+    return mix(mean, lace, resolved);
+}
+
+struct SeaSurface {
+    // Footprint-mean slope of the whole surface.
+    slope: vec2<f32>,
+    // Slope variance inside the footprint that `slope` does not carry.
+    variance: f32,
+    // Whitecap cover in the footprint, and its mean albedo.
+    foam: f32,
+    foam_albedo: f32,
+    // Crest thickness in the footprint (0 = none), for the glow.
+    crest: f32,
+};
+
+// The water at a world point, for a pixel whose footprint on the water is
+// `along` x `across` metres (along the horizontal view direction `h`), at
+// tile mip `lod`.
+fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
+               lod: f32) -> SeaSurface {
+    // Drift-corrected, not raw world: see u.surface_offset (row 24).
+    let p = world_xy - u.surface_offset.xy;
+    let t = scene_time();
+    let swell = sea_swell(p, t, h, along, across);
+    // Each patch of sea at its own moment of the loop: see
+    // SEA_PHASE_SPREAD_S.
+    let fr = sea_frames(t + SEA_PHASE_SPREAD_S * swell.eta_raw);
+    let tile = sea_sample(p, lod, fr);
+
+    let m = 1.0 + SEA_SWELL_MODULATION * swell.eta;
+    var out: SeaSurface;
+    out.slope = m * tile.xy + swell.slope;
+    out.variance = m * m * sea_tile_variance_removed(lod, fr.f)
+        + swell.variance_removed;
+
+    // Whitecaps where the swell gate and the tile's foam rank agree. A cut
+    // at theta = 1 - gate keeps exactly gate * SEA_FOAM_MAX_COVERAGE of the
+    // tile, in every frame, so the far field is that number with no sample
+    // at all; the near field is the cut itself, on the rank at this texel.
+    // Resolved and filtered share the mean, so there is no seam between
+    // them, only a sharpening as the footprint shrinks under a texel.
+    let gate = clamp(0.5 * (1.0 + swell.eta), 0.0, 1.0);
+    let theta = clamp(1.0 - gate, SEA_FOAM_EDGE, 1.0);
+    let far_cover = SEA_FOAM_MAX_COVERAGE * (1.0 - theta) * SEA_LACE_COVER_MEAN;
+    var near_cover = smoothstep(theta - SEA_FOAM_EDGE, theta + SEA_FOAM_EDGE,
+                                tile.z);
+    // Sharp below a texel, the analytic mean by two levels up.
+    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
+    if (resolved > 0.0 && near_cover > 0.0) {
+        near_cover = near_cover * sea_lace(p, tile.z, theta, along, fr);
+    }
+    out.foam = mix(far_cover, near_cover, resolved);
+    out.foam_albedo = SEA_FOAM_ALBEDO;
+    out.crest = tile.w;
+    return out;
+}
+
+// The legacy shader's LOD (realism 0), kept with its own footprint rule.
 fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
     let pixel_span = 2.0 * max(t_hit, 0.0) * u.cam_origin.w / u.params.y;
     let ocean_span = pixel_span / max(abs(dir.z), 0.03);
@@ -1830,13 +2185,11 @@ fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
     return clamp(log2(texel_span), 0.0, u.ocean_params.w);
 }
 
+// The legacy shader's normal: the wind-sea tile alone, at the clock.
 fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
-    let dims = vec2<f32>(textureDimensions(ocean_normals, 0));
-    // Drift-corrected, not raw world: see u.surface_offset (row 24).
-    let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
-        + 0.5 / dims;
-    let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
-    return normalize(n);
+    let s = sea_sample(world_xy - u.surface_offset.xy, lod,
+                       sea_frames(scene_time())).xy;
+    return normalize(vec3<f32>(-s, 1.0));
 }
 
 // Ocean shade ported from witness._ocean_shade (witness.py lines 473-541).
@@ -1881,15 +2234,22 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // and sky-field haze along the ocean sightline.
 // ---------------------------------------------------------------------------
 
-// Legacy reflected sky with its fixed glint lobe faded by the master gate
-// (witness._reflection_sky_realism). At ocean_realism = 1 the legacy lobe is
-// fully off and the GGX glint replaces it.
+// The sky the water reflects: the rendered sky (solar disc excluded — the GGX
+// glint is the sun's reflection), faded by the master gate toward the legacy
+// fixed gradient and its fixed glint lobe (witness._reflection_sky_realism).
+// At ocean_realism = 1 the water mirrors the same sky the camera sees, so a
+// sunset sea takes the sunset's colour; the legacy gradient was the sky of a
+// 55-degree sun and left the water blue under every other.
 fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
                           legacy_glint_weight: f32) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
     t = 1.0 - one_minus * one_minus * one_minus;
-    var col = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
+    let legacy = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
+    let rendered = sky_radiance(vec3<f32>(dir.xy, max(dir.z, 0.0)), sun,
+                                u.sky_horizon.xyz, u.sky_bloom.xyz,
+                                vec3<f32>(0.0), u.cloud_sun.w);
+    var col = mix(rendered, legacy, legacy_glint_weight);
     let cos_rs = dot(dir, sun);
     if (cos_rs > 0.0 && legacy_glint_weight > 0.0) {
         let glint_w = 0.02;
@@ -1905,93 +2265,32 @@ fn ggx_smith_g1(n_dot_x: f32, alpha_squared: f32) -> f32 {
     return (2.0 * n_dot_x) / (n_dot_x + root);
 }
 
-// Slope variance the FIF normal mip chain removes, level by level, measured
-// directly on the shipped tile (tools/export_web_assets.py, seed 20260717).
-// Entry k is mean(sx^2 + sy^2) at level 0 minus the same quantity at level k,
-// where s = n.xy / n.z. Level 0 is the resolved surface and removes nothing;
-// by level 6 the 512^2 tile is down to 8x8 texels and essentially the whole
-// 0.0908 RMS slope of this sea has been filtered out of the normal.
+// One draw from the sub-pixel slope distribution about the footprint's mean
+// slope, with per-axis standard deviation `sigma`. Gaussian by Box-Muller,
+// which is the right shape here: the slope of a filtered Gaussian-ish wave
+// field is Gaussian, and a Gaussian slope density is what makes a sun
+// glitter path an elongated ellipse rather than a disc.
 //
-// This is what the microfacet lobe has to put back. It is a *variance*: it
-// adds to alpha^2, not to alpha (lighting-loop iter_008), and its total is a
-// property of the tile rather than a free parameter — 0.00825 in slope
-// variance is alpha 0.0908 of widening, no matter how many levels the mip
-// chain has.
-const FIF_SLOPE_VARIANCE_REMOVED = array<f32, 10>(
-    0.000000, 0.000449, 0.001407, 0.002788, 0.004635,
-    0.007078, 0.008090, 0.008211, 0.008242, 0.008249
-);
-
-// Interpolated the same way the normal itself is: linearly between the two
-// bracketing levels, so roughness and normal always describe the same surface.
-fn fif_slope_variance_removed(lod: f32) -> f32 {
-    let l0 = clamp(floor(lod), 0.0, 9.0);
-    let l1 = min(l0 + 1.0, 9.0);
-    let f = clamp(lod - l0, 0.0, 1.0);
-    return mix(FIF_SLOPE_VARIANCE_REMOVED[i32(l0)],
-               FIF_SLOPE_VARIANCE_REMOVED[i32(l1)], f);
-}
-
 // The removed variance is split between two estimators of the same thing.
-// `draw_fraction` of it is sampled stochastically (per-axis, hence the 0.5 —
-// the table is the total over both axes); the remainder stays analytic, as
+// `draw_fraction` of it is sampled here (per-axis, hence the 0.5 — the
+// variances are totals over both axes); the remainder stays analytic, as
 // extra width on the microfacet lobe. The endpoints are both exact: at 1 the
 // surface is fully sampled, at 0 the sun lobe is exactly as wide as the sea
 // it stands for and only the Fresnel/sky nonlinearity goes unresolved. In
 // between it is a pure noise-vs-nonlinearity dial with no bias either way.
-fn slope_jitter_sigma(lod: f32, draw_fraction: f32) -> f32 {
-    return sqrt(0.5 * clamp(draw_fraction, 0.0, 1.0)
-                * fif_slope_variance_removed(lod));
-}
-
-// Slope variance left for the lobe to carry.
-fn slope_lobe_variance(lod: f32, draw_fraction: f32) -> f32 {
-    return (1.0 - clamp(draw_fraction, 0.0, 1.0))
-           * fif_slope_variance_removed(lod);
-}
-
-// One draw from the sub-pixel slope distribution about a filtered normal.
-// Gaussian by Box-Muller, which is the right shape here: the slope of a
-// filtered Gaussian-ish wave field is Gaussian, and a Gaussian slope density
-// is what makes a sun glitter path an elongated ellipse rather than a disc.
-fn ocean_slope_sample(n: vec3<f32>, sigma: f32,
+fn ocean_slope_sample(slope: vec2<f32>, sigma: f32,
                       seed: vec2<f32>) -> vec3<f32> {
-    if (sigma <= 0.0) {
-        return n;
+    var s = slope;
+    if (sigma > 0.0) {
+        let radius = sigma * sqrt(-2.0 * log(max(seed.x, 1e-6)));
+        let phi = 6.283185307179586 * seed.y;
+        s = s + radius * vec2<f32>(cos(phi), sin(phi));
     }
-    let nz = max(n.z, 1e-4);
-    let radius = sigma * sqrt(-2.0 * log(max(seed.x, 1e-6)));
-    let phi = 6.283185307179586 * seed.y;
-    let slope = n.xy / nz + radius * vec2<f32>(cos(phi), sin(phi));
-    return normalize(vec3<f32>(slope, 1.0));
-}
-
-// One packed FIF normal mip level, sampled the witness way: the half-texel
-// offset is per-LEVEL (witness bilinear grid puts texel value i at gx = i),
-// so trilinear-in-LOD is done as two explicit level samples + mix +
-// renormalize (witness._ocean_wave_normal_mipped) rather than a single
-// hardware trilinear fetch whose half-texel offset would only fit level 0.
-fn ocean_normal_mip_sample(world_xy: vec2<f32>, level: f32) -> vec3<f32> {
-    let dims = vec2<f32>(textureDimensions(ocean_normals, i32(level)));
-    // Drift-corrected, not raw world: see u.surface_offset (row 24).
-    let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
-        + 0.5 / dims;
-    return textureSampleLevel(ocean_normals, ocean_samp, coord, level).rgb;
-}
-
-fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
-    let level0 = floor(lod);
-    let level1 = min(level0 + 1.0, u.ocean_params.w);
-    let f = lod - level0;
-    var n = ocean_normal_mip_sample(world_xy, level0);
-    if (level1 > level0 && f > 0.0) {
-        n = mix(n, ocean_normal_mip_sample(world_xy, level1), f);
-    }
-    return normalize(n);
+    return normalize(vec3<f32>(-s, 1.0));
 }
 
 // Footprint-filtered ocean with microfacet sun glint and path haze
-// (witness._ocean_shade_realism).
+// (witness._ocean_shade_realism), on the moving sea.
 fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                        sun_shadow: vec3<f32>, t_hit: f32,
                        jit: f32, slope_seed: vec2<f32>,
@@ -2000,39 +2299,48 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let ocean_mip_bias = u.ocean_realism_a.y;
     let glint_strength = u.ocean_realism_a.z;
     let glint_roughness = u.ocean_realism_a.w;
-    let slope_draw_fraction = u.ocean_realism_b.x;
+    let slope_draw_fraction = clamp(u.ocean_realism_b.x, 0.0, 1.0);
     let haze_beta0 = u.ocean_realism_b.y;
     let sky_shadow_floor = u.ocean_realism_b.z;
 
     // Project one pixel's angular span onto the water; the grazing-angle
-    // factor drives the horizon toward coarser mip levels.
+    // factor stretches it along the view and drives the horizon toward
+    // coarser mip levels.
     let grazing = max(abs(dir.z), 0.03);
     let pixel_angular_span = 2.0 * u.cam_origin.w / u.params.y;
-    let ocean_span = t_hit * pixel_angular_span / grazing;
-    let texel_span = max(ocean_span / u.ocean_params.x, 1.0);
+    let across = t_hit * pixel_angular_span;
+    let along = across / grazing;
+    let texel_span = max(along / u.ocean_params.x, 1.0);
     var lod = log2(texel_span) + ocean_mip_bias;
     lod = clamp(lod, 0.0, u.ocean_params.w);
     // Scaling LOD with the master gate keeps intermediate gate values a
     // continuous tuning range (witness does the same).
     lod = lod * ocean_realism;
 
-    // The mip gives the footprint's MEAN normal. Every judge view's water is
-    // sub-pixel: at v7's near field one pixel covers ~30 m of a 0.2 m wave
-    // field, so the honest statement is not "this facet is flat" but "this
-    // pixel contains a slope distribution whose variance the filter removed".
-    // Evaluating the shading at the mean normal is wrong for exactly the
-    // reason the sea looks the way it does: Fresnel goes as (1 - n.v)^5 and
-    // the sky gradient is steep near the horizon, so at grazing incidence the
-    // radiance is strongly convex in slope and its mean is not the value at
-    // the mean. Draw the missing slope instead of averaging it away, the same
-    // move iter_003 made for the sun-march quadrature and iter_007 for the
-    // solar disc: one unbiased sample per pixel per frame, accumulated.
-    let n = ocean_slope_sample(ocean_wave_normal_mipped(hit.xy, lod),
-                               slope_jitter * slope_jitter_sigma(
-                                   lod, slope_draw_fraction),
-                               slope_seed);
+    let h_len = length(dir.xy);
+    var h = vec2<f32>(1.0, 0.0);
+    if (h_len > 1e-8) {
+        h = dir.xy / h_len;
+    }
+    let sea = sea_surface(hit.xy, h, along * ocean_realism,
+                          across * ocean_realism, lod);
 
-    // Reflect the view direction around the filtered surface normal.
+    // The footprint mean slope is not the footprint's shading. Every judge
+    // view's water is sub-pixel: at v7's near field one pixel covers tens
+    // of metres of a 0.4 m wave field, so the honest statement is not "this
+    // facet is flat" but "this pixel contains a slope distribution whose
+    // variance the filters removed". Fresnel goes as (1 - n.v)^5 and the sky
+    // gradient is steep near the horizon, so at grazing incidence the
+    // radiance is strongly convex in slope and its mean is not the value at
+    // the mean. Draw the missing slope instead of averaging it away, the
+    // same move iter_003 made for the sun-march quadrature and iter_007 for
+    // the solar disc: one unbiased sample per pixel per frame, accumulated.
+    let n = ocean_slope_sample(
+        sea.slope,
+        slope_jitter * sqrt(0.5 * slope_draw_fraction * sea.variance),
+        slope_seed);
+
+    // Reflect the view direction around the drawn surface normal.
     let vdotn = dot(dir, n);
     var refl = dir - 2.0 * vdotn * n;
     if (refl.z < 0.0) {
@@ -2052,34 +2360,31 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let t_sun_ocean = exp(-tau_ocean);
     let n_dot_l = max(0.0, dot(sun, n));
 
-    // Direct-sun GGX glint, tinted by the spectral beam color. Mip filtering
-    // removes unresolved slope variance; alpha widening per LOD folds it back
-    // into a broader stable highlight instead of point-sample sparkles.
+    // Direct-sun GGX glint, tinted by the spectral beam color. Filtering
+    // removes unresolved slope variance; alpha widening folds it back into a
+    // broader stable highlight instead of point-sample sparkles.
     let glint_weight = ocean_realism * glint_strength;
     var glint = vec3<f32>(0.0);
     var sun_fresnel = 0.02;
     if (glint_weight > 0.0 && n_dot_l > 0.0 && n_dot_v > 1e-8) {
-        var h = sun - dir;
-        let h_len = length(h);
-        if (h_len > 1e-8) {
-            h = h / h_len;
-            let n_dot_h = dot(n, h);
+        var hv = sun - dir;
+        let hv_len = length(hv);
+        if (hv_len > 1e-8) {
+            hv = hv / hv_len;
+            let n_dot_h = dot(n, hv);
             if (n_dot_h > 0.0) {
-                let v_dot_h = clamp(dot(-dir, h), 0.0, 1.0);
+                let v_dot_h = clamp(dot(-dir, hv), 0.0, 1.0);
                 let one_minus_vh = 1.0 - v_dot_h;
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
-                // Base roughness is what lives BELOW the tile's own 0.2 m
+                // Base roughness is what lives BELOW the tile's own 0.4 m
                 // sampling — capillary ripple the FIF field never had — plus
                 // whatever share of the filtered-away variance the slope draw
-                // did not take. Variances add; roughnesses do not, which is
-                // what the old `roughness + per_lod * lod` ramp got wrong (it
-                // reached alpha 0.51 at the horizon for a sea whose entire
-                // RMS slope is 0.091).
+                // did not take. Variances add; roughnesses do not.
                 let alpha = clamp(
                     sqrt(glint_roughness * glint_roughness
-                         + slope_lobe_variance(lod, slope_draw_fraction)),
+                         + (1.0 - slope_draw_fraction) * sea.variance),
                     0.02, 0.75
                 );
                 let alpha_squared = alpha * alpha;
@@ -2112,18 +2417,49 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
         + (1.0 - view_fresnel) * diffuse
         + glint;
 
+    // Subsurface glow through backlit crests: looking toward a low sun, the
+    // crest's thin water is lit from behind. The crest term is linear in
+    // the tile (mips average it honestly); the rest is the geometry of
+    // sun, view and facet, and the sunlight the crest actually receives.
+    let sun_h_len = length(sun.xy);
+    if (sun_h_len > 1e-4 && sea.crest > 0.0) {
+        let backlit = max(dot(h, sun.xy / sun_h_len), 0.0);
+        let facing = clamp(dot(n, -dir), 0.0, 1.0);
+        let low_sun = 1.0 - clamp(sun.z, 0.0, 1.0);
+        ol = ol + (ocean_realism * SEA_GLOW_STRENGTH * sea.crest
+                   * backlit * backlit * backlit * facing * low_sun
+                   * t_sun_ocean * (1.0 - view_fresnel))
+            * SEA_GLOW_TINT * u.cloud_sun.xyz;
+    }
+
+    // Whitecaps: a Lambertian cover over the water it hides, lit by the beam
+    // (on the mean surface: foam is rough) and the sky, both shadowed like
+    // the water's own terms.
+    if (sea.foam > 0.0) {
+        let beam = SEA_FOAM_BEAM_CALIBRATION * u.cloud_sun.xyz;
+        let mu_sun = max(sun.z, 0.0);
+        // Skylight as desert_light builds it: chroma from the rendered
+        // zenith, magnitude from the beam, dimmed under cloud like the
+        // water's own sky reflection.
+        let zen = sky_radiance(vec3<f32>(0.0, 0.0, 1.0), sun,
+                               u.sky_horizon.xyz, u.sky_bloom.xyz,
+                               vec3<f32>(0.0), u.cloud_sun.w);
+        let skylight = SEA_FOAM_SKY_FRACTION
+            * max(mu_sun, SEA_FOAM_SKY_MU_FLOOR)
+            * max(dot(beam, LUMA_WEIGHTS), 1e-6)
+            * (zen / max(dot(zen, LUMA_WEIGHTS), 1e-6));
+        let irradiance = t_sun_ocean * mu_sun * beam + sky_shadow * skylight;
+        ol = mix(ol, sea.foam_albedo * 0.3183098861837907 * irradiance,
+                 ocean_realism * sea.foam);
+    }
+
     // Ocean-only aerial perspective toward the same angular sky field the
     // cloud haze uses (solar disc excluded), killing the horizon seam.
     let haze_tau = ocean_realism * haze_beta0 * t_hit;
     if (haze_tau > 0.0) {
         let haze = 1.0 - exp(-haze_tau);
-        let h_len = length(dir.xy);
-        var hdir = dir.xy;
-        if (h_len > 1e-8) {
-            hdir = dir.xy / h_len;
-        }
         let haze_col = sky_radiance(
-            vec3<f32>(hdir, 0.0), sun,
+            vec3<f32>(h, 0.0), sun,
             u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
             u.cloud_sun.w
         );
@@ -3457,13 +3793,15 @@ fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
 // another family. The first cut used one 0.85 peak for every family and
 // rendered each LED pool as a clipped white disc; each family now carries
 // its own radiance, set so the brightest family at the brightest draw stays
-// under the tone map's knee at the reference exposure.
+// under the tone map's knee at the reference exposure — a second cut, 30%
+// down, after a close view under a cool LED pole still read as white
+// ground (the lead, 2026-09-23).
 
 const CITY_FLOOD_MAX: i32 = 4;
-const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(0.60, 0.27, 0.075);
-const CITY_FLOOD_HALIDE: vec3<f32> = vec3<f32>(0.42, 0.39, 0.30);
-const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.31, 0.37, 0.45);
-const CITY_FLOOD_LED_WARM: vec3<f32> = vec3<f32>(0.46, 0.36, 0.23);
+const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(0.42, 0.19, 0.052);
+const CITY_FLOOD_HALIDE: vec3<f32> = vec3<f32>(0.29, 0.27, 0.21);
+const CITY_FLOOD_LED: vec3<f32> = vec3<f32>(0.22, 0.26, 0.31);
+const CITY_FLOOD_LED_WARM: vec3<f32> = vec3<f32>(0.32, 0.25, 0.16);
 const CITY_FLOOD_WALL_OUT: f32 = 7.0;    // pool sigma out from the wall (m)
 const CITY_FLOOD_WALL_ALONG: f32 = 7.0;  // ... and along it
 const CITY_FLOOD_WALL_SPACING: f32 = 30.0;
@@ -4951,9 +5289,12 @@ fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (fp < cc_aircars_SDF_FP) {
         return cc_aircars_sdf_hit(o, dir, inv_dir, t0, t1, v, lane, ci, fp);
     }
-    let hx = cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W);
-    let hmin = vec3<f32>(v.base.xy - hx, v.base.z);
-    let hmax = vec3<f32>(v.base.xy + hx, v.base.z + cc_aircars_HULL_H);
+    // The hull box, grown toward a pixel once the craft is smaller than one
+    // (cc_aircars_grown); the shader dilutes it by the same factor.
+    let hc = cc_aircars_hull_centre(v);
+    let he = cc_aircars_grown(v);
+    let hmin = hc - he;
+    let hmax = hc + he;
     let sh = city_box_hit(o, inv_dir, hmin, hmax);
     let t_hull = select(1e30, sh.x,
                         sh.x <= sh.y && sh.x > t0 && sh.x <= t1);
@@ -4988,6 +5329,42 @@ fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // The belly of the hull is the underglow panel.
     let part = select(select(0, 1, nrm.z < -0.5), 2, is_canopy);
     return CityHit(true, t, pos, nrm, 300 + 4 * lane + part, ci);
+}
+
+// --- sub-pixel craft ---------------------------------------------------------
+// A craft narrower than a pixel is either hit by a pixel's one ray, and then
+// drawn at its full panel radiance, or missed: flying, that is a scatter of
+// saturated colored specks winking on and off — confetti — where the eye
+// sees a faint steady point. So below a pixel the hull box GROWS to about
+// one pixel (half-extent MIN_PX footprints) and its radiance is DILUTED by
+// the ratio of the true box's projected area to the grown one's: every pixel
+// the craft touches carries radiance x coverage, which is what a lens
+// integrates, and the light a craft adds to the frame is the same at every
+// distance. The footprint is the craft's own — its distance from the camera,
+// not the ray's cell — so the tracer and the shader agree on it exactly.
+const cc_aircars_MIN_PX: f32 = 0.6;
+
+fn cc_aircars_hull_centre(v: cc_aircars_Craft) -> vec3<f32> {
+    return vec3<f32>(v.base.xy, v.base.z + 0.5 * cc_aircars_HULL_H);
+}
+
+fn cc_aircars_half(v: cc_aircars_Craft) -> vec3<f32> {
+    return vec3<f32>(
+        cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W),
+        0.5 * cc_aircars_HULL_H);
+}
+
+fn cc_aircars_grown(v: cc_aircars_Craft) -> vec3<f32> {
+    let d = length(cc_aircars_hull_centre(v) - city_camera_origin());
+    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * d;
+    return max(cc_aircars_half(v), vec3<f32>(cc_aircars_MIN_PX * fp));
+}
+
+// Projected area of a box of half-extents e seen along dir (up to a common
+// factor, which cancels in the ratio).
+fn cc_aircars_proj(e: vec3<f32>, dir: vec3<f32>) -> f32 {
+    let a = abs(dir);
+    return a.x * e.y * e.z + a.y * e.x * e.z + a.z * e.x * e.y;
 }
 
 fn cc_aircars_nearer(a: CityHit, b: CityHit) -> CityHit {
@@ -5293,6 +5670,26 @@ fn cc_aircars_shade_sdf(h: CityHit, v: cc_aircars_Craft, glow: vec3<f32>,
 
 fn cc_aircars_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
+    // A grown (sub-pixel) hull is shaded at the true hull's nearest point and
+    // diluted by true over grown projected area; a resolved craft has
+    // grown == true and passes through untouched.
+    let code = h.kind - 300;
+    let v = cc_aircars_craft(h.cell, cc, code / 4);
+    let e = cc_aircars_half(v);
+    let eg = cc_aircars_grown(v);
+    var hh = h;
+    var dilution = 1.0;
+    if (code % 4 != 3 && any(eg > e)) {
+        let c = cc_aircars_hull_centre(v);
+        hh.pos = clamp(h.pos, c - e, c + e);
+        dilution = cc_aircars_proj(e, dir) / max(cc_aircars_proj(eg, dir),
+                                                 1e-6);
+    }
+    return cc_aircars_shade_resolved(hh, cc, dir, fp) * dilution;
+}
+
+fn cc_aircars_shade_resolved(h: CityHit, cc: CityCell, dir: vec3<f32>,
+                             fp: f32) -> vec3<f32> {
     let code = h.kind - 300;
     let lane = code / 4;
     let part = code % 4;
@@ -10974,7 +11371,13 @@ const cc_industry_PART_FP: f32 = 0.25;
 // the pools are painted on: a prop of this albedo facing the lamp the way
 // the ground does returns the pool's own radiance.
 const cc_industry_ALB_REF: f32 = 0.35;
-const cc_industry_FACING_MAX: f32 = 2.5;
+// Where lamp light reflected off a prop starts to roll off: exposure 6 puts
+// 0.3 at 1.8, below the Reinhard curve's shoulder.
+const cc_industry_LAMP_KNEE: f32 = 0.3;
+// Weathering's means over a face (tools: a brute-force average of the
+// patterns in cc_industry_weather and the container roof, 4e5 samples).
+const cc_industry_WEATHER_MEAN: vec3<f32> = vec3<f32>(0.962, 0.960, 0.959);
+const cc_industry_ROOF_MEAN: vec3<f32> = vec3<f32>(0.769, 0.745, 0.728);
 
 // --- the lot's frame ----------------------------------------------------------
 // Everything is laid out along the lot's long axis `a` and across it `c`, and
@@ -12112,11 +12515,16 @@ fn cc_industry_fill(p: vec3<f32>) -> vec3<f32> {
 }
 
 // What lights a prop surface, as the radiance a surface of ALB_REF would
-// return: each of the lot's pools at the prop's own ground position, times
-// how squarely the surface faces the fixture compared with the ground it
-// was painted on (a container side facing a flood catches more than the
-// asphalt under it, one facing away catches none); then the street lamps,
-// for the yards that front one, falling mostly on up-facing surfaces.
+// return: each of the lot's pools at the prop's own ground position — the
+// beam's footprint there — times how squarely the surface faces the
+// fixture, relative to the ground under it, and never more than the ground
+// gets: a surface facing away catches none, one squarely facing catches
+// what the ground does. The pools' peaks are calibrated for ground a head's
+// height below the lamp; a container top two metres under it, lit with the
+// inverse square, would take several times that, and first renders showed
+// exactly that as flat white tops (the lead, 2026-09-23). Then the street
+// lamps, for the yards that front one, falling mostly on up-facing
+// surfaces.
 fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     var e = vec3<f32>(0.0);
     let nk = select(0, CITY_FLOOD_MAX,
@@ -12126,8 +12534,7 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let f = city_flood(cc, k);
         if (f.on) {
             let l = normalize(f.head - p);
-            let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2),
-                             cc_industry_FACING_MAX);
+            let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2), 1.0);
             e = e + f.color * (city_flood_pool(f, p.xy) * facing);
         }
     }
@@ -12139,10 +12546,14 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return e;
 }
 
+// The lamp-lit part passes a soft knee before it is returned: a bright
+// painted box under a bright pool still keeps its shading instead of
+// meeting the tone map's shoulder as a flat white face.
 fn cc_industry_lit(cc: CityCell, p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>)
         -> vec3<f32> {
     let moon = u.sun_dir.xyz;
-    return (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n)
+    let lamp = (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n);
+    return lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
            + alb * (cc_industry_fill(p)
                     + CITY_MOONLIGHT * max(dot(n, moon), 0.0));
 }
@@ -12517,6 +12928,53 @@ fn cc_industry_box_color(x: f32) -> vec3<f32> {
     return vec3<f32>(0.20, 0.11, 0.06);
 }
 
+// Weathering on a painted steel side, as an albedo multiplier: rust
+// streaks bleeding down from the roof rail (a third of the 0.9 m cells, of
+// hashed width and length, redder than the paint), grime darkening the
+// bottom 0.9 m where the yard's dust sits, and a paint level that varies
+// panel to panel (2.4 m). `u` runs along the face, `zt` is height in the
+// box, `hgt` its height, `seed` the box's own draw. Dissolves to
+// WEATHER_MEAN, the pattern's own average, as the streaks go sub-pixel.
+fn cc_industry_weather(u: f32, zt: f32, hgt: f32, seed: f32, fp: f32)
+        -> vec3<f32> {
+    let r = hash22(vec2<f32>(floor(u / 0.9), seed * 97.0));
+    let x = fract(u / 0.9);
+    let w = 0.15 + 0.35 * r.y;
+    let len = 0.4 + 1.8 * r.x;
+    let depth = hgt - zt;
+    var streak = 0.0;
+    if (r.x < 0.35 && abs(x - 0.5) < 0.5 * w && depth < len) {
+        streak = (1.0 - depth / len) * (0.5 + 0.5 * r.x);
+    }
+    let rust = vec3<f32>(1.0) - streak * 0.6
+               * (vec3<f32>(1.0) - vec3<f32>(1.0, 0.62, 0.45));
+    let dirt = 0.78 + 0.22 * smoothstep(0.0, 0.9, zt);
+    let panel = 0.88 + 0.24 * hash12(vec2<f32>(floor(u / 2.4), seed * 53.0));
+    return mix(rust * (dirt * panel), cc_industry_WEATHER_MEAN,
+               smoothstep(0.08, 0.4, fp));
+}
+
+// A container roof: shallow transverse corrugation every 0.5 m, two dents
+// as local shading hollows at spots the box's draw picks (periodic swells
+// read as stripes, not dents), and a fifth of its 1.2 m panels carrying a
+// dark wet rust patch; the whole deck dirtier than the sides. Dissolves to
+// ROOF_MEAN.
+fn cc_industry_box_roof(lu: f32, lv: f32, seed: f32, fp: f32) -> vec3<f32> {
+    let rib = 0.85 + 0.30 * (0.5 + 0.5 * cos(6.2831853 * lu / 0.5));
+    let rib_k = cc_industry_band(rib, 1.0, 0.25, fp);
+    let span = vec2<f32>(cc_industry_BOX_L - 2.0, cc_industry_BOX_W - 1.0);
+    let c1 = (fract(seed * vec2<f32>(13.7, 29.1)) - 0.5) * span;
+    let c2 = (fract(seed * vec2<f32>(41.3, 57.9)) - 0.5) * span;
+    let q = vec2<f32>(lu, lv);
+    let d1 = dot(q - c1, q - c1) / (2.0 * 0.8 * 0.8);
+    let d2 = dot(q - c2, q - c2) / (2.0 * 0.6 * 0.6);
+    let dent = (1.0 - 0.25 * exp(-d1)) * (1.0 - 0.18 * exp(-d2));
+    let pr = hash12(vec2<f32>(floor(lu / 1.2), seed * 71.0));
+    let rust = select(vec3<f32>(1.0), vec3<f32>(0.70, 0.55, 0.45), pr < 0.2);
+    let pat = rust * (rib_k * dent * 0.85);
+    return mix(pat, cc_industry_ROOF_MEAN, smoothstep(0.3, 1.2, fp));
+}
+
 fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         s: cc_industry_Slot, fp: f32)
         -> vec3<f32> {
@@ -12554,10 +13012,14 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
                           zt < 0.12 || zt > cc_industry_TIER - 0.10);
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
-    } else {
-        m = 0.9;
+        let wu = select(lu, lv, abs(n_long) > 0.5);
+        return cc_industry_lit(cc, h.pos, h.normal,
+                               col * m * cc_industry_weather(
+                                   wu, zt, cc_industry_TIER, hc, fp));
     }
-    return cc_industry_lit(cc, h.pos, h.normal, col * m);
+    // The top of the stack, or a box seen from above.
+    return cc_industry_lit(cc, h.pos, h.normal,
+                           col * cc_industry_box_roof(lu, lv, hc, fp));
 }
 
 fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
@@ -12590,8 +13052,19 @@ fn cc_industry_trailer_shade(h: CityHit, cc: CityCell,
             p = p * select(1.0, 1.35, abs(abs(lv) - 0.62) < 0.03);
         }
         m = cc_industry_band(p, 0.92, 0.06, fp);
+        let wu = u + dot(h.pos.xy - s.ctr, vec2<f32>(-fwd.y, fwd.x));
+        return cc_industry_lit(
+            cc, h.pos, h.normal,
+            col * m * cc_industry_weather(
+                wu, z - cc_industry_TRL_DECK,
+                cc_industry_TRL_H - cc_industry_TRL_DECK, s.d.w, fp));
     }
-    return cc_industry_lit(cc, h.pos, h.normal, col * m);
+    // The roof: bows every 0.6 m under a grey film of road grime, heavier
+    // toward the nose where the tractor's exhaust lands.
+    let bow = cc_industry_band(select(1.0, 0.8, fract(u / 0.6) < 0.08),
+                               0.984, 0.05, fp);
+    let grime = 0.72 + 0.12 * smoothstep(-6.8, 6.8, -u);
+    return cc_industry_lit(cc, h.pos, h.normal, col * (bow * grime));
 }
 
 fn cc_industry_pallet_shade(h: CityHit, cc: CityCell,
@@ -18332,6 +18805,20 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // the ray the march composites: the same pixel, subpixel stream and frame
 // index, which is what keeps sub-pixel surface detail accumulating.
 //
+// A surface whose full detail is too register-hungry even for its own pass
+// splits in two: fs_surface draws what every pixel needs cheaply, and
+// fs_surface_refine re-traces only the pixels that need more, reading the
+// first stage's result at group 1 binding 1 and writing the final one. The
+// second stage's registers are paid only by its own kernel, which most
+// pixels leave at once. Each surface decides its own early-out from the
+// first stage's t alone, with no flag: the second stage re-walks only the
+// reach its detail lives in (the city's facade shell, the desert's near
+// plants) up to that t, and a pixel whose surface lies beyond the reach is
+// returned exactly as it came. Its result is the one fs_main reads, so t
+// stays >= 0 (1e30 on a miss) as in the first stage.
+// Which surfaces have the second stage is the hosts' list
+// (soar_host.SURFACE_REFINE_SURFACES, renderer.js _hasRefineStage).
+//
 // One function per surface, chosen by the scene's specialization. Anything
 // that belongs to the surface and sits in front of it along the ray (city
 // fog, a component's in-scatter at street level) is folded into its rgb here
@@ -18410,6 +18897,13 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
                               city_o, dir, chit.t, chit.pos), chit.t);
 }
 
+// The city's second stage: the facade shell over the plain surface. Until
+// the shell lands it is the identity, which is what proves the stage's
+// machinery exact.
+fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
+
 // The pass itself. Only the CITY and DESERT specializations are ever run
 // through it; any other scene returns a miss and the host never draws it.
 @fragment
@@ -18428,6 +18922,22 @@ fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> 
                                    cr.jitter_amp);
     }
     return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+}
+
+// The second stage, for a surface that has one. Most pixels leave at once;
+// see each surface's refine function for when.
+@fragment
+fn fs_surface_refine(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    let plain = textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    let cr = camera_ray(frag_pos);
+    if (CITY) {
+        return surface_refine_city(cr, plain);
+    }
+    if (DESERT) {
+        return desert_surface_refine(cr, plain);
+    }
+    return plain;
 }
 
 @fragment
