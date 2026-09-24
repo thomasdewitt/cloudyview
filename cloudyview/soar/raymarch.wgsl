@@ -808,6 +808,15 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // tools/benchmarking/soar_pass_timer.py and prove with
 // tools/soar_shader_ab.py --scene day|city|nested|desert, both on the
 // specialization the app actually compiles.
+//
+// And look, rather than guess: tools/soar_regcount.py prints the register
+// count and binary size the driver compiled an entry point into (NVIDIA's
+// own pipeline statistics, through Vulkan; a pure compile, no GPU work).
+// It is how the desert's surface pass was found at 168 registers and
+// 867 KB with its plant traces compiled in, and 80 without, before any
+// timing. A count is a diagnosis, not a score — fs_main at Low is 96
+// registers today against 80 this morning, and faster — so time what it
+// suggests.
 
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
