@@ -205,6 +205,14 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   const channels = SURFACE_FORMAT_CHANNELS[format];
   const files = meta.files
     ?? Array.from({ length: meta.mips }, (_, k) => `fif_mip${k}.bin`);
+  // Checked before anything is allocated, and outside the try below: the
+  // return reads it.
+  const dx = meta.dx_m ?? meta.cell_m;
+  if (!(dx > 0)) {
+    throw new Error(
+      `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
+      "no texel size.");
+  }
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
     size: [meta.n, meta.n, 1],
@@ -260,12 +268,6 @@ export async function loadOceanTile(device, baseUrl, onProgress,
         [n, n, 1],
       );
       onProgress?.((level + 1) / meta.mips);
-    }
-    const dx = meta.dx_m ?? meta.cell_m;
-    if (!(dx > 0)) {
-      throw new Error(
-        `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
-        "no texel size.");
     }
     if (keepCells && !cells) {
       throw new Error(
@@ -423,6 +425,7 @@ export async function loadSea(device, baseUrl, onProgress, { schema } = {}) {
     dx: meta.dx_m,
     tileExtent: meta.tile_extent_m,
     surfacePeriod: meta.surface_period_m,
+    clockPeriod: meta.clock_period_s,
     maxLod: meta.mips - 1,
     cells: null,
   };
@@ -906,6 +909,7 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       oceanFifDx: surfaceTile.dx,
       oceanTileExtent: surfaceTile.tileExtent,
       surfacePeriod: surfaceTile.surfacePeriod,
+      clockPeriod: surfaceTile.clockPeriod ?? null,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
       desert: surfaceKind === "desert",

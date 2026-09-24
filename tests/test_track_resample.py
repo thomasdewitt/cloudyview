@@ -124,7 +124,7 @@ def test_a_v3_city_track_with_knocks_loads_and_replays(tmp_path):
         "samples": samples.tolist(),
         "knocks": [[float(samples[20, 0]), 0.7, 1, 0.8, 0],
                    [float(samples[40, 0]), 0.3, -1, 0.5, 1]]}))
-    _, loaded = tr.load_track(path)
+    _, loaded, _ = tr.load_track(path)
     assert loaded.shape == samples.shape
     frames = tr.resample_track(loaded, 30.0, periodic=True,
                                linear_position=True)
@@ -156,6 +156,71 @@ def test_resample_rejects_mixed_widths_and_short_tracks(tmp_path):
         tr.load_track(path)
     with pytest.raises(ValueError, match="distinct"):
         tr.resample_track(np.zeros((3, 9)), 30.0)
+
+
+
+# --- the surface period ----------------------------------------------------
+
+def _write(tmp_path, schema, samples, **extra):
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps({"schema": schema,
+                                "header": {"schema": tr.HEADER_SCHEMA},
+                                "samples": samples.tolist(), **extra}))
+    return path
+
+
+def test_a_v4_track_carries_its_surface_period(tmp_path):
+    samples = _synthetic_samples(3)
+    _, _, period = tr.load_track(_write(
+        tmp_path, "cloudyview.track.v4", samples, surface_period_m=1638.4))
+    assert period == 1638.4
+    # Older tracks recorded none; the schema says what it was.
+    _, _, period = tr.load_track(_write(tmp_path, "cloudyview.track.v3",
+                                        samples))
+    assert period is None
+    for bad in ({}, {"surface_period_m": None}, {"surface_period_m": 0},
+                {"surface_period_m": "1638.4"}):
+        with pytest.raises(ValueError, match="surface period"):
+            tr.load_track(_write(tmp_path, "cloudyview.track.v4", samples,
+                                 **bad))
+
+
+def test_a_track_at_the_installed_period_replays_as_recorded():
+    samples = _synthetic_samples(3)
+    out = tr.surface_samples(samples, 1638.4, "ocean", 102.4, 1638.4)
+    assert out is samples
+    # The city and the desert fold at their tile, which v3 recorded at too.
+    assert tr.surface_samples(samples, None, "city", 2300.0, 2300.0) \
+        is samples
+
+
+def test_a_track_at_another_period_is_refused():
+    """The 2026-09-23 case: the sea's period doubled under the recordings,
+    and read at the new one a flight's water streams past at its speed."""
+    samples = _synthetic_samples(3)
+    with pytest.raises(RuntimeError, match="folds at 819.2 m.*1638.4 m"):
+        tr.surface_samples(samples, 819.2, "ocean", 102.4, 1638.4)
+    with pytest.raises(RuntimeError, match="city"):
+        tr.surface_samples(samples, 2300.0, "city", 1150.0, 1150.0)
+
+
+@pytest.mark.parametrize("version, unit", [(3, tr.V3_OCEAN_PERIOD_M),
+                                           (2, 102.4)])
+def test_an_older_sea_track_is_re_expressed_continuously(version, unit):
+    """v3 sea tracks were fractions of 819.2 m, v2 of the 102.4 m tile: in
+    metres the flight over the water is the same continuous path at the
+    installed period — no jump where the old period wrapped."""
+    period = 1638.4
+    samples = _synthetic_samples(version)
+    assert np.any(np.abs(np.diff(samples[:, 7])) > 0.5)    # it wraps
+    out = tr.surface_samples(samples, None, "ocean", 102.4, period)
+    order = np.argsort(samples[:, 0], kind="stable")
+    for c in (7, 8):
+        assert np.all((0.0 <= out[:, c]) & (out[:, c] < 1.0))
+        was = tr.unwrap_periodic(samples[order, c], 1.0, 0.5) * unit
+        now = tr.unwrap_periodic(out[:, c], 1.0, 0.5) * period
+        np.testing.assert_allclose(now - now[0], was - was[0], atol=1e-9)
+    np.testing.assert_array_equal(out[:, :7], samples[order, :7])
 
 
 # --- the header ------------------------------------------------------------

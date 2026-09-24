@@ -646,6 +646,7 @@ export class Renderer {
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
     s.surfacePeriod = tile.surfacePeriod;
+    s.clockPeriod = tile.clockPeriod ?? null;
     s.oceanMaxLod = tile.maxLod;
     s.desertReliefM = relief;
     this.prefetchPipelines();
@@ -1339,49 +1340,58 @@ export class Renderer {
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
-    const renderSize = renderTargetSize(outputSize, this.renderScale);
-    const targets = await this._targetsFor(renderSize[0], renderSize[1]);
-    await this._ensureSurfaceTarget(targets);
-    // The march pipeline for the state as it stands after the LAST await:
-    // from here to the first submit nothing awaits, so the specialization,
-    // the lighting method and the uniforms below all describe one moment.
-    // The method is read once — it picks the pipeline and it is what row 23
-    // packs — or a bake finishing between two reads would march one method
-    // under the other's scene key. A variant still compiling is waited out
-    // only when the caller asks (offline renders, which own the renderer);
-    // the live loop gets `false` back, marches nothing, keeps its last
-    // picture and asks again next frame, so no frame of it is ever
-    // suspended on a compile while the field or a capture changes under it.
-    // The surface pre-pass pipeline resolves in the same loop, so a frame
-    // never encodes one of the pair without the other.
+    // The march pipeline, the surface pipelines (pre-pass and refine) and
+    // the render targets for the state as it stands after the LAST await:
+    // from the end of this loop to the first submit nothing awaits, so the
+    // specialization, the lighting method, the targets and the uniforms
+    // below all describe one moment. The method is read once — it picks the
+    // pipelines and it is what row 23 packs — or a bake finishing between
+    // two reads would march one method under the other's scene key. The
+    // pair resolves together, so a frame never encodes one without the
+    // other. A variant still compiling is waited out only when the caller
+    // asks (offline renders, which own the renderer); the live loop gets
+    // `false` back, marches nothing, keeps its last picture and asks again
+    // next frame, so no frame of it is ever suspended on a compile while the
+    // field or a capture changes under it. Fetching the targets can itself
+    // await (a resize drains the pool; the surface target is made on first
+    // need), so the loop only exits once the variant, the method and the
+    // render size it chose are still the renderer's after those awaits.
     let lighting;
     let rayPipeline;
     let surfacePipelines;
+    let renderSize;
+    let targets;
     for (;;) {
       lighting = this.lighting;
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
       const sp = this._surfacePipeline(lighting);
       const rp = this._refinePipeline(lighting);
       const pending = [p, sp, rp].filter((q) => q && isPending(q));
-      if (pending.length === 0 && sp && !targets.surface) {
-        // The scene gained a traced surface while this frame waited on a
-        // compile (setSurface to the desert): give the target set its
-        // surface target, then resolve the pair again — the await means the
-        // state must be read afresh.
-        await this._ensureSurfaceTarget(targets);
+      if (pending.length > 0) {
+        if (!waitForPipeline) {
+          // Recorded; thrown when next requested.
+          for (const q of pending) q.catch(() => {});
+          return false;
+        }
+        await Promise.all(pending);
         continue;
       }
-      if (pending.length === 0) {
+      const variant = shaderVariantKey(this._shaderSpec({ lighting }));
+      renderSize = renderTargetSize(outputSize, this.renderScale);
+      targets = await this._targetsFor(renderSize[0], renderSize[1]);
+      // A scene with a traced surface needs the set's surface target(s),
+      // made on first need (e.g. after setSurface to the desert).
+      await this._ensureSurfaceTarget(targets);
+      const lightingNow = this.lighting;
+      const sizeNow = renderTargetSize(outputSize, this.renderScale);
+      if (lightingNow.lightCache === lighting.lightCache
+          && lightingNow.skyProbe === lighting.skyProbe
+          && shaderVariantKey(this._shaderSpec({ lighting })) === variant
+          && sizeNow[0] === renderSize[0] && sizeNow[1] === renderSize[1]) {
         rayPipeline = p;
         surfacePipelines = { surface: sp, refine: rp };
         break;
       }
-      if (!waitForPipeline) {
-        // Recorded; thrown when next requested.
-        for (const q of pending) q.catch(() => {});
-        return false;
-      }
-      await Promise.all(pending);
     }
     const targetView = typeof target === "function" ? target() : target;
 
@@ -2121,6 +2131,7 @@ export class Renderer {
       oceanFifDx: s.oceanFifDx,
       oceanTileExtent: s.oceanTileExtent,
       surfacePeriodM: s.surfacePeriod,
+      clockPeriodS: s.clockPeriod ?? null,
       oceanEnabled: true,
       oceanMaxLod: s.oceanMaxLod,
       nested: s.nested,

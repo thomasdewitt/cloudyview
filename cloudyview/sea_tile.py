@@ -102,3 +102,49 @@ def read(tile_dir: Path, schema: str) -> tuple:
             f"expected {expected} for {CHANNELS} planes of {nt}x{n}x{n}.")
     planes = np.frombuffer(raw, dtype=np.uint8).reshape(CHANNELS, nt, n, n)
     return meta, planes
+
+
+def foam_far_field(lace_cover, opacity_old: float, opacity_fresh: float,
+                   tint_old, fresh_k: float) -> tuple:
+    """The whitecaps' far-field means (raymarch.wgsl SEA_FOAM_FAR_*).
+
+    Freshness f is uniform over the foam a gate keeps; the lace keeps
+    lace_cover[k] at index k = fresh_k + (4 - fresh_k)(1 - f), linearly
+    between the five measured points (as the shader reads it), and opacity and tint run linearly from old (f = 0) to fresh
+    (f = 1, white). Returns (mean of lace x opacity, the cover-weighted mean
+    tint) — Simpson on a fine grid of an integrand that is piecewise cubic
+    between the five points, so exact to rounding.
+    """
+    f = np.linspace(0.0, 1.0, 4 * 256 + 1)
+    k = fresh_k + (4.0 - fresh_k) * (1.0 - f)
+    mask = np.interp(k, np.arange(5.0), np.asarray(lace_cover, np.float64))
+    opacity = opacity_old + (opacity_fresh - opacity_old) * f
+    tint = (np.asarray(tint_old, np.float64)[None, :] * (1.0 - f)[:, None]
+            + f[:, None])
+    w = np.ones_like(f)
+    w[1:-1:2], w[2:-1:2] = 4.0, 2.0
+    w *= (f[1] - f[0]) / 3.0
+    cover = float(np.sum(w * mask * opacity))
+    tint_mean = (w * mask * opacity) @ tint / cover
+    return cover, tuple(float(v) for v in tint_mean)
+
+
+def foam_resolved_cover(theta: float, lace_cover, opacity_old: float,
+                        opacity_fresh: float, fresh_k: float,
+                        edge: float) -> float:
+    """What the resolved whitecaps average to at a gate cut theta, per unit
+    of foam cap: the mean over the foam rank v in (0, 1] of
+    smoothstep(theta - edge, theta + edge, v) times lace x opacity at the
+    freshness clamp((v - theta) / (1 - theta), 0, 1) — the shader's near
+    field, integrated. raymarch.wgsl carries it at five cuts near a closed
+    gate (SEA_FOAM_TAIL_*), where the ramp is all there is.
+    """
+    v = np.linspace(0.0, 1.0, 400001)
+    t = np.clip((v - (theta - edge)) / (2.0 * edge), 0.0, 1.0)
+    cut = t * t * (3.0 - 2.0 * t)
+    f = np.clip((v - theta) / max(1.0 - theta, 1e-9), 0.0, 1.0)
+    k = fresh_k + (4.0 - fresh_k) * (1.0 - f)
+    g = (np.interp(k, np.arange(5.0), np.asarray(lace_cover, np.float64))
+         * (opacity_old + (opacity_fresh - opacity_old) * f))
+    y = cut * g
+    return float(np.sum(0.5 * (y[1:] + y[:-1])) * (v[1] - v[0]))

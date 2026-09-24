@@ -184,10 +184,10 @@ CITY_OFFSET = [8100.0, -44190.0]          # K.CITY_TILE_OFFSET_M
 # (name, scene flags, tile extent, the period the surface frame folds at,
 # whether the flight's folds moved the surface frame off the static offset —
 # which is when --surface-origin must appear and carry it). The sea folds at
-# its swell's period, eight of its tiles; the city at its tile.
+# its swell's period, sixteen of its tiles; the city at its tile.
 SURFACE_CASES = [
-    ("ocean", {}, 102.4, 819.2, False),
-    ("ocean-drifted", {}, 102.4, 819.2, True),
+    ("ocean", {}, 102.4, 1638.4, False),
+    ("ocean-drifted", {}, 102.4, 1638.4, True),
     ("city", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0, 92160.0,
      False),
     ("city-drifted", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0,
@@ -318,7 +318,13 @@ def test_the_surface_round_trips_to_the_uniforms(
     # the scene clock it was held at.
     assert tuple(u[24][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
-    assert u[24][2] == np.float32(SCENE_TIME)
+    # The clock is the sea's alone: an ocean still carries it, a city still
+    # neither writes --time nor packs one.
+    if kind == "ocean":
+        assert u[24][2] == np.float32(SCENE_TIME)
+    else:
+        assert u[24][2] == 0.0
+        assert "--time" not in argv
     assert ("--surface-origin" in argv) == drift
     # Row 0: the camera, through worldToRelative and back.
     assert u[0][:3] == pytest.approx(emitted["position"], rel=1e-9, abs=1e-6)

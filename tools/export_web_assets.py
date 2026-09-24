@@ -53,7 +53,11 @@ SEA_SEED = 20260923
 # percentile, and the clip fraction is printed on export.
 SEA_SLOPE_SCALE = (0.75, 0.40)
 # The surface frame folds at this many tiles: the swell's period.
-SEA_SURFACE_TILES = 8
+SEA_SURFACE_TILES = 16
+# The sea's period in time (raymarch.wgsl SEA_CLOCK_PERIOD_S): a whole number
+# of the tile's loops and of the detail octave's (loop / 3), and the swell's
+# frequencies are rounded to it in the shader.
+SEA_CLOCK_PERIOD_S = 1638.4
 
 
 def _volume_aabb(field: CloudField):
@@ -115,7 +119,7 @@ def _slope_variance_tables(planes: np.ndarray, meta: dict):
 # The shader needs the mean cover each cut leaves, which is a property of the
 # tile: measured here at five thresholds.
 LACE_REACH = 0.25
-LACE_EDGE = 0.05
+LACE_EDGE = 0.10
 LACE_POINTS = 5
 
 
@@ -166,6 +170,7 @@ def export_ocean() -> dict:
         # The swell trains are periodic here, not at the tile; the surface
         # frame folds at this period (raymarch.wgsl SWELL_*).
         "surface_period_m": SEA_SURFACE_TILES * ocean_fif.N * ocean_fif.DX_M,
+        "clock_period_s": SEA_CLOCK_PERIOD_S,
         "slope_scale": list(SEA_SLOPE_SCALE),
         "foam_max_coverage": ocean_fif.FOAM_MAX_COVERAGE,
         "seed": SEA_SEED,
@@ -174,6 +179,9 @@ def export_ocean() -> dict:
     meta["lace_reach"] = LACE_REACH
     meta["lace_edge"] = LACE_EDGE
     meta["lace_cover"] = [round(v, 6) for v in _lace_cover(planes)]
+    # What the detail octave's crest is centred on when it jitters the
+    # whitecaps' edge (raymarch.wgsl SEA_CREST_MEAN).
+    meta["crest_mean"] = round(float(np.mean(planes[3] / 255.0)), 6)
     levels, removed, temporal = _slope_variance_tables(planes, meta)
     meta["mips"] = levels
     meta["slope_variance_removed"] = [round(float(v), 7) for v in removed]
