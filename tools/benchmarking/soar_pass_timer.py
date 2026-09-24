@@ -30,6 +30,16 @@ Clock-lock handicap (2026-09-23): the 5080 locked to 180 MHz graphics and
 allows) runs these frames at ~0.65-0.8x the M1's time, and the memory-heavy
 DYCOMS v1 view at ~0.4x. It is a proxy for the Mac, not a substitute; always
 apply and reset the lock inside one tools/gpulock command with a trap.
+
+One GPU, many sessions (tools/benchmarking/gpu_idle.py has the policy). The
+timer starts only when no other process is on the card and checks again at
+the end: a neighbour there exits non-zero, CONTAMINATED. The desktop drawing
+(gnome-shell, the Claude app — Thomas's own screen) is a WARNING instead,
+and the ratios stand only if the null control holds within NULL_TOLERANCE
+and the timed rounds agree within it too; the summary says which. So give
+every comparison a null: the baseline again under another name
+(--variant base=git:HEAD --variant null=git:HEAD --variant new=tree). Under
+the clock lock with the desktop drawing, absolute ms are pessimistic.
 """
 
 import argparse
@@ -55,6 +65,9 @@ from soar_shader_ab import source_for                       # noqa: E402
 from gpu_idle import check_quiet, clock_mode, require_idle  # noqa: E402
 
 OUTPUT = (2560, 1440)
+# A null control within this (and rounds agreeing within it) is what lets
+# the ratios stand when the desktop drew during the run (gpu_idle.py).
+NULL_TOLERANCE = 0.01
 LIGHT_CACHE_DIVISOR = 2       # web/soar/constants.js
 SHORT_VIEWS = {name.split("_")[0]: v for name, v in VIEWS.items()}
 
@@ -172,7 +185,7 @@ def main():
     args = ap.parse_args()
 
     # One GPU, many sessions: start only on an idle card (gpu_idle.py).
-    require_idle()
+    warnings = require_idle()
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync(required_features=["timestamp-query"])
@@ -194,6 +207,11 @@ def main():
     if len(names) > 1:
         header += "  " + " ".join(f"{n + '/' + names[0]:>12s}" for n in names[1:])
     print(header)
+    # Nulls: a variant whose spec repeats an earlier one's.
+    specs = [spec for _, spec in variants]
+    nulls = [(specs.index(sp), j) for j, sp in enumerate(specs)
+             if specs.index(sp) != j]
+    null_dev, round_dev = 0.0, 0.0
 
     for case in args.cases.split(","):
         level, sun = load_case(case, args.demos)
@@ -247,6 +265,7 @@ def main():
                 surf = [[] for _ in renderers]
                 refine = [[] for _ in renderers]
                 march = [[] for _ in renderers]
+                per_round = [[] for _ in renderers]
                 for rnd in range(args.rounds):
                     for k, r in enumerate(renderers):
                         ds, dr, dm = pass_times_ms(r, state, view, args.frames,
@@ -255,8 +274,16 @@ def main():
                             surf[k].extend(ds)
                             refine[k].extend(dr)
                             march[k].extend(dm)
+                            per_round[k].append(float(np.median(
+                                np.add(np.add(ds, dr), dm))))
                 meds = [float(np.median(np.add(np.add(a, b), c)))
                         for a, b, c in zip(surf, refine, march)]
+                for i, j in nulls:
+                    null_dev = max(null_dev, abs(meds[j] / meds[i] - 1.0))
+                for rounds_k in per_round:
+                    if len(rounds_k) > 1:
+                        round_dev = max(round_dev,
+                                        max(rounds_k) / min(rounds_k) - 1.0)
                 line = f"{case:10s} {tier_name:8s} {view_name:4s} " + " ".join(
                     f"{m:9.3f}" for m in meds)
                 if len(meds) > 1:
@@ -270,7 +297,25 @@ def main():
                 print(line, flush=True)
         for r in renderers:
             r._vol_tex.destroy()
-    check_quiet()
+    warnings += check_quiet()
+    null_note = (f"null control within {100 * null_dev:.2f}%" if nulls
+                 else "no null control")
+    round_note = (f"timed rounds within {100 * round_dev:.2f}%"
+                  if args.rounds > 2 else "one timed round")
+    print(f"# {null_note}; {round_note}")
+    if warnings:
+        print("# WARNING, the desktop drew during the run:\n#   "
+              + "\n#   ".join(sorted(set(warnings))))
+        if (nulls and null_dev <= NULL_TOLERANCE and args.rounds > 2
+                and round_dev <= NULL_TOLERANCE):
+            print(f"# The null and the rounds hold within "
+                  f"{100 * NULL_TOLERANCE:.0f}%: the ratios stand; absolute "
+                  f"ms are pessimistic ({clock_mode()}).")
+        else:
+            sys.exit(f"# Without a null and rounds within "
+                     f"{100 * NULL_TOLERANCE:.0f}% the desktop's share cannot "
+                     f"be ruled out: discard these numbers (give the run a "
+                     f"null variant and --rounds 3 or more).")
 
 
 if __name__ == "__main__":
