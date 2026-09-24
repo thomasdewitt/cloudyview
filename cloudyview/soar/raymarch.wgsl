@@ -15970,8 +15970,8 @@ const DF_PP_FOLD_TAU: f32 = 0.044;
 // Past this footprint a clump is one ellipsoid of pad medium, of extinction
 // DF_PP_ENV_SIGMA per pad half-length (a clump's gaps let about a third of
 // the rays through its middle, as the drawn pads do).
-const DF_PP_FAR_FP0: f32 = 0.020;
-const DF_PP_FAR_FP1: f32 = 0.035;
+const DF_PP_FAR_FP0: f32 = 0.012;
+const DF_PP_FAR_FP1: f32 = 0.020;
 const DF_PP_ENV_SIGMA: f32 = 0.20;
 const DF_PP_SKIN: vec3<f32> = vec3<f32>(0.105, 0.150, 0.080);
 const DF_PP_GLOCHID: vec3<f32> = vec3<f32>(0.120, 0.080, 0.050);
@@ -16464,8 +16464,8 @@ const DF_CREO_LEAVES: i32 = 10;
 const DF_CREO_LEAF_HL: f32 = 0.0075;   // leaflet half-length (m)
 const DF_CREO_LEAF_HW: f32 = 0.0034;   // leaflet half-width (m)
 const DF_CREO_MAX_CLUMPS: i32 = 6;     // per twig per ray
-const DF_CREO_EXACT_FP0: f32 = 0.012;
-const DF_CREO_EXACT_FP1: f32 = 0.022;
+const DF_CREO_EXACT_FP0: f32 = 0.007;
+const DF_CREO_EXACT_FP1: f32 = 0.012;
 // Leaf-area optical depth per metre inside a far lobe. Measured, not
 // derived: the value at which the lobes average to what the exact leaves
 // average to (tools/desert_flora_harness.py, view creo_5m, each form forced
@@ -16916,8 +16916,8 @@ const DF_MAT_OCO_LEAF: i32 = 12;
 const DF_MAT_OCO_FLOWER: i32 = 13;
 const DF_MAT_OCO_CANOPY: i32 = 18;   // a leafy cane's capsule medium
 const DF_MAT_OCO_FAR: i32 = 19;      // the fan as a cone of medium
-const DF_OCO_FAR_FP0: f32 = 0.025;
-const DF_OCO_FAR_FP1: f32 = 0.035;
+const DF_OCO_FAR_FP0: f32 = 0.015;
+const DF_OCO_FAR_FP1: f32 = 0.025;
 const DF_OCO_FAR_W: f32 = 0.020;     // mean cane width over its length
 
 // Horizontal reach of an ocotillo from its foot.
@@ -17235,8 +17235,8 @@ const DF_PV_CLUMPS: i32 = 7;
 const DF_PV_CLUMP_SIGMA: f32 = 3.0;   // twig-and-leaflet medium in a clump
 // The whole crown's mean: the clumps fill about 0.6 of its envelope.
 const DF_PV_CROWN_SIGMA: f32 = 1.8;
-const DF_PV_FAR_FP0: f32 = 0.025;
-const DF_PV_FAR_FP1: f32 = 0.035;
+const DF_PV_FAR_FP0: f32 = 0.015;
+const DF_PV_FAR_FP1: f32 = 0.025;
 const DF_PV_BARK: vec3<f32> = vec3<f32>(0.150, 0.190, 0.075);
 const DF_PV_LEAF: vec3<f32> = vec3<f32>(0.095, 0.140, 0.040);
 const DF_MAT_PV_BARK: i32 = 20;
@@ -17459,7 +17459,7 @@ const DF_ROCK: vec3<f32> = vec3<f32>(0.330, 0.285, 0.245);
 const DF_ROCK_VARNISH: vec3<f32> = vec3<f32>(0.090, 0.058, 0.040);
 const DF_ROCK_RIND: vec3<f32> = vec3<f32>(0.380, 0.240, 0.140);
 const DF_MAT_ROCK: i32 = 14;
-const DF_ROCK_FAR_FP: f32 = 0.03;
+const DF_ROCK_FAR_FP: f32 = 0.02;
 
 fn df_stone_param(it: DfItem, i: i32) -> vec4<f32> {
     return select(select(select(it.d, it.c, i == 2), it.b, i == 1),
@@ -18321,7 +18321,7 @@ fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 // its near form to its far one by this footprint), which
 // desert_surface_refine also uses to leave early — a camera high over the
 // desert has nothing to walk here.
-const DESERT_FLORA_REFINE_FP_M: f32 = 0.035;
+const DESERT_FLORA_REFINE_FP_M: f32 = 0.025;
 
 fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                        t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
@@ -18486,7 +18486,7 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
 // never compiles the walk. The hand-off is deterministic in the true
 // footprint: a shadow is light, not geometry, so an expected-value blend is
 // exact.
-const DF_SHADOW_EXACT_FP0: f32 = 0.02;
+const DF_SHADOW_EXACT_FP0: f32 = 0.015;
 const DF_SHADOW_EXACT_FP1: f32 = DESERT_FLORA_REFINE_FP_M;
 
 fn df_far_shadow_weight(fp: f32) -> f32 {

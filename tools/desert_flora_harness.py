@@ -316,6 +316,11 @@ def hero_views(g, h, sun_az, sun_el):
                        sun_az, 7.0),
         "backlit_close": aim(g, x, y, r + 0.9, 2.2, 2.4, 50.0, back + 12.0,
                              sun_az, 9.0),
+        # Flight: level-ish cruise over the bajada, looking ahead and down.
+        "cruise30": (x - 60.0, y - 60.0, g(x - 60.0, y - 60.0) + 30.0, 45.0,
+                     -12.0, 65.0, sun_az, sun_el),
+        "cruise100": (x - 200.0, y - 200.0, g(x - 200.0, y - 200.0) + 100.0,
+                      45.0, -15.0, 65.0, sun_az, sun_el),
         # Level with the arms, the low sun just off the trunk's edge.
         "backlit_low": aim(g, x, y, 7.0, 3.0, 4.2, 55.0, back + 4.0,
                            sun_az, sun_el),
