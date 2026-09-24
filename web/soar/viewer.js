@@ -2309,6 +2309,12 @@ export class Viewer {
   removeNest() {
     if (this.scene.removeNest()) {
       this.renderer.refreshBindGroup();
+      // The baked sun-tau cache marched its shadows through the nest (the
+      // light march integrates it at its own resolution), and a bake still
+      // in flight would finish its remaining slices without it. Same
+      // recovery as setSun: live march while the fresh bake lands.
+      this.renderer.invalidateLightCache();
+      this.renderer.startLightBake(this._viewKwargs());
       this.renderer.resetAccumulation();
       this.frameIndex = 0;
       this.ui.say("Nested field removed.");

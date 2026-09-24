@@ -1640,8 +1640,16 @@ export class Renderer {
    * reads it.
    */
   async _ensureSurfaceTarget(targets) {
-    if (!this._hasSurfacePass() || targets.surface) return;
+    if (!this._hasSurfacePass()) return;
     const refine = this._hasRefineStage();
+    if (targets.surface && (!refine || targets.surface.plainTex)) return;
+    if (targets.surface) {
+      // Made for a surface with no second stage; this one has one, so the
+      // set needs the first stage's target too. Retired once the GPU is done
+      // with any frame that still reads it.
+      retireAfterSubmittedWork(this.device, targets.surface.tex);
+      targets.surface = null;
+    }
     const label = `soar-surface-${targets.w}x${targets.h}`;
     targets.surface = await guardAllocation(
       this.device, `${targets.w}x${targets.h} surface target`,
