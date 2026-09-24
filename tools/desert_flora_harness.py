@@ -47,6 +47,7 @@ DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
 # them.
 SCAN_PRELUDE = """
 const DESERT_FLORA_SLAB_H: f32 = 13.0;
+const DESERT_LITE: bool = false;
 struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>,
                      ocean: vec4<f32>, sun_dir: vec4<f32>, };
 var<private> u: ScanUniforms;
@@ -67,6 +68,12 @@ fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
 
 struct DesertHit { hit: bool, t: f32, pos: vec3<f32>, normal: vec3<f32>,
                    kind: i32, mat: vec4<f32>, };
+fn desert_miss() -> DesertHit {
+    var h: DesertHit;
+    h.hit = false;
+    h.t = 1e30;
+    return h;
+}
 struct DesertLight { sun_dir: vec3<f32>, sun: vec3<f32>, sky: vec3<f32>,
                      ground: vec3<f32>, t_sun: f32, sky_open: f32, };
 fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight) -> vec3<f32> {
@@ -348,8 +355,12 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
                   if targets["plain"] is not None else None)
     stages = []
     if surface_view is not None:
-        stages.append((surface_pipeline, None, plain_view or surface_view))
-        if plain_view is not None:
+        # Under DESERT_LITE there is no refine stage and the plain pass
+        # writes the final surface itself.
+        if refine_pipeline is None:
+            stages.append((surface_pipeline, None, surface_view))
+        else:
+            stages.append((surface_pipeline, None, plain_view))
             stages.append((refine_pipeline, targets["refine_group"],
                            surface_view))
     for i in range(frames):
@@ -409,8 +420,9 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
 
 def main(argv=None) -> int:
     from cloudyview.soar_host import (
-        APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES, SceneState,
-        SoarRenderer, ViewState, desert_relief_m, surface_cell_m)
+        APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES,
+        DESERT_LITE_TIERS, SceneState, SoarRenderer, ViewState,
+        desert_relief_m, surface_cell_m)
     from cloudyview.witness import OCEAN_REFLECTANCE, QUALITY_PRESETS
     from PIL import Image
 
@@ -567,6 +579,9 @@ def main(argv=None) -> int:
             view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * args.lod,
             light_cache=bool(preset["light_cache"]),
             sky_probe=bool(preset["sky_probe"]),
+            # The tier decides the desert's variant, as in the app.
+            desert_lite=(args.surface == "desert"
+                         and args.quality in DESERT_LITE_TIERS),
         )
         if preset["light_cache"] and baked != (s_az, s_el):
             r.bake_light_cache(state, view, divisor=2)

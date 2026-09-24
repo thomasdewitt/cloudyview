@@ -19244,6 +19244,9 @@ fn df_true_pixel_angle() -> f32 {
 const DF_EXPLICIT_MAX_T: f32 = 0.7 * f32(DF_MAX_BIG_CELLS) * DF_BIG_CELL;
 
 fn df_far_cut(dir: vec3<f32>) -> f32 {
+    if (DESERT_LITE) {
+        return 0.0;
+    }
     let d = df_ray_dither(dir);
     return min(mix(DF_FAR_FP0, DF_FAR_FP1, d.x) / df_true_pixel_angle(),
                DF_EXPLICIT_MAX_T);
@@ -19251,6 +19254,9 @@ fn df_far_cut(dir: vec3<f32>) -> f32 {
 
 fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                       t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
+    if (DESERT_LITE) {
+        return desert_miss();
+    }
     let dither = df_ray_dither(dir);
     let t1 = min(t1_in, df_far_cut(dir));
     return df_walk_plain(o, dir, inv_dir, t0, t1, pixel_angle, dither);
@@ -19266,6 +19272,9 @@ const DESERT_FLORA_REFINE_FP_M: f32 = 0.025;
 
 fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                        t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
+    if (DESERT_LITE) {
+        return desert_miss();
+    }
     let dither = df_ray_dither(dir);
     let t1 = min(t1_in, DESERT_FLORA_REFINE_FP_M / max(pixel_angle, 1e-9));
     return df_walk_refine(o, dir, inv_dir, t0, t1, pixel_angle, dither);
@@ -19438,19 +19447,45 @@ fn df_far_shadow_weight(fp: f32) -> f32 {
 // rays while the casters are drawn, the statistical medium (with its hot
 // spot, for which the view direction is p's from the camera) once they are
 // not, mixed once across the hand-off.
+// On the ground: out to where a crown is about a pixel each plant's shadow
+// is its decal (df_decal_shadow), past that the field's mean; the refine
+// stage's exact rays in front of both.
 fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
                        refine: bool) -> f32 {
     let to_p = p - desert_camera_origin();
     let dist = length(to_p);
-    let stat = df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
+    let fpt = df_true_pixel_angle() * dist;
+    var plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
+    let w_st = smoothstep(DF_DECAL_FP0, DF_DECAL_FP1, fpt);
+    if (w_st < 1.0) {
+        plain = mix(df_decal_shadow(p, sun_dir), plain, w_st);
+    }
+    return df_shadow_refined(p, sun_dir, fp, fpt, refine, plain);
+}
+
+// On a plant: the field's mean. A decal cannot tell a plant's own crown
+// from a neighbour's, and would shade every plant by itself.
+fn df_plant_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
+                   refine: bool) -> f32 {
+    let to_p = p - desert_camera_origin();
+    let dist = length(to_p);
+    let plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
+    return df_shadow_refined(p, sun_dir, fp, df_true_pixel_angle() * dist,
+                             refine, plain);
+}
+
+// The refine stage's exact rays near, handing off to the plain pass's
+// shadow `plain` at the band's edge. `refine` is a literal at every call.
+fn df_shadow_refined(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32, fpt: f32,
+                     refine: bool, plain: f32) -> f32 {
     if (!refine) {
-        return 1.0 - stat;
+        return plain;
     }
-    let w = df_far_shadow_weight(df_true_pixel_angle() * dist);
+    let w = df_far_shadow_weight(fpt);
     if (w >= 1.0) {
-        return 1.0 - stat;
+        return plain;
     }
-    return (1.0 - w) * df_shadow_exact(p, sun_dir, fp) + w * (1.0 - stat);
+    return (1.0 - w) * df_shadow_exact(p, sun_dir, fp) + w * plain;
 }
 
 // A needle is thin translucent keratin: most of the light that crosses it
@@ -19532,7 +19567,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
     }
     // A far-form plant (the plain pass) takes the statistical shadow of
     // its neighbours; a near one (the refinement pass) the exact rays.
-    let sun_vis = desert_flora_shadow(h.pos + n * lift, L.sun_dir, fp,
+    let sun_vis = df_plant_shadow(h.pos + n * lift, L.sun_dir, fp,
                                       refine);
     var Ls = L;
     Ls.sun = L.sun * sun_vis;
@@ -19824,8 +19859,34 @@ fn df_far_stretch(za_in: f32, zb_in: f32, hb: DfHabitat, len: f32, s: f32,
     return r;
 }
 
+// The plants a ground hit past the explicit walk sees: its decals while a
+// crown is still a few pixels, the statistical field past that.
 fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                     pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
+    var dc: DesertCover;
+    dc.cover = 0.0;
+    dc.sun_k = vec3<f32>(0.0);
+    dc.sky_k = vec3<f32>(0.0);
+    dc.gnd_k = vec3<f32>(0.0);
+    if (t_hit <= df_far_cut(dir)) {
+        return dc;
+    }
+    let fp = pixel_angle * t_hit;
+    let w_st = smoothstep(DF_DECAL_FP0, DF_DECAL_FP1, fp);
+    if (w_st < 1.0) {
+        dc = df_decal_cover(o + dir * t_hit, dir, sun);
+    }
+    if (w_st <= 0.0) {
+        return dc;
+    }
+    return df_cover_over(df_cover_scale(dc, 1.0 - w_st),
+                         df_cover_scale(df_far_stat(o, dir, t_hit, pixel_angle,
+                                                    sun), w_st));
+}
+
+// The statistical field along the part of the ray past the explicit cut.
+fn df_far_stat(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
+               pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
     var c: DesertCover;
     c.cover = 0.0;
     c.sun_k = vec3<f32>(0.0);
@@ -19981,6 +20042,193 @@ fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>) -> f32 {
             * df_far_crown_shadow(DF_FAR_ROCK_A, 0.0, DF_FAR_ROCK_B, ts)
             * df_far_hot(sep, 0.4, 2.0 * DF_FAR_ROCK_A);
     return 1.0 - exp(-tau);
+}
+
+// --- Ground decals ----------------------------------------------------------
+//
+// Between the explicit plants and the statistical field — and under
+// DESERT_LITE in place of the explicit plants — a shrub or tree is a disc
+// on the ground where the view ray crosses its crown's height (the crown's
+// parallax), and its shadow another where the sun ray from the ground
+// point does. The discs come from the explicit placement itself (the same
+// cells, hashes and habitat: df_small_item, df_big_item), and a crown lies
+// inside its own cell, so a point reads one small and one big cell for the
+// crowns and one of each for the shadows. A disc's cover is a crown's
+// vertical depth profile, sqrt(1 - r^2), scaled so its mean over the disc
+// is the crown's opacity — the statistical field's kappa, which is what
+// lets the one fade into the other. Saguaros and ocotillos are too thin for
+// a disc; the field carries them.
+const DF_DECAL_FP0: f32 = 0.6;       // decals give way to the field over
+const DF_DECAL_FP1: f32 = 1.2;       // this footprint (a creosote ~ a pixel)
+const DF_DECAL_ZC_SMALL: f32 = 0.7;  // the crown heights that pick the cell
+const DF_DECAL_ZC_BIG: f32 = 3.0;
+
+struct DfDisc {
+    cover: f32,
+    kind: i32,    // the item's kind; 0 where no disc covers the point
+    burs: bool,
+}
+
+// The disc covering ground point p when each crown is looked for at
+// p + off * (its height): off = view dir.xy / dir.z for the crowns, the
+// sun's sun.xy / sun.z for the shadows. The explicit placement's rules
+// (df_small_foot and df_small_item, df_big_foot and df_big_item) in the
+// order that is cheapest here: the shape from the hashes, the disc test,
+// and only for a point inside a disc the habitat's texture reads. Nothing
+// reads the ground's height: a disc lies on the ground wherever it is.
+fn df_disc_at(p: vec2<f32>, off: vec2<f32>, big: bool) -> DfDisc {
+    var d: DfDisc;
+    d.cover = 0.0;
+    d.kind = 0;
+    d.burs = false;
+    let cell = select(DF_SMALL_CELL, DF_BIG_CELL, big);
+    let q = p + off * select(DF_DECAL_ZC_SMALL, DF_DECAL_ZC_BIG, big);
+    let ci = vec2<i32>(floor(q / cell));
+    let org = vec2<f32>(ci) * cell;
+    var foot: DfFoot;
+    var seed: vec2<u32>;
+    if (big) {
+        foot = df_big_foot(ci);
+        seed = df_cell_seed(ci, DF_BIG_N, 0x5a17u);
+    } else {
+        foot = df_small_foot(ci);
+        seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
+    }
+    if (foot.kind == 0 || foot.kind == DF_KIND_SAGUARO
+        || foot.kind == DF_KIND_OCOTILLO) {
+        return d;
+    }
+    let r0 = df_rand4(seed);
+    let rs = df_rand4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
+    // (radius, crown-centre height, opacity): each species' far envelope
+    // seen from above.
+    var sh = vec3<f32>(0.0);
+    var kind = foot.kind;
+    let burs = !big && r0.x >= DF_P_CREOSOTE;
+    if (foot.kind == DF_KIND_CREOSOTE) {
+        let hw = df_creosote_dims(rs, burs);
+        sh = vec3<f32>(hw.y + 0.08, 0.62 * hw.x,
+                       select(DF_FAR_CREO_KAPPA, DF_FAR_BURS_KAPPA, burs));
+    } else if (foot.kind == DF_KIND_PALOVERDE) {
+        let crown = df_paloverde_crown(rs);
+        sh = vec3<f32>(crown, 0.68 * (3.0 + 3.0 * rs.x), DF_FAR_PV_KAPPA);
+    } else if (foot.kind == DF_KIND_PRICKLY) {
+        let a = df_prickly_pad(rs);
+        sh = vec3<f32>(5.0 * a, 2.6 * a, DF_FAR_PEAR_KAPPA);
+    } else if (foot.kind == DF_KIND_BARREL) {
+        let hr = df_barrel_dims(rs);
+        sh = vec3<f32>(hr.y, 0.5 * hr.x, 1.0);
+    } else {
+        // A heap or a stone: its extent, half filled (the field's rock term).
+        var it: DfItem;
+        it.seed = seed;
+        it = df_boulder_item(it, rs, big);
+        sh = vec3<f32>(it.a.y, 0.5 * it.a.z, 0.5);
+    }
+    let fw = org + foot.xy;
+    // A bank's young palo verde grows in the creosote's room.
+    let tree_r = foot.reach - 0.3;
+    let qe = p + off * sh.y - fw;
+    let r_test = select(sh.x, max(sh.x, tree_r),
+                        foot.kind == DF_KIND_CREOSOTE && !burs);
+    if (dot(qe, qe) >= r_test * r_test) {
+        return d;
+    }
+    if (!big) {
+        // Clear of the big plant standing here (df_small_item).
+        let bci = vec2<i32>(floor(fw / DF_BIG_CELL));
+        let bf = df_big_foot(bci);
+        if (bf.kind != 0 && length(fw - vec2<f32>(bci) * DF_BIG_CELL - bf.xy)
+            < bf.clear + foot.reach) {
+            return d;
+        }
+    }
+    let hb = df_habitat(fw);
+    if (r0.w >= df_keep(foot.kind, hb)) {
+        return d;
+    }
+    if (foot.kind == DF_KIND_CREOSOTE && !burs
+        && r0.z < DF_BANK_TREE * hb.bank) {
+        kind = DF_KIND_PALOVERDE;
+        sh = vec3<f32>(tree_r, 0.68 * min(1.4 + 1.2 * tree_r, 3.0),
+                       DF_FAR_PV_KAPPA);
+    }
+    let qk = p + off * sh.y - fw;
+    let r2 = dot(qk, qk) / (sh.x * sh.x);
+    d.cover = min(1.5 * sh.z * sqrt(max(1.0 - r2, 0.0)), 1.0);
+    d.kind = kind;
+    d.burs = burs && kind == DF_KIND_CREOSOTE;
+    return d;
+}
+
+// A disc's plants as the field shades them (desert_flora_far's factors;
+// `sph` the Lambert sphere's phase term, `cg` the phase angle's cosine).
+fn df_disc_cover(d: DfDisc, sph: f32, cg: f32) -> DesertCover {
+    var c: DesertCover;
+    c.cover = d.cover;
+    var alb = DF_FAR_CREO_ALB;
+    var f = vec3<f32>(0.75 * sph, 0.45, 0.40);
+    if (d.burs) {
+        alb = DF_FAR_BURS_ALB;
+        f = vec3<f32>(0.75 * sph, 0.50, 0.40);
+    } else if (d.kind == DF_KIND_PALOVERDE) {
+        alb = DF_FAR_PV_ALB;
+        f = vec3<f32>(0.4 * (0.38 + 0.15 * cg), 0.40, 0.50);
+    } else if (d.kind == DF_KIND_PRICKLY) {
+        alb = DF_FAR_PEAR_ALB;
+        f = vec3<f32>(0.75 * sph, 0.50, 0.40);
+    } else if (d.kind == DF_KIND_BARREL) {
+        alb = DF_FAR_SAG_ALB;
+        f = vec3<f32>(0.75 * sph, 0.40, 0.50);
+    } else if (d.kind == DF_KIND_BOULDER) {
+        alb = DF_FAR_ROCK_ALB;
+        f = vec3<f32>(sph, 0.70, 0.30);
+    }
+    c.sun_k = alb * f.x;
+    c.sky_k = alb * f.y;
+    c.gnd_k = alb * f.z;
+    return c;
+}
+
+// `a` in front of `b`.
+fn df_cover_over(a: DesertCover, b: DesertCover) -> DesertCover {
+    var c: DesertCover;
+    let wb = (1.0 - a.cover) * b.cover;
+    c.cover = a.cover + wb;
+    let inv = 1.0 / max(c.cover, 1e-6);
+    c.sun_k = (a.sun_k * a.cover + b.sun_k * wb) * inv;
+    c.sky_k = (a.sky_k * a.cover + b.sky_k * wb) * inv;
+    c.gnd_k = (a.gnd_k * a.cover + b.gnd_k * wb) * inv;
+    return c;
+}
+
+fn df_cover_scale(a: DesertCover, w: f32) -> DesertCover {
+    var c = a;
+    c.cover = a.cover * w;
+    return c;
+}
+
+// The crowns over ground point p seen along view direction `dir`: a tree's
+// in front of a shrub's.
+fn df_decal_cover(p: vec3<f32>, dir: vec3<f32>,
+                  sun: vec3<f32>) -> DesertCover {
+    let off = dir.xy / min(dir.z, -0.1);
+    let cg = dot(-dir, sun);
+    let g = acos(clamp(cg, -1.0, 1.0));
+    let sph = max((2.0 / 3.0) * (sin(g) + (DF_PI - g) * cos(g)) / DF_PI, 0.0);
+    return df_cover_over(df_disc_cover(df_disc_at(p.xy, off, true), sph, cg),
+                         df_disc_cover(df_disc_at(p.xy, off, false), sph,
+                                       cg));
+}
+
+// The crowns' transmittance between ground point p and the sun.
+fn df_decal_shadow(p: vec3<f32>, sun: vec3<f32>) -> f32 {
+    if (sun.z <= 1e-3) {
+        return 1.0;
+    }
+    let off = sun.xy / max(sun.z, 0.1);
+    return (1.0 - df_disc_at(p.xy, off, true).cover)
+        * (1.0 - df_disc_at(p.xy, off, false).cover);
 }
 
 // Mean radiance of the far-field plants a pixel sees under `L`.
