@@ -37,6 +37,14 @@ to be exactly neutral and lands there instead of at zero, the way to settle it
 is to make the two runs the SAME compilation and vary the data instead.
 
 Anything larger than that is a real difference and should be explained.
+
+What this cannot compare: a change that moves the HOSTS as well as the
+shader — a new binding, a new pass, a changed bind-group layout. Both
+revisions run under this tree's one Python host, so the old shader meets the
+new layout and fails validation (the surface pre-pass, 2026-09-23, broke it
+for city and desert). For those, compare whole browser builds instead:
+tools/pinned_still.mjs renders pinned stills of each tree in Chrome and
+hashes them byte for byte.
 """
 
 import argparse
