@@ -3849,10 +3849,10 @@ const CITY_REL_SLOT: f32 = 0.08;        // the dark between grate bars
 // thing on a street, which is exactly what lets the reflections read.
 const CITY_WET_ROAD: f32 = 0.90;
 const CITY_WET_WALK: f32 = 0.85;
-const CITY_WET_DARKEN: f32 = 0.93;
+const CITY_WET_DARKEN: f32 = 0.97;
 // Of a wet surface, the share whose film is smooth enough to be glossy: damp
 // asphalt is a patchwork of film and dull aggregate, not a sheet of water.
-const CITY_FILM_GLOSS: f32 = 0.6;
+const CITY_FILM_GLOSS: f32 = 0.4;
 const CITY_PUDDLE_DARKEN: f32 = 0.85;
 // Puddle mask: two octaves of value noise plus a bias per zone (gutters
 // collect, the road crown sheds), thresholded. Past CITY_PUDDLE_LOD the mask
@@ -3881,7 +3881,7 @@ const CITY_GRATE_HL: f32 = 0.45;      // half-length along the kerb
 // the long vertical streak that IS the wet-street look.
 const CITY_REFL_F0: f32 = 0.02;
 const CITY_REFL_ALPHA_PUDDLE: f32 = 0.02;
-const CITY_REFL_ALPHA_DAMP: f32 = 0.13;
+const CITY_REFL_ALPHA_DAMP: f32 = 0.08;
 // How far a reflected ray looks for the city. Far enough to cross any
 // canyon and reach the towers beyond it; a rising ray that has found nothing
 // by then sees sky.
@@ -3905,8 +3905,8 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0833, 0.2251);
-const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0100, 0.1047);
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0695, 0.2251);
+const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0084, 0.1047);
 
 // STUB for city-facades' storefront glow, same arrangement: the mean emitted
 // radiance of the cell's storefront band, zero where there is no store.
