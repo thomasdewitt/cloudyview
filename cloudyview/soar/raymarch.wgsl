@@ -15285,8 +15285,8 @@ const DF_SAG_CENTRALS: i32 = 4;
 const DF_SAG_EXACT_FP0: f32 = 0.005;
 const DF_SAG_EXACT_FP1: f32 = 0.009;
 // Columns become capsule chains past this footprint (ribs sub-pixel).
-const DF_CACT_CAPS_FP0: f32 = 0.020;
-const DF_CACT_CAPS_FP1: f32 = 0.035;
+const DF_CACT_CAPS_FP0: f32 = 0.010;
+const DF_CACT_CAPS_FP1: f32 = 0.018;
 // Projected needle area per unit volume at the skin, falling linearly to
 // zero at the shell's edge. Measured: the value at which the shell medium
 // averages to what the exact needles average to over a trunk (harness view
@@ -15645,10 +15645,28 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         let mu = max(abs(dot(ch.n, dir)), 0.08);
         let cov = 1.0 - exp(-select(DF_SAG_FOLD_TAU, DF_BAR_FOLD_TAU, barrel)
                             / mu);
-        // x = 0.5: the rib average of the skin's crest-to-groove shading,
-        // which is linear in x (desert_flora_shade), so its mean over a rib
-        // is its value at x = 1/2.
-        res.mat = vec4<f32>(f32(DF_MAT_SKIN_FUZZ) + tint, 0.5,
+        // The pleats, drawn on the capsule while a rib is still a few
+        // pixels wide: the angle around the axis gives the rib phase, and
+        // the pleated profile r(theta) = R (1 - D (1 - x)^2) its slope, so
+        // the normal tilts across each rib as the traced pleats' does and
+        // the groove shading follows x. Faded to the rib average (x = 1/2,
+        // the capsule's own normal) as a rib narrows to a pixel — the
+        // skin's shading is linear in x, so that average is exact.
+        let fp_h = pixel_angle * ch.t;
+        let rib_w = DF_TAU * r_c / c.ribs;
+        let bump = 1.0 - smoothstep(0.35, 1.0, fp_h / rib_w);
+        let pp = df_jpath_at(c, min(ch.s, df_col_len(c)));
+        let n3 = vec3<f32>(c.u * (-pp.tng.y), pp.tng.x);
+        let w3 = vec3<f32>(-c.u.y, c.u.x, 0.0);
+        let theta = atan2(dot(ch.n, w3), dot(ch.n, n3));
+        let ph = fract(theta * c.ribs / DF_TAU + c.phase);
+        let x = abs(2.0 * ph - 1.0);
+        let et = -sin(theta) * n3 + cos(theta) * w3;
+        // (1/r) dr/dtheta over the rib, from the profile's slope in x.
+        let slope = 2.0 * c.depth * (1.0 - x) * sign(2.0 * ph - 1.0)
+            * 2.0 * c.ribs / DF_TAU;
+        res.normal = normalize(ch.n - bump * slope * et);
+        res.mat = vec4<f32>(f32(DF_MAT_SKIN_FUZZ) + tint, mix(0.5, x, bump),
                             round(pad_mean * 255.0) + 0.99 * cov, age);
         return res;
     }
