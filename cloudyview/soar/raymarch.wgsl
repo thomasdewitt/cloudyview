@@ -14022,14 +14022,17 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
     }
     s.albedo = col * mix(0.8, 1.2, fract(r.x * 97.3));
     s.facet = h1.x ^ h0.y;
-    // The broken faces: mostly steep, anywhere round the stone, taking off
-    // between a quarter and two thirds of its radius. This is what gives a
-    // clast its flat faces and its angular outline.
+    // The broken faces: anywhere round the stone, taking off between a
+    // quarter and two thirds of its radius. This is what gives a clast its
+    // flat faces and its angular outline. Sideways or down, never toward the
+    // sky: a clast settles on its flat faces, and an exposed face tilted up
+    // sat in shadow under a lit rounded rim, which reads as a hollow bowl
+    // whatever its normals say.
     let h2 = pcg2d(h1 ^ vec2<u32>(0x2545f491u, 0x9e3779b9u));
     let az0 = 6.283185 * city_u01(h2.x);
     let az1 = az0 + 2.0 + 2.2 * city_u01(h2.y);
-    let el0 = mix(-0.2, 0.7, fract(r.w * 41.7));
-    let el1 = mix(-0.2, 0.7, fract(r.z * 23.9));
+    let el0 = mix(-0.7, 0.1, fract(r.w * 41.7));
+    let el1 = mix(-0.7, 0.1, fract(r.z * 23.9));
     s.cut0 = vec4<f32>(normalize(vec3<f32>(cos(az0), sin(az0), el0)),
                        mix(0.35, 0.75, fract(r.y * 53.1)));
     s.cut1 = vec4<f32>(normalize(vec3<f32>(cos(az1), sin(az1), el1)),
