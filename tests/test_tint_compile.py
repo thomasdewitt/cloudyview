@@ -16,13 +16,9 @@ It needs a Chrome with --remote-debugging-port (CLOUDYVIEW_CDP_PORT, default
 Without one it skips, and says why — it never passes vacuously.
 """
 
-import functools
-import http.server
 import os
 import shutil
-import socket
 import subprocess
-import threading
 import urllib.request
 from pathlib import Path
 
@@ -41,30 +37,18 @@ def _cdp_reachable() -> bool:
         return False
 
 
-@pytest.fixture(scope="module")
-def web_server():
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler,
-                                directory=str(REPO / "web"))
-    handler.log_message = lambda *a, **k: None
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{port}"
-    server.shutdown()
-
-
-def test_every_specialization_compiles_under_tint(web_server):
+def test_every_specialization_compiles_under_tint():
+    """The tool serves this checkout's web/ itself, on a fresh port, and
+    checks the served shader is this tree's before compiling anything."""
     if shutil.which("node") is None:
         pytest.skip("needs node")
     if not _cdp_reachable():
         pytest.skip(f"no Chrome DevTools endpoint on port {CDP_PORT} "
                     "(see this module's docstring for the Chrome command)")
     proc = subprocess.run(
-        ["node", str(REPO / "tools" / "tint_check.mjs"), web_server,
-         CDP_PORT], capture_output=True, text=True, timeout=600)
+        ["node", str(REPO / "tools" / "tint_check.mjs"),
+         "--web", str(REPO / "web"), "--cdp", CDP_PORT],
+        capture_output=True, text=True, timeout=600)
     if proc.returncode == 2:
         pytest.skip("tint_check could not run: "
                     + (proc.stderr or proc.stdout).strip()[-400:])

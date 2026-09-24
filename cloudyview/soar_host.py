@@ -28,6 +28,7 @@ Conventions inherited from the shader, all easy to get subtly wrong:
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,7 +65,7 @@ SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
 # by tests/test_city_lots.py); a tile of another schema is refused, because
 # the city's v1 tile decoded as v2 raises a different city without an error.
 SURFACE_TILE_SCHEMAS = {
-    "ocean": "cloudyview.web.ocean.v1",
+    "ocean": "cloudyview.web.ocean.v2",
     "desert": "cloudyview.web.desert.v1",
     "city": "cloudyview.web.city.v2",
 }
@@ -88,6 +89,41 @@ def surface_cell_m(surface: str, meta: dict) -> float:
     if key not in meta:
         raise KeyError(f"the {surface} tile's meta.json has no {key!r}.")
     return float(meta[key])
+
+
+def surface_period_m(surface: str, meta: dict) -> float:
+    """The period the surface frame folds at (SceneState.surface_period_m).
+
+    The city and the desert are pure functions of their tile, so they fold at
+    the tile. The ocean's swell trains are periodic over several tiles
+    (raymarch.wgsl SWELL_PERIOD_M), and its meta.json says how many metres.
+    """
+    key = "surface_period_m" if check_surface(surface) == "ocean" \
+        else "tile_extent_m"
+    if key not in meta:
+        raise KeyError(f"the {surface} tile's meta.json has no {key!r}.")
+    return float(meta[key])
+
+
+@functools.lru_cache(maxsize=1)
+def _sea_levels(tile_dir: str):
+    """(meta, per-level float16 bytes [t][y][x][rgba]) for the moving sea.
+
+    Decoded and mip-filtered once per process (cloudyview/sea_tile.py) — the
+    renderers a test session builds all upload the same ~90 MB.
+    """
+    from . import sea_tile
+    meta, planes = sea_tile.read(Path(tile_dir), SURFACE_TILE_SCHEMAS["ocean"])
+    nt = int(meta["frames"])
+    chains = [sea_tile.mip_chain(sea_tile.decode_frame(planes, t, meta))
+              for t in range(nt)]
+    if len(chains[0]) != int(meta["mips"]):
+        raise RuntimeError(
+            f"the sea decodes to {len(chains[0])} mip levels; its meta.json "
+            f"says {meta['mips']}.")
+    levels = [np.stack([chain[k] for chain in chains]).astype(np.float16)
+              .tobytes() for k in range(len(chains[0]))]
+    return meta, levels
 
 
 def read_shader() -> str:
@@ -289,10 +325,10 @@ class SceneState:
     periodic: bool = True
     ocean_z: float = 0.0
     ocean_reflectance: Sequence[float] = DEFAULT_OCEAN_REFLECTANCE
-    ocean_fif_dx: float = 0.2
+    ocean_fif_dx: float = 0.4
     ocean_tile_extent: float = 102.4
     ocean_enabled: bool = True
-    ocean_max_lod: int = 9
+    ocean_max_lod: int = 8
     nested: bool = False
     nest_bmin: Optional[Sequence[float]] = None
     nest_bmax: Optional[Sequence[float]] = None
@@ -314,6 +350,12 @@ class SceneState:
     # lands here so a reproduction command from a flight whose camera folds
     # moved the offset carries the value that flight rendered with.
     surface_offset_m: Optional[Sequence[float]] = None
+    # The period row 24 folds at. None is the tile extent — the city's and
+    # the desert's rule, since each is a pure function of its tile. The
+    # ocean's swell repeats over several tiles and a fold at the tile would
+    # jump it, so an ocean scene states its own (surface_period_m(), from
+    # the sea's meta.json).
+    surface_period_m: Optional[float] = None
 
 
 @dataclass
@@ -385,6 +427,10 @@ class ViewState:
     # every consumer of t_sky sees a fully open sky, and buried samples
     # brighten. A cost/look toggle, on by default.
     sky_probe: bool = True
+    # The scene clock (s, row 24.z): where the moving sea is in its motion.
+    # The browser advances it while flying; a still names it (witness
+    # --time) and a track carries it per sample.
+    scene_time: float = 0.0
 
 
 def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
@@ -532,14 +578,17 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
         u[22] = (*state.nest_bmax, state.dt_light_nest)
     u[23] = (1.0 if view.light_cache else 0.0, 0.0,
              0.0 if view.sky_probe else 1.0, 0.0)
-    # Row 24: the surface offset, folded into [0, tile extent) — see
+    # Row 24: the surface offset, folded into [0, surface period) — see
     # SceneState.surface_offset_m and the raymarch.wgsl surface_offset
-    # comment. witness has no flight, so this is always the static offset
-    # folded; for a day scene that is fold(0) = exactly 0.0, which is what
-    # keeps the judge-view goldens byte-identical (the shader then subtracts
-    # a bit-neutral zero). Fold spelled exactly as the browser's
-    # (uniforms.js foldTile): one fmod, then a conditional add.
-    tile = state.ocean_tile_extent
+    # comment — and the scene clock. witness has no flight, so the offset is
+    # always the static one folded; for a day scene that is fold(0) = exactly
+    # 0.0 (the shader then subtracts a bit-neutral zero). Fold spelled
+    # exactly as the browser's (uniforms.js foldTile): one fmod, then a
+    # conditional add.
+    tile = (state.surface_period_m if state.surface_period_m is not None
+            else state.ocean_tile_extent)
+    if not math.isfinite(view.scene_time):
+        raise ValueError(f"scene_time must be finite; got {view.scene_time}.")
 
     def _fold_tile(v: float) -> float:
         r = math.fmod(float(v), tile)
@@ -547,7 +596,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
 
     base = (state.surface_offset_m if state.surface_offset_m is not None
             else (state.city_tile_offset_m if city else (0.0, 0.0)))
-    u[24] = (_fold_tile(base[0]), _fold_tile(base[1]), 0.0, 0.0)
+    u[24] = (_fold_tile(base[0]), _fold_tile(base[1]), view.scene_time, 0.0)
     return u
 
 
@@ -743,7 +792,15 @@ class SoarRenderer:
         # row 23.w stays 0 — but the layout requires it.
         self._ice_frac_tex = self._dummy_volume()
         self._light_cache_dims = None
-        self._ocean_tex = self._load_surface_tile()
+        # Binding 3 is the city's or the desert's tile; binding 9 the moving
+        # sea. Each scene fills the one it reads and binds a stand-in in the
+        # other, so one layout serves every surface.
+        if self.surface == "ocean":
+            self._ocean_tex = self._dummy_surface()
+            self._sea_tex = self._load_sea()
+        else:
+            self._ocean_tex = self._load_surface_tile()
+            self._sea_tex = self._dummy_surface()
         self._targets = None
         self._bind_group = None
         self._build_pipelines()
@@ -761,18 +818,50 @@ class SoarRenderer:
             {"bytes_per_row": 2, "rows_per_image": 1}, (1, 1, 1))
         return tex
 
+    def _dummy_surface(self):
+        """A 1x1 zero rgba16float stand-in: binding 3 over the ocean (viewed
+        as 2d), binding 9 under the city and the desert (as a 1-layer array)."""
+        wgpu = self.wgpu
+        tex = self.device.create_texture(
+            size=(1, 1, 1), dimension="2d", format="rgba16float",
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
+        self.device.queue.write_texture(
+            {"texture": tex}, np.zeros(4, np.float16).tobytes(),
+            {"bytes_per_row": 8, "rows_per_image": 1}, (1, 1, 1))
+        return tex
+
+    def _load_sea(self):
+        """The moving sea at binding 9: a 2D array, one layer per frame.
+
+        `self.surface_meta` is the sea's meta.json — cell size, tile extent,
+        top mip and the surface period, which SceneState has to be told
+        about (surface_cell_m, surface_period_m).
+        """
+        wgpu = self.wgpu
+        meta, levels = _sea_levels(str(OCEAN_DIR))
+        self.surface_meta = meta
+        n, nt = int(meta["n"]), int(meta["frames"])
+        tex = self.device.create_texture(
+            size=(n, n, nt), dimension="2d", format="rgba16float",
+            mip_level_count=len(levels),
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
+        for level, data in enumerate(levels):
+            side = max(1, n >> level)
+            self.device.queue.write_texture(
+                {"texture": tex, "mip_level": level}, data,
+                {"bytes_per_row": side * 8, "rows_per_image": side},
+                (side, side, nt))
+        return tex
+
     def _load_surface_tile(self):
-        """The tile bound at binding 3: pre-renormalised mips, level by level.
+        """The tile bound at binding 3: pre-built mips, level by level.
 
-        Not GPU-generated mips — the shader hand-blends two levels because a
-        single hardware trilinear fetch's half-texel offset only fits level 0.
-
-        Which tile depends on the surface: the ocean's FIF normal field, the
-        desert's eroded terrain, or the city density field. One byte format,
-        one binding, one loader; they differ only in the directory and in
-        what the shader makes of the four channels. `self.surface_meta` is
-        the loaded meta.json, and is where a caller reads the cell size and
-        tile extent that SceneState has to be told about (surface_cell_m).
+        Which tile depends on the surface: the desert's eroded terrain or the
+        city density field. One byte format, one binding, one loader; they
+        differ only in the directory and in what the shader makes of the four
+        channels. `self.surface_meta` is the loaded meta.json, and is where a
+        caller reads the cell size and tile extent that SceneState has to be
+        told about (surface_cell_m).
         """
         import json
         wgpu = self.wgpu
@@ -887,6 +976,9 @@ class SoarRenderer:
              "sampler": {"type": "filtering"}},
             {"binding": 7, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
             {"binding": 8, "visibility": wgpu.ShaderStage.FRAGMENT, "texture": tex3d},
+            {"binding": 9, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "float",
+                         "view_dimension": "2d-array"}},
         ])
         self._ray_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout])
@@ -990,6 +1082,8 @@ class SoarRenderer:
                 {"binding": 6, "resource": self._vol_wrap_sampler},
                 {"binding": 7, "resource": self._light_tau_tex.create_view()},
                 {"binding": 8, "resource": self._ice_frac_tex.create_view()},
+                {"binding": 9, "resource": self._sea_tex.create_view(
+                    dimension="2d-array")},
             ])
         return self._bind_group
 
