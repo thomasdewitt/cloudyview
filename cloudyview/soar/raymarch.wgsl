@@ -17475,7 +17475,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
 // the whole reason a bajada is stipple from above and a wall of saguaros at
 // the horizon. The view transmittance is integrated analytically in height
 // over a few stretches of the part of the ray past the cut, each with the
-// ground read at its ends.
+// ground read at its ends, at the habitat where the ray lands.
 //
 // The ground's shadow is the same medium along the sun ray, with the hot
 // spot (df_far_shadow_stat, mixed into desert_flora_shadow): looking down a
@@ -17529,7 +17529,10 @@ const DF_FAR_OCO_ALB: vec3<f32> = vec3<f32>(0.170, 0.170, 0.135);
 const DF_FAR_ROCK_ALB: vec3<f32> = vec3<f32>(0.150, 0.110, 0.085);
 const DF_FAR_PEAR_ALB: vec3<f32> = vec3<f32>(0.105, 0.150, 0.080);
 
-const DF_FAR_SAMPLES: i32 = 6;
+// Stretches of the far integral. The height integral inside a stretch is
+// exact; the stretches only follow the terrain under the ray, which a
+// footprint this coarse sees as smooth.
+const DF_FAR_SAMPLES: i32 = 3;
 
 // A column population's integrated half-width below z, and its tops' area
 // above z, for heights z0 + L v^(1/p) with v uniform (the draws'
@@ -17682,6 +17685,10 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     var w_oco = 0.0;
     var w_rock = 0.0;
     var w_pear = 0.0;
+    // One habitat for the whole stretch of ray, read where it meets the
+    // ground: the densities vary over a wash's width, and a far pixel's
+    // plants stand within a few of their own heights of where it lands.
+    let hb = df_habitat(o.xy + dir.xy * t_hit);
     let p0 = o + dir * ta;
     var za = clamp(p0.z - desert_surface(p0.xy, pixel_angle * ta).x, 0.0,
                    DESERT_FLORA_SLAB_H);
@@ -17693,9 +17700,7 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
         if (min(za, zb) < DESERT_FLORA_SLAB_H) {
             // Colour weights: each species' share of the side sweep (the
             // crowns' tops share their sides' proportions).
-            let st = df_far_stretch(za, zb,
-                                    df_habitat(o.xy + dir.xy * (tb - 0.5 * dt)),
-                                    dt, sz, cz);
+            let st = df_far_stretch(za, zb, hb, dt, sz, cz);
             tau = tau + st.tau;
             w_sag = w_sag + st.sag;
             w_creo = w_creo + st.creo;
