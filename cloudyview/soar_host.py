@@ -676,6 +676,11 @@ SURFACE_FORMAT = "rgba32float"
 # The scenes whose opaque surface is traced by that pass rather than in the
 # march (raymarch.wgsl: the surface pre-pass section).
 SURFACE_PASS_SURFACES = ("city", "desert")
+# ... and those whose surface pass has a second stage (fs_surface_refine):
+# the city (its facade shell over the plain boxes) and the desert (its near
+# plants over the far forms). A surface joins by being listed here and in
+# renderer.js _hasRefineStage.
+SURFACE_REFINE_SURFACES = ("city", "desert")
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
@@ -1012,14 +1017,18 @@ class SoarRenderer:
         ])
         self._ray_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout])
-        # Group 1: the surface pre-pass's target (raymarch.wgsl), read by the
-        # march alone. textureLoad()ed only, so rgba32float's unfilterability
-        # is exactly right. The passes that do not read it (the bake, the
-        # surface pass itself) are laid out without it.
+        # Group 1: the surface pre-pass's targets (raymarch.wgsl) — the final
+        # surface, read by the march, and the first stage's, read by the
+        # second (fs_surface_refine). textureLoad()ed only, so rgba32float's
+        # unfilterability is exactly right. The passes that read neither (the
+        # bake, the plain surface stage) are laid out without it.
+        unfilterable = {"sample_type": "unfilterable-float",
+                        "view_dimension": "2d"}
         self._surface_layout = d.create_bind_group_layout(entries=[
             {"binding": 0, "visibility": wgpu.ShaderStage.FRAGMENT,
-             "texture": {"sample_type": "unfilterable-float",
-                         "view_dimension": "2d"}},
+             "texture": unfilterable},
+            {"binding": 1, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": unfilterable},
         ])
         self._march_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout, self._surface_layout])
@@ -1107,6 +1116,17 @@ class SoarRenderer:
         return self._pipeline_for("fs_surface", SURFACE_FORMAT, self._spec(
             light_cache=view.light_cache, sky_probe=view.sky_probe))
 
+    def _refine_pipeline_for(self, view: "ViewState"):
+        """The surface pass's second stage (fs_surface_refine), which reads
+        the first stage's surface at group 1 binding 1 — or None in a scene
+        whose surface has no second stage."""
+        if self.surface not in SURFACE_REFINE_SURFACES:
+            return None
+        return self._pipeline_for(
+            "fs_surface_refine", SURFACE_FORMAT,
+            self._spec(light_cache=view.light_cache, sky_probe=view.sky_probe),
+            layout=self._march_pipeline_layout)
+
     def _ensure_targets(self, size):
         wgpu = self.wgpu
         if self._targets is not None and self._targets["size"] == size:
@@ -1118,16 +1138,22 @@ class SoarRenderer:
             size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
         surface = (make(SURFACE_FORMAT)
                    if self.surface in SURFACE_PASS_SURFACES else None)
+        plain = (make(SURFACE_FORMAT)
+                 if self.surface in SURFACE_REFINE_SURFACES else None)
+        dummy = self._surface_dummy
+        group1 = lambda final, plain_: self.device.create_bind_group(
+            layout=self._surface_layout, entries=[
+                {"binding": 0, "resource": final.create_view()},
+                {"binding": 1, "resource": plain_.create_view()}])
         self._targets = {
             "size": size, "sample": make(SAMPLE_FORMAT),
             "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)],
             "surface": surface,
-            # The march's group 1: this size's surface, or the stand-in.
-            "surface_group": self.device.create_bind_group(
-                layout=self._surface_layout, entries=[
-                    {"binding": 0,
-                     "resource": (surface or self._surface_dummy).create_view()},
-                ]),
+            "plain": plain,
+            # Group 1 for the march (this size's final surface) and for the
+            # refinement stage (the plain one); neither binds what it writes.
+            "surface_group": group1(surface or dummy, dummy),
+            "refine_group": group1(dummy, plain or dummy),
         }
         return self._targets
 
@@ -1275,8 +1301,11 @@ class SoarRenderer:
         sample_view = targets["sample"].create_view()
         ray_pipeline = self._ray_pipeline_for(view)
         surface_pipeline = self._surface_pipeline_for(view)
+        refine_pipeline = self._refine_pipeline_for(view)
         surface_view = (targets["surface"].create_view()
                         if targets["surface"] is not None else None)
+        plain_view = (targets["plain"].create_view()
+                      if targets["plain"] is not None else None)
 
         accum_index = 0
         for i in range(frames):
@@ -1305,15 +1334,24 @@ class SoarRenderer:
             enc = self.device.create_command_encoder()
             if surface_view is not None:
                 # The surface under this frame's rays, for the march below:
-                # same uniforms, same frame, same pixels.
-                sp = enc.begin_render_pass(color_attachments=[{
-                    "view": surface_view, "load_op": "clear",
-                    "store_op": "store",
-                    "clear_value": (0.0, 0.0, 0.0, 1e30)}])
-                sp.set_pipeline(surface_pipeline)
-                sp.set_bind_group(0, bind_group)
-                sp.draw(3)
-                sp.end()
+                # same uniforms, same frame, same pixels. With a refinement
+                # stage the first pass writes the plain surface and the
+                # second the final one.
+                stages = [(surface_pipeline, None, plain_view or surface_view)]
+                if plain_view is not None:
+                    stages.append((refine_pipeline, targets["refine_group"],
+                                   surface_view))
+                for pipeline, group1, view_ in stages:
+                    sp = enc.begin_render_pass(color_attachments=[{
+                        "view": view_, "load_op": "clear",
+                        "store_op": "store",
+                        "clear_value": (0.0, 0.0, 0.0, 1e30)}])
+                    sp.set_pipeline(pipeline)
+                    sp.set_bind_group(0, bind_group)
+                    if group1 is not None:
+                        sp.set_bind_group(1, group1)
+                    sp.draw(3)
+                    sp.end()
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": sample_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])
