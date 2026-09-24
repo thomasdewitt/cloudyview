@@ -130,9 +130,19 @@ export async function openTab(cdpPort) {
       }
     },
     async close() {
+      for (const s of SIGNALS) process.off(s, onSignal);
       ws.close();
       await fetch(`http://127.0.0.1:${cdpPort}/json/close/${t.id}`).catch(() => {});
     },
   };
+  // A tool killed mid-run (a timeout, ^C) must not leave its soar tab
+  // animating in the shared Chrome: an orphan once spoiled every timing
+  // taken outside the GPU lock (2026-09-24).
+  const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const onSignal = async (s) => {
+    await tab.close();
+    process.exit(128 + { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }[s]);
+  };
+  for (const s of SIGNALS) process.once(s, onSignal);
   return tab;
 }
