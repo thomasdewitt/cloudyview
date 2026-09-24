@@ -5965,11 +5965,14 @@ fn city_shell_face(o: vec3<f32>, dir: vec3<f32>, cc: CityCell, f: CityFace,
 // foreshortened fp_eff (city_shell_shade). And the cell walk must end: a ray
 // skimming the wall crosses depth * (|du|/pitch + |dv|/floor) / |dw| cells
 // of a layer `depth` thick, so relief flattens as that count nears the cap
-// (only the far reach of a wall you are skimming ever sees this).
+// (only the far reach of a wall you are skimming ever sees this). The
+// block walk's own cap ends the reach too (city_shell_cap), so the relief
+// also flattens over the last quarter before it.
 fn city_shell_scale(pixel_angle: f32, t_ref: f32, dl: vec3<f32>,
-                    depth: f32, pitch: f32) -> f32 {
-    let s_fp = 1.0 - smoothstep(CITY_SHELL_FP_MORPH, CITY_SHELL_FP_FLAT,
-                                pixel_angle * max(t_ref, 0.0));
+                    depth: f32, pitch: f32, t_cap: f32) -> f32 {
+    let s_fp = min(1.0 - smoothstep(CITY_SHELL_FP_MORPH, CITY_SHELL_FP_FLAT,
+                                    pixel_angle * max(t_ref, 0.0)),
+                   1.0 - city_shell_cap_fade(t_ref, t_cap));
     let cells = depth * (abs(dl.x) / pitch + abs(dl.y) / CITY_FLOOR_H)
                 / max(abs(dl.z), 1e-6);
     let s_walk = clamp(f32(CITY_SHELL_MAX_CELLS - 2) / max(cells, 1e-6),
@@ -5988,6 +5991,7 @@ struct CityBoxHit {
 // roof on the box's entry face. Within it the box is inflated by the
 // building's shell depth and each facing wall's layer is traced.
 fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
+                     t_cap: f32,
                      bmin: vec3<f32>, bmax: vec3<f32>, cc: CityCell,
                      tier: i32, st: CityShellStyle,
                      pixel_angle: f32) -> CityBoxHit {
@@ -6005,7 +6009,8 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
                          bmax.z);
     let hi = city_box_hit(o, inv3, imin, imax);
     if (hi.x > hi.y || hi.y <= 0.0
-        || pixel_angle * max(hi.x, 0.0) >= CITY_SHELL_FP_FLAT) {
+        || pixel_angle * max(hi.x, 0.0) >= CITY_SHELL_FP_FLAT
+        || hi.x >= t_cap) {
         return res;
     }
     var best = city_shell_miss();
@@ -6034,11 +6039,11 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         if (side == 3) { lmax.y = bmin.y; }
         let hl = city_box_hit(o, inv3, lmin, lmax);
         // A side other than the slab hit's can only matter in front of it.
-        var t_cap = best.t;
+        var t_accept = best.t;
         if (core && side != core_side) {
-            t_cap = min(t_cap, res.t);
+            t_accept = min(t_accept, res.t);
         }
-        if (hl.x > hl.y || hl.y <= 0.0 || max(hl.x, 0.0) >= t_cap) {
+        if (hl.x > hl.y || hl.y <= 0.0 || max(hl.x, 0.0) >= t_accept) {
             continue;
         }
         let f = city_face_make(cc, bmin, bmax, side, tier);
@@ -6047,7 +6052,8 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         if (dl.z < -1e-3) {
             t_ref = (f.wp - dot(o.xy, f.n)) / dl.z;
         }
-        let s = city_shell_scale(pixel_angle, t_ref, dl, st.depth, f.pitch);
+        let s = city_shell_scale(pixel_angle, t_ref, dl, st.depth, f.pitch,
+                                 t_cap);
         if (s <= 0.0) {
             continue;   // flat: the core slab hit already is this wall
         }
@@ -6069,7 +6075,7 @@ fn city_building_box(o: vec3<f32>, dir: vec3<f32>, inv3: vec3<f32>,
         }
         let sh = city_shell_face(o, dir, cc, f, st, s, pixel_angle,
                                  max(hs.x, 0.0), hs.y);
-        if (sh.t < t_cap) {
+        if (sh.t < t_accept) {
             best = sh;
             best_side = side;
         }
@@ -6320,10 +6326,14 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     if (dl.z < -1e-3) {
         t_ref = h.t - l.z / dl.z;
     }
-    let s = city_shell_scale(pa, t_ref, dl, st.depth, f.pitch);
-    // The in-plane pattern dissolves by the core's foreshortened footprint.
+    let t_cap = city_shell_cap(h.pos - h.t * dir, dir);
+    let s = city_shell_scale(pa, t_ref, dl, st.depth, f.pitch, t_cap);
+    // The in-plane pattern dissolves by the core's foreshortened footprint,
+    // and the whole shell into the flat facade by the walk's cap.
     let fp_eff = pa * t_ref / clamp(abs(dl.z), 0.20, 1.0);
-    let blend = smoothstep(CITY_SHELL_FP_BLEND, CITY_SHELL_FP_FLAT, fp_eff);
+    let blend = max(smoothstep(CITY_SHELL_FP_BLEND, CITY_SHELL_FP_FLAT,
+                               fp_eff),
+                    city_shell_cap_fade(t_ref, t_cap));
 
     // The flat twin is read at the hit's foot on the wall plane, which is
     // where the flattened shell puts the hit as s -> 0.
@@ -16308,7 +16318,7 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
     // miss has red 0, and -0.0 only survives as a bit. (t's sign is not the
     // shell's: later city stages may carry their own flag there.)
     let t_lim = min(select(1e30, chit.t, chit.hit),
-                    CITY_SHELL_FP_FLAT / max(pixel_angle, 1e-9));
+                    city_shell_reach(city_o, dir, pixel_angle));
     let near = city_shell_on_wall(chit, t_lim)
                || city_shell_envelope(city_o, dir, t_lim);
     let mark = select(0u, CITY_SHELL_MARK, near);
@@ -16333,6 +16343,31 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
 // Everything else the plain pass found stands. Returns the hit that
 // replaces t_prev, or no hit when t_prev stands.
 const CITY_SHELL_REFINE_MAX_CELLS: i32 = 64;
+// How far along this ray the block walk reaches before its cell cap: the
+// shell's reach ends there too. Only a narrow view at a high resolution
+// with the view-step LOD at 0 ever sees it (4K at a 12 degree fov: 90 m
+// cells, about 4.8 km); per ray, continuous in direction, since each step
+// covers cell / (|dx| + |dy|).
+fn city_shell_cap(o: vec3<f32>, dir: vec3<f32>) -> f32 {
+    var t0 = 0.0;
+    if (o.z > CITY_SLAB_TOP && dir.z < -1e-7) {
+        t0 = (CITY_SLAB_TOP - o.z) / dir.z;
+    }
+    return t0 + f32(CITY_SHELL_REFINE_MAX_CELLS - 2) * u.ocean_params.x
+                / max(abs(dir.x) + abs(dir.y), 1e-6);
+}
+
+// The relief's fade to flat before the cap: 0 until the last quarter, 1 at it.
+fn city_shell_cap_fade(t: f32, t_cap: f32) -> f32 {
+    return smoothstep(0.75 * t_cap, t_cap, t);
+}
+
+// The shell's reach along a ray: its footprint limit, or the walk's cap.
+fn city_shell_reach(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32) -> f32 {
+    return min(CITY_SHELL_FP_FLAT / max(pixel_angle, 1e-9),
+               city_shell_cap(o, dir));
+}
+
 // surface_pass_city's mark for the refinement: the sign bit of red.
 const CITY_SHELL_MARK: u32 = 0x80000000u;
 
@@ -16465,7 +16500,8 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     res.hit = false;
     res.t = 1e30;
     // Past this every box is its plain slab, which the plain pass has done.
-    let t_reach = min(t_prev, CITY_SHELL_FP_FLAT / max(pixel_angle, 1e-9));
+    let t_cap = city_shell_cap(o, dir);
+    let t_reach = min(t_prev, city_shell_reach(o, dir, pixel_angle));
     var w: CityWalk;
     if (!city_walk_start(o, dir, &w)) {
         return res;
@@ -16491,8 +16527,8 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             let st = city_shell_style(cc);
             for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
                 let bx = city_tier_box(cc, k);
-                let bh = city_building_box(o, dir, inv3, bx.bmin, bx.bmax,
-                                           cc, k, st, pixel_angle);
+                let bh = city_building_box(o, dir, inv3, t_cap, bx.bmin,
+                                           bx.bmax, cc, k, st, pixel_angle);
                 if (bh.kind >= 0 && bh.t < best.t) {
                     best = bh;
                     best_cell = ci;
