@@ -14283,27 +14283,29 @@ const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.33, 0.285, 0.22);
 // tile-wide ratio of the two at each mip (tools/export_desert_tile.py
 // albedo_correction; held to the tile by tests/test_desert_tile.py), applied
 // at the footprint's level so no seam appears where detail drops out.
-const DESERT_ALBEDO_CORRECTION = array<vec3<f32>, 12>(
-    vec3<f32>(1.0000, 1.0000, 1.0000),
-    vec3<f32>(0.9996, 0.9998, 1.0002),
-    vec3<f32>(0.9988, 0.9995, 1.0006),
-    vec3<f32>(0.9966, 0.9986, 1.0015),
-    vec3<f32>(0.9902, 0.9958, 1.0045),
-    vec3<f32>(0.9754, 0.9895, 1.0114),
-    vec3<f32>(0.9618, 0.9835, 1.0181),
-    vec3<f32>(0.9514, 0.9789, 1.0235),
-    vec3<f32>(0.9474, 0.9771, 1.0255),
-    vec3<f32>(0.9451, 0.9760, 1.0268),
-    vec3<f32>(0.9421, 0.9747, 1.0283),
-    vec3<f32>(0.9421, 0.9747, 1.0283)
-);
+fn desert_albedo_correction_at(i: i32) -> vec3<f32> {
+    switch i {
+        case 0: { return vec3<f32>(1.0000, 1.0000, 1.0000); }
+        case 1: { return vec3<f32>(0.9996, 0.9998, 1.0002); }
+        case 2: { return vec3<f32>(0.9988, 0.9995, 1.0006); }
+        case 3: { return vec3<f32>(0.9966, 0.9986, 1.0015); }
+        case 4: { return vec3<f32>(0.9902, 0.9958, 1.0045); }
+        case 5: { return vec3<f32>(0.9754, 0.9895, 1.0114); }
+        case 6: { return vec3<f32>(0.9618, 0.9835, 1.0181); }
+        case 7: { return vec3<f32>(0.9514, 0.9789, 1.0235); }
+        case 8: { return vec3<f32>(0.9474, 0.9771, 1.0255); }
+        case 9: { return vec3<f32>(0.9451, 0.9760, 1.0268); }
+        case 10: { return vec3<f32>(0.9421, 0.9747, 1.0283); }
+        default: { return vec3<f32>(0.9421, 0.9747, 1.0283); }
+    }
+}
 
 fn desert_albedo_correction(fp: f32) -> vec3<f32> {
     let lod = desert_lod(fp);
     let l0 = min(i32(floor(lod)), 11);
     let l1 = min(l0 + 1, 11);
-    return mix(DESERT_ALBEDO_CORRECTION[l0], DESERT_ALBEDO_CORRECTION[l1],
-               lod - f32(l0));
+    return mix(desert_albedo_correction_at(l0),
+               desert_albedo_correction_at(l1), lod - f32(l0));
 }
 
 fn desert_albedo(lightness: f32) -> vec3<f32> {
@@ -14469,10 +14471,22 @@ const DESERT_OCTAVE_MARGIN: f32 = 0.429;
 // again for safety (tools/export_desert_tile.py writes the measured table
 // into meta.json as slope_max; tests/test_desert_tile.py holds this to it).
 // This is what lets the trace step by clearance without tunnelling.
-const DESERT_SLOPE_MAX = array<f32, 12>(
-    1.775, 0.924, 0.478, 0.225, 0.111, 0.070,
-    0.050, 0.041, 0.029, 0.021, 0.002, 0.0
-);
+fn desert_slope_max_at(i: i32) -> f32 {
+    switch i {
+        case 0: { return 1.775; }
+        case 1: { return 0.924; }
+        case 2: { return 0.478; }
+        case 3: { return 0.225; }
+        case 4: { return 0.111; }
+        case 5: { return 0.070; }
+        case 6: { return 0.050; }
+        case 7: { return 0.041; }
+        case 8: { return 0.029; }
+        case 9: { return 0.021; }
+        case 10: { return 0.002; }
+        default: { return 0.0; }
+    }
+}
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
 const DESERT_OCTAVE_SLOPE_MAX: f32 = 1.611;  // meta band_slope_max
@@ -14482,7 +14496,8 @@ fn desert_slope_bound(fp: f32) -> f32 {
     let lod = desert_lod(fp);
     let l0 = min(i32(floor(lod)), 11);
     let l1 = min(l0 + 1, 11);
-    var s = mix(DESERT_SLOPE_MAX[l0], DESERT_SLOPE_MAX[l1], lod - f32(l0));
+    var s = mix(desert_slope_max_at(l0), desert_slope_max_at(l1),
+                lod - f32(l0));
     var texel = u.ocean_params.x;
     var grow = 1.0;
     for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
@@ -14554,10 +14569,22 @@ fn desert_octave_margin(fp: f32) -> f32 {
 // (tools/export_desert_tile.py writes it as envelope_m; tests/
 // test_desert_tile.py holds this to it). Mip k plus this is a lid over the
 // ground that is as smooth as mip k — see desert_terrain_trace.
-const DESERT_ENVELOPE_M = array<f32, 12>(
-    0.0, 1.084, 1.630, 1.761, 1.411, 1.933,
-    2.454, 3.674, 6.395, 9.452, 17.279, 17.772
-);
+fn desert_envelope_m_at(i: i32) -> f32 {
+    switch i {
+        case 0: { return 0.0; }
+        case 1: { return 1.084; }
+        case 2: { return 1.630; }
+        case 3: { return 1.761; }
+        case 4: { return 1.411; }
+        case 5: { return 1.933; }
+        case 6: { return 2.454; }
+        case 7: { return 3.674; }
+        case 8: { return 6.395; }
+        case 9: { return 9.452; }
+        case 10: { return 17.279; }
+        default: { return 17.772; }
+    }
+}
 
 // The trace's budget, and its floor: a step is never shorter than this many
 // pixel footprints, which is what makes the far field cost degrees rather
@@ -14575,7 +14602,7 @@ const DESERT_LID_MAX_LEVEL: f32 = 7.0;
 // The ground's own trace, in two regimes.
 //
 // Far above the ground, the ray steps against a LID: mip k of the tile plus
-// how far the full surface can stand above mip k (DESERT_ENVELOPE_M), plus
+// how far the full surface can stand above mip k (desert_envelope_m_at), plus
 // whatever the resolved octaves can add. The lid is as smooth as mip k, so
 // its slope bound is mip k's, a tenth of level 0's or less, and a step is
 // the clearance over that bound — safe, and long. The lid level adapts:
@@ -14620,10 +14647,11 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         if (level > lod + 0.5) {
             let li = i32(level);
             let top = u.ocean.x + desert_tile(p.xy, level).x
-                      + DESERT_ENVELOPE_M[li] + margin;
+                      + desert_envelope_m_at(li) + margin;
             let gap_lid = p.z - top;
             if (gap_lid > 0.0) {
-                dt = gap_lid / max(DESERT_SLOPE_MAX[li] * hlen + closing, 1e-4);
+                dt = gap_lid / max(desert_slope_max_at(li) * hlen + closing,
+                                   1e-4);
                 lid = min(lid + 1.0, DESERT_LID_MAX_LEVEL);
             } else {
                 lid = max(level - 2.0, 0.0);
@@ -14765,9 +14793,24 @@ fn desert_wash_near(xy: vec2<f32>) -> f32 {
 // the far field, which draws none, is exactly the average of the near
 // field, which draws them all.
 const DESERT_STONE_LEVELS: i32 = 2;
-const DESERT_STONE_CELL = array<f32, 2>(0.03125, 0.125);   // m: 1/32, 1/8
-const DESERT_STONE_CELL_BITS = array<u32, 2>(131071u, 32767u); // n - 1
-const DESERT_STONE_SEED = array<u32, 2>(0x9e3779b9u, 0x85ebca6bu);
+fn desert_stone_cell_at(i: i32) -> f32 {  // m: 1/32, 1/8
+    switch i {
+        case 0: { return 0.03125; }
+        default: { return 0.125; }
+    }
+}
+fn desert_stone_cell_bits_at(i: i32) -> u32 {  // n - 1
+    switch i {
+        case 0: { return 131071u; }
+        default: { return 32767u; }
+    }
+}
+fn desert_stone_seed_at(i: i32) -> u32 {
+    switch i {
+        case 0: { return 0x9e3779b9u; }
+        default: { return 0x85ebca6bu; }
+    }
+}
 // Semi-axis a as a fraction of the cell (times desert_stone_scale); b = a *
 // [0.6, 1]; height c = a * DESERT_STONE_FLAT.
 const DESERT_STONE_A_LO: f32 = 0.26;
@@ -14796,15 +14839,17 @@ const DESERT_STONE_MAX_CELLS: i32 = 64;
 // darker than rock varnish measures (~0.08 visible): at 0.05, and a third
 // of a pavement's clasts, a centimetre stone showed no lit side and no
 // shadow side, and read as a hole in the silt.
-const DESERT_STONE_PALETTE = array<vec3<f32>, 7>(
-    vec3<f32>(0.085, 0.070, 0.056),
-    vec3<f32>(0.160, 0.148, 0.128),
-    vec3<f32>(0.170, 0.115, 0.085),
-    vec3<f32>(0.340, 0.310, 0.270),
-    vec3<f32>(0.280, 0.210, 0.150),
-    vec3<f32>(0.210, 0.105, 0.060),
-    vec3<f32>(0.290, 0.200, 0.170)
-);
+fn desert_stone_palette_at(i: i32) -> vec3<f32> {
+    switch i {
+        case 0: { return vec3<f32>(0.085, 0.070, 0.056); }
+        case 1: { return vec3<f32>(0.160, 0.148, 0.128); }
+        case 2: { return vec3<f32>(0.170, 0.115, 0.085); }
+        case 3: { return vec3<f32>(0.340, 0.310, 0.270); }
+        case 4: { return vec3<f32>(0.280, 0.210, 0.150); }
+        case 5: { return vec3<f32>(0.210, 0.105, 0.060); }
+        default: { return vec3<f32>(0.290, 0.200, 0.170); }
+    }
+}
 // The same seven, as fractions of each surface's stones: varnish-dark and
 // grey on the pavement, fresh and pale in a wash, rust and rose throughout
 // (the references' clasts run through rust, pink, grey, black and white
@@ -14812,23 +14857,51 @@ const DESERT_STONE_PALETTE = array<vec3<f32>, 7>(
 // pavement's own colour: redder than it, and the silt that holds the
 // footprint's mean solved to teal-grey (tests/test_desert_tile.py holds
 // every surface's silt warm).
-const DESERT_STONE_MIX_PAVEMENT = array<f32, 7>(0.28, 0.46, 0.09, 0.06, 0.03,
-                                                0.04, 0.04);
-const DESERT_STONE_MIX_SOIL = array<f32, 7>(0.12, 0.20, 0.20, 0.08, 0.20,
-                                            0.10, 0.10);
-const DESERT_STONE_MIX_WASH = array<f32, 7>(0.04, 0.26, 0.13, 0.26, 0.17,
-                                            0.07, 0.07);
+fn desert_stone_mix_pavement_at(i: i32) -> f32 {
+    switch i {
+        case 0: { return 0.28; }
+        case 1: { return 0.46; }
+        case 2: { return 0.09; }
+        case 3: { return 0.06; }
+        case 4: { return 0.03; }
+        case 5: { return 0.04; }
+        default: { return 0.04; }
+    }
+}
+fn desert_stone_mix_soil_at(i: i32) -> f32 {
+    switch i {
+        case 0: { return 0.12; }
+        case 1: { return 0.20; }
+        case 2: { return 0.20; }
+        case 3: { return 0.08; }
+        case 4: { return 0.20; }
+        case 5: { return 0.10; }
+        default: { return 0.10; }
+    }
+}
+fn desert_stone_mix_wash_at(i: i32) -> f32 {
+    switch i {
+        case 0: { return 0.04; }
+        case 1: { return 0.26; }
+        case 2: { return 0.13; }
+        case 3: { return 0.26; }
+        case 4: { return 0.17; }
+        case 5: { return 0.07; }
+        default: { return 0.07; }
+    }
+}
 
 fn desert_stone_mix(m: vec3<f32>, i: i32) -> f32 {
-    return m.x * DESERT_STONE_MIX_PAVEMENT[i] + m.y * DESERT_STONE_MIX_SOIL[i]
-         + m.z * DESERT_STONE_MIX_WASH[i];
+    return m.x * desert_stone_mix_pavement_at(i)
+         + m.y * desert_stone_mix_soil_at(i)
+         + m.z * desert_stone_mix_wash_at(i);
 }
 
 // The mean albedo of the stones on a surface of material `m`.
 fn desert_stone_mean_albedo(m: vec3<f32>) -> vec3<f32> {
     var a = vec3<f32>(0.0);
     for (var i: i32 = 0; i < 7; i = i + 1) {
-        a = a + desert_stone_mix(m, i) * DESERT_STONE_PALETTE[i];
+        a = a + desert_stone_mix(m, i) * desert_stone_palette_at(i);
     }
     return a;
 }
@@ -14839,7 +14912,7 @@ fn desert_stone_mean_albedo(m: vec3<f32>) -> vec3<f32> {
 // does not grow with nearness — the uniform speckle a blind judge read as
 // texture, not stones — and the surface average says it better.
 fn desert_stone_resolve(k: i32, fp: f32) -> f32 {
-    let c = DESERT_STONE_CELL[k];
+    let c = desert_stone_cell_at(k);
     return smoothstep(0.5 * c, 0.12 * c, fp);
 }
 
@@ -14868,8 +14941,9 @@ fn desert_stone_weight(k: i32, fp: f32, dir: vec3<f32>, n: vec3<f32>,
     if (closing <= 1e-4) {
         return 0.0;
     }
-    let span = DESERT_STONE_TOP * DESERT_STONE_CELL[k] / closing;
-    let cells = span * (abs(dir.x) + abs(dir.y)) / DESERT_STONE_CELL[k] + 2.0;
+    let span = DESERT_STONE_TOP * desert_stone_cell_at(k) / closing;
+    let cells = span * (abs(dir.x) + abs(dir.y)) / desert_stone_cell_at(k)
+                + 2.0;
     return select(0.0, w, cells <= f32(DESERT_STONE_MAX_CELLS));
 }
 
@@ -14913,9 +14987,9 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
                 grad: vec2<f32>, m: vec3<f32>, w: f32) -> DesertStone {
     var s: DesertStone;
     s.on = false;
-    let mask = DESERT_STONE_CELL_BITS[k];
+    let mask = desert_stone_cell_bits_at(k);
     let key = vec2<u32>(u32(ci.x) & mask, u32(ci.y) & mask);
-    let h0 = pcg2d(key ^ vec2<u32>(DESERT_STONE_SEED[k], 0x68e31da4u));
+    let h0 = pcg2d(key ^ vec2<u32>(desert_stone_seed_at(k), 0x68e31da4u));
     let h1 = pcg2d(h0);
     let r = vec4<f32>(city_u01(h0.x), city_u01(h0.y),
                       city_u01(h1.x), city_u01(h1.y));
@@ -14925,7 +14999,7 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
     if (r.x >= p_occ || fract(r.x * 7.31 + r.w * 3.17) >= w) {
         return s;
     }
-    let c = DESERT_STONE_CELL[k];
+    let c = desert_stone_cell_at(k);
     let a = c * desert_stone_scale(m)
               * mix(DESERT_STONE_A_LO, DESERT_STONE_A_HI, r.y);
     let b = a * mix(0.6, 1.0, fract(r.y * 13.7));
@@ -14943,11 +15017,11 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
     // Colour: a palette draw weighted by the material, and a brightness
     // jitter of mean one.
     var pick = fract(r.w * 11.3 + r.y * 2.9);
-    var col = DESERT_STONE_PALETTE[6];
+    var col = desert_stone_palette_at(6);
     for (var i: i32 = 0; i < 7; i = i + 1) {
         let wi = desert_stone_mix(m, i);
         if (pick < wi) {
-            col = DESERT_STONE_PALETTE[i];
+            col = desert_stone_palette_at(i);
             break;
         }
         pick = pick - wi;
@@ -15036,15 +15110,17 @@ fn desert_stone_hit(s: DesertStone, o: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
 // unit-sphere frame (desert_stone_hit): a broken face is flat as it is; the
 // rounded remainder is pulled toward the nearest of a handful of facet
 // planes — a broken clast, not a pebble from a river.
-const DESERT_FACETS = array<vec3<f32>, 7>(
-    vec3<f32>(0.0, 0.0, 1.0),
-    vec3<f32>(0.94, 0.0, 0.34),
-    vec3<f32>(-0.47, 0.82, 0.34),
-    vec3<f32>(-0.47, -0.82, 0.34),
-    vec3<f32>(0.47, 0.82, -0.34),
-    vec3<f32>(0.47, -0.82, -0.34),
-    vec3<f32>(-0.94, 0.0, -0.34)
-);
+fn desert_facets_at(i: i32) -> vec3<f32> {
+    switch i {
+        case 0: { return vec3<f32>(0.0, 0.0, 1.0); }
+        case 1: { return vec3<f32>(0.94, 0.0, 0.34); }
+        case 2: { return vec3<f32>(-0.47, 0.82, 0.34); }
+        case 3: { return vec3<f32>(-0.47, -0.82, 0.34); }
+        case 4: { return vec3<f32>(0.47, 0.82, -0.34); }
+        case 5: { return vec3<f32>(0.47, -0.82, -0.34); }
+        default: { return vec3<f32>(-0.94, 0.0, -0.34); }
+    }
+}
 const DESERT_FACET_WEIGHT: f32 = 0.45;
 
 fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
@@ -15058,7 +15134,7 @@ fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
         // Each stone flips its own facets: three bits, three axes.
         let sgn = vec3<f32>(select(1.0, -1.0, (s.facet & 1u) != 0u),
                             select(1.0, -1.0, (s.facet & 2u) != 0u), 1.0);
-        let d = DESERT_FACETS[i] * sgn;
+        let d = desert_facets_at(i) * sgn;
         let e = dot(q, d);
         if (e > best) {
             best = e;
@@ -15112,7 +15188,7 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit)
         if (w <= 0.0) {
             continue;
         }
-        let c = DESERT_STONE_CELL[k];
+        let c = desert_stone_cell_at(k);
         let span = DESERT_STONE_TOP * c / closing;
         let t0 = max(th.t - span, 0.0);
         let p0 = o + t0 * dir;
@@ -15171,7 +15247,7 @@ fn desert_stone_shadow(p: vec3<f32>, sun: vec3<f32>, n: vec3<f32>,
         if (w <= 0.0) {
             continue;
         }
-        let c = DESERT_STONE_CELL[k];
+        let c = desert_stone_cell_at(k);
         let home = vec2<i32>(floor(p.xy / c));
         // This cell and its eight neighbours: every stone that can reach
         // over the point (a stone overhangs by less than a cell).
@@ -15236,7 +15312,7 @@ fn desert_wall_albedo(p: vec3<f32>) -> vec3<f32> {
 // is undersampled along the view on any oblique surface, and aliases into
 // long smeared streaks (it did, in the first version).
 fn desert_grain(xy: vec2<f32>, fpg: f32, m: vec3<f32>, w0: f32) -> f32 {
-    let c = DESERT_STONE_CELL[0];
+    let c = desert_stone_cell_at(0);
     let s = max(fpg, c);
     let lv = log2(s / c);
     let k0 = floor(lv);
@@ -15576,17 +15652,29 @@ fn desert_brf(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 // the ridges throw; this puts them back as Smith shadowing on the beam, so
 // the far bajada at low sun is as dark as its resolved form averages to
 // rather than flat and bright.
-const DESERT_SLOPE_VARIANCE_REMOVED = array<f32, 12>(
-    0.000000, 0.003600, 0.006006, 0.007218, 0.007616, 0.007761,
-    0.007850, 0.007922, 0.007982, 0.008028, 0.008049, 0.008049
-);
+fn desert_slope_variance_removed_at(i: i32) -> f32 {
+    switch i {
+        case 0: { return 0.000000; }
+        case 1: { return 0.003600; }
+        case 2: { return 0.006006; }
+        case 3: { return 0.007218; }
+        case 4: { return 0.007616; }
+        case 5: { return 0.007761; }
+        case 6: { return 0.007850; }
+        case 7: { return 0.007922; }
+        case 8: { return 0.007982; }
+        case 9: { return 0.008028; }
+        case 10: { return 0.008049; }
+        default: { return 0.008049; }
+    }
+}
 
 fn desert_unresolved_shadow(n: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
     let lod = desert_lod(fp);
     let l0 = min(i32(floor(lod)), 11);
     let l1 = min(l0 + 1, 11);
-    let a2 = mix(DESERT_SLOPE_VARIANCE_REMOVED[l0],
-                 DESERT_SLOPE_VARIANCE_REMOVED[l1], lod - f32(l0));
+    let a2 = mix(desert_slope_variance_removed_at(l0),
+                 desert_slope_variance_removed_at(l1), lod - f32(l0));
     if (a2 <= 0.0) {
         return 1.0;
     }
