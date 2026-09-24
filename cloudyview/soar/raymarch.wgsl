@@ -14330,6 +14330,12 @@ fn desert_lod(fp: f32) -> f32 {
 // footprint `fp`: the tile at its mip, plus every octave the footprint
 // resolves.
 fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
+    return desert_surface_of(xy, fp, false);
+}
+
+// The same, or with `traced` (a literal at every call) only the octaves the
+// trace draws (desert_trace_fade).
+fn desert_surface_of(xy: vec2<f32>, fp: f32, traced: bool) -> vec2<f32> {
     var s = desert_tile(xy, desert_lod(fp));
     var q = xy;
     var texel = u.ocean_params.x;
@@ -14339,7 +14345,8 @@ fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
         texel = texel * 0.2;
         amp = amp * DESERT_OCTAVE_GAIN;
         lamp = lamp * DESERT_OCTAVE_LIGHT_GAIN;
-        let fade = desert_octave_fade(fp, texel);
+        let fade = select(desert_octave_fade(fp, texel),
+                          desert_trace_fade(fp, texel, amp), traced);
         if (fade <= 0.0) {
             break;
         }
@@ -14351,6 +14358,36 @@ fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
                                  select(0.0, lamp * band.y, k == 0));
     }
     return vec2<f32>(u.ocean.x + s.x, s.y);
+}
+
+// THE TRACE'S OCTAVES. The octaves are most of what the trace costs (each
+// adds reads to every step, and its slope to the bound every step divides
+// by: at 300 m on the M1 proxy the plain pass fell from 11.9 ms to 3.7
+// without them), and far off they cannot be seen in its geometry: a
+// vertical error e, from a ray at elevation theta at distance t, moves a
+// silhouette or the ground point the ray lands on (in its own ground
+// footprint) by e cos(theta) / t of angle, against a pixel's fp / t. So an
+// octave whose largest excursion — the band's, times its gain and its fade
+// — is under DESERT_TRACE_OCTAVE_K footprints (cos(theta) taken as 1, which
+// errs only toward exactness) leaves the trace: its height, its slope bound,
+// its margin. The shading still reads it (desert_ground_at's normal and
+// lightness at the hit), so what the pixel shows of it is unchanged. The
+// excursion falls faster than the footprint grows, so the octaves traced
+// are always the first few, and a zero fade ends each octave loop as a
+// footprint past the octave's band always did.
+const DESERT_TRACE_OCTAVE_K: f32 = 1.0;
+
+// Octave (texel, gain amp)'s fade in the trace: its fade, or none once its
+// largest excursion is under DESERT_TRACE_OCTAVE_K footprints.
+fn desert_trace_fade(fp: f32, texel: f32, amp: f32) -> f32 {
+    let fade = desert_octave_fade(fp, texel);
+    return select(0.0, fade,
+                  u.ocean.w * amp * fade > DESERT_TRACE_OCTAVE_K * fp);
+}
+
+// The ground the trace meets at footprint fp (absolute z).
+fn desert_trace_height(xy: vec2<f32>, fp: f32) -> f32 {
+    return desert_surface_of(xy, fp, true).x;
 }
 
 // Terrain height (m, absolute z) at a desert-frame point, at full detail.
@@ -14408,10 +14445,12 @@ fn desert_slope_bound(fp: f32) -> f32 {
     var s = mix(DESERT_SLOPE_MAX[l0], DESERT_SLOPE_MAX[l1], lod - f32(l0));
     var texel = u.ocean_params.x;
     var grow = 1.0;
+    var amp = 1.0;
     for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
         texel = texel * 0.2;
         grow = grow * DESERT_OCTAVE_SLOPE_GROWTH;
-        let fade = desert_octave_fade(fp, texel);
+        amp = amp * DESERT_OCTAVE_GAIN;
+        let fade = desert_trace_fade(fp, texel, amp);
         if (fade <= 0.0) {
             break;
         }
@@ -14457,8 +14496,8 @@ fn desert_terrain_hit(o: vec3<f32>, dir: vec3<f32>, t: f32) -> DesertHit {
     return h;
 }
 
-// The octaves' reach at footprint `fp`: how far the resolved octaves can
-// move the surface off the tile (their faded gains times the band's
+// The traced octaves' reach at footprint `fp`: how far they can move the
+// surface the trace meets off the tile (their faded gains times the band's
 // largest excursion).
 fn desert_octave_margin(fp: f32) -> f32 {
     var texel = u.ocean_params.x;
@@ -14467,7 +14506,7 @@ fn desert_octave_margin(fp: f32) -> f32 {
     for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
         texel = texel * 0.2;
         amp = amp * DESERT_OCTAVE_GAIN;
-        sum = sum + amp * desert_octave_fade(fp, texel);
+        sum = sum + amp * desert_trace_fade(fp, texel, amp);
     }
     return u.ocean.w * sum;
 }
@@ -14553,7 +14592,7 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             }
         }
         if (dt < 0.0) {
-            let gap = p.z - desert_surface(p.xy, fp).x;
+            let gap = p.z - desert_trace_height(p.xy, fp);
             if (gap <= 0.0) {
                 if (t_prev < 0.0) {
                     return desert_terrain_hit(o, dir, t);
@@ -14572,7 +14611,7 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             let pb = o + t_floor * dir;
             return desert_terrain_hit(o, dir, desert_refine(
                 o, dir, pixel_angle, t_prev, t_floor,
-                pb.z - desert_surface(pb.xy, pixel_angle * t_floor).x));
+                pb.z - desert_trace_height(pb.xy, pixel_angle * t_floor)));
         }
     }
     // Out of budget — rare now that far steps are lid steps, and only on
@@ -14600,7 +14639,7 @@ fn desert_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     var ta = ta_in;
     var tb = tb_in;
     let pa = o + ta * dir;
-    var ga = pa.z - desert_surface(pa.xy, pixel_angle * ta).x;
+    var ga = pa.z - desert_trace_height(pa.xy, pixel_angle * ta);
     var gb = gap_b;
     if (ga <= 0.0) {
         return ta;
@@ -14610,7 +14649,7 @@ fn desert_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     for (var k: i32 = 0; k < 6; k = k + 1) {
         tm = ta + (tb - ta) * ga / max(ga - gb, 1e-9);
         let pm = o + tm * dir;
-        let gm = pm.z - desert_surface(pm.xy, pixel_angle * tm).x;
+        let gm = pm.z - desert_trace_height(pm.xy, pixel_angle * tm);
         // Landed to a twentieth of the footprint: the remaining iterations
         // would move the hit by less than the pixel can show, and each is a
         // dependent texture round (the trace at altitude is latency-bound).
