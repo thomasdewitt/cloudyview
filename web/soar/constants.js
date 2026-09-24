@@ -144,7 +144,7 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
   ocean: "cloudyview.web.ocean.v2",
-  desert: "cloudyview.web.desert.v1",
+  desert: "cloudyview.web.desert.v2",
   city: "cloudyview.web.city.v2",
 };
 // From the 2026-08-22 12:31 capture, the same still the start camera and the
@@ -851,6 +851,12 @@ export const ELEVATION_LIMITS = [-89.0, 89.0];
 // own peak-to-trough, so nothing here is about clipping through a wave: it is
 // how low you are allowed to fly, and lower is better flying.
 export const OCEAN_FLOOR_MARGIN_M = 12.5;
+// Over the desert the floor follows the ground: the camera may come down to
+// this far above the terrain, which is what "fly within a couple of metres"
+// asks of it. Measured from the tile's own surface plus the most the
+// sub-tile octaves can raise it (scene.js desertFloorAt), so it is a floor
+// under the drawn ground and not an estimate of it.
+export const DESERT_FLOOR_CLEARANCE_M = 1.0;
 
 // --- sun ------------------------------------------------------------------
 

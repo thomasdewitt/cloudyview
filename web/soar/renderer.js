@@ -11,6 +11,7 @@ import * as K from "./constants.js";
 import { packUniforms, sceneKey, keysEqual, renderTargetSize,
          motionAlphaForDt } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
+import { desertReliefM } from "./scene.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -608,16 +609,13 @@ export class Renderer {
   }
 
   /**
-   * Stand the scene on the other day surface — "ocean" or "desert" — in
-   * flight. `tile` is the loaded surface tile (scene.js loadOceanTile). The
-   * specialization follows scene.desert through every pipeline key, so this
-   * is the tile, the four row-9 numbers and the flag, then a rebind and a
-   * fresh accumulation. The new pipeline is built and validated here, before
-   * a frame is drawn with it, so a shader that will not compile says so at
-   * the switch rather than as a black frame. The night city is not a day
-   * surface and never comes or goes through here.
+   * Build and validate the pipeline for a day surface — "ocean" or
+   * "desert" — WITHOUT standing the scene on it. The first half of an
+   * in-flight switch: everything that can fail or wait happens here, while
+   * the scene keeps rendering what it stands on, so a shader that will not
+   * compile says so and leaves the flight as it was.
    */
-  async setSurface(kind, tile) {
+  async prepareSurface(kind) {
     if (this.scene.city) {
       throw new Error("the night city has no other surface to switch to.");
     }
@@ -625,6 +623,32 @@ export class Renderer {
       throw new Error(`unknown day surface '${kind}'; expected 'ocean' or ` +
                       "'desert'.");
     }
+    // Every entry the target surface draws with, at the current lighting,
+    // on a specialization named explicitly: the scene is not touched.
+    const spec = { ...this._shaderSpec(), desert: kind === "desert" };
+    try {
+      await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
+      if (kind === "desert") {
+        await this._pipeline("fs_surface", SURFACE_FORMAT, spec);
+        await this._pipeline("fs_surface_refine", SURFACE_FORMAT, spec);
+      }
+    } catch (err) {
+      throw new Error(`The ${kind} shader failed to build: ` +
+                      `${err?.message || err}`);
+    }
+  }
+
+  /**
+   * The second half: stand the scene on `kind`, whose pipeline
+   * prepareSurface has already built. Synchronous, so the caller can move
+   * the camera onto the new surface's frame and floor in the same tick and
+   * no frame is ever drawn half-switched. `tile` is the loaded surface tile
+   * (scene.js loadOceanTile).
+   */
+  commitSurface(kind, tile) {
+    // Everything that can throw, before anything is changed: a tile whose
+    // meta lacks the relief must leave the scene standing where it was.
+    const relief = kind === "desert" ? desertReliefM(tile.meta) : null;
     const s = this.scene;
     s.desert = kind === "desert";
     // The desert's tile at binding 3, or the sea at binding 9 — see
@@ -637,15 +661,7 @@ export class Renderer {
     s.surfacePeriod = tile.surfacePeriod;
     s.clockPeriod = tile.clockPeriod ?? null;
     s.oceanMaxLod = tile.maxLod;
-    try {
-      await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
-      await this._surfacePipeline(this.lighting);
-      await this._refinePipeline(this.lighting);
-      await this._streetPipeline(this.lighting);
-    } catch (err) {
-      throw new Error(`The ${kind} shader failed to build: ` +
-                      `${err?.message || err}`);
-    }
+    s.desertReliefM = relief;
     this.prefetchPipelines();
     this.refreshBindGroup();
     this._resetAccumulation();
@@ -946,7 +962,8 @@ export class Renderer {
    * `lighting`); the surface is a property of the scene, which every caller
    * inherits here rather than threading it. The city is constant for a
    * renderer's whole life; ocean and desert can trade places in flight
-   * (setSurface), which is why the surface is in every key.
+   * (prepareSurface / commitSurface), which is why the surface is in every
+   * key.
    */
   _shaderSpec({ toneMap = true, lighting = this.lighting } = {}) {
     return {
@@ -2183,6 +2200,7 @@ export class Renderer {
       city: Boolean(s.city),
       cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
       desert: Boolean(s.desert),
+      desertReliefM: s.desert ? s.desertReliefM : null,
     };
   }
 }
