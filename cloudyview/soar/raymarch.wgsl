@@ -14262,7 +14262,7 @@ fn desert_wall(n: vec3<f32>) -> f32 {
 // brighter by its orientation, and a lighter albedo on top drew every bank
 // as a white stroke (the blind judge's "contour lines"). The caliche is a
 // faint, nodular band, not a continuous white seam.
-const DESERT_ALBEDO_BANK: vec3<f32> = vec3<f32>(0.31, 0.21, 0.13);
+const DESERT_ALBEDO_BANK: vec3<f32> = vec3<f32>(0.31, 0.235, 0.155);
 const DESERT_ALBEDO_CALICHE: vec3<f32> = vec3<f32>(0.40, 0.36, 0.30);
 const DESERT_CALICHE_WEIGHT: f32 = 0.5;
 const DESERT_STRATUM_M: f32 = 0.35;
@@ -14452,10 +14452,7 @@ struct DesertLight {
 // sees, (1 + n.z)/2 and (1 - n.z)/2 — exact for an unobstructed tilted plane.
 fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
-    let mu = max(dot(n, L.sun_dir), 0.0);
-    let sky_view = 0.5 * (1.0 + n.z);
-    return albedo * (1.0 / DESERT_PI)
-        * (L.sun * mu + L.sky * sky_view + L.ground * (1.0 - sky_view));
+    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0), 0.0);
 }
 
 // The cloud's shadow on one ground point, and the light that comes through
@@ -14560,7 +14557,10 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
 const DESERT_SHADOW_STEPS: i32 = 24;
 const DESERT_SHADOW_REACH_M: f32 = 1500.0;
 
-fn desert_terrain_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
+// `lift` is how far p stands above the ground under it (0 on the ground; a
+// stone's face stands clear of the relief its own footprint carries).
+fn desert_terrain_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32,
+                         lift: f32) -> f32 {
     if (sun.z <= 0.0) {
         return 0.0;
     }
@@ -14580,7 +14580,7 @@ fn desert_terrain_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
         // a whole far field shaded, with jagged edges along the washes.
         let fps = max(fp, t * 0.01);
         let rise = desert_surface(q.xy, fps).x - desert_surface(p.xy, fps).x;
-        let gap = t * sun.z - rise;
+        let gap = t * sun.z + lift - rise;
         lit = min(lit, clamp(0.5 + 0.5 * gap
                              / (t * SUN_ANGULAR_RADIUS * 2.0), 0.0, 1.0));
         if (lit <= 0.0) {
@@ -14670,6 +14670,27 @@ const DESERT_GEO_W_SAND: f32 = 0.08;
 fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                           L: DesertLight, plants: f32) -> vec3<f32> {
     let n = h.normal;
+    // A stone is lit by the same law as the ground it lies on, with its
+    // own albedo and normal and none of the ground's statistics: no kernel
+    // BRF (it IS the resolved geometry the kernel stands for), no grain,
+    // no stone or unresolved shadow, no sheen. One path for both, selected
+    // on its inputs: two shading branches kept the hit, the light and the
+    // ground terms all live across the divergence (perf: 155 registers
+    // against 72 with the stones out).
+    if (h.kind == DESERT_KIND_STONE) {
+        let mu_s = max(dot(n, L.sun_dir), 0.0);
+        return desert_lit(h.mat.xyz, n, L,
+                          mu_s * desert_terrain_shadow(
+                              h.pos, L.sun_dir, fp,
+                              // Measured from the stone, not the ground
+                              // beneath it: taken as lying on the ground, a
+                              // face wore the octaves' centimetre shadows
+                              // there as a dark pebbled patch, and a
+                              // varnished clast read as a hollow cup.
+                              max(h.pos.z - desert_surface(h.pos.xy, fp).x,
+                                  0.0))
+                          * plants, 0.0);
+    }
     let light = clamp(h.mat.x, 0.0, 1.0);
     let m = desert_material(light);
     // The silt between the drawn stones, textured below them by the
@@ -14690,16 +14711,23 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                                            DESERT_VOL_W_SAND, light),
                          statistical * mix(DESERT_GEO_W_PAVEMENT,
                                            DESERT_GEO_W_SAND, light));
-    let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp)
+    let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp, 0.0)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
         * desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1)
         * plants;
     let mu = max(dot(n, L.sun_dir), 0.0);
+    return desert_lit(albedo, n, L, mu * brf * shade,
+                      desert_sheen(n, dir, L.sun_dir) * shade);
+}
+
+// The common tail: `beam` the direct factor on L.sun (cosine, BRF and every
+// shadow folded in), `sheen` the specular one.
+fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32,
+              sheen: f32) -> vec3<f32> {
     let sky_view = 0.5 * (1.0 + n.z);
     return albedo * (1.0 / DESERT_PI)
-        * (L.sun * (mu * brf * shade)
-           + L.sky * sky_view + L.ground * (1.0 - sky_view))
-        + desert_sheen(n, dir, L.sun_dir) * L.sun * shade;
+        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view))
+        + sheen * L.sun;
 }
 
 // Looking into a low sun, a desert floor is not dark: silt, sand grains
@@ -14787,16 +14815,10 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
         // The plants' shadow on the ground, walked once for both ground
         // branches (one inlined copy of the flora's shadow walk, not two).
         let plants = desert_flora_shadow(h.pos, sun, fp, refine);
-        if (h.kind == DESERT_KIND_STONE) {
-            var Ls = L;
-            Ls.sun = L.sun * desert_terrain_shadow(h.pos, sun, fp) * plants;
-            rgb = desert_lambert(h.mat.xyz, h.normal, Ls);
-        } else {
-            let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
-            rgb = desert_ground_radiance(h, dir, fp, L, plants)
-                  * (1.0 - far.cover)
-                  + far.cover * desert_flora_far_shade(far, dir, L);
-        }
+        let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
+        rgb = desert_ground_radiance(h, dir, fp, L, plants)
+              * (1.0 - far.cover)
+              + far.cover * desert_flora_far_shade(far, dir, L);
     }
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
