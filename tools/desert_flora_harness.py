@@ -47,7 +47,8 @@ DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
 # them.
 SCAN_PRELUDE = """
 const DESERT_FLORA_SLAB_H: f32 = 13.0;
-struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>, };
+struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>,
+                     ocean: vec4<f32>, };
 var<private> u: ScanUniforms;
 fn desert_camera_origin() -> vec3<f32> { return vec3<f32>(0.0); }
 fn desert_height(xy: vec2<f32>) -> f32 { return 0.0; }
@@ -121,6 +122,13 @@ def extract_fn(src: str, name: str) -> str:
     return m.group(0)
 
 
+def extract_const(src: str, name: str) -> str:
+    m = re.search(rf"^const {name}\b.*?;\n", src, re.S | re.M)
+    if m is None:
+        raise RuntimeError(f"const {name} not found in {SHADER.name}")
+    return m.group(0)
+
+
 def scan_plants(entry="scan"):
     """Items as the shader places them, desert frame. `scan`: every big
     cell, rows (kind, x, y, height, radius, arms, age, ribs). `scan_small`:
@@ -133,6 +141,9 @@ def scan_plants(entry="scan"):
     code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
             + extract_fn(src, "desert_wash") + extract_fn(src, "desert_wash_near")
             + extract_fn(src, "desert_material")
+            + extract_const(src, "DESERT_ENVELOPE_M")
+            + extract_const(src, "DESERT_SLOPE_MAX")
+            + extract_const(src, "DESERT_OCTAVE_MARGIN")
             + extract(src, FLORA_BEGIN, FLORA_END) + SCAN_MAIN)
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
