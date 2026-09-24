@@ -13871,6 +13871,28 @@ fn desert_ripple_slope(xy: vec2<f32>, fp: f32, sand: f32) -> vec2<f32> {
     return fade * DESERT_RIPPLE_SLOPE * d * DESERT_WIND;
 }
 
+// The part of a ray inside the flora slab — z in [ground min, ground max +
+// DESERT_FLORA_SLAB_H] — and in front of `t_limit`: (t0, t1), empty when
+// t1 <= t0. The one clip both the plain pass and the flora's refine stage
+// use, so the two cannot disagree about where plants can be.
+fn desert_flora_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                     t_limit: f32) -> vec2<f32> {
+    let zr = desert_height_range();
+    let slab_lo = zr.x;
+    let slab_hi = zr.y + DESERT_FLORA_SLAB_H;
+    var t0 = 0.0;
+    var t1 = t_limit;
+    if (abs(dir.z) > 1e-8) {
+        let ta = (slab_lo - o.z) * inv_dir.z;
+        let tb = (slab_hi - o.z) * inv_dir.z;
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    } else if (o.z < slab_lo || o.z > slab_hi) {
+        t1 = -1.0;
+    }
+    return vec2<f32>(t0, t1);
+}
+
 // The whole desert along one view ray, in the desert frame: the terrain,
 // then whatever stands on it in front of the terrain hit.
 fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
@@ -13905,22 +13927,10 @@ fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
             best.normal = normalize(best.normal - vec3<f32>(rs, 0.0));
         }
     }
-    // The flora slab, clipped to the part of the ray in front of the ground.
-    let zr = desert_height_range();
-    let slab_lo = zr.x;
-    let slab_hi = zr.y + DESERT_FLORA_SLAB_H;
-    var t0 = 0.0;
-    var t1 = best.t;
-    if (abs(dir.z) > 1e-8) {
-        let ta = (slab_lo - o.z) * inv_dir.z;
-        let tb = (slab_hi - o.z) * inv_dir.z;
-        t0 = max(t0, min(ta, tb));
-        t1 = min(t1, max(ta, tb));
-    } else if (o.z < slab_lo || o.z > slab_hi) {
-        t1 = -1.0;
-    }
-    if (t1 > t0) {
-        let fh = desert_flora_trace(o, dir, inv_dir, t0, t1, pixel_angle);
+    let slab = desert_flora_slab(o, dir, inv_dir, best.t);
+    if (slab.y > slab.x) {
+        let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
+                                    pixel_angle);
         if (fh.hit && fh.t < best.t) {
             best = fh;
         }
@@ -14170,7 +14180,7 @@ const DESERT_VOL_W_SAND: f32 = 0.15;
 const DESERT_GEO_W_SAND: f32 = 0.08;
 
 fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
-                          L: DesertLight) -> vec3<f32> {
+                          L: DesertLight, plants: f32) -> vec3<f32> {
     let n = h.normal;
     let light = clamp(h.mat.x, 0.0, 1.0);
     let m = desert_material(light);
@@ -14195,7 +14205,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
         * desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1)
-        * desert_flora_shadow(h.pos, L.sun_dir, fp);
+        * plants;
     let mu = max(dot(n, L.sun_dir), 0.0);
     let sky_view = 0.5 * (1.0 + n.z);
     return albedo * (1.0 / DESERT_PI)
@@ -14285,15 +14295,20 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
     var rgb: vec3<f32>;
     if (h.kind >= 8) {
         rgb = desert_flora_shade(h, dir, fp, L);
-    } else if (h.kind == DESERT_KIND_STONE) {
-        var Ls = L;
-        Ls.sun = L.sun * desert_terrain_shadow(h.pos, sun, fp)
-                 * desert_flora_shadow(h.pos, sun, fp);
-        rgb = desert_lambert(h.mat.xyz, h.normal, Ls);
     } else {
-        let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
-        rgb = desert_ground_radiance(h, dir, fp, L) * (1.0 - far.cover)
-              + far.cover * desert_flora_far_shade(far, dir, L);
+        // The plants' shadow on the ground, walked once for both ground
+        // branches (one inlined copy of the flora's shadow walk, not two).
+        let plants = desert_flora_shadow(h.pos, sun, fp);
+        if (h.kind == DESERT_KIND_STONE) {
+            var Ls = L;
+            Ls.sun = L.sun * desert_terrain_shadow(h.pos, sun, fp) * plants;
+            rgb = desert_lambert(h.mat.xyz, h.normal, Ls);
+        } else {
+            let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
+            rgb = desert_ground_radiance(h, dir, fp, L, plants)
+                  * (1.0 - far.cover)
+                  + far.cover * desert_flora_far_shade(far, dir, L);
+        }
     }
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
@@ -14310,12 +14325,22 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
 // stepping, the footprint floors), not by borrowing the clouds' LOD.
 fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
                        strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
-    let sun = u.sun_dir.xyz;
     let o = desert_camera_origin();
     let h = desert_trace(o, dir, pixel_angle);
     if (!h.hit) {
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
+    return vec4<f32>(desert_shade_pixel(h, o, dir, pixel_angle, frame_index,
+                                        strat_pixel, jitter_amp), h.t);
+}
+
+// One desert hit shaded for this pixel: the sun-march and solar-cone draws
+// fs_main would make, then desert_shade. Shared by both entries, so a plant
+// the refine stage finds is lit exactly as the plain pass lights the ground.
+fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
+                      pixel_angle: f32, frame_index: u32,
+                      strat_pixel: vec2<u32>, jitter_amp: f32) -> vec3<f32> {
+    let sun = u.sun_dir.xyz;
     let jit = jitter_amp * strat1(frame_index, strat_pixel,
                                   STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
     let cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
@@ -14323,9 +14348,33 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
     let sun_shadow = sun_cone_dir(sun, sun_tangent_frame(sun), cone,
                                   SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
                                   * jitter_amp);
-    let rgb = desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir, sun,
-                           sun_shadow, jit, pixel_angle);
-    return vec4<f32>(rgb, h.t);
+    return desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir, sun,
+                        sun_shadow, jit, pixel_angle);
+}
+
+// THE REFINE ENTRY (fs_surface_refine, under DESERT): the near plants the
+// plain pass leaves out, traced in front of what it found. `plain` is the
+// plain pass's (radiance, t) for this pixel, t = 1e30 on a miss; it comes
+// back unchanged unless a plant stands nearer. Early-out first: a pixel
+// whose flora slab begins beyond the refine reach (the flora's own
+// DESERT_FLORA_REFINE_FP_M footprint) leaves with nothing but the read it
+// came in with.
+fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    let o = desert_camera_origin();
+    let inv_dir = 1.0 / cr.dir;
+    let slab = desert_flora_slab(o, cr.dir, inv_dir, plain.w);
+    let reach = DESERT_FLORA_REFINE_FP_M / cr.true_pixel_angle;
+    if (slab.y <= slab.x || slab.x >= reach) {
+        return plain;
+    }
+    let h = desert_flora_refine(o, cr.dir, inv_dir, slab.x, slab.y,
+                                cr.true_pixel_angle);
+    if (!h.hit || h.t >= plain.w) {
+        return plain;
+    }
+    return vec4<f32>(desert_shade_pixel(h, o, cr.dir, cr.true_pixel_angle,
+                                        cr.frame_index, cr.strat_pixel,
+                                        cr.jitter_amp), h.t);
 }
 
 // Mean hemispherical albedo of the ground as a cloud base sees it, for the
@@ -14386,6 +14435,16 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
 fn desert_flora_far_shade(c: DesertCover, dir: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
     return vec3<f32>(0.0);
+}
+
+// The refine stage's plants: those the plain pass (desert_flora_trace)
+// leaves for fs_surface_refine, over [t0, t1] — out to the footprint
+// DESERT_FLORA_REFINE_FP_M, beyond which the plain pass draws them. STUB
+// until the flora section replaces it.
+const DESERT_FLORA_REFINE_FP_M: f32 = 0.10;
+fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                       t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
+    return desert_miss();
 }
 
 // === END DESERT FLORA ===

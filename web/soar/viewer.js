@@ -1424,6 +1424,12 @@ export class Viewer {
     if (this.scene?.city || kind === this.surfaceKind || this._surfacing) {
       return;
     }
+    // A capture or a video render owns the frame it is converging: a ground
+    // swapped under it would change the scene mid-accumulation.
+    if (this._capturing) {
+      this.ui.say("The ground stays put while a capture renders.", 3);
+      return;
+    }
     // A recorded track stands on one ground: its header names it, and its
     // samples' surface positions are fractions of that ground's tile. A
     // switch mid-recording would replay half the flight over the wrong one.
@@ -1450,6 +1456,11 @@ export class Viewer {
       if (this.recorder?.recording) {
         this.ui.say("A flight track stands on one ground — stop the " +
                     "recording (R) before switching.", 4);
+        return;
+      }
+      // …and a capture begun meanwhile keeps the ground it began on.
+      if (this._capturing) {
+        this.ui.say("The ground stays put while a capture renders.", 3);
         return;
       }
       this.renderer.commitSurface(kind, tile);
