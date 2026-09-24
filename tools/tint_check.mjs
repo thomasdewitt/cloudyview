@@ -133,12 +133,17 @@ const expression = `(async () => {
   }
   const out = [];
   const done = new Set();
-  for (const surface of ["ocean", "city", "desert"]) {
+  // The desert's lite ground (DESERT_LITE, the low tiers') is a desert-only
+  // axis: specializeShader refuses it on any other surface.
+  const surfaces = [["ocean", false], ["city", false],
+                    ["desert", false], ["desert", true]];
+  for (const [surface, desertLite] of surfaces) {
     for (const nested of [false, true]) {
       for (const periodic of [false, true]) {
         for (const toneMap of [true, false]) {
           for (const recipe of recipes) {
-            const label = [surface, nested ? "nested" : "flat",
+            const label = [surface + (desertLite ? "-lite" : ""),
+                           nested ? "nested" : "flat",
                            periodic ? "periodic" : "open",
                            toneMap ? "tonemap" : "linear",
                            "steps" + recipe.maxLightSteps
@@ -148,7 +153,8 @@ const expression = `(async () => {
             try {
               code = R.specializeShader(raymarch, {
                 ...recipe, periodic, nested, toneMap,
-                city: surface === "city", desert: surface === "desert" });
+                city: surface === "city", desert: surface === "desert",
+                ...(desertLite ? { desertLite } : {}) });
             } catch (err) {
               out.push({ label, errors: ["specialize: " + err.message],
                          warnings: [] });
