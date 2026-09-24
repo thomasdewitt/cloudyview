@@ -281,7 +281,7 @@ _JS = textwrap.dedent("""
         bmin, bmax, dtView: 40, dtLight: 40, periodic: true,
         oceanZ: 0.0, oceanReflectance: [0.002, 0.0045, 0.0126],
         oceanFifDx: 90.0, oceanTileExtent: TILE, oceanEnabled: true,
-        oceanMaxLod: 8, city, cityOffsetM: OFFSET,
+        oceanMaxLod: 8, city, cityOffsetM: OFFSET, clockPeriodS: 1638.4,
       });
       const view = (camera) => ({
         camera, outputSize: [64, 36], renderSize: [64, 36],

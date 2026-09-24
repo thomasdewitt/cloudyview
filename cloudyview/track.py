@@ -628,6 +628,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         ocean_tile_extent=tile,
         ocean_max_lod=int(meta["mips"]) - 1,
         surface_period_m=period,
+        **({"clock_period_s": float(meta["clock_period_s"])}
+           if s.surface == "ocean" else {}),
         nested=len(levels) > 1,
         surface=s.surface,
         **({"city_tile_offset_m": s.city_tile_offset_m}

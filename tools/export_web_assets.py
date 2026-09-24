@@ -54,6 +54,10 @@ SEA_SEED = 20260923
 SEA_SLOPE_SCALE = (0.75, 0.40)
 # The surface frame folds at this many tiles: the swell's period.
 SEA_SURFACE_TILES = 16
+# The sea's period in time (raymarch.wgsl SEA_CLOCK_PERIOD_S): a whole number
+# of the tile's loops and of the detail octave's (loop / 3), and the swell's
+# frequencies are rounded to it in the shader.
+SEA_CLOCK_PERIOD_S = 1638.4
 
 
 def _volume_aabb(field: CloudField):
@@ -166,6 +170,7 @@ def export_ocean() -> dict:
         # The swell trains are periodic here, not at the tile; the surface
         # frame folds at this period (raymarch.wgsl SWELL_*).
         "surface_period_m": SEA_SURFACE_TILES * ocean_fif.N * ocean_fif.DX_M,
+        "clock_period_s": SEA_CLOCK_PERIOD_S,
         "slope_scale": list(SEA_SLOPE_SCALE),
         "foam_max_coverage": ocean_fif.FOAM_MAX_COVERAGE,
         "seed": SEA_SEED,

@@ -105,18 +105,18 @@ def read(tile_dir: Path, schema: str) -> tuple:
 
 
 def foam_far_field(lace_cover, opacity_old: float, opacity_fresh: float,
-                   tint_old) -> tuple:
+                   tint_old, fresh_k: float) -> tuple:
     """The whitecaps' far-field means (raymarch.wgsl SEA_FOAM_FAR_*).
 
     Freshness f is uniform over the foam a gate keeps; the lace keeps
-    lace_cover[k] at freshness 1 - k/4, linearly between (as the shader
-    reads it), and opacity and tint run linearly from old (f = 0) to fresh
+    lace_cover[k] at index k = fresh_k + (4 - fresh_k)(1 - f), linearly
+    between the five measured points (as the shader reads it), and opacity and tint run linearly from old (f = 0) to fresh
     (f = 1, white). Returns (mean of lace x opacity, the cover-weighted mean
     tint) — Simpson on a fine grid of an integrand that is piecewise cubic
     between the five points, so exact to rounding.
     """
     f = np.linspace(0.0, 1.0, 4 * 256 + 1)
-    k = 4.0 * (1.0 - f)
+    k = fresh_k + (4.0 - fresh_k) * (1.0 - f)
     mask = np.interp(k, np.arange(5.0), np.asarray(lace_cover, np.float64))
     opacity = opacity_old + (opacity_fresh - opacity_old) * f
     tint = (np.asarray(tint_old, np.float64)[None, :] * (1.0 - f)[:, None]

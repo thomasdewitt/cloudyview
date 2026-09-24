@@ -687,6 +687,7 @@ export async function loadFileScene(
       oceanFifDx: oceanTile.dx,
       oceanTileExtent: oceanTile.tileExtent,
       surfacePeriod: oceanTile.surfacePeriod,
+      clockPeriod: oceanTile.clockPeriod,
       oceanMaxLod: oceanTile.maxLod,
       // The minimap always shows the OUTER domain; the nest is drawn on it as
       // a footprint rectangle, which is why only this level's map is kept.

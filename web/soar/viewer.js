@@ -1879,11 +1879,11 @@ export class Viewer {
    * throws, and fails the capture with it. A meter that saw no light keeps
    * DEFAULT_EXPOSURE, the live loop's own ignore rule.
    */
-  async _meterCaptureExposure(look, size) {
+  async _meterCaptureExposure(look, size, overrides = {}) {
     if (!look.meter) return look.exposure;
     for (;;) {
       const highlight = await this.renderer.meterLuminance(
-        size, this._captureViewKwargs(look));
+        size, { ...this._captureViewKwargs(look), ...overrides });
       if (highlight !== null) {
         return highlight > 0
           ? autoExposureTarget(highlight, this.toneMapWhitePoint)
@@ -2375,7 +2375,11 @@ export class Viewer {
       // a per-frame meter would flicker, and a video wants a still exposure
       // the way a camera on a tripod does.
       const look = this._captureLook(this.captureVideoTier);
-      look.exposure = await this._meterCaptureExposure(look, size);
+      // Metered at frame 0's own pose and clock — not the live camera,
+      // which sits wherever the flight ended.
+      look.exposure = await this._meterCaptureExposure(
+        look, size, { camera: this._trackPose(frames[0]),
+                      sceneTime: frames[0].sceneTime });
 
       target = createOfflineTarget(this.device, size, "soar-video");
       // One staging buffer for the whole video, like the target: made per
@@ -2388,27 +2392,7 @@ export class Viewer {
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
         if (this._videoAbort) throw new Error("Cancelled.");
-        const position = cameraWorldOrigin(
-          frames[i].position, this.scene.bmin, this.scene.bmax);
-        // The frame's surface offset rides on the pose the same way the
-        // camera origin does — packUniforms derives row 24 from a pose
-        // that carries a surfacePosition (world metres, like the live
-        // camera's). A v1 track has no surface frame: over a city the
-        // frame's world xy folds against the static offset instead, and
-        // over the day ocean the null pose frame makes packUniforms write
-        // the static offset folded (exactly 0.0) — the un-shifted surface
-        // either way, which is what those recordings meant.
-        const sp = frames[i].surfacePosition;
-        const pose = {
-          position,
-          azimuth: frames[i].azimuth,
-          elevation: frames[i].elevation,
-          fov: frames[i].fov,
-          surfacePosition: sp
-            ? [sp[0] * this.scene.surfacePeriod,
-               sp[1] * this.scene.surfacePeriod]
-            : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
-        };
+        const pose = this._trackPose(frames[i]);
         const overlays = this.captureOverlays
           ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze,
                                   knocksDue(knocks,
@@ -2464,6 +2448,31 @@ export class Viewer {
       this._videoAbort = false;
       this._lastTime = performance.now();
     }
+  }
+
+  /**
+   * The camera pose a resampled track frame renders from. The frame's
+   * surface offset rides on the pose the same way the camera origin does —
+   * packUniforms derives row 24 from a pose that carries a surfacePosition
+   * (world metres, like the live camera's). A v1 track has no surface
+   * frame: over a city the frame's world xy folds against the static offset
+   * instead, and over the day ocean the null pose frame makes packUniforms
+   * write the static offset folded (exactly 0.0) — the un-shifted surface
+   * either way, which is what those recordings meant.
+   */
+  _trackPose(frame) {
+    const position = cameraWorldOrigin(
+      frame.position, this.scene.bmin, this.scene.bmax);
+    const sp = frame.surfacePosition;
+    return {
+      position,
+      azimuth: frame.azimuth,
+      elevation: frame.elevation,
+      fov: frame.fov,
+      surfacePosition: sp
+        ? [sp[0] * this.scene.surfacePeriod, sp[1] * this.scene.surfacePeriod]
+        : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
+    };
   }
 
   /** The overlays an offline frame draws, laid out for that frame's size.
@@ -2962,8 +2971,10 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
-      // The scene clock the view was held at: where the sea was.
-      "--time", n(this.sceneTime),
+      // The scene clock the view was held at: where the sea was. Only the
+      // sea reads it (row 24.z is 0 elsewhere), so only the sea writes it.
+      ...(this.scene.city || this.scene.desert
+          ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree

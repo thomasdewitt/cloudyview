@@ -9,6 +9,7 @@
  "loop_s": 25.6,
  "tile_extent_m": 102.4,
  "surface_period_m": 1638.4,
+ "clock_period_s": 1638.4,
  "slope_scale": [
   0.75,
   0.4

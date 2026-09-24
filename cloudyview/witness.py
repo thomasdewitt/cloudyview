@@ -392,6 +392,8 @@ def render_nested(
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1,
         surface_period_m=surface_period_m(surface, meta),
+        **({"clock_period_s": float(meta["clock_period_s"])}
+           if surface == "ocean" else {}),
         nested=len(levels) > 1,
         surface=surface,
         **state_kwargs,

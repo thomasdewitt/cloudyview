@@ -315,7 +315,13 @@ def test_the_surface_round_trips_to_the_uniforms(
     # the scene clock it was held at.
     assert tuple(u[24][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
-    assert u[24][2] == np.float32(SCENE_TIME)
+    # The clock is the sea's alone: an ocean still carries it, a city still
+    # neither writes --time nor packs one.
+    if kind == "ocean":
+        assert u[24][2] == np.float32(SCENE_TIME)
+    else:
+        assert u[24][2] == 0.0
+        assert "--time" not in argv
     assert ("--surface-origin" in argv) == drift
     # Row 0: the camera, through worldToRelative and back.
     assert u[0][:3] == pytest.approx(emitted["position"], rel=1e-9, abs=1e-6)

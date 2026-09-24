@@ -83,8 +83,9 @@ def test_every_swell_train_is_whole_cycles_across_the_period():
         assert n == pytest.approx(round(n), abs=1e-5)
         assert float(kk) == pytest.approx(math.hypot(float(kx), float(ky)),
                                           rel=1e-6)
-        assert float(omega) == pytest.approx(math.sqrt(9.81 * float(kk)),
-                                             rel=1e-6)
+        # Deep water, to within the clock period's frequency quantum.
+        assert abs(float(omega) - math.sqrt(9.81 * float(kk))) <= (
+            math.pi / _wgsl_scalar(src, "SEA_CLOCK_PERIOD_S") + 1e-7)
 
 
 def test_the_foam_rank_covers_exactly_what_the_gate_asks(sea):
@@ -165,10 +166,34 @@ def test_the_whitecaps_far_field_is_their_resolved_mean(sea):
         src).group(1).split(",")]
     cover, mean_tint = sea_tile.foam_far_field(
         meta["lace_cover"], _wgsl_scalar(src, "SEA_FOAM_OPACITY_OLD"),
-        _wgsl_scalar(src, "SEA_FOAM_OPACITY_FRESH"), tint)
+        _wgsl_scalar(src, "SEA_FOAM_OPACITY_FRESH"), tint,
+        _wgsl_scalar(src, "SEA_LACE_FRESH_K"))
     assert _wgsl_scalar(src, "SEA_FOAM_FAR_COVER") == pytest.approx(
         cover, abs=1e-6)
     far_tint = [float(v) for v in re.search(
         r"const SEA_FOAM_FAR_TINT: vec3<f32> = vec3<f32>\(([^)]*)\);",
         src).group(1).split(",")]
     assert far_tint == pytest.approx(list(mean_tint), abs=1e-6)
+
+
+def test_the_sea_is_periodic_in_time_at_its_clock_period(sea):
+    """The hosts wrap the clock at clock_period_s, which is only invisible if
+    everything the sea draws repeats there: the tile's loop, the detail
+    octave's (loop / SEA_DETAIL_TIME_SCALE) and every swell frequency."""
+    import math
+    meta, _ = sea
+    src = SHADER.read_text()
+    T = meta["clock_period_s"]
+    assert _wgsl_scalar(src, "SEA_CLOCK_PERIOD_S") == pytest.approx(T)
+    loop = meta["loop_s"]
+    scale = _wgsl_scalar(src, "SEA_DETAIL_TIME_SCALE")
+    assert scale == int(scale)
+    for p in (loop, loop / scale):
+        assert T / p == pytest.approx(round(T / p), abs=1e-9)
+    omegas = re.findall(
+        r"sea_swell_train\(&s, vec2<f32>\([-0-9.]+, [-0-9.]+\), "
+        r"[0-9.]+, ([0-9.]+),", src)
+    assert len(omegas) == 16
+    for om in omegas:
+        cycles = float(om) * T / (2.0 * math.pi)
+        assert cycles == pytest.approx(round(cycles), abs=1e-4)
