@@ -17397,17 +17397,19 @@ fn df_medium_hit(ch: vec2<f32>, ta: f32, tb: f32, sigma: f32,
 const DF_CREO_TWIGS: i32 = 8;
 const DF_CREO_CLUMP_DS: f32 = 0.022;
 const DF_CREO_CLUMP_R: f32 = 0.022;
-const DF_CREO_LEAVES: i32 = 10;
+const DF_CREO_LEAVES: i32 = 12;
 const DF_CREO_LEAF_HL: f32 = 0.0075;   // leaflet half-length (m)
-const DF_CREO_LEAF_HW: f32 = 0.0034;   // leaflet half-width (m)
+const DF_CREO_LEAF_HW: f32 = 0.0050;   // leaflet half-width (m)
 const DF_CREO_MAX_CLUMPS: i32 = 6;     // per twig per ray
 const DF_CREO_EXACT_FP0: f32 = 0.007;
 const DF_CREO_EXACT_FP1: f32 = 0.012;
 // Leaf-area optical depth per metre inside a far lobe. Measured, not
 // derived: the value at which the lobes average to what the exact leaves
 // average to (tools/desert_flora_harness.py, view creo_5m, each form forced
-// in turn with --patch).
-const DF_CREO_LOBE_SIGMA: f32 = 0.28;
+// in turn with --patch; within 2% on the crown's bands). The foliage is
+// the reference's 40-60 % see-through bush: at ten 3.4 mm leaflets a clump
+// it was 75-85 %, and so was every form calibrated to it.
+const DF_CREO_LOBE_SIGMA: f32 = 0.55;
 
 const DF_CREO_LEAF: vec3<f32> = vec3<f32>(0.100, 0.150, 0.016);
 const DF_CREO_LEAF_TRANS: vec3<f32> = vec3<f32>(0.060, 0.110, 0.010);
@@ -19728,7 +19730,9 @@ const DF_FAR_BAR_R: f32 = 0.24;
 const DF_FAR_CREO_A: f32 = 0.70;
 const DF_FAR_CREO_ZC: f32 = 0.78;
 const DF_FAR_CREO_B: f32 = 0.62;
-const DF_FAR_CREO_KAPPA: f32 = 0.30;  // crown opacity (the envelope medium)
+// Crown opacity: measured, the value at which the field, forced from the
+// camera out, averages to the explicit lobes on view cruise30 (within 1%).
+const DF_FAR_CREO_KAPPA: f32 = 0.28;
 const DF_FAR_BURS_A: f32 = 0.30;
 const DF_FAR_BURS_ZC: f32 = 0.28;
 const DF_FAR_BURS_B: f32 = 0.26;
