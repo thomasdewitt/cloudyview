@@ -8,20 +8,111 @@
 // or Safari could build while every test passed. A green suite says nothing
 // about whether a browser can compile the shader; this does.
 //
-//   node tools/tint_check.mjs BASE_URL [CDP_PORT]
+//   node tools/tint_check.mjs --web DIR [--cdp PORT]
+//   node tools/tint_check.mjs BASE_URL --expect FILE [--cdp PORT]
 //
-// BASE_URL is a static server over a checkout's web/ directory (the page that
-// is driven imports soar/renderer.js from it, so the specialization is the
-// app's own); CDP_PORT (default 9333) is a Chrome started with
+// --web serves DIR (a checkout's web/ directory) itself, on a port the
+// kernel picks, so no other session's server can answer in its place. A
+// BASE_URL someone else serves is accepted only with --expect FILE, the
+// raymarch.wgsl it must be serving. Either way the served shader is fetched
+// and compared byte for byte with the local one before anything compiles —
+// a port collision once had the gate compile another session's tree and
+// report green (2026-09-23) — and its hash is printed for a merge request to
+// quote. The page imports soar/renderer.js from the served tree, so the
+// specialization is the app's own. --cdp (default 9333) is a Chrome with
 // --remote-debugging-port and a hardware WebGPU adapter (on the Fedora box:
 // --enable-features=Vulkan --ozone-platform=x11). Compile only — nothing is
-// drawn. Exit 0 clean, 1 on any compile error, 2 when it cannot run at all.
+// drawn.
+//
+// Exit 0 clean; 1 on any compile error; 2 when it cannot run at all (no
+// Chrome, no adapter); 3 when the served shader is not the expected one.
 
-const [base, cdpPort = "9333"] = process.argv.slice(2);
-if (!base) {
-  console.error("usage: node tools/tint_check.mjs BASE_URL [CDP_PORT]");
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
+import { extname, join, resolve, sep } from "node:path";
+
+const argv = process.argv.slice(2);
+const option = (name) => {
+  const i = argv.indexOf(name);
+  if (i < 0) return null;
+  const v = argv[i + 1];
+  argv.splice(i, 2);
+  return v;
+};
+const webDir = option("--web");
+let expectFile = option("--expect");
+const cdpPort = option("--cdp") ?? "9333";
+let base = argv[0] ?? null;
+if (!webDir === !base) {
+  console.error("usage: node tools/tint_check.mjs --web DIR [--cdp PORT]\n" +
+                "       node tools/tint_check.mjs BASE_URL --expect FILE " +
+                "[--cdp PORT]");
   process.exit(2);
 }
+if (base && !expectFile) {
+  console.error("tint_check: a BASE_URL needs --expect FILE (the raymarch.wgsl " +
+                "it must be serving); prefer --web DIR, which serves it " +
+                "here on a fresh port.");
+  process.exit(2);
+}
+
+const TYPES = { ".js": "text/javascript", ".mjs": "text/javascript",
+                ".wgsl": "text/plain", ".json": "application/json",
+                ".html": "text/html", ".css": "text/css" };
+let server = null;
+if (webDir) {
+  const root = resolve(webDir);
+  server = createServer(async (req, res) => {
+    try {
+      const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+      if (path === "/") {
+        // The page the modules are imported into. It must be a real 200
+        // document: Chrome replaces an empty 404 with its own error page,
+        // which has no WebGPU.
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><title>tint_check</title>");
+        return;
+      }
+      const file = resolve(join(root, path));
+      if (file !== root && !file.startsWith(root + sep)) throw new Error("outside");
+      // Symlinks are followed: web/soar/raymarch.wgsl is one, into the
+      // package, and that is the file the app really serves.
+      const body = await readFile(await realpath(file));
+      res.writeHead(200, { "Content-Type": TYPES[extname(file)] ?? "text/html" });
+      res.end(body);
+    } catch {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  base = `http://127.0.0.1:${server.address().port}`;
+  expectFile = join(root, "soar", "raymarch.wgsl");
+}
+const done = (code) => { server?.close(); process.exit(code); };
+
+// The served shader must be the local one, byte for byte.
+const sha = (buf) => createHash("sha256").update(buf).digest("hex");
+const local = await readFile(await realpath(expectFile));
+let served;
+try {
+  const r = await fetch(`${base}/soar/raymarch.wgsl`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  served = Buffer.from(await r.arrayBuffer());
+} catch (err) {
+  console.error(`tint_check: could not fetch ${base}/soar/raymarch.wgsl ` +
+                `(${err.message})`);
+  done(2);
+}
+if (sha(served) !== sha(local)) {
+  console.error(`tint_check: ${base} serves a raymarch.wgsl that is NOT ` +
+                `${expectFile} (served sha256 ${sha(served).slice(0, 16)}, ` +
+                `local ${sha(local).slice(0, 16)}). Another tree is being ` +
+                "served on that port; nothing was compiled.");
+  done(3);
+}
+const shaderHash = sha(served).slice(0, 16);
 
 async function page(port) {
   let targets;
@@ -29,7 +120,7 @@ async function page(port) {
     targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
   } catch (err) {
     console.error(`tint_check: no Chrome DevTools endpoint on port ${port}`);
-    process.exit(2);
+    done(2);
   }
   // A tab of its own, closed at the end: the same Chrome may be driving a
   // QA pass in its other tabs, and navigating theirs would break it.
@@ -157,12 +248,12 @@ await close();
 if (r.exceptionDetails) {
   console.error("tint_check: " + (r.exceptionDetails.exception?.description
                                   ?? r.exceptionDetails.text));
-  process.exit(2);
+  done(2);
 }
 const result = r.result.value;
 if (result.fatal) {
   console.error(`tint_check: ${result.fatal}`);
-  process.exit(2);
+  done(2);
 }
 let failed = 0;
 const seen = new Set();
@@ -177,5 +268,5 @@ for (const m of result.out) {
   }
 }
 console.log(`tint_check: ${result.out.length} modules, ${failed} failed ` +
-            `(${base}; ${result.adapter})`);
-process.exit(failed ? 1 : 0);
+            `(raymarch.wgsl sha256 ${shaderHash}; ${result.adapter})`);
+done(failed ? 1 : 0);
