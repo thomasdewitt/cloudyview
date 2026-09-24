@@ -18,9 +18,10 @@
 // top third. Its lumps are value noise measured in LOCAL RADII — across the
 // plume by d / r, up it by the integral of dz / r — so an eddy is always
 // the same fraction of the plume that carries it: small and tight at the
-// cover, large and soft aloft. That is what "advected upward in shape"
-// means for a field that has no clock yet; it is static, and it will not
-// need rewriting when a clock arrives (offset zeta by the rise time).
+// cover, large and soft aloft. The lumps rise on the scene clock
+// (scene_time, frozen while the view is parked) at a fixed rate in zeta:
+// in metres that is slow at the cover and faster aloft, where each eddy is
+// larger — the plume billows up and opens out rather than scrolling.
 //
 // THE LIGHT is all it has. Steam is white (single-scattering albedo ~1), so
 // its colour is entirely what lights it: the sodium lamp heads through
@@ -94,6 +95,9 @@ const cc_manholesteam_WIND: vec2<f32> = vec2<f32>(0.4472136, 0.8944272);
 const cc_manholesteam_R0_COVER: f32 = 0.9;
 const cc_manholesteam_H_MIN: f32 = 6.0;    // plume height above its source
 const cc_manholesteam_H_MAX: f32 = 12.0;
+// How fast the lumps climb, in zeta per second of scene clock: a lump at
+// the cover (radius r0 ~0.3 m) rises ~0.35 m/s, one a metre across ~1.2 m/s.
+const cc_manholesteam_RISE_RATE: f32 = 1.2;
 // Radius growth per metre of rise. 0.12 is a pure plume in still air; a
 // plume bent over by a crosswind entrains faster, and steam also sheds
 // visible mass as it mixes, which the thinning law below carries.
@@ -311,7 +315,8 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     }
     // Lumps in local radii: across by q / r, up by zeta = integral of
     // dz / r = ln(r / r0) / SPREAD.
-    let zeta = log(r / s.r0) / cc_manholesteam_SPREAD;
+    let zeta = log(r / s.r0) / cc_manholesteam_SPREAD
+             - cc_manholesteam_RISE_RATE * scene_time();
     var x = vec3<f32>(1.6 * q / r + s.seed, 1.3 * zeta);
     var n = 0.0;
     var amp = 0.5;
