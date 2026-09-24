@@ -64,6 +64,7 @@ from .soar_host import (
     check_surface,
     desert_relief_m,
     surface_cell_m,
+    surface_period_m,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,7 @@ def render_nested(
     surface_origin: Optional[Sequence[float]] = None,
     surface: str = "ocean",
     city_offset: Optional[Sequence[float]] = None,
+    scene_time: float = 0.0,
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
@@ -390,6 +392,7 @@ def render_nested(
         ocean_fif_dx=surface_cell_m(surface, meta),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1,
+        surface_period_m=surface_period_m(surface, meta),
         nested=len(levels) > 1,
         surface=surface,
         **({"desert_relief_m": desert_relief_m(meta)}
@@ -420,6 +423,7 @@ def render_nested(
         view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
         light_cache=bool(tier and tier["light_cache"]),
         sky_probe=(tier["sky_probe"] if tier else True),
+        scene_time=float(scene_time),
     )
     if tier and tier["light_cache"]:
         renderer.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)
@@ -491,6 +495,7 @@ def witness(
     surface_origin: Optional[Sequence[float]] = None,
     surface: str = "ocean",
     city_offset: Optional[Sequence[float]] = None,
+    scene_time: float = 0.0,
     return_linear: bool = False,
     verbose: bool = False,
 ) -> np.ndarray:
@@ -538,6 +543,10 @@ def witness(
         The city tile's world offset in metres, which picks the district
         standing under the field. Required with surface="city" and refused
         otherwise; soar's cyberpunk mode flies (8100, -44190).
+    scene_time : float, optional
+        The scene clock in seconds: where the moving sea is in its motion
+        (uniform row 24.z). 0 by default; soar's reproduction commands write
+        the clock the still was taken at.
     return_linear : bool, optional
         Compile the tone map out and return unbounded linear HDR radiance
         instead of an encoded image. This is what soar's auto-exposure
@@ -593,7 +602,7 @@ def witness(
         haze=haze, haze_height_dependent=haze_height_dependent, lod=lod,
         periodic=periodic, accumulate=accumulate, quality=quality,
         surface_origin=surface_origin, surface=surface,
-        city_offset=city_offset,
+        city_offset=city_offset, scene_time=scene_time,
         return_linear=return_linear, verbose=verbose)
 
 
@@ -672,6 +681,7 @@ def main(filename: str, output: str = None,
          surface_origin: list = None,
          surface: str = None,
          city_offset: list = None,
+         scene_time: float = None,
          periodic: bool = False,
          nest_group: str = None,
          liquid_water_var: str = None,
@@ -735,6 +745,8 @@ def main(filename: str, output: str = None,
         look_kwargs['surface'] = surface
     if city_offset is not None:
         look_kwargs['city_offset'] = city_offset
+    if scene_time is not None:
+        look_kwargs['scene_time'] = scene_time
 
     try:
         if nest_group and ice:
@@ -988,6 +1000,11 @@ def cli():
                              "offset in metres, which picks the district "
                              "under the field. Cyberpunk mode flies "
                              "8100 -44190; soar writes the flown one here")
+    parser.add_argument("--time", type=float, metavar="SECONDS",
+                        dest="scene_time",
+                        help="The scene clock: where the moving sea is in "
+                             "its motion (default 0). Soar writes the clock "
+                             "the still was taken at")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",
@@ -1016,6 +1033,7 @@ def cli():
          surface_origin=args.surface_origin,
          surface=args.surface,
          city_offset=args.city_offset,
+         scene_time=args.scene_time,
          haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
          nest_group=args.nest_group,

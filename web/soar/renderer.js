@@ -290,8 +290,11 @@ export function shaderVariantKey(spec) {
 export class Renderer {
   /**
    * `scene` supplies the resident GPU resources and the field geometry:
-   * {volumeView, nestView, oceanView, bmin, bmax, minVoxelM, minVoxelNestM,
-   *  nested, nestBmin, nestBmax, oceanFifDx, oceanTileExtent, oceanMaxLod}.
+   * {volumeView, nestView, oceanView, seaView, bmin, bmax, minVoxelM,
+   *  minVoxelNestM, nested, nestBmin, nestBmax, oceanFifDx, oceanTileExtent,
+   *  surfacePeriod, oceanMaxLod}. oceanView (binding 3, the city's or the
+   *  desert's tile) and seaView (binding 9, the moving sea) are each null
+   *  on the scenes that do not read them.
    */
   constructor(device, shaderSource, scene, { canvasFormat }) {
     this.device = device;
@@ -378,6 +381,8 @@ export class Renderer {
           texture: { sampleType: "float", viewDimension: "3d" } },
         { binding: 8, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
+        { binding: 9, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d-array" } },
       ],
     });
     // Group 1: the surface pre-pass's target, which only the march reads.
@@ -435,6 +440,17 @@ export class Renderer {
       { texture: this._iceDummy }, new Uint8Array([0]),
       { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
     this.iceMode = false;
+    // Bindings 3 and 9 are the two surface slots: the city's or the
+    // desert's tile at 3, the moving sea at 9. A scene fills the one it
+    // reads; the other gets this 1x1 zero stand-in, viewed as a 2D texture
+    // or as a one-layer array.
+    this._surfaceDummy = device.createTexture({
+      label: "soar-surface-dummy", size: [1, 1, 1], format: "rgba16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this._surfaceDummy }, new Uint16Array(4),
+      { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
@@ -518,8 +534,10 @@ export class Renderer {
 
     // The march only ever targets the float intermediate now; everything
     // reaches the canvas through the (dithering) present pass. Awaited, so a
-    // pipeline that fails to build rejects here with its own message.
+    // pipeline that fails to build rejects here with its own message — and
+    // with it the scene's surface pre-pass, which every march needs.
     await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
+    await this._surfacePipeline(this.lighting);
     this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
@@ -529,6 +547,16 @@ export class Renderer {
     }
     this._prefetchArmed = true;
     this.prefetchPipelines();
+  }
+
+  /** Binding 3's stand-in over the ocean, whose sea is at binding 9. */
+  _tileDummyView() {
+    return this._surfaceDummy.createView();
+  }
+
+  /** Binding 9's stand-in under the city and the desert: one layer. */
+  _seaDummyView() {
+    return this._surfaceDummy.createView({ dimension: "2d-array" });
   }
 
   /**
@@ -547,7 +575,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: this.uniformBuf } },
         { binding: 1, resource: scene.volumeView },
         { binding: 2, resource: this.volSampler },
-        { binding: 3, resource: scene.oceanView },
+        { binding: 3, resource: scene.oceanView ?? this._tileDummyView() },
         { binding: 4, resource: this.oceanSampler },
         { binding: 5, resource: scene.nestView },
         { binding: 6, resource: this.volWrapSampler },
@@ -555,6 +583,7 @@ export class Renderer {
             (this._lightTauTex ?? this._lightTauDummy).createView() },
         { binding: 8, resource:
             scene.iceView ?? this._iceDummy.createView() },
+        { binding: 9, resource: scene.seaView ?? this._seaDummyView() },
       ],
     });
   }
@@ -601,9 +630,14 @@ export class Renderer {
     const relief = kind === "desert" ? desertReliefM(tile.meta) : null;
     const s = this.scene;
     s.desert = kind === "desert";
+    // The desert's tile at binding 3, or the sea at binding 9 — see
+    // loadOceanTile / loadSea. Whichever this surface does not use is
+    // null and binds the stand-in.
     s.oceanView = tile.view;
+    s.seaView = tile.seaView ?? null;
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
+    s.surfacePeriod = tile.surfacePeriod;
     s.oceanMaxLod = tile.maxLod;
     s.desertReliefM = relief;
     this.prefetchPipelines();
@@ -1033,9 +1067,13 @@ export class Renderer {
     // each passing state would compile variants no frame will use — each
     // compile a chance at bug 22.
     if (!this._prefetchArmed) return;
+    // The current tier first: compiles run roughly in request order, and
+    // the variant a frame is waiting on must not queue behind a neighbour's.
     const order = K.QUALITY_TIER_NAMES;
     const at = order.indexOf(this.qualityTier);
-    for (const tier of order.slice(Math.max(0, at - 1), at + 2)) {
+    const reachable = [this.qualityTier, order[at - 1], order[at + 1]]
+      .filter(Boolean);
+    for (const tier of reachable) {
       for (const cacheReady of [true, false]) {
         const lighting = this._lightingFor(tier, cacheReady);
         try {
@@ -1277,6 +1315,7 @@ export class Renderer {
     this._outputH = outputH;
     const renderSize = renderTargetSize(outputSize, this.renderScale);
     const targets = await this._targetsFor(renderSize[0], renderSize[1]);
+    await this._ensureSurfaceTarget(targets);
     // The march pipeline for the state as it stands after the LAST await:
     // from here to the first submit nothing awaits, so the specialization,
     // the lighting method and the uniforms below all describe one moment.
@@ -1296,13 +1335,14 @@ export class Renderer {
       lighting = this.lighting;
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
       const sp = this._surfacePipeline(lighting);
-      const waiting = isPending(p) ? p : (sp && isPending(sp) ? sp : null);
-      if (!waiting) { rayPipeline = p; surfacePipeline = sp; break; }
+      const pending = [p, sp].filter((q) => q && isPending(q));
+      if (pending.length === 0) { rayPipeline = p; surfacePipeline = sp; break; }
       if (!waitForPipeline) {
-        waiting.catch(() => {});  // recorded; thrown when next requested
+        // Recorded; thrown when next requested.
+        for (const q of pending) q.catch(() => {});
         return false;
       }
-      await waiting;
+      await Promise.all(pending);
     }
     const targetView = typeof target === "function" ? target() : target;
 
@@ -1320,12 +1360,29 @@ export class Renderer {
     const state = this._sceneState();
     // The effective flags, not the wishes: a wanted-but-unbaked cache reads
     // the live march. Row 23 is in the scene key, so a bake completing, a
-    // rung switching methods, or an override restarts accumulation itself.
+    // rung switching methods or an override is a scene change: never
+    // averaged with the old method, and with a parked camera a clean
+    // restart (see methodKey below).
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
     });
+    // A change of lighting method under a parked camera restarts the
+    // average instead of blending into it. Any scene-key change with a
+    // still camera takes the one-frame motion blend (_accumulationPlan),
+    // which suits a value that glides — exposure, haze — but a method switch
+    // is a step: a bake finishing, a tier changing methods or a K/J toggle
+    // replaces one lighting model with another, and the blend would hold a
+    // ~42% ghost of the old one for a frame before the average restarted.
+    // In flight the key changes every frame anyway, and the motion blend is
+    // the point, so a moving camera is left to it.
+    const methodKey = `${lighting.lightCache}|${lighting.skyProbe}`;
+    if (this._accumMethod !== undefined && methodKey !== this._accumMethod
+        && !this._cameraMoving) {
+      this._resetAccumulation();
+    }
+    this._accumMethod = methodKey;
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
@@ -1496,7 +1553,7 @@ export class Renderer {
   _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfacePipeline) {
     let surfaceGroup = this.surfaceDummyGroup;
     if (surfacePipeline) {
-      const surface = this._surfaceTargetFor(targets);
+      const surface = targets.surface;
       const sp = encoder.beginRenderPass({
         colorAttachments: [{
           view: surface.view, loadOp: "clear", storeOp: "store",
@@ -1524,30 +1581,34 @@ export class Renderer {
   }
 
   /**
-   * A target set's surface target and the march's group 1 over it, made on
-   * first need: a set is pooled by size, and the scene can gain a traced
-   * surface after the set was made (commitSurface, ocean -> desert). 16 bytes
-   * a pixel.
+   * Give a target set its surface target and the march's group 1 over it,
+   * if the scene traces a surface and the set has none yet: a set is pooled
+   * by size, and the scene can gain a traced surface after the set was made
+   * (setSurface, ocean -> desert). 16 bytes a pixel, allocated under the
+   * same out-of-memory guard as the rest of the set. Awaited by every caller
+   * BEFORE it resolves pipelines and encodes, so _encodeMarch only ever
+   * reads it.
    */
-  _surfaceTargetFor(targets) {
-    if (!targets.surface) {
-      const tex = this.device.createTexture({
-        label: `soar-surface-${targets.w}x${targets.h}`,
-        size: [targets.w, targets.h], format: SURFACE_FORMAT,
-        usage: GPUTextureUsage.RENDER_ATTACHMENT
-             | GPUTextureUsage.TEXTURE_BINDING,
+  async _ensureSurfaceTarget(targets) {
+    if (!this._hasSurfacePass() || targets.surface) return;
+    const label = `soar-surface-${targets.w}x${targets.h}`;
+    targets.surface = await guardAllocation(
+      this.device, `${targets.w}x${targets.h} surface target`,
+      targets.w * targets.h * 16, () => {
+        const tex = this.device.createTexture({
+          label, size: [targets.w, targets.h], format: SURFACE_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+               | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        return {
+          tex,
+          view: tex.createView(),
+          group: this.device.createBindGroup({
+            label, layout: this.surfaceLayout,
+            entries: [{ binding: 0, resource: tex.createView() }],
+          }),
+        };
       });
-      targets.surface = {
-        tex,
-        view: tex.createView(),
-        group: this.device.createBindGroup({
-          label: `soar-surface-${targets.w}x${targets.h}`,
-          layout: this.surfaceLayout,
-          entries: [{ binding: 0, resource: tex.createView() }],
-        }),
-      };
-    }
-    return targets.surface;
   }
 
   /**
@@ -1729,16 +1790,29 @@ export class Renderer {
           { binding: 0, resource: { buffer: this._bakeUniformBuf } },
           { binding: 1, resource: this.scene.volumeView },
           { binding: 2, resource: this.volSampler },
-          { binding: 3, resource: this.scene.oceanView },
+          { binding: 3, resource:
+              this.scene.oceanView ?? this._tileDummyView() },
           { binding: 4, resource: this.oceanSampler },
           { binding: 5, resource: this.scene.nestView },
           { binding: 6, resource: this.volWrapSampler },
           { binding: 7, resource: this._lightTauTex.createView() },
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
+          { binding: 9, resource:
+              this.scene.seaView ?? this._seaDummyView() },
         ],
       }),
     };
+  }
+
+  /**
+   * The bake pipeline's compile while it is still in flight, else null — for
+   * a caller that must finish a bake synchronously-in-spirit (a capture) and
+   * so has to yield until the pipeline exists. Throws a failed compile.
+   */
+  bakePipelinePending() {
+    const pipeline = this._bakePipeline();
+    return isPending(pipeline) ? pipeline : null;
   }
 
   /** Bake up to `slices` planes; true when the cache became complete. */
@@ -1805,8 +1879,9 @@ export class Renderer {
   /**
    * One tiny linear-radiance render of `view`, read back and reduced to the
    * luminance at AUTO_EXPOSURE_PERCENTILE. Returns null when a previous
-   * meter's readback is still in flight (one is ever allowed; the AE loop
-   * just tries again next interval).
+   * meter's readback is still in flight (one is ever allowed), or while its
+   * pipelines are still compiling: either way the AE loop just tries again
+   * next interval.
    *
    * The march is the real shader with TONE_MAP compiled out, at
    * AUTO_EXPOSURE_METER_SIZE — the same footprint-per-cost trade renderScale
@@ -1843,40 +1918,23 @@ export class Renderer {
       // same method the row carries.
       const lighting = { lightCache: false, skyProbe: true };
       const spec = this._shaderSpec({ toneMap: false, lighting });
-      const module = this._module(spec);
-      this._meterPipeline ??= new Map();
-      const pipeKey = shaderVariantKey(spec);
-      let pipeline = this._meterPipeline.get(pipeKey);
-      if (!pipeline) {
-        pipeline = this.device.createRenderPipeline({
-          label: `meter(${pipeKey})`,
-          layout: this.rayPipelineLayout,
-          vertex: { module, entryPoint: "vs_main" },
-          fragment: { module, entryPoint: "fs_main",
-                      targets: [{ format: ACCUM_FORMAT }] },
-          primitive: { topology: "triangle-list" },
-        });
-        this._meterPipeline.set(pipeKey, pipeline);
-      }
-      // Its surface pre-pass, on the same specialization, into the meter's
-      // own meter-sized surface target (_encodeMarch makes it on first use).
-      let surfacePipeline = null;
-      if (this._hasSurfacePass()) {
-        this._meterSurfacePipeline ??= new Map();
-        surfacePipeline = this._meterSurfacePipeline.get(pipeKey);
-        if (!surfacePipeline) {
-          surfacePipeline = this.device.createRenderPipeline({
-            label: `meter-surface(${pipeKey})`,
-            layout: this.rayPipelineLayout,
-            vertex: { module, entryPoint: "vs_main" },
-            fragment: { module, entryPoint: "fs_surface",
-                        targets: [{ format: SURFACE_FORMAT }] },
-            primitive: { topology: "triangle-list" },
-          });
-          this._meterSurfacePipeline.set(pipeKey, surfacePipeline);
-        }
+      // Its march and its surface pre-pass (city/desert), on that
+      // specialization, through the same async cache as the frame's: a
+      // first meter in a city scene would otherwise compile the whole city
+      // trace on the main thread, right after load, on the live AE path.
+      // While either is still compiling this interval has no answer; the
+      // next one asks again, and a pipeline that failed throws from here.
+      const pipeline = this._pipeline("fs_main", ACCUM_FORMAT, spec);
+      const surfacePipeline = this._hasSurfacePass()
+        ? this._pipeline("fs_surface", SURFACE_FORMAT, spec) : null;
+      const compiling = [pipeline, surfacePipeline]
+        .filter((q) => q && isPending(q));
+      if (compiling.length > 0) {
+        for (const q of compiling) q.catch(() => {});
+        return null;
       }
       this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
+      await this._ensureSurfaceTarget(this._meterTargets);
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.
       const u = packUniforms(this._sceneState(), {
@@ -1891,7 +1949,8 @@ export class Renderer {
           { binding: 0, resource: { buffer: this._meterUniformBuf } },
           { binding: 1, resource: this.scene.volumeView },
           { binding: 2, resource: this.volSampler },
-          { binding: 3, resource: this.scene.oceanView },
+          { binding: 3, resource:
+              this.scene.oceanView ?? this._tileDummyView() },
           { binding: 4, resource: this.oceanSampler },
           { binding: 5, resource: this.scene.nestView },
           { binding: 6, resource: this.volWrapSampler },
@@ -1899,6 +1958,8 @@ export class Renderer {
               (this._lightTauTex ?? this._lightTauDummy).createView() },
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
+          { binding: 9, resource:
+              this.scene.seaView ?? this._seaDummyView() },
         ],
       });
       const encoder = this.device.createCommandEncoder();
@@ -1928,11 +1989,11 @@ export class Renderer {
       let sum = 0.0;
       for (let i = rank; i < lums.length; i++) sum += lums[i];
       return sum / (lums.length - rank);
-    } catch (err) {
-      // A lost device or an unmapped-in-teardown buffer ends metering, not
-      // the app: the AE loop treats null as "no reading this interval".
-      return null;
     } finally {
+      // Errors are the caller's: null means only "not now" (a reading in
+      // flight, or its pipelines compiling — both end). A meter that failed
+      // used to return null as well, and a capture waiting for a reading
+      // then asked again forever.
       this._meterBusy = false;
     }
   }
@@ -1958,6 +2019,7 @@ export class Renderer {
     this.uniformBuf?.destroy();
     this.accumUniformBuf?.destroy();
     this._iceDummy?.destroy();
+    this._surfaceDummy?.destroy();
     // The sun-tau cache is volume/8 bytes — hundreds of MB on a large field
     // — and none of these were released here before: every change of field
     // leaked the lot. Fenced, because a frame or a bake submitted just
@@ -1980,6 +2042,7 @@ export class Renderer {
       oceanReflectance: K.DEFAULT_OCEAN_REFLECTANCE,
       oceanFifDx: s.oceanFifDx,
       oceanTileExtent: s.oceanTileExtent,
+      surfacePeriodM: s.surfacePeriod,
       oceanEnabled: true,
       oceanMaxLod: s.oceanMaxLod,
       nested: s.nested,

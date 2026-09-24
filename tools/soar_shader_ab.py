@@ -53,7 +53,7 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
-    desert_relief_m, surface_cell_m,
+    desert_relief_m, surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
@@ -203,11 +203,11 @@ def main():
         if nested:
             r.upload_nest(nest.sigma)
         renderers.append(r)
-    if surface != "ocean":
-        meta = renderers[0].surface_meta
-        state.ocean_fif_dx = surface_cell_m(surface, meta)
-        state.ocean_tile_extent = float(meta["tile_extent_m"])
-        state.ocean_max_lod = int(meta["mips"]) - 1
+    meta = renderers[0].surface_meta
+    state.ocean_fif_dx = surface_cell_m(surface, meta)
+    state.ocean_tile_extent = float(meta["tile_extent_m"])
+    state.ocean_max_lod = int(meta["mips"]) - 1
+    state.surface_period_m = surface_period_m(surface, meta)
     if surface == "desert":
         # Row 8.yzw: the tile's relief, without which the desert is a plane.
         state.desert_relief_m = desert_relief_m(meta)

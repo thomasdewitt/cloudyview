@@ -225,11 +225,12 @@ export class FlightCamera {
 
   /**
    * Stand the camera on a different surface in flight (ocean <-> desert):
-   * the new tile's extent and floor. The surface frame re-derives from the
-   * static offset — a surface just laid down has no phase to keep.
+   * the period its frame folds at (the tile's surfacePeriod) and its floor.
+   * The surface frame re-derives from the static offset — a surface just
+   * laid down has no phase to keep.
    */
-  setSurface(tileExtent, floorAt) {
-    this.surfaceTileExtent = tileExtent > 0 ? tileExtent : null;
+  setSurface(period, floorAt) {
+    this.surfaceTileExtent = period > 0 ? period : null;
     this.floorAt = floorAt;
     this._resyncSurface();
     this.constrain();

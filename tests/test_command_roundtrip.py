@@ -181,17 +181,22 @@ _NX, _NZ, _DX = 8, 4, 100.0
 
 CITY_OFFSET = [8100.0, -44190.0]          # K.CITY_TILE_OFFSET_M
 
-# (name, scene flags, tile extent, whether the flight's folds moved the
-# surface frame off the static offset — which is when --surface-origin must
-# appear and carry it).
+# (name, scene flags, tile extent, the period the surface frame folds at,
+# whether the flight's folds moved the surface frame off the static offset —
+# which is when --surface-origin must appear and carry it). The sea folds at
+# its swell's period, eight of its tiles; the city at its tile.
 SURFACE_CASES = [
-    ("ocean", {}, 102.4, False),
-    ("city", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0, False),
+    ("ocean", {}, 102.4, 819.2, False),
+    ("ocean-drifted", {}, 102.4, 819.2, True),
+    ("city", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0, 92160.0,
+     False),
     ("city-drifted", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0,
-     True),
-    ("desert", {"desert": True}, 4096.0, False),
-    ("desert-drifted", {"desert": True}, 4096.0, True),
+     92160.0, True),
+    ("desert", {"desert": True}, 4096.0, 4096.0, False),
+    ("desert-drifted", {"desert": True}, 4096.0, 4096.0, True),
 ]
+# The scene clock the fake views were held at: where the sea was.
+SCENE_TIME = 37.625
 
 _SURFACE_JS = textwrap.dedent("""
     import { Viewer } from "%s";
@@ -200,7 +205,7 @@ _SURFACE_JS = textwrap.dedent("""
     const fold = (v, t) => { const r = v %% t; return r < 0 ? r + t : r; };
     const out = {};
     for (const c of cases) {
-      const t = c.tile;
+      const t = c.period;
       const position = [c.bmin[0] + 312.5, c.bmin[1] + 587.25, 1234.5];
       const stat = c.scene.city ? c.scene.cityOffsetM : [0.0, 0.0];
       // The camera's surface frame: where the static offset puts it, or
@@ -209,12 +214,13 @@ _SURFACE_JS = textwrap.dedent("""
         fold(fold(position[i], t) - fold(stat[i], t) + (c.drift ? 270.0 : 0.0), t));
       const self = {
         scene: { ...c.scene, bmin: c.bmin, bmax: c.bmax,
-                 sourceName: "field.nc", oceanTileExtent: t },
+                 sourceName: "field.nc", oceanTileExtent: c.tile,
+                 surfacePeriod: t },
         camera: { position, azimuth: 301.25, elevation: 12.5, fov: 90.0,
                   surfacePosition: sp, surfaceTileExtent: t },
         canvas: { width: 1920, height: 961 },
         renderer: { periodic: true },
-        sunAzimuth: 181.0, sunElevation: 20.0,
+        sunAzimuth: 181.0, sunElevation: 20.0, sceneTime: c.sceneTime,
         toneMapGamma: 1.66, toneMapWhitePoint: 15.0, contrast: 1.0,
         _selectionFlags: P._selectionFlags,
         _surfaceOffsetM: P._surfaceOffsetM,
@@ -243,9 +249,10 @@ def _surface_field():
 @pytest.fixture(scope="module")
 def surface_commands():
     bmin, bmax = witness_module._volume_aabb(_surface_field())
-    cases = [dict(name=name, scene=scene, tile=tile, drift=drift,
+    cases = [dict(name=name, scene=scene, tile=tile, period=period,
+                  drift=drift, sceneTime=SCENE_TIME,
                   bmin=list(bmin), bmax=list(bmax))
-             for name, scene, tile, drift in SURFACE_CASES]
+             for name, scene, tile, period, drift in SURFACE_CASES]
     js = _SURFACE_JS % ((REPO / "web" / "soar" / "viewer.js").as_posix(),
                         json.dumps(cases))
     proc = subprocess.run(["node", "--input-type=module", "-e", js],
@@ -297,7 +304,7 @@ def test_the_surface_round_trips_to_the_uniforms(
 
     (renderer,) = made
     u = renderer.uniforms
-    scene, tile, drift = next((s, t, d) for n, s, t, d in SURFACE_CASES
+    scene, tile, drift = next((s, t, d) for n, s, t, _, d in SURFACE_CASES
                               if n == name)
     kind = ("city" if scene.get("city")
             else "desert" if scene.get("desert") else "ocean")
@@ -307,9 +314,11 @@ def test_the_surface_round_trips_to_the_uniforms(
     cell = meta["dx_m"] if kind == "ocean" else meta["cell_m"]
     assert tuple(u[9]) == pytest.approx(
         (cell, tile, 1.0, meta["mips"] - 1), rel=0, abs=0)
-    # Row 24: the offset the browser view rendered with, float32-exact.
+    # Row 24: the offset the browser view rendered with, float32-exact, and
+    # the scene clock it was held at.
     assert tuple(u[24][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
+    assert u[24][2] == np.float32(SCENE_TIME)
     assert ("--surface-origin" in argv) == drift
     # Row 0: the camera, through worldToRelative and back.
     assert u[0][:3] == pytest.approx(emitted["position"], rel=1e-9, abs=1e-6)
