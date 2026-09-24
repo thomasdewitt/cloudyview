@@ -14253,7 +14253,9 @@ const DESERT: bool = false;
 // like the lighting method; under it the surface pass has no refine stage —
 // the hosts skip that pass — and each desert section compiles out its own
 // Low drops behind `if (!DESERT_LITE)`. False compiles to exactly the full
-// desert.
+// desert. The ground's drops: the stones drawn as decals on the ground
+// rather than traced (desert_stone_decal), and no octaves in the trace (the
+// shading still reads them).
 const DESERT_LITE: bool = false;
 
 // How far above the terrain the flora slab reaches: the tallest saguaro
@@ -14409,6 +14411,12 @@ fn desert_lod(fp: f32) -> f32 {
 // footprint `fp`: the tile at its mip, plus every octave the footprint
 // resolves.
 fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
+    return desert_surface_of(xy, fp, false);
+}
+
+// The same, or with `traced` (a literal at every call) only the octaves the
+// trace draws (desert_trace_fade).
+fn desert_surface_of(xy: vec2<f32>, fp: f32, traced: bool) -> vec2<f32> {
     var s = desert_tile(xy, desert_lod(fp));
     var q = xy;
     var texel = u.ocean_params.x;
@@ -14418,7 +14426,8 @@ fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
         texel = texel * 0.2;
         amp = amp * DESERT_OCTAVE_GAIN;
         lamp = lamp * DESERT_OCTAVE_LIGHT_GAIN;
-        let fade = desert_octave_fade(fp, texel);
+        let fade = select(desert_octave_fade(fp, texel),
+                          desert_trace_fade(fp, texel, amp), traced);
         if (fade <= 0.0) {
             break;
         }
@@ -14430,6 +14439,39 @@ fn desert_surface(xy: vec2<f32>, fp: f32) -> vec2<f32> {
                                  select(0.0, lamp * band.y, k == 0));
     }
     return vec2<f32>(u.ocean.x + s.x, s.y);
+}
+
+// THE TRACE'S OCTAVES. The octaves are most of what the trace costs (each
+// adds reads to every step, and its slope to the bound every step divides
+// by: at 300 m on the M1 proxy the plain pass fell from 11.9 ms to 3.7
+// without them), and far off they cannot be seen in its geometry: a
+// vertical error e, from a ray at elevation theta at distance t, moves a
+// silhouette or the ground point the ray lands on (in its own ground
+// footprint) by e cos(theta) / t of angle, against a pixel's fp / t. So an
+// octave whose largest excursion — the band's, times its gain and its fade
+// — is under DESERT_TRACE_OCTAVE_K footprints (cos(theta) taken as 1, which
+// errs only toward exactness) leaves the trace: its height, its slope bound,
+// its margin. The shading still reads it (desert_ground_at's normal and
+// lightness at the hit), so what the pixel shows of it is unchanged. The
+// excursion falls faster than the footprint grows, so the octaves traced
+// are always the first few, and a zero fade ends each octave loop as a
+// footprint past the octave's band always did.
+const DESERT_TRACE_OCTAVE_K: f32 = 1.0;
+
+// Octave (texel, gain amp)'s fade in the trace: its fade, or none once its
+// largest excursion is under DESERT_TRACE_OCTAVE_K footprints.
+fn desert_trace_fade(fp: f32, texel: f32, amp: f32) -> f32 {
+    if (DESERT_LITE) {
+        return 0.0;
+    }
+    let fade = desert_octave_fade(fp, texel);
+    return select(0.0, fade,
+                  u.ocean.w * amp * fade > DESERT_TRACE_OCTAVE_K * fp);
+}
+
+// The ground the trace meets at footprint fp (absolute z).
+fn desert_trace_height(xy: vec2<f32>, fp: f32) -> f32 {
+    return desert_surface_of(xy, fp, true).x;
 }
 
 // Terrain height (m, absolute z) at a desert-frame point, at full detail.
@@ -14500,10 +14542,12 @@ fn desert_slope_bound(fp: f32) -> f32 {
                 lod - f32(l0));
     var texel = u.ocean_params.x;
     var grow = 1.0;
+    var amp = 1.0;
     for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
         texel = texel * 0.2;
         grow = grow * DESERT_OCTAVE_SLOPE_GROWTH;
-        let fade = desert_octave_fade(fp, texel);
+        amp = amp * DESERT_OCTAVE_GAIN;
+        let fade = desert_trace_fade(fp, texel, amp);
         if (fade <= 0.0) {
             break;
         }
@@ -14549,8 +14593,8 @@ fn desert_terrain_hit(o: vec3<f32>, dir: vec3<f32>, t: f32) -> DesertHit {
     return h;
 }
 
-// The octaves' reach at footprint `fp`: how far the resolved octaves can
-// move the surface off the tile (their faded gains times the band's
+// The traced octaves' reach at footprint `fp`: how far they can move the
+// surface the trace meets off the tile (their faded gains times the band's
 // largest excursion).
 fn desert_octave_margin(fp: f32) -> f32 {
     var texel = u.ocean_params.x;
@@ -14559,7 +14603,7 @@ fn desert_octave_margin(fp: f32) -> f32 {
     for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
         texel = texel * 0.2;
         amp = amp * DESERT_OCTAVE_GAIN;
-        sum = sum + amp * desert_octave_fade(fp, texel);
+        sum = sum + amp * desert_trace_fade(fp, texel, amp);
     }
     return u.ocean.w * sum;
 }
@@ -14658,7 +14702,7 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             }
         }
         if (dt < 0.0) {
-            let gap = p.z - desert_surface(p.xy, fp).x;
+            let gap = p.z - desert_trace_height(p.xy, fp);
             if (gap <= 0.0) {
                 if (t_prev < 0.0) {
                     return desert_terrain_hit(o, dir, t);
@@ -14677,7 +14721,7 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             let pb = o + t_floor * dir;
             return desert_terrain_hit(o, dir, desert_refine(
                 o, dir, pixel_angle, t_prev, t_floor,
-                pb.z - desert_surface(pb.xy, pixel_angle * t_floor).x));
+                pb.z - desert_trace_height(pb.xy, pixel_angle * t_floor)));
         }
     }
     // Out of budget — rare now that far steps are lid steps, and only on
@@ -14705,7 +14749,7 @@ fn desert_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     var ta = ta_in;
     var tb = tb_in;
     let pa = o + ta * dir;
-    var ga = pa.z - desert_surface(pa.xy, pixel_angle * ta).x;
+    var ga = pa.z - desert_trace_height(pa.xy, pixel_angle * ta);
     var gb = gap_b;
     if (ga <= 0.0) {
         return ta;
@@ -14715,7 +14759,7 @@ fn desert_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     for (var k: i32 = 0; k < 6; k = k + 1) {
         tm = ta + (tb - ta) * ga / max(ga - gb, 1e-9);
         let pm = o + tm * dir;
-        let gm = pm.z - desert_surface(pm.xy, pixel_angle * tm).x;
+        let gm = pm.z - desert_trace_height(pm.xy, pixel_angle * tm);
         // Landed to a twentieth of the footprint: the remaining iterations
         // would move the hit by less than the pixel can show, and each is a
         // dependent texture round (the trace at altitude is latency-bound).
@@ -14933,8 +14977,9 @@ fn desert_stone_scale(m: vec3<f32>) -> f32 {
 fn desert_stone_weight(k: i32, fp: f32, dir: vec3<f32>, n: vec3<f32>,
                        wall: f32) -> f32 {
     let w = desert_stone_resolve(k, fp) * (1.0 - wall);
-    if (w <= 0.0) {
-        return 0.0;
+    // The lite desert draws its stones as decals, with no walk to bound.
+    if (DESERT_LITE || w <= 0.0) {
+        return w;
     }
     let grad = -n.xy / max(n.z, 0.2);
     let closing = -dir.z + dot(grad, dir.xy);
@@ -15240,6 +15285,9 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit)
 // most of what makes a pavement read as stones at low sun.
 fn desert_stone_shadow(p: vec3<f32>, sun: vec3<f32>, n: vec3<f32>,
                        lightness: f32, w0: f32, w1: f32) -> f32 {
+    if (DESERT_LITE) {
+        return 1.0;
+    }
     let m = desert_material(lightness);
     let grad = -n.xy / max(n.z, 0.2);
     for (var k: i32 = 0; k < DESERT_STONE_LEVELS; k = k + 1) {
@@ -15260,6 +15308,82 @@ fn desert_stone_shadow(p: vec3<f32>, sun: vec3<f32>, n: vec3<f32>,
         }
     }
     return 1.0;
+}
+
+// THE LITE DESERT'S STONES: the same clasts the full desert traces (the same
+// cells, hashes and draw weights, so the pavement is the same pavement),
+// drawn as decals on the ground under the pixel — each the vertical
+// projection of its ellipsoid, domed for a lit and a shaded side — and
+// their shadows as the same ellipse slid down-sun. Hashes only, no reads.
+struct DesertDecal {
+    cover: f32,             // how much of the pixel a stone covers
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    shadow: f32,            // sun the ground beside the stones keeps
+};
+
+fn desert_stone_decal(p: vec3<f32>, n: vec3<f32>, lightness: f32, w0: f32,
+                      w1: f32, sun: vec3<f32>, fp: f32) -> DesertDecal {
+    var d: DesertDecal;
+    d.cover = 0.0;
+    d.albedo = vec3<f32>(0.0);
+    d.normal = n;
+    d.shadow = 1.0;
+    let m = desert_material(lightness);
+    let grad = -n.xy / max(n.z, 0.2);
+    // How far a stone's shadow slides per metre of its height.
+    let slide = -sun.xy / max(sun.z, 0.05);
+    var top = -1e30;
+    for (var k: i32 = 0; k < DESERT_STONE_LEVELS; k = k + 1) {
+        let w = select(w1, w0, k == 0);
+        if (w <= 0.0) {
+            continue;
+        }
+        let c = desert_stone_cell_at(k);
+        let home = vec2<i32>(floor(p.xy / c));
+        for (var j: i32 = 0; j < 9; j = j + 1) {
+            let s = desert_stone(k, home + vec2<i32>(j % 3 - 1, j / 3 - 1),
+                                 p.z, p.xy, grad, m, w);
+            if (!s.on) {
+                continue;
+            }
+            // The point in the stone's frame, horizontally.
+            let dxy = p.xy - s.centre.xy;
+            let x = (s.cs.x * dxy.x + s.cs.y * dxy.y) / s.axes.x;
+            let y = (-s.cs.y * dxy.x + s.cs.x * dxy.y) / s.axes.y;
+            // Where the ground cuts the stone (its buried part), in units
+            // of its height; what stands above it is a disc of radius^2
+            // 1 - zg^2 in the unit frame.
+            let ground = p.z + dot(grad, s.centre.xy - p.xy);
+            let zg = clamp((ground - s.centre.z) / s.axes.z, -0.99, 0.99);
+            let r2 = x * x + y * y;
+            let edge = 1.0 - zg * zg;
+            // Antialiased over the footprint, in the stone's own units.
+            let soft = max(2.0 * fp / s.axes.y, 1e-3);
+            let cov = clamp((edge - r2) / soft, 0.0, 1.0);
+            let zt = sqrt(max(1.0 - r2, 0.0));
+            let height = s.centre.z + zt * s.axes.z;
+            if (cov > 0.0 && height > top) {
+                top = height;
+                d.cover = cov;
+                d.albedo = s.albedo;
+                // The dome's normal, back into the world (a plane normal
+                // through a scale goes by the inverse scale).
+                let nl = vec3<f32>(x, y, zt) / s.axes;
+                d.normal = normalize(vec3<f32>(s.cs.x * nl.x - s.cs.y * nl.y,
+                                               s.cs.y * nl.x + s.cs.x * nl.y,
+                                               nl.z));
+            }
+            // Its shadow: the ellipse at mid-height slid down-sun.
+            let rise = s.centre.z + 0.5 * s.axes.z - ground;
+            let sxy = dxy + slide * rise;
+            let sx = (s.cs.x * sxy.x + s.cs.y * sxy.y) / s.axes.x;
+            let sy = (-s.cs.y * sxy.x + s.cs.x * sxy.y) / s.axes.y;
+            d.shadow = min(d.shadow,
+                           clamp((sx * sx + sy * sy - edge) / soft, 0.0, 1.0));
+        }
+    }
+    return d;
 }
 
 // --- cut banks --------------------------------------------------------------
@@ -15420,8 +15544,9 @@ fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             s.y, wall,
             desert_stone_weight(0, fp, dir, best.normal, wall),
             desert_stone_weight(1, fp, dir, best.normal, wall));
-        let ground = best;
-        best = desert_stone_trace(o, dir, ground);
+        if (!DESERT_LITE) {
+            best = desert_stone_trace(o, dir, best);
+        }
         if (best.kind == DESERT_KIND_TERRAIN) {
             // Ripples fade on the footprint ON THE GROUND: seen obliquely
             // a 9 cm crest spacing aliases into moiré long before the
@@ -15723,22 +15848,34 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     let floor_albedo = desert_matrix_albedo(
             desert_albedo(light) * desert_albedo_correction(fp), m, w0, w1)
         * desert_grain(h.pos.xy, fpg, m, w0);
-    let albedo = mix(floor_albedo, desert_wall_albedo(h.pos), wall);
+    var albedo = mix(floor_albedo, desert_wall_albedo(h.pos), wall);
     // The kernel BRF is the statistical form of the stones' shadows and
     // hot spot; where the stones are geometry, geometry casts them instead.
     let statistical = 1.0 - w0;
-    let brf = desert_brf(n, dir, L.sun_dir,
+    var brf = desert_brf(n, dir, L.sun_dir,
                          statistical * mix(DESERT_VOL_W_PAVEMENT,
                                            DESERT_VOL_W_SAND, light),
                          statistical * mix(DESERT_GEO_W_PAVEMENT,
                                            DESERT_GEO_W_SAND, light));
+    var ns = n;
+    var stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
+    var sheen = desert_sheen(n, dir, L.sun_dir);
+    if (DESERT_LITE) {
+        // The stones as decals (desert_stone_decal): a covered pixel is the
+        // stone, lit as a stone is; an uncovered one keeps the stones'
+        // shadows.
+        let dc = desert_stone_decal(h.pos, n, light, w0, w1, L.sun_dir, fp);
+        albedo = mix(albedo, dc.albedo, dc.cover);
+        ns = normalize(mix(n, dc.normal, dc.cover));
+        brf = mix(brf, 1.0, dc.cover);
+        stones = mix(dc.shadow, 1.0, dc.cover);
+        sheen = sheen * (1.0 - dc.cover);
+    }
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp, 0.0)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
-        * desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1)
-        * plants;
-    let mu = max(dot(n, L.sun_dir), 0.0);
-    return desert_lit(albedo, n, L, mu * brf * shade,
-                      desert_sheen(n, dir, L.sun_dir) * shade);
+        * stones * plants;
+    let mu = max(dot(ns, L.sun_dir), 0.0);
+    return desert_lit(albedo, ns, L, mu * brf * shade, sheen * shade);
 }
 
 // The common tail: `beam` the direct factor on L.sun (cosine, BRF and every
