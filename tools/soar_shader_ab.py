@@ -216,11 +216,11 @@ def main():
     state.ocean_tile_extent = float(meta["tile_extent_m"])
     state.ocean_max_lod = int(meta["mips"]) - 1
     state.surface_period_m = surface_period_m(surface, meta)
+    if surface == "ocean":
+        state.clock_period_s = float(meta["clock_period_s"])
     if surface == "desert":
         # Row 8.yzw: the tile's relief, without which the desert is a plane.
         state.desert_relief_m = desert_relief_m(meta)
-    if surface == "ocean":
-        state.clock_period_s = float(meta["clock_period_s"])
 
     views = ALL_VIEWS
     if city:
