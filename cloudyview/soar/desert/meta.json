@@ -1,9 +1,134 @@
 {
- "schema": "cloudyview.web.desert.v1",
- "n": 64,
- "cell_m": 64.0,
- "mips": 7,
- "format": "rgba16float",
+ "schema": "cloudyview.web.desert.v2",
+ "n": 2048,
+ "cell_m": 2.0,
+ "mips": 12,
+ "format": "rg16float",
+ "encoding": "planar-byte-shuffle",
+ "compression": "gzip",
+ "files": [
+  "mip0.bin.gz",
+  "mip1.bin.gz",
+  "mip2.bin.gz",
+  "mip3.bin.gz",
+  "mip4.bin.gz",
+  "mip5.bin.gz",
+  "mip6.bin.gz",
+  "mip7.bin.gz",
+  "mip8.bin.gz",
+  "mip9.bin.gz",
+  "mip10.bin.gz",
+  "mip11.bin.gz"
+ ],
  "tile_extent_m": 4096.0,
- "note": "PLACEHOLDER: flat, until tools/export_desert_tile.py bakes the eroded tile"
+ "height_min_m": -14.2734375,
+ "height_max_m": 16.15625,
+ "seed": 20260923,
+ "mean_lightness": 0.4556,
+ "slope_max": [
+  1.775,
+  0.924,
+  0.478,
+  0.225,
+  0.111,
+  0.07,
+  0.05,
+  0.041,
+  0.029,
+  0.021,
+  0.002,
+  0.0
+ ],
+ "envelope_m": [
+  0.0,
+  1.084,
+  1.63,
+  1.761,
+  1.411,
+  1.933,
+  2.454,
+  3.674,
+  6.395,
+  9.452,
+  17.279,
+  17.772
+ ],
+ "slope_variance_removed": [
+  0.0,
+  0.0036,
+  0.006006,
+  0.007218,
+  0.007616,
+  0.007761,
+  0.00785,
+  0.007922,
+  0.007982,
+  0.008028,
+  0.008049,
+  0.008049
+ ],
+ "band_max_m": 1.9202,
+ "band_slope_max": 1.611,
+ "albedo_correction": [
+  [
+   1.0,
+   1.0,
+   1.0
+  ],
+  [
+   0.9996,
+   0.9998,
+   1.0002
+  ],
+  [
+   0.9988,
+   0.9995,
+   1.0006
+  ],
+  [
+   0.9966,
+   0.9986,
+   1.0015
+  ],
+  [
+   0.9902,
+   0.9958,
+   1.0045
+  ],
+  [
+   0.9754,
+   0.9895,
+   1.0114
+  ],
+  [
+   0.9618,
+   0.9835,
+   1.0181
+  ],
+  [
+   0.9514,
+   0.9789,
+   1.0235
+  ],
+  [
+   0.9474,
+   0.9771,
+   1.0255
+  ],
+  [
+   0.9451,
+   0.976,
+   1.0268
+  ],
+  [
+   0.9421,
+   0.9747,
+   1.0283
+  ],
+  [
+   0.9421,
+   0.9747,
+   1.0283
+  ]
+ ]
 }

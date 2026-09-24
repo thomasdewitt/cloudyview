@@ -148,3 +148,211 @@ def foam_resolved_cover(theta: float, lace_cover, opacity_old: float,
          * (opacity_old + (opacity_fresh - opacity_old) * f))
     y = cut * g
     return float(np.sum(0.5 * (y[1:] + y[:-1])) * (v[1] - v[0]))
+
+
+# --- the whitecaps' near field, mirrored -----------------------------------
+#
+# raymarch.wgsl sea_surface draws resolved whitecaps by cutting the foam rank
+# as the pixel reads it — bilinear between 0.4 m texels, a B-spline closer
+# in, a mip level farther out, scaled by the detail octave's crest — and the
+# pixel's rank is diluted by all of those reads: a foam texel averaged with
+# its empty neighbours falls under the cut and reads older than it is. The
+# far field (foam_resolved_cover) is the undiluted texel mean, so without a
+# correction the whitecaps thin out wherever the near field is drawn. What
+# follows is the shader's near field in numpy, on the shipped bytes, and the
+# rank gain per (cut, footprint) that gives it the far field's mean
+# (raymarch.wgsl sea_foam_near_gain; measured by tools/export_web_assets.py
+# into meta.json foam_near_gain).
+
+# The shader constants the near field depends on, by their WGSL names;
+# the exporter reads them from raymarch.wgsl and records them beside the
+# table it measured with them.
+FOAM_NEAR_CONSTANTS = (
+    "SEA_FOAM_EDGE", "SEA_FOAM_BREAKUP", "SEA_FOAM_OPACITY_OLD",
+    "SEA_FOAM_OPACITY_FRESH", "SEA_LACE_FRESH_K", "SEA_DETAIL_SCALE",
+    "SEA_LACE_SCALE", "SEA_LACE_STRETCH")
+
+
+def shader_scalars(src: str, names) -> dict:
+    """`const NAME: f32 = value;` from WGSL source, for each name."""
+    import re
+    out = {}
+    for name in names:
+        m = re.search(rf"const {name}: f32 = ([0-9.eE+-]+);", src)
+        if not m:
+            raise ValueError(f"{name} is not an f32 const in the shader.")
+        out[name] = float(m.group(1))
+    return out
+
+
+def _smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _bilinear(img, uv):
+    """A repeat-wrapped linear fetch at texel-centred uv, as the sampler."""
+    side = img.shape[0]
+    st = uv * side - 0.5
+    i = np.floor(st).astype(np.int64)
+    f = st - i
+    x0, y0 = i[:, 0] % side, i[:, 1] % side
+    x1, y1 = (x0 + 1) % side, (y0 + 1) % side
+    return ((1 - f[:, 1]) * ((1 - f[:, 0]) * img[y0, x0] + f[:, 0] * img[y0, x1])
+            + f[:, 1] * ((1 - f[:, 0]) * img[y1, x0] + f[:, 0] * img[y1, x1]))
+
+
+def _trilinear(chain, uv, lod: float):
+    l0 = int(np.floor(lod))
+    w = lod - l0
+    v = _bilinear(chain[l0], uv)
+    if w == 0.0:
+        return v
+    return (1 - w) * v + w * _bilinear(chain[min(l0 + 1, len(chain) - 1)], uv)
+
+
+def _bspline(img, uv):
+    """sea_rank_smooth's cubic B-spline over level 0 (the 16 taps it
+    reaches with its four bilinear fetches)."""
+    n = img.shape[0]
+    st = uv * n - 0.5
+    i = np.floor(st).astype(np.int64)
+    f = st - i
+
+    def weights(f):
+        return ((1 - f) ** 3 / 6, (4 - 6 * f * f + 3 * f ** 3) / 6,
+                (1 + 3 * f + 3 * f * f - 3 * f ** 3) / 6, f ** 3 / 6)
+    wx, wy = weights(f[:, 0]), weights(f[:, 1])
+    out = 0.0
+    for a in range(4):
+        for b in range(4):
+            out = out + wx[a] * wy[b] * img[(i[:, 1] + b - 1) % n,
+                                            (i[:, 0] + a - 1) % n]
+    return out
+
+
+def _frame_blend(fetch, chains, uv, a, f):
+    """mix(fetch(frame a), fetch(frame a + 1), f), per sample."""
+    out = np.empty(len(uv))
+    nt = len(chains)
+    for t in np.unique(a):
+        m = a == t
+        out[m] = ((1 - f[m]) * fetch(chains[t], uv[m])
+                  + f[m] * fetch(chains[(t + 1) % nt], uv[m]))
+    return out
+
+
+class NearFoam:
+    """The shader's near-field whitecaps over the shipped tile.
+
+    `consts` are the FOAM_NEAR_CONSTANTS values and `mip_bias` the ocean's
+    (look.OCEAN_MIP_BIAS). Each channel's mips are the hosts' own
+    (mip_chain, in float32).
+    """
+
+    def __init__(self, meta: dict, planes: np.ndarray, consts: dict,
+                 mip_bias: float):
+        self.meta, self.c, self.mip_bias = meta, consts, float(mip_bias)
+        frames = [mip_chain(decode_frame(planes, t, meta))
+                  for t in range(int(meta["frames"]))]
+        self.foam = [[lv[..., 2] for lv in ch] for ch in frames]
+        self.crest = [[lv[..., 3] for lv in ch] for ch in frames]
+        self.dx = float(meta["dx_m"])
+        self.extent = float(meta["tile_extent_m"])
+        self.lace = np.asarray(meta["lace_cover"], np.float64)
+
+    def samples(self, along_m: float, n: int, seed: int,
+                chunk: int = 250_000) -> dict:
+        """n pixels of footprint `along_m`, uniform over the tile and the
+        loop; kept are only those with any foam rank (the rest are empty
+        for every cut and gain). Per kept pixel: the rank the cut sees
+        (before the gain), tile.z, and the lace's crest read."""
+        c, dx = self.c, self.dx
+        nt = len(self.foam)
+        rng = np.random.default_rng(seed)
+        lod = float(np.clip(np.log2(max(along_m / dx, 1.0)) + self.mip_bias,
+                            0.0, int(self.meta["mips"]) - 1))
+        smooth_w = 1.0 - float(_smoothstep(0.25, 0.75, along_m / dx))
+        dtexel = dx / c["SEA_DETAIL_SCALE"]
+        dlod = float(np.clip(np.log2(max(along_m / dtexel, 1.0))
+                             + self.mip_bias, 0.0, 3.0))
+        ltexel = dx / c["SEA_LACE_SCALE"]
+        llod = float(np.log2(max(along_m / ltexel, 1.0)))
+        lace_w = (float(np.clip(1.0 - 0.5 * llod, 0.0, 1.0))
+                  * float(_smoothstep(0.25, 1.0, along_m
+                                      / (ltexel * c["SEA_LACE_STRETCH"]))))
+        keep = {"rank": [], "z": [], "lace_crest": []}
+        for start in range(0, n, chunk):
+            m = min(chunk, n - start)
+            p = rng.uniform(0.0, self.extent, (m, 2))
+            a = rng.integers(0, nt, m)
+            f = rng.uniform(0.0, 1.0, m)
+            da = rng.integers(0, nt, m)
+            df = rng.uniform(0.0, 1.0, m)
+            uv = p / self.extent
+            z = _frame_blend(lambda ch, q: _trilinear(ch, q, lod),
+                             self.foam, uv, a, f)
+            on = z > 0.0
+            p, uv, a, f, da, df, z = p[on], uv[on], a[on], f[on], \
+                da[on], df[on], z[on]
+            rank = z
+            if smooth_w > 0.0:
+                bs = _frame_blend(lambda ch, q: _bspline(ch[0], q),
+                                  self.foam, uv, a, f)
+                rank = (1 - smooth_w) * z + smooth_w * bs
+            if dlod < 3.0:
+                fine = _frame_blend(
+                    lambda ch, q: _trilinear(ch, q, dlod), self.crest,
+                    np.mod(uv * c["SEA_DETAIL_SCALE"], 1.0), da, df)
+                crest = (fine - self.meta["crest_mean"]) * min(3.0 - dlod, 1.0)
+                rank = rank * np.maximum(
+                    1.0 + c["SEA_FOAM_BREAKUP"] * crest, 0.0)
+            lace_crest = np.zeros(0)
+            if lace_w > 0.0:
+                luv = np.stack([p[:, 1], p[:, 0] / c["SEA_LACE_STRETCH"]], 1) \
+                    * (c["SEA_LACE_SCALE"] / self.extent)
+                lace_crest = _frame_blend(
+                    lambda ch, q: _trilinear(ch, q, llod), self.crest,
+                    np.mod(luv, 1.0), a, f)
+            keep["rank"].append(rank)
+            keep["z"].append(z)
+            keep["lace_crest"].append(lace_crest)
+        out = {k: np.concatenate(v) for k, v in keep.items()}
+        out.update(n=n, lace_w=lace_w, lod=lod)
+        return out
+
+    def cover(self, s: dict, theta: float, gain: float = 1.0) -> float:
+        """The near field's mean whitecap cover per unit of foam cap, at
+        cut theta, with the rank (the cut's and freshness's) times gain."""
+        c = self.c
+        e = c["SEA_FOAM_EDGE"]
+        z = s["z"] * gain
+        fresh = np.clip((z - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0)
+        k = c["SEA_LACE_FRESH_K"] + (4.0 - c["SEA_LACE_FRESH_K"]) * (1.0 - fresh)
+        lace = np.interp(k, np.arange(5.0), self.lace)
+        if s["lace_w"] > 0.0:
+            reach, ledge = self.meta["lace_reach"], self.meta["lace_edge"]
+            cut = -ledge + 0.25 * k * reach
+            lace = lace + (_smoothstep(cut - ledge, cut + ledge,
+                                       s["lace_crest"]) - lace) * s["lace_w"]
+        opacity = (c["SEA_FOAM_OPACITY_OLD"]
+                   + (c["SEA_FOAM_OPACITY_FRESH"]
+                      - c["SEA_FOAM_OPACITY_OLD"]) * fresh)
+        near = _smoothstep(theta - e, theta + e, s["rank"] * gain) * lace * opacity
+        return float(near.sum()) / s["n"] / self.meta["foam_max_coverage"]
+
+    def gain(self, s: dict, theta: float, target: float) -> float:
+        """The rank gain at which cover(s, theta) is `target` (bisection;
+        the cover rises with the gain)."""
+        lo, hi = 0.5, 4.0
+        if not (self.cover(s, theta, lo) <= target <= self.cover(s, theta, hi)):
+            raise RuntimeError(
+                f"no rank gain in [{lo}, {hi}] gives the far field's cover "
+                f"{target:.5f} at theta {theta}.")
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if self.cover(s, theta, mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)

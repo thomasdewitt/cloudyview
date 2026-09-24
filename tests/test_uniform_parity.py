@@ -126,6 +126,7 @@ CASES = [
     ("desert_day",
      {"surface": "desert", "ocean_z": 12.5, "ocean_fif_dx": 2.0,
       "ocean_tile_extent": 4096.0, "ocean_max_lod": 11,
+      "desert_relief_m": [-14.0, 16.046875, 1.2621],
       "surface_offset_m": [-18630.2, 136143.7]},
      {"sun_elevation": 38.0}),
 ]
@@ -169,6 +170,7 @@ def _js_state(extra):
              "nest_bmax": "nestBmax", "dt_view_nest": "dtViewNest",
              "dt_light_nest": "dtLightNest",
              "ocean_z": "oceanZ", "city_tile_offset_m": "cityOffsetM",
+             "desert_relief_m": "desertReliefM",
              "surface_offset_m": "surfaceOffsetM",
              "surface_period_m": "surfacePeriodM",
              "clock_period_s": "clockPeriodS",

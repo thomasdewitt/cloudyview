@@ -66,7 +66,7 @@ SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
 # the city's v1 tile decoded as v2 raises a different city without an error.
 SURFACE_TILE_SCHEMAS = {
     "ocean": "cloudyview.web.ocean.v2",
-    "desert": "cloudyview.web.desert.v1",
+    "desert": "cloudyview.web.desert.v2",
     "city": "cloudyview.web.city.v2",
 }
 
@@ -91,6 +91,40 @@ def surface_cell_m(surface: str, meta: dict) -> float:
     return float(meta[key])
 
 
+# Channels per texel of each surface-tile format. The ocean and the city are
+# rgba16float; the desert is rg16float (height and lightness).
+SURFACE_FORMAT_CHANNELS = {"rgba16float": 4, "rg16float": 2}
+
+
+def surface_level_files(meta: dict) -> list:
+    """The file of each mip level: named in the meta, or the legacy scheme."""
+    if "files" in meta:
+        return list(meta["files"])
+    return [f"fif_mip{level}.bin" for level in range(int(meta["mips"]))]
+
+
+def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
+    """One stored mip level -> the interleaved texel bytes the texture wants.
+
+    A level is stored either as the texels themselves, or (encoding
+    "planar-byte-shuffle", the desert's) as each channel's plane with every
+    half float's low bytes before its high bytes — the arrangement that lets
+    gzip see a height field's smoothness. `raw` is already decompressed.
+    web/soar/scene.js decodeSurfaceLevel is the twin.
+    """
+    channels = SURFACE_FORMAT_CHANNELS[meta.get("format", "rgba16float")]
+    expected = side * side * channels * 2
+    if len(raw) != expected:
+        raise RuntimeError(
+            f"a {side}x{side} {meta.get('format', 'rgba16float')} level is "
+            f"{expected} bytes; this one is {len(raw)}.")
+    encoding = meta.get("encoding", "interleaved")
+    if encoding == "interleaved":
+        return raw
+    if encoding != "planar-byte-shuffle":
+        raise RuntimeError(f"unknown surface-tile encoding {encoding!r}.")
+    b = np.frombuffer(raw, np.uint8).reshape(channels, 2, side * side)
+    return np.ascontiguousarray(b.transpose(2, 0, 1)).tobytes()
 def surface_period_m(surface: str, meta: dict) -> float:
     """The period the surface frame folds at (SceneState.surface_period_m).
 
@@ -310,8 +344,10 @@ class SceneState:
         raises rather than render it.
 
     Under "desert" the same four row-9 numbers describe the desert tile,
-    `ocean_z` is the datum its heights stand on, and `ocean_reflectance`
-    packs as zeros. The ocean's haze extinction (row 19.y) still applies —
+    `ocean_z` is the datum its heights stand on, and row 8's other three
+    slots carry the tile's height range and its largest band-pass excursion
+    (`desert_relief_m`, from the tile's meta: height_min_m, height_max_m,
+    band_max_m) — what the shader's slab tests are built from. The ocean's haze extinction (row 19.y) still applies —
     it is the aerial perspective over whatever ground there is.
 
     The ViewState's ocean realism knobs (glint, slope draw, mip bias) are
@@ -350,6 +386,10 @@ class SceneState:
     # lands here so a reproduction command from a flight whose camera folds
     # moved the offset carries the value that flight rendered with.
     surface_offset_m: Optional[Sequence[float]] = None
+    # Row 8.yzw under DESERT — see above. Required for the desert, and
+    # refused anywhere else: without it the terrain collapses onto the datum
+    # plane and still looks plausible, which is the failure worth a raise.
+    desert_relief_m: Optional[Sequence[float]] = None
     # The period row 24 folds at. None is the tile extent — the city's and
     # the desert's rule, since each is a pure function of its tile. The
     # ocean's swell repeats over several tiles and a fold at the tile would
@@ -432,6 +472,10 @@ class ViewState:
     # every consumer of t_sky sees a fully open sky, and buried samples
     # brighten. A cost/look toggle, on by default.
     sky_probe: bool = True
+    # The simplified desert (raymarch.wgsl DESERT_LITE): a specialization of
+    # a desert scene, keyed in the app on the tier (DESERT_LITE_TIERS) —
+    # witness --quality sets it the same way. It has no refine stage.
+    desert_lite: bool = False
     # The scene clock (s, row 24.z): where the moving sea is in its motion.
     # The browser advances it while flying; a still names it (witness
     # --time) and a track carries it per sample.
@@ -493,6 +537,18 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     check_surface(state.surface)
     city = state.surface == "city"
     desert = state.surface == "desert"
+    if desert and state.desert_relief_m is None:
+        raise ValueError(
+            "the desert needs its relief (SceneState.desert_relief_m, from the "
+            "tile's meta: soar_host.desert_relief_m(renderer.surface_meta)); "
+            "without it every ray lands on the flat datum.")
+    if not desert and state.desert_relief_m is not None:
+        raise ValueError("desert_relief_m is the desert's; this scene is the "
+                         f"{state.surface}.")
+    if desert and not state.ocean_enabled:
+        raise ValueError(
+            "the desert needs the surface enabled: ocean_enabled is the "
+            "surface flag (row 9.z) and the desert is drawn regardless.")
     if city and not state.ocean_enabled:
         raise ValueError(
             "city mode needs the surface enabled: ocean_enabled is the "
@@ -534,12 +590,13 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # Row 8 is the surface: sea level plus the water's reflectance, or — under
     # CITY — the ground plane and the tile's world offset (which district
     # sits under this field's cameras).
-    # Under DESERT only the datum: the desert has no reflectance row, its
-    # albedos are properties of the materials and live in the shader.
+    # Under DESERT the datum and the tile's relief: the desert has no
+    # reflectance row, its albedos are properties of the materials and live
+    # in the shader.
     if city:
         u[8] = (state.ocean_z, *state.city_tile_offset_m, 0.0)
     elif desert:
-        u[8] = (state.ocean_z, 0.0, 0.0, 0.0)
+        u[8] = (state.ocean_z, *state.desert_relief_m)
     else:
         u[8] = (state.ocean_z, *state.ocean_reflectance)
     # Row 9 needs no branch: cell size, tile extent, surface flag and top mip
@@ -681,12 +738,17 @@ SURFACE_PASS_SURFACES = ("city", "desert")
 # plants over the far forms). A surface joins by being listed here and in
 # renderer.js _hasRefineStage.
 SURFACE_REFINE_SURFACES = ("city", "desert")
+# The tiers that fly the simplified desert (raymarch.wgsl DESERT_LITE: no
+# refine stage, each desert section's Low drops compiled out). The twin of
+# web/soar/constants.js DESERT_LITE_TIERS; witness --quality sets
+# ViewState.desert_lite from it.
+DESERT_LITE_TIERS = ("low", "minimal")
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
                max_light_steps: int, tone_map: bool = True,
                surface: str = "ocean", light_cache: bool = False,
-               sky_probe: bool = True) -> str:
+               sky_probe: bool = True, desert_lite: bool = False) -> str:
     """Bake the compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
@@ -726,6 +788,13 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     if surface == "desert":
         swaps.append(("const DESERT: bool = false;",
                       "const DESERT: bool = true;"))
+    # The simplified desert: demanded, like CITY and DESERT, only when on.
+    if desert_lite:
+        if surface != "desert":
+            raise ValueError("desert_lite is a desert specialization; the "
+                             f"surface is {surface!r}.")
+        swaps.append(("const DESERT_LITE: bool = false;",
+                      "const DESERT_LITE: bool = true;"))
     if "const LIGHT_CACHE: bool" in source:
         swaps += [
             ("const LIGHT_CACHE: bool = false;",
@@ -891,13 +960,14 @@ class SoarRenderer:
     def _load_surface_tile(self):
         """The tile bound at binding 3: pre-built mips, level by level.
 
-        Which tile depends on the surface: the desert's eroded terrain or the
-        city density field. One byte format, one binding, one loader; they
-        differ only in the directory and in what the shader makes of the four
-        channels. `self.surface_meta` is the loaded meta.json, and is where a
+        Which tile depends on the surface: the desert's eroded terrain
+        (rg16float) or the city density field (rgba16float). One binding,
+        one loader; each tile's meta names its format, files, encoding and
+        compression (decode_surface_level). `self.surface_meta` is the loaded meta.json, and is where a
         caller reads the cell size and tile extent that SceneState has to be
         told about (surface_cell_m).
         """
+        import gzip
         import json
         wgpu = self.wgpu
         tile_dir = SURFACE_DIRS[self.surface]
@@ -909,23 +979,25 @@ class SoarRenderer:
                 f"renderer reads {expected!r}. Re-run "
                 "tools/export_web_assets.py, or update the shader with it.")
         n, mips = int(meta["n"]), int(meta["mips"])
+        fmt = meta.get("format", "rgba16float")
+        texel_bytes = SURFACE_FORMAT_CHANNELS[fmt] * 2
         self.surface_meta = meta
         tex = self.device.create_texture(
-            size=(n, n, 1), dimension="2d", format="rgba16float",
+            size=(n, n, 1), dimension="2d", format=fmt,
             mip_level_count=mips,
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        for level in range(mips):
+        for level, name in enumerate(surface_level_files(meta)):
             side = max(1, n >> level)
-            raw = (tile_dir / f"fif_mip{level}.bin").read_bytes()
-            expected = side * side * 4 * 2
-            if len(raw) != expected:
-                raise RuntimeError(
-                    f"{tile_dir.name}/fif_mip{level}.bin is {len(raw)} bytes, "
-                    f"expected {expected} for a {side}x{side} rgba16float "
-                    "level.")
+            raw = (tile_dir / name).read_bytes()
+            if meta.get("compression") == "gzip":
+                raw = gzip.decompress(raw)
+            try:
+                data = decode_surface_level(raw, side, meta)
+            except RuntimeError as exc:
+                raise RuntimeError(f"{tile_dir.name}/{name}: {exc}") from None
             self.device.queue.write_texture(
-                {"texture": tex, "mip_level": level}, raw,
-                {"bytes_per_row": side * 8, "rows_per_image": side},
+                {"texture": tex, "mip_level": level}, data,
+                {"bytes_per_row": side * texel_bytes, "rows_per_image": side},
                 (side, side, 1))
         return tex
 
@@ -1053,7 +1125,8 @@ class SoarRenderer:
                       "targets": [{"format": ACCUM_FORMAT}]},
             primitive={"topology": "triangle-list"})
 
-    def _spec(self, *, light_cache: bool, sky_probe: bool) -> dict:
+    def _spec(self, *, light_cache: bool, sky_probe: bool,
+              desert_lite: bool = False) -> dict:
         """Everything specialize() takes, from this renderer's attributes as
         they stand now plus a lighting method. Every module and pipeline
         cache here keys on the whole of it, so an attribute changed after
@@ -1062,7 +1135,8 @@ class SoarRenderer:
         return dict(periodic=self.periodic, nested=self.nested,
                     max_light_steps=self.max_light_steps,
                     tone_map=self.tone_map, surface=self.surface,
-                    light_cache=bool(light_cache), sky_probe=bool(sky_probe))
+                    light_cache=bool(light_cache), sky_probe=bool(sky_probe),
+                    desert_lite=bool(desert_lite))
 
     def _module_for(self, spec: dict):
         key = tuple(sorted(spec.items()))
@@ -1094,9 +1168,15 @@ class SoarRenderer:
         """The march pipeline for the method `view` asks for — the same two
         flags pack_uniforms writes into row 23, so the row and the compiled
         method cannot disagree."""
-        return self._pipeline_for("fs_main", SAMPLE_FORMAT, self._spec(
-            light_cache=view.light_cache, sky_probe=view.sky_probe),
-            layout=self._march_pipeline_layout)
+        return self._pipeline_for("fs_main", SAMPLE_FORMAT, self._view_spec(view),
+                                  layout=self._march_pipeline_layout)
+
+    def _view_spec(self, view: "ViewState") -> dict:
+        """The specialization `view` asks for: its lighting method and, over
+        a desert, its detail."""
+        return self._spec(light_cache=view.light_cache,
+                          sky_probe=view.sky_probe,
+                          desert_lite=view.desert_lite)
 
     def _bake_pipeline(self):
         """The sun-tau bake: one field-x plane of the cache per draw, into an
@@ -1113,19 +1193,19 @@ class SoarRenderer:
         scene with no traced surface."""
         if self.surface not in SURFACE_PASS_SURFACES:
             return None
-        return self._pipeline_for("fs_surface", SURFACE_FORMAT, self._spec(
-            light_cache=view.light_cache, sky_probe=view.sky_probe))
+        return self._pipeline_for("fs_surface", SURFACE_FORMAT,
+                                  self._view_spec(view))
 
     def _refine_pipeline_for(self, view: "ViewState"):
         """The surface pass's second stage (fs_surface_refine), which reads
         the first stage's surface at group 1 binding 1 — or None in a scene
-        whose surface has no second stage."""
-        if self.surface not in SURFACE_REFINE_SURFACES:
+        whose surface has no second stage (the simplified desert has none:
+        DESERT_LITE compiles it out, and the pass is skipped)."""
+        if self.surface not in SURFACE_REFINE_SURFACES or view.desert_lite:
             return None
-        return self._pipeline_for(
-            "fs_surface_refine", SURFACE_FORMAT,
-            self._spec(light_cache=view.light_cache, sky_probe=view.sky_probe),
-            layout=self._march_pipeline_layout)
+        return self._pipeline_for("fs_surface_refine", SURFACE_FORMAT,
+                                  self._view_spec(view),
+                                  layout=self._march_pipeline_layout)
 
     def _ensure_targets(self, size):
         wgpu = self.wgpu
@@ -1337,8 +1417,10 @@ class SoarRenderer:
                 # same uniforms, same frame, same pixels. With a refinement
                 # stage the first pass writes the plain surface and the
                 # second the final one.
-                stages = [(surface_pipeline, None, plain_view or surface_view)]
-                if plain_view is not None:
+                stages = [(surface_pipeline, None,
+                           plain_view if refine_pipeline is not None
+                           else surface_view)]
+                if refine_pipeline is not None:
                     stages.append((refine_pipeline, targets["refine_group"],
                                    surface_view))
                 for pipeline, group1, view_ in stages:
@@ -1395,3 +1477,9 @@ class SoarRenderer:
         img = raw.reshape(h, row // np.dtype(dtype).itemsize)[:, :w * 4]
         img = img.reshape(h, w, 4)
         return np.ascontiguousarray(img[:, :, :3], dtype=np.float64)
+
+
+def desert_relief_m(meta: dict) -> Tuple[float, float, float]:
+    """Row 8.yzw under DESERT, from the desert tile's meta.json."""
+    return (float(meta["height_min_m"]), float(meta["height_max_m"]),
+            float(meta["band_max_m"]))
