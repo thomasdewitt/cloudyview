@@ -16691,6 +16691,191 @@ fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         + DF_OCO_LEAF * 0.8 / DF_PI * Ls.sun * back;
 }
 
+// --- Palo verde -------------------------------------------------------------------
+//
+// Parkinsonia microphylla, the small green-barked tree that lines the washes:
+// from the air the banks' ribbons of darker vegetation are mostly this. A few
+// trunks splay from the base into a broad, low, twiggy crown whose leaves
+// are specks, so the crown is a medium of clumps even up close — its
+// structure is the clumps and the green branches between them, which are
+// geometry. Item parameters:
+//   a = (height H, crown radius, trunks, yaw)
+// Near (refine stage): trunk and branch rods, and DF_PV_CLUMPS ellipsoid
+// clumps of twig medium at the branch ends and the crown's centre. Far
+// (plain stage, shadows): one crown ellipsoid of the clumps' mean medium on
+// a trunk capsule.
+const DF_PV_CLUMPS: i32 = 7;
+const DF_PV_CLUMP_SIGMA: f32 = 3.0;   // twig-and-leaflet medium in a clump
+// The whole crown's mean: the clumps fill about 0.6 of its envelope.
+const DF_PV_CROWN_SIGMA: f32 = 1.8;
+const DF_PV_FAR_FP0: f32 = 0.05;
+const DF_PV_FAR_FP1: f32 = 0.08;
+const DF_PV_BARK: vec3<f32> = vec3<f32>(0.150, 0.190, 0.075);
+const DF_PV_LEAF: vec3<f32> = vec3<f32>(0.095, 0.140, 0.040);
+const DF_MAT_PV_BARK: i32 = 20;
+const DF_MAT_PV_CROWN: i32 = 21;
+
+fn df_paloverde_item(it_in: DfItem, r: vec4<f32>) -> DfItem {
+    var it = it_in;
+    it.kind = DF_KIND_PALOVERDE;
+    let h = 3.0 + 3.0 * r.x;
+    it.a = vec4<f32>(h, df_paloverde_crown(r), floor(3.0 + 2.99 * r.z),
+                     r.w * DF_TAU);
+    return it;
+}
+
+// Crown radius from the shape draw: about as broad as the tree is tall.
+fn df_paloverde_crown(r: vec4<f32>) -> f32 {
+    return (0.40 + 0.20 * r.y) * (3.0 + 3.0 * r.x);
+}
+
+fn df_paloverde_reach(crown: f32) -> f32 {
+    return crown + 0.3;
+}
+
+// Trunk i (k = 0) and its two branches (k = 1, 2): rods from the base to
+// the crown's middle and on to its rim.
+fn df_pv_limb(it: DfItem, i: i32, k: i32) -> DfSeg {
+    let hh = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 29u + 401u, 31u)));
+    let h = it.a.x;
+    let cr = it.a.y;
+    let az = it.a.w + DF_TAU * (f32(i) + 0.3 * hh.x) / it.a.z;
+    let d = vec2<f32>(cos(az), sin(az));
+    let a0 = vec3<f32>(d * 0.08, -0.3);
+    let fork = vec3<f32>(d * (0.25 + 0.2 * hh.y) * cr, (0.38 + 0.12 * hh.z) * h);
+    var sg: DfSeg;
+    if (k == 0) {
+        sg.a = a0;
+        sg.len = length(fork - a0);
+        sg.ax = (fork - a0) / sg.len;
+        sg.r0 = 0.11;
+        sg.r1 = 0.07;
+        return sg;
+    }
+    let side = select(-0.5, 0.5, k == 1) + 0.3 * (hh.w - 0.5);
+    let az2 = az + side;
+    let tip = vec3<f32>(vec2<f32>(cos(az2), sin(az2)) * (0.55 + 0.15 * hh.x) * cr,
+                        (0.72 + 0.12 * hh.y) * h);
+    sg.a = fork;
+    sg.len = length(tip - fork);
+    sg.ax = (tip - fork) / sg.len;
+    sg.r0 = 0.06;
+    sg.r1 = 0.025;
+    return sg;
+}
+
+fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
+                      tb: f32, pixel_angle: f32, dither: vec2<f32>,
+                      stage: i32) -> DesertHit {
+    let shadow = stage == DF_STAGE_SHADOW;
+    var res: DesertHit;
+    res.hit = false;
+    res.t = tb;
+    let q0 = o - it.base;
+    let fp = select(pixel_angle * ta, pixel_angle, shadow);
+    let far = shadow || fp > mix(DF_PV_FAR_FP0, DF_PV_FAR_FP1, dither.x);
+    if (df_stage_skips(stage, far)) {
+        return res;
+    }
+    let h = it.a.x;
+    let cr = it.a.y;
+    let fpath = df_item_free_path(dither, it.seed);
+    var best = tb;
+    var code = DF_MAT_PV_CROWN;
+    var nrm = -dir;
+    if (far) {
+        let tt = df_capsule(q0, dir, vec3<f32>(0.0, 0.0, -0.3),
+                            vec3<f32>(0.0, 0.0, 0.45 * h), 0.13);
+        if (tt > ta && tt < best) {
+            best = tt;
+            code = DF_MAT_PV_BARK;
+            let hp = q0 + dir * tt;
+            nrm = normalize(vec3<f32>(hp.xy, 0.0) + vec3<f32>(1e-6, 0.0, 0.0));
+        }
+        let ec = vec3<f32>(0.0, 0.0, 0.68 * h);
+        let er = vec3<f32>(cr, cr, 0.32 * h);
+        let tc = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, best,
+                               DF_PV_CROWN_SIGMA, fpath);
+        if (tc < best) {
+            best = tc;
+            code = DF_MAT_PV_CROWN;
+            nrm = normalize((q0 + dir * tc - ec) / (er * er));
+        }
+    } else {
+        var rod: DfRodHit;
+        rod.t = best;
+        let nt = i32(it.a.z);
+        for (var i: i32 = 0; i < nt; i = i + 1) {
+            for (var k: i32 = 0; k < 3; k = k + 1) {
+                let sg = df_pv_limb(it, i, k);
+                rod = df_rod(q0, dir, sg.a, sg.ax, sg.len, sg.r0, sg.r1, rod,
+                             0.0);
+                if (k > 0) {
+                    // A clump at each branch end: its own medium, its own
+                    // free path.
+                    let cc = sg.a + sg.ax * sg.len;
+                    let cer = vec3<f32>(0.30 * cr, 0.30 * cr, 0.16 * h);
+                    let seed = it.seed + vec2<u32>(u32(i * 3 + k) * 7919u, 0u);
+                    let tc = df_medium_hit(df_ellipsoid_chord(q0, dir, cc, cer),
+                                           ta, min(best, rod.t),
+                                           DF_PV_CLUMP_SIGMA,
+                                           df_item_free_path(dither, seed));
+                    if (tc < min(best, rod.t)) {
+                        best = tc;
+                        code = DF_MAT_PV_CROWN;
+                        nrm = normalize((q0 + dir * tc - cc) / (cer * cer));
+                    }
+                }
+            }
+        }
+        // The crown's heart, over the forks.
+        let hc = vec3<f32>(0.0, 0.0, 0.7 * h);
+        let her = vec3<f32>(0.5 * cr, 0.5 * cr, 0.18 * h);
+        let tc = df_medium_hit(df_ellipsoid_chord(q0, dir, hc, her), ta,
+                               min(best, rod.t), DF_PV_CLUMP_SIGMA, fpath);
+        if (tc < min(best, rod.t)) {
+            best = tc;
+            code = DF_MAT_PV_CROWN;
+            nrm = normalize((q0 + dir * tc - hc) / (her * her));
+        }
+        if (rod.t < best) {
+            best = rod.t;
+            code = DF_MAT_PV_BARK;
+            nrm = rod.n;
+        }
+    }
+    if (best >= tb) {
+        return res;
+    }
+    res.hit = true;
+    res.t = best;
+    res.kind = DF_KIND_PALOVERDE;
+    res.normal = nrm;
+    // The crown hit's depth in its envelope (for the crown's own occlusion
+    // of the sky), 1 at the surface.
+    let pn = length((q0 + dir * best - vec3<f32>(0.0, 0.0, 0.68 * h))
+                    / vec3<f32>(cr, cr, 0.32 * h));
+    res.mat = vec4<f32>(f32(code) + 0.9 * df_u01(it.seed.y), clamp(pn, 0.0, 1.0),
+                        0.0, 0.0);
+    return res;
+}
+
+fn df_paloverde_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight,
+                      Ls: DesertLight) -> vec3<f32> {
+    let code = i32(floor(h.mat.x));
+    let tint = fract(h.mat.x) / 0.9;
+    if (code == DF_MAT_PV_BARK) {
+        return desert_lambert(DF_PV_BARK * (0.9 + 0.2 * tint), h.normal, Ls);
+    }
+    // Twigs and leaflets of every orientation (the creosote canopy's rule),
+    // under a crown that hides part of the sky from its own inside.
+    let open = mix(0.45, 1.0, h.mat.y * h.mat.y);
+    let leaf = DF_PV_LEAF * (0.85 + 0.3 * tint);
+    return leaf / DF_PI * (Ls.sun * 0.25 + Ls.sky * 0.5 * open
+                           + Ls.ground * 0.5)
+        + leaf * 0.6 / DF_PI * Ls.sun * 0.25;
+}
+
 // --- Boulders -------------------------------------------------------------------
 //
 // Granite corestones, rounded by weathering along their joints, half buried,
@@ -16917,6 +17102,9 @@ fn df_boulder_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
 const DF_P_SAGUARO: f32 = 0.18;
 const DF_P_OCOTILLO: f32 = 0.10;
 const DF_P_BOULDERS: f32 = 0.05;
+// Palo verde: a big cell's tree candidate on a wash bank (df_keep scales
+// it by the bank), ~14/ha along the washes, next to nothing away from them.
+const DF_P_PALOVERDE: f32 = 0.35;
 const DF_P_CREOSOTE: f32 = 0.46;
 const DF_P_BURSAGE: f32 = 0.24;
 const DF_P_ROCK: f32 = 0.05;
@@ -16982,6 +17170,10 @@ fn df_keep(kind: i32, hb: DfHabitat) -> f32 {
     if (kind == DF_KIND_BOULDER) {
         return open * mix(0.4, 1.0, hb.stand);
     }
+    if (kind == DF_KIND_PALOVERDE) {
+        // The riparian strip: the washes' banks, a scatter elsewhere.
+        return open * (0.04 + 0.96 * hb.bank);
+    }
     // The shrubs: not on the wash floor, thinned on pavement.
     return open * (1.0 - 0.55 * hb.pave);
 }
@@ -17027,6 +17219,12 @@ fn df_big_foot(ci: vec2<i32>) -> DfFoot {
         f.kind = DF_KIND_BOULDER;
         f.reach = DF_BOULDER_REACH;
         f.clear = 2.2;
+    } else if (r0.x < DF_P_SAGUARO + DF_P_OCOTILLO + DF_P_BOULDERS
+                      + DF_P_PALOVERDE) {
+        f.kind = DF_KIND_PALOVERDE;
+        let rs = df_rand4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
+        f.reach = df_paloverde_reach(df_paloverde_crown(rs));
+        f.clear = 1.2;
     }
     let margin = f.reach + 0.05;
     f.xy = vec2<f32>(margin) + (DF_BIG_CELL - 2.0 * margin) * rp.xy;
@@ -17041,6 +17239,9 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
     var it: DfItem;
     it.seed = df_cell_seed(ci, DF_BIG_N, 0x5a17u);
     it.kind = 0;
+    if (foot.kind == 0) {
+        return it;
+    }
     let r0 = df_rand4(it.seed);
     if (r0.w >= df_keep(foot.kind, df_habitat(cell_org + foot.xy))) {
         return it;
@@ -17057,6 +17258,11 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
         it.bmin = vec3<f32>(foot.xy - vec2<f32>(foot.reach), it.base.z - 0.35);
         it.bmax = vec3<f32>(foot.xy + vec2<f32>(foot.reach),
                             it.base.z + 1.05 * it.a.x + 0.3);
+    } else if (foot.kind == DF_KIND_PALOVERDE) {
+        it = df_paloverde_item(it, rs);
+        it.bmin = vec3<f32>(foot.xy - vec2<f32>(foot.reach), it.base.z - 0.45);
+        it.bmax = vec3<f32>(foot.xy + vec2<f32>(foot.reach),
+                            it.base.z + 1.02 * it.a.x);
     } else {
         it = df_boulder_item(it, rs, true);
         it.base.z = it.base.z - 0.1;
@@ -17108,6 +17314,9 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
     var it: DfItem;
     it.kind = 0;
     it.seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
+    if (foot.kind == 0) {
+        return it;
+    }
     let org_w = cell_org + foot.xy;
     // Keep clear of the big plant standing in this part of the ground.
     let bci = vec2<i32>(floor(org_w / DF_BIG_CELL));
@@ -17163,6 +17372,8 @@ fn df_item_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
                               stage);
     } else if (it.kind == DF_KIND_BOULDER) {
         h = df_boulder_trace(it, o, dir, ta, tb, pixel_angle, stage);
+    } else if (it.kind == DF_KIND_PALOVERDE) {
+        h = df_paloverde_trace(it, o, dir, ta, tb, pixel_angle, dither, stage);
     } else if (it.kind == DF_KIND_PRICKLY) {
         h = df_prickly_trace(it, o, dir, ta, tb, pixel_angle, dither, stage);
     }
@@ -17534,6 +17745,9 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
     if (h.kind == DF_KIND_BOULDER) {
         return df_boulder_shade(h, dir, fp, Ls);
     }
+    if (h.kind == DF_KIND_PALOVERDE) {
+        return df_paloverde_shade(h, dir, L, Ls);
+    }
     if (h.kind == DF_KIND_PRICKLY) {
         return df_prickly_shade(h, dir, fp, L, Ls);
     }
@@ -17597,6 +17811,11 @@ const DF_FAR_PEAR_B: f32 = 0.35;
 const DF_FAR_PEAR_KAPPA: f32 = 0.65;
 const DF_FAR_OCO_RHO: f32 = 0.16;     // canes' equivalent half-width
 const DF_FAR_OCO_H: f32 = 3.6;
+const DF_FAR_PV_A: f32 = 2.2;         // palo verde crown
+const DF_FAR_PV_ZC: f32 = 3.06;
+const DF_FAR_PV_B: f32 = 1.44;
+const DF_FAR_PV_KAPPA: f32 = 0.85;
+const DF_FAR_PV_ALB: vec3<f32> = vec3<f32>(0.095, 0.140, 0.040);
 const DF_FAR_ROCK_A: f32 = 1.3;       // a heap's equivalent dome
 const DF_FAR_ROCK_B: f32 = 0.8;
 const DF_FAR_STONE_A: f32 = 0.25;     // a loose stone
@@ -17650,6 +17869,7 @@ struct DfFarProfile {
     oco: f32,
     rock: f32,
     pear: f32,
+    pv: f32,
 }
 
 fn df_far_profile(z: f32, hb: DfHabitat) -> DfFarProfile {
@@ -17664,6 +17884,7 @@ fn df_far_profile(z: f32, hb: DfHabitat) -> DfFarProfile {
     let n_pear = DF_P_PRICKLY * small * k_shrub;
     let n_bar = DF_P_BARREL * small * k_shrub;
     let n_stone = DF_P_ROCK * small * df_keep(DF_KIND_BOULDER, hb);
+    let n_pv = DF_P_PALOVERDE * big * df_keep(DF_KIND_PALOVERDE, hb);
     // Saguaro heights: 1.3 + 11.2 a^1.15; barrels: 0.45 + 1.2 a^1.2.
     let sag = df_far_column(z, DF_FAR_SAG_R, 1.3, 11.2, 1.0 / 1.15) * n_sag;
     let bar = df_far_column(z, DF_FAR_BAR_R, 0.45, 1.2, 1.0 / 1.2) * n_bar;
@@ -17675,19 +17896,22 @@ fn df_far_profile(z: f32, hb: DfHabitat) -> DfFarProfile {
         * (n_burs * DF_FAR_BURS_KAPPA);
     let pear = df_far_crown(z, DF_FAR_PEAR_A, DF_FAR_PEAR_ZC, DF_FAR_PEAR_B)
         * (n_pear * DF_FAR_PEAR_KAPPA);
+    let pv = df_far_crown(z, DF_FAR_PV_A, DF_FAR_PV_ZC, DF_FAR_PV_B)
+        * (n_pv * DF_FAR_PV_KAPPA);
     let rock = df_far_crown(z, DF_FAR_ROCK_A, 0.0, DF_FAR_ROCK_B) * n_rock
         + df_far_crown(z, DF_FAR_STONE_A, 0.0, DF_FAR_STONE_B) * n_stone;
     var f: DfFarProfile;
     f.w_col = sag.x + bar.x + oco.x;
     f.c_col = sag.y + bar.y;
-    f.w_crown = creo.x + burs.x + pear.x + rock.x;
-    f.c_crown = creo.y + burs.y + pear.y + rock.y;
+    f.w_crown = creo.x + burs.x + pear.x + rock.x + pv.x;
+    f.c_crown = creo.y + burs.y + pear.y + rock.y + pv.y;
     f.sag = sag.x + bar.x;
     f.creo = creo.x;
     f.burs = burs.x;
     f.oco = oco.x;
     f.rock = rock.x;
     f.pear = pear.x;
+    f.pv = pv.x;
     return f;
 }
 
@@ -17707,6 +17931,7 @@ struct DfFarStretch {
     oco: f32,
     rock: f32,
     pear: f32,
+    pv: f32,
 }
 
 fn df_far_stretch(za_in: f32, zb_in: f32, hb: DfHabitat, len: f32, s: f32,
@@ -17734,6 +17959,7 @@ fn df_far_stretch(za_in: f32, zb_in: f32, hb: DfHabitat, len: f32, s: f32,
     r.oco = f * abs(fb.oco - fa.oco);
     r.rock = f * abs(fb.rock - fa.rock);
     r.pear = f * abs(fb.pear - fa.pear);
+    r.pv = f * abs(fb.pv - fa.pv);
     return r;
 }
 
@@ -17766,6 +17992,7 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     var w_oco = 0.0;
     var w_rock = 0.0;
     var w_pear = 0.0;
+    var w_pv = 0.0;
     // One habitat for the whole stretch of ray, read where it meets the
     // ground: the densities vary over a wash's width, and a far pixel's
     // plants stand within a few of their own heights of where it lands.
@@ -17789,11 +18016,12 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
             w_oco = w_oco + st.oco;
             w_rock = w_rock + st.rock;
             w_pear = w_pear + st.pear;
+            w_pv = w_pv + st.pv;
         }
         za = zb;
     }
     c.cover = 1.0 - exp(-tau);
-    let wsum = w_sag + w_creo + w_burs + w_oco + w_rock + w_pear;
+    let wsum = w_sag + w_creo + w_burs + w_oco + w_rock + w_pear + w_pv;
     if (wsum <= 0.0) {
         return c;
     }
@@ -17819,12 +18047,14 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     let a_oco = DF_FAR_OCO_ALB * (w_oco * inv);
     let a_rock = DF_FAR_ROCK_ALB * (w_rock * inv);
     let a_pear = DF_FAR_PEAR_ALB * (w_pear * inv);
-    c.sun_k = a_sag * (0.85 * cyl) + (a_creo + a_burs + a_pear) * (0.75 * sph)
+    let a_pv = DF_FAR_PV_ALB * (w_pv * inv);
+    c.sun_k = a_sag * (0.85 * cyl)
+        + (a_creo + a_burs + a_pear + a_pv) * (0.75 * sph)
         + a_oco * cyl + a_rock * sph;
     c.sky_k = a_sag * 0.40 + a_creo * 0.45 + a_burs * 0.50 + a_oco * 0.50
-        + a_rock * 0.70 + a_pear * 0.50;
+        + a_rock * 0.70 + a_pear * 0.50 + a_pv * 0.45;
     c.gnd_k = a_sag * 0.50 + a_creo * 0.40 + a_burs * 0.40 + a_oco * 0.50
-        + a_rock * 0.30 + a_pear * 0.40;
+        + a_rock * 0.30 + a_pear * 0.40 + a_pv * 0.40;
     return c;
 }
 
@@ -17870,6 +18100,10 @@ fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>) -> f32 {
         + DF_P_PRICKLY * small * k_shrub * DF_FAR_PEAR_KAPPA
             * df_far_crown_shadow(DF_FAR_PEAR_A, DF_FAR_PEAR_ZC, DF_FAR_PEAR_B, ts)
             * df_far_hot(sep, DF_FAR_PEAR_ZC, 2.0 * DF_FAR_PEAR_A)
+        + DF_P_PALOVERDE * big * df_keep(DF_KIND_PALOVERDE, hb)
+            * DF_FAR_PV_KAPPA
+            * df_far_crown_shadow(DF_FAR_PV_A, DF_FAR_PV_ZC, DF_FAR_PV_B, ts)
+            * df_far_hot(sep, DF_FAR_PV_ZC, 2.0 * DF_FAR_PV_A)
         + DF_P_BOULDERS * big * df_keep(DF_KIND_BOULDER, hb) * 0.5
             * df_far_crown_shadow(DF_FAR_ROCK_A, 0.0, DF_FAR_ROCK_B, ts)
             * df_far_hot(sep, 0.4, 2.0 * DF_FAR_ROCK_A);
