@@ -4018,7 +4018,9 @@ const CITY_PART_SILL: i32 = 4;
 const CITY_PART_TRIM: i32 = 5;   // ledges, cornices, fins, mullion caps
 const CITY_PART_AC: i32 = 6;
 const CITY_PART_PIPE: i32 = 7;
-const CITY_PART_STEEL: i32 = 8;  // brackets
+const CITY_PART_STEEL: i32 = 8;  // brackets, fire escapes, balcony bars
+const CITY_PART_SLAB: i32 = 9;   // balcony slabs
+const CITY_PART_PANEL: i32 = 10; // balcony glass panels
 
 struct CityBox {
     bmin: vec3<f32>,
@@ -4385,7 +4387,7 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
             st.ledge_v1 = 0.28;
         }
         st.ac_frac = select(0.0, 0.08 + 0.25 * q.z, !tall);
-        st.pipes = select(0, i32(floor(q.w * 3.99)), !tall);
+        st.pipes = select(0, i32(floor(q.w * 2.99)), !tall);
     } else if (cc.win_style == 1) {
         // Ribbon windows: continuous bands, and on some buildings a
         // sunshade slab over every band.
@@ -4432,6 +4434,9 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
     }
     if (city_escape_building(cc)) {
         st.depth = max(st.depth, CITY_ESCAPE_OUT);
+    }
+    if (city_balcony_building(cc)) {
+        st.depth = max(st.depth, CITY_BALCONY_OUT);
     }
     st.depth = min(st.depth + 0.02, CITY_SHELL_OUT_MAX);
     return st;
@@ -4533,7 +4538,7 @@ fn city_shell_try(best: CityShellHit, ol: vec3<f32>, dl: vec3<f32>,
 // cell b, as a face-local box (shape 1) or vertical cylinder (shape 2), or
 // nothing (shape 0). u extents may run past the cell; the caller clips them
 // to it. `s` scales every depth.
-const CITY_SHELL_FEATURES: i32 = 10;
+const CITY_SHELL_FEATURES: i32 = 15;
 
 struct CityShellFeature {
     shape: i32,
@@ -4590,7 +4595,7 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
                 vec3<f32>(ca + ac.lo.x, vfl + ac.lo.y, 0.0),
                 vec3<f32>(ca + ac.hi.x, vfl + ac.hi.y, ac.out * s));
         }
-    } else {
+    } else if (k < 10) {
         // Drainpipes (k 6, 8) and their brackets (k 7, 9), strapping the
         // pipe to the wall every 2.4 m.
         let j = (k - 6) >> 1;
@@ -4613,8 +4618,90 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
                 }
             }
         }
+    } else {
+        // A balcony (k 10-14): slab, front railing, its top rail and the two
+        // side panels, on the bays and storeys city_balcony gives.
+        let bal = city_balcony(cc, f, b);
+        if (bal.x > 0.0) {
+            let out = CITY_BALCONY_OUT * s;
+            let u0 = ca + 0.08;
+            let u1 = cb - 0.08;
+            if (k == 10) {
+                fe = CityShellFeature(1, CITY_PART_SLAB,
+                    vec3<f32>(u0, vfl - 0.02, 0.0),
+                    vec3<f32>(u1, vfl + 0.16, out));
+            } else if (k == 11) {
+                // Glass (a solid panel) or bars (an alpha-tested plane).
+                fe = CityShellFeature(select(3, 1, bal.y > 0.5),
+                    select(CITY_PART_STEEL, CITY_PART_PANEL, bal.y > 0.5),
+                    vec3<f32>(u0, vfl + 0.16, out - 0.04 * s),
+                    vec3<f32>(u1, vfl + 1.02, out - 0.01 * s));
+            } else if (k == 12) {
+                fe = CityShellFeature(1, CITY_PART_STEEL,
+                    vec3<f32>(u0, vfl + 1.02, out - 0.06 * s),
+                    vec3<f32>(u1, vfl + 1.07, out));
+            } else {
+                let ue = select(u1 - 0.04, u0, k == 13);
+                fe = CityShellFeature(1, CITY_PART_STEEL,
+                    vec3<f32>(ue, vfl + 0.16, 0.0),
+                    vec3<f32>(ue + 0.04, vfl + 1.07, out));
+            }
+        }
     }
     return fe;
+}
+
+// --- balconies ---------------------------------------------------------------
+//
+// Residential mid-rise, a third of it: stacked balconies in columns on every
+// second or third bay, from the first floor to the one under the roof, glass
+// railed or barred by the building's draw. Bay features, so the cell walk
+// finds them; their flat twin (city_balcony_cover) paints the slab line and
+// the railing and dissolves them into their mean coverage.
+const CITY_BALCONY_OUT: f32 = 1.10;
+const CITY_BALCONY_BAR: f32 = 0.11;
+
+// Whether a building has balconies at all (never with a fire escape).
+fn city_balcony_building(cc: CityCell) -> bool {
+    let h = city_rand4(cc.seed ^ vec2<u32>(0x27220a95u, 0x165667b1u));
+    return (cc.win_style == 0 || cc.win_style == 4 || cc.win_style == 1)
+        && cc.height >= 12.0 && cc.height <= 120.0 && h.x < 0.33
+        && !city_escape_building(cc);
+}
+
+// This bay's balcony: x > 0 when it has one, y > 0.5 for a glass railing.
+fn city_balcony(cc: CityCell, f: CityFace, b: CityBay) -> vec2<f32> {
+    if (!b.in_bay || !f.aligned || b.iv < 1
+        || f32(b.iv + 1) * CITY_FLOOR_H > f.z1 - 1.0
+        || !city_balcony_building(cc)) {
+        return vec2<f32>(0.0);
+    }
+    let h = city_rand4(cc.seed ^ vec2<u32>(0x9e3779b1u, 0x7f4a7c15u)
+                       ^ vec2<u32>(f.salt));
+    let period = 2 + i32(floor(h.x * 1.999));
+    let phase = i32(floor(h.y * f32(period) * 0.999));
+    if (b.iu % period != phase) {
+        return vec2<f32>(0.0);
+    }
+    return vec2<f32>(1.0, select(0.0, 1.0, h.z < 0.5));
+}
+
+// The balcony's coverage of the wall seen face-on at bay-local (bu, bv),
+// for the flat twin, and the albedo it paints there.
+fn city_balcony_cover(cc: CityCell, f: CityFace, b: CityBay,
+                      fp_eff: f32) -> f32 {
+    let bal = city_balcony(cc, f, b);
+    if (bal.x <= 0.0 || b.bu < 0.08 || b.bu > f.pitch - 0.08) {
+        return 0.0;
+    }
+    let slab = b.bv < 0.16 || b.bv > CITY_FLOOR_H - 0.02;
+    let rail = b.bv > 0.16 && b.bv < 1.07;
+    let bars = rail && (bal.y > 0.5 || b.bv > 1.02
+        || fract(b.bu / CITY_BALCONY_BAR) < 0.2);
+    let c = select(0.0, 1.0, slab || bars);
+    let mean = (0.18 + select(0.91 * 0.2 + 0.05, 0.91, bal.y > 0.5))
+               / CITY_FLOOR_H;
+    return mix(c, mean, smoothstep(0.10, 0.45, fp_eff));
 }
 
 // Everything in one bay cell: the wall plane with its opening, the recess
@@ -4717,6 +4804,19 @@ fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
                                   vec3<f32>(min(fe.hi.x, chi), fe.hi.y,
                                             min(fe.hi.z, f.col_w)),
                                   fe.part);
+        } else if (fe.shape == 3) {
+            // A thin plane that is solid only on its vertical bars.
+            let blo = vec3<f32>(max(fe.lo.x, clo), fe.lo.yz);
+            let bhi = vec3<f32>(min(fe.hi.x, chi), fe.hi.y,
+                                min(fe.hi.z, f.col_w));
+            let hb = city_box_hit(ol, il, blo, bhi);
+            if (hb.x <= hb.y && hb.x > 0.0 && hb.x < best.t) {
+                let pb = ol + hb.x * dl;
+                if (fract((pb.x - b.ca) / CITY_BALCONY_BAR) < 0.2) {
+                    best = CityShellHit(hb.x, city_box_normal(pb, blo, bhi),
+                                        fe.part);
+                }
+            }
         } else if (fe.shape == 2) {
             // A vertical elliptic cylinder in (u, w): axis at (lo.x, lo.z),
             // radius hi.x along the wall and hi.z out from it (the shell's
@@ -5409,6 +5509,13 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
                      vec3<f32>(0.32, 0.31, 0.29), city_u01(ph.x) < 0.4);
     } else if (part == CITY_PART_STEEL) {
         alb = CITY_ESCAPE_ALBEDO;
+    } else if (part == CITY_PART_SLAB) {
+        alb = st.trim;
+    } else if (part == CITY_PART_PANEL) {
+        // Frosted glass: dark, with the night's reflection on it.
+        alb = vec3<f32>(0.05, 0.055, 0.06);
+        e = city_glass_fresnel(abs(dot(dir, n)))
+            * city_glass_env(reflect(dir, n), h.pos, glow);
     } else {
         // The wall. Brick is coursed in running bond — 65 mm courses and
         // 215 mm bricks in 10 mm of lighter mortar, each brick its own shade
@@ -5573,7 +5680,9 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     // Under a component's panel there are no windows to see; behind a fire
     // escape, only what its lattice leaves.
     let esc_cover = city_escape_cover(city_escape(cc, f), uc, vc, fp_eff);
-    e = e * (1.0 - cc_facade_cover(cc, h, uc, vc, fp)) * (1.0 - esc_cover);
+    let bal_cover = city_balcony_cover(cc, f, b, fp_eff);
+    e = e * (1.0 - cc_facade_cover(cc, h, uc, vc, fp)) * (1.0 - esc_cover)
+          * (1.0 - bal_cover);
 
     // Street-level storefront strip: bright, saturated, and only on
     // buildings whose draw says the ground floor is commercial.
@@ -5587,7 +5696,8 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     e = e + cc_facade_detail(cc, h, uc, vc, fp);
 
     let st = city_shell_style(cc);
-    let alb = mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover);
+    let alb = mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover), st.trim,
+                  bal_cover);
     return e + alb
         * (CITY_SHELL_FILL_K
            * (fill + CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0))
@@ -6954,27 +7064,19 @@ fn cc_aircars_shade_resolved(h: CityHit, cc: CityCell, dir: vec3<f32>,
 // --- component: facadeworks (facadeworks.wgsl) ---
 // facadeworks — additive facade detail on top of the core window ladder.
 //
-// Three layers, in the order they matter to the shot:
+// VERTICAL NEON SIGNAGE. The cyberpunk cue. A hashed minority of buildings
+// (~12%) carries one narrow vertical sign box mounted on a corner of the
+// main mass, so both walls meeting there show it: saturated amber / cyan /
+// magenta at radiance 5-8, broken into glyph-like blocks that suggest
+// characters without being any script. A mid-rise gets a 12-40 m strip
+// starting 6 m up; a tower gets a ribbon proportional to its own height. At
+// street range it should read as typography, and from kilometres out it
+// should still be a colored vertical line, which is what makes a skyline
+// read as a CITY and not a lit grid.
 //
-//   1. VERTICAL NEON SIGNAGE. The cyberpunk cue. A hashed minority of
-//      buildings (~12%) carries one narrow vertical sign box mounted on a
-//      corner of the main mass, so both walls meeting there show it:
-//      saturated amber / cyan / magenta at radiance 5-8, broken into
-//      glyph-like blocks that suggest characters without being any script.
-//      A mid-rise gets a 12-40 m strip starting 6 m up; a tower gets a
-//      ribbon proportional to its own height. This is the layer the whole
-//      component exists for — at street range it should read as typography,
-//      and from kilometres out it should still be a colored vertical line,
-//      which is what makes a skyline read as a CITY and not a lit grid.
-//   2. BALCONY BANDS. ~25% of buildings get balcony ledges every 2nd or 3rd
-//      storey. We are ADDITIVE, so the ledge itself cannot be drawn (it is a
-//      dark band, and there is no multiply here); what we CAN draw is the
-//      light that spills past a balcony door, so the ledge reads by its warm
-//      underglow line rather than by its shadow. Deliberately faint:
-//      balconies are rhythm, not decoration.
-//   3. FIRE-ESCAPE ZIGZAGS. Filigree: a stair lattice rim-lit by street
-//      light on one wall of ~15% of mid-rises. Sub-pixel almost everywhere,
-//      so it is the layer with the most aggressive LOD.
+// (Balconies and fire escapes used to be drawn here as light on a flat wall;
+// they are the core facade shell's now, in 3D, with their flat twins in
+// city_facade_flat.)
 //
 // LOD discipline (SPEC rule 3). Every layer states its own mean and blends
 // to it as the pixel footprint grows; nothing switches off. Two subtleties
@@ -7013,43 +7115,9 @@ const cc_facadeworks_SIGN_HALO_SIG: f32 = 0.85;  // spill sigma (m)
 // illuminated box with writing on it rather than as free-floating strokes.
 const cc_facadeworks_SIGN_PANEL: f32 = 0.005;
 
-// --- Balcony bands ---------------------------------------------------------
-const cc_facadeworks_BAL_FRAC: u32 = 64u;      // of 256 buildings (25%)
-const cc_facadeworks_BAL_GLOW_V0: f32 = 0.55;  // door spill starts above the
-const cc_facadeworks_BAL_GLOW_H: f32 = 0.45;   // 0.5 m ledge, and is this tall
-// The brief's 0.6 rendered as a bright hairline rule ruled clean across a
-// whole wall — the single most prominent thing on the facade, and the exact
-// "stripe" the brief warns against. At exposure 6 a spill that reads as
-// spill, not as a drawn line, wants roughly a tenth of that.
-const cc_facadeworks_BAL_RADIANCE: f32 = 0.09;
-const cc_facadeworks_BAL_COLOR: vec3<f32> = vec3<f32>(1.0, 0.52, 0.22);
-const cc_facadeworks_BAL_FLOOR_P: f32 = 0.60;  // storeys whose doors are open
-const cc_facadeworks_BAL_UNIT_P: f32 = 0.45;   // doors within such a storey
-// One door per window pitch, lighting the middle two thirds of it: what
-// breaks the line into a dashed rhythm instead of a rule.
-const cc_facadeworks_BAL_DOOR_LO: f32 = 0.18;
-const cc_facadeworks_BAL_DOOR_HI: f32 = 0.82;
-const cc_facadeworks_BAL_DOOR_FRAC: f32 = 0.64;  // HI - LO
-// Mean of the soft vertical profile below over the GLOW_H window.
-const cc_facadeworks_BAL_PROFILE_MEAN: f32 = 0.625;
-const cc_facadeworks_BAL_MAX_H: f32 = 260.0;   // towers have sealed walls
-
-// --- Fire escapes ----------------------------------------------------------
-const cc_facadeworks_FE_FRAC: u32 = 38u;        // of 256 buildings (~15%)
-const cc_facadeworks_FE_HW: f32 = 1.50;        // half-width of the column (m)
-// 0.30 was the brief's number and it renders as a solid tan scaffold at
-// exposure 6 — brighter than most of the windows behind it. This is the
-// rim a fire escape catches off a street lamp, so it is set where it reads
-// as structure on black and nothing more, and it falls off with height
-// because the lamp that lights it is on the ground.
-const cc_facadeworks_FE_RADIANCE: f32 = 0.055;
-const cc_facadeworks_FE_FALL_H: f32 = 55.0;    // e-fold of the street lamp
-const cc_facadeworks_FE_COLOR: vec3<f32> = vec3<f32>(1.0, 0.55, 0.28);
-const cc_facadeworks_FE_MEAN: f32 = 0.240;     // ink coverage of the lattice
-
 // Which tier of the building this facade pixel belongs to, and how far the
-// wall runs in facade-u. The u-extent is what lets signage and fire escapes
-// sit a fixed distance from a CORNER rather than at a hashed offset that
+// wall runs in facade-u. The u-extent is what lets signage sit a fixed
+// distance from a CORNER rather than at a hashed offset that
 // would sometimes land mid-wall and sometimes off the end of it.
 struct cc_facadeworks_Face {
     u0: f32,
@@ -7216,127 +7284,20 @@ fn cc_facadeworks_sign(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
     return scol * (rad * vgate * (prof * amp * val + halo));
 }
 
-// Two gates: whether this storey's doors are open at all, and which of them
-// along it spill. The second is what keeps the line dashed — a continuous
-// band ruled across a whole wall reads as a stripe, and balconies are
-// supposed to read as rhythm. One door per window pitch, and the spill
-// fades top and bottom rather than ending on an edge, because it is light
-// falling on a ledge and not a painted line.
-fn cc_facadeworks_bal_lit(cc: CityCell, per: i32, uc: f32, vc: f32) -> f32 {
-    let ivf = floor(vc / CITY_FLOOR_H);
-    let iv = i32(ivf);
-    let vloc = vc - ivf * CITY_FLOOR_H;
-    if (((iv % per) + per) % per != 0
-        || vloc <= cc_facadeworks_BAL_GLOW_V0
-        || vloc >= cc_facadeworks_BAL_GLOW_V0 + cc_facadeworks_BAL_GLOW_H) {
-        return 0.0;
-    }
-    let fu = fract(uc / CITY_WIN_PITCH_U);
-    if (fu <= cc_facadeworks_BAL_DOOR_LO || fu >= cc_facadeworks_BAL_DOOR_HI) {
-        return 0.0;
-    }
-    let fb = pcg2d(vec2<u32>(cc.seed.x ^ 0x3c6ef372u,
-                             bitcast<u32>(iv) * 0x85ebca6bu));
-    if (city_u01(fb.x) >= cc_facadeworks_BAL_FLOOR_P) {
-        return 0.0;
-    }
-    let iu = i32(floor(uc / CITY_WIN_PITCH_U));
-    let ub = pcg2d(vec2<u32>(fb.y, bitcast<u32>(iu) * 0xc2b2ae35u));
-    if (city_u01(ub.x) >= cc_facadeworks_BAL_UNIT_P) {
-        return 0.0;
-    }
-    let q = abs(vloc - (cc_facadeworks_BAL_GLOW_V0
-                        + 0.5 * cc_facadeworks_BAL_GLOW_H))
-            / (0.5 * cc_facadeworks_BAL_GLOW_H);
-    return 1.0 - smoothstep(0.25, 1.0, q);
-}
-
-// Layer 2.
-fn cc_facadeworks_balcony(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
-                          uc: f32, vc: f32, fp: f32) -> vec3<f32> {
-    if (((s.x >> 11u) & 255u) >= cc_facadeworks_BAL_FRAC
-        || cc.height >= cc_facadeworks_BAL_MAX_H) {
-        return vec3<f32>(0.0);
-    }
-    let per = select(2, 3, ((s.x >> 19u) & 1u) != 0u);
-    let duty = cc_facadeworks_BAL_GLOW_H * cc_facadeworks_BAL_PROFILE_MEAN
-               / (f32(per) * CITY_FLOOR_H);
-    let far = duty * cc_facadeworks_BAL_FLOOR_P * cc_facadeworks_BAL_UNIT_P
-              * cc_facadeworks_BAL_DOOR_FRAC;
-    // A 0.45 m spill at a 7.2-10.8 m pitch is sub-pixel past ~1 m/px, so it
-    // dissolves early. Its mean is ~0.0005 radiance — three orders under a
-    // lit facade — which is why it can dissolve without leaving a mark.
-    let l = smoothstep(0.40, 1.5, fp);
-    if (l >= 0.999) {
-        return cc_facadeworks_BAL_COLOR * (cc_facadeworks_BAL_RADIANCE * far);
-    }
-    let near = cc_facadeworks_bal_lit(cc, per, uc, vc);
-    return cc_facadeworks_BAL_COLOR
-           * (cc_facadeworks_BAL_RADIANCE * mix(near, far, l));
-}
-
-// Layer 3.
-fn cc_facadeworks_escape(cc: CityCell, f: cc_facadeworks_Face, s: vec2<u32>,
-                         uc: f32, vc: f32, fp: f32) -> vec3<f32> {
-    // Filigree: fade the pattern into its mean first, then let that mean —
-    // 0.013 radiance, a two-hundredth of a lit window — go out over a wide
-    // footprint band. Fading a pedestal that small across two octaves of
-    // range is not a pop; fading the PATTERN would have been.
-    let l2 = smoothstep(2.0, 6.0, fp);
-    if (((s.x >> 20u) & 255u) >= cc_facadeworks_FE_FRAC
-        || cc.height <= 30.0 || cc.height >= 120.0
-        || i32((s.x >> 28u) & 3u) != f.side
-        || !f.base || (f.u1 - f.u0) <= 13.0 || l2 >= 0.999) {
-        return vec3<f32>(0.0);
-    }
-    // Set in from the corner far enough to clear a sign strip on the same
-    // wall (the two land together on well under 1% of buildings, but where
-    // they do they should be neighbours, not the same column).
-    let ufe = select(f.u0 + 4.5, f.u1 - 4.5, ((s.x >> 30u) & 1u) != 0u);
-    let du = uc - ufe;
-    if (abs(du) > cc_facadeworks_FE_HW) {
-        return vec3<f32>(0.0);
-    }
-    let x = (du + cc_facadeworks_FE_HW) / (2.0 * cc_facadeworks_FE_HW);
-    let ivf = floor(vc / CITY_FLOOR_H);
-    let y = vc / CITY_FLOOR_H - ivf;
-    // Stringers alternate direction storey to storey: the switchback is the
-    // whole silhouette of a fire escape.
-    let xx = select(x, 1.0 - x, ((i32(ivf) % 2) + 2) % 2 == 1);
-    let on = abs(y - xx) < 0.055        // stair stringer
-          || y < 0.055                  // landing at the floor line
-          || abs(x - 0.055) < 0.024     // rails
-          || abs(x - 0.945) < 0.024;
-    let l1 = smoothstep(0.35, 1.6, fp);
-    let val = mix(select(0.0, 1.0, on), cc_facadeworks_FE_MEAN, l1)
-              * (1.0 - l2);
-    let reach = 0.25 + 0.75 * exp(-max(vc - 6.0, 0.0)
-                                  / cc_facadeworks_FE_FALL_H);
-    return cc_facadeworks_FE_COLOR
-           * (cc_facadeworks_FE_RADIANCE * reach * val);
-}
-
 fn cc_facadeworks_draw(cc: CityCell) -> vec2<u32> {
     return pcg2d(cc.seed ^ vec2<u32>(0x7f4a7c15u, 0x2b3d8e11u));
 }
 
 fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
                          fp: f32) -> vec3<f32> {
-    // One draw per building for everything structural. pcg2d gives 64 bits;
-    // slicing them beats three city_rand4 calls on a hook that runs at every
-    // facade pixel, and the continuous draws each layer needs are taken
-    // later, behind that layer's own reject.
+    // One draw per building for the sign's structure. pcg2d gives 64 bits;
+    // the continuous draws are taken later, behind the sign's own reject.
     //
-    //   bits  0-7   sign presence      8-9   sign wall      10  sign edge
-    //        11-18  balcony presence    19   balcony pitch
-    //        20-27  escape presence   28-29  escape wall     30  escape edge
-    // (bit 10 is spare: signage picks a corner, so it needs no edge bit.)
+    //   bits  0-7   sign presence      8-9   sign corner
     //   s.y         sign length
     let s = cc_facadeworks_draw(cc);
     let f = cc_facadeworks_face(cc, h);
-    return cc_facadeworks_sign(cc, f, s, uc, vc, fp)
-         + cc_facadeworks_balcony(cc, f, s, uc, vc, fp)
-         + cc_facadeworks_escape(cc, f, s, uc, vc, fp);
+    return cc_facadeworks_sign(cc, f, s, uc, vc, fp);
 }
 
 // The sign box is a box on the wall: where it hangs there are no windows
