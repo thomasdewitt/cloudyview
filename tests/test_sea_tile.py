@@ -71,10 +71,21 @@ def test_the_shader_carries_the_tiles_own_numbers(sea):
 
 def test_every_swell_train_is_whole_cycles_across_the_period():
     src = SHADER.read_text()
-    calls = re.findall(r"sea_swell_train\(&s, ([-0-9. ]+), ([-0-9. ]+),", src)
-    assert len(calls) == 10
-    for a, b in calls:
-        assert float(a) == int(float(a)) and float(b) == int(float(b))
+    import math
+    period = _wgsl_scalar(src, "SWELL_PERIOD_M")
+    calls = re.findall(
+        r"sea_swell_train\(&s, vec2<f32>\(([-0-9.]+), ([-0-9.]+)\), "
+        r"([0-9.]+), ([0-9.]+),", src)
+    assert len(calls) == 15
+    for kx, ky, kk, omega in calls:
+        m, n = (float(v) * period / (2.0 * math.pi) for v in (kx, ky))
+        assert m == pytest.approx(round(m), abs=1e-5)
+        assert n == pytest.approx(round(n), abs=1e-5)
+        assert float(kk) == pytest.approx(math.hypot(float(kx), float(ky)),
+                                          rel=1e-6)
+        # Deep water, to within the clock period's frequency quantum.
+        assert abs(float(omega) - math.sqrt(9.81 * float(kk))) <= (
+            math.pi / _wgsl_scalar(src, "SEA_CLOCK_PERIOD_S") + 1e-7)
 
 
 def test_the_foam_rank_covers_exactly_what_the_gate_asks(sea):
@@ -140,3 +151,99 @@ def test_the_browser_decodes_and_mips_the_sea_as_python_does(sea):
             got = np.frombuffer(base64.b64decode(theirs[str(t)][k]),
                                 np.float32).reshape(level.shape)
             assert np.array_equal(got, level), f"frame {t} level {k}"
+
+
+def test_the_whitecaps_far_field_is_their_resolved_mean(sea):
+    """The far field's whitecap cover and tint are the means the resolved
+    foam averages to: the lace table the shader reads (measured on the tile)
+    integrated against the shader's own opacity and tint ramps."""
+    meta, _ = sea
+    src = SHADER.read_text()
+    for k, v in enumerate(meta["lace_cover"]):
+        assert _wgsl_scalar(src, f"SEA_LACE_COVER_{k}") == pytest.approx(v)
+    assert _wgsl_scalar(src, "SEA_CREST_MEAN") == pytest.approx(
+        meta["crest_mean"])
+    # The table was measured at these; the shader must cut at the same.
+    assert _wgsl_scalar(src, "SEA_LACE_EDGE") == pytest.approx(meta["lace_edge"])
+    assert _wgsl_scalar(src, "SEA_LACE_REACH") == pytest.approx(
+        meta["lace_reach"])
+    tint = [float(v) for v in re.search(
+        r"const SEA_FOAM_TINT_OLD: vec3<f32> = vec3<f32>\(([^)]*)\);",
+        src).group(1).split(",")]
+    cover, mean_tint = sea_tile.foam_far_field(
+        meta["lace_cover"], _wgsl_scalar(src, "SEA_FOAM_OPACITY_OLD"),
+        _wgsl_scalar(src, "SEA_FOAM_OPACITY_FRESH"), tint,
+        _wgsl_scalar(src, "SEA_LACE_FRESH_K"))
+    assert _wgsl_scalar(src, "SEA_FOAM_FAR_COVER") == pytest.approx(
+        cover, abs=1e-6)
+    far_tint = [float(v) for v in re.search(
+        r"const SEA_FOAM_FAR_TINT: vec3<f32> = vec3<f32>\(([^)]*)\);",
+        src).group(1).split(",")]
+    assert far_tint == pytest.approx(list(mean_tint), abs=1e-6)
+
+
+def test_the_sea_is_periodic_in_time_at_its_clock_period(sea):
+    """The hosts wrap the clock at clock_period_s, which is only invisible if
+    everything the sea draws repeats there: the tile's loop, the detail
+    octave's (loop / SEA_DETAIL_TIME_SCALE) and every swell frequency."""
+    import math
+    meta, _ = sea
+    src = SHADER.read_text()
+    T = meta["clock_period_s"]
+    assert _wgsl_scalar(src, "SEA_CLOCK_PERIOD_S") == pytest.approx(T)
+    loop = meta["loop_s"]
+    scale = _wgsl_scalar(src, "SEA_DETAIL_TIME_SCALE")
+    assert scale == int(scale)
+    for p in (loop, loop / scale):
+        assert T / p == pytest.approx(round(T / p), abs=1e-9)
+    omegas = re.findall(
+        r"sea_swell_train\(&s, vec2<f32>\([-0-9.]+, [-0-9.]+\), "
+        r"[0-9.]+, ([0-9.]+),", src)
+    assert len(omegas) == 15
+    for om in omegas:
+        cycles = float(om) * T / (2.0 * math.pi)
+        assert cycles == pytest.approx(round(cycles), abs=1e-4)
+
+
+def test_the_sea_repeats_where_the_surface_frame_folds(sea):
+    """Everything drawn off the tile — the detail octave (1/8 scale), the
+    lace (1/8, stretched along the wind) and the glitter cells (1.25 cm
+    times a power of two) — repeats a whole number of times across the
+    surface period, or a fold would show a seam."""
+    meta, _ = sea
+    src = SHADER.read_text()
+    period = meta["surface_period_m"]
+    tile = meta["tile_extent_m"]
+    detail = tile / _wgsl_scalar(src, "SEA_DETAIL_SCALE")
+    lace = tile / _wgsl_scalar(src, "SEA_LACE_SCALE")
+    lace_along = lace * _wgsl_scalar(src, "SEA_LACE_STRETCH")
+    facet = _wgsl_scalar(src, "SEA_GLITTER_FACET_M")
+    for size in (detail, lace, lace_along, facet):
+        assert period / size == pytest.approx(round(period / size), abs=1e-6)
+
+
+def test_the_whitecaps_far_field_near_a_closed_gate(sea):
+    """Past theta = 0.6 the kept foam lies inside the cut's soft ramp; the
+    far field there is the resolved mean, tabulated at five cuts."""
+    meta, _ = sea
+    src = SHADER.read_text()
+    args = (meta["lace_cover"], _wgsl_scalar(src, "SEA_FOAM_OPACITY_OLD"),
+            _wgsl_scalar(src, "SEA_FOAM_OPACITY_FRESH"),
+            _wgsl_scalar(src, "SEA_LACE_FRESH_K"),
+            _wgsl_scalar(src, "SEA_FOAM_EDGE"))
+    for i, theta in enumerate([0.6, 0.7, 0.8, 0.9, 1.0]):
+        assert _wgsl_scalar(src, f"SEA_FOAM_TAIL_{i}") == pytest.approx(
+            sea_tile.foam_resolved_cover(theta, *args), rel=1e-5, abs=1e-8)
+
+
+@pytest.mark.parametrize("surface", ["city", "desert"])
+def test_the_clock_is_refused_where_nothing_moves(surface):
+    """Only the sea reads the clock (row 24.z is 0 elsewhere), so a time
+    asked of a city or a desert would be a silent no-op."""
+    from cloudyview.witness import render_nested
+    with pytest.raises(ValueError, match="does not move"):
+        render_nested([], [0.0, 0.0, 100.0], azimuth=0.0, elevation=0.0,
+                      sun_azimuth=0.0, sun_elevation=45.0,
+                      surface=surface, scene_time=5.0,
+                      city_offset=(8100.0, -44190.0) if surface == "city"
+                      else None)

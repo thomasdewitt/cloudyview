@@ -70,6 +70,11 @@ export function packUniforms(state, view) {
     // the desert's rule); the sea folds at its swell's period. Mirrors
     // SceneState.surface_period_m.
     surfacePeriodM = null,
+    // The sea's period in time (meta.json clock_period_s): the clock is
+    // packed modulo it, so float32 never loses the sea's cadence. Required
+    // over the ocean whenever the clock is not 0; unused elsewhere. Mirrors
+    // SceneState.clock_period_s.
+    clockPeriodS = null,
   } = state;
 
   if (city && desert) {
@@ -319,7 +324,19 @@ export function packUniforms(state, view) {
   if (!Number.isFinite(Number(sceneTime))) {
     throw new Error(`scene_time must be finite; got ${sceneTime}.`);
   }
-  row(24, surfaceOff[0], surfaceOff[1], sceneTime, 0.0);
+  // The clock only over the sea: nothing else reads it, and as part of the
+  // scene key a running clock would keep a parked city or desert from ever
+  // converging while a track records.
+  let clock = 0.0;
+  if (!city && !desert && sceneTime !== 0) {
+    if (!(clockPeriodS > 0)) {
+      throw new Error("an ocean scene with a running clock needs its " +
+                      "clockPeriodS (the sea's meta.json clock_period_s).");
+    }
+    clock = sceneTime % clockPeriodS;
+    if (clock < 0) clock += clockPeriodS;
+  }
+  row(24, surfaceOff[0], surfaceOff[1], clock, 0.0);
   return u;
 }
 

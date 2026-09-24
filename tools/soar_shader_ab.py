@@ -216,6 +216,8 @@ def main():
     state.ocean_tile_extent = float(meta["tile_extent_m"])
     state.ocean_max_lod = int(meta["mips"]) - 1
     state.surface_period_m = surface_period_m(surface, meta)
+    if surface == "ocean":
+        state.clock_period_s = float(meta["clock_period_s"])
 
     views = ALL_VIEWS
     if city:

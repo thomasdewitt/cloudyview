@@ -45,7 +45,10 @@ export const DEFAULT_HAZE_HEIGHT_DEPENDENT = false;
 export const OCEAN_REALISM = 1.0;
 export const OCEAN_MIP_BIAS = -0.5;
 export const OCEAN_GLINT_STRENGTH = 0.85;
-export const OCEAN_GLINT_ROUGHNESS = 0.28;
+// The glint's base roughness: the slope variance below the detail octave's
+// 5 cm, as alpha — Cox & Munk's 8 m/s mean square slope less what the tile,
+// the detail octave and the swell resolve. Mirrors look.py.
+export const OCEAN_GLINT_ROUGHNESS = 0.174;
 // How much of the slope variance the normal-mip filter removed is drawn
 // stochastically per pixel per frame (iter_008). The remainder stays as
 // extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.
