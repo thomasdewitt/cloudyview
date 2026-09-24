@@ -1143,7 +1143,10 @@ export class UI {
     });
     m.append(item("Save the track", "a .json the soar command renders to video",
                   () => {
-                    app.downloadTrack(samples, knocks);
+                    app.downloadTrack(samples, knocks).catch((err) => {
+                      console.error(err);
+                      this.say(`Could not save the track: ${err.message}`, 6);
+                    });
                     this.open("main");
                   }));
     m.append(item("Discard it", null, () => this.open("main")));

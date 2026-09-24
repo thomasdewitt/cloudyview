@@ -93,8 +93,22 @@ CASES = [
     # The moving sea (2026-09-23): the ocean folds row 24 at its swell's
     # period rather than its tile, and row 24.z carries the scene clock.
     ("ocean_moving",
-     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 819.2},
+     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 1638.4,
+      "clock_period_s": 1638.4},
      {"scene_time": 1234.5678}),
+    # A clock far past the sea's period packs wrapped, the same way in both.
+    ("ocean_clock_wrapped",
+     {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
+     {"scene_time": 987654.321}),
+    ("ocean_clock_negative",
+     {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
+     {"scene_time": -3.25}),
+    # Off the ocean the clock packs as 0: nothing there reads it.
+    ("city_clock_is_zero",
+     {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
+      "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
+      "ocean_max_lod": 8, "periodic": False},
+     {"sun_azimuth": 310.0, "sun_elevation": 22.0, "scene_time": 77.5}),
     ("city_surface_offset",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "surface_offset_m": [-102400.0, 204800.0],
@@ -159,6 +173,7 @@ def _js_state(extra):
              "desert_relief_m": "desertReliefM",
              "surface_offset_m": "surfaceOffsetM",
              "surface_period_m": "surfacePeriodM",
+             "clock_period_s": "clockPeriodS",
              "ocean_fif_dx": "oceanFifDx",
              "ocean_tile_extent": "oceanTileExtent",
              "ocean_max_lod": "oceanMaxLod"}

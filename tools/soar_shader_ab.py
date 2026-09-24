@@ -219,6 +219,8 @@ def main():
     if surface == "desert":
         # Row 8.yzw: the tile's relief, without which the desert is a plane.
         state.desert_relief_m = desert_relief_m(meta)
+    if surface == "ocean":
+        state.clock_period_s = float(meta["clock_period_s"])
 
     views = ALL_VIEWS
     if city:
