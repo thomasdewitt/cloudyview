@@ -1345,6 +1345,14 @@ export class Renderer {
       const sp = this._surfacePipeline(lighting);
       const rp = this._refinePipeline(lighting);
       const pending = [p, sp, rp].filter((q) => q && isPending(q));
+      if (pending.length === 0 && sp && !targets.surface) {
+        // The scene gained a traced surface while this frame waited on a
+        // compile (setSurface to the desert): give the target set its
+        // surface target, then resolve the pair again — the await means the
+        // state must be read afresh.
+        await this._ensureSurfaceTarget(targets);
+        continue;
+      }
       if (pending.length === 0) {
         rayPipeline = p;
         surfacePipelines = { surface: sp, refine: rp };
@@ -1952,6 +1960,10 @@ export class Renderer {
       // packUniforms call below has always packed (no lighting flags given,
       // so the defaults). Named here so the module is specialized on the
       // same method the row carries.
+      // Its targets first: this is the meter's last await, so the
+      // specialization, pipelines and uniforms below all describe one moment.
+      this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
+      await this._ensureSurfaceTarget(this._meterTargets);
       const lighting = { lightCache: false, skyProbe: true };
       const spec = this._shaderSpec({ toneMap: false, lighting });
       // Its march and its surface pre-pass (city/desert), on that
@@ -1973,8 +1985,6 @@ export class Renderer {
         for (const q of compiling) q.catch(() => {});
         return null;
       }
-      this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
-      await this._ensureSurfaceTarget(this._meterTargets);
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.
       const u = packUniforms(this._sceneState(), {
