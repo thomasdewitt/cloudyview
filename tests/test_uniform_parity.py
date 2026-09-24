@@ -93,12 +93,15 @@ CASES = [
     # The moving sea (2026-09-23): the ocean folds row 24 at its swell's
     # period rather than its tile, and row 24.z carries the scene clock.
     ("ocean_moving",
-     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 1638.4},
+     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 1638.4,
+      "clock_period_s": 1638.4},
      {"scene_time": 1234.5678}),
     # A clock far past the sea's period packs wrapped, the same way in both.
-    ("ocean_clock_wrapped", {"surface_period_m": 1638.4},
+    ("ocean_clock_wrapped",
+     {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
      {"scene_time": 987654.321}),
-    ("ocean_clock_negative", {"surface_period_m": 1638.4},
+    ("ocean_clock_negative",
+     {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
      {"scene_time": -3.25}),
     # Off the ocean the clock packs as 0: nothing there reads it.
     ("city_clock_is_zero",
@@ -159,7 +162,6 @@ def _js_state(extra):
         periodic=True, oceanZ=0.0,
         oceanReflectance=list(sh.DEFAULT_OCEAN_REFLECTANCE),
         oceanFifDx=0.4, oceanTileExtent=102.4, oceanEnabled=True, oceanMaxLod=8,
-        clockPeriodS=1638.4,
         nested=False,
     )
     remap = {"periodic": "periodic", "ocean_enabled": "oceanEnabled",

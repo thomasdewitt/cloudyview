@@ -1870,8 +1870,8 @@ fn scene_time() -> f32 {
 const SEA_LOOP_S: f32 = 25.6;
 // The whole sea is periodic in time at this: the tile's 25.6 s loop and the
 // detail octave's 25.6/3 s divide it, and every swell train's frequency is
-// a whole number of cycles in it (omega rounded to 2 pi / this — a
-// quarter-percent on the swell's periods). So the hosts wrap the clock here
+// a whole number of cycles in it (omega rounded to 2 pi / this — at most
+// 0.4% on the swell's periods). So the hosts wrap the clock here
 // before packing (meta.json "clock_period_s"), and a float32 clock never
 // loses its cadence however long the flight.
 const SEA_CLOCK_PERIOD_S: f32 = 1638.4;
@@ -1904,8 +1904,10 @@ const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
 
 // The swell: a Pierson-Moskowitz peak at ~220 m with cos^2s (s = 3)
 // spreading about the wind (+x of the surface frame), significant height
-// 1.6 m, sampled as its sixteen strongest components on the lattice the
-// surface frame allows. Each wavevector is a whole number of cycles across
+// 1.6 m, sampled as its fifteen strongest components on the lattice the
+// surface frame allows (a set symmetric about the wind: the sixteenth has
+// no mirror in the top sixteen). Each wavevector is a whole number of
+// cycles across
 // the surface period so the frame can fold there without a seam (k = 2 pi
 // (m, n) / 1638.4 m; the tile's 102.4 m divides it). The period is set by
 // the groups: neighbouring lattice wavenumbers near the peak must differ by
@@ -1914,27 +1916,26 @@ const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
 // as corduroy. Phases are fixed draws.
 //
 //   (m, n)     wavelength heading   period   amplitude
-//   (5, +0)    327.7 m     +0.0    14.5 s   0.141 m
-//   (5, -1)    321.3 m    -11.3    14.3 s   0.141 m
-//   (5, +1)    321.3 m    +11.3    14.3 s   0.141 m
-//   (5, -2)    304.2 m    -21.8    14.0 s   0.140 m
-//   (5, +2)    304.2 m    +21.8    14.0 s   0.140 m
-//   (5, +3)    281.0 m    +31.0    13.4 s   0.134 m
-//   (6, +0)    273.1 m     +0.0    13.2 s   0.150 m
-//   (6, -1)    269.4 m     -9.5    13.1 s   0.148 m
-//   (6, +1)    269.4 m     +9.5    13.1 s   0.148 m
-//   (6, -2)    259.1 m    -18.4    12.9 s   0.143 m
-//   (6, +2)    259.1 m    +18.4    12.9 s   0.143 m
-//   (7, +0)    234.1 m     +0.0    12.2 s   0.142 m
-//   (7, -1)    231.7 m     -8.1    12.2 s   0.140 m
-//   (7, +1)    231.7 m     +8.1    12.2 s   0.140 m
-//   (7, -2)    225.1 m    -15.9    12.0 s   0.135 m
-//   (7, +2)    225.1 m    +15.9    12.0 s   0.135 m
+//   (5, +0)    327.7 m     +0.0    14.5 s   0.145 m
+//   (5, -1)    321.3 m    -11.3    14.3 s   0.145 m
+//   (5, +1)    321.3 m    +11.3    14.3 s   0.145 m
+//   (5, -2)    304.2 m    -21.8    14.0 s   0.144 m
+//   (5, +2)    304.2 m    +21.8    14.0 s   0.144 m
+//   (6, +0)    273.1 m     +0.0    13.2 s   0.154 m
+//   (6, -1)    269.4 m     -9.5    13.1 s   0.153 m
+//   (6, +1)    269.4 m     +9.5    13.1 s   0.153 m
+//   (6, -2)    259.1 m    -18.4    12.9 s   0.147 m
+//   (6, +2)    259.1 m    +18.4    12.9 s   0.147 m
+//   (7, +0)    234.1 m     +0.0    12.2 s   0.146 m
+//   (7, -1)    231.7 m     -8.1    12.2 s   0.144 m
+//   (7, +1)    231.7 m     +8.1    12.2 s   0.144 m
+//   (7, -2)    225.1 m    -15.9    12.0 s   0.139 m
+//   (7, +2)    225.1 m    +15.9    12.0 s   0.139 m
 //
-// RMS elevation 0.40 m, RMS slope 0.009: a real swell is that gentle, which
+// RMS elevation 0.40 m, RMS slope 0.010: a real swell is that gentle, which
 // is why it shows mostly through what it does to the wind sea (below) and
 // in the glitter. Normals only: geometry stays the plane at u.ocean.x.
-// The trains are written out as sixteen calls in sea_swell rather than looped
+// The trains are written out as fifteen calls in sea_swell rather than looped
 // over const arrays: a runtime-indexed module-scope array becomes a private
 // variable initialized at fs_main's entry, and that alone moves the city's
 // and the desert's compiled code off bit-identity (measured, 2026-09-23,
@@ -1980,6 +1981,15 @@ const SEA_FOAM_OPACITY_OLD: f32 = 0.25;
 const SEA_FOAM_OPACITY_FRESH: f32 = 0.85;
 const SEA_FOAM_TINT_OLD: vec3<f32> = vec3<f32>(0.78, 0.93, 0.90);
 const SEA_FOAM_GLINT_KEEP: f32 = 0.1;
+// Near a closed gate the whole kept band lies inside the cut's soft ramp,
+// where the formula below is not exact; there the far field reads the
+// resolved mean itself, integrated at five cuts (sea_tile.
+// foam_resolved_cover) for theta = 0.6, 0.7, 0.8, 0.9, 1.0.
+const SEA_FOAM_TAIL_0: f32 = 0.1269433;
+const SEA_FOAM_TAIL_1: f32 = 0.0942405;
+const SEA_FOAM_TAIL_2: f32 = 0.0605305;
+const SEA_FOAM_TAIL_3: f32 = 0.0265476;
+const SEA_FOAM_TAIL_4: f32 = 0.0028433;
 const SEA_FOAM_FAR_COVER: f32 = 0.320837;
 const SEA_FOAM_FAR_TINT: vec3<f32> = vec3<f32>(0.927799, 0.977027, 0.967182);
 // Half-width of the cut's soft edge, in rank.
@@ -2146,59 +2156,56 @@ fn sea_swell_train(s: ptr<function, Swell>, k: vec2<f32>, kk: f32,
 // is `along` metres long in the horizontal view direction `h` and `across`
 // metres wide. Each train is Gaussian-filtered by it (gain
 // exp(-((k.h along)^2 + (k x h across)^2) / 2)), so a train the pixel cannot
-// resolve fades into the lobe instead of aliasing. The sixteen trains are
+// resolve fades into the lobe instead of aliasing. The fifteen trains are
 // the table above, row for row.
 fn sea_swell(p: vec2<f32>, t: f32, h: vec2<f32>, along: f32,
              across: f32) -> Swell {
     var s = Swell(vec2<f32>(0.0), 0.0, 0.0, 0.0);
     // (5, +0)
     sea_swell_train(&s, vec2<f32>(0.01917476, 0.00000000), 0.01917476, 0.43334957,
-                    0.141, 0.260, p, t, h, along, across);
+                    0.145, 0.260, p, t, h, along, across);
     // (5, -1)
     sea_swell_train(&s, vec2<f32>(0.01917476, -0.00383495), 0.01955449, 0.43718452,
-                    0.141, 1.683, p, t, h, along, across);
+                    0.145, 1.683, p, t, h, along, across);
     // (5, +1)
     sea_swell_train(&s, vec2<f32>(0.01917476, 0.00383495), 0.01955449, 0.43718452,
-                    0.141, 0.812, p, t, h, along, across);
+                    0.145, 0.812, p, t, h, along, across);
     // (5, -2)
     sea_swell_train(&s, vec2<f32>(0.01917476, -0.00766990), 0.02065185, 0.44868938,
-                    0.140, 6.011, p, t, h, along, across);
+                    0.144, 6.011, p, t, h, along, across);
     // (5, +2)
     sea_swell_train(&s, vec2<f32>(0.01917476, 0.00766990), 0.02065185, 0.44868938,
-                    0.140, 1.110, p, t, h, along, across);
-    // (5, +3)
-    sea_swell_train(&s, vec2<f32>(0.01917476, 0.01150486), 0.02236142, 0.46786414,
-                    0.134, 4.988, p, t, h, along, across);
+                    0.144, 1.110, p, t, h, along, across);
     // (6, +0)
     sea_swell_train(&s, vec2<f32>(0.02300971, 0.00000000), 0.02300971, 0.47553404,
-                    0.150, 6.219, p, t, h, along, across);
+                    0.154, 6.219, p, t, h, along, across);
     // (6, -1)
     sea_swell_train(&s, vec2<f32>(0.02300971, -0.00383495), 0.02332710, 0.47936900,
-                    0.148, 5.356, p, t, h, along, across);
+                    0.153, 5.356, p, t, h, along, across);
     // (6, +1)
     sea_swell_train(&s, vec2<f32>(0.02300971, 0.00383495), 0.02332710, 0.47936900,
-                    0.148, 3.262, p, t, h, along, across);
+                    0.153, 3.262, p, t, h, along, across);
     // (6, -2)
     sea_swell_train(&s, vec2<f32>(0.02300971, -0.00766990), 0.02425437, 0.48703890,
-                    0.143, 1.887, p, t, h, along, across);
+                    0.147, 1.887, p, t, h, along, across);
     // (6, +2)
     sea_swell_train(&s, vec2<f32>(0.02300971, 0.00766990), 0.02425437, 0.48703890,
-                    0.143, 1.358, p, t, h, along, across);
+                    0.147, 1.358, p, t, h, along, across);
     // (7, +0)
     sea_swell_train(&s, vec2<f32>(0.02684466, 0.00000000), 0.02684466, 0.51388356,
-                    0.142, 6.231, p, t, h, along, across);
+                    0.146, 6.231, p, t, h, along, across);
     // (7, -1)
     sea_swell_train(&s, vec2<f32>(0.02684466, -0.00383495), 0.02711721, 0.51388356,
-                    0.140, 4.441, p, t, h, along, across);
+                    0.144, 4.441, p, t, h, along, across);
     // (7, +1)
     sea_swell_train(&s, vec2<f32>(0.02684466, 0.00383495), 0.02711721, 0.51388356,
-                    0.140, 4.767, p, t, h, along, across);
+                    0.144, 4.767, p, t, h, along, across);
     // (7, -2)
     sea_swell_train(&s, vec2<f32>(0.02684466, -0.00766990), 0.02791887, 0.52155347,
-                    0.135, 4.097, p, t, h, along, across);
+                    0.139, 4.097, p, t, h, along, across);
     // (7, +2)
     sea_swell_train(&s, vec2<f32>(0.02684466, 0.00766990), 0.02791887, 0.52155347,
-                    0.135, 2.771, p, t, h, along, across);
+                    0.139, 2.771, p, t, h, along, across);
     s.eta = clamp(s.eta / SWELL_ETA_SCALE_M, -1.0, 1.0);
     s.eta_raw = s.eta_raw / SWELL_ETA_SCALE_M;
     return s;
@@ -2217,6 +2224,23 @@ fn sea_soft_cut_mean(theta: f32) -> f32 {
     let g0 = x0 * x0 * x0 - 0.5 * x0 * x0 * x0 * x0;
     let g1 = x1 * x1 * x1 - 0.5 * x1 * x1 * x1 * x1;
     return 2.0 * e * (g1 - g0) + max(1.0 - theta - e, 0.0);
+}
+
+// The whitecaps' far-field cover per unit of cap at a gate cut theta: the
+// ramp formula (exact to 1% below theta = 0.6), or past it the resolved
+// mean read off SEA_FOAM_TAIL_*, linearly between the cuts.
+fn sea_foam_tail(theta: f32, formula: f32) -> f32 {
+    if (theta <= 0.6) {
+        return formula;
+    }
+    let c = clamp((theta - 0.6) * 10.0, 0.0, 4.0);
+    let lo = select(select(select(SEA_FOAM_TAIL_0, SEA_FOAM_TAIL_1, c >= 1.0),
+                           SEA_FOAM_TAIL_2, c >= 2.0), SEA_FOAM_TAIL_3,
+                    c >= 3.0);
+    let hi = select(select(select(SEA_FOAM_TAIL_1, SEA_FOAM_TAIL_2, c >= 1.0),
+                           SEA_FOAM_TAIL_3, c >= 2.0), SEA_FOAM_TAIL_4,
+                    c >= 3.0);
+    return mix(lo, hi, c - min(floor(c), 3.0));
 }
 
 // The lace's mean cover at threshold index k in [0, 4] (see SEA_LACE_*),
@@ -2334,8 +2358,19 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     // them, only a sharpening as the footprint shrinks under a texel.
     let gate = clamp(0.5 * (1.0 + swell.eta), 0.0, 1.0);
     let theta = clamp(1.0 - gate, SEA_FOAM_EDGE, 1.0);
-    let far_cover = SEA_FOAM_MAX_COVERAGE * sea_soft_cut_mean(theta)
-        * SEA_FOAM_FAR_COVER;
+    // The ramp below theta holds the oldest foam (freshness 0: the last
+    // lace point at old opacity, old tint); above theta the foam's mean is
+    // SEA_FOAM_FAR_*. The two meet at the ends (theta = 1: nothing but the
+    // ramp) and differ by the ramp's weight in between.
+    let ramp = sea_soft_cut_mean(theta) - (1.0 - theta);
+    let old_cover = SEA_LACE_COVER_4 * SEA_FOAM_OPACITY_OLD;
+    let formula = ramp * old_cover + (1.0 - theta) * SEA_FOAM_FAR_COVER;
+    let far_cover = SEA_FOAM_MAX_COVERAGE * sea_foam_tail(theta, formula);
+    // The tint weighted as the formula weights it, carried to that cover.
+    let far_tint = (ramp * old_cover * SEA_FOAM_TINT_OLD
+        + (1.0 - theta) * SEA_FOAM_FAR_COVER * SEA_FOAM_FAR_TINT)
+        / max(formula, 1e-9);
+    let far_tinted = far_cover * far_tint;
     var near_cover = smoothstep(theta - SEA_FOAM_EDGE, theta + SEA_FOAM_EDGE,
                                 tile.z);
     let fresh = clamp((tile.z - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0);
@@ -2347,8 +2382,7 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
             * mix(SEA_FOAM_OPACITY_OLD, SEA_FOAM_OPACITY_FRESH, fresh);
     }
     out.foam = mix(far_cover, near_cover, resolved);
-    let tinted = mix(far_cover * SEA_FOAM_FAR_TINT, near_cover * near_tint,
-                     resolved);
+    let tinted = mix(far_tinted, near_cover * near_tint, resolved);
     out.foam_color = SEA_FOAM_ALBEDO
         * select(vec3<f32>(1.0), tinted / out.foam, out.foam > 1e-7);
     out.crest = tile.w;
@@ -2364,7 +2398,9 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     let ij = vec2<u32>(floor(q / cell));
     let seed = pcg2d(ij + vec2<u32>((u32(fr.a) * 2654435761u)
                                     + (u32(level) * 40503u), 0u));
-    out.glitter_u = vec2<f32>(seed) * (1.0 / 4294967296.0);
+    // 24 bits, so the uniforms stay below 1 in float32 (a full u32 rounds
+    // to 1.0 at the top).
+    out.glitter_u = vec2<f32>(seed >> vec2<u32>(8u)) * (1.0 / 16777216.0);
     out.glitter_facets = exp2(2.0 * level);
     return out;
 }
@@ -2387,7 +2423,12 @@ fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
         }
         k = k + 1.0;
         pmf = pmf * lambda / k;
-        cdf = cdf + pmf;
+        let next = cdf + pmf;
+        // float32's cdf can stall just below 1; past that, no more mass.
+        if (next <= cdf) {
+            break;
+        }
+        cdf = next;
     }
     return k;
 }
@@ -2657,11 +2698,11 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
         let backlit = b2 * b2 * b2;
         let g = 1.0 - clamp(-dir.z, 0.0, 1.0);
         let g2 = g * g;
-        let grazing = g2 * g2;
+        let sightline = g2 * g2;
         let facing = clamp(dot(n, -dir), 0.0, 1.0);
         let low_sun = 1.0 - clamp(sun.z, 0.0, 1.0);
         ol = ol + (ocean_realism * SEA_GLOW_STRENGTH * sea.crest
-                   * backlit * grazing * facing * low_sun
+                   * backlit * sightline * facing * low_sun
                    * t_sun_ocean * (1.0 - view_fresnel))
             * SEA_GLOW_TINT * u.cloud_sun.xyz;
     }

@@ -358,8 +358,9 @@ class SceneState:
     surface_period_m: Optional[float] = None
     # The sea's period in time (the sea's meta.json clock_period_s): row 24.z
     # packs the scene clock modulo it, so float32 never loses the sea's
-    # cadence. The default is the shipped sea's; unused off the ocean.
-    clock_period_s: float = 1638.4
+    # cadence. Required over the ocean whenever the clock is not 0 (a still
+    # at clock 0 needs nothing); unused off the ocean. Mirrors uniforms.js.
+    clock_period_s: Optional[float] = None
 
 
 @dataclass
@@ -605,9 +606,11 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # from converging while a track records), wrapped at the sea's own
     # period the way uniforms.js wraps it.
     clock = 0.0
-    if not (city or desert):
-        if not state.clock_period_s > 0:
-            raise ValueError("an ocean scene needs clock_period_s.")
+    if not (city or desert) and view.scene_time != 0.0:
+        if state.clock_period_s is None or not state.clock_period_s > 0:
+            raise ValueError(
+                "an ocean scene with a running clock needs clock_period_s "
+                "(the sea's meta.json clock_period_s).")
         clock = math.fmod(float(view.scene_time), state.clock_period_s)
         if clock < 0:
             clock += state.clock_period_s

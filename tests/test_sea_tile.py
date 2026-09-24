@@ -76,7 +76,7 @@ def test_every_swell_train_is_whole_cycles_across_the_period():
     calls = re.findall(
         r"sea_swell_train\(&s, vec2<f32>\(([-0-9.]+), ([-0-9.]+)\), "
         r"([0-9.]+), ([0-9.]+),", src)
-    assert len(calls) == 16
+    assert len(calls) == 15
     for kx, ky, kk, omega in calls:
         m, n = (float(v) * period / (2.0 * math.pi) for v in (kx, ky))
         assert m == pytest.approx(round(m), abs=1e-5)
@@ -161,6 +161,10 @@ def test_the_whitecaps_far_field_is_their_resolved_mean(sea):
     src = SHADER.read_text()
     for k, v in enumerate(meta["lace_cover"]):
         assert _wgsl_scalar(src, f"SEA_LACE_COVER_{k}") == pytest.approx(v)
+    # The table was measured at these; the shader must cut at the same.
+    assert _wgsl_scalar(src, "SEA_LACE_EDGE") == pytest.approx(meta["lace_edge"])
+    assert _wgsl_scalar(src, "SEA_LACE_REACH") == pytest.approx(
+        meta["lace_reach"])
     tint = [float(v) for v in re.search(
         r"const SEA_FOAM_TINT_OLD: vec3<f32> = vec3<f32>\(([^)]*)\);",
         src).group(1).split(",")]
@@ -193,7 +197,38 @@ def test_the_sea_is_periodic_in_time_at_its_clock_period(sea):
     omegas = re.findall(
         r"sea_swell_train\(&s, vec2<f32>\([-0-9.]+, [-0-9.]+\), "
         r"[0-9.]+, ([0-9.]+),", src)
-    assert len(omegas) == 16
+    assert len(omegas) == 15
     for om in omegas:
         cycles = float(om) * T / (2.0 * math.pi)
         assert cycles == pytest.approx(round(cycles), abs=1e-4)
+
+
+def test_the_sea_repeats_where_the_surface_frame_folds(sea):
+    """Everything drawn off the tile — the detail octave (1/8 scale), the
+    lace (1/8, stretched along the wind) and the glitter cells (1.25 cm
+    times a power of two) — repeats a whole number of times across the
+    surface period, or a fold would show a seam."""
+    meta, _ = sea
+    src = SHADER.read_text()
+    period = meta["surface_period_m"]
+    tile = meta["tile_extent_m"]
+    detail = tile / _wgsl_scalar(src, "SEA_DETAIL_SCALE")
+    lace = tile / _wgsl_scalar(src, "SEA_LACE_SCALE")
+    lace_along = lace * _wgsl_scalar(src, "SEA_LACE_STRETCH")
+    facet = _wgsl_scalar(src, "SEA_GLITTER_FACET_M")
+    for size in (detail, lace, lace_along, facet):
+        assert period / size == pytest.approx(round(period / size), abs=1e-6)
+
+
+def test_the_whitecaps_far_field_near_a_closed_gate(sea):
+    """Past theta = 0.6 the kept foam lies inside the cut's soft ramp; the
+    far field there is the resolved mean, tabulated at five cuts."""
+    meta, _ = sea
+    src = SHADER.read_text()
+    args = (meta["lace_cover"], _wgsl_scalar(src, "SEA_FOAM_OPACITY_OLD"),
+            _wgsl_scalar(src, "SEA_FOAM_OPACITY_FRESH"),
+            _wgsl_scalar(src, "SEA_LACE_FRESH_K"),
+            _wgsl_scalar(src, "SEA_FOAM_EDGE"))
+    for i, theta in enumerate([0.6, 0.7, 0.8, 0.9, 1.0]):
+        assert _wgsl_scalar(src, f"SEA_FOAM_TAIL_{i}") == pytest.approx(
+            sea_tile.foam_resolved_cover(theta, *args), rel=1e-5, abs=1e-8)

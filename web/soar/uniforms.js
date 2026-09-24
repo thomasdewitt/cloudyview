@@ -72,7 +72,8 @@ export function packUniforms(state, view) {
     surfacePeriodM = null,
     // The sea's period in time (meta.json clock_period_s): the clock is
     // packed modulo it, so float32 never loses the sea's cadence. Required
-    // over the ocean, unused elsewhere. Mirrors SceneState.clock_period_s.
+    // over the ocean whenever the clock is not 0; unused elsewhere. Mirrors
+    // SceneState.clock_period_s.
     clockPeriodS = null,
   } = state;
 
@@ -327,10 +328,10 @@ export function packUniforms(state, view) {
   // scene key a running clock would keep a parked city or desert from ever
   // converging while a track records.
   let clock = 0.0;
-  if (!city && !desert) {
+  if (!city && !desert && sceneTime !== 0) {
     if (!(clockPeriodS > 0)) {
-      throw new Error("an ocean scene needs its clockPeriodS " +
-                      "(the sea's meta.json clock_period_s).");
+      throw new Error("an ocean scene with a running clock needs its " +
+                      "clockPeriodS (the sea's meta.json clock_period_s).");
     }
     clock = sceneTime % clockPeriodS;
     if (clock < 0) clock += clockPeriodS;

@@ -127,3 +127,24 @@ def foam_far_field(lace_cover, opacity_old: float, opacity_fresh: float,
     cover = float(np.sum(w * mask * opacity))
     tint_mean = (w * mask * opacity) @ tint / cover
     return cover, tuple(float(v) for v in tint_mean)
+
+
+def foam_resolved_cover(theta: float, lace_cover, opacity_old: float,
+                        opacity_fresh: float, fresh_k: float,
+                        edge: float) -> float:
+    """What the resolved whitecaps average to at a gate cut theta, per unit
+    of foam cap: the mean over the foam rank v in (0, 1] of
+    smoothstep(theta - edge, theta + edge, v) times lace x opacity at the
+    freshness clamp((v - theta) / (1 - theta), 0, 1) — the shader's near
+    field, integrated. raymarch.wgsl carries it at five cuts near a closed
+    gate (SEA_FOAM_TAIL_*), where the ramp is all there is.
+    """
+    v = np.linspace(0.0, 1.0, 400001)
+    t = np.clip((v - (theta - edge)) / (2.0 * edge), 0.0, 1.0)
+    cut = t * t * (3.0 - 2.0 * t)
+    f = np.clip((v - theta) / max(1.0 - theta, 1e-9), 0.0, 1.0)
+    k = fresh_k + (4.0 - fresh_k) * (1.0 - f)
+    g = (np.interp(k, np.arange(5.0), np.asarray(lace_cover, np.float64))
+         * (opacity_old + (opacity_fresh - opacity_old) * f))
+    y = cut * g
+    return float(np.sum(0.5 * (y[1:] + y[:-1])) * (v[1] - v[0]))
