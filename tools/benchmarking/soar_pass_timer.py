@@ -98,6 +98,9 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
                               "end_of_pass_write_index": 2 * i + 1})
         rp.set_pipeline(renderer._ray_pipeline_for(view))
         rp.set_bind_group(0, bind_group)
+        # Group 1: the surface pre-pass's target, a stand-in in these day
+        # scenes (the march reads it only under CITY or DESERT).
+        rp.set_bind_group(1, targets["surface_group"])
         rp.draw(3)
         rp.end()
         device.queue.submit([enc.finish()])
