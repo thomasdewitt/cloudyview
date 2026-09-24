@@ -173,6 +173,20 @@ export const CITY_START_CAMERA = {
   fov: 100.0,
 };
 
+// Where the first-flight tutorial puts a cyberpunk visitor. The tutorial
+// wants a LOW start (viewer.tutorialSpawn: turning the mouse should swing
+// the world past), which over the sea is the water line and in the city,
+// taken straight down from CITY_START_CAMERA, was a spot 23 m off the street
+// facing a building's flank — a first sight of a dark wall. This is the same
+// street's centre line, 60 m up, looking down its canyon: lit towers on both
+// sides and the facades close enough to show their relief. City frame, like
+// CITY_START_CAMERA.
+export const CITY_TUTORIAL_CAMERA = {
+  positionCityM: [17370.0, 61700.0, 60.0],
+  azimuth: 180.0,
+  elevation: 8.0,
+};
+
 // Flight speed a cyberpunk session opens at, m/s (Thomas, 2026-08-22). The
 // day default is 1500 m/s, which is a speed for crossing a 50 km cloud field
 // and is a blur between two buildings 20 m apart. The wheel still reaches

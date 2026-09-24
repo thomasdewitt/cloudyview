@@ -2205,8 +2205,20 @@ export class Viewer {
    * kept, so it is still this field's own place.
    */
   tutorialSpawn() {
-    this.camera.position[2] = K.OCEAN_FLOOR_MARGIN_M * 4.0;
-    this.camera.elevation = 0.0;
+    const pose = this.scene.city ? K.CITY_TUTORIAL_CAMERA : null;
+    if (pose && this.camera.surfacePosition) {
+      // The city's own low start (see CITY_TUTORIAL_CAMERA), reached through
+      // the camera's one move path so the cloud and tile frames move
+      // together.
+      const [tx, ty, tz] = pose.positionCityM;
+      const s = this.camera.surfacePosition;
+      this.camera.displace(tx - s[0], ty - s[1], tz - this.camera.position[2]);
+      this.camera.azimuth = pose.azimuth;
+      this.camera.elevation = pose.elevation;
+    } else {
+      this.camera.position[2] = K.OCEAN_FLOOR_MARGIN_M * 4.0;
+      this.camera.elevation = 0.0;
+    }
     this.camera.constrain();
     this._wake("tutorial spawn");
   }
