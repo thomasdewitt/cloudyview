@@ -32,10 +32,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "tools"))
 
-from cloudyview.soar_host import specialize               # noqa: E402
-from soar_shader_ab import source_for                     # noqa: E402
+from cloudyview.soar_host import read_shader, specialize  # noqa: E402
 
 CRATE = REPO / "tools" / "regcount"
 BINARY = CRATE / "target" / "release" / "regcount"
@@ -46,6 +44,21 @@ FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f",
 # (light cache, sky probe).
 TIERS = {"max": (False, True), "high": (True, True), "medium": (True, False),
          "low": (True, False), "minimal": (True, False)}
+
+
+def source_for(spec: str) -> str:
+    """'tree', 'git:<rev>', or a path — soar_shader_ab.py's spec, without its
+    test-suite imports, so this runs in any venv (no pytest)."""
+    if spec == "tree":
+        return read_shader()
+    if spec.startswith("git:"):
+        out = subprocess.run(
+            ["git", "show", f"{spec[4:]}:cloudyview/soar/raymarch.wgsl"],
+            cwd=REPO, capture_output=True, text=True)
+        if out.returncode != 0 or "fn " not in out.stdout:
+            raise SystemExit(f"git show failed for {spec!r}: {out.stderr.strip()}")
+        return out.stdout
+    return Path(spec).read_text()
 
 
 def build():
