@@ -38,6 +38,10 @@ const SAMPLE_FORMAT = "rgba16float";
 // textureLoad and declare `unfilterable-float`. Nothing here needs a
 // filtering sampler, so no optional feature is involved.
 const ACCUM_FORMAT = "rgba32float";
+// The surface pre-pass target: (radiance, t) of the traced city or desert
+// under each render pixel (raymarch.wgsl fs_surface). t runs to 1e30 on a
+// miss, so it is float32; the march only textureLoad()s it.
+const SURFACE_FORMAT = "rgba32float";
 
 const ACCUM_SHADER = `
 struct AccumUniforms {
@@ -380,8 +384,28 @@ export class Renderer {
           texture: { sampleType: "float", viewDimension: "2d-array" } },
       ],
     });
+    // Group 1: the surface pre-pass's target, which only the march reads.
+    // Every raymarch pipeline shares this one layout, so every pass sets
+    // group 1 — the stand-in everywhere but the march of a scene with a
+    // traced surface, which binds that target size's own.
+    this.surfaceLayout = device.createBindGroupLayout({
+      label: "soar-surface-layout",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
+      ],
+    });
     this.rayPipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [this.rayLayout],
+      bindGroupLayouts: [this.rayLayout, this.surfaceLayout],
+    });
+    this._surfaceDummy = device.createTexture({
+      label: "soar-surface-dummy", size: [1, 1], format: SURFACE_FORMAT,
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.surfaceDummyGroup = device.createBindGroup({
+      label: "soar-surface-dummy",
+      layout: this.surfaceLayout,
+      entries: [{ binding: 0, resource: this._surfaceDummy.createView() }],
     });
     // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
     // nest's. Whether it is read is a per-tier preset choice (see
@@ -509,8 +533,10 @@ export class Renderer {
 
     // The march only ever targets the float intermediate now; everything
     // reaches the canvas through the (dithering) present pass. Awaited, so a
-    // pipeline that fails to build rejects here with its own message.
+    // pipeline that fails to build rejects here with its own message — and
+    // with it the scene's surface pre-pass, which every march needs.
     await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
+    await this._surfacePipeline(this.lighting);
     this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
@@ -592,6 +618,7 @@ export class Renderer {
     s.oceanMaxLod = tile.maxLod;
     try {
       await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
+      await this._surfacePipeline(this.lighting);
     } catch (err) {
       throw new Error(`The ${kind} shader failed to build: ` +
                       `${err?.message || err}`);
@@ -930,6 +957,22 @@ export class Renderer {
                           this._shaderSpec({ lighting }));
   }
 
+  /** Whether this scene's opaque surface is traced by the pre-pass. */
+  _hasSurfacePass() {
+    return Boolean(this.scene.city || this.scene.desert);
+  }
+
+  /**
+   * The surface pre-pass pipeline (fs_surface) on the same specialization
+   * as the march for `lighting` — same module, so no extra compile — or
+   * null for a scene with no traced surface.
+   */
+  _surfacePipeline(lighting) {
+    if (!this._hasSurfacePass()) return null;
+    return this._pipeline("fs_surface", SURFACE_FORMAT,
+                          this._shaderSpec({ lighting }));
+  }
+
   /**
    * A raymarch.wgsl render pipeline — entry point `entryPoint` into
    * `targetFormat`, for the specialization `spec` — as the pipeline itself
@@ -1020,6 +1063,8 @@ export class Renderer {
           // logged) by _rayPipeline itself, so the prefetch just lets go.
           const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
           if (isPending(p)) p.catch(() => {});
+          const sp = this._surfacePipeline(lighting);
+          if (sp && isPending(sp)) sp.catch(() => {});
         } catch {
           // Already failed and recorded; thrown again if it is ever needed.
         }
@@ -1099,6 +1144,7 @@ export class Renderer {
         await this.device.queue.onSubmittedWorkDone();
         for (const old of this._targetPool.values()) {
           old.sample.destroy(); old.accumA.destroy(); old.accumB.destroy();
+          old.surface?.tex.destroy();
         }
         this._targetPool.clear();
       }
@@ -1251,6 +1297,7 @@ export class Renderer {
     this._outputH = outputH;
     const renderSize = renderTargetSize(outputSize, this.renderScale);
     const targets = await this._targetsFor(renderSize[0], renderSize[1]);
+    await this._ensureSurfaceTarget(targets);
     // The march pipeline for the state as it stands after the LAST await:
     // from here to the first submit nothing awaits, so the specialization,
     // the lighting method and the uniforms below all describe one moment.
@@ -1261,17 +1308,23 @@ export class Renderer {
     // the live loop gets `false` back, marches nothing, keeps its last
     // picture and asks again next frame, so no frame of it is ever
     // suspended on a compile while the field or a capture changes under it.
+    // The surface pre-pass pipeline resolves in the same loop, so a frame
+    // never encodes one of the pair without the other.
     let lighting;
     let rayPipeline;
+    let surfacePipeline;
     for (;;) {
       lighting = this.lighting;
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
-      if (!isPending(p)) { rayPipeline = p; break; }
+      const sp = this._surfacePipeline(lighting);
+      const pending = [p, sp].filter((q) => q && isPending(q));
+      if (pending.length === 0) { rayPipeline = p; surfacePipeline = sp; break; }
       if (!waitForPipeline) {
-        p.catch(() => {});        // recorded; thrown when next requested
+        // Recorded; thrown when next requested.
+        for (const q of pending) q.catch(() => {});
         return false;
       }
-      await p;
+      await Promise.all(pending);
     }
     const targetView = typeof target === "function" ? target() : target;
 
@@ -1324,12 +1377,6 @@ export class Renderer {
     this.device.queue.writeBuffer(this.uniformBuf, 0, u);
 
     const encoder = this.device.createCommandEncoder();
-    const pass = (viewRef) => encoder.beginRenderPass({
-      colorAttachments: [{
-        view: viewRef, loadOp: "clear", storeOp: "store",
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      }],
-    });
 
     if (!plan) {
       // No accumulation: march at a float intermediate and present from it.
@@ -1339,11 +1386,8 @@ export class Renderer {
       // present pass's dither. One full-screen blit is cheaper than a second
       // encode point.
       const exact = renderSize[0] === outputW && renderSize[1] === outputH;
-      const p = pass(targets.sample.createView());
-      p.setPipeline(rayPipeline);
-      p.setBindGroup(0, this.rayBindGroup);
-      p.draw(3);
-      p.end();
+      this._encodeMarch(encoder, targets, this.rayBindGroup, rayPipeline,
+                        surfacePipeline);
       this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
                        exact);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
@@ -1389,11 +1433,10 @@ export class Renderer {
         }],
       });
 
-      let p = sPass(targets.sample.createView());
-      p.setPipeline(rayPipeline);
-      p.setBindGroup(0, this.rayBindGroup);
-      p.draw(3);
-      p.end();
+      // The surface pass runs per SAMPLE, after this sample's uniform
+      // rewrite: its ray is this sample's ray.
+      this._encodeMarch(enc, targets, this.rayBindGroup, rayPipeline,
+                        surfacePipeline);
 
       // The accumulator ping-pongs between two textures, so there are exactly
       // two bind groups for the whole life of a target set. They were being
@@ -1401,7 +1444,7 @@ export class Renderer {
       // a pair of resources that only change when the render target is
       // reallocated, which is where they are now built instead.
       outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
-      p = sPass(outTex.createView());
+      const p = sPass(outTex.createView());
       p.setPipeline(this.accumPipeline);
       p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
       p.draw(3);
@@ -1479,6 +1522,75 @@ export class Renderer {
       sampleWeight: 1.0 / nextCount,
       nextCount, subpixel: true, jitterScale,
     };
+  }
+
+  /**
+   * One march into `targets.sample`, preceded — in a scene with a traced
+   * surface — by the surface pre-pass (raymarch.wgsl fs_surface) into
+   * `targets.surface`, which the march then reads at group 1. The two use
+   * the same uniforms, so the pass traces exactly the rays the march
+   * composites. Every march in the renderer goes through here or through
+   * the meter, which mirrors it on its own targets.
+   */
+  _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfacePipeline) {
+    let surfaceGroup = this.surfaceDummyGroup;
+    if (surfacePipeline) {
+      const surface = targets.surface;
+      const sp = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: surface.view, loadOp: "clear", storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1e30 },
+        }],
+      });
+      sp.setPipeline(surfacePipeline);
+      sp.setBindGroup(0, rayBindGroup);
+      sp.setBindGroup(1, this.surfaceDummyGroup);
+      sp.draw(3);
+      sp.end();
+      surfaceGroup = surface.group;
+    }
+    const p = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: targets.sample.createView(), loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    p.setPipeline(rayPipeline);
+    p.setBindGroup(0, rayBindGroup);
+    p.setBindGroup(1, surfaceGroup);
+    p.draw(3);
+    p.end();
+  }
+
+  /**
+   * Give a target set its surface target and the march's group 1 over it,
+   * if the scene traces a surface and the set has none yet: a set is pooled
+   * by size, and the scene can gain a traced surface after the set was made
+   * (setSurface, ocean -> desert). 16 bytes a pixel, allocated under the
+   * same out-of-memory guard as the rest of the set. Awaited by every caller
+   * BEFORE it resolves pipelines and encodes, so _encodeMarch only ever
+   * reads it.
+   */
+  async _ensureSurfaceTarget(targets) {
+    if (!this._hasSurfacePass() || targets.surface) return;
+    const label = `soar-surface-${targets.w}x${targets.h}`;
+    targets.surface = await guardAllocation(
+      this.device, `${targets.w}x${targets.h} surface target`,
+      targets.w * targets.h * 16, () => {
+        const tex = this.device.createTexture({
+          label, size: [targets.w, targets.h], format: SURFACE_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+               | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        return {
+          tex,
+          view: tex.createView(),
+          group: this.device.createBindGroup({
+            label, layout: this.surfaceLayout,
+            entries: [{ binding: 0, resource: tex.createView() }],
+          }),
+        };
+      });
   }
 
   /**
@@ -1710,6 +1822,7 @@ export class Renderer {
       });
       p.setPipeline(pipeline);
       p.setBindGroup(0, b.bindGroup);
+      p.setBindGroup(1, this.surfaceDummyGroup);
       p.draw(3);
       p.end();
       encoder.copyTextureToTexture(
@@ -1748,8 +1861,9 @@ export class Renderer {
   /**
    * One tiny linear-radiance render of `view`, read back and reduced to the
    * luminance at AUTO_EXPOSURE_PERCENTILE. Returns null when a previous
-   * meter's readback is still in flight (one is ever allowed; the AE loop
-   * just tries again next interval).
+   * meter's readback is still in flight (one is ever allowed), or while its
+   * pipelines are still compiling: either way the AE loop just tries again
+   * next interval.
    *
    * The march is the real shader with TONE_MAP compiled out, at
    * AUTO_EXPOSURE_METER_SIZE — the same footprint-per-cost trade renderScale
@@ -1786,21 +1900,23 @@ export class Renderer {
       // same method the row carries.
       const lighting = { lightCache: false, skyProbe: true };
       const spec = this._shaderSpec({ toneMap: false, lighting });
-      const module = this._module(spec);
-      this._meterPipeline ??= new Map();
-      const pipeKey = shaderVariantKey(spec);
-      let pipeline = this._meterPipeline.get(pipeKey);
-      if (!pipeline) {
-        pipeline = this.device.createRenderPipeline({
-          label: `meter(${pipeKey})`,
-          layout: this.rayPipelineLayout,
-          vertex: { module, entryPoint: "vs_main" },
-          fragment: { module, entryPoint: "fs_main",
-                      targets: [{ format: ACCUM_FORMAT }] },
-          primitive: { topology: "triangle-list" },
-        });
-        this._meterPipeline.set(pipeKey, pipeline);
+      // Its march and its surface pre-pass (city/desert), on that
+      // specialization, through the same async cache as the frame's: a
+      // first meter in a city scene would otherwise compile the whole city
+      // trace on the main thread, right after load, on the live AE path.
+      // While either is still compiling this interval has no answer; the
+      // next one asks again, and a pipeline that failed throws from here.
+      const pipeline = this._pipeline("fs_main", ACCUM_FORMAT, spec);
+      const surfacePipeline = this._hasSurfacePass()
+        ? this._pipeline("fs_surface", SURFACE_FORMAT, spec) : null;
+      const compiling = [pipeline, surfacePipeline]
+        .filter((q) => q && isPending(q));
+      if (compiling.length > 0) {
+        for (const q of compiling) q.catch(() => {});
+        return null;
       }
+      this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
+      await this._ensureSurfaceTarget(this._meterTargets);
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.
       const u = packUniforms(this._sceneState(), {
@@ -1829,17 +1945,8 @@ export class Renderer {
         ],
       });
       const encoder = this.device.createCommandEncoder();
-      const p = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: this._meterTex.createView(),
-          loadOp: "clear", storeOp: "store",
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        }],
-      });
-      p.setPipeline(pipeline);
-      p.setBindGroup(0, bindGroup);
-      p.draw(3);
-      p.end();
+      this._encodeMarch(encoder, this._meterTargets, bindGroup, pipeline,
+                        surfacePipeline);
       encoder.copyTextureToBuffer(
         { texture: this._meterTex },
         { buffer: this._meterReadBuf, bytesPerRow: mw * 16 },
@@ -1865,9 +1972,10 @@ export class Renderer {
       for (let i = rank; i < lums.length; i++) sum += lums[i];
       return sum / (lums.length - rank);
     } finally {
-      // Errors are the caller's: null means only "a reading is already in
-      // flight". A meter that failed used to return null as well, and a
-      // capture waiting for a reading then asked again forever.
+      // Errors are the caller's: null means only "not now" (a reading in
+      // flight, or its pipelines compiling — both end). A meter that failed
+      // used to return null as well, and a capture waiting for a reading
+      // then asked again forever.
       this._meterBusy = false;
     }
   }
@@ -1875,13 +1983,17 @@ export class Renderer {
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
     this._meterTex?.destroy();
+    this._meterTargets?.surface?.tex.destroy();
     this._meterReadBuf?.destroy();
     this._meterUniformBuf?.destroy();
     this._meterTex = this._meterReadBuf = this._meterUniformBuf = null;
+    this._meterTargets = null;
+    this._surfaceDummy?.destroy();
     for (const targets of this._targetPool?.values() ?? []) {
       targets.sample.destroy();
       targets.accumA.destroy();
       targets.accumB.destroy();
+      targets.surface?.tex.destroy();
     }
     this._targetPool?.clear();
     this._targets = null;
