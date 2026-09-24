@@ -1897,21 +1897,21 @@ const SEA_CLOCK_PERIOD_S: f32 = 1638.4;
 // Blending two frames at fraction f removes 2 f (1 - f) of it — the finest
 // ripples decorrelate within a frame or two and would otherwise dim between
 // frames.
-//
-// One array of pairs, like the static tile's one table before it: every
-// runtime-indexed const array costs a private variable at fs_main's entry
-// (see SWELL_PERIOD_M), and one more moved the other scenes' bits.
-const SEA_SLOPE_VARIANCE = array<vec2<f32>, 9>(
-    vec2<f32>(0.0, 0.0016803),
-    vec2<f32>(0.0006151, 0.0013825),
-    vec2<f32>(0.0019447, 0.0008958),
-    vec2<f32>(0.0038723, 0.0004744),
-    vec2<f32>(0.0062648, 0.0001565),
-    vec2<f32>(0.0076531, 9.3e-06),
-    vec2<f32>(0.0077193, 2.8e-06),
-    vec2<f32>(0.0077417, 5e-07),
-    vec2<f32>(0.0077471, 0.0)
-);
+// A switch, not a const array: a runtime-indexed array costs a private
+// variable at fs_main's entry and moves every scene's registers.
+fn sea_slope_variance(k: i32) -> vec2<f32> {
+    switch k {
+        case 0: { return vec2<f32>(0.0, 0.0016803); }
+        case 1: { return vec2<f32>(0.0006151, 0.0013825); }
+        case 2: { return vec2<f32>(0.0019447, 0.0008958); }
+        case 3: { return vec2<f32>(0.0038723, 0.0004744); }
+        case 4: { return vec2<f32>(0.0062648, 0.0001565); }
+        case 5: { return vec2<f32>(0.0076531, 9.3e-06); }
+        case 6: { return vec2<f32>(0.0077193, 2.8e-06); }
+        case 7: { return vec2<f32>(0.0077417, 5e-07); }
+        default: { return vec2<f32>(0.0077471, 0.0); }
+    }
+}
 // The tile's foam rank covers this much of the sea at a full gate.
 const SEA_FOAM_MAX_COVERAGE: f32 = 0.02;
 
@@ -2083,7 +2083,7 @@ fn sea_variance_table(lod: f32) -> vec2<f32> {
     let l0 = clamp(floor(lod), 0.0, 8.0);
     let l1 = min(l0 + 1.0, 8.0);
     let w = clamp(lod - l0, 0.0, 1.0);
-    return mix(SEA_SLOPE_VARIANCE[i32(l0)], SEA_SLOPE_VARIANCE[i32(l1)], w);
+    return mix(sea_slope_variance(i32(l0)), sea_slope_variance(i32(l1)), w);
 }
 
 fn sea_tile_variance_removed(lod: f32, f: f32) -> f32 {
@@ -2352,6 +2352,67 @@ fn sea_lace(p: vec2<f32>, rank: f32, theta: f32, along: f32,
     return mix(mean, lace, resolved);
 }
 
+// The near field's rank gain. A pixel reads the foam rank diluted: bilinear
+// between 0.4 m texels, a B-spline closer in, a mip farther out, scaled by
+// the detail crest — and a foam texel averaged with its empty neighbours
+// falls under the cut and reads older (fainter, more broken) than it is.
+// Left alone, at a mid gate the resolved whitecaps cover three quarters of
+// the far field's exact mean at a texel and a quarter of it two mips up, and
+// thin out wherever they are drawn.
+// Scaling the rank the near field reads (the cut's, the freshness's) by a
+// gain restores the mean; the gain is measured on the shipped tile by a
+// mirror of this near field (sea_tile.NearFoam; tools/export_web_assets.py
+// into meta.json foam_near_gain, pinned by tests/test_sea_tile.py), per
+// footprint x = log2(along / dx) from -3 in steps of 0.5 (12 rows, held
+// beyond the ends) and per cut theta from 0.2 in steps of 0.1 (9; the last
+// measured at 0.99, as a closed gate's freshness ramp has no width), and
+// read bilinearly. A switch, not a const array: a runtime-indexed array
+// perturbs every scene's codegen.
+struct SeaGainRow {
+    lo: vec4<f32>,      // theta 0.2 .. 0.5
+    hi: vec4<f32>,      // theta 0.6 .. 0.9
+    top: f32,           // theta 1.0
+};
+
+fn sea_foam_gain_row(k: i32) -> SeaGainRow {
+    switch k {
+        case 0: { return SeaGainRow(vec4<f32>(1.08232, 1.10587, 1.11350, 1.11316), vec4<f32>(1.10944, 1.10581, 1.09804, 1.06630), 1.00891); }
+        case 1: { return SeaGainRow(vec4<f32>(1.08041, 1.10422, 1.11213, 1.11207), vec4<f32>(1.10864, 1.10526, 1.09768, 1.06609), 1.00887); }
+        case 2: { return SeaGainRow(vec4<f32>(1.07348, 1.09809, 1.10674, 1.10732), vec4<f32>(1.10430, 1.10086, 1.09315, 1.06289), 1.00957); }
+        case 3: { return SeaGainRow(vec4<f32>(1.06520, 1.09013, 1.09928, 1.10046), vec4<f32>(1.09798, 1.09488, 1.08748, 1.05883), 1.00942); }
+        case 4: { return SeaGainRow(vec4<f32>(1.08165, 1.10101, 1.10545, 1.10242), vec4<f32>(1.09589, 1.08892, 1.07930, 1.05264), 1.00930); }
+        case 5: { return SeaGainRow(vec4<f32>(1.08256, 1.09842, 1.10081, 1.09631), vec4<f32>(1.08845, 1.07998, 1.06963, 1.04517), 1.00741); }
+        case 6: { return SeaGainRow(vec4<f32>(1.08076, 1.09588, 1.09744, 1.09174), vec4<f32>(1.08174, 1.06902, 1.05427, 1.03503), 1.01236); }
+        case 7: { return SeaGainRow(vec4<f32>(1.08037, 1.09537, 1.09675, 1.09080), vec4<f32>(1.08035, 1.06674, 1.05010, 1.03209), 1.01375); }
+        case 8: { return SeaGainRow(vec4<f32>(1.15186, 1.18156, 1.18656, 1.17865), vec4<f32>(1.16199, 1.13854, 1.10828, 1.07304), 1.03618); }
+        case 9: { return SeaGainRow(vec4<f32>(1.20571, 1.25432, 1.26644, 1.25757), vec4<f32>(1.23389, 1.19892, 1.15291, 1.09907), 1.04847); }
+        case 10: { return SeaGainRow(vec4<f32>(1.31423, 1.39100, 1.41342, 1.40624), vec4<f32>(1.37809, 1.33302, 1.26980, 1.18692), 1.10167); }
+        default: { return SeaGainRow(vec4<f32>(1.40010, 1.51223, 1.55163, 1.54953), vec4<f32>(1.51716, 1.45938, 1.37366, 1.25667), 1.13476); }
+    }
+}
+
+// Row r at cut coordinate c = (theta - 0.2) / 0.1 in [0, 8].
+fn sea_foam_gain_pick(r: SeaGainRow, c: f32) -> f32 {
+    let i = min(floor(c), 7.0);
+    let lo = select(select(select(select(select(select(select(
+        r.lo.x, r.lo.y, i >= 1.0), r.lo.z, i >= 2.0), r.lo.w, i >= 3.0),
+        r.hi.x, i >= 4.0), r.hi.y, i >= 5.0), r.hi.z, i >= 6.0),
+        r.hi.w, i >= 7.0);
+    let hi = select(select(select(select(select(select(select(
+        r.lo.y, r.lo.z, i >= 1.0), r.lo.w, i >= 2.0), r.hi.x, i >= 3.0),
+        r.hi.y, i >= 4.0), r.hi.z, i >= 5.0), r.hi.w, i >= 6.0),
+        r.top, i >= 7.0);
+    return mix(lo, hi, c - i);
+}
+
+fn sea_foam_near_gain(theta: f32, along: f32) -> f32 {
+    let x = clamp(2.0 * (log2(along / u.ocean_params.x) + 3.0), 0.0, 11.0);
+    let k = min(floor(x), 10.0);
+    let c = clamp(10.0 * (theta - 0.2), 0.0, 8.0);
+    return mix(sea_foam_gain_pick(sea_foam_gain_row(i32(k)), c),
+               sea_foam_gain_pick(sea_foam_gain_row(i32(k) + 1), c), x - k);
+}
+
 struct SeaSurface {
     // Footprint-mean slope of the whole surface.
     slope: vec2<f32>,
@@ -2422,8 +2483,9 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     // at theta = 1 - gate keeps exactly gate * SEA_FOAM_MAX_COVERAGE of the
     // tile, in every frame, so the far field is that number with no sample
     // at all; the near field is the cut itself, on the rank at this texel.
-    // Resolved and filtered share the mean, so there is no seam between
-    // them, only a sharpening as the footprint shrinks under a texel.
+    // Resolved and filtered share the mean (the near field through its rank
+    // gain, sea_foam_near_gain), so there is no seam between them, only a
+    // sharpening as the footprint shrinks under a texel.
     let gate = clamp(0.5 * (1.0 + swell.eta), 0.0, 1.0);
     let theta = clamp(1.0 - gate, SEA_FOAM_EDGE, 1.0);
     // The ramp below theta holds the oldest foam (freshness 0: the last
@@ -2445,20 +2507,27 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     // resolved, and nothing (the jitter fades with it) where it is not.
     // Multiplicative, so rank-0 water stays foam-free. Well under a texel
     // the rank itself is read as a B-spline (sea_rank_smooth).
-    var base_rank = tile.z;
+    // Sharp below a texel, the analytic mean by two levels up.
+    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
+    // Every read of the rank dilutes it (sea_foam_near_gain); the gain
+    // gives the resolved whitecaps the far field's cover back.
+    var gain = 1.0;
+    if (resolved > 0.0 && tile.z > 0.0) {
+        gain = sea_foam_near_gain(theta, along);
+    }
+    let z = tile.z * gain;
+    var base_rank = z;
     let smooth_w = 1.0 - smoothstep(0.25, 0.75, along / u.ocean_params.x);
     if (smooth_w > 0.0 && tile.z > 0.0) {
-        base_rank = mix(tile.z, sea_rank_smooth(p, fr), smooth_w);
+        base_rank = gain * mix(tile.z, sea_rank_smooth(p, fr), smooth_w);
     }
     let rank = base_rank * max(1.0 + SEA_FOAM_BREAKUP * detail.crest, 0.0);
     var near_cover = smoothstep(theta - SEA_FOAM_EDGE, theta + SEA_FOAM_EDGE,
                                 rank);
-    let fresh = clamp((tile.z - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0);
+    let fresh = clamp((z - theta) / max(1.0 - theta, 1e-6), 0.0, 1.0);
     let near_tint = mix(SEA_FOAM_TINT_OLD, vec3<f32>(1.0), fresh);
-    // Sharp below a texel, the analytic mean by two levels up.
-    let resolved = clamp(1.0 - 0.5 * lod, 0.0, 1.0);
     if (resolved > 0.0 && near_cover > 0.0) {
-        near_cover = near_cover * sea_lace(p, tile.z, theta, along, fr)
+        near_cover = near_cover * sea_lace(p, z, theta, along, fr)
             * mix(SEA_FOAM_OPACITY_OLD, SEA_FOAM_OPACITY_FRESH, fresh);
     }
     out.foam = mix(far_cover, near_cover, resolved);
