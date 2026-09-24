@@ -14178,6 +14178,14 @@ fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
 // seeds from a cell index folded at the tile, so the desert is a pure
 // function of this frame and a replayed track flies over the same stones.
 const DESERT: bool = false;
+// The simplified desert (Thomas, 2026-09-24: the full desert at Medium and
+// above, "a simplified but convincing desert" at Low and Minimal). The hosts
+// turn it on over a desert at web/soar/constants.js DESERT_LITE_TIERS, keyed
+// like the lighting method; under it the surface pass has no refine stage —
+// the hosts skip that pass — and each desert section compiles out its own
+// Low drops behind `if (!DESERT_LITE)`. False compiles to exactly the full
+// desert.
+const DESERT_LITE: bool = false;
 
 // How far above the terrain the flora slab reaches: the tallest saguaro
 // plus margin. The flora trace is called only over the part of a ray that
@@ -15699,12 +15707,14 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
                        strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
     let o = desert_camera_origin();
     let terrain = desert_terrain_trace(o, dir, pixel_angle, 0.0);
-    if (terrain.hit && terrain.t < DESERT_FLORA_REFINE_FP_M / pixel_angle) {
+    if (!DESERT_LITE && terrain.hit
+        && terrain.t < DESERT_FLORA_REFINE_FP_M / pixel_angle) {
         // Inside the refine reach the refine stage (desert_surface_refine)
         // finds the stones and plants in front of this terrain and shades
         // the nearest; all it takes from here is the terrain's distance.
         // Shading it here as well cost the near views as much again as the
-        // whole plain pass (perf, M1 proxy).
+        // whole plain pass (perf, M1 proxy). The simplified desert has no
+        // refine stage, so under DESERT_LITE this pass shades every pixel.
         return vec4<f32>(DESERT_UNSHADED, 0.0, 0.0, terrain.t);
     }
     // The whole desert along the ray: the ground, then whatever stands on
