@@ -68,7 +68,10 @@ you may not redefine them. The structs you exchange with the core:
   (footprint scaled by `fscale` about the plot centre), arch 4 never.
 - `CityHit` — `hit, t, pos, normal, kind, cell`. Component hits use
   `kind = <your kind_base> + local`, local in [0, 15]; core kinds are
-  0 ground, 1 facade, 2 roof, 3 mast, 4 beacon.
+  0 ground, 1 facade, 2 roof, 3 mast, 4 beacon. The facade shell's hits
+  take 1000 and up (`CITY_KIND_SHELL + part + 16 * (side + 4 * tier)`, to
+  1191), so a kind_base ends at 900; the composer refuses one that runs
+  into them.
 - `city_box_hit(o, inv_dir, bmin, bmax) -> vec2(t_near, t_far)` and
   `city_box_normal(p, bmin, bmax)` do slab tests for you.
 
