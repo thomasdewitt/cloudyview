@@ -14593,6 +14593,8 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
 // Illinois false position between (ta, above the surface) and (tb, gap_b
 // at or below it), on the footprint-filtered surface; returns the
 // interpolated root, not the end that happened to be below.
+const DESERT_REFINE_TOL_FP: f32 = 0.05;
+
 fn desert_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                  ta_in: f32, tb_in: f32, gap_b: f32) -> f32 {
     var ta = ta_in;
@@ -14609,6 +14611,12 @@ fn desert_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         tm = ta + (tb - ta) * ga / max(ga - gb, 1e-9);
         let pm = o + tm * dir;
         let gm = pm.z - desert_surface(pm.xy, pixel_angle * tm).x;
+        // Landed to a twentieth of the footprint: the remaining iterations
+        // would move the hit by less than the pixel can show, and each is a
+        // dependent texture round (the trace at altitude is latency-bound).
+        if (abs(gm) < DESERT_REFINE_TOL_FP * pixel_angle * tm) {
+            break;
+        }
         if (gm > 0.0) {
             ta = tm;
             ga = gm;
@@ -14720,11 +14728,15 @@ const DESERT_STONE_PALETTE = array<vec3<f32>, 7>(
     vec3<f32>(0.210, 0.105, 0.060),
     vec3<f32>(0.290, 0.200, 0.170)
 );
-// The same seven, as fractions of each surface's stones: varnish-dark on
-// the pavement, fresh and pale in a wash, rust and rose throughout (the
-// references' clasts run through rust, pink, grey, black and white quartz).
-const DESERT_STONE_MIX_PAVEMENT = array<f32, 7>(0.28, 0.24, 0.16, 0.04, 0.08,
-                                                0.12, 0.08);
+// The same seven, as fractions of each surface's stones: varnish-dark and
+// grey on the pavement, fresh and pale in a wash, rust and rose throughout
+// (the references' clasts run through rust, pink, grey, black and white
+// quartz). A pavement is mostly its stones, so their mean sits close to the
+// pavement's own colour: redder than it, and the silt that holds the
+// footprint's mean solved to teal-grey (tests/test_desert_tile.py holds
+// every surface's silt warm).
+const DESERT_STONE_MIX_PAVEMENT = array<f32, 7>(0.28, 0.46, 0.09, 0.06, 0.03,
+                                                0.04, 0.04);
 const DESERT_STONE_MIX_SOIL = array<f32, 7>(0.12, 0.20, 0.20, 0.08, 0.20,
                                             0.10, 0.10);
 const DESERT_STONE_MIX_WASH = array<f32, 7>(0.04, 0.26, 0.13, 0.26, 0.17,
@@ -14897,7 +14909,8 @@ fn desert_stone_local(s: DesertStone, v: vec3<f32>, is_dir: bool) -> vec3<f32> {
 // Nearest entry of a ray into the stone — the ellipsoid cut by its two
 // planes, a convex solid, so the entry is the latest of the entering
 // boundaries and must precede the earliest exit. Returns (t, the entering
-// boundary's normal in the unit-sphere frame, un-normalized), or t = -1.
+// boundary's normal in the unit-sphere frame — unit on the rounded
+// surface, length 2 on a broken face), or t = -1.
 // The t is the ray's own: the frame change is linear and shared by the
 // origin and the direction.
 fn desert_stone_hit(s: DesertStone, o: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
@@ -14928,7 +14941,9 @@ fn desert_stone_hit(s: DesertStone, o: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
         if (den < 0.0) {
             if (tc > t_in) {
                 t_in = tc;
-                n_in = cut.xyz;
+                // Length 2 marks a broken face (a sphere point's normal is
+                // unit): desert_stone_normal leaves it flat.
+                n_in = 2.0 * cut.xyz;
             }
         } else {
             t_out = min(t_out, tc);
@@ -14957,6 +14972,9 @@ const DESERT_FACET_WEIGHT: f32 = 0.45;
 
 fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
     let q = normalize(nq);
+    // A broken face is flat as it is: pulled toward a facet it could tilt
+    // up to 27 degrees skyward, undoing the faces-sideways-or-down rule.
+    let pull = select(DESERT_FACET_WEIGHT, 0.0, dot(nq, nq) > 2.0);
     var best = -2.0;
     var f = vec3<f32>(0.0, 0.0, 1.0);
     for (var i: i32 = 0; i < 7; i = i + 1) {
@@ -14972,7 +14990,7 @@ fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
     }
     // Both normals back in the world: a plane normal through a scale goes
     // by the inverse scale.
-    let nl = normalize(mix(q, f, DESERT_FACET_WEIGHT)) / s.axes;
+    let nl = normalize(mix(q, f, pull)) / s.axes;
     let x = s.cs.x * nl.x - s.cs.y * nl.y;
     let y = s.cs.y * nl.x + s.cs.x * nl.y;
     return normalize(vec3<f32>(x, y, nl.z));
@@ -15650,8 +15668,7 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
     if (h.kind >= 8) {
         rgb = desert_flora_shade(h, dir, fp, L, refine);
     } else {
-        // The plants' shadow on the ground, walked once for both ground
-        // branches (one inlined copy of the flora's shadow walk, not two).
+        // The plants' shadow on the ground and its stones.
         let plants = desert_flora_shadow(h.pos, sun, fp, refine);
         let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
         rgb = desert_ground_radiance(h, dir, fp, L, plants)
@@ -15661,11 +15678,18 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
 
-// THE ENTRY: the whole desert for one view ray, (hazed radiance, t) — t is
-// 1e30 on a miss. Everything the desert needs per pixel is derived here
-// from the same draws fs_main would make (frame_index, strat_pixel on the
-// sun-march and solar-cone streams, times jitter_amp = jitter_on *
-// jitter_scale), so the surface pre-pass and an inline call agree exactly.
+// The plain pass's mark on ground it leaves for the refine stage to shade:
+// a red no radiance can have, so the refine stage reads the decision rather
+// than re-deriving it.
+const DESERT_UNSHADED: f32 = -1.0;
+
+// THE ENTRY (fs_surface): the whole desert for one view ray, (hazed
+// radiance, t) — t is 1e30 on a miss — or, for terrain inside the refine
+// reach, (DESERT_UNSHADED, 0, 0, t) for the refine stage to shade.
+// Everything the desert needs per pixel is derived from the same draws
+// fs_main would make (frame_index, strat_pixel on the sun-march and
+// solar-cone streams, times jitter_amp = jitter_on * jitter_scale), so the
+// two stages shade alike.
 // `pixel_angle` is the TRUE pixel angle, 2 tan(fov/2) / width — not the
 // cloud march's view-step LOD angle, which at the day tiers is several
 // pixels wide and would dissolve the stones the brief asks to see from a
@@ -15681,7 +15705,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
         // the nearest; all it takes from here is the terrain's distance.
         // Shading it here as well cost the near views as much again as the
         // whole plain pass (perf, M1 proxy).
-        return vec4<f32>(0.0, 0.0, 0.0, terrain.t);
+        return vec4<f32>(DESERT_UNSHADED, 0.0, 0.0, terrain.t);
     }
     // The whole desert along the ray: the ground, then whatever stands on
     // it in front of the ground hit.
@@ -15722,25 +15746,25 @@ fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
 }
 
 // THE REFINE ENTRY (fs_surface_refine, under DESERT): the near plants the
-// plain pass leaves out, traced in front of what it found. `plain` is the
-// plain pass's (radiance, t) for this pixel, t = 1e30 on a miss; it comes
-// back unchanged unless a plant stands nearer, or the terrain it found lies
-// inside the reach — where the plain pass shades nothing and this stage
-// shades the ground, its stones and its plants. Early-out first: a pixel
-// whose flora slab begins beyond the refine reach (the flora's own
-// DESERT_FLORA_REFINE_FP_M footprint) leaves with nothing but the read it
-// came in with.
+// plain pass leaves out, and the near ground it leaves unshaded. `plain` is
+// the plain pass's (radiance, t) for this pixel, t = 1e30 on a miss, or
+// (DESERT_UNSHADED, 0, 0, the terrain's t) for ground inside the reach,
+// which only this stage shades. A shaded pixel comes back unchanged unless
+// a plant stands nearer; early-out first: one whose flora slab begins
+// beyond the refine reach (the flora's own DESERT_FLORA_REFINE_FP_M
+// footprint) leaves with nothing but the read it came in with.
 fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     let o = desert_camera_origin();
     let inv_dir = 1.0 / cr.dir;
     let slab = desert_flora_slab(o, cr.dir, inv_dir, plain.w);
     let reach = DESERT_FLORA_REFINE_FP_M / cr.true_pixel_angle;
-    if (slab.y <= slab.x || slab.x >= reach) {
+    let unshaded = plain.x == DESERT_UNSHADED;
+    if (!unshaded && (slab.y <= slab.x || slab.x >= reach)) {
         return plain;
     }
     var h = desert_flora_refine(o, cr.dir, inv_dir, slab.x, slab.y,
                                 cr.true_pixel_angle);
-    if (plain.w >= reach) {
+    if (!unshaded) {
         // Shaded by the plain pass; only a nearer plant replaces it.
         if (!h.hit || h.t >= plain.w) {
             return plain;
@@ -15755,10 +15779,10 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
         if (!h.hit || (g.hit && g.t < h.t)) {
             h = g;
         }
-        // Not finding the terrain the plain pass found would leave the
-        // pixel as it came in, unshaded black: visible, not papered over.
+        // Not finding the terrain the plain pass found leaves the pixel
+        // black: visible, not papered over, and never the sentinel.
         if (!h.hit) {
-            return plain;
+            return vec4<f32>(0.0, 0.0, 0.0, plain.w);
         }
     }
     return vec4<f32>(desert_shade_pixel(h, o, cr.dir, cr.true_pixel_angle,

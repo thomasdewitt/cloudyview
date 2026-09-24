@@ -951,19 +951,22 @@ if (wantedSurface !== null) {
   }
 }
 if (wanted !== null) {
+  // buildRail shares resolveDemos' promise and reports ITS failure on the
+  // page, so only that rejection is let go here; an id the index does not
+  // have is thrown, not flown as some other demo.
   resolveDemos().then(({ root, groups }) => {
     const all = groups.flatMap((group) => group.demos);
-    const demo = all.find((d) => d.id === wanted) ?? all[0];
+    const demo = wanted === "" ? all[0] : all.find((d) => d.id === wanted);
+    if (!demo) {
+      throw new Error(`?demo=${wanted}: no such demo. The index has ` +
+                      `${all.map((d) => d.id).join(", ")}.`);
+    }
     // Through demoSource like every other way in, so the stored mode decides
     // the surface here too — a raw source flew the daytime ocean while the
     // in-flight UI said Cyberpunk.
-    if (demo) {
-      enterViewer({ ...demoSource(root, demo),
-                    ...(wantedSurface ? { surfaceKind: wantedSurface } : {}) });
-    }
-    // buildRail shares this promise and reports the failure on the page, so
-    // there is nothing to say here beyond not raising it twice.
-  }).catch(() => {});
+    enterViewer({ ...demoSource(root, demo),
+                  ...(wantedSurface ? { surfaceKind: wantedSurface } : {}) });
+  }, () => {});
 }
 
 export { browserGuess };
