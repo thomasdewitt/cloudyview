@@ -15324,12 +15324,14 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // fs_surface_refine re-traces only the pixels that need more, reading the
 // first stage's result at group 1 binding 1 and writing the final one. The
 // second stage's registers are paid only by its own kernel, which most
-// pixels leave at once. Each surface decides its own early-out from the
-// first stage's t alone, with no flag: the second stage re-walks only the
-// reach its detail lives in (the city's facade shell, the desert's near
-// plants) up to that t, and a pixel whose surface lies beyond the reach is
-// returned exactly as it came. Its result is the one fs_main reads, so t
-// stays >= 0 (1e30 on a miss) as in the first stage.
+// pixels leave at once. Each surface decides its own early-out. The desert
+// needs only the first stage's t: its second stage re-walks the reach its
+// near plants live in up to that t, and a pixel whose surface lies beyond is
+// returned as it came. The city marks the pixels its facade shell can touch
+// in the sign of t (surface_pass_city: negative for a ray that entered a
+// building's relief envelope within the shell's reach), and returns every
+// other one untouched. The second stage's result is the one fs_main reads,
+// so t leaves it >= 0 (1e30 on a miss) whatever the first stage wrote.
 // Which surfaces have the second stage is the hosts' list
 // (soar_host.SURFACE_REFINE_SURFACES, renderer.js _hasRefineStage).
 //
