@@ -14835,65 +14835,38 @@ struct DfSagSample {
     cs: DfColSample,
 }
 
-// A cactus's columns: its trunk and up to four arms, as named members
-// rather than an array — a function-local array spills to memory and slows
-// every pixel of the kernel it is compiled into.
-struct DfCols {
-    c0: DfColumn,
-    c1: DfColumn,
-    c2: DfColumn,
-    c3: DfColumn,
-    c4: DfColumn,
-    n: i32,
+// Column i of a cactus — its trunk, then up to four arms — built from the
+// item on demand. Nothing holds the columns: five of them are seventy
+// floats of live state, and the register budget of the whole surface pass
+// is set by its widest function, so they are rebuilt (a few trig calls)
+// every time they are needed instead.
+fn df_cactus_col(it: DfItem, i: i32) -> DfColumn {
+    if (i == 0) {
+        if (it.kind == DF_KIND_BARREL) {
+            return df_barrel_column(it);
+        }
+        return df_sag_trunk(it);
+    }
+    return df_sag_arm(it, i - 1);
 }
 
-fn df_cols_get(cs: ptr<function, DfCols>, i: i32) -> DfColumn {
-    if (i == 1) {
-        return (*cs).c1;
-    }
-    if (i == 2) {
-        return (*cs).c2;
-    }
-    if (i == 3) {
-        return (*cs).c3;
-    }
-    if (i == 4) {
-        return (*cs).c4;
-    }
-    return (*cs).c0;
+fn df_cactus_ncols(it: DfItem) -> i32 {
+    return select(1 + i32(it.b.x), 1, it.kind == DF_KIND_BARREL);
 }
 
-// Fold column i's sample into the running union.
-fn df_sag_fold(acc: DfSagSample, raw: f32, c: DfColumn, i: i32,
-               q: vec3<f32>, blend: f32) -> DfSagSample {
-    var out = acc;
-    let cs = df_col_eval(c, q);
-    out.d = df_smin(acc.d, cs.d, blend);
-    if (cs.d < raw) {
-        out.cs = cs;
-        out.comp = i;
-    }
-    return out;
-}
-
-fn df_sag_eval(cols: ptr<function, DfCols>, q: vec3<f32>,
-               blend: f32) -> DfSagSample {
+fn df_sag_eval(it: DfItem, q: vec3<f32>, blend: f32) -> DfSagSample {
     var out: DfSagSample;
-    out.cs = df_col_eval((*cols).c0, q);
+    out.cs = df_col_eval(df_cactus_col(it, 0), q);
     out.d = out.cs.d;
     out.comp = 0;
-    let n = (*cols).n;
-    if (n > 1) {
-        out = df_sag_fold(out, out.cs.d, (*cols).c1, 1, q, blend);
-    }
-    if (n > 2) {
-        out = df_sag_fold(out, out.cs.d, (*cols).c2, 2, q, blend);
-    }
-    if (n > 3) {
-        out = df_sag_fold(out, out.cs.d, (*cols).c3, 3, q, blend);
-    }
-    if (n > 4) {
-        out = df_sag_fold(out, out.cs.d, (*cols).c4, 4, q, blend);
+    let n = df_cactus_ncols(it);
+    for (var i: i32 = 1; i < n; i = i + 1) {
+        let cs = df_col_eval(df_cactus_col(it, i), q);
+        out.d = df_smin(out.d, cs.d, blend);
+        if (cs.d < out.cs.d) {
+            out.cs = cs;
+            out.comp = i;
+        }
     }
     return out;
 }
@@ -15044,26 +15017,6 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     // The lowest areoles that stand above the ground (arc length from the
     // column's buried root).
     let s_ground = select(0.45, 0.30, barrel);
-    var cols: DfCols;
-    cols.n = 1;
-    if (barrel) {
-        cols.c0 = df_barrel_column(it);
-    } else {
-        cols.c0 = df_sag_trunk(it);
-        cols.n = 1 + i32(it.b.x);
-        if (cols.n > 1) {
-            cols.c1 = df_sag_arm(it, 0);
-        }
-        if (cols.n > 2) {
-            cols.c2 = df_sag_arm(it, 1);
-        }
-        if (cols.n > 3) {
-            cols.c3 = df_sag_arm(it, 2);
-        }
-        if (cols.n > 4) {
-            cols.c4 = df_sag_arm(it, 3);
-        }
-    }
     let blend = 0.10 * it.a.y;
     // Lipschitz bound of the pleated distance: the steepest groove wall.
     let slope = 2.0 * it.b.z * it.a.z / DF_PI;
@@ -15087,18 +15040,9 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     if (fp_in > mix(DF_CACT_CAPS_FP0, DF_CACT_CAPS_FP1, dither.x)) {
         var ch: DfCapHit;
         ch.t = tb;
-        ch = df_col_capsules(cols.c0, 0, q0, dir, ch);
-        if (cols.n > 1) {
-            ch = df_col_capsules(cols.c1, 1, q0, dir, ch);
-        }
-        if (cols.n > 2) {
-            ch = df_col_capsules(cols.c2, 2, q0, dir, ch);
-        }
-        if (cols.n > 3) {
-            ch = df_col_capsules(cols.c3, 3, q0, dir, ch);
-        }
-        if (cols.n > 4) {
-            ch = df_col_capsules(cols.c4, 4, q0, dir, ch);
+        let ncol = df_cactus_ncols(it);
+        for (var i: i32 = 0; i < ncol; i = i + 1) {
+            ch = df_col_capsules(df_cactus_col(it, i), i, q0, dir, ch);
         }
         if (ch.t >= tb || ch.t < ta) {
             return res;
@@ -15120,7 +15064,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             res.mat = vec4<f32>(f32(DF_MAT_BARK) + tint, 0.5, qh.z, age);
             return res;
         }
-        let c = df_cols_get(&cols, ch.comp);
+        let c = df_cactus_col(it, ch.comp);
         // The felt pads' mean coverage of a rib and the folded needles'
         // coverage along this sightline, as the pleated far form has them.
         let r_c = df_col_radius(c, ch.s);
@@ -15154,7 +15098,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             break;
         }
         let q = q0 + dir * t;
-        let sm = df_sag_eval(&cols, q, blend);
+        let sm = df_sag_eval(it, q, blend);
         let d = sm.d;
         // A shadow ray carries the receiver's footprint in pixel_angle
         // (see df_shadow_exact): its own t says nothing about pixels. Its
@@ -15171,7 +15115,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         var stp = d * inv_lip;
         if (d < shell) {
             if (mode == 0) {
-                let c = df_cols_get(&cols, sm.comp);
+                let c = df_cactus_col(it, sm.comp);
                 let kf = sm.cs.theta * c.ribs / DF_TAU + c.phase;
                 let k = round(kf);
                 let odd = f32(i32(k) & 1);
@@ -15261,14 +15205,14 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let k2 = vec3<f32>(-1.0, -1.0, 1.0);
     let k3 = vec3<f32>(-1.0, 1.0, -1.0);
     let k4 = vec3<f32>(1.0, 1.0, 1.0);
-    let g = k1 * df_sag_eval(&cols, qh + e * k1, blend).d
-          + k2 * df_sag_eval(&cols, qh + e * k2, blend).d
-          + k3 * df_sag_eval(&cols, qh + e * k3, blend).d
-          + k4 * df_sag_eval(&cols, qh + e * k4, blend).d;
+    let g = k1 * df_sag_eval(it, qh + e * k1, blend).d
+          + k2 * df_sag_eval(it, qh + e * k2, blend).d
+          + k3 * df_sag_eval(it, qh + e * k3, blend).d
+          + k4 * df_sag_eval(it, qh + e * k4, blend).d;
     res.normal = normalize(g);
 
     // Material: the boot, an areole's felt pad, or skin.
-    let c = df_cols_get(&cols, body.comp);
+    let c = df_cactus_col(it, body.comp);
     let age = it.b.w;
     let boot_h = DF_SAG_BOOT_H * smoothstep(0.35, 0.9, age)
         * (0.7 + 0.3 * fract(it.a.w * 13.1));
@@ -15439,6 +15383,12 @@ const DF_PP_EXACT_FP0: f32 = 0.005;
 const DF_PP_EXACT_FP1: f32 = 0.009;
 const DF_PP_GLOCHID_R: f32 = 0.003;
 const DF_PP_FOLD_TAU: f32 = 0.044;
+// Past this footprint a clump is one ellipsoid of pad medium, of extinction
+// DF_PP_ENV_SIGMA per pad half-length (a clump's gaps let about a third of
+// the rays through its middle, as the drawn pads do).
+const DF_PP_FAR_FP0: f32 = 0.030;
+const DF_PP_FAR_FP1: f32 = 0.050;
+const DF_PP_ENV_SIGMA: f32 = 0.20;
 const DF_PP_SKIN: vec3<f32> = vec3<f32>(0.105, 0.150, 0.080);
 const DF_PP_GLOCHID: vec3<f32> = vec3<f32>(0.120, 0.080, 0.050);
 const DF_PP_SPINE: vec3<f32> = vec3<f32>(0.520, 0.460, 0.300);
@@ -15449,13 +15399,14 @@ const DF_MAT_PAD: i32 = 15;
 const DF_MAT_PP_SPINE: i32 = 16;
 const DF_MAT_FRUIT: i32 = 17;
 
+// A pad's frame: centre, long axis, width axis and half-length. Its face
+// normal (ax x aw) and half-width (a / 1.3) are derived where needed — the
+// depth-first walk holds one of these per generation.
 struct DfPad {
     c: vec3<f32>,
     ax: vec3<f32>,
     aw: vec3<f32>,
-    an: vec3<f32>,
     a: f32,
-    b: f32,
 }
 
 fn df_prickly_item(it_in: DfItem, r: vec4<f32>) -> DfItem {
@@ -15492,9 +15443,7 @@ fn df_pp_base(it: DfItem, b: i32) -> DfPad {
     let tw = 1.2 * (h.z - 0.5);
     var aw = normalize(side * cos(tw) + hz * sin(tw) * 0.5);
     pd.aw = normalize(aw - pd.ax * dot(aw, pd.ax));
-    pd.an = cross(pd.ax, pd.aw);
     pd.a = it.a.z * (0.9 + 0.2 * h.w);
-    pd.b = pd.a / 1.3;
     pd.c = hz * (0.06 + 0.12 * h.z) + pd.ax * (pd.a * 0.92)
         - vec3<f32>(0.0, 0.0, 0.04);
     return pd;
@@ -15504,19 +15453,17 @@ fn df_pp_base(it: DfItem, b: i32) -> DfPad {
 fn df_pp_child(par: DfPad, h: vec4<f32>, sgn: f32) -> DfPad {
     let phi = sgn * (0.2 + 0.7 * h.y);
     let attach = par.c + par.ax * (par.a * cos(phi) * 0.93)
-        + par.aw * (par.b * sin(phi) * 0.93);
+        + par.aw * ((par.a / 1.3) * sin(phi) * 0.93);
     var ax = normalize(par.ax * cos(1.3 * phi) + par.aw * sin(1.3 * phi));
     // Pulled toward upright, more on the young outer pads.
     ax = normalize(ax + vec3<f32>(0.0, 0.0, 0.12 + 0.2 * h.w));
     let tw = 1.4 * (h.z - 0.5);
-    var aw = par.aw * cos(tw) + par.an * sin(tw);
+    var aw = par.aw * cos(tw) + cross(par.ax, par.aw) * sin(tw);
     aw = normalize(aw - ax * dot(aw, ax));
     var pd: DfPad;
     pd.ax = ax;
     pd.aw = aw;
-    pd.an = cross(ax, aw);
     pd.a = par.a * (0.82 + 0.18 * h.w);
-    pd.b = pd.a / 1.3;
     pd.c = attach + ax * (pd.a * 0.9);
     return pd;
 }
@@ -15525,10 +15472,10 @@ fn df_pp_child(par: DfPad, h: vec4<f32>, sgn: f32) -> DfPad {
 // empty if t_in > t_out.
 fn df_pad_hit(pd: DfPad, o: vec3<f32>, dir: vec3<f32>,
               grow: f32) -> vec2<f32> {
-    let sc = vec3<f32>(pd.a + grow, pd.b + grow, DF_PP_THICK + grow);
+    let sc = vec3<f32>(pd.a + grow, (pd.a / 1.3) + grow, DF_PP_THICK + grow);
     let w = o - pd.c;
-    let lo = vec3<f32>(dot(w, pd.ax), dot(w, pd.aw), dot(w, pd.an)) / sc;
-    let ld = vec3<f32>(dot(dir, pd.ax), dot(dir, pd.aw), dot(dir, pd.an)) / sc;
+    let lo = vec3<f32>(dot(w, pd.ax), dot(w, pd.aw), dot(w, cross(pd.ax, pd.aw))) / sc;
+    let ld = vec3<f32>(dot(dir, pd.ax), dot(dir, pd.aw), dot(dir, cross(pd.ax, pd.aw))) / sc;
     let qa = dot(ld, ld);
     let qb = dot(lo, ld);
     let qc = dot(lo, lo) - 1.0;
@@ -15566,8 +15513,8 @@ fn df_pp_test(it: DfItem, pd: DfPad, key: u32, outer: bool, q0: vec3<f32>,
     if (exact) {
         // The areoles around where the ray crosses the pad's mid-plane, on
         // both faces.
-        let dn = dot(dir, pd.an);
-        let tm = select(0.5 * (hp.x + hp.y), dot(pd.c - q0, pd.an) / dn,
+        let dn = dot(dir, cross(pd.ax, pd.aw));
+        let tm = select(0.5 * (hp.x + hp.y), dot(pd.c - q0, cross(pd.ax, pd.aw)) / dn,
                         abs(dn) > 1e-3);
         let pm = q0 + dir * clamp(tm, hp.x, hp.y) - pd.c;
         let uu = dot(pm, pd.ax) / DF_PP_AREOLE_DS;
@@ -15580,7 +15527,7 @@ fn df_pp_test(it: DfItem, pd: DfPad, key: u32, outer: bool, q0: vec3<f32>,
             for (var di: i32 = -1; di <= 1; di = di + 1) {
                 let u = (iu + f32(di) + odd) * DF_PP_AREOLE_DS;
                 let v = j * DF_PP_AREOLE_DS;
-                let e = (u / pd.a) * (u / pd.a) + (v / pd.b) * (v / pd.b);
+                let e = (u / pd.a) * (u / pd.a) + (v / (pd.a / 1.3)) * (v / (pd.a / 1.3));
                 if (e > 0.85) {
                     continue;
                 }
@@ -15590,7 +15537,7 @@ fn df_pp_test(it: DfItem, pd: DfPad, key: u32, outer: bool, q0: vec3<f32>,
                 let cnt = 1 + i32(df_u01(hh.x) * 2.99);
                 let lift = DF_PP_THICK * sqrt(max(1.0 - e, 0.0));
                 for (var face: i32 = 0; face < 2; face = face + 1) {
-                    let fnrm = pd.an * select(-1.0, 1.0, face == 0);
+                    let fnrm = cross(pd.ax, pd.aw) * select(-1.0, 1.0, face == 0);
                     let base = pd.c + pd.ax * u + pd.aw * v
                         + fnrm * (lift - 0.001);
                     for (var k: i32 = 0; k < cnt; k = k + 1) {
@@ -15618,7 +15565,7 @@ fn df_pp_test(it: DfItem, pd: DfPad, key: u32, outer: bool, q0: vec3<f32>,
             }
             let phi = (f32(k) - 1.0) * 0.55;
             let fc = pd.c + pd.ax * (pd.a * cos(phi) + 0.02)
-                + pd.aw * (pd.b * sin(phi));
+                + pd.aw * ((pd.a / 1.3) * sin(phi));
             let fs = vec3<f32>(0.021, 0.021, 0.028);
             let lo = (q0 - fc) / fs;
             let ld = dir / fs;
@@ -15655,6 +15602,27 @@ fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let fp = select(pixel_angle * ta, pixel_angle, shadow);
     let exact = !shadow
         && fp < mix(DF_PP_EXACT_FP0, DF_PP_EXACT_FP1, dither.x);
+    // Far form: the clump as one ellipsoid of pad medium.
+    if (fp > mix(DF_PP_FAR_FP0, DF_PP_FAR_FP1, dither.x)) {
+        let a = it.a.z;
+        let ec = vec3<f32>(0.0, 0.0, 2.6 * a);
+        let er = vec3<f32>(5.0 * a, 5.0 * a, 3.2 * a);
+        let tt = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, tb,
+                               DF_PP_ENV_SIGMA / a,
+                               df_item_free_path(dither, it.seed));
+        if (tt >= tb) {
+            return res;
+        }
+        res.hit = true;
+        res.t = tt;
+        res.kind = DF_KIND_PRICKLY;
+        res.normal = normalize((q0 + dir * tt - ec) / (er * er));
+        let spot_mean = DF_PI * DF_PP_GLOCHID_R * DF_PP_GLOCHID_R
+            / (DF_PP_AREOLE_DS * DF_PP_AREOLE_DS);
+        res.mat = vec4<f32>(f32(DF_MAT_PAD) + 0.9 * spot_mean, 0.5,
+                            df_u01(it.seed.y), 1.0);
+        return res;
+    }
     var st: DfPPState;
     st.best.t = tb;
     st.code = DF_MAT_PAD;
@@ -15704,9 +15672,9 @@ fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     if (st.code == DF_MAT_PAD) {
         let pd = st.pad;
         let q = q0 + dir * best.t - pd.c;
-        let lq = vec3<f32>(dot(q, pd.ax), dot(q, pd.aw), dot(q, pd.an));
-        let g = lq / vec3<f32>(pd.a * pd.a, pd.b * pd.b, DF_PP_THICK * DF_PP_THICK);
-        res.normal = normalize(pd.ax * g.x + pd.aw * g.y + pd.an * g.z);
+        let lq = vec3<f32>(dot(q, pd.ax), dot(q, pd.aw), dot(q, cross(pd.ax, pd.aw)));
+        let g = lq / vec3<f32>(pd.a * pd.a, (pd.a / 1.3) * (pd.a / 1.3), DF_PP_THICK * DF_PP_THICK);
+        res.normal = normalize(pd.ax * g.x + pd.aw * g.y + cross(pd.ax, pd.aw) * g.z);
         // Distance to the nearest areole on the lattice, for the glochids.
         let uu = lq.x / DF_PP_AREOLE_DS;
         let vv = lq.y / DF_PP_AREOLE_DS;
@@ -15725,7 +15693,7 @@ fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     smoothstep(DF_PP_GLOCHID_R, 4.0 * DF_PP_GLOCHID_R, fp_h));
         // Rim: pads yellow a little toward their edges.
         let rim = clamp((lq.x * lq.x) / (pd.a * pd.a)
-                        + (lq.y * lq.y) / (pd.b * pd.b), 0.0, 1.0);
+                        + (lq.y * lq.y) / ((pd.a / 1.3) * (pd.a / 1.3)), 0.0, 1.0);
         // mat.w: the pad's needles are not drawn at this footprint and are
         // folded into its colour instead.
         res.mat = vec4<f32>(f32(DF_MAT_PAD) + 0.9 * w, rim,
@@ -15766,6 +15734,89 @@ fn df_prickly_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         col = mix(col, df_spine_medium(DF_PP_SPINE, dir, L, Ls), cov);
     }
     return col;
+}
+
+// --- Far forms -------------------------------------------------------------------
+//
+// A plant a few centimetres of footprint away is a few dozen pixels of its
+// own sub-pixel parts, and a warp waits on its slowest pixel: every species
+// therefore has a one-primitive far form that stands in for the parts in
+// expectation — a crown as an ellipsoid of uniform medium, the ocotillo's
+// fan as a cone of it, a stone as its ellipsoid — so that past its band no
+// pixel pays for more than a quadratic.
+
+// Ray against an ellipsoid (centre c, radii r): the (t_in, t_out) chord,
+// empty if t_in >= t_out.
+fn df_ellipsoid_chord(q0: vec3<f32>, dir: vec3<f32>, c: vec3<f32>,
+                      r: vec3<f32>) -> vec2<f32> {
+    let lo = (q0 - c) / r;
+    let ld = dir / r;
+    let qa = dot(ld, ld);
+    let qb = dot(lo, ld);
+    let disc = qb * qb - qa * (dot(lo, lo) - 1.0);
+    if (disc <= 0.0) {
+        return vec2<f32>(1.0, -1.0);
+    }
+    let sq = sqrt(disc);
+    return vec2<f32>((-qb - sq) / qa, (-qb + sq) / qa);
+}
+
+// The ray against a cone of uniform medium standing on its apex at `apex`,
+// half-angle tan `tn`, clipped to heights [z0, z1] above the apex: the
+// chord (t_in, t_out). The single nappe is convex, so the chord is one
+// interval: between the roots of x^2 + y^2 = tn^2 z^2 when the ray crosses
+// the cone's wall twice, the half-line beyond the root on the nappe's side
+// when it enters through the open top and never leaves.
+fn df_cone_chord(q0: vec3<f32>, dir: vec3<f32>, apex: vec3<f32>, tn: f32,
+                 z0: f32, z1: f32) -> vec2<f32> {
+    let o = q0 - apex;
+    let k = tn * tn;
+    let qa = dir.x * dir.x + dir.y * dir.y - k * dir.z * dir.z;
+    let qb = o.x * dir.x + o.y * dir.y - k * o.z * dir.z;
+    let qc = o.x * o.x + o.y * o.y - k * o.z * o.z;
+    let disc = qb * qb - qa * qc;
+    var lo = -1e30;
+    var hi = 1e30;
+    if (disc < 0.0) {
+        if (qa >= 0.0) {
+            return vec2<f32>(1.0, -1.0);
+        }
+    } else {
+        let sq = sqrt(disc);
+        let r1 = min((-qb - sq) / qa, (-qb + sq) / qa);
+        let r2 = max((-qb - sq) / qa, (-qb + sq) / qa);
+        if (qa > 0.0) {
+            lo = r1;
+            hi = r2;
+        } else if (dir.z > 0.0) {
+            lo = r2;
+        } else {
+            hi = r1;
+        }
+    }
+    // The height slab, which also removes the lower nappe.
+    if (abs(dir.z) > 1e-7) {
+        let ta = (z0 - o.z) / dir.z;
+        let tb = (z1 - o.z) / dir.z;
+        lo = max(lo, min(ta, tb));
+        hi = min(hi, max(ta, tb));
+    } else if (o.z < z0 || o.z > z1) {
+        return vec2<f32>(1.0, -1.0);
+    }
+    return vec2<f32>(lo, hi);
+}
+
+// The first collision in a uniform medium over chord ch clipped to [ta,
+// tb], on the item's own free path; tb when there is none.
+fn df_medium_hit(ch: vec2<f32>, ta: f32, tb: f32, sigma: f32,
+                 free_path: f32) -> f32 {
+    let t0 = max(ch.x, ta);
+    let t1 = min(ch.y, tb);
+    if (t1 <= t0) {
+        return tb;
+    }
+    let tt = t0 + free_path / sigma;
+    return select(tb, tt, tt < t1);
 }
 
 // --- Creosote and bursage ------------------------------------------------------
@@ -16012,24 +16063,10 @@ fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let ec = vec3<f32>(0.0, 0.0, 0.62 * h);
     let er = vec3<f32>(w + 0.08, w + 0.08, 0.50 * h);
     if (mode == 2) {
-        let lo = (q0 - ec) / er;
-        let ld = dir / er;
-        let qa = dot(ld, ld);
-        let qb = dot(lo, ld);
-        let qc = dot(lo, lo) - 1.0;
-        let disc = qb * qb - qa * qc;
-        if (disc <= 0.0) {
-            return res;
-        }
-        let sq = sqrt(disc);
-        let t0 = max((-qb - sq) / qa, ta);
-        let t1 = min((-qb + sq) / qa, tb);
-        if (t1 <= t0) {
-            return res;
-        }
-        // Exponential free path through a uniform medium.
-        let tt = t0 + df_item_free_path(dither, it.seed) / DF_CREO_ENV_SIGMA;
-        if (tt >= t1) {
+        let tt = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, tb,
+                               DF_CREO_ENV_SIGMA,
+                               df_item_free_path(dither, it.seed));
+        if (tt >= tb) {
             return res;
         }
         res.hit = true;
@@ -16248,6 +16285,10 @@ const DF_MAT_OCO_SPINE: i32 = 11;
 const DF_MAT_OCO_LEAF: i32 = 12;
 const DF_MAT_OCO_FLOWER: i32 = 13;
 const DF_MAT_OCO_CANOPY: i32 = 18;   // a leafy cane's capsule medium
+const DF_MAT_OCO_FAR: i32 = 19;      // the fan as a cone of medium
+const DF_OCO_FAR_FP0: f32 = 0.06;
+const DF_OCO_FAR_FP1: f32 = 0.10;
+const DF_OCO_FAR_W: f32 = 0.020;     // mean cane width over its length
 
 // Horizontal reach of an ocotillo from its foot.
 fn df_ocotillo_reach(h: f32, fan: f32) -> f32 {
@@ -16311,6 +16352,33 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let fp = select(pixel_angle * ta, pixel_angle, shadow);
     let exact = fp < mix(DF_OCO_EXACT_FP0, DF_OCO_EXACT_FP1, dither.x);
     let state = i32(it.a.w);
+    // Far form: the fan as a cone of cane medium, standing on its apex just
+    // below the crown, as wide as the fan and its outward bend.
+    if (fp > mix(DF_OCO_FAR_FP0, DF_OCO_FAR_FP1, dither.x)) {
+        let tn = tan(it.a.z + 0.16);
+        let apex = vec3<f32>(0.0, 0.0, -0.3 - 0.12 / tn);
+        let top = it.a.x * 1.02 - apex.z;
+        let ch = df_cone_chord(q0, dir, apex, tn, 0.3 - apex.z, top);
+        // Canes of mean width DF_OCO_FAR_W, spread over the cone's section
+        // at mid-chord: extinction N w / (pi R^2), more when in leaf.
+        let zm = clamp(q0.z + dir.z * 0.5 * (max(ch.x, ta) + min(ch.y, tb))
+                       - apex.z, 0.3 - apex.z, top);
+        let rr = zm * tn;
+        let leafy = select(1.0, 2.2, state == 1);
+        let sigma = it.a.y * DF_OCO_FAR_W * leafy / (DF_PI * rr * rr);
+        let tt = df_medium_hit(ch, ta, tb, sigma,
+                               df_item_free_path(dither, it.seed));
+        if (tt >= tb) {
+            return res;
+        }
+        res.hit = true;
+        res.t = tt;
+        res.kind = DF_KIND_OCOTILLO;
+        res.normal = -dir;
+        res.mat = vec4<f32>(f32(DF_MAT_OCO_FAR) + 0.45 * f32(state), 0.0,
+                            0.0, 0.0);
+        return res;
+    }
     var best: DfRodHit;
     best.t = tb;
     var code = DF_MAT_CANE;
@@ -16468,6 +16536,18 @@ fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         return desert_lambert(DF_OCO_FLOWER, n, Ls)
             + DF_OCO_FLOWER * 0.5 / DF_PI * Ls.sun * max(-dot(n, L.sun_dir), 0.0);
     }
+    if (code == DF_MAT_OCO_FAR) {
+        // Near-vertical canes of every azimuth (a cylinder's mean facing to
+        // the sun is sin(theta_sun)/pi per unit projected area, as in the
+        // far field), and, in leaf, the leaves' share.
+        let leaf = fract(h.mat.x) > 0.3;
+        let st = sqrt(max(1.0 - L.sun_dir.z * L.sun_dir.z, 0.0));
+        let cane = DF_OCO_CANE / DF_PI
+            * (Ls.sun * (st / DF_PI + 0.1) + Ls.sky * 0.5 + Ls.ground * 0.5);
+        let lf = DF_OCO_LEAF / DF_PI * (Ls.sun * 0.25 + Ls.sky * 0.5
+                                        + Ls.ground * 0.5);
+        return select(cane, mix(cane, lf, 0.55), leaf);
+    }
     if (code == DF_MAT_OCO_CANOPY) {
         // Leaves of every orientation: half the leaf area faces the sun,
         // at a mean cosine of 1/4 per side (the creosote canopy's rule).
@@ -16498,6 +16578,7 @@ const DF_ROCK: vec3<f32> = vec3<f32>(0.330, 0.285, 0.245);
 const DF_ROCK_VARNISH: vec3<f32> = vec3<f32>(0.090, 0.058, 0.040);
 const DF_ROCK_RIND: vec3<f32> = vec3<f32>(0.380, 0.240, 0.140);
 const DF_MAT_ROCK: i32 = 14;
+const DF_ROCK_FAR_FP: f32 = 0.05;
 
 fn df_stone_param(it: DfItem, i: i32) -> vec4<f32> {
     return select(select(select(it.d, it.c, i == 2), it.b, i == 1),
@@ -16586,6 +16667,45 @@ fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.hit = false;
     res.t = tb;
     let q0 = o - it.base;
+    let fp = select(pixel_angle * ta, pixel_angle, shadow);
+    // Far form: each stone its ellipsoid, the joints and undulations (a few
+    // centimetres) sub-pixel.
+    if (fp > DF_ROCK_FAR_FP) {
+        var best = tb;
+        var bn = vec3<f32>(0.0, 0.0, 1.0);
+        let n = i32(it.e.x);
+        for (var i: i32 = 0; i < n; i = i + 1) {
+            let st = df_stone_param(it, i);
+            let hs = pcg2d(vec2<u32>(it.seed.x + u32(i) * 747u,
+                                     (it.seed.x + u32(i) * 747u) ^ 0x68bc21ebu));
+            let h1 = df_u01(hs.x);
+            let h2 = df_u01(hs.y);
+            let cy = cos(h1 * DF_TAU);
+            let sy = sin(h1 * DF_TAU);
+            let rot = mat3x3<f32>(vec3<f32>(cy, -sy, 0.0), vec3<f32>(sy, cy, 0.0),
+                                  vec3<f32>(0.0, 0.0, 1.0));
+            let r = st.w * vec3<f32>(1.0 + 0.35 * h2, 1.0 - 0.15 * h1,
+                                     0.72 + 0.2 * h2);
+            let lo = rot * (q0 - st.xyz);
+            let ld = rot * dir;
+            let ch = df_ellipsoid_chord(lo, ld, vec3<f32>(0.0), r);
+            if (ch.x < ch.y && ch.x > ta && ch.x < best) {
+                best = ch.x;
+                bn = transpose(rot) * ((lo + ld * ch.x) / (r * r));
+            }
+        }
+        if (best >= tb) {
+            return res;
+        }
+        res.hit = true;
+        res.t = best;
+        res.kind = DF_KIND_BOULDER;
+        let qh = q0 + dir * best;
+        res.normal = normalize(bn);
+        res.mat = vec4<f32>(f32(DF_MAT_ROCK) + 0.9 * df_u01(it.seed.y),
+                            qh.z, qh.x, qh.y);
+        return res;
+    }
     var t = ta;
     var converged = false;
     for (var i: i32 = 0; i < 96; i = i + 1) {
