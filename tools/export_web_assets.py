@@ -33,7 +33,7 @@ from cloudyview.city_fif import (
     DEFAULT_N as CITY_N,
     generate_city_density,
 )
-from cloudyview import ocean_fif, sea_tile
+from cloudyview import look, ocean_fif, sea_tile
 from cloudyview.soar_host import SURFACE_TILE_SCHEMAS
 from cloudyview.city_lots import bake_lots, glow_weight, pack_channels
 
@@ -138,11 +138,56 @@ def _lace_cover(planes: np.ndarray) -> list:
             for a in cuts]
 
 
+# The whitecaps' near-field rank gain (sea_tile.NearFoam): measured at these
+# footprints, log2(along / dx) — the near field is drawn below 2.5, and
+# below -3 nothing about it changes — and these cuts (theta is clamped to
+# [SEA_FOAM_EDGE, 1] = [0.2, 1]), over this many pixels per footprint.
+FOAM_NEAR_X = [round(-3.0 + 0.5 * i, 1) for i in range(12)]
+FOAM_NEAR_THETA = [round(0.2 + 0.1 * i, 1) for i in range(9)]
+# Where each column is measured: at theta = 1 the freshness ramp,
+# (rank - theta) / (1 - theta), has no width, and the gain there answers a
+# different question from its neighbours' (and at a cover of 0.3 % of the
+# cap). The last column is the gain just short of a closed gate, so the
+# lookup's line from 0.9 follows the curve rather than cutting its corner.
+FOAM_NEAR_THETA_MEASURED = FOAM_NEAR_THETA[:-1] + [0.99]
+FOAM_NEAR_SAMPLES = 16_000_000
+FOAM_NEAR_SEED = 20260924
+SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+
+
+def _foam_near_gain(planes: np.ndarray, meta: dict) -> dict:
+    """The rank gain that gives the near field's whitecaps the far field's
+    cover, per (footprint, cut) — raymarch.wgsl sea_foam_near_gain. The
+    near field's own constants are the shader's, read from it and recorded
+    here, so a change to one of them fails tests/test_sea_tile.py until the
+    table is measured again."""
+    consts = sea_tile.shader_scalars(SHADER.read_text(),
+                                     sea_tile.FOAM_NEAR_CONSTANTS)
+    near = sea_tile.NearFoam(meta, planes, consts, look.OCEAN_MIP_BIAS)
+    rows = []
+    for x in FOAM_NEAR_X:
+        s = near.samples(meta["dx_m"] * 2.0 ** x, FOAM_NEAR_SAMPLES,
+                         FOAM_NEAR_SEED)
+        row = []
+        for theta in FOAM_NEAR_THETA_MEASURED:
+            target = sea_tile.foam_resolved_cover(
+                theta, meta["lace_cover"], consts["SEA_FOAM_OPACITY_OLD"],
+                consts["SEA_FOAM_OPACITY_FRESH"], consts["SEA_LACE_FRESH_K"],
+                consts["SEA_FOAM_EDGE"])
+            row.append(round(near.gain(s, theta, target), 5))
+        rows.append(row)
+        print(f"  near-foam gain at x {x:+.1f}: {row}")
+    return {"x": FOAM_NEAR_X, "theta": FOAM_NEAR_THETA,
+            "theta_measured": FOAM_NEAR_THETA_MEASURED, "gain": rows,
+            "samples": FOAM_NEAR_SAMPLES, "seed": FOAM_NEAR_SEED,
+            "mip_bias": look.OCEAN_MIP_BIAS, "constants": consts}
+
+
 def export_ocean() -> dict:
     """The moving sea: generate, quantize, and measure what the shader needs.
 
     The two variance tables, the loop length and the foam cap also live in
-    raymarch.wgsl as constants (SEA_SLOPE_VARIANCE — one (removed, temporal)
+    raymarch.wgsl as constants (sea_slope_variance — one (removed, temporal)
     pair per level — SEA_LOOP_S, SEA_FOAM_MAX_COVERAGE); tests/test_sea_tile.py
     fails until the shader is updated to match a re-export.
     """
@@ -186,6 +231,7 @@ def export_ocean() -> dict:
     meta["mips"] = levels
     meta["slope_variance_removed"] = [round(float(v), 7) for v in removed]
     meta["slope_variance_temporal"] = [round(float(v), 7) for v in temporal]
+    meta["foam_near_gain"] = _foam_near_gain(planes, meta)
     (OCEAN_OUT / "meta.json").write_text(json.dumps(meta, indent=1))
     print(f"  {len(payload) / 1e6:.2f} MB gzipped, {levels} mips, loop "
           f"{meta['loop_s']:.1f} s, surface period {meta['surface_period_m']:.1f} m")

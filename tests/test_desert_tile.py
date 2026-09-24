@@ -43,27 +43,33 @@ def _const(name):
     return float(m.group(1))
 
 
+def _table(fn):
+    """The constants a switch accessor `fn(i)` returns for i = 0, 1, ...
+    (cases in order, then the default): floats, or rows for vec3s. The
+    shader keeps its tables as switches, never as runtime-indexed const
+    arrays, which inflate every entry point's registers."""
+    m = re.search(rf"fn {fn}\(i: i32\) -> [^{{]+\{{[^\n]*\n\s*switch i \{{"
+                  rf"(.*?)\n    \}}\n\}}", SHADER, re.S)
+    assert m, f"{fn} is not declared in raymarch.wgsl"
+    cases = re.findall(r"(?:case (\d+)|default): \{ return ([^;]+); \}",
+                       m.group(1))
+    assert [int(k) for k, _ in cases[:-1]] == list(range(len(cases) - 1))
+    vals = [v for _, v in cases]
+    if vals[0].startswith("vec3"):
+        return np.array([[float(x) for x in
+                          re.search(r"\(([^)]*)\)", v).group(1).split(",")]
+                         for v in vals])
+    return np.array([float(v) for v in vals])
+
+
 def test_the_shader_slope_table_is_the_tiles():
-    m = re.search(r"const DESERT_SLOPE_MAX = array<f32, (\d+)>\(([^)]*)\);",
-                  SHADER)
-    assert m, "DESERT_SLOPE_MAX is not declared in raymarch.wgsl"
-    table = [float(v) for v in m.group(2).replace("\n", " ").split(",")
-             if v.strip()]
-    assert int(m.group(1)) == len(table) == META["mips"]
-    assert table == META["slope_max"]
+    table = _table("desert_slope_max_at")
+    assert len(table) == META["mips"]
+    assert list(table) == META["slope_max"]
     assert _const("DESERT_OCTAVE_SLOPE_MAX") == META["band_slope_max"]
-    m = re.search(r"const DESERT_ENVELOPE_M = array<f32, (\d+)>\(([^)]*)\);",
-                  SHADER)
-    assert m, "DESERT_ENVELOPE_M is not declared in raymarch.wgsl"
-    env = [float(v) for v in m.group(2).replace("\n", " ").split(",")
-           if v.strip()]
-    assert env == META["envelope_m"]
-    m = re.search(r"const DESERT_SLOPE_VARIANCE_REMOVED = array<f32, (\d+)>"
-                  r"\(([^)]*)\);", SHADER)
-    assert m, "DESERT_SLOPE_VARIANCE_REMOVED is not declared in raymarch.wgsl"
-    var = [float(v) for v in m.group(2).replace("\n", " ").split(",")
-           if v.strip()]
-    assert var == META["slope_variance_removed"]
+    assert list(_table("desert_envelope_m_at")) == META["envelope_m"]
+    assert (list(_table("desert_slope_variance_removed_at"))
+            == META["slope_variance_removed"])
 
 
 def test_the_measured_numbers_are_the_bytes():
@@ -217,22 +223,8 @@ def test_the_far_field_colour_correction_is_the_tiles():
     lights = [_level(k)[..., 1] for k in range(META["mips"])]
     assert export_desert_tile.albedo_correction(lights) == \
         META["albedo_correction"]
-    body = re.search(r"const DESERT_ALBEDO_CORRECTION = array<vec3<f32>, 12>"
-                     r"\((.*?)\n\);", SHADER, re.S).group(1)
-    rows = [tuple(float(v) for v in r.split(","))
-            for r in re.findall(r"vec3<f32>\(([^)]*)\)", body)]
+    rows = [tuple(r) for r in _table("desert_albedo_correction_at")]
     assert rows == [tuple(r) for r in META["albedo_correction"]]
-
-
-def _array(name):
-    m = re.search(rf"const {name} = array<[^>]+>?, \d+>\((.*?)\);", SHADER, re.S)
-    assert m, f"{name} is not declared in raymarch.wgsl"
-    body = re.sub(r"//[^\n]*", "", m.group(1))
-    rows = re.findall(r"vec3<f32>\(([^)]*)\)", body)
-    if rows:
-        return np.array([[float(v) for v in r.split(",")] for r in rows])
-    return np.array([float(v) for v in body.replace("\n", " ").split(",")
-                     if v.strip()])
 
 
 def test_the_silt_between_resolved_stones_stays_warm():
@@ -240,7 +232,7 @@ def test_the_silt_between_resolved_stones_stays_warm():
     surface: the silt that keeps the footprint's mean must be a warm soil
     colour (R >= G >= B), and not propped up by the solve's floor. A stone
     mix redder than its surface drove the pavement's silt teal-grey."""
-    palette = _array("DESERT_STONE_PALETTE")
+    palette = _table("desert_stone_palette_at")
     area = _const("DESERT_STONE_AREA")
     gravel, pebble = _vec3("DESERT_STONE_P_GRAVEL"), _vec3("DESERT_STONE_P_PEBBLE")
     scale_gain = float(re.search(
@@ -250,7 +242,7 @@ def test_the_silt_between_resolved_stones_stays_warm():
     for name, m in surfaces.items():
         m = np.array(m, float)
         mean = np.array(_vec3(f"DESERT_ALBEDO_{name}"))
-        stones = _array(f"DESERT_STONE_MIX_{name}") @ palette
+        stones = _table(f"desert_stone_mix_{name.lower()}_at") @ palette
         a = area * (1.0 + scale_gain * m[0]) ** 2
         cover = min(1 - (1 - m @ gravel * a) * (1 - m @ pebble * a), 0.9)
         silt = (mean - cover * stones) / (1 - cover)

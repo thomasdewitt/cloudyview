@@ -542,6 +542,12 @@ export const QUALITY_PRESETS = {
             lightCache: true, skyProbe: false },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
+// The tiers that fly the simplified desert (raymarch.wgsl DESERT_LITE, a
+// compile-time specialization like the lighting method): no refine stage,
+// and each desert section's Low drops compiled out. Thomas, 2026-09-24:
+// the full desert at Medium and above, "a simplified but convincing desert"
+// at Low and Minimal. soar_host.DESERT_LITE_TIERS is the Python twin.
+export const DESERT_LITE_TIERS = ["low", "minimal"];
 // Cheapest first. This is the order the startup probe walks, and the order
 // matters for more than tidiness — see AUTO_TIER_COST_RATIO_TO_NEXT.
 // Max is deliberately absent: the probe walks this list, so a tier that is

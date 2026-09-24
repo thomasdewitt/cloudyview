@@ -222,7 +222,8 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
 export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
                                    toneMap = true, city = false,
-                                   desert = false, lightCache, skyProbe }) {
+                                   desert = false, desertLite = false,
+                                   lightCache, skyProbe }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
       `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
@@ -265,6 +266,16 @@ export function specializeShader(source,
   if (desert) {
     swaps.push(["const DESERT: bool = false;", "const DESERT: bool = true;"]);
   }
+  // The simplified desert, demanded (like CITY and DESERT) only when turned
+  // on, and only ever over a desert.
+  if (desertLite) {
+    if (!desert) {
+      throw new Error("desertLite without desert: the simplified desert is " +
+                      "a desert specialization.");
+    }
+    swaps.push(["const DESERT_LITE: bool = false;",
+                "const DESERT_LITE: bool = true;"]);
+  }
   let out = source;
   for (const [sentinel, replacement] of swaps) {
     const count = out.split(sentinel).length - 1;
@@ -288,7 +299,8 @@ export function specializeShader(source,
 export function shaderVariantKey(spec) {
   const surface = spec.city ? "city" : (spec.desert ? "desert" : "ocean");
   return [spec.periodic, spec.nested, spec.maxLightSteps, spec.toneMap,
-          surface, spec.lightCache, spec.skyProbe].join("|");
+          surface, Boolean(spec.desertLite), spec.lightCache,
+          spec.skyProbe].join("|");
 }
 
 export class Renderer {
@@ -965,7 +977,9 @@ export class Renderer {
    * (prepareSurface / commitSurface), which is why the surface is in every
    * key.
    */
-  _shaderSpec({ toneMap = true, lighting = this.lighting } = {}) {
+  _shaderSpec({ toneMap = true, lighting = this.lighting,
+                tier = this.qualityTier,
+                desertLite = this._desertLiteFor(tier) } = {}) {
     return {
       periodic: this.periodic,
       nested: Boolean(this.scene.nested),
@@ -973,6 +987,7 @@ export class Renderer {
       toneMap,
       city: Boolean(this.scene.city),
       desert: Boolean(this.scene.desert),
+      desertLite,
       lightCache: lighting.lightCache,
       skyProbe: lighting.skyProbe,
     };
@@ -992,9 +1007,19 @@ export class Renderer {
   }
 
   /** The march pipeline for `lighting` at the current specialization. */
-  _rayPipeline(targetFormat, lighting) {
+  _rayPipeline(targetFormat, lighting, tier = this.qualityTier) {
     return this._pipeline("fs_main", targetFormat,
-                          this._shaderSpec({ lighting }));
+                          this._shaderSpec({ lighting, tier }));
+  }
+
+  /**
+   * Whether `tier` flies the simplified desert (DESERT_LITE_TIERS): a
+   * specialization of the desert scene only, keyed on the tier like the
+   * lighting method, so captures (which set the parked tier) and prefetch
+   * (which walks the neighbouring tiers) pick the same variant flight does.
+   */
+  _desertLiteFor(tier) {
+    return Boolean(this.scene.desert) && K.DESERT_LITE_TIERS.includes(tier);
   }
 
   /** Whether this scene's opaque surface is traced by the pre-pass. */
@@ -1007,25 +1032,28 @@ export class Renderer {
    * as the march for `lighting` — same module, so no extra compile — or
    * null for a scene with no traced surface.
    */
-  _surfacePipeline(lighting) {
+  _surfacePipeline(lighting, tier = this.qualityTier) {
     if (!this._hasSurfacePass()) return null;
     return this._pipeline("fs_surface", [SURFACE_FORMAT, VEIL_FORMAT],
-                          this._shaderSpec({ lighting }));
+                          this._shaderSpec({ lighting, tier }));
   }
 
   /** Whether this scene's surface pass has a second stage
    *  (fs_surface_refine): the city (its facade shell over the plain boxes)
    *  and the desert (its near plants over the far forms). A surface joins by
    *  being named here and in soar_host's SURFACE_REFINE_SURFACES. */
-  _hasRefineStage() {
-    return Boolean(this.scene.city || this.scene.desert);
+  _hasRefineStage(tier = this.qualityTier) {
+    // The simplified desert has no second stage: it is compiled out of the
+    // shader, and the pass, its pipeline and its target are skipped here.
+    return Boolean(this.scene.city
+                   || (this.scene.desert && !this._desertLiteFor(tier)));
   }
 
   /** The second stage's pipeline (fs_surface_refine), or null. */
-  _refinePipeline(lighting) {
-    if (!this._hasRefineStage()) return null;
+  _refinePipeline(lighting, tier = this.qualityTier) {
+    if (!this._hasRefineStage(tier)) return null;
     return this._pipeline("fs_surface_refine", SURFACE_FORMAT,
-                          this._shaderSpec({ lighting }));
+                          this._shaderSpec({ lighting, tier }));
   }
 
   /** Whether this scene's surface pass has a street stage
@@ -1037,10 +1065,10 @@ export class Renderer {
   }
 
   /** The street stage's pipeline (fs_surface_street), or null. */
-  _streetPipeline(lighting) {
+  _streetPipeline(lighting, tier = this.qualityTier) {
     if (!this._hasStreetStage()) return null;
     return this._pipeline("fs_surface_street", [SURFACE_FORMAT, VEIL_FORMAT],
-                          this._shaderSpec({ lighting }));
+                          this._shaderSpec({ lighting, tier }));
   }
 
   /**
@@ -1134,11 +1162,11 @@ export class Renderer {
         try {
           // A promise while compiling: its rejection is recorded (and
           // logged) by _rayPipeline itself, so the prefetch just lets go.
-          const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
+          const p = this._rayPipeline(SAMPLE_FORMAT, lighting, tier);
           if (isPending(p)) p.catch(() => {});
-          for (const sp of [this._surfacePipeline(lighting),
-                            this._refinePipeline(lighting),
-                            this._streetPipeline(lighting)]) {
+          for (const sp of [this._surfacePipeline(lighting, tier),
+                            this._refinePipeline(lighting, tier),
+                            this._streetPipeline(lighting, tier)]) {
             if (sp && isPending(sp)) sp.catch(() => {});
           }
         } catch {
@@ -1637,10 +1665,28 @@ export class Renderer {
     let marchGroup = this.surfaceDummyGroup;
     if (surfaces.surface) {
       const surface = targets.surface;
-      // Stage by stage (see _ensureSurfaceTarget): each later stage reads
-      // the one before at group 1, the last writes the surface the march
-      // reads, and the first and last write the veil beside it.
-      for (const [name, group1, views] of surface.stages) {
+      // The stages this frame runs (the simplified desert has no
+      // refinement): each later stage reads the one before at group 1, the
+      // last writes the surface the march reads, and the first and last
+      // write the veil beside it. No stage binds what it writes.
+      let out = surface.view;
+      let after = null;
+      if (surfaces.refine || surfaces.street) {
+        out = surface.plainView;
+        after = surface.afterPlain;
+      }
+      const stages = [[surfaces.surface, null, [out, surface.veilView]]];
+      if (surfaces.refine) {
+        const [o, next] = surfaces.street
+          ? [surface.midView, surface.afterMid] : [surface.view, null];
+        stages.push([surfaces.refine, after, [o]]);
+        after = next;
+      }
+      if (surfaces.street) {
+        stages.push([surfaces.street, after,
+                     [surface.view, surface.veilView]]);
+      }
+      for (const [pipeline, group1, views] of stages) {
         const sp = encoder.beginRenderPass({
           colorAttachments: views.map((view, k) => ({
             view, loadOp: "clear", storeOp: "store",
@@ -1648,7 +1694,7 @@ export class Renderer {
                                 : { r: 0, g: 0, b: 0, a: 0 },
           })),
         });
-        sp.setPipeline(surfaces[name]);
+        sp.setPipeline(pipeline);
         sp.setBindGroup(0, rayBindGroup);
         sp.setBindGroup(1, group1 ?? this.surfaceDummyGroup);
         sp.draw(3);
@@ -1680,24 +1726,27 @@ export class Renderer {
    */
   async _ensureSurfaceTarget(targets) {
     if (!this._hasSurfacePass()) return;
-    const refine = this._hasRefineStage();
-    const street = this._hasStreetStage();
-    const shape = `${refine}|${street}`;
+    // Every target a stage of this surface can write at ANY tier (the
+    // desert drops its refinement at the low tiers), so a tier change never
+    // reallocates: the plain surface wherever a later stage exists, the
+    // middle one where a refinement and a street stage both do.
+    const later = this._hasRefineStage("max") || this._hasStreetStage();
+    const both = this._hasRefineStage("max") && this._hasStreetStage();
+    const shape = `${later}|${both}`;
     if (targets.surface && targets.surface.shape === shape) return;
     if (targets.surface) {
-      // Made for a surface with other stages (ocean -> desert -> city):
-      // retired once the GPU is done with any frame that still reads it.
+      // Made for another surface (ocean -> desert -> city): retired once the
+      // GPU is done with any frame that still reads it.
       for (const tex of targets.surface.textures) {
         retireAfterSubmittedWork(this.device, tex);
       }
       targets.surface = null;
     }
     const label = `soar-surface-${targets.w}x${targets.h}`;
-    const later = refine || street;
-    const count = 1 + (later ? 1 : 0) + (refine && street ? 1 : 0);
+    const count = 2 + (later ? 1 : 0) + (both ? 1 : 0);
     targets.surface = await guardAllocation(
       this.device, `${targets.w}x${targets.h} surface target`,
-      targets.w * targets.h * 16 * (count + 1), () => {
+      targets.w * targets.h * 16 * count, () => {
         const make = (name, format) => this.device.createTexture({
           label: `${label}-${name}`, size: [targets.w, targets.h], format,
           usage: GPUTextureUsage.RENDER_ATTACHMENT
@@ -1705,7 +1754,8 @@ export class Renderer {
         });
         const tex = make("final", SURFACE_FORMAT);
         const veil = make("veil", VEIL_FORMAT);
-        const textures = [tex, veil];
+        const plain = later ? make("plain", SURFACE_FORMAT) : null;
+        const mid = both ? make("mid", SURFACE_FORMAT) : null;
         const dummy = this._surfaceDummy.createView();
         const veilDummy = this._veilDummy.createView();
         const group1 = (final, prev, veilView) => this.device.createBindGroup({
@@ -1714,29 +1764,18 @@ export class Renderer {
                     { binding: 1, resource: prev },
                     { binding: 2, resource: veilView }],
         });
-        // The stages, in order: [which pipeline, its group 1 (null: the
-        // stand-in), the views it writes]. Each later stage reads the one
-        // before at binding 1; no stage binds what it writes.
-        const stages = [];
-        let out = tex;
-        if (later) {
-          out = make("plain", SURFACE_FORMAT);
-          textures.push(out);
-        }
-        stages.push(["surface", null, [out.createView(), veil.createView()]]);
-        if (refine) {
-          const prev = out;
-          out = street ? make("mid", SURFACE_FORMAT) : tex;
-          if (street) textures.push(out);
-          stages.push(["refine", group1(dummy, prev.createView(), veilDummy),
-                       [out.createView()]]);
-        }
-        if (street) {
-          stages.push(["street", group1(dummy, out.createView(), veilDummy),
-                       [tex.createView(), veil.createView()]]);
-        }
         return {
-          shape, tex, textures, stages,
+          shape,
+          tex,
+          textures: [tex, veil, plain, mid].filter(Boolean),
+          view: tex.createView(),
+          veilView: veil.createView(),
+          plainView: plain?.createView() ?? null,
+          midView: mid?.createView() ?? null,
+          // Group 1 for a stage reading the plain or the middle surface.
+          afterPlain: plain ? group1(dummy, plain.createView(), veilDummy)
+                            : null,
+          afterMid: mid ? group1(dummy, mid.createView(), veilDummy) : null,
           // The march reads the final surface and the veil.
           group: group1(tex.createView(), dummy, veil.createView()),
         };
@@ -2001,8 +2040,11 @@ export class Renderer {
    * a second bake pipeline identical to the first.
    */
   _bakePipeline() {
+    // fs_bake_light reads neither the lighting method nor the desert's
+    // detail, so it is built on one fixed variant of each.
     return this._pipeline("fs_bake_light", "r16float",
-                          this._shaderSpec({ lighting: BAKE_LIGHTING }));
+                          this._shaderSpec({ lighting: BAKE_LIGHTING,
+                                             desertLite: false }));
   }
 
 

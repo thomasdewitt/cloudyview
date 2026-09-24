@@ -47,7 +47,7 @@ sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
-    desert_relief_m, surface_cell_m, surface_period_m,
+    DESERT_LITE_TIERS, desert_relief_m, surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
@@ -78,61 +78,55 @@ def load_case(name, demos: Path):
 
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
-    """GPU ms of `frames` consecutive frames as (surface, march) arrays: the
-    surface stages summed (fs_surface, fs_surface_refine, fs_surface_street
-    — whichever the scene has; zeros in a scene with none) and the ray pass
-    (fs_main), a timestamp pair per pass, encoded as SoarRenderer.render
-    encodes them."""
+    """GPU ms of `frames` consecutive frames as (surface, refine, street,
+    march) arrays, every stage encoded exactly as SoarRenderer.render encodes
+    it (SoarRenderer._surface_stages): the surface pre-pass (fs_surface), its
+    refinement (fs_surface_refine) and the city's street stage
+    (fs_surface_street) — whichever the view has — then the march
+    (fs_main). A stage the view does not have reads as zeros. One timestamp
+    pair per pass actually encoded: resolving a query no pass wrote fails
+    validation, and the readback below then never maps."""
     import wgpu
     device = renderer.device
     targets = renderer._ensure_targets(view.render_size)
     bind_group = renderer._ensure_bind_group()
     sample_view = targets["sample"].create_view()
-    stage_pipelines = {"surface": renderer._surface_pipeline_for(view),
-                       "refine": renderer._refine_pipeline_for(view),
-                       "street": renderer._street_pipeline_for(view)}
-    stages = targets["stages"]
-    # One timestamp pair per pass actually encoded: resolving a query no
-    # pass wrote fails validation, and the readback below then never maps.
-    per = 2 + 2 * len(stages)
+    names = []
+    if renderer._surface_pipeline_for(view) is not None:
+        names.append("surface")
+        if renderer._refine_pipeline_for(view) is not None:
+            names.append("refine")
+        if renderer._street_pipeline_for(view) is not None:
+            names.append("street")
+    stages = [(name, pipeline, group1, writes) for name, (pipeline, group1,
+              writes) in zip(names, renderer._surface_stages(targets, view))]
+    stages.append(("march", renderer._ray_pipeline_for(view),
+                   targets["surface_group"], [targets["sample"]]))
+    per = 2 * len(stages)
     for i in range(frames):
         pass_view = ViewState(**{**view.__dict__, "frame_index": i,
                                  "subpixel": i >= 1})
         device.queue.write_buffer(renderer._uniform_buf, 0,
                                   pack_uniforms(state, pass_view).tobytes())
         enc = device.create_command_encoder()
-        for k, (name, group1, writes) in enumerate(stages):
-            sp = enc.begin_render_pass(
-                color_attachments=[
-                    {"view": tex.create_view(), "load_op": "clear",
-                     "store_op": "store",
-                     "clear_value": ((0.0, 0.0, 0.0, 1e30) if j == 0
-                                     else (0, 0, 0, 0))}
-                    for j, tex in enumerate(writes)],
-                timestamp_writes={
-                    "query_set": query_set,
-                    "beginning_of_pass_write_index": per * i + 2 + 2 * k,
-                    "end_of_pass_write_index": per * i + 3 + 2 * k})
-            sp.set_pipeline(stage_pipelines[name])
-            sp.set_bind_group(0, bind_group)
+        for k, (name, pipeline, group1, writes) in enumerate(stages):
+            clear = ((0.0, 0.0, 0.0, 1.0) if name == "march"
+                     else (0.0, 0.0, 0.0, 1e30))
+            rp = enc.begin_render_pass(
+                color_attachments=[{"view": tex.create_view(),
+                                    "load_op": "clear", "store_op": "store",
+                                    "clear_value": clear if j == 0
+                                    else (0, 0, 0, 0)}
+                                   for j, tex in enumerate(writes)],
+                timestamp_writes={"query_set": query_set,
+                                  "beginning_of_pass_write_index": per * i + 2 * k,
+                                  "end_of_pass_write_index": per * i + 2 * k + 1})
+            rp.set_pipeline(pipeline)
+            rp.set_bind_group(0, bind_group)
             if group1 is not None:
-                sp.set_bind_group(1, group1)
-            sp.draw(3)
-            sp.end()
-        rp = enc.begin_render_pass(
-            color_attachments=[{"view": sample_view, "load_op": "clear",
-                                "store_op": "store",
-                                "clear_value": (0.0, 0.0, 0.0, 1.0)}],
-            timestamp_writes={"query_set": query_set,
-                              "beginning_of_pass_write_index": per * i,
-                              "end_of_pass_write_index": per * i + 1})
-        rp.set_pipeline(renderer._ray_pipeline_for(view))
-        rp.set_bind_group(0, bind_group)
-        # Group 1: the surface pre-pass's target, or its stand-in — every
-        # march pipeline declares it since the surface pass landed.
-        rp.set_bind_group(1, targets["surface_group"])
-        rp.draw(3)
-        rp.end()
+                rp.set_bind_group(1, group1)
+            rp.draw(3)
+            rp.end()
         device.queue.submit([enc.finish()])
     enc = device.create_command_encoder()
     enc.resolve_query_set(query_set, 0, per * frames, query_buf, 0)
@@ -145,11 +139,11 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     ts = np.frombuffer(bytearray(readback.read_mapped()), np.uint64)
     readback.unmap()
     ts = ts.astype(np.float64).reshape(frames, per)
-    march = (ts[:, 1] - ts[:, 0]) * 1e-6         # WebGPU timestamps are ns
-    surface = np.zeros(frames)
-    for k in range(len(stages)):
-        surface += (ts[:, 3 + 2 * k] - ts[:, 2 + 2 * k]) * 1e-6
-    return surface, march
+    out = {name: np.zeros(frames)
+           for name in ("surface", "refine", "street", "march")}
+    for k, (name, *_rest) in enumerate(stages):
+        out[name] = (ts[:, 2 * k + 1] - ts[:, 2 * k]) * 1e-6   # ns -> ms
+    return out["surface"], out["refine"], out["street"], out["march"]
 
 
 def main():
@@ -177,7 +171,6 @@ def main():
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync(required_features=["timestamp-query"])
-    # Room for the march and up to three surface stages a frame.
     query_set = device.create_query_set(type="timestamp", count=8 * args.frames)
     query_buf = device.create_buffer(
         size=64 * args.frames,
@@ -235,32 +228,41 @@ def main():
                     azimuth=v["azimuth"], elevation=v["elevation"],
                     fov=v["fov"], output_size=OUTPUT, render_size=size,
                     light_cache=tier["light_cache"],
-                    sky_probe=tier["sky_probe"], **sun)
+                    sky_probe=tier["sky_probe"],
+                    # The simplified desert at the tiers the app flies it.
+                    desert_lite=(args.surface == "desert"
+                                 and tier_name in DESERT_LITE_TIERS),
+                    **sun)
                 if tier["light_cache"] and not baked:
                     for r in renderers:
                         r.bake_light_cache(state, view,
                                            divisor=LIGHT_CACHE_DIVISOR)
                     baked = True
                 surf = [[] for _ in renderers]
+                refine = [[] for _ in renderers]
+                street = [[] for _ in renderers]
                 march = [[] for _ in renderers]
                 for rnd in range(args.rounds):
                     for k, r in enumerate(renderers):
-                        ds, dm = pass_times_ms(r, state, view, args.frames,
-                                               query_set, query_buf)
+                        ds, dr, dt, dm = pass_times_ms(
+                            r, state, view, args.frames, query_set, query_buf)
                         if rnd > 0 or args.rounds == 1:
                             surf[k].extend(ds)
+                            refine[k].extend(dr)
+                            street[k].extend(dt)
                             march[k].extend(dm)
-                meds = [float(np.median(np.add(a, b)))
-                        for a, b in zip(surf, march)]
+                meds = [float(np.median(np.add(np.add(a, b), np.add(c, d))))
+                        for a, b, c, d in zip(surf, refine, street, march)]
                 line = f"{case:10s} {tier_name:8s} {view_name:4s} " + " ".join(
                     f"{m:9.3f}" for m in meds)
                 if len(meds) > 1:
                     line += "  " + " ".join(f"{m / meds[0]:12.3f}"
                                             for m in meds[1:])
                 if args.surface != "ocean":
-                    line += "   [surface+march " + ", ".join(
+                    line += "   [surface+refine+street+march " + ", ".join(
                         f"{np.median(a):.3f}+{np.median(b):.3f}"
-                        for a, b in zip(surf, march)) + "]"
+                        f"+{np.median(c):.3f}+{np.median(d):.3f}"
+                        for a, b, c, d in zip(surf, refine, street, march)) + "]"
                 print(line, flush=True)
         for r in renderers:
             r._vol_tex.destroy()

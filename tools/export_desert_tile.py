@@ -372,9 +372,9 @@ def relief_stats(heights: list) -> dict:
     """What the shader's slab tests and clearance stepping are built from.
 
     slope_max: the steepest one-texel slope at each mip level, a quarter
-    again for safety (raymarch.wgsl DESERT_SLOPE_MAX copies it). band_max_m
-    and band_slope_max: the largest excursion and slope of the band an
-    octave adds — the tile minus itself read log2(5) levels up, trilinear,
+    again for safety (raymarch.wgsl desert_slope_max_at copies it).
+    band_max_m and band_slope_max: the largest excursion and slope of the
+    band an octave adds — the tile minus itself read log2(5) levels up, trilinear,
     exactly as desert_surface computes it.
     """
     n = heights[0].shape[0]
@@ -410,7 +410,7 @@ def relief_stats(heights: list) -> dict:
     # slope_variance_removed: mean squared slope (central differences) at
     # level 0 minus the same at level k — what the far field's filtered
     # normal no longer carries, and what the shader puts back as shadowing
-    # on the direct beam (raymarch.wgsl DESERT_SLOPE_VARIANCE_REMOVED).
+    # on the direct beam (raymarch.wgsl desert_slope_variance_removed_at).
     msq = []
     for k, h in enumerate(heights):
         dx = cell * 2 ** k
