@@ -2620,18 +2620,24 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let t_sun_ocean = exp(-tau_ocean);
     let n_dot_l = max(0.0, dot(sun, n));
 
-    // Direct-sun GGX glint, tinted by the spectral beam color. Filtering
-    // removes unresolved slope variance; alpha widening folds it back into a
-    // broader stable highlight instead of point-sample sparkles.
+    // Direct-sun GGX glint, tinted by the spectral beam color, about the
+    // footprint's RESOLVED mean normal with all the unresolved variance in
+    // the lobe — not about the per-frame slope draw. The glitter draw below
+    // is already the unresolved facets' own statistics; evaluating it at a
+    // random draw as well smeared the sparkles evenly over the sea, where
+    // real glitter clusters on the wave faces tilted to the sun.
+    let n_g = normalize(vec3<f32>(-sea.slope, 1.0));
+    let n_g_dot_l = max(0.0, dot(sun, n_g));
+    let n_g_dot_v = clamp(-dot(dir, n_g), 0.0, 1.0);
     let glint_weight = ocean_realism * glint_strength;
     var glint = vec3<f32>(0.0);
     var sun_fresnel = 0.02;
-    if (glint_weight > 0.0 && n_dot_l > 0.0 && n_dot_v > 1e-8) {
+    if (glint_weight > 0.0 && n_g_dot_l > 0.0 && n_g_dot_v > 1e-8) {
         var hv = sun - dir;
         let hv_len = length(hv);
         if (hv_len > 1e-8) {
             hv = hv / hv_len;
-            let n_dot_h = dot(n, hv);
+            let n_dot_h = dot(n_g, hv);
             if (n_dot_h > 0.0) {
                 let v_dot_h = clamp(dot(-dir, hv), 0.0, 1.0);
                 let one_minus_vh = 1.0 - v_dot_h;
@@ -2639,22 +2645,20 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
                 // Base roughness is what lives BELOW the detail octave's
-                // 5 cm — capillary ripple no tile holds — plus
-                // whatever share of the filtered-away variance the slope draw
-                // did not take. Variances add; roughnesses do not.
+                // 5 cm — capillary ripple no tile holds — plus all the
+                // filtered-away variance. Variances add; roughnesses do not.
                 let alpha = clamp(
-                    sqrt(glint_roughness * glint_roughness
-                         + (1.0 - slope_draw_fraction) * sea.variance),
+                    sqrt(glint_roughness * glint_roughness + sea.variance),
                     0.02, 0.75
                 );
                 let alpha_squared = alpha * alpha;
                 let denom = n_dot_h * n_dot_h * (alpha_squared - 1.0) + 1.0;
                 let d_ggx = alpha_squared
                     / (3.14159265358979 * denom * denom);
-                let g_smith = ggx_smith_g1(n_dot_v, alpha_squared)
-                    * ggx_smith_g1(n_dot_l, alpha_squared);
+                let g_smith = ggx_smith_g1(n_g_dot_v, alpha_squared)
+                    * ggx_smith_g1(n_g_dot_l, alpha_squared);
                 let spec = glint_weight * t_sun_ocean * d_ggx * g_smith
-                    * sun_fresnel / (4.0 * n_dot_v);
+                    * sun_fresnel / (4.0 * n_g_dot_v);
                 // Glitter (see SEA_GLITTER_*): the lobe drawn as the facets
                 // that actually catch the disc.
                 let lambda = sea.glitter_facets * d_ggx * n_dot_h
