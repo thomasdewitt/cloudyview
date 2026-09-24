@@ -52,6 +52,7 @@ from cloudyview.soar_host import (                          # noqa: E402
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
 from soar_shader_ab import source_for                       # noqa: E402
+from gpu_idle import check_quiet, clock_mode, require_idle  # noqa: E402
 
 OUTPUT = (2560, 1440)
 LIGHT_CACHE_DIVISOR = 2       # web/soar/constants.js
@@ -170,6 +171,8 @@ def main():
                     help="round-robin blocks per variant; the first is warmup")
     args = ap.parse_args()
 
+    # One GPU, many sessions: start only on an idle card (gpu_idle.py).
+    require_idle()
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync(required_features=["timestamp-query"])
@@ -185,6 +188,7 @@ def main():
           f"{OUTPUT[0]}x{OUTPUT[1]}")
     for name, spec in variants:
         print(f"  {name} = {spec}")
+    print(f"  clocks: {clock_mode()}")
     header = f"{'case':10s} {'tier':8s} {'view':4s} " + " ".join(
         f"{n:>9s}" for n in names)
     if len(names) > 1:
@@ -266,6 +270,7 @@ def main():
                 print(line, flush=True)
         for r in renderers:
             r._vol_tex.destroy()
+    check_quiet()
 
 
 if __name__ == "__main__":
