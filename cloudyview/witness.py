@@ -47,6 +47,7 @@ from .cloudfield import CloudField, load as _load_field
 from .look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
 from .soar_host import (
     APP_LIGHT_MARCH_LOD_DEGREES,
+    DESERT_LITE_TIERS,
     APP_VIEW_STEP_LOD_DEGREES,
     DEFAULT_HAZE_HEIGHT_DEPENDENT,
     DEFAULT_LOD_STRENGTH,
@@ -429,6 +430,8 @@ def render_nested(
         view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
         light_cache=bool(tier and tier["light_cache"]),
         sky_probe=(tier["sky_probe"] if tier else True),
+        # The simplified desert flies at the tiers the app keys it on.
+        desert_lite=bool(surface == "desert" and quality in DESERT_LITE_TIERS),
         scene_time=float(scene_time),
     )
     if tier and tier["light_cache"]:
