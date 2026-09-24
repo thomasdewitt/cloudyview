@@ -9,38 +9,42 @@ Every view is rendered twice — at BEFORE (default: the start of the
 2026-09-23/24 realism push, 3fc2eea) and at AFTER (default: HEAD) — by each
 revision's OWN code: the ref is exported with `git archive` into
 temp/contact/trees/<sha>/ and a subprocess puts that tree first on sys.path
-(and checks it did) before running the tree's `witness` CLI or its
-tools/night_city_harness.py. That is the point of doing it this way rather
-than swapping shaders under one host (tools/soar_shader_ab.py): across a day
-of work the hosts, bindings and tiles moved too, and only a revision's own
-code renders what that revision looked like.
+(and checks it did) before calling the tree's own renderer. That is the
+point of doing it this way rather than swapping shaders under one host
+(tools/soar_shader_ab.py): across a day of work the hosts, bindings and
+tiles moved too, and only a revision's own code renders what that revision
+looked like.
 
-The views are fixed, so a later run compares like with like:
+The clouds are the app's own prebaked demos (web/soar/demos), loaded by each
+tree's tools/benchmarking/soar_frame_bench.build_level_from_demo, and
+rendered periodic as the app flies them. Only the small periodic demos are
+used: a field that is not periodic (the TWP-ICE subvolume) shows its wrap
+seams as hard cloud edges.
 
-  * ocean — `witness` over the TWP-ICE 256^2 subvolume: glitter toward a low
-    sun, mid-altitude whitecaps, an aerial, and one close view at two scene
-    clocks (a revision without the clock renders it once, marked so).
-  * city — the night-city harness in cyberpunk mode's frame (its tile
-    offset and moon, web/soar/constants.js), cameras in city-tile metres so
-    they name the same streets whatever field stands over the tile.
-  * desert — `witness --surface desert`, the full ground (--quality high)
-    beside the LITE ground (--quality low, as the app flies its low tiers).
-    A revision without the desert shows "n/a".
+  * ocean — the tree's witness.render_nested over marine-congestus-coarse:
+    glitter toward a low sun, whitecaps at 120 m, an aerial, one close view
+    at two scene clocks (a tree without the clock renders it once, marked).
+  * city — the tree's tools/night_city_harness.py (its NetCDF loader swapped
+    for the demo loader) in cyberpunk mode's frame: its tile offset and moon
+    (web/soar/constants.js), cameras in city-tile metres so they name the
+    same streets whatever field stands over the tile.
+  * desert — render_nested over desert-coarse at desert-ground's proof
+    cameras, the full ground (quality high) beside the LITE ground (quality
+    low, as the app flies its low tiers). A tree without the desert: "n/a".
 
-Cameras are world metres (x, y as fractions of the field's box, z absolute
-metres above sea level) and are converted to each revision's own relative
-frame with that revision's own field box. Renders are deterministic (fixed
-exposure, frame index from 0) and cached per commit under
-temp/contact/renders/<sha>/, so a re-run only renders what changed;
-`--after tree` renders the working tree and is never cached. Outputs go to
-temp/contact/ on disk, never /tmp. Run it under tools/gpulock: it holds the
-GPU for the whole sheet.
+Cameras are world metres (the city's: city-tile metres). Renders are
+deterministic (fixed exposure, frame index from 0) and cached per commit and
+per view definition under temp/contact/renders/, so a re-run renders only
+what changed; `--after tree` renders the working tree, uncached. Outputs go
+to temp/contact/ on disk, never /tmp. Run it under tools/gpulock: it holds
+the GPU for the whole sheet.
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import shutil
 import subprocess
@@ -53,7 +57,7 @@ from typing import Optional
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "temp" / "contact"
-FIELD = REPO / "data" / "TWPICE_subvolume_256x256_5km.nc"
+DEMOS = REPO / "web" / "soar" / "demos"
 DEFAULT_BEFORE = "3fc2eea"
 SIZE = (960, 540)
 CELL = (640, 360)          # each render's size on the sheet
@@ -73,63 +77,64 @@ STREET_X = 17370.0
 class View:
     name: str
     label: str
-    kind: str                       # "witness" or "harness"
-    # witness: (x_frac, y_frac, z_m, azimuth, elevation, fov, sun_az, sun_el)
+    kind: str                # "nested" (render_nested) or "harness"
+    demo: str                # web/soar/demos/<demo>
+    # nested: (x_m, y_m, z_m, azimuth, elevation, fov, sun_az, sun_el)
     # harness: (city_x_m, city_y_m, z_m, azimuth, elevation, fov)
     camera: tuple
-    flags: tuple = ()               # extra CLI flags
-    # CLI flags a revision must have to render this view at all ("n/a"
-    # otherwise), and flags it may lack and render without (marked).
+    # nested: render_nested keyword arguments, as pairs; harness: CLI flags.
+    args: tuple = ()
+    # render_nested arguments a tree must take to render the view at all
+    # ("n/a" otherwise), and ones it may lack and render without (marked).
     needs: tuple = ()
     optional: tuple = ()
-    # witness only: camera x, y are world metres, not fractions of the box,
-    # on a surface that repeats every fold_m — folded into the field's box.
-    fold_m: Optional[float] = None
 
 
-def _witness(name, label, cam, flags=(), needs=(), optional=()):
-    return View(name, label, "witness", cam, tuple(flags), tuple(needs),
-                tuple(optional))
+OCEAN_DEMO = "marine-congestus-coarse"
+DESERT_DEMO = "desert-coarse"
+CITY_DEMO = "marine-congestus-coarse"
+DESERT_SUN = (0.0, 45.5)     # desert-coarse's own sun
+# The clearest 3 km of marine-congestus-coarse (1.5 % of its columns past
+# optical depth 0.3; the field as a whole is half cloud): the ocean views
+# stand here so the sea is in sun, not under a deck.
+OCEAN_CLEAR = (17105.0, 1405.0)
 
 
-# The desert tile folds at 4096 m under a zero surface offset, so any
-# world xy is the same ground 4096 m on — which lets desert-ground's proof
-# cameras (flown over the 51 km desert-coarse demo) be folded into the 5.1 km
-# subvolume's box, over the same stones. z stays absolute: the ground's own
-# height plus the AGL they were placed at.
-DESERT_FOLD_M = 4096.0
-DESERT_SUN = (0.0, 45.5)            # the desert-coarse demo's sun
+def _ocean(name, label, cam, **kw):
+    return View(name, label, "nested", OCEAN_DEMO, cam,
+                tuple(sorted({"quality": "high", **kw}.items())),
+                optional=tuple(k for k in kw if k == "scene_time"))
 
 
 def _desert(name, label, x, y, z, az, el, fov, sun=DESERT_SUN):
-    return View(name, label, "witness", (x, y, z, az, el, fov, *sun),
-                ("--surface", "desert"), needs=("--surface",),
-                fold_m=DESERT_FOLD_M)
+    return View(name, label, "nested", DESERT_DEMO,
+                (x, y, z, az, el, fov, *sun),
+                (("surface", "desert"),), needs=("surface",))
 
 
 def _city(name, label, cam):
-    return View(name, label, "harness", cam,
+    return View(name, label, "harness", CITY_DEMO, cam,
                 ("--city-offset", *map(str, CITY_OFFSET),
                  "--moon", *map(str, CITY_MOON)))
 
 
 SCENES = {
     "ocean": [
-        _witness("glitter_low_sun", "glitter toward a low sun, 30 m",
-                 (0.30, 0.10, 30.0, 250.0, -6.0, 70.0, 250.0, 10.0),
-                 ["--quality", "high"]),
-        _witness("whitecaps_mid", "whitecaps, 120 m, looking down",
-                 (0.30, 0.10, 120.0, 100.0, -35.0, 70.0, 20.0, 55.0),
-                 ["--quality", "high"]),
-        _witness("aerial", "aerial, 2.5 km",
-                 (0.30, 0.10, 2500.0, 20.0, -40.0, 70.0, 20.0, 50.0),
-                 ["--quality", "high"]),
-        _witness("motion_t0", "close sea, scene clock 0 s",
-                 (0.30, 0.10, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0),
-                 ["--quality", "high", "--time", "0"], optional=["--time"]),
-        _witness("motion_t2", "close sea, scene clock 2 s",
-                 (0.30, 0.10, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0),
-                 ["--quality", "high", "--time", "2"], optional=["--time"]),
+        _ocean("glitter_low_sun", "glitter toward a low sun, 30 m",
+               (*OCEAN_CLEAR, 30.0, 250.0, -6.0, 70.0, 250.0, 10.0)),
+        _ocean("whitecaps_mid", "whitecaps, 120 m, looking down",
+               (*OCEAN_CLEAR, 120.0, 100.0, -35.0, 70.0, 20.0, 55.0)),
+        # Above the congestus tops (3.9 km), 3.5 km back along its azimuth
+        # (20 degrees) so that 55 degrees down it sees the clear patch.
+        _ocean("aerial", "aerial, 5 km, above the tops",
+               (OCEAN_CLEAR[0] - 1197.0, OCEAN_CLEAR[1] - 3289.0, 5000.0,
+                20.0, -55.0, 70.0, 20.0, 50.0)),
+        _ocean("motion_t0", "close sea, scene clock 0 s",
+               (*OCEAN_CLEAR, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0),
+               scene_time=0.0),
+        _ocean("motion_t2", "close sea, scene clock 2 s",
+               (*OCEAN_CLEAR, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0),
+               scene_time=2.0),
     ],
     "city": [
         _city("skyline", "skyline from 3.5 km, 250 m up",
@@ -145,24 +150,21 @@ SCENES = {
         _city("facade", "facade close-up, from the street at 25 m",
               (STREET_X + 6.0, 61500.0, 25.0, 285.0, 15.0, 55.0)),
     ],
-    # desert-ground's proof cameras (2026-09-24): one spot on a wash, the
-    # ground there at 2.572 m, seen from 300, 30 and 5 m and under a low
-    # sun; and a pavement close-up elsewhere.
+    # desert-ground's proof cameras (2026-09-24), over their field: one spot
+    # on a wash, the ground there at 2.572 m, seen from 300, 30 and 5 m and
+    # under a low sun; and a pavement close-up elsewhere.
     "desert": [
         _desert("alt300", "300 m", 7465.14, 34082.99, 302.572, 250, -20, 80),
         _desert("alt30", "30 m", 7465.14, 34082.99, 32.572, 250, -10, 80),
         _desert("alt5", "5 m", 7465.14, 34082.99, 7.572, 250, -4, 80),
         _desert("pavement", "desert pavement close-up, 1.5 m",
                 8421.04, 32708.78, 5.876, 270, -35, 70),
-        # desert-ground's low sun came from 240; over this field that puts
-        # the spot in a cloud's shadow, so the sun here is at 60 (same 18).
-        _desert("low_sun", "low sun (60/18), 12 m",
-                7465.14, 34082.99, 14.572, 330, -3, 80, sun=(60.0, 18.0)),
+        _desert("low_sun", "low sun (240/18), 12 m",
+                7465.14, 34082.99, 14.572, 330, -3, 80, sun=(240.0, 18.0)),
     ],
 }
 # The desert's two columns: the same view, full ground and LITE ground.
-DESERT_VARIANTS = (("full (high)", ["--quality", "high"]),
-                   ("LITE (low)", ["--quality", "low"]))
+DESERT_VARIANTS = (("full (high)", "high"), ("LITE (low)", "low"))
 
 
 # --- trees -----------------------------------------------------------------
@@ -185,8 +187,10 @@ def tree_for(sha: str) -> Path:
     root = OUT / "trees" / sha[:12]
     if (root / ".complete").exists():
         return root
+    if root.is_symlink():
+        raise SystemExit(f"contact_sheet: {root} is a symlink; not touching it.")
     if root.exists():
-        shutil.rmtree(root)              # a half-written export, never a link
+        shutil.rmtree(root)              # a half-written export
     root.mkdir(parents=True)
     print(f"contact_sheet: exporting {sha[:12]} to {root}", flush=True)
     archive = subprocess.run(["git", "archive", "--format=tar", sha],
@@ -200,107 +204,115 @@ def tree_for(sha: str) -> Path:
     return root
 
 
-def has_flag(tree: Path, script: str, flag: str) -> bool:
-    """Whether the revision's CLI declares `flag`."""
-    return f'"{flag}"' in (tree / script).read_text()
-
-
 # --- one render ------------------------------------------------------------
 
-_WITNESS = textwrap.dedent("""
-    import sys, json
-    tree, field, out, cam, flags, fold = json.loads(sys.argv[1])
+# Shared by both workers: the tree first on sys.path, and its own demo loader.
+_PRELUDE = textwrap.dedent("""
+    import sys, json, importlib.util
+    job = json.loads(sys.argv[1])
+    tree = job["tree"]
     sys.path.insert(0, tree)
     import cloudyview
     if not cloudyview.__file__.startswith(tree):
         raise SystemExit(f"imported {cloudyview.__file__}, not the tree {tree}")
-    from cloudyview.cloudfield import load
-    from cloudyview.witness import _field_level, cli
-    level = _field_level(load(field), "single", verbose=False)
-    bmin, bmax = level.bmin, level.bmax
-    fx, fy, z, az, el, fov, saz, sel = cam
-    if fold is not None:
-        # The same ground, fold metres on at a time, inside the box.
-        fx, fy = (float(lo) + (v - float(lo)) %% fold for v, lo in
-                  zip((fx, fy), bmin[:2]))
-        if any(v > float(hi) for v, hi in zip((fx, fy), bmax[:2])):
-            raise SystemExit(f"the field's box is narrower than the "
-                             f"surface's {fold} m fold")
-        fx = (fx - float(bmin[0])) / (float(bmax[0]) - float(bmin[0]))
-        fy = (fy - float(bmin[1])) / (float(bmax[1]) - float(bmin[1]))
-    rel = [2.0 * fx - 1.0, 2.0 * fy - 1.0, 2.0 * z / float(bmax[2]) - 1.0]
-    sys.argv = ["witness", field, "--output", out,
-                "--camera-position", *map(str, rel),
-                "--camera-azimuth", str(az), "--camera-elevation", str(el),
-                "--fov", str(fov), "--sun-azimuth", str(saz),
-                "--sun-elevation", str(sel), "--periodic",
-                "--size", *map(str, %s), *flags]
-    cli()
-""") % (list(SIZE),)
+    spec = importlib.util.spec_from_file_location(
+        "soar_frame_bench", tree + "/tools/benchmarking/soar_frame_bench.py")
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+""")
 
-_HARNESS = textwrap.dedent("""
-    import sys, json, runpy
-    tree, field, out, cam, flags = json.loads(sys.argv[1])
-    sys.path.insert(0, tree)
-    import cloudyview
-    if not cloudyview.__file__.startswith(tree):
-        raise SystemExit(f"imported {cloudyview.__file__}, not the tree {tree}")
-    sys.argv = ["night_city_harness", "--field", field, "--outdir", out,
-                "--size", *map(str, %s), "--city-camera", *map(str, cam),
-                *flags]
-    runpy.run_path(tree + "/tools/night_city_harness.py", run_name="__main__")
-""") % (list(SIZE),)
+_NESTED = _PRELUDE + textwrap.dedent("""
+    import inspect
+    import numpy as np
+    from PIL import Image
+    from cloudyview.witness import render_nested
+    takes = inspect.signature(render_nested).parameters
+    kwargs = dict(job["args"])
+    for name in job["needs"]:
+        if name not in takes:
+            print(f"NA no {name}")
+            sys.exit(0)
+    for name in job["optional"]:
+        if name not in takes:
+            kwargs.pop(name)
+            print(f"DROPPED {name}")
+    level, _ = bench.build_level_from_demo(job["demo"])
+    x, y, z, az, el, fov, saz, sel = job["camera"]
+    img = render_nested([level], [x, y, z], azimuth=az, elevation=el,
+                        sun_azimuth=saz, sun_elevation=sel,
+                        image_size=tuple(job["size"]), fov_degrees=fov,
+                        periodic=True, verbose=False, **kwargs)
+    Image.fromarray((np.clip(img, 0.0, 1.0) * 255.0 + 0.5)
+                    .astype(np.uint8)).save(job["out"])
+""")
+
+# The harness reads a NetCDF field; here its build_level is the demo
+# loader, and everything else (camera frames, uniforms, the look) is the
+# tree's own harness.
+_HARNESS = _PRELUDE + textwrap.dedent("""
+    from pathlib import Path
+    path = tree + "/tools/night_city_harness.py"
+    g = {"__name__": "night_city_harness", "__file__": path}
+    exec(compile(Path(path).read_text(), path, "exec"), g)
+    g["build_level"] = lambda p, verbose=True: bench.build_level_from_demo(p)[0]
+    out = Path(job["out"])
+    work = out.parent / (out.stem + ".work")
+    work.mkdir(parents=True, exist_ok=True)
+    code = g["main"](["--field", job["demo"], "--outdir", str(work),
+                      "--size", *map(str, job["size"]),
+                      "--city-camera", *map(str, job["camera"]),
+                      *job["args"]])
+    made = sorted(work.glob("*.png"))
+    if code or len(made) != 1:
+        raise SystemExit(f"harness exit {code}, made {[p.name for p in made]}")
+    made[0].replace(out)
+    work.rmdir()
+""")
 
 
-def render(tree: Path, view: View, flags: list, dest: Path) -> None:
-    """Render one view with the revision's own code into dest (PNG)."""
-    work = dest.parent / (dest.stem + ".work")
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    script = _WITNESS if view.kind == "witness" else _HARNESS
-    payload = json.dumps([str(tree), str(FIELD), str(work),
-                          list(view.camera), flags]
-                         + ([view.fold_m] if view.kind == "witness" else []))
+def render(tree: Path, view: View, args: tuple, dest: Path) -> str:
+    """Render one view with the revision's own code into dest (PNG).
+    Returns the note the sheet shows under it ("" for none)."""
+    job = {"tree": str(tree), "demo": str(DEMOS / view.demo),
+           "out": str(dest), "camera": list(view.camera), "size": list(SIZE),
+           "args": [list(a) for a in args] if view.kind == "nested"
+           else list(args),
+           "needs": list(view.needs), "optional": list(view.optional)}
+    script = _NESTED if view.kind == "nested" else _HARNESS
     t0 = time.perf_counter()
-    proc = subprocess.run([sys.executable, "-c", script, payload],
+    proc = subprocess.run([sys.executable, "-c", script, json.dumps(job)],
                           capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"{view.name} at {tree.name} failed:\n"
                            f"{proc.stderr[-3000:]}")
-    made = sorted(work.glob("*.png"))
-    if len(made) != 1:
-        raise RuntimeError(f"{view.name} at {tree.name}: expected one PNG in "
-                           f"{work}, found {[p.name for p in made]}.")
-    made[0].replace(dest)
-    shutil.rmtree(work)
+    lines = proc.stdout.splitlines()
+    na = [ln[3:] for ln in lines if ln.startswith("NA ")]
+    if na:
+        return f"n/a ({na[0]})"
+    if not dest.exists():
+        raise RuntimeError(f"{view.name} at {tree.name} wrote no image.")
     print(f"  {dest.relative_to(OUT)}  ({time.perf_counter() - t0:.1f} s)",
           flush=True)
+    dropped = [ln[8:] for ln in lines if ln.startswith("DROPPED ")]
+    return f"(no {', '.join(dropped)}: rendered without it)" if dropped else ""
 
 
-def cell(sha: str, tree: Path, scene: str, view: View, extra=(),
+def cell(sha: str, tree: Path, scene: str, view: View, args=None,
          tag: str = "") -> tuple[Optional[Path], str]:
-    """(PNG or None, note) for one view at one revision."""
-    script = ("cloudyview/witness.py" if view.kind == "witness"
-              else "tools/night_city_harness.py")
-    if not (tree / script).exists():
-        return None, "n/a (no such renderer)"
-    flags = list(view.flags) + list(extra)
-    for flag in view.needs:
-        if not has_flag(tree, script, flag):
-            return None, f"n/a (no {flag})"
-    note = ""
-    for flag in view.optional:
-        if flag in flags and not has_flag(tree, script, flag):
-            i = flags.index(flag)
-            del flags[i:i + 2]
-            note = f"(no {flag}: rendered without it)"
+    """(PNG or None, note) for one view at one revision — from the cache
+    when this revision already rendered this exact view definition."""
+    args = view.args if args is None else args
     key = sha[:12] if sha != "tree" else "tree"
-    dest = OUT / "renders" / key / scene / f"{view.name}{tag}.png"
-    if sha == "tree" or not dest.exists():
+    digest = hashlib.sha256(repr((view, args)).encode()).hexdigest()[:10]
+    dest = OUT / "renders" / key / scene / f"{view.name}{tag}_{digest}.png"
+    note_file = dest.with_suffix(".note")
+    if sha != "tree" and note_file.exists():
+        note = note_file.read_text()
+    else:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        render(tree, view, flags, dest)
-    return dest, note
+        note = render(tree, view, args, dest)
+        note_file.write_text(note)
+    return (None if note.startswith("n/a") else dest), note
 
 
 # --- the sheet -------------------------------------------------------------
@@ -355,36 +367,37 @@ def main(argv=None) -> int:
     if args.list:
         for s in scenes:
             for v in SCENES[s]:
-                print(f"{s:7s} {v.name:18s} {v.label}  {v.kind} {v.camera}")
+                print(f"{s:7s} {v.name:16s} {v.label:42s} {v.demo} {v.camera}")
         return 0
-    if not FIELD.exists():
-        raise SystemExit(f"contact_sheet: the field is missing: {FIELD}")
+    for s in scenes:
+        for v in SCENES[s]:
+            if not (DEMOS / v.demo / "meta.json").exists():
+                raise SystemExit(f"contact_sheet: demo {v.demo!r} is not in "
+                                 f"{DEMOS}.")
     before, after = resolve(args.before), resolve(args.after)
     trees = {before: tree_for(before), after: tree_for(after)}
     short = {sha: sha[:7] if sha != "tree" else "working tree"
              for sha in trees}
     for scene in scenes:
         views = SCENES[scene]
-        if not views:
-            print(f"contact_sheet: no {scene} views defined; skipped.")
-            continue
         print(f"contact_sheet: {scene}", flush=True)
         if scene == "desert":
             columns = [f"{name} at {short[after]}"
                        for name, _ in DESERT_VARIANTS]
-            rows = [(v.label, [cell(after, trees[after], scene, v, extra,
-                                    tag=f"_{name.split()[0].lower()}")
-                               for name, extra in DESERT_VARIANTS])
+            rows = [(v.label, [cell(after, trees[after], scene, v,
+                                    v.args + (("quality", q),), tag=f"_{q}")
+                               for _, q in DESERT_VARIANTS])
                     for v in views]
+            title = f"soar desert at {short[after]}"
         else:
             columns = [f"before: {short[before]}", f"after: {short[after]}"]
             rows = [(v.label, [cell(sha, trees[sha], scene, v)
                                for sha in (before, after)])
                     for v in views]
+            title = f"soar {scene}: {short[before]} -> {short[after]}"
         tag = short[after].replace(" ", "_")
-        compose(f"soar {scene}: {short[before]} -> {short[after]}"
-                if scene != "desert" else f"soar desert at {short[after]}",
-                columns, rows, OUT / f"{scene}_{short[before]}_{tag}.png")
+        compose(title, columns, rows,
+                OUT / f"{scene}_{short[before]}_{tag}.png")
     return 0
 
 
