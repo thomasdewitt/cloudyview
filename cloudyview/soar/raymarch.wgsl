@@ -4021,6 +4021,7 @@ const CITY_PART_PIPE: i32 = 7;
 const CITY_PART_STEEL: i32 = 8;  // brackets, fire escapes, balcony bars
 const CITY_PART_SLAB: i32 = 9;   // balcony slabs
 const CITY_PART_PANEL: i32 = 10; // balcony glass panels
+const CITY_PART_CANOPY: i32 = 11; // corrugated rain canopies
 
 struct CityBox {
     bmin: vec3<f32>,
@@ -4314,6 +4315,8 @@ struct CityShellStyle {
     albedo: vec3<f32>,  // wall
     trim: vec3<f32>,    // sills, ledges, cornices, fins
     frame: vec3<f32>,   // window frames and mullions
+    hood_out: f32,      // cap over each window opening (0 = none)
+    canopy_out: f32,    // rain canopy over each window (0 = none)
     ac_frac: f32,       // share of bays with a wall unit under the sill
     pipes: i32,         // drainpipes per face
     brick: bool,        // coursed brick, visible at arm's length
@@ -4341,6 +4344,8 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
     st.ac_frac = 0.0;
     st.pipes = 0;
     st.brick = false;
+    st.hood_out = 0.0;
+    st.canopy_out = 0.0;
     let pane_w = (cc.pane_hi.x - cc.pane_lo.x) * cc.win_pitch;
     if (cc.win_style == 4) {
         // Punched masonry: the walk-up. Deep reveals, stone sills, a
@@ -4358,6 +4363,8 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
             st.albedo = vec3<f32>(0.34, 0.32, 0.29);     // stucco
         }
         st.brick = r.y < 0.75;
+        // Most walk-ups cap each window with a projecting hood or lintel.
+        st.hood_out = select(0.0, 0.07 + 0.05 * q.y, r.z > 0.3);
         st.trim = vec3<f32>(0.42, 0.39, 0.34);           // limestone
         st.frame = select(vec3<f32>(0.45, 0.44, 0.42),
                           vec3<f32>(0.06, 0.05, 0.05), r.z < 0.5);
@@ -4388,6 +4395,8 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
         }
         st.ac_frac = select(0.0, 0.08 + 0.25 * q.z, !tall);
         st.pipes = select(0, i32(floor(q.w * 2.99)), !tall);
+        st.canopy_out = select(0.0, 0.45 + 0.25 * r.z,
+                               !tall && cc.height < 90.0 && r.z > 0.6);
     } else if (cc.win_style == 1) {
         // Ribbon windows: continuous bands, and on some buildings a
         // sunshade slab over every band.
@@ -4424,8 +4433,9 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
         st.albedo = vec3<f32>(0.035, 0.038, 0.045);       // spandrel glass
         st.trim = vec3<f32>(0.10, 0.10, 0.11);
     }
-    st.depth = max(max(st.sill_out, st.ledge_out),
-                   max(st.cornice_out, st.cap_out));
+    st.depth = max(max(max(st.sill_out, st.ledge_out),
+                       max(st.cornice_out, st.cap_out)),
+                   max(st.hood_out, st.canopy_out));
     if (st.ac_frac > 0.0) {
         st.depth = max(st.depth, 0.58);
     }
@@ -4451,12 +4461,17 @@ fn city_pane_hi(cc: CityCell, f: CityFace) -> vec2<f32> {
     return cc.pane_hi * vec2<f32>(f.pitch, CITY_FLOOR_H);
 }
 
-// A bay's wall unit: whether it has one, and its box in bay-local (bu, bv).
-// Hung on the spandrel under the sill, off-centre by the bay's own draw.
+// A bay's air conditioner: whether it has one, and its box in bay-local
+// (bu, bv) and w. Two kinds by the building's draw: hung on the spandrel
+// under the sill, off-centre by the bay's own draw; or set IN the window,
+// on the sill in the lower sash, standing out past the wall under a little
+// sheet-metal drip hood (the Hong Kong and New York walk-up unit).
 struct CityAC {
     on: bool,
+    in_window: bool,
     lo: vec2<f32>,
     hi: vec2<f32>,
+    w0: f32,
     out: f32,
 }
 
@@ -4464,11 +4479,19 @@ fn city_shell_ac(cc: CityCell, f: CityFace, st: CityShellStyle,
                  b: CityBay) -> CityAC {
     var a: CityAC;
     a.on = false;
+    a.in_window = false;
     a.lo = vec2<f32>(0.0);
     a.hi = vec2<f32>(0.0);
+    a.w0 = 0.0;
     a.out = 0.55;
     let plo = city_pane_lo(cc, f);
-    if (st.ac_frac <= 0.0 || !b.in_bay || b.iv < 1 || plo.y < 0.85) {
+    let phi = city_pane_hi(cc, f);
+    if (st.ac_frac <= 0.0 || !b.in_bay || b.iv < 1) {
+        return a;
+    }
+    let kind = city_rand4(cc.seed ^ vec2<u32>(0x3243f6a8u, 0x885a308du));
+    a.in_window = kind.x < 0.45 && (phi.x - plo.x) > 0.8;
+    if (!a.in_window && plo.y < 0.85) {
         return a;
     }
     let h = city_rand4(vec2<u32>(
@@ -4477,11 +4500,22 @@ fn city_shell_ac(cc: CityCell, f: CityFace, st: CityShellStyle,
     if (h.x >= st.ac_frac) {
         return a;
     }
+    a.on = true;
+    if (a.in_window) {
+        // In the lower sash: as wide as the unit, not the window.
+        let wid = min(0.62 + 0.10 * h.y, phi.x - plo.x - 0.1);
+        let cu = 0.5 * (plo.x + phi.x)
+                 + (h.w - 0.5) * max(phi.x - plo.x - wid - 0.1, 0.0);
+        a.lo = vec2<f32>(cu - 0.5 * wid, plo.y);
+        a.hi = vec2<f32>(cu + 0.5 * wid, plo.y + 0.40 + 0.06 * h.z);
+        a.w0 = -st.reveal;
+        a.out = 0.30 + 0.12 * h.y;
+        return a;
+    }
     let wid = 0.70 + 0.16 * h.y;
     let hgt = 0.42 + 0.10 * h.z;
     let cu = 0.5 * f.pitch + (h.w - 0.5) * max(f.pitch - wid - 0.2, 0.0);
     let top = plo.y - CITY_SHELL_FRAME - 0.14;
-    a.on = true;
     a.lo = vec2<f32>(cu - 0.5 * wid, top - hgt);
     a.hi = vec2<f32>(cu + 0.5 * wid, top);
     a.out = 0.45 + 0.10 * h.y;
@@ -4538,7 +4572,7 @@ fn city_shell_try(best: CityShellHit, ol: vec3<f32>, dl: vec3<f32>,
 // cell b, as a face-local box (shape 1) or vertical cylinder (shape 2), or
 // nothing (shape 0). u extents may run past the cell; the caller clips them
 // to it. `s` scales every depth.
-const CITY_SHELL_FEATURES: i32 = 15;
+const CITY_SHELL_FEATURES: i32 = 18;
 
 struct CityShellFeature {
     shape: i32,
@@ -4561,6 +4595,15 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
             fe = CityShellFeature(1, CITY_PART_SILL,
                 vec3<f32>(ca + olo.x - 0.06, vfl + olo.y - 0.07, 0.0),
                 vec3<f32>(ca + ohi.x + 0.06, vfl + olo.y, st.sill_out * s));
+        }
+    } else if (k == 15) {
+        // The hood over the opening: a cap wider than the window, standing
+        // a little proud, as walk-ups carry them.
+        if (b.in_bay && st.hood_out > 0.0) {
+            fe = CityShellFeature(1, CITY_PART_TRIM,
+                vec3<f32>(ca + olo.x - 0.10, vfl + ohi.y, 0.0),
+                vec3<f32>(ca + ohi.x + 0.10, vfl + ohi.y + 0.16,
+                          st.hood_out * s));
         }
     } else if (k == 1 || k == 2) {
         // A horizontal band (k 1) or the tier's cornice (k 2). A band runs
@@ -4588,12 +4631,27 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle, s: f32,
                 vec3<f32>(u0, va, 0.0),
                 vec3<f32>(u0 + st.cap_hw, vb, st.cap_out * s));
         }
-    } else if (k == 5) {
+    } else if (k == 5 || k == 16) {
         let ac = city_shell_ac(cc, f, st, b);
-        if (ac.on) {
+        if (ac.on && k == 5) {
             fe = CityShellFeature(1, CITY_PART_AC,
-                vec3<f32>(ca + ac.lo.x, vfl + ac.lo.y, 0.0),
+                vec3<f32>(ca + ac.lo.x, vfl + ac.lo.y, ac.w0 * s),
                 vec3<f32>(ca + ac.hi.x, vfl + ac.hi.y, ac.out * s));
+        } else if (ac.on && ac.in_window) {
+            // The drip hood: a sheet a little wider and deeper than the unit.
+            fe = CityShellFeature(1, CITY_PART_STEEL,
+                vec3<f32>(ca + ac.lo.x - 0.05, vfl + ac.hi.y + 0.03, 0.0),
+                vec3<f32>(ca + ac.hi.x + 0.05, vfl + ac.hi.y + 0.05,
+                          (ac.out + 0.08) * s));
+        }
+    } else if (k == 17) {
+        // A rain canopy over the window: corrugated sheet on two brackets,
+        // on the buildings whose draw says so.
+        if (b.in_bay && st.canopy_out > 0.0) {
+            fe = CityShellFeature(1, CITY_PART_CANOPY,
+                vec3<f32>(ca + olo.x - 0.20, vfl + ohi.y + 0.22, 0.0),
+                vec3<f32>(ca + ohi.x + 0.20, vfl + ohi.y + 0.26,
+                          st.canopy_out * s));
         }
     } else if (k < 10) {
         // Drainpipes (k 6, 8) and their brackets (k 7, 9), strapping the
@@ -5511,6 +5569,11 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         alb = CITY_ESCAPE_ALBEDO;
     } else if (part == CITY_PART_SLAB) {
         alb = st.trim;
+    } else if (part == CITY_PART_CANOPY) {
+        // Corrugated sheet: ribs along the wall's normal, every 76 mm.
+        let rib = 0.5 + 0.5 * cos(6.2831853 * l.x / 0.076);
+        alb = vec3<f32>(0.20, 0.21, 0.20)
+              * mix(0.6 + 0.4 * rib, 0.8, smoothstep(0.02, 0.07, fp_eff));
     } else if (part == CITY_PART_PANEL) {
         // Frosted glass: dark, with the night's reflection on it.
         alb = vec3<f32>(0.05, 0.055, 0.06);
@@ -5679,10 +5742,24 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
             * mix(glass, glass_mean, b1);
     // Under a component's panel there are no windows to see; behind a fire
     // escape, only what its lattice leaves.
+    let st = city_shell_style(cc);
     let esc_cover = city_escape_cover(city_escape(cc, f), uc, vc, fp_eff);
     let bal_cover = city_balcony_cover(cc, f, b, fp_eff);
+    // A unit set in the window covers its lower sash, dissolving into its
+    // share of the pane.
+    var ac_cover = 0.0;
+    let ac = city_shell_ac(cc, f, st, b);
+    if (ac.on && ac.in_window) {
+        let inside = b.bu > ac.lo.x && b.bu < ac.hi.x
+                  && b.bv > ac.lo.y && b.bv < ac.hi.y;
+        let span = city_pane_hi(cc, f) - city_pane_lo(cc, f);
+        let share = (ac.hi.x - ac.lo.x) * (ac.hi.y - ac.lo.y)
+                    / max(span.x * span.y, 1e-3);
+        ac_cover = mix(select(0.0, 1.0, inside), share * select(0.0, 1.0, pane),
+                       smoothstep(0.25, 0.9, fp_eff));
+    }
     e = e * (1.0 - cc_facade_cover(cc, h, uc, vc, fp)) * (1.0 - esc_cover)
-          * (1.0 - bal_cover);
+          * (1.0 - bal_cover) * (1.0 - ac_cover);
 
     // Street-level storefront strip: bright, saturated, and only on
     // buildings whose draw says the ground floor is commercial.
@@ -5695,9 +5772,8 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     // fire escapes.
     e = e + cc_facade_detail(cc, h, uc, vc, fp);
 
-    let st = city_shell_style(cc);
-    let alb = mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover), st.trim,
-                  bal_cover);
+    let alb = mix(mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover), st.trim,
+                      bal_cover), vec3<f32>(0.34, 0.33, 0.30), ac_cover);
     return e + alb
         * (CITY_SHELL_FILL_K
            * (fill + CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0))
