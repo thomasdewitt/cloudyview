@@ -1217,29 +1217,47 @@ export class Renderer {
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
-    const renderSize = renderTargetSize(outputSize, this.renderScale);
-    const targets = await this._targetsFor(renderSize[0], renderSize[1]);
-    // The march pipeline for the state as it stands after the LAST await:
-    // from here to the first submit nothing awaits, so the specialization,
-    // the lighting method and the uniforms below all describe one moment.
-    // The method is read once — it picks the pipeline and it is what row 23
-    // packs — or a bake finishing between two reads would march one method
-    // under the other's scene key. A variant still compiling is waited out
-    // only when the caller asks (offline renders, which own the renderer);
-    // the live loop gets `false` back, marches nothing, keeps its last
-    // picture and asks again next frame, so no frame of it is ever
-    // suspended on a compile while the field or a capture changes under it.
+    // The march pipeline and the render targets for the state as it stands
+    // after the LAST await: from the end of this loop to the first submit
+    // nothing awaits, so the specialization, the lighting method, the
+    // targets and the uniforms below all describe one moment. The method is
+    // read once — it picks the pipeline and it is what row 23 packs — or a
+    // bake finishing between two reads would march one method under the
+    // other's scene key. A variant still compiling is waited out only when
+    // the caller asks (offline renders, which own the renderer); the live
+    // loop gets `false` back, marches nothing, keeps its last picture and
+    // asks again next frame, so no frame of it is ever suspended on a
+    // compile while the field or a capture changes under it. Fetching the
+    // targets can itself await (a resize drains the pool), so the loop only
+    // exits once the pipeline and the render size it chose are still the
+    // ones the renderer wants after that await.
     let lighting;
     let rayPipeline;
+    let renderSize;
+    let targets;
     for (;;) {
       lighting = this.lighting;
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
-      if (!isPending(p)) { rayPipeline = p; break; }
-      if (!waitForPipeline) {
-        p.catch(() => {});        // recorded; thrown when next requested
-        return false;
+      if (isPending(p)) {
+        if (!waitForPipeline) {
+          p.catch(() => {});      // recorded; thrown when next requested
+          return false;
+        }
+        await p;
+        continue;
       }
-      await p;
+      const variant = shaderVariantKey(this._shaderSpec({ lighting }));
+      renderSize = renderTargetSize(outputSize, this.renderScale);
+      targets = await this._targetsFor(renderSize[0], renderSize[1]);
+      const lightingNow = this.lighting;
+      const sizeNow = renderTargetSize(outputSize, this.renderScale);
+      if (lightingNow.lightCache === lighting.lightCache
+          && lightingNow.skyProbe === lighting.skyProbe
+          && shaderVariantKey(this._shaderSpec({ lighting })) === variant
+          && sizeNow[0] === renderSize[0] && sizeNow[1] === renderSize[1]) {
+        rayPipeline = p;
+        break;
+      }
     }
     const targetView = typeof target === "function" ? target() : target;
 
