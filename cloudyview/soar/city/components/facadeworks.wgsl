@@ -112,7 +112,9 @@ fn cc_facadeworks_sign_box(cc: CityCell, f: cc_facadeworks_Face,
     let c0 = i32((0x0231u >> (4u * u32(f.side))) & 3u);
     let corner = i32((s.x >> 8u) & 3u);
     let right_edge = corner == ((c0 + 1) & 3);
+    // No signs on a warehouse: the industry component owns its walls.
     if ((s.x & 255u) >= cc_facadeworks_SIGN_FRAC
+        || cc.land_use == CITY_USE_INDUSTRIAL
         || !(right_edge || corner == c0)
         || !f.base || f.z1 <= 17.0 || (f.u1 - f.u0) <= 6.5) {
         return vec4<f32>(0.0);

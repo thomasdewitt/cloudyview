@@ -401,7 +401,9 @@ fn cc_adscreens_none() -> cc_adscreens_Place {
 
 fn cc_adscreens_place(cc: CityCell, h: CityHit, uc: f32,
                       vc: f32) -> cc_adscreens_Place {
-    if (!cc.built || cc.height < cc_adscreens_MIN_H) {
+    // No screens on a warehouse: the industry component owns its walls.
+    if (!cc.built || cc.height < cc_adscreens_MIN_H
+        || cc.land_use == CITY_USE_INDUSTRIAL) {
         return cc_adscreens_none();
     }
     // Screens hang on flat vertical wall. A tapered shaft's skin is neither,
