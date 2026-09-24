@@ -14762,16 +14762,16 @@ fn desert_haze(rgb: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>, t_hit: f32,
 fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
                 dir: vec3<f32>,
                 sun: vec3<f32>, sun_shadow: vec3<f32>, jit: f32,
-                pixel_angle: f32) -> vec3<f32> {
+                pixel_angle: f32, refine: bool) -> vec3<f32> {
     let fp = pixel_angle * h.t;
     let L = desert_light(pos_world, sun, sun_shadow, h.t, jit);
     var rgb: vec3<f32>;
     if (h.kind >= 8) {
-        rgb = desert_flora_shade(h, dir, fp, L);
+        rgb = desert_flora_shade(h, dir, fp, L, refine);
     } else {
         // The plants' shadow on the ground, walked once for both ground
         // branches (one inlined copy of the flora's shadow walk, not two).
-        let plants = desert_flora_shadow(h.pos, sun, fp);
+        let plants = desert_flora_shadow(h.pos, sun, fp, refine);
         if (h.kind == DESERT_KIND_STONE) {
             var Ls = L;
             Ls.sun = L.sun * desert_terrain_shadow(h.pos, sun, fp) * plants;
@@ -14804,7 +14804,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
     return vec4<f32>(desert_shade_pixel(h, o, dir, pixel_angle, frame_index,
-                                        strat_pixel, jitter_amp), h.t);
+                                        strat_pixel, jitter_amp, false), h.t);
 }
 
 // One desert hit shaded for this pixel: the sun-march and solar-cone draws
@@ -14812,7 +14812,8 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
 // the refine stage finds is lit exactly as the plain pass lights the ground.
 fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
                       pixel_angle: f32, frame_index: u32,
-                      strat_pixel: vec2<u32>, jitter_amp: f32) -> vec3<f32> {
+                      strat_pixel: vec2<u32>, jitter_amp: f32,
+                      refine: bool) -> vec3<f32> {
     let sun = u.sun_dir.xyz;
     let jit = jitter_amp * strat1(frame_index, strat_pixel,
                                   STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
@@ -14822,7 +14823,7 @@ fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
                                   SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
                                   * jitter_amp);
     return desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir, sun,
-                        sun_shadow, jit, pixel_angle);
+                        sun_shadow, jit, pixel_angle, refine);
 }
 
 // THE REFINE ENTRY (fs_surface_refine, under DESERT): the near plants the
@@ -14847,7 +14848,7 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     }
     return vec4<f32>(desert_shade_pixel(h, o, cr.dir, cr.true_pixel_angle,
                                         cr.frame_index, cr.strat_pixel,
-                                        cr.jitter_amp), h.t);
+                                        cr.jitter_amp, true), h.t);
 }
 
 // Mean hemispherical albedo of the ground as a cloud base sees it, for the
@@ -18213,31 +18214,40 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     return vis;
 }
 
-// How much of the plants' shadow on a ground point of footprint fp is the
-// statistical one: 0 while the shadow-casters are drawn, 1 once they are
-// not. Deterministic in fp: a shadow is light, not geometry, so an expected
-// value blend is exact.
+// Where the plants' shadow on the ground is exact and where statistical.
+// The exact shadow walk is the costliest thing the desert does, run for
+// every ground pixel it touches — measured, it was half the plain pass,
+// most of it for being compiled in at all — so it lives in the refinement
+// stage only, over the near band that stage covers; the plain pass, and
+// everything past the band, take the statistical medium (with its hot
+// spot). `refine` is a literal at every call site, so the plain kernel
+// never compiles the walk. The hand-off is deterministic in the true
+// footprint: a shadow is light, not geometry, so an expected-value blend is
+// exact.
+const DF_SHADOW_EXACT_FP0: f32 = 0.06;
+const DF_SHADOW_EXACT_FP1: f32 = DESERT_FLORA_REFINE_FP_M;
+
 fn df_far_shadow_weight(fp: f32) -> f32 {
-    return smoothstep(DF_FAR_FP0, DF_FAR_FP1, fp);
+    return smoothstep(DF_SHADOW_EXACT_FP0, DF_SHADOW_EXACT_FP1, fp);
 }
 
 // The ground's hook: the plants' whole shadow on ground point p — exact
 // rays while the casters are drawn, the statistical medium (with its hot
 // spot, for which the view direction is p's from the camera) once they are
 // not, mixed once across the hand-off.
-fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
+fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
+                       refine: bool) -> f32 {
     let to_p = p - desert_camera_origin();
     let dist = length(to_p);
+    let stat = df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
+    if (!refine) {
+        return 1.0 - stat;
+    }
     let w = df_far_shadow_weight(df_true_pixel_angle() * dist);
-    var e = 1.0;
-    if (w < 1.0) {
-        e = df_shadow_exact(p, sun_dir, fp);
+    if (w >= 1.0) {
+        return 1.0 - stat;
     }
-    var stat = 0.0;
-    if (w > 0.0) {
-        stat = df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
-    }
-    return (1.0 - w) * e + w * (1.0 - stat);
+    return (1.0 - w) * df_shadow_exact(p, sun_dir, fp) + w * (1.0 - stat);
 }
 
 // A needle is thin translucent keratin: most of the light that crosses it
@@ -18303,7 +18313,7 @@ fn df_ggx_spec(n: vec3<f32>, dir: vec3<f32>, l: vec3<f32>, alpha: f32,
 }
 
 fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
-                      L: DesertLight) -> vec3<f32> {
+                      L: DesertLight, refine: bool) -> vec3<f32> {
     let code = i32(floor(h.mat.x));
     let tint = fract(h.mat.x);
     let n = h.normal;
@@ -18317,7 +18327,10 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         lift = 0.6 * select(DF_SAG_SHELL, DF_BAR_SHELL,
                             h.kind == DF_KIND_BARREL);
     }
-    let sun_vis = df_shadow_exact(h.pos + n * lift, L.sun_dir, fp);
+    // A far-form plant (the plain pass) takes the statistical shadow of
+    // its neighbours; a near one (the refinement pass) the exact rays.
+    let sun_vis = desert_flora_shadow(h.pos + n * lift, L.sun_dir, fp,
+                                      refine);
     var Ls = L;
     Ls.sun = L.sun * sun_vis;
     if (h.kind == DF_KIND_SAGUARO || h.kind == DF_KIND_BARREL) {

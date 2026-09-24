@@ -312,10 +312,11 @@ def hero_views(g, h, sun_az, sun_el):
 
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
-    """GPU ms of `frames` one-sample frames: the surface pre-pass
-    (fs_surface) and the march (fs_main), a timestamp pair each, exactly as
-    SoarRenderer.render encodes them but without the accumulation or any
-    readback."""
+    """GPU ms of `frames` one-sample frames, per stage: the surface's plain
+    pass (fs_surface), its refinement (fs_surface_refine) and the march
+    (fs_main), a timestamp pair each, encoded exactly as SoarRenderer.render
+    encodes them but without the accumulation or any readback. A scene with
+    no surface pass (the ocean) stamps empty passes for the first two."""
     import wgpu
     from cloudyview.soar_host import ViewState, pack_uniforms
     device = renderer.device
@@ -324,35 +325,52 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     sample_view = targets["sample"].create_view()
     ray_pipeline = renderer._ray_pipeline_for(view)
     surface_pipeline = renderer._surface_pipeline_for(view)
-    # The ocean has no pre-pass: its surface pair stamps an empty pass.
-    has_surface = targets["surface"] is not None
-    surface_view = (targets["surface"].create_view() if has_surface
-                    else sample_view)
+    refine_pipeline = renderer._refine_pipeline_for(view)
+    surface_view = (targets["surface"].create_view()
+                    if targets["surface"] is not None else None)
+    plain_view = (targets["plain"].create_view()
+                  if targets["plain"] is not None else None)
+    stages = []
+    if surface_view is not None:
+        stages.append((surface_pipeline, None, plain_view or surface_view))
+        if plain_view is not None:
+            stages.append((refine_pipeline, targets["refine_group"],
+                           surface_view))
     for i in range(frames):
         pv = ViewState(**{**view.__dict__, "frame_index": i,
                           "subpixel": i >= 1, "jitter_scale": 1.0})
         device.queue.write_buffer(renderer._uniform_buf, 0,
                                   pack_uniforms(state, pv).tobytes())
         enc = device.create_command_encoder()
-        sp = enc.begin_render_pass(
-            color_attachments=[{"view": surface_view, "load_op": "clear",
-                                "store_op": "store",
-                                "clear_value": (0.0, 0.0, 0.0, 1e30)}],
-            timestamp_writes={"query_set": query_set,
-                              "beginning_of_pass_write_index": 4 * i,
-                              "end_of_pass_write_index": 4 * i + 1})
-        if has_surface:
-            sp.set_pipeline(surface_pipeline)
-            sp.set_bind_group(0, bind_group)
-            sp.draw(3)
-        sp.end()
+        for k in range(2):
+            ts = {"query_set": query_set,
+                  "beginning_of_pass_write_index": 6 * i + 2 * k,
+                  "end_of_pass_write_index": 6 * i + 2 * k + 1}
+            if k < len(stages):
+                pipeline, group1, view_ = stages[k]
+                sp = enc.begin_render_pass(
+                    color_attachments=[{"view": view_, "load_op": "clear",
+                                        "store_op": "store",
+                                        "clear_value": (0.0, 0.0, 0.0, 1e30)}],
+                    timestamp_writes=ts)
+                sp.set_pipeline(pipeline)
+                sp.set_bind_group(0, bind_group)
+                if group1 is not None:
+                    sp.set_bind_group(1, group1)
+                sp.draw(3)
+            else:
+                sp = enc.begin_render_pass(
+                    color_attachments=[{"view": sample_view, "load_op": "load",
+                                        "store_op": "store"}],
+                    timestamp_writes=ts)
+            sp.end()
         rp = enc.begin_render_pass(
             color_attachments=[{"view": sample_view, "load_op": "clear",
                                 "store_op": "store",
                                 "clear_value": (0.0, 0.0, 0.0, 1.0)}],
             timestamp_writes={"query_set": query_set,
-                              "beginning_of_pass_write_index": 4 * i + 2,
-                              "end_of_pass_write_index": 4 * i + 3})
+                              "beginning_of_pass_write_index": 6 * i + 4,
+                              "end_of_pass_write_index": 6 * i + 5})
         rp.set_pipeline(ray_pipeline)
         rp.set_bind_group(0, bind_group)
         rp.set_bind_group(1, targets["surface_group"])
@@ -360,17 +378,17 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
         rp.end()
         device.queue.submit([enc.finish()])
     enc = device.create_command_encoder()
-    enc.resolve_query_set(query_set, 0, 4 * frames, query_buf, 0)
+    enc.resolve_query_set(query_set, 0, 6 * frames, query_buf, 0)
     readback = device.create_buffer(
-        size=32 * frames,
+        size=48 * frames,
         usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ)
-    enc.copy_buffer_to_buffer(query_buf, 0, readback, 0, 32 * frames)
+    enc.copy_buffer_to_buffer(query_buf, 0, readback, 0, 48 * frames)
     device.queue.submit([enc.finish()])
     readback.map_sync(wgpu.MapMode.READ)
     ts = np.frombuffer(bytearray(readback.read_mapped()),
                        np.uint64).astype(np.float64)
     readback.unmap()
-    return (ts[1::4] - ts[0::4]) * 1e-6, (ts[3::4] - ts[2::4]) * 1e-6
+    return tuple((ts[2 * k + 1::6] - ts[2 * k::6]) * 1e-6 for k in range(3))
 
 
 def main(argv=None) -> int:
@@ -462,9 +480,9 @@ def main(argv=None) -> int:
             required_features=["timestamp-query"])
         n_timed = 24
         query_set = device.create_query_set(type="timestamp",
-                                            count=4 * n_timed)
+                                            count=6 * n_timed)
         query_buf = device.create_buffer(
-            size=32 * n_timed,
+            size=48 * n_timed,
             usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC)
     r = SoarRenderer(periodic=bool(meta.get("periodic", True)),
                      surface=args.surface, device=device)
@@ -543,10 +561,11 @@ def main(argv=None) -> int:
         ms = ""
         if args.time:
             pass_times_ms(r, state, view, n_timed, query_set, query_buf)
-            sp, rp = pass_times_ms(r, state, view, n_timed, query_set,
-                                   query_buf)
-            ms = (f"  {float(np.median(sp + rp)):7.3f} ms/pass (surface "
-                  f"{float(np.median(sp)):.3f} + march "
+            sp, fp_, rp = pass_times_ms(r, state, view, n_timed, query_set,
+                                        query_buf)
+            ms = (f"  {float(np.median(sp + fp_ + rp)):7.3f} ms/pass (surface "
+                  f"{float(np.median(sp)):.3f} + refine "
+                  f"{float(np.median(fp_)):.3f} + march "
                   f"{float(np.median(rp)):.3f})")
         png = out / f"{name}{args.tag}.png"
         rgb = np.clip(np.asarray(img), 0.0, 1.0)
