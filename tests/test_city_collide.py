@@ -419,7 +419,7 @@ def test_python_reads_a_track_that_carries_knocks(tmp_path):
                "knocks": r["recorded"]["knocks"]}
     path = tmp_path / "crash.json"
     path.write_text(json.dumps(payload))
-    _, samples = load_track(path)
+    _, samples, _ = load_track(path)
     # v3: the surface frame, then the scene clock, which ran with the flight.
     assert samples.shape[1] == 10
     assert samples[:, 9] == pytest.approx(samples[:, 0])

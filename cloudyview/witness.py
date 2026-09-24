@@ -334,6 +334,10 @@ def render_nested(
         raise ValueError(
             f"city_offset places the night city's tile, but surface is "
             f"'{surface}'; pass surface='city' or drop the offset.")
+    if scene_time != 0.0 and surface != "ocean":
+        raise ValueError(
+            f"scene_time is the moving sea's clock, and surface is "
+            f"'{surface}', which does not move; drop --time.")
     levels = list(levels)
     if not levels:
         raise ValueError("render_nested needs at least one level.")

@@ -10,8 +10,9 @@
 //
 // Track schema is shared with the Python side, so a track recorded in the browser
 // can be re-rendered by `soar TRACK.json` (cloudyview/track.py) and vice versa:
-//   {"schema": "cloudyview.track.v3",
+//   {"schema": "cloudyview.track.v4",
 //    "header": <render metadata>,
+//    "surface_period_m": <the period sx/sy are fractions of>,
 //    "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy, scene_t],
 //                ...],
 //    "knocks": [[t, severity, side, duration, landing], ...]}
@@ -27,14 +28,20 @@
 // byte-identical to v1's; a camera without one writes 7 columns, and a v1
 // track loads and resamples the same way.
 //
-// v3 appends scene_t, the scene clock (s) the frame was drawn at — where the
-// moving sea was — so a re-render has the waves the flight had. It is its
-// own column rather than a function of t because the clock is the scene's,
-// not the recording's. v1 and v2 tracks have none and replay at clock 0.
-// sx/sy are fractions of the surface PERIOD, which for the sea is the
-// swell's 1638.4 m, not the 102.4 m wave tile a v2 day track was folded at;
-// a v2 ocean track therefore replays over a different patch of the (by now
-// moving) sea — nothing else about it changes.
+// v3 appended scene_t, the scene clock (s) the frame was drawn at — where
+// the moving sea was — so a re-render has the waves the flight had. It is
+// its own column rather than a function of t because the clock is the
+// scene's, not the recording's. v1 and v2 tracks have none and replay at
+// clock 0.
+//
+// v4 records surface_period_m, the period sx/sy are fractions of: the tile
+// for the city and the desert, the swell's lattice for the sea. v3 recorded
+// none, and when the sea's period doubled (819.2 -> 1638.4 m) its tracks
+// would have replayed with the water streaming past at flight speed. A
+// reader refuses a period other than the installed one, and re-expresses an
+// older track's sx/sy from the period its schema implies (track.py
+// surface_samples); the browser replays only what it recorded this
+// session, at the scene's own period.
 //
 // `knocks` are the night city's crashes (collide.js), at the flight time of
 // the sample that first showed them. Everything else a crash does — the
@@ -48,7 +55,7 @@
 
 "use strict";
 
-export const TRACK_SCHEMA = "cloudyview.track.v3";
+export const TRACK_SCHEMA = "cloudyview.track.v4";
 
 // Relative x/y span the domain as [-1, 1], so a periodic flight-path wrap is
 // a near-full-span jump between consecutive samples and nothing else is.
@@ -205,7 +212,7 @@ export function resampleTrack(samples, fps,
       `The track collapses to ${unique.length} sample(s) with distinct ` +
       "times, which is not enough to interpolate. Fly for longer.");
   }
-  // 10 columns is a v3 sample (surface frame and scene clock); 9 is v2 (no
+  // 10 columns is a v3/v4 sample (surface frame and scene clock); 9 is v2 (no
   // clock: replays at 0); 7 is a v1 recording — those predate the surface
   // frame and replay with zero drift (the old behavior, not repairable: the
   // fold already lost which tile copy the flight was in). A mix is a
@@ -215,7 +222,7 @@ export function resampleTrack(samples, fps,
       || !(widths.has(7) || widths.has(9) || widths.has(10))) {
     throw new Error(
       "Track samples must uniformly have 7 columns (v1 / no surface frame), " +
-      "9 (v2 with one) or 10 (v3 with the scene clock); got widths " +
+      "9 (v2 with one) or 10 (v3/v4 with the scene clock); got widths " +
       `{${[...widths].join(", ")}}.`);
   }
   const hasSurface = widths.has(9) || widths.has(10);
@@ -377,7 +384,7 @@ export class TrackRecorder {
     // Appended, so the first seven columns stay byte-identical to a v1
     // sample; the scene clock follows them.
     if (!camera.surfacePosition) {
-      // v3 is 10 columns or nothing: the clock comes after the surface
+      // v4 is 10 columns or nothing: the clock comes after the surface
       // frame, and every scene's camera has one.
       throw new Error("the camera has no surface frame to record.");
     }
@@ -402,11 +409,17 @@ export class TrackRecorder {
   }
 }
 
-/** The JSON a track file holds, ready for download or for Python. */
-export function trackPayload(header, samples, knocks = []) {
+/** The JSON a track file holds, ready for download or for Python.
+ *  `surfacePeriodM` is the period the samples' sx/sy are fractions of. */
+export function trackPayload(header, samples, knocks, surfacePeriodM) {
+  if (!(Number.isFinite(surfacePeriodM) && surfacePeriodM > 0)) {
+    throw new Error("a track records the surface period its sx/sy are " +
+                    `fractions of; got ${surfacePeriodM}.`);
+  }
   return {
     schema: TRACK_SCHEMA,
     header,
+    surface_period_m: surfacePeriodM,
     samples: samples.map((s) => Array.from(s, Number)),
     knocks: knocks.map((k) => Array.from(k, Number)),
   };

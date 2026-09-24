@@ -234,3 +234,16 @@ def test_the_whitecaps_far_field_near_a_closed_gate(sea):
     for i, theta in enumerate([0.6, 0.7, 0.8, 0.9, 1.0]):
         assert _wgsl_scalar(src, f"SEA_FOAM_TAIL_{i}") == pytest.approx(
             sea_tile.foam_resolved_cover(theta, *args), rel=1e-5, abs=1e-8)
+
+
+@pytest.mark.parametrize("surface", ["city", "desert"])
+def test_the_clock_is_refused_where_nothing_moves(surface):
+    """Only the sea reads the clock (row 24.z is 0 elsewhere), so a time
+    asked of a city or a desert would be a silent no-op."""
+    from cloudyview.witness import render_nested
+    with pytest.raises(ValueError, match="does not move"):
+        render_nested([], [0.0, 0.0, 100.0], azimuth=0.0, elevation=0.0,
+                      sun_azimuth=0.0, sun_elevation=45.0,
+                      surface=surface, scene_time=5.0,
+                      city_offset=(8100.0, -44190.0) if surface == "city"
+                      else None)

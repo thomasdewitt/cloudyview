@@ -65,7 +65,8 @@ pytestmark = pytest.mark.skipif(
 
 
 _JS = textwrap.dedent("""
-    import { TrackRecorder, resampleTrack, TRACK_SCHEMA } from "%s";
+    import { TrackRecorder, resampleTrack, trackPayload, TRACK_SCHEMA }
+      from "%s";
     import { FlightCamera, cameraWorldOrigin, worldToRelative } from "%s";
     import { packUniforms } from "%s";
 
@@ -92,6 +93,13 @@ _JS = textwrap.dedent("""
 
     const fold = (v, p) => ((v %% p) + p) %% p;
     const out = { schema: TRACK_SCHEMA };
+    {
+      const two = [[0, 0.1, 0.2, 0.3, 90, 0, 70, 0.5, 0.25, 0],
+                   [1, 0.1, 0.2, 0.3, 90, 0, 70, 0.51, 0.25, 1]];
+      out.payload = trackPayload({}, two, [], 1638.4);
+      try { trackPayload({}, two, [], undefined); }
+      catch (err) { out.payloadWithoutPeriod = err.message; }
+    }
 
     // (a) Two cloud periods east: same cloud, same district.
     {
@@ -343,8 +351,20 @@ def result():
     return json.loads(proc.stdout)
 
 
-def test_schema_is_v3(result):
-    assert result["schema"] == "cloudyview.track.v3"
+def test_schema_is_v4(result):
+    assert result["schema"] == "cloudyview.track.v4"
+
+
+def test_the_saved_track_records_its_period_and_python_reads_it(
+        result, tmp_path):
+    """What downloadTrack writes: the samples with the period their sx/sy
+    are fractions of, which `soar TRACK.json` checks against its own."""
+    from cloudyview import track as tr
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps(result["payload"]))
+    _, samples, period = tr.load_track(path)
+    assert period == 1638.4 and samples.shape == (2, 10)
+    assert "surface period" in result["payloadWithoutPeriod"]
 
 
 def test_two_cloud_periods_east_keeps_the_district(result):

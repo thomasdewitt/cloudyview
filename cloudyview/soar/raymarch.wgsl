@@ -1997,7 +1997,9 @@ const SEA_FOAM_GLINT_KEEP: f32 = 0.1;
 // Near a closed gate the whole kept band lies inside the cut's soft ramp,
 // where the formula below is not exact; there the far field reads the
 // resolved mean itself, integrated at five cuts (sea_tile.
-// foam_resolved_cover) for theta = 0.6, 0.7, 0.8, 0.9, 1.0.
+// foam_resolved_cover) for theta = 0.6, 0.7, 0.8, 0.9, 1.0 — exact at the
+// cuts and linear between them, which runs up to 14% high between the last
+// two (theta = 0.95: 4e-5 of whitecap cover).
 const SEA_FOAM_TAIL_0: f32 = 0.1269433;
 const SEA_FOAM_TAIL_1: f32 = 0.0942405;
 const SEA_FOAM_TAIL_2: f32 = 0.0605305;
