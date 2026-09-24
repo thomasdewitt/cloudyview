@@ -15502,12 +15502,19 @@ fn desert_flora_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 fn desert_ground(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                  t_start: f32) -> DesertHit {
     return desert_ground_at(o, dir, pixel_angle,
-                            desert_terrain_trace(o, dir, pixel_angle, t_start));
+                            desert_terrain_trace(o, dir, pixel_angle, t_start),
+                            true);
 }
 
-// The same from a terrain hit already found (desert_terrain_trace).
+// The same from a terrain hit already found (desert_terrain_trace). `near`
+// (a literal at every call) says whether this ground can be close enough
+// for its stones to resolve: the refine stage's, and the lite desert's
+// plain pass. The full desert's plain pass hands every footprint under
+// DESERT_FLORA_REFINE_FP_M to the refine stage, and the stones resolve only
+// under 0.0625 m (desert_stone_resolve), so there it has no stones to walk
+// or shade, and compiling them out spares the whole pass their registers.
 fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
-                    terrain: DesertHit) -> DesertHit {
+                    terrain: DesertHit, near: bool) -> DesertHit {
     var best = terrain;
     if (best.hit) {
         // What the ground is at the hit, once: its lightness and its normal
@@ -15521,12 +15528,13 @@ fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         // stone levels' weights). The weights are computed ONCE, here, on
         // the terrain's own normal, and everything downstream reads them.
         let wall = desert_wall(best.normal);
-        best.mat = vec4<f32>(
-            s.y, wall,
-            desert_stone_weight(0, fp, dir, best.normal, wall),
-            desert_stone_weight(1, fp, dir, best.normal, wall));
-        if (!DESERT_LITE) {
-            best = desert_stone_trace(o, dir, best);
+        best.mat = vec4<f32>(s.y, wall, 0.0, 0.0);
+        if (near) {
+            best.mat.z = desert_stone_weight(0, fp, dir, best.normal, wall);
+            best.mat.w = desert_stone_weight(1, fp, dir, best.normal, wall);
+            if (!DESERT_LITE) {
+                best = desert_stone_trace(o, dir, best);
+            }
         }
         if (best.kind == DESERT_KIND_TERRAIN) {
             // Ripples fade on the footprint ON THE GROUND: seen obliquely
@@ -15782,7 +15790,8 @@ const DESERT_VOL_W_SAND: f32 = 0.15;
 const DESERT_GEO_W_SAND: f32 = 0.08;
 
 fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
-                          L: DesertLight, plants: f32) -> vec3<f32> {
+                          L: DesertLight, plants: f32, near: bool)
+        -> vec3<f32> {
     let n = h.normal;
     // A stone is lit by the same law as the ground it lies on, with its
     // own albedo and normal and none of the ground's statistics: no kernel
@@ -15791,7 +15800,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // on its inputs: two shading branches kept the hit, the light and the
     // ground terms all live across the divergence (perf: 155 registers
     // against 72 with the stones out).
-    if (h.kind == DESERT_KIND_STONE) {
+    if (near && h.kind == DESERT_KIND_STONE) {
         let mu_s = max(dot(n, L.sun_dir), 0.0);
         return desert_lit(h.mat.xyz, n, L,
                           mu_s * desert_terrain_shadow(
@@ -15826,7 +15835,10 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                          statistical * mix(DESERT_GEO_W_PAVEMENT,
                                            DESERT_GEO_W_SAND, light));
     var ns = n;
-    var stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
+    var stones = 1.0;
+    if (near) {
+        stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
+    }
     var sheen = desert_sheen(n, dir, L.sun_dir);
     if (DESERT_LITE) {
         // The stones as decals (desert_stone_decal): a covered pixel is the
@@ -15941,7 +15953,9 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
         // The plants' shadow on the ground and its stones.
         let plants = desert_flora_shadow(h.pos, sun, fp, refine);
         let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
-        rgb = desert_ground_radiance(h, dir, fp, L, plants)
+        // Stones only where they can resolve: see desert_ground_at.
+        rgb = desert_ground_radiance(h, dir, fp, L, plants,
+                                     refine || DESERT_LITE)
               * (1.0 - far.cover)
               + far.cover * desert_flora_far_shade(far, dir, L);
     }
@@ -15982,7 +15996,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
     // The whole desert along the ray: the ground, then whatever stands on
     // it in front of the ground hit.
     let inv_dir = 1.0 / dir;
-    var h = desert_ground_at(o, dir, pixel_angle, terrain);
+    var h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
     let slab = desert_flora_slab(o, dir, inv_dir, h.t);
     if (slab.y > slab.x) {
         let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
