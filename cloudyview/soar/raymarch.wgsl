@@ -808,6 +808,15 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // tools/benchmarking/soar_pass_timer.py and prove with
 // tools/soar_shader_ab.py --scene day|city|nested|desert, both on the
 // specialization the app actually compiles.
+//
+// And look, rather than guess: tools/soar_regcount.py prints the register
+// count and binary size the driver compiled an entry point into (NVIDIA's
+// own pipeline statistics, through Vulkan; a pure compile, no GPU work).
+// It is how the desert's surface pass was found at 168 registers and
+// 867 KB with its plant traces compiled in, and 80 without, before any
+// timing. A count is a diagnosis, not a score — fs_main at Low is 96
+// registers today against 80 this morning, and faster — so time what it
+// suggests.
 
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
@@ -2597,6 +2606,9 @@ const CITY_USE_OPEN: i32 = 3;
 const CITY_WORD_OFFSET: f32 = 2048.0;
 // A warehouse's occupancy: a few office windows at one end, the rest dark.
 const CITY_INDUSTRY_LIT_FRAC: f32 = 0.03;
+// A warehouse's ground band: dock doors, personnel doors and their lamps,
+// which the industry component draws; no windows below it.
+const CITY_INDUSTRY_DOOR_BAND: f32 = 5.0;
 // Windows.
 const CITY_WIN_PITCH_U: f32 = 3.4;  // horizontal window pitch (m)
 const CITY_WIN_U_LO: f32 = 0.14;    // pane bounds within the pitch cell
@@ -6128,6 +6140,12 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
             * city_glass_env(reflect(dir, h.normal), h.pos,
                              city_glow_sample(h.pos.xy, 3.0))
             * mix(glass, glass_mean, b1);
+    // A warehouse's ground band is its doors, which the industry component
+    // draws: no windows there, and no glass.
+    let warehouse = cc.land_use == CITY_USE_INDUSTRIAL;
+    if (warehouse && vc < CITY_INDUSTRY_DOOR_BAND) {
+        e = vec3<f32>(0.0);
+    }
     // Under a component's panel there are no windows to see; behind a fire
     // escape, only what its lattice leaves.
     let st = city_shell_style(cc);
@@ -6164,10 +6182,16 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
                 * (1.0 - smoothstep(CITY_STORE_H * 0.4, CITY_STORE_H, vc));
     }
 
-    // Whatever the facade-layer components add: balconies, signage,
-    // fire escapes.
+    // Whatever the facade-layer components add: signage, screens, a
+    // warehouse's cladding and doors.
     e = e + cc_facade_detail(cc, h, uc, vc, fp);
 
+    // A warehouse's walls are the industry component's whole look —
+    // cladding, doors, their lamps' light — reflectance included, so the
+    // core's flat albedo stays off them.
+    if (warehouse) {
+        return e;
+    }
     let alb = mix(mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover), st.trim,
                       bal_c), vec3<f32>(0.34, 0.33, 0.30), ac_c);
     return e + alb
@@ -12836,6 +12860,7 @@ const cc_industry_K_REFUSE: i32 = 710;   // the fill inside a skip
 const cc_industry_K_PILE: i32 = 711;     // debris mound
 const cc_industry_K_FORK: i32 = 712;     // forklift
 const cc_industry_K_FENCE: i32 = 713;
+const cc_industry_K_DOCK: i32 = 714;     // dock shelter, bumpers, leveller
 
 // --- roofs ------------------------------------------------------------------
 const cc_industry_SAW_FRAC: f32 = 0.40;
@@ -12924,7 +12949,16 @@ const cc_industry_TRL_W: f32 = 2.5;
 const cc_industry_TRL_H: f32 = 4.0;
 const cc_industry_TRL_DECK: f32 = 1.22;       // underside of the box body
 const cc_industry_DOCK_PITCH: f32 = 4.2;      // dock door centres (m)
-const cc_industry_DOCK_GAP: f32 = 0.5;        // trailer rear off the wall
+const cc_industry_DOCK_GAP: f32 = 0.25;       // trailer rear off the wall
+// The dock doors: sectional doors DOOR_W x DOOR_H standing on the dock
+// floor (DOCK_H above the court), one per dock slot; a black shelter frame
+// around each on some buildings, bumpers and a leveller lip on all. Relief
+// stays inside SHELL_OUT of the wall — the flight collider's growth
+// (web/soar/citylots.js CITY_SHELL_OUT_MAX).
+const cc_industry_DOCK_H: f32 = 1.2;
+const cc_industry_DOOR_W: f32 = 3.0;
+const cc_industry_DOOR_H: f32 = 3.0;
+const cc_industry_SHELL_OUT: f32 = 0.60;
 const cc_industry_PALLET_H: f32 = 0.144;
 const cc_industry_SKIP_L: f32 = 5.8;
 const cc_industry_SKIP_W: f32 = 2.3;
@@ -12991,6 +13025,28 @@ fn cc_industry_lot(cc: CityCell) -> cc_industry_Lot {
 // (a, c) -> world xy. A swizzle, so it preserves min/max order.
 fn cc_industry_xy(l: cc_industry_Lot, ac: vec2<f32>) -> vec2<f32> {
     return select(ac.yx, ac, l.long_x);
+}
+
+// The dock doors along a warehouse's court wall: (centre of door 0 along
+// the lot's long axis, count). Trailers, the forklift, the dock hardware and
+// the doors painted on the wall all take their slots from here.
+fn cc_industry_docks(l: cc_industry_Lot) -> vec2<f32> {
+    let len = l.ba.y - l.ba.x - 8.0;
+    let n = floor(len / cc_industry_DOCK_PITCH);
+    return vec2<f32>(l.ba.x + 4.0 + 0.5 * (len - n * cc_industry_DOCK_PITCH)
+                     + 0.5 * cc_industry_DOCK_PITCH, n);
+}
+
+// The truck court's depth, dock wall to the plot edge less the prop margin,
+// and whether trailers fit in it.
+fn cc_industry_court_depth(l: cc_industry_Lot) -> f32 {
+    return select(l.bc.x - l.pc.x, l.pc.y - l.bc.y, l.court_hi)
+           - cc_industry_EDGE;
+}
+
+fn cc_industry_has_trailers(l: cc_industry_Lot) -> bool {
+    return cc_industry_court_depth(l)
+           >= cc_industry_TRL_L + 2.0 * cc_industry_DOCK_GAP + 2.0;
 }
 
 // A lot-level draw: the same in every member cell, salted per use.
@@ -13090,7 +13146,7 @@ struct cc_industry_Grid {
     obj: vec2<f32>,     // object footprint in its slot (centred), world x, y
     zmax: f32,          // tallest object above lo.z
     occ: f32,           // fraction of slots filled
-    tiers: i32,         // containers: most stacked
+    tiers: i32,         // containers: most stacked; docks: 1 with shelters
     front: i32,         // object's forward axis: 0 +x, 1 -x, 2 +y, 3 -y
     salt: u32,
 }
@@ -13320,7 +13376,7 @@ fn cc_industry_fixtures(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // Everything is sized from the plot and the building, so a narrow court gets
 // pallets, a deep one trailers and a row of boxes along its far fence. No
 // two grids of a lot overlap: the shader finds a hit's slot by position.
-const cc_industry_N_GRIDS: i32 = 6;
+const cc_industry_N_GRIDS: i32 = 7;
 
 fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
     if (i < 0) {
@@ -13345,13 +13401,12 @@ fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
         let sgn = select(-1.0, 1.0, l.court_hi);
         let wall = select(l.bc.x, l.bc.y, l.court_hi);
         let far = select(l.pc.x, l.pc.y, l.court_hi);
-        let depth = abs(far - wall) - E;
-        let dock_len = l.ba.y - l.ba.x - 8.0;
-        let n_dock = i32(floor(dock_len / cc_industry_DOCK_PITCH));
-        let dock_a0 = l.ba.x + 4.0
-            + 0.5 * (dock_len - f32(n_dock) * cc_industry_DOCK_PITCH);
+        let depth = cc_industry_court_depth(l);
+        let docks = cc_industry_docks(l);
+        let n_dock = i32(docks.y);
+        let dock_a0 = docks.x - 0.5 * cc_industry_DOCK_PITCH;
         let trl_c = cc_industry_TRL_L + 2.0 * cc_industry_DOCK_GAP;
-        let has_docks = depth >= trl_c + 2.0;
+        let has_docks = cc_industry_has_trailers(l);
         let d = cc_industry_draw(cc, 21u, i, 0);
         if (i == 0 && has_docks) {
             // Trailers backed onto the dock doors, rear to the wall, legs
@@ -13452,6 +13507,19 @@ fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
                 skip_cell, vec2<i32>(1, 1), skip_obj, 0.0,
                 cc_industry_SKIP_H, 1.0, 1, 0, 25u);
         }
+        if (i == 6) {
+            // The dock hardware: a slot per door, flush on the wall.
+            let c_lo = select(wall - cc_industry_SHELL_OUT, wall, l.court_hi);
+            return cc_industry_mk_grid(
+                l, cc_industry_K_DOCK,
+                vec2<f32>(dock_a0, c_lo),
+                vec2<f32>(cc_industry_DOCK_PITCH, cc_industry_SHELL_OUT),
+                vec2<i32>(n_dock, 1),
+                vec2<f32>(cc_industry_DOCK_PITCH - 0.2, cc_industry_SHELL_OUT),
+                0.0, 4.95, 1.0,
+                select(0, 1, cc_industry_wall_of(cc).shelter),
+                select(3, 2, l.court_hi), 27u);
+        }
         if (i == 5 && has_docks && d.x < 0.6) {
             // A forklift working an open door: in a dock slot with no trailer
             // in it, forks toward the wall.
@@ -13463,7 +13531,7 @@ fn cc_industry_grid(cc: CityCell, i: i32) -> cc_industry_Grid {
             if (slot.x < 0.45) {
                 return cc_industry_no_grid();
             }
-            let a = dock_a0 + (f32(j) + 0.5) * cc_industry_DOCK_PITCH;
+            let a = docks.x + f32(j) * cc_industry_DOCK_PITCH;
             let c = wall + sgn * (2.6 + 3.0 * d.z);
             return cc_industry_mk_grid(
                 l, cc_industry_K_FORK,
@@ -13659,6 +13727,29 @@ fn cc_industry_trl_part(i: i32) -> cc_industry_Box {
     return cc_industry_Box(lo, hi);
 }
 
+// A dock's hardware, about its slot centre (SHELL_OUT/2 off the wall), u out
+// from the wall: the shelter's two side pads and head pad, black fabric over
+// a frame, standing proud of the wall around the door; the two rubber
+// bumpers either side of the door at trailer-bed height; the leveller's
+// steel lip at the dock floor, which a trailer backs under. Parts 0-2 are
+// the shelter.
+fn cc_industry_dock_part(i: i32) -> cc_industry_Box {
+    let w = -0.5 * cc_industry_SHELL_OUT;      // the wall, in u
+    let hd = 0.5 * cc_industry_DOOR_W;
+    let top = cc_industry_DOCK_H + cc_industry_DOOR_H;
+    var lo = vec3<f32>(0.0);
+    var hi = vec3<f32>(0.0);
+    switch i {
+        case 0: { lo = vec3<f32>(w, hd, 1.0); hi = vec3<f32>(w + 0.60, hd + 0.50, top + 0.75); }
+        case 1: { lo = vec3<f32>(w, -hd - 0.50, 1.0); hi = vec3<f32>(w + 0.60, -hd, top + 0.75); }
+        case 2: { lo = vec3<f32>(w, -hd - 0.50, top + 0.10); hi = vec3<f32>(w + 0.60, hd + 0.50, top + 0.75); }
+        case 3: { lo = vec3<f32>(w, 1.05, 0.75); hi = vec3<f32>(w + 0.18, 1.30, 1.20); }
+        case 4: { lo = vec3<f32>(w, -1.30, 0.75); hi = vec3<f32>(w + 0.18, -1.05, 1.20); }
+        default: { lo = vec3<f32>(w, -1.0, cc_industry_DOCK_H - 0.08); hi = vec3<f32>(w + 0.30, 1.0, cc_industry_DOCK_H); }
+    }
+    return cc_industry_Box(lo, hi);
+}
+
 // One object in its slot, against the segment. Boxes for the simple kinds;
 // part unions for trailers and forklifts close up; a hollow for the skip.
 fn cc_industry_obj(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
@@ -13671,16 +13762,27 @@ fn cc_industry_obj(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
     if (sb.x > sb.y || sb.y <= max(t0, 1e-3) || sb.x > min(t1, best.t)) {
         return best;
     }
-    if (g.kind == cc_industry_K_TRAILER || g.kind == cc_industry_K_FORK) {
+    if (g.kind == cc_industry_K_TRAILER || g.kind == cc_industry_K_FORK
+        || g.kind == cc_industry_K_DOCK) {
         let is_fork = g.kind == cc_industry_K_FORK;
-        let n = select(select(3, 8, fp < cc_industry_PART_FP),
-                       select(5, 15, fp < cc_industry_PART_FP), is_fork);
+        let is_dock = g.kind == cc_industry_K_DOCK;
+        let near = fp < cc_industry_PART_FP;
+        var n = select(select(3, 8, near), select(5, 15, near), is_fork);
+        var i0 = 0;
+        if (is_dock) {
+            // The shelter (parts 0-2) where the building has them; the
+            // bumpers and leveller lip close in only.
+            i0 = select(3, 0, g.tiers > 0);
+            n = select(3, 6, near);
+        }
         var r = best;
         let c = vec3<f32>(ctr, g.lo.z);
-        for (var i: i32 = 0; i < n; i = i + 1) {
+        for (var i: i32 = i0; i < n; i = i + 1) {
             var pb: cc_industry_Box;
             if (is_fork) {
                 pb = cc_industry_fork_part(i);
+            } else if (is_dock) {
+                pb = cc_industry_dock_part(i);
             } else {
                 pb = cc_industry_trl_part(i);
             }
@@ -13741,7 +13843,7 @@ fn cc_industry_grid_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
                         g: cc_industry_Grid, ci: vec2<i32>, px: f32, fp0: f32)
         -> CityHit {
     let small = g.kind == cc_industry_K_PALLET || g.kind == cc_industry_K_REBAR
-                || g.kind == cc_industry_K_FORK;
+                || g.kind == cc_industry_K_FORK || g.kind == cc_industry_K_DOCK;
     if (small && fp0 >= cc_industry_FINE_FP) {
         return best;
     }
@@ -14394,52 +14496,404 @@ fn cc_industry_head_shade(h: CityHit, cc: CityCell) -> vec3<f32> {
                                      real.x / cc_industry_HEAD_WIDEN, fp));
 }
 
-// The facade hook: the scallop of light under each wall pack, on the court
-// wall only. Gated on land use first — it runs for every facade pixel in
-// the city.
-fn cc_industry_wash_int(k: f32, z: f32) -> f32 {
-    let e = exp(-k * z);
-    return cc_industry_WASH_W0 * (1.0 - e) / k
-         + cc_industry_WASH_W1 * (1.0 - e * (1.0 + k * z)) / (k * k);
+// ============================================================================
+// THE WAREHOUSE WALLS (the facade hook)
+// ============================================================================
+//
+// city-facades handed the warehouse walls to this component (2026-09-23):
+// the core draws no windows in their ground band and adds no reflectance of
+// its own on them, so what a warehouse wall looks like is decided here, at
+// every range — the facade hook runs wherever a wall is hit. A wall is:
+//
+//   * CLADDING: corrugated metal sheet (ribs every 0.2 m, as shading bands,
+//     over a concrete plinth the bottom metre) on two thirds of buildings,
+//     tilt-up concrete panels 7-9 m wide with their joints on the rest. Real
+//     albedo, lit by the skyglow fill, the moon, the court's own wall packs
+//     (the scallop each throws down the wall under it), the lamp over each
+//     personnel door, and the street lamps where a street runs past.
+//   * DOCK DOORS on the court wall, one per dock slot (cc_industry_docks),
+//     so they line up with the trailers: sectional doors on the dock floor
+//     with a row of vision panels, most dark, a few with light leaking
+//     through, and some open onto a lit interior — mostly where a trailer
+//     is backed in, on a building working a night shift. The shelters,
+//     bumpers and leveller are relief geometry (cc_industry_dock_part); the
+//     wall under the shelter is painted in its colour, so at range, where
+//     the geometry is no longer traced, the frame is still there.
+//   * PERSONNEL DOORS, one or two per other wall, each with a small lamp
+//     over it and the lamp's own scallop of light.
+//   * A painted company band near the top of some buildings, and grime in
+//     the bottom metre.
+//
+// Every sub-pixel pattern (ribs, panel joints, door seams, vision panels)
+// dissolves to its own mean; a dock door past a few metres per pixel is its
+// cell's mean emission; a lamp is widened toward a pixel at constant energy.
+//
+// FACE FRAME. `s` below is metres along the wall from the building box's
+// min corner (x or y), computed here from b1. When city-facades' city_face_at
+// lands, the hook's `uc` becomes metres from the face's start corner and
+// replaces cc_industry_wall_s — the only place the frame is taken. Their
+// coming `facade_cover` hook is where the dock and personnel doors should
+// also clear the windows and relief under them (today the core's door-band
+// cut does that for the windows).
+
+struct cc_industry_Wall {
+    concrete: bool,
+    alb: vec3<f32>,
+    panel_w: f32,        // tilt-up panel width
+    band: vec2<f32>,     // painted band's z range (empty: none)
+    band_col: vec3<f32>,
+    door_col: vec3<f32>,
+    shelter: bool,
+    lamp_col: vec3<f32>, // the personnel doors' lamps
 }
+
+fn cc_industry_wall_of(cc: CityCell) -> cc_industry_Wall {
+    var w: cc_industry_Wall;
+    let d = cc_industry_draw(cc, 91u, 0, 0);
+    let e = cc_industry_draw(cc, 92u, 0, 0);
+    w.concrete = d.x < 0.35;
+    // Cladding colours, dimmed as they read under a night sky: galvanised
+    // grey, beige, the blue-grey and green of profiled sheet, off-white.
+    var c = vec3<f32>(0.34, 0.35, 0.36);
+    if (d.y > 0.30) { c = vec3<f32>(0.36, 0.33, 0.27); }
+    if (d.y > 0.50) { c = vec3<f32>(0.22, 0.27, 0.33); }
+    if (d.y > 0.70) { c = vec3<f32>(0.14, 0.21, 0.16); }
+    if (d.y > 0.85) { c = vec3<f32>(0.45, 0.45, 0.44); }
+    w.alb = select(c, vec3<f32>(0.30, 0.29, 0.27), w.concrete);
+    w.panel_w = 7.0 + 2.0 * d.z;
+    let top = cc.height - (0.6 + 1.2 * e.x);
+    w.band = select(vec2<f32>(1e3, -1e3), vec2<f32>(top - 1.0 - e.y, top),
+                    d.w < 0.45);
+    var b = vec3<f32>(0.30, 0.05, 0.04);                         // red
+    if (e.z > 0.30) { b = vec3<f32>(0.05, 0.12, 0.30); }         // blue
+    if (e.z > 0.55) { b = vec3<f32>(0.06, 0.20, 0.09); }         // green
+    if (e.z > 0.75) { b = vec3<f32>(0.42, 0.18, 0.03); }         // orange
+    if (e.z > 0.90) { b = vec3<f32>(0.45, 0.35, 0.04); }         // yellow
+    w.band_col = b;
+    var dc = vec3<f32>(0.42, 0.42, 0.41);                        // white
+    if (e.w > 0.40) { dc = vec3<f32>(0.24, 0.24, 0.25); }        // grey
+    if (e.w > 0.70) { dc = vec3<f32>(0.07, 0.13, 0.28); }        // blue
+    if (e.w > 0.90) { dc = vec3<f32>(0.42, 0.30, 0.05); }        // yellow
+    w.door_col = dc;
+    w.shelter = fract(d.w * 7.13) < 0.60;
+    w.lamp_col = select(vec3<f32>(0.80, 0.90, 1.00), vec3<f32>(1.0, 0.60, 0.28),
+                        fract(e.x * 5.31) < 0.55);
+    return w;
+}
+
+// (metres along the wall from the box's min corner, the wall's length) —
+// see FACE FRAME above.
+fn cc_industry_wall_s(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let ext = cc.b1max.xy - cc.b1min.xy;
+    if (abs(n.x) > abs(n.y)) {
+        return vec2<f32>(p.y - cc.b1min.y, ext.y);
+    }
+    return vec2<f32>(p.x - cc.b1min.x, ext.x);
+}
+
+// A lamp's scallop of light on the wall below it: narrow at the lamp,
+// widening with the drop d; rising over `rise` (the housing shades the wall
+// right behind it) and fading over `fade`.
+fn cc_industry_wash(d: f32, du: f32, w0: f32, w1: f32, rise: f32,
+                    fade: f32) -> f32 {
+    if (d <= 0.0) {
+        return 0.0;
+    }
+    let w = w0 + w1 * d;
+    return (1.0 - exp(-d / rise)) * exp(-d / fade)
+           * exp(-0.5 * du * du / (w * w));
+}
+
+// The integral of e^{-k d} (w0 + w1 d) over d in [0, z].
+fn cc_industry_wash_int(k: f32, z: f32, w0: f32, w1: f32) -> f32 {
+    let e = exp(-k * z);
+    return w0 * (1.0 - e) / k + w1 * (1.0 - e * (1.0 + k * z)) / (k * k);
+}
+
+// cc_industry_wash's integral over the wall, from a lamp at height z.
+fn cc_industry_wash_flux(z: f32, w0: f32, w1: f32, rise: f32, fade: f32)
+        -> f32 {
+    let kf = 1.0 / fade;
+    return 2.5066283 * (cc_industry_wash_int(kf, z, w0, w1)
+                        - cc_industry_wash_int(kf + 1.0 / rise, z, w0, w1));
+}
+
+// Street light on a wall, in ground-pool units: the core's pools at the
+// wall's foot, and past the pools' own footprint LOD their mean along the
+// wall — a periodic trapezoid rule over one lamp spacing, which for these
+// Gaussians (sigma 3.2 m, 4 samples 6.5 m apart) is good to 2%. Lamp lines
+// crossing the wall's line do not vary along it, so the rule holds for
+// them trivially.
+fn cc_industry_street_wall(p: vec2<f32>, tang: vec2<f32>, fp: f32) -> f32 {
+    let near = city_street_pools(p);
+    let k = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+    let nq = select(0, 4, k > 0.0);
+    var m = 0.0;
+    for (var q: i32 = 0; q < nq; q = q + 1) {
+        m = m + city_street_pools(
+            p + tang * (f32(q) * 0.25 * CITY_LAMP_SPACING));
+    }
+    return mix(near, 0.25 * m, k);
+}
+
+// A personnel door on wall `face` (0 -x, 1 +x, 2 -y, 3 +y): (position along
+// the wall, lamp on (1) or not (0), present (1) or not (0)).
+fn cc_industry_pdoor(cc: CityCell, face: i32, k: i32, len: f32) -> vec3<f32> {
+    let dk = cc_industry_draw(cc, 93u, face, k);
+    let present = select(len > 12.0, len > 40.0 && dk.x < 0.5, k == 1);
+    // Two doors keep to their own halves of the wall.
+    let lo = select(3.0, 0.5 * len + 1.0, k == 1);
+    let hi = select(select(len - 3.0, 0.5 * len - 1.0, len > 40.0),
+                    len - 3.0, k == 1);
+    return vec3<f32>(mix(lo, hi, dk.y), select(0.0, 1.0, dk.z < 0.8),
+                     select(0.0, 1.0, present));
+}
+
+const cc_industry_PDOOR_W: f32 = 1.0;
+const cc_industry_PDOOR_H: f32 = 2.1;
+const cc_industry_PLAMP_Z: f32 = 2.45;
+const cc_industry_PLAMP_R: f32 = 0.10;       // lens radius
+const cc_industry_PLAMP_RAD: f32 = 12.0;
+const cc_industry_PLAMP_GAIN: f32 = 0.35;    // its wash, in pool units
+const cc_industry_OPEN_RAD: f32 = 1.0;       // an open dock door's interior
+const cc_industry_LEAK_RAD: f32 = 0.8;       // a vision panel, lit inside
+const cc_industry_SEAM_RAD: f32 = 0.25;      // light through a door seam
+
+// A dock door's state: .x open, .y leaking light, .z its level draw.
+fn cc_industry_door_state(cc: CityCell, l: cc_industry_Lot, j: i32,
+                          lit: bool) -> vec3<f32> {
+    let dd = cc_industry_draw(cc, 90u, j, 0);
+    // The trailer backed onto this door, by the dock grid's own draw.
+    let ts = cc_industry_draw(cc, 20u, select(0, j, l.long_x),
+                              select(j, 0, l.long_x));
+    let trailer = cc_industry_has_trailers(l) && ts.x < 0.45;
+    let open = (lit && trailer && dd.x < 0.55) || dd.x < 0.04;
+    let leak = !open && dd.y < select(0.08, 0.35, lit);
+    return vec3<f32>(select(0.0, 1.0, open), select(0.0, 1.0, leak), dd.z);
+}
+
+// Vision panels in a sectional door: four, 0.4 m square, in the fourth
+// section.
+fn cc_industry_vision(dv: f32, dz: f32) -> bool {
+    let a = abs(dv);
+    return dz > 1.90 && dz < 2.30
+           && (abs(a - 0.35) < 0.20 || abs(a - 1.05) < 0.20);
+}
+// Their share of a door's face, and the seams' (5 of 0.03 m).
+const cc_industry_VISION_FRAC: f32 = 0.0711;   // 4 x 0.4 x 0.4 / 9
+const cc_industry_SEAM_FRAC: f32 = 0.05;       // 5 x 0.03 / 3
 
 fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
         -> vec3<f32> {
-    if (cc.land_use != CITY_USE_INDUSTRIAL || vc > CITY_FLOOD_WALL_Z + 0.5) {
+    if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
+    let w = cc_industry_wall_of(cc);
     let l = cc_industry_lot(cc);
+    let n = h.normal;
+    let tang = vec2<f32>(-n.y, n.x);
+    let ws = cc_industry_wall_s(cc, h.pos, n);
+    let sw = ws.x;
     let out = cc_industry_xy(l, vec2<f32>(0.0, select(-1.0, 1.0, l.court_hi)));
-    if (dot(h.normal.xy, out) < 0.9) {
-        return vec3<f32>(0.0);
-    }
-    let tang = cc_industry_xy(l, vec2<f32>(1.0, 0.0));
-    let k_fade = 1.0 / cc_industry_WASH_FADE;
-    let k_rise = k_fade + 1.0 / cc_industry_WASH_RISE;
-    var near = vec3<f32>(0.0);
-    var flux = vec3<f32>(0.0);
-    for (var k: i32 = 0; k < CITY_FLOOD_MAX; k = k + 1) {
-        let f = city_flood(cc, k);
-        if (!f.on) {
-            continue;
+    let court = dot(n.xy, out) > 0.9;
+    let face = select(select(2, 3, n.y > 0.0), select(0, 1, n.x > 0.0),
+                      abs(n.x) > abs(n.y));
+
+    // --- cladding ------------------------------------------------------------
+    var alb = w.alb;
+    if (w.concrete) {
+        let pi = floor(sw / w.panel_w);
+        let tone = 0.90 + 0.20 * hash12(vec2<f32>(pi, f32(face) * 17.0
+                                                   + f32(cc.seed.x & 1023u)));
+        let fj = fract(sw / w.panel_w) * w.panel_w;
+        let joint = select(1.0, 0.45, fj < 0.025 || fj > w.panel_w - 0.025);
+        alb = alb * (tone * cc_industry_band(
+            joint, 1.0 - 0.05 / w.panel_w * 0.55, 0.05, fp));
+    } else {
+        let rib = 0.78 + 0.44 * (0.5 + 0.5 * cos(6.2831853 * sw / 0.2));
+        alb = alb * cc_industry_band(rib, 1.0, 0.1, fp);
+        // The sheets' side laps, one per 1 m cover width: the rhythm that
+        // still reads once the ribs have gone to their mean.
+        let lap = select(1.0, 0.55, fract(sw) < 0.04);
+        alb = alb * cc_industry_band(lap, 1.0 - 0.04 * 0.45, 0.04, fp);
+        if (vc < 1.0) {
+            alb = vec3<f32>(0.26, 0.25, 0.23);          // concrete plinth
         }
-        let du = dot(h.pos.xy - f.head.xy, tang);
-        let d = f.head.z - vc;
-        let gain = f.color * cc_industry_WASH_GAIN;
-        if (d > 0.0) {
-            let w = cc_industry_WASH_W0 + cc_industry_WASH_W1 * d;
-            let a = (1.0 - exp(-d / cc_industry_WASH_RISE))
-                    * exp(-d / cc_industry_WASH_FADE);
-            near = near + gain * (a * exp(-0.5 * du * du / (w * w)));
-        }
-        // Its integral over the wall: sqrt(2 pi) w(d) a(d), over the drop.
-        flux = flux + gain * (2.5066283
-            * (cc_industry_wash_int(k_fade, f.head.z)
-               - cc_industry_wash_int(k_rise, f.head.z)));
     }
-    let area = (l.ba.y - l.ba.x) * cc.height;
-    let blend = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
-    return mix(near, flux / area, blend);
+    if (vc > w.band.x && vc < w.band.y) {
+        alb = w.band_col * (alb / max(w.alb, vec3<f32>(1e-3)));
+    }
+    alb = alb * (0.6 + 0.4 * smoothstep(0.0, 1.0, vc));   // grime
+    // The eave flashing: a 0.3 m band of trim along the top of the wall.
+    if (vc > cc.height - 0.3) {
+        alb = alb * 0.55;
+    }
+
+    // --- doors ---------------------------------------------------------------
+    var emit = vec3<f32>(0.0);
+    var light = vec3<f32>(0.0);
+    let r = cc_industry_roof_of(cc);
+    if (court) {
+        let docks = cc_industry_docks(l);
+        let a = select(h.pos.y, h.pos.x, l.long_x);
+        let jf = round((a - docks.x) / cc_industry_DOCK_PITCH);
+        let j = i32(jf);
+        let dv = a - (docks.x + jf * cc_industry_DOCK_PITCH);
+        let top = cc_industry_DOCK_H + cc_industry_DOOR_H;
+        let hd = 0.5 * cc_industry_DOOR_W;
+        if (j >= 0 && j < i32(docks.y)) {
+            let st = cc_industry_door_state(cc, l, j, r.lit);
+            let in_door = abs(dv) < hd && vc > cc_industry_DOCK_H && vc < top;
+            let dz = vc - cc_industry_DOCK_H;
+            // The door's own look, and its emission.
+            var d_alb = w.door_col;
+            var d_emit = vec3<f32>(0.0);
+            let seam = fract(dz / 0.6) * 0.6 < 0.03;
+            let vis = cc_industry_vision(dv, dz);
+            let level = 0.55 + 0.45 * st.z;
+            if (st.x > 0.5) {
+                // Open: the lit interior, the dock floor's lip at its foot.
+                d_alb = vec3<f32>(0.02);
+                d_emit = r.tint * (cc_industry_OPEN_RAD * level
+                                   * smoothstep(0.0, 0.3, dz));
+            } else {
+                d_alb = d_alb * cc_industry_band(
+                    select(1.0, 0.45, seam), 1.0 - 0.55 * cc_industry_SEAM_FRAC,
+                    0.03, fp);
+                if (vis) {
+                    d_alb = vec3<f32>(0.04);
+                }
+                if (st.y > 0.5) {
+                    let pat = select(0.0, cc_industry_LEAK_RAD, vis)
+                        + cc_industry_band(select(0.0, cc_industry_SEAM_RAD,
+                                                  seam),
+                                           cc_industry_SEAM_RAD
+                                           * cc_industry_SEAM_FRAC, 0.03, fp);
+                    d_emit = r.tint * (level * pat);
+                }
+            }
+            // The door's mean over its face, for the far field below.
+            let d_mean = select(
+                r.tint * (level * st.y * (cc_industry_LEAK_RAD
+                                          * cc_industry_VISION_FRAC
+                                          + cc_industry_SEAM_RAD
+                                          * cc_industry_SEAM_FRAC)),
+                r.tint * (cc_industry_OPEN_RAD * level * 0.95), st.x > 0.5);
+            // The frame around it: the shelter's fabric where there is one
+            // (under its geometry close in, standing in for it far out), a
+            // steel jamb where not; the dock wall under the door.
+            let rim = select(0.15, 0.50, w.shelter);
+            let in_rim = abs(dv) < hd + rim && vc > 1.0
+                         && vc < top + select(0.15, 0.75, w.shelter);
+            var p_alb = alb;
+            if (in_rim) {
+                p_alb = select(vec3<f32>(0.10), vec3<f32>(0.035), w.shelter);
+            }
+            if (abs(dv) < hd + rim && vc <= cc_industry_DOCK_H) {
+                p_alb = vec3<f32>(0.12);
+            }
+            var p_emit = vec3<f32>(0.0);
+            if (in_door) {
+                p_alb = d_alb;
+                p_emit = d_emit;
+            }
+            // Past a few metres per pixel a door is its dock cell's mean.
+            let k = smoothstep(1.0, 3.0, fp);
+            if (vc > cc_industry_DOCK_H && vc < top) {
+                let fd = cc_industry_DOOR_W / cc_industry_DOCK_PITCH;
+                let fr = 2.0 * rim / cc_industry_DOCK_PITCH;
+                let rim_alb = select(vec3<f32>(0.10), vec3<f32>(0.035),
+                                     w.shelter);
+                let far_alb = w.door_col * fd + rim_alb * fr
+                              + alb * (1.0 - fd - fr);
+                alb = mix(p_alb, far_alb, k);
+                emit = mix(p_emit, d_mean * fd, k);
+            } else {
+                alb = p_alb;
+            }
+        }
+        // The court's wall packs, each washing the wall under it.
+        let k_far = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+        var near = vec3<f32>(0.0);
+        var flux = vec3<f32>(0.0);
+        for (var q: i32 = 0; q < CITY_FLOOD_MAX; q = q + 1) {
+            let f = city_flood(cc, q);
+            if (!f.on) {
+                continue;
+            }
+            let gain = f.color * cc_industry_WASH_GAIN;
+            near = near + gain * cc_industry_wash(
+                f.head.z - vc, dot(h.pos.xy - f.head.xy, tang),
+                cc_industry_WASH_W0, cc_industry_WASH_W1,
+                cc_industry_WASH_RISE, cc_industry_WASH_FADE);
+            flux = flux + gain * cc_industry_wash_flux(
+                f.head.z, cc_industry_WASH_W0, cc_industry_WASH_W1,
+                cc_industry_WASH_RISE, cc_industry_WASH_FADE);
+        }
+        light = mix(near, flux / (ws.y * cc.height), k_far);
+    } else {
+        // Personnel doors, each with its lamp and the lamp's own wash.
+        let k_far = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
+        var near = vec3<f32>(0.0);
+        var flux = vec3<f32>(0.0);
+        let np = select(0, 2, ws.y > 12.0);
+        for (var q: i32 = 0; q < np; q = q + 1) {
+            let pd = cc_industry_pdoor(cc, face, q, ws.y);
+            if (pd.z < 0.5) {
+                continue;
+            }
+            let ds = sw - pd.x;
+            let hw = 0.5 * cc_industry_PDOOR_W;
+            if (abs(ds) < hw && vc < cc_industry_PDOOR_H) {
+                alb = vec3<f32>(0.10) * select(1.0, 0.6,
+                                               abs(ds) > hw - 0.06);
+            } else if (abs(ds) < hw + 0.08 && vc < cc_industry_PDOOR_H + 0.08) {
+                alb = vec3<f32>(0.06);                     // the frame
+            }
+            if (pd.y > 0.5) {
+                let col = w.lamp_col;
+                // The lens, widened toward a pixel at constant energy.
+                let sg = max(cc_industry_PLAMP_R, 0.35 * fp);
+                let kk = (cc_industry_PLAMP_R * cc_industry_PLAMP_R)
+                         / (sg * sg);
+                let dz = vc - cc_industry_PLAMP_Z;
+                emit = emit + col * (cc_industry_PLAMP_RAD * kk
+                    * exp(-0.5 * (ds * ds + dz * dz) / (sg * sg)));
+                let gain = col * cc_industry_PLAMP_GAIN;
+                near = near + gain * cc_industry_wash(
+                    cc_industry_PLAMP_Z - vc, ds, 0.3, 0.5, 0.15, 1.6);
+                flux = flux + gain * cc_industry_wash_flux(
+                    cc_industry_PLAMP_Z, 0.3, 0.5, 0.15, 1.6);
+            }
+        }
+        light = mix(near, flux / (ws.y * cc.height), k_far);
+    }
+
+    // --- light ---------------------------------------------------------------
+    let district = city_glow_sample(h.pos.xy, 2.0);
+    let raw = CITY_LAMP_RADIANCE * (0.20 + 1.3 * smoothstep(0.02, 0.45, district))
+              * cc_industry_street_wall(h.pos.xy, tang, fp);
+    // Street lamps stand 9 m tall and throw down: their light on a wall
+    // fades out above their heads rather than running up to the eaves.
+    light = light + CITY_LAMP_COLOR * (0.35 * raw / (1.0 + raw * 0.30)
+                                       * smoothstep(11.0, 5.0, vc));
+    let lamp = (alb / cc_industry_ALB_REF) * light;
+    let refl = lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
+               + alb * (cc_industry_fill(h.pos)
+                        + CITY_MOONLIGHT * max(dot(n, u.sun_dir.xyz), 0.0));
+    return refl + emit;
+}
+
+// Dock hardware: black fabric shelters, black rubber bumpers, a steel lip.
+fn cc_industry_dock_shade(h: CityHit, cc: CityCell, s: cc_industry_Slot)
+        -> vec3<f32> {
+    let fwd = cc_industry_fwd(s.front);
+    let v = abs(fwd.x * (h.pos.y - s.ctr.y) - fwd.y * (h.pos.x - s.ctr.x));
+    var alb = vec3<f32>(0.035);
+    if (h.pos.z <= cc_industry_DOCK_H + 0.001 && v < 1.0) {
+        alb = vec3<f32>(0.14);
+    }
+    return cc_industry_lit(cc, h.pos, h.normal, alb);
 }
 
 // ============================================================================
@@ -14800,6 +15254,7 @@ fn cc_industry_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
             return cc_industry_rubble(h, cc, fp, 0.28,
                                       vec3<f32>(0.22, 0.17, 0.10));
         }
+        case 714: { return cc_industry_dock_shade(h, cc, s); }
         default: { return cc_industry_fork_shade(h, cc, s, fp); }
     }
 }
