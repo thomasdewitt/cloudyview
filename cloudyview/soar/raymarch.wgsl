@@ -4502,6 +4502,19 @@ fn city_vnoise(p: vec2<f32>, freq: f32, off: f32) -> f32 {
     return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
 }
 
+// A mean-1 texture, 1 + amp (n - 0.5) over city_vnoise, dissolving into its
+// mean 1 as the footprint crosses the band `lod` — and not evaluated at all
+// once it has: past the band the value IS the mean, so skipping the noise
+// changes nothing but the cost.
+fn city_detail(p: vec2<f32>, freq: f32, off: f32, amp: f32, fp: f32,
+               lod: vec2<f32>) -> f32 {
+    let k = smoothstep(lod.x, lod.y, fp);
+    if (k >= 1.0) {
+        return 1.0;
+    }
+    return mix(1.0 + amp * (city_vnoise(p, freq, off) - 0.5), 1.0, k);
+}
+
 // --- manholes -----------------------------------------------------------------
 
 // Site j on centreline k of the streets running along y (`along_y`) or
@@ -4633,16 +4646,14 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     let ftone = mix(1.0 + 0.30 * (city_u01(fh.x) - 0.5), 1.0,
                     smoothstep(0.4 * CITY_FLAG, 1.5 * CITY_FLAG, fp));
     // Stains: the dark blots every city sidewalk carries, mean 1.
-    let stain = mix(1.0 + 0.40 * (city_vnoise(p, 0.9, 3.7) - 0.5), 1.0,
-                    smoothstep(0.5, 2.0, fp));
+    let stain = city_detail(p, 0.9, 3.7, 0.40, fp, vec2<f32>(0.5, 2.0));
     let rel_walk = CITY_REL_WALK * ftone * stain * (1.0 - 0.6 * joint);
     let rel_in = select(CITY_REL_LOT * stain, rel_walk, walk_ok);
 
     // Asphalt: aggregate at a quarter metre, patching at six. Both mean 1.
-    let agg = mix(1.0 + 0.30 * (city_vnoise(p, 4.0, 0.0) - 0.5), 1.0,
-                  smoothstep(0.08, 0.30, fp));
-    let patching = mix(1.0 + 0.45 * (city_vnoise(p, 0.17, 31.7) - 0.5), 1.0,
-                    smoothstep(2.0, 8.0, fp));
+    let agg = city_detail(p, 4.0, 0.0, 0.30, fp, vec2<f32>(0.08, 0.30));
+    let patching = city_detail(p, 0.17, 31.7, 0.45, fp,
+                               vec2<f32>(2.0, 8.0));
     var road = vec3<f32>(agg * patching);
 
     // Markings, painted only on the carriageway. `ax`/`ay` are the offsets
@@ -4690,8 +4701,7 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                       * city_stripes(rd.sy, 0.25, 0.5, 1.0, fp);
     }
     // Paint wears through where the tyres run; mean 0.8.
-    let wear = mix(0.6 + 0.4 * city_vnoise(p, 1.3, 9.1), 0.8,
-                   smoothstep(0.3, 1.2, fp));
+    let wear = 0.8 * city_detail(p, 1.3, 9.1, 0.5, fp, vec2<f32>(0.3, 1.2));
     white = min(white, 1.0) * wear;
     yellow = min(yellow, 1.0) * wear;
     road = mix(road, vec3<f32>(CITY_REL_PAINT), white);
@@ -4717,7 +4727,7 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     // gutter and off the crown of the road.
     let film = w_road * CITY_WET_ROAD + w_gutter
              + (w_kerb + w_in) * CITY_WET_WALK;
-    let n = 0.62 * city_vnoise(p, 0.38, 0.0) + 0.38 * city_vnoise(p, 1.1, 37.1);
+    let pud_k = smoothstep(CITY_PUDDLE_LOD.x, CITY_PUDDLE_LOD.y, fp);
     let region = city_vnoise(p, 0.025, 5.3) - 0.5;
     let crown = 1.0 - smoothstep(0.0, 2.5, min(select(1e3, ex, on_x),
                                                select(1e3, ey, on_y)));
@@ -4747,19 +4757,23 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                   smoothstep(0.3, 1.2, fp));
     let bias = 0.38 * gutter + 0.14 * rut * w_road
              - 0.12 * crown - 0.35 * (w_kerb + w_in) + 0.12 * region;
-    let pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
-                               CITY_PUDDLE_THR + CITY_PUDDLE_EDGE, n + bias);
     let pud_mean = 1.0 / (1.0 + exp(-(bias + 0.5 - CITY_PUDDLE_FIT.x)
                                     / CITY_PUDDLE_FIT.y));
-    let puddle = mix(pud_sharp, pud_mean,
-                     smoothstep(CITY_PUDDLE_LOD.x, CITY_PUDDLE_LOD.y, fp))
-               * (1.0 - mh.x);
+    // The noise only while the puddles are resolved: past the band the
+    // coverage IS its expectation.
+    var pud_sharp = pud_mean;
+    if (pud_k < 1.0) {
+        let n = 0.62 * city_vnoise(p, 0.38, 0.0)
+              + 0.38 * city_vnoise(p, 1.1, 37.1);
+        pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
+                               CITY_PUDDLE_THR + CITY_PUDDLE_EDGE, n + bias);
+    }
+    let puddle = mix(pud_sharp, pud_mean, pud_k) * (1.0 - mh.x);
 
     // The film is not a sheet: it pools in the texture and drains off the
     // high spots, so its gloss mottles at half a metre and the joints hold
     // water. Mean 1, so the far field keeps the film's average sheen.
-    let mottle = mix(1.0 + 1.4 * (city_vnoise(p, 1.7, 11.3) - 0.5), 1.0,
-                     smoothstep(0.3, 1.2, fp));
+    let mottle = city_detail(p, 1.7, 11.3, 1.4, fp, vec2<f32>(0.3, 1.2));
     var g: CityGround;
     g.alb = dry * (1.0 - CITY_WET_DARKEN * film * (1.0 - puddle)
                    - CITY_PUDDLE_DARKEN * puddle);
