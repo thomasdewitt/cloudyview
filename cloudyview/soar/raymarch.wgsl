@@ -17315,14 +17315,15 @@ fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 
 // The refinement stage's hook: the plants inside their near band, in full,
 // over [t0, t1] (t1 = what the plain pass found). The band ends where the
-// widest near band ends, DF_NEAR_FP (the ocotillo's), so a camera high over
-// the desert has nothing to walk here.
-const DF_NEAR_FP: f32 = 0.10;
+// widest near band ends, DESERT_FLORA_REFINE_FP_M (the ocotillo's far
+// threshold), which desert_surface_refine also uses to leave early — a
+// camera high over the desert has nothing to walk here.
+const DESERT_FLORA_REFINE_FP_M: f32 = 0.10;
 
 fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                        t0: f32, t1_in: f32, pixel_angle: f32) -> DesertHit {
     let dither = df_ray_dither(dir);
-    let t1 = min(t1_in, DF_NEAR_FP / max(pixel_angle, 1e-9));
+    let t1 = min(t1_in, DESERT_FLORA_REFINE_FP_M / max(pixel_angle, 1e-9));
     var h: DesertHit;
     h.hit = false;
     h.t = t1;
@@ -17879,16 +17880,6 @@ fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>) -> f32 {
 fn desert_flora_far_shade(c: DesertCover, dir: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
     return (L.sun * c.sun_k + L.sky * c.sky_k + L.ground * c.gnd_k) / DF_PI;
-}
-
-// The refine stage's plants: those the plain pass (desert_flora_trace)
-// leaves for fs_surface_refine, over [t0, t1] — out to the footprint
-// DESERT_FLORA_REFINE_FP_M, beyond which the plain pass draws them. STUB
-// until the flora section replaces it.
-const DESERT_FLORA_REFINE_FP_M: f32 = 0.10;
-fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                       t0: f32, t1: f32, pixel_angle: f32) -> DesertHit {
-    return desert_miss();
 }
 
 // === END DESERT FLORA ===
