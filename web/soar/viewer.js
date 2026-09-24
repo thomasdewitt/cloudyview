@@ -1879,11 +1879,11 @@ export class Viewer {
    * throws, and fails the capture with it. A meter that saw no light keeps
    * DEFAULT_EXPOSURE, the live loop's own ignore rule.
    */
-  async _meterCaptureExposure(look, size) {
+  async _meterCaptureExposure(look, size, overrides = {}) {
     if (!look.meter) return look.exposure;
     for (;;) {
       const highlight = await this.renderer.meterLuminance(
-        size, this._captureViewKwargs(look));
+        size, { ...this._captureViewKwargs(look), ...overrides });
       if (highlight !== null) {
         return highlight > 0
           ? autoExposureTarget(highlight, this.toneMapWhitePoint)
@@ -2377,11 +2377,9 @@ export class Viewer {
       for (const warning of writer.warnings ?? []) console.warn(warning);
 
       // The capture's look, decided once for the whole video — including
-      // the exposure, metered here on the first frame's view and then HELD:
-      // a per-frame meter would flicker, and a video wants a still exposure
-      // the way a camera on a tripod does.
-      const look = this._captureLook(this.captureVideoTier);
-      look.exposure = await this._meterCaptureExposure(look, size);
+      // the exposure, metered on the first frame and then HELD
+      // (_trackLook).
+      const look = await this._trackLook(size, frames[0]);
 
       target = createOfflineTarget(this.device, size, "soar-video");
       // One staging buffer for the whole video, like the target: made per
@@ -2394,27 +2392,7 @@ export class Viewer {
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
         if (this._videoAbort) throw new Error("Cancelled.");
-        const position = cameraWorldOrigin(
-          frames[i].position, this.scene.bmin, this.scene.bmax);
-        // The frame's surface offset rides on the pose the same way the
-        // camera origin does — packUniforms derives row 24 from a pose
-        // that carries a surfacePosition (world metres, like the live
-        // camera's). A v1 track has no surface frame: over a city the
-        // frame's world xy folds against the static offset instead, and
-        // over the day ocean the null pose frame makes packUniforms write
-        // the static offset folded (exactly 0.0) — the un-shifted surface
-        // either way, which is what those recordings meant.
-        const sp = frames[i].surfacePosition;
-        const pose = {
-          position,
-          azimuth: frames[i].azimuth,
-          elevation: frames[i].elevation,
-          fov: frames[i].fov,
-          surfacePosition: sp
-            ? [sp[0] * this.scene.surfacePeriod,
-               sp[1] * this.scene.surfacePeriod]
-            : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
-        };
+        const pose = this._trackPose(frames[i]);
         const overlays = this.captureOverlays
           ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze,
                                   knocksDue(knocks,
@@ -2472,6 +2450,31 @@ export class Viewer {
     }
   }
 
+  /**
+   * The camera pose a resampled track frame renders from. The frame's
+   * surface offset rides on the pose the same way the camera origin does —
+   * packUniforms derives row 24 from a pose that carries a surfacePosition
+   * (world metres, like the live camera's). A v1 track has no surface
+   * frame: over a city the frame's world xy folds against the static offset
+   * instead, and over the day ocean the null pose frame makes packUniforms
+   * write the static offset folded (exactly 0.0) — the un-shifted surface
+   * either way, which is what those recordings meant.
+   */
+  _trackPose(frame) {
+    const position = cameraWorldOrigin(
+      frame.position, this.scene.bmin, this.scene.bmax);
+    const sp = frame.surfacePosition;
+    return {
+      position,
+      azimuth: frame.azimuth,
+      elevation: frame.elevation,
+      fov: frame.fov,
+      surfacePosition: sp
+        ? [sp[0] * this.scene.surfacePeriod, sp[1] * this.scene.surfacePeriod]
+        : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
+    };
+  }
+
   /** The overlays an offline frame draws, laid out for that frame's size.
    *  `haze` is the CAPTURE's, so the minimap reads like the picture it sits
    *  on rather than like the session it was launched from. */
@@ -2504,10 +2507,35 @@ export class Viewer {
     return overlays;
   }
 
-  /** The track as a file, which `soar TRACK.json` renders on the desktop. */
-  downloadTrack(samples, knocks = []) {
-    const size = this.captureDimensions();
-    const payload = trackPayload(this.renderMetadata(size), samples, knocks);
+  /**
+   * A track video's look, decided once for the whole file: the video tier's
+   * look, with the exposure metered at frame 0's own pose and clock — not
+   * the live camera, which sits wherever the flight ended — and then HELD:
+   * a per-frame meter would flicker, and a video wants a still exposure the
+   * way a camera on a tripod does. The browser's video and the header of
+   * the saved track (which `soar TRACK.json` renders from) both come from
+   * here, so the two videos of one flight share an exposure.
+   */
+  async _trackLook(size, frame0) {
+    const look = this._captureLook(this.captureVideoTier);
+    look.exposure = await this._meterCaptureExposure(
+      look, size, { camera: this._trackPose(frame0),
+                    sceneTime: frame0.sceneTime });
+    return look;
+  }
+
+  /** The track as a file, which `soar TRACK.json` renders on the desktop.
+   *  Its header describes the video — the video tier's look, metered as
+   *  renderTrackVideo meters it — rather than a still of the live view. */
+  async downloadTrack(samples, knocks = []) {
+    const { evenSize } = await import("./video.js");
+    const size = evenSize(this.captureDimensions());
+    const [frame0] = resampleTrack(
+      samples, this.videoFps, { periodic: this.renderer.periodic,
+                                linearPosition: Boolean(this.scene.city) });
+    const look = await this._trackLook(size, frame0);
+    const payload = trackPayload(this.renderMetadata(size, look), samples,
+                                 knocks, this.scene.surfacePeriod);
     download(new Blob([JSON.stringify(payload)], { type: "application/json" }),
              timestampedName("cloudyview_track", ".json"));
     this.ui.say(`Saved ${samples.length} samples.`, 3);
@@ -2524,16 +2552,10 @@ export class Viewer {
    * `look` is what the capture actually marched (_captureLook, with the
    * metered exposure filled in) — the honesty trail: a named-tier capture no
    * longer marches the session's haze, LOD or exposure, so recording the live
-   * values would misreport every one of them. When no capture has run (the
-   * track download), the still tier's look is described with the session's
-   * exposure standing in on a metering tier — the capture meters at render
-   * time and there is no reading to write down yet.
+   * values would misreport every one of them. A saved track's header is a
+   * capture too: the video's look, metered at its first frame (_trackLook).
    */
-  renderMetadata(size, look = null) {
-    if (!look) {
-      look = this._captureLook(this.captureStillTier);
-      if (look.meter) look.exposure = this.exposure;
-    }
+  renderMetadata(size, look) {
     const preset = K.QUALITY_PRESETS[look.preset];
     const parked = K.QUALITY_PRESETS.high;   // the top hold rung's sampling
     // The cloud-folded relative position, as ever — with the city block
@@ -2618,8 +2640,9 @@ export class Viewer {
         // is that everything here comes from `look`.
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
-        // The scene clock the still was taken at (witness --time).
-        scene_time: this.sceneTime,
+        // The scene clock the still was taken at (witness --time): the
+        // sea's, and 0 over anything else, as row 24.z is.
+        scene_time: this.scene.city || this.scene.desert ? 0 : this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
         light_march_lod_degrees:
@@ -2968,8 +2991,10 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
-      // The scene clock the view was held at: where the sea was.
-      "--time", n(this.sceneTime),
+      // The scene clock the view was held at: where the sea was. Only the
+      // sea reads it (row 24.z is 0 elsewhere), so only the sea writes it.
+      ...(this.scene.city || this.scene.desert
+          ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree

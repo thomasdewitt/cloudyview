@@ -622,6 +622,7 @@ export class Renderer {
     s.oceanFifDx = tile.dx;
     s.oceanTileExtent = tile.tileExtent;
     s.surfacePeriod = tile.surfacePeriod;
+    s.clockPeriod = tile.clockPeriod ?? null;
     s.oceanMaxLod = tile.maxLod;
     try {
       await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
@@ -2112,6 +2113,7 @@ export class Renderer {
       oceanFifDx: s.oceanFifDx,
       oceanTileExtent: s.oceanTileExtent,
       surfacePeriodM: s.surfacePeriod,
+      clockPeriodS: s.clockPeriod ?? null,
       oceanEnabled: true,
       oceanMaxLod: s.oceanMaxLod,
       nested: s.nested,

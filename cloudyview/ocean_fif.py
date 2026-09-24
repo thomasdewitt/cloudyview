@@ -67,9 +67,9 @@ SPREAD_S = 2.0
 # draws no rows. 12 m is a young sea under a moderate breeze and close to
 # where the static tile put its dominant waves (10 m).
 PEAK_WAVELENGTH_M = 12.0
-PEAK_ENHANCEMENT = 6.0
+PEAK_ENHANCEMENT = 4.0
 PEAK_WIDTH = 0.15
-PEAK_HEADING_DEG = 12.0
+PEAK_HEADING_DEG = 22.0
 # RMS slope of the resolved sea (both axes). The static tile resolved 0.0908
 # at 0.2 m; its own mip table put 5% of that variance in the finest octave,
 # so the same sea resolved at 0.4 m is 0.088.
