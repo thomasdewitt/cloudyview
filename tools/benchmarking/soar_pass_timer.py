@@ -63,6 +63,8 @@ from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
 from soar_shader_ab import source_for                       # noqa: E402
 from gpu_idle import check_quiet, clock_mode, require_idle  # noqa: E402
+from night_city_harness import (CITY_VIEWS, MOON_AZIMUTH,     # noqa: E402
+                                MOON_ELEVATION, NIGHT_EXPOSURE)
 
 OUTPUT = (2560, 1440)
 # A null control within this (and rounds agreeing within it) is what lets
@@ -171,7 +173,11 @@ def main():
     ap.add_argument("--cases", default="twpice,rce,dycoms")
     ap.add_argument("--demos", type=Path, default=REPO / "dist" / "soar" / "demos",
                     help="prebaked demo directory (default: dist/soar/demos)")
-    ap.add_argument("--views", default="v1,v4,v8")
+    ap.add_argument("--views", default="v1,v4,v8",
+                    help="the judge views (v1..v8); with --surface city also "
+                         "the night-city harness's (aerial, base, street, "
+                         "horizon, moonrise, moon_check), rendered as it "
+                         "renders them: under the moon, at night exposure")
     ap.add_argument("--tiers", default="low,minimal")
     ap.add_argument("--frames", type=int, default=16,
                     help="timed passes per block")
@@ -202,7 +208,7 @@ def main():
     for name, spec in variants:
         print(f"  {name} = {spec}")
     print(f"  clocks: {clock_mode()}")
-    header = f"{'case':10s} {'tier':8s} {'view':4s} " + " ".join(
+    header = f"{'case':10s} {'tier':8s} {'view':8s} " + " ".join(
         f"{n:>9s}" for n in names)
     if len(names) > 1:
         header += "  " + " ".join(f"{n + '/' + names[0]:>12s}" for n in names[1:])
@@ -242,11 +248,24 @@ def main():
             scale = tier["render_scale"]
             size = (max(1, int(OUTPUT[0] * scale + 0.5)),
                     max(1, int(OUTPUT[1] * scale + 0.5)))
-            baked = False
+            baked = None       # the light the cache was baked under
             for view_name in args.views.split(","):
-                v = SHORT_VIEWS[view_name]
-                pos = camera_world_origin(v["camera_position"],
-                                          level.bmin, level.bmax)
+                if args.surface == "city" and view_name in CITY_VIEWS:
+                    # tools/night_city_harness.py's view: xy a fraction of
+                    # the box, z in metres, the moon, night exposure.
+                    v = CITY_VIEWS[view_name]
+                    fx, fy = v["xy"]
+                    pos = (level.bmin[0] + fx * (level.bmax[0] - level.bmin[0]),
+                           level.bmin[1] + fy * (level.bmax[1] - level.bmin[1]),
+                           v["z"])
+                    light = {"sun_azimuth": MOON_AZIMUTH,
+                             "sun_elevation": MOON_ELEVATION,
+                             "exposure": NIGHT_EXPOSURE}
+                else:
+                    v = SHORT_VIEWS[view_name]
+                    pos = camera_world_origin(v["camera_position"],
+                                              level.bmin, level.bmax)
+                    light = sun
                 view = ViewState(
                     camera_position=[float(p) for p in pos],
                     azimuth=v["azimuth"], elevation=v["elevation"],
@@ -256,12 +275,12 @@ def main():
                     # The simplified desert at the tiers the app flies it.
                     desert_lite=(args.surface == "desert"
                                  and tier_name in DESERT_LITE_TIERS),
-                    **sun)
-                if tier["light_cache"] and not baked:
+                    **light)
+                if tier["light_cache"] and baked != light:
                     for r in renderers:
                         r.bake_light_cache(state, view,
                                            divisor=LIGHT_CACHE_DIVISOR)
-                    baked = True
+                    baked = light
                 surf = [[] for _ in renderers]
                 refine = [[] for _ in renderers]
                 march = [[] for _ in renderers]
@@ -284,7 +303,7 @@ def main():
                     if len(rounds_k) > 1:
                         round_dev = max(round_dev,
                                         max(rounds_k) / min(rounds_k) - 1.0)
-                line = f"{case:10s} {tier_name:8s} {view_name:4s} " + " ".join(
+                line = f"{case:10s} {tier_name:8s} {view_name:8s} " + " ".join(
                     f"{m:9.3f}" for m in meds)
                 if len(meds) > 1:
                     line += "  " + " ".join(f"{m / meds[0]:12.3f}"
