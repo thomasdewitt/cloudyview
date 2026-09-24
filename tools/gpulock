@@ -10,6 +10,11 @@
 # Waits up to GPULOCK_WAIT seconds (default 1800) and then fails loudly
 # rather than running unlocked.
 #
+# The command also runs in a memory-capped systemd scope (GPULOCK_MEM,
+# default 16G, no swap): on 2026-09-24 one unbounded full-field render grew to
+# 25 GB and the kernel's OOM killer took the whole Claude app down with it.
+# Over the cap, only the offending command dies.
+#
 # Keep each locked command short (a few renders, one bench) so others are
 # not starved; loop outside the lock, not inside it.
 set -euo pipefail
@@ -18,4 +23,6 @@ if [[ $# -eq 0 ]]; then
     echo "usage: tools/gpulock <command...>" >&2
     exit 2
 fi
-exec flock -x -w "${GPULOCK_WAIT:-1800}" -E 75 "$LOCK" "$@"
+exec flock -x -w "${GPULOCK_WAIT:-1800}" -E 75 "$LOCK" \
+    systemd-run --user --scope --quiet \
+    -p MemoryMax="${GPULOCK_MEM:-16G}" -p MemorySwapMax=0 -- "$@"
