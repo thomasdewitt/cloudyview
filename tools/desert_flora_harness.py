@@ -148,8 +148,8 @@ def scan_plants(entry="scan"):
     code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
             + extract_fn(src, "desert_wash") + extract_fn(src, "desert_wash_near")
             + extract_fn(src, "desert_material")
-            + extract_const(src, "DESERT_ENVELOPE_M")
-            + extract_const(src, "DESERT_SLOPE_MAX")
+            + extract_fn(src, "desert_envelope_m_at")
+            + extract_fn(src, "desert_slope_max_at")
             + extract_const(src, "DESERT_OCTAVE_MARGIN")
             + extract(src, FLORA_BEGIN, FLORA_END) + SCAN_MAIN)
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")

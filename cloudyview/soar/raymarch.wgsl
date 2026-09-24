@@ -19303,7 +19303,7 @@ const DF_TALLEST: f32 = 12.7;
 fn df_cell_lid(org: vec2<f32>) -> f32 {
     let half = 0.5 * DF_BIG_CELL;
     return u.ocean.x + desert_tile(org + vec2<f32>(half), 3.0).x
-        + DESERT_ENVELOPE_M[3] + DESERT_SLOPE_MAX[3] * half * 1.4143
+        + desert_envelope_m_at(3) + desert_slope_max_at(3) * half * 1.4143
         + u.ocean.w * DESERT_OCTAVE_MARGIN + DF_TALLEST;
 }
 
