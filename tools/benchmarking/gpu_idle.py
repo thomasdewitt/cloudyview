@@ -30,6 +30,11 @@ import sys
 import time
 
 IDLE_UTIL_PCT = 3
+# Under the M1-proxy clock lock (180 MHz) the compositor's few frames take
+# ten times as long, and the device reads 6-7% busy with nothing but the
+# desktop on it, below what pmon attributes to any process. The context and
+# SM tests still catch a neighbour; this backstop is loosened to match.
+IDLE_UTIL_PCT_LOCKED = 10
 IDLE_SM_PCT = 2
 DESKTOP_SM_PCT = 15
 # Processes that always hold a context on this desktop, the Claude app
@@ -88,9 +93,11 @@ def problems(seconds: float = 3.0, exclude=()) -> list[str]:
                 found.add(f"pid {pid} ({name}) at {sm}% SM")
             if "chrome" not in name:
                 found.add(f"pid {pid} ({name}) holds a GPU context")
-        if util - desktop > IDLE_UTIL_PCT:
+        limit = (IDLE_UTIL_PCT_LOCKED if clock_mode().startswith("locked")
+                 else IDLE_UTIL_PCT)
+        if util - desktop > limit:
             found.add(f"device utilization {util}% of which the desktop "
-                      f"and the caller {desktop}% (> {IDLE_UTIL_PCT}% "
+                      f"and the caller {desktop}% (> {limit}% "
                       f"besides them)")
         if time.monotonic() >= t_end:
             return sorted(found)
