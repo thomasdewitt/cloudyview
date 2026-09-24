@@ -380,8 +380,8 @@ export class Renderer {
       ],
     });
     // Group 1: the surface pre-pass's targets — the final surface, which
-    // only the march reads, and the city's plain one, which only its
-    // refinement stage reads. Every raymarch pipeline shares this one
+    // only the march reads, and the first stage's, which only the second
+    // stage (fs_surface_refine) reads. Every raymarch pipeline shares this one
     // layout, so every pass sets group 1: stand-ins everywhere but those
     // two, which bind that target size's own.
     this.surfaceLayout = device.createBindGroupLayout({
@@ -594,6 +594,7 @@ export class Renderer {
     try {
       await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
       await this._surfacePipeline(this.lighting);
+      await this._refinePipeline(this.lighting);
     } catch (err) {
       throw new Error(`The ${kind} shader failed to build: ` +
                       `${err?.message || err}`);
@@ -948,13 +949,15 @@ export class Renderer {
                           this._shaderSpec({ lighting }));
   }
 
-  /** Whether this scene's surface has the refinement stage: the city's
-   *  facade shell over its plain surface. */
+  /** Whether this scene's surface pass has a second stage
+   *  (fs_surface_refine): the city (its facade shell over the plain boxes)
+   *  and the desert (its near plants over the far forms). A surface joins by
+   *  being named here and in soar_host's SURFACE_REFINE_SURFACES. */
   _hasRefineStage() {
-    return Boolean(this.scene.city);
+    return Boolean(this.scene.city || this.scene.desert);
   }
 
-  /** The refinement stage's pipeline (fs_surface_refine), or null. */
+  /** The second stage's pipeline (fs_surface_refine), or null. */
   _refinePipeline(lighting) {
     if (!this._hasRefineStage()) return null;
     return this._pipeline("fs_surface_refine", SURFACE_FORMAT,
@@ -1522,8 +1525,8 @@ export class Renderer {
 
   /**
    * One march into `targets.sample`, preceded — in a scene with a traced
-   * surface — by the surface pre-pass (raymarch.wgsl fs_surface, and for
-   * the city its refinement stage fs_surface_refine) into
+   * surface — by the surface pre-pass (raymarch.wgsl fs_surface, and for a
+   * surface with one its second stage fs_surface_refine) into
    * `targets.surface`, which the march then reads at group 1. `surfaces` is
    * {surface, refine}, either null. The two use
    * the same uniforms, so the pass traces exactly the rays the march

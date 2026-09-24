@@ -609,9 +609,11 @@ SURFACE_FORMAT = "rgba32float"
 # The scenes whose opaque surface is traced by that pass rather than in the
 # march (raymarch.wgsl: the surface pre-pass section).
 SURFACE_PASS_SURFACES = ("city", "desert")
-# ... and those whose surface is refined by a second stage: the city's
-# facade shell over its plain surface (fs_surface_refine).
-SURFACE_REFINE_SURFACES = ("city",)
+# ... and those whose surface pass has a second stage (fs_surface_refine):
+# the city (its facade shell over the plain boxes) and the desert (its near
+# plants over the far forms). A surface joins by being listed here and in
+# renderer.js _hasRefineStage.
+SURFACE_REFINE_SURFACES = ("city", "desert")
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
@@ -906,8 +908,8 @@ class SoarRenderer:
         self._ray_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout])
         # Group 1: the surface pre-pass's targets (raymarch.wgsl) — the final
-        # surface, read by the march, and the city's plain one, read by its
-        # refinement stage. textureLoad()ed only, so rgba32float's
+        # surface, read by the march, and the first stage's, read by the
+        # second (fs_surface_refine). textureLoad()ed only, so rgba32float's
         # unfilterability is exactly right. The passes that read neither (the
         # bake, the plain surface stage) are laid out without it.
         unfilterable = {"sample_type": "unfilterable-float",
@@ -1005,9 +1007,9 @@ class SoarRenderer:
             light_cache=view.light_cache, sky_probe=view.sky_probe))
 
     def _refine_pipeline_for(self, view: "ViewState"):
-        """The city's second surface stage (fs_surface_refine): the facade
-        shell over the plain surface, which it reads at group 1 — or None in
-        a scene without one."""
+        """The surface pass's second stage (fs_surface_refine), which reads
+        the first stage's surface at group 1 binding 1 — or None in a scene
+        whose surface has no second stage."""
         if self.surface not in SURFACE_REFINE_SURFACES:
             return None
         return self._pipeline_for(
