@@ -929,7 +929,27 @@ wireFlyPair(buildRail());
 // rather than to the page that offers them. Bare ?demo takes the first.
 // The id is looked up across every group: which group a demo sits in is a
 // presentation choice on the landing page and links must not depend on it.
-const wanted = new URLSearchParams(location.search).get("demo");
+//
+// ?surface=ocean|desert, beside ?demo, stands the demo on that day surface
+// whatever its meta says — the in-flight G switch, for a headless run that
+// cannot press keys. Checked here, before anything loads: a name the viewer
+// does not know, or a day surface asked of the night city, is refused
+// rather than flown as something else.
+const query = new URLSearchParams(location.search);
+const wanted = query.get("demo");
+const wantedSurface = query.get("surface");
+if (wantedSurface !== null) {
+  if (wanted === null) {
+    throw new Error("?surface needs ?demo: it picks the ground a demo stands on.");
+  }
+  if (!["ocean", "desert"].includes(wantedSurface)) {
+    throw new Error(`?surface=${wantedSurface}: expected 'ocean' or 'desert'.`);
+  }
+  if (mode === "cyberpunk") {
+    throw new Error(`?surface=${wantedSurface} is a day surface; cyberpunk ` +
+                    "mode flies the night city.");
+  }
+}
 if (wanted !== null) {
   resolveDemos().then(({ root, groups }) => {
     const all = groups.flatMap((group) => group.demos);
@@ -937,7 +957,10 @@ if (wanted !== null) {
     // Through demoSource like every other way in, so the stored mode decides
     // the surface here too — a raw source flew the daytime ocean while the
     // in-flight UI said Cyberpunk.
-    if (demo) enterViewer(demoSource(root, demo));
+    if (demo) {
+      enterViewer({ ...demoSource(root, demo),
+                    ...(wantedSurface ? { surfaceKind: wantedSurface } : {}) });
+    }
     // buildRail shares this promise and reports the failure on the page, so
     // there is nothing to say here beyond not raising it twice.
   }).catch(() => {});
