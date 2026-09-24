@@ -14377,27 +14377,19 @@ fn desert_flora_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 
 // The whole desert along one view ray, in the desert frame: the terrain,
 // then whatever stands on it in front of the terrain hit.
-fn desert_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32)
-        -> DesertHit {
-    let inv_dir = 1.0 / dir;
-    var best = desert_ground(o, dir, pixel_angle, 0.0);
-    let slab = desert_flora_slab(o, dir, inv_dir, best.t);
-    if (slab.y > slab.x) {
-        let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
-                                    pixel_angle);
-        if (fh.hit && fh.t < best.t) {
-            best = fh;
-        }
-    }
-    return best;
-}
-
 // The ground along a view ray from `t_start` on (a point known to be above
 // it): the terrain, its material and normal at the pixel's footprint, and
 // the stones standing on it in front of the terrain hit.
 fn desert_ground(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                  t_start: f32) -> DesertHit {
-    var best = desert_terrain_trace(o, dir, pixel_angle, t_start);
+    return desert_ground_at(o, dir, pixel_angle,
+                            desert_terrain_trace(o, dir, pixel_angle, t_start));
+}
+
+// The same from a terrain hit already found (desert_terrain_trace).
+fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
+                    terrain: DesertHit) -> DesertHit {
+    var best = terrain;
     if (best.hit) {
         // What the ground is at the hit, once: its lightness and its normal
         // at this footprint, which the stones stand on and the shading
@@ -14839,7 +14831,27 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
 fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
                        strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
     let o = desert_camera_origin();
-    let h = desert_trace(o, dir, pixel_angle);
+    let terrain = desert_terrain_trace(o, dir, pixel_angle, 0.0);
+    if (terrain.hit && terrain.t < DESERT_FLORA_REFINE_FP_M / pixel_angle) {
+        // Inside the refine reach the refine stage (desert_surface_refine)
+        // finds the stones and plants in front of this terrain and shades
+        // the nearest; all it takes from here is the terrain's distance.
+        // Shading it here as well cost the near views as much again as the
+        // whole plain pass (perf, M1 proxy).
+        return vec4<f32>(0.0, 0.0, 0.0, terrain.t);
+    }
+    // The whole desert along the ray: the ground, then whatever stands on
+    // it in front of the ground hit.
+    let inv_dir = 1.0 / dir;
+    var h = desert_ground_at(o, dir, pixel_angle, terrain);
+    let slab = desert_flora_slab(o, dir, inv_dir, h.t);
+    if (slab.y > slab.x) {
+        let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
+                                    pixel_angle);
+        if (fh.hit && fh.t < h.t) {
+            h = fh;
+        }
+    }
     if (!h.hit) {
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
@@ -14869,8 +14881,9 @@ fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
 // THE REFINE ENTRY (fs_surface_refine, under DESERT): the near plants the
 // plain pass leaves out, traced in front of what it found. `plain` is the
 // plain pass's (radiance, t) for this pixel, t = 1e30 on a miss; it comes
-// back unchanged unless a plant stands nearer or the ground it hit lies
-// inside the reach, where the plants' exact shadows fall on it. Early-out first: a pixel
+// back unchanged unless a plant stands nearer, or the terrain it found lies
+// inside the reach — where the plain pass shades nothing and this stage
+// shades the ground, its stones and its plants. Early-out first: a pixel
 // whose flora slab begins beyond the refine reach (the flora's own
 // DESERT_FLORA_REFINE_FP_M footprint) leaves with nothing but the read it
 // came in with.
@@ -14884,16 +14897,23 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     }
     var h = desert_flora_refine(o, cr.dir, inv_dir, slab.x, slab.y,
                                 cr.true_pixel_angle);
-    if (!h.hit || h.t >= plain.w) {
-        // No plant nearer. Ground inside the reach is found again and
-        // re-shaded with the plants' exact shadow, which the plain pass
-        // leaves out: every point of the ray short of its first crossing is
-        // above the ground, so a march from just short of plain.w lands on
-        // the same terrain (and stone) in a few steps.
-        if (plain.w >= reach) {
+    if (plain.w >= reach) {
+        // Shaded by the plain pass; only a nearer plant replaces it.
+        if (!h.hit || h.t >= plain.w) {
             return plain;
         }
-        h = desert_ground(o, cr.dir, cr.true_pixel_angle, 0.98 * plain.w);
+    } else {
+        // The plain pass kept only this terrain's distance. The ground and
+        // its stones are found here, from just short of it (every point of
+        // the ray short of its first crossing is above the ground, so the
+        // march lands in a few steps), and the nearer of them and the
+        // plants is shaded, with the plants' exact shadows.
+        let g = desert_ground(o, cr.dir, cr.true_pixel_angle, 0.98 * plain.w);
+        if (!h.hit || (g.hit && g.t < h.t)) {
+            h = g;
+        }
+        // Not finding the terrain the plain pass found would leave the
+        // pixel as it came in, unshaded black: visible, not papered over.
         if (!h.hit) {
             return plain;
         }
