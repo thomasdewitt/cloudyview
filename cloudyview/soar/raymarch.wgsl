@@ -13124,6 +13124,10 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
     } else {
         let rib = 0.78 + 0.44 * (0.5 + 0.5 * cos(6.2831853 * sw / 0.2));
         alb = alb * cc_industry_band(rib, 1.0, 0.1, fp);
+        // The sheets' side laps, one per 1 m cover width: the rhythm that
+        // still reads once the ribs have gone to their mean.
+        let lap = select(1.0, 0.55, fract(sw) < 0.04);
+        alb = alb * cc_industry_band(lap, 1.0 - 0.04 * 0.45, 0.04, fp);
         if (vc < 1.0) {
             alb = vec3<f32>(0.26, 0.25, 0.23);          // concrete plinth
         }
@@ -13132,6 +13136,10 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
         alb = w.band_col * (alb / max(w.alb, vec3<f32>(1e-3)));
     }
     alb = alb * (0.6 + 0.4 * smoothstep(0.0, 1.0, vc));   // grime
+    // The eave flashing: a 0.3 m band of trim along the top of the wall.
+    if (vc > cc.height - 0.3) {
+        alb = alb * 0.55;
+    }
 
     // --- doors ---------------------------------------------------------------
     var emit = vec3<f32>(0.0);
@@ -13277,7 +13285,10 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
     let district = city_glow_sample(h.pos.xy, 2.0);
     let raw = CITY_LAMP_RADIANCE * (0.20 + 1.3 * smoothstep(0.02, 0.45, district))
               * cc_industry_street_wall(h.pos.xy, tang, fp);
-    light = light + CITY_LAMP_COLOR * (0.35 * raw / (1.0 + raw * 0.30));
+    // Street lamps stand 9 m tall and throw down: their light on a wall
+    // fades out above their heads rather than running up to the eaves.
+    light = light + CITY_LAMP_COLOR * (0.35 * raw / (1.0 + raw * 0.30)
+                                       * smoothstep(11.0, 5.0, vc));
     let lamp = (alb / cc_industry_ALB_REF) * light;
     let refl = lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
                + alb * (cc_industry_fill(h.pos)
