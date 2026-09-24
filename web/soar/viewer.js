@@ -10,7 +10,9 @@ import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
-import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
+import {
+  loadDemoIceVolume, loadDemoScene, loadOceanTile, loadSea,
+} from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -197,6 +199,13 @@ export class Viewer {
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
+    // The scene clock (s): where the moving sea is in its motion, uniform
+    // row 24.z. It runs only while the view is flying or a track is being
+    // recorded, never while paused — so a parked view is a still scene and
+    // its accumulation converges, and a held shot keeps the waves it was
+    // held on. Captures take it from the view (a still) or from the track
+    // (a video), never from the wall.
+    this.sceneTime = 0.0;
     this._fpsAcc = 0; this._fpsN = 0; this._fps = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
@@ -374,8 +383,8 @@ export class Viewer {
                                 { schema: K.SURFACE_TILE_SCHEMAS.desert }));
         }
         return (this._ocean ??=
-          await loadOceanTile(this.device, OCEAN_URL, undefined,
-                              { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
+          await loadSea(this.device, OCEAN_URL, undefined,
+                        { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
       };
 
       if (source.kind === "demo") {
@@ -496,7 +505,11 @@ export class Viewer {
                                      // when the cloud frame folds ("the
                                      // ocean should never jump" — Thomas,
                                      // 2026-09-01).
-                                     surfaceTileExtent: scene.oceanTileExtent,
+                                     // Folded at the surface's own period:
+                                     // the tile for the city and the
+                                     // desert, several tiles for the sea,
+                                     // whose swell repeats only there.
+                                     surfaceTileExtent: scene.surfacePeriod,
                                      surfaceOffsetM:
                                        scene.city ? scene.cityOffsetM
                                                   : [0.0, 0.0],
@@ -2392,8 +2405,8 @@ export class Viewer {
           elevation: frames[i].elevation,
           fov: frames[i].fov,
           surfacePosition: sp
-            ? [sp[0] * this.scene.oceanTileExtent,
-               sp[1] * this.scene.oceanTileExtent]
+            ? [sp[0] * this.scene.surfacePeriod,
+               sp[1] * this.scene.surfacePeriod]
             : (this.scene.cityPosition(position)?.slice(0, 2) ?? null),
         };
         const overlays = this.captureOverlays
@@ -2404,8 +2417,12 @@ export class Viewer {
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
+          // The frame's own scene clock: the sea moves as it moved in
+          // flight, one video frame at a time, however many passes each
+          // frame accumulates.
           { ...this._captureViewKwargs(look),
-            camera: pose, frameIndex: i * 1024 },
+            camera: pose, frameIndex: i * 1024,
+            sceneTime: frames[i].sceneTime },
           framesPerVideoFrame, overlays);
         await writer.addFrame(await readback.read(target.texture), i);
 
@@ -2595,6 +2612,8 @@ export class Viewer {
         // is that everything here comes from `look`.
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
+        // The scene clock the still was taken at (witness --time).
+        scene_time: this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
         light_march_lod_degrees:
@@ -2943,6 +2962,8 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
+      // The scene clock the view was held at: where the sea was.
+      "--time", n(this.sceneTime),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree
@@ -3024,6 +3045,7 @@ export class Viewer {
       lightMarchLodDegrees: K.APP_LIGHT_MARCH_LOD_DEGREES * lodStrength,
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
       frameIndex: this.frameIndex,
+      sceneTime: this.sceneTime,
     };
   }
 
@@ -3122,6 +3144,13 @@ export class Viewer {
       this._lastSignature !== null && signature !== this._lastSignature;
     this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
+    // The clock runs with the flight, on the simulation's dt (the camera's
+    // clock, so a stall cannot jump the sea either). It is in the scene key,
+    // so a frame it moves restarts accumulation — which a moving camera has
+    // done already.
+    if (!this.paused && (cameraMoved || this.recorder.recording)) {
+      this.sceneTime += dt;
+    }
 
     if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
@@ -3295,7 +3324,7 @@ export class Viewer {
     // accumulated time, not the wall's: see TrackRecorder.
     if (this.recorder.recording && !this.paused) {
       this.recorder.advance(dt);
-      this.recorder.sample(this.camera);
+      this.recorder.sample(this.camera, this.sceneTime);
       if (this.recorder.full) this._finishTrackRecording(true);
     }
 

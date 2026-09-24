@@ -122,6 +122,29 @@ def test_every_host_binds_what_the_shader_declares():
             "built against that layout.")
 
 
+def test_every_host_lays_out_the_surface_group():
+    """Group 1 is the surface pre-pass's target (raymarch.wgsl), read by the
+    march: the same binding numbers in the shader, the browser's surface
+    layout and the Python host's."""
+    source = SHADER.read_text()
+    declared = {int(n) for n in re.findall(
+        r"@group\(1\)\s*@binding\((\d+)\)", source)}
+    assert declared, "no @group(1) bindings found — the regex has gone stale"
+    js = RENDERER_JS.read_text()
+    start = js.index("this.surfaceLayout = ")
+    js_numbers = {int(n) for n in
+                  re.findall(r"binding:\s*(\d+)", _call_block(js, start))}
+    py = SOAR_HOST.read_text()
+    a = py.index("self._surface_layout = d.create_bind_group_layout(")
+    b = py.index("        ])", a)
+    py_numbers = {int(n) for n in re.findall(r'"binding":\s*(\d+)', py[a:b])}
+    for label, numbers in (("renderer.js surfaceLayout", js_numbers),
+                           ("soar_host _surface_layout", py_numbers)):
+        assert numbers == declared, (
+            f"{label} lays out {sorted(numbers)}; raymarch.wgsl's @group(1) "
+            f"declares {sorted(declared)}")
+
+
 def test_the_periodic_sampler_is_declared():
     """The binding the de-padding added, named rather than merely counted, so
     that renumbering cannot quietly satisfy the test above."""

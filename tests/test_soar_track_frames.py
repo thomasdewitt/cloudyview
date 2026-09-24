@@ -12,7 +12,8 @@ The design under test: the camera tracks each frame in its own coordinates,
 wrapped at its own period — `position` folds at the CLOUD period,
 `surfacePosition` at the tile, both advanced by the same world-space delta
 on every move. Track schema v2 carries both (x/y cloud-folded exactly as
-v1, sx/sy tile-relative at period 1.0), and resampleTrack unwraps each
+v1, sx/sy tile-relative at period 1.0), v3 adds the scene clock (where the
+moving sea was), and resampleTrack unwraps each
 column at its own frame's period. Uniform row 24 is the per-frame surface
 offset, folded into [0, tile): cam.xy - surfacePosition, or the static
 offset for a static render. The shader derives the water uv and the WHOLE
@@ -25,14 +26,15 @@ Pinned here under node, with the real modules:
 
  (a) a camera moved two cloud periods east has position folded into the box
      and surfacePosition advanced by the same delta mod the tile;
- (b) a day scene records v2 samples whose first seven columns are
-     byte-identical to v1, plus the ocean's sx/sy; and the ocean frame is
-     continuous across a cloud crossing;
+ (b) a day scene records v3 samples whose first seven columns are
+     byte-identical to v1, plus the ocean's sx/sy and the scene clock; and
+     the ocean frame is continuous across a cloud crossing;
  (c) record -> resample -> replay of a city crossing preserves the district
      while the cloud position folds exactly as today;
  (d) a v1 7-column track still resamples, with null surface frames;
  (e) resampled sx wraps the short way across the tile boundary and stays in
-     [0, 1);
+     [0, 1); a v2 track replays at clock 0 and a v3 track's clock resamples
+     with the flight;
  (f) spawn identities: the cyberpunk surface frame is the pinned city
      position, and row 8 carries the static offset whatever the camera;
  (g) row 24 semantics: day zero-drift writes a bit-exact 0.0 (the golden
@@ -119,8 +121,8 @@ _JS = textwrap.dedent("""
       day.teleport(1000, -2000);
       const rec = new TrackRecorder();
       rec.start();
-      rec.advance(0.0); rec.sample(day);
-      rec.advance(1.0); rec.sample(day);
+      rec.advance(0.0); rec.sample(day, 5.0);
+      rec.advance(1.0); rec.sample(day, 6.0);
       const rel = day.relativePosition();
       const v1 = [1.0, rel[0], rel[1], rel[2],
                   day.azimuth, day.elevation, day.fov];
@@ -155,11 +157,11 @@ _JS = textwrap.dedent("""
       const spStart = cam.surfacePosition[0];
       const rec = new TrackRecorder();
       rec.start();
-      rec.sample(cam);
+      rec.sample(cam, 0.0);
       for (let i = 0; i < 4; i++) {         // 400 m east, crossing at 5000
         flyEast(cam, 100);
         rec.advance(0.1);
-        rec.sample(cam);
+        rec.sample(cam, 0.1 * (i + 1));
       }
       const samples = rec.stop();
       const frames = resampleTrack(samples, 10.0, { periodic: true });
@@ -203,6 +205,23 @@ _JS = textwrap.dedent("""
       ];
       const frames = resampleTrack(v2, 2.0, { periodic: true });
       out.sxWrap = frames.map((f) => f.surfacePosition[0]);
+      // A v2 track has no scene clock: the sea holds at 0.
+      out.v2Clock = frames.map((f) => f.sceneTime);
+    }
+
+    // (e2) A v3 track's scene clock resamples with the flight, including
+    // across a pause in it (the clock stops while the view is paused, and
+    // so does the recording's own t — but a clock that ran while t held is
+    // the scene's business, and the column carries it either way).
+    {
+      const v3 = [
+        [0.0, 0.0, 0.0, 0.1, 0, 0, 70, 0.5, 0.5, 100.0],
+        [1.0, 0.0, 0.0, 0.1, 0, 0, 70, 0.5, 0.5, 101.0],
+        [2.0, 0.0, 0.0, 0.1, 0, 0, 70, 0.5, 0.5, 102.0],
+        [3.0, 0.0, 0.0, 0.1, 0, 0, 70, 0.5, 0.5, 103.0],
+      ];
+      const frames = resampleTrack(v3, 4.0, { periodic: true });
+      out.v3Clock = frames.map((f) => [f.t, f.sceneTime]);
     }
 
     // (f) The uniforms-offset identity at spawn.
@@ -324,8 +343,8 @@ def result():
     return json.loads(proc.stdout)
 
 
-def test_schema_is_v2(result):
-    assert result["schema"] == "cloudyview.track.v2"
+def test_schema_is_v3(result):
+    assert result["schema"] == "cloudyview.track.v3"
 
 
 def test_two_cloud_periods_east_keeps_the_district(result):
@@ -343,11 +362,12 @@ def test_a_day_recording_keeps_v1_columns_and_gains_the_ocean_frame(result):
     # The day camera carries the ocean's tile frame now.
     assert day["surface"] == pytest.approx(
         [s * 2300.0 for s in day["spExpected"]])
-    assert [len(s) for s in day["samples"]] == [9, 9]
+    assert [len(s) for s in day["samples"]] == [10, 10]
     # The first seven columns are byte-identical to a v1 sample; sx/sy ride
-    # behind them, tile-relative.
+    # behind them, period-relative, and then the scene clock.
     assert day["samples"][1][:7] == day["v1"]
-    assert day["samples"][1][7:] == pytest.approx(day["spExpected"])
+    assert day["samples"][1][7:9] == pytest.approx(day["spExpected"])
+    assert [s[9] for s in day["samples"]] == [5.0, 6.0]
 
 
 def test_the_day_ocean_never_jumps_across_a_cloud_crossing(result):
@@ -360,7 +380,7 @@ def test_the_day_ocean_never_jumps_across_a_cloud_crossing(result):
 
 def test_a_resampled_city_crossing_preserves_the_district(result):
     c = result["crossing"]
-    assert c["sampleWidth"] == 9
+    assert c["sampleWidth"] == 10
     # The cloud x folds exactly as today: 0.98, then the crossing lands at
     # the opposite face and walks on.
     assert c["xs"][0] == pytest.approx(0.98)
@@ -409,6 +429,23 @@ def test_resampled_sx_wraps_the_short_way(result):
     deltas = [((b - a + 0.5) % 1.0) - 0.5 for a, b in zip(sx, sx[1:])]
     assert all(0.0 <= d < 0.1 for d in deltas)
     assert sum(deltas) == pytest.approx(0.12, abs=1e-9)
+
+
+def test_a_v2_track_replays_the_sea_at_clock_zero(result):
+    assert result["v2Clock"] == [0.0] * len(result["v2Clock"])
+
+
+def test_a_v3_track_carries_the_scene_clock(result):
+    # A clock that ran with the flight resamples to the flight's own times —
+    # exactly on the interior segment, where all four knots are real (the
+    # clamped ends ease, as every column's do), and forward throughout.
+    frames = result["v3Clock"]
+    for t, clock in frames:
+        if 1.0 <= t <= 2.0:
+            assert clock == pytest.approx(100.0 + t, abs=1e-9)
+    clocks = [c for _, c in frames]
+    assert all(b > a for a, b in zip(clocks, clocks[1:]))
+    assert clocks[0] == 100.0 and clocks[-1] == pytest.approx(103.0)
 
 
 def test_the_uniforms_offset_identity_at_spawn(result):
@@ -465,9 +502,9 @@ def test_the_shader_derives_water_and_city_from_the_tile_frame():
     quietly reverts one site — a regenerated city block included, since the
     composer rewrites the GENERATED section wholesale."""
     src = SHADER.read_text()
-    # The two water-normal reads sample the offset-corrected frame.
-    assert src.count(
-        "(world_xy - u.surface_offset.xy) / u.ocean_params.y") == 2
+    # The two water reads (the moving sea, and the legacy shader's normal)
+    # sample the offset-corrected frame.
+    assert src.count("world_xy - u.surface_offset.xy") == 2
     # The city frame has ONE entry, and the trace and the dome probe both
     # use it; nothing calls city_trace with a raw world origin.
     assert "fn city_camera_origin()" in src
