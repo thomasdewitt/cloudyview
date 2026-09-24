@@ -40,6 +40,17 @@ sandy floor and steep banks. The carved surface re-routes the water, which
 deepens the washes that captured it, and the loop is iterated to
 self-consistency.
 
+WHAT MAKES THEM A BAJADA'S. A regional slope alone cuts a comb: every wash
+parallel, one width, the same bright thread repeated (the 2026-09-23
+review read them from 300 m as white contour lines). Three things break
+it. The fans' cross-slope turns the fall across the tile, so washes
+radiate over a fan and gather between fans. A wash's width wanders along
+it, and past BRAID_WIDTH_M its floor braids around low gravel bars. And
+lightness goes with size: a rill's floor is barely paler than its soil, a
+braided bed is clean sand, and the active tract either side of a braided
+bed never ages into pavement. Banks are drawn from the blurred footprint of
+the routed centreline, whose cell staircase otherwise beads every bank.
+
 Initial surface: a periodic FIF cascade for the ground's roughness and a
 smooth fBm for its broad undulation — the "FIF is not enough" of the brief is
 exactly why the washes are cut rather than read off the cascade.
@@ -63,25 +74,58 @@ TILE_EXTENT_M = 4096.0
 REGIONAL_SLOPE = 0.02          # the fall the flow law sees, and nothing else does
 LOSS_LENGTH_M = 400.0         # transmission-loss e-folding length
 ROUTING_EXPONENT = 2.5         # discharge shared as slope^this
+# A bajada is coalescing fans: across it the fall turns, radiating from each
+# fan's apex and converging between fans. The flow law sees that as a
+# cross-slope (the fall toward +x per metre) varying on the scale of a fan,
+# zero-mean so the tile stays periodic, and — like the regional slope —
+# stored nowhere in the heights.
+FAN_CROSS_SLOPE = 0.018
+FAN_SCALE_M = 700.0
 ROUGHNESS_M = 0.6              # std of the FIF roughness
 UNDULATION_M = 5.0             # std of the broad fBm undulation
 # The washes.
 CHANNEL_THRESHOLD = 1.2        # channelized beyond this many sheetflows
 DEPTH_MAX_M = 2.0              # the deepest wash's banks
 DEPTH_SCALE = 30.0             # sheetflows past threshold to reach ~0.76 DEPTH_MAX
-WIDTH_MIN_M = 2.0
+# Two cells is the narrowest bed the 2 m tile draws with a smooth bank;
+# the rills below it are the octaves' (raymarch.wgsl desert_surface).
+WIDTH_MIN_M = 4.0
 WIDTH_MAX_M = 24.0
 # Width goes as a power of discharge. Leopold and Maddock's at-a-station
 # 0.5 is for perennial rivers; ephemeral washes on a fan split rather than
 # widen, and the references' threads stay a few metres wide for kilometres.
 WIDTH_EXPONENT = 0.35
 CARVE_ITERATIONS = 12
+# Along a wash its width wanders: a bed widens where the banks are soft and
+# pinches where they are not, by a lognormal factor of this spread,
+# correlated over WIDTH_WANDER_M; a widening bed is shallower for it.
+WIDTH_SPREAD = 0.45
+WIDTH_WANDER_M = 40.0
+PINCH_MIN = 0.6                # a pinch deepens a bed by at most 1/sqrt of this
+# How soft a bank's contour is: the blur its footprint is drawn from.
+BANK_SOFTNESS_M = 2.0
+# A wide wash braids: low gravel bars, lens-shaped and drawn out along the
+# flow, stand up out of its floor and split it into threads. They rise to
+# this fraction of the wash's depth, in beds wider than BRAID_WIDTH_M.
+BAR_RELIEF = 0.45
+BAR_LENGTH_M = 40.0
+BAR_BREADTH_M = 8.0
+BRAID_WIDTH_M = (6.0, 14.0)
 # The surface's age, as lightness (see generate).
 SOIL_LIGHTNESS = 0.5
 SOIL_PATCHINESS = 0.08
 PAVEMENT_LIGHTNESS = 0.08
 PAVEMENT_DRAINAGE_RADIUS_M = 40.0   # "the local drainage" a surface stands above
 BAR_DARKENING = 0.25
+# A wash's floor is as fresh as the wash is big: a rill's is barely paler
+# than the soil it cuts, a braided wash's is clean sand (lightness 1).
+RILL_LIGHTNESS = 0.62
+FRESH_WIDTH_M = (3.0, 12.0)
+# The active tract: the braided washes rework the ground either side of
+# them, so no pavement forms there and the soil is younger and paler.
+TRACT_M = 20.0
+TRACT_GAIN = 1.5
+TRACT_LIGHTENING = 0.08
 
 
 def _round_up(v: float, digits: int = 3) -> float:
@@ -93,9 +137,9 @@ def _round_up(v: float, digits: int = 3) -> float:
 # The shader's albedo endmembers (raymarch.wgsl DESERT_ALBEDO_*; the tile
 # test holds the two to each other): pavement, soil, wash sand, at
 # lightness 0, 1/2 and 1.
-ALBEDO_PAVEMENT = (0.19, 0.15, 0.115)
-ALBEDO_SOIL = (0.33, 0.22, 0.13)
-ALBEDO_WASH = (0.34, 0.29, 0.23)
+ALBEDO_PAVEMENT = (0.17, 0.145, 0.12)
+ALBEDO_SOIL = (0.31, 0.235, 0.155)
+ALBEDO_WASH = (0.33, 0.285, 0.22)
 
 
 def albedo_of(lightness: np.ndarray) -> np.ndarray:
@@ -136,12 +180,14 @@ def _disc(radius_cells: float) -> np.ndarray:
     return (x * x + y * y) <= r * r + 1e-6
 
 
-def route(h: np.ndarray, dx: float, sweeps: int = 2) -> np.ndarray:
+def route(h: np.ndarray, dx: float, cross: np.ndarray,
+          sweeps: int = 2) -> np.ndarray:
     """Discharge per cell, in units of one cell's rain.
 
     Rows drain i -> i+1 (mod n), each cell to its three neighbours in the
-    next row. The regional slope enters every drop as s*dx; nothing else
-    about the domain knows it exists. Two sweeps: the first carries the flow
+    next row. The regional slope enters every drop as s*dx, and the fans'
+    cross-slope `cross` every diagonal one as +-cross*dx; nothing else about
+    the domain knows either exists. Two sweeps: the first carries the flow
     that wraps round from the last row, the second is the answer.
     """
     n = h.shape[0]
@@ -154,8 +200,8 @@ def route(h: np.ndarray, dx: float, sweeps: int = 2) -> np.ndarray:
             drop = h[i] + REGIONAL_SLOPE * dx
             hn = h[(i + 1) % n]
             s0 = (drop - hn) / dx
-            sl = (drop - np.roll(hn, 1)) / (dx * diag)
-            sr = (drop - np.roll(hn, -1)) / (dx * diag)
+            sl = (drop - cross[i] * dx - np.roll(hn, 1)) / (dx * diag)
+            sr = (drop + cross[i] * dx - np.roll(hn, -1)) / (dx * diag)
             q = q_in + 1.0
             discharge[i] = q
             wl = np.maximum(sl, 0.0) ** ROUTING_EXPONENT
@@ -171,35 +217,69 @@ def route(h: np.ndarray, dx: float, sweeps: int = 2) -> np.ndarray:
     return discharge
 
 
-def carve(discharge: np.ndarray, dx: float):
-    """Wash depth (m) from discharge by hydraulic geometry.
+def carve(discharge: np.ndarray, dx: float, wander: np.ndarray,
+          bars: np.ndarray):
+    """Wash depth (m) from discharge by hydraulic geometry, and the width
+    (m) of the wash each cell lies in (0 outside one).
 
     Channelization is discharge over the sheetflow a uniform surface would
     carry (1 / loss per cell). Depth saturates with it; width goes as its
-    WIDTH_EXPONENT power. Each width band is laid down by a disc-shaped grey dilation
-    of its own depth, which is what gives a wash a flat floor and banks.
+    WIDTH_EXPONENT power, times the lognormal `wander` (a wider stretch of
+    the same wash is shallower, holding its cross-section). Each width band
+    is laid down by a disc-shaped grey dilation of its own depth, which is
+    what gives a wash a flat floor and banks; `bars` (0..1) then raise the
+    braid bars out of the floors of the wide ones.
     """
     sheetflow = LOSS_LENGTH_M / dx
     ch = discharge / sheetflow
     depth = np.where(ch > CHANNEL_THRESHOLD,
-                     DEPTH_MAX_M * np.tanh((ch - CHANNEL_THRESHOLD) / DEPTH_SCALE),
-                     0.0)
+                     DEPTH_MAX_M * np.tanh((ch - CHANNEL_THRESHOLD) / DEPTH_SCALE)
+                     / np.sqrt(np.maximum(wander, PINCH_MIN)), 0.0)
     width = np.clip(WIDTH_MIN_M * (np.maximum(ch, CHANNEL_THRESHOLD)
-                                   / CHANNEL_THRESHOLD) ** WIDTH_EXPONENT,
-                    WIDTH_MIN_M, WIDTH_MAX_M)
-    bands = [2.0, 4.0, 8.0, 16.0, 32.0]
+                                   / CHANNEL_THRESHOLD) ** WIDTH_EXPONENT
+                    * wander, WIDTH_MIN_M, WIDTH_MAX_M)
+    bands = [4.0, 8.0, 16.0, 32.0]
     edges = [0.0] + [0.5 * (a + b) for a, b in zip(bands[:-1], bands[1:])] + [1e9]
     out = np.zeros_like(discharge)
+    wide = np.zeros_like(discharge)
+    soft = BANK_SOFTNESS_M / dx
     for wb, lo, hi in zip(bands, edges[:-1], edges[1:]):
-        m = np.where((width >= lo) & (width < hi), depth, 0.0)
-        if m.any():
-            out = np.maximum(out, ndimage.grey_dilation(
-                m, footprint=_disc(0.5 * wb / dx), mode="wrap"))
-    # Banks are steep, not vertical — and not soft: a 0.4-cell blur is the
-    # least that keeps the 2 m bilinear surface from stair-stepping, and a
-    # wider one (0.6 was tried) turned the cut banks into gentle swales that
-    # read as painted lines rather than channels.
-    return ndimage.gaussian_filter(out, 0.4, mode="wrap"), ch
+        sel = (width >= lo) & (width < hi) & (depth > 0.0)
+        if not sel.any():
+            continue
+        disc = _disc(0.5 * wb / dx)
+        inside = ndimage.grey_dilation(sel.astype(np.float64), footprint=disc,
+                                       mode="wrap")
+        # The bank is the half-way contour of the BLURRED footprint: the
+        # routed centreline is a staircase of cells, and the union of discs
+        # along it is a string of beads — scallops a cell apart that a low
+        # sun lit as a ladder along every bank. A blurred staircase's
+        # contours are smooth.
+        bank = _smoothstep(0.25, 0.75, ndimage.gaussian_filter(
+            inside, soft, mode="wrap"))
+        # The floor's depth, smoothed inside the footprint only (a
+        # normalized convolution), so it does not sag toward the banks.
+        wet = ndimage.gaussian_filter(inside, 2.0 * soft, mode="wrap")
+        d = ndimage.gaussian_filter(ndimage.grey_dilation(
+            np.where(sel, depth, 0.0), footprint=disc, mode="wrap"),
+            2.0 * soft, mode="wrap") / np.maximum(wet, 1e-6)
+        w = ndimage.grey_dilation(np.where(sel, width, 0.0), footprint=disc,
+                                  mode="wrap")
+        out = np.maximum(out, bank * d)
+        wide = np.maximum(wide, bank * w)
+    out = out * (1.0 - BAR_RELIEF * bars * _smoothstep(*BRAID_WIDTH_M, wide))
+    # Banks are steep, not vertical — and not soft: the smoothstep on the
+    # blurred footprint puts a bank across about one cell. A plain blur of
+    # the depth wide enough to hide the staircase (0.6 cell was tried)
+    # turned the cut banks into gentle swales that read as painted lines.
+    return out, wide
+
+
+def _smooth_noise(rng, n: int, sigma_cells) -> np.ndarray:
+    """Periodic gaussian-filtered white noise, zero mean, unit std."""
+    f = ndimage.gaussian_filter(rng.standard_normal((n, n)), sigma_cells,
+                                mode="wrap")
+    return (f - f.mean()) / f.std()
 
 
 def generate(n: int, seed: int = SEED, verbose: bool = True):
@@ -217,10 +297,15 @@ def generate(n: int, seed: int = SEED, verbose: bool = True):
     base = (ROUGHNESS_M * (rough - rough.mean()) / rough.std()
             + UNDULATION_M * (und - und.mean()) / und.std())
 
+    cross = FAN_CROSS_SLOPE * _smooth_noise(rng, n, FAN_SCALE_M / dx)
+    wander = np.exp(WIDTH_SPREAD * _smooth_noise(rng, n, WIDTH_WANDER_M / dx))
+    # Rows are the flow direction (axis 0), so the bars are long in it.
+    bars = _smoothstep(0.0, 1.5, _smooth_noise(
+        rng, n, (0.5 * BAR_LENGTH_M / dx, 0.5 * BAR_BREADTH_M / dx)))
     h = base.copy()
     depth = np.zeros_like(h)
     for k in range(CARVE_ITERATIONS):
-        new_depth, ch = carve(route(h, dx), dx)
+        new_depth, wide = carve(route(h, dx, cross), dx, wander, bars)
         depth = 0.5 * depth + 0.5 * new_depth
         h = base - depth
         if verbose:
@@ -244,11 +329,18 @@ def generate(n: int, seed: int = SEED, verbose: bool = True):
     old = (_smoothstep(0.15, 0.7, above)
            * _smoothstep(6.0, 30.0, dist)
            * _smoothstep(-0.9, 0.1, patch))
-    soil = SOIL_LIGHTNESS + SOIL_PATCHINESS * np.tanh(patch)
+    braided = _smoothstep(*BRAID_WIDTH_M, wide)
+    tract = np.clip(TRACT_GAIN * ndimage.gaussian_filter(
+        braided, TRACT_M / dx, mode="wrap"), 0.0, 1.0)
+    old = old * (1.0 - tract)
+    soil = (SOIL_LIGHTNESS + SOIL_PATCHINESS * np.tanh(patch)
+            + TRACT_LIGHTENING * tract)
     ground = soil + (PAVEMENT_LIGHTNESS - soil) * old
-    # Gravel bars: the coarser, darker patches a flood leaves on a wash floor.
-    bars = BAR_DARKENING * _smoothstep(0.8, 1.6, patch)
-    light = wash * (1.0 - bars) + (1.0 - wash) * ground
+    fresh = RILL_LIGHTNESS + (1.0 - RILL_LIGHTNESS) * _smoothstep(
+        *FRESH_WIDTH_M, wide)
+    # The braid bars are the coarser, darker gravel a flood leaves.
+    bar_gravel = BAR_DARKENING * bars * braided
+    light = wash * fresh * (1.0 - bar_gravel) + (1.0 - wash) * ground
     # 1/64 steps: far finer than any albedo difference an eye resolves, and
     # coarse enough that the channel compresses to almost nothing.
     return h - h.mean(), np.round(light * 64.0) / 64.0
