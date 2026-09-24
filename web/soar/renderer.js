@@ -1321,9 +1321,9 @@ export class Renderer {
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
-    // The march pipeline, the surface pipelines (pre-pass and refine) and the render
-    // targets for the state as it stands after the LAST await: from the end
-    // of this loop to the first submit nothing awaits, so the
+    // The march pipeline, the surface pipelines (pre-pass and refine) and
+    // the render targets for the state as it stands after the LAST await:
+    // from the end of this loop to the first submit nothing awaits, so the
     // specialization, the lighting method, the targets and the uniforms
     // below all describe one moment. The method is read once — it picks the
     // pipelines and it is what row 23 packs — or a bake finishing between
