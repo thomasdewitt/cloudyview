@@ -178,9 +178,44 @@ _JS = textwrap.dedent("""
       out.metaCustom = v.renderMetadata([1920, 1080], custom).render;
       out.cmdCustom = v.renderMetadata([1920, 1080], custom)
         .reproduction_command;
-      // No look given (the track download): the still tier's look, with the
-      // session's exposure standing in on a metering tier.
-      out.metaDefault = v.renderMetadata([640, 360]).render;
+    }
+
+    // (g) A saved track's header is the video's look, metered where the
+    // video meters: at frame 0's pose and clock, not the live camera.
+    {
+      const metered = [];
+      const v = makeViewer({
+        videoFps: 30,
+        scene: { sourceName: "field.nc", bmin: [0, 0, 0],
+                 bmax: [1000, 1000, 1000], cityPosition: () => null,
+                 surfacePeriod: 1638.4 },
+        renderer: { periodic: true, cameraMoving: false,
+                    meterLuminance: async (size, kw) => {
+                      metered.push({ size, position: [...kw.camera.position],
+                                     sceneTime: kw.sceneTime,
+                                     haze: kw.haze });
+                      return 4.0;
+                    } },
+        ui: { say() {} },
+      });
+      let blob = null;
+      globalThis.document = { createElement: () => ({ click() {} }) };
+      URL.createObjectURL = (b) => { blob = b; return "blob:track"; };
+      URL.revokeObjectURL = () => {};
+      const samples = [[0, -0.5, 0.2, 0.3, 90, 0, 70, 0.5, 0.25, 12.5],
+                       [1, -0.4, 0.2, 0.3, 90, 0, 70, 0.51, 0.25, 13.5]];
+      await v.downloadTrack(samples, []);
+      const payload = JSON.parse(await blob.text());
+      out.savedTrack = {
+        metered,
+        pose0: v._trackPose(
+          { position: samples[0].slice(1, 4), azimuth: 90, elevation: 0,
+            fov: 70, surfacePosition: [0.5, 0.25] }).position,
+        surfacePeriod: payload.surface_period_m,
+        render: payload.header.render,
+        expected: autoExposureTarget(4.0, 15),
+        videoHaze: K.DEFAULT_HAZE_BY_TIER.high,
+      };
     }
 
     out.tables = {
@@ -310,11 +345,24 @@ def test_metadata_and_command_record_what_was_marched(js):
     assert "--haze 1.7" in js["cmdCustom"]
     assert "--lod 1.3" in js["cmdCustom"]
 
-    # No look given: the still tier's look, session exposure standing in.
-    # Hand-set haze means the still tier resolves to Custom here.
-    assert js["metaDefault"]["tier"] == "custom"
-    assert js["metaDefault"]["exposure"] == 2.5
 
+
+@needs_node
+def test_a_saved_track_holds_the_exposure_its_video_meters(js):
+    """`soar TRACK.json` renders at the header's exposure, the browser's
+    video at the one it meters on frame 0; they are one reading
+    (Viewer._trackLook), taken at the first sample's pose and clock at the
+    video tier's look."""
+    t = js["savedTrack"]
+    assert len(t["metered"]) == 1
+    m = t["metered"][0]
+    assert m["size"] == [640, 360]
+    assert m["position"] == pytest.approx(t["pose0"])
+    assert m["sceneTime"] == 12.5
+    assert m["haze"] == t["videoHaze"]
+    assert t["render"]["tier"] == "high" and t["render"]["quality"] == "high"
+    assert t["render"]["exposure"] == pytest.approx(t["expected"])
+    assert t["surfacePeriod"] == 1638.4
 
 def test_witness_quality_presets_carry_parked_stepping():
     """The CLI promise — '--quality renders as the in-app capture at that
