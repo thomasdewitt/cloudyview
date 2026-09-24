@@ -844,9 +844,13 @@ struct cc_streetlife_Kerb {
     tb: f32,           // the box interval to sphere-trace inside
 }
 
+// `near` picks the stage: false for the view ray's first stage (poles, and
+// the cars far enough to be drawn as boxes), true for the street stage (the
+// cars close enough to be sphere-traced, cc_streetlife_near_trace). Every
+// call passes a constant, so each stage inlines only its own half.
 fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                       t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell,
-                      side: i32, fp: f32) -> cc_streetlife_Kerb {
+                      side: i32, fp: f32, near: bool) -> cc_streetlife_Kerb {
     var out: cc_streetlife_Kerb;
     out.hit = cc_streetlife_miss(ci);
     out.car_ok = false;
@@ -902,7 +906,7 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // Poles, on the core's lamp lattice for this street
     // (city_lamp_lattice), restricted to those standing wholly inside this
     // cell.
-    if (fp < cc_streetlife_POLE_FAR_FP) {
+    if (!near && fp < cc_streetlife_POLE_FAR_FP) {
         let lat = city_lamp_lattice(s.line);
         let sp = lat.x;
         var j0 = i32(ceil((s_lo - 0.45 - lat.y) / sp));
@@ -933,18 +937,42 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // Ground props: everything below is under 1.8 m, so a segment that only
     // clips the lamp heads stops here.
     out.hit = res;
+    // A car close enough for the SDF is the street stage's; the first stage
+    // leaves it out entirely (and so never compiles the SDF — which, in the
+    // first stage, cost 13% of the city's surface time even on views with
+    // barely a pixel of near car in them).
+    let near_sdf = fp < cc_streetlife_CAR_SDF_FP;
     if (!s.park_ok || z_lo > cc_streetlife_BB_Z + 0.1
-        || fp > cc_streetlife_CAR_FAR_FP) {
+        || fp > cc_streetlife_CAR_FAR_FP || near_sdf != near) {
         return out;
     }
-    let g0 = i32(floor((s_lo - cc_streetlife_BB_A) / cc_streetlife_SLOT));
-    let g1 = i32(floor((s_hi + cc_streetlife_BB_A) / cc_streetlife_SLOT));
+    // The slots are walked over the stretch of the run below the car tops
+    // only. The kerb slab is pole-tall, so a ray coming down from a few
+    // metres up crosses it for tens of metres before it is low enough to
+    // meet a car, and the five near-end slots used to be spent on slots it
+    // passes high over: from 6 m up, the parked cars of the whole block
+    // ahead were missing. (inv_dir.z is the core's, 1e30 when level, which
+    // gives the right empty or unbounded window.)
+    let tz0 = (0.0 - o.z) * inv_dir.z;
+    let tz1 = (cc_streetlife_BB_Z - o.z) * inv_dir.z;
+    let ca = max(ta, min(tz0, tz1));
+    let cb = min(tb, max(tz0, tz1));
+    if (cb <= ca) {
+        return out;
+    }
+    let qa = o + ca * dir;
+    let qb = o + cb * dir;
+    let ua = select(qa.y, qa.x, s.ax == 0);
+    let ub = select(qb.y, qb.x, s.ax == 0);
+    let g0 = i32(floor((min(ua, ub) - cc_streetlife_BB_A)
+                       / cc_streetlife_SLOT));
+    let g1 = i32(floor((max(ua, ub) + cc_streetlife_BB_A)
+                       / cc_streetlife_SLOT));
     let gstart = select(g1, g0, fwd_first);
     let gstep = select(-1, 1, fwd_first);
     // Same rule as the poles: near end first, stop at the first prop the ray
     // actually strikes. Five iterations is what an empty run costs, and at
     // ~40% occupancy the loop usually ends on the first or the second.
-    let near_sdf = fp < cc_streetlife_CAR_SDF_FP;
     for (var k: i32 = 0; k < 5; k = k + 1) {
         let j = gstart + k * gstep;
         if (j < g0 || j > g1) {
@@ -963,7 +991,7 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         if (hc.x > hc.y || hc.y <= ta || hc.x > t_end) {
             continue;
         }
-        if (near_sdf) {
+        if (near) {
             out.car_ok = true;
             out.car = v;
             out.ta = max(hc.x, ta);
@@ -1140,9 +1168,6 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
             t_end = res.t;
         }
     }
-    var cand: cc_streetlife_Kerb;
-    var have = false;
-    var cand_t = 1e30;
     for (var side: i32 = 0; side < 4; side = side + 1) {
         // Poles and parked cars stand only on a kerb that has a street
         // (the bake removes streets from open land and lot interiors).
@@ -1150,11 +1175,44 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
             continue;
         }
         let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
-                                   fp);
+                                   fp, false);
         if (k.hit.hit) {
             res = cc_streetlife_nearer(res, k.hit);
             t_end = min(t_end, res.t);
         }
+    }
+    return res;
+}
+
+// The parked cars close enough to be sphere-traced (fp < CAR_SDF_FP), for
+// the street stage (fs_surface_street, the near_props hook), which walks
+// only the stretch of the ray below CITY_FURNITURE_TOP up to the surface
+// the first stages found — the road, since the first stage leaves these
+// cars out. The contact shadow under a car (kind 106 + side) comes from the
+// same trace.
+fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                            t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
+        -> CityHit {
+    let za = o.z + t0 * dir.z;
+    let zb = o.z + t1 * dir.z;
+    if (min(za, zb) > cc_streetlife_BB_Z + 0.2 || max(za, zb) < -0.5) {
+        return cc_streetlife_miss(ci);
+    }
+    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
+             * max(t0, 0.0);
+    if (fp >= cc_streetlife_CAR_SDF_FP) {
+        return cc_streetlife_miss(ci);
+    }
+    var cand: cc_streetlife_Kerb;
+    var have = false;
+    var cand_t = 1e30;
+    var t_end = t1;
+    for (var side: i32 = 0; side < 4; side = side + 1) {
+        if (!city_edge_street(cc, side)) {
+            continue;
+        }
+        let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
+                                   fp, true);
         if (k.car_ok && k.ta < cand_t) {
             cand = k;
             have = true;
@@ -1165,24 +1223,22 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // ONE sphere trace per cell, on the nearest car bounding box any kerb
     // accepted — never one per slot. This is the most consequential
     // structural decision in the file and it was forced by measurement.
-    // cell_props is inlined into the core's DDA, whose loop runs up to 512
-    // times, and the four-kerb by five-slot loops are small enough that the
-    // driver unrolls them: written at the slot, the trace appeared twenty
-    // times in that loop body, and the register pressure alone cost 1.0 s of
-    // a 1.6 s frame set on the `base` view, where no car is anywhere near
-    // the footprint that admits an SDF. Hoisted here it appears once.
+    // The hook is inlined into the DDA, whose loop runs up to 512 times, and
+    // the four-kerb by five-slot loops are small enough that the driver
+    // unrolls them: written at the slot, the trace appeared twenty times in
+    // that loop body, and the register pressure alone cost 1.0 s of a 1.6 s
+    // frame set on the `base` view, where no car is anywhere near the
+    // footprint that admits an SDF (measured when this lived in the first
+    // stage). Hoisted here it appears once.
     // The price is one artifact: a ray that enters a car's box and then
     // grazes past the hull returns a miss rather than falling through to the
     // car behind it. Parked cars sit 2.4 m apart, so that is a sliver on a
     // silhouette edge, and it buys back the whole rest of the scene.
-    if (have && cand_t <= t_end + 1e-4) {
-        let hit = cc_streetlife_trace_car(o, dir, cand.ta, cand.tb, cand.car,
-                                          ci, cand.side, fp);
-        if (hit.hit && (!res.hit || hit.t < res.t)) {
-            res = hit;
-        }
+    if (have) {
+        return cc_streetlife_trace_car(o, dir, cand.ta, cand.tb, cand.car, ci,
+                                       cand.side, fp);
     }
-    return res;
+    return cc_streetlife_miss(ci);
 }
 
 // ---------------------------------------------------------------------------

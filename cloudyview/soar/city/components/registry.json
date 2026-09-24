@@ -63,7 +63,8 @@
    "kind_base": 100,
    "hooks": {
     "cell_props": "cc_streetlife_props_trace",
-    "shade": "cc_streetlife_shade"
+    "shade": "cc_streetlife_shade",
+    "near_props": "cc_streetlife_near_trace"
    },
    "enabled": true
   },
