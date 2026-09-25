@@ -783,13 +783,15 @@ SURFACE_FORMAT = "rgba32float"
 # before at group 1 binding 1, the last writing the surface the march reads.
 # The city: its boxes, the facade shell over them (fs_surface_refine), the
 # street (fs_surface_street: furniture, wet reflection, steam, kept out of
-# the earlier stages' registers). The desert: its ground, then its near
-# plants over the far forms (fs_surface_refine). A surface or a stage joins
+# the earlier stages' registers). The desert: its ground, the explicit
+# plants' far forms in front of it (fs_surface_flora: their walk, kept out
+# of the ground's registers), then its near plants (fs_surface_refine). A
+# surface or a stage joins
 # here and in web/soar/constants.js SURFACE_STAGES, its twin (pinned by
 # tests/test_surface_stages.py); the hosts derive everything else from it.
 SURFACE_STAGES = {
     "city": ("fs_surface", "fs_surface_refine", "fs_surface_street"),
-    "desert": ("fs_surface", "fs_surface_refine"),
+    "desert": ("fs_surface", "fs_surface_flora", "fs_surface_refine"),
 }
 # Under DESERT_LITE the desert's later stages are compiled out and skipped.
 SURFACE_STAGES_LITE = ("fs_surface",)

@@ -21360,12 +21360,19 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
     } else {
         // The plants' shadow on the ground and its stones.
         let plants = desert_flora_shadow(h.pos, sun, fp, refine);
-        let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
         // Stones only where they can resolve: see desert_ground_at.
         rgb = desert_ground_radiance(h, dir, fp, L, plants,
-                                     refine || DESERT_LITE)
-              * (1.0 - far.cover)
-              + far.cover * desert_flora_far_shade(far, dir, L);
+                                     refine || DESERT_LITE);
+        // The plants past the explicit walk over this ground (decals, the
+        // field): here only under DESERT_LITE, whose one stage this is; the
+        // full desert's flora stage lays them over the hazed ground
+        // (desert_surface_flora), keeping the field's registers out of the
+        // stage that traces the whole ground.
+        if (DESERT_LITE) {
+            let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
+            rgb = rgb * (1.0 - far.cover)
+                + far.cover * desert_flora_far_shade(far, dir, L);
+        }
     }
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
@@ -21401,23 +21408,67 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
         // refine stage, so under DESERT_LITE this pass shades every pixel.
         return vec4<f32>(DESERT_UNSHADED, 0.0, 0.0, terrain.t);
     }
-    // The whole desert along the ray: the ground, then whatever stands on
-    // it in front of the ground hit.
-    let inv_dir = safe_inv_dir(dir);
-    var h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
-    let slab = desert_flora_slab(o, dir, inv_dir, h.t);
-    if (slab.y > slab.x) {
-        let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
-                                    pixel_angle);
-        if (fh.hit && fh.t < h.t) {
-            h = fh;
-        }
-    }
+    // The ground; the plants standing in front of it are the flora stage's
+    // (desert_surface_flora), which keeps their walk out of this stage's
+    // registers.
+    let h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
     if (!h.hit) {
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
     return vec4<f32>(desert_shade_pixel(h, o, dir, pixel_angle, frame_index,
                                         strat_pixel, jitter_amp, false), h.t);
+}
+
+// THE FLORA ENTRY (fs_surface_flora, under DESERT and not DESERT_LITE):
+// the plants in front of the ground the first stage found and shaded.
+// `plain` is that stage's (hazed radiance, t), t = 1e30 on a miss. Over the
+// ground go the plants past the explicit walk (decals, the field) — laid
+// over the hazed radiance, which is the same as laying them before the
+// haze, the haze being affine in it — and in front of it all, the nearest
+// explicit plant the walk finds. A pixel the first stage left to the
+// refine stage (DESERT_UNSHADED: ground inside the refine reach, where the
+// far cover is nothing) is the refine stage's whole and passes through.
+fn desert_surface_flora(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    if (plain.x == DESERT_UNSHADED) {
+        return plain;
+    }
+    let o = desert_camera_origin();
+    var out = plain;
+    if (plain.w < 1e29) {
+        out = vec4<f32>(desert_flora_far_over(plain.xyz, o, cr, plain.w),
+                        plain.w);
+    }
+    let inv_dir = safe_inv_dir(cr.dir);
+    let slab = desert_flora_slab(o, cr.dir, inv_dir, plain.w);
+    if (slab.y <= slab.x) {
+        return out;
+    }
+    let fh = desert_flora_trace(o, cr.dir, inv_dir, slab.x, slab.y,
+                                cr.true_pixel_angle);
+    if (!fh.hit || fh.t >= plain.w) {
+        return out;
+    }
+    return vec4<f32>(desert_shade_pixel(fh, o, cr.dir, cr.true_pixel_angle,
+                                        cr.frame_index, cr.strat_pixel,
+                                        cr.jitter_amp, false), fh.t);
+}
+
+// The far cover (desert_flora_far) over a ground point t along the camera
+// ray, laid over that point's hazed radiance `ground` as desert_shade lays
+// it under DESERT_LITE: the same light, the same draws, then the haze.
+fn desert_flora_far_over(ground: vec3<f32>, o: vec3<f32>, cr: CameraRay,
+                         t: f32) -> vec3<f32> {
+    let sun = u.sun_dir.xyz;
+    let far = desert_flora_far(o, cr.dir, t, cr.true_pixel_angle, sun);
+    if (far.cover <= 0.0) {
+        return ground;
+    }
+    let sd = desert_sun_draws(cr.frame_index, cr.strat_pixel, cr.jitter_amp);
+    let pos_world = u.cam_origin.xyz + t * cr.dir;
+    let L = desert_light(pos_world, sun, sd.xyz, t, sd.w);
+    let f = desert_haze(desert_flora_far_shade(far, cr.dir, L), cr.dir, sun, t,
+                        pos_world.z);
+    return ground * (1.0 - far.cover) + far.cover * f;
 }
 
 // One desert hit shaded for this pixel: the sun-march and solar-cone draws
@@ -21427,16 +21478,23 @@ fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
                       pixel_angle: f32, frame_index: u32,
                       strat_pixel: vec2<u32>, jitter_amp: f32,
                       refine: bool) -> vec3<f32> {
+    let sd = desert_sun_draws(frame_index, strat_pixel, jitter_amp);
+    return desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir,
+                        u.sun_dir.xyz, sd.xyz, sd.w, pixel_angle, refine);
+}
+
+// This pixel's sun-march and solar-cone draws, the ones fs_main makes:
+// (the jittered shadow direction, the sun-march jitter).
+fn desert_sun_draws(frame_index: u32, strat_pixel: vec2<u32>,
+                    jitter_amp: f32) -> vec4<f32> {
     let sun = u.sun_dir.xyz;
     let jit = jitter_amp * strat1(frame_index, strat_pixel,
                                   STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
     let cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
                       vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
-    let sun_shadow = sun_cone_dir(sun, sun_tangent_frame(sun), cone,
+    return vec4<f32>(sun_cone_dir(sun, sun_tangent_frame(sun), cone,
                                   SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
-                                  * jitter_amp);
-    return desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir, sun,
-                        sun_shadow, jit, pixel_angle, refine);
+                                  * jitter_amp), jit);
 }
 
 // THE REFINE ENTRY (fs_surface_refine, under DESERT): the near plants the
@@ -21911,6 +21969,7 @@ const DF_SAG_SHELL: f32 = 0.055;       // outermost reach of the spines (m)
 const DF_SAG_SHELL_STEP: f32 = 0.009;  // march step inside the shell (m)
 const DF_SAG_FELT_R: f32 = 0.0035;     // areole felt pad radius (m)
 const DF_SAG_RADIALS: i32 = 14;
+const DF_SAG_RADIAL_REACH: f32 = 0.0385;
 const DF_SAG_CENTRALS: i32 = 4;
 const DF_SAG_EXACT_FP0: f32 = 0.005;
 const DF_SAG_EXACT_FP1: f32 = 0.009;
@@ -22046,6 +22105,15 @@ fn df_cactus_ncols(it: DfItem) -> i32 {
     return select(1 + i32(it.b.x), 1, it.kind == DF_KIND_BARREL);
 }
 
+// A column's bounding sphere: (centre, radius) about its J's box, the
+// widest radius and the tip dome included.
+fn df_col_bound(c: DfColumn) -> vec4<f32> {
+    let hx = c.l1 * cos(c.alpha) + c.rb;
+    let hz = c.l1 * sin(c.alpha) + c.rb + c.l2;
+    return vec4<f32>(c.root + vec3<f32>(c.u * (0.5 * hx), 0.5 * hz),
+                     0.5 * length(vec2<f32>(hx, hz)) + 1.2 * c.r);
+}
+
 fn df_sag_eval(it: DfItem, q: vec3<f32>, blend: f32) -> DfSagSample {
     var out: DfSagSample;
     out.cs = df_col_eval(df_cactus_col(it, 0), q);
@@ -22053,7 +22121,15 @@ fn df_sag_eval(it: DfItem, q: vec3<f32>, blend: f32) -> DfSagSample {
     out.comp = 0;
     let n = df_cactus_ncols(it);
     for (var i: i32 = 1; i < n; i = i + 1) {
-        let cs = df_col_eval(df_cactus_col(it, i), q);
+        // An arm whose bounding sphere lies further than the nearest column
+        // so far plus the blend cannot change the distance (the smooth
+        // minimum is the plain one past its blend): skip its J-path.
+        let cc = df_cactus_col(it, i);
+        let bs = df_col_bound(cc);
+        if (length(q - bs.xyz) - bs.w > out.d + blend) {
+            continue;
+        }
+        let cs = df_col_eval(cc, q);
         out.d = df_smin(out.d, cs.d, blend);
         if (cs.d < out.cs.d) {
             out.cs = cs;
@@ -22078,7 +22154,13 @@ fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
     // Tint 0: every saguaro needle is shaded by its position along it.
     let tint = 0.0;
     let step = DF_TAU / f32(DF_SAG_RADIALS);
-    for (var i: i32 = 0; i < DF_SAG_RADIALS; i = i + 1) {
+    // The radials are short: none reaches past DF_SAG_RADIAL_REACH of the
+    // pad (2 mm set back, 36 mm at the longest, half a millimetre thick),
+    // so a ray passing wider tests only the centrals.
+    let n_rad = select(0, DF_SAG_RADIALS,
+                       dot(w, w) - tc * tc
+                       < DF_SAG_RADIAL_REACH * DF_SAG_RADIAL_REACH);
+    for (var i: i32 = 0; i < n_rad; i = i + 1) {
         let hi = fract(h.y * 31.7 + f32(i) * 0.6180339);
         let hj = fract(h.w * 23.9 + f32(i) * 0.7548776);
         // Irregular, as in the close-ups: a few radials missing, the rest
@@ -22365,6 +22447,13 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     // Lipschitz bound of the pleated distance: the steepest groove wall.
     let slope = 2.0 * it.b.z * it.a.z / DF_PI;
     let inv_lip = 1.0 / sqrt(1.0 + slope * slope);
+    // Outside the columns' smooth outer envelope the pleats do not matter:
+    // a column's pleated distance exceeds its envelope's by at most its
+    // groove depth (depth x radius, the trunk's the largest), the blend
+    // dips a quarter of itself below the nearest, and the envelope's
+    // distance is Lipschitz-1 — so d less these steps safely at full
+    // length, where the pleated bound would take a third of it.
+    let pleat_slack = it.b.z * it.a.y + 0.25 * blend;
 
     // Spine representation, chosen once per plant on the ray dither: exact
     // needles, the shell medium, or — past the capsule hand-off below — the
@@ -22388,6 +22477,13 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     var tau = 0.0;
     var fuzz_t = 1e30;
     var last_key = 0xffffffffu;
+    // The areoles the last key tested: per rib slot (the nearest rib, the
+    // next one), its rib and centre areole; a slot's rib is -1e9 when unused.
+    // Keys a step apart share two of each rib's three areoles, and an areole
+    // tested once cannot give another answer (the best hit persists).
+    var done_comp = -1;
+    var done_k = vec2<f32>(-1e9);
+    var done_j = vec2<f32>(0.0);
     var t = ta;
     var body_t = 1e30;
     var body: DfSagSample;
@@ -22424,15 +22520,32 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     // than half the rib spacing.
                     let k_side = k + select(-1.0, 1.0, kf > k);
                     let ribs_n = select(1, 2, abs(kf - k) > 0.2);
+                    var now_k = vec2<f32>(-1e9);
+                    var now_j = vec2<f32>(0.0);
                     for (var rr: i32 = 0; rr < ribs_n; rr = rr + 1) {
                         let kk = select(k_side, k, rr == 0);
                         let oddk = f32(i32(kk) & 1);
                         let jk = round(sm.cs.s / areole_ds - 0.5 * oddk);
                         let th = (kk - c.phase) * DF_TAU / c.ribs;
+                        if (rr == 0) {
+                            now_k.x = kk;
+                            now_j.x = jk;
+                        } else {
+                            now_k.y = kk;
+                            now_j.y = jk;
+                        }
                         for (var dj: i32 = -1; dj <= 1; dj = dj + 1) {
-                            let sj = (jk + f32(dj) + 0.5 * oddk) * areole_ds;
+                            let jj = jk + f32(dj);
+                            let sj = (jj + 0.5 * oddk) * areole_ds;
                             if (sj < s_ground) {
                                 continue;   // below ground
+                            }
+                            if (sm.comp == done_comp
+                                && ((kk == done_k.x
+                                     && abs(jj - done_j.x) <= 1.0)
+                                    || (kk == done_k.y
+                                        && abs(jj - done_j.y) <= 1.0))) {
+                                continue;   // tested at the last key
                             }
                             let fr = df_col_frame(c, sj, th);
                             let hh = df_rand4(pcg2d(it.seed
@@ -22446,6 +22559,9 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                         }
                     }
                     sp_found = sp.t < tb;
+                    done_comp = sm.comp;
+                    done_k = now_k;
+                    done_j = now_j;
                 }
             } else {
                 let dl = min(max(DF_SAG_SHELL_STEP, 0.5 * pixel_angle * t),
@@ -22459,7 +22575,8 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             }
             stp = min(stp, DF_SAG_SHELL_STEP);
         } else if (shell > 0.0) {
-            stp = max((d - shell) * inv_lip, 0.004);
+            stp = max(max((d - shell) * inv_lip, d - shell - pleat_slack),
+                      0.004);
         }
         t = t + max(stp, 0.5 * eps);
     }
@@ -25262,7 +25379,16 @@ fn df_item_transmit(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
         ch.t = tb;
         let ncol = df_cactus_ncols(it);
         for (var i: i32 = 0; i < ncol; i = i + 1) {
-            ch = df_col_capsules(df_cactus_col(it, i), i, q0, dir, ch);
+            // A column whose bounding sphere the ray passes wide of casts
+            // nothing on it: skip its capsules.
+            let c = df_cactus_col(it, i);
+            let bs = df_col_bound(c);
+            let w = bs.xyz - q0;
+            let tc = dot(w, dir);
+            if (dot(w, w) - tc * tc > bs.w * bs.w) {
+                continue;
+            }
+            ch = df_col_capsules(c, i, q0, dir, ch);
         }
         return select(1.0, 0.0, ch.t < tb && ch.t > ta);
     }
@@ -26354,6 +26480,9 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
 fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     return plain;
 }
+fn desert_surface_flora(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
 fn desert_bounce_albedo() -> vec3<f32> {
     return vec3<f32>(0.0);
 }
@@ -27047,17 +27176,21 @@ fn fs_surface_refine(@builtin(position) frag_pos: vec4<f32>)
     return plain;
 }
 
-// The desert's flora stage (desert-flora's split of the far-form walk out
-// of the first stage's registers): it reads the ground the first stage
-// traced at group 1 binding 1 and writes the surface the refinement reads.
-// Joins the desert's stages in soar_host.SURFACE_STAGES and
-// web/soar/constants.js SURFACE_STAGES, between fs_surface and
-// fs_surface_refine, with the walk; until then it is not run, and it passes
-// the ground through unchanged.
+// The desert's flora stage: the explicit plants' far-form walk, split out
+// of the first stage so its registers stay out of the stage that shades the
+// whole ground (desert_surface_flora). It reads the ground the first stage
+// traced at group 1 binding 1 and writes the surface the refinement reads;
+// the desert's stages in soar_host.SURFACE_STAGES and web/soar/constants.js
+// SURFACE_STAGES, between fs_surface and fs_surface_refine (not under
+// DESERT_LITE, which has no walk).
 @fragment
 fn fs_surface_flora(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
-    return textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    let plain = textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    if (DESERT) {
+        return desert_surface_flora(camera_ray(frag_pos), plain);
+    }
+    return plain;
 }
 
 // The third stage, for a surface that has one: the city's street
