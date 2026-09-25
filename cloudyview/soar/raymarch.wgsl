@@ -22318,7 +22318,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let strat_pixel = cr.strat_pixel;
     let dir = cr.dir;
 
-    let inv_dir = 1.0 / dir;
+    // safe_inv_dir, not 1.0 / dir: an exactly axis-aligned pixel ray would
+    // divide by zero, and the infinity makes the slab test below
+    // indeterminate (the sun path's same bug, desert-ground 2026-09-24).
+    let inv_dir = safe_inv_dir(dir);
     let periodic_on = PERIODIC_DOMAIN;
     var t_near: f32;
     var t_far: f32;
