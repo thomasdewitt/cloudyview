@@ -21398,7 +21398,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
     }
     // The whole desert along the ray: the ground, then whatever stands on
     // it in front of the ground hit.
-    let inv_dir = 1.0 / dir;
+    let inv_dir = safe_inv_dir(dir);
     var h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
     let slab = desert_flora_slab(o, dir, inv_dir, h.t);
     if (slab.y > slab.x) {
@@ -21444,7 +21444,7 @@ fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
 // footprint) leaves with nothing but the read it came in with.
 fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     let o = desert_camera_origin();
-    let inv_dir = 1.0 / cr.dir;
+    let inv_dir = safe_inv_dir(cr.dir);
     let slab = desert_flora_slab(o, cr.dir, inv_dir, plain.w);
     let reach = DESERT_FLORA_REFINE_FP_M / cr.true_pixel_angle;
     let unshaded = plain.x == DESERT_UNSHADED;
@@ -25372,7 +25372,7 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
     }
     let top = desert_height_range().y + DESERT_FLORA_SLAB_H;
     let t1 = max((top - p.z) / sun_dir.z, 0.0);
-    let inv = 1.0 / sun_dir;
+    let inv = safe_inv_dir(sun_dir);
     return df_occlusion_walk(p, sun_dir, inv, t1, fp);
 }
 
