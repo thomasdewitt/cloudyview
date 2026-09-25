@@ -19,7 +19,9 @@ Rules it enforces (the same ones components/SPEC.md states):
     collisions with the core or with other components are refused;
   * every hook named in the registry must exist in the component's file with
     the exact dispatcher-compatible signature (checked by compiling a probe);
-  * kind_base values are >= 100, multiples of 100 apart, and unique.
+  * kind_base values are >= 100, multiples of 100 apart, and unique, and
+    each component's kinds (kind_base + 0..15) end below the facade shell's,
+    which start at the core's CITY_KIND_SHELL.
 """
 
 from __future__ import annotations
@@ -54,9 +56,14 @@ HOOKS = {
         "fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
         "fp: f32)\n"
         "        -> vec3<f32>"),
+    "facade_cover": (
+        "fn cc_facade_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
+        "fp: f32)\n"
+        "        -> f32"),
     "window_glyph": (
         "fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, "
-        "pane_uv: vec2<f32>, fp: f32)\n"
+        "pane_uv: vec2<f32>,\n"
+        "                   deep_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
     "roof": (
         "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
@@ -159,8 +166,18 @@ def dispatcher(comps):
         + ("\n".join(facade_body) + "\n" if facade_body else "")
         + "    return e;\n}")
 
+    cover_body = [
+        f"    m = max(m, {c['hooks']['facade_cover']}(cc, h, uc, vc, fp));"
+        for c in hooked("facade_cover")]
+    out.append(
+        f"{HOOKS['facade_cover']} {{\n"
+        "    var m = 0.0;\n"
+        + ("\n".join(cover_body) + "\n" if cover_body else "")
+        + "    return m;\n}")
+
     glyph_body = [
-        f"    t = t * {c['hooks']['window_glyph']}(cc, wh, pane_uv, fp);"
+        f"    t = t * {c['hooks']['window_glyph']}(cc, wh, pane_uv, deep_uv, "
+        "fp);"
         for c in hooked("window_glyph")]
     out.append(
         f"{HOOKS['window_glyph']} {{\n"
@@ -184,6 +201,18 @@ def compose(check_only: bool) -> int:
     kbs = [c["kind_base"] for c in comps if c.get("kind_base") is not None]
     if len(kbs) != len(set(kbs)):
         raise SystemExit(f"duplicate kind_base values: {sorted(kbs)}")
+    # The facade shell's hit kinds (raymarch.wgsl, CITY_KIND_SHELL + part +
+    # 16 * (side + 4 * tier)) sit above every component's.
+    m = re.search(r"^const CITY_KIND_SHELL: i32 = (\d+);", SHADER.read_text(),
+                  re.MULTILINE)
+    if m is None:
+        raise SystemExit("raymarch.wgsl defines no CITY_KIND_SHELL")
+    shell = int(m.group(1))
+    for c in comps:
+        kb = c.get("kind_base")
+        if kb is not None and kb + 15 >= shell:
+            raise SystemExit(f"component '{c['name']}' kind_base {kb} runs into "
+                             f"the facade shell's kinds (from {shell})")
 
     pieces = []
     for comp in comps:

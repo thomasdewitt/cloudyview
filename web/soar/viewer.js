@@ -2286,17 +2286,37 @@ export class Viewer {
   }
 
   /**
-   * Put the camera down on the water, looking at the horizon.
+   * Put the camera where the tutorial opens.
    *
-   * The tutorial's opening position, and only that. Low is the point: the
-   * first prompt asks for the mouse, and a beginner who moves it wants the
-   * sea and the sky to swing past — a start high above the field looks the
-   * same whichever way it is turned. The x/y of whatever view was loaded is
-   * kept, so it is still this field's own place.
+   * On the sea: down on the water, looking at the horizon, at whatever x/y
+   * the loaded view had, so it is still this field's own place. Low is the
+   * point: the first prompt asks for the mouse, and a beginner who moves it
+   * wants the sea and the sky to swing past — a start high above the field
+   * looks the same whichever way it is turned. In the city: the start
+   * street's canyon (CITY_TUTORIAL_CAMERA), lit towers on both sides.
    */
   tutorialSpawn() {
-    this.camera.position[2] = K.OCEAN_FLOOR_MARGIN_M * 4.0;
-    this.camera.elevation = 0.0;
+    if (this.scene.city) {
+      // A city camera always carries its tile-frame position; without one
+      // there is no street to put it in.
+      const s = this.camera.surfacePosition;
+      if (!s) {
+        throw new Error("tutorialSpawn: a city scene's camera has no "
+                        + "surfacePosition");
+      }
+      // Reached through the camera's one move path, so the cloud and tile
+      // frames move together.
+      const pose = K.CITY_TUTORIAL_CAMERA;
+      const [tx, ty, tz] = pose.positionCityM;
+      this.camera.displace(tx - s[0], ty - s[1], tz - this.camera.position[2]);
+      this.camera.azimuth = pose.azimuth;
+      this.camera.elevation = pose.elevation;
+    } else {
+      this.camera.position[2] = K.OCEAN_FLOOR_MARGIN_M * 4.0;
+      this.camera.elevation = 0.0;
+    }
+    // The look was just written absolutely: no shake is on it any more.
+    this.camera.shake = [0.0, 0.0];
     this.camera.constrain();
     this._wake("tutorial spawn");
   }
