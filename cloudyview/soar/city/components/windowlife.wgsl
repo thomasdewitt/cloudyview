@@ -245,8 +245,12 @@ fn cc_windowlife_figure(h: vec4<f32>, uv: vec2<f32>, fp: f32,
     return mix(lit, cc_windowlife_FIGURE_MEAN, lod);
 }
 
+// Drapes hang at the glass, so they take the glass uv; an occupant stands
+// in the room, so it takes the uv where the ray crosses the occupant's
+// plane (deep_uv) — which is what slides them against each other as the
+// camera moves past a close window. On a flat facade the two are equal.
 fn cc_windowlife_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
-                       fp: f32) -> vec3<f32> {
+                       deep_uv: vec2<f32>, fp: f32) -> vec3<f32> {
     let h = cc_windowlife_hash(wh);
     if (h.x < cc_windowlife_T_DRAPE) {
         return vec3<f32>(1.0);      // most windows are just light
@@ -254,6 +258,6 @@ fn cc_windowlife_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
     if (h.x < cc_windowlife_T_FIGURE) {
         return cc_windowlife_drape(h, pane_uv, fp);
     }
-    return cc_windowlife_figure(h, pane_uv, fp,
+    return cc_windowlife_figure(h, deep_uv, fp,
                                 h.x >= cc_windowlife_T_ANDROID);
 }

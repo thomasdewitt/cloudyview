@@ -68,7 +68,10 @@ you may not redefine them. The structs you exchange with the core:
   (footprint scaled by `fscale` about the plot centre), arch 4 never.
 - `CityHit` — `hit, t, pos, normal, kind, cell`. Component hits use
   `kind = <your kind_base> + local`, local in [0, 15]; core kinds are
-  0 ground, 1 facade, 2 roof, 3 mast, 4 beacon.
+  0 ground, 1 facade, 2 roof, 3 mast, 4 beacon. The facade shell's hits
+  take 1000 and up (`CITY_KIND_SHELL + part + 16 * (side + 4 * tier)`, to
+  1191), so a kind_base ends at 900; the composer refuses one that runs
+  into them.
 - `city_box_hit(o, inv_dir, bmin, bmax) -> vec2(t_near, t_far)` and
   `city_box_normal(p, bmin, bmax)` do slab tests for you.
 
@@ -101,18 +104,33 @@ Signatures (the composer checks these by compiling):
   whose kind is in your range.
 - `facade` — `fn (cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
   -> vec3<f32>` — ADDITIVE facade emission. `uc` runs along the facade in
-  meters, `vc` is height; the window grid is `CITY_WIN_PITCH_U` x
-  `CITY_FLOOR_H`. Return zero where you add nothing.
+  meters FROM THE FACE'S OWN START CORNER (`city_face_at(cc, h.pos,
+  h.normal)` gives the face: its length, tier and bay lattice), `vc` is
+  height; the window grid is the face's bays (`f.pitch` x `CITY_FLOOR_H`,
+  between corner margins). On a frustum skin (`!f.aligned`) uc is the old
+  world-anchored coordinate. `h` is always on the wall plane. Return zero
+  where you add nothing.
+- `facade_cover` — `fn (cc: CityCell, h: CityHit, uc: f32, vc: f32,
+  fp: f32) -> f32` — the share (0..1) of the wall at this point that a panel of
+  yours covers. Covered wall shows no windows and, up close, no shell
+  relief: the core takes them out, so an opaque panel only adds its own
+  emission through `facade`.
 - `roof` — `fn (cc: CityCell, h: CityHit, fp: f32) -> vec3<f32>` —
   ADDITIVE emission on a core roof hit (kind 2), at every distance. This is
   where roof geometry that `cell_props` only draws near (inside
   `CITY_PROP_RANGE`) keeps its far-field mean: a warehouse's lit sawtooth
   glazing must not vanish at 2.2 km. Return zero where you add nothing.
 - `window_glyph` — `fn (cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
-  fp: f32) -> vec3<f32>` — transmission MULTIPLIER inside a lit pane
-  (`pane_uv` in [0,1]^2, `wh` is that window's hash draw). Return
-  `vec3(1.0)` to leave a window alone. Sub-pixel glyphs (fp much larger
-  than a pane) must return your glyph's mean transmission, not 1.
+  deep_uv: vec2<f32>, fp: f32) -> vec3<f32>` — transmission MULTIPLIER
+  inside a lit pane (`pane_uv` in [0,1]^2 at the glass, `wh` is that
+  window's hash draw). `deep_uv` is where the same ray crosses the
+  occupant's plane inside the room, in the same pane units — draw things
+  that stand IN the room (figures) at `deep_uv` and things AT the glass
+  (curtains, blinds) at `pane_uv`, and parallax comes for free; on a flat
+  facade the two are equal. Return `vec3(1.0)` to leave a window alone.
+  Sub-pixel glyphs (fp much larger than a pane) must return your glyph's
+  mean transmission, not 1.
+
 - `media` — `fn (o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
   t_max: f32, pixel_angle: f32, rnd: f32) -> vec4<f32>` — participating
   media between the eye and the city hit at `t_max` (steam): in-scattered
@@ -137,10 +155,39 @@ reflects off it) exactly as it shades the z = 0 plane beyond the prop range.
 That is the one sanctioned exception to "component hits use your own kinds".
 
 **Wet reflections do not see props.** The reflected ray off wet ground is
-traced with `props = false`: no `cell_props` or `extra_trace` hook runs for
-it (their second inlined copy cost 20-36% on views that never reflect). A
+traced with `CITY_TRACE_PLAIN`: no `cell_props`, `near_props` or `extra_trace`
+hook runs for it (their second inlined copy cost 20-36% on views that never reflect). A
 component's geometry therefore never appears in a puddle; its facade and
 window hooks do, because the reflected hit is shaded by `city_shade`.
+
+## The facade shell (core)
+
+Up close a building face is not a box face: the core traces it as a SHELL
+(raymarch.wgsl, "Facade shell"), in the city's second surface stage
+(`fs_surface_refine`) — recessed windows with the glass set back, sills,
+hoods, ledges, cornices, fins and mullion caps, AC units, drainpipes on
+brackets, rain canopies, balconies, fire escapes, and an interior-mapped
+room behind every lit pane. What that means for a component:
+
+- **Face frame.** `city_face_at(cc, h.pos, h.normal)` returns the face a
+  facade hit lies on: `side`, `tier`, `len`, and its bay lattice (`margin`,
+  `pitch`, `nbays`). `uc` in the facade hooks is metres from the face's
+  own start corner. Windows sit in an integer number of bays between two
+  corner margins (`CITY_SHELL_CORNER`), so nothing of yours should assume a
+  window lattice anchored to world coordinates.
+- **Relief extent.** Nothing of the shell stands more than
+  `CITY_SHELL_OUT_MAX` (1.5 m) off its wall; the flyer's collider inflates
+  every building box by exactly that. Props within 1.5 m of a wall share
+  space with the shell — keep bins and bollards out of it, or expect a
+  balcony slab above them.
+- **Panels.** A component that hangs an opaque panel on a wall (a screen, a
+  sign box, a roll-up door) reports it through `facade_cover`, and the core
+  takes the windows and the relief out from under it.
+- **LOD.** The shell's depths flatten to the wall over pixel footprints
+  0.4 -> 1.2 m, and its shading hands off to the flat facade at the same
+  point on the wall, so a facade hook sees the same wall at every range.
+- **Industrial walls** (`land_use == CITY_USE_INDUSTRIAL`) are the industry
+  component's; the shell leaves them alone.
 
 ## Detailed micro-geometry: the SDF-in-a-box pattern
 

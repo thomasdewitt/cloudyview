@@ -23,7 +23,8 @@
    "file": "facadeworks.wgsl",
    "name": "facadeworks",
    "hooks": {
-    "facade": "cc_facadeworks_detail"
+    "facade": "cc_facadeworks_detail",
+    "facade_cover": "cc_facadeworks_cover"
    },
    "enabled": true
   },
@@ -73,7 +74,8 @@
    "name": "adscreens",
    "kind_base": 400,
    "hooks": {
-    "facade": "cc_adscreens_facade"
+    "facade": "cc_adscreens_facade",
+    "facade_cover": "cc_adscreens_cover"
    },
    "enabled": true
   },
