@@ -48,6 +48,7 @@ DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
 SCAN_PRELUDE = """
 const DESERT_FLORA_SLAB_H: f32 = 13.0;
 const DESERT_LITE: bool = false;
+const DESERT_FLORA_CUT: f32 = 1.0;
 struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>,
                      ocean: vec4<f32>, sun_dir: vec4<f32>, };
 var<private> u: ScanUniforms;
@@ -450,7 +451,8 @@ def gpu_report() -> str:
 def main(argv=None) -> int:
     from cloudyview.soar_host import (
         APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES,
-        DESERT_LITE_TIERS, SceneState, SoarRenderer, ViewState,
+        DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SceneState, SoarRenderer,
+        ViewState,
         desert_relief_m, surface_cell_m)
     from cloudyview.witness import OCEAN_REFLECTANCE, QUALITY_PRESETS
     from PIL import Image
@@ -629,6 +631,8 @@ def main(argv=None) -> int:
             # The tier decides the desert's variant, as in the app.
             desert_lite=(args.surface == "desert"
                          and args.quality in DESERT_LITE_TIERS),
+            desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[args.quality]
+                              if args.surface == "desert" else 1.0),
         )
         if preset["light_cache"] and baked != (s_az, s_el):
             for vr in (variants.values() if variants else [r]):

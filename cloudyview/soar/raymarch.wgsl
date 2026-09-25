@@ -14257,6 +14257,14 @@ const DESERT: bool = false;
 // rather than traced (desert_stone_decal), and no octaves in the trace (the
 // shading still reads them).
 const DESERT_LITE: bool = false;
+// The explicit shrubs' reach, as a scale on their grazing far-cut
+// footprints (df_small_cut): the hosts set it from the tier
+// (web/soar/constants.js DESERT_FLORA_CUT_BY_TIER; Medium walks the small
+// cells half as far as High, past which the shrubs are their decals). The
+// saguaros, trees and heaps keep the common cut on every tier: a saguaro
+// has no decal, and past its cut it would be the field's faint mean.
+// Under DESERT_LITE there is no walk and it is not read.
+const DESERT_FLORA_CUT: f32 = 1.0;
 
 // How far above the terrain the flora slab reaches: the tallest saguaro
 // plus margin. The flora trace is called only over the part of a ray that
@@ -19672,7 +19680,7 @@ const DF_SMALL_FAR_FP1: f32 = 0.16;
 fn df_small_cut(dir: vec3<f32>) -> f32 {
     let d = df_ray_dither(dir);
     let steep = smoothstep(0.10, 0.30, -dir.z);
-    let fp = mix(mix(DF_FAR_FP0, DF_FAR_FP1, d.x),
+    let fp = mix(DESERT_FLORA_CUT * mix(DF_FAR_FP0, DF_FAR_FP1, d.x),
                  mix(DF_SMALL_FAR_FP0, DF_SMALL_FAR_FP1, d.y), steep);
     return min(fp / df_true_pixel_angle(), df_far_cut(dir));
 }
@@ -19897,7 +19905,10 @@ fn df_plant_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
                    refine: bool) -> f32 {
     let to_p = p - desert_camera_origin();
     let dist = length(to_p);
-    let z = max(p.z - desert_surface(p.xy, fp).x, 0.0);
+    // The height to a few decimetres is enough here: the tile alone, not
+    // desert_surface's octaves, whose evaluation cost the plain pass as
+    // much as the walk.
+    let z = max(p.z - u.ocean.x - desert_tile(p.xy, 0.0).x, 0.0);
     let plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir,
                                          z);
     return df_shadow_refined(p, sun_dir, fp, df_true_pixel_angle() * dist,
