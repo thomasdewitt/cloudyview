@@ -142,16 +142,16 @@ def extract_const(src: str, name: str) -> str:
     return m.group(0)
 
 
-def scan_plants(entry="scan"):
-    """Items as the shader places them, desert frame. `scan`: every big
-    cell, rows (kind, x, y, height, radius, arms, age, ribs). `scan_small`:
-    the small cells of the first 1024 m, rows (kind, x, y, height,
-    half-width, variant, flowering, stems)."""
-    import wgpu
+def scan_code() -> str:
+    """The placement scan's module: the flora section and the shared
+    functions it calls, lifted from the shader, over SCAN_PRELUDE's stubs.
+    tests/test_desert_flora_scan.py compiles it, so a shared function the
+    flora section starts calling fails there rather than in every run."""
     src = SHADER.read_text()
     # The ground's habitat accessors are lifted from the shader like the
     # flora section itself, over the stub tile read above.
-    code = (extract_fn(src, "pcg2d") + extract_fn(src, "safe_inv_dir")
+    return (extract_fn(src, "pcg2d") + extract_fn(src, "safe_inv_dir")
+            + extract_fn(src, "true_pixel_angle")
             + SCAN_PRELUDE
             + extract_fn(src, "desert_wash") + extract_fn(src, "desert_wash_near")
             + extract_fn(src, "desert_material")
@@ -160,6 +160,15 @@ def scan_plants(entry="scan"):
             + extract_fn(src, "desert_slope_max_at")
             + extract_const(src, "DESERT_OCTAVE_MARGIN")
             + extract(src, FLORA_BEGIN, FLORA_END) + SCAN_MAIN)
+
+
+def scan_plants(entry="scan"):
+    """Items as the shader places them, desert frame. `scan`: every big
+    cell, rows (kind, x, y, height, radius, arms, age, ribs). `scan_small`:
+    the small cells of the first 1024 m, rows (kind, x, y, height,
+    half-width, variant, flowering, stems)."""
+    import wgpu
+    code = scan_code()
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
     module = device.create_shader_module(code=code)
