@@ -26059,27 +26059,39 @@ struct DfDisc {
     burs: bool,
 }
 
-// The disc covering ground point p when each crown is looked for at
-// p + off * (its height): off = view dir.xy / dir.z for the crowns, the
-// sun's sun.xy / sun.z for the shadows. The plants that can cover p stand
-// in the cells the segment p + off * z crosses over the grid's crown
-// heights: its ends and middle (at the offsets decals are drawn at, a
-// steep view or a sun above ~20 degrees, at most three cells).
-fn df_disc_at(p: vec2<f32>, off: vec2<f32>, big: bool) -> DfDisc {
+// What covers ground point p along the ray rd leaving it upward: the view
+// ray back toward the camera (-dir) for the crowns, the sun's for the
+// shadows. The plants it can meet stand in the cells its ground track
+// crosses over the grid's crown heights, DF_DECAL_Z_*; they are taken front
+// to back (from the high end), at most DF_DECAL_CELLS_* of them — a grazing
+// ray's track can be longer, and there the explicit walk draws the shrubs
+// (df_small_cut) and the trees (df_far_cut) anyway.
+const DF_DECAL_CELLS_SMALL: i32 = 6;
+const DF_DECAL_CELLS_BIG: i32 = 3;
+
+fn df_disc_at(p: vec3<f32>, rd: vec3<f32>, big: bool) -> DfDisc {
     let cell = select(DF_SMALL_CELL, DF_BIG_CELL, big);
     let z = select(DF_DECAL_Z_SMALL, DF_DECAL_Z_BIG, big);
-    let qa = p + off * z.x;
-    let qb = p + off * z.y;
-    let ca = vec2<i32>(floor(qa / cell));
-    let cm = vec2<i32>(floor(0.5 * (qa + qb) / cell));
-    let cb = vec2<i32>(floor(qb / cell));
-    // Higher up the ray first: a higher crown stands in front.
-    var d = df_disc_cell(cb, p, off, big, qa, qb);
-    if (any(cm != cb)) {
-        d = df_disc_under(d, df_disc_cell(cm, p, off, big, qa, qb));
-    }
-    if (any(ca != cm) && any(ca != cb)) {
-        d = df_disc_under(d, df_disc_cell(ca, p, off, big, qa, qb));
+    let off = rd.xy / max(rd.z, 0.05);
+    let qa = p.xy + off * z.x;
+    let qb = p.xy + off * z.y;
+    let seg = qa - qb;
+    let len = length(seg);
+    let far_cells = vec2<i32>(1 << 30);
+    var dd = df_dda(vec3<f32>(qb, 0.0),
+                    vec3<f32>(seg / max(len, 1e-6), 0.0), 0.0, cell,
+                    -far_cells, far_cells);
+    var d: DfDisc;
+    d.cover = 0.0;
+    d.kind = 0;
+    d.burs = false;
+    let n = select(DF_DECAL_CELLS_SMALL, DF_DECAL_CELLS_BIG, big);
+    for (var k: i32 = 0; k < n; k = k + 1) {
+        d = df_disc_under(d, df_disc_cell(dd.ci, p, rd, big, qa, qb));
+        if (min(dd.tmax.x, dd.tmax.y) >= len || d.cover > 0.98) {
+            break;
+        }
+        dd = df_dda_step(dd);
     }
     return d;
 }
@@ -26095,13 +26107,22 @@ fn df_disc_under(a: DfDisc, b: DfDisc) -> DfDisc {
     return d;
 }
 
-// Cell ci's plant's disc at p (df_disc_at; qa..qb its test points). The
+// The length of ray (p, rd), t >= 0, inside the crown envelope `sh` (as
+// df_disc_cell builds it) standing on the ground at fw.
+fn df_disc_chord(p: vec3<f32>, rd: vec3<f32>, fw: vec2<f32>,
+                 sh: vec4<f32>) -> f32 {
+    let ch = df_ellipsoid_chord(p, rd, vec3<f32>(fw, p.z + sh.y),
+                                vec3<f32>(sh.x, sh.x, sh.z));
+    return max(ch.y - max(ch.x, 0.0), 0.0);
+}
+
+// Cell ci's plant's crown along the ray (df_disc_at; qa..qb its track). The
 // explicit placement's rules (df_small_foot and df_small_item, df_big_foot
 // and df_big_item) in the order that is cheapest here: the foot's reach
 // against the test points, the shape from the hashes, the disc test, and
 // only for a point inside a disc the habitat's texture reads. Nothing reads
 // the ground's height: a disc lies on the ground wherever it is.
-fn df_disc_cell(ci: vec2<i32>, p: vec2<f32>, off: vec2<f32>, big: bool,
+fn df_disc_cell(ci: vec2<i32>, p: vec3<f32>, rd: vec3<f32>, big: bool,
                 qa: vec2<f32>, qb: vec2<f32>) -> DfDisc {
     var d: DfDisc;
     d.cover = 0.0;
@@ -26130,42 +26151,45 @@ fn df_disc_cell(ci: vec2<i32>, p: vec2<f32>, off: vec2<f32>, big: bool,
     }
     let r0 = df_rand4(seed);
     let rs = df_rand4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
-    // (radius, crown-centre height, opacity): each species' far envelope
-    // seen from above.
-    var sh = vec3<f32>(0.0);
+    // The crown's envelope: (horizontal radius, centre height, vertical
+    // semi-axis, opacity) — each species' far envelope.
+    var sh = vec4<f32>(0.0);
     var kind = foot.kind;
     let burs = !big && r0.x >= DF_P_CREOSOTE;
     if (foot.kind == DF_KIND_CREOSOTE) {
         let hw = df_creosote_dims(rs, burs);
-        sh = vec3<f32>(hw.y + 0.08, 0.62 * hw.x,
+        sh = vec4<f32>(hw.y + 0.08, 0.62 * hw.x, 0.5 * hw.x,
                        select(DF_FAR_CREO_KAPPA, DF_FAR_BURS_KAPPA, burs));
     } else if (foot.kind == DF_KIND_PALOVERDE) {
-        let crown = df_paloverde_crown(rs);
-        sh = vec3<f32>(crown, 0.68 * (3.0 + 3.0 * rs.x), DF_FAR_PV_KAPPA);
+        let h = 3.0 + 3.0 * rs.x;
+        sh = vec4<f32>(df_paloverde_crown(rs), 0.68 * h, 0.32 * h,
+                       DF_FAR_PV_KAPPA);
     } else if (foot.kind == DF_KIND_PRICKLY) {
         let a = df_prickly_pad(rs);
-        sh = vec3<f32>(5.0 * a, 2.6 * a, DF_FAR_PEAR_KAPPA);
+        sh = vec4<f32>(5.0 * a, 2.6 * a, 3.2 * a, DF_FAR_PEAR_KAPPA);
     } else if (foot.kind == DF_KIND_BARREL) {
         let hr = df_barrel_dims(rs);
-        sh = vec3<f32>(hr.y, 0.5 * hr.x, 1.0);
+        sh = vec4<f32>(hr.y, 0.5 * hr.x, 0.5 * hr.x, 1.0);
     } else {
-        // A heap or a stone: its extent, half filled (the field's rock term).
+        // A heap or a stone: a dome of its extent and top, half filled (the
+        // field's rock term).
         var it: DfItem;
         it.seed = seed;
         it = df_boulder_item(it, rs, big);
-        sh = vec3<f32>(it.a.y, 0.5 * it.a.z, 0.5);
+        sh = vec4<f32>(it.a.y, 0.0, max(it.a.z, 0.05), 0.5);
     }
     let fw = org + foot.xy;
     // A bank's young palo verde grows in the creosote's room, with its
     // crown higher up: a creosote draw is looked for at both heights until
     // the habitat says which it is.
     let tree_r = foot.reach - 0.3;
-    let tree_z = 0.68 * min(1.4 + 1.2 * tree_r, 3.0);
+    let tree_h = min(1.4 + 1.2 * tree_r, 3.0);
+    let tree = vec4<f32>(tree_r, 0.68 * tree_h, 0.32 * tree_h, DF_FAR_PV_KAPPA);
     let may_tree = foot.kind == DF_KIND_CREOSOTE && !burs;
-    let qe = p + off * sh.y - fw;
-    let qt = p + off * tree_z - fw;
-    if (dot(qe, qe) >= sh.x * sh.x
-        && !(may_tree && dot(qt, qt) < tree_r * tree_r)) {
+    // The foot's ground is taken as p's (the slope across a crown is a few
+    // centimetres).
+    let ce = df_disc_chord(p, rd, fw, sh);
+    if (ce <= 0.0 && !(may_tree && df_disc_chord(p, rd, fw, tree) > 0.0)) {
         return d;
     }
     if (!big) {
@@ -26181,14 +26205,18 @@ fn df_disc_cell(ci: vec2<i32>, p: vec2<f32>, off: vec2<f32>, big: bool,
     if (r0.w >= df_keep(foot.kind, hb)) {
         return d;
     }
-    if (foot.kind == DF_KIND_CREOSOTE && !burs
-        && r0.z < DF_BANK_TREE * hb.bank) {
+    var chord = ce;
+    if (may_tree && r0.z < DF_BANK_TREE * hb.bank) {
         kind = DF_KIND_PALOVERDE;
-        sh = vec3<f32>(tree_r, tree_z, DF_FAR_PV_KAPPA);
+        sh = tree;
+        chord = df_disc_chord(p, rd, fw, tree);
     }
-    let qk = p + off * sh.y - fw;
-    let r2 = dot(qk, qk) / (sh.x * sh.x);
-    d.cover = min(1.5 * sh.z * sqrt(max(1.0 - r2, 0.0)), 1.0);
+    // A medium whose vertical chord through the centre covers what the
+    // field's mean asks of the crown's middle (1.5 kappa: the chord's mean
+    // over the disc is 2/3 of the centre's), so a view from above averages
+    // to the field and a view from the side sees the crown's side.
+    let sigma = -log(1.0 - min(1.5 * sh.w, 0.95)) / (2.0 * sh.z);
+    d.cover = 1.0 - exp(-sigma * chord);
     d.kind = kind;
     d.burs = burs && kind == DF_KIND_CREOSOTE;
     return d;
@@ -26246,15 +26274,14 @@ fn df_cover_scale(a: DesertCover, w: f32) -> DesertCover {
 // stopped (`big_on`) — the shrubs' stops nearer (df_small_cut).
 fn df_decal_cover(p: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                   big_on: bool) -> DesertCover {
-    let off = dir.xy / min(dir.z, -0.1);
     let cg = dot(-dir, sun);
     let g = acos(clamp(cg, -1.0, 1.0));
     let sph = max((2.0 / 3.0) * (sin(g) + (DF_PI - g) * cos(g)) / DF_PI, 0.0);
-    let small = df_disc_cover(df_disc_at(p.xy, off, false), sph, cg);
+    let small = df_disc_cover(df_disc_at(p, -dir, false), sph, cg);
     if (!big_on) {
         return small;
     }
-    return df_cover_over(df_disc_cover(df_disc_at(p.xy, off, true), sph, cg),
+    return df_cover_over(df_disc_cover(df_disc_at(p, -dir, true), sph, cg),
                          small);
 }
 
@@ -26263,9 +26290,8 @@ fn df_decal_shadow(p: vec3<f32>, sun: vec3<f32>) -> f32 {
     if (sun.z <= 1e-3) {
         return 1.0;
     }
-    let off = sun.xy / max(sun.z, 0.1);
-    return (1.0 - df_disc_at(p.xy, off, true).cover)
-        * (1.0 - df_disc_at(p.xy, off, false).cover);
+    return (1.0 - df_disc_at(p, sun, true).cover)
+        * (1.0 - df_disc_at(p, sun, false).cover);
 }
 
 // Mean radiance of the far-field plants a pixel sees under `L`.

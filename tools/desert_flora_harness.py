@@ -147,7 +147,8 @@ def scan_plants(entry="scan"):
     src = SHADER.read_text()
     # The ground's habitat accessors are lifted from the shader like the
     # flora section itself, over the stub tile read above.
-    code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
+    code = (extract_fn(src, "pcg2d") + extract_fn(src, "safe_inv_dir")
+            + SCAN_PRELUDE
             + extract_fn(src, "desert_wash") + extract_fn(src, "desert_wash_near")
             + extract_fn(src, "desert_material")
             + extract_fn(src, "desert_tile_level")
@@ -495,7 +496,8 @@ def main(argv=None) -> int:
                     help="also save the linear float image")
     ap.add_argument("--interleave", metavar="JSON",
                     help="time shader variants against each other instead of "
-                         "rendering: a JSON file {name: [OLD=>NEW, ...]}, the "
+                         "rendering: a JSON file {name: [OLD=>NEW, ...] or "
+                         "\"git:REV\"}, the "
                          "tree itself first and again last as the null "
                          "control, each view's variants timed in turn for "
                          "--rounds rounds in this one process (one gpulock)")
@@ -548,11 +550,20 @@ def main(argv=None) -> int:
         spec = json.loads(Path(args.interleave).read_text())
         base = read_shader()
         names = list(spec)
+        def variant_source(v):
+            # A list of patches on the tree, or "git:REV" for that
+            # revision's shader whole.
+            if isinstance(v, str):
+                import subprocess
+                return subprocess.run(
+                    ["git", "show", f"{v[4:]}:cloudyview/soar/raymarch.wgsl"],
+                    capture_output=True, text=True, check=True).stdout
+            return apply_patches(base, v)
         for name in [*names, names[0] + "'"]:
             vr = SoarRenderer(periodic=bool(meta.get("periodic", True)),
                               surface=args.surface, device=device,
-                              shader_source=apply_patches(
-                                  base, spec[name.rstrip("'")]))
+                              shader_source=variant_source(
+                                  spec[name.rstrip("'")]))
             vr.upload_volume(sigma)
             variants[name] = vr
         r = variants[names[0]]
