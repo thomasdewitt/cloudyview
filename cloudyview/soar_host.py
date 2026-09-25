@@ -778,14 +778,29 @@ ACCUM_FORMAT = "rgba32float"
 # under each render pixel. t runs to 1e30 on a miss and to tens of km on a
 # hit, so it needs float32; fs_main only ever textureLoad()s it.
 SURFACE_FORMAT = "rgba32float"
-# The scenes whose opaque surface is traced by that pass rather than in the
-# march (raymarch.wgsl: the surface pre-pass section).
-SURFACE_PASS_SURFACES = ("city", "desert")
-# ... and those whose surface pass has a second stage (fs_surface_refine):
-# the city (its facade shell over the plain boxes) and the desert (its near
-# plants over the far forms). A surface joins by being listed here and in
-# renderer.js _hasRefineStage.
-SURFACE_REFINE_SURFACES = ("city", "desert")
+# The surface stages each traced surface runs before the march, in order:
+# raymarch.wgsl fragment entries, each after the first reading the one
+# before at group 1 binding 1, the last writing the surface the march reads.
+# The city: its boxes, the facade shell over them (fs_surface_refine), the
+# street (fs_surface_street: furniture, wet reflection, steam, kept out of
+# the earlier stages' registers). The desert: its ground, then its near
+# plants over the far forms (fs_surface_refine). A surface or a stage joins
+# here and in web/soar/constants.js SURFACE_STAGES, its twin (pinned by
+# tests/test_surface_stages.py); the hosts derive everything else from it.
+SURFACE_STAGES = {
+    "city": ("fs_surface", "fs_surface_refine", "fs_surface_street"),
+    "desert": ("fs_surface", "fs_surface_refine"),
+}
+# Under DESERT_LITE the desert's later stages are compiled out and skipped.
+SURFACE_STAGES_LITE = ("fs_surface",)
+# The stages that also write the veil (a second attachment, VEIL_FORMAT):
+# the first, and the city's street.
+VEIL_STAGES = ("fs_surface", "fs_surface_street")
+# Derived: the scenes whose opaque surface is traced by the stages rather
+# than in the march, and those with a refinement or a street stage.
+SURFACE_PASS_SURFACES = tuple(SURFACE_STAGES)
+SURFACE_REFINE_SURFACES = tuple(
+    s for s, e in SURFACE_STAGES.items() if "fs_surface_refine" in e)
 # The tiers that fly the simplified desert (raymarch.wgsl DESERT_LITE: no
 # refine stage, each desert section's Low drops compiled out). The twin of
 # web/soar/constants.js DESERT_LITE_TIERS; witness --quality sets
@@ -799,14 +814,37 @@ DESERT_LITE_TIERS = ("low", "minimal")
 DESERT_FLORA_CUT_BY_TIER = {"max": 1.0, "high": 1.0, "medium": 0.5,
                             "low": 1.0, "minimal": 1.0}
 
-# ... and those with a third, the street stage (fs_surface_street): the
-# city's furniture, wet reflection and steam, kept out of the first stage's
-# registers. Listed here and in renderer.js _hasStreetStage.
-SURFACE_STREET_SURFACES = ("city",)
+SURFACE_STREET_SURFACES = tuple(
+    s for s, e in SURFACE_STAGES.items() if "fs_surface_street" in e)
 # The veil the first and last surface stages write beside the surface
 # (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
 # depth, packed as uints so no float path touches the bits.
 VEIL_FORMAT = "rgba32uint"
+
+
+def surface_stage_entries(surface: str, desert_lite: bool = False) -> tuple:
+    """The surface stages (raymarch.wgsl entries) a view of `surface` runs,
+    in order; none over the sea."""
+    stages = SURFACE_STAGES.get(check_surface(surface), ())
+    if desert_lite:
+        if surface != "desert":
+            raise ValueError("desert_lite is a desert specialization; the "
+                             f"surface is {surface!r}.")
+        return SURFACE_STAGES_LITE
+    return stages
+
+
+def surface_stage_plan(n: int) -> list:
+    """Where each of `n` chained stages writes and what it reads, as
+    (writes, reads) with "final" the surface the march reads and "a"/"b"
+    the two intermediates the chain alternates between (None: the first
+    stage reads nothing). renderer.js surfaceStagePlan is the twin."""
+    plan = []
+    for i in range(n):
+        writes = "final" if i == n - 1 else "ab"[i % 2]
+        reads = None if i == 0 else "ab"[(i - 1) % 2]
+        plan.append((writes, reads))
+    return plan
 
 
 # Section stripping (raymarch.wgsl's `// @section` markers). Each surface's
@@ -1339,36 +1377,41 @@ class SoarRenderer:
         return self._pipeline_for("fs_bake_light", "r16float", self._spec(
             light_cache=False, sky_probe=True))
 
-    def _surface_pipeline_for(self, view: "ViewState"):
-        """The surface pre-pass pipeline (raymarch.wgsl fs_surface) on the
-        same specialization as `view`'s march — the traced city or desert,
-        one texel per render pixel, drawn before every march — or None in a
-        scene with no traced surface."""
-        if self.surface not in SURFACE_PASS_SURFACES:
+    def _stage_entries(self, view: "ViewState") -> tuple:
+        """The surface stages `view` runs (SURFACE_STAGES), in order."""
+        return surface_stage_entries(self.surface, view.desert_lite)
+
+    def _stage_pipeline_for(self, entry: str, first: bool,
+                            view: "ViewState"):
+        """One surface stage's pipeline on `view`'s specialization: the
+        first reads nothing at group 1, a later one the stage before (the
+        march's layout); a VEIL_STAGES entry writes the veil too."""
+        formats = ((SURFACE_FORMAT, VEIL_FORMAT) if entry in VEIL_STAGES
+                   else SURFACE_FORMAT)
+        return self._pipeline_for(
+            entry, formats, self._view_spec(view),
+            layout=None if first else self._march_pipeline_layout)
+
+    def _named_stage_for(self, entry: str, view: "ViewState"):
+        entries = self._stage_entries(view)
+        if entry not in entries:
             return None
-        return self._pipeline_for("fs_surface", (SURFACE_FORMAT, VEIL_FORMAT),
-                                  self._view_spec(view))
+        return self._stage_pipeline_for(entry, entries.index(entry) == 0,
+                                        view)
+
+    def _surface_pipeline_for(self, view: "ViewState"):
+        """The first surface stage (fs_surface), or None in a scene with no
+        traced surface."""
+        return self._named_stage_for("fs_surface", view)
 
     def _refine_pipeline_for(self, view: "ViewState"):
-        """The surface pass's second stage (fs_surface_refine), which reads
-        the first stage's surface at group 1 binding 1 — or None in a scene
-        whose surface has no second stage (the simplified desert has none:
-        DESERT_LITE compiles it out, and the pass is skipped)."""
-        if self.surface not in SURFACE_REFINE_SURFACES or view.desert_lite:
-            return None
-        return self._pipeline_for("fs_surface_refine", SURFACE_FORMAT,
-                                  self._view_spec(view),
-                                  layout=self._march_pipeline_layout)
+        """The refinement (fs_surface_refine), or None where the view has
+        none (the sea; the simplified desert compiles it out)."""
+        return self._named_stage_for("fs_surface_refine", view)
 
     def _street_pipeline_for(self, view: "ViewState"):
-        """The surface pass's street stage (fs_surface_street), which reads
-        the previous stage's surface at group 1 binding 1 and writes the
-        final surface and the veil — or None in a scene without one."""
-        if self.surface not in SURFACE_STREET_SURFACES:
-            return None
-        return self._pipeline_for(
-            "fs_surface_street", (SURFACE_FORMAT, VEIL_FORMAT),
-            self._view_spec(view), layout=self._march_pipeline_layout)
+        """The city's street stage (fs_surface_street), or None."""
+        return self._named_stage_for("fs_surface_street", view)
 
     def _ensure_targets(self, size):
         wgpu = self.wgpu
@@ -1380,10 +1423,11 @@ class SoarRenderer:
         make = lambda fmt: self.device.create_texture(
             size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
         has = self.surface in SURFACE_PASS_SURFACES
-        later = has and (self.surface in SURFACE_REFINE_SURFACES
-                         or self.surface in SURFACE_STREET_SURFACES)
-        both = (self.surface in SURFACE_REFINE_SURFACES
-                and self.surface in SURFACE_STREET_SURFACES)
+        # The intermediates the longest stage chain this surface can run
+        # needs (surface_stage_plan alternates two), made once so a tier
+        # change never reallocates.
+        n_mid = min(len(SURFACE_STAGES.get(self.surface, ())) - 1, 2)
+        later, both = n_mid >= 1, n_mid >= 2
         surface = make(SURFACE_FORMAT) if has else None
         veil = make(VEIL_FORMAT) if has else None
         plain = make(SURFACE_FORMAT) if later else None
@@ -1412,31 +1456,23 @@ class SoarRenderer:
 
     def _surface_stages(self, targets, view: "ViewState"):
         """The surface stages this view runs, in order, as (pipeline, group 1
-        or None, the textures it writes): the first stage, the refinement
-        when the view has one (the simplified desert does not), and the
-        street stage. Each later stage reads the one before at group 1
-        binding 1; the last writes the surface the march reads, and the first
-        and last write the veil."""
-        first = self._surface_pipeline_for(view)
-        if first is None:
-            return []
-        refine = self._refine_pipeline_for(view)
-        street = self._street_pipeline_for(view)
+        or None, the textures it writes): SURFACE_STAGES chained by
+        surface_stage_plan — each later stage reads the one before at group
+        1 binding 1 through the two intermediates ("plain", "mid"), the last
+        writes the surface the march reads, and a VEIL_STAGES entry writes
+        the veil beside it."""
+        entries = self._stage_entries(view)
+        slot = {"final": (targets["surface"], None),
+                "a": (targets["plain"], targets["after_plain"]),
+                "b": (targets["mid"], targets["after_mid"])}
         stages = []
-        out, after = targets["surface"], None
-        if refine is not None or street is not None:
-            out, after = targets["plain"], targets["after_plain"]
-        stages.append((first, None, [out, targets["veil"]]))
-        if refine is not None:
-            if street is not None:
-                out, nxt = targets["mid"], targets["after_mid"]
-            else:
-                out, nxt = targets["surface"], None
-            stages.append((refine, after, [out]))
-            after = nxt
-        if street is not None:
-            stages.append((street, after,
-                           [targets["surface"], targets["veil"]]))
+        for k, (entry, (writes, reads)) in enumerate(
+                zip(entries, surface_stage_plan(len(entries)))):
+            out = [slot[writes][0]]
+            if entry in VEIL_STAGES:
+                out.append(targets["veil"])
+            stages.append((self._stage_pipeline_for(entry, k == 0, view),
+                           None if reads is None else slot[reads][1], out))
         return stages
 
     def _ensure_bind_group(self):

@@ -27110,6 +27110,19 @@ fn fs_surface_refine(@builtin(position) frag_pos: vec4<f32>)
     return plain;
 }
 
+// The desert's flora stage (desert-flora's split of the far-form walk out
+// of the first stage's registers): it reads the ground the first stage
+// traced at group 1 binding 1 and writes the surface the refinement reads.
+// Joins the desert's stages in soar_host.SURFACE_STAGES and
+// web/soar/constants.js SURFACE_STAGES, between fs_surface and
+// fs_surface_refine, with the walk; until then it is not run, and it passes
+// the ground through unchanged.
+@fragment
+fn fs_surface_flora(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    return textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+}
+
 // The third stage, for a surface that has one: the city's street
 // (surface_street_city). It reads the second stage's surface at group 1
 // binding 1, as the second reads the first's, and writes the final surface
