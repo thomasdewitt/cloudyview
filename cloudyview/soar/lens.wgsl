@@ -156,7 +156,7 @@ fn lens_apply(rgb: vec3<f32>, uv: vec2<f32>, aspect: f32, texel: vec2<f32>,
         // A drip wanders a little as it runs.
         let xw = x0 + 0.004 * sin(31.0 * t.y + 6.3 * hc.y);
         let r = 0.024;
-        let q = vec2<f32>(t.x - xw, (t.y - head) * 0.8) / r;
+        let q = vec2<f32>(t.x - xw, (t.y - head) * 0.65) / r;
         let dd = dot(q, q);
         if (dd < 1.0) {
             off = -q * (LENS_REFRACT * r);
@@ -171,9 +171,12 @@ fn lens_apply(rgb: vec3<f32>, uv: vec2<f32>, aspect: f32, texel: vec2<f32>,
             let across = abs(t.x - xw);
             if (behind > 0.0 && behind < 0.45 && across < tw) {
                 let fade = (1.0 - behind / 0.45) * (1.0 - across / tw);
-                off = vec2<f32>(sign(t.x - xw) * 0.004, 0.0) * fade;
-                cover = max(cover, 0.6 * fade);
-                rim = max(rim, 0.3 * fade);
+                // A wet streak is a thin cylinder lens: it throws the view
+                // sideways across itself and darkens at its two edges.
+                let u = (t.x - xw) / tw;
+                off = vec2<f32>(-u * 0.012, 0.0) * fade;
+                cover = max(cover, 0.9 * fade);
+                rim = max(rim, (0.3 + 0.5 * u * u) * fade);
             }
         }
     }
