@@ -1427,27 +1427,6 @@ class SoarRenderer:
             entry, formats, self._view_spec(view),
             layout=None if first else self._march_pipeline_layout)
 
-    def _named_stage_for(self, entry: str, view: "ViewState"):
-        entries = self._stage_entries(view)
-        if entry not in entries:
-            return None
-        return self._stage_pipeline_for(entry, entries.index(entry) == 0,
-                                        view)
-
-    def _surface_pipeline_for(self, view: "ViewState"):
-        """The first surface stage (fs_surface), or None in a scene with no
-        traced surface."""
-        return self._named_stage_for("fs_surface", view)
-
-    def _refine_pipeline_for(self, view: "ViewState"):
-        """The refinement (fs_surface_refine), or None where the view has
-        none (the sea; the simplified desert compiles it out)."""
-        return self._named_stage_for("fs_surface_refine", view)
-
-    def _street_pipeline_for(self, view: "ViewState"):
-        """The city's street stage (fs_surface_street), or None."""
-        return self._named_stage_for("fs_surface_street", view)
-
     def _ensure_targets(self, size, view: Optional["ViewState"] = None):
         """This size's render targets, with the surface intermediates
         `view`'s stage chain alternates between (surface_stage_plan) — or,

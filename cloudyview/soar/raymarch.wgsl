@@ -20967,8 +20967,8 @@ fn desert_ripple_slope(xy: vec2<f32>, fp: f32, sand: f32) -> vec2<f32> {
 
 // The part of a ray inside the flora slab — z in [ground min, ground max +
 // DESERT_FLORA_SLAB_H] — and in front of `t_limit`: (t0, t1), empty when
-// t1 <= t0. The one clip both the plain pass and the flora's refine stage
-// use, so the two cannot disagree about where plants can be.
+// t1 <= t0. The one clip both the flora stage and the refine stage use,
+// so the two cannot disagree about where plants can be.
 fn desert_flora_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                      t_limit: f32) -> vec2<f32> {
     let zr = desert_height_range();
@@ -21002,7 +21002,7 @@ fn desert_ground(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
 // The same from a terrain hit already found (desert_terrain_trace). `near`
 // (a literal at every call) says whether this ground can be close enough
 // for its stones to resolve: the refine stage's, and the lite desert's
-// plain pass. The full desert's plain pass hands every footprint under
+// one stage. The full desert's first stage hands every footprint under
 // DESERT_FLORA_REFINE_FP_M to the refine stage, and the stones resolve only
 // under 0.0625 m (desert_stone_resolve), so there it has no stones to walk
 // or shade, and compiling them out spares the whole pass their registers.
@@ -21493,7 +21493,7 @@ fn desert_shade_ground(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
 
-// The plain pass's mark on ground it leaves for the refine stage to shade:
+// The first stage's mark on ground it leaves for the refine stage to shade:
 // a red no radiance can have, so the refine stage reads the decision rather
 // than re-deriving it.
 const DESERT_UNSHADED: f32 = -1.0;
@@ -21525,7 +21525,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
         // finds the stones and plants in front of this terrain and shades
         // the nearest; all it takes from here is the terrain's distance.
         // Shading it here as well cost the near views as much again as the
-        // whole plain pass (perf, M1 proxy). The simplified desert has no
+        // whole first stage (perf, M1 proxy). The simplified desert has no
         // refine stage, so under DESERT_LITE this pass shades every pixel.
         return DesertPlain(vec4<f32>(DESERT_UNSHADED, 0.0, 0.0, terrain.t),
                            vec2<f32>(0.0));
@@ -21662,12 +21662,12 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     var h = desert_flora_refine(o, cr.dir, inv_dir, slab.x, slab.y,
                                 cr.true_pixel_angle);
     if (!unshaded) {
-        // Shaded by the plain pass; only a nearer plant replaces it.
+        // Shaded by the earlier stages; only a nearer plant replaces it.
         if (!h.hit || h.t >= plain.w) {
             return plain;
         }
     } else {
-        // The plain pass kept only this terrain's distance. The ground and
+        // The first stage kept only this terrain's distance. The ground and
         // its stones are found here, from just short of it (every point of
         // the ray short of its first crossing is above the ground, so the
         // march lands in a few steps), and the nearer of them and the
@@ -21676,7 +21676,7 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
         if (!h.hit || (g.hit && g.t < h.t)) {
             h = g;
         }
-        // Not finding the terrain the plain pass found leaves the pixel
+        // Not finding the terrain the first stage found leaves the pixel
         // black: visible, not papered over, and never the sentinel.
         if (!h.hit) {
             return vec4<f32>(0.0, 0.0, 0.0, plain.w);
@@ -21762,9 +21762,9 @@ const DF_MAT_SKIN_FUZZ: i32 = 5; // skin whose spines are sub-pixel shell
 // in full (df_<species>_trace) — needles, leaves, pleats. Each stage has
 // its own walk and dispatch, so neither kernel so much as references the
 // other's code: a stage literal threaded through one shared walk was
-// measured to leave the near forms compiled into the plain kernel (162
+// measured to leave the near forms compiled into the far-form kernel (162
 // registers against 96 without them), and their mere presence was most of
-// the plain pass's flora cost. A plant picks near or far on the same
+// the far-form stage's flora cost. A plant picks near or far on the same
 // per-ray dither in both passes, so between them every plant is drawn
 // exactly once. (Shadow rays have a third, leaner path:
 // df_occlusion_walk.)
@@ -24369,7 +24369,7 @@ fn df_paloverde_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     let er = env.r;
     let tc = df_medium_hit(df_ellipsoid_chord(q0, dir, ec, er), ta, best,
                            env.sigma, fpath);
-    // The crown's own shade: the plain pass lights a far form with the
+    // The crown's own shade: the flora stage lights a far form with the
     // statistical shadow of its neighbours only, so the medium between a
     // leaf and the sun is walked here, where the envelope is at hand (the
     // refinement's exact rays see the near form's clumps themselves).
@@ -25144,7 +25144,7 @@ fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
     return it;
 }
 
-// The plain stage's dispatch: far forms only.
+// The flora stage's dispatch: far forms only.
 fn df_item_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
                pixel_angle: f32, dither: vec2<f32>) -> DesertHit {
     if (it.kind == DF_KIND_SAGUARO || it.kind == DF_KIND_BARREL) {
@@ -25165,8 +25165,8 @@ fn df_item_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
     return df_boulder_far(it, o, dir, ta, tb, pixel_angle, dither);
 }
 
-// The refine stage's dispatch: inside the refine reach the plain pass
-// leaves the whole pixel to this stage, and a plant there may already be
+// The refine stage's dispatch: inside the refine reach the earlier stages
+// leave the whole pixel to this stage, and a plant there may already be
 // past its own near-to-far switch (a creosote's at ~1 cm), so each item
 // answers with whichever form its footprint and dither select — its near
 // and far functions are complements, exactly one of them draws.
@@ -25331,7 +25331,7 @@ fn df_dda_step(d_in: DfDda) -> DfDda {
     return d;
 }
 
-// The plain stage's walk (far forms).
+// The flora stage's walk (far forms).
 fn df_walk_plain(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                  t0: f32, t1: f32, t1_small: f32, pixel_angle: f32,
                  dither: vec2<f32>) -> DesertHit {
@@ -25534,7 +25534,7 @@ fn desert_flora_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 }
 
 // The refinement stage's hook: the plants inside their near band, in full,
-// over [t0, t1] (t1 = what the plain pass found). The band ends where the
+// over [t0, t1] (t1 = what the earlier stages found). The band ends where the
 // widest near band ends, DESERT_FLORA_REFINE_FP_M (every species hands
 // its near form to its far one by this footprint), which
 // desert_surface_refine also uses to leave early — a camera high over the
@@ -25548,8 +25548,8 @@ fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     }
     let dither = df_ray_dither(dir);
     // The reach stops the cell walk, not the plants it has met: an item
-    // entered inside the reach is traced to its end (to the plain pass's
-    // depth), or a crown that crosses the reach would be cut there.
+    // entered inside the reach is traced to its end (to the earlier
+    // stages' depth), or a crown that crosses the reach would be cut there.
     let t_walk = min(t1_in, DESERT_FLORA_REFINE_FP_M / max(pixel_angle, 1e-9));
     return df_walk_refine(o, dir, inv_dir, t0, t1_in, t_walk, pixel_angle,
                           dither);
@@ -25712,12 +25712,12 @@ fn df_shadow_exact(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32) -> f32 {
 
 // Where the plants' shadow on the ground is exact and where statistical.
 // The exact shadow walk is the costliest thing the desert does, run for
-// every ground pixel it touches — measured, it was half the plain pass,
+// every ground pixel it touches — measured, it was half the first stage,
 // most of it for being compiled in at all — so it lives in the refinement
-// stage only, over the near band that stage covers; the plain pass, and
-// everything past the band, take the statistical medium (with its hot
-// spot). `refine` is a literal at every call site, so the plain kernel
-// never compiles the walk. The hand-off is deterministic in the true
+// stage only, over the near band that stage covers; the earlier stages,
+// and everything past the band, take the statistical medium (with its hot
+// spot). `refine` is a literal at every call site, so their kernels never
+// compile the walk. The hand-off is deterministic in the true
 // footprint: a shadow is light, not geometry, so an expected-value blend is
 // exact.
 const DF_SHADOW_EXACT_FP0: f32 = 0.015;
@@ -25728,9 +25728,10 @@ fn df_far_shadow_weight(fp: f32) -> f32 {
 }
 
 // The ground's hook: the plants' whole shadow on ground point p. In the
-// refine stage's reach, exact rays (df_shadow_refined). In the plain pass,
-// each shrub's, tree's and heap's shadow is its decal (df_decal_shadow) out
-// to where a crown is about a pixel, the field's mean past that; the
+// refine stage's reach, exact rays (df_shadow_refined). In the earlier
+// stages, each shrub's, tree's and heap's shadow is its decal
+// (df_decal_shadow) out to where a crown is about a pixel, the field's mean
+// past that; the
 // saguaros and ocotillos, which have no decal, shade through the field
 // everywhere (with its hot spot, for which the view direction is p's from
 // the camera).
@@ -25760,7 +25761,7 @@ fn df_plant_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
     let to_p = p - desert_camera_origin();
     let dist = length(to_p);
     // The height to a few decimetres is enough here: the tile alone, not
-    // desert_surface's octaves, whose evaluation cost the plain pass as
+    // desert_surface's octaves, whose evaluation cost the first stage as
     // much as the walk.
     let z = max(p.z - u.ocean.x - desert_tile(p.xy, 0.0).x, 0.0);
     let plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir,
@@ -25769,7 +25770,7 @@ fn df_plant_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
                              refine, plain);
 }
 
-// The refine stage's exact rays near, handing off to the plain pass's
+// The refine stage's exact rays near, handing off to the earlier stages'
 // shadow `plain` at the band's edge. `refine` is a literal at every call.
 fn df_shadow_refined(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32, fpt: f32,
                      refine: bool, plain: f32) -> f32 {
@@ -25861,7 +25862,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         lift = 0.6 * select(DF_SAG_SHELL, DF_BAR_SHELL,
                             h.kind == DF_KIND_BARREL);
     }
-    // A far-form plant (the plain pass) takes the statistical shadow of
+    // A far-form plant (the flora stage) takes the statistical shadow of
     // its neighbours; a near one (the refinement pass) the exact rays.
     let sun_vis = df_plant_shadow(h.pos + n * lift, L.sun_dir, fp,
                                       refine);

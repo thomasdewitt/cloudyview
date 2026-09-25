@@ -8,6 +8,13 @@ undrawn, silently. Both hosts check the pixel angle against
 DESERT_MIN_PIXEL_TAN when packing; this pins that constant, on both hosts,
 to the shader's own, and checks that both hosts refuse the full desert and
 pass the simplified one (DESERT_LITE walks no flora) at the same pixel.
+
+And the refine stage's reach against the far cover: ground inside the reach
+is shaded by the refine stage alone, which lays no far cover (decals, the
+field) over it. That is safe only while the far cover starts beyond the
+reach on every ray: its start, the shrubs' cut (df_small_cut), is at least
+the smaller of DF_SMALL_FAR_FP0 (a steep view) and the tiers' smallest
+DESERT_FLORA_CUT times DF_FAR_FP0 (a grazing one), as a footprint.
 """
 
 import json
@@ -27,11 +34,13 @@ CONSTANTS_JS = REPO / "web" / "soar" / "constants.js"
 UNIFORMS_JS = REPO / "web" / "soar" / "uniforms.js"
 
 
+def num(name, kind="f32"):
+    m = re.search(rf"^const {name}: {kind} = ([0-9.]+);", SHADER, re.M)
+    assert m, name
+    return float(m.group(1))
+
+
 def shader_min_pixel_tan():
-    def num(name, kind):
-        m = re.search(rf"^const {name}: {kind} = ([0-9.]+);", SHADER, re.M)
-        assert m, name
-        return float(m.group(1))
     m = re.search(r"^const DF_EXPLICIT_MAX_T: f32 = ([0-9.]+) \* "
                   r"f32\(DF_MAX_BIG_CELLS\) \* DF_BIG_CELL;", SHADER, re.M)
     assert m, "DF_EXPLICIT_MAX_T's form changed; update this test and the hosts"
@@ -50,6 +59,13 @@ SCENE = dict(bmin=[0.0, 0.0, 0.0], bmax=[25600.0, 25600.0, 5000.0],
              desert_tile_rows=[[0.5] * 4 for _ in range(22)])
 VIEW = dict(camera_position=[12800.0, 12800.0, 300.0], azimuth=20.0,
             elevation=-10.0, output_size=(320, 200), render_size=(320, 200))
+
+
+def test_the_far_cover_starts_past_the_refine_reach():
+    full = [c for tier, c in sh.DESERT_FLORA_CUT_BY_TIER.items()
+            if tier not in sh.DESERT_LITE_TIERS]
+    start = min(num("DF_SMALL_FAR_FP0"), min(full) * num("DF_FAR_FP0"))
+    assert start >= num("DESERT_FLORA_REFINE_FP_M")
 
 
 def test_hosts_match_the_shader():
