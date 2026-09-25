@@ -570,14 +570,12 @@ export const DESERT_LITE_TIERS = ["low", "minimal"];
 // raymarch.wgsl fragment entries, each after the first reading the one
 // before, the last writing the surface the march reads. The city: its
 // boxes, the facade shell (fs_surface_refine), the street
-// (fs_surface_street). The desert: its ground, the explicit plants' far
-// forms (fs_surface_flora, their walk kept out of the ground's registers),
-// then its near plants (fs_surface_refine). soar_host.SURFACE_STAGES is the
-// Python twin (pinned by tests/test_surface_stages.py); renderer.js derives
-// the rest from it.
+// (fs_surface_street). The desert: its ground, then its near plants
+// (fs_surface_refine). soar_host.SURFACE_STAGES is the Python twin (pinned
+// by tests/test_surface_stages.py); renderer.js derives the rest from it.
 export const SURFACE_STAGES = {
   city: ["fs_surface", "fs_surface_refine", "fs_surface_street"],
-  desert: ["fs_surface", "fs_surface_flora", "fs_surface_refine"],
+  desert: ["fs_surface", "fs_surface_refine"],
 };
 // Under DESERT_LITE the desert's later stages are compiled out and skipped.
 export const SURFACE_STAGES_LITE = ["fs_surface"];
