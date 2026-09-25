@@ -57,7 +57,7 @@ sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
-    DESERT_LITE_TIERS, desert_relief_m, surface_cell_m, surface_period_m,
+    DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, desert_relief_m, surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
@@ -275,6 +275,8 @@ def main():
                     # The simplified desert at the tiers the app flies it.
                     desert_lite=(args.surface == "desert"
                                  and tier_name in DESERT_LITE_TIERS),
+                    desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[tier_name]
+                                      if args.surface == "desert" else 1.0),
                     **light)
                 if tier["light_cache"] and baked != light:
                     for r in renderers:

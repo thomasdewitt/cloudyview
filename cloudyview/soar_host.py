@@ -476,6 +476,10 @@ class ViewState:
     # a desert scene, keyed in the app on the tier (DESERT_LITE_TIERS) —
     # witness --quality sets it the same way. It has no refine stage.
     desert_lite: bool = False
+    # How far out the full desert walks explicit plants (raymarch.wgsl
+    # DESERT_FLORA_CUT, a scale on the far-cut footprints), keyed in the app
+    # on the tier (DESERT_FLORA_CUT_BY_TIER); 1.0 is the shader's own value.
+    desert_flora_cut: float = 1.0
     # The scene clock (s, row 24.z): where the moving sea is in its motion.
     # The browser advances it while flying; a still names it (witness
     # --time) and a track carries it per sample.
@@ -743,12 +747,19 @@ SURFACE_REFINE_SURFACES = ("city", "desert")
 # web/soar/constants.js DESERT_LITE_TIERS; witness --quality sets
 # ViewState.desert_lite from it.
 DESERT_LITE_TIERS = ("low", "minimal")
+# The flora's explicit cut per tier (raymarch.wgsl DESERT_FLORA_CUT): Medium
+# walks explicit plants about half as far as High; the lite tiers ignore it.
+# The twin of web/soar/constants.js DESERT_FLORA_CUT_BY_TIER; witness
+# --quality sets ViewState.desert_flora_cut from it.
+DESERT_FLORA_CUT_BY_TIER = {"max": 1.0, "high": 1.0, "medium": 0.5,
+                            "low": 1.0, "minimal": 1.0}
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
                max_light_steps: int, tone_map: bool = True,
                surface: str = "ocean", light_cache: bool = False,
-               sky_probe: bool = True, desert_lite: bool = False) -> str:
+               sky_probe: bool = True, desert_lite: bool = False,
+               desert_flora_cut: float = 1.0) -> str:
     """Bake the compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
@@ -795,6 +806,17 @@ def specialize(source: str, *, periodic: bool, nested: bool,
                              f"surface is {surface!r}.")
         swaps.append(("const DESERT_LITE: bool = false;",
                       "const DESERT_LITE: bool = true;"))
+    # The flora's explicit cut, the same way: demanded only when it departs
+    # from the declared 1.0, and only ever over a desert.
+    cut = float(desert_flora_cut)
+    if not (math.isfinite(cut) and cut > 0.0):
+        raise ValueError(f"desert_flora_cut must be positive; got {cut}.")
+    if cut != 1.0:
+        if surface != "desert":
+            raise ValueError("desert_flora_cut is a desert specialization; "
+                             f"the surface is {surface!r}.")
+        swaps.append(("const DESERT_FLORA_CUT: f32 = 1.0;",
+                      f"const DESERT_FLORA_CUT: f32 = {cut!r};"))
     if "const LIGHT_CACHE: bool" in source:
         swaps += [
             ("const LIGHT_CACHE: bool = false;",
@@ -1126,7 +1148,8 @@ class SoarRenderer:
             primitive={"topology": "triangle-list"})
 
     def _spec(self, *, light_cache: bool, sky_probe: bool,
-              desert_lite: bool = False) -> dict:
+              desert_lite: bool = False,
+              desert_flora_cut: float = 1.0) -> dict:
         """Everything specialize() takes, from this renderer's attributes as
         they stand now plus a lighting method. Every module and pipeline
         cache here keys on the whole of it, so an attribute changed after
@@ -1136,7 +1159,8 @@ class SoarRenderer:
                     max_light_steps=self.max_light_steps,
                     tone_map=self.tone_map, surface=self.surface,
                     light_cache=bool(light_cache), sky_probe=bool(sky_probe),
-                    desert_lite=bool(desert_lite))
+                    desert_lite=bool(desert_lite),
+                    desert_flora_cut=float(desert_flora_cut))
 
     def _module_for(self, spec: dict):
         key = tuple(sorted(spec.items()))
@@ -1176,7 +1200,8 @@ class SoarRenderer:
         a desert, its detail."""
         return self._spec(light_cache=view.light_cache,
                           sky_probe=view.sky_probe,
-                          desert_lite=view.desert_lite)
+                          desert_lite=view.desert_lite,
+                          desert_flora_cut=view.desert_flora_cut)
 
     def _bake_pipeline(self):
         """The sun-tau bake: one field-x plane of the cache per draw, into an

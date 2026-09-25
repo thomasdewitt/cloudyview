@@ -60,8 +60,9 @@ sys.path.insert(0, str(REPO / "tests"))
 
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
-    SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
-    desert_relief_m, surface_cell_m, surface_period_m,
+    DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SceneState, SoarRenderer,
+    ViewState, camera_world_origin, read_shader, desert_relief_m,
+    surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
@@ -255,7 +256,15 @@ def main():
             sun_azimuth=v.get("sun_azimuth", 20.0),
             sun_elevation=v.get("sun_elevation", 55.0),
             jitter=args.jitter, light_cache=light_cache,
-            sky_probe=sky_probe, **extra)
+            sky_probe=sky_probe,
+            # A desert at a quality tier flies that tier's detail.
+            desert_lite=(surface == "desert"
+                         and args.tier in DESERT_LITE_TIERS),
+            desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[args.tier]
+                              if surface == "desert"
+                              and args.tier in DESERT_FLORA_CUT_BY_TIER
+                              else 1.0),
+            **extra)
         sun = (view.sun_azimuth, view.sun_elevation)
         if light_cache and sun != baked_sun:
             for r in renderers:

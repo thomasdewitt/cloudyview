@@ -219,6 +219,7 @@ export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
                                    toneMap = true, city = false,
                                    desert = false, desertLite = false,
+                                   desertFloraCut = 1.0,
                                    lightCache, skyProbe }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
@@ -272,6 +273,20 @@ export function specializeShader(source,
     swaps.push(["const DESERT_LITE: bool = false;",
                 "const DESERT_LITE: bool = true;"]);
   }
+  // The flora's explicit cut, the same way: demanded only when it departs
+  // from the shader's declared 1.0, and only ever over a desert.
+  if (!(Number.isFinite(desertFloraCut) && desertFloraCut > 0)) {
+    throw new Error(`desertFloraCut must be a positive number; got ` +
+                    `${desertFloraCut}.`);
+  }
+  if (desertFloraCut !== 1.0) {
+    if (!desert) {
+      throw new Error("desertFloraCut without desert: the flora's cut is " +
+                      "a desert specialization.");
+    }
+    swaps.push(["const DESERT_FLORA_CUT: f32 = 1.0;",
+                `const DESERT_FLORA_CUT: f32 = ${wgslFloat(desertFloraCut)};`]);
+  }
   let out = source;
   for (const [sentinel, replacement] of swaps) {
     const count = out.split(sentinel).length - 1;
@@ -295,8 +310,13 @@ export function specializeShader(source,
 export function shaderVariantKey(spec) {
   const surface = spec.city ? "city" : (spec.desert ? "desert" : "ocean");
   return [spec.periodic, spec.nested, spec.maxLightSteps, spec.toneMap,
-          surface, Boolean(spec.desertLite), spec.lightCache,
-          spec.skyProbe].join("|");
+          surface, Boolean(spec.desertLite), spec.desertFloraCut ?? 1.0,
+          spec.lightCache, spec.skyProbe].join("|");
+}
+
+/** A number as a WGSL f32 literal: always with a decimal point. */
+function wgslFloat(x) {
+  return Number.isInteger(x) ? x.toFixed(1) : String(x);
 }
 
 export class Renderer {
@@ -966,7 +986,8 @@ export class Renderer {
    */
   _shaderSpec({ toneMap = true, lighting = this.lighting,
                 tier = this.qualityTier,
-                desertLite = this._desertLiteFor(tier) } = {}) {
+                desertLite = this._desertLiteFor(tier),
+                desertFloraCut = this._desertFloraCutFor(tier) } = {}) {
     return {
       periodic: this.periodic,
       nested: Boolean(this.scene.nested),
@@ -975,6 +996,7 @@ export class Renderer {
       city: Boolean(this.scene.city),
       desert: Boolean(this.scene.desert),
       desertLite,
+      desertFloraCut,
       lightCache: lighting.lightCache,
       skyProbe: lighting.skyProbe,
     };
@@ -1007,6 +1029,17 @@ export class Renderer {
    */
   _desertLiteFor(tier) {
     return Boolean(this.scene.desert) && K.DESERT_LITE_TIERS.includes(tier);
+  }
+
+  /** The flora's explicit cut at `tier` (DESERT_FLORA_CUT_BY_TIER), keyed
+   *  like _desertLiteFor; 1 off the desert, where it means nothing. */
+  _desertFloraCutFor(tier) {
+    if (!this.scene.desert) return 1.0;
+    const cut = K.DESERT_FLORA_CUT_BY_TIER[tier];
+    if (cut === undefined) {
+      throw new Error(`no flora cut for tier ${tier}`);
+    }
+    return cut;
   }
 
   /** Whether this scene's opaque surface is traced by the pre-pass. */
@@ -1978,10 +2011,11 @@ export class Renderer {
    */
   _bakePipeline() {
     // fs_bake_light reads neither the lighting method nor the desert's
-    // detail, so it is built on one fixed variant of each.
+    // detail (lite, flora cut), so it is built on one fixed variant of each.
     return this._pipeline("fs_bake_light", "r16float",
                           this._shaderSpec({ lighting: BAKE_LIGHTING,
-                                             desertLite: false }));
+                                             desertLite: false,
+                                             desertFloraCut: 1.0 }));
   }
 
 
