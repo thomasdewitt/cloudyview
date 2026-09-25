@@ -7829,10 +7829,11 @@ fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32, fog: vec4<f32>,
 // The radiance the averaged footprint hands back. `mean` is the per-area
 // sum. Shown directly, it is the light's own colour (its fogless mean)
 // scaled by s until it shows the averaged luminance: the least s that
-// does (within CITY_RESOLVE_EPS). s is bracketed about a first guess (the
-// per-channel curve inverted at that luminance), the bracket widened by
-// fours until it holds, and bisected in log steps, two more for each
-// widening. One element, alone in the footprint, comes back as itself.
+// does (to within CITY_RESOLVE_EPS). s is bracketed about
+// a first guess (the per-channel curve inverted at that luminance, held
+// to [1e-6, 1e6]), the bracket widened by fours until it holds, and
+// bisected in log steps, two more for each widening. One element, alone
+// in the footprint, comes back as itself.
 //
 // The rule needs the displayed luminance to rise with s up to the goal.
 // It does for a light with every channel lit, as the room palette's
@@ -7842,7 +7843,8 @@ fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32, fog: vec4<f32>,
 // the plateau). A near-primary in fog is the exception: the shoulder's
 // chroma-preserving blend dims the fog's own channels as the primary
 // brightens, so its luminance can peak and fall. The widening stops at
-// the peak, and s stays near it.
+// the peak, stepping hi back to the brightest point it found, and s stays
+// near it.
 const CITY_RESOLVE_EPS: f32 = 1e-5;
 fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
                         shown: bool) -> vec3<f32> {
@@ -7865,7 +7867,7 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
     let w2 = u.flags.w * u.flags.w;
     // @domain: (1 - m)^2 >= 0, m >= 0, and w2 >= 16 (both hosts hold the white point to [4, 40])
     let e_y = 2.0 * m / ((1.0 - m) + sqrt((1.0 - m) * (1.0 - m) + 4.0 * m / w2));
-    let guess = max((e_y - dot(fog.yzw * e, lum)) / y_light, 1e-6);
+    let guess = clamp((e_y - dot(fog.yzw * e, lum)) / y_light, 1e-6, 1e6);
     // lo shows short of the goal, hi reaches it. The goal is always
     // reachable: every channel an averaged element lit, the light has.
     // Twelve widenings reach 4^12 either way, past anything the palette
@@ -7882,8 +7884,11 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
         if (!lo_over && !hi_under) {
             break;
         }
-        // Past a peak short of the goal (see above).
+        // Past a peak short of the goal (see above): back to the last hi,
+        // the brighter.
         if (hi_under && y_hi <= y_hi_last) {
+            hi = 0.25 * hi;
+            steps = steps - 2;
             break;
         }
         y_hi_last = y_hi;
@@ -7896,7 +7901,7 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
         steps = steps + 2;
     }
     for (var k: i32 = 0; k < steps; k = k + 1) {
-        // @domain: lo and hi stay positive (guess >= 1e-6, halved or quartered at most 13 times)
+        // @domain: lo and hi stay positive (guess >= 1e-6, quartered at most 12 times after halving)
         let mid = sqrt(lo * hi);
         if (dot(city_display_curve(e * (mid * x0 + fog.yzw)), lum) < goal) {
             lo = mid;
