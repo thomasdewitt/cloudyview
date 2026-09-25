@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-eight hook dispatchers the core calls (see the hook comment block in
+nine hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -125,7 +125,7 @@ def validate_component(comp, source):
 
 
 def dispatcher(comps):
-    """The eight hook dispatchers over whatever is registered."""
+    """The nine hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 

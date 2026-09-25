@@ -641,7 +641,8 @@ export class Renderer {
     try {
       await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
       if (kind === "desert") {
-        await this._pipeline("fs_surface", SURFACE_FORMAT, spec);
+        await this._pipeline("fs_surface", [SURFACE_FORMAT, VEIL_FORMAT],
+                             spec);
         await this._pipeline("fs_surface_refine", SURFACE_FORMAT, spec);
       }
     } catch (err) {

@@ -209,8 +209,8 @@ struct Uniforms {
 // forms — and a 1x1 stand-in for every other pass.
 @group(1) @binding(1) var surface_plain: texture_2d<f32>;
 // The VEIL: one semi-transparent layer per pixel in front of the surface —
-// the city's steam, the desert's far canopy — as the last surface stage left
-// it: premultiplied in-scattered radiance, transmittance, and the depth the
+// the city's steam (the desert writes none yet) — as the last surface stage
+// left it: premultiplied in-scattered radiance, opacity, and the depth the
 // march composites it at (veil_pack / veil_unpack). Read by the march only
 // under CITY or DESERT; a 1x1 stand-in everywhere else.
 @group(1) @binding(2) var veil_buf: texture_2d<u32>;
@@ -3193,7 +3193,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 // cloudyview/soar/city/components/, each owning one kind of thing (a street
 // prop, a facade layer, an elevated highway), registered in registry.json
 // and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls six hooks; the composer generates their
+// markers below. The core calls nine hooks; the composer generates their
 // dispatchers over whatever is registered, and when nothing is, the
 // defaults below make every hook a no-op — except the shade dispatcher,
 // which returns magenta, because an unclaimed hit kind is a bug and should
@@ -3206,6 +3206,10 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //                        called only within CITY_PROP_RANGE of the camera —
 //                        the props' whole cost budget lives inside that
 //                        radius.
+//   cc_near_props_trace  per-cell prop geometry seen only close (street
+//                        furniture, the parked cars' hulls), below
+//                        CITY_FURNITURE_TOP, traced only by the street stage
+//                        (surface_street_city) out to city_near_reach.
 //   cc_component_shade   radiance at a component hit (kind >= 100; each
 //                        component owns kind_base .. kind_base+15).
 //   cc_facade_detail     additive facade emission (balconies, signage,
@@ -21458,13 +21462,12 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // Which surfaces have the second stage is the hosts' list
 // (soar_host.SURFACE_REFINE_SURFACES, renderer.js _hasRefineStage).
 //
-// One function per surface, chosen by the scene's specialization. Anything
-// that belongs to the surface and sits in front of it along the ray (city
-// fog, a component's in-scatter at street level) is folded into its rgb here
-// — it was already, when fs_main did the tracing. A semi-transparent layer
-// in front of the surface (a far canopy over the sky) would need a second
-// target; there is room for one (24 bytes per sample with an rgba16float
-// premultiplied layer beside this rgba32float), and none is built.
+// One function per surface, chosen by the scene's specialization. What
+// belongs to the surface and sits in front of it along the ray as part of
+// its look (city fog) is folded into its rgb here. A semi-transparent layer
+// that must also show against the sky, or with a cloud in front of or
+// behind it (the city's steam), goes to the VEIL instead (@location(1),
+// veil_pack), which fs_main composites at the veil's own depth.
 
 struct CameraRay {
     dir: vec3<f32>,
@@ -21827,11 +21830,25 @@ fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
 // street — the furniture standing in front of it, the wet reflection off
 // it, and the steam over it, which goes to the VEIL so it shows against the
 // sky and in front of any wall. A pixel whose ray never comes down within
-// CITY_NEAR_TOP of the street, within CITY_NEAR_RANGE, and did not land on
-// the ground, leaves at once with the surface unchanged.
+// CITY_NEAR_TOP of the street, within its reach (city_near_reach), and did
+// not land on the ground, leaves at once with the surface unchanged.
 const CITY_NEAR_TOP: f32 = 15.0;     // the tallest near thing: a plume
-const CITY_NEAR_RANGE: f32 = 400.0;  // past the furniture and steam cutoffs
+const CITY_NEAR_RANGE: f32 = 400.0;  // past the steam's cutoff
 const CITY_FURNITURE_TOP: f32 = 3.0; // an open dumpster lid on the kerb
+// The near_props contract (SPEC.md): no hook draws anything where the props'
+// footprint, max(0.35 pixel_angle, true_pixel_angle) * t, exceeds this. The
+// wall lane's fade ends there (streetfurniture WALL_FAR), and the parked
+// cars the street stage owns (pixel_angle * t < 0.5) end well short of it.
+const CITY_NEAR_FP: f32 = 0.75;
+
+// How far along the ray the street stage looks: the steam's fixed range, or
+// the props' footprint-bound one, whichever is longer. At high resolution the
+// props reach well past CITY_NEAR_RANGE (~900 m at 1440p, fov 70).
+fn city_near_reach(cr: CameraRay) -> f32 {
+    return max(CITY_NEAR_RANGE,
+               CITY_NEAR_FP / max(0.35 * cr.pixel_angle,
+                                  cr.true_pixel_angle));
+}
 
 fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     let dir = cr.dir;
@@ -21847,7 +21864,7 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     if (city_o.z > CITY_NEAR_TOP) {
         t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
     }
-    let t_near = min(t_prev, CITY_NEAR_RANGE);
+    let t_near = min(t_prev, city_near_reach(cr));
     let near = t_low < t_near;
     if (!near && !ground_hit) {
         return out;
@@ -21874,8 +21891,12 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
         let hp = city_trace(city_o, dir, t_f0, t_f1, CITY_TRACE_NEAR);
         if (hp.hit) {
             t = hp.t;
-            rgb = city_fog(city_shade(hp, dir, pixel_angle * t), city_o, dir,
-                           t, hp.pos);
+            // Always a component's hit (kind >= 100: no near_props hook
+            // returns core kinds), so its shader directly — a second whole
+            // city_shade beside the reflection's cost registers here.
+            rgb = city_fog(cc_component_shade(hp, city_cell(hp.cell), dir,
+                                              pixel_angle * t),
+                           city_o, dir, t, hp.pos);
             ground = false;
         }
     }
@@ -21959,9 +21980,12 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
 
 // What every surface stage writes to the veil target (@location(1)), and
 // what the march reads back at group 1 binding 2: premultiplied radiance
-// (half floats), transmittance, and the composite depth (a full f32 — up to
+// and opacity (half floats), and the composite depth (a full f32 — up to
 // 40 km over the desert). Packed into a uint target so no driver's float
-// path ever touches the bits.
+// path ever touches the bits. Opacity, 1 - transmittance, rather than
+// transmittance: a half float rounds any transmittance above ~0.99976 to
+// exactly 1, which would drop a faint plume's fringe (and its radiance with
+// it) at a hard edge; 1 - T keeps its full relative precision down there.
 struct SurfaceOut {
     @location(0) surf: vec4<f32>,
     @location(1) veil: vec4<u32>,
@@ -21969,7 +21993,7 @@ struct SurfaceOut {
 
 fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
     return vec4<u32>(pack2x16float(rgb.xy),
-                     pack2x16float(vec2<f32>(rgb.z, trans)),
+                     pack2x16float(vec2<f32>(rgb.z, 1.0 - trans)),
                      bitcast<u32>(t), 0u);
 }
 
@@ -21987,7 +22011,7 @@ struct Veil {
 fn veil_unpack(v: vec4<u32>) -> Veil {
     let rg = unpack2x16float(v.x);
     let bt = unpack2x16float(v.y);
-    return Veil(vec3<f32>(rg, bt.x), bt.y, bitcast<f32>(v.z));
+    return Veil(vec3<f32>(rg, bt.x), 1.0 - bt.y, bitcast<f32>(v.z));
 }
 
 // The pass itself. Only the CITY and DESERT specializations are ever run
@@ -22151,7 +22175,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
     let t_surface = select(select(t_ocean, t_city, CITY), t_desert, DESERT);
-    // The veil (steam over the city, far canopy over the desert): composited
+    // The veil (the city's steam; the desert writes none yet): composited
     // once, where the march passes its depth — so a cloud in front of it
     // stays in front and a cloud behind it is seen through it — and only if
     // it lies in front of the surface.
