@@ -39,6 +39,8 @@ const FLYERS = [
 // Lens water's setting, per browser: default on. Storage can be missing or
 // refuse (a private window); the setting then simply is not remembered.
 const LENS_WATER_KEY = "soar.lensWater";
+// The longest single step the live lens takes (s): see _frame.
+const LENS_MAX_STEP_S = 1.0;
 function readLensWater() {
   try {
     return localStorage.getItem(LENS_WATER_KEY) !== "off";
@@ -2208,6 +2210,9 @@ export class Viewer {
     this.lensWater = Boolean(on);
     writeLensWater(this.lensWater);
     if (!this.lensWater) this.renderer?.resetLens();
+    // Switched on while parked in cloud, the lens has wetting to do before
+    // any read-back can say so: keep the loop up until one does.
+    else if (this.renderer) this.renderer.lensSettled = false;
     this._wake("lens water");
   }
 
@@ -3368,9 +3373,13 @@ export class Viewer {
     if (clockRuns) {
       this.sceneTime += dt;
     }
-    // Lens water steps on the same clock: parked, it holds still, so the
-    // picture under it converges and the drops do not crawl.
-    this._lensDt = clockRuns ? dt : 0.0;
+    // Lens water keeps wall-clock time, parked or not: it goes on wetting in
+    // cloud and drying out of it while you hover. It is drawn after the
+    // accumulation, so a changing lens never disturbs the parked picture's
+    // convergence. Capped at a second: the loop only sleeps once the lens
+    // has settled (below), so a longer gap is one in which it had nothing
+    // left to do, and the law is exact for any step.
+    this._lensDt = Math.min(elapsed, LENS_MAX_STEP_S);
 
     if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
@@ -3495,7 +3504,8 @@ export class Viewer {
       } else {
         this.renderer.presentLast(
           this.context.getCurrentTexture().createView(), this.canvasFormat,
-          [outW, outH], overlays);
+          [outW, outH], overlays,
+          this.lensWater ? { dt: this._lensDt ?? 0.0 } : null);
       }
       if (queueClock && measuring) {
         // Close of the window the drain above opened: what sits between the
@@ -3605,7 +3615,9 @@ export class Viewer {
     // throttling, so a parked picture is not merely wasteful, it makes the
     // NEXT flight slower.
     const animating = this._overlaysAnimate() || this.recorder.recording
-      || this._capturing || probing || this.renderer.lightBakePending;
+      || this._capturing || probing || this.renderer.lightBakePending
+      // A lens still wetting or drying is motion too.
+      || (this.lensWater && !this.renderer.lensSettled);
     if (converged && !this._marchPending && !animating) {
       this._sleeping = true;
       return;                    // no rAF is scheduled; only _wake starts one

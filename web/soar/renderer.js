@@ -654,12 +654,24 @@ export class Renderer {
       size: [1, 1, 1], format: SURFACE_FORMAT, usage,
     });
     const stateUsage = GPUTextureUsage.RENDER_ATTACHMENT
-      | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
+      | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      | GPUTextureUsage.COPY_SRC;                // the wetness read-back
     this._lensState = [lensTex(stateUsage), lensTex(stateUsage)];
     this._lensDry = lensTex(GPUTextureUsage.TEXTURE_BINDING);   // zeros
     this._lensIndex = 0;
     this._lensGroups = null;
     this._lastLensTex = this._lensDry;
+    // The wetness, read back to the CPU a frame or so late (never waited
+    // on): all the viewer needs to know is whether the lens is still
+    // changing, so the loop stays awake while it wets or dries and may sleep
+    // once it has settled. `lensSettled` starts true (dry).
+    this._lensReadBuf = device.createBuffer({
+      size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this._lensReadQueued = false;
+    this._lensReadBusy = false;
+    this._lensReadW = 0.0;
+    this.lensSettled = true;
     this.blitPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.blitLayout],
     });
@@ -1831,11 +1843,13 @@ export class Renderer {
   async _submit(commandBuffer) {
     if (!this.boundedQueue) {
       this.device.queue.submit([commandBuffer]);
+      this._startLensRead();
       return;
     }
     while (this._queueFences.length >= 2) await this._queueFences.shift();
     this.device.queue.submit([commandBuffer]);
     this._queueFences.push(this.device.queue.onSubmittedWorkDone());
+    this._startLensRead();
   }
 
   /**
@@ -2071,9 +2085,36 @@ export class Renderer {
     p.setBindGroup(1, this._lensGroups[this._lensIndex]);
     p.draw(3);
     p.end();
+    if (!this._lensReadBusy && !this._lensReadQueued) {
+      encoder.copyTextureToBuffer({ texture: this._lensState[next] },
+                                  { buffer: this._lensReadBuf, bytesPerRow: 256 },
+                                  [1, 1, 1]);
+      this._lensReadQueued = true;
+    }
     this._lensIndex = next;
     this._lastLensTex = this._lensState[next];
     return this._lastLensTex;
+  }
+
+  /**
+   * Map the wetness copied by the last state step, once its submit is in the
+   * queue, and note whether the lens has settled: exactly dry, or changing
+   * by less than 1e-5 between two reads (within ~1e-3 of where it is going
+   * at 60 fps). Never awaited by the frame.
+   */
+  _startLensRead() {
+    if (!this._lensReadQueued || this._lensReadBusy) return;
+    this._lensReadQueued = false;
+    this._lensReadBusy = true;
+    this._lensReadBuf.mapAsync(GPUMapMode.READ).then(() => {
+      const w = new Float32Array(this._lensReadBuf.getMappedRange(0, 4))[0];
+      this._lensReadBuf.unmap();
+      this.lensSettled = w === 0 || Math.abs(w - this._lensReadW) < 1e-5;
+      this._lensReadW = w;
+      this._lensReadBusy = false;
+    }, () => {
+      this._lensReadBusy = false;
+    });
   }
 
   /** A dry lens: the start of a video, or the toggle switched off. */
@@ -2085,6 +2126,8 @@ export class Renderer {
     }
     this._lensIndex = 0;
     this._lastLensTex = this._lensDry;
+    this._lensReadW = 0.0;
+    this.lensSettled = true;
   }
 
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact,
@@ -2114,15 +2157,35 @@ export class Renderer {
    * plus whatever the overlays are. The bird is why the loop still runs at
    * all in that state — it flies whether or not the camera does.
    */
-  presentLast(targetView, targetFormat, outputSize, overlays = null) {
+  presentLast(targetView, targetFormat, outputSize, overlays = null,
+              lens = null) {
     if (!this.canPresentLast) return false;
     const encoder = this.device.createCommandEncoder();
+    // Lens water keeps its own time on a converged view: step it here too,
+    // with only row 24.w rewritten (the rest of the block is still the last
+    // march's, and the camera has not moved). A state pipeline still
+    // compiling skips the step and keeps the last texel.
+    let lensTex = this._lastLensTex;
+    if (lens) {
+      let pipeline = null;
+      try {
+        pipeline = this._lensPipeline(this.lighting);
+      } catch {
+        // Failed and recorded; the march that needs it throws it.
+      }
+      if (pipeline && !isPending(pipeline)) {
+        this.device.queue.writeBuffer(this.uniformBuf, (24 * 4 + 3) * 4,
+                                      new Float32Array([lens.dt]));
+        lensTex = this._encodeLensState(encoder, lens, pipeline);
+      }
+    }
     this._encodeBlit(
       encoder, this._lastPresented, targetView, targetFormat,
       this._targets.w === outputSize[0] && this._targets.h === outputSize[1],
-      this._lastLensTex);
+      lensTex);
     encodeOverlays(overlays, encoder, targetView, targetFormat);
     this.device.queue.submit([encoder.finish()]);
+    this._startLensRead();
     return true;
   }
 
@@ -2483,6 +2546,7 @@ export class Renderer {
     for (const tex of [...(this._lensState ?? []), this._lensDry]) {
       tex?.destroy();
     }
+    this._lensReadBuf?.destroy();
     this._meterTex?.destroy();
     for (const tex of this._meterTargets?.surface?.textures ?? []) {
       tex.destroy();
