@@ -340,6 +340,7 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     }
     // Lumps in local radii: across by q / r, up by zeta = integral of
     // dz / r = ln(r / r0) / SPREAD.
+    // @domain: r >= r0 > 0: the plume's radius only grows from its source
     let zeta = log(r / s.r0) / cc_manholesteam_SPREAD
              - cc_manholesteam_RISE_RATE * scene_time();
     var x = vec3<f32>(1.6 * q / r + s.seed, 1.3 * zeta);
@@ -367,6 +368,7 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     // thins to the same plume aloft.
     let cover = smoothstep(0.0, cc_manholesteam_SOFT, boundary - d);
     return s.vigor * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
+           // @domain: r >= r0 > 0: the plume's radius only grows from its source
            * pow(cc_manholesteam_R0_COVER / r, cc_manholesteam_THIN);
 }
 
@@ -426,8 +428,12 @@ fn cc_manholesteam_light(p: vec3<f32>, dir: vec3<f32>,
         let glow = select(st.glow_lo, st.glow_hi, side == 1);
         let d = max(abs(face - x), 0.3);
         let theta = atan((CITY_STORE_H - p.z) / d) + atan(p.z / d);
-        let toward = select(vec2<f32>(0.0, face - x), vec2<f32>(face - x, 0.0),
+        // Toward the band across the same clamped distance theta uses, so
+        // a sample on the facade plane at mid-band height has a direction.
+        let dx = select(-d, d, face >= x);
+        let toward = select(vec2<f32>(0.0, dx), vec2<f32>(dx, 0.0),
                             st.along_y);
+        // @domain: |toward| = d >= 0.3
         let v = normalize(vec3<f32>(toward, 0.5 * CITY_STORE_H - p.z));
         l = l + glow * (theta / 6.2831853)
               * (12.566371 * hg_phase(dot(v, dir), cc_manholesteam_STORE_G));
@@ -689,6 +695,7 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
             if (disc <= 0.0) {
                 continue;
             }
+            // @domain: the discriminant is tested positive (or non-negative) just above
             let sq = sqrt(disc);
             let tn = (-qb - sq) / qa;
             let tf = (-qb + sq) / qa;

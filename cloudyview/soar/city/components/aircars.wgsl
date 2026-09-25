@@ -607,6 +607,7 @@ fn cc_aircars_sdf_hit(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     let g = cc_aircars_g;
 
     return CityHit(true, cc_aircars_t, o + cc_aircars_t * dir,
+                   // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
                    cc_aircars_to_world(f, normalize(g)),
                    300 + 4 * lane + 3, ci);
 }

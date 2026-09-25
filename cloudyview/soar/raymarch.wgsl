@@ -1415,6 +1415,7 @@ fn sun_tangent_frame(sun: vec3<f32>) -> mat2x3<f32> {
     if (abs(sun.z) > 0.9) {
         helper = vec3<f32>(1.0, 0.0, 0.0);
     }
+    // @domain: helper is swapped for x when |sun.z| > 0.9: never parallel to sun
     let t1 = normalize(cross(helper, sun));
     return mat2x3<f32>(t1, cross(sun, t1));
 }
@@ -1438,10 +1439,12 @@ fn sun_cone_dir(sun: vec3<f32>, frame: mat2x3<f32>, r: vec2<f32>,
     } else {
         ru = (ru - AUREOLE_FRACTION) / max(1.0 - AUREOLE_FRACTION, 1e-6);
     }
+    // @domain: ru is the uniform r.x, rescaled into [0, 1) on either branch
     let radius = tan_max * scale * sqrt(ru);
     let phi = 6.283185307179586 * r.y;
     var d = sun + radius * (cos(phi) * t1 + sin(phi) * t2);
     d.z = max(d.z, SUN_CONE_MIN_Z);
+    // @domain: d.z >= SUN_CONE_MIN_Z > 0
     return normalize(d);
 }
 
@@ -1692,6 +1695,7 @@ fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
         if (mu > 1e-6 || mu < -1e-6) {
             let a = e0 - tau_cap * mu / (aer_beta0 * aer_h);
             if (a > 0.0) {
+                // @domain: a > 0 on this branch
                 let t_sol = (-aer_h * log(a) - z0) / mu;
                 if (t_sol > 0.0) {
                     cap = min(cap, t_sol);
@@ -1734,6 +1738,7 @@ fn circumsolar_amplitude(haze: f32) -> f32 {
     // whereas summing floor and span would land a ULP or two off 0.045.
     let span = CIRCUMSOLAR_AMPLITUDE - CIRCUMSOLAR_AMPLITUDE_FLOOR;
     return CIRCUMSOLAR_AMPLITUDE
+        // @domain: haze >= 0: the only caller, sky_radiance, reads max(u.flags.z, 0.0) (docs/soar-bugs.md 21)
         + span * (pow(haze / HAZE_ANCHOR, CIRCUMSOLAR_HAZE_EXPONENT) - 1.0);
 }
 
@@ -1845,6 +1850,7 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     let d_hg = 1.0 + g_a * g_a - 2.0 * g_a * cos_sun;
     let one_minus_g = 1.0 - g_a;
     let lobe = (one_minus_g * one_minus_g * one_minus_g)
+        // @domain: d = 1 + g^2 - 2 g cos >= (1 - |g|)^2 >= 0 for |cos| <= 1 (Henyey-Greenstein)
         / max(pow(d_hg, 1.5), 1e-6);
     let warm_ratio = bloom / LEGACY_BLOOM_CONST;
     col = col + circumsolar_amplitude(haze) * lobe
@@ -2441,6 +2447,7 @@ fn sea_foam_gain_pick(r: SeaGainRow, c: f32) -> f32 {
 }
 
 fn sea_foam_near_gain(theta: f32, along: f32) -> f32 {
+    // @domain: along >= 0; log2(0) = -inf, which the clamp takes to 0
     let x = clamp(2.0 * (log2(along / u.ocean_params.x) + 3.0), 0.0, 11.0);
     let k = min(floor(x), 10.0);
     let c = clamp(10.0 * (theta - 0.2), 0.0, 8.0);
@@ -2575,7 +2582,9 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
     // two of facets and folded at the surface period. Smaller than the
     // pixel, so the jittered samples of one pixel see several cells and a
     // sparkle lands as a point, antialiased, not as a cell-shaped tile.
+    // @domain: along and across are footprints: t_hit times a positive pixel span
     let side = max(0.5 * sqrt(along * across), SEA_GLITTER_FACET_M);
+    // @domain: side >= SEA_GLITTER_FACET_M > 0 (the max above)
     let level = ceil(log2(side / SEA_GLITTER_FACET_M));
     let cell = SEA_GLITTER_FACET_M * exp2(level);
     let q = p - SWELL_PERIOD_M * floor(p / SWELL_PERIOD_M);
@@ -2615,6 +2624,7 @@ fn sea_glitter_brightness(k: f32, seed: vec2<u32>) -> f32 {
         }
         let r = sea_uniforms(pcg2d(seed + vec2<u32>(0x9e3779b9u * (i + 1u),
                                                    0x85ebca6bu)));
+        // @domain: a uniform < 1, so the log is <= 0
         let z = sqrt(-2.0 * log(max(r.x, 1e-7)))
             * cos(6.283185307179586 * r.y);
         total = total + exp(SEA_GLITTER_SPREAD * z - 0.5 * s2);
@@ -2626,8 +2636,10 @@ fn sea_glitter_brightness(k: f32, seed: vec2<u32>) -> f32 {
 // the normal approximation (rounded, clamped at 0) past it.
 fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
     if (lambda > 16.0) {
+        // @domain: a uniform < 1, so the log is <= 0
         let z = sqrt(-2.0 * log(max(r.x, 1e-7)))
             * cos(6.283185307179586 * r.y);
+        // @domain: lambda > 16 on this branch
         return max(round(lambda + sqrt(lambda) * z), 0.0);
     }
     let e = exp(-lambda);
@@ -2735,6 +2747,7 @@ fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
 // @end sea
 // Smith masking for a GGX distribution parameterized by RMS slope.
 fn ggx_smith_g1(n_dot_x: f32, alpha_squared: f32) -> f32 {
+    // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
     let root = sqrt(alpha_squared + (1.0 - alpha_squared) * n_dot_x * n_dot_x);
     return (2.0 * n_dot_x) / (n_dot_x + root);
 }
@@ -2757,6 +2770,7 @@ fn ocean_slope_sample(slope: vec2<f32>, sigma: f32,
                       seed: vec2<f32>) -> vec3<f32> {
     var s = slope;
     if (sigma > 0.0) {
+        // @domain: a uniform < 1, so the log is <= 0
         let radius = sigma * sqrt(-2.0 * log(max(seed.x, 1e-6)));
         let phi = 6.283185307179586 * seed.y;
         s = s + radius * vec2<f32>(cos(phi), sin(phi));
@@ -2812,6 +2826,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     // the solar disc: one unbiased sample per pixel per frame, accumulated.
     let n = ocean_slope_sample(
         sea.slope,
+        // @domain: a fraction of a variance: >= 0
         slope_jitter * sqrt(0.5 * slope_draw_fraction * sea.variance),
         slope_seed);
 
@@ -2863,6 +2878,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 // 5 cm — capillary ripple no tile holds — plus all the
                 // filtered-away variance. Variances add; roughnesses do not.
                 let alpha = clamp(
+                    // @domain: a square plus a variance: >= 0
                     sqrt(glint_roughness * glint_roughness + sea.variance),
                     0.02, 0.75
                 );
@@ -3618,6 +3634,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         CITY_SPRAWL_MIN_FRAC, 1.0,
         smoothstep(CITY_EMPTY_RANK, CITY_SPRAWL_RANK_FULL, c.rank)
     );
+    // @domain: density is the city tile's channel, in [0, 1]
     let h_raw = (CITY_H_BASE + CITY_H_SCALE * pow(c.density, CITY_H_EXP))
                 * (0.70 + 0.60 * r4.x) * sprawl;
     let ns = clamp(floor(h_raw * CITY_PER_STOREY), 2.0, CITY_MAX_STOREYS);
@@ -3643,6 +3660,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     var podium = false;
     var zp = 0.0;
     if (h >= CITY_TOWER_H) {
+        // @domain: h >= CITY_TOWER_H > 0 on this branch
         let side = max(CITY_TOWER_SIDE_K * sqrt(min(h, CITY_TOWER_KNEE_H))
                            * (0.80 + 0.40 * r4.y),
                        h / CITY_SLENDER_MAX);
@@ -5120,7 +5138,9 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
     let nv = max(v.z, 1e-3);
     let ap = CITY_REFL_ALPHA_PUDDLE * CITY_REFL_ALPHA_PUDDLE;
     let ad = CITY_REFL_ALPHA_DAMP * CITY_REFL_ALPHA_DAMP;
+    // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
     let g1v_p = 2.0 * nv / (nv + sqrt(ap + (1.0 - ap) * nv * nv));
+    // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
     let g1v_d = 2.0 * nv / (nv + sqrt(ad + (1.0 - ad) * nv * nv));
     let lit = city_lamp_lines(p.xy);
     // The heads a mirror shows are the ones near where the MIRROR ray (the
@@ -5161,11 +5181,14 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
                 let nl = max(l.z, 1e-3);
                 // The pool's own irradiance law (downward lobe x cosine).
                 let e_pool = amp * h2 / r2 * nl * nl;
+                // @domain: v (to the eye) and l (to a lamp head) both point up from the ground
                 let hv = normalize(v + l);
                 let nh = max(hv.z, 0.0);
                 let fres = CITY_REFL_F0 + (1.0 - CITY_REFL_F0)
                          * pow(1.0 - clamp(dot(v, hv), 0.0, 1.0), 5.0);
+                // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
                 let g1l_p = 2.0 * nl / (nl + sqrt(ap + (1.0 - ap) * nl * nl));
+                // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
                 let g1l_d = 2.0 * nl / (nl + sqrt(ad + (1.0 - ad) * nl * nl));
                 // Each lobe widened by the pixel's footprint as the lamp
                 // sees it (fp / r radians, half of it in half-vector
@@ -5228,6 +5251,7 @@ fn city_wet_lobe(h: CityHit, g: CityGround, dir: vec3<f32>,
                        puddle_lobe);
     // GGX, sampled by its distribution of normals.
     let a2 = alpha * alpha;
+    // @domain: rnd.x in [0, 1), a2 in (0, 1]: numerator > 0, denominator >= a2 > 0
     let ct = sqrt((1.0 - rnd.x) / (1.0 + (a2 - 1.0) * rnd.x));
     let st = sqrt(max(1.0 - ct * ct, 0.0));
     let phi = 6.2831853 * rnd.y;
@@ -5243,8 +5267,11 @@ fn city_wet_lobe(h: CityHit, g: CityGround, dir: vec3<f32>,
     // Estimator: F G2 (v.m) / ((n.v)(n.m)), Smith's G1 for each direction.
     let nv = max(-dir.z, 1e-4);
     let nl = r.z;
+    // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
     let g1v = 2.0 * nv / (nv + sqrt(a2 + (1.0 - a2) * nv * nv));
+    // @domain: a squared GGX roughness in (0, 1]: both terms >= 0
     let g1l = 2.0 * nl / (nl + sqrt(a2 + (1.0 - a2) * nl * nl));
+    // @domain: vm <= 1 (the min above) and vm > 0 (returned above otherwise)
     let fres = CITY_REFL_F0 + (1.0 - CITY_REFL_F0) * pow(1.0 - vm, 5.0);
     out.ok = true;
     out.r = r;
@@ -5288,6 +5315,7 @@ fn city_reflect_sky(world_o: vec3<f32>, r: vec3<f32>, jit: f32) -> vec3<f32> {
             base = q;
         }
     }
+    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
     let lod = clamp(log2(max(base.z, u.ocean_params.x) / u.ocean_params.x),
                     0.0, u.ocean_params.w);
     let g_raw = max(city_glow_sample(city_fold_xy(base.xy), lod)
@@ -5735,6 +5763,7 @@ fn city_fog_ab(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                hit_pos: vec3<f32>) -> vec4<f32> {
     let ftrans = city_fog_trans(o, dir, t_hit, hit_pos);
     let mid = mix(o.xy, hit_pos.xy, 0.6);
+    // @domain: t_hit >= 0
     let lod = 5.0 + log2(1.0 + t_hit / 2000.0);
     // Clamped: over the megatower district the raw mip runs to ~3x the
     // p99.5 level, and unclamped it bleaches the whole frame sepia.
@@ -5802,6 +5831,7 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
         let spos = vec2<f32>(cid) + vec2<f32>(0.15) + 0.70 * sh.yz;
         let d = length(sc - spos);
         if (d < CITY_STAR_RADIUS) {
+            // @domain: a hash draw, in [0, 1)
             let b = pow(sh.w, 4.0) * (1.0 - d / CITY_STAR_RADIUS);
             col = col + vec3<f32>(0.9, 0.95, 1.0)
                 * (CITY_STAR_AMP * b * smoothstep(0.05, 0.25, dir.z));
@@ -5814,6 +5844,7 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
     let dh = 1.0 + g_h * g_h - 2.0 * g_h * cm;
     let one_minus_gh = 1.0 - g_h;
     let halo = (one_minus_gh * one_minus_gh * one_minus_gh)
+        // @domain: d = 1 + g^2 - 2 g cos >= (1 - |g|)^2 >= 0 for |cos| <= 1 (Henyey-Greenstein)
         / max(pow(dh, 1.5), 1e-6);
     col = col + CITY_MOON_HALO_AMP * halo * vec3<f32>(0.75, 0.80, 0.95);
     if (cm > 0.0) {
@@ -5824,12 +5855,18 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
     let sin_r = length(off);
     if (cm > 0.0 && sin_r < CITY_MOON_SIN_R) {
         let r = sin_r / CITY_MOON_SIN_R;
-        let t1 = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), moon));
+        // The frame's helper axis swaps for x near the zenith, where
+        // z x moon would vanish (as the sun's frame does).
+        let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0),
+                        abs(moon.z) > 0.9);
+        // @domain: up is swapped for x when |moon.z| > 0.9: never parallel to moon
+        let t1 = normalize(cross(up, moon));
         let t2 = cross(moon, t1);
         let a1 = dot(off, t1) / CITY_MOON_SIN_R;
         let a2 = dot(off, t2) / CITY_MOON_SIN_R;
         let c = sqrt(max(1.0 - r * r, 0.0));
         let n = a1 * t1 + a2 * t2 - c * moon;
+        // @domain: a combination of an orthonormal frame with a nonzero coefficient (t1, t2, moon)
         let l = normalize(0.82 * t1 - 0.20 * t2 + 0.55 * moon);
         let lit = smoothstep(
             0.0, CITY_MOON_TERMINATOR_SOFT, dot(n, l));
@@ -6019,6 +6056,7 @@ fn city_face_skin(cc: CityCell, nrm: vec3<f32>) -> CityFace {
     f.aligned = false;
     f.side = 0;
     f.tier = 0;
+    // @domain: a skin or unclaimed facade normal (kind 1: |n.z| <= 0.7), so |xy| >= 0.7
     f.n = normalize(nrm.xy + vec2<f32>(1e-9, 0.0));
     f.t = vec2<f32>(-f.n.y, f.n.x);
     f.ua = 0.0;
@@ -6221,6 +6259,7 @@ fn city_window(cc: CityCell, f: CityFace, iu: i32, iv: i32) -> CityWin {
         let style_gain = select(
             select(1.0, 0.80, cc.win_style == 1),
             0.55, cc.win_style == 3);
+        // @domain: a hash draw, in [0, 1)
         let bright = (0.25 + 5.0 * pow(w.wh.z, 7.0)) * style_gain;
         // A monochrome house draws every window near its one palette
         // coordinate; a mixed house draws freely.
@@ -6887,12 +6926,14 @@ fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
             let qc = du * du + dw * dw - fe.hi.x * fe.hi.x;
             let disc = qb * qb - qa * qc;
             if (disc > 0.0 && qa > 1e-12) {
+                // @domain: the discriminant is tested positive (or non-negative) just above
                 let sq = sqrt(disc);
                 let tp = (-qb - sq) / qa;
                 let pp = ol + tp * dl;
                 if (tp > 0.0 && tp < best.t && pp.y > fe.lo.y
                     && pp.y < fe.hi.y && pp.x >= clo && pp.x <= chi) {
                     let rw = fe.hi.x / fe.hi.z;
+                    // @domain: the hit lies on the rail's elliptic cylinder, never on its axis
                     best = CityShellHit(tp, normalize(vec3<f32>(
                         pp.x - fe.lo.x, 0.0, (pp.z - fe.lo.z) * rw * rw)),
                         fe.part);
@@ -7754,6 +7795,7 @@ fn city_display_inv_pc(d: vec3<f32>) -> vec3<f32> {
                 vec3<f32>(u.periodic.w));
     let w2 = u.flags.w * u.flags.w;
     let q = vec3<f32>(1.0) - m;
+    // @domain: q*q >= 0, m >= 0, and w2 >= 16 (both hosts hold the white point to [4, 40])
     return 2.0 * m / (q + sqrt(q * q + 4.0 * m / w2));
 }
 
@@ -7794,6 +7836,7 @@ fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32,
 // wall plane. dl is the ray in face-local terms (z out of the wall); the
 // stretch is held to the core's grazing limit (cosine 0.2).
 fn city_wall_footprint(dl: vec3<f32>, fp: f32) -> vec2<f32> {
+    // @domain: zero only at dl.x = 0 and dl.z = -1e-9 exactly (a unit dl into the wall)
     let e1 = normalize(vec3<f32>(dl.z, 0.0, -dl.x) + vec3<f32>(1e-9, 0.0, 0.0));
     let e2 = cross(dl, e1);
     // An offset e across the ray lands on the wall at e - dl (e.z / dl.z).
@@ -7852,6 +7895,7 @@ fn city_lit_pane(cc: CityCell, refl: vec3<f32>, through: f32,
         if (cc.win_mono >= 0.0) {
             cdraw = clamp(cc.win_mono + (wy - 0.5) * 0.08, 0.0, 1.0);
         }
+        // @domain: wz = (k + 0.5) / 8 lies in (0, 1)
         let bright = 0.25 + 5.0 * pow(wz, 7.0);
         acc = city_win_add(acc, refl + city_room_color(cdraw, cc.palette_bias)
                                        * g * bright, 0.125, fog);
@@ -9044,6 +9088,7 @@ fn cc_aircars_sdf_hit(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     let g = cc_aircars_g;
 
     return CityHit(true, cc_aircars_t, o + cc_aircars_t * dir,
+                   // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
                    cc_aircars_to_world(f, normalize(g)),
                    300 + 4 * lane + 3, ci);
 }
@@ -11303,6 +11348,7 @@ fn cc_rooftopworks_tank_sdf(p: vec3<f32>) -> f32 {
 
 fn cc_rooftopworks_tank_normal(p: vec3<f32>) -> vec3<f32> {
     let e = vec2<f32>(1.2e-3, -1.2e-3);
+    // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     return normalize(
         e.xyy * cc_rooftopworks_tank_sdf(p + e.xyy)
       + e.yyx * cc_rooftopworks_tank_sdf(p + e.yyx)
@@ -11630,6 +11676,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         }
         // Glass on three-and-a-bit sides, with mullions and a dark spandrel
         // at its foot. The colour follows the house where there is one.
+        // @domain: a wall's normal: |xy| = 1
         let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
         let tangent = vec2<f32>(-nh.y, nh.x);
         let uc = dot(h.pos.xy, tangent);
@@ -13062,6 +13109,7 @@ fn cc_streetlife_car_normal(pl: vec3<f32>, r: vec4<f32>, fine: bool, hh: f32)
             * cc_streetlife_car_sdf(pl + vec3<f32>(e.y, e.x, e.y), r, fine)
           + vec3<f32>(1.0, 1.0, 1.0)
             * cc_streetlife_car_sdf(pl + vec3<f32>(e.x, e.x, e.x), r, fine);
+    // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     return normalize(n);
 }
 
@@ -13507,6 +13555,7 @@ fn cc_streetlife_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         if (disc < 0.0 || a < 1e-12) {
             return miss;
         }
+        // @domain: the discriminant is tested positive (or non-negative) just above
         let sq = sqrt(disc);
         let tc0 = (-b - sq) / a;
         let tc1 = (-b + sq) / a;
@@ -13521,6 +13570,7 @@ fn cc_streetlife_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         }
         t = tin;
         let pc = o + t * dir;
+        // @domain: the hit lies on the pole's cylinder: |pc.xy - cc0| is its radius
         n = select(vec3<f32>(normalize(pc.xy - cc0), 0.0),
                    vec3<f32>(0.0, 0.0, 1.0), tin == tzn);
     }
@@ -13545,7 +13595,9 @@ fn cc_streetlife_kerb_shade(h: CityHit, dir: vec3<f32>, fp: f32)
     // A wet arris reflects the lamp it faces: tight, bright, and only where
     // the eye sits on the mirror side of it.
     let head = cc_streetlife_nearest_lamp(h.pos.xy);
+    // @domain: a lamp head in the air minus a point on a surface: never zero
     let l = normalize(head - h.pos);
+    // @domain: a kerb's normals face up or out, never straight down
     let rf = reflect(dir, normalize(h.normal + vec3<f32>(0.0, 0.0, 1.0)));
     let glint = pow(max(dot(rf, l), 0.0), 40.0);
     return light * (CITY_REL_KERB * wet * (1.0 + 1.5 * arris)
@@ -13787,6 +13839,7 @@ fn cc_streetlife_dot(a: f32, b: f32, sa: f32, sb: f32, span: f32, fp: f32)
     // crossed that constant the test stopped bounding anything at all and the
     // lens grew vertically without limit. A clamped width in the normalised
     // metric cannot do either: the lens is never more than 1 + w across.
+    // @domain: a product of two positive constants
     let w = clamp(fp / sqrt(cc_streetlife_LENS_A * cc_streetlife_LENS_B),
                   0.06, 0.42);
     let sharp = 1.0 - smoothstep(1.0 - w, 1.0 + w, d);
@@ -13884,6 +13937,7 @@ fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
     let near_lamp = 0.12 + 0.88 * up * up;
     let pool = cc_streetlife_pool(h.pos.xy);
     let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    // @domain: a lamp head in the air minus a point on a surface: never zero
     let l = normalize(lamp - h.pos);
     // The mast is a box because a box is what the DDA wants, but 17 cm of
     // steel is round, and from two metres away a flat-shaded rectangle says
@@ -13909,6 +13963,7 @@ fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
         && dot(rel, rel) < cc_streetlife_MAST_R * cc_streetlife_MAST_R * 2.9) {
         let tang = vec2<f32>(-h.normal.y, h.normal.x);
         let uu = clamp(dot(rel, tang) / cc_streetlife_MAST_R, -1.0, 1.0);
+        // @domain: n.xy sqrt(1 - u^2) + tang u with tang perpendicular to the unit n.xy: unit
         n = normalize(vec3<f32>(h.normal.xy * sqrt(max(1.0 - uu * uu, 0.0))
                                 + tang * uu, 0.0));
     }
@@ -13993,6 +14048,7 @@ fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let fill = cc_streetlife_fill(h.pos);
     let pool = cc_streetlife_pool(h.pos.xy);
     let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    // @domain: a lamp head in the air minus a point on a surface: never zero
     let l = normalize(lamp - h.pos);
     let fade = (1.0 - smoothstep(cc_streetlife_FADE_START * CITY_PROP_RANGE,
                                  CITY_PROP_RANGE, h.t))
@@ -15246,6 +15302,7 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     }
     // Lumps in local radii: across by q / r, up by zeta = integral of
     // dz / r = ln(r / r0) / SPREAD.
+    // @domain: r >= r0 > 0: the plume's radius only grows from its source
     let zeta = log(r / s.r0) / cc_manholesteam_SPREAD
              - cc_manholesteam_RISE_RATE * scene_time();
     var x = vec3<f32>(1.6 * q / r + s.seed, 1.3 * zeta);
@@ -15273,6 +15330,7 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     // thins to the same plume aloft.
     let cover = smoothstep(0.0, cc_manholesteam_SOFT, boundary - d);
     return s.vigor * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
+           // @domain: r >= r0 > 0: the plume's radius only grows from its source
            * pow(cc_manholesteam_R0_COVER / r, cc_manholesteam_THIN);
 }
 
@@ -15332,8 +15390,12 @@ fn cc_manholesteam_light(p: vec3<f32>, dir: vec3<f32>,
         let glow = select(st.glow_lo, st.glow_hi, side == 1);
         let d = max(abs(face - x), 0.3);
         let theta = atan((CITY_STORE_H - p.z) / d) + atan(p.z / d);
-        let toward = select(vec2<f32>(0.0, face - x), vec2<f32>(face - x, 0.0),
+        // Toward the band across the same clamped distance theta uses, so
+        // a sample on the facade plane at mid-band height has a direction.
+        let dx = select(-d, d, face >= x);
+        let toward = select(vec2<f32>(0.0, dx), vec2<f32>(dx, 0.0),
                             st.along_y);
+        // @domain: |toward| = d >= 0.3
         let v = normalize(vec3<f32>(toward, 0.5 * CITY_STORE_H - p.z));
         l = l + glow * (theta / 6.2831853)
               * (12.566371 * hg_phase(dot(v, dir), cc_manholesteam_STORE_G));
@@ -15595,6 +15657,7 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
             if (disc <= 0.0) {
                 continue;
             }
+            // @domain: the discriminant is tested positive (or non-negative) just above
             let sq = sqrt(disc);
             let tn = (-qb - sq) / qa;
             let tf = (-qb + sq) / qa;
@@ -16515,6 +16578,7 @@ fn cc_industry_slot_h(g: cc_industry_Grid, d: vec4<f32>) -> f32 {
         return 0.0;
     }
     if (g.kind == cc_industry_K_BOX) {
+        // @domain: d is cc_industry_draw: a hash draw, in [0, 1)
         let t = min(1.0 + floor(pow(d.y, 0.8) * f32(g.tiers)), f32(g.tiers));
         return t * cc_industry_TIER;
     }
@@ -16864,10 +16928,12 @@ fn cc_industry_piles_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
             if (disc <= 0.0) {
                 continue;
             }
+            // @domain: the discriminant is tested positive (or non-negative) just above
             let t = (-b - sqrt(disc)) / a;
             if (t > max(t0, 1e-3) && t <= t1 && t < best.t) {
                 let p = o + t * dir;
                 if (p.z >= 0.0) {
+                    // @domain: the hit lies on the dome, never at its centre
                     let n = normalize((p - vec3<f32>(e.xy, 0.0))
                                       / (rad * rad));
                     best = CityHit(true, t, p, n, cc_industry_K_PILE, ci);
@@ -17089,6 +17155,7 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     for (var k: i32 = 0; k < nk; k = k + 1) {
         let f = city_flood(cc, k);
         if (f.on) {
+            // @domain: a lamp head in the air minus a point on a surface: never zero
             let l = normalize(f.head - p);
             let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2), 1.0);
             e = e + f.color * (city_flood_pool(f, p.xy) * facing);
@@ -17147,6 +17214,7 @@ fn cc_industry_glass_frac(hgt: f32) -> f32 {
 
 fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     let r = cc_industry_roof_of(cc);
+    // @domain: a wall's normal: |xy| = 1
     let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
     let uc = dot(h.pos.xy, vec2<f32>(-nh.y, nh.x));
     let v = h.pos.z - cc.height;
@@ -18065,6 +18133,7 @@ fn cc_industry_rubble(h: CityHit, cc: CityCell, fp: f32, cell: f32,
     let alb_mean = (0.15 * tint + vec3<f32>(0.100, 0.078, 0.062)) * 0.93;
     let k = smoothstep(0.5 * cell, 2.0 * cell, fp);
     let tilt = (r - 0.5) * 0.9 * (1.0 - k);
+    // @domain: a roof's normal (z = 1) plus a horizontal tilt
     let n = normalize(h.normal + vec3<f32>(tilt, 0.0));
     let frag = alb_frag * ((0.8 + 0.4 * r.y) * (0.35 + 0.65 * crack));
     return cc_industry_lit(cc, h.pos, n, mix(frag, alb_mean, k));
@@ -19388,6 +19457,7 @@ fn cc_streetfurniture_trace(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
         g = g + s * cc_streetfurniture_sdf(q + s * hs, v, lod).x;
     }
     return CityHit(true, t, o + t * dir,
+                   // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
                    cc_streetfurniture_to_world(v, normalize(g)), kind, ci);
 }
 
@@ -19733,6 +19803,7 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let mat = cc_streetfurniture_material(mid, v);
     let rf = reflect(dir, n);
     let cosv = clamp(-dot(dir, n), 0.0, 1.0);
+    // @domain: cosv is clamped to [0, 1] just above
     let schlick = pow(1.0 - cosv, 5.0);
 
     // Diffuse: the sodium heads, the lit pavement from below, the store
@@ -20135,6 +20206,7 @@ fn desert_octave_fade(fp: f32, texel: f32) -> f32 {
 
 // The tile mip a footprint `fp` (m) reads.
 fn desert_lod(fp: f32) -> f32 {
+    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
     return clamp(log2(max(fp, 1e-6) / u.ocean_params.x), 0.0, u.ocean_params.w);
 }
 
@@ -20220,6 +20292,7 @@ fn desert_normal_fp(xy: vec2<f32>, fp: f32) -> vec3<f32> {
            - desert_surface(xy - vec2<f32>(e, 0.0), fp).x;
     let hy = desert_surface(xy + vec2<f32>(0.0, e), fp).x
            - desert_surface(xy - vec2<f32>(0.0, e), fp).x;
+    // @domain: z = 2 e > 0
     return normalize(vec3<f32>(-hx, -hy, 2.0 * e));
 }
 
@@ -20825,8 +20898,10 @@ fn desert_stone(lv: DesertStoneLevel, ci: vec2<i32>, z0: f32,
     let az1 = az0 + 2.0 + 2.2 * city_u01(h2.y);
     let el0 = mix(-0.7, 0.1, fract(r.w * 41.7));
     let el1 = mix(-0.7, 0.1, fract(r.z * 23.9));
+    // @domain: (cos, sin, .) has |xy| = 1
     s.cut0 = vec4<f32>(normalize(vec3<f32>(cos(az0), sin(az0), el0)),
                        mix(0.35, 0.75, fract(r.y * 53.1)));
+    // @domain: (cos, sin, .) has |xy| = 1
     s.cut1 = vec4<f32>(normalize(vec3<f32>(cos(az1), sin(az1), el1)),
                        mix(0.35, 0.75, fract(r.x * 31.3)));
     return s;
@@ -20860,6 +20935,7 @@ fn desert_stone_hit(s: DesertStone, o: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     if (disc < 0.0) {
         return vec4<f32>(-1.0);
     }
+    // @domain: the discriminant is tested positive (or non-negative) just above
     let sq = sqrt(disc);
     var t_in = (-bb - sq) / aa;
     var t_out = (-bb + sq) / aa;
@@ -20910,6 +20986,7 @@ fn desert_facets_at(i: i32) -> vec3<f32> {
 const DESERT_FACET_WEIGHT: f32 = 0.45;
 
 fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
+    // @domain: the stone-space gradient at a surface point: nonzero
     let q = normalize(nq);
     // A broken face is flat as it is: pulled toward a facet it could tilt
     // up to 27 degrees skyward, undoing the faces-sideways-or-down rule.
@@ -20929,9 +21006,11 @@ fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
     }
     // Both normals back in the world: a plane normal through a scale goes
     // by the inverse scale.
+    // @domain: q and the facet normal f face the same side; pull <= DESERT_FACET_WEIGHT < 1
     let nl = normalize(mix(q, f, pull)) / s.axes;
     let x = s.cs.x * nl.x - s.cs.y * nl.y;
     let y = s.cs.y * nl.x + s.cs.x * nl.y;
+    // @domain: a rotation of nl, itself a unit vector over positive axes
     return normalize(vec3<f32>(x, y, nl.z));
 }
 
@@ -21118,6 +21197,7 @@ fn desert_stone_decal(p: vec3<f32>, n: vec3<f32>, lightness: f32, w0: f32,
                 // The dome's normal, back into the world (a plane normal
                 // through a scale goes by the inverse scale).
                 let nl = vec3<f32>(x, y, zt) / s.axes;
+                // @domain: a rotation of the dome's normal over positive axes
                 d.normal = normalize(vec3<f32>(s.cs.x * nl.x - s.cs.y * nl.y,
                                                s.cs.y * nl.x + s.cs.x * nl.y,
                                                nl.z));
@@ -21189,6 +21269,7 @@ fn desert_wall_albedo(p: vec3<f32>) -> vec3<f32> {
 fn desert_grain(xy: vec2<f32>, fpg: f32, m: vec3<f32>, w0: f32) -> f32 {
     let c = desert_stone_cell_at(0);
     let s = max(fpg, c);
+    // @domain: s = max(fpg, c) >= c > 0
     let lv = log2(s / c);
     let k0 = floor(lv);
     var g = 0.0;
@@ -21313,6 +21394,7 @@ fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             let fpg = fp / max(abs(dot(dir, best.normal)), 0.08);
             let rs = desert_ripple_slope(best.pos.xy, fpg,
                                          desert_material(s.y).z);
+            // @domain: the ground's normal minus a horizontal slope keeps its z > 0
             best.normal = normalize(best.normal - vec3<f32>(rs, 0.0));
         }
     }
@@ -21413,6 +21495,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     // hemispheric mean of this sky's profile, from the surfaces branch).
     let zen = sky_radiance(vec3<f32>(0.0, 0.0, 1.0), sun, u.sky_horizon.xyz,
                            u.sky_bloom.xyz, vec3<f32>(0.0), u.cloud_sun.w);
+    // @domain: zero only if sun.xy is exactly (1e-6, 1e-6); at the zenith the offset keeps it finite
     let hor = sky_radiance(normalize(vec3<f32>(-sun.xy + vec2<f32>(1e-6), 0.0)),
                            sun, u.sky_horizon.xyz, u.sky_bloom.xyz,
                            vec3<f32>(0.0), u.cloud_sun.w);
@@ -21459,6 +21542,7 @@ fn desert_terrain_shadow(p: vec3<f32>, sun: vec3<f32>, fp: f32,
     }
     var lit = 1.0;
     var t = max(0.5 * fp, 0.01);
+    // @domain: t = max(0.5 fp, 0.01) > 0 and the reach is a positive constant
     let growth = pow(DESERT_SHADOW_REACH_M / t,
                      1.0 / f32(DESERT_SHADOW_STEPS));
     for (var i: i32 = 0; i < DESERT_SHADOW_STEPS; i = i + 1) {
@@ -21616,6 +21700,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
         // shadows.
         let dc = desert_stone_decal(h.pos, n, light, w0, w1, L.sun_dir, fp);
         albedo = mix(albedo, dc.albedo, dc.cover);
+        // @domain: n and the decal's normal both face up off the ground
         ns = normalize(mix(n, dc.normal, dc.cover));
         brf = mix(brf, 1.0, dc.cover);
         stones = mix(dc.shadow, 1.0, dc.cover);
@@ -21655,6 +21740,7 @@ fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
     if (n_dot_l <= 0.0 || n_dot_v <= 1e-4) {
         return 0.0;
     }
+    // @domain: n.l > 0 and n.v > 0 (returned above otherwise): same hemisphere
     let hv = normalize(sun + v);
     let n_dot_h = max(dot(n, hv), 0.0);
     let om = 1.0 - clamp(dot(v, hv), 0.0, 1.0);
@@ -22172,6 +22258,7 @@ fn df_col_eval(c: DfColumn, q: vec3<f32>) -> DfColSample {
     let a_n = dot(o2, n2);
     let a_t = dot(o2, pp.tng);
     let lat2 = a_n * a_n + vv * vv;
+    // @domain: lat2 is a sum of squares
     let rho = sqrt(lat2 + a_t * a_t);
     let lat_frac = lat2 / max(rho * rho, 1e-12);
     var sm: DfColSample;
@@ -22263,6 +22350,7 @@ fn df_rod(o: vec3<f32>, dir: vec3<f32>, a: vec3<f32>, ax: vec3<f32>,
     // rod's radius there — whose chord has no 1/sin, which is what keeps a
     // ray looking straight down a needle from landing metres short of it.
     let at_end = sp_line < 0.0 || sp_line > len;
+    // @domain: dist2 < r * r (returned above otherwise) and den >= 1e-6
     let th = tr - sqrt((r * r - dist2) / select(den, 1.0, at_end));
     if (th <= 0.0 || th >= best.t) {
         return best;
@@ -22531,6 +22619,7 @@ fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
             continue;
         }
         let beta = h.x * DF_TAU + f32(i) * step + 0.9 * (hi - 0.5);
+        // @domain: a combination of an orthonormal frame with a nonzero coefficient
         let ax = normalize(cos(beta) * f.et + sin(beta) * f.es
                            + (0.15 + 0.45 * hj) * f.er);
         best = df_rod(o, dir, a, ax, 0.014 + 0.022 * hi * hi, 0.00050,
@@ -22540,6 +22629,7 @@ fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
         let hi = fract(h.z * 17.3 + f32(i) * 0.7548776);
         let fi = f32(i);
         // The longest points down and out; the others fan above it.
+        // @domain: a combination of an orthonormal frame with a nonzero coefficient
         let ax = normalize(f.er + (-0.85 + 0.45 * fi) * f.es
                            + select(0.45, -0.45, (i & 1) == 0) * min(fi, 1.0)
                              * f.et
@@ -22570,18 +22660,21 @@ fn df_capsule(ro: vec3<f32>, rd: vec3<f32>, pa: vec3<f32>, pb: vec3<f32>,
         return -1.0;
     }
     if (a > 1e-9 * baba) {
+        // @domain: h >= 0: returned above otherwise
         let t = (-b - sqrt(h)) / a;
         let y = baoa + t * bard;
         if (y > 0.0 && y < baba) {
             return t;
         }
     }
+    // @domain: h >= 0: returned above otherwise
     let y0 = baoa + select(0.0, ((-b - sqrt(h)) / a) * bard, a > 1e-9 * baba);
     let oc = select(ro - pb, oa, y0 <= 0.0);
     let b2 = dot(rd, oc);
     let c2 = dot(oc, oc) - r * r;
     let h2 = b2 * b2 - c2;
     if (h2 > 0.0) {
+        // @domain: h2 > 0 on this branch
         return -b2 - sqrt(h2);
     }
     return -1.0;
@@ -22634,6 +22727,7 @@ fn df_col_capsules(c: DfColumn, comp: i32, q0: vec3<f32>, dir: vec3<f32>,
             let ba = b - a;
             let f = clamp(dot(hp - a, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
             best.t = t;
+            // @domain: the hit lies on the capsule at radius > 0 from its axis
             best.n = normalize(hp - (a + ba * f));
             best.comp = comp;
             best.s = mix(s0, s1, f);
@@ -22685,6 +22779,7 @@ fn df_col_rim(c: DfColumn, q0: vec3<f32>, dir: vec3<f32>, shell: f32,
             continue;
         }
         let tau = (4.0 / 3.0) * sigma0 * (1.0 - d)
+            // @domain: 0 < d < 1 (skipped otherwise); r and shell are positive sizes
             * sqrt(2.0 * r * shell * (1.0 - d)) / max(ap.z, 0.2);
         if (tau > best.x) {
             let cl = a + ax * clamp(ap.y, 0.0, seg);
@@ -22786,6 +22881,7 @@ fn df_cactus_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     // (1/r) dr/dtheta over the rib, from the profile's slope in x.
     let rib_slope = 2.0 * c.depth * (1.0 - x) * sign(2.0 * ph - 1.0)
         * 2.0 * c.ribs / DF_TAU;
+    // @domain: et is tangent to the unit normal ch.n
     res.normal = normalize(ch.n - bump * rib_slope * et);
     res.mat = vec4<f32>(f32(DF_MAT_SKIN_FUZZ) + tint, mix(0.5, x, bump),
                         round(pad_mean * 255.0) + 0.99 * cov, age);
@@ -22979,6 +23075,7 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
           + k2 * df_sag_eval(it, qh + e * k2, blend).d
           + k3 * df_sag_eval(it, qh + e * k3, blend).d
           + k4 * df_sag_eval(it, qh + e * k4, blend).d;
+    // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     res.normal = normalize(g);
 
     // Material: the boot, an areole's felt pad, or skin.
@@ -23108,6 +23205,7 @@ fn df_bar_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
     for (var i: i32 = 0; i < DF_BAR_RADIALS; i = i + 1) {
         let hi = fract(h.y * 29.3 + f32(i) * 0.6180339);
         let beta = h.x * DF_TAU + f32(i) * step + 0.3 * (hi - 0.5);
+        // @domain: a combination of an orthonormal frame with a nonzero coefficient
         let ax = normalize(cos(beta) * f.et + sin(beta) * f.es
                            + (0.30 + 0.3 * hi) * f.er);
         // tint 0: a radial.
@@ -23116,8 +23214,10 @@ fn df_bar_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
     }
     // The central: out and a little down, then the hook curls back down.
     let len = 0.085 + 0.04 * h.z;
+    // @domain: a combination of an orthonormal frame with a nonzero coefficient
     let ax = normalize(f.er - 0.35 * f.es + 0.15 * (h.w - 0.5) * f.et);
     best = df_rod(o, dir, a, ax, len, 0.0012, 0.0007, best, 0.5);
+    // @domain: a combination of an orthonormal frame with a nonzero coefficient (es: -1)
     let hook = normalize(ax * 0.2 - f.es - 0.3 * f.er);
     best = df_rod(o, dir, a + ax * len, hook, 0.012, 0.0007, 0.0002, best, 0.5);
     return best;
@@ -23199,10 +23299,14 @@ fn df_pp_base(it: DfItem, b: i32) -> DfPad {
     let el = 0.35 + 0.9 * h.y;
     let hz = vec3<f32>(cos(az), sin(az), 0.0);
     var pd: DfPad;
+    // @domain: hz is horizontal and unit, sin(el) > 0.3: never zero
     pd.ax = normalize(hz * cos(el) + vec3<f32>(0.0, 0.0, sin(el)));
+    // @domain: hz is horizontal and unit: z x hz is unit
     let side = normalize(cross(vec3<f32>(0.0, 0.0, 1.0), hz));
     let tw = 1.2 * (h.z - 0.5);
+    // @domain: side is perpendicular to hz, both unit
     var aw = normalize(side * cos(tw) + hz * sin(tw) * 0.5);
+    // @domain: aw is horizontal, pd.ax has z = sin(el) > 0.3: never parallel
     pd.aw = normalize(aw - pd.ax * dot(aw, pd.ax));
     pd.a = it.a.z * (0.9 + 0.2 * h.w);
     pd.c = hz * (0.06 + 0.12 * h.z) + pd.ax * (pd.a * 0.92)
@@ -23215,11 +23319,14 @@ fn df_pp_child(par: DfPad, h: vec4<f32>, sgn: f32) -> DfPad {
     let phi = sgn * (0.2 + 0.7 * h.y);
     let attach = par.c + par.ax * (par.a * cos(phi) * 0.93)
         + par.aw * ((par.a / 1.3) * sin(phi) * 0.93);
+    // @domain: par.ax and par.aw are orthonormal
     var ax = normalize(par.ax * cos(1.3 * phi) + par.aw * sin(1.3 * phi));
     // Pulled toward upright, more on the young outer pads.
+    // @domain: ax is unit and the lift is small and upward
     ax = normalize(ax + vec3<f32>(0.0, 0.0, 0.12 + 0.2 * h.w));
     let tw = 1.4 * (h.z - 0.5);
     var aw = par.aw * cos(tw) + cross(par.ax, par.aw) * sin(tw);
+    // @domain: aw has no par.ax component and ax a cos(1.3 phi) > 0.3 one: never parallel
     aw = normalize(aw - ax * dot(aw, ax));
     var pd: DfPad;
     pd.ax = ax;
@@ -23244,6 +23351,7 @@ fn df_pad_hit(pd: DfPad, o: vec3<f32>, dir: vec3<f32>,
     if (disc <= 0.0) {
         return vec2<f32>(1.0, -1.0);
     }
+    // @domain: the discriminant is tested positive (or non-negative) just above
     let sq = sqrt(disc);
     return vec2<f32>((-qb - sq) / qa, (-qb + sq) / qa);
 }
@@ -23304,6 +23412,7 @@ fn df_pp_test(it: DfItem, pd: DfPad, key: u32, outer: bool, q0: vec3<f32>,
                     for (var k: i32 = 0; k < cnt; k = k + 1) {
                         let hk = fract(df_u01(hh.y) * 7.3 + f32(k) * 0.618
                                        + f32(face) * 0.37);
+                        // @domain: a combination of an orthonormal frame with a nonzero coefficient
                         let sax = normalize(fnrm - (0.5 + 0.4 * hk) * pd.ax
                                             + (hk - 0.5) * 0.9 * pd.aw);
                         let bs = df_rod(q0, dir, base, sax, 0.012 + 0.025 * hk,
@@ -23334,9 +23443,11 @@ fn df_pp_test(it: DfItem, pd: DfPad, key: u32, outer: bool, q0: vec3<f32>,
             let qb = dot(lo, ld);
             let disc = qb * qb - qa * (dot(lo, lo) - 1.0);
             if (disc > 0.0) {
+                // @domain: the discriminant is tested positive (or non-negative) just above
                 let th = (-qb - sqrt(disc)) / qa;
                 if (th > ta && th < (*st).best.t) {
                     (*st).best.t = th;
+                    // @domain: the hit lies on the ellipsoid, never at its centre
                     (*st).best.n = normalize((q0 + dir * th - fc) / (fs * fs));
                     (*st).code = DF_MAT_FRUIT;
                 }
@@ -23386,6 +23497,7 @@ fn df_prickly_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.hit = true;
     res.t = tt;
     res.kind = DF_KIND_PRICKLY;
+    // @domain: the hit lies on the ellipsoid, never at its centre
     res.normal = normalize((q0 + dir * tt - ec) / (er * er));
     let spot_mean = DF_PI * DF_PP_GLOCHID_R * DF_PP_GLOCHID_R
         / (DF_PP_AREOLE_DS * DF_PP_AREOLE_DS);
@@ -23455,6 +23567,7 @@ fn df_prickly_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         let q = q0 + dir * best.t - pd.c;
         let lq = vec3<f32>(dot(q, pd.ax), dot(q, pd.aw), dot(q, cross(pd.ax, pd.aw)));
         let g = lq / vec3<f32>(pd.a * pd.a, (pd.a / 1.3) * (pd.a / 1.3), DF_PP_THICK * DF_PP_THICK);
+        // @domain: the ellipsoid's gradient at a surface point, in an orthonormal frame
         res.normal = normalize(pd.ax * g.x + pd.aw * g.y + cross(pd.ax, pd.aw) * g.z);
         // Distance to the nearest areole on the lattice, for the glochids.
         let uu = lq.x / DF_PP_AREOLE_DS;
@@ -23538,6 +23651,7 @@ fn df_ellipsoid_chord(q0: vec3<f32>, dir: vec3<f32>, c: vec3<f32>,
     if (disc <= 0.0) {
         return vec2<f32>(1.0, -1.0);
     }
+    // @domain: the discriminant is tested positive (or non-negative) just above
     let sq = sqrt(disc);
     return vec2<f32>((-qb - sq) / qa, (-qb + sq) / qa);
 }
@@ -23566,6 +23680,7 @@ fn df_cone_chord(q0: vec3<f32>, dir: vec3<f32>, apex: vec3<f32>, tn: f32,
             return vec2<f32>(1.0, -1.0);
         }
     } else {
+        // @domain: the discriminant is tested positive (or non-negative) just above
         let sq = sqrt(disc);
         let r1 = min((-qb - sq) / qa, (-qb + sq) / qa);
         let r2 = max((-qb - sq) / qa, (-qb + sq) / qa);
@@ -23744,9 +23859,11 @@ fn df_creo_twig(it: DfItem, st: DfSeg, i: i32, f: i32) -> DfSeg {
     let s0 = st.len * (0.25 + 0.68 * (f32(f - 1) + g.x) / f32(DF_CREO_TWIGS));
     sg.a = st.a + st.ax * s0;
     // Out from the stem by 25-50 degrees, about a random side.
+    // @domain: zero only if the stem lies exactly along the drawn direction: a measure-zero draw
     let side = normalize(cross(st.ax, vec3<f32>(cos(g.y * DF_TAU),
                                                  sin(g.y * DF_TAU), 0.35)));
     let th = 0.5 + 0.55 * g.z;
+    // @domain: side is perpendicular to st.ax, both unit
     sg.ax = normalize(st.ax * cos(th) + side * sin(th));
     // Longer low down, where a twig has had longer to grow.
     let reach = mix(0.45, 0.2, f32(f - 1) / f32(DF_CREO_TWIGS));
@@ -23769,8 +23886,10 @@ fn df_creo_clump(o: vec3<f32>, dir: vec3<f32>, cc: vec3<f32>,
             - 1.0;
         let c = cc + rv * (0.7 * DF_CREO_CLUMP_R);
         // A leaflet points out of its clump and a little along the twig.
+        // @domain: zero only on an exact cancellation of three independent draws: measure zero
         let la = normalize(rv + 0.6 * tw_ax + vec3<f32>(0.0, 0.0, 0.2));
         let tw = df_u01(s2.y) * 2.0 - 1.0;
+        // @domain: zero only if la lies exactly along the drawn direction: a measure-zero draw
         let side = normalize(cross(la, vec3<f32>(tw, 1.0 - abs(tw), 0.4)));
         let nl = cross(la, side);
         let dn = dot(dir, nl);
@@ -23819,6 +23938,7 @@ fn df_capsule_chord(o: vec3<f32>, dir: vec3<f32>, sg: DfSeg,
     if (disc <= 0.0) {
         return vec2<f32>(0.0);
     }
+    // @domain: the discriminant is tested positive (or non-negative) just above
     let sq = sqrt(disc);
     var t0 = (-qb - sq) / den;
     var t1 = (-qb + sq) / den;
@@ -23883,6 +24003,7 @@ fn df_creosote_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                                    dither, it.seed + vec2<u32>(u32(k), 0u)));
         if (tk < tt) {
             tt = tk;
+            // @domain: the hit lies on the ellipsoid, never at its centre
             nrm = normalize((q0 + dir * tk - e.c) / (e.r * e.r));
         }
     }
@@ -23975,6 +24096,7 @@ fn df_creosote_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                 let fs = pcg2d(it.seed ^ vec2<u32>(u32(i) * 31u + u32(f), 77u));
                 if (df_u01(fs.x) < 0.35) {
                     let fc = tw.a + tw.ax * (tw.len + 0.004);
+                    // @domain: tw.ax is unit and the lift is upward: zero only for a stem pointing straight down
                     let nf = normalize(tw.ax + vec3<f32>(0.0, 0.0, 0.5));
                     let dn = dot(dir, nf);
                     if (abs(dn) > 1e-5) {
@@ -24129,6 +24251,7 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
     let h = it.a.x;
     let phi = f32(i) * 2.39996 + 0.5 * hh.x + it.b.x;
     // Outer canes lean further: a fan, not a broom.
+    // @domain: a hash draw, in [0, 1)
     let tilt = it.a.z * sqrt(hh.y);
     let len = h * (0.7 + 0.3 * hh.z) / cos(tilt);
     let dxy = vec2<f32>(cos(phi), sin(phi));
@@ -24279,6 +24402,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                              n_nodes - 1);
                 let helper = select(vec3<f32>(0.0, 0.0, 1.0),
                                     vec3<f32>(1.0, 0.0, 0.0), sg.ax.z > 0.9);
+                // @domain: helper is swapped for x when sg.ax.z > 0.9: never parallel
                 let side0 = normalize(cross(sg.ax, helper));
                 let side1 = cross(sg.ax, side0);
                 for (var j = j0; j <= min(j1, j0 + DF_OCO_MAX_NODES - 1);
@@ -24289,6 +24413,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     let out = cos(ang) * side0 + sin(ang) * side1;
                     let rr = mix(sg.r0, sg.r1, sj / sg.len);
                     let base = sg.a + sg.ax * sj + out * (0.7 * rr);
+                    // @domain: out is perpendicular to sg.ax, both unit
                     let sax = normalize(out + 0.35 * sg.ax);
                     let bs = df_rod(q0, dir, base, sax, 0.014 + 0.4 * rr,
                                     0.0020, 0.0002, best, 0.0);
@@ -24304,9 +24429,11 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                             ls = pcg2d(ls);
                             let a2 = ang + (df_u01(ls.x) - 0.5) * 2.2;
                             let lo = cos(a2) * side0 + sin(a2) * side1;
+                            // @domain: lo is perpendicular to sg.ax, both unit, coefficient >= 0.6
                             let la = normalize(lo + (0.6 + df_u01(ls.y))
                                                * sg.ax);
                             let c = base + la * 0.013;
+                            // @domain: la = lo + k sg.ax with k > 0 is never parallel to lo
                             let lside = normalize(cross(la, lo));
                             let nl = cross(la, lside);
                             let dn = dot(dir, nl);
@@ -24342,6 +24469,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                                        df_u01(fs.x ^ fs.y)) * 2.0 - 1.0;
                     let fa = tip - sg.ax * (0.18 * f32(m) / f32(DF_OCO_FLOWERS))
                         + rv * 0.012;
+                    // @domain: rv and sg.ax: zero only on an exact anti-alignment, a measure-zero draw
                     let fax = normalize(rv + 1.5 * sg.ax);
                     let bf = df_rod(q0, dir, fa, fax, 0.022, 0.0035, 0.0055,
                                     best, 0.0);
@@ -24374,6 +24502,7 @@ fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         // Furrowed bark: the ridges run along the cane, darker grooves
         // between, averaged once the footprint is wider than a furrow.
         let ax = h.mat.yzw;
+        // @domain: zero only if the cane lies exactly along (0.01, 0, 1): measure zero
         let ref_v = normalize(cross(ax, vec3<f32>(0.0, 0.0, 1.0)
                                     + vec3<f32>(0.01, 0.0, 0.0)));
         let ang = atan2(dot(cross(ref_v, n), ax), dot(ref_v, n));
@@ -24534,6 +24663,7 @@ fn df_paloverde_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         best = tt;
         code = DF_MAT_PV_BARK;
         let hp = q0 + dir * tt;
+        // @domain: the hit lies on the trunk's cylinder: |hp.xy| is its radius
         nrm = normalize(vec3<f32>(hp.xy, 0.0) + vec3<f32>(1e-6, 0.0, 0.0));
     }
     let env = df_pv_crown(it);
@@ -24550,6 +24680,7 @@ fn df_paloverde_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         best = tc;
         code = DF_MAT_PV_CROWN;
         let hp = q0 + dir * tc;
+        // @domain: the hit lies on the ellipsoid, never at its centre
         nrm = normalize((hp - ec) / (er * er));
         let ch = df_ellipsoid_chord(hp, u.sun_dir.xyz, ec, er);
         self_t = exp(-env.sigma * max(ch.y, 0.0));
@@ -24609,6 +24740,7 @@ fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                 if (tc < min(best, rod.t)) {
                     best = tc;
                     code = DF_MAT_PV_CROWN;
+                    // @domain: the hit lies on the ellipsoid, never at its centre
                     nrm = normalize((q0 + dir * tc - cc) / (cer * cer));
                 }
             }
@@ -24622,6 +24754,7 @@ fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     if (tc < min(best, rod.t)) {
         best = tc;
         code = DF_MAT_PV_CROWN;
+        // @domain: the hit lies on the ellipsoid, never at its centre
         nrm = normalize((q0 + dir * tc - hc) / (her * her));
     }
     if (rod.t < best) {
@@ -24894,6 +25027,7 @@ fn df_boulder_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.t = fh.x;
     res.kind = DF_KIND_BOULDER;
     let qh = q0 + dir * fh.x;
+    // @domain: the boulder's analytic gradient at a surface point: nonzero
     res.normal = normalize(fh.yzw);
     // The far form's faces are sub-pixel: the body's material stands for
     // them (df_boulder_shade averages what they add).
@@ -24947,6 +25081,7 @@ fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
           + k2 * df_boulder_sdf(it, qh + e * k2).x
           + k3 * df_boulder_sdf(it, qh + e * k3).x
           + k4 * df_boulder_sdf(it, qh + e * k4).x;
+    // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     res.normal = normalize(g);
     // The face and a tint draw in the code's fraction (0.2 a face, the tint
     // in 0.19 below it); the height above the soil line, for the varnish's
@@ -25998,6 +26133,7 @@ fn df_ggx_spec(n: vec3<f32>, dir: vec3<f32>, l: vec3<f32>, alpha: f32,
     if (nl <= 0.0 || nv <= 0.0) {
         return 0.0;
     }
+    // @domain: n.l > 0 and n.v > 0 (returned above otherwise): same hemisphere
     let hv = normalize(l + v);
     let nh = max(dot(n, hv), 0.0);
     let a2 = alpha * alpha;
@@ -26207,6 +26343,7 @@ fn df_far_column(z: f32, r: f32, z0: f32, l: f32, p: f32) -> vec2<f32> {
 // top).
 fn df_far_crown(z: f32, a: f32, zc: f32, b: f32) -> vec2<f32> {
     let u = clamp((z - zc) / b, -1.0, 1.0);
+    // @domain: u is clamped to [-1, 1] just above (the asin too)
     let w = a * b * (0.5 * (u * sqrt(1.0 - u * u) + asin(u)) + 0.25 * DF_PI);
     let c = DF_PI * a * a * select(1.0, 1.0 - u * u, u > 0.0);
     return vec2<f32>(w, c);
@@ -26363,6 +26500,7 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
 // the tile at the footprint's level, without desert_surface's octaves
 // (decimetres, which the field cannot see).
 fn df_ground_coarse(xy: vec2<f32>, fp: f32) -> f32 {
+    // @domain: fp >= 0; log2(0) = -inf, which the max takes to 0
     return u.ocean.x + desert_tile(xy, max(log2(fp * 0.5), 0.0)).x;
 }
 
@@ -26445,6 +26583,7 @@ fn df_far_stat(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     // view sees is 0.38 + 0.15 cos g within 0.07 over the crown draws, view
     // elevations 10-70 deg and sun elevations 30-70 deg (Monte Carlo
     // through the envelope).
+    // @domain: zero only if dir.xy is exactly (1e-7, 0): measure zero
     let vh = normalize(vec2<f32>(-dir.x, -dir.y) + vec2<f32>(1e-7, 0.0));
     let sh_len = length(sun.xy);
     let sh = select(vh, sun.xy / max(sh_len, 1e-7), sh_len > 1e-5);
@@ -26478,6 +26617,7 @@ fn df_far_stat(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
 // still see: the two paths through one plant decorrelate with how far apart
 // they run through its height, in units of its width.
 fn df_far_crown_shadow(a: f32, zc: f32, b: f32, ts: f32) -> f32 {
+    // @domain: a sum of squares
     return DF_PI * a * sqrt(a * a + b * b * ts * ts) + 2.0 * a * zc * ts;
 }
 
@@ -26963,6 +27103,7 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     }
     let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * tan_half_fov;
     let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov / aspect;
+    // @domain: forward plus in-plane offsets of the camera's orthonormal basis
     cr.dir = normalize(u.cam_forward.xyz
                        + ndc_x * u.cam_right.xyz
                        + ndc_y * u.cam_up.xyz);
@@ -28371,6 +28512,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // Never below mip 1: mip 0's r is the density the heights
                 // come from, the glow starts at mip 1 (export_web_assets).
                 let up_lod = clamp(
+                    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
                     1.0, u.ocean_params.w);
                 let g_raw = max(

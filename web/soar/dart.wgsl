@@ -213,6 +213,7 @@ fn vs_main(
         // sheet that happens to be in the wrong place. dz/d(span) of the line
         // above, turned into a slope across the wing by the semi-span.
         let slope = -FLUTTER_WAVES * amp * cos(phase) / SEMI_SPAN;
+        // @domain: the sheet's unit normal minus a small slope along x
         n = normalize(n - vec3<f32>(side * slope, 0.0, 0.0));
     } else {
         // The keel swings a little as a rudder. It is hinged along its TOP,
@@ -252,6 +253,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // Thin shell: orient the normal toward the viewer so both faces shade.
     // A sheet of paper genuinely has two sides and both are paper.
+    // @domain: a triangle's interpolated unit vertex normals: zero only if they cancel, which a smooth-shaded mesh's do not
     var n = normalize(in.normal);
 
     // Folded-over paper does not lie flat. Each layer region — the two big
@@ -267,6 +269,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // first thing wrong with it.
     let region = hash21(vec2<f32>(layers, 3.7));
     let tilt = (region - 0.5) * 0.055;
+    // @domain: a unit normal plus a tilt under 0.03
     n = normalize(n + vec3<f32>(tilt, 0.0, tilt * 0.6));
 
     let to_cam = -in.rel_pos;
@@ -304,6 +307,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // and stand up. One hairline does more for "this is folded" than the fold
     // geometry does, because at this size the geometry is a pixel wide.
     let near = 1.0 - smoothstep(0.0, CREASE_CAP, crease);
+    // @domain: near = 1 - smoothstep(...), in [0, 1]
     let core = pow(near, 3.0);
     let fur = near * (1.0 - core);
     albedo = albedo * (1.0 - 0.42 * core) * (1.0 + 0.09 * fur);
@@ -332,6 +336,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // when you hold a sheet up to a window.
     let back = max(-dot(n, sun), 0.0);
     let toward = pow(max(dot(-view, sun), 0.0), 1.5);
+    // @domain: a positive constant
     let through = pow(SHEET_TRANSMIT, layers);
     let cloudiness = 1.0 + 0.42 * formation;
     let glow = sun_rgb * TRANSMISSION_TINT
@@ -340,7 +345,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Barely any specular: office paper is matte, and the only thing it does
     // at grazing incidence is pick up a little sky. Overdo this and the dart
     // turns into laminated plastic.
-    let fresnel = pow(1.0 - max(dot(n, view), 0.0), 5.0);
+    let fresnel = pow(1.0 - clamp(dot(n, view), 0.0, 1.0), 5.0);
     let sheen = sky_rgb * (fresnel * du.sky_rgb.w * ambient_strength * 0.35);
 
     let hdr = albedo * (direct + fill) + glow + sheen;
