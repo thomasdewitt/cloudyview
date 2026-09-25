@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -775,6 +776,70 @@ SURFACE_STREET_SURFACES = ("city",)
 VEIL_FORMAT = "rgba32uint"
 
 
+# Section stripping (raymarch.wgsl's `// @section` markers). Each surface's
+# code is fenced in one or more section blocks plus one stub block that
+# re-declares, with neutral bodies, exactly the symbols shared code calls
+# into it. A module keeps the compiled surface's sections and the OTHER
+# surfaces' stubs, so it carries no code of a surface it cannot show: dead
+# code of another surface had been moving this one's codegen (a dead desert
+# call moved ocean pixels; the desert's tables moved the city's surface pass
+# 128 -> 168 registers). renderer.js stripSections is the twin, and
+# tests/test_wgsl_sections.py pins the two to the same bytes.
+SECTION_OF_SURFACE = {"ocean": "sea", "city": "city", "desert": "desert"}
+_SECTION_MARKER = re.compile(r"^// @(section|end|stub|end-stub) (\w+)\s*$")
+
+
+def strip_sections(source: str, surface: str) -> str:
+    """`source` with every section but `surface`'s blanked, and `surface`'s
+    stub blanked. Lines are blanked, not removed, so a compile error's line
+    number is still the file's. A source with no markers (a revision from
+    before them, which soar_shader_ab replays) is returned as it is; one
+    with any must be complete: every surface has at least one section and
+    exactly one stub, blocks do not nest, and each closes what it opened."""
+    keep = SECTION_OF_SURFACE[check_surface(surface)]
+    lines = source.split("\n")
+    marks = [(i, m.group(1), m.group(2)) for i, l in enumerate(lines)
+             for m in [_SECTION_MARKER.match(l)] if m]
+    if not marks:
+        return source
+    names = set(SECTION_OF_SURFACE.values())
+    seen = {n: {"section": 0, "stub": 0} for n in names}
+    out, open_ = list(lines), None          # open_: (kind, name, line)
+    for i, kind, name in marks:
+        if name not in names:
+            raise RuntimeError(f"raymarch.wgsl line {i + 1}: unknown section "
+                               f"{name!r}; the sections are {sorted(names)}.")
+        if kind in ("section", "stub"):
+            if open_ is not None:
+                raise RuntimeError(
+                    f"raymarch.wgsl line {i + 1}: @{kind} {name} opens inside "
+                    f"@{open_[0]} {open_[1]} (line {open_[2] + 1}); blocks "
+                    "do not nest.")
+            open_ = (kind, name, i)
+            seen[name][kind] += 1
+            continue
+        want = "section" if kind == "end" else "stub"
+        if open_ is None or open_[:2] != (want, name):
+            raise RuntimeError(f"raymarch.wgsl line {i + 1}: @{kind} {name} "
+                               f"closes nothing open as @{want} {name}.")
+        start = open_[2]
+        drop = (name != keep) if want == "section" else (name == keep)
+        if drop:
+            for j in range(start + 1, i):
+                out[j] = ""
+        open_ = None
+    if open_ is not None:
+        raise RuntimeError(f"raymarch.wgsl line {open_[2] + 1}: "
+                           f"@{open_[0]} {open_[1]} is never closed.")
+    for name, n in sorted(seen.items()):
+        if n["section"] < 1 or n["stub"] != 1:
+            raise RuntimeError(
+                f"raymarch.wgsl: {name} has {n['section']} section block(s) "
+                f"and {n['stub']} stub block(s); a marked shader needs at "
+                "least one and exactly one.")
+    return "\n".join(out)
+
+
 def specialize(source: str, *, periodic: bool, nested: bool,
                max_light_steps: int, tone_map: bool = True,
                surface: str = "ocean", light_cache: bool = False,
@@ -801,7 +866,7 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     """
     if not (1 <= int(max_light_steps) <= 512):
         raise ValueError(f"max_light_steps must be in [1, 512]; got {max_light_steps}.")
-    check_surface(surface)
+    source = strip_sections(source, surface)
     swaps = [
         ("const PERIODIC_DOMAIN: bool = true;",
          f"const PERIODIC_DOMAIN: bool = {'true' if periodic else 'false'};"),

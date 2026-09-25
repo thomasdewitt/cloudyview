@@ -286,9 +286,14 @@ def compose(check_only: bool) -> int:
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
+    # Compiled as the hosts compile it: stripped to one surface's sections
+    # (soar_host.strip_sections), since the raw file holds each surface's
+    # stub twin beside its real code.
+    from cloudyview.soar_host import strip_sections
     for city in ("false", "true"):
-        probe = out.replace("const CITY: bool = false;",
-                            f"const CITY: bool = {city};", 1)
+        probe = strip_sections(out, "city" if city == "true" else "ocean")
+        probe = probe.replace("const CITY: bool = false;",
+                              f"const CITY: bool = {city};", 1)
         device.create_shader_module(code=probe)
 
     if check_only:
