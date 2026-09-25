@@ -121,15 +121,10 @@ def test_the_regional_albedo_is_the_mean_of_the_albedos():
     assert META["bounce_albedo"] == [round(float(v), 3) for v in truth.mean(0)]
 
 
-def test_the_octave_margin_is_the_sum_of_the_gains():
-    g = _const("DESERT_OCTAVE_GAIN")
-    n = int(re.search(r"const DESERT_OCTAVES: i32 = (\d+);", SHADER).group(1))
-    assert g == pytest.approx(5.0 ** -0.7, abs=1e-6)
-    assert _const("DESERT_OCTAVE_MARGIN") == pytest.approx(
-        sum(g ** k for k in range(1, n + 1)), abs=5e-4)
-    scene = (REPO / "web" / "soar" / "scene.js").read_text()
-    js = re.search(r"export const DESERT_OCTAVE_MARGIN = ([0-9.]+);", scene)
-    assert js and float(js.group(1)) == _const("DESERT_OCTAVE_MARGIN")
+def test_the_octave_gain_is_five_to_the_minus_0_7():
+    """H = 0.7 (DESERT_OCTAVE_MARGIN, which sums the gains, is held to the
+    band's true reach in test_desert_bounds)."""
+    assert _const("DESERT_OCTAVE_GAIN") == pytest.approx(5.0 ** -0.7, abs=1e-6)
 
 
 def test_each_mip_is_the_box_mean_of_the_last():

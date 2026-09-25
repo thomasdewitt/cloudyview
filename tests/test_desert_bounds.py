@@ -204,6 +204,28 @@ def test_the_smooth_lid_reads_true_bounds():
     assert all(a >= b for a, b in zip(META["slope_max"], META["slope_max"][1:]))
 
 
+def test_the_octave_margin_is_a_true_bound():
+    """DESERT_OCTAVE_MARGIN (raymarch.wgsl, and scene.js's copy for the
+    camera floor) times band_max_m is how far the octaves may move the
+    ground: the flora's slabs, the plants' lids and the floor stand on it.
+    It has to cover the sum of the gains times the band's largest
+    magnitude, which band_max_m (measured at texel centres) does not."""
+    import re
+    shader = (REPO / "cloudyview" / "soar" / "raymarch.wgsl").read_text()
+    wgsl = float(re.search(r"const DESERT_OCTAVE_MARGIN: f32 = ([0-9.]+);",
+                           shader).group(1))
+    gain = float(np.float32(re.search(
+        r"const DESERT_OCTAVE_GAIN: f32 = ([0-9.]+);", shader).group(1)))
+    octaves = int(re.search(r"const DESERT_OCTAVES: i32 = (\d+);",
+                            shader).group(1))
+    js = float(re.search(r"export const DESERT_OCTAVE_MARGIN = ([0-9.]+);",
+                         (SOAR / "scene.js").read_text()).group(1))
+    assert js == wgsl
+    largest = pyramid()[-1][1, 0, 0, 2]              # BA of the whole tile
+    gains = sum(gain ** k for k in range(1, octaves + 1))
+    assert wgsl * META["band_max_m"] >= gains * largest
+
+
 _JS = textwrap.dedent("""
     import { readFileSync, writeFileSync } from "node:fs";
     import { gunzipSync } from "node:zlib";

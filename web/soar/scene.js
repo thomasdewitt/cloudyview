@@ -182,7 +182,7 @@ export function desertTileRows(meta) {
  * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
  * shader samples, so the floor is under the drawn ground by construction.
  */
-export const DESERT_OCTAVE_MARGIN = 0.429;
+export const DESERT_OCTAVE_MARGIN = 0.4942;       // raymarch.wgsl's, a true bound
 
 export function desertFloorAt(tile, groundZ = 0.0) {
   const { heights, meta } = tile;

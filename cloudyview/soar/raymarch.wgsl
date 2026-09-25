@@ -20161,9 +20161,13 @@ fn desert_height_range() -> vec2<f32> {
                      u.ocean.x + u.ocean.z + margin);
 }
 
-// Sum of the octave gains, g + g^2: how far the octaves together can
-// move the surface, in units of one octave's band excursion.
-const DESERT_OCTAVE_MARGIN: f32 = 0.429;
+// How far the octaves together can move the surface, in units of the
+// tile's band_max_m (u.ocean.w): the sum of their gains, g + g^2 = 0.429192,
+// times the band's largest magnitude anywhere and at any mip weight
+// (2.211 m, the bounds pyramid's top cell; band_max_m, 1.920, is measured at
+// texel centres and falls short of it), over band_max_m, rounded up.
+// tests/test_desert_bounds.py holds it to that; scene.js carries the same.
+const DESERT_OCTAVE_MARGIN: f32 = 0.4942;
 
 // Steepest slope at each mip level of the tile, with a quarter again for
 // safety (tools/export_desert_tile.py measures it into meta.json as
