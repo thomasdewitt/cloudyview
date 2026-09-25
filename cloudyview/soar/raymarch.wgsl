@@ -5299,6 +5299,7 @@ fn city_reflect_sky(world_o: vec3<f32>, r: vec3<f32>, jit: f32) -> vec3<f32> {
             base = q;
         }
     }
+    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
     let lod = clamp(log2(max(base.z, u.ocean_params.x) / u.ocean_params.x),
                     0.0, u.ocean_params.w);
     let g_raw = max(city_glow_sample(city_fold_xy(base.xy), lod)
@@ -19841,6 +19842,7 @@ fn desert_octave_fade(fp: f32, texel: f32) -> f32 {
 
 // The tile mip a footprint `fp` (m) reads.
 fn desert_lod(fp: f32) -> f32 {
+    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
     return clamp(log2(max(fp, 1e-6) / u.ocean_params.x), 0.0, u.ocean_params.w);
 }
 
@@ -28139,6 +28141,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // Never below mip 1: mip 0's r is the density the heights
                 // come from, the glow starts at mip 1 (export_web_assets).
                 let up_lod = clamp(
+                    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
                     1.0, u.ocean_params.w);
                 let g_raw = max(

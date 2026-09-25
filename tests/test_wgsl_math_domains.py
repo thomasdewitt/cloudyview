@@ -86,6 +86,33 @@ def _split_top(a, sep):
     return [t.strip() for t in out]
 
 
+def _whole_call(a, names):
+    """(name, [arguments]) when `a` is exactly one call to a name in
+    `names` — its closing parenthesis ends the expression — else None. A
+    guard that only STARTS the argument (max(x, 0.0) - 1.0) guards nothing.
+    """
+    m = re.match(r"(" + "|".join(names) + r")\s*\(", a)
+    if not m:
+        return None
+    inner = _args(a, m.end() - 1)
+    if m.end() + len(inner) + 1 != len(a):
+        return None
+    return m.group(1), _split_top(inner, ",")
+
+
+def _positive_literal(t):
+    return re.fullmatch(NUMBER, t) is not None and float(t) > 0.0
+
+
+def _non_negative_bound(t):
+    """A literal >= 0, or a vector splat of one (vec3<f32>(0.0))."""
+    m = re.fullmatch(r"vec[234](<f32>)?\((.*)\)", t)
+    if m:
+        parts = _split_top(m.group(2), ",")
+        return all(_non_negative_bound(q) for q in parts)
+    return re.fullmatch(NUMBER, t) is not None and float(t) >= 0.0
+
+
 def _is_square(t):
     m = re.fullmatch(r"dot\((.*)\)", t)
     if m:
@@ -98,21 +125,28 @@ def _is_square(t):
 def _safe_form(fn, a):
     """Forms that cannot leave the domain, whatever their inputs."""
     if fn in ("pow", "sqrt"):
-        if any(re.fullmatch(g + r"\(.*\)", a) for g in NON_NEGATIVE):
+        if _whole_call(a, NON_NEGATIVE):
             return True
-        # A sum of squares and non-negative literals.
+        # A sum of squares, non-negative literals and guarded terms. Only
+        # "+" at the top level: a "-" anywhere outside a guard's own
+        # parentheses disqualifies the sum.
         terms = _split_top(a, "+")
-        if "-" not in a.replace("e-", "") and all(
+        if len(terms) > 1 and all(
                 _is_square(t) or re.fullmatch(r"[0-9]*\.?[0-9]+", t)
-                for t in terms):
+                or _guarded("sqrt", t) for t in terms):
+            return True
+        if len(terms) == 1 and "-" not in a.replace("e-", "") \
+                and _is_square(a):
             return True
         # 1 - (something in [0, 1]).
-        m = re.fullmatch(r"1\.0\s*-\s*(clamp\((.*),\s*0\.0,\s*1\.0\)"
-                         r"|min\((.*),\s*1\.0\))", a)
-        if m and (m.group(2) is not None or re.fullmatch(
-                r"(abs|max|clamp|length|saturate)\(.*\)",
-                m.group(3).strip())):
-            return True
+        m = re.fullmatch(r"1\.0\s*-\s*(.*)", a)
+        if m:
+            c = _whole_call(m.group(1).strip(), ("clamp", "min"))
+            if c and c[0] == "clamp" and c[1][1:] == ["0.0", "1.0"]:
+                return True
+            if (c and c[0] == "min" and len(c[1]) == 2 and c[1][1] == "1.0"
+                    and _whole_call(c[1][0], NON_NEGATIVE)):
+                return True
     if fn == "normalize":
         # A vector constructor with a nonzero literal component.
         m = re.fullmatch(r"vec[234](<f32>)?\((.*)\)", a)
@@ -123,9 +157,27 @@ def _safe_form(fn, a):
 
 
 def _guarded(fn, a):
-    return (any(re.match(g + r"\s*\(", a) for g in GUARDS[fn])
-            or re.fullmatch(r"[0-9.]+(e[-+]?[0-9]+)?", a) is not None
-            or _safe_form(fn, a))
+    if re.fullmatch(r"[0-9.]+(e[-+]?[0-9]+)?", a) is not None:
+        return True
+    c = _whole_call(a, GUARDS[fn]) if GUARDS[fn] else None
+    if c:
+        name, args = c
+        if fn in ("log", "log2", "inverseSqrt"):
+            # > 0, not >= 0: max(x, 0.0) is log(0) = -inf.
+            return (name == "max" and len(args) == 2
+                    and _positive_literal(args[1])) or (
+                name == "clamp" and len(args) == 3
+                and _positive_literal(args[1]))
+        if fn in ("acos", "asin"):
+            return (len(args) == 3 and re.fullmatch(NUMBER, args[1])
+                    and re.fullmatch(NUMBER, args[2])
+                    and -1.0 <= float(args[1]) and float(args[2]) <= 1.0)
+        if name == "max":
+            return len(args) == 2 and _non_negative_bound(args[1])
+        if name == "clamp":
+            return len(args) == 3 and _non_negative_bound(args[1])
+        return True     # abs, saturate, exp, exp2
+    return _safe_form(fn, a)
 
 
 def _last_let(code, pos, name):
@@ -191,6 +243,18 @@ def test_the_scanner_catches_the_bug_that_shipped():
     assert not unguarded_calls("fn f() { let n = normalize(vec3<f32>(-s, 1.0)); }")
     assert not unguarded_calls(
         "fn f() { let d = max(x, 0.0);\n let s = sqrt(d); }")
+    # A guard counts only when it IS the argument, not when it starts it,
+    # and only with a bound that keeps it in the domain (loose-ends, c3a50f5).
+    for bad in ("sqrt(max(x, 0.0) - 1.0)", "pow(clamp(a, 0.0, 1.0) - 0.5, 2.2)",
+                "sqrt(abs(x) - y)", "sqrt(length(a) - length(b))",
+                "acos(clamp(c, -1.0, 1.0) * 2.0)", "log2(max(x, 0.0))",
+                "sqrt(max(x, -1.0))", "acos(clamp(c, -2.0, 1.0))"):
+        assert unguarded_calls("fn f() { let v = " + bad + "; }"), bad
+    assert not unguarded_calls("fn f() { let v = log2(max(x, 1e-6)); }")
+    assert not unguarded_calls("fn f() { let v = sqrt(max(d, 0.0) + o * o); }")
+    assert unguarded_calls("fn f() { let v = sqrt(max(d, 0.0) + o * p); }")
+    assert not unguarded_calls(
+        "fn f() { let v = pow(clamp(m, vec3<f32>(0.0), vec3<f32>(1.0)), g); }")
     # A guarded `let` of the same name in ANOTHER function does not count.
     assert unguarded_calls(
         "fn g() { let d = max(x, 0.0); }\nfn f() { let s = sqrt(d); }")
