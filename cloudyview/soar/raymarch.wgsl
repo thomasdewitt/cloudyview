@@ -4769,14 +4769,17 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
 // about its neighbours.
 //
 // LOD, and why there is no seam. The shell is traced only where a pixel can
-// resolve it. Its depths morph to zero over fp_eff CITY_SHELL_FP_MORPH ->
-// CITY_SHELL_FP_FLAT, and its shading blends into the flat facade's shading
-// AT THE SAME POINT OF THE WALL PLANE over CITY_SHELL_FP_BLEND -> FLAT. At
-// the hand-off the resolved shell therefore IS the flat facade — same
-// point, same function — and the flat facade's own octave ladder carries
-// the far field from there exactly as it did before the shell existed.
-// fp_eff divides by the view/normal cosine (the core's law), so a wall seen
-// edge-on flattens early, which is also what bounds the cell walk.
+// resolve it. What stands proud of the wall morphs to zero depth over the
+// plain footprint CITY_SHELL_FP_MORPH -> CITY_SHELL_FP_FLAT (city_shell_scale),
+// and the shading blends into the flat facade's, read where the ray crosses
+// the wall plane, over CITY_SHELL_FP_BLEND -> FLAT on the same footprint.
+// Where a grazing wall reaches the flat facade's pane dissolve first, the
+// shell's glass fades its reflection as the flat facade's does. The recess
+// keeps its true depth at every footprint, and the flat facade sees its
+// glass through the opening (city_recess_off), so at the hand-off the
+// resolved shell IS the flat facade: same point, same glass, same
+// function. The flat facade's octave ladder carries the far field from
+// there. tests/test_soar_city_shell_continuity.py holds this.
 //
 // Light. At night a wall is seen by what lights it: the lit pane in its own
 // reveal (the jambs and the sill catch the room's light — a rectangle-source
@@ -5410,7 +5413,8 @@ fn city_shell_try(best: CityShellHit, ol: vec3<f32>, dl: vec3<f32>,
 // The things that stand proud of the wall, enumerated: feature k of the bay
 // cell b, as a face-local box (shape 1) or vertical cylinder (shape 2), or
 // nothing (shape 0). u extents may run past the cell; the caller clips them
-// to it. `s` scales every depth.
+// to it. `s` scales the depth of what stands proud of the wall; a unit set
+// into the window keeps its back at the glass.
 const CITY_SHELL_FEATURES: i32 = 18;
 
 struct CityShellFeature {
@@ -5474,7 +5478,7 @@ fn city_shell_feature(cc: CityCell, f: CityFace, st: CityShellStyle,
         let ac = city_shell_ac(cc, f, st, b);
         if (ac.on && k == 5) {
             fe = CityShellFeature(1, CITY_PART_AC,
-                vec3<f32>(ca + ac.lo.x, vfl + ac.lo.y, ac.w0 * s),
+                vec3<f32>(ca + ac.lo.x, vfl + ac.lo.y, ac.w0),
                 vec3<f32>(ca + ac.hi.x, vfl + ac.hi.y, ac.out * s));
         } else if (ac.on && ac.in_window) {
             // The drip hood: a sheet a little wider and deeper than the unit.
@@ -5618,8 +5622,9 @@ fn city_balcony_cover(cc: CityCell, f: CityFace, st: CityShellStyle,
 }
 
 // Everything in one bay cell: the wall plane with its opening, the recess
-// behind it, and whatever stands proud of the wall. `s` scales every depth
-// (see the LOD note at the top); u in [ca, cb], v in [va, vb].
+// behind it, and whatever stands proud of the wall. `s` scales the depth of
+// what stands proud (see the LOD note at the top); the recess keeps its
+// own. u in [ca, cb], v in [va, vb].
 fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
                    cc: CityCell, f: CityFace, st: CityShellStyle,
                    fd: CityFaceDraw, s: f32, fp_cell: f32, b: CityBay,
@@ -6403,23 +6408,37 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     let t_cap = city_shell_cap(h.pos - h.t * dir, dir);
     let s = city_shell_scale(pa, t_ref, dl, st.depth, f.pitch, t_cap);
     // The in-plane pattern dissolves by the core's foreshortened footprint.
-    // The shell blends into the flat facade on the same footprint its relief
-    // flattens by, so the blend completes exactly as s reaches 0 and never
-    // runs ahead of it at a grazing angle; and by the walk's cap.
+    // The shell blends into the flat facade as its relief flattens, on the
+    // footprint s runs on, so the blend never completes with the relief
+    // still up; and by the walk's cap.
     let fp_eff = pa * t_ref / clamp(abs(dl.z), 0.20, 1.0);
     let blend = max(smoothstep(CITY_SHELL_FP_BLEND, CITY_SHELL_FP_FLAT,
                                pa * max(t_ref, 0.0)),
                     city_shell_cap_fade(t_ref, t_cap));
+    // Past the start of the flat facade's pane dissolve (a grazing wall can
+    // be there before the relief has flattened) the flat facade fades its
+    // glass reflection with the panes; the shell's glass does the same, so
+    // the two agree on it wherever they are mixed.
+    let refl = 1.0 - smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
 
-    // The flat twin is read at the hit's foot on the wall plane, which is
-    // where the flattened shell puts the hit as s -> 0.
+    // The flat twin is read where the ray crosses the wall plane, which is
+    // where the plain pass meets this wall: the flat facade finds the glass
+    // behind that point itself (city_recess_off), exactly where the shell's
+    // recess put it. A ray that never reaches the wall keeps the hit's foot.
     var hw = h;
-    hw.pos = h.pos - l.z * vec3<f32>(f.n, 0.0);
+    var t_wall = h.t;
+    if (dl.z < -1e-3) {
+        hw.pos = h.pos + (t_ref - h.t) * dir;
+        t_wall = t_ref;
+    } else {
+        hw.pos = h.pos - l.z * vec3<f32>(f.n, 0.0);
+    }
+    hw.t = t_wall;
     hw.normal = vec3<f32>(f.n, 0.0);
     hw.kind = 1;
     var flat = vec3<f32>(0.0);
     if (blend > 0.0) {
-        flat = city_facade_flat(cc, f, hw, dir, fp, fill);
+        flat = city_facade_flat(cc, f, hw, dir, pa * t_wall, fill);
         if (blend >= 1.0) {
             return flat;
         }
@@ -6438,7 +6457,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     if (part == CITY_PART_GLASS) {
         let cosv = abs(dot(dir, n));
         e = city_glass_fresnel(cosv)
-            * city_glass_env(reflect(dir, n), h.pos, glow);
+            * city_glass_env(reflect(dir, n), h.pos, glow) * refl;
         if (win.lit) {
             e = e + city_room(cc, f, b, win, l, dl, fp_eff)
                   * (1.0 - city_glass_fresnel(cosv));
@@ -6545,7 +6564,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         // flat facade gives the whole skin.
         if (cc.win_style == 3) {
             e = e + city_glass_fresnel(abs(dot(dir, n)))
-                    * city_glass_env(reflect(dir, n), h.pos, glow);
+                    * city_glass_env(reflect(dir, n), h.pos, glow) * refl;
         }
     }
     return mix(e, flat, blend);
@@ -6595,13 +6614,14 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     // ray that crosses the opening here meets the glass `off` further along
     // the wall, and sees it only if that point is still inside the opening
     // (else it met the reveal or the sill) and inside the pane (else the
-    // frame). A frustum's skin has no shell and no recess.
+    // frame). A frustum's skin has no shell and no recess, and neither has
+    // a warehouse, whose walls are the industry component's.
     let plo = city_pane_lo(cc, f);
     let phi = city_pane_hi(cc, f);
     let olo = plo - vec2<f32>(CITY_SHELL_FRAME);
     let ohi = phi + vec2<f32>(CITY_SHELL_FRAME);
     var off = vec2<f32>(0.0);
-    if (f.aligned) {
+    if (f.aligned && cc.land_use == CITY_USE_URBAN) {
         off = city_recess_off(st, city_face_dir(f, dir));
     }
     let pw = vec2<f32>(b.bu, b.bv);
@@ -6682,9 +6702,8 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     // below, rather than into its share of the face: at grazing angles that
     // share is a uniform lift several times the wall's own diffuse, and it
     // washed out the block octave the far city is drawn in. So the octaves
-    // past the panes keep the look they always had. (The band starts past
-    // the shell's reach, CITY_SHELL_FP_FLAT, so the shell still hands off
-    // to a wall that reflects exactly as it does.)
+    // past the panes keep the look they always had. (The shell has handed
+    // over completely before the band starts: city_shell_shade.)
     let skin = cc.win_style == 3;
     let glass = select(select(0.0, 1.0, pane), select(0.0, 1.0, b.in_bay),
                        skin);
@@ -6747,7 +6766,11 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     }
     let alb = mix(mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover), st.trim,
                       bal_c), vec3<f32>(0.34, 0.33, 0.30), ac_c);
-    return e + alb
+    // Inside the opening but not on the glass, the ray met the reveal, the
+    // sill or the frame, which the shell shades in the recess's shadow
+    // (ao 0.5-0.85): their mean.
+    let ao = select(1.0, 0.6, open && !pane);
+    return e + (alb * ao)
         * (CITY_SHELL_FILL_K
            * (fill + CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0))
            + city_shell_lamp_stub(h.pos, h.normal));

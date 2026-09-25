@@ -19,14 +19,19 @@ its flat twin would leave that difference constant: the near field keeps its
 own look (it is meant to differ), and what must not move is the look where
 the shell hands over.
 
-Measured when this was written (2026-09-24, 32 frames), worst region step of
-(shell - flat) between adjacent widths: 0.0075, 0.0072 and 0.0067 for the
-three views; with the resolved shell forced to half brightness (a mismatch
-of the kind this guards) 0.0150, 0.0117 and 0.0153. The views are the ones
-where that mismatch shows: an oblique walk-up face, a canyon from 150 m up,
-and a flight along a curtain wall. The test refuses to pass vacuously: at the
-widest width the plain pass must have marked a real share of the frame for
-the shell.
+Measured (2026-09-24, 32 frames), worst region step of (shell - flat)
+between adjacent widths: 0.0077, 0.0074 and 0.0068 for the three views;
+with the resolved shell forced to half brightness (a mismatch of the kind
+this guards) 0.0147, 0.0122 and 0.0157, and before the flat facade carried the
+recess's occlusion (18252f9) 0.0243 on the curtain flight. The views are the
+ones where such mismatches show: an oblique walk-up face, a canyon from
+150 m up, and a flight along a curtain wall. The test refuses to pass
+vacuously: at the narrowest width, where the shell's reach is shortest, the
+plain pass must still have marked a real share of the frame for it.
+
+A second test checks the hand-off itself, pixel for pixel, where the blend
+has reached 1: a mismatch there is a line, not a band, and the sweep's
+region means do not see it.
 
 The sweep runs at the view-step LOD 0 on purpose. At the app's LOD the pixel
 angle is floored by the view-step angle, which at these widths is larger
@@ -71,6 +76,15 @@ FRAMES = 32
 GRID = (8, 4)
 MAX_STEP = 0.010
 MIN_MARKED = 0.05
+# The direct check at the hand-off: pixels whose footprint lies in this band
+# are blended at least 0.98 into the flat facade, so there the shell's render
+# must equal the flat one, pixel for pixel. Pooled over the sweep's widths.
+# Measured (2026-09-24): mean |shell - flat| 0.00068, 0.00019 and 0.00064;
+# with the flat twin read at the wrong point on the wall (the recess offset
+# applied twice, as 2d8a5a0 did) 0.00125, 0.00160 and 0.00130.
+HANDOFF_FP = (1.15, 1.20)
+HANDOFF_MIN_PIXELS = 1000
+MAX_HANDOFF_ABS = 0.0010
 
 
 @pytest.fixture(scope="module")
@@ -121,9 +135,9 @@ def _view(cam, width):
         view_step_lod_degrees=0.0)
 
 
-def _marked_fraction(r, width, height):
-    """Share of pixels the plain pass marked for the shell (red's sign bit,
-    CITY_SHELL_MARK in raymarch.wgsl)."""
+def _plain(r, width, height):
+    """The plain pass's target as raw words: red carries the shell's mark
+    (its sign bit, CITY_SHELL_MARK in raymarch.wgsl), alpha the distance."""
     import wgpu
     tex = r._targets["plain"]
     row = math.ceil(width * 16 / 256) * 256
@@ -139,14 +153,42 @@ def _marked_fraction(r, width, height):
     buf.map_sync(wgpu.MapMode.READ)
     a = np.frombuffer(bytearray(buf.read_mapped()), np.uint32)
     buf.unmap()
-    red = a.reshape(height, row // 4)[:, 0:width * 4:4]
+    return a.reshape(height, row // 4)[:, :width * 4].reshape(height, width, 4)
+
+
+def _surface_t(r, width, height):
+    """The final surface's distance (the refinement stage's output)."""
+    import wgpu
+    tex = r._targets["surface"]
+    row = math.ceil(width * 16 / 256) * 256
+    buf = r.device.create_buffer(
+        size=row * height,
+        usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ)
+    enc = r.device.create_command_encoder()
+    enc.copy_texture_to_buffer(
+        {"texture": tex, "mip_level": 0, "origin": (0, 0, 0)},
+        {"buffer": buf, "offset": 0, "bytes_per_row": row,
+         "rows_per_image": height}, (width, height, 1))
+    r.device.queue.submit([enc.finish()])
+    buf.map_sync(wgpu.MapMode.READ)
+    a = np.frombuffer(bytearray(buf.read_mapped()), np.float32)
+    buf.unmap()
+    return a.reshape(height, row // 4)[:, 3:width * 4:4]
+
+
+def _marked_fraction(r, width, height):
+    red = _plain(r, width, height)[..., 0]
     return float(((red & 0x80000000) != 0).mean())
 
 
-def _regions(r, state, cam, width):
+def _shown(r, state, cam, width):
     import cloudyview as cv
     img = np.asarray(r.render(state, _view(cam, width), frames=FRAMES))
-    shown = cv.quantize_uint8(img).astype(np.float64) / 255.0
+    return cv.quantize_uint8(img).astype(np.float64) / 255.0
+
+
+def _regions(r, state, cam, width):
+    shown = _shown(r, state, cam, width)
     gx, gy = GRID
     h, w = shown.shape[:2]
     return np.array([[shown[j * h // gy:(j + 1) * h // gy,
@@ -162,7 +204,7 @@ def test_shell_hand_off_is_continuous(view_name, city):
     diff = []
     for width in WIDTHS:
         shell = _regions(renderers["shell"], state, cam, width)
-        if width == WIDTHS[0]:
+        if width == WIDTHS[-1]:
             marked = _marked_fraction(renderers["shell"],
                                       *_view(cam, width).render_size)
             assert marked >= MIN_MARKED, (
@@ -173,3 +215,37 @@ def test_shell_hand_off_is_continuous(view_name, city):
     assert step <= MAX_STEP, (
         f"{view_name}: the shell's difference from the flat facade moved "
         f"{step:.4f} in a region between adjacent widths (bound {MAX_STEP})")
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("view_name", list(VIEWS))
+def test_shell_equals_flat_where_it_hands_off(view_name, city):
+    """Where the blend reaches 1, the shell's pixel IS the flat facade's.
+
+    The width sweep sees mismatches spread over the band; this sees one
+    that sits on the edge of the reach, a line rather than a band (a flat
+    twin read at the wrong point on the wall did exactly that). Only pixels
+    where the shell kept the plain pass's surface count: a nearer piece of
+    relief standing in front of a far wall is meant to differ.
+    """
+    renderers, state = city
+    cam = VIEWS[view_name]
+    diffs = []
+    for width in WIDTHS:
+        shell = _shown(renderers["shell"], state, cam, width)
+        w, h = _view(cam, width).render_size
+        t_plain = np.abs(_plain(renderers["shell"], w, h)[..., 3]
+                         .view(np.float32))
+        t_final = np.abs(_surface_t(renderers["shell"], w, h))
+        flat = _shown(renderers["flat"], state, cam, width)
+        fp = 2.0 * math.tan(math.radians(cam[5]) / 2.0) / w * t_plain
+        band = ((fp >= HANDOFF_FP[0]) & (fp < HANDOFF_FP[1])
+                & (np.abs(t_final - t_plain) < 0.02 * t_plain))
+        diffs.append((shell - flat)[band])
+    d = np.concatenate(diffs, axis=None)
+    assert d.size >= HANDOFF_MIN_PIXELS, (
+        f"{view_name}: only {d.size} pixels at the hand-off")
+    mean_abs = float(np.abs(d).mean())
+    assert mean_abs <= MAX_HANDOFF_ABS, (
+        f"{view_name}: at the hand-off the shell differs from the flat "
+        f"facade by {mean_abs:.5f} on average (bound {MAX_HANDOFF_ABS})")
