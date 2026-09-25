@@ -3046,15 +3046,22 @@ const CITY_H_SCALE: f32 = 390.0;
 const CITY_H_EXP: f32 = 1.2;
 // Massing bands (see the footprint block in city_cell). Below LOWRISE a
 // block is a row of frontages; from TOWER up a building is a tower whose
-// side is K sqrt(h) metres to the KNEE and K sqrt(KNEE) (h/KNEE)^0.3 above
-// it, never slenderer than SLENDER_MAX.
+// side is K sqrt(h) metres up to the KNEE and stops growing there, never
+// slenderer than SLENDER_MAX.
 const CITY_LOWRISE_H: f32 = 22.0;
 const CITY_TOWER_H: f32 = 60.0;
 const CITY_TOWER_SIDE_K: f32 = 4.2;
-const CITY_TOWER_KNEE_H: f32 = 800.0;
-// Above this a tower is a supertall: sharper taper, longer spire, a needle.
+const CITY_TOWER_KNEE_H: f32 = 600.0;
+// Above SPIRE_H every tower is a spire crown or a tapered shaft — a tall
+// prism reads from across the city as a slab. Above SUPERTALL_H the taper
+// is sharper, the spire longer, and a tapered shaft ends in a needle.
+const CITY_SPIRE_H: f32 = 600.0;
 const CITY_SUPERTALL_H: f32 = 1200.0;
-const CITY_SLENDER_MAX: f32 = 20.0;
+// A supertall's shaft is SUPERTALL_SIDE of an ordinary tower's: the needles
+// of the skyline are slender, and a slenderness of up to SLENDER_MAX is
+// allowed for them — beyond today's 24:1, as the skyline itself is.
+const CITY_SUPERTALL_SIDE: f32 = 0.45;
+const CITY_SLENDER_MAX: f32 = 60.0;
 // Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
 // is an integer of at most 12 bits stored offset by -2048, where float16
 // holds every integer exactly.
@@ -3520,13 +3527,15 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // Footprint grows with height, the way a real city's does. Low-rise is
     // a row of narrow frontages that fills its block; mid-rise fills the
     // block with one mass; a tower's side grows as the square root of its
-    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 120 m at 800, the
-    // run real towers follow from floor-plate economics and sway — and more
-    // slowly above that (h^0.3: 150 m at 1.5 km, 180 m at 3 km), because
-    // what carries a supertall is taper, not bulk; a slenderness limit
-    // (height over width at most 20) floors the extremes. So the tallest
-    // towers are also the broadest, and a supertall needs the multi-block
-    // lot its peak claimed. Where the tower leaves most of its plot open it
+    // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 103 m at 600, the
+    // run real towers follow from floor-plate economics and sway — and then
+    // stops: what carries a supertall is taper, not bulk, and a supertall's
+    // shaft is slimmer still (SUPERTALL_SIDE). A slenderness limit (height
+    // over width at most 60) widens only the very tallest.
+    // The supertall's broader FOOTPRINT is its podium, on the multi-block
+    // lot its peak claimed, not its shaft: a 3 km tower 150 m wide read
+    // from across the city as a slab, where the skyline Thomas loved was a
+    // cluster of needles. Where the tower leaves most of its plot open it
     // stands on a podium that fills the plot: the street wall every real
     // downtown tower keeps.
     let r4f = city_rand4(c.seed ^ vec2<u32>(0x6a09e667u, 0xbb67ae85u));
@@ -3534,10 +3543,10 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     var podium = false;
     var zp = 0.0;
     if (h >= CITY_TOWER_H) {
-        let h_eff = select(h, CITY_TOWER_KNEE_H
-                              * pow(h / CITY_TOWER_KNEE_H, 0.6),
-                           h > CITY_TOWER_KNEE_H);
-        let side = max(CITY_TOWER_SIDE_K * sqrt(h_eff) * (0.80 + 0.40 * r4.y),
+        let side = max(CITY_TOWER_SIDE_K * sqrt(min(h, CITY_TOWER_KNEE_H))
+                           * (0.80 + 0.40 * r4.y)
+                           * select(1.0, CITY_SUPERTALL_SIDE,
+                                    h > CITY_SUPERTALL_H),
                        h / CITY_SLENDER_MAX);
         let aspect = 0.72 + 0.28 * r4.z;
         let sides = select(vec2<f32>(side * aspect, side),
@@ -3562,21 +3571,24 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     let pod_max = pc + 0.5 * pod_fw;
 
     // The architecture. Low buildings stay slabs; above 60 m the draw picks
-    // among four archetypes, and the megatowers lean hard toward the two
-    // frustum forms — a 3 km rectangular extrusion is a wall, a 3 km
-    // tapering shaft is a spire (Thomas: not perfect rectangular prisms;
-    // architectures that grow, or have a spire).
+    // among four archetypes, spires growing commoner with height, and above
+    // SPIRE_H every tower is one of the two frustum forms — a 3 km
+    // rectangular extrusion is a wall, a 3 km tapering shaft is a spire
+    // (Thomas: not perfect rectangular prisms; architectures that grow, or
+    // have a spire). Spire crowns are the majority up there: the needles
+    // are what the skyline is.
     if (h > 60.0) {
+        let spire_p = select(0.13, 0.30, h > 300.0);
         if (r4d.x < 0.20) {
             c.arch = 2;                   // growth: cantilevered buds
         } else if (r4d.x < 0.42) {
             c.arch = 3;                   // tapered shaft on a podium
-        } else if (r4d.x < 0.55) {
+        } else if (r4d.x < 0.42 + spire_p) {
             c.arch = 4;                   // spire crown
         }
     }
-    if (h > 600.0 && r4d.y < select(0.65, 0.85, h > CITY_SUPERTALL_H)) {
-        c.arch = select(3, 4, r4d.y < 0.30);
+    if (h > CITY_SPIRE_H) {
+        c.arch = select(3, 4, r4d.y < 0.60);
     }
 
     if (h < CITY_LOWRISE_H) {
@@ -3640,16 +3652,18 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.has_frustum = true;
         c.fmin = vec3<f32>(bc - 0.5 * fw_shaft, zp);
         c.fmax = vec3<f32>(bc + 0.5 * fw_shaft, h);
-        // A supertall's shaft closes much further: its elegance is the
-        // taper, and a 3 km prism that only narrows by a third reads as a
-        // wall however wide its base is right to be.
-        c.fscale = select(0.55 + 0.25 * r4d.z, 0.28 + 0.22 * r4d.z,
+        // A supertall's shaft is already slim (SUPERTALL_SIDE); it closes a
+        // little further than a tower's and ends in a needle. Closed much
+        // further (to a fifth) the shafts read as cones, not the needles of
+        // the skyline Thomas loved.
+        c.fscale = select(0.55 + 0.25 * r4d.z, 0.40 + 0.20 * r4d.z,
                           h > CITY_SUPERTALL_H);
     } else if (c.arch == 4) {
-        // A straight shaft to three quarters, then a steep spire — on the
-        // podium, when there is one, as a stacked tier.
-        // Supertalls give the spire a longer run: the top 35-45%.
-        let zs = floor(ns * select(0.75, 0.55 + 0.10 * r4d.w,
+        // A straight shaft to seven tenths, then a steep spire — on the
+        // podium, when there is one, as a stacked tier. Supertalls keep a
+        // long straight shaft too (a spire over half the height reads as a
+        // cone) but end in a finer point: the needles of the skyline.
+        let zs = floor(ns * select(0.70, 0.62 + 0.10 * r4d.w,
                                    h > CITY_SUPERTALL_H)) * CITY_FLOOR_H;
         if (podium) {
             c.tiers = 2;
@@ -3664,7 +3678,8 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.has_frustum = true;
         c.fmin = vec3<f32>(bmin2, zs);
         c.fmax = vec3<f32>(bmax2, h);
-        c.fscale = 0.12 + 0.10 * r4d.z;
+        c.fscale = select(0.12 + 0.10 * r4d.z, 0.06 + 0.08 * r4d.z,
+                          h > CITY_SUPERTALL_H);
     } else if (c.arch == 2) {
         // Growth: a straight tower with one or two boxes budding from its
         // upper flanks, cantilevered over the street. Buds stay inside the
@@ -3719,15 +3734,16 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         }
     } else if (podium) {
         // Podium, tower, crown: the setback stack with the street wall at
-        // the bottom and the tower's own crown setback at the top.
+        // the bottom and the tower's own crown setback stepping in over
+        // its top third or so.
         c.tiers = 3;
-        let zc = floor(ns * (0.70 + 0.15 * r4b.w))
+        let zc = floor(ns * (0.62 + 0.12 * r4b.w))
                  * CITY_FLOOR_H;
         c.b1min = vec3<f32>(pod_min, CITY_GROUND_Z);
         c.b1max = vec3<f32>(pod_max, zp);
         c.b2min = vec3<f32>(bmin2, zp);
         c.b2max = vec3<f32>(bmax2, zc);
-        let fw3 = fw * (0.62 + 0.18 * r4b.z);
+        let fw3 = fw * (0.55 + 0.15 * r4b.z);
         c.b3min = vec3<f32>(bc - 0.5 * fw3, zc);
         c.b3max = vec3<f32>(bc + 0.5 * fw3, h);
     } else {

@@ -84,6 +84,9 @@ INDUSTRIAL_STREET_PERIOD = 2
 # jitter) at which a peak claims a k x k lot. A 78 m plot carries a tower to
 # about 12:1 slenderness at these cuts.
 TOWER_LOT_H = ((2, 330.0), (3, 900.0), (4, 2000.0))
+# A block whose own tower would reach this fraction of the claimant's (and
+# is a tower-lot candidate itself) is a rival, never part of its lot.
+RIVAL_FRAC = 0.5
 # A few dense mid-rise groups merge into one full-block building anyway —
 # the department store, the convention centre — as the old 2x2 superblocks
 # did.
@@ -202,6 +205,16 @@ def bake_lots(density: np.ndarray, rank: np.ndarray, seed: int = 20260923,
                     if not np.all(urban_district[np.ix_(ys, xs)]):
                         continue
                     if not lots.free(x0, y0, k, k):
+                        continue
+                    # Never swallow a rival: a block that would raise a
+                    # comparable tower of its own keeps it. The tile's
+                    # tallest peaks stand on adjacent blocks, and one lot
+                    # over them turned the skyline's cluster of needles
+                    # into a single tower (the skyline Thomas loved).
+                    sub = h0[np.ix_(ys, xs)].copy()
+                    sub[oy, ox] = 0.0
+                    if np.any(sub >= max(TOWER_LOT_H[0][1],
+                                         RIVAL_FRAC * h0[y, x])):
                         continue
                     lots.claim(x0, y0, k, k, ox, oy)
                     placed = True

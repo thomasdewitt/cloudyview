@@ -136,8 +136,11 @@ def _sample_cells(texels, count_per_kind=300, seed=20260923):
     span = np.maximum((lot >> 4) & 3, (lot >> 6) & 3) + 1
     density = texels[..., 0]
     kinds = {
-        "supertall lot": span == 4,
-        "tower lot": span == 3,
+        # The tallest peaks keep their own blocks (city_lots' rival rule),
+        # so the supertalls are sampled by their density, and the tower
+        # lots by span, whatever sizes the bake made.
+        "supertall": (use == 0) & (density >= 3.0),
+        "tower lot": span >= 3,
         "multi-cell lot": span == 2,
         "industrial": use == 1,
         "yard": use == 2,
