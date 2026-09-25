@@ -27,8 +27,12 @@ Three channels come out, plus a fourth derived one:
           trail behind it) are ranked, and the top FOAM_MAX_COVERAGE of the
           tile is spread uniformly over (0, 1], everything else 0. A cut at
           1 - g therefore keeps exactly g * FOAM_MAX_COVERAGE of the tile in
-          every frame, which is what lets the shader gate whitecaps by the
-          swell and still know the far-field coverage exactly.
+          every frame, which is what let the shader gate whitecaps by the
+          swell and still know the far-field coverage exactly. RETIRED
+          (2026-09-25, Thomas: the waves are not big enough for whitecaps):
+          the shader no longer reads it. It is generated still because the
+          shipped tile's bytes carry it, and a re-export has to reproduce
+          them; it goes with the tile's next re-bake.
   crest   height above a ~6 m low-pass, positive part, normalized — how
           much thin water a crest holds up for sunlight to shine through
           (the subsurface glow). Linear in the shader, so it mips honestly.
