@@ -52,7 +52,6 @@ export const CITY_TOWER_SIDE_K = 4.2;
 export const CITY_TOWER_KNEE_H = 600.0;
 export const CITY_SPIRE_H = 600.0;
 export const CITY_SUPERTALL_H = 1200.0;
-export const CITY_SUPERTALL_SIDE = 0.45;
 export const CITY_SLENDER_MAX = 60.0;
 export const CITY_USE_URBAN = 0;
 export const CITY_USE_INDUSTRIAL = 1;
@@ -337,8 +336,7 @@ export function cityCell(tile, cx, cy) {
   if (h >= CITY_TOWER_H) {
     const side = Math.max(
       CITY_TOWER_SIDE_K * Math.sqrt(Math.min(h, CITY_TOWER_KNEE_H))
-        * (0.80 + 0.40 * r4[1])
-        * (h > CITY_SUPERTALL_H ? CITY_SUPERTALL_SIDE : 1.0),
+        * (0.80 + 0.40 * r4[1]),
       h / CITY_SLENDER_MAX);
     const aspect = 0.72 + 0.28 * r4[2];
     const sides = r4f[1] < 0.5 ? [side, side * aspect]
@@ -365,9 +363,9 @@ export function cityCell(tile, cx, cy) {
   // The architecture.
   if (h > 60.0) {
     const spire_p = h > 300.0 ? 0.30 : 0.13;
-    if (r4d[0] < 0.20) {
+    if (r4d[0] < f(0.20)) {
       c.arch = 2;                   // growth: cantilevered buds
-    } else if (r4d[0] < 0.42) {
+    } else if (r4d[0] < f(0.42)) {
       c.arch = 3;                   // tapered shaft on a podium
     } else if (r4d[0] < f(f(0.42) + f(spire_p))) {
       c.arch = 4;                   // spire crown

@@ -305,6 +305,7 @@ def _column_names():
 
 
 @needs_node
+@pytest.mark.gpu
 def test_js_city_cell_matches_the_wgsl_on_the_gpu():
     adapter = soar_gpu_adapter()
     if adapter is None:

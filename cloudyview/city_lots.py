@@ -3,7 +3,7 @@
 The density tile (city_fif) says how much city stands on each 90 m block.
 This module decides what KIND of city, and where the roads run, from the
 same two channels — offline, because both questions are non-local: a
-supertall claims the neighbouring blocks around its peak (a lot has to be
+tall tower claims the neighbouring blocks around its peak (a lot has to be
 agreed by every member cell, and two peaks cannot claim the same block),
 and a street is only worth drawing if it connects to the rest of the
 network. Neither can be answered from one texel in a shader. The answers
@@ -27,13 +27,17 @@ also omit the streets"), and the only roads across open scrub are the
 connectors that join a stranded works to the network (under 1% of open-open
 edges).
 
-Massing that needs agreement lives here too. A tower's footprint grows with
-its height, and a supertall's footprint is larger than one block: the peak
-cell claims a k x k lot centred on itself (k up to 4), greedily from the
-tallest down, never across an avenue line (skyway's elevated decks rely on
-avenues being empty air) and never across another claim. Every member cell
-then reports the peak's density, rank and seed, so the skyline's extremes
-keep exactly the heights they had.
+Massing that needs agreement lives here too. A tall tower's podium wants
+more than one block: the peak cell claims a k x k lot centred on itself (k
+up to 4), greedily from the tallest down, never across an avenue line
+(skyway's elevated decks rely on avenues being empty air), never across
+another claim, and never over a RIVAL — a block whose own tower would reach
+RIVAL_FRAC of the claimant's. The tile's tallest peaks stand on adjacent
+blocks, and one lot over them turned the skyline's cluster of needles into
+a single tower; with the rule the peaks of a cluster keep a block each, and
+lots go only to towers standing among lower neighbours. Every member cell
+reports the owner's density, rank and seed, so every tower keeps exactly the
+height it had.
 
 Packing (both channels, mip 0 only; the coarser mips of b and a are zeroed,
 because an average of bitfields means nothing and nothing reads it):
@@ -81,8 +85,8 @@ DISTRICT_URBAN_RANK = 0.40
 INDUSTRIAL_STREET_PERIOD = 2
 
 # Tower lots: the unjittered height (city_cell's law without its per-building
-# jitter) at which a peak claims a k x k lot. A 78 m plot carries a tower to
-# about 12:1 slenderness at these cuts.
+# jitter) at which a peak claims a k x k lot for its podium (city_cell keeps
+# the shaft itself slim; see CITY_TOWER_KNEE_H).
 TOWER_LOT_H = ((2, 330.0), (3, 900.0), (4, 2000.0))
 # A block whose own tower would reach this fraction of the claimant's (and
 # is a tower-lot candidate itself) is a rival, never part of its lot.
@@ -234,6 +238,12 @@ def bake_lots(density: np.ndarray, rank: np.ndarray, seed: int = 20260923,
             if rng.random() >= MIDRISE_MERGE_FRAC or not lots.free(x0, y0, 2, 2):
                 continue
             sub = h0[np.ix_(ys, xs)]
+            # Mid-rise only: a block tall enough for a tower lot of its own
+            # is never folded into a superblock (the peaks stage 1 leaves
+            # free for the rival rule would otherwise merge here). Tested
+            # after the draw, so every other superblock is unchanged.
+            if sub.max() >= TOWER_LOT_H[0][1]:
+                continue
             oy, ox = np.unravel_index(np.argmax(sub), sub.shape)
             lots.claim(x0, y0, 2, 2, int(ox), int(oy))
 

@@ -3046,8 +3046,8 @@ const CITY_H_SCALE: f32 = 390.0;
 const CITY_H_EXP: f32 = 1.2;
 // Massing bands (see the footprint block in city_cell). Below LOWRISE a
 // block is a row of frontages; from TOWER up a building is a tower whose
-// side is K sqrt(h) metres up to the KNEE and stops growing there, never
-// slenderer than SLENDER_MAX.
+// side is K sqrt(h) metres up to the KNEE and holds there (see
+// SLENDER_MAX for the floor on the very tallest).
 const CITY_LOWRISE_H: f32 = 22.0;
 const CITY_TOWER_H: f32 = 60.0;
 const CITY_TOWER_SIDE_K: f32 = 4.2;
@@ -3057,10 +3057,10 @@ const CITY_TOWER_KNEE_H: f32 = 600.0;
 // is sharper, the spire longer, and a tapered shaft ends in a needle.
 const CITY_SPIRE_H: f32 = 600.0;
 const CITY_SUPERTALL_H: f32 = 1200.0;
-// A supertall's shaft is SUPERTALL_SIDE of an ordinary tower's: the needles
-// of the skyline are slender, and a slenderness of up to SLENDER_MAX is
-// allowed for them — beyond today's 24:1, as the skyline itself is.
-const CITY_SUPERTALL_SIDE: f32 = 0.45;
+// The slenderness floor: a tower is never narrower than its height over
+// this, on its broad face (the narrow face is up to 0.72 of it). It binds
+// only on the very tallest; everything below takes its slenderness from its
+// taper and spire, not from its width.
 const CITY_SLENDER_MAX: f32 = 60.0;
 // Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
 // is an integer of at most 12 bits stored offset by -2048, where float16
@@ -3334,9 +3334,10 @@ struct CityCell {
     has_frustum: bool,
     fmin: vec3<f32>, fmax: vec3<f32>,
     fscale: f32,
-    // One building can own a lot of several blocks — up to 4x4 under a
-    // supertall, 2x1 or 2x2 under a warehouse; every member cell then
-    // reports the same plot, seed and boxes.
+    // One building can own a lot of several blocks — up to 4x4 under a tall
+    // tower among lower neighbours, 2x2 under a mid-rise superblock, 2x1 or
+    // 2x2 under a warehouse (cloudyview/city_lots.py); every member cell
+    // then reports the same plot, seed and boxes.
     merged: bool,
     // The window style (see the style block in city_cell): 0 grid,
     // 1 ribbon bands, 2 vertical strips, 3 curtain wall, 4 punched.
@@ -3535,24 +3536,22 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // block with one mass; a tower's side grows as the square root of its
     // height — 35 m at 70 m, 55 m at 180, 85 m at 400, 103 m at 600, the
     // run real towers follow from floor-plate economics and sway — and then
-    // stops: what carries a supertall is taper, not bulk, and a supertall's
-    // shaft is slimmer still (SUPERTALL_SIDE). A slenderness limit (height
-    // over width at most 60) widens only the very tallest.
-    // The supertall's broader FOOTPRINT is its podium, on the multi-block
-    // lot its peak claimed, not its shaft: a 3 km tower 150 m wide read
-    // from across the city as a slab, where the skyline Thomas loved was a
-    // cluster of needles. Where the tower leaves most of its plot open it
-    // stands on a podium that fills the plot: the street wall every real
-    // downtown tower keeps.
+    // holds, continuous and never shrinking with height: what carries a
+    // supertall is its taper, setbacks and spire, not bulk (a 3 km tower
+    // 150 m wide read from across the city as a slab, where the skyline
+    // Thomas loved was a cluster of needles; a step down in width at some
+    // height read as wrong the other way). A slenderness floor (SLENDER_MAX)
+    // widens only the very tallest. Where the tower leaves most of its plot
+    // open it stands on a podium that fills the plot — on the multi-block
+    // lot its peak claimed, when it stood among lower neighbours: the street
+    // wall every real downtown tower keeps.
     let r4f = city_rand4(c.seed ^ vec2<u32>(0x6a09e667u, 0xbb67ae85u));
     var fw = plot_size * vec2<f32>(0.80 + 0.17 * r4.y, 0.80 + 0.17 * r4.z);
     var podium = false;
     var zp = 0.0;
     if (h >= CITY_TOWER_H) {
         let side = max(CITY_TOWER_SIDE_K * sqrt(min(h, CITY_TOWER_KNEE_H))
-                           * (0.80 + 0.40 * r4.y)
-                           * select(1.0, CITY_SUPERTALL_SIDE,
-                                    h > CITY_SUPERTALL_H),
+                           * (0.80 + 0.40 * r4.y),
                        h / CITY_SLENDER_MAX);
         let aspect = 0.72 + 0.28 * r4.z;
         let sides = select(vec2<f32>(side * aspect, side),
@@ -3658,8 +3657,8 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.has_frustum = true;
         c.fmin = vec3<f32>(bc - 0.5 * fw_shaft, zp);
         c.fmax = vec3<f32>(bc + 0.5 * fw_shaft, h);
-        // A supertall's shaft is already slim (SUPERTALL_SIDE); it closes a
-        // little further than a tower's and ends in a needle. Closed much
+        // A supertall's shaft closes a little further than a tower's and
+        // ends in a needle. Closed much
         // further (to a fifth) the shafts read as cones, not the needles of
         // the skyline Thomas loved.
         c.fscale = select(0.55 + 0.25 * r4d.z, 0.40 + 0.20 * r4d.z,
@@ -9699,7 +9698,7 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
         bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
     // Helipad first: it wants the same real estate and it is the rarer
     // thing. A building gets one pad, in the member cell under a point of
-    // its top deck that the building-level draw picks — lots run up to 4x4
+    // its top deck that the building-level draw picks — lots span up to 4x4
     // and a tower's crown covers only some of their cells, so neither a
     // parity rule nor a pick among the lot's cells would do.
     let pad_at = mix(d.lo, d.hi, vec2<f32>(0.25) + 0.5 * gh.zw);

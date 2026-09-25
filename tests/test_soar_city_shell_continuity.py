@@ -202,16 +202,26 @@ def _regions(r, state, cam, width):
 # bound. Whether that face exposes a real hand-off mismatch or the views
 # only need re-aiming is city-facades' to settle on bigday/city-lod, where
 # the views are re-aimed by building type and the bounds re-calibrated with
-# fresh negative controls. Strict: each must keep failing until then, so
-# the exception cannot outlive its reason.
+# fresh negative controls. The measurements quoted in this module's
+# docstring are the pre-spire city's. Strict where the failure is clear
+# (curtain_flyby), so the exception cannot outlive its reason; not strict
+# for walkup_oblique's hand-off, which sits a hair over its bound (0.00101
+# against 0.001 on this box) and would pass — and fail strictly — on a GPU
+# that lands a hair under.
 _CITY_LOD = ("massing moved the view's buildings; re-aim by building type "
              "and re-calibrate on bigday/city-lod (city-facades)")
 
 
-def _xfail_on(names):
-    return [pytest.param(v, marks=pytest.mark.xfail(strict=True,
-                                                     reason=_CITY_LOD))
-            if v in names else v for v in VIEWS]
+def _xfail_on(strict, lax=()):
+    unknown = (set(strict) | set(lax)) - set(VIEWS)
+    if unknown:
+        raise ValueError(f"no such shell views: {sorted(unknown)}")
+    def mark(v):
+        if v in strict or v in lax:
+            return pytest.param(v, marks=pytest.mark.xfail(
+                strict=v in strict, reason=_CITY_LOD))
+        return v
+    return [mark(v) for v in VIEWS]
 
 
 @pytest.mark.gpu
@@ -237,7 +247,7 @@ def test_shell_hand_off_is_continuous(view_name, city):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("view_name",
-                         _xfail_on({"curtain_flyby", "walkup_oblique"}))
+                         _xfail_on({"curtain_flyby"}, lax={"walkup_oblique"}))
 def test_shell_equals_flat_where_it_hands_off(view_name, city):
     """Where the blend reaches 1, the shell's pixel IS the flat facade's.
 
