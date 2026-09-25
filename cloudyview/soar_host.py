@@ -1415,46 +1415,60 @@ class SoarRenderer:
         """The city's street stage (fs_surface_street), or None."""
         return self._named_stage_for("fs_surface_street", view)
 
-    def _ensure_targets(self, size):
+    def _ensure_targets(self, size, view: Optional["ViewState"] = None):
+        """This size's render targets, with the surface intermediates
+        `view`'s stage chain alternates between (surface_stage_plan) — or,
+        with no view, the longest chain this surface can run. Grow-only, as
+        renderer.js _ensureSurfaceTarget: a set that already holds enough
+        keeps them, so a Low render (the simplified desert's one stage)
+        never makes the two it does not use."""
         wgpu = self.wgpu
-        if self._targets is not None and self._targets["size"] == size:
-            return self._targets
+        entries = (self._stage_entries(view) if view is not None
+                   else SURFACE_STAGES.get(self.surface, ()))
+        n_mid = min(max(len(entries) - 1, 0), 2)
+        if self._targets is None or self._targets["size"] != size:
+            w, h = size
+            has = self.surface in SURFACE_PASS_SURFACES
+            surface = self._make_target(size, SURFACE_FORMAT) if has else None
+            veil = self._make_target(size, VEIL_FORMAT) if has else None
+            self._targets = {
+                "size": size, "sample": self._make_target(size, SAMPLE_FORMAT),
+                "accum": [self._make_target(size, ACCUM_FORMAT),
+                          self._make_target(size, ACCUM_FORMAT)],
+                "surface": surface, "veil": veil,
+                "plain": None, "mid": None,
+                # Group 1 for a later stage reading the plain or the middle
+                # surface (made with them); no stage binds what it writes.
+                "after_plain": None, "after_mid": None,
+                # Group 1 for the march: this size's final surface and veil.
+                "surface_group": self._group1(
+                    surface or self._surface_dummy, self._surface_dummy,
+                    veil or self._veil_dummy),
+            }
+        t = self._targets
+        for name, after, needed in (("plain", "after_plain", n_mid >= 1),
+                                    ("mid", "after_mid", n_mid >= 2)):
+            if needed and t[name] is None:
+                t[name] = self._make_target(size, SURFACE_FORMAT)
+                t[after] = self._group1(self._surface_dummy, t[name],
+                                        self._veil_dummy)
+        return t
+
+    def _make_target(self, size, fmt):
+        wgpu = self.wgpu
         w, h = size
-        usage = (wgpu.TextureUsage.RENDER_ATTACHMENT
-                 | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC)
-        make = lambda fmt: self.device.create_texture(
-            size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
-        has = self.surface in SURFACE_PASS_SURFACES
-        # The intermediates the longest stage chain this surface can run
-        # needs (surface_stage_plan alternates two), made once so a tier
-        # change never reallocates.
-        n_mid = min(len(SURFACE_STAGES.get(self.surface, ())) - 1, 2)
-        later, both = n_mid >= 1, n_mid >= 2
-        surface = make(SURFACE_FORMAT) if has else None
-        veil = make(VEIL_FORMAT) if has else None
-        plain = make(SURFACE_FORMAT) if later else None
-        mid = make(SURFACE_FORMAT) if both else None
-        dummy = self._surface_dummy
-        veil_dummy = self._veil_dummy
-        group1 = lambda final, prev, veil_: self.device.create_bind_group(
+        return self.device.create_texture(
+            size=(w, h, 1), dimension="2d", format=fmt,
+            usage=(wgpu.TextureUsage.RENDER_ATTACHMENT
+                   | wgpu.TextureUsage.TEXTURE_BINDING
+                   | wgpu.TextureUsage.COPY_SRC))
+
+    def _group1(self, final, prev, veil):
+        return self.device.create_bind_group(
             layout=self._surface_layout, entries=[
                 {"binding": 0, "resource": final.create_view()},
                 {"binding": 1, "resource": prev.create_view()},
-                {"binding": 2, "resource": veil_.create_view()}])
-        self._targets = {
-            "size": size, "sample": make(SAMPLE_FORMAT),
-            "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)],
-            "surface": surface, "veil": veil, "plain": plain, "mid": mid,
-            # Group 1 for a later stage reading the plain or the middle
-            # surface (the march's own group is below); no stage binds what
-            # it writes.
-            "after_plain": group1(dummy, plain, veil_dummy) if plain else None,
-            "after_mid": group1(dummy, mid, veil_dummy) if mid else None,
-            # Group 1 for the march: this size's final surface and veil.
-            "surface_group": group1(surface or dummy, dummy,
-                                    veil or veil_dummy),
-        }
-        return self._targets
+                {"binding": 2, "resource": veil.create_view()}])
 
     def _surface_stages(self, targets, view: "ViewState"):
         """The surface stages this view runs, in order, as (pipeline, group 1
@@ -1616,7 +1630,7 @@ class SoarRenderer:
             raise ValueError(f"frames must be >= 1; got {frames}.")
         self._check_scene(state)
         w, h = view.render_size
-        targets = self._ensure_targets((w, h))
+        targets = self._ensure_targets((w, h), view)
         bind_group = self._ensure_bind_group()
         sample_view = targets["sample"].create_view()
         ray_pipeline = self._ray_pipeline_for(view)
