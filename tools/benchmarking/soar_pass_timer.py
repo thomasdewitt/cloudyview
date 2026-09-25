@@ -70,7 +70,8 @@ from night_city_harness import (CITY_VIEWS, MOON_AZIMUTH,     # noqa: E402
 OUTPUT = (2560, 1440)
 # The timed passes: each surface stage (soar_host.SURFACE_STAGES) by a short
 # name, then the march. A view without a stage times it as zeros.
-STAGE_COLUMN = {"fs_surface": "surface", "fs_surface_flora": "flora",
+STAGE_COLUMN = {"fs_surface": "surface", "fs_surface_desert": "surface",
+                "fs_surface_flora": "flora",
                 "fs_surface_refine": "refine", "fs_surface_street": "street"}
 COLUMNS = ("surface", "flora", "refine", "street", "march")
 # A null control within this (and rounds agreeing within it) is what lets

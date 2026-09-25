@@ -47,6 +47,10 @@ const SURFACE_FORMAT = "rgba32float";
 // (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
 // depth, packed as uints so no float path touches the bits.
 const VEIL_FORMAT = "rgba32uint";
+// The optical depths the full desert's first stage writes in the veil's
+// place (K.TAUS_STAGE), f32 so its flora stage rebuilds the very same light
+// (raymarch.wgsl desert_light_from). soar_host.TAUS_FORMAT is the twin.
+const TAUS_FORMAT = "rg32float";
 
 const ACCUM_SHADER = `
 struct AccumUniforms {
@@ -234,11 +238,12 @@ export function surfaceStagePlan(n) {
   return plan;
 }
 
-/** A surface stage's colour targets: the surface, and the veil beside it
- *  for a VEIL_STAGES entry. */
+/** A surface stage's colour targets: the surface, and beside it the veil
+ *  for a VEIL_STAGES entry or the optical depths for K.TAUS_STAGE. */
 function stageFormats(entry) {
-  return K.VEIL_STAGES.includes(entry) ? [SURFACE_FORMAT, VEIL_FORMAT]
-                                       : SURFACE_FORMAT;
+  if (K.VEIL_STAGES.includes(entry)) return [SURFACE_FORMAT, VEIL_FORMAT];
+  if (entry === K.TAUS_STAGE) return [SURFACE_FORMAT, TAUS_FORMAT];
+  return SURFACE_FORMAT;
 }
 
 // Section stripping (raymarch.wgsl's `// @section` markers): a module keeps
@@ -515,10 +520,11 @@ export class Renderer {
       ],
     });
     // Group 1: the surface pre-pass's targets — the final surface, which
-    // only the march reads, and the first stage's, which only the second
-    // stage (fs_surface_refine) reads. Every raymarch pipeline shares this one
-    // layout, so every pass sets group 1: stand-ins everywhere but those
-    // two, which bind that target size's own.
+    // only the march reads; the stage before's, which each later stage
+    // reads; the veil, read by the march; and the desert's optical depths,
+    // read by its flora stage. Every raymarch pipeline shares this one
+    // layout, so every pass sets group 1: stand-ins everywhere but those,
+    // which bind that target size's own.
     this.surfaceLayout = device.createBindGroupLayout({
       label: "soar-surface-layout",
       entries: [
@@ -529,6 +535,10 @@ export class Renderer {
         // The veil (raymarch.wgsl veil_buf), read by the march.
         { binding: 2, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "2d" } },
+        // The desert's optical depths (surface_taus), read by its flora
+        // stage.
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
@@ -549,6 +559,7 @@ export class Renderer {
         { binding: 0, resource: this._surfaceDummy.createView() },
         { binding: 1, resource: this._surfaceDummy.createView() },
         { binding: 2, resource: this._veilDummy.createView() },
+        { binding: 3, resource: this._surfaceDummy.createView() },
       ],
     });
     // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
@@ -1598,6 +1609,7 @@ export class Renderer {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
+      desertLite: this._desertLiteFor(this.qualityTier),
     });
     // A change of lighting method under a parked camera restarts the
     // average instead of blending into it. Any scene-key change with a
@@ -1790,9 +1802,11 @@ export class Renderer {
       const surface = targets.surface;
       // The stages this frame runs, chained by surfaceStagePlan: each later
       // stage reads the one before at group 1 through the two
-      // intermediates, the last writes the surface the march reads, and a
-      // VEIL_STAGES entry writes the veil beside it. No stage binds what it
-      // writes.
+      // intermediates, the last writes the surface the march reads, a
+      // VEIL_STAGES entry writes the veil beside it, and K.TAUS_STAGE the
+      // optical depths K.TAUS_READER reads. No stage binds what it writes,
+      // and a stage without the target it needs throws rather than read a
+      // stand-in.
       const slot = {
         final: [surface.view, null],
         a: [surface.plainView, surface.afterPlain],
@@ -1803,6 +1817,13 @@ export class Renderer {
         const [writes, reads] = plan[k];
         const views = [slot[writes][0]];
         if (K.VEIL_STAGES.includes(entry)) views.push(surface.veilView);
+        if ((entry === K.TAUS_STAGE || entry === K.TAUS_READER)
+            && !surface.tausView) {
+          throw new Error(`${entry} needs the desert's optical-depth ` +
+                          "target, and this size's surface set has none " +
+                          "(_ensureSurfaceTarget was not awaited for it).");
+        }
+        if (entry === K.TAUS_STAGE) views.push(surface.tausView);
         return [pipeline, reads === null ? null : slot[reads][1], views];
       });
       for (const [pipeline, group1, views] of stages) {
@@ -1850,16 +1871,27 @@ export class Renderer {
    * the allocation's await — so _encodeMarch only ever reads it.
    */
   async _ensureSurfaceTarget(targets) {
+    // A set covers a chain when it holds as many intermediates and, for the
+    // full desert's (K.TAUS_STAGE), the optical depths.
+    const covers = (set, nMid, taus) =>
+      set.nMid >= nMid && (set.taus || !taus);
     for (;;) {
       if (!this._hasSurfacePass()) return;
-      const nMid = Math.min(Math.max(this._stageEntries().length - 1, 0), 2);
-      if (targets.surface && targets.surface.nMid >= nMid) return;
-      const made = await this._makeSurfaceSet(targets, nMid);
+      const entries = this._stageEntries();
+      const nMid = Math.min(Math.max(entries.length - 1, 0), 2);
+      const taus = entries.includes(K.TAUS_STAGE);
+      const old = targets.surface;
+      if (old && covers(old, nMid, taus)) return;
+      // Grow-only: the new set keeps whatever the old one held.
+      const made = await this._makeSurfaceSet(
+        targets, Math.max(nMid, old?.nMid ?? 0), taus || Boolean(old?.taus));
       // Another caller may have grown the set during the await: keep the
-      // larger, retire the other once the GPU is done with any frame that
-      // still reads it. Then check the (possibly changed) tier again.
-      const [keep, drop] = targets.surface && targets.surface.nMid >= made.nMid
-        ? [targets.surface, made] : [made, targets.surface];
+      // one that covers the other, retire the other once the GPU is done
+      // with any frame that still reads it. Then check the (possibly
+      // changed) tier again.
+      const cur = targets.surface;
+      const [keep, drop] = cur && covers(cur, made.nMid, made.taus)
+        ? [cur, made] : [made, cur];
       targets.surface = keep;
       if (drop) {
         for (const tex of drop.textures) {
@@ -1869,15 +1901,16 @@ export class Renderer {
     }
   }
 
-  /** A surface set of `targets`' size with `nMid` intermediates. */
-  async _makeSurfaceSet(targets, nMid) {
+  /** A surface set of `targets`' size with `nMid` intermediates, and the
+   *  desert's optical depths if `taus`. */
+  async _makeSurfaceSet(targets, nMid, taus) {
     const later = nMid >= 1;
     const both = nMid >= 2;
     const label = `soar-surface-${targets.w}x${targets.h}`;
     const count = 2 + (later ? 1 : 0) + (both ? 1 : 0);
     return guardAllocation(
       this.device, `${targets.w}x${targets.h} surface target`,
-      targets.w * targets.h * 16 * count, () => {
+      targets.w * targets.h * (16 * count + (taus ? 8 : 0)), () => {
         const make = (name, format) => this.device.createTexture({
           label: `${label}-${name}`, size: [targets.w, targets.h], format,
           usage: GPUTextureUsage.RENDER_ATTACHMENT
@@ -1887,28 +1920,38 @@ export class Renderer {
         const veil = make("veil", VEIL_FORMAT);
         const plain = later ? make("plain", SURFACE_FORMAT) : null;
         const mid = both ? make("mid", SURFACE_FORMAT) : null;
+        const tausTex = taus ? make("taus", TAUS_FORMAT) : null;
         const dummy = this._surfaceDummy.createView();
         const veilDummy = this._veilDummy.createView();
-        const group1 = (final, prev, veilView) => this.device.createBindGroup({
-          label, layout: this.surfaceLayout,
-          entries: [{ binding: 0, resource: final },
-                    { binding: 1, resource: prev },
-                    { binding: 2, resource: veilView }],
-        });
+        const group1 = (final, prev, veilView, tausView) =>
+          this.device.createBindGroup({
+            label, layout: this.surfaceLayout,
+            entries: [{ binding: 0, resource: final },
+                      { binding: 1, resource: prev },
+                      { binding: 2, resource: veilView },
+                      { binding: 3, resource: tausView }],
+          });
+        // A later stage's group: what it reads, and the optical depths
+        // wherever they exist (the flora stage reads them; the others
+        // ignore binding 3).
+        const after = (prevTex) => group1(dummy, prevTex.createView(),
+                                          veilDummy,
+                                          tausTex?.createView() ?? dummy);
         return {
           nMid,
+          taus,
           tex,
-          textures: [tex, veil, plain, mid].filter(Boolean),
+          textures: [tex, veil, plain, mid, tausTex].filter(Boolean),
           view: tex.createView(),
           veilView: veil.createView(),
           plainView: plain?.createView() ?? null,
           midView: mid?.createView() ?? null,
+          tausView: tausTex?.createView() ?? null,
           // Group 1 for a stage reading the plain or the middle surface.
-          afterPlain: plain ? group1(dummy, plain.createView(), veilDummy)
-                            : null,
-          afterMid: mid ? group1(dummy, mid.createView(), veilDummy) : null,
+          afterPlain: plain ? after(plain) : null,
+          afterMid: mid ? after(mid) : null,
           // The march reads the final surface and the veil.
-          group: group1(tex.createView(), dummy, veil.createView()),
+          group: group1(tex.createView(), dummy, veil.createView(), dummy),
         };
       });
   }
@@ -2248,6 +2291,7 @@ export class Renderer {
       const u = packUniforms(this._sceneState(), {
         ...view, outputSize, renderSize: [mw, mh],
         subpixel: false, jitterScale: 1.0, ...lighting,
+        desertLite: this._desertLiteFor(this.qualityTier),
       });
       this.device.queue.writeBuffer(this._meterUniformBuf, 0, u);
       const bindGroup = this.device.createBindGroup({

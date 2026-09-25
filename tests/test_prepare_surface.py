@@ -57,8 +57,9 @@ _JS = textwrap.dedent("""
         r.scene = { desert: to === "desert" };
         const key = shaderVariantKey(r._shaderSpec());
         const used = [["fs_main", key]];
-        if (r._hasSurfacePass()) used.push(["fs_surface", key]);
-        if (r._hasRefineStage()) used.push(["fs_surface_refine", key]);
+        if (r._hasSurfacePass()) {
+          for (const entry of r._stageEntries()) used.push([entry, key]);
+        }
         out[`${tier}/${from}->${to}`] = { error, built, used };
       }
     }

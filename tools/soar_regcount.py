@@ -13,7 +13,7 @@ statistics per entry point (tools/regcount, a small Rust program, built on
 first use with cargo).
 
     uv run python tools/soar_regcount.py                      # fs_main, day, Low
-    uv run python tools/soar_regcount.py --surface desert --entry fs_surface
+    uv run python tools/soar_regcount.py --surface desert --entry fs_surface_desert
     uv run python tools/soar_regcount.py --shader my_variant.wgsl --tier max
     uv run python tools/soar_regcount.py --a git:HEAD --b tree   # side by side
 
@@ -39,9 +39,11 @@ from cloudyview.soar_host import (DESERT_FLORA_CUT_BY_TIER,  # noqa: E402
 CRATE = REPO / "tools" / "regcount"
 BINARY = CRATE / "target" / "release" / "regcount"
 # Entry point -> the color-attachment formats its pipeline renders into, one
-# per fragment output: the first and last surface stages also write the veil.
+# per fragment output: the first and last surface stages also write the veil,
+# the desert's first its optical depths.
 FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f,rgba32ui",
-           "fs_surface_refine": "rgba32f",
+           "fs_surface_desert": "rgba32f,rg32f",
+           "fs_surface_flora": "rgba32f", "fs_surface_refine": "rgba32f",
            "fs_surface_street": "rgba32f,rgba32ui", "fs_bake_light": "r16f"}
 # The lighting method per tier (web/soar/constants.js QUALITY_PRESETS):
 # (light cache, sky probe).

@@ -10,7 +10,9 @@ alternating intermediates. What would go wrong silently is pinned here:
   reads, each later stage reads what the one before wrote, none reads what
   it writes;
 - every listed entry is a fragment entry of the shader, with a veil output
-  exactly when it is listed in VEIL_STAGES;
+  exactly when it is listed in VEIL_STAGES, and the desert's optical depths
+  exactly for TAUS_STAGE, which comes right before the stage that reads
+  them (TAUS_READER);
 - the renderer runs, per scene and tier, the stages the Python host runs.
 
 The node half skips without node.
@@ -27,8 +29,8 @@ import pytest
 
 from cloudyview import soar_host
 from cloudyview.soar_host import (SURFACE_STAGES, SURFACE_STAGES_LITE,
-                                  VEIL_STAGES, surface_stage_entries,
-                                  surface_stage_plan)
+                                  TAUS_READER, TAUS_STAGE, VEIL_STAGES,
+                                  surface_stage_entries, surface_stage_plan)
 
 REPO = Path(__file__).resolve().parents[1]
 RENDERER_JS = REPO / "web" / "soar" / "renderer.js"
@@ -65,11 +67,27 @@ def test_every_stage_is_a_fragment_entry_with_the_right_outputs():
         assert entry in outputs, f"{entry} is not a fragment entry"
         veil = outputs[entry].startswith("SurfaceOut")
         assert veil == (entry in VEIL_STAGES), (entry, outputs[entry])
+        taus = outputs[entry].startswith("DesertSurfaceOut")
+        assert taus == (entry == TAUS_STAGE), (entry, outputs[entry])
 
 
-def test_every_chain_starts_at_the_first_stage():
+def test_the_optical_depths_reach_their_reader():
+    # Written by the stage right before the one that reads them: the chain
+    # alternates two intermediates, but the depths have a target of their
+    # own, so only an intervening writer could clobber them — and none may
+    # write it.
     for surface, entries in SURFACE_STAGES.items():
-        assert entries[0] == "fs_surface", surface
+        if TAUS_STAGE in entries:
+            k = entries.index(TAUS_STAGE)
+            assert entries[k + 1] == TAUS_READER, surface
+    assert TAUS_STAGE in SURFACE_STAGES["desert"]
+    assert TAUS_STAGE not in SURFACE_STAGES_LITE
+
+
+def test_every_chain_starts_at_a_first_stage():
+    for surface, entries in SURFACE_STAGES.items():
+        assert entries[0] == ("fs_surface_desert" if surface == "desert"
+                              else "fs_surface"), surface
     assert SURFACE_STAGES_LITE == ("fs_surface",)
     assert surface_stage_entries("ocean") == ()
     assert surface_stage_entries("desert", desert_lite=True) == ("fs_surface",)
@@ -88,7 +106,8 @@ _JS = textwrap.dedent("""
     }
     const out = {
       stages: K.SURFACE_STAGES, lite: K.SURFACE_STAGES_LITE,
-      veil: K.VEIL_STAGES, plans: {}, entries: {},
+      veil: K.VEIL_STAGES, tausStage: K.TAUS_STAGE, tausReader: K.TAUS_READER,
+      plans: {}, entries: {},
     };
     for (let n = 0; n < 6; n++) out.plans[n] = surfaceStagePlan(n);
     for (const [name, scene] of [["desert", { desert: true }],
@@ -116,6 +135,7 @@ def test_hosts_agree_on_the_tables(js):
     assert {k: tuple(v) for k, v in js["stages"].items()} == SURFACE_STAGES
     assert tuple(js["lite"]) == SURFACE_STAGES_LITE
     assert tuple(js["veil"]) == VEIL_STAGES
+    assert (js["tausStage"], js["tausReader"]) == (TAUS_STAGE, TAUS_READER)
 
 
 def test_hosts_agree_on_the_plan(js):
