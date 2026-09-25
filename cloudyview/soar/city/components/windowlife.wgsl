@@ -53,7 +53,9 @@ const cc_windowlife_EYE_SEP: f32 = 0.028;   // half-separation, pane widths
 const cc_windowlife_EYE_SIGMA: f32 = 0.0060; // ~0.02 pane: a point, not a lamp
 
 // Footprint windows (m/px) over which each case blends into its mean. Set
-// by the case's finest feature, all of them closed before fp_eff 1.6.
+// by the case's finest feature, all of them closed by a footprint of about
+// a pane (1.6 m); past it the flat facade's exact sum shows each pane at
+// its case's mean.
 const cc_windowlife_LOD_CURTAIN: vec2<f32> = vec2<f32>(0.40, 1.50);
 const cc_windowlife_LOD_BLIND: vec2<f32> = vec2<f32>(0.18, 0.60);
 const cc_windowlife_LOD_FIGURE: vec2<f32> = vec2<f32>(0.30, 1.20);
@@ -252,7 +254,8 @@ fn cc_windowlife_figure(h: vec4<f32>, uv: vec2<f32>, fp: f32,
 // plane (deep_uv) — which is what slides them against each other as the
 // camera moves past a close window. On a flat facade the two are equal.
 // The glyph's population mean, for a facade whose windows are too small to
-// draw one by one (the core's statistical octave): h.x picks the class
+// draw one by one (the core's storey-by-storey expectation,
+// city_windows_rows): h.x picks the class
 // (uniform, the hash decorrelates it from wh), and each class dissolves to
 // its own mean. 60% plain; 25% drapes, of which 55% curtains and 45% blinds;
 // 15% figures and androids, which share the figure's mean.

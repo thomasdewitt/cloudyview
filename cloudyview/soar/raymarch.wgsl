@@ -3453,7 +3453,6 @@ struct CityCell {
     win_style: i32,
     win_pitch: f32,
     pane_lo: vec2<f32>, pane_hi: vec2<f32>,
-    pane_frac: f32,
     // Monochrome house palette: below 0 the building draws window colors
     // freely; at or above 0 it is THE cyan (or amber, or magenta) tower —
     // every window draws near this one palette coordinate.
@@ -3612,8 +3611,6 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.win_pitch = 3.2 * (0.85 + 0.40 * r4b.z);
         c.pane_lo = vec2<f32>(0.30, 0.45);
         c.pane_hi = vec2<f32>(0.70, 0.80);
-        let span_p = c.pane_hi - c.pane_lo;
-        c.pane_frac = span_p.x * span_p.y;
         c.win_mono = -1.0;
         c.palette_bias = min(c.palette_bias * 1.4 + 0.1, 1.0);
         c.lit_frac = CITY_INDUSTRY_LIT_FRAC * (0.3 + 1.4 * r4c.x);
@@ -3939,8 +3936,6 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.pane_lo = vec2<f32>(0.14, 0.28);
         c.pane_hi = vec2<f32>(0.86, 0.90);
     }
-    let pane_span = c.pane_hi - c.pane_lo;
-    c.pane_frac = pane_span.x * pane_span.y;
     // A fifth of buildings keep a house color: every window draws near one
     // palette coordinate, so a tower can be THE cyan tower — the color
     // balance is a property of the building, not only of the window
@@ -7771,8 +7766,9 @@ fn city_recess_off(st: CityShellStyle, dl: vec3<f32>) -> vec2<f32> {
 
 // The window cells the exact sum walks at most, across and up. A box
 // spans at most floor(2 h / pitch) + 2 cells on an axis, so the exact sum
-// is whole while 2 h / pitch < MAX - 2; it hands over to the storey-by-
-// storey expectation while the span is between MAX - 3 and MAX - 2.
+// is whole while 2 h / pitch < MAX - 1; it hands over to the storey-by-
+// storey expectation while the span is between MAX - 3 and MAX - 2, well
+// inside that.
 const CITY_WIN_EXACT_MAX_U: i32 = 5;
 const CITY_WIN_EXACT_MAX_V: i32 = 4;
 // Storeys the expectation walks one by one; past this it blends, over the
@@ -7826,10 +7822,22 @@ fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32, fog: vec4<f32>,
 
 // The radiance the averaged footprint hands back. `mean` is the per-area
 // sum. Shown directly, it is the light's own colour (its fogless mean)
-// scaled by s until it shows the averaged luminance: the displayed
-// luminance is monotone along one chromaticity, so s is bracketed about a
-// first guess (the per-channel curve inverted at that luminance) and
-// bisected. One element, alone in the footprint, comes back as itself.
+// scaled by s until it shows the averaged luminance: the least s that
+// does (within CITY_RESOLVE_EPS). s is bracketed about a first guess (the
+// per-channel curve inverted at that luminance), the bracket widened by
+// fours until it holds, and bisected in log steps, two more for each
+// widening. One element, alone in the footprint, comes back as itself.
+//
+// The rule needs the displayed luminance to rise with s up to the goal.
+// It does for a light with every channel lit, as the room palette's
+// lights are, in any fog, and for any light in clear air, where it at most
+// plateaus once every lit channel is clipped (hence the least s, which
+// keeps a rounding residue in an empty channel from being scaled up past
+// the plateau). A near-primary in fog is the exception: the shoulder's
+// chroma-preserving blend dims the fog's own channels as the primary
+// brightens, so its luminance can peak and fall. The widening stops at
+// the peak, and s stays near it.
+const CITY_RESOLVE_EPS: f32 = 1e-5;
 fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
                         shown: bool) -> vec3<f32> {
     let light = max(mean.light - fog.yzw, vec3<f32>(0.0)) / max(fog.x, 1e-6);
@@ -7838,6 +7846,7 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
     }
     let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
     let target_y = dot(mean.shown, lum);
+    let goal = target_y - CITY_RESOLVE_EPS;
     let e = u.cam_right.w;
     let x0 = light * fog.x;
     let y_light = dot(x0 * e, lum);
@@ -7851,26 +7860,46 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
     // @domain: (1 - m)^2 >= 0, m >= 0, and w2 >= 16 (both hosts hold the white point to [4, 40])
     let e_y = 2.0 * m / ((1.0 - m) + sqrt((1.0 - m) * (1.0 - m) + 4.0 * m / w2));
     let guess = max((e_y - dot(fog.yzw * e, lum)) / y_light, 1e-6);
+    // lo shows short of the goal, hi reaches it. The goal is always
+    // reachable: every channel an averaged element lit, the light has.
+    // Twelve widenings reach 4^12 either way, past anything the palette
+    // and the hosts' gamma and white-point limits produce.
     var lo = 0.5 * guess;
     var hi = 2.0 * guess;
-    // Widen the bracket if the shoulder or the fog put s outside it.
-    for (var k: i32 = 0; k < 3; k = k + 1) {
-        if (dot(city_display_curve(e * (lo * x0 + fog.yzw)), lum) > target_y) {
+    var steps = 10;
+    var y_hi_last = -1.0;
+    for (var k: i32 = 0; k < 12; k = k + 1) {
+        let lo_over = dot(city_display_curve(e * (lo * x0 + fog.yzw)), lum)
+                      >= goal;
+        let y_hi = dot(city_display_curve(e * (hi * x0 + fog.yzw)), lum);
+        let hi_under = y_hi < goal;
+        if (!lo_over && !hi_under) {
+            break;
+        }
+        // Past a peak short of the goal (see above).
+        if (hi_under && y_hi <= y_hi_last) {
+            break;
+        }
+        y_hi_last = y_hi;
+        if (lo_over) {
             lo = 0.25 * lo;
         }
-        if (dot(city_display_curve(e * (hi * x0 + fog.yzw)), lum) < target_y) {
+        if (hi_under) {
             hi = 4.0 * hi;
         }
+        steps = steps + 2;
     }
-    for (var k: i32 = 0; k < 10; k = k + 1) {
-        let mid = 0.5 * (lo + hi);
-        if (dot(city_display_curve(e * (mid * x0 + fog.yzw)), lum) < target_y) {
+    for (var k: i32 = 0; k < steps; k = k + 1) {
+        // @domain: lo and hi stay positive (guess >= 1e-6, halved or quartered at most 13 times)
+        let mid = sqrt(lo * hi);
+        if (dot(city_display_curve(e * (mid * x0 + fog.yzw)), lum) < goal) {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    return light * (0.5 * (lo + hi));
+    // @domain: as above
+    return light * sqrt(lo * hi);
 }
 
 // Half extents (u, v) of the box that holds one pixel's footprint on the
@@ -7921,20 +7950,27 @@ fn city_storey_lit(cc: CityCell, iv: i32) -> f32 {
 }
 
 // The share of the building's lit windows drawing room colour band k
-// (city_room_band): city_window's colour draw is uniform on [lo, hi] and
+// (city_room_color): city_window's colour draw is uniform on [lo, hi] and
 // then clamped to [0, 1] (a whole [0, 1] for a mixed house, 0.08 wide about
-// its one draw for a monochrome one), so a band holding 0 or 1 also takes
-// the draws clamped onto it.
+// its one draw for a monochrome one), and band k takes the clamped draws in
+// [its lower edge, its upper edge). So the share is the difference of the
+// clamped draw's distribution at the two edges, and the six shares sum to
+// 1 wherever the edges fall, 1 and past it included.
 fn city_room_band_share(k: i32, lo: f32, hi: f32, bias: f32) -> f32 {
-    var a = select(city_room_band_edge(k - 1, bias), -1e9, k == 0);
-    var b = select(city_room_band_edge(k, bias), 1e9, k == 5);
-    if (a <= 0.0) {
-        a = -1e9;
+    let a = select(city_room_band_edge(k - 1, bias), -1e9, k == 0);
+    let b = select(city_room_band_edge(k, bias), 1e9, k == 5);
+    return city_room_draw_below(b, lo, hi) - city_room_draw_below(a, lo, hi);
+}
+
+// P(clamp(draw, 0, 1) < x) for the draw uniform on [lo, hi].
+fn city_room_draw_below(x: f32, lo: f32, hi: f32) -> f32 {
+    if (x <= 0.0) {
+        return 0.0;
     }
-    if (b > 1.0) {
-        b = 1e9;
+    if (x > 1.0) {
+        return 1.0;
     }
-    return city_overlap(lo, hi, a, b) / max(hi - lo, 1e-6);
+    return clamp((x - lo) / max(hi - lo, 1e-6), 0.0, 1.0);
 }
 
 // A lit pane of this building, over the population of its lit windows:
@@ -7998,6 +8034,12 @@ struct CityWinGeom {
 
 // Window by window: every window cell the footprint box touches. Returns
 // the sums over the box (not yet divided by its area).
+// The storeys at a warehouse's foot whose panes would stand in its door
+// band: none there, in either path.
+fn city_door_storeys(g: CityWinGeom) -> i32 {
+    return i32(ceil((CITY_INDUSTRY_DOOR_BAND - g.phi.y) / CITY_FLOOR_H));
+}
+
 fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
                       c: vec2<f32>, hb: vec2<f32>, l_wall: vec3<f32>,
                       refl: vec3<f32>, through: f32, fog: vec4<f32>,
@@ -8021,12 +8063,12 @@ fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
         if (j > j1) {
             break;
         }
-        let vfl = f32(j) * CITY_FLOOR_H;
         // A warehouse's ground band is its doors, which the industry
         // component draws: no windows, no glass.
-        if (warehouse && vfl + g.phi.y < CITY_INDUSTRY_DOOR_BAND) {
+        if (warehouse && j < city_door_storeys(g)) {
             continue;
         }
+        let vfl = f32(j) * CITY_FLOOR_H;
         let rate = city_storey_rate(cc, j);
         for (var ii: i32 = 0; ii < CITY_WIN_EXACT_MAX_U; ii = ii + 1) {
             let i = i0 + ii;
@@ -8100,17 +8142,21 @@ fn city_windows_rows(cc: CityCell, f: CityFace, g: CityWinGeom,
     let len_g = city_periodic_cover(u0, u1, start, f.pitch, n, rlo.x, rhi.x);
     let len_o = city_periodic_cover(u0, u1, start, f.pitch, n,
                                     g.olo.x, g.ohi.x);
-    // A warehouse's door band holds no windows.
+    // A warehouse's door band holds no windows (the storeys the exact sum
+    // skips).
     var v0 = max(c.y - hb.y, f.z0);
     let v1 = min(c.y + hb.y, f.z1);
     if (warehouse) {
-        v0 = max(v0, CITY_INDUSTRY_DOOR_BAND);
+        v0 = max(v0, f32(city_door_storeys(g)) * CITY_FLOOR_H);
     }
     let j0 = i32(floor(v0 / CITY_FLOOR_H));
     let j1 = i32(floor(v1 / CITY_FLOOR_H));
-    let storeys = f32(j1 - j0 + 1);
+    // The storeys the box touches are at most (v1 - v0) / FLOOR_H + 2, so
+    // the walk is whole wherever the blend leaves it any weight, and the
+    // blend moves continuously with the box.
     let w_mean = smoothstep(f32(CITY_WIN_ROWS_MAX) - CITY_WIN_ROWS_BLEND,
-                            f32(CITY_WIN_ROWS_MAX), storeys);
+                            f32(CITY_WIN_ROWS_MAX),
+                            (v1 - v0) / CITY_FLOOR_H + 2.0);
     // The lit glass, the glass and the openings, walked storey by storey
     // and as the building's mean, blended.
     var walk = vec3<f32>(0.0);
@@ -8361,7 +8407,9 @@ const cc_windowlife_EYE_SEP: f32 = 0.028;   // half-separation, pane widths
 const cc_windowlife_EYE_SIGMA: f32 = 0.0060; // ~0.02 pane: a point, not a lamp
 
 // Footprint windows (m/px) over which each case blends into its mean. Set
-// by the case's finest feature, all of them closed before fp_eff 1.6.
+// by the case's finest feature, all of them closed by a footprint of about
+// a pane (1.6 m); past it the flat facade's exact sum shows each pane at
+// its case's mean.
 const cc_windowlife_LOD_CURTAIN: vec2<f32> = vec2<f32>(0.40, 1.50);
 const cc_windowlife_LOD_BLIND: vec2<f32> = vec2<f32>(0.18, 0.60);
 const cc_windowlife_LOD_FIGURE: vec2<f32> = vec2<f32>(0.30, 1.20);
@@ -8560,7 +8608,8 @@ fn cc_windowlife_figure(h: vec4<f32>, uv: vec2<f32>, fp: f32,
 // plane (deep_uv) — which is what slides them against each other as the
 // camera moves past a close window. On a flat facade the two are equal.
 // The glyph's population mean, for a facade whose windows are too small to
-// draw one by one (the core's statistical octave): h.x picks the class
+// draw one by one (the core's storey-by-storey expectation,
+// city_windows_rows): h.x picks the class
 // (uniform, the hash decorrelates it from wh), and each class dissolves to
 // its own mean. 60% plain; 25% drapes, of which 55% curtains and 45% blinds;
 // 15% figures and androids, which share the figure's mean.

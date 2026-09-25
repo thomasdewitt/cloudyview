@@ -9,8 +9,9 @@ sweeps the render width instead: at the view-step LOD 0 the pixel angle is
 inversely proportional to the width, so the walls in frame walk through the
 hand-off with the geometry, the occlusion and every hash draw fixed.
 
-The flat facade's own window ladder also changes with the footprint (panes
-into blocks into its asymptote), so the width dependence of the full render
+The flat facade's own look also changes with the footprint (each pane
+filtered at the pixel, then storey by storey in expectation, then the
+building's mean), so the width dependence of the full render
 is not the shell's alone. The same sweep is therefore rendered twice, once
 as shipped and once with nothing marked for the shell (the flat facade
 everywhere), and what is bounded is how much the difference between the two
