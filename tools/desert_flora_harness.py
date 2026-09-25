@@ -50,7 +50,8 @@ const DESERT_FLORA_SLAB_H: f32 = 13.0;
 const DESERT_LITE: bool = false;
 const DESERT_FLORA_CUT: f32 = 1.0;
 struct ScanUniforms { cam_origin: vec4<f32>, params: vec4<f32>,
-                     ocean: vec4<f32>, sun_dir: vec4<f32>, };
+                     ocean: vec4<f32>, sun_dir: vec4<f32>,
+                     desert_tile: array<vec4<f32>, 22>, };
 var<private> u: ScanUniforms;
 fn desert_camera_origin() -> vec3<f32> { return vec3<f32>(0.0); }
 fn desert_height(xy: vec2<f32>) -> f32 { return 0.0; }
@@ -149,6 +150,7 @@ def scan_plants(entry="scan"):
     code = (extract_fn(src, "pcg2d") + SCAN_PRELUDE
             + extract_fn(src, "desert_wash") + extract_fn(src, "desert_wash_near")
             + extract_fn(src, "desert_material")
+            + extract_fn(src, "desert_tile_level")
             + extract_fn(src, "desert_envelope_m_at")
             + extract_fn(src, "desert_slope_max_at")
             + extract_const(src, "DESERT_OCTAVE_MARGIN")

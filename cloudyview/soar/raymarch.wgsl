@@ -22072,6 +22072,13 @@ fn desert_flora_far(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                                                     sun), w_st));
 }
 
+// The ground's height for the field's stretches, whose footprint is metres:
+// the tile at the footprint's level, without desert_surface's octaves
+// (decimetres, which the field cannot see).
+fn df_ground_coarse(xy: vec2<f32>, fp: f32) -> f32 {
+    return u.ocean.x + desert_tile(xy, max(log2(fp * 0.5), 0.0)).x;
+}
+
 // The statistical field along the part of the ray past the explicit cut.
 fn df_far_stat(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
                pixel_angle: f32, sun: vec3<f32>) -> DesertCover {
@@ -22108,12 +22115,12 @@ fn df_far_stat(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     // plants stand within a few of their own heights of where it lands.
     let hb = df_habitat(o.xy + dir.xy * t_hit);
     let p0 = o + dir * ta;
-    var za = clamp(p0.z - desert_surface(p0.xy, pixel_angle * ta).x, 0.0,
+    var za = clamp(p0.z - df_ground_coarse(p0.xy, pixel_angle * ta), 0.0,
                    DESERT_FLORA_SLAB_H);
     for (var k: i32 = 0; k < DF_FAR_SAMPLES; k = k + 1) {
         let tb = ta + f32(k + 1) * dt;
         let pb = o + dir * tb;
-        let zb = clamp(pb.z - desert_surface(pb.xy, pixel_angle * tb).x, 0.0,
+        let zb = clamp(pb.z - df_ground_coarse(pb.xy, pixel_angle * tb), 0.0,
                        DESERT_FLORA_SLAB_H);
         if (min(za, zb) < DESERT_FLORA_SLAB_H) {
             // Colour weights: each species' share of the side sweep (the
