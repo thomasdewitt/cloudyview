@@ -897,7 +897,7 @@ fn cc_rooftopworks_dark(h: CityHit, albedo: f32) -> vec3<f32> {
 // The house colour, where the building has one; cool white otherwise.
 fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     if (cc.win_mono >= 0.0) {
-        return city_window_color(cc.win_mono, cc.palette_bias);
+        return city_room_color(cc.win_mono, cc.palette_bias);
     }
     return cc_rooftopworks_TRIM_COOL;
 }
@@ -980,7 +980,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                     * cc_rooftopworks_PENT_MEAN_COMP, k);
         var col = cc_rooftopworks_PENT_COL;
         if (cc.win_mono >= 0.0) {
-            col = city_window_color(cc.win_mono, cc.palette_bias);
+            col = city_room_color(cc.win_mono, cc.palette_bias);
         }
         return cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO)
              + col * (cc_rooftopworks_PENT_RAD * m * sill);
