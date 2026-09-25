@@ -1787,12 +1787,12 @@ export class Renderer {
 
   /**
    * One march into `targets.sample`, preceded — in a scene with a traced
-   * surface — by the surface pre-pass (raymarch.wgsl fs_surface, and for a
-   * surface with one its second stage fs_surface_refine) into
-   * `targets.surface`, which the march then reads at group 1. `surfaces` is
-   * the stages as [entry, pipeline] in order (_stageEntries), empty over
-   * the sea. They use
-   * the same uniforms, so the pass traces exactly the rays the march
+   * surface — by its surface stages (K.SURFACE_STAGES: the first,
+   * fs_surface or the full desert's fs_surface_desert, then the later
+   * ones, each reading the one before) into `targets.surface`, which the
+   * march then reads at group 1. `surfaces` is the stages as [entry,
+   * pipeline] in order (_stageEntries), empty over the sea. They use the
+   * same uniforms, so the stages trace exactly the rays the march
    * composites. Every march in the renderer goes through here or through
    * the meter, which mirrors it on its own targets.
    */
