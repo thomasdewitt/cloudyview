@@ -147,9 +147,21 @@ fn dither_present(rgb: vec3<f32>, frag_xy: vec2<f32>) -> vec3<f32> {
 }
 `;
 
-const PRESENT_SHADER = `
+// The present shader carries lens water (lens.wgsl, shared with the Python
+// host's post pass): the accumulated image through the lens state at
+// binding 1, before the dither. A dry state (every capture, the toggle off,
+// the lens drained) returns the pixel untouched, bit for bit.
+export const presentShader = (lensSource) => `
 ${DITHER_WGSL}
+${lensSource}
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var lens_state_tex: texture_2d<f32>;
+fn lens_src(uv: vec2<f32>) -> vec3<f32> { return lens_bilinear(src_tex, uv); }
+fn lens_here(rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let dims = vec2<f32>(textureDimensions(src_tex, 0));
+    let st = textureLoad(lens_state_tex, vec2<i32>(0, 0), 0);
+    return lens_apply(rgb, uv, dims.x / dims.y, vec2<f32>(1.0) / dims, st);
+}
 
 // Clamp-to-edge bilinear, by hand. Matches a linear sampler's texel space:
 // the texel centre of texel i is at (i + 0.5) / size.
@@ -183,12 +195,14 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
 }
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let rgb = sample_bilinear(in.uv);
+    let rgb = lens_here(sample_bilinear(in.uv), in.uv);
     return vec4<f32>(dither_present(rgb, floor(in.position.xy)), 1.0);
 }
 @fragment
 fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let rgb = textureLoad(src_tex, vec2<i32>(frag_pos.xy), 0).rgb;
+    let dims = vec2<f32>(textureDimensions(src_tex, 0));
+    let rgb = lens_here(textureLoad(src_tex, vec2<i32>(frag_pos.xy), 0).rgb,
+                        frag_pos.xy / dims);
     return vec4<f32>(dither_present(rgb, floor(frag_pos.xy)), 1.0);
 }
 `;
@@ -430,7 +444,10 @@ export class Renderer {
    *  desert's tile) and seaView (binding 9, the moving sea) are each null
    *  on the scenes that do not read them.
    */
-  constructor(device, shaderSource, scene, { canvasFormat }) {
+  constructor(device, shaderSource, scene, { canvasFormat, lensSource }) {
+    if (typeof lensSource !== "string") {
+      throw new Error("Renderer needs lensSource, lens.wgsl's text.");
+    }
     this.device = device;
     this.shaderSource = shaderSource;
     this.scene = scene;
@@ -625,8 +642,24 @@ export class Renderer {
       entries: [{
         binding: 0, visibility: GPUShaderStage.FRAGMENT,
         texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
+      }, {
+        // Lens water's state texel (raymarch.wgsl fs_lens_state).
+        binding: 1, visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
       }],
     });
+    // Lens water's state: two 1x1 texels ping-ponged by the state pass, and a
+    // dry one (all zeros) that every capture and the toggle-off present.
+    const lensTex = () => device.createTexture({
+      size: [1, 1, 1], format: SURFACE_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        | GPUTextureUsage.COPY_DST,
+    });
+    this._lensState = [lensTex(), lensTex()];
+    this._lensDry = lensTex();
+    this._lensIndex = 0;
+    this._lensGroups = null;
+    this._lastLensTex = this._lensDry;
     this.blitPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.blitLayout],
     });
@@ -647,7 +680,9 @@ export class Renderer {
     });
 
     const accumModule = device.createShaderModule({ code: ACCUM_SHADER });
-    const presentModule = device.createShaderModule({ code: PRESENT_SHADER });
+    const presentModule = device.createShaderModule({
+      code: presentShader(lensSource),
+    });
     this.presentModule = presentModule;
     this._shaderModules = [accumModule, presentModule];
     this.accumPipeline = device.createRenderPipeline({
@@ -1530,7 +1565,14 @@ export class Renderer {
    */
   async drawFrame(target, targetFormat, outputSize, view,
                   { deltaSeconds = null, accumulate = true,
-                    overlays = null, waitForPipeline = true } = {}) {
+                    overlays = null, waitForPipeline = true,
+                    lens = null } = {}) {
+    // `lens`: null draws a dry lens (captures, stills, the toggle off);
+    // { dt } steps lens water's state by dt seconds of flight clock (0
+    // parked) before the present draws it — see raymarch.wgsl fs_lens_state.
+    if (lens !== null && !(Number.isFinite(lens.dt) && lens.dt >= 0)) {
+      throw new Error(`drawFrame: lens.dt must be a finite dt >= 0; got ${lens.dt}.`);
+    }
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
@@ -1553,6 +1595,7 @@ export class Renderer {
     let lighting;
     let rayPipeline;
     let surfacePipelines;
+    let lensPipeline = null;
     let renderSize;
     let targets;
     for (;;) {
@@ -1560,7 +1603,11 @@ export class Renderer {
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
       const entries = this._stageEntries();
       const sps = this._stagePipelines(lighting);
-      const pending = [p, ...sps].filter((q) => q && isPending(q));
+      const lp = lens
+        ? this._pipeline("fs_lens_state", SURFACE_FORMAT,
+                         this._shaderSpec({ lighting }))
+        : null;
+      const pending = [p, ...sps, lp].filter((q) => q && isPending(q));
       if (pending.length > 0) {
         if (!waitForPipeline) {
           // Recorded; thrown when next requested.
@@ -1584,6 +1631,7 @@ export class Renderer {
           && sizeNow[0] === renderSize[0] && sizeNow[1] === renderSize[1]) {
         rayPipeline = p;
         surfacePipelines = entries.map((entry, k) => [entry, sps[k]]);
+        lensPipeline = lp;
         break;
       }
     }
@@ -1636,6 +1684,10 @@ export class Renderer {
     } else {
       this._resetAccumulation();
     }
+    // Row 24.w: lens water's dt for the state pass, which reads nothing
+    // else of this frame but the camera. Written after the plan, like the
+    // sampling flags, so it is never part of the scene key.
+    u[24 * 4 + 3] = lens ? lens.dt : 0.0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, u);
 
     const encoder = this.device.createCommandEncoder();
@@ -1650,8 +1702,9 @@ export class Renderer {
       const exact = renderSize[0] === outputW && renderSize[1] === outputH;
       this._encodeMarch(encoder, targets, this.rayBindGroup, rayPipeline,
                         surfacePipelines);
+      const lensTex = this._encodeLensState(encoder, lens, lensPipeline);
       this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
-                       exact);
+                       exact, lensTex);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
       await this._submit(encoder.finish());
       return true;
@@ -1715,8 +1768,10 @@ export class Renderer {
       // Only the last sample reaches the screen: the ones before it are the
       // picture being built, and presenting each would be a strobe.
       if (s === samples - 1) {
+        const lensTex = this._encodeLensState(enc, lens, lensPipeline);
         this._encodeBlit(enc, outTex, targetView, targetFormat,
-                         renderSize[0] === outputW && renderSize[1] === outputH);
+                         renderSize[0] === outputW && renderSize[1] === outputH,
+                         lensTex);
         encodeOverlays(overlays, enc, targetView, targetFormat);
       }
       await this._submit(enc.finish());
@@ -1963,8 +2018,58 @@ export class Renderer {
    * but would let the compositor pick up the bare frame in between, which
    * reads as the minimap flickering.
    */
-  _encodeBlit(encoder, srcTex, targetView, targetFormat, exact) {
-    const entries = [{ binding: 0, resource: srcTex.createView() }];
+  /**
+   * Lens water's state step, once per presented frame: fs_lens_state reads
+   * the previous texel and the camera's extinction and writes the other
+   * (row 24.w carries the dt). Returns the texel the present should draw
+   * through — the dry one when `lens` is null, which also leaves the state
+   * untouched (a capture does not wet or dry the live lens).
+   */
+  _encodeLensState(encoder, lens, pipeline) {
+    if (!lens) return this._lensDry;
+    if (!this._lensGroups) {
+      this._lensGroups = this._lensState.map((tex) =>
+        this.device.createBindGroup({
+          layout: this.surfaceLayout, entries: [
+            { binding: 0, resource: this._surfaceDummy.createView() },
+            { binding: 1, resource: tex.createView() },
+            { binding: 2, resource: this._veilDummy.createView() },
+            { binding: 3, resource: this._surfaceDummy.createView() },
+          ],
+        }));
+    }
+    const next = 1 - this._lensIndex;
+    const p = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: this._lensState[next].createView(), loadOp: "clear",
+        storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      }],
+    });
+    p.setPipeline(pipeline);
+    p.setBindGroup(0, this.rayBindGroup);
+    p.setBindGroup(1, this._lensGroups[this._lensIndex]);
+    p.draw(3);
+    p.end();
+    this._lensIndex = next;
+    this._lastLensTex = this._lensState[next];
+    return this._lastLensTex;
+  }
+
+  /** A dry lens: the start of a video, or the toggle switched off. */
+  resetLens() {
+    const zero = new Float32Array(4);
+    for (const tex of this._lensState) {
+      this.device.queue.writeTexture({ texture: tex }, zero,
+                                     { bytesPerRow: 16 }, [1, 1, 1]);
+    }
+    this._lensIndex = 0;
+    this._lastLensTex = this._lensDry;
+  }
+
+  _encodeBlit(encoder, srcTex, targetView, targetFormat, exact,
+              lensTex = this._lensDry) {
+    const entries = [{ binding: 0, resource: srcTex.createView() },
+                     { binding: 1, resource: lensTex.createView() }];
     const p = encoder.beginRenderPass({
       colorAttachments: [{
         view: targetView, loadOp: "clear", storeOp: "store",
@@ -1993,7 +2098,8 @@ export class Renderer {
     const encoder = this.device.createCommandEncoder();
     this._encodeBlit(
       encoder, this._lastPresented, targetView, targetFormat,
-      this._targets.w === outputSize[0] && this._targets.h === outputSize[1]);
+      this._targets.w === outputSize[0] && this._targets.h === outputSize[1],
+      this._lastLensTex);
     encodeOverlays(overlays, encoder, targetView, targetFormat);
     this.device.queue.submit([encoder.finish()]);
     return true;

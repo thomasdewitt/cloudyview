@@ -36,6 +36,24 @@ const FLYERS = [
   { kind: "bird", Species: Bird, name: "swift", source: "birdSource" },
 ];
 
+// Lens water's setting, per browser: default on. Storage can be missing or
+// refuse (a private window); the setting then simply is not remembered.
+const LENS_WATER_KEY = "soar.lensWater";
+function readLensWater() {
+  try {
+    return localStorage.getItem(LENS_WATER_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+function writeLensWater(on) {
+  try {
+    localStorage.setItem(LENS_WATER_KEY, on ? "on" : "off");
+  } catch {
+    // Not remembered; the switch still works for this session.
+  }
+}
+
 /** Release both flyers, whichever of them got built. */
 function destroyFlyers(flyers) {
   for (const flyer of Object.values(flyers ?? {})) flyer?.destroy();
@@ -163,6 +181,9 @@ export class Viewer {
     // over the clouds. One switch for both overlays, shared by both panels:
     // a capture either shows the flight apparatus or it doesn't.
     this.captureOverlays = true;
+    // Lens water (lens.wgsl): drops on the lens after flying through cloud,
+    // in the live view and in videos; stills and captures are always dry.
+    this.lensWater = readLensWater();
     // True once any Advanced quality setting was hand-changed: the tier row
     // shows a selected "Custom" chip, and the governor stands down. Clicking
     // any preset (or Auto) resets every Advanced setting and clears this.
@@ -280,6 +301,7 @@ export class Viewer {
 
   async start(source, progress) {
     this.shaderSource = await (await fetch("raymarch.wgsl")).text();
+    this.lensSource = await (await fetch("lens.wgsl")).text();
     this.hudSource = await (await fetch("hud.wgsl")).text();
     this.birdSource = await (await fetch("bird.wgsl")).text();
     this.dartSource = await (await fetch("dart.wgsl")).text();
@@ -415,7 +437,8 @@ export class Viewer {
       }
 
       renderer = new Renderer(this.device, this.shaderSource, scene,
-                              { canvasFormat: this.canvasFormat });
+                              { canvasFormat: this.canvasFormat,
+                                lensSource: this.lensSource });
       if (scene.periodicDefault === false) renderer.setPeriodic(false);
       // Choose the tier BEFORE init(), because init() is what compiles and
       // validates the shader, and the shader is specialized on the tier's
@@ -2179,6 +2202,14 @@ export class Viewer {
     this._wake("field of view");
   }
 
+  /** Lens water on or off; off dries the lens at once. */
+  setLensWater(on) {
+    this.lensWater = Boolean(on);
+    writeLensWater(this.lensWater);
+    if (!this.lensWater) this.renderer?.resetLens();
+    this._wake("lens water");
+  }
+
   togglePeriodic() {
     this.renderer.setPeriodic(!this.renderer.periodic);
     this.camera.periodic = this.renderer.periodic;
@@ -2504,6 +2535,10 @@ export class Viewer {
       readback = new Readback(this.device, size);
       saved = await beginOfflineRender(this.renderer, look.preset);
       const framesPerVideoFrame = captureFrames(look.preset);
+      // A video's lens starts dry and steps by the resampled track's own
+      // frame interval — what `soar TRACK.json` steps it by — never by how
+      // long a frame took to render.
+      this.renderer.resetLens();
 
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
@@ -2523,7 +2558,9 @@ export class Viewer {
           { ...this._captureViewKwargs(look),
             camera: pose, frameIndex: i * 1024,
             sceneTime: frames[i].sceneTime },
-          framesPerVideoFrame, overlays);
+          framesPerVideoFrame, overlays, null,
+          this.lensWater
+            ? { dt: i > 0 ? frames[i].t - frames[i - 1].t : 0.0 } : null);
         await writer.addFrame(await readback.read(target.texture), i);
 
         const done = (i + 1) / frames.length;
@@ -2553,6 +2590,9 @@ export class Viewer {
       // abort flag is what woke this loop up. There is then no state left to
       // restore, and reaching for it would throw inside a finally.
       if (saved && this.renderer) endOfflineRender(this.renderer, saved);
+      // The video stepped the lens along the track; the live flight resumes
+      // with a dry one rather than the replay's last drops.
+      this.renderer?.resetLens();
       this.ui.hideProgress();
       this._capturing = false;
       // And back to the live flight, which the replay's last pose is not.
@@ -3310,9 +3350,13 @@ export class Viewer {
     // clock, so a stall cannot jump the sea either). It is in the scene key,
     // so a frame it moves restarts accumulation — which a moving camera has
     // done already.
-    if (!this.paused && (cameraMoved || this.recorder.recording)) {
+    const clockRuns = !this.paused && (cameraMoved || this.recorder.recording);
+    if (clockRuns) {
       this.sceneTime += dt;
     }
+    // Lens water steps on the same clock: parked, it holds still, so the
+    // picture under it converges and the drops do not crawl.
+    this._lensDt = clockRuns ? dt : 0.0;
 
     if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
@@ -3420,7 +3464,8 @@ export class Viewer {
         const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
-          { deltaSeconds: dt, overlays, waitForPipeline: false });
+          { deltaSeconds: dt, overlays, waitForPipeline: false,
+            lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null });
         if (!marched) {
           // The shader variant this frame needs is still compiling (a tier,
           // bake or toggle moved the lighting specialization; see

@@ -182,6 +182,15 @@ const expression = `(async () => {
     try { out.push(await compile(f, await text(f))); }
     catch (err) { out.push({ label: f, errors: [err.message], warnings: [] }); }
   }
+  // The present pass, which carries lens water (lens.wgsl is not a module
+  // on its own: the present shader includes it and provides lens_src).
+  try {
+    out.push(await compile("present + lens.wgsl",
+                           R.presentShader(await text("lens.wgsl"))));
+  } catch (err) {
+    out.push({ label: "present + lens.wgsl", errors: [err.message],
+               warnings: [] });
+  }
   device.destroy();
   return { out, adapter: [adapter.info?.vendor, adapter.info?.architecture]
                            .filter(Boolean).join(" ") };

@@ -27987,6 +27987,71 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
     return out;
 }
 
+// --- lens water: the state ---------------------------------------------------
+//
+// Water on the camera's lens after it flies through cloud. The look is
+// lens.wgsl's, drawn by each host's present (browser) or post pass (Python)
+// AFTER accumulation, never into the accumulated image. This is its state,
+// one texel, integrated once per presented frame:
+//   x  wetness in [0, 1];
+//   y  the lens clock (s), folded at LENS_PERIOD_S (lens.wgsl's streaks are
+//      periodic at exactly that period);
+//   zw "down" on the screen (unit, x right, y down): gravity projected onto
+//      the camera's image plane, so the drips respect camera and dart roll.
+// The host puts the frame's flight-clock dt in row 24.w: the live view's
+// frame time while flying (0 parked, so a parked lens holds perfectly still
+// and accumulation converges under it), a video's 1 / fps. Stills pass no
+// state at all and are dry in both hosts.
+//
+// The wetting law, exact in dt at constant extinction sigma at the camera:
+//   dw/dt = K_WET f (1 - w) - K_DRY (1 - f) w,   f = 1 - exp(-sigma L_WET)
+// is linear in w, so one step of any length is
+//   w(t + dt) = w* + (w - w*) exp(-a dt),
+//   a = K_WET f + K_DRY (1 - f),  w* = K_WET f / a,
+// and one step of 2 dt equals two of dt: a replay at another frame rate
+// sees the same wetness. Dense cloud (f ~ 1) wets the lens in a few seconds;
+// haze (f small) only to a low level, slowly; out of cloud it drains to 5 %
+// in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
+const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
+const LENS_K_WET: f32 = 0.6;        // 1/s
+const LENS_K_DRY: f32 = 0.2;        // 1/s
+const LENS_DRY_FLOOR: f32 = 0.002;  // below this, and drying: exactly dry
+const LENS_PERIOD_S: f32 = 600.0;   // the lens clock's fold
+const LENS_DOWN_RATE: f32 = 6.0;    // 1/s: how fast "down" follows a roll
+
+@fragment
+fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    // The previous state, bound where the refine stages bind surface_plain.
+    let prev = textureLoad(surface_plain, vec2<i32>(0, 0), 0);
+    let dt = max(u.surface_offset.w, 0.0);
+    let sigma = max(sample_sigma(u.cam_origin.xyz), 0.0);
+    let f = 1.0 - exp(-sigma * LENS_L_WET);
+    let a = LENS_K_WET * f + LENS_K_DRY * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
+    let w_star = LENS_K_WET * f / a;
+    var w = w_star + (prev.x - w_star) * exp(-a * dt);
+    // Dry is exactly 0, so a dry lens draws nothing at all (lens.wgsl).
+    w = select(w, 0.0, w < LENS_DRY_FLOOR && w_star < LENS_DRY_FLOOR);
+    var clock = prev.y + dt;
+    clock = clock - LENS_PERIOD_S * floor(clock / LENS_PERIOD_S);
+    // Down on the screen: world -z on the image plane, (x right, y down).
+    let s = vec2<f32>(-u.cam_right.z, u.cam_up.z);
+    let s_len = length(s);
+    let prev_len = length(prev.zw);
+    var down = select(vec2<f32>(0.0, 1.0), prev.zw / max(prev_len, 1e-6),
+                      prev_len > 0.5);
+    if (s_len > 0.2) {
+        // Looking straight up or down, "down" is undefined on the screen:
+        // the drops keep the last one they had.
+        let aim = s / s_len;
+        let k = select(1.0 - exp(-LENS_DOWN_RATE * dt), 1.0, prev_len <= 0.5);
+        let m = mix(down, aim, k);
+        let m_len = length(m);
+        down = select(aim, m / max(m_len, 1e-6), m_len > 0.1);
+    }
+    return vec4<f32>(w, clock, down);
+}
+
 @fragment
 fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
