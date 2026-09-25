@@ -89,6 +89,27 @@ def test_every_member_of_a_lot_agrees_on_it(decoded):
     assert np.all(d["ox"] < d["w"]) and np.all(d["oy"] < d["h"])
 
 
+def test_no_lot_swallows_a_rival_tower(tile, decoded):
+    """The skyline's cluster of needles is peaks on adjacent blocks: a lot
+    that took one of them into another's building turned the cluster into a
+    single tower. No member of a multi-block lot may be a block whose own
+    tower would reach city_lots.RIVAL_FRAC of the owner's (or a tower lot's
+    threshold, whichever is higher)."""
+    d = decoded
+    n = d["n"]
+    h0 = city_lots.potential_height(tile["density"], tile["rank"])
+    Y, X = np.mgrid[0:n, 0:n]
+    ox = (d["x0"] + d["ox"]) % n
+    oy = (d["y0"] + d["oy"]) % n
+    member = (d["w"] * d["h"] > 1) & ((X != ox) | (Y != oy))
+    bound = np.maximum(city_lots.TOWER_LOT_H[0][1],
+                       city_lots.RIVAL_FRAC * h0[oy, ox])
+    rivals = member & (h0 >= bound)
+    assert not rivals.any(), (
+        f"{int(rivals.sum())} lot members are rival towers, e.g. cell "
+        f"{tuple(np.argwhere(rivals)[0][::-1])}")
+
+
 def test_no_lot_straddles_an_avenue(decoded):
     """skyway's decks ride the avenue corridors as guaranteed empty air."""
     period = city_lots.AVENUE_PERIOD
