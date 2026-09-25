@@ -2307,11 +2307,19 @@ const SEA_GLITTER_SPREAD: f32 = 1.3;
 // Snow."). So the draw is blended toward its own mean, the smooth lobe, by
 // where the half vector sits in the lobe: GGX D(h) over its peak, 1 on the
 // sun's reflection, falling as the facets that would reflect it get rarer.
-// The draw's mean is 1 (E[K / lambda] = 1, and each facet's brightness has
-// mean 1), so any blend keeps the lobe's mean exactly — the energy stays
-// the smooth Cox-Munk specular's, with the sparkles only where it is bright.
+// And only where the pixel expects a few glints: with lambda well under
+// one, a drawn footprint is almost always empty, and next to smooth sheen
+// an empty footprint on a sunlit wave face reads as a hole in the water
+// (a dark blob round one dot) rather than as glitter; from a few glints up
+// an empty footprint is rare (e^-4 at lambda 4) and the draw reads as
+// texture. The draw's mean is 1 (E[K / lambda] = 1, and each facet's
+// brightness has mean 1), so any blend keeps the lobe's mean exactly — the
+// energy stays the smooth Cox-Munk specular's, with the sparkles only where
+// it is bright and the footprint holds enough of them.
 const SEA_GLITTER_CORE_LO: f32 = 0.3;
 const SEA_GLITTER_CORE_HI: f32 = 0.7;
+const SEA_GLITTER_FEW: f32 = 1.0;
+const SEA_GLITTER_MANY: f32 = 4.0;
 
 fn sea_glitter_brightness(k: f32, seed: vec2<u32>) -> f32 {
     if (k >= 4.0 || k <= 0.0) {
@@ -2598,7 +2606,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 // D(h) / D(n.h = 1) = alpha^4 / denom^2, in (0, 1].
                 let lobe = alpha_squared * alpha_squared / (denom * denom);
                 let core = smoothstep(SEA_GLITTER_CORE_LO,
-                                      SEA_GLITTER_CORE_HI, lobe);
+                                      SEA_GLITTER_CORE_HI, lobe)
+                    * smoothstep(SEA_GLITTER_FEW, SEA_GLITTER_MANY, lambda);
                 var sparkle = 1.0;
                 if (core > 0.0 && lambda > 0.0) {
                     let k = sea_poisson(lambda, sea_uniforms(sea.glitter_seed));
