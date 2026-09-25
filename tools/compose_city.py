@@ -65,6 +65,9 @@ HOOKS = {
         "pane_uv: vec2<f32>,\n"
         "                   deep_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
+    "window_glyph_mean": (
+        "fn cc_window_glyph_mean()\n"
+        "        -> vec3<f32>"),
     "roof": (
         "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
         "        -> vec3<f32>"),
@@ -183,6 +186,15 @@ def dispatcher(comps):
         f"{HOOKS['window_glyph']} {{\n"
         "    var t = vec3<f32>(1.0);\n"
         + ("\n".join(glyph_body) + "\n" if glyph_body else "")
+        + "    return t;\n}")
+
+    glyph_mean_body = [
+        f"    t = t * {c['hooks']['window_glyph_mean']}();"
+        for c in hooked("window_glyph_mean")]
+    out.append(
+        f"{HOOKS['window_glyph_mean']} {{\n"
+        "    var t = vec3<f32>(1.0);\n"
+        + ("\n".join(glyph_mean_body) + "\n" if glyph_mean_body else "")
         + "    return t;\n}")
 
     roof_body = [

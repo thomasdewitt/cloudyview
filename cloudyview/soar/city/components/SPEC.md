@@ -130,6 +130,12 @@ Signatures (the composer checks these by compiling):
   facade the two are equal. Return `vec3(1.0)` to leave a window alone.
   Sub-pixel glyphs (fp much larger than a pane) must return your glyph's
   mean transmission, not 1.
+- `window_glyph_mean` — `fn () -> vec3<f32>` — your glyph's mean
+  transmission over the whole population of lit windows (what
+  `window_glyph` averages to across many windows at a large footprint). The
+  core's facade uses it where a pixel covers more windows than it sums one
+  by one. A component with `window_glyph` must provide it, and the two must
+  agree.
 
 ## The facade shell (core)
 
