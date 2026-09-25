@@ -14109,7 +14109,12 @@ fn cc_adscreens_product(ch: vec4<f32>, sv: f32, px: f32, py: f32,
     let d = cc_adscreens_sd_seg(p, -ax * ln, ax * ln) - r;
     let body = 1.0 - smoothstep(-aa - 0.004, aa + 0.004, d);
     let rim = exp(-abs(d) * 22.0);
-    let bg = (0.18 + 0.82 * pow(1.0 - sv, 1.3)) * 0.55;
+    // The backdrop's gradient is the panel's, sv in [0, 1]. The facade hook
+    // evaluates the content beyond the panel too (the spill ring above it,
+    // where sv > 1) and masks it with `panel` = 0 — but pow() of a negative
+    // base is NaN, and NaN * 0 is NaN: far screens reached by a jittered
+    // ray left NaN pixels that stuck through the whole accumulation.
+    let bg = (0.18 + 0.82 * pow(clamp(1.0 - sv, 0.0, 1.0), 1.3)) * 0.55;
     let dh = max(d, 0.0);
     let halo = 1.1 * exp(-dh * dh / (2.0 * 0.075 * 0.075));
     return vec3<f32>(bg, body * 2.4 + rim * 1.1, halo);
