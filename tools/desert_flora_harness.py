@@ -26,6 +26,7 @@ import argparse
 import gzip
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -39,7 +40,10 @@ sys.path.insert(0, str(ROOT))
 SHADER = ROOT / "cloudyview" / "soar" / "raymarch.wgsl"
 FLORA_BEGIN = "// === DESERT FLORA (desert-flora) ==="
 FLORA_END = "// === END DESERT FLORA ==="
-DEMOS = Path("/home/thomas/code-and-data/cloudyview/web/soar/demos")
+# The prebaked demos are built, not tracked: --demos, or $SOAR_DEMOS, or
+# this checkout's own web/soar/demos.
+DEMOS_DEFAULT = Path(os.environ.get("SOAR_DEMOS",
+                                    ROOT / "web" / "soar" / "demos"))
 
 # Stubs of the ground API, for the placement scan only. The tile itself is
 # bound (the habitat reads its lightness), without the sub-tile octaves;
@@ -216,8 +220,12 @@ def pick_hero(plants, near=(512.0, 512.0)):
     return close[np.argmax(close[:, 3])]
 
 
-def load_demo(demo, cache_dir: Path):
-    base = DEMOS / demo
+def load_demo(demos: Path, demo, cache_dir: Path):
+    base = demos / demo
+    if not (base / "meta.json").exists():
+        raise SystemExit(f"no demo {demo!r} under {demos}: pass --demos DIR "
+                         "or set SOAR_DEMOS (the prebaked demos are built, "
+                         "not tracked)")
     meta = json.loads((base / "meta.json").read_text())
     shape = tuple(meta["volume"]["shape_xyz"])
     cache = cache_dir / f"{demo}.npy"
@@ -456,6 +464,9 @@ def main(argv=None) -> int:
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--demo", default="desert-coarse")
+    ap.add_argument("--demos", type=Path, default=DEMOS_DEFAULT,
+                    help="the prebaked demo directory (default $SOAR_DEMOS, "
+                         "else web/soar/demos in this checkout)")
     ap.add_argument("--views", default="all")
     ap.add_argument("--size", type=int, nargs=2, default=(768, 432),
                     help="render size (default: the low tier's 768x432)")
@@ -525,7 +536,7 @@ def main(argv=None) -> int:
           f"H {hero[3]:.2f} m, R {hero[4]:.3f} m, {int(hero[5])} arms, "
           f"{int(hero[7])} ribs, age {hero[6]:.2f}")
 
-    meta, sigma = load_demo(args.demo, out)
+    meta, sigma = load_demo(args.demos, args.demo, out)
     bmin, bmax = meta["volume"]["bmin"], meta["volume"]["bmax"]
     sun_az, sun_el = args.sun
     preset = QUALITY_PRESETS[args.quality]

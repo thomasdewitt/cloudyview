@@ -566,10 +566,11 @@ export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // the full desert at Medium and above, "a simplified but convincing desert"
 // at Low and Minimal. soar_host.DESERT_LITE_TIERS is the Python twin.
 export const DESERT_LITE_TIERS = ["low", "minimal"];
-// How far out the desert's full tiers walk explicit plants before the far
-// forms take over (raymarch.wgsl DESERT_FLORA_CUT, a compile-time scale on
-// the far-cut footprints DF_FAR_FP0/1): Medium walks them about half as far
-// as High, which roughly halves the grazing walk at altitude. The lite tiers
+// How far out the desert's full tiers walk the explicit shrubs before their
+// decals take over (raymarch.wgsl DESERT_FLORA_CUT, a compile-time scale on
+// the shrubs' grazing cut, df_small_cut): Medium walks them about half as far
+// as High, the small cells being most of the walk; saguaros, trees and
+// heaps keep the common cut on every tier. The lite tiers
 // ignore it and stay at 1, so their variant key does not move. The lead,
 // 2026-09-24: a tier-keyed explicit cut for the flora.
 // soar_host.DESERT_FLORA_CUT_BY_TIER is the Python twin.

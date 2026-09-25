@@ -505,8 +505,8 @@ class ViewState:
     # a desert scene, keyed in the app on the tier (DESERT_LITE_TIERS) —
     # witness --quality sets it the same way. It has no refine stage.
     desert_lite: bool = False
-    # How far out the full desert walks explicit plants (raymarch.wgsl
-    # DESERT_FLORA_CUT, a scale on the far-cut footprints), keyed in the app
+    # How far out the full desert walks the explicit shrubs (raymarch.wgsl
+    # DESERT_FLORA_CUT, a scale on the shrubs' cut), keyed in the app
     # on the tier (DESERT_FLORA_CUT_BY_TIER); 1.0 is the shader's own value.
     desert_flora_cut: float = 1.0
     # The scene clock (s, row 24.z): where the moving sea is in its motion.
@@ -791,8 +791,9 @@ SURFACE_REFINE_SURFACES = ("city", "desert")
 # web/soar/constants.js DESERT_LITE_TIERS; witness --quality sets
 # ViewState.desert_lite from it.
 DESERT_LITE_TIERS = ("low", "minimal")
-# The flora's explicit cut per tier (raymarch.wgsl DESERT_FLORA_CUT): Medium
-# walks explicit plants about half as far as High; the lite tiers ignore it.
+# The shrubs' explicit cut per tier (raymarch.wgsl DESERT_FLORA_CUT): Medium
+# walks the explicit shrubs about half as far as High; the lite tiers ignore
+# it.
 # The twin of web/soar/constants.js DESERT_FLORA_CUT_BY_TIER; witness
 # --quality sets ViewState.desert_flora_cut from it.
 DESERT_FLORA_CUT_BY_TIER = {"max": 1.0, "high": 1.0, "medium": 0.5,
