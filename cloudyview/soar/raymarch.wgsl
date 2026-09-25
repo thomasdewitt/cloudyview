@@ -17910,7 +17910,8 @@ fn df_cell_seed(ci: vec2<i32>, n: i32, salt: u32) -> vec2<u32> {
 // ray's second dither rehashed with the item's seed, so two media along one
 // ray are two Poisson trials and not one threshold shared.
 fn df_item_free_path(dither: vec2<f32>, seed: vec2<u32>) -> f32 {
-    let h = pcg2d(bitcast<vec2<u32>>(dither) ^ seed);
+    let bits = bitcast<vec2<u32>>(dither);
+    let h = pcg2d(bits ^ seed);
     return -log(max(df_u01(h.x), 1e-7));
 }
 
@@ -20062,7 +20063,8 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     var best: DfRodHit;
     best.t = tb;
     var code = DF_MAT_CANE;
-    var cap_seed = pcg2d(bitcast<vec2<u32>>(dither) ^ it.seed);
+    let dither_bits = bitcast<vec2<u32>>(dither);
+    var cap_seed = pcg2d(dither_bits ^ it.seed);
     let n = i32(it.a.y);
     for (var i: i32 = 0; i < n; i = i + 1) {
         for (var k: i32 = 0; k < 2; k = k + 1) {
@@ -20703,7 +20705,8 @@ fn df_boulder_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
     // Mineral speckle (feldspar, quartz, biotite) at a few millimetres,
     // averaged away as the footprint outgrows it.
     let cellp = floor(pl * 180.0);
-    let sp = pcg2d(bitcast<vec2<u32>>(cellp.xy) ^ vec2<u32>(bitcast<u32>(cellp.z)));
+    let cxy = bitcast<vec2<u32>>(cellp.xy);
+    let sp = pcg2d(cxy ^ vec2<u32>(bitcast<u32>(cellp.z)));
     let grain = df_u01(sp.x);
     let gw = 1.0 - smoothstep(0.004, 0.02, fp);
     let speck = mix(1.0, 0.55 + 0.9 * grain, gw * 0.6);
