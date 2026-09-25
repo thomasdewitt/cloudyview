@@ -1835,36 +1835,47 @@ export class Renderer {
   }
 
   /**
-   * Give a target set its surface target and the march's group 1 over it,
-   * if the scene traces a surface and the set has none yet: a set is pooled
-   * by size, and the scene can gain a traced surface after the set was made
-   * (setSurface, ocean -> desert). 16 bytes a pixel, allocated under the
-   * same out-of-memory guard as the rest of the set. Awaited by every caller
-   * BEFORE it resolves pipelines and encodes, so _encodeMarch only ever
-   * reads it.
+   * Give a target set the surface targets the ACTIVE stage chain writes and
+   * the march's group 1 over them: the final surface and the veil, and the
+   * intermediates surfaceStagePlan alternates between (none for one stage,
+   * one for two, both for more). A set is pooled by size, and the scene can
+   * gain a traced surface or a longer chain after the set was made
+   * (setSurface, a tier change). Grow-only: a set that already holds enough
+   * keeps them, so a size used only at Low (the simplified desert's single
+   * stage) never allocates an intermediate, and after a size's first
+   * growth a tier change never reallocates it. Allocated under the same
+   * out-of-memory guard as the rest of the set. Awaited by every caller
+   * BEFORE it resolves pipelines and encodes, and it returns only once the
+   * set satisfies the tier live at that moment — the tier can change during
+   * the allocation's await — so _encodeMarch only ever reads it.
    */
   async _ensureSurfaceTarget(targets) {
-    if (!this._hasSurfacePass()) return;
-    // Every target a stage of this surface can write at ANY tier (the
-    // desert drops its later stages at the low tiers), so a tier change
-    // never reallocates: the intermediates its longest chain alternates
-    // between (surfaceStagePlan), one for two stages, both for more.
-    const longest = K.SURFACE_STAGES[this.scene.city ? "city" : "desert"];
-    const later = longest.length >= 2;
-    const both = longest.length >= 3;
-    const shape = `${later}|${both}`;
-    if (targets.surface && targets.surface.shape === shape) return;
-    if (targets.surface) {
-      // Made for another surface (ocean -> desert -> city): retired once the
-      // GPU is done with any frame that still reads it.
-      for (const tex of targets.surface.textures) {
-        retireAfterSubmittedWork(this.device, tex);
+    for (;;) {
+      if (!this._hasSurfacePass()) return;
+      const nMid = Math.min(Math.max(this._stageEntries().length - 1, 0), 2);
+      if (targets.surface && targets.surface.nMid >= nMid) return;
+      const made = await this._makeSurfaceSet(targets, nMid);
+      // Another caller may have grown the set during the await: keep the
+      // larger, retire the other once the GPU is done with any frame that
+      // still reads it. Then check the (possibly changed) tier again.
+      const [keep, drop] = targets.surface && targets.surface.nMid >= made.nMid
+        ? [targets.surface, made] : [made, targets.surface];
+      targets.surface = keep;
+      if (drop) {
+        for (const tex of drop.textures) {
+          retireAfterSubmittedWork(this.device, tex);
+        }
       }
-      targets.surface = null;
     }
+  }
+
+  /** A surface set of `targets`' size with `nMid` intermediates. */
+  async _makeSurfaceSet(targets, nMid) {
+    const later = nMid >= 1;
+    const both = nMid >= 2;
     const label = `soar-surface-${targets.w}x${targets.h}`;
     const count = 2 + (later ? 1 : 0) + (both ? 1 : 0);
-    targets.surface = await guardAllocation(
+    return guardAllocation(
       this.device, `${targets.w}x${targets.h} surface target`,
       targets.w * targets.h * 16 * count, () => {
         const make = (name, format) => this.device.createTexture({
@@ -1885,7 +1896,7 @@ export class Renderer {
                     { binding: 2, resource: veilView }],
         });
         return {
-          shape,
+          nMid,
           tex,
           textures: [tex, veil, plain, mid].filter(Boolean),
           view: tex.createView(),
