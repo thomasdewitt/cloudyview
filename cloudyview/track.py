@@ -611,7 +611,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
                             DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS,
                             APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
                             desert_scene_fields, surface_cell_m,
-                            surface_period_m)
+                            surface_clock_period_s, surface_period_m)
     from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
                           QUALITY_PRESETS, _field_level)
 
@@ -687,8 +687,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         ocean_tile_extent=tile,
         ocean_max_lod=int(meta["mips"]) - 1,
         surface_period_m=period,
-        **({"clock_period_s": float(meta["clock_period_s"])}
-           if s.surface == "ocean" else {}),
+        clock_period_s=surface_clock_period_s(s.surface, meta),
         nested=len(levels) > 1,
         surface=s.surface,
         **({"city_tile_offset_m": s.city_tile_offset_m}

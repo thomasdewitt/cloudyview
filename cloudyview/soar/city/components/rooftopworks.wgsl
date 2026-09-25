@@ -394,7 +394,7 @@ fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
         bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
     // Helipad first: it wants the same real estate and it is the rarer
     // thing. A building gets one pad, in the member cell under a point of
-    // its top deck that the building-level draw picks — lots run up to 4x4
+    // its top deck that the building-level draw picks — lots span up to 4x4
     // and a tower's crown covers only some of their cells, so neither a
     // parity rule nor a pick among the lot's cells would do.
     let pad_at = mix(d.lo, d.hi, vec2<f32>(0.25) + 0.5 * gh.zw);

@@ -49,9 +49,10 @@ export const CITY_H_EXP = 1.2;
 export const CITY_LOWRISE_H = 22.0;
 export const CITY_TOWER_H = 60.0;
 export const CITY_TOWER_SIDE_K = 4.2;
-export const CITY_TOWER_KNEE_H = 800.0;
-export const CITY_SLENDER_MAX = 20.0;
+export const CITY_TOWER_KNEE_H = 600.0;
+export const CITY_SPIRE_H = 600.0;
 export const CITY_SUPERTALL_H = 1200.0;
+export const CITY_SLENDER_MAX = 60.0;
 export const CITY_USE_URBAN = 0;
 export const CITY_USE_INDUSTRIAL = 1;
 export const CITY_USE_YARD = 2;
@@ -333,10 +334,9 @@ export function cityCell(tile, cx, cy) {
   let podium = false;
   let zp = 0.0;
   if (h >= CITY_TOWER_H) {
-    const h_eff = h > CITY_TOWER_KNEE_H
-      ? CITY_TOWER_KNEE_H * Math.pow(h / CITY_TOWER_KNEE_H, 0.6) : h;
     const side = Math.max(
-      CITY_TOWER_SIDE_K * Math.sqrt(h_eff) * (0.80 + 0.40 * r4[1]),
+      CITY_TOWER_SIDE_K * Math.sqrt(Math.min(h, CITY_TOWER_KNEE_H))
+        * (0.80 + 0.40 * r4[1]),
       h / CITY_SLENDER_MAX);
     const aspect = 0.72 + 0.28 * r4[2];
     const sides = r4f[1] < 0.5 ? [side, side * aspect]
@@ -362,16 +362,17 @@ export function cityCell(tile, cx, cy) {
 
   // The architecture.
   if (h > 60.0) {
-    if (r4d[0] < 0.20) {
+    const spire_p = h > 300.0 ? 0.30 : 0.13;
+    if (r4d[0] < f(0.20)) {
       c.arch = 2;                   // growth: cantilevered buds
-    } else if (r4d[0] < 0.42) {
+    } else if (r4d[0] < f(0.42)) {
       c.arch = 3;                   // tapered shaft on a podium
-    } else if (r4d[0] < 0.55) {
+    } else if (r4d[0] < f(f(0.42) + f(spire_p))) {
       c.arch = 4;                   // spire crown
     }
   }
-  if (h > 600.0 && r4d[1] < (h > CITY_SUPERTALL_H ? 0.85 : 0.65)) {
-    c.arch = r4d[1] < 0.30 ? 4 : 3;
+  if (h > CITY_SPIRE_H) {
+    c.arch = r4d[1] < 0.60 ? 4 : 3;
   }
 
   if (h < CITY_LOWRISE_H) {
@@ -430,12 +431,12 @@ export function cityCell(tile, cx, cy) {
     c.has_frustum = true;
     c.fmin = [bc[0] - 0.5 * fw_shaft[0], bc[1] - 0.5 * fw_shaft[1], zp];
     c.fmax = [bc[0] + 0.5 * fw_shaft[0], bc[1] + 0.5 * fw_shaft[1], h];
-    c.fscale = h > CITY_SUPERTALL_H ? 0.28 + 0.22 * r4d[2]
+    c.fscale = h > CITY_SUPERTALL_H ? 0.40 + 0.20 * r4d[2]
                                     : 0.55 + 0.25 * r4d[2];
   } else if (c.arch === 4) {
-    // A straight shaft to three quarters, then a steep spire.
+    // A straight shaft to seven tenths, then a steep spire.
     const zs = storeyZ(ns * (h > CITY_SUPERTALL_H
-      ? f(f(0.55) + f(f(0.10) * r4d[3])) : f(0.75)));
+      ? f(f(0.62) + f(f(0.10) * r4d[3])) : f(0.70)));
     if (podium) {
       c.tiers = 2;
       c.b1min = vec3(pod_min, CITY_GROUND_Z);
@@ -449,7 +450,8 @@ export function cityCell(tile, cx, cy) {
     c.has_frustum = true;
     c.fmin = vec3(bmin2, zs);
     c.fmax = vec3(bmax2, h);
-    c.fscale = 0.12 + 0.10 * r4d[2];
+    c.fscale = h > CITY_SUPERTALL_H ? 0.06 + 0.08 * r4d[2]
+                                    : 0.12 + 0.10 * r4d[2];
   } else if (c.arch === 2) {
     // Growth: a straight tower with one or two cantilevered buds.
     c.b1min = vec3(bmin2, CITY_GROUND_Z);
@@ -504,12 +506,12 @@ export function cityCell(tile, cx, cy) {
   } else if (podium) {
     // Podium, tower, crown.
     c.tiers = 3;
-    const zc = storeyZ(ns * f(f(0.70) + f(f(0.15) * r4b[3])));
+    const zc = storeyZ(ns * f(f(0.62) + f(f(0.12) * r4b[3])));
     c.b1min = vec3(pod_min, CITY_GROUND_Z);
     c.b1max = vec3(pod_max, zp);
     c.b2min = vec3(bmin2, zp);
     c.b2max = vec3(bmax2, zc);
-    const s3 = 0.62 + 0.18 * r4b[2];
+    const s3 = 0.55 + 0.15 * r4b[2];
     const fw3 = [fw[0] * s3, fw[1] * s3];
     c.b3min = [bc[0] - 0.5 * fw3[0], bc[1] - 0.5 * fw3[1], zc];
     c.b3max = [bc[0] + 0.5 * fw3[0], bc[1] + 0.5 * fw3[1], h];

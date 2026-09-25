@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-six hook dispatchers the core calls (see the hook comment block in
+nine hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -65,9 +65,22 @@ HOOKS = {
         "pane_uv: vec2<f32>,\n"
         "                   deep_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
+    "media": (
+        "fn cc_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, "
+        "t_max: f32,\n"
+        "            pixel_angle: f32, rnd: f32) -> vec4<f32>"),
     "roof": (
         "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
         "        -> vec3<f32>"),
+    # Street-level props traced only by the street stage (fs_surface_street,
+    # city_trace's CITY_TRACE_NEAR mode), never by the view ray's first
+    # stage: detail that would cost every city pixel occupancy there.
+    "near_props": (
+        "fn cc_near_props_trace(o: vec3<f32>, dir: vec3<f32>, "
+        "inv_dir: vec3<f32>,\n"
+        "                       t0: f32, t1: f32, ci: vec2<i32>, "
+        "cc: CityCell)\n"
+        "        -> CityHit"),
 }
 
 # Module-scope declarations only (column 0): a function-local `var` or
@@ -105,14 +118,14 @@ def validate_component(comp, source):
                              f"'{hook}' but does not define it")
     kb = comp.get("kind_base")
     needs_kinds = any(h in comp.get("hooks", {})
-                      for h in ("extra_trace", "cell_props"))
+                      for h in ("extra_trace", "cell_props", "near_props"))
     if needs_kinds and (kb is None or kb < 100 or kb % 100 != 0):
         raise SystemExit(f"component '{name}' traces geometry and needs a "
                          f"kind_base >= 100 in multiples of 100; got {kb!r}")
 
 
 def dispatcher(comps):
-    """The six hook dispatchers over whatever is registered."""
+    """The nine hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 
@@ -185,6 +198,37 @@ def dispatcher(comps):
         + ("\n".join(glyph_body) + "\n" if glyph_body else "")
         + "    return t;\n}")
 
+    # Participating media in front of the city (steam): each component
+    # returns (in-scattered radiance, transmittance) over [0, t_max]; they
+    # compose front to back in registry order. With none registered the
+    # dispatcher is the identity (0, 0, 0, 1), which the call site applies
+    # as `rgb + a * city` — exact, so an empty registry changes no bit.
+    media_body = []
+    for c in hooked("media"):
+        media_body.append(
+            f"    let m_{c['name']} = {c['hooks']['media']}"
+            "(o, dir, inv_dir, t_max, pixel_angle, rnd);\n"
+            f"    acc = vec4<f32>(acc.rgb + acc.a * m_{c['name']}.rgb, "
+            f"acc.a * m_{c['name']}.a);")
+    out.append(
+        f"{HOOKS['media']} {{\n"
+        "    var acc = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n"
+        + ("\n".join(media_body) + "\n" if media_body else "")
+        + "    return acc;\n}")
+
+    near_body = []
+    for c in hooked("near_props"):
+        near_body.append(
+            f"    let h_{c['name']} = {c['hooks']['near_props']}"
+            "(o, dir, inv_dir, t0, t1, ci, cc);\n"
+            f"    if (h_{c['name']}.hit && h_{c['name']}.t < res.t) "
+            f"{{ res = h_{c['name']}; }}")
+    out.append(
+        f"{HOOKS['near_props']} {{\n"
+        "    var res: CityHit;\n    res.hit = false;\n    res.t = 1e30;\n"
+        + ("\n".join(near_body) + "\n" if near_body else "")
+        + "    return res;\n}")
+
     roof_body = [
         f"    e = e + {c['hooks']['roof']}(cc, h, fp);"
         for c in hooked("roof")]
@@ -196,7 +240,9 @@ def dispatcher(comps):
     return "\n\n".join(out)
 
 
-def compose(check_only: bool) -> int:
+def composed_text() -> tuple[list, str]:
+    """The registry's components, and raymarch.wgsl as the composer would
+    write it from them (nothing compiled, nothing written)."""
     comps = load_registry()
     kbs = [c["kind_base"] for c in comps if c.get("kind_base") is not None]
     if len(kbs) != len(set(kbs)):
@@ -232,14 +278,22 @@ def compose(check_only: bool) -> int:
     shader = SHADER.read_text()
     start = shader.index(MARK_OPEN)
     end = shader.index(MARK_CLOSE) + len(MARK_CLOSE)
-    out = shader[:start] + generated + shader[end:]
+    return comps, shader[:start] + generated + shader[end:]
 
+
+def compose(check_only: bool) -> int:
+    comps, out = composed_text()
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
+    # Compiled as the hosts compile it: stripped to one surface's sections
+    # (soar_host.strip_sections), since the raw file holds each surface's
+    # stub twin beside its real code.
+    from cloudyview.soar_host import strip_sections
     for city in ("false", "true"):
-        probe = out.replace("const CITY: bool = false;",
-                            f"const CITY: bool = {city};", 1)
+        probe = strip_sections(out, "city" if city == "true" else "ocean")
+        probe = probe.replace("const CITY: bool = false;",
+                              f"const CITY: bool = {city};", 1)
         device.create_shader_module(code=probe)
 
     if check_only:

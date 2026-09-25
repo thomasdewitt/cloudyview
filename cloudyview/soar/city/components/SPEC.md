@@ -96,6 +96,22 @@ Signatures (the composer checks these by compiling):
   t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell) -> CityHit` — geometry
   inside cell `ci`, tested against the ray segment [t0, t1]. Return the
   nearest hit with `t` in that segment, or `hit = false`.
+- `near_props` — same signature as `cell_props` — geometry below
+  `CITY_FURNITURE_TOP` (3 m) that is only drawn close: street furniture,
+  the parked cars' sphere-traced hulls. It runs ONLY in the city's street
+  stage (`fs_surface_street`), after the facade shell, over the stretch of
+  the view ray below 3 m, up to the surface the earlier stages found and at
+  most `city_near_reach` — so heavy code here costs the first stage no
+  registers. Two things follow. (1) `t0` in the first cell is where the ray
+  comes down to 3 m, not the cell's entry: take a footprint for a stage
+  decision from the thing's own entry (streetlife's per-car switch), never
+  from `t0`. (2) The contract: draw nothing where
+  `max(0.35 pixel_angle, true_pixel_angle) * t > CITY_NEAR_FP` (0.75), the
+  street stage's reach. A hook is not in wet reflections
+  (`CITY_TRACE_PLAIN`), and nothing makes it continuous with `cell_props`:
+  a component that draws the same thing in both (streetlife's cars: boxes
+  in the first stage, hulls here) must split it so each instance is
+  exactly one stage's.
 - `extra_trace` — `fn (o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
   -> CityHit` — geometry independent of the block grid (an elevated
   highway network). Must stay below `CITY_SLAB_TOP`.
@@ -130,6 +146,39 @@ Signatures (the composer checks these by compiling):
   facade the two are equal. Return `vec3(1.0)` to leave a window alone.
   Sub-pixel glyphs (fp much larger than a pane) must return your glyph's
   mean transmission, not 1.
+
+- `media` — `fn (o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+  t_max: f32, pixel_angle: f32, rnd: f32) -> vec4<f32>` — participating
+  media between the eye and the city hit at `t_max` (steam): in-scattered
+  radiance in rgb, transmittance in a; `(0, 0, 0, 1)` is the identity. The
+  street stage packs the result into the VEIL at `t_low`, where the ray
+  first comes down to `CITY_NEAR_TOP` (15 m), and fs_main composites it
+  when its march reaches that distance — so the steam lies in front of
+  whatever is behind it, cloud and sky included, and never in the surface
+  rgb. `rnd` is a per-pixel independent (white) uniform per frame, for
+  jittering a march.
+
+## The street (core section THE STREET SURFACE)
+
+The ground is a cross-section around each plot: sidewalk (`CITY_SIDEWALK_W`,
+`_AVE` on avenues), kerb (`CITY_KERB_H` high), gutter, parking lane, travel
+lanes. `city_kerb_rect(cc)` / `city_kerb_sd(p, cc, kr)` give the kerb line
+(negative on the sidewalk), `city_road(p)` where a point sits in the network,
+`city_manhole(k, j, along_y)` the manhole lattice, and
+`city_street_light(p, n)` / `city_street_light_g(p, n, g)` the sodium light
+of the lamp lattice on a surface or in a medium — light props with it. Gate
+anything that stands along an edge on `city_edge_street(cc, side)`.
+
+**The sidewalk slab reports its top as ground.** streetlife traces the
+raised slab and returns kind 0 for its top face, so the core shades it (and
+reflects off it) exactly as it shades the z = 0 plane beyond the prop range.
+That is the one sanctioned exception to "component hits use your own kinds".
+
+**Wet reflections do not see props.** The reflected ray off wet ground is
+traced with `CITY_TRACE_PLAIN`: no `cell_props`, `near_props` or `extra_trace`
+hook runs for it (their second inlined copy cost 20-36% on views that never reflect). A
+component's geometry therefore never appears in a puddle; its facade and
+window hooks do, because the reflected hit is shaded by `city_shade`.
 
 ## The facade shell (core)
 

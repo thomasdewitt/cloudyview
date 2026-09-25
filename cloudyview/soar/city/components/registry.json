@@ -64,7 +64,8 @@
    "kind_base": 100,
    "hooks": {
     "cell_props": "cc_streetlife_props_trace",
-    "shade": "cc_streetlife_shade"
+    "shade": "cc_streetlife_shade",
+    "near_props": "cc_streetlife_near_trace"
    },
    "enabled": true
   },
@@ -75,6 +76,17 @@
    "hooks": {
     "facade": "cc_adscreens_facade",
     "facade_cover": "cc_adscreens_cover"
+   },
+   "enabled": true
+  },
+  {
+   "file": "manholesteam.wgsl",
+   "name": "manholesteam",
+   "kind_base": 900,
+   "hooks": {
+    "cell_props": "cc_manholesteam_props_trace",
+    "shade": "cc_manholesteam_shade",
+    "media": "cc_manholesteam_media"
    },
    "enabled": true
   },
@@ -90,6 +102,16 @@
    },
    "enabled": true,
    "note": "The industrial belt above its ground: warehouse roofs (sawtooth, clerestory, skylights), flood heads and poles, yard and court props. cell_props traces them; facade adds each wall pack's wash to the court wall; roof carries the lit glazing's exact view-dependent mean on core roof hits wherever the roof geometry is not drawn (beyond CITY_PROP_RANGE)."
+  },
+  {
+   "file": "streetfurniture.wgsl",
+   "name": "streetfurniture",
+   "kind_base": 800,
+   "hooks": {
+    "shade": "cc_streetfurniture_shade",
+    "near_props": "cc_streetfurniture_props_trace"
+   },
+   "enabled": true
   }
  ]
 }
