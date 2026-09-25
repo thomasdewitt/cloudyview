@@ -21529,16 +21529,21 @@ fn desert_surface_flora(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     if (plain.x == DESERT_UNSHADED) {
         return plain;
     }
-    // The walk first: a plant in front hides the ground and its far cover,
-    // which is then not worth its light.
+    // The far cover first, then the walk: walking first and paying the cover
+    // only on a miss measured 1.6% slower in this stage at 300 m (a plant
+    // hides few of a cruise view's pixels).
     let o = desert_camera_origin();
+    var out = plain;
+    if (plain.w < 1e29) {
+        out = vec4<f32>(desert_flora_far_over(plain.xyz, o, cr, plain.w),
+                        plain.w);
+    }
     let inv_dir = safe_inv_dir(cr.dir);
     let slab = desert_flora_slab(o, cr.dir, inv_dir, plain.w);
     if (slab.y > slab.x) {
         let fh = desert_flora_trace(o, cr.dir, inv_dir, slab.x, slab.y,
                                     cr.true_pixel_angle);
         if (fh.hit && fh.t < plain.w) {
-            // Only a plant: the stage compiles no ground shading.
             let sd = desert_sun_draws(cr.frame_index, cr.strat_pixel,
                                       cr.jitter_amp);
             return vec4<f32>(desert_shade_plant(fh,
@@ -21548,11 +21553,7 @@ fn desert_surface_flora(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
                                                 false), fh.t);
         }
     }
-    if (plain.w >= 1e29) {
-        return plain;
-    }
-    return vec4<f32>(desert_flora_far_over(plain.xyz, o, cr, plain.w),
-                     plain.w);
+    return out;
 }
 
 // The far cover (desert_flora_far) over a ground point t along the camera
