@@ -346,6 +346,21 @@ def hero_views(g, h, sun_az, sun_el):
     }
 
 
+MAX_STAGES = 3
+STAGE_LABEL = {"fs_surface": "surface", "fs_surface_flora": "flora",
+               "fs_surface_refine": "refine", "fs_surface_street": "street"}
+
+
+def stage_text(stages, march):
+    """'surface a + flora b + refine c + march d' (medians, ms)."""
+    parts = [f"{n} {float(np.median(v)):.3f}" for n, v in stages.items()]
+    return " + ".join(parts + [f"march {float(np.median(march)):.3f}"])
+
+
+def stage_total(stages, march):
+    return march + sum(stages.values(), np.zeros_like(march))
+
+
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     """GPU ms of `frames` one-sample frames, per stage: the surface's plain
     pass (fs_surface), its refinement (fs_surface_refine) and the march
@@ -359,23 +374,25 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     bind_group = renderer._ensure_bind_group()
     sample_view = targets["sample"].create_view()
     ray_pipeline = renderer._ray_pipeline_for(view)
-    # The renderer's own stage list (first stage, refinement, street), each
-    # with the targets it writes: the desert's plain pass and its refine
-    # stage are the first two (under DESERT_LITE the first alone).
+    # The renderer's own stage list, each with the targets it writes, and
+    # the stages' names (the desert: fs_surface, fs_surface_flora,
+    # fs_surface_refine; under DESERT_LITE the first alone).
     stages = renderer._surface_stages(targets, view)
-    if len(stages) > 2:
-        raise RuntimeError("pass_times_ms times two surface stages; this "
-                           f"view has {len(stages)}")
+    names = list(renderer._stage_entries(view))
+    if len(stages) > MAX_STAGES:
+        raise RuntimeError(f"pass_times_ms times {MAX_STAGES} surface stages; "
+                           f"this view has {len(stages)}")
+    per = 2 * (MAX_STAGES + 1)
     for i in range(frames):
         pv = ViewState(**{**view.__dict__, "frame_index": i,
                           "subpixel": i >= 1, "jitter_scale": 1.0})
         device.queue.write_buffer(renderer._uniform_buf, 0,
                                   pack_uniforms(state, pv).tobytes())
         enc = device.create_command_encoder()
-        for k in range(2):
+        for k in range(MAX_STAGES):
             ts = {"query_set": query_set,
-                  "beginning_of_pass_write_index": 6 * i + 2 * k,
-                  "end_of_pass_write_index": 6 * i + 2 * k + 1}
+                  "beginning_of_pass_write_index": per * i + 2 * k,
+                  "end_of_pass_write_index": per * i + 2 * k + 1}
             if k < len(stages):
                 pipeline, group1, writes = stages[k]
                 sp = enc.begin_render_pass(
@@ -402,8 +419,10 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
                                 "store_op": "store",
                                 "clear_value": (0.0, 0.0, 0.0, 1.0)}],
             timestamp_writes={"query_set": query_set,
-                              "beginning_of_pass_write_index": 6 * i + 4,
-                              "end_of_pass_write_index": 6 * i + 5})
+                              "beginning_of_pass_write_index":
+                                  per * i + 2 * MAX_STAGES,
+                              "end_of_pass_write_index":
+                                  per * i + 2 * MAX_STAGES + 1})
         rp.set_pipeline(ray_pipeline)
         rp.set_bind_group(0, bind_group)
         rp.set_bind_group(1, targets["surface_group"])
@@ -411,17 +430,20 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
         rp.end()
         device.queue.submit([enc.finish()])
     enc = device.create_command_encoder()
-    enc.resolve_query_set(query_set, 0, 6 * frames, query_buf, 0)
+    enc.resolve_query_set(query_set, 0, per * frames, query_buf, 0)
     readback = device.create_buffer(
-        size=48 * frames,
+        size=8 * per * frames,
         usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ)
-    enc.copy_buffer_to_buffer(query_buf, 0, readback, 0, 48 * frames)
+    enc.copy_buffer_to_buffer(query_buf, 0, readback, 0, 8 * per * frames)
     device.queue.submit([enc.finish()])
     readback.map_sync(wgpu.MapMode.READ)
     ts = np.frombuffer(bytearray(readback.read_mapped()),
                        np.uint64).astype(np.float64)
     readback.unmap()
-    return tuple((ts[2 * k + 1::6] - ts[2 * k::6]) * 1e-6 for k in range(3))
+    ms = [(ts[2 * k + 1::per] - ts[2 * k::per]) * 1e-6
+          for k in range(MAX_STAGES + 1)]
+    # (stage name -> ms per frame) for the stages run, then the march.
+    return {STAGE_LABEL[n]: ms[k] for k, n in enumerate(names)}, ms[-1]
 
 
 def apply_patches(src: str, patches) -> str:
@@ -561,9 +583,9 @@ def main(argv=None) -> int:
             required_features=["timestamp-query"])
         n_timed = 24
         query_set = device.create_query_set(type="timestamp",
-                                            count=6 * n_timed)
+                                            count=2 * (MAX_STAGES + 1) * n_timed)
         query_buf = device.create_buffer(
-            size=48 * n_timed,
+            size=16 * (MAX_STAGES + 1) * n_timed,
             usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC)
     if args.no_clouds:
         sigma = np.zeros_like(sigma)
@@ -678,18 +700,19 @@ def main(argv=None) -> int:
             parts = {k: [] for k in variants}
             for _ in range(args.rounds):
                 for k, vr in variants.items():
-                    sp, fp_, rp = pass_times_ms(vr, state, view, n_timed,
-                                                query_set, query_buf)
-                    tot[k].append(float(np.median(sp + fp_ + rp)))
-                    parts[k].append((float(np.median(sp)),
-                                     float(np.median(fp_)),
-                                     float(np.median(rp))))
+                    st, rp = pass_times_ms(vr, state, view, n_timed,
+                                           query_set, query_buf)
+                    tot[k].append(float(np.median(stage_total(st, rp))))
+                    parts[k].append((st, rp))
             for k in variants:
                 t = np.array(tot[k])
-                pa = np.median(np.array(parts[k]), axis=0)
+                # Each stage's median over every frame of every round.
+                st = {n: np.concatenate([p[0][n] for p in parts[k]])
+                      for n in parts[k][0][0]}
+                rp = np.concatenate([p[1] for p in parts[k]])
                 print(f"  {name:<14} {k:<12} {np.median(t):7.3f} ms "
-                      f"(min {t.min():.3f} max {t.max():.3f}; surface "
-                      f"{pa[0]:.3f} + refine {pa[1]:.3f} + march {pa[2]:.3f})")
+                      f"(min {t.min():.3f} max {t.max():.3f}; "
+                      f"{stage_text(st, rp)})")
             continue
         t0 = time.perf_counter()
         img = r.render(state, view, frames=args.frames)
@@ -697,12 +720,10 @@ def main(argv=None) -> int:
         ms = ""
         if args.time:
             pass_times_ms(r, state, view, n_timed, query_set, query_buf)
-            sp, fp_, rp = pass_times_ms(r, state, view, n_timed, query_set,
-                                        query_buf)
-            ms = (f"  {float(np.median(sp + fp_ + rp)):7.3f} ms/pass (surface "
-                  f"{float(np.median(sp)):.3f} + refine "
-                  f"{float(np.median(fp_)):.3f} + march "
-                  f"{float(np.median(rp)):.3f})")
+            st, rp = pass_times_ms(r, state, view, n_timed, query_set,
+                                   query_buf)
+            ms = (f"  {float(np.median(stage_total(st, rp))):7.3f} ms/pass "
+                  f"({stage_text(st, rp)})")
         png = out / f"{name}{args.tag}.png"
         rgb = np.clip(np.asarray(img), 0.0, 1.0)
         Image.fromarray((rgb * 255.0 + 0.5).astype(np.uint8)).save(png)
