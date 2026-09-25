@@ -30,7 +30,7 @@
 //      line, sometimes doubled), vent stacks (1 x 1 x 5 m, in pairs). Dark:
 //      their whole job at distance is silhouette. ~30% carry one warm
 //      service lamp — a bulkhead light on the housing, radiance 2 — which is
-//      what puts a few sparks up on the roofs above the window ladder.
+//      what puts a few sparks up on the roofs above the core's windows.
 //   2. PARAPET. A real low wall around the top deck of ~55% of buildings
 //      (the core only fakes one by brightening the roof albedo near the
 //      edge), and on ~12% of roofs overall a strip of light along its

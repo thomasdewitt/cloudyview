@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-nine hook dispatchers the core calls (see the hook comment block in
+ten hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -119,6 +119,11 @@ def validate_component(comp, source):
         if f"fn {fn}(" not in source:
             raise SystemExit(f"component '{name}' registers {fn} for hook "
                              f"'{hook}' but does not define it")
+    hooks = comp.get("hooks", {})
+    if ("window_glyph" in hooks) != ("window_glyph_mean" in hooks):
+        raise SystemExit(f"component '{name}' must register window_glyph "
+                         f"and window_glyph_mean together: the core's far "
+                         f"facade reads the glyph's population mean")
     kb = comp.get("kind_base")
     needs_kinds = any(h in comp.get("hooks", {})
                       for h in ("extra_trace", "cell_props", "near_props"))
@@ -128,7 +133,7 @@ def validate_component(comp, source):
 
 
 def dispatcher(comps):
-    """The nine hook dispatchers over whatever is registered."""
+    """The ten hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 

@@ -1,4 +1,4 @@
-// facadeworks — additive facade detail on top of the core window ladder.
+// facadeworks — additive facade detail on top of the core's windows.
 //
 // VERTICAL NEON SIGNAGE. The cyberpunk cue. A hashed minority of buildings
 // (~12%) carries one narrow vertical sign box mounted on a corner of the

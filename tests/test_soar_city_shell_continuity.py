@@ -21,9 +21,10 @@ the shell hands over.
 
 Measured (2026-09-25, 32 frames, on the flat facade that averages its
 windows as shown, city_windows_seen), worst region step of (shell - flat)
-between adjacent widths: 0.0058, 0.0071 and 0.0075 for the three views;
-with the resolved shell forced to half brightness (a mismatch of the kind
-this guards) 0.0103, 0.0134 and 0.0158. The walk-up and the curtain wall
+between adjacent widths: 0.0053, 0.0071 and 0.0075 for the walk-up, the
+canyon and the curtain wall; with the resolved shell forced to half
+brightness (a mismatch of the kind this guards) 0.0103, 0.0131 and 0.0158.
+The walk-up and the curtain wall
 are found by building type in the city itself (TYPED_VIEWS), so a change of
 massing moves them with it; the canyon is a fixed camera. The test refuses
 to pass vacuously: at the narrowest width, where the shell's reach is
@@ -99,18 +100,22 @@ MAX_CANDIDATES = 60
 WIDTHS = (1280, 960, 720, 480, 360)
 FRAMES = 32
 GRID = (8, 4)
-MAX_STEP = 0.010
+# Per view, between what the branch measures and what its controls do (see
+# the module docstring), so every control fails every view.
+MAX_STEP = {"walkup_oblique": 0.0075, "canyon_150m": 0.0100,
+            "curtain_flyby": 0.0110}
 MIN_MARKED = 0.05
 # The direct check at the hand-off: pixels whose footprint lies in this band
 # are blended at least 0.98 into the flat facade, so there the shell's render
 # must equal the flat one, pixel for pixel. Pooled over the sweep's widths.
-# Measured (2026-09-25): mean |shell - flat| 0.00080, 0.00037 and 0.00069;
+# Measured (2026-09-25): mean |shell - flat| 0.00079, 0.00037 and 0.00068;
 # with the flat twin read at the hit's straight-in projection onto the wall
-# (the recess offset applied twice, as 2d8a5a0 did) 0.00361, 0.00082 and
-# 0.00192.
+# (the recess offset applied twice, as 2d8a5a0 did) 0.00358, 0.00083 and
+# 0.00191.
 HANDOFF_FP = (1.15, 1.20)
 HANDOFF_MIN_PIXELS = 1000
-MAX_HANDOFF_ABS = 0.0010
+MAX_HANDOFF_ABS = {"walkup_oblique": 0.0015, "canyon_150m": 0.00060,
+                   "curtain_flyby": 0.0012}
 
 
 @pytest.fixture(scope="module")
@@ -372,9 +377,10 @@ def test_shell_hand_off_is_continuous(view_name, city):
                 "the shell; the view no longer exercises the hand-off")
         diff.append(shell - _regions(renderers["flat"], state, cam, width))
     step = float(np.abs(np.diff(np.array(diff), axis=0)).max())
-    assert step <= MAX_STEP, (
+    bound = MAX_STEP[view_name]
+    assert step <= bound, (
         f"{view_name}: the shell's difference from the flat facade moved "
-        f"{step:.4f} in a region between adjacent widths (bound {MAX_STEP})")
+        f"{step:.4f} in a region between adjacent widths (bound {bound})")
 
 
 @pytest.mark.gpu
@@ -406,6 +412,7 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
     assert d.size >= HANDOFF_MIN_PIXELS, (
         f"{view_name}: only {d.size} pixels at the hand-off")
     mean_abs = float(np.abs(d).mean())
-    assert mean_abs <= MAX_HANDOFF_ABS, (
+    bound = MAX_HANDOFF_ABS[view_name]
+    assert mean_abs <= bound, (
         f"{view_name}: at the hand-off the shell differs from the flat "
-        f"facade by {mean_abs:.5f} on average (bound {MAX_HANDOFF_ABS})")
+        f"facade by {mean_abs:.5f} on average (bound {bound})")
