@@ -362,11 +362,13 @@ def stage_total(stages, march):
 
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
-    """GPU ms of `frames` one-sample frames, per stage: the surface's plain
-    pass (fs_surface), its refinement (fs_surface_refine) and the march
-    (fs_main), a timestamp pair each, encoded exactly as SoarRenderer.render
-    encodes them but without the accumulation or any readback. A scene with
-    no surface pass (the ocean) stamps empty passes for the first two."""
+    """GPU ms of `frames` one-sample frames, per stage: each surface stage
+    the renderer runs for this view (the desert: fs_surface,
+    fs_surface_flora, fs_surface_refine; under DESERT_LITE fs_surface alone)
+    and the march (fs_main), a timestamp pair each, encoded exactly as
+    SoarRenderer.render encodes them but without the accumulation or any
+    readback; unused stage slots stamp empty passes. Returns ({stage label:
+    ms per frame}, march ms per frame)."""
     import wgpu
     from cloudyview.soar_host import ViewState, pack_uniforms
     device = renderer.device

@@ -674,6 +674,11 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     # off, fixed dt" sentinel. Twin of the packer in uniforms.js
     # (test_uniform_parity pins them to each other).
     pixel_tan = 2.0 * math.tan(view.fov * DEG * 0.5) / w
+    if desert and not view.desert_lite and pixel_tan < DESERT_MIN_PIXEL_TAN:
+        raise ValueError(
+            f"a pixel of {pixel_tan:.3g} rad is finer than the desert's "
+            f"flora can walk to ({DESERT_MIN_PIXEL_TAN:.3g}): widen the "
+            "field of view or lower the render width.")
     view_step_tan = math.tan(view.view_step_lod_degrees * DEG)
     if view_step_tan > 0.0:
         view_step_tan = max(view_step_tan, 0.25 * pixel_tan)
@@ -808,6 +813,14 @@ SURFACE_REFINE_SURFACES = tuple(
 # web/soar/constants.js DESERT_LITE_TIERS; witness --quality sets
 # ViewState.desert_lite from it.
 DESERT_LITE_TIERS = ("low", "minimal")
+# The finest pixel the full desert can render: its refine stage walks the
+# plants out to DESERT_FLORA_REFINE_FP_M / pixel angle, which must lie
+# inside the explicit walk's cell budget, DF_EXPLICIT_MAX_T (raymarch.wgsl;
+# 0.025 m / (0.65 * 96 * 16 m)) — past it, plants inside the reach would go
+# undrawn. About 5.5 degrees of field across 3840 pixels. The twin of
+# web/soar/constants.js DESERT_MIN_PIXEL_TAN (tests/test_desert_pixel_limit.py
+# pins both to the shader).
+DESERT_MIN_PIXEL_TAN = 0.025 / (0.65 * 96 * 16.0)
 # The shrubs' explicit cut per tier (raymarch.wgsl DESERT_FLORA_CUT): Medium
 # walks the explicit shrubs about half as far as High; the lite tiers ignore
 # it.

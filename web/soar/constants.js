@@ -566,6 +566,12 @@ export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // the full desert at Medium and above, "a simplified but convincing desert"
 // at Low and Minimal. soar_host.DESERT_LITE_TIERS is the Python twin.
 export const DESERT_LITE_TIERS = ["low", "minimal"];
+// The finest pixel the full desert can render: its refine stage walks the
+// plants out to DESERT_FLORA_REFINE_FP_M / pixel angle, which must lie
+// inside the explicit walk's cell budget, DF_EXPLICIT_MAX_T (raymarch.wgsl;
+// 0.025 m / (0.65 * 96 * 16 m)). soar_host.DESERT_MIN_PIXEL_TAN is the
+// Python twin (tests/test_desert_pixel_limit.py pins both to the shader).
+export const DESERT_MIN_PIXEL_TAN = 0.025 / (0.65 * 96 * 16.0);
 // The surface stages each traced surface runs before the march, in order:
 // raymarch.wgsl fragment entries, each after the first reading the one
 // before, the last writing the surface the march reads. The city: its

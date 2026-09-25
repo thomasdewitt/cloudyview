@@ -1598,6 +1598,7 @@ export class Renderer {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
+      desertLite: this._desertLiteFor(this.qualityTier),
     });
     // A change of lighting method under a parked camera restarts the
     // average instead of blending into it. Any scene-key change with a
@@ -2238,6 +2239,7 @@ export class Renderer {
       const u = packUniforms(this._sceneState(), {
         ...view, outputSize, renderSize: [mw, mh],
         subpixel: false, jitterScale: 1.0, ...lighting,
+        desertLite: this._desertLiteFor(this.qualityTier),
       });
       this.device.queue.writeBuffer(this._meterUniformBuf, 0, u);
       const bindGroup = this.device.createBindGroup({
