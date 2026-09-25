@@ -22,6 +22,8 @@ import {
 import * as K from "./constants.js";
 import { worldToRelative } from "./camera.js";
 import { fromHalf, HAS_F16, toHalf } from "./half.js";
+import { buildDesertBounds, LAYERS as DESERT_BOUNDS_LAYERS }
+  from "./desert_bounds.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
@@ -135,7 +137,7 @@ export function desertReliefM(meta) {
 /**
  * Rows 25..46 under DESERT (raymarch.wgsl desert_tile), from the desert
  * tile's meta: its per-level tables four levels to a row, its per-level
- * colour correction a level to a row, then (bounce albedo, band_slope_max).
+ * colour correction a level to a row, then (bounce albedo, 0).
  * Twin of soar_host.desert_tile_rows.
  */
 export function desertTileRows(meta) {
@@ -160,12 +162,10 @@ export function desertTileRows(meta) {
   }
   for (const rgb of correction) rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
   const bounce = meta.bounce_albedo;
-  if (!Array.isArray(bounce) || bounce.length !== 3
-      || !Number.isFinite(meta.band_slope_max)) {
-    throw new Error("the desert tile's meta.json has no bounce_albedo or " +
-                    "band_slope_max.");
+  if (!Array.isArray(bounce) || bounce.length !== 3) {
+    throw new Error("the desert tile's meta.json has no bounce_albedo.");
   }
-  rows.push([bounce[0], bounce[1], bounce[2], meta.band_slope_max]);
+  rows.push([bounce[0], bounce[1], bounce[2], 0.0]);
   if (rows.length !== K.DESERT_TILE_ROWS) {
     throw new Error(`desertTileRows made ${rows.length} rows; the shader ` +
                     `reads ${K.DESERT_TILE_ROWS}.`);
@@ -224,10 +224,16 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  *
  * keepHeights holds the desert's level-0 height channel (as half-float bits)
  * for the camera's floor — the same bytes the shader reads.
+ *
+ * bounds builds the desert's bounds pyramid from every level's heights
+ * (desert_bounds.js; the trace steps on it) and returns it as `seaView`,
+ * the binding-9 view the desert reads, with its texture as
+ * `boundsTexture`.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
                                     { keepCells = false, keepHeights = false,
-                                      clock = false, schema } = {}) {
+                                      bounds = false, clock = false,
+                                      schema } = {}) {
   if (!schema) {
     throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
   }
@@ -242,6 +248,8 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
   let heights = null;
+  const boundsLevels = [];
+  let boundsTexture = null;
   const format = meta.format ?? "rgba16float";
   const channels = SURFACE_FORMAT_CHANNELS[format];
   const files = meta.files
@@ -273,6 +281,13 @@ export async function loadOceanTile(device, baseUrl, onProgress,
             await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())
         : await fetchBytes(url);
       const bytes = decodeSurfaceLevel(stored, n, meta);
+      if (bounds) {
+        const halves = new Uint16Array(
+          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+        const h = new Float32Array(n * n);
+        for (let i = 0; i < n * n; i++) h[i] = fromHalf(halves[i * channels]);
+        boundsLevels.push(h);
+      }
       if (keepHeights && level === 0) {
         const halves = new Uint16Array(
           bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
@@ -315,8 +330,28 @@ export async function loadOceanTile(device, baseUrl, onProgress,
         `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
         "them from.");
     }
+    if (bounds) {
+      const pyramid = buildDesertBounds(boundsLevels, dx);
+      const side = Math.round(Math.sqrt(pyramid[0].length / 4
+                                        / DESERT_BOUNDS_LAYERS));
+      boundsTexture = device.createTexture({
+        label: `${baseUrl}-bounds`,
+        size: [side, side, DESERT_BOUNDS_LAYERS],
+        format: "rgba16float",
+        mipLevelCount: pyramid.length,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      pyramid.forEach((bits, level) => {
+        const m = Math.max(1, side >> level);
+        device.queue.writeTexture(
+          { texture: boundsTexture, mipLevel: level }, bits,
+          { bytesPerRow: m * 8, rowsPerImage: m },
+          [m, m, DESERT_BOUNDS_LAYERS]);
+      });
+    }
   } catch (err) {
     texture.destroy();
+    boundsTexture?.destroy();
     throw err;
   }
   return {
@@ -333,6 +368,8 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     maxLod: meta.mips - 1,
     cells,
     heights,
+    seaView: boundsTexture?.createView({ dimension: "2d-array" }) ?? null,
+    boundsTexture,
     meta,
   };
 }

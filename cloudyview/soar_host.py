@@ -1105,13 +1105,17 @@ class SoarRenderer:
             usage=self.wgpu.TextureUsage.TEXTURE_BINDING)
         self._light_cache_dims = None
         # Binding 3 is the city's or the desert's tile; binding 9 the moving
-        # sea. Each scene fills the one it reads and binds a stand-in in the
-        # other, so one layout serves every surface.
+        # sea, or under the desert its bounds pyramid. Each scene fills what
+        # it reads and binds a stand-in in the rest, so one layout serves
+        # every surface.
         if self.surface == "ocean":
             self._ocean_tex = self._dummy_surface()
             self._sea_tex = self._load_sea()
+        elif self.surface == "desert":
+            self._ocean_tex, heights = self._load_surface_tile()
+            self._sea_tex = self._desert_bounds(heights)
         else:
-            self._ocean_tex = self._load_surface_tile()
+            self._ocean_tex, _ = self._load_surface_tile()
             self._sea_tex = self._dummy_surface()
         self._targets = None
         self._bind_group = None
@@ -1166,7 +1170,8 @@ class SoarRenderer:
         return tex
 
     def _load_surface_tile(self):
-        """The tile bound at binding 3: pre-built mips, level by level.
+        """The tile bound at binding 3: pre-built mips, level by level, and
+        each level's first channel (the desert's heights) as float16.
 
         Which tile depends on the surface: the desert's eroded terrain
         (rg16float) or the city density field (rgba16float). One binding,
@@ -1190,10 +1195,12 @@ class SoarRenderer:
         fmt = meta.get("format", "rgba16float")
         texel_bytes = SURFACE_FORMAT_CHANNELS[fmt] * 2
         self.surface_meta = meta
+        channels = SURFACE_FORMAT_CHANNELS[fmt]
         tex = self.device.create_texture(
             size=(n, n, 1), dimension="2d", format=fmt,
             mip_level_count=mips,
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
+        first = []
         for level, name in enumerate(surface_level_files(meta)):
             side = max(1, n >> level)
             raw = (tile_dir / name).read_bytes()
@@ -1207,6 +1214,29 @@ class SoarRenderer:
                 {"texture": tex, "mip_level": level}, data,
                 {"bytes_per_row": side * texel_bytes, "rows_per_image": side},
                 (side, side, 1))
+            first.append(np.frombuffer(data, np.float16)
+                         .reshape(side, side, channels)[..., 0])
+        return tex, first
+
+    def _desert_bounds(self, heights):
+        """Binding 9 under the desert: the bounds pyramid its trace steps on
+        (cloudyview/desert_bounds.py), built from the tile's own heights."""
+        from cloudyview import desert_bounds
+        wgpu = self.wgpu
+        levels = desert_bounds.build(heights,
+                                     float(self.surface_meta["cell_m"]))
+        m = levels[0].shape[1]
+        tex = self.device.create_texture(
+            size=(m, m, desert_bounds.LAYERS), dimension="2d",
+            format="rgba16float", mip_level_count=len(levels),
+            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
+        for level, data in enumerate(levels):
+            side = data.shape[1]
+            self.device.queue.write_texture(
+                {"texture": tex, "mip_level": level},
+                np.ascontiguousarray(data).tobytes(),
+                {"bytes_per_row": side * 8, "rows_per_image": side},
+                (side, side, desert_bounds.LAYERS))
         return tex
 
     def upload_volume(self, sigma: np.ndarray) -> None:
@@ -1764,8 +1794,8 @@ _DESERT_LEVEL_TABLES = ("slope_max", "envelope_m", "slope_variance_removed")
 def desert_tile_rows(meta: dict) -> list:
     """Rows 25..46 under DESERT (raymarch.wgsl desert_tile), from the desert
     tile's meta.json: its per-level tables four levels to a row, then its
-    per-level colour correction a level to a row, then (bounce albedo,
-    band_slope_max). scene.js desertTileRows is the twin."""
+    per-level colour correction a level to a row, then (bounce albedo, 0).
+    scene.js desertTileRows is the twin."""
     mips = int(meta["mips"])
     if mips != 12:
         raise ValueError(f"the desert tile has {mips} mips; the shader's "
@@ -1781,8 +1811,7 @@ def desert_tile_rows(meta: dict) -> list:
         raise ValueError(f"meta albedo_correction has {len(correction)} "
                          f"levels, not {mips}.")
     rows += [[*map(float, rgb), 0.0] for rgb in correction]
-    rows.append([*map(float, meta["bounce_albedo"]),
-                 float(meta["band_slope_max"])])
+    rows.append([*map(float, meta["bounce_albedo"]), 0.0])
     assert len(rows) == DESERT_TILE_ROWS
     return rows
 

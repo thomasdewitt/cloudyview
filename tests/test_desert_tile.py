@@ -74,7 +74,7 @@ def test_the_hosts_carry_the_tiles_tables():
     assert list(rows[6:9].ravel()) == META["slope_variance_removed"]
     assert rows[9:21, :3].tolist() == META["albedo_correction"]
     assert list(rows[21, :3]) == META["bounce_albedo"]
-    assert rows[21, 3] == META["band_slope_max"]
+    assert rows[21, 3] == 0.0
     for pattern in [r"fn desert_slope_max_at\(i: i32\) -> f32 \{\s*"
                     r"return desert_tile_level\(0, i\);",
                     r"fn desert_envelope_m_at\(i: i32\) -> f32 \{\s*"
@@ -82,8 +82,7 @@ def test_the_hosts_carry_the_tiles_tables():
                     r"fn desert_slope_variance_removed_at\(i: i32\) -> f32 "
                     r"\{\s*return desert_tile_level\(6, i\);",
                     r"return u\.desert_tile\[9 \+ i\]\.xyz;",
-                    r"return u\.desert_tile\[21\]\.xyz;",
-                    r"u\.desert_tile\[21\]\.w"]:
+                    r"return u\.desert_tile\[21\]\.xyz;"]:
         assert re.search(pattern, SHADER), pattern
 
 

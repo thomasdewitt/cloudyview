@@ -376,10 +376,11 @@ export class Viewer {
     }
     if (kind === "desert") {
       // keepHeights: the camera's floor follows the terrain, read from the
-      // same level-0 bytes the shader samples.
+      // same level-0 bytes the shader samples. bounds: the pyramid the
+      // ground's trace steps on, built from those same bytes.
       return (this._desertTile ??=
         await loadOceanTile(this.device, DESERT_URL, undefined,
-                            { keepHeights: true,
+                            { keepHeights: true, bounds: true,
                               schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
     return (this._ocean ??=
@@ -2385,6 +2386,7 @@ export class Viewer {
     this._ocean?.texture?.destroy();
     this._cityTile?.texture?.destroy();
     this._desertTile?.texture?.destroy();
+    this._desertTile?.boundsTexture?.destroy();
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
