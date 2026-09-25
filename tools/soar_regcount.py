@@ -33,7 +33,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from cloudyview.soar_host import read_shader, specialize  # noqa: E402
+from cloudyview.soar_host import (DESERT_FLORA_CUT_BY_TIER,  # noqa: E402
+                                  DESERT_LITE_TIERS, read_shader, specialize)
 
 CRATE = REPO / "tools" / "regcount"
 BINARY = CRATE / "target" / "release" / "regcount"
@@ -103,15 +104,21 @@ def main():
     build()
 
     light_cache, sky_probe = TIERS[args.tier]
+    # As both hosts do: a desert at a lite tier compiles the simplified desert.
+    desert_lite = args.surface == "desert" and args.tier in DESERT_LITE_TIERS
+    flora_cut = (DESERT_FLORA_CUT_BY_TIER[args.tier]
+                 if args.surface == "desert" else 1.0)
     specs = [args.a, args.b] if args.a and args.b else [args.shader]
     print(f"{args.entry}, surface {args.surface}, tier {args.tier} "
           f"(cache {light_cache}, probe {sky_probe}), periodic {args.periodic}"
-          f"{', nested' if args.nested else ''}")
+          f"{', nested' if args.nested else ''}"
+          f"{', desert lite' if desert_lite else ''}")
     for spec in specs:
         src = specialize(source_for(spec), periodic=args.periodic == "on",
                          nested=args.nested, max_light_steps=512,
                          surface=args.surface, light_cache=light_cache,
-                         sky_probe=sky_probe)
+                         sky_probe=sky_probe, desert_lite=desert_lite,
+                         desert_flora_cut=flora_cut)
         s = stats(src, args.entry)
         print(f"  {spec:28s} registers {s['Register Count']:4d}   "
               f"binary {s['Binary Size'] / 1024:7.0f} KB   "
