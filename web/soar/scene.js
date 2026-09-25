@@ -186,7 +186,7 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
                                     { keepCells = false, keepHeights = false,
-                                      schema } = {}) {
+                                      clock = false, schema } = {}) {
   if (!schema) {
     throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
   }
@@ -286,11 +286,22 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     // A tile-bound surface is a pure function of its tile, so its surface
     // frame folds at the tile (the sea's folds wider — see loadSea).
     surfacePeriod: meta.tile_extent_m,
+    // A surface whose shader reads the scene clock (`clock`: the city's
+    // steam) wraps it at its own period, where its animation repeats.
+    clockPeriod: clock ? clockPeriodOf(meta, baseUrl) : null,
     maxLod: meta.mips - 1,
     cells,
     heights,
     meta,
   };
+}
+
+function clockPeriodOf(meta, baseUrl) {
+  if (!(meta.clock_period_s > 0)) {
+    throw new Error(`${baseUrl}/meta.json has no clock_period_s, and this ` +
+                    "surface's clock runs (soar_host.CLOCK_SURFACES).");
+  }
+  return meta.clock_period_s;
 }
 
 // The sea's shipped encoding (cloudyview/sea_tile.py, whose arithmetic this

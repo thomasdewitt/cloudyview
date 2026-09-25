@@ -318,9 +318,10 @@ def test_the_surface_round_trips_to_the_uniforms(
     # the scene clock it was held at.
     assert tuple(u[24][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
-    # The clock is the sea's alone: an ocean still carries it, a city still
-    # neither writes --time nor packs one.
-    if kind == "ocean":
+    # The clock runs where the shader reads it: an ocean or a city still
+    # carries it (both periods far exceed it, so it packs unwrapped), a
+    # desert still neither writes --time nor packs one.
+    if kind in ("ocean", "city"):
         assert u[24][2] == np.float32(SCENE_TIME)
     else:
         assert u[24][2] == 0.0

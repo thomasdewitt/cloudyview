@@ -74,9 +74,10 @@ export function packUniforms(state, view) {
     // the desert's rule); the sea folds at its swell's period. Mirrors
     // SceneState.surface_period_m.
     surfacePeriodM = null,
-    // The sea's period in time (meta.json clock_period_s): the clock is
-    // packed modulo it, so float32 never loses the sea's cadence. Required
-    // over the ocean whenever the clock is not 0; unused elsewhere. Mirrors
+    // The surface's period in time (its meta.json clock_period_s): the
+    // clock is packed modulo it, so float32 never loses the cadence.
+    // Required over the sea and the city whenever the clock is not 0;
+    // unused over the desert, whose clock is 0. Mirrors
     // SceneState.clock_period_s.
     clockPeriodS = null,
   } = state;
@@ -144,7 +145,8 @@ export function packUniforms(state, view) {
     // when a real ice-fraction texture is bound at binding 8; the packer
     // just writes the flag, same contract as lightCache.
     iceMode = false,
-    // The scene clock, seconds (row 24.z): where the moving sea is.
+    // The scene clock, seconds (row 24.z): where the moving sea is, and
+    // the city's steam.
     sceneTime = 0.0,
   } = view;
 
@@ -334,14 +336,17 @@ export function packUniforms(state, view) {
   if (!Number.isFinite(Number(sceneTime))) {
     throw new Error(`scene_time must be finite; got ${sceneTime}.`);
   }
-  // The clock only over the sea: nothing else reads it, and as part of the
-  // scene key a running clock would keep a parked city or desert from ever
-  // converging while a track records.
+  // The clock only where the shader reads it — the sea's waves, the city's
+  // steam (soar_host.CLOCK_SURFACES): as part of the scene key a running
+  // clock would keep a parked desert from ever converging while a track
+  // records. Wrapped at the surface's own period in float64, before the
+  // narrowing to float32.
   let clock = 0.0;
-  if (!city && !desert && sceneTime !== 0) {
+  if (!desert && sceneTime !== 0) {
     if (!(clockPeriodS > 0)) {
-      throw new Error("an ocean scene with a running clock needs its " +
-                      "clockPeriodS (the sea's meta.json clock_period_s).");
+      throw new Error(`a ${city ? "city" : "sea"} scene with a running clock ` +
+                      "needs its clockPeriodS (the surface tile's " +
+                      "meta.json clock_period_s).");
     }
     clock = sceneTime % clockPeriodS;
     if (clock < 0) clock += clockPeriodS;

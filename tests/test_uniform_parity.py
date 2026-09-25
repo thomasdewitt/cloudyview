@@ -103,12 +103,18 @@ CASES = [
     ("ocean_clock_negative",
      {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
      {"scene_time": -3.25}),
-    # Off the ocean the clock packs as 0: nothing there reads it.
-    ("city_clock_is_zero",
+    # The city's clock runs too (2026-09-24: its steam reads it), wrapped
+    # at the city tile's own period, the same way in both.
+    ("city_clock_running",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
-      "ocean_max_lod": 8, "periodic": False},
+      "ocean_max_lod": 8, "periodic": False, "clock_period_s": 2600.0},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0, "scene_time": 77.5}),
+    ("city_clock_wrapped",
+     {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
+      "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
+      "ocean_max_lod": 8, "periodic": False, "clock_period_s": 2600.0},
+     {"sun_azimuth": 310.0, "sun_elevation": 22.0, "scene_time": 98765.4321}),
     ("city_surface_offset",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "surface_offset_m": [-102400.0, 204800.0],
@@ -129,6 +135,13 @@ CASES = [
       "desert_relief_m": [-14.0, 16.046875, 1.2621],
       "surface_offset_m": [-18630.2, 136143.7]},
      {"sun_elevation": 38.0}),
+    # Over the desert the clock packs as 0: nothing there reads it, and a
+    # running clock would keep a parked view from converging.
+    ("desert_clock_is_zero",
+     {"surface": "desert", "ocean_z": 12.5, "ocean_fif_dx": 2.0,
+      "ocean_tile_extent": 4096.0, "ocean_max_lod": 11,
+      "desert_relief_m": [-14.0, 16.046875, 1.2621]},
+     {"sun_elevation": 38.0, "scene_time": 77.5}),
 ]
 
 BASE_SCENE = dict(
@@ -299,6 +312,15 @@ def test_block_is_400_bytes():
     and not the other fails here as well as in the diff above."""
     assert sh.UNIFORM_NBYTES == 400
     assert _python_block({}, {}).nbytes == 400
+
+
+@pytest.mark.parametrize("surface", ["ocean", "city"])
+def test_a_running_clock_needs_its_surfaces_period(surface):
+    """No default period: a clock wrapped at the wrong one would pop."""
+    extra = ({"surface": "city", "city_tile_offset_m": [75330.0, -17010.0]}
+             if surface == "city" else {})
+    with pytest.raises(ValueError, match="needs clock_period_s"):
+        _python_block(extra, {"scene_time": 5.0})
 
 
 def test_periodic_requires_sun_above_horizon():
