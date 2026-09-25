@@ -1845,18 +1845,19 @@ export class Renderer {
    */
   async _ensureSurfaceTarget(targets) {
     if (!this._hasSurfacePass()) return;
-    // Every target a stage of this surface can write at ANY tier (the
-    // desert drops its later stages at the low tiers), so a tier change
-    // never reallocates: the intermediates its longest chain alternates
-    // between (surfaceStagePlan), one for two stages, both for more.
-    const longest = K.SURFACE_STAGES[this.scene.city ? "city" : "desert"];
-    const later = longest.length >= 2;
-    const both = longest.length >= 3;
-    const shape = `${later}|${both}`;
-    if (targets.surface && targets.surface.shape === shape) return;
+    // The intermediates the ACTIVE chain alternates between
+    // (surfaceStagePlan): none for one stage, one for two, both for more.
+    // Grow-only: a set that already holds enough keeps them, so a session
+    // at Low (the simplified desert's single stage) never allocates the
+    // two it does not use, and a tier change after the first growth never
+    // reallocates.
+    const nMid = Math.min(Math.max(this._stageEntries().length - 1, 0), 2);
+    if (targets.surface && targets.surface.nMid >= nMid) return;
+    const later = nMid >= 1;
+    const both = nMid >= 2;
     if (targets.surface) {
-      // Made for another surface (ocean -> desert -> city): retired once the
-      // GPU is done with any frame that still reads it.
+      // Too few intermediates for this chain: retired once the GPU is done
+      // with any frame that still reads it.
       for (const tex of targets.surface.textures) {
         retireAfterSubmittedWork(this.device, tex);
       }
@@ -1885,7 +1886,7 @@ export class Renderer {
                     { binding: 2, resource: veilView }],
         });
         return {
-          shape,
+          nMid,
           tex,
           textures: [tex, veil, plain, mid].filter(Boolean),
           view: tex.createView(),
