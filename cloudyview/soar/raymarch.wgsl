@@ -2220,6 +2220,9 @@ struct SeaSurface {
     // sea — see SEA_GLITTER_*) and how many facets the footprint holds.
     glitter_seed: vec2<u32>,
     glitter_facets: f32,
+    // The same count before the cell is rounded to a power of two: what
+    // the draw's weight reads, so it varies with the footprint smoothly.
+    glitter_count: f32,
 };
 
 // Glitter. The glint lobe is the MEAN of what the unresolved facets in a
@@ -2283,6 +2286,8 @@ fn sea_surface(world_xy: vec2<f32>, h: vec2<f32>, along: f32, across: f32,
                                     + (u32(level) * 40503u), 0u));
     out.glitter_seed = seed;
     out.glitter_facets = exp2(2.0 * level);
+    let cells = side / SEA_GLITTER_FACET_M;
+    out.glitter_count = cells * cells;
     return out;
 }
 
@@ -2308,12 +2313,15 @@ const SEA_GLITTER_SPREAD: f32 = 1.3;
 // Snow."). So the draw is blended toward its own mean, the smooth lobe, by
 // where the half vector sits in the lobe: GGX D(h) over its peak, 1 on the
 // sun's reflection, falling as the facets that would reflect it get rarer.
-// And only where the pixel expects a few glints: with lambda well under
-// one, a drawn footprint is almost always empty, and next to smooth sheen
-// an empty footprint on a sunlit wave face reads as a hole in the water
-// (a dark blob round one dot) rather than as glitter; from a few glints up
-// an empty footprint is rare (e^-4 at lambda 4) and the draw reads as
-// texture. The draw's mean is 1 (E[K / lambda] = 1, and each facet's
+// And only where a glitter cell expects a few glints: with lambda well
+// under one, a drawn cell is almost always empty, and next to smooth sheen
+// an empty cell on a sunlit wave face reads as a hole in the water (a dark
+// blob round one dot) rather than as glitter; from a few glints up an empty
+// cell is rare (e^-4 at lambda 4) and the draw reads as texture. The weight
+// reads the count at the footprint's own size, not the cell's: the cell is
+// rounded to a power of two, so lambda jumps fourfold where it steps — as
+// wide as this ramp — and a ramp on it would draw a contour at a fixed
+// footprint, sheen on one side and texture on the other. The draw's mean is 1 (E[K / lambda] = 1, and each facet's
 // brightness has mean 1), so any blend keeps the lobe's mean exactly — the
 // energy stays the smooth Cox-Munk specular's, with the sparkles only where
 // it is bright and the footprint holds enough of them.
@@ -2608,9 +2616,11 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let lobe = alpha_squared * alpha_squared / (denom * denom);
                 let core = smoothstep(SEA_GLITTER_CORE_LO,
                                       SEA_GLITTER_CORE_HI, lobe)
-                    * smoothstep(SEA_GLITTER_FEW, SEA_GLITTER_MANY, lambda);
+                    * smoothstep(SEA_GLITTER_FEW, SEA_GLITTER_MANY,
+                                 lambda * sea.glitter_count
+                                     / sea.glitter_facets);
                 var sparkle = 1.0;
-                if (core > 0.0 && lambda > 0.0) {
+                if (core > 0.0) {
                     let k = sea_poisson(lambda, sea_uniforms(sea.glitter_seed));
                     let draw = sea_glitter_brightness(k, sea.glitter_seed)
                         / lambda;
