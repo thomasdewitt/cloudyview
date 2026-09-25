@@ -20027,6 +20027,8 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
 // it and the extinction there, (t_in, t_out, sigma). Canes of mean width
 // DF_OCO_FAR_W spread over the cone's section at mid-chord: N w / (pi R^2),
 // more when in leaf.
+const DF_OCO_SOFT_NORM: f32 = 2.244;
+
 fn df_oco_medium(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
                  tb: f32) -> vec3<f32> {
     // As wide at the canes' tops as the canes spread (df_ocotillo_reach
@@ -20036,11 +20038,21 @@ fn df_oco_medium(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
     let apex = vec3<f32>(0.0, 0.0, -0.3 - 0.12 / tn);
     let top = it.a.x * 1.02 - apex.z;
     let ch = df_cone_chord(q0, dir, apex, tn, 0.3 - apex.z, top);
-    let zm = clamp(q0.z + dir.z * 0.5 * (max(ch.x, ta) + min(ch.y, tb))
-                   - apex.z, 0.3 - apex.z, top);
+    let tm = 0.5 * (max(ch.x, ta) + min(ch.y, tb));
+    let zm = clamp(q0.z + dir.z * tm - apex.z, 0.3 - apex.z, top);
     let rr = zm * tn;
     let leafy = select(1.0, 2.2, i32(it.a.w) == 1);
-    return vec3<f32>(ch, it.a.y * DF_OCO_FAR_W * leafy / (DF_PI * rr * rr));
+    // Thinned toward the rim and the top, where fewer canes reach (their
+    // lengths vary, their angles fill the fan), and read at the ray's
+    // middle through the cone: a uniform cone showed its hard outline as a
+    // grey lampshade. DF_OCO_SOFT_NORM = 1 / (mean of the two fall-offs over
+    // the cone's cross-section and height) keeps the plant's total.
+    let rho = length((q0 + dir * tm).xy) / max(rr, 1e-3);
+    let hf = (zm - (0.3 - apex.z)) / (top - (0.3 - apex.z));
+    let soft = (1.0 - smoothstep(0.5, 1.0, rho))
+        * (1.0 - smoothstep(0.55, 1.0, hf)) * DF_OCO_SOFT_NORM;
+    return vec3<f32>(ch, it.a.y * DF_OCO_FAR_W * leafy * soft
+                     / (DF_PI * rr * rr));
 }
 
 fn df_ocotillo_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
@@ -20528,14 +20540,29 @@ fn df_paloverde_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight,
 //   a = (stone count, horizontal extent, top, 1 for a big cell's heap)
 // Stone i (centre relative to the foot, size) is drawn from the seed where
 // it is needed (df_stone_draw), as a saguaro's arms are.
-// A stone is an ellipsoid (its own axes and yaw from its hash) with two
-// joint planes cutting it flat and a few long-wavelength undulations: the
-// distance is a bound (the undulations' slope is under 0.35), so the sphere
-// trace divides by 1.35. Desert varnish darkens what faces the sky and
-// stops short of the soil line, where the stone was buried until recently.
+// A stone is a corestone: a rounded box (its own axes and yaw from its
+// hash), which is what granite weathered along three joint sets looks
+// like, cut again by a sheeting joint across its top and a vertical one on
+// its side, split through by a crack in half the stones, and bent by a few
+// long undulations. Each stone lies in a skirt of grus — the coarse sand
+// it weathers to — a low mound mostly under the ground. The distance is a
+// bound (the undulations' slope is under 0.35), so the sphere trace divides
+// by 1.35. The face a hit lies on (DF_FACE_*) chooses its material: the
+// weathered body carries desert varnish where it faces the sky, dripping in
+// streaks down the sides, and lichen on the upper faces; a joint face
+// weathers as the body does with half its varnish; a crack's walls are
+// fresh rock, pale and unvarnished; the skirt is grus.
 const DF_ROCK: vec3<f32> = vec3<f32>(0.330, 0.285, 0.245);
 const DF_ROCK_VARNISH: vec3<f32> = vec3<f32>(0.090, 0.058, 0.040);
 const DF_ROCK_RIND: vec3<f32> = vec3<f32>(0.380, 0.240, 0.140);
+const DF_ROCK_FRESH: vec3<f32> = vec3<f32>(0.430, 0.350, 0.290);
+const DF_ROCK_GRUS: vec3<f32> = vec3<f32>(0.400, 0.335, 0.265);
+const DF_LICHEN_GREEN: vec3<f32> = vec3<f32>(0.300, 0.300, 0.120);
+const DF_LICHEN_ORANGE: vec3<f32> = vec3<f32>(0.450, 0.230, 0.070);
+const DF_FACE_BODY: f32 = 0.0;
+const DF_FACE_JOINT: f32 = 1.0;
+const DF_FACE_CRACK: f32 = 2.0;
+const DF_FACE_GRUS: f32 = 3.0;
 const DF_MAT_ROCK: i32 = 14;
 const DF_ROCK_FAR_FP: f32 = 0.02;
 
@@ -20543,10 +20570,40 @@ fn df_stone_param(it: DfItem, i: i32) -> vec4<f32> {
     return df_stone_draw(it.seed, i, it.a.w > 0.5);
 }
 
-fn df_stone_sdf(q: vec3<f32>, st: vec4<f32>, seed: u32) -> f32 {
+// A lattice point's value for df_vnoise, in [0, 1).
+fn df_lattice(c: vec3<i32>) -> f32 {
+    let u = bitcast<vec3<u32>>(c);
+    return df_u01(pcg2d(vec2<u32>(u.x ^ (u.z * 0x85ebca6bu), u.y)).x);
+}
+
+// Value noise on the unit lattice, trilinear with a smooth fade, in [0, 1].
+fn df_vnoise(p: vec3<f32>) -> f32 {
+    let c = vec3<i32>(floor(p));
+    let f = p - floor(p);
+    let w = f * f * (3.0 - 2.0 * f);
+    let z0 = mix(mix(df_lattice(c), df_lattice(c + vec3<i32>(1, 0, 0)), w.x),
+                 mix(df_lattice(c + vec3<i32>(0, 1, 0)),
+                     df_lattice(c + vec3<i32>(1, 1, 0)), w.x), w.y);
+    let z1 = mix(mix(df_lattice(c + vec3<i32>(0, 0, 1)),
+                     df_lattice(c + vec3<i32>(1, 0, 1)), w.x),
+                 mix(df_lattice(c + vec3<i32>(0, 1, 1)),
+                     df_lattice(c + vec3<i32>(1, 1, 1)), w.x), w.y);
+    return mix(z0, z1, w.z);
+}
+
+// max(a, b) with its edge rounded over k.
+fn df_smax(a: f32, b: f32, k: f32) -> f32 {
+    let h = max(k - abs(a - b), 0.0) / k;
+    return max(a, b) + h * h * k * 0.25;
+}
+
+// (distance bound, face) of stone `st` (centre, size) at q, the heap's
+// ground level `g` above its foot.
+fn df_stone_sdf(q: vec3<f32>, st: vec4<f32>, seed: u32, g: f32) -> vec2<f32> {
     let hs = pcg2d(vec2<u32>(seed, seed ^ 0x68bc21ebu));
     let h1 = df_u01(hs.x);
     let h2 = df_u01(hs.y);
+    let hj = df_rand4(pcg2d(vec2<u32>(seed ^ 0x2545f491u, seed)));
     let yaw = h1 * DF_TAU;
     let cy = cos(yaw);
     let sy = sin(yaw);
@@ -20554,29 +20611,67 @@ fn df_stone_sdf(q: vec3<f32>, st: vec4<f32>, seed: u32) -> f32 {
     let lp = vec3<f32>(cy * p.x + sy * p.y, -sy * p.x + cy * p.y, p.z);
     let r = st.w * vec3<f32>(1.0 + 0.35 * h2, 1.0 - 0.15 * h1,
                              0.72 + 0.2 * h2);
-    // Ellipsoid bound (Quilez): exact on the surface, conservative off it.
-    let k0 = length(lp / r);
-    let k1 = length(lp / (r * r));
-    var d = k0 * (k0 - 1.0) / max(k1, 1e-6);
-    // Two joint planes, softened: the flat faces granite breaks along.
-    let n1 = normalize(vec3<f32>(0.8, 0.2 * h1, 0.5 + h2));
-    let n2 = normalize(vec3<f32>(-0.4, 0.9, 0.2 - h1));
-    d = max(d, dot(lp, n1) - 0.72 * st.w);
-    d = max(d, dot(lp, n2) - 0.80 * st.w);
+    // The rounded box: rounding over 55-80 % of the smallest half-axis.
+    let k = (0.55 + 0.25 * hj.x) * min(min(r.x, r.y), r.z);
+    let bq = abs(lp) - (r - k);
+    var d = length(max(bq, vec3<f32>(0.0)))
+        + min(max(bq.x, max(bq.y, bq.z)), 0.0) - k;
+    var face = DF_FACE_BODY;
+    // The sheeting joint across the top (on three stones in five) and a
+    // vertical joint on the side, each far enough inside the body to cut a
+    // facet, not a table; the edges rounded over a few centimetres.
+    let n1 = normalize(vec3<f32>(0.25 * (hj.y - 0.5), 0.25 * (hj.z - 0.5), 1.0));
+    let aj = DF_TAU * hj.w;
+    let n2 = vec3<f32>(cos(aj), sin(aj), 0.12 * (h1 - 0.5));
+    let e = 0.04 * st.w;
+    let d1 = select(-1e9, dot(lp, n1) - (0.80 + 0.12 * hj.y) * r.z,
+                    hj.y < 0.6);
+    let d2 = dot(lp, n2) - (0.74 + 0.18 * hj.z) * max(r.x, r.y);
+    let dj = df_smax(d1, d2, e);
+    if (dj > d) {
+        face = DF_FACE_JOINT;
+    }
+    d = df_smax(d, dj, e);
+    // The crack: a vertical split right through, a centimetre or two wide.
+    if (h2 < 0.5) {
+        let ac = aj + 1.2 + 1.5 * h2;
+        let nc = vec3<f32>(cos(ac), sin(ac), 0.0);
+        let w = 0.006 + 0.012 * st.w;
+        let dc = w - abs(dot(lp, nc) - (hj.x - 0.5) * 0.5 * r.x);
+        if (dc > d) {
+            face = DF_FACE_CRACK;
+        }
+        d = max(d, dc);
+    }
     // Long undulations.
-    let w = 2.3 / st.w;
-    d = d + 0.045 * st.w * (sin(w * lp.x + 6.0 * h1) * sin(w * 0.8 * lp.y + 3.0 * h2)
-                            + 0.6 * sin(w * 1.7 * lp.z + 1.3 * lp.x * w));
-    return d;
+    let wv = 2.3 / st.w;
+    d = d + 0.07 * st.w * (sin(wv * lp.x + 6.0 * h1) * sin(wv * 0.8 * lp.y + 3.0 * h2)
+                           + 0.6 * sin(wv * 1.7 * lp.z + 1.3 * lp.x * wv));
+    // The grus skirt: a flat mound about the stone, 4 cm proud of the
+    // ground at the stone and under it by the skirt's edge.
+    let sr = vec3<f32>(1.25 * st.w, 1.25 * st.w, 0.14);
+    let sp = vec3<f32>(p.xy, q.z - (g - 0.10));
+    let s0 = length(sp / sr);
+    let s1 = length(sp / (sr * sr));
+    let ds = s0 * (s0 - 1.0) / max(s1, 1e-6);
+    if (ds < d) {
+        return vec2<f32>(ds, DF_FACE_GRUS);
+    }
+    return vec2<f32>(d, face);
 }
 
+// (distance bound, face) of the nearest stone of a heap. Ground level is
+// 0.1 above a big heap's foot (df_big_item sinks it) and at a small
+// stone's.
 fn df_boulder_sdf(it: DfItem, q: vec3<f32>) -> vec2<f32> {
     var best = vec2<f32>(1e9, 0.0);
     let n = i32(it.a.x);
+    let g = 0.1 * it.a.w;
     for (var i: i32 = 0; i < n; i = i + 1) {
-        let d = df_stone_sdf(q, df_stone_param(it, i), it.seed.x + u32(i) * 747u);
-        if (d < best.x) {
-            best = vec2<f32>(d, f32(i));
+        let d = df_stone_sdf(q, df_stone_param(it, i),
+                             it.seed.x + u32(i) * 747u, g);
+        if (d.x < best.x) {
+            best = d;
         }
     }
     return best;
@@ -20667,7 +20762,9 @@ fn df_boulder_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.kind = DF_KIND_BOULDER;
     let qh = q0 + dir * fh.x;
     res.normal = normalize(fh.yzw);
-    res.mat = vec4<f32>(f32(DF_MAT_ROCK) + 0.9 * df_u01(it.seed.y),
+    // The far form's faces are sub-pixel: the body's material stands for
+    // them (df_boulder_shade averages what they add).
+    res.mat = vec4<f32>(f32(DF_MAT_ROCK) + 0.19 * df_u01(it.seed.y),
                         qh.z, qh.x, qh.y);
     return res;
 }
@@ -20717,36 +20814,71 @@ fn df_boulder_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
           + k3 * df_boulder_sdf(it, qh + e * k3).x
           + k4 * df_boulder_sdf(it, qh + e * k4).x;
     res.normal = normalize(g);
-    // Height above the soil line, for the varnish's lower edge.
-    res.mat = vec4<f32>(f32(DF_MAT_ROCK) + 0.9 * df_u01(it.seed.y),
-                        qh.z, qh.x, qh.y);
+    // The face and a tint draw in the code's fraction (0.2 a face, the tint
+    // in 0.19 below it); the height above the soil line, for the varnish's
+    // lower edge, and where the hit is, for the patterns.
+    let face = df_boulder_sdf(it, qh).y;
+    res.mat = vec4<f32>(f32(DF_MAT_ROCK) + 0.2 * face
+                        + 0.19 * df_u01(it.seed.y), qh.z, qh.x, qh.y);
     return res;
 }
 
 fn df_boulder_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
                     Ls: DesertLight) -> vec3<f32> {
-    let tint = fract(h.mat.x) / 0.9;
+    let fr = fract(h.mat.x);
+    let face = floor(fr / 0.2 + 1e-3);
+    let tint = (fr - 0.2 * face) / 0.19;
     let z = h.mat.y;
     let n = h.normal;
     let pl = vec3<f32>(h.mat.z, h.mat.w, z);
     // Mineral speckle (feldspar, quartz, biotite) at a few millimetres,
-    // averaged away as the footprint outgrows it.
-    let cellp = floor(pl * 180.0);
+    // averaged away as the footprint outgrows it; grus is the same grains
+    // loose, a little coarser.
+    let grus = face == DF_FACE_GRUS;
+    let cellp = floor(pl * select(180.0, 90.0, grus));
     let cxy = bitcast<vec2<u32>>(cellp.xy);
     let sp = pcg2d(cxy ^ vec2<u32>(bitcast<u32>(cellp.z)));
     let grain = df_u01(sp.x);
     let gw = 1.0 - smoothstep(0.004, 0.02, fp);
     let speck = mix(1.0, 0.55 + 0.9 * grain, gw * 0.6);
-    // Varnish: on what faces the sky, patchy, absent near the soil line.
+    if (grus) {
+        return desert_lambert(DF_ROCK_GRUS * (0.9 + 0.2 * tint) * speck, n, Ls);
+    }
+    if (face == DF_FACE_CRACK) {
+        // A crack's walls: rock broken since the varnish formed.
+        return desert_lambert(DF_ROCK_FRESH * (0.65 + 0.12 * tint) * speck, n,
+                              Ls);
+    }
+    // A joint face is as old as the body round it, but opened later: it
+    // weathers the same and carries half the varnish.
+    let jv = select(1.0, 0.5, face == DF_FACE_JOINT);
+    // Patterns on the weathered body, from the hit's place on the heap: a
+    // slow blotch, and drip streaks running down the sides from the sky-
+    // facing top where the varnish grows.
     let blotch = 0.5 + 0.5 * sin(pl.x * 3.1 + 1.7 * sin(pl.y * 2.3 + tint * 9.0))
         * sin(pl.y * 2.7 + pl.z * 1.9);
+    // The streaks: value noise stretched down the fall line (about 5 cm
+    // across the side, 80 cm down it).
+    let az = atan2(pl.y, pl.x);
+    let streak = smoothstep(0.55, 0.75,
+                            df_vnoise(vec3<f32>(az * 14.0, pl.z * 1.2,
+                                                tint * 13.0)));
+    let side = 1.0 - abs(n.z);
     let above = smoothstep(0.02, 0.18, z);
-    let varn = clamp((0.35 + 0.65 * max(n.z, 0.0)) * above
-                     * (0.45 + 0.55 * blotch), 0.0, 1.0);
+    let varn = clamp(((0.3 + 0.7 * max(n.z, 0.0)) * (0.45 + 0.55 * blotch)
+                      + 0.9 * streak * side) * above * jv, 0.0, 1.0);
     // The rind: an orange band just above the soil.
     let rind = (1.0 - smoothstep(0.0, 0.12, z)) * 0.7;
-    var alb = mix(DF_ROCK * (0.9 + 0.2 * tint), DF_ROCK_VARNISH, varn * 0.85);
-    alb = mix(alb, DF_ROCK_RIND, rind) * speck;
+    // Lichen: crusts of a few centimetres, clustered, on the upper faces,
+    // green-grey and orange (two octaves of value noise, the coarse one
+    // gathering the fine).
+    let ln = 0.65 * df_vnoise(pl * 9.0) + 0.35 * df_vnoise(pl * 31.0 + 7.1);
+    let lich = smoothstep(0.66, 0.74, ln) * smoothstep(0.1, 0.6, n.z) * above;
+    let lcol = mix(DF_LICHEN_GREEN, DF_LICHEN_ORANGE,
+                   step(0.5, df_vnoise(pl * 2.3 + 3.7)));
+    var alb = mix(DF_ROCK * (0.9 + 0.2 * tint), DF_ROCK_VARNISH, varn * 0.6);
+    alb = mix(alb, DF_ROCK_RIND, rind);
+    alb = mix(alb, lcol, lich * 0.8) * speck;
     return desert_lambert(alb, n, Ls)
         + Ls.sun * df_ggx_spec(n, dir, Ls.sun_dir, 0.45, 0.04) * varn;
 }
