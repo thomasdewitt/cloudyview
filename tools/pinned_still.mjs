@@ -9,11 +9,15 @@
 // and diff the lines.
 //
 //   node tools/pinned_still.mjs --web DIR [--cdp PORT]
-//        [--scenes city,day] [--tiers high,low,max] [--size 640x360]
+//        [--scenes city,day,desert] [--tiers high,low,max] [--size 640x360]
 //
 // DIR is a checkout's web/ directory WITH soar/demos present (the symlink
 // into the site's demo store): the day scene is the TWP-ICE demo over the
-// sea, the city is cyberpunk mode's first case. The tree is served here on a
+// sea, the desert is the same demo over the desert (?surface=desert), the
+// city is cyberpunk mode's first case. The desert's tier picks its variant
+// as flight does (renderer._desertLiteFor): the default tiers take the full
+// ground at high and max and the LITE ground at low, and each desert line
+// says which it drew. The tree is served here on a
 // fresh port (tools/soar_cdp.mjs) and its shader hash is printed with the
 // stills. CDP_PORT is a Chrome with --remote-debugging-port and a hardware
 // WebGPU adapter (see tests/test_tint_compile.py). The live loop is held off
@@ -21,7 +25,8 @@
 // pipeline and the sun-tau bake are settled first, so nothing but the tree
 // can move a byte.
 //
-// Output: one line per still, "scene/tier sha256[:16] mean-rgb camera".
+// Output: one line per still, "scene/tier sha256[:16] mean-rgb camera",
+// the desert's tier suffixed "+lite" where it drew the LITE ground.
 // Exit 0; 2 when it cannot run.
 
 import { join } from "node:path";
@@ -34,18 +39,22 @@ const option = (name, fallback) => {
 };
 const webDir = option("--web", null);
 const cdpPort = option("--cdp", "9333");
-const scenes = option("--scenes", "city,day").split(",");
+const scenes = option("--scenes", "city,day,desert").split(",");
 const tiers = option("--tiers", "high,low,max").split(",");
 const [w, h] = option("--size", "640x360").split("x").map(Number);
 if (!webDir) {
   console.error("usage: node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
-                "[--scenes city,day] [--tiers high,low,max] [--size WxH]");
+                "[--scenes city,day,desert] [--tiers high,low,max] [--size WxH]");
   process.exit(2);
 }
 
 const SCENES = {
   city: { mode: "cyberpunk", demo: null },
   day: { mode: "research", demo: "twpice" },
+  // Low over the ground, looking ahead and down, so the stills hold the near
+  // stones and plants (the refine stage) as well as the far forms.
+  desert: { mode: "research", demo: "twpice", surface: "desert",
+            ground: { up: 3.0, elevation: -8.0 } },
 };
 
 const server = await serveTree(webDir);
@@ -58,14 +67,15 @@ try {
   tab = await openTab(cdpPort);
   for (const name of scenes) {
     const sc = SCENES[name];
-    if (!sc) throw new Error(`unknown scene '${name}' (city, day)`);
+    if (!sc) throw new Error(`unknown scene '${name}' (city, day, desert)`);
     await tab.goto(`${server.base}/soar/`);
     await tab.eval(`localStorage.clear();
       localStorage.setItem("soar.mode", ${JSON.stringify(sc.mode)});
       localStorage.setItem("soar.tutorialDone", "1");
       localStorage.setItem("soar.tutorialResearchDone", "1"); true`);
     if (sc.demo) {
-      await tab.goto(`${server.base}/soar/?demo=${sc.demo}`);
+      const surface = sc.surface ? `&surface=${sc.surface}` : "";
+      await tab.goto(`${server.base}/soar/?demo=${sc.demo}${surface}`);
     } else {
       await tab.goto(`${server.base}/soar/`);
       await tab.waitFor(`!document.getElementById("capability").innerText.startsWith("Checking")`);
@@ -74,6 +84,19 @@ try {
     await tab.waitFor(`(() => { const L = document.getElementById("loading");
       if (L.classList.contains("failed") && !L.hidden) throw new Error(L.innerText);
       return window.soar?.scene && L.hidden; })()`, 180000);
+    // The surface asked for, or no still: a ?surface the tree ignores would
+    // otherwise hash the sea as the desert.
+    const desert = await tab.eval(`Boolean(window.soar.scene.desert)`);
+    if (desert !== (sc.surface === "desert")) {
+      throw new Error(`scene '${name}' loaded ${desert ? "the desert" : "no desert"}`);
+    }
+    if (sc.ground) {
+      await tab.eval(`(() => { const cam = window.soar.camera;
+        const floor = window.soar.scene.desertFloorAt(cam.surfacePosition);
+        cam.displace(0.0, 0.0, floor + ${sc.ground.up} - cam.position[2]);
+        cam.elevation = ${sc.ground.elevation};
+        return true; })()`);
+    }
     await tab.waitFor(`(window.soar.renderer._pendingPipelines?.size ?? 0) === 0
       && !window.soar.renderer.lightBakePending`, 180000);
     for (const tier of tiers) {
@@ -96,10 +119,14 @@ try {
           return { sha: [...new Uint8Array(d)].slice(0, 8)
                      .map((b) => b.toString(16).padStart(2, "0")).join(""),
                    mean: (sum / (img.data.length / 4) / 3).toFixed(4),
-                   cam: s.camera.position.map((v) => v.toFixed(2)).join(",") };
+                   cam: s.camera.position.map((v) => v.toFixed(2)).join(","),
+                   // A tree from before DESERT_LITE has no lite ground.
+                   lite: s.renderer._desertLiteFor?.(${JSON.stringify(tier)})
+                         ?? false };
         } finally { s._capturing = false; }
       })()`);
-      console.log(`${name}/${tier} ${r.sha} ${r.mean} ${r.cam}`);
+      console.log(`${name}/${tier}${r.lite ? "+lite" : ""} ${r.sha} ${r.mean} ` +
+                  r.cam);
     }
   }
   await done(0);
