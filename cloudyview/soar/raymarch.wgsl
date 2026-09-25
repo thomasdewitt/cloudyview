@@ -21444,12 +21444,19 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
     } else {
         // The plants' shadow on the ground and its stones.
         let plants = desert_flora_shadow(h.pos, sun, fp, refine);
-        let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
         // Stones only where they can resolve: see desert_ground_at.
         rgb = desert_ground_radiance(h, dir, fp, L, plants,
-                                     refine || DESERT_LITE)
-              * (1.0 - far.cover)
-              + far.cover * desert_flora_far_shade(far, dir, L);
+                                     refine || DESERT_LITE);
+        // The plants past the explicit walk over this ground (decals, the
+        // field): here only under DESERT_LITE, whose one stage this is; the
+        // full desert's flora stage lays them over the hazed ground
+        // (desert_surface_flora), keeping the field's registers out of the
+        // stage that traces the whole ground.
+        if (DESERT_LITE) {
+            let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
+            rgb = rgb * (1.0 - far.cover)
+                + far.cover * desert_flora_far_shade(far, dir, L);
+        }
     }
     return desert_haze(rgb, dir, sun, h.t, pos_world.z);
 }
@@ -21485,23 +21492,67 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
         // refine stage, so under DESERT_LITE this pass shades every pixel.
         return vec4<f32>(DESERT_UNSHADED, 0.0, 0.0, terrain.t);
     }
-    // The whole desert along the ray: the ground, then whatever stands on
-    // it in front of the ground hit.
-    let inv_dir = safe_inv_dir(dir);
-    var h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
-    let slab = desert_flora_slab(o, dir, inv_dir, h.t);
-    if (slab.y > slab.x) {
-        let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
-                                    pixel_angle);
-        if (fh.hit && fh.t < h.t) {
-            h = fh;
-        }
-    }
+    // The ground; the plants standing in front of it are the flora stage's
+    // (desert_surface_flora), which keeps their walk out of this stage's
+    // registers.
+    let h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
     if (!h.hit) {
         return vec4<f32>(0.0, 0.0, 0.0, 1e30);
     }
     return vec4<f32>(desert_shade_pixel(h, o, dir, pixel_angle, frame_index,
                                         strat_pixel, jitter_amp, false), h.t);
+}
+
+// THE FLORA ENTRY (fs_surface_flora, under DESERT and not DESERT_LITE):
+// the plants in front of the ground the first stage found and shaded.
+// `plain` is that stage's (hazed radiance, t), t = 1e30 on a miss. Over the
+// ground go the plants past the explicit walk (decals, the field) — laid
+// over the hazed radiance, which is the same as laying them before the
+// haze, the haze being affine in it — and in front of it all, the nearest
+// explicit plant the walk finds. A pixel the first stage left to the
+// refine stage (DESERT_UNSHADED: ground inside the refine reach, where the
+// far cover is nothing) is the refine stage's whole and passes through.
+fn desert_surface_flora(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    if (plain.x == DESERT_UNSHADED) {
+        return plain;
+    }
+    let o = desert_camera_origin();
+    var out = plain;
+    if (plain.w < 1e29) {
+        out = vec4<f32>(desert_flora_far_over(plain.xyz, o, cr, plain.w),
+                        plain.w);
+    }
+    let inv_dir = safe_inv_dir(cr.dir);
+    let slab = desert_flora_slab(o, cr.dir, inv_dir, plain.w);
+    if (slab.y <= slab.x) {
+        return out;
+    }
+    let fh = desert_flora_trace(o, cr.dir, inv_dir, slab.x, slab.y,
+                                cr.true_pixel_angle);
+    if (!fh.hit || fh.t >= plain.w) {
+        return out;
+    }
+    return vec4<f32>(desert_shade_pixel(fh, o, cr.dir, cr.true_pixel_angle,
+                                        cr.frame_index, cr.strat_pixel,
+                                        cr.jitter_amp, false), fh.t);
+}
+
+// The far cover (desert_flora_far) over a ground point t along the camera
+// ray, laid over that point's hazed radiance `ground` as desert_shade lays
+// it under DESERT_LITE: the same light, the same draws, then the haze.
+fn desert_flora_far_over(ground: vec3<f32>, o: vec3<f32>, cr: CameraRay,
+                         t: f32) -> vec3<f32> {
+    let sun = u.sun_dir.xyz;
+    let far = desert_flora_far(o, cr.dir, t, cr.true_pixel_angle, sun);
+    if (far.cover <= 0.0) {
+        return ground;
+    }
+    let sd = desert_sun_draws(cr.frame_index, cr.strat_pixel, cr.jitter_amp);
+    let pos_world = u.cam_origin.xyz + t * cr.dir;
+    let L = desert_light(pos_world, sun, sd.xyz, t, sd.w);
+    let f = desert_haze(desert_flora_far_shade(far, cr.dir, L), cr.dir, sun, t,
+                        pos_world.z);
+    return ground * (1.0 - far.cover) + far.cover * f;
 }
 
 // One desert hit shaded for this pixel: the sun-march and solar-cone draws
@@ -21511,16 +21562,23 @@ fn desert_shade_pixel(h: DesertHit, o: vec3<f32>, dir: vec3<f32>,
                       pixel_angle: f32, frame_index: u32,
                       strat_pixel: vec2<u32>, jitter_amp: f32,
                       refine: bool) -> vec3<f32> {
+    let sd = desert_sun_draws(frame_index, strat_pixel, jitter_amp);
+    return desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir,
+                        u.sun_dir.xyz, sd.xyz, sd.w, pixel_angle, refine);
+}
+
+// This pixel's sun-march and solar-cone draws, the ones fs_main makes:
+// (the jittered shadow direction, the sun-march jitter).
+fn desert_sun_draws(frame_index: u32, strat_pixel: vec2<u32>,
+                    jitter_amp: f32) -> vec4<f32> {
     let sun = u.sun_dir.xyz;
     let jit = jitter_amp * strat1(frame_index, strat_pixel,
                                   STRAT_STREAM_SUN_MARCH, STRAT_ALPHA_4);
     let cone = strat2(frame_index, strat_pixel, STRAT_STREAM_SUN_CONE,
                       vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
-    let sun_shadow = sun_cone_dir(sun, sun_tangent_frame(sun), cone,
+    return vec4<f32>(sun_cone_dir(sun, sun_tangent_frame(sun), cone,
                                   SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
-                                  * jitter_amp);
-    return desert_shade(h, o, u.cam_origin.xyz + h.t * dir, dir, sun,
-                        sun_shadow, jit, pixel_angle, refine);
+                                  * jitter_amp), jit);
 }
 
 // THE REFINE ENTRY (fs_surface_refine, under DESERT): the near plants the
@@ -26560,6 +26618,9 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
 fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
     return plain;
 }
+fn desert_surface_flora(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
 fn desert_bounce_albedo() -> vec3<f32> {
     return vec3<f32>(0.0);
 }
@@ -27254,17 +27315,21 @@ fn fs_surface_refine(@builtin(position) frag_pos: vec4<f32>)
     return plain;
 }
 
-// The desert's flora stage (desert-flora's split of the far-form walk out
-// of the first stage's registers): it reads the ground the first stage
-// traced at group 1 binding 1 and writes the surface the refinement reads.
-// Joins the desert's stages in soar_host.SURFACE_STAGES and
-// web/soar/constants.js SURFACE_STAGES, between fs_surface and
-// fs_surface_refine, with the walk; until then it is not run, and it passes
-// the ground through unchanged.
+// The desert's flora stage: the explicit plants' far-form walk, split out
+// of the first stage so its registers stay out of the stage that shades the
+// whole ground (desert_surface_flora). It reads the ground the first stage
+// traced at group 1 binding 1 and writes the surface the refinement reads;
+// the desert's stages in soar_host.SURFACE_STAGES and web/soar/constants.js
+// SURFACE_STAGES, between fs_surface and fs_surface_refine (not under
+// DESERT_LITE, which has no walk).
 @fragment
 fn fs_surface_flora(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
-    return textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    let plain = textureLoad(surface_plain, vec2<i32>(frag_pos.xy), 0);
+    if (DESERT) {
+        return desert_surface_flora(camera_ray(frag_pos), plain);
+    }
+    return plain;
 }
 
 // The third stage, for a surface that has one: the city's street

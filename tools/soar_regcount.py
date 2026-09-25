@@ -41,7 +41,7 @@ BINARY = CRATE / "target" / "release" / "regcount"
 # Entry point -> the color-attachment formats its pipeline renders into, one
 # per fragment output: the first and last surface stages also write the veil.
 FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f,rgba32ui",
-           "fs_surface_refine": "rgba32f",
+           "fs_surface_flora": "rgba32f", "fs_surface_refine": "rgba32f",
            "fs_surface_street": "rgba32f,rgba32ui", "fs_bake_light": "r16f"}
 # The lighting method per tier (web/soar/constants.js QUALITY_PRESETS):
 # (light cache, sky probe).
