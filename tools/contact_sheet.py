@@ -22,7 +22,7 @@ used: a field that is not periodic (the TWP-ICE subvolume) shows its wrap
 seams as hard cloud edges.
 
   * ocean — the tree's witness.render_nested over marine-congestus-coarse:
-    glitter toward a low sun, whitecaps at 120 m, an aerial, one close view
+    glitter toward a low sun, a look-down at 120 m, an aerial, one close view
     at two scene clocks (a tree without the clock renders it once, marked).
   * city — the tree's tools/night_city_harness.py (its NetCDF loader swapped
     for the demo loader) in cyberpunk mode's frame: its tile offset and moon
@@ -122,7 +122,7 @@ SCENES = {
     "ocean": [
         _ocean("glitter_low_sun", "glitter toward a low sun, 30 m",
                (*OCEAN_CLEAR, 30.0, 250.0, -6.0, 70.0, 250.0, 10.0)),
-        _ocean("whitecaps_mid", "whitecaps, 120 m, looking down",
+        _ocean("lookdown_mid", "looking down from 120 m",
                (*OCEAN_CLEAR, 120.0, 100.0, -35.0, 70.0, 20.0, 55.0)),
         # Above the congestus tops (3.9 km), 3.5 km back along its azimuth
         # (20 degrees) so that 55 degrees down it sees the clear patch.
