@@ -597,13 +597,14 @@ export class Renderer {
     // Bindings 3 and 9 are the two surface slots: the city's or the
     // desert's tile at 3, the moving sea at 9. A scene fills the one it
     // reads; the other gets this 1x1 zero stand-in, viewed as a 2D texture
-    // or as a one-layer array.
-    this._surfaceDummy = device.createTexture({
-      label: "soar-surface-dummy", size: [1, 1, 1], format: "rgba16float",
+    // or as a one-layer array. (Its own field: it once shared
+    // _surfaceDummy's name, which orphaned group 1's stand-in above.)
+    this._tileDummy = device.createTexture({
+      label: "soar-tile-dummy", size: [1, 1, 1], format: "rgba16float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     device.queue.writeTexture(
-      { texture: this._surfaceDummy }, new Uint16Array(4),
+      { texture: this._tileDummy }, new Uint16Array(4),
       { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
@@ -705,12 +706,12 @@ export class Renderer {
 
   /** Binding 3's stand-in over the ocean, whose sea is at binding 9. */
   _tileDummyView() {
-    return this._surfaceDummy.createView();
+    return this._tileDummy.createView();
   }
 
   /** Binding 9's stand-in under the city and the desert: one layer. */
   _seaDummyView() {
-    return this._surfaceDummy.createView({ dimension: "2d-array" });
+    return this._tileDummy.createView({ dimension: "2d-array" });
   }
 
   /**
@@ -2373,7 +2374,7 @@ export class Renderer {
     this.uniformBuf?.destroy();
     this.accumUniformBuf?.destroy();
     this._iceDummy?.destroy();
-    this._surfaceDummy?.destroy();
+    this._tileDummy?.destroy();
     this._veilDummy?.destroy();
     // The sun-tau cache is volume/8 bytes — hundreds of MB on a large field
     // — and none of these were released here before: every change of field
