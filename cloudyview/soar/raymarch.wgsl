@@ -14811,13 +14811,16 @@ fn cc_manholesteam_vnoise3(p: vec3<f32>) -> f32 {
     // Two z slices of the 2-D lattice, told apart by a large shift; z wraps
     // at ZWRAP cells, which is what makes the steam periodic in the clock
     // (and keeps the hash's arguments small however long the flight).
-    // An integer modulo: a float floor(i.z / ZWRAP) can land one short at
-    // an exact multiple (the reciprocal is a ulp off) and give z0 = ZWRAP,
-    // a seam across the plume.
-    let nw = i32(cc_manholesteam_ZWRAP);
-    let iz = ((i32(i.z) % nw) + nw) % nw;
-    let z0 = f32(iz);
-    let z1 = f32((iz + 1) % nw);
+    // i.z and ZWRAP are integers held exactly in f32, so the floor-div wrap
+    // is exact but for one case: at an exact multiple a reciprocal a ulp
+    // off can floor one short and give z0 = ZWRAP (or one long, -ZWRAP) —
+    // a seam across the plume. The two selects put that back in [0, ZWRAP).
+    // Not the euclidean ((a % n) + n) % n: that is docs/soar-bugs.md bug
+    // 22's trigger (NVIDIA's compiler segfaults on it under Firefox).
+    var z0 = i.z - cc_manholesteam_ZWRAP * floor(i.z / cc_manholesteam_ZWRAP);
+    z0 = select(z0, z0 - cc_manholesteam_ZWRAP, z0 >= cc_manholesteam_ZWRAP);
+    z0 = select(z0, z0 + cc_manholesteam_ZWRAP, z0 < 0.0);
+    let z1 = select(z0 + 1.0, 0.0, z0 + 1.0 >= cc_manholesteam_ZWRAP);
     let s0 = i.xy + vec2<f32>(37.0, 17.0) * z0;
     let s1 = i.xy + vec2<f32>(37.0, 17.0) * z1;
     let lo = mix(mix(hash12(s0), hash12(s0 + vec2<f32>(1.0, 0.0)), w.x),
