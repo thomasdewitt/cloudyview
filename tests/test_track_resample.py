@@ -18,6 +18,7 @@ The resample tests skip without node; the header tests need nothing.
 import json
 import shutil
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -318,6 +319,13 @@ def test_surface_offset_folds_like_the_browser():
 
 
 def test_cli_help_needs_no_gpu():
-    out = subprocess.run(["soar", "--help"], capture_output=True, text=True)
+    # The `soar` this environment installed, beside its interpreter, not the
+    # first one on PATH: a stale user-site install's ~/.local/bin/soar (an
+    # entry point from before soar was a browser app) shadowed the venv's
+    # whenever the suite ran without `uv run` putting .venv/bin first.
+    soar = Path(sys.executable).with_name("soar")
+    assert soar.is_file(), f"no soar entry point beside {sys.executable}"
+    out = subprocess.run([str(soar), "--help"], capture_output=True,
+                         text=True)
     assert out.returncode == 0
     assert "--field" in out.stdout and "--quality" in out.stdout
