@@ -57,7 +57,7 @@ sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
-    DESERT_LITE_TIERS, desert_relief_m, surface_cell_m, surface_period_m,
+    DESERT_LITE_TIERS, desert_scene_fields, surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
@@ -244,7 +244,8 @@ def main():
             state.ocean_max_lod = int(meta["mips"]) - 1
             state.surface_period_m = surface_period_m(args.surface, meta)
             if args.surface == "desert":
-                state.desert_relief_m = desert_relief_m(meta)
+                for key, value in desert_scene_fields(meta).items():
+                    setattr(state, key, value)
             scale = tier["render_scale"]
             size = (max(1, int(OUTPUT[0] * scale + 0.5)),
                     max(1, int(OUTPUT[1] * scale + 0.5)))

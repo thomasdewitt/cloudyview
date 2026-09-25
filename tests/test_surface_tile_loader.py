@@ -93,15 +93,14 @@ def test_a_surface_tile_loads_every_level(kind, keep, channels):
 def test_a_tile_that_fails_to_download_gives_its_texture_back(tmp_path):
     """A level missing part-way: the load rejects and frees the texture."""
     meta = json.loads((SOAR / "desert" / "meta.json").read_text())
-    shipped = SOAR / "desert"
-    # meta.json is served, and so are the levels up to the one renamed away:
-    # point the loader at a meta whose last file does not exist.
+    # A meta.json of its own, naming the shipped levels by relative path
+    # (no links into the repo) except the last, which does not exist.
     alias = tmp_path / "desert"
     alias.mkdir()
+    shipped = [os.path.relpath(SOAR / "desert" / name, alias)
+               for name in meta["files"][:-1]]
     (alias / "meta.json").write_text(json.dumps(
-        {**meta, "files": meta["files"][:-1] + ["missing.bin.gz"]}))
-    for name in meta["files"][:-1]:
-        (alias / name).symlink_to(shipped / name)
+        {**meta, "files": shipped + ["missing.bin.gz"]}))
     got = _load("desert", "keepHeights",
                 base=os.path.relpath(alias, SOAR))
     assert "missing.bin.gz" in got["error"]
