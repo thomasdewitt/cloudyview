@@ -240,7 +240,9 @@ def dispatcher(comps):
     return "\n\n".join(out)
 
 
-def compose(check_only: bool) -> int:
+def composed_text() -> tuple[list, str]:
+    """The registry's components, and raymarch.wgsl as the composer would
+    write it from them (nothing compiled, nothing written)."""
     comps = load_registry()
     kbs = [c["kind_base"] for c in comps if c.get("kind_base") is not None]
     if len(kbs) != len(set(kbs)):
@@ -276,8 +278,11 @@ def compose(check_only: bool) -> int:
     shader = SHADER.read_text()
     start = shader.index(MARK_OPEN)
     end = shader.index(MARK_CLOSE) + len(MARK_CLOSE)
-    out = shader[:start] + generated + shader[end:]
+    return comps, shader[:start] + generated + shader[end:]
 
+
+def compose(check_only: bool) -> int:
+    comps, out = composed_text()
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
