@@ -726,15 +726,20 @@ export class Renderer {
       throw new Error(`unknown day surface '${kind}'; expected 'ocean' or ` +
                       "'desert'.");
     }
-    // Every entry the target surface draws with, at the current lighting,
-    // on a specialization named explicitly: the scene is not touched.
-    const spec = { ...this._shaderSpec(), desert: kind === "desert" };
+    // Every entry the target surface draws with, at the current lighting
+    // and tier, on the specialization the first frame after commitSurface
+    // will ask for: the desert's tier axes (lite, the flora's cut) are the
+    // TARGET surface's, not the scene's — the scene is not touched.
+    const desert = kind === "desert";
+    const spec = this._shaderSpec({ desert });
     try {
       await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
-      if (kind === "desert") {
+      if (desert) {
         await this._pipeline("fs_surface", [SURFACE_FORMAT, VEIL_FORMAT],
                              spec);
-        await this._pipeline("fs_surface_refine", SURFACE_FORMAT, spec);
+        if (!spec.desertLite) {
+          await this._pipeline("fs_surface_refine", SURFACE_FORMAT, spec);
+        }
       }
     } catch (err) {
       throw new Error(`The ${kind} shader failed to build: ` +
@@ -1074,15 +1079,16 @@ export class Renderer {
    */
   _shaderSpec({ toneMap = true, lighting = this.lighting,
                 tier = this.qualityTier,
-                desertLite = this._desertLiteFor(tier),
-                desertFloraCut = this._desertFloraCutFor(tier) } = {}) {
+                desert = Boolean(this.scene.desert),
+                desertLite = this._desertLiteFor(tier, desert),
+                desertFloraCut = this._desertFloraCutFor(tier, desert) } = {}) {
     return {
       periodic: this.periodic,
       nested: Boolean(this.scene.nested),
       maxLightSteps: this.maxLightSteps,
       toneMap,
       city: Boolean(this.scene.city),
-      desert: Boolean(this.scene.desert),
+      desert,
       desertLite,
       desertFloraCut,
       lightCache: lighting.lightCache,
@@ -1115,14 +1121,16 @@ export class Renderer {
    * lighting method, so captures (which set the parked tier) and prefetch
    * (which walks the neighbouring tiers) pick the same variant flight does.
    */
-  _desertLiteFor(tier) {
-    return Boolean(this.scene.desert) && K.DESERT_LITE_TIERS.includes(tier);
+  _desertLiteFor(tier, desert = Boolean(this.scene.desert)) {
+    return desert && K.DESERT_LITE_TIERS.includes(tier);
   }
 
   /** The flora's explicit cut at `tier` (DESERT_FLORA_CUT_BY_TIER), keyed
-   *  like _desertLiteFor; 1 off the desert, where it means nothing. */
-  _desertFloraCutFor(tier) {
-    if (!this.scene.desert) return 1.0;
+   *  like _desertLiteFor; 1 off the desert, where it means nothing.
+   *  `desert` defaults to the scene's surface; prepareSurface passes the
+   *  surface it is preparing. */
+  _desertFloraCutFor(tier, desert = Boolean(this.scene.desert)) {
+    if (!desert) return 1.0;
     const cut = K.DESERT_FLORA_CUT_BY_TIER[tier];
     if (cut === undefined) {
       throw new Error(`no flora cut for tier ${tier}`);
