@@ -12135,6 +12135,9 @@ const cc_streetlife_LAT_JIT: f32 = 0.16;
 const cc_streetlife_BB_A: f32 = 2.60;
 const cc_streetlife_BB_C: f32 = 1.36;
 const cc_streetlife_BB_Z: f32 = 1.74;
+// The car box's diagonal, sqrt((2 BB_A)^2 + (2 BB_C)^2 + BB_Z^2) = 6.12,
+// rounded up: how far before a segment's start a box it meets can begin.
+const cc_streetlife_BB_DIAG: f32 = 6.2;
 
 // --- the hull ---------------------------------------------------------------
 const cc_streetlife_HL: f32 = 2.32;    // hull half-length
@@ -12840,6 +12843,12 @@ struct cc_streetlife_Kerb {
     tb: f32,           // the box interval to sphere-trace inside
 }
 
+// The core's LOD pixel angle, the one both surface stages' footprints are
+// taken from (and so the one the per-car stage switch must use).
+fn cc_streetlife_pa() -> f32 {
+    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+}
+
 // `near` picks the stage: false for the view ray's first stage (poles, and
 // the cars far enough to be drawn as boxes), true for the street stage (the
 // cars close enough to be sphere-traced, cc_streetlife_near_trace). Every
@@ -12933,13 +12942,8 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // Ground props: everything below is under 1.8 m, so a segment that only
     // clips the lamp heads stops here.
     out.hit = res;
-    // A car close enough for the SDF is the street stage's; the first stage
-    // leaves it out entirely (and so never compiles the SDF — which, in the
-    // first stage, cost 13% of the city's surface time even on views with
-    // barely a pixel of near car in them).
-    let near_sdf = fp < cc_streetlife_CAR_SDF_FP;
     if (!s.park_ok || z_lo > cc_streetlife_BB_Z + 0.1
-        || fp > cc_streetlife_CAR_FAR_FP || near_sdf != near) {
+        || fp > cc_streetlife_CAR_FAR_FP) {
         return out;
     }
     // The slots are walked over the stretch of the run below the car tops
@@ -12956,8 +12960,29 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (cb <= ca) {
         return out;
     }
-    let qa = o + ca * dir;
-    let qb = o + cb * dir;
+    // A car close enough for the SDF is the street stage's, the rest the
+    // first stage's (which so never compiles the SDF — in the first stage it
+    // cost 13% of the city's surface time even on views with barely a pixel
+    // of near car in them). Each car decides by its OWN box entry,
+    // pa * max(hc.x, 0) against CAR_SDF_FP: both stages trace from the same
+    // origin with the same inv_dir and box, so they compute the same number
+    // and every car is exactly one stage's. (Deciding by the segment's entry
+    // instead let a car fall through: the street stage starts its walk where
+    // the ray comes down to 3 m, not at the cell's entry.) t_sw is where
+    // that switch falls on this ray; each stage walks only its side of it,
+    // and leaves when its side holds no car.
+    let pxa = cc_streetlife_pa();
+    let t_sw = cc_streetlife_CAR_SDF_FP / pxa;
+    if (near && ca - cc_streetlife_BB_DIAG >= t_sw) {
+        return out;   // every entry here is past the switch
+    }
+    if (!near && cb < t_sw) {
+        return out;   // every entry here is short of it
+    }
+    let ws = select(clamp(t_sw, ca, cb), ca, near);
+    let we = select(cb, clamp(t_sw, ca, cb), near);
+    let qa = o + ws * dir;
+    let qb = o + we * dir;
     let ua = select(qa.y, qa.x, s.ax == 0);
     let ub = select(qb.y, qb.x, s.ax == 0);
     let g0 = i32(floor((min(ua, ub) - cc_streetlife_BB_A)
@@ -12967,9 +12992,13 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     let gstart = select(g1, g0, fwd_first);
     let gstep = select(-1, 1, fwd_first);
     // Same rule as the poles: near end first, stop at the first prop the ray
-    // actually strikes. Five iterations is what an empty run costs, and at
-    // ~40% occupancy the loop usually ends on the first or the second.
-    for (var k: i32 = 0; k < 5; k = k + 1) {
+    // actually strikes. Five iterations is what an empty run costs in the
+    // first stage, and at ~40% occupancy the loop usually ends on the first
+    // or the second. The street stage only picks a candidate box here, so it
+    // walks twelve (84 m of kerb): an eye at kerb height looking along the
+    // parking lane passes many empty slots before the car it meets.
+    let n_walk = select(5, 12, near);
+    for (var k: i32 = 0; k < n_walk; k = k + 1) {
         let j = gstart + k * gstep;
         if (j < g0 || j > g1) {
             break;
@@ -12984,7 +13013,8 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let cmin = vec3<f32>(v.ctr - e, 0.0);
         let cmax = vec3<f32>(v.ctr + e, cc_streetlife_BB_Z);
         let hc = city_box_hit(o, inv_dir, cmin, cmax);
-        if (hc.x > hc.y || hc.y <= ta || hc.x > t_end) {
+        if (hc.x > hc.y || hc.y <= ta || hc.x > t_end
+            || (pxa * max(hc.x, 0.0) < cc_streetlife_CAR_SDF_FP) != near) {
             continue;
         }
         if (near) {
@@ -13143,8 +13173,7 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (min(za, zb) > cc_streetlife_Z_GATE || max(za, zb) < -0.5) {
         return cc_streetlife_miss(ci);
     }
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = cc_streetlife_pa() * max(t0, 0.0);
     // Gate 2: past the pole cutoff nothing this component draws survives, and
     // every prop's emission has already faded to zero before reaching it
     // (POLE_FAR_FADE 2.4 -> 4.0, CAR_FAR_FADE 1.6 -> 2.6). Hoisting the test
@@ -13194,9 +13223,11 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (min(za, zb) > cc_streetlife_BB_Z + 0.2 || max(za, zb) < -0.5) {
         return cc_streetlife_miss(ci);
     }
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
-    if (fp >= cc_streetlife_CAR_SDF_FP) {
+    let fp = cc_streetlife_pa() * max(t0, 0.0);
+    // No car box entered in this segment can be near enough (see the kerb's
+    // per-car switch): a box starts at most its diagonal before the segment.
+    if (cc_streetlife_pa() * max(t0 - cc_streetlife_BB_DIAG, 0.0)
+        >= cc_streetlife_CAR_SDF_FP) {
         return cc_streetlife_miss(ci);
     }
     var cand: cc_streetlife_Kerb;
@@ -14549,6 +14580,16 @@ const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
 // the cover (radius r0 ~0.3 m) rises ~0.35 m/s, one a metre across ~1.2 m/s.
 const cc_manholesteam_RISE_RATE: f32 = 1.2;
+// The city's scene clock wraps at its tile meta's clock_period_s, 2600 s,
+// and the steam repeats exactly at that period: the lumps' lattice
+// coordinate up the plume is 1.3 zeta, which climbs 1.3 * RISE_RATE * 2600
+// = 4056 cells per period, so the lattice wraps in z at exactly that many
+// cells (ZWRAP) and every octave steps up by exactly 2 in z (a whole
+// multiple of it) — the wrap lands every octave on the lattice point it
+// left, and no plume pops. Change RISE_RATE, the 1.3, or the period
+// together, keeping 1.3 * RISE_RATE * CLOCK_PERIOD_S an integer.
+const cc_manholesteam_CLOCK_PERIOD_S: f32 = 2600.0;
+const cc_manholesteam_ZWRAP: f32 = 4056.0;
 // Radius growth per metre of rise. 0.12 is a pure plume in still air; a
 // plume bent over by a crosswind entrains faster, and steam also sheds
 // visible mass as it mixes, which the thinning law below carries.
@@ -14738,9 +14779,13 @@ fn cc_manholesteam_vnoise3(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = p - i;
     let w = f * f * (3.0 - 2.0 * f);
-    // Two z slices of the 2-D lattice, told apart by a large shift.
-    let s0 = i.xy + vec2<f32>(37.0, 17.0) * i.z;
-    let s1 = s0 + vec2<f32>(37.0, 17.0);
+    // Two z slices of the 2-D lattice, told apart by a large shift; z wraps
+    // at ZWRAP cells, which is what makes the steam periodic in the clock
+    // (and keeps the hash's arguments small however long the flight).
+    let z0 = i.z - cc_manholesteam_ZWRAP * floor(i.z / cc_manholesteam_ZWRAP);
+    let z1 = select(z0 + 1.0, 0.0, z0 + 1.0 >= cc_manholesteam_ZWRAP);
+    let s0 = i.xy + vec2<f32>(37.0, 17.0) * z0;
+    let s1 = i.xy + vec2<f32>(37.0, 17.0) * z1;
     let lo = mix(mix(hash12(s0), hash12(s0 + vec2<f32>(1.0, 0.0)), w.x),
                  mix(hash12(s0 + vec2<f32>(0.0, 1.0)),
                      hash12(s0 + vec2<f32>(1.0, 1.0)), w.x), w.y);
@@ -14778,7 +14823,9 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     for (var o: i32 = 0; o < octaves; o = o + 1) {
         n = n + amp * cc_manholesteam_vnoise3(x);
         norm = norm + amp;
-        x = 2.03 * x + vec3<f32>(19.1, 7.3, 3.7);
+        // Exactly 2 in z, so each octave's lattice is periodic with the
+        // first's (CLOCK_PERIOD_S); 2.03 across, off the lattice's grain.
+        x = vec3<f32>(2.03, 2.03, 2.0) * x + vec3<f32>(19.1, 7.3, 3.7);
         amp = 0.5 * amp;
     }
     n = n / norm - 0.5;

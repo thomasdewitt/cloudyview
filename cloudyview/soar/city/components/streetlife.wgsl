@@ -975,8 +975,8 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // the ray comes down to 3 m, not at the cell's entry.) t_sw is where
     // that switch falls on this ray; each stage walks only its side of it,
     // and leaves when its side holds no car.
-    let pa = cc_streetlife_pa();
-    let t_sw = cc_streetlife_CAR_SDF_FP / pa;
+    let pxa = cc_streetlife_pa();
+    let t_sw = cc_streetlife_CAR_SDF_FP / pxa;
     if (near && ca - cc_streetlife_BB_DIAG >= t_sw) {
         return out;   // every entry here is past the switch
     }
@@ -1018,7 +1018,7 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let cmax = vec3<f32>(v.ctr + e, cc_streetlife_BB_Z);
         let hc = city_box_hit(o, inv_dir, cmin, cmax);
         if (hc.x > hc.y || hc.y <= ta || hc.x > t_end
-            || (pa * max(hc.x, 0.0) < cc_streetlife_CAR_SDF_FP) != near) {
+            || (pxa * max(hc.x, 0.0) < cc_streetlife_CAR_SDF_FP) != near) {
             continue;
         }
         if (near) {
