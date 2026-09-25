@@ -193,9 +193,13 @@ def read_shader() -> str:
     return SHADER_PATH.read_text()
 
 # Row 24 (the 25th) is the surface offset the water samples and the city
-# frame are derived from — see raymarch.wgsl's surface_offset.
-UNIFORM_ROWS = 25
-UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 400; the scene key compares all of it
+# frame are derived from — see raymarch.wgsl's surface_offset. Rows 25..46
+# are the desert tile's own numbers (raymarch.wgsl desert_tile, written by
+# desert_tile_rows; zero off the desert).
+DESERT_TILE_ROW0 = 25
+DESERT_TILE_ROWS = 22
+UNIFORM_ROWS = DESERT_TILE_ROW0 + DESERT_TILE_ROWS
+UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 752; the scene key compares all of it
 
 DEG = math.pi / 180.0
 
@@ -349,7 +353,7 @@ class SceneState:
     `surface` is what the world stands on: "ocean", "desert" or "city". The
     desert and the city each compile in through their own constant (DESERT,
     CITY — see `specialize`). Neither adds uniform rows — the block is the
-    same 400 bytes in every mode — they REINTERPRET a few of them, and the
+    same 752 bytes in every mode — they REINTERPRET a few of them, and the
     fields keep their ocean names because the slots are literally the
     ocean's. Under "city":
 
@@ -409,6 +413,10 @@ class SceneState:
     # refused anywhere else: without it the terrain collapses onto the datum
     # plane and still looks plausible, which is the failure worth a raise.
     desert_relief_m: Optional[Sequence[float]] = None
+    # Rows 25..46 under DESERT: the tile's own tables (desert_tile_rows).
+    # Required and refused alike, and for the same reason: without them the
+    # trace steps with no slope bound and the far field has no colour.
+    desert_tile_rows: Optional[Sequence[Sequence[float]]] = None
     # The period row 24 folds at. None is the tile extent — the city's and
     # the desert's rule, since each is a pure function of its tile. The
     # ocean's swell repeats over several tiles and a fold at the tile would
@@ -503,9 +511,9 @@ class ViewState:
 
 
 def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
-    """The 400-byte block, row for row with web/soar/uniforms.js.
+    """The 752-byte block, row for row with web/soar/uniforms.js.
 
-    Returns (25, 4) float32. Every unwritten slot stays zero, which is what
+    Returns (47, 4) float32. Every unwritten slot stays zero, which is what
     the shader's unused components and the absent nest rows require.
 
     Under the city the layout is untouched and a handful of rows change
@@ -565,6 +573,13 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     if not desert and state.desert_relief_m is not None:
         raise ValueError("desert_relief_m is the desert's; this scene is the "
                          f"{state.surface}.")
+    if desert and state.desert_tile_rows is None:
+        raise ValueError(
+            "the desert needs its tile's tables (SceneState.desert_tile_rows, "
+            "from soar_host.desert_tile_rows(renderer.surface_meta)).")
+    if not desert and state.desert_tile_rows is not None:
+        raise ValueError("desert_tile_rows is the desert's; this scene is the "
+                         f"{state.surface}.")
     if desert and not state.ocean_enabled:
         raise ValueError(
             "the desert needs the surface enabled: ocean_enabled is the "
@@ -617,6 +632,12 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
         u[8] = (state.ocean_z, *state.city_tile_offset_m, 0.0)
     elif desert:
         u[8] = (state.ocean_z, *state.desert_relief_m)
+        rows = np.asarray(state.desert_tile_rows, dtype=np.float32)
+        if rows.shape != (DESERT_TILE_ROWS, 4):
+            raise ValueError(
+                f"desert_tile_rows is {rows.shape}; the shader reads "
+                f"({DESERT_TILE_ROWS}, 4).")
+        u[DESERT_TILE_ROW0:DESERT_TILE_ROW0 + DESERT_TILE_ROWS] = rows
     else:
         u[8] = (state.ocean_z, *state.ocean_reflectance)
     # Row 9 needs no branch: cell size, tile extent, surface flag and top mip
@@ -1561,3 +1582,39 @@ def desert_relief_m(meta: dict) -> Tuple[float, float, float]:
     """Row 8.yzw under DESERT, from the desert tile's meta.json."""
     return (float(meta["height_min_m"]), float(meta["height_max_m"]),
             float(meta["band_max_m"]))
+
+
+# The per-level tables raymarch.wgsl's desert_tile reads, in row order.
+_DESERT_LEVEL_TABLES = ("slope_max", "envelope_m", "slope_variance_removed")
+
+
+def desert_tile_rows(meta: dict) -> list:
+    """Rows 25..46 under DESERT (raymarch.wgsl desert_tile), from the desert
+    tile's meta.json: its per-level tables four levels to a row, then its
+    per-level colour correction a level to a row, then (bounce albedo,
+    band_slope_max). scene.js desertTileRows is the twin."""
+    mips = int(meta["mips"])
+    if mips != 12:
+        raise ValueError(f"the desert tile has {mips} mips; the shader's "
+                         "tables are laid out for 12.")
+    rows = []
+    for key in _DESERT_LEVEL_TABLES:
+        table = [float(v) for v in meta[key]]
+        if len(table) != mips:
+            raise ValueError(f"meta {key} has {len(table)} levels, not {mips}.")
+        rows += [table[i:i + 4] for i in range(0, mips, 4)]
+    correction = meta["albedo_correction"]
+    if len(correction) != mips:
+        raise ValueError(f"meta albedo_correction has {len(correction)} "
+                         f"levels, not {mips}.")
+    rows += [[*map(float, rgb), 0.0] for rgb in correction]
+    rows.append([*map(float, meta["bounce_albedo"]),
+                 float(meta["band_slope_max"])])
+    assert len(rows) == DESERT_TILE_ROWS
+    return rows
+
+
+def desert_scene_fields(meta: dict) -> dict:
+    """The SceneState fields a desert takes from its tile's meta.json."""
+    return {"desert_relief_m": desert_relief_m(meta),
+            "desert_tile_rows": desert_tile_rows(meta)}

@@ -256,8 +256,22 @@ def test_the_city_states_its_clock_period():
     from cloudyview.soar_host import surface_clock_period_s
     city = json.loads((REPO / "cloudyview" / "soar" / "city"
                        / "meta.json").read_text())
-    assert surface_clock_period_s("city", city) == 2600.0
+    period = surface_clock_period_s("city", city)
     assert surface_clock_period_s("desert", {}) is None
+    # The steam states the period it repeats at, and the tile the hosts
+    # wrap at must be the same number — neither side can drift alone.
+    src = SHADER.read_text()
+    assert _wgsl_scalar(src, "cc_manholesteam_CLOCK_PERIOD_S") == period
+    # Why it repeats there: its noise lattice rises (lattice scale) x
+    # RISE_RATE cells a second and wraps at ZWRAP cells, and the period is
+    # a whole ZWRAP — so every octave (lacunarity 2) is back on its own
+    # lattice point when the hosts wrap the clock.
+    scale = float(re.search(r"vec3<f32>\([^;]*, ([0-9.]+) \* zeta\)",
+                            src).group(1))
+    rise = _wgsl_scalar(src, "cc_manholesteam_RISE_RATE")
+    zwrap = _wgsl_scalar(src, "cc_manholesteam_ZWRAP")
+    assert zwrap == round(zwrap)
+    assert scale * rise * period == pytest.approx(zwrap, abs=1e-6)
 
 
 def _wgsl_gain_rows(src):

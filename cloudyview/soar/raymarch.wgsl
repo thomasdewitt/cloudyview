@@ -161,6 +161,18 @@ struct Uniforms {
     // what keeps the frozen judge-view goldens byte-identical.
     // z, w unused (0.0).
     surface_offset: vec4<f32>,
+    // Rows 25..46, under DESERT only (zero elsewhere): the desert tile's own
+    // numbers, from its meta.json, written by both hosts
+    // (soar_host.desert_tile_rows, scene.js desertTileRows). Data of the
+    // tile, not of the shader: a re-baked tile brings its own. By level k
+    // of the tile's 12 mips, four to a row:
+    //   0..2   slope_max            the steepest texel slope of mip k
+    //   3..5   envelope_m           how far the surface stands above mip k
+    //   6..8   slope_variance_removed   what mip k's normal no longer carries
+    //   9..20  albedo_correction    xyz: mip k's far-field colour factor
+    //   21     xyz: the bounce albedo (the mean of the level-0 albedos);
+    //          w: band_slope_max, the octave band's steepest slope
+    desert_tile: array<vec4<f32>, 22>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -209,8 +221,8 @@ struct Uniforms {
 // forms — and a 1x1 stand-in for every other pass.
 @group(1) @binding(1) var surface_plain: texture_2d<f32>;
 // The VEIL: one semi-transparent layer per pixel in front of the surface —
-// the city's steam, the desert's far canopy — as the last surface stage left
-// it: premultiplied in-scattered radiance, transmittance, and the depth the
+// the city's steam (the desert writes none yet) — as the last surface stage
+// left it: premultiplied in-scattered radiance, opacity, and the depth the
 // march composites it at (veil_pack / veil_unpack). Read by the march only
 // under CITY or DESERT; a 1x1 stand-in everywhere else.
 @group(1) @binding(2) var veil_buf: texture_2d<u32>;
@@ -3193,7 +3205,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 // cloudyview/soar/city/components/, each owning one kind of thing (a street
 // prop, a facade layer, an elevated highway), registered in registry.json
 // and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls six hooks; the composer generates their
+// markers below. The core calls nine hooks; the composer generates their
 // dispatchers over whatever is registered, and when nothing is, the
 // defaults below make every hook a no-op — except the shade dispatcher,
 // which returns magenta, because an unclaimed hit kind is a bug and should
@@ -3206,6 +3218,10 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //                        called only within CITY_PROP_RANGE of the camera —
 //                        the props' whole cost budget lives inside that
 //                        radius.
+//   cc_near_props_trace  per-cell prop geometry seen only close (street
+//                        furniture, the parked cars' hulls), below
+//                        CITY_FURNITURE_TOP, traced only by the street stage
+//                        (surface_street_city) out to city_near_reach.
 //   cc_component_shade   radiance at a component hit (kind >= 100; each
 //                        component owns kind_base .. kind_base+15).
 //   cc_facade_detail     additive facade emission (balconies, signage,
@@ -12119,6 +12135,9 @@ const cc_streetlife_LAT_JIT: f32 = 0.16;
 const cc_streetlife_BB_A: f32 = 2.60;
 const cc_streetlife_BB_C: f32 = 1.36;
 const cc_streetlife_BB_Z: f32 = 1.74;
+// The car box's diagonal, sqrt((2 BB_A)^2 + (2 BB_C)^2 + BB_Z^2) = 6.12,
+// rounded up: how far before a segment's start a box it meets can begin.
+const cc_streetlife_BB_DIAG: f32 = 6.2;
 
 // --- the hull ---------------------------------------------------------------
 const cc_streetlife_HL: f32 = 2.32;    // hull half-length
@@ -12824,6 +12843,12 @@ struct cc_streetlife_Kerb {
     tb: f32,           // the box interval to sphere-trace inside
 }
 
+// The core's LOD pixel angle, the one both surface stages' footprints are
+// taken from (and so the one the per-car stage switch must use).
+fn cc_streetlife_pa() -> f32 {
+    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+}
+
 // `near` picks the stage: false for the view ray's first stage (poles, and
 // the cars far enough to be drawn as boxes), true for the street stage (the
 // cars close enough to be sphere-traced, cc_streetlife_near_trace). Every
@@ -12917,13 +12942,8 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // Ground props: everything below is under 1.8 m, so a segment that only
     // clips the lamp heads stops here.
     out.hit = res;
-    // A car close enough for the SDF is the street stage's; the first stage
-    // leaves it out entirely (and so never compiles the SDF — which, in the
-    // first stage, cost 13% of the city's surface time even on views with
-    // barely a pixel of near car in them).
-    let near_sdf = fp < cc_streetlife_CAR_SDF_FP;
     if (!s.park_ok || z_lo > cc_streetlife_BB_Z + 0.1
-        || fp > cc_streetlife_CAR_FAR_FP || near_sdf != near) {
+        || fp > cc_streetlife_CAR_FAR_FP) {
         return out;
     }
     // The slots are walked over the stretch of the run below the car tops
@@ -12940,8 +12960,29 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (cb <= ca) {
         return out;
     }
-    let qa = o + ca * dir;
-    let qb = o + cb * dir;
+    // A car close enough for the SDF is the street stage's, the rest the
+    // first stage's (which so never compiles the SDF — in the first stage it
+    // cost 13% of the city's surface time even on views with barely a pixel
+    // of near car in them). Each car decides by its OWN box entry,
+    // pa * max(hc.x, 0) against CAR_SDF_FP: both stages trace from the same
+    // origin with the same inv_dir and box, so they compute the same number
+    // and every car is exactly one stage's. (Deciding by the segment's entry
+    // instead let a car fall through: the street stage starts its walk where
+    // the ray comes down to 3 m, not at the cell's entry.) t_sw is where
+    // that switch falls on this ray; each stage walks only its side of it,
+    // and leaves when its side holds no car.
+    let pxa = cc_streetlife_pa();
+    let t_sw = cc_streetlife_CAR_SDF_FP / pxa;
+    if (near && ca - cc_streetlife_BB_DIAG >= t_sw) {
+        return out;   // every entry here is past the switch
+    }
+    if (!near && cb < t_sw) {
+        return out;   // every entry here is short of it
+    }
+    let ws = select(clamp(t_sw, ca, cb), ca, near);
+    let we = select(cb, clamp(t_sw, ca, cb), near);
+    let qa = o + ws * dir;
+    let qb = o + we * dir;
     let ua = select(qa.y, qa.x, s.ax == 0);
     let ub = select(qb.y, qb.x, s.ax == 0);
     let g0 = i32(floor((min(ua, ub) - cc_streetlife_BB_A)
@@ -12951,9 +12992,13 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     let gstart = select(g1, g0, fwd_first);
     let gstep = select(-1, 1, fwd_first);
     // Same rule as the poles: near end first, stop at the first prop the ray
-    // actually strikes. Five iterations is what an empty run costs, and at
-    // ~40% occupancy the loop usually ends on the first or the second.
-    for (var k: i32 = 0; k < 5; k = k + 1) {
+    // actually strikes. Five iterations is what an empty run costs in the
+    // first stage, and at ~40% occupancy the loop usually ends on the first
+    // or the second. The street stage only picks a candidate box here, so it
+    // walks twelve (84 m of kerb): an eye at kerb height looking along the
+    // parking lane passes many empty slots before the car it meets.
+    let n_walk = select(5, 12, near);
+    for (var k: i32 = 0; k < n_walk; k = k + 1) {
         let j = gstart + k * gstep;
         if (j < g0 || j > g1) {
             break;
@@ -12968,7 +13013,8 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let cmin = vec3<f32>(v.ctr - e, 0.0);
         let cmax = vec3<f32>(v.ctr + e, cc_streetlife_BB_Z);
         let hc = city_box_hit(o, inv_dir, cmin, cmax);
-        if (hc.x > hc.y || hc.y <= ta || hc.x > t_end) {
+        if (hc.x > hc.y || hc.y <= ta || hc.x > t_end
+            || (pxa * max(hc.x, 0.0) < cc_streetlife_CAR_SDF_FP) != near) {
             continue;
         }
         if (near) {
@@ -13127,8 +13173,7 @@ fn cc_streetlife_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (min(za, zb) > cc_streetlife_Z_GATE || max(za, zb) < -0.5) {
         return cc_streetlife_miss(ci);
     }
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = cc_streetlife_pa() * max(t0, 0.0);
     // Gate 2: past the pole cutoff nothing this component draws survives, and
     // every prop's emission has already faded to zero before reaching it
     // (POLE_FAR_FADE 2.4 -> 4.0, CAR_FAR_FADE 1.6 -> 2.6). Hoisting the test
@@ -13178,9 +13223,11 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (min(za, zb) > cc_streetlife_BB_Z + 0.2 || max(za, zb) < -0.5) {
         return cc_streetlife_miss(ci);
     }
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
-    if (fp >= cc_streetlife_CAR_SDF_FP) {
+    let fp = cc_streetlife_pa() * max(t0, 0.0);
+    // No car box entered in this segment can be near enough (see the kerb's
+    // per-car switch): a box starts at most its diagonal before the segment.
+    if (cc_streetlife_pa() * max(t0 - cc_streetlife_BB_DIAG, 0.0)
+        >= cc_streetlife_CAR_SDF_FP) {
         return cc_streetlife_miss(ci);
     }
     var cand: cc_streetlife_Kerb;
@@ -14533,6 +14580,16 @@ const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
 // the cover (radius r0 ~0.3 m) rises ~0.35 m/s, one a metre across ~1.2 m/s.
 const cc_manholesteam_RISE_RATE: f32 = 1.2;
+// The city's scene clock wraps at its tile meta's clock_period_s, 2600 s,
+// and the steam repeats exactly at that period: the lumps' lattice
+// coordinate up the plume is 1.3 zeta, which climbs 1.3 * RISE_RATE * 2600
+// = 4056 cells per period, so the lattice wraps in z at exactly that many
+// cells (ZWRAP) and every octave steps up by exactly 2 in z (a whole
+// multiple of it) — the wrap lands every octave on the lattice point it
+// left, and no plume pops. Change RISE_RATE, the 1.3, or the period
+// together, keeping 1.3 * RISE_RATE * CLOCK_PERIOD_S an integer.
+const cc_manholesteam_CLOCK_PERIOD_S: f32 = 2600.0;
+const cc_manholesteam_ZWRAP: f32 = 4056.0;
 // Radius growth per metre of rise. 0.12 is a pure plume in still air; a
 // plume bent over by a crosswind entrains faster, and steam also sheds
 // visible mass as it mixes, which the thinning law below carries.
@@ -14722,9 +14779,13 @@ fn cc_manholesteam_vnoise3(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = p - i;
     let w = f * f * (3.0 - 2.0 * f);
-    // Two z slices of the 2-D lattice, told apart by a large shift.
-    let s0 = i.xy + vec2<f32>(37.0, 17.0) * i.z;
-    let s1 = s0 + vec2<f32>(37.0, 17.0);
+    // Two z slices of the 2-D lattice, told apart by a large shift; z wraps
+    // at ZWRAP cells, which is what makes the steam periodic in the clock
+    // (and keeps the hash's arguments small however long the flight).
+    let z0 = i.z - cc_manholesteam_ZWRAP * floor(i.z / cc_manholesteam_ZWRAP);
+    let z1 = select(z0 + 1.0, 0.0, z0 + 1.0 >= cc_manholesteam_ZWRAP);
+    let s0 = i.xy + vec2<f32>(37.0, 17.0) * z0;
+    let s1 = i.xy + vec2<f32>(37.0, 17.0) * z1;
     let lo = mix(mix(hash12(s0), hash12(s0 + vec2<f32>(1.0, 0.0)), w.x),
                  mix(hash12(s0 + vec2<f32>(0.0, 1.0)),
                      hash12(s0 + vec2<f32>(1.0, 1.0)), w.x), w.y);
@@ -14762,7 +14823,9 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     for (var o: i32 = 0; o < octaves; o = o + 1) {
         n = n + amp * cc_manholesteam_vnoise3(x);
         norm = norm + amp;
-        x = 2.03 * x + vec3<f32>(19.1, 7.3, 3.7);
+        // Exactly 2 in z, so each octave's lattice is periodic with the
+        // first's (CLOCK_PERIOD_S); 2.03 across, off the lattice's grain.
+        x = vec3<f32>(2.03, 2.03, 2.0) * x + vec3<f32>(19.1, 7.3, 3.7);
         amp = 0.5 * amp;
     }
     n = n / norm - 0.5;
@@ -19509,23 +19572,16 @@ const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.33, 0.285, 0.22);
 // pavement reads redder and duller through its mean lightness than its
 // albedos average to — by ~9% in blue at the top of the chain. This is the
 // tile-wide ratio of the two at each mip (tools/export_desert_tile.py
-// albedo_correction; held to the tile by tests/test_desert_tile.py), applied
+// albedo_correction, in the tile's meta and so in u.desert_tile), applied
 // at the footprint's level so no seam appears where detail drops out.
+// Level i of the tile table that starts at u.desert_tile row `row0`, four
+// levels to a row.
+fn desert_tile_level(row0: i32, i: i32) -> f32 {
+    return u.desert_tile[row0 + (i >> 2u)][i & 3];
+}
+
 fn desert_albedo_correction_at(i: i32) -> vec3<f32> {
-    switch i {
-        case 0: { return vec3<f32>(1.0000, 1.0000, 1.0000); }
-        case 1: { return vec3<f32>(0.9996, 0.9998, 1.0002); }
-        case 2: { return vec3<f32>(0.9988, 0.9995, 1.0006); }
-        case 3: { return vec3<f32>(0.9966, 0.9986, 1.0015); }
-        case 4: { return vec3<f32>(0.9902, 0.9958, 1.0045); }
-        case 5: { return vec3<f32>(0.9754, 0.9895, 1.0114); }
-        case 6: { return vec3<f32>(0.9618, 0.9835, 1.0181); }
-        case 7: { return vec3<f32>(0.9514, 0.9789, 1.0235); }
-        case 8: { return vec3<f32>(0.9474, 0.9771, 1.0255); }
-        case 9: { return vec3<f32>(0.9451, 0.9760, 1.0268); }
-        case 10: { return vec3<f32>(0.9421, 0.9747, 1.0283); }
-        default: { return vec3<f32>(0.9421, 0.9747, 1.0283); }
-    }
+    return u.desert_tile[9 + i].xyz;
 }
 
 fn desert_albedo_correction(fp: f32) -> vec3<f32> {
@@ -19735,29 +19791,23 @@ fn desert_height_range() -> vec2<f32> {
 // move the surface, in units of one octave's band excursion.
 const DESERT_OCTAVE_MARGIN: f32 = 0.429;
 
-// Steepest slope at each mip level of the shipped tile, with a quarter
-// again for safety (tools/export_desert_tile.py writes the measured table
-// into meta.json as slope_max; tests/test_desert_tile.py holds this to it).
+// Steepest slope at each mip level of the tile, with a quarter again for
+// safety (tools/export_desert_tile.py measures it into meta.json as
+// slope_max; the hosts carry it here in u.desert_tile).
 // This is what lets the trace step by clearance without tunnelling.
 fn desert_slope_max_at(i: i32) -> f32 {
-    switch i {
-        case 0: { return 1.775; }
-        case 1: { return 0.924; }
-        case 2: { return 0.478; }
-        case 3: { return 0.225; }
-        case 4: { return 0.111; }
-        case 5: { return 0.070; }
-        case 6: { return 0.050; }
-        case 7: { return 0.041; }
-        case 8: { return 0.029; }
-        case 9: { return 0.021; }
-        case 10: { return 0.002; }
-        default: { return 0.0; }
-    }
+    return desert_tile_level(0, i);
 }
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
-const DESERT_OCTAVE_SLOPE_MAX: f32 = 1.611;  // meta band_slope_max
+// The band's own steepest slope, meta band_slope_max, is
+// u.desert_tile[21].w, read once at the top of desert_slope_bound below.
+// Where that read sits moves the driver's codegen for the whole module
+// (M1 proxy, interleaved, identical output, 1.5 m view, 2026-09-24):
+// behind a zero-argument accessor called in the octave loop, 111.5 ms;
+// read in the loop itself, 66.3 ms but the CITY's surface pass 128 -> 168
+// registers; hoisted here, 96.3 and the city at 128. Hoisted until the
+// hosts strip the sections a scene doesn't compile in.
 const DESERT_OCTAVE_SLOPE_GROWTH: f32 = 1.620657; // 5^0.3
 
 fn desert_slope_bound(fp: f32) -> f32 {
@@ -19766,6 +19816,7 @@ fn desert_slope_bound(fp: f32) -> f32 {
     let l1 = min(l0 + 1, 11);
     var s = mix(desert_slope_max_at(l0), desert_slope_max_at(l1),
                 lod - f32(l0));
+    let band = u.desert_tile[21].w;
     var texel = u.ocean_params.x;
     var grow = 1.0;
     var amp = 1.0;
@@ -19777,7 +19828,7 @@ fn desert_slope_bound(fp: f32) -> f32 {
         if (fade <= 0.0) {
             break;
         }
-        s = s + fade * DESERT_OCTAVE_SLOPE_MAX * grow;
+        s = s + fade * band * grow;
     }
     return s;
 }
@@ -19835,25 +19886,12 @@ fn desert_octave_margin(fp: f32) -> f32 {
 }
 
 // How far the full surface can stand above mip k of the tile read at the
-// same point, measured on the shipped tile with a tenth to spare
-// (tools/export_desert_tile.py writes it as envelope_m; tests/
-// test_desert_tile.py holds this to it). Mip k plus this is a lid over the
+// same point, measured on the tile with a tenth to spare
+// (tools/export_desert_tile.py writes it as envelope_m; the hosts carry it
+// here in u.desert_tile). Mip k plus this is a lid over the
 // ground that is as smooth as mip k — see desert_terrain_trace.
 fn desert_envelope_m_at(i: i32) -> f32 {
-    switch i {
-        case 0: { return 0.0; }
-        case 1: { return 1.084; }
-        case 2: { return 1.630; }
-        case 3: { return 1.761; }
-        case 4: { return 1.411; }
-        case 5: { return 1.933; }
-        case 6: { return 2.454; }
-        case 7: { return 3.674; }
-        case 8: { return 6.395; }
-        case 9: { return 9.452; }
-        case 10: { return 17.279; }
-        default: { return 17.772; }
-    }
+    return desert_tile_level(3, i);
 }
 
 // The trace's budget, and its floor: a step is never shorter than this many
@@ -20242,7 +20280,8 @@ struct DesertStone {
     centre: vec3<f32>,
     axes: vec3<f32>,
     cs: vec2<f32>,         // cos, sin of the stone's yaw
-    albedo: vec3<f32>,
+    pick: f32,             // its palette draw (desert_stone_albedo)
+    bright: f32,           // and its brightness jitter
     facet: u32,            // bits for the facet pattern
     // Two broken faces: planes dot(q, cut) = d in the stone's unit-sphere
     // frame; the stone is the ellipsoid on their inner side.
@@ -20250,29 +20289,65 @@ struct DesertStone {
     cut1: vec4<f32>,
 };
 
+// A stone level's constants for one pixel's material, read once per level
+// rather than once per candidate cell. The walk tries hundreds of cells near
+// the ground; reading the tables (and drawing each candidate's colour, which
+// only the stone hit needs) in that loop cost the 1.5 m view over 40%
+// (M1 proxy, interleaved, 2026-09-24).
+struct DesertStoneLevel {
+    cell: f32,
+    mask: u32,
+    seed: u32,
+    p_occ: f32,            // occupancy of a cell on this material
+    scale: f32,            // desert_stone_scale
+};
+
+fn desert_stone_level(k: i32, m: vec3<f32>) -> DesertStoneLevel {
+    var lv: DesertStoneLevel;
+    lv.cell = desert_stone_cell_at(k);
+    lv.mask = desert_stone_cell_bits_at(k);
+    lv.seed = desert_stone_seed_at(k);
+    lv.p_occ = select(dot(m, DESERT_STONE_P_PEBBLE),
+                      dot(m, DESERT_STONE_P_GRAVEL), k == 0);
+    lv.scale = desert_stone_scale(m);
+    return lv;
+}
+
+// A stone's colour on material m: its palette draw weighted by the
+// material, times its brightness jitter of mean one.
+fn desert_stone_albedo(pick_in: f32, bright: f32, m: vec3<f32>) -> vec3<f32> {
+    var pick = pick_in;
+    var col = desert_stone_palette_at(6);
+    for (var i: i32 = 0; i < 7; i = i + 1) {
+        let wi = desert_stone_mix(m, i);
+        if (pick < wi) {
+            col = desert_stone_palette_at(i);
+            break;
+        }
+        pick = pick - wi;
+    }
+    return col * bright;
+}
+
 // The stone in cell `ci` of level k, if any, standing on the local ground
 // plane z = z0 + dot(grad, xy - xy0) (the terrain at the hit, which is all
 // the ground a few centimetres of stone can see). `m` is the surface's
 // material there and `w` the level's resolve weight.
-fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
-                grad: vec2<f32>, m: vec3<f32>, w: f32) -> DesertStone {
+fn desert_stone(lv: DesertStoneLevel, ci: vec2<i32>, z0: f32,
+                xy0: vec2<f32>, grad: vec2<f32>, w: f32) -> DesertStone {
     var s: DesertStone;
     s.on = false;
-    let mask = desert_stone_cell_bits_at(k);
-    let key = vec2<u32>(u32(ci.x) & mask, u32(ci.y) & mask);
-    let h0 = pcg2d(key ^ vec2<u32>(desert_stone_seed_at(k), 0x68e31da4u));
+    let key = vec2<u32>(u32(ci.x) & lv.mask, u32(ci.y) & lv.mask);
+    let h0 = pcg2d(key ^ vec2<u32>(lv.seed, 0x68e31da4u));
     let h1 = pcg2d(h0);
     let r = vec4<f32>(city_u01(h0.x), city_u01(h0.y),
                       city_u01(h1.x), city_u01(h1.y));
-    let p_occ = select(dot(m, DESERT_STONE_P_PEBBLE),
-                       dot(m, DESERT_STONE_P_GRAVEL), k == 0);
     // Occupied, and drawn at this footprint: two independent hashes.
-    if (r.x >= p_occ || fract(r.x * 7.31 + r.w * 3.17) >= w) {
+    if (r.x >= lv.p_occ || fract(r.x * 7.31 + r.w * 3.17) >= w) {
         return s;
     }
-    let c = desert_stone_cell_at(k);
-    let a = c * desert_stone_scale(m)
-              * mix(DESERT_STONE_A_LO, DESERT_STONE_A_HI, r.y);
+    let c = lv.cell;
+    let a = c * lv.scale * mix(DESERT_STONE_A_LO, DESERT_STONE_A_HI, r.y);
     let b = a * mix(0.6, 1.0, fract(r.y * 13.7));
     let h = a * DESERT_STONE_FLAT * mix(0.7, 1.2, fract(r.y * 29.1));
     // Anywhere in the cell; a < c/2, so the stone reaches at most into the
@@ -20285,19 +20360,9 @@ fn desert_stone(k: i32, ci: vec2<i32>, z0: f32, xy0: vec2<f32>,
     // Buried to between a quarter below and a quarter above its middle.
     let ground = z0 + dot(grad, xy - xy0);
     s.centre = vec3<f32>(xy, ground + h * mix(-0.25, 0.25, fract(r.z * 5.3)));
-    // Colour: a palette draw weighted by the material, and a brightness
-    // jitter of mean one.
-    var pick = fract(r.w * 11.3 + r.y * 2.9);
-    var col = desert_stone_palette_at(6);
-    for (var i: i32 = 0; i < 7; i = i + 1) {
-        let wi = desert_stone_mix(m, i);
-        if (pick < wi) {
-            col = desert_stone_palette_at(i);
-            break;
-        }
-        pick = pick - wi;
-    }
-    s.albedo = col * mix(0.8, 1.2, fract(r.x * 97.3));
+    // Colour, drawn only for a stone that is hit (desert_stone_albedo).
+    s.pick = fract(r.w * 11.3 + r.y * 2.9);
+    s.bright = mix(0.8, 1.2, fract(r.x * 97.3));
     s.facet = h1.x ^ h0.y;
     // The broken faces: anywhere round the stone, taking off between a
     // quarter and two thirds of its radius. This is what gives a clast its
@@ -20422,10 +20487,10 @@ fn desert_stone_normal(s: DesertStone, nq: vec3<f32>) -> vec3<f32> {
 
 // Test the stone of cell `ci` (level k) against the ray, keeping the
 // nearer hit.
-fn desert_stone_try(best: ptr<function, DesertHit>, k: i32, ci: vec2<i32>,
-                    o: vec3<f32>, dir: vec3<f32>, th: DesertHit,
-                    grad: vec2<f32>, m: vec3<f32>, w: f32) {
-    let s = desert_stone(k, ci, th.pos.z, th.pos.xy, grad, m, w);
+fn desert_stone_try(best: ptr<function, DesertHit>, lv: DesertStoneLevel,
+                    ci: vec2<i32>, o: vec3<f32>, dir: vec3<f32>, th: DesertHit,
+                    grad: vec2<f32>, w: f32) {
+    let s = desert_stone(lv, ci, th.pos.z, th.pos.xy, grad, w);
     if (!s.on) {
         return;
     }
@@ -20436,7 +20501,8 @@ fn desert_stone_try(best: ptr<function, DesertHit>, k: i32, ci: vec2<i32>,
         (*best).pos = o + sh.x * dir;
         (*best).normal = desert_stone_normal(s, sh.yzw);
         (*best).kind = DESERT_KIND_STONE;
-        (*best).mat = vec4<f32>(s.albedo, th.mat.x);
+        // (pick, bright, -, lightness) until the walk is done.
+        (*best).mat = vec4<f32>(s.pick, s.bright, 0.0, th.mat.x);
     }
 }
 
@@ -20459,7 +20525,8 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit)
         if (w <= 0.0) {
             continue;
         }
-        let c = desert_stone_cell_at(k);
+        let lv = desert_stone_level(k, m);
+        let c = lv.cell;
         let span = DESERT_STONE_TOP * c / closing;
         let t0 = max(th.t - span, 0.0);
         let p0 = o + t0 * dir;
@@ -20476,8 +20543,8 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit)
         // adds only the three cells it newly brings within one cell of the
         // track (the column or row beyond the new cell).
         for (var e: i32 = 0; e < 9; e = e + 1) {
-            desert_stone_try(&best, k, ci + vec2<i32>(e % 3 - 1, e / 3 - 1),
-                             o, dir, th, grad, m, w);
+            desert_stone_try(&best, lv, ci + vec2<i32>(e % 3 - 1, e / 3 - 1),
+                             o, dir, th, grad, w);
         }
         for (var i: i32 = 0; i < DESERT_STONE_MAX_CELLS; i = i + 1) {
             let t_exit = min(tm.x, tm.y);
@@ -20498,10 +20565,14 @@ fn desert_stone_trace(o: vec3<f32>, dir: vec3<f32>, th: DesertHit)
                 along = vec2<i32>(1, 0);
             }
             for (var e: i32 = -1; e <= 1; e = e + 1) {
-                desert_stone_try(&best, k, edge + e * along, o, dir, th, grad,
-                                 m, w);
+                desert_stone_try(&best, lv, edge + e * along, o, dir, th,
+                                 grad, w);
             }
         }
+    }
+    if (best.kind == DESERT_KIND_STONE) {
+        best.mat = vec4<f32>(desert_stone_albedo(best.mat.x, best.mat.y, m),
+                             best.mat.w);
     }
     return best;
 }
@@ -20521,13 +20592,13 @@ fn desert_stone_shadow(p: vec3<f32>, sun: vec3<f32>, n: vec3<f32>,
         if (w <= 0.0) {
             continue;
         }
-        let c = desert_stone_cell_at(k);
-        let home = vec2<i32>(floor(p.xy / c));
+        let lv = desert_stone_level(k, m);
+        let home = vec2<i32>(floor(p.xy / lv.cell));
         // This cell and its eight neighbours: every stone that can reach
         // over the point (a stone overhangs by less than a cell).
         for (var j: i32 = 0; j < 9; j = j + 1) {
             let ci = home + vec2<i32>(j % 3 - 1, j / 3 - 1);
-            let s = desert_stone(k, ci, p.z, p.xy, grad, m, w);
+            let s = desert_stone(lv, ci, p.z, p.xy, grad, w);
             if (s.on && desert_stone_hit(s, p + 1e-4 * sun, sun).x > 0.0) {
                 return 0.0;
             }
@@ -20560,16 +20631,17 @@ fn desert_stone_decal(p: vec3<f32>, n: vec3<f32>, lightness: f32, w0: f32,
     // How far a stone's shadow slides per metre of its height.
     let slide = -sun.xy / max(sun.z, 0.05);
     var top = -1e30;
+    var colour = vec2<f32>(0.0);         // the top stone's (pick, bright)
     for (var k: i32 = 0; k < DESERT_STONE_LEVELS; k = k + 1) {
         let w = select(w1, w0, k == 0);
         if (w <= 0.0) {
             continue;
         }
-        let c = desert_stone_cell_at(k);
-        let home = vec2<i32>(floor(p.xy / c));
+        let lv = desert_stone_level(k, m);
+        let home = vec2<i32>(floor(p.xy / lv.cell));
         for (var j: i32 = 0; j < 9; j = j + 1) {
-            let s = desert_stone(k, home + vec2<i32>(j % 3 - 1, j / 3 - 1),
-                                 p.z, p.xy, grad, m, w);
+            let s = desert_stone(lv, home + vec2<i32>(j % 3 - 1, j / 3 - 1),
+                                 p.z, p.xy, grad, w);
             if (!s.on) {
                 continue;
             }
@@ -20592,7 +20664,7 @@ fn desert_stone_decal(p: vec3<f32>, n: vec3<f32>, lightness: f32, w0: f32,
             if (cov > 0.0 && height > top) {
                 top = height;
                 d.cover = cov;
-                d.albedo = s.albedo;
+                colour = vec2<f32>(s.pick, s.bright);
                 // The dome's normal, back into the world (a plane normal
                 // through a scale goes by the inverse scale).
                 let nl = vec3<f32>(x, y, zt) / s.axes;
@@ -20608,6 +20680,9 @@ fn desert_stone_decal(p: vec3<f32>, n: vec3<f32>, lightness: f32, w0: f32,
             d.shadow = min(d.shadow,
                            clamp((sx * sx + sy * sy - edge) / soft, 0.0, 1.0));
         }
+    }
+    if (d.cover > 0.0) {
+        d.albedo = desert_stone_albedo(colour.x, colour.y, m);
     }
     return d;
 }
@@ -20747,12 +20822,19 @@ fn desert_flora_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 fn desert_ground(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                  t_start: f32) -> DesertHit {
     return desert_ground_at(o, dir, pixel_angle,
-                            desert_terrain_trace(o, dir, pixel_angle, t_start));
+                            desert_terrain_trace(o, dir, pixel_angle, t_start),
+                            true);
 }
 
-// The same from a terrain hit already found (desert_terrain_trace).
+// The same from a terrain hit already found (desert_terrain_trace). `near`
+// (a literal at every call) says whether this ground can be close enough
+// for its stones to resolve: the refine stage's, and the lite desert's
+// plain pass. The full desert's plain pass hands every footprint under
+// DESERT_FLORA_REFINE_FP_M to the refine stage, and the stones resolve only
+// under 0.0625 m (desert_stone_resolve), so there it has no stones to walk
+// or shade, and compiling them out spares the whole pass their registers.
 fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
-                    terrain: DesertHit) -> DesertHit {
+                    terrain: DesertHit, near: bool) -> DesertHit {
     var best = terrain;
     if (best.hit) {
         // What the ground is at the hit, once: its lightness and its normal
@@ -20766,12 +20848,13 @@ fn desert_ground_at(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         // stone levels' weights). The weights are computed ONCE, here, on
         // the terrain's own normal, and everything downstream reads them.
         let wall = desert_wall(best.normal);
-        best.mat = vec4<f32>(
-            s.y, wall,
-            desert_stone_weight(0, fp, dir, best.normal, wall),
-            desert_stone_weight(1, fp, dir, best.normal, wall));
-        if (!DESERT_LITE) {
-            best = desert_stone_trace(o, dir, best);
+        best.mat = vec4<f32>(s.y, wall, 0.0, 0.0);
+        if (near) {
+            best.mat.z = desert_stone_weight(0, fp, dir, best.normal, wall);
+            best.mat.w = desert_stone_weight(1, fp, dir, best.normal, wall);
+            if (!DESERT_LITE) {
+                best = desert_stone_trace(o, dir, best);
+            }
         }
         if (best.kind == DESERT_KIND_TERRAIN) {
             // Ripples fade on the footprint ON THE GROUND: seen obliquely
@@ -20902,7 +20985,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
     L.t_sun = t_sun;
     L.sky_open = open;
     // The surroundings' reflected light, from the tile's mean albedo.
-    L.ground = DESERT_BOUNCE_ALBEDO * (L.sun * mu_sun + L.sky);
+    L.ground = desert_bounce_albedo() * (L.sun * mu_sun + L.sky);
     return L;
 }
 
@@ -20996,28 +21079,15 @@ fn desert_brf(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 }
 
 // The slope variance the tile's mip chain has filtered out of the normal at
-// each level (tools/export_desert_tile.py slope_variance_removed; held to the
-// tile by tests/test_desert_tile.py) — the ocean's FIF_SLOPE_VARIANCE_REMOVED
+// each level (tools/export_desert_tile.py slope_variance_removed, carried in
+// u.desert_tile) — the ocean's FIF_SLOPE_VARIANCE_REMOVED
 // for the ground. A far pixel is shaded at the footprint's MEAN normal,
 // which has lost the facets that turn away from a low sun and the shadows
 // the ridges throw; this puts them back as Smith shadowing on the beam, so
 // the far bajada at low sun is as dark as its resolved form averages to
 // rather than flat and bright.
 fn desert_slope_variance_removed_at(i: i32) -> f32 {
-    switch i {
-        case 0: { return 0.000000; }
-        case 1: { return 0.003600; }
-        case 2: { return 0.006006; }
-        case 3: { return 0.007218; }
-        case 4: { return 0.007616; }
-        case 5: { return 0.007761; }
-        case 6: { return 0.007850; }
-        case 7: { return 0.007922; }
-        case 8: { return 0.007982; }
-        case 9: { return 0.008028; }
-        case 10: { return 0.008049; }
-        default: { return 0.008049; }
-    }
+    return desert_tile_level(6, i);
 }
 
 fn desert_unresolved_shadow(n: vec3<f32>, sun: vec3<f32>, fp: f32) -> f32 {
@@ -21040,7 +21110,8 @@ const DESERT_VOL_W_SAND: f32 = 0.15;
 const DESERT_GEO_W_SAND: f32 = 0.08;
 
 fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
-                          L: DesertLight, plants: f32) -> vec3<f32> {
+                          L: DesertLight, plants: f32, near: bool)
+        -> vec3<f32> {
     let n = h.normal;
     // A stone is lit by the same law as the ground it lies on, with its
     // own albedo and normal and none of the ground's statistics: no kernel
@@ -21049,7 +21120,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // on its inputs: two shading branches kept the hit, the light and the
     // ground terms all live across the divergence (perf: 155 registers
     // against 72 with the stones out).
-    if (h.kind == DESERT_KIND_STONE) {
+    if (near && h.kind == DESERT_KIND_STONE) {
         let mu_s = max(dot(n, L.sun_dir), 0.0);
         return desert_lit(h.mat.xyz, n, L,
                           mu_s * desert_terrain_shadow(
@@ -21084,7 +21155,10 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                          statistical * mix(DESERT_GEO_W_PAVEMENT,
                                            DESERT_GEO_W_SAND, light));
     var ns = n;
-    var stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
+    var stones = 1.0;
+    if (near) {
+        stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
+    }
     var sheen = desert_sheen(n, dir, L.sun_dir);
     if (DESERT_LITE) {
         // The stones as decals (desert_stone_decal): a covered pixel is the
@@ -21199,7 +21273,9 @@ fn desert_shade(h: DesertHit, o: vec3<f32>, pos_world: vec3<f32>,
         // The plants' shadow on the ground and its stones.
         let plants = desert_flora_shadow(h.pos, sun, fp, refine);
         let far = desert_flora_far(o, dir, h.t, pixel_angle, sun);
-        rgb = desert_ground_radiance(h, dir, fp, L, plants)
+        // Stones only where they can resolve: see desert_ground_at.
+        rgb = desert_ground_radiance(h, dir, fp, L, plants,
+                                     refine || DESERT_LITE)
               * (1.0 - far.cover)
               + far.cover * desert_flora_far_shade(far, dir, L);
     }
@@ -21240,7 +21316,7 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
     // The whole desert along the ray: the ground, then whatever stands on
     // it in front of the ground hit.
     let inv_dir = 1.0 / dir;
-    var h = desert_ground_at(o, dir, pixel_angle, terrain);
+    var h = desert_ground_at(o, dir, pixel_angle, terrain, DESERT_LITE);
     let slab = desert_flora_slab(o, dir, inv_dir, h.t);
     if (slab.y > slab.x) {
         let fh = desert_flora_trace(o, dir, inv_dir, slab.x, slab.y,
@@ -21322,9 +21398,11 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
 
 // Mean hemispherical albedo of the ground as a cloud base sees it, for the
 // surface bounce and the upwelling light a facet sees: the mean of the
-// tile's level-0 albedos (tests/test_desert_tile.py). The ocean's bounce
+// tile's level-0 albedos (the tile's meta, u.desert_tile). The ocean's bounce
 // constant was tuned over water, so the desert's scales it by the ratio.
-const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>(0.280, 0.221, 0.156);
+fn desert_bounce_albedo() -> vec3<f32> {
+    return u.desert_tile[21].xyz;
+}
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 
 // === END DESERT GROUND ===
@@ -21458,13 +21536,12 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 // Which surfaces have the second stage is the hosts' list
 // (soar_host.SURFACE_REFINE_SURFACES, renderer.js _hasRefineStage).
 //
-// One function per surface, chosen by the scene's specialization. Anything
-// that belongs to the surface and sits in front of it along the ray (city
-// fog, a component's in-scatter at street level) is folded into its rgb here
-// — it was already, when fs_main did the tracing. A semi-transparent layer
-// in front of the surface (a far canopy over the sky) would need a second
-// target; there is room for one (24 bytes per sample with an rgba16float
-// premultiplied layer beside this rgba32float), and none is built.
+// One function per surface, chosen by the scene's specialization. What
+// belongs to the surface and sits in front of it along the ray as part of
+// its look (city fog) is folded into its rgb here. A semi-transparent layer
+// that must also show against the sky, or with a cloud in front of or
+// behind it (the city's steam), goes to the VEIL instead (@location(1),
+// veil_pack), which fs_main composites at the veil's own depth.
 
 struct CameraRay {
     dir: vec3<f32>,
@@ -21827,11 +21904,25 @@ fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
 // street — the furniture standing in front of it, the wet reflection off
 // it, and the steam over it, which goes to the VEIL so it shows against the
 // sky and in front of any wall. A pixel whose ray never comes down within
-// CITY_NEAR_TOP of the street, within CITY_NEAR_RANGE, and did not land on
-// the ground, leaves at once with the surface unchanged.
+// CITY_NEAR_TOP of the street, within its reach (city_near_reach), and did
+// not land on the ground, leaves at once with the surface unchanged.
 const CITY_NEAR_TOP: f32 = 15.0;     // the tallest near thing: a plume
-const CITY_NEAR_RANGE: f32 = 400.0;  // past the furniture and steam cutoffs
+const CITY_NEAR_RANGE: f32 = 400.0;  // past the steam's cutoff
 const CITY_FURNITURE_TOP: f32 = 3.0; // an open dumpster lid on the kerb
+// The near_props contract (SPEC.md): no hook draws anything where the props'
+// footprint, max(0.35 pixel_angle, true_pixel_angle) * t, exceeds this. The
+// wall lane's fade ends there (streetfurniture WALL_FAR), and the parked
+// cars the street stage owns (pixel_angle * t < 0.5) end well short of it.
+const CITY_NEAR_FP: f32 = 0.75;
+
+// How far along the ray the street stage looks: the steam's fixed range, or
+// the props' footprint-bound one, whichever is longer. At high resolution the
+// props reach well past CITY_NEAR_RANGE (~900 m at 1440p, fov 70).
+fn city_near_reach(cr: CameraRay) -> f32 {
+    return max(CITY_NEAR_RANGE,
+               CITY_NEAR_FP / max(0.35 * cr.pixel_angle,
+                                  cr.true_pixel_angle));
+}
 
 fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     let dir = cr.dir;
@@ -21847,7 +21938,7 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     if (city_o.z > CITY_NEAR_TOP) {
         t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
     }
-    let t_near = min(t_prev, CITY_NEAR_RANGE);
+    let t_near = min(t_prev, city_near_reach(cr));
     let near = t_low < t_near;
     if (!near && !ground_hit) {
         return out;
@@ -21874,8 +21965,12 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
         let hp = city_trace(city_o, dir, t_f0, t_f1, CITY_TRACE_NEAR);
         if (hp.hit) {
             t = hp.t;
-            rgb = city_fog(city_shade(hp, dir, pixel_angle * t), city_o, dir,
-                           t, hp.pos);
+            // Always a component's hit (kind >= 100: no near_props hook
+            // returns core kinds), so its shader directly — a second whole
+            // city_shade beside the reflection's cost registers here.
+            rgb = city_fog(cc_component_shade(hp, city_cell(hp.cell), dir,
+                                              pixel_angle * t),
+                           city_o, dir, t, hp.pos);
             ground = false;
         }
     }
@@ -21959,9 +22054,12 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
 
 // What every surface stage writes to the veil target (@location(1)), and
 // what the march reads back at group 1 binding 2: premultiplied radiance
-// (half floats), transmittance, and the composite depth (a full f32 — up to
+// and opacity (half floats), and the composite depth (a full f32 — up to
 // 40 km over the desert). Packed into a uint target so no driver's float
-// path ever touches the bits.
+// path ever touches the bits. Opacity, 1 - transmittance, rather than
+// transmittance: a half float rounds any transmittance above ~0.99976 to
+// exactly 1, which would drop a faint plume's fringe (and its radiance with
+// it) at a hard edge; 1 - T keeps its full relative precision down there.
 struct SurfaceOut {
     @location(0) surf: vec4<f32>,
     @location(1) veil: vec4<u32>,
@@ -21969,7 +22067,7 @@ struct SurfaceOut {
 
 fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
     return vec4<u32>(pack2x16float(rgb.xy),
-                     pack2x16float(vec2<f32>(rgb.z, trans)),
+                     pack2x16float(vec2<f32>(rgb.z, 1.0 - trans)),
                      bitcast<u32>(t), 0u);
 }
 
@@ -21987,7 +22085,7 @@ struct Veil {
 fn veil_unpack(v: vec4<u32>) -> Veil {
     let rg = unpack2x16float(v.x);
     let bt = unpack2x16float(v.y);
-    return Veil(vec3<f32>(rg, bt.x), bt.y, bitcast<f32>(v.z));
+    return Veil(vec3<f32>(rg, bt.x), 1.0 - bt.y, bitcast<f32>(v.z));
 }
 
 // The pass itself. Only the CITY and DESERT specializations are ever run
@@ -22151,7 +22249,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
     let t_surface = select(select(t_ocean, t_city, CITY), t_desert, DESERT);
-    // The veil (steam over the city, far canopy over the desert): composited
+    // The veil (the city's steam; the desert writes none yet): composited
     // once, where the march passes its depth — so a cloud in front of it
     // stays in front and a cloud behind it is seen through it — and only if
     // it lies in front of the surface.
@@ -22890,7 +22988,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // albedo against the water's the constant was tuned over.
                 let bounce_tint = select(
                     BOUNCE_TINT,
-                    BOUNCE_TINT * DESERT_BOUNCE_ALBEDO / OCEAN_BOUNCE_ALBEDO,
+                    BOUNCE_TINT * desert_bounce_albedo() / OCEAN_BOUNCE_ALBEDO,
                     DESERT);
                 col = col + ice_recolor(
                     transmittance * d_tau * bounce * air_t * bounce_tint,

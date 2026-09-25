@@ -98,6 +98,16 @@ const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
 // the cover (radius r0 ~0.3 m) rises ~0.35 m/s, one a metre across ~1.2 m/s.
 const cc_manholesteam_RISE_RATE: f32 = 1.2;
+// The city's scene clock wraps at its tile meta's clock_period_s, 2600 s,
+// and the steam repeats exactly at that period: the lumps' lattice
+// coordinate up the plume is 1.3 zeta, which climbs 1.3 * RISE_RATE * 2600
+// = 4056 cells per period, so the lattice wraps in z at exactly that many
+// cells (ZWRAP) and every octave steps up by exactly 2 in z (a whole
+// multiple of it) — the wrap lands every octave on the lattice point it
+// left, and no plume pops. Change RISE_RATE, the 1.3, or the period
+// together, keeping 1.3 * RISE_RATE * CLOCK_PERIOD_S an integer.
+const cc_manholesteam_CLOCK_PERIOD_S: f32 = 2600.0;
+const cc_manholesteam_ZWRAP: f32 = 4056.0;
 // Radius growth per metre of rise. 0.12 is a pure plume in still air; a
 // plume bent over by a crosswind entrains faster, and steam also sheds
 // visible mass as it mixes, which the thinning law below carries.
@@ -287,9 +297,13 @@ fn cc_manholesteam_vnoise3(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = p - i;
     let w = f * f * (3.0 - 2.0 * f);
-    // Two z slices of the 2-D lattice, told apart by a large shift.
-    let s0 = i.xy + vec2<f32>(37.0, 17.0) * i.z;
-    let s1 = s0 + vec2<f32>(37.0, 17.0);
+    // Two z slices of the 2-D lattice, told apart by a large shift; z wraps
+    // at ZWRAP cells, which is what makes the steam periodic in the clock
+    // (and keeps the hash's arguments small however long the flight).
+    let z0 = i.z - cc_manholesteam_ZWRAP * floor(i.z / cc_manholesteam_ZWRAP);
+    let z1 = select(z0 + 1.0, 0.0, z0 + 1.0 >= cc_manholesteam_ZWRAP);
+    let s0 = i.xy + vec2<f32>(37.0, 17.0) * z0;
+    let s1 = i.xy + vec2<f32>(37.0, 17.0) * z1;
     let lo = mix(mix(hash12(s0), hash12(s0 + vec2<f32>(1.0, 0.0)), w.x),
                  mix(hash12(s0 + vec2<f32>(0.0, 1.0)),
                      hash12(s0 + vec2<f32>(1.0, 1.0)), w.x), w.y);
@@ -327,7 +341,9 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     for (var o: i32 = 0; o < octaves; o = o + 1) {
         n = n + amp * cc_manholesteam_vnoise3(x);
         norm = norm + amp;
-        x = 2.03 * x + vec3<f32>(19.1, 7.3, 3.7);
+        // Exactly 2 in z, so each octave's lattice is periodic with the
+        // first's (CLOCK_PERIOD_S); 2.03 across, off the lattice's grain.
+        x = vec3<f32>(2.03, 2.03, 2.0) * x + vec3<f32>(19.1, 7.3, 3.7);
         amp = 0.5 * amp;
     }
     n = n / norm - 0.5;

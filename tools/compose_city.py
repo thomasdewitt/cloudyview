@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-eight hook dispatchers the core calls (see the hook comment block in
+nine hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -125,7 +125,7 @@ def validate_component(comp, source):
 
 
 def dispatcher(comps):
-    """The eight hook dispatchers over whatever is registered."""
+    """The nine hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 
@@ -240,7 +240,9 @@ def dispatcher(comps):
     return "\n\n".join(out)
 
 
-def compose(check_only: bool) -> int:
+def composed_text() -> tuple[list, str]:
+    """The registry's components, and raymarch.wgsl as the composer would
+    write it from them (nothing compiled, nothing written)."""
     comps = load_registry()
     kbs = [c["kind_base"] for c in comps if c.get("kind_base") is not None]
     if len(kbs) != len(set(kbs)):
@@ -276,8 +278,11 @@ def compose(check_only: bool) -> int:
     shader = SHADER.read_text()
     start = shader.index(MARK_OPEN)
     end = shader.index(MARK_CLOSE) + len(MARK_CLOSE)
-    out = shader[:start] + generated + shader[end:]
+    return comps, shader[:start] + generated + shader[end:]
 
+
+def compose(check_only: bool) -> int:
+    comps, out = composed_text()
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()

@@ -96,6 +96,22 @@ Signatures (the composer checks these by compiling):
   t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell) -> CityHit` — geometry
   inside cell `ci`, tested against the ray segment [t0, t1]. Return the
   nearest hit with `t` in that segment, or `hit = false`.
+- `near_props` — same signature as `cell_props` — geometry below
+  `CITY_FURNITURE_TOP` (3 m) that is only drawn close: street furniture,
+  the parked cars' sphere-traced hulls. It runs ONLY in the city's street
+  stage (`fs_surface_street`), after the facade shell, over the stretch of
+  the view ray below 3 m, up to the surface the earlier stages found and at
+  most `city_near_reach` — so heavy code here costs the first stage no
+  registers. Two things follow. (1) `t0` in the first cell is where the ray
+  comes down to 3 m, not the cell's entry: take a footprint for a stage
+  decision from the thing's own entry (streetlife's per-car switch), never
+  from `t0`. (2) The contract: draw nothing where
+  `max(0.35 pixel_angle, true_pixel_angle) * t > CITY_NEAR_FP` (0.75), the
+  street stage's reach. A hook is not in wet reflections
+  (`CITY_TRACE_PLAIN`), and nothing makes it continuous with `cell_props`:
+  a component that draws the same thing in both (streetlife's cars: boxes
+  in the first stage, hulls here) must split it so each instance is
+  exactly one stage's.
 - `extra_trace` — `fn (o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
   -> CityHit` — geometry independent of the block grid (an elevated
   highway network). Must stay below `CITY_SLAB_TOP`.
@@ -134,9 +150,13 @@ Signatures (the composer checks these by compiling):
 - `media` — `fn (o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
   t_max: f32, pixel_angle: f32, rnd: f32) -> vec4<f32>` — participating
   media between the eye and the city hit at `t_max` (steam): in-scattered
-  radiance in rgb, transmittance in a. The core applies it as
-  `rgb + a * city`; `(0, 0, 0, 1)` is the identity. `rnd` is a per-pixel
-  independent (white) uniform per frame, for jittering a march.
+  radiance in rgb, transmittance in a; `(0, 0, 0, 1)` is the identity. The
+  street stage packs the result into the VEIL at `t_low`, where the ray
+  first comes down to `CITY_NEAR_TOP` (15 m), and fs_main composites it
+  when its march reaches that distance — so the steam lies in front of
+  whatever is behind it, cloud and sky included, and never in the surface
+  rgb. `rnd` is a per-pixel independent (white) uniform per frame, for
+  jittering a march.
 
 ## The street (core section THE STREET SURFACE)
 

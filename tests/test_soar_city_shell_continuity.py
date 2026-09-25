@@ -137,7 +137,8 @@ def _view(cam, width):
 
 def _plain(r, width, height):
     """The plain pass's target as raw words: red carries the shell's mark
-    (its sign bit, CITY_SHELL_MARK in raymarch.wgsl), alpha the distance."""
+    (its sign bit, CITY_SHELL_MARK in raymarch.wgsl), alpha the distance
+    (negated where the street stage's ground flag is set)."""
     import wgpu
     tex = r._targets["plain"]
     row = math.ceil(width * 16 / 256) * 256
@@ -157,7 +158,9 @@ def _plain(r, width, height):
 
 
 def _surface_t(r, width, height):
-    """The final surface's distance (the refinement stage's output)."""
+    """The final surface's distance: the city's last surface stage, the
+    street stage (fs_surface_street), which passes the refinement's t on
+    unless street furniture stands in front of it."""
     import wgpu
     tex = r._targets["surface"]
     row = math.ceil(width * 16 / 256) * 256

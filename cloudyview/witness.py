@@ -63,7 +63,7 @@ from .soar_host import (
     ViewState,
     camera_world_origin,
     check_surface,
-    desert_relief_m,
+    desert_scene_fields,
     surface_cell_m,
     surface_period_m,
     surface_clock_period_s,
@@ -404,7 +404,7 @@ def render_nested(
         clock_period_s=surface_clock_period_s(surface, meta),
         nested=len(levels) > 1,
         surface=surface,
-        **({"desert_relief_m": desert_relief_m(meta)}
+        **(desert_scene_fields(meta)
            if surface == "desert" else {}),
         **state_kwargs,
     )
