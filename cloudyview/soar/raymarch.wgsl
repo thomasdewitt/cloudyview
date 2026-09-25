@@ -2300,6 +2300,18 @@ fn sea_uniforms(seed: vec2<u32>) -> vec2<f32> {
 // sparkle is no longer always the same clipped dot. Past a few facets the
 // sum is its mean, K: the pixel holds enough of them to average.
 const SEA_GLITTER_SPREAD: f32 = 1.3;
+// Glitter lives in the core of the sun's lobe — around its reflection —
+// and nowhere else. Out in the lobe's tails a lone facet catching the sun is
+// possible but rare, and drawn as such it strewed the whole sea with
+// equally bright dots that read as snow (Thomas, 2026-09-25: "Exactly.
+// Snow."). So the draw is blended toward its own mean, the smooth lobe, by
+// where the half vector sits in the lobe: GGX D(h) over its peak, 1 on the
+// sun's reflection, falling as the facets that would reflect it get rarer.
+// The draw's mean is 1 (E[K / lambda] = 1, and each facet's brightness has
+// mean 1), so any blend keeps the lobe's mean exactly — the energy stays
+// the smooth Cox-Munk specular's, with the sparkles only where it is bright.
+const SEA_GLITTER_CORE_LO: f32 = 0.3;
+const SEA_GLITTER_CORE_HI: f32 = 0.7;
 
 fn sea_glitter_brightness(k: f32, seed: vec2<u32>) -> f32 {
     if (k >= 4.0 || k <= 0.0) {
@@ -2580,14 +2592,19 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let spec = glint_weight * t_sun_ocean * d_ggx * g_smith
                     * sun_fresnel / (4.0 * n_g_dot_v);
                 // Glitter (see SEA_GLITTER_*): the lobe drawn as the facets
-                // that actually catch the disc.
+                // that actually catch the disc, in the lobe's core only.
                 let lambda = sea.glitter_facets * d_ggx * n_dot_h
                     * SEA_SUN_SOLID_ANGLE / (4.0 * max(v_dot_h, 1e-4));
+                // D(h) / D(n.h = 1) = alpha^4 / denom^2, in (0, 1].
+                let lobe = alpha_squared * alpha_squared / (denom * denom);
+                let core = smoothstep(SEA_GLITTER_CORE_LO,
+                                      SEA_GLITTER_CORE_HI, lobe);
                 var sparkle = 1.0;
-                if (lambda > 0.0) {
+                if (core > 0.0 && lambda > 0.0) {
                     let k = sea_poisson(lambda, sea_uniforms(sea.glitter_seed));
-                    sparkle = sea_glitter_brightness(k, sea.glitter_seed)
+                    let draw = sea_glitter_brightness(k, sea.glitter_seed)
                         / lambda;
+                    sparkle = 1.0 + core * (draw - 1.0);
                 }
                 glint = spec * sparkle * u.cloud_sun.xyz;
             }

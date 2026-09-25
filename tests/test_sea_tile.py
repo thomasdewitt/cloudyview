@@ -211,3 +211,45 @@ def test_the_city_states_its_clock_period():
     zwrap = _wgsl_scalar(src, "cc_manholesteam_ZWRAP")
     assert zwrap == round(zwrap)
     assert scale * rise * period == pytest.approx(zwrap, abs=1e-6)
+
+
+def _glitter_draw(lam, spread, rng, n):
+    """raymarch.wgsl's glitter draw for n footprints of expected facet count
+    lam: K ~ sea_poisson(lam), then sea_glitter_brightness(K) / lam — the
+    same branches (the normal approximation past 16; K lognormal facets of
+    mean 1 below 4, K itself from 4), on numpy's uniforms for the hash's."""
+    r1, r2 = rng.random(n), rng.random(n)
+    if lam > 16.0:
+        z = np.sqrt(-2.0 * np.log(np.maximum(r1, 1e-7))) * np.cos(2 * np.pi * r2)
+        k = np.maximum(np.round(lam + np.sqrt(lam) * z), 0.0)
+    else:
+        k = rng.poisson(lam, n).astype(float)
+    s2 = spread * spread
+    total = k.copy()
+    few = (k > 0) & (k < 4)
+    bright = np.zeros(n)
+    for i in range(3):
+        u1, u2 = rng.random(n), rng.random(n)
+        z = np.sqrt(-2.0 * np.log(np.maximum(u1, 1e-7))) * np.cos(2 * np.pi * u2)
+        bright += np.where(i < k, np.exp(spread * z - 0.5 * s2), 0.0)
+    total[few] = bright[few]
+    return total / lam
+
+
+def test_the_glitter_keeps_the_smooth_specular_mean():
+    """The glint is the smooth Cox-Munk lobe times 1 + core (draw - 1): the
+    draw's mean is exactly 1 (the facets' expected count is lambda, each
+    facet's brightness has mean 1), so whatever the core weight — 1 on the
+    sun's reflection, 0 in the lobe's tails, where it stays the smooth lobe
+    rather than strewing the sea with lone glints — the energy is the
+    specular's."""
+    src = SHADER.read_text()
+    assert "sparkle = 1.0 + core * (draw - 1.0);" in src
+    spread = _wgsl_scalar(src, "SEA_GLITTER_SPREAD")
+    rng = np.random.default_rng(3)
+    n = 4_000_000
+    for lam in (0.02, 0.3, 1.0, 3.5, 10.0, 40.0):
+        draw = _glitter_draw(lam, spread, rng, n)
+        # A few standard errors of the draw's own mean.
+        tol = 4.0 * draw.std() / np.sqrt(n)
+        assert abs(draw.mean() - 1.0) < tol + 1e-3, (lam, draw.mean(), tol)
