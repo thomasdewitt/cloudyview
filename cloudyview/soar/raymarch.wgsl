@@ -856,6 +856,20 @@ fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(t_near, t_far);
 }
 
+// ray_box's inv_dir for a direction that may lie along an axis. 1 / 0 is an
+// infinity, and in WGSL an operation that produces one is indeterminate: the
+// driver may assume it never happens, so what the slab test then returns is
+// whatever the codegen of the day makes of it. It did differ — the desert's
+// straight-up march, (0, 0, 1) in a bounded domain, measured the whole cloud
+// column above the ground in one build and no cloud at all in the next
+// (2026-09-24). A component of 1e30 bounds the ray only where the origin is
+// outside that slab, which is what the infinity was meant to do.
+fn safe_inv_dir(d: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(select(1e30, 1.0 / d.x, abs(d.x) > 1e-9),
+                     select(1e30, 1.0 / d.y, abs(d.y) > 1e-9),
+                     select(1e30, 1.0 / d.z, abs(d.z) > 1e-9));
+}
+
 // One refinement level's sample, plus the march step sizes that level asks
 // for. witness carries the same two things out of _sample_sigma_nested (the
 // value and the level index that sets dt_max).
@@ -1493,8 +1507,7 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
         t_exit = (u.bmax.z - p.z) / sun.z;
         t_start = max((u.bmin.z - p.z) / sun.z, 0.0);
     } else {
-        let inv_dir = 1.0 / sun;
-        let hit = ray_box(p, inv_dir);
+        let hit = ray_box(p, safe_inv_dir(sun));
         if (hit.x > hit.y || hit.y <= 0.0) {
             return 0.0;
         }
@@ -21000,7 +21013,7 @@ fn desert_light(p_world: vec3<f32>, sun: vec3<f32>, sun_shadow: vec3<f32>,
             let entry = p_world + sun * ((u.bmin.z - p_world.z) / sun.z);
             tau_sun = sample_light_tau(entry);
         } else {
-            let hit = ray_box(p_world, 1.0 / sun);
+            let hit = ray_box(p_world, safe_inv_dir(sun));
             if (hit.x > hit.y || hit.y <= 0.0) {
                 tau_sun = 0.0;
             } else {

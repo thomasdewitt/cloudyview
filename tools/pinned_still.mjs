@@ -10,6 +10,7 @@
 //
 //   node tools/pinned_still.mjs --web DIR [--cdp PORT]
 //        [--scenes city,day,desert] [--tiers high,low,max] [--size 640x360]
+//        [--save DIR]
 //
 // DIR is a checkout's web/ directory WITH soar/demos present (the symlink
 // into the site's demo store): the day scene is the TWP-ICE demo over the
@@ -26,9 +27,12 @@
 // can move a byte.
 //
 // Output: one line per still, "scene/tier sha256[:16] mean-rgb camera",
-// the desert's tier suffixed "+lite" where it drew the LITE ground.
+// the desert's tier suffixed "+lite" where it drew the LITE ground. --save
+// DIR also writes each still there as scene-tier.png (the exact bytes the
+// hash is of), for looking at what a changed hash changed.
 // Exit 0; 2 when it cannot run.
 
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openTab, serveTree, servedShaderHash } from "./soar_cdp.mjs";
 
@@ -42,9 +46,12 @@ const cdpPort = option("--cdp", "9333");
 const scenes = option("--scenes", "city,day,desert").split(",");
 const tiers = option("--tiers", "high,low,max").split(",");
 const [w, h] = option("--size", "640x360").split("x").map(Number);
+const saveDir = option("--save", null);
+if (saveDir) mkdirSync(saveDir, { recursive: true });
 if (!webDir) {
   console.error("usage: node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
-                "[--scenes city,day,desert] [--tiers high,low,max] [--size WxH]");
+                "[--scenes city,day,desert] [--tiers high,low,max] [--size WxH] " +
+                "[--save DIR]");
   process.exit(2);
 }
 
@@ -116,7 +123,19 @@ try {
           for (let i = 0; i < img.data.length; i += 4) {
             sum += img.data[i] + img.data[i + 1] + img.data[i + 2];
           }
-          return { sha: [...new Uint8Array(d)].slice(0, 8)
+          let png = null;
+          if (${JSON.stringify(Boolean(saveDir))}) {
+            const canvas = new OffscreenCanvas(img.width, img.height);
+            canvas.getContext("2d").putImageData(img, 0, 0);
+            const blob = await canvas.convertToBlob({ type: "image/png" });
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let bin = "";
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+              bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+            }
+            png = btoa(bin);
+          }
+          return { png, sha: [...new Uint8Array(d)].slice(0, 8)
                      .map((b) => b.toString(16).padStart(2, "0")).join(""),
                    mean: (sum / (img.data.length / 4) / 3).toFixed(4),
                    cam: s.camera.position.map((v) => v.toFixed(2)).join(","),
@@ -127,6 +146,10 @@ try {
       })()`);
       console.log(`${name}/${tier}${r.lite ? "+lite" : ""} ${r.sha} ${r.mean} ` +
                   r.cam);
+      if (saveDir) {
+        writeFileSync(join(saveDir, `${name}-${tier}.png`),
+                      Buffer.from(r.png, "base64"));
+      }
     }
   }
   await done(0);
