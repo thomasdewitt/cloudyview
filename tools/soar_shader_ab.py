@@ -61,7 +61,7 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SceneState, SoarRenderer,
-    ViewState, camera_world_origin, read_shader, desert_relief_m,
+    ViewState, camera_world_origin, desert_scene_fields, read_shader,
     surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
@@ -221,7 +221,8 @@ def main():
         state.clock_period_s = float(meta["clock_period_s"])
     if surface == "desert":
         # Row 8.yzw: the tile's relief, without which the desert is a plane.
-        state.desert_relief_m = desert_relief_m(meta)
+        for key, value in desert_scene_fields(meta).items():
+            setattr(state, key, value)
 
     views = ALL_VIEWS
     if city:

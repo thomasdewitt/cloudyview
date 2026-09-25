@@ -610,7 +610,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
                             APP_LIGHT_MARCH_LOD_DEGREES,
                             DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS,
                             APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
-                            desert_relief_m, surface_cell_m,
+                            desert_scene_fields, surface_cell_m,
                             surface_period_m)
     from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
                           QUALITY_PRESETS, _field_level)
@@ -693,7 +693,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         surface=s.surface,
         **({"city_tile_offset_m": s.city_tile_offset_m}
            if s.surface == "city" else {}),
-        **({"desert_relief_m": desert_relief_m(meta)}
+        **(desert_scene_fields(meta)
            if s.surface == "desert" else {}),
         surface_offset_m=s.surface_offset_m,
     )

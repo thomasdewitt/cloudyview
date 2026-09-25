@@ -453,7 +453,7 @@ def main(argv=None) -> int:
         APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES,
         DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SceneState, SoarRenderer,
         ViewState,
-        desert_relief_m, surface_cell_m)
+        desert_scene_fields, surface_cell_m)
     from cloudyview.witness import OCEAN_REFLECTANCE, QUALITY_PRESETS
     from PIL import Image
 
@@ -576,8 +576,7 @@ def main(argv=None) -> int:
         ocean_tile_extent=float(tile["tile_extent_m"]),
         ocean_max_lod=int(tile["mips"]) - 1,
         surface=args.surface,
-        **({"desert_relief_m": desert_relief_m(tile)}
-           if args.surface == "desert" else {}),
+        **(desert_scene_fields(tile) if args.surface == "desert" else {}),
     )
 
     small = scan_plants("scan_small")
