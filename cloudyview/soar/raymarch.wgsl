@@ -21906,6 +21906,7 @@ const DF_SAG_SHELL: f32 = 0.055;       // outermost reach of the spines (m)
 const DF_SAG_SHELL_STEP: f32 = 0.009;  // march step inside the shell (m)
 const DF_SAG_FELT_R: f32 = 0.0035;     // areole felt pad radius (m)
 const DF_SAG_RADIALS: i32 = 14;
+const DF_SAG_RADIAL_REACH: f32 = 0.0385;
 const DF_SAG_CENTRALS: i32 = 4;
 const DF_SAG_EXACT_FP0: f32 = 0.005;
 const DF_SAG_EXACT_FP1: f32 = 0.009;
@@ -22041,6 +22042,15 @@ fn df_cactus_ncols(it: DfItem) -> i32 {
     return select(1 + i32(it.b.x), 1, it.kind == DF_KIND_BARREL);
 }
 
+// A column's bounding sphere: (centre, radius) about its J's box, the
+// widest radius and the tip dome included.
+fn df_col_bound(c: DfColumn) -> vec4<f32> {
+    let hx = c.l1 * cos(c.alpha) + c.rb;
+    let hz = c.l1 * sin(c.alpha) + c.rb + c.l2;
+    return vec4<f32>(c.root + vec3<f32>(c.u * (0.5 * hx), 0.5 * hz),
+                     0.5 * length(vec2<f32>(hx, hz)) + 1.2 * c.r);
+}
+
 fn df_sag_eval(it: DfItem, q: vec3<f32>, blend: f32) -> DfSagSample {
     var out: DfSagSample;
     out.cs = df_col_eval(df_cactus_col(it, 0), q);
@@ -22048,7 +22058,15 @@ fn df_sag_eval(it: DfItem, q: vec3<f32>, blend: f32) -> DfSagSample {
     out.comp = 0;
     let n = df_cactus_ncols(it);
     for (var i: i32 = 1; i < n; i = i + 1) {
-        let cs = df_col_eval(df_cactus_col(it, i), q);
+        // An arm whose bounding sphere lies further than the nearest column
+        // so far plus the blend cannot change the distance (the smooth
+        // minimum is the plain one past its blend): skip its J-path.
+        let cc = df_cactus_col(it, i);
+        let bs = df_col_bound(cc);
+        if (length(q - bs.xyz) - bs.w > out.d + blend) {
+            continue;
+        }
+        let cs = df_col_eval(cc, q);
         out.d = df_smin(out.d, cs.d, blend);
         if (cs.d < out.cs.d) {
             out.cs = cs;
@@ -22073,7 +22091,13 @@ fn df_sag_areole(o: vec3<f32>, dir: vec3<f32>, f: DfFrame, h: vec4<f32>,
     // Tint 0: every saguaro needle is shaded by its position along it.
     let tint = 0.0;
     let step = DF_TAU / f32(DF_SAG_RADIALS);
-    for (var i: i32 = 0; i < DF_SAG_RADIALS; i = i + 1) {
+    // The radials are short: none reaches past DF_SAG_RADIAL_REACH of the
+    // pad (2 mm set back, 36 mm at the longest, half a millimetre thick),
+    // so a ray passing wider tests only the centrals.
+    let n_rad = select(0, DF_SAG_RADIALS,
+                       dot(w, w) - tc * tc
+                       < DF_SAG_RADIAL_REACH * DF_SAG_RADIAL_REACH);
+    for (var i: i32 = 0; i < n_rad; i = i + 1) {
         let hi = fract(h.y * 31.7 + f32(i) * 0.6180339);
         let hj = fract(h.w * 23.9 + f32(i) * 0.7548776);
         // Irregular, as in the close-ups: a few radials missing, the rest
@@ -22360,6 +22384,13 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     // Lipschitz bound of the pleated distance: the steepest groove wall.
     let slope = 2.0 * it.b.z * it.a.z / DF_PI;
     let inv_lip = 1.0 / sqrt(1.0 + slope * slope);
+    // Outside the columns' smooth outer envelope the pleats do not matter:
+    // a column's pleated distance exceeds its envelope's by at most its
+    // groove depth (depth x radius, the trunk's the largest), the blend
+    // dips a quarter of itself below the nearest, and the envelope's
+    // distance is Lipschitz-1 — so d less these steps safely at full
+    // length, where the pleated bound would take a third of it.
+    let pleat_slack = it.b.z * it.a.y + 0.25 * blend;
 
     // Spine representation, chosen once per plant on the ray dither: exact
     // needles, the shell medium, or — past the capsule hand-off below — the
@@ -22383,6 +22414,13 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     var tau = 0.0;
     var fuzz_t = 1e30;
     var last_key = 0xffffffffu;
+    // The areoles the last key tested: per rib slot (the nearest rib, the
+    // next one), its rib and centre areole; a slot's rib is -1e9 when unused.
+    // Keys a step apart share two of each rib's three areoles, and an areole
+    // tested once cannot give another answer (the best hit persists).
+    var done_comp = -1;
+    var done_k = vec2<f32>(-1e9);
+    var done_j = vec2<f32>(0.0);
     var t = ta;
     var body_t = 1e30;
     var body: DfSagSample;
@@ -22419,15 +22457,32 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     // than half the rib spacing.
                     let k_side = k + select(-1.0, 1.0, kf > k);
                     let ribs_n = select(1, 2, abs(kf - k) > 0.2);
+                    var now_k = vec2<f32>(-1e9);
+                    var now_j = vec2<f32>(0.0);
                     for (var rr: i32 = 0; rr < ribs_n; rr = rr + 1) {
                         let kk = select(k_side, k, rr == 0);
                         let oddk = f32(i32(kk) & 1);
                         let jk = round(sm.cs.s / areole_ds - 0.5 * oddk);
                         let th = (kk - c.phase) * DF_TAU / c.ribs;
+                        if (rr == 0) {
+                            now_k.x = kk;
+                            now_j.x = jk;
+                        } else {
+                            now_k.y = kk;
+                            now_j.y = jk;
+                        }
                         for (var dj: i32 = -1; dj <= 1; dj = dj + 1) {
-                            let sj = (jk + f32(dj) + 0.5 * oddk) * areole_ds;
+                            let jj = jk + f32(dj);
+                            let sj = (jj + 0.5 * oddk) * areole_ds;
                             if (sj < s_ground) {
                                 continue;   // below ground
+                            }
+                            if (sm.comp == done_comp
+                                && ((kk == done_k.x
+                                     && abs(jj - done_j.x) <= 1.0)
+                                    || (kk == done_k.y
+                                        && abs(jj - done_j.y) <= 1.0))) {
+                                continue;   // tested at the last key
                             }
                             let fr = df_col_frame(c, sj, th);
                             let hh = df_rand4(pcg2d(it.seed
@@ -22441,6 +22496,9 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                         }
                     }
                     sp_found = sp.t < tb;
+                    done_comp = sm.comp;
+                    done_k = now_k;
+                    done_j = now_j;
                 }
             } else {
                 let dl = min(max(DF_SAG_SHELL_STEP, 0.5 * pixel_angle * t),
@@ -22454,7 +22512,8 @@ fn df_cactus_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             }
             stp = min(stp, DF_SAG_SHELL_STEP);
         } else if (shell > 0.0) {
-            stp = max((d - shell) * inv_lip, 0.004);
+            stp = max(max((d - shell) * inv_lip, d - shell - pleat_slack),
+                      0.004);
         }
         t = t + max(stp, 0.5 * eps);
     }
@@ -25257,7 +25316,16 @@ fn df_item_transmit(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
         ch.t = tb;
         let ncol = df_cactus_ncols(it);
         for (var i: i32 = 0; i < ncol; i = i + 1) {
-            ch = df_col_capsules(df_cactus_col(it, i), i, q0, dir, ch);
+            // A column whose bounding sphere the ray passes wide of casts
+            // nothing on it: skip its capsules.
+            let c = df_cactus_col(it, i);
+            let bs = df_col_bound(c);
+            let w = bs.xyz - q0;
+            let tc = dot(w, dir);
+            if (dot(w, w) - tc * tc > bs.w * bs.w) {
+                continue;
+            }
+            ch = df_col_capsules(c, i, q0, dir, ch);
         }
         return select(1.0, 0.0, ch.t < tb && ch.t > ta);
     }
