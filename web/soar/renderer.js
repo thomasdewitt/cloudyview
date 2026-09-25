@@ -219,6 +219,28 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   }
 }
 
+/**
+ * Where each of `n` chained surface stages writes and what it reads:
+ * [writes, reads] with "final" the surface the march reads and "a"/"b" the
+ * two intermediates the chain alternates between (reads null: the first
+ * stage). soar_host.surface_stage_plan is the twin.
+ */
+export function surfaceStagePlan(n) {
+  const plan = [];
+  for (let i = 0; i < n; i++) {
+    plan.push([i === n - 1 ? "final" : "ab"[i % 2],
+               i === 0 ? null : "ab"[(i - 1) % 2]]);
+  }
+  return plan;
+}
+
+/** A surface stage's colour targets: the surface, and the veil beside it
+ *  for a VEIL_STAGES entry. */
+function stageFormats(entry) {
+  return K.VEIL_STAGES.includes(entry) ? [SURFACE_FORMAT, VEIL_FORMAT]
+                                       : SURFACE_FORMAT;
+}
+
 // Section stripping (raymarch.wgsl's `// @section` markers): a module keeps
 // the compiled surface's sections and the other surfaces' stubs, so it
 // carries no code of a surface it cannot show — another surface's dead code
@@ -658,9 +680,7 @@ export class Renderer {
     // pipeline that fails to build rejects here with its own message — and
     // with it the scene's surface pre-pass, which every march needs.
     await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
-    await this._surfacePipeline(this.lighting);
-    await this._refinePipeline(this.lighting);
-    await this._streetPipeline(this.lighting);
+    for (const sp of this._stagePipelines(this.lighting)) await sp;
     this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
@@ -735,10 +755,10 @@ export class Renderer {
     try {
       await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
       if (desert) {
-        await this._pipeline("fs_surface", [SURFACE_FORMAT, VEIL_FORMAT],
-                             spec);
-        if (!spec.desertLite) {
-          await this._pipeline("fs_surface_refine", SURFACE_FORMAT, spec);
+        const entries = spec.desertLite ? K.SURFACE_STAGES_LITE
+                                        : K.SURFACE_STAGES.desert;
+        for (const entry of entries) {
+          await this._pipeline(entry, stageFormats(entry), spec);
         }
       }
     } catch (err) {
@@ -1144,47 +1164,36 @@ export class Renderer {
   }
 
   /**
-   * The surface pre-pass pipeline (fs_surface) on the same specialization
-   * as the march for `lighting` — same module, so no extra compile — or
-   * null for a scene with no traced surface.
+   * The surface stages this scene runs at `tier`, in order (SURFACE_STAGES;
+   * the simplified desert's first alone), as raymarch.wgsl entries; none
+   * over the sea.
    */
-  _surfacePipeline(lighting, tier = this.qualityTier) {
-    if (!this._hasSurfacePass()) return null;
-    return this._pipeline("fs_surface", [SURFACE_FORMAT, VEIL_FORMAT],
-                          this._shaderSpec({ lighting, tier }));
+  _stageEntries(tier = this.qualityTier) {
+    if (!this._hasSurfacePass()) return [];
+    if (this._desertLiteFor(tier)) return K.SURFACE_STAGES_LITE;
+    return K.SURFACE_STAGES[this.scene.city ? "city" : "desert"];
   }
 
-  /** Whether this scene's surface pass has a second stage
-   *  (fs_surface_refine): the city (its facade shell over the plain boxes)
-   *  and the desert (its near plants over the far forms). A surface joins by
-   *  being named here and in soar_host's SURFACE_REFINE_SURFACES. */
+  /**
+   * Each stage's pipeline for `lighting` at `tier`, in order, on the same
+   * specialization as the march (same module, so no extra compile) — the
+   * pipeline itself, or a promise of it while it compiles.
+   */
+  _stagePipelines(lighting, tier = this.qualityTier) {
+    const spec = this._shaderSpec({ lighting, tier });
+    return this._stageEntries(tier).map(
+      (entry) => this._pipeline(entry, stageFormats(entry), spec));
+  }
+
+  /** Whether the stages at `tier` include a refinement (fs_surface_refine):
+   *  the city's facade shell, the full desert's near plants. */
   _hasRefineStage(tier = this.qualityTier) {
-    // The simplified desert has no second stage: it is compiled out of the
-    // shader, and the pass, its pipeline and its target are skipped here.
-    return Boolean(this.scene.city
-                   || (this.scene.desert && !this._desertLiteFor(tier)));
+    return this._stageEntries(tier).includes("fs_surface_refine");
   }
 
-  /** The second stage's pipeline (fs_surface_refine), or null. */
-  _refinePipeline(lighting, tier = this.qualityTier) {
-    if (!this._hasRefineStage(tier)) return null;
-    return this._pipeline("fs_surface_refine", SURFACE_FORMAT,
-                          this._shaderSpec({ lighting, tier }));
-  }
-
-  /** Whether this scene's surface pass has a street stage
-   *  (fs_surface_street): the city's furniture, wet reflection and steam,
-   *  kept out of the first stage's registers. A surface joins by being named
-   *  here and in soar_host's SURFACE_STREET_SURFACES. */
-  _hasStreetStage() {
-    return Boolean(this.scene.city);
-  }
-
-  /** The street stage's pipeline (fs_surface_street), or null. */
-  _streetPipeline(lighting, tier = this.qualityTier) {
-    if (!this._hasStreetStage()) return null;
-    return this._pipeline("fs_surface_street", [SURFACE_FORMAT, VEIL_FORMAT],
-                          this._shaderSpec({ lighting, tier }));
+  /** Whether the stages include the city's street (fs_surface_street). */
+  _hasStreetStage(tier = this.qualityTier) {
+    return this._stageEntries(tier).includes("fs_surface_street");
   }
 
   /**
@@ -1280,10 +1289,8 @@ export class Renderer {
           // logged) by _rayPipeline itself, so the prefetch just lets go.
           const p = this._rayPipeline(SAMPLE_FORMAT, lighting, tier);
           if (isPending(p)) p.catch(() => {});
-          for (const sp of [this._surfacePipeline(lighting, tier),
-                            this._refinePipeline(lighting, tier),
-                            this._streetPipeline(lighting, tier)]) {
-            if (sp && isPending(sp)) sp.catch(() => {});
+          for (const sp of this._stagePipelines(lighting, tier)) {
+            if (isPending(sp)) sp.catch(() => {});
           }
         } catch {
           // Already failed and recorded; thrown again if it is ever needed.
@@ -1539,10 +1546,9 @@ export class Renderer {
     for (;;) {
       lighting = this.lighting;
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
-      const sp = this._surfacePipeline(lighting);
-      const rp = this._refinePipeline(lighting);
-      const st = this._streetPipeline(lighting);
-      const pending = [p, sp, rp, st].filter((q) => q && isPending(q));
+      const entries = this._stageEntries();
+      const sps = this._stagePipelines(lighting);
+      const pending = [p, ...sps].filter((q) => q && isPending(q));
       if (pending.length > 0) {
         if (!waitForPipeline) {
           // Recorded; thrown when next requested.
@@ -1565,7 +1571,7 @@ export class Renderer {
           && shaderVariantKey(this._shaderSpec({ lighting })) === variant
           && sizeNow[0] === renderSize[0] && sizeNow[1] === renderSize[1]) {
         rayPipeline = p;
-        surfacePipelines = { surface: sp, refine: rp, street: st };
+        surfacePipelines = entries.map((entry, k) => [entry, sps[k]]);
         break;
       }
     }
@@ -1772,36 +1778,33 @@ export class Renderer {
    * surface — by the surface pre-pass (raymarch.wgsl fs_surface, and for a
    * surface with one its second stage fs_surface_refine) into
    * `targets.surface`, which the march then reads at group 1. `surfaces` is
-   * {surface, refine, street}, any null. They use
+   * the stages as [entry, pipeline] in order (_stageEntries), empty over
+   * the sea. They use
    * the same uniforms, so the pass traces exactly the rays the march
    * composites. Every march in the renderer goes through here or through
    * the meter, which mirrors it on its own targets.
    */
   _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfaces) {
     let marchGroup = this.surfaceDummyGroup;
-    if (surfaces.surface) {
+    if (surfaces.length > 0) {
       const surface = targets.surface;
-      // The stages this frame runs (the simplified desert has no
-      // refinement): each later stage reads the one before at group 1, the
-      // last writes the surface the march reads, and the first and last
-      // write the veil beside it. No stage binds what it writes.
-      let out = surface.view;
-      let after = null;
-      if (surfaces.refine || surfaces.street) {
-        out = surface.plainView;
-        after = surface.afterPlain;
-      }
-      const stages = [[surfaces.surface, null, [out, surface.veilView]]];
-      if (surfaces.refine) {
-        const [o, next] = surfaces.street
-          ? [surface.midView, surface.afterMid] : [surface.view, null];
-        stages.push([surfaces.refine, after, [o]]);
-        after = next;
-      }
-      if (surfaces.street) {
-        stages.push([surfaces.street, after,
-                     [surface.view, surface.veilView]]);
-      }
+      // The stages this frame runs, chained by surfaceStagePlan: each later
+      // stage reads the one before at group 1 through the two
+      // intermediates, the last writes the surface the march reads, and a
+      // VEIL_STAGES entry writes the veil beside it. No stage binds what it
+      // writes.
+      const slot = {
+        final: [surface.view, null],
+        a: [surface.plainView, surface.afterPlain],
+        b: [surface.midView, surface.afterMid],
+      };
+      const plan = surfaceStagePlan(surfaces.length);
+      const stages = surfaces.map(([entry, pipeline], k) => {
+        const [writes, reads] = plan[k];
+        const views = [slot[writes][0]];
+        if (K.VEIL_STAGES.includes(entry)) views.push(surface.veilView);
+        return [pipeline, reads === null ? null : slot[reads][1], views];
+      });
       for (const [pipeline, group1, views] of stages) {
         const sp = encoder.beginRenderPass({
           colorAttachments: views.map((view, k) => ({
@@ -1843,11 +1846,12 @@ export class Renderer {
   async _ensureSurfaceTarget(targets) {
     if (!this._hasSurfacePass()) return;
     // Every target a stage of this surface can write at ANY tier (the
-    // desert drops its refinement at the low tiers), so a tier change never
-    // reallocates: the plain surface wherever a later stage exists, the
-    // middle one where a refinement and a street stage both do.
-    const later = this._hasRefineStage("max") || this._hasStreetStage();
-    const both = this._hasRefineStage("max") && this._hasStreetStage();
+    // desert drops its later stages at the low tiers), so a tier change
+    // never reallocates: the intermediates its longest chain alternates
+    // between (surfaceStagePlan), one for two stages, both for more.
+    const longest = K.SURFACE_STAGES[this.scene.city ? "city" : "desert"];
+    const later = longest.length >= 2;
+    const both = longest.length >= 3;
     const shape = `${later}|${both}`;
     if (targets.surface && targets.surface.shape === shape) return;
     if (targets.surface) {
@@ -2220,18 +2224,9 @@ export class Renderer {
       // While either is still compiling this interval has no answer; the
       // next one asks again, and a pipeline that failed throws from here.
       const pipeline = this._pipeline("fs_main", ACCUM_FORMAT, spec);
-      const surfaces = {
-        surface: this._hasSurfacePass()
-          ? this._pipeline("fs_surface", [SURFACE_FORMAT, VEIL_FORMAT], spec)
-          : null,
-        refine: this._hasRefineStage()
-          ? this._pipeline("fs_surface_refine", SURFACE_FORMAT, spec) : null,
-        street: this._hasStreetStage()
-          ? this._pipeline("fs_surface_street", [SURFACE_FORMAT, VEIL_FORMAT],
-                           spec) : null,
-      };
-      const compiling = [pipeline, surfaces.surface, surfaces.refine,
-                         surfaces.street]
+      const surfaces = this._stageEntries().map(
+        (entry) => [entry, this._pipeline(entry, stageFormats(entry), spec)]);
+      const compiling = [pipeline, ...surfaces.map(([, sp]) => sp)]
         .filter((q) => q && isPending(q));
       if (compiling.length > 0) {
         for (const q of compiling) q.catch(() => {});

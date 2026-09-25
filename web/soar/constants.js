@@ -566,6 +566,21 @@ export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // the full desert at Medium and above, "a simplified but convincing desert"
 // at Low and Minimal. soar_host.DESERT_LITE_TIERS is the Python twin.
 export const DESERT_LITE_TIERS = ["low", "minimal"];
+// The surface stages each traced surface runs before the march, in order:
+// raymarch.wgsl fragment entries, each after the first reading the one
+// before, the last writing the surface the march reads. The city: its
+// boxes, the facade shell (fs_surface_refine), the street
+// (fs_surface_street). The desert: its ground, then its near plants
+// (fs_surface_refine). soar_host.SURFACE_STAGES is the Python twin (pinned
+// by tests/test_surface_stages.py); renderer.js derives the rest from it.
+export const SURFACE_STAGES = {
+  city: ["fs_surface", "fs_surface_refine", "fs_surface_street"],
+  desert: ["fs_surface", "fs_surface_refine"],
+};
+// Under DESERT_LITE the desert's later stages are compiled out and skipped.
+export const SURFACE_STAGES_LITE = ["fs_surface"];
+// The stages that also write the veil, a second attachment.
+export const VEIL_STAGES = ["fs_surface", "fs_surface_street"];
 // How far out the desert's full tiers walk the explicit shrubs before their
 // decals take over (raymarch.wgsl DESERT_FLORA_CUT, a compile-time scale on
 // the shrubs' grazing cut, df_small_cut): Medium walks them about half as far
