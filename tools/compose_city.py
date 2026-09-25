@@ -4,7 +4,7 @@
 The night city grows by components: WGSL files under
 cloudyview/soar/city/components/, each owning one kind of thing and listed in
 registry.json there. This tool concatenates the enabled ones, generates the
-six hook dispatchers the core calls (see the hook comment block in
+eight hook dispatchers the core calls (see the hook comment block in
 raymarch.wgsl), replaces the GENERATED block between the markers, and
 compile-validates the result under wgpu for both CITY specializations before
 writing a byte.
@@ -19,7 +19,9 @@ Rules it enforces (the same ones components/SPEC.md states):
     collisions with the core or with other components are refused;
   * every hook named in the registry must exist in the component's file with
     the exact dispatcher-compatible signature (checked by compiling a probe);
-  * kind_base values are >= 100, multiples of 100 apart, and unique.
+  * kind_base values are >= 100, multiples of 100 apart, and unique, and
+    each component's kinds (kind_base + 0..15) end below the facade shell's,
+    which start at the core's CITY_KIND_SHELL.
 """
 
 from __future__ import annotations
@@ -54,13 +56,31 @@ HOOKS = {
         "fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
         "fp: f32)\n"
         "        -> vec3<f32>"),
+    "facade_cover": (
+        "fn cc_facade_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
+        "fp: f32)\n"
+        "        -> f32"),
     "window_glyph": (
         "fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, "
-        "pane_uv: vec2<f32>, fp: f32)\n"
+        "pane_uv: vec2<f32>,\n"
+        "                   deep_uv: vec2<f32>, fp: f32)\n"
         "        -> vec3<f32>"),
+    "media": (
+        "fn cc_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, "
+        "t_max: f32,\n"
+        "            pixel_angle: f32, rnd: f32) -> vec4<f32>"),
     "roof": (
         "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
         "        -> vec3<f32>"),
+    # Street-level props traced only by the street stage (fs_surface_street,
+    # city_trace's CITY_TRACE_NEAR mode), never by the view ray's first
+    # stage: detail that would cost every city pixel occupancy there.
+    "near_props": (
+        "fn cc_near_props_trace(o: vec3<f32>, dir: vec3<f32>, "
+        "inv_dir: vec3<f32>,\n"
+        "                       t0: f32, t1: f32, ci: vec2<i32>, "
+        "cc: CityCell)\n"
+        "        -> CityHit"),
 }
 
 # Module-scope declarations only (column 0): a function-local `var` or
@@ -98,14 +118,14 @@ def validate_component(comp, source):
                              f"'{hook}' but does not define it")
     kb = comp.get("kind_base")
     needs_kinds = any(h in comp.get("hooks", {})
-                      for h in ("extra_trace", "cell_props"))
+                      for h in ("extra_trace", "cell_props", "near_props"))
     if needs_kinds and (kb is None or kb < 100 or kb % 100 != 0):
         raise SystemExit(f"component '{name}' traces geometry and needs a "
                          f"kind_base >= 100 in multiples of 100; got {kb!r}")
 
 
 def dispatcher(comps):
-    """The six hook dispatchers over whatever is registered."""
+    """The eight hook dispatchers over whatever is registered."""
     def hooked(h):
         return [c for c in comps if h in c.get("hooks", {})]
 
@@ -159,14 +179,55 @@ def dispatcher(comps):
         + ("\n".join(facade_body) + "\n" if facade_body else "")
         + "    return e;\n}")
 
+    cover_body = [
+        f"    m = max(m, {c['hooks']['facade_cover']}(cc, h, uc, vc, fp));"
+        for c in hooked("facade_cover")]
+    out.append(
+        f"{HOOKS['facade_cover']} {{\n"
+        "    var m = 0.0;\n"
+        + ("\n".join(cover_body) + "\n" if cover_body else "")
+        + "    return m;\n}")
+
     glyph_body = [
-        f"    t = t * {c['hooks']['window_glyph']}(cc, wh, pane_uv, fp);"
+        f"    t = t * {c['hooks']['window_glyph']}(cc, wh, pane_uv, deep_uv, "
+        "fp);"
         for c in hooked("window_glyph")]
     out.append(
         f"{HOOKS['window_glyph']} {{\n"
         "    var t = vec3<f32>(1.0);\n"
         + ("\n".join(glyph_body) + "\n" if glyph_body else "")
         + "    return t;\n}")
+
+    # Participating media in front of the city (steam): each component
+    # returns (in-scattered radiance, transmittance) over [0, t_max]; they
+    # compose front to back in registry order. With none registered the
+    # dispatcher is the identity (0, 0, 0, 1), which the call site applies
+    # as `rgb + a * city` — exact, so an empty registry changes no bit.
+    media_body = []
+    for c in hooked("media"):
+        media_body.append(
+            f"    let m_{c['name']} = {c['hooks']['media']}"
+            "(o, dir, inv_dir, t_max, pixel_angle, rnd);\n"
+            f"    acc = vec4<f32>(acc.rgb + acc.a * m_{c['name']}.rgb, "
+            f"acc.a * m_{c['name']}.a);")
+    out.append(
+        f"{HOOKS['media']} {{\n"
+        "    var acc = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n"
+        + ("\n".join(media_body) + "\n" if media_body else "")
+        + "    return acc;\n}")
+
+    near_body = []
+    for c in hooked("near_props"):
+        near_body.append(
+            f"    let h_{c['name']} = {c['hooks']['near_props']}"
+            "(o, dir, inv_dir, t0, t1, ci, cc);\n"
+            f"    if (h_{c['name']}.hit && h_{c['name']}.t < res.t) "
+            f"{{ res = h_{c['name']}; }}")
+    out.append(
+        f"{HOOKS['near_props']} {{\n"
+        "    var res: CityHit;\n    res.hit = false;\n    res.t = 1e30;\n"
+        + ("\n".join(near_body) + "\n" if near_body else "")
+        + "    return res;\n}")
 
     roof_body = [
         f"    e = e + {c['hooks']['roof']}(cc, h, fp);"
@@ -184,6 +245,18 @@ def compose(check_only: bool) -> int:
     kbs = [c["kind_base"] for c in comps if c.get("kind_base") is not None]
     if len(kbs) != len(set(kbs)):
         raise SystemExit(f"duplicate kind_base values: {sorted(kbs)}")
+    # The facade shell's hit kinds (raymarch.wgsl, CITY_KIND_SHELL + part +
+    # 16 * (side + 4 * tier)) sit above every component's.
+    m = re.search(r"^const CITY_KIND_SHELL: i32 = (\d+);", SHADER.read_text(),
+                  re.MULTILINE)
+    if m is None:
+        raise SystemExit("raymarch.wgsl defines no CITY_KIND_SHELL")
+    shell = int(m.group(1))
+    for c in comps:
+        kb = c.get("kind_base")
+        if kb is not None and kb + 15 >= shell:
+            raise SystemExit(f"component '{c['name']}' kind_base {kb} runs into "
+                             f"the facade shell's kinds (from {shell})")
 
     pieces = []
     for comp in comps:

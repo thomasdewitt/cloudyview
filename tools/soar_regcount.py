@@ -33,13 +33,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from cloudyview.soar_host import read_shader, specialize  # noqa: E402
+from cloudyview.soar_host import (DESERT_LITE_TIERS, read_shader,  # noqa: E402
+                                  specialize)
 
 CRATE = REPO / "tools" / "regcount"
 BINARY = CRATE / "target" / "release" / "regcount"
-# Entry point -> the color-attachment format its pipeline renders into.
-FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f",
-           "fs_surface_refine": "rgba32f", "fs_bake_light": "r16f"}
+# Entry point -> the color-attachment formats its pipeline renders into, one
+# per fragment output: the first and last surface stages also write the veil.
+FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f,rgba32ui",
+           "fs_surface_refine": "rgba32f",
+           "fs_surface_street": "rgba32f,rgba32ui", "fs_bake_light": "r16f"}
 # The lighting method per tier (web/soar/constants.js QUALITY_PRESETS):
 # (light cache, sky probe).
 TIERS = {"max": (False, True), "high": (True, True), "medium": (True, False),
@@ -103,15 +106,18 @@ def main():
     build()
 
     light_cache, sky_probe = TIERS[args.tier]
+    # As both hosts do: a desert at a lite tier compiles the simplified desert.
+    desert_lite = args.surface == "desert" and args.tier in DESERT_LITE_TIERS
     specs = [args.a, args.b] if args.a and args.b else [args.shader]
     print(f"{args.entry}, surface {args.surface}, tier {args.tier} "
           f"(cache {light_cache}, probe {sky_probe}), periodic {args.periodic}"
-          f"{', nested' if args.nested else ''}")
+          f"{', nested' if args.nested else ''}"
+          f"{', desert lite' if desert_lite else ''}")
     for spec in specs:
         src = specialize(source_for(spec), periodic=args.periodic == "on",
                          nested=args.nested, max_light_steps=512,
                          surface=args.surface, light_cache=light_cache,
-                         sky_probe=sky_probe)
+                         sky_probe=sky_probe, desert_lite=desert_lite)
         s = stats(src, args.entry)
         print(f"  {spec:28s} registers {s['Register Count']:4d}   "
               f"binary {s['Binary Size'] / 1024:7.0f} KB   "

@@ -172,6 +172,10 @@ def main(argv=None) -> int:
                         help="moon azimuth/elevation in city mode "
                              "(default: %(default)s; constants.js CITY_MOON "
                              "is the app's)")
+    parser.add_argument("--time", type=float, default=0.0,
+                        help="the scene clock in seconds (steam, the sea): "
+                             "what `witness --time` and a track's samples "
+                             "set (default: %(default)s)")
     parser.add_argument("--haze", type=float, default=None,
                         help="aerosol, the app's one haze number "
                              "(default: the app's)")
@@ -347,6 +351,7 @@ def main(argv=None) -> int:
             jitter=True, subpixel=True,
             sun_azimuth=light_az, sun_elevation=light_el,
             exposure=exposure,
+            scene_time=args.time,
             light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
             view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
             **look,
