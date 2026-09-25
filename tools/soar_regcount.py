@@ -65,9 +65,11 @@ def source_for(spec: str) -> str:
 
 
 def build():
-    if not BINARY.exists():
-        subprocess.run(["cargo", "build", "--release", "--quiet"],
-                       cwd=CRATE, check=True)
+    # Always: cargo is a no-op when the binary is current, and a binary
+    # built before a change to the crate (the veil's second attachment,
+    # "rgba32f,rgba32ui") panics on formats it does not know.
+    subprocess.run(["cargo", "build", "--release", "--quiet"],
+                   cwd=CRATE, check=True)
 
 
 def stats(source: str, entry: str) -> dict:
