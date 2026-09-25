@@ -471,6 +471,11 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
         "mean_lightness": round(float(np.float16(mips[-1][0, 0, 1])), 4),
         **relief_stats(heights),
         "albedo_correction": albedo_correction(lights),
+        # The regional albedo the far field and the clouds' surface bounce
+        # see: the mean of the level-0 albedos (not the albedo of the mean
+        # lightness — see albedo_correction).
+        "bounce_albedo": [round(float(v), 3) for v in
+                          albedo_of(lights[0]).reshape(-1, 3).mean(0)],
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     print(f"  {len(mips)} mips, heights {meta['height_min_m']:.2f} to "
