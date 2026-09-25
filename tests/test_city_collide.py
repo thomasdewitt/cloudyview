@@ -204,18 +204,26 @@ if (spec.city === "tile") {
     meta.n, meta.cell_m);
   city = new CityLots(tile);
   // The tallest plain slab near the requested cell, approached square-on
-  // at a third of its height from 40 m off its west face.
+  // at a third of its height from 40 m off its west face — through clear
+  // air: the start must be outside every building and the first thing the
+  // approach meets must be this slab's own (shell-grown) face.
   let pick = null;
+  const startOf = (c) => [c.b1min[0] - 40,
+                          0.5 * (c.b1min[1] + c.b1max[1]), c.height / 3];
   for (let cy = spec.near[1] - 20; cy < spec.near[1] + 20; cy++) {
     for (let cx = spec.near[0] - 20; cx < spec.near[0] + 20; cx++) {
       const c = cityCell(tile, cx, cy);
-      if (c.built && c.tiers === 1 && !c.has_frustum && c.height > 60
-          && (pick === null || c.height > pick.height)) pick = c;
+      if (!(c.built && c.tiers === 1 && !c.has_frustum && c.height > 60
+            && (pick === null || c.height > pick.height))) continue;
+      const s0 = startOf(c);
+      if (city.inside(s0)) continue;
+      const hit = city.sweep(s0, [c.b1min[0] + 1.0, s0[1], s0[2]]);
+      if (hit === null || hit.point[0] < c.b1min[0] - 2.0) continue;
+      pick = c;
     }
   }
-  if (pick === null) throw new Error("no slab near the requested cell");
-  const y = 0.5 * (pick.b1min[1] + pick.b1max[1]);
-  spec.start = [pick.b1min[0] - 40, y, pick.height / 3];
+  if (pick === null) throw new Error("no clear slab near the requested cell");
+  spec.start = startOf(pick);
   spec.wallX = pick.b1min[0];
 } else {
   city = new BoxCity(spec.boxes);
