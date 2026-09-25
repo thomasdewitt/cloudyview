@@ -180,15 +180,18 @@ export function endOfflineRender(renderer, saved) {
  */
 export async function renderAccumulated(renderer, targetView, size, view,
                                         frames, overlays = null,
-                                        onProgress = null) {
+                                        onProgress = null, lens = null) {
   renderer.resetAccumulation();
   for (let i = 0; i < frames; i++) {
     await renderer.drawFrame(
       targetView, STILL_FORMAT, size,
       { ...view, frameIndex: (view.frameIndex ?? 0) + i },
       // Every pass clears the target before blitting into it, so drawing the
-      // overlays each time composites them once, not sixty-four times.
-      { deltaSeconds: null, overlays });
+      // overlays each time composites them once, not sixty-four times. Lens
+      // water steps once per rendered frame — on its last pass, the one that
+      // stays on the target — and a still passes none: stills are dry.
+      { deltaSeconds: null, overlays,
+        lens: i === frames - 1 ? lens : null });
     if (!onProgress) continue;
     await renderer.device.queue.onSubmittedWorkDone();
     onProgress(i + 1, frames);

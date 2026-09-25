@@ -428,6 +428,10 @@ class TrackSettings:
     # The static row-24 surface offset the flight recorded — what a v1 track
     # (no per-sample surface frame) renders every frame with.
     surface_offset_m: Optional[tuple[float, float]]
+    # Lens water (cloudyview/soar/lens.wgsl): what the flight's switch was.
+    # A header without the key predates the switch and replays dry, so an
+    # old track re-renders exactly as it did.
+    lens_water: bool = False
 
 
 def even_size(size) -> tuple[int, int]:
@@ -529,6 +533,7 @@ def settings_from_header(header: dict, *, track_path=None,
         surface_offset_m=(tuple(float(v) for v in
                                 _need(block, "surface_offset_m", surface))
                           if block else None),
+        lens_water=bool(render.get("lens_water", False)),
     )
 
 
@@ -579,7 +584,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
                  fps=None, quality=None, crf: int = DEFAULT_CRF,
                  nest_group: Optional[str] = None,
                  load_kwargs: Optional[dict] = None,
-                 progress_every_s: float = 5.0) -> Path:
+                 progress_every_s: float = 5.0,
+                 lens_water: Optional[bool] = None) -> Path:
     """Re-render a recorded track into an H.264 mp4. Blocks; prints progress.
 
     Every frame is rendered with the tier's parked accumulation — the still
@@ -751,11 +757,19 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
                             stdin=subprocess.PIPE)
     t_start = time.perf_counter()
     last_report = t_start
+    # Lens water starts dry and steps once per output frame by the resampled
+    # track's own frame interval — as the browser's video export steps it —
+    # so the replay wets and dries where the flight did.
+    renderer.reset_lens()
+    # The header's switch unless the caller overrides it (--no-lens-water).
+    lens_on = s.lens_water if lens_water is None else bool(lens_water)
     try:
         for i, frame in enumerate(frames):
             view = view_for(frame, i)
+            lens_dt = ((frame.t - frames[i - 1].t if i > 0 else 0.0)
+                       if lens_on else None)
             image = renderer.render(state_for(frame, view), view,
-                                    frames=accumulate)
+                                    frames=accumulate, lens_dt=lens_dt)
             proc.stdin.write(
                 np.ascontiguousarray(quantize_uint8(image, seed=i)).tobytes())
             now = time.perf_counter()
@@ -848,6 +862,11 @@ def cli(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--nest-group", metavar="GROUP",
                         help="NetCDF group in the same file holding a finer "
                              "field to render as a nest inside the outer domain")
+    parser.add_argument("--no-lens-water", dest="lens_water",
+                        action="store_false", default=None,
+                        help="no water on the lens after flying through "
+                             "cloud, whatever the track's header says (the "
+                             "header records the browser's Lens water switch)")
     add_dataset_selection_arguments(parser)
     args = parser.parse_args(argv)
 
@@ -856,7 +875,8 @@ def cli(argv: Optional[Sequence[str]] = None) -> None:
                      size=tuple(args.size) if args.size else None,
                      fps=args.fps, quality=args.quality, crf=args.crf,
                      nest_group=args.nest_group,
-                     load_kwargs=dataset_selection_kwargs(args))
+                     load_kwargs=dataset_selection_kwargs(args),
+                     lens_water=args.lens_water)
     except KeyboardInterrupt:
         print("soar: cancelled; nothing was saved.", file=sys.stderr)
         sys.exit(130)

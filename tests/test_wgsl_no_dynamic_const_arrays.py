@@ -34,7 +34,11 @@ REPO = Path(__file__).resolve().parents[1]
 SOURCES = sorted(
     [REPO / "cloudyview" / "soar" / "raymarch.wgsl"]
     + list((REPO / "cloudyview" / "soar" / "city" / "components").glob(
-        "*.wgsl")))
+        "*.wgsl"))
+    # Lens water's look, which the present pass and the Python post pass
+    # include. (hud.wgsl indexes its vertex positions by vertex_index, which
+    # this rule would flag; it is not scanned here.)
+    + [REPO / "cloudyview" / "soar" / "lens.wgsl"])
 
 # `const NAME = array<`, `const NAME: array<...> =`, `var NAME: array<`,
 # `var<private> NAME: array<`, `let NAME = array<`, `var NAME = array<`.

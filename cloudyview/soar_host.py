@@ -45,6 +45,8 @@ from . import look
 # look cannot drift between the Python host and the web app.
 SOAR_DIR = Path(__file__).resolve().parent / "soar"
 SHADER_PATH = SOAR_DIR / "raymarch.wgsl"
+# Lens water's look, shared with the browser's present pass (lens.wgsl).
+LENS_SHADER_PATH = SOAR_DIR / "lens.wgsl"
 OCEAN_DIR = SOAR_DIR / "ocean"
 # The night-city surface tile. Same byte format and same binding as the ocean
 # tile (rgba16float mip chain, binding 3) — under CITY the shader reads it as
@@ -770,6 +772,31 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 """
 
+# Lens water, after accumulation: the accumulated image through the lens
+# (lens.wgsl lens_apply), with the state raymarch.wgsl's fs_lens_state wrote.
+# The browser's present pass includes the same file; this is its twin for
+# the offline renders, minus the present's dither (the Python hosts quantize
+# on their own way out).
+_LENS_POST_SHADER = """
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var lens_state_tex: texture_2d<f32>;
+fn lens_src(uv: vec2<f32>) -> vec3<f32> { return lens_bilinear(src_tex, uv); }
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let x = f32(i32(vi) / 2) * 4.0 - 1.0;
+    let y = f32(i32(vi) & 1) * 4.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+@fragment
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(src_tex, 0));
+    let rgb = textureLoad(src_tex, vec2<i32>(frag_pos.xy), 0).rgb;
+    let st = textureLoad(lens_state_tex, vec2<i32>(0, 0), 0);
+    return vec4<f32>(lens_apply(rgb, frag_pos.xy / dims, dims.x / dims.y,
+                                vec2<f32>(1.0) / dims, st), 1.0);
+}
+"""
+
 # The march's own output for one frame: half precision is plenty for a single
 # sample (its round-off is ~0.03 8-bit levels, unbiased, and it averages away).
 SAMPLE_FORMAT = "rgba16float"
@@ -1339,6 +1366,35 @@ class SoarRenderer:
                       "targets": [{"format": ACCUM_FORMAT}]},
             primitive={"topology": "triangle-list"})
 
+        # Lens water: the post pass, and the state it reads (two 1x1 texels,
+        # ping-ponged by fs_lens_state; both start dry, all zeros).
+        unfilterable = {"sample_type": "unfilterable-float",
+                        "view_dimension": "2d"}
+        self._lens_layout = d.create_bind_group_layout(entries=[
+            {"binding": 0, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": unfilterable},
+            {"binding": 1, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": unfilterable}])
+        lens_module = d.create_shader_module(
+            code=LENS_SHADER_PATH.read_text() + _LENS_POST_SHADER)
+        self._lens_post_pipeline = d.create_render_pipeline(
+            layout=d.create_pipeline_layout(bind_group_layouts=[self._lens_layout]),
+            vertex={"module": lens_module, "entry_point": "vs_main"},
+            fragment={"module": lens_module, "entry_point": "fs_main",
+                      "targets": [{"format": ACCUM_FORMAT}]},
+            primitive={"topology": "triangle-list"})
+        self._lens_state = [
+            d.create_texture(
+                size=(1, 1, 1), dimension="2d", format=SURFACE_FORMAT,
+                usage=(wgpu.TextureUsage.RENDER_ATTACHMENT
+                       | wgpu.TextureUsage.TEXTURE_BINDING
+                       | wgpu.TextureUsage.COPY_SRC
+                       | wgpu.TextureUsage.COPY_DST))
+            for _ in range(2)]
+        self._lens_index = 0
+        self._lens_groups = None
+        self._lens_out = None
+
     def _spec(self, *, light_cache: bool, sky_probe: bool,
               desert_lite: bool = False,
               desert_flora_cut: float = 1.0) -> dict:
@@ -1642,7 +1698,8 @@ class SoarRenderer:
     # -- rendering ---------------------------------------------------------
 
     def render(self, state: SceneState, view: ViewState, *,
-               frames: int = STILL_ACCUMULATE_FRAMES) -> np.ndarray:
+               frames: int = STILL_ACCUMULATE_FRAMES,
+               lens_dt: Optional[float] = None) -> np.ndarray:
         """Accumulate `frames` passes at a fixed camera and read the result.
 
         This is the offline path, not the interactive one: the scene key never
@@ -1725,7 +1782,90 @@ class SoarRenderer:
             self.device.queue.submit([enc.finish()])
             accum_index = 1 - accum_index
 
-        return self._read_back(targets["accum"][accum_index], w, h)
+        final = targets["accum"][accum_index]
+        if lens_dt is None:
+            # A still: no lens, no extra pass, byte for byte what it was.
+            return self._read_back(final, w, h)
+        return self._read_back(self._lens_pass(state, view, final, lens_dt),
+                               w, h)
+
+    # --- lens water -----------------------------------------------------------
+
+    def reset_lens(self) -> None:
+        """A dry lens (both state texels zero), for the start of a video."""
+        zero = np.zeros(4, np.float32).tobytes()
+        for tex in self._lens_state:
+            self.device.queue.write_texture(
+                {"texture": tex, "mip_level": 0, "origin": (0, 0, 0)}, zero,
+                {"offset": 0, "bytes_per_row": 16, "rows_per_image": 1},
+                (1, 1, 1))
+
+    def lens_state(self) -> np.ndarray:
+        """The current lens state texel (wetness, clock, down.x, down.y)."""
+        return self._read_back_texel(self._lens_state[self._lens_index])
+
+    def _lens_pass(self, state: SceneState, view: ViewState, final, dt: float):
+        """One step of the lens state (raymarch.wgsl fs_lens_state, dt in row
+        24.w) and the accumulated image `final` through it (lens.wgsl); the
+        texture the post pass wrote."""
+        if not (math.isfinite(dt) and dt >= 0.0):
+            raise ValueError(f"lens_dt must be a finite dt >= 0; got {dt}.")
+        w, h = self._targets["size"]
+        if self._lens_groups is None:
+            # Group 1 for the state pass: the previous state where the
+            # refine stages read surface_plain.
+            self._lens_groups = [
+                self._group1(self._surface_dummy, tex, self._veil_dummy,
+                             self._surface_dummy)
+                for tex in self._lens_state]
+        if self._lens_out is None or self._lens_out[0] != (w, h):
+            self._lens_out = ((w, h), self._make_target((w, h), ACCUM_FORMAT))
+        u = pack_uniforms(state, view)
+        u[24, 3] = dt
+        self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
+        prev, nxt = self._lens_index, 1 - self._lens_index
+        pipeline = self._pipeline_for("fs_lens_state", SURFACE_FORMAT,
+                                      self._view_spec(view),
+                                      layout=self._march_pipeline_layout)
+        enc = self.device.create_command_encoder()
+        sp = enc.begin_render_pass(color_attachments=[{
+            "view": self._lens_state[nxt].create_view(), "load_op": "clear",
+            "store_op": "store", "clear_value": (0.0, 0.0, 0.0, 0.0)}])
+        sp.set_pipeline(pipeline)
+        sp.set_bind_group(0, self._ensure_bind_group())
+        sp.set_bind_group(1, self._lens_groups[prev])
+        sp.draw(3)
+        sp.end()
+        group = self.device.create_bind_group(
+            layout=self._lens_layout, entries=[
+                {"binding": 0, "resource": final.create_view()},
+                {"binding": 1, "resource": self._lens_state[nxt].create_view()}])
+        out = self._lens_out[1]
+        pp = enc.begin_render_pass(color_attachments=[{
+            "view": out.create_view(), "load_op": "clear", "store_op": "store",
+            "clear_value": (0.0, 0.0, 0.0, 1.0)}])
+        pp.set_pipeline(self._lens_post_pipeline)
+        pp.set_bind_group(0, group)
+        pp.draw(3)
+        pp.end()
+        self.device.queue.submit([enc.finish()])
+        self._lens_index = nxt
+        return out
+
+    def _read_back_texel(self, texture) -> np.ndarray:
+        wgpu = self.wgpu
+        buf = self.device.create_buffer(
+            size=256, usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ)
+        enc = self.device.create_command_encoder()
+        enc.copy_texture_to_buffer(
+            {"texture": texture, "mip_level": 0, "origin": (0, 0, 0)},
+            {"buffer": buf, "offset": 0, "bytes_per_row": 256,
+             "rows_per_image": 1}, (1, 1, 1))
+        self.device.queue.submit([enc.finish()])
+        buf.map_sync(wgpu.MapMode.READ)
+        v = np.frombuffer(bytearray(buf.read_mapped()), np.float32)[:4].copy()
+        buf.unmap()
+        return v
 
     def _read_back(self, texture, w: int, h: int) -> np.ndarray:
         """copy_texture_to_buffer does enforce the 256-byte row rule."""

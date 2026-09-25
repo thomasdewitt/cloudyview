@@ -30,14 +30,15 @@ export const MODE_KEY = "soar.mode";
 export const MODES = {
   basic: {
     label: "Basic mode",
-    items: ["sun", "ground", "capture", "controls", "tutorial", "leave"],
+    items: ["sun", "ground", "lensWater", "capture", "controls", "tutorial",
+            "leave"],
   },
   research: { label: "Research mode", items: null },
   cyberpunk: {
     label: "Cyberpunk mode",
     // Basic's menu exactly: cyberpunk is basic's complexity over a different
     // scene, not a third set of controls.
-    items: ["sun", "capture", "controls", "tutorial", "leave"],
+    items: ["sun", "lensWater", "capture", "controls", "tutorial", "leave"],
     // Entered and left from the start page only. Basic and research differ by
     // which rows a menu carries, which a menu can change about itself
     // mid-flight; cyberpunk differs by which shader is compiled and which
@@ -598,6 +599,14 @@ export class UI {
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two
     // that change the picture, above the overlay and window rows.
+    // Drops on the lens after the camera flies through cloud. Not on stills:
+    // a still or capture is always dry, so it stays reproducible; videos
+    // and the live view get the water.
+    const lens = flipSwitch("Lens water", () => app.lensWater,
+                            (v) => app.setLensWater(v));
+    lens.title = "Water on the lens after flying through cloud. Live view and " +
+      "videos only: stills and captures are always dry.";
+    add(appearance, "lensWater", lens);
     add(appearance, "periodic",
         item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
              "wrap the field laterally",
