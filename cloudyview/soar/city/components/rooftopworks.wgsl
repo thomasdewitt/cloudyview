@@ -624,6 +624,7 @@ fn cc_rooftopworks_tank_sdf(p: vec3<f32>) -> f32 {
 
 fn cc_rooftopworks_tank_normal(p: vec3<f32>) -> vec3<f32> {
     let e = vec2<f32>(1.2e-3, -1.2e-3);
+    // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     return normalize(
         e.xyy * cc_rooftopworks_tank_sdf(p + e.xyy)
       + e.yyx * cc_rooftopworks_tank_sdf(p + e.yyx)
@@ -951,6 +952,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         }
         // Glass on three-and-a-bit sides, with mullions and a dark spandrel
         // at its foot. The colour follows the house where there is one.
+        // @domain: a wall's normal: |xy| = 1
         let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
         let tangent = vec2<f32>(-nh.y, nh.x);
         let uc = dot(h.pos.xy, tangent);

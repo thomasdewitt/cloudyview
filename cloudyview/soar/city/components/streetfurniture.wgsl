@@ -1249,6 +1249,7 @@ fn cc_streetfurniture_trace(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
         g = g + s * cc_streetfurniture_sdf(q + s * hs, v, lod).x;
     }
     return CityHit(true, t, o + t * dir,
+                   // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
                    cc_streetfurniture_to_world(v, normalize(g)), kind, ci);
 }
 
@@ -1594,6 +1595,7 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let mat = cc_streetfurniture_material(mid, v);
     let rf = reflect(dir, n);
     let cosv = clamp(-dot(dir, n), 0.0, 1.0);
+    // @domain: cosv is clamped to [0, 1] just above
     let schlick = pow(1.0 - cosv, 5.0);
 
     // Diffuse: the sodium heads, the lit pavement from below, the store
