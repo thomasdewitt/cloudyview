@@ -513,9 +513,21 @@ def main(argv=None) -> int:
                          "control, each view's variants timed in turn for "
                          "--rounds rounds in this one process (one gpulock)")
     ap.add_argument("--rounds", type=int, default=6)
+    ap.add_argument("--source", metavar="git:REV",
+                    help="render that revision's shader instead of the tree's "
+                         "(the placement scan still reads the tree)")
     args = ap.parse_args(argv)
     args.time = args.time or bool(args.interleave)
 
+    if args.source:
+        import subprocess
+        import cloudyview.soar_host as host
+        if not args.source.startswith("git:"):
+            raise SystemExit("--source takes git:REV")
+        rev_src = subprocess.run(
+            ["git", "show", f"{args.source[4:]}:cloudyview/soar/raymarch.wgsl"],
+            capture_output=True, text=True, check=True).stdout
+        host.read_shader = lambda: rev_src
     if args.patch:
         import cloudyview.soar_host as host
         original = host.read_shader
