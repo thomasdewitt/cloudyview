@@ -12135,9 +12135,16 @@ const cc_streetlife_LAT_JIT: f32 = 0.16;
 const cc_streetlife_BB_A: f32 = 2.60;
 const cc_streetlife_BB_C: f32 = 1.36;
 const cc_streetlife_BB_Z: f32 = 1.74;
-// The car box's diagonal, sqrt((2 BB_A)^2 + (2 BB_C)^2 + BB_Z^2) = 6.12,
-// rounded up: how far before a segment's start a box it meets can begin.
-const cc_streetlife_BB_DIAG: f32 = 6.2;
+// The diagonal of a parked car's axis-aligned box at the full YAW (the box
+// the walk tests: half-extents 2.71 x 1.58 x 1.74 m at 5 degrees), 6.51 m,
+// rounded up: no ray is inside that box for longer, so none enters it more
+// than this before the point where the walk starts looking.
+const cc_streetlife_BB_DIAG: f32 = 6.6;
+// Half-width of the parking band about park_c that a parked car's box can
+// reach: LAT_JIT + BB_A sin(YAW) + BB_C cos(YAW) = 0.16 + 0.23 + 1.35 =
+// 1.74 m, rounded up. The kerb slab covers it, and the slot walk looks only
+// where the ray is inside it.
+const cc_streetlife_PARK_BAND: f32 = 1.80;
 
 // --- the hull ---------------------------------------------------------------
 const cc_streetlife_HL: f32 = 2.32;    // hull half-length
@@ -12869,8 +12876,8 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // top of a mast, clipped to the cell's own column. This is the test the
     // wide scene pays, and the only one most cells ever reach.
     let arm_c = s.lamp_c - s.plot_sign * (cc_streetlife_ARM_REACH + 0.5);
-    var lo = min(min(s.lamp_c, arm_c), s.park_c - cc_streetlife_BB_C);
-    var hi = max(max(s.lamp_c, arm_c), s.park_c + cc_streetlife_BB_C);
+    var lo = min(min(s.lamp_c, arm_c), s.park_c - cc_streetlife_PARK_BAND);
+    var hi = max(max(s.lamp_c, arm_c), s.park_c + cc_streetlife_PARK_BAND);
     if (!s.park_ok) {
         lo = min(s.lamp_c, arm_c);
         hi = max(s.lamp_c, arm_c);
@@ -12953,10 +12960,17 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // passes high over: from 6 m up, the parked cars of the whole block
     // ahead were missing. (inv_dir.z is the core's, 1e30 when level, which
     // gives the right empty or unbounded window.)
+    // And only where it is inside the parking band across the kerb: with
+    // the z window this is the stretch where a car can be, so the walk's
+    // slots are spent on cars and not on the lane either side of them.
     let tz0 = (0.0 - o.z) * inv_dir.z;
     let tz1 = (cc_streetlife_BB_Z - o.z) * inv_dir.z;
-    let ca = max(ta, min(tz0, tz1));
-    let cb = min(tb, max(tz0, tz1));
+    let oc = select(o.x, o.y, s.ax == 0);
+    let ic = select(inv_dir.x, inv_dir.y, s.ax == 0);
+    let tc0 = (s.park_c - cc_streetlife_PARK_BAND - oc) * ic;
+    let tc1 = (s.park_c + cc_streetlife_PARK_BAND - oc) * ic;
+    let ca = max(max(ta, min(tz0, tz1)), min(tc0, tc1));
+    let cb = min(min(tb, max(tz0, tz1)), max(tc0, tc1));
     if (cb <= ca) {
         return out;
     }
@@ -12964,7 +12978,7 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // first stage's (which so never compiles the SDF — in the first stage it
     // cost 13% of the city's surface time even on views with barely a pixel
     // of near car in them). Each car decides by its OWN box entry,
-    // pa * max(hc.x, 0) against CAR_SDF_FP: both stages trace from the same
+    // max(hc.x, 0) against t_sw = CAR_SDF_FP / pa: both stages trace from the same
     // origin with the same inv_dir and box, so they compute the same number
     // and every car is exactly one stage's. (Deciding by the segment's entry
     // instead let a car fall through: the street stage starts its walk where
@@ -13014,7 +13028,7 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let cmax = vec3<f32>(v.ctr + e, cc_streetlife_BB_Z);
         let hc = city_box_hit(o, inv_dir, cmin, cmax);
         if (hc.x > hc.y || hc.y <= ta || hc.x > t_end
-            || (pxa * max(hc.x, 0.0) < cc_streetlife_CAR_SDF_FP) != near) {
+            || (max(hc.x, 0.0) < t_sw) != near) {
             continue;
         }
         if (near) {
@@ -14782,8 +14796,13 @@ fn cc_manholesteam_vnoise3(p: vec3<f32>) -> f32 {
     // Two z slices of the 2-D lattice, told apart by a large shift; z wraps
     // at ZWRAP cells, which is what makes the steam periodic in the clock
     // (and keeps the hash's arguments small however long the flight).
-    let z0 = i.z - cc_manholesteam_ZWRAP * floor(i.z / cc_manholesteam_ZWRAP);
-    let z1 = select(z0 + 1.0, 0.0, z0 + 1.0 >= cc_manholesteam_ZWRAP);
+    // An integer modulo: a float floor(i.z / ZWRAP) can land one short at
+    // an exact multiple (the reciprocal is a ulp off) and give z0 = ZWRAP,
+    // a seam across the plume.
+    let nw = i32(cc_manholesteam_ZWRAP);
+    let iz = ((i32(i.z) % nw) + nw) % nw;
+    let z0 = f32(iz);
+    let z1 = f32((iz + 1) % nw);
     let s0 = i.xy + vec2<f32>(37.0, 17.0) * z0;
     let s1 = i.xy + vec2<f32>(37.0, 17.0) * z1;
     let lo = mix(mix(hash12(s0), hash12(s0 + vec2<f32>(1.0, 0.0)), w.x),
@@ -21917,7 +21936,8 @@ const CITY_NEAR_FP: f32 = 0.75;
 
 // How far along the ray the street stage looks: the steam's fixed range, or
 // the props' footprint-bound one, whichever is longer. At high resolution the
-// props reach well past CITY_NEAR_RANGE (~900 m at 1440p, fov 70).
+// props reach well past CITY_NEAR_RANGE (at 1440p, fov 70, the cars' switch
+// to boxes sits ~900 m out and the reach ~1370 m).
 fn city_near_reach(cr: CameraRay) -> f32 {
     return max(CITY_NEAR_RANGE,
                CITY_NEAR_FP / max(0.35 * cr.pixel_angle,
