@@ -192,6 +192,9 @@ def generate_sea(seed: int, n: int = N, nt: int = NT, dx_m: float = DX_M,
     top = int(round(FOAM_MAX_COVERAGE * n * n))
     for k in range(nt):
         flat = intensity[k].ravel()
+        # The foam plane is retired (the module docstring), but this guard
+        # stays with it: the shipped tile's seed passes it, and a re-bake
+        # that trips it is the re-bake that drops the plane.
         if np.count_nonzero(flat) < top:
             raise RuntimeError(
                 f"frame {k} has only {np.count_nonzero(flat)} breaking texels, "

@@ -213,43 +213,79 @@ def test_the_city_states_its_clock_period():
     assert scale * rise * period == pytest.approx(zwrap, abs=1e-6)
 
 
-def _glitter_draw(lam, spread, rng, n):
-    """raymarch.wgsl's glitter draw for n footprints of expected facet count
-    lam: K ~ sea_poisson(lam), then sea_glitter_brightness(K) / lam — the
-    same branches (the normal approximation past 16; K lognormal facets of
-    mean 1 below 4, K itself from 4), on numpy's uniforms for the hash's."""
-    r1, r2 = rng.random(n), rng.random(n)
-    if lam > 16.0:
-        z = np.sqrt(-2.0 * np.log(np.maximum(r1, 1e-7))) * np.cos(2 * np.pi * r2)
-        k = np.maximum(np.round(lam + np.sqrt(lam) * z), 0.0)
-    else:
-        k = rng.poisson(lam, n).astype(float)
-    s2 = spread * spread
-    total = k.copy()
-    few = (k > 0) & (k < 4)
-    bright = np.zeros(n)
-    for i in range(3):
-        u1, u2 = rng.random(n), rng.random(n)
-        z = np.sqrt(-2.0 * np.log(np.maximum(u1, 1e-7))) * np.cos(2 * np.pi * u2)
-        bright += np.where(i < k, np.exp(spread * z - 0.5 * s2), 0.0)
-    total[few] = bright[few]
-    return total / lam
+def _fn_body(src, name):
+    m = re.search(rf"(?ms)^fn {name}\(.*?^}}", src)
+    assert m, f"{name} not found in raymarch.wgsl"
+    return m.group(0)
+
+
+def _glitter_mean(lam, src):
+    """E[sea_glitter_brightness(K) / lambda], K = sea_poisson(lambda), as
+    raymarch.wgsl computes them — exactly, not sampled: the inversion's
+    float32 cdf (its step cap and stall guard) over the 2^24 values its
+    24-bit uniform takes, the normal branch past its threshold, and the
+    facets' lognormal brightness as the shader forms it (the 1e-7 clamp on
+    the uniform, the -s2/2 term) — every literal read from the shader."""
+    from scipy.special import i0e, ndtr
+    poisson = _fn_body(src, "sea_poisson")
+    bright = _fn_body(src, "sea_glitter_brightness")
+    uniforms = _fn_body(src, "sea_uniforms")
+    assert ">> vec2<u32>(8u)) * (1.0 / 16777216.0)" in uniforms
+    threshold = float(re.search(r"if \(lambda > ([0-9.]+)\)", poisson).group(1))
+    cap = int(re.search(r"i < (\d+); i = i \+ 1\)", poisson).group(1))
+    cutoff = float(re.search(r"if \(k >= ([0-9.]+) \|\| k <= 0\.0\)",
+                             bright).group(1))
+    facets = int(re.search(r"i < (\d+)u;", bright).group(1))
+    assert facets == cutoff - 1          # every k below the cutoff is drawn
+    assert "sqrt(-2.0 * log(max(r.x, 1e-7)))" in bright
+    assert "exp(SEA_GLITTER_SPREAD * z - 0.5 * s2)" in bright
+    spread = _wgsl_scalar(src, "SEA_GLITTER_SPREAD")
+    # One facet's mean brightness over the shader's uniforms: the angle
+    # averages exp(b cos) to I0(b); the radius is the 24-bit grid, clamped.
+    rx = np.maximum(np.arange(2 ** 24, dtype=np.float64) / 2 ** 24, 1e-7)
+    b = spread * np.sqrt(-2.0 * np.log(rx))
+    facet = float(np.mean(i0e(b) * np.exp(b - 0.5 * spread * spread)))
+
+    def brightness(k):
+        return k if (k >= cutoff or k <= 0) else k * facet
+    if lam > threshold:
+        ks = np.arange(0, int(lam + 20 * np.sqrt(lam)) + 1)
+        sd = np.sqrt(lam)
+        pk = ndtr((ks + 0.5 - lam) / sd) - ndtr((ks - 0.5 - lam) / sd)
+        pk[0] = ndtr((0.5 - lam) / sd)              # max(round(...), 0)
+        return float(sum(pk[k] * brightness(k) for k in ks)) / lam
+    # The inversion, in float32, as the shader steps it.
+    f32 = np.float32
+    lam32 = f32(lam)
+    pmf = cdf = f32(np.exp(-lam32))
+    thresholds, k, stalled = [cdf], 0, False
+    for _ in range(cap):
+        k += 1
+        pmf = f32(pmf * lam32 / f32(k))
+        nxt = f32(cdf + pmf)
+        if nxt <= cdf:
+            stalled = True
+            break
+        cdf = nxt
+        thresholds.append(cdf)
+    # K(r) = the first k whose cdf reaches r; past the last, the loop's own
+    # exit value (the stall's k, or the cap).
+    r = np.arange(2 ** 24, dtype=np.float64) / 2 ** 24
+    kr = np.searchsorted(np.asarray(thresholds, np.float64), r, side="left")
+    kr = np.where(kr >= len(thresholds), k if stalled else cap, kr)
+    counts = np.bincount(kr)
+    return float(sum(c * brightness(k) for k, c in enumerate(counts) if c)
+                 / 2 ** 24) / lam
 
 
 def test_the_glitter_keeps_the_smooth_specular_mean():
     """The glint is the smooth Cox-Munk lobe times 1 + core (draw - 1): the
-    draw's mean is exactly 1 (the facets' expected count is lambda, each
-    facet's brightness has mean 1), so whatever the core weight — 1 on the
-    sun's reflection, 0 in the lobe's tails, where it stays the smooth lobe
-    rather than strewing the sea with lone glints — the energy is the
-    specular's."""
+    draw's mean is 1 — the facets' expected count is lambda and each facet's
+    brightness has mean 1 — so whatever the core weight (the lobe's core,
+    the footprint's glint count) the energy is the specular's. Computed
+    exactly from the shader's own sampler, across its two branches and both
+    sides of the switch between them."""
     src = SHADER.read_text()
     assert "sparkle = 1.0 + core * (draw - 1.0);" in src
-    spread = _wgsl_scalar(src, "SEA_GLITTER_SPREAD")
-    rng = np.random.default_rng(3)
-    n = 4_000_000
-    for lam in (0.02, 0.3, 1.0, 3.5, 10.0, 40.0):
-        draw = _glitter_draw(lam, spread, rng, n)
-        # A few standard errors of the draw's own mean.
-        tol = 4.0 * draw.std() / np.sqrt(n)
-        assert abs(draw.mean() - 1.0) < tol + 1e-3, (lam, draw.mean(), tol)
+    for lam in (1e-4, 1e-3, 0.02, 0.3, 1.0, 3.5, 10.0, 15.99, 16.01, 40.0):
+        assert _glitter_mean(lam, src) == pytest.approx(1.0, abs=1e-3), lam

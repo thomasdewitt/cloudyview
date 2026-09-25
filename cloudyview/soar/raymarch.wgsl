@@ -1905,7 +1905,7 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 //                   over a 25.6 s loop, 128 frames (cloudyview/ocean_fif.py).
 //                   Bound at 9 as a 2D array, one layer per frame, each with
 //                   its own spatial mips; two frames are read and blended.
-//   the swell       a narrow-band spectrum about the same wind, ten
+//   the swell       a narrow-band spectrum about the same wind, fifteen
 //                   analytic trains, deep-water dispersion (SWELL_*).
 //
 // Everything the footprint cannot resolve is handed to the microfacet lobe
@@ -1997,8 +1997,9 @@ fn sea_slope_variance(k: i32) -> vec2<f32> {
 // and the desert's compiled code off bit-identity (measured, 2026-09-23,
 // tools/soar_shader_ab.py) though they never shade water.
 const SWELL_PERIOD_M: f32 = 1638.4;
-// The elevation the modulation is normalized by: ~2.5 sigma. Beyond it it
-// clips.
+// The elevation the swell's elevation is normalized by: ~2.5 sigma. The
+// hydrodynamic modulation reads it clipped to [-1, 1]; the tile's phase
+// spread (SEA_PHASE_SPREAD_S) reads it unclipped (Swell.eta_raw).
 const SWELL_ETA_SCALE_M: f32 = 1.0;
 const SEA_G: f32 = 9.81;
 // Hydrodynamic modulation: short waves steepen on the crests of long ones
