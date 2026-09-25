@@ -1856,42 +1856,59 @@ export class Renderer {
   }
 
   /**
-   * Give a target set its surface target and the march's group 1 over it,
-   * if the scene traces a surface and the set has none yet: a set is pooled
-   * by size, and the scene can gain a traced surface after the set was made
-   * (setSurface, ocean -> desert). 16 bytes a pixel, allocated under the
-   * same out-of-memory guard as the rest of the set. Awaited by every caller
-   * BEFORE it resolves pipelines and encodes, so _encodeMarch only ever
-   * reads it.
+   * Give a target set the surface targets the ACTIVE stage chain writes and
+   * the march's group 1 over them: the final surface and the veil, and the
+   * intermediates surfaceStagePlan alternates between (none for one stage,
+   * one for two, both for more). A set is pooled by size, and the scene can
+   * gain a traced surface or a longer chain after the set was made
+   * (setSurface, a tier change). Grow-only: a set that already holds enough
+   * keeps them, so a size used only at Low (the simplified desert's single
+   * stage) never allocates an intermediate, and after a size's first
+   * growth a tier change never reallocates it. Allocated under the same
+   * out-of-memory guard as the rest of the set. Awaited by every caller
+   * BEFORE it resolves pipelines and encodes, and it returns only once the
+   * set satisfies the tier live at that moment — the tier can change during
+   * the allocation's await — so _encodeMarch only ever reads it.
    */
   async _ensureSurfaceTarget(targets) {
-    if (!this._hasSurfacePass()) return;
-    // The intermediates the ACTIVE chain alternates between
-    // (surfaceStagePlan): none for one stage, one for two, both for more.
-    // Grow-only: a set that already holds enough keeps them, so a session
-    // at Low (the simplified desert's single stage) never allocates the
-    // two it does not use, nor the optical depths only the full desert's
-    // chain writes (K.TAUS_STAGE), and a tier change after the first
-    // growth never reallocates.
-    const entries = this._stageEntries();
-    const old = targets.surface;
-    const nMid = Math.max(Math.min(Math.max(entries.length - 1, 0), 2),
-                          old?.nMid ?? 0);
-    const taus = entries.includes(K.TAUS_STAGE) || Boolean(old?.tausView);
-    if (old && old.nMid >= nMid && (Boolean(old.tausView) || !taus)) return;
+    // A set covers a chain when it holds as many intermediates and, for the
+    // full desert's (K.TAUS_STAGE), the optical depths.
+    const covers = (set, nMid, taus) =>
+      set.nMid >= nMid && (set.taus || !taus);
+    for (;;) {
+      if (!this._hasSurfacePass()) return;
+      const entries = this._stageEntries();
+      const nMid = Math.min(Math.max(entries.length - 1, 0), 2);
+      const taus = entries.includes(K.TAUS_STAGE);
+      const old = targets.surface;
+      if (old && covers(old, nMid, taus)) return;
+      // Grow-only: the new set keeps whatever the old one held.
+      const made = await this._makeSurfaceSet(
+        targets, Math.max(nMid, old?.nMid ?? 0), taus || Boolean(old?.taus));
+      // Another caller may have grown the set during the await: keep the
+      // one that covers the other, retire the other once the GPU is done
+      // with any frame that still reads it. Then check the (possibly
+      // changed) tier again.
+      const cur = targets.surface;
+      const [keep, drop] = cur && covers(cur, made.nMid, made.taus)
+        ? [cur, made] : [made, cur];
+      targets.surface = keep;
+      if (drop) {
+        for (const tex of drop.textures) {
+          retireAfterSubmittedWork(this.device, tex);
+        }
+      }
+    }
+  }
+
+  /** A surface set of `targets`' size with `nMid` intermediates, and the
+   *  desert's optical depths if `taus`. */
+  async _makeSurfaceSet(targets, nMid, taus) {
     const later = nMid >= 1;
     const both = nMid >= 2;
-    if (targets.surface) {
-      // Too few targets for this chain: retired once the GPU is done with
-      // any frame that still reads it.
-      for (const tex of targets.surface.textures) {
-        retireAfterSubmittedWork(this.device, tex);
-      }
-      targets.surface = null;
-    }
     const label = `soar-surface-${targets.w}x${targets.h}`;
     const count = 2 + (later ? 1 : 0) + (both ? 1 : 0);
-    targets.surface = await guardAllocation(
+    return guardAllocation(
       this.device, `${targets.w}x${targets.h} surface target`,
       targets.w * targets.h * (16 * count + (taus ? 8 : 0)), () => {
         const make = (name, format) => this.device.createTexture({
@@ -1915,12 +1932,14 @@ export class Renderer {
                       { binding: 3, resource: tausView }],
           });
         // A later stage's group: what it reads, and the optical depths
-        // wherever they exist (the flora stage reads them).
+        // wherever they exist (the flora stage reads them; the others
+        // ignore binding 3).
         const after = (prevTex) => group1(dummy, prevTex.createView(),
                                           veilDummy,
                                           tausTex?.createView() ?? dummy);
         return {
           nMid,
+          taus,
           tex,
           textures: [tex, veil, plain, mid, tausTex].filter(Boolean),
           view: tex.createView(),

@@ -1454,14 +1454,12 @@ class SoarRenderer:
         with no view, the longest chain this surface can run. Grow-only, as
         renderer.js _ensureSurfaceTarget: a set that already holds enough
         keeps them, so a Low render (the simplified desert's one stage)
-        never makes the two it does not use — nor the optical depths'
-        target (TAUS_STAGE), which only the full desert's chain writes."""
-        wgpu = self.wgpu
+        makes no intermediate, nor the optical depths' target (TAUS_STAGE),
+        which only the full desert's chain writes."""
         entries = (self._stage_entries(view) if view is not None
                    else SURFACE_STAGES.get(self.surface, ()))
         n_mid = min(max(len(entries) - 1, 0), 2)
         if self._targets is None or self._targets["size"] != size:
-            w, h = size
             has = self.surface in SURFACE_PASS_SURFACES
             surface = self._make_target(size, SURFACE_FORMAT) if has else None
             veil = self._make_target(size, VEIL_FORMAT) if has else None
@@ -1490,7 +1488,8 @@ class SoarRenderer:
                 t[name] = self._make_target(size, SURFACE_FORMAT)
             if t[name] is not None and (t[after] is None or grown):
                 # A later stage's group: what it reads, and the optical
-                # depths wherever they exist (the flora stage reads them).
+                # depths wherever they exist (the flora stage reads them;
+                # the others ignore binding 3).
                 t[after] = self._group1(self._surface_dummy, t[name],
                                         self._veil_dummy,
                                         t["taus"] or self._surface_dummy)

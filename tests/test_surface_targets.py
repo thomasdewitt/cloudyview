@@ -2,17 +2,24 @@
 
 Both hosts hold, per render size, the intermediates the ACTIVE surface
 stage chain alternates between (surface_stage_plan): none for the simplified
-desert's single stage at Low, two for the full desert's three at High —
-and the full desert's optical-depth target (TAUS_STAGE), which only its
-chain writes. Grow-only: a session that stays at Low never allocates what
-it does not use, and after the first growth a tier flip never reallocates.
-What is pinned here, on a counting stand-in for the GPU device (no GPU
-needed):
+desert's single stage at Low, one for each stage after the first beyond
+that, up to two — and the full desert's optical-depth target (TAUS_STAGE),
+which only its chain writes. Grow-only: a size used only at Low never
+allocates an intermediate or the optical depths, and after a size's first
+growth a tier flip never reallocates it. What is pinned here, on a
+counting stand-in for the GPU device (no GPU needed):
 
 - Low allocates no intermediate and no optical-depth target; Low -> High
   grows once, by both; High -> Low -> High allocates nothing more.
 - A retired set's textures are destroyed only after the queue reports the
   submitted work done — never while a frame in flight may still read them.
+- The tier can rise DURING the allocation's await (the meter is
+  fire-and-forget; the governor or the menu can change tier meanwhile):
+  the ensure still returns a set that holds every slot the chain live at
+  that moment writes or reads (loose-ends' race, 2026-09-25), the optical
+  depths included.
+- A stage chain that needs the optical depths on a set without them
+  raises / throws rather than bind a stand-in.
 
 The node half skips without node.
 """
@@ -198,3 +205,66 @@ def test_retired_textures_wait_for_the_gpu(js):
 
 def test_browser_host_refuses_the_flora_stage_without_its_depths(js):
     assert "optical-depth" in js["missingTaus"], js["missingTaus"]
+
+
+_JS_RACE = textwrap.dedent("""
+    import * as K from "%s";
+    import { Renderer, surfaceStagePlan } from "%s";
+
+    globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 4 };
+    const r = Object.create(Renderer.prototype);
+    let flipTo = null;          // the tier to switch to inside the await
+    const device = {
+      pushErrorScope() {},
+      async popErrorScope() {
+        if (flipTo) { r.qualityTier = flipTo; flipTo = null; }
+        return null;
+      },
+      createTexture(d) { return { label: d.label, createView: () => ({ of: d.label }),
+                                  destroy() {} }; },
+      createBindGroup() { return { group: true }; },
+      queue: { onSubmittedWorkDone: () => Promise.resolve() },
+    };
+    r.device = device;
+    r.scene = { desert: true };
+    r._surfaceDummy = { createView: () => ({}) };
+    r._veilDummy = { createView: () => ({}) };
+    r.surfaceLayout = {};
+    const out = [];
+    // Every slot the live chain writes or reads must exist.
+    const check = (targets) => {
+      const s = targets.surface;
+      const slot = { final: [s.view, null], a: [s.plainView, s.afterPlain],
+                     b: [s.midView, s.afterMid] };
+      const entries = r._stageEntries();
+      const bad = [];
+      surfaceStagePlan(entries.length).forEach(([w, rd], k) => {
+        if (!slot[w][0]) bad.push(`stage ${k} writes ${w}: no view`);
+        if (rd !== null && !slot[rd][1]) bad.push(`stage ${k} reads ${rd}: no group`);
+      });
+      if (entries.includes(K.TAUS_STAGE) && !s.tausView) {
+        bad.push("the chain writes the optical depths: no view");
+      }
+      return { tier: r.qualityTier, entries, nMid: s.nMid, bad };
+    };
+    for (const [start, during] of [["low", "high"], ["low", "max"],
+                                   ["high", "low"], ["minimal", "medium"]]) {
+      const targets = { w: 8, h: 8 };
+      r.qualityTier = start;
+      flipTo = during;
+      await r._ensureSurfaceTarget(targets);
+      out.push({ start, during, ...check(targets) });
+    }
+    console.log(JSON.stringify(out));
+""") % ((REPO / "web" / "soar" / "constants.js").as_uri(), RENDERER_JS.as_uri())
+
+
+def test_a_tier_rise_during_the_allocation_still_leaves_every_slot():
+    if shutil.which("node") is None:
+        pytest.skip("needs node")
+    out = subprocess.run(["node", "--input-type=module", "-e", _JS_RACE],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    for case in json.loads(out.stdout):
+        assert case["tier"] == case["during"], case
+        assert not case["bad"], case
