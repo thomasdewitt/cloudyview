@@ -74,7 +74,7 @@ def test_the_hosts_carry_the_tiles_tables():
     assert list(rows[6:9].ravel()) == META["slope_variance_removed"]
     assert rows[9:21, :3].tolist() == META["albedo_correction"]
     assert list(rows[21, :3]) == META["bounce_albedo"]
-    assert rows[21, 3] == META["band_slope_max"]
+    assert rows[21, 3] == 0.0
     for pattern in [r"fn desert_slope_max_at\(i: i32\) -> f32 \{\s*"
                     r"return desert_tile_level\(0, i\);",
                     r"fn desert_envelope_m_at\(i: i32\) -> f32 \{\s*"
@@ -82,8 +82,7 @@ def test_the_hosts_carry_the_tiles_tables():
                     r"fn desert_slope_variance_removed_at\(i: i32\) -> f32 "
                     r"\{\s*return desert_tile_level\(6, i\);",
                     r"return u\.desert_tile\[9 \+ i\]\.xyz;",
-                    r"return u\.desert_tile\[21\]\.xyz;",
-                    r"u\.desert_tile\[21\]\.w"]:
+                    r"return u\.desert_tile\[21\]\.xyz;"]:
         assert re.search(pattern, SHADER), pattern
 
 
@@ -122,15 +121,10 @@ def test_the_regional_albedo_is_the_mean_of_the_albedos():
     assert META["bounce_albedo"] == [round(float(v), 3) for v in truth.mean(0)]
 
 
-def test_the_octave_margin_is_the_sum_of_the_gains():
-    g = _const("DESERT_OCTAVE_GAIN")
-    n = int(re.search(r"const DESERT_OCTAVES: i32 = (\d+);", SHADER).group(1))
-    assert g == pytest.approx(5.0 ** -0.7, abs=1e-6)
-    assert _const("DESERT_OCTAVE_MARGIN") == pytest.approx(
-        sum(g ** k for k in range(1, n + 1)), abs=5e-4)
-    scene = (REPO / "web" / "soar" / "scene.js").read_text()
-    js = re.search(r"export const DESERT_OCTAVE_MARGIN = ([0-9.]+);", scene)
-    assert js and float(js.group(1)) == _const("DESERT_OCTAVE_MARGIN")
+def test_the_octave_gain_is_five_to_the_minus_0_7():
+    """H = 0.7 (DESERT_OCTAVE_MARGIN, which sums the gains, is held to the
+    band's true reach in test_desert_bounds)."""
+    assert _const("DESERT_OCTAVE_GAIN") == pytest.approx(5.0 ** -0.7, abs=1e-6)
 
 
 def test_each_mip_is_the_box_mean_of_the_last():

@@ -173,7 +173,7 @@ struct Uniforms {
     //   6..8   slope_variance_removed   what mip k's normal no longer carries
     //   9..20  albedo_correction    xyz: mip k's far-field colour factor
     //   21     xyz: the bounce albedo (the mean of the level-0 albedos);
-    //          w: band_slope_max, the octave band's steepest slope
+    //          w: 0 (the band's slopes are the bounds pyramid's, binding 9)
     desert_tile: array<vec4<f32>, 22>,
 };
 
@@ -206,8 +206,10 @@ struct Uniforms {
 // when u.light_cache.w is set.
 @group(0) @binding(8) var ice_frac: texture_3d<f32>;
 // The moving sea: one layer per frame of the (x, y, t) tile, each with its
-// own spatial mips — see "The moving sea". Always bound (a 1x1, one-layer
-// stand-in under the city and the desert) so one layout serves every scene.
+// own spatial mips — see "The moving sea". Under the desert, its bounds
+// pyramid (two layers; cloudyview/desert_bounds.py, desert_bounds below).
+// Always bound (a 1x1, one-layer stand-in under the city) so one layout
+// serves every scene.
 @group(0) @binding(9) var ocean_waves: texture_2d_array<f32>;
 
 // Group 1: the surface pre-pass's target, size-specific, so it lives apart
@@ -20172,9 +20174,13 @@ fn desert_height_range() -> vec2<f32> {
                      u.ocean.x + u.ocean.z + margin);
 }
 
-// Sum of the octave gains, g + g^2: how far the octaves together can
-// move the surface, in units of one octave's band excursion.
-const DESERT_OCTAVE_MARGIN: f32 = 0.429;
+// How far the octaves together can move the surface, in units of the
+// tile's band_max_m (u.ocean.w): the sum of their gains, g + g^2 = 0.429192,
+// times the band's largest magnitude anywhere and at any mip weight
+// (2.211 m, the bounds pyramid's top cell; band_max_m, 1.920, is measured at
+// texel centres and falls short of it), over band_max_m, rounded up.
+// tests/test_desert_bounds.py holds it to that; scene.js carries the same.
+const DESERT_OCTAVE_MARGIN: f32 = 0.4942;
 
 // Steepest slope at each mip level of the tile, with a quarter again for
 // safety (tools/export_desert_tile.py measures it into meta.json as
@@ -20183,42 +20189,6 @@ const DESERT_OCTAVE_MARGIN: f32 = 0.429;
 fn desert_slope_max_at(i: i32) -> f32 {
     return desert_tile_level(0, i);
 }
-// The octaves' own slope bound when fully on: each is the band's steepest
-// slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
-// The band's own steepest slope, meta band_slope_max, is
-// u.desert_tile[21].w, read in place inside the octave loop of
-// desert_slope_bound below. Where that one read sits moves the driver's
-// codegen (M1 proxy, interleaved, identical output, 2026-09-24): behind a
-// zero-argument accessor, the 1.5 m view took 111.5 ms; hoisted before the
-// loop, 96.3; in the loop, 66.3. In the loop it also took the city's
-// surface pass from 128 to 168 registers while the city compiled the desert
-// in; with the sections stripped (the city module holds no desert code) it
-// costs the city nothing, and the desert is 15-30% faster on the views it
-// is flown in (3-10% slower on the cloud-field judge views from above).
-const DESERT_OCTAVE_SLOPE_GROWTH: f32 = 1.620657; // 5^0.3
-
-fn desert_slope_bound(fp: f32) -> f32 {
-    let lod = desert_lod(fp);
-    let l0 = min(i32(floor(lod)), 11);
-    let l1 = min(l0 + 1, 11);
-    var s = mix(desert_slope_max_at(l0), desert_slope_max_at(l1),
-                lod - f32(l0));
-    var texel = u.ocean_params.x;
-    var grow = 1.0;
-    var amp = 1.0;
-    for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
-        texel = texel * 0.2;
-        grow = grow * DESERT_OCTAVE_SLOPE_GROWTH;
-        amp = amp * DESERT_OCTAVE_GAIN;
-        let fade = desert_trace_fade(fp, texel, amp);
-        if (fade <= 0.0) {
-            break;
-        }
-        s = s + fade * u.desert_tile[21].w * grow;
-    }
-    return s;
-}
-
 // --- hits --------------------------------------------------------------------
 
 // One hit on the desert: the terrain, a stone, or a plant. Kinds 0..7 are
@@ -20256,102 +20226,251 @@ fn desert_terrain_hit(o: vec3<f32>, dir: vec3<f32>, t: f32) -> DesertHit {
     return h;
 }
 
-// The traced octaves' reach at footprint `fp`: how far they can move the
-// surface the trace meets off the tile (their faded gains times the band's
-// largest excursion).
-fn desert_octave_margin(fp: f32) -> f32 {
-    var texel = u.ocean_params.x;
-    var amp = 1.0;
-    var sum = 0.0;
-    for (var k: i32 = 0; k < DESERT_OCTAVES; k = k + 1) {
-        texel = texel * 0.2;
-        amp = amp * DESERT_OCTAVE_GAIN;
-        sum = sum + amp * desert_trace_fade(fp, texel, amp);
-    }
-    return u.ocean.w * sum;
-}
-
 // How far the full surface can stand above mip k of the tile read at the
-// same point, measured on the tile with a tenth to spare
-// (tools/export_desert_tile.py writes it as envelope_m; the hosts carry it
-// here in u.desert_tile). Mip k plus this is a lid over the
-// ground that is as smooth as mip k — see desert_terrain_trace.
+// same point (tools/export_desert_tile.py writes it as envelope_m; the hosts
+// carry it here in u.desert_tile). Measured on the tile with a tenth to
+// spare, and a true bound: tests/test_desert_bounds.py holds it above the
+// exact supremum of mip l - mip k, l < k, taken on the lattice where that
+// difference is bilinear. Mip k plus this is a lid over the ground that is
+// as smooth as mip k — see desert_terrain_trace.
 fn desert_envelope_m_at(i: i32) -> f32 {
     return desert_tile_level(3, i);
 }
 
 // The trace's budget, and its floor: a step is never shorter than this many
 // pixel footprints, which is what makes the far field cost degrees rather
-// than metres.
-const DESERT_MAX_STEPS: i32 = 192;
+// than metres. The budget is sized for rays skimming a metre over the ground
+// from a couple of metres up, whose octave relief the trace has to resolve
+// step by step (flora's 2.5 m camera: at 192 about 5,000 rays out of budget,
+// at 256 about 900; 2026-09-25).
+const DESERT_MAX_STEPS: i32 = 256;
 const DESERT_MIN_STEP_FP: f32 = 0.75;
-// The coarsest lid the trace steps against: mip 7 (256 m texels), whose
-// envelope is still a few metres. Far rays read coarser still — the drawn
-// surface's own mip grows with the footprint, all the way to the top level,
-// which IS the datum plane — so there is no hand-over to a plane anywhere
-// short of it (a hand-over at a footprint threshold was a range ring: a
-// grazing ray shifts its hit by kilometres per metre of height).
+// The coarsest mip the trace's smooth lid steps against: mip 7 (256 m
+// texels), whose envelope is still a few metres.
 const DESERT_LID_MAX_LEVEL: f32 = 7.0;
 
-// The ground's own trace, in two regimes.
+// THE BOUNDS PYRAMID (cloudyview/desert_bounds.py, the spec; built at load
+// by both hosts from the tile's own mips and bound at binding 9). Level k is
+// a grid of cells of cell_m 2^(DESERT_BOUNDS_BASE + k) metres; each cell
+// holds bounds that hold anywhere a point can reach moving up to one cell
+// from inside it. Layer 0 bounds the tile (its highest H, steepest G, how
+// far one mip step moves it E, and its highest over the cell alone H0),
+// layer 1 the octaves' band (highest BH, steepest GB, largest magnitude BA,
+// and the steepest of its mip-2/3 read alone G23). The top level is one
+// cell, the whole tile: the global bounds.
+const DESERT_BOUNDS_BASE: i32 = 1;
+// A disc may be smaller than a cell, down to cell_m 2^(BASE + this): its
+// tile bounds then come from level 0, and its octaves' from the level that
+// covers 5^j times it in the octave's own frame.
+const DESERT_BOUNDS_KNEG: i32 = -5;
+const DESERT_BOUNDS_KSTART: i32 = 4;
+const DESERT_LOG2_5: f32 = 2.321928;
+// A clear step is taken when it covers at least this much of its disc;
+// shorter, the next finer disc is tried (a coarse bound cleared by a
+// centimetre would otherwise be stepped by the centimetre).
+const DESERT_CLEAR_FRACTION: f32 = 0.5;
+// The near regime's disc shrinks when its step falls under this fraction
+// of it (its bounds are then wider than the step needs).
+const DESERT_NEAR_SHRINK: f32 = 0.5;
+// The GPU filters with 8-bit weights, so a read is the exact bilinear
+// value at a point snapped by up to 1/256 of a texel on each axis: a read
+// at p and one anywhere along a step can each be off by that, which is
+// this times the texel times the slope. (8 bits of sub-texel and mip
+// precision is what this card has; Vulkan guarantees only 4, which would
+// want this sixteen times larger.)
+const DESERT_SNAP: f32 = 0.011049;            // 2 sqrt(2) / 256
+// Arithmetic slack on every bound, metres.
+const DESERT_BOUND_EPS: f32 = 1e-3;
+// Past this mip the footprint reads only smooth mips and no octave: the
+// trace steps on the global bounds alone (FAR in desert_terrain_trace).
+const DESERT_FAR_LOD: f32 = 2.0;
+// An exhausted ray's cell-exit walk on the cells' own highest (see
+// desert_trace_finish).
+// At 64, one ray in a million at 30 m still ran out of both.
+const DESERT_FINISH_STEPS: i32 = 256;
+
+// Set true to see the trace's budget: a ray that exhausted it and was
+// finished by the cell walk draws magenta, one still out after that cyan
+// (count them in a render). Nothing else reads it.
+const DESERT_TRACE_DEBUG: bool = false;
+var<private> desert_trace_state: u32;
+
+// One cell's bounds at pyramid level k (clamped to the pyramid).
+fn desert_bounds(k: i32, layer: i32, xy: vec2<f32>) -> vec4<f32> {
+    let kc = clamp(k, 0, i32(textureNumLevels(ocean_waves)) - 1);
+    let m = i32(textureDimensions(ocean_waves, kc).x);
+    let cell = u.ocean_params.x * exp2(f32(DESERT_BOUNDS_BASE + kc));
+    let c = vec2<i32>(floor(xy / cell)) % vec2<i32>(m);
+    return textureLoad(ocean_waves, (c + vec2<i32>(m)) % vec2<i32>(m), layer,
+                       kc);
+}
+
+// The distance along the ray to the edge of the cell of side `side` that
+// holds p.
+fn desert_cell_exit(p: vec2<f32>, dir: vec2<f32>, side: f32) -> f32 {
+    let lo = floor(p / side) * side;
+    let edge = select(lo, lo + vec2<f32>(side), dir > vec2<f32>(0.0));
+    let tx = select(1e30, (edge.x - p.x) / dir.x, abs(dir.x) > 1e-9);
+    let ty = select(1e30, (edge.y - p.y) / dir.y, abs(dir.y) > 1e-9);
+    return min(tx, ty);
+}
+
+// The octaves' highest over a step that stays inside a pyramid cell of
+// level `k` (up to its diagonal: 5^j sqrt(2) cells in octave j's frame).
+fn desert_octaves_cell_top(k: i32, xy: vec2<f32>, fp: f32) -> f32 {
+    var q = xy;
+    var texel = u.ocean_params.x;
+    var amp = 1.0;
+    var top = 0.0;
+    for (var j: i32 = 0; j < DESERT_OCTAVES; j = j + 1) {
+        texel = texel * 0.2;
+        amp = amp * DESERT_OCTAVE_GAIN;
+        let fade = desert_trace_fade(fp, texel, amp);
+        if (fade <= 0.0) {
+            break;
+        }
+        q = desert_octave_step(q);
+        let kq = k + i32(ceil(f32(j + 1) * DESERT_LOG2_5 + 0.5));
+        top = top + fade * amp * desert_bounds(kq, 1, q).x;
+    }
+    return top;
+}
+
+// The ground's trace, in two regimes on the bounds pyramid, plus the
+// tile's smooth lid.
 //
-// Far above the ground, the ray steps against a LID: mip k of the tile plus
-// how far the full surface can stand above mip k (desert_envelope_m_at), plus
-// whatever the resolved octaves can add. The lid is as smooth as mip k, so
-// its slope bound is mip k's, a tenth of level 0's or less, and a step is
-// the clearance over that bound — safe, and long. The lid level adapts:
-// coarser while the ray clears it, finer once it does not.
+// HEIGHT. A disc of radius S (a pyramid cell's side at level k) around p is
+// clear when the ray, over the step that crosses it, stays above
+//   min(H, tile(p) + G S [+ E while the mip read can move]) + sum_j fade_j amp_j BH_j
+// with BH_j the band's highest over the disc's image in octave j's frame.
+// The step takes the disc, or to where the ray descends to that level; a
+// clear disc widens to the next level, a blocked one narrows. A disc still
+// blocked at the finest level the footprint allows hands over to:
 //
-// Close to the ground, below every useful lid, the ray steps against the
-// surface actually drawn at this footprint (desert_surface), with the full
-// slope bound: tile plus octaves. The step is never shorter than a fraction
-// of the footprint, and a crossing is refined by Illinois false position
-// and landed at the interpolated root.
+// NEAR. The ground itself, and a Lipschitz step: the ground can rise
+// toward the ray no faster than G + sum_j fade_j amp_j 5^j GB_j per metre
+// of the ray's run, plus E / (t ln 2) for the mip read growing along the
+// ray and each octave's fade falling, and the ray falls by `closing`. The
+// disc adapts to the step (a step that fills it widens it; one far under
+// it narrows it, down to DESERT_BOUNDS_KNEG), because each octave's bound
+// comes from 5^j times the disc in its own frame.
 //
-// The two regimes answer the one failure the single global bound had: a
-// ray skimming the ground a couple of metres up, whose clearance over an
-// eight-slope bound bought centimetre steps and exhausted the budget in
-// thirty metres.
+// One more certified distance rides along, read first and taken alone when
+// it is long: the smooth LID, mip k of the tile plus how far the surface can
+// stand above it (desert_envelope_m_at) plus the octaves' global highest,
+// stepped by mip k's slope bound — long steps high above the ground, where
+// the pyramid's windows are wide. And far off (DESERT_FAR_LOD) the lid and
+// the global slope bound are the whole trace.
+//
+// Every bound is conservative: fp16 maxima rounded up, the snapped reads
+// of the 8-bit filter (DESERT_SNAP), the steps capped so the footprint's mip
+// never passes the one the bound served. Two things are given up, as they
+// always were: the step floor, DESERT_MIN_STEP_FP footprints (a crest under
+// a footprint high and shorter than the floor can be stepped over), and the
+// trace's octave cut (desert_trace_fade drops an octave whole once its reach
+// is under a footprint, so a NEAR step across the cut can meet ground about a
+// footprint higher than it certified).
 fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                         t_start: f32) -> DesertHit {
-    let zr = desert_height_range();
+    desert_trace_state = 0u;
+    let c0 = u.ocean_params.x;
+    let hlen = length(dir.xy);
+    let closing = max(-dir.z, 0.0);
+    let k_top = i32(textureNumLevels(ocean_waves)) - 1;
+    let tile_top = desert_bounds(k_top, 0, vec2<f32>(0.0));
+    let band_top = desert_bounds(k_top, 1, vec2<f32>(0.0));
+    // Every octave at full strength, the band at its highest and its
+    // largest magnitude: the ground's whole range.
+    var amp_all = 0.0;
+    var amp = 1.0;
+    for (var j: i32 = 0; j < DESERT_OCTAVES; j = j + 1) {
+        amp = amp * DESERT_OCTAVE_GAIN;
+        amp_all = amp_all + amp;
+    }
+    let z_top = u.ocean.x + tile_top.x + band_top.x * amp_all
+                + DESERT_BOUND_EPS;
+    let z_floor = u.ocean.x + u.ocean.y - band_top.z * amp_all
+                  - DESERT_BOUND_EPS;
     var t = t_start;
-    if (o.z + t * dir.z > zr.y) {
+    if (o.z + t * dir.z > z_top) {
         if (dir.z >= 0.0) {
             return desert_miss();
         }
-        t = (zr.y - o.z) / dir.z;
+        t = (z_top - o.z) / dir.z;
     }
-    let hlen = length(dir.xy);
-    let closing = max(-dir.z, 0.0);
+    var k = DESERT_BOUNDS_KSTART;
     var lid = DESERT_LID_MAX_LEVEL;
     var t_prev = -1.0;
-    var gap_prev = 0.0;
     for (var i: i32 = 0; i < DESERT_MAX_STEPS; i = i + 1) {
         let fp = pixel_angle * t;
         let p = o + t * dir;
         // A rising ray above every ground there is will never come down.
-        if (dir.z >= 0.0 && p.z > zr.y) {
+        if (dir.z >= 0.0 && p.z > z_top) {
             return desert_miss();
         }
         let lod = desert_lod(fp);
-        let margin = desert_octave_margin(fp);
-        var dt = -1.0;
+        // The level whose tile bounds serve this footprint's mips, and the
+        // disc's own level (which may be finer).
+        let k_lod = max(i32(ceil(lod)) - DESERT_BOUNDS_BASE, 0);
+        k = max(k, DESERT_BOUNDS_KNEG);
+        let kt = max(k, k_lod);
+        let disc = c0 * exp2(f32(DESERT_BOUNDS_BASE + k));
+        // Never past twice this distance, nor past where the footprint
+        // reaches mip BASE + kt: its mip stays within what kt's bounds cover.
+        let t_cap = max(2.0 * t,
+                        c0 * exp2(f32(DESERT_BOUNDS_BASE + kt)) / pixel_angle);
+        let dt_disc = min(disc / max(hlen, 1e-9), t_cap - t);
+        let lod_moves = pixel_angle * (t + dt_disc) > c0;
+
+        // The traced octaves' summed strength (their fades alone, no reads).
+        var amp_traced = 0.0;
+        var texel_f = c0;
+        amp = 1.0;
+        for (var j: i32 = 0; j < DESERT_OCTAVES; j = j + 1) {
+            texel_f = texel_f * 0.2;
+            amp = amp * DESERT_OCTAVE_GAIN;
+            let fade = desert_trace_fade(fp, texel_f, amp);
+            if (fade <= 0.0) {
+                break;
+            }
+            amp_traced = amp_traced + fade * amp;
+        }
+        // The smooth lid (see above), certified on its own.
+        var dt_lid = 0.0;
         let level = max(lid, ceil(lod));
         if (level > lod + 0.5) {
             let li = i32(level);
-            let top = u.ocean.x + desert_tile(p.xy, level).x
-                      + desert_envelope_m_at(li) + margin;
-            let gap_lid = p.z - top;
+            let slope = desert_slope_max_at(li);
+            let lid_top = u.ocean.x + desert_tile(p.xy, level).x
+                          + desert_envelope_m_at(li) + band_top.x * amp_traced
+                          + DESERT_SNAP * slope * c0 * exp2(level)
+                          + DESERT_BOUND_EPS;
+            let gap_lid = p.z - lid_top;
             if (gap_lid > 0.0) {
-                dt = gap_lid / max(desert_slope_max_at(li) * hlen + closing,
-                                   1e-4);
+                dt_lid = min(gap_lid / max(slope * hlen + closing, 1e-4),
+                             max(c0 * exp2(level) / pixel_angle - t, 0.0));
                 lid = min(lid + 1.0, DESERT_LID_MAX_LEVEL);
             } else {
                 lid = max(level - 2.0, 0.0);
             }
         }
-        if (dt < 0.0) {
+
+        // Far above the ground the lid's step is the long one: take it before
+        // reading anything else. (Under DESERT_LITE the pyramid costs flora's
+        // 300 m view 14% over master's trace, which was already right there;
+        // taking the lid at any length, at an eighth of the disc, or the FAR
+        // step at every distance was each no cheaper or slower, the last with
+        // 250,000 rays out of budget at 2.5 m. Measured 2026-09-25, Low, 5080.)
+        if (dt_lid >= DESERT_CLEAR_FRACTION * dt_disc) {
+            t_prev = t;
+            t = t + dt_lid;
+            continue;
+        }
+        if (lod >= DESERT_FAR_LOD) {
+            // FAR. The footprint reads only coarse, smooth mips here and
+            // traces no octave, so the pyramid's local bounds buy nothing
+            // over the global ones: the lid, and a step on slope_max at the
+            // footprint's mip, E the tile's whole range (the pyramid's top).
             let gap = p.z - desert_trace_height(p.xy, fp);
             if (gap <= 0.0) {
                 if (t_prev < 0.0) {
@@ -20360,31 +20479,159 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                 return desert_terrain_hit(
                     o, dir, desert_refine(o, dir, pixel_angle, t_prev, t, gap));
             }
-            dt = gap / max(desert_slope_bound(fp) * hlen + closing, 1e-4);
+            let g_far = desert_slope_max_at(i32(floor(lod)));
+            let guard = DESERT_SNAP * g_far * c0 * exp2(ceil(lod))
+                        + tile_top.z / 256.0 + DESERT_BOUND_EPS;
+            let rate = g_far * hlen + tile_top.z / (t * 0.693147) + closing;
+            t_prev = t;
+            t = t + max(max((gap - guard) / rate, dt_lid),
+                        DESERT_MIN_STEP_FP * fp + 1e-3);
+            continue;
+        }
+        let tile_b = desert_bounds(kt, 0, p.xy);
+        // The tile's steepest along the step: the cell's, or the mips the
+        // step can read at all — none finer than floor(lod), the footprint
+        // only growing along the ray — whose steepest anywhere is
+        // slope_max there (it falls with the level; test_desert_bounds).
+        let g_tile = min(tile_b.y, desert_slope_max_at(i32(floor(lod))));
+        let e_mip = select(0.0, tile_b.z, lod_moves);
+        let guard_tile = DESERT_SNAP * g_tile * c0 * exp2(ceil(lod))
+                         + e_mip / 256.0 + DESERT_BOUND_EPS;
+        let top_tile = min(tile_b.x + DESERT_BOUND_EPS,
+                           desert_tile(p.xy, lod).x + g_tile * disc + e_mip
+                           + guard_tile);
+
+        // The octaves at this footprint: their highest over the disc, their
+        // steepest, their snapped reads, their fades' fall, their sum.
+        var u_oct = 0.0;
+        var slope_oct = 0.0;
+        var guard_oct = 0.0;
+        var rate_fade = 0.0;
+        var q = p.xy;
+        var texel = c0;
+        amp = 1.0;
+        var reach = 1.0;
+        for (var j: i32 = 0; j < DESERT_OCTAVES; j = j + 1) {
+            texel = texel * 0.2;
+            amp = amp * DESERT_OCTAVE_GAIN;
+            reach = reach * 5.0;
+            let fade = desert_trace_fade(fp, texel, amp);
+            if (fade <= 0.0) {
+                break;
+            }
+            q = desert_octave_step(q);
+            let band = desert_bounds(
+                max(k + i32(ceil(f32(j + 1) * DESERT_LOG2_5)), 0), 1, q);
+            // The band's two reads each snap on their own (DESERT_SNAP is
+            // two reads' worth: one here, one along the step).
+            u_oct = u_oct + fade * amp * (band.x + 0.5 * DESERT_SNAP
+                        * (tile_top.y * c0 + band.w * 8.0 * c0));
+            slope_oct = slope_oct + fade * amp * reach * band.y;
+            guard_oct = guard_oct + fade * amp * DESERT_SNAP
+                        * (tile_top.y * c0 + band.w * 8.0 * c0);
+            // smoothstep(5, 1, fp / texel) falls at most 3/8 per unit.
+            rate_fade = rate_fade + 0.375 * pixel_angle / texel * amp * band.z;
+        }
+        let top = u.ocean.x + top_tile + u_oct;
+
+        var dt_clear = 0.0;
+        if (p.z > top) {
+            dt_clear = min(dt_disc, (p.z - top) / max(closing, 1e-9));
+        }
+        if (dt_lid > max(dt_clear, DESERT_CLEAR_FRACTION * dt_disc)) {
+            t_prev = t;
+            t = t + dt_lid;
+            continue;
+        }
+        if (dt_clear >= DESERT_CLEAR_FRACTION * dt_disc) {
+            t_prev = t;
+            t = t + max(dt_clear, dt_lid);
+            k = min(k + 1, k_top);
+            continue;
+        }
+        if (k > k_lod) {
+            k = k - 1;
+            continue;
+        }
+
+        let gap = p.z - desert_trace_height(p.xy, fp);
+        if (gap <= 0.0) {
+            if (t_prev < 0.0) {
+                return desert_terrain_hit(o, dir, t);
+            }
+            return desert_terrain_hit(
+                o, dir, desert_refine(o, dir, pixel_angle, t_prev, t, gap));
+        }
+        var rate = (g_tile + slope_oct) * hlen + rate_fade + closing;
+        if (lod_moves) {
+            rate = rate + tile_b.z / (max(t, 1e-6) * 0.693147);
+        }
+        let dt_lip = (gap - guard_tile - guard_oct) / rate;
+        if (dt_lip >= dt_disc) {
+            k = min(k + 1, k_top);
+        } else if (dt_lip < DESERT_NEAR_SHRINK * dt_disc) {
+            k = max(k - 1, DESERT_BOUNDS_KNEG);
         }
         t_prev = t;
-        t = t + max(dt, DESERT_MIN_STEP_FP * fp + 1e-3);
-        if (dir.z < 0.0 && o.z + t * dir.z < zr.x) {
+        t = t + max(max(max(min(dt_lip, dt_disc), dt_clear), dt_lid),
+                    DESERT_MIN_STEP_FP * fp + 1e-3);
+        if (dir.z < 0.0 && o.z + t * dir.z < z_floor) {
             // Past the lowest ground anywhere: the crossing is in this last
             // step. Refine inside it rather than tunnel.
-            let t_floor = (zr.x - o.z) / dir.z;
+            let t_floor = (z_floor - o.z) / dir.z;
             let pb = o + t_floor * dir;
             return desert_terrain_hit(o, dir, desert_refine(
                 o, dir, pixel_angle, t_prev, t_floor,
                 pb.z - desert_trace_height(pb.xy, pixel_angle * t_floor)));
         }
     }
-    // Out of budget — rare now that far steps are lid steps, and only on
-    // the longest grazing rays. The ground this ray meets is within [t, the
-    // slab floor], and at a footprint that has spent the budget it stands on
-    // the plane of the tile's mean height as closely as the pixel resolves:
-    // land it there, never earlier than where the march got to. A rising ray
-    // (possible only from a camera inside the slab) that has not met ground
-    // leaves it.
+    return desert_trace_finish(o, dir, pixel_angle, t, t_prev, k, z_top);
+}
+
+// A ray that spent the budget: the cell-exit walk on the cells' own highest
+// alone, without reading the ground. Rising above every ground there is is
+// a certified miss; a cell it cannot clear at the finest level its
+// footprint allows is where it lands — ground within that cell, never sky
+// in front of ground. Out of this budget as well, the ray lands where it
+// got to, or leaves when rising. DESERT_TRACE_DEBUG shows both.
+fn desert_trace_finish(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
+                       t_in: f32, t_prev_in: f32, k_in: i32,
+                       z_top: f32) -> DesertHit {
+    desert_trace_state = 1u;
+    let c0 = u.ocean_params.x;
+    let closing = max(-dir.z, 0.0);
+    let k_top = i32(textureNumLevels(ocean_waves)) - 1;
+    var t = t_in;
+    var k = max(k_in, 0);
+    for (var i: i32 = 0; i < DESERT_FINISH_STEPS; i = i + 1) {
+        let fp = pixel_angle * t;
+        let p = o + t * dir;
+        if (dir.z >= 0.0 && p.z > z_top) {
+            return desert_miss();
+        }
+        let k_lod = max(i32(ceil(desert_lod(fp))) - DESERT_BOUNDS_BASE, 0);
+        k = max(k, k_lod);
+        let side = c0 * exp2(f32(DESERT_BOUNDS_BASE + k));
+        let t_cap = max(2.0 * t, side / pixel_angle);
+        let top0 = u.ocean.x + desert_bounds(k, 0, p.xy).w
+                   + desert_octaves_cell_top(k, p.xy, fp) + DESERT_BOUND_EPS;
+        if (p.z > top0) {
+            let te = desert_cell_exit(p.xy, dir.xy, side);
+            if ((p.z - top0) / max(closing, 1e-9) > te) {
+                t = min(t + te, t_cap) + max(1e-3, 1e-6 * t);
+                k = min(k + 1, k_top);
+                continue;
+            }
+        }
+        if (k > k_lod) {
+            k = k - 1;
+            continue;
+        }
+        return desert_terrain_hit(o, dir, t);
+    }
+    desert_trace_state = 2u;
     if (dir.z < 0.0) {
-        let t_plane = (u.ocean.x - o.z) / dir.z;
-        let t_floor = (zr.x - o.z) / dir.z;
-        return desert_terrain_hit(o, dir, clamp(t_plane, t, t_floor));
+        return desert_terrain_hit(o, dir, t);
     }
     return desert_miss();
 }
@@ -21740,6 +21987,12 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
         -> DesertPlain {
     let o = desert_camera_origin();
     let terrain = desert_terrain_trace(o, dir, pixel_angle, 0.0);
+    if (DESERT_TRACE_DEBUG && desert_trace_state != 0u) {
+        return DesertPlain(vec4<f32>(select(vec3<f32>(1.0, 0.0, 1.0),
+                                            vec3<f32>(0.0, 1.0, 1.0),
+                                            desert_trace_state == 2u),
+                                     terrain.t), vec2<f32>(0.0));
+    }
     if (!DESERT_LITE && terrain.hit
         && terrain.t < DESERT_FLORA_REFINE_FP_M / pixel_angle) {
         // Inside the refine reach the refine stage (desert_surface_refine)

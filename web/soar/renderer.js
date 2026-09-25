@@ -747,9 +747,22 @@ export class Renderer {
     return this._tileDummy.createView();
   }
 
-  /** Binding 9's stand-in under the city and the desert: one layer. */
+  /** Binding 9's stand-in under the city: one layer. */
   _seaDummyView() {
     return this._tileDummy.createView({ dimension: "2d-array" });
+  }
+
+  /**
+   * What binding 9 holds: the sea, the desert's bounds pyramid (its trace
+   * steps on it, so a desert without one is an error, not a stand-in), or
+   * the stand-in.
+   */
+  _slot9View() {
+    if (this.scene.desert && !this.scene.seaView) {
+      throw new Error("the desert's bounds pyramid is missing: its tile " +
+                      "was loaded without `bounds` (scene.js loadOceanTile).");
+    }
+    return this.scene.seaView ?? this._seaDummyView();
   }
 
   /**
@@ -776,7 +789,7 @@ export class Renderer {
             (this._lightTauTex ?? this._lightTauDummy).createView() },
         { binding: 8, resource:
             scene.iceView ?? this._iceDummy.createView() },
-        { binding: 9, resource: scene.seaView ?? this._seaDummyView() },
+        { binding: 9, resource: this._slot9View() },
       ],
     });
   }
@@ -2259,7 +2272,7 @@ export class Renderer {
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
           { binding: 9, resource:
-              this.scene.seaView ?? this._seaDummyView() },
+              this._slot9View() },
         ],
       }),
     };
@@ -2426,7 +2439,7 @@ export class Renderer {
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
           { binding: 9, resource:
-              this.scene.seaView ?? this._seaDummyView() },
+              this._slot9View() },
         ],
       });
       const encoder = this.device.createCommandEncoder();
