@@ -44,7 +44,7 @@ DESKTOP_SM_PCT = 15
 # Processes that always hold a context on this desktop, the Claude app
 # (claude-desktop) among them.
 DESKTOP = {"gnome-shell", "Xwayland", "gnome-software", "ptyxis",
-           "gnome-remote-de", "mutter-x11-fram", "claude-desktop"}
+           "gnome-remote-de", "mutter-x11-fram", "claude-desktop", "nautilus"}
 
 
 def _smi(*args) -> str:
