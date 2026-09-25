@@ -8134,9 +8134,11 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     // The windows, averaged over the pixel's footprint on the wall
     // (city_windows_seen): what the eye is shown, not what the wall emits.
     let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
-    var e = city_windows_seen(cc, f, st, vec2<f32>(uc, vc), dl, fp,
-                              l_wall, refl, (1.0 - fres) * (1.0 - cover),
-                              fog);
+    // Filtered over the true pixel's footprint: `fp` carries the view-step
+    // LOD floor, which decides the work, not the sharpness.
+    var e = city_windows_seen(cc, f, st, vec2<f32>(uc, vc), dl,
+                              true_pixel_angle() * h.t, l_wall, refl,
+                              (1.0 - fres) * (1.0 - cover), fog);
 
     // Street-level storefront strip: bright, saturated, and only on
     // buildings whose draw says the ground floor is commercial.
@@ -26794,6 +26796,13 @@ struct CameraRay {
     jitter_amp: f32,        // jitter_on * jitter_scale
 }
 
+// One pixel's angular size: the frame's own, before any LOD floor. What a
+// surface filters its texture over (a wider footprint only blurs it; the
+// view-step LOD angle decides how much work is done, not how sharp).
+fn true_pixel_angle() -> f32 {
+    return 2.0 * u.cam_origin.w / u.params.x;
+}
+
 fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     var cr: CameraRay;
     let img_w = u.params.x;
@@ -26828,7 +26837,7 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     // (u.periodic.z, the app's one LOD slider). Coarsening the slider
     // dissolves windows into blocks exactly as it coarsens the march — one
     // lever, one degrees-not-meters law for the whole scene.
-    cr.true_pixel_angle = 2.0 * tan_half_fov / img_w;
+    cr.true_pixel_angle = true_pixel_angle();
     cr.pixel_angle = max(cr.true_pixel_angle, u.periodic.z);
     cr.jitter_amp = u.cam_up.w * jitter_scale;
     return cr;
