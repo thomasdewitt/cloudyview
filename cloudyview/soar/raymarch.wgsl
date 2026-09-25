@@ -1848,6 +1848,7 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     return col;
 }
 
+// @section sea
 // Ocean reflection sky ported from witness._reflection_sky
 // (witness.py lines 445-470).
 fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
@@ -1889,6 +1890,7 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 // the blend between two frames removed, and what the swell filter removed.
 // Nothing is averaged away without being put back.
 
+// @end sea
 // The scene clock (s, row 24.z). Frozen while the view is parked, so the
 // accumulation of a held view converges; advanced by the host while flying
 // or recording, carried per sample in a recorded track (track.js v3), and
@@ -1896,6 +1898,7 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 fn scene_time() -> f32 {
     return u.surface_offset.z;
 }
+// @section sea
 
 // Measured on the shipped tile by tools/export_web_assets.py and recorded in
 // cloudyview/soar/ocean/meta.json; tests/test_sea_tile.py holds these to it.
@@ -2716,11 +2719,13 @@ fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
     return col;
 }
 
+// @end sea
 // Smith masking for a GGX distribution parameterized by RMS slope.
 fn ggx_smith_g1(n_dot_x: f32, alpha_squared: f32) -> f32 {
     let root = sqrt(alpha_squared + (1.0 - alpha_squared) * n_dot_x * n_dot_x);
     return (2.0 * n_dot_x) / (n_dot_x + root);
 }
+// @section sea
 
 // One draw from the sub-pixel slope distribution about the footprint's mean
 // slope, with per-axis standard deviation `sigma`. Gaussian by Box-Muller,
@@ -2968,6 +2973,18 @@ fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     return ocean_shade_realism(hit, dir, sun, sun_shadow, t_hit, jit,
                                slope_seed, slope_jitter);
 }
+// @end sea
+
+// @stub sea
+// The sea's stub twin: what shared code calls, for a module compiled
+// without the sea. Reached only under ocean_on, which is false there.
+fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
+                        sun_shadow: vec3<f32>, t_hit: f32,
+                        jit: f32, slope_seed: vec2<f32>,
+                        slope_jitter: f32) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+// @end-stub sea
 
 // Highlight shoulder: how far bright regions blend from per-channel
 // Reinhard toward a luminance-normalized curve. Per-channel compression
@@ -3034,6 +3051,7 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
 // is the glow mip at the hit point.
 
 const CITY: bool = false;
+// @section city
 
 // Grid. The block pitch and tile extent arrive in u.ocean_params (x, y) so
 // the tile stays self-describing; everything else about the city is a
@@ -3161,6 +3179,7 @@ const CITY_FOG_H: f32 = 320.0;       // scale height (m)
 const CITY_FOG_GLOW: vec3<f32> = vec3<f32>(1.0, 0.42, 0.15);
 const CITY_FOG_GLOW_AMP: f32 = 0.10;
 const CITY_FOG_BASE: vec3<f32> = vec3<f32>(0.003, 0.004, 0.008);
+// @end city
 // Cloud uplight: the city as the cloud field's second light source. The
 // glow mip under the sample (footprint ~ its height, so the mip level is
 // log2(z / cell)) times the two-stream transmittance of the cloud below.
@@ -3181,6 +3200,7 @@ const CITY_UP_PROBE_STEPS: i32 = 12;
 const CITY_UPLIGHT_FLOOR: f32 = 0.02;
 // e-folding of the amber in probe tau: 1/0.25 = 4 optical depths of skin.
 const CITY_UPLIGHT_TAU_SCALE: f32 = 0.25;
+// @section city
 // Night sky.
 const CITY_NIGHT_HORIZON: vec3<f32> = vec3<f32>(0.006, 0.007, 0.012);
 const CITY_NIGHT_ZENITH: vec3<f32> = vec3<f32>(0.0008, 0.0011, 0.0024);
@@ -3255,9 +3275,11 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 
 const CITY_PROP_RANGE: f32 = 2200.0;
 
+// @end city
 fn city_u01(x: u32) -> f32 {
     return f32(x) * 2.3283064365386963e-10; // 1 / 2^32
 }
+// @section city
 
 fn city_rand4(s: vec2<u32>) -> vec4<f32> {
     let a = pcg2d(s);
@@ -19541,6 +19563,7 @@ fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
     return e;
 }
 // <<< GENERATED CITY COMPONENTS
+// @end city
 
 // ===========================================================================
 // === DESERT GROUND (desert-ground) ===
@@ -19583,6 +19606,7 @@ const DESERT: bool = false;
 // rather than traced (desert_stone_decal), and no octaves in the trace (the
 // shading still reads them).
 const DESERT_LITE: bool = false;
+// @section desert
 
 // How far above the terrain the flora slab reaches: the tallest saguaro
 // plus margin. The flora trace is called only over the part of a ray that
@@ -21440,7 +21464,9 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
 fn desert_bounce_albedo() -> vec3<f32> {
     return u.desert_tile[21].xyz;
 }
+// @end desert
 const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
+// @section desert
 
 // === END DESERT GROUND ===
 
@@ -21508,6 +21534,22 @@ fn desert_flora_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 }
 
 // === END DESERT FLORA ===
+// @end desert
+
+// @stub desert
+// The desert's stub twin: every desert symbol shared code calls, for a
+// module compiled without the desert. Reached only under DESERT, false there.
+fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
+                       strat_pixel: vec2<u32>, jitter_amp: f32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+}
+fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
+fn desert_bounce_albedo() -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+// @end-stub desert
 
 
 // ---------------------------------------------------------------------------
@@ -21629,6 +21671,7 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     return cr;
 }
 
+// @section city
 // The city under this ray: fogged radiance and distance, t = 1e30 on a miss.
 fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
     // THE CITY FRAME: world xy minus the row-24 surface offset, folded into
@@ -22087,6 +22130,37 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
     }
     return add;
 }
+// @end city
+
+// @stub city
+fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
+    var o: SurfaceOut;
+    o.surf = prev;
+    o.veil = veil_none();
+    return o;
+}
+
+// The city's stub twin: every city symbol shared code calls, for a module
+// compiled without the city. Reached only under CITY, false there.
+fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1e30);
+}
+fn surface_refine_city(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
+    return plain;
+}
+fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
+    return 0.0;
+}
+fn city_fold_xy(xy: vec2<f32>) -> vec2<f32> {
+    return xy;
+}
+fn city_uplight_probe_tau(p: vec3<f32>, jit: f32) -> f32 {
+    return 0.0;
+}
+fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+// @end-stub city
 
 // --- the veil ------------------------------------------------------------------
 

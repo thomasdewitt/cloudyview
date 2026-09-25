@@ -219,6 +219,77 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   }
 }
 
+// Section stripping (raymarch.wgsl's `// @section` markers): a module keeps
+// the compiled surface's sections and the other surfaces' stubs, so it
+// carries no code of a surface it cannot show — another surface's dead code
+// had been moving this one's codegen. soar_host.strip_sections is the twin;
+// tests/test_wgsl_sections.py pins the two to the same bytes.
+const SECTION_NAMES = ["sea", "city", "desert"];
+const SECTION_MARKER = /^\/\/ @(section|end|stub|end-stub) (\w+)\s*$/;
+
+/**
+ * `source` with every section but `keep`'s blanked, and `keep`'s stub
+ * blanked. Lines are blanked, not removed, so a compile error's line number
+ * is still the file's. A source with no markers passes through; one with
+ * any must be complete (every surface: at least one section, exactly one
+ * stub; no nesting; every block closed).
+ */
+export function stripSections(source, keep) {
+  if (!SECTION_NAMES.includes(keep)) {
+    throw new Error(`unknown section ${keep}`);
+  }
+  const lines = source.split("\n");
+  const marks = [];
+  lines.forEach((l, i) => {
+    const m = SECTION_MARKER.exec(l);
+    if (m) marks.push([i, m[1], m[2]]);
+  });
+  if (marks.length === 0) return source;
+  const seen = Object.fromEntries(
+    SECTION_NAMES.map((n) => [n, { section: 0, stub: 0 }]));
+  const out = lines.slice();
+  let open = null;                     // [kind, name, line]
+  for (const [i, kind, name] of marks) {
+    if (!SECTION_NAMES.includes(name)) {
+      throw new Error(`raymarch.wgsl line ${i + 1}: unknown section ` +
+                      `${name}; the sections are ${SECTION_NAMES}.`);
+    }
+    if (kind === "section" || kind === "stub") {
+      if (open) {
+        throw new Error(`raymarch.wgsl line ${i + 1}: @${kind} ${name} ` +
+                        `opens inside @${open[0]} ${open[1]} (line ` +
+                        `${open[2] + 1}); blocks do not nest.`);
+      }
+      open = [kind, name, i];
+      seen[name][kind] += 1;
+      continue;
+    }
+    const want = kind === "end" ? "section" : "stub";
+    if (!open || open[0] !== want || open[1] !== name) {
+      throw new Error(`raymarch.wgsl line ${i + 1}: @${kind} ${name} ` +
+                      `closes nothing open as @${want} ${name}.`);
+    }
+    const drop = want === "section" ? name !== keep : name === keep;
+    if (drop) {
+      for (let j = open[2] + 1; j < i; j++) out[j] = "";
+    }
+    open = null;
+  }
+  if (open) {
+    throw new Error(`raymarch.wgsl line ${open[2] + 1}: @${open[0]} ` +
+                    `${open[1]} is never closed.`);
+  }
+  for (const name of SECTION_NAMES) {
+    const n = seen[name];
+    if (n.section < 1 || n.stub !== 1) {
+      throw new Error(`raymarch.wgsl: ${name} has ${n.section} section ` +
+                      `block(s) and ${n.stub} stub block(s); a marked ` +
+                      "shader needs at least one and exactly one.");
+    }
+  }
+  return out.join("\n");
+}
+
 export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
                                    toneMap = true, city = false,
@@ -276,7 +347,7 @@ export function specializeShader(source,
     swaps.push(["const DESERT_LITE: bool = false;",
                 "const DESERT_LITE: bool = true;"]);
   }
-  let out = source;
+  let out = stripSections(source, city ? "city" : (desert ? "desert" : "sea"));
   for (const [sentinel, replacement] of swaps) {
     const count = out.split(sentinel).length - 1;
     if (count !== 1) {
