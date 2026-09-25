@@ -20438,7 +20438,11 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         }
 
         // Far above the ground the lid's step is the long one: take it before
-        // reading anything else.
+        // reading anything else. (Under DESERT_LITE the pyramid costs flora's
+        // 300 m view 14% over master's trace, which was already right there;
+        // taking the lid at any length, at an eighth of the disc, or the FAR
+        // step at every distance was each no cheaper or slower, the last with
+        // 250,000 rays out of budget at 2.5 m. Measured 2026-09-25, Low, 5080.)
         if (dt_lid >= DESERT_CLEAR_FRACTION * dt_disc) {
             t_prev = t;
             t = t + dt_lid;
