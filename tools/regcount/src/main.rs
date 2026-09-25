@@ -3,9 +3,10 @@
 //!   regcount <file.wgsl> <fragment-entry> <formats> [vertex-entry]
 //!
 //! <formats> is one colour-attachment format per fragment output, comma
-//! separated, from rgba16f, rgba32f, rgba32ui, r16f — a stage with two
-//! outputs (the surface stages write the surface and the veil) must be given
-//! both, or the driver may discard an output and compile its work away.
+//! separated, from rgba16f, rgba32f, rgba32ui, rg32f, r16f — a stage with
+//! two outputs (the surface stages write the surface and the veil, the
+//! desert's first the surface and its optical depths) must be given both, or
+//! the driver may discard an output and compile its work away.
 //!
 //! WGSL -> SPIR-V with naga (the compiler wgpu-native uses), a graphics
 //! pipeline built with VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR, and the
@@ -30,6 +31,7 @@ fn main() {
             "rgba16f" => vk::Format::R16G16B16A16_SFLOAT,
             "rgba32f" => vk::Format::R32G32B32A32_SFLOAT,
             "rgba32ui" => vk::Format::R32G32B32A32_UINT,
+            "rg32f" => vk::Format::R32G32_SFLOAT,
             "r16f" => vk::Format::R16_SFLOAT,
             other => panic!("unknown format {other}"),
         })

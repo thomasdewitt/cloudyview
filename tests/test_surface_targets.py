@@ -2,13 +2,15 @@
 
 Both hosts hold, per render size, the intermediates the ACTIVE surface
 stage chain alternates between (surface_stage_plan): none for the simplified
-desert's single stage at Low, two for the full desert's three at High.
-Grow-only: a session that stays at Low never allocates the two it does not
-use, and after the first growth a tier flip never reallocates. What is
-pinned here, on a counting stand-in for the GPU device (no GPU needed):
+desert's single stage at Low, two for the full desert's three at High —
+and the full desert's optical-depth target (TAUS_STAGE), which only its
+chain writes. Grow-only: a session that stays at Low never allocates what
+it does not use, and after the first growth a tier flip never reallocates.
+What is pinned here, on a counting stand-in for the GPU device (no GPU
+needed):
 
-- Low allocates no intermediate; Low -> High grows once; High -> Low ->
-  High allocates nothing more.
+- Low allocates no intermediate and no optical-depth target; Low -> High
+  grows once, by both; High -> Low -> High allocates nothing more.
 - A retired set's textures are destroyed only after the queue reports the
   submitted work done — never while a frame in flight may still read them.
 
@@ -77,13 +79,23 @@ def test_python_host_grows_once_and_never_shrinks():
     first = len(r.device.made)
     full = len(soar_host.SURFACE_STAGES["desert"])
     r._ensure_targets((8, 8), _view(lite=False))
-    grown = len(r.device.made) - first
-    assert grown == min(full - 1, 2), grown
-    assert r.device.made[first:] == [surf] * grown
+    grown = r.device.made[first:]
+    assert sorted(grown) == sorted(
+        [surf] * min(full - 1, 2) + [soar_host.TAUS_FORMAT]), grown
     after = len(r.device.made)
     for lite in (True, False, True, False):
         r._ensure_targets((8, 8), _view(lite=lite))
     assert len(r.device.made) == after
+
+
+def test_python_host_refuses_the_flora_stage_without_its_depths():
+    # A set grown for Low only has no optical-depth target: the full
+    # desert's chain on it raises rather than bind a stand-in.
+    r = _renderer("desert")
+    t = r._ensure_targets((8, 8), _view(lite=True))
+    t["plain"] = t["mid"] = _Tex([], soar_host.SURFACE_FORMAT)
+    with pytest.raises(RuntimeError, match="optical-depth"):
+        r._surface_stages(t, _view(lite=False))
 
 
 def test_python_host_without_a_view_holds_the_longest_chain():
@@ -120,15 +132,25 @@ _JS = textwrap.dedent("""
     r.surfaceLayout = {};
     const targets = { w: 8, h: 8 };
     const out = { steps: [] };
+    const tausOf = () => made.filter((l) => l.endsWith("-taus")).length;
     for (const tier of ["low", "high", "low", "high", "minimal", "max"]) {
       r.qualityTier = tier;
       const before = made.length;
       const destroyedBefore = destroyed;
       await r._ensureSurfaceTarget(targets);
       out.steps.push({ tier, made: made.length - before,
-                       nMid: targets.surface.nMid,
+                       nMid: targets.surface.nMid, taus: tausOf(),
                        destroyedNow: destroyed - destroyedBefore,
                        retirePending: pendingDone.length });
+    }
+    // A set without the optical depths, handed the full desert's chain:
+    // the encoder throws rather than bind a stand-in.
+    try {
+      r._encodeMarch({}, { surface: { ...targets.surface, tausView: null } },
+                     {}, {}, K.SURFACE_STAGES.desert.map((e) => [e, {}]));
+      out.missingTaus = "encoded";
+    } catch (e) {
+      out.missingTaus = String(e.message);
     }
     // The GPU reports the submitted work done: only now are retired
     // textures destroyed.
@@ -153,11 +175,13 @@ def js():
 def test_browser_host_grows_once_on_a_tier_flip(js):
     low, high, *rest = js["steps"]
     # Low: the final surface and the veil only.
-    assert low["nMid"] == 0 and low["made"] == 2, low
+    assert low["nMid"] == 0 and low["made"] == 2 and low["taus"] == 0, low
     assert not any("plain" in t or "mid" in t for t in js["lowTextures"])
-    # Low -> High: one growth, to the full desert's intermediates.
+    # Low -> High: one growth, to the full desert's intermediates and its
+    # optical depths.
     full = len(soar_host.SURFACE_STAGES["desert"])
     assert high["nMid"] == min(full - 1, 2) and high["made"] > 0, high
+    assert high["taus"] == 1, high
     # Every flip after that: nothing made.
     for step in rest:
         assert step["made"] == 0, step
@@ -170,3 +194,7 @@ def test_retired_textures_wait_for_the_gpu(js):
     assert js["steps"][1]["retirePending"] >= 1
     # ... and destroyed Low's two textures once it had.
     assert js["destroyedAfterDone"] == 2
+
+
+def test_browser_host_refuses_the_flora_stage_without_its_depths(js):
+    assert "optical-depth" in js["missingTaus"], js["missingTaus"]

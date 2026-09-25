@@ -347,7 +347,8 @@ def hero_views(g, h, sun_az, sun_el):
 
 
 MAX_STAGES = 3
-STAGE_LABEL = {"fs_surface": "surface", "fs_surface_flora": "flora",
+STAGE_LABEL = {"fs_surface": "surface", "fs_surface_desert": "surface",
+               "fs_surface_flora": "flora",
                "fs_surface_refine": "refine", "fs_surface_street": "street"}
 
 
@@ -363,7 +364,7 @@ def stage_total(stages, march):
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     """GPU ms of `frames` one-sample frames, per stage: each surface stage
-    the renderer runs for this view (the desert: fs_surface,
+    the renderer runs for this view (the desert: fs_surface_desert,
     fs_surface_flora, fs_surface_refine; under DESERT_LITE fs_surface alone)
     and the march (fs_main), a timestamp pair each, encoded exactly as
     SoarRenderer.render encodes them but without the accumulation or any
@@ -377,7 +378,7 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     sample_view = targets["sample"].create_view()
     ray_pipeline = renderer._ray_pipeline_for(view)
     # The renderer's own stage list, each with the targets it writes, and
-    # the stages' names (the desert: fs_surface, fs_surface_flora,
+    # the stages' names (the desert: fs_surface_desert, fs_surface_flora,
     # fs_surface_refine; under DESERT_LITE the first alone).
     stages = renderer._surface_stages(targets, view)
     names = list(renderer._stage_entries(view))

@@ -788,21 +788,33 @@ SURFACE_FORMAT = "rgba32float"
 # before at group 1 binding 1, the last writing the surface the march reads.
 # The city: its boxes, the facade shell over them (fs_surface_refine), the
 # street (fs_surface_street: furniture, wet reflection, steam, kept out of
-# the earlier stages' registers). The desert: its ground, the explicit
-# plants' far forms in front of it (fs_surface_flora: their walk, kept out
-# of the ground's registers), then its near plants (fs_surface_refine). A
+# the earlier stages' registers). The desert: its ground
+# (fs_surface_desert, which also writes the optical depths it lit it with,
+# TAUS_FORMAT), the explicit plants' far forms in front of it
+# (fs_surface_flora: their walk, kept out of the ground's registers, and
+# the far cover, lit from those depths), then its near plants
+# (fs_surface_refine). A
 # surface or a stage joins
 # here and in web/soar/constants.js SURFACE_STAGES, its twin (pinned by
 # tests/test_surface_stages.py); the hosts derive everything else from it.
 SURFACE_STAGES = {
     "city": ("fs_surface", "fs_surface_refine", "fs_surface_street"),
-    "desert": ("fs_surface", "fs_surface_flora", "fs_surface_refine"),
+    "desert": ("fs_surface_desert", "fs_surface_flora", "fs_surface_refine"),
 }
-# Under DESERT_LITE the desert's later stages are compiled out and skipped.
+# Under DESERT_LITE the desert's later stages are compiled out and skipped,
+# and its one stage is the shared first stage.
 SURFACE_STAGES_LITE = ("fs_surface",)
 # The stages that also write the veil (a second attachment, VEIL_FORMAT):
 # the first, and the city's street.
 VEIL_STAGES = ("fs_surface", "fs_surface_street")
+# The full desert's first stage writes, in the veil's place (the desert has
+# none, and the two would pass the 32 bytes a pixel's attachments may hold),
+# the optical depths it lit its ground with, (tau_sun, tau_up) as f32 so the
+# flora stage rebuilds the very same light (raymarch.wgsl
+# desert_light_from); the flora stage reads them at group 1 binding 3.
+TAUS_STAGE = "fs_surface_desert"
+TAUS_READER = "fs_surface_flora"
+TAUS_FORMAT = "rg32float"
 # Derived: the scenes whose opaque surface is traced by the stages rather
 # than in the march, and those with a refinement or a street stage.
 SURFACE_PASS_SURFACES = tuple(SURFACE_STAGES)
@@ -1287,10 +1299,11 @@ class SoarRenderer:
             bind_group_layouts=[self._ray_layout])
         # Group 1: the surface pre-pass's targets (raymarch.wgsl) — the final
         # surface, read by the march; the previous stage's, read by each later
-        # stage (fs_surface_refine, fs_surface_street); and the veil, read by
-        # the march. textureLoad()ed only, so rgba32float's unfilterability
-        # is exactly right. The passes that read none of them (the bake, the
-        # first surface stage) are laid out without it.
+        # stage (fs_surface_refine, fs_surface_street); the veil, read by
+        # the march; and the desert's optical depths (TAUS_FORMAT), read by
+        # its flora stage. textureLoad()ed only, so the float formats'
+        # unfilterability is exactly right. The passes that read none of
+        # them (the bake, the first surface stage) are laid out without it.
         unfilterable = {"sample_type": "unfilterable-float",
                         "view_dimension": "2d"}
         self._surface_layout = d.create_bind_group_layout(entries=[
@@ -1300,6 +1313,8 @@ class SoarRenderer:
              "texture": unfilterable},
             {"binding": 2, "visibility": wgpu.ShaderStage.FRAGMENT,
              "texture": {"sample_type": "uint", "view_dimension": "2d"}},
+            {"binding": 3, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": unfilterable},
         ])
         self._march_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout, self._surface_layout])
@@ -1400,9 +1415,14 @@ class SoarRenderer:
                             view: "ViewState"):
         """One surface stage's pipeline on `view`'s specialization: the
         first reads nothing at group 1, a later one the stage before (the
-        march's layout); a VEIL_STAGES entry writes the veil too."""
-        formats = ((SURFACE_FORMAT, VEIL_FORMAT) if entry in VEIL_STAGES
-                   else SURFACE_FORMAT)
+        march's layout); a VEIL_STAGES entry writes the veil too, and
+        TAUS_STAGE the desert's optical depths."""
+        if entry in VEIL_STAGES:
+            formats = (SURFACE_FORMAT, VEIL_FORMAT)
+        elif entry == TAUS_STAGE:
+            formats = (SURFACE_FORMAT, TAUS_FORMAT)
+        else:
+            formats = SURFACE_FORMAT
         return self._pipeline_for(
             entry, formats, self._view_spec(view),
             layout=None if first else self._march_pipeline_layout)
@@ -1434,7 +1454,8 @@ class SoarRenderer:
         with no view, the longest chain this surface can run. Grow-only, as
         renderer.js _ensureSurfaceTarget: a set that already holds enough
         keeps them, so a Low render (the simplified desert's one stage)
-        never makes the two it does not use."""
+        never makes the two it does not use — nor the optical depths'
+        target (TAUS_STAGE), which only the full desert's chain writes."""
         wgpu = self.wgpu
         entries = (self._stage_entries(view) if view is not None
                    else SURFACE_STAGES.get(self.surface, ()))
@@ -1449,22 +1470,30 @@ class SoarRenderer:
                 "accum": [self._make_target(size, ACCUM_FORMAT),
                           self._make_target(size, ACCUM_FORMAT)],
                 "surface": surface, "veil": veil,
-                "plain": None, "mid": None,
+                "plain": None, "mid": None, "taus": None,
                 # Group 1 for a later stage reading the plain or the middle
                 # surface (made with them); no stage binds what it writes.
                 "after_plain": None, "after_mid": None,
                 # Group 1 for the march: this size's final surface and veil.
                 "surface_group": self._group1(
                     surface or self._surface_dummy, self._surface_dummy,
-                    veil or self._veil_dummy),
+                    veil or self._veil_dummy, self._surface_dummy),
             }
         t = self._targets
+        grown = False
+        if TAUS_STAGE in entries and t["taus"] is None:
+            t["taus"] = self._make_target(size, TAUS_FORMAT)
+            grown = True
         for name, after, needed in (("plain", "after_plain", n_mid >= 1),
                                     ("mid", "after_mid", n_mid >= 2)):
             if needed and t[name] is None:
                 t[name] = self._make_target(size, SURFACE_FORMAT)
+            if t[name] is not None and (t[after] is None or grown):
+                # A later stage's group: what it reads, and the optical
+                # depths wherever they exist (the flora stage reads them).
                 t[after] = self._group1(self._surface_dummy, t[name],
-                                        self._veil_dummy)
+                                        self._veil_dummy,
+                                        t["taus"] or self._surface_dummy)
         return t
 
     def _make_target(self, size, fmt):
@@ -1476,20 +1505,23 @@ class SoarRenderer:
                    | wgpu.TextureUsage.TEXTURE_BINDING
                    | wgpu.TextureUsage.COPY_SRC))
 
-    def _group1(self, final, prev, veil):
+    def _group1(self, final, prev, veil, taus):
         return self.device.create_bind_group(
             layout=self._surface_layout, entries=[
                 {"binding": 0, "resource": final.create_view()},
                 {"binding": 1, "resource": prev.create_view()},
-                {"binding": 2, "resource": veil.create_view()}])
+                {"binding": 2, "resource": veil.create_view()},
+                {"binding": 3, "resource": taus.create_view()}])
 
     def _surface_stages(self, targets, view: "ViewState"):
         """The surface stages this view runs, in order, as (pipeline, group 1
         or None, the textures it writes): SURFACE_STAGES chained by
         surface_stage_plan — each later stage reads the one before at group
         1 binding 1 through the two intermediates ("plain", "mid"), the last
-        writes the surface the march reads, and a VEIL_STAGES entry writes
-        the veil beside it."""
+        writes the surface the march reads, a VEIL_STAGES entry writes
+        the veil beside it, and TAUS_STAGE the optical depths TAUS_READER
+        reads (group 1 binding 3). A stage without the target it needs
+        raises rather than read a stand-in."""
         entries = self._stage_entries(view)
         slot = {"final": (targets["surface"], None),
                 "a": (targets["plain"], targets["after_plain"]),
@@ -1500,6 +1532,13 @@ class SoarRenderer:
             out = [slot[writes][0]]
             if entry in VEIL_STAGES:
                 out.append(targets["veil"])
+            if entry in (TAUS_STAGE, TAUS_READER) and targets["taus"] is None:
+                raise RuntimeError(
+                    f"{entry} needs the desert's optical-depth target, and "
+                    "this size's targets have none: _ensure_targets was "
+                    "not given this view.")
+            if entry == TAUS_STAGE:
+                out.append(targets["taus"])
             stages.append((self._stage_pipeline_for(entry, k == 0, view),
                            None if reads is None else slot[reads][1], out))
         return stages
