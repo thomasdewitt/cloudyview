@@ -650,13 +650,13 @@ export class Renderer {
     });
     // Lens water's state: two 1x1 texels ping-ponged by the state pass, and a
     // dry one (all zeros) that every capture and the toggle-off present.
-    const lensTex = () => device.createTexture({
-      size: [1, 1, 1], format: SURFACE_FORMAT,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-        | GPUTextureUsage.COPY_DST,
+    const lensTex = (usage) => device.createTexture({
+      size: [1, 1, 1], format: SURFACE_FORMAT, usage,
     });
-    this._lensState = [lensTex(), lensTex()];
-    this._lensDry = lensTex();
+    const stateUsage = GPUTextureUsage.RENDER_ATTACHMENT
+      | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
+    this._lensState = [lensTex(stateUsage), lensTex(stateUsage)];
+    this._lensDry = lensTex(GPUTextureUsage.TEXTURE_BINDING);   // zeros
     this._lensIndex = 0;
     this._lensGroups = null;
     this._lastLensTex = this._lensDry;
@@ -728,6 +728,9 @@ export class Renderer {
     // with it the scene's surface pre-pass, which every march needs.
     await this._rayPipeline(SAMPLE_FORMAT, this.lighting);
     for (const sp of this._stagePipelines(this.lighting)) await sp;
+    // Lens water's state step runs every live frame while the switch is on
+    // (the default): built here, not on the first frame that needs it.
+    await this._lensPipeline(this.lighting);
     this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
@@ -1339,6 +1342,8 @@ export class Renderer {
           for (const sp of this._stagePipelines(lighting, tier)) {
             if (isPending(sp)) sp.catch(() => {});
           }
+          const lp = this._lensPipeline(lighting, tier);
+          if (isPending(lp)) lp.catch(() => {});
         } catch {
           // Already failed and recorded; thrown again if it is ever needed.
         }
@@ -1603,10 +1608,7 @@ export class Renderer {
       const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
       const entries = this._stageEntries();
       const sps = this._stagePipelines(lighting);
-      const lp = lens
-        ? this._pipeline("fs_lens_state", SURFACE_FORMAT,
-                         this._shaderSpec({ lighting }))
-        : null;
+      const lp = lens ? this._lensPipeline(lighting) : null;
       const pending = [p, ...sps, lp].filter((q) => q && isPending(q));
       if (pending.length > 0) {
         if (!waitForPipeline) {
@@ -2018,6 +2020,12 @@ export class Renderer {
    * but would let the compositor pick up the bare frame in between, which
    * reads as the minimap flickering.
    */
+  /** Lens water's state-step pipeline for a lighting method and tier. */
+  _lensPipeline(lighting, tier = this.qualityTier) {
+    return this._pipeline("fs_lens_state", SURFACE_FORMAT,
+                          this._shaderSpec({ lighting, tier }));
+  }
+
   /**
    * Lens water's state step, once per presented frame: fs_lens_state reads
    * the previous texel and the camera's extinction and writes the other
@@ -2459,6 +2467,9 @@ export class Renderer {
 
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
+    for (const tex of [...(this._lensState ?? []), this._lensDry]) {
+      tex?.destroy();
+    }
     this._meterTex?.destroy();
     for (const tex of this._meterTargets?.surface?.textures ?? []) {
       tex.destroy();

@@ -329,3 +329,15 @@ def test_cli_help_needs_no_gpu():
                          text=True)
     assert out.returncode == 0
     assert "--field" in out.stdout and "--quality" in out.stdout
+
+
+def test_lens_water_comes_from_the_header_and_old_tracks_replay_dry(tmp_path):
+    # A header from before the switch has no key: it replays dry, as it
+    # always rendered.
+    assert tr.settings_from_header(_header(tmp_path)).lens_water is False
+    on = _header(tmp_path)
+    on["render"]["lens_water"] = True
+    assert tr.settings_from_header(on).lens_water is True
+    off = _header(tmp_path)
+    off["render"]["lens_water"] = False
+    assert tr.settings_from_header(off).lens_water is False

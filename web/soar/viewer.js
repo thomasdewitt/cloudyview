@@ -2454,6 +2454,10 @@ export class Viewer {
       return;
     }
     this.recorder.start();
+    // The track's lens: the switch as it stands now, recorded in the header
+    // and flown by the video; and a dry start, as every replay starts dry.
+    this._trackLensWater = this.lensWater;
+    this.renderer.resetLens();
     // A recording holds the loop awake outright — a track's samples are its
     // timeline, and a sleeping loop would record a pause as nothing at all.
     this._wake("track recording");
@@ -2537,8 +2541,10 @@ export class Viewer {
       const framesPerVideoFrame = captureFrames(look.preset);
       // A video's lens starts dry and steps by the resampled track's own
       // frame interval — what `soar TRACK.json` steps it by — never by how
-      // long a frame took to render.
+      // long a frame took to render; on or off as the track was flown (the
+      // header says the same).
       this.renderer.resetLens();
+      const lensWater = this._trackLensWater ?? this.lensWater;
 
       const t0 = performance.now();
       for (let i = 0; i < frames.length; i++) {
@@ -2559,7 +2565,7 @@ export class Viewer {
             camera: pose, frameIndex: i * 1024,
             sceneTime: frames[i].sceneTime },
           framesPerVideoFrame, overlays, null,
-          this.lensWater
+          lensWater
             ? { dt: i > 0 ? frames[i].t - frames[i - 1].t : 0.0 } : null);
         await writer.addFrame(await readback.read(target.texture), i);
 
@@ -2690,8 +2696,10 @@ export class Viewer {
       samples, this.videoFps, { periodic: this.renderer.periodic,
                                 linearPosition: Boolean(this.scene.city) });
     const look = await this._trackLook(size, frame0);
-    const payload = trackPayload(this.renderMetadata(size, look), samples,
-                                 knocks, this.scene.surfacePeriod);
+    const payload = trackPayload(
+      this.renderMetadata(size, look,
+                          { lensWater: this._trackLensWater ?? this.lensWater }),
+      samples, knocks, this.scene.surfacePeriod);
     download(new Blob([JSON.stringify(payload)], { type: "application/json" }),
              timestampedName("cloudyview_track", ".json"));
     this.ui.say(`Saved ${samples.length} samples.`, 3);
@@ -2711,7 +2719,7 @@ export class Viewer {
    * values would misreport every one of them. A saved track's header is a
    * capture too: the video's look, metered at its first frame (_trackLook).
    */
-  renderMetadata(size, look) {
+  renderMetadata(size, look, { lensWater = false } = {}) {
     const preset = K.QUALITY_PRESETS[look.preset];
     const parked = K.QUALITY_PRESETS.high;   // the top hold rung's sampling
     // The cloud-folded relative position, as ever — with the city block
@@ -2798,6 +2806,10 @@ export class Viewer {
         light_cache: preset.lightCache,
         sky_probe: preset.skyProbe,
         periodic: this.renderer.periodic,
+        // Lens water (lens.wgsl): on for a track flown with the switch on,
+        // false for a still, which is always dry. A track without the key
+        // (older than the switch) replays dry.
+        lens_water: Boolean(lensWater),
         accumulate_frames: K.PARKED_ACCUM_FRAMES_BY_TIER[look.preset],
         tone_map_gamma: this.toneMapGamma,
         tone_map_white_point: this.toneMapWhitePoint,

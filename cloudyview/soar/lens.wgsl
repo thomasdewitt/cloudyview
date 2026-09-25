@@ -1,8 +1,8 @@
 // Lens water: drops on the camera's lens after it flies through cloud.
 //
 // One look, drawn by both hosts AFTER accumulation — the browser's present
-// pass (web/soar/renderer.js PRESENT_SHADER) and the Python host's post pass
-// (cloudyview/soar_host.py LENS_POST_SHADER) include this file — so the
+// pass (web/soar/renderer.js presentShader) and the Python host's post pass
+// (cloudyview/soar_host.py _LENS_POST_SHADER) include this file — so the
 // accumulated image never holds a drop, a parked view converges under a
 // still lens, and `soar TRACK.json` draws what the browser drew.
 //
@@ -16,9 +16,11 @@
 // Wetness 0 returns the pixel untouched, bit for bit: a dry lens (every
 // still, every capture, the toggle off) costs one compare.
 //
-// Everything is procedural, in a frame turned so that "down" is +y and
-// measured in screen heights, so the drops keep their size at any
-// resolution and the drips run with gravity however the camera is rolled.
+// Everything is procedural and measured in screen heights, so the drops keep
+// their size at any resolution. The beads sit on the lens (screen space);
+// the runners run with gravity on the image plane ("down", st.zw) — today
+// always straight down the screen, since soar's camera does not roll, and
+// down whatever roll a camera might have.
 // A drop is a small lens: it shows the scene behind it inverted and
 // magnified, darkened and blurred at its rim where the water curves away.
 // Each pixel looks only at its own cell of each layer (a drop never leaves
@@ -27,8 +29,11 @@
 const LENS_PERIOD_S_L: f32 = 600.0;    // raymarch.wgsl LENS_PERIOD_S
 const LENS_BEAD_CELL: f32 = 0.085;     // screen heights: the large beads
 const LENS_FINE_CELL: f32 = 0.038;     // the fine mist of small ones
-const LENS_RUN_PITCH: f32 = 0.055;     // screen heights between drip columns
-const LENS_RUN_SPAN: f32 = 1.6;        // screen heights a drip runs per pass
+const LENS_RUN_PITCH: f32 = 0.075;     // screen heights between drip columns
+const LENS_RUN_R: f32 = 0.024;         // a running head's half-width
+const LENS_RUN_WANDER: f32 = 0.004;    // how far a head wanders side to side
+const LENS_TRAIL: f32 = 0.45;          // screen heights of trail behind it
+const LENS_TRAIL_W: f32 = 0.006;       // the trail's half-width
 const LENS_REFRACT: f32 = 1.6;         // how far a drop throws the view
 const LENS_RIM_DARK: f32 = 0.45;       // rim darkening at a drop's edge
 const LENS_GLINT: f32 = 0.35;          // the highlight on a drop's upper side
@@ -88,9 +93,10 @@ fn lens_bead(g: vec2<f32>, salt: u32, share: f32, grow: f32) -> LensDrop {
         return d;
     }
     // Inside the cell, so no neighbour ever needs looking at: centre in
-    // [0.25, 0.75], radius <= 0.22. Beads sag a little: taller than wide.
+    // [0.25, 0.75], semi-axes <= 0.21 across and 0.2415 down. Beads sag a
+    // little: taller than wide.
     let c = vec2<f32>(0.25, 0.25) + 0.5 * h.yz;
-    let r = (0.10 + 0.12 * h.w) * grow;
+    let r = (0.10 + 0.11 * h.w) * grow;
     let q = (g - ci - c) / vec2<f32>(r, 1.15 * r);
     let dd = dot(q, q);
     if (dd >= 1.0) {
@@ -117,18 +123,16 @@ fn lens_apply(rgb: vec3<f32>, uv: vec2<f32>, aspect: f32, texel: vec2<f32>,
     if (w <= 0.0) {
         return rgb;
     }
-    let down = st.zw;
-    let side = vec2<f32>(-down.y, down.x);
-    // The turned frame, in screen heights about the image centre.
+    // Screen heights about the image centre (x right, y down).
     let p = (uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0);
-    let t = vec2<f32>(dot(p, side), dot(p, down));
 
-    // The beads: they appear as the lens wets, first the fine mist, then the
-    // large ones, and grow toward their full size.
+    // The beads sit on the lens, so they live on the screen: they appear as
+    // the lens wets, first the fine mist, then the large ones, and grow
+    // toward their full size. Offsets here are screen heights.
     let grow = 0.55 + 0.45 * smoothstep(0.2, 0.9, w);
-    let fine = lens_bead(t / LENS_FINE_CELL, 11u,
+    let fine = lens_bead(p / LENS_FINE_CELL, 11u,
                          0.45 * smoothstep(0.02, 0.35, w), grow);
-    let big = lens_bead(t / LENS_BEAD_CELL, 23u,
+    let big = lens_bead(p / LENS_BEAD_CELL, 23u,
                         0.30 * smoothstep(0.15, 0.7, w), grow);
     var off = fine.off * LENS_FINE_CELL;
     var cover = fine.cover;
@@ -141,52 +145,71 @@ fn lens_apply(rgb: vec3<f32>, uv: vec2<f32>, aspect: f32, texel: vec2<f32>,
         glint = big.glint;
     }
 
-    // The runners: once the lens is properly wet, a few columns carry a drop
-    // that runs down it, leaving a thin wet trail. A column's speed is a
-    // whole number of passes per lens-clock period, so the pattern is
-    // exactly periodic with the clock (it folds without a jump).
+    // The runners run with gravity, so they live in the frame turned to
+    // "down" (st.zw): once the lens is properly wet, a few columns carry a
+    // drop that runs down it, leaving a thin wet trail. A column's speed is
+    // a whole number of passes per lens-clock period, so the pattern is
+    // exactly periodic with the clock (it folds without a jump). A head
+    // starts above the screen's top and wraps only once its trail has left
+    // the bottom, over the screen's diagonal (whatever "down" is), so no
+    // trail is on screen when its drop wraps.
+    let down = st.zw;
+    let side = vec2<f32>(-down.y, down.x);
+    let t = vec2<f32>(dot(p, side), dot(p, down));
     let run_share = 0.35 * smoothstep(0.45, 0.95, w);
     let col = floor(t.x / LENS_RUN_PITCH);
     let hc = lens_hash4(vec2<i32>(i32(col), 7), 37u);
     if (hc.x < run_share) {
-        let laps = 60.0 + floor(40.0 * hc.y);        // passes per period
-        let head = -0.5 * LENS_RUN_SPAN
-            + LENS_RUN_SPAN * fract(hc.z + laps * st.y / LENS_PERIOD_S_L);
-        let x0 = (col + 0.3 + 0.4 * hc.w) * LENS_RUN_PITCH;
-        // A drip wanders a little as it runs.
-        let xw = x0 + 0.004 * sin(31.0 * t.y + 6.3 * hc.y);
-        let r = 0.024;
+        let r = LENS_RUN_R;
+        let half_diag = 0.5 * length(vec2<f32>(aspect, 1.0));
+        let top = -half_diag - r / 0.65;
+        let span = 2.0 * half_diag + LENS_TRAIL + 2.0 * r / 0.65;
+        let laps = 35.0 + floor(25.0 * hc.y);         // passes per period
+        let head = top + span * fract(hc.z + laps * st.y / LENS_PERIOD_S_L);
+        // Inside its column with the wander and a margin to spare: a head
+        // never reaches its column's edge, where the next column's pixels
+        // would not see it.
+        let x_lo = r + LENS_RUN_WANDER + 0.002;
+        let x0 = (col * LENS_RUN_PITCH) + x_lo
+            + (LENS_RUN_PITCH - 2.0 * x_lo) * hc.w;
+        let xw = x0 + LENS_RUN_WANDER * sin(31.0 * t.y + 6.3 * hc.y);
         let q = vec2<f32>(t.x - xw, (t.y - head) * 0.65) / r;
         let dd = dot(q, q);
+        var off_t = vec2<f32>(0.0);
+        var hit = false;
         if (dd < 1.0) {
-            off = -q * (LENS_REFRACT * r);
+            off_t = -q * (LENS_REFRACT * r);
             cover = 1.0 - smoothstep(0.85, 1.0, dd);
             rim = smoothstep(0.30, 1.0, dd);
             let gq = q - vec2<f32>(-0.25, -0.4);
             glint = 1.0 - smoothstep(0.0, 0.09, dot(gq, gq));
+            hit = true;
         } else {
-            // The trail: behind the head, thin, fading with distance.
+            // The trail: behind the head, thin, fading along its length. A
+            // wet streak is a thin cylinder lens: it throws the view across
+            // itself, and it is darkest at its two edges.
             let behind = head - t.y;
-            let tw = 0.006;
-            let across = abs(t.x - xw);
-            if (behind > 0.0 && behind < 0.45 && across < tw) {
-                let fade = (1.0 - behind / 0.45) * (1.0 - across / tw);
-                // A wet streak is a thin cylinder lens: it throws the view
-                // sideways across itself and darkens at its two edges.
-                let u = (t.x - xw) / tw;
-                off = vec2<f32>(-u * 0.012, 0.0) * fade;
-                cover = max(cover, 0.9 * fade);
-                rim = max(rim, (0.3 + 0.5 * u * u) * fade);
+            let v = (t.x - xw) / LENS_TRAIL_W;                  // -1 .. 1
+            if (behind > 0.0 && behind < LENS_TRAIL && abs(v) < 1.0) {
+                let along = 1.0 - behind / LENS_TRAIL;
+                off_t = vec2<f32>(-v * 0.012, 0.0) * along;
+                cover = max(cover,
+                            0.9 * along * (1.0 - smoothstep(0.7, 1.0, abs(v))));
+                rim = max(rim, (0.3 + 0.5 * v * v) * along);
+                glint = 0.0;
+                hit = true;
             }
+        }
+        if (hit) {
+            off = off_t.x * side + off_t.y * down;        // back to the screen
         }
     }
     if (cover <= 0.0) {
         return rgb;
     }
-    // Back to the screen, and the view through the water: the thrown sample
-    // and a small cross of taps around it for the water's softness.
-    let off_h = off.x * side + off.y * down;          // screen heights
-    let c = uv + off_h * vec2<f32>(1.0 / aspect, 1.0);
+    // The view through the water: the thrown sample and a small cross of
+    // taps around it for the water's softness.
+    let c = uv + off * vec2<f32>(1.0 / aspect, 1.0);
     let b = 1.2 * texel;
     let seen = 0.4 * lens_src(c)
         + 0.15 * (lens_src(c + vec2<f32>(b.x, 0.0))

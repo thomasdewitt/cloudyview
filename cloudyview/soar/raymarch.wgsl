@@ -159,7 +159,9 @@ struct Uniforms {
     // mod the tile can matter. A day scene with a parked camera writes
     // exactly 0.0, making the water subtraction bit-neutral — which is
     // what keeps the frozen judge-view goldens byte-identical.
-    // z, w unused (0.0).
+    // z = the scene clock (scene_time, per surface: the sea and the city
+    // run it). w = lens water's step dt for fs_lens_state (s; 0 in every
+    // other pass, which never reads it).
     surface_offset: vec4<f32>,
     // Rows 25..46, under DESERT only (zero elsewhere): the desert tile's own
     // numbers, from its meta.json, written by both hosts
@@ -27685,7 +27687,8 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 //   y  the lens clock (s), folded at LENS_PERIOD_S (lens.wgsl's streaks are
 //      periodic at exactly that period);
 //   zw "down" on the screen (unit, x right, y down): gravity projected onto
-//      the camera's image plane, so the drips respect camera and dart roll.
+//      the camera's image plane, for the runners (lens.wgsl). soar's camera
+//      does not roll, so today this is always straight down the screen.
 // The host puts the frame's flight-clock dt in row 24.w: the live view's
 // frame time while flying (0 parked, so a parked lens holds perfectly still
 // and accumulation converges under it), a video's 1 / fps. Stills pass no
@@ -27696,8 +27699,9 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // is linear in w, so one step of any length is
 //   w(t + dt) = w* + (w - w*) exp(-a dt),
 //   a = K_WET f + K_DRY (1 - f),  w* = K_WET f / a,
-// and one step of 2 dt equals two of dt: a replay at another frame rate
-// sees the same wetness. Dense cloud (f ~ 1) wets the lens in a few seconds;
+// and one step of 2 dt equals two of dt at constant f: a replay at another
+// frame rate sees the same wetness wherever the extinction at the camera
+// changes slowly against the frame interval (f is taken at the step's end). Dense cloud (f ~ 1) wets the lens in a few seconds;
 // haze (f small) only to a low level, slowly; out of cloud it drains to 5 %
 // in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
 const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
@@ -27713,13 +27717,18 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     // The previous state, bound where the refine stages bind surface_plain.
     let prev = textureLoad(surface_plain, vec2<i32>(0, 0), 0);
     let dt = max(u.surface_offset.w, 0.0);
-    let sigma = max(sample_sigma(u.cam_origin.xyz), 0.0);
+    // A NaN extinction reads as none (a comparison with NaN is false, so
+    // this is exact where max(NaN, 0) is left to the implementation).
+    let s_raw = sample_sigma(u.cam_origin.xyz);
+    let sigma = select(0.0, s_raw, s_raw > 0.0);
     let f = 1.0 - exp(-sigma * LENS_L_WET);
     let a = LENS_K_WET * f + LENS_K_DRY * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
     let w_star = LENS_K_WET * f / a;
     var w = w_star + (prev.x - w_star) * exp(-a * dt);
-    // Dry is exactly 0, so a dry lens draws nothing at all (lens.wgsl).
+    // Dry is exactly 0, so a dry lens draws nothing at all (lens.wgsl); a
+    // state that is not a number starts again dry rather than stay NaN.
     w = select(w, 0.0, w < LENS_DRY_FLOOR && w_star < LENS_DRY_FLOOR);
+    w = select(0.0, w, w >= 0.0);
     var clock = prev.y + dt;
     clock = clock - LENS_PERIOD_S * floor(clock / LENS_PERIOD_S);
     // Down on the screen: world -z on the image plane, (x right, y down).
@@ -27730,9 +27739,12 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
                       prev_len > 0.5);
     if (s_len > 0.2) {
         // Looking straight up or down, "down" is undefined on the screen:
-        // the drops keep the last one they had.
+        // the drops keep the last one they had. A roll past a right angle
+        // is taken at once (easing toward the opposite direction would
+        // never turn).
         let aim = s / s_len;
-        let k = select(1.0 - exp(-LENS_DOWN_RATE * dt), 1.0, prev_len <= 0.5);
+        let k = select(1.0 - exp(-LENS_DOWN_RATE * dt), 1.0,
+                       prev_len <= 0.5 || dot(down, aim) < 0.0);
         let m = mix(down, aim, k);
         let m_len = length(m);
         down = select(aim, m / max(m_len, 1e-6), m_len > 0.1);

@@ -1810,7 +1810,6 @@ class SoarRenderer:
         texture the post pass wrote."""
         if not (math.isfinite(dt) and dt >= 0.0):
             raise ValueError(f"lens_dt must be a finite dt >= 0; got {dt}.")
-        wgpu = self.wgpu
         w, h = self._targets["size"]
         if self._lens_groups is None:
             # Group 1 for the state pass: the previous state where the
