@@ -731,7 +731,9 @@ def main(argv=None) -> int:
         Image.fromarray((rgb * 255.0 + 0.5).astype(np.uint8)).save(png)
         if args.npy:
             np.save(png.with_suffix(".npy"), np.asarray(img, np.float32))
-        print(f"  {name:<14} {el_s:6.2f} s{ms}  -> {png}")
+        print(f"  {name:<14} {el_s:6.2f} s{ms}  -> {png}  (camera "
+              f"{x:.2f} {y:.2f} {z:.2f}, az {az:.2f} el {el:.2f} fov {fov:g};"
+              f" sun {s_az:g} {s_el:g})")
     return 0
 
 
