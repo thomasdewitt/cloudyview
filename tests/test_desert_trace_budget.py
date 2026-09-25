@@ -10,8 +10,10 @@ still spends the budget is finished by a cell walk that lands it in-cell.
 
 DESERT_TRACE_DEBUG paints those rays: magenta when the walk finished one,
 cyan when it ran out as well. Here it is switched on for flora's 2.5 m
-camera and a 30 m view over the same ground, with the sky empty: no ray
-may run out of both, and walk-finished rays stay a thin scatter. Needs a
+camera and a 30 m view over the same ground, full and simplified, with
+the sky empty: no ray may run out of both (the walk's own fallback is
+uncertified, so it must stay unreached), and walk-finished rays stay a
+thin scatter. Needs a
 real GPU; skips cleanly without one.
 """
 
@@ -22,7 +24,8 @@ import pytest
 
 pytest.importorskip("wgpu")
 
-from cloudyview.soar_host import (SceneState, SoarRenderer, ViewState,   # noqa: E402
+from cloudyview.soar_host import (DESERT_LITE_TIERS, SceneState,         # noqa: E402
+                                  SoarRenderer, ViewState,
                                   desert_scene_fields, surface_cell_m)
 from cloudyview.witness import OCEAN_REFLECTANCE, QUALITY_PRESETS        # noqa: E402
 
@@ -66,7 +69,8 @@ def debug_counts(view_name, quality="high"):
         output_size=(1280, 720), render_size=(1280, 720),
         sun_azimuth=120.0, sun_elevation=50.0, exposure=1.0,
         light_cache=bool(preset["light_cache"]),
-        sky_probe=bool(preset["sky_probe"]))
+        sky_probe=bool(preset["sky_probe"]),
+        desert_lite=quality in DESERT_LITE_TIERS)
     if preset["light_cache"]:
         r.bake_light_cache(state, view, divisor=2)
     img = r.render(state, view, frames=1)[..., :3]
@@ -76,12 +80,15 @@ def debug_counts(view_name, quality="high"):
     return int(magenta.sum()), int(cyan.sum())
 
 
-@pytest.mark.parametrize("view_name, finished_max", [("2.5 m", 2000),
-                                                     ("30 m", 100)])
-def test_no_ray_runs_out_of_the_trace(view_name, finished_max):
+# Walk-finished rays measured 2026-09-25 (of 921,600): 950 and 76 at High,
+# 145 and 484 at Low (the simplified desert); the caps are about twice that.
+@pytest.mark.parametrize("view_name, quality, finished_max", [
+    ("2.5 m", "high", 2000), ("30 m", "high", 200),
+    ("2.5 m", "low", 400), ("30 m", "low", 1000)])
+def test_no_ray_runs_out_of_the_trace(view_name, quality, finished_max):
     if soar_gpu_adapter() is None:
         pytest.skip("No GPU adapter available (a software rasterizer does "
                     "not count)")
-    finished, out = debug_counts(view_name)
+    finished, out = debug_counts(view_name, quality)
     assert out == 0, (view_name, finished, out)
     assert finished <= finished_max, (view_name, finished)

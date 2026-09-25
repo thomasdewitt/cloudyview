@@ -373,9 +373,11 @@ def relief_stats(heights: list) -> dict:
 
     slope_max: the steepest one-texel slope at each mip level, a quarter
     again for safety (raymarch.wgsl desert_slope_max_at copies it).
-    band_max_m and band_slope_max: the largest excursion and slope of the
-    band an octave adds — the tile minus itself read log2(5) levels up, trilinear,
-    exactly as desert_surface computes it.
+    band_max_m: the largest excursion of the band an octave adds — the tile
+    minus itself read log2(5) levels up, trilinear, exactly as
+    desert_surface computes it, measured at texel centres (the octaves' true
+    reach, and their slopes, come from the bounds pyramid:
+    cloudyview/desert_bounds.py).
     """
     n = heights[0].shape[0]
     cell = TILE_EXTENT_M / n
@@ -398,8 +400,6 @@ def relief_stats(heights: list) -> dict:
     coarse = ((1 - f) * _bilinear_periodic(heights[lo], n)
               + f * _bilinear_periodic(heights[lo + 1], n))
     band = heights[0] - coarse
-    bg = np.hypot((np.roll(band, -1, 1) - band) / cell,
-                  (np.roll(band, -1, 0) - band) / cell)
     # envelope_m: how far the full surface can stand ABOVE mip k read at the
     # same point — the lid the trace can step against from far above, with
     # mip k's gentle slope bound in place of level 0's (a tenth again for
@@ -421,8 +421,7 @@ def relief_stats(heights: list) -> dict:
     return {"slope_max": slope_max,
             "envelope_m": envelope,
             "slope_variance_removed": removed,
-            "band_max_m": round(float(np.abs(band).max()), 4),
-            "band_slope_max": _round_up(1.25 * float(bg.max()))}
+            "band_max_m": round(float(np.abs(band).max()), 4)}
 
 
 def encode_level(level: np.ndarray) -> bytes:

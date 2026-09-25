@@ -76,7 +76,9 @@ Layer 0 is the tile and layer 1 the octaves' band, so the simplified desert
     a  H0   max_{l <= T+1} win(h_l, 0): its highest over the cell alone,
             for a step that stays inside the cell.
   layer 1: the band (sub-patches of cells I-1..I+1)
-    r  BH   its highest.
+    r  BH   its highest, and never below 0: an octave's fade only falls
+            along a ray, to 0 at the trace's cut, so a negative band rises
+            to 0 within a step, and the octave's bound has to hold there.
     g  GB   its steepest.
     b  BA   its largest magnitude.
     a  G23  max(win(P_2, 1), win(P_3, 1)): the steepest of the band's
@@ -103,8 +105,11 @@ BAND_MIPS = (2, 3)
 
 
 def ceil_half(x):
-    """The smallest float16 at or above each float64 in `x`."""
+    """The smallest float16 at or above each float64 in `x`; a value that has
+    none (not finite, or past float16's largest) is an error."""
     x = np.asarray(x, np.float64)
+    if not np.all(np.isfinite(x)) or np.any(np.abs(x) > 65504.0):
+        raise ValueError("desert bounds: a value outside float16's range")
     y = x.astype(np.float16)
     low = y.astype(np.float64) < x
     y[low] = np.nextafter(y[low], np.float16(np.inf))
@@ -274,7 +279,7 @@ def build(levels, cell_m):
         level[0, ..., 1] = dilate(np.max([p0[lv] for lv in served], axis=0))
         level[0, ..., 2] = dilate(top) - dilate(low, np.minimum)
         level[0, ..., 3] = top
-        level[1, ..., 0] = dilate(pool_patches(bh, xs, extent, m))
+        level[1, ..., 0] = np.maximum(dilate(pool_patches(bh, xs, extent, m)), 0.0)
         level[1, ..., 1] = dilate(pool_patches(gb, xs, extent, m))
         level[1, ..., 2] = dilate(pool_patches(ba, xs, extent, m))
         level[1, ..., 3] = dilate(np.maximum(p0[BAND_MIPS[0]], p0[BAND_MIPS[1]]))

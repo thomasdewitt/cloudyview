@@ -20262,7 +20262,9 @@ const DESERT_NEAR_SHRINK: f32 = 0.5;
 // The GPU filters with 8-bit weights, so a read is the exact bilinear
 // value at a point snapped by up to 1/256 of a texel on each axis: a read
 // at p and one anywhere along a step can each be off by that, which is
-// this times the texel times the slope.
+// this times the texel times the slope. (8 bits of sub-texel and mip
+// precision is what this card has; Vulkan guarantees only 4, which would
+// want this sixteen times larger.)
 const DESERT_SNAP: f32 = 0.011049;            // 2 sqrt(2) / 256
 // Arithmetic slack on every bound, metres.
 const DESERT_BOUND_EPS: f32 = 1e-3;
@@ -20349,9 +20351,12 @@ fn desert_octaves_cell_top(k: i32, xy: vec2<f32>, fp: f32) -> f32 {
 //
 // Every bound is conservative: fp16 maxima rounded up, the snapped reads
 // of the 8-bit filter (DESERT_SNAP), the steps capped so the footprint's mip
-// never passes the one the bound served. The one thing given up is the step
-// floor, DESERT_MIN_STEP_FP footprints: a crest under a footprint high and
-// shorter than the floor can be stepped over, as it always could.
+// never passes the one the bound served. Two things are given up, as they
+// always were: the step floor, DESERT_MIN_STEP_FP footprints (a crest under
+// a footprint high and shorter than the floor can be stepped over), and the
+// trace's octave cut (desert_trace_fade drops an octave whole once its reach
+// is under a footprint, so a NEAR step across the cut can meet ground about a
+// footprint higher than it certified).
 fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                         t_start: f32) -> DesertHit {
     desert_trace_state = 0u;
@@ -20504,7 +20509,10 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             q = desert_octave_step(q);
             let band = desert_bounds(
                 max(k + i32(ceil(f32(j + 1) * DESERT_LOG2_5)), 0), 1, q);
-            u_oct = u_oct + fade * amp * band.x;
+            // The band's two reads each snap on their own (DESERT_SNAP is
+            // two reads' worth: one here, one along the step).
+            u_oct = u_oct + fade * amp * (band.x + 0.5 * DESERT_SNAP
+                        * (tile_top.y * c0 + band.w * 8.0 * c0));
             slope_oct = slope_oct + fade * amp * reach * band.y;
             guard_oct = guard_oct + fade * amp * DESERT_SNAP
                         * (tile_top.y * c0 + band.w * 8.0 * c0);

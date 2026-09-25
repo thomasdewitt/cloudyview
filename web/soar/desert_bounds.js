@@ -312,7 +312,9 @@ export function buildDesertBounds(levels, cellM) {
     const top1 = dilate(top, m, true);
     const low1 = dilate(low, m, false);
     const layer0 = [top1, dilate(steep, m, true), null, top];
-    const layer1 = [dilate(band.BH, m, true), dilate(band.GB, m, true),
+    // BH never below 0 (desert_bounds.py: the fade falls to 0 along a ray).
+    const layer1 = [dilate(band.BH, m, true).map((v) => Math.max(v, 0)),
+                    dilate(band.GB, m, true),
                     dilate(band.BA, m, true), dilate(b23, m, true)];
     const bits = new Uint16Array(LAYERS * m * m * 4);
     const l1 = m * m * 4;

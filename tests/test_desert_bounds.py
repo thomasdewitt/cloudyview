@@ -134,6 +134,9 @@ def violations(pyr, rng=None):
             if l + 1 in served:
                 count += np.sum(np.abs(f[l + 1] - f[l]) > near(E))
         count += np.sum(np.maximum(g[B2], g[B3]) > near(G23))
+        # An octave's fade falls along a ray, to 0 at the trace's cut: its
+        # bound has to cover the octave there too, where it adds nothing.
+        count += np.sum(BH < 0)
         f0 = db.bilinear(h[0].astype(np.float64), x, y, CELL)
         f2 = db.bilinear(h[B2].astype(np.float64), x, y, CELL * (1 << B2))
         f3 = db.bilinear(h[B3].astype(np.float64), x, y, CELL * (1 << B3))
@@ -171,12 +174,31 @@ def test_a_pyramid_without_its_dilations_is_caught(monkeypatch):
     assert sum(violations(bare).values()) > 0
 
 
+@pytest.mark.slow
+def test_a_band_bound_below_zero_is_caught():
+    """Level 0's BH as it was before the clamp (552 cells below 0): an
+    octave fading out within a HEIGHT step rose from fade amp BH < 0 to 0,
+    and a disc certified clear could end 2 cm inside the ground."""
+    h = heights()
+    xs = db.lattice(N, CELL)
+    bh, _, _ = db.band_patches(list(h), CELL)
+    m = N >> db.BASE_LEVEL
+    bare = [lv.copy() for lv in pyramid()]
+    bare[0][1, ..., 0] = db.ceil_half(
+        db.dilate(db.pool_patches(bh, xs, EXTENT, m))).astype(np.float64)
+    assert (bare[0][1, ..., 0] < 0).any()
+    assert violations(tuple(bare))[0] > 0
+
+
 def test_ceil_half_rounds_up():
     x = np.array([0.1, -0.1, 1.0, 16.156, -14.27, 3e-6, -3e-6, 0.0, 65504.0])
     y = db.ceil_half(x)
     assert np.all(y.astype(np.float64) >= x)
     below = np.nextafter(y, np.float16(-np.inf)).astype(np.float64)
     assert np.all((below < x) | (y.astype(np.float64) == x))
+    for bad in (np.nan, np.inf, 70000.0):
+        with pytest.raises(ValueError):
+            db.ceil_half(np.array([1.0, bad]))
 
 
 def test_the_smooth_lid_reads_true_bounds():
