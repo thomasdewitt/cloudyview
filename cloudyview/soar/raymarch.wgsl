@@ -7826,9 +7826,10 @@ fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32, fog: vec4<f32>,
 
 // The radiance the averaged footprint hands back. `mean` is the per-area
 // sum. Shown directly, it is the light's own colour (its fogless mean)
-// scaled by s until it shows the averaged luminance: bisection on s, the
-// displayed luminance being monotone along one chromaticity. One element,
-// alone in the footprint, comes back as itself (s = 1).
+// scaled by s until it shows the averaged luminance: the displayed
+// luminance is monotone along one chromaticity, so s is bracketed about a
+// first guess (the per-channel curve inverted at that luminance) and
+// bisected. One element, alone in the footprint, comes back as itself.
 fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
                         shown: bool) -> vec3<f32> {
     let light = max(mean.light - fog.yzw, vec3<f32>(0.0)) / max(fog.x, 1e-6);
@@ -7838,22 +7839,32 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
     let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
     let target_y = dot(mean.shown, lum);
     let e = u.cam_right.w;
-    // Bracket: the averaged display sits at most at the display of the
-    // mean for a concave curve, but the white point's toe is convex, so
-    // look up to 16x.
-    var hi = 1.0;
-    for (var k: i32 = 0; k < 4; k = k + 1) {
-        let d = city_display_curve(e * (hi * light * fog.x + fog.yzw));
-        if (dot(d, lum) >= target_y) {
-            break;
-        }
-        hi = hi * 2.0;
+    let x0 = light * fog.x;
+    let y_light = dot(x0 * e, lum);
+    if (y_light <= 0.0) {
+        return light;
     }
-    var lo = 0.0;
-    for (var k: i32 = 0; k < 18; k = k + 1) {
+    // First guess: the exposed luminance the per-channel curve shows as
+    // target_y, over the light's own.
+    let m = pow(clamp(target_y, 0.0, 0.999999), u.periodic.w);
+    let w2 = u.flags.w * u.flags.w;
+    // @domain: (1 - m)^2 >= 0, m >= 0, and w2 >= 16 (both hosts hold the white point to [4, 40])
+    let e_y = 2.0 * m / ((1.0 - m) + sqrt((1.0 - m) * (1.0 - m) + 4.0 * m / w2));
+    let guess = max((e_y - dot(fog.yzw * e, lum)) / y_light, 1e-6);
+    var lo = 0.5 * guess;
+    var hi = 2.0 * guess;
+    // Widen the bracket if the shoulder or the fog put s outside it.
+    for (var k: i32 = 0; k < 3; k = k + 1) {
+        if (dot(city_display_curve(e * (lo * x0 + fog.yzw)), lum) > target_y) {
+            lo = 0.25 * lo;
+        }
+        if (dot(city_display_curve(e * (hi * x0 + fog.yzw)), lum) < target_y) {
+            hi = 4.0 * hi;
+        }
+    }
+    for (var k: i32 = 0; k < 10; k = k + 1) {
         let mid = 0.5 * (lo + hi);
-        let d = city_display_curve(e * (mid * light * fog.x + fog.yzw));
-        if (dot(d, lum) < target_y) {
+        if (dot(city_display_curve(e * (mid * x0 + fog.yzw)), lum) < target_y) {
             lo = mid;
         } else {
             hi = mid;
