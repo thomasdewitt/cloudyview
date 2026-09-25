@@ -83,7 +83,7 @@ def test_the_hosts_carry_the_tiles_tables():
                     r"\{\s*return desert_tile_level\(6, i\);",
                     r"return u\.desert_tile\[9 \+ i\]\.xyz;",
                     r"return u\.desert_tile\[21\]\.xyz;",
-                    r"return u\.desert_tile\[21\]\.w;"]:
+                    r"u\.desert_tile\[21\]\.w"]:
         assert re.search(pattern, SHADER), pattern
 
 
