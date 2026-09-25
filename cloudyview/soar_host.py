@@ -139,6 +139,25 @@ def surface_period_m(surface: str, meta: dict) -> float:
     return float(meta[key])
 
 
+# The surfaces whose shader reads the scene clock, and so whose clock runs:
+# the sea (its waves) and the city (its steam). The desert reads none, and a
+# running clock there would only keep a parked view from converging.
+CLOCK_SURFACES = ("ocean", "city")
+
+
+def surface_clock_period_s(surface: str, meta: dict) -> Optional[float]:
+    """The period a surface's clock wraps at (SceneState.clock_period_s), from
+    its meta.json — where its animation repeats exactly, so the wrap is
+    invisible and float32 never loses the cadence — or None for a surface
+    whose clock is always 0."""
+    if check_surface(surface) not in CLOCK_SURFACES:
+        return None
+    if "clock_period_s" not in meta:
+        raise KeyError(f"the {surface} tile's meta.json has no "
+                       "'clock_period_s'.")
+    return float(meta["clock_period_s"])
+
+
 @functools.lru_cache(maxsize=1)
 def _sea_levels(tile_dir: str):
     """(meta, per-level float16 bytes [t][y][x][rgba]) for the moving sea.
@@ -404,10 +423,11 @@ class SceneState:
     # jump it, so an ocean scene states its own (surface_period_m(), from
     # the sea's meta.json).
     surface_period_m: Optional[float] = None
-    # The sea's period in time (the sea's meta.json clock_period_s): row 24.z
-    # packs the scene clock modulo it, so float32 never loses the sea's
-    # cadence. Required over the ocean whenever the clock is not 0 (a still
-    # at clock 0 needs nothing); unused off the ocean. Mirrors uniforms.js.
+    # The surface's period in time (its meta.json clock_period_s,
+    # surface_clock_period_s()): row 24.z packs the scene clock modulo it, so
+    # float32 never loses the cadence. Required over the sea and the city
+    # whenever the clock is not 0 (a still at clock 0 needs nothing); unused
+    # over the desert, whose clock is 0. Mirrors uniforms.js.
     clock_period_s: Optional[float] = None
 
 
@@ -679,16 +699,18 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
 
     base = (state.surface_offset_m if state.surface_offset_m is not None
             else (state.city_tile_offset_m if city else (0.0, 0.0)))
-    # The clock only over the sea (nothing else reads it, and as part of the
-    # browser's scene key a running clock would keep a parked city or desert
-    # from converging while a track records), wrapped at the sea's own
-    # period the way uniforms.js wraps it.
+    # The clock only where the shader reads it (CLOCK_SURFACES: the sea's
+    # waves, the city's steam; as part of the browser's scene key a running
+    # clock would keep a parked desert from converging while a track
+    # records), wrapped at the surface's own period the way uniforms.js
+    # wraps it — in float64, before the narrowing to float32.
     clock = 0.0
-    if not (city or desert) and view.scene_time != 0.0:
+    if not desert and view.scene_time != 0.0:
         if state.clock_period_s is None or not state.clock_period_s > 0:
             raise ValueError(
-                "an ocean scene with a running clock needs clock_period_s "
-                "(the sea's meta.json clock_period_s).")
+                f"a {'city' if city else 'sea'} scene with a running clock "
+                "needs clock_period_s (the surface tile's meta.json "
+                "clock_period_s; surface_clock_period_s()).")
         clock = math.fmod(float(view.scene_time), state.clock_period_s)
         if clock < 0:
             clock += state.clock_period_s

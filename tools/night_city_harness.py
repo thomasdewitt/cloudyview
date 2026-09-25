@@ -96,6 +96,7 @@ def main(argv=None) -> int:
         STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
         APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
         SceneState, SoarRenderer, ViewState, surface_cell_m,
+        surface_clock_period_s,
     )
     from cloudyview.witness import OCEAN_REFLECTANCE
 
@@ -269,6 +270,7 @@ def main(argv=None) -> int:
         ocean_max_lod=max_lod,
         ocean_enabled=True,
         surface=surface,
+        clock_period_s=surface_clock_period_s(surface, meta),
         **({"city_tile_offset_m": tuple(args.city_offset)}
            if args.city_offset is not None else {}),
     )

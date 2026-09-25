@@ -371,7 +371,7 @@ export class Viewer {
       // volume) rather than re-downloaded per field.
       return (this._cityTile ??=
         await loadOceanTile(this.device, CITY_URL, undefined,
-                            { keepCells: true,
+                            { keepCells: true, clock: true,
                               schema: K.SURFACE_TILE_SCHEMAS.city }));
     }
     if (kind === "desert") {
@@ -2772,8 +2772,8 @@ export class Viewer {
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
         // The scene clock the still was taken at (witness --time): the
-        // sea's, and 0 over anything else, as row 24.z is.
-        scene_time: this.scene.city || this.scene.desert ? 0 : this.sceneTime,
+        // sea's or the city's, and 0 over the desert, as row 24.z is.
+        scene_time: this.scene.desert ? 0 : this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
         light_march_lod_degrees:
@@ -3122,10 +3122,10 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
-      // The scene clock the view was held at: where the sea was. Only the
-      // sea reads it (row 24.z is 0 elsewhere), so only the sea writes it.
-      ...(this.scene.city || this.scene.desert
-          ? [] : ["--time", n(this.sceneTime)]),
+      // The scene clock the view was held at: where the sea was, or the
+      // city's steam. The desert reads none (row 24.z is 0 there), so it
+      // writes none.
+      ...(this.scene.desert ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree

@@ -46,6 +46,12 @@ OCEAN_OUT = REPO / "cloudyview" / "soar" / "ocean"
 CITY_OUT = REPO / "cloudyview" / "soar" / "city"
 
 CITY_SEED = 20260820
+# The city's clock period (soar_host.surface_clock_period_s): where its
+# animation — the manhole steam, city-street's cc_manholesteam — repeats
+# exactly. The steam's noise rises 1.3 * 1.2 = 1.56 lattice cells a second
+# and its lattice wraps at 4056 cells, so 2600 s is a whole number of every
+# octave's cycles and the hosts' wrap of the clock there shows nothing.
+CITY_CLOCK_PERIOD_S = 2600.0
 
 SEA_SEED = 20260923
 # Quantization range of the two slopes. The sea's crests run across the wind
@@ -307,6 +313,7 @@ def export_city() -> dict:
         "mips": len(mips),
         "format": "rgba16float",
         "tile_extent_m": float(CITY_N * CITY_CELL_M),
+        "clock_period_s": CITY_CLOCK_PERIOD_S,
         "seed": CITY_SEED,
     }
     (CITY_OUT / "meta.json").write_text(json.dumps(meta, indent=1))
