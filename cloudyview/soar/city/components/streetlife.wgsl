@@ -661,6 +661,7 @@ fn cc_streetlife_car_normal(pl: vec3<f32>, r: vec4<f32>, fine: bool, hh: f32)
             * cc_streetlife_car_sdf(pl + vec3<f32>(e.y, e.x, e.y), r, fine)
           + vec3<f32>(1.0, 1.0, 1.0)
             * cc_streetlife_car_sdf(pl + vec3<f32>(e.x, e.x, e.x), r, fine);
+    // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     return normalize(n);
 }
 
@@ -1106,6 +1107,7 @@ fn cc_streetlife_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         if (disc < 0.0 || a < 1e-12) {
             return miss;
         }
+        // @domain: the discriminant is tested positive (or non-negative) just above
         let sq = sqrt(disc);
         let tc0 = (-b - sq) / a;
         let tc1 = (-b + sq) / a;
@@ -1120,6 +1122,7 @@ fn cc_streetlife_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         }
         t = tin;
         let pc = o + t * dir;
+        // @domain: the hit lies on the pole's cylinder: |pc.xy - cc0| is its radius
         n = select(vec3<f32>(normalize(pc.xy - cc0), 0.0),
                    vec3<f32>(0.0, 0.0, 1.0), tin == tzn);
     }
@@ -1144,7 +1147,9 @@ fn cc_streetlife_kerb_shade(h: CityHit, dir: vec3<f32>, fp: f32)
     // A wet arris reflects the lamp it faces: tight, bright, and only where
     // the eye sits on the mirror side of it.
     let head = cc_streetlife_nearest_lamp(h.pos.xy);
+    // @domain: a lamp head in the air minus a point on a surface: never zero
     let l = normalize(head - h.pos);
+    // @domain: a kerb's normals face up or out, never straight down
     let rf = reflect(dir, normalize(h.normal + vec3<f32>(0.0, 0.0, 1.0)));
     let glint = pow(max(dot(rf, l), 0.0), 40.0);
     return light * (CITY_REL_KERB * wet * (1.0 + 1.5 * arris)
@@ -1386,6 +1391,7 @@ fn cc_streetlife_dot(a: f32, b: f32, sa: f32, sb: f32, span: f32, fp: f32)
     // crossed that constant the test stopped bounding anything at all and the
     // lens grew vertically without limit. A clamped width in the normalised
     // metric cannot do either: the lens is never more than 1 + w across.
+    // @domain: a product of two positive constants
     let w = clamp(fp / sqrt(cc_streetlife_LENS_A * cc_streetlife_LENS_B),
                   0.06, 0.42);
     let sharp = 1.0 - smoothstep(1.0 - w, 1.0 + w, d);
@@ -1483,6 +1489,7 @@ fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
     let near_lamp = 0.12 + 0.88 * up * up;
     let pool = cc_streetlife_pool(h.pos.xy);
     let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    // @domain: a lamp head in the air minus a point on a surface: never zero
     let l = normalize(lamp - h.pos);
     // The mast is a box because a box is what the DDA wants, but 17 cm of
     // steel is round, and from two metres away a flat-shaded rectangle says
@@ -1508,6 +1515,7 @@ fn cc_streetlife_pole_shade(h: CityHit, dir: vec3<f32>, fp: f32)
         && dot(rel, rel) < cc_streetlife_MAST_R * cc_streetlife_MAST_R * 2.9) {
         let tang = vec2<f32>(-h.normal.y, h.normal.x);
         let uu = clamp(dot(rel, tang) / cc_streetlife_MAST_R, -1.0, 1.0);
+        // @domain: n.xy sqrt(1 - u^2) + tang u with tang perpendicular to the unit n.xy: unit
         n = normalize(vec3<f32>(h.normal.xy * sqrt(max(1.0 - uu * uu, 0.0))
                                 + tang * uu, 0.0));
     }
@@ -1592,6 +1600,7 @@ fn cc_streetlife_car_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let fill = cc_streetlife_fill(h.pos);
     let pool = cc_streetlife_pool(h.pos.xy);
     let lamp = cc_streetlife_nearest_lamp(h.pos.xy);
+    // @domain: a lamp head in the air minus a point on a surface: never zero
     let l = normalize(lamp - h.pos);
     let fade = (1.0 - smoothstep(cc_streetlife_FADE_START * CITY_PROP_RANGE,
                                  CITY_PROP_RANGE, h.t))

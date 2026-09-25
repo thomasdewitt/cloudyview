@@ -861,6 +861,7 @@ fn cc_industry_slot_h(g: cc_industry_Grid, d: vec4<f32>) -> f32 {
         return 0.0;
     }
     if (g.kind == cc_industry_K_BOX) {
+        // @domain: d is cc_industry_draw: a hash draw, in [0, 1)
         let t = min(1.0 + floor(pow(d.y, 0.8) * f32(g.tiers)), f32(g.tiers));
         return t * cc_industry_TIER;
     }
@@ -1210,10 +1211,12 @@ fn cc_industry_piles_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
             if (disc <= 0.0) {
                 continue;
             }
+            // @domain: the discriminant is tested positive (or non-negative) just above
             let t = (-b - sqrt(disc)) / a;
             if (t > max(t0, 1e-3) && t <= t1 && t < best.t) {
                 let p = o + t * dir;
                 if (p.z >= 0.0) {
+                    // @domain: the hit lies on the dome, never at its centre
                     let n = normalize((p - vec3<f32>(e.xy, 0.0))
                                       / (rad * rad));
                     best = CityHit(true, t, p, n, cc_industry_K_PILE, ci);
@@ -1435,6 +1438,7 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     for (var k: i32 = 0; k < nk; k = k + 1) {
         let f = city_flood(cc, k);
         if (f.on) {
+            // @domain: a lamp head in the air minus a point on a surface: never zero
             let l = normalize(f.head - p);
             let facing = min(max(dot(n, l), 0.0) / max(l.z, 0.2), 1.0);
             e = e + f.color * (city_flood_pool(f, p.xy) * facing);
@@ -1493,6 +1497,7 @@ fn cc_industry_glass_frac(hgt: f32) -> f32 {
 
 fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     let r = cc_industry_roof_of(cc);
+    // @domain: a wall's normal: |xy| = 1
     let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
     let uc = dot(h.pos.xy, vec2<f32>(-nh.y, nh.x));
     let v = h.pos.z - cc.height;
@@ -2411,6 +2416,7 @@ fn cc_industry_rubble(h: CityHit, cc: CityCell, fp: f32, cell: f32,
     let alb_mean = (0.15 * tint + vec3<f32>(0.100, 0.078, 0.062)) * 0.93;
     let k = smoothstep(0.5 * cell, 2.0 * cell, fp);
     let tilt = (r - 0.5) * 0.9 * (1.0 - k);
+    // @domain: a roof's normal (z = 1) plus a horizontal tilt
     let n = normalize(h.normal + vec3<f32>(tilt, 0.0));
     let frag = alb_frag * ((0.8 + 0.4 * r.y) * (0.35 + 0.65 * crack));
     return cc_industry_lit(cc, h.pos, n, mix(frag, alb_mean, k));

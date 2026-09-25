@@ -180,6 +180,7 @@ fn vs_main(
     if (part > PART_TAIL - 0.5) {
         let spread = 1.0 + bu.anim.z;
         p = vec3<f32>(p.x * spread, p.y, p.z);
+        // @domain: a unit normal scaled per axis by positive factors (spread >= 1)
         n = normalize(vec3<f32>(n.x / spread, n.y, n.z));
     }
 
@@ -230,6 +231,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let is_body = part < PART_ARM - 0.5;
 
     // Thin shells: orient the normal toward the viewer so both faces shade.
+    // @domain: a triangle's interpolated unit vertex normals: zero only if they cancel, which a smooth-shaded mesh's do not
     var n = normalize(in.normal);
     // The camera sits at the origin of this frame, so the vector to it is
     // just the negated interpolant — no differencing of world positions, and
@@ -252,6 +254,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let from_rachis = abs(chord - RACHIS_V);
     var shaft = 0.0;
     if (is_feather) {
+        // @domain: from_rachis is an abs: >= 0
         shaft = exp(-pow(from_rachis / 0.075, 2.0));
         albedo = albedo * (1.0 - 0.45 * shaft);
         // No two feathers are quite alike, and wear pales the outer primaries.
@@ -311,7 +314,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // surface. The rim is what stops a backlit bird from being a hole in the
     // sky: it is the single cue that says "solid body", and leaving it out is
     // why the first version of this read as a silhouette sticker.
-    let fresnel = pow(1.0 - max(dot(n, view), 0.0), 5.0);
+    let fresnel = pow(1.0 - clamp(dot(n, view), 0.0, 1.0), 5.0);
     let sheen = sky_rgb * (fresnel * bu.sky_rgb.w * ambient_strength);
     let behind = pow(max(dot(-view, sun), 0.0), 6.0);
     let rim = sun_rgb * (fresnel * behind * 0.030);
