@@ -541,3 +541,89 @@ GPU: NVIDIA GeForce RTX 5080 · output 2560x1440 · 16 frames/view · demo dycom
 | minimal | v4_overview_south | 320x180 | 1.481 | 675.4 |
 | minimal | v8_ocean_lod | 320x180 | 2.768 | 361.3 |
 
+
+## 2026-09-25 09:34 — 3fc2eea (start of the 2026-09-23/24 round) vs 0f0a1aa — the loadable big fields
+
+Thomas: "The 640 fields like cm1 were working on m1. Not expecting the 2048
+fields to be possible. But it would be nice to get those that are possible
+but slower to run better." Scope for this round: cloud output bit-identical.
+
+Method. Each revision on its own tree and hosts, timed by that tree's own
+tools/benchmarking/soar_frame_bench.py (960x540 output, 32 frames/view after 4
+warmup, ocean surface, z-crop on as the app does, per-preset lighting), run
+master / start-of-day / master-again (null) per field, all inside ONE
+tools/gpulock: stock clocks first, then the RTX 5080 locked to 180/405 MHz
+(the M1 proxy) under a trap that resets it. GPU allocations tallied by
+wrapping wgpu-native's create_texture on the tier's device. DYCOMS holds only
+SAM's QN, which the loader never infers (cloudyview/io.py), so it is loaded
+with liquid_water_var="QN" as --liquid-water-var does; with no variable named
+it is refused on both revisions ("Could not find liquid water variable ...
+Available variables: ['QN', 'W', 'p']"). No other field failed. Nulls within
+±4% at Low (sub-ms frames) and ±2.5% at High.
+
+The proxy does not emulate the M1's caches: the memory-heavy DYCOMS v1 view
+(the camera inside the deck) read ~2.5x worse on the real M1 than here
+(2026-09-23), so the big-field rows are the least trustworthy proxy rows.
+
+ms/frame, start -> master (master/start):
+
+| field (3D bytes) | tier | view | stock | proxy 180/405 | proxy/stock |
+|---|---|---|---|---|---|
+| TWPICE 256 (11 MiB) | high | v1 | 0.94 -> 0.93 (0.99) | 13.52 -> 13.97 (1.03) | 15.1x |
+| | high | v4 | 0.86 -> 0.86 (1.00) | 12.18 -> 12.38 (1.02) | 14.4x |
+| | high | v8 | 0.63 -> 0.63 (1.00) | 9.09 -> 8.97 (0.99) | 14.2x |
+| | low | v1/v4/v8 | 0.20/0.21/0.12 -> 0.20/0.19/0.13 | 2.92/2.87/1.36 -> 2.60/2.64/1.21 (0.89/0.92/0.89) | 13-14x |
+| TWPICE LPT 512 (116 MiB) | high | v1 | 1.35 -> 1.31 (0.97) | 20.27 -> 19.56 (0.97) | 14.9x |
+| | high | v4 | 3.10 -> 2.83 (0.91) | 45.39 -> 41.55 (0.92) | 14.7x |
+| | high | v8 | 1.53 -> 1.41 (0.92) | 23.48 -> 21.58 (0.92) | 15.3x |
+| | low | v1/v4/v8 | (0.93/0.85/0.89) | 2.39/4.71/4.29 -> 2.15/4.06/3.23 (0.90/0.86/0.75) | 13-15x |
+| CM1 RCE full (55 MiB) | high | v1 | 2.52 -> 2.34 (0.93) | 36.88 -> 35.11 (0.95) | 15.0x |
+| | high | v4 | 2.13 -> 1.73 (0.81) | 30.77 -> 25.86 (0.84) | 15.0x |
+| | high | v8 | 1.44 -> 1.19 (0.83) | 19.64 -> 17.62 (0.90) | 14.8x |
+| | low | v1/v4/v8 | (0.95/0.82/0.95) | 3.34/2.81/2.01 -> 3.13/2.18/1.66 (0.94/0.78/0.83) | 12-14x |
+| DYCOMS 640 (121 MiB) | high | v1 | 6.67 -> 5.99 (0.90) | 143.93 -> 124.38 (0.86) | 20.8x |
+| | high | v4 | 1.52 -> 1.42 (0.93) | 21.69 -> 21.27 (0.98) | 15.0x |
+| | high | v8 | 1.26 -> 1.19 (0.94) | 17.16 -> 17.47 (1.02) | 14.7x |
+| | low | v1/v4/v8 | (0.86/0.98/0.86) | 14.68/2.27/3.03 -> 13.53/2.11/2.63 (0.92/0.93/0.87) | 24.6x/13.5x/13.6x |
+
+Memory (the High tier's device, both revisions measured): the field's 3D
+textures — r16float density plus the /2 sun-tau cache, with no bricks or
+sky-probe volume — are 11 / 116 / 55 / 121 MiB. The 2D side (render and
+surface targets, the sea) is 22 MiB at the start of the day and 105 MiB on
+master, the difference being the moving sea's 256x256x128 rgba16float
+9-mip array (85 MiB), which every ocean scene carries whatever the field. The
+largest total is DYCOMS at 226 MiB: memory is not the wall for any field
+that loads, on an 8 GB M1 or otherwise. Light-cache bakes (per sun change,
+not per frame): 16-20 ms at High stock, 50-65 ms at the proxy.
+
+Reading. The round made the big fields 5-25% faster at the M1 proxy and
+cost none of them anything outside the null (the largest: CM1 v4 -16% High /
+-22% Low, DYCOMS v1 -14%, TWPICE 512 -8%). The proxy/stock ratio is ~14.7x
+for every row but one: the ratio of the graphics clocks (2640/180), not of the
+memory clocks (37x), so these marches are bound by instruction latency and
+count, and they scale with the number of steps a ray takes, which a finer
+grid multiplies by design (dt = voxel x step factor). The exception is DYCOMS
+v1 from inside the deck, at 21-25x, the one view that is partly
+bandwidth-bound, and the one the real M1 punishes a further 2.5x. At the
+app's 2560x1440 High, that view is on the order of a second a frame on the
+M1, which is Thomas's "basically impossible".
+
+Levers, within bit-identical cloud output, ranked:
+
+1. None measured that would move the big fields materially. What costs them
+   is the step count, and the step is fixed by this round's scope.
+2. Empty-space skipping of any kind: four attempts, all slower (raymarch.wgsl
+   EMPTY-SPACE note); for these fields the bench says latency-bound, which is
+   exactly the regime where they lost. Not recommended.
+3. Per-step instruction trimming in fs_main (sample addressing, level
+   selection on single-level fields): bit-identical in principle, but the day's
+   record is that fs_main's register allocation, not its instruction count,
+   decides these, and small edits have moved it both ways. Unknown gain,
+   probably under 5%.
+4. The light cache: a per-sun-change cost of 16-65 ms, not per frame.
+
+Outside this round's scope, for the record: what would move them is the
+march step at distance in degrees rather than metres (the view-step LOD the
+slider already carries, defaulted up for fine fields); for DYCOMS v1
+specifically, a narrower density format (r8unorm halves its bandwidth). Both
+change the picture.

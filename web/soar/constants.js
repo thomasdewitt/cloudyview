@@ -566,21 +566,37 @@ export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // the full desert at Medium and above, "a simplified but convincing desert"
 // at Low and Minimal. soar_host.DESERT_LITE_TIERS is the Python twin.
 export const DESERT_LITE_TIERS = ["low", "minimal"];
+// The finest pixel the full desert can render: its refine stage walks the
+// plants out to DESERT_FLORA_REFINE_FP_M / pixel angle, which must lie
+// inside the explicit walk's cell budget, DF_EXPLICIT_MAX_T (raymarch.wgsl;
+// 0.025 m / (0.65 * 96 * 16 m)). soar_host.DESERT_MIN_PIXEL_TAN is the
+// Python twin (tests/test_desert_pixel_limit.py pins both to the shader).
+export const DESERT_MIN_PIXEL_TAN = 0.025 / (0.65 * 96 * 16.0);
 // The surface stages each traced surface runs before the march, in order:
 // raymarch.wgsl fragment entries, each after the first reading the one
 // before, the last writing the surface the march reads. The city: its
 // boxes, the facade shell (fs_surface_refine), the street
-// (fs_surface_street). The desert: its ground, then its near plants
-// (fs_surface_refine). soar_host.SURFACE_STAGES is the Python twin (pinned
-// by tests/test_surface_stages.py); renderer.js derives the rest from it.
+// (fs_surface_street). The desert: its ground (fs_surface_desert, with the
+// optical depths it lit it with, TAUS_STAGE), the explicit plants' far
+// forms and the far cover (fs_surface_flora, their walk kept out of the
+// ground's registers), then its near plants (fs_surface_refine). soar_host.SURFACE_STAGES is the
+// Python twin (pinned by tests/test_surface_stages.py); renderer.js derives
+// the rest from it.
 export const SURFACE_STAGES = {
   city: ["fs_surface", "fs_surface_refine", "fs_surface_street"],
-  desert: ["fs_surface", "fs_surface_refine"],
+  desert: ["fs_surface_desert", "fs_surface_flora", "fs_surface_refine"],
 };
-// Under DESERT_LITE the desert's later stages are compiled out and skipped.
+// Under DESERT_LITE the desert's later stages are compiled out and skipped,
+// and its one stage is the shared first stage.
 export const SURFACE_STAGES_LITE = ["fs_surface"];
 // The stages that also write the veil, a second attachment.
 export const VEIL_STAGES = ["fs_surface", "fs_surface_street"];
+// The full desert's first stage writes, in the veil's place, the optical
+// depths it lit its ground with (raymarch.wgsl fs_surface_desert), which
+// its flora stage reads at group 1 binding 3. soar_host.TAUS_STAGE and
+// TAUS_READER are the Python twins.
+export const TAUS_STAGE = "fs_surface_desert";
+export const TAUS_READER = "fs_surface_flora";
 // How far out the desert's full tiers walk the explicit shrubs before their
 // decals take over (raymarch.wgsl DESERT_FLORA_CUT, a compile-time scale on
 // the shrubs' grazing cut, df_small_cut): Medium walks them about half as far

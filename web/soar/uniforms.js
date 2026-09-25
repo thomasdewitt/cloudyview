@@ -107,6 +107,9 @@ export function packUniforms(state, view) {
   const {
     camera, outputSize, renderSize,
     jitter = true,
+    // The simplified desert (DESERT_LITE), which walks no flora and so
+    // has no finest pixel; see the check on pixelTan below.
+    desertLite = false,
     sunAzimuth = K.DEFAULT_SUN_AZIMUTH,
     sunElevation = K.DEFAULT_SUN_ELEVATION,
     exposure = K.DEFAULT_EXPOSURE,
@@ -298,6 +301,12 @@ export function packUniforms(state, view) {
   // where the return genuinely ends. An exact 0 stays 0 — the "LOD off,
   // fixed dt" sentinel, unreachable from the slider.
   const pixelTan = 2.0 * tanHalfFov / w;
+  if (desert && !desertLite && pixelTan < K.DESERT_MIN_PIXEL_TAN) {
+    throw new Error(`a pixel of ${pixelTan.toPrecision(3)} rad is finer ` +
+                    "than the desert's flora can walk to " +
+                    `(${K.DESERT_MIN_PIXEL_TAN.toPrecision(3)}): widen the ` +
+                    "field of view or lower the render width.");
+  }
   let viewStepTan = Math.tan(viewStepLodDegrees * DEG);
   if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, 0.25 * pixelTan);
   row(20, periodic ? 1.0 : 0.0,
