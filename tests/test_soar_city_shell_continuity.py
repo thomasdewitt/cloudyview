@@ -9,8 +9,9 @@ sweeps the render width instead: at the view-step LOD 0 the pixel angle is
 inversely proportional to the width, so the walls in frame walk through the
 hand-off with the geometry, the occlusion and every hash draw fixed.
 
-The flat facade's own window ladder also changes with the footprint (panes
-into blocks into its asymptote), so the width dependence of the full render
+The flat facade's own look also changes with the footprint (each pane
+filtered at the pixel, then storey by storey in expectation, then the
+building's mean), so the width dependence of the full render
 is not the shell's alone. The same sweep is therefore rendered twice, once
 as shipped and once with nothing marked for the shell (the flat facade
 everywhere), and what is bounded is how much the difference between the two
@@ -19,15 +20,17 @@ its flat twin would leave that difference constant: the near field keeps its
 own look (it is meant to differ), and what must not move is the look where
 the shell hands over.
 
-Measured (2026-09-24, 32 frames), worst region step of (shell - flat)
-between adjacent widths: 0.0077, 0.0074 and 0.0068 for the three views;
-with the resolved shell forced to half brightness (a mismatch of the kind
-this guards) 0.0147, 0.0122 and 0.0157, and before the flat facade carried the
-recess's occlusion (18252f9) 0.0243 on the curtain flight. The views are the
-ones where such mismatches show: an oblique walk-up face, a canyon from
-150 m up, and a flight along a curtain wall. The test refuses to pass
-vacuously: at the narrowest width, where the shell's reach is shortest, the
-plain pass must still have marked a real share of the frame for it.
+Measured (2026-09-25, 32 frames, on the flat facade that averages its
+windows as shown, city_windows_seen), worst region step of (shell - flat)
+between adjacent widths: 0.0053, 0.0071 and 0.0075 for the walk-up, the
+canyon and the curtain wall; with the resolved shell forced to half
+brightness (a mismatch of the kind this guards) 0.0103, 0.0131 and 0.0158.
+The walk-up and the curtain wall
+are found by building type in the city itself (TYPED_VIEWS), so a change of
+massing moves them with it; the canyon is a fixed camera. The test refuses
+to pass vacuously: at the narrowest width, where the shell's reach is
+shortest, the plain pass must still have marked a real share of the frame
+for it.
 
 A second test checks the hand-off itself, pixel for pixel, where the blend
 has reached 1: a mismatch there is a line, not a band, and the sweep's
@@ -65,26 +68,55 @@ MARK = """    let near = city_shell_on_wall(chit, t_lim)
 # Tile-frame cameras on the TWP-ICE harness city: (x, y, z, azimuth,
 # elevation, fov). World = tile + TILE_OFFSET for this field.
 TILE_OFFSET = (75330.0, -17010.0)
-VIEWS = {
-    "walkup_oblique": (21380.0, 70540.0, 14.0, 35.0, 3.0, 60.0),
-    "canyon_150m": (17300.0, 72700.0, 150.0, 10.0, -12.0, 50.0),
-    "curtain_flyby": (19900.0, 69836.5, 20.0, 80.0, 2.0, 70.0),
+VIEW_NAMES = ("walkup_oblique", "canyon_150m", "curtain_flyby")
+# A canyon from 150 m up: it looks down a street between blocks, which any
+# massing has, so it stays a fixed camera.
+CANYON_150M = (17300.0, 72700.0, 150.0, 10.0, -12.0, 50.0)
+# The other two are pinned to a BUILDING, found by type in the city itself
+# (_find_views), so a change of massing moves the camera with it. Each looks
+# at the building's south face (its tier-0 box's min-y side) from a range
+# inside the hand-off's (CITY_SHELL_FP_FLAT over the pixel angle, at a
+# 60 degree field of view: 375 m at the narrowest width, 1330 m at the
+# widest), off its normal, so the sweep carries the face through the
+# hand-off at a slant. The face need only fill one of the sweep's regions.
+TYPED_VIEWS = {
+    # name: (window style, land use, (min height, max height), min face
+    #        width, range (m), angle off the face normal (deg), camera z as
+    #        a share of the building's height (+ m), fov)
+    "curtain_flyby": (3, 0, (120.0, 400.0), 40.0, 700.0, 50.0, (0.35, 0.0),
+                      60.0),
+    "walkup_oblique": (4, 0, (18.0, 66.0), 30.0, 500.0, 30.0, (1.5, 0.0),
+                       60.0),
 }
+# Where to look for them: a top-down probe over the dense city.
+SEARCH_CENTRE = (19500.0, 71000.0)
+SEARCH_ALT = 4000.0
+SEARCH_FOV = 60.0
+SEARCH_PX = 768
+# The candidate whose own walls fill the most of its view is taken, and at
+# least this share (the camera must see what it was put there for).
+MIN_TARGET_SHARE = 0.005
+MAX_CANDIDATES = 60
 # The widths every tier renders at lie within these (minimal renders 320).
 WIDTHS = (1280, 960, 720, 480, 360)
 FRAMES = 32
 GRID = (8, 4)
-MAX_STEP = 0.010
+# Per view, between what the branch measures and what its controls do (see
+# the module docstring), so every control fails every view.
+MAX_STEP = {"walkup_oblique": 0.0075, "canyon_150m": 0.0100,
+            "curtain_flyby": 0.0110}
 MIN_MARKED = 0.05
 # The direct check at the hand-off: pixels whose footprint lies in this band
 # are blended at least 0.98 into the flat facade, so there the shell's render
 # must equal the flat one, pixel for pixel. Pooled over the sweep's widths.
-# Measured (2026-09-24): mean |shell - flat| 0.00068, 0.00019 and 0.00064;
-# with the flat twin read at the wrong point on the wall (the recess offset
-# applied twice, as 2d8a5a0 did) 0.00125, 0.00160 and 0.00130.
+# Measured (2026-09-25): mean |shell - flat| 0.00079, 0.00037 and 0.00068;
+# with the flat twin read at the hit's straight-in projection onto the wall
+# (the recess offset applied twice, as 2d8a5a0 did) 0.00358, 0.00083 and
+# 0.00191.
 HANDOFF_FP = (1.15, 1.20)
 HANDOFF_MIN_PIXELS = 1000
-MAX_HANDOFF_ABS = 0.0010
+MAX_HANDOFF_ABS = {"walkup_oblique": 0.0015, "canyon_150m": 0.00060,
+                   "curtain_flyby": 0.0012}
 
 
 @pytest.fixture(scope="module")
@@ -118,7 +150,136 @@ def city():
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,
         surface="city")
-    return renderers, state
+    views = _find_views(level, state)
+    return renderers, state, views
+
+
+# The plain pass as a probe: it writes each hit's building (its tier-0 box,
+# window style, land use and whether it is built) in place of the colour.
+# Two targets' worth, so two variants.
+PROBE_ANCHOR = "    let t_lim = min(select(1e30, chit.t, chit.hit),"
+PROBES = (
+    """    if (chit.hit) {
+        let pc = city_cell(chit.cell);
+        return vec4<f32>(pc.b1min.x, pc.b1min.y, pc.b1max.x, chit.t);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+""",
+    """    if (chit.hit) {
+        let pc = city_cell(chit.cell);
+        return vec4<f32>(pc.b1max.y, pc.b1max.z,
+                         f32(pc.win_style) + 10.0 * f32(pc.land_use)
+                         + select(0.0, 100.0, pc.built), chit.t);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+""")
+
+
+def _probe_renderers(level):
+    from cloudyview.soar_host import SoarRenderer
+    source = SHADER.read_text()
+    assert source.count(PROBE_ANCHOR) == 1, (
+        "the plain pass's probe anchor moved; update PROBE_ANCHOR")
+    out = []
+    for probe in PROBES:
+        r = SoarRenderer(periodic=True, surface="city",
+                         shader_source=source.replace(
+                             PROBE_ANCHOR, probe + PROBE_ANCHOR))
+        r.upload_volume(level.sigma)
+        out.append(r)
+    return out
+
+
+def _probe(renderers, state, cam, w, h):
+    """Per pixel: (b1min.x, b1min.y, b1max.x, b1max.y, height, code, t)."""
+    from cloudyview.soar_host import ViewState
+    x, y, z, az, el, fov = cam
+    planes = []
+    for r in renderers:
+        view = ViewState(
+            camera_position=[x + TILE_OFFSET[0], y + TILE_OFFSET[1], z],
+            azimuth=az, elevation=el, fov=fov, output_size=(w, h),
+            render_size=(w, h), jitter=False, subpixel=False,
+            sun_azimuth=310.0, sun_elevation=22.0, exposure=6.0,
+            view_step_lod_degrees=0.0)
+        r.render(state, view, frames=1)
+        planes.append(_plain(r, w, h).view(np.float32))
+    a, b = planes
+    return np.stack([a[..., 0], a[..., 1], a[..., 2], b[..., 0], b[..., 1],
+                     b[..., 2], a[..., 3]], axis=-1)
+
+
+def _typed_camera(box, height, rng, off, zs, fov):
+    """A camera `rng` metres from the middle of the south face of the
+    building whose tier-0 box is (min x, min y, max x, max y), `off` degrees
+    west of the face's normal (east if negative), aimed at its middle."""
+    x0, y0, x1, _ = (float(v) for v in box)
+    cx, cz = 0.5 * (x0 + x1), 0.5 * float(height)
+    a = math.radians(off)
+    x, y = cx - rng * math.sin(a), y0 - rng * math.cos(a)
+    z = zs[0] * float(height) + zs[1]
+    el = math.degrees(math.atan2(cz - z, rng))
+    return (x, y, z, off, el, fov)
+
+
+def _inside_any(cam, boxes):
+    """Whether the camera stands in any building seen from above, or within
+    3 m of one (its relief): a trace starting inside a box does not see it,
+    so the probe would call the view clear."""
+    x, y, z = cam[:3]
+    for (x0, y0, x1, y1), (hgt, _) in boxes.items():
+        if (x0 - 3.0 <= x <= x1 + 3.0 and y0 - 3.0 <= y <= y1 + 3.0
+                and z <= hgt + 3.0):
+            return True
+    return False
+
+
+def _find_views(level, state):
+    """Pin the typed views to buildings of their type (TYPED_VIEWS)."""
+    probes = _probe_renderers(level)
+    top = _probe(probes, state, (SEARCH_CENTRE[0], SEARCH_CENTRE[1],
+                                 SEARCH_ALT, 0.0, -89.9, SEARCH_FOV),
+                 SEARCH_PX, SEARCH_PX)
+    hit = top[..., 6] > 0.0
+    boxes = {}
+    for px in top[hit]:
+        key = tuple(np.round(px[:4], 1))
+        boxes[key] = (float(px[4]), int(round(px[5])))
+    views = {"canyon_150m": CANYON_150M}
+    for name, (style, use, (h0, h1), width, rng, off, zs,
+               fov) in TYPED_VIEWS.items():
+        want = 100 + style + 10 * use
+        found = [(key, hgt) for key, (hgt, code) in boxes.items()
+                 if code == want and h0 <= hgt <= h1
+                 and key[2] - key[0] >= width]
+        if style == 3:
+            found.sort(key=lambda kh: (-kh[1], kh[0]))
+        else:
+            found.sort(key=lambda kh: (
+                (0.5 * (kh[0][0] + kh[0][2]) - SEARCH_CENTRE[0]) ** 2
+                + (0.5 * (kh[0][1] + kh[0][3]) - SEARCH_CENTRE[1]) ** 2,
+                kh[0]))
+        # Each candidate from west of the face's normal, east of it, and
+        # face on: the view where the building is seen best past whatever
+        # stands between (the first of equals, so the pick is stable).
+        best, best_share = None, MIN_TARGET_SHARE
+        for key, hgt in found[:MAX_CANDIDATES]:
+            for a in (off, -off, 0.0):
+                cam = _typed_camera(key, hgt, rng, a, zs, fov)
+                if _inside_any(cam, boxes):
+                    continue
+                seen = _probe(probes, state, cam, 320, 180)
+                mine = ((np.abs(seen[..., 0] - key[0]) < 0.1)
+                        & (np.abs(seen[..., 1] - key[1]) < 0.1)
+                        & (seen[..., 6] > 0.0))
+                if mine.mean() > best_share:
+                    best, best_share = cam, float(mine.mean())
+        if best is None:
+            raise AssertionError(
+                f"{name}: no building of its type ({len(found)} candidates) "
+                "fills its view; revisit TYPED_VIEWS or SEARCH_*")
+        views[name] = best
+    return views
 
 
 def _view(cam, width):
@@ -199,39 +360,13 @@ def _regions(r, state, cam, width):
                       for i in range(gx)] for j in range(gy)])
 
 
-# The skyline-spire massing (bigday/city-layout, 2026-09-24) moved the
-# buildings these tile-coordinate cameras look at: curtain_flyby now faces a
-# different, close curtain wall, and walkup_oblique measures a hair over its
-# bound. Whether that face exposes a real hand-off mismatch or the views
-# only need re-aiming is city-facades' to settle on bigday/city-lod, where
-# the views are re-aimed by building type and the bounds re-calibrated with
-# fresh negative controls. The measurements quoted in this module's
-# docstring are the pre-spire city's. Strict where the failure is clear
-# (curtain_flyby), so the exception cannot outlive its reason; not strict
-# for walkup_oblique's hand-off, which sits a hair over its bound (0.00101
-# against 0.001 on this box) and would pass — and fail strictly — on a GPU
-# that lands a hair under.
-_CITY_LOD = ("massing moved the view's buildings; re-aim by building type "
-             "and re-calibrate on bigday/city-lod (city-facades)")
-
-
-def _xfail_on(strict, lax=()):
-    unknown = (set(strict) | set(lax)) - set(VIEWS)
-    if unknown:
-        raise ValueError(f"no such shell views: {sorted(unknown)}")
-    def mark(v):
-        if v in strict or v in lax:
-            return pytest.param(v, marks=pytest.mark.xfail(
-                strict=v in strict, reason=_CITY_LOD))
-        return v
-    return [mark(v) for v in VIEWS]
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("view_name", _xfail_on({"curtain_flyby"}))
+@pytest.mark.parametrize("view_name", VIEW_NAMES)
 def test_shell_hand_off_is_continuous(view_name, city):
-    renderers, state = city
-    cam = VIEWS[view_name]
+    renderers, state, views = city
+    cam = views[view_name]
     diff = []
     for width in WIDTHS:
         shell = _regions(renderers["shell"], state, cam, width)
@@ -243,14 +378,14 @@ def test_shell_hand_off_is_continuous(view_name, city):
                 "the shell; the view no longer exercises the hand-off")
         diff.append(shell - _regions(renderers["flat"], state, cam, width))
     step = float(np.abs(np.diff(np.array(diff), axis=0)).max())
-    assert step <= MAX_STEP, (
+    bound = MAX_STEP[view_name]
+    assert step <= bound, (
         f"{view_name}: the shell's difference from the flat facade moved "
-        f"{step:.4f} in a region between adjacent widths (bound {MAX_STEP})")
+        f"{step:.4f} in a region between adjacent widths (bound {bound})")
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("view_name",
-                         _xfail_on({"curtain_flyby"}, lax={"walkup_oblique"}))
+@pytest.mark.parametrize("view_name", VIEW_NAMES)
 def test_shell_equals_flat_where_it_hands_off(view_name, city):
     """Where the blend reaches 1, the shell's pixel IS the flat facade's.
 
@@ -260,8 +395,8 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
     where the shell kept the plain pass's surface count: a nearer piece of
     relief standing in front of a far wall is meant to differ.
     """
-    renderers, state = city
-    cam = VIEWS[view_name]
+    renderers, state, views = city
+    cam = views[view_name]
     diffs = []
     for width in WIDTHS:
         shell = _shown(renderers["shell"], state, cam, width)
@@ -278,6 +413,7 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
     assert d.size >= HANDOFF_MIN_PIXELS, (
         f"{view_name}: only {d.size} pixels at the hand-off")
     mean_abs = float(np.abs(d).mean())
-    assert mean_abs <= MAX_HANDOFF_ABS, (
+    bound = MAX_HANDOFF_ABS[view_name]
+    assert mean_abs <= bound, (
         f"{view_name}: at the hand-off the shell differs from the flat "
-        f"facade by {mean_abs:.5f} on average (bound {MAX_HANDOFF_ABS})")
+        f"facade by {mean_abs:.5f} on average (bound {bound})")

@@ -12,8 +12,10 @@
 // a multiplier above 1 and so read as emission through the same interface.
 //
 // LOD is the whole discipline here. These glyphs are sub-window detail:
-// they must be gone before the core's window->block dissolve even starts
-// (CITY_WIN_LOD_START, fp_eff 1.6 m/px). Each case blends to its OWN mean
+// they must be gone by the time a pixel holds more than a window (the
+// core's facade then sums whole windows through this hook at the pixel's
+// footprint, and past a few of them uses cc_windowlife_glyph_mean). Each
+// case blends to its OWN mean
 // transmission over a footprint window sized to that case's FINEST feature,
 // not to the pane — a blind's 0.4 m stripe and an android's 5 cm eye alias
 // long before a curtain's edge does, so they die sooner. Past its window a
@@ -51,7 +53,9 @@ const cc_windowlife_EYE_SEP: f32 = 0.028;   // half-separation, pane widths
 const cc_windowlife_EYE_SIGMA: f32 = 0.0060; // ~0.02 pane: a point, not a lamp
 
 // Footprint windows (m/px) over which each case blends into its mean. Set
-// by the case's finest feature, all of them closed before fp_eff 1.6.
+// by the case's finest feature, all of them closed by a footprint of about
+// a pane (1.6 m); past it the flat facade's exact sum shows each pane at
+// its case's mean.
 const cc_windowlife_LOD_CURTAIN: vec2<f32> = vec2<f32>(0.40, 1.50);
 const cc_windowlife_LOD_BLIND: vec2<f32> = vec2<f32>(0.18, 0.60);
 const cc_windowlife_LOD_FIGURE: vec2<f32> = vec2<f32>(0.30, 1.20);
@@ -249,6 +253,20 @@ fn cc_windowlife_figure(h: vec4<f32>, uv: vec2<f32>, fp: f32,
 // in the room, so it takes the uv where the ray crosses the occupant's
 // plane (deep_uv) — which is what slides them against each other as the
 // camera moves past a close window. On a flat facade the two are equal.
+// The glyph's population mean, for a facade whose windows are too small to
+// draw one by one (the core's storey-by-storey expectation,
+// city_windows_rows): h.x picks the class
+// (uniform, the hash decorrelates it from wh), and each class dissolves to
+// its own mean. 60% plain; 25% drapes, of which 55% curtains and 45% blinds;
+// 15% figures and androids, which share the figure's mean.
+fn cc_windowlife_glyph_mean() -> vec3<f32> {
+    let drape = 0.55 * cc_windowlife_CURTAIN_MEAN
+                + 0.45 * cc_windowlife_BLIND_MEAN;
+    return cc_windowlife_T_DRAPE * vec3<f32>(1.0)
+           + (cc_windowlife_T_FIGURE - cc_windowlife_T_DRAPE) * drape
+           + (1.0 - cc_windowlife_T_FIGURE) * cc_windowlife_FIGURE_MEAN;
+}
+
 fn cc_windowlife_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
                        deep_uv: vec2<f32>, fp: f32) -> vec3<f32> {
     let h = cc_windowlife_hash(wh);

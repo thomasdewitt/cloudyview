@@ -5,7 +5,8 @@
    "file": "windowlife.wgsl",
    "name": "windowlife",
    "hooks": {
-    "window_glyph": "cc_windowlife_glyph"
+    "window_glyph": "cc_windowlife_glyph",
+    "window_glyph_mean": "cc_windowlife_glyph_mean"
    },
    "enabled": true
   },

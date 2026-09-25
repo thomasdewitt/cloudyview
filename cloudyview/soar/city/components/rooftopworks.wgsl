@@ -30,7 +30,7 @@
 //      line, sometimes doubled), vent stacks (1 x 1 x 5 m, in pairs). Dark:
 //      their whole job at distance is silhouette. ~30% carry one warm
 //      service lamp — a bulkhead light on the housing, radiance 2 — which is
-//      what puts a few sparks up on the roofs above the window ladder.
+//      what puts a few sparks up on the roofs above the core's windows.
 //   2. PARAPET. A real low wall around the top deck of ~55% of buildings
 //      (the core only fakes one by brightening the roof albedo near the
 //      edge), and on ~12% of roofs overall a strip of light along its
@@ -160,8 +160,8 @@ const cc_rooftopworks_PENT_PITCH: f32 = 2.10;  // mullion pitch (m)
 const cc_rooftopworks_PENT_MULL: f32 = 0.13;   // dark fraction of the pitch
 const cc_rooftopworks_PENT_SILL: f32 = 0.80;   // dark spandrel at its foot
 const cc_rooftopworks_PENT_LIT: f32 = 0.58;    // bays with the light on
-// Tone-map compensation on the far-field means, the same correction the
-// core applies to its own window octaves (CITY_MEAN_COMP_BLOCK/_FLAT): a
+// Tone-map compensation on the far-field means (the core's facade now
+// averages in display space instead, city_windows_seen): a
 // mean taken in linear radiance ahead of a Reinhard curve renders CREAM,
 // because a lit bay at 1.8 is already near the knee and its average is not.
 // Solved rather than guessed: match tone(mean * E) to lit_frac * tone(B * E)
@@ -898,7 +898,7 @@ fn cc_rooftopworks_dark(h: CityHit, albedo: f32) -> vec3<f32> {
 // The house colour, where the building has one; cool white otherwise.
 fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     if (cc.win_mono >= 0.0) {
-        return city_window_color(cc.win_mono, cc.palette_bias);
+        return city_room_color(cc.win_mono, cc.palette_bias);
     }
     return cc_rooftopworks_TRIM_COOL;
 }
@@ -982,7 +982,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                     * cc_rooftopworks_PENT_MEAN_COMP, k);
         var col = cc_rooftopworks_PENT_COL;
         if (cc.win_mono >= 0.0) {
-            col = city_window_color(cc.win_mono, cc.palette_bias);
+            col = city_room_color(cc.win_mono, cc.palette_bias);
         }
         return cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO)
              + col * (cc_rooftopworks_PENT_RAD * m * sill);

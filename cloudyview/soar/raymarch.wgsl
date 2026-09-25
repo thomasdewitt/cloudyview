@@ -3153,31 +3153,18 @@ const CITY_WIN_U_LO: f32 = 0.14;    // pane bounds within the pitch cell
 const CITY_WIN_U_HI: f32 = 0.86;
 const CITY_WIN_V_LO: f32 = 0.28;
 const CITY_WIN_V_HI: f32 = 0.90;
-const CITY_PANE_FRAC: f32 = 0.446;  // (U_HI-U_LO)*(V_HI-V_LO), for the mean
-const CITY_DARK_FLOOR_FRAC: f32 = 0.10; // whole storeys gone dark
-const CITY_WIN_RADIANCE: f32 = 3.5;
-// Mean of the palette draw below, for the far-field facade average.
+const CITY_DARK_FLOOR_FRAC: f32 = 0.04; // whole storeys gone dark
+// A lit room's radiance through its pane, before the per-window brightness
+// draw (0.25 + 5 w^7, mean CITY_WIN_BRIGHT_MEAN): THE knob for how bright
+// the city's windows are, near and far alike (the far facade averages the
+// same windows). Held where a typical pane does not clip to white at the
+// night exposure, so rooms keep their colour.
+const CITY_ROOM_RADIANCE: f32 = 2.4;
+// The city's window light in one warm colour, for what glows with it (the
+// lamps' and the rooms' spill on props, reflections, rooftops).
 const CITY_PALETTE_MEAN: vec3<f32> = vec3<f32>(1.0, 0.55, 0.25);
 const CITY_WIN_BRIGHT_MEAN: f32 = 0.875; // E[0.25 + 5 w^7]
-// Tone-map compensation per far-field octave. Each LOD average is taken in
-// linear radiance, but the display transform is compressive: a few blazing
-// windows tone-map to little more than their dim neighbours, so an
-// uncompensated mean reads far brighter than the resolved facade it
-// replaces — mid-distance towers rendered cream-white. The right number is
-// the ratio <T(E)>/T(<E>) of the population inside the footprint, which
-// grows toward 1 as the octave's own variance hands the clipping down to
-// it: the block octave keeps bright members (heavy compensation), the flat
-// asymptote keeps none (mild).
-const CITY_MEAN_COMP_BLOCK: f32 = 0.13;
-const CITY_MEAN_COMP_FLAT: f32 = 0.07;
-// Where blocks dissolve into the flat asymptote (m of pixel footprint;
-// the window->block hand-off is CITY_WIN_LOD_*).
-const CITY_BLOCK_LOD_START: f32 = 9.0;
-const CITY_BLOCK_LOD_FULL: f32 = 30.0;
-// Facade LOD: pixel footprint (m) where the window grid starts and finishes
-// dissolving into the facade average.
-const CITY_WIN_LOD_START: f32 = 1.6;
-const CITY_WIN_LOD_FULL: f32 = 6.5;
+
 // Streets.
 const CITY_LAMP_SPACING: f32 = 26.0;
 const CITY_LAMP_OFFSET: f32 = 2.5;   // lamp line inset from the block edge
@@ -3267,7 +3254,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 // cloudyview/soar/city/components/, each owning one kind of thing (a street
 // prop, a facade layer, an elevated highway), registered in registry.json
 // and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls nine hooks; the composer generates their
+// markers below. The core calls ten hooks; the composer generates their
 // dispatchers over whatever is registered, and when nothing is, the
 // defaults below make every hook a no-op — except the shade dispatcher,
 // which returns magenta, because an unclaimed hit kind is a bug and should
@@ -3287,7 +3274,7 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //   cc_component_shade   radiance at a component hit (kind >= 100; each
 //                        component owns kind_base .. kind_base+15).
 //   cc_facade_detail     additive facade emission (balconies, signage,
-//                        fire escapes) on top of the window ladder.
+//                        fire escapes) on top of the core's windows.
 //   cc_facade_cover      how much of the wall at a point a component's
 //                        panel covers (0..1): covered wall shows no
 //                        windows and, up close, no shell relief — the panel
@@ -3297,6 +3284,8 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //                        window exactly as it was. Two uvs: the glass, and
 //                        where the ray crosses the occupant's plane inside
 //                        the room (the same point on a flat facade).
+//   cc_window_glyph_mean the glyph's mean over all lit windows, for a
+//                        facade seen too small to sum window by window.
 //   cc_media             participating media in front of the city (manhole
 //                        steam): in-scattered radiance and transmittance
 //                        over the view ray up to the city hit, applied as
@@ -3470,7 +3459,6 @@ struct CityCell {
     win_style: i32,
     win_pitch: f32,
     pane_lo: vec2<f32>, pane_hi: vec2<f32>,
-    pane_frac: f32,
     // Monochrome house palette: below 0 the building draws window colors
     // freely; at or above 0 it is THE cyan (or amber, or magenta) tower —
     // every window draws near this one palette coordinate.
@@ -3629,8 +3617,6 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.win_pitch = 3.2 * (0.85 + 0.40 * r4b.z);
         c.pane_lo = vec2<f32>(0.30, 0.45);
         c.pane_hi = vec2<f32>(0.70, 0.80);
-        let span_p = c.pane_hi - c.pane_lo;
-        c.pane_frac = span_p.x * span_p.y;
         c.win_mono = -1.0;
         c.palette_bias = min(c.palette_bias * 1.4 + 0.1, 1.0);
         c.lit_frac = CITY_INDUSTRY_LIT_FRAC * (0.3 + 1.4 * r4c.x);
@@ -3956,8 +3942,6 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.pane_lo = vec2<f32>(0.14, 0.28);
         c.pane_hi = vec2<f32>(0.86, 0.90);
     }
-    let pane_span = c.pane_hi - c.pane_lo;
-    c.pane_frac = pane_span.x * pane_span.y;
     // A fifth of buildings keep a house color: every window draws near one
     // palette coordinate, so a tower can be THE cyan tower — the color
     // balance is a property of the building, not only of the window
@@ -4334,6 +4318,46 @@ fn city_window_color(draw: f32, bias: f32) -> vec3<f32> {
         return vec3<f32>(0.15, 0.95, 0.85);       // cyan neon
     }
     return vec3<f32>(1.00, 0.25, 0.55);           // magenta neon
+}
+
+// A lit room's colour: what the light inside a window is. Incandescent and
+// sodium interiors dominate a city's night; warm LED, cool fluorescent and
+// the odd neon are the few. The building's palette_bias leans the warm share
+// (a mixed house draws freely; city_window keeps a monochrome house near its
+// one draw). Its mean is about (0.97, 0.59, 0.32). Signs, storefronts and other lit
+// dressing draw from city_window_color instead.
+fn city_room_color(draw: f32, bias: f32) -> vec3<f32> {
+    for (var k: i32 = 0; k < 5; k = k + 1) {
+        if (draw < city_room_band_edge(k, bias)) {
+            return city_room_band_colour(k);
+        }
+    }
+    return city_room_band_colour(5);
+}
+
+// The palette's bands: band k is drawn below its upper edge and at or
+// above the one before; the last runs to 1.
+fn city_room_band_edge(k: i32, bias: f32) -> f32 {
+    let cut = 0.60 + 0.20 * (bias - 0.5);
+    switch k {
+        case 0: { return cut; }
+        case 1: { return cut + 0.22; }
+        case 2: { return cut + 0.32; }
+        case 3: { return cut + 0.36; }
+        case 4: { return cut + 0.38; }
+        default: { return 1e9; }
+    }
+}
+
+fn city_room_band_colour(k: i32) -> vec3<f32> {
+    switch k {
+        case 0: { return vec3<f32>(1.0, 0.58, 0.26); }    // tungsten
+        case 1: { return vec3<f32>(1.0, 0.45, 0.14); }    // amber / sodium
+        case 2: { return vec3<f32>(0.95, 0.82, 0.62); }   // warm LED
+        case 3: { return vec3<f32>(0.75, 0.85, 1.00); }   // fluorescent
+        case 4: { return vec3<f32>(0.15, 0.95, 0.85); }   // cyan neon
+        default: { return vec3<f32>(1.00, 0.25, 0.55); } // magenta neon
+    }
 }
 
 // Streetlight pools on the asphalt around block edges. Evaluated for the
@@ -5669,7 +5693,11 @@ fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
 // the hit (m/px): the analytic LOD that dissolves windows and lamp pools
 // into their means once they are sub-pixel, so the far city is smooth
 // glow rather than shimmer.
-fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
+// fp is the footprint the city's LOD runs on; fp_filter the true pixel's
+// (or a reflection lobe's), which a surface's texture is filtered over;
+// direct false for a surface seen in a reflection.
+fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32, fp_filter: f32,
+              direct: bool) -> vec3<f32> {
     let moon = u.sun_dir.xyz;
     let cc = city_cell(h.cell);
     let local_glow = city_glow_sample(h.pos.xy, 3.0);
@@ -5712,7 +5740,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32) -> vec3<f32> {
     }
     if (h.kind == 1) {   // facade, flat: past the shell's reach
         let f = city_face_at(cc, h.pos, h.normal);
-        return city_facade_flat(cc, f, h, dir, fp, fill);
+        return city_facade_flat(cc, f, h, dir, fp, fp_filter, direct, fill);
     }
 
     // Ground: the street surface (see THE STREET SURFACE above).
@@ -5742,6 +5770,15 @@ fn city_fog_trans(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
 
 fn city_fog(radiance: vec3<f32>, o: vec3<f32>, dir: vec3<f32>,
             t_hit: f32, hit_pos: vec3<f32>) -> vec3<f32> {
+    let ab = city_fog_ab(o, dir, t_hit, hit_pos);
+    return radiance * ab.x + ab.yzw;
+}
+
+// The fog as the affine map it is on the surface's radiance: fogged =
+// radiance * x + yzw (transmittance, in-scatter). The flat facade needs it
+// to average what the eye is shown rather than what the wall emits.
+fn city_fog_ab(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
+               hit_pos: vec3<f32>) -> vec4<f32> {
     let ftrans = city_fog_trans(o, dir, t_hit, hit_pos);
     let mid = mix(o.xy, hit_pos.xy, 0.6);
     // @domain: t_hit >= 0
@@ -5751,7 +5788,7 @@ fn city_fog(radiance: vec3<f32>, o: vec3<f32>, dir: vec3<f32>,
     let glow = min(city_glow_sample(mid, lod), 1.2);
     let in_scatter = (1.0 - ftrans)
         * (CITY_FOG_GLOW * (CITY_FOG_GLOW_AMP * glow) + CITY_FOG_BASE);
-    return radiance * ftrans + in_scatter;
+    return vec4<f32>(ftrans, in_scatter);
 }
 
 // Downward twin of sky_probe_transmittance: the optical depth between a
@@ -5887,8 +5924,7 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
 // plain footprint CITY_SHELL_FP_MORPH -> CITY_SHELL_FP_FLAT (city_shell_scale),
 // and the shading blends into the flat facade's, read where the ray crosses
 // the wall plane, over CITY_SHELL_FP_BLEND -> FLAT on the same footprint.
-// Where a grazing wall reaches the flat facade's pane dissolve first, the
-// shell's glass fades its reflection as the flat facade's does. The recess
+// The recess
 // keeps its true depth at every footprint, and the flat facade sees its
 // glass through the opening (city_recess_off), so at the hand-off the
 // resolved shell IS the flat facade: same point, same glass, same
@@ -6116,15 +6152,6 @@ fn city_face_covered(cc: CityCell, f: CityFace, uu: f32, v: f32,
     return cc_facade_cover(cc, hw, uu, v, fp) > 0.5;
 }
 
-// The share of the face's length its bays cover: the window mean over the
-// whole face is the per-bay mean times this.
-fn city_face_bay_frac(f: CityFace) -> f32 {
-    if (!f.aligned) {
-        return 1.0;
-    }
-    return f32(f.nbays) * f.pitch / max(f.len, 1e-3);
-}
-
 // The bay cell holding face-local (u, v). iu runs 0..nbays-1 over the bays,
 // with -1 and nbays for the two corner strips; ca is the cell's u start.
 struct CityBay {
@@ -6166,35 +6193,78 @@ struct CityWin {
     wh: vec4<f32>,
 }
 
+// The threshold a window's lit draw on storey iv is held to: its unit is lit
+// when the draw falls under it. The storey's own draw decides the rate: a
+// few storeys dark, the rest at an occupancy of their own around the
+// building's, which is what gives a far tower its floors without making
+// them stripes. Whole floors switched on or off (as curtain walls once were)
+// read as zebra bands at range, and real towers show mostly scattered rooms
+// with some floor-wide structure.
+
+// The style's rate against the building's lit_frac: a ribbon's paired bays
+// and a strip's column runs switch in larger units, and an office floor
+// plate burns more of its glass.
+fn city_style_rate(cc: CityCell) -> f32 {
+    return select(select(select(1.0, 1.32, cc.win_style == 3),
+                         1.10, cc.win_style == 2),
+                  1.15, cc.win_style == 1);
+}
+
+// The share of its rate a building's storeys burn at on average, dark ones
+// included: 0.90, as when a tenth of the storeys went dark and the rest
+// burned at the full rate.
+const CITY_LIT_SHARE: f32 = 0.90;
+// A storey's occupancy against the building's, from its draw r in [0, 1):
+// mean CITY_STOREY_OCC_MEAN (CITY_LIT_SHARE over the storeys left lit),
+// spread 0.6-1.4x of that, a little wider on an office tower's floors.
+const CITY_STOREY_OCC_MEAN: f32 = CITY_LIT_SHARE / (1.0 - CITY_DARK_FLOOR_FRAC);
+fn city_storey_occupancy(cc: CityCell, r: f32) -> f32 {
+    let spread = select(0.40, 0.50, cc.win_style == 3);
+    return CITY_STOREY_OCC_MEAN * (1.0 - spread + 2.0 * spread * r);
+}
+fn city_storey_rate(cc: CityCell, iv: i32) -> f32 {
+    let fh = city_rand4(vec2<u32>(
+        cc.seed.x ^ 0x2545f491u,
+        bitcast<u32>(iv) * 0x9e3779b9u
+    ));
+    if (fh.x < CITY_DARK_FLOOR_FRAC) {
+        return 0.0;
+    }
+    return cc.lit_frac * city_style_rate(cc) * city_storey_occupancy(cc, fh.y);
+}
+
+// A storey's lit probability averaged over the storey draws (the dark
+// storeys and the occupancy spread cancel by construction; the clamp at 1
+// is ignored), for a footprint too tall to walk storey by storey.
+fn city_storey_lit_mean(cc: CityCell) -> f32 {
+    return min(cc.lit_frac * city_style_rate(cc) * CITY_LIT_SHARE, 1.0);
+}
+
 fn city_window(cc: CityCell, f: CityFace, iu: i32, iv: i32) -> CityWin {
+    return city_window_rated(cc, f, iu, iv, city_storey_rate(cc, iv));
+}
+
+// city_window on a storey whose rate (city_storey_rate) is already known.
+fn city_window_rated(cc: CityCell, f: CityFace, iu: i32, iv: i32,
+                     rate: f32) -> CityWin {
     var w: CityWin;
     w.wh = city_rand4(vec2<u32>(
         cc.seed.x ^ bitcast<u32>(iu) ^ f.salt,
         cc.seed.y ^ bitcast<u32>(iv)
     ));
-    let fh = city_rand4(vec2<u32>(
-        cc.seed.x ^ 0x2545f491u,
-        bitcast<u32>(iv) * 0x9e3779b9u
-    ));
-    let floor_dark = fh.x < CITY_DARK_FLOOR_FRAC;
-    var is_on = w.wh.x < cc.lit_frac;
+    // The unit the style switches on: one pane (grid, punched, curtain),
+    // a pair of bays (ribbon), or a four-storey column run (strips).
+    var unit = w.wh.x;
     if (cc.win_style == 1) {
-        let sh = city_rand4(vec2<u32>(
+        unit = city_rand4(vec2<u32>(
             cc.seed.x ^ (bitcast<u32>(iu >> 1) * 0x9e3779b9u) ^ f.salt,
-            cc.seed.y ^ (bitcast<u32>(iv) * 0x51ed270bu)));
-        is_on = sh.x < cc.lit_frac * 1.15;
+            cc.seed.y ^ (bitcast<u32>(iv) * 0x51ed270bu))).x;
     } else if (cc.win_style == 2) {
-        let sh = city_rand4(vec2<u32>(
+        unit = city_rand4(vec2<u32>(
             cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u) ^ f.salt,
-            cc.seed.y ^ (bitcast<u32>(iv >> 2) * 0x51ed270bu)));
-        is_on = sh.x < cc.lit_frac * 1.10;
-    } else if (cc.win_style == 3) {
-        let fl = city_rand4(vec2<u32>(
-            cc.seed.x ^ 0x7feb352du,
-            bitcast<u32>(iv) * 0x846ca68bu));
-        is_on = fl.x < cc.lit_frac * 1.5 && w.wh.x < 0.88;
+            cc.seed.y ^ (bitcast<u32>(iv >> 2) * 0x51ed270bu))).x;
     }
-    w.lit = !floor_dark && is_on;
+    w.lit = unit < rate;
     w.e = vec3<f32>(0.0);
     if (w.lit) {
         // Curtain-wall floors run dimmer per pane than a lamp-lit room
@@ -6212,8 +6282,8 @@ fn city_window(cc: CityCell, f: CityFace, iu: i32, iv: i32) -> CityWin {
         if (cc.win_mono >= 0.0) {
             cdraw = clamp(cc.win_mono + (w.wh.y - 0.5) * 0.08, 0.0, 1.0);
         }
-        w.e = city_window_color(cdraw, cc.palette_bias)
-              * (CITY_WIN_RADIANCE * bright);
+        w.e = city_room_color(cdraw, cc.palette_bias)
+              * (CITY_ROOM_RADIANCE * bright);
     }
     return w;
 }
@@ -6780,9 +6850,10 @@ fn city_shell_cell(ol: vec3<f32>, dl: vec3<f32>, il: vec3<f32>,
                                     CITY_PART_WALL);
             } else if (on_face) {
                 // The recess keeps its true depth at every footprint: the
-                // flat facade carries its mean occlusion (city_recess_vis),
-                // so the two agree wherever they meet. Only relief standing
-                // proud of the wall flattens with s.
+                // flat facade sees its glass through the opening
+                // (city_recess_off, city_windows_seen), so the two agree
+                // wherever they meet. Only relief standing proud of the wall
+                // flattens with s.
                 let d = st.reveal;
                 let rmin = vec3<f32>(ca + olo.x, vfl + olo.y, -d);
                 let rmax = vec3<f32>(ca + ohi.x, vfl + ohi.y, 0.0);
@@ -7497,11 +7568,6 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     let blend = max(smoothstep(CITY_SHELL_FP_BLEND, CITY_SHELL_FP_FLAT,
                                pa * max(t_ref, 0.0)),
                     city_shell_cap_fade(t_ref, t_cap));
-    // Past the start of the flat facade's pane dissolve (a grazing wall can
-    // be there before the relief has flattened) the flat facade fades its
-    // glass reflection with the panes; the shell's glass does the same, so
-    // the two agree on it wherever they are mixed.
-    let refl = 1.0 - smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
 
     // The flat twin is read where the ray crosses the wall plane, which is
     // where the plain pass meets this wall: the flat facade finds the glass
@@ -7520,7 +7586,8 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     hw.kind = 1;
     var flat = vec3<f32>(0.0);
     if (blend > 0.0) {
-        flat = city_facade_flat(cc, f, hw, dir, pa * t_wall, fill);
+        flat = city_facade_flat(cc, f, hw, dir, pa * t_wall,
+                                true_pixel_angle() * t_wall, true, fill);
         if (blend >= 1.0) {
             return flat;
         }
@@ -7539,7 +7606,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     if (part == CITY_PART_GLASS) {
         let cosv = abs(dot(dir, n));
         e = city_glass_fresnel(cosv)
-            * city_glass_env(reflect(dir, n), h.pos, glow) * refl;
+            * city_glass_env(reflect(dir, n), h.pos, glow);
         if (win.lit) {
             e = e + city_room(cc, f, b, win, l, dl, fp_eff)
                   * (1.0 - city_glass_fresnel(cosv));
@@ -7646,7 +7713,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         // flat facade gives the whole skin.
         if (cc.win_style == 3) {
             e = e + city_glass_fresnel(abs(dot(dir, n)))
-                    * city_glass_env(reflect(dir, n), h.pos, glow) * refl;
+                    * city_glass_env(reflect(dir, n), h.pos, glow);
         }
     }
     return mix(e, flat, blend);
@@ -7671,139 +7738,562 @@ fn city_recess_off(st: CityShellStyle, dl: vec3<f32>) -> vec2<f32> {
     return st.reveal * dl.xy / max(-dl.z, 1e-4);
 }
 
-// The share of a pane the opening leaves in view at that offset: the part of
-// the pane whose ray back out stays inside the opening (the pane and the
-// opening shifted by off overlap), per unit of pane area.
-fn city_recess_vis(plo: vec2<f32>, phi: vec2<f32>, olo: vec2<f32>,
-                   ohi: vec2<f32>, off: vec2<f32>) -> f32 {
-    let span = max(min(phi, ohi + off) - max(plo, olo + off), vec2<f32>(0.0))
-               / max(phi - plo, vec2<f32>(1e-4));
-    return span.x * span.y;
+// --- the flat facade's windows, as the eye is shown them --------------------
+//
+// A lit window is ten to a hundred times the radiance of the wall around
+// it, and the display transform (tone_map) is steeply compressive. When a
+// pixel holds several windows, what the renderer shows at rest is the
+// average of what each sample SHOWS: the accumulator averages tone-mapped
+// samples. A far facade's plain mean radiance tone-maps to a cream wash far
+// brighter than the resolved facade it stands for. So the pixel's footprint
+// on the wall is averaged as it would be shown: exactly, window by window,
+// while it holds few of them (city_windows_exact), and in expectation
+// storey by storey past that (city_windows_rows), blending the two across
+// the last cell of the exact sum's room. The storeys are the building's own
+// (city_storey_rate), so a far tower reads in fine bands of floors, never
+// in squares.
+//
+// What comes back is the LUMINANCE the eye is shown at rest, in the colour
+// the light actually has (city_windows_resolve): the plain area mean's
+// chromaticity, scaled until it shows that luminance. Bright panes clip
+// toward white on the display, so a mean taken of displayed colours greys
+// every window population out, while the light itself, which is what a
+// camera's optics and sensor average, keeps its warmth; the city's rooms
+// are warm (city_room_color). A footprint holding one element comes back
+// as that element, exactly. The result is handed back as a radiance, so
+// fog, clouds and the tone map downstream treat it like any other.
+//
+// Linear consumers get the plain area mean, which is what they average:
+// TONE_MAP false (witness's linear return, the auto-exposure meter, any
+// HDR output), where it does not depend on the exposure, so the meter
+// never chases its own setting through the far city; and a facade seen in
+// a reflection, whose radiance is weighted into the ground's before
+// anything is shown.
+
+// The window cells the exact sum walks at most, across and up. A box
+// spans at most floor(2 h / pitch) + 2 cells on an axis, so the exact sum
+// is whole while 2 h / pitch < MAX - 1; it hands over to the storey-by-
+// storey expectation while the span is between MAX - 3 and MAX - 2, well
+// inside that.
+const CITY_WIN_EXACT_MAX_U: i32 = 5;
+const CITY_WIN_EXACT_MAX_V: i32 = 4;
+// Storeys the expectation walks one by one; past this it blends, over the
+// last CITY_WIN_ROWS_BLEND of them, into one building mean.
+const CITY_WIN_ROWS_MAX: i32 = 16;
+const CITY_WIN_ROWS_BLEND: f32 = 4.0;
+// The reveal, sill and frame inside an opening, off the glass: the shell
+// shades them in the recess's shadow (ao 0.5-0.85); their mean.
+const CITY_OPENING_AO: f32 = 0.6;
+// The per-bay covers' fade (m of foreshortened footprint).
+const CITY_COVER_LOD: vec2<f32> = vec2<f32>(1.6, 6.5);
+
+// The display curve on exposed radiance: tone_map without its contrast
+// pivot (an affine map, which commutes with an average), its highlight
+// shoulder included.
+fn city_display_curve(e: vec3<f32>) -> vec3<f32> {
+    let w2 = u.flags.w * u.flags.w;
+    let per_channel = e * (1.0 + e / w2) / (1.0 + e);
+    let y = dot(e, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let chroma_preserving = e * (1.0 + y / w2) / (1.0 + y);
+    let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+    let mapped = mix(per_channel, chroma_preserving, k);
+    return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
+               vec3<f32>(1.0 / u.periodic.w));
+}
+
+// One area element, weighted `a`, of radiance l seen through the fog: its
+// displayed value and its light, summed side by side. `shown` is kept only
+// when the pixel will be shown directly (see above).
+struct CityWinSum {
+    shown: vec3<f32>,
+    light: vec3<f32>,
+}
+
+fn city_win_zero() -> CityWinSum {
+    return CityWinSum(vec3<f32>(0.0), vec3<f32>(0.0));
+}
+
+fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32, fog: vec4<f32>,
+                shown: bool) -> CityWinSum {
+    if (a <= 0.0) {
+        return acc;
+    }
+    let x = max(l * fog.x + fog.yzw, vec3<f32>(0.0));
+    var d = vec3<f32>(0.0);
+    if (shown) {
+        d = city_display_curve(x * u.cam_right.w);
+    }
+    return CityWinSum(acc.shown + d * a, acc.light + x * a);
+}
+
+// The radiance the averaged footprint hands back. `mean` is the per-area
+// sum. Shown directly, it is the light's own colour (its fogless mean)
+// scaled by s until it shows the averaged luminance: the least s that
+// does (within CITY_RESOLVE_EPS). s is bracketed about a first guess (the
+// per-channel curve inverted at that luminance), the bracket widened by
+// fours until it holds, and bisected in log steps, two more for each
+// widening. One element, alone in the footprint, comes back as itself.
+//
+// The rule needs the displayed luminance to rise with s up to the goal.
+// It does for a light with every channel lit, as the room palette's
+// lights are, in any fog, and for any light in clear air, where it at most
+// plateaus once every lit channel is clipped (hence the least s, which
+// keeps a rounding residue in an empty channel from being scaled up past
+// the plateau). A near-primary in fog is the exception: the shoulder's
+// chroma-preserving blend dims the fog's own channels as the primary
+// brightens, so its luminance can peak and fall. The widening stops at
+// the peak, and s stays near it.
+const CITY_RESOLVE_EPS: f32 = 1e-5;
+fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
+                        shown: bool) -> vec3<f32> {
+    let light = max(mean.light - fog.yzw, vec3<f32>(0.0)) / max(fog.x, 1e-6);
+    if (!shown) {
+        return light;
+    }
+    let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let target_y = dot(mean.shown, lum);
+    let goal = target_y - CITY_RESOLVE_EPS;
+    let e = u.cam_right.w;
+    let x0 = light * fog.x;
+    let y_light = dot(x0 * e, lum);
+    if (y_light <= 0.0) {
+        return light;
+    }
+    // First guess: the exposed luminance the per-channel curve shows as
+    // target_y, over the light's own.
+    let m = pow(clamp(target_y, 0.0, 0.999999), u.periodic.w);
+    let w2 = u.flags.w * u.flags.w;
+    // @domain: (1 - m)^2 >= 0, m >= 0, and w2 >= 16 (both hosts hold the white point to [4, 40])
+    let e_y = 2.0 * m / ((1.0 - m) + sqrt((1.0 - m) * (1.0 - m) + 4.0 * m / w2));
+    let guess = max((e_y - dot(fog.yzw * e, lum)) / y_light, 1e-6);
+    // lo shows short of the goal, hi reaches it. The goal is always
+    // reachable: every channel an averaged element lit, the light has.
+    // Twelve widenings reach 4^12 either way, past anything the palette
+    // and the hosts' gamma and white-point limits produce.
+    var lo = 0.5 * guess;
+    var hi = 2.0 * guess;
+    var steps = 10;
+    var y_hi_last = -1.0;
+    for (var k: i32 = 0; k < 12; k = k + 1) {
+        let lo_over = dot(city_display_curve(e * (lo * x0 + fog.yzw)), lum)
+                      >= goal;
+        let y_hi = dot(city_display_curve(e * (hi * x0 + fog.yzw)), lum);
+        let hi_under = y_hi < goal;
+        if (!lo_over && !hi_under) {
+            break;
+        }
+        // Past a peak short of the goal (see above).
+        if (hi_under && y_hi <= y_hi_last) {
+            break;
+        }
+        y_hi_last = y_hi;
+        if (lo_over) {
+            lo = 0.25 * lo;
+        }
+        if (hi_under) {
+            hi = 4.0 * hi;
+        }
+        steps = steps + 2;
+    }
+    for (var k: i32 = 0; k < steps; k = k + 1) {
+        // @domain: lo and hi stay positive (guess >= 1e-6, halved or quartered at most 13 times)
+        let mid = sqrt(lo * hi);
+        if (dot(city_display_curve(e * (mid * x0 + fog.yzw)), lum) < goal) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    // @domain: as above
+    return light * sqrt(lo * hi);
+}
+
+// Half extents (u, v) of the box that holds one pixel's footprint on the
+// wall: the pixel's fp x fp cross-section carried along the ray onto the
+// wall plane. dl is the ray in face-local terms (z out of the wall); the
+// stretch is held to the core's grazing limit (cosine 0.2).
+fn city_wall_footprint(dl: vec3<f32>, fp: f32) -> vec2<f32> {
+    // @domain: zero only at dl.x = 0 and dl.z = -1e-9 exactly (a unit dl into the wall)
+    let e1 = normalize(vec3<f32>(dl.z, 0.0, -dl.x) + vec3<f32>(1e-9, 0.0, 0.0));
+    let e2 = cross(dl, e1);
+    // An offset e across the ray lands on the wall at e - dl (e.z / dl.z).
+    let k = 1.0 / max(-dl.z, 0.20);
+    let w1 = e1 + dl * (e1.z * k);
+    let w2 = e2 + dl * (e2.z * k);
+    return 0.5 * fp * vec2<f32>(abs(w1.x) + abs(w2.x), abs(w1.y) + abs(w2.y));
+}
+
+// The face's bays along u: the lattice between the corner strips, or on a
+// frustum's skin everything.
+fn city_bay_strip(f: CityFace) -> vec2<f32> {
+    if (!f.aligned) {
+        return vec2<f32>(-1e30, 1e30);
+    }
+    return vec2<f32>(f.margin, f.margin + f32(f.nbays) * f.pitch);
+}
+
+fn city_overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    return max(min(a1, b1) - max(a0, b0), 0.0);
+}
+
+// Length of [u0, u1] covered by the interval [r0, r1] repeated every
+// `pitch` from `start` over `n` periods (r0 <= r1 within one period).
+fn city_periodic_cover(u0: f32, u1: f32, start: f32, pitch: f32, n: f32,
+                       r0: f32, r1: f32) -> f32 {
+    let lo = clamp((u0 - start) / pitch, 0.0, n);
+    let hi = clamp((u1 - start) / pitch, 0.0, n);
+    let a = r0 / pitch;
+    let w = max(r1 - r0, 0.0) / pitch;
+    let c_hi = floor(hi) * w + clamp(fract(hi) - a, 0.0, w);
+    let c_lo = floor(lo) * w + clamp(fract(lo) - a, 0.0, w);
+    return max(c_hi - c_lo, 0.0) * pitch;
+}
+
+// The probability a window on storey iv is lit, from the draws city_window
+// makes (its unit's draw is uniform, so this is exact).
+fn city_storey_lit(cc: CityCell, iv: i32) -> f32 {
+    return min(city_storey_rate(cc, iv), 1.0);
+}
+
+// The share of the building's lit windows drawing room colour band k
+// (city_room_color): city_window's colour draw is uniform on [lo, hi] and
+// then clamped to [0, 1] (a whole [0, 1] for a mixed house, 0.08 wide about
+// its one draw for a monochrome one), and band k takes the clamped draws in
+// [its lower edge, its upper edge). So the share is the difference of the
+// clamped draw's distribution at the two edges, and the six shares sum to
+// 1 wherever the edges fall, 1 and past it included.
+fn city_room_band_share(k: i32, lo: f32, hi: f32, bias: f32) -> f32 {
+    let a = select(city_room_band_edge(k - 1, bias), -1e9, k == 0);
+    let b = select(city_room_band_edge(k, bias), 1e9, k == 5);
+    return city_room_draw_below(b, lo, hi) - city_room_draw_below(a, lo, hi);
+}
+
+// P(clamp(draw, 0, 1) < x) for the draw uniform on [lo, hi].
+fn city_room_draw_below(x: f32, lo: f32, hi: f32) -> f32 {
+    if (x <= 0.0) {
+        return 0.0;
+    }
+    if (x > 1.0) {
+        return 1.0;
+    }
+    return clamp((x - lo) / max(hi - lo, 1e-6), 0.0, 1.0);
+}
+
+// A lit pane of this building, over the population of its lit windows:
+// what it shows (the brightness draw, 0.25 + 5 w^7, in four strata by
+// their exact means, times the palette's bands by their exact shares) and
+// its light (exact: the mean brightness times the mean colour).
+fn city_lit_pane(cc: CityCell, refl: vec3<f32>, through: f32,
+                 fog: vec4<f32>, shown: bool) -> CityWinSum {
+    let style_gain = select(select(1.0, 0.80, cc.win_style == 1),
+                            0.55, cc.win_style == 3);
+    let g = cc_window_glyph_mean() * (through * CITY_ROOM_RADIANCE
+                                      * style_gain);
+    var lo = 0.0;
+    var hi = 1.0;
+    if (cc.win_mono >= 0.0) {
+        lo = cc.win_mono - 0.04;
+        hi = cc.win_mono + 0.04;
+    }
+    var colour = vec3<f32>(0.0);
+    var acc = city_win_zero();
+    for (var k: i32 = 0; k < 6; k = k + 1) {
+        let share = city_room_band_share(k, lo, hi, cc.palette_bias);
+        if (share <= 0.0) {
+            continue;
+        }
+        let c = city_room_band_colour(k);
+        colour = colour + c * share;
+        if (shown) {
+            // The brightness strata: w in [0, .7), [.7, .85), [.85, .95),
+            // [.95, 1), each at its exact mean 0.25 + 5 (b^8 - a^8) /
+            // (8 (b - a)).
+            for (var s: i32 = 0; s < 4; s = s + 1) {
+                let wa = select(select(select(0.0, 0.70, s == 1), 0.85,
+                                       s == 2), 0.95, s == 3);
+                let wb = select(select(select(0.70, 0.85, s == 1), 0.95,
+                                       s == 2), 1.0, s == 3);
+                // @domain: wa and wb lie in [0, 1]
+                let b_mean = 0.25 + 5.0 * (pow(wb, 8.0) - pow(wa, 8.0))
+                                        / (8.0 * (wb - wa));
+                let x = max((refl + c * (g * b_mean)) * fog.x + fog.yzw,
+                            vec3<f32>(0.0));
+                acc.shown = acc.shown
+                    + city_display_curve(x * u.cam_right.w)
+                      * (share * (wb - wa));
+            }
+        }
+    }
+    acc.light = max((refl + colour * (g * CITY_WIN_BRIGHT_MEAN)) * fog.x
+                    + fog.yzw, vec3<f32>(0.0));
+    return acc;
+}
+
+struct CityWinGeom {
+    plo: vec2<f32>,    // pane, bay-local
+    phi: vec2<f32>,
+    olo: vec2<f32>,    // opening, bay-local
+    ohi: vec2<f32>,
+    off: vec2<f32>,    // where the glass seen at a wall point lies, relative
+    i_shift: i32,      // the lattice cell c's u is counted from (skins)
+}
+
+// Window by window: every window cell the footprint box touches. Returns
+// the sums over the box (not yet divided by its area).
+// The storeys at a warehouse's foot whose panes would stand in its door
+// band: none there, in either path.
+fn city_door_storeys(g: CityWinGeom) -> i32 {
+    return i32(ceil((CITY_INDUSTRY_DOOR_BAND - g.phi.y) / CITY_FLOOR_H));
+}
+
+fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
+                      c: vec2<f32>, hb: vec2<f32>, l_wall: vec3<f32>,
+                      refl: vec3<f32>, through: f32, fog: vec4<f32>,
+                      skin: bool, shown: bool) -> CityWinSum {
+    let warehouse = cc.land_use == CITY_USE_INDUSTRIAL;
+    // A frustum's skin has an unbounded, world-anchored lattice: every
+    // cell is a bay (city_bay).
+    var i0 = i32(floor((c.x - hb.x - f.margin) / f.pitch));
+    var i1 = i32(floor((c.x + hb.x - f.margin) / f.pitch));
+    if (f.aligned) {
+        i0 = max(i0, 0);
+        i1 = min(i1, f.nbays - 1);
+    }
+    let j0 = i32(floor((c.y - hb.y) / CITY_FLOOR_H));
+    let j1 = i32(floor((c.y + hb.y) / CITY_FLOOR_H));
+    var acc = city_win_zero();
+    var a_open = 0.0;
+    var a_ring = 0.0;
+    for (var jj: i32 = 0; jj < CITY_WIN_EXACT_MAX_V; jj = jj + 1) {
+        let j = j0 + jj;
+        if (j > j1) {
+            break;
+        }
+        // A warehouse's ground band is its doors, which the industry
+        // component draws: no windows, no glass.
+        if (warehouse && j < city_door_storeys(g)) {
+            continue;
+        }
+        let vfl = f32(j) * CITY_FLOOR_H;
+        let rate = city_storey_rate(cc, j);
+        for (var ii: i32 = 0; ii < CITY_WIN_EXACT_MAX_U; ii = ii + 1) {
+            let i = i0 + ii;
+            if (i > i1) {
+                break;
+            }
+            let base = vec2<f32>(f.margin + f32(i) * f.pitch, vfl);
+            // The opening, on this face, and the glass seen through it.
+            let olo = max(base + g.olo, vec2<f32>(-1e9, f.z0));
+            let ohi = min(base + g.ohi, vec2<f32>(1e9, f.z1));
+            let rlo = max(base + g.plo - g.off, olo);
+            let rhi = min(base + g.phi - g.off, ohi);
+            let ao = city_overlap(c.x - hb.x, c.x + hb.x, olo.x, ohi.x)
+                     * city_overlap(c.y - hb.y, c.y + hb.y, olo.y, ohi.y);
+            if (ao <= 0.0) {
+                continue;
+            }
+            let ag = city_overlap(c.x - hb.x, c.x + hb.x, rlo.x, rhi.x)
+                     * city_overlap(c.y - hb.y, c.y + hb.y, rlo.y, rhi.y);
+            let win = city_window_rated(cc, f, i + g.i_shift, j, rate);
+            var glass = refl;
+            if (win.lit) {
+                // Where the pixel's centre sees this pane, for a glyph a
+                // pixel can still resolve; far larger footprints get the
+                // glyph's own mean from it.
+                let uv = clamp((c - base + g.off - g.plo)
+                               / max(g.phi - g.plo, vec2<f32>(1e-4)),
+                               vec2<f32>(0.0), vec2<f32>(1.0));
+                glass = refl + win.e * through
+                        * cc_window_glyph(cc, win.wh, uv, uv,
+                                          2.0 * max(hb.x, hb.y));
+            }
+            acc = city_win_add(acc, glass, ag, fog, shown);
+            a_ring = a_ring + (ao - ag);
+            a_open = a_open + ao;
+        }
+    }
+    acc = city_win_add(acc, CITY_OPENING_AO * l_wall, a_ring, fog, shown);
+    // The rest is wall: skin (a curtain wall's glass spandrels reflect) on
+    // the bays, plain wall on the corner strips and off the face. Openings
+    // lie inside the bays.
+    let strip = city_bay_strip(f);
+    let a_bays = city_overlap(c.x - hb.x, c.x + hb.x, strip.x, strip.y)
+                 * city_overlap(c.y - hb.y, c.y + hb.y, f.z0, f.z1);
+    acc = city_win_add(acc, l_wall + select(vec3<f32>(0.0), refl, skin),
+                       max(a_bays - a_open, 0.0), fog, shown);
+    return city_win_add(acc, l_wall,
+                        max(4.0 * hb.x * hb.y - a_bays, 0.0), fog, shown);
+}
+
+// Storey by storey, in expectation: each storey's windows lit at the rate
+// its own draw gives, their panes averaged over the draws. Past
+// CITY_WIN_ROWS_MAX storeys, the building's mean rate instead, blended in
+// over the last CITY_WIN_ROWS_BLEND. Returns the sums over the box.
+fn city_windows_rows(cc: CityCell, f: CityFace, g: CityWinGeom,
+                     c: vec2<f32>, hb: vec2<f32>, l_wall: vec3<f32>,
+                     refl: vec3<f32>, through: f32, fog: vec4<f32>,
+                     skin: bool, shown: bool) -> CityWinSum {
+    let warehouse = cc.land_use == CITY_USE_INDUSTRIAL;
+    let u0 = c.x - hb.x;
+    let u1 = c.x + hb.x;
+    // The lattice's first bay and its count; a skin's runs past the box.
+    var start = f.margin;
+    var n = f32(max(f.nbays, 0));
+    if (!f.aligned) {
+        start = f.margin + (floor((u0 - f.margin) / f.pitch) - 1.0) * f.pitch;
+        n = (u1 - start) / f.pitch + 2.0;
+    }
+    let rlo = max(g.plo - g.off, g.olo);
+    let rhi = min(g.phi - g.off, g.ohi);
+    let len_g = city_periodic_cover(u0, u1, start, f.pitch, n, rlo.x, rhi.x);
+    let len_o = city_periodic_cover(u0, u1, start, f.pitch, n,
+                                    g.olo.x, g.ohi.x);
+    // A warehouse's door band holds no windows (the storeys the exact sum
+    // skips).
+    var v0 = max(c.y - hb.y, f.z0);
+    let v1 = min(c.y + hb.y, f.z1);
+    if (warehouse) {
+        v0 = max(v0, f32(city_door_storeys(g)) * CITY_FLOOR_H);
+    }
+    let j0 = i32(floor(v0 / CITY_FLOOR_H));
+    let j1 = i32(floor(v1 / CITY_FLOOR_H));
+    // The storeys the box touches are at most (v1 - v0) / FLOOR_H + 2, so
+    // the walk is whole wherever the blend leaves it any weight, and the
+    // blend moves continuously with the box.
+    let w_mean = smoothstep(f32(CITY_WIN_ROWS_MAX) - CITY_WIN_ROWS_BLEND,
+                            f32(CITY_WIN_ROWS_MAX),
+                            (v1 - v0) / CITY_FLOOR_H + 2.0);
+    // The lit glass, the glass and the openings, walked storey by storey
+    // and as the building's mean, blended.
+    var walk = vec3<f32>(0.0);
+    if (w_mean < 1.0) {
+        for (var jj: i32 = 0; jj < CITY_WIN_ROWS_MAX; jj = jj + 1) {
+            let j = j0 + jj;
+            if (j > j1) {
+                break;
+            }
+            let vfl = f32(j) * CITY_FLOOR_H;
+            let ag = len_g * city_overlap(v0, v1, vfl + rlo.y, vfl + rhi.y);
+            walk = walk + vec3<f32>(city_storey_lit(cc, j) * ag, ag,
+                                    len_o * city_overlap(v0, v1,
+                                                         vfl + g.olo.y,
+                                                         vfl + g.ohi.y));
+        }
+    }
+    var mean = vec3<f32>(0.0);
+    if (w_mean > 0.0) {
+        let nv = floor(f.z1 / CITY_FLOOR_H) + 1.0;
+        let ag = len_g * city_periodic_cover(v0, v1, 0.0, CITY_FLOOR_H, nv,
+                                             rlo.y, rhi.y);
+        mean = vec3<f32>(city_storey_lit_mean(cc) * ag, ag,
+                         len_o * city_periodic_cover(v0, v1, 0.0,
+                                                     CITY_FLOOR_H, nv,
+                                                     g.olo.y, g.ohi.y));
+    }
+    let a = mix(walk, mean, w_mean);   // (lit glass, glass, openings)
+    let lit = city_lit_pane(cc, refl, through, fog, shown);
+    var acc = city_win_add(city_win_zero(), refl, a.y - a.x, fog, shown);
+    acc = CityWinSum(acc.shown + lit.shown * a.x,
+                     acc.light + lit.light * a.x);
+    acc = city_win_add(acc, CITY_OPENING_AO * l_wall, max(a.z - a.y, 0.0),
+                       fog, shown);
+    let strip = city_bay_strip(f);
+    let a_bays = city_overlap(u0, u1, strip.x, strip.y)
+                 * city_overlap(c.y - hb.y, c.y + hb.y, f.z0, f.z1);
+    acc = city_win_add(acc, l_wall + select(vec3<f32>(0.0), refl, skin),
+                       max(a_bays - a.z, 0.0), fog, shown);
+    return city_win_add(acc, l_wall,
+                        max(4.0 * hb.x * hb.y - a_bays, 0.0), fog, shown);
+}
+
+// The windows and wall under one pixel's footprint `fp_filter`, as the
+// radiance that shows as their mean at rest, in the colour of their light
+// (see above); `shown` false for a facade seen in a reflection, which gets
+// the plain area mean. `through` is what of a lit pane's light passes the
+// glass, (1 - F). Under a component's panel, a fire escape's lattice or a
+// balcony (`cover`, 0..1) there are no windows to see: the covered share
+// is plain wall, as the shell draws it.
+fn city_windows_seen(cc: CityCell, f: CityFace, st: CityShellStyle,
+                     c_in: vec2<f32>, dl: vec3<f32>, fp_filter: f32,
+                     l_wall: vec3<f32>, refl: vec3<f32>, through: f32,
+                     cover: f32, fog: vec4<f32>, direct: bool) -> vec3<f32> {
+    let shown = direct && TONE_MAP;
+    var g: CityWinGeom;
+    g.plo = city_pane_lo(cc, f);
+    g.phi = city_pane_hi(cc, f);
+    g.olo = g.plo - vec2<f32>(CITY_SHELL_FRAME);
+    g.ohi = g.phi + vec2<f32>(CITY_SHELL_FRAME);
+    // The glass is recessed behind its opening, as the shell builds it: the
+    // ray that crosses the opening at a wall point meets the glass `off`
+    // further along, and sees it only if that point is still inside the
+    // opening (else the reveal or the sill) and inside the pane (else the
+    // frame). A frustum's skin has no shell and no recess, and neither has
+    // a warehouse, whose walls are the industry component's.
+    g.off = vec2<f32>(0.0);
+    if (f.aligned && cc.land_use == CITY_USE_URBAN) {
+        g.off = city_recess_off(st, dl);
+    }
+    // A skin's u is world-anchored, tens of kilometres at float precision:
+    // count it from the lattice cell under it, so a small footprint keeps
+    // its width.
+    var c = c_in;
+    g.i_shift = 0;
+    if (!f.aligned) {
+        let cell = floor((c.x - f.margin) / f.pitch);
+        g.i_shift = i32(cell);
+        c.x = c.x - cell * f.pitch;
+    }
+    let skin = cc.win_style == 3;
+    let hb = max(city_wall_footprint(dl, fp_filter), vec2<f32>(1e-3));
+    // Cells the footprint spans, continuously, against the room the exact
+    // sum has: it hands over while it is still whole.
+    let span = vec2<f32>(2.0 * hb.x / f.pitch, 2.0 * hb.y / CITY_FLOOR_H);
+    let room = vec2<f32>(f32(CITY_WIN_EXACT_MAX_U - 2),
+                         f32(CITY_WIN_EXACT_MAX_V - 2));
+    let w = max(smoothstep(room.x - 1.0, room.x - 0.05, span.x),
+                smoothstep(room.y - 1.0, room.y - 0.05, span.y));
+    var sum = city_win_zero();
+    if (w < 1.0) {
+        sum = city_windows_exact(cc, f, g, c, hb, l_wall, refl, through,
+                                 fog, skin, shown);
+    }
+    if (w > 0.0) {
+        let rows = city_windows_rows(cc, f, g, c, hb, l_wall, refl, through,
+                                     fog, skin, shown);
+        sum = CityWinSum(mix(sum.shown, rows.shown, w),
+                         mix(sum.light, rows.light, w));
+    }
+    let area = 4.0 * hb.x * hb.y;
+    var mean = CityWinSum(sum.shown / area, sum.light / area);
+    if (cover > 0.0) {
+        let wall = city_win_add(city_win_zero(),
+                                l_wall + select(vec3<f32>(0.0), refl, skin),
+                                1.0, fog, shown);
+        mean = CityWinSum(mix(mean.shown, wall.shown, cover),
+                          mix(mean.light, wall.light, cover));
+    }
+    return city_windows_resolve(mean, fog, shown);
 }
 
 // The flat facade: what a wall is past the shell's reach, and what the
 // shell blends into at the hand-off.
 fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
-                    fp: f32, fill: vec3<f32>) -> vec3<f32> {
+                    fp: f32, fp_filter: f32, direct: bool,
+                    fill: vec3<f32>) -> vec3<f32> {
     let moon = u.sun_dir.xyz;
     let l = city_face_local(f, h.pos);
     let uc = l.x;
     let vc = h.pos.z;
     let b = city_bay(f, uc, vc);
-    let win = city_window(cc, f, b.iu, b.iv);
     let st = city_shell_style(cc);
-    // The glass is recessed behind its opening, as the shell builds it: the
-    // ray that crosses the opening here meets the glass `off` further along
-    // the wall, and sees it only if that point is still inside the opening
-    // (else it met the reveal or the sill) and inside the pane (else the
-    // frame). A frustum's skin has no shell and no recess, and neither has
-    // a warehouse, whose walls are the industry component's.
-    let plo = city_pane_lo(cc, f);
-    let phi = city_pane_hi(cc, f);
-    let olo = plo - vec2<f32>(CITY_SHELL_FRAME);
-    let ohi = phi + vec2<f32>(CITY_SHELL_FRAME);
-    var off = vec2<f32>(0.0);
-    if (f.aligned && cc.land_use == CITY_USE_URBAN) {
-        off = city_recess_off(st, city_face_dir(f, dir));
-    }
-    let pw = vec2<f32>(b.bu, b.bv);
-    let g = pw + off;
-    let open = b.in_bay && all(pw > olo) && all(pw < ohi)
-               && all(g > olo) && all(g < ohi);
-    let pane = open && all(g > plo) && all(g < phi);
-    var e_win = vec3<f32>(0.0);
-    if (pane && win.lit) {
-        // Life inside: whatever the glyph components put between the
-        // light and the glass (curtains, figures, androids). Seen flat, the
-        // glass and the occupant's plane are the same point.
-        let pane_uv = (g - plo) / max(phi - plo, vec2<f32>(1e-4));
-        // What leaves the room through the glass: the same (1 - F) the
-        // shell's room carries, so the two agree at every angle.
-        e_win = win.e * cc_window_glyph(cc, win.wh, pane_uv, pane_uv, fp)
-                * (1.0 - city_glass_fresnel(abs(dot(dir, h.normal))));
-    }
-
-    // Far field: an octave ladder rather than one mean. A single flat
-    // mean fails twice — averaged in linear radiance ahead of a
-    // compressive tone map it renders cream, and dimmed enough not to,
-    // it renders as a lightless brown slab whose windows visibly
-    // vanish at one distance. So the windows dissolve the way they
-    // were built, scale by scale: individual panes into 4x4-window
-    // BLOCKS (hashed, a few bright, most dim — the speckle character
-    // survives past the point where any one pane does, and a rare
-    // block keeps a neon accent), and blocks into the flat asymptote,
-    // which is the palette mean at the occupancy the statistics say.
-    // Each coarser octave carries its own tone-map compensation, so
-    // the display-space brightness holds across both hand-offs. The
-    // corner strips carry no windows, so the blocks stop at them and the
-    // asymptote is the per-bay mean times the share of the face in bays.
-    let bay_frac = city_face_bay_frac(f);
-    let e_mean_base = CITY_PALETTE_MEAN
-        * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
-           * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN);
-
-    // Octave 1: 4x4-window blocks.
-    let ibu = b.iu >> 2;
-    let ibv = b.iv >> 2;
-    let bh1 = city_rand4(vec2<u32>(
-        cc.seed.x ^ (bitcast<u32>(ibu) * 0x85ebca6bu) ^ f.salt,
-        cc.seed.y ^ (bitcast<u32>(ibv) * 0xc2b2ae35u)
-    ));
-    var block_color = CITY_PALETTE_MEAN;
-    if (bh1.y < 0.03) {
-        block_color = city_window_color(
-            0.90 + 0.09 * bh1.z, cc.palette_bias);
-    }
-    // @domain: a hash draw, in [0, 1)
-    let block_var = 0.10 + 1.8 * pow(bh1.x, 5.0);
-    let e_block = block_color
-        * (cc.lit_frac * cc.pane_frac * (1.0 - CITY_DARK_FLOOR_FRAC)
-           * CITY_WIN_RADIANCE * CITY_WIN_BRIGHT_MEAN
-           * CITY_MEAN_COMP_BLOCK * block_var)
-        * select(0.0, 1.0, b.in_bay);
-
-    // Octave 2: the flat asymptote, softly banded per 16 floors.
-    let bh2 = city_rand4(vec2<u32>(
-        cc.seed.x ^ 0x51ed270bu,
-        bitcast<u32>(b.iv >> 4) * 0x9e3779b9u
-    ));
-    let band = 0.70 + 0.60 * bh2.x;
-    let e_flat = e_mean_base * (CITY_MEAN_COMP_FLAT * band * bay_frac);
-    // The panes' share the recesses leave in view at this angle, which the
-    // coarser octaves carry as the panes do.
-    let vis = city_recess_vis(plo, phi, olo, ohi, off);
-
+    let dl = city_face_dir(f, dir);
     let cosv = abs(dot(dir, h.normal));
     let fp_eff = fp / clamp(cosv, 0.20, 1.0);
-    let b1 = smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL, fp_eff);
-    let b2 = smoothstep(CITY_BLOCK_LOD_START, CITY_BLOCK_LOD_FULL, fp_eff);
-    var e = mix(e_win, mix(e_block, e_flat, b2) * vis, b1);
-
-    // Glass reflects: panes on a punched or gridded wall, the whole skin on
-    // a curtain wall. The reflection goes with the panes it lives on and
-    // dissolves across the ladder's pane band, as the per-bay covers do
-    // below, rather than into its share of the face: at grazing angles that
-    // share is a uniform lift several times the wall's own diffuse, and it
-    // washed out the block octave the far city is drawn in. So the octaves
-    // past the panes keep the look they always had. (The shell has handed
-    // over completely before the band starts: city_shell_shade.)
-    let skin = cc.win_style == 3;
-    let glass = select(select(0.0, 1.0, pane), select(0.0, 1.0, b.in_bay),
-                       skin);
-    if (b1 < 1.0) {
-        e = e + city_glass_fresnel(cosv)
-                * city_glass_env(reflect(dir, h.normal), h.pos,
-                                 city_glow_sample(h.pos.xy, 3.0))
-                * (glass * (1.0 - b1));
-    }
-    // A warehouse's ground band is its doors, which the industry component
-    // draws: no windows there, and no glass.
     let warehouse = cc.land_use == CITY_USE_INDUSTRIAL;
-    if (warehouse && vc < CITY_INDUSTRY_DOOR_BAND) {
-        e = vec3<f32>(0.0);
-    }
+
     // Under a component's panel there are no windows to see; behind a fire
-    // escape, only what its lattice leaves.
+    // escape, only what its lattice leaves. These stay point-sampled at the
+    // pixel, each with its own footprint fade.
     let esc_cover = city_escape_cover(city_escape(cc, f, st), uc, vc, fp_eff);
     let bal_cover = city_balcony_cover(cc, f, st, b, fp_eff);
     // A unit set in the window covers its lower sash, dissolving into its
@@ -7816,19 +8306,42 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
         let span = city_pane_hi(cc, f) - city_pane_lo(cc, f);
         let share = (ac.hi.x - ac.lo.x) * (ac.hi.y - ac.lo.y)
                     / max(span.x * span.y, 1e-3);
-        ac_cover = mix(select(0.0, 1.0, inside), share * select(0.0, 1.0, pane),
+        ac_cover = mix(select(0.0, 1.0, inside), share,
                        smoothstep(0.25, 0.9, fp_eff));
     }
-    // The per-bay covers (balconies, in-window units) go with the window
-    // lattice they sit in: they fade across the ladder's own dissolve band,
-    // where the panes they cover dissolve too, so no bay pattern beats at
-    // range. (A few percent of a few bays: the fade is continuous.)
-    let bay_fade = 1.0 - smoothstep(CITY_WIN_LOD_START, CITY_WIN_LOD_FULL,
+    // The per-bay covers (balconies, in-window units) are a bay pattern;
+    // once bays are a few pixels they fade out rather than beat.
+    let bay_fade = 1.0 - smoothstep(CITY_COVER_LOD.x, CITY_COVER_LOD.y,
                                     fp_eff);
     let bal_c = bal_cover * bay_fade;
     let ac_c = ac_cover * bay_fade;
-    e = e * (1.0 - cc_facade_cover(cc, h, uc, vc, fp)) * (1.0 - esc_cover)
-          * (1.0 - bal_c) * (1.0 - ac_c);
+    let cover = 1.0 - (1.0 - cc_facade_cover(cc, h, uc, vc, fp))
+                      * (1.0 - esc_cover) * (1.0 - bal_c) * (1.0 - ac_c);
+
+    // The wall itself, lit where the pixel looks. A warehouse's walls are
+    // the industry component's whole look, reflectance included.
+    var l_wall = vec3<f32>(0.0);
+    if (!warehouse) {
+        let alb = mix(mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover),
+                          st.trim, bal_c), vec3<f32>(0.34, 0.33, 0.30), ac_c);
+        l_wall = alb * (CITY_SHELL_FILL_K
+                        * (fill + CITY_MOONLIGHT
+                                  * max(dot(h.normal, moon), 0.0))
+                        + city_shell_light(h.pos, h.normal));
+    }
+    // Glass reflects the night; the room's light leaves through it at
+    // (1 - F), as the shell's glass does.
+    let fres = city_glass_fresnel(cosv);
+    let refl = fres * city_glass_env(reflect(dir, h.normal), h.pos,
+                                     city_glow_sample(h.pos.xy, 3.0));
+
+    // The windows, averaged over the pixel's footprint on the wall
+    // (city_windows_seen): what the eye is shown, not what the wall emits.
+    let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+    // Filtered over fp_filter: `fp` carries the view-step LOD floor, which
+    // decides the work, not the sharpness.
+    var e = city_windows_seen(cc, f, st, vec2<f32>(uc, vc), dl, fp_filter,
+                              l_wall, refl, 1.0 - fres, cover, fog, direct);
 
     // Street-level storefront strip: bright, saturated, and only on
     // buildings whose draw says the ground floor is commercial.
@@ -7836,27 +8349,9 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
         e = e + city_storefront_glow(cc)
                 * (1.0 - smoothstep(CITY_STORE_H * 0.4, CITY_STORE_H, vc));
     }
-
     // Whatever the facade-layer components add: signage, screens, a
     // warehouse's cladding and doors.
-    e = e + cc_facade_detail(cc, h, uc, vc, fp);
-
-    // A warehouse's walls are the industry component's whole look —
-    // cladding, doors, their lamps' light — reflectance included, so the
-    // core's flat albedo stays off them.
-    if (warehouse) {
-        return e;
-    }
-    let alb = mix(mix(mix(st.albedo, CITY_ESCAPE_ALBEDO, esc_cover), st.trim,
-                      bal_c), vec3<f32>(0.34, 0.33, 0.30), ac_c);
-    // Inside the opening but not on the glass, the ray met the reveal, the
-    // sill or the frame, which the shell shades in the recess's shadow
-    // (ao 0.5-0.85): their mean.
-    let ao = select(1.0, 0.6, open && !pane);
-    return e + (alb * ao)
-        * (CITY_SHELL_FILL_K
-           * (fill + CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0))
-           + city_shell_light(h.pos, h.normal));
+    return e + cc_facade_detail(cc, h, uc, vc, fp);
 }
 
 // >>> GENERATED CITY COMPONENTS — written by tools/compose_city.py from
@@ -7877,8 +8372,10 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
 // a multiplier above 1 and so read as emission through the same interface.
 //
 // LOD is the whole discipline here. These glyphs are sub-window detail:
-// they must be gone before the core's window->block dissolve even starts
-// (CITY_WIN_LOD_START, fp_eff 1.6 m/px). Each case blends to its OWN mean
+// they must be gone by the time a pixel holds more than a window (the
+// core's facade then sums whole windows through this hook at the pixel's
+// footprint, and past a few of them uses cc_windowlife_glyph_mean). Each
+// case blends to its OWN mean
 // transmission over a footprint window sized to that case's FINEST feature,
 // not to the pane — a blind's 0.4 m stripe and an android's 5 cm eye alias
 // long before a curtain's edge does, so they die sooner. Past its window a
@@ -7916,7 +8413,9 @@ const cc_windowlife_EYE_SEP: f32 = 0.028;   // half-separation, pane widths
 const cc_windowlife_EYE_SIGMA: f32 = 0.0060; // ~0.02 pane: a point, not a lamp
 
 // Footprint windows (m/px) over which each case blends into its mean. Set
-// by the case's finest feature, all of them closed before fp_eff 1.6.
+// by the case's finest feature, all of them closed by a footprint of about
+// a pane (1.6 m); past it the flat facade's exact sum shows each pane at
+// its case's mean.
 const cc_windowlife_LOD_CURTAIN: vec2<f32> = vec2<f32>(0.40, 1.50);
 const cc_windowlife_LOD_BLIND: vec2<f32> = vec2<f32>(0.18, 0.60);
 const cc_windowlife_LOD_FIGURE: vec2<f32> = vec2<f32>(0.30, 1.20);
@@ -8114,6 +8613,20 @@ fn cc_windowlife_figure(h: vec4<f32>, uv: vec2<f32>, fp: f32,
 // in the room, so it takes the uv where the ray crosses the occupant's
 // plane (deep_uv) — which is what slides them against each other as the
 // camera moves past a close window. On a flat facade the two are equal.
+// The glyph's population mean, for a facade whose windows are too small to
+// draw one by one (the core's storey-by-storey expectation,
+// city_windows_rows): h.x picks the class
+// (uniform, the hash decorrelates it from wh), and each class dissolves to
+// its own mean. 60% plain; 25% drapes, of which 55% curtains and 45% blinds;
+// 15% figures and androids, which share the figure's mean.
+fn cc_windowlife_glyph_mean() -> vec3<f32> {
+    let drape = 0.55 * cc_windowlife_CURTAIN_MEAN
+                + 0.45 * cc_windowlife_BLIND_MEAN;
+    return cc_windowlife_T_DRAPE * vec3<f32>(1.0)
+           + (cc_windowlife_T_FIGURE - cc_windowlife_T_DRAPE) * drape
+           + (1.0 - cc_windowlife_T_FIGURE) * cc_windowlife_FIGURE_MEAN;
+}
+
 fn cc_windowlife_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
                        deep_uv: vec2<f32>, fp: f32) -> vec3<f32> {
     let h = cc_windowlife_hash(wh);
@@ -9218,7 +9731,7 @@ fn cc_aircars_shade_resolved(h: CityHit, cc: CityCell, dir: vec3<f32>,
 }
 
 // --- component: facadeworks (facadeworks.wgsl) ---
-// facadeworks — additive facade detail on top of the core window ladder.
+// facadeworks — additive facade detail on top of the core's windows.
 //
 // VERTICAL NEON SIGNAGE. The cyberpunk cue. A hashed minority of buildings
 // (~12%) carries one narrow vertical sign box mounted on a corner of the
@@ -10403,7 +10916,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 //      line, sometimes doubled), vent stacks (1 x 1 x 5 m, in pairs). Dark:
 //      their whole job at distance is silhouette. ~30% carry one warm
 //      service lamp — a bulkhead light on the housing, radiance 2 — which is
-//      what puts a few sparks up on the roofs above the window ladder.
+//      what puts a few sparks up on the roofs above the core's windows.
 //   2. PARAPET. A real low wall around the top deck of ~55% of buildings
 //      (the core only fakes one by brightening the roof albedo near the
 //      edge), and on ~12% of roofs overall a strip of light along its
@@ -10533,8 +11046,8 @@ const cc_rooftopworks_PENT_PITCH: f32 = 2.10;  // mullion pitch (m)
 const cc_rooftopworks_PENT_MULL: f32 = 0.13;   // dark fraction of the pitch
 const cc_rooftopworks_PENT_SILL: f32 = 0.80;   // dark spandrel at its foot
 const cc_rooftopworks_PENT_LIT: f32 = 0.58;    // bays with the light on
-// Tone-map compensation on the far-field means, the same correction the
-// core applies to its own window octaves (CITY_MEAN_COMP_BLOCK/_FLAT): a
+// Tone-map compensation on the far-field means (the core's facade now
+// averages in display space instead, city_windows_seen): a
 // mean taken in linear radiance ahead of a Reinhard curve renders CREAM,
 // because a lit bay at 1.8 is already near the knee and its average is not.
 // Solved rather than guessed: match tone(mean * E) to lit_frac * tone(B * E)
@@ -11271,7 +11784,7 @@ fn cc_rooftopworks_dark(h: CityHit, albedo: f32) -> vec3<f32> {
 // The house colour, where the building has one; cool white otherwise.
 fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     if (cc.win_mono >= 0.0) {
-        return city_window_color(cc.win_mono, cc.palette_bias);
+        return city_room_color(cc.win_mono, cc.palette_bias);
     }
     return cc_rooftopworks_TRIM_COOL;
 }
@@ -11355,7 +11868,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                     * cc_rooftopworks_PENT_MEAN_COMP, k);
         var col = cc_rooftopworks_PENT_COL;
         if (cc.win_mono >= 0.0) {
-            col = city_window_color(cc.win_mono, cc.palette_bias);
+            col = city_room_color(cc.win_mono, cc.palette_bias);
         }
         return cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO)
              + col * (cc_rooftopworks_PENT_RAD * m * sill);
@@ -19628,6 +20141,13 @@ fn cc_window_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
     return t;
 }
 
+fn cc_window_glyph_mean()
+        -> vec3<f32> {
+    var t = vec3<f32>(1.0);
+    t = t * cc_windowlife_glyph_mean();
+    return t;
+}
+
 fn cc_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>, t_max: f32,
             pixel_angle: f32, rnd: f32) -> vec4<f32> {
     var acc = vec4<f32>(0.0, 0.0, 0.0, 1.0);
@@ -25487,7 +26007,7 @@ const DF_FAR_FP0: f32 = 0.30;
 const DF_FAR_FP1: f32 = 0.50;
 
 fn df_true_pixel_angle() -> f32 {
-    return 2.0 * u.cam_origin.w / u.params.x;
+    return true_pixel_angle();
 }
 
 // The furthest the explicit walk is sure to reach on its cell budget: a
@@ -26771,6 +27291,13 @@ struct CameraRay {
     jitter_amp: f32,        // jitter_on * jitter_scale
 }
 
+// One pixel's angular size: the frame's own, before any LOD floor. What a
+// surface filters its texture over (a wider footprint only blurs it; the
+// view-step LOD angle decides how much work is done, not how sharp).
+fn true_pixel_angle() -> f32 {
+    return 2.0 * u.cam_origin.w / u.params.x;
+}
+
 fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     var cr: CameraRay;
     let img_w = u.params.x;
@@ -26801,12 +27328,15 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     cr.dir = normalize(u.cam_forward.xyz
                        + ndc_x * u.cam_right.xyz
                        + ndc_y * u.cam_up.xyz);
-    // The surfaces' resolving angle is the same knob as the cloud march's:
-    // the larger of the true pixel angle and the view-step LOD angle
-    // (u.periodic.z, the app's one LOD slider). Coarsening the slider
-    // dissolves windows into blocks exactly as it coarsens the march — one
-    // lever, one degrees-not-meters law for the whole scene.
-    cr.true_pixel_angle = 2.0 * tan_half_fov / img_w;
+    // The surfaces' LOD angle is the same knob as the cloud march's: the
+    // larger of the true pixel angle and the view-step LOD angle
+    // (u.periodic.z, the app's one LOD slider). Coarsening the slider cuts
+    // the surfaces' work (how far the city's facade shell reaches, how
+    // finely the desert walks) exactly as it coarsens the march — one
+    // lever, one degrees-not-meters law for the whole scene. What a surface
+    // FILTERS its texture over stays the true pixel's footprint: a wider
+    // one would only blur it.
+    cr.true_pixel_angle = true_pixel_angle();
     cr.pixel_angle = max(cr.true_pixel_angle, u.periodic.z);
     cr.jitter_amp = u.cam_up.w * jitter_scale;
     return cr;
@@ -26852,7 +27382,8 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
     if (!chit.hit) {
         return vec4<f32>(bitcast<f32>(mark), 0.0, 0.0, 1e30);
     }
-    let rgb = city_fog(city_shade(chit, dir, pixel_angle * chit.t),
+    let rgb = city_fog(city_shade(chit, dir, pixel_angle * chit.t,
+                                  true_pixel_angle() * chit.t, true),
                        city_o, dir, chit.t, chit.pos);
     // Flagged only where a reflection can be traced: past CITY_REFL_LOD the
     // wet street's reflection is its environment mean, measured at under
@@ -27264,8 +27795,12 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
                          ro, lobe.r, CITY_REFL_RANGE, far);
         } else {
             let fp_r = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;
-            l = city_fog(city_shade(hr, lobe.r, fp_r), ro, lobe.r, hr.t,
-                         hr.pos);
+            // The texture under the lobe, filtered over its footprint on the
+            // true pixel's terms.
+            let fp_f = true_pixel_angle() * (t + hr.t)
+                       + 0.5 * lobe.alpha * hr.t;
+            l = city_fog(city_shade(hr, lobe.r, fp_r, fp_f, false), ro,
+                         lobe.r, hr.t, hr.pos);
         }
         add = add + (wt / p_tr) * l;
     }
