@@ -418,6 +418,35 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     return tuple((ts[2 * k + 1::6] - ts[2 * k::6]) * 1e-6 for k in range(3))
 
 
+def apply_patches(src: str, patches) -> str:
+    """OLD=>NEW substitutes OLD, which must occur exactly once; OLD=*>NEW
+    substitutes every occurrence, of which there must be at least one."""
+    for p in patches:
+        every = "=*>" in p
+        old, new = p.split("=*>" if every else "=>")
+        n = src.count(old)
+        if n == 0 or (n != 1 and not every):
+            raise RuntimeError(f"patch: {old!r} occurs {n} times")
+        src = src.replace(old, new)
+    return src
+
+
+def gpu_report() -> str:
+    """The card's state before a timing: another process on it, or a busy
+    GPU, makes any comparison fiction."""
+    import subprocess
+    q = subprocess.run(
+        ["nvidia-smi", "--query-gpu=utilization.gpu,clocks.sm,clocks.max.sm,"
+         "clocks_throttle_reasons.active", "--format=csv,noheader"],
+        capture_output=True, text=True).stdout.strip()
+    apps = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=pid,process_name",
+         "--format=csv,noheader"], capture_output=True, text=True).stdout
+    return (f"gpu (util, sm clock, max sm clock, throttle): {q}; clocks "
+            f"unlocked (driver default); compute apps: "
+            f"{len([a for a in apps.splitlines() if a.strip()])}")
+
+
 def main(argv=None) -> int:
     from cloudyview.soar_host import (
         APP_LIGHT_MARCH_LOD_DEGREES, APP_VIEW_STEP_LOD_DEGREES,
@@ -466,21 +495,22 @@ def main(argv=None) -> int:
                          "the demo's cloud standing in front of a low sun")
     ap.add_argument("--npy", action="store_true",
                     help="also save the linear float image")
+    ap.add_argument("--interleave", metavar="JSON",
+                    help="time shader variants against each other instead of "
+                         "rendering: a JSON file {name: [OLD=>NEW, ...]}, the "
+                         "tree itself first and again last as the null "
+                         "control, each view's variants timed in turn for "
+                         "--rounds rounds in this one process (one gpulock)")
+    ap.add_argument("--rounds", type=int, default=6)
     args = ap.parse_args(argv)
+    args.time = args.time or bool(args.interleave)
 
     if args.patch:
         import cloudyview.soar_host as host
         original = host.read_shader
 
         def patched() -> str:
-            src = original()
-            for p in args.patch:
-                old, new = p.split("=>")
-                if src.count(old) != 1:
-                    raise RuntimeError(f"--patch: {old!r} occurs "
-                                       f"{src.count(old)} times")
-                src = src.replace(old, new)
-            return src
+            return apply_patches(original(), args.patch)
         host.read_shader = patched
 
     out = Path(args.out)
@@ -512,11 +542,26 @@ def main(argv=None) -> int:
         query_buf = device.create_buffer(
             size=48 * n_timed,
             usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC)
-    r = SoarRenderer(periodic=bool(meta.get("periodic", True)),
-                     surface=args.surface, device=device)
     if args.no_clouds:
         sigma = np.zeros_like(sigma)
-    r.upload_volume(sigma)
+    variants = {}
+    if args.interleave:
+        from cloudyview.soar_host import read_shader
+        spec = json.loads(Path(args.interleave).read_text())
+        base = read_shader()
+        names = list(spec)
+        for name in [*names, names[0] + "'"]:
+            vr = SoarRenderer(periodic=bool(meta.get("periodic", True)),
+                              surface=args.surface, device=device,
+                              shader_source=apply_patches(
+                                  base, spec[name.rstrip("'")]))
+            vr.upload_volume(sigma)
+            variants[name] = vr
+        r = variants[names[0]]
+    else:
+        r = SoarRenderer(periodic=bool(meta.get("periodic", True)),
+                         surface=args.surface, device=device)
+        r.upload_volume(sigma)
     tile = r.surface_meta
     dx = (bmax[0] - bmin[0]) / sigma.shape[0]
     state = SceneState(
@@ -567,6 +612,8 @@ def main(argv=None) -> int:
                                      math.hypot(dxo, dyo)))
         views = {"hero_offset": (x, y, z, az, el, 60.0, sun_az, sun_el)}
 
+    if variants:
+        print(gpu_report())
     baked = None
     w, h = args.size
     for name, (x, y, z, az, el, fov, s_az, s_el) in views.items():
@@ -584,8 +631,33 @@ def main(argv=None) -> int:
                          and args.quality in DESERT_LITE_TIERS),
         )
         if preset["light_cache"] and baked != (s_az, s_el):
-            r.bake_light_cache(state, view, divisor=2)
+            for vr in (variants.values() if variants else [r]):
+                vr.bake_light_cache(state, view, divisor=2)
             baked = (s_az, s_el)
+        if variants:
+            # Warm each variant (compile, first-touch), then A, B, ..., A'
+            # in turn, round after round: drift and neighbours' load fall
+            # on all of them alike, and A' against A is the null control.
+            for vr in variants.values():
+                vr.render(state, view, frames=1)
+                pass_times_ms(vr, state, view, n_timed, query_set, query_buf)
+            tot = {k: [] for k in variants}
+            parts = {k: [] for k in variants}
+            for _ in range(args.rounds):
+                for k, vr in variants.items():
+                    sp, fp_, rp = pass_times_ms(vr, state, view, n_timed,
+                                                query_set, query_buf)
+                    tot[k].append(float(np.median(sp + fp_ + rp)))
+                    parts[k].append((float(np.median(sp)),
+                                     float(np.median(fp_)),
+                                     float(np.median(rp))))
+            for k in variants:
+                t = np.array(tot[k])
+                pa = np.median(np.array(parts[k]), axis=0)
+                print(f"  {name:<14} {k:<12} {np.median(t):7.3f} ms "
+                      f"(min {t.min():.3f} max {t.max():.3f}; surface "
+                      f"{pa[0]:.3f} + refine {pa[1]:.3f} + march {pa[2]:.3f})")
+            continue
         t0 = time.perf_counter()
         img = r.render(state, view, frames=args.frames)
         el_s = time.perf_counter() - t0
