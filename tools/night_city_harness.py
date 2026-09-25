@@ -96,6 +96,7 @@ def main(argv=None) -> int:
         STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
         APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
         SceneState, SoarRenderer, ViewState, surface_cell_m,
+        surface_clock_period_s,
     )
     from cloudyview.witness import OCEAN_REFLECTANCE
 
@@ -172,6 +173,10 @@ def main(argv=None) -> int:
                         help="moon azimuth/elevation in city mode "
                              "(default: %(default)s; constants.js CITY_MOON "
                              "is the app's)")
+    parser.add_argument("--time", type=float, default=0.0,
+                        help="the scene clock in seconds (steam, the sea): "
+                             "what `witness --time` and a track's samples "
+                             "set (default: %(default)s)")
     parser.add_argument("--haze", type=float, default=None,
                         help="aerosol, the app's one haze number "
                              "(default: the app's)")
@@ -265,6 +270,7 @@ def main(argv=None) -> int:
         ocean_max_lod=max_lod,
         ocean_enabled=True,
         surface=surface,
+        clock_period_s=surface_clock_period_s(surface, meta),
         **({"city_tile_offset_m": tuple(args.city_offset)}
            if args.city_offset is not None else {}),
     )
@@ -347,6 +353,7 @@ def main(argv=None) -> int:
             jitter=True, subpixel=True,
             sun_azimuth=light_az, sun_elevation=light_el,
             exposure=exposure,
+            scene_time=args.time,
             light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
             view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
             **look,

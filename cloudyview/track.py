@@ -608,9 +608,10 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     from .cloudfield import load as load_field
     from .soar_host import (SceneState, SoarRenderer, ViewState,
                             APP_LIGHT_MARCH_LOD_DEGREES,
+                            DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS,
                             APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
                             desert_scene_fields, surface_cell_m,
-                            surface_period_m)
+                            surface_clock_period_s, surface_period_m)
     from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
                           QUALITY_PRESETS, _field_level)
 
@@ -686,8 +687,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         ocean_tile_extent=tile,
         ocean_max_lod=int(meta["mips"]) - 1,
         surface_period_m=period,
-        **({"clock_period_s": float(meta["clock_period_s"])}
-           if s.surface == "ocean" else {}),
+        clock_period_s=surface_clock_period_s(s.surface, meta),
         nested=len(levels) > 1,
         surface=s.surface,
         **({"city_tile_offset_m": s.city_tile_offset_m}
@@ -717,6 +717,11 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * s.lod_strength,
             light_cache=bool(preset["light_cache"]),
             sky_probe=bool(preset["sky_probe"]),
+            # The desert's tier-keyed detail, as the browser flew it.
+            desert_lite=(s.surface == "desert"
+                         and s.quality in DESERT_LITE_TIERS),
+            desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[s.quality]
+                              if s.surface == "desert" else 1.0),
             frame_index=index * FRAME_INDEX_STRIDE,
             scene_time=frame.scene_time,
         )

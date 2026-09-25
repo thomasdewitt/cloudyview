@@ -47,6 +47,7 @@ from .cloudfield import CloudField, load as _load_field
 from .look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
 from .soar_host import (
     APP_LIGHT_MARCH_LOD_DEGREES,
+    DESERT_FLORA_CUT_BY_TIER,
     DESERT_LITE_TIERS,
     APP_VIEW_STEP_LOD_DEGREES,
     DEFAULT_HAZE_HEIGHT_DEPENDENT,
@@ -66,6 +67,8 @@ from .soar_host import (
     desert_scene_fields,
     surface_cell_m,
     surface_period_m,
+    surface_clock_period_s,
+    CLOCK_SURFACES,
 )
 
 logger = logging.getLogger(__name__)
@@ -336,10 +339,11 @@ def render_nested(
         raise ValueError(
             f"city_offset places the night city's tile, but surface is "
             f"'{surface}'; pass surface='city' or drop the offset.")
-    if scene_time != 0.0 and surface != "ocean":
+    if scene_time != 0.0 and surface not in CLOCK_SURFACES:
         raise ValueError(
-            f"scene_time is the moving sea's clock, and surface is "
-            f"'{surface}', which does not move; drop --time.")
+            f"scene_time is the clock of the surfaces that move "
+            f"({', '.join(CLOCK_SURFACES)}), and surface is '{surface}', "
+            f"which does not; drop --time.")
     levels = list(levels)
     if not levels:
         raise ValueError("render_nested needs at least one level.")
@@ -398,8 +402,7 @@ def render_nested(
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1,
         surface_period_m=surface_period_m(surface, meta),
-        **({"clock_period_s": float(meta["clock_period_s"])}
-           if surface == "ocean" else {}),
+        clock_period_s=surface_clock_period_s(surface, meta),
         nested=len(levels) > 1,
         surface=surface,
         **(desert_scene_fields(meta)
@@ -432,6 +435,8 @@ def render_nested(
         sky_probe=(tier["sky_probe"] if tier else True),
         # The simplified desert flies at the tiers the app keys it on.
         desert_lite=bool(surface == "desert" and quality in DESERT_LITE_TIERS),
+        desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[quality]
+                          if surface == "desert" and quality else 1.0),
         scene_time=float(scene_time),
     )
     if tier and tier["light_cache"]:
@@ -1011,9 +1016,10 @@ def cli():
                              "8100 -44190; soar writes the flown one here")
     parser.add_argument("--time", type=float, metavar="SECONDS",
                         dest="scene_time",
-                        help="The scene clock: where the moving sea is in "
-                             "its motion (default 0). Soar writes the clock "
-                             "the still was taken at")
+                        help="The scene clock: where the moving sea, or the "
+                             "city's steam, is in its motion (default 0; the "
+                             "desert has none). Soar writes the clock the "
+                             "still was taken at")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",

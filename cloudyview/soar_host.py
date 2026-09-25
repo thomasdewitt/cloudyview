@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -137,6 +138,25 @@ def surface_period_m(surface: str, meta: dict) -> float:
     if key not in meta:
         raise KeyError(f"the {surface} tile's meta.json has no {key!r}.")
     return float(meta[key])
+
+
+# The surfaces whose shader reads the scene clock, and so whose clock runs:
+# the sea (its waves) and the city (its steam). The desert reads none, and a
+# running clock there would only keep a parked view from converging.
+CLOCK_SURFACES = ("ocean", "city")
+
+
+def surface_clock_period_s(surface: str, meta: dict) -> Optional[float]:
+    """The period a surface's clock wraps at (SceneState.clock_period_s), from
+    its meta.json — where its animation repeats exactly, so the wrap is
+    invisible and float32 never loses the cadence — or None for a surface
+    whose clock is always 0."""
+    if check_surface(surface) not in CLOCK_SURFACES:
+        return None
+    if "clock_period_s" not in meta:
+        raise KeyError(f"the {surface} tile's meta.json has no "
+                       "'clock_period_s'.")
+    return float(meta["clock_period_s"])
 
 
 @functools.lru_cache(maxsize=1)
@@ -404,10 +424,11 @@ class SceneState:
     # jump it, so an ocean scene states its own (surface_period_m(), from
     # the sea's meta.json).
     surface_period_m: Optional[float] = None
-    # The sea's period in time (the sea's meta.json clock_period_s): row 24.z
-    # packs the scene clock modulo it, so float32 never loses the sea's
-    # cadence. Required over the ocean whenever the clock is not 0 (a still
-    # at clock 0 needs nothing); unused off the ocean. Mirrors uniforms.js.
+    # The surface's period in time (its meta.json clock_period_s,
+    # surface_clock_period_s()): row 24.z packs the scene clock modulo it, so
+    # float32 never loses the cadence. Required over the sea and the city
+    # whenever the clock is not 0 (a still at clock 0 needs nothing); unused
+    # over the desert, whose clock is 0. Mirrors uniforms.js.
     clock_period_s: Optional[float] = None
 
 
@@ -484,6 +505,10 @@ class ViewState:
     # a desert scene, keyed in the app on the tier (DESERT_LITE_TIERS) —
     # witness --quality sets it the same way. It has no refine stage.
     desert_lite: bool = False
+    # How far out the full desert walks the explicit shrubs (raymarch.wgsl
+    # DESERT_FLORA_CUT, a scale on the shrubs' cut), keyed in the app
+    # on the tier (DESERT_FLORA_CUT_BY_TIER); 1.0 is the shader's own value.
+    desert_flora_cut: float = 1.0
     # The scene clock (s, row 24.z): where the moving sea is in its motion.
     # The browser advances it while flying; a still names it (witness
     # --time) and a track carries it per sample.
@@ -679,16 +704,18 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
 
     base = (state.surface_offset_m if state.surface_offset_m is not None
             else (state.city_tile_offset_m if city else (0.0, 0.0)))
-    # The clock only over the sea (nothing else reads it, and as part of the
-    # browser's scene key a running clock would keep a parked city or desert
-    # from converging while a track records), wrapped at the sea's own
-    # period the way uniforms.js wraps it.
+    # The clock only where the shader reads it (CLOCK_SURFACES: the sea's
+    # waves, the city's steam; as part of the browser's scene key a running
+    # clock would keep a parked desert from converging while a track
+    # records), wrapped at the surface's own period the way uniforms.js
+    # wraps it — in float64, before the narrowing to float32.
     clock = 0.0
-    if not (city or desert) and view.scene_time != 0.0:
+    if not desert and view.scene_time != 0.0:
         if state.clock_period_s is None or not state.clock_period_s > 0:
             raise ValueError(
-                "an ocean scene with a running clock needs clock_period_s "
-                "(the sea's meta.json clock_period_s).")
+                f"a {'city' if city else 'sea'} scene with a running clock "
+                "needs clock_period_s (the surface tile's meta.json "
+                "clock_period_s; surface_clock_period_s()).")
         clock = math.fmod(float(view.scene_time), state.clock_period_s)
         if clock < 0:
             clock += state.clock_period_s
@@ -751,25 +778,144 @@ ACCUM_FORMAT = "rgba32float"
 # under each render pixel. t runs to 1e30 on a miss and to tens of km on a
 # hit, so it needs float32; fs_main only ever textureLoad()s it.
 SURFACE_FORMAT = "rgba32float"
-# The scenes whose opaque surface is traced by that pass rather than in the
-# march (raymarch.wgsl: the surface pre-pass section).
-SURFACE_PASS_SURFACES = ("city", "desert")
-# ... and those whose surface pass has a second stage (fs_surface_refine):
-# the city (its facade shell over the plain boxes) and the desert (its near
-# plants over the far forms). A surface joins by being listed here and in
-# renderer.js _hasRefineStage.
-SURFACE_REFINE_SURFACES = ("city", "desert")
+# The surface stages each traced surface runs before the march, in order:
+# raymarch.wgsl fragment entries, each after the first reading the one
+# before at group 1 binding 1, the last writing the surface the march reads.
+# The city: its boxes, the facade shell over them (fs_surface_refine), the
+# street (fs_surface_street: furniture, wet reflection, steam, kept out of
+# the earlier stages' registers). The desert: its ground, then its near
+# plants over the far forms (fs_surface_refine). A surface or a stage joins
+# here and in web/soar/constants.js SURFACE_STAGES, its twin (pinned by
+# tests/test_surface_stages.py); the hosts derive everything else from it.
+SURFACE_STAGES = {
+    "city": ("fs_surface", "fs_surface_refine", "fs_surface_street"),
+    "desert": ("fs_surface", "fs_surface_refine"),
+}
+# Under DESERT_LITE the desert's later stages are compiled out and skipped.
+SURFACE_STAGES_LITE = ("fs_surface",)
+# The stages that also write the veil (a second attachment, VEIL_FORMAT):
+# the first, and the city's street.
+VEIL_STAGES = ("fs_surface", "fs_surface_street")
+# Derived: the scenes whose opaque surface is traced by the stages rather
+# than in the march, and those with a refinement or a street stage.
+SURFACE_PASS_SURFACES = tuple(SURFACE_STAGES)
+SURFACE_REFINE_SURFACES = tuple(
+    s for s, e in SURFACE_STAGES.items() if "fs_surface_refine" in e)
 # The tiers that fly the simplified desert (raymarch.wgsl DESERT_LITE: no
 # refine stage, each desert section's Low drops compiled out). The twin of
 # web/soar/constants.js DESERT_LITE_TIERS; witness --quality sets
 # ViewState.desert_lite from it.
 DESERT_LITE_TIERS = ("low", "minimal")
+# The shrubs' explicit cut per tier (raymarch.wgsl DESERT_FLORA_CUT): Medium
+# walks the explicit shrubs about half as far as High; the lite tiers ignore
+# it.
+# The twin of web/soar/constants.js DESERT_FLORA_CUT_BY_TIER; witness
+# --quality sets ViewState.desert_flora_cut from it.
+DESERT_FLORA_CUT_BY_TIER = {"max": 1.0, "high": 1.0, "medium": 0.5,
+                            "low": 1.0, "minimal": 1.0}
+
+SURFACE_STREET_SURFACES = tuple(
+    s for s, e in SURFACE_STAGES.items() if "fs_surface_street" in e)
+# The veil the first and last surface stages write beside the surface
+# (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
+# depth, packed as uints so no float path touches the bits.
+VEIL_FORMAT = "rgba32uint"
+
+
+def surface_stage_entries(surface: str, desert_lite: bool = False) -> tuple:
+    """The surface stages (raymarch.wgsl entries) a view of `surface` runs,
+    in order; none over the sea."""
+    stages = SURFACE_STAGES.get(check_surface(surface), ())
+    if desert_lite:
+        if surface != "desert":
+            raise ValueError("desert_lite is a desert specialization; the "
+                             f"surface is {surface!r}.")
+        return SURFACE_STAGES_LITE
+    return stages
+
+
+def surface_stage_plan(n: int) -> list:
+    """Where each of `n` chained stages writes and what it reads, as
+    (writes, reads) with "final" the surface the march reads and "a"/"b"
+    the two intermediates the chain alternates between (None: the first
+    stage reads nothing). renderer.js surfaceStagePlan is the twin."""
+    plan = []
+    for i in range(n):
+        writes = "final" if i == n - 1 else "ab"[i % 2]
+        reads = None if i == 0 else "ab"[(i - 1) % 2]
+        plan.append((writes, reads))
+    return plan
+
+
+# Section stripping (raymarch.wgsl's `// @section` markers). Each surface's
+# code is fenced in one or more section blocks plus one stub block that
+# re-declares, with neutral bodies, exactly the symbols shared code calls
+# into it. A module keeps the compiled surface's sections and the OTHER
+# surfaces' stubs, so it carries no code of a surface it cannot show: dead
+# code of another surface had been moving this one's codegen (a dead desert
+# call moved ocean pixels; the desert's tables moved the city's surface pass
+# 128 -> 168 registers). renderer.js stripSections is the twin, and
+# tests/test_wgsl_sections.py pins the two to the same bytes.
+SECTION_OF_SURFACE = {"ocean": "sea", "city": "city", "desert": "desert"}
+_SECTION_MARKER = re.compile(r"^// @(section|end|stub|end-stub) (\w+)\s*$")
+
+
+def strip_sections(source: str, surface: str) -> str:
+    """`source` with every section but `surface`'s blanked, and `surface`'s
+    stub blanked. Lines are blanked, not removed, so a compile error's line
+    number is still the file's. A source with no markers (a revision from
+    before them, which soar_shader_ab replays) is returned as it is; one
+    with any must be complete: every surface has at least one section and
+    exactly one stub, blocks do not nest, and each closes what it opened."""
+    keep = SECTION_OF_SURFACE[check_surface(surface)]
+    lines = source.split("\n")
+    marks = [(i, m.group(1), m.group(2)) for i, l in enumerate(lines)
+             for m in [_SECTION_MARKER.match(l)] if m]
+    if not marks:
+        return source
+    names = set(SECTION_OF_SURFACE.values())
+    seen = {n: {"section": 0, "stub": 0} for n in names}
+    out, open_ = list(lines), None          # open_: (kind, name, line)
+    for i, kind, name in marks:
+        if name not in names:
+            raise RuntimeError(f"raymarch.wgsl line {i + 1}: unknown section "
+                               f"{name!r}; the sections are {sorted(names)}.")
+        if kind in ("section", "stub"):
+            if open_ is not None:
+                raise RuntimeError(
+                    f"raymarch.wgsl line {i + 1}: @{kind} {name} opens inside "
+                    f"@{open_[0]} {open_[1]} (line {open_[2] + 1}); blocks "
+                    "do not nest.")
+            open_ = (kind, name, i)
+            seen[name][kind] += 1
+            continue
+        want = "section" if kind == "end" else "stub"
+        if open_ is None or open_[:2] != (want, name):
+            raise RuntimeError(f"raymarch.wgsl line {i + 1}: @{kind} {name} "
+                               f"closes nothing open as @{want} {name}.")
+        start = open_[2]
+        drop = (name != keep) if want == "section" else (name == keep)
+        if drop:
+            for j in range(start + 1, i):
+                out[j] = ""
+        open_ = None
+    if open_ is not None:
+        raise RuntimeError(f"raymarch.wgsl line {open_[2] + 1}: "
+                           f"@{open_[0]} {open_[1]} is never closed.")
+    for name, n in sorted(seen.items()):
+        if n["section"] < 1 or n["stub"] != 1:
+            raise RuntimeError(
+                f"raymarch.wgsl: {name} has {n['section']} section block(s) "
+                f"and {n['stub']} stub block(s); a marked shader needs at "
+                "least one and exactly one.")
+    return "\n".join(out)
 
 
 def specialize(source: str, *, periodic: bool, nested: bool,
                max_light_steps: int, tone_map: bool = True,
                surface: str = "ocean", light_cache: bool = False,
-               sky_probe: bool = True, desert_lite: bool = False) -> str:
+               sky_probe: bool = True, desert_lite: bool = False,
+               desert_flora_cut: float = 1.0) -> str:
     """Bake the compile-time constants into the shader source.
 
     Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
@@ -792,7 +938,7 @@ def specialize(source: str, *, periodic: bool, nested: bool,
     """
     if not (1 <= int(max_light_steps) <= 512):
         raise ValueError(f"max_light_steps must be in [1, 512]; got {max_light_steps}.")
-    check_surface(surface)
+    source = strip_sections(source, surface)
     swaps = [
         ("const PERIODIC_DOMAIN: bool = true;",
          f"const PERIODIC_DOMAIN: bool = {'true' if periodic else 'false'};"),
@@ -816,6 +962,17 @@ def specialize(source: str, *, periodic: bool, nested: bool,
                              f"surface is {surface!r}.")
         swaps.append(("const DESERT_LITE: bool = false;",
                       "const DESERT_LITE: bool = true;"))
+    # The flora's explicit cut, the same way: demanded only when it departs
+    # from the declared 1.0, and only ever over a desert.
+    cut = float(desert_flora_cut)
+    if not (math.isfinite(cut) and cut > 0.0):
+        raise ValueError(f"desert_flora_cut must be positive; got {cut}.")
+    if cut != 1.0:
+        if surface != "desert":
+            raise ValueError("desert_flora_cut is a desert specialization; "
+                             f"the surface is {surface!r}.")
+        swaps.append(("const DESERT_FLORA_CUT: f32 = 1.0;",
+                      f"const DESERT_FLORA_CUT: f32 = {cut!r};"))
     if "const LIGHT_CACHE: bool" in source:
         swaps += [
             ("const LIGHT_CACHE: bool = false;",
@@ -915,6 +1072,9 @@ class SoarRenderer:
         # traced surface.
         self._surface_dummy = self.device.create_texture(
             size=(1, 1, 1), dimension="2d", format=SURFACE_FORMAT,
+            usage=self.wgpu.TextureUsage.TEXTURE_BINDING)
+        self._veil_dummy = self.device.create_texture(
+            size=(1, 1, 1), dimension="2d", format=VEIL_FORMAT,
             usage=self.wgpu.TextureUsage.TEXTURE_BINDING)
         self._light_cache_dims = None
         # Binding 3 is the city's or the desert's tile; binding 9 the moving
@@ -1111,10 +1271,11 @@ class SoarRenderer:
         self._ray_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout])
         # Group 1: the surface pre-pass's targets (raymarch.wgsl) — the final
-        # surface, read by the march, and the first stage's, read by the
-        # second (fs_surface_refine). textureLoad()ed only, so rgba32float's
-        # unfilterability is exactly right. The passes that read neither (the
-        # bake, the plain surface stage) are laid out without it.
+        # surface, read by the march; the previous stage's, read by each later
+        # stage (fs_surface_refine, fs_surface_street); and the veil, read by
+        # the march. textureLoad()ed only, so rgba32float's unfilterability
+        # is exactly right. The passes that read none of them (the bake, the
+        # first surface stage) are laid out without it.
         unfilterable = {"sample_type": "unfilterable-float",
                         "view_dimension": "2d"}
         self._surface_layout = d.create_bind_group_layout(entries=[
@@ -1122,6 +1283,8 @@ class SoarRenderer:
              "texture": unfilterable},
             {"binding": 1, "visibility": wgpu.ShaderStage.FRAGMENT,
              "texture": unfilterable},
+            {"binding": 2, "visibility": wgpu.ShaderStage.FRAGMENT,
+             "texture": {"sample_type": "uint", "view_dimension": "2d"}},
         ])
         self._march_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout, self._surface_layout])
@@ -1147,7 +1310,8 @@ class SoarRenderer:
             primitive={"topology": "triangle-list"})
 
     def _spec(self, *, light_cache: bool, sky_probe: bool,
-              desert_lite: bool = False) -> dict:
+              desert_lite: bool = False,
+              desert_flora_cut: float = 1.0) -> dict:
         """Everything specialize() takes, from this renderer's attributes as
         they stand now plus a lighting method. Every module and pipeline
         cache here keys on the whole of it, so an attribute changed after
@@ -1157,7 +1321,8 @@ class SoarRenderer:
                     max_light_steps=self.max_light_steps,
                     tone_map=self.tone_map, surface=self.surface,
                     light_cache=bool(light_cache), sky_probe=bool(sky_probe),
-                    desert_lite=bool(desert_lite))
+                    desert_lite=bool(desert_lite),
+                    desert_flora_cut=float(desert_flora_cut))
 
     def _module_for(self, spec: dict):
         key = tuple(sorted(spec.items()))
@@ -1168,11 +1333,15 @@ class SoarRenderer:
             self._modules[key] = module
         return module
 
-    def _pipeline_for(self, entry_point: str, target_format: str, spec: dict,
+    def _pipeline_for(self, entry_point: str, target_format, spec: dict,
                       layout=None):
         """`layout` defaults to the scene group alone; the march, which also
-        reads the surface pre-pass's target, passes _march_pipeline_layout."""
-        key = (entry_point, target_format, tuple(sorted(spec.items())))
+        reads the surface pre-pass's target, passes _march_pipeline_layout.
+        `target_format` is one format, or a tuple of them for an entry point
+        with several outputs (the surface stages that write the veil)."""
+        formats = ((target_format,) if isinstance(target_format, str)
+                   else tuple(target_format))
+        key = (entry_point, formats, tuple(sorted(spec.items())))
         pipeline = self._pipelines.get(key)
         if pipeline is None:
             module = self._module_for(spec)
@@ -1180,7 +1349,7 @@ class SoarRenderer:
                 layout=layout or self._ray_pipeline_layout,
                 vertex={"module": module, "entry_point": "vs_main"},
                 fragment={"module": module, "entry_point": entry_point,
-                          "targets": [{"format": target_format}]},
+                          "targets": [{"format": f} for f in formats]},
                 primitive={"topology": "triangle-list"})
             self._pipelines[key] = pipeline
         return pipeline
@@ -1197,7 +1366,8 @@ class SoarRenderer:
         a desert, its detail."""
         return self._spec(light_cache=view.light_cache,
                           sky_probe=view.sky_probe,
-                          desert_lite=view.desert_lite)
+                          desert_lite=view.desert_lite,
+                          desert_flora_cut=view.desert_flora_cut)
 
     def _bake_pipeline(self):
         """The sun-tau bake: one field-x plane of the cache per draw, into an
@@ -1207,26 +1377,41 @@ class SoarRenderer:
         return self._pipeline_for("fs_bake_light", "r16float", self._spec(
             light_cache=False, sky_probe=True))
 
-    def _surface_pipeline_for(self, view: "ViewState"):
-        """The surface pre-pass pipeline (raymarch.wgsl fs_surface) on the
-        same specialization as `view`'s march — the traced city or desert,
-        one texel per render pixel, drawn before every march — or None in a
-        scene with no traced surface."""
-        if self.surface not in SURFACE_PASS_SURFACES:
+    def _stage_entries(self, view: "ViewState") -> tuple:
+        """The surface stages `view` runs (SURFACE_STAGES), in order."""
+        return surface_stage_entries(self.surface, view.desert_lite)
+
+    def _stage_pipeline_for(self, entry: str, first: bool,
+                            view: "ViewState"):
+        """One surface stage's pipeline on `view`'s specialization: the
+        first reads nothing at group 1, a later one the stage before (the
+        march's layout); a VEIL_STAGES entry writes the veil too."""
+        formats = ((SURFACE_FORMAT, VEIL_FORMAT) if entry in VEIL_STAGES
+                   else SURFACE_FORMAT)
+        return self._pipeline_for(
+            entry, formats, self._view_spec(view),
+            layout=None if first else self._march_pipeline_layout)
+
+    def _named_stage_for(self, entry: str, view: "ViewState"):
+        entries = self._stage_entries(view)
+        if entry not in entries:
             return None
-        return self._pipeline_for("fs_surface", SURFACE_FORMAT,
-                                  self._view_spec(view))
+        return self._stage_pipeline_for(entry, entries.index(entry) == 0,
+                                        view)
+
+    def _surface_pipeline_for(self, view: "ViewState"):
+        """The first surface stage (fs_surface), or None in a scene with no
+        traced surface."""
+        return self._named_stage_for("fs_surface", view)
 
     def _refine_pipeline_for(self, view: "ViewState"):
-        """The surface pass's second stage (fs_surface_refine), which reads
-        the first stage's surface at group 1 binding 1 — or None in a scene
-        whose surface has no second stage (the simplified desert has none:
-        DESERT_LITE compiles it out, and the pass is skipped)."""
-        if self.surface not in SURFACE_REFINE_SURFACES or view.desert_lite:
-            return None
-        return self._pipeline_for("fs_surface_refine", SURFACE_FORMAT,
-                                  self._view_spec(view),
-                                  layout=self._march_pipeline_layout)
+        """The refinement (fs_surface_refine), or None where the view has
+        none (the sea; the simplified desert compiles it out)."""
+        return self._named_stage_for("fs_surface_refine", view)
+
+    def _street_pipeline_for(self, view: "ViewState"):
+        """The city's street stage (fs_surface_street), or None."""
+        return self._named_stage_for("fs_surface_street", view)
 
     def _ensure_targets(self, size):
         wgpu = self.wgpu
@@ -1237,26 +1422,58 @@ class SoarRenderer:
                  | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC)
         make = lambda fmt: self.device.create_texture(
             size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
-        surface = (make(SURFACE_FORMAT)
-                   if self.surface in SURFACE_PASS_SURFACES else None)
-        plain = (make(SURFACE_FORMAT)
-                 if self.surface in SURFACE_REFINE_SURFACES else None)
+        has = self.surface in SURFACE_PASS_SURFACES
+        # The intermediates the longest stage chain this surface can run
+        # needs (surface_stage_plan alternates two), made once so a tier
+        # change never reallocates.
+        n_mid = min(len(SURFACE_STAGES.get(self.surface, ())) - 1, 2)
+        later, both = n_mid >= 1, n_mid >= 2
+        surface = make(SURFACE_FORMAT) if has else None
+        veil = make(VEIL_FORMAT) if has else None
+        plain = make(SURFACE_FORMAT) if later else None
+        mid = make(SURFACE_FORMAT) if both else None
         dummy = self._surface_dummy
-        group1 = lambda final, plain_: self.device.create_bind_group(
+        veil_dummy = self._veil_dummy
+        group1 = lambda final, prev, veil_: self.device.create_bind_group(
             layout=self._surface_layout, entries=[
                 {"binding": 0, "resource": final.create_view()},
-                {"binding": 1, "resource": plain_.create_view()}])
+                {"binding": 1, "resource": prev.create_view()},
+                {"binding": 2, "resource": veil_.create_view()}])
         self._targets = {
             "size": size, "sample": make(SAMPLE_FORMAT),
             "accum": [make(ACCUM_FORMAT), make(ACCUM_FORMAT)],
-            "surface": surface,
-            "plain": plain,
-            # Group 1 for the march (this size's final surface) and for the
-            # refinement stage (the plain one); neither binds what it writes.
-            "surface_group": group1(surface or dummy, dummy),
-            "refine_group": group1(dummy, plain or dummy),
+            "surface": surface, "veil": veil, "plain": plain, "mid": mid,
+            # Group 1 for a later stage reading the plain or the middle
+            # surface (the march's own group is below); no stage binds what
+            # it writes.
+            "after_plain": group1(dummy, plain, veil_dummy) if plain else None,
+            "after_mid": group1(dummy, mid, veil_dummy) if mid else None,
+            # Group 1 for the march: this size's final surface and veil.
+            "surface_group": group1(surface or dummy, dummy,
+                                    veil or veil_dummy),
         }
         return self._targets
+
+    def _surface_stages(self, targets, view: "ViewState"):
+        """The surface stages this view runs, in order, as (pipeline, group 1
+        or None, the textures it writes): SURFACE_STAGES chained by
+        surface_stage_plan — each later stage reads the one before at group
+        1 binding 1 through the two intermediates ("plain", "mid"), the last
+        writes the surface the march reads, and a VEIL_STAGES entry writes
+        the veil beside it."""
+        entries = self._stage_entries(view)
+        slot = {"final": (targets["surface"], None),
+                "a": (targets["plain"], targets["after_plain"]),
+                "b": (targets["mid"], targets["after_mid"])}
+        stages = []
+        for k, (entry, (writes, reads)) in enumerate(
+                zip(entries, surface_stage_plan(len(entries)))):
+            out = [slot[writes][0]]
+            if entry in VEIL_STAGES:
+                out.append(targets["veil"])
+            stages.append((self._stage_pipeline_for(entry, k == 0, view),
+                           None if reads is None else slot[reads][1], out))
+        return stages
 
     def _ensure_bind_group(self):
         if self._bind_group is not None:
@@ -1401,12 +1618,7 @@ class SoarRenderer:
         bind_group = self._ensure_bind_group()
         sample_view = targets["sample"].create_view()
         ray_pipeline = self._ray_pipeline_for(view)
-        surface_pipeline = self._surface_pipeline_for(view)
-        refine_pipeline = self._refine_pipeline_for(view)
-        surface_view = (targets["surface"].create_view()
-                        if targets["surface"] is not None else None)
-        plain_view = (targets["plain"].create_view()
-                      if targets["plain"] is not None else None)
+        surface_stages = self._surface_stages(targets, view)
 
         accum_index = 0
         for i in range(frames):
@@ -1433,28 +1645,21 @@ class SoarRenderer:
                 ])
 
             enc = self.device.create_command_encoder()
-            if surface_view is not None:
-                # The surface under this frame's rays, for the march below:
-                # same uniforms, same frame, same pixels. With a refinement
-                # stage the first pass writes the plain surface and the
-                # second the final one.
-                stages = [(surface_pipeline, None,
-                           plain_view if refine_pipeline is not None
-                           else surface_view)]
-                if refine_pipeline is not None:
-                    stages.append((refine_pipeline, targets["refine_group"],
-                                   surface_view))
-                for pipeline, group1, view_ in stages:
-                    sp = enc.begin_render_pass(color_attachments=[{
-                        "view": view_, "load_op": "clear",
-                        "store_op": "store",
-                        "clear_value": (0.0, 0.0, 0.0, 1e30)}])
-                    sp.set_pipeline(pipeline)
-                    sp.set_bind_group(0, bind_group)
-                    if group1 is not None:
-                        sp.set_bind_group(1, group1)
-                    sp.draw(3)
-                    sp.end()
+            # The surface under this frame's rays, for the march below: same
+            # uniforms, same frame, same pixels, stage by stage.
+            for pipeline, group1, writes in surface_stages:
+                sp = enc.begin_render_pass(color_attachments=[
+                    {"view": tex.create_view(), "load_op": "clear",
+                     "store_op": "store",
+                     "clear_value": ((0.0, 0.0, 0.0, 1e30) if k == 0
+                                     else (0, 0, 0, 0))}
+                    for k, tex in enumerate(writes)])
+                sp.set_pipeline(pipeline)
+                sp.set_bind_group(0, bind_group)
+                if group1 is not None:
+                    sp.set_bind_group(1, group1)
+                sp.draw(3)
+                sp.end()
             rp = enc.begin_render_pass(color_attachments=[{
                 "view": sample_view, "load_op": "clear", "store_op": "store",
                 "clear_value": (0.0, 0.0, 0.0, 1.0)}])

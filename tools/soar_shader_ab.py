@@ -60,8 +60,9 @@ sys.path.insert(0, str(REPO / "tests"))
 
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
-    SceneState, SoarRenderer, ViewState, camera_world_origin, read_shader,
-    desert_scene_fields, surface_cell_m, surface_period_m,
+    DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SceneState, SoarRenderer,
+    ViewState, camera_world_origin, desert_scene_fields, read_shader,
+    surface_cell_m, surface_clock_period_s, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
@@ -216,8 +217,7 @@ def main():
     state.ocean_tile_extent = float(meta["tile_extent_m"])
     state.ocean_max_lod = int(meta["mips"]) - 1
     state.surface_period_m = surface_period_m(surface, meta)
-    if surface == "ocean":
-        state.clock_period_s = float(meta["clock_period_s"])
+    state.clock_period_s = surface_clock_period_s(surface, meta)
     if surface == "desert":
         # Row 8.yzw: the tile's relief, without which the desert is a plane.
         for key, value in desert_scene_fields(meta).items():
@@ -256,7 +256,15 @@ def main():
             sun_azimuth=v.get("sun_azimuth", 20.0),
             sun_elevation=v.get("sun_elevation", 55.0),
             jitter=args.jitter, light_cache=light_cache,
-            sky_probe=sky_probe, **extra)
+            sky_probe=sky_probe,
+            # A desert at a quality tier flies that tier's detail.
+            desert_lite=(surface == "desert"
+                         and args.tier in DESERT_LITE_TIERS),
+            desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[args.tier]
+                              if surface == "desert"
+                              and args.tier in DESERT_FLORA_CUT_BY_TIER
+                              else 1.0),
+            **extra)
         sun = (view.sun_azimuth, view.sun_elevation)
         if light_cache and sun != baked_sun:
             for r in renderers:

@@ -238,17 +238,40 @@ def test_the_whitecaps_far_field_near_a_closed_gate(sea):
             sea_tile.foam_resolved_cover(theta, *args), rel=1e-5, abs=1e-8)
 
 
-@pytest.mark.parametrize("surface", ["city", "desert"])
-def test_the_clock_is_refused_where_nothing_moves(surface):
-    """Only the sea reads the clock (row 24.z is 0 elsewhere), so a time
-    asked of a city or a desert would be a silent no-op."""
+def test_the_clock_is_refused_where_nothing_moves():
+    """The desert reads no clock (row 24.z is 0 there), so a time asked of
+    it would be a silent no-op. The sea and the city read it."""
+    from cloudyview.soar_host import CLOCK_SURFACES
     from cloudyview.witness import render_nested
-    with pytest.raises(ValueError, match="does not move"):
+    assert CLOCK_SURFACES == ("ocean", "city")
+    with pytest.raises(ValueError, match="does not"):
         render_nested([], [0.0, 0.0, 100.0], azimuth=0.0, elevation=0.0,
                       sun_azimuth=0.0, sun_elevation=45.0,
-                      surface=surface, scene_time=5.0,
-                      city_offset=(8100.0, -44190.0) if surface == "city"
-                      else None)
+                      surface="desert", scene_time=5.0)
+
+
+def test_the_city_states_its_clock_period():
+    """The city's clock wraps at its tile's period, where city-street's
+    steam repeats exactly (tools/export_web_assets.py CITY_CLOCK_PERIOD_S)."""
+    from cloudyview.soar_host import surface_clock_period_s
+    city = json.loads((REPO / "cloudyview" / "soar" / "city"
+                       / "meta.json").read_text())
+    period = surface_clock_period_s("city", city)
+    assert surface_clock_period_s("desert", {}) is None
+    # The steam states the period it repeats at, and the tile the hosts
+    # wrap at must be the same number — neither side can drift alone.
+    src = SHADER.read_text()
+    assert _wgsl_scalar(src, "cc_manholesteam_CLOCK_PERIOD_S") == period
+    # Why it repeats there: its noise lattice rises (lattice scale) x
+    # RISE_RATE cells a second and wraps at ZWRAP cells, and the period is
+    # a whole ZWRAP — so every octave (lacunarity 2) is back on its own
+    # lattice point when the hosts wrap the clock.
+    scale = float(re.search(r"vec3<f32>\([^;]*, ([0-9.]+) \* zeta\)",
+                            src).group(1))
+    rise = _wgsl_scalar(src, "cc_manholesteam_RISE_RATE")
+    zwrap = _wgsl_scalar(src, "cc_manholesteam_ZWRAP")
+    assert zwrap == round(zwrap)
+    assert scale * rise * period == pytest.approx(zwrap, abs=1e-6)
 
 
 def _wgsl_gain_rows(src):

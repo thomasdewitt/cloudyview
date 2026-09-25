@@ -33,14 +33,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from cloudyview.soar_host import (DESERT_LITE_TIERS, read_shader,  # noqa: E402
-                                  specialize)
+from cloudyview.soar_host import (DESERT_FLORA_CUT_BY_TIER,  # noqa: E402
+                                  DESERT_LITE_TIERS, read_shader, specialize)
 
 CRATE = REPO / "tools" / "regcount"
 BINARY = CRATE / "target" / "release" / "regcount"
-# Entry point -> the color-attachment format its pipeline renders into.
-FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f",
-           "fs_surface_refine": "rgba32f", "fs_bake_light": "r16f"}
+# Entry point -> the color-attachment formats its pipeline renders into, one
+# per fragment output: the first and last surface stages also write the veil.
+FORMATS = {"fs_main": "rgba16f", "fs_surface": "rgba32f,rgba32ui",
+           "fs_surface_refine": "rgba32f",
+           "fs_surface_street": "rgba32f,rgba32ui", "fs_bake_light": "r16f"}
 # The lighting method per tier (web/soar/constants.js QUALITY_PRESETS):
 # (light cache, sky probe).
 TIERS = {"max": (False, True), "high": (True, True), "medium": (True, False),
@@ -63,9 +65,11 @@ def source_for(spec: str) -> str:
 
 
 def build():
-    if not BINARY.exists():
-        subprocess.run(["cargo", "build", "--release", "--quiet"],
-                       cwd=CRATE, check=True)
+    # Always: cargo is a no-op when the binary is current, and a binary
+    # built before a change to the crate (the veil's second attachment,
+    # "rgba32f,rgba32ui") panics on formats it does not know.
+    subprocess.run(["cargo", "build", "--release", "--quiet"],
+                   cwd=CRATE, check=True)
 
 
 def stats(source: str, entry: str) -> dict:
@@ -106,6 +110,8 @@ def main():
     light_cache, sky_probe = TIERS[args.tier]
     # As both hosts do: a desert at a lite tier compiles the simplified desert.
     desert_lite = args.surface == "desert" and args.tier in DESERT_LITE_TIERS
+    flora_cut = (DESERT_FLORA_CUT_BY_TIER[args.tier]
+                 if args.surface == "desert" else 1.0)
     specs = [args.a, args.b] if args.a and args.b else [args.shader]
     print(f"{args.entry}, surface {args.surface}, tier {args.tier} "
           f"(cache {light_cache}, probe {sky_probe}), periodic {args.periodic}"
@@ -115,7 +121,8 @@ def main():
         src = specialize(source_for(spec), periodic=args.periodic == "on",
                          nested=args.nested, max_light_steps=512,
                          surface=args.surface, light_cache=light_cache,
-                         sky_probe=sky_probe, desert_lite=desert_lite)
+                         sky_probe=sky_probe, desert_lite=desert_lite,
+                         desert_flora_cut=flora_cut)
         s = stats(src, args.entry)
         print(f"  {spec:28s} registers {s['Register Count']:4d}   "
               f"binary {s['Binary Size'] / 1024:7.0f} KB   "
