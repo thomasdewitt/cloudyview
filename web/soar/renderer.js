@@ -44,7 +44,7 @@ const ACCUM_FORMAT = "rgba32float";
 // miss, so it is float32; the march only textureLoad()s it.
 const SURFACE_FORMAT = "rgba32float";
 // The veil the first and last surface stages write beside the surface
-// (raymarch.wgsl veil_pack): half-float radiance and transmittance and an f32
+// (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
 // depth, packed as uints so no float path touches the bits.
 const VEIL_FORMAT = "rgba32uint";
 

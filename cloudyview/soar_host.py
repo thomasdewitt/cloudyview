@@ -770,7 +770,7 @@ DESERT_LITE_TIERS = ("low", "minimal")
 # registers. Listed here and in renderer.js _hasStreetStage.
 SURFACE_STREET_SURFACES = ("city",)
 # The veil the first and last surface stages write beside the surface
-# (raymarch.wgsl veil_pack): half-float radiance and transmittance and an f32
+# (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
 # depth, packed as uints so no float path touches the bits.
 VEIL_FORMAT = "rgba32uint"
 
