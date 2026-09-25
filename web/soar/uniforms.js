@@ -1,4 +1,4 @@
-// The uniform block: 25 rows of 4 floats, 400 bytes, rebuilt every frame.
+// The uniform block: 47 rows of 4 floats, 752 bytes, rebuilt every frame.
 //
 // A direct port of InteractiveRenderer.write_uniforms. Row order and meaning
 // are fixed by raymarch.wgsl, which the browser shares verbatim with the
@@ -66,6 +66,9 @@ export function packUniforms(state, view) {
     // band-pass excursion (meta height_min_m, height_max_m, band_max_m).
     // Required for the desert — see the check below.
     desertReliefM = null,
+    // Under DESERT, rows 25..46: the tile's own tables (scene.js
+    // desertTileRows). Required for the desert, like the relief.
+    desertTileRows = null,
     // Explicit override of the surface offset row 24 folds and writes;
     // null means the scene's static offset (cityOffsetM under CITY, the
     // origin otherwise). Mirrors SceneState.surface_offset_m.
@@ -90,6 +93,14 @@ export function packUniforms(state, view) {
   if (desert && !desertReliefM) {
     throw new Error("the desert needs its relief (desertReliefM, from the " +
                     "tile's meta); without it every ray lands on the datum.");
+  }
+  if (desert && !desertTileRows) {
+    throw new Error("the desert needs its tile's tables (desertTileRows, " +
+                    "from the tile's meta).");
+  }
+  if (!desert && (desertReliefM || desertTileRows)) {
+    throw new Error("desertReliefM and desertTileRows are the desert's; " +
+                    "this scene is not the desert.");
   }
 
   const {
@@ -347,6 +358,14 @@ export function packUniforms(state, view) {
     if (clock < 0) clock += clockPeriodS;
   }
   row(24, surfaceOff[0], surfaceOff[1], clock, 0.0);
+  if (desert) {
+    if (desertTileRows.length !== K.DESERT_TILE_ROWS) {
+      throw new Error(`desertTileRows has ${desertTileRows.length} rows; ` +
+                      `the shader reads ${K.DESERT_TILE_ROWS}.`);
+    }
+    desertTileRows.forEach((r, i) =>
+      row(K.DESERT_TILE_ROW0 + i, r[0], r[1], r[2], r[3]));
+  }
   return u;
 }
 

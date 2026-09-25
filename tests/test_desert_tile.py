@@ -62,14 +62,47 @@ def _table(fn):
     return np.array([float(v) for v in vals])
 
 
-def test_the_shader_slope_table_is_the_tiles():
-    table = _table("desert_slope_max_at")
-    assert len(table) == META["mips"]
-    assert list(table) == META["slope_max"]
-    assert _const("DESERT_OCTAVE_SLOPE_MAX") == META["band_slope_max"]
-    assert list(_table("desert_envelope_m_at")) == META["envelope_m"]
-    assert (list(_table("desert_slope_variance_removed_at"))
-            == META["slope_variance_removed"])
+def test_the_hosts_carry_the_tiles_tables():
+    """Rows 25..46 are the tile's own tables (soar_host.desert_tile_rows),
+    at the rows raymarch.wgsl's accessors read them from; the JS twin is
+    held to this by tests/test_uniform_parity.py and below."""
+    from cloudyview import soar_host as sh
+    rows = np.array(sh.desert_tile_rows(META))
+    assert rows.shape == (sh.DESERT_TILE_ROWS, 4)
+    assert list(rows[0:3].ravel()) == META["slope_max"]
+    assert list(rows[3:6].ravel()) == META["envelope_m"]
+    assert list(rows[6:9].ravel()) == META["slope_variance_removed"]
+    assert rows[9:21, :3].tolist() == META["albedo_correction"]
+    assert list(rows[21, :3]) == META["bounce_albedo"]
+    assert rows[21, 3] == META["band_slope_max"]
+    for pattern in [r"fn desert_slope_max_at\(i: i32\) -> f32 \{\s*"
+                    r"return desert_tile_level\(0, i\);",
+                    r"fn desert_envelope_m_at\(i: i32\) -> f32 \{\s*"
+                    r"return desert_tile_level\(3, i\);",
+                    r"fn desert_slope_variance_removed_at\(i: i32\) -> f32 "
+                    r"\{\s*return desert_tile_level\(6, i\);",
+                    r"return u\.desert_tile\[9 \+ i\]\.xyz;",
+                    r"return u\.desert_tile\[21\]\.xyz;",
+                    r"u\.desert_tile\[21\]\.w"]:
+        assert re.search(pattern, SHADER), pattern
+
+
+_ROWS_JS = textwrap.dedent("""
+    import { desertTileRows } from "%s";
+    process.stdout.write(JSON.stringify(
+        desertTileRows(JSON.parse(process.env.META))));
+""")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_browser_packs_the_same_tile_rows():
+    from cloudyview import soar_host as sh
+    js = _ROWS_JS % (REPO / "web" / "soar" / "scene.js").as_posix()
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", js], capture_output=True,
+        text=True, cwd=REPO, env={**os.environ, "META": json.dumps(META)})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert json.loads(proc.stdout) == sh.desert_tile_rows(META)
 
 
 def test_the_measured_numbers_are_the_bytes():
@@ -85,11 +118,8 @@ def test_the_regional_albedo_is_the_mean_of_the_albedos():
     top = _level(META["mips"] - 1)
     assert top.shape == (1, 1, 2)
     assert META["mean_lightness"] == round(float(top[0, 0, 1]), 4)
-    m = re.search(r"const DESERT_BOUNCE_ALBEDO: vec3<f32> = vec3<f32>"
-                  r"\(([^)]*)\);", SHADER)
-    shader = tuple(float(v) for v in m.group(1).split(","))
     truth = export_desert_tile.albedo_of(_level(0)[..., 1]).reshape(-1, 3)
-    assert shader == tuple(round(float(v), 3) for v in truth.mean(0))
+    assert META["bounce_albedo"] == [round(float(v), 3) for v in truth.mean(0)]
 
 
 def test_the_octave_margin_is_the_sum_of_the_gains():
@@ -200,8 +230,13 @@ def test_the_desert_refuses_to_render_without_its_relief():
                         render_size=(64, 36))
     with pytest.raises(ValueError, match="relief"):
         sh.pack_uniforms(sh.SceneState(**base), view)
-    ok = sh.pack_uniforms(sh.SceneState(**base, desert_relief_m=(-1, 2, 3)),
-                          view)
+    rows = sh.desert_tile_rows(META)
+    with pytest.raises(ValueError, match="tables"):
+        sh.pack_uniforms(sh.SceneState(**base, desert_relief_m=(-1, 2, 3)),
+                         view)
+    ok = sh.pack_uniforms(sh.SceneState(**base, desert_relief_m=(-1, 2, 3),
+                                        desert_tile_rows=rows), view)
+    assert np.array_equal(ok[sh.DESERT_TILE_ROW0:], np.float32(rows))
     assert tuple(ok[8]) == (0.0, -1.0, 2.0, 3.0)
     with pytest.raises(ValueError, match="desert's"):
         sh.pack_uniforms(sh.SceneState(**{**base, "surface": "ocean"},
@@ -223,8 +258,6 @@ def test_the_far_field_colour_correction_is_the_tiles():
     lights = [_level(k)[..., 1] for k in range(META["mips"])]
     assert export_desert_tile.albedo_correction(lights) == \
         META["albedo_correction"]
-    rows = [tuple(r) for r in _table("desert_albedo_correction_at")]
-    assert rows == [tuple(r) for r in META["albedo_correction"]]
 
 
 def test_the_silt_between_resolved_stones_stays_warm():
