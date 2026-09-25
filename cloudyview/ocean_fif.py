@@ -192,15 +192,16 @@ def generate_sea(seed: int, n: int = N, nt: int = NT, dx_m: float = DX_M,
     top = int(round(FOAM_MAX_COVERAGE * n * n))
     for k in range(nt):
         flat = intensity[k].ravel()
-        if np.count_nonzero(flat) < top:
-            raise RuntimeError(
-                f"frame {k} has only {np.count_nonzero(flat)} breaking texels, "
-                f"fewer than the {top} the foam rank needs; lower "
-                "BREAKING_SLOPE_RMS or raise FOAM_DECAY_S.")
-        order = np.argsort(flat, kind="stable")[::-1][:top]
+        # The foam plane is retired (the module docstring) and nothing reads
+        # it, so a frame with fewer breaking texels than the cap ranks the
+        # ones it has rather than stopping a re-export. With enough of them
+        # (the shipped tile's seed) this is the ranking the shipped bytes
+        # hold, unchanged.
+        m = min(top, int(np.count_nonzero(flat)))
+        order = np.argsort(flat, kind="stable")[::-1][:m]
         ranked = np.zeros(n * n)
         # Strongest texel -> 1, the top-th -> 1/top: uniform over (0, 1].
-        ranked[order] = (top - np.arange(top)) / top
+        ranked[order] = (top - np.arange(m)) / top
         foam[k] = ranked.reshape(n, n)
 
     if verbose:
