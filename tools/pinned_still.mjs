@@ -59,9 +59,14 @@ const SCENES = {
   city: { mode: "cyberpunk", demo: null },
   day: { mode: "research", demo: "twpice" },
   // Low over the ground, looking ahead and down, so the stills hold the near
-  // stones and plants (the refine stage) as well as the far forms.
+  // stones and plants (the refine stage) as well as the far forms. Moved
+  // 20 km west and 40 km south of the demo's start, onto sunlit ground with
+  // the storm in view: at the start itself the ground lies under the
+  // storm's deep column, near-black once the sky-light probe was made
+  // determinate (safe_inv_dir, 69d6bc5), and a black still would hide a
+  // ground regression.
   desert: { mode: "research", demo: "twpice", surface: "desert",
-            ground: { up: 3.0, elevation: -8.0 } },
+            ground: { up: 3.0, elevation: -8.0, shift: [-20000.0, -40000.0] } },
 };
 
 const server = await serveTree(webDir);
@@ -99,6 +104,7 @@ try {
     }
     if (sc.ground) {
       await tab.eval(`(() => { const cam = window.soar.camera;
+        cam.displace(${sc.ground.shift[0]}, ${sc.ground.shift[1]}, 0.0);
         const floor = window.soar.scene.desertFloorAt(cam.surfacePosition);
         cam.displace(0.0, 0.0, floor + ${sc.ground.up} - cam.position[2]);
         cam.elevation = ${sc.ground.elevation};

@@ -19883,13 +19883,15 @@ fn desert_slope_max_at(i: i32) -> f32 {
 // The octaves' own slope bound when fully on: each is the band's steepest
 // slope scaled by 5^(1-H) per octave (steeper as it gets smaller).
 // The band's own steepest slope, meta band_slope_max, is
-// u.desert_tile[21].w, read once at the top of desert_slope_bound below.
-// Where that read sits moves the driver's codegen for the whole module
-// (M1 proxy, interleaved, identical output, 1.5 m view, 2026-09-24):
-// behind a zero-argument accessor called in the octave loop, 111.5 ms;
-// read in the loop itself, 66.3 ms but the CITY's surface pass 128 -> 168
-// registers; hoisted here, 96.3 and the city at 128. Hoisted until the
-// hosts strip the sections a scene doesn't compile in.
+// u.desert_tile[21].w, read in place inside the octave loop of
+// desert_slope_bound below. Where that one read sits moves the driver's
+// codegen (M1 proxy, interleaved, identical output, 2026-09-24): behind a
+// zero-argument accessor, the 1.5 m view took 111.5 ms; hoisted before the
+// loop, 96.3; in the loop, 66.3. In the loop it also took the city's
+// surface pass from 128 to 168 registers while the city compiled the desert
+// in; with the sections stripped (the city module holds no desert code) it
+// costs the city nothing, and the desert is 15-30% faster on the views it
+// is flown in (3-10% slower on the cloud-field judge views from above).
 const DESERT_OCTAVE_SLOPE_GROWTH: f32 = 1.620657; // 5^0.3
 
 fn desert_slope_bound(fp: f32) -> f32 {
@@ -19898,7 +19900,6 @@ fn desert_slope_bound(fp: f32) -> f32 {
     let l1 = min(l0 + 1, 11);
     var s = mix(desert_slope_max_at(l0), desert_slope_max_at(l1),
                 lod - f32(l0));
-    let band = u.desert_tile[21].w;
     var texel = u.ocean_params.x;
     var grow = 1.0;
     var amp = 1.0;
@@ -19910,7 +19911,7 @@ fn desert_slope_bound(fp: f32) -> f32 {
         if (fade <= 0.0) {
             break;
         }
-        s = s + fade * band * grow;
+        s = s + fade * u.desert_tile[21].w * grow;
     }
     return s;
 }
@@ -27045,7 +27046,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let strat_pixel = cr.strat_pixel;
     let dir = cr.dir;
 
-    let inv_dir = 1.0 / dir;
+    // safe_inv_dir, not 1.0 / dir: an exactly axis-aligned pixel ray would
+    // divide by zero, and the infinity makes the slab test below
+    // indeterminate (the sun path's same bug, desert-ground 2026-09-24).
+    let inv_dir = safe_inv_dir(dir);
     let periodic_on = PERIODIC_DOMAIN;
     var t_near: f32;
     var t_far: f32;
