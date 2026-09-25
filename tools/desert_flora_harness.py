@@ -350,22 +350,13 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     bind_group = renderer._ensure_bind_group()
     sample_view = targets["sample"].create_view()
     ray_pipeline = renderer._ray_pipeline_for(view)
-    surface_pipeline = renderer._surface_pipeline_for(view)
-    refine_pipeline = renderer._refine_pipeline_for(view)
-    surface_view = (targets["surface"].create_view()
-                    if targets["surface"] is not None else None)
-    plain_view = (targets["plain"].create_view()
-                  if targets["plain"] is not None else None)
-    stages = []
-    if surface_view is not None:
-        # Under DESERT_LITE there is no refine stage and the plain pass
-        # writes the final surface itself.
-        if refine_pipeline is None:
-            stages.append((surface_pipeline, None, surface_view))
-        else:
-            stages.append((surface_pipeline, None, plain_view))
-            stages.append((refine_pipeline, targets["refine_group"],
-                           surface_view))
+    # The renderer's own stage list (first stage, refinement, street), each
+    # with the targets it writes: the desert's plain pass and its refine
+    # stage are the first two (under DESERT_LITE the first alone).
+    stages = renderer._surface_stages(targets, view)
+    if len(stages) > 2:
+        raise RuntimeError("pass_times_ms times two surface stages; this "
+                           f"view has {len(stages)}")
     for i in range(frames):
         pv = ViewState(**{**view.__dict__, "frame_index": i,
                           "subpixel": i >= 1, "jitter_scale": 1.0})
@@ -377,11 +368,14 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
                   "beginning_of_pass_write_index": 6 * i + 2 * k,
                   "end_of_pass_write_index": 6 * i + 2 * k + 1}
             if k < len(stages):
-                pipeline, group1, view_ = stages[k]
+                pipeline, group1, writes = stages[k]
                 sp = enc.begin_render_pass(
-                    color_attachments=[{"view": view_, "load_op": "clear",
-                                        "store_op": "store",
-                                        "clear_value": (0.0, 0.0, 0.0, 1e30)}],
+                    color_attachments=[
+                        {"view": tex.create_view(), "load_op": "clear",
+                         "store_op": "store",
+                         "clear_value": ((0.0, 0.0, 0.0, 1e30) if j == 0
+                                         else (0, 0, 0, 0))}
+                        for j, tex in enumerate(writes)],
                     timestamp_writes=ts)
                 sp.set_pipeline(pipeline)
                 sp.set_bind_group(0, bind_group)
