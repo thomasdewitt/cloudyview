@@ -16803,6 +16803,58 @@ fn df_col_capsules(c: DfColumn, comp: i32, q0: vec3<f32>, dir: vec3<f32>,
     return best;
 }
 
+// The far form's spines outside its silhouette: a ray that misses every
+// capsule but passes within the shell crosses the needle medium the near
+// form draws (sigma0 at the skin, falling linearly to zero at the shell's
+// edge), whose optical depth over the chord, for a shell thin against the
+// column, is (4/3) sigma0 (1 - d) sqrt(2 R s (1 - d)) / sin(theta) — d the
+// closest approach's depth into the shell as a fraction of it, theta the
+// ray's angle to the axis. This is the backlit halo at the range where a
+// needle is sub-pixel. Returns (the largest such depth, t at that
+// approach) folded into `best`.
+fn df_col_rim(c: DfColumn, q0: vec3<f32>, dir: vec3<f32>, shell: f32,
+              sigma0: f32, best_in: vec2<f32>) -> vec2<f32> {
+    var best = best_in;
+    let arc = c.rb * (0.5 * DF_PI - c.alpha);
+    let len = df_col_len(c);
+    for (var k: i32 = 0; k < 4; k = k + 1) {
+        var s0 = 0.0;
+        var s1 = c.l1;
+        if (k == 1) {
+            s0 = c.l1;
+            s1 = c.l1 + 0.5 * arc;
+        } else if (k == 2) {
+            s0 = c.l1 + 0.5 * arc;
+            s1 = c.l1 + arc;
+        } else if (k == 3) {
+            s0 = c.l1 + arc;
+            s1 = len;
+        }
+        if (s1 <= s0) {
+            continue;
+        }
+        let p0 = df_jpath_at(c, s0).p;
+        let p1 = df_jpath_at(c, s1).p;
+        let a = c.root + vec3<f32>(c.u * p0.x, p0.y);
+        let b = c.root + vec3<f32>(c.u * p1.x, p1.y);
+        let seg = length(b - a);
+        let ax = (b - a) / seg;
+        let ap = df_seg_approach(q0, dir, a, ax, seg);
+        let r = df_col_radius(c, 0.5 * (s0 + s1)) * (1.0 - c.depth / 3.0);
+        let d = (ap.x - r) / shell;
+        if (d <= 0.0 || d >= 1.0) {
+            continue;
+        }
+        let tau = (4.0 / 3.0) * sigma0 * (1.0 - d)
+            * sqrt(2.0 * r * shell * (1.0 - d)) / max(ap.z, 0.2);
+        if (tau > best.x) {
+            let cl = a + ax * clamp(ap.y, 0.0, seg);
+            best = vec2<f32>(tau, max(dot(cl - q0, dir), 0.0));
+        }
+    }
+    return best;
+}
+
 // The fluted cacti — saguaro and barrel — share one march: sphere-traced
 // columns, the needles of the areoles the ray passes near, and the three
 // needle representations. Only the numbers and the areole differ.
@@ -16829,7 +16881,27 @@ fn df_cactus_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     for (var i: i32 = 0; i < ncol; i = i + 1) {
         ch = df_col_capsules(df_cactus_col(it, i), i, q0, dir, ch);
     }
-    if (ch.t >= tb || ch.t < ta) {
+    if (ch.t >= tb) {
+        // No skin on this ray: its spines, if it passes through their shell.
+        let barrel_rim = it.kind == DF_KIND_BARREL;
+        var rim = vec2<f32>(0.0, tb);
+        for (var i: i32 = 0; i < ncol; i = i + 1) {
+            rim = df_col_rim(df_cactus_col(it, i), q0, dir,
+                             select(DF_SAG_SHELL, DF_BAR_SHELL, barrel_rim),
+                             select(DF_SAG_FUZZ_SIGMA0, DF_BAR_FUZZ_SIGMA0,
+                                    barrel_rim), rim);
+        }
+        if (df_item_free_path(dither, it.seed) < rim.x && rim.y > ta
+            && rim.y < tb) {
+            res.hit = true;
+            res.t = rim.y;
+            res.kind = it.kind;
+            res.normal = -dir;
+            res.mat = vec4<f32>(f32(DF_MAT_FUZZ) + 0.45, 0.0, 0.0, 0.0);
+        }
+        return res;
+    }
+    if (ch.t < ta) {
         return res;
     }
     res.hit = true;
@@ -18212,7 +18284,10 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
 // more when in leaf.
 fn df_oco_medium(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
                  tb: f32) -> vec3<f32> {
-    let tn = tan(it.a.z + 0.16);
+    // As wide at the canes' tops as the canes spread (df_ocotillo_reach
+    // less its margins): a wider cone would stand outside the item's box and
+    // be cut to a rectangle by it.
+    let tn = (it.a.x * sin(it.a.z + 0.12) + 0.03) / (1.02 * it.a.x + 0.3);
     let apex = vec3<f32>(0.0, 0.0, -0.3 - 0.12 / tn);
     let top = it.a.x * 1.02 - apex.z;
     let ch = df_cone_chord(q0, dir, apex, tn, 0.3 - apex.z, top);
@@ -19806,7 +19881,8 @@ fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
     let to_p = p - desert_camera_origin();
     let dist = length(to_p);
     let fpt = df_true_pixel_angle() * dist;
-    var plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
+    var plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir,
+                                         0.0);
     let w_st = smoothstep(DF_DECAL_FP0, DF_DECAL_FP1, fpt);
     if (w_st < 1.0) {
         plain = mix(df_decal_shadow(p, sun_dir), plain, w_st);
@@ -19814,13 +19890,16 @@ fn desert_flora_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
     return df_shadow_refined(p, sun_dir, fp, fpt, refine, plain);
 }
 
-// On a plant: the field's mean. A decal cannot tell a plant's own crown
-// from a neighbour's, and would shade every plant by itself.
+// On a plant: the field's mean over what stands taller than the point. A
+// decal cannot tell a plant's own crown from a neighbour's, and would shade
+// every plant by itself.
 fn df_plant_shadow(p: vec3<f32>, sun_dir: vec3<f32>, fp: f32,
                    refine: bool) -> f32 {
     let to_p = p - desert_camera_origin();
     let dist = length(to_p);
-    let plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir);
+    let z = max(p.z - desert_surface(p.xy, fp).x, 0.0);
+    let plain = 1.0 - df_far_shadow_stat(p, to_p / max(dist, 1e-6), sun_dir,
+                                         z);
     return df_shadow_refined(p, sun_dir, fp, df_true_pixel_angle() * dist,
                              refine, plain);
 }
@@ -20360,7 +20439,15 @@ fn df_far_hot(sep: f32, h: f32, w: f32) -> f32 {
     return 1.0 - exp(-sep * h / w);
 }
 
-fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>) -> f32 {
+// `z` is p's height above the ground: a point up a saguaro is shaded only
+// by what stands taller than it, each population by the part of its height
+// above z (df_above; 0 on the ground, where the field is as it was).
+fn df_above(z: f32, top: f32) -> f32 {
+    return clamp(1.0 - z / top, 0.0, 1.0);
+}
+
+fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>,
+                      z: f32) -> f32 {
     if (sun.z <= 1e-3) {
         return 1.0;
     }
@@ -20374,32 +20461,40 @@ fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>) -> f32 {
     let tau =
         DF_P_SAGUARO * big * df_keep(DF_KIND_SAGUARO, hb)
             * (2.0 * DF_FAR_SAG_R * 5.2 * ts) * df_far_hot(sep, 5.2, 0.52)
+            * df_above(z, 12.5)
         + DF_P_BARREL * small * k_shrub
             * (2.0 * DF_FAR_BAR_R * 0.9 * ts) * df_far_hot(sep, 0.9, 0.48)
+            * df_above(z, 1.65)
         + DF_P_OCOTILLO * big * df_keep(DF_KIND_OCOTILLO, hb)
             * (2.0 * DF_FAR_OCO_RHO * DF_FAR_OCO_H * ts)
-            * df_far_hot(sep, 2.0, 1.0)
+            * df_far_hot(sep, 2.0, 1.0) * df_above(z, 6.0)
         + DF_P_CREOSOTE * small * k_shrub * (1.0 - DF_BANK_TREE * hb.bank)
             * DF_FAR_CREO_KAPPA
             * df_far_crown_shadow(DF_FAR_CREO_A, DF_FAR_CREO_ZC, DF_FAR_CREO_B, ts)
             * df_far_hot(sep, DF_FAR_CREO_ZC, 2.0 * DF_FAR_CREO_A)
+            * df_above(z, DF_FAR_CREO_ZC + DF_FAR_CREO_B)
         + DF_P_BURSAGE * small * k_shrub * DF_FAR_BURS_KAPPA
             * df_far_crown_shadow(DF_FAR_BURS_A, DF_FAR_BURS_ZC, DF_FAR_BURS_B, ts)
             * df_far_hot(sep, DF_FAR_BURS_ZC, 2.0 * DF_FAR_BURS_A)
+            * df_above(z, DF_FAR_BURS_ZC + DF_FAR_BURS_B)
         + DF_P_PRICKLY * small * k_shrub * DF_FAR_PEAR_KAPPA
             * df_far_crown_shadow(DF_FAR_PEAR_A, DF_FAR_PEAR_ZC, DF_FAR_PEAR_B, ts)
             * df_far_hot(sep, DF_FAR_PEAR_ZC, 2.0 * DF_FAR_PEAR_A)
+            * df_above(z, DF_FAR_PEAR_ZC + DF_FAR_PEAR_B)
         + DF_P_PALOVERDE * big * df_keep(DF_KIND_PALOVERDE, hb)
             * DF_FAR_PV_KAPPA
             * df_far_crown_shadow(DF_FAR_PV_A, DF_FAR_PV_ZC, DF_FAR_PV_B, ts)
             * df_far_hot(sep, DF_FAR_PV_ZC, 2.0 * DF_FAR_PV_A)
+            * df_above(z, DF_FAR_PV_ZC + DF_FAR_PV_B)
         + DF_P_CREOSOTE * small * k_shrub * DF_BANK_TREE * hb.bank
             * DF_FAR_PV_KAPPA
             * df_far_crown_shadow(DF_FAR_BPV_A, DF_FAR_BPV_ZC, DF_FAR_BPV_B, ts)
             * df_far_hot(sep, DF_FAR_BPV_ZC, 2.0 * DF_FAR_BPV_A)
+            * df_above(z, DF_FAR_BPV_ZC + DF_FAR_BPV_B)
         + DF_P_BOULDERS * big * df_keep(DF_KIND_BOULDER, hb) * 0.5
             * df_far_crown_shadow(DF_FAR_ROCK_A, 0.0, DF_FAR_ROCK_B, ts)
-            * df_far_hot(sep, 0.4, 2.0 * DF_FAR_ROCK_A);
+            * df_far_hot(sep, 0.4, 2.0 * DF_FAR_ROCK_A)
+            * df_above(z, DF_FAR_ROCK_B);
     return 1.0 - exp(-tau);
 }
 
