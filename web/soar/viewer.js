@@ -12,6 +12,7 @@ import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
 import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile,
          loadSea } from "./scene.js";
+import { buildDesertBoundsInWorker } from "./desert_bounds.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -384,7 +385,7 @@ export class Viewer {
    * for the session, which is what keeps the desert's download off every
    * flight that never stands on it.
    */
-  async _surfaceTile(kind) {
+  async _surfaceTile(kind, onProgress = null, onStage = null) {
     if (kind === "city") {
       // keepCells: the minimap draws the city out of the tile's own mip
       // 0, the flight collider builds its buildings from it too, and the
@@ -401,8 +402,11 @@ export class Viewer {
       // same level-0 bytes the shader samples. bounds: the pyramid the
       // ground's trace steps on, built from those same bytes.
       return (this._desertTile ??=
-        await loadOceanTile(this.device, DESERT_URL, undefined,
-                            { keepHeights: true, bounds: true,
+        await loadOceanTile(this.device, DESERT_URL, onProgress ?? undefined,
+                            { keepHeights: true, bounds: true, onStage,
+                              // Over a second of arithmetic: off the main
+                              // thread, so the flight keeps drawing.
+                              boundsBuilder: buildDesertBoundsInWorker,
                               schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
     return (this._ocean ??=
@@ -1474,17 +1478,64 @@ export class Viewer {
       return;
     }
     this._surfacing = true;
+    // Named steps on the progress panel from the moment the switch is
+    // asked for, so a first desert — its download, its bounds, its
+    // shaders — never reads as a frozen tab (Thomas, 2026-09-25: "i thought
+    // it was completely frozen"). Each step is also a performance mark
+    // ("soar-surface <step>"), which is how the switch is timed.
+    const ground = kind === "desert" ? "desert" : "ocean";
+    const step = (stage, fraction) => {
+      performance.mark(`soar-surface ${stage}`);
+      this.ui.showProgress(stage, fraction);
+    };
+    let landed = false;
     try {
-      if (kind === "desert" && !this._desertTile) {
-        this.ui.say("Laying out the desert…", 30);
-      }
+      step(`Switching to the ${ground}…`, 0.02);
       // Everything that can wait or fail first — the download, the
       // pipeline — while the flight keeps drawing the ground it has; then
       // the renderer and the camera change together, in one tick, so no
       // frame is drawn with the new shader over the old frame or floor
       // (codex review: an ocean camera at 12.5 m under a +16 m dune).
-      const tile = await this._surfaceTile(kind);
-      await this.renderer.prepareSurface(kind);
+      // The download (and the bounds, in a worker) and the shader compiles
+      // run side by side; the panel names whichever is still going.
+      const at = { download: 0, bounds: false, tile: false, k: 0, n: 1 };
+      const show = () => {
+        const fraction = 0.05 + 0.4 * at.download + (at.tile ? 0.1 : 0)
+          + 0.4 * (at.k / at.n);
+        let stage;
+        if (!at.tile) {
+          stage = at.bounds ? "Building the terrain bounds…"
+                            : `Downloading the ${ground}…`;
+        } else {
+          stage = `Compiling the ${ground}'s shaders (${at.k} of ${at.n})…`;
+        }
+        this.ui.showProgress(stage, fraction);
+      };
+      const compiled = this.renderer.prepareSurface(kind, (k, n) => {
+        at.k = k; at.n = n;
+        if (k === n) performance.mark("soar-surface shaders compiled");
+        show();
+      });
+      let tile;
+      try {
+        tile = await this._surfaceTile(
+          kind,
+          (f) => { at.download = f; show(); },
+          (stage) => {
+            if (stage === "bounds") {
+              at.bounds = true;
+              performance.mark("soar-surface bounds");
+              show();
+            }
+          });
+      } catch (err) {
+        compiled.catch(() => {});        // the tile's error is the one told
+        throw err;
+      }
+      at.tile = true;
+      performance.mark("soar-surface tile ready");
+      show();
+      await compiled;
       const floorAt = kind === "desert" ? desertFloorAt(tile) : null;
       // A recording may have started while the tile or the pipeline was on
       // its way: a track stands on one ground, so the switch yields to it.
@@ -1498,7 +1549,12 @@ export class Viewer {
         this.ui.say("The ground stays put while a capture renders.", 3);
         return;
       }
+      step(`Landing on the ${ground}…`, 0.97);
       this.renderer.commitSurface(kind, tile);
+      landed = true;
+      // The panel stays up until a frame on the new ground has been drawn
+      // (the frame loop clears it: _surfaceLanding).
+      this._surfaceLanding = true;
       this.scene.desertFloorAt = floorAt;
       // The camera folds at the surface frame's period: the sea's swell
       // repeats over several tiles, the desert at its tile.
@@ -1510,6 +1566,7 @@ export class Viewer {
       this.ui.say(`Could not change the ground: ${err.message}`, 8);
       throw err;
     } finally {
+      if (!landed) this.ui.hideProgress();
       this._surfacing = false;
       this._wake("surface");
     }
@@ -3480,6 +3537,12 @@ export class Viewer {
           [outW, outH], this._viewKwargs(),
           { deltaSeconds: dt, overlays, waitForPipeline: false,
             lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null });
+        if (marched && this._surfaceLanding) {
+          // The first frame on a new ground: the switch's panel comes down.
+          this._surfaceLanding = false;
+          performance.mark("soar-surface first frame");
+          this.ui.hideProgress();
+        }
         if (!marched) {
           // The shader variant this frame needs is still compiling (a tier,
           // bake or toggle moved the lighting specialization; see

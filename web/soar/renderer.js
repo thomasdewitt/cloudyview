@@ -801,7 +801,7 @@ export class Renderer {
    * the scene keeps rendering what it stands on, so a shader that will not
    * compile says so and leaves the flight as it was.
    */
-  async prepareSurface(kind) {
+  async prepareSurface(kind, onCompiled = null) {
     if (this.scene.city) {
       throw new Error("the night city has no other surface to switch to.");
     }
@@ -815,15 +815,21 @@ export class Renderer {
     // TARGET surface's, not the scene's — the scene is not touched.
     const desert = kind === "desert";
     const spec = this._shaderSpec({ desert });
+    const wanted = [["fs_main", SAMPLE_FORMAT]];
+    if (desert) {
+      const entries = spec.desertLite ? K.SURFACE_STAGES_LITE
+                                      : K.SURFACE_STAGES.desert;
+      for (const entry of entries) wanted.push([entry, stageFormats(entry)]);
+    }
     try {
-      await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
-      if (desert) {
-        const entries = spec.desertLite ? K.SURFACE_STAGES_LITE
-                                        : K.SURFACE_STAGES.desert;
-        for (const entry of entries) {
-          await this._pipeline(entry, stageFormats(entry), spec);
-        }
-      }
+      // All asked for at once (createRenderPipelineAsync each), so the
+      // driver can overlap them and a caller can overlap them with its
+      // download; each reported as it lands.
+      let done = 0;
+      await Promise.all(wanted.map(async ([entry, formats]) => {
+        await this._pipeline(entry, formats, spec);
+        onCompiled?.(++done, wanted.length, entry);
+      }));
     } catch (err) {
       throw new Error(`The ${kind} shader failed to build: ` +
                       `${err?.message || err}`);

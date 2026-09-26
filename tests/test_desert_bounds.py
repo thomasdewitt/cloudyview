@@ -340,3 +340,93 @@ def test_the_browser_uploads_the_pyramid_and_needs_it():
         assert w["size"] == [lv.shape[1], lv.shape[2], db.LAYERS]
     assert got["view"] == {"dimension": "2d-array"}
     assert got["refused"] and "bounds pyramid is missing" in got["refused"]
+
+
+# The viewer builds the pyramid in a module Worker (desert_bounds.js
+# buildDesertBoundsInWorker), off the main thread: that path must give the
+# same bytes too. Node has no Web Worker, so this one runs in Chrome over the
+# DevTools protocol (tools/soar_cdp.mjs, as the Tint gate does), on the tile
+# the page fetches, and hands back a digest of the worker's bytes and of the
+# same build on the page's own thread. Without a Chrome on CLOUDYVIEW_CDP_PORT
+# (default 9333) it skips, and says so.
+_WORKER_JS = textwrap.dedent("""
+    import { openTab, serveTree } from "%(tools)s/soar_cdp.mjs";
+    const server = await serveTree("%(web)s");
+    let tab = null;
+    try {
+      tab = await openTab(process.env.CDP_PORT);
+      await tab.goto(`${server.base}/`);
+      const got = await tab.eval(`(async () => {
+        const base = "${server.base}/soar";
+        const { decodeSurfaceLevel } = await import(base + "/scene.js");
+        const { fromHalf } = await import(base + "/half.js");
+        const B = await import(base + "/desert_bounds.js");
+        const meta = await (await fetch(base + "/desert/meta.json")).json();
+        const levels = [];
+        for (let l = 0; l < meta.files.length; l++) {
+          const n = Math.max(1, meta.n >> l);
+          const gz = (await fetch(base + "/desert/" + meta.files[l])).body
+            .pipeThrough(new DecompressionStream("gzip"));
+          const bytes = decodeSurfaceLevel(
+            new Uint8Array(await new Response(gz).arrayBuffer()), n, meta);
+          const halves = new Uint16Array(bytes.buffer, bytes.byteOffset,
+                                         bytes.byteLength / 2);
+          const h = new Float32Array(n * n);
+          for (let i = 0; i < n * n; i++) h[i] = fromHalf(halves[i * 2]);
+          levels.push(h);
+        }
+        const digest = async (out) => {
+          const all = new Uint16Array(out.reduce((s, a) => s + a.length, 0));
+          let o = 0;
+          for (const a of out) { all.set(a, o); o += a.length; }
+          const d = await crypto.subtle.digest("SHA-256", all.buffer);
+          return [...new Uint8Array(d)].map((b) => b.toString(16)
+            .padStart(2, "0")).join("");
+        };
+        const here = await digest(B.buildDesertBounds(levels, meta.cell_m));
+        const inWorker = await digest(await B.buildDesertBoundsInWorker(
+          levels.map((a) => a.slice()), meta.cell_m));
+        return { here, inWorker };
+      })()`);
+      process.stdout.write(JSON.stringify(got));
+    } finally {
+      await tab?.close();
+      server.close();
+    }
+""")
+
+
+def _cdp_port():
+    import os
+    import urllib.request
+    port = os.environ.get("CLOUDYVIEW_CDP_PORT", "9333")
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version",
+                               timeout=1).read()
+    except OSError:
+        return None
+    return port
+
+
+def test_the_worker_builds_the_same_pyramid():
+    if shutil.which("node") is None:
+        pytest.skip("needs node")
+    port = _cdp_port()
+    if port is None:
+        pytest.skip("needs a Chrome with --remote-debugging-port "
+                    "(CLOUDYVIEW_CDP_PORT, default 9333); see "
+                    "tests/test_tint_compile.py")
+    import hashlib
+    import os
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e",
+         _WORKER_JS % {"tools": (REPO / "tools").as_posix(),
+                       "web": (REPO / "web").as_posix()}],
+        capture_output=True, text=True, cwd=REPO, timeout=300,
+        env={**os.environ, "CDP_PORT": port})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    got = json.loads(proc.stdout)
+    py = np.concatenate([a.ravel() for a in db.build(list(heights()), CELL)])
+    want = hashlib.sha256(py.view(np.uint16).tobytes()).hexdigest()
+    assert got["here"] == want
+    assert got["inWorker"] == want

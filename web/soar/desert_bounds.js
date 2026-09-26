@@ -329,3 +329,29 @@ export function buildDesertBounds(levels, cellM) {
   }
   return out;
 }
+
+/**
+ * buildDesertBounds in a module Worker (desert_bounds_worker.js), off the
+ * main thread: on the shipped tile it is over a second of arithmetic, and on
+ * the main thread that second froze the flight at the first switch to the
+ * desert (Thomas, 2026-09-25). Resolves to the very same Uint16Arrays — the
+ * worker runs this module's own buildDesertBounds (tests/test_desert_bounds.py
+ * pins the worker's bytes to Python's). `levels` are transferred, so the
+ * caller must not read them afterwards.
+ */
+export function buildDesertBoundsInWorker(levels, cellM) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./desert_bounds_worker.js",
+                                      import.meta.url), { type: "module" });
+    worker.onmessage = (e) => {
+      worker.terminate();
+      if (e.data.error) reject(new Error(`desert bounds: ${e.data.error}`));
+      else resolve(e.data.out);
+    };
+    worker.onerror = (e) => {
+      worker.terminate();
+      reject(new Error(`desert bounds worker: ${e.message ?? "failed"}`));
+    };
+    worker.postMessage({ levels, cellM }, levels.map((a) => a.buffer));
+  });
+}
