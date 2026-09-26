@@ -594,7 +594,7 @@ export class UI {
         `switch to the ${desert ? "ocean" : "desert"} — G in flight`,
         () => { app.setSurface(desert ? "ocean" : "desert").then(() => {
           if (this.panel === "main") this.open("main");
-        }); }));
+        }, () => {}); }));   // a failure is told by setSurface's toast
     }
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two

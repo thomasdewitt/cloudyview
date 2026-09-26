@@ -1484,11 +1484,16 @@ export class Viewer {
     // it was completely frozen"). Each step is also a performance mark
     // ("soar-surface <step>"), which is how the switch is timed.
     const ground = kind === "desert" ? "desert" : "ocean";
+    // Once the switch has settled (landed, refused or failed) nothing it
+    // started may touch the panel again: a compile or a download still
+    // running would otherwise put a stale step back up and leave it there.
+    let settled = false;
     const step = (stage, fraction) => {
       performance.mark(`soar-surface ${stage}`);
-      this.ui.showProgress(stage, fraction);
+      if (!settled) this.ui.showProgress(stage, fraction);
     };
     let landed = false;
+    this._surfaceLanding = false;
     try {
       step(`Switching to the ${ground}…`, 0.02);
       // Everything that can wait or fail first — the download, the
@@ -1500,6 +1505,7 @@ export class Viewer {
       // run side by side; the panel names whichever is still going.
       const at = { download: 0, bounds: false, tile: false, k: 0, n: 1 };
       const show = () => {
+        if (settled) return;
         const fraction = 0.05 + 0.4 * at.download + (at.tile ? 0.1 : 0)
           + 0.4 * (at.k / at.n);
         let stage;
@@ -1516,26 +1522,24 @@ export class Viewer {
         if (k === n) performance.mark("soar-surface shaders compiled");
         show();
       });
-      let tile;
-      try {
-        tile = await this._surfaceTile(
-          kind,
-          (f) => { at.download = f; show(); },
-          (stage) => {
-            if (stage === "bounds") {
-              at.bounds = true;
-              performance.mark("soar-surface bounds");
-              show();
-            }
-          });
-      } catch (err) {
-        compiled.catch(() => {});        // the tile's error is the one told
-        throw err;
-      }
-      at.tile = true;
-      performance.mark("soar-surface tile ready");
-      show();
-      await compiled;
+      const loaded = this._surfaceTile(
+        kind,
+        (f) => { at.download = f; show(); },
+        (stage) => {
+          if (stage === "bounds") {
+            at.bounds = true;
+            performance.mark("soar-surface bounds");
+            show();
+          }
+        }).then((t) => {
+        at.tile = true;
+        performance.mark("soar-surface tile ready");
+        show();
+        return t;
+      });
+      // Whichever fails first is the one told, at once; the other may run
+      // on (a finished compile or tile is cached for the next switch).
+      const [tile] = await Promise.all([loaded, compiled]);
       const floorAt = kind === "desert" ? desertFloorAt(tile) : null;
       // A recording may have started while the tile or the pipeline was on
       // its way: a track stands on one ground, so the switch yields to it.
@@ -1552,9 +1556,11 @@ export class Viewer {
       step(`Landing on the ${ground}…`, 0.97);
       this.renderer.commitSurface(kind, tile);
       landed = true;
-      // The panel stays up until a frame on the new ground has been drawn
-      // (the frame loop clears it: _surfaceLanding).
+      // The panel stays up until a frame on the new ground has been drawn:
+      // the frame loop clears it for the first march begun after this
+      // moment (a frame already in flight still shows the old ground).
       this._surfaceLanding = true;
+      this._surfaceLandedAt = performance.now();
       this.scene.desertFloorAt = floorAt;
       // The camera folds at the surface frame's period: the sea's swell
       // repeats over several tiles, the desert at its tile.
@@ -1566,6 +1572,7 @@ export class Viewer {
       this.ui.say(`Could not change the ground: ${err.message}`, 8);
       throw err;
     } finally {
+      settled = true;
       if (!landed) this.ui.hideProgress();
       this._surfacing = false;
       this._wake("surface");
@@ -1575,7 +1582,9 @@ export class Viewer {
   /** G: the other day ground. */
   toggleSurface() {
     if (this.scene?.city) return;
-    this.setSurface(this.surfaceKind === "desert" ? "ocean" : "desert");
+    // A failure has already been told (setSurface's toast).
+    this.setSurface(this.surfaceKind === "desert" ? "ocean" : "desert")
+      .catch(() => {});
   }
 
   /**
@@ -2558,6 +2567,12 @@ export class Viewer {
    */
   async renderTrackVideo(samples, knocks = []) {
     if (this._capturing) return;
+    // The ground is changing, and the switch owns the progress panel.
+    if (this._surfacing) {
+      this.ui.say("Changing the ground — render the video once it has " +
+                  "landed.", 3);
+      return;
+    }
     const { VideoWriter, evenSize } = await import("./video.js");
 
     // Even before the offscreen texture is made, not after: H.264 refuses odd
@@ -2912,6 +2927,12 @@ export class Viewer {
   async saveScreenshot() {
     const overlays = this.captureOverlays;
     if (this._capturing) return;
+    // The ground is changing, and the switch owns the progress panel.
+    if (this._surfacing) {
+      this.ui.say("Changing the ground — take the still once it has " +
+                  "landed.", 3);
+      return;
+    }
     this._capturing = true;
     this._wake("capture");
     const size = this.captureDimensions();
@@ -3532,16 +3553,19 @@ export class Viewer {
         this._marchPending = false;
         // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
         // must not be acquired until every await inside the draw has resolved.
+        const marchStartedAt = performance.now();
         const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
           { deltaSeconds: dt, overlays, waitForPipeline: false,
             lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null });
-        if (marched && this._surfaceLanding) {
-          // The first frame on a new ground: the switch's panel comes down.
+        if (marched && this._surfaceLanding
+            && marchStartedAt >= this._surfaceLandedAt) {
+          // The first frame on a new ground: the switch's panel comes down,
+          // unless a capture begun since has put up its own.
           this._surfaceLanding = false;
           performance.mark("soar-surface first frame");
-          this.ui.hideProgress();
+          if (!this._capturing) this.ui.hideProgress();
         }
         if (!marched) {
           // The shader variant this frame needs is still compiling (a tier,

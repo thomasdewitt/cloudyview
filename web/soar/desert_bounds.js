@@ -352,6 +352,10 @@ export function buildDesertBoundsInWorker(levels, cellM) {
       worker.terminate();
       reject(new Error(`desert bounds worker: ${e.message ?? "failed"}`));
     };
+    worker.onmessageerror = () => {
+      worker.terminate();
+      reject(new Error("desert bounds worker: its reply could not be read."));
+    };
     worker.postMessage({ levels, cellM }, levels.map((a) => a.buffer));
   });
 }
