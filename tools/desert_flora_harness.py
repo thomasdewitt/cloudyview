@@ -104,16 +104,19 @@ fn scan(@builtin(global_invocation_id) gid: vec3<u32>) {
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.w, it.a.z);
 }
 
-// The small cells of the tile's first 1024 m, where the harness looks.
+// The small cells of the tile's first 1024 m, where the harness looks: a
+// thread per slot, the cell's DF_SMALL_SLOTS (4) slots as a 2x2 block of
+// threads.
 @compute @workgroup_size(16, 16)
 fn scan_small(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = 256u;
     if (gid.x >= n || gid.y >= n) {
         return;
     }
-    let ci = vec2<i32>(gid.xy);
+    let ci = vec2<i32>(gid.xy / 2u);
+    let slot = i32((gid.x & 1u) + 2u * (gid.y & 1u));
     let org = vec2<f32>(ci) * DF_SMALL_CELL;
-    let it = df_small_item(ci, org, 0.1, df_small_foot(ci), -1e9);
+    let it = df_small_item(ci, slot, org, 0.1, df_small_foot(ci, slot), -1e9);
     let i = (gid.y * n + gid.x) * 2u;
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.y, it.a.z);
@@ -142,12 +145,13 @@ def extract_const(src: str, name: str) -> str:
     return m.group(0)
 
 
-def scan_code() -> str:
+def scan_code(src: str | None = None) -> str:
     """The placement scan's module: the flora section and the shared
-    functions it calls, lifted from the shader, over SCAN_PRELUDE's stubs.
-    tests/test_desert_flora_scan.py compiles it, so a shared function the
-    flora section starts calling fails there rather than in every run."""
-    src = SHADER.read_text()
+    functions it calls, lifted from the shader (or from `src`, a patched
+    copy of it), over SCAN_PRELUDE's stubs. tests/test_desert_flora_scan.py
+    compiles it, so a shared function the flora section starts calling
+    fails there rather than in every run."""
+    src = SHADER.read_text() if src is None else src
     # The ground's habitat accessors are lifted from the shader like the
     # flora section itself, over the stub tile read above.
     return (extract_fn(src, "pcg2d") + extract_fn(src, "safe_inv_dir")
@@ -167,14 +171,21 @@ def scan_plants(entry="scan"):
     cell, rows (kind, x, y, height, radius, arms, age, ribs). `scan_small`:
     the small cells of the first 1024 m, rows (kind, x, y, height,
     half-width, variant, flowering, stems)."""
+    return run_scan(scan_code(), entry, 256)
+
+
+def run_scan(code, entry, n):
+    """Run compute entry `entry` of module `code` (scan_code() and more)
+    over an n x n grid of 16 x 16 workgroups' threads, with the scan's
+    bindings (the tile, its sampler, scan_out: two vec4 a thread), and
+    return scan_out as rows of eight floats. tests/test_desert_flora_bounds.py
+    runs its own entries through it."""
     import wgpu
-    code = scan_code()
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
     module = device.create_shader_module(code=code)
     pipe = device.create_compute_pipeline(
         layout="auto", compute={"module": module, "entry_point": entry})
-    n = 256
     size = n * n * 2 * 16
     buf = device.create_buffer(size=size, usage=wgpu.BufferUsage.STORAGE
                                | wgpu.BufferUsage.COPY_SRC)
@@ -315,10 +326,19 @@ def shrub_views(g, s, sun_az, sun_el):
 def other_views(g, plants, hero, sun_az, sun_el):
     oc = nearest(plants, 10, hero)
     rk = nearest(plants, 14, hero)
+    pv = nearest(plants, 13, hero)
     print(f"ocotillo at ({oc[1]:.1f}, {oc[2]:.1f}): H {oc[3]:.2f} m, "
-          f"{int(oc[4])} canes; boulders at ({rk[1]:.1f}, {rk[2]:.1f})")
+          f"{int(oc[4])} canes; boulders at ({rk[1]:.1f}, {rk[2]:.1f}); "
+          f"palo verde at ({pv[1]:.1f}, {pv[2]:.1f}): H {pv[3]:.2f} m, "
+          f"crown {pv[4]:.2f} m")
     side = sun_az + 25.0
     return {
+        # A palo verde's crown close (the near form) and at a dozen metres
+        # (both forms, for calibrating one against the other with --patch).
+        "pv_6m": aim(g, pv[1], pv[2], 6.0 + pv[4], 1.7, 0.6 * pv[3], 60.0,
+                     side, sun_az, sun_el),
+        "pv_12m": aim(g, pv[1], pv[2], 12.0 + pv[4], 2.0, 0.6 * pv[3], 40.0,
+                      side, sun_az, sun_el),
         "oco_1m": aim(g, oc[1], oc[2], 1.3, 1.6, 1.9, 60.0, side, sun_az, sun_el),
         "oco_8m": aim(g, oc[1], oc[2], 8.0, 1.7, 0.5 * oc[3], 60.0, side,
                       sun_az, sun_el),
@@ -502,6 +522,12 @@ def main(argv=None) -> int:
                     help="the prebaked demo directory (default $SOAR_DEMOS, "
                          "else web/soar/demos in this checkout)")
     ap.add_argument("--views", default="all")
+    ap.add_argument("--random-views", type=int, default=0, metavar="N",
+                    help="N cameras drawn at random over the tile's first "
+                         "kilometre (1.5-40 m up, looking 2-20 degrees down, "
+                         "fov 60; --seed picks them): a cost averaged over "
+                         "what happens to stand in view, not one framing")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--size", type=int, nargs=2, default=(768, 432),
                     help="render size (default: the low tier's 768x432)")
     ap.add_argument("--frames", type=int, default=32)
@@ -665,6 +691,15 @@ def main(argv=None) -> int:
              **other_views(g, plants, hero, sun_az, sun_el)}
     if args.views != "all":
         views = {k: views[k] for k in args.views.split(",")}
+    if args.random_views:
+        rng = np.random.default_rng(args.seed)
+        views = {}
+        for i in range(args.random_views):
+            x, y = rng.uniform(64.0, 960.0, 2)
+            views[f"r{i:02d}"] = (x, y, g(x, y) + rng.uniform(1.5, 40.0),
+                                  rng.uniform(0.0, 360.0),
+                                  -rng.uniform(2.0, 20.0), 60.0,
+                                  sun_az, sun_el)
     if args.camera is not None:
         c = args.camera
         views = {"camera": (*c, sun_az, sun_el)}
