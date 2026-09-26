@@ -25,6 +25,7 @@ Coordinate System (Meteorological Convention):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -68,7 +69,7 @@ from .soar_host import (
     surface_cell_m,
     surface_period_m,
     surface_clock_period_s,
-    CLOCK_SURFACES,
+    SURFACE_DIRS,
 )
 
 logger = logging.getLogger(__name__)
@@ -339,11 +340,16 @@ def render_nested(
         raise ValueError(
             f"city_offset places the night city's tile, but surface is "
             f"'{surface}'; pass surface='city' or drop the offset.")
-    if scene_time != 0.0 and surface not in CLOCK_SURFACES:
-        raise ValueError(
-            f"scene_time is the clock of the surfaces that move "
-            f"({', '.join(CLOCK_SURFACES)}), and surface is '{surface}', "
-            f"which does not; drop --time.")
+    if scene_time != 0.0:
+        # Only a surface with a clock reads it (its meta.json clock_period_s:
+        # the city's steam); asked of one without, --time would be a silent
+        # no-op.
+        tile_meta = json.loads((SURFACE_DIRS[check_surface(surface)]
+                                / "meta.json").read_text())
+        if surface_clock_period_s(surface, tile_meta) is None:
+            raise ValueError(
+                f"the {surface} has no clock — nothing on it moves (its "
+                f"meta.json clock_period_s is null); drop --time.")
     levels = list(levels)
     if not levels:
         raise ValueError("render_nested needs at least one level.")
@@ -558,9 +564,10 @@ def witness(
         standing under the field. Required with surface="city" and refused
         otherwise; soar's cyberpunk mode flies (8100, -44190).
     scene_time : float, optional
-        The scene clock in seconds: where the moving sea is in its motion
-        (uniform row 24.z). 0 by default; soar's reproduction commands write
-        the clock the still was taken at.
+        The scene clock in seconds (uniform row 24.z): where the city's
+        steam is in its motion. 0 by default, and refused over a surface
+        with no clock (the sea, the desert); soar's reproduction commands
+        write the clock the still was taken at.
     return_linear : bool, optional
         Compile the tone map out and return unbounded linear HDR radiance
         instead of an encoded image. This is what soar's auto-exposure
@@ -1016,10 +1023,10 @@ def cli():
                              "8100 -44190; soar writes the flown one here")
     parser.add_argument("--time", type=float, metavar="SECONDS",
                         dest="scene_time",
-                        help="The scene clock: where the moving sea, or the "
-                             "city's steam, is in its motion (default 0; the "
-                             "desert has none). Soar writes the clock the "
-                             "still was taken at")
+                        help="The scene clock: where the city's steam is in "
+                             "its motion (default 0; the sea and the desert "
+                             "have none). Soar writes the clock the still was "
+                             "taken at")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
     parser.add_argument("--nest-group", metavar="GROUP",

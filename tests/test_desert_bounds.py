@@ -1,6 +1,6 @@
 """The desert's bounds pyramid holds, and both hosts build the same one.
 
-raymarch.wgsl desert_terrain_trace certifies every step it takes over the
+raymarch.wgsl desert_terrain_march certifies every step it takes over the
 desert from cloudyview/desert_bounds.py's pyramid, so a bound that falls
 short anywhere is a ray that can pass through the ground. What is pinned:
 
@@ -202,7 +202,7 @@ def test_ceil_half_rounds_up():
 
 
 def test_the_smooth_lid_reads_true_bounds():
-    """desert_terrain_trace's lid is mip k plus meta's envelope_m[k],
+    """desert_terrain_march's lid is mip k plus meta's envelope_m[k],
     stepped by slope_max[k], for k up to the lid's top (DESERT_LID_MAX_LEVEL
     = 7), and its other steps take slope_max at the footprint's mip: both
     are bounds, not measurements."""

@@ -174,9 +174,10 @@ def main(argv=None) -> int:
                              "(default: %(default)s; constants.js CITY_MOON "
                              "is the app's)")
     parser.add_argument("--time", type=float, default=0.0,
-                        help="the scene clock in seconds (steam, the sea): "
-                             "what `witness --time` and a track's samples "
-                             "set (default: %(default)s)")
+                        help="the scene clock in seconds (the city's "
+                             "steam; refused over the ocean, which has "
+                             "none): what `witness --time` and a track's "
+                             "samples set (default: %(default)s)")
     parser.add_argument("--haze", type=float, default=None,
                         help="aerosol, the app's one haze number "
                              "(default: the app's)")
@@ -254,6 +255,13 @@ def main(argv=None) -> int:
     cell_m = surface_cell_m(surface, meta)
     tile_extent_m = float(meta["tile_extent_m"])
     max_lod = int(meta["mips"]) - 1
+    clock_period_s = surface_clock_period_s(surface, meta)
+    if args.time != 0.0 and clock_period_s is None:
+        # It would pack 0 (the surface has no clock): a silent no-op.
+        print(f"\n--time {args.time:g}: the {surface} has no clock — nothing "
+              "on it moves. Drop --time, or render the city (--city).",
+              file=sys.stderr)
+        return 2
     print(f"  Surface tile: {'city' if args.city else 'ocean'}, "
           f"n={meta['n']}, cell {cell_m:g} m, extent {tile_extent_m:g} m, "
           f"top mip {max_lod}")
@@ -270,7 +278,7 @@ def main(argv=None) -> int:
         ocean_max_lod=max_lod,
         ocean_enabled=True,
         surface=surface,
-        clock_period_s=surface_clock_period_s(surface, meta),
+        clock_period_s=clock_period_s,
         **({"city_tile_offset_m": tuple(args.city_offset)}
            if args.city_offset is not None else {}),
     )

@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from cloudyview.soar_host import SURFACE_FRAME_TILES, surface_period_m
+
 REPO = Path(__file__).resolve().parents[1]
 SOAR = REPO / "web" / "soar"
 
@@ -34,9 +36,11 @@ _LOAD_JS = textwrap.dedent("""
     };
     const writes = [];
     let destroyed = false;
+    let created = 0;
     const device = {
-      createTexture: (desc) => ({ desc, createView: () => ({}),
-                                  destroy: () => { destroyed = true; } }),
+      createTexture: (desc) => { created += 1;
+                                 return { desc, createView: () => ({}),
+                                          destroy: () => { destroyed = true; } }; },
       queue: { writeTexture: (dst, bytes, layout, size) =>
         writes.push({ level: dst.mipLevel, bytes: bytes.byteLength,
                       bytesPerRow: layout.bytesPerRow, size }) },
@@ -50,9 +54,10 @@ _LOAD_JS = textwrap.dedent("""
               surfacePeriod: tile.surfacePeriod, maxLod: tile.maxLod,
               format: tile.texture.desc.format,
               heights: tile.heights?.length ?? null,
-              cells: tile.cells?.density.length ?? null, writes, destroyed };
+              cells: tile.cells?.density.length ?? null, writes, destroyed,
+              frameTiles: K.SURFACE_FRAME_TILES };
     } catch (err) {
-      out = { error: String(err), destroyed };
+      out = { error: String(err), destroyed, created };
     }
     process.stdout.write(JSON.stringify(out));
 """)
@@ -70,13 +75,19 @@ def _load(kind, keep, base=None):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 @pytest.mark.parametrize("kind, keep, channels", [
-    ("desert", "keepHeights", 2), ("city", "keepCells", 4)])
+    ("desert", "keepHeights", 2), ("city", "keepCells", 4),
+    ("ocean", "keepNothing", 4)])
 def test_a_surface_tile_loads_every_level(kind, keep, channels):
     meta = json.loads((SOAR / kind / "meta.json").read_text())
     got = _load(kind, keep)
     assert "error" not in got, got.get("error")
     assert got["dx"] == meta.get("dx_m", meta.get("cell_m"))
-    assert got["tileExtent"] == got["surfacePeriod"] == meta["tile_extent_m"]
+    assert got["tileExtent"] == meta["tile_extent_m"]
+    # The frame folds at a whole number of tiles: the sea's 16, the
+    # district's one — the same period the Python host folds at.
+    assert got["frameTiles"] == SURFACE_FRAME_TILES
+    assert got["surfacePeriod"] == pytest.approx(
+        surface_period_m(kind, meta), rel=1e-15)
     assert got["maxLod"] == meta["mips"] - 1
     assert got["format"] == meta.get("format", "rgba16float")
     assert [w["level"] for w in got["writes"]] == list(range(meta["mips"]))
@@ -84,9 +95,27 @@ def test_a_surface_tile_loads_every_level(kind, keep, channels):
         side = max(1, meta["n"] >> w["level"])
         assert w["bytes"] == side * side * channels * 2
         assert w["bytesPerRow"] == side * channels * 2
-    held = got["heights"] if keep == "keepHeights" else got["cells"]
-    assert held == meta["n"] ** 2
+    if keep != "keepNothing":
+        held = got["heights"] if keep == "keepHeights" else got["cells"]
+        assert held == meta["n"] ** 2
     assert not got["destroyed"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_tile_with_a_bad_clock_is_refused_before_any_texture(tmp_path):
+    """The clock is read before anything is allocated: a meta.json that
+    does not state it (or states 0) throws with no texture made, rather
+    than after every level downloaded, leaking the chain."""
+    meta = json.loads((SOAR / "ocean" / "meta.json").read_text())
+    for bad in ({k: v for k, v in meta.items() if k != "clock_period_s"},
+                {**meta, "clock_period_s": 0}):
+        alias = tmp_path / "ocean"
+        alias.mkdir(exist_ok=True)
+        (alias / "meta.json").write_text(json.dumps(bad))
+        got = _load("ocean", "keepNothing",
+                    base=os.path.relpath(alias, SOAR))
+        assert "clock_period_s" in got["error"] or "positive" in got["error"]
+        assert got["created"] == 0
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
