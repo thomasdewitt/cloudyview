@@ -104,16 +104,19 @@ fn scan(@builtin(global_invocation_id) gid: vec3<u32>) {
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.w, it.a.z);
 }
 
-// The small cells of the tile's first 1024 m, where the harness looks.
+// The small cells of the tile's first 1024 m, where the harness looks: a
+// thread per slot, the cell's DF_SMALL_SLOTS (4) slots as a 2x2 block of
+// threads.
 @compute @workgroup_size(16, 16)
 fn scan_small(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = 256u;
     if (gid.x >= n || gid.y >= n) {
         return;
     }
-    let ci = vec2<i32>(gid.xy);
+    let ci = vec2<i32>(gid.xy / 2u);
+    let slot = i32((gid.x & 1u) + 2u * (gid.y & 1u));
     let org = vec2<f32>(ci) * DF_SMALL_CELL;
-    let it = df_small_item(ci, org, 0.1, df_small_foot(ci), -1e9);
+    let it = df_small_item(ci, slot, org, 0.1, df_small_foot(ci, slot), -1e9);
     let i = (gid.y * n + gid.x) * 2u;
     scan_out[i] = vec4<f32>(f32(it.kind), org + it.base.xy, it.a.x);
     scan_out[i + 1u] = vec4<f32>(it.a.y, it.b.x, it.b.y, it.a.z);

@@ -22207,8 +22207,17 @@ const DF_TAU: f32 = 6.28318530717959;
 
 const DF_BIG_CELL: f32 = 16.0;
 const DF_BIG_N: i32 = 256;        // 4096 m / 16 m
-const DF_SMALL_CELL: f32 = 4.0;
-const DF_SMALL_N: i32 = 1024;     // 4096 m / 4 m
+// The small plants stand DF_SMALL_SLOTS to a cell, each slot its own draw
+// placed anywhere its reach leaves room for in the cell: one plant to a
+// cell half this size could only wander as far as its reach left of a
+// half-cell (a creosote's reach is most of one), and the stand read as the
+// lattice, rows running off to the horizon (Thomas, 2026-09-25: "The
+// plants are too regular as seen here, they are in lines"). Four slots in
+// twice the cell hold the same density, placed near-uniformly.
+const DF_SMALL_CELL: f32 = 8.0;
+const DF_SMALL_N: i32 = 512;      // 4096 m / 8 m
+const DF_SMALL_SLOTS: i32 = 4;
+const DF_SMALL_PER_BIG: i32 = 2;  // DF_BIG_CELL / DF_SMALL_CELL
 
 // DesertHit.kind for flora; 0..7 belong to the ground.
 const DF_KIND_SAGUARO: i32 = 8;
@@ -25526,10 +25535,15 @@ fn df_big_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
     return it;
 }
 
+// Slot s of small cell ci's own hash stream.
+fn df_small_seed(ci: vec2<i32>, s: i32) -> vec2<u32> {
+    return df_cell_seed(ci, DF_SMALL_N, 0x3c6eu + u32(s) * 0x2545f491u);
+}
+
 // Size first, so the jitter can use whatever room the thing leaves in its
-// cell: small ones wander, big ones sit near the centre.
-fn df_small_foot(ci: vec2<i32>) -> DfFoot {
-    let seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
+// cell: small ones wander the whole cell, big ones a little less.
+fn df_small_foot(ci: vec2<i32>, s: i32) -> DfFoot {
+    let seed = df_small_seed(ci, s);
     let r0 = df_rand4(seed);
     var f: DfFoot;
     f.kind = 0;
@@ -25563,11 +25577,11 @@ fn df_small_foot(ci: vec2<i32>) -> DfFoot {
     return f;
 }
 
-fn df_small_item(ci: vec2<i32>, cell_org: vec2<f32>, fp: f32,
+fn df_small_item(ci: vec2<i32>, s: i32, cell_org: vec2<f32>, fp: f32,
                  foot: DfFoot, zlo: f32) -> DfItem {
     var it: DfItem;
     it.kind = 0;
-    it.seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
+    it.seed = df_small_seed(ci, s);
     if (foot.kind == 0) {
         return it;
     }
@@ -25700,8 +25714,8 @@ fn df_cell_lid(org: vec2<f32>) -> f32 {
         + u.ocean.w * DESERT_OCTAVE_MARGIN + DF_TALLEST;
 }
 
-// The item of cell ci (big or small) that the ray over its segment
-// [t_cur, t_exit] can touch nearer than best_t: its box interval in `ta`,
+// The item of cell ci (big, or small cell ci's slot `slot`) that the ray
+// over its segment [t_cur, t_exit] can touch nearer than best_t: its box interval in `ta`,
 // `tb` and its cell-local ray origin; kind 0 when there is none.
 struct DfCandidate {
     it: DfItem,
@@ -25710,7 +25724,8 @@ struct DfCandidate {
     tb: f32,
 }
 
-fn df_cell_candidate(ci: vec2<i32>, big: bool, o: vec3<f32>, dir: vec3<f32>,
+fn df_cell_candidate(ci: vec2<i32>, big: bool, slot: i32, o: vec3<f32>,
+                     dir: vec3<f32>,
                      inv_dir: vec3<f32>, t_cur: f32, t_exit: f32, t0: f32,
                      best_t: f32, pixel_angle: f32) -> DfCandidate {
     var c: DfCandidate;
@@ -25721,7 +25736,7 @@ fn df_cell_candidate(ci: vec2<i32>, big: bool, o: vec3<f32>, dir: vec3<f32>,
     if (big) {
         foot = df_big_foot(ci);
     } else {
-        foot = df_small_foot(ci);
+        foot = df_small_foot(ci, slot);
     }
     if (foot.kind == 0) {
         return c;
@@ -25740,7 +25755,7 @@ fn df_cell_candidate(ci: vec2<i32>, big: bool, o: vec3<f32>, dir: vec3<f32>,
     if (big) {
         c.it = df_big_item(ci, org, fp_cell, foot, zlo);
     } else {
-        c.it = df_small_item(ci, org, fp_cell, foot, zlo);
+        c.it = df_small_item(ci, slot, org, fp_cell, foot, zlo);
     }
     if (c.it.kind == 0) {
         return c;
@@ -25823,7 +25838,7 @@ fn df_walk_plain(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let org = vec2<f32>(bd.ci) * DF_BIG_CELL;
         let zlo = o.z + dir.z * select(t_cur, t_exit, dir.z < 0.0);
         if (zlo <= df_cell_lid(org)) {
-            let cb = df_cell_candidate(bd.ci, true, o, dir, inv_dir, t_cur,
+            let cb = df_cell_candidate(bd.ci, true, 0, o, dir, inv_dir, t_cur,
                                        t_exit, t0, res.t, pixel_angle);
             var hb = res;
             if (cb.it.kind != 0) {
@@ -25835,26 +25850,33 @@ fn df_walk_plain(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
             }
             // The small cells of this big cell, front to back, as far as
             // anything found so far.
-            let lo = bd.ci * 4;
+            let lo = bd.ci * DF_SMALL_PER_BIG;
             var sd = df_dda(o, dir, t_cur, DF_SMALL_CELL, lo,
-                            lo + vec2<i32>(3));
+                            lo + vec2<i32>(DF_SMALL_PER_BIG - 1));
             var ts = t_cur;
-            for (var k: i32 = 0; k < 8; k = k + 1) {
+            for (var k: i32 = 0; k < 2 * DF_SMALL_PER_BIG; k = k + 1) {
                 let ts_exit = min(min(sd.tmax.x, sd.tmax.y), t_exit);
                 if (ts >= min(res.t, t1_small)) {
                     break;
                 }
-                let cs = df_cell_candidate(sd.ci, false, o, dir, inv_dir, ts,
-                                           ts_exit, t0, res.t, pixel_angle);
-                var hs = res;
-                hs.hit = false;
-                if (cs.it.kind != 0) {
-                    hs = df_accept(df_item_far(cs.it, cs.ol, dir, cs.ta, cs.tb,
-                                               pixel_angle, dither), cs, o,
-                                   dir);
+                // The cell's slots, the nearest hit kept: each candidate's
+                // interval ends at the best found so far.
+                var found = false;
+                for (var s: i32 = 0; s < DF_SMALL_SLOTS; s = s + 1) {
+                    let cs = df_cell_candidate(sd.ci, false, s, o, dir,
+                                               inv_dir, ts, ts_exit, t0,
+                                               res.t, pixel_angle);
+                    if (cs.it.kind != 0) {
+                        let hs = df_accept(df_item_far(cs.it, cs.ol, dir, cs.ta,
+                                                  cs.tb, pixel_angle, dither),
+                                           cs, o, dir);
+                        if (hs.hit) {
+                            res = hs;
+                            found = true;
+                        }
+                    }
                 }
-                if (hs.hit) {
-                    res = hs;
+                if (found) {
                     break;
                 }
                 if (ts_exit >= t_exit) {
@@ -25893,7 +25915,7 @@ fn df_walk_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let org = vec2<f32>(bd.ci) * DF_BIG_CELL;
         let zlo = o.z + dir.z * select(t_cur, t_exit, dir.z < 0.0);
         if (zlo <= df_cell_lid(org)) {
-            let cb = df_cell_candidate(bd.ci, true, o, dir, inv_dir, t_cur,
+            let cb = df_cell_candidate(bd.ci, true, 0, o, dir, inv_dir, t_cur,
                                        t_exit, t0, res.t, pixel_angle);
             var hb = res;
             if (cb.it.kind != 0) {
@@ -25905,26 +25927,33 @@ fn df_walk_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
             }
             // The small cells of this big cell, front to back, as far as
             // anything found so far.
-            let lo = bd.ci * 4;
+            let lo = bd.ci * DF_SMALL_PER_BIG;
             var sd = df_dda(o, dir, t_cur, DF_SMALL_CELL, lo,
-                            lo + vec2<i32>(3));
+                            lo + vec2<i32>(DF_SMALL_PER_BIG - 1));
             var ts = t_cur;
-            for (var k: i32 = 0; k < 8; k = k + 1) {
+            for (var k: i32 = 0; k < 2 * DF_SMALL_PER_BIG; k = k + 1) {
                 let ts_exit = min(min(sd.tmax.x, sd.tmax.y), t_exit);
                 if (ts >= res.t) {
                     break;
                 }
-                let cs = df_cell_candidate(sd.ci, false, o, dir, inv_dir, ts,
-                                           ts_exit, t0, res.t, pixel_angle);
-                var hs = res;
-                hs.hit = false;
-                if (cs.it.kind != 0) {
-                    hs = df_accept(df_item_refine(cs.it, cs.ol, dir, cs.ta, cs.tb,
-                                               pixel_angle, dither), cs, o,
-                                   dir);
+                // The cell's slots, the nearest hit kept: each candidate's
+                // interval ends at the best found so far.
+                var found = false;
+                for (var s: i32 = 0; s < DF_SMALL_SLOTS; s = s + 1) {
+                    let cs = df_cell_candidate(sd.ci, false, s, o, dir,
+                                               inv_dir, ts, ts_exit, t0,
+                                               res.t, pixel_angle);
+                    if (cs.it.kind != 0) {
+                        let hs = df_accept(df_item_refine(cs.it, cs.ol, dir, cs.ta,
+                                                  cs.tb, pixel_angle, dither),
+                                           cs, o, dir);
+                        if (hs.hit) {
+                            res = hs;
+                            found = true;
+                        }
+                    }
                 }
-                if (hs.hit) {
-                    res = hs;
+                if (found) {
                     break;
                 }
                 if (ts_exit >= t_exit) {
@@ -26090,7 +26119,8 @@ fn df_item_transmit(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
 
 // The item of cell ci (big or small) as an occluder of the sun ray from p
 // over its segment [t_cur, t_exit]: the transmittance past it.
-fn df_cell_transmit(ci: vec2<i32>, big: bool, p: vec3<f32>, dir: vec3<f32>,
+fn df_cell_transmit(ci: vec2<i32>, big: bool, slot: i32, p: vec3<f32>,
+                    dir: vec3<f32>,
                     inv_dir: vec3<f32>, t_cur: f32, t_exit: f32, t1: f32,
                     fp: f32) -> f32 {
     let cell = select(DF_SMALL_CELL, DF_BIG_CELL, big);
@@ -26099,7 +26129,7 @@ fn df_cell_transmit(ci: vec2<i32>, big: bool, p: vec3<f32>, dir: vec3<f32>,
     if (big) {
         foot = df_big_foot(ci);
     } else {
-        foot = df_small_foot(ci);
+        foot = df_small_foot(ci, slot);
     }
     if (foot.kind == 0) {
         return 1.0;
@@ -26116,7 +26146,7 @@ fn df_cell_transmit(ci: vec2<i32>, big: bool, p: vec3<f32>, dir: vec3<f32>,
     if (big) {
         it = df_big_item(ci, org, fp, foot, zlo);
     } else {
-        it = df_small_item(ci, org, fp, foot, zlo);
+        it = df_small_item(ci, slot, org, fp, foot, zlo);
     }
     if (it.kind == 0) {
         return 1.0;
@@ -26146,15 +26176,18 @@ fn df_occlusion_walk(p: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         if (p.z + dir.z * t_cur > df_cell_lid(org)) {
             return vis;
         }
-        vis = vis * df_cell_transmit(bd.ci, true, p, dir, inv_dir, t_cur,
+        vis = vis * df_cell_transmit(bd.ci, true, 0, p, dir, inv_dir, t_cur,
                                      t_exit, t1, fp);
-        let lo = bd.ci * 4;
-        var sd = df_dda(p, dir, t_cur, DF_SMALL_CELL, lo, lo + vec2<i32>(3));
+        let lo = bd.ci * DF_SMALL_PER_BIG;
+        var sd = df_dda(p, dir, t_cur, DF_SMALL_CELL, lo,
+                        lo + vec2<i32>(DF_SMALL_PER_BIG - 1));
         var ts = t_cur;
-        for (var k: i32 = 0; k < 8; k = k + 1) {
+        for (var k: i32 = 0; k < 2 * DF_SMALL_PER_BIG; k = k + 1) {
             let ts_exit = min(min(sd.tmax.x, sd.tmax.y), t_exit);
-            vis = vis * df_cell_transmit(sd.ci, false, p, dir, inv_dir, ts,
-                                         ts_exit, t1, fp);
+            for (var s: i32 = 0; s < DF_SMALL_SLOTS; s = s + 1) {
+                vis = vis * df_cell_transmit(sd.ci, false, s, p, dir, inv_dir,
+                                             ts, ts_exit, t1, fp);
+            }
             if (ts_exit >= t_exit) {
                 break;
             }
@@ -26544,7 +26577,7 @@ struct DfFarProfile {
 // decal-drawn ones apart (desert_flora_far).
 fn df_far_profile(z: f32, hb: DfHabitat, w: vec2<f32>) -> DfFarProfile {
     let big = 1.0 / (DF_BIG_CELL * DF_BIG_CELL);
-    let small = 1.0 / (DF_SMALL_CELL * DF_SMALL_CELL);
+    let small = f32(DF_SMALL_SLOTS) / (DF_SMALL_CELL * DF_SMALL_CELL);
     let n_sag = DF_P_SAGUARO * big * df_keep(DF_KIND_SAGUARO, hb) * w.x;
     let n_oco = DF_P_OCOTILLO * big * df_keep(DF_KIND_OCOTILLO, hb) * w.x;
     let n_rock = DF_P_BOULDERS * big * df_keep(DF_KIND_BOULDER, hb) * w.y;
@@ -26812,7 +26845,7 @@ fn df_far_shadow_stat(p: vec3<f32>, v: vec3<f32>, sun: vec3<f32>,
     }
     let hb = df_habitat(p.xy);
     let big = 1.0 / (DF_BIG_CELL * DF_BIG_CELL);
-    let small = 1.0 / (DF_SMALL_CELL * DF_SMALL_CELL);
+    let small = f32(DF_SMALL_SLOTS) / (DF_SMALL_CELL * DF_SMALL_CELL);
     let k_shrub = df_keep(DF_KIND_CREOSOTE, hb);
     let ts = sqrt(max(1.0 - sun.z * sun.z, 0.0)) / sun.z;
     let vz = max(abs(v.z), 1e-3);
@@ -26907,7 +26940,7 @@ const DF_DECAL_TAU0_PEAR: f32 = 1.7035;
 const DF_DECAL_TAU0_PV: f32 = 3.3647;
 const DF_DECAL_TAU0_BARREL: f32 = 6.2813;
 const DF_DECAL_TAU0_ROCK: f32 = 1.0916;
-const DF_DECAL_CELLS_SMALL: i32 = 8;
+const DF_DECAL_CELLS_SMALL: i32 = 4;
 const DF_DECAL_CELLS_BIG: i32 = 4;
 
 fn df_disc_at(p: vec3<f32>, rd: vec3<f32>, big: bool) -> DfDisc {
@@ -26928,7 +26961,9 @@ fn df_disc_at(p: vec3<f32>, rd: vec3<f32>, big: bool) -> DfDisc {
     d.burs = false;
     let n = select(DF_DECAL_CELLS_SMALL, DF_DECAL_CELLS_BIG, big);
     for (var k: i32 = 0; k < n; k = k + 1) {
-        d = df_disc_under(df_disc_cell(dd.ci, p, rd, big, qa, qb), d);
+        for (var s: i32 = 0; s < select(DF_SMALL_SLOTS, 1, big); s = s + 1) {
+            d = df_disc_under(df_disc_cell(dd.ci, s, p, rd, big, qa, qb), d);
+        }
         if (min(dd.tmax.x, dd.tmax.y) >= len) {
             break;
         }
@@ -26963,7 +26998,8 @@ fn df_disc_chord(p: vec3<f32>, rd: vec3<f32>, fw: vec2<f32>,
 // against the test points, the shape from the hashes, the disc test, and
 // only for a point inside a disc the habitat's texture reads. Nothing reads
 // the ground's height: a disc lies on the ground wherever it is.
-fn df_disc_cell(ci: vec2<i32>, p: vec3<f32>, rd: vec3<f32>, big: bool,
+fn df_disc_cell(ci: vec2<i32>, slot: i32, p: vec3<f32>, rd: vec3<f32>,
+                big: bool,
                 qa: vec2<f32>, qb: vec2<f32>) -> DfDisc {
     var d: DfDisc;
     d.cover = 0.0;
@@ -26977,8 +27013,8 @@ fn df_disc_cell(ci: vec2<i32>, p: vec3<f32>, rd: vec3<f32>, big: bool,
         foot = df_big_foot(ci);
         seed = df_cell_seed(ci, DF_BIG_N, 0x5a17u);
     } else {
-        foot = df_small_foot(ci);
-        seed = df_cell_seed(ci, DF_SMALL_N, 0x3c6eu);
+        foot = df_small_foot(ci, slot);
+        seed = df_small_seed(ci, slot);
     }
     if (foot.kind == 0 || foot.kind == DF_KIND_SAGUARO
         || foot.kind == DF_KIND_OCOTILLO) {
