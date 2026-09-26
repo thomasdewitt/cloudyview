@@ -20058,7 +20058,7 @@ fn desert_octaves_cell_top(k: i32, xy: vec2<f32>, fp: f32) -> f32 {
 // trace's octave cut (desert_trace_fade drops an octave whole once its reach
 // is under a footprint, so a NEAR step across the cut can meet ground about a
 // footprint higher than it certified).
-fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
+fn desert_terrain_march(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
                         t_start: f32) -> DesertHit {
     desert_trace_state = 0u;
     let c0 = u.ocean_params.x;
@@ -20274,6 +20274,30 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
         }
     }
     return desert_trace_finish(o, dir, pixel_angle, t, t_prev, k, z_top);
+}
+
+// The ground's trace: the march above, and for a ray whose budget ran out
+// and whose cell walk then landed it, one more march from where the walk
+// stopped. The ray is certified clear up to that point; the walk landed
+// there only because it could no longer tell. On a silhouette — a ray
+// skimming the lip of a wash's bank from down in the wash — the truth is
+// often that the ray clears the lip: landed, it was ground in the air
+// inside the refine reach, the refine stage found none there and left the
+// pixel black, a black line along the lip (Thomas's flight, 2026-09-25). A
+// renewed budget from that point settles it. One call site, so the march is
+// compiled once.
+fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
+                        t_start: f32) -> DesertHit {
+    var t = t_start;
+    var h = desert_miss();
+    for (var attempt: i32 = 0; attempt < 2; attempt = attempt + 1) {
+        h = desert_terrain_march(o, dir, pixel_angle, t);
+        if (desert_trace_state != 1u || !h.hit) {
+            break;
+        }
+        t = h.t;
+    }
+    return h;
 }
 
 // A ray that spent the budget: the cell-exit walk on the cells' own highest
@@ -21143,19 +21167,9 @@ fn desert_flora_slab(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     return vec2<f32>(t0, t1);
 }
 
-// The whole desert along one view ray, in the desert frame: the terrain,
-// then whatever stands on it in front of the terrain hit.
-// The ground along a view ray from `t_start` on (a point known to be above
-// it): the terrain, its material and normal at the pixel's footprint, and
-// the stones standing on it in front of the terrain hit.
-fn desert_ground(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
-                 t_start: f32) -> DesertHit {
-    return desert_ground_at(o, dir, pixel_angle,
-                            desert_terrain_trace(o, dir, pixel_angle, t_start),
-                            true);
-}
-
-// The same from a terrain hit already found (desert_terrain_trace). `near`
+// The ground at a terrain hit already found (desert_terrain_trace): its
+// material and normal at the pixel's footprint, and the stones standing on
+// it in front of the hit. `near`
 // (a literal at every call) says whether this ground can be close enough
 // for its stones to resolve: the refine stage's, and the lite desert's
 // one stage. The full desert's first stage hands every footprint under
@@ -21829,19 +21843,18 @@ fn desert_surface_refine(cr: CameraRay, plain: vec4<f32>) -> vec4<f32> {
             return plain;
         }
     } else {
-        // The first stage kept only this terrain's distance. The ground and
-        // its stones are found here, from just short of it (every point of
-        // the ray short of its first crossing is above the ground, so the
-        // march lands in a few steps), and the nearer of them and the
-        // plants is shaded, with the plants' exact shadows.
-        let g = desert_ground(o, cr.dir, cr.true_pixel_angle, 0.98 * plain.w);
-        if (!h.hit || (g.hit && g.t < h.t)) {
+        // The first stage kept only this terrain's distance: its trace's own
+        // refined crossing, at this same pixel angle. The ground's material
+        // and its stones are found here from that hit, and the nearer of
+        // them and the plants is shaded, with the plants' exact shadows.
+        // Not re-traced: a march restarted short of the hit can step over a
+        // crossing shorter than its step floor that the first stage landed
+        // in, and along the lip of a wash's bank did, a black pixel per such
+        // graze (2026-09-25).
+        let g = desert_ground_at(o, cr.dir, cr.true_pixel_angle,
+                                 desert_terrain_hit(o, cr.dir, plain.w), true);
+        if (!h.hit || g.t < h.t) {
             h = g;
-        }
-        // Not finding the terrain the first stage found leaves the pixel
-        // black: visible, not papered over, and never the sentinel.
-        if (!h.hit) {
-            return vec4<f32>(0.0, 0.0, 0.0, plain.w);
         }
     }
     return vec4<f32>(desert_shade_pixel(h, o, cr.dir, cr.true_pixel_angle,

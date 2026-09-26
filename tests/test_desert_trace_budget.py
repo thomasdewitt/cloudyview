@@ -40,13 +40,15 @@ DEBUG_OFF = "const DESERT_TRACE_DEBUG: bool = false;"
 # (position in the desert frame, azimuth, elevation, fov): flora's 2.5 m
 # camera 30 m from the hero saguaro, and a view from 30 m up.
 VIEWS = {"2.5 m": ((873.08, 735.86, 2.51), 325.0, 5.19, 45.0),
-         "30 m": ((873.08, 735.86, 30.0), 325.0, -3.0, 45.0)}
-
-
-def debug_counts(view_name, quality="high"):
-    """(walk-finished, still out) pixels of a 1280 x 720 frame."""
-    assert SHADER.count(DEBUG_OFF) == 1
-    src = SHADER.replace(DEBUG_OFF, "const DESERT_TRACE_DEBUG: bool = true;")
+         "30 m": ((873.08, 735.86, 30.0), 325.0, -3.0, 45.0),
+         # Down in a wash 1 m off its floor, looking up at a 2 m bank.
+         "wash": ((780.60, 940.51, -5.0), 310.5, 3.0, 60.0)}
+def render(view_name, quality="high", patches=(), source=SHADER):
+    """A 1280 x 720 linear frame of one view, the shader patched."""
+    for old, new in patches:
+        assert source.count(old) == 1, old
+        source = source.replace(old, new)
+    src = source
     preset = QUALITY_PRESETS[quality]
     r = SoarRenderer(periodic=True, surface="desert", tone_map=False,
                      shader_source=src)
@@ -73,7 +75,13 @@ def debug_counts(view_name, quality="high"):
         desert_lite=quality in DESERT_LITE_TIERS)
     if preset["light_cache"]:
         r.bake_light_cache(state, view, divisor=2)
-    img = r.render(state, view, frames=1)[..., :3]
+    return r.render(state, view, frames=1)[..., :3]
+
+
+def debug_counts(view_name, quality="high"):
+    """(walk-finished, still out) pixels of a 1280 x 720 frame."""
+    img = render(view_name, quality, [(DEBUG_OFF, "const DESERT_TRACE_DEBUG: "
+                                                  "bool = true;")])
     red, green, blue = img[..., 0], img[..., 1], img[..., 2]
     magenta = (red > 0.5) & (blue > 0.5) & (green < 0.2 * red)
     cyan = (green > 0.5) & (blue > 0.5) & (red < 0.2 * green)
@@ -92,3 +100,26 @@ def test_no_ray_runs_out_of_the_trace(view_name, quality, finished_max):
     finished, out = debug_counts(view_name, quality)
     assert out == 0, (view_name, finished, out)
     assert finished <= finished_max, (view_name, finished)
+
+
+def black_pixels(source=SHADER, quality="high"):
+    """Pixels of the wash view with no light at all: nothing in a lit
+    desert under an open sky is black."""
+    img = render("wash", quality, source=source)
+    return int((img.sum(-1) < 1e-4).sum())
+
+
+def test_no_black_line_along_a_lip():
+    """Down in a wash looking up at a bank, rays skim its lip. The plain
+    pass's budget ran out on some and its cell walk landed them in the lip's
+    cell, in the air; the refine stage, re-tracing from just short of that,
+    found the ray clears the lip, and on not finding the ground drew black:
+    a black line along the silhouette (Thomas's flight, 2026-09-25; 241
+    pixels here at 22c7948, 26 of them, sub-floor grazes, already at
+    c933289). The trace now marches again from where the walk stopped, and
+    the refine stage shades the plain pass's own hit."""
+    if soar_gpu_adapter() is None:
+        pytest.skip("No GPU adapter available (a software rasterizer does "
+                    "not count)")
+    assert black_pixels() == 0
+    assert black_pixels(quality="low") == 0
