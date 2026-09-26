@@ -5,16 +5,16 @@ ground from a couple of metres up ran out of budget a few hundred metres
 out: a rising one drew sky under the far plants (the strip flora found,
 2026-09-25), a falling one landed on the mean plane, and most of the ground
 of a low view was that plane with the texture sliding on it. The trace now
-steps on the bounds pyramid (cloudyview/desert_bounds.py), and a ray that
-still spends the budget is finished by a cell walk that lands it in-cell.
+steps on the bounds pyramid (cloudyview/desert_bounds.py); a ray that
+still spends the budget is finished by a cell walk, and marches again from
+where the walk stopped.
 
-DESERT_TRACE_DEBUG paints those rays: magenta when the walk finished one,
-cyan when it ran out as well. Here it is switched on for flora's 2.5 m
-camera and a 30 m view over the same ground, full and simplified, with
-the sky empty: no ray may run out of both (the walk's own fallback is
-uncertified, so it must stay unreached), and walk-finished rays stay a
-thin scatter. Needs a
-real GPU; skips cleanly without one.
+DESERT_TRACE_DEBUG paints the rays the second march still leaves to the
+walk magenta, and those the walk cannot finish either cyan. Here it is
+switched on for flora's 2.5 m camera, a 30 m view over the same ground and
+the wash below a bank, full and simplified, with the sky empty: none may
+be either (a walk-landed ray can be ground in the air, and the walk's own
+fallback is uncertified). Needs a real GPU; skips cleanly without one.
 """
 
 from pathlib import Path
@@ -43,15 +43,16 @@ VIEWS = {"2.5 m": ((873.08, 735.86, 2.51), 325.0, 5.19, 45.0),
          "30 m": ((873.08, 735.86, 30.0), 325.0, -3.0, 45.0),
          # Down in a wash 1 m off its floor, looking up at a 2 m bank.
          "wash": ((780.60, 940.51, -5.0), 310.5, 3.0, 60.0)}
+
+
 def render(view_name, quality="high", patches=(), source=SHADER):
     """A 1280 x 720 linear frame of one view, the shader patched."""
     for old, new in patches:
         assert source.count(old) == 1, old
         source = source.replace(old, new)
-    src = source
     preset = QUALITY_PRESETS[quality]
     r = SoarRenderer(periodic=True, surface="desert", tone_map=False,
-                     shader_source=src)
+                     shader_source=source)
     r.upload_volume(np.zeros((8, 8, 4), np.float32))
     tile = r.surface_meta
     bmin, bmax = (0.0, 0.0, 1000.0), (4096.0, 4096.0, 2000.0)
@@ -88,18 +89,13 @@ def debug_counts(view_name, quality="high"):
     return int(magenta.sum()), int(cyan.sum())
 
 
-# Walk-finished rays measured 2026-09-25 (of 921,600): 950 and 76 at High,
-# 145 and 484 at Low (the simplified desert); the caps are about twice that.
-@pytest.mark.parametrize("view_name, quality, finished_max", [
-    ("2.5 m", "high", 2000), ("30 m", "high", 200),
-    ("2.5 m", "low", 400), ("30 m", "low", 1000)])
-def test_no_ray_runs_out_of_the_trace(view_name, quality, finished_max):
+@pytest.mark.parametrize("view_name", list(VIEWS))
+@pytest.mark.parametrize("quality", ["high", "low"])
+def test_no_ray_is_left_to_the_walk(view_name, quality):
     if soar_gpu_adapter() is None:
         pytest.skip("No GPU adapter available (a software rasterizer does "
                     "not count)")
-    finished, out = debug_counts(view_name, quality)
-    assert out == 0, (view_name, finished, out)
-    assert finished <= finished_max, (view_name, finished)
+    assert debug_counts(view_name, quality) == (0, 0), view_name
 
 
 def black_pixels(source=SHADER, quality="high"):
