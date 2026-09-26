@@ -28,20 +28,23 @@
 // byte-identical to v1's; a camera without one writes 7 columns, and a v1
 // track loads and resamples the same way.
 //
-// v3 appended scene_t, the scene clock (s) the frame was drawn at — where
-// the moving sea was — so a re-render has the waves the flight had. It is
-// its own column rather than a function of t because the clock is the
-// scene's, not the recording's. v1 and v2 tracks have none and replay at
-// clock 0.
+// v3 appended scene_t, the scene clock (s) the frame was drawn at — then
+// where the moving sea was, now the city's steam — so a re-render has the
+// motion the flight had. It is its own column rather than a function of t
+// because the clock is the scene's, not the recording's. v1 and v2 tracks
+// have none and replay at clock 0; over a surface with no clock (the sea,
+// the desert) it is carried and packs 0.
 //
-// v4 records surface_period_m, the period sx/sy are fractions of: the tile
-// for the city and the desert, the swell's lattice for the sea. v3 recorded
-// none, and when the sea's period doubled (819.2 -> 1638.4 m) its tracks
-// would have replayed with the water streaming past at flight speed. A
-// reader refuses a period other than the installed one, and re-expresses an
-// older track's sx/sy from the period its schema implies (track.py
-// surface_samples); the browser replays only what it recorded this
-// session, at the scene's own period.
+// v4 records surface_period_m, the period sx/sy are fractions of: the
+// surface frame's (constants.js SURFACE_FRAME_TILES — the tile for the city
+// and the desert, 16 tiles for the sea). v3 recorded none. Over the city or
+// the desert a reader refuses a period other than the installed one (the
+// flight would land in the wrong district); over the sea, a static field
+// repeating at its tile, any period is taken, and a track recorded at
+// another re-expressed at the installed one, continuously (track.py
+// surface_samples). The browser replays only what it recorded this
+// session, at the scene's own period. The resampler unwraps sx/sy at half
+// the period, so a track carries at most that between two samples.
 //
 // `knocks` are the night city's crashes (collide.js), at the flight time of
 // the sample that first showed them. Everything else a crash does — the

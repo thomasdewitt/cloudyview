@@ -1,5 +1,5 @@
 // Resident GPU resources for one scene: the extinction volume, an optional
-// finer nest, the surface (the moving sea, or the city's or the desert's
+// finer nest, the surface (the sea's, the city's or the desert's
 // tile), and the geometry the uniform block needs.
 //
 // The volume's texture layout is the one piece here worth stating plainly.
@@ -255,12 +255,20 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   const files = meta.files
     ?? Array.from({ length: meta.mips }, (_, k) => `fif_mip${k}.bin`);
   // Checked before anything is allocated, and outside the try below: the
-  // return reads it.
+  // return reads them.
   const dx = meta.dx_m ?? meta.cell_m;
   if (!(dx > 0)) {
     throw new Error(
       `${baseUrl}/meta.json names neither dx_m nor cell_m; the tile has ` +
       "no texel size.");
+  }
+  const clockPeriod = tileClockPeriod(meta, baseUrl);
+  // The surface is the one whose schema this is (checked above).
+  const surface = Object.keys(K.SURFACE_TILE_SCHEMAS)
+    .find((k) => K.SURFACE_TILE_SCHEMAS[k] === schema);
+  if (!surface) {
+    throw new Error(`loadOceanTile(${baseUrl}): ${schema} is no surface's ` +
+                    "schema (constants.js SURFACE_TILE_SCHEMAS).");
   }
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
@@ -360,11 +368,12 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     dx,
     tileExtent: meta.tile_extent_m,
     // A tile-bound surface is a pure function of its tile, so its surface
-    // frame folds at the tile.
-    surfacePeriod: meta.tile_extent_m,
+    // frame folds at a whole number of tiles, invisibly (constants.js
+    // SURFACE_FRAME_TILES: the sea's 16, the district's one).
+    surfacePeriod: K.SURFACE_FRAME_TILES[surface] * meta.tile_extent_m,
     // The surface's clock: the period its animation repeats at (the city's
     // steam), where the scene clock wraps, or null where nothing moves.
-    clockPeriod: tileClockPeriod(meta, baseUrl),
+    clockPeriod,
     maxLod: meta.mips - 1,
     cells,
     heights,

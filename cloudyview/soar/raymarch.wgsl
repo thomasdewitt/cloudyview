@@ -2309,9 +2309,10 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
-                // Base roughness is what lives BELOW the detail octave's
-                // 5 cm — capillary ripple no tile holds — plus all the
-                // filtered-away variance. Variances add; roughnesses do not.
+                // Base roughness is what lives BELOW the tile's 0.2 m
+                // texels — ripple no tile holds — plus the variance the
+                // footprint's mip filtered away. Variances add; roughnesses
+                // do not.
                 let alpha = clamp(
                     // @domain: a square plus a variance: >= 0
                     sqrt(glint_roughness * glint_roughness + sea_variance),

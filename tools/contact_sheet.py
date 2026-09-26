@@ -85,9 +85,8 @@ class View:
     # nested: render_nested keyword arguments, as pairs; harness: CLI flags.
     args: tuple = ()
     # render_nested arguments a tree must take to render the view at all
-    # ("n/a" otherwise), and ones it may lack and render without (marked).
+    # ("n/a" otherwise).
     needs: tuple = ()
-    optional: tuple = ()
 
 
 OCEAN_DEMO = "marine-congestus-coarse"
@@ -230,10 +229,6 @@ _NESTED = _PRELUDE + textwrap.dedent("""
         if name not in takes:
             print(f"NA no {name}")
             sys.exit(0)
-    for name in job["optional"]:
-        if name not in takes:
-            kwargs.pop(name)
-            print(f"DROPPED {name}")
     level, _ = bench.build_level_from_demo(job["demo"])
     x, y, z, az, el, fov, saz, sel = job["camera"]
     img = render_nested([level], [x, y, z], azimuth=az, elevation=el,
@@ -275,7 +270,7 @@ def render(tree: Path, view: View, args: tuple, dest: Path) -> str:
            "out": str(dest), "camera": list(view.camera), "size": list(SIZE),
            "args": [list(a) for a in args] if view.kind == "nested"
            else list(args),
-           "needs": list(view.needs), "optional": list(view.optional)}
+           "needs": list(view.needs)}
     script = _NESTED if view.kind == "nested" else _HARNESS
     t0 = time.perf_counter()
     proc = subprocess.run([sys.executable, "-c", script, json.dumps(job)],
@@ -291,8 +286,7 @@ def render(tree: Path, view: View, args: tuple, dest: Path) -> str:
         raise RuntimeError(f"{view.name} at {tree.name} wrote no image.")
     print(f"  {dest.relative_to(OUT)}  ({time.perf_counter() - t0:.1f} s)",
           flush=True)
-    dropped = [ln[8:] for ln in lines if ln.startswith("DROPPED ")]
-    return f"(no {', '.join(dropped)}: rendered without it)" if dropped else ""
+    return ""
 
 
 def cell(sha: str, tree: Path, scene: str, view: View, args=None,

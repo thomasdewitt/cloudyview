@@ -9,7 +9,12 @@ Destinations (name the ones to write):
                     offline. Committed, and the seed is fixed; the shipped
                     tile was baked against a local scaleinvariance 0.13.1,
                     and a re-run under PyPI's (0.14, whose N-D FIF differs)
-                    is a new field, not a reproduction.
+                    is a new field, not a reproduction — so it is refused
+                    under any other version unless --rebake says a new sea
+                    is meant. A new tile also needs raymarch.wgsl's
+                    fif_slope_variance table and the @domain bound on its
+                    normals re-measured (tests/test_ocean_tile_bytes.py
+                    holds both to the bytes).
 
 Cloud fields are not exported here. Each demo field is baked separately by
 tools/prebake_demos.py into web/soar/demos/<id>/, which is what the browser
@@ -58,6 +63,9 @@ CITY_CLOCK_PERIOD_S = 2600.0
 FIF_N = 512
 FIF_DX_M = 0.2
 FIF_SEED = 20260717
+# The scaleinvariance the shipped tile was baked with (a local checkout,
+# 2026-08-05); under any other the same seed draws a different sea.
+OCEAN_BAKED_WITH = "0.13.1"
 
 
 def _volume_aabb(field: CloudField):
@@ -219,7 +227,19 @@ def main() -> None:
     # that scene, not a no-op (0.14's N-D normalization fix scaled every N-D
     # FIF by ~1.57).
     parser.add_argument("tiles", nargs="+", choices=sorted(EXPORTS))
+    parser.add_argument("--rebake", action="store_true",
+                        help="write the ocean under a scaleinvariance other "
+                             f"than the {OCEAN_BAKED_WITH} it was baked with: "
+                             "a new sea, not a reproduction")
     args = parser.parse_args()
+    if "ocean" in args.tiles and not args.rebake:
+        import scaleinvariance
+        if scaleinvariance.__version__ != OCEAN_BAKED_WITH:
+            parser.error(
+                f"the shipped ocean tile was baked with scaleinvariance "
+                f"{OCEAN_BAKED_WITH}; this is {scaleinvariance.__version__}, "
+                "whose FIF is a different field. Pass --rebake to write a new "
+                "sea (then re-measure raymarch.wgsl's fif_slope_variance).")
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
     for name in args.tiles:
         EXPORTS[name]()

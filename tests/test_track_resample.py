@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from cloudyview import track as tr
+from cloudyview.soar_host import surface_period_m
 
 REPO = Path(__file__).resolve().parents[1]
 TRACK_JS = REPO / "web" / "soar" / "track.js"
@@ -188,7 +189,9 @@ def test_a_v4_track_carries_its_surface_period(tmp_path):
 
 def test_a_track_at_the_installed_period_replays_as_recorded():
     samples = _synthetic_samples(3)
-    out = tr.surface_samples(samples, 102.4, "ocean", 102.4, 102.4)
+    # The moving sea's v4 tracks were recorded at the frame the sea folds at
+    # again (16 tiles): they replay as they are.
+    out = tr.surface_samples(samples, 1638.4, "ocean", 102.4, 1638.4)
     assert out is samples
     # The city and the desert fold at their tile, which v3 recorded at too.
     assert tr.surface_samples(samples, None, "city", 2300.0, 2300.0) \
@@ -205,17 +208,26 @@ def test_a_city_or_desert_track_at_another_period_is_refused():
         tr.surface_samples(samples, 8192.0, "desert", 4096.0, 4096.0)
 
 
+def test_the_sea_folds_at_sixteen_tiles():
+    """The sea's frame is 16 of its 102.4 m tiles, the city's and the
+    desert's their tile (soar_host.SURFACE_FRAME_TILES)."""
+    assert surface_period_m("ocean", {"tile_extent_m": 102.4}) \
+        == pytest.approx(1638.4, rel=1e-12)
+    assert surface_period_m("desert", {"tile_extent_m": 4096.0}) == 4096.0
+    assert surface_period_m("city", {"tile_extent_m": 92160.0}) == 92160.0
+
+
 @pytest.mark.parametrize("version, recorded, unit", [
-    (3, 1638.4, 1638.4),                  # v4: the moving sea's own period
+    (3, 102.4, 102.4),                    # v4 at another period: the tile
     (3, None, tr.V3_OCEAN_PERIOD_M),      # v3: 819.2 m, from the schema
     (2, None, 102.4)])                    # v2: the tile
 def test_a_sea_track_replays_over_the_static_sea(version, recorded, unit):
     """The sea is static and repeats at its 102.4 m tile, so any recorded
-    period places it: a track flown over the moving sea (v4 at 1638.4 m, v3
-    at 819.2 m) or before it (v2) replays with its sx/sy re-expressed at the
-    tile — in metres the same continuous path, no jump where the old period
-    wrapped, no drift."""
-    period = 102.4
+    period places it: a track flown at another (v3 over the moving sea at
+    819.2 m, v2 before it at the tile) replays with its sx/sy re-expressed
+    at the installed 1638.4 m — in metres the same continuous path, no jump
+    where the old period wrapped, no drift."""
+    period = 1638.4
     samples = _synthetic_samples(version)
     assert np.any(np.abs(np.diff(samples[:, 7])) > 0.5)    # it wraps
     out = tr.surface_samples(samples, recorded, "ocean", 102.4, period)
@@ -226,6 +238,38 @@ def test_a_sea_track_replays_over_the_static_sea(version, recorded, unit):
         now = tr.unwrap_periodic(out[:, c], 1.0, 0.5) * period
         np.testing.assert_allclose(now - now[0], was - was[0], atol=1e-9)
     np.testing.assert_array_equal(out[:, :7], samples[order, :7])
+
+
+def _fast_sea_track(period, speed=1500.0, fps=20.0, n=40):
+    """A straight flight over the sea at `speed` m/s, one sample a frame at
+    `fps` — the recorder's rate when the tab runs slow — with sx the
+    surface position as a fraction of `period`."""
+    t = np.arange(n) / fps
+    s_m = 37.0 + speed * t
+    cols = [t, np.full(n, 0.1), np.full(n, 0.2), np.full(n, 0.3),
+            np.full(n, 90.0), np.full(n, -10.0), np.full(n, 70.0),
+            np.mod(s_m / period, 1.0), np.full(n, 0.25), np.zeros(n)]
+    return np.stack(cols, axis=1), speed
+
+
+def _replayed_path_error(period):
+    samples, speed = _fast_sea_track(period)
+    frames = tr.resample_track(samples, 60.0, linear_position=True)
+    t = np.array([f.t for f in frames])
+    got = np.array([f.surface_position[0] for f in frames]) * period
+    want = np.mod(37.0 + speed * t, period)
+    d = np.abs(got - want)
+    return float(np.max(np.minimum(d, period - d)))
+
+
+def test_a_fast_sea_track_replays_without_sliding():
+    """At 1500 m/s a 20 fps recording steps 75 m a sample. The resampler
+    unwraps sx at half the period, so over the sea's 1638.4 m frame (819 m)
+    the replayed water follows the flight; at one 102.4 m tile (51 m) the
+    same flight unwraps the wrong way and the sea slides — the control, so
+    this test can fail."""
+    assert _replayed_path_error(1638.4) < 1e-6
+    assert _replayed_path_error(102.4) > 10.0
 
 
 # --- the header ------------------------------------------------------------

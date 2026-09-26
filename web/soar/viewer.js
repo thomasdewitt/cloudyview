@@ -219,10 +219,11 @@ export class Viewer {
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
-    // The scene clock (s): where the moving sea is in its motion, uniform
-    // row 24.z. It runs only while the view is flying or a track is being
+    // The scene clock (s), uniform row 24.z, read by what moves in the
+    // scene (the city's steam; the sea and the desert have no clock and
+    // pack 0). It runs only while the view is flying or a track is being
     // recorded, never while paused — so a parked view is a still scene and
-    // its accumulation converges, and a held shot keeps the waves it was
+    // its accumulation converges, and a held shot keeps the steam it was
     // held on. Captures take it from the view (a still) or from the track
     // (a video), never from the wall.
     this.sceneTime = 0.0;
@@ -539,8 +540,8 @@ export class Viewer {
                                      // 2026-09-01).
                                      // Folded at the surface's own period:
                                      // the tile for the city and the
-                                     // desert, several tiles for the sea,
-                                     // whose swell repeats only there.
+                                     // desert, 16 tiles for the sea
+                                     // (constants.js SURFACE_FRAME_TILES).
                                      surfaceTileExtent: scene.surfacePeriod,
                                      surfaceOffsetM:
                                        scene.city ? scene.cityOffsetM
@@ -1500,8 +1501,8 @@ export class Viewer {
       }
       this.renderer.commitSurface(kind, tile);
       this.scene.desertFloorAt = floorAt;
-      // The camera folds at the surface frame's period: the sea's swell
-      // repeats over several tiles, the desert at its tile.
+      // The camera folds at the surface frame's period: 16 tiles for the
+      // sea, one for the desert (constants.js SURFACE_FRAME_TILES).
       this.camera.setSurface(tile.surfacePeriod, floorAt);
       this.ui.say(kind === "desert"
         ? "The Sonoran desert (G for the ocean)."
@@ -2560,9 +2561,9 @@ export class Viewer {
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
-          // The frame's own scene clock: the sea moves as it moved in
-          // flight, one video frame at a time, however many passes each
-          // frame accumulates.
+          // The frame's own scene clock: the city's steam moves as it
+          // moved in flight, one video frame at a time, however many passes
+          // each frame accumulates.
           { ...this._captureViewKwargs(look),
             camera: pose, frameIndex: i * 1024,
             sceneTime: frames[i].sceneTime },
@@ -3362,7 +3363,7 @@ export class Viewer {
     this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
     // The clock runs with the flight, on the simulation's dt (the camera's
-    // clock, so a stall cannot jump the sea either). It is in the scene key,
+    // clock, so a stall cannot jump the steam either). It is in the scene key,
     // so a frame it moves restarts accumulation — which a moving camera has
     // done already.
     const clockRuns = !this.paused && (cameraMoved || this.recorder.recording);

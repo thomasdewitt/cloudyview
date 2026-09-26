@@ -72,6 +72,18 @@ SURFACE_TILE_SCHEMAS = {
     "desert": "cloudyview.web.desert.v2",
     "city": "cloudyview.web.city.v2",
 }
+# How many tiles each surface's frame folds at (surface_period_m). The city
+# and the desert fold at their tile: their frame IS the district, so a
+# recorded flight must come back to the same one. The sea folds at 16 tiles
+# (1638.4 m): the static tile repeats every 102.4 m, so any whole number of
+# tiles folds invisibly, and a long frame is what a recorded track can carry
+# between two samples — both resamplers (track.py, track.js) unwrap sx/sy at
+# half the period, 819 m here rather than 51 m at one tile, where a flight at
+# 1500 m/s recorded at 20 fps (75 m a sample) slid the sea. 1638.4 m is also
+# the moving sea's period (2026-09-23..25), so its v4 tracks replay as
+# recorded. Mirrors web/soar/constants.js SURFACE_FRAME_TILES (pinned by
+# tests/test_surface_tile_loader.py).
+SURFACE_FRAME_TILES = {"ocean": 16, "desert": 1, "city": 1}
 
 
 def check_surface(surface: str) -> str:
@@ -130,11 +142,12 @@ def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
     return np.ascontiguousarray(b.transpose(2, 0, 1)).tobytes()
 def surface_period_m(surface: str, meta: dict) -> float:
     """The period the surface frame folds at (SceneState.surface_period_m):
-    the tile, for every surface — each is a pure function of its tile."""
+    a whole number of tiles (SURFACE_FRAME_TILES) — each surface is a pure
+    function of its tile, so the fold is invisible."""
     check_surface(surface)
     if "tile_extent_m" not in meta:
         raise KeyError(f"the {surface} tile's meta.json has no 'tile_extent_m'.")
-    return float(meta["tile_extent_m"])
+    return SURFACE_FRAME_TILES[surface] * float(meta["tile_extent_m"])
 
 
 def surface_clock_period_s(surface: str, meta: dict) -> Optional[float]:

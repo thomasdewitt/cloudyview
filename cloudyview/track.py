@@ -40,15 +40,19 @@ other and a recorded city flight replays over the wrong district. scene_t
 is the scene clock the frame was drawn at, for a surface that has one (the
 city's steam); over a surface with none it is carried and packs as 0.
 
-Over the city or the desert a recorded period other than the installed
-surface's is refused: the flight would land in the wrong district. Over the
-sea it is not: the sea is a static field repeating every tile, so any
-recorded period places it — sx/sy are re-expressed at the installed period
-continuously, and the water under the flight moves with the flight, over a
-different patch of the same sea, whatever the period was when it was flown
-(1638.4 m for tracks of the moving sea, 2026-09-23..25; 819.2 m for its v3
-tracks). Older tracks recorded no period, and theirs is known from the
-schema: a v3 track (10 columns) was the tile for the city and the desert
+The surface frame folds at a whole number of tiles
+(soar_host.SURFACE_FRAME_TILES): the tile for the city and the desert,
+16 tiles (1638.4 m) for the sea. Over the city or the desert a recorded
+period other than the installed surface's is refused: the flight would land
+in the wrong district. Over the sea it is not: the sea is a static field
+repeating every tile, so any recorded period places it — a track flown at
+another (819.2 m for the moving sea's v3 tracks, the tile for v2's) has its
+sx/sy re-expressed at the installed period continuously, and the water
+under the flight moves with the flight, over a different patch of the same
+sea. The moving sea's v4 tracks (2026-09-23..25) were recorded at 1638.4 m
+and replay as they are. The resampler unwraps sx/sy at half the period, so
+a track carries at most that between two samples: 819 m over the sea.
+Older tracks recorded no period, and theirs is known from the schema: a v3 track (10 columns) was the tile for the city and the desert
 and 819.2 m for the sea; a v2 track (9 columns) has no clock, and its sx/sy
 were fractions of the TILE. A v1 track (7 columns, no surface frame) holds
 the static offset the header recorded, the un-shifted surface those

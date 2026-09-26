@@ -147,6 +147,17 @@ export const SURFACE_TILE_SCHEMAS = {
   desert: "cloudyview.web.desert.v2",
   city: "cloudyview.web.city.v2",
 };
+// How many tiles each surface's frame folds at (the tile's surfacePeriod).
+// The city and the desert fold at their tile: their frame IS the district.
+// The sea folds at 16 tiles (1638.4 m): its static tile repeats every
+// 102.4 m, so the fold is invisible, and a long frame is what a recorded
+// track can carry between two samples — the resamplers unwrap sx/sy at half
+// the period, 819 m here rather than 51 m at one tile, where a flight at
+// 1500 m/s recorded at 20 fps (75 m a sample) slid the sea. It is also the
+// moving sea's period (2026-09-23..25), so its tracks replay as recorded.
+// Pinned against soar_host.SURFACE_FRAME_TILES by
+// tests/test_surface_tile_loader.py.
+export const SURFACE_FRAME_TILES = { ocean: 16, desert: 1, city: 1 };
 // From the 2026-08-22 12:31 capture, the same still the start camera and the
 // landing backdrop come from: the moon the view was composed under is part
 // of the view.

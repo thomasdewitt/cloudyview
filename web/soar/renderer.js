@@ -612,11 +612,11 @@ export class Renderer {
       { texture: this._iceDummy }, new Uint8Array([0]),
       { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
     this.iceMode = false;
-    // Bindings 3 and 9 are the two surface slots: the city's or the
-    // desert's tile at 3, the moving sea at 9. A scene fills the one it
-    // reads; the other gets this 1x1 zero stand-in, viewed as a 2D texture
-    // or as a one-layer array. (Its own field: it once shared
-    // _surfaceDummy's name, which orphaned group 1's stand-in above.)
+    // Binding 9 is the desert's bounds pyramid; every surface's tile is at
+    // 3. The sea and the city read nothing at 9 and get this 1x1 zero
+    // stand-in there, viewed as a one-layer array. (Its own field: it once
+    // shared _surfaceDummy's name, which orphaned group 1's stand-in
+    // above.)
     this._tileDummy = device.createTexture({
       label: "soar-tile-dummy", size: [1, 1, 1], format: "rgba16float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
