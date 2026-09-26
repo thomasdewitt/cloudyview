@@ -27946,8 +27946,9 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // Water on the camera's lens after it flies through cloud. The look is
 // lens.wgsl's, drawn by each host's present (browser) or post pass (Python)
 // AFTER accumulation, never into the accumulated image. This is its state,
-// one texel, integrated once per presented frame: x = wetness in [0, 1]
-// (y, z, w are 0). The host puts the step's dt in row 24.w: the live view's
+// one texel, integrated once per presented frame: x = wetness in [0, 1],
+// y = w*, the level it is heading for at this extinction (the browser's
+// read-back settles the loop on |w - w*|, whatever the frame rate), z, w 0. The host puts the step's dt in row 24.w: the live view's
 // wall-clock frame time, parked or not (the lens keeps wetting in cloud and
 // drying out of it while you hover; being drawn after accumulation, it does
 // not disturb a parked picture's convergence), a video's resampled frame
@@ -27986,7 +27987,7 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     // state that is not a number starts again dry rather than stay NaN.
     w = select(w, 0.0, w < LENS_DRY_FLOOR && w_star < LENS_DRY_FLOOR);
     w = select(0.0, w, w >= 0.0);
-    return vec4<f32>(w, 0.0, 0.0, 0.0);
+    return vec4<f32>(w, w_star, 0.0, 0.0);
 }
 
 @fragment

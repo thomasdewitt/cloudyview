@@ -1597,9 +1597,10 @@ export class Renderer {
                   { deltaSeconds = null, accumulate = true,
                     overlays = null, waitForPipeline = true,
                     lens = null } = {}) {
-    // `lens`: null draws a dry lens (captures, stills, the toggle off);
-    // { dt } steps lens water's state by dt seconds of flight clock (0
-    // parked) before the present draws it — see raymarch.wgsl fs_lens_state.
+    // `lens`: null draws a dry lens (captures, stills, the switch off);
+    // { dt } steps lens water's state by dt seconds before the present draws
+    // it — the live view's wall-clock frame time, a video's resampled frame
+    // interval (see raymarch.wgsl fs_lens_state).
     if (lens !== null && !(Number.isFinite(lens.dt) && lens.dt >= 0)) {
       throw new Error(`drawFrame: lens.dt must be a finite dt >= 0; got ${lens.dt}.`);
     }
@@ -1734,6 +1735,7 @@ export class Renderer {
                        exact, lensTex);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
       await this._submit(encoder.finish());
+      this._startLensRead();          // this submit carried the state's copy
       return true;
     }
 
@@ -1802,6 +1804,7 @@ export class Renderer {
         encodeOverlays(overlays, enc, targetView, targetFormat);
       }
       await this._submit(enc.finish());
+      if (s === samples - 1) this._startLensRead();   // the one with the copy
 
       this._accumIndex = 1 - this._accumIndex;
       this._accumCount = step.nextCount;
@@ -1843,13 +1846,11 @@ export class Renderer {
   async _submit(commandBuffer) {
     if (!this.boundedQueue) {
       this.device.queue.submit([commandBuffer]);
-      this._startLensRead();
       return;
     }
     while (this._queueFences.length >= 2) await this._queueFences.shift();
     this.device.queue.submit([commandBuffer]);
     this._queueFences.push(this.device.queue.onSubmittedWorkDone());
-    this._startLensRead();
   }
 
   /**
@@ -2097,19 +2098,20 @@ export class Renderer {
   }
 
   /**
-   * Map the wetness copied by the last state step, once its submit is in the
-   * queue, and note whether the lens has settled: exactly dry, or changing
-   * by less than 1e-5 between two reads (within ~1e-3 of where it is going
-   * at 60 fps). Never awaited by the frame.
+   * Map the state copied by the last state step — called right after the
+   * submit that carries that copy — and note whether the lens has settled:
+   * exactly dry, or within 1e-3 of w*, the level it is heading for (the
+   * texel's y), whatever the frame rate. Never awaited by the frame.
    */
   _startLensRead() {
     if (!this._lensReadQueued || this._lensReadBusy) return;
     this._lensReadQueued = false;
     this._lensReadBusy = true;
     this._lensReadBuf.mapAsync(GPUMapMode.READ).then(() => {
-      const w = new Float32Array(this._lensReadBuf.getMappedRange(0, 4))[0];
+      const [w, wStar] = new Float32Array(
+        this._lensReadBuf.getMappedRange(0, 8));
       this._lensReadBuf.unmap();
-      this.lensSettled = w === 0 || Math.abs(w - this._lensReadW) < 1e-5;
+      this.lensSettled = w === 0 || Math.abs(w - wStar) < 1e-3;
       this._lensReadW = w;
       this._lensReadBusy = false;
     }, () => {
@@ -2173,6 +2175,7 @@ export class Renderer {
       } catch {
         // Failed and recorded; the march that needs it throws it.
       }
+      if (pipeline && isPending(pipeline)) pipeline.catch(() => {});
       if (pipeline && !isPending(pipeline)) {
         this.device.queue.writeBuffer(this.uniformBuf, (24 * 4 + 3) * 4,
                                       new Float32Array([lens.dt]));
