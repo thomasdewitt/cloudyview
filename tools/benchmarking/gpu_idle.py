@@ -86,22 +86,49 @@ def clock_mode() -> str:
                           "stock (no clock lock declared by the caller)")
 
 
+def _descendants(root: int) -> set[int]:
+    """`root` and every process under it, from /proc's parent links."""
+    children = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            stat = open(f"/proc/{entry}/stat").read()
+        except OSError:
+            continue              # exited between the listing and the read
+        # The field after the parenthesised name (which may hold spaces or
+        # parentheses itself) is the state, then the parent's pid.
+        ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        children.setdefault(ppid, []).append(int(entry))
+    tree, todo = set(), [root]
+    while todo:
+        pid = todo.pop()
+        tree.add(pid)
+        todo.extend(children.get(pid, ()))
+    return tree
+
+
 def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
     """(fatal, warnings) sampled over `seconds`; both empty when idle.
-    `exclude`: pids to ignore besides this process (which is always
-    ignored: the caller's own tail is not a neighbour)."""
-    exclude = set(exclude) | {os.getpid()}
+    `exclude`: pids to ignore besides this process and everything it
+    started (always ignored: the caller's own work is not a neighbour). The
+    whole tree, not just this pid, because a caller that times a child
+    through `uv run` has the GPU held by uv's child, its grandchild — a
+    watch that excluded only the direct child flagged the timed harness
+    itself as a neighbour (2026-09-25)."""
     fatal, warn = set(), set()
     limit = (IDLE_UTIL_PCT_LOCKED if clock_mode().startswith("locked")
              else IDLE_UTIL_PCT)
     t_end = time.monotonic() + seconds
     while True:
+        # Each sample: the caller's children come and go during a run.
+        own = set(exclude) | _descendants(os.getpid())
         util = int(_smi("--query-gpu=utilization.gpu",
                         "--format=csv,noheader,nounits").strip())
         known = 0
         for pid, short, sm in _processes():
             known += sm or 0
-            if pid in exclude:
+            if pid in own:
                 continue
             name = _full_name(pid, short)
             if name in DESKTOP:
@@ -141,7 +168,9 @@ class Watch:
     """Samples the card all through a run on a background thread, so a
     neighbour that draws for a while mid-run (a browser tab brought to the
     front) is caught, not only one still there at the end:
-    `with Watch() as w: ...` then check_quiet(w)."""
+    `with Watch() as w: ...` then check_quiet(w). What the caller runs
+    meanwhile, a subprocess under `uv run` included, is its own work, not a
+    neighbour (survey)."""
 
     def __init__(self):
         import threading
