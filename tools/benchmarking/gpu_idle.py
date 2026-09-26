@@ -65,6 +65,8 @@ def _processes():
         if line.startswith("#") or not line.strip():
             continue
         f = line.split()
+        if not f[1].isdigit():
+            continue              # pmon's placeholder row: no process at all
         sm = None if f[3] == "-" else int(f[3])
         rows.append((int(f[1]), f[-1], sm))
     return rows
@@ -144,14 +146,21 @@ class Watch:
     def __init__(self):
         import threading
         self.fatal = set()
+        self.error = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
-        while not self._stop.is_set():
-            fatal, _ = survey(seconds=0.0)
-            self.fatal.update(fatal)
-            self._stop.wait(0.5)
+        # A watch that dies must say so: a dead thread with an empty
+        # `fatal` would pass the run as watched and clean (loose-ends'
+        # review: nvidia-smi failing, a pmon row it cannot parse).
+        try:
+            while not self._stop.is_set():
+                fatal, _ = survey(seconds=0.0)
+                self.fatal.update(fatal)
+                self._stop.wait(0.5)
+        except Exception as e:  # noqa: BLE001 — kept, and failed on below
+            self.error = e
 
     def __enter__(self):
         self._thread.start()
@@ -167,6 +176,9 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
     the card, or `watch` saw one during the run, either of which may have
     skewed the numbers just printed. Returns the desktop warnings, for the
     caller's verdict."""
+    if watch is not None and watch.error is not None:
+        sys.exit(f"CONTAMINATED: the watch failed ({watch.error!r}); the run "
+                 "was not watched, so these numbers cannot be trusted.")
     time.sleep(1.0)            # let the caller's own last passes drain
     fatal, warn = survey(seconds=2.0)
     fatal = sorted(set(fatal) | (watch.fatal if watch else set()))
