@@ -40,6 +40,7 @@ CASES = [("DF_DECAL_TAU0_CREO", const("DF_FAR_CREO_KAPPA")),
          ("DF_DECAL_TAU0_BURS", const("DF_FAR_BURS_KAPPA")),
          ("DF_DECAL_TAU0_PEAR", const("DF_FAR_PEAR_KAPPA")),
          ("DF_DECAL_TAU0_PV", const("DF_FAR_PV_KAPPA")),
+         ("DF_DECAL_TAU0_BPV", const("DF_FAR_BPV_KAPPA")),
          ("DF_DECAL_TAU0_BARREL", 0.95),
          ("DF_DECAL_TAU0_ROCK", 0.5)]
 

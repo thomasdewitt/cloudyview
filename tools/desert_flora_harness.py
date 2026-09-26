@@ -318,10 +318,19 @@ def shrub_views(g, s, sun_az, sun_el):
 def other_views(g, plants, hero, sun_az, sun_el):
     oc = nearest(plants, 10, hero)
     rk = nearest(plants, 14, hero)
+    pv = nearest(plants, 13, hero)
     print(f"ocotillo at ({oc[1]:.1f}, {oc[2]:.1f}): H {oc[3]:.2f} m, "
-          f"{int(oc[4])} canes; boulders at ({rk[1]:.1f}, {rk[2]:.1f})")
+          f"{int(oc[4])} canes; boulders at ({rk[1]:.1f}, {rk[2]:.1f}); "
+          f"palo verde at ({pv[1]:.1f}, {pv[2]:.1f}): H {pv[3]:.2f} m, "
+          f"crown {pv[4]:.2f} m")
     side = sun_az + 25.0
     return {
+        # A palo verde's crown close (the near form) and at a dozen metres
+        # (both forms, for calibrating one against the other with --patch).
+        "pv_6m": aim(g, pv[1], pv[2], 6.0 + pv[4], 1.7, 0.6 * pv[3], 60.0,
+                     side, sun_az, sun_el),
+        "pv_12m": aim(g, pv[1], pv[2], 12.0 + pv[4], 2.0, 0.6 * pv[3], 40.0,
+                      side, sun_az, sun_el),
         "oco_1m": aim(g, oc[1], oc[2], 1.3, 1.6, 1.9, 60.0, side, sun_az, sun_el),
         "oco_8m": aim(g, oc[1], oc[2], 8.0, 1.7, 0.5 * oc[3], 60.0, side,
                       sun_az, sun_el),
