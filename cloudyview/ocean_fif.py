@@ -111,8 +111,3 @@ def generate_fif_normals(
               f"|slope| med={np.median(slope):.3f} p99={np.quantile(slope, 0.99):.3f}")
     return nx, ny, nz, dx_m
 
-
-def dummy_fif_arrays() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """1×1 placeholders for when use_fif=False, so the kernel signature is stable."""
-    z = np.zeros((1, 1), dtype=np.float32)
-    return z, z.copy(), np.ones((1, 1), dtype=np.float32)
