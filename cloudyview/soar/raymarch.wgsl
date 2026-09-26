@@ -1958,6 +1958,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     if (level1 > level0 && f > 0.0) {
         n = mix(n, ocean_normal_mip_sample(world_xy, level1), f);
     }
+    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering and the mip mix are convex
     return normalize(n);
 }
 
@@ -2084,6 +2085,7 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
         + 0.5 / dims;
     let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
+    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering is convex
     return normalize(n);
 }
 
