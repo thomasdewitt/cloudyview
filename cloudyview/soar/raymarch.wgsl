@@ -21899,9 +21899,9 @@ const OCEAN_BOUNCE_ALBEDO: f32 = 0.06;
 // Placement is two jittered cell grids in the desert frame, each walked by a
 // 2D DDA over the slice of the ray the ground hands us (the flora slab):
 // 16 m cells hold the big plants (saguaro, ocotillo, palo verde, boulders),
-// 4 m cells the matrix (creosote, bursage, prickly pear, barrel cactus,
-// rocks). Every item fits inside its own cell, so the first cell with a hit
-// is the nearest hit and the walk stops there. Per-item parameters are pcg2d
+// 8 m cells the matrix (creosote, bursage, prickly pear, barrel cactus,
+// rocks), DF_SMALL_SLOTS to a cell. Every item fits inside its own cell, so
+// the first cell with a hit is the nearest hit and the walk stops there. Per-item parameters are pcg2d
 // draws on the cell index wrapped into the 4096 m tile with a bit mask (the
 // cell counts are powers of two; no `%`, which is what crashes NVIDIA's
 // SPIR-V compiler under Firefox — soar bug 22). All sub-centimetre geometry
@@ -22358,6 +22358,8 @@ const DF_SPINE_TIP: vec3<f32> = vec3<f32>(0.220, 0.140, 0.090);
 // The trunk's lean: 1 degree plus up to this many radians more (4.5 degrees
 // in all at most); the reaches below allow for it.
 const DF_SAG_LEAN_MAX_EXTRA: f32 = 0.061;
+// An arm's upright run leans out from plumb by up to this (radians).
+const DF_SAG_ARM_TILT: f32 = 0.12;
 
 // (lean, straightening, lean azimuth, taper). Drawn from the item's own
 // uniform draws (rib phase, groove depth) rather than a fresh hash: an arm
@@ -22381,7 +22383,8 @@ fn df_sag_axis_at(it: DfItem, sh: vec4<f32>, z: f32) -> vec3<f32> {
     let z1 = 0.3 * rise;
     let dz = 0.35 * rise;
     let l0 = sh.x;
-    let l1 = sh.x * (1.0 - sh.y);
+    // As df_sag_trunk: no elbow under a third of a degree of bend.
+    let l1 = select(sh.x, sh.x * (1.0 - sh.y), sh.x * sh.y >= 0.006);
     let za = min(z, z1);
     let zb = clamp(z - z1, 0.0, dz);
     let zc = max(z - z1 - dz, 0.0);
@@ -22404,11 +22407,14 @@ fn df_sag_trunk(it: DfItem) -> DfColumn {
     c.r = r;
     let rise = h + 0.4 - r * (1.0 - c.taper);
     c.l1 = 0.3 * rise;
-    c.rb = select(0.0, 0.35 * rise / max(sh.x * sh.y, 1e-3),
-                  sh.x * sh.y > 1e-3);
+    // An elbow only where it turns by a third of a degree or more: below,
+    // its radius would run to kilometres (and f32 with it); the lean then
+    // simply holds.
+    let bend = sh.x * sh.y;
+    c.omega = select(c.alpha, c.omega, bend >= 0.006);
+    c.rb = select(0.0, 0.35 * rise / max(bend, 0.006), bend >= 0.006);
     let arc_rise = c.rb * (cos(c.alpha) - cos(c.omega));
-    c.l2 = max(rise - c.l1 * sin(c.alpha) - arc_rise, 0.0)
-        / max(sin(c.omega), 0.5);
+    c.l2 = max(rise - c.l1 * sin(c.alpha) - arc_rise, 0.0) / sin(c.omega);
     c.wave = 0.025 + 0.025 * fract(sh.z * 5.13);
     c.wave_l = 1.3 + 1.2 * fract(sh.w * 9.71);
     // A slight pinch at the foot: old saguaros stand on a narrower boot.
@@ -22430,8 +22436,11 @@ fn df_sag_arm(it: DfItem, i: i32) -> DfColumn {
     c.root = df_sag_axis_at(it, df_sag_shape(it), ap.y + 0.4);
     c.u = vec2<f32>(cos(ap.x), sin(ap.x));
     c.alpha = 0.12 + 0.5 * fract(ap.x * 3.71);
-    // The upright run is not plumb either: up to 7 degrees either way.
-    c.omega = 0.5 * DF_PI + 0.24 * (fract(ap.w * 6.13) - 0.5);
+    // The upright run is not plumb either: it leans out, away from the
+    // trunk, by up to 7 degrees — never back toward it, where a tall arm's
+    // tip ended in the trunk (13% of them, loose-ends' review). The item's
+    // reach counts the lean (df_saguaro_item).
+    c.omega = 0.5 * DF_PI - DF_SAG_ARM_TILT * fract(ap.w * 6.13);
     c.l1 = r + ap.z;
     c.rb = 0.20 + 0.22 * fract(ap.y * 5.31);
     c.l2 = ap.w;
@@ -22480,16 +22489,32 @@ fn df_saguaro_item(it_in: DfItem, r0: vec4<f32>) -> DfItem {
     let n_arms = min(floor(arm_cap * (0.3 + 0.9 * r1.z)), 4.0);
     it.a = vec4<f32>(h, r, ribs, r1.x);
     it.b = vec4<f32>(n_arms, 0.80 + 0.12 * r1.w, depth, age);
+    // An arm's run (up to its root's r plus 0.42), its elbow (0.42), its own
+    // radius and spines.
     let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL;
-    // The trunk's lean carries its top (and the arms) sideways, one way:
-    // the box stretches toward it only, so it stays tight (a ray in the box
+    // The trunk's lean carries its top (and the arms) sideways, one way,
+    // and each arm's upright leans its tip out along its own azimuth: the
+    // box stretches toward each only, so it stays tight (a ray in the box
     // pays for a march).
     let sh = df_sag_shape(it);
     let top = df_sag_axis_at(it, sh, h + 0.4 - r * (1.0 - sh.w)).xy;
+    var lo = min(top, vec2<f32>(0.0));
+    var hi = max(top, vec2<f32>(0.0));
+    var arm_lo = vec2<f32>(0.0);
+    var arm_hi = vec2<f32>(0.0);
+    for (var i: i32 = 0; i < i32(n_arms); i = i + 1) {
+        let ap = df_sag_arm_draw(it, i);
+        let out = vec2<f32>(cos(ap.x), sin(ap.x))
+            * (ap.w * sin(DF_SAG_ARM_TILT * fract(ap.w * 6.13)));
+        arm_lo = min(arm_lo, out);
+        arm_hi = max(arm_hi, out);
+    }
+    lo = lo + arm_lo;
+    hi = hi + arm_hi;
     // The trunk's axis starts 0.4 m down and ends in a cap of its radius.
-    it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach) + min(top, vec2<f32>(0.0)),
+    it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach) + lo,
                         it.base.z - 0.4 - r);
-    it.bmax = vec3<f32>(it.base.xy + vec2<f32>(reach) + max(top, vec2<f32>(0.0)),
+    it.bmax = vec3<f32>(it.base.xy + vec2<f32>(reach) + hi,
                         it.base.z + h + DF_SAG_SHELL + 0.05);
     return it;
 }
@@ -24566,13 +24591,16 @@ const DF_PV_LEAF: vec3<f32> = vec3<f32>(0.095, 0.140, 0.040);
 const DF_MAT_PV_BARK: i32 = 20;
 const DF_MAT_PV_CROWN: i32 = 21;
 // The crown's envelope (centre and vertical semi-axis over the height): the
-// lobes' extent on average (a sapling's, 0.482 and 0.264, alike), for the
-// sky occlusion's depth, the decals and the statistical field (DF_FAR_PV_*,
-// DF_FAR_BPV_*, whose kappas are the far form's mean cover from above over
-// its crown's disc). From a numpy mirror of df_pv_limb / df_pv_lobe over
-// 400 draws of each: tools/desert_pv_crown_stats.py.
+// lobes' extent on average, a tree's and a bank sapling's (fewer trunks),
+// for the sky occlusion's depth (df_pv_env), the decals and the statistical
+// field (DF_FAR_PV_*, DF_FAR_BPV_*, whose kappas are the far form's mean
+// cover from above over its crown's disc). From a numpy mirror of
+// df_pv_limb / df_pv_lobe over 400 draws of each:
+// tools/desert_pv_crown_stats.py.
 const DF_PV_CROWN_ZC: f32 = 0.505;
 const DF_PV_CROWN_RZ: f32 = 0.317;
+const DF_PV_BANK_ZC: f32 = 0.479;
+const DF_PV_BANK_RZ: f32 = 0.255;
 
 fn df_paloverde_item(it_in: DfItem, r: vec4<f32>) -> DfItem {
     var it = it_in;
@@ -24580,6 +24608,7 @@ fn df_paloverde_item(it_in: DfItem, r: vec4<f32>) -> DfItem {
     let h = 3.0 + 3.0 * r.x;
     it.a = vec4<f32>(h, df_paloverde_crown(r), floor(3.0 + 2.99 * r.z),
                      r.w * DF_TAU);
+    it.b = vec4<f32>(0.0);   // b.x: 1 for a bank's sapling
     return it;
 }
 
@@ -24597,7 +24626,16 @@ fn df_paloverde_bank_item(it_in: DfItem, reach: f32, r: vec4<f32>) -> DfItem {
     let crown = reach - 0.3;
     it.a = vec4<f32>(min(1.4 + 1.2 * crown, 3.0), crown,
                      floor(2.0 + 1.99 * r.z), r.w * DF_TAU);
+    it.b = vec4<f32>(1.0, 0.0, 0.0, 0.0);
     return it;
+}
+
+// The crown's envelope for the sky occlusion's depth: (centre, vertical
+// semi-axis) in metres over the base.
+fn df_pv_env(it: DfItem) -> vec2<f32> {
+    let bank = it.b.x > 0.5;
+    return it.a.x * vec2<f32>(select(DF_PV_CROWN_ZC, DF_PV_BANK_ZC, bank),
+                              select(DF_PV_CROWN_RZ, DF_PV_BANK_RZ, bank));
 }
 
 fn df_paloverde_reach(crown: f32) -> f32 {
@@ -24668,9 +24706,10 @@ fn df_pv_lobe(it: DfItem, sg: DfSeg, n: i32, m: i32) -> DfEnvelope {
     return e;
 }
 
-// Clump j of lobe `e` (seeded by `seed`): (centre, horizontal radius),
-// flattened to 0.85 of that, at a point drawn through the lobe so the clumps
-// scatter with gaps between them.
+// Clump j of lobe `e` (seeded by `seed`): (centre, radius rc), at a point
+// drawn through the lobe so the clumps scatter with gaps between them; its
+// sprigs reach DF_PV_SPRIG_BOUND rc from the centre, so up to
+// (DF_PV_SPRIG_BOUND - 0.5) rc past the lobe (df_pv_lobe_bound).
 fn df_pv_clump(e: DfEnvelope, seed: vec2<u32>, j: i32) -> vec4<f32> {
     let hc = df_rand4(pcg2d(seed + vec2<u32>(u32(j) * 71u + 3u, 83u)));
     let rc = (0.25 + 0.20 * hc.w) * min(e.r.x, e.r.y);
@@ -24681,7 +24720,7 @@ fn df_pv_clump(e: DfEnvelope, seed: vec2<u32>, j: i32) -> vec4<f32> {
     // Uniform in the unit ball: the radius as the cube root of a uniform.
     let v = vec3<f32>(st * cos(ph), st * sin(ph), ct)
         * pow(max(hc.z, 1e-30), 1.0 / 3.0);
-    let room = max(e.r - 0.5 * vec3<f32>(rc, rc, 0.85 * rc), vec3<f32>(0.0));
+    let room = max(e.r - vec3<f32>(0.5 * rc), vec3<f32>(0.0));
     return vec4<f32>(e.c + v * room, rc);
 }
 
@@ -24691,50 +24730,82 @@ fn df_pv_clump(e: DfEnvelope, seed: vec2<u32>, j: i32) -> vec4<f32> {
 // leaflets are (df_creo_clump), so up close the crown is leaf shapes and
 // the sky between them, not a ball of haze. Sizes scale with the clump.
 const DF_PV_SPRIGS: i32 = 36;
+const DF_PV_SPRIG_BOUND: f32 = 1.35;   // a clump's sprigs' sphere, over rc
+
+// Sprig k of the clump at cc (radius rc), from the stream s the caller
+// steps (`seed` out is the next): its centre, axis and side, half-length
+// and half-width; `tint` its own draw.
+struct DfPvSprig {
+    c: vec3<f32>,
+    la: vec3<f32>,
+    side: vec3<f32>,
+    hl: f32,
+    hw: f32,
+    tint: f32,
+    seed: vec2<u32>,
+}
+
+fn df_pv_sprig(cc: vec3<f32>, rc: f32, seed: vec2<u32>) -> DfPvSprig {
+    var sp: DfPvSprig;
+    sp.seed = pcg2d(seed);
+    let s2 = pcg2d(sp.seed ^ vec2<u32>(0x2545f491u, 0x9e3779b9u));
+    let rv = vec3<f32>(df_u01(sp.seed.x), df_u01(sp.seed.y), df_u01(s2.x))
+        * 2.0 - 1.0;
+    sp.c = cc + rv * (0.6 * rc);
+    // @domain: zero only on an exact cancellation of three independent draws: measure zero
+    sp.la = normalize(rv + vec3<f32>(0.0, 0.0, 0.3));
+    let tw = df_u01(s2.y) * 2.0 - 1.0;
+    // @domain: zero only if la lies exactly along the drawn direction: a measure-zero draw
+    sp.side = normalize(cross(sp.la, vec3<f32>(tw, 1.0 - abs(tw), 0.4)));
+    sp.hl = 0.31 * rc;
+    sp.hw = 0.12 * rc;
+    sp.tint = df_u01(s2.x);
+    return sp;
+}
 
 fn df_pv_sprigs(o: vec3<f32>, dir: vec3<f32>, cc: vec3<f32>, rc: f32,
                 seed: vec2<u32>, best_in: DfRodHit) -> DfRodHit {
     var best = best_in;
-    // The clump's bounding sphere first: most rays pass it by.
+    // The clump's bounding sphere first: most rays pass it by. A sprig's
+    // centre lies within 0.6 rc of the clump's on each axis (0.6 sqrt(3) rc
+    // at a corner) and its tip 0.31 rc past that: 1.35 rc holds them all.
+    let rb = DF_PV_SPRIG_BOUND * rc;
     let oc = cc - o;
     let tca = dot(oc, dir);
     let d2 = dot(oc, oc) - tca * tca;
-    if (d2 > rc * rc || tca + rc <= 0.0 || tca - rc >= best.t) {
+    if (d2 > rb * rb || tca + rb <= 0.0 || tca - rb >= best.t) {
         return best;
     }
-    let hl = 0.31 * rc;
-    let hw = 0.12 * rc;
     var s = seed;
     for (var k: i32 = 0; k < DF_PV_SPRIGS; k = k + 1) {
-        s = pcg2d(s);
-        let s2 = pcg2d(s ^ vec2<u32>(0x2545f491u, 0x9e3779b9u));
-        let rv = vec3<f32>(df_u01(s.x), df_u01(s.y), df_u01(s2.x)) * 2.0
-            - 1.0;
-        let c = cc + rv * (0.6 * rc);
-        // @domain: zero only on an exact cancellation of three independent draws: measure zero
-        let la = normalize(rv + vec3<f32>(0.0, 0.0, 0.3));
-        let tw = df_u01(s2.y) * 2.0 - 1.0;
-        // @domain: zero only if la lies exactly along the drawn direction: a measure-zero draw
-        let side = normalize(cross(la, vec3<f32>(tw, 1.0 - abs(tw), 0.4)));
-        let nl = cross(la, side);
+        let sp = df_pv_sprig(cc, rc, s);
+        s = sp.seed;
+        let nl = cross(sp.la, sp.side);
         let dn = dot(dir, nl);
         if (abs(dn) < 1e-5) {
             continue;
         }
-        let t = dot(c - o, nl) / dn;
+        let t = dot(sp.c - o, nl) / dn;
         if (t <= 0.0 || t >= best.t) {
             continue;
         }
-        let q = o + dir * t - c;
-        let u = dot(q, la) / hl;
-        let v = dot(q, side) / hw;
+        let q = o + dir * t - sp.c;
+        let u = dot(q, sp.la) / sp.hl;
+        let v = dot(q, sp.side) / sp.hw;
         if (u * u + v * v < 1.0) {
             best.t = t;
             best.n = select(nl, -nl, dn > 0.0);
-            best.tint = df_u01(s2.x);
+            best.tint = sp.tint;
         }
     }
     return best;
+}
+
+// The lobe grown to hold its clumps' sprigs: the largest clump's rc is
+// 0.45 of the lobe's smaller horizontal radius (df_pv_clump).
+fn df_pv_lobe_bound(e: DfEnvelope) -> vec3<f32> {
+    return e.r + vec3<f32>((DF_PV_SPRIG_BOUND - 0.5) * 0.45
+                           * min(e.r.x, e.r.y));
 }
 
 // The number of lobes over the whole tree, for the loops' bounds.
@@ -24794,10 +24865,13 @@ fn df_paloverde_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         }
         for (var m: i32 = 0; m < DF_PV_LOBES_PER_LIMB; m = m + 1) {
             let e = df_pv_lobe(it, sg, n, m);
-            let tl = df_medium_hit(df_ellipsoid_chord(q0, dir, e.c, e.r), ta,
-                                   best, e.sigma, df_item_free_path(
-                                       dither, it.seed + vec2<u32>(
-                                           u32(n * DF_PV_LOBES_PER_LIMB + m) * 7919u, 0u)));
+            let ch = df_ellipsoid_chord(q0, dir, e.c, e.r);
+            if (ch.y <= ch.x || ch.y <= ta || ch.x >= best) {
+                continue;
+            }
+            let tl = df_medium_hit(ch, ta, best, e.sigma, df_item_free_path(
+                dither, it.seed + vec2<u32>(
+                    u32(n * DF_PV_LOBES_PER_LIMB + m) * 7919u, 0u)));
             if (tl < best) {
                 best = tl;
                 code = DF_MAT_PV_CROWN;
@@ -24834,8 +24908,9 @@ fn df_paloverde_far(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.normal = nrm;
     // The crown hit's depth in the crown's envelope (for the crown's own
     // occlusion of the sky), 1 at its surface.
-    let pn = length((q0 + dir * best - vec3<f32>(0.0, 0.0, DF_PV_CROWN_ZC * h))
-                    / vec3<f32>(cr, cr, DF_PV_CROWN_RZ * h));
+    let env = df_pv_env(it);
+    let pn = length((q0 + dir * best - vec3<f32>(0.0, 0.0, env.x))
+                    / vec3<f32>(cr, cr, env.y));
     res.mat = vec4<f32>(f32(code) + 0.9 * tint, clamp(pn, 0.0, 1.0), self_t,
                         0.0);
     return res;
@@ -24876,8 +24951,8 @@ fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
         for (var m: i32 = 0; m < DF_PV_LOBES_PER_LIMB; m = m + 1) {
             let e = df_pv_lobe(it, sg, n, m);
             // Only a lobe the ray enters, nearer than what it has, is
-            // resolved into its clumps.
-            let ch = df_ellipsoid_chord(q0, dir, e.c, e.r);
+            // resolved into its clumps (the lobe grown to hold them).
+            let ch = df_ellipsoid_chord(q0, dir, e.c, df_pv_lobe_bound(e));
             if (ch.y <= ch.x || ch.y <= ta || ch.x >= min(leaf.t, rod.t)) {
                 continue;
             }
@@ -24925,8 +25000,9 @@ fn df_paloverde_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.normal = nrm;
     // The crown hit's depth in the crown's envelope (for the crown's own
     // occlusion of the sky), 1 at its surface.
-    let pn = length((q0 + dir * best - vec3<f32>(0.0, 0.0, DF_PV_CROWN_ZC * h))
-                    / vec3<f32>(cr, cr, DF_PV_CROWN_RZ * h));
+    let env = df_pv_env(it);
+    let pn = length((q0 + dir * best - vec3<f32>(0.0, 0.0, env.x))
+                    / vec3<f32>(cr, cr, env.y));
     res.mat = vec4<f32>(f32(code) + 0.9 * tint, clamp(pn, 0.0, 1.0), 1.0, 0.0);
     return res;
 }
@@ -24949,6 +25025,11 @@ fn df_pv_transmit(it: DfItem, q0: vec3<f32>, dir: vec3<f32>, ta: f32,
     let nl = df_pv_nlimbs(it);
     for (var n: i32 = 0; n < nl; n = n + 1) {
         let sg = df_pv_limb_n(it, n);
+        // The limbs, drawn by both forms, cast their shadows too.
+        rod = df_rod(q0, dir, sg.a, sg.ax, sg.len, sg.r0, sg.r1, rod, 0.0);
+        if (rod.t > ta && rod.t < tb) {
+            return 0.0;
+        }
         for (var m: i32 = 0; m < DF_PV_LOBES_PER_LIMB; m = m + 1) {
             let e = df_pv_lobe(it, sg, n, m);
             let ch = df_ellipsoid_chord(q0, dir, e.c, e.r);
@@ -25436,9 +25517,13 @@ struct DfFoot {
     reach: f32,
 }
 
-// The largest df_saguaro_item reach: 1.39 m unleaned, plus the tallest
-// trunk's (12.9 m of axis) sideways carry at the greatest lean,
-// 0.017 + DF_SAG_LEAN_MAX_EXTRA radians.
+// Bounds every saguaro's extent from its foot. The tile is periodic, so its
+// saguaros are all there are: over them, with every arm at its greatest
+// outward tilt (DF_SAG_ARM_TILT) whatever its draw, the most is 2.20 m
+// (tests/test_desert_flora_bounds.py measures it and holds this to it).
+// The sum of each part's worst — the tallest trunk at the greatest lean
+// with the longest arm tilted the same way — would be 3.5 m; no draw comes
+// near it, and the cell margin this sets is the saguaros' room to wander.
 const DF_SAG_REACH: f32 = 2.4;
 const DF_ROCK_SMALL_REACH: f32 = 0.65;
 
@@ -25726,7 +25811,7 @@ fn df_item_near(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
 
 // --- The walk ------------------------------------------------------------------
 //
-// One DDA over the 16 m cells, and inside each a DDA over its 4x4 small
+// One DDA over the 16 m cells, and inside each a DDA over its 2x2 small
 // cells: both grids in one front-to-back walk. Every item lies inside its
 // own cell, so the first big cell that yields a hit holds the nearest.
 //
@@ -25738,7 +25823,7 @@ fn df_item_near(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
 // point (DESERT_ENVELOPE_M, measured on the tile) and across the cell (mip
 // 3's slope bound times the half-diagonal), plus the octaves' reach, plus
 // the tallest plant. One texture read per 16 m instead of hashing sixteen
-// small cells.
+// small plants' feet.
 const DF_MAX_BIG_CELLS: i32 = 96;
 const DF_TALLEST: f32 = 12.7;
 // The tallest a small cell's plant stands (df_kind_top's 3.1 m: a big
@@ -26557,9 +26642,9 @@ const DF_FAR_PV_A: f32 = 2.2;         // palo verde crown (mean H 4.5 m)
 const DF_FAR_PV_ZC: f32 = 2.27;       // DF_PV_CROWN_ZC * 4.5
 const DF_FAR_PV_B: f32 = 1.43;        // DF_PV_CROWN_RZ * 4.5
 const DF_FAR_PV_KAPPA: f32 = 0.42;
-const DF_FAR_BPV_A: f32 = 0.75;       // a bank thicket's young tree (2.29 m)
+const DF_FAR_BPV_A: f32 = 0.75;       // a bank thicket's young tree (2.30 m)
 const DF_FAR_BPV_ZC: f32 = 1.10;
-const DF_FAR_BPV_B: f32 = 0.60;
+const DF_FAR_BPV_B: f32 = 0.59;
 const DF_FAR_BPV_KAPPA: f32 = 0.33;
 const DF_FAR_PV_ALB: vec3<f32> = vec3<f32>(0.095, 0.140, 0.040);
 const DF_FAR_ROCK_A: f32 = 1.3;       // a heap's equivalent dome
@@ -27118,8 +27203,8 @@ fn df_disc_cell(ci: vec2<i32>, slot: i32, p: vec3<f32>, rd: vec3<f32>,
     // the habitat says which it is.
     let tree_r = foot.reach - 0.3;
     let tree_h = min(1.4 + 1.2 * tree_r, 3.0);
-    let tree = vec4<f32>(tree_r, DF_PV_CROWN_ZC * tree_h,
-                         DF_PV_CROWN_RZ * tree_h, DF_DECAL_TAU0_BPV);
+    let tree = vec4<f32>(tree_r, DF_PV_BANK_ZC * tree_h,
+                         DF_PV_BANK_RZ * tree_h, DF_DECAL_TAU0_BPV);
     let may_tree = foot.kind == DF_KIND_CREOSOTE && !burs;
     // The foot's ground is taken as p's (the slope across a crown is a few
     // centimetres).

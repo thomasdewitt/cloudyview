@@ -19,7 +19,11 @@ rng = np.random.default_rng(1)
 def tree(bank=False):
     U = rng.random
     if bank:
-        crown = 0.23 + 1.3 * U()          # reach - 0.3, as the bank item
+        # A creosote's reach, less 0.3, as df_paloverde_bank_item takes it:
+        # df_creosote_dims (not bursage) and df_creosote_reach.
+        hc = 0.7 + 1.3 * U() ** 1.3
+        wc = hc * (0.40 + 0.20 * U())
+        crown = wc + 0.30 * max(hc, 0.525) + 0.022 + 2 * 0.0075 - 0.3
         h = min(1.4 + 1.2 * crown, 3.0)
         cr = crown
         nt = int(2.0 + 1.99 * U())

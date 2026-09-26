@@ -145,12 +145,13 @@ def extract_const(src: str, name: str) -> str:
     return m.group(0)
 
 
-def scan_code() -> str:
+def scan_code(src: str | None = None) -> str:
     """The placement scan's module: the flora section and the shared
-    functions it calls, lifted from the shader, over SCAN_PRELUDE's stubs.
-    tests/test_desert_flora_scan.py compiles it, so a shared function the
-    flora section starts calling fails there rather than in every run."""
-    src = SHADER.read_text()
+    functions it calls, lifted from the shader (or from `src`, a patched
+    copy of it), over SCAN_PRELUDE's stubs. tests/test_desert_flora_scan.py
+    compiles it, so a shared function the flora section starts calling
+    fails there rather than in every run."""
+    src = SHADER.read_text() if src is None else src
     # The ground's habitat accessors are lifted from the shader like the
     # flora section itself, over the stub tile read above.
     return (extract_fn(src, "pcg2d") + extract_fn(src, "safe_inv_dir")
@@ -170,14 +171,21 @@ def scan_plants(entry="scan"):
     cell, rows (kind, x, y, height, radius, arms, age, ribs). `scan_small`:
     the small cells of the first 1024 m, rows (kind, x, y, height,
     half-width, variant, flowering, stems)."""
+    return run_scan(scan_code(), entry, 256)
+
+
+def run_scan(code, entry, n):
+    """Run compute entry `entry` of module `code` (scan_code() and more)
+    over an n x n grid of 16 x 16 workgroups' threads, with the scan's
+    bindings (the tile, its sampler, scan_out: two vec4 a thread), and
+    return scan_out as rows of eight floats. tests/test_desert_flora_bounds.py
+    runs its own entries through it."""
     import wgpu
-    code = scan_code()
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
     module = device.create_shader_module(code=code)
     pipe = device.create_compute_pipeline(
         layout="auto", compute={"module": module, "entry_point": entry})
-    n = 256
     size = n * n * 2 * 16
     buf = device.create_buffer(size=size, usage=wgpu.BufferUsage.STORAGE
                                | wgpu.BufferUsage.COPY_SRC)
