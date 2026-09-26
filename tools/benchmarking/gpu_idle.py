@@ -86,11 +86,39 @@ def clock_mode() -> str:
                           "stock (no clock lock declared by the caller)")
 
 
+def _descendants(root: int) -> set[int]:
+    """`root` and every process under it, from /proc's parent links."""
+    children = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            stat = open(f"/proc/{entry}/stat").read()
+        except OSError:
+            continue              # exited between the listing and the read
+        # The field after the parenthesised name (which may hold spaces or
+        # parentheses itself) is the state, then the parent's pid.
+        ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        children.setdefault(ppid, []).append(int(entry))
+    tree, todo = set(), [root]
+    while todo:
+        pid = todo.pop()
+        tree.add(pid)
+        todo.extend(children.get(pid, ()))
+    return tree
+
+
 def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
     """(fatal, warnings) sampled over `seconds`; both empty when idle.
-    `exclude`: pids to ignore besides this process (which is always
-    ignored: the caller's own tail is not a neighbour)."""
-    exclude = set(exclude) | {os.getpid()}
+    `exclude`: pids to ignore besides this process and everything it
+    started (always ignored: the caller's own work is not a neighbour). The
+    whole tree, not just this pid, because a caller that times a child
+    through `uv run` has the GPU held by uv's child, its grandchild — a
+    watch that excluded only its own pid and the child's flagged the timed
+    harness itself as a neighbour (2026-09-25). The price: a child the
+    caller left running from an earlier variant is its own work too, and is
+    not caught here — a caller that times variants as subprocesses must
+    reap each before starting the next."""
     fatal, warn = set(), set()
     limit = (IDLE_UTIL_PCT_LOCKED if clock_mode().startswith("locked")
              else IDLE_UTIL_PCT)
@@ -98,10 +126,16 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
     while True:
         util = int(_smi("--query-gpu=utilization.gpu",
                         "--format=csv,noheader,nounits").strip())
+        # The tree on both sides of the pmon sample, each time: the caller's
+        # children come and go during a run, and one started or ended just
+        # as pmon looked is still the caller's.
+        own = _descendants(os.getpid())
+        rows = _processes()
+        own |= _descendants(os.getpid()) | set(exclude)
         known = 0
-        for pid, short, sm in _processes():
+        for pid, short, sm in rows:
             known += sm or 0
-            if pid in exclude:
+            if pid in own:
                 continue
             name = _full_name(pid, short)
             if name in DESKTOP:
@@ -141,7 +175,9 @@ class Watch:
     """Samples the card all through a run on a background thread, so a
     neighbour that draws for a while mid-run (a browser tab brought to the
     front) is caught, not only one still there at the end:
-    `with Watch() as w: ...` then check_quiet(w)."""
+    `with Watch() as w: ...` then check_quiet(w). What the caller runs
+    meanwhile, a subprocess under `uv run` included, is its own work, not a
+    neighbour (survey)."""
 
     def __init__(self):
         import threading
