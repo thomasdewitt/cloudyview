@@ -182,20 +182,22 @@ _NX, _NZ, _DX = 8, 4, 100.0
 CITY_OFFSET = [8100.0, -44190.0]          # K.CITY_TILE_OFFSET_M
 
 # (name, scene flags, tile extent, the period the surface frame folds at,
-# whether the flight's folds moved the surface frame off the static offset —
-# which is when --surface-origin must appear and carry it). The sea folds at
-# its swell's period, sixteen of its tiles; the city at its tile.
+# the surface's clock period (null: it has none), whether the flight's folds
+# moved the surface frame off the static offset — which is when
+# --surface-origin must appear and carry it). The city and the desert fold
+# at their tile, the sea at 16 tiles (SURFACE_FRAME_TILES); only the city
+# has a clock (its steam).
 SURFACE_CASES = [
-    ("ocean", {}, 102.4, 1638.4, False),
-    ("ocean-drifted", {}, 102.4, 1638.4, True),
+    ("ocean", {}, 102.4, 1638.4, None, False),
+    ("ocean-drifted", {}, 102.4, 1638.4, None, True),
     ("city", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0, 92160.0,
-     False),
+     2600.0, False),
     ("city-drifted", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0,
-     92160.0, True),
-    ("desert", {"desert": True}, 4096.0, 4096.0, False),
-    ("desert-drifted", {"desert": True}, 4096.0, 4096.0, True),
+     92160.0, 2600.0, True),
+    ("desert", {"desert": True}, 4096.0, 4096.0, None, False),
+    ("desert-drifted", {"desert": True}, 4096.0, 4096.0, None, True),
 ]
-# The scene clock the fake views were held at: where the sea was.
+# The scene clock the fake views were held at: where the city's steam was.
 SCENE_TIME = 37.625
 
 _SURFACE_JS = textwrap.dedent("""
@@ -215,7 +217,7 @@ _SURFACE_JS = textwrap.dedent("""
       const self = {
         scene: { ...c.scene, bmin: c.bmin, bmax: c.bmax,
                  sourceName: "field.nc", oceanTileExtent: c.tile,
-                 surfacePeriod: t },
+                 surfacePeriod: t, clockPeriod: c.clock },
         camera: { position, azimuth: 301.25, elevation: 12.5, fov: 90.0,
                   surfacePosition: sp, surfaceTileExtent: t },
         canvas: { width: 1920, height: 961 },
@@ -250,9 +252,9 @@ def _surface_field():
 def surface_commands():
     bmin, bmax = witness_module._volume_aabb(_surface_field())
     cases = [dict(name=name, scene=scene, tile=tile, period=period,
-                  drift=drift, sceneTime=SCENE_TIME,
+                  clock=clock, drift=drift, sceneTime=SCENE_TIME,
                   bmin=list(bmin), bmax=list(bmax))
-             for name, scene, tile, period, drift in SURFACE_CASES]
+             for name, scene, tile, period, clock, drift in SURFACE_CASES]
     js = _SURFACE_JS % ((REPO / "web" / "soar" / "viewer.js").as_posix(),
                         json.dumps(cases))
     proc = subprocess.run(["node", "--input-type=module", "-e", js],
@@ -304,7 +306,7 @@ def test_the_surface_round_trips_to_the_uniforms(
 
     (renderer,) = made
     u = renderer.uniforms
-    scene, tile, drift = next((s, t, d) for n, s, t, _, d in SURFACE_CASES
+    scene, tile, drift = next((s, t, d) for n, s, t, _, _c, d in SURFACE_CASES
                               if n == name)
     kind = ("city" if scene.get("city")
             else "desert" if scene.get("desert") else "ocean")
@@ -318,10 +320,10 @@ def test_the_surface_round_trips_to_the_uniforms(
     # the scene clock it was held at.
     assert tuple(u[24][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
-    # The clock runs where the shader reads it: an ocean or a city still
-    # carries it (both periods far exceed it, so it packs unwrapped), a
-    # desert still neither writes --time nor packs one.
-    if kind in ("ocean", "city"):
+    # The clock runs where something reads it: a city still carries it (its
+    # period far exceeds it, so it packs unwrapped); an ocean or a desert
+    # still neither writes --time nor packs one.
+    if kind == "city":
         assert u[24][2] == np.float32(SCENE_TIME)
     else:
         assert u[24][2] == 0.0

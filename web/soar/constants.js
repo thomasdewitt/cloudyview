@@ -45,9 +45,9 @@ export const DEFAULT_HAZE_HEIGHT_DEPENDENT = false;
 export const OCEAN_REALISM = 1.0;
 export const OCEAN_MIP_BIAS = -0.5;
 export const OCEAN_GLINT_STRENGTH = 0.85;
-// The glint's base roughness: the slope variance below the detail octave's
-// 5 cm, as alpha — Cox & Munk's 8 m/s mean square slope less what the tile,
-// the detail octave and the swell resolve. Mirrors look.py.
+// The glint's base roughness: the slope variance below the static tile's
+// 0.2 m texels, as alpha — the sea's whole mean square slope Cox & Munk's at
+// ~7 m/s with the tile's own. Mirrors look.py.
 export const OCEAN_GLINT_ROUGHNESS = 0.174;
 // How much of the slope variance the normal-mip filter removed is drawn
 // stochastically per pixel per frame (iter_008). The remainder stays as
@@ -143,10 +143,21 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // every visitor past any cache. Pinned against the tiles and against
 // soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
-  ocean: "cloudyview.web.ocean.v2",
+  ocean: "cloudyview.web.ocean.v1",
   desert: "cloudyview.web.desert.v2",
   city: "cloudyview.web.city.v2",
 };
+// How many tiles each surface's frame folds at (the tile's surfacePeriod).
+// The city and the desert fold at their tile: their frame IS the district.
+// The sea folds at 16 tiles (1638.4 m): its static tile repeats every
+// 102.4 m, so the fold is invisible, and a long frame is what a recorded
+// track can carry between two samples — the resamplers unwrap sx/sy at half
+// the period, 819 m here rather than 51 m at one tile, where a flight at
+// 1500 m/s recorded at 20 fps (75 m a sample) slid the sea. It is also the
+// moving sea's period (2026-09-23..25), so its tracks replay as recorded.
+// Pinned against soar_host.SURFACE_FRAME_TILES by
+// tests/test_surface_tile_loader.py.
+export const SURFACE_FRAME_TILES = { ocean: 16, desert: 1, city: 1 };
 // From the 2026-08-22 12:31 capture, the same still the start camera and the
 // landing backdrop come from: the moon the view was composed under is part
 // of the view.

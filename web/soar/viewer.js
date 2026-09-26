@@ -10,8 +10,8 @@ import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
-import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile,
-         loadSea } from "./scene.js";
+import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile }
+  from "./scene.js";
 import { buildDesertBoundsInWorker } from "./desert_bounds.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
@@ -222,10 +222,11 @@ export class Viewer {
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
-    // The scene clock (s): where the moving sea is in its motion, uniform
-    // row 24.z. It runs only while the view is flying or a track is being
+    // The scene clock (s), uniform row 24.z, read by what moves in the
+    // scene (the city's steam; the sea and the desert have no clock and
+    // pack 0). It runs only while the view is flying or a track is being
     // recorded, never while paused — so a parked view is a still scene and
-    // its accumulation converges, and a held shot keeps the waves it was
+    // its accumulation converges, and a held shot keeps the steam it was
     // held on. Captures take it from the view (a still) or from the track
     // (a video), never from the wall.
     this.sceneTime = 0.0;
@@ -396,7 +397,7 @@ export class Viewer {
       // volume) rather than re-downloaded per field.
       return (this._cityTile ??=
         await loadOceanTile(this.device, CITY_URL, undefined,
-                            { keepCells: true, clock: true,
+                            { keepCells: true,
                               schema: K.SURFACE_TILE_SCHEMAS.city }));
     }
     if (kind === "desert") {
@@ -412,8 +413,8 @@ export class Viewer {
                               schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
     return (this._ocean ??=
-      await loadSea(this.device, OCEAN_URL, undefined,
-                    { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
+      await loadOceanTile(this.device, OCEAN_URL, undefined,
+                          { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
   }
 
   async loadField(source, progress) {
@@ -545,8 +546,8 @@ export class Viewer {
                                      // 2026-09-01).
                                      // Folded at the surface's own period:
                                      // the tile for the city and the
-                                     // desert, several tiles for the sea,
-                                     // whose swell repeats only there.
+                                     // desert, 16 tiles for the sea
+                                     // (constants.js SURFACE_FRAME_TILES).
                                      surfaceTileExtent: scene.surfacePeriod,
                                      surfaceOffsetM:
                                        scene.city ? scene.cityOffsetM
@@ -1564,8 +1565,8 @@ export class Viewer {
       this._surfaceLanding = true;
       this._surfaceLandedAt = performance.now();
       this.scene.desertFloorAt = floorAt;
-      // The camera folds at the surface frame's period: the sea's swell
-      // repeats over several tiles, the desert at its tile.
+      // The camera folds at the surface frame's period: 16 tiles for the
+      // sea, one for the desert (constants.js SURFACE_FRAME_TILES).
       this.camera.setSurface(tile.surfacePeriod, floorAt);
       this.ui.say(kind === "desert"
         ? "The Sonoran desert (G for the ocean)."
@@ -2637,9 +2638,9 @@ export class Viewer {
           : [];
         await renderAccumulated(
           this.renderer, target.view, size,
-          // The frame's own scene clock: the sea moves as it moved in
-          // flight, one video frame at a time, however many passes each
-          // frame accumulates.
+          // The frame's own scene clock: the city's steam moves as it
+          // moved in flight, one video frame at a time, however many passes
+          // each frame accumulates.
           { ...this._captureViewKwargs(look),
             camera: pose, frameIndex: i * 1024,
             sceneTime: frames[i].sceneTime },
@@ -2902,9 +2903,10 @@ export class Viewer {
         // is that everything here comes from `look`.
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
-        // The scene clock the still was taken at (witness --time): the
-        // sea's or the city's, and 0 over the desert, as row 24.z is.
-        scene_time: this.scene.desert ? 0 : this.sceneTime,
+        // The scene clock the still was taken at (witness --time): for a
+        // surface with a clock (the city's steam), and 0 over one without
+        // (the sea, the desert), as row 24.z is.
+        scene_time: this.scene.clockPeriod === null ? 0 : this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
         light_march_lod_degrees:
@@ -3259,10 +3261,10 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
-      // The scene clock the view was held at: where the sea was, or the
-      // city's steam. The desert reads none (row 24.z is 0 there), so it
-      // writes none.
-      ...(this.scene.desert ? [] : ["--time", n(this.sceneTime)]),
+      // The scene clock the view was held at: the city's steam. A surface
+      // with no clock (the sea, the desert) reads none — row 24.z is 0
+      // there — so it writes none.
+      ...(this.scene.clockPeriod === null ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree
@@ -3444,7 +3446,7 @@ export class Viewer {
     this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
     // The clock runs with the flight, on the simulation's dt (the camera's
-    // clock, so a stall cannot jump the sea either). It is in the scene key,
+    // clock, so a stall cannot jump the steam either). It is in the scene key,
     // so a frame it moves restarts accumulation — which a moving camera has
     // done already.
     const clockRuns = !this.paused && (cameraMoved || this.recorder.recording);

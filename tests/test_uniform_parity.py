@@ -90,19 +90,15 @@ CASES = [
     # scene and a city scene respectively. The city case also pins the
     # static default: with no override, row 24 is city_tile_offset_m folded.
     ("ocean_surface_offset", {"surface_offset_m": [-18630.2, 136143.7]}, {}),
-    # The moving sea (2026-09-23): the ocean folds row 24 at its swell's
-    # period rather than its tile, and row 24.z carries the scene clock.
-    ("ocean_moving",
-     {"surface_offset_m": [-18630.2, 136143.7], "surface_period_m": 1638.4,
-      "clock_period_s": 1638.4},
+    # The sea has no clock (its meta.json clock_period_s is null): row 24.z
+    # packs 0 at any scene time, in both — so the scene key, which is these
+    # bytes, never restarts the sea's accumulation for a running clock.
+    ("ocean_no_clock",
+     {"surface_offset_m": [-18630.2, 136143.7], "clock_period_s": None},
      {"scene_time": 1234.5678}),
-    # A clock far past the sea's period packs wrapped, the same way in both.
-    ("ocean_clock_wrapped",
-     {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
+    ("ocean_no_clock_later",
+     {"surface_offset_m": [-18630.2, 136143.7], "clock_period_s": None},
      {"scene_time": 987654.321}),
-    ("ocean_clock_negative",
-     {"surface_period_m": 1638.4, "clock_period_s": 1638.4},
-     {"scene_time": -3.25}),
     # The city's clock runs too (2026-09-24: its steam reads it), wrapped
     # at the city tile's own period, the same way in both.
     ("city_clock_running",
@@ -144,6 +140,7 @@ CASES = [
     ("desert_clock_is_zero",
      {"surface": "desert", "ocean_z": 12.5, "ocean_fif_dx": 2.0,
       "ocean_tile_extent": 4096.0, "ocean_max_lod": 11,
+      "clock_period_s": None,
       "desert_relief_m": [-14.0, 16.046875, 1.2621],
       "desert_tile_rows": [[0.25 * r + 0.001 * c + 0.5 for c in range(4)]
                            for r in range(22)]},
@@ -181,7 +178,7 @@ def _js_state(extra):
         dtView=BASE_SCENE["dt_view"], dtLight=BASE_SCENE["dt_light"],
         periodic=True, oceanZ=0.0,
         oceanReflectance=list(sh.DEFAULT_OCEAN_REFLECTANCE),
-        oceanFifDx=0.4, oceanTileExtent=102.4, oceanEnabled=True, oceanMaxLod=8,
+        oceanFifDx=0.2, oceanTileExtent=102.4, oceanEnabled=True, oceanMaxLod=9,
         nested=False,
     )
     remap = {"periodic": "periodic", "ocean_enabled": "oceanEnabled",
@@ -324,11 +321,28 @@ def test_block_is_752_bytes():
 
 @pytest.mark.parametrize("surface", ["ocean", "city"])
 def test_a_running_clock_needs_its_surfaces_period(surface):
-    """No default period: a clock wrapped at the wrong one would pop."""
+    """No default: a surface's clock is stated (a period, or None for no
+    clock), and a running clock with it unstated is an error — a forgotten
+    city period would otherwise freeze the steam silently."""
     extra = ({"surface": "city", "city_tile_offset_m": [75330.0, -17010.0]}
              if surface == "city" else {})
-    with pytest.raises(ValueError, match="needs clock_period_s"):
+    with pytest.raises(ValueError, match="running clock needs"):
         _python_block(extra, {"scene_time": 5.0})
+    with pytest.raises(ValueError, match="positive or None"):
+        _python_block({**extra, "clock_period_s": 0.0}, {"scene_time": 5.0})
+
+
+def test_a_static_sea_packs_the_same_at_any_clock(js_blocks):
+    """The sea's block at scene time 1234.6 and at 987654.3 is the same
+    block, byte for byte, in both hosts: row 24.z is 0 — so the scene key
+    (these bytes) does not restart the sea's accumulation as the clock
+    runs."""
+    a = base64.b64decode(js_blocks["ocean_no_clock"])
+    b = base64.b64decode(js_blocks["ocean_no_clock_later"])
+    assert a == b
+    ours = _python_block(*[c[1:] for c in CASES
+                           if c[0] == "ocean_no_clock"][0])
+    assert ours[24][2] == 0.0
 
 
 def test_periodic_requires_sun_above_horizon():

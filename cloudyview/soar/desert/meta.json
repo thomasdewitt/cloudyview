@@ -21,6 +21,7 @@
   "mip11.bin.gz"
  ],
  "tile_extent_m": 4096.0,
+ "clock_period_s": null,
  "height_min_m": -14.2734375,
  "height_max_m": 16.15625,
  "seed": 20260923,
