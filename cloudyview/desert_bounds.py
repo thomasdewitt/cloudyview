@@ -1,7 +1,7 @@
 """The desert's bounds pyramid: local upper bounds on the ground the trace
 meets, built from the tile's own mip chain.
 
-raymarch.wgsl desert_terrain_trace steps a ray over the desert surface
+raymarch.wgsl desert_terrain_march steps a ray over the desert surface
 
     ground(xy, fp) = datum + tile(xy, lod(fp)) + sum_k fade_k(fp) amp_k band(q_k)
 

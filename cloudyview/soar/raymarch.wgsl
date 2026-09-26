@@ -19920,7 +19920,7 @@ fn desert_terrain_hit(o: vec3<f32>, dir: vec3<f32>, t: f32) -> DesertHit {
 // spare, and a true bound: tests/test_desert_bounds.py holds it above the
 // exact supremum of mip l - mip k, l < k, taken on the lattice where that
 // difference is bilinear. Mip k plus this is a lid over the ground that is
-// as smooth as mip k — see desert_terrain_trace.
+// as smooth as mip k — see desert_terrain_march.
 fn desert_envelope_m_at(i: i32) -> f32 {
     return desert_tile_level(3, i);
 }
@@ -19970,16 +19970,17 @@ const DESERT_SNAP: f32 = 0.011049;            // 2 sqrt(2) / 256
 // Arithmetic slack on every bound, metres.
 const DESERT_BOUND_EPS: f32 = 1e-3;
 // Past this mip the footprint reads only smooth mips and no octave: the
-// trace steps on the global bounds alone (FAR in desert_terrain_trace).
+// trace steps on the global bounds alone (FAR in desert_terrain_march).
 const DESERT_FAR_LOD: f32 = 2.0;
 // An exhausted ray's cell-exit walk on the cells' own highest (see
 // desert_trace_finish).
 // At 64, one ray in a million at 30 m still ran out of both.
 const DESERT_FINISH_STEPS: i32 = 256;
 
-// Set true to see the trace's budget: a ray that exhausted it and was
-// finished by the cell walk draws magenta, one still out after that cyan
-// (count them in a render). Nothing else reads it.
+// Set true to see the trace's budget: a ray the second march still left to
+// the cell walk (desert_terrain_trace) draws magenta, one the walk could not
+// finish either cyan (count them in a render). Either is drawn black when
+// this is off (desert_surface_pass). Nothing else reads it.
 const DESERT_TRACE_DEBUG: bool = false;
 var<private> desert_trace_state: u32;
 
@@ -20292,7 +20293,10 @@ fn desert_terrain_trace(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
     var h = desert_miss();
     for (var attempt: i32 = 0; attempt < 2; attempt = attempt + 1) {
         h = desert_terrain_march(o, dir, pixel_angle, t);
-        if (desert_trace_state != 1u || !h.hit) {
+        // A walk that ran out as well (state 2) still stopped at a
+        // certified point, and a falling ray it landed there marches again
+        // just the same.
+        if (desert_trace_state == 0u || !h.hit) {
             break;
         }
         t = h.t;
@@ -21694,6 +21698,13 @@ fn desert_surface_pass(dir: vec3<f32>, pixel_angle: f32, frame_index: u32,
                                             vec3<f32>(0.0, 1.0, 1.0),
                                             desert_trace_state == 2u),
                                      terrain.t), vec2<f32>(0.0));
+    }
+    // A ray that ran out on both marches was landed where the cell walk
+    // could no longer tell, which can be in the air: it is drawn black, the
+    // old visible answer for ground that was not found, never ground shaded
+    // in the air. test_desert_trace_budget holds it at none.
+    if (terrain.hit && desert_trace_state != 0u) {
+        return DesertPlain(vec4<f32>(0.0, 0.0, 0.0, terrain.t), vec2<f32>(0.0));
     }
     if (!DESERT_LITE && terrain.hit
         && terrain.t < DESERT_FLORA_REFINE_FP_M / pixel_angle) {

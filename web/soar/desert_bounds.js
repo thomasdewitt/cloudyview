@@ -1,5 +1,5 @@
 // The desert's bounds pyramid, built in the browser from the tile's own
-// height mips: the local upper bounds raymarch.wgsl desert_terrain_trace
+// height mips: the local upper bounds raymarch.wgsl desert_terrain_march
 // steps on. cloudyview/desert_bounds.py is the spec (its docstring says what
 // each channel bounds and why); this builds the same bytes, and
 // tests/test_desert_bounds.py pins the two equal on the shipped tile.
