@@ -20,7 +20,7 @@ except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
 # raymarch.wgsl's lens-water constants.
-L_WET, K_WET, K_DRY, DRY_FLOOR, PERIOD = 30.0, 0.6, 0.2, 0.002, 600.0
+L_WET, K_WET, K_DRY, DRY_FLOOR = 30.0, 0.6, 0.2, 0.002
 SIGMA = 0.0625           # m^-1: exact in half and single float
 
 
@@ -90,10 +90,11 @@ def test_one_long_step_equals_many_short_ones(scene):
         r.render(state, view, frames=1, lens_dt=0.1)
     ten = r.lens_state()
     assert abs(one[0] - ten[0]) < 2e-5
-    assert abs(one[1] - ten[1]) < 1e-5              # the clock too
+    assert abs(one[1] - ten[1]) < 1e-6                         # w*, the same
+    assert np.array_equal(one[2:], np.zeros(2, np.float32))
 
 
-def test_a_parked_lens_holds_still(scene):
+def test_a_zero_step_holds_the_lens_still(scene):
     r, state, view, shape = scene
     _fill(r, shape, SIGMA)
     r.reset_lens()
@@ -127,3 +128,42 @@ def test_a_wet_lens_draws_drops(scene):
     assert r.lens_state()[0] == 0.0
     changed = np.any(img != dry, axis=-1).mean()
     assert 0.02 < changed < 0.6, f"{changed:.3f} of the frame under water"
+
+
+def test_the_lens_never_touches_the_accumulation(scene):
+    """A lens that changes every frame (the live view's, parked in cloud) is
+    drawn after the accumulation and never writes it, so the picture under
+    it converges exactly as it would with no lens."""
+    r, state, view, shape = scene
+    _fill(r, shape, SIGMA)
+
+    def accumulated(**kw):
+        r.reset_lens()
+        r.render(state, view, frames=4, **kw)
+        t = r._targets
+        final = [a for a in t["accum"]]
+        # render() leaves the finished average in one of the two ping-pong
+        # targets; read both, the pair is what the next frame builds on.
+        return [r._read_back(a, *t["size"]) for a in final]
+
+    plain = accumulated()
+    wet = accumulated(lens_dt=0.5)
+    assert r.lens_state()[0] > 0.0
+    assert all(np.array_equal(a, b) for a, b in zip(plain, wet))
+
+
+def test_only_the_lens_state_pass_reads_row_24_w():
+    """Row 24.w carries the lens dt, written for the state pass alone (and left
+    over in the uniform block for the passes after it): nothing else may read
+    it. No GPU."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "cloudyview" / "soar"
+           / "raymarch.wgsl").read_text()
+    code = re.sub(r"//[^\n]*", "", src)
+    start = code.index("fn fs_lens_state(")
+    end = code.index("\n}\n", start)
+    reads = [m.start() for m in re.finditer(r"surface_offset\.w\b", code)]
+    assert reads, "the state pass no longer reads its dt from row 24.w"
+    outside = [code[:i].count("\n") + 1 for i in reads if not start <= i < end]
+    assert not outside, f"row 24.w read outside fs_lens_state at lines {outside}"

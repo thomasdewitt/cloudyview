@@ -654,12 +654,24 @@ export class Renderer {
       size: [1, 1, 1], format: SURFACE_FORMAT, usage,
     });
     const stateUsage = GPUTextureUsage.RENDER_ATTACHMENT
-      | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
+      | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      | GPUTextureUsage.COPY_SRC;                // the wetness read-back
     this._lensState = [lensTex(stateUsage), lensTex(stateUsage)];
     this._lensDry = lensTex(GPUTextureUsage.TEXTURE_BINDING);   // zeros
     this._lensIndex = 0;
     this._lensGroups = null;
     this._lastLensTex = this._lensDry;
+    // The wetness, read back to the CPU a frame or so late (never waited
+    // on): all the viewer needs to know is whether the lens is still
+    // changing, so the loop stays awake while it wets or dries and may sleep
+    // once it has settled. `lensSettled` starts true (dry).
+    this._lensReadBuf = device.createBuffer({
+      size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this._lensReadQueued = false;
+    this._lensReadBusy = false;
+    this._lensReadW = 0.0;
+    this.lensSettled = true;
     this.blitPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.blitLayout],
     });
@@ -801,7 +813,7 @@ export class Renderer {
    * the scene keeps rendering what it stands on, so a shader that will not
    * compile says so and leaves the flight as it was.
    */
-  async prepareSurface(kind) {
+  async prepareSurface(kind, onCompiled = null) {
     if (this.scene.city) {
       throw new Error("the night city has no other surface to switch to.");
     }
@@ -815,15 +827,21 @@ export class Renderer {
     // TARGET surface's, not the scene's — the scene is not touched.
     const desert = kind === "desert";
     const spec = this._shaderSpec({ desert });
+    const wanted = [["fs_main", SAMPLE_FORMAT]];
+    if (desert) {
+      const entries = spec.desertLite ? K.SURFACE_STAGES_LITE
+                                      : K.SURFACE_STAGES.desert;
+      for (const entry of entries) wanted.push([entry, stageFormats(entry)]);
+    }
     try {
-      await this._pipeline("fs_main", SAMPLE_FORMAT, spec);
-      if (desert) {
-        const entries = spec.desertLite ? K.SURFACE_STAGES_LITE
-                                        : K.SURFACE_STAGES.desert;
-        for (const entry of entries) {
-          await this._pipeline(entry, stageFormats(entry), spec);
-        }
-      }
+      // All asked for at once (createRenderPipelineAsync each), so the
+      // driver can overlap them and a caller can overlap them with its
+      // download; each reported as it lands.
+      let done = 0;
+      await Promise.all(wanted.map(async ([entry, formats]) => {
+        await this._pipeline(entry, formats, spec);
+        onCompiled?.(++done, wanted.length, entry);
+      }));
     } catch (err) {
       throw new Error(`The ${kind} shader failed to build: ` +
                       `${err?.message || err}`);
@@ -1585,9 +1603,10 @@ export class Renderer {
                   { deltaSeconds = null, accumulate = true,
                     overlays = null, waitForPipeline = true,
                     lens = null } = {}) {
-    // `lens`: null draws a dry lens (captures, stills, the toggle off);
-    // { dt } steps lens water's state by dt seconds of flight clock (0
-    // parked) before the present draws it — see raymarch.wgsl fs_lens_state.
+    // `lens`: null draws a dry lens (captures, stills, the switch off);
+    // { dt } steps lens water's state by dt seconds before the present draws
+    // it — the live view's wall-clock frame time, a video's resampled frame
+    // interval (see raymarch.wgsl fs_lens_state).
     if (lens !== null && !(Number.isFinite(lens.dt) && lens.dt >= 0)) {
       throw new Error(`drawFrame: lens.dt must be a finite dt >= 0; got ${lens.dt}.`);
     }
@@ -1722,6 +1741,7 @@ export class Renderer {
                        exact, lensTex);
       encodeOverlays(overlays, encoder, targetView, targetFormat);
       await this._submit(encoder.finish());
+      this._startLensRead();          // this submit carried the state's copy
       return true;
     }
 
@@ -1790,6 +1810,7 @@ export class Renderer {
         encodeOverlays(overlays, enc, targetView, targetFormat);
       }
       await this._submit(enc.finish());
+      if (s === samples - 1) this._startLensRead();   // the one with the copy
 
       this._accumIndex = 1 - this._accumIndex;
       this._accumCount = step.nextCount;
@@ -2071,9 +2092,37 @@ export class Renderer {
     p.setBindGroup(1, this._lensGroups[this._lensIndex]);
     p.draw(3);
     p.end();
+    if (!this._lensReadBusy && !this._lensReadQueued) {
+      encoder.copyTextureToBuffer({ texture: this._lensState[next] },
+                                  { buffer: this._lensReadBuf, bytesPerRow: 256 },
+                                  [1, 1, 1]);
+      this._lensReadQueued = true;
+    }
     this._lensIndex = next;
     this._lastLensTex = this._lensState[next];
     return this._lastLensTex;
+  }
+
+  /**
+   * Map the state copied by the last state step — called right after the
+   * submit that carries that copy — and note whether the lens has settled:
+   * exactly dry, or within 1e-3 of w*, the level it is heading for (the
+   * texel's y), whatever the frame rate. Never awaited by the frame.
+   */
+  _startLensRead() {
+    if (!this._lensReadQueued || this._lensReadBusy) return;
+    this._lensReadQueued = false;
+    this._lensReadBusy = true;
+    this._lensReadBuf.mapAsync(GPUMapMode.READ).then(() => {
+      const [w, wStar] = new Float32Array(
+        this._lensReadBuf.getMappedRange(0, 8));
+      this._lensReadBuf.unmap();
+      this.lensSettled = w === 0 || Math.abs(w - wStar) < 1e-3;
+      this._lensReadW = w;
+      this._lensReadBusy = false;
+    }, () => {
+      this._lensReadBusy = false;
+    });
   }
 
   /** A dry lens: the start of a video, or the toggle switched off. */
@@ -2085,6 +2134,8 @@ export class Renderer {
     }
     this._lensIndex = 0;
     this._lastLensTex = this._lensDry;
+    this._lensReadW = 0.0;
+    this.lensSettled = true;
   }
 
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact,
@@ -2114,15 +2165,36 @@ export class Renderer {
    * plus whatever the overlays are. The bird is why the loop still runs at
    * all in that state — it flies whether or not the camera does.
    */
-  presentLast(targetView, targetFormat, outputSize, overlays = null) {
+  presentLast(targetView, targetFormat, outputSize, overlays = null,
+              lens = null) {
     if (!this.canPresentLast) return false;
     const encoder = this.device.createCommandEncoder();
+    // Lens water keeps its own time on a converged view: step it here too,
+    // with only row 24.w rewritten (the rest of the block is still the last
+    // march's, and the camera has not moved). A state pipeline still
+    // compiling skips the step and keeps the last texel.
+    let lensTex = this._lastLensTex;
+    if (lens) {
+      let pipeline = null;
+      try {
+        pipeline = this._lensPipeline(this.lighting);
+      } catch {
+        // Failed and recorded; the march that needs it throws it.
+      }
+      if (pipeline && isPending(pipeline)) pipeline.catch(() => {});
+      if (pipeline && !isPending(pipeline)) {
+        this.device.queue.writeBuffer(this.uniformBuf, (24 * 4 + 3) * 4,
+                                      new Float32Array([lens.dt]));
+        lensTex = this._encodeLensState(encoder, lens, pipeline);
+      }
+    }
     this._encodeBlit(
       encoder, this._lastPresented, targetView, targetFormat,
       this._targets.w === outputSize[0] && this._targets.h === outputSize[1],
-      this._lastLensTex);
+      lensTex);
     encodeOverlays(overlays, encoder, targetView, targetFormat);
     this.device.queue.submit([encoder.finish()]);
+    this._startLensRead();
     return true;
   }
 
@@ -2483,6 +2555,7 @@ export class Renderer {
     for (const tex of [...(this._lensState ?? []), this._lensDry]) {
       tex?.destroy();
     }
+    this._lensReadBuf?.destroy();
     this._meterTex?.destroy();
     for (const tex of this._meterTargets?.surface?.textures ?? []) {
       tex.destroy();

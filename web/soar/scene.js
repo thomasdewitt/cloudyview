@@ -228,12 +228,17 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  * bounds builds the desert's bounds pyramid from every level's heights
  * (desert_bounds.js; the trace steps on it) and returns it as `seaView`,
  * the binding-9 view the desert reads, with its texture as
- * `boundsTexture`.
+ * `boundsTexture`. onStage("bounds") is called as that build begins, for a
+ * caller that names its steps (onProgress carries the download's fraction).
+ * boundsBuilder, if given, builds it instead of buildDesertBounds on this
+ * thread — the viewer passes buildDesertBoundsInWorker; it must return (or
+ * resolve to) the same bytes.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
                                     { keepCells = false, keepHeights = false,
                                       bounds = false, clock = false,
-                                      schema } = {}) {
+                                      schema, onStage = null,
+                                      boundsBuilder = null } = {}) {
   if (!schema) {
     throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
   }
@@ -331,7 +336,9 @@ export async function loadOceanTile(device, baseUrl, onProgress,
         "them from.");
     }
     if (bounds) {
-      const pyramid = buildDesertBounds(boundsLevels, dx);
+      onStage?.("bounds");
+      const pyramid = await (boundsBuilder ?? buildDesertBounds)(
+        boundsLevels, dx);
       const side = Math.round(Math.sqrt(pyramid[0].length / 4
                                         / DESERT_BOUNDS_LAYERS));
       boundsTexture = device.createTexture({

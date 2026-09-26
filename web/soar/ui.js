@@ -594,19 +594,19 @@ export class UI {
         `switch to the ${desert ? "ocean" : "desert"} — G in flight`,
         () => { app.setSurface(desert ? "ocean" : "desert").then(() => {
           if (this.panel === "main") this.open("main");
-        }); }));
+        }, () => {}); }));   // a failure is told by setSurface's toast
     }
     // Whether the field wraps is a fact about how the scene looks — an
     // endless sheet or a box in empty air — so it sits with the other two
     // that change the picture, above the overlay and window rows.
-    // Drops on the lens after the camera flies through cloud. Not on stills:
-    // a still or capture is always dry, so it stays reproducible; videos
-    // and the live view get the water.
-    const lens = flipSwitch("Lens water", () => app.lensWater,
-                            (v) => app.setLensWater(v));
-    lens.title = "Water on the lens after flying through cloud. Live view and " +
-      "videos only: stills and captures are always dry.";
-    add(appearance, "lensWater", lens);
+    // Drops on the lens after the camera flies through cloud: a row like the
+    // others, flipped by clicking it. Not on stills — a still or capture is
+    // always dry, so it stays reproducible; videos and the live view get the
+    // water.
+    add(appearance, "lensWater",
+        item(`Lens water: ${app.lensWater ? "on" : "off"}`,
+             "drops on the lens after flying through cloud; stills stay dry",
+             () => { app.setLensWater(!app.lensWater); this.open("main"); }));
     add(appearance, "periodic",
         item(`Periodic domain: ${app.renderer.periodic ? "on" : "off"}`,
              "wrap the field laterally",

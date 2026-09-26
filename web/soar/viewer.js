@@ -12,6 +12,7 @@ import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
 import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile,
          loadSea } from "./scene.js";
+import { buildDesertBoundsInWorker } from "./desert_bounds.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -39,6 +40,8 @@ const FLYERS = [
 // Lens water's setting, per browser: default on. Storage can be missing or
 // refuse (a private window); the setting then simply is not remembered.
 const LENS_WATER_KEY = "soar.lensWater";
+// The longest single step the live lens takes (s): see _frame.
+const LENS_MAX_STEP_S = 1.0;
 function readLensWater() {
   try {
     return localStorage.getItem(LENS_WATER_KEY) !== "off";
@@ -384,7 +387,7 @@ export class Viewer {
    * for the session, which is what keeps the desert's download off every
    * flight that never stands on it.
    */
-  async _surfaceTile(kind) {
+  async _surfaceTile(kind, onProgress = null, onStage = null) {
     if (kind === "city") {
       // keepCells: the minimap draws the city out of the tile's own mip
       // 0, the flight collider builds its buildings from it too, and the
@@ -401,8 +404,11 @@ export class Viewer {
       // same level-0 bytes the shader samples. bounds: the pyramid the
       // ground's trace steps on, built from those same bytes.
       return (this._desertTile ??=
-        await loadOceanTile(this.device, DESERT_URL, undefined,
-                            { keepHeights: true, bounds: true,
+        await loadOceanTile(this.device, DESERT_URL, onProgress ?? undefined,
+                            { keepHeights: true, bounds: true, onStage,
+                              // Over a second of arithmetic: off the main
+                              // thread, so the flight keeps drawing.
+                              boundsBuilder: buildDesertBoundsInWorker,
                               schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
     return (this._ocean ??=
@@ -1474,17 +1480,68 @@ export class Viewer {
       return;
     }
     this._surfacing = true;
+    // Named steps on the progress panel from the moment the switch is
+    // asked for, so a first desert — its download, its bounds, its
+    // shaders — never reads as a frozen tab (Thomas, 2026-09-25: "i thought
+    // it was completely frozen"). Each step is also a performance mark
+    // ("soar-surface <step>"), which is how the switch is timed.
+    const ground = kind === "desert" ? "desert" : "ocean";
+    // Once the switch has settled (landed, refused or failed) nothing it
+    // started may touch the panel again: a compile or a download still
+    // running would otherwise put a stale step back up and leave it there.
+    let settled = false;
+    const step = (stage, fraction) => {
+      performance.mark(`soar-surface ${stage}`);
+      if (!settled) this.ui.showProgress(stage, fraction);
+    };
+    let landed = false;
+    this._surfaceLanding = false;
     try {
-      if (kind === "desert" && !this._desertTile) {
-        this.ui.say("Laying out the desert…", 30);
-      }
+      step(`Switching to the ${ground}…`, 0.02);
       // Everything that can wait or fail first — the download, the
       // pipeline — while the flight keeps drawing the ground it has; then
       // the renderer and the camera change together, in one tick, so no
       // frame is drawn with the new shader over the old frame or floor
       // (codex review: an ocean camera at 12.5 m under a +16 m dune).
-      const tile = await this._surfaceTile(kind);
-      await this.renderer.prepareSurface(kind);
+      // The download (and the bounds, in a worker) and the shader compiles
+      // run side by side; the panel names whichever is still going.
+      const at = { download: 0, bounds: false, tile: false, k: 0, n: 1 };
+      const show = () => {
+        if (settled) return;
+        const fraction = 0.05 + 0.4 * at.download + (at.tile ? 0.1 : 0)
+          + 0.4 * (at.k / at.n);
+        let stage;
+        if (!at.tile) {
+          stage = at.bounds ? "Building the terrain bounds…"
+                            : `Downloading the ${ground}…`;
+        } else {
+          stage = `Compiling the ${ground}'s shaders (${at.k} of ${at.n})…`;
+        }
+        this.ui.showProgress(stage, fraction);
+      };
+      const compiled = this.renderer.prepareSurface(kind, (k, n) => {
+        at.k = k; at.n = n;
+        if (k === n) performance.mark("soar-surface shaders compiled");
+        show();
+      });
+      const loaded = this._surfaceTile(
+        kind,
+        (f) => { at.download = f; show(); },
+        (stage) => {
+          if (stage === "bounds") {
+            at.bounds = true;
+            performance.mark("soar-surface bounds");
+            show();
+          }
+        }).then((t) => {
+        at.tile = true;
+        performance.mark("soar-surface tile ready");
+        show();
+        return t;
+      });
+      // Whichever fails first is the one told, at once; the other may run
+      // on (a finished compile or tile is cached for the next switch).
+      const [tile] = await Promise.all([loaded, compiled]);
       const floorAt = kind === "desert" ? desertFloorAt(tile) : null;
       // A recording may have started while the tile or the pipeline was on
       // its way: a track stands on one ground, so the switch yields to it.
@@ -1498,7 +1555,14 @@ export class Viewer {
         this.ui.say("The ground stays put while a capture renders.", 3);
         return;
       }
+      step(`Landing on the ${ground}…`, 0.97);
       this.renderer.commitSurface(kind, tile);
+      landed = true;
+      // The panel stays up until a frame on the new ground has been drawn:
+      // the frame loop clears it for the first march begun after this
+      // moment (a frame already in flight still shows the old ground).
+      this._surfaceLanding = true;
+      this._surfaceLandedAt = performance.now();
       this.scene.desertFloorAt = floorAt;
       // The camera folds at the surface frame's period: the sea's swell
       // repeats over several tiles, the desert at its tile.
@@ -1510,6 +1574,8 @@ export class Viewer {
       this.ui.say(`Could not change the ground: ${err.message}`, 8);
       throw err;
     } finally {
+      settled = true;
+      if (!landed) this.ui.hideProgress();
       this._surfacing = false;
       this._wake("surface");
     }
@@ -1518,7 +1584,9 @@ export class Viewer {
   /** G: the other day ground. */
   toggleSurface() {
     if (this.scene?.city) return;
-    this.setSurface(this.surfaceKind === "desert" ? "ocean" : "desert");
+    // A failure has already been told (setSurface's toast).
+    this.setSurface(this.surfaceKind === "desert" ? "ocean" : "desert")
+      .catch(() => {});
   }
 
   /**
@@ -2208,6 +2276,9 @@ export class Viewer {
     this.lensWater = Boolean(on);
     writeLensWater(this.lensWater);
     if (!this.lensWater) this.renderer?.resetLens();
+    // Switched on while parked in cloud, the lens has wetting to do before
+    // any read-back can say so: keep the loop up until one does.
+    else if (this.renderer) this.renderer.lensSettled = false;
     this._wake("lens water");
   }
 
@@ -2501,6 +2572,12 @@ export class Viewer {
    */
   async renderTrackVideo(samples, knocks = []) {
     if (this._capturing) return;
+    // The ground is changing, and the switch owns the progress panel.
+    if (this._surfacing) {
+      this.ui.say("Changing the ground — render the video once it has " +
+                  "landed.", 3);
+      return;
+    }
     const { VideoWriter, evenSize } = await import("./video.js");
 
     // Even before the offscreen texture is made, not after: H.264 refuses odd
@@ -2855,6 +2932,12 @@ export class Viewer {
   async saveScreenshot() {
     const overlays = this.captureOverlays;
     if (this._capturing) return;
+    // The ground is changing, and the switch owns the progress panel.
+    if (this._surfacing) {
+      this.ui.say("Changing the ground — take the still once it has " +
+                  "landed.", 3);
+      return;
+    }
     this._capturing = true;
     this._wake("capture");
     const size = this.captureDimensions();
@@ -3368,9 +3451,13 @@ export class Viewer {
     if (clockRuns) {
       this.sceneTime += dt;
     }
-    // Lens water steps on the same clock: parked, it holds still, so the
-    // picture under it converges and the drops do not crawl.
-    this._lensDt = clockRuns ? dt : 0.0;
+    // Lens water keeps wall-clock time, parked or not: it goes on wetting in
+    // cloud and drying out of it while you hover. It is drawn after the
+    // accumulation, so a changing lens never disturbs the parked picture's
+    // convergence. Capped at a second, which only bites after a hidden tab
+    // or a stall (a wake resets the frame clock, and the loop does not
+    // sleep until the lens has settled); the law is exact for any step.
+    this._lensDt = Math.min(elapsed, LENS_MAX_STEP_S);
 
     if (this._probe) {
       // The probe measures the FLIGHT configuration, because what decides
@@ -3475,11 +3562,20 @@ export class Viewer {
         this._marchPending = false;
         // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
         // must not be acquired until every await inside the draw has resolved.
+        const marchStartedAt = performance.now();
         const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
           { deltaSeconds: dt, overlays, waitForPipeline: false,
             lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null });
+        if (marched && this._surfaceLanding
+            && marchStartedAt >= this._surfaceLandedAt) {
+          // The first frame on a new ground: the switch's panel comes down,
+          // unless a capture begun since has put up its own.
+          this._surfaceLanding = false;
+          performance.mark("soar-surface first frame");
+          if (!this._capturing) this.ui.hideProgress();
+        }
         if (!marched) {
           // The shader variant this frame needs is still compiling (a tier,
           // bake or toggle moved the lighting specialization; see
@@ -3495,7 +3591,8 @@ export class Viewer {
       } else {
         this.renderer.presentLast(
           this.context.getCurrentTexture().createView(), this.canvasFormat,
-          [outW, outH], overlays);
+          [outW, outH], overlays,
+          this.lensWater ? { dt: this._lensDt ?? 0.0 } : null);
       }
       if (queueClock && measuring) {
         // Close of the window the drain above opened: what sits between the
@@ -3605,7 +3702,9 @@ export class Viewer {
     // throttling, so a parked picture is not merely wasteful, it makes the
     // NEXT flight slower.
     const animating = this._overlaysAnimate() || this.recorder.recording
-      || this._capturing || probing || this.renderer.lightBakePending;
+      || this._capturing || probing || this.renderer.lightBakePending
+      // A lens still wetting or drying is motion too.
+      || (this.lensWater && !this.renderer.lensSettled);
     if (converged && !this._marchPending && !animating) {
       this._sleeping = true;
       return;                    // no rAF is scheduled; only _wake starts one

@@ -28263,17 +28263,13 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // Water on the camera's lens after it flies through cloud. The look is
 // lens.wgsl's, drawn by each host's present (browser) or post pass (Python)
 // AFTER accumulation, never into the accumulated image. This is its state,
-// one texel, integrated once per presented frame:
-//   x  wetness in [0, 1];
-//   y  the lens clock (s), folded at LENS_PERIOD_S (lens.wgsl's streaks are
-//      periodic at exactly that period);
-//   zw "down" on the screen (unit, x right, y down): gravity projected onto
-//      the camera's image plane, for the runners (lens.wgsl). soar's camera
-//      does not roll, so today this is always straight down the screen.
-// The host puts the frame's flight-clock dt in row 24.w: the live view's
-// frame time while flying (0 parked, so a parked lens holds perfectly still
-// and accumulation converges under it), a video's 1 / fps. Stills pass no
-// state at all and are dry in both hosts.
+// one texel, integrated once per presented frame: x = wetness in [0, 1],
+// y = w*, the level it is heading for at this extinction (the browser's
+// read-back settles the loop on |w - w*|, whatever the frame rate), z, w 0. The host puts the step's dt in row 24.w: the live view's
+// wall-clock frame time, parked or not (the lens keeps wetting in cloud and
+// drying out of it while you hover; being drawn after accumulation, it does
+// not disturb a parked picture's convergence), a video's resampled frame
+// interval. Stills pass no state at all and are dry in both hosts.
 //
 // The wetting law, exact in dt at constant extinction sigma at the camera:
 //   dw/dt = K_WET f (1 - w) - K_DRY (1 - f) w,   f = 1 - exp(-sigma L_WET)
@@ -28282,15 +28278,13 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 //   a = K_WET f + K_DRY (1 - f),  w* = K_WET f / a,
 // and one step of 2 dt equals two of dt at constant f: a replay at another
 // frame rate sees the same wetness wherever the extinction at the camera
-// changes slowly against the frame interval (f is taken at the step's end). Dense cloud (f ~ 1) wets the lens in a few seconds;
-// haze (f small) only to a low level, slowly; out of cloud it drains to 5 %
-// in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
+// changes slowly against the frame interval (f is taken at the step's end).
+// Dense cloud (f ~ 1) wets the lens in a few seconds; haze (f small) only to
+// a low level, slowly; out of cloud it drains to 5 % in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
 const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
 const LENS_K_WET: f32 = 0.6;        // 1/s
 const LENS_K_DRY: f32 = 0.2;        // 1/s
 const LENS_DRY_FLOOR: f32 = 0.002;  // below this, and drying: exactly dry
-const LENS_PERIOD_S: f32 = 600.0;   // the lens clock's fold
-const LENS_DOWN_RATE: f32 = 6.0;    // 1/s: how fast "down" follows a roll
 
 @fragment
 fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
@@ -28310,27 +28304,7 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     // state that is not a number starts again dry rather than stay NaN.
     w = select(w, 0.0, w < LENS_DRY_FLOOR && w_star < LENS_DRY_FLOOR);
     w = select(0.0, w, w >= 0.0);
-    var clock = prev.y + dt;
-    clock = clock - LENS_PERIOD_S * floor(clock / LENS_PERIOD_S);
-    // Down on the screen: world -z on the image plane, (x right, y down).
-    let s = vec2<f32>(-u.cam_right.z, u.cam_up.z);
-    let s_len = length(s);
-    let prev_len = length(prev.zw);
-    var down = select(vec2<f32>(0.0, 1.0), prev.zw / max(prev_len, 1e-6),
-                      prev_len > 0.5);
-    if (s_len > 0.2) {
-        // Looking straight up or down, "down" is undefined on the screen:
-        // the drops keep the last one they had. A roll past a right angle
-        // is taken at once (easing toward the opposite direction would
-        // never turn).
-        let aim = s / s_len;
-        let k = select(1.0 - exp(-LENS_DOWN_RATE * dt), 1.0,
-                       prev_len <= 0.5 || dot(down, aim) < 0.0);
-        let m = mix(down, aim, k);
-        let m_len = length(m);
-        down = select(aim, m / max(m_len, 1e-6), m_len > 0.1);
-    }
-    return vec4<f32>(w, clock, down);
+    return vec4<f32>(w, w_star, 0.0, 0.0);
 }
 
 @fragment
