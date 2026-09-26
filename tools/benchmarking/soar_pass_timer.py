@@ -63,7 +63,7 @@ from cloudyview.soar_host import (                          # noqa: E402
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
 from soar_shader_ab import source_for                       # noqa: E402
-from gpu_idle import check_quiet, clock_mode, require_idle  # noqa: E402
+from gpu_idle import Watch, check_quiet, clock_mode, require_idle  # noqa: E402
 from night_city_harness import (CITY_VIEWS, MOON_AZIMUTH,     # noqa: E402
                                 MOON_ELEVATION, NIGHT_EXPOSURE)
 
@@ -218,6 +218,10 @@ def main():
              if specs.index(sp) != j]
     null_dev, round_dev = 0.0, 0.0
 
+    # Sampled all through the timing: a neighbour that draws mid-run (a
+    # browser brought to the front) fails the run, not only one there at the
+    # end (gpu_idle.Watch).
+    watch = Watch().__enter__()
     for case in args.cases.split(","):
         level, sun = load_case(case, args.demos)
         renderers = []
@@ -316,7 +320,8 @@ def main():
                 print(line, flush=True)
         for r in renderers:
             r._vol_tex.destroy()
-    warnings += check_quiet()
+    watch.__exit__(None, None, None)
+    warnings += check_quiet(watch)
     null_note = (f"null control within {100 * null_dev:.2f}%" if nulls
                  else "no null control")
     round_note = (f"timed rounds within {100 * round_dev:.2f}%"
