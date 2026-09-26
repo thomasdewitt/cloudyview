@@ -2,8 +2,8 @@
 
 A timing tool that runs its harness as a subprocess through `uv run` has
 the GPU held by uv's child — the caller's grandchild. A watch that excluded
-only the caller's own pid (or its direct child) flagged the timed run itself
-as a neighbour and failed it CONTAMINATED (2026-09-25). No GPU needed: the
+only its own pid and the child's flagged the timed run itself as a
+neighbour and failed it CONTAMINATED (2026-09-25). No GPU needed: the
 pmon sample is stood in for.
 """
 
@@ -35,12 +35,19 @@ def grandchild():
     yield pid
     subprocess.run(["kill", str(pid)], check=False)
     child.wait(timeout=10)
+    child.stdout.close()
 
 
 def _pmon_says(monkeypatch, rows):
-    """survey() over a pmon sample of `rows` (pid, name, sm%), device idle."""
-    monkeypatch.setattr(gpu_idle, "_processes", lambda: rows)
+    """survey() over a pmon sample of `rows` (pid, name, sm%), device idle.
+    Returns the list the samples taken are counted in."""
+    samples = []
+    def processes():
+        samples.append(1)
+        return rows
+    monkeypatch.setattr(gpu_idle, "_processes", processes)
     monkeypatch.setattr(gpu_idle, "_smi", lambda *a: "0\n")
+    return samples
 
 
 def test_the_callers_grandchild_is_in_its_tree(grandchild):
@@ -52,18 +59,23 @@ def test_the_callers_grandchild_is_in_its_tree(grandchild):
 
 def test_a_grandchild_drawing_is_not_a_neighbour(monkeypatch, grandchild):
     """The caller's grandchild at 90% SM passes; a process outside the tree
-    (pid 1, never the caller's) at the same load is fatal — the control, so
-    the test can fail."""
-    _pmon_says(monkeypatch, [(grandchild, "python3", 90), (1, "python3", 90)])
+    (the caller's own parent, above it) at the same load is fatal — the
+    control, so the test can fail."""
+    parent = os.getppid()
+    _pmon_says(monkeypatch, [(grandchild, "python3", 90),
+                             (parent, "python3", 90)])
     fatal, _ = gpu_idle.survey(seconds=0.0)
     assert not any(f"pid {grandchild} " in f for f in fatal), fatal
-    assert any(f.startswith("pid 1 ") for f in fatal), fatal
+    assert any(f.startswith(f"pid {parent} ") for f in fatal), fatal
 
 
 def test_a_watch_does_not_flag_the_run_it_watches(monkeypatch, grandchild):
-    _pmon_says(monkeypatch, [(grandchild, "python3", 90)])
+    samples = _pmon_says(monkeypatch, [(grandchild, "python3", 90)])
     with gpu_idle.Watch() as w:
-        time.sleep(0.2)
+        deadline = time.monotonic() + 10.0
+        while not samples and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert samples, "the watch never sampled"
     assert w.error is None and not w.fatal, (w.error, w.fatal)
 
 

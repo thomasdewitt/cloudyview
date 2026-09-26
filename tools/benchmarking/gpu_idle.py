@@ -114,19 +114,26 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
     started (always ignored: the caller's own work is not a neighbour). The
     whole tree, not just this pid, because a caller that times a child
     through `uv run` has the GPU held by uv's child, its grandchild — a
-    watch that excluded only the direct child flagged the timed harness
-    itself as a neighbour (2026-09-25)."""
+    watch that excluded only its own pid and the child's flagged the timed
+    harness itself as a neighbour (2026-09-25). The price: a child the
+    caller left running from an earlier variant is its own work too, and is
+    not caught here — a caller that times variants as subprocesses must
+    reap each before starting the next."""
     fatal, warn = set(), set()
     limit = (IDLE_UTIL_PCT_LOCKED if clock_mode().startswith("locked")
              else IDLE_UTIL_PCT)
     t_end = time.monotonic() + seconds
     while True:
-        # Each sample: the caller's children come and go during a run.
-        own = set(exclude) | _descendants(os.getpid())
         util = int(_smi("--query-gpu=utilization.gpu",
                         "--format=csv,noheader,nounits").strip())
+        # The tree on both sides of the pmon sample, each time: the caller's
+        # children come and go during a run, and one started or ended just
+        # as pmon looked is still the caller's.
+        own = _descendants(os.getpid())
+        rows = _processes()
+        own |= _descendants(os.getpid()) | set(exclude)
         known = 0
-        for pid, short, sm in _processes():
+        for pid, short, sm in rows:
             known += sm or 0
             if pid in own:
                 continue
