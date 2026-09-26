@@ -22417,27 +22417,6 @@ fn df_jpath_at(c: DfColumn, s: f32) -> DfPathPt {
     return r;
 }
 
-// The J at height z over its root (the arc length whose point stands z
-// up; the path always climbs): where a leaning trunk's arm roots.
-fn df_jpath_at_height(c: DfColumn, z: f32) -> DfPathPt {
-    let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
-    let ctr = d1 * c.l1 + c.rb * vec2<f32>(-d1.y, d1.x);
-    let z1 = c.l1 * d1.y;
-    let z2 = ctr.y - c.rb * cos(c.omega);
-    var s: f32;
-    if (z <= z1) {
-        s = z / max(d1.y, 1e-3);
-    } else if (z <= z2) {
-        // @domain: the argument is clamped to [-1, 1]
-        let beta = acos(clamp((ctr.y - z) / max(c.rb, 1e-6), -1.0, 1.0));
-        s = c.l1 + c.rb * (clamp(beta, c.alpha, c.omega) - c.alpha);
-    } else {
-        s = c.l1 + c.rb * (c.omega - c.alpha)
-            + (z - z2) / max(sin(c.omega), 1e-3);
-    }
-    return df_jpath_at(c, s);
-}
-
 fn df_col_radius(c: DfColumn, s: f32) -> f32 {
     let len = df_col_len(c);
     let tap = 1.0 - c.taper * clamp(s / max(len, 1e-3), 0.0, 1.0);
@@ -22668,11 +22647,34 @@ const DF_SPINE_TIP: vec3<f32> = vec3<f32>(0.220, 0.140, 0.090);
 // in all at most); the reaches below allow for it.
 const DF_SAG_LEAN_MAX_EXTRA: f32 = 0.061;
 
+// (lean, straightening, lean azimuth, taper). Drawn from the item's own
+// uniform draws (rib phase, groove depth) rather than a fresh hash: an arm
+// is rebuilt at every march step, and each rebuild asks for its trunk's
+// lean.
 fn df_sag_shape(it: DfItem) -> vec4<f32> {
-    let rs = df_rand4(pcg2d(it.seed + vec2<u32>(61u, 67u)));
-    // (lean, straightening, lean azimuth, taper)
+    let rs = fract(vec4<f32>(it.a.w * 7.13, it.a.w * 13.71,
+                             it.a.w * 3.07 + 0.5, it.b.z * 91.3));
     return vec4<f32>(0.017 + DF_SAG_LEAN_MAX_EXTRA * rs.x, 0.9 * rs.y,
                      DF_TAU * rs.z, 0.10 + 0.12 * rs.w);
+}
+
+// The trunk's axis at height z over its root, off the vertical through the
+// root along its lean: the lean held over the first third of the rise,
+// easing linearly to the final lean over the elbow's third, then held —
+// df_sag_trunk's J to second order in the (few degrees of) angle, which is
+// centimetres against a trunk's radius. Where an arm roots, without
+// rebuilding the trunk at every march step.
+fn df_sag_axis_at(it: DfItem, sh: vec4<f32>, z: f32) -> vec3<f32> {
+    let rise = it.a.x + 0.4 - it.a.y * (1.0 - sh.w);
+    let z1 = 0.3 * rise;
+    let dz = 0.35 * rise;
+    let l0 = sh.x;
+    let l1 = sh.x * (1.0 - sh.y);
+    let za = min(z, z1);
+    let zb = clamp(z - z1, 0.0, dz);
+    let zc = max(z - z1 - dz, 0.0);
+    let x = l0 * za + l0 * zb - 0.5 * (l0 - l1) * zb * zb / dz + l1 * zc;
+    return vec3<f32>(vec2<f32>(cos(sh.z), sin(sh.z)) * x, z - 0.4);
 }
 
 fn df_sag_trunk(it: DfItem) -> DfColumn {
@@ -22713,9 +22715,7 @@ fn df_sag_arm(it: DfItem, i: i32) -> DfColumn {
     let r = it.a.y;
     // Rooted on the trunk's axis at its height: a leaning trunk carries its
     // arms with it.
-    let tr = df_sag_trunk(it);
-    let tp = df_jpath_at_height(tr, ap.y - tr.root.z).p;
-    c.root = tr.root + vec3<f32>(tr.u * tp.x, tp.y);
+    c.root = df_sag_axis_at(it, df_sag_shape(it), ap.y + 0.4);
     c.u = vec2<f32>(cos(ap.x), sin(ap.x));
     c.alpha = 0.12 + 0.5 * fract(ap.x * 3.71);
     // The upright run is not plumb either: up to 7 degrees either way.
@@ -22768,12 +22768,16 @@ fn df_saguaro_item(it_in: DfItem, r0: vec4<f32>) -> DfItem {
     let n_arms = min(floor(arm_cap * (0.3 + 0.9 * r1.z)), 4.0);
     it.a = vec4<f32>(h, r, ribs, r1.x);
     it.b = vec4<f32>(n_arms, 0.80 + 0.12 * r1.w, depth, age);
-    // Plus how far the trunk's lean carries its top (and the arms) sideways.
-    let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL
-        + (h + 0.4) * sin(df_sag_shape(it).x);
+    let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL;
+    // The trunk's lean carries its top (and the arms) sideways, one way:
+    // the box stretches toward it only, so it stays tight (a ray in the box
+    // pays for a march).
+    let sh = df_sag_shape(it);
+    let top = df_sag_axis_at(it, sh, h + 0.4 - r * (1.0 - sh.w)).xy;
     // The trunk's axis starts 0.4 m down and ends in a cap of its radius.
-    it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach), it.base.z - 0.4 - r);
-    it.bmax = vec3<f32>(it.base.xy + vec2<f32>(reach),
+    it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach) + min(top, vec2<f32>(0.0)),
+                        it.base.z - 0.4 - r);
+    it.bmax = vec3<f32>(it.base.xy + vec2<f32>(reach) + max(top, vec2<f32>(0.0)),
                         it.base.z + h + DF_SAG_SHELL + 0.05);
     return it;
 }
@@ -22806,16 +22810,18 @@ fn df_cactus_ncols(it: DfItem) -> i32 {
 // A column's bounding sphere: (centre, radius) about its J's box, the
 // widest radius and the tip dome included.
 fn df_col_bound(c: DfColumn) -> vec4<f32> {
-    // The J's box in its plane: its knots, and the elbow's outermost point
-    // where it passes the vertical.
-    let p1 = df_jpath_at(c, c.l1).p;
-    let p2 = df_jpath_at(c, c.l1 + c.rb * (c.omega - c.alpha)).p;
-    let p3 = df_jpath_at(c, df_col_len(c)).p;
+    // The J's box in its plane: its knots (the run's end, the elbow's end,
+    // the tip), and the elbow's outermost point where it passes the
+    // vertical. Called per arm per march step: the knots in closed form.
+    let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
+    let d3 = vec2<f32>(cos(c.omega), sin(c.omega));
+    let p1 = d1 * c.l1;
+    let ctr = p1 + c.rb * vec2<f32>(-d1.y, d1.x);
+    let p2 = ctr + c.rb * vec2<f32>(d3.y, -d3.x);
+    let p3 = p2 + d3 * c.l2;
     var lo = min(min(vec2<f32>(0.0), p1), min(p2, p3));
     var hi = max(max(vec2<f32>(0.0), p1), max(p2, p3));
     if (c.alpha < 0.5 * DF_PI && c.omega > 0.5 * DF_PI) {
-        let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
-        let ctr = d1 * c.l1 + c.rb * vec2<f32>(-d1.y, d1.x);
         hi.x = max(hi.x, ctr.x + c.rb);
     }
     let mid = 0.5 * (lo + hi);
@@ -25823,11 +25829,44 @@ fn df_small_seed(ci: vec2<i32>, s: i32) -> vec2<u32> {
     return df_cell_seed(ci, DF_SMALL_N, 0x3c6eu + u32(s) * 0x2545f491u);
 }
 
+// A slot's draws, 16 bits each from two hashes: `a` = (species, keep,
+// bank, foot x) and `b` = (the shape's first three draws, foot y). All a
+// foot needs: the walks ask for every slot's foot along every ray, sun
+// rays included, and a foot's hashes were most of what four slots to a
+// cell cost (nine pcg2d a foot, now two past the cell's).
+struct DfSmallDraws {
+    a: vec4<f32>,
+    b: vec4<f32>,
+}
+
+fn df_u16x4(v: vec2<u32>) -> vec4<f32> {
+    return vec4<f32>(vec4<u32>(v.x & 0xffffu, v.x >> 16u,
+                               v.y & 0xffffu, v.y >> 16u)) * (1.0 / 65536.0);
+}
+
+fn df_small_draws(seed: vec2<u32>) -> DfSmallDraws {
+    var d: DfSmallDraws;
+    d.a = df_u16x4(pcg2d(seed));
+    d.b = df_u16x4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
+    return d;
+}
+
+// The item's view of them: r0 = (species, -, bank, keep) and its shape
+// draws, the fourth drawn here, where only a built item asks for it.
+fn df_small_r0(d: DfSmallDraws) -> vec4<f32> {
+    return vec4<f32>(d.a.x, 0.0, d.a.z, d.a.y);
+}
+
+fn df_small_rs(d: DfSmallDraws, seed: vec2<u32>) -> vec4<f32> {
+    let w = pcg2d(seed ^ vec2<u32>(0x9e3779b9u, 0x85ebca6bu));
+    return vec4<f32>(d.b.xyz, df_u01(w.x));
+}
+
 // Size first, so the jitter can use whatever room the thing leaves in its
 // cell: small ones wander the whole cell, big ones a little less.
 fn df_small_foot(ci: vec2<i32>, s: i32) -> DfFoot {
-    let seed = df_small_seed(ci, s);
-    let r0 = df_rand4(seed);
+    let dr = df_small_draws(df_small_seed(ci, s));
+    let r0 = df_small_r0(dr);
     var f: DfFoot;
     f.kind = 0;
     f.clear = 0.0;
@@ -25837,8 +25876,9 @@ fn df_small_foot(ci: vec2<i32>, s: i32) -> DfFoot {
                 + DF_P_PRICKLY) {
         return f;
     }
-    let rs = df_rand4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
-    let rp = df_rand4(pcg2d(seed ^ vec2<u32>(0xb5297a4du, 0x68e31da4u)));
+    // The shape's draws the reach needs (the fourth only an item asks for).
+    let rs = vec4<f32>(dr.b.xyz, 0.0);
+    let rp = vec2<f32>(dr.a.w, dr.b.w);
     if (r0.x < DF_P_CREOSOTE + DF_P_BURSAGE) {
         f.kind = DF_KIND_CREOSOTE;
         let hw = df_creosote_dims(rs, r0.x >= DF_P_CREOSOTE);
@@ -25882,12 +25922,13 @@ fn df_small_item(ci: vec2<i32>, s: i32, cell_org: vec2<f32>, fp: f32,
     if (zlo > zg + df_kind_top(foot.kind)) {
         return it;
     }
-    let r0 = df_rand4(it.seed);
+    let dr = df_small_draws(it.seed);
+    let r0 = df_small_r0(dr);
     let hb = df_habitat(org_w);
     if (r0.w >= df_keep(foot.kind, hb)) {
         return it;
     }
-    let rs = df_rand4(pcg2d(it.seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
+    let rs = df_small_rs(dr, it.seed);
     var top: f32;
     if (foot.kind == DF_KIND_CREOSOTE && r0.x < DF_P_CREOSOTE
         && r0.z < DF_BANK_TREE * hb.bank) {
@@ -25988,6 +26029,11 @@ fn df_item_near(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
 // small cells.
 const DF_MAX_BIG_CELLS: i32 = 96;
 const DF_TALLEST: f32 = 12.7;
+// The tallest a small cell's plant stands (df_kind_top's 3.1 m: a big
+// creosote, a bank's sapling): over a big cell whose small-plant lid a ray
+// clears, the walks skip its small cells, slots and all — most of a sun
+// ray's climb through the slab, which is there for the saguaros.
+const DF_SMALL_TALLEST: f32 = 3.1;
 
 // The highest anything in big cell `org` can reach.
 fn df_cell_lid(org: vec2<f32>) -> f32 {
@@ -26120,7 +26166,8 @@ fn df_walk_plain(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let t_exit = min(min(bd.tmax.x, bd.tmax.y), t1);
         let org = vec2<f32>(bd.ci) * DF_BIG_CELL;
         let zlo = o.z + dir.z * select(t_cur, t_exit, dir.z < 0.0);
-        if (zlo <= df_cell_lid(org)) {
+        let lid = df_cell_lid(org);
+        if (zlo <= lid) {
             let cb = df_cell_candidate(bd.ci, true, 0, o, dir, inv_dir, t_cur,
                                        t_exit, t0, res.t, pixel_angle);
             var hb = res;
@@ -26132,14 +26179,15 @@ fn df_walk_plain(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                 res = hb;
             }
             // The small cells of this big cell, front to back, as far as
-            // anything found so far.
+            // anything found so far — if the ray comes down among them.
             let lo = bd.ci * DF_SMALL_PER_BIG;
             var sd = df_dda(o, dir, t_cur, DF_SMALL_CELL, lo,
                             lo + vec2<i32>(DF_SMALL_PER_BIG - 1));
             var ts = t_cur;
+            let small_in = zlo <= lid - DF_TALLEST + DF_SMALL_TALLEST;
             for (var k: i32 = 0; k < 2 * DF_SMALL_PER_BIG; k = k + 1) {
                 let ts_exit = min(min(sd.tmax.x, sd.tmax.y), t_exit);
-                if (ts >= min(res.t, t1_small)) {
+                if (!small_in || ts >= min(res.t, t1_small)) {
                     break;
                 }
                 // The cell's slots, the nearest hit kept: each candidate's
@@ -26197,7 +26245,8 @@ fn df_walk_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let t_exit = min(min(bd.tmax.x, bd.tmax.y), t_walk);
         let org = vec2<f32>(bd.ci) * DF_BIG_CELL;
         let zlo = o.z + dir.z * select(t_cur, t_exit, dir.z < 0.0);
-        if (zlo <= df_cell_lid(org)) {
+        let lid = df_cell_lid(org);
+        if (zlo <= lid) {
             let cb = df_cell_candidate(bd.ci, true, 0, o, dir, inv_dir, t_cur,
                                        t_exit, t0, res.t, pixel_angle);
             var hb = res;
@@ -26209,14 +26258,15 @@ fn df_walk_refine(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                 res = hb;
             }
             // The small cells of this big cell, front to back, as far as
-            // anything found so far.
+            // anything found so far — if the ray comes down among them.
             let lo = bd.ci * DF_SMALL_PER_BIG;
             var sd = df_dda(o, dir, t_cur, DF_SMALL_CELL, lo,
                             lo + vec2<i32>(DF_SMALL_PER_BIG - 1));
             var ts = t_cur;
+            let small_in = zlo <= lid - DF_TALLEST + DF_SMALL_TALLEST;
             for (var k: i32 = 0; k < 2 * DF_SMALL_PER_BIG; k = k + 1) {
                 let ts_exit = min(min(sd.tmax.x, sd.tmax.y), t_exit);
-                if (ts >= res.t) {
+                if (!small_in || ts >= res.t) {
                     break;
                 }
                 // The cell's slots, the nearest hit kept: each candidate's
@@ -26451,7 +26501,9 @@ fn df_occlusion_walk(p: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let t_exit = min(min(bd.tmax.x, bd.tmax.y), t1);
         let org = vec2<f32>(bd.ci) * DF_BIG_CELL;
         // A sun ray climbs: its lowest over the cell is where it enters.
-        if (p.z + dir.z * t_cur > df_cell_lid(org)) {
+        let zin = p.z + dir.z * t_cur;
+        let lid = df_cell_lid(org);
+        if (zin > lid) {
             return vis;
         }
         vis = vis * df_cell_transmit(bd.ci, true, 0, p, dir, inv_dir, t_cur,
@@ -26460,7 +26512,11 @@ fn df_occlusion_walk(p: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         var sd = df_dda(p, dir, t_cur, DF_SMALL_CELL, lo,
                         lo + vec2<i32>(DF_SMALL_PER_BIG - 1));
         var ts = t_cur;
+        let small_in = zin <= lid - DF_TALLEST + DF_SMALL_TALLEST;
         for (var k: i32 = 0; k < 2 * DF_SMALL_PER_BIG; k = k + 1) {
+            if (!small_in) {
+                break;
+            }
             let ts_exit = min(min(sd.tmax.x, sd.tmax.y), t_exit);
             for (var s: i32 = 0; s < DF_SMALL_SLOTS; s = s + 1) {
                 vis = vis * df_cell_transmit(sd.ci, false, s, p, dir, inv_dir,
@@ -27307,8 +27363,16 @@ fn df_disc_cell(ci: vec2<i32>, slot: i32, p: vec3<f32>, rd: vec3<f32>,
     if (length(fq - ab * sa) > foot.reach) {
         return d;
     }
-    let r0 = df_rand4(seed);
-    let rs = df_rand4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
+    var r0: vec4<f32>;
+    var rs: vec4<f32>;
+    if (big) {
+        r0 = df_rand4(seed);
+        rs = df_rand4(pcg2d(seed ^ vec2<u32>(0x27d4eb2fu, 0x165667b1u)));
+    } else {
+        let dr = df_small_draws(seed);
+        r0 = df_small_r0(dr);
+        rs = df_small_rs(dr, seed);
+    }
     // The crown's envelope: (horizontal radius, centre height, vertical
     // semi-axis, tau0) — each species' far envelope and centre depth.
     var sh = vec4<f32>(0.0);

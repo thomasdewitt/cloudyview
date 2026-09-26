@@ -514,6 +514,12 @@ def main(argv=None) -> int:
                     help="the prebaked demo directory (default $SOAR_DEMOS, "
                          "else web/soar/demos in this checkout)")
     ap.add_argument("--views", default="all")
+    ap.add_argument("--random-views", type=int, default=0, metavar="N",
+                    help="N cameras drawn at random over the tile's first "
+                         "kilometre (1.5-40 m up, looking 2-20 degrees down, "
+                         "fov 60; --seed picks them): a cost averaged over "
+                         "what happens to stand in view, not one framing")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--size", type=int, nargs=2, default=(768, 432),
                     help="render size (default: the low tier's 768x432)")
     ap.add_argument("--frames", type=int, default=32)
@@ -677,6 +683,15 @@ def main(argv=None) -> int:
              **other_views(g, plants, hero, sun_az, sun_el)}
     if args.views != "all":
         views = {k: views[k] for k in args.views.split(",")}
+    if args.random_views:
+        rng = np.random.default_rng(args.seed)
+        views = {}
+        for i in range(args.random_views):
+            x, y = rng.uniform(64.0, 960.0, 2)
+            views[f"r{i:02d}"] = (x, y, g(x, y) + rng.uniform(1.5, 40.0),
+                                  rng.uniform(0.0, 360.0),
+                                  -rng.uniform(2.0, 20.0), 60.0,
+                                  sun_az, sun_el)
     if args.camera is not None:
         c = args.camera
         views = {"camera": (*c, sun_az, sun_el)}
