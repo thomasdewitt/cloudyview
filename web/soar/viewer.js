@@ -3454,9 +3454,9 @@ export class Viewer {
     // Lens water keeps wall-clock time, parked or not: it goes on wetting in
     // cloud and drying out of it while you hover. It is drawn after the
     // accumulation, so a changing lens never disturbs the parked picture's
-    // convergence. Capped at a second: the loop only sleeps once the lens
-    // has settled (below), so a longer gap is one in which it had nothing
-    // left to do, and the law is exact for any step.
+    // convergence. Capped at a second, which only bites after a hidden tab
+    // or a stall (a wake resets the frame clock, and the loop does not
+    // sleep until the lens has settled); the law is exact for any step.
     this._lensDt = Math.min(elapsed, LENS_MAX_STEP_S);
 
     if (this._probe) {

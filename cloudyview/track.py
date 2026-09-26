@@ -866,7 +866,8 @@ def cli(argv: Optional[Sequence[str]] = None) -> None:
                         action="store_false", default=None,
                         help="no water on the lens after flying through "
                              "cloud, whatever the track's header says (the "
-                             "header records the browser's Lens water switch)")
+                             "header records the browser's Lens water "
+                             "setting)")
     add_dataset_selection_arguments(parser)
     args = parser.parse_args(argv)
 

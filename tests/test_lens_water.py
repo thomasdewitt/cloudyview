@@ -90,10 +90,11 @@ def test_one_long_step_equals_many_short_ones(scene):
         r.render(state, view, frames=1, lens_dt=0.1)
     ten = r.lens_state()
     assert abs(one[0] - ten[0]) < 2e-5
-    assert np.array_equal(one[1:], np.zeros(3, np.float32))   # wetness only
+    assert abs(one[1] - ten[1]) < 1e-6                         # w*, the same
+    assert np.array_equal(one[2:], np.zeros(2, np.float32))
 
 
-def test_a_parked_lens_holds_still(scene):
+def test_a_zero_step_holds_the_lens_still(scene):
     r, state, view, shape = scene
     _fill(r, shape, SIGMA)
     r.reset_lens()
@@ -149,3 +150,20 @@ def test_the_lens_never_touches_the_accumulation(scene):
     wet = accumulated(lens_dt=0.5)
     assert r.lens_state()[0] > 0.0
     assert all(np.array_equal(a, b) for a, b in zip(plain, wet))
+
+
+def test_only_the_lens_state_pass_reads_row_24_w():
+    """Row 24.w carries the lens dt, written for the state pass alone (and left
+    over in the uniform block for the passes after it): nothing else may read
+    it. No GPU."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "cloudyview" / "soar"
+           / "raymarch.wgsl").read_text()
+    code = re.sub(r"//[^\n]*", "", src)
+    start = code.index("fn fs_lens_state(")
+    end = code.index("\n}\n", start)
+    reads = [m.start() for m in re.finditer(r"surface_offset\.w\b", code)]
+    assert reads, "the state pass no longer reads its dt from row 24.w"
+    outside = [code[:i].count("\n") + 1 for i in reads if not start <= i < end]
+    assert not outside, f"row 24.w read outside fs_lens_state at lines {outside}"

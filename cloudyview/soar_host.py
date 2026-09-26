@@ -1831,7 +1831,7 @@ class SoarRenderer:
                 (1, 1, 1))
 
     def lens_state(self) -> np.ndarray:
-        """The current lens state texel (wetness, clock, down.x, down.y)."""
+        """The current lens state texel (wetness, w*, 0, 0)."""
         return self._read_back_texel(self._lens_state[self._lens_index])
 
     def _lens_pass(self, state: SceneState, view: ViewState, final, dt: float):
