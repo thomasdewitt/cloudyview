@@ -13,10 +13,13 @@ Two kinds of finding, over a few seconds of nvidia-smi samples (the fleet's
 policy, 2026-09-24):
 
 - FATAL, a neighbour: any process outside the desktop (DESKTOP) above
-  IDLE_SM_PCT of SM time, or holding a GPU context at all (Chrome excepted:
-  the QA harness parks an idle browser, and if it draws, the SM test
-  catches it). require_idle() waits for these to go, then exits;
-  check_quiet() exits non-zero with CONTAMINATED — discard the numbers.
+  IDLE_SM_PCT of SM time, or holding a GPU context at all — except an idle
+  browser (BROWSERS): the QA harness parks a Chrome, and Thomas flies soar
+  in his own Firefox on this box (2026-09-25), which is his to leave open.
+  A browser that DRAWS is a neighbour like any other. require_idle() waits
+  for these to go, then exits; a Watch samples all through the run, and
+  check_quiet() exits non-zero with CONTAMINATED if the watch or its own
+  last look saw one — discard the numbers.
 - WARNING, the desktop drawing: gnome-shell or the Claude app above
   DESKTOP_SM_PCT, or device utilization pmon attributes to nobody (the
   compositor under the clock lock). This is Thomas's own screen and cannot
@@ -43,6 +46,8 @@ IDLE_SM_PCT = 2
 DESKTOP_SM_PCT = 15
 # Processes that always hold a context on this desktop, the Claude app
 # (claude-desktop) among them.
+# Browsers whose idle context is allowed; their drawing is not (see above).
+BROWSERS = ("chrome", "firefox")
 DESKTOP = {"gnome-shell", "Xwayland", "gnome-software", "ptyxis",
            "gnome-remote-de", "mutter-x11-fram", "claude-desktop", "nautilus"}
 
@@ -60,6 +65,8 @@ def _processes():
         if line.startswith("#") or not line.strip():
             continue
         f = line.split()
+        if not f[1].isdigit():
+            continue              # pmon's placeholder row: no process at all
         sm = None if f[3] == "-" else int(f[3])
         rows.append((int(f[1]), f[-1], sm))
     return rows
@@ -104,7 +111,7 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
                 continue
             if sm is not None and sm > IDLE_SM_PCT:
                 fatal.add(f"pid {pid} ({name}) at {sm}% SM")
-            if "chrome" not in name:
+            if not any(b in name for b in BROWSERS):
                 fatal.add(f"pid {pid} ({name}) holds a GPU context")
         if util - known > limit:
             warn.add(f"device {util}% busy, {util - known}% of it "
@@ -130,15 +137,55 @@ def require_idle(wait_s: float = 300.0) -> list[str]:
         time.sleep(10)
 
 
-def check_quiet() -> list[str]:
+class Watch:
+    """Samples the card all through a run on a background thread, so a
+    neighbour that draws for a while mid-run (a browser tab brought to the
+    front) is caught, not only one still there at the end:
+    `with Watch() as w: ...` then check_quiet(w)."""
+
+    def __init__(self):
+        import threading
+        self.fatal = set()
+        self.error = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        # A watch that dies must say so: a dead thread with an empty
+        # `fatal` would pass the run as watched and clean (loose-ends'
+        # review: nvidia-smi failing, a pmon row it cannot parse).
+        try:
+            while not self._stop.is_set():
+                fatal, _ = survey(seconds=0.0)
+                self.fatal.update(fatal)
+                self._stop.wait(0.5)
+        except Exception as e:  # noqa: BLE001 — kept, and failed on below
+            self.error = e
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join()
+
+
+def check_quiet(watch: "Watch | None" = None) -> list[str]:
     """After a run (own device still open): exit loudly if a neighbour is on
-    the card, which may have skewed the numbers just printed. Returns the
-    desktop warnings, for the caller's verdict."""
+    the card, or `watch` saw one during the run, either of which may have
+    skewed the numbers just printed. Returns the desktop warnings, for the
+    caller's verdict."""
+    if watch is not None and watch.error is not None:
+        sys.exit(f"CONTAMINATED: the watch failed ({watch.error!r}); the run "
+                 "was not watched, so these numbers cannot be trusted.")
     time.sleep(1.0)            # let the caller's own last passes drain
     fatal, warn = survey(seconds=2.0)
+    fatal = sorted(set(fatal) | (watch.fatal if watch else set()))
     if fatal:
-        sys.exit("CONTAMINATED: another process was on the GPU at the end "
-                 "of the run; discard these numbers:\n  " + "\n  ".join(fatal))
+        sys.exit("CONTAMINATED: another process was on the GPU during or "
+                 "at the end of the run; discard these numbers:\n  "
+                 + "\n  ".join(fatal))
     return warn
 
 
