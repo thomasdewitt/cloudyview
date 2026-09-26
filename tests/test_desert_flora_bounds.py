@@ -14,10 +14,10 @@ its cells are every plant there is. This runs the shader's own functions
 (the harness's placement-scan module) over all of them, each plant built
 whatever its habitat, and measures how far any of it lies outside each
 bound: the saguaro's columns (trunk and arms, sampled along their axes,
-radius and spines included), and the palo verde's clumps' sprig spheres —
-a tree's and a bank sapling's — against their lobes, boxes, reaches and
-cells, with every sprig against its clump's sphere over a corner of the
-tile. It also holds the arms' tilt to leaning out, never back toward the
+radius and spines included), and the palo verde's — a tree's and a bank
+sapling's — every leaf against its grown lobe (a proof: see pv_check), each
+clump's sprig sphere against the box, reach and cell, and every sprig
+against its clump's sphere over a corner of the tile. It also holds the arms' tilt to leaning out, never back toward the
 trunk (loose-ends' review, 2026-09-25). The negative controls run the same
 over the shader with the old bounds, which must fail.
 
@@ -121,9 +121,9 @@ fn bounds_sag(@builtin(global_invocation_id) gid: vec3<u32>) {
                                  reach_tilt_x, close);
 }
 
-// A palo verde's clumps against its bounds: (sprig sphere against the
-// grown lobe — the lobe shrunk by the sphere must hold its centre, a
-// sufficient test —, against the box, the foot's reach, the cell), each
+// A palo verde against its bounds: (every sprig against its grown lobe,
+// each clump's sprig sphere against the box, the foot's reach, the cell),
+// each
 // the most any lies outside; `sprigs` also every sprig against its clump's
 // sphere.
 struct PvX {
@@ -152,9 +152,6 @@ fn pv_check(it: DfItem, reach: f32, cell: f32, sprigs: bool) -> PvX {
             for (var j: i32 = 0; j < DF_PV_CLUMPS; j = j + 1) {
                 let cl = df_pv_clump(e, lseed, j);
                 let rb = DF_PV_SPRIG_BOUND * cl.w;
-                x.lobe = max(x.lobe, length((cl.xyz - e.c)
-                                            / max(big - vec3<f32>(rb),
-                                                  vec3<f32>(1e-6))) - 1.0);
                 let p = it.base + cl.xyz;
                 let lo = it.bmin - (p - vec3<f32>(rb));
                 let hi = (p + vec3<f32>(rb)) - it.bmax;
@@ -163,11 +160,20 @@ fn pv_check(it: DfItem, reach: f32, cell: f32, sprigs: bool) -> PvX {
                 x.reach = max(x.reach, length(cl.xy) + rb - reach);
                 x.cell = max(x.cell, max(max(rb - p.x, p.x + rb - cell),
                                          max(rb - p.y, p.y + rb - cell)));
-                if (sprigs) {
-                    var sd = lseed + vec2<u32>(u32(j) * 104729u, 0u);
-                    for (var k: i32 = 0; k < DF_PV_SPRIGS; k = k + 1) {
-                        let sp = df_pv_sprig(cl.xyz, cl.w, sd);
-                        sd = sp.seed;
+                // Every sprig against the grown lobe: a sprig lies within hl
+                // of its centre, and a ball of radius hl moves the lobe's
+                // norm by at most hl over its smallest axis, so a centre
+                // within the lobe scaled by 1 - hl / min(axis) keeps the
+                // whole leaf inside. And, over `sprigs` cells, each against
+                // its clump's sphere.
+                let small_axis = min(min(big.x, big.y), big.z);
+                var sd = lseed + vec2<u32>(u32(j) * 104729u, 0u);
+                for (var k: i32 = 0; k < DF_PV_SPRIGS; k = k + 1) {
+                    let sp = df_pv_sprig(cl.xyz, cl.w, sd);
+                    sd = sp.seed;
+                    x.lobe = max(x.lobe, length((sp.c - e.c) / big)
+                                         - (1.0 - sp.hl / small_axis));
+                    if (sprigs) {
                         x.sprig = max(x.sprig, length(sp.c - cl.xyz) + sp.hl
                                                - rb);
                     }
@@ -327,7 +333,8 @@ def test_palo_verdes_lie_inside_their_bounds(run, entry, n):
     p = _pv(run(entry, n))
     assert len(p) > 1000
     lobe, box, reach, cell = (p[:, 0, k] for k in range(4))
-    assert lobe.max() <= 1e-4, lobe.max()
+    # A proof, leaf by leaf (see pv_check).
+    assert lobe.max() <= 0.0, lobe.max()
     assert box.max() <= 1e-3, box.max()
     assert reach.max() <= 1e-3, reach.max()
     assert cell.max() <= 1e-3, cell.max()
@@ -345,7 +352,6 @@ def test_palo_verde_negative_control(run):
     sprig = p[:, 1, 1]
     assert sprig[sprig > -1e8].max() > 0.01
     p = _pv(run("bounds_pv", 256, [(
-        "    return e.r + vec3<f32>((DF_PV_SPRIG_BOUND - 0.5) * 0.45\n"
-        "                           * min(e.r.x, e.r.y));",
+        "    return e.r + vec3<f32>(0.45 * min(e.r.x, e.r.y));",
         "    return e.r;")]))
     assert p[:, 0, 0].max() > 0.05, p[:, 0, 0].max()

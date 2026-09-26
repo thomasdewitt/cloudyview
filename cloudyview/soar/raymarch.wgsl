@@ -24801,11 +24801,14 @@ fn df_pv_sprigs(o: vec3<f32>, dir: vec3<f32>, cc: vec3<f32>, rc: f32,
     return best;
 }
 
-// The lobe grown to hold its clumps' sprigs: the largest clump's rc is
-// 0.45 of the lobe's smaller horizontal radius (df_pv_clump).
+// The lobe grown to hold its clumps' sprigs: by the largest clump's rc,
+// 0.45 of the lobe's smaller horizontal radius (df_pv_clump). A clump
+// centre stands up to 0.5 rc inside the lobe's surface and its sprigs
+// reach 1.35 rc (DF_PV_SPRIG_BOUND), 0.85 rc past it on an axis; the
+// whole rc covers the leaves where the lobe's axes differ, which
+// tests/test_desert_flora_bounds.py proves sprig by sprig over the tile.
 fn df_pv_lobe_bound(e: DfEnvelope) -> vec3<f32> {
-    return e.r + vec3<f32>((DF_PV_SPRIG_BOUND - 0.5) * 0.45
-                           * min(e.r.x, e.r.y));
+    return e.r + vec3<f32>(0.45 * min(e.r.x, e.r.y));
 }
 
 // The number of lobes over the whole tree, for the loops' bounds.
@@ -25519,8 +25522,9 @@ struct DfFoot {
 
 // Bounds every saguaro's extent from its foot. The tile is periodic, so its
 // saguaros are all there are: over them, with every arm at its greatest
-// outward tilt (DF_SAG_ARM_TILT) whatever its draw, the most is 2.20 m
-// (tests/test_desert_flora_bounds.py measures it and holds this to it).
+// outward tilt (DF_SAG_ARM_TILT) whatever its draw, the most is about
+// 2.2 m (2.17 m in loose-ends' float64 run; the drawn plants, 1.99 m;
+// tests/test_desert_flora_bounds.py holds this to it).
 // The sum of each part's worst — the tallest trunk at the greatest lean
 // with the longest arm tilted the same way — would be 3.5 m; no draw comes
 // near it, and the cell margin this sets is the saguaros' room to wander.
