@@ -22332,14 +22332,17 @@ struct DfColumn {
     root: vec3<f32>,   // plant-local start of the axis
     u: vec2<f32>,      // horizontal unit direction of the axis' plane
     alpha: f32,        // initial elevation of the axis (pi/2: straight up)
+    omega: f32,        // final elevation, after the elbow (>= alpha)
     l1: f32,           // straight run before the elbow
     rb: f32,           // elbow radius
-    l2: f32,           // vertical run after the elbow
+    l2: f32,           // run after the elbow, at elevation omega
     r: f32,            // radius
     taper: f32,        // fraction of r lost from root to tip
     neck: f32,         // fractional pinch at the root (an arm's junction)
     neck_s: f32,       // where the pinch starts releasing
     neck_len: f32,     // over what length it releases
+    wave: f32,         // growth constrictions: the radius's fractional swing
+    wave_l: f32,       // and their spacing along the axis
     ribs: f32,
     phase: f32,
     depth: f32,        // groove depth as a fraction of the radius
@@ -22352,7 +22355,7 @@ struct DfPathPt {
 }
 
 fn df_col_len(c: DfColumn) -> f32 {
-    return c.l1 + c.rb * (0.5 * DF_PI - c.alpha) + c.l2;
+    return c.l1 + c.rb * (c.omega - c.alpha) + c.l2;
 }
 
 // Closest point on the J to q = (along u, z), both relative to the root.
@@ -22368,7 +22371,7 @@ fn df_jpath_closest(c: DfColumn, q: vec2<f32>) -> DfPathPt {
     let n1 = vec2<f32>(-d1.y, d1.x);
     let ctr = d1 * c.l1 + c.rb * n1;
     let v = q - ctr;
-    let beta = clamp(atan2(v.x, -v.y), c.alpha, 0.5 * DF_PI);
+    let beta = clamp(atan2(v.x, -v.y), c.alpha, c.omega);
     let pa = ctr + c.rb * vec2<f32>(sin(beta), -cos(beta));
     let da = dot(q - pa, q - pa);
     if (da < bd) {
@@ -22378,14 +22381,15 @@ fn df_jpath_closest(c: DfColumn, q: vec2<f32>) -> DfPathPt {
         best.tng = vec2<f32>(cos(beta), sin(beta));
     }
 
-    let e2 = ctr + vec2<f32>(c.rb, 0.0);
-    let s2 = clamp(q.y - e2.y, 0.0, c.l2);
-    let p2 = e2 + vec2<f32>(0.0, s2);
+    let d3 = vec2<f32>(cos(c.omega), sin(c.omega));
+    let e2 = ctr + c.rb * vec2<f32>(sin(c.omega), -cos(c.omega));
+    let s2 = clamp(dot(q - e2, d3), 0.0, c.l2);
+    let p2 = e2 + d3 * s2;
     let d2 = dot(q - p2, q - p2);
     if (d2 < bd) {
-        best.s = c.l1 + c.rb * (0.5 * DF_PI - c.alpha) + s2;
+        best.s = c.l1 + c.rb * (c.omega - c.alpha) + s2;
         best.p = p2;
-        best.tng = vec2<f32>(0.0, 1.0);
+        best.tng = d3;
     }
     return best;
 }
@@ -22395,7 +22399,7 @@ fn df_jpath_at(c: DfColumn, s: f32) -> DfPathPt {
     let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
     var r: DfPathPt;
     r.s = s;
-    let arc = c.rb * (0.5 * DF_PI - c.alpha);
+    let arc = c.rb * (c.omega - c.alpha);
     let ctr = d1 * c.l1 + c.rb * vec2<f32>(-d1.y, d1.x);
     if (s <= c.l1) {
         r.p = d1 * s;
@@ -22405,10 +22409,33 @@ fn df_jpath_at(c: DfColumn, s: f32) -> DfPathPt {
         r.p = ctr + c.rb * vec2<f32>(sin(beta), -cos(beta));
         r.tng = vec2<f32>(cos(beta), sin(beta));
     } else {
-        r.p = ctr + vec2<f32>(c.rb, s - c.l1 - arc);
-        r.tng = vec2<f32>(0.0, 1.0);
+        let d3 = vec2<f32>(cos(c.omega), sin(c.omega));
+        r.p = ctr + c.rb * vec2<f32>(sin(c.omega), -cos(c.omega))
+            + d3 * (s - c.l1 - arc);
+        r.tng = d3;
     }
     return r;
+}
+
+// The J at height z over its root (the arc length whose point stands z
+// up; the path always climbs): where a leaning trunk's arm roots.
+fn df_jpath_at_height(c: DfColumn, z: f32) -> DfPathPt {
+    let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
+    let ctr = d1 * c.l1 + c.rb * vec2<f32>(-d1.y, d1.x);
+    let z1 = c.l1 * d1.y;
+    let z2 = ctr.y - c.rb * cos(c.omega);
+    var s: f32;
+    if (z <= z1) {
+        s = z / max(d1.y, 1e-3);
+    } else if (z <= z2) {
+        // @domain: the argument is clamped to [-1, 1]
+        let beta = acos(clamp((ctr.y - z) / max(c.rb, 1e-6), -1.0, 1.0));
+        s = c.l1 + c.rb * (clamp(beta, c.alpha, c.omega) - c.alpha);
+    } else {
+        s = c.l1 + c.rb * (c.omega - c.alpha)
+            + (z - z2) / max(sin(c.omega), 1e-3);
+    }
+    return df_jpath_at(c, s);
 }
 
 fn df_col_radius(c: DfColumn, s: f32) -> f32 {
@@ -22416,7 +22443,9 @@ fn df_col_radius(c: DfColumn, s: f32) -> f32 {
     let tap = 1.0 - c.taper * clamp(s / max(len, 1e-3), 0.0, 1.0);
     let neck = 1.0 - c.neck
         * (1.0 - smoothstep(c.neck_s, c.neck_s + c.neck_len, s));
-    return c.r * tap * neck;
+    // Growth constrictions: a wet year's girth and a dry one's.
+    let wave = 1.0 + c.wave * sin(DF_TAU * (s / c.wave_l + c.phase));
+    return c.r * tap * neck * wave;
 }
 
 struct DfColSample {
@@ -22628,18 +22657,46 @@ const DF_SPINE_MEAN: vec3<f32> = vec3<f32>(0.267, 0.239, 0.212);
 const DF_SPINE_GREY: vec3<f32> = vec3<f32>(0.330, 0.315, 0.290);
 const DF_SPINE_TIP: vec3<f32> = vec3<f32>(0.220, 0.140, 0.090);
 
+// A saguaro is not a pillar: its trunk leans a few degrees and straightens
+// as it grows (a straight run at its lean, then a long gentle elbow up
+// toward the vertical, and on), tapers by its own amount, and pinches and
+// swells where dry years and wet ones laid down its girth ("Saguaros are
+// close but look a little too 'perfect' geometrically - e.g. perfectly
+// vertical", Thomas, 2026-09-25). The lean, bend and taper are drawn from
+// the seed (df_sag_shape); the arms root on this axis (df_sag_arm).
+// The trunk's lean: 1 degree plus up to this many radians more (4.5 degrees
+// in all at most); the reaches below allow for it.
+const DF_SAG_LEAN_MAX_EXTRA: f32 = 0.061;
+
+fn df_sag_shape(it: DfItem) -> vec4<f32> {
+    let rs = df_rand4(pcg2d(it.seed + vec2<u32>(61u, 67u)));
+    // (lean, straightening, lean azimuth, taper)
+    return vec4<f32>(0.017 + DF_SAG_LEAN_MAX_EXTRA * rs.x, 0.9 * rs.y,
+                     DF_TAU * rs.z, 0.10 + 0.12 * rs.w);
+}
+
 fn df_sag_trunk(it: DfItem) -> DfColumn {
     var c: DfColumn;
     let h = it.a.x;
     let r = it.a.y;
+    let sh = df_sag_shape(it);
     c.root = vec3<f32>(0.0, 0.0, -0.4);
-    c.u = vec2<f32>(1.0, 0.0);
-    c.alpha = 0.5 * DF_PI;
-    c.l1 = 0.0;
-    c.rb = 0.0;
-    c.taper = 0.16;
+    c.u = vec2<f32>(cos(sh.z), sin(sh.z));
+    c.alpha = 0.5 * DF_PI - sh.x;
+    // Straightens by up to 0.9 of its lean over a gentle elbow through the
+    // middle third of its height.
+    c.omega = c.alpha + sh.x * sh.y;
+    c.taper = sh.w;
     c.r = r;
-    c.l2 = h + 0.4 - r * (1.0 - c.taper);
+    let rise = h + 0.4 - r * (1.0 - c.taper);
+    c.l1 = 0.3 * rise;
+    c.rb = select(0.0, 0.35 * rise / max(sh.x * sh.y, 1e-3),
+                  sh.x * sh.y > 1e-3);
+    let arc_rise = c.rb * (cos(c.alpha) - cos(c.omega));
+    c.l2 = max(rise - c.l1 * sin(c.alpha) - arc_rise, 0.0)
+        / max(sin(c.omega), 0.5);
+    c.wave = 0.025 + 0.025 * fract(sh.z * 5.13);
+    c.wave_l = 1.3 + 1.2 * fract(sh.w * 9.71);
     // A slight pinch at the foot: old saguaros stand on a narrower boot.
     c.neck = 0.10 * it.b.w;
     c.neck_s = 0.2;
@@ -22654,14 +22711,22 @@ fn df_sag_arm(it: DfItem, i: i32) -> DfColumn {
     let ap = df_sag_arm_draw(it, i);
     var c: DfColumn;
     let r = it.a.y;
-    c.root = vec3<f32>(0.0, 0.0, ap.y);
+    // Rooted on the trunk's axis at its height: a leaning trunk carries its
+    // arms with it.
+    let tr = df_sag_trunk(it);
+    let tp = df_jpath_at_height(tr, ap.y - tr.root.z).p;
+    c.root = tr.root + vec3<f32>(tr.u * tp.x, tp.y);
     c.u = vec2<f32>(cos(ap.x), sin(ap.x));
     c.alpha = 0.12 + 0.5 * fract(ap.x * 3.71);
+    // The upright run is not plumb either: up to 7 degrees either way.
+    c.omega = 0.5 * DF_PI + 0.24 * (fract(ap.w * 6.13) - 0.5);
     c.l1 = r + ap.z;
     c.rb = 0.20 + 0.22 * fract(ap.y * 5.31);
     c.l2 = ap.w;
     c.r = r * it.b.y;
-    c.taper = 0.10;
+    c.taper = 0.06 + 0.10 * fract(ap.z * 8.37);
+    c.wave = 0.03 * fract(ap.x * 4.19);
+    c.wave_l = 0.9 + 0.8 * fract(ap.y * 2.77);
     // Arms are pinched where they leave the trunk and swell out beyond it.
     c.neck = 0.38;
     c.neck_s = 0.55 * r;
@@ -22679,7 +22744,7 @@ fn df_sag_arm_draw(it: DfItem, i: i32) -> vec4<f32> {
     let h = it.a.x;
     let r = it.a.y;
     let ri = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) + 23u, 7u)));
-    let psi = it.a.w * DF_TAU + f32(i) * 2.39996 + 0.5 * (ri.w - 0.5);
+    let psi = it.a.w * DF_TAU + f32(i) * 2.39996 + 1.0 * (ri.w - 0.5);
     let za = mix(2.4, max(2.5, h * 0.62), ri.x);
     let run = 0.10 + 0.32 * ri.y;
     let alpha = 0.12 + 0.5 * fract(psi * 3.71);
@@ -22703,7 +22768,9 @@ fn df_saguaro_item(it_in: DfItem, r0: vec4<f32>) -> DfItem {
     let n_arms = min(floor(arm_cap * (0.3 + 0.9 * r1.z)), 4.0);
     it.a = vec4<f32>(h, r, ribs, r1.x);
     it.b = vec4<f32>(n_arms, 0.80 + 0.12 * r1.w, depth, age);
-    let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL;
+    // Plus how far the trunk's lean carries its top (and the arms) sideways.
+    let reach = r + 0.42 + 0.42 + r * 0.95 + DF_SAG_SHELL
+        + (h + 0.4) * sin(df_sag_shape(it).x);
     // The trunk's axis starts 0.4 m down and ends in a cap of its radius.
     it.bmin = vec3<f32>(it.base.xy - vec2<f32>(reach), it.base.z - 0.4 - r);
     it.bmax = vec3<f32>(it.base.xy + vec2<f32>(reach),
@@ -22739,10 +22806,21 @@ fn df_cactus_ncols(it: DfItem) -> i32 {
 // A column's bounding sphere: (centre, radius) about its J's box, the
 // widest radius and the tip dome included.
 fn df_col_bound(c: DfColumn) -> vec4<f32> {
-    let hx = c.l1 * cos(c.alpha) + c.rb;
-    let hz = c.l1 * sin(c.alpha) + c.rb + c.l2;
-    return vec4<f32>(c.root + vec3<f32>(c.u * (0.5 * hx), 0.5 * hz),
-                     0.5 * length(vec2<f32>(hx, hz)) + 1.2 * c.r);
+    // The J's box in its plane: its knots, and the elbow's outermost point
+    // where it passes the vertical.
+    let p1 = df_jpath_at(c, c.l1).p;
+    let p2 = df_jpath_at(c, c.l1 + c.rb * (c.omega - c.alpha)).p;
+    let p3 = df_jpath_at(c, df_col_len(c)).p;
+    var lo = min(min(vec2<f32>(0.0), p1), min(p2, p3));
+    var hi = max(max(vec2<f32>(0.0), p1), max(p2, p3));
+    if (c.alpha < 0.5 * DF_PI && c.omega > 0.5 * DF_PI) {
+        let d1 = vec2<f32>(cos(c.alpha), sin(c.alpha));
+        let ctr = d1 * c.l1 + c.rb * vec2<f32>(-d1.y, d1.x);
+        hi.x = max(hi.x, ctr.x + c.rb);
+    }
+    let mid = 0.5 * (lo + hi);
+    return vec4<f32>(c.root + vec3<f32>(c.u * mid.x, mid.y),
+                     0.5 * length(hi - lo) + 1.2 * c.r);
 }
 
 fn df_sag_eval(it: DfItem, q: vec3<f32>, blend: f32) -> DfSagSample {
@@ -22876,7 +22954,7 @@ struct DfCapHit {
 fn df_col_capsules(c: DfColumn, comp: i32, q0: vec3<f32>, dir: vec3<f32>,
                    best_in: DfCapHit) -> DfCapHit {
     var best = best_in;
-    let arc = c.rb * (0.5 * DF_PI - c.alpha);
+    let arc = c.rb * (c.omega - c.alpha);
     let len = df_col_len(c);
     // Knots along the J: root, end of the run, mid-elbow, end of the elbow,
     // tip; zero-length pieces are spheres and cost a quadratic.
@@ -22929,7 +23007,7 @@ fn df_col_capsules(c: DfColumn, comp: i32, q0: vec3<f32>, dir: vec3<f32>,
 fn df_col_rim(c: DfColumn, q0: vec3<f32>, dir: vec3<f32>, shell: f32,
               sigma0: f32, best_in: vec2<f32>) -> vec2<f32> {
     var best = best_in;
-    let arc = c.rb * (0.5 * DF_PI - c.alpha);
+    let arc = c.rb * (c.omega - c.alpha);
     let len = df_col_len(c);
     for (var k: i32 = 0; k < 4; k = k + 1) {
         var s0 = 0.0;
@@ -23356,6 +23434,7 @@ fn df_barrel_column(it: DfItem) -> DfColumn {
     // South-west in the desert frame (+x east, +y north).
     c.u = vec2<f32>(-0.70710678, -0.70710678);
     c.alpha = 0.5 * DF_PI - lean;
+    c.omega = c.alpha;
     c.taper = 0.22;
     c.r = r;
     c.l1 = (h + 0.25 - r * (1.0 - c.taper)) / cos(lean);
@@ -23364,6 +23443,8 @@ fn df_barrel_column(it: DfItem) -> DfColumn {
     c.neck = 0.0;
     c.neck_s = 0.0;
     c.neck_len = 1.0;
+    c.wave = 0.0;
+    c.wave_l = 1.0;
     c.ribs = it.a.z;
     c.phase = it.a.w;
     c.depth = it.b.z;
@@ -25637,7 +25718,10 @@ struct DfFoot {
     reach: f32,
 }
 
-const DF_SAG_REACH: f32 = 2.2;
+// The largest df_saguaro_item reach: 1.39 m unleaned, plus the tallest
+// trunk's (12.9 m of axis) sideways carry at the greatest lean,
+// 0.017 + DF_SAG_LEAN_MAX_EXTRA radians.
+const DF_SAG_REACH: f32 = 2.4;
 const DF_ROCK_SMALL_REACH: f32 = 0.65;
 
 fn df_big_foot(ci: vec2<i32>) -> DfFoot {
