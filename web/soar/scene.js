@@ -207,10 +207,11 @@ export function desertFloorAt(tile, groundZ = 0.0) {
 }
 
 /**
- * A binding-3 surface tile: the night city's density tile (rgba16float) or
- * the desert's eroded terrain (rg16float, planar-byte-shuffled) — one
- * mip-chain loader, each tile's meta saying its format, files, encoding and
- * compression (the sea has its own, see loadSea). The texel size is cell_m.
+ * A binding-3 surface tile: the ocean's wave normals (rgba16float), the
+ * night city's density tile (rgba16float) or the desert's eroded terrain
+ * (rg16float, planar-byte-shuffled) — one mip-chain loader, each tile's meta
+ * saying its format, files, encoding and compression. The texel size is
+ * dx_m (the ocean's) or cell_m.
  * Field-independent, so each ships with the tool and is loaded once per
  * session.
  *
@@ -232,8 +233,7 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
                                     { keepCells = false, keepHeights = false,
-                                      bounds = false, clock = false,
-                                      schema } = {}) {
+                                      bounds = false, schema } = {}) {
   if (!schema) {
     throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
   }
@@ -360,11 +360,11 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     dx,
     tileExtent: meta.tile_extent_m,
     // A tile-bound surface is a pure function of its tile, so its surface
-    // frame folds at the tile (the sea's folds wider — see loadSea).
+    // frame folds at the tile.
     surfacePeriod: meta.tile_extent_m,
-    // A surface whose shader reads the scene clock (`clock`: the city's
-    // steam) wraps it at its own period, where its animation repeats.
-    clockPeriod: clock ? clockPeriodOf(meta, baseUrl) : null,
+    // The surface's clock: the period its animation repeats at (the city's
+    // steam), where the scene clock wraps, or null where nothing moves.
+    clockPeriod: tileClockPeriod(meta, baseUrl),
     maxLod: meta.mips - 1,
     cells,
     heights,
@@ -374,150 +374,20 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   };
 }
 
-function clockPeriodOf(meta, baseUrl) {
-  if (!(meta.clock_period_s > 0)) {
-    throw new Error(`${baseUrl}/meta.json has no clock_period_s, and this ` +
-                    "surface's clock runs (soar_host.CLOCK_SURFACES).");
+/** A tile's clock_period_s: a positive period, or null for a surface with
+ *  no clock. Missing is an error, not a surface without a clock
+ *  (soar_host.surface_clock_period_s is the twin). */
+export function tileClockPeriod(meta, baseUrl) {
+  if (!("clock_period_s" in meta)) {
+    throw new Error(`${baseUrl}/meta.json has no clock_period_s (a period ` +
+                    "in seconds, or null for a surface with no clock).");
   }
-  return meta.clock_period_s;
-}
-
-// The sea's shipped encoding (cloudyview/sea_tile.py, whose arithmetic this
-// mirrors float32 op for float32 op; tests/test_sea_tile.py holds the two
-// to each other). Its schema is constants.js SURFACE_TILE_SCHEMAS.ocean.
-const SEA_CHANNELS = 4;
-const SEA_SLOPE_OFFSET = 128;
-const SEA_SLOPE_STEPS = 127;
-
-/**
- * Decode one frame of the sea's uint8 planes to float32 rgba, texel-major.
- * `planes` is the whole [channel][t][y][x] payload.
- */
-export function decodeSeaFrame(planes, t, meta) {
-  const n = meta.n, nt = meta.frames, texels = n * n;
-  const mult = [
-    Math.fround(meta.slope_scale[0] / SEA_SLOPE_STEPS),
-    Math.fround(meta.slope_scale[1] / SEA_SLOPE_STEPS),
-    Math.fround(1 / 255), Math.fround(1 / 255),
-  ];
-  const offset = [SEA_SLOPE_OFFSET, SEA_SLOPE_OFFSET, 0, 0];
-  const out = new Float32Array(texels * SEA_CHANNELS);
-  for (let c = 0; c < SEA_CHANNELS; c++) {
-    const base = (c * nt + t) * texels;
-    for (let i = 0; i < texels; i++) {
-      out[i * SEA_CHANNELS + c] =
-        Math.fround((planes[base + i] - offset[c]) * mult[c]);
-    }
+  const period = meta.clock_period_s;
+  if (period !== null && !(period > 0)) {
+    throw new Error(`${baseUrl}/meta.json clock_period_s must be positive ` +
+                    `or null; got ${JSON.stringify(period)}.`);
   }
-  return out;
-}
-
-/**
- * Box-filter one frame (side x side rgba float32) to the next level down:
- * ((a + b) + c) + d, then * 0.25, each step rounded to float32 — the order
- * sea_tile.mip_chain adds them in.
- */
-export function seaMipDown(level, side) {
-  const half = side >> 1;
-  const out = new Float32Array(half * half * SEA_CHANNELS);
-  const f = Math.fround;
-  for (let y = 0; y < half; y++) {
-    for (let x = 0; x < half; x++) {
-      const a = ((2 * y) * side + 2 * x) * SEA_CHANNELS;       // [2y,   2x]
-      const b = ((2 * y + 1) * side + 2 * x) * SEA_CHANNELS;   // [2y+1, 2x]
-      const c = ((2 * y) * side + 2 * x + 1) * SEA_CHANNELS;   // [2y,   2x+1]
-      const d = ((2 * y + 1) * side + 2 * x + 1) * SEA_CHANNELS;
-      const o = (y * half + x) * SEA_CHANNELS;
-      for (let k = 0; k < SEA_CHANNELS; k++) {
-        out[o + k] = f(f(f(f(level[a + k] + level[b + k]) + level[c + k])
-                       + level[d + k]) * 0.25);
-      }
-    }
-  }
-  return out;
-}
-
-function toHalfBits(f32) {
-  if (HAS_F16) {
-    // eslint-disable-next-line no-undef
-    return new Uint16Array(new Float16Array(f32).buffer);
-  }
-  const out = new Uint16Array(f32.length);
-  for (let i = 0; i < f32.length; i++) out[i] = toHalf(f32[i]);
-  return out;
-}
-
-/**
- * The moving sea (raymarch.wgsl "The moving sea"): one gzipped file of
- * 8-bit planes, decoded here, mip-filtered frame by frame, and uploaded as
- * an rgba16float 2D array — one layer per frame, each with its own spatial
- * mips — for binding 9. Frame by frame so no more than one frame's float
- * chain is ever held.
- *
- * Returns the surface record the scene takes: `view` is null (binding 3
- * binds its stand-in over the ocean), `seaView` the array.
- *
- * `schema` and the cache rules are loadOceanTile's: meta.json revalidated
- * every time, the payload fetched under the schema as a version query.
- */
-export async function loadSea(device, baseUrl, onProgress, { schema } = {}) {
-  if (!schema) {
-    throw new Error(`loadSea(${baseUrl}) needs the schema it expects.`);
-  }
-  const meta = await (await fetch(`${baseUrl}/meta.json`,
-                                  { cache: "no-cache" })).json();
-  if (meta.schema !== schema) {
-    throw new Error(
-      `${baseUrl}/meta.json is schema ${JSON.stringify(meta.schema)}; this ` +
-      `soar reads ${schema}. The tile and the app are from different ` +
-      "releases — reload the page; if it persists the deploy is mixed.");
-  }
-  const version = `?v=${encodeURIComponent(meta.schema)}`;
-  const n = meta.n, nt = meta.frames;
-  const planes = await fetchBytes(
-    `${baseUrl}/${meta.file}${version}`, (f) => onProgress?.(0.8 * f),
-    "gzip");
-  if (planes.length !== SEA_CHANNELS * nt * n * n) {
-    throw new Error(
-      `${baseUrl}/${meta.file} unpacks to ${planes.length} bytes; expected ` +
-      `${SEA_CHANNELS * nt * n * n} for ${SEA_CHANNELS} planes of ` +
-      `${nt}x${n}x${n}.`);
-  }
-  if ((1 << (meta.mips - 1)) !== n) {
-    throw new Error(
-      `${baseUrl}/meta.json says ${meta.mips} mips for a ${n}-texel tile; ` +
-      "the chain runs to 1x1.");
-  }
-  const texture = device.createTexture({
-    label: `${baseUrl}-sea`,
-    size: [n, n, nt],
-    format: "rgba16float",
-    mipLevelCount: meta.mips,
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
-  for (let t = 0; t < nt; t++) {
-    let level = decodeSeaFrame(planes, t, meta);
-    for (let m = 0, side = n; m < meta.mips; m++, side >>= 1) {
-      device.queue.writeTexture(
-        { texture, mipLevel: m, origin: [0, 0, t] },
-        toHalfBits(level),
-        { bytesPerRow: side * 8, rowsPerImage: side },
-        [side, side, 1]);
-      if (side > 1) level = seaMipDown(level, side);
-    }
-    onProgress?.(0.8 + 0.2 * (t + 1) / nt);
-  }
-  return {
-    view: null,
-    seaView: texture.createView({ dimension: "2d-array" }),
-    texture,
-    dx: meta.dx_m,
-    tileExtent: meta.tile_extent_m,
-    surfacePeriod: meta.surface_period_m,
-    clockPeriod: meta.clock_period_s,
-    maxLod: meta.mips - 1,
-    cells: null,
-  };
+  return period;
 }
 
 // The two volume formats, and the bytes a texel of each costs. Extinction is
@@ -999,7 +869,7 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       oceanFifDx: surfaceTile.dx,
       oceanTileExtent: surfaceTile.tileExtent,
       surfacePeriod: surfaceTile.surfacePeriod,
-      clockPeriod: surfaceTile.clockPeriod ?? null,
+      clockPeriod: surfaceTile.clockPeriod,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
       desert: surfaceKind === "desert",

@@ -37,19 +37,22 @@ camera's position in the scene's surface frame as fractions of the frame's
 period, which the file records beside them. The two frames wrap at
 independent periods, which is why a sample carries both: fold one into the
 other and a recorded city flight replays over the wrong district. scene_t
-is the scene clock the frame was drawn at — where the moving sea was — so a
-re-render has the flight's waves. A period other than the installed
-surface's is refused: the positions would land in the wrong places, and
-over the sea the water would stream past at the flight's speed.
+is the scene clock the frame was drawn at, for a surface that has one (the
+city's steam); over a surface with none it is carried and packs as 0.
 
-Older tracks still render, their sx/sy re-expressed at the installed period
-— continuously, so the surface under the flight moves as it did, over a
-different patch of the same sea. A v3 track (10 columns) recorded no period:
-it was the tile for the city and the desert and 819.2 m for the sea, before
-the swell's lattice doubled it. A v2 track (9 columns) has no clock and
-replays with the sea at 0; its sx/sy were fractions of the TILE. A v1 track
-(7 columns, no surface frame) holds the static offset the header recorded,
-the un-shifted surface those recordings meant.
+Over the city or the desert a recorded period other than the installed
+surface's is refused: the flight would land in the wrong district. Over the
+sea it is not: the sea is a static field repeating every tile, so any
+recorded period places it — sx/sy are re-expressed at the installed period
+continuously, and the water under the flight moves with the flight, over a
+different patch of the same sea, whatever the period was when it was flown
+(1638.4 m for tracks of the moving sea, 2026-09-23..25; 819.2 m for its v3
+tracks). Older tracks recorded no period, and theirs is known from the
+schema: a v3 track (10 columns) was the tile for the city and the desert
+and 819.2 m for the sea; a v2 track (9 columns) has no clock, and its sx/sy
+were fractions of the TILE. A v1 track (7 columns, no surface frame) holds
+the static offset the header recorded, the un-shifted surface those
+recordings meant.
 
 The header is the one a still would carry, written at the video's quality
 tier, and its exposure is the one the browser's own video holds: metered
@@ -152,28 +155,31 @@ def surface_samples(samples: np.ndarray, recorded_period: Optional[float],
                     surface: str, tile: float, period: float) -> np.ndarray:
     """The samples with sx/sy as fractions of the installed surface period.
 
-    A v4 track recorded its period (`recorded_period`), and it has to be
-    the installed one: a city or desert flight would land in the wrong
-    district, and a sea flight's water would stream past at the flight's
-    speed. Older tracks recorded none, and their period is known from the
-    schema (the module docstring); their sx/sy are unwrapped and re-scaled,
-    so the surface under the flight moves continuously — over the sea, a
-    different patch of the same water. A v1 track has no sx/sy.
+    A v4 track recorded its period (`recorded_period`). Over the city or
+    the desert it has to be the installed one — a flight would otherwise
+    land in the wrong district. Over the sea any period is taken: the sea
+    is a static field repeating at its tile, so the period only says what
+    sx/sy are fractions of. Older tracks recorded none, and theirs is known
+    from the schema (the module docstring). Wherever the period differs,
+    sx/sy are unwrapped and re-scaled to the installed one, so the surface
+    under the flight moves continuously. A v1 track has no sx/sy.
     """
     if samples.shape[1] == 7:
         return samples
+    if (recorded_period is not None and surface != "ocean"
+            and not math.isclose(recorded_period, period, rel_tol=1e-9)):
+        raise RuntimeError(
+            f"the track was recorded over a {surface} whose surface "
+            f"frame folds at {recorded_period:g} m, but the installed "
+            f"{surface} folds at {period:g} m; the flight's surface "
+            "positions would land in the wrong places. Render it with "
+            "the cloudyview it was recorded with, or record it again.")
     if recorded_period is not None:
-        if not math.isclose(recorded_period, period, rel_tol=1e-9):
-            raise RuntimeError(
-                f"the track was recorded over a {surface} whose surface "
-                f"frame folds at {recorded_period:g} m, but the installed "
-                f"{surface} folds at {period:g} m; the flight's surface "
-                "positions would land in the wrong places. Render it with "
-                "the cloudyview it was recorded with, or record it again.")
-        return samples
-    unit = tile if samples.shape[1] == 9 else (
-        V3_OCEAN_PERIOD_M if surface == "ocean" else period)
-    if unit == period:
+        unit = recorded_period
+    else:
+        unit = tile if samples.shape[1] == 9 else (
+            V3_OCEAN_PERIOD_M if surface == "ocean" else period)
+    if math.isclose(unit, period, rel_tol=1e-9):
         return samples
     # In time order, as the resampler reads them, so each unwrap step is
     # one step of the flight.

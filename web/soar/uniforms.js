@@ -73,16 +73,16 @@ export function packUniforms(state, view) {
     // null means the scene's static offset (cityOffsetM under CITY, the
     // origin otherwise). Mirrors SceneState.surface_offset_m.
     surfaceOffsetM = null,
-    // The period row 24 folds at: null is the tile extent (the city's and
-    // the desert's rule); the sea folds at its swell's period. Mirrors
-    // SceneState.surface_period_m.
+    // The period row 24 folds at: null is the tile extent, every surface's
+    // rule. Mirrors SceneState.surface_period_m.
     surfacePeriodM = null,
-    // The surface's period in time (its meta.json clock_period_s): the
-    // clock is packed modulo it, so float32 never loses the cadence.
-    // Required over the sea and the city whenever the clock is not 0;
-    // unused over the desert, whose clock is 0. Mirrors
-    // SceneState.clock_period_s.
-    clockPeriodS = null,
+    // The surface's clock (its meta.json clock_period_s): a period, the
+    // scene clock packed modulo it so float32 never loses the cadence (the
+    // city); null for a surface where nothing moves, packing 0 at any scene
+    // time (the sea, the desert). Undefined until the caller says, and a
+    // running clock with it undefined throws. Mirrors
+    // SceneState.clock_period_s (UNSTATED / None / a number).
+    clockPeriodS,
   } = state;
 
   if (city && desert) {
@@ -159,7 +159,7 @@ export function packUniforms(state, view) {
     // when a real ice-fraction texture is bound at binding 8; the packer
     // just writes the flag, same contract as lightCache.
     iceMode = false,
-    // The scene clock, seconds (row 24.z): where the moving sea is, and
+    // The scene clock, seconds (row 24.z): where a surface with a clock is
     // the city's steam.
     sceneTime = 0.0,
   } = view;
@@ -323,9 +323,9 @@ export function packUniforms(state, view) {
       iceMode ? 1.0 : 0.0);
   // Row 24: the surface offset — where the surface tile sits in the world
   // THIS FRAME renders, folded into [0, surface period) — and in z the
-  // scene clock. The period is the tile's for the city and the desert and
-  // the swell's for the sea (surfacePeriodM). The shader derives the
-  // city frame (and the water uv) as world minus this, and because the city
+  // scene clock. The period is the surface's tile (surfacePeriodM). The
+  // shader derives the city frame (and the water uv) as world minus this,
+  // and because the city
   // is a pure function of the tile frame — every cell index folds at the
   // tile before it seeds anything — the fold here is invisible: only the
   // offset mod the tile can matter. Per frame: a camera (or replay pose)
@@ -356,20 +356,25 @@ export function packUniforms(state, view) {
   if (!Number.isFinite(Number(sceneTime))) {
     throw new Error(`scene_time must be finite; got ${sceneTime}.`);
   }
-  // The clock only where the shader reads it — the sea's waves, the city's
-  // steam (soar_host.CLOCK_SURFACES): as part of the scene key a running
-  // clock would keep a parked desert from ever converging while a track
-  // records. Wrapped at the surface's own period in float64, before the
-  // narrowing to float32.
+  // The clock only where something reads it (a surface with a period: the
+  // city's steam), wrapped there in float64, before the narrowing to
+  // float32. A surface with no clock packs 0 whatever the scene time, so
+  // its accumulation never restarts for it.
   let clock = 0.0;
-  if (!desert && sceneTime !== 0) {
-    if (!(clockPeriodS > 0)) {
-      throw new Error(`a ${city ? "city" : "sea"} scene with a running clock ` +
-                      "needs its clockPeriodS (the surface tile's " +
-                      "meta.json clock_period_s).");
+  if (sceneTime !== 0) {
+    if (clockPeriodS === undefined) {
+      throw new Error("a running clock needs the surface's clockPeriodS — " +
+                      "its meta.json clock_period_s: a period, or null for " +
+                      "a surface with no clock.");
     }
-    clock = sceneTime % clockPeriodS;
-    if (clock < 0) clock += clockPeriodS;
+    if (clockPeriodS !== null) {
+      if (!(clockPeriodS > 0)) {
+        throw new Error("clockPeriodS must be positive or null; got " +
+                        `${clockPeriodS}.`);
+      }
+      clock = sceneTime % clockPeriodS;
+      if (clock < 0) clock += clockPeriodS;
+    }
   }
   row(24, surfaceOff[0], surfaceOff[1], clock, 0.0);
   if (desert) {

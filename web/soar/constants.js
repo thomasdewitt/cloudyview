@@ -45,9 +45,9 @@ export const DEFAULT_HAZE_HEIGHT_DEPENDENT = false;
 export const OCEAN_REALISM = 1.0;
 export const OCEAN_MIP_BIAS = -0.5;
 export const OCEAN_GLINT_STRENGTH = 0.85;
-// The glint's base roughness: the slope variance below the detail octave's
-// 5 cm, as alpha — Cox & Munk's 8 m/s mean square slope less what the tile,
-// the detail octave and the swell resolve. Mirrors look.py.
+// The glint's base roughness: the slope variance below the static tile's
+// 0.2 m texels, as alpha — the sea's whole mean square slope Cox & Munk's at
+// ~7 m/s with the tile's own. Mirrors look.py.
 export const OCEAN_GLINT_ROUGHNESS = 0.174;
 // How much of the slope variance the normal-mip filter removed is drawn
 // stochastically per pixel per frame (iter_008). The remainder stays as
@@ -143,7 +143,7 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // every visitor past any cache. Pinned against the tiles and against
 // soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
-  ocean: "cloudyview.web.ocean.v2",
+  ocean: "cloudyview.web.ocean.v1",
   desert: "cloudyview.web.desert.v2",
   city: "cloudyview.web.city.v2",
 };

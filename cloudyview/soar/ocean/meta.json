@@ -1,42 +1,10 @@
 {
- "schema": "cloudyview.web.ocean.v2",
- "file": "sea.bin.gz",
- "encoding": "gzip, uint8 planes [slope x, slope y, foam, crest][t][y][x]",
- "n": 256,
- "frames": 128,
- "dx_m": 0.4,
- "dt_s": 0.2,
- "loop_s": 25.6,
+ "schema": "cloudyview.web.ocean.v1",
+ "n": 512,
+ "dx_m": 0.2,
+ "mips": 10,
+ "format": "rgba16float",
  "tile_extent_m": 102.4,
- "surface_period_m": 1638.4,
- "clock_period_s": 1638.4,
- "slope_scale": [
-  0.75,
-  0.4
- ],
- "seed": 20260923,
- "scaleinvariance": "0.13.1",
- "mips": 9,
- "slope_variance_removed": [
-  0.0,
-  0.0006151,
-  0.0019447,
-  0.0038723,
-  0.0062648,
-  0.0076531,
-  0.0077193,
-  0.0077417,
-  0.0077471
- ],
- "slope_variance_temporal": [
-  0.0016803,
-  0.0013825,
-  0.0008958,
-  0.0004744,
-  0.0001565,
-  9.3e-06,
-  2.8e-06,
-  5e-07,
-  0.0
- ]
+ "clock_period_s": null,
+ "seed": 20260717
 }

@@ -188,33 +188,37 @@ def test_a_v4_track_carries_its_surface_period(tmp_path):
 
 def test_a_track_at_the_installed_period_replays_as_recorded():
     samples = _synthetic_samples(3)
-    out = tr.surface_samples(samples, 1638.4, "ocean", 102.4, 1638.4)
+    out = tr.surface_samples(samples, 102.4, "ocean", 102.4, 102.4)
     assert out is samples
     # The city and the desert fold at their tile, which v3 recorded at too.
     assert tr.surface_samples(samples, None, "city", 2300.0, 2300.0) \
         is samples
 
 
-def test_a_track_at_another_period_is_refused():
-    """The 2026-09-23 case: the sea's period doubled under the recordings,
-    and read at the new one a flight's water streams past at its speed."""
+def test_a_city_or_desert_track_at_another_period_is_refused():
+    """A city flight read at another period would land in the wrong
+    district."""
     samples = _synthetic_samples(3)
-    with pytest.raises(RuntimeError, match="folds at 819.2 m.*1638.4 m"):
-        tr.surface_samples(samples, 819.2, "ocean", 102.4, 1638.4)
     with pytest.raises(RuntimeError, match="city"):
         tr.surface_samples(samples, 2300.0, "city", 1150.0, 1150.0)
+    with pytest.raises(RuntimeError, match="desert"):
+        tr.surface_samples(samples, 8192.0, "desert", 4096.0, 4096.0)
 
 
-@pytest.mark.parametrize("version, unit", [(3, tr.V3_OCEAN_PERIOD_M),
-                                           (2, 102.4)])
-def test_an_older_sea_track_is_re_expressed_continuously(version, unit):
-    """v3 sea tracks were fractions of 819.2 m, v2 of the 102.4 m tile: in
-    metres the flight over the water is the same continuous path at the
-    installed period — no jump where the old period wrapped."""
-    period = 1638.4
+@pytest.mark.parametrize("version, recorded, unit", [
+    (3, 1638.4, 1638.4),                  # v4: the moving sea's own period
+    (3, None, tr.V3_OCEAN_PERIOD_M),      # v3: 819.2 m, from the schema
+    (2, None, 102.4)])                    # v2: the tile
+def test_a_sea_track_replays_over_the_static_sea(version, recorded, unit):
+    """The sea is static and repeats at its 102.4 m tile, so any recorded
+    period places it: a track flown over the moving sea (v4 at 1638.4 m, v3
+    at 819.2 m) or before it (v2) replays with its sx/sy re-expressed at the
+    tile — in metres the same continuous path, no jump where the old period
+    wrapped, no drift."""
+    period = 102.4
     samples = _synthetic_samples(version)
     assert np.any(np.abs(np.diff(samples[:, 7])) > 0.5)    # it wraps
-    out = tr.surface_samples(samples, None, "ocean", 102.4, period)
+    out = tr.surface_samples(samples, recorded, "ocean", 102.4, period)
     order = np.argsort(samples[:, 0], kind="stable")
     for c in (7, 8):
         assert np.all((0.0 <= out[:, c]) & (out[:, c] < 1.0))

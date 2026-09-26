@@ -22,8 +22,8 @@ used: a field that is not periodic (the TWP-ICE subvolume) shows its wrap
 seams as hard cloud edges.
 
   * ocean — the tree's witness.render_nested over marine-congestus-coarse:
-    glitter toward a low sun, a look-down at 120 m, an aerial, one close view
-    at two scene clocks (a tree without the clock renders it once, marked).
+    glitter toward a low sun, a look-down at 120 m, an aerial, a moderate
+    look-down into the sun's glint, and a close view.
   * city — the tree's tools/night_city_harness.py (its NetCDF loader swapped
     for the demo loader) in cyberpunk mode's frame: its tile offset and moon
     (web/soar/constants.js), cameras in city-tile metres so they name the
@@ -100,10 +100,8 @@ DESERT_SUN = (0.0, 45.5)     # desert-coarse's own sun
 OCEAN_CLEAR = (17105.0, 1405.0)
 
 
-def _ocean(name, label, cam, **kw):
-    return View(name, label, "nested", OCEAN_DEMO, cam,
-                tuple(sorted({"quality": "high", **kw}.items())),
-                optional=tuple(k for k in kw if k == "scene_time"))
+def _ocean(name, label, cam):
+    return View(name, label, "nested", OCEAN_DEMO, cam, (("quality", "high"),))
 
 
 def _desert(name, label, x, y, z, az, el, fov, sun=DESERT_SUN):
@@ -129,12 +127,12 @@ SCENES = {
         _ocean("aerial", "aerial, 5 km, above the tops",
                (OCEAN_CLEAR[0] - 1197.0, OCEAN_CLEAR[1] - 3289.0, 5000.0,
                 20.0, -55.0, 70.0, 20.0, 50.0)),
-        _ocean("motion_t0", "close sea, scene clock 0 s",
-               (*OCEAN_CLEAR, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0),
-               scene_time=0.0),
-        _ocean("motion_t2", "close sea, scene clock 2 s",
-               (*OCEAN_CLEAR, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0),
-               scene_time=2.0),
+        # Thomas's framing of 2026-09-25: a moderate look-down into the sun's
+        # glint, the sun's reflection inside the frame.
+        _ocean("glint_lookdown", "into the sun's glint, 300 m, 35 deg down",
+               (*OCEAN_CLEAR, 300.0, 20.0, -35.0, 70.0, 20.0, 40.0)),
+        _ocean("close_sea", "close sea, 12 m",
+               (*OCEAN_CLEAR, 12.0, 100.0, -30.0, 70.0, 20.0, 45.0)),
     ],
     "city": [
         _city("skyline", "skyline from 3.5 km, 250 m up",

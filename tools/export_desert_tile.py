@@ -462,6 +462,9 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
         "compression": "gzip",
         "files": files,
         "tile_extent_m": TILE_EXTENT_M,
+        # The desert has no clock: nothing on it moves (soar_host.
+        # surface_clock_period_s; null, not a period of 0).
+        "clock_period_s": None,
         "height_min_m": float(h16.min()),
         "height_max_m": float(h16.max()),
         "seed": seed,

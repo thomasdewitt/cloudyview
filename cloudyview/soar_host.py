@@ -68,7 +68,7 @@ SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
 # by tests/test_city_lots.py); a tile of another schema is refused, because
 # the city's v1 tile decoded as v2 raises a different city without an error.
 SURFACE_TILE_SCHEMAS = {
-    "ocean": "cloudyview.web.ocean.v2",
+    "ocean": "cloudyview.web.ocean.v1",
     "desert": "cloudyview.web.desert.v2",
     "city": "cloudyview.web.city.v2",
 }
@@ -129,57 +129,46 @@ def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
     b = np.frombuffer(raw, np.uint8).reshape(channels, 2, side * side)
     return np.ascontiguousarray(b.transpose(2, 0, 1)).tobytes()
 def surface_period_m(surface: str, meta: dict) -> float:
-    """The period the surface frame folds at (SceneState.surface_period_m).
-
-    The city and the desert are pure functions of their tile, so they fold at
-    the tile. The ocean's swell trains are periodic over several tiles
-    (raymarch.wgsl SWELL_PERIOD_M), and its meta.json says how many metres.
-    """
-    key = "surface_period_m" if check_surface(surface) == "ocean" \
-        else "tile_extent_m"
-    if key not in meta:
-        raise KeyError(f"the {surface} tile's meta.json has no {key!r}.")
-    return float(meta[key])
-
-
-# The surfaces whose shader reads the scene clock, and so whose clock runs:
-# the sea (its waves) and the city (its steam). The desert reads none, and a
-# running clock there would only keep a parked view from converging.
-CLOCK_SURFACES = ("ocean", "city")
+    """The period the surface frame folds at (SceneState.surface_period_m):
+    the tile, for every surface — each is a pure function of its tile."""
+    check_surface(surface)
+    if "tile_extent_m" not in meta:
+        raise KeyError(f"the {surface} tile's meta.json has no 'tile_extent_m'.")
+    return float(meta["tile_extent_m"])
 
 
 def surface_clock_period_s(surface: str, meta: dict) -> Optional[float]:
-    """The period a surface's clock wraps at (SceneState.clock_period_s), from
-    its meta.json — where its animation repeats exactly, so the wrap is
-    invisible and float32 never loses the cadence — or None for a surface
-    whose clock is always 0."""
-    if check_surface(surface) not in CLOCK_SURFACES:
-        return None
+    """A surface's clock, from its meta.json "clock_period_s": the period
+    its animation repeats at exactly, where the hosts wrap the scene clock
+    (the city's steam: 2600 s), or null for a surface where nothing moves
+    (the ocean, the desert), whose clock packs as 0 at any scene time.
+
+    The key must be there: a surface that does not say is an error, not a
+    surface without a clock. A period must be positive (a wrap at 0 is NaN).
+    """
+    check_surface(surface)
     if "clock_period_s" not in meta:
         raise KeyError(f"the {surface} tile's meta.json has no "
-                       "'clock_period_s'.")
-    return float(meta["clock_period_s"])
+                       "'clock_period_s' (a period in seconds, or null for "
+                       "a surface with no clock).")
+    period = meta["clock_period_s"]
+    if period is None:
+        return None
+    if not float(period) > 0:
+        raise ValueError(f"the {surface} tile's clock_period_s must be "
+                         f"positive or null; got {period!r}.")
+    return float(period)
 
 
-@functools.lru_cache(maxsize=1)
-def _sea_levels(tile_dir: str):
-    """(meta, per-level float16 bytes [t][y][x][rgba]) for the moving sea.
+class _Unstated:
+    """SceneState.clock_period_s before its caller has said what the
+    surface's clock is — distinct from None, which says it has none."""
 
-    Decoded and mip-filtered once per process (cloudyview/sea_tile.py) — the
-    renderers a test session builds all upload the same ~90 MB.
-    """
-    from . import sea_tile
-    meta, planes = sea_tile.read(Path(tile_dir), SURFACE_TILE_SCHEMAS["ocean"])
-    nt = int(meta["frames"])
-    chains = [sea_tile.mip_chain(sea_tile.decode_frame(planes, t, meta))
-              for t in range(nt)]
-    if len(chains[0]) != int(meta["mips"]):
-        raise RuntimeError(
-            f"the sea decodes to {len(chains[0])} mip levels; its meta.json "
-            f"says {meta['mips']}.")
-    levels = [np.stack([chain[k] for chain in chains]).astype(np.float16)
-              .tobytes() for k in range(len(chains[0]))]
-    return meta, levels
+    def __repr__(self):
+        return "UNSTATED"
+
+
+UNSTATED = _Unstated()
 
 
 def read_shader() -> str:
@@ -387,10 +376,10 @@ class SceneState:
     periodic: bool = True
     ocean_z: float = 0.0
     ocean_reflectance: Sequence[float] = DEFAULT_OCEAN_REFLECTANCE
-    ocean_fif_dx: float = 0.4
+    ocean_fif_dx: float = 0.2
     ocean_tile_extent: float = 102.4
     ocean_enabled: bool = True
-    ocean_max_lod: int = 8
+    ocean_max_lod: int = 9
     nested: bool = False
     nest_bmin: Optional[Sequence[float]] = None
     nest_bmax: Optional[Sequence[float]] = None
@@ -420,18 +409,16 @@ class SceneState:
     # Required and refused alike, and for the same reason: without them the
     # trace steps with no slope bound and the far field has no colour.
     desert_tile_rows: Optional[Sequence[Sequence[float]]] = None
-    # The period row 24 folds at. None is the tile extent — the city's and
-    # the desert's rule, since each is a pure function of its tile. The
-    # ocean's swell repeats over several tiles and a fold at the tile would
-    # jump it, so an ocean scene states its own (surface_period_m(), from
-    # the sea's meta.json).
+    # The period row 24 folds at. None is the tile extent, which is every
+    # surface's rule (surface_period_m()).
     surface_period_m: Optional[float] = None
-    # The surface's period in time (its meta.json clock_period_s,
-    # surface_clock_period_s()): row 24.z packs the scene clock modulo it, so
-    # float32 never loses the cadence. Required over the sea and the city
-    # whenever the clock is not 0 (a still at clock 0 needs nothing); unused
-    # over the desert, whose clock is 0. Mirrors uniforms.js.
-    clock_period_s: Optional[float] = None
+    # The surface's clock (its meta.json clock_period_s,
+    # surface_clock_period_s()): a period, row 24.z packing the scene clock
+    # modulo it so float32 never loses the cadence (the city); None for a
+    # surface where nothing moves, packing 0 at any scene time (the ocean,
+    # the desert). UNSTATED until a caller says, and a running clock with
+    # it unstated raises. Mirrors uniforms.js (undefined / null / number).
+    clock_period_s: object = UNSTATED
 
 
 @dataclass
@@ -511,7 +498,7 @@ class ViewState:
     # DESERT_FLORA_CUT, a scale on the shrubs' cut), keyed in the app
     # on the tier (DESERT_FLORA_CUT_BY_TIER); 1.0 is the shader's own value.
     desert_flora_cut: float = 1.0
-    # The scene clock (s, row 24.z): where the moving sea is in its motion.
+    # The scene clock (s, row 24.z): where the city's steam is in its motion.
     # The browser advances it while flying; a still names it (witness
     # --time) and a track carries it per sample.
     scene_time: float = 0.0
@@ -711,21 +698,25 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
 
     base = (state.surface_offset_m if state.surface_offset_m is not None
             else (state.city_tile_offset_m if city else (0.0, 0.0)))
-    # The clock only where the shader reads it (CLOCK_SURFACES: the sea's
-    # waves, the city's steam; as part of the browser's scene key a running
-    # clock would keep a parked desert from converging while a track
-    # records), wrapped at the surface's own period the way uniforms.js
-    # wraps it — in float64, before the narrowing to float32.
+    # The clock only where something reads it (a surface with a period: the
+    # city's steam), wrapped there the way uniforms.js wraps it — in
+    # float64, before the narrowing to float32. A surface with no clock packs
+    # 0 whatever the scene time, so its accumulation never restarts for it.
     clock = 0.0
-    if not desert and view.scene_time != 0.0:
-        if state.clock_period_s is None or not state.clock_period_s > 0:
+    period = state.clock_period_s
+    if view.scene_time != 0.0:
+        if period is UNSTATED:
             raise ValueError(
-                f"a {'city' if city else 'sea'} scene with a running clock "
-                "needs clock_period_s (the surface tile's meta.json "
-                "clock_period_s; surface_clock_period_s()).")
-        clock = math.fmod(float(view.scene_time), state.clock_period_s)
-        if clock < 0:
-            clock += state.clock_period_s
+                "a running clock needs the surface's clock_period_s — its "
+                "meta.json's, via surface_clock_period_s(): a period, or None "
+                "for a surface with no clock.")
+        if period is not None:
+            if not period > 0:
+                raise ValueError(
+                    f"clock_period_s must be positive or None; got {period!r}.")
+            clock = math.fmod(float(view.scene_time), period)
+            if clock < 0:
+                clock += period
     u[24] = (_fold_tile(base[0]), _fold_tile(base[1]), clock, 0.0)
     return u
 
@@ -1131,19 +1122,16 @@ class SoarRenderer:
             size=(1, 1, 1), dimension="2d", format=VEIL_FORMAT,
             usage=self.wgpu.TextureUsage.TEXTURE_BINDING)
         self._light_cache_dims = None
-        # Binding 3 is the city's or the desert's tile; binding 9 the moving
-        # sea, or under the desert its bounds pyramid. Each scene fills what
-        # it reads and binds a stand-in in the rest, so one layout serves
-        # every surface.
-        if self.surface == "ocean":
-            self._ocean_tex = self._dummy_surface()
-            self._sea_tex = self._load_sea()
-        elif self.surface == "desert":
+        # Binding 3 is the surface's tile (the ocean's normals, the city's
+        # density, the desert's terrain); binding 9 the desert's bounds
+        # pyramid. Each scene fills what it reads and binds a stand-in in the
+        # rest, so one layout serves every surface.
+        if self.surface == "desert":
             self._ocean_tex, heights = self._load_surface_tile()
-            self._sea_tex = self._desert_bounds(heights)
+            self._bounds_tex = self._desert_bounds(heights)
         else:
             self._ocean_tex, _ = self._load_surface_tile()
-            self._sea_tex = self._dummy_surface()
+            self._bounds_tex = self._dummy_surface()
         self._targets = None
         self._bind_group = None
         self._build_pipelines()
@@ -1162,8 +1150,8 @@ class SoarRenderer:
         return tex
 
     def _dummy_surface(self):
-        """A 1x1 zero rgba16float stand-in: binding 3 over the ocean (viewed
-        as 2d), binding 9 under the city and the desert (as a 1-layer array)."""
+        """A 1x1 zero rgba16float stand-in for binding 9 (as a 1-layer
+        array) over the ocean and the city."""
         wgpu = self.wgpu
         tex = self.device.create_texture(
             size=(1, 1, 1), dimension="2d", format="rgba16float",
@@ -1173,35 +1161,13 @@ class SoarRenderer:
             {"bytes_per_row": 8, "rows_per_image": 1}, (1, 1, 1))
         return tex
 
-    def _load_sea(self):
-        """The moving sea at binding 9: a 2D array, one layer per frame.
-
-        `self.surface_meta` is the sea's meta.json — cell size, tile extent,
-        top mip and the surface period, which SceneState has to be told
-        about (surface_cell_m, surface_period_m).
-        """
-        wgpu = self.wgpu
-        meta, levels = _sea_levels(str(OCEAN_DIR))
-        self.surface_meta = meta
-        n, nt = int(meta["n"]), int(meta["frames"])
-        tex = self.device.create_texture(
-            size=(n, n, nt), dimension="2d", format="rgba16float",
-            mip_level_count=len(levels),
-            usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        for level, data in enumerate(levels):
-            side = max(1, n >> level)
-            self.device.queue.write_texture(
-                {"texture": tex, "mip_level": level}, data,
-                {"bytes_per_row": side * 8, "rows_per_image": side},
-                (side, side, nt))
-        return tex
-
     def _load_surface_tile(self):
         """The tile bound at binding 3: pre-built mips, level by level, and
         each level's first channel (the desert's heights) as float16.
 
-        Which tile depends on the surface: the desert's eroded terrain
-        (rg16float) or the city density field (rgba16float). One binding,
+        Which tile depends on the surface: the ocean's wave normals
+        (rgba16float), the desert's eroded terrain (rg16float) or the city
+        density field (rgba16float). One binding,
         one loader; each tile's meta names its format, files, encoding and
         compression (decode_surface_level). `self.surface_meta` is the loaded meta.json, and is where a
         caller reads the cell size and tile extent that SceneState has to be
@@ -1624,7 +1590,7 @@ class SoarRenderer:
                 {"binding": 6, "resource": self._vol_wrap_sampler},
                 {"binding": 7, "resource": self._light_tau_tex.create_view()},
                 {"binding": 8, "resource": self._ice_frac_tex.create_view()},
-                {"binding": 9, "resource": self._sea_tex.create_view(
+                {"binding": 9, "resource": self._bounds_tex.create_view(
                     dimension="2d-array")},
             ])
         return self._bind_group

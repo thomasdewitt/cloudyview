@@ -188,7 +188,7 @@ _JS = textwrap.dedent("""
         videoFps: 30,
         scene: { sourceName: "field.nc", bmin: [0, 0, 0],
                  bmax: [1000, 1000, 1000], cityPosition: () => null,
-                 surfacePeriod: 1638.4 },
+                 surfacePeriod: 102.4 },
         renderer: { periodic: true, cameraMoving: false,
                     meterLuminance: async (size, kw) => {
                       metered.push({ size, position: [...kw.camera.position],
@@ -362,7 +362,7 @@ def test_a_saved_track_holds_the_exposure_its_video_meters(js):
     assert m["haze"] == t["videoHaze"]
     assert t["render"]["tier"] == "high" and t["render"]["quality"] == "high"
     assert t["render"]["exposure"] == pytest.approx(t["expected"])
-    assert t["surfacePeriod"] == 1638.4
+    assert t["surfacePeriod"] == 102.4
 
 def test_witness_quality_presets_carry_parked_stepping():
     """The CLI promise — '--quality renders as the in-app capture at that

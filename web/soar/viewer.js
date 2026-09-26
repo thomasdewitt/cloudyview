@@ -10,8 +10,8 @@ import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
-import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile,
-         loadSea } from "./scene.js";
+import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile }
+  from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -393,7 +393,7 @@ export class Viewer {
       // volume) rather than re-downloaded per field.
       return (this._cityTile ??=
         await loadOceanTile(this.device, CITY_URL, undefined,
-                            { keepCells: true, clock: true,
+                            { keepCells: true,
                               schema: K.SURFACE_TILE_SCHEMAS.city }));
     }
     if (kind === "desert") {
@@ -406,8 +406,8 @@ export class Viewer {
                               schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
     return (this._ocean ??=
-      await loadSea(this.device, OCEAN_URL, undefined,
-                    { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
+      await loadOceanTile(this.device, OCEAN_URL, undefined,
+                          { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
   }
 
   async loadField(source, progress) {
@@ -2825,9 +2825,10 @@ export class Viewer {
         // is that everything here comes from `look`.
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
-        // The scene clock the still was taken at (witness --time): the
-        // sea's or the city's, and 0 over the desert, as row 24.z is.
-        scene_time: this.scene.desert ? 0 : this.sceneTime,
+        // The scene clock the still was taken at (witness --time): for a
+        // surface with a clock (the city's steam), and 0 over one without
+        // (the sea, the desert), as row 24.z is.
+        scene_time: this.scene.clockPeriod === null ? 0 : this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
         light_march_lod_degrees:
@@ -3176,10 +3177,10 @@ export class Viewer {
       "--fov", n(this.camera.fov),
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
-      // The scene clock the view was held at: where the sea was, or the
-      // city's steam. The desert reads none (row 24.z is 0 there), so it
-      // writes none.
-      ...(this.scene.desert ? [] : ["--time", n(this.sceneTime)]),
+      // The scene clock the view was held at: the city's steam. A surface
+      // with no clock (the sea, the desert) reads none — row 24.z is 0
+      // there — so it writes none.
+      ...(this.scene.clockPeriod === null ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
       // still's command rendered the day ocean. The city's tile offset picks
       // the district under the field, and the CLI has no default to agree
