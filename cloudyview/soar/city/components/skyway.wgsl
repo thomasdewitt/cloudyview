@@ -401,13 +401,13 @@ fn cc_skyway_ztop(a: f32, ac: f32, raised: bool) -> f32 {
 // z = zb + m*(a - ab), and the two rails riding on it. An envelope test
 // covering deck and rails together gates the three detail tests, so a piece
 // the ray never reaches costs three clips and stops.
-fn cc_skyway_ribbon(lo3: vec3<f32>, ld3: vec3<f32>, ct0: f32, ct1: f32,
+fn cc_skyway_ribbon(lo3: vec3<f32>, ld3: vec3<f32>, ta: f32, tb: f32,
                     a0: f32, a1: f32, ab: f32, zb: f32, m: f32,
                     fam: i32, best: cc_skyway_Best) -> cc_skyway_Best {
     var r = best;
     let h0 = lo3.z - zb - m * (lo3.x - ab);
     let hd = ld3.z - m * ld3.x;
-    let seed = cc_skyway_Span(ct0, ct1, -1, 1.0);
+    let seed = cc_skyway_Span(ta, tb, -1, 1.0);
 
     var env = cc_skyway_clip(seed, lo3.x, ld3.x, a0, a1, 0);
     env = cc_skyway_clip(env, lo3.y, ld3.y, -cc_skyway_HW, cc_skyway_HW, 1);
@@ -559,12 +559,20 @@ fn cc_skyway_route(o: vec3<f32>, dir: vec3<f32>, fam: i32, lat_c: f32,
         return r;
     }
 
+    // The ribbon pieces clip from the z slab's entry, not the corridor's:
+    // the deck's fascia and the outer faces of its rails lie ON the
+    // corridor's lateral bounds, and a piece whose clip started at ct0 could
+    // never raise its entry there, so it never learned the face it entered
+    // by — and dropped the hit. From outside the corridor the fascia and the
+    // rails' outer faces were not drawn at all; a ray went through to the
+    // deck top or the soffit behind them (found by the collider's mirror
+    // test, 2026-11). The corridor bound still rejects everything else.
     let raised = fam == 1;
     if (!raised) {
         // Flat from horizon to horizon.
         return cc_skyway_pylons(
             lo3, ld3, ct0, ct1, 0.0, false, fam,
-            cc_skyway_ribbon(lo3, ld3, ct0, ct1,
+            cc_skyway_ribbon(lo3, ld3, tz0, ct1,
                              -cc_skyway_FAR, cc_skyway_FAR,
                              0.0, cc_skyway_DECK_Z, 0.0, fam, r));
     }
@@ -582,15 +590,15 @@ fn cc_skyway_route(o: vec3<f32>, dir: vec3<f32>, fam: i32, lat_c: f32,
 
     // Five pieces sharing four end planes exactly: base, ramp up, high flat,
     // ramp down, base.
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, -cc_skyway_FAR, ac - e - rp,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, -cc_skyway_FAR, ac - e - rp,
                          0.0, cc_skyway_DECK_Z, 0.0, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac - e - rp, ac - e,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac - e - rp, ac - e,
                          ac - e - rp, cc_skyway_DECK_Z, slope, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac - e, ac + e,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac - e, ac + e,
                          0.0, cc_skyway_HIGH_Z, 0.0, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac + e, ac + e + rp,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac + e, ac + e + rp,
                          ac + e, cc_skyway_HIGH_Z, -slope, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac + e + rp, cc_skyway_FAR,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac + e + rp, cc_skyway_FAR,
                          0.0, cc_skyway_DECK_Z, 0.0, fam, r);
     return cc_skyway_pylons(lo3, ld3, ct0, ct1, ac, true, fam, r);
 }
