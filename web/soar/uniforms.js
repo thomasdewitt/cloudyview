@@ -25,7 +25,9 @@ const DEG = Math.PI / 180.0;
  * oblong pixels: the meter's fixed 64x36 did, everywhere but 16:9.
  */
 export function meterSize([w, h]) {
-  if (!(w >= 1 && h >= 1)) throw new Error(`size must be positive; got ${w}x${h}.`);
+  if (!(w >= 1 && h >= 1)) {
+    throw new Error(`size must be positive; got ${w}x${h}.`);
+  }
   const scale = Math.sqrt(K.AUTO_EXPOSURE_METER_RAYS / (w * h));
   return [Math.max(1, Math.floor(w * scale + 0.5)),
           Math.max(1, Math.floor(h * scale + 0.5))];
