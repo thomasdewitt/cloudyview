@@ -19,11 +19,11 @@ policy, 2026-09-24):
   his Steam client (a Chromium UI, steamwebhelper) is the same case
   (2026-11-08: idle at 0% SM, it refused a whole timing lock).
   A browser that DRAWS is a neighbour like any other; one driven over
-  DevTools (the QA Chrome) is named by whoever drives it (driven_by). require_idle() waits
-  briefly for these to go (WAIT_S), then exits; a Watch samples all through
-  the run, and
-  check_quiet() exits non-zero with CONTAMINATED if the watch or its own
-  last look saw one — discard the numbers.
+  DevTools (the QA Chrome) is named by whoever drives it (driven_by).
+  require_idle() waits briefly for these to go (WAIT_S), then exits; a
+  Watch samples all through the run, and check_quiet() exits non-zero with
+  CONTAMINATED if the watch or its own last look saw one — discard the
+  numbers.
 - WARNING, the desktop drawing: gnome-shell or the Claude app above
   DESKTOP_SM_PCT, or device utilization pmon attributes to nobody (the
   compositor under the clock lock). This is Thomas's own screen and cannot
