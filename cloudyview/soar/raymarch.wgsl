@@ -2071,9 +2071,9 @@ fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
     return k;
 }
 
-// The legacy shader's LOD (realism 0), kept with its own footprint rule.
+// The legacy shader's LOD (realism 0): no bias, the one true pixel angle.
 fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
-    let pixel_span = 2.0 * max(t_hit, 0.0) * u.cam_origin.w / u.params.y;
+    let pixel_span = max(t_hit, 0.0) * true_pixel_angle();
     let ocean_span = pixel_span / max(abs(dir.z), 0.03);
     let texel_span = max(ocean_span / u.ocean_params.x, 1.0);
     return clamp(log2(texel_span), 0.0, u.ocean_params.w);
@@ -2208,7 +2208,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     // factor stretches it along the view and drives the horizon toward
     // coarser mip levels.
     let grazing = max(abs(dir.z), 0.03);
-    let pixel_angular_span = 2.0 * u.cam_origin.w / u.params.y;
+    let pixel_angular_span = true_pixel_angle();
     let across = t_hit * pixel_angular_span;
     let along = across / grazing;
     let texel_span = max(along / u.ocean_params.x, 1.0);
@@ -8724,7 +8724,7 @@ fn cc_aircars_half(v: cc_aircars_Craft) -> vec3<f32> {
 
 fn cc_aircars_grown(v: cc_aircars_Craft) -> vec3<f32> {
     let d = length(cc_aircars_hull_centre(v) - city_camera_origin());
-    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * d;
+    let fp = true_pixel_angle() * d;
     return max(cc_aircars_half(v), vec3<f32>(cc_aircars_MIN_PX * fp));
 }
 
@@ -8765,7 +8765,7 @@ fn cc_aircars_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         return cc_aircars_miss(ci);
     }
     // Gate 2: a craft smaller than this is not worth a box test.
-    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * max(t0, 0.0);
+    let fp = true_pixel_angle() * max(t0, 0.0);
     if (fp > cc_aircars_FAR_FP) {
         return cc_aircars_miss(ci);
     }
@@ -11090,8 +11090,7 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
     let zb = o.z + t1 * dir.z;
     let z_lo = min(za, zb);
     let z_hi = max(za, zb);
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = lod_pixel_angle() * max(t0, 0.0);
     var best = cc_rooftopworks_miss(ci);
 
     // Gate 1: the roof band, from the lowest deck this building owns to the
@@ -12859,7 +12858,7 @@ struct cc_streetlife_Kerb {
 // The core's LOD pixel angle, the one both surface stages' footprints are
 // taken from (and so the one the per-car stage switch must use).
 fn cc_streetlife_pa() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // `near` picks the stage: false for the view ray's first stage (poles, and
@@ -13364,8 +13363,7 @@ fn cc_streetlife_seam(x: f32, x0: f32, w: f32, pitch: f32, fp: f32) -> f32 {
 // default slider this lands at ~1.5 px; with a fine slider the true-pixel
 // term takes over and holds the floor at 1 px.
 fn cc_streetlife_fp_px(fp: f32, t: f32) -> f32 {
-    return max(0.35 * fp,
-               2.0 * u.cam_origin.w / max(u.params.x, 1.0) * max(t, 0.0));
+    return max(0.35 * fp, true_pixel_angle() * max(t, 0.0));
 }
 
 // One lamp LENS on a face, resolved while it is bigger than a pixel and
@@ -15156,8 +15154,7 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
     }
     // Gate 2: past FP_END the plume above a stack has faded out, and the
     // stack is under half a pixel wide.
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = lod_pixel_angle() * max(t0, 0.0);
     if (fp > cc_manholesteam_FP_END) {
         return res;
     }
@@ -15572,7 +15569,7 @@ fn cc_industry_box(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // The pixel's angular size: the footprint at distance t is px * t (m/px),
 // the core's own pixel_angle.
 fn cc_industry_px() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // ============================================================================
@@ -18956,7 +18953,7 @@ fn cc_streetfurniture_miss(ci: vec2<i32>) -> CityHit {
 // them. streetlife's cc_streetlife_fp_px, for streetlife's reason — a hinge
 // is one feature, not a lattice that could moire.
 fn cc_streetfurniture_fpx(t: f32) -> f32 {
-    let pa = 2.0 * u.cam_origin.w / max(u.params.x, 1.0);
+    let pa = true_pixel_angle();
     return max(0.35 * max(pa, u.periodic.z), pa) * max(t, 0.0);
 }
 
@@ -19348,8 +19345,7 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // placement and the trace disagree, and that should be seen.
         return vec3<f32>(1.0, 0.0, 1.0);
     }
-    let fpx = max(0.35 * fp, 2.0 * u.cam_origin.w / max(u.params.x, 1.0)
-                             * max(h.t, 0.0));
+    let fpx = max(0.35 * fp, true_pixel_angle() * max(h.t, 0.0));
     let pl = cc_streetfurniture_to_local(v, h.pos);
     let n = h.normal;
     let mid = cc_streetfurniture_sdf(pl, v, cc_streetfurniture_lod(fpx)).y;
@@ -27402,6 +27398,13 @@ fn true_pixel_angle() -> f32 {
     return 2.0 * u.cam_origin.w / u.params.x;
 }
 
+// The angle a surface's level of detail resolves at: the true pixel's, or
+// the view-step LOD angle (u.periodic.z, the app's one LOD slider) when that
+// is coarser. See camera_ray.
+fn lod_pixel_angle() -> f32 {
+    return max(true_pixel_angle(), u.periodic.z);
+}
+
 fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     var cr: CameraRay;
     let img_w = u.params.x;
@@ -27441,7 +27444,7 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     // FILTERS its texture over stays the true pixel's footprint: a wider
     // one would only blur it.
     cr.true_pixel_angle = true_pixel_angle();
-    cr.pixel_angle = max(cr.true_pixel_angle, u.periodic.z);
+    cr.pixel_angle = lod_pixel_angle();
     cr.jitter_amp = u.cam_up.w * jitter_scale;
     return cr;
 }
@@ -28180,15 +28183,10 @@ fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
 
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let img_w = u.params.x;
-    let img_h = u.params.y;
     let g_hg = u.params.z;
     let ambient_strength = u.params.w;
-    let tan_half_fov = u.cam_origin.w;
-    let aspect = u.cam_forward.w;
     let exposure = u.cam_right.w;
     let jitter_on = u.cam_up.w;
-    let subpixel_on = u.flags.x;
     let jitter_scale = clamp(u.flags.y, 0.0, 1.0);
     let sun = u.sun_dir.xyz;
     let gradient_shading_strength = u.cb_realism.x;
