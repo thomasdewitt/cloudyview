@@ -641,8 +641,7 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
     }
     // Gate 2: past FP_END the plume above a stack has faded out, and the
     // stack is under half a pixel wide.
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = lod_pixel_angle() * max(t0, 0.0);
     if (fp > cc_manholesteam_FP_END) {
         return res;
     }

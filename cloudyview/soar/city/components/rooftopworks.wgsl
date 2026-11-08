@@ -813,8 +813,7 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
     let zb = o.z + t1 * dir.z;
     let z_lo = min(za, zb);
     let z_hi = max(za, zb);
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = lod_pixel_angle() * max(t0, 0.0);
     var best = cc_rooftopworks_miss(ci);
 
     // Gate 1: the roof band, from the lowest deck this building owns to the

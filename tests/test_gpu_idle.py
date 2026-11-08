@@ -86,3 +86,123 @@ def test_only_the_direct_pid_would_flag_it(monkeypatch, grandchild):
     monkeypatch.setattr(gpu_idle, "_descendants", lambda root: {root})
     fatal, _ = gpu_idle.survey(seconds=0.0)
     assert any(f"pid {grandchild} " in f for f in fatal), fatal
+
+
+# pids no process has: the names come from pmon's column, as for a process
+# that exited between the sample and the /proc read.
+STEAM, HELPER, GAME = 2**22 + 11, 2**22 + 12, 2**22 + 13
+
+
+def test_thomass_idle_steam_is_not_a_neighbour(monkeypatch):
+    """His Steam client holds contexts at 0% SM (2026-11-08); like his idle
+    Firefox it is allowed. Any other idle context stays fatal — the control."""
+    _pmon_says(monkeypatch, [(STEAM, "steam", None),
+                             (HELPER, "steamwebhelper", 0),
+                             (GAME, "somegame", None)])
+    fatal, _ = gpu_idle.survey(seconds=0.0)
+    assert fatal == [f"pid {GAME} (somegame) holds a GPU context"], fatal
+
+
+def test_steam_drawing_is_a_neighbour(monkeypatch):
+    _pmon_says(monkeypatch, [(HELPER, "steamwebhelper", 40)])
+    fatal, _ = gpu_idle.survey(seconds=0.0)
+    assert fatal == [f"pid {HELPER} (steamwebhelper) at 40% SM"], fatal
+
+
+def test_the_lock_holders_work_is_not_a_neighbour_outside_the_lock(
+        monkeypatch, tmp_path):
+    """--outside-lock's view: what runs under the flock holding the GPU lock
+    is the holder's work (a pre-check before queueing would otherwise always
+    see it and fail), including a worker the holder starts only after the
+    check has begun (a holder running a loop does that all the time); a
+    process outside it is still fatal — the control."""
+    lock = tmp_path / "gpu.lock"
+    monkeypatch.setattr(gpu_idle, "LOCK", str(lock))
+    late = SPAWNER.replace("import subprocess", "import subprocess, time; "
+                           "time.sleep(0.5); import subprocess", 1)
+    # Detached (setsid -f): a holder under this process would be the
+    # caller's own tree, excluded whatever lock_work() says.
+    holder = subprocess.Popen(["setsid", "-f", "flock", "-x", str(lock),
+                               sys.executable, "-c", late],
+                              stdout=subprocess.PIPE, text=True)
+    outsider = os.getppid()
+    seen = []
+
+    def processes():
+        # The pmon sample: taken after survey started, by which time the
+        # holder's worker exists (readline blocks until it is spawned).
+        if not seen:
+            seen.append(int(holder.stdout.readline()))
+        return [(seen[0], "python3", 50), (outsider, "python3", 50)]
+
+    monkeypatch.setattr(gpu_idle, "_processes", processes)
+    monkeypatch.setattr(gpu_idle, "_smi", lambda *a: "0\n")
+    try:
+        before = gpu_idle.lock_work()
+        fatal, _ = gpu_idle.survey(seconds=0.0, outside_lock=True)
+        worker = seen[0]
+        assert worker not in before        # it really started late
+        assert worker not in gpu_idle._descendants(os.getpid())
+        assert not any(f"pid {worker} " in f for f in fatal), fatal
+        assert any(f.startswith(f"pid {outsider} ") for f in fatal), fatal
+        # A snapshot taken before the worker existed is what the review
+        # caught: with it the worker reads as a neighbour.
+        monkeypatch.setattr(gpu_idle, "lock_work", lambda: before)
+        fatal, _ = gpu_idle.survey(seconds=0.0, outside_lock=True)
+        assert any(f"pid {worker} " in f for f in fatal), fatal
+    finally:
+        if seen:
+            subprocess.run(["kill", str(seen[0])], check=False)
+        holder.wait(timeout=10)
+        holder.stdout.close()
+
+
+# A Chrome as /proc shows it: the GPU process under the zygote under the
+# browser, whose argv Chrome rewrites into ONE space-joined string.
+GPU, ZYGOTE, BROWSER, DRIVER = 2**22 + 21, 2**22 + 22, 2**22 + 23, 2**22 + 24
+CHROME = {
+    GPU: (ZYGOTE, ["/opt/google/chrome/chrome --type=gpu-process"]),
+    ZYGOTE: (BROWSER, ["/opt/google/chrome/chrome --type=zygote"]),
+    BROWSER: (1, ["/opt/google/chrome/chrome --user-data-dir=/q "
+                  "--remote-debugging-port=9333 about:blank"]),
+    DRIVER: (1, ["node", "tools/tint_check.mjs", "--web", "web"]),
+}
+
+
+def _chrome(monkeypatch, ss):
+    monkeypatch.setattr(gpu_idle, "_cmdline",
+                        lambda pid: CHROME.get(pid, (0, []))[1])
+    monkeypatch.setattr(gpu_idle, "_ppid",
+                        lambda pid: CHROME.get(pid, (0,))[0])
+    ports = []
+    def clients(port):
+        ports.append(port)
+        return ss
+    monkeypatch.setattr(gpu_idle, "_ss_clients", clients)
+    return ports
+
+
+def test_a_drawing_qa_chrome_names_who_drives_it(monkeypatch):
+    """The QA Chrome is one browser every session drives over CDP, so its
+    pid names nobody (2026-11-08: an afternoon to find that a merge gate's
+    tint_check had drawn in two timing locks). The neighbour line names the
+    process connected to its DevTools port."""
+    ports = _chrome(monkeypatch, "0 0 127.0.0.1:40060 127.0.0.1:9333 "
+                                 f'users:(("node",pid={DRIVER},fd=21))\n')
+    _pmon_says(monkeypatch, [(GPU, "chrome", 40)])
+    fatal, _ = gpu_idle.survey(seconds=0.0)
+    assert ports == [9333]
+    assert len(fatal) == 1
+    assert fatal[0].startswith(f"pid {GPU} (chrome) at 40% SM;")
+    assert f"pid {DRIVER} `node tools/tint_check.mjs --web web`" in fatal[0]
+
+
+def test_an_undriven_chrome_says_so(monkeypatch):
+    _chrome(monkeypatch, "")
+    assert "no client connected" in gpu_idle.driven_by(GPU)
+
+
+def test_a_browser_with_no_devtools_port_names_nobody(monkeypatch):
+    """Thomas's Firefox has no DevTools port; nothing to add, nothing run."""
+    ports = _chrome(monkeypatch, "")
+    assert gpu_idle.driven_by(DRIVER) == "" and ports == []
