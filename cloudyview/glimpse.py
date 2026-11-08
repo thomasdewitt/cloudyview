@@ -195,6 +195,7 @@ def main(
     z_first: str = None,
     ice: str = None,
     no_ice: bool = False,
+    coarsen: int = None,
 ) -> None:
     """
     Main function for glimpse.py
@@ -275,6 +276,7 @@ def main(
             grid_spacing=grid_spacing,
             z_first=z_first,
             no_ice=no_ice,
+            coarsen=coarsen,
         )
 
         print(f"✓ Loaded {field.liquid_var} variable (liquid water)")
