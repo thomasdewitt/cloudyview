@@ -21305,7 +21305,7 @@ struct DesertLight {
 // sees, (1 + n.z)/2 and (1 - n.z)/2 — exact for an unobstructed tilted plane.
 fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
-    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0), 0.0);
+    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0));
 }
 
 // The cloud's shadow on one ground point, and the light that comes through
@@ -21547,7 +21547,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // A stone is lit by the same law as the ground it lies on, with its
     // own albedo and normal and none of the ground's statistics: no kernel
     // BRF (it IS the resolved geometry the kernel stands for), no grain,
-    // no stone or unresolved shadow, no sheen. One path for both, selected
+    // no stone or unresolved shadow. One path for both, selected
     // on its inputs: two shading branches kept the hit, the light and the
     // ground terms all live across the divergence (perf: 155 registers
     // against 72 with the stones out).
@@ -21563,7 +21563,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                               // varnished clast read as a hollow cup.
                               max(h.pos.z - desert_surface(h.pos.xy, fp).x,
                                   0.0))
-                          * plants, 0.0);
+                          * plants);
     }
     let light = clamp(h.mat.x, 0.0, 1.0);
     let m = desert_material(light);
@@ -21590,7 +21590,6 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     if (near) {
         stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
     }
-    var sheen = desert_sheen(n, dir, L.sun_dir);
     if (DESERT_LITE) {
         // The stones as decals (desert_stone_decal): a covered pixel is the
         // stone, lit as a stone is; an uncovered one keeps the stones'
@@ -21601,57 +21600,26 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
         ns = normalize(mix(n, dc.normal, dc.cover));
         brf = mix(brf, 1.0, dc.cover);
         stones = mix(dc.shadow, 1.0, dc.cover);
-        sheen = sheen * (1.0 - dc.cover);
     }
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp, 0.0)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
         * stones * plants;
     let mu = max(dot(ns, L.sun_dir), 0.0);
-    return desert_lit(albedo, ns, L, mu * brf * shade, sheen * shade);
+    return desert_lit(albedo, ns, L, mu * brf * shade);
 }
 
 // The common tail: `beam` the direct factor on L.sun (cosine, BRF and every
-// shadow folded in), `sheen` the specular one.
-fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32,
-              sheen: f32) -> vec3<f32> {
+// shadow folded in). No specular term: sand, silt and soil are matte. A
+// floor of loose grains scatters light inside and between them, and the
+// directional reflectance it keeps at a pixel's scale is the kernel BRF
+// (desert_brf, the form satellites fit to real land), not a glint. A GGX
+// sheen stood here until 2026-11-08 (Thomas: "the desert ground is way too
+// reflective, it looks similar to the ocean").
+fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32)
+        -> vec3<f32> {
     let sky_view = 0.5 * (1.0 + n.z);
     return albedo * (1.0 / DESERT_PI)
-        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view))
-        + sheen * L.sun;
-}
-
-// Looking into a low sun, a desert floor is not dark: silt, sand grains
-// and the polished tops of pavement clasts throw a soft forward glare
-// toward the viewer (temp/references/desert lowsun_backlit_*). A weak,
-// rough dielectric lobe — Fresnel at F0 = 0.04, GGX at alpha 0.35, Smith
-// masking, weighted to grazing views — which is zero anywhere but near the
-// forward-scattering geometry seen edge-on, so the high-sun look is
-// untouched.
-const DESERT_SHEEN_F0: f32 = 0.04;
-const DESERT_SHEEN_ALPHA: f32 = 0.2;
-
-fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
-    let v = -dir;
-    let n_dot_l = dot(n, sun);
-    let n_dot_v = dot(n, v);
-    if (n_dot_l <= 0.0 || n_dot_v <= 1e-4) {
-        return 0.0;
-    }
-    // @domain: n.l > 0 and n.v > 0 (returned above otherwise): same hemisphere
-    let hv = normalize(sun + v);
-    let n_dot_h = max(dot(n, hv), 0.0);
-    let om = 1.0 - clamp(dot(v, hv), 0.0, 1.0);
-    let om2 = om * om;
-    let fresnel = DESERT_SHEEN_F0 + (1.0 - DESERT_SHEEN_F0) * om2 * om2 * om;
-    let a2 = DESERT_SHEEN_ALPHA * DESERT_SHEEN_ALPHA;
-    let den = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    let d = a2 / (DESERT_PI * den * den);
-    let g = ggx_smith_g1(n_dot_v, a2) * ggx_smith_g1(n_dot_l, a2);
-    // A grazing phenomenon: the glare comes off the tops of grains and
-    // clasts seen edge-on, and a view from well above sees their shadowed
-    // flanks instead (the RossLi kernel's forward darkening).
-    let edge = 1.0 - n_dot_v;
-    return d * g * fresnel / (4.0 * n_dot_v) * edge * edge;
+        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view));
 }
 
 // Aerial perspective: the SAME air the clouds are seen through — fs_main's
@@ -28281,18 +28249,31 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // interval. Stills pass no state at all and are dry in both hosts.
 //
 // The wetting law, exact in dt at constant extinction sigma at the camera:
-//   dw/dt = K_WET f (1 - w) - K_DRY (1 - f) w,   f = 1 - exp(-sigma L_WET)
-// is linear in w, so one step of any length is
+//   dw/dt = K_WET f (1 - w) - k_dry(f) (1 - f) w,  f = 1 - exp(-sigma L_WET),
+//   k_dry(f) = K_DRY in cloud, K_DRY_CLEAR in clear air,
+// is linear in w at constant f, whatever k_dry(f) is, so one step of any
+// length is
 //   w(t + dt) = w* + (w - w*) exp(-a dt),
-//   a = K_WET f + K_DRY (1 - f),  w* = K_WET f / a,
+//   a = K_WET f + k_dry(f) (1 - f),  w* = K_WET f / a,
 // and one step of 2 dt equals two of dt at constant f: a replay at another
 // frame rate sees the same wetness wherever the extinction at the camera
 // changes slowly against the frame interval (f is taken at the step's end).
-// Dense cloud (f ~ 1) wets the lens in a few seconds; haze (f small) only to
-// a low level, slowly; out of cloud it drains to 5 % in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
+// f is the cloud's alone (the field's extinction; the haze is not in it).
+// Clear air is where the first law's level, K_WET f / (K_WET f + K_DRY
+// (1 - f)), is under LENS_DRY_FLOOR, the wetness that counts as dry anyway:
+// f below ~6.7e-4, sigma below ~2.2e-5 /m. Not where sigma is exactly 0: a
+// field's clear air can carry a faint positive tail (the RCE demo's, median
+// f ~3e-5, over a third of its volume), and the camera samples sigma
+// trilinearly. Dense cloud (f ~ 1) wets the lens in a few seconds, thin
+// cloud (f small) only to a low level, slowly; in cloud this is the first
+// law, its w* and its rate unchanged. In clear air the lens drains at
+// K_DRY_CLEAR, 3x K_DRY (Thomas, 2026-11-08: outside of cloud the drops
+// "should disappear 3x faster"), to 5 % in 5 s. The same law in numpy is
+// tests/test_lens_water.py's reference.
 const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
 const LENS_K_WET: f32 = 0.6;        // 1/s
-const LENS_K_DRY: f32 = 0.2;        // 1/s
+const LENS_K_DRY: f32 = 0.2;        // 1/s, in cloud
+const LENS_K_DRY_CLEAR: f32 = 0.6;  // 1/s, in clear air
 const LENS_DRY_FLOOR: f32 = 0.002;  // below this, and drying: exactly dry
 
 @fragment
@@ -28306,7 +28287,11 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     let s_raw = sample_sigma(u.cam_origin.xyz);
     let sigma = select(0.0, s_raw, s_raw > 0.0);
     let f = 1.0 - exp(-sigma * LENS_L_WET);
-    let a = LENS_K_WET * f + LENS_K_DRY * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
+    // Clear air: the first law's level would count as dry. Its denominator
+    // is >= min(K_WET, K_DRY) > 0.
+    let w_first = LENS_K_WET * f / (LENS_K_WET * f + LENS_K_DRY * (1.0 - f));
+    let k_dry = select(LENS_K_DRY_CLEAR, LENS_K_DRY, w_first >= LENS_DRY_FLOOR);
+    let a = LENS_K_WET * f + k_dry * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
     let w_star = LENS_K_WET * f / a;
     var w = w_star + (prev.x - w_star) * exp(-a * dt);
     // Dry is exactly 0, so a dry lens draws nothing at all (lens.wgsl); a

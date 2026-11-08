@@ -40,6 +40,11 @@ and the timed rounds agree within it too; the summary says which. So give
 every comparison a null: the baseline again under another name
 (--variant base=git:HEAD --variant null=git:HEAD --variant new=tree). Under
 the clock lock with the desktop drawing, absolute ms are pessimistic.
+Precede it with the idle pre-check so a busy card fails before you take a
+place in the GPU queue rather than after (gpu_idle.py has why):
+
+    uv run python tools/benchmarking/gpu_idle.py --outside-lock && \
+        tools/gpulock uv run python tools/benchmarking/soar_pass_timer.py ...
 """
 
 import argparse
