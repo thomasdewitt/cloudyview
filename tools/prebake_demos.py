@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cloudyview as cv
 from cloudyview import optical_depth
 from cloudyview.cloudfield import CloudField
+from cloudyview.coarsen import axis_mean, block_mean, grow_band
 from cloudyview.glimpse import glimpse
 from cloudyview.look import DEFAULT_HAZE
 from cloudyview.soar_host import (
@@ -467,59 +468,6 @@ def coarsen_factor(spec: dict) -> int:
     return int(spec.get("coarsen", 1) or 1)
 
 
-def _block_mean(a: np.ndarray, f: int) -> np.ndarray:
-    """Average (x, y, z) over f x f x f blocks, accumulating in float64.
-
-    float64 for the sum even though the inputs and the output are float32:
-    a block is only f**3 terms, but the terms are mixing ratios that span
-    many orders of magnitude across a cascade field, and a float32 sum of
-    eight of those loses the small one entirely. Cheap insurance at this size.
-
-    Requires every axis to divide exactly. A partial edge block would be an
-    average over fewer cells than its neighbours — a quietly different
-    quantity at the domain edge, which then wraps against the opposite face
-    in a periodic field. Better to refuse the crop.
-    """
-    if f == 1:
-        return a
-    if any(n % f for n in a.shape):
-        raise ValueError(
-            f"cannot block-average {a.shape} by {f}: every axis must divide "
-            "exactly, or the edge blocks would average fewer cells than the "
-            "interior and the periodic wrap would meet a seam")
-    nx, ny, nz = (n // f for n in a.shape)
-    out = np.empty((nx, ny, nz), dtype=np.float32)
-    # Slabbed over x so the float64 view of the field never exists whole: the
-    # marine case is 2048 x 2048 x 385 float32 (6.5 GB), and .astype(float64)
-    # on all of it is 13 GB on top of the copy already in memory. 128 output
-    # planes at a time is under a gigabyte and x is the slowest axis, so the
-    # slabs are exactly the whole-array result.
-    for o0 in range(0, nx, 128):
-        o1 = min(o0 + 128, nx)
-        block = a[o0 * f:o1 * f].astype(np.float64)
-        out[o0:o1] = (block.reshape(o1 - o0, f, ny, f, nz, f)
-                           .mean(axis=(1, 3, 5))
-                           .astype(np.float32))
-    return out
-
-
-def _axis_mean(a: np.ndarray, f: int) -> np.ndarray:
-    """One coordinate axis under the same block average.
-
-    The centre of a merged block is the mean of the centres it merges, which
-    is exact for a uniform grid and the right answer for a stretched one too:
-    the coarse cell spans the fine cells' union either way, and its centre is
-    where the march should sample it. Already float64 — coordinates are read
-    that way — so no accumulator question arises.
-    """
-    if f == 1:
-        return a
-    if a.size % f:
-        raise ValueError(
-            f"cannot block-average a {a.size}-point axis by {f}")
-    return a.reshape(-1, f).mean(axis=1)
-
-
 def has_ice(spec: dict) -> bool:
     """Whether this spec produces an ice phase at all.
 
@@ -714,10 +662,11 @@ def resolved_crop(spec: dict) -> dict:
     """The spec's crop with an `auto` z resolved to the occupied band.
 
     A coarsened case needs every axis of that crop to be a whole number of
-    blocks (see `_block_mean`). x and y are typed in the spec and are simply
-    required to divide; z is FOUND, so it is grown here — outward from the
-    occupied band, never inward, because trimming to fit would drop planes
-    that hold cloud.
+    blocks (see cloudyview.coarsen.block_mean). x and y are typed in the spec
+    and are simply required to divide; z is FOUND, so it is grown here
+    (cloudyview.coarsen.grow_band, the rule `--coarsen` remakes the grid
+    with) — outward from the occupied band, never inward, because trimming
+    to fit would drop planes that hold cloud.
     """
     crop = dict(spec["crop"])
     if crop.get("z") == "auto":
@@ -730,17 +679,7 @@ def resolved_crop(spec: dict) -> dict:
                 raise ValueError(
                     f"{spec['id']}: the {axis} crop {lo}:{hi} is "
                     f"{hi - lo} cells, which {f} does not divide")
-        lo, hi = crop["z"]
-        top = _z_planes(spec)
-        while (hi - lo) % f:
-            if hi < top:
-                hi += 1
-            elif lo > 0:
-                lo -= 1
-            else:
-                raise ValueError(
-                    f"{spec['id']}: the whole {top}-plane column is not a "
-                    f"multiple of {f}, so no z band can be")
+        lo, hi = grow_band(*crop["z"], _z_planes(spec), f)
         if (lo, hi) != crop["z"]:
             print(f"    z band grown to {lo}:{hi} so {f} divides it "
                   "(coarsening blocks must be whole)")
@@ -759,9 +698,9 @@ def load_demo(spec: dict) -> CloudField:
     # belongs to the source cell, and averaging phases is not averaging a
     # ramp of an average temperature.
     lwc, iwc = read_condensate(spec, crop, src,
-                               post=(lambda a: _block_mean(a, f)) if f > 1
+                               post=(lambda a: block_mean(a, f)) if f > 1
                                else None)
-    x, y, z = (_axis_mean(a, f)
+    x, y, z = (axis_mean(a, f)
                for a in _coords(src / spec["liquid"][0], crop,
                                 coord_names(spec)))
     return CloudField(lwc=lwc, iwc=iwc, x=x, y=y, z=z,

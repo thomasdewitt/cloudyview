@@ -24,6 +24,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import cloudyview as cv
+
 # The package exports witness the FUNCTION; the CLI lives on the module.
 witness = importlib.import_module("cloudyview.witness")
 
@@ -65,6 +67,7 @@ _JS = textwrap.dedent("""
       noIce: flags(noIce),
       sameFileIce: flags(bare),
       demo: flags({}),            // a demo scene carries no selection
+      coarseDemo: flags({ coarsen: 2 }),   // ...but a coarsened bake's grid
       // A metric-less regular grid, placed by the grid-spacing answer: x
       // and z asked (y had meters), z with its first level at the top.
       spaced: flags({ liquidVar: "qc",
@@ -160,6 +163,15 @@ def test_the_grid_spacing_answer_round_trips(monkeypatch, emitted):
 
 def test_a_demo_scene_emits_no_selection(emitted):
     assert emitted["demo"] == ""
+
+
+def test_a_coarse_demo_says_how_its_grid_was_made(monkeypatch, emitted):
+    """The coarse marine demo names its FINE source file, so its command
+    carries the block average that made the shipped grid from it."""
+    assert emitted["coarseDemo"] == "--coarsen 2"
+    assert _parse_with_witness_cli(
+        monkeypatch, emitted["coarseDemo"])["coarsen"] == 2
+    assert _parse_with_witness_cli(monkeypatch, "")["coarsen"] is None
 
 
 # --- the surface: what the world stands on ---------------------------------
@@ -365,3 +377,158 @@ def test_witness_refuses_a_city_without_a_district():
         render_nested([None], (0, 0, 0), azimuth=0, elevation=0,
                       sun_azimuth=0, sun_elevation=20, surface="ocean",
                       city_offset=(0, 0))
+
+
+# --- a coarse demo: the command remakes the grid the bake shipped ----------
+#
+# marine-congestus-coarse is demo_marine-congestus.nc block-averaged 2x2x2 by
+# tools/prebake_demos.py, and the browser can only name that fine file. Here
+# a small fine field goes through the bake's own load_demo, the browser's
+# witnessCommand is built over the box the bake would ship, and the command
+# runs through the real witness CLI and loader (only the GPU is stubbed): the
+# field it marches must be the bake's to the fp16 bit, in the same box, with
+# the camera where the browser had it. Before `--coarsen` it marched the fine
+# field in a box ~10 m taller.
+
+_COARSE_JS = textwrap.dedent("""
+    import { Viewer } from "%s";
+    const c = %s;
+    const P = Viewer.prototype;
+    const position = [c.bmin[0] + 312.5, c.bmin[1] + 587.25, 433.0];
+    const self = {
+      scene: { coarsen: 2, bmin: c.bmin, bmax: c.bmax, sourceName: c.source,
+               oceanTileExtent: 102.4, surfacePeriod: 1638.4,
+               clockPeriod: null },
+      camera: { position, azimuth: 301.25, elevation: 12.5, fov: 90.0,
+                surfacePosition: null, surfaceTileExtent: 1638.4 },
+      canvas: { width: 640, height: 360 },
+      renderer: { periodic: true },
+      sunAzimuth: 181.0, sunElevation: 20.0, sceneTime: 0.0,
+      toneMapGamma: 1.66, toneMapWhitePoint: 15.0, contrast: 1.0,
+      _selectionFlags: P._selectionFlags,
+      _surfaceOffsetM: P._surfaceOffsetM,
+      _surfaceOriginFlags: P._surfaceOriginFlags,
+    };
+    process.stdout.write(JSON.stringify({
+      command: P.witnessCommand.call(self, {
+        size: [64, 36], lodStrength: 1.0, haze: 0.35,
+        hazeHeightDependent: false, exposure: 2.5, quality: "high" }),
+      position,
+    }));
+""")
+
+
+def _write_fine_field(path):
+    """8 x 8 x 12 cells of 100 x 100 x 50 m, kg/kg as STEAM writes it. Cloud
+    in planes 3-9 only: the band starts on an odd plane and is an odd 7
+    planes deep, so the bake's blocks start at plane 3 and the band grows
+    to 3-10, where coarsening the whole column would pair 2-3, 4-5, ..."""
+    from netCDF4 import Dataset
+    rng = np.random.default_rng(7)
+    qc = np.zeros((8, 8, 12), np.float32)
+    qi = np.zeros((8, 8, 12), np.float32)
+    # Six decades of mixing ratio, as a cascade field has.
+    qc[:, :, 3:10] = 10.0 ** rng.uniform(-9, -3, (8, 8, 7))
+    qi[:, :, 6:10] = 10.0 ** rng.uniform(-9, -4, (8, 8, 4))
+    with Dataset(path, "w") as ds:
+        for name, n, d in (("x", 8, 100.0), ("y", 8, 100.0), ("z", 12, 50.0)):
+            ds.createDimension(name, n)
+            v = ds.createVariable(name, "f8", (name,))
+            v.units = "m"
+            v[:] = (np.arange(n) + 0.5) * d
+        for name, a in (("qc", qc), ("qi", qi)):
+            v = ds.createVariable(name, "f4", ("x", "y", "z"))
+            v.units = "kg/kg"
+            v[:] = a
+
+
+def _bake(path):
+    """The coarse demo's extinction and box, by the bake's own code."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import prebake_demos as pb
+    spec = dict(id="coarse-test", liquid=(path.name, "qc"),
+                ice=(path.name, "qi"), src=path.parent, dims="xyz",
+                crop=dict(x=(0, 8), y=(0, 8), z="auto"), scale=1e3,
+                coarsen=2)
+    field = pb.load_demo(spec)
+    sigma = pb._extinction(field.lwc, field.z, field.iwc)
+    bmin, bmax = pb._volume_aabb(field)
+    return sigma.astype(np.float16), bmin, bmax
+
+
+def test_a_coarse_demo_command_marches_the_baked_grid(monkeypatch, tmp_path):
+    fine = tmp_path / "fine.nc"
+    _write_fine_field(fine)
+    baked, bmin, bmax = _bake(fine)
+    assert baked.shape == (4, 4, 4)           # z band 3-10, in 2-plane blocks
+
+    js = _COARSE_JS % ((REPO / "web" / "soar" / "viewer.js").as_posix(),
+                       json.dumps(dict(bmin=list(bmin), bmax=list(bmax),
+                                       source=str(fine))))
+    proc = subprocess.run(["node", "--input-type=module", "-e", js],
+                          capture_output=True, text=True, cwd=REPO,
+                          env={**os.environ})
+    if proc.returncode != 0:
+        pytest.fail(f"node failed:\n{proc.stderr[-3000:]}")
+    emitted = json.loads(proc.stdout)
+    assert "--coarsen 2" in emitted["command"]
+
+    made, levels = [], []
+
+    def fake_renderer_for(lv, *, periodic, tone_mapped, surface):
+        levels.extend(lv)
+        made.append(_FakeRenderer(surface))
+        return made[-1]
+
+    monkeypatch.setattr(witness_module, "_renderer_for", fake_renderer_for)
+    monkeypatch.setattr(sys, "argv", shlex.split(emitted["command"])
+                        + ["--output", str(tmp_path)])
+    witness_module.cli()
+
+    (level,) = levels
+    # The bake's field, bit for bit as the r16float texture holds it...
+    assert level.sigma.shape == baked.shape
+    assert np.array_equal(level.sigma.astype(np.float16).view(np.uint16),
+                          baked.view(np.uint16))
+    # ...in the bake's box, so the relative camera lands where it flew.
+    assert list(level.bmin) == list(bmin) and list(level.bmax) == list(bmax)
+    (renderer,) = made
+    assert renderer.uniforms[0][:3] == pytest.approx(
+        emitted["position"], rel=1e-9, abs=1e-6)
+
+    # The control: blocks that start at the bottom of the file's column
+    # instead of the band's make a different field, so the test can fail.
+    from cloudyview.coarsen import axis_mean, block_mean
+    field = cv.load(fine)
+    whole = cv.CloudField(lwc=block_mean(field.lwc, 2),
+                          iwc=block_mean(field.iwc, 2),
+                          x=axis_mean(field.x, 2), y=axis_mean(field.y, 2),
+                          z=axis_mean(field.z, 2))
+    other = witness_module._field_level(whole, "single").sigma
+    assert other.shape != baked.shape or not np.array_equal(
+        other.astype(np.float16).view(np.uint16), baked.view(np.uint16))
+
+
+def test_coarsen_refuses_what_it_cannot_average(tmp_path):
+    from cloudyview.coarsen import coarsened, grow_band
+    fine = tmp_path / "fine.nc"
+    _write_fine_field(fine)
+    field = cv.load(fine)
+    with pytest.raises(ValueError, match="x axis has 8 cells"):
+        coarsened(field, 3)
+    with pytest.raises(ValueError, match="whole number"):
+        coarsened(field, 0)
+    assert coarsened(field, 1) is field
+    # Up first, then down when the top is reached; never inward.
+    assert grow_band(3, 10, 12, 2) == (3, 11)
+    assert grow_band(5, 12, 12, 2) == (4, 12)
+    with pytest.raises(ValueError, match="no z band"):
+        grow_band(0, 7, 7, 2)
+
+
+def test_witness_refuses_a_coarse_field_under_a_nest(capsys):
+    # Refused before the load: the file need not exist for the pair to be
+    # wrong, and the message is what tells this exit from a missing file's.
+    with pytest.raises(SystemExit):
+        witness_module.main("missing.nc", nest_group="/nest", coarsen=2)
+    assert "--coarsen and --nest-group" in capsys.readouterr().err

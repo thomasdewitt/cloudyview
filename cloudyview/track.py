@@ -415,6 +415,9 @@ class TrackSettings:
     ice_path: Optional[str]
     liquid_var: Optional[str]
     ice_var: Optional[str]
+    # The block average the flown field was made with from field_path (the
+    # coarse marine demo is that file at 2), or None: the file as read.
+    coarsen: Optional[int]
     size: tuple[int, int]               # even, as H.264 needs
     fps: float
     quality: str                        # a QUALITY_PRESETS name
@@ -523,6 +526,7 @@ def settings_from_header(header: dict, *, track_path=None,
         ice_path=source.get("ice_path"),
         liquid_var=source.get("liquid_var"),
         ice_var=source.get("ice_var"),
+        coarsen=source.get("coarsen"),
         size=even_size(size),
         fps=float(fps),
         quality=quality,
@@ -652,6 +656,12 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     kwargs.setdefault("liquid_water_var", s.liquid_var)
     kwargs.setdefault("ice_water_var", s.ice_var)
+    kwargs.setdefault("coarsen", s.coarsen)
+    if nest_group and kwargs["coarsen"] not in (None, 1):
+        raise ValueError(
+            "a coarsened field and --nest-group are not supported together: "
+            "the coarse grid is the outer field's only (witness refuses the "
+            "same pair).")
     ice = kwargs.pop("ice", None) or s.ice_path
     print(f"soar: loading {s.field_path}", flush=True)
     field = load_field(s.field_path, ice=ice, **kwargs)

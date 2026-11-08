@@ -379,6 +379,44 @@ def test_cli_help_needs_no_gpu():
     assert "--field" in out.stdout and "--quality" in out.stdout
 
 
+def test_a_coarse_demo_track_loads_the_grid_it_flew(monkeypatch, tmp_path):
+    """marine-congestus-coarse's header names the FINE file and the block
+    average the demo was made with; the re-render loads that grid, and the
+    header of any other flight (no key) loads the file as read."""
+    loads = []
+
+    class Loaded(Exception):
+        pass
+
+    def fake_load(path, **kwargs):
+        loads.append(kwargs)
+        raise Loaded               # the render itself is not this test's
+
+    import cloudyview.cloudfield
+    monkeypatch.setattr(cloudyview.cloudfield, "load", fake_load)
+    monkeypatch.setattr(tr.shutil, "which", lambda name: "/usr/bin/" + name)
+    for coarsen in (2, None):
+        header = _header(tmp_path, surface="ocean")
+        if coarsen:
+            header["source"]["coarsen"] = coarsen
+        assert tr.settings_from_header(header).coarsen == coarsen
+        path = _write(tmp_path, "cloudyview.track.v3", _synthetic_samples(3))
+        payload = json.loads(path.read_text())
+        payload["header"] = header
+        path.write_text(json.dumps(payload))
+        with pytest.raises(Loaded):
+            tr.render_track(path, tmp_path / "out.mp4")
+        assert loads[-1]["coarsen"] == coarsen
+    # A nest inside a coarsened field is refused before anything loads.
+    header["source"]["coarsen"] = 2
+    payload["header"] = header
+    path.write_text(json.dumps(payload))
+    n = len(loads)
+    with pytest.raises(ValueError, match="nest-group"):
+        tr.render_track(path, tmp_path / "out.mp4", nest_group="/nest")
+    assert len(loads) == n
+
+
 def test_lens_water_comes_from_the_header_and_old_tracks_replay_dry(tmp_path):
     # A header from before the switch has no key: it replays dry, as it
     # always rendered.

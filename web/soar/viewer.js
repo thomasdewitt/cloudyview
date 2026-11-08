@@ -2826,6 +2826,10 @@ export class Viewer {
         ice_path: this.scene.iceSourceName ?? null,
         liquid_var: this.scene.liquidVar ?? null,
         ice_var: this.scene.iceVar ?? null,
+        // A coarsened demo's block average (see scene.js), so `soar` re-renders
+        // a track over the grid that was flown rather than the fine file.
+        // Absent otherwise, like the city and desert blocks.
+        ...(this.scene.coarsen ? { coarsen: this.scene.coarsen } : {}),
       },
       camera: {
         position: rel,
@@ -3103,12 +3107,15 @@ export class Viewer {
    * here: behold renders the nest group when there is one, so each command
    * names its own.
    *
-   * A demo scene carries none of these fields and gets no flags, which is
-   * right — its command already names a file the browser never had.
+   * A demo scene carries none of these fields, which is right — its command
+   * already names a file the browser never had — except a coarsened bake's
+   * `--coarsen`: that command names the FINE source file, and the flag is
+   * how the CLI makes the grid the demo shipped from it.
    */
   _selectionFlags(quote) {
     const s = this.scene;
     const flags = [];
+    if (s?.coarsen) flags.push("--coarsen", String(s.coarsen));
     if (s?.liquidVar) flags.push("--liquid-water-var", quote(s.liquidVar));
     if (s?.iceFrom) {
       flags.push("--ice-file", quote(s.iceFrom.filename));
