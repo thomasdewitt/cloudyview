@@ -107,3 +107,28 @@ def test_steam_drawing_is_a_neighbour(monkeypatch):
     _pmon_says(monkeypatch, [(HELPER, "steamwebhelper", 40)])
     fatal, _ = gpu_idle.survey(seconds=0.0)
     assert fatal == [f"pid {HELPER} (steamwebhelper) at 40% SM"], fatal
+
+
+def test_the_lock_holders_work_is_not_a_neighbour_outside_the_lock(
+        monkeypatch, tmp_path):
+    """--outside-lock's view: what runs under the flock holding the GPU lock
+    is the holder's work (a pre-check before queueing would otherwise always
+    see it and fail); a process outside it is still fatal — the control."""
+    lock = tmp_path / "gpu.lock"
+    monkeypatch.setattr(gpu_idle, "LOCK", str(lock))
+    holder = subprocess.Popen(["flock", "-x", str(lock), sys.executable,
+                               "-c", SPAWNER], stdout=subprocess.PIPE,
+                              text=True)
+    worker = int(holder.stdout.readline())
+    try:
+        outsider = os.getppid()
+        assert worker in gpu_idle.lock_work()
+        _pmon_says(monkeypatch, [(worker, "python3", 90),
+                                 (outsider, "python3", 90)])
+        fatal, _ = gpu_idle.survey(seconds=0.0, exclude=gpu_idle.lock_work())
+        assert not any(f"pid {worker} " in f for f in fatal), fatal
+        assert any(f.startswith(f"pid {outsider} ") for f in fatal), fatal
+    finally:
+        subprocess.run(["kill", str(worker)], check=False)
+        holder.wait(timeout=10)
+        holder.stdout.close()

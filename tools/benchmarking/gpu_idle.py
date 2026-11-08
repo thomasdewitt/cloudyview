@@ -19,7 +19,7 @@ policy, 2026-09-24):
   his Steam client (a Chromium UI, steamwebhelper) is the same case
   (2026-11-08: idle at 0% SM, it refused a whole timing lock).
   A browser that DRAWS is a neighbour like any other. require_idle() waits
-  for these to go, then exits; a Watch samples all through the run, and
+  briefly for these to go (WAIT_S), then exits; a Watch samples all through the run, and
   check_quiet() exits non-zero with CONTAMINATED if the watch or its own
   last look saw one — discard the numbers.
 - WARNING, the desktop drawing: gnome-shell or the Claude app above
@@ -32,6 +32,21 @@ policy, 2026-09-24):
   that verdict, rather than failing.
 
     uv run python tools/benchmarking/gpu_idle.py      # exit 0 idle, 1 not
+
+Check BEFORE queueing for tools/gpulock as well as inside it. Inside the
+lock nothing worth waiting for can arrive (a teammate's GPU job is queued
+behind you), so a neighbour there is outside-lock work or an app that will
+not leave soon, and every second spent waiting holds the whole queue: on
+2026-11-08 an idle Steam client made one timing lock refuse six blocks of
+five minutes each. So require_idle() waits WAIT_S, not minutes, and a
+timing command is preceded by the pre-check, which ignores the lock
+holder's own work (LOCK; its tree under the flock that holds it):
+
+    uv run python tools/benchmarking/gpu_idle.py --outside-lock && \
+        tools/gpulock uv run python tools/benchmarking/soar_pass_timer.py ...
+
+The pre-check is only a fast fail: the card can change while you queue, so
+the check inside the lock stays the one that counts.
 """
 
 import os
@@ -40,6 +55,11 @@ import sys
 import time
 
 IDLE_UTIL_PCT = 3
+# How long require_idle() waits for a neighbour to leave, inside the lock.
+WAIT_S = 30.0
+# tools/gpulock's lock file: the flock holding it, and everything under it, is
+# the lock holder's work (what --outside-lock ignores).
+LOCK = "/tmp/soar-gpu.lock"
 # Under the M1-proxy clock lock (180 MHz) the compositor's few frames take
 # ten times as long, and the device reads 6-7% busy with nothing but the
 # desktop on it, below what pmon attributes to any process.
@@ -157,7 +177,7 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
         time.sleep(0.5)
 
 
-def require_idle(wait_s: float = 300.0) -> list[str]:
+def require_idle(wait_s: float = WAIT_S) -> list[str]:
     """Block until no neighbour is on the card, up to `wait_s`, then exit
     loudly. Returns the desktop warnings seen at the start."""
     t_end = time.monotonic() + wait_s
@@ -227,8 +247,26 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
     return warn
 
 
+def lock_work() -> set[int]:
+    """Every process under a flock on LOCK: the GPU work of whoever holds
+    tools/gpulock (the flocks still queued have nothing under them yet)."""
+    work = set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            argv = open(f"/proc/{entry}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if (argv and os.path.basename(argv[0]) == b"flock"
+                and LOCK.encode() in argv):
+            work |= _descendants(int(entry))
+    return work
+
+
 if __name__ == "__main__":
-    fatal, warn = survey()
+    outside = "--outside-lock" in sys.argv[1:]
+    fatal, warn = survey(exclude=lock_work() if outside else ())
     for w in warn:
         print("WARNING " + w)
     print("idle" if not fatal else "NOT idle:\n  " + "\n  ".join(fatal))
