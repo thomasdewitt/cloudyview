@@ -2449,34 +2449,60 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
 // tone_map run backwards: the linear radiance a displayed value came from,
 // for the live steam (fs_steam_live), which composites in linear light onto
 // an image already accumulated in display values. Exact wherever tone_map
-// is invertible; what its clamps threw away does not come back: a channel
-// at the white point returns the white point, and under contrast > 1 a
-// value clipped to 0 or 1 returns the clip's edge. The shoulder couples the
-// channels through the exposed luminance y, so the solve iterates: with the
-// mix k and the chroma gain g of the last y held fixed, each channel's
-// (1 - k) e (1 + e/w^2)/(1 + e) + k g e = m is a quadratic in e (the first
-// pass, k = 0, is the per-channel curve's exact inverse, and stays exact
-// below the shoulder, y < 1).
+// is invertible (tests/test_tone_unmap.py holds the round trip on the GPU);
+// what its clamps threw away does not come back: a channel whose curve
+// reached 1 (at the white point, or below it for a saturated colour in the
+// shoulder, whose chroma-preserving branch overshoots) returns where it
+// reached it, and under contrast > 1 a value clipped to 0 or 1 returns the
+// clip's edge. Below the shoulder (exposed luminance
+// y < 1) the curve is per channel and inverts in closed form. In it, y fixes
+// the shoulder's mix k and chroma gain g and with them every channel, so
+// the solve is for the one y that reproduces itself, by bisection: a fixed
+// point iterated on y can oscillate there (codex, 2026-11-08).
 fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let c = u.ocean_realism_b.w;
     let encoded = clamp((display - vec3<f32>(0.5)) / c + vec3<f32>(0.5),
                         vec3<f32>(0.0), vec3<f32>(1.0));
     let m = pow(encoded, vec3<f32>(gamma));
-    let wp = u.flags.w;
-    let w2 = wp * wp;
-    var k = 0.0;
-    var g = 1.0;
-    var e = m;
-    for (var i: i32 = 0; i < 4; i = i + 1) {
-        let a2 = (1.0 - k) / w2 + k * g;               // > 0
-        let b1 = vec3<f32>((1.0 - k) + k * g) - m;
-        // @domain: a sum of a square and 4 a2 m, a2 > 0 and m >= 0
-        e = (sqrt(b1 * b1 + 4.0 * a2 * m) - b1) / (2.0 * a2);
-        let y = dot(e, vec3<f32>(0.2126, 0.7152, 0.0722));
-        k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
-        g = (1.0 + y / w2) / (1.0 + y);
+    let w2 = u.flags.w * u.flags.w;
+    let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let e0 = tone_unmap_channels(m, 0.0, 1.0, w2);
+    if (dot(e0, lum) < 1.0) {
+        return e0 / exposure;
     }
-    return e / exposure;
+    // y lies in [1, y_hi]: every channel's m <= 1, and with k at most
+    // TONE_MAP_SHOULDER the per-channel part alone caps e where the plain
+    // curve reaches 1 / (1 - TONE_MAP_SHOULDER).
+    var lo = 1.0;
+    var hi = tone_unmap_channels(vec3<f32>(1.0 / (1.0 - TONE_MAP_SHOULDER)),
+                                 0.0, 1.0, w2).x;
+    for (var i: i32 = 0; i < 24; i = i + 1) {
+        let y = 0.5 * (lo + hi);
+        let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+        let e = tone_unmap_channels(m, k, (1.0 + y / w2) / (1.0 + y), w2);
+        if (dot(e, lum) > y) {
+            lo = y;
+        } else {
+            hi = y;
+        }
+    }
+    let y = 0.5 * (lo + hi);
+    let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+    return tone_unmap_channels(m, k, (1.0 + y / w2) / (1.0 + y), w2)
+        / exposure;
+}
+
+// Each channel's exposed e with (1 - k) e (1 + e/w2)/(1 + e) + k g e = m,
+// the shoulder's mix k and chroma gain g held fixed: a e^2 + b e - m = 0,
+// a = (1 - k)/w2 + k g > 0, b = (1 - k) + k g - m. Its root e >= 0 in the
+// form that does not cancel for either sign of b (the plain one lost a dark
+// value to 0 in float32, codex 2026-11-08).
+fn tone_unmap_channels(m: vec3<f32>, k: f32, g: f32, w2: f32) -> vec3<f32> {
+    let a = (1.0 - k) / w2 + k * g;
+    let b = vec3<f32>((1.0 - k) + k * g) - m;
+    // @domain: a square plus 4 a m, with a > 0 and m >= 0
+    let q = sqrt(b * b + 4.0 * a * m);
+    return select((q - b) / (2.0 * a), 2.0 * m / (q + b), b > vec3<f32>(0.0));
 }
 
 // ---------------------------------------------------------------------------
