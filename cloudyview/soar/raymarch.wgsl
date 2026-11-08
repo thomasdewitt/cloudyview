@@ -7083,16 +7083,20 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
               + city_shell_light(h.pos, n)
               + win.e * (0.8 * spill);
     e = e + alb * light;
-    // The storefront band and everything the facade components paint on
-    // the wall, read at the wall-plane point the way the flat facade does.
-    if (part == CITY_PART_WALL || part == CITY_PART_GLASS
-        || part == CITY_PART_FRAME) {
-        if (hw.pos.z < CITY_STORE_H && cc.store_draw < 0.65) {
-            e = e + city_storefront_glow(cc)
-                    * (1.0 - smoothstep(CITY_STORE_H * 0.4, CITY_STORE_H,
-                                        hw.pos.z));
-        }
+    // The storefront band, read at the wall-plane point the way the flat
+    // facade reads it. The flat facade lays the band over the whole wall
+    // plane, so here it is on every surface of the wall: the wall and its
+    // trim, and the openings' reveals, sills, frames and glass (parts WALL
+    // to TRIM). Left off the reveals and sills, each jamb was a dark sliver
+    // in a white band, there while the shell drew it and gone when it
+    // handed over. What stands off the wall (units, pipes, steel, canopies,
+    // balconies) is lit by the band, not part of it.
+    if (part <= CITY_PART_TRIM && hw.pos.z < CITY_STORE_H) {
+        e = e + city_storefront_glow(cc)
+                * (1.0 - smoothstep(CITY_STORE_H * 0.4, CITY_STORE_H,
+                                    hw.pos.z));
     }
+    // Everything the facade components paint on the wall.
     if (part == CITY_PART_WALL) {
         e = e + cc_facade_detail(cc, hw, l.x, l.y, fp);
         // A curtain wall's spandrels are glass too: the same reflection the

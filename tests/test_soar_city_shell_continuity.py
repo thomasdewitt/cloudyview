@@ -417,3 +417,168 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
     assert mean_abs <= bound, (
         f"{view_name}: at the hand-off the shell differs from the flat "
         f"facade by {mean_abs:.5f} on average (bound {bound})")
+
+
+# --- the storefront band ----------------------------------------------------
+#
+# A commercial ground floor glows (city_storefront_glow): the flat facade
+# lays that light over the whole wall plane below CITY_STORE_H, so the
+# shell, read up close, must lay it over every surface of the wall there
+# too: the reveals and sills of its recessed windows as well as the wall and
+# the glass. Left off them, each jamb is a dark sliver in a band that is
+# otherwise white, there when the shell is and gone when it hands over to
+# the flat facade: "the window sides appear and disappear" (Thomas, on the
+# building with the white first floor).
+#
+# The probe: per pixel where the plain pass hit a building's facade (kind
+# 1: never the ground or a roof), that building (its tier-0 box's min x and
+# y), the wall-plane height and the distance; elsewhere t < 0. Whether the
+# building's ground floor is commercial comes from a top-down pass, which
+# reads the storefront glow's mean in z (`_find_storefront`).
+STORE_PROBE = """    if (chit.hit && chit.kind == 1) {
+        let pc = city_cell(chit.cell);
+        return vec4<f32>(pc.b1min.x, pc.b1min.y, chit.pos.z, chit.t);
+    }
+    if (chit.hit) {
+        let pc = city_cell(chit.cell);
+        return vec4<f32>(pc.b1min.x, pc.b1min.y,
+                         dot(city_storefront_glow(pc), vec3<f32>(1.0 / 3.0)),
+                         -1.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+"""
+# The band's fully lit part: the glow fades from 0.4 CITY_STORE_H (1.76 m)
+# up to CITY_STORE_H.
+STORE_FULL_Z = 1.7
+# A camera STORE_RANGE metres off the face's middle, STORE_OFF degrees off
+# its normal so the reveals on one side of every window face it, at
+# STORE_Z, looking at STORE_AIM_Z.
+STORE_RANGE = 28.0
+STORE_OFF = 45.0
+STORE_Z = 3.0
+STORE_AIM_Z = 1.2
+STORE_FOV = 50.0
+STORE_SIZE = (960, 540)
+STORE_MIN_SHARE = 0.05
+STORE_MIN_PIXELS = 5000
+# Relief standing more than this in front of the wall plane is an object
+# (a canopy, a unit, a pipe, the street's furniture), not the wall.
+STORE_IN_FRONT = 0.25
+# A band pixel the shell shows darker than this share of what the flat
+# facade shows there is a dark sliver.
+STORE_DARK = 0.6
+# Measured (2026-11-08, 32 frames, 45735 band pixels): 0.0 with the band on
+# every surface of the wall; 0.066 with it left off the reveals and sills.
+MAX_STORE_DARK = 0.002
+
+
+def _store_probe(level):
+    from cloudyview.soar_host import SoarRenderer
+    source = SHADER.read_text()
+    assert source.count(PROBE_ANCHOR) == 1, (
+        "the plain pass's probe anchor moved; update PROBE_ANCHOR")
+    r = SoarRenderer(periodic=True, surface="city",
+                     shader_source=source.replace(
+                         PROBE_ANCHOR, STORE_PROBE + PROBE_ANCHOR))
+    r.upload_volume(level.sigma)
+    return r
+
+
+def _store_plane(r, state, cam, w, h):
+    from cloudyview.soar_host import ViewState
+    x, y, z, az, el, fov = cam
+    r.render(state, ViewState(
+        camera_position=[x + TILE_OFFSET[0], y + TILE_OFFSET[1], z],
+        azimuth=az, elevation=el, fov=fov, output_size=(w, h),
+        render_size=(w, h), jitter=False, subpixel=False,
+        sun_azimuth=310.0, sun_elevation=22.0, exposure=6.0,
+        view_step_lod_degrees=0.0), frames=1)
+    return _plain(r, w, h).view(np.float32)
+
+
+def _store_camera(box, off):
+    """STORE_RANGE metres off the middle of the building's south face,
+    `off` degrees west of its normal, aimed at the band."""
+    x0, y0, x1, _ = (float(v) for v in box)
+    a = math.radians(off)
+    x = 0.5 * (x0 + x1) - STORE_RANGE * math.sin(a)
+    y = y0 - STORE_RANGE * math.cos(a)
+    el = math.degrees(math.atan2(STORE_AIM_Z - STORE_Z, STORE_RANGE))
+    return (x, y, STORE_Z, off, el, STORE_FOV)
+
+
+def _store_band(plane, box):
+    """The building's own facade in the band's fully lit part, eroded by a
+    pixel so that jitter at its edges cannot reach past it."""
+    m = ((np.abs(plane[..., 0] - box[0]) < 0.1)
+         & (np.abs(plane[..., 1] - box[1]) < 0.1) & (plane[..., 3] > 0.0)
+         & (plane[..., 2] < STORE_FULL_Z))
+    e = m.copy()
+    e[1:] &= m[:-1]
+    e[:-1] &= m[1:]
+    e[:, 1:] &= m[:, :-1]
+    e[:, :-1] &= m[:, 1:]
+    return e
+
+
+def _find_storefront(level, state):
+    """The commercial building whose band fills most of its view."""
+    probes = _probe_renderers(level)
+    store = _store_probe(level)
+    top_cam = (SEARCH_CENTRE[0], SEARCH_CENTRE[1], SEARCH_ALT, 0.0, -89.9,
+               SEARCH_FOV)
+    top = _probe(probes, state, top_cam, SEARCH_PX, SEARCH_PX)
+    # Looking straight down, a hit on a roof or the ground hands back the
+    # storefront glow of the cell under it (t < 0); a facade seen edge-on
+    # hands back a height instead, so it is not read.
+    plane = _store_plane(store, state, top_cam, SEARCH_PX, SEARCH_PX)
+    glow = np.where(plane[..., 3] < 0.0, plane[..., 2], 0.0)
+    hit = top[..., 6] > 0.0
+    boxes, lit = {}, set()
+    for px, g in zip(top[hit], glow[hit]):
+        key = tuple(np.round(px[:4], 1))
+        boxes[key] = (float(px[4]), int(round(px[5])))
+        if g > 0.0:
+            lit.add(key)
+    found = sorted((key for key in lit if key[2] - key[0] >= 20.0),
+                   key=lambda k: (
+                       (0.5 * (k[0] + k[2]) - SEARCH_CENTRE[0]) ** 2
+                       + (0.5 * (k[1] + k[3]) - SEARCH_CENTRE[1]) ** 2, k))
+    best, best_share = None, STORE_MIN_SHARE
+    for key in found[:MAX_CANDIDATES]:
+        for off in (STORE_OFF, -STORE_OFF):
+            cam = _store_camera(key, off)
+            if _inside_any(cam, boxes):
+                continue
+            share = float(_store_band(
+                _store_plane(store, state, cam, 320, 180), key).mean())
+            if share > best_share:
+                best, best_share = (key, cam), share
+    if best is None:
+        raise AssertionError(
+            f"no storefront ({len(found)} candidates) fills its view; "
+            "revisit STORE_* or SEARCH_*")
+    return best, store
+
+
+@pytest.mark.gpu
+def test_storefront_band_lights_the_whole_wall(city):
+    """Up close, the shell shows no surface of the wall in a lit storefront
+    band much darker than the flat facade shows the band there."""
+    renderers, state, _ = city
+    level = build_soar_level()
+    (box, cam), store = _find_storefront(level, state)
+    w, h = STORE_SIZE
+    band = _store_band(_store_plane(store, state, cam, w, h), box)
+    shell = _shown(renderers["shell"], state, cam, w).mean(axis=-1)
+    t_plain = np.abs(_plain(renderers["shell"], w, h)[..., 3]
+                     .view(np.float32))
+    t_final = np.abs(_surface_t(renderers["shell"], w, h))
+    flat = _shown(renderers["flat"], state, cam, w).mean(axis=-1)
+    wall = band & (t_final > t_plain - STORE_IN_FRONT)
+    assert wall.sum() >= STORE_MIN_PIXELS, (
+        f"only {wall.sum()} pixels of storefront band in view")
+    dark = float((shell[wall] < STORE_DARK * flat[wall]).mean())
+    assert dark <= MAX_STORE_DARK, (
+        f"{dark:.4f} of the storefront band's wall is a dark sliver in the "
+        f"shell (bound {MAX_STORE_DARK}); building {box}, camera {cam}")
