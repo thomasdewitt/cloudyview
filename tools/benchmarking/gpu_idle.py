@@ -19,7 +19,8 @@ policy, 2026-09-24):
   his Steam client (a Chromium UI, steamwebhelper) is the same case
   (2026-11-08: idle at 0% SM, it refused a whole timing lock).
   A browser that DRAWS is a neighbour like any other. require_idle() waits
-  briefly for these to go (WAIT_S), then exits; a Watch samples all through the run, and
+  briefly for these to go (WAIT_S), then exits; a Watch samples all through
+  the run, and
   check_quiet() exits non-zero with CONTAMINATED if the watch or its own
   last look saw one — discard the numbers.
 - WARNING, the desktop drawing: gnome-shell or the Claude app above
@@ -46,7 +47,9 @@ holder's own work (LOCK; its tree under the flock that holds it):
         tools/gpulock uv run python tools/benchmarking/soar_pass_timer.py ...
 
 The pre-check is only a fast fail: the card can change while you queue, so
-the check inside the lock stays the one that counts.
+the check inside the lock stays the one that counts. It fails closed on one
+case: the holder's QA Chrome drawing reads as a neighbour, because the CDP
+scripts only drive that Chrome and it does not run under the flock.
 """
 
 import os
@@ -130,8 +133,11 @@ def _descendants(root: int) -> set[int]:
     return tree
 
 
-def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
+def survey(seconds: float = 3.0, exclude=(),
+           outside_lock: bool = False) -> tuple[list[str], list[str]]:
     """(fatal, warnings) sampled over `seconds`; both empty when idle.
+    `outside_lock`: the lock holder's work (lock_work()) is not a
+    neighbour either — the pre-check before queueing.
     `exclude`: pids to ignore besides this process and everything it
     started (always ignored: the caller's own work is not a neighbour). The
     whole tree, not just this pid, because a caller that times a child
@@ -151,9 +157,15 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
         # The tree on both sides of the pmon sample, each time: the caller's
         # children come and go during a run, and one started or ended just
         # as pmon looked is still the caller's.
+        # The same for the lock holder's tree under outside_lock: a holder
+        # running a loop starts new GPU processes all the time.
         own = _descendants(os.getpid())
+        if outside_lock:
+            own |= lock_work()
         rows = _processes()
         own |= _descendants(os.getpid()) | set(exclude)
+        if outside_lock:
+            own |= lock_work()
         known = 0
         for pid, short, sm in rows:
             known += sm or 0
@@ -266,7 +278,7 @@ def lock_work() -> set[int]:
 
 if __name__ == "__main__":
     outside = "--outside-lock" in sys.argv[1:]
-    fatal, warn = survey(exclude=lock_work() if outside else ())
+    fatal, warn = survey(outside_lock=outside)
     for w in warn:
         print("WARNING " + w)
     print("idle" if not fatal else "NOT idle:\n  " + "\n  ".join(fatal))

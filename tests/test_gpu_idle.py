@@ -113,22 +113,45 @@ def test_the_lock_holders_work_is_not_a_neighbour_outside_the_lock(
         monkeypatch, tmp_path):
     """--outside-lock's view: what runs under the flock holding the GPU lock
     is the holder's work (a pre-check before queueing would otherwise always
-    see it and fail); a process outside it is still fatal — the control."""
+    see it and fail), including a worker the holder starts only after the
+    check has begun (a holder running a loop does that all the time); a
+    process outside it is still fatal — the control."""
     lock = tmp_path / "gpu.lock"
     monkeypatch.setattr(gpu_idle, "LOCK", str(lock))
-    holder = subprocess.Popen(["flock", "-x", str(lock), sys.executable,
-                               "-c", SPAWNER], stdout=subprocess.PIPE,
-                              text=True)
-    worker = int(holder.stdout.readline())
+    late = SPAWNER.replace("import subprocess", "import subprocess, time; "
+                           "time.sleep(0.5); import subprocess", 1)
+    # Detached (setsid -f): a holder under this process would be the
+    # caller's own tree, excluded whatever lock_work() says.
+    holder = subprocess.Popen(["setsid", "-f", "flock", "-x", str(lock),
+                               sys.executable, "-c", late],
+                              stdout=subprocess.PIPE, text=True)
+    outsider = os.getppid()
+    seen = []
+
+    def processes():
+        # The pmon sample: taken after survey started, by which time the
+        # holder's worker exists (readline blocks until it is spawned).
+        if not seen:
+            seen.append(int(holder.stdout.readline()))
+        return [(seen[0], "python3", 50), (outsider, "python3", 50)]
+
+    monkeypatch.setattr(gpu_idle, "_processes", processes)
+    monkeypatch.setattr(gpu_idle, "_smi", lambda *a: "0\n")
     try:
-        outsider = os.getppid()
-        assert worker in gpu_idle.lock_work()
-        _pmon_says(monkeypatch, [(worker, "python3", 90),
-                                 (outsider, "python3", 90)])
-        fatal, _ = gpu_idle.survey(seconds=0.0, exclude=gpu_idle.lock_work())
+        before = gpu_idle.lock_work()
+        fatal, _ = gpu_idle.survey(seconds=0.0, outside_lock=True)
+        worker = seen[0]
+        assert worker not in before        # it really started late
+        assert worker not in gpu_idle._descendants(os.getpid())
         assert not any(f"pid {worker} " in f for f in fatal), fatal
         assert any(f.startswith(f"pid {outsider} ") for f in fatal), fatal
+        # A snapshot taken before the worker existed is what the review
+        # caught: with it the worker reads as a neighbour.
+        monkeypatch.setattr(gpu_idle, "lock_work", lambda: before)
+        fatal, _ = gpu_idle.survey(seconds=0.0, outside_lock=True)
+        assert any(f"pid {worker} " in f for f in fatal), fatal
     finally:
-        subprocess.run(["kill", str(worker)], check=False)
+        if seen:
+            subprocess.run(["kill", str(seen[0])], check=False)
         holder.wait(timeout=10)
         holder.stdout.close()
