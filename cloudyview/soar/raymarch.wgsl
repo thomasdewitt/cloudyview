@@ -5327,10 +5327,11 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
 // look while materials read as brick or concrete where a lamp reaches them.
 
 const CITY_KIND_SHELL: i32 = 1000;  // 1000 + part + 16 * (side + 4 * tier)
-// The deepest any facade relief may stand off its wall (m). The flyer's
-// collider (city-layout's, and its JS mirror) inflates every building box by
-// exactly this, so the camera can never be inside a feature; a style deeper
-// than this is clamped to it.
+// The deepest any facade relief may stand off its wall (m); a style deeper
+// than this is clamped to it. The flight collider (web/soar/citylots.js
+// shellDepth) grows each building by its own style's depth, mirrored from
+// city_shell_style, so the camera is never inside a feature — change a
+// relief depth there and tests/test_city_lots_mirror.py says so.
 const CITY_SHELL_OUT_MAX: f32 = 1.5;
 const CITY_SHELL_FP_MORPH: f32 = 0.4;
 const CITY_SHELL_FP_BLEND: f32 = 0.6;
@@ -14361,8 +14362,8 @@ const cc_industry_DOCK_GAP: f32 = 0.25;       // trailer rear off the wall
 // The dock doors: sectional doors DOOR_W x DOOR_H standing on the dock
 // floor (DOCK_H above the court), one per dock slot; a black shelter frame
 // around each on some buildings, bumpers and a leveller lip on all. Relief
-// stays inside SHELL_OUT of the wall — the flight collider's growth
-// (web/soar/citylots.js CITY_SHELL_OUT_MAX).
+// stays inside SHELL_OUT of the wall. (Not mirrored by the flight collider,
+// which meets a warehouse at its wall: web/soar/cityprops.js.)
 const cc_industry_DOCK_H: f32 = 1.2;
 const cc_industry_DOOR_W: f32 = 3.0;
 const cc_industry_DOOR_H: f32 = 3.0;

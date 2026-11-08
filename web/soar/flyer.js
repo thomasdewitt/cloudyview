@@ -90,13 +90,15 @@ const COURSE_MIN_SPEED = 0.5;   // m/s
 // one — a wing catches, the thing goes over — and the yaw is what a wall
 // does to a nose that meets it off-square. A landing (the street, a roof)
 // is the same at LANDING_KNOCK of the size: a stumble, not a tumble.
-const KNOCK_ROLL_DEG = 70.0;
-const KNOCK_PITCH_DEG = 28.0;
-const KNOCK_YAW_DEG = 40.0;
-const KNOCK_ROLL_HZ = 1.5;
-const KNOCK_PITCH_HZ = 2.2;
+// (Raised by about half in 2026-11, roll past the vertical at a full-speed
+// crash, at Thomas's ask for a crash that rocks the plane harder.)
+const KNOCK_ROLL_DEG = 110.0;
+const KNOCK_PITCH_DEG = 42.0;
+const KNOCK_YAW_DEG = 60.0;
+const KNOCK_ROLL_HZ = 1.3;
+const KNOCK_PITCH_HZ = 2.0;
 const KNOCK_YAW_HZ = 0.9;
-const KNOCK_TAU = 0.45;           // s
+const KNOCK_TAU = 0.55;           // s
 const LANDING_KNOCK = 0.4;
 
 export const TWO_PI = 2.0 * Math.PI;

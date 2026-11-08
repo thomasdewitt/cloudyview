@@ -15,11 +15,13 @@
 // city_cell on the GPU over a couple of thousand cells and holds this file to
 // it.
 //
-// What is solid: the building boxes b1..b3 (as many as `tiers` says), the
-// frustum of archetypes 3 and 4, the mast, and the ground plane. Everything
-// the components add — street furniture, props, industry roof ridges,
-// skyways — is scenery the flyer passes through (decided with the
-// city-layout session, 2026-09-23).
+// What is solid here: the building boxes b1..b3 (as many as `tiers` says),
+// grown by the facade relief their walls carry (shellDepth), the frustum of
+// archetypes 3 and 4, the mast, and the ground plane. What the components
+// stand among them — the freeways, lamp posts, parked cars, skybridges and
+// warehouse roof ridges — is cityprops.js's, handed to CityLots as `props`.
+// (Until 2026-11 those were scenery the flyer passed through; Thomas: "it
+// seems like all these should be solid. why not?")
 //
 // city_cell below is kept line for line with the WGSL so that re-syncing
 // after a change there is a diff read, not a re-derivation. It deliberately
@@ -29,6 +31,7 @@
 "use strict";
 
 import { fromHalf } from "./half.js";
+import { insidePolytope, segmentPolytope } from "./polytope.js";
 
 // --- raymarch.wgsl constants (names identical; pinned by the mirror test) ---
 export const CITY_GROUND_Z = 0.0;
@@ -197,12 +200,12 @@ export class CityTile {
 }
 
 /** raymarch.wgsl city_tile_cell: an index folded into [0, n). */
-function tileCell(n, k) {
+export function tileCell(n, k) {
   return ((k % n) + n) % n;
 }
 
 /** raymarch.wgsl city_is_avenue. */
-function isAvenue(k) {
+export function isAvenue(k) {
   return ((k % CITY_AVENUE_PERIOD) + CITY_AVENUE_PERIOD)
          % CITY_AVENUE_PERIOD === 0;
 }
@@ -278,6 +281,7 @@ export function cityCell(tile, cx, cy) {
   c.has_frustum = false;
   c.fmin = ZERO3(); c.fmax = ZERO3();
   c.fscale = 1.0;
+  c.win_style = 0;              // the WGSL's zero-initialised CityCell
   if (!c.built) {
     return c;
   }
@@ -311,6 +315,7 @@ export function cityCell(tile, cx, cy) {
     }
     c.b1min = vec3(lo, CITY_GROUND_Z);
     c.b1max = vec3(hi, h);
+    c.win_style = 4;
     return c;
   }
 
@@ -546,8 +551,29 @@ export function cityCell(tile, cx, cy) {
     }
   }
 
-  // (The WGSL's window style, house palette and occupancy draws go here.
-  // None of them is geometry.)
+  // The window style: geometry after all, since the facade shell's relief
+  // (sills, units, balconies, fire escapes) stands off the wall by a depth
+  // that follows it (shellDepth). The house palette and occupancy draws that
+  // follow it in the WGSL decide nothing a flyer can hit.
+  const r4e = cityRand4(...xorSeed(c.seed, 0xb5297a4d, 0x68e31da4));
+  let style = 0;
+  if (h > 350.0 || c.arch === 3) {
+    if (r4e[0] < f(0.45)) style = 3;
+    else if (r4e[0] < f(0.70)) style = 0;
+    else if (r4e[0] < f(0.90)) style = 1;
+    else style = 2;
+  } else if (h < 40.0) {
+    if (r4e[0] < f(0.50)) style = 4;
+    else if (r4e[0] < f(0.80)) style = 0;
+    else style = 1;
+  } else {
+    if (r4e[0] < f(0.30)) style = 0;
+    else if (r4e[0] < f(0.55)) style = 1;
+    else if (r4e[0] < f(0.75)) style = 2;
+    else if (r4e[0] < f(0.90)) style = 3;
+    else style = 4;
+  }
+  c.win_style = style;
 
   // Roof furniture belongs on roofs; a supertall's tapered shaft always
   // ends in a needle, scaled to the tower and centred on its crown.
@@ -586,13 +612,20 @@ export function cityCell(tile, cx, cy) {
 // to z = r. (A grown box's edges are square where the true grown shape is
 // rounded — a few centimetres of extra caution at a corner.)
 //
-// The buildings grow sideways by more than that: the facade shell
-// (city-facades) hangs relief — sills, air-conditioning units, fire escapes,
-// balconies — up to CITY_SHELL_OUT_MAX outside every building box and
-// frustum, and a camera inside that relief sees it vanish exactly as it saw
-// whole buildings vanish. So b1..b3 and the frustum grow horizontally by
-// the shell as well; roofs stay exact (nothing stands on them from the
-// shell) and nothing hangs below a box. Masts carry no shell.
+// A building's boxes grow sideways by more than that: the facade shell
+// (city-facades) hangs relief off the walls — sills, ledges, air-
+// conditioning units, fire escapes, balconies — and a camera inside that
+// relief sees it vanish exactly as it saw whole buildings vanish. How far
+// it stands out is the building's own (shellDepth: a few centimetres of
+// mullion cap on a curtain wall, 0.6 m where units hang under the sills,
+// 1.1-1.25 m only where there are balconies or a fire escape), so each
+// building grows by exactly its own relief and the flight meets the wall
+// where the wall is. (It grew every building by the deepest any style
+// allows, CITY_SHELL_OUT_MAX, until 2026-11: a curtain wall stopped you
+// 1.5 m short of its glass, and Thomas noticed — "it happens a bit before
+// the airplane actually contacts the building".) Roofs stay exact (nothing
+// stands on them from the shell) and nothing hangs below a box. The
+// frustum's sloped skin and the masts carry no shell.
 //
 // A hit reports the ENTRY — a segment that starts inside does not hit. That
 // is the right answer for a sweep (a body already inside cannot be stopped
@@ -605,9 +638,76 @@ export function cityCell(tile, cx, cy) {
 // walk visits tests its eight neighbours as well. That is exact as long as
 // the growth is under a cell, which checkReach() holds.
 
-// raymarch.wgsl CITY_SHELL_OUT_MAX, in the facade shell's section (the
-// city-facades branch): how far relief stands off a building box.
+// raymarch.wgsl's facade shell: the deepest relief any style may carry, and
+// the two deepest features.
 export const CITY_SHELL_OUT_MAX = 1.5;
+export const CITY_ESCAPE_OUT = 1.25;
+export const CITY_BALCONY_OUT = 1.10;
+
+/** raymarch.wgsl city_escape_building: the building carries a fire escape. */
+function escapeBuilding(c) {
+  const h = cityRand4(...xorSeed(c.seed, 0x1b873593, 0xcc9e2d51));
+  return (c.win_style === 4 || c.win_style === 0)
+    && c.land_use === CITY_USE_URBAN
+    && c.height >= 18.0 && c.height <= 66.0 && h[0] < f(0.25);
+}
+
+/** raymarch.wgsl city_balcony_building: balconies (never with an escape). */
+function balconyBuilding(c) {
+  const h = cityRand4(...xorSeed(c.seed, 0x27220a95, 0x165667b1));
+  return (c.win_style === 0 || c.win_style === 4 || c.win_style === 1)
+    && c.land_use === CITY_USE_URBAN
+    && c.height >= 12.0 && c.height <= 120.0 && h[0] < f(0.33)
+    && !escapeBuilding(c);
+}
+
+/**
+ * How far the facade shell's relief stands off this building's walls: the
+ * depth raymarch.wgsl city_shell_style gives the building's shell layer,
+ * draw for draw (only the draws that move the depth are mirrored). Zero on
+ * an industrial lot, whose walls the shell leaves to the industry
+ * component, which hangs nothing off them.
+ */
+export function shellDepth(c) {
+  if (c.land_use !== CITY_USE_URBAN) return 0.0;
+  const r = cityRand4(...xorSeed(c.seed, 0x6a09e667, 0xbb67ae85));
+  const q = cityRand4(...xorSeed(c.seed, 0x510e527f, 0x9b05688c));
+  const tall = c.height > 150.0;
+  const pipesOf = (x) => Math.floor(f(x * f(2.99)));
+  let sill = 0.0, ledge = 0.0, cornice = 0.0, cap = 0.0, hood = 0.0;
+  let canopy = 0.0, ac = 0.0, pipes = 0;
+  if (c.win_style === 4) {
+    sill = 0.06;
+    hood = r[2] > f(0.3) ? 0.07 + 0.05 * q[1] : 0.0;
+    if (r[3] < f(0.40)) ledge = 0.05;
+    cornice = c.height < 80.0 ? 0.30 + 0.20 * q[1] : 0.0;
+    ac = tall ? 0.0 : 0.10 + 0.20 * q[2];
+    pipes = pipesOf(q[3]);
+  } else if (c.win_style === 0) {
+    sill = r[1] < f(0.5) ? 0.04 : 0.0;
+    if (r[3] < f(0.60)) ledge = 0.10 + 0.08 * q[0];
+    ac = tall ? 0.0 : 0.08 + 0.25 * q[2];
+    pipes = tall ? 0 : pipesOf(q[3]);
+    canopy = !tall && c.height < 90.0 && r[2] > f(0.6)
+      ? 0.45 + 0.25 * r[2] : 0.0;
+  } else if (c.win_style === 1) {
+    cap = 0.05;
+    if (r[3] < f(0.45)) ledge = 0.35 + 0.20 * q[0];
+    ac = tall ? 0.0 : 0.06;
+    pipes = !tall && q[3] < f(0.4) ? 1 : 0;
+  } else if (c.win_style === 2) {
+    cap = 0.25 + 0.20 * r[3];
+  } else {
+    cap = 0.08 + 0.06 * r[3];
+    ledge = 0.04;
+  }
+  let depth = Math.max(sill, ledge, cornice, cap, hood, canopy);
+  if (ac > 0.0) depth = Math.max(depth, 0.58);
+  if (pipes > 0) depth = Math.max(depth, 0.24);
+  if (escapeBuilding(c)) depth = Math.max(depth, CITY_ESCAPE_OUT);
+  if (balconyBuilding(c)) depth = Math.max(depth, CITY_BALCONY_OUT);
+  return Math.min(depth + 0.02, CITY_SHELL_OUT_MAX);
+}
 
 const EPS_DIR = 1e-12;
 
@@ -621,7 +721,8 @@ export function cellSolids(cc, r) {
   let list = cc._solids.get(r);
   if (list !== undefined) return list;
   list = [];
-  const building = [CITY_SHELL_OUT_MAX + r, CITY_SHELL_OUT_MAX + r, r];
+  const shell = shellDepth(cc);
+  const building = [shell + r, shell + r, r];
   list.push({ min: cc.b1min, max: cc.b1max, grow: building });
   if (cc.tiers >= 2) list.push({ min: cc.b2min, max: cc.b2max, grow: building });
   if (cc.tiers >= 3) list.push({ min: cc.b3min, max: cc.b3max, grow: building });
@@ -672,9 +773,8 @@ function frustumShape(fmin, fmax, fscale, r) {
     h2, sp,
     z0: fmin[2] - r, z1: fmax[2] + r,
     // A sloped face moved out by r along its normal moves out by
-    // r sqrt(1 + slope^2) horizontally; the shell is horizontal already.
-    grow: [CITY_SHELL_OUT_MAX + r * Math.hypot(1.0, h2[0] * sp),
-           CITY_SHELL_OUT_MAX + r * Math.hypot(1.0, h2[1] * sp)],
+    // r sqrt(1 + slope^2) horizontally.
+    grow: [r * Math.hypot(1.0, h2[0] * sp), r * Math.hypot(1.0, h2[1] * sp)],
   };
 }
 
@@ -750,17 +850,27 @@ function* neighbourhood(cx, cy) {
 // by clearing rather than evicting — at 4096 blocks it holds a 5 km square,
 // several seconds of flight at any speed a street allows.
 const CELL_CACHE_MAX = 4096;
+const NO_PROPS = Object.freeze({ solids: [], top: -Infinity });
+const SHRINK_MAX = 0.01;
 
 /**
  * The city as a solid: segment sweeps and point containment in the
  * UNWRAPPED city frame (metres; any real x, y — the tile repeats).
+ *
+ * `props`, if given, is what the components stand in the city besides its
+ * buildings (cityprops.js CityProps): `cellSolids(cc, cx, cy, r)`, the
+ * polytopes block (cx, cy)'s column holds and the highest top among them
+ * ({solids, top}), and
+ * `segmentSolids(p0, p1, r)`, those owned by no block (the freeways) near a
+ * segment. Every hit names its `source`.
  */
 export class CityLots {
-  constructor(tile) {
+  constructor(tile, props = null) {
     if (!(tile instanceof CityTile)) {
       throw new Error("CityLots needs a CityTile.");
     }
     this.tile = tile;
+    this.props = props;
     this._cells = new Map();
   }
 
@@ -803,7 +913,13 @@ export class CityLots {
     const floor = CITY_GROUND_Z + r;
     if (d[2] < 0.0 && p0[2] >= floor) {
       const tg = (floor - p0[2]) / d[2];
-      if (tg <= 1.0) take({ t: tg, normal: [0.0, 0.0, 1.0] });
+      if (tg <= 1.0) take({ t: tg, normal: [0.0, 0.0, 1.0], source: "ground" });
+    }
+    if (this.props !== null) {
+      for (const solid of this.props.segmentSolids(p0, p1, r)) {
+        const hit = segmentPolytope(p0, d, solid, r);
+        if (hit) take({ ...hit, source: solid.source });
+      }
     }
     if (Math.min(p0[2], p1[2]) > CITY_SLAB_TOP + r) {
       return finish(best, p0, d);
@@ -832,10 +948,19 @@ export class CityLots {
         const key = `${nx},${ny}`;
         if (tested.has(key)) continue;
         const cc = this.cell(nx, ny);
-        if (!cc.built || zLow >= cc.top_z + 1.0 + r) continue;
+        const props = this._props(cc, nx, ny, r);
+        const top = Math.max(cc.built ? cc.top_z : -Infinity, props.top);
+        if (zLow >= top + 1.0 + r) continue;
         tested.add(key);
-        for (const solid of cellSolids(cc, r)) {
-          take(segmentSolid(p0, d, solid));
+        if (cc.built) {
+          for (const solid of cellSolids(cc, r)) {
+            const hit = segmentSolid(p0, d, solid);
+            if (hit) take({ ...hit, source: "building" });
+          }
+        }
+        for (const solid of props.solids) {
+          const hit = segmentPolytope(p0, d, solid, r);
+          if (hit) take({ ...hit, source: solid.source });
         }
       }
       if (tExit >= 1.0 || (best !== null && best.t <= tExit)) break;
@@ -862,21 +987,44 @@ export class CityLots {
     for (const [nx, ny] of neighbourhood(Math.floor(p[0] / cell),
                                          Math.floor(p[1] / cell))) {
       const cc = this.cell(nx, ny);
-      if (!cc.built || p[2] >= cc.top_z + r) continue;
-      if (cellSolids(cc, r).some((solid) => insideSolid(p, solid))) {
+      if (cc.built && p[2] < cc.top_z + r
+          && cellSolids(cc, r).some((solid) => insideSolid(p, solid))) {
         top = Math.max(top ?? -Infinity, cc.top_z);
+      }
+      for (const solid of this._props(cc, nx, ny, r).solids) {
+        if (insidePolytope(p, solid, r)) {
+          top = Math.max(top ?? -Infinity, solid.top);
+        }
+      }
+    }
+    if (this.props !== null) {
+      for (const solid of this.props.segmentSolids(p, p, r)) {
+        if (insidePolytope(p, solid, r)) {
+          top = Math.max(top ?? -Infinity, solid.top);
+        }
       }
     }
     return top === null ? null : { top };
   }
 
-  /** The growth must stay under a cell for the 3 x 3 walk to be exact. */
+  /** The props a block's column holds, or none. */
+  _props(cc, cx, cy, r) {
+    return this.props === null ? NO_PROPS
+                               : this.props.cellSolids(cc, cx, cy, r);
+  }
+
+  /**
+   * The growth must stay under a cell for the 3 x 3 walk to be exact. A
+   * radius may also be a hair negative, the solids shrunk rather than grown
+   * (to SHRINK_MAX): tests/test_city_props_mirror.py brackets the GPU's
+   * float32 decision at an edge between a grown and a shrunk sweep.
+   */
   _checkReach(r) {
-    if (!(r >= 0.0 && CITY_SHELL_OUT_MAX + r < this.tile.cellM)) {
+    if (!(r >= -SHRINK_MAX && CITY_SHELL_OUT_MAX + r < this.tile.cellM)) {
       throw new Error(
         `A city sweep's body radius ${r} m plus the facade shell ` +
         `(${CITY_SHELL_OUT_MAX} m) must stay under a block ` +
-        `(${this.tile.cellM} m).`);
+        `(${this.tile.cellM} m), and not below -${SHRINK_MAX} m.`);
     }
   }
 }
@@ -888,5 +1036,6 @@ function finish(best, p0, d) {
     point: [p0[0] + best.t * d[0], p0[1] + best.t * d[1],
             p0[2] + best.t * d[2]],
     normal: best.normal,
+    source: best.source,
   };
 }

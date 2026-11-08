@@ -10,7 +10,8 @@
 // So this module does two things.
 //
 //   STOP. Every frame, the motion the flight made is swept against the city
-//   (citylots.js, the renderer's own buildings mirrored on the CPU) and cut
+//   (citylots.js and cityprops.js, the renderer's own buildings and what
+//   stands among them, mirrored on the CPU) and cut
 //   back where it would have come within a body's radius of something.
 //   Only the component INTO the surface is removed, so a glancing touch
 //   slides along the wall rather than sticking to it.
@@ -101,11 +102,13 @@ const IMPACT_MIN_SPEED = 3.0;    // m/s
 const IMPACT_FULL_SPEED = 25.0;  // m/s
 // The bounce: a fraction of the arrival speed, back along the normal,
 // dying away with time constant BOUNCE_TAU — so it carries you
-// v * BOUNCE_TAU metres back in total (1.75 m off a 20 m/s wall). Capped,
-// because at 500 m/s a proportional bounce would throw you across a block.
-const RESTITUTION = 0.35;
-const BOUNCE_MAX = 10.0;         // m/s
-const BOUNCE_TAU = 0.25;         // s
+// v * RESTITUTION * BOUNCE_TAU metres back in total (3 m off a 20 m/s
+// wall; 1.75 m until 2026-11, when Thomas asked for the crash to rock the
+// flight harder). Capped, because at 500 m/s a proportional bounce would
+// throw you across a block.
+const RESTITUTION = 0.50;
+const BOUNCE_MAX = 14.0;         // m/s
+const BOUNCE_TAU = 0.30;         // s
 
 // --- The episode --------------------------------------------------------------
 // [severity 0, severity 1]. A wall is the full loss of control; a landing is
@@ -119,14 +122,17 @@ const CONTROL_FLOOR = 0.08;
 const CONTROL_RETURN = 0.45;
 
 // --- The shake ----------------------------------------------------------------
-// A few hertz, a degree or two, dying fast; exactly zero at the episode's
-// end, so the look you had is the look you get back. Landings shake mostly
-// in elevation.
-const SHAKE_AZ_DEG = 1.6;
-const SHAKE_EL_DEG = 1.2;
-const SHAKE_AZ_HZ = 5.3;
-const SHAKE_EL_HZ = 3.9;
-const SHAKE_DECAY = 3.0;         // e-folds over the episode
+// A lurch of a few degrees at two or three hertz, dying away; exactly zero
+// at the episode's end, so the look you had is the look you get back.
+// Landings shake mostly in elevation. (It was a degree or two at four or
+// five hertz until 2026-11 — a buzz, which Thomas found too gentle: "Paper
+// airplane could be a bit more 'rocked' when it hits a building". A slower
+// swing reads as the craft being knocked rather than the camera vibrating.)
+const SHAKE_AZ_DEG = 3.4;
+const SHAKE_EL_DEG = 2.6;
+const SHAKE_AZ_HZ = 3.1;
+const SHAKE_EL_HZ = 2.3;
+const SHAKE_DECAY = 2.4;         // e-folds over the episode
 const LANDING_SHAKE_AZ = 0.35;
 
 // Blocked segments resolved per frame before giving up and stopping dead.
