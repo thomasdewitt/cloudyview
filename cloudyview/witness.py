@@ -724,7 +724,8 @@ def main(filename: str, output: str = None,
          grid_spacing: dict = None,
          z_first: str = None,
          ice: str = None,
-         no_ice: bool = False) -> None:
+         no_ice: bool = False,
+         coarsen: int = None) -> None:
     """CLI wrapper around :func:`witness`: load, render, save a PNG."""
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
@@ -787,6 +788,14 @@ def main(filename: str, output: str = None,
                 "--dx/--dy/--dz and --nest-group are not supported together: "
                 "the stated spacing describes the outer grid only, and a nest "
                 "without meters cannot be placed inside it.")
+        if nest_group and coarsen not in (None, 1):
+            # The nest is the finer grid inside the outer one, there to be
+            # seen at its own resolution; a coarsened outer field under it is
+            # a pairing no soar view makes.
+            raise ValueError(
+                "--coarsen and --nest-group are not supported together: "
+                "the coarse grid is the outer field's only, and a nest "
+                "inside it at its own resolution is not a view soar has.")
         field = _load_field(
             filename,
             ice=ice,
@@ -809,6 +818,7 @@ def main(filename: str, output: str = None,
             grid_spacing=grid_spacing,
             z_first=z_first,
             no_ice=no_ice,
+            coarsen=coarsen,
         )
 
         camera = Camera(

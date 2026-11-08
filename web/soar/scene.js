@@ -918,6 +918,12 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       title: meta.title,
       description: meta.description,
       sourceName: meta.source,
+      // The block average this demo was baked with from that file, present
+      // only on a coarsened bake (marine-congestus-coarse: 2): the source
+      // named above is the FINE field, so a reproduction command has to say
+      // how the shipped grid was made from it (`--coarsen`), or the terminal
+      // renders a different field in a different box.
+      coarsen: meta.coarsen ?? null,
       // A bake is extinction and nothing else: the liquid and ice mixing
       // ratios went into it and cannot be taken back out. Said here rather
       // than inferred from an absent variable name, because the ice-detection
