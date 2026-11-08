@@ -1898,10 +1898,12 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 }
 
 // @end sea
-// The scene clock (s, row 24.z). Frozen while the view is parked, so the
-// accumulation of a held view converges; advanced by the host while flying
-// or recording, carried per sample in a recorded track (track.js), and set
-// by `witness --time`. Anything in the scene that moves reads it here (the
+// The scene clock (s, row 24.z). The live view advances it every frame,
+// parked and paused included, and keeps it out of its accumulation: the
+// march leaves the steam to fs_steam_live, drawn at this clock after the
+// accumulation, so a held view converges under steam that moves. Every
+// still holds it fixed; a recorded track carries it per sample (track.js),
+// and `witness --time` sets it. Anything in the scene that moves reads it here (the
 // city's steam); a surface where nothing moves (the sea, the desert) has no
 // clock, and the hosts pack 0 for it.
 fn scene_time() -> f32 {
@@ -2442,6 +2444,39 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let c = u.ocean_realism_b.w;
     return clamp(vec3<f32>(0.5) + (encoded - vec3<f32>(0.5)) * c,
                  vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// tone_map run backwards: the linear radiance a displayed value came from,
+// for the live steam (fs_steam_live), which composites in linear light onto
+// an image already accumulated in display values. Exact wherever tone_map
+// is invertible; what its clamps threw away does not come back: a channel
+// at the white point returns the white point, and under contrast > 1 a
+// value clipped to 0 or 1 returns the clip's edge. The shoulder couples the
+// channels through the exposed luminance y, so the solve iterates: with the
+// mix k and the chroma gain g of the last y held fixed, each channel's
+// (1 - k) e (1 + e/w^2)/(1 + e) + k g e = m is a quadratic in e (the first
+// pass, k = 0, is the per-channel curve's exact inverse, and stays exact
+// below the shoulder, y < 1).
+fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
+    let c = u.ocean_realism_b.w;
+    let encoded = clamp((display - vec3<f32>(0.5)) / c + vec3<f32>(0.5),
+                        vec3<f32>(0.0), vec3<f32>(1.0));
+    let m = pow(encoded, vec3<f32>(gamma));
+    let wp = u.flags.w;
+    let w2 = wp * wp;
+    var k = 0.0;
+    var g = 1.0;
+    var e = m;
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        let a2 = (1.0 - k) / w2 + k * g;               // > 0
+        let b1 = vec3<f32>((1.0 - k) + k * g) - m;
+        // @domain: a sum of a square and 4 a2 m, a2 > 0 and m >= 0
+        e = (sqrt(b1 * b1 + 4.0 * a2 * m) - b1) / (2.0 * a2);
+        let y = dot(e, vec3<f32>(0.2126, 0.7152, 0.0722));
+        k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+        g = (1.0 + y / w2) / (1.0 + y);
+    }
+    return e / exposure;
 }
 
 // ---------------------------------------------------------------------------
@@ -14534,7 +14569,8 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // plume by d / r, up it by the integral of dz / r — so an eddy is always
 // the same fraction of the plume that carries it: small and tight at the
 // cover, large and soft aloft. The lumps rise on the scene clock
-// (scene_time, frozen while the view is parked) at a fixed rate in zeta:
+// (scene_time; the live view draws them after its accumulation, so they go
+// on rising over a parked view: fs_steam_live) at a fixed rate in zeta:
 // in metres that is slow at the cover and faster aloft, where each eddy is
 // larger — the plume billows up and opens out rather than scrolling.
 //
@@ -27822,11 +27858,7 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     out.surf = vec4<f32>(prev.xyz, t_prev);
     out.veil = veil_none();
     let city_o = city_camera_origin();
-    // Where the ray first comes down to CITY_NEAR_TOP.
-    var t_low = 0.0;
-    if (city_o.z > CITY_NEAR_TOP) {
-        t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
-    }
+    let t_low = city_t_low(city_o, dir);
     let t_near = min(t_prev, city_near_reach(cr));
     let near = t_low < t_near;
     if (!near && !ground_hit) {
@@ -27867,19 +27899,93 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
         rgb = rgb + city_wet_reflection(city_o, dir, t, pixel_angle,
                                         cr.frame_index, cr.strat_pixel);
     }
-    if (near) {
+    if (near && city_steam_live()) {
+        // The live view draws its steam after the accumulation
+        // (fs_steam_live); the veil only marks the depth it goes in at, so
+        // the march notes the cloud's transmittance there.
+        out.veil = veil_pack(vec3<f32>(0.0), 1.0, t_low);
+    } else if (near) {
         // The steam in front of whatever is there — or of nothing: over the
         // sky the veil is all that shows of it.
-        let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
-                            select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
-                            select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
-        let med = cc_media(city_o, dir, inv, t, pixel_angle,
+        let med = cc_media(city_o, dir, city_inv_dir(dir), t, pixel_angle,
                            city_frame_rand(cr.strat_pixel, cr.frame_index,
                                            CITY_RAND_MEDIA).x);
         out.veil = veil_pack(med.rgb, med.a, t_low);
     }
     out.surf = vec4<f32>(rgb, t);
     return out;
+}
+
+// Where a ray from the camera first comes down to CITY_NEAR_TOP (0 from
+// below it, 1e30 for a ray that never does): the depth the veil goes in at.
+fn city_t_low(city_o: vec3<f32>, dir: vec3<f32>) -> f32 {
+    var t_low = 0.0;
+    if (city_o.z > CITY_NEAR_TOP) {
+        t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
+    }
+    return t_low;
+}
+
+// The steam's slab tests take 1/dir with an axis-parallel component at 1e30.
+fn city_inv_dir(dir: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                     select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
+                     select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
+}
+
+// The live view's steam (fs_steam_live), over `acc`, the accumulated image
+// (display values; alpha the cloud's transmittance T_f from the camera to
+// the veil's depth, as fs_main noted it), for the surface at t_surf. The
+// steam is marched at the live clock exactly as the street stage marches it
+// (cc_media, to the same surface, from the same depth), but once per
+// presented frame, so instead of the accumulation's many offsets of its
+// march it averages STEAM_LIVE_SAMPLES, stratified over the offset's range
+// from a start fixed per pixel: a parked view shows the steam moving through
+// a still, fine dither rather than a fresh grain every frame (one offset
+// alone was a coarse grain, 2026-11-08). In linear light, with B the
+// accumulated image's radiance and
+// S, T_s the steam's in-scattered radiance and transmittance,
+//     L = B (1 - T_f (1 - T_s)) + T_f S.
+// The exact composite is C_f + T_f S + T_s (B - C_f), C_f the cloud
+// radiance in front of the steam; with no cloud in front (T_f = 1, C_f = 0)
+// and behind a cloud that hides it (T_f = 0) the two agree. In between this
+// takes the share of B arriving from behind the veil's depth to be T_f, as
+// though the cloud in front glowed like the scene behind it. What else is
+// inexact here, and only here (stills and videos march the steam):
+//   - B is tone_unmap of an AVERAGE of tone-mapped samples, not the average
+//     radiance: a pixel whose samples differ (a window edge behind the
+//     steam) is dimmed through the curve at its mean display value;
+//   - T_f is averaged apart from the radiance it belongs to;
+//   - a background past the white point (a lamp head) reads as the white
+//     point, so steam in front of it dims it more than it should;
+//   - the steam takes the LAST sample's ray and surface depth, so its edge
+//     along a silhouette is one sample's, not the average's.
+// A pixel with no steam returns acc untouched, bit for bit.
+const STEAM_LIVE_SAMPLES: u32 = 4u;
+fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
+    let dir = cr.dir;
+    let city_o = city_camera_origin();
+    let t_low = city_t_low(city_o, dir);
+    if (!(t_low < min(t_surf, city_near_reach(cr)))) {
+        return acc;
+    }
+    let inv = city_inv_dir(dir);
+    let start = city_frame_rand(cr.strat_pixel, 0u, CITY_RAND_MEDIA).x;
+    var med = vec4<f32>(0.0);
+    for (var k: u32 = 0u; k < STEAM_LIVE_SAMPLES; k = k + 1u) {
+        med = med + cc_media(city_o, dir, inv, t_surf, cr.pixel_angle,
+                             (f32(k) + start) / f32(STEAM_LIVE_SAMPLES));
+    }
+    med = med / f32(STEAM_LIVE_SAMPLES);
+    if (med.a >= 1.0 && all(med.rgb == vec3<f32>(0.0))) {
+        return acc;
+    }
+    let exposure = max(u.cam_right.w, 1e-6);
+    let gamma = u.periodic.w;
+    let t_front = acc.a;
+    let b = tone_unmap(acc.rgb, exposure, gamma);
+    let l = b * (1.0 - t_front * (1.0 - med.a)) + t_front * med.rgb;
+    return vec4<f32>(tone_map(l, exposure, gamma), acc.a);
 }
 
 // What the wet street at distance t along the view ray reflects, through the
@@ -27951,6 +28057,9 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     o.veil = veil_none();
     return o;
 }
+fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
+    return acc;
+}
 
 // The city's stub twin: every city symbol shared code calls, for a module
 // compiled without the city. Reached only under CITY, false there.
@@ -27993,6 +28102,15 @@ fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
     return vec4<u32>(pack2x16float(rgb.xy),
                      pack2x16float(vec2<f32>(rgb.z, 1.0 - trans)),
                      bitcast<u32>(t), 0u);
+}
+
+// Whether the city's steam is the live view's (row 8.w, which the city's row
+// 8 has spare): drawn after the accumulation by fs_steam_live at the live
+// clock, so it keeps moving over a parked, converging picture. Off, it is
+// marched into the veil as it always was — every still, video and replay,
+// and the meter's of a capture.
+fn city_steam_live() -> bool {
+    return CITY && u.ocean.w > 0.5;
 }
 
 // No veil: nothing scattered in, everything let through.
@@ -28172,6 +28290,29 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     return vec4<f32>(w, w_star, 0.0, 0.0);
 }
 
+// --- the live view's steam -------------------------------------------------
+//
+// Thomas (2026-11-08): the steam "should keep going when the flight is
+// paused". A parked view converges by averaging frames of one frozen scene,
+// so steam marched into those frames would either freeze with them or, with
+// the clock running, smear the average. The live view therefore marches
+// the city with the steam left out (city_steam_live: the veil is only its
+// depth) and draws it here, once per presented frame, at the live clock
+// (row 24.z), onto the accumulated image — the lens water's arrangement.
+// Group 1: binding 0 the final surface (t in w), binding 1 the accumulated
+// image. The composite and what it gets wrong: steam_live_city.
+@fragment
+fn fs_steam_live(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    let xy = vec2<i32>(frag_pos.xy);
+    let acc = textureLoad(surface_plain, xy, 0);
+    if (!CITY) {
+        return acc;
+    }
+    return steam_live_city(camera_ray(frag_pos), acc,
+                           textureLoad(surface_buf, xy, 0).w);
+}
+
 @fragment
 fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
@@ -28288,7 +28429,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (CITY) {
         veil = veil_unpack(textureLoad(veil_buf, vec2<i32>(frag_pos.xy), 0));
     }
-    var veil_pending = CITY && veil.trans < 1.0 && veil.t < t_surface;
+    // Under the live view's steam the veil is only its depth (trans 1), and
+    // the march notes the cloud's transmittance there, t_front, in the
+    // sample's alpha for fs_steam_live; elsewhere the alpha is 1.
+    let steam_live = city_steam_live();
+    var veil_pending = CITY && (veil.trans < 1.0 || steam_live)
+        && veil.t < t_surface;
+    var t_front = 1.0;
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
@@ -28461,6 +28608,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 break;
             }
             if (veil_pending && t >= veil.t) {
+                t_front = transmittance;
                 col = col + transmittance * veil.rgb;
                 transmittance = transmittance * veil.trans;
                 veil_pending = false;
@@ -29087,6 +29235,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // never entered it): in front of the surface and the sky, behind every
     // cloud the march did see.
     if (veil_pending) {
+        t_front = transmittance;
         col = col + transmittance * veil.rgb;
         transmittance = transmittance * veil.trans;
     }
@@ -29130,5 +29279,6 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (!TONE_MAP) {
         return vec4<f32>(col, 1.0);
     }
-    return vec4<f32>(tone_map(col, exposure, u.periodic.w), 1.0);
+    return vec4<f32>(tone_map(col, exposure, u.periodic.w),
+                     select(1.0, t_front, steam_live));
 }

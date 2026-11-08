@@ -19,7 +19,8 @@
 // plume by d / r, up it by the integral of dz / r — so an eddy is always
 // the same fraction of the plume that carries it: small and tight at the
 // cover, large and soft aloft. The lumps rise on the scene clock
-// (scene_time, frozen while the view is parked) at a fixed rate in zeta:
+// (scene_time; the live view draws them after its accumulation, so they go
+// on rising over a parked view: fs_steam_live) at a fixed rate in zeta:
 // in metres that is slow at the cover and faster aloft, where each eddy is
 // larger — the plume billows up and opens out rather than scrolling.
 //
