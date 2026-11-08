@@ -86,3 +86,24 @@ def test_only_the_direct_pid_would_flag_it(monkeypatch, grandchild):
     monkeypatch.setattr(gpu_idle, "_descendants", lambda root: {root})
     fatal, _ = gpu_idle.survey(seconds=0.0)
     assert any(f"pid {grandchild} " in f for f in fatal), fatal
+
+
+# pids no process has: the names come from pmon's column, as for a process
+# that exited between the sample and the /proc read.
+STEAM, HELPER, GAME = 2**22 + 11, 2**22 + 12, 2**22 + 13
+
+
+def test_thomass_idle_steam_is_not_a_neighbour(monkeypatch):
+    """His Steam client holds contexts at 0% SM (2026-11-08); like his idle
+    Firefox it is allowed. Any other idle context stays fatal — the control."""
+    _pmon_says(monkeypatch, [(STEAM, "steam", None),
+                             (HELPER, "steamwebhelper", 0),
+                             (GAME, "somegame", None)])
+    fatal, _ = gpu_idle.survey(seconds=0.0)
+    assert fatal == [f"pid {GAME} (somegame) holds a GPU context"], fatal
+
+
+def test_steam_drawing_is_a_neighbour(monkeypatch):
+    _pmon_says(monkeypatch, [(HELPER, "steamwebhelper", 40)])
+    fatal, _ = gpu_idle.survey(seconds=0.0)
+    assert fatal == [f"pid {HELPER} (steamwebhelper) at 40% SM"], fatal

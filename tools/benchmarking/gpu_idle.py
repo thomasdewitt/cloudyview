@@ -15,7 +15,9 @@ policy, 2026-09-24):
 - FATAL, a neighbour: any process outside the desktop (DESKTOP) above
   IDLE_SM_PCT of SM time, or holding a GPU context at all — except an idle
   browser (BROWSERS): the QA harness parks a Chrome, and Thomas flies soar
-  in his own Firefox on this box (2026-09-25), which is his to leave open.
+  in his own Firefox on this box (2026-09-25), which is his to leave open;
+  his Steam client (a Chromium UI, steamwebhelper) is the same case
+  (2026-11-08: idle at 0% SM, it refused a whole timing lock).
   A browser that DRAWS is a neighbour like any other. require_idle() waits
   for these to go, then exits; a Watch samples all through the run, and
   check_quiet() exits non-zero with CONTAMINATED if the watch or its own
@@ -47,7 +49,7 @@ DESKTOP_SM_PCT = 15
 # Processes that always hold a context on this desktop, the Claude app
 # (claude-desktop) among them.
 # Browsers whose idle context is allowed; their drawing is not (see above).
-BROWSERS = ("chrome", "firefox")
+BROWSERS = ("chrome", "firefox", "steam", "steamwebhelper")
 DESKTOP = {"gnome-shell", "Xwayland", "gnome-software", "ptyxis",
            "gnome-remote-de", "mutter-x11-fram", "claude-desktop", "nautilus"}
 
