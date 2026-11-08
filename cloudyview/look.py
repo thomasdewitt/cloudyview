@@ -56,12 +56,14 @@ OCEAN_REALISM = 1.0
 OCEAN_MIP_BIAS = -0.5
 OCEAN_GLINT_STRENGTH = 0.85
 # The glint's base roughness: the slope variance below the static tile's
-# 0.2 m texels, as alpha = sqrt(mss). With the tile's own 0.0083 the sea's
-# mean square slope is 0.038, Cox & Munk's (0.003 + 0.00512 U) at ~7 m/s.
-# Narrower than the 0.28 before 2026-09-23, and brighter at the sun's
-# reflection for it: the solar reflection Thomas kept when the moving sea
-# was reverted (2026-09-25).
-OCEAN_GLINT_ROUGHNESS = 0.174
+# 0.1 m texels, as alpha = sqrt(mss). With the tile's own 0.0097 the sea's
+# mean square slope is 0.0386, Cox & Munk's (0.003 + 0.00512 U) at ~7 m/s.
+# It keeps the solar reflection Thomas kept when the moving sea was reverted
+# (2026-09-25; 0.174 over the 0.2 m tile then): over the 0.1 m tile
+# (2026-11-08), rendered at the pixel footprint corrected for 16:9, 0.170 is
+# where the glint's mean and peak match that look's at the contact sheet's
+# glint look-down and low sun (to 1%), as well as the far-field total.
+OCEAN_GLINT_ROUGHNESS = 0.170
 # How much of the slope variance the normal-mip filter removed is drawn
 # stochastically per pixel per frame (lighting-loop iter_008). The remainder
 # stays as extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.

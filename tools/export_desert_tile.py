@@ -64,6 +64,8 @@ from pathlib import Path
 import numpy as np
 from scipy import ndimage
 
+from cloudyview.soar_host import encode_surface_level
+
 REPO = Path(__file__).resolve().parents[1]
 DESERT_OUT = REPO / "cloudyview" / "soar" / "desert"
 
@@ -424,16 +426,6 @@ def relief_stats(heights: list) -> dict:
             "band_max_m": round(float(np.abs(band).max()), 4)}
 
 
-def encode_level(level: np.ndarray) -> bytes:
-    """(side, side, channels) -> planar, byte-shuffled float16 bytes."""
-    planes = []
-    for c in range(level.shape[-1]):
-        b = np.ascontiguousarray(level[..., c], dtype=np.float16).view(np.uint8)
-        b = b.reshape(-1, 2)
-        planes += [b[:, 0].tobytes(), b[:, 1].tobytes()]
-    return b"".join(planes)
-
-
 def export(n: int, out: Path, seed: int = SEED) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     print(f"Desert tile {n}^2 over {TILE_EXTENT_M:g} m (seed {seed})")
@@ -445,7 +437,7 @@ def export(n: int, out: Path, seed: int = SEED) -> dict:
     wire = 0
     files = []
     for i, level in enumerate(mips):
-        packed = gzip.compress(encode_level(level), compresslevel=9, mtime=0)
+        packed = gzip.compress(encode_surface_level(level), compresslevel=9, mtime=0)
         files.append(f"mip{i}.bin.gz")
         (out / files[-1]).write_bytes(packed)
         wire += len(packed)

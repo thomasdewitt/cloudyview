@@ -3,33 +3,35 @@
 raymarch.wgsl carries two facts measured from cloudyview/soar/ocean/: the
 slope variance each mip level removed (fif_slope_variance — the glint lobe
 hands it back), and the bound its two normalize() calls rest on (the
-@domain notes: every texel's normal has z >= 0.938). Neither is derived at
+@domain notes: every texel's normal has z >= 0.923). Neither is derived at
 run time, so a new tile (tools/export_web_assets.py ocean --rebake) would
 leave both silently stale. Here they are re-measured on the CPU.
 
 The table is the mean-square slope (slope = -n.xy / n.z, both axes) of
 level 0 less that of level k: what box-filtering to level k took away.
 """
+import gzip
+import json
 import re
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-OCEAN = REPO / "cloudyview" / "soar" / "ocean"
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
-Z_BOUND = 0.938
+from cloudyview.soar_host import (OCEAN_DIR, SHADER_PATH, decode_surface_level,
+                                  surface_level_files)
+
+SHADER = SHADER_PATH
+Z_BOUND = 0.923
 
 
 def _levels():
-    import json
-    meta = json.loads((OCEAN / "meta.json").read_text())
+    meta = json.loads((OCEAN_DIR / "meta.json").read_text())
     out = []
-    for k in range(meta["mips"]):
+    for k, name in enumerate(surface_level_files(meta)):
         n = max(1, meta["n"] >> k)
-        raw = np.fromfile(OCEAN / f"fif_mip{k}.bin", dtype=np.float16)
-        out.append(raw.reshape(n, n, 4).astype(np.float64))
+        raw = gzip.decompress((OCEAN_DIR / name).read_bytes())
+        texels = np.frombuffer(decode_surface_level(raw, n, meta), np.float16)
+        out.append(texels.reshape(n, n, 4).astype(np.float64))
     return out
 
 
@@ -57,6 +59,11 @@ def test_the_slope_variance_table_is_the_tiles():
     measured = [top - _mean_square_slope(lv) for lv in levels]
     # The shader states six decimals.
     np.testing.assert_allclose(table, measured, atol=5.1e-7, rtol=0)
+    # And fif_slope_variance_removed clamps its lod at the table's top.
+    clamps = re.findall(r"fn fif_slope_variance_removed.*?clamp\(floor\(lod\), "
+                        r"0\.0, ([0-9.]+)\);\s*let l1 = min\(l0 \+ 1\.0, ([0-9.]+)\)",
+                        SHADER.read_text(), re.S)
+    assert clamps and all(float(v) == len(levels) - 1 for v in clamps[0])
 
 
 def test_the_normalize_bound_is_the_tiles():

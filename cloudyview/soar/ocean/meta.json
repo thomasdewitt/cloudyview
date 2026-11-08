@@ -1,9 +1,24 @@
 {
- "schema": "cloudyview.web.ocean.v1",
- "n": 512,
- "dx_m": 0.2,
- "mips": 10,
+ "schema": "cloudyview.web.ocean.v2",
+ "n": 1024,
+ "dx_m": 0.1,
+ "mips": 11,
  "format": "rgba16float",
+ "encoding": "planar-byte-shuffle",
+ "compression": "gzip",
+ "files": [
+  "mip0.bin.gz",
+  "mip1.bin.gz",
+  "mip2.bin.gz",
+  "mip3.bin.gz",
+  "mip4.bin.gz",
+  "mip5.bin.gz",
+  "mip6.bin.gz",
+  "mip7.bin.gz",
+  "mip8.bin.gz",
+  "mip9.bin.gz",
+  "mip10.bin.gz"
+ ],
  "tile_extent_m": 102.4,
  "clock_period_s": null,
  "seed": 20260717

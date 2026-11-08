@@ -1910,34 +1910,35 @@ fn scene_time() -> f32 {
 // @section sea
 
 // ---------------------------------------------------------------------------
-// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 512^2 texels of
-// 0.2 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
+// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 1024^2 texels of
+// 0.1 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
 // bound at 3. A pixel reads the mip its footprint covers; what that mip
 // averaged away is handed back as slope variance — to the microfacet lobe,
 // and in part to a per-pixel slope draw for the sky reflection.
 
 // The slope variance each mip level removed from the tile's normals (level 0
-// removes none; by the top, the tile's whole 0.091 RMS slope). A switch, not
+// removes none; by the top, the tile's whole 0.098 RMS slope). A switch, not
 // a const array: a runtime-indexed array costs a private variable at
 // fs_main's entry and moves every scene's registers.
 fn fif_slope_variance(k: i32) -> f32 {
     switch k {
         case 0: { return 0.000000; }
-        case 1: { return 0.000449; }
-        case 2: { return 0.001407; }
-        case 3: { return 0.002788; }
-        case 4: { return 0.004635; }
-        case 5: { return 0.007078; }
-        case 6: { return 0.008090; }
-        case 7: { return 0.008211; }
-        case 8: { return 0.008242; }
-        default: { return 0.008249; }
+        case 1: { return 0.000523; }
+        case 2: { return 0.001609; }
+        case 3: { return 0.003032; }
+        case 4: { return 0.004580; }
+        case 5: { return 0.006378; }
+        case 6: { return 0.008571; }
+        case 7: { return 0.009524; }
+        case 8: { return 0.009662; }
+        case 9: { return 0.009699; }
+        default: { return 0.009703; }
     }
 }
 
 fn fif_slope_variance_removed(lod: f32) -> f32 {
-    let l0 = clamp(floor(lod), 0.0, 9.0);
-    let l1 = min(l0 + 1.0, 9.0);
+    let l0 = clamp(floor(lod), 0.0, 10.0);
+    let l1 = min(l0 + 1.0, 10.0);
     let f = clamp(lod - l0, 0.0, 1.0);
     return mix(fif_slope_variance(i32(l0)), fif_slope_variance(i32(l1)), f);
 }
@@ -1958,7 +1959,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     if (level1 > level0 && f > 0.0) {
         n = mix(n, ocean_normal_mip_sample(world_xy, level1), f);
     }
-    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering and the mip mix are convex
+    // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering and the mip mix are convex
     return normalize(n);
 }
 
@@ -1977,7 +1978,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 // them away: they are the surface, not noise).
 //
 // A capillary facet is ~1 cm (the base roughness is everything below the
-// tile's 0.2 m). Cells are that times a power of two, so a whole number of
+// tile's 0.1 m). Cells are that times a power of two, so a whole number of
 // them spans the tile and the pattern folds with it.
 const SEA_GLITTER_FACET_M: f32 = 0.0125;          // 102.4 m / 2^13
 const SEA_SUN_SOLID_ANGLE: f32 = 6.8e-5;          // pi (0.266 deg)^2
@@ -2085,7 +2086,7 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
         + 0.5 / dims;
     let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
-    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering is convex
+    // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering is convex
     return normalize(n);
 }
 
@@ -2251,7 +2252,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 
     // The footprint mean slope is not the footprint's shading. Every judge
     // view's water is sub-pixel: at v7's near field one pixel covers tens
-    // of metres of a 0.2 m wave field, so the honest statement is not "this
+    // of metres of a 0.1 m wave field, so the honest statement is not "this
     // facet is flat" but "this pixel contains a slope distribution whose
     // variance the filters removed". Fresnel goes as (1 - n.v)^5 and the sky
     // gradient is steep near the horizon, so at grazing incidence the
@@ -2309,7 +2310,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
-                // Base roughness is what lives BELOW the tile's 0.2 m
+                // Base roughness is what lives BELOW the tile's 0.1 m
                 // texels — ripple no tile holds — plus the variance the
                 // footprint's mip filtered away. Variances add; roughnesses
                 // do not.
