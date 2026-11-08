@@ -407,6 +407,15 @@ def test_a_coarse_demo_track_loads_the_grid_it_flew(monkeypatch, tmp_path):
         with pytest.raises(Loaded):
             tr.render_track(path, tmp_path / "out.mp4")
         assert loads[-1]["coarsen"] == coarsen
+    # The CLI's own --coarsen is the caller's choice and wins over the
+    # header's: `soar track.json --coarsen 1` replays the fine file.
+    header["source"]["coarsen"] = 2
+    payload["header"] = header
+    path.write_text(json.dumps(payload))
+    with pytest.raises(Loaded):
+        tr.render_track(path, tmp_path / "out.mp4",
+                        load_kwargs={"coarsen": 1})
+    assert loads[-1]["coarsen"] == 1
     # A nest inside a coarsened field is refused before anything loads.
     header["source"]["coarsen"] = 2
     payload["header"] = header

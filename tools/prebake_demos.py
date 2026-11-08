@@ -44,14 +44,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cloudyview as cv
 from cloudyview import optical_depth
 from cloudyview.cloudfield import CloudField
-from cloudyview.coarsen import axis_mean, block_mean, grow_band
+from cloudyview.coarsen import (axis_mean, band_of_peaks, block_mean,
+                                extinction_peaks, grow_band,
+                                occupied_band)
 from cloudyview.glimpse import glimpse
 from cloudyview.look import DEFAULT_HAZE
 from cloudyview.soar_host import (
     DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_HAZE_HEIGHT_DEPENDENT,
     DEFAULT_LOD_STRENGTH, DEFAULT_TONE_MAP_GAMMA, DEFAULT_TONE_MAP_WHITE_POINT,
 )
-from cloudyview.witness import crop_empty_z
 from export_web_assets import _volume_aabb
 
 # The tone map the app flies with, imported rather than restated: a still that
@@ -608,9 +609,10 @@ def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
 
     The band is found from a per-plane maximum accumulated over x-slabs, so
     this costs one streamed pass and a few GB rather than a second copy of a
-    field that can be tens of gigabytes. The decision itself is handed to
-    crop_empty_z on a 1x1xnz array — the same function, so there is one
-    definition of "occupied" and not a second one that agrees today.
+    field that can be tens of gigabytes. The measure and the decision are
+    cloudyview.coarsen's (extinction_peaks, band_of_peaks), the ones
+    `--coarsen` finds the same band with, so there is one definition of
+    "occupied" and not a second one that agrees today.
     """
     src = source_dir(spec)
     path = src / spec["liquid"][0]
@@ -622,15 +624,14 @@ def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
     for i0 in range(xs[0], xs[1], slab):
         window = dict(spec["crop"], x=(i0, min(i0 + slab, xs[1])), z=full_z)
         lwc, iwc = read_condensate(spec, window, src)
-        sigma = _extinction(lwc, z, iwc)
-        peak = np.maximum(peak, np.nanmax(sigma, axis=(0, 1)))
+        peak = np.maximum(peak, extinction_peaks(lwc, z, iwc))
         print(f"    scanning for cloud: x {min(i0 + slab, xs[1])}/{xs[1]}",
               end="\r", flush=True)
-    _, _, (lo, hi) = crop_empty_z(peak.reshape(1, 1, -1), z)
-    print(f"    occupied z band {lo}:{hi + 1} = {z[lo]:.0f}..{z[hi]:.0f} m "
-          f"({hi + 1 - lo} of {z.size} planes, "
-          f"{100 * (1 - (hi + 1 - lo) / z.size):.0f}% vacuum dropped)")
-    return lo, hi + 1
+    lo, hi = band_of_peaks(peak, z)
+    print(f"    occupied z band {lo}:{hi} = {z[lo]:.0f}..{z[hi - 1]:.0f} m "
+          f"({hi - lo} of {z.size} planes, "
+          f"{100 * (1 - (hi - lo) / z.size):.0f}% vacuum dropped)")
+    return lo, hi
 
 
 def _write_gz(path: Path, raw: bytes) -> int:
@@ -679,7 +680,10 @@ def resolved_crop(spec: dict) -> dict:
                 raise ValueError(
                     f"{spec['id']}: the {axis} crop {lo}:{hi} is "
                     f"{hi - lo} cells, which {f} does not divide")
-        lo, hi = grow_band(*crop["z"], _z_planes(spec), f)
+        try:
+            lo, hi = grow_band(*crop["z"], _z_planes(spec), f)
+        except ValueError as e:
+            raise ValueError(f"{spec['id']}: {e}") from None
         if (lo, hi) != crop["z"]:
             print(f"    z band grown to {lo}:{hi} so {f} divides it "
                   "(coarsening blocks must be whole)")
@@ -697,12 +701,28 @@ def load_demo(spec: dict) -> CloudField:
     # is partitioned before this for the same reason — the temperature ramp
     # belongs to the source cell, and averaging phases is not averaging a
     # ramp of an average temperature.
-    lwc, iwc = read_condensate(spec, crop, src,
-                               post=(lambda a: block_mean(a, f)) if f > 1
-                               else None)
+    #
+    # Negative condensate is clamped to zero BEFORE the average, as
+    # cloudyview's loader clamps it at load: `--coarsen` averages the loaded
+    # field, and the two must make the same grid (cloudyview.coarsen).
+    lwc, iwc = read_condensate(
+        spec, crop, src,
+        post=(lambda a: block_mean(np.maximum(a, 0.0, out=a), f)) if f > 1
+        else None)
     x, y, z = (axis_mean(a, f)
                for a in _coords(src / spec["liquid"][0], crop,
                                 coord_names(spec)))
+    if f > 1:
+        # The averaged grid's own band, as witness and behold cut it: an edge
+        # plane averaged with an empty one the growth added can store as zero
+        # (cloudyview.coarsen), and a shipped box that kept it would not be
+        # the box `--coarsen` renders in.
+        lo, hi = occupied_band(lwc, z, iwc)
+        if (lo, hi) != (0, z.size):
+            print(f"    coarse grid cut to its own band {lo}:{hi} of "
+                  f"{z.size} planes (an averaged edge plane stores as zero)")
+            lwc, z = lwc[:, :, lo:hi], z[lo:hi]
+            iwc = None if iwc is None else iwc[:, :, lo:hi]
     return CloudField(lwc=lwc, iwc=iwc, x=x, y=y, z=z,
                       source=str(src / spec["liquid"][0]),
                       liquid_var=spec["liquid"][1],

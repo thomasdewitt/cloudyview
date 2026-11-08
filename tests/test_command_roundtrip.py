@@ -418,11 +418,16 @@ _COARSE_JS = textwrap.dedent("""
 """)
 
 
-def _write_fine_field(path):
+def _write_fine_field(path, variant="plain"):
     """8 x 8 x 12 cells of 100 x 100 x 50 m, kg/kg as STEAM writes it. Cloud
     in planes 3-9 only: the band starts on an odd plane and is an odd 7
     planes deep, so the bake's blocks start at plane 3 and the band grows
-    to 3-10, where coarsening the whole column would pair 2-3, 4-5, ..."""
+    to 3-10, where coarsening the whole column would pair 2-3, 4-5, ...
+
+    "negatives": LES-style negative condensate, which the loader clamps at
+    load, so the bake must clamp before it averages. "sparse_top": plane 9
+    holds one faint voxel, which averaged with the empty plane 10 stores as
+    zero, so the averaged grid loses its top plane in both."""
     from netCDF4 import Dataset
     rng = np.random.default_rng(7)
     qc = np.zeros((8, 8, 12), np.float32)
@@ -430,6 +435,12 @@ def _write_fine_field(path):
     # Six decades of mixing ratio, as a cascade field has.
     qc[:, :, 3:10] = 10.0 ** rng.uniform(-9, -3, (8, 8, 7))
     qi[:, :, 6:10] = 10.0 ** rng.uniform(-9, -4, (8, 8, 4))
+    if variant == "negatives":
+        qc[:, :, 4:9][rng.random((8, 8, 5)) < 0.3] = -1e-5
+    elif variant == "sparse_top":
+        qc[:, :, 9] = 0.0
+        qi[:, :, 9] = 0.0
+        qc[0, 0, 9] = 2e-10
     with Dataset(path, "w") as ds:
         for name, n, d in (("x", 8, 100.0), ("y", 8, 100.0), ("z", 12, 50.0)):
             ds.createDimension(name, n)
@@ -456,11 +467,15 @@ def _bake(path):
     return sigma.astype(np.float16), bmin, bmax
 
 
-def test_a_coarse_demo_command_marches_the_baked_grid(monkeypatch, tmp_path):
+@pytest.mark.parametrize("variant,nz", [("plain", 4), ("negatives", 4),
+                                        ("sparse_top", 3)])
+def test_a_coarse_demo_command_marches_the_baked_grid(monkeypatch, tmp_path,
+                                                      variant, nz):
     fine = tmp_path / "fine.nc"
-    _write_fine_field(fine)
+    _write_fine_field(fine, variant)
     baked, bmin, bmax = _bake(fine)
-    assert baked.shape == (4, 4, 4)           # z band 3-10, in 2-plane blocks
+    # z band 3-10 in 2-plane blocks; the faint top block stores as zero.
+    assert baked.shape == (4, 4, nz)
 
     js = _COARSE_JS % ((REPO / "web" / "soar" / "viewer.js").as_posix(),
                        json.dumps(dict(bmin=list(bmin), bmax=list(bmax),
@@ -496,6 +511,8 @@ def test_a_coarse_demo_command_marches_the_baked_grid(monkeypatch, tmp_path):
     assert renderer.uniforms[0][:3] == pytest.approx(
         emitted["position"], rel=1e-9, abs=1e-6)
 
+    if variant != "plain":
+        return
     # The control: blocks that start at the bottom of the file's column
     # instead of the band's make a different field, so the test can fail.
     from cloudyview.coarsen import axis_mean, block_mean

@@ -8,11 +8,21 @@ grid from it, or the terminal render is a different field in a different box
 (`--coarsen`). The bake and the CLI share this module so there is one
 definition of that grid, not two that agree today.
 
-The coarse grid depends on WHERE the blocks start, not only on their size. The
-bake crops z to the occupied band first (the planes that hold cloud, by
-witness's fp16 rule) and grows that band outward until the factor divides it;
-blocks start at its bottom. Coarsening the file's whole column instead pairs
-the planes with the other parity — a different field.
+The coarse grid depends on WHERE the blocks start, not only on their size. z
+is cut to the occupied band first (the planes that hold cloud, by witness's
+fp16 rule) and the band is grown outward until the factor divides it; blocks
+start at its bottom. Coarsening the file's whole column instead pairs the
+planes with the other parity — a different field. After averaging, an edge
+plane averaged with the empty plane the growth added can store as zero;
+witness and behold cut the averaged field to its own occupied band as they
+cut any field, and the bake makes the same cut before it ships.
+
+The mixing ratios are averaged after the loader's value policy (negative
+condensate clamped to zero), and x and y are averaged whole. The bake does
+the same (tools/prebake_demos.py), so `--coarsen` remakes a coarsened demo
+whose x/y crop is the whole file and whose z ascends in the file, as STEAM's
+do; a spec that crops x or y, or a file written top-down, is not one the
+flag can name.
 """
 
 import numpy as np
@@ -91,28 +101,46 @@ def grow_band(lo: int, hi: int, top: int, f: int) -> tuple:
     return lo, hi
 
 
+def extinction_peaks(lwc: np.ndarray, z: np.ndarray, iwc=None) -> np.ndarray:
+    """Per-plane maximum of the extinction a band is judged on (float64).
+
+    What the renderers march, at witness's effective radii. Ice counts even
+    where witness would drop it as negligible, as the bake never drops it.
+    The bake calls this on x-slabs read from the file and folds them with
+    np.maximum; occupied_band does the same in memory.
+    """
+    from .witness import RE_ICE_UM, RE_LIQUID_UM
+    sigma = optical_depth.compute_extinction_field(
+        lwc, np.asarray(z, dtype=np.float64), re=RE_LIQUID_UM, iwc=iwc,
+        re_ice=RE_ICE_UM)
+    return np.nanmax(sigma, axis=(0, 1)).astype(np.float64)
+
+
+def band_of_peaks(peaks: np.ndarray, z: np.ndarray) -> tuple:
+    """The occupied z planes [lo, hi) of a per-plane peak profile.
+
+    crop_empty_z's decision on a 1x1xnz array: the same function witness
+    crops with, so there is one definition of "occupied".
+    """
+    from .witness import crop_empty_z
+    _, _, (lo, hi) = crop_empty_z(np.asarray(peaks).reshape(1, 1, -1),
+                                  np.asarray(z, dtype=np.float64))
+    return lo, hi + 1
+
+
 def occupied_band(lwc: np.ndarray, z: np.ndarray, iwc=None,
                   slab: int = 256) -> tuple:
     """The z planes [lo, hi) that hold cloud, by witness's crop_empty_z rule.
 
-    From a per-plane maximum of the extinction accumulated over x-slabs, so
-    a field the size of the marine case does not need a float64 extinction
-    copy of itself. The decision is crop_empty_z's on a 1x1xnz array — the
-    same function witness crops with. Ice counts even where witness would
-    drop it as negligible, as it does in the bake.
+    Over x-slabs, so a field the size of the marine case does not need a
+    float64 extinction copy of itself.
     """
-    from .witness import RE_ICE_UM, RE_LIQUID_UM, crop_empty_z
-
-    z = np.asarray(z, dtype=np.float64)
-    peak = np.zeros(z.size, dtype=np.float64)
+    peak = np.zeros(np.asarray(z).size, dtype=np.float64)
     for i0 in range(0, lwc.shape[0], slab):
         sl = slice(i0, i0 + slab)
-        sigma = optical_depth.compute_extinction_field(
-            lwc[sl], z, re=RE_LIQUID_UM,
-            iwc=None if iwc is None else iwc[sl], re_ice=RE_ICE_UM)
-        peak = np.maximum(peak, np.nanmax(sigma, axis=(0, 1)))
-    _, _, (lo, hi) = crop_empty_z(peak.reshape(1, 1, -1), z)
-    return lo, hi + 1
+        peak = np.maximum(peak, extinction_peaks(
+            lwc[sl], z, None if iwc is None else iwc[sl]))
+    return band_of_peaks(peak, z)
 
 
 def coarsened(field, f: int):
