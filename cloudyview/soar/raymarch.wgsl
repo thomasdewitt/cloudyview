@@ -21243,7 +21243,7 @@ struct DesertLight {
 // sees, (1 + n.z)/2 and (1 - n.z)/2 — exact for an unobstructed tilted plane.
 fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
-    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0), 0.0);
+    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0));
 }
 
 // The cloud's shadow on one ground point, and the light that comes through
@@ -21485,7 +21485,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // A stone is lit by the same law as the ground it lies on, with its
     // own albedo and normal and none of the ground's statistics: no kernel
     // BRF (it IS the resolved geometry the kernel stands for), no grain,
-    // no stone or unresolved shadow, no sheen. One path for both, selected
+    // no stone or unresolved shadow. One path for both, selected
     // on its inputs: two shading branches kept the hit, the light and the
     // ground terms all live across the divergence (perf: 155 registers
     // against 72 with the stones out).
@@ -21501,7 +21501,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                               // varnished clast read as a hollow cup.
                               max(h.pos.z - desert_surface(h.pos.xy, fp).x,
                                   0.0))
-                          * plants, 0.0);
+                          * plants);
     }
     let light = clamp(h.mat.x, 0.0, 1.0);
     let m = desert_material(light);
@@ -21528,7 +21528,6 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     if (near) {
         stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
     }
-    var sheen = desert_sheen(n, dir, L.sun_dir);
     if (DESERT_LITE) {
         // The stones as decals (desert_stone_decal): a covered pixel is the
         // stone, lit as a stone is; an uncovered one keeps the stones'
@@ -21539,57 +21538,26 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
         ns = normalize(mix(n, dc.normal, dc.cover));
         brf = mix(brf, 1.0, dc.cover);
         stones = mix(dc.shadow, 1.0, dc.cover);
-        sheen = sheen * (1.0 - dc.cover);
     }
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp, 0.0)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
         * stones * plants;
     let mu = max(dot(ns, L.sun_dir), 0.0);
-    return desert_lit(albedo, ns, L, mu * brf * shade, sheen * shade);
+    return desert_lit(albedo, ns, L, mu * brf * shade);
 }
 
 // The common tail: `beam` the direct factor on L.sun (cosine, BRF and every
-// shadow folded in), `sheen` the specular one.
-fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32,
-              sheen: f32) -> vec3<f32> {
+// shadow folded in). No specular term: sand, silt and soil are matte. A
+// floor of loose grains scatters light inside and between them, and the
+// directional reflectance it keeps at a pixel's scale is the kernel BRF
+// (desert_brf, the form satellites fit to real land), not a glint. A GGX
+// sheen stood here until 2026-11-08 (Thomas: "the desert ground is way too
+// reflective, it looks similar to the ocean").
+fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32)
+        -> vec3<f32> {
     let sky_view = 0.5 * (1.0 + n.z);
     return albedo * (1.0 / DESERT_PI)
-        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view))
-        + sheen * L.sun;
-}
-
-// Looking into a low sun, a desert floor is not dark: silt, sand grains
-// and the polished tops of pavement clasts throw a soft forward glare
-// toward the viewer (temp/references/desert lowsun_backlit_*). A weak,
-// rough dielectric lobe — Fresnel at F0 = 0.04, GGX at alpha 0.35, Smith
-// masking, weighted to grazing views — which is zero anywhere but near the
-// forward-scattering geometry seen edge-on, so the high-sun look is
-// untouched.
-const DESERT_SHEEN_F0: f32 = 0.04;
-const DESERT_SHEEN_ALPHA: f32 = 0.2;
-
-fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
-    let v = -dir;
-    let n_dot_l = dot(n, sun);
-    let n_dot_v = dot(n, v);
-    if (n_dot_l <= 0.0 || n_dot_v <= 1e-4) {
-        return 0.0;
-    }
-    // @domain: n.l > 0 and n.v > 0 (returned above otherwise): same hemisphere
-    let hv = normalize(sun + v);
-    let n_dot_h = max(dot(n, hv), 0.0);
-    let om = 1.0 - clamp(dot(v, hv), 0.0, 1.0);
-    let om2 = om * om;
-    let fresnel = DESERT_SHEEN_F0 + (1.0 - DESERT_SHEEN_F0) * om2 * om2 * om;
-    let a2 = DESERT_SHEEN_ALPHA * DESERT_SHEEN_ALPHA;
-    let den = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    let d = a2 / (DESERT_PI * den * den);
-    let g = ggx_smith_g1(n_dot_v, a2) * ggx_smith_g1(n_dot_l, a2);
-    // A grazing phenomenon: the glare comes off the tops of grains and
-    // clasts seen edge-on, and a view from well above sees their shadowed
-    // flanks instead (the RossLi kernel's forward darkening).
-    let edge = 1.0 - n_dot_v;
-    return d * g * fresnel / (4.0 * n_dot_v) * edge * edge;
+        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view));
 }
 
 // Aerial perspective: the SAME air the clouds are seen through — fs_main's
