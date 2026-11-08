@@ -690,7 +690,7 @@ fn cc_aircars_half(v: cc_aircars_Craft) -> vec3<f32> {
 
 fn cc_aircars_grown(v: cc_aircars_Craft) -> vec3<f32> {
     let d = length(cc_aircars_hull_centre(v) - city_camera_origin());
-    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * d;
+    let fp = true_pixel_angle() * d;
     return max(cc_aircars_half(v), vec3<f32>(cc_aircars_MIN_PX * fp));
 }
 
@@ -731,7 +731,7 @@ fn cc_aircars_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         return cc_aircars_miss(ci);
     }
     // Gate 2: a craft smaller than this is not worth a box test.
-    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * max(t0, 0.0);
+    let fp = true_pixel_angle() * max(t0, 0.0);
     if (fp > cc_aircars_FAR_FP) {
         return cc_aircars_miss(ci);
     }
