@@ -8562,25 +8562,32 @@ const cc_skyway_JNT_FP_HI: f32 = 2.00;
 // trail every ~85 m — inside the brief's 80-200, and dense enough that the
 // population's MEAN is a real share of what the deck delivers at a kilometre
 // rather than a rounding error on the wash.
+//
+// Each car is the light it throws on the deck: a soft pool, Gaussian along
+// and across the lane, and nothing with an edge. (The first version was a
+// 7 m trail cut hard at both ends with a 2.2 m halo, at radiance 16: the tone
+// map flattened it into a saturated rectangle half a deck wide, and from a
+// low camera the arteries were strewn with "spurious bright squares",
+// Thomas's words.) The pool spends the same light per car as that trail did
+// — radiance times area — so the deck's mean at a kilometre is unchanged.
+// Its centre stays STK_EDGE cells in from the ends of its 70 m hash cell,
+// 3.5 sigma, where the pool has fallen to 0.2% of its peak: the cell
+// boundary that cuts it is below a display step.
 const cc_skyway_STK_CELL: f32 = 70.0;
-const cc_skyway_STK_L: f32 = 7.0;
-const cc_skyway_STK_W: f32 = 0.65;    // lateral sigma (m)
+const cc_skyway_STK_EDGE: f32 = 0.25;  // pool centre's margin, in cells
+const cc_skyway_STK_SA: f32 = 5.0;    // along sigma (m)
+const cc_skyway_STK_SL: f32 = 1.5;    // lateral sigma (m)
 const cc_skyway_STK_P: f32 = 0.85;    // slot occupancy at full district glow
-const cc_skyway_STK_TAIL: f32 = 2.2;  // e-folds along the frozen trail
-const cc_skyway_STK_HALO: f32 = 0.16;   // glow around the trail core
-const cc_skyway_STK_HALO_W: f32 = 2.20; // its sigma (m)
 const cc_skyway_STK_FP_LO: f32 = 1.6;
 const cc_skyway_STK_FP_HI: f32 = 5.0;
-// Headlights blow out; tail lamps must NOT. The tone map desaturates anything
-// it clips, so a red at radiance 6 arrives pink-white — the colour that says
-// "receding traffic" only survives if the green and blue channels stay off
-// the shoulder. Hence a deeply saturated red at a third of the white's
-// radiance, which lands at (1.0, 0.64, 0.42) in display: unmistakably red,
-// still the brightest thing in its lane.
+// The red must stay red: the tone map desaturates anything it clips, so a
+// red pool bright enough to clip arrives pink-white. A deeply saturated red
+// at a little over a quarter of the white's peak keeps the green and blue
+// channels off the shoulder.
 const cc_skyway_HEAD_COL: vec3<f32> = vec3<f32>(1.00, 0.95, 0.86);
-const cc_skyway_HEAD_RAD: f32 = 16.0;
+const cc_skyway_HEAD_RAD: f32 = 2.4;
 const cc_skyway_TAIL_COL: vec3<f32> = vec3<f32>(1.00, 0.055, 0.018);
-const cc_skyway_TAIL_RAD: f32 = 4.5;
+const cc_skyway_TAIL_RAD: f32 = 0.68;
 
 // --- hit kinds --------------------------------------------------------------
 // kind = 200 + 8*family + part. SPEC allows local in [0, 15]; a stride of 8
@@ -8959,17 +8966,22 @@ fn cc_skyway_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
 // over the whole deck, both colours, which is the honest asymptote.
 fn cc_skyway_streaks(s: f32, lat: f32, fam: i32, glow: f32, fp: f32)
         -> vec3<f32> {
-    let sd = select(0u, 1u, lat >= 0.0);
-    let side = select(-1.0, 1.0, lat >= 0.0);
     let n = floor(s / cc_skyway_STK_CELL);
     let ni = bitcast<u32>(i32(n));
     let p = cc_skyway_STK_P
         * mix(0.35, 1.25, smoothstep(0.02, 0.35, glow));
-    let col = select(cc_skyway_TAIL_COL, cc_skyway_HEAD_COL, sd == 1u);
-    let rad = select(cc_skyway_TAIL_RAD, cc_skyway_HEAD_RAD, sd == 1u);
 
-    var f = 0.0;
-    for (var slot: i32 = 0; slot < 2; slot = slot + 1) {
+    // All four lanes, on both halves of the deck: a pool 2 m off the centre
+    // line spills across it, and evaluating only the half the point is on
+    // cut every inner pool at the line (white on one side, red on the
+    // other — the long edge of the bright squares).
+    var f = vec3<f32>(0.0);
+    for (var k: i32 = 0; k < 4; k = k + 1) {
+        let slot = k & 1;
+        let sd = u32(k >> 1);
+        let side = select(-1.0, 1.0, sd == 1u);
+        let col = select(cc_skyway_TAIL_COL * cc_skyway_TAIL_RAD,
+                         cc_skyway_HEAD_COL * cc_skyway_HEAD_RAD, sd == 1u);
         let key = (u32(fam) * 3u + u32(slot)) * 2u + sd;
         let r = city_rand4(vec2<u32>(
             ni * 0x9e3779b9u + key * 0x51ed270bu + 0x165667b1u,
@@ -8977,42 +8989,29 @@ fn cc_skyway_streaks(s: f32, lat: f32, fam: i32, glow: f32, fp: f32)
         if (r.x >= p) {
             continue;
         }
-        let s_c = (n + 0.15 + 0.70 * r.y) * cc_skyway_STK_CELL;
+        let s_c = (n + cc_skyway_STK_EDGE
+                   + (1.0 - 2.0 * cc_skyway_STK_EDGE) * r.y)
+                  * cc_skyway_STK_CELL;
         let lane = side * (2.0 + 4.0 * f32(slot));
-        // Travel is +along on the lat>0 side, -along on the other; the trail
-        // is frozen BEHIND the head, so it points against travel.
-        let x = -((s - s_c) * side) / cc_skyway_STK_L;
-        if (x < 0.0 || x > 1.0) {
-            continue;
-        }
-        let dl = lat - lane;
-        // Core plus halo: a lamp seen on a road surface is a hard bright
-        // patch inside a soft glow, and without the second term the trails
-        // read as painted dashes rather than as light.
-        let core = exp(-dl * dl
-                       / (2.0 * cc_skyway_STK_W * cc_skyway_STK_W));
-        let halo = cc_skyway_STK_HALO
-            * exp(-dl * dl / (2.0 * cc_skyway_STK_HALO_W
-                              * cc_skyway_STK_HALO_W));
-        f = f + (0.55 + 0.90 * r.w) * exp(-cc_skyway_STK_TAIL * x)
-                * (core + halo);
+        let da = (s - s_c) / cc_skyway_STK_SA;
+        let dl = (lat - lane) / cc_skyway_STK_SL;
+        f = f + col * ((0.55 + 0.90 * r.w) * exp(-0.5 * (da * da + dl * dl)));
     }
 
-    // The population's mean over the deck: occupancy x the trail's integral
+    // The population's mean over the deck: occupancy x the pool's integral
     // along s x its lateral integral, over the cell's area, summed over the
     // two lanes of each colour. Written out rather than fitted, so changing
-    // STK_L or STK_W keeps the two ends of the LOD agreeing by construction.
-    let along_int = cc_skyway_STK_L * (1.0 - exp(-cc_skyway_STK_TAIL))
-                    / cc_skyway_STK_TAIL;
-    let lat_int = 2.5066 * (cc_skyway_STK_W
-                            + cc_skyway_STK_HALO * cc_skyway_STK_HALO_W);
+    // the sigmas keeps the two ends of the LOD agreeing by construction (the
+    // tails cut at the cell ends and the rails are below 0.3% of it).
+    let along_int = 2.5066 * cc_skyway_STK_SA;
+    let lat_int = 2.5066 * cc_skyway_STK_SL;
     let unit = 2.0 * p * along_int * lat_int
                / (cc_skyway_STK_CELL * 2.0 * cc_skyway_HW);
     let mean = (cc_skyway_HEAD_COL * cc_skyway_HEAD_RAD
                 + cc_skyway_TAIL_COL * cc_skyway_TAIL_RAD) * unit;
 
     let k = smoothstep(cc_skyway_STK_FP_LO, cc_skyway_STK_FP_HI, fp);
-    return mix(col * (rad * f), mean, k);
+    return mix(f, mean, k);
 }
 
 fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
