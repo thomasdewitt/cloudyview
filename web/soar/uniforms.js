@@ -17,6 +17,20 @@ import { cameraBasis } from "./camera.js";
 
 const DEG = Math.PI / 180.0;
 
+/**
+ * The auto-exposure meter's ray grid for an output of `[w, h]`: the output's
+ * shape at about AUTO_EXPOSURE_METER_RAYS rays, rounded as renderTargetSize
+ * rounds. The shader takes its aspect from the OUTPUT (row 1.w) and its
+ * pixel angle from the grid's width, so a grid of any other shape has
+ * oblong pixels: the meter's fixed 64x36 did, everywhere but 16:9.
+ */
+export function meterSize([w, h]) {
+  if (!(w >= 1 && h >= 1)) throw new Error(`size must be positive; got ${w}x${h}.`);
+  const scale = Math.sqrt(K.AUTO_EXPOSURE_METER_RAYS / (w * h));
+  return [Math.max(1, Math.floor(w * scale + 0.5)),
+          Math.max(1, Math.floor(h * scale + 0.5))];
+}
+
 /** Scaled march resolution. Round-half-up, matching numpy's floor(x + 0.5). */
 export function renderTargetSize([w, h], renderScale) {
   const scale = Number(renderScale);

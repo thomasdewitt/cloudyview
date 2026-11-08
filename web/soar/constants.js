@@ -284,8 +284,11 @@ export const AUTO_EXPOSURE_DEFAULT_BY_TIER = {
   max: true, high: true, medium: true, low: true, minimal: false,
 };
 // Metered on a tiny linear render (TONE_MAP compiled out) of the live view:
-// 64x36 = 2304 rays per meter, beneath measurement next to a frame's march.
-export const AUTO_EXPOSURE_METER_SIZE = [64, 36];
+// about 2304 rays per meter (64x36 at 16:9), beneath measurement next to a
+// frame's march. The grid takes the window's shape (uniforms.js meterSize):
+// a fixed 64x36 had square pixels only at 16:9, and in a portrait window
+// each meter pixel was ~3x taller than wide.
+export const AUTO_EXPOSURE_METER_RAYS = 64 * 36;
 // Every frame: the 200 ms first cut stepped visibly (Thomas). The real
 // cadence is set by the readback round-trip — one meter is in flight at a
 // time — and the glide's time constant is computed from measured elapsed
