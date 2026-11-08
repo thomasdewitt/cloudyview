@@ -15,9 +15,12 @@ policy, 2026-09-24):
 - FATAL, a neighbour: any process outside the desktop (DESKTOP) above
   IDLE_SM_PCT of SM time, or holding a GPU context at all — except an idle
   browser (BROWSERS): the QA harness parks a Chrome, and Thomas flies soar
-  in his own Firefox on this box (2026-09-25), which is his to leave open.
+  in his own Firefox on this box (2026-09-25), which is his to leave open;
+  his Steam client (a Chromium UI, steamwebhelper) is the same case
+  (2026-11-08: idle at 0% SM, it refused a whole timing lock).
   A browser that DRAWS is a neighbour like any other. require_idle() waits
-  for these to go, then exits; a Watch samples all through the run, and
+  briefly for these to go (WAIT_S), then exits; a Watch samples all through
+  the run, and
   check_quiet() exits non-zero with CONTAMINATED if the watch or its own
   last look saw one — discard the numbers.
 - WARNING, the desktop drawing: gnome-shell or the Claude app above
@@ -30,6 +33,23 @@ policy, 2026-09-24):
   that verdict, rather than failing.
 
     uv run python tools/benchmarking/gpu_idle.py      # exit 0 idle, 1 not
+
+Check BEFORE queueing for tools/gpulock as well as inside it. Inside the
+lock nothing worth waiting for can arrive (a teammate's GPU job is queued
+behind you), so a neighbour there is outside-lock work or an app that will
+not leave soon, and every second spent waiting holds the whole queue: on
+2026-11-08 an idle Steam client made one timing lock refuse six blocks of
+five minutes each. So require_idle() waits WAIT_S, not minutes, and a
+timing command is preceded by the pre-check, which ignores the lock
+holder's own work (LOCK; its tree under the flock that holds it):
+
+    uv run python tools/benchmarking/gpu_idle.py --outside-lock && \
+        tools/gpulock uv run python tools/benchmarking/soar_pass_timer.py ...
+
+The pre-check is only a fast fail: the card can change while you queue, so
+the check inside the lock stays the one that counts. It fails closed on one
+case: the holder's QA Chrome drawing reads as a neighbour, because the CDP
+scripts only drive that Chrome and it does not run under the flock.
 """
 
 import os
@@ -38,6 +58,11 @@ import sys
 import time
 
 IDLE_UTIL_PCT = 3
+# How long require_idle() waits for a neighbour to leave, inside the lock.
+WAIT_S = 30.0
+# tools/gpulock's lock file: the flock holding it, and everything under it, is
+# the lock holder's work (what --outside-lock ignores).
+LOCK = "/tmp/soar-gpu.lock"
 # Under the M1-proxy clock lock (180 MHz) the compositor's few frames take
 # ten times as long, and the device reads 6-7% busy with nothing but the
 # desktop on it, below what pmon attributes to any process.
@@ -47,7 +72,7 @@ DESKTOP_SM_PCT = 15
 # Processes that always hold a context on this desktop, the Claude app
 # (claude-desktop) among them.
 # Browsers whose idle context is allowed; their drawing is not (see above).
-BROWSERS = ("chrome", "firefox")
+BROWSERS = ("chrome", "firefox", "steam", "steamwebhelper")
 DESKTOP = {"gnome-shell", "Xwayland", "gnome-software", "ptyxis",
            "gnome-remote-de", "mutter-x11-fram", "claude-desktop", "nautilus"}
 
@@ -108,8 +133,11 @@ def _descendants(root: int) -> set[int]:
     return tree
 
 
-def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
+def survey(seconds: float = 3.0, exclude=(),
+           outside_lock: bool = False) -> tuple[list[str], list[str]]:
     """(fatal, warnings) sampled over `seconds`; both empty when idle.
+    `outside_lock`: the lock holder's work (lock_work()) is not a
+    neighbour either — the pre-check before queueing.
     `exclude`: pids to ignore besides this process and everything it
     started (always ignored: the caller's own work is not a neighbour). The
     whole tree, not just this pid, because a caller that times a child
@@ -129,9 +157,15 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
         # The tree on both sides of the pmon sample, each time: the caller's
         # children come and go during a run, and one started or ended just
         # as pmon looked is still the caller's.
+        # The same for the lock holder's tree under outside_lock: a holder
+        # running a loop starts new GPU processes all the time.
         own = _descendants(os.getpid())
+        if outside_lock:
+            own |= lock_work()
         rows = _processes()
         own |= _descendants(os.getpid()) | set(exclude)
+        if outside_lock:
+            own |= lock_work()
         known = 0
         for pid, short, sm in rows:
             known += sm or 0
@@ -155,7 +189,7 @@ def survey(seconds: float = 3.0, exclude=()) -> tuple[list[str], list[str]]:
         time.sleep(0.5)
 
 
-def require_idle(wait_s: float = 300.0) -> list[str]:
+def require_idle(wait_s: float = WAIT_S) -> list[str]:
     """Block until no neighbour is on the card, up to `wait_s`, then exit
     loudly. Returns the desktop warnings seen at the start."""
     t_end = time.monotonic() + wait_s
@@ -225,8 +259,26 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
     return warn
 
 
+def lock_work() -> set[int]:
+    """Every process under a flock on LOCK: the GPU work of whoever holds
+    tools/gpulock (the flocks still queued have nothing under them yet)."""
+    work = set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            argv = open(f"/proc/{entry}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if (argv and os.path.basename(argv[0]) == b"flock"
+                and LOCK.encode() in argv):
+            work |= _descendants(int(entry))
+    return work
+
+
 if __name__ == "__main__":
-    fatal, warn = survey()
+    outside = "--outside-lock" in sys.argv[1:]
+    fatal, warn = survey(outside_lock=outside)
     for w in warn:
         print("WARNING " + w)
     print("idle" if not fatal else "NOT idle:\n  " + "\n  ".join(fatal))
