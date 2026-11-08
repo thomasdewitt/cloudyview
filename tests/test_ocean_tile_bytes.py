@@ -17,8 +17,8 @@ import re
 import numpy as np
 import pytest
 
-from cloudyview.soar_host import (OCEAN_DIR, SHADER_PATH, decode_surface_level,
-                                  surface_level_files)
+from cloudyview.soar_host import (OCEAN_DIR, SHADER_PATH, SceneState,
+                                  decode_surface_level, surface_level_files)
 
 SHADER = SHADER_PATH
 Z_BOUND = 0.923
@@ -66,10 +66,22 @@ def test_the_slope_variance_table_is_the_tiles():
     assert clamps and all(float(v) == len(levels) - 1 for v in clamps[0])
 
 
+def test_the_scene_defaults_are_the_tiles():
+    """SceneState's row 9 defaults are the sea tile's numbers (witness and
+    the parity tests lean on it), so a new tile must move them too."""
+    meta = json.loads((OCEAN_DIR / "meta.json").read_text())
+    state = SceneState(bmin=(0, 0, 0), bmax=(1, 1, 1), dt_view=1, dt_light=1)
+    assert (state.ocean_fif_dx, state.ocean_tile_extent, state.ocean_max_lod) \
+        == (meta["dx_m"], meta["tile_extent_m"], meta["mips"] - 1)
+
+
 def test_the_normalize_bound_is_the_tiles():
     """Bilinear filtering and the mip mix are convex, so a sampled normal's
     z is at least the smallest texel's — the @domain notes' bound."""
     assert min(float(lv[..., 2].min()) for lv in _levels()) >= Z_BOUND
     notes = re.findall(r"// @domain: every texel of every mip has z >= "
                        r"([0-9.]+)", SHADER.read_text())
-    assert notes and all(float(v) == pytest.approx(Z_BOUND) for v in notes)
+    # One on each normalize() of the tile's normals: the mipped and the
+    # legacy sampler.
+    assert len(notes) == 2
+    assert all(float(v) == pytest.approx(Z_BOUND) for v in notes)

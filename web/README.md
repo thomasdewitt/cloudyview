@@ -21,9 +21,10 @@ is the tree the site gets.
 
 `soar/ocean/` is committed: a periodic 100 m patch of sea surface, generated
 from a multifractal that only exists in Python, so it ships with the tool and
-works offline. Regenerate it with:
+works offline: 1024² normals of 0.1 m, eleven mips, each level byte-shuffled
+and gzipped (`mip*.bin.gz`, 5.2 MiB). Regenerate it with:
 
-    uv run python tools/export_web_assets.py
+    uv run python tools/export_web_assets.py ocean
 
 `demos/` is the baked demo set — derived, gitignored, and served from the
 website rather than from this repo, because it runs to a few hundred megabytes
@@ -33,10 +34,14 @@ appear, or how they are grouped, without re-baking anything:
 
     uv run python tools/prebake_demos.py --index-only
 
-The seed recorded in `soar/ocean/meta.json` reproduces the tile exactly, so
-re-running the exporter leaves the committed `fif_mip*.bin` byte-identical.
-(It did not until 2026-08-05: `generate_fif_normals` was letting `FIF_ND` draw
-its own cascade noise, so its `rng` argument steered only the boost direction.)
+The seed recorded in `soar/ocean/meta.json` reproduces the tile exactly under
+the scaleinvariance it names in the exporter (`OCEAN_BAKED_WITH`): the
+decoded levels come out the same. The gzip around them is reproducible only
+under the same zlib (another — zlib-ng, say — packs the same levels into
+different bytes), so a re-run elsewhere can rewrite the files without
+changing the sea. (The tile did not reproduce at all until 2026-08-05:
+`generate_fif_normals` was letting `FIF_ND` draw its own cascade noise, so
+its `rng` argument steered only the boost direction.)
 
 ## Deploy
 
