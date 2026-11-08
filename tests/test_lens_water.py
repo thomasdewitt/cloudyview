@@ -20,14 +20,18 @@ except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
 # raymarch.wgsl's lens-water constants.
-L_WET, K_WET, K_DRY, DRY_FLOOR = 30.0, 0.6, 0.2, 0.002
+L_WET, K_WET, K_DRY, K_DRY_CLEAR, DRY_FLOOR = 30.0, 0.6, 0.2, 0.6, 0.002
 SIGMA = 0.0625           # m^-1: exact in half and single float
 
 
 def reference_step(w, sigma, dt):
-    """One step of dw/dt = K_WET f (1 - w) - K_DRY (1 - f) w, exactly."""
+    """One step of dw/dt = K_WET f (1 - w) - k_dry (1 - f) w, exactly, with
+    k_dry = K_DRY in cloud and K_DRY_CLEAR in clear air: where the first
+    law's level is under DRY_FLOOR."""
     f = 1.0 - math.exp(-sigma * L_WET)
-    a = K_WET * f + K_DRY * (1.0 - f)
+    w_first = K_WET * f / (K_WET * f + K_DRY * (1.0 - f))
+    k_dry = K_DRY if w_first >= DRY_FLOOR else K_DRY_CLEAR
+    a = K_WET * f + k_dry * (1.0 - f)
     w_star = K_WET * f / a
     w = w_star + (w - w_star) * math.exp(-a * dt)
     return 0.0 if (w < DRY_FLOOR and w_star < DRY_FLOOR) else w
@@ -76,7 +80,50 @@ def test_wetness_follows_the_exact_law_through_a_cloud_and_out(scene):
     got, want = np.array(trace).T
     assert np.max(np.abs(got - want)) < 2e-4, (
         f"GPU wetness strays from the law by {np.max(np.abs(got - want)):.2e}")
-    assert want[79] > 0.8 and want[-1] < 0.35      # wetted, and draining
+    # Wetted toward w* = 0.94 (the in-cloud law, K_DRY 0.2), then drained
+    # out of cloud at K_DRY_CLEAR: 0.83 exp(-0.6/s * 6 s) = 0.023.
+    assert want[79] > 0.8 and want[-1] < 0.03
+
+
+@pytest.mark.parametrize("sigma", [SIGMA, SIGMA / 8.0, SIGMA / 64.0])
+def test_in_cloud_the_law_is_the_first_one(scene, sigma):
+    # Only the drain in clear air got faster: in cloud, thin cloud included,
+    # w* is the first law's K_WET f / (K_WET f + 0.2 (1 - f)).
+    r, state, view, shape = scene
+    _fill(r, shape, sigma)
+    r.reset_lens()
+    r.render(state, view, frames=1, lens_dt=0.5)
+    f = 1.0 - math.exp(-sigma * L_WET)
+    w_star_first = 0.6 * f / (0.6 * f + 0.2 * (1.0 - f))
+    assert abs(float(r.lens_state()[1]) - w_star_first) < 1e-6
+
+
+def test_out_of_cloud_the_lens_drains_at_three_times_the_rate(scene):
+    r, state, view, shape = scene
+    _fill(r, shape, SIGMA)
+    r.reset_lens()
+    r.render(state, view, frames=1, lens_dt=4.0)
+    w0 = float(r.lens_state()[0])
+    _fill(r, shape, 0.0)
+    r.render(state, view, frames=1, lens_dt=2.0)
+    w1 = float(r.lens_state()[0])
+    assert abs(w1 / w0 - math.exp(-3.0 * 0.2 * 2.0)) < 1e-4
+
+
+def test_a_faint_tail_of_extinction_is_clear_air(scene):
+    # A field's clear air can carry a tiny positive extinction (the RCE
+    # demo's tail): it drains at the clear rate, not the in-cloud one.
+    r, state, view, shape = scene
+    _fill(r, shape, SIGMA)
+    r.reset_lens()
+    r.render(state, view, frames=1, lens_dt=4.0)
+    w0 = float(r.lens_state()[0])
+    _fill(r, shape, 1e-6)
+    r.render(state, view, frames=1, lens_dt=2.0)
+    w1, w_star = (float(v) for v in r.lens_state()[:2])
+    assert 0.0 < w_star < DRY_FLOOR
+    ratio = (w1 - w_star) / (w0 - w_star)
+    assert abs(ratio - math.exp(-K_DRY_CLEAR * 2.0)) < 1e-4
 
 
 def test_one_long_step_equals_many_short_ones(scene):

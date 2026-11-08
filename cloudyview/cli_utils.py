@@ -137,6 +137,13 @@ def add_dataset_selection_arguments(parser: argparse.ArgumentParser) -> None:
              "Required, because a level index does not say which end is the "
              "ground.",
     )
+    parser.add_argument(
+        "--coarsen", type=int, metavar="N",
+        help="Block-average the field by N on every axis, after cutting z "
+             "to its occupied band grown to a multiple of N: the grid a "
+             "coarse soar demo was baked on, which soar's copied commands "
+             "write here. Without it, the field as read.",
+    )
     ice = parser.add_mutually_exclusive_group()
     ice.add_argument(
         "--ice-file", "--ice", dest="ice_file", metavar="FILE",
@@ -176,4 +183,5 @@ def dataset_selection_kwargs(args: argparse.Namespace) -> dict:
                          for axis in ("x", "y", "z")
                          if getattr(args, f"d{axis}") is not None} or None,
         "z_first": args.z_first,
+        "coarsen": args.coarsen,
     }

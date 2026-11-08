@@ -1195,7 +1195,7 @@ fn cc_streetfurniture_miss(ci: vec2<i32>) -> CityHit {
 // them. streetlife's cc_streetlife_fp_px, for streetlife's reason — a hinge
 // is one feature, not a lattice that could moire.
 fn cc_streetfurniture_fpx(t: f32) -> f32 {
-    let pa = 2.0 * u.cam_origin.w / max(u.params.x, 1.0);
+    let pa = true_pixel_angle();
     return max(0.35 * max(pa, u.periodic.z), pa) * max(t, 0.0);
 }
 
@@ -1587,8 +1587,7 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // placement and the trace disagree, and that should be seen.
         return vec3<f32>(1.0, 0.0, 1.0);
     }
-    let fpx = max(0.35 * fp, 2.0 * u.cam_origin.w / max(u.params.x, 1.0)
-                             * max(h.t, 0.0));
+    let fpx = max(0.35 * fp, true_pixel_angle() * max(h.t, 0.0));
     let pl = cc_streetfurniture_to_local(v, h.pos);
     let n = h.normal;
     let mid = cc_streetfurniture_sdf(pl, v, cc_streetfurniture_lod(fpx)).y;

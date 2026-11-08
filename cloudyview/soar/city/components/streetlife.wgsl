@@ -858,7 +858,7 @@ struct cc_streetlife_Kerb {
 // The core's LOD pixel angle, the one both surface stages' footprints are
 // taken from (and so the one the per-car stage switch must use).
 fn cc_streetlife_pa() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // `near` picks the stage: false for the view ray's first stage (poles, and
@@ -1361,8 +1361,7 @@ fn cc_streetlife_seam(x: f32, x0: f32, w: f32, pitch: f32, fp: f32) -> f32 {
 // default slider this lands at ~1.5 px; with a fine slider the true-pixel
 // term takes over and holds the floor at 1 px.
 fn cc_streetlife_fp_px(fp: f32, t: f32) -> f32 {
-    return max(0.35 * fp,
-               2.0 * u.cam_origin.w / max(u.params.x, 1.0) * max(t, 0.0));
+    return max(0.35 * fp, true_pixel_angle() * max(t, 0.0));
 }
 
 // One lamp LENS on a face, resolved while it is bigger than a pixel and

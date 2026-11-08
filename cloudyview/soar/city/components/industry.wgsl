@@ -302,7 +302,7 @@ fn cc_industry_box(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // The pixel's angular size: the footprint at distance t is px * t (m/px),
 // the core's own pixel_angle.
 fn cc_industry_px() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // ============================================================================

@@ -404,7 +404,8 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
          fallback_coord_units: str = None,
          grid_spacing: dict = None,
          z_first: str = None,
-         no_ice: bool = False) -> None:
+         no_ice: bool = False,
+         coarsen: int = None) -> None:
     """CLI wrapper: load, build the scene, progressively render and save PNGs.
 
     Composes the same helpers as the library :func:`behold`; the file
@@ -501,6 +502,7 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
             grid_spacing=grid_spacing,
             z_first=z_first,
             no_ice=no_ice,
+            coarsen=coarsen,
         )
 
         camera = Camera(
