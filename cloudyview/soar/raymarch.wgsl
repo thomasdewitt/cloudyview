@@ -28137,18 +28137,31 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // interval. Stills pass no state at all and are dry in both hosts.
 //
 // The wetting law, exact in dt at constant extinction sigma at the camera:
-//   dw/dt = K_WET f (1 - w) - K_DRY (1 - f) w,   f = 1 - exp(-sigma L_WET)
-// is linear in w, so one step of any length is
+//   dw/dt = K_WET f (1 - w) - k_dry(f) (1 - f) w,  f = 1 - exp(-sigma L_WET),
+//   k_dry(f) = K_DRY in cloud, K_DRY_CLEAR in clear air,
+// is linear in w at constant f, whatever k_dry(f) is, so one step of any
+// length is
 //   w(t + dt) = w* + (w - w*) exp(-a dt),
-//   a = K_WET f + K_DRY (1 - f),  w* = K_WET f / a,
+//   a = K_WET f + k_dry(f) (1 - f),  w* = K_WET f / a,
 // and one step of 2 dt equals two of dt at constant f: a replay at another
 // frame rate sees the same wetness wherever the extinction at the camera
 // changes slowly against the frame interval (f is taken at the step's end).
-// Dense cloud (f ~ 1) wets the lens in a few seconds; haze (f small) only to
-// a low level, slowly; out of cloud it drains to 5 % in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
+// f is the cloud's alone (the field's extinction; the haze is not in it).
+// Clear air is where the first law's level, K_WET f / (K_WET f + K_DRY
+// (1 - f)), is under LENS_DRY_FLOOR, the wetness that counts as dry anyway:
+// f below ~6.7e-4, sigma below ~2.2e-5 /m. Not where sigma is exactly 0: a
+// field's clear air can carry a faint positive tail (the RCE demo's, median
+// f ~3e-5, over a third of its volume), and the camera samples sigma
+// trilinearly. Dense cloud (f ~ 1) wets the lens in a few seconds, thin
+// cloud (f small) only to a low level, slowly; in cloud this is the first
+// law, its w* and its rate unchanged. In clear air the lens drains at
+// K_DRY_CLEAR, 3x K_DRY (Thomas, 2026-11-08: outside of cloud the drops
+// "should disappear 3x faster"), to 5 % in 5 s. The same law in numpy is
+// tests/test_lens_water.py's reference.
 const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
 const LENS_K_WET: f32 = 0.6;        // 1/s
-const LENS_K_DRY: f32 = 0.2;        // 1/s
+const LENS_K_DRY: f32 = 0.2;        // 1/s, in cloud
+const LENS_K_DRY_CLEAR: f32 = 0.6;  // 1/s, in clear air
 const LENS_DRY_FLOOR: f32 = 0.002;  // below this, and drying: exactly dry
 
 @fragment
@@ -28162,7 +28175,11 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     let s_raw = sample_sigma(u.cam_origin.xyz);
     let sigma = select(0.0, s_raw, s_raw > 0.0);
     let f = 1.0 - exp(-sigma * LENS_L_WET);
-    let a = LENS_K_WET * f + LENS_K_DRY * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
+    // Clear air: the first law's level would count as dry. Its denominator
+    // is >= min(K_WET, K_DRY) > 0.
+    let w_first = LENS_K_WET * f / (LENS_K_WET * f + LENS_K_DRY * (1.0 - f));
+    let k_dry = select(LENS_K_DRY_CLEAR, LENS_K_DRY, w_first >= LENS_DRY_FLOOR);
+    let a = LENS_K_WET * f + k_dry * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
     let w_star = LENS_K_WET * f / a;
     var w = w_star + (prev.x - w_star) * exp(-a * dt);
     // Dry is exactly 0, so a dry lens draws nothing at all (lens.wgsl); a
