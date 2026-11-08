@@ -117,11 +117,15 @@ def run():
 
 
 def _radiances(white_point, n=4000, seed=20261108):
-    """Colours from deep shadow to past the shoulder, log-spaced per channel,
-    as exposed radiance up to 1.2x the white point."""
+    """Colours from deep shadow to past the shoulder: a level log-spaced as
+    exposed radiance up to 1.2x the white point, each channel within a
+    factor ~3 of it either way (saturated enough to reach the shoulder's
+    chroma branch, not so saturated that high contrast clips a channel of
+    nearly every one)."""
     rng = np.random.default_rng(seed)
-    exposed = np.exp(rng.uniform(np.log(1e-4), np.log(1.2 * white_point),
-                                 size=(n, 3)))
+    level = np.exp(rng.uniform(np.log(1e-4), np.log(1.2 * white_point),
+                               size=(n, 1)))
+    exposed = level * np.exp(rng.uniform(-1.1, 1.1, size=(n, 3)))
     return np.concatenate([exposed / EXPOSURE, np.zeros((n, 1))], axis=1)
 
 
