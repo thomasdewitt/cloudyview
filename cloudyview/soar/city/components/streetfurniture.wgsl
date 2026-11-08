@@ -1238,8 +1238,8 @@ fn cc_streetfurniture_trace(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
     if (!got || t > tb) {
         return cc_streetfurniture_miss(ci);
     }
-    // Normal: the four tetrahedron taps as a LOOP (aircars' measured
-    // lesson — four inline copies of the field cost occupancy everywhere).
+    // Normal: the four tetrahedron taps as a LOOP (four inline copies of
+    // the field cost occupancy everywhere; SPEC, "Cost honesty").
     let q = ro + t * rd;
     let hs = max(eps, 0.0015);
     var g = vec3<f32>(0.0);

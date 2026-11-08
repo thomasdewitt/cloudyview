@@ -11,16 +11,6 @@
    "enabled": true
   },
   {
-   "file": "aircars.wgsl",
-   "name": "aircars",
-   "kind_base": 300,
-   "hooks": {
-    "cell_props": "cc_aircars_props_trace",
-    "shade": "cc_aircars_shade"
-   },
-   "enabled": true
-  },
-  {
    "file": "facadeworks.wgsl",
    "name": "facadeworks",
    "hooks": {
