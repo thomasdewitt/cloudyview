@@ -28,8 +28,9 @@ disagreed in both directions: a graffiti-weathering variant it read at 128
 ran at 157, and a facade-zones variant it read at 161 ran at 128. Register
 attributions in commits before that date came from it.
 
-What the numbers mean on this card (NVIDIA, sm_120: 64K registers an SM,
-48 warps at most, registers allocated 8 a thread). The driver chooses each
+What the numbers mean on this card (NVIDIA, sm_120: four 16K-register
+sub-partitions an SM, 12 warps each, registers allocated 8 a thread; see
+warps_per_sm). The driver chooses each
 fragment program's register target itself, by its own spill-cost
 heuristic, and a stage whose natural demand sits near 128 flips between
 two builds on changes that do no work: 128 registers with spills (LDL/STL,
@@ -72,8 +73,16 @@ ENTRIES = ("fs_main", "fs_bake_light", "fs_surface", "fs_surface_refine",
            "fs_surface_street")
 
 # sm_120 (RTX 50): what a register count allows an SM to keep in flight.
-SM_REGISTERS = 65536
-SM_MAX_WARPS = 48
+# Architectural knowledge, not a measurement here: since sm_70 an SM's 64K
+# registers are four sub-partition files of 16K, a warp's registers come
+# from one of them, allocated 256 to a warp (8 a thread), and each
+# sub-partition holds at most 12 of the SM's 48 warps. So the bound is per
+# sub-partition — CUDA's occupancy calculator (cuda_occupancy.h, its
+# registers limit) divides the same way — and differs from 64K over one
+# pool at, e.g., 96 registers (20 warps, not 21) and 136 (12, not 15).
+SM_SUBPARTITIONS = 4
+SUBPARTITION_REGISTERS = 16384
+SUBPARTITION_MAX_WARPS = 12
 REG_GRANULE = 8
 # SM120 opcodes, the low 12 bits of an instruction's first 64-bit word
 # (checked against nvdisasm -b SM120 on these binaries).
@@ -167,6 +176,8 @@ def cache_frames(blob: bytes):
     i = 0
     while (j := blob.find(ZSTD_MAGIC, i)) >= 0:
         i = j + 4
+        if j < 8:
+            continue                # no room for a record's sizes
         n, size = struct.unpack_from("<II", blob, j - 8)
         if j + n - 4 > len(blob) or n < 12 or size == 0:
             continue                # the magic inside compressed data
@@ -226,11 +237,17 @@ def program_stats(prog: bytes) -> dict:
             if t in (1, 2) and size == 0 and o == 0 and w5 == 0xff]
     if len(regs) != 1 or not 0 < regs[0] <= 255:
         raise SystemExit(f"no register count where one was expected ({regs})")
-    granted = -(-regs[0] // REG_GRANULE) * REG_GRANULE
     return {"registers": regs[0], "ldl": ops[OP_LDL], "stl": ops[OP_STL],
             "instructions": len(code) // 16, "binary": len(code),
-            "warps": min(SM_MAX_WARPS, SM_REGISTERS // (granted * 32)),
-            "code": code}
+            "warps": warps_per_sm(regs[0]), "code": code}
+
+
+def warps_per_sm(registers: int) -> int:
+    """The warps a register count lets an sm_120 SM keep resident (see
+    SM_SUBPARTITIONS): per sub-partition, then times four."""
+    per_warp = -(-registers // REG_GRANULE) * REG_GRANULE * 32
+    return SM_SUBPARTITIONS * min(SUBPARTITION_MAX_WARPS,
+                                  SUBPARTITION_REGISTERS // per_warp)
 
 
 def measure(spec: str, args, work: Path) -> dict:
