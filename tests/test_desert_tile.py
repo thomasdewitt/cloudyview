@@ -3,7 +3,11 @@
 Nothing at run time would notice if the tile were re-baked and the numbers
 derived from it were not: the shader's clearance stepping trusts a per-mip
 slope table, the far field's bounce trusts a mean lightness, and the camera's
-floor trusts the octaves' margin. Each is held to the tile here.
+floor follows the drawn ground. Each is held to the tile here, the meta's
+derived numbers through desert_tile_spec (this repo's reading of
+docs/desert_tile_format.md; the generator is desert-surface now). The
+conformance fixtures (tests/fixtures/desert-tile-64-*) are held to the same
+reading, and soar's decoders to the fixtures.
 """
 
 import gzip
@@ -20,12 +24,12 @@ import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "tools"))
+sys.path.insert(0, str(REPO / "tests"))
 
 from cloudyview.soar_host import (DESERT_DIR, SHADER_PATH,         # noqa: E402
                                   decode_surface_level, encode_surface_level,
                                   surface_level_files)
-import export_desert_tile                                        # noqa: E402
+import desert_tile_spec as spec                                 # noqa: E402
 
 META = json.loads((DESERT_DIR / "meta.json").read_text())
 SHADER = SHADER_PATH.read_text()
@@ -106,19 +110,18 @@ def test_the_browser_packs_the_same_tile_rows():
 
 
 def test_the_measured_numbers_are_the_bytes():
-    """slope_max and band_max_m, re-measured from the shipped levels."""
-    heights = [_level(k)[..., 0] for k in range(META["mips"])]
-    stats = export_desert_tile.relief_stats(heights, META["cell_m"])
-    assert stats == {k: META[k] for k in stats}
-    assert META["height_min_m"] == heights[0].min()
-    assert META["height_max_m"] == heights[0].max()
+    """Every derived meta.json field, re-measured from the shipped levels
+    as the spec defines it."""
+    levels = [_level(k) for k in range(META["mips"])]
+    derived = spec.derived_meta(levels, META["cell_m"])
+    assert derived == {k: META[k] for k in derived}
 
 
 def test_the_regional_albedo_is_the_mean_of_the_albedos():
     top = _level(META["mips"] - 1)
     assert top.shape == (1, 1, 2)
     assert META["mean_lightness"] == round(float(top[0, 0, 1]), 4)
-    truth = export_desert_tile.albedo_of(_level(0)[..., 1]).reshape(-1, 3)
+    truth = spec.albedo_of(_level(0)[..., 1]).reshape(-1, 3)
     assert META["bounce_albedo"] == [round(float(v), 3) for v in truth.mean(0)]
 
 
@@ -289,14 +292,105 @@ def _vec3(name):
 
 
 def test_the_far_field_colour_correction_is_the_tiles():
-    """The bake's albedo endmembers are the shader's, and the per-level
-    correction it measured with them is the one the shader applies."""
-    assert _vec3("DESERT_ALBEDO_PAVEMENT") == export_desert_tile.ALBEDO_PAVEMENT
-    assert _vec3("DESERT_ALBEDO_SOIL") == export_desert_tile.ALBEDO_SOIL
-    assert _vec3("DESERT_ALBEDO_WASH") == export_desert_tile.ALBEDO_WASH
+    """The spec's albedo endmembers are the shader's, and the per-level
+    correction measured with them is the one the shader applies."""
+    assert _vec3("DESERT_ALBEDO_PAVEMENT") == spec.ALBEDO_PAVEMENT
+    assert _vec3("DESERT_ALBEDO_SOIL") == spec.ALBEDO_SOIL
+    assert _vec3("DESERT_ALBEDO_WASH") == spec.ALBEDO_WASH
     lights = [_level(k)[..., 1] for k in range(META["mips"])]
-    assert export_desert_tile.albedo_correction(lights) == \
-        META["albedo_correction"]
+    assert spec.albedo_correction(lights) == META["albedo_correction"]
+
+
+SPEC_DOC = (REPO / "docs" / "desert_tile_format.md").read_text()
+
+
+def test_the_spec_documents_the_shaders_albedo():
+    rows = re.findall(r"^\| ([0-9½]+) \| \w[\w ]* \| \(([^)]*)\) \|",
+                      SPEC_DOC, re.M)
+    table = {r[0]: tuple(float(v) for v in r[1].split(",")) for r in rows}
+    assert table == {"0": _vec3("DESERT_ALBEDO_PAVEMENT"),
+                     "½": _vec3("DESERT_ALBEDO_SOIL"),
+                     "1": _vec3("DESERT_ALBEDO_WASH")}
+    assert META["schema"] in SPEC_DOC
+
+
+FIXTURES = REPO / "tests" / "fixtures"
+
+
+def _fixture(fmt):
+    path = FIXTURES / f"desert-tile-64-{fmt}"
+    meta = json.loads((path / "meta.json").read_text())
+    return path, meta
+
+
+def _fixture_levels_want(fmt):
+    """The conformance field's box means, stored as the format stores them."""
+    height, light = spec.fixture_field()
+    mips = spec.box_mips(np.stack([height, light], axis=-1))
+    dtype = np.float16 if fmt == "rg16float" else np.float32
+    return [m.astype(dtype) for m in mips]
+
+
+def test_soar_host_decodes_the_conformance_tile():
+    path, meta = _fixture("rg16float")
+    want = _fixture_levels_want("rg16float")
+    assert meta["mips"] == len(want)
+    for k, w in enumerate(want):
+        side = meta["n"] >> k
+        raw = gzip.decompress((path / meta["files"][k]).read_bytes())
+        got = np.frombuffer(decode_surface_level(raw, side, meta),
+                            np.float16).reshape(side, side, 2)
+        assert np.array_equal(got, w)
+
+
+@pytest.mark.parametrize("fmt", ["rg16float", "rg32float"])
+def test_the_conformance_tiles_meta_is_its_bytes(fmt):
+    """The fixture desert-surface's writer made, read by this repo's
+    reading of the spec: the two implementations agree."""
+    path, meta = _fixture(fmt)
+    levels = [lv.astype(np.float64) for lv in _fixture_levels_want(fmt)]
+    assert meta["n"] == spec.FIXTURE_N
+    assert meta["tile_extent_m"] == spec.FIXTURE_EXTENT_M
+    assert meta["cell_m"] == spec.FIXTURE_EXTENT_M / spec.FIXTURE_N
+    assert meta["clock_period_s"] is None
+    derived = spec.derived_meta(levels, meta["cell_m"])
+    assert derived == {k: meta[k] for k in derived}
+
+
+_FIXTURE_JS = textwrap.dedent("""
+    import { decodeSurfaceLevel } from "%s";
+    import { readFileSync } from "node:fs";
+    import { gunzipSync } from "node:zlib";
+    const dir = process.env.DIR;
+    const meta = JSON.parse(readFileSync(dir + "/meta.json"));
+    const out = [];
+    for (let k = 0; k < meta.mips; k++) {
+      let raw = readFileSync(dir + "/" + meta.files[k]);
+      if (meta.compression === "gzip") raw = gunzipSync(raw);
+      const bytes = decodeSurfaceLevel(new Uint8Array(raw), meta.n >> k, meta);
+      out.push(Buffer.from(bytes).toString("base64"));
+    }
+    process.stdout.write(JSON.stringify(out));
+""")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+@pytest.mark.parametrize("fmt", ["rg16float", "rg32float"])
+def test_the_browser_decodes_the_conformance_tiles(fmt):
+    path, meta = _fixture(fmt)
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e",
+         _FIXTURE_JS % (REPO / "web" / "soar" / "scene.js").as_posix()],
+        capture_output=True, text=True, cwd=REPO,
+        env={**os.environ, "DIR": str(path)})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    import base64
+    dtype = "<f2" if fmt == "rg16float" else "<f4"
+    for k, (b64, w) in enumerate(zip(json.loads(proc.stdout),
+                                     _fixture_levels_want(fmt))):
+        side = meta["n"] >> k
+        got = np.frombuffer(base64.b64decode(b64), dtype).reshape(side, side, 2)
+        assert np.array_equal(got, w)
 
 
 def test_the_silt_between_resolved_stones_stays_warm():

@@ -178,23 +178,19 @@ _F32_JS = textwrap.dedent("""
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
-def test_a_full_precision_desert_tile_loads_where_it_can_be_filtered(tmp_path):
-    """The terrain lab's rg32float tile: refused by a device without
-    float32-filterable, and otherwise uploaded at four bytes a channel,
-    its heights read exactly (no half rounding)."""
-    import sys
+def test_a_full_precision_desert_tile_loads_where_it_can_be_filtered():
+    """The terrain lab's rg32float tile (the conformance fixture of that
+    format): refused by a device without float32-filterable, and otherwise
+    uploaded at four bytes a channel, its heights read exactly (no half
+    rounding)."""
     import numpy as np
-    sys.path.insert(0, str(REPO / "tools"))
-    import export_desert_tile as edt
-    rng = np.random.default_rng(1)
+    base = REPO / "tests" / "fixtures" / "desert-tile-64-rg32float"
     n = 64
-    height = 1000.0 + rng.normal(size=(n, n)) * 123.456789
-    light = rng.random((n, n))
-    edt.write_tile(tmp_path / "tile", height, light, 6400.0, 1, fmt="rg32float")
+    level0 = np.fromfile(base / "mip0.bin", "<f4").reshape(n, n, 2)
     proc = subprocess.run(
         ["node", "--input-type=module", "-e", _F32_JS % {"soar": SOAR.as_posix()}],
         capture_output=True, text=True, cwd=REPO,
-        env={**os.environ, "BASE": str(tmp_path / "tile")})
+        env={**os.environ, "BASE": str(base)})
     assert proc.returncode == 0, proc.stderr[-2000:]
     got = json.loads(proc.stdout)
     assert "float32-filterable" in got["false"]["error"]
@@ -205,6 +201,7 @@ def test_a_full_precision_desert_tile_loads_where_it_can_be_filtered(tmp_path):
         side = max(1, n >> level)
         assert w["bytes"] == side * side * 2 * 4
         assert w["bytesPerRow"] == side * 2 * 4
-    assert ok["level0"] == np.float32(height.ravel()[:4]).tolist()
+    assert ok["level0"] == level0[0, :4, 0].tolist()
     # The bounds builder took its levels away; the floor kept its own.
-    assert np.isfinite(ok["floor"]) and ok["floor"] > 500.0
+    assert np.isfinite(ok["floor"])
+    assert abs(ok["floor"] - level0[0, 0, 0]) < 10.0
