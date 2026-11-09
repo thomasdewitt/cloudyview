@@ -9,7 +9,9 @@ found is just on a random bit of street"). So this runs the shader's own
 functions, on the GPU, over every site of a stretch of streets of the
 shipped tile, and holds every steaming site to a cover drawn at its centre
 (city_manhole_cover through city_road, the ground's own path, at a
-resolved footprint).
+resolved footprint) and kept dry there by its heat — and no other site to a
+dry lid: the ground and the component ask one rule (city_manhole_steam), so
+a pale dry lid and its plume can never disagree.
 
 The functions are cut out of raymarch.wgsl by name, with everything they
 call (found by name, transitively) and every module-scope constant, over
@@ -36,8 +38,9 @@ TILE_DIR = REPO / "cloudyview" / "soar" / "city"
 
 ROOTS = ["city_manhole", "cc_manholesteam_site", "city_manhole_cover",
          "city_road"]
-# Per site: present, steams, stack, cover at its centre, centre x, y.
-STRIDE = 6
+# Per site: present, steams, stack, cover at its centre, centre x, y, the
+# share kept dry at its centre.
+STRIDE = 7
 
 
 def _functions(source):
@@ -95,7 +98,8 @@ def _compute_source(source):
             let along_y = q.z == 1;
             let m = city_manhole(q.x, q.y, along_y);
             let s = cc_manholesteam_site(q.x, q.y, along_y);
-            let cover = city_manhole_cover(m.xy, city_road(m.xy), 0.01).x;
+            let mh = city_manhole_cover(m.xy, city_road(m.xy), 0.01);
+            let cover = mh.x;
             let o = i * {STRIDE}u;
             out[o] = m.z;
             out[o + 1u] = select(0.0, 1.0, s.on);
@@ -103,6 +107,7 @@ def _compute_source(source):
             out[o + 3u] = cover;
             out[o + 4u] = m.x;
             out[o + 5u] = m.y;
+            out[o + 6u] = mh.z;
         }}
         """)
 
@@ -188,3 +193,10 @@ def test_every_steaming_site_has_its_cover_drawn():
     assert not bare.any(), (
         f"{bare.sum()} of {int((steams > 0.5).sum())} steaming covers have "
         "no cover drawn at their centre:\n  " + "\n  ".join(rows))
+    dried = out[:, 6]
+    wet_steam = (steams > 0.5) & (dried < 0.99)
+    dry_still = (steams < 0.5) & (dried > 0.0)
+    assert not wet_steam.any(), \
+        f"{wet_steam.sum()} steaming covers are not dry at their centre"
+    assert not dry_still.any(), \
+        f"{dry_still.sum()} covers that do not steam are dry at their centre"

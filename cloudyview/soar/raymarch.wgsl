@@ -3935,6 +3935,20 @@ const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
 const CITY_MH_PITCH: f32 = 30.0;
 const CITY_MH_R: f32 = 0.34;
 const CITY_MH_PRESENT: f32 = 0.55;
+// Share of PRESENT sites that steam, by district (city_manhole_steam). A
+// block owns about 3.3 present covers (two street edges x ~1.65 each), so
+// 0.26 downtown is a steaming cover every block or so and 0.015 in the
+// outskirts is one in twenty blocks. The ramp is the lamp scale's
+// (city_lamp_scale): the same districts that burn brightest steam most.
+const CITY_MH_STEAM_FRAC_LO: f32 = 0.015;
+const CITY_MH_STEAM_FRAC_HI: f32 = 0.26;
+// A steaming cover is hot: it and the asphalt round it stay dry on a wet
+// street, a pale patch the plume rises out of (Thomas, 2026-11-08: steam
+// "just on a random bit of street"; the dark wet lid under it did not read,
+// and from his pose the plume's own foot hides the lid itself). Dry out to
+// CITY_MH_R + DRY_IN, fading to wet by CITY_MH_R + DRY_OUT.
+const CITY_MH_DRY_IN: f32 = 0.35;
+const CITY_MH_DRY_OUT: f32 = 0.45;
 // A wet cover's gloss: tyre-polished iron under a film, sheened all over
 // rather than mottled like the asphalt round it, so at night a lid reads as
 // a lid — it catches the lamps (city_lamp_glint) and the lit windows (the
@@ -3978,7 +3992,7 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0694, 0.2250);
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0695, 0.2216);
 const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0084, 0.1047);
 
 // Building line to kerb on the street a plot edge faces. The plot edge alone
@@ -4183,13 +4197,60 @@ fn city_manhole(k: i32, j: i32, along_y: bool) -> vec4<f32> {
     return vec4<f32>(c, select(0.0, 1.0, present), r.w);
 }
 
+// Whether a site steams, for the ground and the manhole-steam component
+// alike, so a dry lid and its plume can never disagree: the site's steam
+// draw over its district's share, v in [0, 1) uniform over the steaming
+// sites (the component sizes its plume by v) and >= 1 for every other, an
+// absent site included. The hash rejects all but the candidates before the
+// texture read.
+fn city_manhole_steam(m: vec4<f32>) -> f32 {
+    if (m.z < 0.5 || m.w >= CITY_MH_STEAM_FRAC_HI) {
+        return 2.0;
+    }
+    let district = city_glow_sample(m.xy, 2.0);
+    let frac = mix(CITY_MH_STEAM_FRAC_LO, CITY_MH_STEAM_FRAC_HI,
+                   smoothstep(0.02, 0.45, district));
+    return m.w / frac;
+}
+
+// A disc of radius r at offset lq (|lq| = d) from p, filtered over fp:
+// resolved, the disc with its edge antialiased over a pixel; unresolved,
+// the equal-area square box-filtered in both axes, whose integral IS the
+// disc's area at every footprint — a 1-D ramp in d would claim half the
+// pixel at fp = 10 m for a cover that is 0.4% of it.
+fn city_disc_cover(lq: vec2<f32>, d: f32, r: f32, fp: f32) -> f32 {
+    let h = 0.5 * max(fp, 1e-4);
+    let sq = r * 1.7724539;          // sqrt(pi) r
+    return mix(clamp((r - d + h) / (2.0 * h), 0.0, 1.0),
+               city_band(lq.x, -0.5 * sq, sq, fp)
+               * city_band(lq.y, -0.5 * sq, sq, fp),
+               smoothstep(0.05, 0.25, fp));
+}
+
+// A disc that fades from 1 inside r_in to 0 at r_out (a smoothstep in d),
+// filtered over fp: resolved, the profile itself; unresolved, the
+// equal-area disc, radius sqrt(r_in^2 + r_in w + 0.3 w^2) for the fade's
+// width w (the smoothstep's exact area), so its mean holds at every range.
+fn city_soft_disc_cover(lq: vec2<f32>, d: f32, r_in: f32, r_out: f32,
+                        fp: f32) -> f32 {
+    let w = r_out - r_in;
+    // @domain: a sum of squares and r_in w, all >= 0
+    let r_eq = sqrt(r_in * r_in + r_in * w + 0.3 * w * w);
+    return mix(1.0 - smoothstep(r_in, r_out, d),
+               city_disc_cover(lq, d, r_eq, fp),
+               smoothstep(0.05, 0.25, fp));
+}
+
 // Cover coverage at p for the two streets p may stand on, filtered: a
-// resolved disc with its rim, or its area share once sub-pixel. xy of the
+// resolved disc with its rim, or its area share once sub-pixel. The
 // result: (cover coverage, rim/pattern darkening already folded in as a
-// relative albedo to multiply).
-fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
+// relative albedo to multiply, the share kept dry by a steaming cover's
+// heat: the lid and the asphalt round it, fading out between DRY_IN and
+// DRY_OUT, filtered so the far field's mean is the near field's).
+fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec3<f32> {
     var cov = 0.0;
     var tone = 1.0;
+    var dried = 0.0;
     for (var s: i32 = 0; s < 2; s = s + 1) {
         let along_y = s == 0;
         let k = select(rd.ky, rd.kx, along_y);
@@ -4207,17 +4268,14 @@ fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
             }
             let d = length(p - m.xy);
             let lq = p - m.xy;
-            // Resolved, the disc with its edge antialiased over a pixel.
-            // Unresolved, the equal-area square box-filtered in both axes,
-            // whose integral IS the disc's area at every footprint — a 1-D
-            // ramp in d would claim half the pixel at fp = 10 m for a cover
-            // that is 0.4% of it.
-            let h = 0.5 * max(fp, 1e-4);
-            let sq = CITY_MH_R * 1.7724539;          // sqrt(pi) R
-            let disc = mix(clamp((CITY_MH_R - d + h) / (2.0 * h), 0.0, 1.0),
-                           city_band(lq.x, -0.5 * sq, sq, fp)
-                           * city_band(lq.y, -0.5 * sq, sq, fp),
-                           smoothstep(0.05, 0.25, fp));
+            // The dry disc only for a pixel it reaches, and the steam test
+            // (a texture read) only for a cover whose dry disc that is.
+            let warm = city_soft_disc_cover(lq, d, CITY_MH_R + CITY_MH_DRY_IN,
+                                            CITY_MH_R + CITY_MH_DRY_OUT, fp);
+            if (warm > 0.0 && city_manhole_steam(m) < 1.0) {
+                dried = max(dried, warm);
+            }
+            let disc = city_disc_cover(lq, d, CITY_MH_R, fp);
             if (disc <= 0.0) {
                 continue;
             }
@@ -4234,7 +4292,7 @@ fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
             tone = mix(1.0, 0.72 + 0.55 * grid, 1.0 - rim) * (1.0 + 0.6 * rim);
         }
     }
-    return vec2<f32>(cov, tone);
+    return vec3<f32>(cov, tone, dried);
 }
 
 // --- the ground material --------------------------------------------------------
@@ -4355,9 +4413,10 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                                         + w_in * rel_in);
 
     // Wetness. The film by zone; the puddles by noise, biased into the
-    // gutter and off the crown of the road.
-    let film = w_road * CITY_WET_ROAD + w_gutter
-             + (w_kerb + w_in) * CITY_WET_WALK;
+    // gutter and off the crown of the road; neither on the share a steaming
+    // cover's heat keeps dry (mh.z).
+    let film = (w_road * CITY_WET_ROAD + w_gutter
+                + (w_kerb + w_in) * CITY_WET_WALK) * (1.0 - mh.z);
     let pud_k = smoothstep(CITY_PUDDLE_LOD.x, CITY_PUDDLE_LOD.y, fp);
     let region = city_vnoise(p, 0.025, 5.3) - 0.5;
     let crown = 1.0 - smoothstep(0.0, 2.5, min(select(1e3, ex, on_x),
@@ -4399,7 +4458,8 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
         pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
                                CITY_PUDDLE_THR + CITY_PUDDLE_EDGE, n + bias);
     }
-    let puddle = mix(pud_sharp, pud_mean, pud_k) * (1.0 - mh.x);
+    let puddle = mix(pud_sharp, pud_mean, pud_k)
+               * (1.0 - max(mh.x, mh.z));
 
     // The film is not a sheet: it pools in the texture and drains off the
     // high spots, so its gloss mottles at half a metre and the joints hold
@@ -4410,8 +4470,9 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                    - CITY_PUDDLE_DARKEN * puddle);
     g.wet = film;
     g.puddle = puddle;
+    // A wet lid sheens as polished iron; a hot one is dry, and matte.
     g.gloss = mix(CITY_FILM_GLOSS * film * max(mottle, 0.0), CITY_MH_GLOSS,
-                  mh.x);
+                  mh.x) * (1.0 - mh.z);
     g.walk = select(0.0, w_in + w_kerb, walk_ok);
     // Outside the plot on an edge that carries no street there is no
     // street at all: lot ground, and no kerb to collect water against.
@@ -13484,13 +13545,9 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // eye-level view pays for its enumeration and its marches.
 
 // --- where steam is ----------------------------------------------------------
-// Share of PRESENT sites that steam, by district. A block owns about 3.3
-// present covers (two street edges x ~1.65 each), so 0.26 downtown is a
-// steaming cover every block or so and 0.015 in the outskirts is one in
-// twenty blocks. The ramp is the lamp scale's (city_lamp_scale): the same
-// districts that burn brightest steam most.
-const cc_manholesteam_FRAC_LO: f32 = 0.015;
-const cc_manholesteam_FRAC_HI: f32 = 0.26;
+// Which present sites steam is the core's (city_manhole_steam, with its
+// district shares CITY_MH_STEAM_FRAC_*), which the ground asks too: a
+// steaming cover is a dry, pale lid on a wet street.
 // The most vigorous share of steaming sites carry a stack.
 const cc_manholesteam_STACK_SHARE: f32 = 0.22;
 
@@ -13513,7 +13570,7 @@ const cc_manholesteam_R0_COVER: f32 = 0.9;
 // density ramps as 1 - exp(-z / COND_L). The lid shows through the foot of
 // its plume from an ordinary viewing angle. Stacks keep their mouths.
 const cc_manholesteam_NECK_L: f32 = 0.35;
-const cc_manholesteam_COND_L: f32 = 0.25;
+const cc_manholesteam_COND_L: f32 = 0.10;
 const cc_manholesteam_H_MIN: f32 = 6.0;    // plume height above its source
 const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
@@ -13661,14 +13718,7 @@ fn cc_manholesteam_site(k: i32, j: i32, along_y: bool) -> cc_manholesteam_Site {
     s.on = false;
     s.stack = false;
     let m = city_manhole(k, j, along_y);
-    // The hash rejects all but the candidates before the texture read.
-    if (m.z < 0.5 || m.w >= cc_manholesteam_FRAC_HI) {
-        return s;
-    }
-    let district = city_glow_sample(m.xy, 2.0);
-    let frac = mix(cc_manholesteam_FRAC_LO, cc_manholesteam_FRAC_HI,
-                   smoothstep(0.02, 0.45, district));
-    let v = m.w / frac;           // uniform in [0, 1) over steaming sites
+    let v = city_manhole_steam(m);   // uniform in [0, 1) over steaming sites
     if (v >= 1.0) {
         return s;
     }

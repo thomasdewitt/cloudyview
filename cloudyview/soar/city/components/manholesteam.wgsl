@@ -75,13 +75,9 @@
 // eye-level view pays for its enumeration and its marches.
 
 // --- where steam is ----------------------------------------------------------
-// Share of PRESENT sites that steam, by district. A block owns about 3.3
-// present covers (two street edges x ~1.65 each), so 0.26 downtown is a
-// steaming cover every block or so and 0.015 in the outskirts is one in
-// twenty blocks. The ramp is the lamp scale's (city_lamp_scale): the same
-// districts that burn brightest steam most.
-const cc_manholesteam_FRAC_LO: f32 = 0.015;
-const cc_manholesteam_FRAC_HI: f32 = 0.26;
+// Which present sites steam is the core's (city_manhole_steam, with its
+// district shares CITY_MH_STEAM_FRAC_*), which the ground asks too: a
+// steaming cover is a dry, pale lid on a wet street.
 // The most vigorous share of steaming sites carry a stack.
 const cc_manholesteam_STACK_SHARE: f32 = 0.22;
 
@@ -104,7 +100,7 @@ const cc_manholesteam_R0_COVER: f32 = 0.9;
 // density ramps as 1 - exp(-z / COND_L). The lid shows through the foot of
 // its plume from an ordinary viewing angle. Stacks keep their mouths.
 const cc_manholesteam_NECK_L: f32 = 0.35;
-const cc_manholesteam_COND_L: f32 = 0.25;
+const cc_manholesteam_COND_L: f32 = 0.10;
 const cc_manholesteam_H_MIN: f32 = 6.0;    // plume height above its source
 const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
@@ -252,14 +248,7 @@ fn cc_manholesteam_site(k: i32, j: i32, along_y: bool) -> cc_manholesteam_Site {
     s.on = false;
     s.stack = false;
     let m = city_manhole(k, j, along_y);
-    // The hash rejects all but the candidates before the texture read.
-    if (m.z < 0.5 || m.w >= cc_manholesteam_FRAC_HI) {
-        return s;
-    }
-    let district = city_glow_sample(m.xy, 2.0);
-    let frac = mix(cc_manholesteam_FRAC_LO, cc_manholesteam_FRAC_HI,
-                   smoothstep(0.02, 0.45, district));
-    let v = m.w / frac;           // uniform in [0, 1) over steaming sites
+    let v = city_manhole_steam(m);   // uniform in [0, 1) over steaming sites
     if (v >= 1.0) {
         return s;
     }

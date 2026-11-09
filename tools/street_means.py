@@ -20,8 +20,13 @@ the far-field stand-in for the thresholded two-octave noise.
 
 A port, not a copy of the renderer: noise textures whose mean is 1 by
 construction (flag tone, stains, aggregate, patching) are left at 1, and the
-manhole covers and grates, a fraction of a percent of the area, are left out.
-Everything that moves the mean is here. Keep it in step with the WGSL.
+manhole covers and grates, a fraction of a percent of the area, are left out
+— but not the dry patch a STEAMING cover's heat keeps round it (city_manhole
+_steam, city_manhole_cover's third component): up to ~1.7 m^2 of dry asphalt
+per steaming cover, one a block downtown, moves the street's mean by ~0.3 %,
+twice the fit's error. Its share follows the district as the lamp scale
+does, so each s takes the sites that steam there. Everything that moves the
+mean is here. Keep it in step with the WGSL.
 
     uv run python tools/street_means.py
 """
@@ -65,6 +70,22 @@ PUDDLE_EDGE = 0.015
 
 # The district lamp scale s = CITY_LAMP_RADIANCE (0.55) x (0.20 .. 1.50).
 S_GRID = 0.55 * np.linspace(0.20, 1.50, 14)
+
+# Manholes (city_manhole, city_manhole_steam, the dry patch).
+TILE_EXTENT = 92160.0
+MH_PITCH = 30.0
+MH_R = 0.34
+MH_PRESENT = 0.55
+MH_STEAM_FRAC = (0.015, 0.26)
+MH_DRY_IN = 0.35
+MH_DRY_OUT = 0.45
+
+
+def steam_frac(s):
+    """The steaming share at lamp scale s: city_lamp_scale and
+    city_manhole_steam ramp on the same smoothstep of the district."""
+    u = (s / 0.55 - 0.20) / 1.3
+    return MH_STEAM_FRAC[0] + (MH_STEAM_FRAC[1] - MH_STEAM_FRAC[0]) * u
 
 
 def is_avenue(k):
@@ -123,6 +144,63 @@ def lamp_station(k, a):
     sp = np.where(is_avenue(k), LAMP_SPACING, sp)
     ph = np.where(is_avenue(k), 0.0, ph)
     return ph + np.round((a - ph) / sp) * sp
+
+
+def city_rand4(sx, sy):
+    """city_rand4: two rounds of pcg2d, as four uniforms."""
+    ax, ay = pcg2d(sx, sy)
+    bx, by = pcg2d(ax, ay)
+    f = lambda v: v.astype(np.float64) * 2.3283064365386963e-10
+    return f(ax), f(ay), f(bx), f(by)
+
+
+def manholes(k, along_y, j):
+    """city_manhole for sites j on centreline k: (centre x, y, present,
+    steam draw)."""
+    m32 = np.uint64(0xFFFFFFFF)
+    j = np.asarray(j, np.int64)
+    jn = int(round(TILE_EXTENT / MH_PITCH))
+    sx = (line_seed(np.full_like(j, k)) * np.uint64(0x9e3779b9)
+          + np.uint64(0xcc9e2d51 if along_y else 0x1b873593)) & m32
+    sy = (np.mod(j, jn).astype(np.uint64) * np.uint64(0x85ebca6b)
+          + np.uint64(0x27d4eb2f)) & m32
+    rx, ry, rz, rw = city_rand4(sx, sy)
+    a = (j + 0.5) * MH_PITCH + (ry - 0.5) * 6.0
+    kc = np.round(a / CELL)
+    clear = np.abs(a - kc * CELL) > half(kc) + 2.5
+    if is_avenue(k):
+        lane = np.floor(rz * 6.0)
+        side = np.where(lane >= 3.0, 1.0, -1.0)
+        lat = side * (1.6 + 3.1 * (lane - np.where(lane >= 3.0, 3.0, 0.0)))
+    else:
+        park = 1.0 if park_side_bits(k) == 1 else -1.0
+        lat = -park * (1.1 + 0.8 * rz)
+    line = k * CELL + lat
+    cx, cy = (line, a) if along_y else (a, line)
+    return cx, cy, (rx < MH_PRESENT) & clear, rw
+
+
+def dry_patches(ci, x, y):
+    """(dryness f in [0, 1], the steam draw of the site it belongs to) on
+    the grid of cell ci: every present cover's dry-patch profile, resolved
+    (1 - smoothstep from MH_R + DRY_IN to MH_R + DRY_OUT). Which of them
+    steam depends on the district, so the caller thresholds the draw."""
+    f = np.zeros_like(x)
+    draw = np.full_like(x, 2.0)
+    r_in, r_out = MH_R + MH_DRY_IN, MH_R + MH_DRY_OUT
+    for along_y, k0 in ((True, ci[0]), (False, ci[1])):
+        for k in (k0, k0 + 1):
+            a0 = (ci[1] if along_y else ci[0]) * CELL
+            js = np.arange(int(np.floor(a0 / MH_PITCH)) - 1,
+                           int(np.ceil((a0 + CELL) / MH_PITCH)) + 1)
+            cx, cy, present, w = manholes(k, along_y, js)
+            for i in np.nonzero(present & (w < MH_STEAM_FRAC[1]))[0]:
+                d = np.hypot(x - cx[i], y - cy[i])
+                fi = 1.0 - smoothstep(r_in, r_out, d)
+                take = fi > f
+                f = np.where(take, fi, f)
+                draw = np.where(take, w[i], draw)
+    return f, draw
 
 
 def smoothstep(e0, e1, x):
@@ -273,7 +351,9 @@ def ground(ci, x, y, noise_off):
     alb = dry * (1 - WET_DARKEN * film * (1 - puddle)
                  - PUDDLE_DARKEN * puddle)
     inside = ((x > pmin[0]) & (x < pmax[0]) & (y > pmin[1]) & (y < pmax[1]))
-    return alb.mean(axis=0), inside
+    # Where a steaming cover keeps the street dry (no film, no puddle) the
+    # albedo is the dry one; the caller blends by the patch's dryness.
+    return alb.mean(axis=0), dry.mean(axis=0), inside
 
 
 def fit_a_over_1_plus_bs(s, m):
@@ -305,8 +385,11 @@ def main():
             pl = pools(x, y)
             for rep in range(2):
                 off = rng.uniform(0, 5000, 2)
-                alb, inside = ground(ci, x, y, off)
+                alb_wet, alb_dry, inside = ground(ci, x, y, off)
+                f, draw = dry_patches(ci, x, y)
                 for k, s in enumerate(S_GRID):
+                    dried = np.where(draw < steam_frac(s), f, 0.0)
+                    alb = alb_wet + (alb_dry - alb_wet) * dried
                     raw = s * pl
                     lamp = raw / (1 + POOL_KNEE * raw) * alb
                     street_acc[k] += weight * lamp[~inside].mean()
