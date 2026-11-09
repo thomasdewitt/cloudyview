@@ -27953,11 +27953,21 @@ fn city_inv_dir(dir: vec3<f32>) -> vec3<f32> {
 //     radiance: a pixel whose samples differ (a window edge behind the
 //     steam) is dimmed through the curve at its mean display value;
 //   - T_f is averaged apart from the radiance it belongs to;
-//   - a background past the white point (a lamp head) reads as the white
-//     point, so steam in front of it dims it more than it should;
+//   - a background past the curve's 1 (a lamp head, or a saturated colour
+//     in the shoulder) reads as that clip, so steam in front of it dims it
+//     more than it should;
+//   - under contrast > 1 a background the contrast clipped to black has
+//     lost its radiance: a channel displayed at exactly 0 is taken as black
+//     (B = 0, the clip's low end, where thin steam then reads as itself)
+//     rather than as the clip's edge, which made a plume over the night sky
+//     larger and greyer than the still's (loose-ends' review, 2026-11-08);
+//     a dark background just above the clip keeps its inverse;
 //   - the steam takes the LAST sample's ray and surface depth, so its edge
 //     along a silhouette is one sample's, not the average's.
-// A pixel with no steam returns acc untouched, bit for bit.
+// A pixel with no steam returns acc untouched, bit for bit. That is against
+// the live accumulation, not the marched one: the live march adds a step at
+// the veil's depth for every near pixel (to note T_f there), so its cloud
+// samples there are not the marched view's.
 const STEAM_LIVE_SAMPLES: u32 = 4u;
 fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
     let dir = cr.dir;
@@ -27977,10 +27987,13 @@ fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
     if (med.a >= 1.0 && all(med.rgb == vec3<f32>(0.0))) {
         return acc;
     }
-    let exposure = max(u.cam_right.w, 1e-6);
+    // fs_main's exposure and gamma, read as it reads them (the exposure
+    // slider and auto-exposure keep it >= 0.5).
+    let exposure = u.cam_right.w;
     let gamma = u.periodic.w;
     let t_front = acc.a;
-    let b = tone_unmap(acc.rgb, exposure, gamma);
+    let b = select(tone_unmap(acc.rgb, exposure, gamma), vec3<f32>(0.0),
+                   acc.rgb <= vec3<f32>(0.0));
     let l = b * (1.0 - t_front * (1.0 - med.a)) + t_front * med.rgb;
     return vec4<f32>(tone_map(l, exposure, gamma), acc.a);
 }
@@ -28314,15 +28327,16 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
 // depth) and draws it here, once per presented frame, at the live clock
 // (row 24.z), onto the accumulated image — the lens water's arrangement.
 // Group 1: binding 0 the final surface (t in w), binding 1 the accumulated
-// image. The composite and what it gets wrong: steam_live_city.
+// image. The composite and what it gets wrong: steam_live_city (a stub that
+// returns the image as it came in a module without the city). The image is
+// in display values, as the browser accumulates it: the one host that draws
+// this pass always tone-maps (TONE_MAP false is the Python host's linear
+// output, render_nested, which has no live view).
 @fragment
 fn fs_steam_live(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
     let xy = vec2<i32>(frag_pos.xy);
     let acc = textureLoad(surface_plain, xy, 0);
-    if (!CITY) {
-        return acc;
-    }
     return steam_live_city(camera_ray(frag_pos), acc,
                            textureLoad(surface_buf, xy, 0).w);
 }
