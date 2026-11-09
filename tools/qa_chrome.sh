@@ -2,8 +2,16 @@
 # The QA Chrome: hardware WebGPU, DevTools on a port, and no way to reach the
 # desktop. tools/tint_check.mjs and tools/pinned_still.mjs drive it.
 #
-#   tools/qa_chrome.sh start [PORT]    # default 9333; refuses a port in use
+#   tools/gpulock tools/qa_chrome.sh start [PORT]   # default 9333; refuses a port in use
 #   tools/qa_chrome.sh stop  [PORT]
+#
+# start runs under tools/gpulock and refuses otherwise (gpulock_guard.py): the
+# headless Chrome's GPU process opens a Vulkan device and takes VRAM as it
+# starts. The lock covers the start only. Chrome would otherwise inherit the
+# lock's descriptor from flock(1) and hold the GPU lock for as long as it
+# runs (checked 2026-11-09: a backgrounded child of a locked command keeps
+# the flock held after the command ends), so this script closes its copy
+# before launching it.
 #
 # Why headless and cut off: a windowed QA Chrome raised itself over whatever
 # was in front each time a check opened a tab (Thomas, mid-game, 2026-11-08:
@@ -40,10 +48,18 @@ running() { curl -sf "http://127.0.0.1:$PORT/json/version" >/dev/null; }
 
 case "$cmd" in
   start)
+    python3 "$(dirname "$0")/gpulock_guard.py" tools/qa_chrome.sh \
+        "tools/gpulock tools/qa_chrome.sh start${2:+ $PORT}" || exit $?
     if running; then
       echo "qa_chrome: something already answers on :$PORT; not starting" >&2
       exit 1
     fi
+    # Not into Chrome: the lock's descriptor, inherited from flock(1).
+    for fd in /proc/$$/fd/*; do
+      if [[ "$(readlink "$fd")" == "${SOAR_GPULOCK:-/tmp/soar-gpu.lock}" ]]; then
+        eval "exec ${fd##*/}>&-"
+      fi
+    done
     mkdir -p "$PROFILE" "$RUNTIME"
     chmod 700 "$RUNTIME"
     env -u DISPLAY -u WAYLAND_DISPLAY XDG_RUNTIME_DIR="$RUNTIME" \
@@ -67,7 +83,8 @@ case "$cmd" in
     pkill -f -- "--user-data-dir=$PROFILE( |\$)" || true
     ;;
   *)
-    echo "usage: tools/qa_chrome.sh start|stop [PORT]" >&2
+    echo "usage: tools/gpulock tools/qa_chrome.sh start [PORT]" >&2
+    echo "       tools/qa_chrome.sh stop [PORT]" >&2
     exit 2
     ;;
 esac

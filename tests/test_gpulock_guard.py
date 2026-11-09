@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -54,17 +55,22 @@ JS_TOOLS = [
     "tools/soar_noise.mjs",
 ]
 # What in a tool's source means it opens a device (directly, through the
-# renderer host or witness, through Mitsuba's CUDA variant, or through the
-# QA Chrome's WebGPU, or through tools/regcount's Vulkan pipeline), and the
-# files that may say so without the guard:
-# the shared CDP library the .mjs tools call, the guard itself, and the
-# exporters, which only encode tiles and never render.
-OPENS = re.compile(r"request_adapter|SoarRenderer\(|cv\.witness\(|"
-                   r"render_nested\(|import mitsuba|openTab\(|"
-                   r'/ "regcount"')     # the Vulkan statistics crate
+# renderer host or witness or behold, through Mitsuba's CUDA variant, through
+# the QA Chrome's WebGPU, through tools/regcount's Vulkan pipeline, or by
+# running one of the library's CLIs), and the files that may say so without
+# the guard: the shared CDP library the .mjs tools call, the guard itself,
+# and the exporter, which only encodes tiles and never renders. The library
+# CLIs themselves (witness, behold, glimpse, soar) stay unguarded by design.
+OPENS = re.compile(r"request_adapter|SoarRenderer\(|\bwitness\(|"
+                   r"render_nested\(|\bbehold\b|import mitsuba|"
+                   r"import wgpu|from wgpu|openTab\(|"
+                   r'/ "regcount"|'                 # the Vulkan statistics crate
+                   r"[\"'](witness|behold|glimpse|soar)[\"']\s*[,\]]")  # a CLI
+# A shell tool that starts a browser starts its GPU process.
+OPENS_SH = re.compile(r"google-chrome|chromium")
+SH_TOOLS = ["tools/qa_chrome.sh"]
 NOT_TOOLS = {"tools/soar_cdp.mjs", "tools/gpulock_guard.py",
-             "tools/gpulock_guard.mjs", "tools/export_web_assets.py",
-             "tools/export_desert_tile.py"}
+             "tools/gpulock_guard.mjs", "tools/export_web_assets.py"}
 
 EXIT_UNLOCKED = 3
 
@@ -144,17 +150,37 @@ def test_a_js_tool_refuses_unlocked(tool, tmp_path):
 
 
 def test_every_tool_that_opens_a_device_is_guarded():
-    guarded = set(PY_TOOLS) | set(JS_TOOLS)
+    guarded = set(PY_TOOLS) | set(JS_TOOLS) | set(SH_TOOLS)
     for p in sorted(TOOLS.rglob("*")):
-        if p.suffix not in (".py", ".mjs") or "regcount" in p.parts[-2:-1]:
+        if (p.suffix not in (".py", ".mjs", ".sh")
+                or "regcount" in p.parts[-2:-1]):
             continue
         rel = p.relative_to(REPO).as_posix()
-        if rel in NOT_TOOLS or not OPENS.search(p.read_text()):
+        src = p.read_text()
+        opens = OPENS_SH if p.suffix == ".sh" else OPENS
+        if rel in NOT_TOOLS or not opens.search(src):
             continue
         assert rel in guarded, f"{rel} opens a GPU device and is not guarded"
-        src = p.read_text()
-        call = "require_gpulock(" if p.suffix == ".py" else "requireGpulock("
-        assert f'{call}"{rel}")' in src, f"{rel} does not call {call}"
+        call = {".py": f'require_gpulock("{rel}"',
+                ".mjs": f'requireGpulock("{rel}")',
+                ".sh": f'gpulock_guard.py" {rel}'}[p.suffix]
+        assert call in src, f"{rel} does not call the guard ({call})"
+
+
+def test_the_qa_chrome_start_refuses_unlocked(tmp_path):
+    env = _unlocked_env()
+    env["QA_DIR"] = str(tmp_path)
+    try:
+        proc = subprocess.run([str(TOOLS / "qa_chrome.sh"), "start", "9447"],
+                              cwd=REPO, env=env, capture_output=True,
+                              text=True, timeout=60)
+    finally:
+        # Should the guard ever let it through, no Chrome is left running.
+        subprocess.run([str(TOOLS / "qa_chrome.sh"), "stop", "9447"],
+                       cwd=REPO, env=env, capture_output=True, timeout=30)
+    assert proc.returncode == EXIT_UNLOCKED, proc.stderr[-2000:]
+    assert "run this under tools/gpulock: it opens a GPU device" in proc.stderr
+    assert not any(tmp_path.iterdir()), "it got as far as making a profile"
 
 
 def test_gpulock_exports_the_marker_to_its_command():
@@ -215,6 +241,39 @@ def test_the_marker_needs_the_lock_held(tmp_path):
              f"{str(lock)!r}));"],
             capture_output=True, text=True, check=True, timeout=30)
         assert "not held" in js.stdout
+
+
+def test_a_lock_another_process_holds_does_not_pass(tmp_path):
+    # The usual state of this box: some other session holds the lock. A
+    # marker set by hand must not pass on that (loose-ends, review of
+    # 4b86576): only a holder among this process's ancestors counts. Here
+    # the holder is a flock(1) this test starts, a child, not an ancestor.
+    if shutil.which("flock") is None:
+        pytest.skip("needs flock(1)")
+    g = _guard()
+    lock = tmp_path / "lock"
+    lock.touch()
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "60"])
+    try:
+        for _ in range(200):
+            if g.lock_holders(str(lock)):
+                break
+            time.sleep(0.01)
+        assert g.lock_holders(str(lock)) == {holder.pid}
+        why = g.unlocked_reason({"SOAR_GPULOCK": str(lock)}, str(lock))
+        assert why and f"held by pid {holder.pid}" in why, why
+        if shutil.which("node") is not None:
+            js = subprocess.run(
+                ["node", "--input-type=module", "-e",
+                 f"import {{ unlockedReason }} from "
+                 f"{(TOOLS / 'gpulock_guard.mjs').as_uri()!r};"
+                 f"console.log(unlockedReason({{SOAR_GPULOCK: {str(lock)!r}}}, "
+                 f"{str(lock)!r}));"],
+                capture_output=True, text=True, check=True, timeout=30)
+            assert f"held by pid {holder.pid}" in js.stdout, js.stdout
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_pytest_may_exempt_the_tool_it_drives():
