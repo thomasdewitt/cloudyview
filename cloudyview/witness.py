@@ -29,6 +29,7 @@ import json
 import logging
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -96,7 +97,9 @@ class NestedLevel:
     sigma is m^-1, already scaled by the caller's extinction_multiplier.
     bmin/bmax are absolute world meters.
     """
-    sigma: np.ndarray        # (nx, ny, nz) float64, m^-1
+    # (nx, ny, nz) m^-1, in the extinction's own dtype: float32 for a
+    # float32 field (the loaders'), float64 for a float64 one.
+    sigma: np.ndarray
     bmin: np.ndarray         # (3,) float64: (x_min, y_min, z_min) meters
     bmax: np.ndarray         # (3,) float64: (x_max, y_max, z_max) meters
     name: str = ""
@@ -181,7 +184,7 @@ def crop_empty_z(sigma: np.ndarray, z: np.ndarray):
     that crosses the vacuum sample by sample because nothing tells it there is
     nothing there.
 
-    Emptiness is judged on the value AS STORED, not on the float64 sigma. The
+    Emptiness is judged on the value AS STORED, not on sigma as computed. The
     texture is r16float in both hosts, so a sigma below the smallest fp16
     subnormal is zero as far as any renderer will ever know, and defining the
     crop that way is what lets web/soar/ingest/worker.js reach the same band
@@ -449,6 +452,18 @@ def render_nested(
     return image
 
 
+# The extinction is built in x-slabs of about this many voxels, so the
+# temporaries the optics make (condensate times air density, each phase's
+# term, their sum) are a slab's and not a field's.
+_SLAB_VOXELS = 1 << 24
+
+
+def _x_slabs(shape):
+    """Slices along x covering a field of `shape`, each ~_SLAB_VOXELS."""
+    step = max(1, _SLAB_VOXELS // max(1, int(np.prod(shape[1:]))))
+    return [slice(i, min(i + step, shape[0])) for i in range(0, shape[0], step)]
+
+
 def _field_level(field: CloudField, name: str, verbose: bool = False) -> NestedLevel:
     """Turn a loaded CloudField into a renderable NestedLevel.
 
@@ -456,30 +471,65 @@ def _field_level(field: CloudField, name: str, verbose: bool = False) -> NestedL
     applies the config's extinction_multiplier, and derives the absolute-meter
     AABB. Shared by the single-field and nested paths so both levels of a nest
     are built by exactly the same rule.
+
+    Memory: the result is one array of the occupied z band, in the
+    extinction's own dtype, and nothing field-sized is made on the way to it.
+    The extinction is elementwise in x, so it is computed slab by slab
+    (_x_slabs) twice: once for each plane's peak, which is all crop_empty_z
+    judges the band on, and once into the band itself. Until 2026-11-09 this
+    built the whole field's extinction (five field-sized arrays alive at the
+    liquid + ice sum), copied it to float64, then copied the band: on the fine
+    utah-convection demo (2048 x 2048 x 495, liquid and ice) that was about 58
+    GB over the 16.6 GB field, and the render ran out of memory. Every value
+    is the same, bit for bit: the same function on the same elements, and a
+    float64 copy of a float32 value rounds to the same fp16 texel the float32
+    does.
     """
     rendering = config.get_witness_config()['rendering']
+    multiplier = rendering.get('extinction_multiplier', 1.0)
 
     iwc = field.iwc
     if iwc is not None and float(np.max(iwc)) < ICE_NEGLIGIBLE_G_KG:
         if verbose:
             print("  Ice water content is negligible; rendering liquid only.")
         iwc = None
+    lwc = field.lwc
+    # As given: the air density is computed in z's own dtype, and an upcast
+    # here would move it by an ulp.
+    z = np.asarray(field.z)
 
-    sigma = optical_depth.compute_extinction_field(
-        field.lwc, field.z, re=RE_LIQUID_UM, iwc=iwc, re_ice=RE_ICE_UM)
-    sigma = np.ascontiguousarray(
-        sigma * rendering.get('extinction_multiplier', 1.0), dtype=np.float64)
+    def extinction(xs, zs=slice(None)):
+        sigma = optical_depth.compute_extinction_field(
+            lwc[xs, :, zs], z[zs], re=RE_LIQUID_UM,
+            iwc=None if iwc is None else iwc[xs, :, zs], re_ice=RE_ICE_UM)
+        sigma *= multiplier
+        return sigma
+
+    slabs = _x_slabs(lwc.shape)
+    peaks = np.full(z.size, -np.inf)
+    for xs in slabs:
+        with warnings.catch_warnings():
+            # An all-NaN plane in one slab is no plane's whole answer; fmax
+            # skips its NaN as nanmax over the field would.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            peaks = np.fmax(peaks, np.nanmax(extinction(xs), axis=(0, 1)))
+    # Trim the empty sky above and below the cloud, and move the box with it.
+    # Only z: x and y are cropped by nobody, here or in the browser. The
+    # rule is crop_empty_z's, on the planes' peaks (as coarsen.occupied_band).
+    _, z_crop, (lo, hi) = crop_empty_z(peaks.reshape(1, 1, -1), z)
+    sigma = None
+    for xs in slabs:
+        part = extinction(xs, slice(lo, hi + 1))
+        if sigma is None:
+            sigma = np.empty(lwc.shape[:2] + (hi - lo + 1,), dtype=part.dtype)
+        sigma[xs] = part
 
     bmin, bmax = _volume_aabb(field)
-    # Trim the empty sky above and below the cloud, and move the box with it.
-    # Only z: x and y are cropped by nobody, here or in the browser.
-    sigma, z_crop, (lo, hi) = crop_empty_z(sigma, field.z)
-    sigma = np.ascontiguousarray(sigma)
-    if hi - lo + 1 < np.asarray(field.z).size:
+    if hi - lo + 1 < z.size:
         bmin[2] = z_crop.min() - 0.5 * abs(z_crop[1] - z_crop[0])
         bmax[2] = z_crop.max() + 0.5 * abs(z_crop[-1] - z_crop[-2])
         if verbose:
-            source = np.asarray(field.z).size
+            source = z.size
             print(f"  Cropped to z planes {lo}-{hi} of {source} "
                   f"({100 * (1 - (hi - lo + 1) / source):.0f}% of the "
                   "vertical held no cloud).")

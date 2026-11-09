@@ -115,19 +115,27 @@ class CloudField:
         here), and negative condensate — normal LES numerics — clamps to
         zero, loudly.
         """
-        values = np.asarray(values, dtype=np.float32)
+        given = values
+        values = np.asarray(given, dtype=np.float32)
         finite = np.isfinite(values)
         if not finite.all():
             raise ValueError(
                 f"{name} has {int((~finite).sum())} non-finite value(s)."
             )
+        del finite
         negative = values < 0
         if negative.any():
             logger.warning(
                 "Clamped %d negative value(s) in %s to zero (most "
                 "negative: %g).", int(negative.sum()), name,
                 float(values.min()))
-            values = np.where(negative, 0.0, values).astype(np.float32)
+            # Clamped in place, in a copy only where asarray made none (the
+            # caller's array is never written): at most one copy of the
+            # field, where np.where(...).astype(...) made two. The same
+            # values: +0.0 where negative, everything else as it was.
+            if np.may_share_memory(values, given):
+                values = values.copy()
+            values[negative] = 0.0
         return values
 
     @property
