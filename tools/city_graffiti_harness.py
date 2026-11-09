@@ -13,6 +13,8 @@ a renderer:
           _RHO_*) from the shader's own shapes, and print them.
   rungs   average FINE, MID and FAR over many runs at a set of heights;
           they must agree (tests/test_city_graffiti.py holds them to it).
+  panel   chosen bands of the wall, each beside a reference photograph
+          (temp/references/graffiti), for judging the look.
 
 Run under tools/gpulock.
 """
@@ -170,10 +172,10 @@ fn means(@builtin(global_invocation_id) gid: vec3<u32>) {{
     run.seed = pcg2d(vec2<u32>(t, 0x5bd1e995u));
     run.len = 1.0e4;
     run.kind = 0;
-    // Letters (layer 0: pieces among them), buff, a tag row.
+    // Letters (layer 0: pieces among them), buff (2), tags (5).
     let l = city_graffiti_letters_at(run, 0, 0);
-    let m = city_graffiti_mark_at(run, 1, 0);
-    let g = city_graffiti_mark_at(run, 3, 0);
+    let m = city_graffiti_mark_at(run, 2, 0);
+    let g = city_graffiti_mark_at(run, 5, 0);
     var a = vec4<f32>(0.0);     // fill, shine, line, drip
     var sp = 0.0;
     var cb = 0.0;
@@ -184,10 +186,10 @@ fn means(@builtin(global_invocation_id) gid: vec3<u32>) {{
         let pt = city_graffiti_letter_parts(q, 1e-4, l);
         a = a + vec4<f32>(pt.fill, pt.shine, pt.line, pt.drip);
         sp = sp + pt.splash;
-        cb = cb + city_graffiti_mark_cover(1, vec2<f32>(r.z * m.len, r.w),
+        cb = cb + city_graffiti_mark_cover(2, vec2<f32>(r.z * m.len, r.w),
                                            1e-4, m);
         let r2 = city_rand4(pcg2d(vec2<u32>(t * K + k, 0x2f0f5d1bu)));
-        ct = ct + city_graffiti_mark_cover(3, vec2<f32>(r2.x * g.len, r2.y),
+        ct = ct + city_graffiti_mark_cover(5, vec2<f32>(r2.x * g.len, r2.y),
                                            1e-4, g);
     }}
     // Areas in units of h^2: the box is len x 1.
@@ -251,6 +253,49 @@ def palette_means(n=1 << 20, src=None):
             for k, name in enumerate(["HUE", "FILL", "LINE", "INK"])}
 
 
+# --- the letters' height profile ---------------------------------------------
+
+PROFILE = """
+const NB: u32 = {nb}u;
+
+@compute @workgroup_size(64)
+fn profile(@builtin(global_invocation_id) gid: vec3<u32>) {{
+    let t = tid(gid);
+    if (t >= {n}u * NB) {{ return; }}
+    var run: CityGraffitiRun;
+    run.seed = pcg2d(vec2<u32>(t / NB, 0x2545f491u));
+    run.len = 1.0e4;
+    run.kind = 0;
+    let l = city_graffiti_letters_at(run, 0, 0);
+    let y = (f32(t % NB) + u01(vec2<u32>(t, 0x1b873593u))) / f32(NB);
+    var a = 0.0;
+    for (var k: u32 = 0u; k < 32u; k = k + 1u) {{
+        let x = l.len * (f32(k) + u01(vec2<u32>(t, k))) / 32.0;
+        let pt = city_graffiti_letter_parts(vec2<f32>(x, y), 1e-4, l);
+        a = a + pt.fill + pt.line + pt.drip + pt.splash;
+    }}
+    // Painted length at this height, in units of h, and the glyphs.
+    put(t, 0u, vec4<f32>(a * l.len / 32.0, f32(l.n), y, 0.0));
+}}
+"""
+
+
+def letter_profile(n=1 << 16, nb=40, src=None):
+    """The letters' painted length per glyph at each normalized height y in
+    their box, as a density over y (integral 1): (bin centres, density,
+    (alpha, beta)), the uniform band [alpha, beta] with the density's mean
+    and variance — the profile MID and FAR give them."""
+    code = graffiti_code(src) + PRELUDE + PROFILE.format(n=n, nb=nb)
+    o = run_kernel(code, "profile", n * nb).reshape(n, nb, 4, 4)
+    dens = o[:, :, 0, 0].sum(0) / o[:, :, 0, 1].sum(0)
+    yc = (np.arange(nb) + 0.5) / nb
+    dens = dens / dens.mean()
+    m = np.mean(dens * yc)
+    sd = np.sqrt(np.mean(dens * (yc - m) ** 2) - 1.0 / (12 * nb * nb))
+    half = np.sqrt(3.0) * sd
+    return yc, dens, (float(m - half), float(m + half))
+
+
 # --- the filter's bias -------------------------------------------------------------
 
 BIAS = """
@@ -263,8 +308,8 @@ fn bias(@builtin(global_invocation_id) gid: vec3<u32>) {{
     run.len = 1.0e4;
     run.kind = 0;
     let l = city_graffiti_letters_at(run, 0, 0);
-    let m = city_graffiti_mark_at(run, 1, 0);
-    let g = city_graffiti_mark_at(run, 3, 0);
+    let m = city_graffiti_mark_at(run, 2, 0);
+    let g = city_graffiti_mark_at(run, 5, 0);
     let ff = {f};
     var a = 0.0;
     var b = 0.0;
@@ -277,9 +322,9 @@ fn bias(@builtin(global_invocation_id) gid: vec3<u32>) {{
             vec2<f32>(r.x * (l.len + 2.0 * ff) - ff, y), ff, l);
         a = a + pt.fill + pt.line + pt.drip + pt.splash;
         b = b + city_graffiti_mark_cover(
-            1, vec2<f32>(r.z * (m.len + 2.0 * ff) - ff, y), ff, m);
+            2, vec2<f32>(r.z * (m.len + 2.0 * ff) - ff, y), ff, m);
         c = c + city_graffiti_mark_cover(
-            3, vec2<f32>(r.w * (g.len + 2.0 * ff) - ff, y), ff, g);
+            5, vec2<f32>(r.w * (g.len + 2.0 * ff) - ff, y), ff, g);
     }}
     let s = (1.0 + 2.0 * ff) / 64.0;
     put(t, 0u, vec4<f32>(a * (l.len + 2.0 * ff) * s, b * (m.len + 2.0 * ff) * s,
@@ -306,7 +351,7 @@ def filter_bias(fs, n=1 << 18, src=None):
 # A layer's MID footprint: past the hand-over for its tallest element
 # (CITY_GRAFFITI_MID1 of its height) and short of FAR (a quarter of its
 # slot).
-MID_FP = {0: 0.8, 1: 0.8, 2: 0.8, 3: 0.2, 4: 0.2, 5: 0.2}
+MID_FP = {0: 0.8, 1: 0.8, 2: 0.8, 3: 0.8, 4: 0.8, 5: 0.2, 6: 0.2, 7: 0.2}
 
 RUNGS = """
 const NV: u32 = {nv}u;
@@ -432,6 +477,16 @@ def main():
     sub.add_parser("means")
     sub.add_parser("palettes")
     sub.add_parser("bias")
+    sub.add_parser("profile")
+    pn = sub.add_parser("panel")
+    pn.add_argument("--bands", type=int, nargs="+", required=True,
+                    help="band indices of the wall (its runs, kind = index "
+                         "mod 6)")
+    pn.add_argument("--refs", nargs="+", required=True,
+                    help="one reference image per band")
+    pn.add_argument("--fp", type=float, default=0.01)
+    pn.add_argument("--length", type=float, default=24.0)
+    pn.add_argument("--out", type=Path, required=True)
     sub.add_parser("rungs")
     args = ap.parse_args()
     if args.cmd == "wall":
@@ -453,6 +508,39 @@ def main():
                   f"{ref.mean(axis=(0, 1)).round(4)} rendered "
                   f"{got.mean(axis=(0, 1)).round(4)}; mean |diff| "
                   f"{np.abs(ref - got).mean():.4f}")
+    elif args.cmd == "panel":
+        from PIL import Image
+        runs = max(args.bands) + 1
+        alb, lv = paint_wall(args.fp, runs, args.length)
+        rows_per = alb.shape[0] // runs
+        img = (np.clip(1.56 * alb, 0.0, 1.0) ** (1.0 / 2.2) * 255
+               + 0.5).astype(np.uint8)
+        tiles = []
+        for b, ref in zip(args.bands, args.refs):
+            band = Image.fromarray(img[b * rows_per:(b + 1) * rows_per])
+            r = Image.open(ref).convert("RGB")
+            r = r.resize((int(r.width * rows_per / r.height), rows_per))
+            row = Image.new("RGB", (r.width + 8 + band.width, rows_per),
+                            "white")
+            row.paste(r, (0, 0))
+            row.paste(band, (r.width + 8, 0))
+            tiles.append(row)
+            print(f"band {b}: kind {b % 6}, level {int(lv[b * rows_per, 0])}")
+        w = max(t.width for t in tiles)
+        out = Image.new("RGB", (w, sum(t.height + 8 for t in tiles)), "white")
+        y = 0
+        for t in tiles:
+            out.paste(t, (0, y))
+            y += t.height + 8
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        out.save(args.out)
+    elif args.cmd == "profile":
+        yc, dens, (a, b) = letter_profile()
+        print(f"const CITY_GRAFFITI_LETTER_Y0: f32 = {a:.4f};")
+        print(f"const CITY_GRAFFITI_LETTER_Y1: f32 = {b:.4f};")
+        band = np.where((yc > a) & (yc < b), 1.0 / (b - a), 0.0)
+        for y, d, f_ in zip(yc[::4], dens[::4], band[::4]):
+            print(f"  y {y:.3f}  density {d:.3f}  band {f_:.3f}")
     elif args.cmd == "bias":
         fs = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
         for f, r in zip(fs, filter_bias(fs)):
@@ -465,7 +553,7 @@ def main():
         for k, (val, se) in measure_means().items():
             print(f"const {k}: f32 = {val:.4f};   // +- {se:.4f}")
     else:
-        for layer in range(6):
+        for layer in range(8):
             v, fine, mid, far, se, se_band = measure_layer(layer)
             band = lambda x: x.mean(0)
             print(f"layer {layer}: band means (ac r g b, a, at) fine "

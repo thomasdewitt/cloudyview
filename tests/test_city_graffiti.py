@@ -84,7 +84,7 @@ def test_fine_keeps_its_area_to_the_hand_over(h):
     np.testing.assert_array_less(np.abs(r[tg, 2] - 1.0), 0.015)
 
 
-@pytest.mark.parametrize("layer", range(6))
+@pytest.mark.parametrize("layer", range(8))
 def test_each_layer_dissolves_into_its_mean(h, layer):
     """MID against FAR at every height (both spread an element evenly over
     its box, so they agree exactly), and FINE against FAR over the band
@@ -112,5 +112,5 @@ def test_negative_control(h):
                   re.M)
     bad = SHADER.replace(m.group(0), "const CITY_GRAFFITI_A_LINE: f32 = "
                          f"{1.2 * float(m.group(1)):.4f};")
-    v, fine, mid, far, se, se_band = h.measure_layer(2, src=bad)
+    v, fine, mid, far, se, se_band = h.measure_layer(3, src=bad)
     assert np.any(np.abs(fine.mean(0) - far.mean(0)) > 4.0 * se_band + 1e-4)
