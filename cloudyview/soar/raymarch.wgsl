@@ -6115,6 +6115,18 @@ fn city_bay_pane_hi(cc: CityCell, f: CityFace, b: CityBay) -> vec2<f32> {
     return city_bay_cell(cc, b).pane_hi * vec2<f32>(f.pitch, CITY_FLOOR_H);
 }
 
+// The building as zone k's windows are drawn from it in the flat facade's
+// mean: 0 the lattice, 1 the lofts, 2 the shops.
+fn city_zone_cell(cc: CityCell, k: i32) -> CityCell {
+    if (k == 1) {
+        return city_loft_cell(cc);
+    }
+    if (k == 2) {
+        return city_store_cell(cc);
+    }
+    return cc;
+}
+
 // The building as this bay's windows are drawn from it.
 fn city_bay_cell(cc: CityCell, b: CityBay) -> CityCell {
     if (b.zone == CITY_ZONE_LOFT) {
@@ -7929,31 +7941,26 @@ fn city_windows_seen(cc: CityCell, f: CityFace, st: CityShellStyle,
     }
     let skin = cc.win_style == 3;
     let hb = max(city_wall_footprint(dl, fp_filter), vec2<f32>(1e-3));
-    let lattice = city_windows_mean(cc, f, off, i_shift, c, hb, l_wall,
-                                    refl, through, fog, skin, shown);
-    var mean = lattice;
     // The facade's zones take their shares of the footprint
-    // (city_zone_cover): the lofts' windows in place of the lattice's, and
-    // plain wall or louvres where there are no openings at all.
+    // (city_zone_cover): the lofts' and the shops' windows in place of the
+    // lattice's, and plain wall or louvres where there are no openings at
+    // all. The three window means are one call in a rolled loop: the mean
+    // is the heaviest code in the kernel, and three inlined copies of it
+    // cost a quarter more binary for pixels that mostly need one.
     let zc = city_zone_cover(zones, f, c, hb);
     let open = max(1.0 - zc.x - zc.y, 1e-6);
-    if (zc.z > 0.0) {
-        let loft = city_windows_mean(city_loft_cell(cc), f, off, i_shift, c,
-                                     hb, l_wall, refl, through, fog, skin,
-                                     shown);
-        let k = zc.z / open;
-        mean = CityWinSum(mean.shown + k * (loft.shown - lattice.shown),
-                          mean.light + k * (loft.light - lattice.light));
-    }
-    if (zc.w > 0.0) {
-        let shop = city_windows_mean(city_store_cell(cc), f, off, i_shift, c,
-                                     hb, l_wall, refl, through, fog, skin,
-                                     shown);
-        // Against the lattice's share, not the loft-mixed mean: the two
-        // zones are disjoint.
-        let k = zc.w / open;
-        mean = CityWinSum(mean.shown + k * (shop.shown - lattice.shown),
-                          mean.light + k * (shop.light - lattice.light));
+    let wz = vec3<f32>(max(open - zc.z - zc.w, 0.0), zc.z, zc.w) / open;
+    var mean = city_win_zero();
+    for (var k: i32 = 0; k < 3; k = k + 1) {
+        let wk = select(select(wz.x, wz.y, k == 1), wz.z, k == 2);
+        // A footprint wholly on solid wall or plant needs no windows.
+        if (wk > 0.0 && zc.x + zc.y < 1.0) {
+            let m = city_windows_mean(city_zone_cell(cc, k), f, off, i_shift,
+                                      c, hb, l_wall, refl, through, fog,
+                                      skin, shown);
+            mean = CityWinSum(mean.shown + wk * m.shown,
+                              mean.light + wk * m.light);
+        }
     }
     if (zc.x + zc.y > 0.0) {
         let solid = city_win_add(city_win_zero(), l_wall, 1.0, fog, shown);
