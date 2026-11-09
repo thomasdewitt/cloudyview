@@ -549,3 +549,33 @@ def test_witness_refuses_a_coarse_field_under_a_nest(capsys):
     with pytest.raises(SystemExit):
         witness_module.main("missing.nc", nest_group="/nest", coarsen=2)
     assert "--coarsen and --nest-group" in capsys.readouterr().err
+
+
+_LAB_DESERT_JS = textwrap.dedent("""
+    globalThis.location = { search: "?desert=/lab/runs/20261109-132131/tile" };
+    const { Viewer, labDesertNote } = await import("%s");
+    process.stdout.write(JSON.stringify({
+      command: Viewer.prototype.witnessCommand.call({ scene: { desert: true } }, {
+        size: [640, 360], lodStrength: 1.0, haze: 0.35,
+        hazeHeightDependent: false, exposure: 2.5, quality: "high" }),
+      note: labDesertNote({ desert: true }),
+      sea: labDesertNote({ desert: false }) }));
+""")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_lab_desert_has_no_witness_command():
+    """witness draws only the shipped desert: over a ?desert= tile the
+    browser offers no command (a shell comment saying why), rather than one
+    that renders the shipped bajada in the lab tile's place."""
+    soar = Path(__file__).resolve().parents[1] / "web" / "soar"
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e",
+         _LAB_DESERT_JS % (soar / "viewer.js").as_posix()],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    got = json.loads(proc.stdout)
+    assert got["command"].startswith("# No witness command:")
+    assert "/lab/runs/20261109-132131/tile" in got["note"]
+    assert got["sea"] is None
+

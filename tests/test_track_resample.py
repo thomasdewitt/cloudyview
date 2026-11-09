@@ -337,6 +337,18 @@ def test_a_desert_flight_names_its_ground(tmp_path):
     both["desert"] = _header(tmp_path, surface="desert")["desert"]
     with pytest.raises(ValueError, match="one surface"):
         tr.settings_from_header(both)
+    shipped = _header(tmp_path, surface="desert")
+    shipped["desert"]["tile"] = "desert"
+    assert tr.settings_from_header(shipped).surface == "desert"
+
+
+def test_a_flight_over_a_lab_tile_is_refused_by_name(tmp_path):
+    """Same extent, other terrain: the period check cannot see it, the tile
+    name does."""
+    h = _header(tmp_path, surface="desert")
+    h["desert"]["tile"] = "/lab/runs/20261109-132131/tile"
+    with pytest.raises(ValueError, match="20261109-132131.*only the browser"):
+        tr.settings_from_header(h)
 
 
 def test_missing_field_and_missing_keys_are_named(tmp_path):

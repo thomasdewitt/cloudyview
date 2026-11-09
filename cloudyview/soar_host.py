@@ -118,6 +118,20 @@ def surface_level_files(meta: dict) -> list:
     return [f"fif_mip{level}.bin" for level in range(int(meta["mips"]))]
 
 
+def surface_format_channels(fmt: str, where: str = "the surface tile") -> int:
+    """Channels per texel of a surface-tile format this host reads; any
+    other is refused by name. rg32float is desert-surface's full-precision
+    lab tile (docs/desert_tile_format.md), which only the browser reads."""
+    if fmt == "rg32float":
+        raise RuntimeError(
+            f"{where} is a full-precision (rg32float) desert tile, a "
+            "desert-surface lab run: only the browser (scene.js) reads that "
+            "format; this host reads the shipped rg16float desert.")
+    if fmt not in SURFACE_FORMAT_CHANNELS:
+        raise RuntimeError(f"{where}: unknown surface-tile format {fmt!r}.")
+    return SURFACE_FORMAT_CHANNELS[fmt]
+
+
 def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
     """One stored mip level -> the interleaved texel bytes the texture wants.
 
@@ -127,7 +141,7 @@ def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
     gzip see a height field's smoothness. `raw` is already decompressed.
     web/soar/scene.js decodeSurfaceLevel is the twin.
     """
-    channels = SURFACE_FORMAT_CHANNELS[meta.get("format", "rgba16float")]
+    channels = surface_format_channels(meta.get("format", "rgba16float"))
     expected = side * side * channels * 2
     if len(raw) != expected:
         raise RuntimeError(
@@ -1214,9 +1228,9 @@ class SoarRenderer:
                 "tools/export_web_assets.py, or update the shader with it.")
         n, mips = int(meta["n"]), int(meta["mips"])
         fmt = meta.get("format", "rgba16float")
-        texel_bytes = SURFACE_FORMAT_CHANNELS[fmt] * 2
+        texel_bytes = surface_format_channels(fmt, str(tile_dir)) * 2
         self.surface_meta = meta
-        channels = SURFACE_FORMAT_CHANNELS[fmt]
+        channels = surface_format_channels(fmt, str(tile_dir))
         tex = self.device.create_texture(
             size=(n, n, 1), dimension="2d", format=fmt,
             mip_level_count=mips,
