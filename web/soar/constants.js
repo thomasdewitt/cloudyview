@@ -704,6 +704,14 @@ export const HOLD_RENDER_SCALE_BY_TIER = {
 // actually happens.
 export const HOLD_RUNG_FRAMES = 4;
 
+// Above this altitude no steam can be in view, so a parked city view may
+// sleep again: the steam stands below cc_manholesteam_ZTOP (15 m) and is
+// marched only to cc_manholesteam_RANGE (360 m) along the ray
+// (raymarch.wgsl's manholesteam component; tests/test_live_steam.py pins
+// the sum). Below it the live view's steam keeps the loop awake, parked or
+// paused (Renderer.drawFrame's liveSteam).
+export const LIVE_STEAM_CEILING_M = 375.0;
+
 // The ceiling on a single held frame, and the reason the climb is gated by a
 // measurement rather than run open-loop.
 //
