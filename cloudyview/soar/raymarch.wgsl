@@ -3935,6 +3935,12 @@ const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
 const CITY_MH_PITCH: f32 = 30.0;
 const CITY_MH_R: f32 = 0.34;
 const CITY_MH_PRESENT: f32 = 0.55;
+// A wet cover's gloss: tyre-polished iron under a film, sheened all over
+// rather than mottled like the asphalt round it, so at night a lid reads as
+// a lid — it catches the lamps (city_lamp_glint) and the lit windows (the
+// film lobe) where dark iron alone was a dark disc on dark asphalt (Thomas,
+// 2026-11-08: a plume from "a random bit of street", its cover unread).
+const CITY_MH_GLOSS: f32 = 0.9;
 // Storm-drain grates: one in each gutter, this far from the cross street's
 // centreline, beyond its crosswalk and stop line.
 const CITY_GRATE_AT: f32 = 5.2;       // past the cross street's building line
@@ -4404,7 +4410,8 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                    - CITY_PUDDLE_DARKEN * puddle);
     g.wet = film;
     g.puddle = puddle;
-    g.gloss = CITY_FILM_GLOSS * film * max(mottle, 0.0);
+    g.gloss = mix(CITY_FILM_GLOSS * film * max(mottle, 0.0), CITY_MH_GLOSS,
+                  mh.x);
     g.walk = select(0.0, w_in + w_kerb, walk_ok);
     // Outside the plot on an edge that carries no street there is no
     // street at all: lot ground, and no kerb to collect water against.
@@ -13492,10 +13499,21 @@ const cc_manholesteam_STACK_SHARE: f32 = 0.22;
 // diagonal to the grid, so no street sees its plumes lean straight along
 // or straight across it.
 const cc_manholesteam_WIND: vec2<f32> = vec2<f32>(0.4472136, 0.8944272);
-// The source radius of a plume from a bare cover. Steam leaves through the
-// vent holes and the rim gap and billows out at once, so the visible plume
-// starts wider than the iron (CITY_MH_R); a stack's leaves its own mouth.
+// The source radius of a plume from a bare cover: the radius its body
+// grows from (r = R0_COVER + SPREAD z, which the thinning and the lumps
+// follow), wider than the iron (CITY_MH_R) because the steam billows out
+// within a metre. A stack's leaves its own mouth.
 const cc_manholesteam_R0_COVER: f32 = 0.9;
+// The first metre of a cover's plume (Thomas, 2026-11-08: a plume "just on
+// a random bit of street" — its cover was there, buried in the plume's own
+// dense 0.9 m base). Steam leaves through the lid's vent holes and rim gap,
+// so the plume's edge starts at the lid (CITY_MH_R) and relaxes onto the
+// body's radius over NECK_L; and it leaves as hot vapour, near transparent,
+// condensing into the visible plume as it mixes with the cold air — its
+// density ramps as 1 - exp(-z / COND_L). The lid shows through the foot of
+// its plume from an ordinary viewing angle. Stacks keep their mouths.
+const cc_manholesteam_NECK_L: f32 = 0.35;
+const cc_manholesteam_COND_L: f32 = 0.25;
 const cc_manholesteam_H_MIN: f32 = 6.0;    // plume height above its source
 const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
@@ -13736,8 +13754,17 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     let rise = z / s.h;
     let r = s.r0 + cc_manholesteam_SPREAD * z;
     let q = p.xy - s.c - cc_manholesteam_WIND * (s.lean * s.h * rise * rise);
-    // Distance from the axis in local radii. Past CUT nothing can reach.
-    let d = length(q) / r;
+    // A cover's plume: its edge from the lid's radius, its density from
+    // nothing, over its first decimetres (NECK_L, COND_L).
+    var r_edge = r;
+    var cond = 1.0;
+    if (!s.stack) {
+        r_edge = r - (s.r0 - CITY_MH_R) * exp(-z / cc_manholesteam_NECK_L);
+        cond = 1.0 - exp(-z / cc_manholesteam_COND_L);
+    }
+    // Distance from the axis in local radii. Past CUT nothing can reach
+    // (r_edge <= r, so the box, sized by r, still bounds it).
+    let d = length(q) / r_edge;
     if (d >= cc_manholesteam_CUT) {
         return 0.0;
     }
@@ -13770,7 +13797,7 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     // leaves denser — the opaque burst at the top of every stack — and
     // thins to the same plume aloft.
     let cover = smoothstep(0.0, cc_manholesteam_SOFT, boundary - d);
-    return s.vigor * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
+    return s.vigor * cond * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
            // @domain: r >= r0 > 0: the plume's radius only grows from its source
            * pow(cc_manholesteam_R0_COVER / r, cc_manholesteam_THIN);
 }
