@@ -645,6 +645,8 @@ export function cityCell(tile, cx, cy) {
 export const CITY_SHELL_OUT_MAX = 1.5;
 export const CITY_ESCAPE_OUT = 1.25;
 export const CITY_BALCONY_OUT = 1.10;
+// A core strip's proud front (raymarch.wgsl's facade zones).
+export const CITY_CORE_OUT = 0.45;
 
 /** raymarch.wgsl city_escape_building: the building carries a fire escape. */
 function escapeBuilding(c) {
@@ -708,6 +710,10 @@ export function shellDepth(c) {
   if (pipes > 0) depth = Math.max(depth, 0.24);
   if (escapeBuilding(c)) depth = Math.max(depth, CITY_ESCAPE_OUT);
   if (balconyBuilding(c)) depth = Math.max(depth, CITY_BALCONY_OUT);
+  // A core strip may stand on any face of a tower (city_zones).
+  if (c.height > 40.0 && c.win_style !== 4) {
+    depth = Math.max(depth, CITY_CORE_OUT);
+  }
   return Math.min(depth + 0.02, CITY_SHELL_OUT_MAX);
 }
 

@@ -6298,11 +6298,6 @@ fn city_loft_cell(cc: CityCell) -> CityCell {
     return c;
 }
 
-// The share of [a, b] inside [lo, hi].
-fn city_span_cover(a: f32, b: f32, lo: f32, hi: f32) -> f32 {
-    return max(min(b, hi) - max(a, lo), 0.0) / max(b - a, 1e-6);
-}
-
 // Plant storeys below storey coordinate s (storeys, not metres).
 fn city_plant_below(z: CityZones, s: f32) -> f32 {
     let q = clamp(s, f32(z.plant.x), f32(z.plant.w + 1)) - f32(z.plant.x);
@@ -6312,43 +6307,47 @@ fn city_plant_below(z: CityZones, s: f32) -> f32 {
 }
 
 // The shares of the footprint [c - hb, c + hb] (face-local u and z) that
-// are solid (x: a solid side or a core), plant (y), loft (z) and shop (w).
-// The zones are disjoint, so the four add.
+// the zones take: solid (x: a solid side or a core), plant (y), loft (z)
+// and shop (w), each within the face's bays (the corner strips are wall
+// whatever the zoning, and the lattice's mean already holds them so). The
+// zones are disjoint, so the four add, to at most the bays' share.
 fn city_zone_cover(z: CityZones, f: CityFace, c: vec2<f32>, hb: vec2<f32>)
         -> vec4<f32> {
     let u0 = c.x - hb.x;
     let u1 = c.x + hb.x;
-    let v0 = c.y - hb.y;
-    let v1 = c.y + hb.y;
-    // The bays: the corner strips are wall whatever the zoning.
-    let bays = city_span_cover(u0, u1, f.margin,
-                               f.margin + f32(f.nbays) * f.pitch);
+    let v0 = max(c.y - hb.y, f.z0);
+    let v1 = min(c.y + hb.y, f.z1);
+    let du = 2.0 * hb.x;
+    let dv = 2.0 * hb.y;
+    let strip = city_bay_strip(f);
+    let bu = city_overlap(u0, u1, strip.x, strip.y) / du;
+    // v shares are lengths within the face over the whole footprint height.
+    let vface = max(v1 - v0, 0.0) / dv;
     var store = 0.0;
     if (z.store) {
-        store = bays * city_span_cover(v0, v1, 0.0, CITY_FLOOR_H);
+        store = bu * city_overlap(v0, v1, 0.0, CITY_FLOOR_H) / dv;
     }
     if (z.blank) {
-        return vec4<f32>(1.0 - store, 0.0, 0.0, store);
+        return vec4<f32>(bu * vface - store, 0.0, 0.0, store);
     }
-    let cu = city_span_cover(u0, u1, f.margin + f32(z.core.x) * f.pitch,
-                             f.margin + f32(z.core.y) * f.pitch);
-    let core = cu * city_span_cover(v0, v1, CITY_FLOOR_H, 1e9);
-    var plant = city_span_cover(v0, v1, f32(z.crown) * CITY_FLOOR_H, 1e9);
-    if (z.plant.y > 0) {
-        plant = plant + (city_plant_below(z, v1 * CITY_PER_STOREY)
-                         - city_plant_below(z, v0 * CITY_PER_STOREY))
-                        / max((v1 - v0) * CITY_PER_STOREY, 1e-6);
+    let cu = city_overlap(u0, u1, f.margin + f32(z.core.x) * f.pitch,
+                          f.margin + f32(z.core.y) * f.pitch) / du;
+    let core = cu * city_overlap(v0, v1, CITY_FLOOR_H, 1e9) / dv;
+    var pv = city_overlap(v0, v1, f32(z.crown) * CITY_FLOOR_H, 1e9) / dv;
+    if (z.plant.y > 0 && v1 > v0) {
+        pv = pv + (city_plant_below(z, v1 * CITY_PER_STOREY)
+                   - city_plant_below(z, v0 * CITY_PER_STOREY))
+                  * CITY_FLOOR_H / dv;
     }
-    // Plant storeys all lie above storey 1, so a core covers its share of
-    // them: what is left of them is plant.
-    plant = plant * (1.0 - cu);
-    let lu = city_span_cover(u0, u1, f.margin,
-                             f.margin + f32(z.loft.z) * f.pitch)
-           + city_span_cover(u0, u1,
-                             f.margin + f32(f.nbays - z.loft.z) * f.pitch,
-                             f.margin + f32(f.nbays) * f.pitch);
-    let loft = lu * city_span_cover(v0, v1, f32(z.loft.x) * CITY_FLOOR_H,
-                                    f32(z.loft.y) * CITY_FLOOR_H);
+    // Plant storeys all lie above storey 1, where a core takes its bays.
+    let plant = pv * (bu - cu);
+    let lu = city_overlap(u0, u1, f.margin,
+                          f.margin + f32(z.loft.z) * f.pitch)
+           + city_overlap(u0, u1,
+                          f.margin + f32(f.nbays - z.loft.z) * f.pitch,
+                          f.margin + f32(f.nbays) * f.pitch);
+    let loft = lu / du * city_overlap(v0, v1, f32(z.loft.x) * CITY_FLOOR_H,
+                                      f32(z.loft.y) * CITY_FLOOR_H) / dv;
     return vec4<f32>(core, plant, loft, store);
 }
 
@@ -8072,34 +8071,62 @@ fn city_windows_seen(cc: CityCell, f: CityFace, st: CityShellStyle,
     }
     let skin = cc.win_style == 3;
     let hb = max(city_wall_footprint(dl, fp_filter), vec2<f32>(1e-3));
-    // The facade's zones take their shares of the footprint
+    // The facade's zones take their shares of the footprint's bays
     // (city_zone_cover): the lofts' and the shops' windows in place of the
-    // lattice's, and plain wall or louvres where there are no openings at
-    // all. The three window means are one call in a rolled loop: the mean
-    // is the heaviest code in the kernel, and three inlined copies of it
-    // cost a quarter more binary for pixels that mostly need one.
+    // lattice's, plain wall or louvres where there are no openings. Each
+    // zone replaces what the lattice holds in the bays (its mean less the
+    // corner strips' wall, which no zone touches), so a face that is all one
+    // zone averages to exactly that zone. The window means are one call in a
+    // rolled loop: the mean is the heaviest code in the kernel, and three
+    // inlined copies of it cost a quarter more binary.
     let zc = city_zone_cover(zones, f, c, hb);
-    let open = max(1.0 - zc.x - zc.y, 1e-6);
-    let wz = vec3<f32>(max(open - zc.z - zc.w, 0.0), zc.z, zc.w) / open;
+    let strip = city_bay_strip(f);
+    let bays = city_overlap(c.x - hb.x, c.x + hb.x, strip.x, strip.y)
+               * city_overlap(c.y - hb.y, c.y + hb.y, f.z0, f.z1)
+               / (4.0 * hb.x * hb.y);
+    let strip_wall = city_win_add(city_win_zero(),
+                                  l_wall + select(vec3<f32>(0.0), refl, skin),
+                                  1.0, fog, shown);
+    let solid = city_win_add(city_win_zero(), l_wall, 1.0, fog, shown);
+    let plant = city_win_add(city_win_zero(), l_plant, 1.0, fog, shown);
+    let shut = zc.x + zc.y;
     var mean = city_win_zero();
-    for (var k: i32 = 0; k < 3; k = k + 1) {
-        let wk = select(select(wz.x, wz.y, k == 1), wz.z, k == 2);
-        // A footprint wholly on solid wall or plant needs no windows.
-        if (wk > 0.0 && zc.x + zc.y < 1.0) {
-            let m = city_windows_mean(city_zone_cell(cc, k), f, off, i_shift,
-                                      c, hb, l_wall, refl, through, fog,
-                                      skin, shown);
-            mean = CityWinSum(mean.shown + wk * m.shown,
-                              mean.light + wk * m.light);
-        }
-    }
-    if (zc.x + zc.y > 0.0) {
-        let solid = city_win_add(city_win_zero(), l_wall, 1.0, fog, shown);
-        let plant = city_win_add(city_win_zero(), l_plant, 1.0, fog, shown);
-        let k = 1.0 - zc.x - zc.y;
+    if (shut > 0.0 && shut >= bays - 1e-6) {
+        // No openings under the footprint: no windows to average.
         mean = CityWinSum(
-            k * mean.shown + zc.x * solid.shown + zc.y * plant.shown,
-            k * mean.light + zc.x * solid.light + zc.y * plant.light);
+            (1.0 - bays) * strip_wall.shown + zc.x * solid.shown
+            + zc.y * plant.shown,
+            (1.0 - bays) * strip_wall.light + zc.x * solid.light
+            + zc.y * plant.light);
+    } else {
+        var lattice = city_win_zero();
+        for (var k: i32 = 0; k < 3; k = k + 1) {
+            let share = select(select(1.0, zc.z, k == 1), zc.w, k == 2);
+            if (share > 0.0) {
+                let m = city_windows_mean(city_zone_cell(cc, k), f, off,
+                                          i_shift, c, hb, l_wall, refl,
+                                          through, fog, skin, shown);
+                if (k == 0) {
+                    lattice = m;
+                    mean = m;
+                } else {
+                    let w = share / bays;
+                    mean = CityWinSum(mean.shown + w * (m.shown - lattice.shown),
+                                      mean.light + w * (m.light - lattice.light));
+                }
+            }
+        }
+        if (shut > 0.0) {
+            // The lattice's own bays, its corner strips taken out.
+            let wb = CityWinSum(
+                (lattice.shown - (1.0 - bays) * strip_wall.shown) / bays,
+                (lattice.light - (1.0 - bays) * strip_wall.light) / bays);
+            mean = CityWinSum(
+                mean.shown + zc.x * (solid.shown - wb.shown)
+                + zc.y * (plant.shown - wb.shown),
+                mean.light + zc.x * (solid.light - wb.light)
+                + zc.y * (plant.light - wb.light));
+        }
     }
     if (cover > 0.0) {
         let wall = city_win_add(city_win_zero(),
