@@ -414,3 +414,12 @@ def test_the_silt_between_resolved_stones_stays_warm():
         silt = (mean - cover * stones) / (1 - cover)
         assert np.all(silt > 0.35 * mean), (name, silt)
         assert silt[0] >= silt[1] >= silt[2], (name, silt)
+
+
+def test_soar_host_refuses_a_full_precision_tile_by_name():
+    """rg32float is the lab's, and the browser's only: this host names it
+    rather than failing on a bare KeyError."""
+    _, meta = _fixture("rg32float")
+    raw = (FIXTURES / "desert-tile-64-rg32float" / meta["files"][0]).read_bytes()
+    with pytest.raises(RuntimeError, match="rg32float.*only the browser"):
+        decode_surface_level(raw, meta["n"], meta)

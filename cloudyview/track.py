@@ -520,6 +520,17 @@ def settings_from_header(header: dict, *, track_path=None,
         tile_offset = tuple(float(v) for v in _need(city, "tile_offset_m", "city"))
     elif desert is not None:
         surface, block = "desert", desert
+        # The tile the flight stood on (absent before it was recorded: the
+        # shipped one). A ?desert= tile is a desert-surface lab run, which
+        # only the browser draws; rendering the shipped desert in its place
+        # would be the wrong ground without a word.
+        tile = desert.get("tile", "desert")
+        if tile != "desert":
+            raise ValueError(
+                f"this track flew the desert tile {tile!r} (?desert=, a "
+                "desert-surface lab run), which only the browser draws; "
+                "soar re-renders only the shipped desert. Record the video "
+                "in the browser instead.")
 
     return TrackSettings(
         field_path=field_path,

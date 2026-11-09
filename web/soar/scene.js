@@ -88,7 +88,8 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
 // Channels per texel of each surface-tile format (soar_host's
 // SURFACE_FORMAT_CHANNELS), and bytes per channel: the ocean and the city
 // are rgba16float, the desert rg16float. rg32float is the terrain lab's
-// full-precision desert (tools/terrain_lab), which only this loader reads.
+// full-precision desert (desert-surface's desert-lab), which only this
+// loader reads.
 const SURFACE_FORMAT_CHANNELS = { rgba16float: 4, rg16float: 2, rg32float: 2 };
 const SURFACE_FORMAT_BYTES = { rgba16float: 2, rg16float: 2, rg32float: 4 };
 

@@ -86,9 +86,20 @@ const DESERT_URL = desertUrl(globalThis.location?.search ?? "");
 
 /**
  * ?desert=<path> flies a desert tile other than the shipped one: the terrain
- * lab's candidates (tools/terrain_lab). A path on this origin only, so a
+ * lab's candidates (desert-surface's desert-lab). A path on this origin only, so a
  * link cannot point the app at someone else's tile.
  */
+/**
+ * Why no witness command can reproduce a view of `scene`, or null: a
+ * ?desert= tile (desert-surface's lab) is drawn here and nowhere else —
+ * soar_host reads only the shipped desert, and would render that instead.
+ */
+export function labDesertNote(scene) {
+  if (!scene?.desert || DESERT_URL === "desert") return null;
+  return `this desert is ${DESERT_URL} (?desert=), which only the browser ` +
+    "draws: witness and `soar track.json` render the shipped desert only.";
+}
+
 function desertUrl(search) {
   const asked = new URLSearchParams(search).get("desert");
   if (asked === null) return "desert";
@@ -2901,6 +2912,10 @@ export class Viewer {
           position_m: desertPos,
           tile_extent_m: this.scene.oceanTileExtent,
           surface_offset_m: this._surfaceOffsetM(),
+          // Which tile: "desert" is the shipped one; anything else came in
+          // by ?desert= (a desert-surface lab run), which no Python host
+          // draws — cloudyview/track.py refuses it by this name.
+          tile: DESERT_URL,
         },
       } : {}),
       render: {
@@ -2955,7 +2970,8 @@ export class Viewer {
       // nests, wrap and image controls included. At the capture's look
       // rather than the live view's, for the same reason as the render
       // block above.
-      reproduction_command: this.witnessCommand({
+      // None for a ?desert= tile: witness draws only the shipped desert.
+      reproduction_command: labDesertNote(this.scene) ? null : this.witnessCommand({
         size,
         lodStrength: look.lodStrength,
         haze: look.haze,
@@ -3280,6 +3296,8 @@ export class Viewer {
                    exposure = this.exposure,
                    quality = this.capturePresetTier(this.captureStillTier),
                  } = {}) {
+    const lab = labDesertNote(this.scene);
+    if (lab) return `# No witness command: ${lab}`;
     const n = (v) => Number(v).toPrecision(12).replace(/\.?0+$/, "");
     const q = (v) => (/\s/.test(String(v))
       ? JSON.stringify(String(v)) : String(v));

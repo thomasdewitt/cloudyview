@@ -20894,7 +20894,8 @@ fn desert_height_range() -> vec2<f32> {
 // times the band's largest magnitude anywhere and at any mip weight
 // (2.211 m, the bounds pyramid's top cell; band_max_m, 1.920, is measured at
 // texel centres and falls short of it), over band_max_m, rounded up.
-// tests/test_desert_bounds.py holds it to that; scene.js carries the same.
+// tests/test_desert_bounds.py holds it to that. (The camera floor no longer
+// uses it: scene.js desertFloorAt evaluates the octaves themselves.)
 const DESERT_OCTAVE_MARGIN: f32 = 0.4942;
 
 // Steepest slope at each mip level of the tile, with a quarter again for
