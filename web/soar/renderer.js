@@ -8,7 +8,7 @@
 "use strict";
 
 import * as K from "./constants.js";
-import { packUniforms, sceneKey, keysEqual, renderTargetSize,
+import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize,
          motionAlphaForDt, sceneClock } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
 import { desertReliefM, desertTileRows } from "./scene.js";
@@ -2532,9 +2532,9 @@ export class Renderer {
    * pipelines are still compiling: either way the AE loop just tries again
    * next interval.
    *
-   * The march is the real shader with TONE_MAP compiled out, at
-   * AUTO_EXPOSURE_METER_SIZE — the same footprint-per-cost trade renderScale
-   * makes, so ~5k rays per meter against ~1M for a frame. It gets its own
+   * The march is the real shader with TONE_MAP compiled out, on meterSize's
+   * grid — the output's shape at ~2.3k rays (the same footprint-per-cost
+   * trade renderScale makes) against ~1M for a frame. It gets its own
    * uniform buffer and target: the main frame's buffer is rewritten inside
    * drawFrame's multi-sample loop, and sharing it would race the meter's
    * submit against those rewrites.
@@ -2543,21 +2543,29 @@ export class Renderer {
     if (this._meterBusy) return null;
     this._meterBusy = true;
     try {
-      const [mw, mh] = K.AUTO_EXPOSURE_METER_SIZE;
+      const [mw, mh] = meterSize(outputSize);
+      // The grid follows the window's shape, so a resize can change it; the
+      // old size's target, readback and surface set go. No reading is in
+      // flight (this is the only meter, and its last readback was unmapped).
+      if (this._meterTex && (this._meterTex.width !== mw
+                             || this._meterTex.height !== mh)) {
+        this._releaseMeterTargets();
+      }
+      this._meterUniformBuf ??= this.device.createBuffer({
+        label: "soar-meter-uniforms",
+        size: K.UNIFORM_NBYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
       if (!this._meterTex) {
-        this._meterUniformBuf = this.device.createBuffer({
-          label: "soar-meter-uniforms",
-          size: K.UNIFORM_NBYTES,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
         this._meterTex = this.device.createTexture({
           label: "soar-meter", size: [mw, mh], format: ACCUM_FORMAT,
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         });
-        // 16 bytes per rgba32float texel; the row is 256-byte aligned by
-        // construction (96 * 16 = 1536).
+        // 16 bytes per rgba32float texel, each row padded to the 256 bytes
+        // a texture-to-buffer copy aligns rows to.
+        this._meterRowBytes = Math.ceil(mw * 16 / 256) * 256;
         this._meterReadBuf = this.device.createBuffer({
-          label: "soar-meter-read", size: mw * 16 * mh,
+          label: "soar-meter-read", size: this._meterRowBytes * mh,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
       }
@@ -2618,17 +2626,20 @@ export class Renderer {
                         surfaces);
       encoder.copyTextureToBuffer(
         { texture: this._meterTex },
-        { buffer: this._meterReadBuf, bytesPerRow: mw * 16 },
+        { buffer: this._meterReadBuf, bytesPerRow: this._meterRowBytes },
         [mw, mh]);
       this.device.queue.submit([encoder.finish()]);
 
       await this._meterReadBuf.mapAsync(GPUMapMode.READ);
       const data = new Float32Array(this._meterReadBuf.getMappedRange());
       const lums = new Float32Array(mw * mh);
-      for (let i = 0; i < mw * mh; i++) {
-        lums[i] = 0.2126 * data[i * 4]
-                + 0.7152 * data[i * 4 + 1]
-                + 0.0722 * data[i * 4 + 2];
+      const rowFloats = this._meterRowBytes / 4;
+      for (let y = 0; y < mh; y++) {
+        for (let x = 0; x < mw; x++) {
+          const t = y * rowFloats + x * 4;
+          lums[y * mw + x] = 0.2126 * data[t] + 0.7152 * data[t + 1]
+                           + 0.0722 * data[t + 2];
+        }
       }
       this._meterReadBuf.unmap();
       lums.sort();
@@ -2649,20 +2660,25 @@ export class Renderer {
     }
   }
 
+  /** The meter's size-bound resources: its target, surface set, readback. */
+  _releaseMeterTargets() {
+    this._meterTex?.destroy();
+    for (const tex of this._meterTargets?.surface?.textures ?? []) {
+      tex.destroy();
+    }
+    this._meterReadBuf?.destroy();
+    this._meterTex = this._meterReadBuf = this._meterTargets = null;
+  }
+
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
     for (const tex of [...(this._lensState ?? []), this._lensDry]) {
       tex?.destroy();
     }
     this._lensReadBuf?.destroy();
-    this._meterTex?.destroy();
-    for (const tex of this._meterTargets?.surface?.textures ?? []) {
-      tex.destroy();
-    }
-    this._meterReadBuf?.destroy();
+    this._releaseMeterTargets();
     this._meterUniformBuf?.destroy();
-    this._meterTex = this._meterReadBuf = this._meterUniformBuf = null;
-    this._meterTargets = null;
+    this._meterUniformBuf = null;
     this._surfaceDummy?.destroy();
     for (const targets of this._targetPool?.values() ?? []) {
       targets.sample.destroy();

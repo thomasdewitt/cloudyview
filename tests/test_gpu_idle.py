@@ -8,6 +8,7 @@ pmon sample is stood in for.
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -179,6 +180,10 @@ def _chrome(monkeypatch, ss):
         ports.append(port)
         return ss
     monkeypatch.setattr(gpu_idle, "_ss_clients", clients)
+    # The page list is the browser's DevTools HTTP endpoint; never the real
+    # QA Chrome's from a test.
+    monkeypatch.setattr(gpu_idle, "_pages",
+                        lambda port: "'soar' http://127.0.0.1:8791/soar/")
     return ports
 
 
@@ -197,9 +202,27 @@ def test_a_drawing_qa_chrome_names_who_drives_it(monkeypatch):
     assert f"pid {DRIVER} `node tools/tint_check.mjs --web web`" in fatal[0]
 
 
-def test_an_undriven_chrome_says_so(monkeypatch):
+def test_an_undriven_chrome_says_so_and_what_it_shows(monkeypatch):
     _chrome(monkeypatch, "")
-    assert "no client connected" in gpu_idle.driven_by(GPU)
+    line = gpu_idle.driven_by(GPU)
+    assert "no client connected" in line
+    assert line.endswith("pages: 'soar' http://127.0.0.1:8791/soar/")
+
+
+def test_contamination_says_when_each_neighbour_was_first_seen(monkeypatch):
+    """A short-lived client is gone by the time anyone looks; the time a
+    line was first seen lines it up against the other sessions' logs."""
+    w = gpu_idle.Watch()
+    w.fatal = {"pid 7 (chrome) at 14% SM": "16:52:03"}
+    monkeypatch.setattr(gpu_idle, "survey", lambda seconds: (
+        ["pid 8 (python3) holds a GPU context"], []))
+    monkeypatch.setattr(gpu_idle.time, "sleep", lambda s: None)
+    with pytest.raises(SystemExit) as e:
+        gpu_idle.check_quiet(w)
+    lines = str(e.value).splitlines()[1:]
+    assert lines[0] == "  16:52:03 pid 7 (chrome) at 14% SM"
+    assert re.fullmatch(r"  \d\d:\d\d:\d\d pid 8 \(python3\) holds a GPU "
+                        r"context", lines[1]), lines
 
 
 def test_a_browser_with_no_devtools_port_names_nobody(monkeypatch):
