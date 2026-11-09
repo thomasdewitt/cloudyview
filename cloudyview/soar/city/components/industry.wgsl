@@ -1603,11 +1603,8 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // skylights. So the hook adds nothing where the geometry was drawn, and
 // beyond CITY_PROP_RANGE it adds the geometry's exact mean.
 //
-// "Drawn" is the core's own test: props run for a cell whose ray segment
-// starts inside CITY_PROP_RANGE, and that start is where the ray enters the
-// hit cell's column, or enters the city slab from above if that is later
-// (city_trace's t_cur) — recomputed here from the camera, since the hook is
-// not handed the ray.
+// "Drawn" is the core's own test (city_props_drawn), from the camera: the
+// range is the view ray's, so a warehouse seen in a reflection follows it.
 //
 // The sawtooth mean is view-dependent, and exactly so. In the tooth's own
 // (s, z) plane a ray descending with slope m = |dz| / |ds| against the
@@ -1620,7 +1617,12 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // A clerestory is the same argument with one long face in view and no
 // occluder: its projected strip, length x height x |d_c| / |dz|, over the
 // roof's area.
-fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32) -> vec3<f32> {
+// The hook's fp_filter, ray, directness and the core's roof radiance are
+// not needed here: the glazing's mean is a plain emission on the roof, its
+// range test is the camera's (below), not the ray's.
+fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
+                    _dir: vec3<f32>, _direct: bool, _base: vec3<f32>)
+        -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
@@ -1628,21 +1630,10 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32) -> vec3<f32> {
     if (!r.lit) {
         return vec3<f32>(0.0);
     }
-    let o = city_camera_origin();
-    let dir = (h.pos - o) / max(h.t, 1e-3);
-    let cell = u.ocean_params.x;
-    let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
-                        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
-                        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
-    let cmin = vec3<f32>(vec2<f32>(h.cell) * cell, -1e6);
-    let col = city_box_hit(o, inv, cmin, cmin + vec3<f32>(cell, cell, 2e6));
-    var t_slab = 0.0;
-    if (o.z > CITY_SLAB_TOP) {
-        t_slab = (CITY_SLAB_TOP - o.z) * inv.z;
-    }
-    if (max(col.x, t_slab) < CITY_PROP_RANGE) {
+    if (city_props_drawn(h.cell, h.pos, h.t)) {
         return vec3<f32>(0.0);
     }
+    let dir = (h.pos - city_camera_origin()) / max(h.t, 1e-3);
     let dz = max(abs(dir.z), 1e-3);
     if (r.kind == 1) {
         let d_s = r.face * select(dir.y, dir.x, r.step_x);
