@@ -7225,7 +7225,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         }
     }
     if (part == CITY_PART_WALL) {
-        e = e + cc_facade_detail(cc, hw, l.x, l.y, fp);
+        e = e + cc_facade_detail(cc, hw, dir, l.x, l.y, fp);
         // A curtain wall's spandrels are glass too: the same reflection the
         // flat facade gives the whole skin.
         if (cc.win_style == 3) {
@@ -7873,7 +7873,7 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     }
     // Whatever the facade-layer components add: signage, screens, a
     // warehouse's cladding and doors.
-    return e + cc_facade_detail(cc, h, uc, vc, fp);
+    return e + cc_facade_detail(cc, h, dir, uc, vc, fp);
 }
 
 // >>> GENERATED CITY COMPONENTS — written by tools/compose_city.py from
@@ -8391,8 +8391,8 @@ fn cc_facadeworks_draw(cc: CityCell) -> vec2<u32> {
     return pcg2d(cc.seed ^ vec2<u32>(0x7f4a7c15u, 0x2b3d8e11u));
 }
 
-fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                         fp: f32) -> vec3<f32> {
+fn cc_facadeworks_detail(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                         uc: f32, vc: f32, fp: f32) -> vec3<f32> {
     // One draw per building for the sign's structure. pcg2d gives 64 bits;
     // the continuous draws are taken later, behind the sign's own reject.
     //
@@ -13278,8 +13278,8 @@ fn cc_adscreens_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     return cc_adscreens_outer(p, fp);
 }
 
-fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                       fp: f32) -> vec3<f32> {
+fn cc_adscreens_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+                       vc: f32, fp: f32) -> vec3<f32> {
     let p = cc_adscreens_place(cc, h, uc, vc);
     if (!p.on) {
         return vec3<f32>(0.0);
@@ -16145,8 +16145,8 @@ fn cc_industry_vision(dv: f32, dz: f32) -> bool {
 const cc_industry_VISION_FRAC: f32 = 0.0711;   // 4 x 0.4 x 0.4 / 9
 const cc_industry_SEAM_FRAC: f32 = 0.05;       // 5 x 0.03 / 3
 
-fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
-        -> vec3<f32> {
+fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+                      vc: f32, fp: f32) -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
@@ -18465,12 +18465,13 @@ fn cc_component_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     return vec3<f32>(1.0, 0.0, 1.0);
 }
 
-fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
+fn cc_facade_detail(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                    uc: f32, vc: f32, fp: f32)
         -> vec3<f32> {
     var e = vec3<f32>(0.0);
-    e = e + cc_facadeworks_detail(cc, h, uc, vc, fp);
-    e = e + cc_adscreens_facade(cc, h, uc, vc, fp);
-    e = e + cc_industry_facade(cc, h, uc, vc, fp);
+    e = e + cc_facadeworks_detail(cc, h, dir, uc, vc, fp);
+    e = e + cc_adscreens_facade(cc, h, dir, uc, vc, fp);
+    e = e + cc_industry_facade(cc, h, dir, uc, vc, fp);
     return e;
 }
 

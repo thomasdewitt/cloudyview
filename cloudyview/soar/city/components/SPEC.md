@@ -120,8 +120,12 @@ Signatures (the composer checks these by compiling):
 - `shade` — `fn (h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
   -> vec3<f32>` — radiance (before fog; the core applies fog) for hits
   whose kind is in your range.
-- `facade` — `fn (cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
-  -> vec3<f32>` — ADDITIVE facade emission. `uc` runs along the facade in
+- `facade` — `fn (cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+  vc: f32, fp: f32) -> vec3<f32>` — ADDITIVE facade emission. `dir` is the
+  ray that found the wall (the view ray, or a wet street's reflected one),
+  for a footprint that knows the angle the wall is seen at: `fp` is the
+  pixel's across the ray, and a wall seen edge-on spreads it along `uc` by
+  `1/|dot(dir, h.normal)|`. `uc` runs along the facade in
   meters FROM THE FACE'S OWN START CORNER (`city_face_at(cc, h.pos,
   h.normal)` gives the face: its length, tier and bay lattice), `vc` is
   height; the window grid is the face's bays (`f.pitch` x `CITY_FLOOR_H`,
