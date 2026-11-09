@@ -11,8 +11,9 @@
 # on the session bus reaches the keyring and GNOME. So it runs with no
 # DISPLAY, no Wayland socket (a private, empty XDG_RUNTIME_DIR) and its
 # session bus pointed at a socket that does not exist: by construction it can
-# open no window and talk to nothing on the desktop, while the GPU stays
-# reachable through /dev/nvidia*.
+# open no window and reach nothing of the desktop session (the system bus is
+# still there; it is not the desktop), while the GPU stays reachable through
+# /dev/nvidia*.
 #
 # The flags that give the hardware adapter headless (checked 2026-11-08 on the
 # RTX 5080, Chrome 157): --headless=new --enable-features=Vulkan
@@ -25,6 +26,10 @@
 set -euo pipefail
 cmd=${1:-}
 PORT=${2:-9333}
+if ! [[ $PORT =~ ^[0-9]+$ ]]; then
+  echo "qa_chrome: PORT must be a number; got '$PORT'" >&2
+  exit 2
+fi
 QA=${QA_DIR:-$HOME/code-and-data/cloudyview/temp/qa}
 PROFILE=$QA/chrome-headless-$PORT
 RUNTIME=$QA/xdg-$PORT
