@@ -3978,7 +3978,8 @@ const CITY_REFL_RANGE: f32 = 600.0;
 // 0.05 rather than the first 0.15, Thomas's wet avenue (2026-11-08) traces
 // more of them: its one-sample spread 8 % lower (3.54 vs 3.90 levels on
 // the street, with the stratified draws), its first 8 frames 8 % nearer the
-// converged mean, for +2.1 % of the frame (768x432, High). Unbiased in
+// converged mean, for +1.6 % of the frame (768x432, High, interleaved with
+// a +0.7 % null; tier verified in every tab). Unbiased in
 // linear light; the accumulation averages tone-mapped samples, so fewer
 // rare RR / w samples brighten a converged wet reflection a little (+0.6
 // levels mean on reflective pixels), toward the tone map of the true mean.
@@ -27053,6 +27054,19 @@ fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
 // independent of each other, which the estimator's 1/p weights need (two
 // draws on one 1-D lattice would not be). White noise (city_frame_rand)
 // drew them before; the sky probe's jitter still does.
+// Each dimension has a near neighbour among the strat streams the city
+// runs, and two Weyl sequences whose steps differ by d move nearly in step
+// for ~1/(2d) frames (loose-ends' review): x by the subpixel offset's y
+// (STRAT_ALPHA_2, d 0.020, ~25 frames), y by the moon cone's u (ALPHA_5,
+// 0.015, ~32), z by its v (ALPHA_6, 0.044, ~11), w by the pre-march jitter
+// (ALPHA_9, 0.013, ~37). With eight 1-D streams already on the circle no
+// four steps sit much farther (a search of the golden families and of
+// integer strides of this lattice found 0.02 at best), and none of these
+// pairs shares an integrand (a microfacet normal against a subpixel
+// position, the roulette against the cloud pre-march), so early in a
+// parked accumulation a pair samples near a diagonal of its square instead
+// of all of it and converges regardless — the first 8 frames' error is 8 %
+// lower than dev's white draws all the same.
 const CITY_REFL_R4: vec4<f32> = vec4<f32>(0.8566748838545029, 0.7338918566271260,
                                           0.6287067210378086, 0.5385972572236101);
 const STRAT_STREAM_CITY_REFLECT: u32 = 9u;
