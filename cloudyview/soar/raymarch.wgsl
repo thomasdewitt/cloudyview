@@ -24263,9 +24263,10 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
 // bark pattern"; temp/references/ocotillo-bark). DF_OCO_ROWS rows with a
 // node every 2/5 of a turn, so each row carries every fifth spine; narrow
 // dark furrows part the rows, the green cortex showing in them. Each cane
-// winds at its own rate and hand: a row turns once in 27-63 cm, 10-21
-// degrees off the axis at the cane's foot and straighter up the thinning
-// cane (the twist is per metre, not per radius).
+// winds at its own rate and hand: a row turns once in 27-62 cm, 8-24
+// degrees off the axis at the cane's foot (radius 1.4-1.9 cm) and
+// straighter up the thinning cane (the twist is per metre, not per
+// radius).
 //
 // The azimuth about a cane is measured from a frame that both its segments
 // share: side1, horizontal and normal to the vertical plane the cane bends
@@ -24275,8 +24276,8 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
 // 2 pi (m + 1/2) / DF_OCO_ROWS + twist * s, s the arc length up the cane,
 // and the furrows halfway between.
 const DF_OCO_ROWS: i32 = 5;
-const DF_OCO_TWIST_MIN: f32 = 10.1;   // rad per metre: tan(10 deg) / 1.7 cm
-const DF_OCO_TWIST_MAX: f32 = 23.4;   // tan(21 deg) / 1.7 cm
+const DF_OCO_TWIST_MIN: f32 = 10.1;   // rad per metre: a turn in 62 cm
+const DF_OCO_TWIST_MAX: f32 = 23.4;   // a turn in 27 cm
 // A ridge's rise over the row spacing: arches meeting in creases whose
 // walls stand ~30 degrees.
 const DF_OCO_RIDGE_RISE: f32 = 0.18;
@@ -24314,14 +24315,18 @@ fn df_oco_bark(it: DfItem, i: i32, k: i32, along: f32, n: vec3<f32>,
     let e_theta = cross(sg.ax, n);
     let el = length(e_theta);
     // n is the rod's radial normal, unit and normal to the axis, except
-    // where df_rod met the axis itself and returned -dir: no azimuth there.
+    // where df_rod met the axis itself and returned -dir, which has no
+    // azimuth when the ray runs along the axis.
     if (el < 1e-4) {
         return vec4<f32>(n, 0.0);
     }
     let s = (f32(k) + along) * sg.len;
     let r = mix(sg.r0, sg.r1, along);
     let rows = f32(DF_OCO_ROWS);
-    let u = rows * (atan2(dot(n, side1), dot(n, side0)) - fr.w * s) / DF_TAU;
+    // Only u's fraction matters (whole harmonics): taken here, it keeps the
+    // cosines' arguments small up a long, fast-winding cane.
+    let u = fract(rows * (atan2(dot(n, side1), dot(n, side0)) - fr.w * s)
+                  / DF_TAU);
     // u's gradient on the surface: its length is one over the row spacing
     // across the rows, its direction the across-row tangent.
     let gu = rows / DF_TAU * (e_theta / (el * r) - fr.w * sg.ax);
@@ -24351,7 +24356,11 @@ fn df_oco_bark(it: DfItem, i: i32, k: i32, along: f32, n: vec3<f32>,
     // and the normal leans against it.
     let slope = 8.0 * DF_OCO_RIDGE_RISE
         * (f1 * s1 / 3.0 + 2.0 * f2 * s2 / 15.0 + 3.0 * f3 * s3 / 35.0);
-    // @domain: across is tangent to the surface, normal to the unit n: length >= 1
+    // across is made of cross(axis, n) and the axis, so where n is
+    // df_rod's radial normal it is normal to n and the sum is at least unit;
+    // at the -dir fallback n is still unit and the sum vanishes only if
+    // slope * across were exactly n.
+    // @domain: zero only if slope * across == n, a measure-zero coincidence
     return vec4<f32>(normalize(n - slope * across), w);
 }
 
@@ -24478,7 +24487,8 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                 // length (j + 1/2) DF_OCO_NODE_DS, on row 2j mod 5 (a node
                 // every 2/5 turn), at that row's crest (df_oco_bark). Taken
                 // from the ray's near end, so a cap on the count drops the
-                // far ones.
+                // far ones: at DF_OCO_MAX_NODES the cap holds 14 cm of cane,
+                // and binds on a ray within ~40 degrees of the cane's axis.
                 let half = sqrt(max(DF_OCO_REACH * DF_OCO_REACH - ap.w * ap.w,
                                     0.0)) / max(ap.z, 0.05);
                 let s_k = f32(k) * sg.len;
@@ -24590,14 +24600,15 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     return res;
 }
 
-fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight, Ls: DesertLight) -> vec3<f32> {
+fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight,
+                     Ls: DesertLight) -> vec3<f32> {
     let code = i32(floor(h.mat.x));
-    let along = fract(h.mat.x) / 0.9;
     let n = h.normal;
     if (code == DF_MAT_CANE) {
-        // The spiral bark (df_oco_bark): its furrow weight, zero-mean.
-        return desert_lambert(DF_OCO_CANE + (along - 0.25) * DF_OCO_FURROW,
-                              n, Ls);
+        // The spiral bark (df_oco_bark): its furrow weight, zero-mean,
+        // packed in the fraction as w + 1/4.
+        let furrow = fract(h.mat.x) / 0.9 - 0.25;
+        return desert_lambert(DF_OCO_CANE + furrow * DF_OCO_FURROW, n, Ls);
     }
     if (code == DF_MAT_OCO_SPINE) {
         return df_fiber(DF_OCO_SPINE, h.mat.yzw, dir, Ls, 1.0);
