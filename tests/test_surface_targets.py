@@ -20,6 +20,10 @@ counting stand-in for the GPU device (no GPU needed):
   depths included.
 - A stage chain that needs the optical depths on a set without them
   raises / throws rather than bind a stand-in.
+- A set made and then not kept (two ensures of one size racing, each
+  allocating: the later finds the other's set already covering its chain)
+  is retired the same way, after the GPU is done — the city's chain, which
+  is the same at every tier, retires only by this path.
 
 The node half skips without node.
 """
@@ -268,3 +272,62 @@ def test_a_tier_rise_during_the_allocation_still_leaves_every_slot():
     for case in json.loads(out.stdout):
         assert case["tier"] == case["during"], case
         assert not case["bad"], case
+
+
+_JS_RACE_RETIRE = textwrap.dedent("""
+    import { Renderer } from "%s";
+
+    globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 4 };
+    const made = [];
+    let destroyed = 0;
+    let pendingDone = [];
+    const device = {
+      pushErrorScope() {}, async popErrorScope() { return null; },
+      createTexture(d) {
+        made.push(d.label);
+        return { label: d.label, createView: () => ({}),
+                 destroy: () => { destroyed++; } };
+      },
+      createBindGroup() { return {}; },
+      queue: { onSubmittedWorkDone: () => new Promise((res) => {
+        pendingDone.push(res); }) },
+    };
+    const r = Object.create(Renderer.prototype);
+    r.device = device;
+    r.scene = { city: true };
+    r.qualityTier = "high";
+    r._surfaceDummy = { createView: () => ({}) };
+    r._veilDummy = { createView: () => ({}) };
+    r.surfaceLayout = {};
+    const one = { w: 8, h: 8 };
+    await r._ensureSurfaceTarget(one);
+    const perSet = made.length;
+    // Two ensures of one fresh size, racing: both allocate; the later keeps
+    // the earlier's set and retires its own.
+    const raced = { w: 16, h: 16 };
+    await Promise.all([r._ensureSurfaceTarget(raced),
+                       r._ensureSurfaceTarget(raced)]);
+    const out = { perSet, made: made.length - perSet, destroyedNow: destroyed,
+                  retirePending: pendingDone.length };
+    for (const res of pendingDone) res();
+    await new Promise((res) => setTimeout(res, 0));
+    out.destroyedAfterDone = destroyed;
+    console.log(JSON.stringify(out));
+""") % RENDERER_JS.as_uri()
+
+
+def test_a_set_lost_to_a_race_is_retired_after_the_gpu():
+    if shutil.which("node") is None:
+        pytest.skip("needs node")
+    out = subprocess.run(["node", "--input-type=module", "-e",
+                          _JS_RACE_RETIRE],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    # Both racers allocated a whole set; the one not kept is retired but
+    # destroyed nothing while the queue had not reported its work done ...
+    assert got["made"] == 2 * got["perSet"], got
+    assert got["destroyedNow"] == 0, got
+    assert got["retirePending"] >= 1, got
+    # ... and destroyed that set's textures once it had.
+    assert got["destroyedAfterDone"] == got["perSet"], got

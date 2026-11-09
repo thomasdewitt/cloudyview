@@ -111,9 +111,9 @@ function surfaceChannel(bytes, texels, format, c) {
 /**
  * One stored mip level -> the interleaved texel bytes the texture wants.
  * A level is either the texels themselves, or (encoding
- * "planar-byte-shuffle", the desert's) each channel's plane with every half
- * float's low bytes before its high bytes, the arrangement that lets gzip
- * see a height field's smoothness. Twin of soar_host.decode_surface_level.
+ * "planar-byte-shuffle", the ocean's and the desert's) each channel's plane
+ * with every half float's low bytes before its high bytes, the arrangement
+ * that lets gzip see a smooth field's smoothness. Twin of soar_host.decode_surface_level.
  */
 export function decodeSurfaceLevel(bytes, side, meta) {
   const format = meta.format ?? "rgba16float";
