@@ -26,8 +26,10 @@
 set -euo pipefail
 cmd=${1:-}
 PORT=${2:-9333}
-if ! [[ $PORT =~ ^[0-9]+$ ]]; then
-  echo "qa_chrome: PORT must be a number; got '$PORT'" >&2
+# Checked before it reaches the profile and runtime paths or stop's regex.
+if ! [[ $PORT =~ ^[0-9]{4,5}$ ]] \
+    || (( 10#$PORT < 1024 || 10#$PORT > 65535 )); then
+  echo "qa_chrome: PORT must be a number in 1024-65535; got '$PORT'" >&2
   exit 2
 fi
 QA=${QA_DIR:-$HOME/code-and-data/cloudyview/temp/qa}
