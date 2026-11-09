@@ -53,6 +53,7 @@ JS_TOOLS = [
     "tools/steam_live_qa.mjs",
     "tools/sea_speckle_qa.mjs",
     "tools/soar_noise.mjs",
+    "tools/surface_cs_timer.mjs",
 ]
 # What in a tool's source means it opens a device (directly, through the
 # renderer host or witness or behold, through Mitsuba's CUDA variant, through

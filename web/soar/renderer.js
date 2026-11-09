@@ -228,6 +228,24 @@ function isPending(pipelineOrPromise) {
   return typeof pipelineOrPromise?.then === "function";
 }
 
+/**
+ * EXPERIMENT: the city's first surface stage as a compute pass
+ * (raymarch.wgsl cs_surface), behind ?surfacecs — "1" (or "512") for a
+ * 32x16 workgroup, which bounds the stage at 128 registers on NVIDIA, "256"
+ * for 16x16. Off (the default), nothing below changes. Returns the
+ * workgroup [x, y] or null. An unknown value throws: a mistyped flag must
+ * not quietly measure the fragment path.
+ */
+export function surfaceComputeWorkgroup(search = globalThis.location?.search ?? "") {
+  const v = new URLSearchParams(search).get("surfacecs");
+  if (v === null || v === "0") return null;
+  const sizes = { "1": [32, 16], "512": [32, 16], "256": [16, 16] };
+  if (!(v in sizes)) {
+    throw new Error(`?surfacecs=${v}: expected 1 (or 512), 256, or 0`);
+  }
+  return sizes[v];
+}
+
 function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   if (!overlays) return;
   for (const overlay of overlays) {
@@ -425,6 +443,23 @@ export class Renderer {
     this.shaderSource = shaderSource;
     this.scene = scene;
     this.canvasFormat = canvasFormat;
+    // ?surfacecs (surfaceComputeWorkgroup). The device must allow the
+    // workgroup; one that does not is an error, never a quiet fall back to
+    // the fragment stage or a smaller group.
+    this.surfaceCS = surfaceComputeWorkgroup();
+    if (this.surfaceCS) {
+      const [wx, wy] = this.surfaceCS;
+      const l = device.limits;
+      if (wx * wy > l.maxComputeInvocationsPerWorkgroup
+          || wx > l.maxComputeWorkgroupSizeX || wy > l.maxComputeWorkgroupSizeY) {
+        throw new Error(
+          `?surfacecs: a ${wx}x${wy} workgroup (${wx * wy} invocations) is ` +
+          `over this device's limits (maxComputeInvocationsPerWorkgroup ` +
+          `${l.maxComputeInvocationsPerWorkgroup}, sizes ` +
+          `${l.maxComputeWorkgroupSizeX}x${l.maxComputeWorkgroupSizeY})`);
+      }
+      console.info(`soar: surface stage as compute, workgroup ${wx}x${wy}`);
+    }
 
     this.periodic = true;
     this.qualityTier = K.DEFAULT_QUALITY_TIER;
@@ -486,24 +521,28 @@ export class Renderer {
       addressModeU: "repeat", addressModeV: "repeat",
       magFilter: "linear", minFilter: "linear", mipmapFilter: "linear",
     });
+    // Under ?surfacecs group 0 is also the compute stage's.
+    const rayVis = this.surfaceCS
+      ? GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE
+      : GPUShaderStage.FRAGMENT;
     this.rayLayout = device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 0, visibility: rayVis, buffer: {} },
+        { binding: 1, visibility: rayVis,
           texture: { sampleType: "float", viewDimension: "3d" } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 2, visibility: rayVis,
           sampler: { type: "filtering" } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 3, visibility: rayVis,
           texture: { sampleType: "float", viewDimension: "2d" } },
-        { binding: 4, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 4, visibility: rayVis,
           sampler: { type: "filtering" } },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 5, visibility: rayVis,
           texture: { sampleType: "float", viewDimension: "3d" } },
-        { binding: 6, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 6, visibility: rayVis,
           sampler: { type: "filtering" } },
-        { binding: 7, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 7, visibility: rayVis,
           texture: { sampleType: "float", viewDimension: "3d" } },
-        { binding: 8, visibility: GPUShaderStage.FRAGMENT,
+        { binding: 8, visibility: rayVis,
           texture: { sampleType: "float", viewDimension: "3d" } },
       ],
     });
@@ -527,6 +566,25 @@ export class Renderer {
     this.rayPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.rayLayout, this.surfaceLayout],
     });
+    if (this.surfaceCS) {
+      const store = (format) => ({ access: "write-only", format,
+                                   viewDimension: "2d" });
+      this.surfaceCSLayout = device.createBindGroupLayout({
+        label: "soar-surface-cs-out",
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE,
+            storageTexture: store(SURFACE_FORMAT) },
+          { binding: 1, visibility: GPUShaderStage.COMPUTE,
+            storageTexture: store(VEIL_FORMAT) },
+        ],
+      });
+      const empty = device.createBindGroupLayout({ entries: [] });
+      this.surfaceCSEmptyGroup = device.createBindGroup({ layout: empty,
+                                                         entries: [] });
+      this.surfaceCSPipelineLayout = device.createPipelineLayout({
+        bindGroupLayouts: [this.rayLayout, empty, this.surfaceCSLayout],
+      });
+    }
     this._surfaceDummy = device.createTexture({
       label: "soar-surface-dummy", size: [1, 1], format: SURFACE_FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING,
@@ -1094,8 +1152,16 @@ export class Renderer {
    */
   _stagePipelines(lighting) {
     const spec = this._shaderSpec({ lighting });
-    return this._stageEntries().map(
-      (entry) => this._pipeline(entry, stageFormats(entry), spec));
+    return this._stageEntries().map((entry) => this._stagePipeline(entry, spec));
+  }
+
+  /** One surface stage's pipeline for `spec`: under ?surfacecs the first
+   *  stage's is the compute one (_surfaceComputePipeline). Every caller —
+   *  the frame and the meter — goes through here. */
+  _stagePipeline(entry, spec) {
+    return this.surfaceCS && entry === "fs_surface"
+      ? this._surfaceComputePipeline(spec)
+      : this._pipeline(entry, stageFormats(entry), spec);
   }
 
   /** Whether the stages include a refinement (fs_surface_refine): the
@@ -1163,6 +1229,44 @@ export class Renderer {
         this._pendingPipelines.delete(key);
         const failure = new Error(
           `The raymarch shader (${key}) failed to build: ` +
+          `${err?.message || err}`);
+        this._failedPipelines.set(key, failure);
+        console.error(`soar: ${failure.message}`);
+        throw failure;
+      });
+      this._pendingPipelines.set(key, pending);
+    }
+    return pending;
+  }
+
+  /**
+   * ?surfacecs: cs_surface's compute pipeline for `spec`, its workgroup set
+   * through the module's overrides. Cached and failed as _pipeline's are,
+   * in the same maps: a pipeline that fails to build is thrown by every
+   * later request (and logged once), never replaced by the fragment stage.
+   */
+  _surfaceComputePipeline(spec) {
+    const [wx, wy] = this.surfaceCS;
+    const key = `cs_surface|${wx}x${wy}|${shaderVariantKey(spec)}`;
+    const ready = this._pipelines.get(key);
+    if (ready) return ready;
+    const failed = this._failedPipelines.get(key);
+    if (failed) throw failed;
+    let pending = this._pendingPipelines.get(key);
+    if (!pending) {
+      pending = this.device.createComputePipelineAsync({
+        label: `raymarch(${key})`,
+        layout: this.surfaceCSPipelineLayout,
+        compute: { module: this._module(spec), entryPoint: "cs_surface",
+                   constants: { SURFACE_CS_WX: wx, SURFACE_CS_WY: wy } },
+      }).then((pipeline) => {
+        this._pipelines.set(key, pipeline);
+        this._pendingPipelines.delete(key);
+        return pipeline;
+      }, (err) => {
+        this._pendingPipelines.delete(key);
+        const failure = new Error(
+          `The surface stage as compute (${key}) failed to build: ` +
           `${err?.message || err}`);
         this._failedPipelines.set(key, failure);
         console.error(`soar: ${failure.message}`);
@@ -1764,9 +1868,24 @@ export class Renderer {
         const [writes, reads] = plan[k];
         const views = [slot[writes][0]];
         if (K.VEIL_STAGES.includes(entry)) views.push(surface.veilView);
-        return [pipeline, reads === null ? null : slot[reads][1], views];
+        const cs = this.surfaceCS && entry === "fs_surface" ? writes : null;
+        return [pipeline, reads === null ? null : slot[reads][1], views, cs];
       });
-      for (const [pipeline, group1, views] of stages) {
+      for (const [pipeline, group1, views, cs] of stages) {
+        if (cs !== null) {
+          // ?surfacecs: every pixel written, so no clear is needed.
+          surface.csGroups[cs] ??= surface.csGroup(surface.csTargets[cs]);
+          const [wx, wy] = this.surfaceCS;
+          const cp = encoder.beginComputePass();
+          cp.setPipeline(pipeline);
+          cp.setBindGroup(0, rayBindGroup);
+          cp.setBindGroup(1, this.surfaceCSEmptyGroup);
+          cp.setBindGroup(2, surface.csGroups[cs]);
+          cp.dispatchWorkgroups(Math.ceil(targets.w / wx),
+                                Math.ceil(targets.h / wy));
+          cp.end();
+          continue;
+        }
         const sp = encoder.beginRenderPass({
           colorAttachments: views.map((view, k) => ({
             view, loadOp: "clear", storeOp: "store",
@@ -1844,7 +1963,8 @@ export class Renderer {
         const make = (name, format) => this.device.createTexture({
           label: `${label}-${name}`, size: [targets.w, targets.h], format,
           usage: GPUTextureUsage.RENDER_ATTACHMENT
-               | GPUTextureUsage.TEXTURE_BINDING,
+               | GPUTextureUsage.TEXTURE_BINDING
+               | (this.surfaceCS ? GPUTextureUsage.STORAGE_BINDING : 0),
         });
         const tex = make("final", SURFACE_FORMAT);
         const veil = make("veil", VEIL_FORMAT);
@@ -1875,6 +1995,14 @@ export class Renderer {
           afterMid: mid ? after(mid) : null,
           // The march reads the final surface and the veil.
           group: group1(tex.createView(), dummy, veil.createView()),
+          // ?surfacecs: the compute stage's outputs, by the slot it writes.
+          csGroup: this.surfaceCS ? (texOut) => this.device.createBindGroup({
+            label: `${label}-cs`, layout: this.surfaceCSLayout,
+            entries: [{ binding: 0, resource: texOut.createView() },
+                      { binding: 1, resource: veil.createView() }],
+          }) : null,
+          csTargets: { final: tex, a: plain, b: mid },
+          csGroups: {},
         };
       });
   }
@@ -2384,7 +2512,7 @@ export class Renderer {
       // next one asks again, and a pipeline that failed throws from here.
       const pipeline = this._pipeline("fs_main", ACCUM_FORMAT, spec);
       const surfaces = this._stageEntries().map(
-        (entry) => [entry, this._pipeline(entry, stageFormats(entry), spec)]);
+        (entry) => [entry, this._stagePipeline(entry, spec)]);
       const compiling = [pipeline, ...surfaces.map(([, sp]) => sp)]
         .filter((q) => q && isPending(q));
       if (compiling.length > 0) {

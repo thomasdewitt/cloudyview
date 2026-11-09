@@ -48,6 +48,10 @@ const scenes = option("--scenes", "city,day").split(",");
 const tiers = option("--tiers", "high,low,max").split(",");
 const [w, h] = option("--size", "640x360").split("x").map(Number);
 const saveDir = option("--save", null);
+// Extra query parameters for every soar page, e.g. "surfacecs=1" (an
+// experiment flag the viewer reads at load).
+const query = option("--query", "");
+const q = (sep) => (query ? `${sep}${query}` : "");
 if (saveDir) mkdirSync(saveDir, { recursive: true });
 if (!webDir) {
   console.error("usage: tools/gpulock node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
@@ -75,15 +79,15 @@ try {
   for (const name of scenes) {
     const sc = SCENES[name];
     if (!sc) throw new Error(`unknown scene '${name}' (city, day)`);
-    await tab.goto(`${server.base}/soar/`);
+    await tab.goto(`${server.base}/soar/${q("?")}`);
     await tab.eval(`localStorage.clear();
       localStorage.setItem("soar.mode", ${JSON.stringify(sc.mode)});
       localStorage.setItem("soar.tutorialDone", "1");
       localStorage.setItem("soar.tutorialResearchDone", "1"); true`);
     if (sc.demo) {
-      await tab.goto(`${server.base}/soar/?demo=${sc.demo}`);
+      await tab.goto(`${server.base}/soar/?demo=${sc.demo}${q("&")}`);
     } else {
-      await tab.goto(`${server.base}/soar/`);
+      await tab.goto(`${server.base}/soar/${q("?")}`);
       await tab.waitFor(`!document.getElementById("capability").innerText.startsWith("Checking")`);
       await tab.eval(`document.getElementById("fly-less").click(); true`);
     }
