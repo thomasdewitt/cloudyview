@@ -102,10 +102,10 @@ try {
     // switched off, and every mean would differ by that.
     s.autoExposure = false; s.exposure = ${exposure};
     if (v.city) {
-      c.displace(v.city[0] - c.surfacePosition[0], v.city[1] - c.surfacePosition[1],
+      c.jump(v.city[0] - c.surfacePosition[0], v.city[1] - c.surfacePosition[1],
                  v.z - c.position[2]);
     } else {
-      c.displace(v.x - c.position[0], v.y - c.position[1], v.z - c.position[2]);
+      c.jump(v.x - c.position[0], v.y - c.position[1], v.z - c.position[2]);
     }
     if (v.fov) c.fov = v.fov;
     c.azimuth = v.az + ${turn}; c.elevation = v.el; return true; })()`);

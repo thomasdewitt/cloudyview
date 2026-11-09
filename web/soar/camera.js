@@ -246,6 +246,23 @@ export class FlightCamera {
   }
 
   /**
+   * An absolute reposition by a displacement: a tool standing the camera
+   * at a capture's pose (its city.position_m, by the difference from
+   * surfacePosition). Both frames move by the same delta through the one
+   * move path, so the surface frame keeps its phase, as displace does; but
+   * this is a jump, not flight, so the epoch bumps and whatever tracks the
+   * flight from frame to frame starts again. Through displace, the
+   * collider's next resolve swept the jump as one frame of flight — tens of
+   * kilometres through the city from wherever the camera stood — and left
+   * the camera at the first wall on the way, on another street and hundreds
+   * of metres up (steam_live_qa --pose-png, 2026-11-09).
+   */
+  jump(dx, dy, dz) {
+    this._translate(dx, dy, dz);
+    this.epoch += 1;
+  }
+
+  /**
    * Put a shake of [dAz, dEl] degrees on the look in place of whatever
    * shake was on it. Elevation stays inside its limits, and what is
    * recorded is the offset actually applied, so taking it off later

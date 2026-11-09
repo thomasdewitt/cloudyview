@@ -153,12 +153,13 @@ try {
   await tab.eval(`window.__steamQa = {
     place(v) { const s = window.soar, c = s.camera;
       if (v.city) {
-        // By the city frame: displace moves the camera's surface frame with it.
-        c.displace(v.city[0] - c.surfacePosition[0], v.city[1] - c.surfacePosition[1],
+        // By the city frame: jump moves the camera's surface frame with it,
+        // and is not flight, so the collider does not sweep it (camera.js).
+        c.jump(v.city[0] - c.surfacePosition[0], v.city[1] - c.surfacePosition[1],
                    v.z - c.position[2]);
         if (v.fov) c.fov = v.fov;
       } else {
-        c.displace(v.x - c.position[0], v.y - c.position[1], v.z - c.position[2]);
+        c.jump(v.x - c.position[0], v.y - c.position[1], v.z - c.position[2]);
       }
       c.azimuth = v.az; c.elevation = v.el; s._wake?.("steam-qa"); return true; },
     half(x) { const f = new Float32Array([x]), i = new Uint32Array(f.buffer)[0];
