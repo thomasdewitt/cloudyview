@@ -238,7 +238,15 @@ const cc_rooftopworks_DUCT_H: f32 = 0.90;
 // Round tanks: on walk-ups always, and on most of the older low-rise.
 const cc_rooftopworks_ROUND_H: f32 = 70.0;
 const cc_rooftopworks_ROUND_FRAC: f32 = 0.60;
-const cc_rooftopworks_CONE_H: f32 = 0.80;
+// The round tank stands a storey up on its steel stand: posts and tie
+// beams under a stave barrel, the shallow cone of its roof overhanging the
+// staves by an eave.
+const cc_rooftopworks_ROUND_TANK_H: f32 = 5.20;
+const cc_rooftopworks_ROUND_STAND: f32 = 1.80;  // stand height (barrel floor)
+const cc_rooftopworks_CONE_H: f32 = 0.70;
+const cc_rooftopworks_EAVE: f32 = 0.15;         // the cone's overhang
+const cc_rooftopworks_POST_HW: f32 = 0.07;      // a stand post's half width
+const cc_rooftopworks_TIE_H: f32 = 0.10;        // a tie beam's depth
 const cc_rooftopworks_WOOD: vec3<f32> = vec3<f32>(1.25, 0.95, 0.70);
 // Skylights: a field of them in the middle of a low roof, on a lattice.
 const cc_rooftopworks_SKY_FRAC: f32 = 0.40;
@@ -567,7 +575,9 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
 
     // Type and footprint.
     var hx = vec2<f32>(cc_rooftopworks_TANK_HW);
-    var hgt = cc_rooftopworks_TANK_H;
+    let round = cc_rooftopworks_round_tanks(cc);
+    var hgt = select(cc_rooftopworks_TANK_H, cc_rooftopworks_ROUND_TANK_H,
+                     round);
     var ty = 0;
     let axis_y = r.w > 0.5;
     if (r.y >= cc_rooftopworks_TANK_CUT && r.y < cc_rooftopworks_AC_CUT) {
@@ -653,7 +663,7 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
     else if (face > 0.50) { n = vec2<f32>(0.0, 1.0); }
     else if (face > 0.25) { n = vec2<f32>(0.0, -1.0); }
     res.seat = vec3<f32>(c + n * (hx + 0.04), d.z + 0.72 * hgt);
-    res.round = ty == 0 && cc_rooftopworks_round_tanks(cc);
+    res.round = ty == 0 && round;
     if (res.round) {
         // A round tank has hoops, not a rim band: the cap is its own cone,
         // and its envelope is its own box.
@@ -973,16 +983,18 @@ fn cc_rooftopworks_tank_normal(p: vec3<f32>) -> vec3<f32> {
 }
 
 // The round wooden tank, close up, in closed form rather than marched: its
-// staved barrel (a vertical cylinder) and its conical cap, each a quadratic
-// in t. It stands on a dark steel frame drawn as one box (the hit's other
-// branch). Returns (t, normal), t < 0 for a miss. A sphere-traced barrel
-// beside the square tank's cost the far views 3% without ever running.
+// staved barrel (a vertical cylinder, with its floor), the eave (the
+// annulus under the cap's overhang) and its conical roof, each a quadratic
+// or a plane in t. Its stand is boxes (the hit's other branch). Returns
+// (t, normal), t < 0 for a miss. A sphere-traced barrel beside the square
+// tank's cost the far views 3% without ever running.
 fn cc_rooftopworks_round_hit(o: vec3<f32>, dir: vec3<f32>, t_in: f32,
                              t_out: f32, base: vec3<f32>) -> vec4<f32> {
     let r = cc_rooftopworks_TANK_HW - 0.08;
-    let z0 = cc_rooftopworks_TANK_LEG;
-    let z1 = cc_rooftopworks_TANK_H - cc_rooftopworks_CONE_H;
-    let zt = cc_rooftopworks_TANK_H;
+    let re = r + cc_rooftopworks_EAVE;
+    let z0 = cc_rooftopworks_ROUND_STAND;
+    let zt = cc_rooftopworks_ROUND_TANK_H;
+    let z1 = zt - cc_rooftopworks_CONE_H;
     let p = o - base;
     var best = vec4<f32>(-1.0, 0.0, 0.0, 1.0);
     // The barrel: |p.xy + t d.xy| = r, entering from outside.
@@ -998,8 +1010,26 @@ fn cc_rooftopworks_round_hit(o: vec3<f32>, dir: vec3<f32>, t_in: f32,
             best = vec4<f32>(t, (p.xy + t * dir.xy) / r, 0.0);
         }
     }
-    // The cap: |p.xy + t d.xy| = k (zt - z) for z in [z1, zt].
-    let k = r / cc_rooftopworks_CONE_H;
+    // The barrel's floor (from below, between the stand's posts) and the
+    // eave's underside: horizontal planes, a disc and an annulus.
+    if (abs(dir.z) > 1e-6) {
+        let tf = (z0 - p.z) / dir.z;
+        let qf = p.xy + tf * dir.xy;
+        if (dir.z > 0.0 && tf >= t_in && tf <= t_out && dot(qf, qf) <= r * r
+            && (best.x < 0.0 || tf < best.x)) {
+            best = vec4<f32>(tf, 0.0, 0.0, -1.0);
+        }
+        let te = (z1 - p.z) / dir.z;
+        let qe = p.xy + te * dir.xy;
+        let qq = dot(qe, qe);
+        if (dir.z > 0.0 && te >= t_in && te <= t_out && qq >= r * r
+            && qq <= re * re && (best.x < 0.0 || te < best.x)) {
+            best = vec4<f32>(te, 0.0, 0.0, -1.0);
+        }
+    }
+    // The roof: |p.xy + t d.xy| = k (zt - z) for z in [z1, zt], its rim at
+    // the eave's radius.
+    let k = re / cc_rooftopworks_CONE_H;
     let w0 = zt - p.z;
     let qa = a - k * k * dir.z * dir.z;
     let qb = b + k * k * w0 * dir.z;
@@ -1065,17 +1095,35 @@ fn cc_rooftopworks_mech_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
                                                min(sb.y, t1), base);
             if (rh.x > max(t0, 1e-3) && rh.x < r.t) {
                 let p = o + rh.x * dir;
-                let is_cap = p.z > m.hi.z - cc_rooftopworks_CONE_H;
+                let is_cap = p.z > m.hi.z - cc_rooftopworks_CONE_H - 0.01;
                 r = CityHit(true, rh.x, p, rh.yzw,
                             select(cc_rooftopworks_K_MECH,
                                    cc_rooftopworks_K_ACC, is_cap) + s, ci);
             }
-            // The steel frame under the barrel.
-            let fh = vec2<f32>(0.72 * cc_rooftopworks_TANK_HW);
-            return cc_rooftopworks_box(
-                r, o, dir, inv_dir, t0, t1,
-                vec3<f32>(base.xy - fh, m.lo.z),
-                vec3<f32>(base.xy + fh, m.lo.z + cc_rooftopworks_TANK_LEG),
+            // The stand: four posts under the barrel's rim and two tie beams
+            // across them at mid-height (the bracing, as a beam can be at
+            // this size). Kind ACC, the steel.
+            let pr = 0.70 * cc_rooftopworks_TANK_HW;
+            let ph = vec2<f32>(cc_rooftopworks_POST_HW);
+            let zs = m.lo.z + cc_rooftopworks_ROUND_STAND;
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                let q = base.xy + pr * vec2<f32>(select(-1.0, 1.0, (k & 1) == 1),
+                                                 select(-1.0, 1.0, k >= 2));
+                r = cc_rooftopworks_box(r, o, dir, inv_dir, t0, t1,
+                                        vec3<f32>(q - ph, m.lo.z),
+                                        vec3<f32>(q + ph, zs),
+                                        cc_rooftopworks_K_ACC + s, ci);
+            }
+            let zt = m.lo.z + 0.5 * cc_rooftopworks_ROUND_STAND;
+            r = cc_rooftopworks_box(r, o, dir, inv_dir, t0, t1,
+                vec3<f32>(base.xy - vec2<f32>(pr, ph.y), zt),
+                vec3<f32>(base.xy + vec2<f32>(pr, ph.y),
+                          zt + cc_rooftopworks_TIE_H),
+                cc_rooftopworks_K_ACC + s, ci);
+            return cc_rooftopworks_box(r, o, dir, inv_dir, t0, t1,
+                vec3<f32>(base.xy - vec2<f32>(ph.x, pr), zt),
+                vec3<f32>(base.xy + vec2<f32>(ph.x, pr),
+                          zt + cc_rooftopworks_TIE_H),
                 cc_rooftopworks_K_ACC + s, ci);
         }
         let t = cc_rooftopworks_tank_trace(o, dir, max(sb.x, t0),
@@ -1583,11 +1631,14 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                                  cc_rooftopworks_mech_on(cc), crs,
                                  cc_rooftopworks_bulk(cc, h.cell, crs));
     var alb = cc_rooftopworks_MECH_ALBEDO;
-    if (m.kind == 0 && is_acc) {
+    // A round tank's stand is dark steel; the barrel and its roof are wood.
+    let stand = m.round
+                && h.pos.z - m.lo.z < cc_rooftopworks_ROUND_STAND - 0.01;
+    if (m.kind == 0 && is_acc && !m.round) {
         alb = alb * 1.35;  // the rim band is galvanised: it catches more
     }
     var e = cc_rooftopworks_dark(h, alb);
-    if (m.round) {
+    if (m.round && !stand) {
         e = e * cc_rooftopworks_WOOD;
     }
     if (m.lamp) {
