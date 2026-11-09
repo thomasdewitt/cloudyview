@@ -178,6 +178,11 @@ export function packUniforms(state, view) {
     // The scene clock, seconds (row 24.z): where a surface with a clock is
     // the city's steam.
     sceneTime = 0.0,
+    // The city's steam drawn after the accumulation at the live clock
+    // (row 8.w; raymarch.wgsl city_steam_live, fs_steam_live): the live
+    // view's, and its auto-exposure meter's. Every still, video and replay
+    // leaves it off and marches the steam.
+    liveSteam = false,
   } = view;
 
   const [outputW, outputH] = outputSize;
@@ -279,7 +284,8 @@ export function packUniforms(state, view) {
     // shader builds p_city from); this row is kept as the scene's own
     // statement of where the tile was pinned — metadata, the harness and
     // the parity test read it, the shader no longer does.
-    row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], 0.0);
+    // w: the live view's steam (liveSteam above).
+    row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], liveSteam ? 1.0 : 0.0);
   } else if (desert) {
     // The datum and the tile's relief. The desert has no reflectance row:
     // its albedos are properties of the materials and live in the shader.
@@ -372,27 +378,8 @@ export function packUniforms(state, view) {
   if (!Number.isFinite(Number(sceneTime))) {
     throw new Error(`scene_time must be finite; got ${sceneTime}.`);
   }
-  // The clock only where something reads it (a surface with a period: the
-  // city's steam), wrapped there in float64, before the narrowing to
-  // float32. A surface with no clock packs 0 whatever the scene time, so
-  // its accumulation never restarts for it.
-  let clock = 0.0;
-  if (sceneTime !== 0) {
-    if (clockPeriodS === undefined) {
-      throw new Error("a running clock needs the surface's clockPeriodS — " +
-                      "its meta.json clock_period_s: a period, or null for " +
-                      "a surface with no clock.");
-    }
-    if (clockPeriodS !== null) {
-      if (!(clockPeriodS > 0)) {
-        throw new Error("clockPeriodS must be positive or null; got " +
-                        `${clockPeriodS}.`);
-      }
-      clock = sceneTime % clockPeriodS;
-      if (clock < 0) clock += clockPeriodS;
-    }
-  }
-  row(24, surfaceOff[0], surfaceOff[1], clock, 0.0);
+  row(24, surfaceOff[0], surfaceOff[1], sceneClock(sceneTime, clockPeriodS),
+      0.0);
   if (desert) {
     if (desertTileRows.length !== K.DESERT_TILE_ROWS) {
       throw new Error(`desertTileRows has ${desertTileRows.length} rows; ` +
@@ -419,6 +406,28 @@ export function packUniforms(state, view) {
  * maxLightSteps and the output size are folded in because both change the
  * image without appearing in the buffer.
  */
+/**
+ * Row 24.z, the clock a surface reads: only where something reads it (a
+ * surface with a period: the city's steam), wrapped there in float64,
+ * before the narrowing to float32. A surface with no clock packs 0 whatever
+ * the scene time, so its accumulation never restarts for it.
+ */
+export function sceneClock(sceneTime, clockPeriodS) {
+  if (sceneTime === 0) return 0.0;
+  if (clockPeriodS === undefined) {
+    throw new Error("a running clock needs the surface's clockPeriodS — " +
+                    "its meta.json clock_period_s: a period, or null for " +
+                    "a surface with no clock.");
+  }
+  if (clockPeriodS === null) return 0.0;
+  if (!(clockPeriodS > 0)) {
+    throw new Error("clockPeriodS must be positive or null; got " +
+                    `${clockPeriodS}.`);
+  }
+  const clock = sceneTime % clockPeriodS;
+  return clock < 0 ? clock + clockPeriodS : clock;
+}
+
 export function sceneKey(u, maxLightSteps, outputW, outputH) {
   const copy = new Float32Array(u);
   copy[4 * 4 + 3] = 0.0;
