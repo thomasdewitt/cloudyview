@@ -95,14 +95,19 @@ def test_each_layer_dissolves_into_its_mean(h, layer):
                                  4.0 * se_band + 1e-4)
 
 
-@pytest.mark.parametrize("kind", [1, 0])   # a street wall, a container
-def test_the_whole_paint_dissolves_into_its_mean(h, kind):
+# A long street wall and a long container row; then the short runs the
+# city has, whose lattices are fitted to them (city_graffiti_lattice): a
+# 40 ft container's side and a dock door.
+@pytest.mark.parametrize("kind,length", [(1, 200.0), (0, 200.0),
+                                         (0, 12.19), (3, 3.0)])
+def test_the_whole_paint_dissolves_into_its_mean(h, kind, length):
     """The layers composited: FINE against FAR over the band, per level. The
     composite of the layers' expectations is the expectation of their
     composite (independent draws); what is left is second order — where
     two layers overlap, FINE's paint sits where the strokes are and FAR's
     is spread over the boxes."""
-    for lv, (v, fine, far, se) in h.measure_paint(kind).items():
+    for lv, (v, fine, far, se) in h.measure_paint(kind,
+                                                  length=length).items():
         diff = np.abs(fine.mean(0) - far.mean(0))
         assert np.all(diff < 4.0 * se.mean(0) + 3e-3), (lv, diff)
 
