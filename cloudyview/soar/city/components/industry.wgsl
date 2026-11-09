@@ -2234,8 +2234,31 @@ fn cc_industry_box_roof(lu: f32, lv: f32, seed: f32, fp: f32) -> vec3<f32> {
     return mix(pat, cc_industry_ROOF_MEAN, smoothstep(0.3, 1.2, fp));
 }
 
+// Graffiti on a container side (city_graffiti_paint): each face of a box
+// standing on the yard is a run of its own, u from the face's left end as
+// you stand facing it, v from the yard; a box up the stack is out of reach.
+fn cc_industry_box_graffiti(h: CityHit, cc: CityCell, s: cc_industry_Slot,
+                            dir: vec3<f32>, fp: f32, zt: f32)
+        -> CityGraffitiPaint {
+    let n = h.normal.xy;
+    let tang = vec2<f32>(-n.y, n.x);
+    let half = 0.5 * dot(abs(tang), s.obj);
+    let face = select(select(2u, 3u, n.y > 0.0), select(0u, 1u, n.x > 0.0),
+                      abs(n.x) > abs(n.y));
+    var run: CityGraffitiRun;
+    run.seed = pcg2d(cc.seed ^ vec2<u32>(bitcast<u32>(s.ctr.x),
+                                         bitcast<u32>(s.ctr.y)
+                                         + face * 0x9e3779b9u));
+    run.len = 2.0 * half;
+    run.kind = CITY_GRAFFITI_CONTAINER;
+    let fuv = city_graffiti_footprint(fp, h.normal, dir, vec3<f32>(tang, 0.0),
+                                      vec3<f32>(0.0, 0.0, 1.0));
+    return city_graffiti_paint(run, dot(h.pos.xy - s.ctr, tang) + half, zt,
+                               fuv);
+}
+
 fn cc_industry_container_shade(h: CityHit, cc: CityCell,
-        s: cc_industry_Slot, fp: f32)
+        s: cc_industry_Slot, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     let tier = floor(max(h.pos.z - 1e-3, 0.0) / cc_industry_TIER);
     let hc = fract(s.d.w * 7.31 + tier * 0.618);
@@ -2272,9 +2295,14 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
         let wu = select(lu, lv, abs(n_long) > 0.5);
-        return cc_industry_lit(cc, h.pos, h.normal,
-                               col * m * cc_industry_weather(
-                                   wu, zt, cc_industry_TIER, hc, fp));
+        var base = col * cc_industry_weather(wu, zt, cc_industry_TIER, hc, fp);
+        // The paint goes on over the weathered side, and the corrugation
+        // and rails shade through it.
+        if (tier < 0.5) {
+            let g = cc_industry_box_graffiti(h, cc, s, dir, fp, zt);
+            base = base * g.keep + g.add;
+        }
+        return cc_industry_lit(cc, h.pos, h.normal, base * m);
     }
     // The top of the stack, or a box seen from above.
     return cc_industry_lit(cc, h.pos, h.normal,
@@ -2474,7 +2502,7 @@ fn cc_industry_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                              select(h.kind, cc_industry_K_SKIP,
                                     h.kind == cc_industry_K_REFUSE));
     switch h.kind {
-        case 705: { return cc_industry_container_shade(h, cc, s, fp); }
+        case 705: { return cc_industry_container_shade(h, cc, s, dir, fp); }
         case 706: { return cc_industry_trailer_shade(h, cc, s, fp); }
         case 707: { return cc_industry_pallet_shade(h, cc, s, fp); }
         case 708: { return cc_industry_rebar_shade(h, cc, s, fp); }

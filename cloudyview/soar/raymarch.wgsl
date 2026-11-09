@@ -4124,6 +4124,18 @@ fn city_graffiti_slot(layer: i32) -> vec2<f32> {
     }
 }
 
+// A layer's lattice on a run: (slot length, where slot 0 starts, the number
+// of whole slots). As many slots as the run holds, from the layer's own
+// offset where there is room for it, else from the room there is: a run
+// shorter than offset + slot (a container side, a door) still takes the
+// slot it holds, rather than losing every lattice whose offset pushes it
+// off the end.
+fn city_graffiti_lattice(run: CityGraffitiRun, layer: i32) -> vec3<f32> {
+    let sl = city_graffiti_slot(layer);
+    let n = max(floor(run.len / sl.x), 0.0);
+    return vec3<f32>(sl.x, min(sl.y, run.len - n * sl.x), n);
+}
+
 // Spray paint's own soft edge: SOFT (m) of falloff at the edge of every
 // stroke, folded into the footprint the edge is filtered over (in units
 // of an element's height h). A symmetric ramp moves no paint across a
@@ -4355,7 +4367,7 @@ struct CityGraffitiLetters {
 // colour is its fresh colour times FADE_MEAN.
 fn city_graffiti_letters_at(run: CityGraffitiRun, layer: i32, i: i32)
         -> CityGraffitiLetters {
-    let sl = city_graffiti_slot(layer);
+    let sl = city_graffiti_lattice(run, layer);
     let d = city_graffiti_draw(run, layer, i, 0u);
     let e = city_graffiti_draw(run, layer, i, 1u);
     let g = city_graffiti_draw(run, layer, i, 2u);
@@ -4690,7 +4702,7 @@ struct CityGraffitiMark {
 
 fn city_graffiti_mark_at(run: CityGraffitiRun, layer: i32, i: i32)
         -> CityGraffitiMark {
-    let sl = city_graffiti_slot(layer);
+    let sl = city_graffiti_lattice(run, layer);
     let d = city_graffiti_draw(run, layer, i, 0u);
     let e = city_graffiti_draw(run, layer, i, 1u);
     var m: CityGraffitiMark;
@@ -4818,9 +4830,8 @@ fn city_graffiti_element(run: CityGraffitiRun, layer: i32, i: i32,
 fn city_graffiti_far(run: CityGraffitiRun, layer: i32, v: f32, fv: f32,
                      base: f32, p: f32) -> CityGraffitiCover {
     var out: CityGraffitiCover;
-    let sl = city_graffiti_slot(layer);
-    let whole = max(floor((run.len - sl.y) / sl.x), 0.0) * sl.x / run.len;
-    let k = p * whole / sl.x;
+    // @domain: run.len > 0 (city_graffiti_paint)
+    let k = p * city_graffiti_lattice(run, layer).z / run.len;
     if (city_graffiti_is_letters(layer)) {
         // Painted length at v: n A h p((v - base) / h) for each element,
         // over the footprint's height (city_graffiti_letter_phi).
@@ -4882,12 +4893,12 @@ fn city_graffiti_layer(run: CityGraffitiRun, layer: i32, u: f32, v: f32,
     if (p <= 0.0) {
         return out;
     }
-    let sl = city_graffiti_slot(layer);
+    let sl = city_graffiti_lattice(run, layer);
     // The slots run along u: the footprint's extent along u decides (its
     // height is the profile's to filter, city_graffiti_far).
     let w_far = smoothstep(0.25 * sl.x, 0.75 * sl.x, fuv.x);
     if (w_far < 1.0) {
-        let n_slots = i32(floor((run.len - sl.y) / sl.x));
+        let n_slots = i32(sl.z);
         let i = i32(floor((u - sl.y) / sl.x));
         for (var j: i32 = i - 1; j <= i + 1; j = j + 1) {
             let s0 = sl.y + f32(j) * sl.x;
@@ -17575,8 +17586,31 @@ fn cc_industry_box_roof(lu: f32, lv: f32, seed: f32, fp: f32) -> vec3<f32> {
     return mix(pat, cc_industry_ROOF_MEAN, smoothstep(0.3, 1.2, fp));
 }
 
+// Graffiti on a container side (city_graffiti_paint): each face of a box
+// standing on the yard is a run of its own, u from the face's left end as
+// you stand facing it, v from the yard; a box up the stack is out of reach.
+fn cc_industry_box_graffiti(h: CityHit, cc: CityCell, s: cc_industry_Slot,
+                            dir: vec3<f32>, fp: f32, zt: f32)
+        -> CityGraffitiPaint {
+    let n = h.normal.xy;
+    let tang = vec2<f32>(-n.y, n.x);
+    let half = 0.5 * dot(abs(tang), s.obj);
+    let face = select(select(2u, 3u, n.y > 0.0), select(0u, 1u, n.x > 0.0),
+                      abs(n.x) > abs(n.y));
+    var run: CityGraffitiRun;
+    run.seed = pcg2d(cc.seed ^ vec2<u32>(bitcast<u32>(s.ctr.x),
+                                         bitcast<u32>(s.ctr.y)
+                                         + face * 0x9e3779b9u));
+    run.len = 2.0 * half;
+    run.kind = CITY_GRAFFITI_CONTAINER;
+    let fuv = city_graffiti_footprint(fp, h.normal, dir, vec3<f32>(tang, 0.0),
+                                      vec3<f32>(0.0, 0.0, 1.0));
+    return city_graffiti_paint(run, dot(h.pos.xy - s.ctr, tang) + half, zt,
+                               fuv);
+}
+
 fn cc_industry_container_shade(h: CityHit, cc: CityCell,
-        s: cc_industry_Slot, fp: f32)
+        s: cc_industry_Slot, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     let tier = floor(max(h.pos.z - 1e-3, 0.0) / cc_industry_TIER);
     let hc = fract(s.d.w * 7.31 + tier * 0.618);
@@ -17613,9 +17647,14 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
         let wu = select(lu, lv, abs(n_long) > 0.5);
-        return cc_industry_lit(cc, h.pos, h.normal,
-                               col * m * cc_industry_weather(
-                                   wu, zt, cc_industry_TIER, hc, fp));
+        var base = col * cc_industry_weather(wu, zt, cc_industry_TIER, hc, fp);
+        // The paint goes on over the weathered side, and the corrugation
+        // and rails shade through it.
+        if (tier < 0.5) {
+            let g = cc_industry_box_graffiti(h, cc, s, dir, fp, zt);
+            base = base * g.keep + g.add;
+        }
+        return cc_industry_lit(cc, h.pos, h.normal, base * m);
     }
     // The top of the stack, or a box seen from above.
     return cc_industry_lit(cc, h.pos, h.normal,
@@ -17815,7 +17854,7 @@ fn cc_industry_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                              select(h.kind, cc_industry_K_SKIP,
                                     h.kind == cc_industry_K_REFUSE));
     switch h.kind {
-        case 705: { return cc_industry_container_shade(h, cc, s, fp); }
+        case 705: { return cc_industry_container_shade(h, cc, s, dir, fp); }
         case 706: { return cc_industry_trailer_shade(h, cc, s, fp); }
         case 707: { return cc_industry_pallet_shade(h, cc, s, fp); }
         case 708: { return cc_industry_rebar_shade(h, cc, s, fp); }
