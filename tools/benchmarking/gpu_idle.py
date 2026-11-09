@@ -132,7 +132,8 @@ def _pages(port: int) -> str:
             pages = [t for t in json.load(r) if t.get("type") == "page"]
     except (OSError, ValueError) as e:
         return f"unreadable ({e})"
-    return " | ".join(f"{t.get('title', '')[:40]!r} {t.get('url', '')[:80]}"
+    return " | ".join(f"{(t.get('title') or '')[:40]!r} "
+                      f"{(t.get('url') or '')[:80]}"
                       for t in pages) or "none"
 
 
