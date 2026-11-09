@@ -96,7 +96,7 @@ try {
       if (L.classList.contains("failed") && !L.hidden) throw new Error(L.innerText);
       return window.soar?.scene && L.hidden; })()`, 180000);
   await tab.eval(`(() => { const s = window.soar, c = s.camera, v = ${JSON.stringify(view)};
-    s.renderer.setQualityTier(${JSON.stringify(tier)});
+    s.setQualityTier(${JSON.stringify(tier)});
     // Pinned, not metered: the meter reads the noisy picture, so two trees
     // whose noise differs would meter to different exposures before it is
     // switched off, and every mean would differ by that.
