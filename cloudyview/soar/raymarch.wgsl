@@ -4390,7 +4390,8 @@ fn city_graffiti_letters_at(run: CityGraffitiRun, layer: i32, i: i32)
     let c = city_graffiti_draw(run, layer, i, 3u);
     var l: CityGraffitiLetters;
     l.h = mix(CITY_GRAFFITI_LETTER_H0, CITY_GRAFFITI_LETTER_H1, d.y);
-    l.n = 3 + i32(3.0 * d.z);
+    // 3-5 glyphs (city_u01 can return 1.0, which would make a sixth).
+    l.n = 3 + min(i32(3.0 * d.z), 2);
     l.gw = mix(CITY_GRAFFITI_GW_LO, CITY_GRAFFITI_GW_HI, e.w);
     l.len = f32(l.n) * l.gw + 2.0 * CITY_GRAFFITI_PAD;
     l.x0 = sl.y + f32(i) * sl.x + (sl.x - l.len * l.h) * d.w;
@@ -4499,8 +4500,8 @@ fn city_graffiti_letter_parts(q: vec2<f32>, f_in: f32,
     pt.splash = 0.0;
     var dmin = 1e3;
     // Three glyphs, the count at run time so the loop stays rolled (see
-    // city_graffiti_paint); a run has no more than five.
-    let n_near = select(3, 0, l.n > 5);
+    // city_graffiti_paint); a letter's height is never negative.
+    let n_near = select(3, 0, l.h < 0.0);
     for (var j: i32 = 0; j < n_near; j = j + 1) {
         // Left to right, or right to left: the later letter on top.
         let kk = select(k + 1 - j, k - 1 + j, l.left_up);
