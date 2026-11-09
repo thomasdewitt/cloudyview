@@ -56,15 +56,13 @@ JS_TOOLS = [
 ]
 # What in a tool's source means it opens a device (directly, through the
 # renderer host or witness or behold, through Mitsuba's CUDA variant, through
-# the QA Chrome's WebGPU, through tools/regcount's Vulkan pipeline, or by
-# running one of the library's CLIs), and the files that may say so without
+# the QA Chrome's WebGPU, or by running one of the library's CLIs), and the files that may say so without
 # the guard: the shared CDP library the .mjs tools call, the guard itself,
 # and the exporter, which only encodes tiles and never renders. The library
 # CLIs themselves (witness, behold, glimpse, soar) stay unguarded by design.
 OPENS = re.compile(r"request_adapter|SoarRenderer\(|\bwitness\(|"
                    r"render_nested\(|\bbehold\b|import mitsuba|"
                    r"import wgpu|from wgpu|openTab\(|"
-                   r'/ "regcount"|'                 # the Vulkan statistics crate
                    r"[\"'](witness|behold|glimpse|soar)[\"']\s*[,\]]")  # a CLI
 # A shell tool that starts a browser starts its GPU process.
 OPENS_SH = re.compile(r"google-chrome|chromium")
@@ -152,8 +150,7 @@ def test_a_js_tool_refuses_unlocked(tool, tmp_path):
 def test_every_tool_that_opens_a_device_is_guarded():
     guarded = set(PY_TOOLS) | set(JS_TOOLS) | set(SH_TOOLS)
     for p in sorted(TOOLS.rglob("*")):
-        if (p.suffix not in (".py", ".mjs", ".sh")
-                or "regcount" in p.parts[-2:-1]):
+        if p.suffix not in (".py", ".mjs", ".sh"):
             continue
         rel = p.relative_to(REPO).as_posix()
         src = p.read_text()
