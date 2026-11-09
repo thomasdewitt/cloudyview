@@ -20616,7 +20616,7 @@ fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
 //   u.surface_offset   where the tile sits this frame (row 24).
 // Nothing else in the block changes meaning.
 //
-// THE TILE (tools/export_desert_tile.py) is an eroded bajada, 4096 m at 2 m,
+// THE TILE (docs/desert_tile_format.md; baked by desert-surface) is an eroded bajada, 4096 m at 2 m,
 // exactly periodic: r is height about the datum, g is LIGHTNESS — the linear
 // weight between varnished pavement (0) and fresh wash sand (1), linear so
 // that its box-averaged mips are the far field's mean albedo.
@@ -20671,7 +20671,7 @@ const DESERT_ALBEDO_WASH: vec3<f32> = vec3<f32>(0.33, 0.285, 0.22);
 // but albedo bends at the soil knot, so a footprint mixing wash sand with
 // pavement reads redder and duller through its mean lightness than its
 // albedos average to — by ~9% in blue at the top of the chain. This is the
-// tile-wide ratio of the two at each mip (tools/export_desert_tile.py
+// tile-wide ratio of the two at each mip (docs/desert_tile_format.md
 // albedo_correction, in the tile's meta and so in u.desert_tile), applied
 // at the footprint's level so no seam appears where detail drops out.
 // Level i of the tile table that starts at u.desert_tile row `row0`, four
@@ -20898,7 +20898,7 @@ fn desert_height_range() -> vec2<f32> {
 const DESERT_OCTAVE_MARGIN: f32 = 0.4942;
 
 // Steepest slope at each mip level of the tile, with a quarter again for
-// safety (tools/export_desert_tile.py measures it into meta.json as
+// safety (docs/desert_tile_format.md: the bake measures it into meta.json as
 // slope_max; the hosts carry it here in u.desert_tile).
 // This is what lets the trace step by clearance without tunnelling.
 fn desert_slope_max_at(i: i32) -> f32 {
@@ -20942,7 +20942,7 @@ fn desert_terrain_hit(o: vec3<f32>, dir: vec3<f32>, t: f32) -> DesertHit {
 }
 
 // How far the full surface can stand above mip k of the tile read at the
-// same point (tools/export_desert_tile.py writes it as envelope_m; the hosts
+// same point (docs/desert_tile_format.md: meta.json's envelope_m; the hosts
 // carry it here in u.desert_tile). Measured on the tile with a tenth to
 // spare, and a true bound: tests/test_desert_bounds.py holds it above the
 // exact supremum of mip l - mip k, l < k, taken on the lattice where that
@@ -22475,7 +22475,7 @@ fn desert_brf(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 }
 
 // The slope variance the tile's mip chain has filtered out of the normal at
-// each level (tools/export_desert_tile.py slope_variance_removed, carried in
+// each level (docs/desert_tile_format.md slope_variance_removed, carried in
 // u.desert_tile) — the ocean's FIF_SLOPE_VARIANCE_REMOVED
 // for the ground. A far pixel is shaded at the footprint's MEAN normal,
 // which has lost the facets that turn away from a low sun and the shadows
