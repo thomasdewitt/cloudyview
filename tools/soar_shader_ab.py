@@ -42,12 +42,22 @@ What this cannot compare: a change that moves the HOSTS as well as the
 shader — a new binding, a new pass, a changed bind-group layout. Both
 revisions run under this tree's one Python host, so the old shader meets the
 new layout and fails validation (the surface pre-pass, 2026-09-23, broke it
-for city and desert). For those, compare whole browser builds instead:
-tools/pinned_still.mjs renders pinned stills of each tree in Chrome and
-hashes them byte for byte.
+for city and desert). For those, compare whole browser builds
+(tools/pinned_still.mjs renders pinned stills of each tree in Chrome and
+hashes them byte for byte), or run this tool in each tree with its own host:
+`--save DIR` in the one writes every view's float render there, and
+`--against DIR` in the other renders only its B and holds it against those.
+A tree from before --save existed takes a copy of this file anywhere inside
+it (REPO is found from the file's own path). The run's settings are written
+beside the renders (run.json) and an --against run with others is refused.
+
+    cp tools/soar_shader_ab.py ../old-tree/temp/ab.py     # if it lacks --save
+    (cd ../old-tree && uv run python temp/ab.py --a tree --b tree --save /tmp/ab-old)
+    uv run python tools/soar_shader_ab.py --b tree --against /tmp/ab-old
 """
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -149,7 +159,8 @@ def source_for(spec: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--a", default="git:HEAD", help="baseline revision")
+    ap.add_argument("--a", default=None,
+                    help="baseline revision (default git:HEAD)")
     ap.add_argument("--b", default="tree", help="candidate revision")
     ap.add_argument("--size", type=int, nargs=2, default=(400, 225))
     ap.add_argument("--frames", type=int, default=1,
@@ -173,7 +184,36 @@ def main():
                     help="a quality preset's flight sampling and lighting "
                          "methods (default: the judge views' 2-voxel live "
                          "march with the sky probe)")
+    ap.add_argument("--save", type=Path, default=None,
+                    help="write each view's A render (float32 .npy) here, "
+                         "for an --against run in another tree")
+    ap.add_argument("--against", type=Path, default=None,
+                    help="hold B against the renders a --save run wrote "
+                         "(another tree, under its own host) instead of "
+                         "rendering A here")
     args = ap.parse_args()
+    # What a saved set was rendered under: an --against run under any other
+    # settings would compare different pictures.
+    run = {"size": list(args.size), "frames": args.frames,
+           "jitter": bool(args.jitter), "periodic": args.periodic,
+           "scene": args.scene, "tier": args.tier,
+           "field": str(args.field) if args.field else None,
+           "demo": str(args.demo) if args.demo else None,
+           "views": args.views}
+    if args.save is not None and args.against is not None:
+        ap.error("--save and --against: save in one tree, compare in the other")
+    if args.save is not None:
+        args.save.mkdir(parents=True, exist_ok=True)
+        (args.save / "run.json").write_text(json.dumps(run, indent=1))
+    if args.against is not None:
+        saved = json.loads((args.against / "run.json").read_text())
+        if saved != run:
+            ap.error(f"{args.against} was rendered under {saved}; this run is "
+                     f"{run}.")
+        if args.a is not None:
+            ap.error("--a and --against: A is the saved set")
+    elif args.a is None:
+        args.a = "git:HEAD"
 
     import wgpu
     device = wgpu.gpu.request_adapter_sync(
@@ -205,14 +245,16 @@ def main():
         state.dt_light_nest = min(nest.dx) * light_factor
 
     renderers = []
-    for spec in (args.a, args.b):
+    # Against a saved set, A is not rendered here: B alone is built.
+    for spec in ((args.b,) if args.against is not None
+                 else (args.a, args.b)):
         r = SoarRenderer(device=device, periodic=periodic, nested=nested,
                          surface=surface, shader_source=source_for(spec))
         r.upload_volume(level.sigma)
         if nested:
             r.upload_nest(nest.sigma)
         renderers.append(r)
-    meta = renderers[0].surface_meta
+    meta = renderers[-1].surface_meta
     state.ocean_fif_dx = surface_cell_m(surface, meta)
     state.ocean_tile_extent = float(meta["tile_extent_m"])
     state.ocean_max_lod = int(meta["mips"]) - 1
@@ -237,7 +279,7 @@ def main():
             for name, v in CITY_VIEWS.items()}
     wanted = args.views.split(",") if args.views else list(views)
     w, h = args.size
-    print(f"A = {args.a}\nB = {args.b}")
+    print(f"A = {args.against or args.a}\nB = {args.b}")
     print(f"{w}x{h}, {args.frames} frame(s), jitter "
           f"{'on' if args.jitter else 'off'}, periodic {args.periodic}, "
           f"scene {args.scene}, tier {args.tier or 'judge (live march)'}\n")
@@ -270,8 +312,13 @@ def main():
             for r in renderers:
                 r.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)
             baked_sun = sun
-        a = renderers[0].render(state, view, frames=args.frames)
-        b = renderers[1].render(state, view, frames=args.frames)
+        if args.against is not None:
+            a = np.load(args.against / f"{name}.npy")
+        else:
+            a = renderers[0].render(state, view, frames=args.frames)
+        if args.save is not None:
+            np.save(args.save / f"{name}.npy", a)
+        b = renderers[-1].render(state, view, frames=args.frames)
         d = np.abs(a - b)
         n = int((d > 0).sum())
         worst = max(worst, float(d.max()))

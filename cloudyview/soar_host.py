@@ -136,9 +136,9 @@ def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
     """One stored mip level -> the interleaved texel bytes the texture wants.
 
     A level is stored either as the texels themselves, or (encoding
-    "planar-byte-shuffle", the desert's) as each channel's plane with every
-    half float's low bytes before its high bytes — the arrangement that lets
-    gzip see a height field's smoothness. `raw` is already decompressed.
+    "planar-byte-shuffle", the ocean's and the desert's) as each channel's
+    plane with every half float's low bytes before its high bytes — the
+    arrangement that lets gzip see a smooth field's smoothness. `raw` is already decompressed.
     web/soar/scene.js decodeSurfaceLevel is the twin.
     """
     channels = surface_format_channels(meta.get("format", "rgba16float"))

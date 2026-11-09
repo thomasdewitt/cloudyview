@@ -180,12 +180,11 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var vol: texture_3d<f32>;
 @group(0) @binding(2) var vol_samp: sampler;
-// The city's or the desert's surface tile. The name is the slot's history:
-// the day ocean read its normals here until the sea began to move
-// (2026-09-23); it now lives at binding 9 and an ocean scene binds a 1x1
-// stand-in here.
+// The surface tile: the sea's normals under the ocean, the city's tile under
+// CITY, the desert's terrain under DESERT.
 @group(0) @binding(3) var ocean_normals: texture_2d<f32>;
-// Repeat-wrapping trilinear sampler shared by binding 3 and binding 9.
+// Repeat-wrapping trilinear sampler for binding 3 (binding 9, the desert's
+// bounds pyramid, is only ever textureLoad()ed).
 @group(0) @binding(4) var ocean_samp: sampler;
 // The finer nested level. Always bound (a 1x1x1 zero texture when there is
 // no nest) so one bind-group layout serves both specializations.

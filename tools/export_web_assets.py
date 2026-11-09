@@ -152,7 +152,7 @@ def export_ocean() -> dict:
     remove_tile(OCEAN_OUT)
     files, wire = [], 0
     for i, mip in enumerate(mips):
-        # Planar and byte-shuffled, the desert's encoding: gzip then sees
+        # Planar and byte-shuffled (planar-byte-shuffle): gzip then sees
         # each normal component's smoothness, and the constant alpha plane
         # costs nothing.
         packed = gzip.compress(encode_surface_level(mip), compresslevel=9,
