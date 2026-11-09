@@ -7472,11 +7472,15 @@ fn city_zone_at(z: CityZones, f: CityFace, iu: i32, iv: i32) -> i32 {
     return CITY_ZONE_WIN;
 }
 
-// Whether storey iv is plant (behind a core, the core's).
+// Whether storey iv is plant (behind a core, the core's). The period test
+// is in float (exact for storey counts, and an integer modulo is the most
+// expensive thing the window paths would do per storey).
 fn city_storey_plant(z: CityZones, iv: i32) -> bool {
+    let q = f32(iv - z.plant.x);
+    let p = f32(max(z.plant.y, 1));
     return iv >= z.crown
         || (z.plant.y > 0 && iv >= z.plant.x && iv <= z.plant.w
-            && (iv - z.plant.x) % z.plant.y < z.plant.z);
+            && q - p * floor((q + 0.5) / p) < f32(z.plant.z));
 }
 
 // Whether a bay of this zone has an opening.
@@ -9159,6 +9163,7 @@ fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
     let j0 = i32(floor((c.y - hb.y) / CITY_FLOOR_H));
     let j1 = i32(floor((c.y + hb.y) / CITY_FLOOR_H));
     let loft_lf = city_loft_lit_frac(cc);
+    let zones = city_zones_unpack(zp);
     var acc = city_win_zero();
     var a_open = 0.0;
     var a_ring = 0.0;
@@ -9175,6 +9180,11 @@ fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
         }
         let vfl = f32(j) * CITY_FLOOR_H;
         let rate = city_storey_rate(cc, j);
+        // The storey's zoning, once (city_zone_at, by storey and then by
+        // bay, in its order).
+        let row_shop = zones.store && j == 0;
+        let row_plant = city_storey_plant(zones, j);
+        let row_loft = j >= zones.loft.x && j < zones.loft.y;
         for (var ii: i32 = 0; ii < CITY_WIN_EXACT_MAX_U; ii = ii + 1) {
             let i = i0 + ii;
             if (i > i1) {
@@ -9184,7 +9194,19 @@ fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
             // The bay's zone, as the shell draws it: no opening on a solid
             // bay (wall) or a plant one (louvres), a loft's or a shop's
             // own glass and its own rate.
-            let zone = city_zone_at(city_zones_unpack(zp), f, i, j);
+            var zone = CITY_ZONE_WIN;
+            if (row_shop) {
+                zone = CITY_ZONE_STORE;
+            } else if (zones.blank) {
+                zone = CITY_ZONE_BLANK;
+            } else if (i >= zones.core.x && i < zones.core.y && j >= 1) {
+                zone = CITY_ZONE_CORE;
+            } else if (row_plant) {
+                zone = CITY_ZONE_PLANT;
+            } else if (row_loft && (i < zones.loft.z
+                                    || i >= f.nbays - zones.loft.z)) {
+                zone = CITY_ZONE_LOFT;
+            }
             if (!city_zone_open(zone)) {
                 if (zone == CITY_ZONE_PLANT) {
                     a_plant = a_plant
