@@ -108,7 +108,7 @@ def test_the_browser_packs_the_same_tile_rows():
 def test_the_measured_numbers_are_the_bytes():
     """slope_max and band_max_m, re-measured from the shipped levels."""
     heights = [_level(k)[..., 0] for k in range(META["mips"])]
-    stats = export_desert_tile.relief_stats(heights)
+    stats = export_desert_tile.relief_stats(heights, META["cell_m"])
     assert stats == {k: META[k] for k in stats}
     assert META["height_min_m"] == heights[0].min()
     assert META["height_max_m"] == heights[0].max()
@@ -178,25 +178,70 @@ _FLOOR_JS = textwrap.dedent("""
     import { desertFloorAt } from "%s";
     import { readFileSync } from "node:fs";
     const meta = JSON.parse(process.env.META);
-    const heights = new Uint16Array(readFileSync(process.env.H).buffer);
-    const floor = desertFloorAt({ heights, meta });
+    const raw = readFileSync(process.env.H);
+    const all = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+    const heightLevels = [];
+    let at = 0;
+    for (let k = 0; k < 4; k++) {
+      const side = meta.n >> k;
+      heightLevels.push(all.subarray(at, at + side * side));
+      at += side * side;
+    }
+    const floor = desertFloorAt({ heightLevels, meta });
     const pts = JSON.parse(process.env.PTS);
     process.stdout.write(JSON.stringify(pts.map((p) => floor(p))));
 """)
 
 
+def _bilinear(h, x, y, period):
+    n = h.shape[0]
+    cell = period / n
+    gx, gy = x / cell - 0.5, y / cell - 0.5
+    i, j = int(np.floor(gx)), int(np.floor(gy))
+    fx, fy = gx - i, gy - j
+    at = lambda a, b: h[b % n, a % n]                 # noqa: E731
+    return ((at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy)
+            + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy)
+
+
+def _desert_height(levels, x, y, period):
+    """raymarch.wgsl desert_height (desert_surface_of at fp = 0), in numpy."""
+    lod = _const("DESERT_OCTAVE_LOD")
+    lo, w = int(np.floor(lod)), lod - np.floor(lod)
+    h = _bilinear(levels[0], x, y, period)
+    amp = 1.0
+    for _ in range(int(re.search(r"const DESERT_OCTAVES: i32 = (\d+);",
+                                 SHADER).group(1))):
+        amp *= _const("DESERT_OCTAVE_GAIN")
+        mx, my = (4 * x - 3 * y) / period, (3 * x + 4 * y) / period
+        x, y = period * (mx - np.floor(mx)), period * (my - np.floor(my))
+        coarse = (_bilinear(levels[lo], x, y, period) * (1 - w)
+                  + _bilinear(levels[lo + 1], x, y, period) * w)
+        h += amp * (_bilinear(levels[0], x, y, period) - coarse)
+    return h
+
+
+def test_the_floor_constants_are_the_shaders():
+    js = (REPO / "web" / "soar" / "scene.js").read_text()
+    for name in ("DESERT_OCTAVE_LOD", "DESERT_OCTAVE_GAIN"):
+        got = float(re.search(rf"export const {name} = ([0-9.]+);", js).group(1))
+        assert got == _const(name)
+    assert (int(re.search(r"export const DESERT_OCTAVES = (\d+);", js).group(1))
+            == int(re.search(r"const DESERT_OCTAVES: i32 = (\d+);", SHADER).group(1)))
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
-def test_the_camera_floor_stands_above_the_drawn_ground(tmp_path):
-    """At texel centres the bilinear floor is the texel, plus the octaves'
-    largest lift and the clearance — including across the tile's wrap."""
-    h0 = _level(0)[..., 0]
-    halves = h0.astype(np.float16).view(np.uint16)
-    (tmp_path / "h.bin").write_bytes(halves.tobytes())
-    cell = META["cell_m"]
-    n = META["n"]
-    ij = [(0, 0), (17, 1033), (n - 1, n - 1), (1500, 3)]
-    pts = [[(i + 0.5) * cell, (j + 0.5) * cell] for i, j in ij]
-    pts.append([-0.5 * cell, -0.5 * cell])          # wraps to (n-1, n-1)
+def test_the_camera_floor_is_the_drawn_ground_plus_the_clearance(tmp_path):
+    """The floor is desert_height — the tile and its octaves, as the shader
+    sums them — plus the clearance, at arbitrary points and across the
+    tile's wrap."""
+    levels = [_level(k)[..., 0] for k in range(4)]
+    (tmp_path / "h.bin").write_bytes(b"".join(
+        lv.astype(np.float32).tobytes() for lv in levels))
+    period = META["tile_extent_m"]
+    rng = np.random.default_rng(3)
+    pts = (rng.random((40, 2)) * period).tolist()
+    pts += [[-0.3 * META["cell_m"], -0.5 * META["cell_m"]], [period * 1.7, 3.0]]
     js = _FLOOR_JS % (REPO / "web" / "soar" / "scene.js").as_posix()
     proc = subprocess.run(
         ["node", "--input-type=module", "-e", js], capture_output=True,
@@ -208,9 +253,8 @@ def test_the_camera_floor_stands_above_the_drawn_ground(tmp_path):
     constants = (REPO / "web" / "soar" / "constants.js").read_text()
     clearance = float(re.search(
         r"DESERT_FLOOR_CLEARANCE_M = ([0-9.]+);", constants).group(1))
-    lift = META["band_max_m"] * _const("DESERT_OCTAVE_MARGIN") + clearance
-    want = [h0[j, i] + lift for i, j in ij] + [h0[n - 1, n - 1] + lift]
-    assert got == pytest.approx(want, abs=1e-9)
+    want = [_desert_height(levels, x, y, period) + clearance for x, y in pts]
+    assert got == pytest.approx(want, abs=1e-6)
 
 
 def test_the_desert_refuses_to_render_without_its_relief():

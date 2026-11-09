@@ -86,9 +86,26 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
 }
 
 // Channels per texel of each surface-tile format (soar_host's
-// SURFACE_FORMAT_CHANNELS): the ocean and the city are rgba16float, the
-// desert rg16float.
-const SURFACE_FORMAT_CHANNELS = { rgba16float: 4, rg16float: 2 };
+// SURFACE_FORMAT_CHANNELS), and bytes per channel: the ocean and the city
+// are rgba16float, the desert rg16float. rg32float is the terrain lab's
+// full-precision desert (tools/terrain_lab), which only this loader reads.
+const SURFACE_FORMAT_CHANNELS = { rgba16float: 4, rg16float: 2, rg32float: 2 };
+const SURFACE_FORMAT_BYTES = { rgba16float: 2, rg16float: 2, rg32float: 4 };
+
+/** Channel c of a decoded level's interleaved texels, as floats. */
+function surfaceChannel(bytes, texels, format, c) {
+  const channels = SURFACE_FORMAT_CHANNELS[format];
+  const out = new Float32Array(texels);
+  if (SURFACE_FORMAT_BYTES[format] === 4) {
+    const f = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+    for (let i = 0; i < texels; i++) out[i] = f[i * channels + c];
+  } else {
+    const halves = new Uint16Array(
+      bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+    for (let i = 0; i < texels; i++) out[i] = fromHalf(halves[i * channels + c]);
+  }
+  return out;
+}
 
 /**
  * One stored mip level -> the interleaved texel bytes the texture wants.
@@ -102,15 +119,20 @@ export function decodeSurfaceLevel(bytes, side, meta) {
   const channels = SURFACE_FORMAT_CHANNELS[format];
   if (!channels) throw new Error(`unknown surface-tile format '${format}'.`);
   const texels = side * side;
-  if (bytes.byteLength !== texels * channels * 2) {
+  const size = texels * channels * SURFACE_FORMAT_BYTES[format];
+  if (bytes.byteLength !== size) {
     throw new Error(
-      `a ${side}x${side} ${format} level is ${texels * channels * 2} bytes; ` +
+      `a ${side}x${side} ${format} level is ${size} bytes; ` +
       `this one is ${bytes.byteLength}.`);
   }
   const encoding = meta.encoding ?? "interleaved";
   if (encoding === "interleaved") return bytes;
   if (encoding !== "planar-byte-shuffle") {
     throw new Error(`unknown surface-tile encoding '${encoding}'.`);
+  }
+  if (SURFACE_FORMAT_BYTES[format] !== 2) {
+    throw new Error(`a ${format} tile cannot be planar-byte-shuffled (the ` +
+                    "shuffle is of half floats).");
   }
   const out = new Uint8Array(bytes.byteLength);
   for (let c = 0; c < channels; c++) {
@@ -176,32 +198,64 @@ export function desertTileRows(meta) {
 /**
  * The camera's floor over the desert: a function of the surface-frame
  * position (tile metres, the camera's surfacePosition) returning the lowest
- * z the camera may take. The tile's own height, read bilinearly the way the
- * GPU reads it (texel i centred at (i + 1/2) cells, periodic), plus the most
- * the sub-tile octaves can add (band_max_m times raymarch.wgsl's
- * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
- * shader samples, so the floor is under the drawn ground by construction.
+ * z the camera may take — the drawn ground there plus the clearance. The
+ * ground is raymarch.wgsl's desert_height evaluated here as the GPU does
+ * it: the tile read bilinearly (texel i centred at (i + 1/2) cells,
+ * periodic), plus its DESERT_OCTAVES sub-tile octaves (each the tile at the
+ * octave's point less the tile read DESERT_OCTAVE_LOD levels up, trilinear,
+ * times the octave's gain), from the same stored levels the shader samples.
+ *
+ * It used to be the tile's height plus the most the octaves could add
+ * anywhere (band_max_m times DESERT_OCTAVE_MARGIN): a bound, which over a
+ * tile with a kilometre of relief put the floor hundreds of metres up.
  */
-export const DESERT_OCTAVE_MARGIN = 0.4942;       // raymarch.wgsl's, a true bound
+// raymarch.wgsl's octave constants (tests/test_desert_tile.py holds them equal).
+export const DESERT_OCTAVES = 2;
+export const DESERT_OCTAVE_LOD = 2.321928;
+export const DESERT_OCTAVE_GAIN = 0.324131;
+// The tile levels the floor reads: 0 and the two the octave LOD falls between.
+export const DESERT_FLOOR_LEVELS = Math.floor(DESERT_OCTAVE_LOD) + 2;
 
 export function desertFloorAt(tile, groundZ = 0.0) {
-  const { heights, meta } = tile;
-  if (!heights) throw new Error("the desert tile was loaded without heights.");
-  const n = meta.n;
-  const cell = meta.cell_m;
-  const lift = meta.band_max_m * DESERT_OCTAVE_MARGIN
-    + K.DESERT_FLOOR_CLEARANCE_M + groundZ;
-  const at = (i, j) =>
-    fromHalf(heights[(((j % n) + n) % n) * n + (((i % n) + n) % n)]);
-  return ([x, y]) => {
+  const { heightLevels, meta } = tile;
+  if (!heightLevels || heightLevels.length < DESERT_FLOOR_LEVELS) {
+    throw new Error("the desert tile was loaded without its heights.");
+  }
+  const n0 = meta.n;
+  const period = meta.tile_extent_m;
+  const lift = K.DESERT_FLOOR_CLEARANCE_M + groundZ;
+  const bilinear = (level, x, y) => {
+    const h = heightLevels[level];
+    const n = Math.max(1, n0 >> level);
+    const cell = period / n;
+    const at = (i, j) => h[(((j % n) + n) % n) * n + (((i % n) + n) % n)];
     const gx = x / cell - 0.5;
     const gy = y / cell - 0.5;
     const i = Math.floor(gx);
     const j = Math.floor(gy);
     const fx = gx - i;
     const fy = gy - j;
-    const h = (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy)
-            + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
+    return (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy)
+         + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
+  };
+  const lo = Math.floor(DESERT_OCTAVE_LOD);
+  const w = DESERT_OCTAVE_LOD - lo;
+  const coarse = (x, y) =>
+    bilinear(lo, x, y) * (1 - w) + bilinear(lo + 1, x, y) * w;
+  return ([x, y]) => {
+    let h = bilinear(0, x, y);
+    let qx = x;
+    let qy = y;
+    let amp = 1.0;
+    for (let k = 0; k < DESERT_OCTAVES; k++) {
+      amp *= DESERT_OCTAVE_GAIN;
+      // desert_octave_step: the 4-3-5 rotation and scaling, folded.
+      const mx = (4 * qx - 3 * qy) / period;
+      const my = (3 * qx + 4 * qy) / period;
+      qx = period * (mx - Math.floor(mx));
+      qy = period * (my - Math.floor(my));
+      h += amp * (bilinear(0, qx, qy) - coarse(qx, qy));
+    }
     return h + lift;
   };
 }
@@ -223,7 +277,8 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  * every edge and browser cache while a stale meta.json fails loudly rather
  * than pairing a new shader with an old tile.
  *
- * keepHeights holds the desert's level-0 height channel (as half-float bits)
+ * keepHeights holds the desert's height channel of levels 0 to
+ * DESERT_FLOOR_LEVELS - 1 (heightLevels, as floats)
  * for the camera's floor — the same bytes the shader reads.
  *
  * bounds builds the desert's bounds pyramid from every level's heights
@@ -253,7 +308,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   }
   const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
-  let heights = null;
+  let heightLevels = null;
   const boundsLevels = [];
   let boundsTexture = null;
   const format = meta.format ?? "rgba16float";
@@ -276,6 +331,11 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     throw new Error(`loadOceanTile(${baseUrl}): ${schema} is no surface's ` +
                     "schema (constants.js SURFACE_TILE_SCHEMAS).");
   }
+  if (format === "rg32float" && !device.features?.has("float32-filterable")) {
+    throw new Error(
+      `${baseUrl} is a full-precision (rg32float) tile, and this GPU device ` +
+      "has no float32-filterable, so it cannot be filtered.");
+  }
   const texture = device.createTexture({
     label: `${baseUrl}-surface-tile`,
     size: [meta.n, meta.n, 1],
@@ -295,18 +355,16 @@ export async function loadOceanTile(device, baseUrl, onProgress,
             await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())
         : await fetchBytes(url);
       const bytes = decodeSurfaceLevel(stored, n, meta);
-      if (bounds) {
-        const halves = new Uint16Array(
-          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-        const h = new Float32Array(n * n);
-        for (let i = 0; i < n * n; i++) h[i] = fromHalf(halves[i * channels]);
-        boundsLevels.push(h);
-      }
-      if (keepHeights && level === 0) {
-        const halves = new Uint16Array(
-          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-        heights = new Uint16Array(n * n);
-        for (let i = 0; i < n * n; i++) heights[i] = halves[i * channels];
+      const needHeights = bounds
+        || (keepHeights && level < DESERT_FLOOR_LEVELS);
+      const h = needHeights ? surfaceChannel(bytes, n * n, format, 0) : null;
+      if (bounds) boundsLevels.push(h);
+      if (keepHeights && level < DESERT_FLOOR_LEVELS) {
+        // Its own copy: the bounds builder may be a worker, and handing it
+        // boundsLevels transfers (detaches) those arrays, which left the
+        // floor reading empty ones (NaN).
+        heightLevels ??= [];
+        heightLevels.push(bounds ? h.slice() : h);
       }
       // The city minimap draws the same cascade the shader raises buildings
       // out of, and the flight collider (collide.js) stands the same
@@ -334,7 +392,8 @@ export async function loadOceanTile(device, baseUrl, onProgress,
       device.queue.writeTexture(
         { texture, mipLevel: level },
         bytes,
-        { bytesPerRow: n * channels * 2, rowsPerImage: n },
+        { bytesPerRow: n * channels * SURFACE_FORMAT_BYTES[format],
+          rowsPerImage: n },
         [n, n, 1],
       );
       onProgress?.((level + 1) / meta.mips);
@@ -384,7 +443,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     clockPeriod,
     maxLod: meta.mips - 1,
     cells,
-    heights,
+    heightLevels,
     seaView: boundsTexture?.createView({ dimension: "2d-array" }) ?? null,
     boundsTexture,
     meta,

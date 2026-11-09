@@ -82,7 +82,23 @@ import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
 const OCEAN_URL = "ocean";
 const CITY_URL = "city";
-const DESERT_URL = "desert";
+const DESERT_URL = desertUrl(globalThis.location?.search ?? "");
+
+/**
+ * ?desert=<path> flies a desert tile other than the shipped one: the terrain
+ * lab's candidates (tools/terrain_lab). A path on this origin only, so a
+ * link cannot point the app at someone else's tile.
+ */
+function desertUrl(search) {
+  const asked = new URLSearchParams(search).get("desert");
+  if (asked === null) return "desert";
+  if (!/^\/[\w\-./]+$/.test(asked) || asked.startsWith("//")
+      || asked.split("/").includes("..")) {
+    throw new Error(`?desert=${asked}: expected a path on this site, like ` +
+                    "/lab/runs/<id>/tile.");
+  }
+  return asked.replace(/\/+$/, "");
+}
 
 // Every key _onKeyDown's switch answers, and nothing else. It is the set the
 // tutorial refuses while a chapter is running: each of these opens a panel or

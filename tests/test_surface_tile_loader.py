@@ -53,7 +53,8 @@ _LOAD_JS = textwrap.dedent("""
       out = { dx: tile.dx, tileExtent: tile.tileExtent,
               surfacePeriod: tile.surfacePeriod, maxLod: tile.maxLod,
               format: tile.texture.desc.format,
-              heights: tile.heights?.length ?? null,
+              heights: tile.heightLevels?.[0].length ?? null,
+              heightLevels: tile.heightLevels?.length ?? null,
               cells: tile.cells?.density.length ?? null, writes, destroyed,
               frameTiles: K.SURFACE_FRAME_TILES };
     } catch (err) {
@@ -98,6 +99,8 @@ def test_a_surface_tile_loads_every_level(kind, keep, channels):
     if keep != "keepNothing":
         held = got["heights"] if keep == "keepHeights" else got["cells"]
         assert held == meta["n"] ** 2
+    if keep == "keepHeights":
+        assert got["heightLevels"] == 4      # 0, and the octave LOD's two
     assert not got["destroyed"]
 
 
@@ -134,3 +137,74 @@ def test_a_tile_that_fails_to_download_gives_its_texture_back(tmp_path):
                 base=os.path.relpath(alias, SOAR))
     assert "missing.bin.gz" in got["error"]
     assert got["destroyed"]
+
+
+_F32_JS = textwrap.dedent("""
+    import { readFileSync, existsSync } from "node:fs";
+    import * as K from "%(soar)s/constants.js";
+    import { loadOceanTile, desertFloorAt } from "%(soar)s/scene.js";
+    import { buildDesertBounds } from "%(soar)s/desert_bounds.js";
+
+    globalThis.GPUTextureUsage = { COPY_DST: 2, TEXTURE_BINDING: 4 };
+    // As the viewer's worker does: the levels are transferred (detached).
+    const transferring = (levels, dx) => buildDesertBounds(
+      structuredClone(levels, { transfer: levels.map((a) => a.buffer) }), dx);
+    globalThis.fetch = async (url) => {
+      const path = process.env.BASE + "/" + String(url).split("?")[0].split("/").pop();
+      if (!existsSync(path)) return new Response(null, { status: 404 });
+      return new Response(readFileSync(path));
+    };
+    const out = {};
+    for (const filterable of [false, true]) {
+      const writes = [];
+      const device = {
+        features: new Set(filterable ? ["float32-filterable"] : []),
+        createTexture: (desc) => ({ desc, createView: () => ({}), destroy: () => {} }),
+        queue: { writeTexture: (dst, bytes, layout) =>
+          writes.push({ bytes: bytes.byteLength, bytesPerRow: layout.bytesPerRow }) },
+      };
+      try {
+        const tile = await loadOceanTile(device, "tile", undefined,
+          { keepHeights: true, bounds: true, boundsBuilder: transferring,
+            schema: K.SURFACE_TILE_SCHEMAS.desert });
+        const floor = desertFloorAt(tile);
+        out[filterable] = { format: tile.texture.desc.format, writes,
+                            level0: Array.from(tile.heightLevels[0].slice(0, 4)),
+                            floor: floor([0.5 * tile.meta.cell_m, 0.5 * tile.meta.cell_m]) };
+      } catch (err) { out[filterable] = { error: String(err) }; }
+    }
+    process.stdout.write(JSON.stringify(out));
+""")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_a_full_precision_desert_tile_loads_where_it_can_be_filtered(tmp_path):
+    """The terrain lab's rg32float tile: refused by a device without
+    float32-filterable, and otherwise uploaded at four bytes a channel,
+    its heights read exactly (no half rounding)."""
+    import sys
+    import numpy as np
+    sys.path.insert(0, str(REPO / "tools"))
+    import export_desert_tile as edt
+    rng = np.random.default_rng(1)
+    n = 64
+    height = 1000.0 + rng.normal(size=(n, n)) * 123.456789
+    light = rng.random((n, n))
+    edt.write_tile(tmp_path / "tile", height, light, 6400.0, 1, fmt="rg32float")
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", _F32_JS % {"soar": SOAR.as_posix()}],
+        capture_output=True, text=True, cwd=REPO,
+        env={**os.environ, "BASE": str(tmp_path / "tile")})
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    got = json.loads(proc.stdout)
+    assert "float32-filterable" in got["false"]["error"]
+    ok = got["true"]
+    assert ok["format"] == "rg32float"
+    tile_writes = ok["writes"][:7]                     # then the bounds pyramid
+    for level, w in enumerate(tile_writes):
+        side = max(1, n >> level)
+        assert w["bytes"] == side * side * 2 * 4
+        assert w["bytesPerRow"] == side * 2 * 4
+    assert ok["level0"] == np.float32(height.ravel()[:4]).tolist()
+    # The bounds builder took its levels away; the floor kept its own.
+    assert np.isfinite(ok["floor"]) and ok["floor"] > 500.0
