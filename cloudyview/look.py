@@ -64,10 +64,12 @@ OCEAN_GLINT_STRENGTH = 0.85
 # where the glint's mean and peak match that look's at the contact sheet's
 # glint look-down and low sun (to 1%), as well as the far-field total.
 OCEAN_GLINT_ROUGHNESS = 0.170
-# How much of the slope variance the normal-mip filter removed is drawn
-# stochastically per pixel per frame (lighting-loop iter_008). The remainder
-# stays as extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.
-OCEAN_SLOPE_DRAW_FRACTION = 0.5
+# How much of the slope variance the normal-mip filter removed the sky
+# reflection integrates over (raymarch.wgsl ocean_sky_reflection: four
+# deterministic taps since 2026-11-09, one random draw per frame before —
+# lighting-loop iter_008). The sun's glint carries all of it as lobe width
+# either way. 1 = the sky sees the whole spread, 0 = only the mean slope.
+OCEAN_SLOPE_RESOLVED_FRACTION = 0.5
 OCEAN_SKY_SHADOW_FLOOR = 0.75
 OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 

@@ -150,7 +150,7 @@ export function packUniforms(state, view) {
     oceanMipBias = K.OCEAN_MIP_BIAS,
     oceanGlintStrength = K.OCEAN_GLINT_STRENGTH,
     oceanGlintRoughness = K.OCEAN_GLINT_ROUGHNESS,
-    oceanSlopeDrawFraction = K.OCEAN_SLOPE_DRAW_FRACTION,
+    oceanSlopeResolvedFraction = K.OCEAN_SLOPE_RESOLVED_FRACTION,
     oceanSkyShadowFloor = K.OCEAN_SKY_SHADOW_FLOOR,
     coneStencilThetaDeg = K.CONE_STENCIL_THETA_DEG,
     hazeHeightDependent = K.DEFAULT_HAZE_HEIGHT_DEPENDENT,
@@ -313,7 +313,7 @@ export function packUniforms(state, view) {
   row(17, spec.disc[0], spec.disc[1], spec.disc[2],
       hazeHeightDependent ? K.AERIAL_SCALE_HEIGHT_M : 0.0);
   row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
-  row(19, oceanSlopeDrawFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
+  row(19, oceanSlopeResolvedFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
        oceanSkyShadowFloor, contrast);
   // The view-step angle floors at a QUARTER of the render's pixel angle.
   // Not the full pixel: the accumulation is jittered, so a converged image

@@ -50,10 +50,9 @@ export const OCEAN_GLINT_STRENGTH = 0.85;
 // ~7 m/s with the tile's own, and the reflection Thomas kept. Mirrors
 // look.py, which says how it was fitted.
 export const OCEAN_GLINT_ROUGHNESS = 0.170;
-// How much of the slope variance the normal-mip filter removed is drawn
-// stochastically per pixel per frame (iter_008). The remainder stays as
-// extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.
-export const OCEAN_SLOPE_DRAW_FRACTION = 0.5;
+// How much of the slope variance the normal-mip filter removed the sky
+// reflection integrates over (four deterministic taps). Mirrors look.py.
+export const OCEAN_SLOPE_RESOLVED_FRACTION = 0.5;
 export const OCEAN_SKY_SHADOW_FLOOR = 0.75;
 export const OCEAN_HAZE_EXTINCTION_PER_KM = 0.012;
 
