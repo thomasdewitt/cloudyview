@@ -11,8 +11,8 @@ writing a byte.
 
 Run it after editing any component or the registry:
 
-    uv run python tools/compose_city.py            # splice + validate + write
-    uv run python tools/compose_city.py --check    # validate only, no write
+    tools/gpulock uv run python tools/compose_city.py            # splice + validate + write
+    tools/gpulock uv run python tools/compose_city.py --check    # validate only, no write
 
 Rules it enforces (the same ones components/SPEC.md states):
   * a component may only define module-scope symbols named cc_<name>_* —
@@ -328,6 +328,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true",
                     help="validate and compile only; write nothing")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/compose_city.py")
     args = ap.parse_args()
     return compose(args.check)
 

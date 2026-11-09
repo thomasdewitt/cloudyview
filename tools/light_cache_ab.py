@@ -9,8 +9,8 @@ march and once per cache divisor, and writes full frames plus a side-by-side
 edge-crop strip per view.
 
 Usage:
-    uv run python tools/light_cache_ab.py
-    uv run python tools/light_cache_ab.py --views v1 --divisors 1,2
+    tools/gpulock uv run python tools/light_cache_ab.py
+    tools/gpulock uv run python tools/light_cache_ab.py --views v1 --divisors 1,2
 
 Output lands in temp/light-cache-ab-<date>/.
 """
@@ -122,6 +122,10 @@ def main():
     parser.add_argument("--views", type=str, default=None)
     parser.add_argument("--divisors", type=str, default="1,2,4")
     parser.add_argument("--frames", type=int, default=FRAMES)
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/light_cache_ab.py")
     args = parser.parse_args()
 
     from PIL import Image

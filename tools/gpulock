@@ -17,8 +17,15 @@
 #
 # Keep each locked command short (a few renders, one bench) so others are
 # not starved; loop outside the lock, not inside it.
+#
+# The command gets SOAR_GPULOCK set to the lock's path. The tools that open
+# a GPU device check it, and that the lock is held by this flock, an
+# ancestor of theirs (not merely by someone), before they request an
+# adapter, and refuse to run without both (tools/gpulock_guard.py and .mjs):
+# unlocked tools spoiled four timing runs in two days, 2026-11-08/09.
 set -euo pipefail
 LOCK=/tmp/soar-gpu.lock
+export SOAR_GPULOCK="$LOCK"
 if [[ $# -eq 0 ]]; then
     echo "usage: tools/gpulock <command...>" >&2
     exit 2

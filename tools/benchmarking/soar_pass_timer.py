@@ -11,9 +11,9 @@ neighbour's work land on all of them alike. It is the instrument for "is
 this revision faster", which is the question an optimization asks, where
 soar_frame_bench answers "how fast is the app".
 
-    uv run python tools/benchmarking/soar_pass_timer.py \\
+    tools/gpulock uv run python tools/benchmarking/soar_pass_timer.py \\
         --variant base=git:HEAD --variant new=tree
-    uv run python tools/benchmarking/soar_pass_timer.py \\
+    tools/gpulock uv run python tools/benchmarking/soar_pass_timer.py \\
         --variant base=git:HEAD --variant new=tree --cases rce --tiers low
 
 A variant is name=spec, spec as tools/soar_shader_ab.py takes it: `tree`,
@@ -187,6 +187,11 @@ def main():
                          "column beside the march (fs_main)")
     ap.add_argument("--rounds", type=int, default=3,
                     help="round-robin blocks per variant; the first is warmup")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/benchmarking/soar_pass_timer.py")
     args = ap.parse_args()
 
     # One GPU, many sessions: start only on an idle card (gpu_idle.py).

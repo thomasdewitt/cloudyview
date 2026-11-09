@@ -8,7 +8,7 @@
 // whole browser build — hosts and shader together — so run it once per tree
 // and diff the lines.
 //
-//   node tools/pinned_still.mjs --web DIR [--cdp PORT]
+//   tools/gpulock node tools/pinned_still.mjs --web DIR [--cdp PORT]
 //        [--scenes city,day] [--tiers high,low,max] [--size 640x360]
 //        [--save DIR]
 //
@@ -31,6 +31,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openTab, requireHardwareAdapter, serveTree, servedShaderHash }
   from "./soar_cdp.mjs";
+import { requireGpulock } from "./gpulock_guard.mjs";
+
+// It drives a WebGPU page: refuse outside tools/gpulock, before anything
+// else runs (gpulock_guard.mjs).
+requireGpulock("tools/pinned_still.mjs");
 
 const argv = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -45,7 +50,7 @@ const [w, h] = option("--size", "640x360").split("x").map(Number);
 const saveDir = option("--save", null);
 if (saveDir) mkdirSync(saveDir, { recursive: true });
 if (!webDir) {
-  console.error("usage: node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
+  console.error("usage: tools/gpulock node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
                 "[--scenes city,day] [--tiers high,low,max] [--size WxH] " +
                 "[--save DIR]");
   process.exit(2);

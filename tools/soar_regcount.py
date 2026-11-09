@@ -12,10 +12,10 @@ VK_KHR_pipeline_executable_properties, and prints the driver's own
 statistics per entry point (tools/regcount, a small Rust program, built on
 first use with cargo).
 
-    uv run python tools/soar_regcount.py                      # fs_main, day, Low
-    uv run python tools/soar_regcount.py --surface city --entry fs_surface_refine
-    uv run python tools/soar_regcount.py --shader my_variant.wgsl --tier max
-    uv run python tools/soar_regcount.py --a git:HEAD --b tree   # side by side
+    tools/gpulock uv run python tools/soar_regcount.py                      # fs_main, day, Low
+    tools/gpulock uv run python tools/soar_regcount.py --surface city --entry fs_surface_refine
+    tools/gpulock uv run python tools/soar_regcount.py --shader my_variant.wgsl --tier max
+    tools/gpulock uv run python tools/soar_regcount.py --a git:HEAD --b tree   # side by side
 
 Numbers are for THIS driver (NVIDIA on Vulkan: Register Count, Binary Size,
 Stack Size). Apple's compiler makes different choices; treat a count as a
@@ -105,6 +105,10 @@ def main():
     ap.add_argument("--tier", default="low", choices=sorted(TIERS))
     ap.add_argument("--periodic", default="on", choices=("on", "off"))
     ap.add_argument("--nested", action="store_true")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/soar_regcount.py")
     args = ap.parse_args()
     build()
 

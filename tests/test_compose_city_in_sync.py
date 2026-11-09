@@ -23,5 +23,5 @@ def test_generated_block_matches_the_components():
     actual = compose_city.SHADER.read_text()
     assert actual == expected, (
         "raymarch.wgsl's GENERATED city block is stale: re-run "
-        "`uv run python tools/compose_city.py` (and read its output — it "
+        "`tools/gpulock uv run python tools/compose_city.py` (and read its output — it "
         "refuses a component that does not compile).")

@@ -48,7 +48,10 @@ def test_every_specialization_compiles_under_tint():
     proc = subprocess.run(
         ["node", str(REPO / "tools" / "tint_check.mjs"),
          "--web", str(REPO / "web"), "--cdp", CDP_PORT],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=600,
+        # pytest is not held to tools/gpulock (Thomas runs it directly), so
+        # the tool it drives is exempted for this child (gpulock_guard).
+        env={**os.environ, "SOAR_GPULOCK_EXEMPT": "pytest"})
     if proc.returncode == 2:
         pytest.skip("tint_check could not run: "
                     + (proc.stderr or proc.stdout).strip()[-400:])

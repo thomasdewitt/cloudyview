@@ -311,6 +311,10 @@ def main(argv=None) -> int:
     ap.add_argument("--scenes", default="ocean,city")
     ap.add_argument("--list", action="store_true",
                     help="print the views and exit")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/contact_sheet.py")
     args = ap.parse_args(argv)
     scenes = args.scenes.split(",")
     unknown = [s for s in scenes if s not in SCENES]

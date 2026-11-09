@@ -12,8 +12,9 @@ writing — so components compose without their authors coordinating.
    var) must be named `cc_<yourname>_*`, where `<yourname>` is your
    registry `name`. The composer refuses anything else.
 2. **Never edit raymarch.wgsl.** Your file + one registry entry is the whole
-   footprint. Run `uv run python tools/compose_city.py` to splice, and
-   `--check` to validate without writing.
+   footprint. Run `tools/gpulock uv run python tools/compose_city.py` to
+   splice, and `--check` to validate without writing (it opens a GPU device
+   to compile-check, and refuses to run outside tools/gpulock).
 3. **Budget.** The DDA cell loop is the hot path of every city pixel.
    `cell_props` runs per visited cell within `CITY_PROP_RANGE` (2.2 km) of
    the camera: keep it to a few box tests and hashes, and gate everything
@@ -262,8 +263,8 @@ just your close-up.
 
 The harness renders the real scene headlessly (RTX 5080, ~0.1 s/view):
 
-    uv run python tools/compose_city.py               # splice your component
-    uv run python tools/night_city_harness.py --frames 48 \
+    tools/gpulock uv run python tools/compose_city.py # splice your component
+    tools/gpulock uv run python tools/night_city_harness.py --frames 48 \
         --views street --outdir /tmp/yourname
 
 Add `--camera X Y Z AZ EL FOV` (world meters / degrees) for close-ups; the

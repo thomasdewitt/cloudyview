@@ -7,8 +7,8 @@ measured here is a statement about the shader, not about the browser host.
 Run before and after an optimization and diff the tables.
 
 Usage:
-    uv run python tools/benchmarking/soar_frame_bench.py
-    uv run python tools/benchmarking/soar_frame_bench.py --frames 64 --views v1,v4,v8
+    tools/gpulock uv run python tools/benchmarking/soar_frame_bench.py
+    tools/gpulock uv run python tools/benchmarking/soar_frame_bench.py --frames 64 --views v1,v4,v8
 
 Results are appended to tools/benchmarking/soar_frame_results.md.
 
@@ -21,6 +21,7 @@ the machine.
 
 import argparse
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -266,6 +267,11 @@ def main():
     parser.add_argument("--fallback-units", type=str, default=None,
                         help="units to assume when the file's condensate "
                              "variable carries no units attribute (SAM: g/kg)")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/benchmarking/soar_frame_bench.py")
     args = parser.parse_args()
     if args.demo is None and not args.field.exists():
         raise SystemExit(f"no such field: {args.field}")
