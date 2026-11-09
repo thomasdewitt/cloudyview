@@ -941,10 +941,7 @@ fn cc_rooftopworks_rbox(p: vec3<f32>, b: vec3<f32>, r: f32) -> f32 {
 // The tank in its own frame: origin at the centre of its footprint, z from
 // the deck it stands on. Tub, rim band, four legs — the functional features
 // and nothing below them (SPEC: wiper blades, not tire brands).
-fn cc_rooftopworks_tank_sdf(p: vec3<f32>, round: bool) -> f32 {
-    if (round) {
-        return cc_rooftopworks_round_sdf(p);
-    }
+fn cc_rooftopworks_tank_sdf(p: vec3<f32>) -> f32 {
     let hw = cc_rooftopworks_TANK_HW;
     let hh = cc_rooftopworks_TANK_H;
     let leg = cc_rooftopworks_TANK_LEG;
@@ -965,49 +962,81 @@ fn cc_rooftopworks_tank_sdf(p: vec3<f32>, round: bool) -> f32 {
     return min(min(body, rim), legs);
 }
 
-// The round wooden tank: a barrel of staves on four legs under a conical
-// cap, filling the same envelope as the square one.
-fn cc_rooftopworks_round_sdf(p: vec3<f32>) -> f32 {
-    let hw = cc_rooftopworks_TANK_HW;
-    let hh = cc_rooftopworks_TANK_H;
-    let leg = cc_rooftopworks_TANK_LEG;
-    let cone0 = hh - cc_rooftopworks_CONE_H;
-    let rxy = length(p.xy);
-    let barrel = max(rxy - (hw - 0.08), abs(p.z - 0.5 * (leg + cone0))
-                                        - 0.5 * (cone0 - leg));
-    // The cap: radius falling from the barrel's to a point, as a distance
-    // bound (scaled by the cone's slope so it never overshoots).
-    let u = clamp((p.z - cone0) / cc_rooftopworks_CONE_H, 0.0, 1.0);
-    let cap = max((rxy - (hw - 0.02) * (1.0 - u)) * 0.6,
-                  max(cone0 - p.z, p.z - hh));
-    let legs = cc_rooftopworks_rbox(
-        vec3<f32>(abs(p.xy) - vec2<f32>(0.70 * hw), p.z - 0.5 * leg),
-        vec3<f32>(0.10, 0.10, 0.5 * leg), 0.03);
-    return min(min(barrel, cap), legs);
-}
-
-fn cc_rooftopworks_tank_normal(p: vec3<f32>, round: bool) -> vec3<f32> {
+fn cc_rooftopworks_tank_normal(p: vec3<f32>) -> vec3<f32> {
     let e = vec2<f32>(1.2e-3, -1.2e-3);
     // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
     return normalize(
-        e.xyy * cc_rooftopworks_tank_sdf(p + e.xyy, round)
-      + e.yyx * cc_rooftopworks_tank_sdf(p + e.yyx, round)
-      + e.yxy * cc_rooftopworks_tank_sdf(p + e.yxy, round)
-      + e.xxx * cc_rooftopworks_tank_sdf(p + e.xxx, round));
+        e.xyy * cc_rooftopworks_tank_sdf(p + e.xyy)
+      + e.yyx * cc_rooftopworks_tank_sdf(p + e.yyx)
+      + e.yxy * cc_rooftopworks_tank_sdf(p + e.yxy)
+      + e.xxx * cc_rooftopworks_tank_sdf(p + e.xxx));
+}
+
+// The round wooden tank, close up, in closed form rather than marched: its
+// staved barrel (a vertical cylinder) and its conical cap, each a quadratic
+// in t. It stands on a dark steel frame drawn as one box (the hit's other
+// branch). Returns (t, normal), t < 0 for a miss. A sphere-traced barrel
+// beside the square tank's cost the far views 3% without ever running.
+fn cc_rooftopworks_round_hit(o: vec3<f32>, dir: vec3<f32>, t_in: f32,
+                             t_out: f32, base: vec3<f32>) -> vec4<f32> {
+    let r = cc_rooftopworks_TANK_HW - 0.08;
+    let z0 = cc_rooftopworks_TANK_LEG;
+    let z1 = cc_rooftopworks_TANK_H - cc_rooftopworks_CONE_H;
+    let zt = cc_rooftopworks_TANK_H;
+    let p = o - base;
+    var best = vec4<f32>(-1.0, 0.0, 0.0, 1.0);
+    // The barrel: |p.xy + t d.xy| = r, entering from outside.
+    let a = dot(dir.xy, dir.xy);
+    let b = dot(p.xy, dir.xy);
+    let c = dot(p.xy, p.xy) - r * r;
+    let disc = b * b - a * c;
+    if (a > 1e-8 && disc >= 0.0) {
+        // @domain: disc >= 0 by the branch
+        let t = (-b - sqrt(disc)) / a;
+        let z = p.z + t * dir.z;
+        if (t >= t_in && t <= t_out && z >= z0 && z <= z1) {
+            best = vec4<f32>(t, (p.xy + t * dir.xy) / r, 0.0);
+        }
+    }
+    // The cap: |p.xy + t d.xy| = k (zt - z) for z in [z1, zt].
+    let k = r / cc_rooftopworks_CONE_H;
+    let w0 = zt - p.z;
+    let qa = a - k * k * dir.z * dir.z;
+    let qb = b + k * k * w0 * dir.z;
+    let qc = dot(p.xy, p.xy) - k * k * w0 * w0;
+    let qd = qb * qb - qa * qc;
+    if (abs(qa) > 1e-8 && qd >= 0.0) {
+        // @domain: qd >= 0 by the branch
+        let sq = sqrt(qd);
+        let ta = (-qb - sq) / qa;
+        let tb = (-qb + sq) / qa;
+        for (var i: i32 = 0; i < 2; i = i + 1) {
+            let t = select(min(ta, tb), max(ta, tb), i == 1);
+            let z = p.z + t * dir.z;
+            if (t >= t_in && t <= t_out && z >= z1 && z <= zt
+                && (best.x < 0.0 || t < best.x)) {
+                let q = p + t * dir;
+                // @domain: the cone's gradient on its surface, nonzero below the apex
+                let n = normalize(vec3<f32>(q.xy, k * k * (zt - q.z)));
+                best = vec4<f32>(t, n);
+                break;
+            }
+        }
+    }
+    return best;
 }
 
 // Sphere-trace the tank between the entry and exit of its envelope box.
 // Returns the hit t, or -1 when the ray threads past the rounded hull —
 // which is what makes the hull read as rounded.
 fn cc_rooftopworks_tank_trace(o: vec3<f32>, dir: vec3<f32>, t_in: f32,
-                              t_out: f32, base: vec3<f32>, round: bool)
-        -> f32 {
+                              t_out: f32, base: vec3<f32>) -> f32 {
     var t = max(t_in, 0.0) + 1.0e-3;
     for (var i: i32 = 0; i < cc_rooftopworks_SDF_ITERS; i = i + 1) {
         if (t > t_out) {
             return -1.0;
         }
-        let d = cc_rooftopworks_tank_sdf(o + t * dir - base, round);
+        let d = cc_rooftopworks_tank_sdf(o + t * dir - base);
         if (d < 2.0e-3) {
             return t;
         }
@@ -1030,8 +1059,27 @@ fn cc_rooftopworks_mech_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
             return best;
         }
         let base = vec3<f32>(0.5 * (m.lo.xy + m.hi.xy), m.lo.z);
+        if (m.round) {
+            var r = best;
+            let rh = cc_rooftopworks_round_hit(o, dir, max(sb.x, t0),
+                                               min(sb.y, t1), base);
+            if (rh.x > max(t0, 1e-3) && rh.x < r.t) {
+                let p = o + rh.x * dir;
+                let is_cap = p.z > m.hi.z - cc_rooftopworks_CONE_H;
+                r = CityHit(true, rh.x, p, rh.yzw,
+                            select(cc_rooftopworks_K_MECH,
+                                   cc_rooftopworks_K_ACC, is_cap) + s, ci);
+            }
+            // The steel frame under the barrel.
+            let fh = vec2<f32>(0.72 * cc_rooftopworks_TANK_HW);
+            return cc_rooftopworks_box(
+                r, o, dir, inv_dir, t0, t1,
+                vec3<f32>(base.xy - fh, m.lo.z),
+                vec3<f32>(base.xy + fh, m.lo.z + cc_rooftopworks_TANK_LEG),
+                cc_rooftopworks_K_ACC + s, ci);
+        }
         let t = cc_rooftopworks_tank_trace(o, dir, max(sb.x, t0),
-                                           min(sb.y, t1), base, m.round);
+                                           min(sb.y, t1), base);
         if (t < 0.0 || t > t1 || t <= max(t0, 1e-3) || t >= best.t) {
             return best;
         }
@@ -1040,7 +1088,7 @@ fn cc_rooftopworks_mech_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
         // galvanised albedo it had when it was a separate box.
         let is_rim = p.z > m.hi.z - cc_rooftopworks_TANK_RIM_T - 0.02;
         return CityHit(true, t, p,
-                       cc_rooftopworks_tank_normal(p - base, m.round),
+                       cc_rooftopworks_tank_normal(p - base),
                        select(cc_rooftopworks_K_MECH, cc_rooftopworks_K_ACC,
                               is_rim) + s, ci);
     }
