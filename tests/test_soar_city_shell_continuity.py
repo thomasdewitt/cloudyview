@@ -422,7 +422,7 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
 # --- the shops ---------------------------------------------------------------
 #
 # A commercial ground floor is a row of lit shop windows (the STORE zone,
-# city_store_cell), drawn by the shell and averaged by the flat facade
+# city_zone_lit_frac), drawn by the shell and averaged by the flat facade
 # through the same window path. It used to be an emitting band painted over
 # the wall, which the shell left off its reveals and sills: each jamb was a
 # dark sliver in a band that clipped to white, there while the shell drew it

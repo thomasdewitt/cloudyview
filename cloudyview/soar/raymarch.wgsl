@@ -6962,14 +6962,14 @@ fn city_storey_rate(cc: CityCell, iv: i32) -> f32 {
 }
 
 // city_storey_rate at a lit_frac of the caller's: a loft's or a shop's
-// (city_loft_lit_frac, city_store_cell), drawn from the building's storey
+// (city_zone_lit_frac), drawn from the building's storey
 // draws.
 fn city_storey_rate_at(cc: CityCell, iv: i32, lit_frac: f32) -> f32 {
     let fh = city_rand4(vec2<u32>(
         cc.seed.x ^ 0x2545f491u,
         bitcast<u32>(iv) * 0x9e3779b9u
     ));
-    // A lit_frac past 1 is a row of shops (city_store_cell), which never
+    // A lit_frac past 1 is a row of shops (city_zone_lit_frac), which never
     // goes dark with the floor.
     if (fh.x < CITY_DARK_FLOOR_FRAC && lit_frac <= 1.0) {
         return 0.0;
@@ -7341,6 +7341,10 @@ const CITY_LOFT_PANE_HI: vec2<f32> = vec2<f32>(0.94, 0.95);
 const CITY_STORE_PANE_LO: vec2<f32> = vec2<f32>(0.06, 0.055);
 const CITY_STORE_PANE_HI: vec2<f32> = vec2<f32>(0.94, 0.92);
 const CITY_STORE_LIT_FRAC: f32 = 4.0;
+// The odd shop whose interior is cyan neon, drawn shop by shop (Thomas:
+// "if some rare shops had an interior cyan color like the original, that
+// would be kinda cool"): the palette's own cyan (band 4).
+const CITY_SHOP_CYAN_FRAC: f32 = 0.05;
 
 struct CityZones {
     blank: bool,        // the whole face is solid
@@ -7491,8 +7495,8 @@ fn city_zone_open(zone: i32) -> bool {
 
 // The pane rectangle of this bay, in bay-local metres: the building's, or a
 // loft's big glass.
-// (By the zone, not through city_bay_cell: a copy of the building per pane
-// lookup cost the street view 0.05 ms of its 0.84 at Low.)
+// (By the zone, not through a copy of the building: one per pane lookup
+// cost the street view 0.05 ms of its 0.84 at Low.)
 fn city_bay_pane_lo(cc: CityCell, f: CityFace, b: CityBay) -> vec2<f32> {
     let fr = select(select(cc.pane_lo, CITY_LOFT_PANE_LO,
                            b.zone == CITY_ZONE_LOFT),
@@ -7506,43 +7510,39 @@ fn city_bay_pane_hi(cc: CityCell, f: CityFace, b: CityBay) -> vec2<f32> {
     return fr * vec2<f32>(f.pitch, CITY_FLOOR_H);
 }
 
-// The building as this bay's windows are drawn from it.
-fn city_bay_cell(cc: CityCell, b: CityBay) -> CityCell {
-    if (b.zone == CITY_ZONE_LOFT) {
-        return city_loft_cell(cc);
+// A shop window as it is lit: the house's light, or in one shop in twenty
+// cyan neon at the brightness the window drew. The draw is the window's
+// unit draw, which a shop (lit whatever it draws) has free.
+fn city_shop_window(cc: CityCell, w_in: CityWin) -> CityWin {
+    var w = w_in;
+    if (w.lit && w.wh.x < CITY_SHOP_CYAN_FRAC) {
+        let style_gain = select(select(1.0, 0.80, cc.win_style == 1),
+                                0.55, cc.win_style == 3);
+        // @domain: a hash draw, in [0, 1)
+        w.e = city_room_band_colour(4)
+              * (CITY_ROOM_RADIANCE * (0.25 + 5.0 * pow(w.wh.z, 7.0))
+                 * style_gain);
     }
-    if (b.zone == CITY_ZONE_STORE) {
-        return city_store_cell(cc);
-    }
-    return cc;
+    return w;
 }
 
-// The building as its shops are: shop glass, every one lit (a lit_frac
-// that puts each storey's rate past 1 for any occupancy draw, and that
-// city_storey_rate never darkens with the floor), in the house's colours,
-// so the flat facade's lit pane (city_lit_pane) is the lattice's. city_storefront_glow stays the band's radiance as the street sees it
-// (the sidewalk's spill, the steam); on the wall the shops are windows.
-fn city_store_cell(cc: CityCell) -> CityCell {
-    var c = cc;
-    c.pane_lo = CITY_STORE_PANE_LO;
-    c.pane_hi = CITY_STORE_PANE_HI;
-    c.lit_frac = CITY_STORE_LIT_FRAC;
-    return c;
-}
-
-// The building as its lofts are: the big glass, and lit twice as often as
-// the floors below, from a lit_frac of at least 0.7 (the corner flats are
-// the ones lived in). The
-// shell draws a loft bay's window from it and the flat facade averages the
-// loft share of a footprint over it, so the two agree by construction.
+// The lit_frac a bay's windows are drawn at (city_storey_rate_at), shell
+// and flat facade alike: a shop's puts every storey's rate past 1 for any
+// occupancy draw, and city_storey_rate never darkens it with the floor (a
+// row of shops is lit, in the house's colours, so the flat facade's lit
+// pane is the lattice's but for the odd cyan shop); a loft's is lit twice
+// as often as the floors below, from at least 0.7 (the corner flats are
+// the ones lived in).
 const CITY_LOFT_LIT_GAIN: f32 = 2.0;
 const CITY_LOFT_LIT_MIN: f32 = 0.70;
-fn city_loft_cell(cc: CityCell) -> CityCell {
-    var c = cc;
-    c.pane_lo = CITY_LOFT_PANE_LO;
-    c.pane_hi = CITY_LOFT_PANE_HI;
-    c.lit_frac = city_loft_lit_frac(cc);
-    return c;
+fn city_zone_lit_frac(cc: CityCell, zone: i32) -> f32 {
+    if (zone == CITY_ZONE_STORE) {
+        return CITY_STORE_LIT_FRAC;
+    }
+    if (zone == CITY_ZONE_LOFT) {
+        return city_loft_lit_frac(cc);
+    }
+    return cc.lit_frac;
 }
 
 fn city_loft_lit_frac(cc: CityCell) -> f32 {
@@ -8680,7 +8680,12 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     }
 
     let b = city_bay_zoned(city_zones(cc, f), f, l.x, l.y);
-    let win = city_window(city_bay_cell(cc, b), f, b.iu, b.iv);
+    var win = city_window_rated(cc, f, b.iu, b.iv,
+                                city_storey_rate_at(cc, b.iv,
+                                                    city_zone_lit_frac(cc, b.zone)));
+    if (b.zone == CITY_ZONE_STORE) {
+        win = city_shop_window(cc, win);
+    }
     let n = h.normal;
     let moon = u.sun_dir.xyz;
     var ao = 1.0;
@@ -8805,7 +8810,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
 
 // The shop row's radiance as the street sees it, the strip of light the
 // sidewalk's spill, the steam and the street furniture read: what its
-// windows (city_store_cell) emit on average over the strip, glass share by
+// windows (the STORE zone) emit on average over the strip, glass share by
 // a lit room's mean radiance through the glass, in the house's colour (its
 // one draw for a monochrome house, the palette's mean for a mixed one).
 // Zero where the ground floor is not commercial.
@@ -8818,9 +8823,10 @@ fn city_storefront_glow(cc: CityCell) -> vec3<f32> {
                             0.55, cc.win_style == 3);
     let pane = (CITY_STORE_PANE_HI - CITY_STORE_PANE_LO) * CITY_FLOOR_H
                / CITY_STORE_H;
-    let colour = select(CITY_ROOM_COLOR_MEAN,
-                        city_room_color(cc.win_mono, cc.palette_bias),
-                        cc.win_mono >= 0.0);
+    let colour = mix(select(CITY_ROOM_COLOR_MEAN,
+                            city_room_color(cc.win_mono, cc.palette_bias),
+                            cc.win_mono >= 0.0),
+                     city_room_band_colour(4), CITY_SHOP_CYAN_FRAC);
     return colour * cc_window_glyph_mean()
            * (CITY_ROOM_RADIANCE * CITY_WIN_BRIGHT_MEAN * style_gain
               * (pane.x * pane.y) * (1.0 - city_glass_fresnel(1.0)));
@@ -9083,8 +9089,10 @@ fn city_room_draw_below(x: f32, lo: f32, hi: f32) -> f32 {
 // what it shows (the brightness draw, 0.25 + 5 w^7, in four strata by
 // their exact means, times the palette's bands by their exact shares) and
 // its light (exact: the mean brightness times the mean colour).
+// `cyan` moves that share of the population to the cyan band (the shops'
+// cyan interiors among all the lit glass the caller averages).
 fn city_lit_pane(cc: CityCell, refl: vec3<f32>, through: f32,
-                 fog: vec4<f32>, shown: bool) -> CityWinSum {
+                 fog: vec4<f32>, shown: bool, cyan: f32) -> CityWinSum {
     let style_gain = select(select(1.0, 0.80, cc.win_style == 1),
                             0.55, cc.win_style == 3);
     let g = cc_window_glyph_mean() * (through * CITY_ROOM_RADIANCE
@@ -9098,7 +9106,8 @@ fn city_lit_pane(cc: CityCell, refl: vec3<f32>, through: f32,
     var colour = vec3<f32>(0.0);
     var acc = city_win_zero();
     for (var k: i32 = 0; k < 6; k = k + 1) {
-        let share = city_room_band_share(k, lo, hi, cc.palette_bias);
+        let share = city_room_band_share(k, lo, hi, cc.palette_bias)
+                    * (1.0 - cyan) + select(0.0, cyan, k == 4);
         if (share <= 0.0) {
             continue;
         }
@@ -9237,7 +9246,10 @@ fn city_windows_exact(cc: CityCell, f: CityFace, g: CityWinGeom,
             }
             let ag = city_overlap(c.x - hb.x, c.x + hb.x, rlo.x, rhi.x)
                      * city_overlap(c.y - hb.y, c.y + hb.y, rlo.y, rhi.y);
-            let win = city_window_rated(cc, f, i + g.i_shift, j, rate_w);
+            var win = city_window_rated(cc, f, i + g.i_shift, j, rate_w);
+            if (zone == CITY_ZONE_STORE) {
+                win = city_shop_window(cc, win);
+            }
             var glass = refl;
             if (win.lit) {
                 // Where the pixel's centre sees this pane, for a glyph a
@@ -9348,6 +9360,7 @@ fn city_windows_rows(cc: CityCell, f: CityFace, g: CityWinGeom,
     // The lit glass, the glass, the openings and the plant, walked storey
     // by storey and as the building's mean, blended.
     var walk = vec4<f32>(0.0);
+    var walk_shop = 0.0;   // the shop row's lit glass (city_shop_window)
     if (w_mean < 1.0) {
         for (var jj: i32 = 0; jj < CITY_WIN_ROWS_MAX; jj = jj + 1) {
             let j = j0 + jj;
@@ -9384,6 +9397,7 @@ fn city_windows_rows(cc: CityCell, f: CityFace, g: CityWinGeom,
             let ag = city_periodic_cover(u0, u1, f.margin, f.pitch, nb,
                                          rs.x, rs.z)
                      * city_overlap(v0, v1, rs.y, rs.w);
+            walk_shop = ag;
             walk = walk + vec4<f32>(ag, ag,
                 city_periodic_cover(u0, u1, f.margin, f.pitch, nb,
                                     gs.olo.x, gs.ohi.x)
@@ -9415,6 +9429,7 @@ fn city_windows_rows(cc: CityCell, f: CityFace, g: CityWinGeom,
         }
     }
     var mean = vec4<f32>(0.0);
+    var mean_shop = 0.0;
     if (w_mean > 0.0) {
         let nv = floor(f.z1 / CITY_FLOOR_H) + 1.0;
         let ag = len_g * city_periodic_cover(v0, v1, 0.0, CITY_FLOOR_H, nv,
@@ -9453,9 +9468,12 @@ fn city_windows_rows(cc: CityCell, f: CityFace, g: CityWinGeom,
                          ag * keep + fl.x + fs.x,
                          ao * keep + fl.y + fs.y,
                          zc.y * area);
+        mean_shop = fs.x;
     }
     let a = mix(walk, mean, w_mean);   // (lit glass, glass, openings, plant)
-    let lit = city_lit_pane(cc, refl, through, fog, shown);
+    let cyan = CITY_SHOP_CYAN_FRAC * mix(walk_shop, mean_shop, w_mean)
+               / max(a.x, 1e-6);
+    let lit = city_lit_pane(cc, refl, through, fog, shown, cyan);
     var acc = city_win_add(city_win_zero(), refl, a.y - a.x, fog, shown);
     acc = CityWinSum(acc.shown + lit.shown * a.x,
                      acc.light + lit.light * a.x);
