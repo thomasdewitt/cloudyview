@@ -20,7 +20,9 @@ first use with cargo).
 Numbers are for THIS driver (NVIDIA on Vulkan: Register Count, Binary Size,
 Stack Size). Apple's compiler makes different choices; treat a count as a
 statement about this card that usually generalizes, and time on the Mac.
-Pure compile — no GPU work runs, so it does not need tools/gpulock.
+Run it under tools/gpulock. It draws nothing, but building the pipeline
+opens a Vulkan device, and a held GPU context makes a locked timing run
+refuse (tools/gpu_idle; three unlocked runs did, 2026-11-09).
 """
 
 import argparse

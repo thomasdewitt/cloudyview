@@ -2776,6 +2776,8 @@ fn city_rand4(s: vec2<u32>) -> vec4<f32> {
 // sharing one of them — a different stream only rotates it — would lock a
 // city draw to, say, the subpixel offset for every frame of a pixel. Adding
 // dimensions would change every existing alpha, and the day scene with them.
+// (The wet reflection's draws have their own generator instead, an R4 of its
+// own constant: city_refl_rand.)
 fn city_frame_rand(pixel: vec2<u32>, frame: u32, stream: u32) -> vec4<f32> {
     return city_rand4(vec2<u32>(pixel.x ^ (frame * 0x9e3779b9u),
                                 pixel.y + frame * 0x85ebca6bu
@@ -2783,7 +2785,6 @@ fn city_frame_rand(pixel: vec2<u32>, frame: u32, stream: u32) -> vec4<f32> {
 }
 const CITY_RAND_REFLECT: u32 = 1u;
 const CITY_RAND_MEDIA: u32 = 2u;
-const CITY_RAND_ROULETTE: u32 = 3u;
 
 // The city repeats at the tile, exactly. One texel is one block, so the
 // block count per tile IS the glow texture's mip-0 dimension (1024 at the
@@ -3981,8 +3982,18 @@ const CITY_REFL_ALPHA_DAMP: f32 = 0.08;
 // canyon and reach the towers beyond it; a rising ray that has found nothing
 // by then sees sky.
 const CITY_REFL_RANGE: f32 = 600.0;
-// Lobes that carry less than this are traced only by Russian roulette.
-const CITY_REFL_RR: f32 = 0.15;
+// Lobes that carry less than this are traced only by Russian roulette: a
+// lobe of weight w < RR is traced with probability w / RR and counted RR / w
+// times over, binary noise on the dim film (a steep view, a damp patch). At
+// 0.05 rather than the first 0.15, Thomas's wet avenue (2026-11-08) traces
+// more of them: its one-sample spread 8 % lower (3.54 vs 3.90 levels on
+// the street, with the stratified draws), its first 8 frames 8 % nearer the
+// converged mean, for +1.6 % of the frame (768x432, High, interleaved with
+// a +0.7 % null; tier verified in every tab). Unbiased in
+// linear light; the accumulation averages tone-mapped samples, so fewer
+// rare RR / w samples brighten a converged wet reflection a little (+0.6
+// levels mean on reflective pixels), toward the tone map of the true mean.
+const CITY_REFL_RR: f32 = 0.05;
 // Footprint over which the traced reflection hands over to its mean. Past
 // it a wet pixel reflects the environment estimate, and pays nothing.
 const CITY_REFL_LOD: vec2<f32> = vec2<f32>(0.30, 0.80);
@@ -7235,7 +7246,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         }
     }
     if (part == CITY_PART_WALL) {
-        e = e + cc_facade_detail(cc, hw, l.x, l.y, fp);
+        e = e + cc_facade_detail(cc, hw, dir, l.x, l.y, fp);
         // A curtain wall's spandrels are glass too: the same reflection the
         // flat facade gives the whole skin.
         if (cc.win_style == 3) {
@@ -7883,7 +7894,7 @@ fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
     }
     // Whatever the facade-layer components add: signage, screens, a
     // warehouse's cladding and doors.
-    return e + cc_facade_detail(cc, h, uc, vc, fp);
+    return e + cc_facade_detail(cc, h, dir, uc, vc, fp);
 }
 
 // >>> GENERATED CITY COMPONENTS — written by tools/compose_city.py from
@@ -8401,8 +8412,8 @@ fn cc_facadeworks_draw(cc: CityCell) -> vec2<u32> {
     return pcg2d(cc.seed ^ vec2<u32>(0x7f4a7c15u, 0x2b3d8e11u));
 }
 
-fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                         fp: f32) -> vec3<f32> {
+fn cc_facadeworks_detail(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                         uc: f32, vc: f32, fp: f32) -> vec3<f32> {
     // One draw per building for the sign's structure. pcg2d gives 64 bits;
     // the continuous draws are taken later, behind the sign's own reject.
     //
@@ -8614,6 +8625,18 @@ const cc_skyway_STR_FP_HI: f32 = 4.8;
 const cc_skyway_RAIL_FACE_IN: f32 = 0.60;
 const cc_skyway_RAIL_FACE_OUT: f32 = 0.34;
 const cc_skyway_RAIL_BAND: f32 = 0.35;  // lit depth below the rail top (m)
+// The spill: what the strip throws down the OUTSIDE of the barrier and on
+// down the deck's fascia below it. Without it the side of a deck was near-
+// black from the band to the soffit — a 2.5 m slab with nothing on it once
+// the fascia was drawn at all (Thomas's flights, 2026-11). It falls off
+// with depth below the rail top, it is scalloped along the deck under each
+// lamp exactly as the wash on the road is (the same rhythm, and so the same
+// far mean), and an expansion joint breaks it, which is what lets you read
+// from the side where one span ends and the next begins. Dim on purpose: a
+// third of display at the fascia's top, near-black at its foot, against a
+// road that runs to white under the same lamps.
+const cc_skyway_SPILL_AMP: f32 = 0.05;
+const cc_skyway_SPILL_E: f32 = 0.60;    // e-folding down the face (m)
 // The wash the strings throw across the deck. This is half the artery — but
 // it is a GRADIENT, not a bar, and the difference is everything. At exposure
 // 6 with a white point of 15 the tone map has already spent most of its range
@@ -9145,19 +9168,42 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let j_mul = 1.0 + cc_skyway_JNT_STEEL * max(joint, 0.0)
                     + cc_skyway_JNT_DARK * min(joint, 0.0);
 
+    // The strings' rhythm along the deck: scalloped under the individual
+    // lamps, a between-lamp floor plus a pool, handed to the pattern's own
+    // mean at the same footprint where the dashes themselves dissolve. The
+    // wash across the road and the spill down the outside share it.
+    let q = fract(s / cc_skyway_STR_P - 0.5 * duty);
+    let dd = min(q, 1.0 - q) * cc_skyway_STR_P;
+    let pool = exp(-dd * dd
+                   / (2.0 * cc_skyway_SCALLOP_S * cc_skyway_SCALLOP_S));
+    let pool_mean = 2.5066 * cc_skyway_SCALLOP_S / cc_skyway_STR_P;
+    let rhythm = cc_skyway_SCALLOP
+        + (1.0 - cc_skyway_SCALLOP) * mix(pool, pool_mean, str_lod);
+    // The spill at this depth below the rail top (zero above it: the rail's
+    // own top and the road are lit by the strip and the wash), joint-broken.
+    let below = ztop + cc_skyway_RAIL_H - h.pos.z;
+    let spill = cc_skyway_STR_COLOR
+        * (cc_skyway_SPILL_AMP * rhythm * j_mul
+           * exp(-max(below, 0.0) / cc_skyway_SPILL_E));
+
     if (part == cc_skyway_P_RAIL) {
         var face = 1.0;
+        var outside = false;
         if (h.normal.z < 0.5) {
             let nl = cc_skyway_swap(h.normal, fam);
-            let side = select(cc_skyway_RAIL_FACE_OUT,
-                              cc_skyway_RAIL_FACE_IN, nl.y * lat < 0.0);
+            // A face that looks across the deck, away from its centre line.
+            // (A rail's end, at a joint between two pieces of ribbon, looks
+            // along it, and is neither outside nor in.)
+            outside = abs(nl.y) > 0.5 && nl.y * lat > 0.0;
+            let side = select(cc_skyway_RAIL_FACE_IN,
+                              cc_skyway_RAIL_FACE_OUT, outside);
             // Only the top band of the barrier carries the fixture.
-            let below = ztop + cc_skyway_RAIL_H - h.pos.z;
             face = side * (1.0 - smoothstep(cc_skyway_RAIL_BAND * 0.5,
                                             cc_skyway_RAIL_BAND, below));
         }
         return cc_skyway_CONCRETE * fill
-               + cc_skyway_STR_COLOR * (cc_skyway_STR_RAD * strength * face);
+               + cc_skyway_STR_COLOR * (cc_skyway_STR_RAD * strength * face)
+               + select(vec3<f32>(0.0), spill, outside);
     }
 
     if (part == cc_skyway_P_DECK) {
@@ -9165,15 +9211,6 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // network reads as an artery from altitude. Exponential across, and
         // scalloped along under the individual lamps.
         let din = max(cc_skyway_HW - abs(lat), 0.0);
-        let q = fract(s / cc_skyway_STR_P - 0.5 * duty);
-        let dd = min(q, 1.0 - q) * cc_skyway_STR_P;
-        let pool = exp(-dd * dd
-                       / (2.0 * cc_skyway_SCALLOP_S * cc_skyway_SCALLOP_S));
-        // Between-lamp floor plus pool, handed to the pattern's own mean at
-        // the same footprint where the dashes themselves dissolve.
-        let pool_mean = 2.5066 * cc_skyway_SCALLOP_S / cc_skyway_STR_P;
-        let rhythm = cc_skyway_SCALLOP
-            + (1.0 - cc_skyway_SCALLOP) * mix(pool, pool_mean, str_lod);
         let wash = exp(-din / cc_skyway_WASH_E) * rhythm;
         var e = cc_skyway_ASPHALT * fill
                 + cc_skyway_STR_COLOR * (cc_skyway_WASH_AMP * wash);
@@ -9214,6 +9251,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let district = city_glow_sample(h.pos.xy, 2.0);
     let street_scale = 0.20 + 2.2 * smoothstep(0.02, 0.45, district);
     var up = cc_skyway_UPLIGHT * pools * street_scale;
+    var side_light = vec3<f32>(0.0);
     if (part == cc_skyway_P_PYL) {
         // Column: brightest at its foot, standing in the pool itself.
         up = up * exp(-max(h.pos.z, 0.0) / cc_skyway_PYL_UP_E);
@@ -9227,11 +9265,13 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         up = up * select(0.45, 1.35, h.normal.z < -0.5)
                 * exp(-max(h.pos.z, 0.0) / (2.0 * cc_skyway_PYL_UP_E));
     } else if (h.normal.z > -0.5) {
-        // Fascia, not soffit: it faces sideways, so it catches much less —
-        // and it carries the end of the deck's expansion joint, which is the
-        // only thing on this component that says where one span stops and the
+        // Fascia, not soffit: it faces sideways, so it catches much less of
+        // the street's light — and the strip's spill from above, which runs
+        // on down from the barrier's outside, carries the end of the deck's
+        // expansion joint: the thing that says where one span stops and the
         // next starts when you are looking at it from the side.
         up = up * 0.35 * j_mul;
+        side_light = spill;
     } else {
         // Soffit: the girders the deck is carried on, as shading rather than
         // as geometry — the read is entirely in the banding. The joint runs
@@ -9240,7 +9280,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
             * select(-1.0, 1.0, fract(s / cc_skyway_RIB_P) < 0.5);
         up = up * mix(rib, 1.0, smoothstep(0.0, cc_skyway_RIB_FP, fp)) * j_mul;
     }
-    return cc_skyway_CONCRETE * fill + CITY_LAMP_COLOR * up;
+    return cc_skyway_CONCRETE * fill + CITY_LAMP_COLOR * up + side_light;
 }
 
 // --- component: rooftopworks (rooftopworks.wgsl) ---
@@ -13288,8 +13328,8 @@ fn cc_adscreens_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     return cc_adscreens_outer(p, fp);
 }
 
-fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                       fp: f32) -> vec3<f32> {
+fn cc_adscreens_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+                       vc: f32, fp: f32) -> vec3<f32> {
     let p = cc_adscreens_place(cc, h, uc, vc);
     if (!p.on) {
         return vec3<f32>(0.0);
@@ -16155,8 +16195,8 @@ fn cc_industry_vision(dv: f32, dz: f32) -> bool {
 const cc_industry_VISION_FRAC: f32 = 0.0711;   // 4 x 0.4 x 0.4 / 9
 const cc_industry_SEAM_FRAC: f32 = 0.05;       // 5 x 0.03 / 3
 
-fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
-        -> vec3<f32> {
+fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+                      vc: f32, fp: f32) -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
@@ -18475,12 +18515,13 @@ fn cc_component_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     return vec3<f32>(1.0, 0.0, 1.0);
 }
 
-fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
+fn cc_facade_detail(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                    uc: f32, vc: f32, fp: f32)
         -> vec3<f32> {
     var e = vec3<f32>(0.0);
-    e = e + cc_facadeworks_detail(cc, h, uc, vc, fp);
-    e = e + cc_adscreens_facade(cc, h, uc, vc, fp);
-    e = e + cc_industry_facade(cc, h, uc, vc, fp);
+    e = e + cc_facadeworks_detail(cc, h, dir, uc, vc, fp);
+    e = e + cc_adscreens_facade(cc, h, dir, uc, vc, fp);
+    e = e + cc_industry_facade(cc, h, dir, uc, vc, fp);
     return e;
 }
 
@@ -27045,6 +27086,37 @@ fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
 // roulette. What the puddles lose is the parked cars, the poles, the skyway
 // and the furniture; the lamps they would have shown are city_lamp_glint's,
 // analytically, in the ground's own shading.
+// The reflection's four draws per pixel and frame — the GGX normal (x, y),
+// the lobe (z) and the roulette (w) — as one 4-D R-sequence over the frames
+// (Roberts 2018: alpha_k = phi_4^-k, phi_4 the real root of x^5 = x + 1),
+// rotated per pixel by an integer hash (strat_seed). A parked view's frames
+// then stratify all four together, and the lobe and the roulette stay
+// independent of each other, which the estimator's 1/p weights need (two
+// draws on one 1-D lattice would not be). White noise (city_frame_rand)
+// drew them before; the sky probe's jitter still does.
+// Each dimension has a near neighbour among the strat streams the city
+// runs, and two Weyl sequences whose steps differ by d move nearly in step
+// for ~1/(2d) frames (loose-ends' review): x by the subpixel offset's y
+// (STRAT_ALPHA_2, d 0.020, ~25 frames), y by the moon cone's u (ALPHA_5,
+// 0.015, ~32), z by its v (ALPHA_6, 0.044, ~11), w by the pre-march jitter
+// (ALPHA_9, 0.013, ~37). With eight 1-D streams already on the circle no
+// four steps sit much farther (a search of the golden families and of
+// integer strides of this lattice found 0.02 at best), and none of these
+// pairs shares an integrand (a microfacet normal against a subpixel
+// position, the roulette against the cloud pre-march), so early in a
+// parked accumulation a pair samples near a diagonal of its square instead
+// of all of it and converges regardless — the first 8 frames' error is 8 %
+// lower than dev's white draws all the same.
+const CITY_REFL_R4: vec4<f32> = vec4<f32>(0.8566748838545029, 0.7338918566271260,
+                                          0.6287067210378086, 0.5385972572236101);
+const STRAT_STREAM_CITY_REFLECT: u32 = 9u;
+fn city_refl_rand(pixel: vec2<u32>, frame: u32) -> vec4<f32> {
+    let a = strat_seed(pixel, STRAT_STREAM_CITY_REFLECT);
+    let b = pcg2d(a);
+    return fract(f32(frame) * CITY_REFL_R4
+                 + vec4<f32>(vec2<f32>(a), vec2<f32>(b)) * STRAT_INV_2P32);
+}
+
 fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
                        pixel_angle: f32, frame_index: u32,
                        strat_pixel: vec2<u32>) -> vec3<f32> {
@@ -27058,7 +27130,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
     let h = CityHit(true, t, pos, vec3<f32>(0.0, 0.0, 1.0), 0, cell);
     let fp = pixel_angle * t;
     let g = city_ground(pos.xy, cell, cc, fp);
-    let rnd = city_frame_rand(strat_pixel, frame_index, CITY_RAND_REFLECT);
+    let rnd = city_refl_rand(strat_pixel, frame_index);
     let lobe = city_wet_lobe(h, g, dir, pixel_angle, rnd.xyz);
     if (!lobe.ok) {
         return vec3<f32>(0.0);
@@ -27070,9 +27142,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
     // with probability w / RR and counted RR / w times over when it is.
     let wt = w * (1.0 - lobe.blend);
     let p_tr = min(wt / CITY_REFL_RR, 1.0);
-    let roll = city_frame_rand(strat_pixel, frame_index,
-                               CITY_RAND_ROULETTE).x;
-    if (wt > 0.0 && roll < p_tr) {
+    if (wt > 0.0 && rnd.w < p_tr) {
         let ro = vec3<f32>(pos.xy, pos.z + 0.02);
         let hr = city_trace(ro, lobe.r, 0.0, CITY_REFL_RANGE,
                             CITY_TRACE_PLAIN);
@@ -27082,7 +27152,9 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
             // would have been.
             let far = ro + CITY_REFL_RANGE * lobe.r;
             l = city_fog(city_reflect_sky(u.cam_origin.xyz + t * dir, lobe.r,
-                                          rnd.w),
+                                          city_frame_rand(strat_pixel,
+                                                          frame_index,
+                                                          CITY_RAND_REFLECT).w),
                          ro, lobe.r, CITY_REFL_RANGE, far);
         } else {
             let fp_r = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;

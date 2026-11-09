@@ -8,7 +8,6 @@ pmon sample is stood in for.
 """
 
 import os
-import re
 import subprocess
 import sys
 import time
@@ -209,20 +208,53 @@ def test_an_undriven_chrome_says_so_and_what_it_shows(monkeypatch):
     assert line.endswith("pages: 'soar' http://127.0.0.1:8791/soar/")
 
 
-def test_contamination_says_when_each_neighbour_was_first_seen(monkeypatch):
+def _local(*ymdhms):
+    """Seconds since the epoch of a local wall-clock time."""
+    return time.mktime((*ymdhms, 0, 0, -1))
+
+
+@pytest.mark.parametrize("watched, final", [
+    # The case that failed on dev: a line from 16:52 and a final look at
+    # 08:18 the next morning, where text order is the reverse.
+    ((2026, 11, 8, 16, 52, 3), (2026, 11, 9, 8, 18, 0)),
+    # Either side of midnight.
+    ((2026, 11, 8, 23, 59, 58), (2026, 11, 9, 0, 0, 3)),
+    # The same day, the plain case.
+    ((2026, 11, 9, 9, 0, 0), (2026, 11, 9, 9, 0, 5)),
+], ids=["next_morning", "midnight", "same_day"])
+def test_contamination_lists_neighbours_in_the_order_first_seen(
+        monkeypatch, watched, final):
     """A short-lived client is gone by the time anyone looks; the time a
-    line was first seen lines it up against the other sessions' logs."""
+    line was first seen lines it up against the other sessions' logs. The
+    order is the clock's, not the text's, and the stamp carries the date."""
     w = gpu_idle.Watch()
-    w.fatal = {"pid 7 (chrome) at 14% SM": "16:52:03"}
+    w.fatal = {"pid 7 (chrome) at 14% SM": _local(*watched)}
+    monkeypatch.setattr(gpu_idle, "_now", lambda: _local(*final))
     monkeypatch.setattr(gpu_idle, "survey", lambda seconds: (
         ["pid 8 (python3) holds a GPU context"], []))
     monkeypatch.setattr(gpu_idle.time, "sleep", lambda s: None)
     with pytest.raises(SystemExit) as e:
         gpu_idle.check_quiet(w)
-    lines = str(e.value).splitlines()[1:]
-    assert lines[0] == "  16:52:03 pid 7 (chrome) at 14% SM"
-    assert re.fullmatch(r"  \d\d:\d\d:\d\d pid 8 \(python3\) holds a GPU "
-                        r"context", lines[1]), lines
+    stamp = lambda t: "%04d-%02d-%02d %02d:%02d:%02d" % t
+    assert str(e.value).splitlines()[1:] == [
+        f"  {stamp(watched)} pid 7 (chrome) at 14% SM",
+        f"  {stamp(final)} pid 8 (python3) holds a GPU context"]
+
+
+def test_the_watch_stamps_by_the_clock(monkeypatch):
+    """The watch's first-seen time comes from the same clock check_quiet
+    reads, once per line however often it is seen again."""
+    _pmon_says(monkeypatch, [(os.getppid(), "python3", 90)])
+    ticks = iter(range(1000, 2000))
+    monkeypatch.setattr(gpu_idle, "_now", lambda: float(next(ticks)))
+    with gpu_idle.Watch() as w:
+        deadline = time.monotonic() + 10.0
+        while len(w.fatal) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.6)                  # seen again: must not restamp
+    assert w.error is None
+    # One sample's two lines (the load, the context), stamped once each.
+    assert sorted(w.fatal.values()) == [1000.0, 1001.0], w.fatal
 
 
 def test_a_browser_with_no_devtools_port_names_nobody(monkeypatch):
