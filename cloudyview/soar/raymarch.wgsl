@@ -3934,6 +3934,12 @@ const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
 const CITY_MH_PITCH: f32 = 30.0;
 const CITY_MH_R: f32 = 0.34;
 const CITY_MH_PRESENT: f32 = 0.55;
+// A wet cover's gloss: tyre-polished iron under a film, sheened all over
+// rather than mottled like the asphalt round it, so at night a lid reads as
+// a lid — it catches the lamps (city_lamp_glint) and the lit windows (the
+// film lobe) where dark iron alone was a dark disc on dark asphalt (Thomas,
+// 2026-11-08: a plume from "a random bit of street", its cover unread).
+const CITY_MH_GLOSS: f32 = 0.9;
 // Storm-drain grates: one in each gutter, this far from the cross street's
 // centreline, beyond its crosswalk and stop line.
 const CITY_GRATE_AT: f32 = 5.2;       // past the cross street's building line
@@ -4403,7 +4409,8 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                    - CITY_PUDDLE_DARKEN * puddle);
     g.wet = film;
     g.puddle = puddle;
-    g.gloss = CITY_FILM_GLOSS * film * max(mottle, 0.0);
+    g.gloss = mix(CITY_FILM_GLOSS * film * max(mottle, 0.0), CITY_MH_GLOSS,
+                  mh.x);
     g.walk = select(0.0, w_in + w_kerb, walk_ok);
     // Outside the plot on an edge that carries no street there is no
     // street at all: lot ground, and no kerb to collect water against.
