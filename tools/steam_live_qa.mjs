@@ -33,6 +33,13 @@
 // near 1 km). It is invisible from eye level, where the field (z >= 25 m)
 // never lies between the camera and a plume; ABOVE looks through ~64 m of it.
 //
+// --views a,b runs only the named views (street, above, png).
+// --pose-png FILE adds a third view, "png": the city pose a soar screenshot
+// carries in its render metadata (city.position_m, azimuth, elevation; the
+// camera placed by its city-frame position, so the street under it is the
+// screenshot's), compared at the screenshot's own clock — a reported bug,
+// re-rendered with and without its steam.
+//
 // Auto-exposure is switched off first (it would move the exposure, which is
 // in the scene key, between the two halves of a comparison), the hint panel
 // and the minimap are hidden, and lens water is off.
@@ -44,7 +51,7 @@
 // Needs web/soar/demos (a reflinked copy, not a link) and a QA Chrome with a
 // hardware adapter on --cdp (see tools/soar_cdp.mjs).
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openTab, serveTree } from "./soar_cdp.mjs";
@@ -63,6 +70,7 @@ const cdpPort = flags.get("--cdp") ?? "9333";
 const [W, H] = (flags.get("--size") ?? "960x540").split("x").map(Number);
 const tier = flags.get("--tier") ?? "high";
 const fog = flags.has("--fog") ? Number(flags.get("--fog")) : null;
+const posePng = flags.get("--pose-png") ?? null;
 const KNOWN = new Set(["strip", "compare", "timing"]);
 if (!out || steps.length === 0 || steps.some((s) => !KNOWN.has(s))
     || !(W > 0 && H > 0) || (fog !== null && !(fog > 0))) {
@@ -79,9 +87,37 @@ const VIEWS = {
   above: { x: 4990, y: 17456, z: 70, az: 90, el: -45 },
 };
 const CLOCKS = [100.0, 101.5];       // the compare step's fixed scene clocks
+
+/** The render metadata a soar screenshot carries (its tEXt chunk). */
+function pngMetadata(path) {
+  const b = readFileSync(path);
+  for (let i = 8; i < b.length;) {
+    const n = b.readUInt32BE(i);
+    const type = b.toString("latin1", i + 4, i + 8);
+    if (type === "tEXt") {
+      const text = b.toString("latin1", i + 8, i + 8 + n);
+      const [key, value] = [text.slice(0, text.indexOf("\0")),
+                            text.slice(text.indexOf("\0") + 1)];
+      if (key === "cloudyview.render_metadata") return JSON.parse(value);
+    }
+    i += 12 + n;
+  }
+  throw new Error(`${path} carries no cloudyview.render_metadata`);
+}
+let pngClock = null;
+const only = flags.has("--views") ? flags.get("--views").split(",") : null;
+if (posePng) {
+  const md = pngMetadata(posePng);
+  if (!md.city) throw new Error(`${posePng} is not a city screenshot`);
+  const [cx, cy, cz] = md.city.position_m;
+  VIEWS.png = { city: [cx, cy], z: cz, az: md.camera.azimuth,
+                el: md.camera.elevation, fov: md.camera.fov };
+  pngClock = md.render.scene_time;
+}
 const COMPARE_FRAMES = 64;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const views = () => Object.entries(VIEWS).filter(([n]) => !only || only.includes(n));
 const server = await serveTree(webDir);
 let tab = null;
 try {
@@ -108,13 +144,22 @@ try {
       && e.innerText.length < 400).pop();
     if (hint) hint.style.visibility = "hidden";
     return true; })()`);
+  // Setting the tier prefetches it and its two neighbours, each lighting
+  // method (dozens of city compiles when the probe had chosen another tier).
   await tab.waitFor(`(window.soar.renderer._pendingPipelines?.size ?? 0) === 0
-      && !window.soar.renderer.lightBakePending`, 180000);
+      && !window.soar.renderer.lightBakePending`, 900000);
 
   // Page-side helpers.
   await tab.eval(`window.__steamQa = {
     place(v) { const s = window.soar, c = s.camera;
-      c.displace(v.x - c.position[0], v.y - c.position[1], v.z - c.position[2]);
+      if (v.city) {
+        // By the city frame: displace moves the camera's surface frame with it.
+        c.displace(v.city[0] - c.surfacePosition[0], v.city[1] - c.surfacePosition[1],
+                   v.z - c.position[2]);
+        if (v.fov) c.fov = v.fov;
+      } else {
+        c.displace(v.x - c.position[0], v.y - c.position[1], v.z - c.position[2]);
+      }
       c.azimuth = v.az; c.elevation = v.el; s._wake?.("steam-qa"); return true; },
     half(x) { const f = new Float32Array([x]), i = new Uint32Array(f.buffer)[0];
       return ((i >>> 16) & 0x8000) | ((((i >>> 23) & 0xff) - 112) << 10)
@@ -184,7 +229,7 @@ try {
   for (const step of steps) {
     if (step === "strip") {
       const log = [];
-      for (const [name, v] of Object.entries(VIEWS)) {
+      for (const [name, v] of views()) {
         await tab.eval(`window.__steamQa.place(${JSON.stringify(v)})`);
         await tab.waitFor(`window.soar.renderer.converged`, 120000);
         for (let k = 0; k < 6; k++) {
@@ -202,10 +247,13 @@ try {
       writeFileSync(join(out, "strip.json"), JSON.stringify(log, null, 1));
     } else if (step === "compare") {
       let meta = null;
-      for (const [name, v] of Object.entries(VIEWS)) {
+      for (const [name, v] of views()) {
         await tab.eval(`window.__steamQa.place(${JSON.stringify(v)})`);
         await sleep(1500);
-        for (const T of CLOCKS) {
+        console.log(`compare ${name} camera ${await tab.eval(`JSON.stringify({
+          position: window.soar.camera.position, city: window.soar.camera.surfacePosition,
+          azimuth: window.soar.camera.azimuth, elevation: window.soar.camera.elevation })`)}`);
+        for (const T of name === "png" ? [pngClock] : CLOCKS) {
           const lv = await tab.eval(`window.__steamQa.render(true, ${T}, ${COMPARE_FRAMES})`);
           const ex = await tab.eval(`window.__steamQa.render(false, ${T}, ${COMPARE_FRAMES})`);
           const stem = `${name}-T${T}`;
@@ -220,7 +268,7 @@ try {
       }
       writeFileSync(join(out, "compare.json"), JSON.stringify(meta, null, 1));
     } else if (step === "timing") {
-      for (const [name, v] of Object.entries(VIEWS)) {
+      for (const [name, v] of views()) {
         await tab.eval(`window.__steamQa.place(${JSON.stringify(v)})`);
         await sleep(1500);
         const res = await tab.eval(`(async () => {
