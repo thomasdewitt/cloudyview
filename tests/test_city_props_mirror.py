@@ -73,8 +73,11 @@ KINDS = {"skyway": range(200, 216), "lamp": (100, 101),
 # What the renderer leaves out to save drawing it, which the solids do not:
 # the parked cars inside half a metre a pixel are sphere-traced hulls inside
 # their box (the street stage's), here all drawn as the two boxes they are
-# from there on, and a pole's arm, dropped past 0.3 m a pixel, drawn at
-# every footprint. Neither changes where anything stands.
+# from there on; a pole's arm, dropped past 0.3 m a pixel, drawn at every
+# footprint; and the walks that stop after the first few candidates along a
+# ray — three bays of freeway columns past the ray's entry under a deck,
+# five parking slots and three poles along a kerb — run out to every
+# candidate. None of it changes where anything stands.
 ECONOMY = (
     ("const cc_streetlife_CAR_SDF_FP: f32 = 0.50;",
      "const cc_streetlife_CAR_SDF_FP: f32 = -1.0;"),
@@ -82,6 +85,16 @@ ECONOMY = (
      "    if (fp < 0.30) {",
      "    // luminaire carry the pole, which is what the eye reads anyway.\n"
      "    if (true) {"),
+    ("    for (var q: i32 = 0; q < 3; q = q + 1) {\n"
+     "        let n = na + q * dn;",
+     "    for (var q: i32 = 0; q < 64; q = q + 1) {\n"
+     "        let n = na + q * dn;"),
+    ("    let n_walk = select(5, 12, near);",
+     "    let n_walk = select(64, 64, near);"),
+    ("            for (var k: i32 = 0; k < 3; k = k + 1) {\n"
+     "                let j = jstart + k * jstep;",
+     "            for (var k: i32 = 0; k < 64; k = k + 1) {\n"
+     "                let j = jstart + k * jstep;"),
 )
 
 # Tile frame: x, y in metres from the tile origin, z in world metres; az, el,
@@ -204,8 +217,14 @@ def _drawn(source, t, pixel_angle):
 
 
 def _pixel_angle(view):
+    """The LOD pixel angle the props' cutoffs read (lod_pixel_angle): the
+    larger of the true pixel angle and the view-step LOD angle the probe
+    renders at (ViewState's default)."""
     import math
-    return 2.0 * math.tan(math.radians(0.5 * VIEWS[view][5])) / SIZE[0]
+    from cloudyview.soar_host import ViewState
+    step = math.tan(math.radians(ViewState.view_step_lod_degrees))
+    return max(2.0 * math.tan(math.radians(0.5 * VIEWS[view][5])) / SIZE[0],
+               step)
 
 
 def _source_of(kind):
