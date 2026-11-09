@@ -520,8 +520,8 @@ fn cc_adscreens_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32,
     return cc_adscreens_outer(p, fp);
 }
 
-fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                       fp: f32) -> vec3<f32> {
+fn cc_adscreens_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+                       vc: f32, fp: f32) -> vec3<f32> {
     let p = cc_adscreens_place(cc, h, uc, vc);
     if (!p.on) {
         return vec3<f32>(0.0);

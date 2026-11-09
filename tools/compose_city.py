@@ -53,8 +53,8 @@ HOOKS = {
         "fp: f32)\n"
         "        -> vec3<f32>"),
     "facade": (
-        "fn cc_facade_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
-        "fp: f32)\n"
+        "fn cc_facade_detail(cc: CityCell, h: CityHit, dir: vec3<f32>,\n"
+        "                    uc: f32, vc: f32, fp: f32)\n"
         "        -> vec3<f32>"),
     "facade_cover": (
         "fn cc_facade_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32, "
@@ -179,7 +179,7 @@ def dispatcher(comps):
         "    return vec3<f32>(1.0, 0.0, 1.0);\n}")
 
     facade_body = [
-        f"    e = e + {c['hooks']['facade']}(cc, h, uc, vc, fp);"
+        f"    e = e + {c['hooks']['facade']}(cc, h, dir, uc, vc, fp);"
         for c in hooked("facade")]
     out.append(
         f"{HOOKS['facade']} {{\n"
@@ -300,6 +300,8 @@ def composed_text() -> tuple[list, str]:
 
 def compose(check_only: bool) -> int:
     comps, out = composed_text()
+    # This opens a GPU device to compile-validate (--check too), so run it
+    # under tools/gpulock: a held context makes locked timing refuse.
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()
