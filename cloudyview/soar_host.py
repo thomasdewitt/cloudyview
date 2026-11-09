@@ -1114,8 +1114,7 @@ class SoarRenderer:
         one surface the two hosts had already drifted on.
         """
         wgpu = self.wgpu
-        data = np.ascontiguousarray(sigma, dtype=np.float16)
-        nx, ny, nz = data.shape
+        nx, ny, nz = sigma.shape
         limit = self.device.limits.get("max-texture-dimension-3d", 2048)
         if max(nx, ny, nz) > limit:
             raise ValueError(
@@ -1126,13 +1125,34 @@ class SoarRenderer:
         self._vol_tex = self.device.create_texture(
             size=(nz, ny, nx), dimension="3d", format="r16float",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        # queue.write_texture, never copy_buffer_to_texture: the 256-byte
-        # bytes_per_row rule applies to buffer copies, and nz*2 almost never
-        # satisfies it.
-        self.device.queue.write_texture(
-            {"texture": self._vol_tex}, data.tobytes(),
-            {"bytes_per_row": nz * 2, "rows_per_image": ny}, (nz, ny, nx))
+        self._write_r16_volume(self._vol_tex, sigma)
         self._bind_group = None
+
+    # Texels per write_texture call: the fp16 copy of the field is made a
+    # slab at a time, never whole.
+    _UPLOAD_SLAB_TEXELS = 1 << 24
+
+    def _write_r16_volume(self, tex, sigma: np.ndarray) -> None:
+        """Write (nx, ny, nz) `sigma` into r16float texture `tex` (nz, ny, nx).
+
+        In slabs along x, the texture's depth, so the fp16 copy is a slab's
+        and not the field's (a whole-field copy and its tobytes() twin were
+        two fp16 fields on top of the float one: 8.3 GB at 2048 x 2048 x 495,
+        2026-11-09). An x-slab of a C-order (nx, ny, nz) array is contiguous
+        and z-fastest, exactly a run of the texture's depth slices, so the
+        texels written are the same bytes in the same places as one whole
+        write. queue.write_texture, never copy_buffer_to_texture: the 256-byte
+        bytes_per_row rule applies to buffer copies, and nz*2 almost never
+        satisfies it.
+        """
+        nx, ny, nz = sigma.shape
+        step = max(1, self._UPLOAD_SLAB_TEXELS // max(1, ny * nz))
+        for i0 in range(0, nx, step):
+            slab = np.ascontiguousarray(sigma[i0:i0 + step], dtype=np.float16)
+            self.device.queue.write_texture(
+                {"texture": tex, "origin": (0, 0, i0)}, slab,
+                {"bytes_per_row": nz * 2, "rows_per_image": ny},
+                (nz, ny, slab.shape[0]))
 
     def upload_nest(self, sigma: np.ndarray) -> None:
         """Upload the finer level bound at binding 5.
@@ -1147,16 +1167,13 @@ class SoarRenderer:
                 "This renderer was built with nested=False, so the shader has "
                 "NESTED baked to false and would ignore the nest.")
         wgpu = self.wgpu
-        data = np.ascontiguousarray(sigma, dtype=np.float16)
-        nx, ny, nz = data.shape
+        nx, ny, nz = sigma.shape
         if self._nest_tex is not None:
             self._nest_tex.destroy()
         self._nest_tex = self.device.create_texture(
             size=(nz, ny, nx), dimension="3d", format="r16float",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
-        self.device.queue.write_texture(
-            {"texture": self._nest_tex}, data.tobytes(),
-            {"bytes_per_row": nz * 2, "rows_per_image": ny}, (nz, ny, nx))
+        self._write_r16_volume(self._nest_tex, sigma)
         self._bind_group = None
 
     # -- pipelines ---------------------------------------------------------
