@@ -3788,6 +3788,958 @@ fn city_street_pools(p: vec2<f32>) -> f32 {
     return pool;
 }
 
+// === CITY GRAFFITI (desert-flora) ===
+// CITY GRAFFITI (2026-11-08)
+// ===========================================================================
+//
+// Spray paint on the city's walls, containers, doors and piers (Thomas: "a
+// really excellent addition perhaps could be graffiti, esp on containers/in
+// industrial areas"). What the references show (temp/references/graffiti,
+// Commons photographs), and so what this draws:
+//
+//   * A REACH BAND. Paint lives from ~0.3 to ~2.5 m above whatever the
+//     painter stood on — the foot of every pier of a bridge, the bottom
+//     two and a half metres of a long factory wall — and clean surface
+//     above it.
+//   * CLUMPING BY SURFACE. One wall or pier face is saturated, the next is
+//     clean; a row of containers carries one throw-up a side and bare
+//     stretches. So the unit is a RUN (one wall face, container side, door
+//     or pier face), and a run draws a level first: clean, lightly tagged,
+//     or heavily painted.
+//   * KINDS. TAGS: one colour, one stroke, 0.2-0.45 m tall, in loose rows.
+//     THROW-UPS: 1-2 m bubble letters, a flat fill (silver above all) inside
+//     a dark outline, a white shine tick or two, drips under the fill.
+//     PIECES: the same lettering in bright fills over a background splash.
+//     BUFF: flat patches of wall colour over old paint, a shade off.
+//   * LAYERS. New over old: an old layer of letters, buff over part of it,
+//     a new layer of throw-ups, and tags over everything.
+//   * PALETTE. Silver, black and white most (they read under any lamp),
+//     then red, orange, yellow, blue, purple, lime, cyan, pink.
+//
+// Paint is albedo, nothing else: city_graffiti_paint returns how to change
+// the albedo a surface's owner was about to light, albedo * keep + add —
+// linear in that albedo, so that buff (a patch of the wall's own colour, a
+// shade off) and paint compose the same way at every range. The owner
+// lights the result as it lights its bare surface: the ribs of a
+// corrugated side still shade through the paint.
+//
+// THE MEAN. Each layer is a lattice of slots along the run, one element at
+// most to a slot and wholly inside it, each element drawn from the slot's
+// own hash; the layers' draws are independent. Every element's shape is
+// scale-free (drawn in units of its own height h, every width included),
+// so its painted area is a constant times h^2 in expectation, and painted
+// length at a height inside its box is that constant times h when spread
+// evenly over the box's height. The pixel reads one of three rungs, keyed
+// on its footprint (fpuv, metres along u and v on the surface) against the
+// element's size:
+//
+//   FINE — the strokes, their edges filtered over the footprint exactly
+//     (a straight edge's coverage is the overlap of the footprint with the
+//     painted side);
+//   MID — each element as its box, painted evenly at its expected density,
+//     the box's edges box-filtered over the footprint;
+//   FAR — the layer's expectation along the run: slot odds, the element's
+//     expected density, and the closed-form expected height profile, box-
+//     filtered over the footprint's height (city_graffiti_ramp).
+//
+// FAR is MID's expectation at every height. MID is FINE's in each
+// element's paint and colour, spread evenly over the element's box where
+// FINE has it where the strokes are — a difference only within a few
+// pixels, since MID takes over as the element shrinks to that. The layers
+// composite in expectation as they do pointwise (each element's draws are
+// separate hash lanes, uncorrelated in practice, and the compositing is
+// linear in each layer's coverage), so the paint dissolves into its mean
+// colour and coverage — conditional on the run's level, which a far run
+// still shows. The areas the expectations need are the shader's own shapes,
+// measured (tools/city_graffiti_harness.py means) and pinned by
+// tests/test_city_graffiti.py; the palettes' means are exact.
+
+struct CityGraffitiRun {
+    seed: vec2<u32>,   // the run's own draw
+    len: f32,          // its length along u (m)
+    kind: i32,         // CITY_GRAFFITI_*: what it is, which sets its odds
+}
+
+// albedo * keep + add.
+struct CityGraffitiPaint {
+    keep: f32,
+    add: vec3<f32>,
+}
+
+// One layer's paint at a point (or its expectation): coverage, coverage x
+// paint colour, and coverage x the buff's tone (the share of the albedo
+// beneath that it repaints in the wall's own colour).
+struct CityGraffitiCover {
+    a: f32,
+    ac: vec3<f32>,
+    at: f32,
+}
+
+const CITY_GRAFFITI_CONTAINER: i32 = 0;
+const CITY_GRAFFITI_WALL_STREET: i32 = 1;
+const CITY_GRAFFITI_WALL_COURT: i32 = 2;
+const CITY_GRAFFITI_DOOR: i32 = 3;
+const CITY_GRAFFITI_PIER: i32 = 4;
+const CITY_GRAFFITI_CORE: i32 = 5;
+
+// The layers, oldest first: old letters (throw-ups and pieces), buff, new
+// throw-ups, and three rows of tags.
+const CITY_GRAFFITI_LAYERS: i32 = 6;
+// Slot lengths (m): the longest element of the family fits with room.
+const CITY_GRAFFITI_LETTER_S: f32 = 9.0;
+const CITY_GRAFFITI_BUFF_S: f32 = 6.0;
+const CITY_GRAFFITI_TAG_S: f32 = 1.3;
+// Letters: height h ~ U(H0, H1) standing on the run's baseline; 3-5 glyphs
+// (GLYPHS_MEAN on average) on a pitch of GW_LO-GW_HI h, PAD h of room at
+// each end for their overlap, slant, outlines and splash.
+const CITY_GRAFFITI_LETTER_H0: f32 = 1.1;
+const CITY_GRAFFITI_LETTER_H1: f32 = 2.0;
+const CITY_GRAFFITI_GW_LO: f32 = 0.38;
+const CITY_GRAFFITI_GW_HI: f32 = 0.55;
+const CITY_GRAFFITI_PAD: f32 = 0.42;
+const CITY_GRAFFITI_GLYPHS_MEAN: f32 = 4.0;
+// The share of old-layer letters that are pieces (bright fills, a
+// background splash).
+const CITY_GRAFFITI_PIECE_FRAC: f32 = 0.35;
+// FINE gives way to MID as the footprint passes MID0 to MID1 of the
+// element's height (city_graffiti_element); a tag's strokes sooner.
+const CITY_GRAFFITI_MID0: f32 = 0.12;
+const CITY_GRAFFITI_MID1: f32 = 0.25;
+const CITY_GRAFFITI_TAG_MID0: f32 = 0.05;
+const CITY_GRAFFITI_TAG_MID1: f32 = 0.15;
+// A tag's strokes lose area where they meet as the filter widens: at a
+// junction the blurred union counts one footprint's width of stroke once
+// where it is painted twice. Measured (tools/city_graffiti_harness.py
+// bias; tests/test_city_graffiti.py), the loss is TAG_LOSS of the
+// footprint past TAG_LOSS0, within half a percent to TAG_MID1; FINE puts
+// it back.
+const CITY_GRAFFITI_TAG_LOSS: f32 = 0.6;
+const CITY_GRAFFITI_TAG_LOSS0: f32 = 0.03;
+// Old paint is faded: its colours at FADE_LO-1 of new, FADE_MEAN on average.
+const CITY_GRAFFITI_FADE_LO: f32 = 0.7;
+const CITY_GRAFFITI_FADE_MEAN: f32 = 0.85;
+// Buff: patches from just above the ground, h ~ U(B0, B1), L/h ~ U(.6, 2.2).
+const CITY_GRAFFITI_BUFF_FOOT: f32 = 0.05;
+const CITY_GRAFFITI_BUFF_H0: f32 = 0.8;
+const CITY_GRAFFITI_BUFF_H1: f32 = 2.0;
+const CITY_GRAFFITI_BUFF_A0: f32 = 0.6;
+const CITY_GRAFFITI_BUFF_A1: f32 = 2.2;
+// Tags: h ~ U(T0, T1) centred on their row, L/h ~ U(1.4, 2.6).
+const CITY_GRAFFITI_TAG_H0: f32 = 0.20;
+const CITY_GRAFFITI_TAG_H1: f32 = 0.45;
+const CITY_GRAFFITI_TAG_A0: f32 = 1.4;
+const CITY_GRAFFITI_TAG_A1: f32 = 2.6;
+
+// Painted areas, in units of h^2 (letters: per glyph; buff and tags: per
+// unit of box, L h), from the shader's own shapes
+// (tools/city_graffiti_harness.py means; tests/test_city_graffiti.py).
+// Letters, per glyph (E[area] / E[n]): the fill (the shine painted over it
+// included), the shine, the outline ring, the drips, and a piece's splash
+// ring. Buff and tags, per unit of box (E[area] / E[L], L in h).
+const CITY_GRAFFITI_A_FILL: f32 = 0.1855;
+const CITY_GRAFFITI_A_SHINE: f32 = 0.0030;
+const CITY_GRAFFITI_A_LINE: f32 = 0.1470;
+const CITY_GRAFFITI_A_DRIP: f32 = 0.0008;
+const CITY_GRAFFITI_A_SPLASH: f32 = 0.0554;
+const CITY_GRAFFITI_RHO_BUFF: f32 = 0.8939;
+const CITY_GRAFFITI_RHO_TAG: f32 = 0.1864;
+
+// Spray-paint albedos, dimmed to the belt's convention (cc_industry's
+// liveries: a white box reads 0.45 under a night sky).
+const CITY_GRAFFITI_WHITE: vec3<f32> = vec3<f32>(0.50, 0.50, 0.49);
+const CITY_GRAFFITI_SILVER: vec3<f32> = vec3<f32>(0.40, 0.41, 0.42);
+const CITY_GRAFFITI_BLACK: vec3<f32> = vec3<f32>(0.035, 0.035, 0.038);
+
+fn city_graffiti_hue(x: f32) -> vec3<f32> {
+    // The bright colours, equally likely.
+    if (x < 0.125) { return vec3<f32>(0.36, 0.05, 0.04); }    // red
+    if (x < 0.250) { return vec3<f32>(0.45, 0.16, 0.03); }    // orange
+    if (x < 0.375) { return vec3<f32>(0.48, 0.38, 0.05); }    // yellow
+    if (x < 0.500) { return vec3<f32>(0.25, 0.42, 0.06); }    // lime
+    if (x < 0.625) { return vec3<f32>(0.06, 0.30, 0.38); }    // cyan
+    if (x < 0.750) { return vec3<f32>(0.05, 0.12, 0.36); }    // blue
+    if (x < 0.875) { return vec3<f32>(0.20, 0.08, 0.32); }    // purple
+    return vec3<f32>(0.48, 0.12, 0.26);                       // pink
+}
+const CITY_GRAFFITI_HUE_MEAN: vec3<f32> = vec3<f32>(0.29125, 0.20375, 0.1875);
+
+// A throw-up's fill: silver most, then white, black and the hues.
+fn city_graffiti_fill(x: f32) -> vec3<f32> {
+    if (x < 0.45) { return CITY_GRAFFITI_SILVER; }
+    if (x < 0.57) { return CITY_GRAFFITI_WHITE; }
+    if (x < 0.63) { return CITY_GRAFFITI_BLACK; }
+    return city_graffiti_hue((x - 0.63) / 0.37);
+}
+// 0.45 silver + 0.12 white + 0.06 black + 0.37 hue mean.
+const CITY_GRAFFITI_FILL_MEAN: vec3<f32> =
+    vec3<f32>(0.3498625, 0.3219875, 0.3194550);
+
+// An outline: black mostly, else a hue or white.
+fn city_graffiti_line(x: f32) -> vec3<f32> {
+    if (x < 0.58) { return CITY_GRAFFITI_BLACK; }
+    if (x < 0.66) { return CITY_GRAFFITI_WHITE; }
+    return city_graffiti_hue((x - 0.66) / 0.34);
+}
+// 0.58 black + 0.08 white + 0.34 hue mean.
+const CITY_GRAFFITI_LINE_MEAN: vec3<f32> =
+    vec3<f32>(0.1593250, 0.1295750, 0.1249900);
+
+// A tag: black, white or silver mostly, else a hue.
+fn city_graffiti_ink(x: f32) -> vec3<f32> {
+    if (x < 0.42) { return CITY_GRAFFITI_BLACK; }
+    if (x < 0.58) { return CITY_GRAFFITI_WHITE; }
+    if (x < 0.66) { return CITY_GRAFFITI_SILVER; }
+    return city_graffiti_hue((x - 0.66) / 0.34);
+}
+// 0.42 black + 0.16 white + 0.08 silver + 0.34 hue mean.
+const CITY_GRAFFITI_INK_MEAN: vec3<f32> =
+    vec3<f32>(0.2257250, 0.1967750, 0.1917100);
+
+// How often a run of each kind is lightly tagged and heavily painted:
+// (P(light), P(heavy)); the rest are clean.
+fn city_graffiti_odds(kind: i32) -> vec2<f32> {
+    switch kind {
+        case CITY_GRAFFITI_CONTAINER: { return vec2<f32>(0.25, 0.12); }
+        case CITY_GRAFFITI_WALL_STREET: { return vec2<f32>(0.30, 0.25); }
+        case CITY_GRAFFITI_WALL_COURT: { return vec2<f32>(0.20, 0.05); }
+        case CITY_GRAFFITI_DOOR: { return vec2<f32>(0.35, 0.05); }
+        case CITY_GRAFFITI_PIER: { return vec2<f32>(0.25, 0.40); }
+        default: { return vec2<f32>(0.10, 0.02); }   // CORE
+    }
+}
+
+// A layer's slot odds at a level (1 light, 2 heavy).
+fn city_graffiti_slot_p(layer: i32, level: i32) -> f32 {
+    let heavy = level == 2;
+    switch layer {
+        case 0: { return select(0.0, 0.85, heavy); }
+        case 1: { return select(0.12, 0.30, heavy); }
+        case 2: { return select(0.18, 0.70, heavy); }
+        default: { return select(0.30, 0.70, heavy); }
+    }
+}
+
+// A layer's slot length and lattice offset (m).
+fn city_graffiti_slot(layer: i32) -> vec2<f32> {
+    switch layer {
+        case 0: { return vec2<f32>(CITY_GRAFFITI_LETTER_S, 0.0); }
+        case 1: { return vec2<f32>(CITY_GRAFFITI_BUFF_S, 2.0); }
+        case 2: { return vec2<f32>(CITY_GRAFFITI_LETTER_S, 5.0); }
+        default: {
+            return vec2<f32>(CITY_GRAFFITI_TAG_S, 0.4 * f32(layer - 3));
+        }
+    }
+}
+
+// A tag row's centre height (m).
+fn city_graffiti_tag_row(layer: i32) -> f32 {
+    return 0.95 + 0.5 * f32(layer - 3);
+}
+
+// Exact box-filter coverage of the interval [lo, hi] by the footprint
+// [x - f/2, x + f/2]. Every f here is a footprint, and footprints are
+// positive: city_graffiti_paint's fuv is a pixel's (city_graffiti_footprint
+// of a pixel angle times a distance, both positive).
+fn city_graffiti_span(x: f32, f: f32, lo: f32, hi: f32) -> f32 {
+    // @domain: f > 0, a footprint
+    return clamp((min(x + 0.5 * f, hi) - max(x - 0.5 * f, lo)) / f, 0.0, 1.0);
+}
+
+// Coverage of the painted side (sd < 0) of a straight edge at signed
+// distance sd, by a footprint f wide.
+fn city_graffiti_edge(sd: f32, f: f32) -> f32 {
+    // @domain: f > 0, a footprint
+    return clamp(0.5 - sd / f, 0.0, 1.0);
+}
+
+// R(y) = int_0^y E[h 1(s < h)] ds for h ~ U(h0, h1): the expected painted
+// height profile of a box of height h standing on y = 0, integrated. Its
+// slope is E[h] below h0, (h1^2 - y^2) / (2 (h1 - h0)) between, 0 above;
+// R(inf) = E[h^2].
+fn city_graffiti_ramp(y: f32, h0: f32, h1: f32) -> f32 {
+    let dh = h1 - h0;
+    let eh = 0.5 * (h0 + h1);
+    let yc = clamp(y, 0.0, h1);
+    let lin = eh * min(yc, h0);
+    let z = max(yc, h0);
+    return lin + (h1 * h1 * (z - h0) - (z * z * z - h0 * h0 * h0) / 3.0)
+                 / (2.0 * dh);
+}
+
+// The profile's mean over the footprint [v - f/2, v + f/2]: a box standing
+// on `foot` (centred == false) or centred on it (true, the tags: profile
+// E[h 1(2 |y| < h)], whose integral from 0 is R(2 y) / 2).
+fn city_graffiti_profile(v: f32, f: f32, foot: f32, h0: f32, h1: f32,
+                         centred: bool) -> f32 {
+    let y0 = v - 0.5 * f - foot;
+    let y1 = v + 0.5 * f - foot;
+    // @domain: f > 0, a footprint (both returns divide by it)
+    if (centred) {
+        let r0 = sign(y0) * 0.5 * city_graffiti_ramp(2.0 * abs(y0), h0, h1);
+        let r1 = sign(y1) * 0.5 * city_graffiti_ramp(2.0 * abs(y1), h0, h1);
+        return (r1 - r0) / f;
+    }
+    return (city_graffiti_ramp(y1, h0, h1) - city_graffiti_ramp(y0, h0, h1))
+           / f;
+}
+
+// --- the shapes ------------------------------------------------------------
+
+// A rounded box's signed distance: half sizes b, corner radius r.
+fn city_graffiti_rbox(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + vec2<f32>(r);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// A capsule's (segment a-b, radius r) signed distance.
+fn city_graffiti_capsule(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>,
+                         r: f32) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    // @domain: a != b by construction (a stroke of nonzero length)
+    let k = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * k) - r;
+}
+
+// A bubble letter, signed distance in units of the element's height, at p
+// (from the letter's centre, already turned into its own slant): a fat
+// rounded body and the cuts that make it one of eight letterforms. A cut
+// narrower than two outlines fills with the outline's colour — the drawn
+// line inside a throw-up letter — and a wider one opens onto the wall. The
+// eight: O (a counter), U (a slot from the top), N (one from the bottom),
+// C (one from the right), E (two from the right), S (one from each side,
+// offset), X (one from the top and one from the bottom), R (a small
+// counter high, a slot from the bottom at the right). This is the one
+// function to swap for other letterforms.
+fn city_graffiti_glyph(p: vec2<f32>, b: vec2<f32>, kind: i32,
+                       cut: f32) -> f32 {
+    let r = 0.9 * min(b.x, b.y);
+    var d = city_graffiti_rbox(p, b, r);
+    let top = b.y + 0.1;
+    let side = b.x + 0.1;
+    var c = 1e3;
+    switch kind {
+        case 0: {
+            c = city_graffiti_capsule(p, vec2<f32>(0.0, -0.32 * b.y),
+                                      vec2<f32>(0.0, 0.32 * b.y), cut);
+        }
+        case 1: {
+            c = city_graffiti_capsule(p, vec2<f32>(0.0, top),
+                                      vec2<f32>(0.0, -0.3 * b.y), cut);
+        }
+        case 2: {
+            c = city_graffiti_capsule(p, vec2<f32>(0.0, -top),
+                                      vec2<f32>(0.0, 0.3 * b.y), cut);
+        }
+        case 3: {
+            c = city_graffiti_capsule(p, vec2<f32>(side, 0.0),
+                                      vec2<f32>(-0.25 * b.x, 0.0), cut);
+        }
+        case 4: {
+            c = min(city_graffiti_capsule(p, vec2<f32>(side, 0.36 * b.y),
+                                          vec2<f32>(-0.1 * b.x, 0.36 * b.y),
+                                          cut),
+                    city_graffiti_capsule(p, vec2<f32>(side, -0.36 * b.y),
+                                          vec2<f32>(-0.1 * b.x, -0.36 * b.y),
+                                          cut));
+        }
+        case 5: {
+            c = min(city_graffiti_capsule(p, vec2<f32>(-side, 0.3 * b.y),
+                                          vec2<f32>(0.3 * b.x, 0.3 * b.y),
+                                          cut),
+                    city_graffiti_capsule(p, vec2<f32>(side, -0.3 * b.y),
+                                          vec2<f32>(-0.3 * b.x, -0.3 * b.y),
+                                          cut));
+        }
+        case 6: {
+            c = min(city_graffiti_capsule(p, vec2<f32>(0.0, top),
+                                          vec2<f32>(0.0, 0.25 * b.y), cut),
+                    city_graffiti_capsule(p, vec2<f32>(0.0, -top),
+                                          vec2<f32>(0.0, -0.25 * b.y), cut));
+        }
+        default: {
+            c = min(city_graffiti_capsule(p, vec2<f32>(-0.05 * b.x, 0.38 * b.y),
+                                          vec2<f32>(0.05 * b.x, 0.38 * b.y),
+                                          cut),
+                    city_graffiti_capsule(p, vec2<f32>(0.35 * b.x, -top),
+                                          vec2<f32>(0.2 * b.x, -0.15 * b.y),
+                                          cut));
+        }
+    }
+    return max(d, -c);
+}
+
+// A lettering element's draws: its height, glyphs, glyph pitch and box
+// length (both in h), the box's start (m), outline width and cut radius
+// (in h), slant, whether its letters stack left over right, whether it is
+// a piece, its three colours and its glyphs' seed. The draws that shape it
+// and the draws that colour it are independent, which is what lets its
+// mean colour be its colours' means (city_graffiti_far).
+struct CityGraffitiLetters {
+    h: f32,
+    n: i32,
+    gw: f32,
+    len: f32,
+    x0: f32,
+    ow: f32,
+    cut: f32,
+    slant: f32,
+    left_up: bool,
+    piece: bool,
+    fill: vec3<f32>,
+    fill2: vec3<f32>,     // below `split` (in h); fill again for one tone
+    split: f32,
+    line: vec3<f32>,
+    splash: vec3<f32>,
+    shine: vec3<f32>,
+    gs: vec2<u32>,
+}
+
+// The lettering in slot i of `layer` (0 or 2): draws d (presence, height,
+// glyphs, place), e (piece, fill, outline, glyph pitch), g (outline width,
+// slant, splash, cut and stacking), c (two tones or one, the second fill,
+// the split, the fade). The second fill is drawn from the same palette as
+// the first, so a two-tone letter's mean colour is a one-tone letter's;
+// and old paint's fade is independent of everything, so the layer's mean
+// colour is its fresh colour times FADE_MEAN.
+fn city_graffiti_letters_at(run: CityGraffitiRun, layer: i32, i: i32)
+        -> CityGraffitiLetters {
+    let sl = city_graffiti_slot(layer);
+    let d = city_graffiti_draw(run, layer, i, 0u);
+    let e = city_graffiti_draw(run, layer, i, 1u);
+    let g = city_graffiti_draw(run, layer, i, 2u);
+    let c = city_graffiti_draw(run, layer, i, 3u);
+    var l: CityGraffitiLetters;
+    l.h = mix(CITY_GRAFFITI_LETTER_H0, CITY_GRAFFITI_LETTER_H1, d.y);
+    l.n = 3 + i32(3.0 * d.z);
+    l.gw = mix(CITY_GRAFFITI_GW_LO, CITY_GRAFFITI_GW_HI, e.w);
+    l.len = f32(l.n) * l.gw + 2.0 * CITY_GRAFFITI_PAD;
+    l.x0 = sl.y + f32(i) * sl.x + (sl.x - l.len * l.h) * d.w;
+    l.ow = 0.04 + 0.03 * g.x;
+    l.cut = 0.05 + 0.05 * fract(g.w * 7.31);
+    l.slant = -0.08 + 0.30 * g.y;
+    l.left_up = g.w < 0.5;
+    l.piece = layer == 0 && e.x < CITY_GRAFFITI_PIECE_FRAC;
+    // A piece's fills from the hues, a throw-up's from the fills.
+    l.fill = select(city_graffiti_fill(e.y), city_graffiti_hue(e.y), l.piece);
+    l.fill2 = select(city_graffiti_fill(c.y), city_graffiti_hue(c.y), l.piece);
+    l.fill2 = select(l.fill, l.fill2, c.x < 0.5);
+    l.split = 0.40 + 0.25 * c.z;
+    l.line = city_graffiti_line(e.z);
+    l.splash = city_graffiti_hue(g.z);
+    let fade = select(1.0, mix(CITY_GRAFFITI_FADE_LO, 1.0, c.w), layer == 0);
+    l.fill = l.fill * fade;
+    l.fill2 = l.fill2 * fade;
+    l.line = l.line * fade;
+    l.splash = l.splash * fade;
+    l.shine = CITY_GRAFFITI_WHITE * fade;
+    l.gs = run.seed ^ vec2<u32>(u32(i) * 0x3c6ef372u, u32(layer) + 0xa54ff53au);
+    return l;
+}
+
+// A lettering element's parts at q (units of h, from its box's start and
+// its foot), FINE, their edges filtered over f (the footprint, in h):
+// (fill, shine, outline, drip) and a piece's splash. The fill includes the
+// shine painted over it.
+struct CityGraffitiParts {
+    fill: f32,
+    shine: f32,
+    line: f32,
+    drip: f32,
+    splash: f32,
+}
+
+// Glyph k's frame: its centre, half sizes and letterform, and its shine
+// and drip draws (x: shine or not, y: drip or not, z: where, w: how long).
+struct CityGraffitiGlyph {
+    c: vec2<f32>,
+    b: vec2<f32>,
+    turn: f32,
+    kind: i32,
+    sd: vec4<f32>,
+}
+
+fn city_graffiti_glyph_at(l: CityGraffitiLetters, k: i32)
+        -> CityGraffitiGlyph {
+    let g = city_rand4(pcg2d(l.gs + vec2<u32>(u32(k) * 0x27d4eb2fu,
+                                              0x165667b1u)));
+    var o: CityGraffitiGlyph;
+    // Fat round letters about as wide as they are tall, overlapping their
+    // neighbours by a third to a half, each its own height, a little turned.
+    let hy = 0.30 * (0.94 + 0.12 * g.z);
+    o.c = vec2<f32>(CITY_GRAFFITI_PAD + (f32(k) + 0.5) * l.gw,
+                    0.55 + 0.04 * (g.y - 0.5));
+    o.b = vec2<f32>(0.5 * l.gw * (1.25 + 0.25 * g.x), hy);
+    o.turn = 0.10 * (g.w - 0.5);
+    o.kind = i32(8.0 * fract(g.x * 13.17 + g.y * 7.91));
+    o.sd = city_rand4(pcg2d(l.gs + vec2<u32>(u32(k) * 0x27d4eb2fu,
+                                             0x61c88647u)));
+    return o;
+}
+
+// The point q in glyph o's own frame: about its centre, turned, slanted.
+fn city_graffiti_glyph_p(q: vec2<f32>, o: CityGraffitiGlyph,
+                         slant: f32) -> vec2<f32> {
+    let cs = vec2<f32>(cos(o.turn), sin(o.turn));
+    var p = q - o.c;
+    p = vec2<f32>(cs.x * p.x + cs.y * p.y, -cs.y * p.x + cs.x * p.y);
+    p.x = p.x - slant * p.y;
+    return p;
+}
+
+// The letters drawn one over the next, as a writer paints them: each its
+// fill inside its outline, over the letters before it — which is what
+// draws the outline lines inside a throw-up. A point sees its own glyph's
+// cell and the two beside it (the overlap reaches no further).
+fn city_graffiti_letter_parts(q: vec2<f32>, f: f32, l: CityGraffitiLetters)
+        -> CityGraffitiParts {
+    let k = clamp(i32(floor((q.x - CITY_GRAFFITI_PAD) / l.gw)), 0, l.n - 1);
+    var pt: CityGraffitiParts;
+    pt.fill = 0.0;
+    pt.shine = 0.0;
+    pt.line = 0.0;
+    pt.drip = 0.0;
+    pt.splash = 0.0;
+    var dmin = 1e3;
+    for (var j: i32 = 0; j < 3; j = j + 1) {
+        // Left to right, or right to left: the later letter on top.
+        let kk = select(k + 1 - j, k - 1 + j, l.left_up);
+        if (kk < 0 || kk >= l.n) {
+            continue;
+        }
+        let o = city_graffiti_glyph_at(l, kk);
+        let p = city_graffiti_glyph_p(q, o, l.slant);
+        let d = city_graffiti_glyph(p, o.b, o.kind, l.cut);
+        dmin = min(dmin, d);
+        let fg = city_graffiti_edge(d, f);
+        let rg = city_graffiti_edge(d - l.ow, f);
+        // Shine: a short white tick high on the letter's left shoulder.
+        var sh = 0.0;
+        if (o.sd.x < 0.6) {
+            let s0 = vec2<f32>(-0.55 * o.b.x, 0.45 * o.b.y);
+            sh = city_graffiti_edge(city_graffiti_capsule(
+                p, s0, s0 + vec2<f32>(0.10, 0.07), 0.022), f) * fg;
+        }
+        pt.fill = pt.fill * (1.0 - rg) + fg;
+        pt.shine = pt.shine * (1.0 - rg) + sh;
+        pt.line = pt.line * (1.0 - rg) + (rg - fg);
+    }
+    let ring = city_graffiti_edge(dmin - l.ow, f);
+    if (l.piece) {
+        // A piece's second outline: a band of splash colour round the whole.
+        pt.splash = city_graffiti_edge(dmin - l.ow - 0.03, f) - ring;
+    }
+    // A drip: from under glyph k's fill straight down, outside the letters.
+    let o = city_graffiti_glyph_at(l, k);
+    if (o.sd.y < 0.5) {
+        let xd = o.c.x + 0.7 * (o.sd.z - 0.5) * o.b.x;
+        let foot = o.c.y - o.b.y;
+        let dl = 0.04 + 0.10 * o.sd.w;
+        pt.drip = city_graffiti_span(q.x, f, xd - 0.008, xd + 0.008)
+            * city_graffiti_span(q.y, f, foot - l.ow - dl, foot)
+            * (1.0 - ring);
+    }
+    return pt;
+}
+
+// A stroke of half-width w at signed distance s across it: the
+// footprint's overlap with the stroke, exact for a straight stroke.
+fn city_graffiti_stroke(s: f32, f: f32, w: f32) -> f32 {
+    return city_graffiti_span(s, f, -w, w);
+}
+
+// An ellipse's stroke (centre c, radii r): signed distance across it,
+// first order in the radial error (good for a pen stroke on a bowl).
+fn city_graffiti_ring(p: vec2<f32>, c: vec2<f32>, r: vec2<f32>) -> f32 {
+    return (length((p - c) / r) - 1.0) * min(r.x, r.y);
+}
+
+// Letter k of a tag (cells cw wide from x = 0.05, n of them), distance from
+// its stroke's centre line in units of h, at p (the tag's point, unslanted).
+fn city_graffiti_tag_letter(p: vec2<f32>, k: i32, n: i32, cw: f32,
+                            base: f32, xh: f32, w: vec4<f32>) -> f32 {
+    let x0 = 0.05 + f32(k) * cw;
+    // Each letter its own size (0.9-1.1) and a little off the line.
+    let jit = city_rand4(vec2<u32>(bitcast<u32>(w.z) ^ (u32(k) * 0x9e3779b9u),
+                                   0x85ebca6bu));
+    let sc = 0.9 + 0.2 * jit.x;
+    let lc = (p - vec2<f32>(x0, base + 0.03 * (jit.y - 0.5))) / sc;
+    let kind = i32(6.0 * fract(w.z * 7.13 + f32(k) * 0.618));
+    var s = 1e3;
+    switch kind {
+        case 0: {
+            s = city_graffiti_capsule(lc, vec2<f32>(0.4 * cw, 0.0),
+                                      vec2<f32>(0.4 * cw, 0.66), 0.0);
+        }
+        case 1: {
+            s = abs(city_graffiti_ring(lc, vec2<f32>(0.5 * cw, 0.5 * xh),
+                                       vec2<f32>(0.4 * cw, 0.5 * xh)));
+        }
+        case 2: {
+            let arch = abs(city_graffiti_ring(
+                lc, vec2<f32>(0.5 * cw, 0.35 * xh),
+                vec2<f32>(0.4 * cw, 0.65 * xh)));
+            s = select(1e3, arch, lc.y > 0.35 * xh);
+            s = min(s, city_graffiti_capsule(lc, vec2<f32>(0.1 * cw, 0.0),
+                                             vec2<f32>(0.1 * cw, 0.35 * xh),
+                                             0.0));
+            s = min(s, city_graffiti_capsule(lc, vec2<f32>(0.9 * cw, 0.0),
+                                             vec2<f32>(0.9 * cw, 0.35 * xh),
+                                             0.0));
+        }
+        case 3: {
+            s = min(abs(city_graffiti_ring(lc, vec2<f32>(0.4 * cw, 0.5 * xh),
+                                           vec2<f32>(0.32 * cw, 0.5 * xh))),
+                    city_graffiti_capsule(lc, vec2<f32>(0.8 * cw, 0.0),
+                                          vec2<f32>(0.8 * cw, 0.62), 0.0));
+        }
+        case 4: {
+            s = min(city_graffiti_capsule(lc, vec2<f32>(0.05 * cw, 0.0),
+                                          vec2<f32>(0.95 * cw, xh), 0.0),
+                    city_graffiti_capsule(lc, vec2<f32>(0.05 * cw, xh),
+                                          vec2<f32>(0.95 * cw, 0.0), 0.0));
+        }
+        default: {
+            s = min(min(city_graffiti_capsule(lc, vec2<f32>(0.9 * cw, xh),
+                                              vec2<f32>(0.1 * cw, xh), 0.0),
+                        city_graffiti_capsule(lc, vec2<f32>(0.1 * cw, xh),
+                                              vec2<f32>(0.9 * cw, 0.0), 0.0)),
+                    city_graffiti_capsule(lc, vec2<f32>(0.9 * cw, 0.0),
+                                          vec2<f32>(0.1 * cw, 0.0), 0.0));
+        }
+    }
+    // The join along the baseline to the next letter.
+    if (k < n - 1) {
+        s = min(s, city_graffiti_capsule(lc, vec2<f32>(0.85 * cw, 0.0),
+                                         vec2<f32>(1.1 * cw, 0.0), 0.0));
+    }
+    return s * sc;
+}
+
+// A tag at q (units of h, x from its box's start, y up from its foot),
+// FINE: a handstyle. One stroke 0.08 h wide writes a word of cells 0.38-
+// 0.5 h wide, each one of six letters, each its own size — a stem with an ascender (l, t),
+// a bowl (o), an arch (n), a bowl and stem (a, d), a cross (k, x), a zig
+// (s, z) — on a baseline at a fifth of the box with an x-height of a
+// little over a third, slanted, joined at the baseline; half the tags underline
+// themselves with a swash. `w` holds its draws.
+fn city_graffiti_tag(q: vec2<f32>, f: f32, len: f32, w: vec4<f32>) -> f32 {
+    let half = 0.04;
+    let slant = 0.15 + 0.35 * w.x;
+    let base = 0.19;
+    let xh = 0.36;
+    let p = vec2<f32>(q.x - slant * (q.y - base), q.y);
+    let cw = 0.38 + 0.12 * w.y;
+    // As many cells as fit with the slant's lean at the ascenders' tops.
+    let n = max(i32(floor((len - 0.1 - 0.8 * slant) / cw)), 1);
+    // The letter under p and the two beside it: the slant, the joins and the
+    // filter all carry a stroke across a cell's edge.
+    let k = clamp(i32(floor((p.x - 0.05) / cw)), 0, n - 1);
+    var s = 1e3;
+    for (var kk: i32 = max(k - 1, 0); kk <= min(k + 1, n - 1); kk = kk + 1) {
+        s = min(s, city_graffiti_tag_letter(p, kk, n, cw, base, xh, w));
+    }
+    var c = city_graffiti_stroke(s, f, half);
+    if (w.w < 0.5) {
+        // The swash: a long shallow curve under the word.
+        let xs = q.x / len;
+        let ys = 0.08 + 0.06 * sin(3.14159265 * xs) - 0.05 * xs;
+        c = max(c, city_graffiti_stroke(q.y - ys, f, 0.03)
+                   * city_graffiti_span(q.x, f, 0.05, len - 0.05));
+    }
+    // The junctions' loss to the filter, put back (CITY_GRAFFITI_TAG_LOSS).
+    return min(c / (1.0 - CITY_GRAFFITI_TAG_LOSS
+                    * max(f - CITY_GRAFFITI_TAG_LOSS0, 0.0)), 1.0);
+}
+
+// A buff patch at q (units of h, x from its box's start, y from its foot),
+// FINE: a rounded box with a ragged roller edge.
+fn city_graffiti_buff(q: vec2<f32>, f: f32, len: f32, w: vec4<f32>) -> f32 {
+    let p = q - vec2<f32>(0.5 * len, 0.5);
+    let rag = 0.012 * (sin(37.0 * q.y + 6.2831853 * w.x)
+                       + sin(23.0 * q.x + 6.2831853 * w.y));
+    let d = city_graffiti_rbox(p, vec2<f32>(0.5 * len - 0.03, 0.47), 0.10) + rag;
+    return city_graffiti_edge(d, f);
+}
+
+// --- one layer --------------------------------------------------------------
+
+// Draw `which` (0, 1, 2) of the element in slot i of a layer.
+fn city_graffiti_draw(run: CityGraffitiRun, layer: i32, i: i32,
+                      which: u32) -> vec4<f32> {
+    return city_rand4(pcg2d(run.seed ^ vec2<u32>(
+        u32(layer) * 0x9e3779b9u + which * 0x632be5abu,
+        u32(i) * 0x85ebca6bu + which * 0x1b873593u + 0x27d4eb2fu)));
+}
+
+// A buff patch's or a tag's draws: height h, box length (in h), box start
+// (m), foot (m), the shape's four draws, and the buff's tone or the tag's
+// ink. d = (presence, height, length, place), e = (tone, ink, -, -), g the
+// shape's own.
+struct CityGraffitiMark {
+    h: f32,
+    len: f32,
+    x0: f32,
+    foot: f32,
+    w: vec4<f32>,
+    tone: f32,
+    ink: vec3<f32>,
+}
+
+fn city_graffiti_mark_at(run: CityGraffitiRun, layer: i32, i: i32)
+        -> CityGraffitiMark {
+    let sl = city_graffiti_slot(layer);
+    let d = city_graffiti_draw(run, layer, i, 0u);
+    let e = city_graffiti_draw(run, layer, i, 1u);
+    var m: CityGraffitiMark;
+    if (layer == 1) {
+        m.h = mix(CITY_GRAFFITI_BUFF_H0, CITY_GRAFFITI_BUFF_H1, d.y);
+        m.len = mix(CITY_GRAFFITI_BUFF_A0, CITY_GRAFFITI_BUFF_A1, d.z);
+        m.foot = CITY_GRAFFITI_BUFF_FOOT;
+    } else {
+        m.h = mix(CITY_GRAFFITI_TAG_H0, CITY_GRAFFITI_TAG_H1, d.y);
+        m.len = mix(CITY_GRAFFITI_TAG_A0, CITY_GRAFFITI_TAG_A1, d.z);
+        m.foot = city_graffiti_tag_row(layer) - 0.5 * m.h;
+    }
+    m.x0 = sl.y + f32(i) * sl.x + (sl.x - m.len * m.h) * d.w;
+    m.w = city_graffiti_draw(run, layer, i, 2u);
+    m.tone = 0.85 + 0.40 * e.x;
+    m.ink = city_graffiti_ink(e.y);
+    return m;
+}
+
+// A buff patch's or a tag's cover at q (units of h, from its box's start
+// and its foot), FINE.
+fn city_graffiti_mark_cover(layer: i32, q: vec2<f32>, f: f32,
+                            m: CityGraffitiMark) -> f32 {
+    if (layer == 1) {
+        return city_graffiti_buff(q, f, m.len, m.w);
+    }
+    return city_graffiti_tag(q, f, m.len, m.w);
+}
+
+// Slot i's element of `layer` at (u, v) with the footprint fuv: FINE (its
+// strokes, edges filtered over the footprint) while it stands more than
+// eight pixels tall, MID (its box at its expected density) once it is under
+// four, a blend between (a tag: twenty and under seven). A
+// filtered straight edge keeps its area at any footprint; curved and
+// crossing strokes drift as the filter widens (measured: letters and buff
+// under 1.5% by MID1; tags' junctions lose more, which their FINE puts
+// back), which is where the hand-over sits — by then the letterforms are
+// a few pixels and the box at their mean is what a pixel can show.
+fn city_graffiti_element(run: CityGraffitiRun, layer: i32, i: i32,
+                         u: f32, v: f32, fuv: vec2<f32>, base: f32,
+                         p: f32) -> CityGraffitiCover {
+    var out: CityGraffitiCover;
+    out.a = 0.0;
+    out.ac = vec3<f32>(0.0);
+    out.at = 0.0;
+    if (city_graffiti_draw(run, layer, i, 0u).x >= p) {
+        return out;
+    }
+    let fm = max(fuv.x, fuv.y);
+    if (layer == 0 || layer == 2) {
+        let l = city_graffiti_letters_at(run, layer, i);
+        let q = vec2<f32>(u - l.x0, v - base) / l.h;
+        let f = fm / l.h;
+        if (q.x < -f || q.x > l.len + f || q.y < -f || q.y > 1.0 + f) {
+            return out;
+        }
+        let w_mid = smoothstep(CITY_GRAFFITI_MID0, CITY_GRAFFITI_MID1, f);
+        if (w_mid < 1.0) {
+            let pt = city_graffiti_letter_parts(q, f, l);
+            out.a = (1.0 - w_mid) * (pt.fill + pt.line + pt.drip + pt.splash);
+            // The fill's two tones either side of the split, the drips the
+            // lower one's.
+            let lo = city_graffiti_span(q.y, f, -1.0, l.split);
+            let fq = mix(l.fill, l.fill2, lo);
+            out.ac = (1.0 - w_mid)
+                * ((pt.fill - pt.shine) * fq + pt.drip * l.fill2
+                   + pt.shine * l.shine + pt.line * l.line
+                   + pt.splash * l.splash);
+        }
+        if (w_mid > 0.0) {
+            // MID: the box at its expected density, n glyphs' worth.
+            let cov = w_mid
+                * city_graffiti_span(u, fuv.x, l.x0, l.x0 + l.len * l.h)
+                * city_graffiti_span(v, fuv.y, base, base + l.h)
+                * f32(l.n) / l.len;
+            let splash = select(0.0, CITY_GRAFFITI_A_SPLASH, l.piece);
+            out.a = out.a + cov * (CITY_GRAFFITI_A_FILL + CITY_GRAFFITI_A_LINE
+                                   + CITY_GRAFFITI_A_DRIP + splash);
+            out.ac = out.ac
+                + cov * ((CITY_GRAFFITI_A_FILL - CITY_GRAFFITI_A_SHINE
+                          + CITY_GRAFFITI_A_DRIP) * 0.5 * (l.fill + l.fill2)
+                         + CITY_GRAFFITI_A_SHINE * l.shine
+                         + CITY_GRAFFITI_A_LINE * l.line + splash * l.splash);
+        }
+        return out;
+    }
+    let m = city_graffiti_mark_at(run, layer, i);
+    let q = vec2<f32>(u - m.x0, v - m.foot) / m.h;
+    let f = fm / m.h;
+    if (q.x < -f || q.x > m.len + f || q.y < -f || q.y > 1.0 + f) {
+        return out;
+    }
+    let w_mid = select(
+        smoothstep(CITY_GRAFFITI_TAG_MID0, CITY_GRAFFITI_TAG_MID1, f),
+        smoothstep(CITY_GRAFFITI_MID0, CITY_GRAFFITI_MID1, f), layer == 1);
+    var c = 0.0;
+    if (w_mid < 1.0) {
+        c = (1.0 - w_mid) * city_graffiti_mark_cover(layer, q, f, m);
+    }
+    if (w_mid > 0.0) {
+        c = c + w_mid * city_graffiti_span(u, fuv.x, m.x0, m.x0 + m.len * m.h)
+            * city_graffiti_span(v, fuv.y, m.foot, m.foot + m.h)
+            * select(CITY_GRAFFITI_RHO_TAG, CITY_GRAFFITI_RHO_BUFF, layer == 1);
+    }
+    out.a = c;
+    if (layer == 1) {
+        out.at = c * m.tone;
+    } else {
+        out.ac = c * m.ink;
+    }
+    return out;
+}
+
+// A layer's expectation along the run (FAR) at height v, over a footprint
+// fv tall: the slot odds, the element's expected painted length at each
+// height (city_graffiti_profile) over the slot, the colours' means, and the
+// share of the run its whole slots cover.
+fn city_graffiti_far(run: CityGraffitiRun, layer: i32, v: f32, fv: f32,
+                     base: f32, p: f32) -> CityGraffitiCover {
+    var out: CityGraffitiCover;
+    let sl = city_graffiti_slot(layer);
+    let whole = max(floor((run.len - sl.y) / sl.x), 0.0) * sl.x / run.len;
+    let k = p * whole / sl.x;
+    if (layer == 0 || layer == 2) {
+        // Painted length at v: n A h for each element.
+        let prof = CITY_GRAFFITI_GLYPHS_MEAN * city_graffiti_profile(
+            v, fv, base, CITY_GRAFFITI_LETTER_H0, CITY_GRAFFITI_LETTER_H1,
+            false);
+        let q = select(0.0, CITY_GRAFFITI_PIECE_FRAC, layer == 0);
+        let fade = select(1.0, CITY_GRAFFITI_FADE_MEAN, layer == 0);
+        let fill_mean = mix(CITY_GRAFFITI_FILL_MEAN, CITY_GRAFFITI_HUE_MEAN, q);
+        out.a = k * prof * (CITY_GRAFFITI_A_FILL + CITY_GRAFFITI_A_LINE
+                            + CITY_GRAFFITI_A_DRIP + q * CITY_GRAFFITI_A_SPLASH);
+        out.ac = k * prof * fade
+            * ((CITY_GRAFFITI_A_FILL - CITY_GRAFFITI_A_SHINE
+                + CITY_GRAFFITI_A_DRIP) * fill_mean
+               + CITY_GRAFFITI_A_SHINE * CITY_GRAFFITI_WHITE
+               + CITY_GRAFFITI_A_LINE * CITY_GRAFFITI_LINE_MEAN
+               + q * CITY_GRAFFITI_A_SPLASH * CITY_GRAFFITI_HUE_MEAN);
+        out.at = 0.0;
+        return out;
+    }
+    if (layer == 1) {
+        // Painted length at v: rho L = rho (L/h) h; E[L/h] = 1.4.
+        let prof = 0.5 * (CITY_GRAFFITI_BUFF_A0 + CITY_GRAFFITI_BUFF_A1)
+            * city_graffiti_profile(v, fv, CITY_GRAFFITI_BUFF_FOOT,
+                                    CITY_GRAFFITI_BUFF_H0,
+                                    CITY_GRAFFITI_BUFF_H1, false);
+        out.a = k * prof * CITY_GRAFFITI_RHO_BUFF;
+        out.ac = vec3<f32>(0.0);
+        out.at = out.a * 1.05;           // E[tone]
+        return out;
+    }
+    let prof = 0.5 * (CITY_GRAFFITI_TAG_A0 + CITY_GRAFFITI_TAG_A1)
+        * city_graffiti_profile(v, fv, city_graffiti_tag_row(layer),
+                                CITY_GRAFFITI_TAG_H0, CITY_GRAFFITI_TAG_H1,
+                                true);
+    out.a = k * prof * CITY_GRAFFITI_RHO_TAG;
+    out.ac = out.a * CITY_GRAFFITI_INK_MEAN;
+    out.at = 0.0;
+    return out;
+}
+
+// One layer at (u, v): the elements of the slots the footprint reaches
+// (city_graffiti_element), giving way to the layer's expectation (FAR) as
+// the footprint passes a quarter to three quarters of a slot.
+fn city_graffiti_layer(run: CityGraffitiRun, layer: i32, u: f32, v: f32,
+                       fuv: vec2<f32>, base: f32, level: i32)
+        -> CityGraffitiCover {
+    let p = city_graffiti_slot_p(layer, level);
+    var out: CityGraffitiCover;
+    out.a = 0.0;
+    out.ac = vec3<f32>(0.0);
+    out.at = 0.0;
+    if (p <= 0.0) {
+        return out;
+    }
+    let sl = city_graffiti_slot(layer);
+    // The slots run along u: the footprint's extent along u decides (its
+    // height is the profile's to filter, city_graffiti_far).
+    let w_far = smoothstep(0.25 * sl.x, 0.75 * sl.x, fuv.x);
+    if (w_far < 1.0) {
+        let n_slots = i32(floor((run.len - sl.y) / sl.x));
+        let i = i32(floor((u - sl.y) / sl.x));
+        for (var j: i32 = i - 1; j <= i + 1; j = j + 1) {
+            let s0 = sl.y + f32(j) * sl.x;
+            if (j >= 0 && j < n_slots && u + 0.5 * fuv.x > s0
+                && u - 0.5 * fuv.x < s0 + sl.x) {
+                let c = city_graffiti_element(run, layer, j, u, v, fuv, base,
+                                              p);
+                out.a = out.a + c.a;
+                out.ac = out.ac + c.ac;
+                out.at = out.at + c.at;
+            }
+        }
+    }
+    if (w_far > 0.0) {
+        let c = city_graffiti_far(run, layer, v, fuv.y, base, p);
+        out.a = mix(out.a, c.a, w_far);
+        out.ac = mix(out.ac, c.ac, w_far);
+        out.at = mix(out.at, c.at, w_far);
+    }
+    return out;
+}
+
+// The run's level: 0 clean, 1 light, 2 heavy; and its baseline, where its
+// letters stand (m above the painter's floor).
+fn city_graffiti_level(run: CityGraffitiRun) -> vec2<f32> {
+    let r = city_rand4(pcg2d(run.seed ^ vec2<u32>(0x7f4a7c15u, 0x94d049bbu)));
+    let odds = city_graffiti_odds(run.kind);
+    let level = select(select(0.0, 1.0, r.x < odds.x + odds.y), 2.0,
+                       r.x < odds.y);
+    return vec2<f32>(level, 0.15 + 0.35 * r.y);
+}
+
+// The paint on a run at (u, v): u metres along it, v metres above the
+// painter's floor, fuv the pixel's footprint on the surface along u and v
+// (city_graffiti_footprint). The owner applies it to the albedo it would
+// light: albedo * keep + add.
+fn city_graffiti_paint(run: CityGraffitiRun, u: f32, v: f32,
+                       fuv: vec2<f32>) -> CityGraffitiPaint {
+    var out: CityGraffitiPaint;
+    out.keep = 1.0;
+    out.add = vec3<f32>(0.0);
+    let lv = city_graffiti_level(run);
+    // Nothing on a clean run, outside it, or clear of the reach band.
+    if (lv.x < 0.5 || run.len <= 0.0 || u < 0.0 || u > run.len
+        || v + 0.5 * fuv.y < 0.0 || v - 0.5 * fuv.y > 2.75) {
+        return out;
+    }
+    for (var l: i32 = 0; l < CITY_GRAFFITI_LAYERS; l = l + 1) {
+        let c = city_graffiti_layer(run, l, u, v, fuv, lv.y, i32(lv.x));
+        out.keep = out.keep * (1.0 - c.a) + c.at;
+        out.add = out.add * (1.0 - c.a) + c.ac;
+    }
+    return out;
+}
+
+// A pixel's footprint on a surface along its u and v directions (unit
+// tangents tu, tv, normal n): the pixel's disc of diameter fp, cast along
+// the ray onto the surface — fp sqrt(1 + (t.dir)^2 / (n.dir)^2) along t.
+fn city_graffiti_footprint(fp: f32, n: vec3<f32>, dir: vec3<f32>,
+                           tu: vec3<f32>, tv: vec3<f32>) -> vec2<f32> {
+    let nv = max(abs(dot(n, dir)), 0.05);
+    let au = dot(tu, dir) / nv;
+    let av = dot(tv, dir) / nv;
+    // @domain: both arguments are at least 1
+    return fp * vec2<f32>(sqrt(1.0 + au * au), sqrt(1.0 + av * av));
+}
+// === END CITY GRAFFITI ===
+
 // THE STREET SURFACE (city-street, 2026-09-23)
 // ===========================================================================
 //
