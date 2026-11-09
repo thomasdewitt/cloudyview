@@ -89,17 +89,6 @@ const DESERT_URL = desertUrl(globalThis.location?.search ?? "");
  * lab's candidates (desert-surface's desert-lab). A path on this origin only, so a
  * link cannot point the app at someone else's tile.
  */
-/**
- * Why no witness command can reproduce a view of `scene`, or null: a
- * ?desert= tile (desert-surface's lab) is drawn here and nowhere else —
- * soar_host reads only the shipped desert, and would render that instead.
- */
-export function labDesertNote(scene) {
-  if (!scene?.desert || DESERT_URL === "desert") return null;
-  return `this desert is ${DESERT_URL} (?desert=), which only the browser ` +
-    "draws: witness and `soar track.json` render the shipped desert only.";
-}
-
 function desertUrl(search) {
   const asked = new URLSearchParams(search).get("desert");
   if (asked === null) return "desert";
@@ -109,6 +98,17 @@ function desertUrl(search) {
                     "/lab/runs/<id>/tile.");
   }
   return asked.replace(/\/+$/, "");
+}
+
+/**
+ * Why no witness command can reproduce a view of `scene`, or null: a
+ * ?desert= tile (desert-surface's lab) is drawn here and nowhere else —
+ * soar_host reads only the shipped desert, and would render that instead.
+ */
+export function labDesertNote(scene) {
+  if (!scene?.desert || DESERT_URL === "desert") return null;
+  return `this desert is ${DESERT_URL} (?desert=), which only the browser ` +
+    "draws: witness and `soar track.json` render the shipped desert only.";
 }
 
 // Every key _onKeyDown's switch answers, and nothing else. It is the set the
