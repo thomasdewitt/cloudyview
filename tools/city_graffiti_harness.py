@@ -488,6 +488,10 @@ def main():
     pn.add_argument("--length", type=float, default=24.0)
     pn.add_argument("--out", type=Path, required=True)
     sub.add_parser("rungs")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/city_graffiti_harness.py")
     args = ap.parse_args()
     if args.cmd == "wall":
         args.out.mkdir(parents=True, exist_ok=True)

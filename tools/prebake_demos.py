@@ -20,8 +20,8 @@ Two products per demo, both written to web/soar/demos/<id>/:
       witness — which is now the same shader the browser runs, so the preview
       is the thing itself rather than an impression of it.
 
-    uv run python tools/prebake_demos.py            # everything
-    uv run python tools/prebake_demos.py --only rce --skip-volume
+    tools/gpulock uv run python tools/prebake_demos.py            # everything
+    tools/gpulock uv run python tools/prebake_demos.py --only rce --skip-volume
     uv run python tools/prebake_demos.py --ice-only     # just ice.bin.gz
     uv run python tools/prebake_demos.py --index-only   # regroup, no baking
 """
@@ -1216,6 +1216,12 @@ def main() -> None:
     ap.add_argument("--quality", type=int, default=82,
                     help="WebP quality (default 82)")
     args = ap.parse_args()
+    if not (args.index_only or args.ice_only or args.skip_still):
+        # The still (render_still, auto_exposure) is rendered by witness on
+        # a GPU device: refuse outside tools/gpulock (gpulock_guard). The
+        # other passes only encode and write, and need no lock.
+        from gpulock_guard import require_gpulock
+        require_gpulock("tools/prebake_demos.py")
 
     OUT.mkdir(parents=True, exist_ok=True)
 

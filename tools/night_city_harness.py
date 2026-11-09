@@ -19,8 +19,8 @@ is the point of running `--no-city` first: it renders the ordinary daylight
 ocean scene through this same code path, so a failure afterwards is the
 shader's and not the harness's.
 
-    uv run python tools/night_city_harness.py --no-city     # sanity
-    uv run python tools/night_city_harness.py               # the city
+    tools/gpulock uv run python tools/night_city_harness.py --no-city     # sanity
+    tools/gpulock uv run python tools/night_city_harness.py               # the city
 """
 
 from __future__ import annotations
@@ -181,6 +181,10 @@ def main(argv=None) -> int:
     parser.add_argument("--haze", type=float, default=None,
                         help="aerosol, the app's one haze number "
                              "(default: the app's)")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/night_city_harness.py")
     args = parser.parse_args(argv)
     given_cameras = [name for name, value in (
         ("--camera", args.camera),

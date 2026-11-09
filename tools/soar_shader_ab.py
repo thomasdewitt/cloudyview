@@ -9,13 +9,13 @@ a sharper instrument than that, and this is it: both revisions compiled on one
 device, the same deterministic frames, the float32 accumulator compared
 without ever passing through 8 bits.
 
-    uv run python tools/soar_shader_ab.py                     # HEAD vs tree
-    uv run python tools/soar_shader_ab.py --a git:HEAD~3 --b git:HEAD
-    uv run python tools/soar_shader_ab.py --frames 64 --jitter
-    uv run python tools/soar_shader_ab.py --periodic off --views repro
-    uv run python tools/soar_shader_ab.py --tier low --frames 4 --jitter
-    uv run python tools/soar_shader_ab.py --scene city --frames 4 --jitter
-    uv run python tools/soar_shader_ab.py --scene nested --frames 4 --jitter
+    tools/gpulock uv run python tools/soar_shader_ab.py                     # HEAD vs tree
+    tools/gpulock uv run python tools/soar_shader_ab.py --a git:HEAD~3 --b git:HEAD
+    tools/gpulock uv run python tools/soar_shader_ab.py --frames 64 --jitter
+    tools/gpulock uv run python tools/soar_shader_ab.py --periodic off --views repro
+    tools/gpulock uv run python tools/soar_shader_ab.py --tier low --frames 4 --jitter
+    tools/gpulock uv run python tools/soar_shader_ab.py --scene city --frames 4 --jitter
+    tools/gpulock uv run python tools/soar_shader_ab.py --scene nested --frames 4 --jitter
 
 `--tier` renders with a quality preset's flight sampling and lighting methods
 (step factors, the baked sun-tau cache, the sky probe) rather than the judge
@@ -192,6 +192,10 @@ def main():
                     help="hold B against the renders a --save run wrote "
                          "(another tree, under its own host) instead of "
                          "rendering A here")
+    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
+    # before the parse: -h/--help still answers unlocked.
+    from gpulock_guard import require_gpulock
+    require_gpulock("tools/soar_shader_ab.py")
     args = ap.parse_args()
     # What a saved set was rendered under: an --against run under any other
     # settings would compare different pictures.

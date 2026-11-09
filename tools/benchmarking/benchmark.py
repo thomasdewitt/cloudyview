@@ -193,6 +193,12 @@ def main():
     args = parser.parse_args()
 
     backend = 'llvm' if args.llvm else 'cuda'
+    if backend == 'cuda':
+        # CUDA opens a GPU device: refuse outside tools/gpulock (gpulock_guard).
+        # The LLVM backend runs on the CPU and needs no lock.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from gpulock_guard import require_gpulock
+        require_gpulock("tools/benchmarking/benchmark.py")
 
     print("=" * 60)
     print("CloudyView Benchmark")

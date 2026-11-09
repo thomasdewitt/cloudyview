@@ -17,7 +17,7 @@
 // noise by the numbers, and an estimator's exactness by the means (two
 // unbiased estimators' N-frame means differ by noise of order std/sqrt(N)).
 //
-//   node tools/soar_noise.mjs --web DIR --out DIR [--cdp PORT]
+//   tools/gpulock node tools/soar_noise.mjs --web DIR --out DIR [--cdp PORT]
 //        [--size WxH] [--frames N] [--tier high] [--pose-png FILE] [--turn DEG]
 //
 // The view is the cyberpunk city's start at eye level, looking down a wet
@@ -30,6 +30,11 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { openTab, serveTree } from "./soar_cdp.mjs";
+import { requireGpulock } from "./gpulock_guard.mjs";
+
+// It drives a WebGPU page: refuse outside tools/gpulock, before anything
+// else runs (gpulock_guard.mjs).
+requireGpulock("tools/soar_noise.mjs");
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => { const i = argv.indexOf(n); return i < 0 ? d : argv[i + 1]; };
@@ -42,7 +47,7 @@ const tier = flag("--tier", "high");
 const posePng = flag("--pose-png", null);
 const turn = Number(flag("--turn", "0"));
 if (!webDir || !out || !(N >= 2) || !(W > 0 && H > 0)) {
-  console.error("usage: node tools/soar_noise.mjs --web DIR --out DIR " +
+  console.error("usage: tools/gpulock node tools/soar_noise.mjs --web DIR --out DIR " +
                 "[--cdp PORT] [--size WxH] [--frames N] [--tier T] " +
                 "[--pose-png FILE]");
   process.exit(2);

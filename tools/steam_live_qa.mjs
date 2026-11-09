@@ -8,7 +8,7 @@
 // eye level with a plume ahead, and ABOVE, at 70 m looking steeply down at
 // the same plume.
 //
-//   node tools/steam_live_qa.mjs --out DIR [--web DIR] [--cdp PORT]
+//   tools/gpulock node tools/steam_live_qa.mjs --out DIR [--web DIR] [--cdp PORT]
 //        [--size WxH] [--tier high] [--fog SIGMA] STEP...
 //
 // Steps, run in order on one page:
@@ -55,6 +55,11 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openTab, serveTree } from "./soar_cdp.mjs";
+import { requireGpulock } from "./gpulock_guard.mjs";
+
+// It drives a WebGPU page: refuse outside tools/gpulock, before anything
+// else runs (gpulock_guard.mjs).
+requireGpulock("tools/steam_live_qa.mjs");
 
 const argv = process.argv.slice(2);
 const flags = new Map();
@@ -74,7 +79,7 @@ const posePng = flags.get("--pose-png") ?? null;
 const KNOWN = new Set(["strip", "compare", "timing"]);
 if (!out || steps.length === 0 || steps.some((s) => !KNOWN.has(s))
     || !(W > 0 && H > 0) || (fog !== null && !(fog > 0))) {
-  console.error("usage: node tools/steam_live_qa.mjs --out DIR [--web DIR] " +
+  console.error("usage: tools/gpulock node tools/steam_live_qa.mjs --out DIR [--web DIR] " +
                 "[--cdp PORT] [--size WxH] [--tier T] [--fog SIGMA] " +
                 "strip|compare|timing ...");
   process.exit(2);

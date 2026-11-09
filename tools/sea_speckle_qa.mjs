@@ -5,7 +5,7 @@
 // accumulation restarted from one unjittered sample — the frame the speckle
 // flashes on).
 //
-//   node tools/sea_speckle_qa.mjs --web DIR --out DIR [--cdp PORT]
+//   tools/gpulock node tools/sea_speckle_qa.mjs --web DIR --out DIR [--cdp PORT]
 //        [--size WxH] [--tier high] [--fps 60] [--views a,b]
 //
 // Each view is the marine-congestus-coarse demo over the sea, at a pinned
@@ -35,6 +35,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openTab, serveTree } from "./soar_cdp.mjs";
+import { requireGpulock } from "./gpulock_guard.mjs";
+
+// It drives a WebGPU page: refuse outside tools/gpulock, before anything
+// else runs (gpulock_guard.mjs).
+requireGpulock("tools/sea_speckle_qa.mjs");
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => { const i = argv.indexOf(n); return i < 0 ? d : argv[i + 1]; };
@@ -46,7 +51,7 @@ const tier = flag("--tier", "high");
 const fps = Number(flag("--fps", "60"));
 const only = flag("--views", null)?.split(",") ?? null;
 if (!webDir || !out || !(W > 0 && H > 0) || !(fps > 0)) {
-  console.error("usage: node tools/sea_speckle_qa.mjs --web DIR --out DIR " +
+  console.error("usage: tools/gpulock node tools/sea_speckle_qa.mjs --web DIR --out DIR " +
                 "[--cdp PORT] [--size WxH] [--tier T] [--fps N] [--views a,b]");
   process.exit(2);
 }
