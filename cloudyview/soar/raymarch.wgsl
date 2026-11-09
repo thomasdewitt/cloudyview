@@ -810,14 +810,17 @@ const LIGHT_TRANSFER_SHADOW_SKYLIGHT: f32 = 0.26;
 // specialization the app actually compiles.
 //
 // And look, rather than guess: tools/soar_regcount.py prints the register
-// count and binary size the driver compiled an entry point into (NVIDIA's
-// own pipeline statistics, through Vulkan; a pure compile, no GPU work).
-// It is how the desert's surface pass (now on the `desert` branch) was
-// found at 168 registers and
-// 867 KB with its plant traces compiled in, and 80 without, before any
-// timing. A count is a diagnosis, not a score — fs_main at Low is 96
-// registers today against 80 this morning, and faster — so time what it
-// suggests.
+// count, spills and size of the binary wgpu actually built for an entry
+// point (read back from the NVIDIA driver's shader cache; a pure compile,
+// no GPU work). A count is a diagnosis, not a score — fs_main at Low was
+// 96 registers one day against 80 the morning before, and faster — so
+// time what it suggests. Near 128 a count is not stable either: the driver
+// picks each stage's register target by its own spill-cost estimate, and
+// a stage whose demand sits near it flips between 128 with spills (16
+// warps an SM) and ~160 without (12 warps) on changes that do no work —
+// the city's first stage, 10-14% apart (2026-11-09). Counts quoted before
+// that date came from a compile of our own (naga 26), not the binary the
+// app runs, and can be wrong in either direction.
 
 // The host may bind either r32float (reference/default) or filterable r16float
 // density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.

@@ -1,8 +1,0 @@
-[package]
-name = "regcount"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-ash = "0.38"
-naga = { version = "26", features = ["wgsl-in", "spv-out"] }
