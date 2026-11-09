@@ -7513,9 +7513,9 @@ fn city_shop_window(cc: CityCell, w_in: CityWin) -> CityWin {
         let style_gain = select(select(1.0, 0.80, cc.win_style == 1),
                                 0.55, cc.win_style == 3);
         // @domain: a hash draw, in [0, 1)
+        let bright = 0.25 + 5.0 * pow(w.wh.z, 7.0);
         w.e = city_room_band_colour(4)
-              * (CITY_ROOM_RADIANCE * (0.25 + 5.0 * pow(w.wh.z, 7.0))
-                 * style_gain);
+              * (CITY_ROOM_RADIANCE * bright * style_gain);
     }
     return w;
 }
