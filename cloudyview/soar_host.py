@@ -152,6 +152,8 @@ def encode_surface_level(level: np.ndarray) -> bytes:
         b = b.reshape(-1, 2)
         planes += [b[:, 0].tobytes(), b[:, 1].tobytes()]
     return b"".join(planes)
+
+
 def surface_period_m(surface: str, meta: dict) -> float:
     """The period the surface frame folds at (SceneState.surface_period_m):
     a whole number of tiles (SURFACE_FRAME_TILES) — each surface is a pure

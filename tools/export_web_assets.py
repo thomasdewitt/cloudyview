@@ -113,6 +113,32 @@ def _build_fif_normal_mips(base: np.ndarray) -> list:
     return mips
 
 
+def remove_tile(out: Path) -> None:
+    """Delete the tile in `out` by the level files its meta.json names: a
+    level the old tile had and the new one does not would otherwise ship
+    alongside it. A delete driven by names read from a file, so every name
+    is checked before anything is removed: each must be a bare file name in
+    `out` itself — no separator, no "." or "..", nothing absolute — or the
+    whole delete is refused. The meta is left for the export to overwrite.
+    """
+    meta_path = out / "meta.json"
+    if not meta_path.exists():
+        return
+    meta = json.loads(meta_path.read_text())
+    if "files" in meta and not isinstance(meta["files"], list):
+        raise ValueError(f"{meta_path}: 'files' is not a list: "
+                         f"{meta['files']!r}")
+    names = surface_level_files(meta)
+    bad = [n for n in names
+           if not isinstance(n, str) or n in ("", ".", "..")
+           or "/" in n or "\\" in n or n != Path(n).name]
+    if bad:
+        raise ValueError(f"{meta_path} names files that are not bare names "
+                         f"in {out}: {bad!r}; nothing was deleted.")
+    for name in names:
+        (out / name).unlink(missing_ok=True)
+
+
 def export_ocean() -> dict:
     OCEAN_OUT.mkdir(parents=True, exist_ok=True)
     print(f"FIF ocean tile {FIF_N}^2 at dx={FIF_DX_M} m (seeded {FIF_SEED})")
@@ -123,12 +149,7 @@ def export_ocean() -> dict:
     base[..., 0], base[..., 1], base[..., 2] = nx, ny, nz
     base[..., 3] = 1.0
     mips = _build_fif_normal_mips(base)
-    # The tile being replaced goes first, by the names its meta gives: a
-    # level it had and this one does not would otherwise ship alongside.
-    old_meta = OCEAN_OUT / "meta.json"
-    if old_meta.exists():
-        for name in surface_level_files(json.loads(old_meta.read_text())):
-            (OCEAN_OUT / name).unlink(missing_ok=True)
+    remove_tile(OCEAN_OUT)
     files, wire = [], 0
     for i, mip in enumerate(mips):
         # Planar and byte-shuffled, the desert's encoding: gzip then sees
@@ -257,8 +278,10 @@ def main() -> None:
             parser.error(
                 f"the shipped ocean tile was baked with scaleinvariance "
                 f"{OCEAN_BAKED_WITH}; this is {scaleinvariance.__version__}, "
-                "whose FIF is a different field. Pass --rebake to write a new "
-                "sea (then re-measure raymarch.wgsl's fif_slope_variance).")
+                "whose FIF may draw another field from the same seed. Pass "
+                "--rebake to write a new sea, then re-measure raymarch.wgsl's "
+                "fif_slope_variance and @domain bound and re-fit "
+                "OCEAN_GLINT_ROUGHNESS.")
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
     for name in args.tiles:
         EXPORTS[name]()
