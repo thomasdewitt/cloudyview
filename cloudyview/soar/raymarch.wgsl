@@ -9173,15 +9173,18 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     // own top and the road are lit by the strip and the wash), joint-broken.
     let below = ztop + cc_skyway_RAIL_H - h.pos.z;
     let spill = cc_skyway_STR_COLOR
-        * (cc_skyway_SPILL_AMP * rhythm * exp(-max(below, 0.0) / cc_skyway_SPILL_E)
-           * j_mul);
+        * (cc_skyway_SPILL_AMP * rhythm * j_mul
+           * exp(-max(below, 0.0) / cc_skyway_SPILL_E));
 
     if (part == cc_skyway_P_RAIL) {
         var face = 1.0;
         var outside = false;
         if (h.normal.z < 0.5) {
             let nl = cc_skyway_swap(h.normal, fam);
-            outside = nl.y * lat >= 0.0;
+            // A face that looks across the deck, away from its centre line.
+            // (A rail's end, at a joint between two pieces of ribbon, looks
+            // along it, and is neither outside nor in.)
+            outside = abs(nl.y) > 0.5 && nl.y * lat > 0.0;
             let side = select(cc_skyway_RAIL_FACE_IN,
                               cc_skyway_RAIL_FACE_OUT, outside);
             // Only the top band of the barrier carries the fixture.
