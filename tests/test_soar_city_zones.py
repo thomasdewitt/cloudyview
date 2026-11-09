@@ -38,17 +38,19 @@ except ImportError:
 SHADER = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
 ANCHOR = "    let t_lim = min(select(1e30, chit.t, chit.hit),"
 GRID = 128
-# Out: x the largest |cover - count| over the four shares, y whether the
-# face has any zone, w hit.
+# Out: x the largest |cover - count| over the four shares, y which zones
+# the count found under the footprint (bits), z the largest closed-form
+# share, w hit. Faces are drawn from every tier of the building, so the
+# setbacks' faces (and the lofts on a one-storey top tier) are probed too.
 PROBE = """    if (chit.hit) {
         let pc = city_cell(chit.cell);
         let sd = i32(floor(fract(abs(dir.x) * 97.13 + abs(dir.y) * 31.7)
                            * 3.999));
-        let bx = city_tier_box(pc, 0);
-        let f = city_face_make(pc, bx.bmin, bx.bmax, sd, 0);
+        let tier = min(i32(floor(fract(abs(dir.z) * 57.3) * f32(pc.tiers))),
+                       pc.tiers - 1);
+        let bx = city_tier_box(pc, tier);
+        let f = city_face_make(pc, bx.bmin, bx.bmax, sd, tier);
         let z = city_zones(pc, f);
-        let any = z.blank || z.store || z.core.y > z.core.x
-                  || z.plant.y > 0 || z.crown < (1 << 29) || z.loft.z > 0;
         let r = fract(vec4<f32>(13.7, 7.31, 17.1, 23.9)
                       * (abs(dir.x) + 2.0 * abs(dir.y) + 3.0 * abs(dir.z))
                       * 101.0);
@@ -77,8 +79,12 @@ PROBE = """    if (chit.hit) {
             }
         }
         let d = abs(zc - n / (g * g));
-        return vec4<f32>(max(max(d.x, d.y), max(d.z, d.w)),
-                         select(0.0, 1.0, any), 0.0, 1.0);
+        // Which zones the footprint holds, by the count: solid 1, plant 2,
+        // loft 4, shop 8.
+        let kinds = select(0.0, 1.0, n.x > 0.0) + select(0.0, 2.0, n.y > 0.0)
+                  + select(0.0, 4.0, n.z > 0.0) + select(0.0, 8.0, n.w > 0.0);
+        return vec4<f32>(max(max(d.x, d.y), max(d.z, d.w)), kinds,
+                         max(max(zc.x, zc.y), max(zc.z, zc.w)), 1.0);
     }
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
 """.replace("GRID_N", str(GRID))
@@ -96,6 +102,10 @@ SIZE = (320, 180)
 # a storey too tall 0.33.
 MAX_ERR = 4.0 / GRID
 MIN_ZONED = 2000
+# Every zone kind must be under enough of the probed footprints that the
+# bound means something for it.
+MIN_PER_KIND = 200
+KIND_NAMES = {1: "solid", 2: "plant", 4: "loft", 8: "shop"}
 
 
 def _plain(r, width, height):
@@ -145,7 +155,7 @@ def test_zone_cover_matches_the_bays():
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,
         surface="city")
-    errs = []
+    errs, kinds = [], []
     for x, y, z, az, el, fov in VIEWS:
         r.render(state, ViewState(
             camera_position=[x + TILE_OFFSET[0], y + TILE_OFFSET[1], z],
@@ -154,10 +164,17 @@ def test_zone_cover_matches_the_bays():
             sun_azimuth=310.0, sun_elevation=22.0, exposure=6.0,
             view_step_lod_degrees=0.0), frames=1)
         p = _plain(r, *SIZE)
-        zoned = (p[..., 3] > 0.0) & (p[..., 1] > 0.5)
+        # A probe counts when the count or the closed form finds a zone
+        # under its footprint (either alone is a miss the bound must see).
+        zoned = (p[..., 3] > 0.0) & ((p[..., 1] > 0.5) | (p[..., 2] > 0.0))
         errs.append(p[..., 0][zoned])
+        kinds.append(np.round(p[..., 1][zoned]).astype(int))
     e = np.concatenate(errs)
-    assert e.size >= MIN_ZONED, f"only {e.size} probes on zoned faces"
+    assert e.size >= MIN_ZONED, f"only {e.size} probes over a zone"
+    k = np.concatenate(kinds)
+    for bit, name in KIND_NAMES.items():
+        n = int(((k & bit) != 0).sum())
+        assert n >= MIN_PER_KIND, f"only {n} probes over a {name} zone"
     worst = float(e.max())
     assert worst <= MAX_ERR, (
         f"city_zone_cover misses the bay-by-bay count by {worst:.4f} "

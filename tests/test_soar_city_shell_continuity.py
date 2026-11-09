@@ -468,12 +468,17 @@ STORE_MIN_PIXELS = 5000
 STORE_IN_FRONT = 0.25
 # The shell's band mean against the flat facade's, and the band's dark tail
 # (its 10th percentile) against its glass (90th), both as shown. Measured
-# (2026-11-09, 32 frames, 97369 band pixels): -0.027 and 0.242 with shop
-# windows; the old band, left off the shell's reveals and sills, -0.051 and
-# 0.932; the band laid on every surface instead, +0.000 and 0.961 (no
-# flicker, and no frames).
+# (2026-11-09, 32 frames, 97369 band pixels), mean error, p10/p90 and lit
+# share: -0.027, 0.242, 0.692 with shop windows; -0.015, 0.107, 0.080 with
+# no shops (the ground floor's own lattice); the old band, left off the
+# shell's reveals and sills, -0.051, 0.932, 0.929; the band laid on every
+# surface instead, +0.000, 0.961, 0.999 (no flicker, and no frames).
 MAX_STORE_MEAN_ERR = 0.04
 MAX_STORE_CONTRAST = 0.5
+# And the shops are lit: the share of the band shown brighter than
+# STORE_GLASS (a lit pane; frames, reveals and dark rooms are far below).
+STORE_GLASS = 0.6
+MIN_STORE_LIT = 0.4
 
 
 def _store_probe(level):
@@ -568,7 +573,8 @@ def _find_storefront(level, state):
 
 def _store_measure(renderers, state):
     """(shell band mean / flat band mean - 1, p10 / p90 of the shell's
-    band, pixels, building, camera)."""
+    band, its share shown brighter than STORE_GLASS, pixels, building,
+    camera)."""
     level = build_soar_level()
     (box, cam), store = _find_storefront(level, state)
     w, h = STORE_SIZE
@@ -581,7 +587,8 @@ def _store_measure(renderers, state):
     wall = band & (t_final > t_plain - STORE_IN_FRONT)
     err = float(shell[wall].mean() / flat[wall].mean() - 1.0)
     p10, p90 = np.percentile(shell[wall], [10.0, 90.0])
-    return err, float(p10 / p90), int(wall.sum()), box, cam
+    lit = float((shell[wall] > STORE_GLASS).mean())
+    return err, float(p10 / p90), lit, int(wall.sum()), box, cam
 
 
 @pytest.mark.gpu
@@ -589,12 +596,15 @@ def test_shops_agree_and_keep_their_frames(city):
     """Up close, the shell's shop windows average to what the flat facade
     shows there, and their frames stay darker than their glass."""
     renderers, state, _ = city
-    err, contrast, n, box, cam = _store_measure(renderers, state)
+    err, contrast, lit, n, box, cam = _store_measure(renderers, state)
     assert n >= STORE_MIN_PIXELS, f"only {n} pixels of shop band in view"
     where = f"building {box}, camera {cam}"
     assert abs(err) <= MAX_STORE_MEAN_ERR, (
         f"the shell's shops show {err:+.3f} against the flat facade's "
         f"(bound {MAX_STORE_MEAN_ERR}); {where}")
+    assert lit >= MIN_STORE_LIT, (
+        f"only {lit:.3f} of the shop band shows as lit glass (bound "
+        f"{MIN_STORE_LIT}): the shops are dark or gone; {where}")
     assert contrast <= MAX_STORE_CONTRAST, (
         f"the shop band's dark tail is {contrast:.3f} of its glass (bound "
         f"{MAX_STORE_CONTRAST}): the frames are lost; {where}")

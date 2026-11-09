@@ -6958,7 +6958,9 @@ fn city_storey_rate(cc: CityCell, iv: i32) -> f32 {
         cc.seed.x ^ 0x2545f491u,
         bitcast<u32>(iv) * 0x9e3779b9u
     ));
-    if (fh.x < CITY_DARK_FLOOR_FRAC) {
+    // A lit_frac past 1 is a row of shops (city_store_cell), which never
+    // goes dark with the floor.
+    if (fh.x < CITY_DARK_FLOOR_FRAC && cc.lit_frac <= 1.0) {
         return 0.0;
     }
     let tb = city_rand4(cc.seed ^ vec2<u32>(0x7137449fu, 0xb5c0fbcfu));
@@ -7467,8 +7469,8 @@ fn city_bay_cell(cc: CityCell, b: CityBay) -> CityCell {
 }
 
 // The building as its shops are: shop glass, every one lit (a lit_frac
-// that puts each storey's rate past 1 for any occupancy draw), each its own
-// hue. city_storefront_glow stays the band's radiance as the street sees it
+// that puts each storey's rate past 1 for any occupancy draw, and that
+// city_storey_rate never darkens with the floor), each its own hue. city_storefront_glow stays the band's radiance as the street sees it
 // (the sidewalk's spill, the steam); on the wall the shops are windows.
 fn city_store_cell(cc: CityCell) -> CityCell {
     var c = cc;
@@ -7480,8 +7482,8 @@ fn city_store_cell(cc: CityCell) -> CityCell {
 }
 
 // The building as its lofts are: the big glass, and lit twice as often as
-// the floors below and at least most of the time (the corner flats are the
-// ones lived in). The
+// the floors below, from a lit_frac of at least 0.7 (the corner flats are
+// the ones lived in). The
 // shell draws a loft bay's window from it and the flat facade averages the
 // loft share of a footprint over it, so the two agree by construction.
 const CITY_LOFT_LIT_GAIN: f32 = 2.0;
@@ -7578,8 +7580,8 @@ fn city_zone_rect(z: CityZones, f: CityFace, c: vec2<f32>, hb: vec2<f32>,
         } else {
             u0 = max(u0, b0);
         }
-        v0 = max(c.y - hb.y, f32(z.loft.x) * CITY_FLOOR_H);
-        v1 = min(c.y + hb.y, f32(z.loft.y) * CITY_FLOOR_H);
+        v0 = max(max(c.y - hb.y, f32(z.loft.x) * CITY_FLOOR_H), f.z0);
+        v1 = min(min(c.y + hb.y, f32(z.loft.y) * CITY_FLOOR_H), f.z1);
     }
     return vec4<f32>(0.5 * (u0 + u1), 0.5 * (v0 + v1),
                      max(0.5 * (u1 - u0), 1e-3), max(0.5 * (v1 - v0), 1e-3));
@@ -9313,7 +9315,11 @@ fn city_windows_seen(cc: CityCell, f: CityFace, st: CityShellStyle,
     //   mean = (1 - zoned / bays) lattice + (zoned / bays) (1 - bays) strips
     //          + loft lofts + shop shops + solid wall + plant louvres
     // with every share of the footprint, `zoned` their sum and `strips` the
-    // corner strips' wall. A loft's or a shop's windows are averaged over
+    // corner strips' wall. The lattice is taken out of the zones in
+    // proportion, not window by window: exact in expectation, and on a
+    // pixel that straddles a zone's edge only to the lattice's statistics
+    // (its own windows there are not the ones it gives up), which is the
+    // price of not averaging the lattice a second time. A loft's or a shop's windows are averaged over
     // its own part of the footprint (city_zone_rect): a storey or a few
     // bays, however far the footprint reaches, so a far pixel that touches
     // a ground floor pays for one storey of shops, not its whole height
