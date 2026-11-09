@@ -184,6 +184,18 @@ const cc_skyway_STR_FP_HI: f32 = 4.8;
 const cc_skyway_RAIL_FACE_IN: f32 = 0.60;
 const cc_skyway_RAIL_FACE_OUT: f32 = 0.34;
 const cc_skyway_RAIL_BAND: f32 = 0.35;  // lit depth below the rail top (m)
+// The spill: what the strip throws down the OUTSIDE of the barrier and on
+// down the deck's fascia below it. Without it the side of a deck was near-
+// black from the band to the soffit — a 2.5 m slab with nothing on it once
+// the fascia was drawn at all (Thomas's flights, 2026-11). It falls off
+// with depth below the rail top, it is scalloped along the deck under each
+// lamp exactly as the wash on the road is (the same rhythm, and so the same
+// far mean), and an expansion joint breaks it, which is what lets you read
+// from the side where one span ends and the next begins. Dim on purpose: a
+// third of display at the fascia's top, near-black at its foot, against a
+// road that runs to white under the same lamps.
+const cc_skyway_SPILL_AMP: f32 = 0.05;
+const cc_skyway_SPILL_E: f32 = 0.60;    // e-folding down the face (m)
 // The wash the strings throw across the deck. This is half the artery — but
 // it is a GRADIENT, not a bar, and the difference is everything. At exposure
 // 6 with a white point of 15 the tone map has already spent most of its range
@@ -715,19 +727,39 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let j_mul = 1.0 + cc_skyway_JNT_STEEL * max(joint, 0.0)
                     + cc_skyway_JNT_DARK * min(joint, 0.0);
 
+    // The strings' rhythm along the deck: scalloped under the individual
+    // lamps, a between-lamp floor plus a pool, handed to the pattern's own
+    // mean at the same footprint where the dashes themselves dissolve. The
+    // wash across the road and the spill down the outside share it.
+    let q = fract(s / cc_skyway_STR_P - 0.5 * duty);
+    let dd = min(q, 1.0 - q) * cc_skyway_STR_P;
+    let pool = exp(-dd * dd
+                   / (2.0 * cc_skyway_SCALLOP_S * cc_skyway_SCALLOP_S));
+    let pool_mean = 2.5066 * cc_skyway_SCALLOP_S / cc_skyway_STR_P;
+    let rhythm = cc_skyway_SCALLOP
+        + (1.0 - cc_skyway_SCALLOP) * mix(pool, pool_mean, str_lod);
+    // The spill at this depth below the rail top (zero above it: the rail's
+    // own top and the road are lit by the strip and the wash), joint-broken.
+    let below = ztop + cc_skyway_RAIL_H - h.pos.z;
+    let spill = cc_skyway_STR_COLOR
+        * (cc_skyway_SPILL_AMP * rhythm * exp(-max(below, 0.0) / cc_skyway_SPILL_E)
+           * j_mul);
+
     if (part == cc_skyway_P_RAIL) {
         var face = 1.0;
+        var outside = false;
         if (h.normal.z < 0.5) {
             let nl = cc_skyway_swap(h.normal, fam);
-            let side = select(cc_skyway_RAIL_FACE_OUT,
-                              cc_skyway_RAIL_FACE_IN, nl.y * lat < 0.0);
+            outside = nl.y * lat >= 0.0;
+            let side = select(cc_skyway_RAIL_FACE_IN,
+                              cc_skyway_RAIL_FACE_OUT, outside);
             // Only the top band of the barrier carries the fixture.
-            let below = ztop + cc_skyway_RAIL_H - h.pos.z;
             face = side * (1.0 - smoothstep(cc_skyway_RAIL_BAND * 0.5,
                                             cc_skyway_RAIL_BAND, below));
         }
         return cc_skyway_CONCRETE * fill
-               + cc_skyway_STR_COLOR * (cc_skyway_STR_RAD * strength * face);
+               + cc_skyway_STR_COLOR * (cc_skyway_STR_RAD * strength * face)
+               + select(vec3<f32>(0.0), spill, outside);
     }
 
     if (part == cc_skyway_P_DECK) {
@@ -735,15 +767,6 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // network reads as an artery from altitude. Exponential across, and
         // scalloped along under the individual lamps.
         let din = max(cc_skyway_HW - abs(lat), 0.0);
-        let q = fract(s / cc_skyway_STR_P - 0.5 * duty);
-        let dd = min(q, 1.0 - q) * cc_skyway_STR_P;
-        let pool = exp(-dd * dd
-                       / (2.0 * cc_skyway_SCALLOP_S * cc_skyway_SCALLOP_S));
-        // Between-lamp floor plus pool, handed to the pattern's own mean at
-        // the same footprint where the dashes themselves dissolve.
-        let pool_mean = 2.5066 * cc_skyway_SCALLOP_S / cc_skyway_STR_P;
-        let rhythm = cc_skyway_SCALLOP
-            + (1.0 - cc_skyway_SCALLOP) * mix(pool, pool_mean, str_lod);
         let wash = exp(-din / cc_skyway_WASH_E) * rhythm;
         var e = cc_skyway_ASPHALT * fill
                 + cc_skyway_STR_COLOR * (cc_skyway_WASH_AMP * wash);
@@ -784,6 +807,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let district = city_glow_sample(h.pos.xy, 2.0);
     let street_scale = 0.20 + 2.2 * smoothstep(0.02, 0.45, district);
     var up = cc_skyway_UPLIGHT * pools * street_scale;
+    var side_light = vec3<f32>(0.0);
     if (part == cc_skyway_P_PYL) {
         // Column: brightest at its foot, standing in the pool itself.
         up = up * exp(-max(h.pos.z, 0.0) / cc_skyway_PYL_UP_E);
@@ -797,11 +821,13 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         up = up * select(0.45, 1.35, h.normal.z < -0.5)
                 * exp(-max(h.pos.z, 0.0) / (2.0 * cc_skyway_PYL_UP_E));
     } else if (h.normal.z > -0.5) {
-        // Fascia, not soffit: it faces sideways, so it catches much less —
-        // and it carries the end of the deck's expansion joint, which is the
-        // only thing on this component that says where one span stops and the
+        // Fascia, not soffit: it faces sideways, so it catches much less of
+        // the street's light — and the strip's spill from above, which runs
+        // on down from the barrier's outside, carries the end of the deck's
+        // expansion joint: the thing that says where one span stops and the
         // next starts when you are looking at it from the side.
         up = up * 0.35 * j_mul;
+        side_light = spill;
     } else {
         // Soffit: the girders the deck is carried on, as shading rather than
         // as geometry — the read is entirely in the banding. The joint runs
@@ -810,5 +836,5 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
             * select(-1.0, 1.0, fract(s / cc_skyway_RIB_P) < 0.5);
         up = up * mix(rib, 1.0, smoothstep(0.0, cc_skyway_RIB_FP, fp)) * j_mul;
     }
-    return cc_skyway_CONCRETE * fill + CITY_LAMP_COLOR * up;
+    return cc_skyway_CONCRETE * fill + CITY_LAMP_COLOR * up + side_light;
 }
