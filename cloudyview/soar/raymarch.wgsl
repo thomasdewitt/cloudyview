@@ -1910,34 +1910,35 @@ fn scene_time() -> f32 {
 // @section sea
 
 // ---------------------------------------------------------------------------
-// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 512^2 texels of
-// 0.2 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
+// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 1024^2 texels of
+// 0.1 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
 // bound at 3. A pixel reads the mip its footprint covers; what that mip
 // averaged away is handed back as slope variance — to the microfacet lobe,
 // and in part to a per-pixel slope draw for the sky reflection.
 
 // The slope variance each mip level removed from the tile's normals (level 0
-// removes none; by the top, the tile's whole 0.091 RMS slope). A switch, not
+// removes none; by the top, the tile's whole 0.098 RMS slope). A switch, not
 // a const array: a runtime-indexed array costs a private variable at
 // fs_main's entry and moves every scene's registers.
 fn fif_slope_variance(k: i32) -> f32 {
     switch k {
         case 0: { return 0.000000; }
-        case 1: { return 0.000449; }
-        case 2: { return 0.001407; }
-        case 3: { return 0.002788; }
-        case 4: { return 0.004635; }
-        case 5: { return 0.007078; }
-        case 6: { return 0.008090; }
-        case 7: { return 0.008211; }
-        case 8: { return 0.008242; }
-        default: { return 0.008249; }
+        case 1: { return 0.000523; }
+        case 2: { return 0.001609; }
+        case 3: { return 0.003032; }
+        case 4: { return 0.004580; }
+        case 5: { return 0.006378; }
+        case 6: { return 0.008571; }
+        case 7: { return 0.009524; }
+        case 8: { return 0.009662; }
+        case 9: { return 0.009699; }
+        default: { return 0.009703; }
     }
 }
 
 fn fif_slope_variance_removed(lod: f32) -> f32 {
-    let l0 = clamp(floor(lod), 0.0, 9.0);
-    let l1 = min(l0 + 1.0, 9.0);
+    let l0 = clamp(floor(lod), 0.0, 10.0);
+    let l1 = min(l0 + 1.0, 10.0);
     let f = clamp(lod - l0, 0.0, 1.0);
     return mix(fif_slope_variance(i32(l0)), fif_slope_variance(i32(l1)), f);
 }
@@ -1958,7 +1959,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     if (level1 > level0 && f > 0.0) {
         n = mix(n, ocean_normal_mip_sample(world_xy, level1), f);
     }
-    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering and the mip mix are convex
+    // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering and the mip mix are convex
     return normalize(n);
 }
 
@@ -1977,7 +1978,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 // them away: they are the surface, not noise).
 //
 // A capillary facet is ~1 cm (the base roughness is everything below the
-// tile's 0.2 m). Cells are that times a power of two, so a whole number of
+// tile's 0.1 m). Cells are that times a power of two, so a whole number of
 // them spans the tile and the pattern folds with it.
 const SEA_GLITTER_FACET_M: f32 = 0.0125;          // 102.4 m / 2^13
 const SEA_SUN_SOLID_ANGLE: f32 = 6.8e-5;          // pi (0.266 deg)^2
@@ -2085,7 +2086,7 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
         + 0.5 / dims;
     let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
-    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering is convex
+    // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering is convex
     return normalize(n);
 }
 
@@ -2251,7 +2252,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 
     // The footprint mean slope is not the footprint's shading. Every judge
     // view's water is sub-pixel: at v7's near field one pixel covers tens
-    // of metres of a 0.2 m wave field, so the honest statement is not "this
+    // of metres of a 0.1 m wave field, so the honest statement is not "this
     // facet is flat" but "this pixel contains a slope distribution whose
     // variance the filters removed". Fresnel goes as (1 - n.v)^5 and the sky
     // gradient is steep near the horizon, so at grazing incidence the
@@ -2309,7 +2310,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
-                // Base roughness is what lives BELOW the tile's 0.2 m
+                // Base roughness is what lives BELOW the tile's 0.1 m
                 // texels — ripple no tile holds — plus the variance the
                 // footprint's mip filtered away. Variances add; roughnesses
                 // do not.
@@ -22981,16 +22982,18 @@ fn df_creosote_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
 //        2 flowering)
 //   b = (yaw, lean of the whole plant, unused, unused)
 // Each cane is two tapered rods, the upper one bent a little further out,
-// grey-green and furrowed, with a stout grey spine every DF_OCO_NODE_DS in a
-// spiral (the hardened petioles of the first leaves). In leaf, every spine
-// base carries a small cluster of obovate leaves; flowering, the last
-// ~20 cm of a cane is a panicle of red tubular flowers. Nodes within reach
-// of the ray are an interval of the cane parameter, as for the creosote
-// clumps.
-const DF_OCO_NODE_DS: f32 = 0.035;
+// with a stout grey spine every DF_OCO_NODE_DS (the hardened petioles of the
+// first leaves) on the crests of its spiral ridges (df_oco_bark). In leaf,
+// every spine base carries a small cluster of obovate leaves; flowering,
+// the last ~20 cm of a cane is a panicle of red tubular flowers. Nodes
+// within reach of the ray are an interval of the cane parameter, as for the
+// creosote clumps. DF_OCO_LEAVES / DF_OCO_NODE_DS, the leaves per metre of
+// cane, is what DF_OCO_CAPS_SIGMA was set for (5 every 3.5 cm, 4 every
+// 2.8 cm since the spiral rows): change one and the other moves with it.
+const DF_OCO_NODE_DS: f32 = 0.028;
 const DF_OCO_REACH: f32 = 0.045;      // spines and leaves around the cane (m)
 const DF_OCO_MAX_NODES: i32 = 5;
-const DF_OCO_LEAVES: i32 = 5;
+const DF_OCO_LEAVES: i32 = 4;
 const DF_OCO_FLOWERS: i32 = 9;
 const DF_OCO_EXACT_FP0: f32 = 0.010;
 const DF_OCO_EXACT_FP1: f32 = 0.018;
@@ -23001,7 +23004,8 @@ const DF_OCO_CAPS_SIGMA: f32 = 14.0;
 // Purplish grey-brown bark (the references' cane macro, darkened from a
 // sunlit close-up to an albedo).
 const DF_OCO_CANE: vec3<f32> = vec3<f32>(0.165, 0.130, 0.125);
-const DF_OCO_SPINE: vec3<f32> = vec3<f32>(0.300, 0.280, 0.250);
+// The spines a grey near the bark's (the references' Ocotillothron).
+const DF_OCO_SPINE: vec3<f32> = vec3<f32>(0.215, 0.200, 0.190);
 const DF_OCO_LEAF: vec3<f32> = vec3<f32>(0.080, 0.160, 0.030);
 const DF_OCO_FLOWER: vec3<f32> = vec3<f32>(0.560, 0.075, 0.020);
 
@@ -23036,11 +23040,16 @@ fn df_ocotillo_item(it_in: DfItem, r: vec4<f32>) -> DfItem {
     return it;
 }
 
+// Cane i's azimuth from the plant's centre, from its first draw.
+fn df_oco_phi(it: DfItem, i: i32, draw: f32) -> f32 {
+    return f32(i) * 2.39996 + 0.5 * draw + it.b.x;
+}
+
 // Cane i, segment k (0 lower, 1 upper).
 fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
     let hh = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 13u + 211u, 17u)));
     let h = it.a.x;
-    let phi = f32(i) * 2.39996 + 0.5 * hh.x + it.b.x;
+    let phi = df_oco_phi(it, i, hh.x);
     // Outer canes lean further: a fan, not a broom.
     // @domain: a hash draw, in [0, 1)
     let tilt = it.a.z * sqrt(hh.y);
@@ -23066,6 +23075,115 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
         sg.r1 = 0.25 * r0;
     }
     return sg;
+}
+
+// The bark. An ocotillo cane is ridged: each spine stands at the head of a
+// raised ridge, the decurrent base of the leaf it was, that runs down the
+// cane past the nodes between to the next spine of its row, and the rows
+// wind round the cane — the spiral that marks an ocotillo cane at a glance
+// (Thomas, 2026-11-08: "the hallmark to me of ocotillo is the spiraling
+// bark pattern"; temp/references/ocotillo-bark). DF_OCO_ROWS rows with a
+// node every 2/5 of a turn, so each row carries every fifth spine; narrow
+// dark furrows part the rows, the green cortex showing in them. Each cane
+// winds at its own rate and hand: a row turns once in 27-62 cm, 8-24
+// degrees off the axis at the cane's foot (radius 1.4-1.9 cm) and
+// straighter up the thinning cane (the twist is per metre, not per
+// radius).
+//
+// The azimuth about a cane is measured from a frame that both its segments
+// share: side1, horizontal and normal to the vertical plane the cane bends
+// in, and side0 = side1 x axis in that plane — the lower segment's frame
+// carried through the bend by the bend's own rotation, so a ridge runs on
+// unbroken through the joint. Row m's crest stands at azimuth
+// 2 pi (m + 1/2) / DF_OCO_ROWS + twist * s, s the arc length up the cane,
+// and the furrows halfway between.
+const DF_OCO_ROWS: i32 = 5;
+const DF_OCO_TWIST_MIN: f32 = 10.1;   // rad per metre: a turn in 62 cm
+const DF_OCO_TWIST_MAX: f32 = 23.4;   // a turn in 27 cm
+// A ridge's rise over the row spacing: arches meeting in creases whose
+// walls stand ~30 degrees.
+const DF_OCO_RIDGE_RISE: f32 = 0.18;
+// Albedo change per unit furrow weight (df_oco_bark's w, mean zero): the
+// furrow's floor (w = 3/4) a dark olive-brown, (0.075, 0.075, 0.050), the
+// crests (w = -1/4) a little paler than DF_OCO_CANE, which stays the mean.
+const DF_OCO_FURROW: vec3<f32> = vec3<f32>(-0.120, -0.0733, -0.100);
+
+// Cane i's bark frame: (side1, twist), the twist signed by its hand.
+fn df_oco_bark_frame(it: DfItem, i: i32) -> vec4<f32> {
+    let hx = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 13u + 211u, 17u))).x;
+    let phi = df_oco_phi(it, i, hx);
+    let hw = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 13u + 211u, 23u)));
+    let twist = mix(DF_OCO_TWIST_MIN, DF_OCO_TWIST_MAX, hw.x)
+        * select(-1.0, 1.0, hw.y < 0.5);
+    return vec4<f32>(-sin(phi), cos(phi), 0.0, twist);
+}
+
+// The bark at a hit on cane i, segment k, `along` up the segment, with rod
+// normal n: (shading normal, furrow weight w). Across the rows the ridges
+// are arches, |sin(pi u)|, meeting in creases at whole u, and the furrow's
+// colour is a narrow line in the crease, a Fejer kernel (never negative,
+// mean 1/4); both are their first three harmonics, and each harmonic is
+// filtered exactly by a Gaussian of the pixel's footprint across the rows
+// (its extent on the surface, foreshortening and all). So a pixel reads the
+// bark's average over its own footprint, and once the rows are well below
+// it, w is 0 and the normal the rod's own: the cane's albedo is exactly
+// DF_OCO_CANE, the colour its far forms are lit with.
+fn df_oco_bark(it: DfItem, i: i32, k: i32, along: f32, n: vec3<f32>,
+               dir: vec3<f32>, fp: f32) -> vec4<f32> {
+    let sg = df_oco_cane(it, i, k);
+    let fr = df_oco_bark_frame(it, i);
+    let side1 = fr.xyz;
+    let side0 = cross(side1, sg.ax);
+    let e_theta = cross(sg.ax, n);
+    let el = length(e_theta);
+    // n is the rod's radial normal, unit and normal to the axis, except
+    // where df_rod met the axis itself and returned -dir, which has no
+    // azimuth when the ray runs along the axis.
+    if (el < 1e-4) {
+        return vec4<f32>(n, 0.0);
+    }
+    let s = (f32(k) + along) * sg.len;
+    let r = mix(sg.r0, sg.r1, along);
+    let rows = f32(DF_OCO_ROWS);
+    // Only u's fraction matters (whole harmonics): taken here, it keeps the
+    // cosines' arguments small up a long, fast-winding cane.
+    let u = fract(rows * (atan2(dot(n, side1), dot(n, side0)) - fr.w * s)
+                  / DF_TAU);
+    // u's gradient on the surface: its length is one over the row spacing
+    // across the rows, its direction the across-row tangent.
+    let gu = rows / DF_TAU * (e_theta / (el * r) - fr.w * sg.ax);
+    let inv_p = length(gu);
+    let across = gu / inv_p;
+    // The footprint's extent along `across`: the pixel's disc of diameter
+    // fp, cast along the ray onto the surface.
+    let nv = max(-dot(n, dir), 0.05);
+    let av = dot(across, dir);
+    // @domain: the argument is at least 1
+    let sig = 0.5 * fp * sqrt(1.0 + av * av / (nv * nv)) * inv_p;
+    // Harmonic j's Gaussian gain, exp(-2 (pi j sig)^2).
+    let g = DF_PI * sig;
+    let f1 = exp(-2.0 * g * g);
+    let f2 = exp(-8.0 * g * g);
+    let f3 = exp(-18.0 * g * g);
+    let c1 = cos(DF_TAU * u);
+    let s1 = sin(DF_TAU * u);
+    let c2 = 2.0 * c1 * c1 - 1.0;
+    let s2 = 2.0 * s1 * c1;
+    let c3 = c1 * c2 - s1 * s2;
+    let s3 = s1 * c2 + c1 * s2;
+    // The furrow weight: phi - 1/4, phi = (1 + 2 sum (1 - j/4) cos)/4.
+    let w = 0.5 * (0.75 * f1 * c1 + 0.5 * f2 * c2 + 0.25 * f3 * c3);
+    // The bark's height, rise * P * |sin(pi u)|, is (4/pi) rise * P
+    // * (1/2 - sum cos(2 pi j u) / (4 j^2 - 1)); its slope across the rows,
+    // and the normal leans against it.
+    let slope = 8.0 * DF_OCO_RIDGE_RISE
+        * (f1 * s1 / 3.0 + 2.0 * f2 * s2 / 15.0 + 3.0 * f3 * s3 / 35.0);
+    // across is made of cross(axis, n) and the axis, so where n is
+    // df_rod's radial normal it is normal to n and the sum is at least unit;
+    // at the -dir fallback n is still unit and the sum vanishes only if
+    // slope * across were exactly n.
+    // @domain: zero only if slope * across == n, a measure-zero coincidence
+    return vec4<f32>(normalize(n - slope * across), w);
 }
 
 // The fan as a cone of cane medium, standing on its apex just below the
@@ -23148,6 +23266,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     var best: DfRodHit;
     best.t = tb;
     var code = DF_MAT_CANE;
+    var best_cane = vec2<i32>(0, 0);
     let dither_bits = bitcast<vec2<u32>>(dither);
     var cap_seed = pcg2d(dither_bits ^ it.seed);
     let n = i32(it.a.y);
@@ -23163,6 +23282,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             if (bc.t < best.t) {
                 best = bc;
                 code = DF_MAT_CANE;
+                best_cane = vec2<i32>(i, k);
             }
             if (!exact) {
                 if (state == 1) {
@@ -23184,38 +23304,48 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     }
                 }
             } else {
-                // Spine nodes (and their leaves) within reach of the ray.
+                // Spine nodes (and their leaves) within reach of the ray,
+                // numbered up the whole cane from its foot: node j at arc
+                // length (j + 1/2) DF_OCO_NODE_DS, on row 2j mod 5 (a node
+                // every 2/5 turn), at that row's crest (df_oco_bark). Taken
+                // from the ray's near end, so a cap on the count drops the
+                // far ones: at DF_OCO_MAX_NODES the cap holds 14 cm of cane,
+                // and binds on a ray within ~40 degrees of the cane's axis.
                 let half = sqrt(max(DF_OCO_REACH * DF_OCO_REACH - ap.w * ap.w,
                                     0.0)) / max(ap.z, 0.05);
-                let n_nodes = i32(sg.len / DF_OCO_NODE_DS);
-                let j0 = max(i32(ceil((ap.y - half) / DF_OCO_NODE_DS)), 0);
-                let j1 = min(i32(floor((ap.y + half) / DF_OCO_NODE_DS)),
-                             n_nodes - 1);
-                let helper = select(vec3<f32>(0.0, 0.0, 1.0),
-                                    vec3<f32>(1.0, 0.0, 0.0), sg.ax.z > 0.9);
-                // @domain: helper is swapped for x when sg.ax.z > 0.9: never parallel
-                let side0 = normalize(cross(sg.ax, helper));
-                let side1 = cross(sg.ax, side0);
-                for (var j = j0; j <= min(j1, j0 + DF_OCO_MAX_NODES - 1);
-                     j = j + 1) {
-                    let sj = (f32(j) + 0.5) * DF_OCO_NODE_DS;
-                    // A spiral: 137.5 degrees per node.
-                    let ang = f32(j + i32(k) * 97 + i * 31) * 2.39996;
+                let s_k = f32(k) * sg.len;
+                let j0 = i32(ceil((s_k + max(ap.y - half, 0.0))
+                                  / DF_OCO_NODE_DS - 0.5));
+                // The last node strictly below the segment's top: one at
+                // the joint belongs to the upper segment alone.
+                let j1 = i32(ceil((s_k + min(ap.y + half, sg.len))
+                                  / DF_OCO_NODE_DS - 0.5)) - 1;
+                let fr = df_oco_bark_frame(it, i);
+                let side1 = fr.xyz;
+                let side0 = cross(side1, sg.ax);
+                let up = dot(dir, sg.ax) >= 0.0;
+                for (var nj = 0; nj <= min(j1 - j0, DF_OCO_MAX_NODES - 1);
+                     nj = nj + 1) {
+                    let j = select(j1 - nj, j0 + nj, up);
+                    let s_j = (f32(j) + 0.5) * DF_OCO_NODE_DS;
+                    let sj = s_j - s_k;
+                    let row = (2 * j) % DF_OCO_ROWS;
+                    let ang = DF_TAU * (f32(row) + 0.5) / f32(DF_OCO_ROWS)
+                        + fr.w * s_j;
                     let out = cos(ang) * side0 + sin(ang) * side1;
                     let rr = mix(sg.r0, sg.r1, sj / sg.len);
                     let base = sg.a + sg.ax * sj + out * (0.7 * rr);
                     // @domain: out is perpendicular to sg.ax, both unit
                     let sax = normalize(out + 0.35 * sg.ax);
                     let bs = df_rod(q0, dir, base, sax, 0.014 + 0.4 * rr,
-                                    0.0020, 0.0002, best, 0.0);
+                                    0.0030, 0.0002, best, 0.0);
                     if (bs.t < best.t) {
                         best = bs;
                         code = DF_MAT_OCO_SPINE;
                     }
                     if (state == 1 || (state == 2 && k == 1)) {
                         var ls = pcg2d(it.seed ^ vec2<u32>(
-                            u32(i) * 0x9e3779b9u + u32(k),
-                            u32(j) * 0x85ebca6bu));
+                            u32(i) * 0x9e3779b9u, u32(j) * 0x85ebca6bu));
                         for (var m: i32 = 0; m < DF_OCO_LEAVES; m = m + 1) {
                             ls = pcg2d(ls);
                             let a2 = ang + (df_u01(ls.x) - 0.5) * 2.2;
@@ -23281,26 +23411,26 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.normal = best.n;
     res.mat = vec4<f32>(f32(code) + 0.9 * clamp(best.along, 0.0, 1.0),
                         best.axis);
+    if (code == DF_MAT_CANE) {
+        // The bark, once, at the hit that won: its normal, and its furrow
+        // weight in the fraction (w + 1/4 in [0, 1]).
+        let bk = df_oco_bark(it, best_cane.x, best_cane.y, best.along,
+                             best.n, dir, pixel_angle * best.t);
+        res.normal = bk.xyz;
+        res.mat.x = f32(code) + 0.9 * clamp(bk.w + 0.25, 0.0, 1.0);
+    }
     return res;
 }
 
-fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
-                     L: DesertLight, Ls: DesertLight) -> vec3<f32> {
+fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight,
+                     Ls: DesertLight) -> vec3<f32> {
     let code = i32(floor(h.mat.x));
-    let along = fract(h.mat.x) / 0.9;
     let n = h.normal;
     if (code == DF_MAT_CANE) {
-        // Furrowed bark: the ridges run along the cane, darker grooves
-        // between, averaged once the footprint is wider than a furrow.
-        let ax = h.mat.yzw;
-        // @domain: zero only if the cane lies exactly along (0.01, 0, 1): measure zero
-        let ref_v = normalize(cross(ax, vec3<f32>(0.0, 0.0, 1.0)
-                                    + vec3<f32>(0.01, 0.0, 0.0)));
-        let ang = atan2(dot(cross(ref_v, n), ax), dot(ref_v, n));
-        let furrow = 0.5 + 0.5 * cos(ang * 9.0);
-        let fw = mix(furrow, 0.5, smoothstep(0.002, 0.008, fp));
-        let alb = DF_OCO_CANE * (0.8 + 0.35 * fw);
-        return desert_lambert(alb, n, Ls);
+        // The spiral bark (df_oco_bark): its furrow weight, zero-mean,
+        // packed in the fraction as w + 1/4.
+        let furrow = fract(h.mat.x) / 0.9 - 0.25;
+        return desert_lambert(DF_OCO_CANE + furrow * DF_OCO_FURROW, n, Ls);
     }
     if (code == DF_MAT_OCO_SPINE) {
         return df_fiber(DF_OCO_SPINE, h.mat.yzw, dir, Ls, 1.0);
@@ -25355,7 +25485,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         return df_creosote_shade(h, dir, fp, L, Ls);
     }
     if (h.kind == DF_KIND_OCOTILLO) {
-        return df_ocotillo_shade(h, dir, fp, L, Ls);
+        return df_ocotillo_shade(h, dir, L, Ls);
     }
     if (h.kind == DF_KIND_BOULDER) {
         return df_boulder_shade(h, dir, fp, Ls);

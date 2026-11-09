@@ -46,9 +46,10 @@ export const OCEAN_REALISM = 1.0;
 export const OCEAN_MIP_BIAS = -0.5;
 export const OCEAN_GLINT_STRENGTH = 0.85;
 // The glint's base roughness: the slope variance below the static tile's
-// 0.2 m texels, as alpha — the sea's whole mean square slope Cox & Munk's at
-// ~7 m/s with the tile's own. Mirrors look.py.
-export const OCEAN_GLINT_ROUGHNESS = 0.174;
+// 0.1 m texels, as alpha — the sea's whole mean square slope Cox & Munk's at
+// ~7 m/s with the tile's own, and the reflection Thomas kept. Mirrors
+// look.py, which says how it was fitted.
+export const OCEAN_GLINT_ROUGHNESS = 0.170;
 // How much of the slope variance the normal-mip filter removed is drawn
 // stochastically per pixel per frame (iter_008). The remainder stays as
 // extra microfacet-lobe width. 1 = fully sampled, 0 = fully analytic.
@@ -143,7 +144,7 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // every visitor past any cache. Pinned against the tiles and against
 // soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
-  ocean: "cloudyview.web.ocean.v1",
+  ocean: "cloudyview.web.ocean.v2",
   desert: "cloudyview.web.desert.v2",
   city: "cloudyview.web.city.v2",
 };
@@ -284,8 +285,11 @@ export const AUTO_EXPOSURE_DEFAULT_BY_TIER = {
   max: true, high: true, medium: true, low: true, minimal: false,
 };
 // Metered on a tiny linear render (TONE_MAP compiled out) of the live view:
-// 64x36 = 2304 rays per meter, beneath measurement next to a frame's march.
-export const AUTO_EXPOSURE_METER_SIZE = [64, 36];
+// about 2304 rays per meter (64x36 at 16:9), beneath measurement next to a
+// frame's march. The grid takes the window's shape (uniforms.js meterSize):
+// a fixed 64x36 had square pixels only at 16:9, and in a portrait window
+// each meter pixel was ~3x taller than wide.
+export const AUTO_EXPOSURE_METER_RAYS = 64 * 36;
 // Every frame: the 200 ms first cut stepped visibly (Thomas). The real
 // cadence is set by the readback round-trip — one meter is in flight at a
 // time — and the glide's time constant is computed from measured elapsed

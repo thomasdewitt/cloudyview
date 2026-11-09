@@ -29,6 +29,7 @@ Two products per demo, both written to web/soar/demos/<id>/:
 import argparse
 import gzip
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -901,11 +902,21 @@ AE_PERCENTILE = 0.99
 AE_HIGHLIGHT_FRACTION = 0.90
 AE_RESPONSE = 0.5
 AE_LIMITS = (1.0, 4.0)
-# 64 x 36 in the browser, which is a 16:9 ray grid. Here the aspect follows
-# the still's — the browser meters the real aspect too (it passes the output
-# size for the projection and the meter size only for the ray count), and a
-# still is not always 16:9.
-AE_METER_WIDTH = 96
+# The meter's ray grid: the still's shape at about AE_METER_RAYS rays, the
+# browser's rule (uniforms.js meterSize, AUTO_EXPOSURE_METER_RAYS; pinned by
+# tests/test_soar_meter_grid.py). Until 2026-11-08 the two differed: this
+# metered 96 wide, and the browser a fixed 64x36 whatever the window's shape,
+# which only has square pixels at 16:9.
+AE_METER_RAYS = 64 * 36
+
+
+def meter_size(size) -> tuple[int, int]:
+    """(w, h) of the meter's grid for an output of `size`; uniforms.js
+    meterSize, rounded the same way (round half up)."""
+    w, h = size
+    scale = math.sqrt(AE_METER_RAYS / (w * h))
+    return (max(1, math.floor(w * scale + 0.5)),
+            max(1, math.floor(h * scale + 0.5)))
 
 
 def auto_exposure(spec: dict, field: CloudField, view: dict,
@@ -921,8 +932,7 @@ def auto_exposure(spec: dict, field: CloudField, view: dict,
     drift that way — and it is the only honest answer for a freshly baked
     field, whose extinction no earlier hand-tuned number was chosen against.
     """
-    w = AE_METER_WIDTH
-    h = max(1, int(round(w * view["size"][1] / view["size"][0])))
+    w, h = meter_size(view["size"])
     hdr = cv.witness(
         field,
         cv.Camera(position=view["position"], azimuth=view["azimuth"],
