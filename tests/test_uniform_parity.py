@@ -1,4 +1,4 @@
-"""The Python host and the browser must fill the same 752 bytes.
+"""The Python host and the browser must fill the same 400 bytes.
 
 There is one renderer core — web/soar/raymarch.wgsl — driven by two hosts:
 JavaScript in the tab and Python via wgpu. The shader is shared by
@@ -122,29 +122,6 @@ CASES = [
       "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
       "ocean_max_lod": 8, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
-    # The desert (2026-09-23): row 8 is the datum alone, rows 9 and 24
-    # describe the 4096 m terrain tile, and the daytime spectral rows are
-    # the ocean's. A far-flung surface offset checks the fold at its tile.
-    ("desert_day",
-     {"surface": "desert", "ocean_z": 12.5, "ocean_fif_dx": 2.0,
-      "ocean_tile_extent": 4096.0, "ocean_max_lod": 11,
-      "desert_relief_m": [-14.0, 16.046875, 1.2621],
-      # Rows 25..46: distinct values in every slot, so a row or a
-      # component out of place shows.
-      "desert_tile_rows": [[0.25 * r + 0.001 * c + 0.5 for c in range(4)]
-                           for r in range(22)],
-      "surface_offset_m": [-18630.2, 136143.7]},
-     {"sun_elevation": 38.0}),
-    # Over the desert the clock packs as 0: nothing there reads it, and a
-    # running clock would keep a parked view from converging.
-    ("desert_clock_is_zero",
-     {"surface": "desert", "ocean_z": 12.5, "ocean_fif_dx": 2.0,
-      "ocean_tile_extent": 4096.0, "ocean_max_lod": 11,
-      "clock_period_s": None,
-      "desert_relief_m": [-14.0, 16.046875, 1.2621],
-      "desert_tile_rows": [[0.25 * r + 0.001 * c + 0.5 for c in range(4)]
-                           for r in range(22)]},
-     {"sun_elevation": 38.0, "scene_time": 77.5}),
 ]
 
 BASE_SCENE = dict(
@@ -193,8 +170,6 @@ def _js_state(extra):
              "nest_bmax": "nestBmax", "dt_view_nest": "dtViewNest",
              "dt_light_nest": "dtLightNest",
              "ocean_z": "oceanZ", "city_tile_offset_m": "cityOffsetM",
-             "desert_relief_m": "desertReliefM",
-             "desert_tile_rows": "desertTileRows",
              "surface_offset_m": "surfaceOffsetM",
              "surface_period_m": "surfacePeriodM",
              "clock_period_s": "clockPeriodS",
@@ -206,7 +181,6 @@ def _js_state(extra):
             # Python names the surface; the browser's scene carries one flag
             # per specialization.
             s["city"] = v == "city"
-            s["desert"] = v == "desert"
         else:
             s[remap[k]] = v
     return s
@@ -317,13 +291,14 @@ def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
         f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
 
 
-def test_block_is_752_bytes():
-    """47 rows of 4 floats: row 24 is the surface offset (2026-09-01), rows
-    25..46 the desert tile's tables (2026-09-24). Pinned rather than derived
-    on purpose, so that a row added on one side and not the other fails here
-    as well as in the diff above."""
-    assert sh.UNIFORM_NBYTES == 752
-    assert _python_block({}, {}).nbytes == 752
+def test_block_is_400_bytes():
+    """25 rows of 4 floats: row 24, the last, is the surface offset
+    (2026-09-01); the desert tile's rows 25..46 left with the desert
+    (2026-11-09). Pinned rather than derived on purpose, so that a row added
+    on one side and not the other fails here as well as in the diff
+    above."""
+    assert sh.UNIFORM_NBYTES == 400
+    assert _python_block({}, {}).nbytes == 400
 
 
 @pytest.mark.parametrize("surface", ["ocean", "city"])

@@ -2,8 +2,8 @@
 
 Every surface tile's meta.json says its clock: a period in seconds where
 its animation repeats exactly and the hosts wrap the scene clock (the
-city's steam, 2600 s), or null for a surface where nothing moves (the sea,
-the desert), whose clock packs as 0 at any scene time. A missing key is an
+city's steam, 2600 s), or null for a surface where nothing moves (the sea),
+whose clock packs as 0 at any scene time. A missing key is an
 error, not a surface without a clock, and a period of 0 is refused (a wrap
 at 0 is NaN). The three places that read it — the tile loaders
 (scene.js tileClockPeriod, soar_host.surface_clock_period_s), the uniform
@@ -37,7 +37,6 @@ def _wgsl_scalar(src, name):
 
 def test_every_surface_states_its_clock():
     assert surface_clock_period_s("ocean", _meta("ocean")) is None
-    assert surface_clock_period_s("desert", _meta("desert")) is None
     assert surface_clock_period_s("city", _meta("city")) == 2600.0
 
 
@@ -65,7 +64,7 @@ def test_the_city_clock_is_the_steams():
     assert scale * rise * period == pytest.approx(zwrap, abs=1e-6)
 
 
-@pytest.mark.parametrize("surface", ["ocean", "desert"])
+@pytest.mark.parametrize("surface", ["ocean"])
 def test_the_clock_is_refused_where_nothing_moves(surface):
     """witness --time over a surface with no clock would be a silent
     no-op, so it is refused; over the city it is taken (and this call then

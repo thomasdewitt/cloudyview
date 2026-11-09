@@ -21,7 +21,7 @@ pinned against each other by tests/test_track_resample.py.
 Track schema (shared with the browser, which wrote it):
 
     {"schema": "cloudyview.track.v4",
-     "header": <render metadata: source, camera, sun, [city|desert], render>,
+     "header": <render metadata: source, camera, sun, [city], render>,
      "surface_period_m": <the period sx/sy are fractions of>,
      "samples": [[t, x, y, z, azimuth, elevation, fov, sx, sy, scene_t],
                  ...],
@@ -41,9 +41,8 @@ is the scene clock the frame was drawn at, for a surface that has one (the
 city's steam); over a surface with none it is carried and packs as 0.
 
 The surface frame folds at a whole number of tiles
-(soar_host.SURFACE_FRAME_TILES): the tile for the city and the desert,
-16 tiles (1638.4 m) for the sea. Over the city or the desert a recorded
-period other than the installed surface's is refused: the flight would land
+(soar_host.SURFACE_FRAME_TILES): the tile for the city, 16 tiles
+(1638.4 m) for the sea. Over the city a recorded period other than the installed surface's is refused: the flight would land
 in the wrong district. Over the sea it is not: the sea is a static field
 repeating every tile, so any recorded period places it — a track flown at
 another (819.2 m for the moving sea's v3 tracks, the tile for v2's) has its
@@ -52,8 +51,8 @@ under the flight moves with the flight, over a different patch of the same
 sea. The moving sea's v4 tracks (2026-09-23..25) were recorded at 1638.4 m
 and replay as they are. The resampler unwraps sx/sy at half the period, so
 a track carries at most that between two samples: 819 m over the sea.
-Older tracks recorded no period, and theirs is known from the schema: a v3 track (10 columns) was the tile for the city and the desert
-and 819.2 m for the sea; a v2 track (9 columns) has no clock, and its sx/sy
+Older tracks recorded no period, and theirs is known from the schema: a v3
+track (10 columns) was the tile for the city and 819.2 m for the sea; a v2 track (9 columns) has no clock, and its sx/sy
 were fractions of the TILE. A v1 track (7 columns, no surface frame) holds
 the static offset the header recorded, the un-shifted surface those
 recordings meant.
@@ -159,8 +158,8 @@ def surface_samples(samples: np.ndarray, recorded_period: Optional[float],
                     surface: str, tile: float, period: float) -> np.ndarray:
     """The samples with sx/sy as fractions of the installed surface period.
 
-    A v4 track recorded its period (`recorded_period`). Over the city or
-    the desert it has to be the installed one — a flight would otherwise
+    A v4 track recorded its period (`recorded_period`). Over the city it
+    has to be the installed one — a flight would otherwise
     land in the wrong district. Over the sea any period is taken: the sea
     is a static field repeating at its tile, so the period only says what
     sx/sy are fractions of. Older tracks recorded none, and theirs is known
@@ -431,12 +430,12 @@ class TrackSettings:
     haze: float
     haze_height_dependent: bool
     lod_strength: float
-    # What the flight stood on: "ocean", "desert" or "city", from which
-    # surface block the header carries (none means the ocean).
+    # What the flight stood on: "ocean" or "city", from which surface block
+    # the header carries (none means the ocean).
     surface: str
     city_tile_offset_m: Optional[tuple[float, float]]
     # The extent of the surface tile the flight flew over, when it matters
-    # which one (the city's blocks, the desert's stones); None over the sea.
+    # which one (the city's blocks); None over the sea.
     surface_tile_extent_m: Optional[float]
     # The static row-24 surface offset the flight recorded — what a v1 track
     # (no per-sample surface frame) renders every frame with.
@@ -483,10 +482,14 @@ def settings_from_header(header: dict, *, track_path=None,
     render = _need(header, "render", "header")
     sun = _need(header, "sun", "header")
     city = header.get("city")
-    desert = header.get("desert")
-    if city is not None and desert is not None:
-        raise ValueError("the track header carries both a 'city' and a "
-                         "'desert' block; a flight stands on one surface.")
+    # A header names its surface only by the block it carries, so a desert
+    # flight's header has no other mark: refused here, or it would replay
+    # over the sea.
+    if header.get("desert") is not None:
+        raise ValueError(
+            "this track was flown over the desert, which this cloudyview no "
+            "longer has (it lives on the `desert` branch); it cannot be "
+            "rendered here.")
 
     if field_path is None:
         field_path = _need(source, "path", "source")
@@ -518,8 +521,6 @@ def settings_from_header(header: dict, *, track_path=None,
     if city is not None:
         surface, block = "city", city
         tile_offset = tuple(float(v) for v in _need(city, "tile_offset_m", "city"))
-    elif desert is not None:
-        surface, block = "desert", desert
 
     return TrackSettings(
         field_path=field_path,
@@ -628,9 +629,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     from .cloudfield import load as load_field
     from .soar_host import (SceneState, SoarRenderer, ViewState,
                             APP_LIGHT_MARCH_LOD_DEGREES,
-                            DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS,
                             APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
-                            desert_scene_fields, surface_cell_m,
+                            surface_cell_m,
                             surface_clock_period_s, surface_period_m)
     from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
                           QUALITY_PRESETS, _field_level)
@@ -718,8 +718,6 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         surface=s.surface,
         **({"city_tile_offset_m": s.city_tile_offset_m}
            if s.surface == "city" else {}),
-        **(desert_scene_fields(meta)
-           if s.surface == "desert" else {}),
         surface_offset_m=s.surface_offset_m,
     )
     if len(levels) > 1:
@@ -743,11 +741,6 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * s.lod_strength,
             light_cache=bool(preset["light_cache"]),
             sky_probe=bool(preset["sky_probe"]),
-            # The desert's tier-keyed detail, as the browser flew it.
-            desert_lite=(s.surface == "desert"
-                         and s.quality in DESERT_LITE_TIERS),
-            desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[s.quality]
-                              if s.surface == "desert" else 1.0),
             frame_index=index * FRAME_INDEX_STRIDE,
             scene_time=frame.scene_time,
         )

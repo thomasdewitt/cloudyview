@@ -683,7 +683,6 @@ export async function loadFileScene(
       bmin, bmax,
       minVoxelM: minVoxelSize(outerShape, bmin, bmax),
       oceanView: oceanTile.view,
-      seaView: oceanTile.seaView,
       oceanFifDx: oceanTile.dx,
       oceanTileExtent: oceanTile.tileExtent,
       surfacePeriod: oceanTile.surfacePeriod,

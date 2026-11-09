@@ -11,7 +11,6 @@ import * as K from "./constants.js";
 import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize,
          motionAlphaForDt, sceneClock } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
-import { desertReliefM, desertTileRows } from "./scene.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -39,18 +38,14 @@ const SAMPLE_FORMAT = "rgba16float";
 // textureLoad and declare `unfilterable-float`. Nothing here needs a
 // filtering sampler, so no optional feature is involved.
 const ACCUM_FORMAT = "rgba32float";
-// The surface pre-pass target: (radiance, t) of the traced city or desert
-// under each render pixel (raymarch.wgsl fs_surface). t runs to 1e30 on a
+// The surface pre-pass target: (radiance, t) of the traced city under each
+// render pixel (raymarch.wgsl fs_surface). t runs to 1e30 on a
 // miss, so it is float32; the march only textureLoad()s it.
 const SURFACE_FORMAT = "rgba32float";
 // The veil the first and last surface stages write beside the surface
 // (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
 // depth, packed as uints so no float path touches the bits.
 const VEIL_FORMAT = "rgba32uint";
-// The optical depths the full desert's first stage writes in the veil's
-// place (K.TAUS_STAGE), f32 so its flora stage rebuilds the very same light
-// (raymarch.wgsl desert_light_from). soar_host.TAUS_FORMAT is the twin.
-const TAUS_FORMAT = "rg32float";
 
 const ACCUM_SHADER = `
 struct AccumUniforms {
@@ -256,10 +251,9 @@ export function surfaceStagePlan(n) {
 }
 
 /** A surface stage's colour targets: the surface, and beside it the veil
- *  for a VEIL_STAGES entry or the optical depths for K.TAUS_STAGE. */
+ *  for a VEIL_STAGES entry. */
 function stageFormats(entry) {
   if (K.VEIL_STAGES.includes(entry)) return [SURFACE_FORMAT, VEIL_FORMAT];
-  if (entry === K.TAUS_STAGE) return [SURFACE_FORMAT, TAUS_FORMAT];
   return SURFACE_FORMAT;
 }
 
@@ -268,7 +262,17 @@ function stageFormats(entry) {
 // carries no code of a surface it cannot show — another surface's dead code
 // had been moving this one's codegen. soar_host.strip_sections is the twin;
 // tests/test_wgsl_sections.py pins the two to the same bytes.
-const SECTION_NAMES = ["sea", "city", "desert"];
+const SECTION_NAMES = ["sea", "city"];
+// Sections of surfaces this line no longer has. They exist so the tooling
+// can still specialize and compile a revision from before a surface left,
+// and so a branch that keeps it (the `desert` branch) still compiles here: a
+// retired name's sections are always blanked and its stub always kept, which
+// is exactly how every scene but its own specialized such a shader. It
+// specializes and compiles; it does not render under this host, whose
+// uniform block and bindings are not its own (soar_host.RETIRED_SECTIONS has
+// the why). The desert branch's merge back into this line removes "desert"
+// from here again. soar_host.RETIRED_SECTIONS is the twin.
+const RETIRED_SECTIONS = ["desert"];
 const SECTION_MARKER = /^\/\/ @(section|end|stub|end-stub) (\w+)\s*$/;
 
 /**
@@ -289,14 +293,15 @@ export function stripSections(source, keep) {
     if (m) marks.push([i, m[1], m[2]]);
   });
   if (marks.length === 0) return source;
+  const names = [...SECTION_NAMES, ...RETIRED_SECTIONS];
   const seen = Object.fromEntries(
-    SECTION_NAMES.map((n) => [n, { section: 0, stub: 0 }]));
+    names.map((n) => [n, { section: 0, stub: 0 }]));
   const out = lines.slice();
   let open = null;                     // [kind, name, line]
   for (const [i, kind, name] of marks) {
-    if (!SECTION_NAMES.includes(name)) {
+    if (!names.includes(name)) {
       throw new Error(`raymarch.wgsl line ${i + 1}: unknown section ` +
-                      `${name}; the sections are ${SECTION_NAMES}.`);
+                      `${name}; the sections are ${names.slice().sort()}.`);
     }
     if (kind === "section" || kind === "stub") {
       if (open) {
@@ -323,8 +328,13 @@ export function stripSections(source, keep) {
     throw new Error(`raymarch.wgsl line ${open[2] + 1}: @${open[0]} ` +
                     `${open[1]} is never closed.`);
   }
-  for (const name of SECTION_NAMES) {
+  for (const name of names) {
     const n = seen[name];
+    // A retired surface may be absent; where it is present (an old
+    // revision), it is held to the same rule.
+    if (!SECTION_NAMES.includes(name) && n.section === 0 && n.stub === 0) {
+      continue;
+    }
     if (n.section < 1 || n.stub !== 1) {
       throw new Error(`raymarch.wgsl: ${name} has ${n.section} section ` +
                       `block(s) and ${n.stub} stub block(s); a marked ` +
@@ -337,8 +347,6 @@ export function stripSections(source, keep) {
 export function specializeShader(source,
                                  { periodic, nested, maxLightSteps,
                                    toneMap = true, city = false,
-                                   desert = false, desertLite = false,
-                                   desertFloraCut = 1.0,
                                    lightCache, skyProbe }) {
   if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
     throw new Error(
@@ -372,41 +380,10 @@ export function specializeShader(source,
   ];
   // Demanded only when asked for, like soar_host.specialize: a shader that
   // predates the night city still serves every daytime render.
-  if (city && desert) {
-    throw new Error("a scene stands on one surface: city and desert are " +
-                    "both set.");
-  }
   if (city) {
     swaps.push(["const CITY: bool = false;", "const CITY: bool = true;"]);
   }
-  if (desert) {
-    swaps.push(["const DESERT: bool = false;", "const DESERT: bool = true;"]);
-  }
-  // The simplified desert, demanded (like CITY and DESERT) only when turned
-  // on, and only ever over a desert.
-  if (desertLite) {
-    if (!desert) {
-      throw new Error("desertLite without desert: the simplified desert is " +
-                      "a desert specialization.");
-    }
-    swaps.push(["const DESERT_LITE: bool = false;",
-                "const DESERT_LITE: bool = true;"]);
-  }
-  // The flora's explicit cut, the same way: demanded only when it departs
-  // from the shader's declared 1.0, and only ever over a desert.
-  if (!(Number.isFinite(desertFloraCut) && desertFloraCut > 0)) {
-    throw new Error(`desertFloraCut must be a positive number; got ` +
-                    `${desertFloraCut}.`);
-  }
-  if (desertFloraCut !== 1.0) {
-    if (!desert) {
-      throw new Error("desertFloraCut without desert: the flora's cut is " +
-                      "a desert specialization.");
-    }
-    swaps.push(["const DESERT_FLORA_CUT: f32 = 1.0;",
-                `const DESERT_FLORA_CUT: f32 = ${wgslFloat(desertFloraCut)};`]);
-  }
-  let out = stripSections(source, city ? "city" : (desert ? "desert" : "sea"));
+  let out = stripSections(source, city ? "city" : "sea");
   for (const [sentinel, replacement] of swaps) {
     const count = out.split(sentinel).length - 1;
     if (count !== 1) {
@@ -427,26 +404,18 @@ export function specializeShader(source,
  * through each cache's own string.
  */
 export function shaderVariantKey(spec) {
-  const surface = spec.city ? "city" : (spec.desert ? "desert" : "ocean");
+  const surface = spec.city ? "city" : "ocean";
   return [spec.periodic, spec.nested, spec.maxLightSteps, spec.toneMap,
-          surface, Boolean(spec.desertLite), spec.desertFloraCut ?? 1.0,
-          spec.lightCache, spec.skyProbe].join("|");
-}
-
-/** A number as a WGSL f32 literal: always with a decimal point. */
-function wgslFloat(x) {
-  return Number.isInteger(x) ? x.toFixed(1) : String(x);
+          surface, spec.lightCache, spec.skyProbe].join("|");
 }
 
 export class Renderer {
   /**
    * `scene` supplies the resident GPU resources and the field geometry:
-   * {volumeView, nestView, oceanView, seaView, bmin, bmax, minVoxelM,
+   * {volumeView, nestView, oceanView, bmin, bmax, minVoxelM,
    *  minVoxelNestM, nested, nestBmin, nestBmax, oceanFifDx, oceanTileExtent,
    *  surfacePeriod, clockPeriod, oceanMaxLod}. oceanView is binding 3, the
-   *  surface's tile (the ocean's normals, the city's density, the desert's
-   *  terrain); seaView is binding 9, the desert's bounds pyramid, null on
-   *  the scenes that do not read it.
+   *  surface's tile (the ocean's normals, the city's density).
    */
   constructor(device, shaderSource, scene, { canvasFormat, lensSource }) {
     if (typeof lensSource !== "string") {
@@ -536,14 +505,11 @@ export class Renderer {
           texture: { sampleType: "float", viewDimension: "3d" } },
         { binding: 8, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float", viewDimension: "3d" } },
-        { binding: 9, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "float", viewDimension: "2d-array" } },
       ],
     });
     // Group 1: the surface pre-pass's targets — the final surface, which
     // only the march reads; the stage before's, which each later stage
-    // reads; the veil, read by the march; and the desert's optical depths,
-    // read by its flora stage. Every raymarch pipeline shares this one
+    // reads; and the veil, read by the march. Every raymarch pipeline shares this one
     // layout, so every pass sets group 1: stand-ins everywhere but those,
     // which bind that target size's own.
     this.surfaceLayout = device.createBindGroupLayout({
@@ -556,10 +522,6 @@ export class Renderer {
         // The veil (raymarch.wgsl veil_buf), read by the march.
         { binding: 2, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "2d" } },
-        // The desert's optical depths (surface_taus), read by its flora
-        // stage.
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
       ],
     });
     this.rayPipelineLayout = device.createPipelineLayout({
@@ -580,7 +542,6 @@ export class Renderer {
         { binding: 0, resource: this._surfaceDummy.createView() },
         { binding: 1, resource: this._surfaceDummy.createView() },
         { binding: 2, resource: this._veilDummy.createView() },
-        { binding: 3, resource: this._surfaceDummy.createView() },
       ],
     });
     // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
@@ -615,18 +576,6 @@ export class Renderer {
       { texture: this._iceDummy }, new Uint8Array([0]),
       { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
     this.iceMode = false;
-    // Binding 9 is the desert's bounds pyramid; every surface's tile is at
-    // 3. The sea and the city read nothing at 9 and get this 1x1 zero
-    // stand-in there, viewed as a one-layer array. (Its own field: it once
-    // shared _surfaceDummy's name, which orphaned group 1's stand-in
-    // above.)
-    this._tileDummy = device.createTexture({
-      label: "soar-tile-dummy", size: [1, 1, 1], format: "rgba16float",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    device.queue.writeTexture(
-      { texture: this._tileDummy }, new Uint16Array(4),
-      { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
@@ -760,24 +709,6 @@ export class Renderer {
     this.prefetchPipelines();
   }
 
-  /** Binding 9's stand-in over the ocean and the city: one layer. */
-  _seaDummyView() {
-    return this._tileDummy.createView({ dimension: "2d-array" });
-  }
-
-  /**
-   * What binding 9 holds: the desert's bounds pyramid (its trace steps on
-   * it, so a desert without one is an error, not a stand-in), or the
-   * stand-in.
-   */
-  _slot9View() {
-    if (this.scene.desert && !this.scene.seaView) {
-      throw new Error("the desert's bounds pyramid is missing: its tile " +
-                      "was loaded without `bounds` (scene.js loadOceanTile).");
-    }
-    return this.scene.seaView ?? this._seaDummyView();
-  }
-
   /**
    * Rebuild the bind group against the scene's current textures. Must be
    * called whenever a nest is attached or removed — binding 5 otherwise still
@@ -802,83 +733,8 @@ export class Renderer {
             (this._lightTauTex ?? this._lightTauDummy).createView() },
         { binding: 8, resource:
             scene.iceView ?? this._iceDummy.createView() },
-        { binding: 9, resource: this._slot9View() },
       ],
     });
-  }
-
-  /**
-   * Build and validate the pipeline for a day surface — "ocean" or
-   * "desert" — WITHOUT standing the scene on it. The first half of an
-   * in-flight switch: everything that can fail or wait happens here, while
-   * the scene keeps rendering what it stands on, so a shader that will not
-   * compile says so and leaves the flight as it was.
-   */
-  async prepareSurface(kind, onCompiled = null) {
-    if (this.scene.city) {
-      throw new Error("the night city has no other surface to switch to.");
-    }
-    if (kind !== "ocean" && kind !== "desert") {
-      throw new Error(`unknown day surface '${kind}'; expected 'ocean' or ` +
-                      "'desert'.");
-    }
-    // Every entry the target surface draws with, at the current lighting
-    // and tier, on the specialization the first frame after commitSurface
-    // will ask for: the desert's tier axes (lite, the flora's cut) are the
-    // TARGET surface's, not the scene's — the scene is not touched.
-    const desert = kind === "desert";
-    const spec = this._shaderSpec({ desert });
-    const wanted = [["fs_main", SAMPLE_FORMAT]];
-    if (desert) {
-      const entries = spec.desertLite ? K.SURFACE_STAGES_LITE
-                                      : K.SURFACE_STAGES.desert;
-      for (const entry of entries) wanted.push([entry, stageFormats(entry)]);
-    }
-    try {
-      // All asked for at once (createRenderPipelineAsync each), so the
-      // driver can overlap them and a caller can overlap them with its
-      // download; each reported as it lands.
-      let done = 0;
-      await Promise.all(wanted.map(async ([entry, formats]) => {
-        await this._pipeline(entry, formats, spec);
-        onCompiled?.(++done, wanted.length, entry);
-      }));
-    } catch (err) {
-      throw new Error(`The ${kind} shader failed to build: ` +
-                      `${err?.message || err}`);
-    }
-  }
-
-  /**
-   * The second half: stand the scene on `kind`, whose pipeline
-   * prepareSurface has already built. Synchronous, so the caller can move
-   * the camera onto the new surface's frame and floor in the same tick and
-   * no frame is ever drawn half-switched. `tile` is the loaded surface tile
-   * (scene.js loadOceanTile).
-   */
-  commitSurface(kind, tile) {
-    // Everything that can throw, before anything is changed: a tile whose
-    // meta lacks the relief or its tables must leave the scene standing
-    // where it was.
-    const relief = kind === "desert" ? desertReliefM(tile.meta) : null;
-    const tables = kind === "desert" ? desertTileRows(tile.meta) : null;
-    const s = this.scene;
-    s.desert = kind === "desert";
-    // The surface's tile at binding 3, and under the desert its bounds
-    // pyramid at binding 9 — see loadOceanTile. A surface without the
-    // pyramid binds the stand-in there.
-    s.oceanView = tile.view;
-    s.seaView = tile.seaView ?? null;
-    s.oceanFifDx = tile.dx;
-    s.oceanTileExtent = tile.tileExtent;
-    s.surfacePeriod = tile.surfacePeriod;
-    s.clockPeriod = tile.clockPeriod;
-    s.oceanMaxLod = tile.maxLod;
-    s.desertReliefM = relief;
-    s.desertTileRows = tables;
-    this.prefetchPipelines();
-    this.refreshBindGroup();
-    this._resetAccumulation();
   }
 
   /** Ice mode actually reaches the shader only with a real ice texture. */
@@ -1183,25 +1039,16 @@ export class Renderer {
    * Everything the shader is specialized on for a march from this renderer
    * now — specializeShader's argument. `lighting` is the method (see
    * `lighting`); the surface is a property of the scene, which every caller
-   * inherits here rather than threading it. The city is constant for a
-   * renderer's whole life; ocean and desert can trade places in flight
-   * (prepareSurface / commitSurface), which is why the surface is in every
-   * key.
+   * inherits here rather than threading it; it is constant for a
+   * renderer's whole life, and in every key.
    */
-  _shaderSpec({ toneMap = true, lighting = this.lighting,
-                tier = this.qualityTier,
-                desert = Boolean(this.scene.desert),
-                desertLite = this._desertLiteFor(tier, desert),
-                desertFloraCut = this._desertFloraCutFor(tier, desert) } = {}) {
+  _shaderSpec({ toneMap = true, lighting = this.lighting } = {}) {
     return {
       periodic: this.periodic,
       nested: Boolean(this.scene.nested),
       maxLightSteps: this.maxLightSteps,
       toneMap,
       city: Boolean(this.scene.city),
-      desert,
-      desertLite,
-      desertFloraCut,
       lightCache: lighting.lightCache,
       skyProbe: lighting.skyProbe,
     };
@@ -1221,70 +1068,45 @@ export class Renderer {
   }
 
   /** The march pipeline for `lighting` at the current specialization. */
-  _rayPipeline(targetFormat, lighting, tier = this.qualityTier) {
+  _rayPipeline(targetFormat, lighting) {
     return this._pipeline("fs_main", targetFormat,
-                          this._shaderSpec({ lighting, tier }));
-  }
-
-  /**
-   * Whether `tier` flies the simplified desert (DESERT_LITE_TIERS): a
-   * specialization of the desert scene only, keyed on the tier like the
-   * lighting method, so captures (which set the parked tier) and prefetch
-   * (which walks the neighbouring tiers) pick the same variant flight does.
-   */
-  _desertLiteFor(tier, desert = Boolean(this.scene.desert)) {
-    return desert && K.DESERT_LITE_TIERS.includes(tier);
-  }
-
-  /** The flora's explicit cut at `tier` (DESERT_FLORA_CUT_BY_TIER), keyed
-   *  like _desertLiteFor; 1 off the desert, where it means nothing.
-   *  `desert` defaults to the scene's surface; prepareSurface passes the
-   *  surface it is preparing. */
-  _desertFloraCutFor(tier, desert = Boolean(this.scene.desert)) {
-    if (!desert) return 1.0;
-    const cut = K.DESERT_FLORA_CUT_BY_TIER[tier];
-    if (cut === undefined) {
-      throw new Error(`no flora cut for tier ${tier}`);
-    }
-    return cut;
+                          this._shaderSpec({ lighting }));
   }
 
   /** Whether this scene's opaque surface is traced by the pre-pass. */
   _hasSurfacePass() {
-    return Boolean(this.scene.city || this.scene.desert);
+    return Boolean(this.scene.city);
   }
 
   /**
-   * The surface stages this scene runs at `tier`, in order (SURFACE_STAGES;
-   * the simplified desert's first alone), as raymarch.wgsl entries; none
-   * over the sea.
+   * The surface stages this scene runs, in order (SURFACE_STAGES), as
+   * raymarch.wgsl entries; none over the sea.
    */
-  _stageEntries(tier = this.qualityTier) {
+  _stageEntries() {
     if (!this._hasSurfacePass()) return [];
-    if (this._desertLiteFor(tier)) return K.SURFACE_STAGES_LITE;
-    return K.SURFACE_STAGES[this.scene.city ? "city" : "desert"];
+    return K.SURFACE_STAGES.city;
   }
 
   /**
-   * Each stage's pipeline for `lighting` at `tier`, in order, on the same
+   * Each stage's pipeline for `lighting`, in order, on the same
    * specialization as the march (same module, so no extra compile) — the
    * pipeline itself, or a promise of it while it compiles.
    */
-  _stagePipelines(lighting, tier = this.qualityTier) {
-    const spec = this._shaderSpec({ lighting, tier });
-    return this._stageEntries(tier).map(
+  _stagePipelines(lighting) {
+    const spec = this._shaderSpec({ lighting });
+    return this._stageEntries().map(
       (entry) => this._pipeline(entry, stageFormats(entry), spec));
   }
 
-  /** Whether the stages at `tier` include a refinement (fs_surface_refine):
-   *  the city's facade shell, the full desert's near plants. */
-  _hasRefineStage(tier = this.qualityTier) {
-    return this._stageEntries(tier).includes("fs_surface_refine");
+  /** Whether the stages include a refinement (fs_surface_refine): the
+   *  city's facade shell. */
+  _hasRefineStage() {
+    return this._stageEntries().includes("fs_surface_refine");
   }
 
   /** Whether the stages include the city's street (fs_surface_street). */
-  _hasStreetStage(tier = this.qualityTier) {
-    return this._stageEntries(tier).includes("fs_surface_street");
+  _hasStreetStage() {
+    return this._stageEntries().includes("fs_surface_street");
   }
 
   /**
@@ -1378,15 +1200,15 @@ export class Renderer {
         try {
           // A promise while compiling: its rejection is recorded (and
           // logged) by _rayPipeline itself, so the prefetch just lets go.
-          const p = this._rayPipeline(SAMPLE_FORMAT, lighting, tier);
+          const p = this._rayPipeline(SAMPLE_FORMAT, lighting);
           if (isPending(p)) p.catch(() => {});
-          for (const sp of this._stagePipelines(lighting, tier)) {
+          for (const sp of this._stagePipelines(lighting)) {
             if (isPending(sp)) sp.catch(() => {});
           }
-          const lp = this._lensPipeline(lighting, tier);
+          const lp = this._lensPipeline(lighting);
           if (isPending(lp)) lp.catch(() => {});
           if (this.scene.city) {
-            const stp = this._steamPipeline(lighting, tier);
+            const stp = this._steamPipeline(lighting);
             if (isPending(stp)) stp.catch(() => {});
           }
         } catch {
@@ -1679,7 +1501,7 @@ export class Renderer {
       renderSize = renderTargetSize(outputSize, this.renderScale);
       targets = await this._targetsFor(renderSize[0], renderSize[1]);
       // A scene with a traced surface needs the set's surface target(s),
-      // made on first need (e.g. after setSurface to the desert).
+      // made on first need.
       await this._ensureSurfaceTarget(targets);
       if (steamLive) await this._ensureLiveTarget(targets);
       const lightingNow = this.lighting;
@@ -1718,7 +1540,6 @@ export class Renderer {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
-      desertLite: this._desertLiteFor(this.qualityTier),
       liveSteam: steamLive,
     });
     // A change of lighting method under a parked camera restarts the
@@ -1917,8 +1738,7 @@ export class Renderer {
   /**
    * One march into `targets.sample`, preceded — in a scene with a traced
    * surface — by its surface stages (K.SURFACE_STAGES: the first,
-   * fs_surface or the full desert's fs_surface_desert, then the later
-   * ones, each reading the one before) into `targets.surface`, which the
+   * fs_surface, then the later ones, each reading the one before) into `targets.surface`, which the
    * march then reads at group 1. `surfaces` is the stages as [entry,
    * pipeline] in order (_stageEntries), empty over the sea. They use the
    * same uniforms, so the stages trace exactly the rays the march
@@ -1931,11 +1751,9 @@ export class Renderer {
       const surface = targets.surface;
       // The stages this frame runs, chained by surfaceStagePlan: each later
       // stage reads the one before at group 1 through the two
-      // intermediates, the last writes the surface the march reads, a
-      // VEIL_STAGES entry writes the veil beside it, and K.TAUS_STAGE the
-      // optical depths K.TAUS_READER reads. No stage binds what it writes,
-      // and a stage without the target it needs throws rather than read a
-      // stand-in.
+      // intermediates, the last writes the surface the march reads, and a
+      // VEIL_STAGES entry writes the veil beside it. No stage binds what it
+      // writes.
       const slot = {
         final: [surface.view, null],
         a: [surface.plainView, surface.afterPlain],
@@ -1946,13 +1764,6 @@ export class Renderer {
         const [writes, reads] = plan[k];
         const views = [slot[writes][0]];
         if (K.VEIL_STAGES.includes(entry)) views.push(surface.veilView);
-        if ((entry === K.TAUS_STAGE || entry === K.TAUS_READER)
-            && !surface.tausView) {
-          throw new Error(`${entry} needs the desert's optical-depth ` +
-                          "target, and this size's surface set has none " +
-                          "(_ensureSurfaceTarget was not awaited for it).");
-        }
-        if (entry === K.TAUS_STAGE) views.push(surface.tausView);
         return [pipeline, reads === null ? null : slot[reads][1], views];
       });
       for (const [pipeline, group1, views] of stages) {
@@ -1988,38 +1799,29 @@ export class Renderer {
    * Give a target set the surface targets the ACTIVE stage chain writes and
    * the march's group 1 over them: the final surface and the veil, and the
    * intermediates surfaceStagePlan alternates between (none for one stage,
-   * one for two, both for more). A set is pooled by size, and the scene can
-   * gain a traced surface or a longer chain after the set was made
-   * (setSurface, a tier change). Grow-only: a set that already holds enough
-   * keeps them, so a size used only at Low (the simplified desert's single
-   * stage) never allocates an intermediate, and after a size's first
-   * growth a tier change never reallocates it. Allocated under the same
+   * one for two, both for more). A set is pooled by size. Grow-only: a set
+   * that already holds enough keeps them. Allocated under the same
    * out-of-memory guard as the rest of the set. Awaited by every caller
-   * BEFORE it resolves pipelines and encodes, and it returns only once the
-   * set satisfies the tier live at that moment — the tier can change during
-   * the allocation's await — so _encodeMarch only ever reads it.
+   * BEFORE it resolves pipelines and encodes, so _encodeMarch only ever
+   * reads it.
    */
   async _ensureSurfaceTarget(targets) {
-    // A set covers a chain when it holds as many intermediates and, for the
-    // full desert's (K.TAUS_STAGE), the optical depths.
-    const covers = (set, nMid, taus) =>
-      set.nMid >= nMid && (set.taus || !taus);
+    // A set covers a chain when it holds as many intermediates.
+    const covers = (set, nMid) => set.nMid >= nMid;
     for (;;) {
       if (!this._hasSurfacePass()) return;
       const entries = this._stageEntries();
       const nMid = Math.min(Math.max(entries.length - 1, 0), 2);
-      const taus = entries.includes(K.TAUS_STAGE);
       const old = targets.surface;
-      if (old && covers(old, nMid, taus)) return;
+      if (old && covers(old, nMid)) return;
       // Grow-only: the new set keeps whatever the old one held.
       const made = await this._makeSurfaceSet(
-        targets, Math.max(nMid, old?.nMid ?? 0), taus || Boolean(old?.taus));
+        targets, Math.max(nMid, old?.nMid ?? 0));
       // Another caller may have grown the set during the await: keep the
       // one that covers the other, retire the other once the GPU is done
-      // with any frame that still reads it. Then check the (possibly
-      // changed) tier again.
+      // with any frame that still reads it. Then check again.
       const cur = targets.surface;
-      const [keep, drop] = cur && covers(cur, made.nMid, made.taus)
+      const [keep, drop] = cur && covers(cur, made.nMid)
         ? [cur, made] : [made, cur];
       targets.surface = keep;
       if (drop) {
@@ -2030,16 +1832,15 @@ export class Renderer {
     }
   }
 
-  /** A surface set of `targets`' size with `nMid` intermediates, and the
-   *  desert's optical depths if `taus`. */
-  async _makeSurfaceSet(targets, nMid, taus) {
+  /** A surface set of `targets`' size with `nMid` intermediates. */
+  async _makeSurfaceSet(targets, nMid) {
     const later = nMid >= 1;
     const both = nMid >= 2;
     const label = `soar-surface-${targets.w}x${targets.h}`;
     const count = 2 + (later ? 1 : 0) + (both ? 1 : 0);
     return guardAllocation(
       this.device, `${targets.w}x${targets.h} surface target`,
-      targets.w * targets.h * (16 * count + (taus ? 8 : 0)), () => {
+      targets.w * targets.h * 16 * count, () => {
         const make = (name, format) => this.device.createTexture({
           label: `${label}-${name}`, size: [targets.w, targets.h], format,
           usage: GPUTextureUsage.RENDER_ATTACHMENT
@@ -2049,38 +1850,31 @@ export class Renderer {
         const veil = make("veil", VEIL_FORMAT);
         const plain = later ? make("plain", SURFACE_FORMAT) : null;
         const mid = both ? make("mid", SURFACE_FORMAT) : null;
-        const tausTex = taus ? make("taus", TAUS_FORMAT) : null;
         const dummy = this._surfaceDummy.createView();
         const veilDummy = this._veilDummy.createView();
-        const group1 = (final, prev, veilView, tausView) =>
+        const group1 = (final, prev, veilView) =>
           this.device.createBindGroup({
             label, layout: this.surfaceLayout,
             entries: [{ binding: 0, resource: final },
                       { binding: 1, resource: prev },
-                      { binding: 2, resource: veilView },
-                      { binding: 3, resource: tausView }],
+                      { binding: 2, resource: veilView }],
           });
-        // A later stage's group: what it reads, and the optical depths
-        // wherever they exist (the flora stage reads them; the others
-        // ignore binding 3).
+        // A later stage's group: what it reads.
         const after = (prevTex) => group1(dummy, prevTex.createView(),
-                                          veilDummy,
-                                          tausTex?.createView() ?? dummy);
+                                          veilDummy);
         return {
           nMid,
-          taus,
           tex,
-          textures: [tex, veil, plain, mid, tausTex].filter(Boolean),
+          textures: [tex, veil, plain, mid].filter(Boolean),
           view: tex.createView(),
           veilView: veil.createView(),
           plainView: plain?.createView() ?? null,
           midView: mid?.createView() ?? null,
-          tausView: tausTex?.createView() ?? null,
           // Group 1 for a stage reading the plain or the middle surface.
           afterPlain: plain ? after(plain) : null,
           afterMid: mid ? after(mid) : null,
           // The march reads the final surface and the veil.
-          group: group1(tex.createView(), dummy, veil.createView(), dummy),
+          group: group1(tex.createView(), dummy, veil.createView()),
         };
       });
   }
@@ -2091,10 +1885,10 @@ export class Renderer {
    * but would let the compositor pick up the bare frame in between, which
    * reads as the minimap flickering.
    */
-  /** Lens water's state-step pipeline for a lighting method and tier. */
-  _lensPipeline(lighting, tier = this.qualityTier) {
+  /** Lens water's state-step pipeline for a lighting method. */
+  _lensPipeline(lighting) {
     return this._pipeline("fs_lens_state", SURFACE_FORMAT,
-                          this._shaderSpec({ lighting, tier }));
+                          this._shaderSpec({ lighting }));
   }
 
   /**
@@ -2113,7 +1907,6 @@ export class Renderer {
             { binding: 0, resource: this._surfaceDummy.createView() },
             { binding: 1, resource: tex.createView() },
             { binding: 2, resource: this._veilDummy.createView() },
-            { binding: 3, resource: this._surfaceDummy.createView() },
           ],
         }));
     }
@@ -2175,10 +1968,10 @@ export class Renderer {
     this.lensSettled = true;
   }
 
-  /** The city's live steam pipeline for a lighting method and tier. */
-  _steamPipeline(lighting, tier = this.qualityTier) {
+  /** The city's live steam pipeline for a lighting method. */
+  _steamPipeline(lighting) {
     return this._pipeline("fs_steam_live", ACCUM_FORMAT,
-                          this._shaderSpec({ lighting, tier }));
+                          this._shaderSpec({ lighting }));
   }
 
   /** Give a target set the live image the steam is composited into (the
@@ -2209,7 +2002,6 @@ export class Renderer {
         { binding: 0, resource: targets.surface.view },
         { binding: 1, resource: accTex.createView() },
         { binding: 2, resource: this._veilDummy.createView() },
-        { binding: 3, resource: this._surfaceDummy.createView() },
       ],
     });
     const p = encoder.beginRenderPass({
@@ -2452,8 +2244,6 @@ export class Renderer {
           { binding: 7, resource: this._lightTauTex.createView() },
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
-          { binding: 9, resource:
-              this._slot9View() },
         ],
       }),
     };
@@ -2523,12 +2313,10 @@ export class Renderer {
    * a second bake pipeline identical to the first.
    */
   _bakePipeline() {
-    // fs_bake_light reads neither the lighting method nor the desert's
-    // detail (lite, flora cut), so it is built on one fixed variant of each.
+    // fs_bake_light does not read the lighting method, so it is built on
+    // one fixed variant.
     return this._pipeline("fs_bake_light", "r16float",
-                          this._shaderSpec({ lighting: BAKE_LIGHTING,
-                                             desertLite: false,
-                                             desertFloraCut: 1.0 }));
+                          this._shaderSpec({ lighting: BAKE_LIGHTING }));
   }
 
 
@@ -2588,7 +2376,7 @@ export class Renderer {
       await this._ensureSurfaceTarget(this._meterTargets);
       const lighting = { lightCache: false, skyProbe: true };
       const spec = this._shaderSpec({ toneMap: false, lighting });
-      // Its march and its surface pre-pass (city/desert), on that
+      // Its march and its surface pre-pass (the city's), on that
       // specialization, through the same async cache as the frame's: a
       // first meter in a city scene would otherwise compile the whole city
       // trace on the main thread, right after load, on the live AE path.
@@ -2608,7 +2396,6 @@ export class Renderer {
       const u = packUniforms(this._sceneState(), {
         ...view, outputSize, renderSize: [mw, mh],
         subpixel: false, jitterScale: 1.0, ...lighting,
-        desertLite: this._desertLiteFor(this.qualityTier),
       });
       this.device.queue.writeBuffer(this._meterUniformBuf, 0, u);
       const bindGroup = this.device.createBindGroup({
@@ -2626,8 +2413,6 @@ export class Renderer {
               (this._lightTauTex ?? this._lightTauDummy).createView() },
           { binding: 8, resource:
               this.scene.iceView ?? this._iceDummy.createView() },
-          { binding: 9, resource:
-              this._slot9View() },
         ],
       });
       const encoder = this.device.createCommandEncoder();
@@ -2702,7 +2487,6 @@ export class Renderer {
     this.uniformBuf?.destroy();
     this.accumUniformBuf?.destroy();
     this._iceDummy?.destroy();
-    this._tileDummy?.destroy();
     this._veilDummy?.destroy();
     // The sun-tau cache is volume/8 bytes — hundreds of MB on a large field
     // — and none of these were released here before: every change of field
@@ -2737,9 +2521,6 @@ export class Renderer {
       dtLightNest: this.dtLightNest,
       city: Boolean(s.city),
       cityOffsetM: s.cityOffsetM ?? [0.0, 0.0],
-      desert: Boolean(s.desert),
-      desertReliefM: s.desert ? s.desertReliefM : null,
-      desertTileRows: s.desert ? s.desertTileRows : null,
     };
   }
 }

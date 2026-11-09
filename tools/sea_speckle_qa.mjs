@@ -84,7 +84,7 @@ try {
   await tab.waitFor(`(() => { const L = document.getElementById("loading");
       if (L.classList.contains("failed") && !L.hidden) throw new Error(L.innerText);
       return window.soar?.scene && L.hidden; })()`, 180000);
-  if (await tab.eval(`Boolean(window.soar.scene.desert || window.soar.scene.city)`)) {
+  if (await tab.eval(`Boolean(window.soar.scene.city)`)) {
     throw new Error(`${DEMO} did not load over the sea`);
   }
   const inForce = await tab.eval(`(() => { const s = window.soar;

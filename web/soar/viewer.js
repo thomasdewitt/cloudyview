@@ -10,9 +10,7 @@ import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
-import { desertFloorAt, loadDemoIceVolume, loadDemoScene, loadOceanTile }
-  from "./scene.js";
-import { buildDesertBoundsInWorker } from "./desert_bounds.js";
+import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
 import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
@@ -82,7 +80,6 @@ import { cameraWorldOrigin, worldToRelative } from "./camera.js";
 
 const OCEAN_URL = "ocean";
 const CITY_URL = "city";
-const DESERT_URL = "desert";
 
 // Every key _onKeyDown's switch answers, and nothing else. It is the set the
 // tutorial refuses while a chapter is running: each of these opens a panel or
@@ -91,7 +88,7 @@ const DESERT_URL = "desert";
 // it has its own rule (Tutorial.interceptEscape), because one flight step
 // asks for it.
 const TUTORIAL_REFUSED = new Set(
-  ["Tab", "f", "F3", "`", "b", "g", "i", "m", "r", "k", "j", "p", "F12"]);
+  ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "j", "p", "F12"]);
 
 /**
  * The canvas must not present through an sRGB format. raymarch.wgsl's tone
@@ -224,8 +221,7 @@ export class Viewer {
     this.captured = false;
     this.frameIndex = 0;
     // The scene clock (s), uniform row 24.z, read by what moves in the
-    // scene (the city's steam; the sea and the desert have no clock and
-    // pack 0). It runs only while the view is flying or a track is being
+    // scene (the city's steam; the sea has no clock and packs 0). It runs only while the view is flying or a track is being
     // recorded, never while paused — so a parked view is a still scene and
     // its accumulation converges, and a held shot keeps the steam it was
     // held on. Captures take it from the view (a still) or from the track
@@ -385,13 +381,11 @@ export class Viewer {
    */
   /**
    * The surface tiles are not anything about the data — the ocean is a
-   * patch of sea surface, the city a patch of city, the desert a patch of
-   * bajada — so they survive a change of field and belong to the viewer,
-   * which is what disposes of them. Each is loaded on first use and cached
-   * for the session, which is what keeps the desert's download off every
-   * flight that never stands on it.
+   * patch of sea surface, the city a patch of city — so they survive a
+   * change of field and belong to the viewer, which is what disposes of
+   * them. Each is loaded on first use and cached for the session.
    */
-  async _surfaceTile(kind, onProgress = null, onStage = null) {
+  async _surfaceTile(kind) {
     if (kind === "city") {
       // keepCells: the minimap draws the city out of the tile's own mip
       // 0, the flight collider builds its buildings from it too, and the
@@ -402,18 +396,6 @@ export class Viewer {
         await loadOceanTile(this.device, CITY_URL, undefined,
                             { keepCells: true,
                               schema: K.SURFACE_TILE_SCHEMAS.city }));
-    }
-    if (kind === "desert") {
-      // keepHeights: the camera's floor follows the terrain, read from the
-      // same level-0 bytes the shader samples. bounds: the pyramid the
-      // ground's trace steps on, built from those same bytes.
-      return (this._desertTile ??=
-        await loadOceanTile(this.device, DESERT_URL, onProgress ?? undefined,
-                            { keepHeights: true, bounds: true, onStage,
-                              // Over a second of arithmetic: off the main
-                              // thread, so the flight keeps drawing.
-                              boundsBuilder: buildDesertBoundsInWorker,
-                              schema: K.SURFACE_TILE_SCHEMAS.desert }));
     }
     return (this._ocean ??=
       await loadOceanTile(this.device, OCEAN_URL, undefined,
@@ -548,14 +530,13 @@ export class Viewer {
                                      // ocean should never jump" — Thomas,
                                      // 2026-09-01).
                                      // Folded at the surface's own period:
-                                     // the tile for the city and the
-                                     // desert, 16 tiles for the sea
-                                     // (constants.js SURFACE_FRAME_TILES).
+                                     // the tile for the city, 16 tiles
+                                     // for the sea (constants.js
+                                     // SURFACE_FRAME_TILES).
                                      surfaceTileExtent: scene.surfacePeriod,
                                      surfaceOffsetM:
                                        scene.city ? scene.cityOffsetM
                                                   : [0.0, 0.0],
-                                     floorAt: scene.desertFloorAt ?? null,
                                      // Streets, not a cloud field: the city
                                      // is the only scene with anything
                                      // within 20 m of the camera, so it
@@ -1360,7 +1341,6 @@ export class Viewer {
       case "F3":
       case "`": e.preventDefault(); this.ui.cycleStats(); return;
       case "b": this.cycleFlyer(); return;
-      case "g": this.toggleSurface(); return;
       // Ice detection is a research control too, and it is the only one whose
       // key can start a load — so the gate is here, before anything is asked
       // of the file.
@@ -1452,148 +1432,6 @@ export class Viewer {
     this.renderer.invalidateLightCache();
     this.renderer.startLightBake(this._viewKwargs());
     this._wake("sun");
-  }
-
-  /** Which ground the day scene stands on: "ocean" or "desert" (or "city"). */
-  get surfaceKind() {
-    if (this.scene?.city) return "city";
-    return this.scene?.desert ? "desert" : "ocean";
-  }
-
-  /**
-   * Stand the day scene on the other ground, in flight: the ocean or the
-   * Sonoran desert. The tile loads on first use (the one download a
-   * flight that never asks for the desert does not pay), the renderer
-   * swaps its specialization and binding, and the camera takes the new
-   * surface's frame and floor — lifted clear if the terrain is above it.
-   * The night city is not a day ground and has nothing to switch to.
-   */
-  async setSurface(kind) {
-    if (this.scene?.city || kind === this.surfaceKind || this._surfacing) {
-      return;
-    }
-    // A capture or a video render owns the frame it is converging: a ground
-    // swapped under it would change the scene mid-accumulation.
-    if (this._capturing) {
-      this.ui.say("The ground stays put while a capture renders.", 3);
-      return;
-    }
-    // A recorded track stands on one ground: its header names it, and its
-    // samples' surface positions are fractions of that ground's tile. A
-    // switch mid-recording would replay half the flight over the wrong one.
-    if (this.recorder?.recording) {
-      this.ui.say("A flight track stands on one ground — stop the " +
-                  "recording (R) before switching.", 4);
-      return;
-    }
-    this._surfacing = true;
-    // Named steps on the progress panel from the moment the switch is
-    // asked for, so a first desert — its download, its bounds, its
-    // shaders — never reads as a frozen tab (Thomas, 2026-09-25: "i thought
-    // it was completely frozen"). Each step is also a performance mark
-    // ("soar-surface <step>"), which is how the switch is timed.
-    const ground = kind === "desert" ? "desert" : "ocean";
-    // Once the switch has settled (landed, refused or failed) nothing it
-    // started may touch the panel again: a compile or a download still
-    // running would otherwise put a stale step back up and leave it there.
-    let settled = false;
-    const step = (stage, fraction) => {
-      performance.mark(`soar-surface ${stage}`);
-      if (!settled) this.ui.showProgress(stage, fraction);
-    };
-    let landed = false;
-    this._surfaceLanding = false;
-    try {
-      step(`Switching to the ${ground}…`, 0.02);
-      // Everything that can wait or fail first — the download, the
-      // pipeline — while the flight keeps drawing the ground it has; then
-      // the renderer and the camera change together, in one tick, so no
-      // frame is drawn with the new shader over the old frame or floor
-      // (codex review: an ocean camera at 12.5 m under a +16 m dune).
-      // The download (and the bounds, in a worker) and the shader compiles
-      // run side by side; the panel names whichever is still going.
-      const at = { download: 0, bounds: false, tile: false, k: 0, n: 1 };
-      const show = () => {
-        if (settled) return;
-        const fraction = 0.05 + 0.4 * at.download + (at.tile ? 0.1 : 0)
-          + 0.4 * (at.k / at.n);
-        let stage;
-        if (!at.tile) {
-          stage = at.bounds ? "Building the terrain bounds…"
-                            : `Downloading the ${ground}…`;
-        } else {
-          stage = `Compiling the ${ground}'s shaders (${at.k} of ${at.n})…`;
-        }
-        this.ui.showProgress(stage, fraction);
-      };
-      const compiled = this.renderer.prepareSurface(kind, (k, n) => {
-        at.k = k; at.n = n;
-        if (k === n) performance.mark("soar-surface shaders compiled");
-        show();
-      });
-      const loaded = this._surfaceTile(
-        kind,
-        (f) => { at.download = f; show(); },
-        (stage) => {
-          if (stage === "bounds") {
-            at.bounds = true;
-            performance.mark("soar-surface bounds");
-            show();
-          }
-        }).then((t) => {
-        at.tile = true;
-        performance.mark("soar-surface tile ready");
-        show();
-        return t;
-      });
-      // Whichever fails first is the one told, at once; the other may run
-      // on (a finished compile or tile is cached for the next switch).
-      const [tile] = await Promise.all([loaded, compiled]);
-      const floorAt = kind === "desert" ? desertFloorAt(tile) : null;
-      // A recording may have started while the tile or the pipeline was on
-      // its way: a track stands on one ground, so the switch yields to it.
-      if (this.recorder?.recording) {
-        this.ui.say("A flight track stands on one ground — stop the " +
-                    "recording (R) before switching.", 4);
-        return;
-      }
-      // …and a capture begun meanwhile keeps the ground it began on.
-      if (this._capturing) {
-        this.ui.say("The ground stays put while a capture renders.", 3);
-        return;
-      }
-      step(`Landing on the ${ground}…`, 0.97);
-      this.renderer.commitSurface(kind, tile);
-      landed = true;
-      // The panel stays up until a frame on the new ground has been drawn:
-      // the frame loop clears it for the first march begun after this
-      // moment (a frame already in flight still shows the old ground).
-      this._surfaceLanding = true;
-      this._surfaceLandedAt = performance.now();
-      this.scene.desertFloorAt = floorAt;
-      // The camera folds at the surface frame's period: 16 tiles for the
-      // sea, one for the desert (constants.js SURFACE_FRAME_TILES).
-      this.camera.setSurface(tile.surfacePeriod, floorAt);
-      this.ui.say(kind === "desert"
-        ? "The Sonoran desert (G for the ocean)."
-        : "The ocean (G for the desert).", 4);
-    } catch (err) {
-      this.ui.say(`Could not change the ground: ${err.message}`, 8);
-      throw err;
-    } finally {
-      settled = true;
-      if (!landed) this.ui.hideProgress();
-      this._surfacing = false;
-      this._wake("surface");
-    }
-  }
-
-  /** G: the other day ground. */
-  toggleSurface() {
-    if (this.scene?.city) return;
-    // A failure has already been told (setSurface's toast).
-    this.setSurface(this.surfaceKind === "desert" ? "ocean" : "desert")
-      .catch(() => {});
   }
 
   /**
@@ -2502,15 +2340,12 @@ export class Viewer {
     this.scene?.destroy();
     this._ocean?.texture?.destroy();
     this._cityTile?.texture?.destroy();
-    this._desertTile?.texture?.destroy();
-    this._desertTile?.boundsTexture?.destroy();
     this.renderer = null;
     this.minimap = null;
     this.flyers = null;
     this.scene = null;
     this._ocean = null;
     this._cityTile = null;
-    this._desertTile = null;
 
     // Unconfigure before destroy: the swapchain holds textures on this device,
     // and leaving it configured against a destroyed device is the state
@@ -2535,12 +2370,6 @@ export class Viewer {
    */
   toggleTrackRecording() {
     if (this.recorder.recording) { this._finishTrackRecording(); return; }
-    // A track stands on one ground (its header names it, its samples are
-    // fractions of that ground's tile): not while the ground is changing.
-    if (this._surfacing) {
-      this.ui.say("Changing the ground — record once it has landed.", 3);
-      return;
-    }
     this.recorder.start();
     // The track's lens: the switch as it stands now, recorded in the header
     // and flown by the video; and a dry start, as every replay starts dry.
@@ -2588,12 +2417,6 @@ export class Viewer {
    */
   async renderTrackVideo(samples, knocks = []) {
     if (this._capturing) return;
-    // The ground is changing, and the switch owns the progress panel.
-    if (this._surfacing) {
-      this.ui.say("Changing the ground — render the video once it has " +
-                  "landed.", 3);
-      return;
-    }
     const { VideoWriter, evenSize } = await import("./video.js");
 
     // Even before the offscreen texture is made, not after: H.264 refuses odd
@@ -2829,11 +2652,6 @@ export class Viewer {
     const cityPos = this.scene.city && this.camera.surfacePosition
       ? [...this.camera.surfacePosition, this.camera.position[2]]
       : null;
-    // The desert's twin: where on the tile the still stands, so a replay
-    // or a reproduction lands on the same washes and stones.
-    const desertPos = this.scene.desert && this.camera.surfacePosition
-      ? [...this.camera.surfacePosition, this.camera.position[2]]
-      : null;
     return {
       schema: "cloudyview.render.v1",
       source: {
@@ -2843,7 +2661,7 @@ export class Viewer {
         ice_var: this.scene.iceVar ?? null,
         // A coarsened demo's block average (see scene.js), so `soar` re-renders
         // a track over the grid that was flown rather than the fine file.
-        // Absent otherwise, like the city and desert blocks.
+        // Absent otherwise, like the city block.
         ...(this.scene.coarsen ? { coarsen: this.scene.coarsen } : {}),
       },
       camera: {
@@ -2874,16 +2692,6 @@ export class Viewer {
           // With the folded camera position above, this — not
           // tile_offset_m — is what reproduces the district and the water
           // phase: hand it to --surface-origin.
-          surface_offset_m: this._surfaceOffsetM(),
-        },
-      } : {}),
-      // Present only over the desert, and read the same way as the city
-      // block: its presence is what says the ground was the desert
-      // (cloudyview/track.py), its surface offset what reproduces the place.
-      ...(desertPos ? {
-        desert: {
-          position_m: desertPos,
-          tile_extent_m: this.scene.oceanTileExtent,
           surface_offset_m: this._surfaceOffsetM(),
         },
       } : {}),
@@ -2924,7 +2732,7 @@ export class Viewer {
         haze_height_dependent: look.hazeHeightDependent,
         // The scene clock the still was taken at (witness --time): for a
         // surface with a clock (the city's steam), and 0 over one without
-        // (the sea, the desert), as row 24.z is.
+        // (the sea), as row 24.z is.
         scene_time: this.scene.clockPeriod === null ? 0 : this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
@@ -2953,12 +2761,6 @@ export class Viewer {
   async saveScreenshot() {
     const overlays = this.captureOverlays;
     if (this._capturing) return;
-    // The ground is changing, and the switch owns the progress panel.
-    if (this._surfacing) {
-      this.ui.say("Changing the ground — take the still once it has " +
-                  "landed.", 3);
-      return;
-    }
     this._capturing = true;
     this._wake("capture");
     const size = this.captureDimensions();
@@ -3284,7 +3086,7 @@ export class Viewer {
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
       // The scene clock the view was held at: the city's steam. A surface
-      // with no clock (the sea, the desert) reads none — row 24.z is 0
+      // with no clock (the sea) reads none — row 24.z is 0
       // there — so it writes none.
       ...(this.scene.clockPeriod === null ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
@@ -3293,7 +3095,7 @@ export class Viewer {
       // with (cyberpunk and the night-city harness park different ones), so
       // it travels with the surface.
       "--surface",
-      this.scene.city ? "city" : this.scene.desert ? "desert" : "ocean",
+      this.scene.city ? "city" : "ocean",
       ...(this.scene.city
           ? ["--city-offset", n(this.scene.cityOffsetM[0]),
              n(this.scene.cityOffsetM[1])] : []),
@@ -3592,21 +3394,12 @@ export class Viewer {
         this._marchPending = false;
         // Deliberately a thunk: see Renderer.drawFrame. The swapchain texture
         // must not be acquired until every await inside the draw has resolved.
-        const marchStartedAt = performance.now();
         const marched = await this.renderer.drawFrame(
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
           { deltaSeconds: dt, overlays, waitForPipeline: false,
             lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null,
             liveSteam: true });
-        if (marched && this._surfaceLanding
-            && marchStartedAt >= this._surfaceLandedAt) {
-          // The first frame on a new ground: the switch's panel comes down,
-          // unless a capture begun since has put up its own.
-          this._surfaceLanding = false;
-          performance.mark("soar-surface first frame");
-          if (!this._capturing) this.ui.hideProgress();
-        }
         if (!marched) {
           // The shader variant this frame needs is still compiling (a tier,
           // bake or toggle moved the lighting specialization; see

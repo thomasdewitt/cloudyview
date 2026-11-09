@@ -67,7 +67,6 @@ cloudyview = [
     "Mie_tables/*_normalized.txt",
     "soar/raymarch.wgsl",
     "soar/ocean/*",
-    "soar/desert/*",
     # The night city's tile, not its component sources (those are compiled
     # into raymarch.wgsl) nor the landing backdrop.
     "soar/city/meta.json",

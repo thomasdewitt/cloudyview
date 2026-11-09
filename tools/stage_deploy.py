@@ -82,10 +82,9 @@ FINGERPRINT_PATTERNS = (
 # Copied through untouched: never imported, fetched by constructed paths,
 # and immutable in practice. `demos/` is baked output, hundreds of MB, and
 # `city/` is the night-city tile — same shape as the ocean tile, loaded by
-# scene.js from a constructed base URL — and `desert/` the desert's, loaded
-# the same way. Opaque means not cache-busted: a re-baked tile ships under a
+# scene.js from a constructed base URL. Opaque means not cache-busted: a re-baked tile ships under a
 # new path, or visitors keep the old one for the cache's lifetime.
-OPAQUE_DIRS = ("vendor/", "ocean/", "demos/", "city/", "desert/")
+OPAQUE_DIRS = ("vendor/", "ocean/", "demos/", "city/")
 
 # Build-time source that sits inside the asset tree and must not ship.
 # `city/components/` holds the WGSL components and the registry that

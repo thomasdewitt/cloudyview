@@ -174,9 +174,9 @@ DEMOS = [
         title="STEAM high-based convection",
         field="Utah summer cumulus congestus",
         warning="Needs a highly capable GPU",
-        # High-based summer convection is a desert sky, and it stands on the
-        # desert (2026-09-23). The ground its bases see is part of the case.
-        surface="desert",
+        # High-based summer convection, a desert sky. It stood on the desert
+        # ground 2026-09-23 .. 11-09; the desert left this line, and it stands
+        # on the sea again (Thomas: "Same clouds, over sea").
         liquid=("demo_desert-convection.nc", "qc"),
         ice=("demo_desert-convection.nc", "qi"),
         src=STEAM_SRC,
@@ -202,7 +202,6 @@ DEMOS = [
         field="Utah cumulus on a coarser grid",
         description="STEAM high-based convection (above) at coarser "
                     "resolution.",
-        surface="desert",
         liquid=("demo_desert-convection-coarse.nc", "qc"),
         ice=("demo_desert-convection-coarse.nc", "qi"),
         src=STEAM_SRC,

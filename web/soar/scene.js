@@ -1,6 +1,6 @@
 // Resident GPU resources for one scene: the extinction volume, an optional
-// finer nest, the surface (the sea's, the city's or the desert's
-// tile), and the geometry the uniform block needs.
+// finer nest, the surface (the sea's or the city's tile), and the geometry
+// the uniform block needs.
 //
 // The volume's texture layout is the one piece here worth stating plainly.
 // A C-order (nx, ny, nz) array already has z varying fastest, so it maps onto
@@ -22,8 +22,6 @@ import {
 import * as K from "./constants.js";
 import { worldToRelative } from "./camera.js";
 import { fromHalf, HAS_F16, toHalf } from "./half.js";
-import { buildDesertBounds, LAYERS as DESERT_BOUNDS_LAYERS }
-  from "./desert_bounds.js";
 
 async function fetchBytes(url, onProgress, decompress = null) {
   const response = await fetch(url);
@@ -86,16 +84,15 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
 }
 
 // Channels per texel of each surface-tile format (soar_host's
-// SURFACE_FORMAT_CHANNELS): the ocean and the city are rgba16float, the
-// desert rg16float.
-const SURFACE_FORMAT_CHANNELS = { rgba16float: 4, rg16float: 2 };
+// SURFACE_FORMAT_CHANNELS): the ocean and the city are rgba16float.
+const SURFACE_FORMAT_CHANNELS = { rgba16float: 4 };
 
 /**
  * One stored mip level -> the interleaved texel bytes the texture wants.
  * A level is either the texels themselves, or (encoding
- * "planar-byte-shuffle", the desert's) each channel's plane with every half
+ * "planar-byte-shuffle", the ocean's) each channel's plane with every half
  * float's low bytes before its high bytes, the arrangement that lets gzip
- * see a height field's smoothness. Twin of soar_host.decode_surface_level.
+ * see a smooth field's smoothness. Twin of soar_host.decode_surface_level.
  */
 export function decodeSurfaceLevel(bytes, side, meta) {
   const format = meta.format ?? "rgba16float";
@@ -124,92 +121,9 @@ export function decodeSurfaceLevel(bytes, side, meta) {
   return out;
 }
 
-/** Row 8.yzw under DESERT, from the desert tile's meta (soar_host twin). */
-export function desertReliefM(meta) {
-  for (const key of ["height_min_m", "height_max_m", "band_max_m"]) {
-    if (!Number.isFinite(meta?.[key])) {
-      throw new Error(`the desert tile's meta.json has no ${key}.`);
-    }
-  }
-  return [meta.height_min_m, meta.height_max_m, meta.band_max_m];
-}
-
 /**
- * Rows 25..46 under DESERT (raymarch.wgsl desert_tile), from the desert
- * tile's meta: its per-level tables four levels to a row, its per-level
- * colour correction a level to a row, then (bounce albedo, 0).
- * Twin of soar_host.desert_tile_rows.
- */
-export function desertTileRows(meta) {
-  const mips = meta?.mips;
-  if (mips !== 12) {
-    throw new Error(`the desert tile has ${mips} mips; the shader's tables ` +
-                    "are laid out for 12.");
-  }
-  const rows = [];
-  for (const key of ["slope_max", "envelope_m", "slope_variance_removed"]) {
-    const table = meta[key];
-    if (!Array.isArray(table) || table.length !== mips) {
-      throw new Error(`the desert tile's meta.json ${key} is not ${mips} ` +
-                      "levels.");
-    }
-    for (let i = 0; i < mips; i += 4) rows.push(table.slice(i, i + 4));
-  }
-  const correction = meta.albedo_correction;
-  if (!Array.isArray(correction) || correction.length !== mips) {
-    throw new Error("the desert tile's meta.json albedo_correction is not " +
-                    `${mips} levels.`);
-  }
-  for (const rgb of correction) rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
-  const bounce = meta.bounce_albedo;
-  if (!Array.isArray(bounce) || bounce.length !== 3) {
-    throw new Error("the desert tile's meta.json has no bounce_albedo.");
-  }
-  rows.push([bounce[0], bounce[1], bounce[2], 0.0]);
-  if (rows.length !== K.DESERT_TILE_ROWS) {
-    throw new Error(`desertTileRows made ${rows.length} rows; the shader ` +
-                    `reads ${K.DESERT_TILE_ROWS}.`);
-  }
-  return rows;
-}
-
-/**
- * The camera's floor over the desert: a function of the surface-frame
- * position (tile metres, the camera's surfacePosition) returning the lowest
- * z the camera may take. The tile's own height, read bilinearly the way the
- * GPU reads it (texel i centred at (i + 1/2) cells, periodic), plus the most
- * the sub-tile octaves can add (band_max_m times raymarch.wgsl's
- * DESERT_OCTAVE_MARGIN) and the clearance. From the same level-0 bytes the
- * shader samples, so the floor is under the drawn ground by construction.
- */
-export const DESERT_OCTAVE_MARGIN = 0.4942;       // raymarch.wgsl's, a true bound
-
-export function desertFloorAt(tile, groundZ = 0.0) {
-  const { heights, meta } = tile;
-  if (!heights) throw new Error("the desert tile was loaded without heights.");
-  const n = meta.n;
-  const cell = meta.cell_m;
-  const lift = meta.band_max_m * DESERT_OCTAVE_MARGIN
-    + K.DESERT_FLOOR_CLEARANCE_M + groundZ;
-  const at = (i, j) =>
-    fromHalf(heights[(((j % n) + n) % n) * n + (((i % n) + n) % n)]);
-  return ([x, y]) => {
-    const gx = x / cell - 0.5;
-    const gy = y / cell - 0.5;
-    const i = Math.floor(gx);
-    const j = Math.floor(gy);
-    const fx = gx - i;
-    const fy = gy - j;
-    const h = (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy)
-            + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
-    return h + lift;
-  };
-}
-
-/**
- * A binding-3 surface tile: the ocean's wave normals (rgba16float), the
- * night city's density tile (rgba16float) or the desert's eroded terrain
- * (rg16float, planar-byte-shuffled) — one mip-chain loader, each tile's meta
+ * A binding-3 surface tile: the ocean's wave normals (rgba16float) or the
+ * night city's density tile (rgba16float) — one mip-chain loader, each tile's meta
  * saying its format, files, encoding and compression. The texel size is
  * dx_m (the ocean's) or cell_m.
  * Field-independent, so each ships with the tool and is loaded once per
@@ -222,24 +136,9 @@ export function desertFloorAt(tile, groundZ = 0.0) {
  * under the schema as a version query, so a schema bump is a new URL for
  * every edge and browser cache while a stale meta.json fails loudly rather
  * than pairing a new shader with an old tile.
- *
- * keepHeights holds the desert's level-0 height channel (as half-float bits)
- * for the camera's floor — the same bytes the shader reads.
- *
- * bounds builds the desert's bounds pyramid from every level's heights
- * (desert_bounds.js; the trace steps on it) and returns it as `seaView`,
- * the binding-9 view the desert reads, with its texture as
- * `boundsTexture`. onStage("bounds") is called as that build begins, for a
- * caller that names its steps (onProgress carries the download's fraction).
- * boundsBuilder, if given, builds it instead of buildDesertBounds on this
- * thread — the viewer passes buildDesertBoundsInWorker; it must return (or
- * resolve to) the same bytes.
  */
 export async function loadOceanTile(device, baseUrl, onProgress,
-                                    { keepCells = false, keepHeights = false,
-                                      bounds = false, schema,
-                                      onStage = null,
-                                      boundsBuilder = null } = {}) {
+                                    { keepCells = false, schema } = {}) {
   if (!schema) {
     throw new Error(`loadOceanTile(${baseUrl}) needs the schema it expects.`);
   }
@@ -253,9 +152,6 @@ export async function loadOceanTile(device, baseUrl, onProgress,
   }
   const version = `?v=${encodeURIComponent(meta.schema)}`;
   let cells = null;
-  let heights = null;
-  const boundsLevels = [];
-  let boundsTexture = null;
   const format = meta.format ?? "rgba16float";
   const channels = SURFACE_FORMAT_CHANNELS[format];
   const files = meta.files
@@ -295,19 +191,6 @@ export async function loadOceanTile(device, baseUrl, onProgress,
             await fetchDecompressedStream(url, null, "gzip")).arrayBuffer())
         : await fetchBytes(url);
       const bytes = decodeSurfaceLevel(stored, n, meta);
-      if (bounds) {
-        const halves = new Uint16Array(
-          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-        const h = new Float32Array(n * n);
-        for (let i = 0; i < n * n; i++) h[i] = fromHalf(halves[i * channels]);
-        boundsLevels.push(h);
-      }
-      if (keepHeights && level === 0) {
-        const halves = new Uint16Array(
-          bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
-        heights = new Uint16Array(n * n);
-        for (let i = 0; i < n * n; i++) heights[i] = halves[i * channels];
-      }
       // The city minimap draws the same cascade the shader raises buildings
       // out of, and the flight collider (collide.js) stands the same
       // buildings up again on the CPU, so both read the SAME bytes rather
@@ -344,30 +227,8 @@ export async function loadOceanTile(device, baseUrl, onProgress,
         `${baseUrl} was asked for its block cells and has no mip 0 to take ` +
         "them from.");
     }
-    if (bounds) {
-      onStage?.("bounds");
-      const pyramid = await (boundsBuilder ?? buildDesertBounds)(
-        boundsLevels, dx);
-      const side = Math.round(Math.sqrt(pyramid[0].length / 4
-                                        / DESERT_BOUNDS_LAYERS));
-      boundsTexture = device.createTexture({
-        label: `${baseUrl}-bounds`,
-        size: [side, side, DESERT_BOUNDS_LAYERS],
-        format: "rgba16float",
-        mipLevelCount: pyramid.length,
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-      pyramid.forEach((bits, level) => {
-        const m = Math.max(1, side >> level);
-        device.queue.writeTexture(
-          { texture: boundsTexture, mipLevel: level }, bits,
-          { bytesPerRow: m * 8, rowsPerImage: m },
-          [m, m, DESERT_BOUNDS_LAYERS]);
-      });
-    }
   } catch (err) {
     texture.destroy();
-    boundsTexture?.destroy();
     throw err;
   }
   return {
@@ -384,9 +245,6 @@ export async function loadOceanTile(device, baseUrl, onProgress,
     clockPeriod,
     maxLod: meta.mips - 1,
     cells,
-    heights,
-    seaView: boundsTexture?.createView({ dimension: "2d-array" }) ?? null,
-    boundsTexture,
     meta,
   };
 }
@@ -790,25 +648,30 @@ export function createNestDummy(device) {
  * takes one: the tiles are field-independent and belong to the session, so
  * loading the demo after a file (or the other way round) reuses the tile
  * already on the card instead of allocating a second one and abandoning it.
- * It takes the surface kind — "ocean", "desert", or "city" for the night
- * city — because which tile a demo stands on is the demo's call
+ * It takes the surface kind — "ocean", or "city" for the night city —
+ * because which tile a demo stands on is the demo's call
  * (meta.surface)…
  *
  * …unless the PAGE overrides it. `surfaceKind` does that, for two callers:
  * cyberpunk mode, which flies the same demos every other mode does standing
  * them on the city (the alternative was a parallel set of city-surfaced
  * bakes, the same volumes twice on disk to carry one boolean), and
- * ?surface= (main.js), which stands a demo on either day surface.
+ * ?surface= (main.js), which stands a demo on the sea.
  */
 export async function loadDemoScene(device, baseUrl, surface, progress,
                                     { surfaceKind: forcedSurface = null } = {}) {
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const surfaceKind = forcedSurface ?? meta.surface ?? "ocean";
-  if (!["ocean", "desert", "city"].includes(surfaceKind)) {
+  if (surfaceKind === "desert") {
+    throw new Error(
+      `The '${meta.id}' demo was baked over the desert, which this soar no ` +
+      "longer has (it lives on the cloudyview `desert` branch).");
+  }
+  if (!["ocean", "city"].includes(surfaceKind)) {
     throw new Error(
       `The '${meta.id}' demo asks for surface '${surfaceKind}', which this ` +
-      "viewer does not know. It knows 'ocean', 'desert' and 'city'.");
+      "viewer does not know. It knows 'ocean' and 'city'.");
   }
   // A pre-v5 bake ships a ghost-padded volume and a faces.bin, which this
   // renderer would read two texels out of register on every axis. Say so
@@ -867,9 +730,8 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
     }
 
     const mapBytes = await fetchBytes(`${baseUrl}/${meta.map.file ?? "map.bin"}`);
-    progress?.({ city: "Raising the city…",
-                 desert: "Laying out the desert…" }[surfaceKind]
-               ?? "Loading the ocean surface…", 0.95);
+    progress?.(surfaceKind === "city" ? "Raising the city…"
+               : "Loading the ocean surface…", 0.95);
     const surfaceTile = await surface(surfaceKind);
     nestDummy = createNestDummy(device);
 
@@ -882,20 +744,12 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
       bmin, bmax,
       minVoxelM: minVoxelSize(shape, bmin, bmax),
       oceanView: surfaceTile.view,
-      seaView: surfaceTile.seaView ?? null,
       oceanFifDx: surfaceTile.dx,
       oceanTileExtent: surfaceTile.tileExtent,
       surfacePeriod: surfaceTile.surfacePeriod,
       clockPeriod: surfaceTile.clockPeriod,
       oceanMaxLod: surfaceTile.maxLod,
       city: surfaceKind === "city",
-      desert: surfaceKind === "desert",
-      desertReliefM: surfaceKind === "desert"
-        ? desertReliefM(surfaceTile.meta) : null,
-      desertTileRows: surfaceKind === "desert"
-        ? desertTileRows(surfaceTile.meta) : null,
-      desertFloorAt: surfaceKind === "desert"
-        ? desertFloorAt(surfaceTile) : null,
       // The city tile's per-block cascade, for the minimap to draw the city
       // with. Null for an ocean scene, and null is what makes the minimap
       // build the cloud map instead — see Minimap's constructor.

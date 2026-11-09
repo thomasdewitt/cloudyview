@@ -930,11 +930,11 @@ wireFlyPair(buildRail());
 // The id is looked up across every group: which group a demo sits in is a
 // presentation choice on the landing page and links must not depend on it.
 //
-// ?surface=ocean|desert, beside ?demo, stands the demo on that day surface
-// whatever its meta says — the in-flight G switch, for a headless run that
-// cannot press keys. Checked here, before anything loads: a name the viewer
-// does not know, or a day surface asked of the night city, is refused
-// rather than flown as something else.
+// ?surface=ocean, beside ?demo, stands the demo on the day sea whatever its
+// meta says. Checked here, before anything loads: a name the viewer does
+// not know (the desert included: it lives on the `desert` branch), or a day
+// surface asked of the night city, is refused rather than flown as
+// something else.
 const query = new URLSearchParams(location.search);
 const wanted = query.get("demo");
 const wantedSurface = query.get("surface");
@@ -942,8 +942,12 @@ if (wantedSurface !== null) {
   if (wanted === null) {
     throw new Error("?surface needs ?demo: it picks the ground a demo stands on.");
   }
-  if (!["ocean", "desert"].includes(wantedSurface)) {
-    throw new Error(`?surface=${wantedSurface}: expected 'ocean' or 'desert'.`);
+  if (wantedSurface === "desert") {
+    throw new Error("?surface=desert: the desert is not part of this soar " +
+                    "(it lives on the cloudyview `desert` branch).");
+  }
+  if (wantedSurface !== "ocean") {
+    throw new Error(`?surface=${wantedSurface}: expected 'ocean'.`);
   }
   if (mode === "cyberpunk") {
     throw new Error(`?surface=${wantedSurface} is a day surface; cyberpunk ` +

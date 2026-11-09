@@ -196,8 +196,8 @@ CITY_OFFSET = [8100.0, -44190.0]          # K.CITY_TILE_OFFSET_M
 # (name, scene flags, tile extent, the period the surface frame folds at,
 # the surface's clock period (null: it has none), whether the flight's folds
 # moved the surface frame off the static offset — which is when
-# --surface-origin must appear and carry it). The city and the desert fold
-# at their tile, the sea at 16 tiles (SURFACE_FRAME_TILES); only the city
+# --surface-origin must appear and carry it). The city folds at its tile,
+# the sea at 16 tiles (SURFACE_FRAME_TILES); only the city
 # has a clock (its steam).
 SURFACE_CASES = [
     ("ocean", {}, 102.4, 1638.4, None, False),
@@ -206,8 +206,6 @@ SURFACE_CASES = [
      2600.0, False),
     ("city-drifted", {"city": True, "cityOffsetM": CITY_OFFSET}, 92160.0,
      92160.0, 2600.0, True),
-    ("desert", {"desert": True}, 4096.0, 4096.0, None, False),
-    ("desert-drifted", {"desert": True}, 4096.0, 4096.0, None, True),
 ]
 # The scene clock the fake views were held at: where the city's steam was.
 SCENE_TIME = 37.625
@@ -320,8 +318,7 @@ def test_the_surface_round_trips_to_the_uniforms(
     u = renderer.uniforms
     scene, tile, drift = next((s, t, d) for n, s, t, _, _c, d in SURFACE_CASES
                               if n == name)
-    kind = ("city" if scene.get("city")
-            else "desert" if scene.get("desert") else "ocean")
+    kind = "city" if scene.get("city") else "ocean"
     meta = renderer.surface_meta
     assert renderer.surface == kind
     # Row 9: cell size, tile extent, surface on, top mip — the bound tile's.
@@ -333,8 +330,8 @@ def test_the_surface_round_trips_to_the_uniforms(
     assert tuple(u[24][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
     # The clock runs where something reads it: a city still carries it (its
-    # period far exceeds it, so it packs unwrapped); an ocean or a desert
-    # still neither writes --time nor packs one.
+    # period far exceeds it, so it packs unwrapped); an ocean still neither
+    # writes --time nor packs one.
     if kind == "city":
         assert u[24][2] == np.float32(SCENE_TIME)
     else:
@@ -343,11 +340,6 @@ def test_the_surface_round_trips_to_the_uniforms(
     assert ("--surface-origin" in argv) == drift
     # Row 0: the camera, through worldToRelative and back.
     assert u[0][:3] == pytest.approx(emitted["position"], rel=1e-9, abs=1e-6)
-    if kind == "desert":
-        # Row 8 under DESERT: the datum and the tile's relief, from its meta.
-        assert tuple(u[8]) == tuple(np.float32(
-            (0.0, meta["height_min_m"], meta["height_max_m"],
-             meta["band_max_m"])))
     if kind == "city":
         assert tuple(u[8][1:3]) == tuple(np.float32(CITY_OFFSET))
         # Under CITY the sun row is the moon the browser flew under.

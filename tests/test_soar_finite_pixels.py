@@ -43,7 +43,7 @@ def field():
     return cv.load(str(SOAR_DATA_FILE))
 
 
-@pytest.mark.parametrize("surface", ["city", "desert", "ocean"])
+@pytest.mark.parametrize("surface", ["city", "ocean"])
 @pytest.mark.parametrize("view", VIEWS, ids=["z95", "z97", "z99"])
 def test_near_ground_pixels_are_finite(field, surface, view):
     import cloudyview as cv

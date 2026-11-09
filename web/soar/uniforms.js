@@ -75,16 +75,6 @@ export function packUniforms(state, view) {
     // describe the city tile, row 4 is the moon, and cityOffsetM is where
     // the tile sits in world space (row 8.yz).
     city = false, cityOffsetM = [0.0, 0.0],
-    // The Sonoran desert (raymarch.wgsl DESERT): the ocean-named fields
-    // describe the desert tile, and row 8 is the datum and the relief.
-    desert = false,
-    // Under DESERT, row 8.yzw: the tile's height range and its largest
-    // band-pass excursion (meta height_min_m, height_max_m, band_max_m).
-    // Required for the desert — see the check below.
-    desertReliefM = null,
-    // Under DESERT, rows 25..46: the tile's own tables (scene.js
-    // desertTileRows). Required for the desert, like the relief.
-    desertTileRows = null,
     // Explicit override of the surface offset row 24 folds and writes;
     // null means the scene's static offset (cityOffsetM under CITY, the
     // origin otherwise). Mirrors SceneState.surface_offset_m.
@@ -95,37 +85,15 @@ export function packUniforms(state, view) {
     // The surface's clock (its meta.json clock_period_s): a period, the
     // scene clock packed modulo it so float32 never loses the cadence (the
     // city); null for a surface where nothing moves, packing 0 at any scene
-    // time (the sea, the desert). Undefined until the caller says, and a
+    // time (the sea). Undefined until the caller says, and a
     // running clock with it undefined throws. Mirrors
     // SceneState.clock_period_s (UNSTATED / None / a number).
     clockPeriodS,
   } = state;
 
-  if (city && desert) {
-    throw new Error("a scene stands on one surface: city and desert are " +
-                    "both set.");
-  }
-  // No default: without its relief the desert collapses onto the datum and
-  // still looks plausible. Mirrors soar_host.pack_uniforms.
-  if (desert && !desertReliefM) {
-    throw new Error("the desert needs its relief (desertReliefM, from the " +
-                    "tile's meta); without it every ray lands on the datum.");
-  }
-  if (desert && !desertTileRows) {
-    throw new Error("the desert needs its tile's tables (desertTileRows, " +
-                    "from the tile's meta).");
-  }
-  if (!desert && (desertReliefM || desertTileRows)) {
-    throw new Error("desertReliefM and desertTileRows are the desert's; " +
-                    "this scene is not the desert.");
-  }
-
   const {
     camera, outputSize, renderSize,
     jitter = true,
-    // The simplified desert (DESERT_LITE), which walks no flora and so
-    // has no finest pixel; see the check on pixelTan below.
-    desertLite = false,
     sunAzimuth = K.DEFAULT_SUN_AZIMUTH,
     sunElevation = K.DEFAULT_SUN_ELEVATION,
     exposure = K.DEFAULT_EXPOSURE,
@@ -286,10 +254,6 @@ export function packUniforms(state, view) {
     // the parity test read it, the shader no longer does.
     // w: the live view's steam (liveSteam above).
     row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], liveSteam ? 1.0 : 0.0);
-  } else if (desert) {
-    // The datum and the tile's relief. The desert has no reflectance row:
-    // its albedos are properties of the materials and live in the shader.
-    row(8, oceanZ, desertReliefM[0], desertReliefM[1], desertReliefM[2]);
   } else {
     row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
   }
@@ -323,12 +287,6 @@ export function packUniforms(state, view) {
   // where the return genuinely ends. An exact 0 stays 0 — the "LOD off,
   // fixed dt" sentinel, unreachable from the slider.
   const pixelTan = 2.0 * tanHalfFov / w;
-  if (desert && !desertLite && pixelTan < K.DESERT_MIN_PIXEL_TAN) {
-    throw new Error(`a pixel of ${pixelTan.toPrecision(3)} rad is finer ` +
-                    "than the desert's flora can walk to " +
-                    `(${K.DESERT_MIN_PIXEL_TAN.toPrecision(3)}): widen the ` +
-                    "field of view or lower the render width.");
-  }
   let viewStepTan = Math.tan(viewStepLodDegrees * DEG);
   if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, 0.25 * pixelTan);
   row(20, periodic ? 1.0 : 0.0,
@@ -380,14 +338,6 @@ export function packUniforms(state, view) {
   }
   row(24, surfaceOff[0], surfaceOff[1], sceneClock(sceneTime, clockPeriodS),
       0.0);
-  if (desert) {
-    if (desertTileRows.length !== K.DESERT_TILE_ROWS) {
-      throw new Error(`desertTileRows has ${desertTileRows.length} rows; ` +
-                      `the shader reads ${K.DESERT_TILE_ROWS}.`);
-    }
-    desertTileRows.forEach((r, i) =>
-      row(K.DESERT_TILE_ROW0 + i, r[0], r[1], r[2], r[3]));
-  }
   return u;
 }
 

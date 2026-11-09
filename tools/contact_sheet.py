@@ -28,9 +28,6 @@ seams as hard cloud edges.
     for the demo loader) in cyberpunk mode's frame: its tile offset and moon
     (web/soar/constants.js), cameras in city-tile metres so they name the
     same streets whatever field stands over the tile.
-  * desert — render_nested over desert-coarse at desert-ground's proof
-    cameras, the full ground (quality high) beside the LITE ground (quality
-    low, as the app flies its low tiers). A tree without the desert: "n/a".
 
 Cameras are world metres (the city's: city-tile metres). Renders are
 deterministic (fixed exposure, frame index from 0) and cached per commit and
@@ -84,15 +81,10 @@ class View:
     camera: tuple
     # nested: render_nested keyword arguments, as pairs; harness: CLI flags.
     args: tuple = ()
-    # render_nested arguments a tree must take to render the view at all
-    # ("n/a" otherwise).
-    needs: tuple = ()
 
 
 OCEAN_DEMO = "marine-congestus-coarse"
-DESERT_DEMO = "desert-coarse"
 CITY_DEMO = "marine-congestus-coarse"
-DESERT_SUN = (0.0, 45.5)     # desert-coarse's own sun
 # The clearest 3 km of marine-congestus-coarse (1.5 % of its columns past
 # optical depth 0.3; the field as a whole is half cloud): the ocean views
 # stand here so the sea is in sun, not under a deck.
@@ -101,12 +93,6 @@ OCEAN_CLEAR = (17105.0, 1405.0)
 
 def _ocean(name, label, cam):
     return View(name, label, "nested", OCEAN_DEMO, cam, (("quality", "high"),))
-
-
-def _desert(name, label, x, y, z, az, el, fov, sun=DESERT_SUN):
-    return View(name, label, "nested", DESERT_DEMO,
-                (x, y, z, az, el, fov, *sun),
-                (("surface", "desert"),), needs=("surface",))
 
 
 def _city(name, label, cam):
@@ -147,21 +133,7 @@ SCENES = {
         _city("facade", "facade close-up, from the street at 25 m",
               (STREET_X + 6.0, 61500.0, 25.0, 285.0, 15.0, 55.0)),
     ],
-    # desert-ground's proof cameras (2026-09-24), over their field: one spot
-    # on a wash, the ground there at 2.572 m, seen from 300, 30 and 5 m and
-    # under a low sun; and a pavement close-up elsewhere.
-    "desert": [
-        _desert("alt300", "300 m", 7465.14, 34082.99, 302.572, 250, -20, 80),
-        _desert("alt30", "30 m", 7465.14, 34082.99, 32.572, 250, -10, 80),
-        _desert("alt5", "5 m", 7465.14, 34082.99, 7.572, 250, -4, 80),
-        _desert("pavement", "desert pavement close-up, 1.5 m",
-                8421.04, 32708.78, 5.876, 270, -35, 70),
-        _desert("low_sun", "low sun (240/18), 12 m",
-                7465.14, 34082.99, 14.572, 330, -3, 80, sun=(240.0, 18.0)),
-    ],
 }
-# The desert's two columns: the same view, full ground and LITE ground.
-DESERT_VARIANTS = (("full (high)", "high"), ("LITE (low)", "low"))
 
 
 # --- trees -----------------------------------------------------------------
@@ -219,16 +191,10 @@ _PRELUDE = textwrap.dedent("""
 """)
 
 _NESTED = _PRELUDE + textwrap.dedent("""
-    import inspect
     import numpy as np
     from PIL import Image
     from cloudyview.witness import render_nested
-    takes = inspect.signature(render_nested).parameters
     kwargs = dict(job["args"])
-    for name in job["needs"]:
-        if name not in takes:
-            print(f"NA no {name}")
-            sys.exit(0)
     level, _ = bench.build_level_from_demo(job["demo"])
     x, y, z, az, el, fov, saz, sel = job["camera"]
     img = render_nested([level], [x, y, z], azimuth=az, elevation=el,
@@ -269,8 +235,7 @@ def render(tree: Path, view: View, args: tuple, dest: Path) -> str:
     job = {"tree": str(tree), "demo": str(DEMOS / view.demo),
            "out": str(dest), "camera": list(view.camera), "size": list(SIZE),
            "args": [list(a) for a in args] if view.kind == "nested"
-           else list(args),
-           "needs": list(view.needs)}
+           else list(args)}
     script = _NESTED if view.kind == "nested" else _HARNESS
     t0 = time.perf_counter()
     proc = subprocess.run([sys.executable, "-c", script, json.dumps(job)],
@@ -278,10 +243,6 @@ def render(tree: Path, view: View, args: tuple, dest: Path) -> str:
     if proc.returncode != 0:
         raise RuntimeError(f"{view.name} at {tree.name} failed:\n"
                            f"{proc.stderr[-3000:]}")
-    lines = proc.stdout.splitlines()
-    na = [ln[3:] for ln in lines if ln.startswith("NA ")]
-    if na:
-        return f"n/a ({na[0]})"
     if not dest.exists():
         raise RuntimeError(f"{view.name} at {tree.name} wrote no image.")
     print(f"  {dest.relative_to(OUT)}  ({time.perf_counter() - t0:.1f} s)",
@@ -289,14 +250,14 @@ def render(tree: Path, view: View, args: tuple, dest: Path) -> str:
     return ""
 
 
-def cell(sha: str, tree: Path, scene: str, view: View, args=None,
-         tag: str = "") -> tuple[Optional[Path], str]:
+def cell(sha: str, tree: Path, scene: str,
+         view: View) -> tuple[Optional[Path], str]:
     """(PNG or None, note) for one view at one revision — from the cache
     when this revision already rendered this exact view definition."""
-    args = view.args if args is None else args
+    args = view.args
     key = sha[:12] if sha != "tree" else "tree"
     digest = hashlib.sha256(repr((view, args)).encode()).hexdigest()[:10]
-    dest = OUT / "renders" / key / scene / f"{view.name}{tag}_{digest}.png"
+    dest = OUT / "renders" / key / scene / f"{view.name}_{digest}.png"
     note_file = dest.with_suffix(".note")
     if sha != "tree" and note_file.exists():
         note = note_file.read_text()
@@ -347,7 +308,7 @@ def main(argv=None) -> int:
     ap.add_argument("--before", default=DEFAULT_BEFORE)
     ap.add_argument("--after", default="HEAD",
                     help="a ref, or 'tree' for the working tree (uncached)")
-    ap.add_argument("--scenes", default="ocean,city,desert")
+    ap.add_argument("--scenes", default="ocean,city")
     ap.add_argument("--list", action="store_true",
                     help="print the views and exit")
     args = ap.parse_args(argv)
@@ -373,20 +334,11 @@ def main(argv=None) -> int:
     for scene in scenes:
         views = SCENES[scene]
         print(f"contact_sheet: {scene}", flush=True)
-        if scene == "desert":
-            columns = [f"{name} at {short[after]}"
-                       for name, _ in DESERT_VARIANTS]
-            rows = [(v.label, [cell(after, trees[after], scene, v,
-                                    v.args + (("quality", q),), tag=f"_{q}")
-                               for _, q in DESERT_VARIANTS])
-                    for v in views]
-            title = f"soar desert at {short[after]}"
-        else:
-            columns = [f"before: {short[before]}", f"after: {short[after]}"]
-            rows = [(v.label, [cell(sha, trees[sha], scene, v)
-                               for sha in (before, after)])
-                    for v in views]
-            title = f"soar {scene}: {short[before]} -> {short[after]}"
+        columns = [f"before: {short[before]}", f"after: {short[after]}"]
+        rows = [(v.label, [cell(sha, trees[sha], scene, v)
+                           for sha in (before, after)])
+                for v in views]
+        title = f"soar {scene}: {short[before]} -> {short[after]}"
         tag = short[after].replace(" ", "_")
         compose(title, columns, rows,
                 OUT / f"{scene}_{short[before]}_{tag}.png")

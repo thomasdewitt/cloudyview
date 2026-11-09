@@ -48,8 +48,6 @@ from .cloudfield import CloudField, load as _load_field
 from .look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
 from .soar_host import (
     APP_LIGHT_MARCH_LOD_DEGREES,
-    DESERT_FLORA_CUT_BY_TIER,
-    DESERT_LITE_TIERS,
     APP_VIEW_STEP_LOD_DEGREES,
     DEFAULT_HAZE_HEIGHT_DEPENDENT,
     DEFAULT_LOD_STRENGTH,
@@ -65,7 +63,6 @@ from .soar_host import (
     ViewState,
     camera_world_origin,
     check_surface,
-    desert_scene_fields,
     surface_cell_m,
     surface_period_m,
     surface_clock_period_s,
@@ -311,7 +308,7 @@ def render_nested(
     in one place (soar_host.camera_basis) so it cannot disagree with the
     browser's.
 
-    `surface` is what the world stands on: "ocean", "desert", or "city" —
+    `surface` is what the world stands on: "ocean" or "city" —
     the night city, which also turns the sun into the moon (the sun angles
     are then the moon's). A city needs `city_offset`, the world position of
     its tile, because that is what picks the district under the field.
@@ -411,8 +408,6 @@ def render_nested(
         clock_period_s=surface_clock_period_s(surface, meta),
         nested=len(levels) > 1,
         surface=surface,
-        **(desert_scene_fields(meta)
-           if surface == "desert" else {}),
         **state_kwargs,
     )
     dt = min_voxel * view_factor
@@ -439,10 +434,6 @@ def render_nested(
         view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
         light_cache=bool(tier and tier["light_cache"]),
         sky_probe=(tier["sky_probe"] if tier else True),
-        # The simplified desert flies at the tiers the app keys it on.
-        desert_lite=bool(surface == "desert" and quality in DESERT_LITE_TIERS),
-        desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[quality]
-                          if surface == "desert" and quality else 1.0),
         scene_time=float(scene_time),
     )
     if tier and tier["light_cache"]:
@@ -556,9 +547,9 @@ def witness(
         the scene's static offset, which is every fresh render; soar's
         reproduction commands write a flight's own offset here.
     surface : str, optional
-        What the world stands on: "ocean" (default) or "desert", soar's
-        two day grounds, or "city", the night city of soar's cyberpunk
-        mode — under which the sun angles are the moon's.
+        What the world stands on: "ocean" (default), soar's day ground, or
+        "city", the night city of soar's cyberpunk mode — under which the
+        sun angles are the moon's.
     city_offset : (x, y), optional
         The city tile's world offset in metres, which picks the district
         standing under the field. Required with surface="city" and refused
@@ -566,7 +557,7 @@ def witness(
     scene_time : float, optional
         The scene clock in seconds (uniform row 24.z): where the city's
         steam is in its motion. 0 by default, and refused over a surface
-        with no clock (the sea, the desert); soar's reproduction commands
+        with no clock (the sea); soar's reproduction commands
         write the clock the still was taken at.
     return_linear : bool, optional
         Compile the tone map out and return unbounded linear HDR radiance
@@ -1020,8 +1011,8 @@ def cli():
                              "rendered them")
     parser.add_argument("--surface", choices=SURFACES,
                         help="What the world stands on: the ocean "
-                             "(default) or the Sonoran desert — soar's two "
-                             "day grounds — or the night city of cyberpunk "
+                             "(default), soar's day ground, or the night "
+                             "city of cyberpunk "
                              "mode, where the sun angles are the moon's "
                              "(needs --city-offset). Soar writes the flown "
                              "one here")
@@ -1034,8 +1025,7 @@ def cli():
     parser.add_argument("--time", type=float, metavar="SECONDS",
                         dest="scene_time",
                         help="The scene clock: where the city's steam is in "
-                             "its motion (default 0; the sea and the desert "
-                             "have none). Soar writes the clock the still was "
+                             "its motion (default 0; the sea has none). Soar writes the clock the still was "
                              "taken at")
     parser.add_argument("--periodic", action="store_true",
                         help="Wrap the domain in x and y, as soar does for LES fields")
