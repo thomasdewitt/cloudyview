@@ -137,7 +137,7 @@ try {
       if (L.classList.contains("failed") && !L.hidden) throw new Error(L.innerText);
       return window.soar?.scene && L.hidden; })()`, 180000);
   await tab.eval(`(() => { const s = window.soar;
-    s.renderer.setQualityTier(${JSON.stringify(tier)});
+    s.setQualityTier(${JSON.stringify(tier)});
     s.autoExposure = false; s.minimapMode = "off";
     const hint = [...document.querySelectorAll("body *")].filter((e) =>
       e.children.length > 0 && e.innerText?.includes("to fly")
@@ -310,7 +310,12 @@ try {
           return Object.fromEntries(Object.entries(t).map(([k, a]) => [k, med(a)]));
         })()`);
         const f = (k) => res[k].toFixed(3);
-        console.log(`timing ${name} ${W}x${H} ms/frame: marched ${f("M")} live ` +
+        const inForce = await tab.eval(`({ tier: window.soar.renderer.qualityTier,
+          scale: window.soar.renderer.renderScale })`);
+        if (inForce.tier !== tier) {
+          throw new Error(`timed at tier ${inForce.tier}, not the ${tier} asked for`);
+        }
+        console.log(`timing ${name} ${W}x${H} tier ${inForce.tier} (scale ${inForce.scale}) ms/frame: marched ${f("M")} live ` +
                     `${f("L")} (null ${f("M2")}/${f("L2")}) | parked present: ` +
                     `steam ${f("P")} bare ${f("B")} (null ${f("P2")}) | live/marched ` +
                     `${(res.L / res.M).toFixed(3)}, null ${(res.M2 / res.M).toFixed(3)}`);
