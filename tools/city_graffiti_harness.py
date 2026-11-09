@@ -118,7 +118,7 @@ fn wall(@builtin(global_invocation_id) gid: vec3<u32>) {{
     var run: CityGraffitiRun;
     run.seed = vec2<u32>(b * 7919u + {salt}u, b * 104729u + 17u);
     run.len = f32(W) * FP;
-    run.kind = i32(b) % 6;
+    run.kind = i32(b) % 4;
     let v_top = BAND;
     var acc = vec3<f32>(0.0);
     let sub = FP / f32(SS);
@@ -481,7 +481,7 @@ def main():
     pn = sub.add_parser("panel")
     pn.add_argument("--bands", type=int, nargs="+", required=True,
                     help="band indices of the wall (its runs, kind = index "
-                         "mod 6)")
+                         "mod 4)")
     pn.add_argument("--refs", nargs="+", required=True,
                     help="one reference image per band")
     pn.add_argument("--fp", type=float, default=0.01)
@@ -525,7 +525,7 @@ def main():
             row.paste(r, (0, 0))
             row.paste(band, (r.width + 8, 0))
             tiles.append(row)
-            print(f"band {b}: kind {b % 6}, level {int(lv[b * rows_per, 0])}")
+            print(f"band {b}: kind {b % 4}, level {int(lv[b * rows_per, 0])}")
         w = max(t.width for t in tiles)
         out = Image.new("RGB", (w, sum(t.height + 8 for t in tiles)), "white")
         y = 0
