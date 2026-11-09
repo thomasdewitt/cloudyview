@@ -6,7 +6,7 @@
 // flashes on).
 //
 //   node tools/sea_speckle_qa.mjs --web DIR --out DIR [--cdp PORT]
-//        [--size WxH] [--tier high] [--views a,b]
+//        [--size WxH] [--tier high] [--fps 60] [--views a,b]
 //
 // Each view is the marine-congestus-coarse demo over the sea, at a pinned
 // camera and sun (the Python ablation's views, temp/speckle in the ocean
@@ -14,7 +14,13 @@
 // Per view: a glide of GLIDE frames at 1 m a frame along the view azimuth
 // (the camera moving, so the real motion blend), the last of them read back
 // as `VIEW-flight`; then the camera held, and park frames 1..4 read back as
-// `VIEW-park1..4`; then accumulated to CONVERGE frames, `VIEW-converged`.
+// `VIEW-park1..4`; then held until the renderer calls the view converged —
+// the tier's parked sample count at the top of its hold ladder, climbed as
+// the live loop climbs it (holdTick, fed each frame's measured time) —
+// `VIEW-converged`, the picture a parked viewer settles to.
+// --fps sets the glide's frame time, which the motion blend is scaled by
+// (motionAlphaForDt): 60 is a viewer at 60 Hz, a slower machine keeps more
+// history in flight.
 // Each is raw RGBA8 (rows top-down), with meta.json saying the size and
 // format; tools/sea_speckle_sheet.py turns them into a sheet.
 //
@@ -37,10 +43,11 @@ const out = flag("--out", null);
 const cdpPort = flag("--cdp", "9333");
 const [W, H] = flag("--size", "960x540").split("x").map(Number);
 const tier = flag("--tier", "high");
+const fps = Number(flag("--fps", "60"));
 const only = flag("--views", null)?.split(",") ?? null;
-if (!webDir || !out || !(W > 0 && H > 0)) {
+if (!webDir || !out || !(W > 0 && H > 0) || !(fps > 0)) {
   console.error("usage: node tools/sea_speckle_qa.mjs --web DIR --out DIR " +
-                "[--cdp PORT] [--size WxH] [--tier T] [--views a,b]");
+                "[--cdp PORT] [--size WxH] [--tier T] [--fps N] [--views a,b]");
   process.exit(2);
 }
 mkdirSync(out, { recursive: true });
@@ -56,7 +63,8 @@ const VIEWS = {
 };
 const GLIDE = 24;
 const PARK = 4;
-const CONVERGE = 64;
+// A cap on the hold, not a target: the renderer's own converged flag ends it.
+const HOLD_LIMIT = 512;
 const EXPOSURE = 4.0;      // witness.render_nested's, so the Python ablation compares
 
 const server = await serveTree(webDir);
@@ -104,13 +112,20 @@ try {
       s.setSun({ azimuth: v.sun[0], elevation: v.sun[1] });
       return { position: c.position, bmin: s.scene.bmin }; },
     async readback(tex) { const d = window.soar.device;
-      const buf = d.createBuffer({ size: ${W * H * 4},
+      // Rows padded to the 256-byte pitch a texture-to-buffer copy needs,
+      // then stripped back to W * 4.
+      const pitch = Math.ceil(${W * 4} / 256) * 256;
+      const buf = d.createBuffer({ size: pitch * ${H},
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = d.createCommandEncoder();
-      enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: ${W * 4} },
+      enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: pitch },
                               [${W}, ${H}]);
       d.queue.submit([enc.finish()]); await buf.mapAsync(GPUMapMode.READ);
-      const bytes = new Uint8Array(buf.getMappedRange()).slice();
+      const padded = new Uint8Array(buf.getMappedRange());
+      const bytes = new Uint8Array(${W * H * 4});
+      for (let y = 0; y < ${H}; y++) {
+        bytes.set(padded.subarray(y * pitch, y * pitch + ${W * 4}), y * ${W * 4});
+      }
       buf.unmap(); buf.destroy();
       let bin = "";
       for (let i = 0; i < bytes.length; i += 0x8000) {
@@ -129,7 +144,7 @@ try {
       const draw = async () => {
         await r.drawFrame(tex.createView(), s.canvasFormat, [${W}, ${H}],
           { ...s._viewKwargs(), frameIndex: frame++, sceneTime: 0.0 },
-          { deltaSeconds: 1 / 60 });
+          { deltaSeconds: 1 / ${fps} });
       };
       try {
         r.resetAccumulation();
@@ -140,13 +155,20 @@ try {
         }
         shots.flight = await this.readback(tex); spp.flight = r.accumCount;
         r.setCameraMoving(false);
-        for (let k = 1; k <= ${CONVERGE}; k++) {
+        let k = 0;
+        while (!r.converged) {
+          if (++k > ${HOLD_LIMIT}) throw new Error("the held view never converged");
+          const t0 = performance.now();
           await draw();
+          await d.queue.onSubmittedWorkDone();
+          const ms = performance.now() - t0;
           if (k <= ${PARK}) {
             shots["park" + k] = await this.readback(tex); spp["park" + k] = r.accumCount;
           }
+          r.holdTick(ms);
         }
         shots.converged = await this.readback(tex); spp.converged = r.accumCount;
+        spp.held = k;
         return { shots, spp, format: s.canvasFormat, renderScale: r.renderScale };
       } finally { tex.destroy(); s._capturing = false; s._wake?.("sea-qa"); } },
   }; true`);

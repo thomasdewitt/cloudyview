@@ -20,7 +20,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 SHOTS = ("flight", "park1", "park2", "converged")
-BANDS = ((0, 8), (8, 30), (30, 90), (90, 400))
+# The last band runs to the image's bottom edge, however far that is.
+BANDS = ((0, 8), (8, 30), (30, 90), (90, None))
 CROP_ROWS = 170
 
 
@@ -34,6 +35,11 @@ def _load(run: Path, view: str, shot: str, meta: dict) -> np.ndarray:
 
 def _luma(img):
     return 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+
+
+def _band(yh: int, a: int, b) -> slice:
+    """Rows a..b below the horizon row (b None: to the bottom edge)."""
+    return slice(yh + a, None if b is None else yh + b)
 
 
 def _horizon_row(meta: dict, view: dict) -> int:
@@ -53,17 +59,19 @@ def main(argv=None) -> int:
         imgs = {(tag, s): _load(run, name, s, m)
                 for tag, run, m in (("before", before, mb), ("after", after, ma))
                 for s in SHOTS}
+        bottom = ma["height"] - yh
         print(f"{name} (horizon row {yh}); RMS from own converged, 8-bit luma, "
-              "rows below the horizon " + " ".join(f"{a}-{b}" for a, b in BANDS))
+              "rows below the horizon " + " ".join(
+                  f"{a}-{b if b is not None else bottom}" for a, b in BANDS))
         for tag in ("before", "after"):
             conv = _luma(imgs[(tag, "converged")])
             for s in SHOTS[:-1]:
                 d = _luma(imgs[(tag, s)]) - conv
-                vals = [math.sqrt(np.mean(d[yh + a:yh + b] ** 2)) for a, b in BANDS]
+                vals = [math.sqrt(np.mean(d[_band(yh, a, b)] ** 2)) for a, b in BANDS]
                 print(f"  {tag:6s} {s:7s} " + " ".join(f"{v:6.2f}" for v in vals))
         dconv = _luma(imgs[("after", "converged")]) - _luma(imgs[("before", "converged")])
         print("  converged after - before, band means: " + " ".join(
-            f"{np.mean(dconv[yh + a:yh + b]):+6.2f}" for a, b in BANDS))
+            f"{np.mean(dconv[_band(yh, a, b)]):+6.2f}" for a, b in BANDS))
         w = ma["width"]
         sheet = Image.new("RGB", (2 * w + 8, (CROP_ROWS + 18) * (len(SHOTS) + 1)), "white")
         draw = ImageDraw.Draw(sheet)
