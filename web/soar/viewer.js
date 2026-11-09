@@ -17,6 +17,7 @@ import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
 import { CityTile, CityLots } from "./citylots.js";
+import { CityProps } from "./cityprops.js";
 import { CityCollider } from "./collide.js";
 
 /**
@@ -565,11 +566,14 @@ export class Viewer {
                                        ? { speed: K.CITY_DEFAULT_SPEED,
                                            floorZ: null }
                                        : {}) });
-    // Over the night city the buildings are solid (collide.js): the same
-    // buildings the shader raises, stood up on the CPU from the same tile.
-    // The day scenes have nothing to fly into and get no collider at all.
+    // Over the night city the buildings are solid (collide.js), and so is
+    // what stands among them — freeways, lamps, parked cars, skybridges,
+    // roof ridges (cityprops.js): the same things the shader raises, stood
+    // up on the CPU from the same tile. The day scenes have nothing to fly
+    // into and get no collider at all.
+    const cityTile = scene.city ? new CityTile(scene.cityCells) : null;
     this.collider = scene.city
-      ? new CityCollider(new CityLots(new CityTile(scene.cityCells)),
+      ? new CityCollider(new CityLots(cityTile, new CityProps(cityTile)),
                          scene.oceanTileExtent)
       : null;
 
