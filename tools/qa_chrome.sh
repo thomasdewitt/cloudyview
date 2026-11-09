@@ -48,7 +48,10 @@ case "$cmd" in
         --disable-background-timer-throttling \
         about:blank > "$QA/chrome-headless-$PORT.log" 2>&1 &
     for _ in $(seq 1 50); do running && break; sleep 0.2; done
-    running || { echo "qa_chrome: no DevTools on :$PORT after 10 s" >&2; exit 1; }
+    if ! running; then
+      echo "qa_chrome: no DevTools on :$PORT after 10 s" >&2
+      exit 1
+    fi
     curl -s "http://127.0.0.1:$PORT/json/version" | head -3
     ;;
   stop)
