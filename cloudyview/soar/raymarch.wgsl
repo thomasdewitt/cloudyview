@@ -6182,9 +6182,9 @@ fn city_zones(cc: CityCell, f: CityFace) -> CityZones {
     if (cc.win_style != 3 && cc.height >= 15.0 && zc.x < 0.35
         && f.z1 >= cc.height - 0.5) {
         let hi = min(top, z.crown);
-        let n = 1 + i32(floor(zc.y * 2.999));
+        let n = 2 + i32(floor(zc.y * 1.999));
         z.loft = vec3<i32>(hi - n, hi,
-                           select(1, 2, zc.z < 0.4 && f.nbays >= 7));
+                           select(1, 2, zc.z < 0.6 && f.nbays >= 6));
         z.plant.w = min(z.plant.w, hi - n - 2);
     }
     if (z.plant.w < z.plant.x) {
@@ -6283,12 +6283,12 @@ fn city_store_cell(cc: CityCell) -> CityCell {
 }
 
 // The building as its lofts are: the big glass, and lit twice as often as
-// the floors below and at least about half the time (the corner flats are
-// the ones lived in). The
+// the floors below and at least most of the time (the corner flats are the
+// ones lived in). The
 // shell draws a loft bay's window from it and the flat facade averages the
 // loft share of a footprint over it, so the two agree by construction.
 const CITY_LOFT_LIT_GAIN: f32 = 2.0;
-const CITY_LOFT_LIT_MIN: f32 = 0.55;
+const CITY_LOFT_LIT_MIN: f32 = 0.70;
 fn city_loft_cell(cc: CityCell) -> CityCell {
     var c = cc;
     c.pane_lo = CITY_LOFT_PANE_LO;
@@ -8084,20 +8084,14 @@ fn city_windows_seen(cc: CityCell, f: CityFace, st: CityShellStyle,
     let bays = city_overlap(c.x - hb.x, c.x + hb.x, strip.x, strip.y)
                * city_overlap(c.y - hb.y, c.y + hb.y, f.z0, f.z1)
                / (4.0 * hb.x * hb.y);
-    let strip_wall = city_win_add(city_win_zero(),
-                                  l_wall + select(vec3<f32>(0.0), refl, skin),
-                                  1.0, fog, shown);
-    let solid = city_win_add(city_win_zero(), l_wall, 1.0, fog, shown);
-    let plant = city_win_add(city_win_zero(), l_plant, 1.0, fog, shown);
     let shut = zc.x + zc.y;
+    let l_strip = l_wall + select(vec3<f32>(0.0), refl, skin);
     var mean = city_win_zero();
     if (shut > 0.0 && shut >= bays - 1e-6) {
         // No openings under the footprint: no windows to average.
-        mean = CityWinSum(
-            (1.0 - bays) * strip_wall.shown + zc.x * solid.shown
-            + zc.y * plant.shown,
-            (1.0 - bays) * strip_wall.light + zc.x * solid.light
-            + zc.y * plant.light);
+        mean = city_win_add(city_win_add(city_win_add(city_win_zero(),
+                   l_strip, 1.0 - bays, fog, shown),
+                   l_wall, zc.x, fog, shown), l_plant, zc.y, fog, shown);
     } else {
         var lattice = city_win_zero();
         for (var k: i32 = 0; k < 3; k = k + 1) {
@@ -8117,15 +8111,18 @@ fn city_windows_seen(cc: CityCell, f: CityFace, st: CityShellStyle,
             }
         }
         if (shut > 0.0) {
-            // The lattice's own bays, its corner strips taken out.
-            let wb = CityWinSum(
-                (lattice.shown - (1.0 - bays) * strip_wall.shown) / bays,
-                (lattice.light - (1.0 - bays) * strip_wall.light) / bays);
+            // Solid and plant in place of the lattice's own bays (its mean
+            // with the corner strips' wall taken out): mean + shut / bays
+            // (strip share of the wall - lattice) + solid + plant.
+            let k = shut / bays;
+            let strip_w = city_win_add(city_win_zero(), l_strip, 1.0 - bays,
+                                       fog, shown);
+            let add = city_win_add(city_win_add(city_win_zero(), l_wall,
+                                                zc.x, fog, shown),
+                                   l_plant, zc.y, fog, shown);
             mean = CityWinSum(
-                mean.shown + zc.x * (solid.shown - wb.shown)
-                + zc.y * (plant.shown - wb.shown),
-                mean.light + zc.x * (solid.light - wb.light)
-                + zc.y * (plant.light - wb.light));
+                mean.shown + k * (strip_w.shown - lattice.shown) + add.shown,
+                mean.light + k * (strip_w.light - lattice.light) + add.light);
         }
     }
     if (cover > 0.0) {
