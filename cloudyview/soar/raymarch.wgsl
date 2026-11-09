@@ -12364,6 +12364,13 @@ const cc_streetlife_STEP: f32 = 0.72;
 const cc_streetlife_ITERS: i32 = 34;
 const cc_streetlife_ITERS_FAR: i32 = 16;
 const cc_streetlife_ITER_FP: f32 = 0.09;
+// How many car boxes one cell's near trace may try along a ray before it
+// gives up: the first, and up to two more after a hull miss (see the
+// fall-through in cc_streetlife_near_trace). Two were already enough on
+// every pixel of test_parked_car_fall_through's views (one lost 308 to
+// 1,058 car pixels a view of ~5,000); the third is margin, paid only by a
+// ray that has missed two hulls.
+const cc_streetlife_NEAR_TRIES: i32 = 3;
 
 // --- LOD --------------------------------------------------------------------
 // Below this footprint a car is sphere-traced; above it, two boxes. 0.5 m/px
@@ -13433,23 +13440,6 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         >= cc_streetlife_CAR_SDF_FP) {
         return cc_streetlife_miss(ci);
     }
-    var cand: cc_streetlife_Kerb;
-    var have = false;
-    var cand_t = 1e30;
-    var t_end = t1;
-    for (var side: i32 = 0; side < 4; side = side + 1) {
-        if (!city_edge_street(cc, side)) {
-            continue;
-        }
-        let k = cc_streetlife_kerb(o, dir, inv_dir, t0, t_end, ci, cc, side,
-                                   fp, true);
-        if (k.car_ok && k.ta < cand_t) {
-            cand = k;
-            have = true;
-            cand_t = k.ta;
-            t_end = min(t_end, k.ta);
-        }
-    }
     // ONE sphere trace per cell, on the nearest car bounding box any kerb
     // accepted — never one per slot. This is the most consequential
     // structural decision in the file and it was forced by measurement.
@@ -13460,13 +13450,54 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // frame set on the `base` view, where no car is anywhere near the
     // footprint that admits an SDF (measured when this lived in the first
     // stage). Hoisted here it appears once.
-    // The price is one artifact: a ray that enters a car's box and then
-    // grazes past the hull returns a miss rather than falling through to the
-    // car behind it. Parked cars sit 2.4 m apart, so that is a sliver on a
-    // silhouette edge, and it buys back the whole rest of the scene.
-    if (have) {
-        return cc_streetlife_trace_car(o, dir, cand.ta, cand.tb, cand.car, ci,
-                                       cand.side, fp);
+    //
+    // FALL-THROUGH. A ray can enter a car's box and miss its hull — over
+    // the roof (the box stands 1.74 m, a small car's roof 1.4), past a
+    // flank, over the bonnet — and then the car BEHIND it is what it meets.
+    // This once returned the miss, on the reasoning that cars sit 2.4 m
+    // apart and the loss was a sliver on a silhouette. It was not a sliver:
+    // from a few metres up, a ray down to the lower body of a parked car
+    // passes through the box of the one parked in front of it, just above
+    // that car's roof, so the whole body below the shoulder showed the road
+    // through it, cut by the invisible box's vertical edge, with only the
+    // roof left floating (Thomas's flight of dev 1853300, 2026-11-09: "it
+    // looked as though there was an invisible object in front of the
+    // car"). So a miss resumes the search past the box it missed in. The
+    // boxes are disjoint (adjacent slots' centres are at least 5.8 m apart,
+    // their boxes 5.42 m long at the full yaw), so each is entered at most
+    // once and the next candidate starts at or after this one's exit. The
+    // trace is still written once, inside a loop whose bound is a run-time
+    // value (a literal one would be unrolled into the DDA, as above); the
+    // tries after the first are paid only by rays that missed a hull.
+    let tries = select(cc_streetlife_NEAR_TRIES, 0, t1 < t0);
+    var t_from = t0;
+    for (var n: i32 = 0; n < tries; n = n + 1) {
+        var cand: cc_streetlife_Kerb;
+        var have = false;
+        var cand_t = 1e30;
+        var t_end = t1;
+        for (var side: i32 = 0; side < 4; side = side + 1) {
+            if (!city_edge_street(cc, side)) {
+                continue;
+            }
+            let k = cc_streetlife_kerb(o, dir, inv_dir, t_from, t_end, ci,
+                                       cc, side, fp, true);
+            if (k.car_ok && k.ta < cand_t) {
+                cand = k;
+                have = true;
+                cand_t = k.ta;
+                t_end = min(t_end, k.ta);
+            }
+        }
+        if (!have) {
+            break;
+        }
+        let h = cc_streetlife_trace_car(o, dir, cand.ta, cand.tb, cand.car,
+                                        ci, cand.side, fp);
+        if (h.hit) {
+            return h;
+        }
+        t_from = cand.tb;
     }
     return cc_streetlife_miss(ci);
 }
