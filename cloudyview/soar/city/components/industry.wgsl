@@ -1942,21 +1942,85 @@ fn cc_industry_paint(alb: vec3<f32>, g: CityGraffitiPaint) -> vec3<f32> {
     return alb * g.keep + g.add;
 }
 
+// The frame a wall's paint is taken in: (u from its left end, its length).
+fn cc_industry_wall_u(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let ws = cc_industry_wall_s(cc, p, n);
+    let along = select(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+                       abs(n.x) > abs(n.y));
+    return vec2<f32>(select(ws.y - ws.x, ws.x,
+                            dot(vec2<f32>(-n.y, n.x), along) > 0.0), ws.y);
+}
+
+// A dock door on the court wall at p: (door index, offset from its centre
+// along the wall's u, in its face (1) or not (0)) — the doors' own test in
+// cc_industry_facade, and their state's, so the paint picks the run the
+// door section will show.
+fn cc_industry_door_at(cc: CityCell, l: cc_industry_Lot, p: vec3<f32>,
+                       tang: vec2<f32>) -> vec3<f32> {
+    let docks = cc_industry_docks(l);
+    let a = select(p.y, p.x, l.long_x);
+    let jf = round((a - docks.x) / cc_industry_DOCK_PITCH);
+    let j = i32(jf);
+    let dv = a - (docks.x + jf * cc_industry_DOCK_PITCH);
+    let du = dot(tang, select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0),
+                              l.long_x)) * dv;
+    let in_face = j >= 0 && j < i32(docks.y)
+        && abs(dv) < 0.5 * cc_industry_DOOR_W && p.z > cc_industry_DOCK_H
+        && p.z < cc_industry_DOCK_H + cc_industry_DOOR_H;
+    return vec3<f32>(jf, du, select(0.0, 1.0, in_face));
+}
+
+// The pixel's paint: a closed dock door's own where the pixel is on one,
+// the wall's everywhere else. Taken first thing in cc_industry_facade, one
+// paint a pixel, while little else is live: taken after the wall's look
+// and the doors', it raised the city's first stage from 128 to 168
+// registers (tools/soar_regcount.py), which cost every city pixel.
+fn cc_industry_wall_graffiti(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                             fp: f32, court: bool, face: i32)
+        -> CityGraffitiPaint {
+    let n = h.normal;
+    let tang = vec2<f32>(-n.y, n.x);
+    let fuv = city_graffiti_footprint(fp, n, dir, vec3<f32>(tang, 0.0),
+                                      vec3<f32>(0.0, 0.0, 1.0));
+    let wu = cc_industry_wall_u(cc, h.pos, n);
+    var run = cc_industry_wall_run(cc, face, wu.y, court);
+    var u = wu.x;
+    var v = h.pos.z;
+    if (court) {
+        let l = cc_industry_lot(cc);
+        let dd = cc_industry_door_at(cc, l, h.pos, tang);
+        if (dd.z > 0.5) {
+            let j = i32(dd.x);
+            let st = cc_industry_door_state(cc, l, j,
+                                            cc_industry_roof_of(cc).lit);
+            if (st.x < 0.5) {
+                run = cc_industry_door_run(cc, j);
+                u = dd.y + 0.5 * cc_industry_DOOR_W;
+                v = h.pos.z - cc_industry_DOCK_H;
+            }
+        }
+    }
+    return city_graffiti_paint(run, u, v, fuv);
+}
+
 fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
                       vc: f32, fp: f32) -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
-    let w = cc_industry_wall_of(cc);
-    let l = cc_industry_lot(cc);
     let n = h.normal;
-    let tang = vec2<f32>(-n.y, n.x);
-    let ws = cc_industry_wall_s(cc, h.pos, n);
-    let sw = ws.x;
+    let l = cc_industry_lot(cc);
     let out = cc_industry_xy(l, vec2<f32>(0.0, select(-1.0, 1.0, l.court_hi)));
     let court = dot(n.xy, out) > 0.9;
     let face = select(select(2, 3, n.y > 0.0), select(0, 1, n.x > 0.0),
                       abs(n.x) > abs(n.y));
+    // The paint first (cc_industry_wall_graffiti): applied below, over the
+    // wall's grime or a closed door's face.
+    let pnt = cc_industry_wall_graffiti(cc, h, dir, fp, court, face);
+    let w = cc_industry_wall_of(cc);
+    let tang = vec2<f32>(-n.y, n.x);
+    let ws = cc_industry_wall_s(cc, h.pos, n);
+    let sw = ws.x;
 
     // --- cladding ------------------------------------------------------------
     var alb = w.alb;
@@ -1987,16 +2051,6 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
     if (vc > cc.height - 0.3) {
         alb = alb * 0.55;
     }
-
-    // --- graffiti: the wall's paint, over its grime --------------------------
-    // wall_s runs from the box's min corner; u runs from the left end.
-    let along = select(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-                       abs(n.x) > abs(n.y));
-    let u_wall = select(ws.y - sw, sw, dot(tang, along) > 0.0);
-    let fuv = city_graffiti_footprint(fp, n, dir, vec3<f32>(tang, 0.0),
-                                      vec3<f32>(0.0, 0.0, 1.0));
-    let pw = city_graffiti_paint(cc_industry_wall_run(cc, face, ws.y, court),
-                                 u_wall, vc, fuv);
 
     // --- doors ---------------------------------------------------------------
     var emit = vec3<f32>(0.0);
@@ -2062,22 +2116,15 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
                 p_alb = vec3<f32>(0.12);
             }
             var p_emit = vec3<f32>(0.0);
-            // The door's paint (closed), u from its left end; the wall's on
-            // everything else, the shelter and the dock wall included.
+            // The paint: a closed door's own on its face (an open door is
+            // rolled up, and its paint with it), the wall's on everything
+            // else, the shelter and the dock wall included.
             let closed = st.x < 0.5;
-            let drun = cc_industry_door_run(cc, j);
-            let u_door = dot(tang, select(vec2<f32>(0.0, 1.0),
-                                          vec2<f32>(1.0, 0.0), l.long_x))
-                         * dv + hd;
             if (in_door) {
-                p_alb = d_alb;
-                if (closed) {
-                    p_alb = cc_industry_paint(
-                        d_alb, city_graffiti_paint(drun, u_door, dz, fuv));
-                }
+                p_alb = select(d_alb, cc_industry_paint(d_alb, pnt), closed);
                 p_emit = d_emit;
             } else {
-                p_alb = cc_industry_paint(p_alb, pw);
+                p_alb = cc_industry_paint(p_alb, pnt);
             }
             // Past a few metres per pixel a door is its dock cell's mean.
             let k = smoothstep(1.0, 3.0, fp);
@@ -2086,25 +2133,28 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
                 let fr = 2.0 * rim / cc_industry_DOCK_PITCH;
                 let rim_alb = select(vec3<f32>(0.10), vec3<f32>(0.035),
                                      w.shelter);
-                // The door's paint over its whole width (its FAR rung: a
-                // footprint as wide as the door), the wall's over the rest
-                // of the cell.
+                // The paint's means over the cell: the door's over its
+                // share, the wall's over the rest.
+                let fv = city_graffiti_footprint(
+                    fp, n, dir, vec3<f32>(tang, 0.0),
+                    vec3<f32>(0.0, 0.0, 1.0)).y;
                 var door_far = w.door_col;
                 if (closed) {
-                    door_far = cc_industry_paint(door_far, city_graffiti_paint(
-                        drun, hd, dz,
-                        vec2<f32>(max(fuv.x, cc_industry_DOOR_W), fuv.y)));
+                    door_far = cc_industry_paint(door_far, city_graffiti_mean(
+                        cc_industry_door_run(cc, j), dz, fv));
                 }
+                let pm = city_graffiti_mean(
+                    cc_industry_wall_run(cc, face, ws.y, court), vc, fv);
                 let far_alb = door_far * fd
-                    + (rim_alb * fr + alb * (1.0 - fd - fr)) * pw.keep
-                    + pw.add * (1.0 - fd);
+                    + (rim_alb * fr + alb * (1.0 - fd - fr)) * pm.keep
+                    + pm.add * (1.0 - fd);
                 alb = mix(p_alb, far_alb, k);
                 emit = mix(p_emit, d_mean * fd, k);
             } else {
                 alb = p_alb;
             }
         } else {
-            alb = cc_industry_paint(alb, pw);
+            alb = cc_industry_paint(alb, pnt);
         }
         // The court's wall packs, each washing the wall under it.
         let k_far = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
@@ -2161,7 +2211,7 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
             }
         }
         light = mix(near, flux / (ws.y * cc.height), k_far);
-        alb = cc_industry_paint(alb, pw);
+        alb = cc_industry_paint(alb, pnt);
     }
 
     // --- light ---------------------------------------------------------------
@@ -2328,12 +2378,18 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         s: cc_industry_Slot, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     let tier = floor(max(h.pos.z - 1e-3, 0.0) / cc_industry_TIER);
+    let zt = h.pos.z - tier * cc_industry_TIER;
+    // The paint first, while little else is live (see
+    // cc_industry_wall_graffiti): a side of a box on the yard.
+    var g = CityGraffitiPaint(1.0, vec3<f32>(0.0));
+    if (tier < 0.5 && abs(h.normal.z) < 0.5) {
+        g = cc_industry_box_graffiti(h, cc, s, dir, fp, zt);
+    }
     let hc = fract(s.d.w * 7.31 + tier * 0.618);
     let col = cc_industry_box_color(hc);
     let long_x = s.obj.x > s.obj.y;
     let lu = select(h.pos.y - s.ctr.y, h.pos.x - s.ctr.x, long_x);
     let lv = select(h.pos.x - s.ctr.x, h.pos.y - s.ctr.y, long_x);
-    let zt = h.pos.z - tier * cc_industry_TIER;
     let n_long = select(h.normal.y, h.normal.x, long_x);
     var m = 1.0;
     if (abs(h.normal.z) < 0.5) {
@@ -2362,14 +2418,11 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
         let wu = select(lu, lv, abs(n_long) > 0.5);
-        var base = col * cc_industry_weather(wu, zt, cc_industry_TIER, hc, fp);
         // The paint goes on over the weathered side, and the corrugation
         // and rails shade through it.
-        if (tier < 0.5) {
-            let g = cc_industry_box_graffiti(h, cc, s, dir, fp, zt);
-            base = base * g.keep + g.add;
-        }
-        return cc_industry_lit(cc, h.pos, h.normal, base * m);
+        let base = col * cc_industry_weather(wu, zt, cc_industry_TIER, hc, fp);
+        return cc_industry_lit(cc, h.pos, h.normal,
+                               cc_industry_paint(base, g) * m);
     }
     // The top of the stack, or a box seen from above.
     return cc_industry_lit(cc, h.pos, h.normal,

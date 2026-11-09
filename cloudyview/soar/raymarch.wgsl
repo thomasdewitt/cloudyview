@@ -4358,13 +4358,20 @@ struct CityGraffitiLetters {
     slant: f32,
     left_up: bool,
     piece: bool,
+    split: f32,           // the fill's second tone below it (in h)
+    gs: vec2<u32>,
+}
+
+// A lettering element's colours, apart from its shape so that they are not
+// held through the glyphs' distance fields (city_graffiti_letter_parts) in
+// the register file of the stage that paints: drawn after them, from the
+// same draws.
+struct CityGraffitiInk {
     fill: vec3<f32>,
-    fill2: vec3<f32>,     // below `split` (in h); fill again for one tone
-    split: f32,
+    fill2: vec3<f32>,     // below `split`; fill again for one tone
     line: vec3<f32>,
     splash: vec3<f32>,
     shine: vec3<f32>,
-    gs: vec2<u32>,
 }
 
 // The lettering in slot i of a lettering `layer`: draws d (presence, height,
@@ -4392,22 +4399,31 @@ fn city_graffiti_letters_at(run: CityGraffitiRun, layer: i32, i: i32)
     l.slant = -0.08 + 0.30 * g.y;
     l.left_up = g.w < 0.5;
     l.piece = city_graffiti_is_old(layer) && e.x < CITY_GRAFFITI_PIECE_FRAC;
-    // A piece's fills from the hues, a throw-up's from the fills.
-    l.fill = select(city_graffiti_fill(e.y), city_graffiti_hue(e.y), l.piece);
-    l.fill2 = select(city_graffiti_fill(c.y), city_graffiti_hue(c.y), l.piece);
-    l.fill2 = select(l.fill, l.fill2, c.x < 0.5);
     l.split = 0.40 + 0.25 * c.z;
-    l.line = city_graffiti_line(e.z);
-    l.splash = city_graffiti_hue(g.z);
-    let fade = select(1.0, mix(CITY_GRAFFITI_FADE_LO, 1.0, c.w),
-                      city_graffiti_is_old(layer));
-    l.fill = l.fill * fade;
-    l.fill2 = l.fill2 * fade;
-    l.line = l.line * fade;
-    l.splash = l.splash * fade;
-    l.shine = CITY_GRAFFITI_WHITE * fade;
     l.gs = run.seed ^ vec2<u32>(u32(i) * 0x3c6ef372u, u32(layer) + 0xa54ff53au);
     return l;
+}
+
+fn city_graffiti_letters_ink(run: CityGraffitiRun, layer: i32, i: i32,
+                             piece: bool) -> CityGraffitiInk {
+    let e = city_graffiti_draw(run, layer, i, 1u);
+    let g = city_graffiti_draw(run, layer, i, 2u);
+    let c = city_graffiti_draw(run, layer, i, 3u);
+    var k: CityGraffitiInk;
+    // A piece's fills from the hues, a throw-up's from the fills.
+    k.fill = select(city_graffiti_fill(e.y), city_graffiti_hue(e.y), piece);
+    k.fill2 = select(city_graffiti_fill(c.y), city_graffiti_hue(c.y), piece);
+    k.fill2 = select(k.fill, k.fill2, c.x < 0.5);
+    k.line = city_graffiti_line(e.z);
+    k.splash = city_graffiti_hue(g.z);
+    let fade = select(1.0, mix(CITY_GRAFFITI_FADE_LO, 1.0, c.w),
+                      city_graffiti_is_old(layer));
+    k.fill = k.fill * fade;
+    k.fill2 = k.fill2 * fade;
+    k.line = k.line * fade;
+    k.splash = k.splash * fade;
+    k.shine = CITY_GRAFFITI_WHITE * fade;
+    return k;
 }
 
 // A lettering element's parts at q (units of h, from its box's start and
@@ -4482,7 +4498,10 @@ fn city_graffiti_letter_parts(q: vec2<f32>, f_in: f32,
     pt.drip = 0.0;
     pt.splash = 0.0;
     var dmin = 1e3;
-    for (var j: i32 = 0; j < 3; j = j + 1) {
+    // Three glyphs, the count at run time so the loop stays rolled (see
+    // city_graffiti_paint); a run has no more than five.
+    let n_near = select(3, 0, l.n > 5);
+    for (var j: i32 = 0; j < n_near; j = j + 1) {
         // Left to right, or right to left: the later letter on top.
         let kk = select(k + 1 - j, k - 1 + j, l.left_up);
         if (kk < 0 || kk >= l.n) {
@@ -4771,17 +4790,22 @@ fn city_graffiti_element(run: CityGraffitiRun, layer: i32, i: i32,
             return out;
         }
         let w_mid = smoothstep(CITY_GRAFFITI_MID0, CITY_GRAFFITI_MID1, f);
+        var pt = CityGraffitiParts(0.0, 0.0, 0.0, 0.0, 0.0);
         if (w_mid < 1.0) {
-            let pt = city_graffiti_letter_parts(q, f, l);
+            pt = city_graffiti_letter_parts(q, f, l);
+        }
+        // The colours after the shapes (CityGraffitiInk).
+        let k = city_graffiti_letters_ink(run, layer, i, l.piece);
+        if (w_mid < 1.0) {
             out.a = (1.0 - w_mid) * (pt.fill + pt.line + pt.drip + pt.splash);
             // The fill's two tones either side of the split, the drips the
             // lower one's.
             let lo = city_graffiti_span(q.y, f, -1.0, l.split);
-            let fq = mix(l.fill, l.fill2, lo);
+            let fq = mix(k.fill, k.fill2, lo);
             out.ac = (1.0 - w_mid)
-                * ((pt.fill - pt.shine) * fq + pt.drip * l.fill2
-                   + pt.shine * l.shine + pt.line * l.line
-                   + pt.splash * l.splash);
+                * ((pt.fill - pt.shine) * fq + pt.drip * k.fill2
+                   + pt.shine * k.shine + pt.line * k.line
+                   + pt.splash * k.splash);
         }
         if (w_mid > 0.0) {
             // MID: the box at its expected density, n glyphs' worth.
@@ -4799,9 +4823,9 @@ fn city_graffiti_element(run: CityGraffitiRun, layer: i32, i: i32,
                                    + CITY_GRAFFITI_A_DRIP + splash);
             out.ac = out.ac
                 + cov * ((CITY_GRAFFITI_A_FILL - CITY_GRAFFITI_A_SHINE
-                          + CITY_GRAFFITI_A_DRIP) * 0.5 * (l.fill + l.fill2)
-                         + CITY_GRAFFITI_A_SHINE * l.shine
-                         + CITY_GRAFFITI_A_LINE * l.line + splash * l.splash);
+                          + CITY_GRAFFITI_A_DRIP) * 0.5 * (k.fill + k.fill2)
+                         + CITY_GRAFFITI_A_SHINE * k.shine
+                         + CITY_GRAFFITI_A_LINE * k.line + splash * k.splash);
         }
         return out;
     }
@@ -4955,8 +4979,40 @@ fn city_graffiti_paint(run: CityGraffitiRun, u: f32, v: f32,
         || v + 0.5 * fuv.y < 0.0 || v - 0.5 * fuv.y > 2.75) {
         return out;
     }
-    for (var l: i32 = 0; l < CITY_GRAFFITI_LAYERS; l = l + 1) {
+    // The layers' count at run time: a literal bound is unrolled by the
+    // driver, eight copies of a layer in the register file of every stage
+    // that paints (streetlife's ITERS note). The level is at most 2.
+    let n_layers = select(CITY_GRAFFITI_LAYERS, 0, lv.x > 2.5);
+    for (var l: i32 = 0; l < n_layers; l = l + 1) {
         let c = city_graffiti_layer(run, l, u, v, fuv, lv.y, i32(lv.x));
+        out.keep = out.keep * (1.0 - c.a) + c.at;
+        out.add = out.add * (1.0 - c.a) + c.ac;
+    }
+    return out;
+}
+
+// The paint's expectation along a run at height v, over a footprint fv
+// tall: every layer's FAR rung, which is what city_graffiti_paint gives once
+// the footprint along u passes three quarters of every slot. For an owner
+// that needs a run's mean beside the pixel's own paint (a door's share of a
+// dock cell), at a fraction of the paint's cost.
+fn city_graffiti_mean(run: CityGraffitiRun, v: f32, fv: f32)
+        -> CityGraffitiPaint {
+    var out: CityGraffitiPaint;
+    out.keep = 1.0;
+    out.add = vec3<f32>(0.0);
+    let lv = city_graffiti_level(run);
+    if (lv.x < 0.5 || run.len <= 0.0 || v + 0.5 * fv < 0.0
+        || v - 0.5 * fv > 2.75) {
+        return out;
+    }
+    let n_layers = select(CITY_GRAFFITI_LAYERS, 0, lv.x > 2.5);
+    for (var l: i32 = 0; l < n_layers; l = l + 1) {
+        let p = city_graffiti_slot_p(l, i32(lv.x));
+        if (p <= 0.0) {
+            continue;
+        }
+        let c = city_graffiti_far(run, l, v, fv, lv.y, p);
         out.keep = out.keep * (1.0 - c.a) + c.at;
         out.add = out.add * (1.0 - c.a) + c.ac;
     }
@@ -17342,21 +17398,85 @@ fn cc_industry_paint(alb: vec3<f32>, g: CityGraffitiPaint) -> vec3<f32> {
     return alb * g.keep + g.add;
 }
 
+// The frame a wall's paint is taken in: (u from its left end, its length).
+fn cc_industry_wall_u(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let ws = cc_industry_wall_s(cc, p, n);
+    let along = select(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+                       abs(n.x) > abs(n.y));
+    return vec2<f32>(select(ws.y - ws.x, ws.x,
+                            dot(vec2<f32>(-n.y, n.x), along) > 0.0), ws.y);
+}
+
+// A dock door on the court wall at p: (door index, offset from its centre
+// along the wall's u, in its face (1) or not (0)) — the doors' own test in
+// cc_industry_facade, and their state's, so the paint picks the run the
+// door section will show.
+fn cc_industry_door_at(cc: CityCell, l: cc_industry_Lot, p: vec3<f32>,
+                       tang: vec2<f32>) -> vec3<f32> {
+    let docks = cc_industry_docks(l);
+    let a = select(p.y, p.x, l.long_x);
+    let jf = round((a - docks.x) / cc_industry_DOCK_PITCH);
+    let j = i32(jf);
+    let dv = a - (docks.x + jf * cc_industry_DOCK_PITCH);
+    let du = dot(tang, select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0),
+                              l.long_x)) * dv;
+    let in_face = j >= 0 && j < i32(docks.y)
+        && abs(dv) < 0.5 * cc_industry_DOOR_W && p.z > cc_industry_DOCK_H
+        && p.z < cc_industry_DOCK_H + cc_industry_DOOR_H;
+    return vec3<f32>(jf, du, select(0.0, 1.0, in_face));
+}
+
+// The pixel's paint: a closed dock door's own where the pixel is on one,
+// the wall's everywhere else. Taken first thing in cc_industry_facade, one
+// paint a pixel, while little else is live: taken after the wall's look
+// and the doors', it raised the city's first stage from 128 to 168
+// registers (tools/soar_regcount.py), which cost every city pixel.
+fn cc_industry_wall_graffiti(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                             fp: f32, court: bool, face: i32)
+        -> CityGraffitiPaint {
+    let n = h.normal;
+    let tang = vec2<f32>(-n.y, n.x);
+    let fuv = city_graffiti_footprint(fp, n, dir, vec3<f32>(tang, 0.0),
+                                      vec3<f32>(0.0, 0.0, 1.0));
+    let wu = cc_industry_wall_u(cc, h.pos, n);
+    var run = cc_industry_wall_run(cc, face, wu.y, court);
+    var u = wu.x;
+    var v = h.pos.z;
+    if (court) {
+        let l = cc_industry_lot(cc);
+        let dd = cc_industry_door_at(cc, l, h.pos, tang);
+        if (dd.z > 0.5) {
+            let j = i32(dd.x);
+            let st = cc_industry_door_state(cc, l, j,
+                                            cc_industry_roof_of(cc).lit);
+            if (st.x < 0.5) {
+                run = cc_industry_door_run(cc, j);
+                u = dd.y + 0.5 * cc_industry_DOOR_W;
+                v = h.pos.z - cc_industry_DOCK_H;
+            }
+        }
+    }
+    return city_graffiti_paint(run, u, v, fuv);
+}
+
 fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
                       vc: f32, fp: f32) -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
-    let w = cc_industry_wall_of(cc);
-    let l = cc_industry_lot(cc);
     let n = h.normal;
-    let tang = vec2<f32>(-n.y, n.x);
-    let ws = cc_industry_wall_s(cc, h.pos, n);
-    let sw = ws.x;
+    let l = cc_industry_lot(cc);
     let out = cc_industry_xy(l, vec2<f32>(0.0, select(-1.0, 1.0, l.court_hi)));
     let court = dot(n.xy, out) > 0.9;
     let face = select(select(2, 3, n.y > 0.0), select(0, 1, n.x > 0.0),
                       abs(n.x) > abs(n.y));
+    // The paint first (cc_industry_wall_graffiti): applied below, over the
+    // wall's grime or a closed door's face.
+    let pnt = cc_industry_wall_graffiti(cc, h, dir, fp, court, face);
+    let w = cc_industry_wall_of(cc);
+    let tang = vec2<f32>(-n.y, n.x);
+    let ws = cc_industry_wall_s(cc, h.pos, n);
+    let sw = ws.x;
 
     // --- cladding ------------------------------------------------------------
     var alb = w.alb;
@@ -17387,16 +17507,6 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
     if (vc > cc.height - 0.3) {
         alb = alb * 0.55;
     }
-
-    // --- graffiti: the wall's paint, over its grime --------------------------
-    // wall_s runs from the box's min corner; u runs from the left end.
-    let along = select(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-                       abs(n.x) > abs(n.y));
-    let u_wall = select(ws.y - sw, sw, dot(tang, along) > 0.0);
-    let fuv = city_graffiti_footprint(fp, n, dir, vec3<f32>(tang, 0.0),
-                                      vec3<f32>(0.0, 0.0, 1.0));
-    let pw = city_graffiti_paint(cc_industry_wall_run(cc, face, ws.y, court),
-                                 u_wall, vc, fuv);
 
     // --- doors ---------------------------------------------------------------
     var emit = vec3<f32>(0.0);
@@ -17462,22 +17572,15 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
                 p_alb = vec3<f32>(0.12);
             }
             var p_emit = vec3<f32>(0.0);
-            // The door's paint (closed), u from its left end; the wall's on
-            // everything else, the shelter and the dock wall included.
+            // The paint: a closed door's own on its face (an open door is
+            // rolled up, and its paint with it), the wall's on everything
+            // else, the shelter and the dock wall included.
             let closed = st.x < 0.5;
-            let drun = cc_industry_door_run(cc, j);
-            let u_door = dot(tang, select(vec2<f32>(0.0, 1.0),
-                                          vec2<f32>(1.0, 0.0), l.long_x))
-                         * dv + hd;
             if (in_door) {
-                p_alb = d_alb;
-                if (closed) {
-                    p_alb = cc_industry_paint(
-                        d_alb, city_graffiti_paint(drun, u_door, dz, fuv));
-                }
+                p_alb = select(d_alb, cc_industry_paint(d_alb, pnt), closed);
                 p_emit = d_emit;
             } else {
-                p_alb = cc_industry_paint(p_alb, pw);
+                p_alb = cc_industry_paint(p_alb, pnt);
             }
             // Past a few metres per pixel a door is its dock cell's mean.
             let k = smoothstep(1.0, 3.0, fp);
@@ -17486,25 +17589,28 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
                 let fr = 2.0 * rim / cc_industry_DOCK_PITCH;
                 let rim_alb = select(vec3<f32>(0.10), vec3<f32>(0.035),
                                      w.shelter);
-                // The door's paint over its whole width (its FAR rung: a
-                // footprint as wide as the door), the wall's over the rest
-                // of the cell.
+                // The paint's means over the cell: the door's over its
+                // share, the wall's over the rest.
+                let fv = city_graffiti_footprint(
+                    fp, n, dir, vec3<f32>(tang, 0.0),
+                    vec3<f32>(0.0, 0.0, 1.0)).y;
                 var door_far = w.door_col;
                 if (closed) {
-                    door_far = cc_industry_paint(door_far, city_graffiti_paint(
-                        drun, hd, dz,
-                        vec2<f32>(max(fuv.x, cc_industry_DOOR_W), fuv.y)));
+                    door_far = cc_industry_paint(door_far, city_graffiti_mean(
+                        cc_industry_door_run(cc, j), dz, fv));
                 }
+                let pm = city_graffiti_mean(
+                    cc_industry_wall_run(cc, face, ws.y, court), vc, fv);
                 let far_alb = door_far * fd
-                    + (rim_alb * fr + alb * (1.0 - fd - fr)) * pw.keep
-                    + pw.add * (1.0 - fd);
+                    + (rim_alb * fr + alb * (1.0 - fd - fr)) * pm.keep
+                    + pm.add * (1.0 - fd);
                 alb = mix(p_alb, far_alb, k);
                 emit = mix(p_emit, d_mean * fd, k);
             } else {
                 alb = p_alb;
             }
         } else {
-            alb = cc_industry_paint(alb, pw);
+            alb = cc_industry_paint(alb, pnt);
         }
         // The court's wall packs, each washing the wall under it.
         let k_far = smoothstep(CITY_STREET_LOD_START, CITY_STREET_LOD_FULL, fp);
@@ -17561,7 +17667,7 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
             }
         }
         light = mix(near, flux / (ws.y * cc.height), k_far);
-        alb = cc_industry_paint(alb, pw);
+        alb = cc_industry_paint(alb, pnt);
     }
 
     // --- light ---------------------------------------------------------------
@@ -17728,12 +17834,18 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         s: cc_industry_Slot, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     let tier = floor(max(h.pos.z - 1e-3, 0.0) / cc_industry_TIER);
+    let zt = h.pos.z - tier * cc_industry_TIER;
+    // The paint first, while little else is live (see
+    // cc_industry_wall_graffiti): a side of a box on the yard.
+    var g = CityGraffitiPaint(1.0, vec3<f32>(0.0));
+    if (tier < 0.5 && abs(h.normal.z) < 0.5) {
+        g = cc_industry_box_graffiti(h, cc, s, dir, fp, zt);
+    }
     let hc = fract(s.d.w * 7.31 + tier * 0.618);
     let col = cc_industry_box_color(hc);
     let long_x = s.obj.x > s.obj.y;
     let lu = select(h.pos.y - s.ctr.y, h.pos.x - s.ctr.x, long_x);
     let lv = select(h.pos.x - s.ctr.x, h.pos.y - s.ctr.y, long_x);
-    let zt = h.pos.z - tier * cc_industry_TIER;
     let n_long = select(h.normal.y, h.normal.x, long_x);
     var m = 1.0;
     if (abs(h.normal.z) < 0.5) {
@@ -17762,14 +17874,11 @@ fn cc_industry_container_shade(h: CityHit, cc: CityCell,
         rail = select(rail, 0.20, zt < 0.03 && tier > 0.0);
         m = m * cc_industry_band(rail, 0.93, 0.10, fp);
         let wu = select(lu, lv, abs(n_long) > 0.5);
-        var base = col * cc_industry_weather(wu, zt, cc_industry_TIER, hc, fp);
         // The paint goes on over the weathered side, and the corrugation
         // and rails shade through it.
-        if (tier < 0.5) {
-            let g = cc_industry_box_graffiti(h, cc, s, dir, fp, zt);
-            base = base * g.keep + g.add;
-        }
-        return cc_industry_lit(cc, h.pos, h.normal, base * m);
+        let base = col * cc_industry_weather(wu, zt, cc_industry_TIER, hc, fp);
+        return cc_industry_lit(cc, h.pos, h.normal,
+                               cc_industry_paint(base, g) * m);
     }
     // The top of the stack, or a box seen from above.
     return cc_industry_lit(cc, h.pos, h.normal,
