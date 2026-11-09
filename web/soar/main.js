@@ -739,13 +739,13 @@ setTimeout(() => document.body.classList.remove("intro"), 1350);
 // same two rows in research mode.
 //
 // Cyberpunk flies its own pair (Thomas, 2026-08-22). The daylight pair is the
-// 51.2 km desert domain, which under a city is 51 km of streets to cross at
-// 20 m/s; marine congestus is a fifth of that box and its cloud base sits
-// where a skyline can reach it. Two ids, not two bakes: the same volumes the
+// 51.2 km Utah convection domain, which under a city is 51 km of streets to
+// cross at 20 m/s; marine congestus is a fifth of that box and its cloud base
+// sits where a skyline can reach it. Two ids, not two bakes: the same volumes the
 // rail lists, stood on the city by demoSource.
 const FLY_PAIRS = {
-  research: { less: "desert-coarse", more: "desert" },
-  basic: { less: "desert-coarse", more: "desert" },
+  research: { less: "utah-convection-coarse", more: "utah-convection" },
+  basic: { less: "utah-convection-coarse", more: "utah-convection" },
   cyberpunk: { less: "marine-congestus-coarse", more: "congestus" },
 };
 

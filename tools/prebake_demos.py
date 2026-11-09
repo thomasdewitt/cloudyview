@@ -169,7 +169,9 @@ DEMOS = [
     # empty planes before rendering, so the domain box a camera is normalized
     # against IS the occupied band. See occupied_z_band.
     dict(
-        id="desert",
+        # Named for the sky, not the ground (Thomas, 2026-11-09: once the
+        # desert ground left, "desert" named something it no longer stood on).
+        id="utah-convection",
         group="steam",
         title="STEAM high-based convection",
         field="Utah summer cumulus congestus",
@@ -196,7 +198,7 @@ DEMOS = [
     # 100 m rather than 25 m. That pairing is the point of shipping both:
     # it is one field at two resolutions rather than two fields.
     dict(
-        id="desert-coarse",
+        id="utah-convection-coarse",
         group="steam",
         title="STEAM high-based convection (coarse)",
         field="Utah cumulus on a coarser grid",
@@ -248,7 +250,7 @@ DEMOS = [
         ),
     ),
     # The marine case block-averaged 2x2x2, which is a DIFFERENT kind of pair
-    # from desert/desert-coarse: that one is two separate source files, two
+    # from utah-convection/-coarse: that one is two separate source files, two
     # cascades carried to different depths, so its coarse member has structure
     # of its own down to its own cell size. This one has no second source
     # file — turbulon-model wrote only the fine marine field — so the coarse
@@ -1288,8 +1290,10 @@ def main() -> None:
             # — otherwise editing the sun or the description here changes the
             # picture and leaves the file still describing the old one, which
             # is a worse failure than a slow re-bake because nothing reports
-            # it. Only volume/map are genuinely derived from the arrays.
-            for key in ("title", "field"):
+            # it. Only volume/map are genuinely derived from the arrays. The id
+            # too: a demo renamed in the spec (its directory moved with it)
+            # must not keep naming itself by the old one.
+            for key in ("id", "title", "field"):
                 meta[key] = spec[key]
             # The optional prose has to be *removed* when the spec drops it,
             # not merely overwritten: deleting a description from DEMOS and
