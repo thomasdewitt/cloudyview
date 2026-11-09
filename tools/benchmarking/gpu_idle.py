@@ -18,11 +18,12 @@ policy, 2026-09-24):
   in his own Firefox on this box (2026-09-25), which is his to leave open;
   his Steam client (a Chromium UI, steamwebhelper) is the same case
   (2026-11-08: idle at 0% SM, it refused a whole timing lock).
-  A browser that DRAWS is a neighbour like any other. require_idle() waits
-  briefly for these to go (WAIT_S), then exits; a Watch samples all through
-  the run, and
-  check_quiet() exits non-zero with CONTAMINATED if the watch or its own
-  last look saw one — discard the numbers.
+  A browser that DRAWS is a neighbour like any other; one driven over
+  DevTools (the QA Chrome) is named by whoever drives it (driven_by).
+  require_idle() waits briefly for these to go (WAIT_S), then exits; a
+  Watch samples all through the run, and check_quiet() exits non-zero with
+  CONTAMINATED if the watch or its own last look saw one — discard the
+  numbers.
 - WARNING, the desktop drawing: gnome-shell or the Claude app above
   DESKTOP_SM_PCT, or device utilization pmon attributes to nobody (the
   compositor under the clock lock). This is Thomas's own screen and cannot
@@ -53,6 +54,7 @@ scripts only drive that Chrome and it does not run under the flock.
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -95,6 +97,62 @@ def _processes():
         sm = None if f[3] == "-" else int(f[3])
         rows.append((int(f[1]), f[-1], sm))
     return rows
+
+
+def _cmdline(pid: int) -> list[str]:
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read()
+    except OSError:
+        return []
+    return [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+
+
+def _ppid(pid: int) -> int:
+    try:
+        stat = open(f"/proc/{pid}/stat").read()
+    except OSError:
+        return 0
+    return int(stat.rsplit(")", 1)[1].split()[1])
+
+
+def _ss_clients(port: int) -> str:
+    return subprocess.run(
+        ["ss", "-Htnp", "state", "established", f"( dport = :{port} )"],
+        capture_output=True, text=True).stdout
+
+
+def driven_by(pid: int) -> str:
+    """Who is driving a browser that draws: the DevTools port of the browser
+    `pid` belongs to (its GPU process is a grandchild of the browser, which
+    carries --remote-debugging-port), and every process connected to that
+    port, by pid, command line and working directory — the QA Chrome is one
+    browser that every session's CDP scripts drive, so its own pid names
+    nobody. "" when no ancestor has a DevTools port (Thomas's own Firefox)."""
+    port, p = None, pid
+    for _ in range(8):
+        # Searched in the joined line: Chrome rewrites its argv into one
+        # space-separated string.
+        m = re.search(r"--remote-debugging-port=(\d+)", " ".join(_cmdline(p)))
+        if m or p <= 1:
+            port = int(m.group(1)) if m else None
+            break
+        p = _ppid(p)
+    if port is None:
+        return ""
+    clients = []
+    for m in re.finditer(r"pid=(\d+)", _ss_clients(port)):
+        c = int(m.group(1))
+        try:
+            cwd = os.readlink(f"/proc/{c}/cwd")
+        except OSError:
+            cwd = "?"
+        line = " ".join(" ".join(_cmdline(c)).split())[:120]
+        clients.append(f"pid {c} `{line}` in {cwd}")
+    if not clients:
+        return (f"; DevTools :{port} has no client connected (a tab left "
+                "running, or someone at the window)")
+    return (f"; driven over DevTools :{port} by "
+            + ", ".join(sorted(set(clients))))
 
 
 def _full_name(pid: int, short: str) -> str:
@@ -178,7 +236,9 @@ def survey(seconds: float = 3.0, exclude=(),
                              f"{sm}% SM")
                 continue
             if sm is not None and sm > IDLE_SM_PCT:
-                fatal.add(f"pid {pid} ({name}) at {sm}% SM")
+                culprit = (driven_by(pid)
+                           if any(b in name for b in BROWSERS) else "")
+                fatal.add(f"pid {pid} ({name}) at {sm}% SM{culprit}")
             if not any(b in name for b in BROWSERS):
                 fatal.add(f"pid {pid} ({name}) holds a GPU context")
         if util - known > limit:

@@ -155,3 +155,54 @@ def test_the_lock_holders_work_is_not_a_neighbour_outside_the_lock(
             subprocess.run(["kill", str(seen[0])], check=False)
         holder.wait(timeout=10)
         holder.stdout.close()
+
+
+# A Chrome as /proc shows it: the GPU process under the zygote under the
+# browser, whose argv Chrome rewrites into ONE space-joined string.
+GPU, ZYGOTE, BROWSER, DRIVER = 2**22 + 21, 2**22 + 22, 2**22 + 23, 2**22 + 24
+CHROME = {
+    GPU: (ZYGOTE, ["/opt/google/chrome/chrome --type=gpu-process"]),
+    ZYGOTE: (BROWSER, ["/opt/google/chrome/chrome --type=zygote"]),
+    BROWSER: (1, ["/opt/google/chrome/chrome --user-data-dir=/q "
+                  "--remote-debugging-port=9333 about:blank"]),
+    DRIVER: (1, ["node", "tools/tint_check.mjs", "--web", "web"]),
+}
+
+
+def _chrome(monkeypatch, ss):
+    monkeypatch.setattr(gpu_idle, "_cmdline",
+                        lambda pid: CHROME.get(pid, (0, []))[1])
+    monkeypatch.setattr(gpu_idle, "_ppid",
+                        lambda pid: CHROME.get(pid, (0,))[0])
+    ports = []
+    def clients(port):
+        ports.append(port)
+        return ss
+    monkeypatch.setattr(gpu_idle, "_ss_clients", clients)
+    return ports
+
+
+def test_a_drawing_qa_chrome_names_who_drives_it(monkeypatch):
+    """The QA Chrome is one browser every session drives over CDP, so its
+    pid names nobody (2026-11-08: an afternoon to find that a merge gate's
+    tint_check had drawn in two timing locks). The neighbour line names the
+    process connected to its DevTools port."""
+    ports = _chrome(monkeypatch, "0 0 127.0.0.1:40060 127.0.0.1:9333 "
+                                 f'users:(("node",pid={DRIVER},fd=21))\n')
+    _pmon_says(monkeypatch, [(GPU, "chrome", 40)])
+    fatal, _ = gpu_idle.survey(seconds=0.0)
+    assert ports == [9333]
+    assert len(fatal) == 1
+    assert fatal[0].startswith(f"pid {GPU} (chrome) at 40% SM;")
+    assert f"pid {DRIVER} `node tools/tint_check.mjs --web web`" in fatal[0]
+
+
+def test_an_undriven_chrome_says_so(monkeypatch):
+    _chrome(monkeypatch, "")
+    assert "no client connected" in gpu_idle.driven_by(GPU)
+
+
+def test_a_browser_with_no_devtools_port_names_nobody(monkeypatch):
+    """Thomas's Firefox has no DevTools port; nothing to add, nothing run."""
+    ports = _chrome(monkeypatch, "")
+    assert gpu_idle.driven_by(DRIVER) == "" and ports == []
