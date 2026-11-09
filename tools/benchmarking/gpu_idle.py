@@ -60,6 +60,9 @@ import sys
 import time
 
 IDLE_UTIL_PCT = 3
+# The clock first-seen times are read from (seconds since the epoch); tests
+# put their own in its place.
+_now = time.time
 # How long require_idle() waits for a neighbour to leave, inside the lock.
 WAIT_S = 30.0
 # tools/gpulock's lock file: the flock holding it, and everything under it, is
@@ -294,7 +297,7 @@ class Watch:
         import threading
         # Each fatal line with the wall-clock time it was first seen, so a
         # neighbour can be lined up against the other sessions' logs.
-        self.fatal: dict[str, str] = {}
+        self.fatal: dict[str, float] = {}
         self.error = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -307,7 +310,7 @@ class Watch:
             while not self._stop.is_set():
                 fatal, _ = survey(seconds=0.0)
                 for f in fatal:
-                    self.fatal.setdefault(f, time.strftime("%H:%M:%S"))
+                    self.fatal.setdefault(f, _now())
                 self._stop.wait(0.5)
         except Exception as e:  # noqa: BLE001 — kept, and failed on below
             self.error = e
@@ -319,6 +322,10 @@ class Watch:
     def __exit__(self, *exc):
         self._stop.set()
         self._thread.join()
+
+
+def _stamp(t: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
 
 
 def check_quiet(watch: "Watch | None" = None) -> list[str]:
@@ -333,9 +340,13 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
     fatal, warn = survey(seconds=2.0)
     seen = dict(watch.fatal) if watch else {}
     for f in fatal:
-        seen.setdefault(f, time.strftime("%H:%M:%S"))
+        seen.setdefault(f, _now())
     if seen:
-        lines = sorted(f"{t} {f}" for f, t in seen.items())
+        # In the order they were first seen, by the clock itself: a sort on
+        # "HH:MM:SS" text put a run across midnight (or a stamp from another
+        # hour) out of order. Stamped with the date for the same reason.
+        lines = [f"{_stamp(t)} {f}" for f, t in
+                 sorted(seen.items(), key=lambda kv: (kv[1], kv[0]))]
         sys.exit("CONTAMINATED: another process was on the GPU during or "
                  "at the end of the run (first seen, wall clock); discard "
                  "these numbers:\n  " + "\n  ".join(lines))
