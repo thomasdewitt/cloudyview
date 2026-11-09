@@ -226,8 +226,8 @@ fn cc_facadeworks_draw(cc: CityCell) -> vec2<u32> {
     return pcg2d(cc.seed ^ vec2<u32>(0x7f4a7c15u, 0x2b3d8e11u));
 }
 
-fn cc_facadeworks_detail(cc: CityCell, h: CityHit, uc: f32, vc: f32,
-                         fp: f32) -> vec3<f32> {
+fn cc_facadeworks_detail(cc: CityCell, h: CityHit, dir: vec3<f32>,
+                         uc: f32, vc: f32, fp: f32) -> vec3<f32> {
     // One draw per building for the sign's structure. pcg2d gives 64 bits;
     // the continuous draws are taken later, behind the sign's own reject.
     //
