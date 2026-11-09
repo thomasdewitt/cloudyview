@@ -417,3 +417,194 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
     assert mean_abs <= bound, (
         f"{view_name}: at the hand-off the shell differs from the flat "
         f"facade by {mean_abs:.5f} on average (bound {bound})")
+
+
+# --- the shops ---------------------------------------------------------------
+#
+# A commercial ground floor is a row of lit shop windows (the STORE zone,
+# city_zone_lit_frac), drawn by the shell and averaged by the flat facade
+# through the same window path. It used to be an emitting band painted over
+# the wall, which the shell left off its reveals and sills: each jamb was a
+# dark sliver in a band that clipped to white, there while the shell drew it
+# and gone when it handed over ("the window sides appear and disappear",
+# Thomas, on the building with the white first floor). Laying the band on
+# every surface instead cured the flicker and left a featureless white wall.
+# Two things are held here, up close: the shell's ground floor averages to
+# what the flat facade shows there, and its frames and mullions stay
+# visible against the glass.
+#
+# The probe: per pixel where the plain pass hit a building's facade (kind
+# 1: never the ground or a roof), that building (its tier-0 box's min x and
+# y), the wall-plane height and the distance; elsewhere t < 0. Whether the
+# building's ground floor is commercial comes from a top-down pass, which
+# reads the storefront glow's mean in z (`_find_storefront`).
+STORE_PROBE = """    if (chit.hit && chit.kind == 1) {
+        let pc = city_cell(chit.cell);
+        return vec4<f32>(pc.b1min.x, pc.b1min.y, chit.pos.z, chit.t);
+    }
+    if (chit.hit) {
+        let pc = city_cell(chit.cell);
+        return vec4<f32>(pc.b1min.x, pc.b1min.y,
+                         dot(city_storefront_glow(pc), vec3<f32>(1.0 / 3.0)),
+                         -1.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+"""
+# The shop glass's height on the wall (CITY_STORE_PANE_LO/HI: 0.2-3.3 m).
+STORE_BAND_Z = (0.25, 3.25)
+# A camera STORE_RANGE metres off the face's middle, STORE_OFF degrees off
+# its normal so the reveals on one side of every window face it, at
+# STORE_Z, looking at STORE_AIM_Z.
+STORE_RANGE = 28.0
+STORE_OFF = 45.0
+STORE_Z = 3.0
+STORE_AIM_Z = 1.2
+STORE_FOV = 50.0
+STORE_SIZE = (960, 540)
+STORE_MIN_SHARE = 0.05
+STORE_MIN_PIXELS = 5000
+# Relief standing more than this in front of the wall plane is an object
+# (a canopy, a unit, a pipe, the street's furniture), not the wall.
+STORE_IN_FRONT = 0.25
+# The shell's band mean against the flat facade's, and the band's dark tail
+# (its 10th percentile) against its glass (90th), both as shown. Measured
+# (2026-11-09, 32 frames, 97369 band pixels), mean error, p10/p90 and lit
+# share: -0.027, 0.242, 0.692 with shop windows; -0.015, 0.107, 0.080 with
+# no shops (the ground floor's own lattice); the old band, left off the
+# shell's reveals and sills, -0.051, 0.932, 0.929; the band laid on every
+# surface instead, +0.000, 0.961, 0.999 (no flicker, and no frames).
+MAX_STORE_MEAN_ERR = 0.04
+MAX_STORE_CONTRAST = 0.5
+# And the shops are lit: the share of the band shown brighter than
+# STORE_GLASS (a lit pane; frames, reveals and dark rooms are far below).
+STORE_GLASS = 0.6
+MIN_STORE_LIT = 0.4
+
+
+def _store_probe(level):
+    from cloudyview.soar_host import SoarRenderer
+    source = SHADER.read_text()
+    assert source.count(PROBE_ANCHOR) == 1, (
+        "the plain pass's probe anchor moved; update PROBE_ANCHOR")
+    r = SoarRenderer(periodic=True, surface="city",
+                     shader_source=source.replace(
+                         PROBE_ANCHOR, STORE_PROBE + PROBE_ANCHOR))
+    r.upload_volume(level.sigma)
+    return r
+
+
+def _store_plane(r, state, cam, w, h):
+    from cloudyview.soar_host import ViewState
+    x, y, z, az, el, fov = cam
+    r.render(state, ViewState(
+        camera_position=[x + TILE_OFFSET[0], y + TILE_OFFSET[1], z],
+        azimuth=az, elevation=el, fov=fov, output_size=(w, h),
+        render_size=(w, h), jitter=False, subpixel=False,
+        sun_azimuth=310.0, sun_elevation=22.0, exposure=6.0,
+        view_step_lod_degrees=0.0), frames=1)
+    return _plain(r, w, h).view(np.float32)
+
+
+def _store_camera(box, off):
+    """STORE_RANGE metres off the middle of the building's south face,
+    `off` degrees west of its normal, aimed at the band."""
+    x0, y0, x1, _ = (float(v) for v in box)
+    a = math.radians(off)
+    x = 0.5 * (x0 + x1) - STORE_RANGE * math.sin(a)
+    y = y0 - STORE_RANGE * math.cos(a)
+    el = math.degrees(math.atan2(STORE_AIM_Z - STORE_Z, STORE_RANGE))
+    return (x, y, STORE_Z, off, el, STORE_FOV)
+
+
+def _store_band(plane, box):
+    """The building's own facade in the band's fully lit part, eroded by a
+    pixel so that jitter at its edges cannot reach past it."""
+    m = ((np.abs(plane[..., 0] - box[0]) < 0.1)
+         & (np.abs(plane[..., 1] - box[1]) < 0.1) & (plane[..., 3] > 0.0)
+         & (plane[..., 2] > STORE_BAND_Z[0])
+         & (plane[..., 2] < STORE_BAND_Z[1]))
+    e = m.copy()
+    e[1:] &= m[:-1]
+    e[:-1] &= m[1:]
+    e[:, 1:] &= m[:, :-1]
+    e[:, :-1] &= m[:, 1:]
+    return e
+
+
+def _find_storefront(level, state):
+    """The commercial building whose band fills most of its view."""
+    probes = _probe_renderers(level)
+    store = _store_probe(level)
+    top_cam = (SEARCH_CENTRE[0], SEARCH_CENTRE[1], SEARCH_ALT, 0.0, -89.9,
+               SEARCH_FOV)
+    top = _probe(probes, state, top_cam, SEARCH_PX, SEARCH_PX)
+    # Looking straight down, a hit on a roof or the ground hands back the
+    # storefront glow of the cell under it (t < 0); a facade seen edge-on
+    # hands back a height instead, so it is not read.
+    plane = _store_plane(store, state, top_cam, SEARCH_PX, SEARCH_PX)
+    glow = np.where(plane[..., 3] < 0.0, plane[..., 2], 0.0)
+    hit = top[..., 6] > 0.0
+    boxes, lit = {}, set()
+    for px, g in zip(top[hit], glow[hit]):
+        key = tuple(np.round(px[:4], 1))
+        boxes[key] = (float(px[4]), int(round(px[5])))
+        if g > 0.0:
+            lit.add(key)
+    found = sorted((key for key in lit if key[2] - key[0] >= 20.0),
+                   key=lambda k: (
+                       (0.5 * (k[0] + k[2]) - SEARCH_CENTRE[0]) ** 2
+                       + (0.5 * (k[1] + k[3]) - SEARCH_CENTRE[1]) ** 2, k))
+    best, best_share = None, STORE_MIN_SHARE
+    for key in found[:MAX_CANDIDATES]:
+        for off in (STORE_OFF, -STORE_OFF):
+            cam = _store_camera(key, off)
+            if _inside_any(cam, boxes):
+                continue
+            share = float(_store_band(
+                _store_plane(store, state, cam, 320, 180), key).mean())
+            if share > best_share:
+                best, best_share = (key, cam), share
+    if best is None:
+        raise AssertionError(
+            f"no storefront ({len(found)} candidates) fills its view; "
+            "revisit STORE_* or SEARCH_*")
+    return best, store
+
+
+def _store_measure(renderers, state):
+    """(shell band mean / flat band mean - 1, p10 / p90 of the shell's
+    band, its share shown brighter than STORE_GLASS, pixels, building,
+    camera)."""
+    level = build_soar_level()
+    (box, cam), store = _find_storefront(level, state)
+    w, h = STORE_SIZE
+    band = _store_band(_store_plane(store, state, cam, w, h), box)
+    shell = _shown(renderers["shell"], state, cam, w).mean(axis=-1)
+    t_plain = np.abs(_plain(renderers["shell"], w, h)[..., 3]
+                     .view(np.float32))
+    t_final = np.abs(_surface_t(renderers["shell"], w, h))
+    flat = _shown(renderers["flat"], state, cam, w).mean(axis=-1)
+    wall = band & (t_final > t_plain - STORE_IN_FRONT)
+    err = float(shell[wall].mean() / flat[wall].mean() - 1.0)
+    p10, p90 = np.percentile(shell[wall], [10.0, 90.0])
+    lit = float((shell[wall] > STORE_GLASS).mean())
+    return err, float(p10 / p90), lit, int(wall.sum()), box, cam
+
+
+@pytest.mark.gpu
+def test_shops_agree_and_keep_their_frames(city):
+    """Up close, the shell's shop windows average to what the flat facade
+    shows there, and their frames stay darker than their glass."""
+    renderers, state, _ = city
+    err, contrast, lit, n, box, cam = _store_measure(renderers, state)
+    assert n >= STORE_MIN_PIXELS, f"only {n} pixels of shop band in view"
+    where = f"building {box}, camera {cam}"
+    assert abs(err) <= MAX_STORE_MEAN_ERR, (
+        f"the shell's shops show {err:+.3f} against the flat facade's "
+        f"(bound {MAX_STORE_MEAN_ERR}); {where}")
+    assert lit >= MIN_STORE_LIT, (
+        f"only {lit:.3f} of the shop band shows as lit glass (bound "
+        f"{MIN_STORE_LIT}): the shops are dark or gone; {where}")
+    assert contrast <= MAX_STORE_CONTRAST, (
+        f"the shop band's dark tail is {contrast:.3f} of its glass (bound "
+        f"{MAX_STORE_CONTRAST}): the frames are lost; {where}")
