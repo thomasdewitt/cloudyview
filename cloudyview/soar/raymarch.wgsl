@@ -7363,16 +7363,21 @@ fn city_zones_none() -> CityZones {
 
 fn city_zones(cc: CityCell, f: CityFace) -> CityZones {
     var z = city_zones_none();
-    if (!f.aligned || cc.land_use != CITY_USE_URBAN || f.nbays < 3) {
+    if (!f.aligned || cc.land_use != CITY_USE_URBAN) {
         return z;
     }
-    let zb = city_rand4(cc.seed ^ vec2<u32>(0x3c6ef372u, 0xa54ff53au));
+    // A commercial ground floor is a row of shops, whatever is above it,
+    // and on every face, as the street's glow (city_storefront_glow, the
+    // building's) has it.
+    z.store = f.z0 < 0.5 && dot(city_storefront_glow(cc), vec3<f32>(1.0)) > 0.0;
+    if (f.nbays < 3) {
+        return z;
+    }
+    let zb = city_rand4(cc.seed ^ vec2<u32>(0x3956c25bu, 0x59f111f1u));
     let zc = city_rand4(cc.seed ^ vec2<u32>(0x5be0cd19u, 0x1f83d9abu));
     let zf = city_rand4(cc.seed ^ vec2<u32>(f.salt, 0x6a09e667u));
     let top = i32(floor(cc.height * CITY_PER_STOREY + 0.5));
     let tall = cc.height > 60.0;
-    // A commercial ground floor is a row of shops, whatever is above it.
-    z.store = f.z0 < 0.5 && dot(city_storefront_glow(cc), vec3<f32>(1.0)) > 0.0;
     // One side of the building may be solid: a quarter of the lower ones
     // and a few towers (never a curtain wall, which is glass all round).
     if (cc.win_style != 3 && f.side == i32(floor(zb.z * 3.999))
@@ -7525,8 +7530,10 @@ fn city_shop_window(cc: CityCell, w_in: CityWin) -> CityWin {
 // occupancy draw, and city_storey_rate never darkens it with the floor (a
 // row of shops is lit, in the house's colours, so the flat facade's lit
 // pane is the lattice's but for the odd cyan shop); a loft's is lit twice
-// as often as the floors below, from at least 0.7, as far as its rate stays
-// under 1 (the corner flats are the ones lived in).
+// as often as the floors below, from at least 0.7, but never so often its
+// rate could pass 1 (on ribbon and strip houses that cap, 0.66-0.69, is
+// below 0.7 and every loft sits at it); the corner flats are the ones
+// lived in.
 const CITY_LOFT_LIT_GAIN: f32 = 2.0;
 const CITY_LOFT_LIT_MIN: f32 = 0.70;
 fn city_zone_lit_frac(cc: CityCell, zone: i32) -> f32 {
@@ -8091,8 +8098,12 @@ fn city_escape_building(cc: CityCell) -> bool {
 
 fn city_escape(cc: CityCell, f: CityFace, st: CityShellStyle) -> CityEscape {
     var e = CityEscape(false, 0.0, 0.0, 0.0, 0.0, 0.0);
-    if (!st.escape || !f.aligned || f.tier != 0 || f.nbays < 4
-        || city_zones(cc, f).blank) {
+    if (!st.escape || !f.aligned || f.tier != 0 || f.nbays < 4) {
+        return e;
+    }
+    // Not on a solid side, nor across a core strip.
+    let z = city_zones(cc, f);
+    if (z.blank || z.core.y > z.core.x) {
         return e;
     }
     let h = city_rand4(cc.seed ^ vec2<u32>(0x85ebca77u, 0xc2b2ae3du));
@@ -8795,7 +8806,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
               + win.e * (0.8 * spill);
     e = e + alb * light;
     // Everything the facade components paint on the wall.
-    if (part == CITY_PART_WALL) {
+    if (part == CITY_PART_WALL || part == CITY_PART_CORE) {
         e = e + cc_facade_detail(cc, hw, dir, l.x, l.y, fp);
     }
     // A curtain wall's spandrels are glass too, and so is the cladding of
@@ -8811,9 +8822,11 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
 
 // The shop row's radiance as the street sees it, the strip of light the
 // sidewalk's spill, the steam and the street furniture read: what its
-// windows (the STORE zone) emit on average over the strip, glass share by
-// a lit room's mean radiance through the glass, in the house's colour (its
-// one draw for a monochrome house, the palette's mean for a mixed one).
+// windows (the STORE zone) emit on average over the strip, the glass's
+// share of it by a lit room's mean radiance through the glass at normal
+// incidence, in the house's colour (its one draw for a monochrome house,
+// the palette's mean for a mixed one). The frames' and the recess's shade
+// on the glass are left out: a street-scale light, not the wall's mean.
 // Zero where the ground floor is not commercial.
 fn city_storefront_glow(cc: CityCell) -> vec3<f32> {
     if (!cc.built || cc.store_draw >= 0.65
@@ -8822,9 +8835,14 @@ fn city_storefront_glow(cc: CityCell) -> vec3<f32> {
     }
     let style_gain = select(select(1.0, 0.80, cc.win_style == 1),
                             0.55, cc.win_style == 3);
-    // The glass's share of the strip: its width in the bay, its height in
-    // the strip.
-    let glass = (CITY_STORE_PANE_HI.x - CITY_STORE_PANE_LO.x)
+    // The glass's share of the strip: its width in a bay, the bays' share
+    // of the ground box's perimeter (each face keeps a corner strip of wall
+    // at both ends, city_face_make), its height in the strip.
+    let w = cc.b1max.xy - cc.b1min.xy;
+    let corner = min(vec2<f32>(CITY_SHELL_CORNER), 0.25 * w);
+    let bays = max(w.x + w.y - 2.0 * (corner.x + corner.y), 0.0)
+               / max(w.x + w.y, 1e-3);
+    let glass = (CITY_STORE_PANE_HI.x - CITY_STORE_PANE_LO.x) * bays
                 * (CITY_STORE_PANE_HI.y - CITY_STORE_PANE_LO.y)
                 * CITY_FLOOR_H / CITY_STORE_H;
     // The shops' mean colour. A mixed house's draws are uniform on [0, 1],
