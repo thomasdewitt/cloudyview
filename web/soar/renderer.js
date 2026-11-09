@@ -264,12 +264,14 @@ function stageFormats(entry) {
 // tests/test_wgsl_sections.py pins the two to the same bytes.
 const SECTION_NAMES = ["sea", "city"];
 // Sections of surfaces this line no longer has. They exist so the tooling
-// can still specialize a revision from before a surface left, and so a
-// branch that keeps it (the `desert` branch) still compiles here: a retired
-// name's sections are always blanked and its stub always kept, which is
-// exactly how every scene but its own specialized such a shader. The
-// desert branch's merge back into this line removes "desert" from here
-// again. soar_host.RETIRED_SECTIONS is the twin.
+// can still specialize and compile a revision from before a surface left,
+// and so a branch that keeps it (the `desert` branch) still compiles here: a
+// retired name's sections are always blanked and its stub always kept, which
+// is exactly how every scene but its own specialized such a shader. It
+// specializes and compiles; it does not render under this host, whose
+// uniform block and bindings are not its own (soar_host.RETIRED_SECTIONS has
+// the why). The desert branch's merge back into this line removes "desert"
+// from here again. soar_host.RETIRED_SECTIONS is the twin.
 const RETIRED_SECTIONS = ["desert"];
 const SECTION_MARKER = /^\/\/ @(section|end|stub|end-stub) (\w+)\s*$/;
 

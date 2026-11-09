@@ -822,11 +822,15 @@ def surface_stage_plan(n: int) -> list:
 # tests/test_wgsl_sections.py pins the two to the same bytes.
 SECTION_OF_SURFACE = {"ocean": "sea", "city": "city"}
 # Sections of surfaces this line no longer has. They exist so the tooling
-# (soar_shader_ab, soar_regcount, the pass timer: `--a git:REV`) can still
-# specialize a revision from before a surface left, and so a branch that
-# keeps it (the `desert` branch) still compiles here: a retired name's
-# sections are always blanked and its stub always kept, which is exactly how
-# every scene but its own specialized such a shader. The desert branch's
+# (soar_regcount, tint: `--a git:REV`) can still specialize and compile a
+# revision from before a surface left, and so a branch that keeps it (the
+# `desert` branch) still compiles here: a retired name's sections are always
+# blanked and its stub always kept, which is exactly how every scene but its
+# own specialized such a shader. Specializes and compiles, not renders: such
+# a revision's uniform block and bindings are its own host's (752 bytes,
+# bindings this host no longer lays out), so a render of it under this host
+# fails validation — render it under its own (soar_shader_ab --save there,
+# --against here). The desert branch's
 # merge back into this line removes "desert" from here again.
 RETIRED_SECTIONS = ("desert",)
 _SECTION_MARKER = re.compile(r"^// @(section|end|stub|end-stub) (\w+)\s*$")

@@ -48,13 +48,17 @@ hashes them byte for byte), or run this tool in each tree with its own host:
 `--save DIR` in the one writes every view's float render there, and
 `--against DIR` in the other renders only its B and holds it against those
 (the desert's removal, 2026-11-09, moved the uniform block and two bindings).
+A tree from before --save existed takes a copy of this file anywhere inside
+it (REPO is found from the file's own path). The run's settings are written
+beside the renders (run.json) and an --against run with others is refused.
 
-    uv run python tools/soar_shader_ab.py --a tree --b tree --save /tmp/ab-old
-    # ...then, in the other tree:
+    cp tools/soar_shader_ab.py ../old-tree/temp/ab.py     # if it lacks --save
+    (cd ../old-tree && uv run python temp/ab.py --a tree --b tree --save /tmp/ab-old)
     uv run python tools/soar_shader_ab.py --b tree --against /tmp/ab-old
 """
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -156,7 +160,8 @@ def source_for(spec: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--a", default="git:HEAD", help="baseline revision")
+    ap.add_argument("--a", default=None,
+                    help="baseline revision (default git:HEAD)")
     ap.add_argument("--b", default="tree", help="candidate revision")
     ap.add_argument("--size", type=int, nargs=2, default=(400, 225))
     ap.add_argument("--frames", type=int, default=1,
@@ -188,8 +193,28 @@ def main():
                          "(another tree, under its own host) instead of "
                          "rendering A here")
     args = ap.parse_args()
+    # What a saved set was rendered under: an --against run under any other
+    # settings would compare different pictures.
+    run = {"size": list(args.size), "frames": args.frames,
+           "jitter": bool(args.jitter), "periodic": args.periodic,
+           "scene": args.scene, "tier": args.tier,
+           "field": str(args.field) if args.field else None,
+           "demo": str(args.demo) if args.demo else None,
+           "views": args.views}
+    if args.save is not None and args.against is not None:
+        ap.error("--save and --against: save in one tree, compare in the other")
     if args.save is not None:
         args.save.mkdir(parents=True, exist_ok=True)
+        (args.save / "run.json").write_text(json.dumps(run, indent=1))
+    if args.against is not None:
+        saved = json.loads((args.against / "run.json").read_text())
+        if saved != run:
+            ap.error(f"{args.against} was rendered under {saved}; this run is "
+                     f"{run}.")
+        if args.a is not None:
+            ap.error("--a and --against: A is the saved set")
+    elif args.a is None:
+        args.a = "git:HEAD"
 
     import wgpu
     device = wgpu.gpu.request_adapter_sync(
@@ -220,9 +245,8 @@ def main():
         state.dt_light_nest = min(nest.dx) * light_factor
 
     renderers = []
-    # Against a saved set, A is not rendered here: its renderer only lends
-    # the tile's meta (and bakes), so it is B's own revision.
-    for spec in ((args.b, args.b) if args.against is not None
+    # Against a saved set, A is not rendered here: B alone is built.
+    for spec in ((args.b,) if args.against is not None
                  else (args.a, args.b)):
         r = SoarRenderer(device=device, periodic=periodic, nested=nested,
                          surface=surface, shader_source=source_for(spec))
@@ -230,7 +254,7 @@ def main():
         if nested:
             r.upload_nest(nest.sigma)
         renderers.append(r)
-    meta = renderers[0].surface_meta
+    meta = renderers[-1].surface_meta
     state.ocean_fif_dx = surface_cell_m(surface, meta)
     state.ocean_tile_extent = float(meta["tile_extent_m"])
     state.ocean_max_lod = int(meta["mips"]) - 1
@@ -283,7 +307,7 @@ def main():
             a = renderers[0].render(state, view, frames=args.frames)
         if args.save is not None:
             np.save(args.save / f"{name}.npy", a)
-        b = renderers[1].render(state, view, frames=args.frames)
+        b = renderers[-1].render(state, view, frames=args.frames)
         d = np.abs(a - b)
         n = int((d > 0).sum())
         worst = max(worst, float(d.max()))
