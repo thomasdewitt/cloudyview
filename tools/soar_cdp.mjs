@@ -113,6 +113,58 @@ export async function requireHardwareAdapter(tab) {
   return [info.vendor, info.architecture].filter(Boolean).join(" ");
 }
 
+/** What the page threw, from a Runtime.evaluate result's exceptionDetails. */
+function thrownMessage(details) {
+  return details.exception?.description ?? details.text;
+}
+
+/**
+ * Poll `evaluate(expression)` — one CDP Runtime.evaluate, resolving to its
+ * result or rejecting on a protocol error — until it gives a truthy value,
+ * and return that value.
+ *
+ * Three answers, kept apart:
+ *   - a truthy value: done;
+ *   - a falsy value, or a protocol error (no execution context: the page is
+ *     navigating, its context was destroyed, it is not up yet): not ready,
+ *     poll again;
+ *   - the expression THREW (exceptionDetails): a failure the expression is
+ *     reporting, so rethrown at once with the page's message.
+ * Until 2026-11-09 the poll swallowed all three alike (`.catch(() =>
+ * undefined)`), so a failure check inside a waited expression — pinned_
+ * still's `if (L.classList.contains("failed") ...) throw new Error(L.
+ * innerText)` — could never fire: ?surfacecs=2 showed its failure panel and
+ * the tool timed out 181 s later with the reason lost. A waited expression
+ * must therefore not throw while merely not ready (use ?. on what may not
+ * exist yet); every one in tools/ is written that way.
+ */
+export async function pollUntil(evaluate, expression, timeoutMs = 60000,
+                                intervalMs = 250) {
+  const t0 = Date.now();
+  let last = null;
+  for (;;) {
+    let r = null;
+    try {
+      r = await evaluate(expression);
+    } catch (err) {
+      last = err;
+    }
+    if (r?.exceptionDetails) {
+      const short = expression.length > 120
+        ? `${expression.slice(0, 117)}...` : expression;
+      throw new Error(`the page threw while waiting for ${short}: ` +
+                      thrownMessage(r.exceptionDetails));
+    }
+    const v = r?.result?.value;
+    if (v) return v;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`timed out waiting for ${expression}` +
+                      (last ? ` (last protocol error: ${last.message})` : ""));
+    }
+    await new Promise((ok) => setTimeout(ok, intervalMs));
+  }
+}
+
 export async function openTab(cdpPort) {
   let t;
   try {
@@ -144,16 +196,13 @@ export async function openTab(cdpPort) {
   await send("Page.enable");
   await send("Network.enable");
   await send("Network.setCacheDisabled", { cacheDisabled: true });
+  const evaluate = (expression) => send("Runtime.evaluate",
+    { expression, awaitPromise: true, returnByValue: true, userGesture: true });
   const tab = {
     send,
     async eval(expression) {
-      const r = await send("Runtime.evaluate",
-                           { expression, awaitPromise: true,
-                             returnByValue: true, userGesture: true });
-      if (r.exceptionDetails) {
-        throw new Error(r.exceptionDetails.exception?.description
-                        ?? r.exceptionDetails.text);
-      }
+      const r = await evaluate(expression);
+      if (r.exceptionDetails) throw new Error(thrownMessage(r.exceptionDetails));
       return r.result.value;
     },
     async goto(url) {
@@ -163,16 +212,9 @@ export async function openTab(cdpPort) {
       await send("Page.navigate", { url });
       await loaded;
     },
-    async waitFor(expression, timeoutMs = 60000) {
-      const t0 = Date.now();
-      for (;;) {
-        const v = await tab.eval(expression).catch(() => undefined);
-        if (v) return v;
-        if (Date.now() - t0 > timeoutMs) {
-          throw new Error(`timed out waiting for ${expression}`);
-        }
-        await new Promise((r) => setTimeout(r, 250));
-      }
+    /** pollUntil on this tab: a throw in `expression` fails at once. */
+    waitFor(expression, timeoutMs = 60000) {
+      return pollUntil(evaluate, expression, timeoutMs);
     },
     async close() {
       for (const s of SIGNALS) process.off(s, onSignal);

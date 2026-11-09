@@ -1,0 +1,103 @@
+"""soar_cdp's waitFor fails at once when the waited expression throws.
+
+The tools wait on expressions that carry their own failure checks: the
+loading wait in pinned_still, steam_live_qa, sea_speckle_qa, soar_noise and
+surface_cs_timer throws the page's failure panel text when the scene fails to
+load. waitFor polled `tab.eval(expression).catch(() => undefined)`, so that
+throw was swallowed with everything else: ?surfacecs=2 showed its failure
+panel and pinned_still timed out 181 s later with the reason lost
+(loose-ends, 2026-11-09).
+
+waitFor is now pollUntil over the tab's Runtime.evaluate. This drives
+pollUntil with stand-in evaluate functions that answer as CDP does: a result,
+a result carrying exceptionDetails (the expression threw), or a rejected call
+(a protocol error: no execution context while the page navigates). Needs
+node; no Chrome, no GPU.
+"""
+
+import json
+import shutil
+import subprocess
+import textwrap
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[1]
+SOAR_CDP = REPO / "tools" / "soar_cdp.mjs"
+
+pytestmark = pytest.mark.skipif(shutil.which("node") is None,
+                                reason="needs node")
+
+SCRIPT = textwrap.dedent("""
+    import { pollUntil } from "%s";
+    const value = (v) => ({ result: { type: typeof v, value: v } });
+    // What Runtime.evaluate answers for `throw new Error("Scene failed: X")`.
+    const threw = (msg) => ({
+      result: { type: "object", subtype: "error" },
+      exceptionDetails: { text: "Uncaught", exception: {
+        type: "object", subtype: "error",
+        description: `Error: ${msg}\\n    at <anonymous>:1:60` } } });
+    // What send() rejects with while the page is between documents.
+    const destroyed = () => Promise.reject(new Error(JSON.stringify(
+      { code: -32000, message: "Execution context was destroyed." })));
+
+    async function run(name, answers, timeoutMs) {
+      let calls = 0;
+      const evaluate = async () => {
+        const a = answers[Math.min(calls++, answers.length - 1)];
+        return typeof a === "function" ? a() : a;
+      };
+      const t0 = Date.now();
+      try {
+        const v = await pollUntil(evaluate, "probe()", timeoutMs, 10);
+        return { name, ok: true, value: v, calls, ms: Date.now() - t0 };
+      } catch (err) {
+        return { name, ok: false, error: err.message, calls, ms: Date.now() - t0 };
+      }
+    }
+
+    const out = [
+      await run("throws", [value(false), threw("Scene failed: ?surfacecs=2: expected 1 (or 512), 256, or 0")], 60000),
+      await run("waits", [value(false), value(0), value(null), value(""), value("ready")], 60000),
+      await run("navigates", [value(false), destroyed, destroyed, value(true)], 60000),
+      await run("times out", [destroyed], 80),
+      await run("never true", [value(false)], 80),
+    ];
+    console.log(JSON.stringify(out));
+""") % SOAR_CDP.as_uri()
+
+
+@pytest.fixture(scope="module")
+def runs():
+    out = subprocess.run(["node", "--input-type=module", "-e", SCRIPT],
+                         capture_output=True, text=True, check=True,
+                         timeout=60)
+    return {r["name"]: r for r in json.loads(out.stdout)}
+
+
+def test_a_thrown_expression_fails_at_once_with_the_pages_message(runs):
+    r = runs["throws"]
+    assert not r["ok"]
+    assert "?surfacecs=2: expected 1 (or 512), 256, or 0" in r["error"]
+    assert "the page threw while waiting for probe()" in r["error"]
+    # On the poll that threw, not at the 60 s timeout.
+    assert r["calls"] == 2 and r["ms"] < 5000, r
+
+
+def test_a_not_yet_true_expression_still_waits(runs):
+    r = runs["waits"]
+    assert r["ok"] and r["value"] == "ready" and r["calls"] == 5, r
+
+
+def test_a_navigation_mid_poll_does_not_throw(runs):
+    r = runs["navigates"]
+    assert r["ok"] and r["value"] is True and r["calls"] == 4, r
+
+
+def test_a_timeout_names_the_last_protocol_error(runs):
+    r = runs["times out"]
+    assert not r["ok"] and r["error"].startswith("timed out waiting for probe()")
+    assert "Execution context was destroyed." in r["error"], r
+    r = runs["never true"]
+    assert not r["ok"] and r["error"] == "timed out waiting for probe()", r
