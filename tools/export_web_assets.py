@@ -7,14 +7,14 @@ Destinations (name the ones to write):
                     your data), generated from a multifractal that only
                     exists in Python, so it ships WITH the tool and works
                     offline. Committed, and the seed is fixed; the shipped
-                    tile was baked against a local scaleinvariance 0.13.1,
-                    and a re-run under PyPI's (0.14, whose N-D FIF differs)
-                    is a new field, not a reproduction — so it is refused
-                    under any other version unless --rebake says a new sea
-                    is meant. A new tile also needs raymarch.wgsl's
-                    fif_slope_variance table and the @domain bound on its
-                    normals re-measured (tests/test_ocean_tile_bytes.py
-                    holds both to the bytes).
+                    tile was baked under scaleinvariance 0.14.0, and a
+                    re-run under any other version is refused unless
+                    --rebake says a new sea is meant (another FIF may draw
+                    another field from the same seed). A new tile also
+                    needs raymarch.wgsl's fif_slope_variance table, the
+                    @domain bound on its normals and OCEAN_GLINT_ROUGHNESS
+                    re-measured (tests/test_ocean_tile_bytes.py holds the
+                    first two to the bytes).
 
 Cloud fields are not exported here. Each demo field is baked separately by
 tools/prebake_demos.py into web/soar/demos/<id>/, which is what the browser
@@ -27,6 +27,7 @@ copy is now the original.
     uv run python tools/export_web_assets.py ocean
 """
 
+import gzip
 import json
 from pathlib import Path
 
@@ -39,7 +40,8 @@ from cloudyview.city_fif import (
     generate_city_density,
 )
 from cloudyview.ocean_fif import generate_fif_normals
-from cloudyview.soar_host import SURFACE_TILE_SCHEMAS
+from cloudyview.soar_host import (SURFACE_TILE_SCHEMAS, encode_surface_level,
+                                  surface_level_files)
 from cloudyview.city_lots import bake_lots, glow_weight, pack_channels
 
 REPO = Path(__file__).resolve().parents[1]
@@ -58,14 +60,15 @@ CITY_SEED = 20260820
 # octave's cycles and the hosts' wrap of the clock there shows nothing.
 CITY_CLOCK_PERIOD_S = 2600.0
 
-# 512 rather than the app's 2048: a quarter the texel count for the same
-# physical tile (dx scales to match), which keeps the download honest.
-FIF_N = 512
-FIF_DX_M = 0.2
+# 1024 texels of 0.1 m: the 102.4 m tile, twice as fine as the 512 of 0.2 m
+# it replaced (2026-11-08), so a low pass over the water still resolves wave
+# texture a few hundred metres out. Stored byte-shuffled and gzipped
+# (5.2 MiB on the wire, 10.7 MiB on the card).
+FIF_N = 1024
+FIF_DX_M = 0.1
 FIF_SEED = 20260717
-# The scaleinvariance the shipped tile was baked with (a local checkout,
-# 2026-08-05); under any other the same seed draws a different sea.
-OCEAN_BAKED_WITH = "0.13.1"
+# The scaleinvariance the shipped tile was baked with (PyPI, 2026-11-08).
+OCEAN_BAKED_WITH = "0.14.0"
 
 
 def _volume_aabb(field: CloudField):
@@ -110,6 +113,32 @@ def _build_fif_normal_mips(base: np.ndarray) -> list:
     return mips
 
 
+def remove_tile(out: Path) -> None:
+    """Delete the tile in `out` by the level files its meta.json names: a
+    level the old tile had and the new one does not would otherwise ship
+    alongside it. A delete driven by names read from a file, so every name
+    is checked before anything is removed: each must be a bare file name in
+    `out` itself — no separator, no "." or "..", nothing absolute — or the
+    whole delete is refused. The meta is left for the export to overwrite.
+    """
+    meta_path = out / "meta.json"
+    if not meta_path.exists():
+        return
+    meta = json.loads(meta_path.read_text())
+    if "files" in meta and not isinstance(meta["files"], list):
+        raise ValueError(f"{meta_path}: 'files' is not a list: "
+                         f"{meta['files']!r}")
+    names = surface_level_files(meta)
+    bad = [n for n in names
+           if not isinstance(n, str) or n in ("", ".", "..")
+           or "/" in n or "\\" in n or n != Path(n).name]
+    if bad:
+        raise ValueError(f"{meta_path} names files that are not bare names "
+                         f"in {out}: {bad!r}; nothing was deleted.")
+    for name in names:
+        (out / name).unlink(missing_ok=True)
+
+
 def export_ocean() -> dict:
     OCEAN_OUT.mkdir(parents=True, exist_ok=True)
     print(f"FIF ocean tile {FIF_N}^2 at dx={FIF_DX_M} m (seeded {FIF_SEED})")
@@ -120,16 +149,26 @@ def export_ocean() -> dict:
     base[..., 0], base[..., 1], base[..., 2] = nx, ny, nz
     base[..., 3] = 1.0
     mips = _build_fif_normal_mips(base)
+    remove_tile(OCEAN_OUT)
+    files, wire = [], 0
     for i, mip in enumerate(mips):
-        (OCEAN_OUT / f"fif_mip{i}.bin").write_bytes(
-            np.ascontiguousarray(mip, dtype=np.float16).tobytes()
-        )
+        # Planar and byte-shuffled, the desert's encoding: gzip then sees
+        # each normal component's smoothness, and the constant alpha plane
+        # costs nothing.
+        packed = gzip.compress(encode_surface_level(mip), compresslevel=9,
+                               mtime=0)
+        files.append(f"mip{i}.bin.gz")
+        (OCEAN_OUT / files[-1]).write_bytes(packed)
+        wire += len(packed)
     meta = {
         "schema": SURFACE_TILE_SCHEMAS["ocean"],
         "n": FIF_N,
         "dx_m": float(dx),
         "mips": len(mips),
         "format": "rgba16float",
+        "encoding": "planar-byte-shuffle",
+        "compression": "gzip",
+        "files": files,
         "tile_extent_m": float(FIF_N * dx),
         # The sea has no clock: nothing on it moves (soar_host.
         # surface_clock_period_s; null, not a period of 0).
@@ -137,7 +176,8 @@ def export_ocean() -> dict:
         "seed": FIF_SEED,
     }
     (OCEAN_OUT / "meta.json").write_text(json.dumps(meta, indent=1))
-    print(f"  {len(mips)} mips, tile extent {meta['tile_extent_m']:.1f} m")
+    print(f"  {len(mips)} mips, tile extent {meta['tile_extent_m']:.1f} m, "
+          f"{wire / 2**20:.2f} MiB gzipped")
     return meta
 
 
@@ -238,8 +278,10 @@ def main() -> None:
             parser.error(
                 f"the shipped ocean tile was baked with scaleinvariance "
                 f"{OCEAN_BAKED_WITH}; this is {scaleinvariance.__version__}, "
-                "whose FIF is a different field. Pass --rebake to write a new "
-                "sea (then re-measure raymarch.wgsl's fif_slope_variance).")
+                "whose FIF may draw another field from the same seed. Pass "
+                "--rebake to write a new sea, then re-measure raymarch.wgsl's "
+                "fif_slope_variance and @domain bound and re-fit "
+                "OCEAN_GLINT_ROUGHNESS.")
     SOAR_OUT.mkdir(parents=True, exist_ok=True)
     for name in args.tiles:
         EXPORTS[name]()

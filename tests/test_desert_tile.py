@@ -23,7 +23,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools"))
 
 from cloudyview.soar_host import (DESERT_DIR, SHADER_PATH,         # noqa: E402
-                                  decode_surface_level, surface_level_files)
+                                  decode_surface_level, encode_surface_level,
+                                  surface_level_files)
 import export_desert_tile                                        # noqa: E402
 
 META = json.loads((DESERT_DIR / "meta.json").read_text())
@@ -141,7 +142,7 @@ def test_each_mip_is_the_box_mean_of_the_last():
 def test_the_encoding_round_trips():
     rng = np.random.default_rng(3)
     level = rng.normal(size=(8, 8, 2)).astype(np.float16)
-    raw = export_desert_tile.encode_level(level)
+    raw = encode_surface_level(level)
     back = np.frombuffer(decode_surface_level(raw, 8, META),
                          np.float16).reshape(8, 8, 2)
     assert np.array_equal(back, level)
@@ -160,7 +161,7 @@ _DECODE_JS = textwrap.dedent("""
 def test_the_browser_decodes_the_same_bytes(tmp_path):
     rng = np.random.default_rng(5)
     level = rng.normal(size=(8, 8, 2)).astype(np.float16)
-    raw = export_desert_tile.encode_level(level)
+    raw = encode_surface_level(level)
     (tmp_path / "raw.bin").write_bytes(raw)
     js = _DECODE_JS % (REPO / "web" / "soar" / "scene.js").as_posix()
     proc = subprocess.run(
