@@ -71,13 +71,15 @@
 //
 // LIGHT. The artery read from altitude is NOT the lamp heads: a 0.36 m rail
 // at 4 m/px covers a tenth of a pixel and delivers a tenth of its radiance.
-// It is what those strings put on the 16 m of DECK — the wash, plus the
-// traffic under it — which is what actually makes a lit road photograph as a
-// continuous bright ribbon from the air. The string dashes (radiance 5,
-// warm white, every 9 m along both rail tops, collapsing into a continuous
-// line of the same mean energy once a dash is sub-pixel) are the close read;
-// the deck's own mean radiance, about 0.47, is the far one — roughly half
-// wash and half frozen traffic.
+// It is what those strings put on the 16 m of DECK — the wash — which is
+// what actually makes a lit road photograph as a continuous bright ribbon
+// from the air. The string dashes (radiance 5, warm white, every 9 m along
+// both rail tops, collapsing into a continuous line of the same mean energy
+// once a dash is sub-pixel) are the close read; the deck's own mean radiance
+// is the far one. There is no traffic: the deck carried "frozen traffic",
+// the light of cars painted on the asphalt with no car under it, until
+// Thomas flew it (2026-11): "they dont have a source". Real cars on the
+// decks were the alternative; he chose an empty road.
 //
 // A note on what "bright" can mean here. At exposure 6 the tone map is
 // nearly flat above radiance 1: 0.47 renders at 0.85 display and 1.7 (a
@@ -186,10 +188,10 @@ const cc_skyway_RAIL_BAND: f32 = 0.35;  // lit depth below the rail top (m)
 // it is a GRADIENT, not a bar, and the difference is everything. At exposure
 // 6 with a white point of 15 the tone map has already spent most of its range
 // by radiance 1.5 (0.1 renders at 0.55 display, 1.0 at 0.93, 3.5 at white),
-// so a deck lit evenly at 1.3 arrives as a featureless white ribbon with its
-// traffic invisible inside it. E-folded over 1.9 m instead, the same deck
-// runs 0.95 display under a lamp at the rail down to about 0.2 along the
-// centreline: bright margins, dark lanes, and headroom for headlights.
+// so a deck lit evenly at 1.3 arrives as a featureless white ribbon.
+// E-folded over 1.9 m instead, the same deck runs 0.95 display under a lamp
+// at the rail down to about 0.2 along the centreline: bright margins and
+// dark lanes.
 //
 // A string of lamps 9 m apart also does not light a road evenly — it scallops
 // it, and that rhythm running away toward the vanishing point is most of what
@@ -266,39 +268,6 @@ const cc_skyway_JNT_STEEL: f32 = 0.22;  // plate lift, as a fraction of wash
 // honestly smooth rather than dishonestly striped.
 const cc_skyway_JNT_FP_LO: f32 = 0.65;
 const cc_skyway_JNT_FP_HI: f32 = 2.00;
-
-// --- traffic streaks -------------------------------------------------------
-// Four lanes: two per direction, at |lat| = 2 and 6. One hash draw per
-// (route, lane, 70 m cell), so with the occupancy below a lane carries a
-// trail every ~85 m — inside the brief's 80-200, and dense enough that the
-// population's MEAN is a real share of what the deck delivers at a kilometre
-// rather than a rounding error on the wash.
-//
-// Each car is the light it throws on the deck: a soft pool, Gaussian along
-// and across the lane, and nothing with an edge. (The first version was a
-// 7 m trail cut hard at both ends with a 2.2 m halo, at radiance 16: the tone
-// map flattened it into a saturated rectangle half a deck wide, and from a
-// low camera the arteries were strewn with "spurious bright squares",
-// Thomas's words.) The pool spends the same light per car as that trail did
-// — radiance times area — so the deck's mean at a kilometre is unchanged.
-// Its centre stays STK_EDGE cells in from the ends of its 70 m hash cell,
-// 3.5 sigma, where the pool has fallen to 0.2% of its peak: the cell
-// boundary that cuts it is below a display step.
-const cc_skyway_STK_CELL: f32 = 70.0;
-const cc_skyway_STK_EDGE: f32 = 0.25;  // pool centre's margin, in cells
-const cc_skyway_STK_SA: f32 = 5.0;    // along sigma (m)
-const cc_skyway_STK_SL: f32 = 1.5;    // lateral sigma (m)
-const cc_skyway_STK_P: f32 = 0.85;    // slot occupancy at full district glow
-const cc_skyway_STK_FP_LO: f32 = 1.6;
-const cc_skyway_STK_FP_HI: f32 = 5.0;
-// The red must stay red: the tone map desaturates anything it clips, so a
-// red pool bright enough to clip arrives pink-white. A deeply saturated red
-// at a little over a quarter of the white's peak keeps the green and blue
-// channels off the shoulder.
-const cc_skyway_HEAD_COL: vec3<f32> = vec3<f32>(1.00, 0.95, 0.86);
-const cc_skyway_HEAD_RAD: f32 = 2.4;
-const cc_skyway_TAIL_COL: vec3<f32> = vec3<f32>(1.00, 0.055, 0.018);
-const cc_skyway_TAIL_RAD: f32 = 0.68;
 
 // --- hit kinds --------------------------------------------------------------
 // kind = 200 + 8*family + part. SPEC allows local in [0, 15]; a stride of 8
@@ -676,63 +645,6 @@ fn cc_skyway_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
     return res;
 }
 
-// Frozen traffic. One draw per (route family, lane, 70 m cell) places a single
-// trail; which side of the centreline the lane is on decides which way it is
-// going and therefore whether you are looking at its headlights or its tail
-// lamps. Only the two lanes on the shaded point's own side are evaluated —
-// the far pair is four metres of a 0.65 m sigma away and contributes e^-19.
-// Below the LOD gate the trail is resolved; above it, the population's mean
-// over the whole deck, both colours, which is the honest asymptote.
-fn cc_skyway_streaks(s: f32, lat: f32, fam: i32, glow: f32, fp: f32)
-        -> vec3<f32> {
-    let n = floor(s / cc_skyway_STK_CELL);
-    let ni = bitcast<u32>(i32(n));
-    let p = cc_skyway_STK_P
-        * mix(0.35, 1.25, smoothstep(0.02, 0.35, glow));
-
-    // All four lanes, on both halves of the deck: a pool 2 m off the centre
-    // line spills across it, and evaluating only the half the point is on
-    // cut every inner pool at the line (white on one side, red on the
-    // other — the long edge of the bright squares).
-    var f = vec3<f32>(0.0);
-    for (var k: i32 = 0; k < 4; k = k + 1) {
-        let slot = k & 1;
-        let sd = u32(k >> 1);
-        let side = select(-1.0, 1.0, sd == 1u);
-        let col = select(cc_skyway_TAIL_COL * cc_skyway_TAIL_RAD,
-                         cc_skyway_HEAD_COL * cc_skyway_HEAD_RAD, sd == 1u);
-        let key = (u32(fam) * 3u + u32(slot)) * 2u + sd;
-        let r = city_rand4(vec2<u32>(
-            ni * 0x9e3779b9u + key * 0x51ed270bu + 0x165667b1u,
-            (ni * 0x85ebca6bu) ^ (key * 0xc2b2ae35u + 0x27d4eb2fu)));
-        if (r.x >= p) {
-            continue;
-        }
-        let s_c = (n + cc_skyway_STK_EDGE
-                   + (1.0 - 2.0 * cc_skyway_STK_EDGE) * r.y)
-                  * cc_skyway_STK_CELL;
-        let lane = side * (2.0 + 4.0 * f32(slot));
-        let da = (s - s_c) / cc_skyway_STK_SA;
-        let dl = (lat - lane) / cc_skyway_STK_SL;
-        f = f + col * ((0.55 + 0.90 * r.w) * exp(-0.5 * (da * da + dl * dl)));
-    }
-
-    // The population's mean over the deck: occupancy x the pool's integral
-    // along s x its lateral integral, over the cell's area, summed over the
-    // two lanes of each colour. Written out rather than fitted, so changing
-    // the sigmas keeps the two ends of the LOD agreeing by construction (the
-    // tails cut at the cell ends and the rails are below 0.3% of it).
-    let along_int = 2.5066 * cc_skyway_STK_SA;
-    let lat_int = 2.5066 * cc_skyway_STK_SL;
-    let unit = 2.0 * p * along_int * lat_int
-               / (cc_skyway_STK_CELL * 2.0 * cc_skyway_HW);
-    let mean = (cc_skyway_HEAD_COL * cc_skyway_HEAD_RAD
-                + cc_skyway_TAIL_COL * cc_skyway_TAIL_RAD) * unit;
-
-    let k = smoothstep(cc_skyway_STK_FP_LO, cc_skyway_STK_FP_HI, fp);
-    return mix(f, mean, k);
-}
-
 fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     let code = h.kind - cc_skyway_KIND_BASE;
@@ -761,8 +673,8 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     // expansion joints the plain `fp` and a transverse band that is a fifth
     // of a pixel still believes itself resolved, and crawls.
     //
-    // So: lateral-extent detail (lane-line widths, the streaks' lateral
-    // profile) keeps `fp`; along-extent detail that is thin — the joints —
+    // So: lateral-extent detail (lane-line widths) keeps `fp`; along-extent
+    // detail that is thin — the joints —
     // gets this. Clamped at 5x like `city_shade`'s window grid, because at
     // true grazing the exact factor stops meaning anything.
     //
@@ -860,9 +772,8 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                 * (cc_skyway_PAINT_AMP * paint_l * (0.20 + wash));
 
         // The joint crosses the paint and the wash — a comb plate is bare
-        // steel, so the lane line stops at it — but NOT the traffic, which is
-        // light thrown onto the deck rather than a property of the deck.
-        return e * j_mul + cc_skyway_streaks(s, lat, fam, glow, fp);
+        // steel, so the lane line stops at it.
+        return e * j_mul;
     }
 
     // Underside, fascia, pylons: near-black structure carrying the sodium
