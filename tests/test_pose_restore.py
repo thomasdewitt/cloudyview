@@ -139,3 +139,12 @@ def test_the_tools_place_by_jump():
     for name in ("steam_live_qa.mjs", "soar_noise.mjs"):
         src = (TOOLS / name).read_text()
         assert "c.jump(" in src and "c.displace(" not in src, name
+
+
+def test_the_tutorial_spawn_places_by_jump():
+    # The viewer's own absolute city reposition: the tutorial's spawn, which
+    # a replay from the menu makes mid-flight (tutorial.js -> tutorialSpawn).
+    src = (SOAR / "viewer.js").read_text()
+    start = src.index("  tutorialSpawn() {")
+    body = src[start:src.index("\n  }\n", start)]
+    assert "this.camera.jump(" in body and "displace(" not in body

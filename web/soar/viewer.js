@@ -2420,10 +2420,13 @@ export class Viewer {
                         + "surfacePosition");
       }
       // Reached through the camera's one move path, so the cloud and tile
-      // frames move together.
+      // frames move together; by jump, not displace, because this is an
+      // absolute reposition (a replay from the menu puts it mid-flight) and
+      // the collider must not sweep it as one frame of flight from wherever
+      // the player was, stopping at the first wall (camera.js jump).
       const pose = K.CITY_TUTORIAL_CAMERA;
       const [tx, ty, tz] = pose.positionCityM;
-      this.camera.displace(tx - s[0], ty - s[1], tz - this.camera.position[2]);
+      this.camera.jump(tx - s[0], ty - s[1], tz - this.camera.position[2]);
       this.camera.azimuth = pose.azimuth;
       this.camera.elevation = pose.elevation;
     } else {
