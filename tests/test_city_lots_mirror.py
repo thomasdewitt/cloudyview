@@ -58,6 +58,7 @@ needs_node = pytest.mark.skipif(shutil.which("node") is None,
 WGSL_FUNCTIONS = ["pcg2d", "city_u01", "city_rand4", "city_tile_cell",
                   "city_is_avenue", "city_word", "city_cell",
                   "city_escape_building", "city_balcony_building",
+                  "city_core_building",
                   "city_shell_style"]
 WGSL_STRUCTS = ["CityCell", "CityShellStyle"]
 

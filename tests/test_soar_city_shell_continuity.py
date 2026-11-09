@@ -467,9 +467,13 @@ STORE_MIN_PIXELS = 5000
 # (a canopy, a unit, a pipe, the street's furniture), not the wall.
 STORE_IN_FRONT = 0.25
 # The shell's band mean against the flat facade's, and the band's dark tail
-# (its 10th percentile) against its glass (90th), both as shown.
-MAX_STORE_MEAN_ERR = None
-MAX_STORE_CONTRAST = None
+# (its 10th percentile) against its glass (90th), both as shown. Measured
+# (2026-11-09, 32 frames, 97369 band pixels): -0.027 and 0.242 with shop
+# windows; the old band, left off the shell's reveals and sills, -0.051 and
+# 0.932; the band laid on every surface instead, +0.000 and 0.961 (no
+# flicker, and no frames).
+MAX_STORE_MEAN_ERR = 0.04
+MAX_STORE_CONTRAST = 0.5
 
 
 def _store_probe(level):

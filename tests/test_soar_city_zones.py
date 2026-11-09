@@ -39,7 +39,7 @@ SHADER = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
 ANCHOR = "    let t_lim = min(select(1e30, chit.t, chit.hit),"
 GRID = 128
 # Out: x the largest |cover - count| over the four shares, y whether the
-# face has any zone, z the face's bays share of the footprint, w hit.
+# face has any zone, w hit.
 PROBE = """    if (chit.hit) {
         let pc = city_cell(chit.cell);
         let sd = i32(floor(fract(abs(dir.x) * 97.13 + abs(dir.y) * 31.7)
@@ -77,12 +77,8 @@ PROBE = """    if (chit.hit) {
             }
         }
         let d = abs(zc - n / (g * g));
-        let strip = city_bay_strip(f);
-        let bays = city_overlap(c.x - hb.x, c.x + hb.x, strip.x, strip.y)
-                   * city_overlap(c.y - hb.y, c.y + hb.y, f.z0, f.z1)
-                   / (4.0 * hb.x * hb.y);
         return vec4<f32>(max(max(d.x, d.y), max(d.z, d.w)),
-                         select(0.0, 1.0, any), bays, 1.0);
+                         select(0.0, 1.0, any), 0.0, 1.0);
     }
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
 """.replace("GRID_N", str(GRID))
@@ -149,7 +145,7 @@ def test_zone_cover_matches_the_bays():
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,
         surface="city")
-    errs, bays = [], []
+    errs = []
     for x, y, z, az, el, fov in VIEWS:
         r.render(state, ViewState(
             camera_position=[x + TILE_OFFSET[0], y + TILE_OFFSET[1], z],
@@ -160,7 +156,6 @@ def test_zone_cover_matches_the_bays():
         p = _plain(r, *SIZE)
         zoned = (p[..., 3] > 0.0) & (p[..., 1] > 0.5)
         errs.append(p[..., 0][zoned])
-        bays.append(p[..., 2][zoned])
     e = np.concatenate(errs)
     assert e.size >= MIN_ZONED, f"only {e.size} probes on zoned faces"
     worst = float(e.max())

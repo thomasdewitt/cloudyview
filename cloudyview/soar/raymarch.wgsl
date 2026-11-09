@@ -6005,8 +6005,10 @@ fn city_shell_style(cc: CityCell) -> CityShellStyle {
     if (st.balcony) {
         st.depth = max(st.depth, CITY_BALCONY_OUT);
     }
-    // A core strip may stand on any face of a tower (city_zones).
-    if (cc.height > 40.0 && cc.win_style != 4) {
+    // A core strip may stand on any face of a tower that has them
+    // (city_zones); the layer thickens only there, since every centimetre
+    // of it is cells a grazing ray walks.
+    if (city_core_building(cc)) {
         st.depth = max(st.depth, CITY_CORE_OUT);
     }
     st.depth = min(st.depth + 0.02, CITY_SHELL_OUT_MAX);
@@ -6154,6 +6156,14 @@ struct CityZones {
     store: bool,        // storey 0 is shop windows
 }
 
+// Whether a building carries core strips at all: towers above 40 m, not
+// walk-ups, half of them. Which faces carry one is the face's own draw.
+fn city_core_building(cc: CityCell) -> bool {
+    let h = city_rand4(cc.seed ^ vec2<u32>(0x9b05688cu, 0x1f83d9abu));
+    return cc.land_use == CITY_USE_URBAN && cc.height > 40.0
+        && cc.win_style != 4 && h.x < 0.5;
+}
+
 fn city_zones_none() -> CityZones {
     return CityZones(false, vec2<i32>(0), vec4<i32>(0, 0, 0, -1), 1 << 30,
                      vec3<i32>(0), false);
@@ -6203,8 +6213,7 @@ fn city_zones(cc: CityCell, f: CityFace) -> CityZones {
     }
     // A core strip up a tower's face: one or two bays, centred or near an
     // end (clear of the corner lofts).
-    if (cc.height > 40.0 && cc.win_style != 4 && zf.y < 0.40
-        && f.nbays >= 5) {
+    if (zf.y < 0.6 && f.nbays >= 5 && city_core_building(cc)) {
         let w = 1 + select(0, 1, zf.z < 0.6 && f.nbays >= 7);
         var c0 = (f.nbays - w) / 2;
         if (zf.w < 0.5 && f.nbays >= 8) {
@@ -6250,11 +6259,19 @@ fn city_zone_open(zone: i32) -> bool {
 
 // The pane rectangle of this bay, in bay-local metres: the building's, or a
 // loft's big glass.
+// (By the zone, not through city_bay_cell: a copy of the building per pane
+// lookup cost the street view 0.05 ms of its 0.84 at Low.)
 fn city_bay_pane_lo(cc: CityCell, f: CityFace, b: CityBay) -> vec2<f32> {
-    return city_bay_cell(cc, b).pane_lo * vec2<f32>(f.pitch, CITY_FLOOR_H);
+    let fr = select(select(cc.pane_lo, CITY_LOFT_PANE_LO,
+                           b.zone == CITY_ZONE_LOFT),
+                    CITY_STORE_PANE_LO, b.zone == CITY_ZONE_STORE);
+    return fr * vec2<f32>(f.pitch, CITY_FLOOR_H);
 }
 fn city_bay_pane_hi(cc: CityCell, f: CityFace, b: CityBay) -> vec2<f32> {
-    return city_bay_cell(cc, b).pane_hi * vec2<f32>(f.pitch, CITY_FLOOR_H);
+    let fr = select(select(cc.pane_hi, CITY_LOFT_PANE_HI,
+                           b.zone == CITY_ZONE_LOFT),
+                    CITY_STORE_PANE_HI, b.zone == CITY_ZONE_STORE);
+    return fr * vec2<f32>(f.pitch, CITY_FLOOR_H);
 }
 
 // The building as this bay's windows are drawn from it.
