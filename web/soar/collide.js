@@ -10,7 +10,8 @@
 // So this module does two things.
 //
 //   STOP. Every frame, the motion the flight made is swept against the city
-//   (citylots.js, the renderer's own buildings mirrored on the CPU) and cut
+//   (citylots.js and cityprops.js, the renderer's own buildings and what
+//   stands among them, mirrored on the CPU) and cut
 //   back where it would have come within a body's radius of something.
 //   Only the component INTO the surface is removed, so a glancing touch
 //   slides along the wall rather than sticking to it.
@@ -100,12 +101,15 @@ const CLEARANCE_M = 0.01;
 const IMPACT_MIN_SPEED = 3.0;    // m/s
 const IMPACT_FULL_SPEED = 25.0;  // m/s
 // The bounce: a fraction of the arrival speed, back along the normal,
-// dying away with time constant BOUNCE_TAU — so it carries you
-// v * BOUNCE_TAU metres back in total (1.75 m off a 20 m/s wall). Capped,
-// because at 500 m/s a proportional bounce would throw you across a block.
-const RESTITUTION = 0.35;
-const BOUNCE_MAX = 10.0;         // m/s
-const BOUNCE_TAU = 0.25;         // s
+// dying away with time constant BOUNCE_TAU and tapered to rest by the
+// episode's end (Episode.displacement) — so it carries you a little under
+// v * RESTITUTION * BOUNCE_TAU metres back in total (2.7 m off a 20 m/s
+// wall; 1.75 m until 2026-11, when Thomas asked for the crash to rock the
+// flight harder). Capped, because at 500 m/s a proportional bounce would
+// throw you across a block.
+const RESTITUTION = 0.50;
+const BOUNCE_MAX = 14.0;         // m/s
+const BOUNCE_TAU = 0.30;         // s
 
 // --- The episode --------------------------------------------------------------
 // [severity 0, severity 1]. A wall is the full loss of control; a landing is
@@ -119,14 +123,17 @@ const CONTROL_FLOOR = 0.08;
 const CONTROL_RETURN = 0.45;
 
 // --- The shake ----------------------------------------------------------------
-// A few hertz, a degree or two, dying fast; exactly zero at the episode's
-// end, so the look you had is the look you get back. Landings shake mostly
-// in elevation.
-const SHAKE_AZ_DEG = 1.6;
-const SHAKE_EL_DEG = 1.2;
-const SHAKE_AZ_HZ = 5.3;
-const SHAKE_EL_HZ = 3.9;
-const SHAKE_DECAY = 3.0;         // e-folds over the episode
+// A lurch of a few degrees at two or three hertz, dying away; exactly zero
+// at the episode's end, so the look you had is the look you get back.
+// Landings shake mostly in elevation. (It was a degree or two at four or
+// five hertz until 2026-11 — a buzz, which Thomas found too gentle: "Paper
+// airplane could be a bit more 'rocked' when it hits a building". A slower
+// swing reads as the craft being knocked rather than the camera vibrating.)
+const SHAKE_AZ_DEG = 3.4;
+const SHAKE_EL_DEG = 2.6;
+const SHAKE_AZ_HZ = 3.1;
+const SHAKE_EL_HZ = 2.3;
+const SHAKE_DECAY = 2.4;         // e-folds over the episode
 const LANDING_SHAKE_AZ = 0.35;
 
 // Blocked segments resolved per frame before giving up and stopping dead.
@@ -186,8 +193,15 @@ class Episode {
 
   /** The bounce and the fall between episode times t0 and t1 (metres). */
   displacement(t0, t1) {
-    const k = BOUNCE_TAU * (Math.exp(-t0 / BOUNCE_TAU)
-                            - Math.exp(-t1 / BOUNCE_TAU));
+    // The bounce's velocity, b (e^(-t/tau) - E) / (1 - E) with
+    // E = e^(-T/tau): the full bounce at the impact, exactly zero at the
+    // episode's end. A plain exponential still carried 14-31% of itself
+    // when a landing's 0.35-0.6 s ran out, and stopped dead there (a
+    // severity-1 landing let go of 1.7 m/s upward in one frame).
+    const E = Math.exp(-this.duration / BOUNCE_TAU);
+    const k = (BOUNCE_TAU * (Math.exp(-t0 / BOUNCE_TAU)
+                             - Math.exp(-t1 / BOUNCE_TAU))
+               - E * (t1 - t0)) / (1.0 - E);
     const fall = this.drop * (this._fallen(t1) - this._fallen(t0));
     return [this.bounce[0] * k, this.bounce[1] * k, this.bounce[2] * k - fall];
   }
@@ -223,8 +237,12 @@ class Episode {
  * `city` is anything with the two queries citylots.js CityLots answers, in
  * the unwrapped city frame, for a sphere of radius r:
  *
- *   sweep(p0, p1, r) -> {t, point, normal} | null  first surface met
- *   inside(p, r)     -> {top} | null                a solid it overlaps
+ *   sweep(p0, p1, r, eye) -> {t, point, normal} | null  first surface met
+ *   inside(p, r, eye)     -> {top} | null                a solid it overlaps
+ *
+ * `eye` is where this frame is seen from: the city folds its queries there,
+ * as the renderer folds its camera (CityLots.sweep); a city that does not
+ * fold may ignore it.
  *
  * and `tileExtentM` is the period the camera's surfacePosition folds at.
  */
@@ -328,7 +346,7 @@ export class CityCollider {
     // building — checked on the position the camera actually holds now,
     // after its own constrain().
     const cam = this._cityPosition(camera);
-    if (this.city.sweep(c0, cam, CAMERA_RADIUS_M) !== null
+    if (this.city.sweep(c0, cam, CAMERA_RADIUS_M, cam) !== null
         || this.city.inside(cam, CAMERA_RADIUS_M) !== null) {
       this._move(camera, flyer, sub(c0, cam));
     }
@@ -364,8 +382,11 @@ export class CityCollider {
     // the one blocked EARLIER is what the flight met first — and it decides
     // what kind of crash it was (the dart into a wall before the eye comes
     // down on a roof is a wall).
-    const cam = this.city.sweep(c0, c1, CAMERA_RADIUS_M);
-    const fly = f1 === null ? null : this.city.sweep(f0, f1, FLYER_RADIUS_M);
+    // Every query of the frame folds at this frame's eye, as the renderer
+    // that draws it does (CityLots.sweep).
+    const cam = this.city.sweep(c0, c1, CAMERA_RADIUS_M, c1);
+    const fly = f1 === null ? null
+                            : this.city.sweep(f0, f1, FLYER_RADIUS_M, c1);
     if (cam !== null && (fly === null || cam.t <= fly.t)) {
       return { point: cam.point, normal: cam.normal, end: c1, arrival };
     }
@@ -373,7 +394,8 @@ export class CityCollider {
       return { point: fly.point, normal: fly.normal, end: f1, arrival };
     }
     // Both paths clear: the tether, which is a line held at one instant.
-    const tether = f1 === null ? null : this.city.sweep(c1, f1, FLYER_RADIUS_M);
+    const tether = f1 === null ? null
+                               : this.city.sweep(c1, f1, FLYER_RADIUS_M, c1);
     if (tether !== null) {
       return { point: tether.point, normal: tether.normal, end: f1, arrival };
     }
@@ -485,7 +507,7 @@ export class CityCollider {
         dot(hit.normal, sub(hit.point, fly)) + CLEARANCE_M);
       const to = add(cam, corr);
       if (this.city.sweep(cam, to, CAMERA_RADIUS_M) !== null
-          || this.city.inside(to, CAMERA_RADIUS_M) !== null) break;
+          || this.city.inside(to, CAMERA_RADIUS_M, cam) !== null) break;
       this._move(camera, flyer, corr);
     }
     this._remember(camera, flyer);

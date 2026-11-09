@@ -218,8 +218,8 @@ _JS = textwrap.dedent("""
     }
 
     // (e2) A v3 track's scene clock resamples with the flight, including
-    // across a pause in it (the clock stops while the view is paused, and
-    // so does the recording's own t — but a clock that ran while t held is
+    // across a pause in it (the recording leaves a pause out of its own t
+    // and of the clock it records — but a clock that ran while t held is
     // the scene's business, and the column carries it either way).
     {
       const v3 = [

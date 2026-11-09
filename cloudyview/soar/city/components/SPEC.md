@@ -39,8 +39,10 @@ writing — so components compose without their authors coordinating.
    glowing signage — minus its voxel-art construction. *Stray* is the bar
    for solidity — its streets feel inhabited and physically real — but a
    notch dirtier than we want; this city is lived-in, not derelict. Unlike
-   Cloudpunk we have a real ground: street-level life and ground cars
-   coexist with flying ones.
+   Cloudpunk we have a real ground: street-level life and ground cars.
+   No air traffic: the flying cars were tried and removed (Thomas,
+   2026-11: *"For the flying cars, I recommend just getting rid of them
+   wholesale."*).
 
    **Detail calibration (Thomas, and it applies to ALL detail, not just
    vehicles): wiper-blades-level, not tire-brand-name-level.** Distinct
@@ -245,10 +247,11 @@ Cost honesty: only pixels whose rays enter a prop's bounding box pay for
 EXECUTING the SDF — but every pixel pays for its REGISTER PRESSURE. The
 city and the clouds share one kernel, and a big unrolled SDF (the classic
 offender: four inline copies of the field for a 4-tap gradient) collapses
-occupancy for the whole frame even when no prop is in view — the aircars
-refit measured +65% on craft-free vistas from exactly this, fixed
-pixel-identically by rolling the gradient taps into a loop. Keep your SDF
-in ONE function, roll your gradient taps, and A/B a craft-free vista, not
+occupancy for the whole frame even when no prop is in view — the flying
+cars' refit (a component since removed) measured +65% on craft-free
+vistas from exactly this, fixed pixel-identically by rolling the gradient
+taps into a loop. Keep your SDF
+in ONE function, roll your gradient taps, and A/B a prop-free vista, not
 just your close-up.
 
 ## Iterating on your look

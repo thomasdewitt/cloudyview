@@ -34,7 +34,8 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openTab, serveTree, servedShaderHash } from "./soar_cdp.mjs";
+import { openTab, requireHardwareAdapter, serveTree, servedShaderHash }
+  from "./soar_cdp.mjs";
 
 const argv = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -75,8 +76,11 @@ const done = async (code) => { await tab?.close(); server.close(); process.exit(
 try {
   const shader = await servedShaderHash(server.base,
                                         join(server.root, "soar", "raymarch.wgsl"));
-  console.log(`tree ${server.root} (raymarch.wgsl sha256 ${shader})`);
   tab = await openTab(cdpPort);
+  await tab.goto(`${server.base}/`);
+  const adapter = await requireHardwareAdapter(tab);
+  console.log(`tree ${server.root} (raymarch.wgsl sha256 ${shader}; ` +
+              `${adapter})`);
   for (const name of scenes) {
     const sc = SCENES[name];
     if (!sc) throw new Error(`unknown scene '${name}' (city, day, desert)`);

@@ -18,9 +18,10 @@
 //   * the parking line, CAR_PARK_OFF in from the plot edge (the kerb proper).
 //     Slots on a 7 m lattice in world space, so a run of cars lines up
 //     across cell boundaries; ~35% occupied, scaled by the cascade the way
-//     the streetlights and the air traffic are.
+//     the streetlights are.
 // Every prop lives strictly inside the cell that draws it, because the DDA
-// tests a cell only from the side it enters (the rule aircars states). For
+// tests a cell only from the side it enters (a box straddling a cell
+// boundary is tested from one side and vanishes from the other). For
 // merged 2x2 superblocks the plot edge can fall in a sibling's column; that
 // kerb simply has no parking, and the sibling whose column does contain it
 // draws those cars.
@@ -48,8 +49,7 @@
 // HEAD, recovered from the same lattice. Curvature reads through the
 // specular lobe sliding along the hull shoulder — Lambert alone on a dark
 // paint at night is nearly flat, and the glint is what says "this surface is
-// round". 30% of cars carry an underglow strip; the hue draw is aircars'
-// 60/25/15 cyan/magenta/amber, so ground and air read as one traffic system.
+// round". 30% of cars carry an underglow strip, 60/25/15 cyan/magenta/amber.
 //
 // COST. In order, each gate cheaper than the one it protects:
 //   1. the segment's z range against 12 m — no hash, two multiply-adds, and
@@ -1295,9 +1295,7 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 // Shading
 // ---------------------------------------------------------------------------
 
-// Underglow palette. Deliberately the same draw as aircars' — 60% cyan, 25%
-// magenta, 15% amber — so a street of parked cars and the lane of flying ones
-// above it are visibly the same fleet.
+// Underglow palette: 60% cyan, 25% magenta, 15% amber.
 fn cc_streetlife_glow_color(d: f32) -> vec3<f32> {
     if (d < 0.60) {
         return vec3<f32>(0.16, 0.90, 1.00);
@@ -1367,8 +1365,8 @@ fn cc_streetlife_fp_px(fp: f32, t: f32) -> f32 {
 }
 
 // One lamp LENS on a face, resolved while it is bigger than a pixel and
-// handed to the face's mean when it is not (aircars' treatment, same
-// reasoning). The lens is an ellipse, not a disc, and it is nested inside the
+// handed to the face's mean when it is not, so the face's average is the
+// same either side of the hand-off. The lens is an ellipse, not a disc, and it is nested inside the
 // letterbox recess the SDF cut for it: a circular lens of radius 0.12
 // overflowed a housing only 0.16 tall, so it rendered as a white ball with a
 // dark eyebrow, and a row of parked cars looked back at the camera. Real

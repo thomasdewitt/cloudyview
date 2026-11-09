@@ -28,7 +28,8 @@
 // Chrome, no adapter); 3 when the served shader is not the expected one.
 
 import { join } from "node:path";
-import { openTab, serveTree, servedShaderHash } from "./soar_cdp.mjs";
+import { openTab, requireHardwareAdapter, serveTree, servedShaderHash }
+  from "./soar_cdp.mjs";
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -80,6 +81,7 @@ try {
   // A same-origin page to import the app's modules from; the app itself is
   // not booted.
   await tab.goto(`${base}/`);
+  await requireHardwareAdapter(tab);
 } catch (err) {
   await fail(err);
 }
