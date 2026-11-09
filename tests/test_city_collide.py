@@ -323,7 +323,7 @@ def test_a_wall_stops_bounces_knocks_and_lets_go():
     duration = frames[last]["t"] - hit["t"]
     assert 0.8 <= duration <= 1.2
     assert duration == pytest.approx(knock["duration"], abs=2 / 60)
-    # A bounce back off the wall, a few metres (2.9 here; 1.75 before the
+    # A bounce back off the wall, a few metres (2.7 here; 1.75 before the
     # 2026-11 ask for a harder rock, which this lower bound now holds).
     back = hit["cam"][0] - min(f["cam"][0] for f in frames[first:last + 1])
     assert 2.5 < back < 3.5
@@ -431,6 +431,44 @@ def test_an_elevated_freeway_is_solid():
     assert not any(f["camInside"] or f["flyInside"] for f in frames)
     assert max(f["fly"][1] for f in frames) <= 51832.0 - 0.2 + 1e-6
     assert len(r["knocks"]) == 1 and r["knocks"][0]["landing"] is False
+
+
+CREST_JS = """
+import { readFileSync } from "node:fs";
+import { CityTile, CityLots } from "%(soar)s/citylots.js";
+import { CityProps } from "%(soar)s/cityprops.js";
+const meta = JSON.parse(readFileSync("%(tile)s/meta.json", "utf8"));
+const b = readFileSync("%(tile)s/fif_mip0.bin");
+const tile = CityTile.fromHalfBytes(
+  new Uint8Array(b.buffer, b.byteOffset, b.byteLength), meta.n, meta.cell_m);
+const city = new CityLots(tile, new CityProps(tile));
+const segs = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(segs.map(([p0, p1]) => {
+  const hit = city.sweep(p0, p1, 0.35);
+  return hit && { t: hit.t, normal: hit.normal, source: hit.source };
+})));
+""" % {"soar": SOAR.as_posix(), "tile": TILE_DIR.as_posix()}
+
+
+def test_a_raised_freeway_is_smooth_to_fly_along():
+    # Resting on the high span of the y-route at x = 26640 over its crossing
+    # at y = 51840 (deck top 34 m; the camera's radius and the collider's
+    # clearance above it), and flying level along the deck past either
+    # crest, where the ramps begin: no wall (loose-ends found one, the
+    # ramp's grown end face 1.4 cm proud of the flat's). Then along the low
+    # deck into the foot of a ramp: met, but as a road rising, not a wall.
+    x, ac, rest = 26640.0, 51840.0, 34.0 + 0.35 + 0.01
+    segs = [[[x, ac - 40, rest], [x, ac - 80, rest]],
+            [[x, ac + 40, rest], [x, ac + 80, rest]],
+            [[x, ac - 300, 26.36], [x, ac - 250, 26.36]]]
+    out = json.loads(subprocess.run(
+        ["node", "--input-type=module", "--eval", CREST_JS],
+        input=json.dumps(segs), capture_output=True, text=True,
+        check=True).stdout)
+    assert out[0] is None and out[1] is None, out
+    foot = out[2]
+    assert foot is not None and foot["source"] == "skyway", out
+    assert foot["normal"][2] > 0.99, out
 
 
 def test_a_lamp_post_is_solid():

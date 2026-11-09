@@ -86,9 +86,9 @@ function skywayZtop(a, ac, raised) {
  * (nx, ny, nz, d + ny latC) in the route's swapped world frame.
  */
 function localSolid(planes, top, fam, latC) {
-  return polytope(planes.map(([nx, ny, nz, d]) => {
+  return polytope(planes.map(([nx, ny, nz, d, ...grow]) => {
     const n = swap([nx, ny, nz], fam);
-    return [n[0], n[1], n[2], d + ny * latC];
+    return [n[0], n[1], n[2], d + ny * latC, ...grow];
   }), top, "skyway");
 }
 
@@ -96,12 +96,20 @@ function localSolid(planes, top, fam, latC) {
  * A slab of the ribbon: along [a0, a1], lateral [y0, y1], and between h0 and
  * h1 above the sheared plane z = zb + m (a - ab). The sheared faces' unit
  * normal is (-m, 0, 1) / sqrt(1 + m^2), and their offsets scale with it.
+ *
+ * The two end faces are joints with the next piece of the same deck (or
+ * a million metres off), and are not grown by the body's radius: grown, a
+ * ramp's end face stood m r + r (sqrt(1 + m^2) - 1) above the flat's grown
+ * top, 1.4 cm for the camera — over the collider's 1 cm clearance, so a
+ * camera resting on a raised span met a wall at the crest where the road is
+ * smooth (loose-ends' review). Ungrown, the pieces' grown tops still meet,
+ * within r (sqrt(1 + m^2) - 1), under a third of a millimetre.
  */
 function ribbonSlab(a0, a1, y0, y1, ab, zb, m, h0, h1, top, fam, latC) {
   const k = 1.0 / Math.hypot(1.0, m);
   const c = zb - m * ab;            // z = c + m a on the plane
   return localSolid([
-    [1, 0, 0, a1], [-1, 0, 0, -a0],
+    [1, 0, 0, a1, 0.0], [-1, 0, 0, -a0, 0.0],
     [0, 1, 0, y1], [0, -1, 0, -y0],
     [-m * k, 0, k, (c + h1) * k], [m * k, 0, -k, -(c + h0) * k],
   ], top, fam, latC);
@@ -202,8 +210,9 @@ export function skywaySolids(p0, p1, r, cellM) {
 // arm, luminaire housing). A car is the two boxes the renderer draws it as
 // from half a metre a pixel on (hull and greenhouse); nearer, the shader
 // sphere-traces a hull inside the first, and that rounded shape is not
-// mirrored: a crash meets the car's box, a few centimetres proud of its
-// shoulder at worst. The renderer stops drawing a pole's arm past 0.3 m a
+// mirrored: a crash meets the car's boxes, which are axis-aligned about a
+// car yawed up to 5 degrees and square where its nose narrows and its glass
+// rakes back, so tens of centimetres proud of the hull at a corner. The renderer stops drawing a pole's arm past 0.3 m a
 // pixel and the props past a few metres a pixel; as solids they are always
 // there.
 export const CITY_LAMP_SPACING = 26.0;
@@ -581,15 +590,23 @@ function roofSolids(out, cc) {
     for (let t = 0; t < n; t++) {
       // s = face (a - s0); tooth t: z - h <= slope (s - t pitch) and
       // s <= (t + 1) pitch, on the roof (z >= h), across the building.
+      // The sheet meets the roof at a wedge of atan(slope), 12 to 24
+      // degrees, whose grown planes would meet up to r / sin(6 deg) out —
+      // 3.4 m past the warehouse wall for the camera — so a bevel
+      // s >= t pitch closes it at the tooth's own low edge (polytope.js).
       const top = [0, 0, k, 0];
       top[ax] = -slope * face * k;
       top[3] = k * (h - slope * t * pitch - slope * face * s0);
       const glass = [0, 0, 0, 0];
       glass[ax] = face;
       glass[3] = (t + 1) * pitch + face * s0;
+      const tail = [0, 0, 0, 0];
+      tail[ax] = -face;
+      tail[3] = -(t * pitch + face * s0);
       const lo = [0, 0, 0, -cc.b1min[cx]], hi = [0, 0, 0, cc.b1max[cx]];
       lo[cx] = -1; hi[cx] = 1;
-      out.push(polytope([top, glass, [0, 0, -1, -h], lo, hi], h + rise, "roof"));
+      out.push(polytope([top, glass, tail, [0, 0, -1, -h], lo, hi], h + rise,
+                        "roof"));
     }
   } else if (d[0] < f(cc_industry_SAW_FRAC + cc_industry_MONITOR_FRAC)) {
     const w = (l.bc[1] - l.bc[0]) * (0.24 + 0.10 * e[1]);

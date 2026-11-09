@@ -619,8 +619,10 @@ export function cityCell(tile, cx, cy) {
 // it stands out is the building's own (shellDepth: a few centimetres of
 // mullion cap on a curtain wall, 0.6 m where units hang under the sills,
 // 1.1-1.25 m only where there are balconies or a fire escape), so each
-// building grows by exactly its own relief and the flight meets the wall
-// where the wall is. (It grew every building by the deepest any style
+// building grows by its own relief — its deepest feature, on every face
+// and between the features too, which is the building's envelope rather
+// than the wall behind it — and the flight meets the building where it
+// stands out. (It grew every building by the deepest any style
 // allows, CITY_SHELL_OUT_MAX, until 2026-11: a curtain wall stopped you
 // 1.5 m short of its glass, and Thomas noticed — "it happens a bit before
 // the airplane actually contacts the building".) Roofs stay exact (nothing
@@ -900,14 +902,16 @@ export class CityLots {
    * above); a surface the segment meets at t lies within reach of the cell
    * the segment is in at t, so the stopping rule still holds.
    */
-  sweep(p0, p1, r = 0.0) {
-    // Folded into the primary tile by whole tiles, as the shader folds its
-    // camera (city_fold_xy): the buildings repeat with the tile, but the
-    // props' lattices (freeway routes, lamp stations, parking slots, pylon
-    // bays) do not divide it, so beyond the first tile they stand where the
-    // renderer — which draws from the folded camera — puts them only once
-    // the query is folded the same way. p0 is the end nearest the eye.
-    const [sx, sy] = this._fold(p0);
+  sweep(p0, p1, r = 0.0, eye = p0) {
+    // Folded into the primary tile by whole tiles at the EYE, as the shader
+    // folds its camera (city_fold_xy): the buildings repeat with the tile,
+    // but the props' lattices (freeway routes, lamp stations, parking slots,
+    // pylon bays) do not divide it, so beyond the first tile they stand
+    // where the renderer — which draws from the folded camera — puts them
+    // only once the query is folded where the camera is. Within a few
+    // metres of the tile's seam that is not where the segment starts (the
+    // flyer flies metres ahead), so the collider passes this frame's eye.
+    const [sx, sy] = this._fold(eye);
     const hit = this._sweep([p0[0] - sx, p0[1] - sy, p0[2]],
                             [p1[0] - sx, p1[1] - sy, p1[2]], r);
     if (hit !== null) hit.point = [hit.point[0] + sx, hit.point[1] + sy,
@@ -994,8 +998,8 @@ export class CityLots {
    * on top (the roof-and-mast z of the cell it overlaps; the street's for
    * the ground).
    */
-  inside(p, r = 0.0) {
-    const [sx, sy] = this._fold(p);
+  inside(p, r = 0.0, eye = p) {
+    const [sx, sy] = this._fold(eye);
     return this._inside([p[0] - sx, p[1] - sy, p[2]], r);
   }
 
