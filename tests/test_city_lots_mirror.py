@@ -8,7 +8,9 @@ collider exists to end — so this file runs the WGSL city_cell itself, on the
 GPU, over a couple of thousand cells of the shipped tile, and holds the JS to
 it: every discrete field exactly, every box coordinate to a millimetre plus
 the float32 spacing at that coordinate (the GPU builds the city in float32,
-whose spacing near the tile's far edge, 92 km out, is 8 mm).
+whose spacing near the tile's far edge, 92 km out, is 8 mm). With the boxes
+goes each building's facade relief depth (city_shell_style's, which the
+collider grows the walls by), so the flight meets the wall the shell draws.
 
 The shader is not compiled whole. The functions city_cell needs are cut out of
 raymarch.wgsl by name, with every CITY_ constant, and wrapped in a compute
@@ -49,19 +51,31 @@ TILE_DIR = REPO / "cloudyview" / "soar" / "city"
 needs_node = pytest.mark.skipif(shutil.which("node") is None,
                                 reason="needs node")
 
-# What city_cell calls, in dependency order. A function city_cell starts to
-# call that is not listed here fails the compile with its name in the error.
+# What city_cell calls, in dependency order, then the facade shell's style
+# (whose relief depth the collider grows each building by). A function they
+# start to call that is not listed here fails the compile with its name in
+# the error.
 WGSL_FUNCTIONS = ["pcg2d", "city_u01", "city_rand4", "city_tile_cell",
-                  "city_is_avenue", "city_word", "city_cell"]
+                  "city_is_avenue", "city_word", "city_cell",
+                  "city_escape_building", "city_balcony_building",
+                  "city_shell_style"]
+WGSL_STRUCTS = ["CityCell", "CityShellStyle"]
 
 # The fields compared, in the order the compute shader writes them.
 DISCRETE = ["built", "tiers", "arch", "has_mast", "has_frustum", "merged",
-            "land_use"]
+            "land_use", "win_style"]
 VEC3 = ["b1min", "b1max", "b2min", "b2max", "b3min", "b3max",
         "mast_min", "mast_max", "fmin", "fmax"]
 VEC2 = ["plot_min", "plot_max", "lot_min", "lot_max"]
 SCALAR = ["height", "top_z", "fscale"]
-STRIDE = len(DISCRETE) + 3 * len(VEC3) + 2 * len(VEC2) + len(SCALAR)
+# Derived per building: (the shader's expression, the mirror's). The shell's
+# relief depth: the shell runs only on urban walls (city_shell_refine skips
+# industrial ones; yard and open lots are unbuilt).
+DERIVED = {"shell_depth": (
+    "select(0.0, city_shell_style(c).depth, c.land_use == CITY_USE_URBAN)",
+    "shellDepth(c)")}
+STRIDE = (len(DISCRETE) + 3 * len(VEC3) + 2 * len(VEC2) + len(SCALAR)
+          + len(DERIVED))
 
 
 def _meta():
@@ -89,33 +103,15 @@ def _js_constants(source):
         r"^export\s+const\s+(CITY_\w+)\s*=\s*([-\d.eE+]+)\s*;", source, re.M)}
 
 
-# Mirrored ahead of the shader: city-facades' facade-shell reach, which the
-# collider grows every building by. It lands in raymarch.wgsl with their
-# branch; until then it is pinned by its own, skipping, test below.
-PENDING_IN_WGSL = {"CITY_SHELL_OUT_MAX"}
-
-
 def test_every_mirrored_constant_is_the_shaders():
     wgsl = _wgsl_constants(WGSL.read_text())
     js = _js_constants(CITYLOTS_JS.read_text())
     assert js, "citylots.js exports no CITY_ constants"
-    js = {k: v for k, v in js.items() if k not in PENDING_IN_WGSL or k in wgsl}
     missing = sorted(set(js) - set(wgsl))
     assert not missing, (
         f"citylots.js mirrors constants raymarch.wgsl no longer has: {missing}")
     differ = {k: (js[k], wgsl[k]) for k in js if js[k] != wgsl[k]}
     assert not differ, f"citylots.js disagrees with raymarch.wgsl: {differ}"
-
-
-def test_the_facade_shell_reach_is_the_shaders():
-    wgsl = _wgsl_constants(WGSL.read_text())
-    if "CITY_SHELL_OUT_MAX" not in wgsl:
-        pytest.skip("CITY_SHELL_OUT_MAX is not in raymarch.wgsl yet "
-                    "(city-facades' shell)")
-    js = _js_constants(CITYLOTS_JS.read_text())
-    assert js["CITY_SHELL_OUT_MAX"] == wgsl["CITY_SHELL_OUT_MAX"], (
-        "the collider grows buildings by a different facade-shell reach "
-        "than the shell the renderer draws")
 
 
 # --- the cells ---------------------------------------------------------------
@@ -178,8 +174,11 @@ def _compute_source():
     source = WGSL.read_text()
     consts = "\n".join(re.findall(r"^const\s+CITY_\w+\s*:.*?;", source,
                                   re.S | re.M))
-    struct = re.search(r"^struct CityCell \{.*?^\}", source, re.S | re.M)
-    assert struct, "struct CityCell is gone from raymarch.wgsl"
+    structs = []
+    for name in WGSL_STRUCTS:
+        m = re.search(rf"^struct {name} \{{.*?^\}}", source, re.S | re.M)
+        assert m, f"struct {name} is gone from raymarch.wgsl"
+        structs.append(m.group(0))
     functions = "\n\n".join(_extract(source, f) for f in WGSL_FUNCTIONS)
 
     def put(expr, k):
@@ -198,6 +197,8 @@ def _compute_source():
             lines.append(put(f"c.{name}.{comp}", k)); k += 1
     for name in SCALAR:
         lines.append(put(f"c.{name}", k)); k += 1
+    for gpu_expr, _ in DERIVED.values():
+        lines.append(put(gpu_expr, k)); k += 1
     assert k == STRIDE
     writes = "\n".join(lines)
     return textwrap.dedent("""
@@ -206,7 +207,7 @@ def _compute_source():
         @group(0) @binding(1) var ocean_normals: texture_2d<f32>;
         @group(0) @binding(2) var<storage, read> cells: array<vec2<i32>>;
         @group(0) @binding(3) var<storage, read_write> out: array<f32>;
-        """) + consts + "\n\n" + struct.group(0) + "\n\n" + functions + \
+        """) + consts + "\n\n" + "\n\n".join(structs) + "\n\n" + functions + \
         textwrap.dedent(f"""
 
         @compute @workgroup_size(64)
@@ -272,7 +273,7 @@ def _js_cells(meta, cells):
                          "scalar": SCALAR})
     js = textwrap.dedent(f"""
         import {{ readFileSync }} from "node:fs";
-        import {{ CityTile, cityCell }} from "{CITYLOTS_JS.as_uri()}";
+        import {{ CityTile, cityCell, shellDepth }} from "{CITYLOTS_JS.as_uri()}";
         const bytes = readFileSync("{(TILE_DIR / 'fif_mip0.bin').as_posix()}");
         const tile = CityTile.fromHalfBytes(
           new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
@@ -286,6 +287,7 @@ def _js_cells(meta, cells):
             ...F.vec3.flatMap((k) => c[k]),
             ...F.vec2.flatMap((k) => c[k]),
             ...F.scalar.map((k) => c[k]),
+            {", ".join(js for _, js in DERIVED.values())},
           ];
         }});
         process.stdout.write(JSON.stringify(rows));
@@ -301,6 +303,7 @@ def _column_names():
     names += [f"{v}.{c}" for v in VEC3 for c in "xyz"]
     names += [f"{v}.{c}" for v in VEC2 for c in "xy"]
     names += list(SCALAR)
+    names += list(DERIVED)
     return names
 
 

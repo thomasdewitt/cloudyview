@@ -176,8 +176,8 @@ const cc_industry_DOCK_GAP: f32 = 0.25;       // trailer rear off the wall
 // The dock doors: sectional doors DOOR_W x DOOR_H standing on the dock
 // floor (DOCK_H above the court), one per dock slot; a black shelter frame
 // around each on some buildings, bumpers and a leveller lip on all. Relief
-// stays inside SHELL_OUT of the wall — the flight collider's growth
-// (web/soar/citylots.js CITY_SHELL_OUT_MAX).
+// stays inside SHELL_OUT of the wall. (Not mirrored by the flight collider,
+// which meets a warehouse at its wall: web/soar/cityprops.js.)
 const cc_industry_DOCK_H: f32 = 1.2;
 const cc_industry_DOOR_W: f32 = 3.0;
 const cc_industry_DOOR_H: f32 = 3.0;
@@ -302,7 +302,7 @@ fn cc_industry_box(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // The pixel's angular size: the footprint at distance t is px * t (m/px),
 // the core's own pixel_angle.
 fn cc_industry_px() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // ============================================================================

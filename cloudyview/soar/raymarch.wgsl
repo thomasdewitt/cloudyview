@@ -1898,10 +1898,12 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 }
 
 // @end sea
-// The scene clock (s, row 24.z). Frozen while the view is parked, so the
-// accumulation of a held view converges; advanced by the host while flying
-// or recording, carried per sample in a recorded track (track.js), and set
-// by `witness --time`. Anything in the scene that moves reads it here (the
+// The scene clock (s, row 24.z). The live view advances it every frame,
+// parked and paused included, and keeps it out of its accumulation: the
+// march leaves the steam to fs_steam_live, drawn at this clock after the
+// accumulation, so a held view converges under steam that moves. Every
+// still holds it fixed; a recorded track carries it per sample (track.js),
+// and `witness --time` sets it. Anything in the scene that moves reads it here (the
 // city's steam); a surface where nothing moves (the sea, the desert) has no
 // clock, and the hosts pack 0 for it.
 fn scene_time() -> f32 {
@@ -1910,34 +1912,35 @@ fn scene_time() -> f32 {
 // @section sea
 
 // ---------------------------------------------------------------------------
-// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 512^2 texels of
-// 0.2 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
+// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 1024^2 texels of
+// 0.1 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
 // bound at 3. A pixel reads the mip its footprint covers; what that mip
 // averaged away is handed back as slope variance — to the microfacet lobe,
 // and in part to a per-pixel slope draw for the sky reflection.
 
 // The slope variance each mip level removed from the tile's normals (level 0
-// removes none; by the top, the tile's whole 0.091 RMS slope). A switch, not
+// removes none; by the top, the tile's whole 0.098 RMS slope). A switch, not
 // a const array: a runtime-indexed array costs a private variable at
 // fs_main's entry and moves every scene's registers.
 fn fif_slope_variance(k: i32) -> f32 {
     switch k {
         case 0: { return 0.000000; }
-        case 1: { return 0.000449; }
-        case 2: { return 0.001407; }
-        case 3: { return 0.002788; }
-        case 4: { return 0.004635; }
-        case 5: { return 0.007078; }
-        case 6: { return 0.008090; }
-        case 7: { return 0.008211; }
-        case 8: { return 0.008242; }
-        default: { return 0.008249; }
+        case 1: { return 0.000523; }
+        case 2: { return 0.001609; }
+        case 3: { return 0.003032; }
+        case 4: { return 0.004580; }
+        case 5: { return 0.006378; }
+        case 6: { return 0.008571; }
+        case 7: { return 0.009524; }
+        case 8: { return 0.009662; }
+        case 9: { return 0.009699; }
+        default: { return 0.009703; }
     }
 }
 
 fn fif_slope_variance_removed(lod: f32) -> f32 {
-    let l0 = clamp(floor(lod), 0.0, 9.0);
-    let l1 = min(l0 + 1.0, 9.0);
+    let l0 = clamp(floor(lod), 0.0, 10.0);
+    let l1 = min(l0 + 1.0, 10.0);
     let f = clamp(lod - l0, 0.0, 1.0);
     return mix(fif_slope_variance(i32(l0)), fif_slope_variance(i32(l1)), f);
 }
@@ -1958,7 +1961,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     if (level1 > level0 && f > 0.0) {
         n = mix(n, ocean_normal_mip_sample(world_xy, level1), f);
     }
-    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering and the mip mix are convex
+    // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering and the mip mix are convex
     return normalize(n);
 }
 
@@ -1977,7 +1980,7 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 // them away: they are the surface, not noise).
 //
 // A capillary facet is ~1 cm (the base roughness is everything below the
-// tile's 0.2 m). Cells are that times a power of two, so a whole number of
+// tile's 0.1 m). Cells are that times a power of two, so a whole number of
 // them spans the tile and the pattern folds with it.
 const SEA_GLITTER_FACET_M: f32 = 0.0125;          // 102.4 m / 2^13
 const SEA_SUN_SOLID_ANGLE: f32 = 6.8e-5;          // pi (0.266 deg)^2
@@ -2071,9 +2074,9 @@ fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
     return k;
 }
 
-// The legacy shader's LOD (realism 0), kept with its own footprint rule.
+// The legacy shader's LOD (realism 0): no bias, the one true pixel angle.
 fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
-    let pixel_span = 2.0 * max(t_hit, 0.0) * u.cam_origin.w / u.params.y;
+    let pixel_span = max(t_hit, 0.0) * true_pixel_angle();
     let ocean_span = pixel_span / max(abs(dir.z), 0.03);
     let texel_span = max(ocean_span / u.ocean_params.x, 1.0);
     return clamp(log2(texel_span), 0.0, u.ocean_params.w);
@@ -2085,7 +2088,7 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
         + 0.5 / dims;
     let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
-    // @domain: every texel of every mip has z >= 0.938 (the tile's bytes), and filtering is convex
+    // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering is convex
     return normalize(n);
 }
 
@@ -2208,7 +2211,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     // factor stretches it along the view and drives the horizon toward
     // coarser mip levels.
     let grazing = max(abs(dir.z), 0.03);
-    let pixel_angular_span = 2.0 * u.cam_origin.w / u.params.y;
+    let pixel_angular_span = true_pixel_angle();
     let across = t_hit * pixel_angular_span;
     let along = across / grazing;
     let texel_span = max(along / u.ocean_params.x, 1.0);
@@ -2251,7 +2254,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 
     // The footprint mean slope is not the footprint's shading. Every judge
     // view's water is sub-pixel: at v7's near field one pixel covers tens
-    // of metres of a 0.2 m wave field, so the honest statement is not "this
+    // of metres of a 0.1 m wave field, so the honest statement is not "this
     // facet is flat" but "this pixel contains a slope distribution whose
     // variance the filters removed". Fresnel goes as (1 - n.v)^5 and the sky
     // gradient is steep near the horizon, so at grazing incidence the
@@ -2309,7 +2312,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
-                // Base roughness is what lives BELOW the tile's 0.2 m
+                // Base roughness is what lives BELOW the tile's 0.1 m
                 // texels — ripple no tile holds — plus the variance the
                 // footprint's mip filtered away. Variances add; roughnesses
                 // do not.
@@ -2442,6 +2445,65 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let c = u.ocean_realism_b.w;
     return clamp(vec3<f32>(0.5) + (encoded - vec3<f32>(0.5)) * c,
                  vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// tone_map run backwards: the linear radiance a displayed value came from,
+// for the live steam (fs_steam_live), which composites in linear light onto
+// an image already accumulated in display values. Exact wherever tone_map
+// is invertible (tests/test_tone_unmap.py holds the round trip on the GPU);
+// what its clamps threw away does not come back: a channel whose curve
+// reached 1 (at the white point, or below it for a saturated colour in the
+// shoulder, whose chroma-preserving branch overshoots) returns where it
+// reached it, and under contrast > 1 a value clipped to 0 or 1 returns the
+// clip's edge. Below the shoulder (exposed luminance
+// y < 1) the curve is per channel and inverts in closed form. In it, y fixes
+// the shoulder's mix k and chroma gain g and with them every channel, so
+// the solve is for the one y that reproduces itself, by bisection: a fixed
+// point iterated on y can oscillate there (codex, 2026-11-08).
+fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
+    let c = u.ocean_realism_b.w;
+    let encoded = clamp((display - vec3<f32>(0.5)) / c + vec3<f32>(0.5),
+                        vec3<f32>(0.0), vec3<f32>(1.0));
+    let m = pow(encoded, vec3<f32>(gamma));
+    let w2 = u.flags.w * u.flags.w;
+    let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let e0 = tone_unmap_channels(m, 0.0, 1.0, w2);
+    if (dot(e0, lum) < 1.0) {
+        return e0 / exposure;
+    }
+    // y lies in [1, y_hi]: every channel's m <= 1, and with k at most
+    // TONE_MAP_SHOULDER the per-channel part alone caps e where the plain
+    // curve reaches 1 / (1 - TONE_MAP_SHOULDER).
+    var lo = 1.0;
+    var hi = tone_unmap_channels(vec3<f32>(1.0 / (1.0 - TONE_MAP_SHOULDER)),
+                                 0.0, 1.0, w2).x;
+    for (var i: i32 = 0; i < 24; i = i + 1) {
+        let y = 0.5 * (lo + hi);
+        let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+        let e = tone_unmap_channels(m, k, (1.0 + y / w2) / (1.0 + y), w2);
+        if (dot(e, lum) > y) {
+            lo = y;
+        } else {
+            hi = y;
+        }
+    }
+    let y = 0.5 * (lo + hi);
+    let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
+    return tone_unmap_channels(m, k, (1.0 + y / w2) / (1.0 + y), w2)
+        / exposure;
+}
+
+// Each channel's exposed e with (1 - k) e (1 + e/w2)/(1 + e) + k g e = m,
+// the shoulder's mix k and chroma gain g held fixed: a e^2 + b e - m = 0,
+// a = (1 - k)/w2 + k g > 0, b = (1 - k) + k g - m. Its root e >= 0 in the
+// form that does not cancel for either sign of b (the plain one lost a dark
+// value to 0 in float32, codex 2026-11-08).
+fn tone_unmap_channels(m: vec3<f32>, k: f32, g: f32, w2: f32) -> vec3<f32> {
+    let a = (1.0 - k) / w2 + k * g;
+    let b = vec3<f32>((1.0 - k) + k * g) - m;
+    // @domain: a square plus 4 a m, with a > 0 and m >= 0
+    let q = sqrt(b * b + 4.0 * a * m);
+    return select((q - b) / (2.0 * a), 2.0 * m / (q + b), b > vec3<f32>(0.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -3873,6 +3935,26 @@ const CITY_PUDDLE_FIT: vec2<f32> = vec2<f32>(0.6700, 0.0950);
 const CITY_MH_PITCH: f32 = 30.0;
 const CITY_MH_R: f32 = 0.34;
 const CITY_MH_PRESENT: f32 = 0.55;
+// Share of PRESENT sites that steam, by district (city_manhole_steam). A
+// block owns about 3.3 present covers (two street edges x ~1.65 each), so
+// 0.26 downtown is a steaming cover every block or so and 0.015 in the
+// outskirts is one in twenty blocks. The ramp is the lamp scale's
+// (city_lamp_scale): the same districts that burn brightest steam most.
+const CITY_MH_STEAM_FRAC_LO: f32 = 0.015;
+const CITY_MH_STEAM_FRAC_HI: f32 = 0.26;
+// A steaming cover is hot: it and the asphalt round it stay dry on a wet
+// street, a pale patch the plume rises out of (Thomas, 2026-11-08: steam
+// "just on a random bit of street"; the dark wet lid under it did not read,
+// and from his pose the plume's own foot hides the lid itself). Dry out to
+// CITY_MH_R + DRY_IN, fading to wet by CITY_MH_R + DRY_OUT.
+const CITY_MH_DRY_IN: f32 = 0.35;
+const CITY_MH_DRY_OUT: f32 = 0.45;
+// A wet cover's gloss: tyre-polished iron under a film, sheened all over
+// rather than mottled like the asphalt round it, so at night a lid reads as
+// a lid — it catches the lamps (city_lamp_glint) and the lit windows (the
+// film lobe) where dark iron alone was a dark disc on dark asphalt (Thomas,
+// 2026-11-08: a plume from "a random bit of street", its cover unread).
+const CITY_MH_GLOSS: f32 = 0.9;
 // Storm-drain grates: one in each gutter, this far from the cross street's
 // centreline, beyond its crosswalk and stop line.
 const CITY_GRATE_AT: f32 = 5.2;       // past the cross street's building line
@@ -3910,7 +3992,7 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0694, 0.2250);
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0695, 0.2216);
 const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0084, 0.1047);
 
 // Building line to kerb on the street a plot edge faces. The plot edge alone
@@ -4115,13 +4197,60 @@ fn city_manhole(k: i32, j: i32, along_y: bool) -> vec4<f32> {
     return vec4<f32>(c, select(0.0, 1.0, present), r.w);
 }
 
+// Whether a site steams, for the ground and the manhole-steam component
+// alike, so a dry lid and its plume can never disagree: the site's steam
+// draw over its district's share, v in [0, 1) uniform over the steaming
+// sites (the component sizes its plume by v) and >= 1 for every other, an
+// absent site included. The hash rejects all but the candidates before the
+// texture read.
+fn city_manhole_steam(m: vec4<f32>) -> f32 {
+    if (m.z < 0.5 || m.w >= CITY_MH_STEAM_FRAC_HI) {
+        return 2.0;
+    }
+    let district = city_glow_sample(m.xy, 2.0);
+    let frac = mix(CITY_MH_STEAM_FRAC_LO, CITY_MH_STEAM_FRAC_HI,
+                   smoothstep(0.02, 0.45, district));
+    return m.w / frac;
+}
+
+// A disc of radius r at offset lq (|lq| = d) from p, filtered over fp:
+// resolved, the disc with its edge antialiased over a pixel; unresolved,
+// the equal-area square box-filtered in both axes, whose integral IS the
+// disc's area at every footprint — a 1-D ramp in d would claim half the
+// pixel at fp = 10 m for a cover that is 0.4% of it.
+fn city_disc_cover(lq: vec2<f32>, d: f32, r: f32, fp: f32) -> f32 {
+    let h = 0.5 * max(fp, 1e-4);
+    let sq = r * 1.7724539;          // sqrt(pi) r
+    return mix(clamp((r - d + h) / (2.0 * h), 0.0, 1.0),
+               city_band(lq.x, -0.5 * sq, sq, fp)
+               * city_band(lq.y, -0.5 * sq, sq, fp),
+               smoothstep(0.05, 0.25, fp));
+}
+
+// A disc that fades from 1 inside r_in to 0 at r_out (a smoothstep in d),
+// filtered over fp: resolved, the profile itself; unresolved, the
+// equal-area disc, radius sqrt(r_in^2 + r_in w + 0.3 w^2) for the fade's
+// width w (the smoothstep's exact area), so its mean holds at every range.
+fn city_soft_disc_cover(lq: vec2<f32>, d: f32, r_in: f32, r_out: f32,
+                        fp: f32) -> f32 {
+    let w = r_out - r_in;
+    // @domain: a sum of squares and r_in w, all >= 0
+    let r_eq = sqrt(r_in * r_in + r_in * w + 0.3 * w * w);
+    return mix(1.0 - smoothstep(r_in, r_out, d),
+               city_disc_cover(lq, d, r_eq, fp),
+               smoothstep(0.05, 0.25, fp));
+}
+
 // Cover coverage at p for the two streets p may stand on, filtered: a
-// resolved disc with its rim, or its area share once sub-pixel. xy of the
+// resolved disc with its rim, or its area share once sub-pixel. The
 // result: (cover coverage, rim/pattern darkening already folded in as a
-// relative albedo to multiply).
-fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
+// relative albedo to multiply, the share kept dry by a steaming cover's
+// heat: the lid and the asphalt round it, fading out between DRY_IN and
+// DRY_OUT, filtered so the far field's mean is the near field's).
+fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec3<f32> {
     var cov = 0.0;
     var tone = 1.0;
+    var dried = 0.0;
     for (var s: i32 = 0; s < 2; s = s + 1) {
         let along_y = s == 0;
         let k = select(rd.ky, rd.kx, along_y);
@@ -4139,17 +4268,14 @@ fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
             }
             let d = length(p - m.xy);
             let lq = p - m.xy;
-            // Resolved, the disc with its edge antialiased over a pixel.
-            // Unresolved, the equal-area square box-filtered in both axes,
-            // whose integral IS the disc's area at every footprint — a 1-D
-            // ramp in d would claim half the pixel at fp = 10 m for a cover
-            // that is 0.4% of it.
-            let h = 0.5 * max(fp, 1e-4);
-            let sq = CITY_MH_R * 1.7724539;          // sqrt(pi) R
-            let disc = mix(clamp((CITY_MH_R - d + h) / (2.0 * h), 0.0, 1.0),
-                           city_band(lq.x, -0.5 * sq, sq, fp)
-                           * city_band(lq.y, -0.5 * sq, sq, fp),
-                           smoothstep(0.05, 0.25, fp));
+            // The dry disc only for a pixel it reaches, and the steam test
+            // (a texture read) only for a cover whose dry disc that is.
+            let warm = city_soft_disc_cover(lq, d, CITY_MH_R + CITY_MH_DRY_IN,
+                                            CITY_MH_R + CITY_MH_DRY_OUT, fp);
+            if (warm > 0.0 && city_manhole_steam(m) < 1.0) {
+                dried = max(dried, warm);
+            }
+            let disc = city_disc_cover(lq, d, CITY_MH_R, fp);
             if (disc <= 0.0) {
                 continue;
             }
@@ -4166,7 +4292,7 @@ fn city_manhole_cover(p: vec2<f32>, rd: CityRoad, fp: f32) -> vec2<f32> {
             tone = mix(1.0, 0.72 + 0.55 * grid, 1.0 - rim) * (1.0 + 0.6 * rim);
         }
     }
-    return vec2<f32>(cov, tone);
+    return vec3<f32>(cov, tone, dried);
 }
 
 // --- the ground material --------------------------------------------------------
@@ -4287,9 +4413,10 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                                         + w_in * rel_in);
 
     // Wetness. The film by zone; the puddles by noise, biased into the
-    // gutter and off the crown of the road.
-    let film = w_road * CITY_WET_ROAD + w_gutter
-             + (w_kerb + w_in) * CITY_WET_WALK;
+    // gutter and off the crown of the road; neither on the share a steaming
+    // cover's heat keeps dry (mh.z).
+    let film = (w_road * CITY_WET_ROAD + w_gutter
+                + (w_kerb + w_in) * CITY_WET_WALK) * (1.0 - mh.z);
     let pud_k = smoothstep(CITY_PUDDLE_LOD.x, CITY_PUDDLE_LOD.y, fp);
     let region = city_vnoise(p, 0.025, 5.3) - 0.5;
     let crown = 1.0 - smoothstep(0.0, 2.5, min(select(1e3, ex, on_x),
@@ -4331,7 +4458,8 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
         pud_sharp = smoothstep(CITY_PUDDLE_THR - CITY_PUDDLE_EDGE,
                                CITY_PUDDLE_THR + CITY_PUDDLE_EDGE, n + bias);
     }
-    let puddle = mix(pud_sharp, pud_mean, pud_k) * (1.0 - mh.x);
+    let puddle = mix(pud_sharp, pud_mean, pud_k)
+               * (1.0 - max(mh.x, mh.z));
 
     // The film is not a sheet: it pools in the texture and drains off the
     // high spots, so its gloss mottles at half a metre and the joints hold
@@ -4342,7 +4470,9 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
                    - CITY_PUDDLE_DARKEN * puddle);
     g.wet = film;
     g.puddle = puddle;
-    g.gloss = CITY_FILM_GLOSS * film * max(mottle, 0.0);
+    // A wet lid sheens as polished iron; a hot one is dry, and matte.
+    g.gloss = mix(CITY_FILM_GLOSS * film * max(mottle, 0.0), CITY_MH_GLOSS,
+                  mh.x) * (1.0 - mh.z);
     g.walk = select(0.0, w_in + w_kerb, walk_ok);
     // Outside the plot on an edge that carries no street there is no
     // street at all: lot ground, and no kerb to collect water against.
@@ -5327,10 +5457,11 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
 // look while materials read as brick or concrete where a lamp reaches them.
 
 const CITY_KIND_SHELL: i32 = 1000;  // 1000 + part + 16 * (side + 4 * tier)
-// The deepest any facade relief may stand off its wall (m). The flyer's
-// collider (city-layout's, and its JS mirror) inflates every building box by
-// exactly this, so the camera can never be inside a feature; a style deeper
-// than this is clamped to it.
+// The deepest any facade relief may stand off its wall (m); a style deeper
+// than this is clamped to it. The flight collider (web/soar/citylots.js
+// shellDepth) grows each building by its own style's depth, mirrored from
+// city_shell_style, so the camera is never inside a feature — change a
+// relief depth there and tests/test_city_lots_mirror.py says so.
 const CITY_SHELL_OUT_MAX: f32 = 1.5;
 const CITY_SHELL_FP_MORPH: f32 = 0.4;
 const CITY_SHELL_FP_BLEND: f32 = 0.6;
@@ -8379,1096 +8510,6 @@ fn cc_windowlife_glyph(cc: CityCell, wh: vec4<f32>, pane_uv: vec2<f32>,
                                 h.x >= cc_windowlife_T_ANDROID);
 }
 
-// --- component: aircars (aircars.wgsl) ---
-// aircars — flying cars, frozen mid-flow.
-//
-// The sky layer of a two-layer traffic system: a sibling component parks the
-// cars on the ground, these hold the air above the avenues. There is no time
-// here (SPEC rule 4), so this is a long-exposure photograph of living
-// traffic — every craft is where its hash says it is, on every frame and from
-// every camera, and the streams read as streams because of where they are,
-// not because they move.
-//
-// LAYOUT. Traffic follows the avenue lattice (`city_is_avenue`, every 8
-// blocks) but flies off to one side of it and well above. Each avenue carries
-// two counter-flowing lanes, one over each verge, ~9 m in from the avenue
-// centerline; the two lanes belong to the two cells that flank the avenue —
-// the cell whose MIN edge is the avenue owns the lane on its own side, the
-// cell whose MAX edge is the avenue owns the other. That ownership rule is
-// what keeps every craft geometrically inside the cell that draws it, which
-// the DDA requires: a box straddling a cell boundary is tested only from one
-// side and disappears from the other. It also makes the flow directions fall
-// out right-hand — keep to the right of the avenue you are flying up, and the
-// +x verge of a north-south avenue runs north.
-//
-// Altitude is a two-deck system, ~55 m and ~95 m, +-8 m per craft, chosen by
-// the craft's own hash — so a lane is a loose braid rather than a wire, and
-// the low deck passes under the high one at every crossing. Over ordinary
-// blocks a few percent of cells carry a free flyer at 40-130 m, off-lattice
-// and on any heading, which is what stops the air from being a pure grid.
-//
-// Occupancy rides the cascade the way the streetlights do: a downtown avenue
-// is a stream, an outskirts lane is three craft in a kilometre. That is
-// `cc.density`, already loaded by the core — free.
-//
-// LIGHT. The Cloudpunk cue is the UNDERGLOW: an emissive belly panel, cyan /
-// magenta / amber, which is the only part of a craft big enough to survive
-// past a few hundred metres. From the street you read bellies overhead; from
-// 400 m the avenues are strings of colored points above the sodium lattice;
-// further out the layer is drifting specks. White nose and red tail lamps
-// live in the hull's own shading rather than in geometry of their own, and
-// dissolve into their face's mean as the footprint outgrows them.
-//
-// COST. Cheap gates first, in order: the segment's z-extent against the
-// layer's [35, 140] m slab (no hash, no arithmetic beyond two multiply-adds);
-// the pixel footprint; then the two avenue tests, which are integer. A cell
-// with no avenue edge therefore spends exactly one hash draw — the free-flyer
-// coin — and returns. At most three craft touch a cell (one x-lane, one
-// y-lane, one free flyer; the two x-edge tests are mutually exclusive at
-// avenue period 8), and each craft is two boxes, the second of which drops
-// out once it is sub-pixel: <= 6 box tests and 6 pcg2d draws worst case,
-// 2 pcg2d in the common one.
-//
-// CLOSE READ (the SDF, 2026-08-20). Thomas flew the city and the craft "are
-// not really clearly cars, they are boxes with a few circles" — true, and the
-// far read was never the problem. So the boxes stay exactly as they were
-// beyond half a metre per pixel, and inside that gate the box test becomes a
-// bounding test only: a hit on the padded box hands off to a sphere trace of
-// a vehicle SDF in the craft's own frame (SPEC's SDF-in-a-box pattern). The
-// SDF is a rounded lifting body — tapering nose, blunt tail, stub sponsons,
-// twin rear nacelles, a canopy bubble smooth-minned onto the deck, a dorsal
-// fin and a whip antenna, light housings raised at the sponson tips. If the
-// trace misses inside the box the craft misses: rays grazing past the curved
-// hull are the whole reason it reads as curved rather than as a slab.
-//
-// Everything the eye uses to call a shape a vehicle rather than a box is in
-// the NORMAL, so the shading is written against it: rim brightness at the
-// silhouette, a narrow moon sheen that slides along the crown, the underglow
-// falling off as the belly turns into the flank, and the canopy seam found as
-// the crease between two SDF parts rather than drawn as a stripe. Panel
-// lines, intakes and thruster discs are shading bands in the local frame —
-// per SPEC they are cheaper there than in geometry, and at wiper-blade
-// calibration they are the right size to be features rather than texture.
-
-// --- craft geometry (a compact wedge, 3.8 x 1.9 x 1.1 m) --------------------
-const cc_aircars_HALF_L: f32 = 1.90;
-const cc_aircars_HALF_W: f32 = 0.95;
-const cc_aircars_HULL_H: f32 = 0.70;
-const cc_aircars_CANOPY_H: f32 = 0.40;
-const cc_aircars_CANOPY_HALF_L: f32 = 1.10;
-const cc_aircars_CANOPY_HALF_W: f32 = 0.60;
-const cc_aircars_CANOPY_AFT: f32 = 0.45;  // canopy sits aft: the nose tapers
-
-// --- the close-read SDF -----------------------------------------------------
-// Local frame: +x along the direction of travel, +y to port, z measured up
-// from the hull bottom (so z = 0 is the belly plane and z = HULL_H the deck).
-// Every number below is in metres in that frame, and the whole solid lives
-// inside |x| <= 1.88, |y| <= 1.06, 0 <= z <= 1.10 — which is what sets the
-// padding on the bounding box.
-const cc_aircars_SDF_FP: f32 = 0.50;     // hand-off: boxes beyond this
-const cc_aircars_SDF_ITERS: i32 = 24;
-// Bounding box half-extents, along-travel and across. The hull inside is
-// yawed by up to +-YAW, and the box is NOT: 1.88*cos(5) + 1.06*sin(5) = 1.965
-// along and 1.88*sin(5) + 1.06*cos(5) = 1.220 across, plus slack.
-const cc_aircars_SDF_PAD_L: f32 = 2.04;
-const cc_aircars_SDF_PAD_W: f32 = 1.36;
-const cc_aircars_SDF_PAD_ZLO: f32 = 0.06;
-const cc_aircars_SDF_PAD_ZHI: f32 = 1.18;
-const cc_aircars_YAW: f32 = 0.0873;      // +-5 degrees, per craft
-// Housing / lens radius for the nav lamps, and where the thruster discs sit.
-const cc_aircars_HOUSE_R: f32 = 0.098;
-const cc_aircars_HOUSE_Z: f32 = 0.26;    // housing / sponson axis height
-const cc_aircars_LENS_OUT: f32 = 0.60;   // how much of the bump is the lens
-// The nacelle axis has to sit far enough outboard that the pod stands PROUD
-// of the hull: at |y| = 0.66 the pod's own 0.23 m radius put its outer skin
-// at 0.89 against a hull half-width of 0.86, so the engines were swallowed
-// and the craft had no visible engines at all from the side — the one item of
-// the close read that the first pass silently lost. At 0.80 the pod clears
-// the flank by ~0.17 m, which is 19 px at 25 m: a pod on a pylon, which is
-// what the eye is looking for when it looks for an engine.
-const cc_aircars_NAC_Y: f32 = 0.80;      // nacelle axis, |y|
-const cc_aircars_NAC_Z: f32 = 0.52;      // nacelle axis height
-const cc_aircars_THRUST_R: f32 = 0.15;   // thruster disc radius
-// The chine line: belly below it, flank above. The underglow's side strip is
-// a band centred on it, |z - CHINE_Z| running LO to HI.
-const cc_aircars_CHINE_Z: f32 = 0.145;
-const cc_aircars_CHINE_LO: f32 = 0.018;
-const cc_aircars_CHINE_HI: f32 = 0.050;
-
-// --- lanes ------------------------------------------------------------------
-const cc_aircars_LANE_OFF: f32 = 9.0;    // lane centerline in from the avenue
-const cc_aircars_LANE_JIT: f32 = 4.0;    // +- lateral wander
-const cc_aircars_ALONG_JIT: f32 = 34.0;  // +- along-lane wander in its slot
-const cc_aircars_Z_LOW: f32 = 55.0;
-const cc_aircars_Z_HIGH: f32 = 95.0;
-const cc_aircars_Z_JIT: f32 = 8.0;
-const cc_aircars_HIGH_CUT: f32 = 0.55;   // hash above this -> the high deck
-const cc_aircars_LANE_P: f32 = 0.72;     // slot occupancy at full density
-const cc_aircars_THROUGH_FRAC: f32 = 0.12; // ... over an unbuilt avenue
-const cc_aircars_DENS_LO: f32 = 0.50;    // occupancy scale, outskirts
-const cc_aircars_DENS_HI: f32 = 1.35;    // occupancy scale, downtown
-// The window the occupancy ramp spans, in block density. Set against the
-// tile's own distribution, which is lognormal and brutally skewed — median
-// block 0.045, p75 0.10, p90 0.22 — so a ramp calibrated by eye on the
-// megatower district leaves the MODAL city with one craft every 300 m of
-// lane, which reads as scattered dust rather than as traffic. Anchored at
-// the median instead: a typical avenue carries one craft per ~80 m counting
-// both directions, downtown roughly one per 50, the outskirts one per 300.
-const cc_aircars_DENS_START: f32 = 0.005;
-const cc_aircars_DENS_FULL: f32 = 0.070;
-// Free flyers: off-lattice singles over ordinary blocks.
-const cc_aircars_FREE_FRAC: f32 = 0.07;
-const cc_aircars_FREE_Z_LO: f32 = 40.0;
-const cc_aircars_FREE_Z_HI: f32 = 130.0;
-const cc_aircars_FREE_MARGIN: f32 = 12.0;
-// Segment z-gate: the whole air layer lives in here, hull bottom to canopy.
-const cc_aircars_Z_MIN: f32 = 35.0;
-const cc_aircars_Z_MAX: f32 = 140.0;
-
-// --- light ------------------------------------------------------------------
-// Yardsticks from SPEC rule 5: lit window 3.5, storefront 2.2, lamp pool 0.7.
-// The underglow sits between a lamp pool and a storefront — a lit panel, not
-// a source you look into — and the nav lamps are point-bright.
-const cc_aircars_GLOW_RAD: f32 = 2.5;
-// The panel is inset in the belly, not the whole belly: seen from underneath
-// at street range a craft has to read as a dark object carrying a light, not
-// as a floating rectangle of light. The border keeps a quarter of the
-// radiance (the panel spilling onto its own frame), which is also what keeps
-// the far-field mean near the full value where the inset is sub-pixel.
-const cc_aircars_PANEL_A: f32 = 1.62;    // panel half-length (of 1.90)
-const cc_aircars_PANEL_W: f32 = 0.79;    // panel half-width (of 0.95)
-const cc_aircars_PANEL_RIM: f32 = 0.25;  // what the border keeps
-const cc_aircars_LAMP_RAD: f32 = 6.0;
-const cc_aircars_LAMP_R: f32 = 0.12;     // nav-lamp dot radius (m)
-const cc_aircars_CANOPY_RAD: f32 = 0.40;
-const cc_aircars_HULL_FILL: f32 = 0.05;  // hull albedo against the skyglow
-// The panel does not end at the belly seam: it wraps the lower flanks as a
-// skirt and dies out toward the shoulder. This is what carries the layer at
-// distance — from anywhere but directly underneath, the skirt is the only
-// piece of a craft with the craft's own color on it, and from 400 m up a
-// lane the strings of light you read are skirts, not bellies. Its mean over
-// the 0.7 m flank is what a sub-pixel craft delivers, so it is set against
-// the window yardstick (3.5) rather than against the belly's own radiance.
-const cc_aircars_SKIRT: f32 = 0.86;
-const cc_aircars_SKIRT_LO: f32 = 0.10;   // fully lit below this height (m)
-const cc_aircars_SKIRT_HI: f32 = 0.62;   // gone by this one
-// Dorsal running light: the same color, dimmer, on the hull's back. Without
-// it a craft seen from above is a black chip on a bright street, and the
-// whole aerial read of the layer goes with it.
-const cc_aircars_DORSAL: f32 = 0.76;
-// Close-read light, all of it keyed to the SDF normal. A dark hull against a
-// dark city has exactly three ways to show its shape: the silhouette rim, a
-// specular slid across the crown by the moon, and the way its own underglow
-// dies as the belly turns into the flank. RIM is the loudest of the three and
-// the one that does the work — it is the lit edge that says "curved".
-const cc_aircars_RIM: f32 = 0.55;
-const cc_aircars_HULL_DIFF: f32 = 0.80;  // moonlight on dark metal
-const cc_aircars_BOUNCE: f32 = 0.016;    // the panel's spill onto its own hull
-const cc_aircars_BAR: f32 = 0.45;        // the chine light bar
-const cc_aircars_CABIN: f32 = 0.22;      // how much interior the glass shows
-const cc_aircars_SHEEN: f32 = 0.34;      // moon glint, hull
-const cc_aircars_GLASS: f32 = 0.55;      // moon glint, canopy (tighter, harder)
-const cc_aircars_UPGLOW: f32 = 0.020;    // street uplight caught underneath
-const cc_aircars_SEAM_DARK: f32 = 0.80;  // canopy-to-hull seam band
-const cc_aircars_LINE_DARK: f32 = 0.70;  // panel lines
-const cc_aircars_INTAKE_DARK: f32 = 0.85;
-const cc_aircars_THRUST: f32 = 1.75;     // thruster disc radiance
-const cc_aircars_THRUST_HALO: f32 = 0.32; // what the nacelle cup keeps
-
-// --- LOD --------------------------------------------------------------------
-// Footprint (m/px) where each piece of detail hands over to its own mean. The
-// canopy is a 2.2 m silhouette bump on a 3.8 m body: it stops paying for
-// itself first. The nav lamps are 0.24 m dots: they fade into the mean
-// radiance of the face they sit on, so a distant craft keeps its light and
-// loses only the resolution — which is what a long lens does to traffic.
-const cc_aircars_CANOPY_FP: f32 = 0.80;
-const cc_aircars_LAMP_LOD_START: f32 = 0.35;
-const cc_aircars_LAMP_LOD_FULL: f32 = 1.20;
-// Where the craft stops being traced at all: 6 m/px puts a whole craft at
-// two thirds of a pixel. The emission ramps to zero over the run-up to it
-// (cc_aircars_FAR_FADE) so the geometry disappears at the moment it stops
-// contributing anything, rather than popping out — the tracer's cutoff and
-// the shader's mean meet at the same place. At the harness's 960 px / 65 deg
-// this threshold sits past CITY_PROP_RANGE and never fires; it exists for
-// low-resolution or very wide-angle frames, where it does.
-const cc_aircars_FAR_FP: f32 = 6.0;
-const cc_aircars_FAR_FADE: f32 = 3.6;    // emission gone by FAR_FP from here
-// The core stops calling cell_props at CITY_PROP_RANGE. A hard population
-// edge there would be a ring in any long sightline, so the emission tapers
-// over the last quarter of the range instead: the far-field mean of a layer
-// this sparse IS near zero, and this is that mean approached rather than
-// stepped into.
-// Kept short deliberately: a craft is about one pixel across out here and the
-// population is sparse, so there is no continuous structure for an edge to
-// show up in — all the taper has to do is take the last few craft down, and a
-// long taper instead eats the whole mid-field of any shallow aerial view,
-// which is exactly where the layer is supposed to read.
-const cc_aircars_FADE_START: f32 = 0.92;
-const cc_aircars_FADE_FULL: f32 = 1.00;
-
-// Per-craft placement draw. One city_rand4 (two pcg2d) carries everything the
-// geometry needs; appearance draws its own hash in the shader, where the cost
-// is one per hit pixel rather than one per visited cell.
-// Seeded by the TILE-WRAPPED cell index (city_tile_cell): a craft belongs
-// to its tile coordinate, so live flight and a replayed track — which only
-// carries the tile phase — draw the same traffic.
-fn cc_aircars_draw(ci: vec2<i32>, lane: i32) -> vec4<f32> {
-    let cw = city_tile_cell(ci);
-    let l = u32(lane);
-    return city_rand4(vec2<u32>(
-        bitcast<u32>(cw.x) * 0x9e3779b9u + l * 0x2545f491u + 0x165667b1u,
-        bitcast<u32>(cw.y) * 0x85ebca6bu + l * 0xc2b2ae35u + 0x27d4eb2fu));
-}
-
-fn cc_aircars_look(ci: vec2<i32>, lane: i32) -> vec4<f32> {
-    let cw = city_tile_cell(ci);
-    let l = u32(lane);
-    return city_rand4(vec2<u32>(
-        bitcast<u32>(cw.x) * 0xc2b2ae35u + l * 0x9e3779b9u + 0x51ed270bu,
-        bitcast<u32>(cw.y) * 0x27d4eb2fu + l * 0x85ebca6bu + 0xdeadbeefu));
-}
-
-// Underglow palette: 60% cyan, 25% magenta, 15% amber. Cyan carries the layer
-// because it is the one hue the sodium-and-tungsten ground does not already
-// own — the traffic reads as a separate system, not as more windows.
-fn cc_aircars_glow_color(d: f32) -> vec3<f32> {
-    if (d < 0.60) {
-        return vec3<f32>(0.16, 0.90, 1.00);
-    }
-    if (d < 0.85) {
-        return vec3<f32>(1.00, 0.20, 0.70);
-    }
-    return vec3<f32>(1.00, 0.60, 0.16);
-}
-
-// --- SDF primitives ---------------------------------------------------------
-// All exact or conservative (never over-estimating distance), which is what
-// sphere tracing needs: the ellipsoid is iq's second-order bound and the
-// smooth-min only ever shortens, so a step of `d` can never overshoot a
-// surface.
-fn cc_aircars_sd_rbox(p: vec3<f32>, b: vec3<f32>, r: f32) -> f32 {
-    let q = abs(p) - b;
-    return length(max(q, vec3<f32>(0.0)))
-           + min(max(q.x, max(q.y, q.z)), 0.0) - r;
-}
-
-fn cc_aircars_sd_sphere(p: vec3<f32>, r: f32) -> f32 {
-    return length(p) - r;
-}
-
-fn cc_aircars_sd_ellipsoid(p: vec3<f32>, r: vec3<f32>) -> f32 {
-    let k0 = length(p / r);
-    let k1 = length(p / (r * r));
-    return k0 * (k0 - 1.0) / max(k1, 1e-6);
-}
-
-fn cc_aircars_sd_capsule(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32)
-        -> f32 {
-    let pa = p - a;
-    let ba = b - a;
-    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
-    return length(pa - ba * h) - r;
-}
-
-fn cc_aircars_smin(a: f32, b: f32, k: f32) -> f32 {
-    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return mix(b, a, h) - k * h * (1.0 - h);
-}
-
-// The vehicle, in its own frame. Returns the combined distance in .x and the
-// three parts the shader needs to tell apart in .yzw — hull group, canopy,
-// nacelles. One function, so the marcher and the shader can never disagree
-// about where the canopy ends; the shader gets the parts for free at the hit
-// because it has to evaluate the field there anyway.
-//
-// Wiper-blade calibration: the features here are the ones a person would name
-// looking at the thing — nose, cabin, wing stub, engine pod, fin, aerial,
-// light housing. Nothing smaller has geometry; the panel lines and the intake
-// slot are shading, which is both cheaper and the right scale.
-fn cc_aircars_sdf(q: vec3<f32>) -> vec4<f32> {
-    // The port/starboard fold: everything paired is built once in |y|.
-    let m = vec3<f32>(q.x, abs(q.y), q.z);
-
-    // Lifting body: a flat rounded slab, a shorter block forward and a sphere
-    // at the tip, smooth-minned into a taper rather than modelled as one. The
-    // blend radii are deliberately smaller than the parts they join — a big
-    // k turns the whole thing back into the lozenge the boxes already were.
-    // The body tapers in PLAN as well as in profile: from above a constant-
-    // width slab is a suitcase whichever way its nose points. The half-width
-    // is a function of x, which costs the field a little Lipschitz slack —
-    // hence the 0.98, which keeps every step an under-estimate.
-    let wide = 0.66 - 0.16 * smoothstep(-0.20, 1.10, q.x);
-    var hull = 0.98 * cc_aircars_sd_rbox(q - vec3<f32>(-0.22, 0.0, 0.36),
-                                         vec3<f32>(1.02, wide, 0.14), 0.20);
-    // The nose sits LOW and the tail sits high: a wedge in profile. On a
-    // symmetric body the eye has no way to tell front from back, and a craft
-    // you cannot tell the front of is a pod.
-    let nose = cc_aircars_sd_rbox(q - vec3<f32>(1.00, 0.0, 0.29),
-                                  vec3<f32>(0.38, 0.20, 0.05), 0.18);
-    hull = cc_aircars_smin(hull, nose, 0.18);
-    let tip = cc_aircars_sd_sphere(q - vec3<f32>(1.70, 0.0, 0.26), 0.12);
-    hull = cc_aircars_smin(hull, tip, 0.16);
-    // Blunt tail: the transom the nacelles hang off.
-    let tail = cc_aircars_sd_rbox(q - vec3<f32>(-1.34, 0.0, 0.38),
-                                  vec3<f32>(0.26, 0.48, 0.09), 0.20);
-    hull = cc_aircars_smin(hull, tail, 0.16);
-    // The chine: a thin plate a little wider than the hull, running its
-    // length. It is the one hard horizontal line on the craft, it splits
-    // belly from flank, and the underglow strip lives along it. Without it a
-    // rounded hull has no waterline and reads as a pebble.
-    let chine = cc_aircars_sd_rbox(q - vec3<f32>(-0.30, 0.0, 0.15),
-                                   vec3<f32>(0.88, 0.80, 0.012), 0.055);
-    hull = cc_aircars_smin(hull, chine, 0.05);
-    // Stub sponsons: the stance. They also carry the nav-light housings out
-    // to the widest point, which is where an aircraft puts them.
-    // Thin. The first sponson was a 0.3 m bar down the whole flank, and a
-    // flank that is one bar with a dot at each end is precisely the box-with-
-    // circles this component was sent back to fix. A blade proud of the hull
-    // by a few centimetres reads as a wing stub; anything thicker reads as
-    // the hull.
-    let spon = cc_aircars_sd_rbox(m - vec3<f32>(-0.05, 0.86, 0.26),
-                                  vec3<f32>(0.46, 0.055, 0.008), 0.045);
-    hull = cc_aircars_smin(hull, spon, 0.05);
-    let house = min(
-        cc_aircars_sd_sphere(m - vec3<f32>(0.38, 0.93, 0.26),
-                             cc_aircars_HOUSE_R),
-        cc_aircars_sd_sphere(m - vec3<f32>(-0.52, 0.93, 0.26),
-                             cc_aircars_HOUSE_R));
-    hull = cc_aircars_smin(hull, house, 0.045);
-    // Dorsal fin over the tail, and a whip aerial off the nose deck, offset
-    // to port because real hardware is not symmetric.
-    // The fin has to grow OUT of the transom, not sit on it. Perched at
-    // z = 0.86 with a 0.06 blend it overlapped the tail by three centimetres
-    // and rendered as exactly what it was: a rounded slab floating above the
-    // hull with daylight under it — the box artifact this whole refit exists
-    // to remove, reintroduced at the one place nobody looks. Seated lower,
-    // blended at 0.13, and RAKED: the sample's x is pushed forward with
-    // height, so the solid leans aft the way a fin does. A shear is not an
-    // isometry, so the field is scaled by 1/sqrt(1 + 0.55^2) = 0.876 to stay
-    // an under-estimate for the marcher, the same correction the canopy makes.
-    let fq = q - vec3<f32>(-1.38, 0.0, 0.74);
-    let fin = 0.876 * cc_aircars_sd_rbox(
-        vec3<f32>(fq.x + 0.55 * fq.z, fq.y, fq.z),
-        vec3<f32>(0.20, 0.010, 0.16), 0.045);
-    hull = cc_aircars_smin(hull, fin, 0.13);
-    let ant = cc_aircars_sd_capsule(q, vec3<f32>(1.02, 0.22, 0.56),
-                                    vec3<f32>(0.96, 0.22, 1.00), 0.028);
-    hull = min(hull, ant);
-
-    // Twin nacelles on the rear flanks; their aft caps are the thrusters.
-    // Seated aft of the nav housing rather than over it: moved outboard, the
-    // pod's 0.23 m radius reached forward far enough to swallow the aft lens
-    // and the red lamp came back as a squashed smear. Shorter and further
-    // back leaves 0.06 m between pod skin and housing, which the 0.09 blend
-    // turns into a pylon root instead of a collision.
-    let pods = cc_aircars_sd_rbox(
-        m - vec3<f32>(-1.14, cc_aircars_NAC_Y, cc_aircars_NAC_Z),
-        vec3<f32>(0.40, 0.045, 0.045), 0.185);
-    // Cabin bubble, seated aft of the nose the way the box canopy was — and
-    // short enough in x that there is a HOOD in front of it. A bubble that
-    // runs into the nose is a fuselage; a bubble with deck fore and aft of it
-    // is a cabin, and that is the difference between reading as a car and
-    // reading as a pod.
-    // The bubble is SHEARED forward with height, which rakes the windshield
-    // and gives the cabin a back-slope — the profile everyone reads as a
-    // passenger compartment. A shear is not an isometry, so the field is
-    // scaled by 1/sqrt(1 + s^2) to stay a valid (under-)estimate for the
-    // marcher; s = 0.42 gives 0.922.
-    let ck = q - vec3<f32>(-0.28, 0.0, 0.58);
-    let canopy = 0.922 * cc_aircars_sd_ellipsoid(
-        vec3<f32>(ck.x + 0.42 * ck.z, ck.y, ck.z),
-        vec3<f32>(0.76, 0.46, 0.44));
-
-    var d = cc_aircars_smin(hull, pods, 0.09);
-    d = cc_aircars_smin(d, canopy, 0.075);
-    return vec4<f32>(d, hull, canopy, pods);
-}
-
-struct cc_aircars_Craft {
-    ok: bool,
-    base: vec3<f32>,  // hull bottom, craft centered in xy
-    axis: i32,        // 0 = travels along x, 1 = travels along y
-    fwd: f32,         // +1 or -1 along that axis
-    yaw: f32,         // small per-craft heading offset (rad)
-}
-
-fn cc_aircars_no_craft() -> cc_aircars_Craft {
-    return cc_aircars_Craft(false, vec3<f32>(0.0), 0, 1.0, 0.0);
-}
-
-// The craft's heading as a unit vector in world xy: the lane axis turned by
-// the craft's own yaw. Local <-> world is then a rotation about z, so a
-// normal transforms with the same two numbers and z is shared outright — the
-// shader can read h.normal.z as "up" without converting anything.
-fn cc_aircars_frame(v: cc_aircars_Craft) -> vec2<f32> {
-    let cd = cos(v.yaw);
-    let sd = sin(v.yaw);
-    if (v.axis == 0) {
-        return v.fwd * vec2<f32>(cd, sd);
-    }
-    return v.fwd * vec2<f32>(-sd, cd);
-}
-
-fn cc_aircars_to_local(f: vec2<f32>, w: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(f.x * w.x + f.y * w.y, f.x * w.y - f.y * w.x, w.z);
-}
-
-fn cc_aircars_to_world(f: vec2<f32>, l: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(f.x * l.x - f.y * l.y, f.y * l.x + f.x * l.y, l.z);
-}
-
-fn cc_aircars_miss(ci: vec2<i32>) -> CityHit {
-    return CityHit(false, 1e30, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0),
-                   0, ci);
-}
-
-// Where craft `lane` of cell `ci` is, if it exists at all.
-//   lane 0 — the x-avenue lane (runs north/south)
-//   lane 1 — the y-avenue lane (runs east/west)
-//   lane 2 — the free flyer
-// Deterministic in (ci, cc, lane) alone, so the shader re-derives a craft from
-// its hit kind and the core's own CityCell — nothing has to be smuggled
-// through CityHit.
-fn cc_aircars_craft(ci: vec2<i32>, cc: CityCell, lane: i32)
-        -> cc_aircars_Craft {
-    let cell = u.ocean_params.x;
-    let cmin = vec2<f32>(ci) * cell;
-
-    if (lane == 2) {
-        // Free flyers only over the built city; open lots keep empty sky.
-        if (!cc.built) {
-            return cc_aircars_no_craft();
-        }
-        let r = cc_aircars_draw(ci, lane);
-        if (r.x >= cc_aircars_FREE_FRAC) {
-            return cc_aircars_no_craft();
-        }
-        // r.x is uniform on [0, FREE_FRAC): rescaled it is a free draw, so a
-        // heading costs no extra hash.
-        let q = r.x / cc_aircars_FREE_FRAC;
-        let span = cell - 2.0 * cc_aircars_FREE_MARGIN;
-        return cc_aircars_Craft(
-            true,
-            vec3<f32>(cmin.x + cc_aircars_FREE_MARGIN + r.y * span,
-                      cmin.y + cc_aircars_FREE_MARGIN + r.z * span,
-                      mix(cc_aircars_FREE_Z_LO, cc_aircars_FREE_Z_HI, r.w)),
-            select(0, 1, q > 0.5),
-            select(-1.0, 1.0, fract(q * 2.0) > 0.5),
-            (fract(r.y * 53.0) - 0.5) * 2.0 * cc_aircars_YAW);
-    }
-
-    // Avenue lanes. Exactly one of the two edge tests can fire — the avenue
-    // period is 8, so consecutive indices are never both avenues — which is
-    // why one lane slot per axis per cell is the whole story.
-    let k = select(ci.y, ci.x, lane == 0);
-    let lo_edge = city_is_avenue(k);
-    if (!lo_edge && !city_is_avenue(k + 1)) {
-        return cc_aircars_no_craft();
-    }
-    let r = cc_aircars_draw(ci, lane);
-    // Traffic clusters where the city does. And a lane follows the avenue
-    // on the ground: where that avenue was never built — across open scrub
-    // and the gaps in the belt — only through-traffic between districts
-    // flies it, a thin fraction, so the sky over the gaps is neither dead
-    // nor a floating copy of downtown.
-    let side = select(select(3, 2, lo_edge), select(1, 0, lo_edge), lane == 0);
-    let served = select(cc_aircars_THROUGH_FRAC, 1.0,
-                        city_edge_street(cc, side));
-    let p = cc_aircars_LANE_P * served
-            * mix(cc_aircars_DENS_LO, cc_aircars_DENS_HI,
-                  smoothstep(cc_aircars_DENS_START, cc_aircars_DENS_FULL,
-                             cc.density));
-    if (r.x >= p) {
-        return cc_aircars_no_craft();
-    }
-
-    // Lateral seat: LANE_OFF in from whichever edge is the avenue, jittered.
-    let jit = (r.z - 0.5) * 2.0 * cc_aircars_LANE_JIT;
-    let lat = select(cell - cc_aircars_LANE_OFF + jit,
-                     cc_aircars_LANE_OFF + jit, lo_edge);
-    let along = 0.5 * cell + (r.y - 0.5) * 2.0 * cc_aircars_ALONG_JIT;
-    let z = select(cc_aircars_Z_LOW, cc_aircars_Z_HIGH,
-                   r.w > cc_aircars_HIGH_CUT)
-            + (fract(r.w * 37.0) - 0.5) * 2.0 * cc_aircars_Z_JIT;
-
-    // Yaw is a free re-draw off r.z, the way the deck jitter is off r.w: no
-    // craft flies exactly parallel to its lane, and five degrees is the
-    // difference between a formation and traffic.
-    let yaw = (fract(r.z * 61.0) - 0.5) * 2.0 * cc_aircars_YAW;
-
-    if (lane == 0) {
-        // Runs along y. On the avenue's +x verge (this cell's min edge is the
-        // avenue) right-hand traffic heads north.
-        return cc_aircars_Craft(
-            true, vec3<f32>(cmin.x + lat, cmin.y + along, z),
-            1, select(-1.0, 1.0, lo_edge), yaw);
-    }
-    // Runs along x; the same rule rotated.
-    return cc_aircars_Craft(
-        true, vec3<f32>(cmin.x + along, cmin.y + lat, z),
-        0, select(1.0, -1.0, lo_edge), yaw);
-}
-
-// Half-extents in xy for a body of the given along/across half-sizes.
-fn cc_aircars_extent(axis: i32, hl: f32, hw: f32) -> vec2<f32> {
-    return select(vec2<f32>(hw, hl), vec2<f32>(hl, hw), axis == 0);
-}
-
-// The close read: bounding box, then sphere-trace the vehicle inside it.
-// Called only when the box is worth more than a few pixels; a miss inside the
-// box is a miss, which is what carves the curved silhouette out of the slab.
-fn cc_aircars_sdf_hit(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                      t0: f32, t1: f32, v: cc_aircars_Craft, lane: i32,
-                      ci: vec2<i32>, fp: f32) -> CityHit {
-    let hx = cc_aircars_extent(v.axis, cc_aircars_SDF_PAD_L,
-                               cc_aircars_SDF_PAD_W);
-    let bmin = vec3<f32>(v.base.xy - hx,
-                         v.base.z - cc_aircars_SDF_PAD_ZLO);
-    let bmax = vec3<f32>(v.base.xy + hx,
-                         v.base.z + cc_aircars_SDF_PAD_ZHI);
-    let sb = city_box_hit(o, inv_dir, bmin, bmax);
-    let ta = max(max(sb.x, t0), 0.0);
-    let tb = min(sb.y, t1);
-    if (sb.x > sb.y || ta > tb) {
-        return cc_aircars_miss(ci);
-    }
-
-    // Ray into the craft's frame once, rather than the sample point every
-    // step: the transform is a rotation about z, so |rd| = |dir| and t is
-    // still world distance.
-    let f = cc_aircars_frame(v);
-    let ro = cc_aircars_to_local(f, o - v.base);
-    let rd = cc_aircars_to_local(f, dir);
-    // Surface tolerance follows the footprint: converge to well under a pixel
-    // and no further. The floor keeps the whip aerial from costing the whole
-    // iteration budget at arm's length.
-    let eps = clamp(0.30 * fp, 0.0035, 0.06);
-
-    var cc_aircars_t = ta;
-    var cc_aircars_found = false;
-    for (var cc_aircars_i: i32 = 0; cc_aircars_i < cc_aircars_SDF_ITERS;
-         cc_aircars_i = cc_aircars_i + 1) {
-        let d = cc_aircars_sdf(ro + cc_aircars_t * rd).x;
-        if (d < eps) {
-            cc_aircars_found = true;
-            break;
-        }
-        cc_aircars_t = cc_aircars_t + d;
-        if (cc_aircars_t > tb) {
-            break;
-        }
-    }
-    if (!cc_aircars_found || cc_aircars_t > tb) {
-        return cc_aircars_miss(ci);
-    }
-
-    // Normal by the four-tap tetrahedron gradient, at the tolerance's own
-    // scale so a coarse trace gets a correspondingly smoothed normal.
-    let q = ro + cc_aircars_t * rd;
-    let hs = max(eps, 0.004);
-    // The four tetrahedron taps run as a LOOP, not as four unrolled calls,
-    // and that is a performance decision, not a style one. Written out, the
-    // four calls inline four more copies of the whole vehicle field into the
-    // one kernel that also marches the clouds; the register budget is per
-    // kernel, so occupancy collapses for EVERY pixel in the frame whether or
-    // not a craft is anywhere near it. Measured on the RTX 5080: the unrolled
-    // taps cost +67% on the aerial view, where the nearest craft is 7 km away
-    // and the gate can never fire. Rolled, one copy serves all four.
-    var cc_aircars_g = vec3<f32>(0.0);
-    for (var cc_aircars_k: u32 = 0u; cc_aircars_k < 4u;
-         cc_aircars_k = cc_aircars_k + 1u) {
-        // The tetrahedron's four sign triples, as bit rows: x on taps 0,3;
-        // y on 1,3; z on 2,3.
-        let cc_aircars_e = 2.0 * vec3<f32>(
-            f32((0x9u >> cc_aircars_k) & 1u),
-            f32((0xau >> cc_aircars_k) & 1u),
-            f32((0xcu >> cc_aircars_k) & 1u)) - 1.0;
-        cc_aircars_g = cc_aircars_g + cc_aircars_e
-                       * cc_aircars_sdf(q + cc_aircars_e * hs).x;
-    }
-    let g = cc_aircars_g;
-
-    return CityHit(true, cc_aircars_t, o + cc_aircars_t * dir,
-                   // @domain: the SDF's gradient at a surface point: nonzero off the medial axis
-                   cc_aircars_to_world(f, normalize(g)),
-                   300 + 4 * lane + 3, ci);
-}
-
-// Nearest hit of one craft against [t0, t1]. The kind encodes both the lane
-// (so the shader can find the craft again) and the part that was hit:
-// 300 + 4 * lane + part, part 0 = hull side/top, 1 = the underglow panel on
-// the belly, 2 = the canopy, 3 = an SDF hit (the close read, whose parts the
-// shader recovers from the local position and the field itself).
-fn cc_aircars_hit_craft(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                        t0: f32, t1: f32, v: cc_aircars_Craft, lane: i32,
-                        ci: vec2<i32>, fp: f32) -> CityHit {
-    if (fp < cc_aircars_SDF_FP) {
-        return cc_aircars_sdf_hit(o, dir, inv_dir, t0, t1, v, lane, ci, fp);
-    }
-    // The hull box, grown toward a pixel once the craft is smaller than one
-    // (cc_aircars_grown); the shader dilutes it by the same factor.
-    let hc = cc_aircars_hull_centre(v);
-    let he = cc_aircars_grown(v);
-    let hmin = hc - he;
-    let hmax = hc + he;
-    let sh = city_box_hit(o, inv_dir, hmin, hmax);
-    let t_hull = select(1e30, sh.x,
-                        sh.x <= sh.y && sh.x > t0 && sh.x <= t1);
-
-    let aft = select(vec2<f32>(0.0, -v.fwd * cc_aircars_CANOPY_AFT),
-                     vec2<f32>(-v.fwd * cc_aircars_CANOPY_AFT, 0.0),
-                     v.axis == 0);
-    let cx = cc_aircars_extent(v.axis, cc_aircars_CANOPY_HALF_L,
-                               cc_aircars_CANOPY_HALF_W);
-    let kmin = vec3<f32>(v.base.xy + aft - cx, v.base.z + cc_aircars_HULL_H);
-    let kmax = vec3<f32>(v.base.xy + aft + cx,
-                         v.base.z + cc_aircars_HULL_H + cc_aircars_CANOPY_H);
-    // The composer's namespace check is line-based, so even this local wears
-    // the prefix.
-    var cc_aircars_t_canopy = 1e30;
-    if (fp < cc_aircars_CANOPY_FP) {
-        let sk = city_box_hit(o, inv_dir, kmin, kmax);
-        if (sk.x <= sk.y && sk.x > t0 && sk.x <= t1) {
-            cc_aircars_t_canopy = sk.x;
-        }
-    }
-
-    let t = min(t_hull, cc_aircars_t_canopy);
-    if (t >= 1e30) {
-        return cc_aircars_miss(ci);
-    }
-    let is_canopy = cc_aircars_t_canopy < t_hull;
-    let bmin = select(hmin, kmin, is_canopy);
-    let bmax = select(hmax, kmax, is_canopy);
-    let pos = o + t * dir;
-    let nrm = city_box_normal(pos, bmin, bmax);
-    // The belly of the hull is the underglow panel.
-    let part = select(select(0, 1, nrm.z < -0.5), 2, is_canopy);
-    return CityHit(true, t, pos, nrm, 300 + 4 * lane + part, ci);
-}
-
-// --- sub-pixel craft ---------------------------------------------------------
-// A craft narrower than a pixel is either hit by a pixel's one ray, and then
-// drawn at its full panel radiance, or missed: flying, that is a scatter of
-// saturated colored specks winking on and off — confetti — where the eye
-// sees a faint steady point. So below a pixel the hull box GROWS to about
-// one pixel (half-extent MIN_PX footprints) and its radiance is DILUTED by
-// the ratio of the true box's projected area to the grown one's: every pixel
-// the craft touches carries radiance x coverage, which is what a lens
-// integrates, and the light a craft adds to the frame is the same at every
-// distance. The footprint is the craft's own — its distance from the camera,
-// not the ray's cell — so the tracer and the shader agree on it exactly.
-const cc_aircars_MIN_PX: f32 = 0.6;
-
-fn cc_aircars_hull_centre(v: cc_aircars_Craft) -> vec3<f32> {
-    return vec3<f32>(v.base.xy, v.base.z + 0.5 * cc_aircars_HULL_H);
-}
-
-fn cc_aircars_half(v: cc_aircars_Craft) -> vec3<f32> {
-    return vec3<f32>(
-        cc_aircars_extent(v.axis, cc_aircars_HALF_L, cc_aircars_HALF_W),
-        0.5 * cc_aircars_HULL_H);
-}
-
-fn cc_aircars_grown(v: cc_aircars_Craft) -> vec3<f32> {
-    let d = length(cc_aircars_hull_centre(v) - city_camera_origin());
-    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * d;
-    return max(cc_aircars_half(v), vec3<f32>(cc_aircars_MIN_PX * fp));
-}
-
-// Projected area of a box of half-extents e seen along dir (up to a common
-// factor, which cancels in the ratio).
-fn cc_aircars_proj(e: vec3<f32>, dir: vec3<f32>) -> f32 {
-    let a = abs(dir);
-    return a.x * e.y * e.z + a.y * e.x * e.z + a.z * e.x * e.y;
-}
-
-fn cc_aircars_nearer(a: CityHit, b: CityHit) -> CityHit {
-    if (b.hit && (!a.hit || b.t < a.t)) {
-        return b;
-    }
-    return a;
-}
-
-// One lane's contribution: place, then test. Both halves early-out cheaply,
-// so an absent lane costs an integer compare and an absent craft one hash.
-fn cc_aircars_lane_hit(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                       t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell,
-                       lane: i32, fp: f32) -> CityHit {
-    let v = cc_aircars_craft(ci, cc, lane);
-    if (!v.ok) {
-        return cc_aircars_miss(ci);
-    }
-    return cc_aircars_hit_craft(o, dir, inv_dir, t0, t1, v, lane, ci, fp);
-}
-
-fn cc_aircars_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                          t0: f32, t1: f32, ci: vec2<i32>, cc: CityCell)
-        -> CityHit {
-    // Gate 1, no hash: does this segment pass through the air layer at all?
-    // Most city pixels are looking at a facade or at the road.
-    let za = o.z + t0 * dir.z;
-    let zb = o.z + t1 * dir.z;
-    if (min(za, zb) > cc_aircars_Z_MAX || max(za, zb) < cc_aircars_Z_MIN) {
-        return cc_aircars_miss(ci);
-    }
-    // Gate 2: a craft smaller than this is not worth a box test.
-    let fp = (2.0 * u.cam_origin.w / max(u.params.x, 1.0)) * max(t0, 0.0);
-    if (fp > cc_aircars_FAR_FP) {
-        return cc_aircars_miss(ci);
-    }
-    let h0 = cc_aircars_lane_hit(o, dir, inv_dir, t0, t1, ci, cc, 0, fp);
-    let h1 = cc_aircars_lane_hit(o, dir, inv_dir, t0, t1, ci, cc, 1, fp);
-    let h2 = cc_aircars_lane_hit(o, dir, inv_dir, t0, t1, ci, cc, 2, fp);
-    return cc_aircars_nearer(cc_aircars_nearer(h0, h1), h2);
-}
-
-// One nav lamp. `a` and `b` are the hit's coordinates in the face's own plane
-// relative to the craft, `seat_*` the lamp's seat in the same frame, and
-// `span_*` the face's size. Resolved while the dot is bigger than a pixel,
-// handed to the face's mean when it is not: dot area over face area is the
-// honest sub-pixel value, so the craft keeps its light and loses only the
-// resolution.
-fn cc_aircars_lamp(a: f32, b: f32, seat_a: f32, seat_b: f32,
-                   span_a: f32, span_b: f32, col: vec3<f32>, fp: f32)
-        -> vec3<f32> {
-    let d = length(vec2<f32>(a - seat_a, b - seat_b));
-    let sharp = select(0.0, 1.0, d < cc_aircars_LAMP_R);
-    let area = 3.14159265 * cc_aircars_LAMP_R * cc_aircars_LAMP_R;
-    let mean = area / max(span_a * span_b, 1e-3);
-    let k = smoothstep(cc_aircars_LAMP_LOD_START, cc_aircars_LAMP_LOD_FULL,
-                       fp);
-    return col * (cc_aircars_LAMP_RAD * mix(sharp, mean, k));
-}
-
-// White forward, red aft, on whichever face is looking at you. A craft
-// crossing your view still declares which way it is going, because the flank
-// carries the same pair near its ends.
-fn cc_aircars_navlights(h: CityHit, v: cc_aircars_Craft, fp: f32)
-        -> vec3<f32> {
-    let rel = h.pos - v.base;
-    let a = select(rel.y * v.fwd, rel.x * v.fwd, v.axis == 0);
-    let across = select(rel.x, rel.y, v.axis == 0);
-    let b = rel.z;
-    let seat_b = 0.60 * cc_aircars_HULL_H;
-    let white = vec3<f32>(1.00, 0.96, 0.88);
-    let red = vec3<f32>(1.00, 0.13, 0.06);
-    let n_along = select(h.normal.y * v.fwd, h.normal.x * v.fwd, v.axis == 0);
-    let n_across = select(h.normal.x, h.normal.y, v.axis == 0);
-    let face_w = 2.0 * cc_aircars_HALF_W;
-    let face_l = 2.0 * cc_aircars_HALF_L;
-
-    if (n_along > 0.5) {
-        return cc_aircars_lamp(across, b, -0.52, seat_b, face_w,
-                               cc_aircars_HULL_H, white, fp)
-             + cc_aircars_lamp(across, b, 0.52, seat_b, face_w,
-                               cc_aircars_HULL_H, white, fp);
-    }
-    if (n_along < -0.5) {
-        return cc_aircars_lamp(across, b, -0.52, seat_b, face_w,
-                               cc_aircars_HULL_H, red, fp)
-             + cc_aircars_lamp(across, b, 0.52, seat_b, face_w,
-                               cc_aircars_HULL_H, red, fp);
-    }
-    if (abs(n_across) > 0.5) {
-        return cc_aircars_lamp(a, b, 1.55, seat_b, face_l,
-                               cc_aircars_HULL_H, white, fp)
-             + cc_aircars_lamp(a, b, -1.55, seat_b, face_l,
-                               cc_aircars_HULL_H, red, fp);
-    }
-    return vec3<f32>(0.0);
-}
-
-// The close read's shading. Everything here is a function of the SDF normal
-// or of the hit's position in the craft's own frame, which is the only reason
-// a rounded box full of smooth-mins reads as a machine: the eye recovers the
-// surface from how the light falls off across it, not from the outline.
-fn cc_aircars_shade_sdf(h: CityHit, v: cc_aircars_Craft, glow: vec3<f32>,
-                        bright: f32, fade: f32, fill: vec3<f32>,
-                        dir: vec3<f32>, fp: f32, a4: vec4<f32>) -> vec3<f32> {
-    let f = cc_aircars_frame(v);
-    let q = cc_aircars_to_local(f, h.pos - v.base);
-    let n = cc_aircars_to_local(f, h.normal);
-    let parts = cc_aircars_sdf(q);
-    let ya = abs(q.y);
-    let moon = u.sun_dir.xyz;
-    let refl = reflect(dir, h.normal);
-    let mspec = max(dot(refl, moon), 0.0);
-
-    // Which part of the solid the ray landed on. Soft, because the smooth-min
-    // means the surface near a join genuinely belongs to both.
-    let w_canopy = 1.0 - smoothstep(-0.02, 0.12,
-                                    parts.z - min(parts.y, parts.w));
-    // The seam is the crease itself: where the canopy's field and the hull's
-    // are equal, the join is a physical joint and gets a dark band. Found,
-    // not drawn — it follows the bubble wherever the smooth-min puts it.
-    let seam = 1.0 - smoothstep(0.0, 0.11, abs(parts.z - parts.y));
-
-    // --- dark-metal body ---------------------------------------------------
-    // This is what has to carry the solidity. Emission alone made a candy
-    // lozenge of the first cut: a craft has to read as a dark machine with
-    // lights ON it, so the hull gets its own small directional budget and the
-    // glow is confined to the panels that are actually panels.
-    // A hemisphere: cool skyglow above, sodium city below, blended by n.z.
-    // This one gradient does more for solidity than anything else here — it
-    // is what every curved surface under a lit street actually looks like,
-    // warm underneath and cold on top, and the eye integrates the gradient
-    // into a shape without being told.
-    let gl = city_glow_sample(h.pos.xy, 3.0);
-    // The weights are squared, not linear: a linear hemisphere paints every
-    // near-vertical surface the same mid-tone and the gradient stops being a
-    // gradient. Squaring keeps the flanks dark and puts the light where the
-    // surface actually turns.
-    let dn = 0.5 - 0.5 * n.z;
-    let sky_amb = fill * ((1.0 - dn) * (1.0 - dn));
-    let gnd_amb = CITY_UPLIGHT_COLOR * (cc_aircars_UPGLOW * (0.15 + 2.2 * gl)
-                                        * dn * dn);
-    var body = cc_aircars_HULL_FILL * sky_amb + gnd_amb;
-    // Moonlight on dark metal. Physically this is nearly nothing, and it is
-    // kept nearly nothing — but the sign of dot(n, moon) is the only cue that
-    // says which way a surface faces, and a hull without it is a cutout.
-    body = body + cc_aircars_HULL_DIFF * CITY_MOONLIGHT
-                  * max(dot(h.normal, moon), 0.0);
-    // The craft's own panel spilling back onto its lower flanks. Small, and
-    // the only reason it is here is that a light source hanging under a hull
-    // that leaves no trace on the hull looks like a decal.
-    body = body + cc_aircars_BOUNCE * mix(glow, vec3<f32>(1.0), 0.45)
-                  * (bright * dn);
-    // Moon sheen: narrow, so it travels across the crown as the craft turns.
-    body = body + cc_aircars_SHEEN * vec3<f32>(0.70, 0.78, 1.00)
-                  * pow(mspec, 26.0);
-    // Rim: the lit edge that says "curved". Tinted by the craft's own glow,
-    // because the belly panel is the brightest thing anywhere near the hull.
-    let rim = pow(1.0 - min(abs(dot(h.normal, dir)), 1.0), 3.5);
-    body = body + cc_aircars_RIM * rim
-                  * (0.06 * glow * bright + vec3<f32>(0.010, 0.011, 0.016));
-
-    // --- underglow, mapped onto the curved lower surface -------------------
-    // Two pieces, and the difference between them is the whole look: a broad
-    // PANEL on the surface that actually faces the ground, and a narrow STRIP
-    // along the chine that is all anyone sees from the side. The box version
-    // lit the entire flank because a box has no chine to stop at.
-    // Gating on the normal ALONE was the second wrong answer: a rounded nose
-    // cap points up over its top half and down over its bottom half, so
-    // "faces down" lights the entire nose and the entire tail and the craft
-    // goes back to being made of light. Every panel is therefore a normal
-    // test AND a footprint in the local frame — which is what a panel is.
-    // LOD, and it is the hand-off's whole design. Close up these are BARS —
-    // a spine down the deck, a strip along the chine, a panel inset in the
-    // belly — because that is what fitted lighting looks like. As the
-    // footprint grows toward SDF_FP they widen until they cover the faces
-    // they sit on, which is exactly what the box path beyond the gate draws.
-    // So the two constructions meet with the same mean radiance per face and
-    // the craft does not change brightness when the geometry swaps.
-    let k = smoothstep(0.06, cc_aircars_SDF_FP, fp);
-    let along = 1.0 - smoothstep(mix(0.95, 1.55, k), mix(1.32, 1.90, k),
-                                 abs(q.x));
-    let panel = along * (1.0 - smoothstep(mix(0.56, 0.86, k),
-                                          mix(0.82, 1.00, k), ya));
-    let belly = smoothstep(0.30, 0.85, -n.z) * mix(mix(0.02, 0.30, k), 1.0,
-                                                   panel);
-    // A BAND centred on the chine, not everything below it: a light bar with
-    // dark hull above and below is what makes the panel read as fitted rather
-    // than as the craft being made of light.
-    // The third gate is on the normal being FLANK-like. Without it the band
-    // in z sweeps across the nose's rounded underside — which is tangent to
-    // that height over a large area — and the craft grows a glowing snout.
-    let strip = (1.0 - smoothstep(cc_aircars_CHINE_LO, cc_aircars_CHINE_HI,
-                                  abs(q.z - cc_aircars_CHINE_Z)))
-                * (1.0 - smoothstep(0.42, 0.78, abs(n.z)))
-                * along * (1.0 - belly);
-    // The dorsal light is a spine bar down the middle of the deck, not the
-    // whole upper surface. From above it plus the canopy crown is the read.
-    let spine = 1.0 - smoothstep(mix(0.14, 0.90, k), mix(0.30, 1.10, k), ya);
-    let dorsal = smoothstep(mix(0.62, 0.15, k), mix(0.95, 0.55, k), n.z)
-                 * spine
-                 * (1.0 - smoothstep(mix(1.05, 1.60, k),
-                                     mix(1.45, 1.95, k), abs(q.x)))
-                 * cc_aircars_DORSAL;
-    let amt = belly + strip * cc_aircars_BAR + dorsal;
-    var em = glow * (cc_aircars_GLOW_RAD * bright * amt);
-
-    // --- cabin --------------------------------------------------------------
-    // Dark glass with a dim warm interior; the dorsal running light rides
-    // only the crown, so from the side the bubble is a window and from above
-    // it is still the lit chip the aerial read needs.
-    // The interior is visible through the SIDE glass and not through the
-    // roof, which is both true and the thing that separates a canopy from a
-    // painted panel: a bubble lit evenly all over is a lampshade.
-    let cab = vec3<f32>(1.00, 0.74, 0.44)
-              * (cc_aircars_CANOPY_RAD * cc_aircars_CABIN
-                 * (0.6 + 0.8 * a4.z) * (1.0 - smoothstep(0.15, 0.72, n.z)));
-    let canopy_em = cab
-                  + glow * (cc_aircars_GLOW_RAD * cc_aircars_DORSAL * bright
-                            * smoothstep(0.68, 0.97, n.z)
-                            * (1.0 - smoothstep(mix(0.10, 0.62, k), mix(0.26, 0.80, k), ya)))
-                  + cc_aircars_GLASS * vec3<f32>(0.55, 0.64, 0.90)
-                    * pow(mspec, 110.0);
-    em = mix(em, canopy_em, w_canopy);
-    // Glass takes far less ambient than painted metal, which is most of what
-    // tells a canopy from a roof panel at night.
-    body = body * mix(1.0, 0.30, w_canopy);
-    em = em * (1.0 - cc_aircars_SEAM_DARK * seam);
-    body = body * (1.0 - 0.85 * seam);
-
-    // --- thruster discs -----------------------------------------------------
-    // The aft caps of the nacelles, seen only from behind the craft.
-    let dr = length(vec2<f32>(ya - cc_aircars_NAC_Y, q.z - cc_aircars_NAC_Z));
-    let aft = 1.0 - smoothstep(-1.58, -1.36, q.x);
-    let back = smoothstep(0.30, 0.75, -n.x);
-    let core = 1.0 - smoothstep(0.55 * cc_aircars_THRUST_R,
-                                cc_aircars_THRUST_R, dr);
-    let cup = 1.0 - smoothstep(cc_aircars_THRUST_R,
-                               cc_aircars_THRUST_R + 0.07, dr);
-    em = em + mix(vec3<f32>(1.00, 0.93, 0.84), glow, 0.72)
-              * (cc_aircars_THRUST * bright * aft * back
-                 * (core + cc_aircars_THRUST_HALO * (cup - core)));
-
-    // --- intake slot --------------------------------------------------------
-    // A dark louvred cut in each nose flank. Shading, per SPEC: at this scale
-    // geometry would buy nothing the normal does not already give.
-    let intake = max(
-        (1.0 - smoothstep(0.0, 0.050, abs(q.z - 0.33)))
-            * (1.0 - smoothstep(0.24, 0.36, abs(q.x - 0.92)))
-            * smoothstep(0.25, 0.60, abs(n.y)),
-        // The grille across the nose. A vehicle needs one end that is
-        // obviously the front, and at this scale a dark slot facing forward
-        // does it more cheaply than any amount of modelled taper.
-        (1.0 - smoothstep(0.0, 0.055, abs(q.z - 0.25)))
-            * (1.0 - smoothstep(0.26, 0.42, ya))
-            * smoothstep(0.40, 0.85, n.x));
-    // --- panel lines --------------------------------------------------------
-    // Two, both at joints a fabricator would actually have: where the nose
-    // section meets the body, and where the tail transom starts.
-    // Two transverse joints — nose section to body, body to tail transom —
-    // and one longitudinal shoulder crease along the flank. The crease is the
-    // single most car-like line on the thing: bodies have a waistline.
-    let lines = max(max(1.0 - smoothstep(0.0, 0.045, abs(q.x - 0.52)),
-                        1.0 - smoothstep(0.0, 0.045, abs(q.x + 0.98))),
-                    (1.0 - smoothstep(0.0, 0.032, abs(q.z - 0.46)))
-                        * (1.0 - smoothstep(0.35, 0.62, abs(n.z)))
-                        * along)
-                * (1.0 - w_canopy);
-    let dark = 1.0 - max(cc_aircars_INTAKE_DARK * intake,
-                         cc_aircars_LINE_DARK * lines);
-    em = em * dark;
-    body = body * dark;
-
-    // --- nav lamps in their housings ---------------------------------------
-    // White forward, red aft, each a lens on the outboard face of its own
-    // raised housing. The lens grows and dims with the footprint so the pair
-    // keeps its flux as the housing goes sub-pixel — the craft loses the
-    // resolution, not the light.
-    // The lens is a cap on the OUTBOARD face of the housing bump, found by
-    // where the point sits on the bump rather than by distance to its centre:
-    // distance alone lights the whole hemisphere, which is how the first cut
-    // grew two headlights the size of the cabin.
-    let vf = vec3<f32>(q.x - 0.38, ya - 0.93, q.z - cc_aircars_HOUSE_Z);
-    let va = vec3<f32>(q.x + 0.52, ya - 0.93, q.z - cc_aircars_HOUSE_Z);
-    let df = length(vf);
-    let da = length(va);
-    // As the footprint grows the housing goes sub-pixel; open the cap and
-    // drop the radiance to hold its flux, so the pair fades rather than
-    // flickers.
-    let wide = clamp(2.4 * fp, 0.0, 0.55);
-    let cut = cc_aircars_LENS_OUT - wide;
-    let gain = clamp((1.0 - cc_aircars_LENS_OUT) / (1.0 - cut), 0.20, 1.0);
-    let lf = (1.0 - smoothstep(cc_aircars_HOUSE_R, 0.165, df))
-             * smoothstep(cut, cut + 0.28, vf.y / max(df, 1e-3));
-    let la = (1.0 - smoothstep(cc_aircars_HOUSE_R, 0.165, da))
-             * smoothstep(cut, cut + 0.28, va.y / max(da, 1e-3));
-    em = em + (vec3<f32>(1.00, 0.96, 0.88) * lf
-               + vec3<f32>(1.00, 0.13, 0.06) * la)
-              * (cc_aircars_LAMP_RAD * gain);
-
-    return body + em * fade;
-}
-
-fn cc_aircars_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
-        -> vec3<f32> {
-    // A grown (sub-pixel) hull is shaded at the true hull's nearest point and
-    // diluted by true over grown projected area; a resolved craft has
-    // grown == true and passes through untouched.
-    let code = h.kind - 300;
-    let v = cc_aircars_craft(h.cell, cc, code / 4);
-    let e = cc_aircars_half(v);
-    let eg = cc_aircars_grown(v);
-    var hh = h;
-    var dilution = 1.0;
-    if (code % 4 != 3 && any(eg > e)) {
-        let c = cc_aircars_hull_centre(v);
-        hh.pos = clamp(h.pos, c - e, c + e);
-        dilution = cc_aircars_proj(e, dir) / max(cc_aircars_proj(eg, dir),
-                                                 1e-6);
-    }
-    return cc_aircars_shade_resolved(hh, cc, dir, fp) * dilution;
-}
-
-fn cc_aircars_shade_resolved(h: CityHit, cc: CityCell, dir: vec3<f32>,
-                             fp: f32) -> vec3<f32> {
-    let code = h.kind - 300;
-    let lane = code / 4;
-    let part = code % 4;
-    let v = cc_aircars_craft(h.cell, cc, lane);
-    let a4 = cc_aircars_look(h.cell, lane);
-    let glow = cc_aircars_glow_color(a4.x);
-    let bright = 0.70 + 0.70 * a4.y;
-
-    // The two edges of the layer, each approached rather than stepped: the
-    // population edge at CITY_PROP_RANGE, and the footprint at which the
-    // tracer stops testing craft at all.
-    let fade = (1.0 - smoothstep(cc_aircars_FADE_START * CITY_PROP_RANGE,
-                                 cc_aircars_FADE_FULL * CITY_PROP_RANGE, h.t))
-             * (1.0 - smoothstep(cc_aircars_FAR_FADE, cc_aircars_FAR_FP, fp));
-
-    // The night fill the core gives every city surface. A hull is dark metal
-    // over a dark city: essentially a silhouette with a lit edge.
-    let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(h.pos.xy, 3.0));
-    let body = cc_aircars_HULL_FILL * fill;
-
-    if (part == 3) {   // the close read: shade against the SDF's own normal
-        return cc_aircars_shade_sdf(h, v, glow, bright, fade, fill, dir, fp,
-                                    a4);
-    }
-    if (part == 1) {   // the underglow panel: the whole point of the layer
-        let rel = h.pos - v.base;
-        let a = select(rel.y, rel.x, v.axis == 0);
-        let across = select(rel.x, rel.y, v.axis == 0);
-        let panel =
-            (1.0 - smoothstep(cc_aircars_PANEL_A, cc_aircars_HALF_L, abs(a)))
-          * (1.0 - smoothstep(cc_aircars_PANEL_W, cc_aircars_HALF_W,
-                              abs(across)));
-        return body + glow * (cc_aircars_GLOW_RAD * bright * fade
-                              * mix(cc_aircars_PANEL_RIM, 1.0, panel));
-    }
-    if (part == 2) {   // canopy: a warm interior seen through the glass
-        // Its BACK is dorsal like the hull's, and that matters more than it
-        // sounds: the canopy covers the middle of the top, so from directly
-        // above it is most of what a craft shows. Lit warm, the whole aerial
-        // read of the layer went with it. This also makes the LOD hand-off
-        // exact — when the canopy box drops out the hull top behind it is
-        // already the same radiance.
-        if (h.normal.z > 0.5) {
-            return body + glow * (cc_aircars_GLOW_RAD * cc_aircars_DORSAL
-                                  * bright * fade);
-        }
-        return body + vec3<f32>(1.00, 0.74, 0.44)
-                      * (cc_aircars_CANOPY_RAD * (0.6 + 0.8 * a4.z) * fade);
-    }
-    // Hull. The back carries a dorsal running light; the flanks carry the
-    // skirt of the belly panel, e-folding upward from the seam. Nav lamps are
-    // drawn on rather than built.
-    if (h.normal.z > 0.5) {
-        return body + glow * (cc_aircars_GLOW_RAD * cc_aircars_DORSAL
-                              * bright * fade);
-    }
-    let up = max(h.pos.z - v.base.z, 0.0);
-    let wrap = 1.0 - smoothstep(cc_aircars_SKIRT_LO, cc_aircars_SKIRT_HI, up);
-    let skirt = glow * (cc_aircars_GLOW_RAD * cc_aircars_SKIRT * bright
-                        * wrap);
-    return body + (skirt + cc_aircars_navlights(h, v, fp)) * fade;
-}
-
 // --- component: facadeworks (facadeworks.wgsl) ---
 // facadeworks — additive facade detail on top of the core's windows.
 //
@@ -9798,13 +8839,15 @@ fn cc_facadeworks_cover(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 //
 // LIGHT. The artery read from altitude is NOT the lamp heads: a 0.36 m rail
 // at 4 m/px covers a tenth of a pixel and delivers a tenth of its radiance.
-// It is what those strings put on the 16 m of DECK — the wash, plus the
-// traffic under it — which is what actually makes a lit road photograph as a
-// continuous bright ribbon from the air. The string dashes (radiance 5,
-// warm white, every 9 m along both rail tops, collapsing into a continuous
-// line of the same mean energy once a dash is sub-pixel) are the close read;
-// the deck's own mean radiance, about 0.47, is the far one — roughly half
-// wash and half frozen traffic.
+// It is what those strings put on the 16 m of DECK — the wash — which is
+// what actually makes a lit road photograph as a continuous bright ribbon
+// from the air. The string dashes (radiance 5, warm white, every 9 m along
+// both rail tops, collapsing into a continuous line of the same mean energy
+// once a dash is sub-pixel) are the close read; the deck's own mean radiance
+// is the far one. There is no traffic: the deck carried "frozen traffic",
+// the light of cars painted on the asphalt with no car under it, until
+// Thomas flew it (2026-11): "they dont have a source". Real cars on the
+// decks were the alternative; he chose an empty road.
 //
 // A note on what "bright" can mean here. At exposure 6 the tone map is
 // nearly flat above radiance 1: 0.47 renders at 0.85 display and 1.7 (a
@@ -9913,10 +8956,10 @@ const cc_skyway_RAIL_BAND: f32 = 0.35;  // lit depth below the rail top (m)
 // it is a GRADIENT, not a bar, and the difference is everything. At exposure
 // 6 with a white point of 15 the tone map has already spent most of its range
 // by radiance 1.5 (0.1 renders at 0.55 display, 1.0 at 0.93, 3.5 at white),
-// so a deck lit evenly at 1.3 arrives as a featureless white ribbon with its
-// traffic invisible inside it. E-folded over 1.9 m instead, the same deck
-// runs 0.95 display under a lamp at the rail down to about 0.2 along the
-// centreline: bright margins, dark lanes, and headroom for headlights.
+// so a deck lit evenly at 1.3 arrives as a featureless white ribbon.
+// E-folded over 1.9 m instead, the same deck runs 0.95 display under a lamp
+// at the rail down to about 0.2 along the centreline: bright margins and
+// dark lanes.
 //
 // A string of lamps 9 m apart also does not light a road evenly — it scallops
 // it, and that rhythm running away toward the vanishing point is most of what
@@ -9993,32 +9036,6 @@ const cc_skyway_JNT_STEEL: f32 = 0.22;  // plate lift, as a fraction of wash
 // honestly smooth rather than dishonestly striped.
 const cc_skyway_JNT_FP_LO: f32 = 0.65;
 const cc_skyway_JNT_FP_HI: f32 = 2.00;
-
-// --- traffic streaks -------------------------------------------------------
-// Four lanes: two per direction, at |lat| = 2 and 6. One hash draw per
-// (route, lane, 70 m cell), so with the occupancy below a lane carries a
-// trail every ~85 m — inside the brief's 80-200, and dense enough that the
-// population's MEAN is a real share of what the deck delivers at a kilometre
-// rather than a rounding error on the wash.
-const cc_skyway_STK_CELL: f32 = 70.0;
-const cc_skyway_STK_L: f32 = 7.0;
-const cc_skyway_STK_W: f32 = 0.65;    // lateral sigma (m)
-const cc_skyway_STK_P: f32 = 0.85;    // slot occupancy at full district glow
-const cc_skyway_STK_TAIL: f32 = 2.2;  // e-folds along the frozen trail
-const cc_skyway_STK_HALO: f32 = 0.16;   // glow around the trail core
-const cc_skyway_STK_HALO_W: f32 = 2.20; // its sigma (m)
-const cc_skyway_STK_FP_LO: f32 = 1.6;
-const cc_skyway_STK_FP_HI: f32 = 5.0;
-// Headlights blow out; tail lamps must NOT. The tone map desaturates anything
-// it clips, so a red at radiance 6 arrives pink-white — the colour that says
-// "receding traffic" only survives if the green and blue channels stay off
-// the shoulder. Hence a deeply saturated red at a third of the white's
-// radiance, which lands at (1.0, 0.64, 0.42) in display: unmistakably red,
-// still the brightest thing in its lane.
-const cc_skyway_HEAD_COL: vec3<f32> = vec3<f32>(1.00, 0.95, 0.86);
-const cc_skyway_HEAD_RAD: f32 = 16.0;
-const cc_skyway_TAIL_COL: vec3<f32> = vec3<f32>(1.00, 0.055, 0.018);
-const cc_skyway_TAIL_RAD: f32 = 4.5;
 
 // --- hit kinds --------------------------------------------------------------
 // kind = 200 + 8*family + part. SPEC allows local in [0, 15]; a stride of 8
@@ -10121,13 +9138,13 @@ fn cc_skyway_ztop(a: f32, ac: f32, raised: bool) -> f32 {
 // z = zb + m*(a - ab), and the two rails riding on it. An envelope test
 // covering deck and rails together gates the three detail tests, so a piece
 // the ray never reaches costs three clips and stops.
-fn cc_skyway_ribbon(lo3: vec3<f32>, ld3: vec3<f32>, ct0: f32, ct1: f32,
+fn cc_skyway_ribbon(lo3: vec3<f32>, ld3: vec3<f32>, ta: f32, tb: f32,
                     a0: f32, a1: f32, ab: f32, zb: f32, m: f32,
                     fam: i32, best: cc_skyway_Best) -> cc_skyway_Best {
     var r = best;
     let h0 = lo3.z - zb - m * (lo3.x - ab);
     let hd = ld3.z - m * ld3.x;
-    let seed = cc_skyway_Span(ct0, ct1, -1, 1.0);
+    let seed = cc_skyway_Span(ta, tb, -1, 1.0);
 
     var env = cc_skyway_clip(seed, lo3.x, ld3.x, a0, a1, 0);
     env = cc_skyway_clip(env, lo3.y, ld3.y, -cc_skyway_HW, cc_skyway_HW, 1);
@@ -10279,12 +9296,20 @@ fn cc_skyway_route(o: vec3<f32>, dir: vec3<f32>, fam: i32, lat_c: f32,
         return r;
     }
 
+    // The ribbon pieces clip from the z slab's entry, not the corridor's:
+    // the deck's fascia and the outer faces of its rails lie ON the
+    // corridor's lateral bounds, and a piece whose clip started at ct0 could
+    // never raise its entry there, so it never learned the face it entered
+    // by — and dropped the hit. From outside the corridor the fascia and the
+    // rails' outer faces were not drawn at all; a ray went through to the
+    // deck top or the soffit behind them (found by the collider's mirror
+    // test, 2026-11). The corridor bound still rejects everything else.
     let raised = fam == 1;
     if (!raised) {
         // Flat from horizon to horizon.
         return cc_skyway_pylons(
             lo3, ld3, ct0, ct1, 0.0, false, fam,
-            cc_skyway_ribbon(lo3, ld3, ct0, ct1,
+            cc_skyway_ribbon(lo3, ld3, tz0, ct1,
                              -cc_skyway_FAR, cc_skyway_FAR,
                              0.0, cc_skyway_DECK_Z, 0.0, fam, r));
     }
@@ -10302,15 +9327,15 @@ fn cc_skyway_route(o: vec3<f32>, dir: vec3<f32>, fam: i32, lat_c: f32,
 
     // Five pieces sharing four end planes exactly: base, ramp up, high flat,
     // ramp down, base.
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, -cc_skyway_FAR, ac - e - rp,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, -cc_skyway_FAR, ac - e - rp,
                          0.0, cc_skyway_DECK_Z, 0.0, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac - e - rp, ac - e,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac - e - rp, ac - e,
                          ac - e - rp, cc_skyway_DECK_Z, slope, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac - e, ac + e,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac - e, ac + e,
                          0.0, cc_skyway_HIGH_Z, 0.0, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac + e, ac + e + rp,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac + e, ac + e + rp,
                          ac + e, cc_skyway_HIGH_Z, -slope, fam, r);
-    r = cc_skyway_ribbon(lo3, ld3, ct0, ct1, ac + e + rp, cc_skyway_FAR,
+    r = cc_skyway_ribbon(lo3, ld3, tz0, ct1, ac + e + rp, cc_skyway_FAR,
                          0.0, cc_skyway_DECK_Z, 0.0, fam, r);
     return cc_skyway_pylons(lo3, ld3, ct0, ct1, ac, true, fam, r);
 }
@@ -10388,71 +9413,6 @@ fn cc_skyway_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
     return res;
 }
 
-// Frozen traffic. One draw per (route family, lane, 70 m cell) places a single
-// trail; which side of the centreline the lane is on decides which way it is
-// going and therefore whether you are looking at its headlights or its tail
-// lamps. Only the two lanes on the shaded point's own side are evaluated —
-// the far pair is four metres of a 0.65 m sigma away and contributes e^-19.
-// Below the LOD gate the trail is resolved; above it, the population's mean
-// over the whole deck, both colours, which is the honest asymptote.
-fn cc_skyway_streaks(s: f32, lat: f32, fam: i32, glow: f32, fp: f32)
-        -> vec3<f32> {
-    let sd = select(0u, 1u, lat >= 0.0);
-    let side = select(-1.0, 1.0, lat >= 0.0);
-    let n = floor(s / cc_skyway_STK_CELL);
-    let ni = bitcast<u32>(i32(n));
-    let p = cc_skyway_STK_P
-        * mix(0.35, 1.25, smoothstep(0.02, 0.35, glow));
-    let col = select(cc_skyway_TAIL_COL, cc_skyway_HEAD_COL, sd == 1u);
-    let rad = select(cc_skyway_TAIL_RAD, cc_skyway_HEAD_RAD, sd == 1u);
-
-    var f = 0.0;
-    for (var slot: i32 = 0; slot < 2; slot = slot + 1) {
-        let key = (u32(fam) * 3u + u32(slot)) * 2u + sd;
-        let r = city_rand4(vec2<u32>(
-            ni * 0x9e3779b9u + key * 0x51ed270bu + 0x165667b1u,
-            (ni * 0x85ebca6bu) ^ (key * 0xc2b2ae35u + 0x27d4eb2fu)));
-        if (r.x >= p) {
-            continue;
-        }
-        let s_c = (n + 0.15 + 0.70 * r.y) * cc_skyway_STK_CELL;
-        let lane = side * (2.0 + 4.0 * f32(slot));
-        // Travel is +along on the lat>0 side, -along on the other; the trail
-        // is frozen BEHIND the head, so it points against travel.
-        let x = -((s - s_c) * side) / cc_skyway_STK_L;
-        if (x < 0.0 || x > 1.0) {
-            continue;
-        }
-        let dl = lat - lane;
-        // Core plus halo: a lamp seen on a road surface is a hard bright
-        // patch inside a soft glow, and without the second term the trails
-        // read as painted dashes rather than as light.
-        let core = exp(-dl * dl
-                       / (2.0 * cc_skyway_STK_W * cc_skyway_STK_W));
-        let halo = cc_skyway_STK_HALO
-            * exp(-dl * dl / (2.0 * cc_skyway_STK_HALO_W
-                              * cc_skyway_STK_HALO_W));
-        f = f + (0.55 + 0.90 * r.w) * exp(-cc_skyway_STK_TAIL * x)
-                * (core + halo);
-    }
-
-    // The population's mean over the deck: occupancy x the trail's integral
-    // along s x its lateral integral, over the cell's area, summed over the
-    // two lanes of each colour. Written out rather than fitted, so changing
-    // STK_L or STK_W keeps the two ends of the LOD agreeing by construction.
-    let along_int = cc_skyway_STK_L * (1.0 - exp(-cc_skyway_STK_TAIL))
-                    / cc_skyway_STK_TAIL;
-    let lat_int = 2.5066 * (cc_skyway_STK_W
-                            + cc_skyway_STK_HALO * cc_skyway_STK_HALO_W);
-    let unit = 2.0 * p * along_int * lat_int
-               / (cc_skyway_STK_CELL * 2.0 * cc_skyway_HW);
-    let mean = (cc_skyway_HEAD_COL * cc_skyway_HEAD_RAD
-                + cc_skyway_TAIL_COL * cc_skyway_TAIL_RAD) * unit;
-
-    let k = smoothstep(cc_skyway_STK_FP_LO, cc_skyway_STK_FP_HI, fp);
-    return mix(col * (rad * f), mean, k);
-}
-
 fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     let code = h.kind - cc_skyway_KIND_BASE;
@@ -10481,8 +9441,8 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     // expansion joints the plain `fp` and a transverse band that is a fifth
     // of a pixel still believes itself resolved, and crawls.
     //
-    // So: lateral-extent detail (lane-line widths, the streaks' lateral
-    // profile) keeps `fp`; along-extent detail that is thin — the joints —
+    // So: lateral-extent detail (lane-line widths) keeps `fp`; along-extent
+    // detail that is thin — the joints —
     // gets this. Clamped at 5x like `city_shade`'s window grid, because at
     // true grazing the exact factor stops meaning anything.
     //
@@ -10580,9 +9540,8 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
                 * (cc_skyway_PAINT_AMP * paint_l * (0.20 + wash));
 
         // The joint crosses the paint and the wash — a comb plate is bare
-        // steel, so the lane line stops at it — but NOT the traffic, which is
-        // light thrown onto the deck rather than a property of the deck.
-        return e * j_mul + cc_skyway_streaks(s, lat, fam, glow, fp);
+        // steel, so the lane line stops at it.
+        return e * j_mul;
     }
 
     // Underside, fascia, pylons: near-black structure carrying the sodium
@@ -11438,8 +10397,7 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
     let zb = o.z + t1 * dir.z;
     let z_lo = min(za, zb);
     let z_hi = max(za, zb);
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = lod_pixel_angle() * max(t0, 0.0);
     var best = cc_rooftopworks_miss(ci);
 
     // Gate 1: the roof band, from the lowest deck this building owns to the
@@ -12367,9 +11325,10 @@ fn cc_skybridges_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 //   * the parking line, CAR_PARK_OFF in from the plot edge (the kerb proper).
 //     Slots on a 7 m lattice in world space, so a run of cars lines up
 //     across cell boundaries; ~35% occupied, scaled by the cascade the way
-//     the streetlights and the air traffic are.
+//     the streetlights are.
 // Every prop lives strictly inside the cell that draws it, because the DDA
-// tests a cell only from the side it enters (the rule aircars states). For
+// tests a cell only from the side it enters (a box straddling a cell
+// boundary is tested from one side and vanishes from the other). For
 // merged 2x2 superblocks the plot edge can fall in a sibling's column; that
 // kerb simply has no parking, and the sibling whose column does contain it
 // draws those cars.
@@ -12397,8 +11356,7 @@ fn cc_skybridges_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 // HEAD, recovered from the same lattice. Curvature reads through the
 // specular lobe sliding along the hull shoulder — Lambert alone on a dark
 // paint at night is nearly flat, and the glint is what says "this surface is
-// round". 30% of cars carry an underglow strip; the hue draw is aircars'
-// 60/25/15 cyan/magenta/amber, so ground and air read as one traffic system.
+// round". 30% of cars carry an underglow strip, 60/25/15 cyan/magenta/amber.
 //
 // COST. In order, each gate cheaper than the one it protects:
 //   1. the segment's z range against 12 m — no hash, two multiply-adds, and
@@ -13207,7 +12165,7 @@ struct cc_streetlife_Kerb {
 // The core's LOD pixel angle, the one both surface stages' footprints are
 // taken from (and so the one the per-car stage switch must use).
 fn cc_streetlife_pa() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // `near` picks the stage: false for the view ray's first stage (poles, and
@@ -13644,9 +12602,7 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 // Shading
 // ---------------------------------------------------------------------------
 
-// Underglow palette. Deliberately the same draw as aircars' — 60% cyan, 25%
-// magenta, 15% amber — so a street of parked cars and the lane of flying ones
-// above it are visibly the same fleet.
+// Underglow palette: 60% cyan, 25% magenta, 15% amber.
 fn cc_streetlife_glow_color(d: f32) -> vec3<f32> {
     if (d < 0.60) {
         return vec3<f32>(0.16, 0.90, 1.00);
@@ -13712,13 +12668,12 @@ fn cc_streetlife_seam(x: f32, x0: f32, w: f32, pitch: f32, fp: f32) -> f32 {
 // default slider this lands at ~1.5 px; with a fine slider the true-pixel
 // term takes over and holds the floor at 1 px.
 fn cc_streetlife_fp_px(fp: f32, t: f32) -> f32 {
-    return max(0.35 * fp,
-               2.0 * u.cam_origin.w / max(u.params.x, 1.0) * max(t, 0.0));
+    return max(0.35 * fp, true_pixel_angle() * max(t, 0.0));
 }
 
 // One lamp LENS on a face, resolved while it is bigger than a pixel and
-// handed to the face's mean when it is not (aircars' treatment, same
-// reasoning). The lens is an ellipse, not a disc, and it is nested inside the
+// handed to the face's mean when it is not, so the face's average is the
+// same either side of the hand-off. The lens is an ellipse, not a disc, and it is nested inside the
 // letterbox recess the SDF cut for it: a circular lens of radius 0.12
 // overflowed a housing only 0.16 tall, so it rendered as a white ball with a
 // dark eyebrow, and a row of parked cars looked back at the camera. Real
@@ -14882,7 +13837,8 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // plume by d / r, up it by the integral of dz / r — so an eddy is always
 // the same fraction of the plume that carries it: small and tight at the
 // cover, large and soft aloft. The lumps rise on the scene clock
-// (scene_time, frozen while the view is parked) at a fixed rate in zeta:
+// (scene_time; the live view draws them after its accumulation, so they go
+// on rising over a parked view: fs_steam_live) at a fixed rate in zeta:
 // in metres that is slow at the cover and faster aloft, where each eddy is
 // larger — the plume billows up and opens out rather than scrolling.
 //
@@ -14937,13 +13893,9 @@ fn cc_adscreens_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32,
 // eye-level view pays for its enumeration and its marches.
 
 // --- where steam is ----------------------------------------------------------
-// Share of PRESENT sites that steam, by district. A block owns about 3.3
-// present covers (two street edges x ~1.65 each), so 0.26 downtown is a
-// steaming cover every block or so and 0.015 in the outskirts is one in
-// twenty blocks. The ramp is the lamp scale's (city_lamp_scale): the same
-// districts that burn brightest steam most.
-const cc_manholesteam_FRAC_LO: f32 = 0.015;
-const cc_manholesteam_FRAC_HI: f32 = 0.26;
+// Which present sites steam is the core's (city_manhole_steam, with its
+// district shares CITY_MH_STEAM_FRAC_*), which the ground asks too: a
+// steaming cover is a dry, pale lid on a wet street.
 // The most vigorous share of steaming sites carry a stack.
 const cc_manholesteam_STACK_SHARE: f32 = 0.22;
 
@@ -14952,10 +13904,21 @@ const cc_manholesteam_STACK_SHARE: f32 = 0.22;
 // diagonal to the grid, so no street sees its plumes lean straight along
 // or straight across it.
 const cc_manholesteam_WIND: vec2<f32> = vec2<f32>(0.4472136, 0.8944272);
-// The source radius of a plume from a bare cover. Steam leaves through the
-// vent holes and the rim gap and billows out at once, so the visible plume
-// starts wider than the iron (CITY_MH_R); a stack's leaves its own mouth.
+// The source radius of a plume from a bare cover: the radius its body
+// grows from (r = R0_COVER + SPREAD z, which the thinning and the lumps
+// follow), wider than the iron (CITY_MH_R) because the steam billows out
+// within a metre. A stack's leaves its own mouth.
 const cc_manholesteam_R0_COVER: f32 = 0.9;
+// The first metre of a cover's plume (Thomas, 2026-11-08: a plume "just on
+// a random bit of street" — its cover was there, buried in the plume's own
+// dense 0.9 m base). Steam leaves through the lid's vent holes and rim gap,
+// so the plume's edge starts at the lid (CITY_MH_R) and relaxes onto the
+// body's radius over NECK_L; and it leaves as hot vapour, near transparent,
+// condensing into the visible plume as it mixes with the cold air — its
+// density ramps as 1 - exp(-z / COND_L). The lid shows through the foot of
+// its plume from an ordinary viewing angle. Stacks keep their mouths.
+const cc_manholesteam_NECK_L: f32 = 0.35;
+const cc_manholesteam_COND_L: f32 = 0.10;
 const cc_manholesteam_H_MIN: f32 = 6.0;    // plume height above its source
 const cc_manholesteam_H_MAX: f32 = 12.0;
 // How fast the lumps climb, in zeta per second of scene clock: a lump at
@@ -15103,14 +14066,7 @@ fn cc_manholesteam_site(k: i32, j: i32, along_y: bool) -> cc_manholesteam_Site {
     s.on = false;
     s.stack = false;
     let m = city_manhole(k, j, along_y);
-    // The hash rejects all but the candidates before the texture read.
-    if (m.z < 0.5 || m.w >= cc_manholesteam_FRAC_HI) {
-        return s;
-    }
-    let district = city_glow_sample(m.xy, 2.0);
-    let frac = mix(cc_manholesteam_FRAC_LO, cc_manholesteam_FRAC_HI,
-                   smoothstep(0.02, 0.45, district));
-    let v = m.w / frac;           // uniform in [0, 1) over steaming sites
+    let v = city_manhole_steam(m);   // uniform in [0, 1) over steaming sites
     if (v >= 1.0) {
         return s;
     }
@@ -15196,8 +14152,17 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     let rise = z / s.h;
     let r = s.r0 + cc_manholesteam_SPREAD * z;
     let q = p.xy - s.c - cc_manholesteam_WIND * (s.lean * s.h * rise * rise);
-    // Distance from the axis in local radii. Past CUT nothing can reach.
-    let d = length(q) / r;
+    // A cover's plume: its edge from the lid's radius, its density from
+    // nothing, over its first decimetres (NECK_L, COND_L).
+    var r_edge = r;
+    var cond = 1.0;
+    if (!s.stack) {
+        r_edge = r - (s.r0 - CITY_MH_R) * exp(-z / cc_manholesteam_NECK_L);
+        cond = 1.0 - exp(-z / cc_manholesteam_COND_L);
+    }
+    // Distance from the axis in local radii. Past CUT nothing can reach
+    // (r_edge <= r, so the box, sized by r, still bounds it).
+    let d = length(q) / r_edge;
     if (d >= cc_manholesteam_CUT) {
         return 0.0;
     }
@@ -15230,7 +14195,7 @@ fn cc_manholesteam_density(p: vec3<f32>, s: cc_manholesteam_Site,
     // leaves denser — the opaque burst at the top of every stack — and
     // thins to the same plume aloft.
     let cover = smoothstep(0.0, cc_manholesteam_SOFT, boundary - d);
-    return s.vigor * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
+    return s.vigor * cond * cover * max(1.0 + cc_manholesteam_LUMP * n, 0.0)
            // @domain: r >= r0 > 0: the plume's radius only grows from its source
            * pow(cc_manholesteam_R0_COVER / r, cc_manholesteam_THIN);
 }
@@ -15504,8 +14469,7 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
     }
     // Gate 2: past FP_END the plume above a stack has faded out, and the
     // stack is under half a pixel wide.
-    let fp = max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z)
-             * max(t0, 0.0);
+    let fp = lod_pixel_angle() * max(t0, 0.0);
     if (fp > cc_manholesteam_FP_END) {
         return res;
     }
@@ -15794,8 +14758,8 @@ const cc_industry_DOCK_GAP: f32 = 0.25;       // trailer rear off the wall
 // The dock doors: sectional doors DOOR_W x DOOR_H standing on the dock
 // floor (DOCK_H above the court), one per dock slot; a black shelter frame
 // around each on some buildings, bumpers and a leveller lip on all. Relief
-// stays inside SHELL_OUT of the wall — the flight collider's growth
-// (web/soar/citylots.js CITY_SHELL_OUT_MAX).
+// stays inside SHELL_OUT of the wall. (Not mirrored by the flight collider,
+// which meets a warehouse at its wall: web/soar/cityprops.js.)
 const cc_industry_DOCK_H: f32 = 1.2;
 const cc_industry_DOOR_W: f32 = 3.0;
 const cc_industry_DOOR_H: f32 = 3.0;
@@ -15920,7 +14884,7 @@ fn cc_industry_box(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // The pixel's angular size: the footprint at distance t is px * t (m/px),
 // the core's own pixel_angle.
 fn cc_industry_px() -> f32 {
-    return max(2.0 * u.cam_origin.w / max(u.params.x, 1.0), u.periodic.z);
+    return lod_pixel_angle();
 }
 
 // ============================================================================
@@ -19304,7 +18268,7 @@ fn cc_streetfurniture_miss(ci: vec2<i32>) -> CityHit {
 // them. streetlife's cc_streetlife_fp_px, for streetlife's reason — a hinge
 // is one feature, not a lattice that could moire.
 fn cc_streetfurniture_fpx(t: f32) -> f32 {
-    let pa = 2.0 * u.cam_origin.w / max(u.params.x, 1.0);
+    let pa = true_pixel_angle();
     return max(0.35 * max(pa, u.periodic.z), pa) * max(t, 0.0);
 }
 
@@ -19347,8 +18311,8 @@ fn cc_streetfurniture_trace(o: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32,
     if (!got || t > tb) {
         return cc_streetfurniture_miss(ci);
     }
-    // Normal: the four tetrahedron taps as a LOOP (aircars' measured
-    // lesson — four inline copies of the field cost occupancy everywhere).
+    // Normal: the four tetrahedron taps as a LOOP (four inline copies of
+    // the field cost occupancy everywhere; SPEC, "Cost honesty").
     let q = ro + t * rd;
     let hs = max(eps, 0.0015);
     var g = vec3<f32>(0.0);
@@ -19696,8 +18660,7 @@ fn cc_streetfurniture_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // placement and the trace disagree, and that should be seen.
         return vec3<f32>(1.0, 0.0, 1.0);
     }
-    let fpx = max(0.35 * fp, 2.0 * u.cam_origin.w / max(u.params.x, 1.0)
-                             * max(h.t, 0.0));
+    let fpx = max(0.35 * fp, true_pixel_angle() * max(h.t, 0.0));
     let pl = cc_streetfurniture_to_local(v, h.pos);
     let n = h.normal;
     let mid = cc_streetfurniture_sdf(pl, v, cc_streetfurniture_lod(fpx)).y;
@@ -19810,8 +18773,6 @@ fn cc_cell_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var res: CityHit;
     res.hit = false;
     res.t = 1e30;
-    let h_aircars = cc_aircars_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
-    if (h_aircars.hit && h_aircars.t < res.t) { res = h_aircars; }
     let h_rooftopworks = cc_rooftopworks_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
     if (h_rooftopworks.hit && h_rooftopworks.t < res.t) { res = h_rooftopworks; }
     let h_skybridges = cc_skybridges_props_trace(o, dir, inv_dir, t0, t1, ci, cc);
@@ -19827,9 +18788,6 @@ fn cc_cell_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 
 fn cc_component_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
-    if (h.kind >= 300 && h.kind < 400) {
-        return cc_aircars_shade(h, cc, dir, fp);
-    }
     if (h.kind >= 200 && h.kind < 300) {
         return cc_skyway_shade(h, cc, dir, fp);
     }
@@ -21591,7 +20549,7 @@ struct DesertLight {
 // sees, (1 + n.z)/2 and (1 - n.z)/2 — exact for an unobstructed tilted plane.
 fn desert_lambert(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight)
         -> vec3<f32> {
-    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0), 0.0);
+    return desert_lit(albedo, n, L, max(dot(n, L.sun_dir), 0.0));
 }
 
 // The cloud's shadow on one ground point, and the light that comes through
@@ -21833,7 +20791,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     // A stone is lit by the same law as the ground it lies on, with its
     // own albedo and normal and none of the ground's statistics: no kernel
     // BRF (it IS the resolved geometry the kernel stands for), no grain,
-    // no stone or unresolved shadow, no sheen. One path for both, selected
+    // no stone or unresolved shadow. One path for both, selected
     // on its inputs: two shading branches kept the hit, the light and the
     // ground terms all live across the divergence (perf: 155 registers
     // against 72 with the stones out).
@@ -21849,7 +20807,7 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
                               // varnished clast read as a hollow cup.
                               max(h.pos.z - desert_surface(h.pos.xy, fp).x,
                                   0.0))
-                          * plants, 0.0);
+                          * plants);
     }
     let light = clamp(h.mat.x, 0.0, 1.0);
     let m = desert_material(light);
@@ -21876,7 +20834,6 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
     if (near) {
         stones = desert_stone_shadow(h.pos, L.sun_dir, n, light, w0, w1);
     }
-    var sheen = desert_sheen(n, dir, L.sun_dir);
     if (DESERT_LITE) {
         // The stones as decals (desert_stone_decal): a covered pixel is the
         // stone, lit as a stone is; an uncovered one keeps the stones'
@@ -21887,57 +20844,26 @@ fn desert_ground_radiance(h: DesertHit, dir: vec3<f32>, fp: f32,
         ns = normalize(mix(n, dc.normal, dc.cover));
         brf = mix(brf, 1.0, dc.cover);
         stones = mix(dc.shadow, 1.0, dc.cover);
-        sheen = sheen * (1.0 - dc.cover);
     }
     let shade = desert_terrain_shadow(h.pos, L.sun_dir, fp, 0.0)
         * desert_unresolved_shadow(n, L.sun_dir, fp)
         * stones * plants;
     let mu = max(dot(ns, L.sun_dir), 0.0);
-    return desert_lit(albedo, ns, L, mu * brf * shade, sheen * shade);
+    return desert_lit(albedo, ns, L, mu * brf * shade);
 }
 
 // The common tail: `beam` the direct factor on L.sun (cosine, BRF and every
-// shadow folded in), `sheen` the specular one.
-fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32,
-              sheen: f32) -> vec3<f32> {
+// shadow folded in). No specular term: sand, silt and soil are matte. A
+// floor of loose grains scatters light inside and between them, and the
+// directional reflectance it keeps at a pixel's scale is the kernel BRF
+// (desert_brf, the form satellites fit to real land), not a glint. A GGX
+// sheen stood here until 2026-11-08 (Thomas: "the desert ground is way too
+// reflective, it looks similar to the ocean").
+fn desert_lit(albedo: vec3<f32>, n: vec3<f32>, L: DesertLight, beam: f32)
+        -> vec3<f32> {
     let sky_view = 0.5 * (1.0 + n.z);
     return albedo * (1.0 / DESERT_PI)
-        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view))
-        + sheen * L.sun;
-}
-
-// Looking into a low sun, a desert floor is not dark: silt, sand grains
-// and the polished tops of pavement clasts throw a soft forward glare
-// toward the viewer (temp/references/desert lowsun_backlit_*). A weak,
-// rough dielectric lobe — Fresnel at F0 = 0.04, GGX at alpha 0.35, Smith
-// masking, weighted to grazing views — which is zero anywhere but near the
-// forward-scattering geometry seen edge-on, so the high-sun look is
-// untouched.
-const DESERT_SHEEN_F0: f32 = 0.04;
-const DESERT_SHEEN_ALPHA: f32 = 0.2;
-
-fn desert_sheen(n: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>) -> f32 {
-    let v = -dir;
-    let n_dot_l = dot(n, sun);
-    let n_dot_v = dot(n, v);
-    if (n_dot_l <= 0.0 || n_dot_v <= 1e-4) {
-        return 0.0;
-    }
-    // @domain: n.l > 0 and n.v > 0 (returned above otherwise): same hemisphere
-    let hv = normalize(sun + v);
-    let n_dot_h = max(dot(n, hv), 0.0);
-    let om = 1.0 - clamp(dot(v, hv), 0.0, 1.0);
-    let om2 = om * om;
-    let fresnel = DESERT_SHEEN_F0 + (1.0 - DESERT_SHEEN_F0) * om2 * om2 * om;
-    let a2 = DESERT_SHEEN_ALPHA * DESERT_SHEEN_ALPHA;
-    let den = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    let d = a2 / (DESERT_PI * den * den);
-    let g = ggx_smith_g1(n_dot_v, a2) * ggx_smith_g1(n_dot_l, a2);
-    // A grazing phenomenon: the glare comes off the tops of grains and
-    // clasts seen edge-on, and a view from well above sees their shadowed
-    // flanks instead (the RossLi kernel's forward darkening).
-    let edge = 1.0 - n_dot_v;
-    return d * g * fresnel / (4.0 * n_dot_v) * edge * edge;
+        * (L.sun * beam + L.sky * sky_view + L.ground * (1.0 - sky_view));
 }
 
 // Aerial perspective: the SAME air the clouds are seen through — fs_main's
@@ -24543,16 +23469,18 @@ fn df_creosote_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
 //        2 flowering)
 //   b = (yaw, lean of the whole plant, unused, unused)
 // Each cane is two tapered rods, the upper one bent a little further out,
-// grey-green and furrowed, with a stout grey spine every DF_OCO_NODE_DS in a
-// spiral (the hardened petioles of the first leaves). In leaf, every spine
-// base carries a small cluster of obovate leaves; flowering, the last
-// ~20 cm of a cane is a panicle of red tubular flowers. Nodes within reach
-// of the ray are an interval of the cane parameter, as for the creosote
-// clumps.
-const DF_OCO_NODE_DS: f32 = 0.035;
+// with a stout grey spine every DF_OCO_NODE_DS (the hardened petioles of the
+// first leaves) on the crests of its spiral ridges (df_oco_bark). In leaf,
+// every spine base carries a small cluster of obovate leaves; flowering,
+// the last ~20 cm of a cane is a panicle of red tubular flowers. Nodes
+// within reach of the ray are an interval of the cane parameter, as for the
+// creosote clumps. DF_OCO_LEAVES / DF_OCO_NODE_DS, the leaves per metre of
+// cane, is what DF_OCO_CAPS_SIGMA was set for (5 every 3.5 cm, 4 every
+// 2.8 cm since the spiral rows): change one and the other moves with it.
+const DF_OCO_NODE_DS: f32 = 0.028;
 const DF_OCO_REACH: f32 = 0.045;      // spines and leaves around the cane (m)
 const DF_OCO_MAX_NODES: i32 = 5;
-const DF_OCO_LEAVES: i32 = 5;
+const DF_OCO_LEAVES: i32 = 4;
 const DF_OCO_FLOWERS: i32 = 9;
 const DF_OCO_EXACT_FP0: f32 = 0.010;
 const DF_OCO_EXACT_FP1: f32 = 0.018;
@@ -24563,7 +23491,8 @@ const DF_OCO_CAPS_SIGMA: f32 = 14.0;
 // Purplish grey-brown bark (the references' cane macro, darkened from a
 // sunlit close-up to an albedo).
 const DF_OCO_CANE: vec3<f32> = vec3<f32>(0.165, 0.130, 0.125);
-const DF_OCO_SPINE: vec3<f32> = vec3<f32>(0.300, 0.280, 0.250);
+// The spines a grey near the bark's (the references' Ocotillothron).
+const DF_OCO_SPINE: vec3<f32> = vec3<f32>(0.215, 0.200, 0.190);
 const DF_OCO_LEAF: vec3<f32> = vec3<f32>(0.080, 0.160, 0.030);
 const DF_OCO_FLOWER: vec3<f32> = vec3<f32>(0.560, 0.075, 0.020);
 
@@ -24598,11 +23527,16 @@ fn df_ocotillo_item(it_in: DfItem, r: vec4<f32>) -> DfItem {
     return it;
 }
 
+// Cane i's azimuth from the plant's centre, from its first draw.
+fn df_oco_phi(it: DfItem, i: i32, draw: f32) -> f32 {
+    return f32(i) * 2.39996 + 0.5 * draw + it.b.x;
+}
+
 // Cane i, segment k (0 lower, 1 upper).
 fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
     let hh = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 13u + 211u, 17u)));
     let h = it.a.x;
-    let phi = f32(i) * 2.39996 + 0.5 * hh.x + it.b.x;
+    let phi = df_oco_phi(it, i, hh.x);
     // Outer canes lean further: a fan, not a broom.
     // @domain: a hash draw, in [0, 1)
     let tilt = it.a.z * sqrt(hh.y);
@@ -24628,6 +23562,115 @@ fn df_oco_cane(it: DfItem, i: i32, k: i32) -> DfSeg {
         sg.r1 = 0.25 * r0;
     }
     return sg;
+}
+
+// The bark. An ocotillo cane is ridged: each spine stands at the head of a
+// raised ridge, the decurrent base of the leaf it was, that runs down the
+// cane past the nodes between to the next spine of its row, and the rows
+// wind round the cane — the spiral that marks an ocotillo cane at a glance
+// (Thomas, 2026-11-08: "the hallmark to me of ocotillo is the spiraling
+// bark pattern"; temp/references/ocotillo-bark). DF_OCO_ROWS rows with a
+// node every 2/5 of a turn, so each row carries every fifth spine; narrow
+// dark furrows part the rows, the green cortex showing in them. Each cane
+// winds at its own rate and hand: a row turns once in 27-62 cm, 8-24
+// degrees off the axis at the cane's foot (radius 1.4-1.9 cm) and
+// straighter up the thinning cane (the twist is per metre, not per
+// radius).
+//
+// The azimuth about a cane is measured from a frame that both its segments
+// share: side1, horizontal and normal to the vertical plane the cane bends
+// in, and side0 = side1 x axis in that plane — the lower segment's frame
+// carried through the bend by the bend's own rotation, so a ridge runs on
+// unbroken through the joint. Row m's crest stands at azimuth
+// 2 pi (m + 1/2) / DF_OCO_ROWS + twist * s, s the arc length up the cane,
+// and the furrows halfway between.
+const DF_OCO_ROWS: i32 = 5;
+const DF_OCO_TWIST_MIN: f32 = 10.1;   // rad per metre: a turn in 62 cm
+const DF_OCO_TWIST_MAX: f32 = 23.4;   // a turn in 27 cm
+// A ridge's rise over the row spacing: arches meeting in creases whose
+// walls stand ~30 degrees.
+const DF_OCO_RIDGE_RISE: f32 = 0.18;
+// Albedo change per unit furrow weight (df_oco_bark's w, mean zero): the
+// furrow's floor (w = 3/4) a dark olive-brown, (0.075, 0.075, 0.050), the
+// crests (w = -1/4) a little paler than DF_OCO_CANE, which stays the mean.
+const DF_OCO_FURROW: vec3<f32> = vec3<f32>(-0.120, -0.0733, -0.100);
+
+// Cane i's bark frame: (side1, twist), the twist signed by its hand.
+fn df_oco_bark_frame(it: DfItem, i: i32) -> vec4<f32> {
+    let hx = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 13u + 211u, 17u))).x;
+    let phi = df_oco_phi(it, i, hx);
+    let hw = df_rand4(pcg2d(it.seed + vec2<u32>(u32(i) * 13u + 211u, 23u)));
+    let twist = mix(DF_OCO_TWIST_MIN, DF_OCO_TWIST_MAX, hw.x)
+        * select(-1.0, 1.0, hw.y < 0.5);
+    return vec4<f32>(-sin(phi), cos(phi), 0.0, twist);
+}
+
+// The bark at a hit on cane i, segment k, `along` up the segment, with rod
+// normal n: (shading normal, furrow weight w). Across the rows the ridges
+// are arches, |sin(pi u)|, meeting in creases at whole u, and the furrow's
+// colour is a narrow line in the crease, a Fejer kernel (never negative,
+// mean 1/4); both are their first three harmonics, and each harmonic is
+// filtered exactly by a Gaussian of the pixel's footprint across the rows
+// (its extent on the surface, foreshortening and all). So a pixel reads the
+// bark's average over its own footprint, and once the rows are well below
+// it, w is 0 and the normal the rod's own: the cane's albedo is exactly
+// DF_OCO_CANE, the colour its far forms are lit with.
+fn df_oco_bark(it: DfItem, i: i32, k: i32, along: f32, n: vec3<f32>,
+               dir: vec3<f32>, fp: f32) -> vec4<f32> {
+    let sg = df_oco_cane(it, i, k);
+    let fr = df_oco_bark_frame(it, i);
+    let side1 = fr.xyz;
+    let side0 = cross(side1, sg.ax);
+    let e_theta = cross(sg.ax, n);
+    let el = length(e_theta);
+    // n is the rod's radial normal, unit and normal to the axis, except
+    // where df_rod met the axis itself and returned -dir, which has no
+    // azimuth when the ray runs along the axis.
+    if (el < 1e-4) {
+        return vec4<f32>(n, 0.0);
+    }
+    let s = (f32(k) + along) * sg.len;
+    let r = mix(sg.r0, sg.r1, along);
+    let rows = f32(DF_OCO_ROWS);
+    // Only u's fraction matters (whole harmonics): taken here, it keeps the
+    // cosines' arguments small up a long, fast-winding cane.
+    let u = fract(rows * (atan2(dot(n, side1), dot(n, side0)) - fr.w * s)
+                  / DF_TAU);
+    // u's gradient on the surface: its length is one over the row spacing
+    // across the rows, its direction the across-row tangent.
+    let gu = rows / DF_TAU * (e_theta / (el * r) - fr.w * sg.ax);
+    let inv_p = length(gu);
+    let across = gu / inv_p;
+    // The footprint's extent along `across`: the pixel's disc of diameter
+    // fp, cast along the ray onto the surface.
+    let nv = max(-dot(n, dir), 0.05);
+    let av = dot(across, dir);
+    // @domain: the argument is at least 1
+    let sig = 0.5 * fp * sqrt(1.0 + av * av / (nv * nv)) * inv_p;
+    // Harmonic j's Gaussian gain, exp(-2 (pi j sig)^2).
+    let g = DF_PI * sig;
+    let f1 = exp(-2.0 * g * g);
+    let f2 = exp(-8.0 * g * g);
+    let f3 = exp(-18.0 * g * g);
+    let c1 = cos(DF_TAU * u);
+    let s1 = sin(DF_TAU * u);
+    let c2 = 2.0 * c1 * c1 - 1.0;
+    let s2 = 2.0 * s1 * c1;
+    let c3 = c1 * c2 - s1 * s2;
+    let s3 = s1 * c2 + c1 * s2;
+    // The furrow weight: phi - 1/4, phi = (1 + 2 sum (1 - j/4) cos)/4.
+    let w = 0.5 * (0.75 * f1 * c1 + 0.5 * f2 * c2 + 0.25 * f3 * c3);
+    // The bark's height, rise * P * |sin(pi u)|, is (4/pi) rise * P
+    // * (1/2 - sum cos(2 pi j u) / (4 j^2 - 1)); its slope across the rows,
+    // and the normal leans against it.
+    let slope = 8.0 * DF_OCO_RIDGE_RISE
+        * (f1 * s1 / 3.0 + 2.0 * f2 * s2 / 15.0 + 3.0 * f3 * s3 / 35.0);
+    // across is made of cross(axis, n) and the axis, so where n is
+    // df_rod's radial normal it is normal to n and the sum is at least unit;
+    // at the -dir fallback n is still unit and the sum vanishes only if
+    // slope * across were exactly n.
+    // @domain: zero only if slope * across == n, a measure-zero coincidence
+    return vec4<f32>(normalize(n - slope * across), w);
 }
 
 // The fan as a cone of cane medium, standing on its apex just below the
@@ -24710,6 +23753,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     var best: DfRodHit;
     best.t = tb;
     var code = DF_MAT_CANE;
+    var best_cane = vec2<i32>(0, 0);
     let dither_bits = bitcast<vec2<u32>>(dither);
     var cap_seed = pcg2d(dither_bits ^ it.seed);
     let n = i32(it.a.y);
@@ -24725,6 +23769,7 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
             if (bc.t < best.t) {
                 best = bc;
                 code = DF_MAT_CANE;
+                best_cane = vec2<i32>(i, k);
             }
             if (!exact) {
                 if (state == 1) {
@@ -24746,38 +23791,48 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
                     }
                 }
             } else {
-                // Spine nodes (and their leaves) within reach of the ray.
+                // Spine nodes (and their leaves) within reach of the ray,
+                // numbered up the whole cane from its foot: node j at arc
+                // length (j + 1/2) DF_OCO_NODE_DS, on row 2j mod 5 (a node
+                // every 2/5 turn), at that row's crest (df_oco_bark). Taken
+                // from the ray's near end, so a cap on the count drops the
+                // far ones: at DF_OCO_MAX_NODES the cap holds 14 cm of cane,
+                // and binds on a ray within ~40 degrees of the cane's axis.
                 let half = sqrt(max(DF_OCO_REACH * DF_OCO_REACH - ap.w * ap.w,
                                     0.0)) / max(ap.z, 0.05);
-                let n_nodes = i32(sg.len / DF_OCO_NODE_DS);
-                let j0 = max(i32(ceil((ap.y - half) / DF_OCO_NODE_DS)), 0);
-                let j1 = min(i32(floor((ap.y + half) / DF_OCO_NODE_DS)),
-                             n_nodes - 1);
-                let helper = select(vec3<f32>(0.0, 0.0, 1.0),
-                                    vec3<f32>(1.0, 0.0, 0.0), sg.ax.z > 0.9);
-                // @domain: helper is swapped for x when sg.ax.z > 0.9: never parallel
-                let side0 = normalize(cross(sg.ax, helper));
-                let side1 = cross(sg.ax, side0);
-                for (var j = j0; j <= min(j1, j0 + DF_OCO_MAX_NODES - 1);
-                     j = j + 1) {
-                    let sj = (f32(j) + 0.5) * DF_OCO_NODE_DS;
-                    // A spiral: 137.5 degrees per node.
-                    let ang = f32(j + i32(k) * 97 + i * 31) * 2.39996;
+                let s_k = f32(k) * sg.len;
+                let j0 = i32(ceil((s_k + max(ap.y - half, 0.0))
+                                  / DF_OCO_NODE_DS - 0.5));
+                // The last node strictly below the segment's top: one at
+                // the joint belongs to the upper segment alone.
+                let j1 = i32(ceil((s_k + min(ap.y + half, sg.len))
+                                  / DF_OCO_NODE_DS - 0.5)) - 1;
+                let fr = df_oco_bark_frame(it, i);
+                let side1 = fr.xyz;
+                let side0 = cross(side1, sg.ax);
+                let up = dot(dir, sg.ax) >= 0.0;
+                for (var nj = 0; nj <= min(j1 - j0, DF_OCO_MAX_NODES - 1);
+                     nj = nj + 1) {
+                    let j = select(j1 - nj, j0 + nj, up);
+                    let s_j = (f32(j) + 0.5) * DF_OCO_NODE_DS;
+                    let sj = s_j - s_k;
+                    let row = (2 * j) % DF_OCO_ROWS;
+                    let ang = DF_TAU * (f32(row) + 0.5) / f32(DF_OCO_ROWS)
+                        + fr.w * s_j;
                     let out = cos(ang) * side0 + sin(ang) * side1;
                     let rr = mix(sg.r0, sg.r1, sj / sg.len);
                     let base = sg.a + sg.ax * sj + out * (0.7 * rr);
                     // @domain: out is perpendicular to sg.ax, both unit
                     let sax = normalize(out + 0.35 * sg.ax);
                     let bs = df_rod(q0, dir, base, sax, 0.014 + 0.4 * rr,
-                                    0.0020, 0.0002, best, 0.0);
+                                    0.0030, 0.0002, best, 0.0);
                     if (bs.t < best.t) {
                         best = bs;
                         code = DF_MAT_OCO_SPINE;
                     }
                     if (state == 1 || (state == 2 && k == 1)) {
                         var ls = pcg2d(it.seed ^ vec2<u32>(
-                            u32(i) * 0x9e3779b9u + u32(k),
-                            u32(j) * 0x85ebca6bu));
+                            u32(i) * 0x9e3779b9u, u32(j) * 0x85ebca6bu));
                         for (var m: i32 = 0; m < DF_OCO_LEAVES; m = m + 1) {
                             ls = pcg2d(ls);
                             let a2 = ang + (df_u01(ls.x) - 0.5) * 2.2;
@@ -24843,26 +23898,26 @@ fn df_ocotillo_trace(it: DfItem, o: vec3<f32>, dir: vec3<f32>, ta: f32,
     res.normal = best.n;
     res.mat = vec4<f32>(f32(code) + 0.9 * clamp(best.along, 0.0, 1.0),
                         best.axis);
+    if (code == DF_MAT_CANE) {
+        // The bark, once, at the hit that won: its normal, and its furrow
+        // weight in the fraction (w + 1/4 in [0, 1]).
+        let bk = df_oco_bark(it, best_cane.x, best_cane.y, best.along,
+                             best.n, dir, pixel_angle * best.t);
+        res.normal = bk.xyz;
+        res.mat.x = f32(code) + 0.9 * clamp(bk.w + 0.25, 0.0, 1.0);
+    }
     return res;
 }
 
-fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
-                     L: DesertLight, Ls: DesertLight) -> vec3<f32> {
+fn df_ocotillo_shade(h: DesertHit, dir: vec3<f32>, L: DesertLight,
+                     Ls: DesertLight) -> vec3<f32> {
     let code = i32(floor(h.mat.x));
-    let along = fract(h.mat.x) / 0.9;
     let n = h.normal;
     if (code == DF_MAT_CANE) {
-        // Furrowed bark: the ridges run along the cane, darker grooves
-        // between, averaged once the footprint is wider than a furrow.
-        let ax = h.mat.yzw;
-        // @domain: zero only if the cane lies exactly along (0.01, 0, 1): measure zero
-        let ref_v = normalize(cross(ax, vec3<f32>(0.0, 0.0, 1.0)
-                                    + vec3<f32>(0.01, 0.0, 0.0)));
-        let ang = atan2(dot(cross(ref_v, n), ax), dot(ref_v, n));
-        let furrow = 0.5 + 0.5 * cos(ang * 9.0);
-        let fw = mix(furrow, 0.5, smoothstep(0.002, 0.008, fp));
-        let alb = DF_OCO_CANE * (0.8 + 0.35 * fw);
-        return desert_lambert(alb, n, Ls);
+        // The spiral bark (df_oco_bark): its furrow weight, zero-mean,
+        // packed in the fraction as w + 1/4.
+        let furrow = fract(h.mat.x) / 0.9 - 0.25;
+        return desert_lambert(DF_OCO_CANE + furrow * DF_OCO_FURROW, n, Ls);
     }
     if (code == DF_MAT_OCO_SPINE) {
         return df_fiber(DF_OCO_SPINE, h.mat.yzw, dir, Ls, 1.0);
@@ -26917,7 +25972,7 @@ fn desert_flora_shade(h: DesertHit, dir: vec3<f32>, fp: f32,
         return df_creosote_shade(h, dir, fp, L, Ls);
     }
     if (h.kind == DF_KIND_OCOTILLO) {
-        return df_ocotillo_shade(h, dir, fp, L, Ls);
+        return df_ocotillo_shade(h, dir, L, Ls);
     }
     if (h.kind == DF_KIND_BOULDER) {
         return df_boulder_shade(h, dir, fp, Ls);
@@ -27782,6 +26837,13 @@ fn true_pixel_angle() -> f32 {
     return 2.0 * u.cam_origin.w / u.params.x;
 }
 
+// The angle a surface's level of detail resolves at: the true pixel's, or
+// the view-step LOD angle (u.periodic.z, the app's one LOD slider) when that
+// is coarser. See camera_ray.
+fn lod_pixel_angle() -> f32 {
+    return max(true_pixel_angle(), u.periodic.z);
+}
+
 fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     var cr: CameraRay;
     let img_w = u.params.x;
@@ -27821,7 +26883,7 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     // FILTERS its texture over stays the true pixel's footprint: a wider
     // one would only blur it.
     cr.true_pixel_angle = true_pixel_angle();
-    cr.pixel_angle = max(cr.true_pixel_angle, u.periodic.z);
+    cr.pixel_angle = lod_pixel_angle();
     cr.jitter_amp = u.cam_up.w * jitter_scale;
     return cr;
 }
@@ -28170,11 +27232,7 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     out.surf = vec4<f32>(prev.xyz, t_prev);
     out.veil = veil_none();
     let city_o = city_camera_origin();
-    // Where the ray first comes down to CITY_NEAR_TOP.
-    var t_low = 0.0;
-    if (city_o.z > CITY_NEAR_TOP) {
-        t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
-    }
+    let t_low = city_t_low(city_o, dir);
     let t_near = min(t_prev, city_near_reach(cr));
     let near = t_low < t_near;
     if (!near && !ground_hit) {
@@ -28215,19 +27273,106 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
         rgb = rgb + city_wet_reflection(city_o, dir, t, pixel_angle,
                                         cr.frame_index, cr.strat_pixel);
     }
-    if (near) {
+    if (near && city_steam_live()) {
+        // The live view draws its steam after the accumulation
+        // (fs_steam_live); the veil only marks the depth it goes in at, so
+        // the march notes the cloud's transmittance there.
+        out.veil = veil_pack(vec3<f32>(0.0), 1.0, t_low);
+    } else if (near) {
         // The steam in front of whatever is there — or of nothing: over the
         // sky the veil is all that shows of it.
-        let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
-                            select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
-                            select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
-        let med = cc_media(city_o, dir, inv, t, pixel_angle,
+        let med = cc_media(city_o, dir, city_inv_dir(dir), t, pixel_angle,
                            city_frame_rand(cr.strat_pixel, cr.frame_index,
                                            CITY_RAND_MEDIA).x);
         out.veil = veil_pack(med.rgb, med.a, t_low);
     }
     out.surf = vec4<f32>(rgb, t);
     return out;
+}
+
+// Where a ray from the camera first comes down to CITY_NEAR_TOP (0 from
+// below it, 1e30 for a ray that never does): the depth the veil goes in at.
+fn city_t_low(city_o: vec3<f32>, dir: vec3<f32>) -> f32 {
+    var t_low = 0.0;
+    if (city_o.z > CITY_NEAR_TOP) {
+        t_low = select(1e30, (city_o.z - CITY_NEAR_TOP) / -dir.z, dir.z < 0.0);
+    }
+    return t_low;
+}
+
+// The steam's slab tests take 1/dir with an axis-parallel component at 1e30.
+fn city_inv_dir(dir: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                     select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
+                     select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
+}
+
+// The live view's steam (fs_steam_live), over `acc`, the accumulated image
+// (display values; alpha the cloud's transmittance T_f from the camera to
+// the veil's depth, as fs_main noted it), for the surface at t_surf. The
+// steam is marched at the live clock exactly as the street stage marches it
+// (cc_media, to the same surface, from the same depth), but once per
+// presented frame, so instead of the accumulation's many offsets of its
+// march it averages STEAM_LIVE_SAMPLES, stratified over the offset's range
+// from a start fixed per pixel: a parked view shows the steam moving through
+// a still, fine dither rather than a fresh grain every frame (one offset
+// alone was a coarse grain, 2026-11-08). In linear light, with B the
+// accumulated image's radiance and
+// S, T_s the steam's in-scattered radiance and transmittance,
+//     L = B (1 - T_f (1 - T_s)) + T_f S.
+// The exact composite is C_f + T_f S + T_s (B - C_f), C_f the cloud
+// radiance in front of the steam; with no cloud in front (T_f = 1, C_f = 0)
+// and behind a cloud that hides it (T_f = 0) the two agree. In between this
+// takes the share of B arriving from behind the veil's depth to be T_f, as
+// though the cloud in front glowed like the scene behind it. What else is
+// inexact here, and only here (stills and videos march the steam):
+//   - B is tone_unmap of an AVERAGE of tone-mapped samples, not the average
+//     radiance: a pixel whose samples differ (a window edge behind the
+//     steam) is dimmed through the curve at its mean display value;
+//   - T_f is averaged apart from the radiance it belongs to;
+//   - a background past the curve's 1 (a lamp head, or a saturated colour
+//     in the shoulder) reads as that clip, so steam in front of it dims it
+//     more than it should;
+//   - under contrast > 1 a background the contrast clipped to black has
+//     lost its radiance: a channel displayed at exactly 0 is taken as black
+//     (B = 0, the clip's low end, where thin steam then reads as itself)
+//     rather than as the clip's edge, which made a plume over the night sky
+//     larger and greyer than the still's (loose-ends' review, 2026-11-08);
+//     a dark background just above the clip keeps its inverse;
+//   - the steam takes the LAST sample's ray and surface depth, so its edge
+//     along a silhouette is one sample's, not the average's.
+// A pixel with no steam returns acc untouched, bit for bit. That is against
+// the live accumulation, not the marched one: the live march adds a step at
+// the veil's depth for every near pixel (to note T_f there), so its cloud
+// samples there are not the marched view's.
+const STEAM_LIVE_SAMPLES: u32 = 4u;
+fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
+    let dir = cr.dir;
+    let city_o = city_camera_origin();
+    let t_low = city_t_low(city_o, dir);
+    if (!(t_low < min(t_surf, city_near_reach(cr)))) {
+        return acc;
+    }
+    let inv = city_inv_dir(dir);
+    let start = city_frame_rand(cr.strat_pixel, 0u, CITY_RAND_MEDIA).x;
+    var med = vec4<f32>(0.0);
+    for (var k: u32 = 0u; k < STEAM_LIVE_SAMPLES; k = k + 1u) {
+        med = med + cc_media(city_o, dir, inv, t_surf, cr.pixel_angle,
+                             (f32(k) + start) / f32(STEAM_LIVE_SAMPLES));
+    }
+    med = med / f32(STEAM_LIVE_SAMPLES);
+    if (med.a >= 1.0 && all(med.rgb == vec3<f32>(0.0))) {
+        return acc;
+    }
+    // fs_main's exposure and gamma, read as it reads them (the exposure
+    // slider and auto-exposure keep it >= 0.5).
+    let exposure = u.cam_right.w;
+    let gamma = u.periodic.w;
+    let t_front = acc.a;
+    let b = select(tone_unmap(acc.rgb, exposure, gamma), vec3<f32>(0.0),
+                   acc.rgb <= vec3<f32>(0.0));
+    let l = b * (1.0 - t_front * (1.0 - med.a)) + t_front * med.rgb;
+    return vec4<f32>(tone_map(l, exposure, gamma), acc.a);
 }
 
 // What the wet street at distance t along the view ray reflects, through the
@@ -28299,6 +27444,9 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     o.veil = veil_none();
     return o;
 }
+fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
+    return acc;
+}
 
 // The city's stub twin: every city symbol shared code calls, for a module
 // compiled without the city. Reached only under CITY, false there.
@@ -28341,6 +27489,15 @@ fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
     return vec4<u32>(pack2x16float(rgb.xy),
                      pack2x16float(vec2<f32>(rgb.z, 1.0 - trans)),
                      bitcast<u32>(t), 0u);
+}
+
+// Whether the city's steam is the live view's (row 8.w, which the city's row
+// 8 has spare): drawn after the accumulation by fs_steam_live at the live
+// clock, so it keeps moving over a parked, converging picture. Off, it is
+// marched into the veil as it always was — every still, video and replay,
+// and the meter's of a capture.
+fn city_steam_live() -> bool {
+    return CITY && u.ocean.w > 0.5;
 }
 
 // No veil: nothing scattered in, everything let through.
@@ -28485,18 +27642,31 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // interval. Stills pass no state at all and are dry in both hosts.
 //
 // The wetting law, exact in dt at constant extinction sigma at the camera:
-//   dw/dt = K_WET f (1 - w) - K_DRY (1 - f) w,   f = 1 - exp(-sigma L_WET)
-// is linear in w, so one step of any length is
+//   dw/dt = K_WET f (1 - w) - k_dry(f) (1 - f) w,  f = 1 - exp(-sigma L_WET),
+//   k_dry(f) = K_DRY in cloud, K_DRY_CLEAR in clear air,
+// is linear in w at constant f, whatever k_dry(f) is, so one step of any
+// length is
 //   w(t + dt) = w* + (w - w*) exp(-a dt),
-//   a = K_WET f + K_DRY (1 - f),  w* = K_WET f / a,
+//   a = K_WET f + k_dry(f) (1 - f),  w* = K_WET f / a,
 // and one step of 2 dt equals two of dt at constant f: a replay at another
 // frame rate sees the same wetness wherever the extinction at the camera
 // changes slowly against the frame interval (f is taken at the step's end).
-// Dense cloud (f ~ 1) wets the lens in a few seconds; haze (f small) only to
-// a low level, slowly; out of cloud it drains to 5 % in ~15 s. The same law in numpy is tests/test_lens_water.py's reference.
+// f is the cloud's alone (the field's extinction; the haze is not in it).
+// Clear air is where the first law's level, K_WET f / (K_WET f + K_DRY
+// (1 - f)), is under LENS_DRY_FLOOR, the wetness that counts as dry anyway:
+// f below ~6.7e-4, sigma below ~2.2e-5 /m. Not where sigma is exactly 0: a
+// field's clear air can carry a faint positive tail (the RCE demo's, median
+// f ~3e-5, over a third of its volume), and the camera samples sigma
+// trilinearly. Dense cloud (f ~ 1) wets the lens in a few seconds, thin
+// cloud (f small) only to a low level, slowly; in cloud this is the first
+// law, its w* and its rate unchanged. In clear air the lens drains at
+// K_DRY_CLEAR, 3x K_DRY (Thomas, 2026-11-08: outside of cloud the drops
+// "should disappear 3x faster"), to 5 % in 5 s. The same law in numpy is
+// tests/test_lens_water.py's reference.
 const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
 const LENS_K_WET: f32 = 0.6;        // 1/s
-const LENS_K_DRY: f32 = 0.2;        // 1/s
+const LENS_K_DRY: f32 = 0.2;        // 1/s, in cloud
+const LENS_K_DRY_CLEAR: f32 = 0.6;  // 1/s, in clear air
 const LENS_DRY_FLOOR: f32 = 0.002;  // below this, and drying: exactly dry
 
 @fragment
@@ -28510,7 +27680,11 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     let s_raw = sample_sigma(u.cam_origin.xyz);
     let sigma = select(0.0, s_raw, s_raw > 0.0);
     let f = 1.0 - exp(-sigma * LENS_L_WET);
-    let a = LENS_K_WET * f + LENS_K_DRY * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
+    // Clear air: the first law's level would count as dry. Its denominator
+    // is >= min(K_WET, K_DRY) > 0.
+    let w_first = LENS_K_WET * f / (LENS_K_WET * f + LENS_K_DRY * (1.0 - f));
+    let k_dry = select(LENS_K_DRY_CLEAR, LENS_K_DRY, w_first >= LENS_DRY_FLOOR);
+    let a = LENS_K_WET * f + k_dry * (1.0 - f);   // >= min(K_WET, K_DRY) > 0
     let w_star = LENS_K_WET * f / a;
     var w = w_star + (prev.x - w_star) * exp(-a * dt);
     // Dry is exactly 0, so a dry lens draws nothing at all (lens.wgsl); a
@@ -28518,6 +27692,30 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     w = select(w, 0.0, w < LENS_DRY_FLOOR && w_star < LENS_DRY_FLOOR);
     w = select(0.0, w, w >= 0.0);
     return vec4<f32>(w, w_star, 0.0, 0.0);
+}
+
+// --- the live view's steam -------------------------------------------------
+//
+// Thomas (2026-11-08): the steam "should keep going when the flight is
+// paused". A parked view converges by averaging frames of one frozen scene,
+// so steam marched into those frames would either freeze with them or, with
+// the clock running, smear the average. The live view therefore marches
+// the city with the steam left out (city_steam_live: the veil is only its
+// depth) and draws it here, once per presented frame, at the live clock
+// (row 24.z), onto the accumulated image — the lens water's arrangement.
+// Group 1: binding 0 the final surface (t in w), binding 1 the accumulated
+// image. The composite and what it gets wrong: steam_live_city (a stub that
+// returns the image as it came in a module without the city). The image is
+// in display values, as the browser accumulates it: the one host that draws
+// this pass always tone-maps (TONE_MAP false is the Python host's linear
+// output, render_nested, which has no live view).
+@fragment
+fn fs_steam_live(@builtin(position) frag_pos: vec4<f32>)
+        -> @location(0) vec4<f32> {
+    let xy = vec2<i32>(frag_pos.xy);
+    let acc = textureLoad(surface_plain, xy, 0);
+    return steam_live_city(camera_ray(frag_pos), acc,
+                           textureLoad(surface_buf, xy, 0).w);
 }
 
 @fragment
@@ -28543,15 +27741,10 @@ fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
 
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let img_w = u.params.x;
-    let img_h = u.params.y;
     let g_hg = u.params.z;
     let ambient_strength = u.params.w;
-    let tan_half_fov = u.cam_origin.w;
-    let aspect = u.cam_forward.w;
     let exposure = u.cam_right.w;
     let jitter_on = u.cam_up.w;
-    let subpixel_on = u.flags.x;
     let jitter_scale = clamp(u.flags.y, 0.0, 1.0);
     let sun = u.sun_dir.xyz;
     let gradient_shading_strength = u.cb_realism.x;
@@ -28636,7 +27829,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (CITY) {
         veil = veil_unpack(textureLoad(veil_buf, vec2<i32>(frag_pos.xy), 0));
     }
-    var veil_pending = CITY && veil.trans < 1.0 && veil.t < t_surface;
+    // Under the live view's steam the veil is only its depth (trans 1), and
+    // the march notes the cloud's transmittance there, t_front, in the
+    // sample's alpha for fs_steam_live; elsewhere the alpha is 1.
+    let steam_live = city_steam_live();
+    var veil_pending = CITY && (veil.trans < 1.0 || steam_live)
+        && veil.t < t_surface;
+    var t_front = 1.0;
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
@@ -28809,6 +28008,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 break;
             }
             if (veil_pending && t >= veil.t) {
+                t_front = transmittance;
                 col = col + transmittance * veil.rgb;
                 transmittance = transmittance * veil.trans;
                 veil_pending = false;
@@ -29435,6 +28635,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // never entered it): in front of the surface and the sky, behind every
     // cloud the march did see.
     if (veil_pending) {
+        t_front = transmittance;
         col = col + transmittance * veil.rgb;
         transmittance = transmittance * veil.trans;
     }
@@ -29478,5 +28679,6 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (!TONE_MAP) {
         return vec4<f32>(col, 1.0);
     }
-    return vec4<f32>(tone_map(col, exposure, u.periodic.w), 1.0);
+    return vec4<f32>(tone_map(col, exposure, u.periodic.w),
+                     select(1.0, t_front, steam_live));
 }

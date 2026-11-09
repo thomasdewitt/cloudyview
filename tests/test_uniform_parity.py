@@ -172,13 +172,20 @@ _JS = textwrap.dedent("""
 """) % UNIFORMS_JS
 
 
+# The browser's row 9 for the sea is the shipped tile's (scene.js
+# loadOceanTile: dx from dx_m, maxLod the top mip), so the stand-in reads it.
+_OCEAN_META = json.loads((sh.OCEAN_DIR / "meta.json").read_text())
+
+
 def _js_state(extra):
     s = dict(
         bmin=BASE_SCENE["bmin"], bmax=BASE_SCENE["bmax"],
         dtView=BASE_SCENE["dt_view"], dtLight=BASE_SCENE["dt_light"],
         periodic=True, oceanZ=0.0,
         oceanReflectance=list(sh.DEFAULT_OCEAN_REFLECTANCE),
-        oceanFifDx=0.2, oceanTileExtent=102.4, oceanEnabled=True, oceanMaxLod=9,
+        oceanFifDx=_OCEAN_META["dx_m"],
+        oceanTileExtent=_OCEAN_META["tile_extent_m"], oceanEnabled=True,
+        oceanMaxLod=_OCEAN_META["mips"] - 1,
         nested=False,
     )
     remap = {"periodic": "periodic", "ocean_enabled": "oceanEnabled",

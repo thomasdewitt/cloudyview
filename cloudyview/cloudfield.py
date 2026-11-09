@@ -166,6 +166,7 @@ def load(
     z_first: Optional[str] = None,
     timestep: Optional[int] = None,
     no_ice: bool = False,
+    coarsen: Optional[int] = None,
     stage_callback: Optional[Callable[[str], None]] = None,
 ) -> CloudField:
     """Load a cloud field from NetCDF into a :class:`CloudField`.
@@ -203,6 +204,11 @@ def load(
         without it is an error; a single-step file needs no choice.
     no_ice : bool, optional
         Skip the ice variable even when one could be inferred.
+    coarsen : int, optional
+        Block-average the field by this factor on every axis, after z is cut
+        to its occupied band grown to a multiple of it — the grid soar's
+        coarse demo was baked on (see :mod:`cloudyview.coarsen`). None, the
+        default, or 1 is the field as read.
     grid_spacing : dict, optional
         {axis: meters} for a regular grid whose file has no coordinate in a
         unit of length on those axes: cells are placed at (i + 0.5) * d,
@@ -253,7 +259,7 @@ def load(
     if stage_callback is not None:
         stage_callback("building CloudField")
     iw_data = result['ice_water_data']
-    return CloudField(
+    field = CloudField(
         lwc=result['liquid_water_data'].values,
         iwc=iw_data.values if iw_data is not None else None,
         x=result['x_coord'],
@@ -266,3 +272,9 @@ def load(
         liquid_group=result.get('liquid_water_group'),
         ice_group=result.get('ice_water_group'),
     )
+    if coarsen is None:
+        return field
+    if stage_callback is not None:
+        stage_callback(f"coarsening by {coarsen}")
+    from .coarsen import coarsened
+    return coarsened(field, coarsen)

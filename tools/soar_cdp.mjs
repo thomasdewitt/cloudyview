@@ -1,6 +1,9 @@
 // Drive soar in a real Chrome over the DevTools protocol, against a tree this
 // process serves itself. Shared by tools/tint_check.mjs and
-// tools/pinned_still.mjs.
+// tools/pinned_still.mjs. The Chrome is tools/qa_chrome.sh's: headless and
+// cut off from the desktop, so a check never takes focus or appears over
+// someone's apps (Thomas, mid-game, 2026-11-08), and requireHardwareAdapter
+// refuses one that renders in software.
 //
 // serveTree(dir) serves a checkout's web/ directory on a port the kernel
 // picks, so no other session's server can answer in its place, and answers
@@ -66,6 +69,48 @@ export async function servedShaderHash(base, expectFile) {
       { code: 3 });
   }
   return sha256(served).slice(0, 16);
+}
+
+// A software rasterizer passes for WebGPU (Chrome falls back to SwiftShader
+// when the Vulkan flags are missing or wrong, and Mesa's llvmpipe/lavapipe
+// answer as a "GPU" too), and every hash and timing taken on one is fiction
+// against the hardware stills. `info` is a GPUAdapterInfo-like object plus
+// the adapter's isFallbackAdapter; the reason it is software, or null.
+export function softwareAdapter(info) {
+  if (!info) return "no WebGPU adapter";
+  if (info.isFallbackAdapter) return "the fallback adapter";
+  const id = [info.vendor, info.architecture, info.description]
+    .filter(Boolean).join(" ");
+  const sw = /swiftshader|llvmpipe|lavapipe|softpipe/i.exec(id);
+  return sw ? `a software rasterizer (${id})` : null;
+}
+
+/** The adapter a page of `tab` gets, as "vendor architecture"; throws (code
+ *  2, "cannot run") when there is none or it is software (softwareAdapter).
+ *  The page must be a secure context — a served tree, or localhost. */
+export async function requireHardwareAdapter(tab) {
+  const info = await tab.eval(`(async () => {
+    // A Chrome just launched while other sessions hold VRAM can answer the
+    // first requests with no adapter and then settle (seen 2026-09-23).
+    let a = null;
+    for (let i = 0; i < 6 && !a; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 1000));
+      a = await navigator.gpu?.requestAdapter();
+    }
+    if (!a) return null;
+    const i = a.info ?? {};
+    return { vendor: i.vendor, architecture: i.architecture,
+             description: i.description,
+             isFallbackAdapter: a.isFallbackAdapter ?? i.isFallbackAdapter };
+  })()`);
+  const why = softwareAdapter(info);
+  if (why) {
+    throw Object.assign(new Error(
+      `this Chrome gives ${why}, not the hardware GPU; launch it with ` +
+      "tools/qa_chrome.sh (or --enable-features=Vulkan and a working " +
+      "ANGLE/ozone setup)"), { code: 2 });
+  }
+  return [info.vendor, info.architecture].filter(Boolean).join(" ");
 }
 
 export async function openTab(cdpPort) {

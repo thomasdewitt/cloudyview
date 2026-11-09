@@ -18,7 +18,9 @@ its distance, hanging below by its drop):
     below the ground;
   - a crash low enough that the fall would go through the street;
   - at 2 km/s into a mast 1.4 m across, which a point test would miss;
-  - into a real building of the shipped tile, through citylots.js.
+  - into a real building of the shipped tile, through citylots.js;
+  - into an elevated freeway's deck and a lamp post's mast, through
+    cityprops.js.
 
 Needs node; no GPU.
 """
@@ -94,6 +96,7 @@ import { FlightCamera, cameraBasis, worldToRelative } from "%(soar)s/camera.js";
 import { CityCollider } from "%(soar)s/collide.js";
 import { TrackRecorder, resampleTrack, knocksDue } from "%(soar)s/track.js";
 import { CityTile, CityLots, cityCell } from "%(soar)s/citylots.js";
+import { CityProps } from "%(soar)s/cityprops.js";
 import { readFileSync } from "node:fs";
 %(box_city)s
 
@@ -225,10 +228,50 @@ if (spec.city === "tile") {
   if (pick === null) throw new Error("no clear slab near the requested cell");
   spec.start = startOf(pick);
   spec.wallX = pick.b1min[0];
+} else if (spec.city === "props") {
+  // The shipped tile with what stands among its buildings (cityprops.js).
+  const meta = JSON.parse(readFileSync("%(tile)s/meta.json", "utf8"));
+  const b = readFileSync("%(tile)s/fif_mip0.bin");
+  const tile = CityTile.fromHalfBytes(
+    new Uint8Array(b.buffer, b.byteOffset, b.byteLength),
+    meta.n, meta.cell_m);
+  city = new CityLots(tile, new CityProps(tile));
+  if (spec.mast) {
+    // A lamp mast near the requested cell, approached level at 4 m, below
+    // the arm, from 12 m off along whichever axis meets the mast first from
+    // clear air. The mast's centre is read off its box's planes.
+    const [cx0, cy0] = spec.mast;
+    let found = null;
+    for (let cy = cy0; cy < cy0 + 4 && found === null; cy++) {
+      for (let cx = cx0; cx < cx0 + 4 && found === null; cx++) {
+        const props = city.props.cellSolids(cityCell(tile, cx, cy), cx, cy, 0);
+        for (const sd of props.solids) {
+          if (sd.source !== "lamp" || sd.top < 8.9) continue;
+          const pl = sd.planes;
+          const c = [0.5 * (pl[0][3] - pl[1][3]), 0.5 * (pl[2][3] - pl[3][3]), 4.0];
+          for (const [ux, uy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const s0 = [c[0] - 12 * ux, c[1] - 12 * uy, 4.0];
+            if (city.inside(s0, 0.35)) continue;
+            const hit = city.sweep(s0, c, 0.2);
+            if (hit && hit.source === "lamp") {
+              found = { s0, c, az: (Math.atan2(ux, uy) * 180 / Math.PI + 360) %% 360 };
+              break;
+            }
+          }
+          if (found) break;
+        }
+      }
+    }
+    if (found === null) throw new Error("no clear lamp mast near the requested cell");
+    spec.start = found.s0;
+    spec.azimuth = found.az;
+    spec.mastAt = found.c;
+  }
 } else {
   city = new BoxCity(spec.boxes);
 }
-process.stdout.write(JSON.stringify({ ...fly({ ...spec, city }), wallX: spec.wallX }));
+process.stdout.write(JSON.stringify({ ...fly({ ...spec, city }), wallX: spec.wallX,
+                                     mastAt: spec.mastAt }));
 """ % {"soar": SOAR.as_posix(), "tile": TILE_DIR.as_posix(),
        "box_city": BOX_CITY_JS}
 
@@ -280,9 +323,10 @@ def test_a_wall_stops_bounces_knocks_and_lets_go():
     duration = frames[last]["t"] - hit["t"]
     assert 0.8 <= duration <= 1.2
     assert duration == pytest.approx(knock["duration"], abs=2 / 60)
-    # A bounce back off the wall, a metre or two.
+    # A bounce back off the wall, a few metres (2.7 here; 1.75 before the
+    # 2026-11 ask for a harder rock, which this lower bound now holds).
     back = hit["cam"][0] - min(f["cam"][0] for f in frames[first:last + 1])
-    assert 1.0 < back < 3.5
+    assert 2.5 < back < 3.5
     # A drop of five to fifteen metres (13 m at this severity).
     drop = hit["cam"][2] - frames[last]["cam"][2]
     assert 5.0 <= drop <= 15.0
@@ -291,10 +335,12 @@ def test_a_wall_stops_bounces_knocks_and_lets_go():
     early = frames[first + 6]
     assert early["control"] < 0.15
     assert frames[last + 1]["control"] == 1.0
-    # The view was shaken — and is exactly where it was afterwards.
+    # The view was rocked — by several degrees (3.6 here; about 1.7 before
+    # the 2026-11 ask for a harder rock) — and is exactly where it was
+    # afterwards.
     shaken = max(abs(f["az"] - EAST) + abs(f["el"])
                  for f in frames[first:last + 1])
-    assert 0.3 < shaken < 5.0
+    assert 3.0 < shaken < 5.0
     assert frames[last + 1]["az"] == pytest.approx(EAST, abs=1e-9)
     assert frames[last + 1]["el"] == pytest.approx(0.0, abs=1e-9)
     assert frames[-1]["az"] == pytest.approx(EAST, abs=1e-9)
@@ -373,6 +419,69 @@ def test_a_real_building_of_the_shipped_tile():
     assert max(f["fly"][0] for f in frames) <= r["wallX"] - 0.2 + 1e-6
     assert len(r["knocks"]) == 1
     _episode(frames)
+
+
+def test_an_elevated_freeway_is_solid():
+    # Level at 25.3 m, north across the x-route on y = 51840 (block row
+    # 576), from inside its avenue corridor: the plane meets the deck's
+    # fascia (its south face at y = 51832, from 24.6 to 26 m).
+    r = fly(city="props", start=[28010.0, 51826.0, 25.3], azimuth=0.0,
+            elevation=0.0, speed=20.0, keys=["w"], fps=60, seconds=3.0)
+    frames = r["frames"]
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+    assert max(f["fly"][1] for f in frames) <= 51832.0 - 0.2 + 1e-6
+    assert len(r["knocks"]) == 1 and r["knocks"][0]["landing"] is False
+
+
+CREST_JS = """
+import { readFileSync } from "node:fs";
+import { CityTile, CityLots } from "%(soar)s/citylots.js";
+import { CityProps } from "%(soar)s/cityprops.js";
+const meta = JSON.parse(readFileSync("%(tile)s/meta.json", "utf8"));
+const b = readFileSync("%(tile)s/fif_mip0.bin");
+const tile = CityTile.fromHalfBytes(
+  new Uint8Array(b.buffer, b.byteOffset, b.byteLength), meta.n, meta.cell_m);
+const city = new CityLots(tile, new CityProps(tile));
+const segs = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(segs.map(([p0, p1]) => {
+  const hit = city.sweep(p0, p1, 0.35);
+  return hit && { t: hit.t, normal: hit.normal, source: hit.source };
+})));
+""" % {"soar": SOAR.as_posix(), "tile": TILE_DIR.as_posix()}
+
+
+def test_a_raised_freeway_is_smooth_to_fly_along():
+    # Resting on the high span of the y-route at x = 26640 over its crossing
+    # at y = 51840 (deck top 34 m; the camera's radius and the collider's
+    # clearance above it), and flying level along the deck past either
+    # crest, where the ramps begin: no wall (loose-ends found one, the
+    # ramp's grown end face 1.4 cm proud of the flat's). Then along the low
+    # deck into the foot of a ramp: met, but as a road rising, not a wall.
+    x, ac, rest = 26640.0, 51840.0, 34.0 + 0.35 + 0.01
+    segs = [[[x, ac - 40, rest], [x, ac - 80, rest]],
+            [[x, ac + 40, rest], [x, ac + 80, rest]],
+            [[x, ac - 300, 26.36], [x, ac - 250, 26.36]]]
+    out = json.loads(subprocess.run(
+        ["node", "--input-type=module", "--eval", CREST_JS],
+        input=json.dumps(segs), capture_output=True, text=True,
+        check=True).stdout)
+    assert out[0] is None and out[1] is None, out
+    foot = out[2]
+    assert foot is not None and foot["source"] == "skyway", out
+    assert foot["normal"][2] > 0.99, out
+
+
+def test_a_lamp_post_is_solid():
+    # A street lamp's 0.17 m mast, met level at 4 m under its arm.
+    r = fly(city="props", mast=[312, 576], azimuth=0.0, elevation=0.0,
+            speed=20.0, keys=["w"], fps=60, seconds=3.0)
+    frames = r["frames"]
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+    mx, my = r["mastAt"][:2]
+    closest = min(max(abs(f["fly"][0] - mx), abs(f["fly"][1] - my))
+                  for f in frames)
+    assert closest >= 0.085 + 0.2 - 1e-6
+    assert len(r["knocks"]) == 1
 
 
 def test_a_correction_across_the_cloud_domain_edge_keeps_the_flyer_on():

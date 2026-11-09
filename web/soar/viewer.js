@@ -17,6 +17,7 @@ import { Minimap } from "./minimap.js";
 import { Bird } from "./bird.js";
 import { Dart } from "./dart.js";
 import { CityTile, CityLots } from "./citylots.js";
+import { CityProps } from "./cityprops.js";
 import { CityCollider } from "./collide.js";
 
 /**
@@ -230,6 +231,8 @@ export class Viewer {
     // held on. Captures take it from the view (a still) or from the track
     // (a video), never from the wall.
     this.sceneTime = 0.0;
+    // Paused time inside a recording, cut from the clock its track records.
+    this._trackPausedS = 0.0;
     this._fpsAcc = 0; this._fpsN = 0; this._fps = null;
     this._lastSignature = null;
     this._discardNextPointerMove = false;
@@ -563,11 +566,14 @@ export class Viewer {
                                        ? { speed: K.CITY_DEFAULT_SPEED,
                                            floorZ: null }
                                        : {}) });
-    // Over the night city the buildings are solid (collide.js): the same
-    // buildings the shader raises, stood up on the CPU from the same tile.
-    // The day scenes have nothing to fly into and get no collider at all.
+    // Over the night city the buildings are solid (collide.js), and so is
+    // what stands among them — freeways, lamps, parked cars, skybridges,
+    // roof ridges (cityprops.js): the same things the shader raises, stood
+    // up on the CPU from the same tile. The day scenes have nothing to fly
+    // into and get no collider at all.
+    const cityTile = scene.city ? new CityTile(scene.cityCells) : null;
     this.collider = scene.city
-      ? new CityCollider(new CityLots(new CityTile(scene.cityCells)),
+      ? new CityCollider(new CityLots(cityTile, new CityProps(cityTile)),
                          scene.oceanTileExtent)
       : null;
 
@@ -1891,7 +1897,11 @@ export class Viewer {
     if (nowMs - this._aeLastMeterMs < K.AUTO_EXPOSURE_INTERVAL_MS) return;
     this._aeLastMeterMs = nowMs;
     const renderer = this.renderer;
-    renderer.meterLuminance(outputSize, this._viewKwargs())
+    // The live picture's steam is not in its accumulation, so not in what
+    // sets its exposure either: a meter that saw it move would move the
+    // exposure, and the exposure is in the scene key.
+    renderer.meterLuminance(outputSize,
+                            { ...this._viewKwargs(), liveSteam: true })
       .catch((err) => {
         // A readback abandoned because its renderer was torn down (a field
         // change, leaving the viewer) is not a failure of anything live.
@@ -2531,6 +2541,7 @@ export class Viewer {
     // The track's lens: the switch as it stands now, recorded in the header
     // and flown by the video; and a dry start, as every replay starts dry.
     this._trackLensWater = this.lensWater;
+    this._trackPausedS = 0.0;
     this.renderer.resetLens();
     // A recording holds the loop awake outright — a track's samples are its
     // timeline, and a sleeping loop would record a pause as nothing at all.
@@ -2826,6 +2837,10 @@ export class Viewer {
         ice_path: this.scene.iceSourceName ?? null,
         liquid_var: this.scene.liquidVar ?? null,
         ice_var: this.scene.iceVar ?? null,
+        // A coarsened demo's block average (see scene.js), so `soar` re-renders
+        // a track over the grid that was flown rather than the fine file.
+        // Absent otherwise, like the city and desert blocks.
+        ...(this.scene.coarsen ? { coarsen: this.scene.coarsen } : {}),
       },
       camera: {
         position: rel,
@@ -3103,12 +3118,15 @@ export class Viewer {
    * here: behold renders the nest group when there is one, so each command
    * names its own.
    *
-   * A demo scene carries none of these fields and gets no flags, which is
-   * right — its command already names a file the browser never had.
+   * A demo scene carries none of these fields, which is right — its command
+   * already names a file the browser never had — except a coarsened bake's
+   * `--coarsen`: that command names the FINE source file, and the flag is
+   * how the CLI makes the grid the demo shipped from it.
    */
   _selectionFlags(quote) {
     const s = this.scene;
     const flags = [];
+    if (s?.coarsen) flags.push("--coarsen", String(s.coarsen));
     if (s?.liquidVar) flags.push("--liquid-water-var", quote(s.liquidVar));
     if (s?.iceFrom) {
       flags.push("--ice-file", quote(s.iceFrom.filename));
@@ -3445,14 +3463,15 @@ export class Viewer {
       this._lastSignature !== null && signature !== this._lastSignature;
     this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
-    // The clock runs with the flight, on the simulation's dt (the camera's
-    // clock, so a stall cannot jump the steam either). It is in the scene key,
-    // so a frame it moves restarts accumulation — which a moving camera has
-    // done already.
-    const clockRuns = !this.paused && (cameraMoved || this.recorder.recording);
-    if (clockRuns) {
-      this.sceneTime += dt;
-    }
+    // The clock runs on the simulation's dt (the camera's clock, so a stall
+    // cannot jump the steam either), and it runs paused or parked too
+    // (Thomas, 2026-11-08: the steam "should keep going when the flight is
+    // paused"). The live view draws the city's steam after the accumulation
+    // and keeps the clock out of the scene key (Renderer.drawFrame's
+    // liveSteam), so a parked picture converges under steam that moves; a
+    // recording samples the clock with the camera, so a replay's steam moves
+    // as it did.
+    this.sceneTime += dt;
     // Lens water keeps wall-clock time, parked or not: it goes on wetting in
     // cloud and drying out of it while you hover. It is drawn after the
     // accumulation, so a changing lens never disturbs the parked picture's
@@ -3569,7 +3588,8 @@ export class Viewer {
           () => this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], this._viewKwargs(),
           { deltaSeconds: dt, overlays, waitForPipeline: false,
-            lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null });
+            lens: this.lensWater ? { dt: this._lensDt ?? 0.0 } : null,
+            liveSteam: true });
         if (marched && this._surfaceLanding
             && marchStartedAt >= this._surfaceLandedAt) {
           // The first frame on a new ground: the switch's panel comes down,
@@ -3594,7 +3614,8 @@ export class Viewer {
         this.renderer.presentLast(
           this.context.getCurrentTexture().createView(), this.canvasFormat,
           [outW, outH], overlays,
-          this.lensWater ? { dt: this._lensDt ?? 0.0 } : null);
+          this.lensWater ? { dt: this._lensDt ?? 0.0 } : null,
+          { sceneTime: this.sceneTime });
       }
       if (queueClock && measuring) {
         // Close of the window the drain above opened: what sits between the
@@ -3642,9 +3663,13 @@ export class Viewer {
     // Sampled after the frame it describes, so the track records what was on
     // screen rather than what was about to be. The clock is the flight's own
     // accumulated time, not the wall's: see TrackRecorder.
+    // A pause is cut out of the track, and so is the steam's time through
+    // it: the replay's clock runs on from where it stopped, rather than
+    // jumping by the pause in one frame.
+    if (this.recorder.recording && this.paused) this._trackPausedS += dt;
     if (this.recorder.recording && !this.paused) {
       this.recorder.advance(dt);
-      this.recorder.sample(this.camera, this.sceneTime);
+      this.recorder.sample(this.camera, this.sceneTime - this._trackPausedS);
       if (this.recorder.full) this._finishTrackRecording(true);
     }
 
@@ -3706,7 +3731,11 @@ export class Viewer {
     const animating = this._overlaysAnimate() || this.recorder.recording
       || this._capturing || probing || this.renderer.lightBakePending
       // A lens still wetting or drying is motion too.
-      || (this.lensWater && !this.renderer.lensSettled);
+      || (this.lensWater && !this.renderer.lensSettled)
+      // And the city's steam, which keeps the live clock, wherever any can
+      // be in view.
+      || Boolean(this.scene.city
+                 && this.camera.position[2] < K.LIVE_STEAM_CEILING_M);
     if (converged && !this._marchPending && !animating) {
       this._sleeping = true;
       return;                    // no rAF is scheduled; only _wake starts one

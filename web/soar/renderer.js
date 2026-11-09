@@ -8,8 +8,8 @@
 "use strict";
 
 import * as K from "./constants.js";
-import { packUniforms, sceneKey, keysEqual, renderTargetSize,
-         motionAlphaForDt } from "./uniforms.js";
+import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize,
+         motionAlphaForDt, sceneClock } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
 import { desertReliefM, desertTileRows } from "./scene.js";
 
@@ -69,14 +69,17 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 @fragment
+// Alpha is averaged like the colour: under the live view's steam it is the
+// cloud's transmittance in front of the steam (raymarch.wgsl fs_main's
+// t_front), which fs_steam_live composites with; elsewhere every sample's is 1.
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let xy = vec2<i32>(frag_pos.xy);
     let s = textureLoad(sample_tex, xy, 0);
     if (au.prev_weight <= 0.0) {
-        return vec4<f32>(s.rgb, 1.0);
+        return s;
     }
     let prev = textureLoad(prev_tex, xy, 0);
-    return vec4<f32>(prev.rgb * au.prev_weight + s.rgb * au.sample_weight, 1.0);
+    return prev * au.prev_weight + s * au.sample_weight;
 }
 `;
 
@@ -744,6 +747,8 @@ export class Renderer {
     // Lens water's state step runs every live frame while the switch is on
     // (the default): built here, not on the first frame that needs it.
     await this._lensPipeline(this.lighting);
+    // Likewise the city's live steam, drawn on every live city frame.
+    if (this.scene.city) await this._steamPipeline(this.lighting);
     this.device.pushErrorScope("validation");
     this._blitPipeline(this.canvasFormat, true);
     this._blitPipeline(this.canvasFormat, false);
@@ -1371,6 +1376,10 @@ export class Renderer {
           }
           const lp = this._lensPipeline(lighting, tier);
           if (isPending(lp)) lp.catch(() => {});
+          if (this.scene.city) {
+            const stp = this._steamPipeline(lighting, tier);
+            if (isPending(stp)) stp.catch(() => {});
+          }
         } catch {
           // Already failed and recorded; thrown again if it is ever needed.
         }
@@ -1450,6 +1459,7 @@ export class Renderer {
         await this.device.queue.onSubmittedWorkDone();
         for (const old of this._targetPool.values()) {
           old.sample.destroy(); old.accumA.destroy(); old.accumB.destroy();
+          old.live?.destroy();
           for (const tex of old.surface?.textures ?? []) tex.destroy();
         }
         this._targetPool.clear();
@@ -1598,7 +1608,7 @@ export class Renderer {
   async drawFrame(target, targetFormat, outputSize, view,
                   { deltaSeconds = null, accumulate = true,
                     overlays = null, waitForPipeline = true,
-                    lens = null } = {}) {
+                    lens = null, liveSteam = false } = {}) {
     // `lens`: null draws a dry lens (captures, stills, the switch off);
     // { dt } steps lens water's state by dt seconds before the present draws
     // it — the live view's wall-clock frame time, a video's resampled frame
@@ -1606,6 +1616,13 @@ export class Renderer {
     if (lens !== null && !(Number.isFinite(lens.dt) && lens.dt >= 0)) {
       throw new Error(`drawFrame: lens.dt must be a finite dt >= 0; got ${lens.dt}.`);
     }
+    // `liveSteam` (the live loop's): the city's steam is drawn after the
+    // accumulation at the view's clock (raymarch.wgsl fs_steam_live), and
+    // the clock leaves the scene key, so it runs over a parked picture that
+    // goes on converging. Only an accumulating city frame has it; every
+    // other caller marches the steam, exact, as before.
+    const steamLive = liveSteam && Boolean(this.scene.city) && accumulate
+      && view.jitter !== false;
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
@@ -1629,6 +1646,7 @@ export class Renderer {
     let rayPipeline;
     let surfacePipelines;
     let lensPipeline = null;
+    let steamPipeline = null;
     let renderSize;
     let targets;
     for (;;) {
@@ -1637,7 +1655,8 @@ export class Renderer {
       const entries = this._stageEntries();
       const sps = this._stagePipelines(lighting);
       const lp = lens ? this._lensPipeline(lighting) : null;
-      const pending = [p, ...sps, lp].filter((q) => q && isPending(q));
+      const stp = steamLive ? this._steamPipeline(lighting) : null;
+      const pending = [p, ...sps, lp, stp].filter((q) => q && isPending(q));
       if (pending.length > 0) {
         if (!waitForPipeline) {
           // Recorded; thrown when next requested.
@@ -1653,6 +1672,7 @@ export class Renderer {
       // A scene with a traced surface needs the set's surface target(s),
       // made on first need (e.g. after setSurface to the desert).
       await this._ensureSurfaceTarget(targets);
+      if (steamLive) await this._ensureLiveTarget(targets);
       const lightingNow = this.lighting;
       const sizeNow = renderTargetSize(outputSize, this.renderScale);
       if (lightingNow.lightCache === lighting.lightCache
@@ -1662,6 +1682,7 @@ export class Renderer {
         rayPipeline = p;
         surfacePipelines = entries.map((entry, k) => [entry, sps[k]]);
         lensPipeline = lp;
+        steamPipeline = stp;
         break;
       }
     }
@@ -1689,6 +1710,7 @@ export class Renderer {
       ...lighting,
       iceMode: this.iceModeActive,
       desertLite: this._desertLiteFor(this.qualityTier),
+      liveSteam: steamLive,
     });
     // A change of lighting method under a parked camera restarts the
     // average instead of blending into it. Any scene-key change with a
@@ -1705,9 +1727,15 @@ export class Renderer {
       this._resetAccumulation();
     }
     this._accumMethod = methodKey;
+    // The live steam's clock is kept out of the key, as the sampling flags
+    // are: written back once the plan is made (the march does not read it;
+    // fs_steam_live does).
+    const steamClock = u[24 * 4 + 2];
+    if (steamLive) u[24 * 4 + 2] = 0.0;
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
+    u[24 * 4 + 2] = steamClock;
     if (plan) {
       u[10 * 4] = plan.subpixel ? 1.0 : 0.0;
       u[10 * 4 + 1] = plan.jitterScale;
@@ -1799,8 +1827,11 @@ export class Renderer {
       // Only the last sample reaches the screen: the ones before it are the
       // picture being built, and presenting each would be a strobe.
       if (s === samples - 1) {
+        const shown = steamLive
+          ? this._encodeSteam(enc, targets, outTex, steamPipeline)
+          : outTex;
         const lensTex = this._encodeLensState(enc, lens, lensPipeline);
-        this._encodeBlit(enc, outTex, targetView, targetFormat,
+        this._encodeBlit(enc, shown, targetView, targetFormat,
                          renderSize[0] === outputW && renderSize[1] === outputH,
                          lensTex);
         encodeOverlays(overlays, enc, targetView, targetFormat);
@@ -1812,6 +1843,7 @@ export class Renderer {
       this._accumCount = step.nextCount;
     }
     this._lastPresented = outTex;
+    this._lastSteamLive = steamLive;
     return true;
   }
 
@@ -2134,6 +2166,57 @@ export class Renderer {
     this.lensSettled = true;
   }
 
+  /** The city's live steam pipeline for a lighting method and tier. */
+  _steamPipeline(lighting, tier = this.qualityTier) {
+    return this._pipeline("fs_steam_live", ACCUM_FORMAT,
+                          this._shaderSpec({ lighting, tier }));
+  }
+
+  /** Give a target set the live image the steam is composited into (the
+   *  accumulator's format, so a pixel with no steam passes bit for bit). */
+  async _ensureLiveTarget(targets) {
+    if (targets.live) return;
+    const live = await guardAllocation(
+      this.device, `${targets.w}x${targets.h} live steam target`,
+      targets.w * targets.h * 16, () => this.device.createTexture({
+        label: `soar-live-${targets.w}x${targets.h}`,
+        size: [targets.w, targets.h], format: ACCUM_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+             | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      }));
+    if (targets.live) live.destroy();       // another caller got there first
+    else targets.live = live;
+  }
+
+  /**
+   * The live steam over the accumulated image `accTex`, into the set's live
+   * target, which the present then draws (raymarch.wgsl fs_steam_live): the
+   * steam at the clock in row 24.z, along the last march's rays, to its
+   * surface. Returns the live target.
+   */
+  _encodeSteam(encoder, targets, accTex, pipeline) {
+    const group = this.device.createBindGroup({
+      label: "soar-live-steam", layout: this.surfaceLayout, entries: [
+        { binding: 0, resource: targets.surface.view },
+        { binding: 1, resource: accTex.createView() },
+        { binding: 2, resource: this._veilDummy.createView() },
+        { binding: 3, resource: this._surfaceDummy.createView() },
+      ],
+    });
+    const p = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: targets.live.createView(), loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    p.setPipeline(pipeline);
+    p.setBindGroup(0, this.rayBindGroup);
+    p.setBindGroup(1, group);
+    p.draw(3);
+    p.end();
+    return targets.live;
+  }
+
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact,
               lensTex = this._lensDry) {
     const entries = [{ binding: 0, resource: srcTex.createView() },
@@ -2162,9 +2245,31 @@ export class Renderer {
    * all in that state — it flies whether or not the camera does.
    */
   presentLast(targetView, targetFormat, outputSize, overlays = null,
-              lens = null) {
+              lens = null, steam = null) {
     if (!this.canPresentLast) return false;
     const encoder = this.device.createCommandEncoder();
+    // The live steam keeps the view's clock on a converged view (`steam`:
+    // { sceneTime }), over the last march's accumulated image, rays and
+    // surface: only row 24.z is rewritten. Its pipeline built the last
+    // march's frame, so it is ready; a lighting change since (which marches
+    // again next frame anyway) skips the steam for this one present.
+    let shown = this._lastPresented;
+    if (steam && this._lastSteamLive) {
+      let pipeline = null;
+      try {
+        pipeline = this._steamPipeline(this.lighting);
+      } catch {
+        // Failed and recorded; the march that needs it throws it.
+      }
+      if (pipeline && isPending(pipeline)) pipeline.catch(() => {});
+      if (pipeline && !isPending(pipeline)) {
+        this.device.queue.writeBuffer(
+          this.uniformBuf, (24 * 4 + 2) * 4, new Float32Array(
+            [sceneClock(steam.sceneTime, this.scene.clockPeriod)]));
+        shown = this._encodeSteam(encoder, this._targets, this._lastPresented,
+                                  pipeline);
+      }
+    }
     // Lens water keeps its own time on a converged view: step it here too,
     // with only row 24.w rewritten (the rest of the block is still the last
     // march's, and the camera has not moved). A state pipeline still
@@ -2185,7 +2290,7 @@ export class Renderer {
       }
     }
     this._encodeBlit(
-      encoder, this._lastPresented, targetView, targetFormat,
+      encoder, shown, targetView, targetFormat,
       this._targets.w === outputSize[0] && this._targets.h === outputSize[1],
       lensTex);
     encodeOverlays(overlays, encoder, targetView, targetFormat);
@@ -2427,9 +2532,9 @@ export class Renderer {
    * pipelines are still compiling: either way the AE loop just tries again
    * next interval.
    *
-   * The march is the real shader with TONE_MAP compiled out, at
-   * AUTO_EXPOSURE_METER_SIZE — the same footprint-per-cost trade renderScale
-   * makes, so ~5k rays per meter against ~1M for a frame. It gets its own
+   * The march is the real shader with TONE_MAP compiled out, on meterSize's
+   * grid — the output's shape at ~2.3k rays (the same footprint-per-cost
+   * trade renderScale makes) against ~1M for a frame. It gets its own
    * uniform buffer and target: the main frame's buffer is rewritten inside
    * drawFrame's multi-sample loop, and sharing it would race the meter's
    * submit against those rewrites.
@@ -2438,21 +2543,29 @@ export class Renderer {
     if (this._meterBusy) return null;
     this._meterBusy = true;
     try {
-      const [mw, mh] = K.AUTO_EXPOSURE_METER_SIZE;
+      const [mw, mh] = meterSize(outputSize);
+      // The grid follows the window's shape, so a resize can change it; the
+      // old size's target, readback and surface set go. No reading is in
+      // flight (this is the only meter, and its last readback was unmapped).
+      if (this._meterTex && (this._meterTex.width !== mw
+                             || this._meterTex.height !== mh)) {
+        this._releaseMeterTargets();
+      }
+      this._meterUniformBuf ??= this.device.createBuffer({
+        label: "soar-meter-uniforms",
+        size: K.UNIFORM_NBYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
       if (!this._meterTex) {
-        this._meterUniformBuf = this.device.createBuffer({
-          label: "soar-meter-uniforms",
-          size: K.UNIFORM_NBYTES,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
         this._meterTex = this.device.createTexture({
           label: "soar-meter", size: [mw, mh], format: ACCUM_FORMAT,
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         });
-        // 16 bytes per rgba32float texel; the row is 256-byte aligned by
-        // construction (96 * 16 = 1536).
+        // 16 bytes per rgba32float texel, each row padded to the 256 bytes
+        // a texture-to-buffer copy aligns rows to.
+        this._meterRowBytes = Math.ceil(mw * 16 / 256) * 256;
         this._meterReadBuf = this.device.createBuffer({
-          label: "soar-meter-read", size: mw * 16 * mh,
+          label: "soar-meter-read", size: this._meterRowBytes * mh,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
       }
@@ -2513,17 +2626,20 @@ export class Renderer {
                         surfaces);
       encoder.copyTextureToBuffer(
         { texture: this._meterTex },
-        { buffer: this._meterReadBuf, bytesPerRow: mw * 16 },
+        { buffer: this._meterReadBuf, bytesPerRow: this._meterRowBytes },
         [mw, mh]);
       this.device.queue.submit([encoder.finish()]);
 
       await this._meterReadBuf.mapAsync(GPUMapMode.READ);
       const data = new Float32Array(this._meterReadBuf.getMappedRange());
       const lums = new Float32Array(mw * mh);
-      for (let i = 0; i < mw * mh; i++) {
-        lums[i] = 0.2126 * data[i * 4]
-                + 0.7152 * data[i * 4 + 1]
-                + 0.0722 * data[i * 4 + 2];
+      const rowFloats = this._meterRowBytes / 4;
+      for (let y = 0; y < mh; y++) {
+        for (let x = 0; x < mw; x++) {
+          const t = y * rowFloats + x * 4;
+          lums[y * mw + x] = 0.2126 * data[t] + 0.7152 * data[t + 1]
+                           + 0.0722 * data[t + 2];
+        }
       }
       this._meterReadBuf.unmap();
       lums.sort();
@@ -2544,25 +2660,31 @@ export class Renderer {
     }
   }
 
+  /** The meter's size-bound resources: its target, surface set, readback. */
+  _releaseMeterTargets() {
+    this._meterTex?.destroy();
+    for (const tex of this._meterTargets?.surface?.textures ?? []) {
+      tex.destroy();
+    }
+    this._meterReadBuf?.destroy();
+    this._meterTex = this._meterReadBuf = this._meterTargets = null;
+  }
+
   /** Release the render targets. Pipelines and modules go with the object. */
   destroy() {
     for (const tex of [...(this._lensState ?? []), this._lensDry]) {
       tex?.destroy();
     }
     this._lensReadBuf?.destroy();
-    this._meterTex?.destroy();
-    for (const tex of this._meterTargets?.surface?.textures ?? []) {
-      tex.destroy();
-    }
-    this._meterReadBuf?.destroy();
+    this._releaseMeterTargets();
     this._meterUniformBuf?.destroy();
-    this._meterTex = this._meterReadBuf = this._meterUniformBuf = null;
-    this._meterTargets = null;
+    this._meterUniformBuf = null;
     this._surfaceDummy?.destroy();
     for (const targets of this._targetPool?.values() ?? []) {
       targets.sample.destroy();
       targets.accumA.destroy();
       targets.accumB.destroy();
+      targets.live?.destroy();
       for (const tex of targets.surface?.textures ?? []) tex.destroy();
     }
     this._targetPool?.clear();
