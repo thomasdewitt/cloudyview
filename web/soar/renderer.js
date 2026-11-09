@@ -458,7 +458,11 @@ export class Renderer {
           `${l.maxComputeInvocationsPerWorkgroup}, sizes ` +
           `${l.maxComputeWorkgroupSizeX}x${l.maxComputeWorkgroupSizeY})`);
       }
-      console.info(`soar: surface stage as compute, workgroup ${wx}x${wy}`);
+      // Only a scene with a traced surface (the city) has a first stage to
+      // run as compute; elsewhere the flag changes nothing, and says so.
+      console.info(scene.city
+        ? `soar: surface stage as compute, workgroup ${wx}x${wy}`
+        : "soar: ?surfacecs has no effect: this scene has no surface stage");
     }
 
     this.periodic = true;

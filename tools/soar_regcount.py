@@ -116,12 +116,16 @@ def child(job: dict):
     from gpulock_guard import require_gpulock
     require_gpulock("tools/soar_regcount.py")
     import wgpu
-    from cloudyview.soar_host import SoarRenderer, ViewState
+    from cloudyview.soar_host import (SoarRenderer, ViewState,
+                                      parse_surface_cs, surface_cs_limits)
+    surface_cs = parse_surface_cs(job["surface_cs"])
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-    device = adapter.request_device_sync()
+    device = adapter.request_device_sync(
+        required_limits=surface_cs_limits(surface_cs))
     r = SoarRenderer(device=device, periodic=job["periodic"],
                      nested=job["nested"], surface=job["surface"],
-                     shader_source=Path(job["source"]).read_text())
+                     shader_source=Path(job["source"]).read_text(),
+                     surface_cs=surface_cs)
     entry = job["entry"]
     if entry is None:
         return                      # the renderer's eager pipelines alone
@@ -225,16 +229,26 @@ def opcodes(code: bytes) -> collections.Counter:
                                for k in range(0, len(code), 16))
 
 
-def program_stats(prog: bytes) -> dict:
-    """A fragment program's register count, static spill instructions,
-    size, and the warps its registers allow. The count is the table entry
-    with no data (size and offset 0) and 0xff in its sixth word, of type 1
-    or 2, its fifth word (checked against the driver's own statistics,
-    VK_KHR_pipeline_executable_properties, at 95, 158, 166 and 168)."""
+def program_stats(prog: bytes, compute: bool = False) -> dict:
+    """A program's register count, static spill instructions, size, and the
+    warps its registers allow.
+
+    A fragment program's count is the table entry with no data (size and
+    offset 0) and 0xff in its sixth word, of type 1 or 2: its fifth word
+    (checked against the driver's own statistics,
+    VK_KHR_pipeline_executable_properties, at 95, 158, 166 and 168). A
+    compute program has no such entry; its count is the u32 eight bytes
+    before the code section (checked the same way at 16, 128 and 185,
+    2026-11-09; a fragment program holds 0 there)."""
     code = program_code(prog)
     ops = opcodes(code)
-    regs = [w4 for t, size, o, w4, w5 in sections(prog)
-            if t in (1, 2) and size == 0 and o == 0 and w5 == 0xff]
+    if compute:
+        o = [o for t, size, o, _, _ in sections(prog)
+             if t == SEC_CODE and size > 0][0]
+        regs = [struct.unpack_from("<I", prog, o - 8)[0]]
+    else:
+        regs = [w4 for t, size, o, w4, w5 in sections(prog)
+                if t in (1, 2) and size == 0 and o == 0 and w5 == 0xff]
     if len(regs) != 1 or not 0 < regs[0] <= 255:
         raise SystemExit(f"no register count where one was expected ({regs})")
     return {"registers": regs[0], "ldl": ops[OP_LDL], "stl": ops[OP_STL],
@@ -251,24 +265,37 @@ def warps_per_sm(registers: int) -> int:
 
 
 def measure(spec: str, args, work: Path) -> dict:
-    """The entry's fragment program for `spec`: what a renderer with the
-    entry built cached, less what the renderer alone did (its eager
-    pipelines, which may come from the same module)."""
+    """The entry's program for `spec`: what a renderer with the entry
+    built cached, less what the renderer alone did (its eager pipelines,
+    which may come from the same module). A fragment entry's is the one new
+    program that interpolates an input (IPA); under --surface-cs the first
+    stage is a compute pipeline, one program with no IPA."""
     k = len(list(work.glob("src*.wgsl")))
     src = work / f"src{k}.wgsl"
     src.write_text(source_for(spec))
     job = {"source": str(src), "entry": None, "surface": args.surface,
            "tier": args.tier, "periodic": args.periodic == "on",
-           "nested": args.nested}
+           "nested": args.nested, "surface_cs": args.surface_cs}
     baseline = build_programs(job, work / f"cache{k}-renderer")
     progs = build_programs({**job, "entry": args.entry},
                            work / f"cache{k}-entry")
     new = [p for h, p in progs.items() if h not in baseline]
+    if compute_stage(args):
+        if len(new) != 1 or opcodes(program_code(new[0]))[OP_IPA] > 0:
+            raise SystemExit(f"expected one new compute program for "
+                             f"{args.entry} under --surface-cs, found "
+                             f"{len(new)} new")
+        return program_stats(new[0], compute=True)
     frag = [p for p in new if opcodes(program_code(p))[OP_IPA] > 0]
     if len(frag) != 1:
         raise SystemExit(f"expected one new fragment program for "
                          f"{args.entry}, found {len(frag)} (of {len(new)} new)")
     return program_stats(frag[0])
+
+
+def compute_stage(args) -> bool:
+    """Whether `args` asks for the first surface stage as compute."""
+    return args.surface_cs != "frag" and args.entry == "fs_surface"
 
 
 def main():
@@ -285,6 +312,12 @@ def main():
                     choices=("ocean", "city"))
     ap.add_argument("--tier", default="low", choices=sorted(TIERS))
     ap.add_argument("--periodic", default="on", choices=("on", "off"))
+    ap.add_argument("--surface-cs", default="frag",
+                    choices=("frag", "cs512", "cs256"),
+                    help="EXPERIMENT: build the renderer with the first "
+                         "surface stage as compute (SoarRenderer "
+                         "surface_cs); --entry fs_surface then reports "
+                         "cs_surface's program")
     ap.add_argument("--nested", action="store_true")
     ap.add_argument("--sass", type=Path, default=None,
                     help="also disassemble each program to this path (one per "

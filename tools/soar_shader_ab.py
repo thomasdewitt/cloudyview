@@ -72,8 +72,9 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer,
-    ViewState, camera_world_origin, read_shader,
-    surface_cell_m, surface_clock_period_s, surface_period_m,
+    ViewState, camera_world_origin, parse_surface_cs, read_shader,
+    surface_cell_m, surface_clock_period_s, surface_cs_limits,
+    surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
 
@@ -163,6 +164,14 @@ def main():
     ap.add_argument("--a", default=None,
                     help="baseline revision (default git:HEAD)")
     ap.add_argument("--b", default="tree", help="candidate revision")
+    ap.add_argument("--a-surface-cs", default="frag",
+                    choices=("frag", "cs512", "cs256"),
+                    help="EXPERIMENT: A's first surface stage as compute "
+                         "(SoarRenderer surface_cs); with --b-surface-cs, "
+                         "one revision against itself shows the rounding "
+                         "the compute stage moves")
+    ap.add_argument("--b-surface-cs", default="frag",
+                    choices=("frag", "cs512", "cs256"))
     ap.add_argument("--size", type=int, nargs=2, default=(400, 225))
     ap.add_argument("--frames", type=int, default=1,
                     help="accumulated passes (1 = one deterministic frame)")
@@ -221,8 +230,15 @@ def main():
         args.a = "git:HEAD"
 
     import wgpu
+    modes = {"a": parse_surface_cs(args.a_surface_cs),
+             "b": parse_surface_cs(args.b_surface_cs)}
+    limits = {}
+    for mode in modes.values():
+        for k, v in surface_cs_limits(mode).items():
+            limits[k] = max(limits.get(k, 0), v)
     device = wgpu.gpu.request_adapter_sync(
-        power_preference="high-performance").request_device_sync()
+        power_preference="high-performance").request_device_sync(
+            required_limits=limits)
 
     if args.demo is not None:
         sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
@@ -250,10 +266,11 @@ def main():
 
     renderers = []
     # Against a saved set, A is not rendered here: B alone is built.
-    for spec in ((args.b,) if args.against is not None
-                 else (args.a, args.b)):
+    for side, spec in ((("b", args.b),) if args.against is not None
+                       else (("a", args.a), ("b", args.b))):
         r = SoarRenderer(device=device, periodic=periodic, nested=nested,
-                         surface=surface, shader_source=source_for(spec))
+                         surface=surface, shader_source=source_for(spec),
+                         surface_cs=modes[side])
         r.upload_volume(level.sigma)
         if nested:
             r.upload_nest(nest.sigma)
@@ -279,7 +296,9 @@ def main():
             for name, v in CITY_VIEWS.items()}
     wanted = args.views.split(",") if args.views else list(views)
     w, h = args.size
-    print(f"A = {args.against or args.a}\nB = {args.b}")
+    stage = {k: "" if v is None else f" (first stage compute {v[0]}x{v[1]})"
+             for k, v in modes.items()}
+    print(f"A = {args.against or args.a}{stage['a']}\nB = {args.b}{stage['b']}")
     print(f"{w}x{h}, {args.frames} frame(s), jitter "
           f"{'on' if args.jitter else 'off'}, periodic {args.periodic}, "
           f"scene {args.scene}, tier {args.tier or 'judge (live march)'}\n")

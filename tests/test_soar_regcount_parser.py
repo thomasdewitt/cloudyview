@@ -10,6 +10,12 @@ registers on 2026-11-09, through the Vulkan crate the tool replaced. The
 fixture is one record as driver 595.80 wrote it on the RTX 5080: the sun-tau
 bake (fs_bake_light), 26 registers, 135 instructions, no spills. A driver
 update that changes the format fails here, not in someone's measurement.
+
+A compute program keeps its count elsewhere: the u32 eight bytes before
+its code section (checked against the driver's statistics at 16, 128 and
+185 registers, 2026-11-09, for the surface_cs experiment's cs_surface).
+Its fixture is nvidia_cache_record_cs_tiny.wgsl (a 512-invocation kernel,
+16 registers, 119 instructions) as the same driver wrote it.
 """
 
 import shutil
@@ -24,6 +30,7 @@ sys.path.insert(0, str(REPO / "tools"))
 import soar_regcount as rc  # noqa: E402
 
 FIXTURE = Path(__file__).parent / "data" / "nvidia_cache_record_fs_bake_light.bin"
+FIXTURE_CS = Path(__file__).parent / "data" / "nvidia_cache_record_cs_tiny.bin"
 
 pytestmark = pytest.mark.skipif(shutil.which("zstd") is None,
                                 reason="needs the zstd command")
@@ -35,6 +42,20 @@ def test_the_bake_record_parses_to_its_known_program():
     s = rc.program_stats(progs[0])
     assert (s["registers"], s["ldl"], s["stl"], s["instructions"]) == (26, 0, 0, 135)
     assert rc.opcodes(rc.program_code(progs[0]))[rc.OP_IPA] > 0   # a fragment program
+    with pytest.raises(SystemExit, match="no register count"):
+        rc.program_stats(progs[0], compute=True)                      # 0 there
+
+
+def test_the_compute_record_parses_to_its_known_program():
+    progs = list(rc.cache_frames(FIXTURE_CS.read_bytes()))
+    assert len(progs) == 1
+    assert rc.opcodes(rc.program_code(progs[0]))[rc.OP_IPA] == 0
+    s = rc.program_stats(progs[0], compute=True)
+    assert (s["registers"], s["ldl"], s["stl"], s["instructions"]) == (16, 0, 0, 119)
+    # Read as a fragment program it has no register entry: refused, not
+    # misread.
+    with pytest.raises(SystemExit, match="no register count"):
+        rc.program_stats(progs[0])
 
 
 def test_a_record_that_does_not_decompress_to_its_size_refuses():
