@@ -901,6 +901,21 @@ export class CityLots {
    * the segment is in at t, so the stopping rule still holds.
    */
   sweep(p0, p1, r = 0.0) {
+    // Folded into the primary tile by whole tiles, as the shader folds its
+    // camera (city_fold_xy): the buildings repeat with the tile, but the
+    // props' lattices (freeway routes, lamp stations, parking slots, pylon
+    // bays) do not divide it, so beyond the first tile they stand where the
+    // renderer — which draws from the folded camera — puts them only once
+    // the query is folded the same way. p0 is the end nearest the eye.
+    const [sx, sy] = this._fold(p0);
+    const hit = this._sweep([p0[0] - sx, p0[1] - sy, p0[2]],
+                            [p1[0] - sx, p1[1] - sy, p1[2]], r);
+    if (hit !== null) hit.point = [hit.point[0] + sx, hit.point[1] + sy,
+                                   hit.point[2]];
+    return hit;
+  }
+
+  _sweep(p0, p1, r) {
     this._checkReach(r);
     const cell = this.tile.cellM;
     const d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
@@ -980,6 +995,17 @@ export class CityLots {
    * the ground).
    */
   inside(p, r = 0.0) {
+    const [sx, sy] = this._fold(p);
+    return this._inside([p[0] - sx, p[1] - sy, p[2]], r);
+  }
+
+  /** The whole-tile shift that folds p into the primary tile. */
+  _fold(p) {
+    const e = this.tile.n * this.tile.cellM;
+    return [Math.floor(p[0] / e) * e, Math.floor(p[1] / e) * e];
+  }
+
+  _inside(p, r) {
     this._checkReach(r);
     if (p[2] < CITY_GROUND_Z + r) return { top: CITY_GROUND_Z };
     const cell = this.tile.cellM;

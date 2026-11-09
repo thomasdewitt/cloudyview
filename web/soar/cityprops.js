@@ -14,6 +14,15 @@
 // buildings and nothing else to stand on); this is the reversal.
 //
 // Every solid is a convex polytope (polytope.js).
+//
+// The arithmetic here is float64 and the shader's float32. Positions agree to
+// millimetres, which the mirror test allows for. A yes/no decision whose
+// argument lands within a float32 rounding of its threshold — a slot's
+// occupancy draw against its cut, a car's hover draw, a skybridge's gap
+// against 62 m, a sawtooth's tooth count rounding off a half — can go the
+// other way here, at odds of order 1e-7 per decision: the same standing as
+// pow() in citylots.js's height law. The thresholds compared against a
+// float32 hash draw are written f(...), where that is all it takes.
 
 "use strict";
 

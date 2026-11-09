@@ -119,6 +119,13 @@ VIEWS = {
     "sawtooth": (30860.0, 53800.0, 30.0, 30.0, -25.0, 70.0),
     "monitor": (31070.0, 54520.0, 28.0, 30.0, -20.0, 70.0),
 }
+# What each view is here to hold, and so must show: at least MIN_COMPARED
+# of its probed rays have to land on each.
+EXPECT = {"deck_along": ("skyway",), "under_deck": ("skyway",),
+          "interchange": ("skyway",), "street_eye": ("lamp", "car"),
+          "kerb_down": ("lamp", "car"), "skybridge": ("bridge",),
+          "sawtooth": ("roof",), "monitor": ("roof",)}
+MIN_COMPARED = 50
 SIZE = (480, 270)
 MAX_PROBED = 6000
 WINDOW = 4.0
@@ -273,7 +280,8 @@ def _js_hits(origin, rays):
 
 
 def _check_view(dirs, t_gpu, kind, origin, pixel_angle, rng):
-    """(bad rows, prop rays compared, prop rays behind a building's relief)
+    """(bad rows, prop rays compared by source, prop rays behind a
+    building's relief)
 
     Each ray is swept over WINDOW metres before the GPU's hit to just past
     it, not from the eye: what the collider sweeps is a frame's motion, a few
@@ -309,7 +317,7 @@ def _check_view(dirs, t_gpu, kind, origin, pixel_angle, rng):
     rays = [[*dirs[i], max(float(t_gpu[i]) - WINDOW, 0.0),
              float(t_gpu[i]) + 1.0] for i in idx]
     js = _js_hits(origin, rays)
-    bad, compared, shadowed = [], 0, 0
+    bad, compared, shadowed = [], {}, 0
     for i, ((tg_, sg, cg), (ts, ss, cs)) in zip(idx, js):
         tg = t_gpu[i]
 
@@ -320,7 +328,7 @@ def _check_view(dirs, t_gpu, kind, origin, pixel_angle, rng):
                     t for t, s in ((tg_, sg), (ts, ss)) if s == "building") < tg:
                 shadowed += 1
                 continue
-            compared += 1
+            compared[src[i]] = compared.get(src[i], 0) + 1
             # The GPU's hit lies between the grown sweep's (no later) and the
             # shrunk sweep's (no earlier; it may miss a face the ray only
             # grazes), on the same kind of prop.
@@ -354,6 +362,55 @@ def test_every_mirrored_constant_is_the_shaders():
     assert not differ, f"cityprops.js disagrees with raymarch.wgsl: {differ}"
 
 
+FOLD_JS = textwrap.dedent("""
+    import { readFileSync } from "node:fs";
+    import { CityTile, CityLots } from "%(citylots)s";
+    import { CityProps } from "%(cityprops)s";
+    const meta = JSON.parse(readFileSync("%(meta)s", "utf8"));
+    const bytes = readFileSync("%(bin)s");
+    const tile = CityTile.fromHalfBytes(
+      new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+      meta.n, meta.cell_m);
+    const city = new CityLots(tile, new CityProps(tile));
+    const E = meta.n * meta.cell_m;
+    const segs = JSON.parse(readFileSync(0, "utf8"));
+    const out = segs.map(([p0, p1]) => [-1, 0, 1, 3].map((k) => {
+      const sh = (p) => [p[0] + k * E, p[1] - k * E, p[2]];
+      const hit = city.sweep(sh(p0), sh(p1), 0.35);
+      return hit && [hit.t, hit.source, hit.point[0] - k * E,
+                     hit.point[1] + k * E];
+    }));
+    process.stdout.write(JSON.stringify(out));
+""") % {"citylots": (SOAR / "citylots.js").as_uri(),
+        "cityprops": (SOAR / "cityprops.js").as_uri(),
+        "meta": (TILE_DIR / "meta.json").as_posix(),
+        "bin": (TILE_DIR / "fif_mip0.bin").as_posix()}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+def test_the_props_repeat_with_the_tile():
+    """The renderer draws from a camera folded into the primary tile
+    (city_fold_xy), and the props' lattices — freeway routes every 2160 m,
+    lamp stations, 7 m parking slots, 55 m pylon bays — do not divide the
+    92 km tile, so the collider folds its queries the same way: a flight
+    tiles away meets the same deck, mast and car as one in the first."""
+    segs = [
+        [[28010.0, 51840.0, 40.0], [28010.0, 51840.0, 20.0]],   # onto a deck
+        [[28089.0, 51532.0, 4.0], [28098.0, 51532.0, 4.0]],     # a lamp mast
+        [[28081.0, 51500.0, 0.6], [28096.0, 51540.0, 0.6]],     # parked cars
+    ]
+    out = json.loads(subprocess.run(
+        ["node", "--input-type=module", "--eval", FOLD_JS],
+        input=json.dumps(segs), capture_output=True, text=True,
+        check=True).stdout)
+    for seg, hits in zip(segs, out):
+        assert hits[1] is not None, f"{seg} meets nothing to compare"
+        for h in hits:
+            assert h is not None and h[1] == hits[1][1], (seg, hits)
+            assert h[0] == pytest.approx(hits[1][0], abs=1e-6), (seg, hits)
+            assert h[2:] == pytest.approx(hits[1][2:], abs=1e-4), (seg, hits)
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 def test_js_props_meet_the_rays_the_gpu_traces():
@@ -370,10 +427,12 @@ def test_js_props_meet_the_rays_the_gpu_traces():
                                               _pixel_angle(name), rng)
         seen[name] = (compared, shadowed, len(bad))
         report += [(name, *b) for b in bad[:6]]
-    vacuous = [n for n, (c, _, _) in seen.items() if c < 200]
+    vacuous = [(n, src) for n, (c, _, _) in seen.items()
+               for src in EXPECT[n] if c.get(src, 0) < MIN_COMPARED]
     assert not vacuous, (
-        f"views that no longer look at a mirrored prop (fewer than 200 rays "
-        f"hit one), and would pass vacuously: {vacuous}; {seen}")
+        f"views that no longer look at the props they are here for (fewer "
+        f"than {MIN_COMPARED} rays hit one), and would pass vacuously: "
+        f"{vacuous}; {seen}")
     assert not report, (
         "the JS props and the GPU's disagree (view, pixel, GPU source, GPU t, "
         f"JS source, JS t): {report}; rays compared, shadowed, bad: {seen}")
