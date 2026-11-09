@@ -121,6 +121,22 @@ def _ss_clients(port: int) -> str:
         capture_output=True, text=True).stdout
 
 
+def _pages(port: int) -> str:
+    """The browser's open pages, `'title' url` each, from its DevTools
+    list: what an undriven browser is drawing."""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list",
+                                    timeout=0.5) as r:
+            pages = [t for t in json.load(r) if t.get("type") == "page"]
+    except (OSError, ValueError) as e:
+        return f"unreadable ({e})"
+    return " | ".join(f"{(t.get('title') or '')[:40]!r} "
+                      f"{(t.get('url') or '')[:80]}"
+                      for t in pages) or "none"
+
+
 def driven_by(pid: int) -> str:
     """Who is driving a browser that draws: the DevTools port of the browser
     `pid` belongs to (its GPU process is a grandchild of the browser, which
@@ -150,7 +166,8 @@ def driven_by(pid: int) -> str:
         clients.append(f"pid {c} `{line}` in {cwd}")
     if not clients:
         return (f"; DevTools :{port} has no client connected (a tab left "
-                "running, or someone at the window)")
+                "running, a client between connections, or someone at the "
+                f"window); pages: {_pages(port)}")
     return (f"; driven over DevTools :{port} by "
             + ", ".join(sorted(set(clients))))
 
@@ -275,7 +292,9 @@ class Watch:
 
     def __init__(self):
         import threading
-        self.fatal = set()
+        # Each fatal line with the wall-clock time it was first seen, so a
+        # neighbour can be lined up against the other sessions' logs.
+        self.fatal: dict[str, str] = {}
         self.error = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -287,7 +306,8 @@ class Watch:
         try:
             while not self._stop.is_set():
                 fatal, _ = survey(seconds=0.0)
-                self.fatal.update(fatal)
+                for f in fatal:
+                    self.fatal.setdefault(f, time.strftime("%H:%M:%S"))
                 self._stop.wait(0.5)
         except Exception as e:  # noqa: BLE001 — kept, and failed on below
             self.error = e
@@ -311,11 +331,14 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
                  "was not watched, so these numbers cannot be trusted.")
     time.sleep(1.0)            # let the caller's own last passes drain
     fatal, warn = survey(seconds=2.0)
-    fatal = sorted(set(fatal) | (watch.fatal if watch else set()))
-    if fatal:
+    seen = dict(watch.fatal) if watch else {}
+    for f in fatal:
+        seen.setdefault(f, time.strftime("%H:%M:%S"))
+    if seen:
+        lines = sorted(f"{t} {f}" for f, t in seen.items())
         sys.exit("CONTAMINATED: another process was on the GPU during or "
-                 "at the end of the run; discard these numbers:\n  "
-                 + "\n  ".join(fatal))
+                 "at the end of the run (first seen, wall clock); discard "
+                 "these numbers:\n  " + "\n  ".join(lines))
     return warn
 
 

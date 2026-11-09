@@ -68,7 +68,7 @@ SURFACE_DIRS = {"ocean": OCEAN_DIR, "desert": DESERT_DIR, "city": CITY_DIR}
 # by tests/test_city_lots.py); a tile of another schema is refused, because
 # the city's v1 tile decoded as v2 raises a different city without an error.
 SURFACE_TILE_SCHEMAS = {
-    "ocean": "cloudyview.web.ocean.v1",
+    "ocean": "cloudyview.web.ocean.v2",
     "desert": "cloudyview.web.desert.v2",
     "city": "cloudyview.web.city.v2",
 }
@@ -140,6 +140,20 @@ def decode_surface_level(raw: bytes, side: int, meta: dict) -> bytes:
         raise RuntimeError(f"unknown surface-tile encoding {encoding!r}.")
     b = np.frombuffer(raw, np.uint8).reshape(channels, 2, side * side)
     return np.ascontiguousarray(b.transpose(2, 0, 1)).tobytes()
+
+
+def encode_surface_level(level: np.ndarray) -> bytes:
+    """(side, side, channels) -> planar, byte-shuffled float16 bytes: the
+    "planar-byte-shuffle" encoding decode_surface_level undoes (the tile
+    exporters' half of it)."""
+    planes = []
+    for c in range(level.shape[-1]):
+        b = np.ascontiguousarray(level[..., c], dtype=np.float16).view(np.uint8)
+        b = b.reshape(-1, 2)
+        planes += [b[:, 0].tobytes(), b[:, 1].tobytes()]
+    return b"".join(planes)
+
+
 def surface_period_m(surface: str, meta: dict) -> float:
     """The period the surface frame folds at (SceneState.surface_period_m):
     a whole number of tiles (SURFACE_FRAME_TILES) — each surface is a pure
@@ -389,10 +403,10 @@ class SceneState:
     periodic: bool = True
     ocean_z: float = 0.0
     ocean_reflectance: Sequence[float] = DEFAULT_OCEAN_REFLECTANCE
-    ocean_fif_dx: float = 0.2
+    ocean_fif_dx: float = 0.1
     ocean_tile_extent: float = 102.4
     ocean_enabled: bool = True
-    ocean_max_lod: int = 9
+    ocean_max_lod: int = 10
     nested: bool = False
     nest_bmin: Optional[Sequence[float]] = None
     nest_bmax: Optional[Sequence[float]] = None
