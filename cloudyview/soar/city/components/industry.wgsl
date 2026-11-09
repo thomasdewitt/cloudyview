@@ -1911,8 +1911,8 @@ fn cc_industry_vision(dv: f32, dz: f32) -> bool {
 const cc_industry_VISION_FRAC: f32 = 0.0711;   // 4 x 0.4 x 0.4 / 9
 const cc_industry_SEAM_FRAC: f32 = 0.05;       // 5 x 0.03 / 3
 
-fn cc_industry_facade(cc: CityCell, h: CityHit, uc: f32, vc: f32, fp: f32)
-        -> vec3<f32> {
+fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
+                      vc: f32, fp: f32) -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
