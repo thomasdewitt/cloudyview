@@ -18084,8 +18084,9 @@ fn cc_industry_door_at(cc: CityCell, l: cc_industry_Lot, p: vec3<f32>,
 // The pixel's paint: a closed dock door's own where the pixel is on one,
 // the wall's everywhere else. Taken first thing in cc_industry_facade, one
 // paint a pixel, while little else is live: taken after the wall's look
-// and the doors', it raised the city's first stage from 128 to 168
-// registers (tools/soar_regcount.py), which cost every city pixel.
+// and the doors', it raised the city's first stage from 128 registers
+// (16 warps an SM, some spilled) to 168 (12 warps) in the binary wgpu builds
+// (perf's tools/soar_regcount.py, 2026-11-09), which cost every city pixel.
 fn cc_industry_wall_graffiti(cc: CityCell, h: CityHit, dir: vec3<f32>,
                              vc: f32, fp: f32, court: bool, face: i32)
         -> CityGraffitiPaint {
