@@ -392,7 +392,7 @@ class SceneState:
     band_max_m) — what the shader's slab tests are built from. The ocean's haze extinction (row 19.y) still applies —
     it is the aerial perspective over whatever ground there is.
 
-    The ViewState's ocean realism knobs (glint, slope draw, mip bias) are
+    The ViewState's ocean realism knobs (glint, resolved slope, mip bias) are
     simply ignored by the shader under CITY and DESERT; they are not
     validated away.
     """
@@ -490,7 +490,7 @@ class ViewState:
     ocean_mip_bias: float = look.OCEAN_MIP_BIAS
     ocean_glint_strength: float = look.OCEAN_GLINT_STRENGTH
     ocean_glint_roughness: float = look.OCEAN_GLINT_ROUGHNESS
-    ocean_slope_draw_fraction: float = look.OCEAN_SLOPE_DRAW_FRACTION
+    ocean_slope_resolved_fraction: float = look.OCEAN_SLOPE_RESOLVED_FRACTION
     ocean_sky_shadow_floor: float = look.OCEAN_SKY_SHADOW_FLOOR
     cone_stencil_theta_deg: float = look.CONE_STENCIL_THETA_DEG
     # The app's angles scaled by DEFAULT_LOD_STRENGTH — see above. Given as
@@ -550,7 +550,8 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     _non_negative("aerial_perspective_strength", view.aerial_perspective_strength)
     _non_negative("ocean_glint_strength", view.ocean_glint_strength)
     _non_negative("ocean_glint_roughness", view.ocean_glint_roughness)
-    _unit_interval("ocean_slope_draw_fraction", view.ocean_slope_draw_fraction)
+    _unit_interval("ocean_slope_resolved_fraction",
+                   view.ocean_slope_resolved_fraction)
     if not (look.HAZE_MIN <= view.haze <= look.HAZE_MAX):
         raise ValueError(
             f"haze must be in [{look.HAZE_MIN}, {look.HAZE_MAX}]; "
@@ -680,7 +681,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
                     if view.haze_height_dependent else 0.0)
     u[18] = (view.ocean_realism, view.ocean_mip_bias,
              view.ocean_glint_strength, view.ocean_glint_roughness)
-    u[19] = (view.ocean_slope_draw_fraction,
+    u[19] = (view.ocean_slope_resolved_fraction,
              look.ocean_haze_extinction_per_km(view.haze) * 1e-3,
              view.ocean_sky_shadow_floor, view.contrast)
     # The view-step angle floors at a QUARTER of the render's pixel angle:
