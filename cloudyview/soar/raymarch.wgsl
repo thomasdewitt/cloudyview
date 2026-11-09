@@ -2766,6 +2766,8 @@ fn city_rand4(s: vec2<u32>) -> vec4<f32> {
 // sharing one of them — a different stream only rotates it — would lock a
 // city draw to, say, the subpixel offset for every frame of a pixel. Adding
 // dimensions would change every existing alpha, and the day scene with them.
+// (The wet reflection's draws have their own generator instead, an R4 of its
+// own constant: city_refl_rand.)
 fn city_frame_rand(pixel: vec2<u32>, frame: u32, stream: u32) -> vec4<f32> {
     return city_rand4(vec2<u32>(pixel.x ^ (frame * 0x9e3779b9u),
                                 pixel.y + frame * 0x85ebca6bu
@@ -2773,7 +2775,6 @@ fn city_frame_rand(pixel: vec2<u32>, frame: u32, stream: u32) -> vec4<f32> {
 }
 const CITY_RAND_REFLECT: u32 = 1u;
 const CITY_RAND_MEDIA: u32 = 2u;
-const CITY_RAND_ROULETTE: u32 = 3u;
 
 // The city repeats at the tile, exactly. One texel is one block, so the
 // block count per tile IS the glow texture's mip-0 dimension (1024 at the
@@ -3971,8 +3972,18 @@ const CITY_REFL_ALPHA_DAMP: f32 = 0.08;
 // canyon and reach the towers beyond it; a rising ray that has found nothing
 // by then sees sky.
 const CITY_REFL_RANGE: f32 = 600.0;
-// Lobes that carry less than this are traced only by Russian roulette.
-const CITY_REFL_RR: f32 = 0.15;
+// Lobes that carry less than this are traced only by Russian roulette: a
+// lobe of weight w < RR is traced with probability w / RR and counted RR / w
+// times over, binary noise on the dim film (a steep view, a damp patch). At
+// 0.05 rather than the first 0.15, Thomas's wet avenue (2026-11-08) traces
+// more of them: its one-sample spread 8 % lower (3.54 vs 3.90 levels on
+// the street, with the stratified draws), its first 8 frames 8 % nearer the
+// converged mean, for +1.6 % of the frame (768x432, High, interleaved with
+// a +0.7 % null; tier verified in every tab). Unbiased in
+// linear light; the accumulation averages tone-mapped samples, so fewer
+// rare RR / w samples brighten a converged wet reflection a little (+0.6
+// levels mean on reflective pixels), toward the tone map of the true mean.
+const CITY_REFL_RR: f32 = 0.05;
 // Footprint over which the traced reflection hands over to its mean. Past
 // it a wet pixel reflects the environment estimate, and pays nothing.
 const CITY_REFL_LOD: vec2<f32> = vec2<f32>(0.30, 0.80);
@@ -27036,6 +27047,37 @@ fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
 // roulette. What the puddles lose is the parked cars, the poles, the skyway
 // and the furniture; the lamps they would have shown are city_lamp_glint's,
 // analytically, in the ground's own shading.
+// The reflection's four draws per pixel and frame — the GGX normal (x, y),
+// the lobe (z) and the roulette (w) — as one 4-D R-sequence over the frames
+// (Roberts 2018: alpha_k = phi_4^-k, phi_4 the real root of x^5 = x + 1),
+// rotated per pixel by an integer hash (strat_seed). A parked view's frames
+// then stratify all four together, and the lobe and the roulette stay
+// independent of each other, which the estimator's 1/p weights need (two
+// draws on one 1-D lattice would not be). White noise (city_frame_rand)
+// drew them before; the sky probe's jitter still does.
+// Each dimension has a near neighbour among the strat streams the city
+// runs, and two Weyl sequences whose steps differ by d move nearly in step
+// for ~1/(2d) frames (loose-ends' review): x by the subpixel offset's y
+// (STRAT_ALPHA_2, d 0.020, ~25 frames), y by the moon cone's u (ALPHA_5,
+// 0.015, ~32), z by its v (ALPHA_6, 0.044, ~11), w by the pre-march jitter
+// (ALPHA_9, 0.013, ~37). With eight 1-D streams already on the circle no
+// four steps sit much farther (a search of the golden families and of
+// integer strides of this lattice found 0.02 at best), and none of these
+// pairs shares an integrand (a microfacet normal against a subpixel
+// position, the roulette against the cloud pre-march), so early in a
+// parked accumulation a pair samples near a diagonal of its square instead
+// of all of it and converges regardless — the first 8 frames' error is 8 %
+// lower than dev's white draws all the same.
+const CITY_REFL_R4: vec4<f32> = vec4<f32>(0.8566748838545029, 0.7338918566271260,
+                                          0.6287067210378086, 0.5385972572236101);
+const STRAT_STREAM_CITY_REFLECT: u32 = 9u;
+fn city_refl_rand(pixel: vec2<u32>, frame: u32) -> vec4<f32> {
+    let a = strat_seed(pixel, STRAT_STREAM_CITY_REFLECT);
+    let b = pcg2d(a);
+    return fract(f32(frame) * CITY_REFL_R4
+                 + vec4<f32>(vec2<f32>(a), vec2<f32>(b)) * STRAT_INV_2P32);
+}
+
 fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
                        pixel_angle: f32, frame_index: u32,
                        strat_pixel: vec2<u32>) -> vec3<f32> {
@@ -27049,7 +27091,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
     let h = CityHit(true, t, pos, vec3<f32>(0.0, 0.0, 1.0), 0, cell);
     let fp = pixel_angle * t;
     let g = city_ground(pos.xy, cell, cc, fp);
-    let rnd = city_frame_rand(strat_pixel, frame_index, CITY_RAND_REFLECT);
+    let rnd = city_refl_rand(strat_pixel, frame_index);
     let lobe = city_wet_lobe(h, g, dir, pixel_angle, rnd.xyz);
     if (!lobe.ok) {
         return vec3<f32>(0.0);
@@ -27061,9 +27103,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
     // with probability w / RR and counted RR / w times over when it is.
     let wt = w * (1.0 - lobe.blend);
     let p_tr = min(wt / CITY_REFL_RR, 1.0);
-    let roll = city_frame_rand(strat_pixel, frame_index,
-                               CITY_RAND_ROULETTE).x;
-    if (wt > 0.0 && roll < p_tr) {
+    if (wt > 0.0 && rnd.w < p_tr) {
         let ro = vec3<f32>(pos.xy, pos.z + 0.02);
         let hr = city_trace(ro, lobe.r, 0.0, CITY_REFL_RANGE,
                             CITY_TRACE_PLAIN);
@@ -27073,7 +27113,9 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
             // would have been.
             let far = ro + CITY_REFL_RANGE * lobe.r;
             l = city_fog(city_reflect_sky(u.cam_origin.xyz + t * dir, lobe.r,
-                                          rnd.w),
+                                          city_frame_rand(strat_pixel,
+                                                          frame_index,
+                                                          CITY_RAND_REFLECT).w),
                          ro, lobe.r, CITY_REFL_RANGE, far);
         } else {
             let fp_r = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;
