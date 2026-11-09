@@ -3972,8 +3972,17 @@ const CITY_REFL_ALPHA_DAMP: f32 = 0.08;
 // canyon and reach the towers beyond it; a rising ray that has found nothing
 // by then sees sky.
 const CITY_REFL_RANGE: f32 = 600.0;
-// Lobes that carry less than this are traced only by Russian roulette.
-const CITY_REFL_RR: f32 = 0.15;
+// Lobes that carry less than this are traced only by Russian roulette: a
+// lobe of weight w < RR is traced with probability w / RR and counted RR / w
+// times over, binary noise on the dim film (a steep view, a damp patch). At
+// 0.05 rather than the first 0.15, Thomas's wet avenue (2026-11-08) traces
+// more of them: its one-sample spread 8 % lower (3.54 vs 3.90 levels on
+// the street, with the stratified draws), its first 8 frames 8 % nearer the
+// converged mean, for +2.1 % of the frame (768x432, High). Unbiased in
+// linear light; the accumulation averages tone-mapped samples, so fewer
+// rare RR / w samples brighten a converged wet reflection a little (+0.6
+// levels mean on reflective pixels), toward the tone map of the true mean.
+const CITY_REFL_RR: f32 = 0.05;
 // Footprint over which the traced reflection hands over to its mean. Past
 // it a wet pixel reflects the environment estimate, and pays nothing.
 const CITY_REFL_LOD: vec2<f32> = vec2<f32>(0.30, 0.80);
