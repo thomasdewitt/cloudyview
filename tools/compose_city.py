@@ -300,6 +300,8 @@ def composed_text() -> tuple[list, str]:
 
 def compose(check_only: bool) -> int:
     comps, out = composed_text()
+    # This opens a GPU device to compile-validate (--check too), so run it
+    # under tools/gpulock: a held context makes locked timing refuse.
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
     device = adapter.request_device_sync()

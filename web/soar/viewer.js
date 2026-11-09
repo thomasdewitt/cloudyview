@@ -1899,9 +1899,10 @@ export class Viewer {
     const renderer = this.renderer;
     // The live picture's steam is not in its accumulation, so not in what
     // sets its exposure either: a meter that saw it move would move the
-    // exposure, and the exposure is in the scene key.
-    renderer.meterLuminance(outputSize,
-                            { ...this._viewKwargs(), liveSteam: true })
+    // exposure, and the exposure is in the scene key. Where the steam is
+    // marched (Low, Minimal) the meter marches it too.
+    renderer.meterLuminance(outputSize, { ...this._viewKwargs(),
+                                          liveSteam: renderer.liveSteamActive })
       .catch((err) => {
         // A readback abandoned because its renderer was torn down (a field
         // change, leaving the viewer) is not a failure of anything live.
@@ -3464,14 +3465,19 @@ export class Viewer {
     this.renderer.setCameraMoving(cameraMoved);
     this._lastSignature = signature;
     // The clock runs on the simulation's dt (the camera's clock, so a stall
-    // cannot jump the steam either), and it runs paused or parked too
-    // (Thomas, 2026-11-08: the steam "should keep going when the flight is
-    // paused"). The live view draws the city's steam after the accumulation
-    // and keeps the clock out of the scene key (Renderer.drawFrame's
-    // liveSteam), so a parked picture converges under steam that moves; a
-    // recording samples the clock with the camera, so a replay's steam moves
-    // as it did.
-    this.sceneTime += dt;
+    // cannot jump the steam either). Where the steam is drawn live
+    // (Renderer.liveSteamActive: the city at Medium and up) it runs paused
+    // or parked too (Thomas, 2026-11-08: the steam "should keep going when
+    // the flight is paused"): the live view draws the steam after the
+    // accumulation and keeps the clock out of the scene key, so a parked
+    // picture converges under steam that moves. At Low and Minimal the steam
+    // is marched and the clock is in the key, so it runs only with the
+    // flight or a recording, and a parked picture converges as it always
+    // did. A recording samples the clock with the camera, so a replay's
+    // steam moves as it did.
+    const clockRuns = this.renderer.liveSteamActive
+      || (!this.paused && (cameraMoved || this.recorder.recording));
+    if (clockRuns) this.sceneTime += dt;
     // Lens water keeps wall-clock time, parked or not: it goes on wetting in
     // cloud and drying out of it while you hover. It is drawn after the
     // accumulation, so a changing lens never disturbs the parked picture's
@@ -3666,7 +3672,9 @@ export class Viewer {
     // A pause is cut out of the track, and so is the steam's time through
     // it: the replay's clock runs on from where it stopped, rather than
     // jumping by the pause in one frame.
-    if (this.recorder.recording && this.paused) this._trackPausedS += dt;
+    if (this.recorder.recording && this.paused && clockRuns) {
+      this._trackPausedS += dt;
+    }
     if (this.recorder.recording && !this.paused) {
       this.recorder.advance(dt);
       this.recorder.sample(this.camera, this.sceneTime - this._trackPausedS);
@@ -3732,9 +3740,9 @@ export class Viewer {
       || this._capturing || probing || this.renderer.lightBakePending
       // A lens still wetting or drying is motion too.
       || (this.lensWater && !this.renderer.lensSettled)
-      // And the city's steam, which keeps the live clock, wherever any can
-      // be in view.
-      || Boolean(this.scene.city
+      // And the city's live steam, which keeps the live clock, wherever any
+      // can be in view.
+      || Boolean(this.renderer.liveSteamActive
                  && this.camera.position[2] < K.LIVE_STEAM_CEILING_M);
     if (converged && !this._marchPending && !animating) {
       this._sleeping = true;

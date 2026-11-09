@@ -882,6 +882,15 @@ export class Renderer {
   }
 
   /** Ice mode actually reaches the shader only with a real ice texture. */
+  /** Whether this scene and tier draw the city's steam live (after the
+   *  accumulation, at the live clock): a city, at a K.LIVE_STEAM_TIERS
+   *  tier. Elsewhere the steam is marched, and its clock must stop while
+   *  parked for the picture to converge (Viewer._frame). */
+  get liveSteamActive() {
+    return Boolean(this.scene.city)
+      && K.LIVE_STEAM_TIERS.includes(this.qualityTier);
+  }
+
   get iceModeActive() {
     return Boolean(this.iceMode && this.scene.iceView);
   }
@@ -1621,7 +1630,7 @@ export class Renderer {
     // the clock leaves the scene key, so it runs over a parked picture that
     // goes on converging. Only an accumulating city frame has it; every
     // other caller marches the steam, exact, as before.
-    const steamLive = liveSteam && Boolean(this.scene.city) && accumulate
+    const steamLive = liveSteam && this.liveSteamActive && accumulate
       && view.jitter !== false;
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;

@@ -712,6 +712,14 @@ export const HOLD_RUNG_FRAMES = 4;
 // paused (Renderer.drawFrame's liveSteam).
 export const LIVE_STEAM_CEILING_M = 375.0;
 
+// The tiers that draw the city's steam live (Renderer.liveSteamActive):
+// Medium and up. Low and Minimal march it into the picture as every still
+// does, at a clock that stops while parked, so there the steam pauses with
+// the flight and a parked view converges and sleeps — Thomas (2026-11-09),
+// on its ~0.15 ms a frame: "Maybe turn it off for low though?"; the two
+// tiers that cut the most to hold a frame rate keep the cheaper path.
+export const LIVE_STEAM_TIERS = Object.freeze(["max", "high", "medium"]);
+
 // The ceiling on a single held frame, and the reason the climb is gated by a
 // measurement rather than run open-loop.
 //
