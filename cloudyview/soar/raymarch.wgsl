@@ -21374,14 +21374,55 @@ fn veil_unpack(v: vec4<u32>) -> Veil {
 // other scene returns a miss and the host never draws it.
 @fragment
 fn fs_surface(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
-    let cr = camera_ray(frag_pos);
     var out: SurfaceOut;
-    out.surf = vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    out.surf = surface_first_stage(frag_pos);
     out.veil = veil_none();
-    if (CITY) {
-        out.surf = surface_pass_city(cr.dir, cr.pixel_angle);
-    }
     return out;
+}
+
+// The first stage's surface at a pixel (its centre, frag_pos.xy), shared by
+// the fragment entry and the compute one (cs_surface).
+fn surface_first_stage(frag_pos: vec4<f32>) -> vec4<f32> {
+    let cr = camera_ray(frag_pos);
+    var surf = vec4<f32>(0.0, 0.0, 0.0, 1e30);
+    if (CITY) {
+        surf = surface_pass_city(cr.dir, cr.pixel_angle);
+    }
+    return surf;
+}
+
+// EXPERIMENT (?surfacecs, web/soar/renderer.js): the first stage as a compute
+// pass. Why: NVIDIA's compiler picks a fragment stage's register target by
+// its own spill-cost estimate, and fs_surface sits where that choice flips —
+// 128 registers (16 warps an SM) or ~160 (12), 10-14% apart in the Python
+// host on changes that do no work, and 168 with spills in Chrome. A compute
+// workgroup of 512 invocations must fit an SM's 65536 registers, so the
+// driver has to compile it to 128 at most: a bound it respects, where no
+// fragment-side one exists. Both entries are wrappers on one function,
+// surface_first_stage.
+// Each 32-lane warp takes an 8x4 block of pixels, as a fragment warp's quads
+// do (a 32x1 row cost the horizon view 11%). The size is an override the
+// host sets per adapter: SURFACE_CS_WX a multiple of 8, SURFACE_CS_WY of 4.
+override SURFACE_CS_WX: u32 = 32u;
+override SURFACE_CS_WY: u32 = 16u;
+@group(2) @binding(0) var surface_cs_out: texture_storage_2d<rgba32float, write>;
+@group(2) @binding(1) var surface_cs_veil: texture_storage_2d<rgba32uint, write>;
+
+@compute @workgroup_size(SURFACE_CS_WX, SURFACE_CS_WY)
+fn cs_surface(@builtin(workgroup_id) wid: vec3<u32>,
+              @builtin(local_invocation_index) li: u32) {
+    let warps_x = SURFACE_CS_WX / 8u;
+    let w = li / 32u;
+    let lane = li % 32u;
+    let px = vec2<u32>(wid.x * SURFACE_CS_WX + (w % warps_x) * 8u + lane % 8u,
+                       wid.y * SURFACE_CS_WY + (w / warps_x) * 4u + lane / 8u);
+    let dims = textureDimensions(surface_cs_out);
+    if (px.x >= dims.x || px.y >= dims.y) {
+        return;
+    }
+    let surf = surface_first_stage(vec4<f32>(vec2<f32>(px) + 0.5, 0.0, 1.0));
+    textureStore(surface_cs_out, vec2<i32>(px), surf);
+    textureStore(surface_cs_veil, vec2<i32>(px), veil_none());
 }
 
 // The second stage, for a surface that has one. Most pixels leave at once;
