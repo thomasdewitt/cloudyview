@@ -113,11 +113,6 @@ export class FlightCamera {
                             // surfacePosition on absolute repositions; flight
                             // never reads it again.
                             surfaceOffsetM = [0.0, 0.0],
-                            // The lowest the camera may go at a surface-frame
-                            // position, when the ground is not flat (the
-                            // desert: scene.js desertFloorAt). null keeps the
-                            // flat sea-level floor.
-                            floorAt = null,
                             // The speed this session opens at, and the one R
                             // returns to. A scene's, not a global: 1500 m/s
                             // crosses a cloud field and goes through a city
@@ -137,7 +132,6 @@ export class FlightCamera {
     this.periodic = periodic;
     this.surfaceTileExtent = surfaceTileExtent > 0 ? surfaceTileExtent : null;
     this.surfaceOffsetM = surfaceOffsetM;
-    this.floorAt = floorAt;
     // Held so `reset` returns to this field's own opening view rather than to
     // the global default — on a demo those are different places, and the one
     // worth going back to is the one the page promised.
@@ -220,19 +214,6 @@ export class FlightCamera {
       s[0] = (((s[0] + dx) % t) + t) % t;
       s[1] = (((s[1] + dy) % t) + t) % t;
     }
-    this.constrain();
-  }
-
-  /**
-   * Stand the camera on a different surface in flight (ocean <-> desert):
-   * the period its frame folds at (the tile's surfacePeriod) and its floor.
-   * The surface frame re-derives from the static offset — a surface just
-   * laid down has no phase to keep.
-   */
-  setSurface(period, floorAt) {
-    this.surfaceTileExtent = period > 0 ? period : null;
-    this.floorAt = floorAt;
-    this._resyncSurface();
     this.constrain();
   }
 
@@ -347,9 +328,9 @@ export class FlightCamera {
   }
 
   /**
-   * Keep the camera above its floor — the desert's terrain (floorAt), the
-   * sea's margin, or, over the city, none (see floorZ) — and, in a
-   * periodic domain, inside the box by wrapping rather than stopping. Crossing a lateral face puts you at
+   * Keep the camera above its floor — the sea's margin, or, over the city,
+   * none (see floorZ) — and, in a periodic domain, inside the box by
+   * wrapping rather than stopping. Crossing a lateral face puts you at
    * the opposite one; flight is endless. The fold is at the CLOUD period and
    * nothing else: the surface tile's frame keeps its own phase in
    * surfacePosition, so this fold no longer has to be one the tile can live
@@ -364,9 +345,7 @@ export class FlightCamera {
           (((p[i] - this.bmin[i]) % extent) + extent) % extent;
       }
     }
-    if (this.floorAt && this.surfacePosition) {
-      p[2] = Math.max(p[2], this.floorAt(this.surfacePosition));
-    } else if (this.floorZ !== null) {
+    if (this.floorZ !== null) {
       p[2] = Math.max(p[2], this.floorZ);
     }
   }

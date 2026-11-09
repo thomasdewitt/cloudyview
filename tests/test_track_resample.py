@@ -193,27 +193,24 @@ def test_a_track_at_the_installed_period_replays_as_recorded():
     # again (16 tiles): they replay as they are.
     out = tr.surface_samples(samples, 1638.4, "ocean", 102.4, 1638.4)
     assert out is samples
-    # The city and the desert fold at their tile, which v3 recorded at too.
+    # The city folds at its tile, which v3 recorded at too.
     assert tr.surface_samples(samples, None, "city", 2300.0, 2300.0) \
         is samples
 
 
-def test_a_city_or_desert_track_at_another_period_is_refused():
+def test_a_city_track_at_another_period_is_refused():
     """A city flight read at another period would land in the wrong
     district."""
     samples = _synthetic_samples(3)
     with pytest.raises(RuntimeError, match="city"):
         tr.surface_samples(samples, 2300.0, "city", 1150.0, 1150.0)
-    with pytest.raises(RuntimeError, match="desert"):
-        tr.surface_samples(samples, 8192.0, "desert", 4096.0, 4096.0)
 
 
 def test_the_sea_folds_at_sixteen_tiles():
-    """The sea's frame is 16 of its 102.4 m tiles, the city's and the
-    desert's their tile (soar_host.SURFACE_FRAME_TILES)."""
+    """The sea's frame is 16 of its 102.4 m tiles, the city's its tile
+    (soar_host.SURFACE_FRAME_TILES)."""
     assert surface_period_m("ocean", {"tile_extent_m": 102.4}) \
         == pytest.approx(1638.4, rel=1e-12)
-    assert surface_period_m("desert", {"tile_extent_m": 4096.0}) == 4096.0
     assert surface_period_m("city", {"tile_extent_m": 92160.0}) == 92160.0
 
 
@@ -327,15 +324,15 @@ def test_overrides_and_day_scene(tmp_path):
     assert s.size == (640, 360) and s.fps == 24.0 and s.quality == "low"
 
 
-def test_a_desert_flight_names_its_ground(tmp_path):
-    s = tr.settings_from_header(_header(tmp_path, surface="desert"))
-    assert s.surface == "desert"
-    assert s.surface_tile_extent_m == 4096.0
-    assert s.surface_offset_m == (1780.5, 3970.25)
-    assert s.city_tile_offset_m is None
+def test_a_desert_flight_is_refused(tmp_path):
+    """A track flown over the desert names it only by its header's desert
+    block; with the desert gone from this line (2026-11-09) it is refused,
+    never replayed over the sea."""
+    with pytest.raises(ValueError, match="desert"):
+        tr.settings_from_header(_header(tmp_path, surface="desert"))
     both = _header(tmp_path)
     both["desert"] = _header(tmp_path, surface="desert")["desert"]
-    with pytest.raises(ValueError, match="one surface"):
+    with pytest.raises(ValueError, match="desert"):
         tr.settings_from_header(both)
 
 

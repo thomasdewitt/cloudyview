@@ -20,7 +20,7 @@
 # --use-angle=vulkan. The windowed recipe's --ozone-platform=x11 gives NO
 # adapter headless, and adding VulkanFromANGLE with --enable-unsafe-webgpu
 # crashed the GPU process. Its stills hash byte for byte the same as the
-# windowed Chrome's (pinned_still, city/day/desert at high/low/max), and
+# windowed Chrome's (pinned_still, city/day at high/low/max), and
 # soar_cdp.requireHardwareAdapter refuses the run if it ever falls back to
 # software.
 set -euo pipefail

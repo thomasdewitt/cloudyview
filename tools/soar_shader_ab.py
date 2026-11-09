@@ -42,9 +42,16 @@ What this cannot compare: a change that moves the HOSTS as well as the
 shader — a new binding, a new pass, a changed bind-group layout. Both
 revisions run under this tree's one Python host, so the old shader meets the
 new layout and fails validation (the surface pre-pass, 2026-09-23, broke it
-for city and desert). For those, compare whole browser builds instead:
-tools/pinned_still.mjs renders pinned stills of each tree in Chrome and
-hashes them byte for byte.
+for the city). For those, compare whole browser builds
+(tools/pinned_still.mjs renders pinned stills of each tree in Chrome and
+hashes them byte for byte), or run this tool in each tree with its own host:
+`--save DIR` in the one writes every view's float render there, and
+`--against DIR` in the other renders only its B and holds it against those
+(the desert's removal, 2026-11-09, moved the uniform block and two bindings).
+
+    uv run python tools/soar_shader_ab.py --a tree --b tree --save /tmp/ab-old
+    # ...then, in the other tree:
+    uv run python tools/soar_shader_ab.py --b tree --against /tmp/ab-old
 """
 
 import argparse
@@ -60,8 +67,8 @@ sys.path.insert(0, str(REPO / "tests"))
 
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
-    DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SceneState, SoarRenderer,
-    ViewState, camera_world_origin, desert_scene_fields, read_shader,
+    SceneState, SoarRenderer,
+    ViewState, camera_world_origin, read_shader,
     surface_cell_m, surface_clock_period_s, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
@@ -160,7 +167,7 @@ def main():
     ap.add_argument("--periodic", default="on", choices=("on", "off"))
     ap.add_argument("--views", default="",
                     help="comma-separated names, default all")
-    ap.add_argument("--scene", default="day", choices=("day", "city", "nested", "desert"))
+    ap.add_argument("--scene", default="day", choices=("day", "city", "nested"))
     ap.add_argument("--field", type=Path, default=None,
                     help="netCDF field (default: the judge views' TWP-ICE "
                          "subvolume). An optimization that gates on the cloud "
@@ -173,7 +180,16 @@ def main():
                     help="a quality preset's flight sampling and lighting "
                          "methods (default: the judge views' 2-voxel live "
                          "march with the sky probe)")
+    ap.add_argument("--save", type=Path, default=None,
+                    help="write each view's A render (float32 .npy) here, "
+                         "for an --against run in another tree")
+    ap.add_argument("--against", type=Path, default=None,
+                    help="hold B against the renders a --save run wrote "
+                         "(another tree, under its own host) instead of "
+                         "rendering A here")
     args = ap.parse_args()
+    if args.save is not None:
+        args.save.mkdir(parents=True, exist_ok=True)
 
     import wgpu
     device = wgpu.gpu.request_adapter_sync(
@@ -188,8 +204,7 @@ def main():
     periodic = args.periodic == "on"
     city = args.scene == "city"
     nested = args.scene == "nested"
-    surface = {"day": "ocean", "nested": "ocean", "city": "city",
-               "desert": "desert"}[args.scene]
+    surface = {"day": "ocean", "nested": "ocean", "city": "city"}[args.scene]
     step_factor, light_factor, light_cache, sky_probe = (
         TIERS[args.tier] if args.tier else (2.0, 2.0, False, True))
     state = SceneState(
@@ -205,7 +220,10 @@ def main():
         state.dt_light_nest = min(nest.dx) * light_factor
 
     renderers = []
-    for spec in (args.a, args.b):
+    # Against a saved set, A is not rendered here: its renderer only lends
+    # the tile's meta (and bakes), so it is B's own revision.
+    for spec in ((args.b, args.b) if args.against is not None
+                 else (args.a, args.b)):
         r = SoarRenderer(device=device, periodic=periodic, nested=nested,
                          surface=surface, shader_source=source_for(spec))
         r.upload_volume(level.sigma)
@@ -218,10 +236,6 @@ def main():
     state.ocean_max_lod = int(meta["mips"]) - 1
     state.surface_period_m = surface_period_m(surface, meta)
     state.clock_period_s = surface_clock_period_s(surface, meta)
-    if surface == "desert":
-        # Row 8.yzw: the tile's relief, without which the desert is a plane.
-        for key, value in desert_scene_fields(meta).items():
-            setattr(state, key, value)
 
     views = ALL_VIEWS
     if city:
@@ -237,7 +251,7 @@ def main():
             for name, v in CITY_VIEWS.items()}
     wanted = args.views.split(",") if args.views else list(views)
     w, h = args.size
-    print(f"A = {args.a}\nB = {args.b}")
+    print(f"A = {args.against or args.a}\nB = {args.b}")
     print(f"{w}x{h}, {args.frames} frame(s), jitter "
           f"{'on' if args.jitter else 'off'}, periodic {args.periodic}, "
           f"scene {args.scene}, tier {args.tier or 'judge (live march)'}\n")
@@ -257,20 +271,18 @@ def main():
             sun_elevation=v.get("sun_elevation", 55.0),
             jitter=args.jitter, light_cache=light_cache,
             sky_probe=sky_probe,
-            # A desert at a quality tier flies that tier's detail.
-            desert_lite=(surface == "desert"
-                         and args.tier in DESERT_LITE_TIERS),
-            desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[args.tier]
-                              if surface == "desert"
-                              and args.tier in DESERT_FLORA_CUT_BY_TIER
-                              else 1.0),
             **extra)
         sun = (view.sun_azimuth, view.sun_elevation)
         if light_cache and sun != baked_sun:
             for r in renderers:
                 r.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)
             baked_sun = sun
-        a = renderers[0].render(state, view, frames=args.frames)
+        if args.against is not None:
+            a = np.load(args.against / f"{name}.npy")
+        else:
+            a = renderers[0].render(state, view, frames=args.frames)
+        if args.save is not None:
+            np.save(args.save / f"{name}.npy", a)
         b = renderers[1].render(state, view, frames=args.frames)
         d = np.abs(a - b)
         n = int((d > 0).sum())

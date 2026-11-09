@@ -144,11 +144,10 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
   ocean: "cloudyview.web.ocean.v2",
-  desert: "cloudyview.web.desert.v2",
   city: "cloudyview.web.city.v2",
 };
 // How many tiles each surface's frame folds at (the tile's surfacePeriod).
-// The city and the desert fold at their tile: their frame IS the district.
+// The city folds at its tile: its frame IS the district.
 // The sea folds at 16 tiles (1638.4 m): its static tile repeats every
 // 102.4 m, so the fold is invisible, and a long frame is what a recorded
 // track can carry between two samples — the resamplers unwrap sx/sy at half
@@ -157,7 +156,7 @@ export const SURFACE_TILE_SCHEMAS = {
 // moving sea's period (2026-09-23..25), so its tracks replay as recorded.
 // Pinned against soar_host.SURFACE_FRAME_TILES by
 // tests/test_surface_tile_loader.py.
-export const SURFACE_FRAME_TILES = { ocean: 16, desert: 1, city: 1 };
+export const SURFACE_FRAME_TILES = { ocean: 16, city: 1 };
 // From the 2026-08-22 12:31 capture, the same still the start camera and the
 // landing backdrop come from: the moon the view was composed under is part
 // of the view.
@@ -457,13 +456,9 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
-// Row 24 (the 25th) is the surface offset the water samples and the city
-// frame are derived from — see raymarch.wgsl's surface_offset. Rows 25..46
-// are the desert tile's own numbers (raymarch.wgsl desert_tile; zero off the
-// desert).
-export const DESERT_TILE_ROW0 = 25;
-export const DESERT_TILE_ROWS = 22;
-export const UNIFORM_ROWS = DESERT_TILE_ROW0 + DESERT_TILE_ROWS;
+// Row 24 (the 25th and last) is the surface offset the water samples and the
+// city frame are derived from — see raymarch.wgsl's surface_offset.
+export const UNIFORM_ROWS = 25;
 // DERIVED, never written out. These were two independent literals until a row
 // was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.
@@ -574,54 +569,17 @@ export const QUALITY_PRESETS = {
             lightCache: true, skyProbe: false },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
-// The tiers that fly the simplified desert (raymarch.wgsl DESERT_LITE, a
-// compile-time specialization like the lighting method): no refine stage,
-// and each desert section's Low drops compiled out. Thomas, 2026-09-24:
-// the full desert at Medium and above, "a simplified but convincing desert"
-// at Low and Minimal. soar_host.DESERT_LITE_TIERS is the Python twin.
-export const DESERT_LITE_TIERS = ["low", "minimal"];
-// The finest pixel the full desert can render: its refine stage walks the
-// plants out to DESERT_FLORA_REFINE_FP_M / pixel angle, which must lie
-// inside the explicit walk's cell budget, DF_EXPLICIT_MAX_T (raymarch.wgsl;
-// 0.025 m / (0.65 * 96 * 16 m)). soar_host.DESERT_MIN_PIXEL_TAN is the
-// Python twin (tests/test_desert_pixel_limit.py pins both to the shader).
-export const DESERT_MIN_PIXEL_TAN = 0.025 / (0.65 * 96 * 16.0);
 // The surface stages each traced surface runs before the march, in order:
 // raymarch.wgsl fragment entries, each after the first reading the one
 // before, the last writing the surface the march reads. The city: its
 // boxes, the facade shell (fs_surface_refine), the street
-// (fs_surface_street). The desert: its ground (fs_surface_desert, with the
-// optical depths it lit it with, TAUS_STAGE), the explicit plants' far
-// forms and the far cover (fs_surface_flora, their walk kept out of the
-// ground's registers), then its near plants (fs_surface_refine). soar_host.SURFACE_STAGES is the
-// Python twin (pinned by tests/test_surface_stages.py); renderer.js derives
+// (fs_surface_street). soar_host.SURFACE_STAGES is the Python twin (pinned by tests/test_surface_stages.py); renderer.js derives
 // the rest from it.
 export const SURFACE_STAGES = {
   city: ["fs_surface", "fs_surface_refine", "fs_surface_street"],
-  desert: ["fs_surface_desert", "fs_surface_flora", "fs_surface_refine"],
 };
-// Under DESERT_LITE the desert's later stages are compiled out and skipped,
-// and its one stage is the shared first stage.
-export const SURFACE_STAGES_LITE = ["fs_surface"];
 // The stages that also write the veil, a second attachment.
 export const VEIL_STAGES = ["fs_surface", "fs_surface_street"];
-// The full desert's first stage writes, in the veil's place, the optical
-// depths it lit its ground with (raymarch.wgsl fs_surface_desert), which
-// its flora stage reads at group 1 binding 3. soar_host.TAUS_STAGE and
-// TAUS_READER are the Python twins.
-export const TAUS_STAGE = "fs_surface_desert";
-export const TAUS_READER = "fs_surface_flora";
-// How far out the desert's full tiers walk the explicit shrubs before their
-// decals take over (raymarch.wgsl DESERT_FLORA_CUT, a compile-time scale on
-// the shrubs' grazing cut, df_small_cut): Medium walks them about half as far
-// as High, the small cells being most of the walk; saguaros, trees and
-// heaps keep the common cut on every tier. The lite tiers
-// ignore it and stay at 1, so their variant key does not move. The lead,
-// 2026-09-24: a tier-keyed explicit cut for the flora.
-// soar_host.DESERT_FLORA_CUT_BY_TIER is the Python twin.
-export const DESERT_FLORA_CUT_BY_TIER = {
-  max: 1.0, high: 1.0, medium: 0.5, low: 1.0, minimal: 1.0,
-};
 // Cheapest first. This is the order the startup probe walks, and the order
 // matters for more than tidiness — see AUTO_TIER_COST_RATIO_TO_NEXT.
 // Max is deliberately absent: the probe walks this list, so a tier that is
@@ -947,12 +905,6 @@ export const ELEVATION_LIMITS = [-89.0, 89.0];
 // own peak-to-trough, so nothing here is about clipping through a wave: it is
 // how low you are allowed to fly, and lower is better flying.
 export const OCEAN_FLOOR_MARGIN_M = 12.5;
-// Over the desert the floor follows the ground: the camera may come down to
-// this far above the terrain, which is what "fly within a couple of metres"
-// asks of it. Measured from the tile's own surface plus the most the
-// sub-tile octaves can raise it (scene.js desertFloorAt), so it is a floor
-// under the drawn ground and not an estimate of it.
-export const DESERT_FLOOR_CLEARANCE_M = 1.0;
 
 // --- sun ------------------------------------------------------------------
 

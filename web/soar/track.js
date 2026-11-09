@@ -32,13 +32,13 @@
 // where the moving sea was, now the city's steam — so a re-render has the
 // motion the flight had. It is its own column rather than a function of t
 // because the clock is the scene's, not the recording's. v1 and v2 tracks
-// have none and replay at clock 0; over a surface with no clock (the sea,
-// the desert) it is carried and packs 0.
+// have none and replay at clock 0; over a surface with no clock (the sea)
+// it is carried and packs 0.
 //
 // v4 records surface_period_m, the period sx/sy are fractions of: the
-// surface frame's (constants.js SURFACE_FRAME_TILES — the tile for the city
-// and the desert, 16 tiles for the sea). v3 recorded none. Over the city or
-// the desert a reader refuses a period other than the installed one (the
+// surface frame's (constants.js SURFACE_FRAME_TILES — the tile for the city,
+// 16 tiles for the sea). v3 recorded none. Over the city a reader refuses a
+// period other than the installed one (the
 // flight would land in the wrong district); over the sea, a static field
 // repeating at its tile, any period is taken, and a track recorded at
 // another re-expressed at the installed one, continuously (track.py

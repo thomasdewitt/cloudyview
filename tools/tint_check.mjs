@@ -135,25 +135,12 @@ const expression = `(async () => {
   }
   const out = [];
   const done = new Set();
-  // Two desert-only axes, which specializeShader refuses on any other
-  // surface: the lite ground (DESERT_LITE, the low tiers') and the full
-  // ground's flora cut (DESERT_FLORA_CUT, each value a tier asks for; the
-  // lite ground ignores it). A tree from before either axis has no table,
-  // and serves the desert at the defaults.
-  const cuts = [...new Set(Object.entries(K.DESERT_FLORA_CUT_BY_TIER ?? {})
-    .filter(([tier]) => !(K.DESERT_LITE_TIERS ?? []).includes(tier))
-    .map(([, cut]) => cut).concat([1.0]))];
-  const surfaces = [["ocean", false, 1.0], ["city", false, 1.0],
-                    ...cuts.map((cut) => ["desert", false, cut]),
-                    ["desert", true, 1.0]];
-  for (const [surface, desertLite, desertFloraCut] of surfaces) {
+  for (const surface of ["ocean", "city"]) {
     for (const nested of [false, true]) {
       for (const periodic of [false, true]) {
         for (const toneMap of [true, false]) {
           for (const recipe of recipes) {
-            const label = [surface + (desertLite ? "-lite" : "")
-                           + (desertFloraCut !== 1.0 ? "-cut" + desertFloraCut
-                                                     : ""),
+            const label = [surface,
                            nested ? "nested" : "flat",
                            periodic ? "periodic" : "open",
                            toneMap ? "tonemap" : "linear",
@@ -164,9 +151,7 @@ const expression = `(async () => {
             try {
               code = R.specializeShader(raymarch, {
                 ...recipe, periodic, nested, toneMap,
-                city: surface === "city", desert: surface === "desert",
-                ...(desertLite ? { desertLite } : {}),
-                ...(desertFloraCut !== 1.0 ? { desertFloraCut } : {}) });
+                city: surface === "city" });
             } catch (err) {
               out.push({ label, errors: ["specialize: " + err.message],
                          warnings: [] });

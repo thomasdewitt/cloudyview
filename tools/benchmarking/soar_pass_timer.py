@@ -62,8 +62,7 @@ sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
-    DESERT_FLORA_CUT_BY_TIER, DESERT_LITE_TIERS, SURFACE_STAGES,
-    desert_scene_fields, surface_cell_m, surface_period_m,
+    SURFACE_STAGES, surface_cell_m, surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
@@ -75,10 +74,9 @@ from night_city_harness import (CITY_VIEWS, MOON_AZIMUTH,     # noqa: E402
 OUTPUT = (2560, 1440)
 # The timed passes: each surface stage (soar_host.SURFACE_STAGES) by a short
 # name, then the march. A view without a stage times it as zeros.
-STAGE_COLUMN = {"fs_surface": "surface", "fs_surface_desert": "surface",
-                "fs_surface_flora": "flora",
+STAGE_COLUMN = {"fs_surface": "surface",
                 "fs_surface_refine": "refine", "fs_surface_street": "street"}
-COLUMNS = ("surface", "flora", "refine", "street", "march")
+COLUMNS = ("surface", "refine", "street", "march")
 # A null control within this (and rounds agreeing within it) is what lets
 # the ratios stand when the desktop drew during the run (gpu_idle.py).
 NULL_TOLERANCE = 0.01
@@ -183,9 +181,9 @@ def main():
     ap.add_argument("--frames", type=int, default=16,
                     help="timed passes per block")
     ap.add_argument("--surface", default="ocean",
-                    choices=("ocean", "desert", "city"),
-                    help="what the world stands on; desert and city time "
-                         "their surface pre-pass (fs_surface) as its own "
+                    choices=("ocean", "city"),
+                    help="what the world stands on; the city times its "
+                         "surface pre-pass (fs_surface) as its own "
                          "column beside the march (fs_main)")
     ap.add_argument("--rounds", type=int, default=3,
                     help="round-robin blocks per variant; the first is warmup")
@@ -251,9 +249,6 @@ def main():
             state.ocean_tile_extent = float(meta["tile_extent_m"])
             state.ocean_max_lod = int(meta["mips"]) - 1
             state.surface_period_m = surface_period_m(args.surface, meta)
-            if args.surface == "desert":
-                for key, value in desert_scene_fields(meta).items():
-                    setattr(state, key, value)
             scale = tier["render_scale"]
             size = (max(1, int(OUTPUT[0] * scale + 0.5)),
                     max(1, int(OUTPUT[1] * scale + 0.5)))
@@ -281,11 +276,6 @@ def main():
                     fov=v["fov"], output_size=OUTPUT, render_size=size,
                     light_cache=tier["light_cache"],
                     sky_probe=tier["sky_probe"],
-                    # The simplified desert at the tiers the app flies it.
-                    desert_lite=(args.surface == "desert"
-                                 and tier_name in DESERT_LITE_TIERS),
-                    desert_flora_cut=(DESERT_FLORA_CUT_BY_TIER[tier_name]
-                                      if args.surface == "desert" else 1.0),
                     **light)
                 if tier["light_cache"] and baked != light:
                     for r in renderers:

@@ -1,25 +1,23 @@
-"""The surface intermediates grow with the active stage chain, never shrink.
+"""The surface intermediates a size's stage chain needs, held and retired.
 
-Both hosts hold, per render size, the intermediates the ACTIVE surface
-stage chain alternates between (surface_stage_plan): none for the simplified
-desert's single stage at Low, one for each stage after the first beyond
-that, up to two — and the full desert's optical-depth target (TAUS_STAGE),
-which only its chain writes. Grow-only: a size used only at Low never
-allocates an intermediate or the optical depths, and after a size's first
-growth a tier flip never reallocates it. What is pinned here, on a
-counting stand-in for the GPU device (no GPU needed):
+Both hosts hold, per render size, the intermediates the surface stage chain
+alternates between (surface_stage_plan): one for each stage after the first,
+up to two. Grow-only: a set that already holds enough is kept. What is
+pinned here, on a counting stand-in for the GPU device (no GPU needed):
 
-- Low allocates no intermediate and no optical-depth target; Low -> High
-  grows once, by both; High -> Low -> High allocates nothing more.
-- A retired set's textures are destroyed only after the queue reports the
-  submitted work done — never while a frame in flight may still read them.
-- The tier can rise DURING the allocation's await (the meter is
-  fire-and-forget; the governor or the menu can change tier meanwhile):
-  the ensure still returns a set that holds every slot the chain live at
-  that moment writes or reads (loose-ends' race, 2026-09-25), the optical
-  depths included.
-- A stage chain that needs the optical depths on a set without them
-  raises / throws rather than bind a stand-in.
+- The Python host holds the city's chain at once, and a second ensure of the
+  same size allocates nothing.
+- The browser's set is the final surface, the veil and the intermediates,
+  made once per size.
+- A set made and then not kept (two ensures of one size racing, each
+  allocating: the later finds the other's set already covering its chain)
+  is retired, and its textures are destroyed only after the queue reports
+  the submitted work done — never while a frame in flight may still read
+  them.
+
+(Until 2026-11-09 the desert's tier-dependent chain drove these: its Low ran
+one stage, its High three with an optical-depth target. The desert left this
+line, and the city's chain is the same at every tier.)
 
 The node half skips without node.
 """
@@ -33,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from cloudyview import soar_host
-from cloudyview.soar_host import SoarRenderer, ViewState
+from cloudyview.soar_host import SoarRenderer
 
 REPO = Path(__file__).resolve().parents[1]
 RENDERER_JS = REPO / "web" / "soar" / "renderer.js"
@@ -72,43 +70,18 @@ def _renderer(surface):
     return r
 
 
-def _view(lite):
-    return ViewState(camera_position=[0.0, 0.0, 1.0], azimuth=0.0,
-                     elevation=0.0, fov=60.0, output_size=(8, 8),
-                     render_size=(8, 8), desert_lite=lite)
-
-
-def test_python_host_grows_once_and_never_shrinks():
-    r = _renderer("desert")
-    surf = soar_host.SURFACE_FORMAT
-    t = r._ensure_targets((8, 8), _view(lite=True))
-    assert t["plain"] is None and t["mid"] is None
-    first = len(r.device.made)
-    full = len(soar_host.SURFACE_STAGES["desert"])
-    r._ensure_targets((8, 8), _view(lite=False))
-    grown = r.device.made[first:]
-    assert sorted(grown) == sorted(
-        [surf] * min(full - 1, 2) + [soar_host.TAUS_FORMAT]), grown
-    after = len(r.device.made)
-    for lite in (True, False, True, False):
-        r._ensure_targets((8, 8), _view(lite=lite))
-    assert len(r.device.made) == after
-
-
-def test_python_host_refuses_the_flora_stage_without_its_depths():
-    # A set grown for Low only has no optical-depth target: the full
-    # desert's chain on it raises rather than bind a stand-in.
-    r = _renderer("desert")
-    t = r._ensure_targets((8, 8), _view(lite=True))
-    t["plain"] = t["mid"] = _Tex([], soar_host.SURFACE_FORMAT)
-    with pytest.raises(RuntimeError, match="optical-depth"):
-        r._surface_stages(t, _view(lite=False))
-
-
 def test_python_host_without_a_view_holds_the_longest_chain():
     r = _renderer("city")
     t = r._ensure_targets((8, 8))
     assert t["plain"] is not None and t["mid"] is not None
+
+
+def test_python_host_allocates_a_size_once():
+    r = _renderer("city")
+    r._ensure_targets((8, 8))
+    first = len(r.device.made)
+    r._ensure_targets((8, 8))
+    assert len(r.device.made) == first
 
 
 _JS = textwrap.dedent("""
@@ -133,38 +106,29 @@ _JS = textwrap.dedent("""
     };
     const r = Object.create(Renderer.prototype);
     r.device = device;
-    r.scene = { desert: true };
+    r.scene = { city: true };
     r._surfaceDummy = { createView: () => ({}) };
     r._veilDummy = { createView: () => ({}) };
     r.surfaceLayout = {};
+    const out = {};
     const targets = { w: 8, h: 8 };
-    const out = { steps: [] };
-    const tausOf = () => made.filter((l) => l.endsWith("-taus")).length;
-    for (const tier of ["low", "high", "low", "high", "minimal", "max"]) {
-      r.qualityTier = tier;
-      const before = made.length;
-      const destroyedBefore = destroyed;
-      await r._ensureSurfaceTarget(targets);
-      out.steps.push({ tier, made: made.length - before,
-                       nMid: targets.surface.nMid, taus: tausOf(),
-                       destroyedNow: destroyed - destroyedBefore,
-                       retirePending: pendingDone.length });
-    }
-    // A set without the optical depths, handed the full desert's chain:
-    // the encoder throws rather than bind a stand-in.
-    try {
-      r._encodeMarch({}, { surface: { ...targets.surface, tausView: null } },
-                     {}, {}, K.SURFACE_STAGES.desert.map((e) => [e, {}]));
-      out.missingTaus = "encoded";
-    } catch (e) {
-      out.missingTaus = String(e.message);
-    }
-    // The GPU reports the submitted work done: only now are retired
+    await r._ensureSurfaceTarget(targets);
+    out.first = { made: made.length, nMid: targets.surface.nMid };
+    await r._ensureSurfaceTarget(targets);
+    out.again = made.length - out.first.made;
+    // Two ensures of one fresh size, racing: both allocate; the later keeps
+    // the earlier's set and retires its own.
+    const raced = { w: 16, h: 16 };
+    const before = made.length;
+    await Promise.all([r._ensureSurfaceTarget(raced),
+                       r._ensureSurfaceTarget(raced)]);
+    out.raced = { made: made.length - before, destroyedNow: destroyed,
+                  retirePending: pendingDone.length };
+    // The GPU reports the submitted work done: only now are the retired
     // textures destroyed.
     for (const res of pendingDone) res();
     await new Promise((res) => setTimeout(res, 0));
     out.destroyedAfterDone = destroyed;
-    out.lowTextures = made.slice(0, out.steps[0].made);
     console.log(JSON.stringify(out));
 """) % ((REPO / "web" / "soar" / "constants.js").as_uri(), RENDERER_JS.as_uri())
 
@@ -179,92 +143,20 @@ def js():
     return json.loads(out.stdout)
 
 
-def test_browser_host_grows_once_on_a_tier_flip(js):
-    low, high, *rest = js["steps"]
-    # Low: the final surface and the veil only.
-    assert low["nMid"] == 0 and low["made"] == 2 and low["taus"] == 0, low
-    assert not any("plain" in t or "mid" in t for t in js["lowTextures"])
-    # Low -> High: one growth, to the full desert's intermediates and its
-    # optical depths.
-    full = len(soar_host.SURFACE_STAGES["desert"])
-    assert high["nMid"] == min(full - 1, 2) and high["made"] > 0, high
-    assert high["taus"] == 1, high
-    # Every flip after that: nothing made.
-    for step in rest:
-        assert step["made"] == 0, step
+def test_browser_host_makes_a_size_once(js):
+    full = len(soar_host.SURFACE_STAGES["city"])
+    # The final surface, the veil, and the chain's intermediates.
+    assert js["first"]["nMid"] == min(full - 1, 2), js["first"]
+    assert js["first"]["made"] == 2 + min(full - 1, 2), js["first"]
+    assert js["again"] == 0
 
 
 def test_retired_textures_wait_for_the_gpu(js):
-    # The growth retired Low's set, but destroyed nothing while the queue
-    # had not reported its work done ...
-    assert all(s["destroyedNow"] == 0 for s in js["steps"])
-    assert js["steps"][1]["retirePending"] >= 1
-    # ... and destroyed Low's two textures once it had.
-    assert js["destroyedAfterDone"] == 2
-
-
-def test_browser_host_refuses_the_flora_stage_without_its_depths(js):
-    assert "optical-depth" in js["missingTaus"], js["missingTaus"]
-
-
-_JS_RACE = textwrap.dedent("""
-    import * as K from "%s";
-    import { Renderer, surfaceStagePlan } from "%s";
-
-    globalThis.GPUTextureUsage = { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 4 };
-    const r = Object.create(Renderer.prototype);
-    let flipTo = null;          // the tier to switch to inside the await
-    const device = {
-      pushErrorScope() {},
-      async popErrorScope() {
-        if (flipTo) { r.qualityTier = flipTo; flipTo = null; }
-        return null;
-      },
-      createTexture(d) { return { label: d.label, createView: () => ({ of: d.label }),
-                                  destroy() {} }; },
-      createBindGroup() { return { group: true }; },
-      queue: { onSubmittedWorkDone: () => Promise.resolve() },
-    };
-    r.device = device;
-    r.scene = { desert: true };
-    r._surfaceDummy = { createView: () => ({}) };
-    r._veilDummy = { createView: () => ({}) };
-    r.surfaceLayout = {};
-    const out = [];
-    // Every slot the live chain writes or reads must exist.
-    const check = (targets) => {
-      const s = targets.surface;
-      const slot = { final: [s.view, null], a: [s.plainView, s.afterPlain],
-                     b: [s.midView, s.afterMid] };
-      const entries = r._stageEntries();
-      const bad = [];
-      surfaceStagePlan(entries.length).forEach(([w, rd], k) => {
-        if (!slot[w][0]) bad.push(`stage ${k} writes ${w}: no view`);
-        if (rd !== null && !slot[rd][1]) bad.push(`stage ${k} reads ${rd}: no group`);
-      });
-      if (entries.includes(K.TAUS_STAGE) && !s.tausView) {
-        bad.push("the chain writes the optical depths: no view");
-      }
-      return { tier: r.qualityTier, entries, nMid: s.nMid, bad };
-    };
-    for (const [start, during] of [["low", "high"], ["low", "max"],
-                                   ["high", "low"], ["minimal", "medium"]]) {
-      const targets = { w: 8, h: 8 };
-      r.qualityTier = start;
-      flipTo = during;
-      await r._ensureSurfaceTarget(targets);
-      out.push({ start, during, ...check(targets) });
-    }
-    console.log(JSON.stringify(out));
-""") % ((REPO / "web" / "soar" / "constants.js").as_uri(), RENDERER_JS.as_uri())
-
-
-def test_a_tier_rise_during_the_allocation_still_leaves_every_slot():
-    if shutil.which("node") is None:
-        pytest.skip("needs node")
-    out = subprocess.run(["node", "--input-type=module", "-e", _JS_RACE],
-                         capture_output=True, text=True, timeout=60)
-    assert out.returncode == 0, out.stderr
-    for case in json.loads(out.stdout):
-        assert case["tier"] == case["during"], case
-        assert not case["bad"], case
+    per_set = js["first"]["made"]
+    # Both racers allocated a whole set; the one not kept is retired but
+    # destroyed nothing while the queue had not reported its work done ...
+    assert js["raced"]["made"] == 2 * per_set, js["raced"]
+    assert js["raced"]["destroyedNow"] == 0, js["raced"]
+    assert js["raced"]["retirePending"] >= 1, js["raced"]
+    # ... and destroyed that set's textures once it had.
+    assert js["destroyedAfterDone"] == per_set
