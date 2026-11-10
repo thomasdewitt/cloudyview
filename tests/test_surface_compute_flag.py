@@ -158,3 +158,104 @@ def test_every_stage_pipeline_goes_through_the_one_helper():
     call = "this._pipeline(entry, stageFormats(entry), spec)"
     assert src.count(call) == 1
     assert src.index(call) > src.index("  _stagePipeline(entry, spec) {")
+
+
+# The proof that the compute stage ran (_proveSurfaceCS): the slot is cleared
+# to SURFACE_CS_SENTINEL, cs_surface dispatched once, and the slot read back.
+# Here the device is mocked, so what the readback holds stands for what the
+# dispatch did: still the sentinel everywhere is a dispatch that wrote
+# nothing (a GPU that refused the threadgroup and said nothing).
+_PROOF_JS = textwrap.dedent("""
+    const [search, fill] = [process.argv[1], process.argv[2]];
+    const anyObj = () => new Proxy(function () {}, {
+      get: (t, k) => (k === "then" ? undefined
+                      : k === Symbol.toPrimitive ? () => 0 : anyObj()),
+      apply: () => anyObj(),
+    });
+    globalThis.GPUShaderStage = { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 };
+    globalThis.GPUTextureUsage = { COPY_SRC: 1, COPY_DST: 2, TEXTURE_BINDING: 4,
+                                   STORAGE_BINDING: 8, RENDER_ATTACHMENT: 16 };
+    globalThis.GPUBufferUsage = { MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4,
+                                  COPY_DST: 8, INDEX: 16, VERTEX: 32,
+                                  UNIFORM: 64, STORAGE: 128, INDIRECT: 256,
+                                  QUERY_RESOLVE: 512 };
+    globalThis.GPUMapMode = { READ: 1, WRITE: 2 };
+    globalThis.location = { search };
+    const R = await import(%s);
+    const sentinel = new Uint32Array(
+      new Float32Array([R.SURFACE_CS_SENTINEL]).buffer)[0];
+    let dispatched = 0;
+    const device = new Proxy({
+      limits: { maxComputeInvocationsPerWorkgroup: 1024,
+                maxComputeWorkgroupSizeX: 1024, maxComputeWorkgroupSizeY: 1024 },
+      queue: anyObj(),
+      pushErrorScope: () => {},
+      popErrorScope: () => Promise.resolve(null),
+      createBuffer: (d) => {
+        const words = new Uint32Array(d.size / 4);
+        // What the dispatch left: nothing ("none"), every pixel ("all"),
+        // or every pixel but the last row ("most").
+        words.fill(sentinel);
+        if (fill === "all") words.fill(0);
+        if (fill === "most") words.fill(0, 0, words.length - d.size / 4 / 8);
+        return { mapAsync: async () => {}, getMappedRange: () => words.buffer,
+                 unmap: () => {}, destroy: () => {} };
+      },
+    }, { get: (t, k) => (k in t ? t[k] : () => anyObj()) });
+    const scene = { city: {}, bmin: [0, 0, 0], bmax: [20000, 20000, 5000],
+                    minVoxelM: 50, minVoxelNestM: 50, nested: false,
+                    oceanFifDx: 0.1, oceanTileExtent: 100, surfacePeriod: 20000,
+                    clockPeriod: 1638.4, oceanMaxLod: 9 };
+    const r = new R.Renderer(device, "", scene,
+                             { canvasFormat: "bgra8unorm", lensSource: "" });
+    r._dispatchSurfaceCS = () => { dispatched += 1; };
+    const targets = { w: 16, h: 8 };
+    targets.surface = await r._makeSurfaceSet(targets, 2);
+    let error = null;
+    try {
+      await r._proveSurfaceCS(targets, anyObj(), anyObj(), 3);
+      await r._proveSurfaceCS(targets, anyObj(), anyObj(), 3);   // once
+    } catch (e) {
+      error = String(e.message);
+    }
+    console.log(JSON.stringify({ error, dispatched,
+                                 proven: targets.surface.csProven ?? null }));
+""")
+
+
+def prove(search, fill):
+    js = _PROOF_JS % json.dumps(RENDERER_JS.as_uri())
+    out = subprocess.run(["node", "--input-type=module", "-e", js, search,
+                          fill], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-3000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_a_dispatch_that_writes_nothing_is_refused():
+    r = prove("?surfacecs=1", "none")
+    assert r["error"] == (
+        "The surface stage as compute did not run: 128 of 128 pixels "
+        "unwritten at a 32x16 workgroup. The GPU may have refused "
+        "threadgroups that large for this shader (Metal caps each "
+        "pipeline's maxTotalThreadsPerThreadgroup); try ?surfacecs=256.")
+    assert r["proven"] == {}
+
+
+def test_a_partly_written_slot_is_refused_and_16x16_has_no_smaller():
+    r = prove("?surfacecs=256", "most")
+    assert r["error"].startswith("The surface stage as compute did not run: "
+                                 "16 of 128 pixels unwritten at a 16x16")
+    assert r["error"].endswith("no smaller workgroup is defined: leave "
+                               "?surfacecs off.")
+
+
+def test_a_written_slot_is_proven_once():
+    r = prove("?surfacecs=1", "all")
+    assert r["error"] is None
+    assert r["proven"] == {"a": True}
+    assert r["dispatched"] == 1
+
+
+def test_the_frame_refuses_an_unproven_set():
+    src = RENDERER_JS.read_text()
+    assert "into a target set it was never proven on" in src

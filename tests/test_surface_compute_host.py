@@ -170,3 +170,19 @@ def test_cs_and_frag_agree(gpu, level):
         d = np.abs(a - b).max(axis=-1)
         assert np.mean(d > 1.0 / 255.0) < MAX_FRACTION_OVER_1_255, name
         assert float(np.mean(d)) < MAX_MEAN_ABS, name
+
+
+def test_a_dispatch_that_writes_nothing_is_refused(gpu, level):
+    # A GPU that refuses the threadgroup without a word (wgpu's Metal backend
+    # does not check a pipeline's maxTotalThreadsPerThreadgroup) is a
+    # dispatch that writes nothing: the one-time proof must refuse the
+    # render, naming the workgroup and the alternative.
+    r, state = _city((32, 16), level)
+    r._dispatch_surface_cs = lambda cp, gx, gy: None
+    with pytest.raises(RuntimeError) as err:
+        r.render(state, _view(state, "aerial"), frames=1)
+    w, h = SIZE
+    assert str(err.value).startswith(
+        f"The surface stage as compute did not run: {w * h} of {w * h} pixels "
+        "unwritten at a 32x16 workgroup.")
+    assert str(err.value).endswith("try surface_cs=(16, 16).")

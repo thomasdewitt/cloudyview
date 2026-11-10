@@ -837,6 +837,27 @@ def surface_cs_source(code: str, surface_cs) -> str:
     return code
 
 
+# What _prove_surface_cs clears cs_surface's output to: no surface it writes
+# is this in every channel. renderer.js SURFACE_CS_SENTINEL is the same.
+SURFACE_CS_SENTINEL = -3.0e38
+_SENTINEL_BITS = np.array([SURFACE_CS_SENTINEL], np.float32).view(np.uint32)[0]
+
+
+def surface_cs_failure(surface_cs, unwritten: int, total: int,
+                       smaller: str) -> str:
+    """The message for a compute surface stage that did not run: the
+    workgroup, what was left unwritten, the likely cause, the alternative
+    (`smaller`, in the host's own spelling, or the fragment stage)."""
+    wx, wy = surface_cs
+    alt = (f"try {smaller}" if (wx, wy) != (16, 16)
+           else "no smaller workgroup is defined: use the fragment stage")
+    return (f"The surface stage as compute did not run: {unwritten} of "
+            f"{total} pixels unwritten at a {wx}x{wy} workgroup. The GPU may "
+            f"have refused threadgroups that large for this shader (Metal "
+            f"caps each pipeline's maxTotalThreadsPerThreadgroup, and "
+            f"wgpu-native does not check it); {alt}.")
+
+
 def surface_cs_limits(surface_cs) -> dict:
     """What a device must be asked for to run cs_surface at `surface_cs`
     (WebGPU's default floor is 256 invocations; wgpu-native happens to hand
@@ -1563,6 +1584,69 @@ class SoarRenderer:
                     {"binding": 1, "resource": writes[1].create_view()}])
         return groups[key]
 
+    def _encode_surface_cs(self, cp, targets, pipeline, bind_group, writes):
+        """cs_surface's dispatch into compute pass `cp`: every pixel of the
+        target set's size, in workgroups of surface_cs."""
+        wx, wy = self.surface_cs
+        w, h = targets["size"]
+        cp.set_pipeline(pipeline)
+        cp.set_bind_group(0, bind_group)
+        cp.set_bind_group(1, self._cs_empty_group)
+        cp.set_bind_group(2, self._cs_out_group(targets, writes))
+        self._dispatch_surface_cs(cp, -(-w // wx), -(-h // wy))
+
+    def _dispatch_surface_cs(self, cp, gx: int, gy: int):
+        """The one dispatch call (a test replaces it with one that writes
+        nothing, which the proof must catch)."""
+        cp.dispatch_workgroups(gx, gy)
+
+    def _prove_surface_cs(self, targets, pipeline, bind_group, writes):
+        """Once per target set and slot: prove cs_surface ran, or raise.
+
+        wgpu-hal 29's Metal backend never compares a compute pipeline's
+        maxTotalThreadsPerThreadgroup, which a kernel this heavy can push
+        under 512, with the workgroup it dispatches; Metal then gets an
+        invalid threadgroup and the surface keeps whatever it held — a wrong
+        city and no error. So the slot is cleared to SURFACE_CS_SENTINEL in
+        every channel (cs_surface writes every pixel, and no surface it
+        writes is that: radiance is not negative, the red channel's mark is
+        one bit, |t| is kilometres), cs_surface dispatched once on the
+        uniforms as they stand, and the slot read back: one pixel still
+        holding the sentinel fails the renderer."""
+        proven = targets.setdefault("cs_proven", set())
+        key = id(writes[0])
+        if key in proven:
+            return
+        wgpu = self.wgpu
+        w, h = targets["size"]
+        enc = self.device.create_command_encoder()
+        rp = enc.begin_render_pass(color_attachments=[
+            {"view": writes[0].create_view(), "load_op": "clear",
+             "store_op": "store", "clear_value": (SURFACE_CS_SENTINEL,) * 4}])
+        rp.end()
+        cp = enc.begin_compute_pass()
+        self._encode_surface_cs(cp, targets, pipeline, bind_group, writes)
+        cp.end()
+        row = -(-w * 16 // 256) * 256
+        buf = self.device.create_buffer(
+            size=row * h,
+            usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ)
+        enc.copy_texture_to_buffer(
+            {"texture": writes[0], "mip_level": 0, "origin": (0, 0, 0)},
+            {"buffer": buf, "offset": 0, "bytes_per_row": row,
+             "rows_per_image": h}, (w, h, 1))
+        self.device.queue.submit([enc.finish()])
+        buf.map_sync(wgpu.MapMode.READ)
+        px = np.frombuffer(bytearray(buf.read_mapped()), np.uint32)
+        buf.unmap()
+        buf.destroy()
+        px = px.reshape(h, row // 4)[:, :w * 4].reshape(h, w, 4)
+        unwritten = int(np.all(px == _SENTINEL_BITS, axis=-1).sum())
+        if unwritten:
+            raise RuntimeError(surface_cs_failure(self.surface_cs, unwritten,
+                                                  w * h, "surface_cs=(16, 16)"))
+        proven.add(key)
+
     def encode_frame_passes(self, enc, targets, view: "ViewState", bind_group,
                             timestamps=None):
         """The surface stages under `view`'s rays, then the march into
@@ -1577,15 +1661,11 @@ class SoarRenderer:
         for k, (pipeline, group1, writes) in enumerate(stages):
             tw = stamp(k)
             if isinstance(pipeline, self.wgpu.GPUComputePipeline):
-                wx, wy = self.surface_cs
-                w, h = targets["size"]
+                self._prove_surface_cs(targets, pipeline, bind_group, writes)
                 cp = (enc.begin_compute_pass(timestamp_writes=tw) if tw
                       else enc.begin_compute_pass())
-                cp.set_pipeline(pipeline)
-                cp.set_bind_group(0, bind_group)
-                cp.set_bind_group(1, self._cs_empty_group)
-                cp.set_bind_group(2, self._cs_out_group(targets, writes))
-                cp.dispatch_workgroups(-(-w // wx), -(-h // wy))
+                self._encode_surface_cs(cp, targets, pipeline, bind_group,
+                                        writes)
                 cp.end()
                 continue
             attachments = [
