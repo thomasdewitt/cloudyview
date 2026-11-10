@@ -1143,9 +1143,18 @@ export class CityLots {
     for (const [nx, ny] of neighbourhood(Math.floor(p[0] / cell),
                                          Math.floor(p[1] / cell))) {
       const cc = this.cell(nx, ny);
-      if (cc.built && p[2] < cc.top_z + r
-          && cellSolids(cc, r).some((solid) => insideSolid(p, solid))) {
-        top = Math.max(top ?? -Infinity, cc.top_z);
+      if (cc.built && p[2] < cc.top_z + r) {
+        // The top of the solid the point is in, not the cell's bound: a
+        // tall tower's top_z carries a crown's headroom (and a mast's)
+        // whether or not it has one, and a click onto a crownless roof
+        // lands on the roof. Inside the tower and then its crown, the
+        // seed lifts twice.
+        for (const solid of cellSolids(cc, r)) {
+          if (insideSolid(p, solid)) {
+            const z = solid.frustum ? solid.frustum.z1 - r : solid.max[2];
+            top = Math.max(top ?? -Infinity, z);
+          }
+        }
       }
       for (const solid of this._props(cc, nx, ny, r).solids) {
         if (insidePolytope(p, solid, r)) {

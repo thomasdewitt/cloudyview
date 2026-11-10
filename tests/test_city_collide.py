@@ -617,6 +617,23 @@ def test_starting_inside_a_building_puts_you_on_its_roof():
                                                 abs=1e-6)
 
 
+@pytest.mark.parametrize("start,roof", [
+    # A 266 m tower with no crown and no mast (cell (241, 680)): its top_z
+    # carries a crown's 10.8 m of headroom all the same, and the camera
+    # must land on the roof, not on that bound (loose-ends, 2026-11).
+    ([21735.96, 61254.10, 256.4], 266.4),
+    # A 112 m tower with a 7.2 m crown (cell (221, 680)), started under the
+    # crown: lifted onto the roof, which is inside the crown, then onto the
+    # crown's top.
+    ([19931.26, 61266.38, 101.6], 118.8)])
+def test_starting_inside_a_tower_puts_you_on_what_it_carries(start, roof):
+    r = fly(city="props", start=start, azimuth=EAST, elevation=0.0,
+            speed=20.0, keys=[], fps=60, seconds=0.5)
+    frames = r["frames"]
+    assert not any(f["camInside"] or f["flyInside"] for f in frames)
+    assert frames[0]["fly"][2] == pytest.approx(roof + 0.21, abs=1e-3)
+
+
 def test_looking_round_beside_a_wall_is_not_a_crash():
     # Hovering 2 m off a wall, facing along it, then swinging round to face
     # it at 360 deg/s: the flyer sweeps into the wall at ~15 m/s. It is
