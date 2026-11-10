@@ -91,7 +91,18 @@ try {
   await fail(err);
 }
 
-const expression = `(async () => {
+// The sweep runs as ONE evaluate per module (with its cs_surface pipelines),
+// not one evaluate for all of it: each has its own deadline, a slow or hung
+// compile fails naming its module, and the progress (and each module's time)
+// goes to stderr. As one evaluate the whole sweep (68 modules and the
+// pipelines, ~39 s on the 5080) could pass soar_cdp's 10-minute eval
+// deadline under Metal on the M1 with no shader at fault (loose-ends, review
+// of c17d79b). The setup evaluate below builds the plan and parks run(i) on
+// the page; the order, the de-duplication and the once-only 16x16 pipeline
+// are the single sweep's, so the results are the same.
+const SETUP_DEADLINE_MS = 10 * 60 * 1000;   // adapter, imports, specializing
+const JOB_DEADLINE_MS = 10 * 60 * 1000;     // one module and its pipelines
+const setup = `(async () => {
   const base = ${JSON.stringify(base)};
   // A Chrome just launched while other sessions hold VRAM can answer the
   // first requests with no adapter and then settle (seen 2026-09-23), so a
@@ -166,9 +177,8 @@ const expression = `(async () => {
       }
     }
   }
-  const out = [];
-  const done = new Set();
-  let csSmall = false;     // the 16x16 workgroup, built once
+  const jobs = [];
+  const seen = new Set();
   for (const surface of ["ocean", "city"]) {
     for (const nested of [false, true]) {
       for (const periodic of [false, true]) {
@@ -187,54 +197,75 @@ const expression = `(async () => {
                 ...recipe, periodic, nested, toneMap,
                 city: surface === "city" });
             } catch (err) {
-              out.push({ label, errors: ["specialize: " + err.message],
-                         warnings: [] });
+              jobs.push({ label, error: "specialize: " + err.message });
               continue;
             }
-            if (done.has(code)) continue;
-            done.add(code);
-            const m = await compile("raymarch " + label, code);
-            out.push(m);
-            if (surface === "city" && !m.errors.length) {
-              out.push(await csPipeline("cs_surface 32x16 " + label, m.module,
-                                        [32, 16]));
-              if (!csSmall) {
-                csSmall = true;
-                out.push(await csPipeline("cs_surface 16x16 " + label,
-                                          m.module, [16, 16]));
-              }
-            }
+            if (seen.has(code)) continue;
+            seen.add(code);
+            jobs.push({ label: "raymarch " + label, tail: label, code,
+                        city: surface === "city" });
           }
         }
       }
     }
   }
   for (const f of ["bird.wgsl", "dart.wgsl", "hud.wgsl"]) {
-    try { out.push(await compile(f, await text(f))); }
-    catch (err) { out.push({ label: f, errors: [err.message], warnings: [] }); }
+    jobs.push({ label: f, file: f });
   }
   // The present pass, which carries lens water (lens.wgsl is not a module
   // on its own: the present shader includes it and provides lens_src).
-  try {
-    out.push(await compile("present + lens.wgsl",
-                           R.presentShader(await text("lens.wgsl"))));
-  } catch (err) {
-    out.push({ label: "present + lens.wgsl", errors: [err.message],
-               warnings: [] });
-  }
-  device.destroy();
-  for (const m of out) delete m.module;
-  return { out, adapter: [adapter.info?.vendor, adapter.info?.architecture]
-                           .filter(Boolean).join(" ") };
+  jobs.push({ label: "present + lens.wgsl", present: true });
+  let csSmall = false;     // the 16x16 workgroup, built once
+  const run = async (i) => {
+    const j = jobs[i];
+    if (j.error) return [{ label: j.label, errors: [j.error], warnings: [] }];
+    let code = j.code;
+    try {
+      if (j.file) code = await text(j.file);
+      if (j.present) code = R.presentShader(await text("lens.wgsl"));
+    } catch (err) {
+      return [{ label: j.label, errors: [err.message], warnings: [] }];
+    }
+    const m = await compile(j.label, code);
+    const res = [m];
+    if (j.city && !m.errors.length) {
+      res.push(await csPipeline("cs_surface 32x16 " + j.tail, m.module,
+                                [32, 16]));
+      if (!csSmall) {
+        csSmall = true;
+        res.push(await csPipeline("cs_surface 16x16 " + j.tail, m.module,
+                                  [16, 16]));
+      }
+    }
+    for (const r of res) delete r.module;
+    return res;
+  };
+  window.__tint = { run, device };
+  return { jobs: jobs.map((j) => j.label),
+           adapter: [adapter.info?.vendor, adapter.info?.architecture]
+                      .filter(Boolean).join(" ") };
 })()`;
 
-let result;
+let plan;
 try {
-  result = await tab.eval(expression);
+  plan = await tab.eval(setup, SETUP_DEADLINE_MS);
 } catch (err) {
   await fail(err);
 }
-if (result.fatal) await fail(new Error(result.fatal));
+if (plan.fatal) await fail(new Error(plan.fatal));
+const out = [];
+for (let i = 0; i < plan.jobs.length; i++) {
+  const t0 = Date.now();
+  try {
+    out.push(...await tab.eval(`window.__tint.run(${i})`, JOB_DEADLINE_MS));
+  } catch (err) {
+    await fail(new Error(`${plan.jobs[i]}: ${err.message}`));
+  }
+  console.error(`tint_check: [${i + 1}/${plan.jobs.length}] ${plan.jobs[i]} ` +
+                `${Date.now() - t0} ms`);
+}
+await tab.eval("(window.__tint.device.destroy(), true)").catch(() => {});
+const result = { out, adapter: plan.adapter };
 let failed = 0;
 const seen = new Set();
 for (const m of result.out) {
