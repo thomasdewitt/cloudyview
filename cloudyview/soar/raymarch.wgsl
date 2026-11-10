@@ -11303,13 +11303,6 @@ const cc_rooftopworks_PENT_PITCH: f32 = 2.10;  // mullion pitch (m)
 const cc_rooftopworks_PENT_MULL: f32 = 0.13;   // dark fraction of the pitch
 const cc_rooftopworks_PENT_SILL: f32 = 0.80;   // dark spandrel at its foot
 const cc_rooftopworks_PENT_LIT: f32 = 0.58;    // bays with the light on
-// Tone-map compensation on the far-field means (the core's facade now
-// averages in display space instead, city_windows_seen): a
-// mean taken in linear radiance ahead of a Reinhard curve renders CREAM,
-// because a lit bay at 1.8 is already near the knee and its average is not.
-// Solved rather than guessed: match tone(mean * E) to lit_frac * tone(B * E)
-// at E = 6, which puts the coefficient near a quarter.
-const cc_rooftopworks_PENT_MEAN_COMP: f32 = 0.26;
 
 // --- helipad ----------------------------------------------------------------
 const cc_rooftopworks_PAD_FRAC: f32 = 0.13;
@@ -12790,14 +12783,124 @@ fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     return cc_rooftopworks_TRIM_COOL;
 }
 
-// --- the coping trim, as shown -------------------------------------------------
-// Bright detail on a dark wall, averaged under the pixel's footprint as the
-// flat facade averages its windows (see the skylights): what each element
-// SHOWS, weighted by its share of the footprint, handed back by
-// city_windows_resolve as the radiance that shows as that average.
-// Component shading is not told whether a hit is seen directly or in a
-// reflection, so the trim is averaged as shown; a parapet seen in a
-// reflection gets its shown mean, not its plain one.
+// --- the penthouse's glass and the coping trim, as shown --------------------
+// Both are bright detail on a dark wall, and both are averaged under the
+// pixel's footprint as the flat facade averages its windows (see the
+// skylights): what each element SHOWS, weighted by its share of the
+// footprint, handed back by city_windows_resolve as the radiance that shows
+// as that average. Component shading is not told whether a hit is seen
+// directly or in a reflection, so both are averaged as shown; a penthouse
+// or a parapet seen in a reflection gets its shown mean, not its plain one.
+
+// A storey band's mean sill factor over [v0, v1] (m above the penthouse's
+// foot): smoothstep(0, SILL, v) integrated in closed form.
+fn cc_rooftopworks_sill_int(v: f32) -> f32 {
+    let s = cc_rooftopworks_PENT_SILL;
+    let x = clamp(v / s, 0.0, 1.0);
+    return s * (x * x * x - 0.5 * x * x * x * x) + max(v - s, 0.0);
+}
+
+fn cc_rooftopworks_sill_mean(v0: f32, v1: f32) -> f32 {
+    if (v1 - v0 < 1e-4) {
+        return smoothstep(0.0, cc_rooftopworks_PENT_SILL, v0);
+    }
+    return (cc_rooftopworks_sill_int(v1) - cc_rooftopworks_sill_int(v0))
+           / (v1 - v0);
+}
+
+// A bay's brightness over the room's light, 0 if dark.
+fn cc_rooftopworks_pent_bay(cc: CityCell, iu: i32, iv: i32) -> f32 {
+    let wh = city_rand4(vec2<u32>(
+        cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u) ^ 0x0d2f1a37u,
+        cc.seed.y ^ (bitcast<u32>(iv) * 0x85ebca6bu) ^ 0x1b56c4e9u));
+    return select(0.0, 0.45 + 1.10 * wh.z, wh.x < cc_rooftopworks_PENT_LIT);
+}
+
+// The bays the exact sum walks at most, on each axis (as the skylights').
+const cc_rooftopworks_PENT_EXACT_MAX: i32 = 3;
+
+// The glass wall under the footprint box [u0, u1] x [v0, v1] (u along the
+// wall, v up from its foot, inside the wall), as shown. `base` is the
+// wall's own radiance, `glow` a bay's light at brightness 1.
+fn cc_rooftopworks_pent_seen(cc: CityCell, u0: f32, u1: f32, v0: f32,
+                             v1: f32, base: vec3<f32>, glow: vec3<f32>,
+                             fog: vec4<f32>, shown: bool) -> vec3<f32> {
+    let p = cc_rooftopworks_PENT_PITCH;
+    let fh = CITY_FLOOR_H;
+    let box_a = (u1 - u0) * (v1 - v0);
+    let w_mean = smoothstep(0.5, 1.0, max((u1 - u0) / p, (v1 - v0) / fh));
+    var ex = city_win_zero();
+    var lit_a = 0.0;
+    var n_el = 0;
+    var only = base;
+    if (w_mean < 1.0) {
+        let i0 = i32(floor(u0 / p));
+        let j0 = i32(floor(v0 / fh));
+        for (var j: i32 = 0; j < cc_rooftopworks_PENT_EXACT_MAX; j = j + 1) {
+            let b0 = max(f32(j0 + j) * fh, v0);
+            let b1 = min(f32(j0 + j + 1) * fh, v1);
+            if (b1 <= b0) {
+                continue;
+            }
+            let sill = cc_rooftopworks_sill_mean(b0, b1);
+            for (var i: i32 = 0; i < cc_rooftopworks_PENT_EXACT_MAX;
+                 i = i + 1) {
+                let c0 = f32(i0 + i) * p;
+                let a0 = max(c0, u0);
+                let a1 = min(c0 + p, u1);
+                if (a1 <= a0) {
+                    continue;
+                }
+                let bay = cc_rooftopworks_pent_bay(cc, i0 + i, j0 + j);
+                if (bay <= 0.0) {
+                    continue;
+                }
+                // The mullion is the bay's first MULL of its pitch.
+                let m1 = c0 + cc_rooftopworks_PENT_MULL * p;
+                let am = max(min(a1, m1) - a0, 0.0) * (b1 - b0);
+                let ag = (a1 - a0) * (b1 - b0) - am;
+                let lm = base + glow * (0.10 * bay * sill);
+                let lg = base + glow * (bay * sill);
+                ex = city_win_add(ex, lm, am, fog, shown);
+                ex = city_win_add(ex, lg, ag, fog, shown);
+                if (am > 0.0) { n_el = n_el + 1; only = lm; }
+                if (ag > 0.0) { n_el = n_el + 1; only = lg; }
+                lit_a = lit_a + am + ag;
+            }
+        }
+        if (box_a - lit_a > 1e-6 * box_a) {
+            n_el = n_el + 1;
+            only = base;
+        }
+        ex = city_win_add(ex, base, box_a - lit_a, fog, shown);
+        if (w_mean <= 0.0 && n_el <= 1) {
+            return only;   // one element: itself, exactly
+        }
+    }
+    var mn = city_win_zero();
+    if (w_mean > 0.0) {
+        // Lit at the rate, brightness uniform on [0.45, 1.55] by
+        // three-point Gauss-Legendre, glass and mullion at their shares, the
+        // sill at its mean over the box.
+        let sill = cc_rooftopworks_sill_mean(v0, v1);
+        let g = 0.55 * 0.7745966692;
+        let a_lit = box_a * cc_rooftopworks_PENT_LIT;
+        let am = a_lit * cc_rooftopworks_PENT_MULL;
+        let ag = a_lit - am;
+        let lv = vec3<f32>(1.0, 1.0 - g, 1.0 + g);
+        let wv = vec3<f32>(4.0 / 9.0, 5.0 / 18.0, 5.0 / 18.0);
+        for (var q: i32 = 0; q < 3; q = q + 1) {
+            mn = city_win_add(mn, base + glow * (0.10 * lv[q] * sill),
+                              am * wv[q], fog, shown);
+            mn = city_win_add(mn, base + glow * (lv[q] * sill), ag * wv[q],
+                              fog, shown);
+        }
+        mn = city_win_add(mn, base, box_a - a_lit, fog, shown);
+    }
+    let mean = CityWinSum(mix(ex.shown, mn.shown, w_mean) / box_a,
+                          mix(ex.light, mn.light, w_mean) / box_a);
+    return city_windows_resolve(mean, fog, shown);
+}
 
 // How much of [u0, u1] the trim's runs light: fixtures on a TRIM_PITCH
 // centre, lit over the first TRIM_DUTY of it.
@@ -12885,35 +12988,28 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         let tangent = vec2<f32>(-nh.y, nh.x);
         let uc = dot(h.pos.xy, tangent);
         let up = h.pos.z - cr.z0;
-        let mull = select(
-            1.0, 0.10,
-            fract(uc / cc_rooftopworks_PENT_PITCH) < cc_rooftopworks_PENT_MULL);
-        let sill = smoothstep(0.0, cc_rooftopworks_PENT_SILL, up);
         // Panes, not a slab. Lit uniformly at 1.8 the crown came out as the
-        // brightest thing on the skyline — brighter in the mean than the
+        // brightest thing on the skyline, brighter in the mean than the
         // facade below it, which is backwards. It is a room: most of the
-        // glass is lit, some is not, and each bay has its own level.
-        let iu = i32(floor(uc / cc_rooftopworks_PENT_PITCH));
-        let iv = i32(floor(up / CITY_FLOOR_H));
-        let wh = city_rand4(vec2<u32>(
-            cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u) ^ 0x0d2f1a37u,
-            cc.seed.y ^ (bitcast<u32>(iv) * 0x85ebca6bu) ^ 0x1b56c4e9u));
-        let bay = select(0.0, 0.45 + 1.10 * wh.z,
-                         wh.x < cc_rooftopworks_PENT_LIT);
-        // Mullions are 13% of the pitch and a bay is 2.1 m: both are
-        // sub-pixel past a couple of metres, where the wall settles to its
-        // own mean rather than flickering.
-        let k = smoothstep(0.7, 2.2, fp);
-        let m = mix(mull * bay,
-                    (1.0 - 0.9 * cc_rooftopworks_PENT_MULL)
-                    * cc_rooftopworks_PENT_LIT
-                    * cc_rooftopworks_PENT_MEAN_COMP, k);
+        // glass is lit, some is not, and each bay (one PENT_PITCH by one
+        // storey) has its own level; mullions take the first PENT_MULL of
+        // each pitch at a tenth of the light, and the spandrel at the foot
+        // darkens the first PENT_SILL. Averaged under the footprint as
+        // shown (cc_rooftopworks_pent_seen).
         var col = cc_rooftopworks_PENT_COL;
         if (cc.win_mono >= 0.0) {
             col = city_room_color(cc.win_mono, cc.palette_bias);
         }
-        return cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO)
-             + col * (cc_rooftopworks_PENT_RAD * m * sill);
+        let base = cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO);
+        let dl = vec3<f32>(dot(dir.xy, tangent), dir.z, dot(dir.xy, nh));
+        let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-3));
+        let wall_h = cr.z1 - cr.z0;
+        let v0 = clamp(up - hb.y, 0.0, wall_h);
+        let v1 = max(clamp(up + hb.y, 0.0, wall_h), v0 + 1e-3);
+        let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+        return cc_rooftopworks_pent_seen(cc, uc - hb.x, uc + hb.x, v0, v1,
+                                         base, col * cc_rooftopworks_PENT_RAD,
+                                         fog, TONE_MAP);
     }
 
     // --- helipad -----------------------------------------------------------
