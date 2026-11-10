@@ -49,7 +49,6 @@ from cloudyview.coarsen import (axis_mean, band_of_peaks, block_mean,
                                 extinction_peaks, grow_band,
                                 occupied_band)
 from cloudyview.glimpse import glimpse
-from cloudyview.look import DEFAULT_HAZE
 from cloudyview.soar_host import (
     DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_HAZE_HEIGHT_DEPENDENT,
     DEFAULT_LOD_STRENGTH, DEFAULT_TONE_MAP_GAMMA, DEFAULT_TONE_MAP_WHITE_POINT,
@@ -60,17 +59,24 @@ from export_web_assets import _volume_aabb
 # is meant to be the frame you land on cannot hold a private copy of the look,
 # or moving the app's default silently makes every preview a lie. A demo's
 # `still` block therefore names ONLY what it wants to differ — in practice
-# just exposure and haze — and everything else follows the app.
+# just exposure — and everything else follows the app.
 #
-# Haze is the exception that has to be stated per demo: in the app it is a
-# function of the quality tier, so there is no single value the preview could
-# inherit, and the right one is whichever Thomas chose the view under.
+# Haze is a function of the quality tier in the app, so the still takes the
+# max tier's: a capture at a named tier is the pure preset and takes
+# DEFAULT_HAZE_BY_TIER's value (web/soar/constants.js; max is a 70 km
+# sea-level e-folding, retuned 2026-08-18), and a flight at max or high opens
+# at that same haze. Thomas, 2026-11-09, of a still baked at 0.55: "It should
+# be rendered at max which has rather little haze right?" Restated because
+# Python cannot import that ES module; tests/test_soar_meter_grid.py pins the
+# two equal.
+MAX_TIER_HAZE = -0.0380
+
 LOOK_DEFAULTS = {
     "exposure": DEFAULT_EXPOSURE,
     "gamma": DEFAULT_TONE_MAP_GAMMA,
     "white_point": DEFAULT_TONE_MAP_WHITE_POINT,
     "contrast": DEFAULT_CONTRAST,
-    "haze": DEFAULT_HAZE,
+    "haze": MAX_TIER_HAZE,
     # Angular LOD, recorded like the rest: a still rendered at one strength
     # and a flight opened at another are the same camera marched two ways,
     # and the `look` block is the record of how the picture was made.
@@ -190,7 +196,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.0776818342067, -0.27879259066, -0.998326359833),
             azimuth=44.28, elevation=25.76, fov=100.0,
-            exposure="auto", haze=0.55,
+            exposure="auto",
         ),
     ),
     # The same world as the case above — same seed, same outer scale, same
@@ -226,7 +232,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.917919995217, -0.696861762887, -0.993220338983),
             azimuth=358.68, elevation=0.0, fov=100.0,
-            exposure="auto", haze=0.92,
+            exposure="auto",
         ),
     ),
     dict(
@@ -246,7 +252,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.516654156817, -0.285165086182, -0.993548387097),
             azimuth=249.48, elevation=45.92, fov=100.0,
-            exposure="auto", haze=1.0,
+            exposure="auto",
         ),
     ),
     # The marine case block-averaged 2x2x2, which is a DIFFERENT kind of pair
@@ -289,7 +295,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.516654156817, -0.285165086182, -0.993548387097),
             azimuth=249.48, elevation=45.92, fov=100.0,
-            exposure="auto", haze=1.0,
+            exposure="auto",
         ),
     ),
     dict(
@@ -309,7 +315,7 @@ DEMOS = [
             size=(1920, 963),
             position=(-0.488904823109, 0.653836399367, -0.998325965182),
             azimuth=278.16, elevation=21.8, fov=100.0,
-            exposure="auto", haze=0.0,
+            exposure="auto",
         ),
     ),
     # --- hydrodynamic LES --------------------------------------------------
@@ -337,7 +343,7 @@ DEMOS = [
             size=(1920, 963),
             position=(-0.169577212547, -0.394411429582, -0.875680961028),
             azimuth=50.16, elevation=23.0, fov=100.0,
-            exposure="auto", haze=0.36,
+            exposure="auto",
         ),
     ),
     dict(
@@ -355,7 +361,7 @@ DEMOS = [
             size=(1920, 963),
             position=(0.0, 0.0, -0.971830985915),
             azimuth=231.84, elevation=11.84, fov=100.0,
-            exposure="auto", haze=1.43,
+            exposure="auto",
         ),
     ),
     # --- RCEMIP ------------------------------------------------------------
@@ -382,7 +388,7 @@ DEMOS = [
             size=(1920, 963),
             position=(-0.00633639238438, 0.0177418162348, -0.947201859468),
             azimuth=256.08, elevation=18.8, fov=100.0,
-            exposure="auto", haze=1.3,
+            exposure="auto",
         ),
     ),
     # SAM writes QN — cloud water and cloud ice in one variable — and this run
@@ -409,7 +415,7 @@ DEMOS = [
             size=(1920, 961),
             position=(0.573153097861, -0.509558749967, -0.998447204969),
             azimuth=52.08, elevation=20.84, fov=100.0,
-            exposure="auto", haze=-0.038,
+            exposure="auto",
         ),
     ),
     dict(
@@ -432,7 +438,7 @@ DEMOS = [
             size=(1920, 961),
             position=(-0.251072780761, 0.238920408802, -0.998201438849),
             azimuth=306.72, elevation=20.84, fov=100.0,
-            exposure="auto", haze=-0.038,
+            exposure="auto",
         ),
     ),
     # The FIF cascade was shipped here until 2026-08-08 and was dropped: it is

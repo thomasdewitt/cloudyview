@@ -10,6 +10,9 @@ gives the grid the output's shape at about AUTO_EXPOSURE_METER_RAYS rays,
 and tools/prebake_demos.py's meter (which metered 96 wide) uses the same
 rule, pinned here to the browser's.
 
+The same fixture also pins prebake's MAX_TIER_HAZE, its restatement of
+constants.js DEFAULT_HAZE_BY_TIER.max, which every demo still is baked at.
+
 Needs node, not a GPU.
 """
 
@@ -37,6 +40,7 @@ _JS = textwrap.dedent("""
     import { meterSize } from "%s";
     const sizes = JSON.parse(process.argv[1]);
     console.log(JSON.stringify({ rays: K.AUTO_EXPOSURE_METER_RAYS,
+                                 maxHaze: K.DEFAULT_HAZE_BY_TIER.max,
                                  grids: sizes.map((s) => meterSize(s)) }));
 """) % (CONSTANTS_JS.as_uri(), UNIFORMS_JS.as_uri())
 
@@ -83,3 +87,9 @@ def test_the_demo_bake_meters_on_the_browsers_grid(grids):
     import prebake_demos as pb
     assert pb.AE_METER_RAYS == grids["rays"]
     assert [list(pb.meter_size(s)) for s in OUTPUTS] == grids["grids"]
+
+
+def test_the_demo_bake_restates_the_max_tiers_haze(grids):
+    sys.path.insert(0, str(REPO / "tools"))
+    import prebake_demos as pb
+    assert pb.MAX_TIER_HAZE == grids["maxHaze"]
