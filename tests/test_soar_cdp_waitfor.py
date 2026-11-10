@@ -57,13 +57,31 @@ SCRIPT = textwrap.dedent("""
       }
     }
 
+    // What send() rejects with once the DevTools socket has closed.
+    const closed = () => Promise.reject(Object.assign(
+      new Error("the DevTools connection closed (code 1006)"), { closed: true }));
+    // A primitive thrown: no description, only the value.
+    const threwValue = (v) => ({
+      result: { type: typeof v, value: v },
+      exceptionDetails: { text: "Uncaught",
+                          exception: { type: typeof v, value: v } } });
+
     const out = [
       await run("throws", [value(false), threw("Scene failed: ?surfacecs=2: expected 1 (or 512), 256, or 0")], 60000),
+      await run("throws a string", [threwValue("scene failed: no adapter")], 60000),
+      await run("closed", [value(false), closed], 60000),
+      await run("no answer", [() => new Promise(() => {})], 150),
+      // Abandoned at the deadline, then rejected as the socket closes: the
+      // race's own handler covers it, so no unhandled rejection ends this
+      // script (a guard: checked by a control without the race, 2026-11-09).
+      await run("late rejection", [() => new Promise((_, bad) => setTimeout(
+        () => bad(Object.assign(new Error("closed"), { closed: true })), 200))], 50),
       await run("waits", [value(false), value(0), value(null), value(""), value("ready")], 60000),
       await run("navigates", [value(false), destroyed, destroyed, value(true)], 60000),
       await run("times out", [destroyed], 80),
       await run("never true", [value(false)], 80),
     ];
+    await new Promise((ok) => setTimeout(ok, 400));   // let it reject
     console.log(JSON.stringify(out));
 """) % SOAR_CDP.as_uri()
 
@@ -101,3 +119,28 @@ def test_a_timeout_names_the_last_protocol_error(runs):
     assert "Execution context was destroyed." in r["error"], r
     r = runs["never true"]
     assert not r["ok"] and r["error"] == "timed out waiting for probe()", r
+
+
+def test_a_thrown_value_that_is_not_an_error_keeps_its_value(runs):
+    r = runs["throws a string"]
+    assert not r["ok"] and r["error"].endswith(": scene failed: no adapter"), r
+
+
+def test_a_closed_connection_fails_at_once(runs):
+    r = runs["closed"]
+    assert not r["ok"] and "DevTools connection closed" in r["error"], r
+    assert r["calls"] == 2 and r["ms"] < 5000, r
+
+
+def test_an_evaluate_that_never_answers_ends_at_the_timeout(runs):
+    r = runs["no answer"]
+    assert not r["ok"], r
+    assert "the page did not answer within 150 ms" in r["error"], r
+    assert 140 <= r["ms"] < 2000, r
+
+
+def test_an_abandoned_evaluate_rejecting_later_is_no_crash(runs):
+    # The fixture's script waited past the late rejection before printing:
+    # had it been unhandled, node would have exited non-zero with no output.
+    r = runs["late rejection"]
+    assert not r["ok"] and "did not answer within 50 ms" in r["error"], r
