@@ -9,14 +9,19 @@ with a clear message when they are not under the lock.
 
 "Under the lock" is two facts, both checked:
   - the marker tools/gpulock exports to its command, SOAR_GPULOCK = the
-    lock file's path (it survives flock and systemd-run --scope);
-  - the lock is held by an ANCESTOR of this process: /proc/locks names the
-    pid holding the FLOCK on that file, and under tools/gpulock that is
-    flock(1), the command's parent (systemd-run --scope execs in place).
-    "Held by someone" is not enough: this box's lock is usually held by
-    another session, which is exactly when an unlocked run spoils its
-    timing, and a marker set by hand would then pass (loose-ends, review
-    of 4b86576, found it passing).
+    lock file's path;
+  - SOAR_GPULOCK_PID, the launcher's own pid, which it also exports, is an
+    ANCESTOR of this process and is a running tools/gpulock. The launcher
+    starts the command only once it holds the lock, so that is the lock held
+    by this command's own launcher. "Held by someone" would not be enough:
+    the lock is usually held by another session, which is exactly when an
+    unlocked run spoils its timing, and a marker set by hand would then pass
+    (loose-ends, review of 4b86576, found it passing).
+
+Read from one `ps -A -ww -o pid=,ppid=,command=` table, which procps (Linux)
+and BSD ps (macOS) both answer: one code path everywhere. Until 2026-11-09
+the second check read /proc/locks and /proc/<pid>/status, which macOS does
+not have, so on Thomas's M1 every guarded tool refused.
 
 The library and pytest do not call this: Thomas runs those directly, and
 the library's own CLIs (witness, behold, glimpse, soar) stay unguarded by
@@ -29,6 +34,7 @@ tools/qa_chrome.sh does it in bash for the QA Chrome's start.
 """
 
 import os
+import subprocess
 import sys
 
 LOCK = "/tmp/soar-gpu.lock"
@@ -37,55 +43,61 @@ LOCK = "/tmp/soar-gpu.lock"
 EXIT_UNLOCKED = 3
 
 
-def lock_holders(path: str = LOCK) -> set:
-    """The pids holding a FLOCK on `path` now (blocked waiters excluded)."""
-    try:
-        st = os.stat(path)
-    except FileNotFoundError:
-        return set()
-    key = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
-    pids = set()
-    with open("/proc/locks") as f:
-        for line in f:
-            # "N: FLOCK ADVISORY WRITE pid maj:min:ino start end"; a waiter's
-            # line carries "->" after the index.
-            fields = line.split()
-            if (len(fields) >= 6 and fields[1] == "FLOCK"
-                    and fields[5] == key):
-                pids.add(int(fields[4]))
-    return pids
+def process_table() -> dict:
+    """{pid: (ppid, command)} for every process, from ps."""
+    return parse_ps(subprocess.run(
+        ["ps", "-A", "-ww", "-o", "pid=,ppid=,command="],
+        capture_output=True, text=True, check=True).stdout)
 
 
-def lineage(pid: int = None) -> list:
-    """This process and its ancestors, nearest first."""
+def parse_ps(out: str) -> dict:
+    """`ps -o pid=,ppid=,command=` output -> {pid: (ppid, command)}."""
+    table = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]),
+                                    parts[2] if len(parts) > 2 else "")
+    return table
+
+
+def lineage(table: dict, pid: int = None) -> list:
+    """`pid` (this process by default) and its ancestors, nearest first."""
     pid = os.getpid() if pid is None else pid
     chain = []
     while pid > 0 and pid not in chain:
         chain.append(pid)
-        try:
-            with open(f"/proc/{pid}/status") as f:
-                ppid = next(int(l.split()[1]) for l in f
-                            if l.startswith("PPid:"))
-        except (FileNotFoundError, StopIteration):
+        if pid not in table:
             break
-        pid = ppid
+        pid = table[pid][0]
     return chain
 
 
-def unlocked_reason(env=None, path: str = LOCK):
+def is_launcher(command: str) -> bool:
+    """Whether a ps command line is tools/gpulock running: the script is
+    among its first words (`python3 .../tools/gpulock ...`, under whatever
+    interpreter path the platform shows)."""
+    return any(os.path.basename(w) == "gpulock" for w in command.split()[:3])
+
+
+def unlocked_reason(env=None, path: str = LOCK, table: dict = None):
     """Why this process is not under tools/gpulock, or None when it is."""
     env = os.environ if env is None else env
     if env.get("SOAR_GPULOCK_EXEMPT") == "pytest":
         return None
     if env.get("SOAR_GPULOCK") != path:
         return "SOAR_GPULOCK is not set"
-    holders = lock_holders(path)
-    if not holders:
-        return (f"SOAR_GPULOCK is set but {path} is not held "
+    pid = env.get("SOAR_GPULOCK_PID", "")
+    if not pid.isdigit():
+        return ("SOAR_GPULOCK_PID is not set (a tools/gpulock from before "
+                "2026-11-09?)")
+    pid = int(pid)
+    table = process_table() if table is None else table
+    if pid not in lineage(table):
+        return (f"SOAR_GPULOCK_PID {pid} is not an ancestor of this process "
                 "(a stale export?)")
-    if not holders & set(lineage()):
-        return (f"SOAR_GPULOCK is set but {path} is held by pid "
-                f"{min(holders)}, which is not this command's tools/gpulock")
+    if not is_launcher(table.get(pid, (0, ""))[1]):
+        return f"SOAR_GPULOCK_PID {pid} is not tools/gpulock"
     return None
 
 

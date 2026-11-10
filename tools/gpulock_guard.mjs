@@ -1,58 +1,66 @@
 // Refuse to open a GPU device outside tools/gpulock: the .mjs tools' copy of
 // tools/gpulock_guard.py, which says why and what "under the lock" means
-// (the SOAR_GPULOCK marker tools/gpulock exports, AND the lock held by an
-// ancestor of this process, per /proc/locks).
+// (the SOAR_GPULOCK marker tools/gpulock exports, AND SOAR_GPULOCK_PID an
+// ancestor of this process that is a running tools/gpulock), read from the
+// same `ps` table on Linux and macOS alike.
 // Call requireGpulock() before the tool opens a tab or requests an adapter.
 
-import { readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
 
 export const LOCK = "/tmp/soar-gpu.lock";
 export const EXIT_UNLOCKED = 3;   // not a tool's own "cannot run" (2)
 
-/** The pids holding a FLOCK on `path` now (blocked waiters excluded). */
-export function lockHolders(path = LOCK) {
-  let st;
-  try { st = statSync(path, { bigint: true }); } catch { return new Set(); }
-  // glibc's major()/minor() of a Linux dev_t.
-  const d = st.dev;
-  const major = Number(((d >> 8n) & 0xfffn) | ((d >> 32n) & ~0xfffn));
-  const minor = Number((d & 0xffn) | ((d >> 12n) & ~0xffn));
-  const hex = (n) => n.toString(16).padStart(2, "0");
-  const key = `${hex(major)}:${hex(minor)}:${st.ino}`;
-  const pids = new Set();
-  for (const line of readFileSync("/proc/locks", "utf8").split("\n")) {
-    // "N: FLOCK ADVISORY WRITE pid maj:min:ino start end"; a waiter's line
-    // carries "->" after the index.
-    const f = line.trim().split(/\s+/);
-    if (f.length >= 6 && f[1] === "FLOCK" && f[5] === key) pids.add(Number(f[4]));
+/** Map pid -> [ppid, command] for every process, from ps. */
+export function processTable() {
+  const r = spawnSync("ps", ["-A", "-ww", "-o", "pid=,ppid=,command="],
+                      { encoding: "utf8", maxBuffer: 64 << 20 });
+  if (r.error || r.status !== 0) {
+    throw new Error(`gpulock_guard: ps failed: ${r.error?.message ?? r.stderr}`);
   }
-  return pids;
+  return parsePs(r.stdout);
 }
 
-/** This process and its ancestors, nearest first. */
-export function lineage(pid = process.pid) {
+/** `ps -o pid=,ppid=,command=` output -> Map pid -> [ppid, command]. */
+export function parsePs(out) {
+  const table = new Map();
+  for (const line of out.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s?(.*)$/);
+    if (m) table.set(Number(m[1]), [Number(m[2]), m[3]]);
+  }
+  return table;
+}
+
+/** `pid` (this process by default) and its ancestors, nearest first. */
+export function lineage(table, pid = process.pid) {
   const chain = [];
   while (pid > 0 && !chain.includes(pid)) {
     chain.push(pid);
-    let status;
-    try { status = readFileSync(`/proc/${pid}/status`, "utf8"); } catch { break; }
-    const m = status.match(/^PPid:\s+(\d+)/m);
-    if (!m) break;
-    pid = Number(m[1]);
+    if (!table.has(pid)) break;
+    pid = table.get(pid)[0];
   }
   return chain;
 }
 
+/** Whether a ps command line is tools/gpulock running. */
+export function isLauncher(command) {
+  return command.split(/\s+/).slice(0, 3).some((w) => basename(w) === "gpulock");
+}
+
 /** Why this process is not under tools/gpulock, or null when it is. */
-export function unlockedReason(env = process.env, path = LOCK) {
+export function unlockedReason(env = process.env, path = LOCK, table = null) {
   if (env.SOAR_GPULOCK_EXEMPT === "pytest") return null;
   if (env.SOAR_GPULOCK !== path) return "SOAR_GPULOCK is not set";
-  const holders = lockHolders(path);
-  if (holders.size === 0) return `SOAR_GPULOCK is set but ${path} is not held (a stale export?)`;
-  const mine = lineage();
-  if (![...holders].some((p) => mine.includes(p))) {
-    return `SOAR_GPULOCK is set but ${path} is held by pid ${Math.min(...holders)}, ` +
-           "which is not this command's tools/gpulock";
+  if (!/^\d+$/.test(env.SOAR_GPULOCK_PID ?? "")) {
+    return "SOAR_GPULOCK_PID is not set (a tools/gpulock from before 2026-11-09?)";
+  }
+  const pid = Number(env.SOAR_GPULOCK_PID);
+  table = table ?? processTable();
+  if (!lineage(table).includes(pid)) {
+    return `SOAR_GPULOCK_PID ${pid} is not an ancestor of this process (a stale export?)`;
+  }
+  if (!isLauncher((table.get(pid) ?? [0, ""])[1])) {
+    return `SOAR_GPULOCK_PID ${pid} is not tools/gpulock`;
   }
   return null;
 }

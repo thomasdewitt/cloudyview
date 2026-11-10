@@ -353,9 +353,27 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
     return warn
 
 
+def _locker(pid: int, argv: list) -> bool:
+    """Whether process `pid` (its argv from /proc) takes the GPU lock: a
+    flock(1) on LOCK (the bash tools/gpulock of before 2026-11-09), or the
+    Python tools/gpulock launcher of since, whose lock file is LOCK unless
+    its environment's GPULOCK_FILE names another (the tests')."""
+    if argv and os.path.basename(argv[0]) == b"flock":
+        return LOCK.encode() in argv
+    if not any(os.path.basename(a) == b"gpulock" for a in argv[:3]):
+        return False
+    try:
+        env = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
+    except OSError:
+        return False
+    files = [e[len(b"GPULOCK_FILE="):] for e in env
+             if e.startswith(b"GPULOCK_FILE=")]
+    return (files[-1] if files else b"/tmp/soar-gpu.lock") == LOCK.encode()
+
+
 def lock_work() -> set[int]:
-    """Every process under a flock on LOCK: the GPU work of whoever holds
-    tools/gpulock (the flocks still queued have nothing under them yet)."""
+    """Every process under a launcher of LOCK: the GPU work of whoever holds
+    tools/gpulock (the launchers still queued have nothing under them yet)."""
     work = set()
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -364,8 +382,7 @@ def lock_work() -> set[int]:
             argv = open(f"/proc/{entry}/cmdline", "rb").read().split(b"\0")
         except OSError:
             continue
-        if (argv and os.path.basename(argv[0]) == b"flock"
-                and LOCK.encode() in argv):
+        if _locker(int(entry), argv):
             work |= _descendants(int(entry))
     return work
 

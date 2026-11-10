@@ -1,35 +1,126 @@
-#!/usr/bin/env bash
-# Serialize GPU work across concurrent sessions on this box.
-#
-#   tools/gpulock <command...>
-#
-# Every render, test run, bench or harness that touches the GPU goes through
-# this. It takes one exclusive lock, so a benchmark never shares the card
-# with someone else's render (its timings would be fiction) and seven
-# sessions never each park a multi-GB field in the 16 GB of VRAM at once.
-# Waits up to GPULOCK_WAIT seconds (default 1800) and then fails loudly
-# rather than running unlocked.
-#
-# The command also runs in a memory-capped systemd scope (GPULOCK_MEM,
-# default 16G, no swap): on 2026-09-24 one unbounded full-field render grew to
-# 25 GB and the kernel's OOM killer took the whole Claude app down with it.
-# Over the cap, only the offending command dies.
-#
-# Keep each locked command short (a few renders, one bench) so others are
-# not starved; loop outside the lock, not inside it.
-#
-# The command gets SOAR_GPULOCK set to the lock's path. The tools that open
-# a GPU device check it, and that the lock is held by this flock, an
-# ancestor of theirs (not merely by someone), before they request an
-# adapter, and refuse to run without both (tools/gpulock_guard.py and .mjs):
-# unlocked tools spoiled four timing runs in two days, 2026-11-08/09.
-set -euo pipefail
-LOCK=/tmp/soar-gpu.lock
-export SOAR_GPULOCK="$LOCK"
-if [[ $# -eq 0 ]]; then
-    echo "usage: tools/gpulock <command...>" >&2
-    exit 2
-fi
-exec flock -x -w "${GPULOCK_WAIT:-1800}" -E 75 "$LOCK" \
-    systemd-run --user --scope --quiet \
-    -p MemoryMax="${GPULOCK_MEM:-16G}" -p MemorySwapMax=0 -- "$@"
+#!/usr/bin/env python3
+"""Serialize GPU work across concurrent sessions on this machine.
+
+    tools/gpulock <command...>
+
+Every render, test run, bench or harness that touches the GPU goes through
+this. It takes one exclusive lock, so a benchmark never shares the card with
+someone else's render (its timings would be fiction) and seven sessions
+never each park a multi-GB field in the 16 GB of VRAM at once. Waits up to
+GPULOCK_WAIT seconds (default 1800) and then fails loudly, exit 75, rather
+than running unlocked.
+
+On Linux the command also runs in a memory-capped systemd scope (GPULOCK_MEM,
+default 16G, no swap): on 2026-09-24 one unbounded full-field render grew to
+25 GB and the kernel's OOM killer took the whole Claude app down with it.
+Over the cap, only the offending command dies. There is no systemd anywhere
+else (Thomas's M1): there the command runs uncapped, and says so on stderr;
+a GPULOCK_MEM set there is refused rather than ignored.
+
+Keep each locked command short (a few renders, one bench) so others are not
+starved; loop outside the lock, not inside it.
+
+The command gets SOAR_GPULOCK (the lock's path) and SOAR_GPULOCK_PID (this
+launcher's pid). The tools that open a GPU device check, before they request
+an adapter, that the pid is an ancestor of theirs and a running gpulock
+(tools/gpulock_guard.py and .mjs), and refuse to run otherwise: unlocked
+tools spoiled four timing runs in two days, 2026-11-08/09.
+
+Python, stdlib only, the same on every platform (2026-11-09): this was a bash
+script exec'ing flock(1) and systemd-run, neither of which macOS has, so on
+the M1 every guarded tool refused and gpulock itself could not run. The lock
+is fcntl.flock on the lock file, the same flock(2) lock flock(1) takes, so
+the two exclude each other while both are in use. The command is a child
+that does NOT inherit the lock's descriptor: a background process it starts
+(the QA Chrome) cannot keep the lock after the command ends, as one could
+under flock(1).
+"""
+
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+
+LOCK = "/tmp/soar-gpu.lock"
+EXIT_TIMEOUT = 75          # flock -E 75, kept for the callers that test it
+
+
+def command(argv, platform=sys.platform, env=os.environ):
+    """What to run for `argv` here: under the memory cap on Linux; bare,
+    with a note, elsewhere. Raises SystemExit on a GPULOCK_MEM it cannot
+    honour."""
+    if platform.startswith("linux"):
+        return ["systemd-run", "--user", "--scope", "--quiet",
+                "-p", f"MemoryMax={env.get('GPULOCK_MEM', '16G')}",
+                "-p", "MemorySwapMax=0", "--", *argv]
+    if "GPULOCK_MEM" in env:
+        raise SystemExit(
+            f"gpulock: GPULOCK_MEM={env['GPULOCK_MEM']} was set, but there "
+            f"is no memory cap on {platform} (no systemd); unset it to run "
+            "uncapped.")
+    print(f"gpulock: no memory cap on {platform}", file=sys.stderr)
+    return list(argv)
+
+
+class _Timeout(Exception):
+    pass
+
+
+def acquire(path, wait_s):
+    """The lock's descriptor, held; _Timeout after `wait_s` seconds.
+
+    A blocking flock, so waiters queue in the kernel as flock(1)'s do,
+    interrupted by an alarm at the deadline."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+
+    def expire(signum, frame):
+        raise _Timeout()
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, max(wait_s, 1e-3))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except _Timeout:
+        os.close(fd)
+        raise
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    return fd
+
+
+def main(argv):
+    if not argv:
+        print("usage: tools/gpulock <command...>", file=sys.stderr)
+        return 2
+    cmd = command(argv)
+    # GPULOCK_FILE exists for the tests' own lock files. The tools only
+    # accept SOAR_GPULOCK equal to LOCK, so any other file locks nothing
+    # they will run under.
+    path = os.environ.get("GPULOCK_FILE", LOCK)
+    wait_s = float(os.environ.get("GPULOCK_WAIT", "1800"))
+    try:
+        fd = acquire(path, wait_s)
+    except _Timeout:
+        print(f"gpulock: gave up after {wait_s:g} s waiting for {path}",
+              file=sys.stderr)
+        return EXIT_TIMEOUT
+    env = {**os.environ, "SOAR_GPULOCK": path,
+           "SOAR_GPULOCK_PID": str(os.getpid())}
+    # os.open's descriptors are not inheritable (PEP 446): the child and
+    # everything it starts run without the lock's descriptor.
+    child = subprocess.Popen(cmd, env=env)
+
+    def forward(signum, frame):
+        child.send_signal(signum)
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, forward)
+    rc = child.wait()
+    os.close(fd)
+    return 128 - rc if rc < 0 else rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
