@@ -163,7 +163,7 @@ CELL = """        let px = vec2<i32>(i32(clamp(0.5 + 0.7 * dir.x, 0.0, 1.0) * 40
         if (!d.ok) {
             return vec4<f32>(0.0);
         }
-        let cr = cc_rooftopworks_crown(cc, ci);
+        let cr = city_crown(cc, ci);
         let bk = cc_rooftopworks_bulk(cc, ci, cr);
 """
 

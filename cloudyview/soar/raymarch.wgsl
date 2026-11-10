@@ -2614,6 +2614,21 @@ const CITY_STORE_H: f32 = CITY_STORE_PANE_HI.y * CITY_FLOOR_H;
 // Roof furniture.
 const CITY_MAST_MIN_H: f32 = 150.0;  // buildings shorter than this: no mast
 const CITY_MAST_CROSS: f32 = 1.4;
+// The crown (city_crown): a penthouse on ~20% of tall flat-topped towers,
+// core massing at every range, or the helipad that pre-empts it (the pad
+// itself is rooftopworks' prop). The draw is the one rooftopworks made when
+// the penthouse was its prop, unchanged, so the crowns stand where they did.
+const CITY_CROWN_TIER: i32 = 3;          // the crown's face/shell box index
+const CITY_CROWN_MIN_H: f32 = 105.0;     // "tall": tower, not mid-rise
+const CITY_CROWN_FRAC: f32 = 0.20;
+const CITY_CROWN_MIN_DECK: f32 = 15.0;
+const CITY_CROWN_INSET: f32 = 0.28;
+const CITY_CROWN_H_LO: f32 = 7.2;        // two storeys
+const CITY_CROWN_H_HI: f32 = 10.8;       // three
+const CITY_CROWN_PAD_FRAC: f32 = 0.13;
+const CITY_CROWN_PAD_BIG: f32 = 60.0;    // footprint that qualifies
+const CITY_CROWN_PAD_MIN_H: f32 = 55.0;  // and a building worth landing on
+const CITY_CROWN_PAD_T: f32 = 0.30;
 const CITY_BEACON_LEN: f32 = 2.5;
 const CITY_BEACON_COLOR: vec3<f32> = vec3<f32>(40.0, 2.0, 1.6);
 // Night materials and fill light.
@@ -2939,6 +2954,9 @@ struct CityCell {
     // The whole lot's rectangle of cells (city frame, metres): the column
     // every prim of the lot's building stays inside.
     lot_min: vec2<f32>, lot_max: vec2<f32>,
+    // The DDA cell this was decoded for. Everything above is the lot's;
+    // the crown (city_crown) is the one per-CELL thing in the massing.
+    cell: vec2<i32>,
 }
 
 // A packed lot word from its float16 channel (see CITY_WORD_OFFSET).
@@ -2953,6 +2971,7 @@ fn city_edge_street(cc: CityCell, side: i32) -> bool {
 
 fn city_cell(ci: vec2<i32>) -> CityCell {
     var c: CityCell;
+    c.cell = ci;
     let cell = u.ocean_params.x;
 
     // The lot. Which blocks belong together, what the land is used for and
@@ -3444,6 +3463,10 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     } else {
         c.top_z = h;
     }
+    // The crown's headroom, as a bound: it costs no draw (city_crown).
+    if (h > CITY_CROWN_MIN_H && c.arch != 4) {
+        c.top_z = max(c.top_z, h + CITY_CROWN_H_HI);
+    }
     return c;
 }
 
@@ -3690,6 +3713,24 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_min: f32, t_max: f32,
                     best_t = hf.t_near;
                     best_fnormal = hf.normal;
                     best_kind = 5;
+                }
+            }
+            // The crown, behind a gate that costs no draw: only a cell whose
+            // ray segment crosses the crown's z band hashes for it. Without
+            // the gate every tall cell a ray passes hashes — on a street
+            // view, looking up past towers, that was +7% of the stage.
+            if (city_crown_possible(cc)
+                && max(z_a, z_b) >= cc.height
+                && min(z_a, z_b) <= cc.height + CITY_CROWN_H_HI) {
+                let cr = city_crown(cc, ci);
+                if (cr.kind == 1) {
+                    let pmin = vec3<f32>(cr.lo, cr.z0);
+                    let pmax = vec3<f32>(cr.hi, cr.z1);
+                    let hp = city_box_hit(o, inv3, pmin, pmax);
+                    if (hp.x <= hp.y && hp.x > 0.0 && hp.x < best_t) {
+                        best_t = hp.x; best_min = pmin; best_max = pmax;
+                        best_kind = 1;
+                    }
                 }
             }
             if (cc.has_mast) {
@@ -6492,6 +6533,12 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32, fp_filter: f32,
             rmin = cc.b3min.xy;
             rmax = cc.b3max.xy;
         }
+        // A roof above the summit is a crown's: no ring on it (the draw
+        // that would say where its edge is costs more than the ring).
+        if (h.pos.z > cc.height + 0.5) {
+            rmin = vec2<f32>(-1e30);
+            rmax = vec2<f32>(1e30);
+        }
         let din = min(
             min(h.pos.x - rmin.x, rmax.x - h.pos.x),
             min(h.pos.y - rmin.y, rmax.y - h.pos.y)
@@ -6503,7 +6550,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32, fp_filter: f32,
         return base + cc_roof_detail(cc, h, fp, fp_filter, dir, direct, base);
     }
     if (h.kind == 1) {   // facade, flat: past the shell's reach
-        let f = city_face_at(cc, h.pos, h.normal);
+        let f = city_face_at_mass(cc, h.pos, h.normal);
         return city_facade_flat(cc, f, h, dir, fp, fp_filter, direct, fill);
     }
 
@@ -6772,6 +6819,173 @@ fn city_tier_box(cc: CityCell, k: i32) -> CityBox {
     return CityBox(cc.b1min, cc.b1max);
 }
 
+// --- the crown ----------------------------------------------------------------
+//
+// A penthouse: a 2-3 storey box inset on the summit deck of ~20% of tall
+// flat-topped towers. It is massing, at every range, so a far tower's
+// silhouette never changes as the camera closes on it (as a prop it
+// vanished past CITY_PROP_RANGE, a ~0.26 degree pop on a far tower); its
+// walls are core facades on the tower's own lattice, tier index
+// CITY_CROWN_TIER, and its storeys ride the same rows (the roof is
+// storey-quantized and the crown is 2 or 3 storeys).
+//
+// It is per CELL, not per lot: on a merged superblock a checkerboard of the
+// member cells may carry one, each clipped to its own cell's column and
+// inset at least 3 m inside it, so the DDA cell that draws a crown is the
+// cell that contains it, relief and all (CITY_SHELL_OUT_MAX is 1.5 m).
+// A helipad (rooftopworks' prop) claims the same real estate first, so the
+// draw decides both; kind 2 is the pad, which the core does not trace.
+struct CityCrown {
+    kind: i32,   // 0 none, 1 penthouse, 2 helipad
+    lo: vec2<f32>,
+    hi: vec2<f32>,
+    z0: f32,
+    z1: f32,
+}
+
+fn city_crown_none() -> CityCrown {
+    return CityCrown(0, vec2<f32>(1e30), vec2<f32>(-1e30), 0.0, 0.0);
+}
+
+fn city_crown_overlap(alo: vec2<f32>, ahi: vec2<f32>, blo: vec2<f32>,
+                      bhi: vec2<f32>) -> bool {
+    return alo.x < bhi.x && ahi.x > blo.x && alo.y < bhi.y && ahi.y > blo.y;
+}
+
+fn city_crown(cc: CityCell, ci: vec2<i32>) -> CityCrown {
+    // Gate 0, no hash: unbuilt lots, spires and warehouses carry no crown,
+    // and neither does anything too short for a pad.
+    if (!cc.built || cc.arch == 4 || cc.land_use == CITY_USE_INDUSTRIAL
+        || cc.height <= CITY_CROWN_PAD_MIN_H) {
+        return city_crown_none();
+    }
+    // The summit deck (rooftopworks' deck 0, which never has a hole): the
+    // tapered shaft's top cross-section, a growth tower's main roof, or a
+    // setback stack's top tier.
+    var dlo = cc.b1min.xy;
+    var dhi = cc.b1max.xy;
+    var dz = cc.b1max.z;
+    if (cc.arch == 3) {
+        let c = 0.5 * (cc.fmin.xy + cc.fmax.xy);
+        let hf = 0.5 * (cc.fmax.xy - cc.fmin.xy) * cc.fscale;
+        dlo = c - hf;
+        dhi = c + hf;
+        dz = cc.fmax.z;
+    } else if (cc.arch != 2 && cc.tiers == 2) {
+        dlo = cc.b2min.xy; dhi = cc.b2max.xy; dz = cc.b2max.z;
+    } else if (cc.arch != 2 && cc.tiers >= 3) {
+        dlo = cc.b3min.xy; dhi = cc.b3max.xy; dz = cc.b3max.z;
+    }
+    let cell = u.ocean_params.x;
+    let cmin = vec2<f32>(ci) * cell;
+    let rlo = max(dlo, cmin);
+    let rhi = min(dhi, cmin + vec2<f32>(cell, cell));
+    let size = rhi - rlo;
+    if (min(size.x, size.y) < CITY_CROWN_MIN_DECK) {
+        return city_crown_none();
+    }
+    // Eligibility before entropy: a building too short for either a
+    // penthouse or a pad never draws a hash.
+    let foot0 = max(dhi.x - dlo.x, dhi.y - dlo.y);
+    let pad_size = cc.merged || foot0 > CITY_CROWN_PAD_BIG;
+    if (cc.height <= CITY_CROWN_MIN_H && !pad_size) {
+        return city_crown_none();
+    }
+    // Building-level draws (shared by every cell of a merged group) decide
+    // WHETHER; a cell-level draw decides the shape, so the two penthouses on
+    // a superblock are not identical twins.
+    let gh = city_rand4(cc.seed ^ vec2<u32>(0x1b56c4e9u, 0x0d2f1a37u));
+    // Tile-wrapped, like every cell-index draw (city_tile_cell); the
+    // quadrant test below is wrap-invariant on its own (n is even).
+    let cw = city_tile_cell(ci);
+    let lh = city_rand4(vec2<u32>(
+        bitcast<u32>(cw.x) * 0x9e3779b9u + 0x2545f491u,
+        bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
+    // Helipad first: it wants the same real estate and it is the rarer
+    // thing. A building gets one pad, in the member cell under a point of
+    // its top deck that the building-level draw picks.
+    let pad_at = mix(dlo, dhi, vec2<f32>(0.25) + 0.5 * gh.zw);
+    let pad_here = all(ci == vec2<i32>(floor(pad_at / cell)));
+    if (pad_size && pad_here && gh.x < CITY_CROWN_PAD_FRAC) {
+        let half = clamp(0.30 * min(size.x, size.y), 4.5, 11.0);
+        let c = mix(rlo + half + 1.0, rhi - half - 1.0,
+                    vec2<f32>(0.30 + 0.40 * lh.x, 0.30 + 0.40 * lh.y));
+        let plo = c - half;
+        let phi = c + half;
+        // Not on top of the mast.
+        if (!cc.has_mast
+            || !city_crown_overlap(plo, phi, cc.mast_min.xy - 1.0,
+                                   cc.mast_max.xy + 1.0)) {
+            return CityCrown(2, plo, phi, dz, dz + CITY_CROWN_PAD_T);
+        }
+    }
+    // Penthouse. On a multi-block roof only a checkerboard of its cells may
+    // carry one, so neighbouring penthouses never share a party wall.
+    let pent_here = !cc.merged || ((ci.x + ci.y) & 1) == 0;
+    if (cc.height > CITY_CROWN_MIN_H && pent_here
+        && gh.y < CITY_CROWN_FRAC) {
+        let inset = max(CITY_CROWN_INSET * min(size.x, size.y), 3.0);
+        let plo = rlo + inset;
+        let phi = rhi - inset;
+        if (min(phi.x - plo.x, phi.y - plo.y) > 6.0) {
+            return CityCrown(1, plo, phi, dz,
+                             dz + select(CITY_CROWN_H_LO, CITY_CROWN_H_HI,
+                                         lh.z > 0.45));
+        }
+    }
+    return city_crown_none();
+}
+
+// Could this cell carry a penthouse? No draw: the gate every crown use
+// passes before it hashes.
+fn city_crown_possible(cc: CityCell) -> bool {
+    return cc.built && cc.height > CITY_CROWN_MIN_H && cc.arch != 4
+           && cc.land_use != CITY_USE_INDUSTRIAL;
+}
+
+// The penthouse's box, or an empty one (bmin > bmax) where there is none.
+// The draw: call it once per cell and hand the box on.
+fn city_crown_box(cc: CityCell) -> CityBox {
+    let cr = city_crown(cc, cc.cell);
+    if (cr.kind != 1) {
+        return CityBox(vec3<f32>(1e30), vec3<f32>(-1e30));
+    }
+    return CityBox(vec3<f32>(cr.lo, cr.z0), vec3<f32>(cr.hi, cr.z1));
+}
+
+// Where a penthouse can stand, without the draw: the summit deck's
+// rectangle (which holds every crown's footprint) under its headroom.
+fn city_crown_bound(cc: CityCell) -> CityBox {
+    var lo = cc.b1min.xy;
+    var hi = cc.b1max.xy;
+    if (cc.arch == 3) {
+        let c = 0.5 * (cc.fmin.xy + cc.fmax.xy);
+        let hf = 0.5 * (cc.fmax.xy - cc.fmin.xy) * cc.fscale;
+        lo = c - hf;
+        hi = c + hf;
+    } else if (cc.arch != 2 && cc.tiers == 2) {
+        lo = cc.b2min.xy; hi = cc.b2max.xy;
+    } else if (cc.arch != 2 && cc.tiers >= 3) {
+        lo = cc.b3min.xy; hi = cc.b3max.xy;
+    }
+    return CityBox(vec3<f32>(lo, cc.height),
+                   vec3<f32>(hi, cc.height + CITY_CROWN_H_HI));
+}
+
+// The massing box k of a cell whose crown box (city_crown_box, or empty) is
+// `cb`: the tiers 0 .. tiers-1, then the crown as CITY_CROWN_TIER. Walk
+// k < CITY_CROWN_TIER + 1 and skip what city_mass_has says is not there.
+fn city_mass_box(cc: CityCell, cb: CityBox, k: i32) -> CityBox {
+    if (k == CITY_CROWN_TIER) {
+        return cb;
+    }
+    return city_tier_box(cc, k);
+}
+
+fn city_mass_has(cc: CityCell, cb: CityBox, k: i32) -> bool {
+    return k < cc.tiers || (k == CITY_CROWN_TIER && cb.bmin.x <= cb.bmax.x);
+}
+
 // One vertical face and its bay lattice. `aligned` false is a frustum's
 // sloped skin, which keeps the world-anchored lattice and no shell: its
 // width changes with height, so no integer bay count fits it.
@@ -6884,6 +7098,27 @@ fn city_face_at(cc: CityCell, pos: vec3<f32>, nrm: vec3<f32>) -> CityFace {
         }
     }
     return city_face_skin(cc, nrm);
+}
+
+// city_face_at, crowns included: the core's own facade shading. Only a
+// point above the roof can be on a crown's wall, so only those pay for the
+// draw. (Components ask city_face_at, tiers only: a crown wall comes back
+// as a skin, not aligned, and their base-wall and flat-wall gates leave it.)
+fn city_face_at_mass(cc: CityCell, pos: vec3<f32>, nrm: vec3<f32>)
+        -> CityFace {
+    if (pos.z > cc.height - 0.02 && city_crown_possible(cc)
+        && abs(nrm.z) < 1e-3) {
+        let cb = city_crown_box(cc);
+        if (cb.bmin.x <= cb.bmax.x) {
+            var side = 3;
+            if (nrm.x > 0.999) { side = 0; }
+            else if (nrm.x < -0.999) { side = 1; }
+            else if (nrm.y > 0.999) { side = 2; }
+            return city_face_make(cc, cb.bmin, cb.bmax, side,
+                                  CITY_CROWN_TIER);
+        }
+    }
+    return city_face_at(cc, pos, nrm);
 }
 
 fn city_face_local(f: CityFace, p: vec3<f32>) -> vec3<f32> {
@@ -7419,7 +7654,11 @@ fn city_zones_none() -> CityZones {
 
 fn city_zones(cc: CityCell, f: CityFace) -> CityZones {
     var z = city_zones_none();
-    if (!f.aligned || cc.land_use != CITY_USE_URBAN) {
+    // The crown is two or three more storeys of the tower's own lattice:
+    // no blank side, no loft, no core strip (and its base is the roof, so
+    // never a shopfront).
+    if (!f.aligned || cc.land_use != CITY_USE_URBAN
+        || f.tier == CITY_CROWN_TIER) {
         return z;
     }
     // A commercial ground floor is a row of shops, whatever is above it,
@@ -8696,7 +8935,10 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     let part = code & 15;
     let side = (code >> 4) & 3;
     let tier = code >> 6;
-    let bx = city_tier_box(cc, tier);
+    var bx = city_tier_box(cc, tier);
+    if (tier == CITY_CROWN_TIER) {
+        bx = city_crown_box(cc);
+    }
     let f = city_face_make(cc, bx.bmin, bx.bmax, side, tier);
     let st = city_shell_style(cc);
     let l = city_face_local(f, h.pos);
@@ -11186,10 +11428,10 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 //      building rather than to the cell: every member cell of a merged
 //      superblock derives the same ring and catches whatever part of it
 //      falls in its own ray segment.
-//   3. PENTHOUSE CROWNS. ~20% of tall flat-topped buildings get a 2-3 storey
-//      inset glass box on the roof, lit warm at 1.8. On a merged superblock
-//      two of the four quadrant cells may carry one, so a big roof reads as
-//      a plant room and a penthouse rather than as one centred lump.
+//   3. PENTHOUSE CROWNS are not here: since 2026-11 the crown is core
+//      massing (raymarch.wgsl city_crown), so a far tower's silhouette no
+//      longer changes at CITY_PROP_RANGE. The same draw places the helipad
+//      below, and every piece here keeps clear of what it puts on the roof.
 //   4. HELIPADS. On the biggest flat roofs only (a merged superblock, or a
 //      footprint over 60 m): a pad slab 0.3 m proud with four warm corner
 //      lights at radiance 3. Rare on purpose — a helipad on every tower is
@@ -11205,13 +11447,13 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 // grille bands. Nothing gets a logo, a warning label, or a hatch handle.
 //
 // COST. Every cell pays: two compares (built, arch 4) and one z-interval
-// test against [lowest deck, roof + 12 m]. A cell whose ray segment misses
+// test against [lowest deck, roof + HEADROOM]. A cell whose ray segment misses
 // that band — most of them, since most city pixels are looking at a wall or
 // at the road — costs exactly that. Inside the band each piece has its own
 // tighter z window and its own eligibility test BEFORE it draws a hash: the
-// parapet's 1.25 m band, the clutter's 5 m one, and a crown that never
-// hashes on a building too short to carry one. Worst case is 4 slots x 2
-// boxes + 2 parapet + 1 crown = 11 slab tests, and that only on a large roof
+// parapet's 1.25 m band, the clutter's 5 m one, and a crown draw
+// (city_crown) that never hashes on a building too short to carry one.
+// Worst case is 4 slots x 2 boxes + 2 parapet + 1 pad = 11 slab tests, and that only on a large roof
 // filling the segment; the typical accepted cell runs 3-4. Pipework adds one
 // box behind a footprint gate that keeps it inside ~230 m.
 //
@@ -11230,7 +11472,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 const cc_rooftopworks_K_MECH: i32 = 600;
 const cc_rooftopworks_K_ACC: i32 = 604;
 const cc_rooftopworks_K_PARAPET: i32 = 608;
-const cc_rooftopworks_K_PENT: i32 = 609;
+// 609 was the penthouse (core massing since 2026-11: city_crown).
 const cc_rooftopworks_K_PAD: i32 = 611;
 const cc_rooftopworks_K_PIPE: i32 = 612;
 const cc_rooftopworks_K_UNIT: i32 = 610;
@@ -11292,23 +11534,9 @@ const cc_rooftopworks_TRIM_COOL: vec3<f32> = vec3<f32>(0.72, 0.86, 1.00);
 const cc_rooftopworks_TRIM_PITCH: f32 = 6.50;  // fixture centres (m)
 const cc_rooftopworks_TRIM_DUTY: f32 = 0.82;   // lit fraction of the run
 
-// --- penthouse --------------------------------------------------------------
-const cc_rooftopworks_PENT_FRAC: f32 = 0.20;
-const cc_rooftopworks_PENT_MIN_H: f32 = 105.0; // "tall": tower, not mid-rise
-const cc_rooftopworks_PENT_MIN_DECK: f32 = 15.0;
-const cc_rooftopworks_PENT_INSET: f32 = 0.28;
-const cc_rooftopworks_PENT_RAD: f32 = 1.80;
-const cc_rooftopworks_PENT_COL: vec3<f32> = vec3<f32>(1.00, 0.72, 0.42);
-const cc_rooftopworks_PENT_PITCH: f32 = 2.10;  // mullion pitch (m)
-const cc_rooftopworks_PENT_MULL: f32 = 0.13;   // dark fraction of the pitch
-const cc_rooftopworks_PENT_SILL: f32 = 0.80;   // dark spandrel at its foot
-const cc_rooftopworks_PENT_LIT: f32 = 0.58;    // bays with the light on
-
 // --- helipad ----------------------------------------------------------------
-const cc_rooftopworks_PAD_FRAC: f32 = 0.13;
-const cc_rooftopworks_PAD_BIG: f32 = 60.0;     // footprint that qualifies
-const cc_rooftopworks_PAD_MIN_H: f32 = 55.0;   // and a building worth landing on
-const cc_rooftopworks_PAD_T: f32 = 0.30;
+// Which roofs carry a pad, and where, is the crown draw's (city_crown,
+// CITY_CROWN_PAD_*); this is how it looks.
 const cc_rooftopworks_PAD_LAMP_RAD: f32 = 3.00;
 const cc_rooftopworks_PAD_LAMP_SIG: f32 = 0.26;
 const cc_rooftopworks_PAD_LAMP_COL: vec3<f32> = vec3<f32>(1.00, 0.66, 0.30);
@@ -11398,9 +11626,10 @@ const cc_rooftopworks_SKY_PANE: vec2<f32> = vec2<f32>(1.4, 2.8);
 const cc_rooftopworks_SKY_LIT: f32 = 0.30;
 const cc_rooftopworks_SKY_RAD: f32 = 1.0;
 
-// Headroom above the main roof that everything here fits under: a 3-storey
-// penthouse is the tallest thing (10.8 m).
-const cc_rooftopworks_HEADROOM: f32 = 12.0;
+// Headroom above the main roof that everything here fits under: the round
+// tank on its stand is the tallest thing (5.2 m), a vent stack next (5 m).
+// (12 m while the 10.8 m penthouse was a prop here.)
+const cc_rooftopworks_HEADROOM: f32 = 6.0;
 
 fn cc_rooftopworks_miss(ci: vec2<i32>) -> CityHit {
     return CityHit(false, 1e30, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0),
@@ -11550,102 +11779,6 @@ fn cc_rooftopworks_deck_low(cc: CityCell) -> f32 {
     return z;
 }
 
-// --- the crown: a penthouse, or a helipad, or neither -----------------------
-struct cc_rooftopworks_Crown {
-    kind: i32,   // 0 none, 1 penthouse, 2 helipad
-    lo: vec2<f32>,
-    hi: vec2<f32>,
-    z0: f32,
-    z1: f32,
-}
-
-fn cc_rooftopworks_crown(cc: CityCell, ci: vec2<i32>)
-        -> cc_rooftopworks_Crown {
-    var res: cc_rooftopworks_Crown;
-    res.kind = 0;
-    res.lo = vec2<f32>(1e30);
-    res.hi = vec2<f32>(-1e30);
-    res.z0 = 0.0;
-    res.z1 = 0.0;
-    let d = cc_rooftopworks_deck(cc, 0);
-    if (!d.ok) {
-        return res;
-    }
-    let col = cc_rooftopworks_column(ci);
-    let rlo = max(d.lo, col.xy);
-    let rhi = min(d.hi, col.zw);
-    let size = rhi - rlo;
-    if (min(size.x, size.y) < cc_rooftopworks_PENT_MIN_DECK) {
-        return res;
-    }
-    // Eligibility before entropy: a building too short for either a
-    // penthouse or a pad never draws a hash. This is the gate that keeps the
-    // low-rise majority of the tile out of the crown's cost entirely.
-    let foot0 = max(d.hi.x - d.lo.x, d.hi.y - d.lo.y);
-    let pad_size = cc.merged || foot0 > cc_rooftopworks_PAD_BIG;
-    if (cc.height <= cc_rooftopworks_PENT_MIN_H
-        && !(pad_size && cc.height > cc_rooftopworks_PAD_MIN_H)) {
-        return res;
-    }
-    // Building-level draws (shared by every cell of a merged group) decide
-    // WHETHER; a cell-level draw decides the shape, so the two penthouses on
-    // a superblock are not identical twins.
-    let gh = city_rand4(cc.seed ^ vec2<u32>(0x1b56c4e9u, 0x0d2f1a37u));
-    // Tile-wrapped, like every cell-index draw (city_tile_cell); the
-    // quadrant test below is wrap-invariant on its own (n is even).
-    let cw = city_tile_cell(ci);
-    let lh = city_rand4(vec2<u32>(
-        bitcast<u32>(cw.x) * 0x9e3779b9u + 0x2545f491u,
-        bitcast<u32>(cw.y) * 0x85ebca6bu + 0x27d4eb2fu));
-    // Helipad first: it wants the same real estate and it is the rarer
-    // thing. A building gets one pad, in the member cell under a point of
-    // its top deck that the building-level draw picks — lots span up to 4x4
-    // and a tower's crown covers only some of their cells, so neither a
-    // parity rule nor a pick among the lot's cells would do.
-    let pad_at = mix(d.lo, d.hi, vec2<f32>(0.25) + 0.5 * gh.zw);
-    let pad_here = all(ci == vec2<i32>(floor(pad_at / u.ocean_params.x)));
-    if (pad_size && pad_here
-        && cc.height > cc_rooftopworks_PAD_MIN_H
-        && gh.x < cc_rooftopworks_PAD_FRAC) {
-        let half = clamp(0.30 * min(size.x, size.y), 4.5, 11.0);
-        let c = mix(rlo + half + 1.0, rhi - half - 1.0,
-                    vec2<f32>(0.30 + 0.40 * lh.x, 0.30 + 0.40 * lh.y));
-        let plo = c - half;
-        let phi = c + half;
-        // Not on top of the mast, and not hanging over the hole.
-        let clear_mast = !cc.has_mast
-            || !cc_rooftopworks_overlap(plo, phi, cc.mast_min.xy - 1.0,
-                                        cc.mast_max.xy + 1.0);
-        if (clear_mast && !cc_rooftopworks_overlap(plo, phi, d.hlo, d.hhi)) {
-            res.kind = 2;
-            res.lo = plo;
-            res.hi = phi;
-            res.z0 = d.z;
-            res.z1 = d.z + cc_rooftopworks_PAD_T;
-            return res;
-        }
-    }
-    // Penthouse. On a multi-block roof only a checkerboard of its cells may
-    // carry one, so neighbouring penthouses never share a party wall.
-    let pent_here = !cc.merged || ((ci.x + ci.y) & 1) == 0;
-    if (cc.height > cc_rooftopworks_PENT_MIN_H && pent_here
-        && gh.y < cc_rooftopworks_PENT_FRAC) {
-        let inset = max(cc_rooftopworks_PENT_INSET * min(size.x, size.y), 3.0);
-        let plo = rlo + inset;
-        let phi = rhi - inset;
-        if (min(phi.x - plo.x, phi.y - plo.y) > 6.0
-            && !cc_rooftopworks_overlap(plo, phi, d.hlo, d.hhi)) {
-            res.kind = 1;
-            res.lo = plo;
-            res.hi = phi;
-            res.z0 = d.z;
-            res.z1 = d.z + select(7.2, 10.8, lh.z > 0.45);
-            return res;
-        }
-    }
-    return res;
-}
-
 // --- mechanical clusters ----------------------------------------------------
 struct cc_rooftopworks_Mech {
     ok: bool,
@@ -11685,7 +11818,7 @@ fn cc_rooftopworks_slot_draw(ci: vec2<i32>, s: i32) -> vec4<f32> {
 // Deterministic in (cc, ci, s), so the shader re-derives the object from the
 // hit kind alone — nothing is smuggled through CityHit.
 fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
-                        mech_on: bool, cr: cc_rooftopworks_Crown,
+                        mech_on: bool, cr: CityCrown,
                         bk: cc_rooftopworks_Bulk) -> cc_rooftopworks_Mech {
     if (!mech_on) {
         return cc_rooftopworks_no_mech();
@@ -11842,7 +11975,7 @@ fn cc_rooftopworks_no_bulk() -> cc_rooftopworks_Bulk {
 }
 
 fn cc_rooftopworks_bulk(cc: CityCell, ci: vec2<i32>,
-                        cr: cc_rooftopworks_Crown) -> cc_rooftopworks_Bulk {
+                        cr: CityCrown) -> cc_rooftopworks_Bulk {
     if (cr.kind == 1) {
         return cc_rooftopworks_no_bulk();   // the penthouse is the bulkhead
     }
@@ -11924,7 +12057,7 @@ fn cc_rooftopworks_bulk(cc: CityCell, ci: vec2<i32>,
 
 // --- packaged units -------------------------------------------------------------
 fn cc_rooftopworks_unit(cc: CityCell, ci: vec2<i32>, k: i32,
-                        cr: cc_rooftopworks_Crown, bk: cc_rooftopworks_Bulk)
+                        cr: CityCrown, bk: cc_rooftopworks_Bulk)
         -> cc_rooftopworks_Run {
     var res = cc_rooftopworks_Run(false, vec3<f32>(0.0), vec3<f32>(0.0),
                                   false, false);
@@ -11982,7 +12115,7 @@ struct cc_rooftopworks_Run {
 }
 
 fn cc_rooftopworks_run(cc: CityCell, ci: vec2<i32>, k: i32,
-                       cr: cc_rooftopworks_Crown, bk: cc_rooftopworks_Bulk)
+                       cr: CityCrown, bk: cc_rooftopworks_Bulk)
         -> cc_rooftopworks_Run {
     var res = cc_rooftopworks_Run(false, vec3<f32>(0.0), vec3<f32>(0.0),
                                   false, false);
@@ -12226,7 +12359,7 @@ fn cc_rooftopworks_cell_deck(d: cc_rooftopworks_Deck, ci: vec2<i32>) -> f32 {
 
 fn cc_rooftopworks_lamps_far(cc: CityCell, ci: vec2<i32>,
                              d: cc_rooftopworks_Deck,
-                             cr: cc_rooftopworks_Crown,
+                             cr: CityCrown,
                              bk: cc_rooftopworks_Bulk, dir: vec3<f32>)
         -> vec3<f32> {
     let a0 = cc_rooftopworks_cell_deck(d, ci);
@@ -12275,7 +12408,7 @@ fn cc_rooftopworks_roof(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
     // The door lamp's pool on the deck in front of the bulkhead: what a
     // roof is read by from the air at night.
     var e = vec3<f32>(0.0);
-    let cr = cc_rooftopworks_crown(cc, h.cell);
+    let cr = city_crown(cc, h.cell);
     let bk = cc_rooftopworks_bulk(cc, h.cell, cr);
     // Props are drawn only on the view ray, inside the range; a reflection
     // traces none (CITY_TRACE_PLAIN), so it sees the far means at any range.
@@ -12674,7 +12807,7 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
     if (z_hi >= cc_rooftopworks_deck_low(cc) - 1.0
         && z_lo <= cc.height + cc_rooftopworks_HEADROOM) {
         let d0 = cc_rooftopworks_deck(cc, 0);
-        let cr = cc_rooftopworks_crown(cc, ci);
+        let cr = city_crown(cc, ci);
         if (d0.ok) {
             // The parapet lives in a 1.25 m band on one deck: a tighter z
             // test than the section gate, and it comes before its hash.
@@ -12686,18 +12819,16 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
                                                    t0, t1, d0, ci);
                 }
             }
-            if (cr.kind != 0) {
+            // The helipad. (A penthouse, kind 1, is the core's massing.)
+            if (cr.kind == 2) {
                 best = cc_rooftopworks_box(
                     best, o, dir, inv_dir, t0, t1,
                     vec3<f32>(cr.lo, cr.z0), vec3<f32>(cr.hi, cr.z1),
-                    select(cc_rooftopworks_K_PAD, cc_rooftopworks_K_PENT,
-                           cr.kind == 1),
-                    ci);
+                    cc_rooftopworks_K_PAD, ci);
             }
         }
         // Nothing mechanical stands more than 5 m off a deck, so the slot
-        // loop gets its own band inside the section gate — the penthouse
-        // headroom above it is the crown's business, not the clutter's.
+        // loop gets its own band inside the section gate.
         let bk = cc_rooftopworks_bulk(cc, ci, cr);
         if (bk.ok && z_lo <= bk.hi.z + 0.2) {
             best = cc_rooftopworks_box(best, o, dir, inv_dir, t0, t1, bk.lo,
@@ -12783,150 +12914,14 @@ fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     return cc_rooftopworks_TRIM_COOL;
 }
 
-// --- the penthouse's glass and the coping trim, as shown --------------------
-// Both are bright detail on a dark wall, and both are averaged under the
-// pixel's footprint as the flat facade averages its windows (see the
-// skylights): what each element SHOWS, weighted by its share of the
-// footprint, handed back by city_windows_resolve as the radiance that shows
-// as that average. Component shading is not told whether a hit is seen
-// directly or in a reflection, so both are averaged as shown; a penthouse
-// or a parapet seen in a reflection gets its shown mean, not its plain one.
-
-// Light over a band of wall [b0, b1] (m above the penthouse's foot), ul
-// metres wide, at `f` times a bay's light: added as shown. The spandrel's
-// sill, smoothstep(0, SILL, v), darkens the light at the foot: below SILL
-// the band is three elements at the ramp's three-point Gauss-Legendre
-// nodes, above it one, so a footprint across the ramp is averaged as shown
-// rather than through the ramp's linear mean.
-fn cc_rooftopworks_pent_band(acc: CityWinSum, base: vec3<f32>,
-                             glow: vec3<f32>, f: f32, ul: f32, b0: f32,
-                             b1: f32, fog: vec4<f32>, shown: bool)
-        -> CityWinSum {
-    let s = cc_rooftopworks_PENT_SILL;
-    var res = city_win_add(acc, base + glow * f,
-                           ul * max(b1 - max(b0, s), 0.0), fog, shown);
-    let r1 = min(b1, s);
-    if (r1 > b0) {
-        let mid = 0.5 * (b0 + r1);
-        let hw = 0.5 * (r1 - b0);
-        let g = 0.7745966692 * hw;
-        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s, mid)),
-                           ul * (r1 - b0) * (4.0 / 9.0), fog, shown);
-        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s,
-                                                                mid - g)),
-                           ul * (r1 - b0) * (5.0 / 18.0), fog, shown);
-        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s,
-                                                                mid + g)),
-                           ul * (r1 - b0) * (5.0 / 18.0), fog, shown);
-    }
-    return res;
-}
-
-// A bay's brightness over the room's light, 0 if dark.
-fn cc_rooftopworks_pent_bay(cc: CityCell, iu: i32, iv: i32) -> f32 {
-    let wh = city_rand4(vec2<u32>(
-        cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u) ^ 0x0d2f1a37u,
-        cc.seed.y ^ (bitcast<u32>(iv) * 0x85ebca6bu) ^ 0x1b56c4e9u));
-    return select(0.0, 0.45 + 1.10 * wh.z, wh.x < cc_rooftopworks_PENT_LIT);
-}
-
-// The bays the exact sum walks at most, on each axis (as the skylights').
-const cc_rooftopworks_PENT_EXACT_MAX: i32 = 3;
-
-// The glass wall under the footprint box [u0, u1] x [v0, v1] (u along the
-// wall, v up from its foot, inside the wall), as shown. `base` is the
-// wall's own radiance, `glow` a bay's light at brightness 1.
-fn cc_rooftopworks_pent_seen(cc: CityCell, u0: f32, u1: f32, v0: f32,
-                             v1: f32, base: vec3<f32>, glow: vec3<f32>,
-                             fog: vec4<f32>, shown: bool) -> vec3<f32> {
-    let p = cc_rooftopworks_PENT_PITCH;
-    let fh = CITY_FLOOR_H;
-    let box_a = (u1 - u0) * (v1 - v0);
-    let w_mean = smoothstep(0.5, 1.0, max((u1 - u0) / p, (v1 - v0) / fh));
-    var ex = city_win_zero();
-    var lit_a = 0.0;
-    var n_el = 0;
-    var only = base;
-    if (w_mean < 1.0) {
-        let i0 = i32(floor(u0 / p));
-        let j0 = i32(floor(v0 / fh));
-        for (var j: i32 = 0; j < cc_rooftopworks_PENT_EXACT_MAX; j = j + 1) {
-            let b0 = max(f32(j0 + j) * fh, v0);
-            let b1 = min(f32(j0 + j + 1) * fh, v1);
-            if (b1 <= b0) {
-                continue;
-            }
-            for (var i: i32 = 0; i < cc_rooftopworks_PENT_EXACT_MAX;
-                 i = i + 1) {
-                let c0 = f32(i0 + i) * p;
-                let a0 = max(c0, u0);
-                let a1 = min(c0 + p, u1);
-                if (a1 <= a0) {
-                    continue;
-                }
-                let bay = cc_rooftopworks_pent_bay(cc, i0 + i, j0 + j);
-                if (bay <= 0.0) {
-                    continue;
-                }
-                // The mullion is the bay's first MULL of its pitch.
-                let m1 = c0 + cc_rooftopworks_PENT_MULL * p;
-                let um = max(min(a1, m1) - a0, 0.0);
-                let ug = (a1 - a0) - um;
-                ex = cc_rooftopworks_pent_band(ex, base, glow, 0.10 * bay, um,
-                                               b0, b1, fog, shown);
-                ex = cc_rooftopworks_pent_band(ex, base, glow, bay, ug, b0,
-                                               b1, fog, shown);
-                // One element is the footprint wholly on one surface: on
-                // the glass or the mullion, above the sill.
-                if (b0 >= cc_rooftopworks_PENT_SILL) {
-                    if (um > 0.0) {
-                        n_el = n_el + 1;
-                        only = base + glow * (0.10 * bay);
-                    }
-                    if (ug > 0.0) {
-                        n_el = n_el + 1;
-                        only = base + glow * bay;
-                    }
-                } else {
-                    n_el = n_el + 2;
-                }
-                lit_a = lit_a + (a1 - a0) * (b1 - b0);
-            }
-        }
-        if (box_a - lit_a > 1e-6 * box_a) {
-            n_el = n_el + 1;
-            only = base;
-        }
-        ex = city_win_add(ex, base, box_a - lit_a, fog, shown);
-        if (w_mean <= 0.0 && n_el <= 1) {
-            return only;   // one element: itself, exactly
-        }
-    }
-    var mn = city_win_zero();
-    if (w_mean > 0.0) {
-        // Lit at the rate, brightness uniform on [0.45, 1.55] by
-        // three-point Gauss-Legendre, glass and mullion at their shares of
-        // the box's width, the sill as in the exact sum.
-        let g = 0.55 * 0.7745966692;
-        let ul = (u1 - u0) * cc_rooftopworks_PENT_LIT;
-        let lv = vec3<f32>(1.0, 1.0 - g, 1.0 + g);
-        let wv = vec3<f32>(4.0 / 9.0, 5.0 / 18.0, 5.0 / 18.0);
-        for (var q: i32 = 0; q < 3; q = q + 1) {
-            mn = cc_rooftopworks_pent_band(
-                mn, base, glow, 0.10 * lv[q],
-                ul * cc_rooftopworks_PENT_MULL * wv[q], v0, v1, fog, shown);
-            mn = cc_rooftopworks_pent_band(
-                mn, base, glow, lv[q],
-                ul * (1.0 - cc_rooftopworks_PENT_MULL) * wv[q], v0, v1, fog,
-                shown);
-        }
-        mn = city_win_add(mn, base, box_a * (1.0 - cc_rooftopworks_PENT_LIT),
-                          fog, shown);
-    }
-    let mean = CityWinSum(mix(ex.shown, mn.shown, w_mean) / box_a,
-                          mix(ex.light, mn.light, w_mean) / box_a);
-    return city_windows_resolve(mean, fog, shown);
-}
+// --- the coping trim, as shown -------------------------------------------------
+// Bright detail on a dark wall, averaged under the pixel's footprint as the
+// flat facade averages its windows (see the skylights): what each element
+// SHOWS, weighted by its share of the footprint, handed back by
+// city_windows_resolve as the radiance that shows as that average.
+// Component shading is not told whether a hit is seen directly or in a
+// reflection, so it is averaged as shown; a parapet seen in a reflection
+// gets its shown mean, not its plain one.
 
 // How much of [u0, u1] the trim's runs light: fixtures on a TRIM_PITCH
 // centre, lit over the first TRIM_DUTY of it.
@@ -13001,46 +12996,9 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         return e;
     }
 
-    // --- penthouse ---------------------------------------------------------
-    if (h.kind == cc_rooftopworks_K_PENT) {
-        let cr = cc_rooftopworks_crown(cc, h.cell);
-        if (h.normal.z > 0.5) {
-            return cc_rooftopworks_dark(h, CITY_ROOF_ALBEDO);
-        }
-        // Glass on three-and-a-bit sides, with mullions and a dark spandrel
-        // at its foot. The colour follows the house where there is one.
-        // @domain: a wall's normal: |xy| = 1
-        let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
-        let tangent = vec2<f32>(-nh.y, nh.x);
-        let uc = dot(h.pos.xy, tangent);
-        let up = h.pos.z - cr.z0;
-        // Panes, not a slab. Lit uniformly at 1.8 the crown came out as the
-        // brightest thing on the skyline, brighter in the mean than the
-        // facade below it, which is backwards. It is a room: most of the
-        // glass is lit, some is not, and each bay (one PENT_PITCH by one
-        // storey) has its own level; mullions take the first PENT_MULL of
-        // each pitch at a tenth of the light, and the spandrel at the foot
-        // darkens the first PENT_SILL. Averaged under the footprint as
-        // shown (cc_rooftopworks_pent_seen).
-        var col = cc_rooftopworks_PENT_COL;
-        if (cc.win_mono >= 0.0) {
-            col = city_room_color(cc.win_mono, cc.palette_bias);
-        }
-        let base = cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO);
-        let dl = vec3<f32>(dot(dir.xy, tangent), dir.z, dot(dir.xy, nh));
-        let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-3));
-        let wall_h = cr.z1 - cr.z0;
-        let v0 = clamp(up - hb.y, 0.0, wall_h);
-        let v1 = max(clamp(up + hb.y, 0.0, wall_h), v0 + 1e-3);
-        let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
-        return cc_rooftopworks_pent_seen(cc, uc - hb.x, uc + hb.x, v0, v1,
-                                         base, col * cc_rooftopworks_PENT_RAD,
-                                         fog, TONE_MAP);
-    }
-
     // --- helipad -----------------------------------------------------------
     if (h.kind == cc_rooftopworks_K_PAD) {
-        let cr = cc_rooftopworks_crown(cc, h.cell);
+        let cr = city_crown(cc, h.cell);
         var e = cc_rooftopworks_dark(h, CITY_ROOF_ALBEDO * 0.8);
         if (h.normal.z > 0.5) {
             // Paint: a ring and a bar. Albedo only — at night it is barely
@@ -13080,7 +13038,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     // --- the bulkhead --------------------------------------------------------
     if (h.kind == cc_rooftopworks_K_BULK) {
         let bk = cc_rooftopworks_bulk(cc, h.cell,
-                                      cc_rooftopworks_crown(cc, h.cell));
+                                      city_crown(cc, h.cell));
         var e = cc_rooftopworks_dark(h, cc_rooftopworks_BULK_ALBEDO);
         if (bk.lamp) {
             let src = cc_rooftopworks_spot(h.pos, bk.seat,
@@ -13143,7 +13101,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // sides; a few pixels out it is the casing's mean.
         var e = cc_rooftopworks_dark(h, 0.22);
         let k = 1.0 - smoothstep(0.15, 0.6, fp);
-        let crs = cc_rooftopworks_crown(cc, h.cell);
+        let crs = city_crown(cc, h.cell);
         let bk = cc_rooftopworks_bulk(cc, h.cell, crs);
         var un = cc_rooftopworks_unit(cc, h.cell, 0, crs, bk);
         for (var j: i32 = 1; j < cc_rooftopworks_UNIT_N; j = j + 1) {
@@ -13170,7 +13128,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
 
     // --- runs --------------------------------------------------------------
     if (h.kind == cc_rooftopworks_K_RUN) {
-        let crs = cc_rooftopworks_crown(cc, h.cell);
+        let crs = city_crown(cc, h.cell);
         let bk = cc_rooftopworks_bulk(cc, h.cell, crs);
         // Which run: the one whose box holds the hit.
         var rn = cc_rooftopworks_run(cc, h.cell, 0, crs, bk);
@@ -13222,7 +13180,7 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let is_acc = h.kind >= cc_rooftopworks_K_ACC;
     let s = h.kind - select(cc_rooftopworks_K_MECH, cc_rooftopworks_K_ACC,
                             is_acc);
-    let crs = cc_rooftopworks_crown(cc, h.cell);
+    let crs = city_crown(cc, h.cell);
     let m = cc_rooftopworks_mech(cc, h.cell, s,
                                  cc_rooftopworks_mech_on(cc), crs,
                                  cc_rooftopworks_bulk(cc, h.cell, crs));
@@ -21969,6 +21927,20 @@ fn city_shell_enters(o: vec3<f32>, inv3: vec3<f32>, cc: CityCell,
             return true;
         }
     }
+    // The crown's envelope: first where a crown could stand, without its
+    // draw (the summit deck under the crown's headroom), and only a ray
+    // that enters that pays for the draw. The bound alone marked every
+    // ray over a tall tower's roof, four in five of them crownless.
+    if (city_crown_possible(cc)) {
+        let bd = city_crown_bound(cc);
+        let hb = city_box_hit(o, inv3, bd.bmin - grow, bd.bmax + grow);
+        if (hb.x <= hb.y && hb.y > 0.0 && max(hb.x, 0.0) <= t_lim) {
+            let cb = city_crown_box(cc);
+            let hc = city_box_hit(o, inv3, cb.bmin - grow, cb.bmax + grow);
+            return cb.bmin.x <= cb.bmax.x && hc.x <= hc.y && hc.y > 0.0
+                   && max(hc.x, 0.0) <= t_lim;
+        }
+    }
     return false;
 }
 
@@ -21986,6 +21958,11 @@ fn city_shell_on_wall(h: CityHit, t_lim: f32) -> bool {
         return false;
     }
     let grow = CITY_SHELL_OUT_MAX - 0.01;
+    // A wall hit above the roof is a crown's (the mast is kind 3): inside
+    // the crown's envelope, as a tier's wall is inside its own.
+    if (h.pos.z > cc.height + 0.01 && city_crown_possible(cc)) {
+        return true;
+    }
     for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
         let bx = city_tier_box(cc, k);
         if (all(h.pos.xy > bx.bmin.xy - grow)
@@ -22055,8 +22032,18 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             && min(z_a, z_b) < cc.top_z + 1.0
             && city_shell_enters(o, inv3, cc, min(best.t, t_reach))) {
             let st = city_shell_style(cc);
-            for (var k: i32 = 0; k < cc.tiers; k = k + 1) {
-                let bx = city_tier_box(cc, k);
+            // The crown's draw, once per cell, and only where this cell's
+            // ray segment reaches the crown's band.
+            var cb = CityBox(vec3<f32>(1e30), vec3<f32>(-1e30));
+            if (city_crown_possible(cc) && max(z_a, z_b) >= cc.height
+                && min(z_a, z_b) <= cc.height + CITY_CROWN_H_HI) {
+                cb = city_crown_box(cc);
+            }
+            for (var k: i32 = 0; k < CITY_CROWN_TIER + 1; k = k + 1) {
+                if (!city_mass_has(cc, cb, k)) {
+                    continue;
+                }
+                let bx = city_mass_box(cc, cb, k);
                 let bh = city_building_box(o, dir, inv3, t_cap, bx.bmin,
                                            bx.bmax, cc, k, st, pixel_angle);
                 if (bh.kind >= 0 && bh.t < best.t) {

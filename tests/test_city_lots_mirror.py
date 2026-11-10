@@ -59,8 +59,9 @@ WGSL_FUNCTIONS = ["pcg2d", "city_u01", "city_rand4", "city_tile_cell",
                   "city_is_avenue", "city_word", "city_cell",
                   "city_escape_building", "city_balcony_building",
                   "city_core_building",
-                  "city_shell_style"]
-WGSL_STRUCTS = ["CityCell", "CityShellStyle"]
+                  "city_shell_style", "city_crown_none",
+                  "city_crown_overlap", "city_crown"]
+WGSL_STRUCTS = ["CityCell", "CityShellStyle", "CityCrown"]
 
 # The fields compared, in the order the compute shader writes them.
 DISCRETE = ["built", "tiers", "arch", "has_mast", "has_frustum", "merged",
@@ -75,6 +76,17 @@ SCALAR = ["height", "top_z", "fscale"]
 DERIVED = {"shell_depth": (
     "select(0.0, city_shell_style(c).depth, c.land_use == CITY_USE_URBAN)",
     "shellDepth(c)")}
+# The crown (city_crown, per CELL): the penthouse the collider makes solid,
+# and the helipad that pre-empts it.
+for _name, _gpu, _js in [
+        ("crown_kind", "f32(k.kind)", "c.crown.kind"),
+        ("crown_lo.x", "k.lo.x", "c.crown.lo[0]"),
+        ("crown_lo.y", "k.lo.y", "c.crown.lo[1]"),
+        ("crown_hi.x", "k.hi.x", "c.crown.hi[0]"),
+        ("crown_hi.y", "k.hi.y", "c.crown.hi[1]"),
+        ("crown_z0", "k.z0", "c.crown.z0"),
+        ("crown_z1", "k.z1", "c.crown.z1")]:
+    DERIVED[_name] = (_gpu, _js)
 STRIDE = (len(DISCRETE) + 3 * len(VEC3) + 2 * len(VEC2) + len(SCALAR)
           + len(DERIVED))
 
@@ -216,6 +228,7 @@ def _compute_source():
             let i = gid.x;
             if (i >= arrayLength(&cells)) {{ return; }}
             let c = city_cell(cells[i]);
+            let k = city_crown(c, c.cell);
             let o = i * {STRIDE}u;
         """) + writes + "\n}\n"
 
@@ -352,3 +365,10 @@ def test_js_city_cell_matches_the_wgsl_on_the_gpu():
     needles = ((gpu[:, DISCRETE.index("arch")] == 3) & (height > 1200.0)
                & (gpu[:, DISCRETE.index("has_mast")] == 1))
     assert needles.sum() > 20
+    # Crowns of both kinds (the seeded sample holds 56 penthouses and 4
+    # pads), and every penthouse standing on the roof.
+    kind = gpu[:, names.index("crown_kind")]
+    assert (kind == 1).sum() > 20 and (kind == 2).sum() >= 3, (
+        (kind == 1).sum(), (kind == 2).sum())
+    pent = kind == 1
+    assert np.all(gpu[pent, names.index("crown_z0")] == height[pent])
