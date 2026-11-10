@@ -73,7 +73,9 @@ HOOKS = {
         "t_max: f32,\n"
         "            pixel_angle: f32, rnd: f32) -> vec4<f32>"),
     "roof": (
-        "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)\n"
+        "fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32, "
+        "fp_filter: f32,\n"
+        "                  dir: vec3<f32>, direct: bool, base: vec3<f32>)\n"
         "        -> vec3<f32>"),
     # Street-level props traced only by the street stage (fs_surface_street,
     # city_trace's CITY_TRACE_NEAR mode), never by the view ray's first
@@ -247,7 +249,7 @@ def dispatcher(comps):
         + "    return res;\n}")
 
     roof_body = [
-        f"    e = e + {c['hooks']['roof']}(cc, h, fp);"
+        f"    e = e + {c['hooks']['roof']}(cc, h, fp, fp_filter, dir, direct, base);"
         for c in hooked("roof")]
     out.append(
         f"{HOOKS['roof']} {{\n"

@@ -35,7 +35,8 @@
    "kind_base": 600,
    "hooks": {
     "cell_props": "cc_rooftopworks_props_trace",
-    "shade": "cc_rooftopworks_shade"
+    "shade": "cc_rooftopworks_shade",
+    "roof": "cc_rooftopworks_roof"
    },
    "enabled": true
   },

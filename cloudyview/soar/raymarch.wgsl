@@ -2726,13 +2726,40 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 //                        over the view ray up to the city hit, applied as
 //                        rgb + a * city. (0, 0, 0, 1) is the identity.
 //   cc_roof_detail       additive roof emission (a warehouse's lit
-//                        sawtooth glazing) at EVERY range — the far-field
-//                        mean of roof geometry that props draw only near.
+//                        sawtooth glazing, a roof's skylights) at EVERY
+//                        range — the far-field mean of roof geometry that
+//                        props draw only near. Handed the core's own roof
+//                        radiance, so detail can be averaged as it is shown.
 //
 // Component hits reuse CityHit with kind >= 100. See components/SPEC.md for
 // the contract agents write against.
 
 const CITY_PROP_RANGE: f32 = 2200.0;
+
+// Whether city_trace ran cell_props for the camera's view ray to a point
+// in cell ci: props run for a cell whose ray segment starts inside
+// CITY_PROP_RANGE, and that start is where the ray enters the cell's
+// column, or enters the city slab from above if that is later
+// (city_trace's t_cur). Recomputed from the camera, for the roof hooks,
+// which add a geometry's far mean exactly where the geometry is not drawn.
+// For a hit on the view ray only (t its distance from the camera): a
+// reflection's trace (CITY_TRACE_PLAIN) runs no props, which callers test
+// first.
+fn city_props_drawn(ci: vec2<i32>, p: vec3<f32>, t: f32) -> bool {
+    let o = city_camera_origin();
+    let dir = (p - o) / max(t, 1e-3);
+    let cell = u.ocean_params.x;
+    let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
+                        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
+                        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
+    let cmin = vec3<f32>(vec2<f32>(ci) * cell, -1e6);
+    let col = city_box_hit(o, inv, cmin, cmin + vec3<f32>(cell, cell, 2e6));
+    var t_slab = 0.0;
+    if (o.z > CITY_SLAB_TOP) {
+        t_slab = (CITY_SLAB_TOP - o.z) * inv.z;
+    }
+    return max(col.x, t_slab) < CITY_PROP_RANGE;
+}
 
 // @end city
 fn city_u01(x: u32) -> f32 {
@@ -6384,6 +6411,48 @@ fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
     return m;
 }
 
+// --- the roof surface ---------------------------------------------------------
+// What a flat roof is covered in, building by building: black membrane
+// (bitumen, EPDM), grey gravel ballast, or a white coating (the "cool
+// roof"), the share of each about what an aerial of a city shows. Membrane
+// goes down in sheets, a tone apart, with a darker lapped seam between: the
+// pattern's mean is exactly 1, so past a few pixels the roof is its own
+// albedo and nothing else. A white roof is what makes a roof legible from
+// the air at night: it takes the city's glow.
+const CITY_ROOF_BLACK: f32 = 0.070;
+const CITY_ROOF_GRAVEL: f32 = 0.150;
+const CITY_ROOF_WHITE: f32 = 0.420;
+const CITY_ROOF_SEAM_W: f32 = 0.06;
+const CITY_ROOF_SEAM_K: f32 = 0.55;       // a seam's albedo against its sheet
+fn city_roof_albedo(cc: CityCell, h: CityHit, fp: f32) -> f32 {
+    if (cc.land_use != CITY_USE_URBAN) {
+        return CITY_ROOF_ALBEDO;
+    }
+    let r = city_rand4(cc.seed ^ vec2<u32>(0x4c957f2du, 0x2c1b3c6du));
+    var base = CITY_ROOF_BLACK;
+    if (r.x > 0.75) {
+        base = CITY_ROOF_WHITE;
+    } else if (r.x > 0.45) {
+        return CITY_ROOF_GRAVEL;   // ballast: no sheets to see
+    }
+    // Sheets 1-3 m wide along the roof's long axis, each its own tone in
+    // [0.88, 1.12], seams darker; normalised so the mean over a sheet's
+    // pitch is 1.
+    let w = 1.0 + 2.0 * r.y;
+    let along_x = (cc.b1max.x - cc.b1min.x) > (cc.b1max.y - cc.b1min.y);
+    let across = select(h.pos.x, h.pos.y, along_x) / w;
+    let i = floor(across);
+    let tone = 0.88 + 0.24 * city_u01(pcg2d(vec2<u32>(
+        cc.seed.x ^ (bitcast<u32>(i32(i)) * 0x9e3779b9u), cc.seed.y)).x);
+    let fs = CITY_ROOF_SEAM_W / w;
+    let seam = select(1.0, CITY_ROOF_SEAM_K, fract(across) < fs);
+    let norm = 1.0 / (1.0 - fs * (1.0 - CITY_ROOF_SEAM_K));
+    let pattern = tone * seam * norm;
+    // The tones average to 1 over sheets and the seam over a pitch, so the
+    // dissolve is to 1 itself.
+    return base * mix(pattern, 1.0, smoothstep(0.08, 0.5 * w, fp));
+}
+
 // Surface radiance at a city hit, before fog. fp is the pixel footprint at
 // the hit (m/px): the analytic LOD that dissolves windows and lamp pools
 // into their means once they are sub-pixel, so the far city is smooth
@@ -6409,7 +6478,7 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32, fp_filter: f32,
                + 0.04 * CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0);
     }
     if (h.kind == 2) {   // roof
-        var alb = CITY_ROOF_ALBEDO;
+        var alb = city_roof_albedo(cc, h, fp_filter);
         // Parapet ring: the roof edge catches the street glow from below.
         // The ring belongs to whichever tier this roof is — pick the box
         // whose top the hit sits on.
@@ -6430,8 +6499,8 @@ fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32, fp_filter: f32,
         if (din < 1.2) {
             alb = alb * 2.2;
         }
-        return alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0))
-               + cc_roof_detail(cc, h, fp);
+        let base = alb * (fill + CITY_MOONLIGHT * max(moon.z, 0.0));
+        return base + cc_roof_detail(cc, h, fp, fp_filter, dir, direct, base);
     }
     if (h.kind == 1) {   // facade, flat: past the shell's reach
         let f = city_face_at(cc, h.pos, h.normal);
@@ -11164,6 +11233,9 @@ const cc_rooftopworks_K_PARAPET: i32 = 608;
 const cc_rooftopworks_K_PENT: i32 = 609;
 const cc_rooftopworks_K_PAD: i32 = 611;
 const cc_rooftopworks_K_PIPE: i32 = 612;
+const cc_rooftopworks_K_UNIT: i32 = 610;
+const cc_rooftopworks_K_BULK: i32 = 613;
+const cc_rooftopworks_K_RUN: i32 = 614;
 
 // --- mechanical clusters ----------------------------------------------------
 const cc_rooftopworks_MECH_FRAC: f32 = 0.86;   // buildings with any clutter
@@ -11219,12 +11291,6 @@ const cc_rooftopworks_TRIM_RAD: f32 = 1.20;
 const cc_rooftopworks_TRIM_COOL: vec3<f32> = vec3<f32>(0.72, 0.86, 1.00);
 const cc_rooftopworks_TRIM_PITCH: f32 = 6.50;  // fixture centres (m)
 const cc_rooftopworks_TRIM_DUTY: f32 = 0.82;   // lit fraction of the run
-// The trim is a 0.28 m band on a 1.25 m wall: past this footprint the band is
-// thinner than a pixel and hands over to its mean over the whole wall face,
-// which is the same energy spread out. Nothing switches off (SPEC rule 3).
-const cc_rooftopworks_TRIM_LOD_START: f32 = 1.60;
-const cc_rooftopworks_TRIM_LOD_FULL: f32 = 4.00;
-const cc_rooftopworks_TRIM_MEAN_COMP: f32 = 0.20;  // see PENT_MEAN_COMP
 
 // --- penthouse --------------------------------------------------------------
 const cc_rooftopworks_PENT_FRAC: f32 = 0.20;
@@ -11237,13 +11303,6 @@ const cc_rooftopworks_PENT_PITCH: f32 = 2.10;  // mullion pitch (m)
 const cc_rooftopworks_PENT_MULL: f32 = 0.13;   // dark fraction of the pitch
 const cc_rooftopworks_PENT_SILL: f32 = 0.80;   // dark spandrel at its foot
 const cc_rooftopworks_PENT_LIT: f32 = 0.58;    // bays with the light on
-// Tone-map compensation on the far-field means (the core's facade now
-// averages in display space instead, city_windows_seen): a
-// mean taken in linear radiance ahead of a Reinhard curve renders CREAM,
-// because a lit bay at 1.8 is already near the knee and its average is not.
-// Solved rather than guessed: match tone(mean * E) to lit_frac * tone(B * E)
-// at E = 6, which puts the coefficient near a quarter.
-const cc_rooftopworks_PENT_MEAN_COMP: f32 = 0.26;
 
 // --- helipad ----------------------------------------------------------------
 const cc_rooftopworks_PAD_FRAC: f32 = 0.13;
@@ -11269,6 +11328,75 @@ const cc_rooftopworks_PIPE_CORNER: f32 = 1.20; // in from the building corner
 // rather than pops.
 const cc_rooftopworks_PIPE_FP: f32 = 1.20;
 const cc_rooftopworks_PIPE_FADE: f32 = 0.75;
+
+// --- bulkheads, runs, round tanks, skylights ---------------------------------
+// Thomas, 2026-09: "more roof detail could be added. pipes etc." A roof is
+// not a lid with three boxes on it. The stair comes up through a bulkhead
+// with a lamp over its door; pipe racks and ducts run across the deck
+// between the plant; walk-ups carry the round wooden tank on its steel legs
+// (New York's, seen from the Empire State); a low roof often has a field of
+// skylights, some lit from the room under them.
+//
+// The bulkhead: one per cell on the summit deck (the crown's penthouse is
+// the bulkhead where there is one), against the deck's edge as stairs are.
+const cc_rooftopworks_BULK_HX: f32 = 1.6;      // 3.2 x 4.4 m
+const cc_rooftopworks_BULK_HY: f32 = 2.2;
+const cc_rooftopworks_BULK_H: f32 = 3.0;
+const cc_rooftopworks_BULK_LAMP_FRAC: f32 = 0.90;
+const cc_rooftopworks_BULK_DOOR_W: f32 = 0.95;
+const cc_rooftopworks_BULK_DOOR_H: f32 = 2.10;
+const cc_rooftopworks_BULK_DOOR_K: f32 = 0.30;   // the leaf against the wall
+const cc_rooftopworks_BULK_ALBEDO: f32 = 0.20;
+// Taller buildings carry the lift's machine room beside the stair: a
+// bigger box against the bulkhead.
+const cc_rooftopworks_LIFT_MIN_H: f32 = 40.0;
+const cc_rooftopworks_LIFT_HX: f32 = 2.6;
+const cc_rooftopworks_LIFT_H: f32 = 4.2;
+// Its vent panel: width, height band above its foot (m; a whole number of
+// pitches, so the pattern's mean over it is exactly 1), slat pitch, the
+// slats' share of the pitch and their factor on the wall and its light.
+const cc_rooftopworks_LOUVRE_W: f32 = 1.8;
+const cc_rooftopworks_LOUVRE_Z: vec2<f32> = vec2<f32>(1.5, 3.3);
+const cc_rooftopworks_LOUVRE_PITCH: f32 = 0.15;
+const cc_rooftopworks_LOUVRE_DARK: f32 = 0.45;
+const cc_rooftopworks_LOUVRE_K: f32 = 0.30;
+// Runs: up to four per cell, along x or y: a pipe rack on sleepers (three
+// pipes) or a sheet-metal duct.
+const cc_rooftopworks_RUN_N: i32 = 4;
+const cc_rooftopworks_RUN_DUCT: f32 = 0.35;    // draw below this: a duct
+// Packaged units: up to four rows per cell of one to four units each, the
+// commonest thing on a low roof. A row is one box, its units drawn.
+const cc_rooftopworks_UNIT_N: i32 = 4;
+const cc_rooftopworks_UNIT_HXY: vec2<f32> = vec2<f32>(1.1, 0.7);
+const cc_rooftopworks_UNIT_PITCH: f32 = 2.4;    // along the row
+const cc_rooftopworks_UNIT_H: f32 = 1.3;
+const cc_rooftopworks_RUN_LEN_LO: f32 = 6.0;
+const cc_rooftopworks_RUN_LEN_HI: f32 = 24.0;
+const cc_rooftopworks_RACK_HW: f32 = 0.40;
+const cc_rooftopworks_RACK_Z0: f32 = 0.20;     // sleepers under the pipes
+const cc_rooftopworks_RACK_Z1: f32 = 0.55;
+const cc_rooftopworks_DUCT_HW: f32 = 0.45;
+const cc_rooftopworks_DUCT_H: f32 = 0.90;
+// Round tanks: on walk-ups always, and on most of the older low-rise.
+const cc_rooftopworks_ROUND_H: f32 = 70.0;
+const cc_rooftopworks_ROUND_FRAC: f32 = 0.60;
+// The round tank stands a storey up on its steel stand: posts and tie
+// beams under a stave barrel, the shallow cone of its roof overhanging the
+// staves by an eave.
+const cc_rooftopworks_ROUND_TANK_H: f32 = 5.20;
+const cc_rooftopworks_ROUND_STAND: f32 = 1.80;  // stand height (barrel floor)
+const cc_rooftopworks_CONE_H: f32 = 0.70;
+const cc_rooftopworks_EAVE: f32 = 0.15;         // the cone's overhang
+const cc_rooftopworks_POST_HW: f32 = 0.07;      // a stand post's half width
+const cc_rooftopworks_TIE_H: f32 = 0.10;        // a tie beam's depth
+const cc_rooftopworks_WOOD: vec3<f32> = vec3<f32>(1.25, 0.95, 0.70);
+// Skylights: a field of them in the middle of a low roof, on a lattice.
+const cc_rooftopworks_SKY_FRAC: f32 = 0.40;
+const cc_rooftopworks_SKY_MAX_H: f32 = 120.0;
+const cc_rooftopworks_SKY_PITCH: vec2<f32> = vec2<f32>(4.0, 6.0);
+const cc_rooftopworks_SKY_PANE: vec2<f32> = vec2<f32>(1.4, 2.8);
+const cc_rooftopworks_SKY_LIT: f32 = 0.30;
+const cc_rooftopworks_SKY_RAD: f32 = 1.0;
 
 // Headroom above the main roof that everything here fits under: a 3-storey
 // penthouse is the tallest thing (10.8 m).
@@ -11529,12 +11657,13 @@ struct cc_rooftopworks_Mech {
     kind: i32,         // 0 tank, 1 condenser row, 2 vent stacks
     lamp: bool,
     seat: vec3<f32>,   // the service lamp's own position
+    round: bool,       // a tank: the round wooden one
 }
 
 fn cc_rooftopworks_no_mech() -> cc_rooftopworks_Mech {
     return cc_rooftopworks_Mech(false, vec3<f32>(0.0), vec3<f32>(0.0), false,
                                 vec3<f32>(0.0), vec3<f32>(0.0), 0, false,
-                                vec3<f32>(0.0));
+                                vec3<f32>(0.0), false);
 }
 
 // Does this building carry rooftop clutter at all? One building-level draw,
@@ -11556,8 +11685,8 @@ fn cc_rooftopworks_slot_draw(ci: vec2<i32>, s: i32) -> vec4<f32> {
 // Deterministic in (cc, ci, s), so the shader re-derives the object from the
 // hit kind alone — nothing is smuggled through CityHit.
 fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
-                        mech_on: bool, cr: cc_rooftopworks_Crown)
-        -> cc_rooftopworks_Mech {
+                        mech_on: bool, cr: cc_rooftopworks_Crown,
+                        bk: cc_rooftopworks_Bulk) -> cc_rooftopworks_Mech {
     if (!mech_on) {
         return cc_rooftopworks_no_mech();
     }
@@ -11584,7 +11713,9 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
 
     // Type and footprint.
     var hx = vec2<f32>(cc_rooftopworks_TANK_HW);
-    var hgt = cc_rooftopworks_TANK_H;
+    let round = cc_rooftopworks_round_tanks(cc);
+    var hgt = select(cc_rooftopworks_TANK_H, cc_rooftopworks_ROUND_TANK_H,
+                     round);
     var ty = 0;
     let axis_y = r.w > 0.5;
     if (r.y >= cc_rooftopworks_TANK_CUT && r.y < cc_rooftopworks_AC_CUT) {
@@ -11630,6 +11761,13 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
         && cc_rooftopworks_overlap(lo2, hi2, cr.lo - 1.5, cr.hi + 1.5)) {
         return cc_rooftopworks_no_mech();
     }
+    if (bk.ok && abs(d.z - bk.lo.z) < 0.5
+        && (cc_rooftopworks_overlap(lo2, hi2, bk.lo.xy - 1.2, bk.hi.xy + 1.2)
+            || (bk.lift
+                && cc_rooftopworks_overlap(lo2, hi2, bk.lift_lo.xy - 1.2,
+                                           bk.lift_hi.xy + 1.2)))) {
+        return cc_rooftopworks_no_mech();
+    }
 
     var res: cc_rooftopworks_Mech;
     res.ok = true;
@@ -11665,7 +11803,534 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
     else if (face > 0.50) { n = vec2<f32>(0.0, 1.0); }
     else if (face > 0.25) { n = vec2<f32>(0.0, -1.0); }
     res.seat = vec3<f32>(c + n * (hx + 0.04), d.z + 0.72 * hgt);
+    res.round = ty == 0 && round;
+    if (res.round) {
+        // A round tank has hoops, not a rim band: the cap is its own cone,
+        // and its envelope is its own box.
+        res.has_acc = false;
+        res.alo = res.lo;
+        res.ahi = res.hi;
+    }
     return res;
+}
+
+// Whether this building's tanks are the round wooden kind.
+fn cc_rooftopworks_round_tanks(cc: CityCell) -> bool {
+    let gh = city_rand4(cc.seed ^ vec2<u32>(0x2f8b3c1du, 0x6d4a9e27u));
+    return cc.win_style == 4
+        || (cc.height < cc_rooftopworks_ROUND_H
+            && gh.x < cc_rooftopworks_ROUND_FRAC);
+}
+
+// --- the bulkhead -------------------------------------------------------------
+struct cc_rooftopworks_Bulk {
+    ok: bool,
+    lo: vec3<f32>,
+    hi: vec3<f32>,
+    door: vec2<f32>,   // the door face's outward normal
+    lamp: bool,
+    seat: vec3<f32>,   // the lamp over the door
+    lift: bool,        // the lift's machine room beside it
+    lift_lo: vec3<f32>,
+    lift_hi: vec3<f32>,
+}
+
+fn cc_rooftopworks_no_bulk() -> cc_rooftopworks_Bulk {
+    return cc_rooftopworks_Bulk(false, vec3<f32>(0.0), vec3<f32>(0.0),
+                                vec2<f32>(0.0), false, vec3<f32>(0.0), false,
+                                vec3<f32>(0.0), vec3<f32>(0.0));
+}
+
+fn cc_rooftopworks_bulk(cc: CityCell, ci: vec2<i32>,
+                        cr: cc_rooftopworks_Crown) -> cc_rooftopworks_Bulk {
+    if (cr.kind == 1) {
+        return cc_rooftopworks_no_bulk();   // the penthouse is the bulkhead
+    }
+    let d = cc_rooftopworks_deck(cc, 0);
+    if (!d.ok) {
+        return cc_rooftopworks_no_bulk();
+    }
+    let r = cc_rooftopworks_slot_draw(ci, 7);
+    let along_y = r.w > 0.5;
+    let hx = select(vec2<f32>(cc_rooftopworks_BULK_HY, cc_rooftopworks_BULK_HX),
+                    vec2<f32>(cc_rooftopworks_BULK_HX, cc_rooftopworks_BULK_HY),
+                    along_y);
+    let col = cc_rooftopworks_column(ci);
+    let m = hx + cc_rooftopworks_EDGE_M + cc_rooftopworks_PAR_W;
+    let plo = max(d.lo + m, col.xy + m - cc_rooftopworks_EDGE_M);
+    let phi = min(d.hi - m, col.zw - m + cc_rooftopworks_EDGE_M);
+    if (plo.x > phi.x || plo.y > phi.y) {
+        return cc_rooftopworks_no_bulk();
+    }
+    // Against one edge of the free deck, anywhere along it.
+    let side = r.x > 0.5;
+    let t = fract(r.y * 7.31);
+    var c = select(vec2<f32>(mix(plo.x, phi.x, t),
+                             select(plo.y, phi.y, side)),
+                   vec2<f32>(select(plo.x, phi.x, side),
+                             mix(plo.y, phi.y, t)), along_y);
+    let lo2 = c - hx;
+    let hi2 = c + hx;
+    if (cc_rooftopworks_overlap(lo2, hi2, d.hlo - 1.0, d.hhi + 1.0)
+        || (cc.has_mast
+            && cc_rooftopworks_overlap(lo2, hi2, cc.mast_min.xy - 0.8,
+                                       cc.mast_max.xy + 0.8))
+        || (cr.kind != 0
+            && cc_rooftopworks_overlap(lo2, hi2, cr.lo - 1.5, cr.hi + 1.5))) {
+        return cc_rooftopworks_no_bulk();
+    }
+    var b: cc_rooftopworks_Bulk;
+    b.ok = true;
+    b.lo = vec3<f32>(lo2, d.z);
+    b.hi = vec3<f32>(hi2, d.z + cc_rooftopworks_BULK_H);
+    // The door looks into the deck, on the bulkhead's long side.
+    let into = 0.5 * (d.lo + d.hi) - c;
+    b.door = select(vec2<f32>(0.0, sign(into.y + 1e-6)),
+                    vec2<f32>(sign(into.x + 1e-6), 0.0), along_y);
+    b.lamp = fract(r.z * 13.1) < cc_rooftopworks_BULK_LAMP_FRAC;
+    b.seat = vec3<f32>(c + b.door * (dot(abs(b.door), hx) + 0.10),
+                       d.z + cc_rooftopworks_BULK_DOOR_H + 0.30);
+    // The machine room: beside the stair along its long axis, on the side
+    // with deck to spare, flush with the stair's back (the deck edge it
+    // stands against) and so reaching further into the deck than the stair
+    // does, since it is the wider of the two; wholly inside the free deck,
+    // clear of what the stair keeps clear of, or not at all.
+    b.lift = false;
+    b.lift_lo = b.lo;
+    b.lift_hi = b.hi;
+    if (cc.height > cc_rooftopworks_LIFT_MIN_H) {
+        let ax = select(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0), along_y);
+        let toward = select(-1.0, 1.0, dot(into, ax) > 0.0);
+        let lh = vec2<f32>(cc_rooftopworks_LIFT_HX);
+        let lc = c + ax * toward * (dot(ax, hx) + cc_rooftopworks_LIFT_HX)
+                 + b.door * (cc_rooftopworks_LIFT_HX - dot(abs(b.door), hx));
+        let llo = lc - lh;
+        let lhi = lc + lh;
+        if (all(llo >= plo - hx) && all(lhi <= phi + hx)
+            && !cc_rooftopworks_overlap(llo, lhi, d.hlo - 1.0, d.hhi + 1.0)
+            && !(cc.has_mast
+                 && cc_rooftopworks_overlap(llo, lhi, cc.mast_min.xy - 0.8,
+                                            cc.mast_max.xy + 0.8))
+            && !(cr.kind != 0
+                 && cc_rooftopworks_overlap(llo, lhi, cr.lo - 1.5,
+                                            cr.hi + 1.5))) {
+            b.lift = true;
+            b.lift_lo = vec3<f32>(lc - lh, d.z);
+            b.lift_hi = vec3<f32>(lc + lh, d.z + cc_rooftopworks_LIFT_H);
+        }
+    }
+    return b;
+}
+
+// --- packaged units -------------------------------------------------------------
+fn cc_rooftopworks_unit(cc: CityCell, ci: vec2<i32>, k: i32,
+                        cr: cc_rooftopworks_Crown, bk: cc_rooftopworks_Bulk)
+        -> cc_rooftopworks_Run {
+    var res = cc_rooftopworks_Run(false, vec3<f32>(0.0), vec3<f32>(0.0),
+                                  false, false);
+    let r = cc_rooftopworks_slot_draw(ci, 12 + k);
+    if (r.x >= 0.90 - 0.18 * f32(k)) {
+        return res;
+    }
+    let d = cc_rooftopworks_deck(cc, 0);
+    if (!d.ok) {
+        return res;
+    }
+    let along_y = r.w > 0.5;
+    let n_units = 1.0 + floor(fract(r.x * 23.1) * 3.999);
+    let row = vec2<f32>(cc_rooftopworks_UNIT_HXY.x
+                        + 0.5 * (n_units - 1.0) * cc_rooftopworks_UNIT_PITCH,
+                        cc_rooftopworks_UNIT_HXY.y);
+    let hx = select(row, row.yx, along_y);
+    let col = cc_rooftopworks_column(ci);
+    let m = hx + cc_rooftopworks_EDGE_M + cc_rooftopworks_PAR_W;
+    let plo = max(d.lo + m, col.xy + m - cc_rooftopworks_EDGE_M);
+    let phi = min(d.hi - m, col.zw - m + cc_rooftopworks_EDGE_M);
+    if (plo.x > phi.x || plo.y > phi.y) {
+        return res;
+    }
+    let c = mix(plo, phi, vec2<f32>(fract(r.y * 9.7), fract(r.z * 6.13)));
+    let lo2 = c - hx;
+    let hi2 = c + hx;
+    if (cc_rooftopworks_overlap(lo2, hi2, d.hlo - 1.0, d.hhi + 1.0)
+        || (cc.has_mast
+            && cc_rooftopworks_overlap(lo2, hi2, cc.mast_min.xy - 0.8,
+                                       cc.mast_max.xy + 0.8))
+        || (cr.kind != 0
+            && cc_rooftopworks_overlap(lo2, hi2, cr.lo - 1.0, cr.hi + 1.0))
+        || (bk.ok
+            && (cc_rooftopworks_overlap(lo2, hi2, bk.lo.xy - 0.5,
+                                        bk.hi.xy + 0.5)
+                || cc_rooftopworks_overlap(lo2, hi2, bk.lift_lo.xy - 0.5,
+                                           bk.lift_hi.xy + 0.5)))) {
+        return res;
+    }
+    res.ok = true;
+    res.along_y = along_y;
+    res.lo = vec3<f32>(lo2, d.z);
+    res.hi = vec3<f32>(hi2, d.z + cc_rooftopworks_UNIT_H);
+    return res;
+}
+
+// --- runs ---------------------------------------------------------------------
+struct cc_rooftopworks_Run {
+    ok: bool,
+    lo: vec3<f32>,
+    hi: vec3<f32>,
+    duct: bool,
+    along_y: bool,
+}
+
+fn cc_rooftopworks_run(cc: CityCell, ci: vec2<i32>, k: i32,
+                       cr: cc_rooftopworks_Crown, bk: cc_rooftopworks_Bulk)
+        -> cc_rooftopworks_Run {
+    var res = cc_rooftopworks_Run(false, vec3<f32>(0.0), vec3<f32>(0.0),
+                                  false, false);
+    let r = cc_rooftopworks_slot_draw(ci, 8 + k);
+    if (r.x >= 0.85 - 0.18 * f32(k)) {
+        return res;
+    }
+    let d = cc_rooftopworks_deck(cc, 0);
+    if (!d.ok) {
+        return res;
+    }
+    let duct = fract(r.x * 17.3) < cc_rooftopworks_RUN_DUCT;
+    let along_y = r.w > 0.5;
+    let half_len = 0.5 * mix(cc_rooftopworks_RUN_LEN_LO,
+                             cc_rooftopworks_RUN_LEN_HI, r.y);
+    let across = select(cc_rooftopworks_RACK_HW, cc_rooftopworks_DUCT_HW,
+                        duct);
+    let hx = select(vec2<f32>(half_len, across), vec2<f32>(across, half_len),
+                    along_y);
+    let col = cc_rooftopworks_column(ci);
+    let m = hx + cc_rooftopworks_EDGE_M + cc_rooftopworks_PAR_W;
+    let plo = max(d.lo + m, col.xy + m - cc_rooftopworks_EDGE_M);
+    let phi = min(d.hi - m, col.zw - m + cc_rooftopworks_EDGE_M);
+    if (plo.x > phi.x || plo.y > phi.y) {
+        return res;
+    }
+    let c = mix(plo, phi, vec2<f32>(fract(r.z * 11.3), fract(r.w * 5.17)));
+    let lo2 = c - hx;
+    let hi2 = c + hx;
+    if (cc_rooftopworks_overlap(lo2, hi2, d.hlo - 1.0, d.hhi + 1.0)
+        || (cc.has_mast
+            && cc_rooftopworks_overlap(lo2, hi2, cc.mast_min.xy - 0.8,
+                                       cc.mast_max.xy + 0.8))
+        || (cr.kind != 0
+            && cc_rooftopworks_overlap(lo2, hi2, cr.lo - 1.0, cr.hi + 1.0))
+        || (bk.ok
+            && (cc_rooftopworks_overlap(lo2, hi2, bk.lo.xy - 0.3,
+                                        bk.hi.xy + 0.3)
+                || cc_rooftopworks_overlap(lo2, hi2, bk.lift_lo.xy - 0.3,
+                                           bk.lift_hi.xy + 0.3)))) {
+        return res;
+    }
+    res.ok = true;
+    res.duct = duct;
+    res.along_y = along_y;
+    res.lo = vec3<f32>(lo2, d.z + select(cc_rooftopworks_RACK_Z0, 0.0, duct));
+    res.hi = vec3<f32>(hi2, d.z + select(cc_rooftopworks_RACK_Z1,
+                                         cc_rooftopworks_DUCT_H, duct));
+    return res;
+}
+
+// --- skylights (the roof hook) --------------------------------------------------
+// A field of them over the middle half of a low roof, flush enough to be
+// drawn on the roof rather than built: lit panes glow with the room's light
+// over the roof's own radiance.
+//
+// The field is shown the way the flat facade shows its windows (see THE
+// FLAT FACADE'S WINDOWS in the core): the pixel's footprint on the deck is
+// averaged as it would be shown, pane by pane while it holds few lattice
+// cells (cc_rooftopworks_sky_exact), and in expectation past that
+// (cc_rooftopworks_sky_mean), blending across the last cell of the exact
+// sum's room; city_windows_resolve hands the average back as a radiance.
+// A footprint wholly on one pane, or wholly off the lit ones, comes back as
+// that surface exactly, so up close the panes are drawn sharp.
+struct cc_rooftopworks_Sky {
+    ok: bool,
+    flo: vec2<f32>,
+    fhi: vec2<f32>,
+    pitch: vec2<f32>,
+    pane: vec2<f32>,
+}
+
+fn cc_rooftopworks_sky(cc: CityCell, d: cc_rooftopworks_Deck)
+        -> cc_rooftopworks_Sky {
+    var sk: cc_rooftopworks_Sky;
+    let gh = city_rand4(cc.seed ^ vec2<u32>(0x58f2a6c3u, 0x13d7b9e1u));
+    sk.ok = gh.x < cc_rooftopworks_SKY_FRAC
+            && cc.height <= cc_rooftopworks_SKY_MAX_H;
+    let size = d.hi - d.lo;
+    sk.flo = d.lo + 0.25 * size;
+    sk.fhi = d.hi - 0.25 * size;
+    sk.pitch = select(cc_rooftopworks_SKY_PITCH,
+                      cc_rooftopworks_SKY_PITCH.yx, gh.y > 0.5);
+    sk.pane = select(cc_rooftopworks_SKY_PANE, cc_rooftopworks_SKY_PANE.yx,
+                     gh.y > 0.5);
+    return sk;
+}
+
+// A lattice cell's pane: its brightness over the room's light, 0 if dark.
+fn cc_rooftopworks_sky_lit(cc: CityCell, q: vec2<f32>) -> f32 {
+    let wh = city_rand4(vec2<u32>(
+        cc.seed.x ^ (bitcast<u32>(i32(q.x)) * 0x9e3779b9u) ^ 0x41c64e6du,
+        cc.seed.y ^ (bitcast<u32>(i32(q.y)) * 0x85ebca6bu)));
+    return select(0.0, 0.6 + 0.8 * wh.z, wh.x < cc_rooftopworks_SKY_LIT);
+}
+
+fn cc_rooftopworks_area(lo: vec2<f32>, hi: vec2<f32>) -> f32 {
+    let s = max(hi - lo, vec2<f32>(0.0));
+    return s.x * s.y;
+}
+
+// The lattice cells the exact sum walks at most, on each axis: whole while
+// the footprint spans under one pitch, handed to the expectation between
+// half a pitch and one.
+const cc_rooftopworks_SKY_EXACT_MAX: i32 = 3;
+
+// The footprint box [blo, bhi] summed pane by pane: the lit panes, each
+// clipped to the box and the field, at its own brightness; the rest of the
+// box is roof. `pane_rad` is a pane's radiance over the roof at brightness
+// 1. Also returns, in `whole`, the lit brightness when one lit pane covers
+// the box (else -1).
+struct cc_rooftopworks_SkySum {
+    sum: CityWinSum,
+    lit_area: f32,
+    whole: f32,
+}
+
+fn cc_rooftopworks_sky_exact(cc: CityCell, sk: cc_rooftopworks_Sky,
+                             blo: vec2<f32>, bhi: vec2<f32>,
+                             base: vec3<f32>, pane_rad: vec3<f32>,
+                             fog: vec4<f32>, shown: bool)
+        -> cc_rooftopworks_SkySum {
+    var res = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
+    let box_a = cc_rooftopworks_area(blo, bhi);
+    let c0 = floor((blo - sk.flo) / sk.pitch);
+    let c1 = floor((bhi - sk.flo) / sk.pitch);
+    let inset = 0.5 * (sk.pitch - sk.pane);
+    for (var j: i32 = 0; j < cc_rooftopworks_SKY_EXACT_MAX; j = j + 1) {
+        for (var i: i32 = 0; i < cc_rooftopworks_SKY_EXACT_MAX; i = i + 1) {
+            let q = c0 + vec2<f32>(f32(i), f32(j));
+            if (q.x > c1.x || q.y > c1.y) {
+                continue;
+            }
+            let plo = sk.flo + q * sk.pitch + inset;
+            let olo = max(max(plo, blo), sk.flo);
+            let ohi = min(min(plo + sk.pane, bhi), sk.fhi);
+            let a = cc_rooftopworks_area(olo, ohi);
+            if (a <= 0.0) {
+                continue;
+            }
+            let lit = cc_rooftopworks_sky_lit(cc, q);
+            if (lit > 0.0) {
+                res.sum = city_win_add(res.sum, base + pane_rad * lit, a,
+                                       fog, shown);
+                res.lit_area = res.lit_area + a;
+                // Clipping returns one of its operands, so a box wholly on
+                // this pane clips to itself exactly.
+                if (all(olo == blo) && all(ohi == bhi)) {
+                    res.whole = lit;
+                }
+            }
+        }
+    }
+    res.sum = city_win_add(res.sum, base, box_a - res.lit_area, fog, shown);
+    return res;
+}
+
+// How much of [0, x] (each axis, from the field's corner) the lattice's
+// panes cover: whole pitches, then the part of the last one past its inset.
+fn cc_rooftopworks_sky_cover(x: vec2<f32>, pitch: vec2<f32>,
+                             inset: vec2<f32>, pane: vec2<f32>) -> vec2<f32> {
+    let q = floor(x / pitch);
+    return q * pane + clamp(x - q * pitch - inset, vec2<f32>(0.0), pane);
+}
+
+// The same box in expectation: of the field it overlaps, the panes' area lit
+// at the rate, the brightness uniform on [0.6, 1.4] taken by three-point
+// Gauss-Legendre (the display curve is smooth over it); the rest is roof.
+fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
+                            bhi: vec2<f32>, base: vec3<f32>,
+                            pane_rad: vec3<f32>, fog: vec4<f32>,
+                            shown: bool) -> cc_rooftopworks_SkySum {
+    let box_a = cc_rooftopworks_area(blo, bhi);
+    // The panes' area in the box, exactly: the lattice is separable, so it
+    // is the product of each axis' pane coverage over the box's overlap
+    // with the field, counted from the field's corner where the lattice
+    // starts.
+    let lo = max(blo, sk.flo) - sk.flo;
+    let hi = max(min(bhi, sk.fhi) - sk.flo, lo);
+    let inset = 0.5 * (sk.pitch - sk.pane);
+    let cover = cc_rooftopworks_sky_cover(hi, sk.pitch, inset, sk.pane)
+                - cc_rooftopworks_sky_cover(lo, sk.pitch, inset, sk.pane);
+    let a_lit = cc_rooftopworks_SKY_LIT * cover.x * cover.y;
+    let g = 0.8 * 0.3872983346;   // 0.8 * sqrt(3/5) / 2, on [0.6, 1.4]
+    var acc = city_win_add(city_win_zero(), base + pane_rad, a_lit * (4.0 / 9.0),
+                           fog, shown);
+    acc = city_win_add(acc, base + pane_rad * (1.0 - g), a_lit * (5.0 / 18.0),
+                       fog, shown);
+    acc = city_win_add(acc, base + pane_rad * (1.0 + g), a_lit * (5.0 / 18.0),
+                       fog, shown);
+    acc = city_win_add(acc, base, box_a - a_lit, fog, shown);
+    return cc_rooftopworks_SkySum(acc, a_lit, -1.0);
+}
+
+// --- the lamps, past CITY_PROP_RANGE (the roof hook) ---------------------------
+// Every roof lamp is drawn by props: the tank's service lamp, the
+// bulkhead's door lamp, the helipad's corner lights. Past CITY_PROP_RANGE
+// none is drawn, and the hook adds their light instead, as a uniform
+// emission on the summit deck of the cell that holds them: what the
+// lamps' spots, as the prop shader draws them, send toward the eye, spread
+// over the deck as it is seen. Exact in expectation:
+// - a lamp's spots (the source and its spill) integrate, over the faces of
+//   the housing they are drawn on, to a seen area per unit radiance: a
+//   face's share is seen in proportion to max(0, n.v), v toward the eye,
+//   and the top's in proportion to |v.z|;
+// - a tank lamp's face is one of the four cardinal ones, equally likely,
+//   so each side face is seen, in expectation, as (|v.x| + |v.y|) / 4, and
+//   the sides enter as their sum; how many tank lamps a roof carries is
+//   taken per square metre of its summit deck (MECH_RHO), pooled over the
+//   city's roofs with clutter (cc_rooftopworks_mech_on);
+// - the bulkhead's lamp and the pad's lights are the cell's own: the
+//   bulkhead's door face seen as max(0, door.v), its back as
+//   max(0, -door.v), its two sides together as |t.v| per side, t the door
+//   face's tangent, and a lift room beside it in the same four parts;
+//   the pad's lights sit on its top, so their deck share is their area.
+// The constants were measured by a probe that integrates the prop
+// shader's own spots over the props' own faces, at the footprint where the
+// props hand over (tests/test_soar_city_roof_lamps.py, which pins them).
+const cc_rooftopworks_MECH_RHO: f32 = 2.60e-4;   // tank lamps per m^2 of deck
+// The sides' sum and the top: m^2 per unit lamp radiance.
+const cc_rooftopworks_MECH_S: vec2<f32> = vec2<f32>(1.555, 0.539);
+// The bulkhead's front, back, two sides together and top, without and with
+// its lift room.
+const cc_rooftopworks_BULK_S: vec4<f32> = vec4<f32>(1.214, 0.111, 0.395,
+                                                    0.828);
+const cc_rooftopworks_BULK_LIFT_S: vec4<f32> = vec4<f32>(1.279, 0.126,
+                                                         0.520, 0.903);
+// A wall's projected area over the deck's grows without bound toward
+// grazing; past this ratio the deck stops standing in for the walls.
+const cc_rooftopworks_FAR_LAMP_CAP: f32 = 3.0;
+
+// The summit deck inside the cell's own column, less the tier standing on
+// it: the area a cell's lamps are spread over.
+fn cc_rooftopworks_cell_deck(d: cc_rooftopworks_Deck, ci: vec2<i32>) -> f32 {
+    let col = cc_rooftopworks_column(ci);
+    let lo = max(d.lo, col.xy);
+    let hi = min(d.hi, col.zw);
+    let hole = cc_rooftopworks_area(max(d.hlo, lo), min(d.hhi, hi));
+    return cc_rooftopworks_area(lo, hi) - hole;
+}
+
+fn cc_rooftopworks_lamps_far(cc: CityCell, ci: vec2<i32>,
+                             d: cc_rooftopworks_Deck,
+                             cr: cc_rooftopworks_Crown,
+                             bk: cc_rooftopworks_Bulk, dir: vec3<f32>)
+        -> vec3<f32> {
+    let a0 = cc_rooftopworks_cell_deck(d, ci);
+    if (a0 <= 1.0) {
+        return vec3<f32>(0.0);
+    }
+    let v = -dir;
+    let vz = max(abs(v.z), 1e-3);
+    let cap = cc_rooftopworks_FAR_LAMP_CAP;
+    // Seen area per unit lamp radiance, per square metre of deck as seen.
+    var s = 0.0;
+    if (cc_rooftopworks_mech_on(cc)) {
+        let side = min(0.25 * (abs(v.x) + abs(v.y)) / vz, cap);
+        s = cc_rooftopworks_MECH_RHO
+            * (cc_rooftopworks_MECH_S.x * side + cc_rooftopworks_MECH_S.y);
+    }
+    if (bk.ok && bk.lamp) {
+        let b = select(cc_rooftopworks_BULK_S, cc_rooftopworks_BULK_LIFT_S,
+                       bk.lift);
+        let f = dot(bk.door, v.xy);
+        let t = abs(dot(vec2<f32>(-bk.door.y, bk.door.x), v.xy));
+        s = s + (b.x * min(max(f, 0.0) / vz, cap)
+                 + b.y * min(max(-f, 0.0) / vz, cap)
+                 + b.z * min(0.5 * t / vz, cap) + b.w) / a0;
+    }
+    var e = cc_rooftopworks_LAMP_COL * (cc_rooftopworks_LAMP_RAD * s);
+    if (cr.kind == 2) {
+        let sig = cc_rooftopworks_PAD_LAMP_SIG;
+        e = e + cc_rooftopworks_PAD_LAMP_COL
+                * (cc_rooftopworks_PAD_LAMP_RAD * 4.0 * 6.283185307 * sig * sig
+                   / a0);
+    }
+    return e;
+}
+
+fn cc_rooftopworks_roof(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
+                        dir: vec3<f32>, direct: bool, base: vec3<f32>)
+        -> vec3<f32> {
+    if (!cc.built || cc.arch == 4 || cc.land_use != CITY_USE_URBAN) {
+        return vec3<f32>(0.0);
+    }
+    let d = cc_rooftopworks_deck(cc, 0);
+    if (!d.ok || abs(h.pos.z - d.z) > 0.2) {
+        return vec3<f32>(0.0);
+    }
+    // The door lamp's pool on the deck in front of the bulkhead: what a
+    // roof is read by from the air at night.
+    var e = vec3<f32>(0.0);
+    let cr = cc_rooftopworks_crown(cc, h.cell);
+    let bk = cc_rooftopworks_bulk(cc, h.cell, cr);
+    // Props are drawn only on the view ray, inside the range; a reflection
+    // traces none (CITY_TRACE_PLAIN), so it sees the far means at any range.
+    if (!(direct && city_props_drawn(h.cell, h.pos, h.t))) {
+        e = cc_rooftopworks_lamps_far(cc, h.cell, d, cr, bk, dir);
+    }
+    if (bk.ok && bk.lamp) {
+        let pool = cc_rooftopworks_spot(h.pos, bk.seat - vec3<f32>(0.0, 0.0,
+                                        bk.seat.z - d.z) + vec3<f32>(bk.door
+                                        * 1.4, 0.0), 2.2, fp);
+        e = e + cc_rooftopworks_LAMP_COL * (0.35 * cc_rooftopworks_LAMP_RAD
+                                            * CITY_ROOF_ALBEDO * 4.0 * pool);
+    }
+    let sk = cc_rooftopworks_sky(cc, d);
+    if (!sk.ok) {
+        return e;
+    }
+    // The pixel's footprint on the deck (z out of it, the ray into it).
+    let hb = max(city_wall_footprint(dir, fp_filter), vec2<f32>(1e-3));
+    let blo = h.pos.xy - hb;
+    let bhi = h.pos.xy + hb;
+    if (any(bhi <= sk.flo) || any(blo >= sk.fhi)) {
+        return e;
+    }
+    var col = CITY_PALETTE_MEAN;
+    if (cc.win_mono >= 0.0) {
+        col = city_room_color(cc.win_mono, cc.palette_bias);
+    }
+    let pane_rad = col * cc_rooftopworks_SKY_RAD;
+    let shown = direct && TONE_MAP;
+    let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+    let span = max(2.0 * hb.x / sk.pitch.x, 2.0 * hb.y / sk.pitch.y);
+    let w_mean = smoothstep(0.5, 1.0, span);
+    var ex = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
+    if (w_mean < 1.0) {
+        ex = cc_rooftopworks_sky_exact(cc, sk, blo, bhi, base, pane_rad, fog,
+                                       shown);
+        if (w_mean <= 0.0) {
+            if (ex.lit_area <= 0.0) {
+                return e;   // roof alone: as the core drew it
+            }
+            if (ex.whole > 0.0) {
+                return e + pane_rad * ex.whole;   // one pane, exactly
+            }
+        }
+    }
+    var mn = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
+    if (w_mean > 0.0) {
+        mn = cc_rooftopworks_sky_mean(sk, blo, bhi, base, pane_rad, fog,
+                                      shown);
+    }
+    let box_a = cc_rooftopworks_area(blo, bhi);
+    let mean = CityWinSum(mix(ex.sum.shown, mn.sum.shown, w_mean) / box_a,
+                          mix(ex.sum.light, mn.sum.light, w_mean) / box_a);
+    return e + city_windows_resolve(mean, fog, shown) - base;
 }
 
 // --- the tank, close up: SDF in a box ---------------------------------------
@@ -11709,6 +12374,80 @@ fn cc_rooftopworks_tank_normal(p: vec3<f32>) -> vec3<f32> {
       + e.xxx * cc_rooftopworks_tank_sdf(p + e.xxx));
 }
 
+// The round wooden tank, close up, in closed form rather than marched: its
+// staved barrel (a vertical cylinder, with its floor), the eave (the
+// annulus under the cap's overhang) and its conical roof, each a quadratic
+// or a plane in t. Its stand is boxes (the hit's other branch). Returns
+// (t, normal), t < 0 for a miss. A sphere-traced barrel beside the square
+// tank's cost the far views 3% without ever running.
+fn cc_rooftopworks_round_hit(o: vec3<f32>, dir: vec3<f32>, t_in: f32,
+                             t_out: f32, base: vec3<f32>) -> vec4<f32> {
+    let r = cc_rooftopworks_TANK_HW - 0.08;
+    let re = r + cc_rooftopworks_EAVE;
+    let z0 = cc_rooftopworks_ROUND_STAND;
+    let zt = cc_rooftopworks_ROUND_TANK_H;
+    let z1 = zt - cc_rooftopworks_CONE_H;
+    let p = o - base;
+    var best = vec4<f32>(-1.0, 0.0, 0.0, 1.0);
+    // The barrel: |p.xy + t d.xy| = r, entering from outside.
+    let a = dot(dir.xy, dir.xy);
+    let b = dot(p.xy, dir.xy);
+    let c = dot(p.xy, p.xy) - r * r;
+    let disc = b * b - a * c;
+    if (a > 1e-8 && disc >= 0.0) {
+        // @domain: disc >= 0 by the branch
+        let t = (-b - sqrt(disc)) / a;
+        let z = p.z + t * dir.z;
+        if (t >= t_in && t <= t_out && z >= z0 && z <= z1) {
+            best = vec4<f32>(t, (p.xy + t * dir.xy) / r, 0.0);
+        }
+    }
+    // The barrel's floor (from below, between the stand's posts) and the
+    // eave's underside: horizontal planes, a disc and an annulus.
+    if (abs(dir.z) > 1e-6) {
+        let tf = (z0 - p.z) / dir.z;
+        let qf = p.xy + tf * dir.xy;
+        if (dir.z > 0.0 && tf >= t_in && tf <= t_out && dot(qf, qf) <= r * r
+            && (best.x < 0.0 || tf < best.x)) {
+            best = vec4<f32>(tf, 0.0, 0.0, -1.0);
+        }
+        let te = (z1 - p.z) / dir.z;
+        let qe = p.xy + te * dir.xy;
+        let qq = dot(qe, qe);
+        if (dir.z > 0.0 && te >= t_in && te <= t_out && qq >= r * r
+            && qq <= re * re && (best.x < 0.0 || te < best.x)) {
+            best = vec4<f32>(te, 0.0, 0.0, -1.0);
+        }
+    }
+    // The roof: |p.xy + t d.xy| = k (zt - z) for z in [z1, zt], its rim at
+    // the eave's radius.
+    let k = re / cc_rooftopworks_CONE_H;
+    let w0 = zt - p.z;
+    let qa = a - k * k * dir.z * dir.z;
+    let qb = b + k * k * w0 * dir.z;
+    let qc = dot(p.xy, p.xy) - k * k * w0 * w0;
+    let qd = qb * qb - qa * qc;
+    if (abs(qa) > 1e-8 && qd >= 0.0) {
+        // @domain: qd >= 0 by the branch
+        let sq = sqrt(qd);
+        let ta = (-qb - sq) / qa;
+        let tb = (-qb + sq) / qa;
+        for (var i: i32 = 0; i < 2; i = i + 1) {
+            let t = select(min(ta, tb), max(ta, tb), i == 1);
+            let z = p.z + t * dir.z;
+            if (t >= t_in && t <= t_out && z >= z1 && z <= zt
+                && (best.x < 0.0 || t < best.x)) {
+                let q = p + t * dir;
+                // @domain: the cone's gradient on its surface, nonzero below the apex
+                let n = normalize(vec3<f32>(q.xy, k * k * (zt - q.z)));
+                best = vec4<f32>(t, n);
+                break;
+            }
+        }
+    }
+    return best;
+}
+
 // Sphere-trace the tank between the entry and exit of its envelope box.
 // Returns the hit t, or -1 when the ray threads past the rounded hull —
 // which is what makes the hull read as rounded.
@@ -11742,6 +12481,43 @@ fn cc_rooftopworks_mech_hit(best: CityHit, o: vec3<f32>, dir: vec3<f32>,
             return best;
         }
         let base = vec3<f32>(0.5 * (m.lo.xy + m.hi.xy), m.lo.z);
+        if (m.round) {
+            var r = best;
+            let rh = cc_rooftopworks_round_hit(o, dir, max(sb.x, t0),
+                                               min(sb.y, t1), base);
+            if (rh.x > max(t0, 1e-3) && rh.x < r.t) {
+                let p = o + rh.x * dir;
+                let is_cap = p.z > m.hi.z - cc_rooftopworks_CONE_H - 0.01;
+                r = CityHit(true, rh.x, p, rh.yzw,
+                            select(cc_rooftopworks_K_MECH,
+                                   cc_rooftopworks_K_ACC, is_cap) + s, ci);
+            }
+            // The stand: four posts under the barrel's rim and two tie beams
+            // across them at mid-height (the bracing, as a beam can be at
+            // this size). Kind ACC, the steel.
+            let pr = 0.70 * cc_rooftopworks_TANK_HW;
+            let ph = vec2<f32>(cc_rooftopworks_POST_HW);
+            let zs = m.lo.z + cc_rooftopworks_ROUND_STAND;
+            for (var k: i32 = 0; k < 4; k = k + 1) {
+                let q = base.xy + pr * vec2<f32>(select(-1.0, 1.0, (k & 1) == 1),
+                                                 select(-1.0, 1.0, k >= 2));
+                r = cc_rooftopworks_box(r, o, dir, inv_dir, t0, t1,
+                                        vec3<f32>(q - ph, m.lo.z),
+                                        vec3<f32>(q + ph, zs),
+                                        cc_rooftopworks_K_ACC + s, ci);
+            }
+            let zt = m.lo.z + 0.5 * cc_rooftopworks_ROUND_STAND;
+            r = cc_rooftopworks_box(r, o, dir, inv_dir, t0, t1,
+                vec3<f32>(base.xy - vec2<f32>(pr, ph.y), zt),
+                vec3<f32>(base.xy + vec2<f32>(pr, ph.y),
+                          zt + cc_rooftopworks_TIE_H),
+                cc_rooftopworks_K_ACC + s, ci);
+            return cc_rooftopworks_box(r, o, dir, inv_dir, t0, t1,
+                vec3<f32>(base.xy - vec2<f32>(ph.x, pr), zt),
+                vec3<f32>(base.xy + vec2<f32>(ph.x, pr),
+                          zt + cc_rooftopworks_TIE_H),
+                cc_rooftopworks_K_ACC + s, ci);
+        }
         let t = cc_rooftopworks_tank_trace(o, dir, max(sb.x, t0),
                                            min(sb.y, t1), base);
         if (t < 0.0 || t > t1 || t <= max(t0, 1e-3) || t >= best.t) {
@@ -11922,10 +12698,38 @@ fn cc_rooftopworks_props_trace(o: vec3<f32>, dir: vec3<f32>,
         // Nothing mechanical stands more than 5 m off a deck, so the slot
         // loop gets its own band inside the section gate — the penthouse
         // headroom above it is the crown's business, not the clutter's.
+        let bk = cc_rooftopworks_bulk(cc, ci, cr);
+        if (bk.ok && z_lo <= bk.hi.z + 0.2) {
+            best = cc_rooftopworks_box(best, o, dir, inv_dir, t0, t1, bk.lo,
+                                       bk.hi, cc_rooftopworks_K_BULK, ci);
+        }
+        if (d0.ok && z_lo <= d0.z + cc_rooftopworks_UNIT_H + 0.2) {
+            for (var k: i32 = 0; k < cc_rooftopworks_RUN_N; k = k + 1) {
+                let rn = cc_rooftopworks_run(cc, ci, k, cr, bk);
+                if (rn.ok) {
+                    best = cc_rooftopworks_box(best, o, dir, inv_dir, t0, t1,
+                                               rn.lo, rn.hi,
+                                               cc_rooftopworks_K_RUN, ci);
+                }
+            }
+            for (var k: i32 = 0; k < cc_rooftopworks_UNIT_N; k = k + 1) {
+                let un = cc_rooftopworks_unit(cc, ci, k, cr, bk);
+                if (un.ok) {
+                    best = cc_rooftopworks_box(best, o, dir, inv_dir, t0, t1,
+                                               un.lo, un.hi,
+                                               cc_rooftopworks_K_UNIT, ci);
+                }
+            }
+        }
+        if (bk.ok && bk.lift && z_lo <= bk.lift_hi.z + 0.2) {
+            best = cc_rooftopworks_box(best, o, dir, inv_dir, t0, t1,
+                                       bk.lift_lo, bk.lift_hi,
+                                       cc_rooftopworks_K_BULK, ci);
+        }
         let mech_on = z_lo <= cc.height + cc_rooftopworks_VENT_H + 0.2
                       && cc_rooftopworks_mech_on(cc);
         for (var s: i32 = 0; s < 4; s = s + 1) {
-            let m = cc_rooftopworks_mech(cc, ci, s, mech_on, cr);
+            let m = cc_rooftopworks_mech(cc, ci, s, mech_on, cr, bk);
             if (m.ok) {
                 best = cc_rooftopworks_mech_hit(best, o, dir, inv_dir, t0, t1,
                                                 m, s, ci, fp);
@@ -11979,6 +12783,160 @@ fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     return cc_rooftopworks_TRIM_COOL;
 }
 
+// --- the penthouse's glass and the coping trim, as shown --------------------
+// Both are bright detail on a dark wall, and both are averaged under the
+// pixel's footprint as the flat facade averages its windows (see the
+// skylights): what each element SHOWS, weighted by its share of the
+// footprint, handed back by city_windows_resolve as the radiance that shows
+// as that average. Component shading is not told whether a hit is seen
+// directly or in a reflection, so both are averaged as shown; a penthouse
+// or a parapet seen in a reflection gets its shown mean, not its plain one.
+
+// Light over a band of wall [b0, b1] (m above the penthouse's foot), ul
+// metres wide, at `f` times a bay's light: added as shown. The spandrel's
+// sill, smoothstep(0, SILL, v), darkens the light at the foot: below SILL
+// the band is three elements at the ramp's three-point Gauss-Legendre
+// nodes, above it one, so a footprint across the ramp is averaged as shown
+// rather than through the ramp's linear mean.
+fn cc_rooftopworks_pent_band(acc: CityWinSum, base: vec3<f32>,
+                             glow: vec3<f32>, f: f32, ul: f32, b0: f32,
+                             b1: f32, fog: vec4<f32>, shown: bool)
+        -> CityWinSum {
+    let s = cc_rooftopworks_PENT_SILL;
+    var res = city_win_add(acc, base + glow * f,
+                           ul * max(b1 - max(b0, s), 0.0), fog, shown);
+    let r1 = min(b1, s);
+    if (r1 > b0) {
+        let mid = 0.5 * (b0 + r1);
+        let hw = 0.5 * (r1 - b0);
+        let g = 0.7745966692 * hw;
+        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s, mid)),
+                           ul * (r1 - b0) * (4.0 / 9.0), fog, shown);
+        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s,
+                                                                mid - g)),
+                           ul * (r1 - b0) * (5.0 / 18.0), fog, shown);
+        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s,
+                                                                mid + g)),
+                           ul * (r1 - b0) * (5.0 / 18.0), fog, shown);
+    }
+    return res;
+}
+
+// A bay's brightness over the room's light, 0 if dark.
+fn cc_rooftopworks_pent_bay(cc: CityCell, iu: i32, iv: i32) -> f32 {
+    let wh = city_rand4(vec2<u32>(
+        cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u) ^ 0x0d2f1a37u,
+        cc.seed.y ^ (bitcast<u32>(iv) * 0x85ebca6bu) ^ 0x1b56c4e9u));
+    return select(0.0, 0.45 + 1.10 * wh.z, wh.x < cc_rooftopworks_PENT_LIT);
+}
+
+// The bays the exact sum walks at most, on each axis (as the skylights').
+const cc_rooftopworks_PENT_EXACT_MAX: i32 = 3;
+
+// The glass wall under the footprint box [u0, u1] x [v0, v1] (u along the
+// wall, v up from its foot, inside the wall), as shown. `base` is the
+// wall's own radiance, `glow` a bay's light at brightness 1.
+fn cc_rooftopworks_pent_seen(cc: CityCell, u0: f32, u1: f32, v0: f32,
+                             v1: f32, base: vec3<f32>, glow: vec3<f32>,
+                             fog: vec4<f32>, shown: bool) -> vec3<f32> {
+    let p = cc_rooftopworks_PENT_PITCH;
+    let fh = CITY_FLOOR_H;
+    let box_a = (u1 - u0) * (v1 - v0);
+    let w_mean = smoothstep(0.5, 1.0, max((u1 - u0) / p, (v1 - v0) / fh));
+    var ex = city_win_zero();
+    var lit_a = 0.0;
+    var n_el = 0;
+    var only = base;
+    if (w_mean < 1.0) {
+        let i0 = i32(floor(u0 / p));
+        let j0 = i32(floor(v0 / fh));
+        for (var j: i32 = 0; j < cc_rooftopworks_PENT_EXACT_MAX; j = j + 1) {
+            let b0 = max(f32(j0 + j) * fh, v0);
+            let b1 = min(f32(j0 + j + 1) * fh, v1);
+            if (b1 <= b0) {
+                continue;
+            }
+            for (var i: i32 = 0; i < cc_rooftopworks_PENT_EXACT_MAX;
+                 i = i + 1) {
+                let c0 = f32(i0 + i) * p;
+                let a0 = max(c0, u0);
+                let a1 = min(c0 + p, u1);
+                if (a1 <= a0) {
+                    continue;
+                }
+                let bay = cc_rooftopworks_pent_bay(cc, i0 + i, j0 + j);
+                if (bay <= 0.0) {
+                    continue;
+                }
+                // The mullion is the bay's first MULL of its pitch.
+                let m1 = c0 + cc_rooftopworks_PENT_MULL * p;
+                let um = max(min(a1, m1) - a0, 0.0);
+                let ug = (a1 - a0) - um;
+                ex = cc_rooftopworks_pent_band(ex, base, glow, 0.10 * bay, um,
+                                               b0, b1, fog, shown);
+                ex = cc_rooftopworks_pent_band(ex, base, glow, bay, ug, b0,
+                                               b1, fog, shown);
+                // One element is the footprint wholly on one surface: on
+                // the glass or the mullion, above the sill.
+                if (b0 >= cc_rooftopworks_PENT_SILL) {
+                    if (um > 0.0) {
+                        n_el = n_el + 1;
+                        only = base + glow * (0.10 * bay);
+                    }
+                    if (ug > 0.0) {
+                        n_el = n_el + 1;
+                        only = base + glow * bay;
+                    }
+                } else {
+                    n_el = n_el + 2;
+                }
+                lit_a = lit_a + (a1 - a0) * (b1 - b0);
+            }
+        }
+        if (box_a - lit_a > 1e-6 * box_a) {
+            n_el = n_el + 1;
+            only = base;
+        }
+        ex = city_win_add(ex, base, box_a - lit_a, fog, shown);
+        if (w_mean <= 0.0 && n_el <= 1) {
+            return only;   // one element: itself, exactly
+        }
+    }
+    var mn = city_win_zero();
+    if (w_mean > 0.0) {
+        // Lit at the rate, brightness uniform on [0.45, 1.55] by
+        // three-point Gauss-Legendre, glass and mullion at their shares of
+        // the box's width, the sill as in the exact sum.
+        let g = 0.55 * 0.7745966692;
+        let ul = (u1 - u0) * cc_rooftopworks_PENT_LIT;
+        let lv = vec3<f32>(1.0, 1.0 - g, 1.0 + g);
+        let wv = vec3<f32>(4.0 / 9.0, 5.0 / 18.0, 5.0 / 18.0);
+        for (var q: i32 = 0; q < 3; q = q + 1) {
+            mn = cc_rooftopworks_pent_band(
+                mn, base, glow, 0.10 * lv[q],
+                ul * cc_rooftopworks_PENT_MULL * wv[q], v0, v1, fog, shown);
+            mn = cc_rooftopworks_pent_band(
+                mn, base, glow, lv[q],
+                ul * (1.0 - cc_rooftopworks_PENT_MULL) * wv[q], v0, v1, fog,
+                shown);
+        }
+        mn = city_win_add(mn, base, box_a * (1.0 - cc_rooftopworks_PENT_LIT),
+                          fog, shown);
+    }
+    let mean = CityWinSum(mix(ex.shown, mn.shown, w_mean) / box_a,
+                          mix(ex.light, mn.light, w_mean) / box_a);
+    return city_windows_resolve(mean, fog, shown);
+}
+
+// How much of [u0, u1] the trim's runs light: fixtures on a TRIM_PITCH
+// centre, lit over the first TRIM_DUTY of it.
+fn cc_rooftopworks_trim_run_int(u: f32) -> f32 {
+    let p = cc_rooftopworks_TRIM_PITCH;
+    let q = floor(u / p);
+    return (q * cc_rooftopworks_TRIM_DUTY
+            + min((u / p) - q, cc_rooftopworks_TRIM_DUTY)) * p;
+}
+
 fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     // --- parapet -----------------------------------------------------------
@@ -11987,35 +12945,58 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         var e = cc_rooftopworks_dark(h, CITY_ROOF_ALBEDO * 1.3);
         let par = cc_rooftopworks_has_parapet(cc);
         if (par.y < cc_rooftopworks_PAR_LIT) {
-            // A strip of light under the coping. Sharp while the band is
-            // wider than a pixel; past that it is the same energy spread
-            // over the whole wall face, which is what a real coping light
-            // looks like from two kilometres — a line, not a sparkle.
-            let up = h.pos.z - d0.z;
-            let band = select(
-                0.0, 1.0,
-                up > cc_rooftopworks_PAR_H - cc_rooftopworks_PAR_TRIM);
-            let mean = (cc_rooftopworks_PAR_TRIM / cc_rooftopworks_PAR_H)
-                       * cc_rooftopworks_TRIM_MEAN_COMP;
-            let k = smoothstep(cc_rooftopworks_TRIM_LOD_START,
-                               cc_rooftopworks_TRIM_LOD_FULL, fp);
-            let face = select(1.0, 0.45, h.normal.z > 0.5);
-            // Runs, not a continuous tube. An unbroken glowing rectangle
-            // around every roof reads as wireframe; fixtures on a 6.5 m
-            // centre with a dark joint between them read as hardware. The
-            // run coordinate is the perimeter direction, taken from which
-            // edge of the deck the hit is nearest.
+            // A strip of light under the coping, in runs: fixtures on a
+            // 6.5 m centre with a dark joint between them read as
+            // hardware, where an unbroken glowing rectangle round every
+            // roof reads as wireframe. The run coordinate is the perimeter
+            // direction, taken from which edge of the deck the hit is
+            // nearest. The band and the runs are separable, so the share
+            // of the footprint they light is closed form at any size, and
+            // the footprint is shown as that mixture of lit and dark (see
+            // above): a line at two kilometres, not a sparkle and not a
+            // wash.
             let dxy = min(h.pos.xy - d0.lo, d0.hi - h.pos.xy);
             let along_y = dxy.x < dxy.y;
             let uc = select(h.pos.x, h.pos.y, along_y);
-            let seg = select(1.0, 0.0,
-                             fract(uc / cc_rooftopworks_TRIM_PITCH)
-                             > cc_rooftopworks_TRIM_DUTY);
-            let segk = mix(seg, cc_rooftopworks_TRIM_DUTY,
-                           smoothstep(0.9, 2.4, fp));
-            e = e + cc_rooftopworks_trim_color(cc)
-                    * (cc_rooftopworks_TRIM_RAD * face * segk
-                       * mix(band, mean, k));
+            let top = h.normal.z > 0.5;
+            let face = select(1.0, 0.45, top);
+            let d_u = select(dir.x, dir.y, along_y);
+            let d_w = select(dir.y, dir.x, along_y);
+            // The footprint in the face's own frame: along the run, then
+            // up the wall (across the coping, for its top), then out.
+            var dl = vec3<f32>(d_u, dir.z, dot(dir.xy, h.normal.xy));
+            if (top) {
+                dl = vec3<f32>(d_u, d_w, dir.z);
+            }
+            let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-3));
+            let run = (cc_rooftopworks_trim_run_int(uc + hb.x)
+                       - cc_rooftopworks_trim_run_int(uc - hb.x))
+                      / (2.0 * hb.x);
+            var band = 1.0;
+            if (!top) {
+                let up = h.pos.z - d0.z;
+                let v0 = clamp(up - hb.y, 0.0, cc_rooftopworks_PAR_H);
+                let v1 = clamp(up + hb.y, 0.0, cc_rooftopworks_PAR_H);
+                let b0 = cc_rooftopworks_PAR_H - cc_rooftopworks_PAR_TRIM;
+                if (v1 - v0 < 1e-4) {
+                    band = select(0.0, 1.0, up > b0);
+                } else {
+                    band = max(v1 - max(v0, b0), 0.0) / (v1 - v0);
+                }
+            }
+            let share = clamp(run * band, 0.0, 1.0);
+            let lit = e + cc_rooftopworks_trim_color(cc)
+                          * (cc_rooftopworks_TRIM_RAD * face);
+            if (share >= 1.0) {
+                return lit;
+            }
+            if (share > 0.0) {
+                let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+                var acc = city_win_add(city_win_zero(), lit, share, fog,
+                                       TONE_MAP);
+                acc = city_win_add(acc, e, 1.0 - share, fog, TONE_MAP);
+                return city_windows_resolve(acc, fog, TONE_MAP);
+            }
         }
         return e;
     }
@@ -12033,35 +13014,28 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         let tangent = vec2<f32>(-nh.y, nh.x);
         let uc = dot(h.pos.xy, tangent);
         let up = h.pos.z - cr.z0;
-        let mull = select(
-            1.0, 0.10,
-            fract(uc / cc_rooftopworks_PENT_PITCH) < cc_rooftopworks_PENT_MULL);
-        let sill = smoothstep(0.0, cc_rooftopworks_PENT_SILL, up);
         // Panes, not a slab. Lit uniformly at 1.8 the crown came out as the
-        // brightest thing on the skyline — brighter in the mean than the
+        // brightest thing on the skyline, brighter in the mean than the
         // facade below it, which is backwards. It is a room: most of the
-        // glass is lit, some is not, and each bay has its own level.
-        let iu = i32(floor(uc / cc_rooftopworks_PENT_PITCH));
-        let iv = i32(floor(up / CITY_FLOOR_H));
-        let wh = city_rand4(vec2<u32>(
-            cc.seed.x ^ (bitcast<u32>(iu) * 0x9e3779b9u) ^ 0x0d2f1a37u,
-            cc.seed.y ^ (bitcast<u32>(iv) * 0x85ebca6bu) ^ 0x1b56c4e9u));
-        let bay = select(0.0, 0.45 + 1.10 * wh.z,
-                         wh.x < cc_rooftopworks_PENT_LIT);
-        // Mullions are 13% of the pitch and a bay is 2.1 m: both are
-        // sub-pixel past a couple of metres, where the wall settles to its
-        // own mean rather than flickering.
-        let k = smoothstep(0.7, 2.2, fp);
-        let m = mix(mull * bay,
-                    (1.0 - 0.9 * cc_rooftopworks_PENT_MULL)
-                    * cc_rooftopworks_PENT_LIT
-                    * cc_rooftopworks_PENT_MEAN_COMP, k);
+        // glass is lit, some is not, and each bay (one PENT_PITCH by one
+        // storey) has its own level; mullions take the first PENT_MULL of
+        // each pitch at a tenth of the light, and the spandrel at the foot
+        // darkens the first PENT_SILL. Averaged under the footprint as
+        // shown (cc_rooftopworks_pent_seen).
         var col = cc_rooftopworks_PENT_COL;
         if (cc.win_mono >= 0.0) {
             col = city_room_color(cc.win_mono, cc.palette_bias);
         }
-        return cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO)
-             + col * (cc_rooftopworks_PENT_RAD * m * sill);
+        let base = cc_rooftopworks_dark(h, CITY_FACADE_ALBEDO);
+        let dl = vec3<f32>(dot(dir.xy, tangent), dir.z, dot(dir.xy, nh));
+        let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-3));
+        let wall_h = cr.z1 - cr.z0;
+        let v0 = clamp(up - hb.y, 0.0, wall_h);
+        let v1 = max(clamp(up + hb.y, 0.0, wall_h), v0 + 1e-3);
+        let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+        return cc_rooftopworks_pent_seen(cc, uc - hb.x, uc + hb.x, v0, v1,
+                                         base, col * cc_rooftopworks_PENT_RAD,
+                                         fog, TONE_MAP);
     }
 
     // --- helipad -----------------------------------------------------------
@@ -12103,6 +13077,128 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         return e;
     }
 
+    // --- the bulkhead --------------------------------------------------------
+    if (h.kind == cc_rooftopworks_K_BULK) {
+        let bk = cc_rooftopworks_bulk(cc, h.cell,
+                                      cc_rooftopworks_crown(cc, h.cell));
+        var e = cc_rooftopworks_dark(h, cc_rooftopworks_BULK_ALBEDO);
+        if (bk.lamp) {
+            let src = cc_rooftopworks_spot(h.pos, bk.seat,
+                                           cc_rooftopworks_LAMP_SIG, fp);
+            let spill = cc_rooftopworks_spot(h.pos, bk.seat, 1.6, fp);
+            e = e + cc_rooftopworks_LAMP_COL
+                    * (cc_rooftopworks_LAMP_RAD * (src + 0.12 * spill));
+        }
+        // The door: a dark steel leaf in the middle of its face, under the
+        // lamp, so it darkens the light the face returns as well as the
+        // face (the far lamp constants are measured with it). Box-filtered
+        // over the pixel's footprint on the face: the leaf's share of it,
+        // which is the leaf itself up close and its area's mean far off.
+        if (dot(h.normal.xy, bk.door) > 0.5) {
+            let t = vec2<f32>(-bk.door.y, bk.door.x);
+            let c = 0.5 * (bk.lo.xy + bk.hi.xy);
+            let along = dot(h.pos.xy - c, t);
+            let up = h.pos.z - bk.lo.z;
+            let dl = vec3<f32>(dot(dir.xy, t), dir.z, dot(dir.xy, bk.door));
+            let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-4));
+            let w = 0.5 * cc_rooftopworks_BULK_DOOR_W;
+            let su = max(min(along + hb.x, w) - max(along - hb.x, -w), 0.0);
+            let sv = max(min(up + hb.y, cc_rooftopworks_BULK_DOOR_H)
+                         - max(up - hb.y, 0.0), 0.0);
+            let share = su * sv / (4.0 * hb.x * hb.y);
+            e = e * (1.0 - share * (1.0 - cc_rooftopworks_BULK_DOOR_K));
+        }
+        // The machine room's walls: a louvred vent panel in the middle of
+        // each, where the hoist's motor room breathes. The slats are what
+        // the door lamp's light picks out, so the pattern multiplies the
+        // light as well as the wall; it averages to exactly 1 over its pitch
+        // (dark slats, brighter gaps between them), so the panel's mean,
+        // and the far lamp constants measured without it, are unchanged.
+        // Drawn while a slat is wider than a pixel, its mean (1) past it.
+        let lc = 0.5 * (bk.lift_lo.xy + bk.lift_hi.xy);
+        if (bk.lift && abs(h.normal.z) < 0.5
+            && all(abs(h.pos.xy - lc) < vec2<f32>(cc_rooftopworks_LIFT_HX
+                                                  + 0.01))) {
+            // @domain: a wall's normal: |xy| = 1
+            let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
+            let along = abs(dot(h.pos.xy - lc, vec2<f32>(-nh.y, nh.x)));
+            let up = h.pos.z - bk.lift_lo.z;
+            if (along < 0.5 * cc_rooftopworks_LOUVRE_W
+                && up > cc_rooftopworks_LOUVRE_Z.x
+                && up < cc_rooftopworks_LOUVRE_Z.y) {
+                let dk = cc_rooftopworks_LOUVRE_DARK;
+                let gap = (1.0 - dk * cc_rooftopworks_LOUVRE_K) / (1.0 - dk);
+                let slat = select(gap, cc_rooftopworks_LOUVRE_K,
+                                  fract(up / cc_rooftopworks_LOUVRE_PITCH)
+                                  < dk);
+                e = e * mix(slat, 1.0, smoothstep(0.06, 0.25, fp));
+            }
+        }
+        return e;
+    }
+
+    // --- packaged units -----------------------------------------------------
+    if (h.kind == cc_rooftopworks_K_UNIT) {
+        // Grey casing, a fan grille on the top, a dark louvre band on the
+        // sides; a few pixels out it is the casing's mean.
+        var e = cc_rooftopworks_dark(h, 0.22);
+        let k = 1.0 - smoothstep(0.15, 0.6, fp);
+        let crs = cc_rooftopworks_crown(cc, h.cell);
+        let bk = cc_rooftopworks_bulk(cc, h.cell, crs);
+        var un = cc_rooftopworks_unit(cc, h.cell, 0, crs, bk);
+        for (var j: i32 = 1; j < cc_rooftopworks_UNIT_N; j = j + 1) {
+            if (un.ok && all(h.pos >= un.lo - 0.02)
+                && all(h.pos <= un.hi + 0.02)) {
+                break;
+            }
+            un = cc_rooftopworks_unit(cc, h.cell, j, crs, bk);
+        }
+        let along = select(h.pos.x - un.lo.x, h.pos.y - un.lo.y, un.along_y);
+        let fu = fract(along / cc_rooftopworks_UNIT_PITCH);
+        let seam = select(1.0, 0.3, fu > 0.92);
+        if (h.normal.z > 0.5) {
+            // A fan grille in the middle of each unit's top.
+            let cu = (fu - 0.46) * cc_rooftopworks_UNIT_PITCH;
+            let grille = select(1.0, 0.45, abs(cu) < 0.55);
+            e = e * mix(1.0, grille * seam, k);
+        } else {
+            let band = select(1.0, 0.5, fract(h.pos.z * 6.0) < 0.5);
+            e = e * mix(1.0, band * seam, k * 0.6);
+        }
+        return e;
+    }
+
+    // --- runs --------------------------------------------------------------
+    if (h.kind == cc_rooftopworks_K_RUN) {
+        let crs = cc_rooftopworks_crown(cc, h.cell);
+        let bk = cc_rooftopworks_bulk(cc, h.cell, crs);
+        // Which run: the one whose box holds the hit.
+        var rn = cc_rooftopworks_run(cc, h.cell, 0, crs, bk);
+        for (var k: i32 = 1; k < cc_rooftopworks_RUN_N; k = k + 1) {
+            if (rn.ok && all(h.pos >= rn.lo - 0.02)
+                && all(h.pos <= rn.hi + 0.02)) {
+                break;
+            }
+            rn = cc_rooftopworks_run(cc, h.cell, k, crs, bk);
+        }
+        let k = 1.0 - smoothstep(0.15, 0.6, fp);
+        if (rn.duct) {
+            // Galvanised sheet with a joint every 1.2 m.
+            let along = select(h.pos.x, h.pos.y, rn.along_y);
+            let seam = select(1.0, 0.55, fract(along / 1.2) < 0.05);
+            return cc_rooftopworks_dark(h, 0.24) * mix(1.0, seam, k);
+        }
+        // Three pipes across the rack, each read as a cylinder by its
+        // shading; the sleepers under them every 2 m.
+        let across = select(h.pos.y - rn.lo.y, h.pos.x - rn.lo.x, rn.along_y)
+                     / (2.0 * cc_rooftopworks_RACK_HW);
+        let fu = fract(across * 3.0);
+        let round = sqrt(max(1.0 - (2.0 * fu - 1.0) * (2.0 * fu - 1.0), 0.0));
+        let gap = select(1.0, 0.25, fu < 0.08 || fu > 0.92);
+        return cc_rooftopworks_dark(h, 0.16)
+               * mix(1.0, (0.55 + 0.6 * round) * gap, k);
+    }
+
     // --- pipework ----------------------------------------------------------
     if (h.kind == cc_rooftopworks_K_PIPE) {
         let pp = cc_rooftopworks_pipes(cc);
@@ -12126,14 +13222,21 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let is_acc = h.kind >= cc_rooftopworks_K_ACC;
     let s = h.kind - select(cc_rooftopworks_K_MECH, cc_rooftopworks_K_ACC,
                             is_acc);
+    let crs = cc_rooftopworks_crown(cc, h.cell);
     let m = cc_rooftopworks_mech(cc, h.cell, s,
-                                 cc_rooftopworks_mech_on(cc),
-                                 cc_rooftopworks_crown(cc, h.cell));
+                                 cc_rooftopworks_mech_on(cc), crs,
+                                 cc_rooftopworks_bulk(cc, h.cell, crs));
     var alb = cc_rooftopworks_MECH_ALBEDO;
-    if (m.kind == 0 && is_acc) {
+    // A round tank's stand is dark steel; the barrel and its roof are wood.
+    let stand = m.round
+                && h.pos.z - m.lo.z < cc_rooftopworks_ROUND_STAND - 0.01;
+    if (m.kind == 0 && is_acc && !m.round) {
         alb = alb * 1.35;  // the rim band is galvanised: it catches more
     }
     var e = cc_rooftopworks_dark(h, alb);
+    if (m.round && !stand) {
+        e = e * cc_rooftopworks_WOOD;
+    }
     if (m.lamp) {
         // The fixture itself, plus the pool it throws on its own housing.
         let src = cc_rooftopworks_spot(h.pos, m.seat,
@@ -17709,11 +18812,9 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // skylights. So the hook adds nothing where the geometry was drawn, and
 // beyond CITY_PROP_RANGE it adds the geometry's exact mean.
 //
-// "Drawn" is the core's own test: props run for a cell whose ray segment
-// starts inside CITY_PROP_RANGE, and that start is where the ray enters the
-// hit cell's column, or enters the city slab from above if that is later
-// (city_trace's t_cur) — recomputed here from the camera, since the hook is
-// not handed the ray.
+// "Drawn" is the core's own test (city_props_drawn) on the view ray; a
+// reflection traces no props at all (CITY_TRACE_PLAIN), so a warehouse seen
+// in one gets the mean at any range.
 //
 // The sawtooth mean is view-dependent, and exactly so. In the tooth's own
 // (s, z) plane a ray descending with slope m = |dz| / |ds| against the
@@ -17726,7 +18827,11 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // A clerestory is the same argument with one long face in view and no
 // occluder: its projected strip, length x height x |d_c| / |dz|, over the
 // roof's area.
-fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32) -> vec3<f32> {
+// The hook's fp_filter, ray and the core's roof radiance are not needed
+// here: the glazing's mean is a plain emission on the roof.
+fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
+                    _dir: vec3<f32>, direct: bool, _base: vec3<f32>)
+        -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
     }
@@ -17734,21 +18839,10 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32) -> vec3<f32> {
     if (!r.lit) {
         return vec3<f32>(0.0);
     }
-    let o = city_camera_origin();
-    let dir = (h.pos - o) / max(h.t, 1e-3);
-    let cell = u.ocean_params.x;
-    let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
-                        select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
-                        select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
-    let cmin = vec3<f32>(vec2<f32>(h.cell) * cell, -1e6);
-    let col = city_box_hit(o, inv, cmin, cmin + vec3<f32>(cell, cell, 2e6));
-    var t_slab = 0.0;
-    if (o.z > CITY_SLAB_TOP) {
-        t_slab = (CITY_SLAB_TOP - o.z) * inv.z;
-    }
-    if (max(col.x, t_slab) < CITY_PROP_RANGE) {
+    if (direct && city_props_drawn(h.cell, h.pos, h.t)) {
         return vec3<f32>(0.0);
     }
+    let dir = (h.pos - city_camera_origin()) / max(h.t, 1e-3);
     let dz = max(abs(dir.z), 1e-3);
     if (r.kind == 1) {
         let d_s = r.face * select(dir.y, dir.x, r.step_x);
@@ -20565,10 +21659,12 @@ fn cc_near_props_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     return res;
 }
 
-fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32)
+fn cc_roof_detail(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
+                  dir: vec3<f32>, direct: bool, base: vec3<f32>)
         -> vec3<f32> {
     var e = vec3<f32>(0.0);
-    e = e + cc_industry_roof(cc, h, fp);
+    e = e + cc_rooftopworks_roof(cc, h, fp, fp_filter, dir, direct, base);
+    e = e + cc_industry_roof(cc, h, fp, fp_filter, dir, direct, base);
     return e;
 }
 // <<< GENERATED CITY COMPONENTS
