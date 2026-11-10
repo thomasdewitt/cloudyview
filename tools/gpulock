@@ -30,10 +30,23 @@ Python, stdlib only, the same on every platform (2026-11-09): this was a bash
 script exec'ing flock(1) and systemd-run, neither of which macOS has, so on
 the M1 every guarded tool refused and gpulock itself could not run. The lock
 is fcntl.flock on the lock file, the same flock(2) lock flock(1) takes, so
-the two exclude each other while both are in use. The command is a child
-that does NOT inherit the lock's descriptor: a background process it starts
-(the QA Chrome) cannot keep the lock after the command ends, as one could
-under flock(1).
+the two exclude each other while both are in use.
+
+The command inherits the lock's descriptor, as under flock(1): the lock is
+held while the launcher OR anything under it lives, so a launcher killed
+alone (kill -9, an OOM kill) does not free the lock under a command still
+running (loose-ends, review of 7d3e0b9: a second launcher took the lock
+mid-run). The cost is flock(1)'s too: anything the command leaves running
+in the background holds the lock until it closes the descriptor, which is
+why tools/qa_chrome.sh closes it before starting Chrome.
+
+Re-entrant: a tools/gpulock run under a command that already holds the lock
+(SOAR_GPULOCK the same lock file, SOAR_GPULOCK_PID a running gpulock among
+its ancestors: gpulock_guard.launcher_reason) runs its command at once
+rather than waiting GPULOCK_WAIT on its own ancestor and giving up with 75,
+as flock(1) did, and runs it bare: it is already inside the holder's
+memory-capped scope. A gate script under the lock starting the QA Chrome
+with `tools/gpulock tools/qa_chrome.sh start` is the case.
 """
 
 import fcntl
@@ -41,6 +54,9 @@ import os
 import signal
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gpulock_guard  # noqa: E402  (beside this script, stdlib only)
 
 LOCK = "/tmp/soar-gpu.lock"
 EXIT_TIMEOUT = 75          # flock -E 75, kept for the callers that test it
@@ -90,15 +106,32 @@ def acquire(path, wait_s):
     return fd
 
 
+def held_by_ancestor(env, path, table=None):
+    """The pid of the running tools/gpulock among this process's ancestors
+    that holds `path`, or None: what makes a nested launcher run at once."""
+    if gpulock_guard.launcher_reason(env, path, table) is not None:
+        return None
+    return int(env["SOAR_GPULOCK_PID"])
+
+
 def main(argv):
     if not argv:
         print("usage: tools/gpulock <command...>", file=sys.stderr)
         return 2
-    cmd = command(argv)
     # GPULOCK_FILE exists for the tests' own lock files. The tools only
     # accept SOAR_GPULOCK equal to LOCK, so any other file locks nothing
     # they will run under.
     path = os.environ.get("GPULOCK_FILE", LOCK)
+    holder = held_by_ancestor(os.environ, path)
+    if holder is not None:
+        # Bare: already inside the holder's memory-capped scope on Linux
+        # (and a second systemd-run --scope from the same pid collides with
+        # it: scopes are named by pid).
+        print(f"gpulock: {path} is already held by this command's gpulock "
+              f"(pid {holder}); running directly, under its cap",
+              file=sys.stderr)
+        os.execvp(argv[0], argv)
+    cmd = command(argv)
     wait_s = float(os.environ.get("GPULOCK_WAIT", "1800"))
     try:
         fd = acquire(path, wait_s)
@@ -108,9 +141,10 @@ def main(argv):
         return EXIT_TIMEOUT
     env = {**os.environ, "SOAR_GPULOCK": path,
            "SOAR_GPULOCK_PID": str(os.getpid())}
-    # os.open's descriptors are not inheritable (PEP 446): the child and
-    # everything it starts run without the lock's descriptor.
-    child = subprocess.Popen(cmd, env=env)
+    # Passed to the command (os.open's descriptors are not inheritable by
+    # default, PEP 446): it and its descendants hold the lock with this
+    # launcher, so killing the launcher alone does not free it.
+    child = subprocess.Popen(cmd, env=env, pass_fds=(fd,))
 
     def forward(signum, frame):
         child.send_signal(signum)

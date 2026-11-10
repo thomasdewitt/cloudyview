@@ -201,11 +201,11 @@ def _launcher():
     return m
 
 
-def _locked(lock, *cmd, wait="30", **kw):
+def _locked(lock, *cmd, wait="30", env_extra=None, **kw):
     """Run `cmd` under tools/gpulock on the test's own lock file."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("SOAR_GPULOCK", "SOAR_GPULOCK_PID", "GPULOCK_MEM")}
-    env.update(GPULOCK_FILE=str(lock), GPULOCK_WAIT=wait)
+    env.update(GPULOCK_FILE=str(lock), GPULOCK_WAIT=wait, **(env_extra or {}))
     return subprocess.run([str(TOOLS / "gpulock"), *cmd], cwd=REPO, env=env,
                           capture_output=True, text=True, timeout=60, **kw)
 
@@ -304,16 +304,82 @@ def test_the_launcher_times_out_with_75(tmp_path):
         os.close(fd)
 
 
-def test_the_command_does_not_inherit_the_lock(tmp_path):
-    # A background child of the command (the QA Chrome) cannot keep the
-    # lock: the launcher's descriptor stays in the launcher.
+def test_the_command_holds_the_lock(tmp_path):
+    # As under flock(1): the command inherits the lock's descriptor, so the
+    # lock is held while it (or anything under it) lives.
     if not os.path.isdir("/proc/self/fd"):
         pytest.skip("needs /proc to list descriptors")
     lock = tmp_path / "lock"
     probe = ("import os; print(sum(os.path.realpath(f'/proc/self/fd/{f}') == "
              f"{str(lock)!r} for f in os.listdir('/proc/self/fd')))")
     r = _locked(lock, sys.executable, "-c", probe)
-    assert r.returncode == 0 and r.stdout.strip() == "0", r
+    assert r.returncode == 0 and r.stdout.strip() == "1", r
+
+
+def _launch(lock, *cmd, **env):
+    e = {k: v for k, v in os.environ.items()
+         if k not in ("SOAR_GPULOCK", "SOAR_GPULOCK_PID", "GPULOCK_MEM")}
+    e.update(GPULOCK_FILE=str(lock), **env)
+    return subprocess.Popen([str(TOOLS / "gpulock"), *cmd], env=e,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+
+
+def test_a_launcher_killed_alone_does_not_free_the_lock(tmp_path):
+    # loose-ends' review of 7d3e0b9: SIGKILL to the launcher while its
+    # command ran let a second launcher take the lock mid-run.
+    lock = tmp_path / "lock"
+    first = _launch(lock, sys.executable, "-c",
+                    "import os, time; print(os.getpid(), flush=True); "
+                    "time.sleep(4)")
+    worker = int(first.stdout.readline())
+    first.kill()                                  # the launcher, alone
+    first.wait(timeout=10)
+    os.kill(worker, 0)                            # its command lives on
+    second = _locked(lock, "true", wait="1")
+    assert second.returncode == 75, second       # still held by the command
+    for _ in range(200):                          # the command ends
+        try:
+            os.kill(worker, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    third = _locked(lock, "true", wait="10")
+    assert third.returncode == 0, third          # and then the lock is free
+
+
+def test_a_nested_launcher_runs_at_once(tmp_path):
+    # Inside a locked command, tools/gpulock used to wait GPULOCK_WAIT on
+    # its own ancestor and exit 75 (flock(1) too); a gate script starting
+    # the QA Chrome under the lock does exactly this.
+    lock = tmp_path / "lock"
+    t0 = time.monotonic()
+    r = _locked(lock, str(TOOLS / "gpulock"), sys.executable, "-c",
+                "print('inner')", wait="1")
+    assert r.returncode == 0 and r.stdout.strip() == "inner", r
+    assert "is already held by this command's gpulock" in r.stderr, r.stderr
+    assert time.monotonic() - t0 < 10
+
+
+@pytest.mark.parametrize("forged", ["another launcher", "a non-launcher"])
+def test_a_forged_holder_still_queues(tmp_path, forged):
+    # The controls: re-entrancy is for a launcher among the ancestors only.
+    # Naming another session's real launcher, or an ancestor that is not a
+    # launcher, queues behind the lock like anyone else.
+    lock = tmp_path / "lock"
+    holder = _launch(lock, sys.executable, "-c",
+                     "print('held', flush=True); import time; time.sleep(30)")
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        pid = holder.pid if forged == "another launcher" else os.getpid()
+        r = _locked(lock, "true", wait="0.5",
+                    env_extra={"SOAR_GPULOCK": str(lock),
+                               "SOAR_GPULOCK_PID": str(pid)})
+        assert r.returncode == 75, r
+        assert "already held" not in r.stderr, r.stderr
+    finally:
+        holder.terminate()
+        holder.wait(timeout=30)
 
 
 def test_a_signal_to_the_launcher_reaches_the_command(tmp_path):
@@ -408,3 +474,22 @@ def test_darwin_ps_output_passes_under_its_launcher_only():
 def test_pytest_may_exempt_the_tool_it_drives():
     assert _guard().unlocked_reason({"SOAR_GPULOCK_EXEMPT": "pytest"}) is None
     assert _guard().unlocked_reason({"SOAR_GPULOCK_EXEMPT": "1"}) is not None
+
+
+def test_darwin_ps_output_makes_a_nested_launcher_re_entrant():
+    launcher = _launcher()
+    lock = launcher.LOCK
+    table = _guard().parse_ps(_darwin_ps(os.getpid(), 901))
+    env = lambda pid: {"SOAR_GPULOCK": lock, "SOAR_GPULOCK_PID": pid}
+    assert launcher.held_by_ancestor(env("900"), lock, table) == 900
+    assert launcher.held_by_ancestor(env("950"), lock, table) is None
+    assert launcher.held_by_ancestor(env("415"), lock, table) is None
+    # The pytest exemption excuses a tool; it is no lock to re-enter.
+    assert launcher.held_by_ancestor({"SOAR_GPULOCK_EXEMPT": "pytest"},
+                                     lock, table) is None
+
+
+def test_the_qa_chrome_closes_the_lock_before_chrome():
+    src = (TOOLS / "qa_chrome.sh").read_text()
+    close = src.index('eval "exec ${fd##*/}>&-"')
+    assert close < src.index("/usr/bin/google-chrome")
