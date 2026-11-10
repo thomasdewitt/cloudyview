@@ -11289,12 +11289,6 @@ const cc_rooftopworks_TRIM_RAD: f32 = 1.20;
 const cc_rooftopworks_TRIM_COOL: vec3<f32> = vec3<f32>(0.72, 0.86, 1.00);
 const cc_rooftopworks_TRIM_PITCH: f32 = 6.50;  // fixture centres (m)
 const cc_rooftopworks_TRIM_DUTY: f32 = 0.82;   // lit fraction of the run
-// The trim is a 0.28 m band on a 1.25 m wall: past this footprint the band is
-// thinner than a pixel and hands over to its mean over the whole wall face,
-// which is the same energy spread out. Nothing switches off (SPEC rule 3).
-const cc_rooftopworks_TRIM_LOD_START: f32 = 1.60;
-const cc_rooftopworks_TRIM_LOD_FULL: f32 = 4.00;
-const cc_rooftopworks_TRIM_MEAN_COMP: f32 = 0.20;  // see PENT_MEAN_COMP
 
 // --- penthouse --------------------------------------------------------------
 const cc_rooftopworks_PENT_FRAC: f32 = 0.20;
@@ -12766,6 +12760,24 @@ fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     return cc_rooftopworks_TRIM_COOL;
 }
 
+// --- the coping trim, as shown -------------------------------------------------
+// Bright detail on a dark wall, averaged under the pixel's footprint as the
+// flat facade averages its windows (see the skylights): what each element
+// SHOWS, weighted by its share of the footprint, handed back by
+// city_windows_resolve as the radiance that shows as that average.
+// Component shading is not told whether a hit is seen directly or in a
+// reflection, so the trim is averaged as shown; a parapet seen in a
+// reflection gets its shown mean, not its plain one.
+
+// How much of [u0, u1] the trim's runs light: fixtures on a TRIM_PITCH
+// centre, lit over the first TRIM_DUTY of it.
+fn cc_rooftopworks_trim_run_int(u: f32) -> f32 {
+    let p = cc_rooftopworks_TRIM_PITCH;
+    let q = floor(u / p);
+    return (q * cc_rooftopworks_TRIM_DUTY
+            + min((u / p) - q, cc_rooftopworks_TRIM_DUTY)) * p;
+}
+
 fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
     // --- parapet -----------------------------------------------------------
@@ -12774,35 +12786,58 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         var e = cc_rooftopworks_dark(h, CITY_ROOF_ALBEDO * 1.3);
         let par = cc_rooftopworks_has_parapet(cc);
         if (par.y < cc_rooftopworks_PAR_LIT) {
-            // A strip of light under the coping. Sharp while the band is
-            // wider than a pixel; past that it is the same energy spread
-            // over the whole wall face, which is what a real coping light
-            // looks like from two kilometres — a line, not a sparkle.
-            let up = h.pos.z - d0.z;
-            let band = select(
-                0.0, 1.0,
-                up > cc_rooftopworks_PAR_H - cc_rooftopworks_PAR_TRIM);
-            let mean = (cc_rooftopworks_PAR_TRIM / cc_rooftopworks_PAR_H)
-                       * cc_rooftopworks_TRIM_MEAN_COMP;
-            let k = smoothstep(cc_rooftopworks_TRIM_LOD_START,
-                               cc_rooftopworks_TRIM_LOD_FULL, fp);
-            let face = select(1.0, 0.45, h.normal.z > 0.5);
-            // Runs, not a continuous tube. An unbroken glowing rectangle
-            // around every roof reads as wireframe; fixtures on a 6.5 m
-            // centre with a dark joint between them read as hardware. The
-            // run coordinate is the perimeter direction, taken from which
-            // edge of the deck the hit is nearest.
+            // A strip of light under the coping, in runs: fixtures on a
+            // 6.5 m centre with a dark joint between them read as
+            // hardware, where an unbroken glowing rectangle round every
+            // roof reads as wireframe. The run coordinate is the perimeter
+            // direction, taken from which edge of the deck the hit is
+            // nearest. The band and the runs are separable, so the share
+            // of the footprint they light is closed form at any size, and
+            // the footprint is shown as that mixture of lit and dark (see
+            // above): a line at two kilometres, not a sparkle and not a
+            // wash.
             let dxy = min(h.pos.xy - d0.lo, d0.hi - h.pos.xy);
             let along_y = dxy.x < dxy.y;
             let uc = select(h.pos.x, h.pos.y, along_y);
-            let seg = select(1.0, 0.0,
-                             fract(uc / cc_rooftopworks_TRIM_PITCH)
-                             > cc_rooftopworks_TRIM_DUTY);
-            let segk = mix(seg, cc_rooftopworks_TRIM_DUTY,
-                           smoothstep(0.9, 2.4, fp));
-            e = e + cc_rooftopworks_trim_color(cc)
-                    * (cc_rooftopworks_TRIM_RAD * face * segk
-                       * mix(band, mean, k));
+            let top = h.normal.z > 0.5;
+            let face = select(1.0, 0.45, top);
+            let d_u = select(dir.x, dir.y, along_y);
+            let d_w = select(dir.y, dir.x, along_y);
+            // The footprint in the face's own frame: along the run, then
+            // up the wall (across the coping, for its top), then out.
+            var dl = vec3<f32>(d_u, dir.z, dot(dir.xy, h.normal.xy));
+            if (top) {
+                dl = vec3<f32>(d_u, d_w, dir.z);
+            }
+            let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-3));
+            let run = (cc_rooftopworks_trim_run_int(uc + hb.x)
+                       - cc_rooftopworks_trim_run_int(uc - hb.x))
+                      / (2.0 * hb.x);
+            var band = 1.0;
+            if (!top) {
+                let up = h.pos.z - d0.z;
+                let v0 = clamp(up - hb.y, 0.0, cc_rooftopworks_PAR_H);
+                let v1 = clamp(up + hb.y, 0.0, cc_rooftopworks_PAR_H);
+                let b0 = cc_rooftopworks_PAR_H - cc_rooftopworks_PAR_TRIM;
+                if (v1 - v0 < 1e-4) {
+                    band = select(0.0, 1.0, up > b0);
+                } else {
+                    band = max(v1 - max(v0, b0), 0.0) / (v1 - v0);
+                }
+            }
+            let share = clamp(run * band, 0.0, 1.0);
+            let lit = e + cc_rooftopworks_trim_color(cc)
+                          * (cc_rooftopworks_TRIM_RAD * face);
+            if (share >= 1.0) {
+                return lit;
+            }
+            if (share > 0.0) {
+                let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+                var acc = city_win_add(city_win_zero(), lit, share, fog,
+                                       TONE_MAP);
+                acc = city_win_add(acc, e, 1.0 - share, fog, TONE_MAP);
+                return city_windows_resolve(acc, fog, TONE_MAP);
+            }
         }
         return e;
     }

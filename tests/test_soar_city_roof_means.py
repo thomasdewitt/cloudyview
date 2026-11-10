@@ -1,5 +1,5 @@
 """
-A roof's skylight field shows the same near and far.
+A roof's bright detail shows the same near and far.
 
 rooftopworks draws a skylight field on the deck (cc_rooftopworks_roof) the
 way the flat facade draws its windows: the pixel's footprint is averaged as
@@ -21,10 +21,16 @@ plain pass that evaluates it once per pixel:
    comes back as the pane's radiance exactly, and one off every lit pane as
    the roof, exactly, so up close nothing changes against the per-pixel
    draw.
+3. The coping trim's lit share is its runs'. The trim is shown as the
+   mixture of lit and dark its footprint holds, and the runs' share of a
+   footprint along the coping is closed form
+   (cc_rooftopworks_trim_run_int); it must equal a dense midpoint count of
+   the run pattern the trim is drawn with, for footprints from a few
+   centimetres to a few fixture pitches, far out along the coping.
 
 Needs a real GPU; skips cleanly without one.
 
-Run with: uv run --extra dev python -m pytest tests/test_soar_city_roof_skylights.py -v
+Run with: uv run --extra dev python -m pytest tests/test_soar_city_roof_means.py -v
 """
 
 import math
@@ -121,11 +127,39 @@ ONE = """    {
     }
 """
 
+# 3. Across the frame, footprints 0.05 m to 20 m wide; down it, their start
+# out to 10 km along the coping. The closed-form share against a 4096-point
+# midpoint count of the drawn pattern.
+TRIM = """    {
+        let a = clamp(0.5 + 0.7 * dir.x, 0.0, 1.0);
+        let b = clamp(0.5 + 1.4 * dir.z, 0.0, 0.999);
+        // @domain: the base is 10
+        let w = 0.05 * pow(10.0, 2.6 * a);
+        let u0 = 1e4 * b + 0.37;
+        let share = (cc_rooftopworks_trim_run_int(u0 + w)
+                     - cc_rooftopworks_trim_run_int(u0)) / w;
+        var n = 0.0;
+        for (var i: i32 = 0; i < 4096; i = i + 1) {
+            let u = u0 + w * (f32(i) + 0.5) / 4096.0;
+            n = n + select(0.0, 1.0, fract(u / cc_rooftopworks_TRIM_PITCH)
+                                     < cc_rooftopworks_TRIM_DUTY);
+        }
+        let err = abs(share - n / 4096.0);
+        // The midpoint count misplaces each run edge in the footprint by
+        // at most half a sample (a footprint holds at most 2 (w / pitch + 2)
+        // of them), and float32 positions 10 km out are good to about a
+        // millimetre.
+        let edges = 2.0 * (w / cc_rooftopworks_TRIM_PITCH + 2.0);
+        let tol = 0.5 * edges / 4096.0 + 2e-3 / w;
+        return vec4<f32>(err / tol, share, 0.0, 1.0);
+    }
+"""
 FIELD_BASE = "({:.3f}, {:.3f}, {:.3f})".format(*BASE)
 PROBES = {
     "agree_clear": AGREE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
     "agree_fog": AGREE.replace("FOG", FOGS["fog"]).replace("BASE", FIELD_BASE),
     "one_clear": ONE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
+    "trim": TRIM,
 }
 # Pooled over the frame's 256 x 144 seeds, 64 cells each: the lit share's
 # sampling error is under 0.2% of itself; the footprints tile the field, so
@@ -236,3 +270,13 @@ def test_a_footprint_on_one_pane_is_that_pane(probes):
         "a footprint inside a pane did not come back as that pane")
     assert out[..., 1].max() == 0.0, (
         "a footprint in the gap between panes saw a lit pane")
+
+
+@pytest.mark.gpu
+def test_trim_share_is_the_runs(probes):
+    out = _run(probes, "trim")
+    # The error over its tolerance (see the probe).
+    assert out[..., 0].max() <= 1.0, out[..., 0].max()
+    # And the shares span dark joints to whole runs.
+    assert out[..., 1].min() == 0.0 and out[..., 1].max() >= 0.999
+
