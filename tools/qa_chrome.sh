@@ -7,12 +7,12 @@
 #
 # start runs under tools/gpulock and refuses otherwise (gpulock_guard.py): the
 # headless Chrome's GPU process opens a Vulkan device and takes VRAM as it
-# starts. The lock covers the start only: tools/gpulock runs its command
-# without the lock's descriptor, so the Chrome left running cannot keep the
-# GPU lock after the start returns. (Under the flock(1) gpulock of before
-# 2026-11-09 it inherited the descriptor and would have, and this script
-# closed its copy; checked then: a backgrounded child of a locked command
-# kept the flock held after the command ended.)
+# starts. The lock covers the start only. tools/gpulock's command inherits
+# the lock's descriptor (so a launcher killed alone cannot free the lock
+# under it), and Chrome would inherit it in turn and hold the GPU lock for as
+# long as it runs (checked 2026-11-09: a backgrounded child of a locked
+# command keeps the flock held after the command ends), so this script
+# closes its copy before launching it.
 #
 # Linux only, and says so: the headless isolation below (no DISPLAY, no
 # Wayland socket, a private XDG_RUNTIME_DIR, a dead session bus) and the
@@ -66,6 +66,12 @@ case "$cmd" in
       echo "qa_chrome: something already answers on :$PORT; not starting" >&2
       exit 1
     fi
+    # Not into Chrome: the lock's descriptor, inherited from tools/gpulock.
+    for fd in /proc/$$/fd/*; do
+      if [[ "$(readlink "$fd")" == "${SOAR_GPULOCK:-/tmp/soar-gpu.lock}" ]]; then
+        eval "exec ${fd##*/}>&-"
+      fi
+    done
     mkdir -p "$PROFILE" "$RUNTIME"
     chmod 700 "$RUNTIME"
     env -u DISPLAY -u WAYLAND_DISPLAY XDG_RUNTIME_DIR="$RUNTIME" \

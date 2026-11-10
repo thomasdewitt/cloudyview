@@ -85,6 +85,14 @@ def unlocked_reason(env=None, path: str = LOCK, table: dict = None):
     env = os.environ if env is None else env
     if env.get("SOAR_GPULOCK_EXEMPT") == "pytest":
         return None
+    return launcher_reason(env, path, table)
+
+
+def launcher_reason(env=None, path: str = LOCK, table: dict = None):
+    """Why no tools/gpulock among this process's ancestors holds `path`, or
+    None when one does: unlocked_reason without the pytest exemption, which
+    is also what a nested tools/gpulock asks before taking the lock again."""
+    env = os.environ if env is None else env
     if env.get("SOAR_GPULOCK") != path:
         return "SOAR_GPULOCK is not set"
     pid = env.get("SOAR_GPULOCK_PID", "")
