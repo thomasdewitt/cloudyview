@@ -123,6 +123,53 @@ function thrownMessage(details) {
   return details.text;
 }
 
+// The longest one tab.eval may take unless its caller says otherwise. The
+// long async renders run through it (pinned_still's stills, steam_live_qa's
+// and soar_noise's accumulations: seconds to a minute or two), so this is
+// generous; a page wedged mid-render no longer holds a tool forever.
+export const EVAL_DEADLINE_MS = 10 * 60 * 1000;
+// How long a goto may take to load.
+export const GOTO_DEADLINE_MS = 2 * 60 * 1000;
+
+/** `promise`, or a rejection naming `what` if it has not settled within
+ *  `ms` (err.deadline set). The timer is cleared either way. */
+export function withDeadline(promise, ms, what) {
+  let timer;
+  const late = new Promise((_, bad) => {
+    timer = setTimeout(() => bad(Object.assign(
+      new Error(`${what}: no answer within ${ms} ms`), { deadline: true })), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Navigate and wait until the page has loaded, through `send` (one CDP call)
+ * and `onEvent(f)` (subscribe f to CDP events; returns the unsubscribe).
+ *   - A network failure (Page.navigate's errorText) fails at once, rather
+ *     than waiting on a load the error page may or may not fire.
+ *   - A same-document navigation (no loaderId: CDP omits it when the
+ *     committed document does not change, e.g. a fragment) is done at once:
+ *     no load event ever comes for one, and goto used to wait on it forever.
+ *   - Otherwise the load event, raced against `whenClosed` (the socket
+ *     closing) and the deadline.
+ */
+export async function navigateAndLoad({ send, onEvent, whenClosed }, url,
+                                      timeoutMs = GOTO_DEADLINE_MS) {
+  let loadedNow;
+  const loaded = new Promise((ok) => { loadedNow = ok; });
+  const off = onEvent((m) => { if (m.method === "Page.loadEventFired") loadedNow(); });
+  try {
+    const r = await withDeadline(send("Page.navigate", { url }), timeoutMs,
+                                 `goto ${url}`);
+    if (r?.errorText) throw new Error(`goto ${url}: ${r.errorText}`);
+    if (!r?.loaderId) return;
+    await withDeadline(Promise.race([loaded, whenClosed]), timeoutMs,
+                       `goto ${url}: the load event`);
+  } finally {
+    off();
+  }
+}
+
 /** The rejection every pending and later send() gets once the DevTools
  *  socket has closed: the tab or Chrome is gone, and nothing will answer. */
 function closedError(why) {
@@ -243,21 +290,27 @@ export async function openTab(cdpPort) {
   await send("Page.enable");
   await send("Network.enable");
   await send("Network.setCacheDisabled", { cacheDisabled: true });
+  const onEvent = (f) => {
+    listeners.push(f);
+    return () => { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); };
+  };
   const evaluate = (expression) => send("Runtime.evaluate",
     { expression, awaitPromise: true, returnByValue: true, userGesture: true });
   const tab = {
     send,
-    async eval(expression) {
-      const r = await evaluate(expression);
+    /** One evaluate, within `timeoutMs` (EVAL_DEADLINE_MS unless the
+     *  caller says otherwise): a page wedged mid-evaluate (a stuck GPU
+     *  readback) no longer holds the tool until the socket closes. */
+    async eval(expression, timeoutMs = EVAL_DEADLINE_MS) {
+      const short = expression.length > 80
+        ? `${expression.slice(0, 77)}...` : expression;
+      const r = await withDeadline(evaluate(expression), timeoutMs,
+                                   `evaluate ${short.replace(/\s+/g, " ")}`);
       if (r.exceptionDetails) throw new Error(thrownMessage(r.exceptionDetails));
       return r.result.value;
     },
-    async goto(url) {
-      const loaded = new Promise((ok) => listeners.push((m) => {
-        if (m.method === "Page.loadEventFired") ok();
-      }));
-      await send("Page.navigate", { url });
-      await Promise.race([loaded, whenClosed]);
+    goto(url, timeoutMs = GOTO_DEADLINE_MS) {
+      return navigateAndLoad({ send, onEvent, whenClosed }, url, timeoutMs);
     },
     /** pollUntil on this tab: a throw in `expression` fails at once. */
     waitFor(expression, timeoutMs = 60000) {
