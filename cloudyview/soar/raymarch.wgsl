@@ -7114,8 +7114,13 @@ fn city_face_at_mass(cc: CityCell, pos: vec3<f32>, nrm: vec3<f32>)
             if (nrm.x > 0.999) { side = 0; }
             else if (nrm.x < -0.999) { side = 1; }
             else if (nrm.y > 0.999) { side = 2; }
-            return city_face_make(cc, cb.bmin, cb.bmax, side,
-                                  CITY_CROWN_TIER);
+            let f = city_face_make(cc, cb.bmin, cb.bmax, side,
+                                   CITY_CROWN_TIER);
+            // On the crown's own plane, as city_face_at asks of a tier: the
+            // top 2 cm of the summit's walls are not the crown's.
+            if (abs(dot(pos.xy, f.n) - f.wp) < 0.02) {
+                return f;
+            }
         }
     }
     return city_face_at(cc, pos, nrm);
@@ -22032,8 +22037,8 @@ fn city_shell_refine(o: vec3<f32>, dir: vec3<f32>, pixel_angle: f32,
             && min(z_a, z_b) < cc.top_z + 1.0
             && city_shell_enters(o, inv3, cc, min(best.t, t_reach))) {
             let st = city_shell_style(cc);
-            // The crown's draw, once per cell, and only where this cell's
-            // ray segment reaches the crown's band.
+            // The crown's draw, behind this cell's ray segment reaching the
+            // crown's band (city_shell_enters may have drawn it too).
             var cb = CityBox(vec3<f32>(1e30), vec3<f32>(-1e30));
             if (city_crown_possible(cc) && max(z_a, z_b) >= cc.height
                 && min(z_a, z_b) <= cc.height + CITY_CROWN_H_HI) {
