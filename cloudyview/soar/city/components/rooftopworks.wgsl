@@ -1442,6 +1442,9 @@ fn cc_rooftopworks_roof(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
     }
     // The door lamp's pool on the deck in front of the bulkhead: what a
     // roof is read by from the air at night. And the pad's lights, far off.
+    // Both are added to the skylights' resolved radiance rather than to each
+    // pane before the resolve: second order, and only where the pool reaches
+    // the field (the pool is smooth; the panes carry the contrast).
     deck = deck + far.pad;
     if (bk.ok && bk.lamp && !hidden) {
         let pool = cc_rooftopworks_spot(h.pos, bk.seat - vec3<f32>(0.0, 0.0,
