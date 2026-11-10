@@ -1299,17 +1299,6 @@ export class Renderer {
     cp.dispatchWorkgroups(gx, gy);
   }
 
-  /**
-   * ?surfacecs: once per target set and slot, prove cs_surface ran, or
-   * throw. A GPU that refuses the threadgroup may say nothing — Metal caps
-   * each compute pipeline's maxTotalThreadsPerThreadgroup, which a kernel
-   * this heavy can push under 512, and wgpu's Metal backend does not check
-   * it; whether Dawn's does is not something this code relies on — and the
-   * surface would keep whatever it held. So the slot the first stage
-   * writes is cleared to SURFACE_CS_SENTINEL, cs_surface dispatched once on
-   * the uniforms as they stand (it writes every pixel whatever they say),
-   * and the slot read back: one pixel still holding the sentinel throws.
-   */
   /** Whether the set now in `targets.surface` has the first stage's slot
    *  proven (_proveSurfaceCS). */
   _surfaceCSProven(targets, nStages) {
@@ -1325,6 +1314,17 @@ export class Renderer {
     }
   }
 
+  /**
+   * ?surfacecs: once per target set and slot, prove cs_surface ran, or
+   * throw. A GPU that refuses the threadgroup may say nothing — Metal caps
+   * each compute pipeline's maxTotalThreadsPerThreadgroup, which a kernel
+   * this heavy can push under 512, and wgpu's Metal backend does not check
+   * it; whether Dawn's does is not something this code relies on — and the
+   * surface would keep whatever it held. So the slot the first stage
+   * writes is cleared to SURFACE_CS_SENTINEL, cs_surface dispatched once on
+   * the uniforms as they stand (it writes every pixel whatever they say),
+   * and the slot read back: one pixel still holding the sentinel throws.
+   */
   async _proveSurfaceCS(targets, pipeline, rayBindGroup, nStages) {
     const surface = targets.surface;
     const slot = surfaceStagePlan(nStages)[0][0];
