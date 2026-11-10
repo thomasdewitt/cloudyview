@@ -151,6 +151,9 @@ export function packUniforms(state, view) {
     // view's, and its auto-exposure meter's. Every still, video and replay
     // leaves it off and marches the steam.
     liveSteam = false,
+    // The city's roof clutter density (row 25.x): CITY_ROOF_DENSITY_BY_TIER
+    // at the flight's tier, 1 as tuned. Packed under CITY only.
+    cityRoofDensity = 1.0,
   } = view;
 
   const [outputW, outputH] = outputSize;
@@ -338,6 +341,17 @@ export function packUniforms(state, view) {
   }
   row(24, surfaceOff[0], surfaceOff[1], sceneClock(sceneTime, clockPeriodS),
       0.0);
+  // Row 25: the city's look knobs. Zero on a day scene, which reads none of
+  // them, so the day's block (and its scene key) is unchanged by them.
+  if (city) {
+    const [lo, hi] = K.CITY_ROOF_DENSITY_RANGE;
+    if (!(cityRoofDensity >= lo && cityRoofDensity <= hi)) {
+      throw new RangeError(
+        `cityRoofDensity must be in [${lo}, ${hi}] (the far mean's measured `
+        + `range); got ${cityRoofDensity}.`);
+    }
+    row(25, cityRoofDensity, 0.0, 0.0, 0.0);
+  }
   return u;
 }
 

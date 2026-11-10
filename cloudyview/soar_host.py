@@ -212,10 +212,26 @@ def read_shader() -> str:
             "glimpse and behold do not need the shader and still work.")
     return SHADER_PATH.read_text()
 
-# Row 24 (the 25th and last) is the surface offset the water samples and the
-# city frame are derived from — see raymarch.wgsl's surface_offset.
-UNIFORM_ROWS = 25
-UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 400; the scene key compares all of it
+# Row 24 is the surface offset the water samples and the city frame are
+# derived from — see raymarch.wgsl's surface_offset. Row 25 (the 26th and
+# last) is the city's look knobs — see raymarch.wgsl's city_look.
+UNIFORM_ROWS = 26
+UNIFORM_NBYTES = UNIFORM_ROWS * 16          # 416; the scene key compares all of it
+
+# The night city's roof clutter by quality tier (Thomas, 2026-11-09: "Maybe
+# more for high tier where we can afford it and less for low and minimal?
+# More on med too."): a factor on rooftopworks' clutter families' slot
+# probabilities (tanks, condensers, vents, pipe runs, packaged units; never
+# the stair or the skylights). 1 is the density the roofs were tuned at.
+# Twin of web/soar/constants.js CITY_ROOF_DENSITY_BY_TIER (pinned by
+# tests/test_uniform_parity.py).
+CITY_ROOF_DENSITY_BY_TIER = {
+    "max": 1.4, "high": 1.4, "medium": 1.2, "low": 0.7, "minimal": 0.5,
+}
+# The densities the shader's far mean is measured over
+# (cc_rooftopworks_mech_rho's nodes): a density outside them would draw a
+# near roof the far mean does not stand for, so the packers refuse it.
+CITY_ROOF_DENSITY_RANGE = (0.5, 1.4)
 
 DEG = math.pi / 180.0
 
@@ -368,7 +384,7 @@ class SceneState:
 
     `surface` is what the world stands on: "ocean" or "city". The city
     compiles in through its own constant (CITY — see `specialize`). It adds
-    no uniform rows — the block is the same 400 bytes in every mode — it
+    no uniform rows — the block is the same 416 bytes in every mode — it
     REINTERPRETS a few of them, and the fields keep their ocean names
     because the slots are literally the ocean's. Under "city":
 
@@ -501,12 +517,15 @@ class ViewState:
     # The browser advances it while flying; a still names it (witness
     # --time) and a track carries it per sample.
     scene_time: float = 0.0
+    # The city's roof clutter density (row 25.x; CITY_ROOF_DENSITY_BY_TIER
+    # by tier, 1 as tuned). Packed under CITY only.
+    city_roof_density: float = 1.0
 
 
 def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
-    """The 400-byte block, row for row with web/soar/uniforms.js.
+    """The 416-byte block, row for row with web/soar/uniforms.js.
 
-    Returns (25, 4) float32. Every unwritten slot stays zero, which is what
+    Returns (26, 4) float32. Every unwritten slot stays zero, which is what
     the shader's unused components and the absent nest rows require.
 
     Under the city the layout is untouched and a handful of rows change
@@ -682,6 +701,15 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
             if clock < 0:
                 clock += period
     u[24] = (_fold_tile(base[0]), _fold_tile(base[1]), clock, 0.0)
+    # Row 25: the city's look knobs. Zero on a day scene, which reads none
+    # of them, so the day's block (and its scene key) is unchanged by them.
+    if city:
+        lo, hi = CITY_ROOF_DENSITY_RANGE
+        if not lo <= view.city_roof_density <= hi:
+            raise ValueError(
+                f"city_roof_density must be in [{lo}, {hi}] (the far "
+                f"mean's measured range); got {view.city_roof_density}.")
+        u[25] = (view.city_roof_density, 0.0, 0.0, 0.0)
     return u
 
 

@@ -1618,10 +1618,10 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // A clerestory is the same argument with one long face in view and no
 // occluder: its projected strip, length x height x |d_c| / |dz|, over the
 // roof's area.
-// The hook's fp_filter, ray and the core's roof radiance are not needed
-// here: the glazing's mean is a plain emission on the roof.
+// The hook's fp_filter and the core's roof radiance are not needed here:
+// the glazing's mean is a plain emission on the roof, seen along `dir`.
 fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
-                    _dir: vec3<f32>, direct: bool, _base: vec3<f32>)
+                    dir: vec3<f32>, direct: bool, _base: vec3<f32>)
         -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
@@ -1633,7 +1633,6 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
     if (direct && city_props_drawn(h.cell, h.pos, h.t)) {
         return vec3<f32>(0.0);
     }
-    let dir = (h.pos - city_camera_origin()) / max(h.t, 1e-3);
     let dz = max(abs(dir.z), 1e-3);
     if (r.kind == 1) {
         let d_s = r.face * select(dir.y, dir.x, r.step_x);

@@ -50,6 +50,7 @@ from .look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
 from .soar_host import (
     APP_LIGHT_MARCH_LOD_DEGREES,
     APP_VIEW_STEP_LOD_DEGREES,
+    CITY_ROOF_DENSITY_BY_TIER,
     DEFAULT_HAZE_HEIGHT_DEPENDENT,
     DEFAULT_LOD_STRENGTH,
     DEFAULT_TONE_MAP_GAMMA,
@@ -438,6 +439,10 @@ def render_nested(
         light_cache=bool(tier and tier["light_cache"]),
         sky_probe=(tier["sky_probe"] if tier else True),
         scene_time=float(scene_time),
+        # The roofs' clutter follows the tier, as in the browser; a render
+        # with no tier gets the density the roofs were tuned at.
+        city_roof_density=(CITY_ROOF_DENSITY_BY_TIER[quality] if tier
+                           else 1.0),
     )
     if tier and tier["light_cache"]:
         renderer.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)

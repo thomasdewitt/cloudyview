@@ -52,11 +52,12 @@ struct Uniforms {
     // x = image width (px), y = image height (px), z = HG asymmetry g, w = ambient strength
     params: vec4<f32>,
     // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106).
-    // Under CITY: x = ground z, yz = the tile's STATIC world offset, w
-    // unused. yz is informational since row 24 — the shader builds the
-    // city frame from the per-frame offset there (city_camera_origin) and
-    // no longer reads this pair; hosts keep writing it as the scene's own
-    // statement of where the tile was pinned.
+    // Under CITY: x = ground z, yz = the tile's STATIC world offset, w =
+    // the live view's steam (1.0: drawn after the accumulation at the live
+    // clock, city_steam_live). yz is informational since row 24 — the
+    // shader builds the city frame from the per-frame offset there
+    // (city_camera_origin) and no longer reads this pair; hosts keep
+    // writing it as the scene's own statement of where the tile was pinned.
     ocean: vec4<f32>,
     // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
     ocean_params: vec4<f32>,
@@ -163,6 +164,11 @@ struct Uniforms {
     // run it). w = lens water's step dt for fs_lens_state (s; 0 in every
     // other pass, which never reads it).
     surface_offset: vec4<f32>,
+    // Row 25: the city's look knobs, zero on a day scene, which reads none.
+    // x = roof clutter density (the hosts' CITY_ROOF_DENSITY_BY_TIER at the
+    //     tier: a factor on rooftopworks' clutter slot probabilities, 1 as
+    //     the roofs were tuned); yzw spare.
+    city_look: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -11508,7 +11514,7 @@ const cc_rooftopworks_AC_P2: f32 = 0.45;       // draw above this: doubled row
 const cc_rooftopworks_VENT_HW: f32 = 0.50;
 const cc_rooftopworks_VENT_H: f32 = 5.00;
 const cc_rooftopworks_VENT2_H: f32 = 3.40;
-const cc_rooftopworks_VENT_GAP: f32 = 1.70;
+const cc_rooftopworks_VENT_GAP: f32 = 1.70;    // the two stacks' centre spacing
 const cc_rooftopworks_EDGE_M: f32 = 1.10;      // keep off the parapet line
 // Close-range refinement (SPEC's SDF-in-a-box). A tank is the one object here
 // the camera can end up standing next to, and a bare box is exactly what a
@@ -11811,6 +11817,14 @@ fn cc_rooftopworks_mech_on(cc: CityCell) -> bool {
     return gh.w < cc_rooftopworks_MECH_FRAC;
 }
 
+// The clutter's density at this tier (row 25.x, the hosts'
+// CITY_ROOF_DENSITY_BY_TIER; 1 as the roofs were tuned): a factor on the
+// clutter families' slot probabilities, each held to 1. The stair, its lift
+// room, the crown and the skylights are not clutter and do not scale.
+fn cc_rooftopworks_density() -> f32 {
+    return u.city_look.x;
+}
+
 fn cc_rooftopworks_slot_draw(ci: vec2<i32>, s: i32) -> vec4<f32> {
     let cw = city_tile_cell(ci);
     let l = u32(s);
@@ -11833,7 +11847,7 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
     if (s == 1) { p_slot = cc_rooftopworks_SLOT_P1; }
     if (s == 2) { p_slot = cc_rooftopworks_SLOT_P2; }
     if (s == 3) { p_slot = cc_rooftopworks_SLOT_P3; }
-    if (r.x >= p_slot) {
+    if (r.x >= min(p_slot * cc_rooftopworks_density(), 1.0)) {
         return cc_rooftopworks_no_mech();
     }
     // Slots 0 and 1 take the summit; 2 and 3 look for a lower tier top or a
@@ -11906,6 +11920,9 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
                                            bk.lift_hi.xy + 1.2)))) {
         return cc_rooftopworks_no_mech();
     }
+    if (!cc_rooftopworks_sky_clear(bk, d.z, lo2, hi2)) {
+        return cc_rooftopworks_no_mech();
+    }
 
     var res: cc_rooftopworks_Mech;
     res.ok = true;
@@ -11923,10 +11940,12 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
                             d.z + hgt - cc_rooftopworks_TANK_RIM_T);
         res.ahi = vec3<f32>(c + rw, d.z + hgt + 0.10);
     } else if (ty == 2) {
-        // A second, shorter stack beside the first.
+        // A second, shorter stack beside the first, the pair filling the
+        // footprint reserved for it (its half-length VENT_HW + VENT_GAP / 2).
         res.has_acc = true;
-        let off = select(vec2<f32>(cc_rooftopworks_VENT_GAP, 0.0),
-                         vec2<f32>(0.0, cc_rooftopworks_VENT_GAP), axis_y);
+        let off = select(vec2<f32>(0.5 * cc_rooftopworks_VENT_GAP, 0.0),
+                         vec2<f32>(0.0, 0.5 * cc_rooftopworks_VENT_GAP),
+                         axis_y);
         res.alo = vec3<f32>(c + off - cc_rooftopworks_VENT_HW, d.z);
         res.ahi = vec3<f32>(c + off + cc_rooftopworks_VENT_HW,
                             d.z + cc_rooftopworks_VENT2_H);
@@ -11941,6 +11960,13 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
     else if (face > 0.50) { n = vec2<f32>(0.0, 1.0); }
     else if (face > 0.25) { n = vec2<f32>(0.0, -1.0); }
     res.seat = vec3<f32>(c + n * (hx + 0.04), d.z + 0.72 * hgt);
+    if (ty == 2) {
+        // On the tall stack's own face, whichever: never in the gap between
+        // the stacks or above the short one.
+        let tall = 0.5 * (res.lo.xy + res.hi.xy);
+        res.seat = vec3<f32>(tall + n * (cc_rooftopworks_VENT_HW + 0.04),
+                             res.seat.z);
+    }
     res.round = ty == 0 && round;
     if (res.round) {
         // A round tank has hoops, not a rim band: the cap is its own cone,
@@ -11971,16 +11997,37 @@ struct cc_rooftopworks_Bulk {
     lift: bool,        // the lift's machine room beside it
     lift_lo: vec3<f32>,
     lift_hi: vec3<f32>,
+    // The summit's skylight field the clutter keeps off (cc_rooftopworks_sky
+    // and _sky_clear): carried here because every prop that needs it is
+    // handed the stair, so the field is drawn once per cell, not per slot.
+    sky_ok: bool,
+    sky_lo: vec2<f32>,
+    sky_hi: vec2<f32>,
+    sky_z: f32,
 }
 
 fn cc_rooftopworks_no_bulk() -> cc_rooftopworks_Bulk {
     return cc_rooftopworks_Bulk(false, vec3<f32>(0.0), vec3<f32>(0.0),
                                 vec2<f32>(0.0), false, vec3<f32>(0.0), false,
-                                vec3<f32>(0.0), vec3<f32>(0.0));
+                                vec3<f32>(0.0), vec3<f32>(0.0), false,
+                                vec2<f32>(0.0), vec2<f32>(0.0), 0.0);
 }
 
+// The stair (and its lift room), and with it the skylight field it leaves.
 fn cc_rooftopworks_bulk(cc: CityCell, ci: vec2<i32>,
                         cr: CityCrown) -> cc_rooftopworks_Bulk {
+    var b = cc_rooftopworks_bulk_place(cc, ci, cr);
+    let d0 = cc_rooftopworks_deck(cc, 0);
+    let sk = cc_rooftopworks_sky(cc, d0, cr, b);
+    b.sky_ok = sk.ok;
+    b.sky_lo = sk.flo;
+    b.sky_hi = sk.fhi;
+    b.sky_z = d0.z;
+    return b;
+}
+
+fn cc_rooftopworks_bulk_place(cc: CityCell, ci: vec2<i32>,
+                              cr: CityCrown) -> cc_rooftopworks_Bulk {
     if (cr.kind == 1) {
         return cc_rooftopworks_no_bulk();   // the penthouse is the bulkhead
     }
@@ -12022,7 +12069,11 @@ fn cc_rooftopworks_bulk(cc: CityCell, ci: vec2<i32>,
     b.lo = vec3<f32>(lo2, d.z);
     b.hi = vec3<f32>(hi2, d.z + cc_rooftopworks_BULK_H);
     // The door looks into the deck, on the bulkhead's long side.
-    let into = 0.5 * (d.lo + d.hi) - c;
+    // Toward the middle of the free deck in this cell's own column: the
+    // building's middle on a lone roof, but on a merged one the stair must
+    // not face a column boundary (its pool would land in the next cell,
+    // whose hook does not draw it).
+    let into = 0.5 * (plo + phi) - c;
     b.door = select(vec2<f32>(0.0, sign(into.y + 1e-6)),
                     vec2<f32>(sign(into.x + 1e-6), 0.0), along_y);
     b.lamp = fract(r.z * 13.1) < cc_rooftopworks_BULK_LAMP_FRAC;
@@ -12044,7 +12095,9 @@ fn cc_rooftopworks_bulk(cc: CityCell, ci: vec2<i32>,
                  + b.door * (cc_rooftopworks_LIFT_HX - dot(abs(b.door), hx));
         let llo = lc - lh;
         let lhi = lc + lh;
-        if (all(llo >= plo - hx) && all(lhi <= phi + hx)
+        // Flush with the stair's back, the room meets the free deck's edge
+        // exactly in real arithmetic: a millimetre's slack for the float.
+        if (all(llo >= plo - hx - 1e-3) && all(lhi <= phi + hx + 1e-3)
             && !cc_rooftopworks_overlap(llo, lhi, d.hlo - 1.0, d.hhi + 1.0)
             && !(cc.has_mast
                  && cc_rooftopworks_overlap(llo, lhi, cc.mast_min.xy - 0.8,
@@ -12067,7 +12120,8 @@ fn cc_rooftopworks_unit(cc: CityCell, ci: vec2<i32>, k: i32,
     var res = cc_rooftopworks_Run(false, vec3<f32>(0.0), vec3<f32>(0.0),
                                   false, false);
     let r = cc_rooftopworks_slot_draw(ci, 12 + k);
-    if (r.x >= 0.90 - 0.18 * f32(k)) {
+    if (r.x >= min((0.90 - 0.18 * f32(k)) * cc_rooftopworks_density(),
+                   1.0)) {
         return res;
     }
     let d = cc_rooftopworks_deck(cc, 0);
@@ -12103,6 +12157,9 @@ fn cc_rooftopworks_unit(cc: CityCell, ci: vec2<i32>, k: i32,
                                            bk.lift_hi.xy + 0.5)))) {
         return res;
     }
+    if (!cc_rooftopworks_sky_clear(bk, d.z, lo2, hi2)) {
+        return res;
+    }
     res.ok = true;
     res.along_y = along_y;
     res.lo = vec3<f32>(lo2, d.z);
@@ -12125,7 +12182,8 @@ fn cc_rooftopworks_run(cc: CityCell, ci: vec2<i32>, k: i32,
     var res = cc_rooftopworks_Run(false, vec3<f32>(0.0), vec3<f32>(0.0),
                                   false, false);
     let r = cc_rooftopworks_slot_draw(ci, 8 + k);
-    if (r.x >= 0.85 - 0.18 * f32(k)) {
+    if (r.x >= min((0.85 - 0.18 * f32(k)) * cc_rooftopworks_density(),
+                   1.0)) {
         return res;
     }
     let d = cc_rooftopworks_deck(cc, 0);
@@ -12163,6 +12221,9 @@ fn cc_rooftopworks_run(cc: CityCell, ci: vec2<i32>, k: i32,
                                            bk.lift_hi.xy + 0.3)))) {
         return res;
     }
+    if (!cc_rooftopworks_sky_clear(bk, d.z, lo2, hi2)) {
+        return res;
+    }
     res.ok = true;
     res.duct = duct;
     res.along_y = along_y;
@@ -12193,20 +12254,38 @@ struct cc_rooftopworks_Sky {
     pane: vec2<f32>,
 }
 
-fn cc_rooftopworks_sky(cc: CityCell, d: cc_rooftopworks_Deck)
+// The field is the summit deck's middle half, on a roof with no crown and
+// whose stair (and lift room) stand clear of it; the clutter keeps off it in
+// turn (cc_rooftopworks_sky_clear). So nothing stands on a pane: a pane
+// hidden by a prop up close would otherwise show in the far field's mean.
+fn cc_rooftopworks_sky(cc: CityCell, d: cc_rooftopworks_Deck,
+                       cr: CityCrown, bk: cc_rooftopworks_Bulk)
         -> cc_rooftopworks_Sky {
     var sk: cc_rooftopworks_Sky;
     let gh = city_rand4(cc.seed ^ vec2<u32>(0x58f2a6c3u, 0x13d7b9e1u));
-    sk.ok = gh.x < cc_rooftopworks_SKY_FRAC
-            && cc.height <= cc_rooftopworks_SKY_MAX_H;
     let size = d.hi - d.lo;
     sk.flo = d.lo + 0.25 * size;
     sk.fhi = d.hi - 0.25 * size;
+    sk.ok = d.ok && gh.x < cc_rooftopworks_SKY_FRAC
+            && cc.height <= cc_rooftopworks_SKY_MAX_H && cr.kind == 0
+            && !(bk.ok && cc_rooftopworks_overlap(bk.lo.xy, bk.hi.xy, sk.flo,
+                                                   sk.fhi))
+            && !(bk.ok && bk.lift
+                 && cc_rooftopworks_overlap(bk.lift_lo.xy, bk.lift_hi.xy,
+                                            sk.flo, sk.fhi));
     sk.pitch = select(cc_rooftopworks_SKY_PITCH,
                       cc_rooftopworks_SKY_PITCH.yx, gh.y > 0.5);
     sk.pane = select(cc_rooftopworks_SKY_PANE, cc_rooftopworks_SKY_PANE.yx,
                      gh.y > 0.5);
     return sk;
+}
+
+// Whether a prop's footprint [lo, hi] on the deck at height z keeps clear of
+// the summit's skylight field (true where there is none).
+fn cc_rooftopworks_sky_clear(bk: cc_rooftopworks_Bulk, z: f32,
+                             lo: vec2<f32>, hi: vec2<f32>) -> bool {
+    return !bk.sky_ok || abs(z - bk.sky_z) > 0.5
+        || !cc_rooftopworks_overlap(lo, hi, bk.sky_lo - 0.3, bk.sky_hi + 0.3);
 }
 
 // A lattice cell's pane: its brightness over the room's light, 0 if dark.
@@ -12329,25 +12408,142 @@ fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
 // - a tank lamp's face is one of the four cardinal ones, equally likely,
 //   so each side face is seen, in expectation, as (|v.x| + |v.y|) / 4, and
 //   the sides enter as their sum; how many tank lamps a roof carries is
-//   taken per square metre of its summit deck (MECH_RHO), pooled over the
+//   taken per square metre of its summit deck (cc_rooftopworks_mech_rho, at
+//   the tier's clutter density), pooled over the
 //   city's roofs with clutter (cc_rooftopworks_mech_on);
 // - the bulkhead's lamp and the pad's lights are the cell's own: the
 //   bulkhead's door face seen as max(0, door.v), its back as
 //   max(0, -door.v), its two sides together as |t.v| per side, t the door
 //   face's tangent, and a lift room beside it in the same four parts;
-//   the pad's lights sit on its top, so their deck share is their area.
+//   the pad's lights sit on its top, so their deck share is their area,
+//   less what a widened spot spills over the pad's edges (each light 1 m in
+//   from its corner: the square of the normal integral to 1 m at the
+//   handoff's spot width, tabled with the rest).
 // The constants were measured by a probe that integrates the prop
 // shader's own spots over the props' own faces, at the footprint where the
 // props hand over (tests/test_soar_city_roof_lamps.py, which pins them).
-const cc_rooftopworks_MECH_RHO: f32 = 2.60e-4;   // tank lamps per m^2 of deck
-// The sides' sum and the top: m^2 per unit lamp radiance.
-const cc_rooftopworks_MECH_S: vec2<f32> = vec2<f32>(1.555, 0.539);
-// The bulkhead's front, back, two sides together and top, without and with
-// its lift room.
-const cc_rooftopworks_BULK_S: vec4<f32> = vec4<f32>(1.214, 0.111, 0.395,
-                                                    0.828);
-const cc_rooftopworks_BULK_LIFT_S: vec4<f32> = vec4<f32>(1.279, 0.126,
-                                                         0.520, 0.903);
+// Tank lamps per m^2 of deck, on roofs with clutter, at the clutter
+// densities the tiers use (CITY_ROOF_DENSITY_BY_TIER: 0.5, 0.7, 1, 1.2,
+// 1.4); a slot's probability is held to 1, so it is not proportional. Linear
+// between them (cc_rooftopworks_mech_rho).
+const cc_rooftopworks_MECH_RHO_D: vec4<f32> = vec4<f32>(0.5, 0.7, 1.0, 1.2);
+const cc_rooftopworks_MECH_RHO_AT: vec4<f32> =
+    vec4<f32>(1.110e-4, 1.580e-4, 2.230e-4, 2.467e-4);
+const cc_rooftopworks_MECH_RHO_D4: f32 = 1.4;
+const cc_rooftopworks_MECH_RHO_AT4: f32 = 2.635e-4;
+// The seen areas, m^2 per unit lamp radiance, depend on the footprint where
+// the props hand over, because the far mean continues what is drawn just
+// inside the range, and there a spot is widened to the pixel (area-
+// preserving on an unbounded plane, but a housing's faces are finite, and a
+// widened spill spills off them). That footprint is the LOD angle times
+// CITY_PROP_RANGE: about 1 m at high tier and 1440p, 11.5 m at minimal. So
+// they are tabled at eight handoff footprints and interpolated
+// (cc_rooftopworks_far_at): per node, a tank lamp's sides together and top,
+// the pad lights' share that lands on the pad, and the node's footprint (m);
+// the stair's front, back, two sides together and top, without and with its
+// lift room.
+// Beside each (the rows ending 2), the same integrals of the light's square:
+// the second moment, which says how concentrated it is, so the far mean can
+// show it as the small bright faces it is up close (cc_rooftopworks_lamps_far)
+// rather than spread thin over the deck, which the display would show
+// brighter.
+const cc_rooftopworks_FAR_0_MECH: vec4<f32> =
+    vec4<f32>(1.8828, 0.48987, 0.99914, 1.0);
+const cc_rooftopworks_FAR_0_MECH2: vec4<f32> =
+    vec4<f32>(0.45331, 0.051481, 0.0, 0.0);
+const cc_rooftopworks_FAR_0_BULK: vec4<f32> =
+    vec4<f32>(1.2809, 0.1108, 0.39435, 0.70767);
+const cc_rooftopworks_FAR_0_BULK2: vec4<f32> =
+    vec4<f32>(0.39779, 0.0010687, 0.011022, 0.051587);
+const cc_rooftopworks_FAR_0_LIFT: vec4<f32> =
+    vec4<f32>(1.346, 0.12641, 0.51962, 0.78258);
+const cc_rooftopworks_FAR_0_LIFT2: vec4<f32> =
+    vec4<f32>(0.39867, 0.001108, 0.015437, 0.052411);
+const cc_rooftopworks_FAR_1_MECH: vec4<f32> =
+    vec4<f32>(1.8816, 0.53155, 0.9067, 2.0);
+const cc_rooftopworks_FAR_1_MECH2: vec4<f32> =
+    vec4<f32>(0.24228, 0.049523, 0.0, 0.0);
+const cc_rooftopworks_FAR_1_BULK: vec4<f32> =
+    vec4<f32>(1.2143, 0.1108, 0.39484, 0.82765);
+const cc_rooftopworks_FAR_1_BULK2: vec4<f32> =
+    vec4<f32>(0.19514, 0.0010687, 0.011062, 0.083146);
+const cc_rooftopworks_FAR_1_LIFT: vec4<f32> =
+    vec4<f32>(1.2793, 0.12641, 0.5203, 0.90258);
+const cc_rooftopworks_FAR_1_LIFT2: vec4<f32> =
+    vec4<f32>(0.19584, 0.001108, 0.015493, 0.08398);
+const cc_rooftopworks_FAR_2_MECH: vec4<f32> =
+    vec4<f32>(1.8573, 0.56596, 0.75124, 3.0);
+const cc_rooftopworks_FAR_2_MECH2: vec4<f32> =
+    vec4<f32>(0.19006, 0.048338, 0.0, 0.0);
+const cc_rooftopworks_FAR_2_BULK: vec4<f32> =
+    vec4<f32>(1.1689, 0.1113, 0.41349, 0.88255);
+const cc_rooftopworks_FAR_2_BULK2: vec4<f32> =
+    vec4<f32>(0.14688, 0.0010801, 0.012471, 0.087037);
+const cc_rooftopworks_FAR_2_LIFT: vec4<f32> =
+    vec4<f32>(1.2343, 0.12691, 0.54691, 0.95802);
+const cc_rooftopworks_FAR_2_LIFT2: vec4<f32> =
+    vec4<f32>(0.14758, 0.0011195, 0.017499, 0.087884);
+const cc_rooftopworks_FAR_3_MECH: vec4<f32> =
+    vec4<f32>(1.8224, 0.57827, 0.63628, 4.0);
+const cc_rooftopworks_FAR_3_MECH2: vec4<f32> =
+    vec4<f32>(0.16178, 0.045837, 0.0, 0.0);
+const cc_rooftopworks_FAR_3_BULK: vec4<f32> =
+    vec4<f32>(1.1209, 0.11885, 0.45931, 0.89553);
+const cc_rooftopworks_FAR_3_BULK2: vec4<f32> =
+    vec4<f32>(0.12318, 0.0012434, 0.015597, 0.082121);
+const cc_rooftopworks_FAR_3_LIFT: vec4<f32> =
+    vec4<f32>(1.1907, 0.13485, 0.60983, 0.9762);
+const cc_rooftopworks_FAR_3_LIFT2: vec4<f32> =
+    vec4<f32>(0.12401, 0.0012853, 0.021946, 0.083114);
+const cc_rooftopworks_FAR_4_MECH: vec4<f32> =
+    vec4<f32>(1.6966, 0.55076, 0.50516, 6.0);
+const cc_rooftopworks_FAR_4_MECH2: vec4<f32> =
+    vec4<f32>(0.11675, 0.035838, 0.0, 0.0);
+const cc_rooftopworks_FAR_4_BULK: vec4<f32> =
+    vec4<f32>(0.92252, 0.19527, 0.56513, 0.8159);
+const cc_rooftopworks_FAR_4_BULK2: vec4<f32> =
+    vec4<f32>(0.075852, 0.0031687, 0.020655, 0.05806);
+const cc_rooftopworks_FAR_4_LIFT: vec4<f32> =
+    vec4<f32>(1.0416, 0.23389, 0.72852, 0.95365);
+const cc_rooftopworks_FAR_4_LIFT2: vec4<f32> =
+    vec4<f32>(0.077739, 0.0033668, 0.028411, 0.060259);
+const cc_rooftopworks_FAR_5_MECH: vec4<f32> =
+    vec4<f32>(1.3405, 0.44154, 0.43763, 8.0);
+const cc_rooftopworks_FAR_5_MECH2: vec4<f32> =
+    vec4<f32>(0.057849, 0.018695, 0.0, 0.0);
+const cc_rooftopworks_FAR_5_BULK: vec4<f32> =
+    vec4<f32>(0.62375, 0.2736, 0.57417, 0.61767);
+const cc_rooftopworks_FAR_5_BULK2: vec4<f32> =
+    vec4<f32>(0.032674, 0.0058555, 0.01866, 0.029292);
+const cc_rooftopworks_FAR_5_LIFT: vec4<f32> =
+    vec4<f32>(0.82436, 0.38007, 0.71573, 0.85359);
+const cc_rooftopworks_FAR_5_LIFT2: vec4<f32> =
+    vec4<f32>(0.036163, 0.0068382, 0.024315, 0.033319);
+const cc_rooftopworks_FAR_6_MECH: vec4<f32> =
+    vec4<f32>(1.0415, 0.3474, 0.3976, 10.0);
+const cc_rooftopworks_FAR_6_MECH2: vec4<f32> =
+    vec4<f32>(0.031627, 0.010357, 0.0, 0.0);
+const cc_rooftopworks_FAR_6_BULK: vec4<f32> =
+    vec4<f32>(0.43768, 0.26892, 0.49106, 0.46062);
+const cc_rooftopworks_FAR_6_BULK2: vec4<f32> =
+    vec4<f32>(0.015807, 0.0055516, 0.01304, 0.015599);
+const cc_rooftopworks_FAR_6_LIFT: vec4<f32> =
+    vec4<f32>(0.67386, 0.42639, 0.62575, 0.74226);
+const cc_rooftopworks_FAR_6_LIFT2: vec4<f32> =
+    vec4<f32>(0.019526, 0.0072047, 0.0164, 0.019938);
+const cc_rooftopworks_FAR_7_MECH: vec4<f32> =
+    vec4<f32>(0.81481, 0.27506, 0.37138, 12.0);
+const cc_rooftopworks_FAR_7_MECH2: vec4<f32> =
+    vec4<f32>(0.018442, 0.0060927, 0.0, 0.0);
+const cc_rooftopworks_FAR_7_BULK: vec4<f32> =
+    vec4<f32>(0.32014, 0.23621, 0.40109, 0.34915);
+const cc_rooftopworks_FAR_7_BULK2: vec4<f32> =
+    vec4<f32>(0.0084041, 0.0042525, 0.008543, 0.0088102);
+const cc_rooftopworks_FAR_7_LIFT: vec4<f32> =
+    vec4<f32>(0.55916, 0.41658, 0.54297, 0.63689);
+const cc_rooftopworks_FAR_7_LIFT2: vec4<f32> =
+    vec4<f32>(0.011671, 0.0061128, 0.010653, 0.012667);
+
 // A wall's projected area over the deck's grows without bound toward
 // grazing; past this ratio the deck stops standing in for the walls.
 const cc_rooftopworks_FAR_LAMP_CAP: f32 = 3.0;
@@ -12362,42 +12558,244 @@ fn cc_rooftopworks_cell_deck(d: cc_rooftopworks_Deck, ci: vec2<i32>) -> f32 {
     return cc_rooftopworks_area(lo, hi) - hole;
 }
 
-fn cc_rooftopworks_lamps_far(cc: CityCell, ci: vec2<i32>,
+struct cc_rooftopworks_Far {
+    mech: vec4<f32>,
+    mech2: vec4<f32>,
+    bulk: vec4<f32>,
+    bulk2: vec4<f32>,
+    lift: vec4<f32>,
+    lift2: vec4<f32>,
+}
+
+fn cc_rooftopworks_mech_rho() -> f32 {
+    let d = clamp(cc_rooftopworks_density(), cc_rooftopworks_MECH_RHO_D.x,
+                  cc_rooftopworks_MECH_RHO_D4);
+    let x = cc_rooftopworks_MECH_RHO_D;
+    let y = cc_rooftopworks_MECH_RHO_AT;
+    if (d < x.y) {
+        return mix(y.x, y.y, (d - x.x) / (x.y - x.x));
+    }
+    if (d < x.z) {
+        return mix(y.y, y.z, (d - x.y) / (x.z - x.y));
+    }
+    if (d < x.w) {
+        return mix(y.z, y.w, (d - x.z) / (x.w - x.z));
+    }
+    return mix(y.w, cc_rooftopworks_MECH_RHO_AT4,
+               (d - x.w) / (cc_rooftopworks_MECH_RHO_D4 - x.w));
+}
+
+fn cc_rooftopworks_far_node(i: i32) -> cc_rooftopworks_Far {
+    switch (i) {
+        case 0: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_0_MECH,
+                cc_rooftopworks_FAR_0_MECH2, cc_rooftopworks_FAR_0_BULK,
+                cc_rooftopworks_FAR_0_BULK2, cc_rooftopworks_FAR_0_LIFT,
+                cc_rooftopworks_FAR_0_LIFT2);
+        }
+        case 1: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_1_MECH,
+                cc_rooftopworks_FAR_1_MECH2, cc_rooftopworks_FAR_1_BULK,
+                cc_rooftopworks_FAR_1_BULK2, cc_rooftopworks_FAR_1_LIFT,
+                cc_rooftopworks_FAR_1_LIFT2);
+        }
+        case 2: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_2_MECH,
+                cc_rooftopworks_FAR_2_MECH2, cc_rooftopworks_FAR_2_BULK,
+                cc_rooftopworks_FAR_2_BULK2, cc_rooftopworks_FAR_2_LIFT,
+                cc_rooftopworks_FAR_2_LIFT2);
+        }
+        case 3: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_3_MECH,
+                cc_rooftopworks_FAR_3_MECH2, cc_rooftopworks_FAR_3_BULK,
+                cc_rooftopworks_FAR_3_BULK2, cc_rooftopworks_FAR_3_LIFT,
+                cc_rooftopworks_FAR_3_LIFT2);
+        }
+        case 4: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_4_MECH,
+                cc_rooftopworks_FAR_4_MECH2, cc_rooftopworks_FAR_4_BULK,
+                cc_rooftopworks_FAR_4_BULK2, cc_rooftopworks_FAR_4_LIFT,
+                cc_rooftopworks_FAR_4_LIFT2);
+        }
+        case 5: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_5_MECH,
+                cc_rooftopworks_FAR_5_MECH2, cc_rooftopworks_FAR_5_BULK,
+                cc_rooftopworks_FAR_5_BULK2, cc_rooftopworks_FAR_5_LIFT,
+                cc_rooftopworks_FAR_5_LIFT2);
+        }
+        case 6: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_6_MECH,
+                cc_rooftopworks_FAR_6_MECH2, cc_rooftopworks_FAR_6_BULK,
+                cc_rooftopworks_FAR_6_BULK2, cc_rooftopworks_FAR_6_LIFT,
+                cc_rooftopworks_FAR_6_LIFT2);
+        }
+        default: {
+            return cc_rooftopworks_Far(cc_rooftopworks_FAR_7_MECH,
+                cc_rooftopworks_FAR_7_MECH2, cc_rooftopworks_FAR_7_BULK,
+                cc_rooftopworks_FAR_7_BULK2, cc_rooftopworks_FAR_7_LIFT,
+                cc_rooftopworks_FAR_7_LIFT2);
+        }
+    }
+}
+
+// The table at the handoff footprint fp_h (m): linear between its nodes,
+// held at its ends. The nodes are 1 m apart to 4 m, then 2 m apart to 12 m,
+// so the segment is found in closed form.
+fn cc_rooftopworks_far_at(fp_h: f32) -> cc_rooftopworks_Far {
+    let x = clamp(fp_h, 1.0, 12.0);
+    let i = select(min(3 + i32(floor((x - 4.0) * 0.5)), 6),
+                   min(i32(floor(x)) - 1, 2), x < 4.0);
+    let a = cc_rooftopworks_far_node(i);
+    let b = cc_rooftopworks_far_node(i + 1);
+    let w = clamp((x - a.mech.w) / (b.mech.w - a.mech.w), 0.0, 1.0);
+    return cc_rooftopworks_Far(mix(a.mech, b.mech, w),
+                               mix(a.mech2, b.mech2, w),
+                               mix(a.bulk, b.bulk, w), mix(a.bulk2, b.bulk2, w),
+                               mix(a.lift, b.lift, w), mix(a.lift2, b.lift2, w));
+}
+
+// The lamps' far light, per square metre of deck as seen: for the tank
+// lamps and for the stair's, the share of the deck its light is shown on and
+// the level it is shown at (over LAMP_RAD in LAMP_COL). From each kind's
+// seen flux F and seen second moment S (the table's rows and their squares,
+// each face class at its projection): the light is shown as an element of
+// area F^2 / S at level S / F, which keeps its flux (their product is F) and
+// its concentration (a spot on a small face, not a wash over the deck), so
+// the deck's shown mean is what the faces' would be. The pad's lights sit on
+// its top, flat and small; their light stays a plain emission.
+struct cc_rooftopworks_FarLamps {
+    a_m: f32,
+    l_m: f32,
+    a_b: f32,
+    l_b: f32,
+    pad: vec3<f32>,
+}
+
+fn cc_rooftopworks_lamps_far(cc: CityCell, ci: vec2<i32>, fp_h: f32,
                              d: cc_rooftopworks_Deck,
                              cr: CityCrown,
                              bk: cc_rooftopworks_Bulk, dir: vec3<f32>)
-        -> vec3<f32> {
+        -> cc_rooftopworks_FarLamps {
+    var res = cc_rooftopworks_FarLamps(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0));
     let a0 = cc_rooftopworks_cell_deck(d, ci);
     if (a0 <= 1.0) {
-        return vec3<f32>(0.0);
+        return res;
     }
     let v = -dir;
     let vz = max(abs(v.z), 1e-3);
     let cap = cc_rooftopworks_FAR_LAMP_CAP;
-    // Seen area per unit lamp radiance, per square metre of deck as seen.
-    var s = 0.0;
+    let far = cc_rooftopworks_far_at(fp_h);
     if (cc_rooftopworks_mech_on(cc)) {
-        let side = min(0.25 * (abs(v.x) + abs(v.y)) / vz, cap);
-        s = cc_rooftopworks_MECH_RHO
-            * (cc_rooftopworks_MECH_S.x * side + cc_rooftopworks_MECH_S.y);
+        // Each face's projection capped, then their expectation.
+        let side = 0.25 * (min(abs(v.x) / vz, cap) + min(abs(v.y) / vz, cap));
+        let rho = cc_rooftopworks_mech_rho();
+        let fm = rho * (far.mech.x * side + far.mech.y);
+        let sm = rho * (far.mech2.x * side + far.mech2.y);
+        if (fm > 0.0 && sm > 0.0) {
+            res.a_m = fm * fm / sm;
+            res.l_m = sm / fm;
+        }
     }
     if (bk.ok && bk.lamp) {
-        let b = select(cc_rooftopworks_BULK_S, cc_rooftopworks_BULK_LIFT_S,
-                       bk.lift);
+        let b = select(far.bulk, far.lift, bk.lift);
+        let b2 = select(far.bulk2, far.lift2, bk.lift);
         let f = dot(bk.door, v.xy);
         let t = abs(dot(vec2<f32>(-bk.door.y, bk.door.x), v.xy));
-        s = s + (b.x * min(max(f, 0.0) / vz, cap)
-                 + b.y * min(max(-f, 0.0) / vz, cap)
-                 + b.z * min(0.5 * t / vz, cap) + b.w) / a0;
+        let pr = vec4<f32>(min(max(f, 0.0) / vz, cap),
+                           min(max(-f, 0.0) / vz, cap),
+                           min(0.5 * t / vz, cap), 1.0);
+        let fb = dot(b, pr) / a0;
+        let sb = dot(b2, pr) / a0;
+        if (fb > 0.0 && sb > 0.0) {
+            res.a_b = fb * fb / sb;
+            res.l_b = sb / fb;
+        }
     }
-    var e = cc_rooftopworks_LAMP_COL * (cc_rooftopworks_LAMP_RAD * s);
+    // The two kinds' shares can not outgrow the deck: past it, the light is
+    // spread over the whole of it at the level that keeps its flux.
+    let a = res.a_m + res.a_b;
+    if (a > 1.0) {
+        res.l_m = res.l_m * a;
+        res.l_b = res.l_b * a;
+        res.a_m = res.a_m / a;
+        res.a_b = res.a_b / a;
+    }
     if (cr.kind == 2) {
         let sig = cc_rooftopworks_PAD_LAMP_SIG;
-        e = e + cc_rooftopworks_PAD_LAMP_COL
-                * (cc_rooftopworks_PAD_LAMP_RAD * 4.0 * 6.283185307 * sig * sig
-                   / a0);
+        res.pad = cc_rooftopworks_PAD_LAMP_COL
+                  * (cc_rooftopworks_PAD_LAMP_RAD * 4.0 * 6.283185307 * sig
+                     * sig * far.mech.z / a0);
     }
-    return e;
+    return res;
+}
+
+// Whether the stair or its lift room stands over a deck point p, or between
+// it and the eye along a ray `dir` arriving at it.
+fn cc_rooftopworks_bulk_hides(bk: cc_rooftopworks_Bulk, p: vec3<f32>,
+                              dir: vec3<f32>) -> bool {
+    if (!bk.ok) {
+        return false;
+    }
+    let o = p + vec3<f32>(0.0, 0.0, 0.01);
+    let back = -dir;
+    let inv = vec3<f32>(select(1e30, 1.0 / back.x, abs(back.x) > 1e-9),
+                        select(1e30, 1.0 / back.y, abs(back.y) > 1e-9),
+                        select(1e30, 1.0 / back.z, abs(back.z) > 1e-9));
+    let s = city_box_hit(o, inv, bk.lo, bk.hi);
+    if (s.x <= s.y && s.y > 0.0) {
+        return true;
+    }
+    if (bk.lift) {
+        let l = city_box_hit(o, inv, bk.lift_lo, bk.lift_hi);
+        return l.x <= l.y && l.y > 0.0;
+    }
+    return false;
+}
+
+// The deck under the skylight field as it is shown: the field averaged over
+// the pixel's footprint (exact pane by pane, the expectation past a pitch),
+// handed back as the radiance that shows as that average; `base` where the
+// footprint holds no lit pane.
+fn cc_rooftopworks_sky_deck(cc: CityCell, sk: cc_rooftopworks_Sky,
+                            h: CityHit, dir: vec3<f32>, fp_filter: f32,
+                            base: vec3<f32>, fog: vec4<f32>, shown: bool)
+        -> vec3<f32> {
+    // The pixel's footprint on the deck (z out of it, the ray into it).
+    let hb = max(city_wall_footprint(dir, fp_filter), vec2<f32>(1e-3));
+    let blo = h.pos.xy - hb;
+    let bhi = h.pos.xy + hb;
+    if (any(bhi <= sk.flo) || any(blo >= sk.fhi)) {
+        return base;
+    }
+    var col = CITY_PALETTE_MEAN;
+    if (cc.win_mono >= 0.0) {
+        col = city_room_color(cc.win_mono, cc.palette_bias);
+    }
+    let pane_rad = col * cc_rooftopworks_SKY_RAD;
+    let span = max(2.0 * hb.x / sk.pitch.x, 2.0 * hb.y / sk.pitch.y);
+    let w_mean = smoothstep(0.5, 1.0, span);
+    var ex = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
+    if (w_mean < 1.0) {
+        ex = cc_rooftopworks_sky_exact(cc, sk, blo, bhi, base, pane_rad, fog,
+                                       shown);
+        if (w_mean <= 0.0) {
+            if (ex.lit_area <= 0.0) {
+                return base;   // roof alone: as the core drew it
+            }
+            if (ex.whole > 0.0) {
+                return base + pane_rad * ex.whole;   // one pane, exactly
+            }
+        }
+    }
+    var mn = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
+    if (w_mean > 0.0) {
+        mn = cc_rooftopworks_sky_mean(sk, blo, bhi, base, pane_rad, fog,
+                                      shown);
+    }
+    let box_a = cc_rooftopworks_area(blo, bhi);
+    let mean = CityWinSum(mix(ex.sum.shown, mn.sum.shown, w_mean) / box_a,
+                          mix(ex.sum.light, mn.sum.light, w_mean) / box_a);
+    return city_windows_resolve(mean, fog, shown);
 }
 
 fn cc_rooftopworks_roof(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
@@ -12410,65 +12808,59 @@ fn cc_rooftopworks_roof(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
     if (!d.ok || abs(h.pos.z - d.z) > 0.2) {
         return vec3<f32>(0.0);
     }
-    // The door lamp's pool on the deck in front of the bulkhead: what a
-    // roof is read by from the air at night.
-    var e = vec3<f32>(0.0);
     let cr = city_crown(cc, h.cell);
     let bk = cc_rooftopworks_bulk(cc, h.cell, cr);
     // Props are drawn only on the view ray, inside the range; a reflection
     // traces none (CITY_TRACE_PLAIN), so it sees the far means at any range.
+    var far = cc_rooftopworks_FarLamps(0.0, 0.0, 0.0, 0.0, vec3<f32>(0.0));
+    var hidden = false;
     if (!(direct && city_props_drawn(h.cell, h.pos, h.t))) {
-        e = cc_rooftopworks_lamps_far(cc, h.cell, d, cr, bk, dir);
+        // The footprint where the props hand over, which the far table is
+        // keyed on.
+        let fp_h = lod_pixel_angle() * CITY_PROP_RANGE;
+        far = cc_rooftopworks_lamps_far(cc, h.cell, fp_h, d, cr, bk, dir);
+        // What the stair and its lift room would hide, were they drawn: a
+        // deck point under them, or behind them along the ray (the one
+        // prop computed here anyway). Up close that deck is never hit, so
+        // the door pool and the skylights on it must not show past the
+        // range either; the light on the stair's faces is in the far
+        // lamps above.
+        hidden = cc_rooftopworks_bulk_hides(bk, h.pos, dir);
     }
-    if (bk.ok && bk.lamp) {
+    let lamps = far.a_m + far.a_b > 0.0;
+    let shown = direct && TONE_MAP;
+    var fog = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    if (lamps || (bk.sky_ok && !hidden)) {
+        fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
+    }
+    // The deck itself, as it is shown: the skylights resolved over it.
+    var deck = base;
+    if (bk.sky_ok && !hidden) {
+        deck = cc_rooftopworks_sky_deck(cc, cc_rooftopworks_sky(cc, d, cr, bk),
+                                        h, dir, fp_filter, base, fog, shown);
+    }
+    // The door lamp's pool on the deck in front of the bulkhead: what a
+    // roof is read by from the air at night. And the pad's lights, far off.
+    deck = deck + far.pad;
+    if (bk.ok && bk.lamp && !hidden) {
         let pool = cc_rooftopworks_spot(h.pos, bk.seat - vec3<f32>(0.0, 0.0,
                                         bk.seat.z - d.z) + vec3<f32>(bk.door
                                         * 1.4, 0.0), 2.2, fp);
-        e = e + cc_rooftopworks_LAMP_COL * (0.35 * cc_rooftopworks_LAMP_RAD
-                                            * CITY_ROOF_ALBEDO * 4.0 * pool);
+        deck = deck + cc_rooftopworks_LAMP_COL
+                      * (0.35 * cc_rooftopworks_LAMP_RAD * CITY_ROOF_ALBEDO
+                         * 4.0 * pool);
     }
-    let sk = cc_rooftopworks_sky(cc, d);
-    if (!sk.ok) {
-        return e;
+    if (!lamps) {
+        return deck - base;
     }
-    // The pixel's footprint on the deck (z out of it, the ray into it).
-    let hb = max(city_wall_footprint(dir, fp_filter), vec2<f32>(1e-3));
-    let blo = h.pos.xy - hb;
-    let bhi = h.pos.xy + hb;
-    if (any(bhi <= sk.flo) || any(blo >= sk.fhi)) {
-        return e;
-    }
-    var col = CITY_PALETTE_MEAN;
-    if (cc.win_mono >= 0.0) {
-        col = city_room_color(cc.win_mono, cc.palette_bias);
-    }
-    let pane_rad = col * cc_rooftopworks_SKY_RAD;
-    let shown = direct && TONE_MAP;
-    let fog = city_fog_ab(h.pos - h.t * dir, dir, h.t, h.pos);
-    let span = max(2.0 * hb.x / sk.pitch.x, 2.0 * hb.y / sk.pitch.y);
-    let w_mean = smoothstep(0.5, 1.0, span);
-    var ex = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
-    if (w_mean < 1.0) {
-        ex = cc_rooftopworks_sky_exact(cc, sk, blo, bhi, base, pane_rad, fog,
-                                       shown);
-        if (w_mean <= 0.0) {
-            if (ex.lit_area <= 0.0) {
-                return e;   // roof alone: as the core drew it
-            }
-            if (ex.whole > 0.0) {
-                return e + pane_rad * ex.whole;   // one pane, exactly
-            }
-        }
-    }
-    var mn = cc_rooftopworks_SkySum(city_win_zero(), 0.0, -1.0);
-    if (w_mean > 0.0) {
-        mn = cc_rooftopworks_sky_mean(sk, blo, bhi, base, pane_rad, fog,
-                                      shown);
-    }
-    let box_a = cc_rooftopworks_area(blo, bhi);
-    let mean = CityWinSum(mix(ex.sum.shown, mn.sum.shown, w_mean) / box_a,
-                          mix(ex.sum.light, mn.sum.light, w_mean) / box_a);
-    return e + city_windows_resolve(mean, fog, shown) - base;
+    // Past the range, the lamps' light shown as the small bright faces it
+    // is on up close, beside the deck (cc_rooftopworks_lamps_far).
+    let lamp = cc_rooftopworks_LAMP_COL * cc_rooftopworks_LAMP_RAD;
+    var acc = city_win_add(city_win_zero(), deck, 1.0 - far.a_m - far.a_b,
+                           fog, shown);
+    acc = city_win_add(acc, base + lamp * far.l_m, far.a_m, fog, shown);
+    acc = city_win_add(acc, base + lamp * far.l_b, far.a_b, fog, shown);
+    return city_windows_resolve(acc, fog, shown) - base;
 }
 
 // --- the tank, close up: SDF in a box ---------------------------------------
@@ -13057,18 +13449,30 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         // face (the far lamp constants are measured with it). Box-filtered
         // over the pixel's footprint on the face: the leaf's share of it,
         // which is the leaf itself up close and its area's mean far off.
-        if (dot(h.normal.xy, bk.door) > 0.5) {
-            let t = vec2<f32>(-bk.door.y, bk.door.x);
-            let c = 0.5 * (bk.lo.xy + bk.hi.xy);
-            let along = dot(h.pos.xy - c, t);
+        let t = vec2<f32>(-bk.door.y, bk.door.x);
+        let c = 0.5 * (bk.lo.xy + bk.hi.xy);
+        let along = dot(h.pos.xy - c, t);
+        let fw = 0.5 * abs(dot(bk.hi.xy - bk.lo.xy, t));
+        // On the stair's own door face: the lift room beside it faces the
+        // same way and is drawn under the same kind.
+        let on_face = dot(h.normal.xy, bk.door) > 0.5 && abs(along) <= fw + 1e-3
+            && abs(dot(h.pos.xy - c, bk.door)
+                   - 0.5 * abs(dot(bk.hi.xy - bk.lo.xy, bk.door))) < 0.05;
+        if (on_face) {
             let up = h.pos.z - bk.lo.z;
             let dl = vec3<f32>(dot(dir.xy, t), dir.z, dot(dir.xy, bk.door));
             let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-4));
+            // The footprint clipped to the face it lies on: what falls off
+            // the face (onto the deck at its foot, round its corners) is not
+            // this face's to darken, and the leaf's share is of what is left.
+            let u0 = max(along - hb.x, -fw);
+            let u1 = max(min(along + hb.x, fw), u0 + 1e-4);
+            let v0 = max(up - hb.y, 0.0);
+            let v1 = max(min(up + hb.y, bk.hi.z - bk.lo.z), v0 + 1e-4);
             let w = 0.5 * cc_rooftopworks_BULK_DOOR_W;
-            let su = max(min(along + hb.x, w) - max(along - hb.x, -w), 0.0);
-            let sv = max(min(up + hb.y, cc_rooftopworks_BULK_DOOR_H)
-                         - max(up - hb.y, 0.0), 0.0);
-            let share = su * sv / (4.0 * hb.x * hb.y);
+            let su = max(min(u1, w) - max(u0, -w), 0.0);
+            let sv = max(min(v1, cc_rooftopworks_BULK_DOOR_H) - v0, 0.0);
+            let share = su * sv / ((u1 - u0) * (v1 - v0));
             e = e * (1.0 - share * (1.0 - cc_rooftopworks_BULK_DOOR_K));
         }
         // The machine room's walls: a louvred vent panel in the middle of
@@ -18790,10 +19194,10 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // A clerestory is the same argument with one long face in view and no
 // occluder: its projected strip, length x height x |d_c| / |dz|, over the
 // roof's area.
-// The hook's fp_filter, ray and the core's roof radiance are not needed
-// here: the glazing's mean is a plain emission on the roof.
+// The hook's fp_filter and the core's roof radiance are not needed here:
+// the glazing's mean is a plain emission on the roof, seen along `dir`.
 fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
-                    _dir: vec3<f32>, direct: bool, _base: vec3<f32>)
+                    dir: vec3<f32>, direct: bool, _base: vec3<f32>)
         -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
@@ -18805,7 +19209,6 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
     if (direct && city_props_drawn(h.cell, h.pos, h.t)) {
         return vec3<f32>(0.0);
     }
-    let dir = (h.pos - city_camera_origin()) / max(h.t, 1e-3);
     let dz = max(abs(dir.z), 1e-3);
     if (r.kind == 1) {
         let d_s = r.face * select(dir.y, dir.x, r.step_x);
