@@ -113,9 +113,21 @@ export async function requireHardwareAdapter(tab) {
   return [info.vendor, info.architecture].filter(Boolean).join(" ");
 }
 
-/** What the page threw, from a Runtime.evaluate result's exceptionDetails. */
+/** What the page threw, from a Runtime.evaluate result's exceptionDetails:
+ *  an Error's description, else the thrown value itself (`throw "x"`, a
+ *  promise rejected with a string), else CDP's bare text ("Uncaught"). */
 function thrownMessage(details) {
-  return details.exception?.description ?? details.text;
+  const e = details.exception;
+  if (e?.description !== undefined) return e.description;
+  if (e && "value" in e) return String(e.value);
+  return details.text;
+}
+
+/** The rejection every pending and later send() gets once the DevTools
+ *  socket has closed: the tab or Chrome is gone, and nothing will answer. */
+function closedError(why) {
+  return Object.assign(new Error(`the DevTools connection closed (${why})`),
+                       { closed: true });
 }
 
 /**
@@ -123,13 +135,20 @@ function thrownMessage(details) {
  * result or rejecting on a protocol error — until it gives a truthy value,
  * and return that value.
  *
- * Three answers, kept apart:
+ * The answers, kept apart:
  *   - a truthy value: done;
  *   - a falsy value, or a protocol error (no execution context: the page is
  *     navigating, its context was destroyed, it is not up yet): not ready,
  *     poll again;
  *   - the expression THREW (exceptionDetails): a failure the expression is
- *     reporting, so rethrown at once with the page's message.
+ *     reporting, so rethrown at once with the page's message;
+ *   - the DevTools connection closed (err.closed: the tab or Chrome died,
+ *     or qa_chrome stop ran mid-run): nothing will ever answer, so rethrown
+ *     at once;
+ *   - no answer at all by the deadline (a page whose main thread is wedged,
+ *     a stuck GPU readback): each evaluate is raced against the time left,
+ *     so the wait ends at timeoutMs however long one evaluate would hang.
+ * The last two were hangs past any timeout until loose-ends' review.
  * Until 2026-11-09 the poll swallowed all three alike (`.catch(() =>
  * undefined)`), so a failure check inside a waited expression — pinned_
  * still's `if (L.classList.contains("failed") ...) throw new Error(L.
@@ -142,12 +161,25 @@ export async function pollUntil(evaluate, expression, timeoutMs = 60000,
                                 intervalMs = 250) {
   const t0 = Date.now();
   let last = null;
+  const NO_ANSWER = Symbol("no answer");
   for (;;) {
     let r = null;
+    let timer;
     try {
-      r = await evaluate(expression);
+      const left = Math.max(0, timeoutMs - (Date.now() - t0));
+      r = await Promise.race([
+        evaluate(expression),
+        new Promise((ok) => { timer = setTimeout(() => ok(NO_ANSWER), left); }),
+      ]);
     } catch (err) {
+      if (err.closed) throw err;
       last = err;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (r === NO_ANSWER) {
+      throw new Error(`timed out waiting for ${expression} (the page did not ` +
+                      `answer within ${timeoutMs} ms)`);
     }
     if (r?.exceptionDetails) {
       const short = expression.length > 120
@@ -179,6 +211,20 @@ export async function openTab(cdpPort) {
   let id = 0;
   const waiting = new Map();
   const listeners = [];
+  let closed = null;
+  let rejectOnClose;
+  // Settles only when the socket closes; what waits on an EVENT (goto's load)
+  // races it, as what waits on a reply is rejected below.
+  const whenClosed = new Promise((_, bad) => { rejectOnClose = bad; });
+  whenClosed.catch(() => {});
+  ws.onclose = (e) => {
+    // Nothing pending will be answered now: settle it all, and refuse what
+    // comes after, rather than leave every await on this tab hanging.
+    closed = closedError(`code ${e.code}${e.reason ? `, ${e.reason}` : ""}`);
+    for (const { bad } of waiting.values()) bad(closed);
+    waiting.clear();
+    rejectOnClose(closed);
+  };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id && waiting.has(m.id)) {
@@ -190,6 +236,7 @@ export async function openTab(cdpPort) {
     }
   };
   const send = (method, params = {}) => new Promise((ok, bad) => {
+    if (closed) { bad(closed); return; }
     waiting.set(++id, { ok, bad });
     ws.send(JSON.stringify({ id, method, params }));
   });
@@ -210,7 +257,7 @@ export async function openTab(cdpPort) {
         if (m.method === "Page.loadEventFired") ok();
       }));
       await send("Page.navigate", { url });
-      await loaded;
+      await Promise.race([loaded, whenClosed]);
     },
     /** pollUntil on this tab: a throw in `expression` fails at once. */
     waitFor(expression, timeoutMs = 60000) {
