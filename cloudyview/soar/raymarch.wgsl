@@ -21403,6 +21403,9 @@ fn surface_first_stage(frag_pos: vec4<f32>) -> vec4<f32> {
 // Each 32-lane warp takes an 8x4 block of pixels, as a fragment warp's quads
 // do (a 32x1 row cost the horizon view 11%). The size is an override the
 // host sets per adapter: SURFACE_CS_WX a multiple of 8, SURFACE_CS_WY of 4.
+// tools/tint_check.mjs validates this entry with the rest of the module (Tint
+// checks every entry point at module creation); like every entry, its
+// pipeline is built only by the hosts.
 override SURFACE_CS_WX: u32 = 32u;
 override SURFACE_CS_WY: u32 = 16u;
 @group(2) @binding(0) var surface_cs_out: texture_storage_2d<rgba32float, write>;

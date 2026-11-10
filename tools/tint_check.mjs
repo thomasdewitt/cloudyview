@@ -102,7 +102,13 @@ const expression = `(async () => {
     adapter = await navigator.gpu?.requestAdapter();
   }
   if (!adapter) return { fatal: "no WebGPU adapter in this Chrome (6 tries over 5 s)" };
-  const device = await adapter.requestDevice();
+  // The adapter's compute limits, so the city's cs_surface (the ?surfacecs
+  // experiment) can be built at its 512-invocation workgroup below.
+  const L = adapter.limits;
+  const device = await adapter.requestDevice({ requiredLimits: {
+    maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup,
+    maxComputeWorkgroupSizeX: L.maxComputeWorkgroupSizeX,
+    maxComputeWorkgroupSizeY: L.maxComputeWorkgroupSizeY } });
   const R = await import(base + "/soar/renderer.js");
   const K = await import(base + "/soar/constants.js");
   const text = async (p) => {
@@ -120,7 +126,29 @@ const expression = `(async () => {
     const warnings = info.messages.filter((m) => m.type === "warning")
       .map(say);
     if (scoped && !errors.length) errors.push(scoped.message);
-    return { label, errors, warnings };
+    return { label, errors, warnings, module };
+  };
+  // cs_surface as the hosts build it (renderer.js _surfaceComputePipeline):
+  // Tint validates every entry when the module is made, but its backend,
+  // the workgroup overrides and the device limits meet the entry only at
+  // pipeline creation, which no other check here does for it.
+  const csPipeline = async (label, module, [wx, wy]) => {
+    const errors = [];
+    if (wx * wy > device.limits.maxComputeInvocationsPerWorkgroup) {
+      errors.push("this adapter allows " +
+                  device.limits.maxComputeInvocationsPerWorkgroup +
+                  " invocations, not " + (wx * wy));
+    } else {
+      try {
+        await device.createComputePipelineAsync({
+          label, layout: "auto",
+          compute: { module, entryPoint: "cs_surface",
+                     constants: { SURFACE_CS_WX: wx, SURFACE_CS_WY: wy } } });
+      } catch (err) {
+        errors.push(String(err?.message || err));
+      }
+    }
+    return { label, errors, warnings: [], pipeline: true };
   };
   const raymarch = await text("raymarch.wgsl");
   // Every lighting recipe the app can reach: each tier's light-step cap,
@@ -140,6 +168,7 @@ const expression = `(async () => {
   }
   const out = [];
   const done = new Set();
+  let csSmall = false;     // the 16x16 workgroup, built once
   for (const surface of ["ocean", "city"]) {
     for (const nested of [false, true]) {
       for (const periodic of [false, true]) {
@@ -164,7 +193,17 @@ const expression = `(async () => {
             }
             if (done.has(code)) continue;
             done.add(code);
-            out.push(await compile("raymarch " + label, code));
+            const m = await compile("raymarch " + label, code);
+            out.push(m);
+            if (surface === "city" && !m.errors.length) {
+              out.push(await csPipeline("cs_surface 32x16 " + label, m.module,
+                                        [32, 16]));
+              if (!csSmall) {
+                csSmall = true;
+                out.push(await csPipeline("cs_surface 16x16 " + label,
+                                          m.module, [16, 16]));
+              }
+            }
           }
         }
       }
@@ -184,6 +223,7 @@ const expression = `(async () => {
                warnings: [] });
   }
   device.destroy();
+  for (const m of out) delete m.module;
   return { out, adapter: [adapter.info?.vendor, adapter.info?.architecture]
                            .filter(Boolean).join(" ") };
 })()`;
@@ -207,6 +247,8 @@ for (const m of result.out) {
     if (!seen.has(w)) { seen.add(w); console.log(`warn ${m.label}: ${w}`); }
   }
 }
-console.log(`tint_check: ${result.out.length} modules, ${failed} failed ` +
+const pipelines = result.out.filter((m) => m.pipeline).length;
+console.log(`tint_check: ${result.out.length - pipelines} modules and ` +
+            `${pipelines} cs_surface pipelines, ${failed} failed ` +
             `(raymarch.wgsl sha256 ${shaderHash}; ${result.adapter})`);
 await done(failed ? 1 : 0);

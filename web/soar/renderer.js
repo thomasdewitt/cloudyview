@@ -246,6 +246,44 @@ export function surfaceComputeWorkgroup(search = globalThis.location?.search ?? 
   return sizes[v];
 }
 
+/**
+ * What _proveSurfaceCS clears cs_surface's output to: no surface it writes
+ * is this in every channel (radiance is not negative, red's mark is one bit,
+ * |t| is kilometres). soar_host.SURFACE_CS_SENTINEL is the same.
+ */
+export const SURFACE_CS_SENTINEL = -3.0e38;
+const SENTINEL_BITS = new Uint32Array(
+  new Float32Array([SURFACE_CS_SENTINEL]).buffer)[0];
+
+/** The failure of a compute surface stage that did not run: the workgroup,
+ *  what was left unwritten, the likely cause, the alternative. */
+export function surfaceComputeFailure([wx, wy], unwritten, total) {
+  const alt = wx === 16 && wy === 16
+    ? "no smaller workgroup is defined: leave ?surfacecs off"
+    : "try ?surfacecs=256";
+  return `The surface stage as compute did not run: ${unwritten} of ${total} ` +
+    `pixels unwritten at a ${wx}x${wy} workgroup. The GPU may have refused ` +
+    "threadgroups that large for this shader (Metal caps each pipeline's " +
+    `maxTotalThreadsPerThreadgroup); ${alt}.`;
+}
+
+/** How many pixels of a mapped rgba32float readback (rows of `row` bytes)
+ *  still hold the sentinel in every channel. */
+export function countUnwritten(words, w, h, row) {
+  let n = 0;
+  for (let y = 0; y < h; y++) {
+    const base = y * (row / 4);
+    for (let x = 0; x < w; x++) {
+      const i = base + 4 * x;
+      if (words[i] === SENTINEL_BITS && words[i + 1] === SENTINEL_BITS
+          && words[i + 2] === SENTINEL_BITS && words[i + 3] === SENTINEL_BITS) {
+        n += 1;
+      }
+    }
+  }
+  return n;
+}
+
 function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   if (!overlays) return;
   for (const overlay of overlays) {
@@ -458,7 +496,11 @@ export class Renderer {
           `${l.maxComputeInvocationsPerWorkgroup}, sizes ` +
           `${l.maxComputeWorkgroupSizeX}x${l.maxComputeWorkgroupSizeY})`);
       }
-      console.info(`soar: surface stage as compute, workgroup ${wx}x${wy}`);
+      // Only a scene with a traced surface (the city) has a first stage to
+      // run as compute; elsewhere the flag changes nothing, and says so.
+      console.info(scene.city
+        ? `soar: surface stage as compute, workgroup ${wx}x${wy}`
+        : "soar: ?surfacecs has no effect: this scene has no surface stage");
     }
 
     this.periodic = true;
@@ -1239,6 +1281,75 @@ export class Renderer {
     return pending;
   }
 
+  /** cs_surface's dispatch into compute pass `cp`: every pixel of the
+   *  target set, in workgroups of surfaceCS, writing through `group`. */
+  _encodeSurfaceCS(cp, targets, pipeline, rayBindGroup, group) {
+    const [wx, wy] = this.surfaceCS;
+    cp.setPipeline(pipeline);
+    cp.setBindGroup(0, rayBindGroup);
+    cp.setBindGroup(1, this.surfaceCSEmptyGroup);
+    cp.setBindGroup(2, group);
+    this._dispatchSurfaceCS(cp, Math.ceil(targets.w / wx),
+                            Math.ceil(targets.h / wy));
+  }
+
+  /** The one dispatch call (a test replaces it with one that writes
+   *  nothing, which the proof must catch). */
+  _dispatchSurfaceCS(cp, gx, gy) {
+    cp.dispatchWorkgroups(gx, gy);
+  }
+
+  /**
+   * ?surfacecs: once per target set and slot, prove cs_surface ran, or
+   * throw. A GPU that refuses the threadgroup may say nothing — Metal caps
+   * each compute pipeline's maxTotalThreadsPerThreadgroup, which a kernel
+   * this heavy can push under 512, and wgpu's Metal backend does not check
+   * it; whether Dawn's does is not something this code relies on — and the
+   * surface would keep whatever it held. So the slot the first stage
+   * writes is cleared to SURFACE_CS_SENTINEL, cs_surface dispatched once on
+   * the uniforms as they stand (it writes every pixel whatever they say),
+   * and the slot read back: one pixel still holding the sentinel throws.
+   */
+  async _proveSurfaceCS(targets, pipeline, rayBindGroup, nStages) {
+    const surface = targets.surface;
+    const slot = surfaceStagePlan(nStages)[0][0];
+    surface.csProven ??= {};
+    if (surface.csProven[slot]) return;
+    const tex = surface.csTargets[slot];
+    surface.csGroups[slot] ??= surface.csGroup(tex);
+    const { w, h } = targets;
+    const S = SURFACE_CS_SENTINEL;
+    const enc = this.device.createCommandEncoder({ label: "soar-surface-cs-proof" });
+    const clear = enc.beginRenderPass({ colorAttachments: [{
+      view: tex.createView(), loadOp: "clear", storeOp: "store",
+      clearValue: { r: S, g: S, b: S, a: S } }] });
+    clear.end();
+    const cp = enc.beginComputePass();
+    this._encodeSurfaceCS(cp, targets, pipeline, rayBindGroup,
+                          surface.csGroups[slot]);
+    cp.end();
+    const row = Math.ceil((w * 16) / 256) * 256;
+    const buf = this.device.createBuffer({
+      label: "soar-surface-cs-proof", size: row * h,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: row },
+                            [w, h]);
+    this.device.queue.submit([enc.finish()]);
+    let unwritten;
+    try {
+      await buf.mapAsync(GPUMapMode.READ);
+      unwritten = countUnwritten(new Uint32Array(buf.getMappedRange()),
+                                 w, h, row);
+      buf.unmap();
+    } finally {
+      buf.destroy();
+    }
+    if (unwritten > 0) {
+      throw new Error(surfaceComputeFailure(this.surfaceCS, unwritten, w * h));
+    }
+    surface.csProven[slot] = true;
+  }
+
   /**
    * ?surfacecs: cs_surface's compute pipeline for `spec`, its workgroup set
    * through the module's overrides. Cached and failed as _pipeline's are,
@@ -1607,6 +1718,12 @@ export class Renderer {
       // A scene with a traced surface needs the set's surface target(s),
       // made on first need.
       await this._ensureSurfaceTarget(targets);
+      // ?surfacecs: the first time a set's slot is used, prove the compute
+      // stage writes it (_proveSurfaceCS); a failure throws here.
+      if (this.surfaceCS && entries[0] === "fs_surface") {
+        await this._proveSurfaceCS(targets, sps[0], this.rayBindGroup,
+                                   entries.length);
+      }
       if (steamLive) await this._ensureLiveTarget(targets);
       const lightingNow = this.lighting;
       const sizeNow = renderTargetSize(outputSize, this.renderScale);
@@ -1873,16 +1990,15 @@ export class Renderer {
       });
       for (const [pipeline, group1, views, cs] of stages) {
         if (cs !== null) {
-          // ?surfacecs: every pixel written, so no clear is needed.
-          surface.csGroups[cs] ??= surface.csGroup(surface.csTargets[cs]);
-          const [wx, wy] = this.surfaceCS;
+          // ?surfacecs: every pixel written, so no clear is needed — which
+          // _proveSurfaceCS showed for this set before it was ever used.
+          if (!surface.csProven?.[cs]) {
+            throw new Error("soar: the compute surface stage was dispatched " +
+                            "into a target set it was never proven on");
+          }
           const cp = encoder.beginComputePass();
-          cp.setPipeline(pipeline);
-          cp.setBindGroup(0, rayBindGroup);
-          cp.setBindGroup(1, this.surfaceCSEmptyGroup);
-          cp.setBindGroup(2, surface.csGroups[cs]);
-          cp.dispatchWorkgroups(Math.ceil(targets.w / wx),
-                                Math.ceil(targets.h / wy));
+          this._encodeSurfaceCS(cp, targets, pipeline, rayBindGroup,
+                                surface.csGroups[cs]);
           cp.end();
           continue;
         }
@@ -1964,7 +2080,8 @@ export class Renderer {
           label: `${label}-${name}`, size: [targets.w, targets.h], format,
           usage: GPUTextureUsage.RENDER_ATTACHMENT
                | GPUTextureUsage.TEXTURE_BINDING
-               | (this.surfaceCS ? GPUTextureUsage.STORAGE_BINDING : 0),
+               | (this.surfaceCS ? GPUTextureUsage.STORAGE_BINDING
+                                   | GPUTextureUsage.COPY_SRC : 0),
         });
         const tex = make("final", SURFACE_FORMAT);
         const veil = make("veil", VEIL_FORMAT);
@@ -2518,6 +2635,11 @@ export class Renderer {
       if (compiling.length > 0) {
         for (const q of compiling) q.catch(() => {});
         return null;
+      }
+      // ?surfacecs: the meter's own set is proven like the frame's, once.
+      if (this.surfaceCS && surfaces[0]?.[0] === "fs_surface") {
+        await this._proveSurfaceCS(this._meterTargets, surfaces[0][1],
+                                   this.rayBindGroup, surfaces.length);
       }
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.

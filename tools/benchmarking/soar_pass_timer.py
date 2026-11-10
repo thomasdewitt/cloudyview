@@ -18,7 +18,13 @@ soar_frame_bench answers "how fast is the app".
 
 A variant is name=spec, spec as tools/soar_shader_ab.py takes it: `tree`,
 `git:<rev>`, or a path to a .wgsl file (a feature-ablated scratch copy is
-how cost gets attributed to a feature — measurement only).
+how cost gets attributed to a feature — measurement only). A spec ending
+in @cs512 or @cs256 runs the city's first surface stage as the compute
+pass (SoarRenderer surface_cs, the experiment), so the two are timed
+interleaved on one device:
+
+    --surface city --variant frag=tree --variant null=tree \
+        --variant cs=tree@cs512
 
 Cases are the TWP-ICE judge field and the prebaked demos the site ships
 (dist/soar/demos, or --demos), each with its own sun. Output size is
@@ -62,7 +68,8 @@ sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
-    SURFACE_STAGES, surface_cell_m, surface_period_m,
+    SURFACE_STAGES, parse_surface_cs, surface_cell_m, surface_cs_limits,
+    surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE, NestedLevel  # noqa: E402
 from soar_frame_bench import DATA_FILE, TIERS, VIEWS, build_level  # noqa: E402
@@ -105,46 +112,31 @@ def load_case(name, demos: Path):
 
 def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     """GPU ms of `frames` consecutive frames as {column: array} (COLUMNS),
-    every pass encoded exactly as SoarRenderer.render encodes it
-    (SoarRenderer._surface_stages): the view's surface stages in order, then
-    the march (fs_main). A stage the view does not have reads as zeros. One
-    timestamp pair per pass actually encoded: resolving a query no pass
-    wrote fails validation, and the readback below then never maps."""
+    every pass encoded by SoarRenderer.encode_frame_passes, the one encoding
+    render() uses: the view's surface stages in order (the first a compute
+    dispatch under surface_cs), then the march (fs_main). A stage the view
+    does not have reads as zeros. One timestamp pair per pass actually
+    encoded: resolving a query no pass wrote fails validation, and the
+    readback below then never maps."""
     import wgpu
     device = renderer.device
     targets = renderer._ensure_targets(view.render_size)
     bind_group = renderer._ensure_bind_group()
-    sample_view = targets["sample"].create_view()
-    names = [STAGE_COLUMN[e] for e in renderer._stage_entries(view)]
-    stages = [(name, pipeline, group1, writes) for name, (pipeline, group1,
-              writes) in zip(names, renderer._surface_stages(targets, view))]
-    stages.append(("march", renderer._ray_pipeline_for(view),
-                   targets["surface_group"], [targets["sample"]]))
-    per = 2 * len(stages)
+    names = [STAGE_COLUMN[e] for e in renderer._stage_entries(view)] + ["march"]
+    per = 2 * len(names)
     for i in range(frames):
         pass_view = ViewState(**{**view.__dict__, "frame_index": i,
                                  "subpixel": i >= 1})
         device.queue.write_buffer(renderer._uniform_buf, 0,
                                   pack_uniforms(state, pass_view).tobytes())
         enc = device.create_command_encoder()
-        for k, (name, pipeline, group1, writes) in enumerate(stages):
-            clear = ((0.0, 0.0, 0.0, 1.0) if name == "march"
-                     else (0.0, 0.0, 0.0, 1e30))
-            rp = enc.begin_render_pass(
-                color_attachments=[{"view": tex.create_view(),
-                                    "load_op": "clear", "store_op": "store",
-                                    "clear_value": clear if j == 0
-                                    else (0, 0, 0, 0)}
-                                   for j, tex in enumerate(writes)],
-                timestamp_writes={"query_set": query_set,
+        encoded = renderer.encode_frame_passes(
+            enc, targets, pass_view, bind_group,
+            timestamps=lambda k: {"query_set": query_set,
                                   "beginning_of_pass_write_index": per * i + 2 * k,
                                   "end_of_pass_write_index": per * i + 2 * k + 1})
-            rp.set_pipeline(pipeline)
-            rp.set_bind_group(0, bind_group)
-            if group1 is not None:
-                rp.set_bind_group(1, group1)
-            rp.draw(3)
-            rp.end()
+        if encoded != len(names):
+            raise RuntimeError(f"encoded {encoded} passes, timed {len(names)}")
         device.queue.submit([enc.finish()])
     enc = device.create_command_encoder()
     enc.resolve_query_set(query_set, 0, per * frames, query_buf, 0)
@@ -158,7 +150,7 @@ def pass_times_ms(renderer, state, view, frames, query_set, query_buf):
     readback.unmap()
     ts = ts.astype(np.float64).reshape(frames, per)
     out = {name: np.zeros(frames) for name in COLUMNS}
-    for k, (name, *_rest) in enumerate(stages):
+    for k, name in enumerate(names):
         out[name] = (ts[:, 2 * k + 1] - ts[:, 2 * k]) * 1e-6   # ns -> ms
     return out
 
@@ -167,8 +159,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--variant", action="append", required=True,
-                    help="name=spec (tree, git:REV, or a .wgsl path); the "
-                         "first is the baseline the ratios divide by")
+                    help="name=spec (tree, git:REV, or a .wgsl path), "
+                         "optionally @cs512 or @cs256 (the first surface "
+                         "stage as compute); the first is the baseline the "
+                         "ratios divide by")
     ap.add_argument("--cases", default="twpice,rce,dycoms")
     ap.add_argument("--demos", type=Path, default=REPO / "dist" / "soar" / "demos",
                     help="prebaked demo directory (default: dist/soar/demos)")
@@ -198,7 +192,20 @@ def main():
     warnings = require_idle()
     import wgpu
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-    device = adapter.request_device_sync(required_features=["timestamp-query"])
+    variants = [v.split("=", 1) for v in args.variant]
+    # A variant's spec may end in @cs512 or @cs256: its first surface stage
+    # as the compute pass (SoarRenderer surface_cs; the experiment), timed
+    # interleaved with fragment variants on the same device.
+    stage_modes = [parse_surface_cs(spec.rsplit("@", 1)[1]) if "@" in spec
+                   else None for _, spec in variants]
+    variants = [(n, spec.rsplit("@", 1)[0] if "@" in spec else spec)
+                for n, spec in variants]
+    limits = {}
+    for mode in stage_modes:
+        for k, v in surface_cs_limits(mode).items():
+            limits[k] = max(limits.get(k, 0), v)
+    device = adapter.request_device_sync(required_features=["timestamp-query"],
+                                         required_limits=limits)
     # Two timestamps a pass: the longest stage chain, plus the march.
     passes = 1 + max(len(v) for v in SURFACE_STAGES.values())
     query_set = device.create_query_set(type="timestamp",
@@ -207,21 +214,22 @@ def main():
         size=16 * passes * args.frames,
         usage=wgpu.BufferUsage.QUERY_RESOLVE | wgpu.BufferUsage.COPY_SRC)
 
-    variants = [v.split("=", 1) for v in args.variant]
     names = [n for n, _ in variants]
     print("ray-pass GPU ms, median over "
           f"{args.frames * max(args.rounds - 1, 1)} passes; output "
           f"{OUTPUT[0]}x{OUTPUT[1]}")
-    for name, spec in variants:
-        print(f"  {name} = {spec}")
+    for (name, spec), mode in zip(variants, stage_modes):
+        stage = "" if mode is None else f" (first stage compute {mode[0]}x{mode[1]})"
+        print(f"  {name} = {spec}{stage}")
     print(f"  clocks: {clock_mode()}")
     header = f"{'case':10s} {'tier':8s} {'view':8s} " + " ".join(
         f"{n:>9s}" for n in names)
     if len(names) > 1:
         header += "  " + " ".join(f"{n + '/' + names[0]:>12s}" for n in names[1:])
     print(header)
-    # Nulls: a variant whose spec repeats an earlier one's.
-    specs = [spec for _, spec in variants]
+    # Nulls: a variant whose spec (and first-stage mode) repeats an
+    # earlier one's.
+    specs = [(spec, mode) for (_, spec), mode in zip(variants, stage_modes)]
     nulls = [(specs.index(sp), j) for j, sp in enumerate(specs)
              if specs.index(sp) != j]
     null_dev, round_dev = 0.0, 0.0
@@ -236,7 +244,8 @@ def main():
         for _, spec in variants:
             r = SoarRenderer(device=device, periodic=True, nested=False,
                              surface=args.surface,
-                             shader_source=source_for(spec))
+                             shader_source=source_for(spec),
+                             surface_cs=stage_modes[len(renderers)])
             r.upload_volume(level.sigma)
             renderers.append(r)
         min_voxel = min(level.dx)

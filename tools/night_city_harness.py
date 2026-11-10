@@ -95,8 +95,8 @@ def main(argv=None) -> int:
     from cloudyview.soar_host import (
         STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
         APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
-        SceneState, SoarRenderer, ViewState, surface_cell_m,
-        surface_clock_period_s,
+        SceneState, SoarRenderer, ViewState, parse_surface_cs,
+        surface_cell_m, surface_clock_period_s,
     )
     from cloudyview.witness import OCEAN_REFLECTANCE
 
@@ -173,6 +173,10 @@ def main(argv=None) -> int:
                         help="moon azimuth/elevation in city mode "
                              "(default: %(default)s; constants.js CITY_MOON "
                              "is the app's)")
+    parser.add_argument("--surface-cs", default="frag",
+                        choices=("frag", "cs512", "cs256"),
+                        help="EXPERIMENT: the city's first surface stage as "
+                             "the compute pass (SoarRenderer surface_cs)")
     parser.add_argument("--time", type=float, default=0.0,
                         help="the scene clock in seconds (the city's "
                              "steam; refused over the ocean, which has "
@@ -248,7 +252,8 @@ def main(argv=None) -> int:
     # fails here, before a GPU has been asked to do anything.
     surface = "city" if args.city else "ocean"
     try:
-        renderer = SoarRenderer(periodic=True, surface=surface)
+        renderer = SoarRenderer(periodic=True, surface=surface,
+                                surface_cs=parse_surface_cs(args.surface_cs))
     except RuntimeError as exc:
         print(f"\nCannot build the {'city' if args.city else 'ocean'} "
               f"renderer:\n  {exc}", file=sys.stderr)

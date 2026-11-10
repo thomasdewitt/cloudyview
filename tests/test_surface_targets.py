@@ -63,6 +63,7 @@ def _renderer(surface):
     r.wgpu = wgpu
     r.device = _Device()
     r.surface = surface
+    r.surface_cs = None
     r._targets = None
     r._surface_dummy = _Tex([], "dummy")
     r._veil_dummy = _Tex([], "dummy")
