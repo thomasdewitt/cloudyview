@@ -627,7 +627,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
 
     from .basic_render import quantize_uint8
     from .cloudfield import load as load_field
-    from .soar_host import (SceneState, SoarRenderer, ViewState,
+    from .soar_host import (CITY_ROOF_DENSITY_BY_TIER, SceneState,
+                            SoarRenderer, ViewState,
                             APP_LIGHT_MARCH_LOD_DEGREES,
                             APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
                             surface_cell_m,
@@ -743,6 +744,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             sky_probe=bool(preset["sky_probe"]),
             frame_index=index * FRAME_INDEX_STRIDE,
             scene_time=frame.scene_time,
+            city_roof_density=CITY_ROOF_DENSITY_BY_TIER[s.quality],
         )
 
     def state_for(frame: TrackFrame, view: ViewState) -> SceneState:

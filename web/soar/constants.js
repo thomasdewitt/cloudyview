@@ -427,6 +427,21 @@ export const CITY_LOD_STRENGTH_BY_TIER = {
 // user's, moving or parked.
 export const CITY_PARKED_LOD_STRENGTH = 0.01;
 
+// The night city's roof clutter by quality tier (Thomas, 2026-11-09: "Maybe
+// more for high tier where we can afford it and less for low and minimal?
+// More on med too."): a factor on rooftopworks' clutter families' slot
+// probabilities (tanks, condensers, vents, pipe runs, packaged units; never
+// the stair or the skylights), row 25.x. 1 is the density the roofs were
+// tuned at. Twin of cloudyview/soar_host.py CITY_ROOF_DENSITY_BY_TIER
+// (tests/test_uniform_parity.py pins them).
+export const CITY_ROOF_DENSITY_BY_TIER = {
+  max: 1.4, high: 1.4, medium: 1.2, low: 0.7, minimal: 0.5,
+};
+// The densities the shader's far mean is measured over
+// (cc_rooftopworks_mech_rho's nodes): a density outside them would draw a
+// near roof the far mean does not stand for, so the packers refuse it.
+export const CITY_ROOF_DENSITY_RANGE = [0.5, 1.4];
+
 /** The tier table this scene flies by. */
 export function lodStrengthByTier(city) {
   return city ? CITY_LOD_STRENGTH_BY_TIER : DEFAULT_LOD_STRENGTH_BY_TIER;
@@ -456,9 +471,10 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
-// Row 24 (the 25th and last) is the surface offset the water samples and the
-// city frame are derived from — see raymarch.wgsl's surface_offset.
-export const UNIFORM_ROWS = 25;
+// Row 24 is the surface offset the water samples and the city frame are
+// derived from — see raymarch.wgsl's surface_offset. Row 25 (the 26th and
+// last) is the city's look knobs — see raymarch.wgsl's city_look.
+export const UNIFORM_ROWS = 26;
 // DERIVED, never written out. These were two independent literals until a row
 // was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.

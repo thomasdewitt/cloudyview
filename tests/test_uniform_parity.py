@@ -1,4 +1,4 @@
-"""The Python host and the browser must fill the same 400 bytes.
+"""The Python host and the browser must fill the same 416 bytes.
 
 There is one renderer core — web/soar/raymarch.wgsl — driven by two hosts:
 JavaScript in the tab and Python via wgpu. The shader is shared by
@@ -117,6 +117,15 @@ CASES = [
       "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
       "ocean_max_lod": 8, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
+    # Row 25.x, the city's roof clutter density: a tier's value packed
+    # under CITY, and none on a day scene whatever the view says.
+    ("city_roof_density",
+     {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
+      "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
+      "ocean_max_lod": 8, "periodic": False},
+     {"sun_azimuth": 310.0, "sun_elevation": 22.0,
+      "city_roof_density": 0.7}),
+    ("day_ignores_roof_density", {}, {"city_roof_density": 1.4}),
     ("city_surface_static",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
       "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
@@ -209,7 +218,7 @@ def _js_view(extra):
         "cone_stencil_theta_deg": "coneStencilThetaDeg",
         "haze": "haze", "haze_height_dependent": "hazeHeightDependent",
         "tone_map_white_point": "toneMapWhitePoint", "contrast": "contrast",
-        "scene_time": "sceneTime",
+        "scene_time": "sceneTime", "city_roof_density": "cityRoofDensity",
     }
     for k, val in extra.items():
         if k == "render_size":
@@ -291,14 +300,44 @@ def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
         f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
 
 
-def test_block_is_400_bytes():
-    """25 rows of 4 floats: row 24, the last, is the surface offset
-    (2026-09-01); the desert tile's rows 25..46 left with the desert
-    (2026-11-09). Pinned rather than derived on purpose, so that a row added
-    on one side and not the other fails here as well as in the diff
-    above."""
-    assert sh.UNIFORM_NBYTES == 400
-    assert _python_block({}, {}).nbytes == 400
+def test_block_is_416_bytes():
+    """26 rows of 4 floats: row 24 is the surface offset (2026-09-01); the
+    desert tile's rows 25..46 left with the desert (2026-11-09); row 25, the
+    last, is the city's look knobs (2026-11-09). Pinned rather than derived
+    on purpose, so that a row added on one side and not the other fails here
+    as well as in the diff above."""
+    assert sh.UNIFORM_NBYTES == 416
+    assert _python_block({}, {}).nbytes == 416
+
+
+def test_roof_density_tables_agree():
+    """The tier table that fills row 25.x is written in both hosts; they
+    must be the same table."""
+    import re
+    text = (REPO / "web" / "soar" / "constants.js").read_text()
+    m = re.search(r"CITY_ROOF_DENSITY_BY_TIER = \{([^}]*)\}", text)
+    assert m, "CITY_ROOF_DENSITY_BY_TIER not found in constants.js"
+    js = {k: float(v) for k, v in
+          re.findall(r"(\w+):\s*([0-9.]+)", m.group(1))}
+    assert js == sh.CITY_ROOF_DENSITY_BY_TIER
+    # One density per quality tier, every one inside the range the far mean
+    # is measured over (the packers refuse anything else).
+    from cloudyview.witness import QUALITY_PRESETS
+    assert set(sh.CITY_ROOF_DENSITY_BY_TIER) == set(QUALITY_PRESETS)
+    lo, hi = sh.CITY_ROOF_DENSITY_RANGE
+    assert all(lo <= d <= hi for d in sh.CITY_ROOF_DENSITY_BY_TIER.values())
+    m = re.search(r"CITY_ROOF_DENSITY_RANGE = \[([^\]]*)\]", text)
+    assert m and [float(v) for v in m.group(1).split(",")] == [lo, hi]
+
+
+def test_roof_density_outside_the_range_is_refused():
+    city = {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],
+            "ocean_fif_dx": 90.0, "ocean_tile_extent": 23040.0,
+            "ocean_max_lod": 8, "periodic": False}
+    for d in (0.0, 0.49, 1.41, 2.0):
+        with pytest.raises(ValueError, match="city_roof_density"):
+            _python_block(city, {"sun_elevation": 22.0,
+                                 "city_roof_density": d})
 
 
 @pytest.mark.parametrize("surface", ["ocean", "city"])

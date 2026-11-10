@@ -57,6 +57,16 @@ function writeLensWater(on) {
 }
 
 /** Release both flyers, whichever of them got built. */
+/** The roofs' clutter density at a tier: a tier with none is an error, not
+ *  a default (the far mean is measured at each tier's own density). */
+function cityRoofDensity(tier) {
+  const d = K.CITY_ROOF_DENSITY_BY_TIER[tier];
+  if (d === undefined) {
+    throw new Error(`no roof clutter density for tier '${tier}'.`);
+  }
+  return d;
+}
+
 function destroyFlyers(flyers) {
   for (const flyer of Object.values(flyers ?? {})) flyer?.destroy();
 }
@@ -1891,7 +1901,8 @@ export class Viewer {
   /** The per-frame view kwargs a capture at `look` marches. */
   _captureViewKwargs(look) {
     return {
-      ...this._viewKwargs({ lodStrength: look.lodStrength }),
+      ...this._viewKwargs({ lodStrength: look.lodStrength,
+                            tier: look.preset }),
       haze: look.haze,
       hazeHeightDependent: look.hazeHeightDependent,
       exposure: look.exposure,
@@ -3155,7 +3166,8 @@ export class Viewer {
    * view; a capture overrides haze and exposure on top, in
    * _captureViewKwargs.
    */
-  _viewKwargs({ lodStrength = this._liveLodStrength() } = {}) {
+  _viewKwargs({ lodStrength = this._liveLodStrength(),
+                tier = this.qualityTier ?? K.DEFAULT_QUALITY_TIER } = {}) {
     return {
       camera: this.camera,
       jitter: true,
@@ -3171,6 +3183,9 @@ export class Viewer {
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
       frameIndex: this.frameIndex,
       sceneTime: this.sceneTime,
+      // The roofs' clutter follows the tier (CITY_ROOF_DENSITY_BY_TIER);
+      // packed under CITY only.
+      cityRoofDensity: cityRoofDensity(tier),
     };
   }
 

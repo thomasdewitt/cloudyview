@@ -67,6 +67,7 @@ sys.path.insert(0, str(REPO / "tools"))
 sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
 
 from cloudyview.soar_host import (                          # noqa: E402
+    CITY_ROOF_DENSITY_BY_TIER,
     SceneState, SoarRenderer, ViewState, camera_world_origin, pack_uniforms,
     SURFACE_STAGES, parse_surface_cs, surface_cell_m, surface_cs_limits,
     surface_period_m,
@@ -290,6 +291,7 @@ def main():
                     fov=v["fov"], output_size=OUTPUT, render_size=size,
                     light_cache=tier["light_cache"],
                     sky_probe=tier["sky_probe"],
+                    city_roof_density=CITY_ROOF_DENSITY_BY_TIER[tier_name],
                     **light)
                 if tier["light_cache"] and baked != light:
                     for r in renderers:
