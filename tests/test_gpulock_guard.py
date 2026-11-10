@@ -21,9 +21,11 @@ that drives a guarded tool passes SOAR_GPULOCK_EXEMPT=pytest to that child
 
 import fcntl
 import importlib.util
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -181,20 +183,6 @@ def test_the_qa_chrome_start_refuses_unlocked(tmp_path):
     assert not any(tmp_path.iterdir()), "it got as far as making a profile"
 
 
-def test_gpulock_exports_the_marker_to_its_command():
-    src = (TOOLS / "gpulock").read_text()
-    lock = re.search(r'^LOCK=(\S+)$', src, re.M).group(1)
-    export = src.index('export SOAR_GPULOCK="$LOCK"')
-    assert export < src.index("exec flock")
-    spec = importlib.util.spec_from_file_location("gpulock_guard",
-                                                  TOOLS / "gpulock_guard.py")
-    guard = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(guard)
-    assert guard.LOCK == lock
-    js = (TOOLS / "gpulock_guard.mjs").read_text()
-    assert f'export const LOCK = "{lock}";' in js
-
-
 def _guard():
     spec = importlib.util.spec_from_file_location("gpulock_guard",
                                                   TOOLS / "gpulock_guard.py")
@@ -203,75 +191,218 @@ def _guard():
     return m
 
 
-def test_the_marker_needs_the_lock_held(tmp_path):
-    # On a lock file of the test's own, so no other session's lock matters.
-    g = _guard()
+def _launcher():
+    """tools/gpulock as a module (it is a Python script with no suffix)."""
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("gpulock_launcher", str(TOOLS / "gpulock"))
+    spec = importlib.util.spec_from_loader("gpulock_launcher", loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    return m
+
+
+def _locked(lock, *cmd, wait="30", **kw):
+    """Run `cmd` under tools/gpulock on the test's own lock file."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("SOAR_GPULOCK", "SOAR_GPULOCK_PID", "GPULOCK_MEM")}
+    env.update(GPULOCK_FILE=str(lock), GPULOCK_WAIT=wait)
+    return subprocess.run([str(TOOLS / "gpulock"), *cmd], cwd=REPO, env=env,
+                          capture_output=True, text=True, timeout=60, **kw)
+
+
+def test_the_lock_path_is_one_constant():
+    lock = _launcher().LOCK
+    assert _guard().LOCK == lock
+    assert f'export const LOCK = "{lock}";' in (
+        TOOLS / "gpulock_guard.mjs").read_text()
+
+
+GUARD_PY = ("import sys; sys.path.insert(0, 'tools'); import gpulock_guard "
+            "as g, os; print(os.environ['SOAR_GPULOCK'], "
+            "os.environ['SOAR_GPULOCK_PID'], os.getppid(), "
+            "g.unlocked_reason(path=os.environ['SOAR_GPULOCK']))")
+
+
+def test_under_the_launcher_the_guard_passes(tmp_path):
     lock = tmp_path / "lock"
-    marked = {"SOAR_GPULOCK": str(lock)}
-    assert g.unlocked_reason({}, str(lock)) == "SOAR_GPULOCK is not set"
-    assert "not held" in g.unlocked_reason(marked, str(lock))   # no file
-    lock.touch()
-    assert "not held" in g.unlocked_reason(marked, str(lock))   # free
-    fd = os.open(lock, os.O_RDONLY)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        assert g.unlocked_reason(marked, str(lock)) is None
-        assert g.unlocked_reason({"SOAR_GPULOCK": "/elsewhere"},
-                                 str(lock)) == "SOAR_GPULOCK is not set"
-        if shutil.which("node") is not None:
-            js = subprocess.run(
-                ["node", "--input-type=module", "-e",
-                 f"import {{ unlockedReason }} from "
-                 f"{(TOOLS / 'gpulock_guard.mjs').as_uri()!r};"
-                 f"console.log(JSON.stringify(["
-                 f"unlockedReason({{SOAR_GPULOCK: {str(lock)!r}}}, {str(lock)!r}),"
-                 f"unlockedReason({{}}, {str(lock)!r})]));"],
-                capture_output=True, text=True, check=True, timeout=30)
-            assert js.stdout.strip() == '[null,"SOAR_GPULOCK is not set"]'
-    finally:
-        os.close(fd)
+    r = _locked(lock, sys.executable, "-c", GUARD_PY)
+    assert r.returncode == 0, r.stderr
+    marker, pid, ppid, why = r.stdout.split()
+    assert marker == str(lock) and why == "None", r.stdout
+    # The launcher is the command's parent (systemd-run --scope execs in
+    # place on Linux; elsewhere the command is its child directly).
+    assert pid == ppid, r.stdout
     if shutil.which("node") is not None:
-        js = subprocess.run(
-            ["node", "--input-type=module", "-e",
-             f"import {{ unlockedReason }} from "
-             f"{(TOOLS / 'gpulock_guard.mjs').as_uri()!r};"
-             f"console.log(unlockedReason({{SOAR_GPULOCK: {str(lock)!r}}}, "
-             f"{str(lock)!r}));"],
-            capture_output=True, text=True, check=True, timeout=30)
-        assert "not held" in js.stdout
+        js = (f"import {{ unlockedReason }} from "
+              f"{(TOOLS / 'gpulock_guard.mjs').as_uri()!r};"
+              "console.log(unlockedReason(process.env, process.env.SOAR_GPULOCK));")
+        r = _locked(lock, "node", "--input-type=module", "-e", js)
+        assert r.returncode == 0 and r.stdout.strip() == "null", r
 
 
-def test_a_lock_another_process_holds_does_not_pass(tmp_path):
-    # The usual state of this box: some other session holds the lock. A
-    # marker set by hand must not pass on that (loose-ends, review of
-    # 4b86576): only a holder among this process's ancestors counts. Here
-    # the holder is a flock(1) this test starts, a child, not an ancestor.
-    if shutil.which("flock") is None:
-        pytest.skip("needs flock(1)")
+def test_outside_the_launcher_the_guard_refuses(tmp_path):
     g = _guard()
+    lock = str(tmp_path / "lock")
+    assert g.unlocked_reason({}, lock) == "SOAR_GPULOCK is not set"
+    assert "SOAR_GPULOCK_PID is not set" in g.unlocked_reason(
+        {"SOAR_GPULOCK": lock}, lock)
+    # An ancestor, but not a launcher: this test's own parent.
+    why = g.unlocked_reason({"SOAR_GPULOCK": lock,
+                             "SOAR_GPULOCK_PID": str(os.getppid())}, lock)
+    assert why == f"SOAR_GPULOCK_PID {os.getppid()} is not tools/gpulock", why
+    # Not an ancestor at all: a pid no process has.
+    why = g.unlocked_reason({"SOAR_GPULOCK": lock,
+                             "SOAR_GPULOCK_PID": "4194000"}, lock)
+    assert "is not an ancestor of this process" in why, why
+
+
+def test_a_launcher_that_is_not_an_ancestor_does_not_pass(tmp_path):
+    # The usual state of this box: another session's launcher holds the
+    # lock. A marker set by hand, even naming that launcher, must not pass
+    # (loose-ends, review of 4b86576). Here the launcher is this test's own
+    # child, holding the test's own lock file.
     lock = tmp_path / "lock"
-    lock.touch()
-    holder = subprocess.Popen(["flock", str(lock), "sleep", "60"])
+    env = {k: v for k, v in os.environ.items() if k != "GPULOCK_MEM"}
+    env.update(GPULOCK_FILE=str(lock))
+    holder = subprocess.Popen([str(TOOLS / "gpulock"), "sleep", "60"],
+                              env=env, stderr=subprocess.DEVNULL)
     try:
-        for _ in range(200):
-            if g.lock_holders(str(lock)):
+        g = _guard()
+        for _ in range(500):
+            if g.is_launcher(g.process_table().get(holder.pid, (0, ""))[1]):
                 break
             time.sleep(0.01)
-        assert g.lock_holders(str(lock)) == {holder.pid}
-        why = g.unlocked_reason({"SOAR_GPULOCK": str(lock)}, str(lock))
-        assert why and f"held by pid {holder.pid}" in why, why
+        marked = {"SOAR_GPULOCK": str(lock),
+                  "SOAR_GPULOCK_PID": str(holder.pid)}
+        why = g.unlocked_reason(marked, str(lock))
+        assert why and "is not an ancestor of this process" in why, why
         if shutil.which("node") is not None:
             js = subprocess.run(
                 ["node", "--input-type=module", "-e",
                  f"import {{ unlockedReason }} from "
                  f"{(TOOLS / 'gpulock_guard.mjs').as_uri()!r};"
-                 f"console.log(unlockedReason({{SOAR_GPULOCK: {str(lock)!r}}}, "
+                 f"console.log(unlockedReason({json.dumps(marked)}, "
                  f"{str(lock)!r}));"],
                 capture_output=True, text=True, check=True, timeout=30)
-            assert f"held by pid {holder.pid}" in js.stdout, js.stdout
+            assert "is not an ancestor of this process" in js.stdout, js.stdout
     finally:
-        holder.kill()
-        holder.wait()
+        holder.terminate()
+        holder.wait(timeout=30)
+
+
+def test_the_launcher_times_out_with_75(tmp_path):
+    lock = tmp_path / "lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        t0 = time.monotonic()
+        r = _locked(lock, "true", wait="0.3")
+        assert r.returncode == 75, r
+        assert "gave up after 0.3 s" in r.stderr
+        assert time.monotonic() - t0 < 10
+    finally:
+        os.close(fd)
+
+
+def test_the_command_does_not_inherit_the_lock(tmp_path):
+    # A background child of the command (the QA Chrome) cannot keep the
+    # lock: the launcher's descriptor stays in the launcher.
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("needs /proc to list descriptors")
+    lock = tmp_path / "lock"
+    probe = ("import os; print(sum(os.path.realpath(f'/proc/self/fd/{f}') == "
+             f"{str(lock)!r} for f in os.listdir('/proc/self/fd')))")
+    r = _locked(lock, sys.executable, "-c", probe)
+    assert r.returncode == 0 and r.stdout.strip() == "0", r
+
+
+def test_a_signal_to_the_launcher_reaches_the_command(tmp_path):
+    lock = tmp_path / "lock"
+    env = {k: v for k, v in os.environ.items() if k != "GPULOCK_MEM"}
+    env.update(GPULOCK_FILE=str(lock))
+    p = subprocess.Popen([str(TOOLS / "gpulock"), sys.executable, "-c",
+                          "import time; print('up', flush=True); time.sleep(60)"],
+                         env=env, stdout=subprocess.PIPE, text=True,
+                         stderr=subprocess.DEVNULL)
+    assert p.stdout.readline().strip() == "up"
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(timeout=30) == 128 + signal.SIGTERM
+    # And the lock is free again.
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+
+
+# --- Darwin, mocked (there is no Mac here) -------------------------------
+
+def test_darwin_runs_uncapped_and_says_so(capsys):
+    launcher = _launcher()
+    assert launcher.command(["node", "x.mjs"], platform="darwin",
+                            env={}) == ["node", "x.mjs"]
+    assert capsys.readouterr().err.strip() == "gpulock: no memory cap on darwin"
+    linux = launcher.command(["node", "x.mjs"], platform="linux", env={})
+    assert linux[:4] == ["systemd-run", "--user", "--scope", "--quiet"]
+    assert "MemoryMax=16G" in linux and linux[-2:] == ["node", "x.mjs"]
+
+
+def test_darwin_refuses_a_memory_cap_it_cannot_honour():
+    with pytest.raises(SystemExit) as e:
+        _launcher().command(["node"], platform="darwin",
+                            env={"GPULOCK_MEM": "8G"})
+    assert "GPULOCK_MEM=8G was set" in str(e.value)
+    assert "no memory cap on darwin" in str(e.value)
+
+
+def _darwin_ps(me, parent):
+    """`ps -A -ww -o pid=,ppid=,command=` as macOS's BSD ps prints it: a
+    framework Python running tools/gpulock, node under it, this test's pid
+    as the tool under node."""
+    return "\n".join([
+        "    1     0 /sbin/launchd",
+        "  412     1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+        "  415   412 -zsh",
+        "  900   415 /Library/Frameworks/Python.framework/Versions/3.12/Resources/"
+        "Python.app/Contents/MacOS/Python tools/gpulock node tools/pinned_still.mjs --web web",
+        f"{parent:5d}   900 node tools/pinned_still.mjs --web web",
+        f"{me:>5} {parent:5d} python3 -c import gpulock_guard",
+        "  950   415 /Library/Frameworks/Python.framework/Versions/3.12/Resources/"
+        "Python.app/Contents/MacOS/Python tools/gpulock sleep 60",
+    ]) + "\n"
+
+
+def test_darwin_ps_output_passes_under_its_launcher_only():
+    g = _guard()
+    me = os.getpid()
+    table = g.parse_ps(_darwin_ps(me, 901))
+    env = {"SOAR_GPULOCK": g.LOCK, "SOAR_GPULOCK_PID": "900"}
+    assert g.unlocked_reason(env, table=table) is None
+    # Another launcher on the same machine, not an ancestor.
+    why = g.unlocked_reason({**env, "SOAR_GPULOCK_PID": "950"}, table=table)
+    assert "is not an ancestor" in why, why
+    # An ancestor that is not a launcher.
+    why = g.unlocked_reason({**env, "SOAR_GPULOCK_PID": "415"}, table=table)
+    assert why == "SOAR_GPULOCK_PID 415 is not tools/gpulock", why
+    if shutil.which("node") is not None:
+        # The same table with node's own pid where this test's stands: the
+        # guard walks up from the process it runs in.
+        js = subprocess.run(
+            ["node", "--input-type=module", "-e",
+             f"import {{ parsePs, unlockedReason, LOCK }} from "
+             f"{(TOOLS / 'gpulock_guard.mjs').as_uri()!r};"
+             "const t = parsePs(process.argv[1].replace('{ME}', "
+             "String(process.pid).padStart(5)));"
+             "const e = (pid) => ({ SOAR_GPULOCK: LOCK, SOAR_GPULOCK_PID: pid });"
+             "console.log(JSON.stringify([unlockedReason(e('900'), LOCK, t),"
+             " unlockedReason(e('950'), LOCK, t), unlockedReason(e('415'), LOCK, t)]));",
+             _darwin_ps("{ME}", 901)],
+            capture_output=True, text=True, timeout=30)
+        assert js.returncode == 0, js.stderr
+        ok, other, shell = json.loads(js.stdout)
+        assert ok is None, ok
+        assert "is not an ancestor" in other, other
+        assert shell == "SOAR_GPULOCK_PID 415 is not tools/gpulock", shell
 
 
 def test_pytest_may_exempt_the_tool_it_drives():

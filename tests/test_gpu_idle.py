@@ -109,8 +109,9 @@ def test_steam_drawing_is_a_neighbour(monkeypatch):
     assert fatal == [f"pid {HELPER} (steamwebhelper) at 40% SM"], fatal
 
 
+@pytest.mark.parametrize("launcher", ["flock", "gpulock"])
 def test_the_lock_holders_work_is_not_a_neighbour_outside_the_lock(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, launcher):
     """--outside-lock's view: what runs under the flock holding the GPU lock
     is the holder's work (a pre-check before queueing would otherwise always
     see it and fail), including a worker the holder starts only after the
@@ -122,9 +123,14 @@ def test_the_lock_holders_work_is_not_a_neighbour_outside_the_lock(
                            "time.sleep(0.5); import subprocess", 1)
     # Detached (setsid -f): a holder under this process would be the
     # caller's own tree, excluded whatever lock_work() says.
-    holder = subprocess.Popen(["setsid", "-f", "flock", "-x", str(lock),
+    # Both launchers: the flock(1) of the bash tools/gpulock, and the Python
+    # tools/gpulock since 2026-11-09 (on its own lock file, GPULOCK_FILE).
+    take = (["flock", "-x", str(lock)] if launcher == "flock" else
+            [str(REPO / "tools" / "gpulock")])
+    holder = subprocess.Popen(["setsid", "-f", *take,
                                sys.executable, "-c", late],
-                              stdout=subprocess.PIPE, text=True)
+                              stdout=subprocess.PIPE, text=True,
+                              env={**os.environ, "GPULOCK_FILE": str(lock)})
     outsider = os.getppid()
     seen = []
 

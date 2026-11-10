@@ -7,11 +7,17 @@
 #
 # start runs under tools/gpulock and refuses otherwise (gpulock_guard.py): the
 # headless Chrome's GPU process opens a Vulkan device and takes VRAM as it
-# starts. The lock covers the start only. Chrome would otherwise inherit the
-# lock's descriptor from flock(1) and hold the GPU lock for as long as it
-# runs (checked 2026-11-09: a backgrounded child of a locked command keeps
-# the flock held after the command ends), so this script closes its copy
-# before launching it.
+# starts. The lock covers the start only: tools/gpulock runs its command
+# without the lock's descriptor, so the Chrome left running cannot keep the
+# GPU lock after the start returns. (Under the flock(1) gpulock of before
+# 2026-11-09 it inherited the descriptor and would have, and this script
+# closed its copy; checked then: a backgrounded child of a locked command
+# kept the flock held after the command ended.)
+#
+# Linux only, and says so: the headless isolation below (no DISPLAY, no
+# Wayland socket, a private XDG_RUNTIME_DIR, a dead session bus) and the
+# Chrome path are Linux's. On macOS, start Chrome with
+# --remote-debugging-port yourself and pass the tools --cdp PORT.
 #
 # Why headless and cut off: a windowed QA Chrome raised itself over whatever
 # was in front each time a check opened a tab (Thomas, mid-game, 2026-11-08:
@@ -32,6 +38,12 @@
 # soar_cdp.requireHardwareAdapter refuses the run if it ever falls back to
 # software.
 set -euo pipefail
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "qa_chrome: Linux only (its headless isolation is Linux's); on" \
+       "$(uname -s), start Chrome with --remote-debugging-port and pass" \
+       "the tools --cdp PORT" >&2
+  exit 2
+fi
 cmd=${1:-}
 PORT=${2:-9333}
 # Checked before it reaches the profile and runtime paths or stop's regex.
@@ -54,12 +66,6 @@ case "$cmd" in
       echo "qa_chrome: something already answers on :$PORT; not starting" >&2
       exit 1
     fi
-    # Not into Chrome: the lock's descriptor, inherited from flock(1).
-    for fd in /proc/$$/fd/*; do
-      if [[ "$(readlink "$fd")" == "${SOAR_GPULOCK:-/tmp/soar-gpu.lock}" ]]; then
-        eval "exec ${fd##*/}>&-"
-      fi
-    done
     mkdir -p "$PROFILE" "$RUNTIME"
     chmod 700 "$RUNTIME"
     env -u DISPLAY -u WAYLAND_DISPLAY XDG_RUNTIME_DIR="$RUNTIME" \
