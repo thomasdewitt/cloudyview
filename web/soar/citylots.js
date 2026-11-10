@@ -63,6 +63,17 @@ export const CITY_USE_OPEN = 3;
 export const CITY_WORD_OFFSET = 2048.0;
 export const CITY_MAST_MIN_H = 150.0;
 export const CITY_MAST_CROSS = 1.4;
+export const CITY_CROWN_TIER = 3;
+export const CITY_CROWN_MIN_H = 105.0;
+export const CITY_CROWN_FRAC = 0.20;
+export const CITY_CROWN_MIN_DECK = 15.0;
+export const CITY_CROWN_INSET = 0.28;
+export const CITY_CROWN_H_LO = 7.2;
+export const CITY_CROWN_H_HI = 10.8;
+export const CITY_CROWN_PAD_FRAC = 0.13;
+export const CITY_CROWN_PAD_BIG = 60.0;
+export const CITY_CROWN_PAD_MIN_H = 55.0;
+export const CITY_CROWN_PAD_T = 0.30;
 
 // --- float32 ---------------------------------------------------------------
 //
@@ -228,7 +239,7 @@ const ZERO3 = () => [0.0, 0.0, 0.0];
  * side by side.
  */
 export function cityCell(tile, cx, cy) {
-  const c = {};
+  const c = { crown: noCrown() };
   const cell = tile.cellM;
   const n = tile.n;
 
@@ -599,7 +610,104 @@ export function cityCell(tile, cx, cy) {
   } else {
     c.top_z = h;
   }
+  // The crown's headroom, as a bound (raymarch.wgsl city_cell).
+  if (h > CITY_CROWN_MIN_H && c.arch !== 4) {
+    c.top_z = Math.max(c.top_z, f(h + CITY_CROWN_H_HI));
+  }
+  c.crown = cityCrown(c, cx, cy, cell, n);
   return c;
+}
+
+// float32 images of the crown's constants, for the decisions made in f32.
+const F32_CROWN_INSET = f(CITY_CROWN_INSET);
+const F32_CROWN_H_LO = f(CITY_CROWN_H_LO);
+const F32_CROWN_H_HI = f(CITY_CROWN_H_HI);
+const F32_CROWN_PAD_T = f(CITY_CROWN_PAD_T);
+const F32_0_30 = f(0.30), F32_0_40 = f(0.40);
+const f32Mix = (a, b, t) => f(f(a * f(1.0 - t)) + f(b * t));
+
+/**
+ * raymarch.wgsl city_crown: the penthouse (kind 1) on a tall tower's summit
+ * deck, or the helipad (kind 2) that pre-empts it, per CELL — the crown is
+ * clipped to the cell column (cx, cy) and only a checkerboard of a merged
+ * lot's cells carry one. Every comparison is the shader's, in float32.
+ */
+function noCrown() {
+  return { kind: 0, lo: [f(1e30), f(1e30)], hi: [f(-1e30), f(-1e30)],
+           z0: 0.0, z1: 0.0 };
+}
+
+export function cityCrown(c, cx, cy, cell, n) {
+  const none = noCrown();
+  if (!c.built || c.arch === 4 || c.land_use === CITY_USE_INDUSTRIAL
+      || c.height <= CITY_CROWN_PAD_MIN_H) {
+    return none;
+  }
+  let dlo = [c.b1min[0], c.b1min[1]];
+  let dhi = [c.b1max[0], c.b1max[1]];
+  let dz = c.b1max[2];
+  if (c.arch === 3) {
+    const ctr = [0, 1].map((k) => f(0.5 * f(c.fmin[k] + c.fmax[k])));
+    const hf = [0, 1].map((k) => f(f(0.5 * f(c.fmax[k] - c.fmin[k]))
+                                   * c.fscale));
+    dlo = [f(ctr[0] - hf[0]), f(ctr[1] - hf[1])];
+    dhi = [f(ctr[0] + hf[0]), f(ctr[1] + hf[1])];
+    dz = c.fmax[2];
+  } else if (c.arch !== 2 && c.tiers === 2) {
+    dlo = [c.b2min[0], c.b2min[1]]; dhi = [c.b2max[0], c.b2max[1]];
+    dz = c.b2max[2];
+  } else if (c.arch !== 2 && c.tiers >= 3) {
+    dlo = [c.b3min[0], c.b3min[1]]; dhi = [c.b3max[0], c.b3max[1]];
+    dz = c.b3max[2];
+  }
+  const cmin = [f(cx * cell), f(cy * cell)];
+  const rlo = [Math.max(dlo[0], cmin[0]), Math.max(dlo[1], cmin[1])];
+  const rhi = [Math.min(dhi[0], f(cmin[0] + cell)),
+               Math.min(dhi[1], f(cmin[1] + cell))];
+  const size = [f(rhi[0] - rlo[0]), f(rhi[1] - rlo[1])];
+  const smin = Math.min(size[0], size[1]);
+  if (smin < CITY_CROWN_MIN_DECK) return none;
+  const foot0 = Math.max(f(dhi[0] - dlo[0]), f(dhi[1] - dlo[1]));
+  const padSize = c.merged || foot0 > CITY_CROWN_PAD_BIG;
+  if (c.height <= CITY_CROWN_MIN_H && !padSize) return none;
+  const gh = cityRand4(...xorSeed(c.seed, 0x1b56c4e9, 0x0d2f1a37));
+  const cw = [tileCell(n, cx), tileCell(n, cy)];
+  const lh = cityRand4((Math.imul(cw[0], 0x9e3779b9) + 0x2545f491) >>> 0,
+                       (Math.imul(cw[1], 0x85ebca6b) + 0x27d4eb2f) >>> 0);
+  // Helipad first. (Which cell holds the pad is a float32 division on the
+  // GPU, which NVIDIA computes as a reciprocal multiply; a pick within an
+  // ulp of a cell edge could land in the neighbour. The pick is a point in
+  // the middle half of the deck, so none is that close in the tile.)
+  const padAt = [0, 1].map((k) => f32Mix(dlo[k], dhi[k],
+                                         f(0.25 + f(0.5 * gh[2 + k]))));
+  const padHere = Math.floor(f(padAt[0] / cell)) === cx
+               && Math.floor(f(padAt[1] / cell)) === cy;
+  if (padSize && padHere && gh[0] < f(CITY_CROWN_PAD_FRAC)) {
+    const half = clamp(f(F32_0_30 * smin), 4.5, 11.0);
+    const ctr = [0, 1].map((k) => f32Mix(
+      f(f(rlo[k] + half) + 1.0), f(f(rhi[k] - half) - 1.0),
+      f(F32_0_30 + f(F32_0_40 * lh[k]))));
+    const plo = [f(ctr[0] - half), f(ctr[1] - half)];
+    const phi = [f(ctr[0] + half), f(ctr[1] + half)];
+    const onMast = c.has_mast
+      && plo[0] < f(c.mast_max[0] + 1.0) && phi[0] > f(c.mast_min[0] - 1.0)
+      && plo[1] < f(c.mast_max[1] + 1.0) && phi[1] > f(c.mast_min[1] - 1.0);
+    if (!onMast) {
+      return { kind: 2, lo: plo, hi: phi, z0: dz, z1: f(dz + F32_CROWN_PAD_T) };
+    }
+  }
+  // Penthouse, on a checkerboard of a merged lot's cells.
+  const pentHere = !c.merged || ((cx + cy) & 1) === 0;
+  if (c.height > CITY_CROWN_MIN_H && pentHere && gh[1] < f(CITY_CROWN_FRAC)) {
+    const inset = Math.max(f(F32_CROWN_INSET * smin), 3.0);
+    const plo = [f(rlo[0] + inset), f(rlo[1] + inset)];
+    const phi = [f(rhi[0] - inset), f(rhi[1] - inset)];
+    if (Math.min(f(phi[0] - plo[0]), f(phi[1] - plo[1])) > 6.0) {
+      return { kind: 1, lo: plo, hi: phi, z0: dz,
+               z1: f(dz + (lh[2] > f(0.45) ? F32_CROWN_H_HI : F32_CROWN_H_LO)) };
+    }
+  }
+  return none;
 }
 
 // --- intersection ------------------------------------------------------------
@@ -739,6 +847,13 @@ export function cellSolids(cc, r) {
   list.push({ min: cc.b1min, max: cc.b1max, grow: building });
   if (cc.tiers >= 2) list.push({ min: cc.b2min, max: cc.b2max, grow: building });
   if (cc.tiers >= 3) list.push({ min: cc.b3min, max: cc.b3max, grow: building });
+  // The penthouse crown is massing, with the tower's own relief on its
+  // walls; the helipad (kind 2) is a 0.3 m prop slab and stays unsolid.
+  if (cc.crown?.kind === 1) {
+    const k = cc.crown;
+    list.push({ min: [k.lo[0], k.lo[1], k.z0], max: [k.hi[0], k.hi[1], k.z1],
+                grow: building });
+  }
   if (cc.has_mast) {
     list.push({ min: cc.mast_min, max: cc.mast_max, grow: [r, r, r] });
   }

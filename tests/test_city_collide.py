@@ -484,6 +484,56 @@ def test_a_lamp_post_is_solid():
     assert len(r["knocks"]) == 1
 
 
+CROWN_JS = """
+import { readFileSync } from "node:fs";
+import { CityTile, CityLots, cityCell, shellDepth } from "%(soar)s/citylots.js";
+import { CityProps } from "%(soar)s/cityprops.js";
+const meta = JSON.parse(readFileSync("%(tile)s/meta.json", "utf8"));
+const b = readFileSync("%(tile)s/fif_mip0.bin");
+const tile = CityTile.fromHalfBytes(
+  new Uint8Array(b.buffer, b.byteOffset, b.byteLength), meta.n, meta.cell_m);
+const city = new CityLots(tile, new CityProps(tile));
+// The first penthouse crown in the tile, on a building of its own.
+let c = null, cx = 0, cy = 0;
+for (cy = 0; cy < meta.n && !c; cy++) {
+  for (cx = 0; cx < meta.n; cx++) {
+    const cc = cityCell(tile, cx, cy);
+    if (cc.crown.kind === 1 && !cc.merged && !cc.has_mast) { c = cc; break; }
+  }
+}
+const k = c.crown, r = 0.35;
+const y = 0.5 * (k.lo[1] + k.hi[1]);
+const z = 0.5 * (k.z0 + k.z1);
+// Level, at the crown's mid-height, west to east across the roof into it;
+// and the same line one metre over the crown's top.
+const into = city.sweep([k.lo[0] - 6.0, y, z], [k.hi[0], y, z], r);
+const over = city.sweep([k.lo[0] - 6.0, y, k.z1 + r + 1.0],
+                        [k.hi[0], y, k.z1 + r + 1.0], r);
+process.stdout.write(JSON.stringify({
+  crown: k, shell: shellDepth(c), height: c.height,
+  into: into && { x: k.lo[0] - 6.0 + into.t * (k.hi[0] - k.lo[0] + 6.0),
+                  normal: into.normal, source: into.source },
+  over: over && { source: over.source } }));
+""" % {"soar": SOAR.as_posix(), "tile": TILE_DIR.as_posix()}
+
+
+def test_a_penthouse_crown_is_solid():
+    # The crown is core massing (raymarch.wgsl city_crown): flown into level
+    # at its mid-height from over the roof, it is met at its west wall grown
+    # by the tower's relief and the camera's radius — and a metre over its
+    # top, nothing is.
+    out = json.loads(subprocess.run(
+        ["node", "--input-type=module", "--eval", CROWN_JS],
+        capture_output=True, text=True, check=True).stdout)
+    k = out["crown"]
+    assert k["z0"] == out["height"]
+    into = out["into"]
+    assert into is not None and into["source"] == "building", out
+    assert into["normal"] == [-1.0, 0.0, 0.0], out
+    assert abs(into["x"] - (k["lo"][0] - out["shell"] - 0.35)) < 1e-3, out
+    assert out["over"] is None, out
+
+
 def test_a_correction_across_the_cloud_domain_edge_keeps_the_flyer_on():
     # A 200 m cloud domain, so the camera's world x folds at +-100 while the
     # city frame runs straight on. The flight crosses the fold and is thrown

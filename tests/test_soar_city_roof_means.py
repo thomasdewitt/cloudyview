@@ -31,11 +31,9 @@ plain pass that evaluates it once per pixel:
    (cc_rooftopworks_trim_run_int); it must equal a dense midpoint count of
    the run pattern the trim is drawn with, for footprints from a few
    centimetres to a few fixture pitches, far out along the coping.
-4. A penthouse wall's exact sum averages to its expectation, as 1. for
-   the skylights: footprints half a bay by half a storey tiling 8 bays by
-   2 storeys, their shown luminance averaged, against one footprint's
-   expectation, pooled over the frame's seeds; above the spandrel, and
-   from the foot, across the sill's ramp.
+(The penthouse's glass wall had its own check here until 2026-11, when the
+crown became core massing, raymarch.wgsl city_crown, and its walls the
+core facade's.)
 
 Needs a real GPU; skips cleanly without one.
 
@@ -188,40 +186,6 @@ TRIM = """    {
         return vec4<f32>(err / tol, share, 0.0, 1.0);
     }
 """
-# 4. The shown luminance of cc_rooftopworks_pent_seen over a tiling of two
-# storeys of a wall, from V_BASE up, and of one footprint's expectation.
-PENT = """    {
-        let px = vec2<u32>(u32(clamp(0.5 + 0.7 * dir.x, 0.0, 1.0) * 4096.0),
-                           u32(clamp(0.5 + 1.4 * dir.z, 0.0, 0.999) * 4096.0));
-        var cc = city_cell(vec2<i32>(0, 0));
-        cc.seed = pcg2d(px ^ vec2<u32>(0x6a09e667u, 0xbb67ae85u));
-        let base = vec3<f32>BASE;
-        let glow = cc_rooftopworks_PENT_COL * cc_rooftopworks_PENT_RAD;
-        let fog = FOG;
-        let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
-        let e = u.cam_right.w;
-        let p = cc_rooftopworks_PENT_PITCH;
-        let fh = CITY_FLOOR_H;
-        var shown = 0.0;
-        for (var j: i32 = 0; j < 4; j = j + 1) {
-            for (var i: i32 = 0; i < 16; i = i + 1) {
-                let u0 = 0.5 * p * f32(i);
-                let v0 = V_BASE + 0.5 * fh * f32(j);
-                let r = cc_rooftopworks_pent_seen(cc, u0, u0 + 0.5 * p, v0,
-                                                  v0 + 0.5 * fh, base, glow,
-                                                  fog, true);
-                shown = shown + dot(city_display_curve(
-                    (r * fog.x + fog.yzw) * e), lum);
-            }
-        }
-        let m = cc_rooftopworks_pent_seen(cc, 0.0, 8.0 * p, V_BASE,
-                                          V_BASE + 2.0 * fh,
-                                          base, glow, fog, true);
-        return vec4<f32>(shown / 64.0,
-                         dot(city_display_curve((m * fog.x + fog.yzw) * e),
-                             lum), 0.0, 1.0);
-    }
-"""
 FIELD_BASE = "({:.3f}, {:.3f}, {:.3f})".format(*BASE)
 PROBES = {
     "agree_clear": AGREE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
@@ -229,12 +193,6 @@ PROBES = {
     "one_clear": ONE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
     "trim": TRIM,
     "edge": EDGE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
-    "pent_clear": PENT.replace("V_BASE", "fh").replace("FOG", FOGS["clear"])
-                      .replace("BASE", FIELD_BASE),
-    "pent_fog": PENT.replace("V_BASE", "fh").replace("FOG", FOGS["fog"])
-                    .replace("BASE", FIELD_BASE),
-    "pent_sill": PENT.replace("V_BASE", "0.0").replace("FOG", FOGS["clear"])
-                     .replace("BASE", FIELD_BASE),
 }
 # Pooled over the frame's 256 x 144 seeds, 64 cells each: the lit share's
 # sampling error is under 0.2% of itself; the footprints tile the field, so
@@ -367,23 +325,3 @@ def test_trim_share_is_the_runs(probes):
     assert out[..., 0].max() <= 1.0, out[..., 0].max()
     # And the shares span dark joints to whole runs.
     assert out[..., 1].min() == 0.0 and out[..., 1].max() >= 0.999
-
-
-@pytest.mark.gpu
-@pytest.mark.parametrize("fog", list(FOGS))
-@pytest.mark.parametrize("exposure", (2.0, 6.0))
-def test_penthouse_exact_sum_averages_to_the_expectation(fog, exposure,
-                                                         probes):
-    _pent_agrees(probes, f"pent_{fog}", exposure)
-
-
-@pytest.mark.gpu
-def test_penthouse_agrees_across_the_sill(probes):
-    _pent_agrees(probes, "pent_sill", 6.0)
-
-
-def _pent_agrees(probes, name, exposure):
-    out = _run(probes, name, exposure).astype(np.float64)
-    exact, mean = out[..., 0].mean(), out[..., 1].mean()
-    assert abs(exact - mean) <= MEAN_TOL * mean, (
-        f"shown: exact {exact:.5f} vs expectation {mean:.5f}")
