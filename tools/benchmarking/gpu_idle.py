@@ -51,6 +51,12 @@ The pre-check is only a fast fail: the card can change while you queue, so
 the check inside the lock stays the one that counts. It fails closed on one
 case: the holder's QA Chrome drawing reads as a neighbour, because the CDP
 scripts only drive that Chrome and it does not run under the flock.
+
+On macOS (Thomas's M1) none of this applies: there is no nvidia-smi and no
+/proc, and the machine is his alone. Every check is an explicit no-op there,
+said once on stderr ("gpu_idle: no NVIDIA idle/clock checks on darwin;
+timing assumes a quiet machine"), and clock_mode() is "stock". Everywhere
+else the checks are the NVIDIA/Linux ones above.
 """
 
 import os
@@ -182,9 +188,28 @@ def _full_name(pid: int, short: str) -> str:
         return short
 
 
+DARWIN_NOTICE = ("gpu_idle: no NVIDIA idle/clock checks on darwin; timing "
+                 "assumes a quiet machine")
+_noticed = False
+
+
+def _not_applicable() -> bool:
+    """True on macOS, where the checks are no-ops; says so once (stderr)."""
+    global _noticed
+    if sys.platform != "darwin":
+        return False
+    if not _noticed:
+        print(DARWIN_NOTICE, file=sys.stderr, flush=True)
+        _noticed = True
+    return True
+
+
 def clock_mode() -> str:
     """The clock mode the caller declared (tools that lock the clocks set
-    GPU_CLOCK_MODE), for the header of every table."""
+    GPU_CLOCK_MODE), for the header of every table; "stock" on macOS, whose
+    clocks no tool here locks."""
+    if _not_applicable():
+        return "stock"
     return os.environ.get("GPU_CLOCK_MODE",
                           "stock (no clock lock declared by the caller)")
 
@@ -225,6 +250,8 @@ def survey(seconds: float = 3.0, exclude=(),
     caller left running from an earlier variant is its own work too, and is
     not caught here — a caller that times variants as subprocesses must
     reap each before starting the next."""
+    if _not_applicable():
+        return [], []
     fatal, warn = set(), set()
     limit = (IDLE_UTIL_PCT_LOCKED if clock_mode().startswith("locked")
              else IDLE_UTIL_PCT)
@@ -272,6 +299,8 @@ def survey(seconds: float = 3.0, exclude=(),
 def require_idle(wait_s: float = WAIT_S) -> list[str]:
     """Block until no neighbour is on the card, up to `wait_s`, then exit
     loudly. Returns the desktop warnings seen at the start."""
+    if _not_applicable():
+        return []
     t_end = time.monotonic() + wait_s
     while True:
         fatal, warn = survey()
@@ -306,6 +335,8 @@ class Watch:
         # A watch that dies must say so: a dead thread with an empty
         # `fatal` would pass the run as watched and clean (loose-ends'
         # review: nvidia-smi failing, a pmon row it cannot parse).
+        if _not_applicable():
+            return
         try:
             while not self._stop.is_set():
                 fatal, _ = survey(seconds=0.0)
@@ -333,6 +364,8 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
     the card, or `watch` saw one during the run, either of which may have
     skewed the numbers just printed. Returns the desktop warnings, for the
     caller's verdict."""
+    if _not_applicable():
+        return []
     if watch is not None and watch.error is not None:
         sys.exit(f"CONTAMINATED: the watch failed ({watch.error!r}); the run "
                  "was not watched, so these numbers cannot be trusted.")
@@ -356,6 +389,8 @@ def check_quiet(watch: "Watch | None" = None) -> list[str]:
 def lock_work() -> set[int]:
     """Every process under a flock on LOCK: the GPU work of whoever holds
     tools/gpulock (the flocks still queued have nothing under them yet)."""
+    if _not_applicable():
+        return set()
     work = set()
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -371,6 +406,9 @@ def lock_work() -> set[int]:
 
 
 if __name__ == "__main__":
+    if _not_applicable():
+        print("idle (not checked on darwin)")
+        sys.exit(0)
     outside = "--outside-lock" in sys.argv[1:]
     fatal, warn = survey(outside_lock=outside)
     for w in warn:

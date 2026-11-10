@@ -261,3 +261,67 @@ def test_a_browser_with_no_devtools_port_names_nobody(monkeypatch):
     """Thomas's Firefox has no DevTools port; nothing to add, nothing run."""
     ports = _chrome(monkeypatch, "")
     assert gpu_idle.driven_by(DRIVER) == "" and ports == []
+
+
+# macOS (Thomas's M1): no nvidia-smi, no /proc. Every check is an explicit
+# no-op there, said once on stderr, and nothing NVIDIA or /proc is touched.
+
+@pytest.fixture
+def darwin(monkeypatch):
+    monkeypatch.setattr(gpu_idle.sys, "platform", "darwin")
+    monkeypatch.setattr(gpu_idle, "_noticed", False)
+
+    def forbidden(*a, **k):
+        raise AssertionError(f"touched the NVIDIA/Linux machinery: {a!r}")
+    monkeypatch.setattr(gpu_idle.subprocess, "run", forbidden)
+    monkeypatch.setattr(gpu_idle.os, "listdir", forbidden)
+    monkeypatch.setattr(gpu_idle, "_smi", forbidden)
+
+
+def test_on_darwin_every_check_is_a_no_op_said_once(darwin, capsys):
+    assert gpu_idle.require_idle() == []
+    assert gpu_idle.survey() == ([], [])
+    assert gpu_idle.survey(outside_lock=True) == ([], [])
+    assert gpu_idle.lock_work() == set()
+    with gpu_idle.Watch() as w:
+        pass
+    assert w.error is None and w.fatal == {}
+    assert gpu_idle.check_quiet(w) == []
+    assert gpu_idle.clock_mode() == "stock"
+    err = capsys.readouterr().err
+    assert err.count(gpu_idle.DARWIN_NOTICE) == 1
+    assert gpu_idle.DARWIN_NOTICE == ("gpu_idle: no NVIDIA idle/clock checks "
+                                      "on darwin; timing assumes a quiet "
+                                      "machine")
+
+
+def test_on_darwin_the_cli_says_it_did_not_check(tmp_path):
+    # The module run as the timing command's pre-check, with sys.platform
+    # reporting darwin before it loads.
+    code = ("import sys, runpy; sys.platform = 'darwin'; "
+            f"runpy.run_path({str(Path(gpu_idle.__file__))!r}, "
+            "run_name='__main__')")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "idle (not checked on darwin)"
+    assert out.stderr.count("no NVIDIA idle/clock checks on darwin") == 1
+
+
+def test_on_linux_the_checks_still_run(monkeypatch, capsys):
+    monkeypatch.setattr(gpu_idle.sys, "platform", "linux")
+    monkeypatch.setattr(gpu_idle, "_noticed", False)
+    monkeypatch.delenv("GPU_CLOCK_MODE", raising=False)
+    assert gpu_idle._not_applicable() is False
+    assert gpu_idle.clock_mode().startswith("stock (no clock lock declared")
+    sampled = []
+    monkeypatch.setattr(gpu_idle, "_processes",
+                        lambda: sampled.append(1) or [])
+    monkeypatch.setattr(gpu_idle, "_smi", lambda *a: sampled.append(a) or
+                        "# gpu        sm\n# Idx         %\n    0         0\n")
+    try:
+        gpu_idle.survey(seconds=0.0)
+    except (ValueError, IndexError):
+        pass                    # the canned sample need not parse; it ran
+    assert sampled, "survey did not sample on linux"
+    assert "darwin" not in capsys.readouterr().err
