@@ -1310,6 +1310,21 @@ export class Renderer {
    * the uniforms as they stand (it writes every pixel whatever they say),
    * and the slot read back: one pixel still holding the sentinel throws.
    */
+  /** Whether the set now in `targets.surface` has the first stage's slot
+   *  proven (_proveSurfaceCS). */
+  _surfaceCSProven(targets, nStages) {
+    const slot = surfaceStagePlan(nStages)[0][0];
+    return Boolean(targets.surface?.csProven?.[slot]);
+  }
+
+  /** Prove until the set now in `targets.surface` is proven: a set swapped
+   *  in by a concurrent frame during the proof's await is proven in turn. */
+  async _ensureSurfaceCSProven(targets, pipeline, rayBindGroup, nStages) {
+    while (!this._surfaceCSProven(targets, nStages)) {
+      await this._proveSurfaceCS(targets, pipeline, rayBindGroup, nStages);
+    }
+  }
+
   async _proveSurfaceCS(targets, pipeline, rayBindGroup, nStages) {
     const surface = targets.surface;
     const slot = surfaceStagePlan(nStages)[0][0];
@@ -1720,14 +1735,20 @@ export class Renderer {
       await this._ensureSurfaceTarget(targets);
       // ?surfacecs: the first time a set's slot is used, prove the compute
       // stage writes it (_proveSurfaceCS); a failure throws here.
-      if (this.surfaceCS && entries[0] === "fs_surface") {
-        await this._proveSurfaceCS(targets, sps[0], this.rayBindGroup,
-                                   entries.length);
+      const csFirst = this.surfaceCS && entries[0] === "fs_surface";
+      if (csFirst) {
+        await this._ensureSurfaceCSProven(targets, sps[0], this.rayBindGroup,
+                                          entries.length);
       }
       if (steamLive) await this._ensureLiveTarget(targets);
       const lightingNow = this.lighting;
       const sizeNow = renderTargetSize(outputSize, this.renderScale);
-      if (lightingNow.lightCache === lighting.lightCache
+      // A concurrent frame may have swapped in a covering surface set
+      // during an await above (_ensureSurfaceTarget's race retirement):
+      // the set this frame will encode into must be the proven one.
+      const csReady = !csFirst || this._surfaceCSProven(targets, entries.length);
+      if (csReady
+          && lightingNow.lightCache === lighting.lightCache
           && lightingNow.skyProbe === lighting.skyProbe
           && shaderVariantKey(this._shaderSpec({ lighting })) === variant
           && sizeNow[0] === renderSize[0] && sizeNow[1] === renderSize[1]) {
@@ -2637,9 +2658,10 @@ export class Renderer {
         return null;
       }
       // ?surfacecs: the meter's own set is proven like the frame's, once.
+      // Nothing awaits between this and the meter's encode.
       if (this.surfaceCS && surfaces[0]?.[0] === "fs_surface") {
-        await this._proveSurfaceCS(this._meterTargets, surfaces[0][1],
-                                   this.rayBindGroup, surfaces.length);
+        await this._ensureSurfaceCSProven(this._meterTargets, surfaces[0][1],
+                                          this.rayBindGroup, surfaces.length);
       }
       // Real outputSize for the aspect, meter size for the ray grid — the
       // same split renderScale relies on. One deterministic sample.

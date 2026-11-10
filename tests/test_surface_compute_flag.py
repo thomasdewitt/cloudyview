@@ -166,7 +166,8 @@ def test_every_stage_pipeline_goes_through_the_one_helper():
 # dispatch did: still the sentinel everywhere is a dispatch that wrote
 # nothing (a GPU that refused the threadgroup and said nothing).
 _PROOF_JS = textwrap.dedent("""
-    const [search, fill] = [process.argv[1], process.argv[2]];
+    const [search, fill, swap] = [process.argv[1], process.argv[2],
+                                  process.argv[3] === "swap"];
     const anyObj = () => new Proxy(function () {}, {
       get: (t, k) => (k === "then" ? undefined
                       : k === Symbol.toPrimitive ? () => 0 : anyObj()),
@@ -198,7 +199,10 @@ _PROOF_JS = textwrap.dedent("""
         words.fill(sentinel);
         if (fill === "all") words.fill(0);
         if (fill === "most") words.fill(0, 0, words.length - d.size / 4 / 8);
-        return { mapAsync: async () => {}, getMappedRange: () => words.buffer,
+        // A readback takes time, as a real one does: a concurrent frame's
+        // set swap lands while the proof awaits it.
+        return { mapAsync: () => new Promise((ok) => setTimeout(ok, 10)),
+                 getMappedRange: () => words.buffer,
                  unmap: () => {}, destroy: () => {} };
       },
     }, { get: (t, k) => (k in t ? t[k] : () => anyObj()) });
@@ -208,25 +212,43 @@ _PROOF_JS = textwrap.dedent("""
                     clockPeriod: 1638.4, oceanMaxLod: 9 };
     const r = new R.Renderer(device, "", scene,
                              { canvasFormat: "bgra8unorm", lensSource: "" });
-    r._dispatchSurfaceCS = () => { dispatched += 1; };
     const targets = { w: 16, h: 8 };
     targets.surface = await r._makeSurfaceSet(targets, 2);
+    const first = targets.surface;
+    // "swap": a concurrent frame swaps in a covering set while the first
+    // proof is in flight (at its dispatch, before its readback resolves).
+    let swapped = null;
+    r._dispatchSurfaceCS = () => {
+      dispatched += 1;
+      if (swap && dispatched === 1) {
+        r._makeSurfaceSet(targets, 2).then((set) => {
+          swapped = set; targets.surface = set; });
+      }
+    };
     let error = null;
     try {
-      await r._proveSurfaceCS(targets, anyObj(), anyObj(), 3);
-      await r._proveSurfaceCS(targets, anyObj(), anyObj(), 3);   // once
+      if (swap) {
+        await r._ensureSurfaceCSProven(targets, anyObj(), anyObj(), 3);
+      } else {
+        await r._proveSurfaceCS(targets, anyObj(), anyObj(), 3);
+        await r._proveSurfaceCS(targets, anyObj(), anyObj(), 3);   // once
+      }
     } catch (e) {
       error = String(e.message);
     }
-    console.log(JSON.stringify({ error, dispatched,
-                                 proven: targets.surface.csProven ?? null }));
+    console.log(JSON.stringify({
+      error, dispatched, proven: targets.surface.csProven ?? null,
+      swapped: swapped !== null && targets.surface === swapped,
+      firstProven: first.csProven ?? null,
+      provenNow: r._surfaceCSProven(targets, 3) }));
 """)
 
 
-def prove(search, fill):
+def prove(search, fill, swap=""):
     js = _PROOF_JS % json.dumps(RENDERER_JS.as_uri())
     out = subprocess.run(["node", "--input-type=module", "-e", js, search,
-                          fill], capture_output=True, text=True, timeout=120)
+                          fill, swap], capture_output=True, text=True,
+                         timeout=120)
     assert out.returncode == 0, out.stderr[-3000:]
     return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -259,3 +281,21 @@ def test_a_written_slot_is_proven_once():
 def test_the_frame_refuses_an_unproven_set():
     src = RENDERER_JS.read_text()
     assert "into a target set it was never proven on" in src
+
+
+def test_a_set_swapped_in_during_the_proof_is_proven_in_turn():
+    # loose-ends, review of 514c5d9: a concurrent frame can swap in a
+    # covering set while a proof awaits; the frame must then prove the new
+    # set, not throw from _encodeMarch.
+    r = prove("?surfacecs=1", "all", "swap")
+    assert r["error"] is None
+    assert r["swapped"], "the mock did not swap the set"
+    assert r["firstProven"] == {"a": True}
+    assert r["proven"] == {"a": True} and r["provenNow"]
+    assert r["dispatched"] == 2
+
+
+def test_the_frame_leaves_its_loop_only_on_a_proven_set():
+    src = RENDERER_JS.read_text()
+    assert "const csReady = !csFirst || this._surfaceCSProven(" in src
+    assert "if (csReady\n" in src.replace("\r", "")
