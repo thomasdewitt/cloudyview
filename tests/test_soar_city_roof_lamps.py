@@ -17,12 +17,16 @@ cells, and the shipped constants must match them:
    standing on it), and per lamp the spots' integral over its housing's
    four sides together and over its top.
 2. BULK_S and BULK_LIFT_S: per lit bulkhead, the spots' integral over its
-   door face, its back, its two sides together and its top; with a lift
+   door face (less what its dark door leaf takes off), its back, its two
+   sides together and its top; with a lift
    room, the room's faces join the same four parts, less where the two
    boxes meet.
 
-The integrals are midpoint sums at fp = 0 (the spot unwidened): the spot is
-area-preserving under widening, so the sum is the same at any footprint.
+The integrals are midpoint sums at the footprint where the props hand over
+(FP_HANDOFF), because the far mean must continue what is drawn just inside
+the range. The spots widen with the footprint, area-preserving on an
+unbounded plane but not on a housing's finite faces: at the handoff a tank
+lamp's source reaches its top 6% more than unwidened, at the sides' expense.
 
 Needs a real GPU; skips cleanly without one.
 
@@ -49,9 +53,10 @@ COMPONENT = ROOT / "cloudyview/soar/city/components/rooftopworks.wgsl"
 ANCHOR = "    let city_o = city_camera_origin();\n    let chit = city_trace("
 
 # Module-scope helpers for the probes: one face's integral of a lamp's two
-# spots, as the prop shader sums them (source + k x spill), by a midpoint
-# sum over the face rectangle o + s e1 + t e2.
+# spots, as the prop shader sums them (source + k x spill) at the footprint
+# PROBE_FP, by a midpoint sum over the face rectangle o + s e1 + t e2.
 HELPERS = """
+const PROBE_FP: f32 = FP_VALUE;
 fn probe_lamp_rect(seat: vec3<f32>, o: vec3<f32>, e1: vec3<f32>,
                    e2: vec3<f32>, k: f32, sig_spill: f32) -> f32 {
     let n = 40;
@@ -61,8 +66,8 @@ fn probe_lamp_rect(seat: vec3<f32>, o: vec3<f32>, e1: vec3<f32>,
             let p = o + e1 * ((f32(i) + 0.5) / f32(n))
                       + e2 * ((f32(j) + 0.5) / f32(n));
             sum = sum + cc_rooftopworks_spot(p, seat, cc_rooftopworks_LAMP_SIG,
-                                             0.0)
-                      + k * cc_rooftopworks_spot(p, seat, sig_spill, 0.0);
+                                             PROBE_FP)
+                      + k * cc_rooftopworks_spot(p, seat, sig_spill, PROBE_FP);
         }
     }
     return sum * length(e1) * length(e2) / f32(n * n);
@@ -126,6 +131,21 @@ fn probe_lamp_parts(seat: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>,
     res.w = probe_lamp_face(seat, lo, hi, 2, 1.0, k, sig);
     return res;
 }
+
+// The bulkhead's door leaf, which returns BULK_DOOR_K of the light on it:
+// what it takes off the door face's integral.
+fn probe_lamp_door(seat: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>,
+                   door: vec2<f32>) -> f32 {
+    let t = vec3<f32>(-door.y, door.x, 0.0);
+    let c = 0.5 * (lo + hi);
+    let half = dot(abs(door), 0.5 * (hi - lo).xy);
+    let o = vec3<f32>(c.xy + door * half, lo.z)
+            - t * (0.5 * cc_rooftopworks_BULK_DOOR_W);
+    return (1.0 - cc_rooftopworks_BULK_DOOR_K)
+           * probe_lamp_rect(seat, o, t * cc_rooftopworks_BULK_DOOR_W,
+                             vec3<f32>(0.0, 0.0, cc_rooftopworks_BULK_DOOR_H),
+                             0.12, 1.6);
+}
 """
 
 # The cell this pixel walks: the frame's coordinates at 4096 steps a side,
@@ -163,10 +183,29 @@ MECH = """    {
             let m = cc_rooftopworks_mech(cc, ci, s, true, cr, bk);
             if (m.ok && m.lamp) {
                 n = n + 1.0;
-                side = side + probe_lamp_sides(m.seat, m.lo, m.hi, k, sig);
-                top = top + probe_lamp_face(m.seat, m.lo, m.hi, 2, 1.0, k, sig);
-                // A vent pair's second stack is a housing of its own; a
-                // tank's rim band is part of the tank's.
+                // The housing's lit surfaces as they are traced: a square
+                // tank's tub above its legs and the rim band round its top
+                // (wider than the tub; its own top is the tank's), a round
+                // tank's barrel and roof above its steel stand, a condenser
+                // row's box, a vent pair's two stacks.
+                var lo = m.lo;
+                var hi = m.hi;
+                if (m.kind == 0 && m.round) {
+                    lo.z = lo.z + cc_rooftopworks_ROUND_STAND;
+                } else if (m.kind == 0) {
+                    lo.z = lo.z + cc_rooftopworks_TANK_LEG;
+                    hi.z = m.alo.z;
+                }
+                side = side + probe_lamp_sides(m.seat, lo, hi, k, sig);
+                if (m.kind == 0 && !m.round) {
+                    side = side + probe_lamp_sides(m.seat, m.alo, m.ahi, k,
+                                                   sig);
+                    top = top + probe_lamp_face(m.seat, m.alo, m.ahi, 2, 1.0,
+                                                k, sig);
+                } else {
+                    top = top + probe_lamp_face(m.seat, lo, hi, 2, 1.0, k,
+                                                sig);
+                }
                 if (m.has_acc && m.kind == 2) {
                     side = side + probe_lamp_sides(m.seat, m.alo, m.ahi, k, sig);
                     top = top + probe_lamp_face(m.seat, m.alo, m.ahi, 2, 1.0,
@@ -184,9 +223,11 @@ BULK = """    {
 """ + CELL + """        if (!(bk.ok && bk.lamp) || bk.lift != LIFT) {
             return vec4<f32>(0.0);
         }
+        let leaf = vec4<f32>(probe_lamp_door(bk.seat, bk.lo, bk.hi, bk.door),
+                             0.0, 0.0, 0.0);
         if (!bk.lift) {
             return probe_lamp_parts(bk.seat, bk.lo, bk.hi, bk.door,
-                                    vec2<f32>(0.0));
+                                    vec2<f32>(0.0)) - leaf;
         }
         // The lift room stands beside the stair along the stair's long
         // axis, flush with its back and taller and wider than it: the
@@ -201,7 +242,7 @@ BULK = """    {
         return probe_lamp_parts(bk.seat, bk.lo, bk.hi, bk.door, ax)
              + probe_lamp_parts(bk.seat, bk.lift_lo, bk.lift_hi, bk.door,
                                 vec2<f32>(0.0))
-             - vec4<f32>(0.0, 0.0, hidden, 0.0);
+             - vec4<f32>(0.0, 0.0, hidden, 0.0) - leaf;
     }
 """
 
@@ -210,6 +251,10 @@ PROBES = {
     "bulk": BULK.replace("LIFT", "false"),
     "bulk_lift": BULK.replace("LIFT", "true"),
 }
+# The footprint where the props hand over to the far mean: a pixel's width
+# 2.2 km out (CITY_PROP_RANGE) at 1440p and a 60-degree field (1.6 m),
+# rounded up.
+FP_HANDOFF = 2.0
 # The pooled estimates' sampling error is well under this; the shipped
 # constants are rounded to three figures.
 TOL = 0.02
@@ -232,16 +277,18 @@ def probes():
     level = build_soar_level()
     built = {}
 
-    def get(name):
-        if name not in built:
+    def get(key):
+        if key not in built:
+            name, fp = key
             r = SoarRenderer(periodic=True, surface="city",
                              shader_source=source.replace(
-                                 ANCHOR, PROBES[name] + ANCHOR) + HELPERS)
+                                 ANCHOR, PROBES[name] + ANCHOR)
+                             + HELPERS.replace("FP_VALUE", f"{fp:.3f}"))
             r.upload_volume(level.sigma)
-            built[name] = r
-        return built[name]
+            built[key] = r
+        return built[key]
 
-    meta = get("mech").surface_meta
+    meta = get(("mech", FP_HANDOFF)).surface_meta
     dx = float(min(level.dx))
     state = SceneState(
         bmin=[float(v) for v in level.bmin],
@@ -274,7 +321,7 @@ def _plain(r):
     return a.reshape(H, row // 4)[:, :W * 4].reshape(H, W, 4)
 
 
-def _run(probes, name):
+def _run(probes, name, fp=FP_HANDOFF):
     from cloudyview.soar_host import ViewState
     get, state = probes
     view = ViewState(
@@ -282,7 +329,7 @@ def _run(probes, name):
         elevation=0.0, fov=90.0, output_size=(W, H), render_size=(W, H),
         jitter=False, subpixel=False, exposure=4.0,
         sun_azimuth=310.0, sun_elevation=22.0, view_step_lod_degrees=0.0)
-    r = get(name)
+    r = get((name, fp))
     r.render(state, view, frames=1)
     out = _plain(r).astype(np.float64)
     assert np.isfinite(out).all(), f"{name} produced non-finite values"
@@ -314,15 +361,27 @@ def _check(name, measured):
     assert np.all(np.abs(shipped - measured) <= TOL * np.abs(measured)), name
 
 
-@pytest.mark.gpu
-def test_tank_lamps_far_constants(probes):
-    out = _run(probes, "mech")
+def _mech(probes, fp=FP_HANDOFF):
+    out = _run(probes, "mech", fp)
     roofs = out[out[:, 0] > 0.0]
     assert len(roofs) > 1000, "too few roofs with clutter sampled"
     n = roofs[:, 1].sum()
     assert n > 200, "too few tank lamps sampled"
     rho = n / roofs[:, 0].sum()
     s = np.array([roofs[:, 2].sum(), roofs[:, 3].sum()]) / n
+    return rho, s
+
+
+def _bulk(probes, lift, fp=FP_HANDOFF):
+    out = _run(probes, "bulk_lift" if lift else "bulk", fp)
+    lamps = out[out[:, 0] > 0.0]
+    assert len(lamps) > 100, "too few lit bulkheads sampled"
+    return lamps.mean(axis=0)
+
+
+@pytest.mark.gpu
+def test_tank_lamps_far_constants(probes):
+    rho, s = _mech(probes)
     _report("MECH_RHO", rho)
     _report("MECH_S", s)
     _check("MECH_RHO", rho)
@@ -332,9 +391,8 @@ def test_tank_lamps_far_constants(probes):
 @pytest.mark.gpu
 @pytest.mark.parametrize("lift", (False, True))
 def test_bulkhead_lamp_far_constants(probes, lift):
-    out = _run(probes, "bulk_lift" if lift else "bulk")
-    lamps = out[out[:, 0] > 0.0]
-    assert len(lamps) > 100, "too few lit bulkheads sampled"
     name = "BULK_LIFT_S" if lift else "BULK_S"
-    _report(name, lamps.mean(axis=0))
-    _check(name, lamps.mean(axis=0))
+    m = _bulk(probes, lift)
+    _report(name, m)
+    _check(name, m)
+

@@ -1603,8 +1603,9 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // skylights. So the hook adds nothing where the geometry was drawn, and
 // beyond CITY_PROP_RANGE it adds the geometry's exact mean.
 //
-// "Drawn" is the core's own test (city_props_drawn), from the camera: the
-// range is the view ray's, so a warehouse seen in a reflection follows it.
+// "Drawn" is the core's own test (city_props_drawn) on the view ray; a
+// reflection traces no props at all (CITY_TRACE_PLAIN), so a warehouse seen
+// in one gets the mean at any range.
 //
 // The sawtooth mean is view-dependent, and exactly so. In the tooth's own
 // (s, z) plane a ray descending with slope m = |dz| / |ds| against the
@@ -1617,11 +1618,10 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 // A clerestory is the same argument with one long face in view and no
 // occluder: its projected strip, length x height x |d_c| / |dz|, over the
 // roof's area.
-// The hook's fp_filter, ray, directness and the core's roof radiance are
-// not needed here: the glazing's mean is a plain emission on the roof, its
-// range test is the camera's (below), not the ray's.
+// The hook's fp_filter, ray and the core's roof radiance are not needed
+// here: the glazing's mean is a plain emission on the roof.
 fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
-                    _dir: vec3<f32>, _direct: bool, _base: vec3<f32>)
+                    _dir: vec3<f32>, direct: bool, _base: vec3<f32>)
         -> vec3<f32> {
     if (cc.land_use != CITY_USE_INDUSTRIAL) {
         return vec3<f32>(0.0);
@@ -1630,7 +1630,7 @@ fn cc_industry_roof(cc: CityCell, h: CityHit, fp: f32, _fp_filter: f32,
     if (!r.lit) {
         return vec3<f32>(0.0);
     }
-    if (city_props_drawn(h.cell, h.pos, h.t)) {
+    if (direct && city_props_drawn(h.cell, h.pos, h.t)) {
         return vec3<f32>(0.0);
     }
     let dir = (h.pos - city_camera_origin()) / max(h.t, 1e-3);

@@ -206,12 +206,21 @@ const cc_rooftopworks_BULK_H: f32 = 3.0;
 const cc_rooftopworks_BULK_LAMP_FRAC: f32 = 0.90;
 const cc_rooftopworks_BULK_DOOR_W: f32 = 0.95;
 const cc_rooftopworks_BULK_DOOR_H: f32 = 2.10;
+const cc_rooftopworks_BULK_DOOR_K: f32 = 0.30;   // the leaf against the wall
 const cc_rooftopworks_BULK_ALBEDO: f32 = 0.20;
 // Taller buildings carry the lift's machine room beside the stair: a
 // bigger box against the bulkhead.
 const cc_rooftopworks_LIFT_MIN_H: f32 = 40.0;
 const cc_rooftopworks_LIFT_HX: f32 = 2.6;
 const cc_rooftopworks_LIFT_H: f32 = 4.2;
+// Its vent panel: width, height band above its foot (m; a whole number of
+// pitches, so the pattern's mean over it is exactly 1), slat pitch, the
+// slats' share of the pitch and their factor on the wall and its light.
+const cc_rooftopworks_LOUVRE_W: f32 = 1.8;
+const cc_rooftopworks_LOUVRE_Z: vec2<f32> = vec2<f32>(1.5, 3.3);
+const cc_rooftopworks_LOUVRE_PITCH: f32 = 0.15;
+const cc_rooftopworks_LOUVRE_DARK: f32 = 0.45;
+const cc_rooftopworks_LOUVRE_K: f32 = 0.30;
 // Runs: up to four per cell, along x or y: a pipe rack on sleepers (three
 // pipes) or a sheet-metal duct.
 const cc_rooftopworks_RUN_N: i32 = 4;
@@ -614,8 +623,10 @@ fn cc_rooftopworks_mech(cc: CityCell, ci: vec2<i32>, s: i32,
         return cc_rooftopworks_no_mech();
     }
     if (bk.ok && abs(d.z - bk.lo.z) < 0.5
-        && cc_rooftopworks_overlap(lo2, hi2, bk.lo.xy - 1.2,
-                                   bk.hi.xy + 1.2)) {
+        && (cc_rooftopworks_overlap(lo2, hi2, bk.lo.xy - 1.2, bk.hi.xy + 1.2)
+            || (bk.lift
+                && cc_rooftopworks_overlap(lo2, hi2, bk.lift_lo.xy - 1.2,
+                                           bk.lift_hi.xy + 1.2)))) {
         return cc_rooftopworks_no_mech();
     }
 
@@ -990,7 +1001,15 @@ fn cc_rooftopworks_sky_exact(cc: CityCell, sk: cc_rooftopworks_Sky,
     return res;
 }
 
-// The same box in expectation: of the field it overlaps, the pane share lit
+// How much of [0, x] (each axis, from the field's corner) the lattice's
+// panes cover: whole pitches, then the part of the last one past its inset.
+fn cc_rooftopworks_sky_cover(x: vec2<f32>, pitch: vec2<f32>,
+                             inset: vec2<f32>, pane: vec2<f32>) -> vec2<f32> {
+    let q = floor(x / pitch);
+    return q * pane + clamp(x - q * pitch - inset, vec2<f32>(0.0), pane);
+}
+
+// The same box in expectation: of the field it overlaps, the panes' area lit
 // at the rate, the brightness uniform on [0.6, 1.4] taken by three-point
 // Gauss-Legendre (the display curve is smooth over it); the rest is roof.
 fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
@@ -998,9 +1017,16 @@ fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
                             pane_rad: vec3<f32>, fog: vec4<f32>,
                             shown: bool) -> cc_rooftopworks_SkySum {
     let box_a = cc_rooftopworks_area(blo, bhi);
-    let a_field = cc_rooftopworks_area(max(blo, sk.flo), min(bhi, sk.fhi));
-    let a_lit = a_field * cc_rooftopworks_SKY_LIT
-                * (sk.pane.x * sk.pane.y) / (sk.pitch.x * sk.pitch.y);
+    // The panes' area in the box, exactly: the lattice is separable, so it
+    // is the product of each axis' pane coverage over the box's overlap
+    // with the field, counted from the field's corner where the lattice
+    // starts.
+    let lo = max(blo, sk.flo) - sk.flo;
+    let hi = max(min(bhi, sk.fhi) - sk.flo, lo);
+    let inset = 0.5 * (sk.pitch - sk.pane);
+    let cover = cc_rooftopworks_sky_cover(hi, sk.pitch, inset, sk.pane)
+                - cc_rooftopworks_sky_cover(lo, sk.pitch, inset, sk.pane);
+    let a_lit = cc_rooftopworks_SKY_LIT * cover.x * cover.y;
     let g = 0.8 * 0.3872983346;   // 0.8 * sqrt(3/5) / 2, on [0.6, 1.4]
     var acc = city_win_add(city_win_zero(), base + pane_rad, a_lit * (4.0 / 9.0),
                            fog, shown);
@@ -1034,17 +1060,17 @@ fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
 //   face's tangent, and a lift room beside it in the same four parts;
 //   the pad's lights sit on its top, so their deck share is their area.
 // The constants were measured by a probe that integrates the prop
-// shader's own spots over the props' own faces
-// (tests/test_soar_city_roof_lamps.py, which pins them).
-const cc_rooftopworks_MECH_RHO: f32 = 2.69e-4;   // tank lamps per m^2 of deck
+// shader's own spots over the props' own faces, at the footprint where the
+// props hand over (tests/test_soar_city_roof_lamps.py, which pins them).
+const cc_rooftopworks_MECH_RHO: f32 = 2.60e-4;   // tank lamps per m^2 of deck
 // The sides' sum and the top: m^2 per unit lamp radiance.
-const cc_rooftopworks_MECH_S: vec2<f32> = vec2<f32>(1.632, 0.492);
+const cc_rooftopworks_MECH_S: vec2<f32> = vec2<f32>(1.555, 0.539);
 // The bulkhead's front, back, two sides together and top, without and with
 // its lift room.
-const cc_rooftopworks_BULK_S: vec4<f32> = vec4<f32>(1.446, 0.111, 0.394,
-                                                    0.708);
-const cc_rooftopworks_BULK_LIFT_S: vec4<f32> = vec4<f32>(1.511, 0.126,
-                                                         0.520, 0.783);
+const cc_rooftopworks_BULK_S: vec4<f32> = vec4<f32>(1.214, 0.111, 0.395,
+                                                    0.828);
+const cc_rooftopworks_BULK_LIFT_S: vec4<f32> = vec4<f32>(1.279, 0.126,
+                                                         0.520, 0.903);
 // A wall's projected area over the deck's grows without bound toward
 // grazing; past this ratio the deck stops standing in for the walls.
 const cc_rooftopworks_FAR_LAMP_CAP: f32 = 3.0;
@@ -1112,7 +1138,9 @@ fn cc_rooftopworks_roof(cc: CityCell, h: CityHit, fp: f32, fp_filter: f32,
     var e = vec3<f32>(0.0);
     let cr = cc_rooftopworks_crown(cc, h.cell);
     let bk = cc_rooftopworks_bulk(cc, h.cell, cr);
-    if (!city_props_drawn(h.cell, h.pos, h.t)) {
+    // Props are drawn only on the view ray, inside the range; a reflection
+    // traces none (CITY_TRACE_PLAIN), so it sees the far means at any range.
+    if (!(direct && city_props_drawn(h.cell, h.pos, h.t))) {
         e = cc_rooftopworks_lamps_far(cc, h.cell, d, cr, bk, dir);
     }
     if (bk.ok && bk.lamp) {
@@ -1786,23 +1814,57 @@ fn cc_rooftopworks_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         let bk = cc_rooftopworks_bulk(cc, h.cell,
                                       cc_rooftopworks_crown(cc, h.cell));
         var e = cc_rooftopworks_dark(h, cc_rooftopworks_BULK_ALBEDO);
-        // The door: a dark steel leaf in the middle of its face.
-        if (dot(h.normal.xy, bk.door) > 0.5) {
-            let c = 0.5 * (bk.lo.xy + bk.hi.xy);
-            let along = abs(dot(h.pos.xy - c, vec2<f32>(-bk.door.y,
-                                                        bk.door.x)));
-            let k = 1.0 - smoothstep(0.3, 1.0, fp);
-            let door = select(1.0, 0.30,
-                              along < 0.5 * cc_rooftopworks_BULK_DOOR_W
-                              && h.pos.z - bk.lo.z < cc_rooftopworks_BULK_DOOR_H);
-            e = e * mix(1.0, door, k);
-        }
         if (bk.lamp) {
             let src = cc_rooftopworks_spot(h.pos, bk.seat,
                                            cc_rooftopworks_LAMP_SIG, fp);
             let spill = cc_rooftopworks_spot(h.pos, bk.seat, 1.6, fp);
             e = e + cc_rooftopworks_LAMP_COL
                     * (cc_rooftopworks_LAMP_RAD * (src + 0.12 * spill));
+        }
+        // The door: a dark steel leaf in the middle of its face, under the
+        // lamp, so it darkens the light the face returns as well as the
+        // face (the far lamp constants are measured with it). Box-filtered
+        // over the pixel's footprint on the face: the leaf's share of it,
+        // which is the leaf itself up close and its area's mean far off.
+        if (dot(h.normal.xy, bk.door) > 0.5) {
+            let t = vec2<f32>(-bk.door.y, bk.door.x);
+            let c = 0.5 * (bk.lo.xy + bk.hi.xy);
+            let along = dot(h.pos.xy - c, t);
+            let up = h.pos.z - bk.lo.z;
+            let dl = vec3<f32>(dot(dir.xy, t), dir.z, dot(dir.xy, bk.door));
+            let hb = max(city_wall_footprint(dl, fp), vec2<f32>(1e-4));
+            let w = 0.5 * cc_rooftopworks_BULK_DOOR_W;
+            let su = max(min(along + hb.x, w) - max(along - hb.x, -w), 0.0);
+            let sv = max(min(up + hb.y, cc_rooftopworks_BULK_DOOR_H)
+                         - max(up - hb.y, 0.0), 0.0);
+            let share = su * sv / (4.0 * hb.x * hb.y);
+            e = e * (1.0 - share * (1.0 - cc_rooftopworks_BULK_DOOR_K));
+        }
+        // The machine room's walls: a louvred vent panel in the middle of
+        // each, where the hoist's motor room breathes. The slats are what
+        // the door lamp's light picks out, so the pattern multiplies the
+        // light as well as the wall; it averages to exactly 1 over its pitch
+        // (dark slats, brighter gaps between them), so the panel's mean,
+        // and the far lamp constants measured without it, are unchanged.
+        // Drawn while a slat is wider than a pixel, its mean (1) past it.
+        let lc = 0.5 * (bk.lift_lo.xy + bk.lift_hi.xy);
+        if (bk.lift && abs(h.normal.z) < 0.5
+            && all(abs(h.pos.xy - lc) < vec2<f32>(cc_rooftopworks_LIFT_HX
+                                                  + 0.01))) {
+            // @domain: a wall's normal: |xy| = 1
+            let nh = normalize(h.normal.xy + vec2<f32>(1e-9, 0.0));
+            let along = abs(dot(h.pos.xy - lc, vec2<f32>(-nh.y, nh.x)));
+            let up = h.pos.z - bk.lift_lo.z;
+            if (along < 0.5 * cc_rooftopworks_LOUVRE_W
+                && up > cc_rooftopworks_LOUVRE_Z.x
+                && up < cc_rooftopworks_LOUVRE_Z.y) {
+                let dk = cc_rooftopworks_LOUVRE_DARK;
+                let gap = (1.0 - dk * cc_rooftopworks_LOUVRE_K) / (1.0 - dk);
+                let slat = select(gap, cc_rooftopworks_LOUVRE_K,
+                                  fract(up / cc_rooftopworks_LOUVRE_PITCH)
+                                  < dk);
+                e = e * mix(slat, 1.0, smoothstep(0.06, 0.25, fp));
+            }
         }
         return e;
     }

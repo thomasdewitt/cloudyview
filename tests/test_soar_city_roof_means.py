@@ -16,11 +16,15 @@ plain pass that evaluates it once per pixel:
    displayed luminance and in light within MEAN_TOL. This pins the
    lattice's geometry (pane inset and area), the lit rate, the brightness
    distribution and the expectation's three-point quadrature over it,
-   in clear air and in fog.
+   in clear air and in fog. And at the field's edges, where footprints
+   overlap it only in part, the expectation's lit pane area must equal the
+   exact sum's, pooled over places and seeds: the expectation counts the
+   panes the overlap actually holds, the lattice in its own phase.
 2. A footprint on one pane is that pane. A footprint inside a lit pane
-   comes back as the pane's radiance exactly, and one off every lit pane as
-   the roof, exactly, so up close nothing changes against the per-pixel
-   draw.
+   is flagged as wholly on it at its own brightness (the hook's fast path),
+   one off every lit pane holds none of their area, and both sums resolve
+   back to the pane's and the roof's radiance, so up close nothing changes
+   against the per-pixel draw.
 3. The coping trim's lit share is its runs'. The trim is shown as the
    mixture of lit and dark its footprint holds, and the runs' share of a
    footprint along the coping is closed form
@@ -121,9 +125,34 @@ ONE = """    {
         } else {
             err_on = on.lit_area + select(0.0, 1.0, on.whole >= 0.0);
         }
+        // And the sums themselves resolve back to what they hold: the
+        // pane (or the roof, for a dark one) and the roof beside it.
+        let a = 4.0 * hb.x * hb.y;
+        let want = base + pane_rad * lit;
+        let r_on = city_windows_resolve(
+            CityWinSum(on.sum.shown / a, on.sum.light / a), fog, true);
+        let r_off = city_windows_resolve(
+            CityWinSum(off.sum.shown / a, off.sum.light / a), fog, true);
+        let rel = max(abs(r_on - want) / want, abs(r_off - base) / base);
         return vec4<f32>(err_on, off.lit_area
                          + select(0.0, 1.0, off.whole >= 0.0),
-                         select(0.0, 1.0, lit > 0.0), 1.0);
+                         select(0.0, 1.0, lit > 0.0),
+                         max(max(rel.x, rel.y), rel.z));
+    }
+"""
+
+# 1b. Footprints three quarters of a pitch on a side, scattered across the
+# field's corner and edges (each pixel its own place and seed): the exact
+# sum's lit pane area and the expectation's, which must agree pooled.
+EDGE = """    {
+""" + FIELD + """        let r = city_rand4(px ^ vec2<u32>(0x3c6ef372u, 0xa54ff53au));
+        let hb = 0.375 * sk.pitch;
+        let c = sk.flo + (r.xy * 3.0 - 1.0) * sk.pitch;
+        let ex = cc_rooftopworks_sky_exact(cc, sk, c - hb, c + hb, base,
+                                           pane_rad, fog, true);
+        let mn = cc_rooftopworks_sky_mean(sk, c - hb, c + hb, base, pane_rad,
+                                          fog, true);
+        return vec4<f32>(ex.lit_area, mn.lit_area, 0.0, 1.0);
     }
 """
 
@@ -160,6 +189,7 @@ PROBES = {
     "agree_fog": AGREE.replace("FOG", FOGS["fog"]).replace("BASE", FIELD_BASE),
     "one_clear": ONE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
     "trim": TRIM,
+    "edge": EDGE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
 }
 # Pooled over the frame's 256 x 144 seeds, 64 cells each: the lit share's
 # sampling error is under 0.2% of itself; the footprints tile the field, so
@@ -261,6 +291,16 @@ def test_exact_sum_averages_to_the_expectation(fog, exposure, probes):
 
 
 @pytest.mark.gpu
+def test_expectation_holds_at_the_field_edges(probes):
+    out = _run(probes, "edge").astype(np.float64)
+    exact, mean = out[..., 0].mean(), out[..., 1].mean()
+    assert mean > 0.0
+    # Pooled over the frame's places and seeds (a few percent of a pane's
+    # lit-or-not draw each), the sampling error is under 2%.
+    assert abs(exact - mean) <= 0.03 * mean, (exact, mean)
+
+
+@pytest.mark.gpu
 def test_a_footprint_on_one_pane_is_that_pane(probes):
     out = _run(probes, "one_clear")
     lit_share = out[..., 2].mean()
@@ -270,6 +310,9 @@ def test_a_footprint_on_one_pane_is_that_pane(probes):
         "a footprint inside a pane did not come back as that pane")
     assert out[..., 1].max() == 0.0, (
         "a footprint in the gap between panes saw a lit pane")
+    # The windows' round-trip tolerance (tests/test_soar_city_windows.py).
+    assert out[..., 3].max() <= 0.03, (
+        "a one-element sum did not resolve back to its element")
 
 
 @pytest.mark.gpu
