@@ -1646,20 +1646,34 @@ fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
 // directly or in a reflection, so both are averaged as shown; a penthouse
 // or a parapet seen in a reflection gets its shown mean, not its plain one.
 
-// A storey band's mean sill factor over [v0, v1] (m above the penthouse's
-// foot): smoothstep(0, SILL, v) integrated in closed form.
-fn cc_rooftopworks_sill_int(v: f32) -> f32 {
+// Light over a band of wall [b0, b1] (m above the penthouse's foot), ul
+// metres wide, at `f` times a bay's light: added as shown. The spandrel's
+// sill, smoothstep(0, SILL, v), darkens the light at the foot: below SILL
+// the band is three elements at the ramp's three-point Gauss-Legendre
+// nodes, above it one, so a footprint across the ramp is averaged as shown
+// rather than through the ramp's linear mean.
+fn cc_rooftopworks_pent_band(acc: CityWinSum, base: vec3<f32>,
+                             glow: vec3<f32>, f: f32, ul: f32, b0: f32,
+                             b1: f32, fog: vec4<f32>, shown: bool)
+        -> CityWinSum {
     let s = cc_rooftopworks_PENT_SILL;
-    let x = clamp(v / s, 0.0, 1.0);
-    return s * (x * x * x - 0.5 * x * x * x * x) + max(v - s, 0.0);
-}
-
-fn cc_rooftopworks_sill_mean(v0: f32, v1: f32) -> f32 {
-    if (v1 - v0 < 1e-4) {
-        return smoothstep(0.0, cc_rooftopworks_PENT_SILL, v0);
+    var res = city_win_add(acc, base + glow * f,
+                           ul * max(b1 - max(b0, s), 0.0), fog, shown);
+    let r1 = min(b1, s);
+    if (r1 > b0) {
+        let mid = 0.5 * (b0 + r1);
+        let hw = 0.5 * (r1 - b0);
+        let g = 0.7745966692 * hw;
+        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s, mid)),
+                           ul * (r1 - b0) * (4.0 / 9.0), fog, shown);
+        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s,
+                                                                mid - g)),
+                           ul * (r1 - b0) * (5.0 / 18.0), fog, shown);
+        res = city_win_add(res, base + glow * (f * smoothstep(0.0, s,
+                                                                mid + g)),
+                           ul * (r1 - b0) * (5.0 / 18.0), fog, shown);
     }
-    return (cc_rooftopworks_sill_int(v1) - cc_rooftopworks_sill_int(v0))
-           / (v1 - v0);
+    return res;
 }
 
 // A bay's brightness over the room's light, 0 if dark.
@@ -1696,7 +1710,6 @@ fn cc_rooftopworks_pent_seen(cc: CityCell, u0: f32, u1: f32, v0: f32,
             if (b1 <= b0) {
                 continue;
             }
-            let sill = cc_rooftopworks_sill_mean(b0, b1);
             for (var i: i32 = 0; i < cc_rooftopworks_PENT_EXACT_MAX;
                  i = i + 1) {
                 let c0 = f32(i0 + i) * p;
@@ -1711,15 +1724,27 @@ fn cc_rooftopworks_pent_seen(cc: CityCell, u0: f32, u1: f32, v0: f32,
                 }
                 // The mullion is the bay's first MULL of its pitch.
                 let m1 = c0 + cc_rooftopworks_PENT_MULL * p;
-                let am = max(min(a1, m1) - a0, 0.0) * (b1 - b0);
-                let ag = (a1 - a0) * (b1 - b0) - am;
-                let lm = base + glow * (0.10 * bay * sill);
-                let lg = base + glow * (bay * sill);
-                ex = city_win_add(ex, lm, am, fog, shown);
-                ex = city_win_add(ex, lg, ag, fog, shown);
-                if (am > 0.0) { n_el = n_el + 1; only = lm; }
-                if (ag > 0.0) { n_el = n_el + 1; only = lg; }
-                lit_a = lit_a + am + ag;
+                let um = max(min(a1, m1) - a0, 0.0);
+                let ug = (a1 - a0) - um;
+                ex = cc_rooftopworks_pent_band(ex, base, glow, 0.10 * bay, um,
+                                               b0, b1, fog, shown);
+                ex = cc_rooftopworks_pent_band(ex, base, glow, bay, ug, b0,
+                                               b1, fog, shown);
+                // One element is the footprint wholly on one surface: on
+                // the glass or the mullion, above the sill.
+                if (b0 >= cc_rooftopworks_PENT_SILL) {
+                    if (um > 0.0) {
+                        n_el = n_el + 1;
+                        only = base + glow * (0.10 * bay);
+                    }
+                    if (ug > 0.0) {
+                        n_el = n_el + 1;
+                        only = base + glow * bay;
+                    }
+                } else {
+                    n_el = n_el + 2;
+                }
+                lit_a = lit_a + (a1 - a0) * (b1 - b0);
             }
         }
         if (box_a - lit_a > 1e-6 * box_a) {
@@ -1734,22 +1759,23 @@ fn cc_rooftopworks_pent_seen(cc: CityCell, u0: f32, u1: f32, v0: f32,
     var mn = city_win_zero();
     if (w_mean > 0.0) {
         // Lit at the rate, brightness uniform on [0.45, 1.55] by
-        // three-point Gauss-Legendre, glass and mullion at their shares, the
-        // sill at its mean over the box.
-        let sill = cc_rooftopworks_sill_mean(v0, v1);
+        // three-point Gauss-Legendre, glass and mullion at their shares of
+        // the box's width, the sill as in the exact sum.
         let g = 0.55 * 0.7745966692;
-        let a_lit = box_a * cc_rooftopworks_PENT_LIT;
-        let am = a_lit * cc_rooftopworks_PENT_MULL;
-        let ag = a_lit - am;
+        let ul = (u1 - u0) * cc_rooftopworks_PENT_LIT;
         let lv = vec3<f32>(1.0, 1.0 - g, 1.0 + g);
         let wv = vec3<f32>(4.0 / 9.0, 5.0 / 18.0, 5.0 / 18.0);
         for (var q: i32 = 0; q < 3; q = q + 1) {
-            mn = city_win_add(mn, base + glow * (0.10 * lv[q] * sill),
-                              am * wv[q], fog, shown);
-            mn = city_win_add(mn, base + glow * (lv[q] * sill), ag * wv[q],
-                              fog, shown);
+            mn = cc_rooftopworks_pent_band(
+                mn, base, glow, 0.10 * lv[q],
+                ul * cc_rooftopworks_PENT_MULL * wv[q], v0, v1, fog, shown);
+            mn = cc_rooftopworks_pent_band(
+                mn, base, glow, lv[q],
+                ul * (1.0 - cc_rooftopworks_PENT_MULL) * wv[q], v0, v1, fog,
+                shown);
         }
-        mn = city_win_add(mn, base, box_a - a_lit, fog, shown);
+        mn = city_win_add(mn, base, box_a * (1.0 - cc_rooftopworks_PENT_LIT),
+                          fog, shown);
     }
     let mean = CityWinSum(mix(ex.shown, mn.shown, w_mean) / box_a,
                           mix(ex.light, mn.light, w_mean) / box_a);

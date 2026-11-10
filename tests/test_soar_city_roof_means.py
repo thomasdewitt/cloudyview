@@ -33,9 +33,9 @@ plain pass that evaluates it once per pixel:
    centimetres to a few fixture pitches, far out along the coping.
 4. A penthouse wall's exact sum averages to its expectation, as 1. for
    the skylights: footprints half a bay by half a storey tiling 8 bays by
-   2 storeys above the spandrel (where the sill is 1), their shown
-   luminance averaged, against one footprint's expectation, pooled over
-   the frame's seeds.
+   2 storeys, their shown luminance averaged, against one footprint's
+   expectation, pooled over the frame's seeds; above the spandrel, and
+   from the foot, across the sill's ramp.
 
 Needs a real GPU; skips cleanly without one.
 
@@ -188,8 +188,8 @@ TRIM = """    {
         return vec4<f32>(err / tol, share, 0.0, 1.0);
     }
 """
-# 4. The shown luminance of cc_rooftopworks_pent_seen over a tiling of a
-# wall's upper two storeys, and of one footprint's expectation.
+# 4. The shown luminance of cc_rooftopworks_pent_seen over a tiling of two
+# storeys of a wall, from V_BASE up, and of one footprint's expectation.
 PENT = """    {
         let px = vec2<u32>(u32(clamp(0.5 + 0.7 * dir.x, 0.0, 1.0) * 4096.0),
                            u32(clamp(0.5 + 1.4 * dir.z, 0.0, 0.999) * 4096.0));
@@ -206,7 +206,7 @@ PENT = """    {
         for (var j: i32 = 0; j < 4; j = j + 1) {
             for (var i: i32 = 0; i < 16; i = i + 1) {
                 let u0 = 0.5 * p * f32(i);
-                let v0 = fh + 0.5 * fh * f32(j);
+                let v0 = V_BASE + 0.5 * fh * f32(j);
                 let r = cc_rooftopworks_pent_seen(cc, u0, u0 + 0.5 * p, v0,
                                                   v0 + 0.5 * fh, base, glow,
                                                   fog, true);
@@ -214,7 +214,8 @@ PENT = """    {
                     (r * fog.x + fog.yzw) * e), lum);
             }
         }
-        let m = cc_rooftopworks_pent_seen(cc, 0.0, 8.0 * p, fh, 3.0 * fh,
+        let m = cc_rooftopworks_pent_seen(cc, 0.0, 8.0 * p, V_BASE,
+                                          V_BASE + 2.0 * fh,
                                           base, glow, fog, true);
         return vec4<f32>(shown / 64.0,
                          dot(city_display_curve((m * fog.x + fog.yzw) * e),
@@ -228,8 +229,12 @@ PROBES = {
     "one_clear": ONE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
     "trim": TRIM,
     "edge": EDGE.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
-    "pent_clear": PENT.replace("FOG", FOGS["clear"]).replace("BASE", FIELD_BASE),
-    "pent_fog": PENT.replace("FOG", FOGS["fog"]).replace("BASE", FIELD_BASE),
+    "pent_clear": PENT.replace("V_BASE", "fh").replace("FOG", FOGS["clear"])
+                      .replace("BASE", FIELD_BASE),
+    "pent_fog": PENT.replace("V_BASE", "fh").replace("FOG", FOGS["fog"])
+                    .replace("BASE", FIELD_BASE),
+    "pent_sill": PENT.replace("V_BASE", "0.0").replace("FOG", FOGS["clear"])
+                     .replace("BASE", FIELD_BASE),
 }
 # Pooled over the frame's 256 x 144 seeds, 64 cells each: the lit share's
 # sampling error is under 0.2% of itself; the footprints tile the field, so
@@ -369,7 +374,16 @@ def test_trim_share_is_the_runs(probes):
 @pytest.mark.parametrize("exposure", (2.0, 6.0))
 def test_penthouse_exact_sum_averages_to_the_expectation(fog, exposure,
                                                          probes):
-    out = _run(probes, f"pent_{fog}", exposure).astype(np.float64)
+    _pent_agrees(probes, f"pent_{fog}", exposure)
+
+
+@pytest.mark.gpu
+def test_penthouse_agrees_across_the_sill(probes):
+    _pent_agrees(probes, "pent_sill", 6.0)
+
+
+def _pent_agrees(probes, name, exposure):
+    out = _run(probes, name, exposure).astype(np.float64)
     exact, mean = out[..., 0].mean(), out[..., 1].mean()
     assert abs(exact - mean) <= MEAN_TOL * mean, (
         f"shown: exact {exact:.5f} vs expectation {mean:.5f}")
