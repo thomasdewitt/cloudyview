@@ -10,6 +10,9 @@ gives the grid the output's shape at about AUTO_EXPOSURE_METER_RAYS rays,
 and tools/prebake_demos.py's meter (which metered 96 wide) uses the same
 rule, pinned here to the browser's.
 
+The same fixture also pins prebake's MAX_TIER_HAZE, its restatement of
+constants.js DEFAULT_HAZE_BY_TIER.max, which every demo still is baked at.
+
 Needs node, not a GPU.
 """
 
