@@ -122,7 +122,7 @@ _JS = textwrap.dedent("""
     {
       const r = {
         flightRenderScale: 0.125, qualityTier: "minimal",
-        lightCacheMode: "auto", skyProbeMode: "auto", parkedSppOverride: null,
+        lightCacheMode: "auto", parkedSppOverride: null,
         lightBakePending: false,
         setQualityTier(t) {           // the real one resets to flight stepping
           this.qualityTier = t;
@@ -369,5 +369,5 @@ def test_witness_quality_presets_carry_parked_stepping():
         assert preset["step_factor"] == 2.0, name
         assert preset["light_step_factor"] == 2.0, name
     assert QUALITY_PRESETS["max"]["light_cache"] is False
-    assert QUALITY_PRESETS["high"]["sky_probe"] is True
+    assert QUALITY_PRESETS["high"]["light_cache"] is True
     assert QUALITY_PRESETS["minimal"]["accumulate"] == 8

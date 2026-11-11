@@ -69,22 +69,22 @@ export async function loadShaders(baseUrl) {
  * A compilable module: the compile-time switch header uniforms.wgsl
  * describes, then `source`.
  *
- * The lighting method has no default on purpose: it is the same pair of
- * flags packUniforms writes into the uniform block, and a caller that forgot
- * to say which method it compiled would render one method under the other's
+ * The lighting method has no default on purpose: it is the same flag
+ * packUniforms writes into the uniform block, and a caller that forgot to
+ * say which method it compiled would render one method under the other's
  * scene key.
  */
 export function specializeShader(source,
                                  { periodic, nested, toneMap = true,
-                                   lightCache, skyProbe }) {
-  if (typeof lightCache !== "boolean" || typeof skyProbe !== "boolean") {
+                                   lightCache }) {
+  if (typeof lightCache !== "boolean") {
     throw new Error(
-      "specializeShader needs the lighting method: lightCache and skyProbe " +
-      `as booleans; got ${lightCache} and ${skyProbe}.`);
+      "specializeShader needs the lighting method: lightCache as a boolean; " +
+      `got ${lightCache}.`);
   }
   const switches = {
     PERIODIC_DOMAIN: periodic, NESTED: nested, TONE_MAP: toneMap,
-    LIGHT_CACHE: lightCache, SKY_PROBE: skyProbe,
+    LIGHT_CACHE: lightCache,
   };
   const header = Object.entries(switches)
     .map(([name, on]) => `const ${name}: bool = ${on ? "true" : "false"};\n`)
@@ -99,5 +99,5 @@ export function specializeShader(source,
  */
 export function shaderVariantKey(spec) {
   return [spec.periodic, spec.nested, spec.toneMap, spec.surface,
-          spec.lightCache, spec.skyProbe].join("|");
+          spec.lightCache].join("|");
 }

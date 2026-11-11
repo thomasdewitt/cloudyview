@@ -87,11 +87,11 @@ fn strat_seed(pixel: vec2<u32>, stream: u32) -> vec2<u32> {
 }
 
 // Stream indices. They need only be distinct: each selects its own rotation,
-// so two streams that share a lattice component (the sky probe and the nest
+// so two streams that share a lattice component (the city probe and the nest
 // seam both take STRAT_ALPHA_10) still land on unrelated offsets.
 const STRAT_STREAM_SUBPIXEL: u32 = 1u;
 const STRAT_STREAM_ENTRY: u32 = 2u;
-const STRAT_STREAM_SKY_PROBE: u32 = 3u;
+const STRAT_STREAM_CITY_PROBE: u32 = 3u;
 const STRAT_STREAM_SUN_MARCH: u32 = 4u;
 const STRAT_STREAM_SUN_CONE: u32 = 5u;
 const STRAT_STREAM_PREMARCH: u32 = 7u;

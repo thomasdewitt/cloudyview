@@ -33,30 +33,17 @@ export const settings = {
       this.sunElevation = Math.min(
         90.0, Math.max(K.MIN_SUN_ELEVATION_DEG, elevation));
     }
-    // The baked sun-tau cache is a function of the sun; while it re-bakes
-    // the march runs live, so dragging the sun is correct throughout and
-    // merely slower until the fresh cache lands. The texture is reused, so
-    // this never re-risks the load-time memory probe.
+    // The light cache's sun channel is a function of the sun; while it
+    // re-bakes the march goes to the sun itself, so dragging the sun is
+    // correct throughout and merely slower until the fresh cache lands. The
+    // texture is reused, so this never re-risks the load-time memory probe.
     this.renderer.invalidateLightCache();
     this.renderer.startLightBake(this._viewKwargs());
     this._wake("sun");
   },
 
-  /**
-   * J: flip the sky probe. The same setting as the Advanced panel's row, so
-   * flipping it by key also marks the quality Custom.
-   */
-  toggleSkyProbe() {
-    const on = !this.skyProbeOn;
-    this.setSkyProbe(on);
-    this.markQualityCustom();
-    this.ui.say(on
-      ? "Sky probe on — measured sky visibility in shadow."
-      : "Sky probe off — shadowed samples assume open sky.", 4);
-  },
-
-  /** K: flip the sun-tau cache (on always means the /2 bake). Same setting
-   *  as the Advanced panel's row; marks the quality Custom. */
+  /** K: flip reading the sun from the light cache. Same setting as the
+   *  Advanced panel's row; marks the quality Custom. */
   toggleLightCache() {
     const on = !this.lightCacheOn;
     this.setLightCache(on);
@@ -239,7 +226,6 @@ export const settings = {
     this._byHand.clear();
     const r = this.renderer;
     r.lightCacheMode = "auto";
-    r.skyProbeMode = "auto";
     r.parkedSppOverride = null;
     this.setToneMapGamma(K.DEFAULT_TONE_MAP_GAMMA);
     this.setToneMapWhitePoint(K.DEFAULT_TONE_MAP_WHITE_POINT);
@@ -252,16 +238,9 @@ export const settings = {
     this.qualityCustom = false;
   },
 
-  /** Any hand-change in the Advanced panel (or K/J) lands here. */
+  /** Any hand-change in the Advanced panel (or K) lands here. */
   markQualityCustom() {
     this.qualityCustom = true;
-  },
-
-  /** The flight-time sky probe the current settings ask for. */
-  get skyProbeOn() {
-    const r = this.renderer;
-    if (r.skyProbeMode !== "auto") return r.skyProbeMode === "on";
-    return Boolean(K.QUALITY_PRESETS[r.qualityTier].skyProbe);
   },
 
   get lightCacheOn() {
@@ -273,13 +252,6 @@ export const settings = {
   get parkedSpp() {
     return this.renderer.parkedSppOverride
       ?? K.PARKED_ACCUM_FRAMES_BY_TIER[this.renderer.qualityTier];
-  },
-
-  setSkyProbe(on) {
-    this.renderer.skyProbeMode = on ? "on" : "off";
-    this.renderer.resetAccumulation();
-    this._marchPending = true;
-    this._wake("sky probe");
   },
 
   setLightCache(on) {

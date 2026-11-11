@@ -11,7 +11,7 @@ import * as K from "../constants.js";
 // it has its own rule (Tutorial.interceptEscape), because one flight step
 // asks for it.
 const TUTORIAL_REFUSED = new Set(
-  ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "j", "p", "F12"]);
+  ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "p", "F12"]);
 
 export const input = {
   _bindInput() {
@@ -225,9 +225,8 @@ export const input = {
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
       // Quality is the research mode's business; in basic the tier is
-      // whatever the probe measured, and these two keys would move it.
+      // whatever the probe measured, and this key would move it.
       case "k": if (this.ui.allows("quality")) this.toggleLightCache(); return;
-      case "j": if (this.ui.allows("quality")) this.toggleSkyProbe(); return;
       // Through pause(), not ui.open() directly: the dialog needs the mouse,
       // so the pointer must be released first — opening it under a held lock
       // left the camera turning behind an unusable panel (bug 1).

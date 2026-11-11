@@ -137,10 +137,12 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
     return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r * taper;
 }
 
-// Sun optical depth from the baked cache: the read that stands in for
-// light_march_tau on cloud samples under LIGHT_CACHE. The cached value is
-// for the sun's central direction with no quadrature jitter, so it carries
-// no solar-disc penumbra; trilinear filtering is its only softening.
+// The baked light cache at p: x = optical depth to the sun, y = optical
+// depth of the cloud overhead (the sky probe's). Under LIGHT_CACHE one read
+// of it stands in for light_march_tau and for the sky probe's march on cloud
+// samples. The sun value is for the sun's central direction with no
+// quadrature jitter, so it carries no solar-disc penumbra; trilinear
+// filtering is its only softening.
 //
 // Coordinates are sample_level's over the same outer box (texel i at data
 // coordinate i; see fs_bake_light), with the same lateral wrap in a periodic
@@ -148,7 +150,7 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
 // to zero at the domain edge would let sunlight into the boundary column.
 // Clamp-to-edge is right on the vertical: above the top slice tau is ~0,
 // and below the bottom slice the nearest baked value is the best available.
-fn sample_light_tau(p: vec3<f32>) -> f32 {
+fn sample_light_cache(p: vec3<f32>) -> vec2<f32> {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(light_tau, 0));
     let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
@@ -159,9 +161,9 @@ fn sample_light_tau(p: vec3<f32>) -> f32 {
         data_g.x + 0.5
     ) / tex_dims;
     if (PERIODIC_DOMAIN) {
-        return textureSampleLevel(light_tau, vol_wrap_samp, tex_coord, 0.0).r;
+        return textureSampleLevel(light_tau, vol_wrap_samp, tex_coord, 0.0).rg;
     }
-    return textureSampleLevel(light_tau, vol_samp, tex_coord, 0.0).r;
+    return textureSampleLevel(light_tau, vol_samp, tex_coord, 0.0).rg;
 }
 
 // Extinction from a chosen level at an already-wrapped point.

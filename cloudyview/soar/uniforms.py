@@ -294,16 +294,10 @@ class ViewState:
     frame_index: int = 0
     subpixel: bool = False
     jitter_scale: float = 1.0
-    # Read the sun's optical depth at each cloud sample from the baked cache
-    # instead of marching to the sun. Only meaningful after
-    # SoarRenderer.bake_light_cache has run for this scene and sun: without
-    # it the cache is a 1x1x1 texture of zero and every cloud renders
-    # unshadowed.
+    # Read the sun's optical depth at each cloud sample from the baked light
+    # cache instead of marching to the sun (the LIGHT_CACHE switch). The
+    # marched sun has a penumbra and the cache's does not.
     light_cache: bool = False
-    # The vertical sky-visibility march (the SKY_PROBE switch). Off
-    # means every sample sees a fully open sky, so samples deep in cloud
-    # brighten; it trades that for speed.
-    sky_probe: bool = True
     # The scene clock (s): where the city's steam is in its motion.
     # The browser advances it while flying; a still states it (witness
     # --time) and a track carries it per sample.
@@ -469,8 +463,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
     u[19] = (math.tan(view.light_march_lod_degrees * DEG), view_step_tan,
              roof_density, 0.0)
     u[20] = (1.0 if state.periodic else 0.0,
-             1.0 if view.light_cache else 0.0,
-             0.0 if view.sky_probe else 1.0, 0.0)
+             1.0 if view.light_cache else 0.0, 0.0, 0.0)
     return u
 
 

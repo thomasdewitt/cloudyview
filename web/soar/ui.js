@@ -745,8 +745,6 @@ export class UI {
     };
     m.append(boolRow("Light march cache",
                      () => app.lightCacheOn, (v) => app.setLightCache(v)));
-    m.append(boolRow("Sky probe",
-                     () => app.skyProbeOn, (v) => app.setSkyProbe(v)));
 
     m.append(el("div", "divider"));
     // Two columns while docked at the bottom: the panel exists to be looked
@@ -958,8 +956,7 @@ export class UI {
       ["R", "record a flight track — R again to stop"],
       ["P", "capture a still"],
       ...(this.allows("quality")
-        ? [["K", "light cache on/off (goes Custom; a preset resets)"],
-           ["J", "sky probe on/off (goes Custom; a preset resets)"]]
+        ? [["K", "light cache on/off (goes Custom; a preset resets)"]]
         : []),
       // Like B and M above: a field that cannot carry the mode owes the
       // reason, and the first press is a load, which is worth saying before

@@ -212,8 +212,11 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
  * load-op-"load" pass; nulls are skipped so a caller can pass a fixed-shape
  * list of things that are individually on or off.
  */
-/** The lighting method the sun-tau bake is compiled with; see _bakePipeline. */
-const BAKE_LIGHTING = Object.freeze({ lightCache: false, skyProbe: true });
+/** The light cache's texture format: red is the optical depth to the sun,
+ *  green the optical depth of the cloud overhead. */
+const LIGHT_CACHE_FORMAT = "rg16float";
+/** The lighting method the bake is compiled with; see _bakePipeline. */
+const BAKE_LIGHTING = Object.freeze({ lightCache: false });
 
 /** Whether a _pipeline answer is still a compile in flight. */
 function isPending(pipelineOrPromise) {
@@ -387,20 +390,23 @@ export class Renderer {
         { binding: 2, resource: this._veilDummy.createView() },
       ],
     });
-    // The sun-tau cache (binding 7) starts as a 1x1x1 zero stand-in, like the
-    // nest's. Whether it is read is a per-tier preset choice (see
-    // QUALITY_PRESETS.lightCache), with lightCacheMode/skyProbeMode as
-    // whole-session overrides for A/B ("auto" follows the rung; "on"/"off"
-    // force). The flag actually packed into the block is wanted AND baked — an
-    // unfinished bake reads the live march, never a half-written cache.
+    // The light cache (binding 7) starts as a 1x1x1 zero stand-in, like the
+    // nest's. Every march reads its green channel, the cloud overhead, for
+    // the sky visibility. Whether the sun's optical depth is read from its
+    // red channel is the tier's choice (QUALITY_PRESETS.lightCache), with
+    // lightCacheMode as a whole-session override for A/B ("auto" follows
+    // the tier; "on"/"off" force). The flag packed into the block is wanted
+    // AND baked: while a bake for a new sun is unfinished the march goes to
+    // the sun itself. The green channel does not depend on the sun, and a
+    // re-bake rewrites the same texture, so it stays right through one.
     this._lightTauDummy = device.createTexture({
       label: "soar-light-tau-dummy", size: [1, 1, 1], dimension: "3d",
-      format: "r16float",
+      format: LIGHT_CACHE_FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     device.queue.writeTexture(
-      { texture: this._lightTauDummy }, new Uint16Array([0]),
-      { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
+      { texture: this._lightTauDummy }, new Uint16Array([0, 0]),
+      { bytesPerRow: 4, rowsPerImage: 1 }, [1, 1, 1]);
     // Binding 8 (ice-detection mode): the scene's ice-fraction
     // volume when it has one, this zero stand-in otherwise. The mode flag is
     // packed into u.ice_mode only when a real texture is bound.
@@ -422,7 +428,6 @@ export class Renderer {
     this._lightTauTex = null;
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
-    this.skyProbeMode = "auto";
     // Advanced-panel override for the parked sample count; null follows
     // PARKED_ACCUM_FRAMES_BY_TIER.
     this.parkedSppOverride = null;
@@ -898,7 +903,6 @@ export class Renderer {
       toneMap,
       surface: this.scene.city ? "city" : "ocean",
       lightCache: lighting.lightCache,
-      skyProbe: lighting.skyProbe,
     };
   }
 
@@ -1360,7 +1364,6 @@ export class Renderer {
       const lightingNow = this.lighting;
       const sizeNow = renderTargetSize(outputSize, this.renderScale);
       if (lightingNow.lightCache === lighting.lightCache
-          && lightingNow.skyProbe === lighting.skyProbe
           && shaderVariantKey(this._shaderSpec({ lighting })) === variant
           && sizeNow[0] === renderSize[0] && sizeNow[1] === renderSize[1]) {
         rayPipeline = p;
@@ -1394,12 +1397,12 @@ export class Renderer {
     // average instead of blending into it. Any scene-key change with a
     // still camera takes the one-frame motion blend (_accumulationPlan),
     // which suits a value that glides — exposure, haze — but a method switch
-    // is a step: a bake finishing, a tier changing methods or a K/J toggle
+    // is a step: a bake finishing, a tier changing methods or a K toggle
     // replaces one lighting model with another, and the blend would hold a
     // ~42% ghost of the old one for a frame before the average restarted.
     // In flight the key changes every frame anyway, and the motion blend is
     // the point, so a moving camera is left to it.
-    const methodKey = `${lighting.lightCache}|${lighting.skyProbe}`;
+    const methodKey = `${lighting.lightCache}`;
     if (this._accumMethod !== undefined && methodKey !== this._accumMethod
         && !this._cameraMoving) {
       this._resetAccumulation();
@@ -1566,11 +1569,9 @@ export class Renderer {
     this._offline = { scale: this.flightRenderScale,
                       tier: this.qualityTier,
                       lightCacheMode: this.lightCacheMode,
-                      skyProbeMode: this.skyProbeMode,
                       parkedSppOverride: this.parkedSppOverride };
     this.setQualityTier(tier);
     this.lightCacheMode = "auto";
-    this.skyProbeMode = "auto";
     this.parkedSppOverride = null;
     this.setRenderScale(1.0);
     // Parked sampling, applied after setRenderScale (whose rung rebuild resets
@@ -1615,7 +1616,6 @@ export class Renderer {
     this.setQualityTier(saved.tier);
     this.setRenderScale(saved.scale);
     this.lightCacheMode = saved.lightCacheMode;
-    this.skyProbeMode = saved.skyProbeMode;
     this.parkedSppOverride = saved.parkedSppOverride;
     this.resetAccumulation();
   }
@@ -2003,32 +2003,33 @@ export class Renderer {
     return true;
   }
 
-  // --- the sun-tau cache -----------------------------------------------------
+  // --- the light cache -------------------------------------------------------
   //
-  // A 3D texture of sun optical depth over the outer AABB, baked one field-x
-  // plane per draw (see raymarch.wgsl fs_bake_light) and read by the cloud
-  // march instead of a per-sample sun march while lightCacheEnabled. The bake
-  // spreads across frames — the viewer calls stepLightBake with a slice
-  // budget — and the packed row-23 flag stays off until the last slice lands,
-  // so an unfinished cache is never read. A sun change invalidates and, if
-  // the toggle is on, the viewer starts a fresh bake.
+  // A 3D texture over the outer box, baked one field-x plane per draw
+  // (fs_bake_light, shader/passes.wgsl). Red is the optical depth to the sun,
+  // which the cloud march reads instead of marching to the sun at each sample
+  // while lighting.lightCache; green is the optical depth of the cloud
+  // overhead, which every march reads for the sky visibility. The bake
+  // spreads across frames (the viewer calls stepLightBake with a slice
+  // budget), and the packed light-cache flag stays off until the last slice
+  // lands, so a sun channel half baked for a new sun is never read. A sun
+  // change invalidates, and the viewer starts a fresh bake.
 
   get lightBakePending() { return this._lightBake !== null; }
 
   get lightCacheReady() { return this._lightCacheReady; }
 
   /**
-   * The lighting method a march from this renderer runs now: the flags
-   * packUniforms writes into the block AND the switches the march module is
-   * compiled with (LIGHT_CACHE, SKY_PROBE), from this one
-   * getter so the two can never disagree.
+   * The lighting method a march from this renderer runs now: the flag
+   * packUniforms writes into the block AND the switch the march module is
+   * compiled with (LIGHT_CACHE), from this one getter so the two can never
+   * disagree.
    *
    * What this frame actually does: hand override, else the SELECTED tier's
-   * preset — never the hold ladder's sampling tier. Parking sharpens the
+   * preset, never the hold ladder's sampling tier. Parking sharpens the
    * sampling toward High's step factors, but it must not switch the
-   * lighting method underneath: the sky probe is never on below High, flying
-   * or parked (Thomas, 2026-08-20), and Max's parked march stays live. A
-   * wanted cache is read only once its bake has finished.
+   * lighting method underneath: Max's parked march stays live. A wanted
+   * cache is read only once its bake has finished.
    */
   get lighting() {
     return this._lightingFor(this.qualityTier, this._lightCacheReady);
@@ -2040,18 +2041,13 @@ export class Renderer {
     const wanted = this.lightCacheMode === "auto"
       ? preset.lightCache
       : this.lightCacheMode === "on";
-    return {
-      lightCache: Boolean(wanted && cacheReady),
-      skyProbe: this.skyProbeMode === "auto"
-        ? Boolean(preset.skyProbe)
-        : this.skyProbeMode === "on",
-    };
+    return { lightCache: Boolean(wanted && cacheReady) };
   }
 
   invalidateLightCache() {
     // The abandoned bake's slice texture, not just the reference to it: a
     // sun drag invalidates once per event, and each orphaned slice held its
-    // cz*cy r16float until the tab closed. Fenced — the bake's last copy
+    // cz*cy texels until the tab closed. Fenced — the bake's last copy
     // into the cache may still be in flight.
     if (this._lightBake) {
       retireAfterSubmittedWork(this.device, this._lightBake.sliceTex);
@@ -2085,13 +2081,13 @@ export class Renderer {
     this.device.pushErrorScope("out-of-memory");
     const tex = this.device.createTexture({
       label: "soar-light-tau", size: [cz, cy, cx], dimension: "3d",
-      format: "r16float",
+      format: LIGHT_CACHE_FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     const oom = await this.device.popErrorScope();
     if (oom) {
       tex.destroy();
-      const mb = (cx * cy * cz * 2 / 2 ** 20).toFixed(0);
+      const mb = (cx * cy * cz * 4 / 2 ** 20).toFixed(0);
       const err = new Error(
         `This GPU cannot hold the sun-shadow cache (${mb} MB at 1/` +
         `${divisor} resolution) alongside the volume.`);
@@ -2118,7 +2114,8 @@ export class Renderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const sliceTex = this.device.createTexture({
-      label: "soar-light-tau-slice", size: [cz, cy], format: "r16float",
+      label: "soar-light-tau-slice", size: [cz, cy],
+      format: LIGHT_CACHE_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
     const u = packUniforms(this._sceneState(), {
@@ -2194,16 +2191,14 @@ export class Renderer {
   }
 
   /**
-   * The sun-tau bake's pipeline, through the same async cache as the march.
-   * fs_bake_light reads neither lighting constant, so it is built on ONE
-   * fixed method — the shader's declared default — rather than on flight's:
-   * keyed on flight's, a tier change or probe toggle mid-bake would compile
-   * a second bake pipeline identical to the first.
+   * The light cache's bake pipeline, through the same async cache as the
+   * march. fs_bake_light does not read the lighting switch, so it is built
+   * on one fixed method rather than on flight's: keyed on flight's, a tier
+   * change mid-bake would compile a second bake pipeline identical to the
+   * first.
    */
   _bakePipeline() {
-    // fs_bake_light does not read the lighting method, so it is built on
-    // one fixed variant.
-    return this._pipeline("fs_bake_light", "r16float",
+    return this._pipeline("fs_bake_light", LIGHT_CACHE_FORMAT,
                           this._shaderSpec({ lighting: BAKE_LIGHTING }));
   }
 
@@ -2262,7 +2257,7 @@ export class Renderer {
       // specialization, pipelines and uniforms below all describe one moment.
       this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
       await this._ensureSurfaceTarget(this._meterTargets);
-      const lighting = { lightCache: false, skyProbe: true };
+      const lighting = { lightCache: false };
       const spec = this._shaderSpec({ toneMap: false, lighting });
       // Its march and its surface pre-pass (the city's), on that
       // specialization, through the same async cache as the frame's: a

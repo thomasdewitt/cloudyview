@@ -10,9 +10,8 @@
 //     const TONE_MAP: bool          false returns linear radiance, not an image
 //     const LIGHT_CACHE: bool       cloud samples read the baked sun optical
 //                                   depth instead of marching to the sun
-//     const SKY_PROBE: bool         run the vertical sky-visibility march
 //
-// A sixth switch, CITY (the surface under the clouds is the night city, not
+// A fifth switch, CITY (the surface under the clouds is the night city, not
 // the sea), comes with the surface: city/layout.wgsl declares it true and
 // the stand-in city/absent.wgsl declares it false.
 //
@@ -163,16 +162,15 @@ struct Uniforms {
     view_lod_tan: f32,
     roof_density: f32,
     steam_live: f32,
-    // Row 20. Three slots the shader does not read: 1.0 when the domain is
-    // periodic, 1.0 when cloud samples read tau_sun from the light_tau
-    // texture, and 1.0 when the sky probe is off. They are the host's copies
-    // of the PERIODIC_DOMAIN, LIGHT_CACHE and (inverted) SKY_PROBE switches,
-    // packed so that changing one changes the scene key. Then bake_slice,
-    // the field-x plane of the cache being rendered, read by fs_bake_light
-    // only.
+    // Row 20. Two slots the shader does not read: 1.0 when the domain is
+    // periodic, and 1.0 when cloud samples read tau_sun from the light_tau
+    // texture. They are the host's copies of the PERIODIC_DOMAIN and
+    // LIGHT_CACHE switches, packed so that changing one changes the scene
+    // key. Then a slot nothing uses, and bake_slice, the field-x plane of
+    // the cache being rendered, read by fs_bake_light only.
     periodic_flag: f32,
     light_cache_flag: f32,
-    sky_probe_off: f32,
+    unused_20_2: f32,
     bake_slice: f32,
 };
 
@@ -194,9 +192,10 @@ struct Uniforms {
 // texture axes (depth indexes field x, height indexes field y), clamp on the
 // vertical (width). See sample_level.
 @group(0) @binding(6) var vol_wrap_samp: sampler;
-// The baked sun optical depth over the outer box (sample_light_tau,
-// fs_bake_light). Always bound: a 1x1x1 zero texture while there is no
-// finished bake.
+// The light cache over the outer box (sample_light_cache, fs_bake_light):
+// red is the optical depth to the sun, green the optical depth of the cloud
+// overhead. Always bound: a 1x1x1 zero texture while there is no finished
+// bake.
 @group(0) @binding(7) var light_tau: texture_3d<f32>;
 // The ice fraction of extinction, sigma_ice / (sigma_liq + sigma_ice), per
 // voxel of the outer level, in the texel layout of `vol`. Always bound: a

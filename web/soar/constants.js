@@ -533,31 +533,27 @@ export const QUALITY_PRESETS = {
   // while it is still moving. See drawFrame for why that is eight separate
   // submissions rather than one eight-times-longer pass.
   //
-  // `lightCache` and `skyProbe` are per-tier lighting method choices
-  // (Thomas, 2026-08-20): every tier but Max reads the baked sun-tau cache
-  // instead of marching to the sun per sample, and only Max and High pay
-  // for the vertical sky probe. The SELECTED tier governs them outright —
-  // the hold ladder sharpens a parked view's sampling toward High's step
-  // factors, but the lighting method never switches underneath it: the sky
-  // probe is never on below High, flying or parked, and Max's march stays
-  // fully live. (This joins haze-by-tier in trading away "every tier parks
-  // to the same picture", deliberately.) A capture at the tier chosen on its
-  // own panel marches what a PARKED view at that tier converges to (Thomas,
-  // 2026-09-01): the tier's lighting method, spp and look defaults, but the
-  // top hold rung's sampling — High's step factors — never the flight
-  // stepping below. See Renderer.beginOffline.
+  // `lightCache` is the tier's lighting method: every tier but Max reads the
+  // sun's optical depth from the baked light cache instead of marching to
+  // the sun at each sample. The selected tier governs it outright: the hold
+  // ladder sharpens a parked view's sampling toward High's step factors, but
+  // never switches the method, so Max's march stays live when parked. A
+  // capture at the tier chosen on its own panel marches what a parked view
+  // at that tier converges to: the tier's lighting method, sample count and
+  // look defaults, with the top hold rung's sampling (High's step factors),
+  // never the flight stepping below. See Renderer.beginOffline.
   max:    { name: "max",    label: "Max",    renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
-            lightCache: false, skyProbe: true },
+            lightCache: false },
   high:   { name: "high",   label: "High",   renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 1,
-            lightCache: true, skyProbe: true },
+            lightCache: true },
   medium: { name: "medium", label: "Medium", renderScale: 0.70,
             stepFactor: 2.5, lightStepFactor: 4.0, sppPerFrame: 1,
-            lightCache: true, skyProbe: false },
+            lightCache: true },
   low:    { name: "low",    label: "Low",    renderScale: 0.30,
             stepFactor: 3.0, lightStepFactor: 8.0, sppPerFrame: 1,
-            lightCache: true, skyProbe: false },
+            lightCache: true },
   // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
   // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
   // an eighth is four times fewer pixels than a quarter, which brings that
@@ -567,7 +563,7 @@ export const QUALITY_PRESETS = {
   minimal: { name: "minimal", label: "Minimal",
             renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
             sppPerFrame: 1,
-            lightCache: true, skyProbe: false },
+            lightCache: true },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // The surface stages each traced surface runs before the march, in order:

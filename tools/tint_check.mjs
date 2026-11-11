@@ -76,9 +76,8 @@ const setup = `(async () => {
   const onOff = [false, true];
   for (const surface of Object.keys(shaders)) {
     for (const nested of onOff) for (const periodic of onOff)
-    for (const toneMap of onOff) for (const lightCache of onOff)
-    for (const skyProbe of onOff) {
-      const spec = { periodic, nested, toneMap, lightCache, skyProbe };
+    for (const toneMap of onOff) for (const lightCache of onOff) {
+      const spec = { periodic, nested, toneMap, lightCache };
       jobs.push({
         label: surface + " " + Object.entries(spec)
           .filter(([, on]) => on).map(([k]) => k).join("+"),

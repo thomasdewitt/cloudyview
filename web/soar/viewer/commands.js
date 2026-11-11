@@ -90,7 +90,6 @@ export const commands = {
         step_factor: parked.stepFactor,
         light_step_factor: parked.lightStepFactor,
         light_cache: preset.lightCache,
-        sky_probe: preset.skyProbe,
         periodic: this.renderer.periodic,
         // Lens water (lens.wgsl): on for a track flown with the switch on,
         // false for a still, which is always dry. A track without the key
@@ -386,7 +385,7 @@ export const commands = {
       // A PRESET name, never "custom" — the CLI has no custom row; a Custom
       // capture reproduces as its preset tier with the look flags above
       // carrying the hand-set values. The preset supplies parked sampling,
-      // light cache, sky probe and the parked sample count, the same recipe
+      // the light cache and the parked sample count, the same recipe
       // the in-app capture marches.
       "--quality", quality,
     ].join(" ");

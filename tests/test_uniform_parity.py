@@ -435,7 +435,7 @@ def test_both_hosts_build_the_same_shader_module():
           const source = assembleShader(manifest, texts, surface);
           out[surface] = [false, true].map((on) => specializeShader(source, {
             periodic: on, nested: !on, toneMap: on,
-            lightCache: !on, skyProbe: on }));
+            lightCache: !on }));
         }
         console.log(JSON.stringify(out));
     """) % ((REPO / "web" / "soar" / "shader.js").as_uri(), shader.SHADER_DIR)
@@ -447,6 +447,5 @@ def test_both_hosts_build_the_same_shader_module():
         source = shader.assemble(surface)
         for k, on in enumerate((False, True)):
             py = shader.specialize(source, periodic=on, nested=not on,
-                                   tone_map=on, light_cache=not on,
-                                   sky_probe=on)
+                                   tone_map=on, light_cache=not on)
             assert js[surface][k] == py, surface

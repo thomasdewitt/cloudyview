@@ -6,7 +6,7 @@
 // loads the scene and then: flies with key events, picks a tier in the
 // Quality panel, backs out with Escape, parks until the picture converges,
 // cycles the minimap and the flyer, lets the loop sleep and wakes it, moves
-// the sun, flips the light cache and sky probe (K, J), toggles the periodic
+// the sun, flips the light cache (K), toggles the periodic
 // domain, opens every pause-menu panel, reads the terminal commands, saves a
 // still, records a track and renders it to video and saves it, toggles ice
 // mode, and (day only) opens data/TWPICE_subvolume_128x128_5km.nc through the
@@ -291,20 +291,18 @@ async function runScene(name, server, dataBase) {
     await t.until(() => s.renderer.converged, 120000, "the view to converge again");
     return "elevation " + before + " -> 35, bake finished, converged";`);
 
-  await step(name, "K and J flip the light cache and the sky probe", `
-    if (!s.ui.allows("quality")) t.skip("mode '" + s.ui.mode + "' has no quality controls, so K and J do nothing");
-    const cache = s.lightCacheOn, probe = s.skyProbeOn;
+  await step(name, "K flips the light cache", `
+    if (!s.ui.allows("quality")) t.skip("mode '" + s.ui.mode + "' has no quality controls, so K does nothing");
+    const cache = s.lightCacheOn;
     t.press("k");
     t.expect(s.lightCacheOn === !cache, "K to flip the light cache");
     t.expect(s.qualityCustom, "the quality marked Custom");
-    t.press("j");
-    t.expect(s.skyProbeOn === !probe, "J to flip the sky probe");
     await t.until(() => (s.renderer._pendingPipelines?.size ?? 0) === 0, 120000, "the new shader variant");
     await t.until(() => s.renderer.converged, 120000, "the view to converge on it");
     s.setQualityTier("low");
-    t.expect(!s.qualityCustom && s.lightCacheOn === cache && s.skyProbeOn === probe,
-             "picking a tier to put both back");
-    return "cache " + cache + " -> " + !cache + ", probe " + probe + " -> " + !probe + ", reset by tier";`);
+    t.expect(!s.qualityCustom && s.lightCacheOn === cache,
+             "picking a tier to put it back");
+    return "cache " + cache + " -> " + !cache + ", reset by tier";`);
 
   await step(name, "toggle the periodic domain", `
     const was = s.renderer.periodic;

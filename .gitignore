@@ -150,9 +150,6 @@ output/
 parity_out/
 references/ai-generated-thunderstorms/
 
-# Benchmark results (machine-specific)
-benchmarking/output/
-
 # SLURM output files
 *.out
 *.err

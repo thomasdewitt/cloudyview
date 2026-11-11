@@ -631,8 +631,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     from .soar.renderer import SoarRenderer
     from .soar.surfaces import (surface_cell_m, surface_clock_period_s,
                                 surface_period_m)
-    from .soar.tiers import (CITY_ROOF_DENSITY_BY_TIER, LIGHT_CACHE_DIVISOR,
-                             QUALITY_PRESETS)
+    from .soar.tiers import CITY_ROOF_DENSITY_BY_TIER, QUALITY_PRESETS
     from .soar.uniforms import (APP_LIGHT_MARCH_LOD_DEGREES,
                                 APP_VIEW_STEP_LOD_DEGREES,
                                 DEFAULT_OCEAN_REFLECTANCE, SceneState,
@@ -744,7 +743,6 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * s.lod_strength,
             view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * s.lod_strength,
             light_cache=bool(preset["light_cache"]),
-            sky_probe=bool(preset["sky_probe"]),
             frame_index=index * FRAME_INDEX_STRIDE,
             scene_time=frame.scene_time,
             city_roof_density=CITY_ROOF_DENSITY_BY_TIER[s.quality],
@@ -762,13 +760,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             state, surface_offset_m=surface_offset_for(
                 view.camera_position[:2], sp, period))
 
-    # The sun-tau cache depends on the field and the sun, neither of which
-    # moves along a track, so it is baked once — at the first frame's view,
-    # which carries the same sun as every other.
-    if preset["light_cache"]:
-        print("soar: baking the sun-tau cache", flush=True)
-        renderer.bake_light_cache(state, view_for(frames[0], 0),
-                                  divisor=LIGHT_CACHE_DIVISOR)
+    # The light cache depends on the field and the sun, neither of which
+    # moves along a track, so the renderer bakes it once, at the first frame.
 
     accumulate = int(preset["accumulate"])
     out_path.parent.mkdir(parents=True, exist_ok=True)

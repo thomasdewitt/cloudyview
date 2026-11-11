@@ -571,23 +571,23 @@ fn deep_fill_tint(ambient: vec3<f32>) -> vec3<f32> {
     return amb_luma * chroma;
 }
 
-// Diffuse sky transmittance above p (see SKY_PROBE_SPAN): a midpoint rule
-// over the span. `jit` in [-0.5, 0.5] shifts the taps by a fraction of a
-// step, which decorrelates the quadrature between neighbouring pixels;
-// accumulation averages it out.
-fn sky_probe_transmittance(p: vec3<f32>, g: f32, jit: f32) -> f32 {
+// Optical depth of the cloud above p (see SKY_PROBE_SPAN): a midpoint rule
+// over the span. The sky visibility is diffuse_transmittance of it. It
+// depends on the field alone, so it is baked into the light cache
+// (fs_bake_light) and the march reads it from there.
+fn sky_probe_tau(p: vec3<f32>) -> f32 {
     let headroom = u.bmax.z - p.z;
     if (headroom <= 0.0) {
-        return 1.0;
+        return 0.0;
     }
     let span = min(SKY_PROBE_SPAN, headroom);
     let dt = span / f32(SKY_PROBE_STEPS);
     var tau = 0.0;
     for (var i: i32 = 0; i < SKY_PROBE_STEPS; i = i + 1) {
-        let t = (f32(i) + 0.5 + jit) * dt;
+        let t = (f32(i) + 0.5) * dt;
         tau = tau + sample_sigma(p + vec3<f32>(0.0, 0.0, t)) * dt;
     }
-    return diffuse_transmittance(tau, g);
+    return tau;
 }
 
 // Optical depth along the view ray from t0 to t1 (see AHEAD_STEP_SCALE): one

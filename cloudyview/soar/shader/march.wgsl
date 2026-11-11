@@ -187,9 +187,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // outer box, so a ray always enters through the outer level.
     let jitter = strat1(frame_index, strat_pixel, STRAT_STREAM_ENTRY,
                         STRAT_ALPHA_3);
-    // The sky probe's quadrature offset, in [-0.5, 0.5).
+    // The quadrature offset of the city's downward probe
+    // (city_uplight_probe_tau), in [-0.5, 0.5).
     let probe_jitter = strat1(frame_index, strat_pixel,
-                              STRAT_STREAM_SKY_PROBE,
+                              STRAT_STREAM_CITY_PROBE,
                               STRAT_ALPHA_10) - 0.5;
     // The sun march's quadrature offset. With jitter off it is zero and the
     // sun march is deterministic.
@@ -398,10 +399,15 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 penumbra_tan
             );
             // Under LIGHT_CACHE the baked value stands in for the march: the
-            // central sun, no disc draw, no distance LOD (sample_light_tau).
+            // central sun, no disc draw, no distance LOD (sample_light_cache).
+            // The same read returns the optical depth overhead, which the
+            // sky visibility below is made from.
             var tau_sun: f32;
+            var tau_overhead = 0.0;
             if (LIGHT_CACHE) {
-                tau_sun = sample_light_tau(p);
+                let cached = sample_light_cache(p);
+                tau_sun = cached.x;
+                tau_overhead = cached.y;
             } else {
                 tau_sun = light_march_tau(p, sun_shadow, t * u.light_lod_tan,
                                           step_shadow_jitter);
@@ -421,23 +427,19 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // uses (see SHADOW_SKYLIGHT_TAU_ONSET).
             let shadow_gate = 1.0 - exp(-tau_sun / SHADOW_SKYLIGHT_TAU_ONSET);
 
-            // Sky visibility overhead: one probe for every consumer. It is
-            // skipped only where neither gate is open, which is where
-            // tau_sun is zero.
+            // Sky visibility overhead, for every consumer, from the baked
+            // optical depth above the sample. It is needed only where a
+            // gate is open, which is where tau_sun is not zero.
             var t_sky = 1.0;
             var shallow_open = 0.0;
             if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
-                if (!SKY_PROBE) {
-                    // Sky probe compiled out: every consumer sees a fully
-                    // open sky, the neutral value the floors assume. Buried
-                    // samples are then brighter.
-                    shallow_open = 1.0;
-                } else {
-                    t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
-                    shallow_open = smoothstep(
-                        SHALLOW_OPEN_TSKY_START, SHALLOW_OPEN_TSKY_FULL, t_sky
-                    );
+                if (!LIGHT_CACHE) {
+                    tau_overhead = sample_light_cache(p).y;
                 }
+                t_sky = diffuse_transmittance(tau_overhead, g_hg);
+                shallow_open = smoothstep(
+                    SHALLOW_OPEN_TSKY_START, SHALLOW_OPEN_TSKY_FULL, t_sky
+                );
             }
             // A buried sample keeps the whole suppression; an open shallow
             // shadow keeps SHALLOW_SUPPRESSION_KEEP of it.

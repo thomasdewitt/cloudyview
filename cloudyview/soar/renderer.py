@@ -21,6 +21,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from . import shader
+from .tiers import LIGHT_CACHE_DIVISOR
 from .surfaces import (SURFACE_DIRS, SURFACE_FORMAT_CHANNELS, SURFACE_STAGES,
                        SURFACE_TILE_SCHEMAS, VEIL_STAGES, check_surface,
                        decode_surface_level, surface_level_files,
@@ -40,6 +41,8 @@ INITIAL_BAND_PIXELS = 65536
 # The march's own output for one pass. Half precision is plenty for a single
 # sample: its round-off is ~0.03 8-bit levels, unbiased, and it averages away.
 SAMPLE_FORMAT = "rgba16float"
+# The baked light cache: optical depth to the sun and optical depth overhead.
+LIGHT_CACHE_FORMAT = "rg16float"
 # The running mean. It is a feedback loop: this pass's output is the next
 # pass's input, so its round-off does not average away, it accumulates. In
 # half precision the mean drifts darker with the number of passes (~10 8-bit
@@ -141,14 +144,13 @@ class SoarRenderer:
 
         # One module per set of compile-time switches (see _spec), compiled
         # when a render first asks for it. The default lighting (the march
-        # to the sun at every sample, with the sky probe) is compiled here so
-        # that a shader that does not compile fails at construction, not at
-        # the first frame.
+        # to the sun at every sample) is compiled here so that a shader that
+        # does not compile fails at construction, not at the first frame.
         self._shader_source = (shader_source if shader_source is not None
                                else shader.assemble(self.surface))
         self._modules = {}
         self._pipelines = {}
-        self._module_for(self._spec(light_cache=False, sky_probe=True))
+        self._module_for(self._spec(light_cache=False))
         self._accum_module = device.create_shader_module(code=_ACCUM_SHADER)
 
         self._uniform_buf = device.create_buffer(
@@ -174,8 +176,11 @@ class SoarRenderer:
         self._vol_tex = None
         self._nest_tex = self._dummy_volume()
         # Binding 7 starts as the same 1x1x1 zero texture the nest uses;
-        # bake_light_cache replaces it with a real cache.
+        # bake_light_cache replaces it with a real cache, and render() calls
+        # that whenever the cache is not the one for its scene and sun
+        # (_light_cache_key says which it holds).
         self._light_tau_tex = self._dummy_volume()
+        self._light_cache_key = None
         # Binding 8 is the browser's ice-detection mode. It is never read
         # here (u.ice_mode stays 0), but the layout requires it.
         self._ice_frac_tex = self._dummy_volume()
@@ -279,6 +284,7 @@ class SoarRenderer:
             size=(nz, ny, nx), dimension="3d", format="r16float",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
         self._write_r16_volume(self._vol_tex, sigma)
+        self._light_cache_key = None
         self._bind_group = None
 
     # Texels per write_texture call: the fp16 copy of the field is made a
@@ -327,6 +333,7 @@ class SoarRenderer:
             size=(nz, ny, nx), dimension="3d", format="r16float",
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
         self._write_r16_volume(self._nest_tex, sigma)
+        self._light_cache_key = None
         self._bind_group = None
 
     # -- pipelines ---------------------------------------------------------
@@ -424,7 +431,7 @@ class SoarRenderer:
         self._lens_groups = None
         self._lens_out = None
 
-    def _spec(self, *, light_cache: bool, sky_probe: bool) -> dict:
+    def _spec(self, *, light_cache: bool) -> dict:
         """The module's compile-time switches: this renderer's attributes
         as they stand now plus a lighting method. Every module and pipeline
         cache here keys on the whole of it, so an attribute changed after
@@ -432,7 +439,7 @@ class SoarRenderer:
         value."""
         return dict(periodic=self.periodic, nested=self.nested,
                     tone_map=self.tone_map,
-                    light_cache=bool(light_cache), sky_probe=bool(sky_probe))
+                    light_cache=bool(light_cache))
 
     def _module_for(self, spec: dict):
         key = tuple(sorted(spec.items()))
@@ -466,23 +473,22 @@ class SoarRenderer:
 
     def _ray_pipeline_for(self, view: "ViewState"):
         """The march pipeline for the lighting method `view` asks for: the
-        same two flags pack_uniforms writes into the block, so the block and
-        the compiled method cannot disagree."""
+        same flag pack_uniforms writes into the block, so the block and the
+        compiled method cannot disagree."""
         return self._pipeline_for("fs_main", SAMPLE_FORMAT, self._view_spec(view),
                                   layout=self._march_pipeline_layout)
 
     def _view_spec(self, view: "ViewState") -> dict:
         """The compile-time switches `view` asks for: its lighting method."""
-        return self._spec(light_cache=view.light_cache,
-                          sky_probe=view.sky_probe)
+        return self._spec(light_cache=view.light_cache)
 
     def _bake_pipeline(self):
-        """The sun-tau bake: one field-x plane of the cache per draw, into an
-        r16float 2D target the caller copies into the 3D cache texture.
-        fs_bake_light reads neither lighting switch, so it is built on the
-        default method (as the browser's is)."""
-        return self._pipeline_for("fs_bake_light", "r16float", self._spec(
-            light_cache=False, sky_probe=True))
+        """The light cache's bake: one field-x plane of the cache per draw,
+        into a 2D target the caller copies into the 3D cache texture.
+        fs_bake_light does not read the lighting switch, so it is built on
+        the default method (as the browser's is)."""
+        return self._pipeline_for("fs_bake_light", LIGHT_CACHE_FORMAT,
+                                  self._spec(light_cache=False))
 
     def _stage_pipeline_for(self, entry: str, first: bool,
                             view: "ViewState"):
@@ -615,25 +621,39 @@ class SoarRenderer:
                 f"periodic={bool(state.periodic)}, nested={bool(state.nested)}. "
                 "Build a renderer for the scene you mean to render.")
 
-    # -- the sun-tau cache ---------------------------------------------------
+    # -- the light cache -----------------------------------------------------
+
+    @staticmethod
+    def _light_cache_key_for(state: SceneState, view: ViewState) -> tuple:
+        """What a baked cache is the cache of, apart from the field itself
+        (an upload discards the cache): the sun and the boxes."""
+        return (float(view.sun_azimuth), float(view.sun_elevation),
+                tuple(float(v) for v in state.bmin),
+                tuple(float(v) for v in state.bmax),
+                bool(state.nested)
+                and (tuple(float(v) for v in state.nest_bmin),
+                     tuple(float(v) for v in state.nest_bmax)))
 
     def bake_light_cache(self, state: SceneState, view: ViewState, *,
-                         divisor: int = 2) -> Tuple[int, int, int]:
-        """Bake sun optical depth for every cache voxel toward `view`'s sun.
+                         divisor: int = LIGHT_CACHE_DIVISOR
+                         ) -> Tuple[int, int, int]:
+        """Bake the light cache: at every cache voxel, the optical depth
+        toward `view`'s sun and the optical depth of the cloud overhead.
+
+        Every render reads the second (it is the sky visibility), and a
+        render with view.light_cache=True reads the first instead of
+        marching to the sun per cloud sample. render() bakes when the cache
+        is not the one for its field, boxes and sun, so calling this
+        directly is only needed to choose what the bake is made with:
 
         `divisor` is the linear resolution reduction against the volume grid
-        (1 = one cache texel per voxel). The bake is one fs_bake_light draw
-        per field-x plane, copied into the 3D cache; after it returns,
-        rendering with view.light_cache=True reads the cache instead of
-        marching to the sun per cloud sample. Re-bake whenever the sun, the
-        field, or the divisor changes; nothing here notices a stale cache.
+        (1 = one cache texel per voxel). The bake's sun marches step at
+        `state.dt_light`, with no angular LOD. The browser always bakes at
+        the High tier's light step, so that its cache stays valid when the
+        tier changes.
 
-        The bake's marches step at `state.dt_light`, with no angular LOD.
-        Pass the finest light step you will render with: the browser always
-        bakes at the High tier's, so its cache stays valid when the tier
-        changes.
-
-        Returns the cache dims (nx, ny, nz) in field axis order.
+        The bake is one fs_bake_light draw per field-x plane, copied into the
+        3D cache. Returns the cache dims (nx, ny, nz) in field axis order.
         """
         wgpu = self.wgpu
         if self._vol_tex is None:
@@ -650,14 +670,15 @@ class SoarRenderer:
 
         self._light_tau_tex.destroy()
         self._light_tau_tex = self.device.create_texture(
-            size=(cz, cy, cx), dimension="3d", format="r16float",
+            size=(cz, cy, cx), dimension="3d", format=LIGHT_CACHE_FORMAT,
             usage=wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST)
         self._light_cache_dims = (cx, cy, cz)
+        self._light_cache_key = self._light_cache_key_for(state, view)
         self._bind_group = None
         bind_group = self._ensure_bind_group()
 
         slice_tex = self.device.create_texture(
-            size=(cz, cy, 1), dimension="2d", format="r16float",
+            size=(cz, cy, 1), dimension="2d", format=LIGHT_CACHE_FORMAT,
             usage=(wgpu.TextureUsage.RENDER_ATTACHMENT
                    | wgpu.TextureUsage.COPY_SRC))
         slice_view = slice_tex.create_view()
@@ -779,6 +800,8 @@ class SoarRenderer:
         if not submit_budget_s > 0.0:
             raise ValueError(f"submit_budget_s must be > 0; got {submit_budget_s}.")
         self._check_scene(state)
+        if self._light_cache_key != self._light_cache_key_for(state, view):
+            self.bake_light_cache(state, view)
         w, h = view.render_size
         targets = self._ensure_targets((w, h))
         bind_group = self._ensure_bind_group()

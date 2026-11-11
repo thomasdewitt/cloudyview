@@ -211,18 +211,19 @@ fn fs_steam_live(@builtin(position) frag_pos: vec4<f32>)
                            textureLoad(surface_buf, xy, 0).w);
 }
 
-// One field-x plane of the sun optical depth cache. The host renders this
-// into a 2D r16float target of size (cache_nz, cache_ny) for the slice
-// u.bake_slice, then copies the target into that depth slice of the
-// light_tau texture. A 3D texture cannot be a render target and r16float is
-// not a storage format, but r16float can be rendered to, so the bake is a
-// render pass per slice and not a compute pass. Slice by slice also lets
-// the browser spread a bake over frames.
+// One field-x plane of the light cache. The host renders this into a 2D
+// rg16float target of size (cache_nz, cache_ny) for the slice u.bake_slice,
+// then copies the target into that depth slice of the light_tau texture. A
+// 3D texture cannot be a render target and rg16float is not a storage
+// format, but it can be rendered to, so the bake is a render pass per slice
+// and not a compute pass. Slice by slice also lets the browser spread a
+// bake over frames.
 //
-// Each texel is light_march_tau at the texel's own world position, nest
-// included, with dt_floor = 0 (the bake is paid once, so it takes the fine
-// step everywhere) and no jitter (a static cache cannot average a random
-// phase away).
+// Each texel holds two optical depths at the texel's own world position,
+// nest included. Red is light_march_tau toward the sun, with dt_floor = 0
+// (the bake is paid once, so it takes the fine step everywhere) and no
+// jitter (a static cache cannot average a random phase away). Green is the
+// cloud overhead (sky_probe_tau), which does not depend on the sun.
 @fragment
 fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
@@ -236,10 +237,10 @@ fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
         frag_pos.x - 0.5
     );
     // Texel i sits at box fraction (i + 0.5) / N, the convention
-    // sample_level and sample_light_tau map with, so a read at a texel
+    // sample_level and sample_light_cache map with, so a read at a texel
     // centre returns exactly what was baked there.
     let p = u.bmin
         + ((data_g + 0.5) / dims) * (u.bmax - u.bmin);
     let tau = light_march_tau(p, u.sun_dir, 0.0, 0.0);
-    return vec4<f32>(tau, 0.0, 0.0, 1.0);
+    return vec4<f32>(tau, sky_probe_tau(p), 0.0, 1.0);
 }

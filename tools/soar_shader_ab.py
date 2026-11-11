@@ -73,22 +73,20 @@ EXTRA_VIEWS = {
 }
 ALL_VIEWS = {**SOAR_VIEWS, **EXTRA_VIEWS}
 
-# Mirrors web/soar/constants.js QUALITY_PRESETS (flight sampling):
-# (step_factor, light_step_factor, light cache, sky probe). Max is High with
-# the live sun march.
+# The flight sampling of each tier (web/soar/constants.js QUALITY_PRESETS):
+# (step_factor, light_step_factor, light cache). Max is High with the live
+# sun march.
 TIERS = {
-    "max":     (2.0, 2.0, False, True),
-    "high":    (2.0, 2.0, True, True),
-    "medium":  (2.5, 4.0, True, False),
-    "low":     (3.0, 8.0, True, False),
-    "minimal": (4.0, 12.0, True, False),
-    # Not a preset: the method a cache tier flies with while its sun-tau bake
-    # is still in flight (the renderer reads the live march until the cache
-    # is ready). Low's sampling, no cache, no probe — the fourth lighting
-    # specialization the browser compiles.
-    "baking":  (3.0, 8.0, False, False),
+    "max":     (2.0, 2.0, False),
+    "high":    (2.0, 2.0, True),
+    "medium":  (2.5, 4.0, True),
+    "low":     (3.0, 8.0, True),
+    "minimal": (4.0, 12.0, True),
+    # Not a preset: what a cache tier flies with while its bake for a new sun
+    # is in flight (the renderer marches to the sun until the cache is
+    # ready). Low's sampling with the live march.
+    "baking":  (3.0, 8.0, False),
 }
-LIGHT_CACHE_DIVISOR = 2       # constants.js
 
 
 def synthetic_nest(level):
@@ -156,7 +154,7 @@ def main():
     ap.add_argument("--tier", default=None, choices=sorted(TIERS),
                     help="a quality preset's flight sampling and lighting "
                          "methods (default: the judge views' 2-voxel live "
-                         "march with the sky probe)")
+                         "march)")
     ap.add_argument("--save", type=Path, default=None,
                     help="write each view's A render (float32 .npy) here, "
                          "for an --against run in another tree")
@@ -195,17 +193,16 @@ def main():
         power_preference="high-performance").request_device_sync()
 
     if args.demo is not None:
-        sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
-        from soar_frame_bench import build_level_from_demo
-        level, _ = build_level_from_demo(args.demo)
+        from soar_bench import level_from_demo
+        level = level_from_demo(args.demo)
     else:
         level = build_soar_level(args.field)
     periodic = args.periodic == "on"
     city = args.scene == "city"
     nested = args.scene == "nested"
     surface = {"day": "ocean", "nested": "ocean", "city": "city"}[args.scene]
-    step_factor, light_factor, light_cache, sky_probe = (
-        TIERS[args.tier] if args.tier else (2.0, 2.0, False, True))
+    step_factor, light_factor, light_cache = (
+        TIERS[args.tier] if args.tier else (2.0, 2.0, False))
     state = SceneState(
         bmin=[float(v) for v in level.bmin], bmax=[float(v) for v in level.bmax],
         dt_view=min(level.dx) * step_factor,
@@ -256,7 +253,6 @@ def main():
           f"scene {args.scene}, tier {args.tier or 'judge (live march)'}\n")
     print(f"{'view':22s} {'max |diff|':>12s} {'channels':>10s} {'fraction':>10s}")
     worst = 0.0
-    baked_sun = None
     for name in wanted:
         v = views[name]
         pos = v["world"] if "world" in v else camera_world_origin(
@@ -268,14 +264,7 @@ def main():
             fov=v.get("fov", 70), output_size=(w, h), render_size=(w, h),
             sun_azimuth=v.get("sun_azimuth", 20.0),
             sun_elevation=v.get("sun_elevation", 55.0),
-            jitter=args.jitter, light_cache=light_cache,
-            sky_probe=sky_probe,
-            **extra)
-        sun = (view.sun_azimuth, view.sun_elevation)
-        if light_cache and sun != baked_sun:
-            for r in renderers:
-                r.bake_light_cache(state, view, divisor=LIGHT_CACHE_DIVISOR)
-            baked_sun = sun
+            jitter=args.jitter, light_cache=light_cache, **extra)
         if args.against is not None:
             a = np.load(args.against / f"{name}.npy")
         else:

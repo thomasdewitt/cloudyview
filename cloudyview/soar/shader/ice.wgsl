@@ -5,7 +5,7 @@
 
 // Ice fraction of extinction at a world point, from the outer level's grid.
 // The outer box covers any nest, so one texture serves both levels.
-// Coordinates as in sample_light_tau: lateral wrap in a periodic domain,
+// Coordinates as in sample_light_cache: lateral wrap in a periodic domain,
 // clamp on the vertical, and no edge taper (a fraction is not extinction,
 // and ramping it to zero at the boundary would colour the domain's edge as
 // liquid).

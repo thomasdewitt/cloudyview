@@ -72,7 +72,7 @@ exactly one surface. A new surface is a set of files, an `absent` file with
 neutral bodies for whatever shared code calls, and an entry in the manifest.
 
 The host puts a header of compile-time switches in front:
-`PERIODIC_DOMAIN`, `NESTED`, `TONE_MAP`, `LIGHT_CACHE`, `SKY_PROBE`. They are
+`PERIODIC_DOMAIN`, `NESTED`, `TONE_MAP`, `LIGHT_CACHE`. They are
 constants so that the branch not taken costs nothing. `shader.py` and
 `web/soar/shader.js` build the module the same way, and
 `tests/test_uniform_parity.py` checks they produce the same string.
@@ -110,7 +110,9 @@ strengths; those are constants in the shader, next to the terms they scale.
 The optical depth toward the sun is the expensive part. It is either marched
 per sample (`light_march_tau`) or read from the **light cache**: a 3D
 texture at half the field's resolution, baked for the current sun by
-`fs_bake_light` one slice at a time. Every tier but Max reads the cache.
+`fs_bake_light` one slice at a time. Every tier but Max reads the cache for
+the sun. The cache's second channel is the optical depth of the cloud
+overhead, which every tier reads for how much sky a shadowed sample sees.
 
 While the camera moves the browser renders at the tier's *flight* settings.
 When it stops, it climbs a ladder of finer settings as long as each step

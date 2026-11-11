@@ -11,22 +11,20 @@ together.
 # So the tiers differ in lighting method and in accumulated passes, not in
 # stepping.
 #   step_factor, light_step_factor   march steps, in units of the smallest voxel
-#   light_cache   read the sun's optical depth from a baked cache
-#                 (SoarRenderer.bake_light_cache) instead of marching to the
-#                 sun at every cloud sample
-#   sky_probe     march vertically for sky visibility (ViewState.sky_probe)
+#   light_cache   read the sun's optical depth from the baked light cache
+#                 instead of marching to the sun at every cloud sample
 #   accumulate    passes averaged into the image
 QUALITY_PRESETS = {
     "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": False, "sky_probe": True,  "accumulate": 32},
+                "light_cache": False, "accumulate": 32},
     "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": True,  "accumulate": 32},
+                "light_cache": True,  "accumulate": 32},
     "medium":  {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": False, "accumulate": 24},
+                "light_cache": True,  "accumulate": 24},
     "low":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": False, "accumulate": 16},
+                "light_cache": True,  "accumulate": 16},
     "minimal": {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": False, "accumulate": 8},
+                "light_cache": True,  "accumulate": 8},
 }
 
 # The light cache's resolution: one cache texel per this many voxels along

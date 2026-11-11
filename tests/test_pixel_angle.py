@@ -114,8 +114,7 @@ def _sea(h, jitter, device=None):
     view = ViewState(camera_position=(4000.0, 4000.0, 40.0), azimuth=30.0,
                      elevation=-12.0, fov=70.0, output_size=(96, h),
                      render_size=(96, h), jitter=jitter, sun_azimuth=210.0,
-                     sun_elevation=25.0, exposure=1.0, light_cache=False,
-                     sky_probe=False)
+                     sun_elevation=25.0, exposure=1.0, light_cache=False)
     return r.render(state, view, frames=1), r.device
 
 

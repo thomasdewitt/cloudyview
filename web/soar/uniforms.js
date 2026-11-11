@@ -131,13 +131,10 @@ export function packUniforms(state, view) {
     frameIndex = 0,
     subpixel = false,
     jitterScale = 1.0,
-    // Read tau_sun from the baked sun-tau cache. Only meaningful
-    // when the renderer has a finished bake bound at binding 7; the packer
-    // just writes the flag.
+    // Read tau_sun from the baked light cache. Only meaningful when the
+    // renderer has a finished bake bound at binding 7; the packer just
+    // writes the flag.
     lightCache = false,
-    // The vertical sky-visibility march: off means
-    // every consumer of t_sky sees a fully open sky.
-    skyProbe = true,
     // Ice-detection false-color mode. Only meaningful
     // when a real ice-fraction texture is bound at binding 8; the packer
     // just writes the flag, same contract as lightCache.
@@ -315,11 +312,10 @@ export function packUniforms(state, view) {
   }
   row(19, Math.tan(lightMarchLodDegrees * DEG), viewStepTan, roofDensity,
       city && liveSteam ? 1.0 : 0.0);
-  // The host's copies of three compile-time switches, so that changing one
-  // changes the scene key. w is the bake slice index, which the renderer's
-  // bake pass writes into its own copy of the block.
-  row(20, periodic ? 1.0 : 0.0, lightCache ? 1.0 : 0.0,
-      skyProbe ? 0.0 : 1.0, 0.0);
+  // The host's copies of two compile-time switches, so that changing one
+  // changes the scene key. z is unused; w is the bake slice index, which the
+  // renderer's bake pass writes into its own copy of the block.
+  row(20, periodic ? 1.0 : 0.0, lightCache ? 1.0 : 0.0, 0.0, 0.0);
   return u;
 }
 

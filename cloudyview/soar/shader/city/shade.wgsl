@@ -148,7 +148,7 @@ fn city_fog_ab(o: vec3<f32>, dir: vec3<f32>, t_hit: f32,
     return vec4<f32>(ftrans, in_scatter);
 }
 
-// Downward twin of sky_probe_transmittance: the optical depth between a
+// Downward twin of sky_probe_tau: the optical depth between a
 // sample and the city below it. The caller applies its own decay — NOT the
 // two-stream diffuse transmittance, whose heavy tail (T(20) ~ 0.3) let the
 // city glow soak whole cloud masses ochre; the amber belongs to the base
