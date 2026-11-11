@@ -6,10 +6,8 @@ that is the archive (Thomas, 2026-08-15 — "if you want historical context,
 the move is to commit and then remove the file. Not keep around endlessly
 accumulating files").
 
-Numbers are never reused, so a number that is not here is closed. Several
-code comments cite the closed ones — bugs 1, 2, 4, 5, 6, 8 and 12 are named
-in the browser app, the shader and `tests/test_io_overrides.py`. Those comments carry the reasoning themselves;
-the entry behind them is one `git log` away if the full account is wanted.
+Numbers are never reused, so a number that is not here is closed. The full
+account of a closed one is a `git log -p` away.
 
 Entries 1–10, 12, 16, 18 and 19 were removed on 2026-08-15, all closed. 11
 and 13 survive as the one open item each of them still holds.

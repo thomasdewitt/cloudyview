@@ -179,7 +179,7 @@ export class CityTile {
           throw new Error(
             `City tile texel ${i % n},${Math.floor(i / n)} has ${name} ` +
             `word ${ch[i]}: not a packed 12-bit word. The tile predates ` +
-            "the baked lots (cloudyview/city_lots.py); re-bake it.");
+            "the baked lots (tools/city_lots.py); re-bake it.");
         }
       }
     }

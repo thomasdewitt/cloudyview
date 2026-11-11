@@ -151,9 +151,12 @@ described where they are implemented, in `clouds.wgsl` and `march.wgsl`.
 ## Fields in
 
 `cv.load` (and the browser's `ingest/`) resolve which variables are liquid
-and ice, which dimensions are x, y and z, and what the units are, and they
-ask or refuse instead of guessing. The two implementations follow the same
-rules and are tested on the same cases.
+and ice, which dimensions are x, y and z, and what the units are, without
+guessing. They read a file the same way and are tested on the same cases.
+Where a file leaves a question open they differ on purpose: the browser asks
+it, and the library stops and names the option that answers it. What the
+browser was told comes back out as flags in the `witness` and `behold`
+commands it prints.
 
 - Cloud water becomes extinction (`optical_depth.py`, `web/soar/optical.js`):
   liquid as geometric optics at a 10 um effective radius, ice by Ebert and

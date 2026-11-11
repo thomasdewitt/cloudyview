@@ -212,12 +212,10 @@ export const STEP_VOXEL_FACTOR = 2.0;
 export const APP_LIGHT_MARCH_LOD_DEGREES = 1.4;
 export const APP_VIEW_STEP_LOD_DEGREES = 0.6;
 
-// Tone-map gamma. 1.4 is witness's reference; 3.08 is what an sRGB
-// swapchain's double encode shows.
+// Tone-map gamma. 1.4 is witness's reference.
 // The default is 1.66 — the gamma the look constants were tuned against a
 // real photo at; the look and the encode are a matched pair.
 export const TONE_MAP_GAMMA_WITNESS = 1.4;
-export const TONE_MAP_GAMMA_AS_FLOWN = 3.08;
 export const DEFAULT_TONE_MAP_GAMMA = 1.66;
 export const TONE_MAP_GAMMA_LIMITS = [1.0, 4.0];
 
@@ -598,7 +596,7 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 //
 // The top rung SAMPLES like High for every tier without exception — the tier
 // governs flight, and a parked picture is stepped and lit the same wherever
-// you flew in from. Its SCALE is capped per tier (0.5 on Minimal, 0.75 on
+// you flew in from. Its SCALE is capped per tier (0.25 on Minimal, 0.5 on
 // Low), so not every tier converges to the same still: those two settle to
 // a picture that is upscaled, not native.
 //
