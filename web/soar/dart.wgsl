@@ -108,14 +108,13 @@ fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
                      min(min(tmax.x, tmax.y), tmax.z));
 }
 
-// The volume carries a one-texel ghost ring, so data voxel i lives at texel
-// i + 1 and the domain maps to (g * N + 1.5) / (N + 2), not onto [0, 1].
+// The field's box maps onto the texture's [0, 1]: voxel i's centre is at
+// (i + 0.5) / N, as in the renderer's sample_level (shader/volume.wgsl). The
+// texture's axes are (z, y, x).
 fn sample_sigma(p: vec3<f32>) -> f32 {
-    let dims = vec3<f32>(textureDimensions(vol, 0));
-    let n = max(dims - vec3<f32>(2.0), vec3<f32>(1.0));
-    let g = (p - du.bmin.xyz) / (du.bmax.xyz - du.bmin.xyz);
-    let t = (clamp(g, vec3<f32>(0.0), vec3<f32>(1.0)) * n + 1.5) / dims;
-    return textureSampleLevel(vol, vol_samp, vec3<f32>(t.z, t.y, t.x), 0.0).r;
+    let g = clamp((p - du.bmin.xyz) / (du.bmax.xyz - du.bmin.xyz),
+                  vec3<f32>(0.0), vec3<f32>(1.0));
+    return textureSampleLevel(vol, vol_samp, vec3<f32>(g.z, g.y, g.x), 0.0).r;
 }
 
 const TONE_MAP_SHOULDER: f32 = 0.35;
