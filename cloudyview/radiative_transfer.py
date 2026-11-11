@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import time
 from typing import Any, Callable, Dict, Optional, Literal
-from .angles import direction_from_azimuth_elevation
+from .camera import direction_from_azimuth_elevation
 
 try:
     import mitsuba as mi

@@ -70,13 +70,11 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
-from cloudyview.soar_host import (                          # noqa: E402
-    SceneState, SoarRenderer,
-    ViewState, camera_world_origin,
-    surface_cell_m, surface_clock_period_s,
-    surface_period_m,
-)
-from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
+from cloudyview.soar.renderer import SoarRenderer  # noqa: E402
+from cloudyview.soar.surfaces import (surface_cell_m, surface_clock_period_s,
+                                      surface_period_m)  # noqa: E402
+from cloudyview.soar.uniforms import SceneState, ViewState, camera_world_origin  # noqa: E402
+from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE   # noqa: E402
 
 sys.path.insert(0, str(REPO / "tools"))
 from night_city_harness import (                            # noqa: E402
@@ -233,7 +231,7 @@ def main():
         bmin=[float(v) for v in level.bmin], bmax=[float(v) for v in level.bmax],
         dt_view=min(level.dx) * step_factor,
         dt_light=min(level.dx) * light_factor, periodic=periodic,
-        ocean_reflectance=OCEAN_REFLECTANCE, surface=surface, nested=nested)
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE, surface=surface, nested=nested)
     nest = synthetic_nest(level) if nested else None
     if nested:
         state.nest_bmin = [float(v) for v in nest.bmin]

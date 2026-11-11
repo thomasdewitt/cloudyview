@@ -77,9 +77,10 @@ def _tries():
 def _near_hits(tries):
     """{view: (kind, t)} of the near trace with `tries` boxes per cell."""
     import wgpu
-    from cloudyview.soar_host import (APP_LIGHT_MARCH_LOD_DEGREES,
-                                      SceneState, SoarRenderer, ViewState)
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import (APP_LIGHT_MARCH_LOD_DEGREES,
+                                          SceneState, ViewState)
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     source = SHADER.read_text()
     assert source.count(ANCHOR) == 1, "surface_pass_city's trace moved"
@@ -96,7 +97,7 @@ def _near_hits(tries):
         bmin=[float(v) for v in level.bmin],
         bmax=[float(v) for v in level.bmax],
         dt_view=dx * 2.0, dt_light=dx * 2.0, periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=float(meta["cell_m"]),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,

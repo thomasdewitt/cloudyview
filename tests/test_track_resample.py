@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from cloudyview import track as tr
-from cloudyview.soar_host import surface_period_m
+from cloudyview.soar.surfaces import surface_period_m
 
 REPO = Path(__file__).resolve().parents[1]
 TRACK_JS = REPO / "web" / "soar" / "track.js"
@@ -208,7 +208,7 @@ def test_a_city_track_at_another_period_is_refused():
 
 def test_the_sea_folds_at_sixteen_tiles():
     """The sea's frame is 16 of its 102.4 m tiles, the city's its tile
-    (soar_host.SURFACE_FRAME_TILES)."""
+    (soar/surfaces.py SURFACE_FRAME_TILES)."""
     assert surface_period_m("ocean", {"tile_extent_m": 102.4}) \
         == pytest.approx(1638.4, rel=1e-12)
     assert surface_period_m("city", {"tile_extent_m": 92160.0}) == 92160.0
@@ -389,8 +389,8 @@ def test_a_coarse_demo_track_loads_the_grid_it_flew(monkeypatch, tmp_path):
         loads.append(kwargs)
         raise Loaded               # the render itself is not this test's
 
-    import cloudyview.cloudfield
-    monkeypatch.setattr(cloudyview.cloudfield, "load", fake_load)
+    import cloudyview.field
+    monkeypatch.setattr(cloudyview.field, "load", fake_load)
     monkeypatch.setattr(tr.shutil, "which", lambda name: "/usr/bin/" + name)
     for coarsen in (2, None):
         header = _header(tmp_path, surface="ocean")

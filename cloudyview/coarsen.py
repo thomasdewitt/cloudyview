@@ -152,7 +152,7 @@ def coarsened(field, f: int):
     each at fixed r_eff, but the ice fraction is a ratio of the two and is
     not.
     """
-    from .cloudfield import CloudField
+    from .field import CloudField
 
     if f < 1 or int(f) != f:
         raise ValueError(f"the coarsening factor must be a whole number "

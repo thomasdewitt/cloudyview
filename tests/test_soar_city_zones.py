@@ -136,8 +136,9 @@ def test_zone_cover_matches_the_bays():
                     "not count).")
     if not SOAR_DATA_FILE.exists():
         pytest.skip(f"Data file not found: {SOAR_DATA_FILE}")
-    from cloudyview.soar_host import SceneState, SoarRenderer, ViewState
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import SceneState, ViewState
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     source = SHADER.read_text()
     assert source.count(ANCHOR) == 1, "the plain pass's anchor moved"
@@ -151,7 +152,7 @@ def test_zone_cover_matches_the_bays():
         bmin=[float(v) for v in level.bmin],
         bmax=[float(v) for v in level.bmax],
         dt_view=dx * 2.0, dt_light=dx * 2.0, periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=float(meta["cell_m"]),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,

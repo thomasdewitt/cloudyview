@@ -44,16 +44,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cloudyview as cv
 from cloudyview import optical_depth
-from cloudyview.cloudfield import CloudField
+from cloudyview.field import CloudField
 from cloudyview.coarsen import (axis_mean, band_of_peaks, block_mean,
                                 extinction_peaks, grow_band,
                                 occupied_band)
 from cloudyview.glimpse import glimpse
-from cloudyview.soar_host import (
-    DEFAULT_CONTRAST, DEFAULT_EXPOSURE, DEFAULT_HAZE_HEIGHT_DEPENDENT,
-    DEFAULT_LOD_STRENGTH, DEFAULT_TONE_MAP_GAMMA, DEFAULT_TONE_MAP_WHITE_POINT,
-)
-from cloudyview.soar_host import camera_world_origin
+from cloudyview.soar.uniforms import (DEFAULT_CONTRAST, DEFAULT_EXPOSURE,
+                                      DEFAULT_HAZE_HEIGHT_DEPENDENT,
+                                      DEFAULT_LOD_STRENGTH,
+                                      DEFAULT_TONE_MAP_GAMMA,
+                                      DEFAULT_TONE_MAP_WHITE_POINT)
+from cloudyview.soar.uniforms import camera_world_origin
 from cloudyview.witness import NestedLevel, crop_empty_z, render_nested
 from export_web_assets import _volume_aabb
 
@@ -924,7 +925,7 @@ def baked_level(spec: dict, out: Path) -> NestedLevel:
 
     It is not a reconstruction. bmin/bmax are read out of meta.json rather
     than inferred, the fp16 quantization is the one the GPU receives either
-    way, and the config's extinction_multiplier is 1.0 — so this and the
+    way, and witness.EXTINCTION_MULTIPLIER is 1.0 — so this and the
     source-field path are the same picture. If anything it is the truer one:
     it is the volume the demo serves, not a fresh float64 derivation that no
     viewer will ever see.

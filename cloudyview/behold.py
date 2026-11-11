@@ -27,12 +27,11 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 from textwrap import dedent
 
-from . import io, optical_depth, config
-from .camera import Camera
-from .cloudfield import CloudField, load as _load_field
+from . import io, optical_depth
+from .camera import Camera, direction_from_azimuth_elevation
+from .field import CloudField, load as _load_field
 from .domain import compute_domain_geometry
-from .angles import direction_from_azimuth_elevation
-from .cli_utils import (
+from .cli import (
     CloudyViewHelpFormatter,
     DATA_SELECTION_HELP,
     add_dataset_selection_arguments,
@@ -51,6 +50,29 @@ QUALITY_MAP = {
     'medium': {'resolution': (600, 400), 'spp': 512, 'rr_depth': 4, 'max_depth': 8},
     'high': {'resolution': (960, 640), 'spp': 1024, 'rr_depth': 4, 'max_depth': 8},
     'max': {'resolution': (1200, 800), 'spp': 2048, 'rr_depth': 64, 'max_depth': 96},
+}
+
+# The sun when none is given: a meteorological bearing and the angle above
+# the horizon, in degrees.
+DEFAULT_SUN_AZIMUTH = 20.0
+DEFAULT_SUN_ELEVATION = 55.0
+
+# The scene and integrator settings every behold render uses. max_depth and
+# rr_depth are what a 'custom' quality gets when it does not give its own
+# (the 'max' preset's); a named quality takes its own from QUALITY_MAP.
+RENDERING = {
+    'max_depth': 96,
+    'rr_depth': 64,
+    'exposure': 4.0,
+    'extinction_multiplier': 1.0,
+    'integrator': 'volpathmis',
+    'turbidity': 2.0,
+    'ground_albedo': 0.5,
+    'ocean': {
+        'enabled': True,
+        'reflectance': [0.0020, 0.0045, 0.0126],   # the same as witness's sea
+        'height': -0.9999,  # relative z: just above the ground plane
+    },
 }
 
 
@@ -191,14 +213,14 @@ def _build_view_config(geom, camera: Camera, sun_azimuth: float, sun_elevation: 
     """
     from . import radiative_transfer
 
-    rendering_config = config.get_behold_config()['rendering']
+    rendering_config = dict(RENDERING)     # a copy: the depths are set below
     ar_x, ar_y = geom.ar_x, geom.ar_y
 
     if quality == 'custom':
         # Use custom parameters (with sensible defaults)
         width, height = custom_size if custom_size else (600, 400)
         spp = custom_spp if custom_spp else 512
-        # Override config max_depth/rr_depth if custom values provided
+        # Override the default max_depth/rr_depth if custom values provided
         if custom_max_depth is not None:
             rendering_config['max_depth'] = custom_max_depth
         if custom_rr_depth is not None:
@@ -250,7 +272,7 @@ def _build_view_config(geom, camera: Camera, sun_azimuth: float, sun_elevation: 
         'sun_elevation': sun_elevation,
         'ground_albedo': rendering_config['ground_albedo'],
         'add_ocean': rendering_config['ocean']['enabled'],
-        'ocean_reflectance': rendering_config['ocean']['reflectance'],
+        'ocean_reflectance': list(rendering_config['ocean']['reflectance']),
         # Same anchor as the camera: the sea belongs at the physical surface,
         # not at the floor of whatever slab of atmosphere was loaded.
         'ocean_height': _relative_z_to_cube(
@@ -306,7 +328,7 @@ def behold(
         variant is unavailable — no fallback.
     sun_azimuth, sun_elevation : float, optional
         Sun direction in degrees (met bearing / above horizon);
-        defaults from config (20 / 55).
+        default 20 / 55.
     seed : int
         Monte Carlo seed.
     progress_callback : callable, optional
@@ -330,16 +352,12 @@ def behold(
     import mitsuba as mi
     from . import radiative_transfer
 
-    behold_config = config.get_behold_config()
-    sun_config = behold_config['sun']
-    rendering_config = behold_config['rendering']
-
     if camera is None:
         camera = Camera()
     if sun_azimuth is None:
-        sun_azimuth = sun_config['azimuth']
+        sun_azimuth = DEFAULT_SUN_AZIMUTH
     if sun_elevation is None:
-        sun_elevation = sun_config['elevation']
+        sun_elevation = DEFAULT_SUN_ELEVATION
 
     variant = f"{'cuda' if gpu else 'llvm'}_ad_rgb"
     mi.set_variant(variant)
@@ -454,26 +472,22 @@ def main(filename: str, backend: str, quality: str = 'medium', output: str = Non
     print(f"CloudyView Behold: Loading {filename}")
     start_time = time.perf_counter()
 
-    # Load configuration
-    behold_config = config.get_behold_config()
-    camera_config = behold_config['camera']
-    sun_config = behold_config['sun']
-
-    # Apply CLI overrides to camera config
-    if camera_position is not None:
-        camera_config['position'] = list(camera_position)
-    if camera_azimuth is not None:
-        camera_config['azimuth'] = camera_azimuth
-    if camera_elevation is not None:
-        camera_config['elevation'] = camera_elevation
-    if camera_fov is not None:
-        camera_config['fov'] = camera_fov
-
-    # Apply CLI overrides to sun config
-    if sun_azimuth is not None:
-        sun_config['azimuth'] = sun_azimuth
-    if sun_elevation is not None:
-        sun_config['elevation'] = sun_elevation
+    # The camera and sun: what was given, over the defaults.
+    default_camera = Camera()
+    camera_config = {
+        'position': list(default_camera.position if camera_position is None
+                         else camera_position),
+        'azimuth': (default_camera.azimuth if camera_azimuth is None
+                    else camera_azimuth),
+        'elevation': (default_camera.elevation if camera_elevation is None
+                      else camera_elevation),
+        'fov': default_camera.fov if camera_fov is None else camera_fov,
+    }
+    sun_config = {
+        'azimuth': DEFAULT_SUN_AZIMUTH if sun_azimuth is None else sun_azimuth,
+        'elevation': (DEFAULT_SUN_ELEVATION if sun_elevation is None
+                      else sun_elevation),
+    }
 
     try:
         import mitsuba as mi

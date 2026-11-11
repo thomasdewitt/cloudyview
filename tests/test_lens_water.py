@@ -44,8 +44,9 @@ def scene():
                     "not count).")
     if not SOAR_DATA_FILE.exists():
         pytest.skip(f"Data file not found: {SOAR_DATA_FILE}")
-    from cloudyview.soar_host import SceneState, SoarRenderer, ViewState
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import SceneState, ViewState
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
     level = build_soar_level()
     r = SoarRenderer(periodic=True, surface="ocean")
     dx = float(min(level.dx))
@@ -53,7 +54,7 @@ def scene():
         bmin=[float(v) for v in level.bmin],
         bmax=[float(v) for v in level.bmax],
         dt_view=dx * 2.0, dt_light=dx * 2.0, periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE, ocean_enabled=True)
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE, ocean_enabled=True)
     mid = [0.5 * (a + b) for a, b in zip(level.bmin, level.bmax)]
     view = ViewState(camera_position=mid, azimuth=30.0, elevation=0.0,
                      fov=70.0, output_size=(64, 36), render_size=(64, 36),

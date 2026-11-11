@@ -1,4 +1,5 @@
-"""Shared CLI helpers for CloudyView command entrypoints."""
+"""What the glimpse, witness, behold and soar commands share: the help
+formatter and the flags that say which data in a NetCDF file to read."""
 
 import argparse
 from textwrap import dedent
@@ -158,8 +159,18 @@ def add_dataset_selection_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# The keywords of cloudyview.load() that dataset_selection_kwargs fills.
+LOAD_KEYWORDS = (
+    "liquid_water_var", "ice_water_var", "dataset_group",
+    "liquid_water_group", "ice_water_group", "coords_group",
+    "x_coord_name", "y_coord_name", "z_coord_name", "x_dim", "y_dim", "z_dim",
+    "timestep", "fallback_units", "fallback_ice_units", "fallback_coord_units",
+    "ice", "no_ice", "grid_spacing", "z_first", "coarsen",
+)
+
+
 def dataset_selection_kwargs(args: argparse.Namespace) -> dict:
-    """Build io.load_and_validate keyword arguments from parsed CLI args."""
+    """The parsed dataset flags as cloudyview.load() keywords."""
     return {
         "liquid_water_var": args.liquid_water_var,
         "ice_water_var": args.ice_water_var,

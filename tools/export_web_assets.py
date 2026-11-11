@@ -11,7 +11,7 @@ Destinations (name the ones to write):
                     re-run under any other version is refused unless
                     --rebake says a new sea is meant (another FIF may draw
                     another field from the same seed). A new tile also
-                    needs raymarch.wgsl's fif_slope_variance table, the
+                    needs ocean.wgsl's fif_slope_variance table, the
                     @domain bound on its normals and OCEAN_GLINT_ROUGHNESS
                     re-measured (tests/test_ocean_tile_bytes.py holds the
                     first two to the bytes).
@@ -20,9 +20,8 @@ Cloud fields are not exported here. Each demo field is baked separately by
 tools/prebake_demos.py into web/soar/demos/<id>/, which is what the browser
 fetches; this module keeps the two array helpers that bake shares.
 
-The WGSL under web/soar/ is edited in place. It used to be copied from the
-desktop engine, which was the source; the desktop app is gone and the browser
-copy is now the original.
+The shader is not exported: its files are cloudyview/soar/shader/, which
+web/soar/ reaches through a symlink.
 
     uv run python tools/export_web_assets.py ocean
 """
@@ -33,16 +32,19 @@ from pathlib import Path
 
 import numpy as np
 
-from cloudyview.cloudfield import CloudField
-from cloudyview.city_fif import (
+from cloudyview.field import CloudField
+from cloudyview.soar.surfaces import (SURFACE_TILE_SCHEMAS,
+                                      encode_surface_level,
+                                      surface_level_files)
+# The tile generators sit beside this file in tools/. They need
+# scaleinvariance and scipy, which the installed package does not.
+from city_fif import (
     DEFAULT_CELL_M as CITY_CELL_M,
     DEFAULT_N as CITY_N,
     generate_city_density,
 )
-from cloudyview.ocean_fif import generate_fif_normals
-from cloudyview.soar_host import (SURFACE_TILE_SCHEMAS, encode_surface_level,
-                                  surface_level_files)
-from cloudyview.city_lots import bake_lots, glow_weight, pack_channels
+from city_lots import bake_lots, glow_weight, pack_channels
+from ocean_fif import generate_fif_normals
 
 REPO = Path(__file__).resolve().parents[1]
 SOAR_OUT = REPO / "web" / "soar"
@@ -53,7 +55,7 @@ OCEAN_OUT = REPO / "cloudyview" / "soar" / "ocean"
 CITY_OUT = REPO / "cloudyview" / "soar" / "city"
 
 CITY_SEED = 20260820
-# The city's clock period (soar_host.surface_clock_period_s): where its
+# The city's clock period (surfaces.surface_clock_period_s): where its
 # animation — the manhole steam, city-street's cc_manholesteam — repeats
 # exactly. The steam's noise rises 1.3 * 1.2 = 1.56 lattice cells a second
 # and its lattice wraps at 4056 cells, so 2600 s is a whole number of every
@@ -170,7 +172,7 @@ def export_ocean() -> dict:
         "compression": "gzip",
         "files": files,
         "tile_extent_m": float(FIF_N * dx),
-        # The sea has no clock: nothing on it moves (soar_host.
+        # The sea has no clock: nothing on it moves (surfaces.
         # surface_clock_period_s; null, not a period of 0).
         "clock_period_s": None,
         "seed": FIF_SEED,
@@ -212,7 +214,7 @@ def export_city() -> dict:
     height, rank = generate_city_density(
         rng=np.random.default_rng(CITY_SEED)
     )
-    # Lots, zoning and streets (cloudyview/city_lots.py), baked from the
+    # Lots, zoning and streets (tools/city_lots.py), baked from the
     # channels as the renderer will see them — float16, the stored precision
     # — so a lot boundary is decided on exactly the numbers city_cell reads.
     lot_word, street_word = bake_lots(
@@ -279,7 +281,7 @@ def main() -> None:
                 f"the shipped ocean tile was baked with scaleinvariance "
                 f"{OCEAN_BAKED_WITH}; this is {scaleinvariance.__version__}, "
                 "whose FIF may draw another field from the same seed. Pass "
-                "--rebake to write a new sea, then re-measure raymarch.wgsl's "
+                "--rebake to write a new sea, then re-measure ocean.wgsl's "
                 "fif_slope_variance and @domain bound and re-fit "
                 "OCEAN_GLINT_ROUGHNESS.")
     SOAR_OUT.mkdir(parents=True, exist_ok=True)

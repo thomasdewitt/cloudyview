@@ -1,6 +1,6 @@
 """The night city's lots, zoning and streets: the bake and its contract.
 
-cloudyview/city_lots.py decides offline which blocks form one lot, what each
+tools/city_lots.py decides offline which blocks form one lot, what each
 lot is used for and which grid edges carry a street, and packs the answers
 into the city tile's b and a channels at mip 0. raymarch.wgsl city_cell
 decodes them. These tests pin three things: that the shipped tile IS the
@@ -14,19 +14,21 @@ Needs no GPU: this is arithmetic on the tile's bytes.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from cloudyview import city_lots
-from cloudyview.city_lots import (
-    USE_INDUSTRIAL, USE_OPEN, USE_URBAN, USE_YARD, WORD_OFFSET,
-    bake_lots, glow_weight,
-)
 from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "tools"))
+import city_lots                                            # noqa: E402
+from city_lots import (                                     # noqa: E402
+    USE_INDUSTRIAL, USE_OPEN, USE_URBAN, USE_YARD, WORD_OFFSET,
+    bake_lots, glow_weight,
+)
 TILE = REPO / "cloudyview" / "soar" / "city"
 WGSL = ShaderModule("city")
 
@@ -222,7 +224,7 @@ def test_every_surface_tile_carries_the_schema_both_hosts_expect():
     """A new shader must never read an old tile as if it were new."""
     import json
 
-    from cloudyview.soar_host import SURFACE_DIRS, SURFACE_TILE_SCHEMAS
+    from cloudyview.soar.surfaces import SURFACE_DIRS, SURFACE_TILE_SCHEMAS
 
     js = (REPO / "web" / "soar" / "constants.js").read_text()
     block = re.search(r"SURFACE_TILE_SCHEMAS\s*=\s*\{(.*?)\}", js, re.S)

@@ -244,7 +244,7 @@ def build_soar_level(nc_path=None):
 
 def render_soar_view(level, view):
     """Render one frozen view off `level`, returning float RGB in [0, 1]."""
-    from cloudyview.soar_host import camera_world_origin
+    from cloudyview.soar.uniforms import camera_world_origin
     from cloudyview.witness import render_nested
 
     position = camera_world_origin(view["camera_position"], level.bmin, level.bmax)

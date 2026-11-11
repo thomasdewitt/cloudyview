@@ -94,7 +94,7 @@ def test_degrees_and_a_level_index_are_rescued_by_the_same_answer(degrees):
 
 
 def test_top_first_turns_the_field_the_right_way_up(tmp_path, index_only):
-    from cloudyview.cloudfield import load
+    from cloudyview.field import load
     up = load(index_only, grid_spacing={"x": 1.0, "y": 1.0, "z": 1.0},
               z_first="bottom")
     down = load(index_only, grid_spacing={"x": 1.0, "y": 1.0, "z": 1.0},

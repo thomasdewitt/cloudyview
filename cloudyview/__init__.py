@@ -26,11 +26,10 @@ from types import ModuleType
 def _ensure_drjit_llvm_path() -> None:
     """Point Dr.Jit at the system libLLVM when only a versioned .so exists.
 
-    Lives at package scope (mirrored from behold.py) because Dr.Jit reads
-    DRJIT_LIBLLVM_PATH at the FIRST mitsuba import anywhere in the process —
-    and with the lazy public API below, importing cloudyview no longer
-    imports behold, so behold's own module-scope shim can run too late.
-    Env-only (os + glob): costs nothing for soar/witness users.
+    behold.py does the same. It is also done here because Dr.Jit reads
+    DRJIT_LIBLLVM_PATH at the FIRST mitsuba import anywhere in the process,
+    and importing cloudyview does not import behold, so behold's own call
+    can come too late. It only looks at the environment and the filesystem.
     """
     import glob
     import os
@@ -52,7 +51,7 @@ from . import optical_depth
 from . import domain
 from .optical_depth import vertically_integrated_optical_depth
 from .domain import DomainGeometry, compute_domain_geometry
-from .cloudfield import CloudField, load
+from .field import CloudField, load
 from .camera import Camera
 
 
@@ -72,23 +71,22 @@ def behold(*args, **kwargs):
 
 
 def save_image(*args, **kwargs):
-    """Lazily call :func:`cloudyview.basic_render.save_image`."""
-    return import_module(".basic_render", __name__).save_image(*args, **kwargs)
+    """Lazily call :func:`cloudyview.image.save_image`."""
+    return import_module(".image", __name__).save_image(*args, **kwargs)
 
 
 def quantize_uint8(*args, **kwargs):
-    """Lazily call :func:`cloudyview.basic_render.quantize_uint8`."""
-    return import_module(
-        ".basic_render", __name__).quantize_uint8(*args, **kwargs)
+    """Lazily call :func:`cloudyview.image.quantize_uint8`."""
+    return import_module(".image", __name__).quantize_uint8(*args, **kwargs)
 
 
 class _CloudyViewModule(ModuleType):
-    """Keep public lazy functions from being replaced by child modules.
+    """Keep the public render functions from being replaced by their modules.
 
-    CloudyView has historically exposed ``cv.witness`` as the render function,
-    while callers import the CLI module explicitly with ``importlib``. Python's
-    import machinery normally overwrites the package attribute when that child
-    module is loaded; retaining the function preserves the established API.
+    ``cv.witness`` is the render function, and ``cloudyview.witness`` is also
+    a submodule. Python's import machinery sets the package attribute to the
+    submodule when it is loaded, which would replace the function; this keeps
+    the function.
     """
 
     _public_renderers = frozenset(("glimpse", "witness", "behold"))
@@ -102,7 +100,7 @@ class _CloudyViewModule(ModuleType):
 
 sys.modules[__name__].__class__ = _CloudyViewModule
 
-__all__ = ["io", "basic_render", "optical_depth", "domain",
+__all__ = ["io", "optical_depth", "domain",
            "vertically_integrated_optical_depth",
            "DomainGeometry", "compute_domain_geometry",
            "CloudField", "load", "Camera",

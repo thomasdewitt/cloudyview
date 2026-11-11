@@ -21,8 +21,9 @@ import tracemalloc
 import numpy as np
 import pytest
 
-from cloudyview import config, optical_depth, soar_host
-from cloudyview.cloudfield import CloudField
+from cloudyview import optical_depth
+from cloudyview.soar.renderer import SoarRenderer
+from cloudyview.field import CloudField
 
 # The module, not the function the package re-exports under the same name.
 witness = importlib.import_module("cloudyview.witness")
@@ -57,11 +58,8 @@ def _old_field_level_sigma(field, multiplier):
 
 @pytest.fixture
 def multiplier(monkeypatch):
-    cfg = config.get_witness_config()
     m = 1.7
-    patched = {**cfg, "rendering": {**cfg["rendering"],
-                                    "extinction_multiplier": m}}
-    monkeypatch.setattr(config, "get_witness_config", lambda: patched)
+    monkeypatch.setattr(witness, "EXTINCTION_MULTIPLIER", m)
     return m
 
 
@@ -119,9 +117,9 @@ class _Queue:
 
 
 def test_the_upload_in_slabs_writes_what_one_write_did(monkeypatch):
-    r = object.__new__(soar_host.SoarRenderer)
+    r = object.__new__(SoarRenderer)
     r.device = type("Device", (), {"queue": _Queue()})()
-    monkeypatch.setattr(soar_host.SoarRenderer, "_UPLOAD_SLAB_TEXELS", 7 * 11 * 3)
+    monkeypatch.setattr(SoarRenderer, "_UPLOAD_SLAB_TEXELS", 7 * 11 * 3)
     rng = np.random.default_rng(0)
     for dtype in (np.float32, np.float64):
         r.device.queue.writes.clear()

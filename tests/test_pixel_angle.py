@@ -15,7 +15,7 @@ Three pins:
     places the pixel's ray;
   * the hosts: the pixel angle both packers floor the view-step LOD at is the
     one the shader computes from the same uniforms (test_uniform_parity pins
-    uniforms.js to soar_host.py, so this pins both);
+    uniforms.js to soar/uniforms.py, so this pins both);
   * the image: a pixel's sea does not depend on how tall the image is. Row
     py of an h-tall frame and row py + k of an (h + 2k)-tall frame cast the
     same ray (ndc_y = (h - 2 py - 1) tan(hfov/2) / w), so with jitter off they
@@ -80,7 +80,7 @@ def test_the_image_height_is_read_only_to_place_the_ray():
 
 @pytest.mark.parametrize("render_size", [(1600, 900), (900, 1600), (640, 640)])
 def test_the_hosts_floor_the_lod_at_the_shaders_pixel_angle(render_size):
-    from cloudyview.soar_host import SceneState, ViewState, pack_uniforms
+    from cloudyview.soar.uniforms import SceneState, ViewState, pack_uniforms
     state = SceneState(bmin=(0.0, 0.0, 0.0), bmax=(1000.0, 1000.0, 1000.0),
                        dt_view=10.0, dt_light=10.0, periodic=False)
     # A view-step LOD far finer than a pixel, so the quarter-pixel floor is
@@ -95,9 +95,10 @@ def test_the_hosts_floor_the_lod_at_the_shaders_pixel_angle(render_size):
 
 
 def _sea(h, realism, jitter, device=None):
-    from cloudyview.soar_host import (SceneState, SoarRenderer, ViewState,
-                                      surface_cell_m)
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.surfaces import surface_cell_m
+    from cloudyview.soar.uniforms import SceneState, ViewState
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
     r = SoarRenderer(periodic=False, surface="ocean", tone_map=False,
                      device=device)
     # No cloud: a clear box well above the camera, so the frame is sea and
@@ -107,7 +108,7 @@ def _sea(h, realism, jitter, device=None):
     state = SceneState(
         bmin=(0.0, 0.0, 3000.0), bmax=(8000.0, 8000.0, 4000.0),
         dt_view=100.0, dt_light=100.0, periodic=False,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=surface_cell_m("ocean", meta),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, surface="ocean")

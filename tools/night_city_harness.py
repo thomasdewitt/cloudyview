@@ -8,7 +8,7 @@ argued about. It is not a test — nothing here asserts an image; it writes
 PNGs and prints what each one cost.
 
 The field pipeline is witness's, reused rather than re-derived
-(`cloudyview.witness._field_level`): condensate to extinction, the config's
+(`cloudyview.witness._field_level`): condensate to extinction, witness's
 extinction multiplier, the absolute-metre AABB, and the empty-sky z crop. A
 harness that built its sigma its own way would be rendering a different scene
 from the app and would not know it.
@@ -91,14 +91,15 @@ def main(argv=None) -> int:
     # ARE these constants: a help text that names its own default and a
     # default that is a copy of the app's number cannot both be true unless
     # they are the same object.
-    from cloudyview.basic_render import save_image
-    from cloudyview.soar_host import (
-        STEP_VOXEL_FACTOR, APP_LIGHT_MARCH_LOD_DEGREES,
-        APP_VIEW_STEP_LOD_DEGREES, DEFAULT_LOD_STRENGTH,
-        SceneState, SoarRenderer, ViewState,
-        surface_cell_m, surface_clock_period_s,
-    )
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.image import save_image
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.surfaces import surface_cell_m, surface_clock_period_s
+    from cloudyview.soar.uniforms import (STEP_VOXEL_FACTOR,
+                                          APP_LIGHT_MARCH_LOD_DEGREES,
+                                          APP_VIEW_STEP_LOD_DEGREES,
+                                          DEFAULT_LOD_STRENGTH, SceneState,
+                                          ViewState)
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     parser = argparse.ArgumentParser(
         description="Render soar's night-city views to PNG.")
@@ -157,7 +158,7 @@ def main(argv=None) -> int:
     parser.add_argument("--city-offset", nargs=2, type=float, default=None,
                         metavar=("X", "Y"),
                         help="where the city tile sits in world metres. "
-                             "Defaults to soar_host's, which is the "
+                             "Defaults to soar/uniforms.py's, which is the "
                              "night-city demo's; cyberpunk mode stands a "
                              "borrowed demo on constants.js's "
                              "CITY_TILE_OFFSET_M instead, and the two show "
@@ -272,7 +273,7 @@ def main(argv=None) -> int:
         dt_view=min_voxel * STEP_VOXEL_FACTOR,
         dt_light=min_voxel * STEP_VOXEL_FACTOR,
         periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=cell_m,
         ocean_tile_extent=tile_extent_m,
         ocean_max_lod=max_lod,

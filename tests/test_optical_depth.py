@@ -112,7 +112,7 @@ def test_behold_ice_fraction_is_extinction_weighted():
     effective radii, not the 0.5 a mass weighting gives.
     """
     from cloudyview.behold import _prepare_extinction
-    from cloudyview.cloudfield import CloudField
+    from cloudyview.field import CloudField
 
     n = 4
     coords = np.arange(n, dtype=np.float64) * 100.0

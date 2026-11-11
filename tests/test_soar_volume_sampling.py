@@ -355,7 +355,7 @@ def gpu_sampler_probe():
             {"texture": texture}, data.tobytes(),
             {"bytes_per_row": nz * 2, "rows_per_image": ny}, (nz, ny, nx))
 
-        # The two samplers soar_host.SoarRenderer builds, restated so a change
+        # The two samplers SoarRenderer builds, restated so a change
         # to either address mode shows up here as a wrong number.
         clamp = device.create_sampler(
             address_mode_u="clamp-to-edge", address_mode_v="clamp-to-edge",
@@ -463,7 +463,7 @@ def test_a_2048_cell_field_fits_a_2048_texel_limit():
         from .conftest import soar_gpu_adapter
     except ImportError:
         from conftest import soar_gpu_adapter
-    from cloudyview.soar_host import SoarRenderer
+    from cloudyview.soar.renderer import SoarRenderer
 
     adapter = soar_gpu_adapter()
     if adapter is None:

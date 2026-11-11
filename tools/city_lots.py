@@ -8,7 +8,7 @@ agreed by every member cell, and two peaks cannot claim the same block),
 and a street is only worth drawing if it connects to the rest of the
 network. Neither can be answered from one texel in a shader. The answers
 are packed into the tile's two spare channels at mip 0 and read with
-textureLoad by the renderer (raymarch.wgsl city_cell) and by the flight
+textureLoad by the renderer (city_cell in shader/city/layout.wgsl) and by the flight
 collision mirror (web/soar/citylots.js) alike, so the city stays a pure
 function of the tile frame.
 
@@ -65,7 +65,7 @@ from scipy import ndimage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
 
-# Mirrors raymarch.wgsl — pinned by tests/test_city_lots.py.
+# The city shader has the same numbers; tests/test_city_lots.py pins them.
 EMPTY_RANK = 0.22
 SPRAWL_RANK_FULL = 0.60
 SPRAWL_MIN_FRAC = 0.15

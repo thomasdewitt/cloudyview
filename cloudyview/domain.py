@@ -2,8 +2,8 @@
 Shared domain geometry for CloudyView renderers.
 
 Computes physical domain dimensions and aspect ratios from coordinate arrays,
-handling non-uniform vertical spacing correctly. Used by both witness (numba
-ray marching) and behold (Mitsuba path tracing) to ensure consistent geometry.
+handling non-uniform vertical spacing correctly. behold (Mitsuba path tracing)
+builds its scene from it.
 """
 
 from dataclasses import dataclass
@@ -65,7 +65,7 @@ def compute_domain_geometry(x_coord, y_coord, z_coord, nx, ny, nz):
     Returns
     -------
     DomainGeometry
-        Dataclass with all scalars — safe to unpack for numba @njit functions.
+        Dataclass with all scalars.
     """
     if len(x_coord) < 2 or len(y_coord) < 2 or len(z_coord) < 2:
         raise ValueError(

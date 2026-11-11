@@ -525,7 +525,8 @@ def test_the_shader_derives_water_and_city_from_the_tile_frame():
     src = SHADER.read_text()
     # The two water reads (the moving sea, and the legacy shader's normal)
     # sample the offset-corrected frame.
-    assert src.count("world_xy - u.surface_offset.xy") == 2
+    assert ShaderModule("ocean").read_text().count(
+        "world_xy - u.surface_offset.xy") == 2
     # The city frame has ONE entry, and the trace and the dome probe both
     # use it; nothing calls city_trace with a raw world origin.
     assert "fn city_camera_origin()" in src

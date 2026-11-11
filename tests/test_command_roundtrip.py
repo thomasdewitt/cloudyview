@@ -251,7 +251,7 @@ _SURFACE_JS = textwrap.dedent("""
 
 
 def _surface_field():
-    from cloudyview.cloudfield import CloudField
+    from cloudyview.field import CloudField
     x = (np.arange(_NX) + 0.5) * _DX
     z = (np.arange(_NZ) + 0.5) * _DX
     return CloudField(lwc=np.full((_NX, _NX, _NZ), 0.5, np.float32),
@@ -280,7 +280,7 @@ class _FakeRenderer:
     tile's meta, and a render that keeps the uniforms it would have drawn."""
 
     def __init__(self, surface):
-        from cloudyview.soar_host import pack_uniforms
+        from cloudyview.soar.uniforms import pack_uniforms
         self._pack = pack_uniforms
         self.surface = surface
         self.surface_meta = json.loads(

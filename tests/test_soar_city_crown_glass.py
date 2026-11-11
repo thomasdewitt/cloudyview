@@ -113,8 +113,9 @@ def probes():
                     "not count).")
     if not SOAR_DATA_FILE.exists():
         pytest.skip(f"Data file not found: {SOAR_DATA_FILE}")
-    from cloudyview.soar_host import SceneState, SoarRenderer
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import SceneState
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     source = SHADER.read_text()
     assert source.count(ANCHOR) == 1, (
@@ -137,7 +138,7 @@ def probes():
         bmin=[float(v) for v in level.bmin],
         bmax=[float(v) for v in level.bmax],
         dt_view=dx * 2.0, dt_light=dx * 2.0, periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=float(meta["cell_m"]),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,
@@ -169,7 +170,7 @@ def _plain(r):
 @pytest.mark.parametrize("exposure", (2.0, 6.0))
 def test_glass_room_exact_sum_averages_to_the_expectation(fog, exposure,
                                                           probes):
-    from cloudyview.soar_host import ViewState
+    from cloudyview.soar.uniforms import ViewState
     get, state = probes
     view = ViewState(
         camera_position=[80000.0, 55000.0, 300.0], azimuth=0.0,

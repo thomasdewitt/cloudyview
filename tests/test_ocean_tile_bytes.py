@@ -17,10 +17,13 @@ import re
 import numpy as np
 import pytest
 
-from cloudyview.soar_host import (OCEAN_DIR, SceneState,
-                                  decode_surface_level, surface_level_files)
+from cloudyview.soar.surfaces import (SURFACE_DIRS, decode_surface_level,
+                                      surface_level_files)
+from cloudyview.soar.uniforms import SceneState
 
 from .conftest import ShaderModule
+
+OCEAN_DIR = SURFACE_DIRS["ocean"]
 
 SHADER = ShaderModule("ocean")
 Z_BOUND = 0.923

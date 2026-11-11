@@ -2,8 +2,8 @@
 
 A tile level is stored either as its texels or, encoding "planar-byte-shuffle"
 (the ocean's), as each channel's plane with every half float's low bytes
-before its high bytes: soar_host.encode_surface_level writes it, and
-soar_host.decode_surface_level and web/soar/scene.js decodeSurfaceLevel read
+before its high bytes: surfaces.encode_surface_level writes it, and
+surfaces.decode_surface_level and web/soar/scene.js decodeSurfaceLevel read
 it back. They are held here to the same bytes. (Moved from the desert tile's
 tests when the desert left this line, 2026-11-09; the ocean's is the tile
 that uses the encoding now.)
@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cloudyview.soar_host import decode_surface_level, encode_surface_level
+from cloudyview.soar.surfaces import decode_surface_level, encode_surface_level
 
 REPO = Path(__file__).resolve().parents[1]
 # An ocean-shaped meta: four half-float channels, planar and byte-shuffled.

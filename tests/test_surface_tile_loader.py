@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from cloudyview.soar_host import SURFACE_FRAME_TILES, surface_period_m
+from cloudyview.soar.surfaces import SURFACE_FRAME_TILES, surface_period_m
 
 REPO = Path(__file__).resolve().parents[1]
 SOAR = REPO / "web" / "soar"

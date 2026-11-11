@@ -1,9 +1,9 @@
-"""Shared, dependency-light constants for CloudyView's rendered look.
+"""The look's tuned constants: sun and sky colours, the haze curves, the
+ocean's knobs, and the model that reddens the light as the sun gets low.
 
-This module is the single source of truth for the tuning values shared by the
-Numba Witness renderer and the wgpu Soar renderer.  Keep it free of NumPy,
-Numba, Mitsuba, and other renderer-specific dependencies so Soar can import
-the look without pulling the offline renderers into a desktop bundle.
+soar/uniforms.py packs these into the shader's uniform block. The browser has
+its own copies (web/soar/constants.js, web/soar/spectral.js), and tests hold
+the two together.
 """
 
 import math
@@ -55,20 +55,17 @@ AERIAL_SCALE_HEIGHT_M = 2500.0
 OCEAN_REALISM = 1.0
 OCEAN_MIP_BIAS = -0.5
 OCEAN_GLINT_STRENGTH = 0.85
-# The glint's base roughness: the slope variance below the static tile's
-# 0.1 m texels, as alpha = sqrt(mss). With the tile's own 0.0097 the sea's
-# mean square slope is 0.0386, Cox & Munk's (0.003 + 0.00512 U) at ~7 m/s.
-# It keeps the solar reflection Thomas kept when the moving sea was reverted
-# (2026-09-25; 0.174 over the 0.2 m tile then): over the 0.1 m tile
-# (2026-11-08), rendered at the pixel footprint corrected for 16:9, 0.170 is
-# where the glint's mean and peak match that look's at the contact sheet's
-# glint look-down and low sun (to 1%), as well as the far-field total.
+# The glint's base roughness: the slope variance below the tile's 0.1 m
+# texels, as alpha = sqrt(mss). With the tile's own 0.0097 the sea's mean
+# square slope is 0.0386, Cox & Munk's (0.003 + 0.00512 U) at ~7 m/s. 0.170
+# was tuned so the glint's mean and peak match the reference look (to 1%)
+# both looking down into the glint and at a low sun, as well as the
+# far-field total.
 OCEAN_GLINT_ROUGHNESS = 0.170
-# How much of the slope variance the normal-mip filter removed the sky
-# reflection integrates over (raymarch.wgsl ocean_sky_reflection: four
-# deterministic taps since 2026-11-09, one random draw per frame before —
-# lighting-loop iter_008). The sun's glint carries all of it as lobe width
-# either way. 1 = the sky sees the whole spread, 0 = only the mean slope.
+# How much of the slope variance that the normal-mip filter removed the sky
+# reflection integrates over (ocean_sky_reflection in shader/ocean.wgsl,
+# four fixed taps). The sun's glint carries all of it as lobe width either
+# way. 1 = the sky sees the whole spread, 0 = only the mean slope.
 OCEAN_SLOPE_RESOLVED_FRACTION = 0.5
 OCEAN_SKY_SHADOW_FLOOR = 0.75
 OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
@@ -80,30 +77,25 @@ OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 # no photograph contains — a razor-sharp far field under a milky horizon.
 # They are all the same aerosol, so they get one number, and every term is
 # ANCHORED at HAZE_ANCHOR: at 0.35 each expression returns its tuned
-# constant exactly. The anchor is a calibration point, not the default —
-# Thomas flies at 1.0 ("slammed to 1 looks best", 2026-08-11), so that is
-# the default; the slider runs past 2 for genuinely soupy days.
+# constant exactly. The anchor is a calibration point, not the default,
+# which is 1.0.
 HAZE_ANCHOR = 0.35
 DEFAULT_HAZE = 1.0
-# 2.5 since 2026-08-14, when haze became soar's cheapest performance lever as
-# well as a look: the lower tiers default into thick air because a periodic
-# view march ends where the clear-air transmittance does, so thicker air is a
-# shorter ray. 2.5 is a 2.6 km e-folding — 10 km of visual range, a genuinely
-# murky day and the point past which the far field is gone rather than soft.
+# Haze is also a performance lever: a periodic view march ends where the
+# clear-air transmittance does, so thicker air is a shorter ray. 2.5 is a
+# 2.6 km e-folding, 10 km of visual range: a genuinely murky day, and about
+# where the far field is gone rather than soft.
 HAZE_MAX = 2.5
 # Haze 0 is a clean Rayleigh-limited atmosphere, not vacuum: 0.015/km puts
-# Koschmieder's 3.912/beta at a ~260 km visual range (a 67 km e-folding),
-# which is the "you can see the far range from the pass" day.
+# Koschmieder's 3.912/beta at a ~260 km visual range (a 67 km e-folding).
 AERIAL_BETA_FLOOR_PER_KM = 0.015
-# ...and the slider now runs PAST it, into air cleaner than Earth has, because
-# the far field is what costs and someone tuning a look wants to see the field
-# undimmed (Thomas, 2026-08-15). Negative haze is a slider coordinate, not a
-# claim about the sky.
+# The slider runs PAST haze 0, into air cleaner than Earth has, for seeing
+# a field undimmed. Negative haze is a slider coordinate, not a claim about
+# the sky.
 #
-# Crucially this EXTENDS the curve rather than redefining it: the h*sqrt(h)
-# below is written h*sqrt(|h|), which is bit-identical for every h >= 0, so
-# nothing that was ever tuned or rendered moves. Lowering the floor instead
-# would have re-scaled the whole ramp and changed every still on the site.
+# The curve below is written h*sqrt(|h|) so that it extends to negative h
+# and is bit-identical to h*sqrt(h) for every h >= 0. (Lowering the floor
+# instead would re-scale the whole ramp and change every tuned look.)
 HAZE_MAX_E_FOLDING_KM = 200.0          # the clear end of the slider
 # Extinction rises faster than linearly with the slider because aerosol
 # loading does: haze 1 lands at 0.11/km, a visual range of ~36 km, which is

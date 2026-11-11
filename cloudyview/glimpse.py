@@ -12,32 +12,24 @@ CLI usage:
 """
 
 import argparse
-from importlib import import_module
 import sys
 from pathlib import Path
 import numpy as np
 from textwrap import dedent
 
-from . import io, optical_depth, config
-from .angles import direction_from_azimuth_elevation, azimuth_met_to_internal_deg
-from .cli_utils import (
+from . import io, optical_depth
+from .camera import (
+    Camera,
+    azimuth_met_to_internal_deg,
+    direction_from_azimuth_elevation,
+)
+from .cli import (
     CloudyViewHelpFormatter,
     DATA_SELECTION_HELP,
     add_dataset_selection_arguments,
     dataset_selection_kwargs,
 )
-from .cloudfield import CloudField, load as _load_field
-
-
-class _LazyBasicRender:
-    """Retain the monkeypatchable CLI seam without importing Matplotlib."""
-
-    def __getattr__(self, name):
-        module = import_module(".basic_render", __package__)
-        return getattr(module, name)
-
-
-basic_render = _LazyBasicRender()
+from .field import CloudField, load as _load_field
 
 
 # Conservative-scattering two-stream reflectance: A = tau / (tau + 2/(1-g)).
@@ -113,7 +105,7 @@ def _build_camera_overlay(
     """
     Build camera marker/FOV overlay for top-down optical depth image.
 
-    Returns dict for basic_render.plot_optical_depth(camera_overlay=...).
+    Returns dict for image.plot_optical_depth(camera_overlay=...).
     """
     ny, nx = image_shape
     cam_x = ((camera_position[0] + 1.0) * 0.5) * (nx - 1)
@@ -230,16 +222,16 @@ def main(
     print(f"CloudyView Glimpse: Loading {filename}")
 
     try:
-        witness_config = config.get_witness_config()
-        default_camera = witness_config['camera']
-        render_aspect = (
-            witness_config['rendering']['width'] / witness_config['rendering']['height']
-        )
+        # The overlay draws witness's view: its default camera and the
+        # aspect ratio of its default image.
+        from .witness import DEFAULT_SIZE
+        default_camera = Camera()
+        render_aspect = DEFAULT_SIZE[0] / DEFAULT_SIZE[1]
 
-        cam_position = list(default_camera['position'])
-        cam_azimuth = float(default_camera['azimuth'])
-        cam_elevation = float(default_camera['elevation'])
-        cam_fov = float(default_camera['fov'])
+        cam_position = list(default_camera.position)
+        cam_azimuth = default_camera.azimuth
+        cam_elevation = default_camera.elevation
+        cam_fov = default_camera.fov
 
         if camera_position is not None:
             cam_position = list(camera_position)
@@ -331,7 +323,10 @@ def main(
 
         # Plot visual albedo
         od_path = output_dir / f"cloudyview_glimpse_top_view_{base_filename}.png"
-        basic_render.plot_optical_depth(
+        # Imported here so that cv.glimpse(), which only returns the array,
+        # does not import matplotlib.
+        from . import image
+        image.plot_optical_depth(
             albedo_oriented,
             output_path=str(od_path),
             label_dirs=label_dirs,

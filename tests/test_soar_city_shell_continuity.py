@@ -127,8 +127,9 @@ def city():
                     "not count).")
     if not SOAR_DATA_FILE.exists():
         pytest.skip(f"Data file not found: {SOAR_DATA_FILE}")
-    from cloudyview.soar_host import SceneState, SoarRenderer
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import SceneState
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     source = SHADER.read_text()
     assert source.count(MARK) == 1, (
@@ -146,7 +147,7 @@ def city():
         bmin=[float(v) for v in level.bmin],
         bmax=[float(v) for v in level.bmax],
         dt_view=dx * 2.0, dt_light=dx * 2.0, periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=float(meta["cell_m"]),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,
@@ -177,7 +178,7 @@ PROBES = (
 
 
 def _probe_renderers(level):
-    from cloudyview.soar_host import SoarRenderer
+    from cloudyview.soar.renderer import SoarRenderer
     source = SHADER.read_text()
     assert source.count(PROBE_ANCHOR) == 1, (
         "the plain pass's probe anchor moved; update PROBE_ANCHOR")
@@ -193,7 +194,7 @@ def _probe_renderers(level):
 
 def _probe(renderers, state, cam, w, h):
     """Per pixel: (b1min.x, b1min.y, b1max.x, b1max.y, height, code, t)."""
-    from cloudyview.soar_host import ViewState
+    from cloudyview.soar.uniforms import ViewState
     x, y, z, az, el, fov = cam
     planes = []
     for r in renderers:
@@ -284,7 +285,7 @@ def _find_views(level, state):
 
 
 def _view(cam, width):
-    from cloudyview.soar_host import APP_LIGHT_MARCH_LOD_DEGREES, ViewState
+    from cloudyview.soar.uniforms import APP_LIGHT_MARCH_LOD_DEGREES, ViewState
     x, y, z, az, el, fov = cam
     height = int(round(width * 9 / 16))
     return ViewState(
@@ -483,7 +484,7 @@ MIN_STORE_LIT = 0.4
 
 
 def _store_probe(level):
-    from cloudyview.soar_host import SoarRenderer
+    from cloudyview.soar.renderer import SoarRenderer
     source = SHADER.read_text()
     assert source.count(PROBE_ANCHOR) == 1, (
         "the plain pass's probe anchor moved; update PROBE_ANCHOR")
@@ -495,7 +496,7 @@ def _store_probe(level):
 
 
 def _store_plane(r, state, cam, w, h):
-    from cloudyview.soar_host import ViewState
+    from cloudyview.soar.uniforms import ViewState
     x, y, z, az, el, fov = cam
     r.render(state, ViewState(
         camera_position=[x + TILE_OFFSET[0], y + TILE_OFFSET[1], z],

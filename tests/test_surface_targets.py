@@ -30,8 +30,8 @@ from pathlib import Path
 
 import pytest
 
-from cloudyview import soar_host
-from cloudyview.soar_host import SoarRenderer
+from cloudyview.soar.surfaces import SURFACE_STAGES
+from cloudyview.soar.renderer import SoarRenderer
 
 REPO = Path(__file__).resolve().parents[1]
 RENDERER_JS = REPO / "web" / "soar" / "renderer.js"
@@ -145,7 +145,7 @@ def js():
 
 
 def test_browser_host_makes_a_size_once(js):
-    full = len(soar_host.SURFACE_STAGES["city"])
+    full = len(SURFACE_STAGES["city"])
     # The final surface, the veil, and the chain's intermediates.
     assert js["first"]["nMid"] == min(full - 1, 2), js["first"]
     assert js["first"]["made"] == 2 + min(full - 1, 2), js["first"]

@@ -1,6 +1,6 @@
 """The surface stages are one ordered list per surface, in both hosts.
 
-soar_host.SURFACE_STAGES and web/soar/constants.js SURFACE_STAGES name the
+soar/surfaces.py SURFACE_STAGES and web/soar/constants.js SURFACE_STAGES name the
 raymarch.wgsl entries each traced surface runs before the march; both hosts
 chain them the same way (surface_stage_plan / surfaceStagePlan) through two
 alternating intermediates. What would go wrong silently is pinned here:
@@ -25,9 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from cloudyview import soar_host
-from cloudyview.soar_host import (SURFACE_STAGES, VEIL_STAGES,
-                                  surface_stage_entries, surface_stage_plan)
+from cloudyview.soar import shader
+from cloudyview.soar.surfaces import (SURFACE_STAGES, VEIL_STAGES,
+                                      surface_stage_entries,
+                                      surface_stage_plan)
 
 REPO = Path(__file__).resolve().parents[1]
 RENDERER_JS = REPO / "web" / "soar" / "renderer.js"
@@ -50,7 +51,7 @@ def test_plan_chains(n):
 
 def _fragment_outputs():
     """{fragment entry: its return type} from the shader."""
-    src = soar_host.read_shader()
+    src = shader.assemble("ocean")
     return {m.group(1): " ".join(m.group(2).split())
             for m in re.finditer(r"@fragment\s+fn\s+(\w+)\s*\(.*?\)\s*->\s*"
                                  r"([^{]+)\{", src, re.S)}

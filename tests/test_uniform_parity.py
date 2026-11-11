@@ -5,7 +5,7 @@ JavaScript in the tab and Python via wgpu. The shader is shared by
 construction, so it cannot drift. The uniform block can, and that is the
 whole surface where a Python render could silently stop matching soar.
 
-So this diffs cloudyview.soar_host.pack_uniforms against the browser's own
+So this diffs cloudyview.soar.uniforms.pack_uniforms against the browser's own
 packUniforms, executed under node, byte for byte. docs/architecture.md
 records that a test of exactly this shape was deleted with the desktop app on
 2026-08-05; the look has been unpinned since.
@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cloudyview import soar_host as sh
+from cloudyview.soar import tiers, uniforms as sh
+from cloudyview.soar.surfaces import SURFACE_DIRS
 
 REPO = Path(__file__).resolve().parents[1]
 UNIFORMS_JS = REPO / "web" / "soar" / "uniforms.js"
@@ -160,7 +161,7 @@ _JS = textwrap.dedent("""
 
 # The browser's row 9 for the sea is the shipped tile's (scene.js
 # loadOceanTile: dx from dx_m, maxLod the top mip), so the stand-in reads it.
-_OCEAN_META = json.loads((sh.OCEAN_DIR / "meta.json").read_text())
+_OCEAN_META = json.loads((SURFACE_DIRS["ocean"] / "meta.json").read_text())
 
 
 def _js_state(extra):
@@ -319,13 +320,13 @@ def test_roof_density_tables_agree():
     assert m, "CITY_ROOF_DENSITY_BY_TIER not found in constants.js"
     js = {k: float(v) for k, v in
           re.findall(r"(\w+):\s*([0-9.]+)", m.group(1))}
-    assert js == sh.CITY_ROOF_DENSITY_BY_TIER
+    assert js == tiers.CITY_ROOF_DENSITY_BY_TIER
     # One density per quality tier, every one inside the range the far mean
     # is measured over (the packers refuse anything else).
-    from cloudyview.witness import QUALITY_PRESETS
-    assert set(sh.CITY_ROOF_DENSITY_BY_TIER) == set(QUALITY_PRESETS)
-    lo, hi = sh.CITY_ROOF_DENSITY_RANGE
-    assert all(lo <= d <= hi for d in sh.CITY_ROOF_DENSITY_BY_TIER.values())
+    assert set(tiers.CITY_ROOF_DENSITY_BY_TIER) == set(tiers.QUALITY_PRESETS)
+    lo, hi = tiers.CITY_ROOF_DENSITY_RANGE
+    assert all(lo <= d <= hi
+               for d in tiers.CITY_ROOF_DENSITY_BY_TIER.values())
     m = re.search(r"CITY_ROOF_DENSITY_RANGE = \[([^\]]*)\]", text)
     assert m and [float(v) for v in m.group(1).split(",")] == [lo, hi]
 

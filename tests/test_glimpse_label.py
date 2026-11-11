@@ -268,7 +268,7 @@ def test_descending_coords_keep_east_right_north_up(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(
         glimpse.optical_depth, "vertically_integrated_optical_depth", fake_vertically_integrated_optical_depth
     )
-    monkeypatch.setattr(glimpse.basic_render, "plot_optical_depth", fake_plot_optical_depth)
+    monkeypatch.setattr("cloudyview.image.plot_optical_depth", fake_plot_optical_depth)
 
     glimpse.main(
         "dummy.nc",

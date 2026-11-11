@@ -31,7 +31,7 @@ from .conftest import ShaderModule
 REPO = Path(__file__).resolve().parents[1]
 SHADER = ShaderModule("city")
 RENDERER_JS = REPO / "web" / "soar" / "renderer.js"
-SOAR_HOST = REPO / "cloudyview" / "soar_host.py"
+SOAR_HOST = REPO / "cloudyview" / "soar" / "renderer.py"
 
 pytestmark = pytest.mark.skipif(
     not SHADER.exists(), reason="needs web/soar/raymarch.wgsl")
@@ -94,7 +94,7 @@ def js_binding_lists():
 
 
 def python_binding_lists():
-    """The layout and the bind group in soar_host.SoarRenderer."""
+    """The layout and the bind group in soar/renderer.py SoarRenderer."""
     source = SOAR_HOST.read_text()
     lists = {}
     for label, anchor, stop in (
@@ -140,7 +140,7 @@ def test_every_host_lays_out_the_surface_group():
     b = py.index("        ])", a)
     py_numbers = {int(n) for n in re.findall(r'"binding":\s*(\d+)', py[a:b])}
     for label, numbers in (("renderer.js surfaceLayout", js_numbers),
-                           ("soar_host _surface_layout", py_numbers)):
+                           ("SoarRenderer _surface_layout", py_numbers)):
         assert numbers == declared, (
             f"{label} lays out {sorted(numbers)}; raymarch.wgsl's @group(1) "
             f"declares {sorted(declared)}")

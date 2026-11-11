@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Per-frame timing of the soar/witness WGSL renderer across quality tiers.
 
-Drives web/soar/raymarch.wgsl through cloudyview.soar_host exactly the way
+Drives the soar shader through cloudyview.soar.renderer exactly the way
 the browser does — same uniform packing, same accumulate chain — so a number
 measured here is a statement about the shader, not about the browser host.
 Run before and after an optimization and diff the tables.
@@ -144,10 +144,10 @@ def build_level_from_demo(demo_dir):
 def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=None):
     """`light_cache` None follows the tier's own preset at /2; 0 forces the
     live march; N forces the cache at divisor N everywhere."""
-    from cloudyview.soar_host import (
-        SceneState, SoarRenderer, ViewState, camera_world_origin,
-    )
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import (SceneState, ViewState,
+                                          camera_world_origin)
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     renderer = SoarRenderer(periodic=True, nested=False,
                             max_light_steps=tier["max_light_steps"])
@@ -160,7 +160,7 @@ def time_tier(level, tier_name, tier, views, frames, warmup, light_cache=None):
         dt_view=min_voxel * tier["step_factor"],
         dt_light=min_voxel * tier["light_step_factor"],
         periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
     )
 
     scale = tier["render_scale"]

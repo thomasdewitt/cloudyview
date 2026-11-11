@@ -169,14 +169,12 @@ def test_cloudfield_normalizes_descending_coordinates():
 # cv.Camera
 # =============================================================================
 
-def test_camera_defaults_match_config():
-    from cloudyview import config
+def test_camera_defaults():
     cam = cv.Camera()
-    default = config.DEFAULT_WITNESS_CONFIG['camera']
-    assert cam.position == tuple(default['position'])
-    assert cam.azimuth == default['azimuth']
-    assert cam.elevation == default['elevation']
-    assert cam.fov == default['fov']
+    assert cam.position == (0.0, 0.0, -0.999)
+    assert cam.azimuth == 0.0
+    assert cam.elevation == 35.0
+    assert cam.fov == 100.0
 
 
 def test_camera_validation():
@@ -239,7 +237,7 @@ def test_glimpse_matches_cli_albedo(monkeypatch, tmp_path):
         Path(kwargs["output_path"]).write_bytes(b"fake")
         return None, None
 
-    monkeypatch.setattr(glimpse_mod.basic_render, "plot_optical_depth",
+    monkeypatch.setattr("cloudyview.image.plot_optical_depth",
                         fake_plot_optical_depth)
 
     glimpse_mod.main(str(data_file), output=str(tmp_path))

@@ -6,7 +6,7 @@ city's steam, 2600 s), or null for a surface where nothing moves (the sea),
 whose clock packs as 0 at any scene time. A missing key is an
 error, not a surface without a clock, and a period of 0 is refused (a wrap
 at 0 is NaN). The three places that read it — the tile loaders
-(scene.js tileClockPeriod, soar_host.surface_clock_period_s), the uniform
+(scene.js tileClockPeriod, surfaces.surface_clock_period_s), the uniform
 packers (tests/test_uniform_parity.py holds the two to each other,
 including the static sea's clock packing 0) and witness's --time — agree.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from cloudyview.soar_host import SURFACE_DIRS, surface_clock_period_s
+from cloudyview.soar.surfaces import SURFACE_DIRS, surface_clock_period_s
 from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]

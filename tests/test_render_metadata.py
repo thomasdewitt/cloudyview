@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 
 from cloudyview.camera import Camera
-from cloudyview.cloudfield import CloudField
-from cloudyview.render_metadata import (
+from cloudyview.field import CloudField
+from cloudyview.image import (
     build_render_metadata,
     embed_metadata,
     read_metadata,

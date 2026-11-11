@@ -209,7 +209,7 @@ def test_witness_main_forwards_image_controls_to_witness(monkeypatch, tmp_path):
         witness, "witness",
         lambda field, **kwargs: captured.update(kwargs) or _dummy_image())
     monkeypatch.setattr(
-        "cloudyview.basic_render.save_image", lambda *a, **k: None)
+        "cloudyview.image.save_image", lambda *a, **k: None)
 
     witness.main("input.nc", str(tmp_path), tone_map_gamma=2.0, haze=0.25,
                  periodic=True)
@@ -253,7 +253,7 @@ def test_witness_main_nest_group_builds_finest_first(monkeypatch, tmp_path):
     monkeypatch.setattr(witness, "_field_level", fake_field_level)
     monkeypatch.setattr(witness, "render_nested", fake_render_nested)
     monkeypatch.setattr(
-        "cloudyview.basic_render.save_image", lambda *a, **k: None)
+        "cloudyview.image.save_image", lambda *a, **k: None)
 
     witness.main("input.nc", str(tmp_path), nest_group="fine",
                  liquid_water_group="state/liquid", liquid_water_var="qc",
@@ -270,7 +270,7 @@ def test_witness_main_nest_group_builds_finest_first(monkeypatch, tmp_path):
     assert nest_kwargs["x_dim"] == "ni"
 
     names = [lvl.name for lvl in levels_seen["levels"]]
-    assert names == ["fine", "outer"], "finest level must come first"
+    assert names == ["nest", "outer"], "finest level must come first"
     assert levels_seen["kwargs"]["periodic"] is True
     assert levels_seen["kwargs"]["tone_map_white_point"] == pytest.approx(11.0)
     # Relative z=-0.999 resolves against the OUTER box (2 km deep here).

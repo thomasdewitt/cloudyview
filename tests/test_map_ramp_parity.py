@@ -5,7 +5,7 @@ indistinguishable: `glimpse` writes a PNG with matplotlib, soar's minimap
 colours the same array into a texture in JavaScript, and turbulon-analysis
 plots it for the paper. Before 2026-08-14 they were two different blues, and
 the only thing holding the first two together was a comment in constants.js
-saying "the same sky-blue -> white ramp basic_render uses" — which was true
+saying "the same sky-blue -> white ramp image.py uses" — which was true
 when it was written and is precisely the kind of claim that stops being true
 without anybody noticing, because nothing compares the two pictures.
 
@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cloudyview.basic_render import ACCENT, cloud_colors
+from cloudyview.image import ACCENT, cloud_colors
 
 REPO = Path(__file__).resolve().parents[1]
 MINIMAP_JS = REPO / "web" / "soar" / "minimap.js"

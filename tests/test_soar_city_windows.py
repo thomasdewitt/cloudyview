@@ -164,7 +164,7 @@ CHROMA_TOL = 1e-3
 SHARE_SUM_TOL = 1e-5
 SHARE_COLOUR_TOL = 5 * 0.5 / 1024 + 1e-4
 # (exposure, gamma, white point): the night exposures at the host's
-# defaults, and the gamma and white-point limits (soar_host) at the middle
+# defaults, and the gamma and white-point limits (soar/uniforms.py) at the middle
 # one.
 LOOKS = ((2.0, None, None), (4.0, None, None), (6.0, None, None),
          (4.0, 1.0, 40.0), (4.0, 4.0, 4.0), (4.0, 4.0, 40.0))
@@ -178,8 +178,9 @@ def probes():
                     "not count).")
     if not SOAR_DATA_FILE.exists():
         pytest.skip(f"Data file not found: {SOAR_DATA_FILE}")
-    from cloudyview.soar_host import SceneState, SoarRenderer
-    from cloudyview.witness import OCEAN_REFLECTANCE
+    from cloudyview.soar.renderer import SoarRenderer
+    from cloudyview.soar.uniforms import SceneState
+    from cloudyview.soar.uniforms import DEFAULT_OCEAN_REFLECTANCE
 
     source = SHADER.read_text()
     assert source.count(ANCHOR) == 1, (
@@ -202,7 +203,7 @@ def probes():
         bmin=[float(v) for v in level.bmin],
         bmax=[float(v) for v in level.bmax],
         dt_view=dx * 2.0, dt_light=dx * 2.0, periodic=True,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=float(meta["cell_m"]),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1, ocean_enabled=True,
@@ -230,7 +231,7 @@ def _plain(r):
 
 
 def _run(probes, name, exposure=4.0, gamma=None, white=None):
-    from cloudyview.soar_host import ViewState
+    from cloudyview.soar.uniforms import ViewState
     get, state = probes
     look = {}
     if gamma is not None:

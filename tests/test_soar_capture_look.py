@@ -10,11 +10,10 @@ carries the session's values verbatim. And over the city only, a parked view
 marches finer LOD than a moving one.
 
 This pins those contracts under node against the real viewer and capture
-modules, with stub renderers — no GPU, no DOM — plus the witness.py mirror,
+modules, with stub renderers — no GPU, no DOM — plus the soar/tiers.py mirror,
 whose --quality presets must carry the same parked stepping.
 """
 
-import importlib
 import json
 import os
 import shutil
@@ -24,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-witness = importlib.import_module("cloudyview.witness")
+from cloudyview.soar.tiers import QUALITY_PRESETS
 
 REPO = Path(__file__).resolve().parents[1]
 VIEWER_JS = (REPO / "web" / "soar" / "viewer.js").as_posix()
@@ -368,9 +367,9 @@ def test_witness_quality_presets_carry_parked_stepping():
     """The CLI promise — '--quality renders as the in-app capture at that
     soar tier' — now means parked sampling: High's step factors for every
     tier, with the tiers differing in lighting method and spp only."""
-    for name, preset in witness.QUALITY_PRESETS.items():
+    for name, preset in QUALITY_PRESETS.items():
         assert preset["step_factor"] == 2.0, name
         assert preset["light_step_factor"] == 2.0, name
-    assert witness.QUALITY_PRESETS["max"]["light_cache"] is False
-    assert witness.QUALITY_PRESETS["high"]["sky_probe"] is True
-    assert witness.QUALITY_PRESETS["minimal"]["accumulate"] == 8
+    assert QUALITY_PRESETS["max"]["light_cache"] is False
+    assert QUALITY_PRESETS["high"]["sky_probe"] is True
+    assert QUALITY_PRESETS["minimal"]["accumulate"] == 8

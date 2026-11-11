@@ -1,32 +1,31 @@
 #!/usr/bin/env python
-"""witness: volumetric cloud rendering, one renderer core.
+"""witness: a still image of a cloud field, ray-marched on the GPU.
 
-This used to be a numba kernel that reimplemented what web/soar/raymarch.wgsl
-does. Two implementations of one look diverge, and they did — periodic
-domains and distance LOD arrived in the shader and never came back here, so
-`witness` could not render what soar renders. The kernel is gone. This module
-now drives that same shader through wgpu (see cloudyview/soar_host.py), so
-there is exactly one definition of the look and `witness` is a wrapper that
-prepares a field and a camera for it.
+Library:
+    import cloudyview as cv
+    image = cv.witness(cv.load("cloud.nc"), cv.Camera(azimuth=30))
 
-Consequences worth knowing:
-  * Rendering needs a GPU. There is no CPU path any more, deliberately.
-  * The default tone-map gamma is soar's 2.66 rather than the old 1.4, so
-    images are lighter in the far field than the numba renderer produced.
-    Pass tone_map_gamma=TONE_MAP_GAMMA_WITNESS for the old encode.
-  * Periodic domains and distance LOD are available here for the first time.
+Command line:
+    witness cloud.nc [--quality high] [--size W H] ...
 
-Coordinate System (Meteorological Convention):
-- East  = +x direction
-- North = +y direction
-- Up    = +z direction
+witness prepares a field and a camera for soar's shader and runs it through
+wgpu (soar/renderer.py). The browser app runs the same shader files, so a
+witness image is the picture soar shows. Rendering needs a GPU; there is no
+CPU path.
+
+The layers, from the top:
+    cli()            parses the command line
+    main()           loads the field, calls witness(), saves the PNG
+    witness()        a CloudField and a Camera -> an image
+    render_nested()  extinction levels and a camera in metres -> an image
+
+Coordinates are meteorological: +x east, +y north, +z up.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
 import time
 import warnings
@@ -37,66 +36,70 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from . import optical_depth, config
+from . import optical_depth
 from .camera import Camera
-from .cli_utils import (
+from .cli import (
+    LOAD_KEYWORDS,
     CloudyViewHelpFormatter,
     DATA_SELECTION_HELP,
     add_dataset_selection_arguments,
     dataset_selection_kwargs,
 )
-from .cloudfield import CloudField, load as _load_field
-from .look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
-from .soar_host import (
-    APP_LIGHT_MARCH_LOD_DEGREES,
-    APP_VIEW_STEP_LOD_DEGREES,
-    CITY_ROOF_DENSITY_BY_TIER,
-    DEFAULT_HAZE_HEIGHT_DEPENDENT,
-    DEFAULT_LOD_STRENGTH,
-    DEFAULT_TONE_MAP_GAMMA,
-    DEFAULT_TONE_MAP_WHITE_POINT,
-    DEFAULT_CONTRAST,
-    STILL_ACCUMULATE_FRAMES,
-    STEP_VOXEL_FACTOR,
+from .field import CloudField, load as _load_field
+from .soar.look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
+from .soar.renderer import STILL_ACCUMULATE_FRAMES, SoarRenderer
+from .soar.surfaces import (
+    SURFACE_DIRS,
     SURFACES,
-    TONE_MAP_GAMMA_WITNESS,
-    SceneState,
-    SoarRenderer,
-    ViewState,
-    camera_world_origin,
     check_surface,
     surface_cell_m,
-    surface_period_m,
     surface_clock_period_s,
-    SURFACE_DIRS,
+    surface_period_m,
+)
+from .soar.tiers import (
+    CITY_ROOF_DENSITY_BY_TIER,
+    LIGHT_CACHE_DIVISOR,
+    QUALITY_PRESETS,
+)
+from .soar.uniforms import (
+    APP_LIGHT_MARCH_LOD_DEGREES,
+    APP_VIEW_STEP_LOD_DEGREES,
+    DEFAULT_CONTRAST,
+    DEFAULT_EXPOSURE,
+    DEFAULT_HAZE_HEIGHT_DEPENDENT,
+    DEFAULT_LOD_STRENGTH,
+    DEFAULT_OCEAN_REFLECTANCE,
+    DEFAULT_SUN_AZIMUTH,
+    DEFAULT_SUN_ELEVATION,
+    DEFAULT_TONE_MAP_GAMMA,
+    DEFAULT_TONE_MAP_WHITE_POINT,
+    STEP_VOXEL_FACTOR,
+    SceneState,
+    ViewState,
+    camera_world_origin,
 )
 
-logger = logging.getLogger(__name__)
-
-# TONE_MAP_GAMMA_WITNESS is re-exported: witness's own default is soar's 2.66
-# now, and this is how a caller asks for the pre-2026-08 encode.
 __all__ = ["witness", "render_nested", "tone_map", "NestedLevel",
-           "crop_empty_z",
-           "TONE_MAP_GAMMA_WITNESS", "QUALITY_PRESETS", "main", "cli"]
+           "crop_empty_z", "main", "cli"]
 
-# Effective radii the extinction conversion assumes, mirrored in
-# web/soar/constants.js so the browser derives the same sigma from a file.
+# The image size when none is given, in pixels (width, height).
+DEFAULT_SIZE = (600, 400)
+
+# Effective radii the extinction conversion assumes. web/soar/constants.js has
+# the same numbers, so the browser derives the same extinction from a file.
 RE_LIQUID_UM = 10.0
 RE_ICE_UM = 30.0
+# Ice below this (g/kg) everywhere in a field is dropped before rendering.
 ICE_NEGLIGIBLE_G_KG = 1e-6
+# A factor on the extinction of every field rendered.
+EXTINCTION_MULTIPLIER = 1.0
 
-OCEAN_REFLECTANCE = (0.0020, 0.0045, 0.0126)
-
-# ============================================================================
-# Level descriptor (public — also used by render_nested callers)
-# ============================================================================
 
 @dataclass
 class NestedLevel:
     """One refinement level: extinction field plus its absolute-meter AABB.
 
-    sigma is m^-1, already scaled by the caller's extinction_multiplier.
-    bmin/bmax are absolute world meters.
+    sigma is m^-1. bmin/bmax are absolute world meters.
     """
     # (nx, ny, nz) m^-1, in the extinction's own dtype: float32 for a
     # float32 field (the loaders'), float64 for a float64 one.
@@ -115,45 +118,36 @@ class NestedLevel:
         )
 
 
-# ============================================================================
-# Tone mapping
-# ============================================================================
-
 def tone_map(image, exposure=4.0, gamma=1.4):
-    """Reinhard plus gamma.
+    """Reinhard plus gamma, for linear radiance (return_linear=True).
 
-    Kept because callers import it and because behold's images are compared
-    on this scale. Note the shader applies exactly this inside fs_main, so a
-    render that came back through SoarRenderer is already mapped — running
-    this over it again would encode twice.
+    This is behold's encode. It is not the shader's tone map, which has a
+    white point and a contrast term; and an image rendered without
+    return_linear is already tone-mapped, so do not run this over it.
     """
     exposed = image * exposure
     tone_mapped = exposed / (1.0 + exposed)
     return np.power(np.clip(tone_mapped, 0, 1), 1.0 / gamma)
 
 
-# ============================================================================
-# The renderer, and the session that owns a GPU
-# ============================================================================
-
-# One field is usually rendered many times — prebake walks hundreds of camera
-# positions through a single volume. Creating a device and re-uploading a
-# several-hundred-megabyte texture per call would dominate everything else,
-# so the last session is kept and reused when the field has not changed.
+# One field is usually rendered many times (a demo bake moves a camera
+# through hundreds of positions in one volume). Creating a device and
+# uploading a several-hundred-megabyte texture per call would cost more than
+# the rendering, so the last renderer is kept and reused while the field has
+# not changed.
 _session = None
 _session_key = None
-# Strong references to the arrays the key identifies by id(): an id is only
-# unique while its object lives, so a cache that lets the arrays die can be
-# hit by a NEW field that happens to reuse a freed id — and serve it the
-# previous field's texture.
+# The arrays the key identifies by id(), held so they stay alive: an id is
+# unique only while its object lives, and a new field that reused a freed id
+# would be served the previous field's texture.
 _session_arrays = None
 
 
 def _volume_aabb(field: CloudField):
     """Absolute-meter AABB with half-cell padding.
 
-    tools/export_web_assets.py duplicates this rule for the browser demo;
-    the two must agree or a baked demo lands in a different place from the
+    tools/export_web_assets.py has the same rule for the browser's demos;
+    the two must agree, or a baked demo sits in a different place from the
     same file opened directly.
     """
     x = np.asarray(field.x, dtype=np.float64)
@@ -186,17 +180,14 @@ def crop_empty_z(sigma: np.ndarray, z: np.ndarray):
     nothing there.
 
     Emptiness is judged on the value AS STORED, not on sigma as computed. The
-    texture is r16float in both hosts, so a sigma below the smallest fp16
-    subnormal is zero as far as any renderer will ever know, and defining the
-    crop that way is what lets web/soar/ingest/worker.js reach the same band
-    from the same file. The two hosts have silently disagreed about texture
-    construction once already (tests/test_soar_texture_parity.py exists
-    because of it), so this rule lives in one sentence in two places on
-    purpose.
+    texture is r16float here and in the browser, so a sigma below the smallest
+    fp16 subnormal is zero to the renderer, and defining the crop that way
+    lets the browser (web/soar/zcrop.js) reach the same band from the same
+    file.
 
-    Cropping moves bmin.z/bmax.z onto the cloud, which is a different scene
-    from the uncropped one — cameras place relative to the domain box. That is
-    intended: it is what the browser does, so it is what a user sees.
+    Cropping moves bmin.z/bmax.z onto the cloud. Cameras are placed relative
+    to the domain box, so this is a different scene from the uncropped one;
+    it is the scene the browser shows.
     """
     if sigma.ndim != 3:
         raise ValueError(f"crop_empty_z needs a 3D field; got {sigma.shape}.")
@@ -240,38 +231,12 @@ def _renderer_for(levels: Sequence[NestedLevel], *, periodic: bool,
         return _session
     renderer = SoarRenderer(periodic=periodic, nested=nested,
                             tone_map=tone_mapped, surface=surface)
-    # The bare field, both levels. What the edges do — taper into zero, or
-    # wrap — is the shader's job now, not a border baked into the upload.
     renderer.upload_volume(levels[-1].sigma)
     if nested:
         renderer.upload_nest(levels[0].sigma)
     _session, _session_key = renderer, key
     _session_arrays = tuple(l.sigma for l in levels)
     return renderer
-
-
-# Soar's per-tier capture recipe, mirrored from web/soar/constants.js
-# (QUALITY_PRESETS + PARKED_ACCUM_FRAMES_BY_TIER). Since 2026-09-01 a capture
-# marches PARKED sampling — the hold ladder's top rung, which samples like the
-# browser's High tier for every tier — so the step factors here are High's
-# across the board, and the tiers differ in lighting method, spp, and (in the
-# app) look defaults, not in stepping. --quality applies one of these
-# wholesale so a CLI render matches the in-app capture in all ways; the
-# capture's haze/LOD/exposure arrive as explicit flags in the reproduction
-# command, never through this table. Keep in step with the browser.
-QUALITY_PRESETS = {
-    "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": False, "sky_probe": True,  "accumulate": 32},
-    "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": True,  "accumulate": 32},
-    "medium":  {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": False, "accumulate": 24},
-    "low":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": False, "accumulate": 16},
-    "minimal": {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "sky_probe": False, "accumulate": 8},
-}
-LIGHT_CACHE_DIVISOR = 2       # the one cache resolution; /1 and /4 retired
 
 
 def render_nested(
@@ -282,9 +247,9 @@ def render_nested(
     elevation: float,
     sun_azimuth: float,
     sun_elevation: float,
-    image_size=(600, 400),
-    fov_degrees: float = 100.0,
-    exposure: float = 4.0,
+    image_size=DEFAULT_SIZE,
+    fov_degrees: float = Camera.fov,
+    exposure: float = DEFAULT_EXPOSURE,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
     tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT,
     contrast: float = DEFAULT_CONTRAST,
@@ -302,29 +267,24 @@ def render_nested(
     return_linear: bool = False,
     verbose: bool = True,
 ) -> np.ndarray:
-    """Render one or two nested levels, finest first.
+    """Render one or two extinction levels, finest first, from a camera
+    position in absolute metres.
 
-    The shader carries exactly one optional nest — `NESTED` is a compile-time
-    constant and core WebGPU has no dynamic texture indexing — so more than
-    two levels raises rather than silently dropping the extra ones.
+    This is the entry below witness(): the caller has already turned its
+    fields into NestedLevels and placed the camera. The keywords are
+    witness()'s, where they are described; `image_size` and `fov_degrees`
+    are its `size` and its camera's `fov`, and `step_voxel_factor` is the
+    march step in units of the smallest voxel when no `quality` sets it.
 
-    Camera and sun are given as meteorological angles; the basis is derived
-    in one place (soar_host.camera_basis) so it cannot disagree with the
-    browser's.
-
-    `surface` is what the world stands on: "ocean" or "city" —
-    the night city, which also turns the sun into the moon (the sun angles
-    are then the moon's). A city needs `city_offset`, the world position of
-    its tile, because that is what picks the district under the field.
-
-    With return_linear=True the shader's tone map is compiled out and the
-    linear HDR radiance comes back unbounded.
+    The shader carries one optional nest (`NESTED` is a compile-time switch,
+    and core WebGPU cannot index textures dynamically), so more than two
+    levels raises.
     """
     check_surface(surface)
     # Which district stands under the field is the tile's world offset, and
-    # there is no neutral value to default to: soar's cyberpunk mode and the
-    # night-city harness each park a different one. So a city says which,
-    # and nothing else takes an offset it would silently ignore.
+    # there is no neutral value to default to: soar's cyberpunk mode and
+    # tools/night_city_harness.py each use a different one. So a city must
+    # say which, and an ocean render refuses an offset it would ignore.
     if surface == "city":
         if city_offset is None:
             raise ValueError(
@@ -343,8 +303,8 @@ def render_nested(
             f"'{surface}'; pass surface='city' or drop the offset.")
     if scene_time != 0.0:
         # Only a surface with a clock reads it (its meta.json clock_period_s:
-        # the city's steam); asked of one without, --time would be a silent
-        # no-op.
+        # the city's steam). Over one without, --time would silently do
+        # nothing, so it is an error.
         tile_meta = json.loads((SURFACE_DIRS[check_surface(surface)]
                                 / "meta.json").read_text())
         if surface_clock_period_s(surface, tile_meta) is None:
@@ -365,10 +325,9 @@ def render_nested(
     renderer = _renderer_for(levels, periodic=periodic,
                              tone_mapped=not return_linear, surface=surface)
     min_voxel = min(outer.dx)
-    # --quality is the whole recipe or none of it: step factors (parked —
-    # High's for every tier), lighting method and sample count all come from
-    # the one preset, so this render is the in-app capture at that tier,
-    # made from a terminal.
+    # A quality tier sets the step factors, the lighting method and the
+    # number of passes together, all from the one preset, so the render is
+    # the in-app capture at that tier.
     tier = None
     if quality is not None:
         if quality not in QUALITY_PRESETS:
@@ -379,13 +338,7 @@ def render_nested(
         accumulate = tier["accumulate"]
     view_factor = tier["step_factor"] if tier else step_voxel_factor
     light_factor = tier["light_step_factor"] if tier else step_voxel_factor
-    # --surface-origin: the row-24 surface offset of the flight being
-    # reproduced (SceneState.surface_offset_m — where the surface tile sat
-    # in the world that flight rendered). Omitted means the static offset,
-    # which is every fresh render; a browser flight whose camera folds moved
-    # the offset writes its value into the reproduction command, so the
-    # water phase — and over a city, the streets and buildings — land where
-    # the flight actually rendered them.
+    # surface_origin is SceneState.surface_offset_m, which says what it is.
     state_kwargs = {}
     if surface_origin is not None:
         origin = [float(v) for v in surface_origin]
@@ -396,15 +349,14 @@ def render_nested(
         state_kwargs["surface_offset_m"] = tuple(origin)
     if surface == "city":
         state_kwargs["city_tile_offset_m"] = tuple(city_offset)
-    # Row 9 describes whichever tile the renderer bound, so it comes from
-    # that tile's own meta.json rather than from SceneState's defaults (which
-    # are the ocean tile's numbers, and so leave the ocean bit-identical).
+    # Row 9 of the uniforms describes whichever tile the renderer bound, so
+    # it comes from that tile's own meta.json.
     meta = renderer.surface_meta
     state = SceneState(
         bmin=[float(v) for v in outer.bmin], bmax=[float(v) for v in outer.bmax],
         dt_view=min_voxel * view_factor, dt_light=min_voxel * light_factor,
         periodic=periodic,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=surface_cell_m(surface, meta),
         ocean_tile_extent=float(meta["tile_extent_m"]),
         ocean_max_lod=int(meta["mips"]) - 1,
@@ -431,9 +383,8 @@ def render_nested(
         exposure=exposure, tone_map_gamma=tone_map_gamma,
         tone_map_white_point=tone_map_white_point, contrast=contrast,
         haze=haze, haze_height_dependent=haze_height_dependent,
-        # Angular LOD: the step floor grows as t*tan(theta), so this only ever
-        # buys back far-field steps. Scaled from the app's constants so the
-        # browser's slider and this argument are the same number.
+        # `lod` scales the app's two angles, so it is the same number as the
+        # browser's slider.
         light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
         view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
         light_cache=bool(tier and tier["light_cache"]),
@@ -473,25 +424,19 @@ def _field_level(field: CloudField, name: str, verbose: bool = False) -> NestedL
     """Turn a loaded CloudField into a renderable NestedLevel.
 
     Converts condensate to extinction (dropping ice when it is negligible),
-    applies the config's extinction_multiplier, and derives the absolute-meter
-    AABB. Shared by the single-field and nested paths so both levels of a nest
-    are built by exactly the same rule.
+    applies EXTINCTION_MULTIPLIER, crops the empty sky above and below the
+    cloud, and derives the absolute-meter AABB.
 
     Memory: the result is one array of the occupied z band, in the
     extinction's own dtype, and nothing field-sized is made on the way to it.
     The extinction is elementwise in x, so it is computed slab by slab
     (_x_slabs) twice: once for each plane's peak, which is all crop_empty_z
-    judges the band on, and once into the band itself. Until 2026-11-09 this
-    built the whole field's extinction (five field-sized arrays alive at the
-    liquid + ice sum), copied it to float64, then copied the band: on the fine
-    utah-convection demo (2048 x 2048 x 495, liquid and ice) that was about 58
-    GB over the 16.6 GB field, and the render ran out of memory. Every value
-    is the same, bit for bit: the same function on the same elements, and a
-    float64 copy of a float32 value rounds to the same fp16 texel the float32
-    does.
+    judges the band on, and once into the band itself. Building the whole
+    field's extinction first keeps five field-sized arrays alive at the
+    liquid + ice sum: on a 2048 x 2048 x 495 field with liquid and ice that
+    is about 58 GB over the 16.6 GB field.
     """
-    rendering = config.get_witness_config()['rendering']
-    multiplier = rendering.get('extinction_multiplier', 1.0)
+    multiplier = EXTINCTION_MULTIPLIER
 
     iwc = field.iwc
     if iwc is not None and float(np.max(iwc)) < ICE_NEGLIGIBLE_G_KG:
@@ -519,8 +464,8 @@ def _field_level(field: CloudField, name: str, verbose: bool = False) -> NestedL
             warnings.simplefilter("ignore", RuntimeWarning)
             peaks = np.fmax(peaks, np.nanmax(extinction(xs), axis=(0, 1)))
     # Trim the empty sky above and below the cloud, and move the box with it.
-    # Only z: x and y are cropped by nobody, here or in the browser. The
-    # rule is crop_empty_z's, on the planes' peaks (as coarsen.occupied_band).
+    # Only z: x and y are not cropped, here or in the browser. The rule is
+    # crop_empty_z's, applied to the planes' peaks (as coarsen.occupied_band).
     _, z_crop, (lo, hi) = crop_empty_z(peaks.reshape(1, 1, -1), z)
     sigma = None
     for xs in slabs:
@@ -545,14 +490,15 @@ def witness(
     field: CloudField,
     camera: Optional[Camera] = None,
     *,
-    size: Optional[Tuple[int, int]] = None,
-    sun_azimuth: Optional[float] = None,
-    sun_elevation: Optional[float] = None,
-    exposure: Optional[float] = None,
+    nest: Optional[CloudField] = None,
+    size: Tuple[int, int] = DEFAULT_SIZE,
+    sun_azimuth: float = DEFAULT_SUN_AZIMUTH,
+    sun_elevation: float = DEFAULT_SUN_ELEVATION,
+    exposure: float = DEFAULT_EXPOSURE,
     tone_map_gamma: float = DEFAULT_TONE_MAP_GAMMA,
     tone_map_white_point: float = DEFAULT_TONE_MAP_WHITE_POINT,
     contrast: float = DEFAULT_CONTRAST,
-    haze: Optional[float] = None,
+    haze: float = DEFAULT_HAZE,
     haze_height_dependent: bool = DEFAULT_HAZE_HEIGHT_DEPENDENT,
     periodic: bool = False,
     accumulate: int = STILL_ACCUMULATE_FRAMES,
@@ -572,95 +518,101 @@ def witness(
     field : CloudField
         Loaded cloud field (see :func:`cloudyview.load`).
     camera : Camera, optional
-        Viewpoint; defaults to the standard witness camera. Position is in
-        relative coordinates, where z = -1 is the physical surface rather
-        than the bottom of the data.
-    size : (width, height), optional
-        Image size in pixels (default from config: 600x400).
-    sun_azimuth, sun_elevation : float, optional
-        Sun direction in degrees (met bearing / above horizon);
-        defaults from config (20 / 55).
-    exposure : float, optional
-        Tone-mapping exposure (default from config: 4.0).
-    tone_map_gamma : float, optional
-        Display encode. Defaults to soar's 2.66; pass
-        TONE_MAP_GAMMA_WITNESS (1.4) for the pre-2026-08 look.
-    haze : float, optional
-        Aerosol amount in [0, 1], the same slider soar shows. Drives the
-        aerial perspective, the sky's horizon whitening, the circumsolar
-        lobe and the haze over the sea together. Default 0.35, the tuned
-        look.
-    periodic : bool, optional
-        Wrap the domain in x and y, as soar does for LES fields. Requires
-        the sun above the horizon.
-    accumulate : int, optional
-        Accumulated passes; more is less noise (default 64).
+        Viewpoint; Camera() when omitted. Position is in relative
+        coordinates, where z = -1 is the physical surface rather than the
+        bottom of the data.
+    nest : CloudField, optional
+        A finer field to render inside `field`. It is tapered to zero at its
+        edges, so it blends into the coarser field around it. The camera's
+        relative coordinates still refer to `field`'s box.
+    size : (width, height)
+        Image size in pixels.
+    sun_azimuth, sun_elevation : float
+        Sun direction in degrees: a meteorological bearing (0 north, 90
+        east) and the angle above the horizon.
+    exposure : float
+        Scales the radiance before the tone map.
+    tone_map_gamma, tone_map_white_point, contrast : float
+        The tone map: the display gamma, the exposed radiance that maps to
+        white, and a contrast about mid-grey applied after the gamma.
+    haze : float
+        Aerosol amount, the same number as soar's slider. Sets the aerial
+        perspective, the sky's horizon whitening, the circumsolar lobe and
+        the haze over the sea together.
+    haze_height_dependent : bool
+        Let the haze thin with height instead of being uniform.
+    periodic : bool
+        Wrap the domain in x and y, as soar does for LES fields. Needs the
+        sun above the horizon.
+    accumulate : int
+        Passes averaged into the image; more is less noise. A `quality`
+        tier sets it instead.
+    lod : float
+        Angular level of detail: multiplies the angles the far field's march
+        step grows at. Smaller is finer and slower, never coarser.
+    quality : str, optional
+        A soar quality tier (soar/tiers.py QUALITY_PRESETS): render as the
+        app's capture at that tier, with its step factors, lighting method
+        and number of passes.
     surface_origin : (x, y), optional
         The surface offset of the flight being reproduced, in world metres
         (uniform row 24; the shader derives the water pattern and the
-        city's frame from world minus this, mod the tile). Omitted means
-        the scene's static offset, which is every fresh render; soar's
+        city's frame from world minus this, mod the surface period). Omitted
+        means the scene's static offset, which is every fresh render; soar's
         reproduction commands write a flight's own offset here.
-    surface : str, optional
-        What the world stands on: "ocean" (default), soar's day ground, or
-        "city", the night city of soar's cyberpunk mode — under which the
-        sun angles are the moon's.
+    surface : str
+        What the world stands on: "ocean", soar's day ground, or "city", the
+        night city of soar's cyberpunk mode, under which the sun angles are
+        the moon's.
     city_offset : (x, y), optional
         The city tile's world offset in metres, which picks the district
         standing under the field. Required with surface="city" and refused
         otherwise; soar's cyberpunk mode flies (8100, -44190).
-    scene_time : float, optional
+    scene_time : float
         The scene clock in seconds (uniform row 24.z): where the city's
-        steam is in its motion. 0 by default, and refused over a surface
-        with no clock (the sea); soar's reproduction commands
-        write the clock the still was taken at.
-    return_linear : bool, optional
+        steam is in its motion. Refused, unless 0, over a surface with no
+        clock (the sea); soar's reproduction commands write the clock the
+        still was taken at.
+    return_linear : bool
         Compile the tone map out and return unbounded linear HDR radiance
         instead of an encoded image. This is what soar's auto-exposure
-        meters, so it is also how an offline render reproduces the exposure
-        the app would settle on. Already the contract of
-        :func:`render_nested`; exposed here so a caller holding a
-        ``CloudField`` does not have to build the level itself.
-    verbose : bool, optional
+        meters.
+    verbose : bool
         Print diagnostics.
 
     Returns
     -------
     ndarray
-        (height, width, 3) float64 in [0, 1], tone mapped — or unbounded
+        (height, width, 3) float64 in [0, 1], tone mapped; or unbounded
         linear radiance when ``return_linear`` is set.
     """
-    witness_config = config.get_witness_config()
-    rendering = witness_config['rendering']
-
     if camera is None:
         camera = Camera()
-    if size is None:
-        size = (rendering['width'], rendering['height'])
-    if sun_azimuth is None:
-        sun_azimuth = witness_config['sun']['azimuth']
-    if sun_elevation is None:
-        sun_elevation = witness_config['sun']['elevation']
-    if exposure is None:
-        exposure = rendering['exposure']
-    if haze is None:
-        haze = DEFAULT_HAZE
 
-    level = _field_level(field, "single", verbose=verbose)
-    sigma, bmin, bmax = level.sigma, level.bmin, level.bmax
-    position = camera_world_origin(camera.position, bmin, bmax)
+    # Both levels are built by the same rule. Finest first.
+    outer = _field_level(field, "single" if nest is None else "outer",
+                         verbose=verbose)
+    levels = [outer]
+    if nest is not None:
+        levels = [_field_level(nest, "nest", verbose=verbose), outer]
+    # Relative camera coordinates resolve against the OUTER box, as they do
+    # in the browser.
+    position = camera_world_origin(camera.position, outer.bmin, outer.bmax)
 
     if verbose:
-        print(f"  Grid: {sigma.shape}, domain "
+        bmin, bmax = outer.bmin, outer.bmax
+        print(f"  Grid: {outer.sigma.shape}, domain "
               f"{(bmax[0]-bmin[0])/1e3:.1f} x {(bmax[1]-bmin[1])/1e3:.1f} x "
               f"{bmax[2]/1e3:.1f} km")
+        if nest is not None:
+            print(f"  Nest grid: {levels[0].sigma.shape}")
         print(f"  Camera at {np.round(position, 1)} m, azimuth "
               f"{camera.azimuth:.1f}, elevation {camera.elevation:.1f}, "
               f"fov {camera.fov:.1f} (horizontal)")
         print(f"  Sun: azimuth {sun_azimuth:.1f}, elevation {sun_elevation:.1f}")
 
     return render_nested(
-        [level], position,
+        levels, position,
         azimuth=camera.azimuth, elevation=camera.elevation,
         fov_degrees=camera.fov, image_size=tuple(size),
         sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
@@ -673,151 +625,38 @@ def witness(
         return_linear=return_linear, verbose=verbose)
 
 
-def _render_with_nest(filename: str, outer_field: CloudField, camera: Camera,
-                      nest_group: str, *, size, sun_azimuth, sun_elevation,
-                      periodic: bool, look_kwargs: dict,
-                      load_kwargs: dict) -> np.ndarray:
-    """Render `filename` with a finer field from `nest_group` as the nest.
+def main(filename: str, output: str = None, *, nest_group: str = None,
+         custom_size: tuple = None, **options) -> None:
+    """What the `witness` command does with its parsed arguments: load the
+    field, render it, and save `witness_<input-stem>.png` in `output`.
 
-    The nest is a second field in the SAME file, read from its own NetCDF
-    group. The group-specific overrides (--liquid-water-group and friends)
-    describe the outer field only, so the nest is loaded with `nest_group` as
-    its dataset group and inherits just the variable/coordinate NAME
-    overrides. If it will not load, this raises: a quietly single-field image
-    would look plausible and be the wrong picture.
+    `options` are the other arguments, under the names the library uses:
+    camera_position, camera_azimuth, camera_elevation and camera_fov for the
+    Camera; load()'s keywords (cli.LOAD_KEYWORDS); and witness()'s keywords.
+    One that is None was not given on the command line and is left out, so
+    that the library's default applies.
+
+    `nest_group` names a NetCDF group of the SAME file holding a finer field
+    to render as the nest. The group flags (--group, --liquid-water-group and
+    the others) describe the outer field only; the nest is read from
+    `nest_group` with the same variable, coordinate and dimension names.
+
+    Exits with status 1 on any error.
     """
-    print(f"  Nest: loading group {nest_group}")
-    try:
-        nest_field = _load_field(filename, dataset_group=nest_group,
-                                 **load_kwargs)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Could not load the nest field from group '{nest_group}' of "
-            f"{filename}: {exc}") from exc
-
-    witness_config = config.get_witness_config()
-    rendering = witness_config['rendering']
-    if size is None:
-        size = (rendering['width'], rendering['height'])
-    if sun_azimuth is None:
-        sun_azimuth = witness_config['sun']['azimuth']
-    if sun_elevation is None:
-        sun_elevation = witness_config['sun']['elevation']
-
-    outer = _field_level(outer_field, "outer", verbose=True)
-    nest = _field_level(nest_field, nest_group, verbose=True)
-    # Relative camera coordinates resolve against the OUTER box, as they do
-    # in the browser, so the same numbers frame the same view either side.
-    position = camera_world_origin(camera.position, outer.bmin, outer.bmax)
-
-    print(f"  Outer grid: {outer.sigma.shape}, nest grid: {nest.sigma.shape}")
-    print(f"  Camera at {np.round(position, 1)} m, azimuth "
-          f"{camera.azimuth:.1f}, elevation {camera.elevation:.1f}, "
-          f"fov {camera.fov:.1f} (horizontal)")
-    print(f"  Sun: azimuth {sun_azimuth:.1f}, elevation {sun_elevation:.1f}")
-
-    # `exposure` may arrive in look_kwargs (soar's auto-exposure writes it
-    # into the reproduction command); pop it off a copy so it does not
-    # collide with the explicit kwarg below.
-    look_kwargs = dict(look_kwargs)
-    exposure = look_kwargs.pop('exposure', rendering['exposure'])
-
-    return render_nested(
-        [nest, outer], position,          # finest first
-        azimuth=camera.azimuth, elevation=camera.elevation,
-        fov_degrees=camera.fov, image_size=tuple(size),
-        sun_azimuth=sun_azimuth, sun_elevation=sun_elevation,
-        exposure=exposure,
-        periodic=periodic, verbose=True,
-        **look_kwargs)
-
-
-def main(filename: str, output: str = None,
-         camera_position: list = None, camera_azimuth: float = None,
-         camera_elevation: float = None, camera_fov: float = None,
-         sun_azimuth: float = None, sun_elevation: float = None,
-         custom_size: tuple = None,
-         exposure: float = None,
-         tone_map_gamma: float = None,
-         tone_map_white_point: float = None,
-         contrast: float = None,
-         haze: float = None,
-         haze_height_dependent: bool = None,
-         lod: float = None,
-         quality: str = None,
-         surface_origin: list = None,
-         surface: str = None,
-         city_offset: list = None,
-         scene_time: float = None,
-         periodic: bool = False,
-         nest_group: str = None,
-         liquid_water_var: str = None,
-         ice_water_var: str = None,
-         dataset_group: str = None,
-         liquid_water_group: str = None,
-         ice_water_group: str = None,
-         coords_group: str = None,
-         x_coord_name: str = None,
-         y_coord_name: str = None,
-         z_coord_name: str = None,
-         x_dim: str = None,
-         y_dim: str = None,
-         z_dim: str = None,
-         timestep: int = None,
-         fallback_units: str = None,
-         fallback_ice_units: str = None,
-         fallback_coord_units: str = None,
-         grid_spacing: dict = None,
-         z_first: str = None,
-         ice: str = None,
-         no_ice: bool = False,
-         coarsen: int = None) -> None:
-    """CLI wrapper around :func:`witness`: load, render, save a PNG."""
     print(f"CloudyView Witness: Loading {filename}")
     start_time = time.perf_counter()
 
-    witness_config = config.get_witness_config()
-    cam_config = witness_config['camera']
-
-    if camera_position is not None:
-        cam_config['position'] = list(camera_position)
-    if camera_azimuth is not None:
-        cam_config['azimuth'] = camera_azimuth
-    if camera_elevation is not None:
-        cam_config['elevation'] = camera_elevation
-    if camera_fov is not None:
-        cam_config['fov'] = camera_fov
-
-    # None means "the library default"; only forward what was actually asked
-    # for, so cloudyview.witness / soar_host stay the single source of truth.
-    look_kwargs = {}
-    if exposure is not None:
-        look_kwargs['exposure'] = exposure
-    if tone_map_gamma is not None:
-        look_kwargs['tone_map_gamma'] = tone_map_gamma
-    if tone_map_white_point is not None:
-        look_kwargs['tone_map_white_point'] = tone_map_white_point
-    if contrast is not None:
-        look_kwargs['contrast'] = contrast
-    if haze is not None:
-        look_kwargs['haze'] = haze
-    if lod is not None:
-        look_kwargs['lod'] = lod
-    if haze_height_dependent is not None:
-        look_kwargs['haze_height_dependent'] = haze_height_dependent
-    if quality is not None:
-        look_kwargs['quality'] = quality
-    if surface_origin is not None:
-        look_kwargs['surface_origin'] = surface_origin
-    if surface is not None:
-        look_kwargs['surface'] = surface
-    if city_offset is not None:
-        look_kwargs['city_offset'] = city_offset
-    if scene_time is not None:
-        look_kwargs['scene_time'] = scene_time
+    options = {k: v for k, v in options.items() if v is not None}
+    load_kwargs = {k: options.pop(k) for k in LOAD_KEYWORDS if k in options}
+    camera_kwargs = {k: options.pop("camera_" + k)
+                     for k in ("position", "azimuth", "elevation", "fov")
+                     if "camera_" + k in options}
+    if custom_size:
+        options["size"] = tuple(custom_size)
+    # What is left in `options` are witness() keywords.
 
     try:
-        if nest_group and ice:
+        if nest_group and "ice" in load_kwargs:
             # The nest loads from its own group of the MAIN file; a split
             # ice file describes the outer grid and has no counterpart for
             # the nest, which would come out silently ice-free.
@@ -826,7 +665,7 @@ def main(filename: str, output: str = None,
                 "the nest field has no separate ice file to pair with, so "
                 "it would render ice-free without saying so. Merge the ice "
                 "into the file's groups, or drop one of the flags.")
-        if nest_group and grid_spacing:
+        if nest_group and "grid_spacing" in load_kwargs:
             # A nest is a finer grid inside the outer one: the outer spacing
             # does not describe it, and with no meters of its own there is
             # nothing to place it inside the outer box by.
@@ -834,7 +673,7 @@ def main(filename: str, output: str = None,
                 "--dx/--dy/--dz and --nest-group are not supported together: "
                 "the stated spacing describes the outer grid only, and a nest "
                 "without meters cannot be placed inside it.")
-        if nest_group and coarsen not in (None, 1):
+        if nest_group and load_kwargs.get("coarsen", 1) != 1:
             # The nest is the finer grid inside the outer one, there to be
             # seen at its own resolution; a coarsened outer field under it is
             # a pairing no soar view makes.
@@ -842,89 +681,35 @@ def main(filename: str, output: str = None,
                 "--coarsen and --nest-group are not supported together: "
                 "the coarse grid is the outer field's only, and a nest "
                 "inside it at its own resolution is not a view soar has.")
-        field = _load_field(
-            filename,
-            ice=ice,
-            liquid_water_var=liquid_water_var,
-            ice_water_var=ice_water_var,
-            dataset_group=dataset_group,
-            liquid_water_group=liquid_water_group,
-            ice_water_group=ice_water_group,
-            coords_group=coords_group,
-            x_coord_name=x_coord_name,
-            y_coord_name=y_coord_name,
-            z_coord_name=z_coord_name,
-            x_dim=x_dim,
-            y_dim=y_dim,
-            z_dim=z_dim,
-            timestep=timestep,
-            fallback_units=fallback_units,
-            fallback_ice_units=fallback_ice_units,
-            fallback_coord_units=fallback_coord_units,
-            grid_spacing=grid_spacing,
-            z_first=z_first,
-            no_ice=no_ice,
-            coarsen=coarsen,
-        )
 
-        camera = Camera(
-            position=cam_config['position'],
-            azimuth=cam_config['azimuth'],
-            elevation=cam_config['elevation'],
-            fov=cam_config['fov'],
-        )
-
+        field = _load_field(filename, **load_kwargs)
+        nest = None
         if nest_group:
-            image_tm = _render_with_nest(
-                filename, field, camera, nest_group,
-                size=tuple(custom_size) if custom_size else None,
-                sun_azimuth=sun_azimuth,
-                sun_elevation=sun_elevation,
-                periodic=periodic,
-                look_kwargs=look_kwargs,
-                load_kwargs=dict(
-                    liquid_water_var=liquid_water_var,
-                    ice_water_var=ice_water_var,
-                    x_coord_name=x_coord_name,
-                    y_coord_name=y_coord_name,
-                    z_coord_name=z_coord_name,
-                    x_dim=x_dim,
-                    y_dim=y_dim,
-                    z_dim=z_dim,
-                    timestep=timestep,
-                    fallback_units=fallback_units,
-                    fallback_ice_units=fallback_ice_units,
-                    fallback_coord_units=fallback_coord_units,
-                    no_ice=no_ice,
-                ),
-            )
-        else:
-            image_tm = witness(
-                field,
-                camera=camera,
-                size=tuple(custom_size) if custom_size else None,
-                sun_azimuth=sun_azimuth,
-                sun_elevation=sun_elevation,
-                periodic=periodic,
-                verbose=True,
-                **look_kwargs,
-            )
+            print(f"  Nest: loading group {nest_group}")
+            name_kwargs = {k: v for k, v in load_kwargs.items()
+                           if k not in ("dataset_group", "liquid_water_group",
+                                        "ice_water_group", "coords_group")}
+            # If the nest will not load, stop: an image of the outer field
+            # alone would look plausible and be the wrong picture.
+            try:
+                nest = _load_field(filename, dataset_group=nest_group,
+                                   **name_kwargs)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Could not load the nest field from group '{nest_group}' "
+                    f"of {filename}: {exc}") from exc
 
-        if output:
-            output_dir = Path(output)
-            output_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            output_dir = Path(".")
+        image = witness(field, camera=Camera(**camera_kwargs), nest=nest,
+                        verbose=True, **options)
 
-        dataset_name = Path(filename).stem
-        output_file = output_dir / f"witness_{dataset_name}.png"
+        output_dir = Path(output) if output else Path(".")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"witness_{Path(filename).stem}.png"
 
-        from .basic_render import save_image
-        save_image(image_tm, str(output_file))
+        from .image import save_image
+        save_image(image, str(output_file))
         print(f"  Saved: {output_file}")
-
-        elapsed = time.perf_counter() - start_time
-        print(f"  Complete ({elapsed:.1f}s)")
+        print(f"  Complete ({time.perf_counter() - start_time:.1f}s)")
 
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -968,7 +753,7 @@ def cli():
               `--quality` renders as the in-app capture at that soar tier
               (minimal/low/medium/high/max): its step factors, lighting method
               and sample count, all from the one preset the browser uses.
-              `--size WIDTH HEIGHT` sets the image size (default 600x400).
+              `--size WIDTH HEIGHT` sets the image size (default {DEFAULT_SIZE[0]}x{DEFAULT_SIZE[1]}).
 
             Image controls (the same knobs the browser app exposes):
               `--gamma`, `--white-point`, `--contrast` and `--haze` set the tone
@@ -1005,22 +790,24 @@ def cli():
                         help="Output directory")
     parser.add_argument("--camera-position", type=float, nargs=3,
                         metavar=('X', 'Y', 'Z'),
-                        help="Camera position in relative coords (default: 0 0 -0.999)")
+                        help="Camera position in relative coords (default: "
+                             f"{' '.join(f'{v:g}' for v in Camera.position)})")
     parser.add_argument("--camera-azimuth", type=float,
-                        help="Camera azimuth in degrees (default: 0). 0=North, 90=East, 180=South, 270=West")
+                        help=f"Camera azimuth in degrees (default: {Camera.azimuth:g}). 0=North, 90=East, 180=South, 270=West")
     parser.add_argument("--camera-elevation", type=float,
-                        help="Camera elevation in degrees (default: 35)")
+                        help=f"Camera elevation in degrees (default: {Camera.elevation:g})")
     parser.add_argument("--fov", type=float,
-                        help="Camera horizontal field of view in degrees (default: 100)")
+                        help=f"Camera horizontal field of view in degrees (default: {Camera.fov:g})")
     parser.add_argument("--sun-azimuth", type=float,
-                        help="Sun azimuth in degrees (default: 20). 0=North, 90=East, 180=South, 270=West")
+                        help=f"Sun azimuth in degrees (default: {DEFAULT_SUN_AZIMUTH:g}). 0=North, 90=East, 180=South, 270=West")
     parser.add_argument("--sun-elevation", type=float,
-                        help="Sun elevation in degrees (default: 55)")
+                        help=f"Sun elevation in degrees (default: {DEFAULT_SUN_ELEVATION:g})")
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
                         help="Image size in pixels (overrides quality preset)")
     parser.add_argument("--exposure", type=float,
-                        help="Tone-map exposure (linear pre-scale; default 4.0). "
+                        help="Tone-map exposure (linear pre-scale; default "
+                             f"{DEFAULT_EXPOSURE}). "
                              "Soar's auto-exposure writes its metered value here "
                              "so a terminal render reproduces the flown frame")
     parser.add_argument("--gamma", type=float,
@@ -1090,30 +877,28 @@ def cli():
     add_dataset_selection_arguments(parser)
 
     args = parser.parse_args()
-    size = tuple(args.size) if args.size else None
-
     main(args.filename, args.output,
+         nest_group=args.nest_group,
+         custom_size=args.size,
          camera_position=args.camera_position,
          camera_azimuth=args.camera_azimuth,
          camera_elevation=args.camera_elevation,
          camera_fov=args.fov,
          sun_azimuth=args.sun_azimuth,
          sun_elevation=args.sun_elevation,
-         custom_size=size,
          exposure=args.exposure,
          tone_map_gamma=args.gamma,
          tone_map_white_point=args.white_point,
          contrast=args.contrast,
          haze=args.haze,
+         haze_height_dependent=args.haze_height_dependent,
          lod=args.lod,
          quality=args.quality,
          surface_origin=args.surface_origin,
          surface=args.surface,
          city_offset=args.city_offset,
          scene_time=args.scene_time,
-         haze_height_dependent=args.haze_height_dependent,
          periodic=args.periodic,
-         nest_group=args.nest_group,
          **dataset_selection_kwargs(args))
 
 

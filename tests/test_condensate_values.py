@@ -14,7 +14,7 @@ import pytest
 import xarray as xr
 
 from cloudyview import io
-from cloudyview.cloudfield import CloudField, load as load_field
+from cloudyview.field import CloudField, load as load_field
 from cloudyview.witness import crop_empty_z
 
 

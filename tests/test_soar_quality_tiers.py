@@ -15,7 +15,7 @@ and the two conversions between smoothing and alpha are exact inverses.
 
 Also pins HAZE_MAX across the JS/Python boundary. The uniform parity test
 diffs packed VALUES; it cannot see a limit that only one side widened, and a
-browser that lets the slider reach 2.5 while soar_host raises above 2.0 would
+browser that lets the slider reach 2.5 while pack_uniforms raises above 2.0 would
 put the app and the terminal command it prints out of step.
 
 Skips only without node.
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from cloudyview import look
+from cloudyview.soar import look
 
 REPO = Path(__file__).resolve().parents[1]
 CONSTANTS_JS = REPO / "web" / "soar" / "constants.js"

@@ -41,7 +41,7 @@ is the scene clock the frame was drawn at, for a surface that has one (the
 city's steam); over a surface with none it is carried and packs as 0.
 
 The surface frame folds at a whole number of tiles
-(soar_host.SURFACE_FRAME_TILES): the tile for the city, 16 tiles
+(soar/surfaces.py SURFACE_FRAME_TILES): the tile for the city, 16 tiles
 (1638.4 m) for the sea. Over the city a recorded period other than the installed surface's is refused: the flight would land
 in the wrong district. Over the sea it is not: the sea is a static field
 repeating every tile, so any recorded period places it — a track flown at
@@ -472,7 +472,7 @@ def settings_from_header(header: dict, *, track_path=None,
     folder the file is in"), so it resolves against the current directory,
     with `field_path` for when the file lives elsewhere.
     """
-    from .witness import QUALITY_PRESETS
+    from .soar.tiers import QUALITY_PRESETS
 
     schema = header.get("schema")
     if schema != HEADER_SCHEMA:
@@ -625,16 +625,18 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             "(e.g. `sudo dnf install ffmpeg`). Not falling back to writing "
             "frame files — a directory of PNGs is not a video.")
 
-    from .basic_render import quantize_uint8
-    from .cloudfield import load as load_field
-    from .soar_host import (CITY_ROOF_DENSITY_BY_TIER, SceneState,
-                            SoarRenderer, ViewState,
-                            APP_LIGHT_MARCH_LOD_DEGREES,
-                            APP_VIEW_STEP_LOD_DEGREES, camera_world_origin,
-                            surface_cell_m,
-                            surface_clock_period_s, surface_period_m)
-    from .witness import (LIGHT_CACHE_DIVISOR, OCEAN_REFLECTANCE,
-                          QUALITY_PRESETS, _field_level)
+    from .image import quantize_uint8
+    from .field import load as load_field
+    from .soar.renderer import SoarRenderer
+    from .soar.surfaces import (surface_cell_m, surface_clock_period_s,
+                                surface_period_m)
+    from .soar.tiers import (CITY_ROOF_DENSITY_BY_TIER, LIGHT_CACHE_DIVISOR,
+                             QUALITY_PRESETS)
+    from .soar.uniforms import (APP_LIGHT_MARCH_LOD_DEGREES,
+                                APP_VIEW_STEP_LOD_DEGREES,
+                                DEFAULT_OCEAN_REFLECTANCE, SceneState,
+                                ViewState, camera_world_origin)
+    from .witness import _field_level
 
     track_path = Path(track_path)
     out_path = Path(out_path) if out_path is not None \
@@ -709,7 +711,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         dt_view=min_voxel * preset["step_factor"],
         dt_light=min_voxel * preset["light_step_factor"],
         periodic=s.periodic,
-        ocean_reflectance=OCEAN_REFLECTANCE,
+        ocean_reflectance=DEFAULT_OCEAN_REFLECTANCE,
         ocean_fif_dx=surface_cell_m(s.surface, meta),
         ocean_tile_extent=tile,
         ocean_max_lod=int(meta["mips"]) - 1,
@@ -815,10 +817,10 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
 # --- the command -----------------------------------------------------------
 
 def cli(argv: Optional[Sequence[str]] = None) -> None:
-    from .cli_utils import (CloudyViewHelpFormatter, DATA_SELECTION_HELP,
-                            add_dataset_selection_arguments,
-                            dataset_selection_kwargs)
-    from .witness import QUALITY_PRESETS
+    from .cli import (CloudyViewHelpFormatter, DATA_SELECTION_HELP,
+                      add_dataset_selection_arguments,
+                      dataset_selection_kwargs)
+    from .soar.tiers import QUALITY_PRESETS
 
     parser = argparse.ArgumentParser(
         prog="soar",
