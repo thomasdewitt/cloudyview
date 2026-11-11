@@ -70,7 +70,8 @@ const setup = `(async () => {
     if (!r.ok) throw new Error(p + ": HTTP " + r.status);
     return r.text();
   };
-  const shaders = await S.loadShaders(new URL("shader/", base));
+  const loaded = await S.loadShaders(new URL("shader/", base));
+  const shaders = loaded.modules;
   const jobs = [];
   const onOff = [false, true];
   for (const surface of Object.keys(shaders)) {
@@ -89,7 +90,7 @@ const setup = `(async () => {
   }
   // lens.wgsl is not a module on its own: the present shader includes it.
   jobs.push({ label: "present + shader/lens.wgsl",
-              code: async () => R.presentShader(await text("shader/lens.wgsl")) });
+              code: () => R.presentShader(loaded.lens) });
   const run = async (i) => {
     const { label, code } = jobs[i];
     device.pushErrorScope("validation");

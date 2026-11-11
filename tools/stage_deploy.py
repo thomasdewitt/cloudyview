@@ -25,8 +25,14 @@ the import graph, not just renaming files.
 Only the app's own mutable source is fingerprinted. ``index.html`` keeps its
 name (it *is* the canonical URL), and ``vendor/``, ``ocean/``, ``city/`` and
 the demo assets are left alone — they are immutable blobs or runtime-resolved
-data. ``city/components/`` does not ship at all: it is shader source that
-tools/compose_city.py has already spliced into raymarch.wgsl.
+data.
+
+``shader/`` is copied through under its own names too, because the app
+fetches those files by the names in ``shader/manifest.json``. They are
+cache-busted another way: a hash of every shader file is stamped into the
+staged manifest as ``version``, the app revalidates the manifest on each load
+and appends ``?v=<version>`` to every file it then fetches (shader.js
+loadShaders).
 
 The hash is transitive: a file's name changes when the file changes *or* when
 anything in its transitive dependency set changes, so a fresh ``constants.js``
@@ -44,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import posixpath
 import re
@@ -67,7 +74,6 @@ HASH_CHARS = 8
 FINGERPRINT_PATTERNS = (
     "*.js",
     "ingest/*.js",
-    "raymarch.wgsl",
     "hud.wgsl",
     "bird.wgsl",
     "dart.wgsl",
@@ -84,13 +90,12 @@ FINGERPRINT_PATTERNS = (
 # `city/` is the night-city tile — same shape as the ocean tile, loaded by
 # scene.js from a constructed base URL. Opaque means not cache-busted: a re-baked tile ships under a
 # new path, or visitors keep the old one for the cache's lifetime.
-OPAQUE_DIRS = ("vendor/", "ocean/", "demos/", "city/")
+OPAQUE_DIRS = ("vendor/", "ocean/", "demos/", "city/", "shader/")
+SHADER_MANIFEST = "shader/manifest.json"
 
-# Build-time source that sits inside the asset tree and must not ship.
-# `city/components/` holds the WGSL components and the registry that
-# tools/compose_city.py splices into raymarch.wgsl; the browser never fetches
-# them, and SPEC.md would fail the extension gate on a static host besides.
-EXCLUDED_PREFIXES = ("city/components/",)
+# Documentation that sits inside the asset tree and must not ship (it would
+# fail the extension gate on a static host besides).
+EXCLUDED_PREFIXES = ("shader/city/components/SPEC.md",)
 
 # rclone sets each object's Content-Type from its file extension via Go's mime
 # table. On macOS — where the deploy runs — that falls back to a builtin list
@@ -428,7 +433,7 @@ def resolve(from_relpath: str, raw: str) -> str | None:
     Two resolution bases are in play. ``./x`` and ``../x`` are module- (or
     stylesheet-) relative, matching how the browser resolves import specifiers
     and ``new URL(..., import.meta.url)``. A bare ``x`` is *document*-relative:
-    viewer.js does ``fetch("raymarch.wgsl")``, which the browser resolves
+    viewer.js does ``fetch("hud.wgsl")``, which the browser resolves
     against the page, not the module — the same base index.html's own
     href/src use.
     """
@@ -639,6 +644,17 @@ def stage(out_root: Path, clean: bool) -> dict:
             dest.write_text(rewrite(sources[relpath], refs, renames), encoding="utf-8")
         else:
             shutil.copy2(src, dest)
+
+    # The shader files keep their names; their version is in the manifest.
+    shader_files = sorted(f for f in all_files
+                          if f.startswith("shader/") and f != SHADER_MANIFEST)
+    digest = hashlib.sha256()
+    for f in shader_files:
+        digest.update(f.encode("utf-8"))
+        digest.update((SOAR_SRC / f).read_bytes())
+    manifest = json.loads((SOAR_SRC / SHADER_MANIFEST).read_text())
+    manifest["version"] = digest.hexdigest()[:HASH_CHARS]
+    (app_out / SHADER_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
 
     verify(app_out, all_files, renames, sources)
 

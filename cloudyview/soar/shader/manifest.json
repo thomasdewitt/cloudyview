@@ -12,6 +12,7 @@
     "passes.wgsl",
     "march.wgsl"
   ],
+  "lens": "lens.wgsl",
   "surfaces": {
     "ocean": {
       "files": ["ocean.wgsl"],

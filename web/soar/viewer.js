@@ -314,8 +314,9 @@ export class Viewer {
   // --- setup ---------------------------------------------------------------
 
   async start(source, progress) {
-    this.shaders = await loadShaders(new URL("./shader/", import.meta.url));
-    this.lensSource = await (await fetch("shader/lens.wgsl")).text();
+    const shaders = await loadShaders(new URL("./shader/", import.meta.url));
+    this.shaders = shaders.modules;
+    this.lensSource = shaders.lens;
     this.hudSource = await (await fetch("hud.wgsl")).text();
     this.birdSource = await (await fetch("bird.wgsl")).text();
     this.dartSource = await (await fetch("dart.wgsl")).text();
