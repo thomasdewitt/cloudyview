@@ -49,15 +49,17 @@ Left alone for the same reason in reverse — never imported, fetched by
 constructed paths, effectively immutable: `vendor/`, `ocean/`, `city/`,
 `demos/`.
 
-The renderer's shader (`shader/`) is the one thing fetched by constructed
-paths that does change. Its files keep their names, and staging writes a hash
-of all of them into `shader/manifest.json` as `version`. The app fetches the
-manifest with revalidation on every load and appends `?v=<version>` to each
-shader file it then fetches (`shader.js`), so a new shader is a new set of
-URLs and the files of two builds cannot mix. This was checked by booting a
-staged build locally; it has not yet been through Cloudflare, so the first
-deploy after 2026-11-11 is worth one look at the Network tab for the
-`?v=` on `shader/*.wgsl`.
+The renderer's shader (`shader/`) is fetched by constructed paths and does
+change. Staging puts its files under a folder named by a hash of all of them,
+`shader/<hash>/`, and writes that folder into `shader/manifest.json` as
+`root`. The app fetches the manifest with revalidation on every load and the
+files from under its root (`shader.js`), so a shader URL's content never
+changes and the files of two builds cannot be joined. `rsync --delete`
+removes the previous build's folder; a browser holding a manifest older than
+that gets a 404 and says so, where a mixed module would have rendered
+something wrong. This was checked by booting a staged build locally; it has
+not yet been through Cloudflare, so the first deploy after 2026-11-11 is
+worth one look at the Network tab.
 
 The tool refuses to emit a tree it cannot vouch for. It fails on a reference
 it cannot resolve, a renamed file still named somewhere by its old name, a

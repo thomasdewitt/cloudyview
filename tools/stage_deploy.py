@@ -26,12 +26,15 @@ name (it *is* the canonical URL), and ``vendor/``, ``ocean/``, ``city/`` and
 the demo assets are left alone — they are immutable blobs or runtime-resolved
 data.
 
-``shader/`` is copied through under its own names too, because the app
-fetches those files by the names in ``shader/manifest.json``. They are
-cache-busted another way: a hash of every shader file is stamped into the
-staged manifest as ``version``, the app revalidates the manifest on each load
-and appends ``?v=<version>`` to every file it then fetches (shader.js
-loadShaders).
+``shader/`` is not fingerprinted file by file either, because the app
+fetches those files by the names in ``shader/manifest.json``. Instead the
+whole set is staged under a folder named by a hash of every shader file,
+``shader/<hash>/``, and the staged manifest names that folder as ``root``.
+The app revalidates the manifest on each load and fetches the files from
+under its root (shader.js loadShaders). A shader URL's content therefore
+never changes, so the files of two deploys cannot be joined into one module,
+and a manifest older than the deploy that removed its folder fails loudly
+with a 404.
 
 The hash is transitive: a file's name changes when the file changes *or* when
 anything in its transitive dependency set changes, so a fresh ``constants.js``
@@ -634,10 +637,21 @@ def stage(out_root: Path, clean: bool) -> dict:
         renames[t] = (p.parent / f"{p.stem}.{short}{p.suffix}").as_posix()
     renames.update(EXTENSION_FIXUPS)
 
+    # The shader's files go under a folder named by a hash of all of them.
+    shader_files = sorted(f for f in all_files
+                          if f.startswith("shader/") and f != SHADER_MANIFEST)
+    digest = hashlib.sha256()
+    for f in shader_files:
+        digest.update(f.encode("utf-8"))
+        digest.update((SOAR_SRC / f).read_bytes())
+    shader_root = digest.hexdigest()[:HASH_CHARS]
+    staged_as = {f: f"shader/{shader_root}/{f[len('shader/'):]}"
+                 for f in shader_files}
+
     # Pass 2: emit.
     for relpath in all_files:
         src = SOAR_SRC / relpath
-        dest = app_out / renames.get(relpath, relpath)
+        dest = app_out / staged_as.get(relpath, renames.get(relpath, relpath))
         dest.parent.mkdir(parents=True, exist_ok=True)
         if relpath in sources:
             refs = find_references(relpath, sources[relpath], renames)
@@ -645,15 +659,8 @@ def stage(out_root: Path, clean: bool) -> dict:
         else:
             shutil.copy2(src, dest)
 
-    # The shader files keep their names; their version is in the manifest.
-    shader_files = sorted(f for f in all_files
-                          if f.startswith("shader/") and f != SHADER_MANIFEST)
-    digest = hashlib.sha256()
-    for f in shader_files:
-        digest.update(f.encode("utf-8"))
-        digest.update((SOAR_SRC / f).read_bytes())
     manifest = json.loads((SOAR_SRC / SHADER_MANIFEST).read_text())
-    manifest["version"] = digest.hexdigest()[:HASH_CHARS]
+    manifest["root"] = shader_root + "/"
     (app_out / SHADER_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
 
     verify(app_out, all_files, renames, sources)

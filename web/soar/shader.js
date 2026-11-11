@@ -38,10 +38,11 @@ export function assembleShader(manifest, texts, surface) {
  * surface's module source and the lens-water source the present pass
  * includes: `{ modules: { ocean: "...", city: "..." }, lens: "..." }`.
  *
- * A deployed manifest carries a `version` (tools/stage_deploy.py stamps a
- * hash of the shader files into it). The manifest itself is revalidated on
- * every load and the version rides each file's URL, so a cached shader file
- * from an earlier deploy is never joined with this one's.
+ * A deployed manifest carries a `root`: tools/stage_deploy.py stages the
+ * files under a folder named by a hash of all of them. The manifest itself
+ * is revalidated on every load and the files are fetched from under its
+ * root, so a shader URL's content never changes and the files of two
+ * deploys cannot be joined into one module.
  */
 export async function loadShaders(baseUrl) {
   const get = async (name, init) => {
@@ -52,11 +53,11 @@ export async function loadShaders(baseUrl) {
     return response.text();
   };
   const manifest = JSON.parse(await get("manifest.json", { cache: "no-cache" }));
-  const version = manifest.version ? `?v=${manifest.version}` : "";
+  const root = manifest.root ?? "";
   const surfaces = Object.keys(manifest.surfaces);
   const names = [...new Set(surfaces.flatMap((s) => shaderFiles(manifest, s))),
                  manifest.lens];
-  const bodies = await Promise.all(names.map((n) => get(n + version)));
+  const bodies = await Promise.all(names.map((n) => get(root + n)));
   const texts = Object.fromEntries(names.map((n, i) => [n, bodies[i]]));
   return {
     modules: Object.fromEntries(
