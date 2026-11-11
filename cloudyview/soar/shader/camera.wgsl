@@ -15,7 +15,6 @@ struct CameraRay {
     strat_pixel: vec2<u32>, // the pixel that seeds the stratified rotations
     pixel_angle: f32,       // the angle the surfaces resolve detail at (rad)
     true_pixel_angle: f32,  // one pixel's angle, without the LOD floor (rad)
-    jitter_amp: f32,        // march jitter enable * jitter amplitude
 }
 
 // One pixel's angular size (rad, small-angle): 2 tan(fov / 2) / width. A
@@ -70,6 +69,5 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     // The two angles: see true_pixel_angle and lod_pixel_angle.
     cr.true_pixel_angle = true_pixel_angle();
     cr.pixel_angle = lod_pixel_angle();
-    cr.jitter_amp = u.march_jitter * jitter_scale;
     return cr;
 }

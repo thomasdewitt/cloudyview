@@ -14,6 +14,16 @@
 // Most of the constants are tuned by eye against photographs. Where a value
 // is derived, the derivation is given.
 
+// The strengths of the model's terms.
+const CLOUD_G: f32 = 0.76;                 // HG asymmetry of the cloud phase function
+const AMBIENT_STRENGTH: f32 = 0.15;        // the ambient (skylight) fill
+const GRADIENT_SHADING_STRENGTH: f32 = 1.50;
+const GRADIENT_SHADING_COARSE_WEIGHT: f32 = 0.65;   // weight of the coarse stencil
+const CONE_STENCIL_TAN: f32 = 0.03492076949174773;  // tan(2 deg): the coarse stencil's angle
+const DEEP_SHADOW_MS_SUPPRESSION: f32 = 0.90;
+const AMBIENT_OCCLUSION_FLOOR: f32 = 0.24; // the ambient fill a fully buried sample keeps
+const BOUNCE_DEPTH_ATTENUATION: f32 = 0.80; // per unit optical depth into cloud
+
 // Radiance scale of the direct sun, linear RGB. The hosts hold the same
 // value and derive the per-frame beam colour u.cloud_sun from it; here it
 // lights the sea's diffuse term.
@@ -80,11 +90,8 @@ const BOUNCE_LATERAL_FLOOR: f32 = 0.25;
 
 // Gradient shading. The density gradient stands in for a surface normal n,
 // and the beam terms are scaled by 1 + strength * gate * (n . sun).
-// RADIUS_VOXELS is the fine stencil's radius; COARSE_MIN_VOXELS and
-// COARSE_MAX_DOMAIN_FRACTION bound the fixed coarse radius (sigma_gradient).
+// RADIUS_VOXELS is the fine stencil's radius (sigma_gradient).
 const GRADIENT_SHADING_RADIUS_VOXELS: f32 = 1.0;
-const GRADIENT_SHADING_COARSE_MIN_VOXELS: f32 = 4.0;
-const GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION: f32 = 0.125;
 
 // The gate is a product of two smoothsteps. One is in tau_depth: a ray that
 // has just entered a cloud has no resolved skin yet, and a wisp never gets
@@ -105,9 +112,6 @@ const GRADIENT_SHADING_SHADOW_SIDE_SCALE: f32 = 0.55;
 // fill tint. It runs in log tau because a linear smoothstep over 15..1000
 // would spend nearly all of its travel above tau = 200; the darkest bases
 // belong to the thickest columns, and a storm core reaches several hundred.
-// fs_main reads the two logarithms.
-const DEEP_SHADOW_TAU_START: f32 = 15.0;
-const DEEP_SHADOW_TAU_FULL: f32 = 1000.0;
 const DEEP_SHADOW_LOG_TAU_START: f32 = 2.70805020110221;  // ln(15)
 const DEEP_SHADOW_LOG_TAU_FULL: f32 = 6.907755278982137;  // ln(1000)
 
@@ -628,33 +632,30 @@ fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
     if (h_len > 1e-8) {
         cap = PERIODIC_MAX_RANGE_M / h_len;
     }
-    let aerial_strength = u.aerial_strength;
-    if (aerial_strength > 0.0) {
-        let aer_beta0 = u.haze_beta0;
-        let aer_h = u.haze_scale_height;
-        let z0 = max(cam_z, 0.0);
-        let mu = dir.z;
-        let tau_cap = PERIODIC_AIR_TAU_CUTOFF / aerial_strength;
-        if (aer_h <= 0.0) {
-            // Uniform haze: tau = beta0 * t, so every ray ends at the same
-            // distance whatever its direction.
-            return min(cap, tau_cap / aer_beta0);
-        }
-        let e0 = exp(-z0 / aer_h);
-        if (mu > 1e-6 || mu < -1e-6) {
-            let a = e0 - tau_cap * mu / (aer_beta0 * aer_h);
-            if (a > 0.0) {
-                // @domain: a > 0 on this branch
-                let t_sol = (-aer_h * log(a) - z0) / mu;
-                if (t_sol > 0.0) {
-                    cap = min(cap, t_sol);
-                }
+    let aer_beta0 = u.haze_beta0;
+    let aer_h = u.haze_scale_height;
+    let z0 = max(cam_z, 0.0);
+    let mu = dir.z;
+    let tau_cap = PERIODIC_AIR_TAU_CUTOFF;
+    if (aer_h <= 0.0) {
+        // Uniform haze: tau = beta0 * t, so every ray ends at the same
+        // distance whatever its direction.
+        return min(cap, tau_cap / aer_beta0);
+    }
+    let e0 = exp(-z0 / aer_h);
+    if (mu > 1e-6 || mu < -1e-6) {
+        let a = e0 - tau_cap * mu / (aer_beta0 * aer_h);
+        if (a > 0.0) {
+            // @domain: a > 0 on this branch
+            let t_sol = (-aer_h * log(a) - z0) / mu;
+            if (t_sol > 0.0) {
+                cap = min(cap, t_sol);
             }
-            // a <= 0: an upward ray leaves the haze before it reaches the
-            // cutoff optical depth, and only the range ceiling caps it.
-        } else {
-            cap = min(cap, tau_cap / (aer_beta0 * e0));
         }
+        // a <= 0: an upward ray leaves the haze before it reaches the
+        // cutoff optical depth, and only the range ceiling caps it.
+    } else {
+        cap = min(cap, tau_cap / (aer_beta0 * e0));
     }
     return cap;
 }

@@ -257,17 +257,13 @@ fn coarse_gradient_component(p: vec3<f32>, offset: vec3<f32>, h: f32,
 // change of sigma across the stencil radius h, near 0 in a uniform interior
 // and of order 1 at an edge.
 //
-// Two stencils are blended by coarse_weight_in. The fine one, of radius
+// Two stencils are blended. The fine one, of radius
 // GRADIENT_SHADING_RADIUS_VOXELS, resolves the voxel-scale skin. The coarse
-// one gives the shape of the billow. For a weight strictly between 0 and 1
-// the two unit normals are summed with weights (1 - w) and w, each times a
-// smoothstep of its own confidence, so xyz is then a direction and not a
+// one gives the shape of the billow. The two unit normals are summed with
+// weights (1 - w) and w, w = GRADIENT_SHADING_COARSE_WEIGHT, each times a
+// smoothstep of its own confidence, so xyz is a direction and not a
 // gradient in m^-2. The callers use only its direction.
-fn sigma_gradient(p: vec3<f32>, sigma: f32,
-                  coarse_weight_in: f32,
-                  coarse_radius_m: f32,
-                  sample_distance_m: f32,
-                  cone_stencil_tan_theta: f32,
+fn sigma_gradient(p: vec3<f32>, sigma: f32, sample_distance_m: f32,
                   in_nest: bool) -> vec4<f32> {
     let voxel = level_voxel_size(in_nest);
     let fine_h = voxel * GRADIENT_SHADING_RADIUS_VOXELS;
@@ -277,35 +273,11 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         fine_len * min(min(fine_h.x, fine_h.y), fine_h.z)
     ) / (sigma + 1e-4);
 
-    let coarse_weight = clamp(coarse_weight_in, 0.0, 1.0);
-    if (coarse_weight <= 0.0) {
-        return vec4<f32>(fine_grad, fine_conf);
-    }
-
-    let extent = u.bmax - u.bmin;
-
-    // The coarse radius. Under the cone stencil it is
-    // sample_distance_m * tan(theta): a fixed angle, so the normal is taken
-    // at the scale the pixel sees, and near samples converge on the fine
-    // stencil. A tangent of exactly 0 selects the fixed radius
-    // coarse_radius_m, floored at GRADIENT_SHADING_COARSE_MIN_VOXELS voxels
-    // and capped at GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION of the box.
-    var cone_radius_m: f32;
-    var coarse_min_voxels: f32;
-    if (cone_stencil_tan_theta > 0.0) {
-        cone_radius_m = sample_distance_m * cone_stencil_tan_theta;
-        coarse_min_voxels = GRADIENT_SHADING_RADIUS_VOXELS;
-    } else {
-        cone_radius_m = coarse_radius_m;
-        coarse_min_voxels = GRADIENT_SHADING_COARSE_MIN_VOXELS;
-    }
-    var coarse_h = max(vec3<f32>(cone_radius_m), voxel * coarse_min_voxels);
-    if (cone_stencil_tan_theta == 0.0) {
-        coarse_h = min(
-            coarse_h,
-            extent * GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION
-        );
-    }
+    // The coarse radius is sample_distance_m * tan(theta): a fixed angle, so
+    // the normal is taken at the scale the pixel sees, and near samples
+    // converge on the fine stencil.
+    var coarse_h = max(vec3<f32>(sample_distance_m * CONE_STENCIL_TAN),
+                       voxel * GRADIENT_SHADING_RADIUS_VOXELS);
     coarse_h = max(coarse_h, fine_h);
     var coarse_grad: vec3<f32>;
     if (any(coarse_h == fine_h)) {
@@ -328,18 +300,14 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         coarse_len * min(min(coarse_h.x, coarse_h.y), coarse_h.z)
     ) / (sigma + 1e-4);
 
-    if (coarse_weight >= 1.0) {
-        return vec4<f32>(coarse_grad, coarse_conf);
-    }
-
     let fine_gate = smoothstep(
         GRADIENT_SHADING_CONF_START, GRADIENT_SHADING_CONF_FULL, fine_conf
     );
     let coarse_gate = smoothstep(
         GRADIENT_SHADING_CONF_START, GRADIENT_SHADING_CONF_FULL, coarse_conf
     );
-    let fine_w = (1.0 - coarse_weight) * fine_gate;
-    let coarse_w = coarse_weight * coarse_gate;
+    let fine_w = (1.0 - GRADIENT_SHADING_COARSE_WEIGHT) * fine_gate;
+    let coarse_w = GRADIENT_SHADING_COARSE_WEIGHT * coarse_gate;
 
     var blended = vec3<f32>(0.0);
     if (fine_len > 1e-12) {

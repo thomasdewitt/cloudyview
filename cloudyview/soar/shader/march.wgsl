@@ -44,19 +44,11 @@ const CITY_UPLIGHT_TAU_SCALE: f32 = 0.25;
 
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let g_hg = u.g_hg;
-    let ambient_strength = u.ambient_strength;
+    let g_hg = CLOUD_G;
     let exposure = u.exposure;
     let jitter_on = u.march_jitter;
     let jitter_scale = clamp(u.jitter_scale, 0.0, 1.0);
     let sun = u.sun_dir;
-    let gradient_shading_strength = u.gradient_strength;
-    let deep_shadow_ms_suppression = u.deep_shadow_suppression;
-    let ambient_occlusion_strength = u.ambient_occlusion;
-    let bounce_depth_attenuation = u.bounce_attenuation;
-    let gradient_coarse_weight = u.gradient_coarse_weight;
-    let gradient_coarse_radius_m = u.gradient_coarse_radius;
-    let ambient_occlusion_floor = u.ambient_occlusion_floor;
 
     // The camera ray, shared with the surface passes (camera_ray), so the
     // surface they traced is the surface this march composites.
@@ -165,28 +157,25 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // The ice view runs at 0.3 of the haze strength: at full strength every
     // distant cloud converges on the one horizon colour and the phase
     // colouring is lost in it.
-    let aerial_strength = u.aerial_strength * select(1.0, 0.3, ice_on);
+    let aerial_strength = select(1.0, 0.3, ice_on);
     var aer = vec3<f32>(0.0);
-    if (aerial_strength > 0.0) {
-        if (CITY) {
-            // At night the target is the host's night haze colour itself.
-            aer = u.sky_horizon;
+    if (CITY) {
+        // At night the target is the host's night haze colour itself.
+        aer = u.sky_horizon;
+    } else {
+        let ah_len = length(dir.xy);
+        var ah = dir.xy;
+        if (ah_len > 1e-8) {
+            ah = dir.xy / ah_len;
+        }
+        if (ice_on) {
+            // The green sky's horizon.
+            aer = alien_sky(vec3<f32>(ah, 0.0), sun, vec3<f32>(0.0));
         } else {
-            let ah_len = length(dir.xy);
-            var ah = dir.xy;
-            if (ah_len > 1e-8) {
-                ah = dir.xy / ah_len;
-            }
-            if (ice_on) {
-                // The green sky's horizon.
-                aer = alien_sky(vec3<f32>(ah, 0.0), sun, vec3<f32>(0.0));
-            } else {
-                aer = sky_radiance(
-                    vec3<f32>(ah, 0.0), sun,
-                    u.sky_horizon, u.sky_bloom, vec3<f32>(0.0),
-                    u.low_sun_sky
-                );
-            }
+            aer = sky_radiance(
+                vec3<f32>(ah, 0.0), sun,
+                u.sky_horizon, u.sky_bloom, vec3<f32>(0.0)
+            );
         }
     }
 
@@ -235,7 +224,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // rays that pass beside the box.
     var ocean_consumed = false;
     // The march reached the water. It is shaded by the one
-    // ocean_shade_dispatch call after the loop, which also shades water the
+    // ocean_shade call after the loop, which also shades water the
     // march never reached: the ocean shader holds two sun marches, and a
     // second inlined copy of it would enlarge fs_main for nothing.
     // Transmittance is not touched between the break and that call.
@@ -372,23 +361,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // mu = dir.z, with the limit beta0 t exp(-z0 / H) for a
             // horizontal ray and beta0 t for the uniform haze (H <= 0).
             var air_t = 1.0;
-            if (aerial_strength > 0.0) {
-                let aer_beta0 = u.haze_beta0;
-                let aer_h = u.haze_scale_height;
-                let aer_z0 = max(u.cam_origin.z, 0.0);
-                let aer_z1 = max(p.z, 0.0);
-                let aer_mu = dir.z;
-                var tau_air: f32;
-                if (aer_h <= 0.0) {
-                    tau_air = aer_beta0 * t;          // uniform: no z profile
-                } else if (aer_mu > 1e-6 || aer_mu < -1e-6) {
-                    tau_air = aer_beta0 * (aer_h / aer_mu)
-                        * (exp(-aer_z0 / aer_h) - exp(-aer_z1 / aer_h));
-                } else {
-                    tau_air = aer_beta0 * t * exp(-aer_z0 / aer_h);
-                }
-                air_t = exp(-aerial_strength * tau_air);
+            let aer_beta0 = u.haze_beta0;
+            let aer_h = u.haze_scale_height;
+            let aer_z0 = max(u.cam_origin.z, 0.0);
+            let aer_z1 = max(p.z, 0.0);
+            let aer_mu = dir.z;
+            var tau_air: f32;
+            if (aer_h <= 0.0) {
+                tau_air = aer_beta0 * t;          // uniform: no z profile
+            } else if (aer_mu > 1e-6 || aer_mu < -1e-6) {
+                tau_air = aer_beta0 * (aer_h / aer_mu)
+                    * (exp(-aer_z0 / aer_h) - exp(-aer_z1 / aer_h));
+            } else {
+                tau_air = aer_beta0 * t * exp(-aer_z0 / aer_h);
             }
+            air_t = exp(-aerial_strength * tau_air);
 
             // A view ray takes many steps, so its shadow rays advance the
             // quadrature offset by the golden ratio and do not reuse one
@@ -479,12 +466,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             var grad = vec3<f32>(0.0);
             var grad_len = 0.0;
             var surface_gate = 0.0;
-            if (gradient_shading_strength > 0.0
-                && tau_depth > GRADIENT_SHADING_TAU_START) {
-                let grad_conf_v = sigma_gradient(
-                    p, sigma, gradient_coarse_weight, gradient_coarse_radius_m,
-                    t, u.cone_stencil_tan, level.in_nest
-                );
+            if (tau_depth > GRADIENT_SHADING_TAU_START) {
+                let grad_conf_v = sigma_gradient(p, sigma, t, level.in_nest);
                 grad = grad_conf_v.xyz;
                 grad_len = length(grad);
                 surface_gate = smoothstep(
@@ -528,16 +511,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 // already is, so the handover is continuous.
                 contrib = contrib
                     * mix(1.0, ms_tail_factor * tail_mu_factor, iso_gate);
-                if (deep_shadow_ms_suppression > 0.0) {
-                    let ms_floor = max(
-                        DEEP_SHADOW_MS_FLOOR,
-                        1.0 - deep_shadow_ms_suppression
-                              * storm_weight
-                              * deep_shadow_gate
-                              * iso_gate
-                    );
-                    contrib = contrib * ms_floor;
-                }
+                let ms_floor = max(
+                    DEEP_SHADOW_MS_FLOOR,
+                    1.0 - DEEP_SHADOW_MS_SUPPRESSION
+                          * storm_weight
+                          * deep_shadow_gate
+                          * iso_gate
+                );
+                contrib = contrib * ms_floor;
                 ms = ms + contrib * u.cloud_sun;
                 ms_atten = ms_atten * MS_ATTEN;
             }
@@ -565,22 +546,20 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // FILL_GRADIENT_WEIGHT). Without it shadowed cloud, which only
             // the fills light, has no billow relief.
             var fill_shape = 1.0;
-            if (gradient_shading_strength > 0.0) {
-                if (grad_len > 1e-12) {
-                    var n_dot_sun = -dot(grad, sun) / grad_len;
-                    if (n_dot_sun < 0.0) {
-                        n_dot_sun = n_dot_sun * GRADIENT_SHADING_SHADOW_SIDE_SCALE;
-                    }
-                    let gradient_factor = max(
-                        0.20,
-                        1.0 + gradient_shading_strength
-                              * surface_gate
-                              * n_dot_sun
-                    );
-                    ms = ms * gradient_factor;
-                    fill_shape = mix(1.0, gradient_factor,
-                                     FILL_GRADIENT_WEIGHT);
+            if (grad_len > 1e-12) {
+                var n_dot_sun = -dot(grad, sun) / grad_len;
+                if (n_dot_sun < 0.0) {
+                    n_dot_sun = n_dot_sun * GRADIENT_SHADING_SHADOW_SIDE_SCALE;
                 }
+                let gradient_factor = max(
+                    0.20,
+                    1.0 + GRADIENT_SHADING_STRENGTH
+                          * surface_gate
+                          * n_dot_sun
+                );
+                ms = ms * gradient_factor;
+                fill_shape = mix(1.0, gradient_factor,
+                                 FILL_GRADIENT_WEIGHT);
             }
 
             // Powder (see POWDER_COEFF): a function of the optical depth
@@ -596,7 +575,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // sightline.
             //
             // It multiplies the fills and does not feed t_sky. Both
-            // consumers of t_sky wrap it in a floor (ambient_occlusion_floor,
+            // consumers of t_sky wrap it in a floor (AMBIENT_OCCLUSION_FLOOR,
             // SKY_PROBE_FILL_FLOOR) that exists so that one vertical
             // measurement cannot drive a sample to black. The forward
             // measurement is independent evidence about another part of the
@@ -625,11 +604,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 shallow_open * deep_shadow_gate
             );
             let height_ramp = height_floor + (1.0 - height_floor) * h;
-            let amb = ambient_strength * height_ramp * ahead_factor
+            let amb = AMBIENT_STRENGTH * height_ramp * ahead_factor
                       * fill_shape;
             // Ambient occlusion from the measured sky visibility. With
             // s = strength * storm_weight * deep_shadow_gate and
-            // floor = ambient_occlusion_floor,
+            // floor = AMBIENT_OCCLUSION_FLOOR,
             //
             //   amb_factor = (1 - s) + s*floor + s*(1 - floor)*t_sky,
             //
@@ -639,18 +618,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // colour: the s*floor part is the fill a buried sample keeps
             // (fill_tint), and the rest arrives from the sky (the ambient
             // tint).
-            let ao_s = select(
-                0.0,
-                clamp(ambient_occlusion_strength, 0.0, 1.0)
-                    * storm_weight * deep_shadow_gate,
-                ambient_occlusion_strength > 0.0
-            );
+            let ao_s = storm_weight * deep_shadow_gate;
             // An open shallow shadow is filled by skylight and keeps the
             // ambient's blue. Only buried fill takes the deep tint.
             let fill_tint = mix(deep_tint, u.ambient_tint, shallow_open);
-            let amb_w_deep = ao_s * ambient_occlusion_floor;
+            let amb_w_deep = ao_s * AMBIENT_OCCLUSION_FLOOR;
             let amb_w_sky = (1.0 - ao_s)
-                + ao_s * (1.0 - ambient_occlusion_floor) * t_sky;
+                + ao_s * (1.0 - AMBIENT_OCCLUSION_FLOOR) * t_sky;
             col = col + ice_recolor(
                 transmittance * d_tau * amb * air_t
                 * (amb_w_sky * u.ambient_tint
@@ -741,12 +715,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
             // Surface bounce (see BOUNCE_STRENGTH), measured from z = 0 and
             // not from the box floor.
-            if (BOUNCE_STRENGTH > 0.0 && !CITY) {
+            if (!CITY) {
                 let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
                 var bounce = BOUNCE_STRENGTH * bounce_frac;
-                if (bounce_depth_attenuation > 0.0) {
-                    bounce = bounce * exp(-bounce_depth_attenuation * tau_depth);
-                }
+                bounce = bounce * exp(-BOUNCE_DEPTH_ATTENUATION * tau_depth);
                 // The ground under a saturated column is in the cloud's own
                 // shadow, and the bounce exists only in proportion to the
                 // sunlight that reaches the ground. tau_depth cannot see
@@ -773,7 +745,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             // Aerial in-scatter. The source terms above were attenuated by
             // air_t; the fraction 1 - air_t of this step's opacity is filled
             // with the haze colour.
-            if (aerial_strength > 0.0 && air_t < 1.0) {
+            if (air_t < 1.0) {
                 let aer_in = transmittance
                     * (1.0 - step_atten)
                     * (1.0 - air_t);
@@ -807,7 +779,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     if (shade_ocean) {
         let ocean_hit = u.cam_origin + t_ocean * dir;
         col = col + ice_recolor(transmittance
-                    * ocean_shade_dispatch(
+                    * ocean_shade(
                         ocean_hit, dir, sun,
                         sun_cone_dir(sun, sun_frame, sun_cone_seed,
                                      penumbra_tan),
@@ -846,8 +818,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         } else {
             sky = sky_radiance(
                 dir, sun,
-                u.sky_horizon, u.sky_bloom, u.sky_disc,
-                u.low_sun_sky
+                u.sky_horizon, u.sky_bloom, u.sky_disc
             );
         }
         col = col + transmittance * sky;

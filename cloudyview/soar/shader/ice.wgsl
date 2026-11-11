@@ -62,8 +62,7 @@ fn ice_recolor(x: vec3<f32>, tint: vec3<f32>, on: bool) -> vec3<f32> {
 // the horizon falling to a deep teal overhead. `disc` is passed through so
 // that a caller can leave the solar disc out, as with sky_radiance.
 fn alien_sky(dir: vec3<f32>, sun: vec3<f32>, disc: vec3<f32>) -> vec3<f32> {
-    let phys = sky_radiance(dir, sun, u.sky_horizon, u.sky_bloom,
-                            disc, u.low_sun_sky);
+    let phys = sky_radiance(dir, sun, u.sky_horizon, u.sky_bloom, disc);
     let lum = dot(phys, ICE_LUM);
     let up = clamp(dir.z, 0.0, 1.0);
     // Dimmer than the physical sky: the palette's luminances are ~0.7 and

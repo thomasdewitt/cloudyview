@@ -92,8 +92,7 @@ fn circumsolar_amplitude(haze: f32) -> f32 {
 // from the uniforms. A caller that wants the sky as a haze colour or as a
 // reflection passes disc = 0 to leave the solar disc out.
 fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
-                hor: vec3<f32>, bloom: vec3<f32>, disc: vec3<f32>,
-                low_sun_sky_field_strength: f32) -> vec3<f32> {
+                hor: vec3<f32>, bloom: vec3<f32>, disc: vec3<f32>) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
     // Horizon whitening. The weight of the horizon colour is
@@ -132,16 +131,6 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
             );
         }
 
-        // The azimuth-only field, which low_sun_sky_field_strength = 0
-        // selects: the horizon colour goes from base to `hor` by a
-        // smoothstep of the azimuth from the sun.
-        var legacy_az_weight = 0.5 + 0.5 * cos_sun_az;
-        legacy_az_weight = legacy_az_weight * legacy_az_weight
-                           * (3.0 - 2.0 * legacy_az_weight);
-        let legacy_hor = SKY_BASE_HORIZON
-                         + legacy_az_weight * (hor - SKY_BASE_HORIZON);
-        let legacy_sky = legacy_hor + (SKY_ZENITH - legacy_hor) * t;
-
         // The warm field is confined in elevation, and its azimuthal extent
         // widens toward the horizon, where the slant path through the
         // aerosol is longest.
@@ -169,11 +158,9 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
         // Quadratic Bezier in linear radiance, blue -> neutral -> warm,
         // which avoids the purple midpoint of a straight blue-to-orange mix.
         let cool_weight = 1.0 - warm_weight;
-        let wedge_sky = cool_weight * cool_weight * base_sky
+        col = cool_weight * cool_weight * base_sky
             + 2.0 * cool_weight * warm_weight * neutral_sky
             + warm_weight * warm_weight * warm_sky;
-
-        col = legacy_sky + low_sun_sky_field_strength * (wedge_sky - legacy_sky);
     }
 
     let cos_sun = dot(dir, sun);
