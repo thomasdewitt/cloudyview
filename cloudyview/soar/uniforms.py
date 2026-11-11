@@ -303,7 +303,7 @@ class ViewState:
     # --time) and a track carries it per sample.
     scene_time: float = 0.0
     # The city's roof clutter density (1 is the density the roofs
-    # were tuned at, tiers.CITY_ROOF_DENSITY_BY_TIER the tiers'). Packed over
+    # were tuned at, tiers.QUALITY_PRESETS' city_roof_density the tiers'). Packed over
     # the city only.
     city_roof_density: float = 1.0
 

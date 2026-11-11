@@ -11,7 +11,7 @@ const LENS_MAX_STEP_S = 1.0;
 /** The roofs' clutter density at a tier: a tier with none is an error, not
  *  a default (the far mean is measured at each tier's own density). */
 function cityRoofDensity(tier) {
-  const d = K.CITY_ROOF_DENSITY_BY_TIER[tier];
+  const d = K.QUALITY_PRESETS[tier].cityRoofDensity;
   if (d === undefined) {
     throw new Error(`no roof clutter density for tier '${tier}'.`);
   }
@@ -96,7 +96,7 @@ export const loop = {
       viewStepLodDegrees: K.APP_VIEW_STEP_LOD_DEGREES * lodStrength,
       frameIndex: this.frameIndex,
       sceneTime: this.sceneTime,
-      // The roofs' clutter follows the tier (CITY_ROOF_DENSITY_BY_TIER);
+      // The roofs' clutter follows the tier (its cityRoofDensity);
       // packed under CITY only.
       cityRoofDensity: cityRoofDensity(tier),
     };

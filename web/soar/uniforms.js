@@ -148,7 +148,7 @@ export function packUniforms(state, view) {
     // view's, and its auto-exposure meter's. Every still, video and replay
     // leaves it off and marches the steam.
     liveSteam = false,
-    // The city's roof clutter density: CITY_ROOF_DENSITY_BY_TIER
+    // The city's roof clutter density: the tier's cityRoofDensity
     // at the flight's tier, 1 as tuned. Packed under CITY only.
     cityRoofDensity = 1.0,
   } = view;

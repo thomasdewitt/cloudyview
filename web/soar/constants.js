@@ -77,13 +77,7 @@ export const HAZE_MAX_E_FOLDING_KM = 200.0;
 // named distance (hazeFromEFoldingKm in spectral.js — not imported here,
 // that would be circular). The values were set by hand in the panel; max
 // mirrors high because whatever else max buys, it must never be hazier.
-export const DEFAULT_HAZE_BY_TIER = {
-  max: -0.0380,      // 70 km
-  high: -0.0380,     // 70 km
-  medium: 0.4027,    // 25.2 km
-  low: 0.6590,       // 15 km
-  minimal: 1.0905,   // 8 km
-};
+// Per tier: QUALITY_PRESETS[tier].haze.
 
 // --- scene defaults -----------------------------------------------------
 
@@ -261,9 +255,7 @@ export const CONTRAST_LIMITS = [0.5, 1.6];
 // the frame budget is so tight that even the glide's accumulation restarts
 // hurt. The meter itself is ~0.1-0.5% of a frame's rays. A hand-touched
 // toggle survives tier changes, like haze.
-export const AUTO_EXPOSURE_DEFAULT_BY_TIER = {
-  max: true, high: true, medium: true, low: true, minimal: false,
-};
+// Per tier: QUALITY_PRESETS[tier].autoExposure.
 // Metered on a tiny linear render (TONE_MAP compiled out) of the live view:
 // about 2304 rays per meter (64x36 at 16:9), beneath measurement next to a
 // frame's march. The grid takes the window's shape (uniforms.js meterSize):
@@ -318,20 +310,16 @@ export const DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0;
 // twice the blend depth High can (alpha 0.15 against 0.30 — depth goes as
 // 1/alpha, so ~6.7 frames against ~3.3).
 export const MOTION_ALPHA_AT_ZERO_SMOOTHING = 0.90;
-export const MOTION_ALPHA_FLOOR_BY_TIER = {
-  max: 0.30, high: 0.30, medium: 0.24, low: 0.20, minimal: 0.15,
-};
+// The floor per tier: QUALITY_PRESETS[tier].motionAlphaFloor.
 // Values set by hand in the panel. Medium smooths LESS
 // than high on purpose: medium flies at a lower render scale, and smoothing
 // stacked on upscale blur reads as smear.
-export const DEFAULT_MOTION_SMOOTHING_BY_TIER = {
-  // Max is the one tier that does not need smoothing to hide sampling noise:
-  // it has already paid for eight samples by the time the frame is shown.
-  max: 0.30, high: 0.55, medium: 0.50, low: 0.60, minimal: 0.80,
-};
+// Max is the one tier that does not need smoothing to hide sampling noise:
+// it has already paid for eight samples by the time the frame is shown.
+// The default per tier: QUALITY_PRESETS[tier].motionSmoothing.
 
 export function motionAlphaForSmoothing(smoothing, tier) {
-  const floor = MOTION_ALPHA_FLOOR_BY_TIER[tier];
+  const floor = QUALITY_PRESETS[tier]?.motionAlphaFloor;
   if (floor === undefined) throw new Error(`unknown quality tier '${tier}'.`);
   const s = Math.max(0, Math.min(1, Number(smoothing)));
   return MOTION_ALPHA_AT_ZERO_SMOOTHING
@@ -340,7 +328,7 @@ export function motionAlphaForSmoothing(smoothing, tier) {
 
 /** The inverse, for a tier change that must not move the slider's meaning. */
 export function motionSmoothingForAlpha(alpha, tier) {
-  const floor = MOTION_ALPHA_FLOOR_BY_TIER[tier];
+  const floor = QUALITY_PRESETS[tier]?.motionAlphaFloor;
   if (floor === undefined) throw new Error(`unknown quality tier '${tier}'.`);
   const span = MOTION_ALPHA_AT_ZERO_SMOOTHING - floor;
   return Math.max(0, Math.min(
@@ -364,9 +352,7 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // The lower tiers' values were set by hand in the panel. Minimal's
 // default sits ON the slider ceiling: coarser is off the table there,
 // finer is the only direction that changes anything.
-export const DEFAULT_LOD_STRENGTH_BY_TIER = {
-  max: 0.5, high: 0.5, medium: 1.05, low: 2.0, minimal: 3.0,
-};
+// Per tier: QUALITY_PRESETS[tier].lodStrength.
 
 // The night city's own tier defaults. A separate table rather than a shift of
 // the one above, because the two scenes want different things from the same
@@ -392,9 +378,7 @@ export const DEFAULT_LOD_STRENGTH_BY_TIER = {
 // These are the FLIGHT numbers only. A parked city view and a city capture march at
 // CITY_PARKED_LOD_STRENGTH below — nobody is holding a framerate there, and
 // the whole point of parking in a street is that the windows resolve.
-export const CITY_LOD_STRENGTH_BY_TIER = {
-  max: 0.01, high: 0.01, medium: 0.03, low: 0.1, minimal: 0.5,
-};
+// Per tier: QUALITY_PRESETS[tier].cityLodStrength.
 
 // What a PARKED or captured city view marches at, whatever tier flew it
 // there: the table's high/max entry — the slider floor, which under the
@@ -411,19 +395,18 @@ export const CITY_PARKED_LOD_STRENGTH = 0.01;
 // afford it: a factor on rooftopworks' clutter families' slot
 // probabilities (tanks, condensers, vents, pipe runs, packaged units; never
 // the stair or the skylights), u.roof_density. 1 is the density the roofs were
-// tuned at. Twin of cloudyview/soar/tiers.py CITY_ROOF_DENSITY_BY_TIER
+// tuned at. Twin of cloudyview/soar/tiers.py's city_roof_density
 // (tests/test_uniform_parity.py pins them).
-export const CITY_ROOF_DENSITY_BY_TIER = {
-  max: 1.4, high: 1.4, medium: 1.2, low: 0.7, minimal: 0.5,
-};
+// Per tier: QUALITY_PRESETS[tier].cityRoofDensity.
 // The densities the shader's far mean is measured over
 // (cc_rooftopworks_mech_rho's nodes): a density outside them would draw a
 // near roof the far mean does not stand for, so the packers refuse it.
 export const CITY_ROOF_DENSITY_RANGE = [0.5, 1.4];
 
-/** The tier table this scene flies by. */
-export function lodStrengthByTier(city) {
-  return city ? CITY_LOD_STRENGTH_BY_TIER : DEFAULT_LOD_STRENGTH_BY_TIER;
+/** The LOD strength `tier` flies this scene with. */
+export function tierLodStrength(tier, city) {
+  const preset = QUALITY_PRESETS[tier];
+  return city ? preset.cityLodStrength : preset.lodStrength;
 }
 
 // The floor is below the default rather than equal to it: a slider whose
@@ -438,7 +421,7 @@ export const LOD_STRENGTH_LIMITS = [0.01, 3.0];
 
 // witness's default and the uniform block's own default. Captures do not
 // read it: a capture at tier T takes T's own parked look —
-// DEFAULT_LOD_STRENGTH_BY_TIER[T] over clouds, CITY_PARKED_LOD_STRENGTH over
+// T's lodStrength over clouds, CITY_PARKED_LOD_STRENGTH over
 // the city — so what a still marches is what a parked T view marches.
 //
 // Mirrors soar/uniforms.py DEFAULT_LOD_STRENGTH, and
@@ -509,43 +492,93 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 // allowed to: their job is to be much faster while the camera moves, and the
 // hold ladder converges every tier to High's own sampling the moment you stop,
 // so the picture you actually study is tier-independent.
+// One record per tier: everything that differs between tiers is here, and
+// each field is explained in the section of this file it belongs to.
+//
+//   flight           renderScale, stepFactor, lightStepFactor (above),
+//                    sppPerFrame, lightCache (below)
+//   held             holdRungs, holdRenderScale, parkedFrames (the hold
+//                    ladder and the capture sections)
+//   look defaults    haze, lodStrength, autoExposure, motionSmoothing,
+//                    motionAlphaFloor (their own sections)
+//   the night city   cityLodStrength, cityRoofDensity
+//
+// `sppPerFrame` is how many jittered marches go into ONE presented frame.
+// Every tier but Max takes a single one and leans on accumulation across
+// frames instead; Max pays for the noise up front so that a frame is clean
+// while it is still moving. See drawFrame for why that is eight separate
+// submissions rather than one eight-times-longer pass.
+//
+// `lightCache` is the tier's lighting method: every tier but Max reads the
+// sun's optical depth from the baked light cache instead of marching to
+// the sun at each sample. The selected tier governs it outright: the hold
+// ladder sharpens a parked view's sampling toward High's step factors, but
+// never switches the method, so Max's march stays live when parked. A
+// capture at the tier chosen on its own panel marches what a parked view
+// at that tier converges to: the tier's lighting method, sample count and
+// look defaults, with the top hold rung's sampling (High's step factors),
+// never the flight stepping below. See Renderer.beginOffline.
+//
+// `haze` is the aerosol coordinate; the comment gives its sea-level
+// e-folding length.
 export const QUALITY_PRESETS = {
-  // `sppPerFrame` is how many jittered marches go into ONE presented frame.
-  // Every tier but Max takes a single one and leans on accumulation across
-  // frames instead; Max pays for the noise up front so that a frame is clean
-  // while it is still moving. See drawFrame for why that is eight separate
-  // submissions rather than one eight-times-longer pass.
-  //
-  // `lightCache` is the tier's lighting method: every tier but Max reads the
-  // sun's optical depth from the baked light cache instead of marching to
-  // the sun at each sample. The selected tier governs it outright: the hold
-  // ladder sharpens a parked view's sampling toward High's step factors, but
-  // never switches the method, so Max's march stays live when parked. A
-  // capture at the tier chosen on its own panel marches what a parked view
-  // at that tier converges to: the tier's lighting method, sample count and
-  // look defaults, with the top hold rung's sampling (High's step factors),
-  // never the flight stepping below. See Renderer.beginOffline.
-  max:    { name: "max",    label: "Max",    renderScale: 1.0,
-            stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
-            lightCache: false },
-  high:   { name: "high",   label: "High",   renderScale: 1.0,
-            stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 1,
-            lightCache: true },
-  medium: { name: "medium", label: "Medium", renderScale: 0.70,
-            stepFactor: 2.5, lightStepFactor: 4.0, sppPerFrame: 1,
-            lightCache: true },
-  low:    { name: "low",    label: "Low",    renderScale: 0.30,
-            stepFactor: 3.0, lightStepFactor: 8.0, sppPerFrame: 1,
-            lightCache: true },
+  max: {
+    name: "max", label: "Max",
+    renderScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    sppPerFrame: 8, lightCache: false,
+    holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
+    haze: -0.0380,       // 70 km
+    lodStrength: 0.5, autoExposure: true,
+    motionSmoothing: 0.30, motionAlphaFloor: 0.30,
+    cityLodStrength: 0.01, cityRoofDensity: 1.4,
+  },
+  high: {
+    name: "high", label: "High",
+    renderScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    sppPerFrame: 1, lightCache: true,
+    holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
+    haze: -0.0380,       // 70 km
+    lodStrength: 0.5, autoExposure: true,
+    motionSmoothing: 0.55, motionAlphaFloor: 0.30,
+    cityLodStrength: 0.01, cityRoofDensity: 1.4,
+  },
+  medium: {
+    name: "medium", label: "Medium",
+    renderScale: 0.70, stepFactor: 2.5, lightStepFactor: 4.0,
+    sppPerFrame: 1, lightCache: true,
+    holdRungs: [], holdRenderScale: 1.0, parkedFrames: 24,
+    haze: 0.4027,        // 25.2 km
+    lodStrength: 1.05, autoExposure: true,
+    motionSmoothing: 0.50, motionAlphaFloor: 0.24,
+    cityLodStrength: 0.03, cityRoofDensity: 1.2,
+  },
+  low: {
+    name: "low", label: "Low",
+    renderScale: 0.30, stepFactor: 3.0, lightStepFactor: 8.0,
+    sppPerFrame: 1, lightCache: true,
+    holdRungs: [{ scale: 0.50, sampling: "low" }],
+    holdRenderScale: 0.5, parkedFrames: 16,
+    haze: 0.6590,        // 15 km
+    lodStrength: 2.0, autoExposure: true,
+    motionSmoothing: 0.60, motionAlphaFloor: 0.20,
+    cityLodStrength: 0.1, cityRoofDensity: 0.7,
+  },
   // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
   // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
   // an eighth is four times fewer pixels than a quarter, which brings that
   // back inside a vsync. The name is plain "Minimal" because it is user-facing
   // in the startup toast, on exactly the machines a jokier name would insult.
-  minimal: { name: "minimal", label: "Minimal",
-            renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
-            sppPerFrame: 1,
-            lightCache: true },
+  minimal: {
+    name: "minimal", label: "Minimal",
+    renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
+    sppPerFrame: 1, lightCache: true,
+    holdRungs: [{ scale: 0.25, sampling: "minimal" }],
+    holdRenderScale: 0.25, parkedFrames: 8,
+    haze: 1.0905,        // 8 km
+    lodStrength: 3.0, autoExposure: false,
+    motionSmoothing: 0.80, motionAlphaFloor: 0.15,
+    cityLodStrength: 0.5, cityRoofDensity: 0.5,
+  },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // The surface stages each traced surface runs before the march, in order:
@@ -617,19 +650,11 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // exposes as its own slider next to the flight one. Splitting the two is
 // what lets "how sharp it gets when I stop" be a number the user sets rather
 // than a table entry they cannot see.
-export const QUALITY_HOLD_RUNGS = {
-  max:    [],
-  high:   [],
-  medium: [],
-  low:    [{ scale: 0.50, sampling: "low" }],
-  minimal: [{ scale: 0.25, sampling: "minimal" }],
-};
+// Per tier: QUALITY_PRESETS[tier].holdRungs.
 // Where each tier converges when it is held: the top rung's scale, at High's
 // sampling. Equal to the flight scale on High and Max, which is why their
 // ladders collapse to one rung and a hold there merely accumulates.
-export const HOLD_RENDER_SCALE_BY_TIER = {
-  max: 1.0, high: 1.0, medium: 1.0, low: 0.5, minimal: 0.25,
-};
+// Per tier: QUALITY_PRESETS[tier].holdRenderScale.
 // Accumulated frames to spend on a rung before climbing to the next. Small,
 // because the point of the low rungs is to show *something* settled while the
 // expensive one is still being paid for; the top rung is where convergence
@@ -668,7 +693,7 @@ export const LIVE_STEAM_TIERS = Object.freeze(["max", "high", "medium"]);
 // ever wait for while parked.
 export const HOLD_MAX_FRAME_MS = 400.0;
 
-// The sample count a held view settles at — PARKED_ACCUM_FRAMES_BY_TIER — is
+// The sample count a held view settles at, the tier's parkedFrames, is
 // defined under "capture" below, because a capture's count is the same table.
 
 // --- the startup auto-tier probe -----------------------------------------
@@ -894,7 +919,7 @@ export const COMPASS_EDGES = [
 // --- capture --------------------------------------------------------------
 
 // A capture's spp is not its own constant or slider: it is the chosen
-// tier's parked count from PARKED_ACCUM_FRAMES_BY_TIER below, exactly what
+// tier's parkedFrames, exactly what
 // a parked view at that tier settles at. The Advanced
 // panel's override slider runs over this range.
 export const PARKED_SPP_LIMITS = [4, 64];
@@ -913,9 +938,7 @@ export const PARKED_SPP_LIMITS = [4, 64];
 //
 // So parking stops where the returns stop, sooner on the tiers that can
 // least afford not to.
-export const PARKED_ACCUM_FRAMES_BY_TIER = {
-  max: 32, high: 32, medium: 24, low: 16, minimal: 8,
-};
+// Per tier: QUALITY_PRESETS[tier].parkedFrames.
 
 // Which picture a held view settles to.
 //

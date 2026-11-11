@@ -160,19 +160,19 @@ export const settings = {
    */
   _applyTierDefaults(tier) {
     if (!this._byHand.has("haze")) {
-      this.setHaze(K.DEFAULT_HAZE_BY_TIER[tier], { byHand: false });
+      this.setHaze(K.QUALITY_PRESETS[tier].haze, { byHand: false });
     }
     if (!this._byHand.has("autoExposure")) {
-      this.setAutoExposure(K.AUTO_EXPOSURE_DEFAULT_BY_TIER[tier] ?? false,
+      this.setAutoExposure(K.QUALITY_PRESETS[tier].autoExposure ?? false,
                            { byHand: false });
     }
     if (!this._byHand.has("lod")) {
       this.setLodStrength(
-        K.lodStrengthByTier(this.scene?.city)[tier], { byHand: false });
+        K.tierLodStrength(tier, this.scene?.city), { byHand: false });
     }
     const smoothing = this._byHand.has("smoothing")
       ? this.motionSmoothing
-      : K.DEFAULT_MOTION_SMOOTHING_BY_TIER[tier];
+      : K.QUALITY_PRESETS[tier].motionSmoothing;
     this.setMotionSmoothing(smoothing, { byHand: false });
   },
 
@@ -252,7 +252,7 @@ export const settings = {
 
   get parkedSpp() {
     return this.renderer.parkedSppOverride
-      ?? K.PARKED_ACCUM_FRAMES_BY_TIER[this.renderer.qualityTier];
+      ?? K.QUALITY_PRESETS[this.renderer.qualityTier].parkedFrames;
   },
 
   setLightCache(on) {

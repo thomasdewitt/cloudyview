@@ -39,6 +39,10 @@ _JS = textwrap.dedent("""
     import { Renderer } from "%s";
     import * as K from "%s";
 
+    // One field of the tier record, as a table by tier.
+    const by = (field) => Object.fromEntries(
+      Object.entries(K.QUALITY_PRESETS).map(([t, p]) => [t, p[field]]));
+
     // A viewer stub carrying only what the look/metadata paths read. The
     // methods under test are the real prototype's.
     const makeViewer = (over = {}) => {
@@ -213,17 +217,17 @@ _JS = textwrap.dedent("""
         surfacePeriod: payload.surface_period_m,
         render: payload.header.render,
         expected: autoExposureTarget(4.0, 15),
-        videoHaze: K.DEFAULT_HAZE_BY_TIER.high,
+        videoHaze: K.QUALITY_PRESETS.high.haze,
       };
     }
 
     out.tables = {
-      haze: K.DEFAULT_HAZE_BY_TIER, lod: K.DEFAULT_LOD_STRENGTH_BY_TIER,
+      haze: by("haze"), lod: by("lodStrength"),
       cityParked: K.CITY_PARKED_LOD_STRENGTH,
-      cityTable: K.CITY_LOD_STRENGTH_BY_TIER,
+      cityTable: by("cityLodStrength"),
       defaultExposure: K.DEFAULT_EXPOSURE,
       high: K.QUALITY_PRESETS.high,
-      parkedFrames: K.PARKED_ACCUM_FRAMES_BY_TIER,
+      parkedFrames: by("parkedFrames"),
     };
     process.stdout.write(JSON.stringify(out));
 """) % (VIEWER_JS, RENDERER_JS, CONSTANTS_JS)

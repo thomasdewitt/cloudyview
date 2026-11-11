@@ -1083,7 +1083,7 @@ export class UI {
         const tier = app.captureVideoTier;
         const preset = app.capturePresetTier(tier);
         note.textContent =
-          `${K.PARKED_ACCUM_FRAMES_BY_TIER[preset]} samples ` +
+          `${K.QUALITY_PRESETS[preset].parkedFrames} samples ` +
           `per pixel at the ` +
           `${tier === "custom" ? "Custom"
              : K.QUALITY_PRESETS[preset].label.split(" —")[0]} ` +
@@ -1185,8 +1185,8 @@ export class UI {
 
     m.append(el("div", "divider"));
     m.append(item("Save a still",
-                  `${K.PARKED_ACCUM_FRAMES_BY_TIER[
-                    app.capturePresetTier(app.captureStillTier)]} ` +
+                  `${K.QUALITY_PRESETS[
+                    app.capturePresetTier(app.captureStillTier)].parkedFrames} ` +
                   "samples per pixel, then a PNG download · shortcut: P",
                   () => app.saveScreenshot()));
 

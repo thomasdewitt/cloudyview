@@ -277,7 +277,7 @@ export class Renderer {
     this.periodic = true;
     this.qualityTier = K.DEFAULT_QUALITY_TIER;
     this._flightRenderScale = K.QUALITY_PRESETS[this.qualityTier].renderScale;
-    this._holdRenderScale = K.HOLD_RENDER_SCALE_BY_TIER[this.qualityTier];
+    this._holdRenderScale = K.QUALITY_PRESETS[this.qualityTier].holdRenderScale;
     this._cameraMoving = false;
     this._holdLadder = null;
     this._holdRung = 0;
@@ -434,7 +434,7 @@ export class Renderer {
     this._lightBake = null;           // in-flight bake state, or null
     this.lightCacheMode = "auto";
     // Advanced-panel override for the parked sample count; null follows
-    // PARKED_ACCUM_FRAMES_BY_TIER.
+    // the tier's parkedFrames.
     this.parkedSppOverride = null;
     this._lightCacheReady = false;
     this.refreshBindGroup();
@@ -624,7 +624,7 @@ export class Renderer {
     return this._flightRenderScale
         !== K.QUALITY_PRESETS[this.qualityTier].renderScale
       || this._holdRenderScale
-        !== K.HOLD_RENDER_SCALE_BY_TIER[this.qualityTier];
+        !== K.QUALITY_PRESETS[this.qualityTier].holdRenderScale;
   }
 
   setQualityTier(tier, cameraMoving = null) {
@@ -636,7 +636,7 @@ export class Renderer {
     // Both scales come from the tier. A hand-set scale does not survive a
     // tier change, and never has — the tier is the coarser choice.
     this._flightRenderScale = K.QUALITY_PRESETS[tier].renderScale;
-    this._holdRenderScale = K.HOLD_RENDER_SCALE_BY_TIER[tier];
+    this._holdRenderScale = K.QUALITY_PRESETS[tier].holdRenderScale;
     this._applyEffectiveQuality();
     this.prefetchPipelines();
   }
@@ -677,7 +677,7 @@ export class Renderer {
    *
    * Rung 0 is the flight configuration — the tier's own sampling at whatever
    * render scale is in force, which is the preset's unless the Quality
-   * panel's slider has overridden it. Above it come QUALITY_HOLD_RUNGS'
+   * panel's slider has overridden it. Above it come the tier's holdRungs'
    * stepping stones and then the hold scale itself, minus any that would not
    * actually be an improvement on the rung below. That last rule is what
    * makes both hand-set scales behave: raise the flight scale to the hold
@@ -698,7 +698,7 @@ export class Renderer {
       // hold slider down to (or below) the flight scale must collapse the
       // ladder, and it would not if an intermediate rung were still allowed
       // to climb past the destination.
-      ...K.QUALITY_HOLD_RUNGS[this.qualityTier].filter(
+      ...K.QUALITY_PRESETS[this.qualityTier].holdRungs.filter(
         (step) => step.scale < this._holdRenderScale),
       // The top rung is the hold scale, sampled like High: whatever tier flew
       // you here, a settled picture is stepped and lit the same. A hold scale
@@ -831,7 +831,7 @@ export class Renderer {
     // loop still sleeps, holding a frame that looks like the one you fly on.
     if (this._holdMode === "live") return this.sppPerFrame;
     return this.parkedSppOverride
-      ?? K.PARKED_ACCUM_FRAMES_BY_TIER[this.qualityTier];
+      ?? K.QUALITY_PRESETS[this.qualityTier].parkedFrames;
   }
 
   get holdMode() { return this._holdMode; }
@@ -1560,7 +1560,7 @@ export class Renderer {
    *
    * The one deviation from "parked, full stop": render scale is 1.0 at the
    * capture's explicit pixel size, not the tier's hold-scale cap
-   * (HOLD_RENDER_SCALE_BY_TIER). Those caps are interactivity
+   * (the tier's holdRenderScale). Those caps are interactivity
    * concessions — a frame someone is waiting to fly out of — and a capture
    * has no frame to protect.
    */

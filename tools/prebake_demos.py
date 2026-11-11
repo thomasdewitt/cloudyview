@@ -66,7 +66,7 @@ from export_web_assets import _volume_aabb
 #
 # Haze is a function of the quality tier in the app, so the still takes the
 # max tier's: a capture at a named tier is the pure preset and takes
-# DEFAULT_HAZE_BY_TIER's value (web/soar/constants.js; max is a 70 km
+# that tier's haze (web/soar/constants.js QUALITY_PRESETS; max's is a 70 km
 # sea-level e-folding), and a flight at max or high opens at that same haze,
 # so a still is rendered with max's little haze, not a hazier default.
 # Restated because Python cannot import that ES module;

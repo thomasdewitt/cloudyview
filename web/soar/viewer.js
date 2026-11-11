@@ -72,10 +72,10 @@ export class Viewer {
     // hand; the pre-probe initial state matches the default tier's.
     this.exposure = K.DEFAULT_EXPOSURE;
     this.autoExposure =
-      K.AUTO_EXPOSURE_DEFAULT_BY_TIER[K.DEFAULT_QUALITY_TIER] ?? false;
+      K.QUALITY_PRESETS[K.DEFAULT_QUALITY_TIER].autoExposure ?? false;
     this._aeLastMeterMs = 0;
     this._aeSettled = false;
-    this.lodStrength = K.DEFAULT_LOD_STRENGTH_BY_TIER[K.DEFAULT_QUALITY_TIER];
+    this.lodStrength = K.QUALITY_PRESETS[K.DEFAULT_QUALITY_TIER].lodStrength;
     // Three settings carry a per-tier default (haze, motion smoothing, LOD
     // strength) and the tier is chosen by measurement, so it can change under
     // the user twice in the first second. A setting the user has touched is

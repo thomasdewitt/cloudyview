@@ -249,7 +249,7 @@ async function runScene(name, server, dataBase) {
 
   await step(name, "park and converge", `
     await t.until(() => s.renderer.converged, 120000, "a parked view to converge");
-    const need = K.PARKED_ACCUM_FRAMES_BY_TIER.low;
+    const need = K.QUALITY_PRESETS.low.parkedFrames;
     t.expect(s.renderer.accumCount >= need,
              "at least " + need + " accumulated samples, got " + s.renderer.accumCount);
     t.expect(!s.renderer.cameraMoving, "a still camera");

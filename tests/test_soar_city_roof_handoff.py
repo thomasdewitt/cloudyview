@@ -96,7 +96,7 @@ VIEWS = {
 }
 W, H = 480, 270
 FRAMES = 32
-# Two tiers' roof clutter densities (CITY_ROOF_DENSITY_BY_TIER: low, high).
+# Two tiers' roof clutter densities (the tiers' city_roof_density: low, high).
 DENSITIES = (0.7, 1.4)
 
 

@@ -95,7 +95,7 @@ export const commands = {
         // false for a still, which is always dry. A track without the key
         // (older than the switch) replays dry.
         lens_water: Boolean(lensWater),
-        accumulate_frames: K.PARKED_ACCUM_FRAMES_BY_TIER[look.preset],
+        accumulate_frames: K.QUALITY_PRESETS[look.preset].parkedFrames,
         tone_map_gamma: this.toneMapGamma,
         tone_map_white_point: this.toneMapWhitePoint,
         contrast: this.contrast,

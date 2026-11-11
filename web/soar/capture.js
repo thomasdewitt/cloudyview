@@ -83,7 +83,7 @@ export function captureFrames(tier) {
   const preset = K.QUALITY_PRESETS[tier];
   if (!preset) throw new Error(`unknown capture tier '${tier}'.`);
   return Math.max(1, Math.round(
-    K.PARKED_ACCUM_FRAMES_BY_TIER[tier] / (preset.sppPerFrame ?? 1)));
+    K.QUALITY_PRESETS[tier].parkedFrames / (preset.sppPerFrame ?? 1)));
 }
 
 /**

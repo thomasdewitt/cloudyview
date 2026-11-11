@@ -418,7 +418,7 @@ fn cc_rooftopworks_mech_on(cc: CityCell) -> bool {
 }
 
 // The clutter's density at this tier (u.roof_density, the hosts'
-// CITY_ROOF_DENSITY_BY_TIER; 1 as the roofs were tuned): a factor on the
+// the tiers' cityRoofDensity; 1 as the roofs were tuned): a factor on the
 // clutter families' slot probabilities, each held to 1. The stair, its lift
 // room, the crown and the skylights are not clutter and do not scale.
 fn cc_rooftopworks_density() -> f32 {
@@ -1023,7 +1023,7 @@ fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
 // shader's own spots over the props' own faces, at the footprint where the
 // props hand over (tests/test_soar_city_roof_lamps.py, which pins them).
 // Tank lamps per m^2 of deck, on roofs with clutter, at the clutter
-// densities the tiers use (CITY_ROOF_DENSITY_BY_TIER: 0.5, 0.7, 1, 1.2,
+// densities the tiers use (their cityRoofDensity: 0.5, 0.7, 1, 1.2,
 // 1.4); a slot's probability is held to 1, so it is not proportional. Linear
 // between them (cc_rooftopworks_mech_rho).
 const cc_rooftopworks_MECH_RHO_D: vec4<f32> = vec4<f32>(0.5, 0.7, 1.0, 1.2);

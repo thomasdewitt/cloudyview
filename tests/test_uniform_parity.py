@@ -358,17 +358,20 @@ def test_roof_density_tables_agree():
     must be the same table."""
     import re
     text = (REPO / "web" / "soar" / "constants.js").read_text()
-    m = re.search(r"CITY_ROOF_DENSITY_BY_TIER = \{([^}]*)\}", text)
-    assert m, "CITY_ROOF_DENSITY_BY_TIER not found in constants.js"
-    js = {k: float(v) for k, v in
-          re.findall(r"(\w+):\s*([0-9.]+)", m.group(1))}
-    assert js == tiers.CITY_ROOF_DENSITY_BY_TIER
-    # One density per quality tier, every one inside the range the far mean
-    # is measured over (the packers refuse anything else).
-    assert set(tiers.CITY_ROOF_DENSITY_BY_TIER) == set(tiers.QUALITY_PRESETS)
+    js = json.loads(subprocess.run(
+        ["node", "--input-type=module", "-e",
+         'import { QUALITY_PRESETS as Q } from "%s";'
+         "console.log(JSON.stringify(Object.fromEntries(Object.entries(Q)"
+         ".map(([tier, p]) => [tier, p.cityRoofDensity]))));"
+         % (REPO / "web" / "soar" / "constants.js").as_uri()],
+        capture_output=True, text=True, check=True).stdout)
+    python = {tier: p["city_roof_density"]
+              for tier, p in tiers.QUALITY_PRESETS.items()}
+    assert js == python
+    # Every density is inside the range the far mean is measured over (the
+    # packers refuse anything else).
     lo, hi = tiers.CITY_ROOF_DENSITY_RANGE
-    assert all(lo <= d <= hi
-               for d in tiers.CITY_ROOF_DENSITY_BY_TIER.values())
+    assert all(lo <= d <= hi for d in python.values())
     m = re.search(r"CITY_ROOF_DENSITY_RANGE = \[([^\]]*)\]", text)
     assert m and [float(v) for v in m.group(1).split(",")] == [lo, hi]
 

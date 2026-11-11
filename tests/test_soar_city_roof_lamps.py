@@ -15,7 +15,7 @@ cells, and the shipped constants must match them:
 1. MECH_RHO_AT: over the urban roofs with clutter, the tank lamps per
    square metre of summit deck (in the cell's own column, less the tier
    standing on it), at each clutter density the tiers use (MECH_RHO_D, the
-   hosts' CITY_ROOF_DENSITY_BY_TIER, plus 1 as tuned).
+   hosts' per-tier roof densities, plus 1 as tuned).
 2. The table FAR_i_*, at each of its handoff footprints (FAR_i_MECH.w): per
    tank lamp the spots' integral over its housing's four sides together and
    over its top (MECH .xy); per lit bulkhead over its door face (less what
@@ -421,11 +421,11 @@ def test_tank_lamp_density(probes, i):
 
 
 def test_density_nodes_are_the_tiers():
-    from cloudyview.soar.tiers import CITY_ROOF_DENSITY_BY_TIER
+    from cloudyview.soar.tiers import QUALITY_PRESETS
     d = list(_shipped("MECH_RHO_D")) + [float(_shipped("MECH_RHO_D4"))]
     # Every tier's density is a node, so the far mean is measured, not
     # interpolated, at each.
-    assert set(CITY_ROOF_DENSITY_BY_TIER.values()) <= set(d)
+    assert {p["city_roof_density"] for p in QUALITY_PRESETS.values()} <= set(d)
 
 
 @pytest.mark.gpu

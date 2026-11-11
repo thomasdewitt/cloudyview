@@ -58,7 +58,6 @@ from .soar.surfaces import (
     surface_period_m,
 )
 from .soar.tiers import (
-    CITY_ROOF_DENSITY_BY_TIER,
     QUALITY_PRESETS,
 )
 from .soar.uniforms import (
@@ -391,7 +390,7 @@ def render_nested(
         scene_time=float(scene_time),
         # The roofs' clutter follows the tier, as in the browser; a render
         # with no tier gets the density the roofs were tuned at.
-        city_roof_density=(CITY_ROOF_DENSITY_BY_TIER[quality] if tier
+        city_roof_density=(tier["city_roof_density"] if tier
                            else 1.0),
     )
     if verbose:

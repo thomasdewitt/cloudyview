@@ -631,7 +631,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
     from .soar.renderer import SoarRenderer
     from .soar.surfaces import (surface_cell_m, surface_clock_period_s,
                                 surface_period_m)
-    from .soar.tiers import CITY_ROOF_DENSITY_BY_TIER, QUALITY_PRESETS
+    from .soar.tiers import QUALITY_PRESETS
     from .soar.uniforms import (APP_LIGHT_MARCH_LOD_DEGREES,
                                 APP_VIEW_STEP_LOD_DEGREES,
                                 DEFAULT_OCEAN_REFLECTANCE, SceneState,
@@ -745,7 +745,7 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
             light_cache=bool(preset["light_cache"]),
             frame_index=index * FRAME_INDEX_STRIDE,
             scene_time=frame.scene_time,
-            city_roof_density=CITY_ROOF_DENSITY_BY_TIER[s.quality],
+            city_roof_density=preset["city_roof_density"],
         )
 
     def state_for(frame: TrackFrame, view: ViewState) -> SceneState:

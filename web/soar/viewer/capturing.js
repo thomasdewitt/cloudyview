@@ -83,12 +83,12 @@ export const capturing = {
     this.capturePresetTier(tier);   // validates the name
     return {
       tier, preset: tier,
-      haze: K.DEFAULT_HAZE_BY_TIER[tier],
+      haze: K.QUALITY_PRESETS[tier].haze,
       hazeHeightDependent: this.hazeHeightDependent,
       lodStrength: this.scene?.city
-        ? K.CITY_PARKED_LOD_STRENGTH : K.DEFAULT_LOD_STRENGTH_BY_TIER[tier],
+        ? K.CITY_PARKED_LOD_STRENGTH : K.QUALITY_PRESETS[tier].lodStrength,
       exposure: K.DEFAULT_EXPOSURE,
-      meter: Boolean(K.AUTO_EXPOSURE_DEFAULT_BY_TIER[tier]),
+      meter: Boolean(K.QUALITY_PRESETS[tier].autoExposure),
     };
   },
 

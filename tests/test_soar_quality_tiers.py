@@ -52,12 +52,16 @@ _JS = textwrap.dedent("""
     import { hazeEFoldingKm, HAZE_MIN } from "%s";
     import { Renderer } from "%s";
 
+    // One field of the tier record, as a table by tier.
+    const by = (field) => Object.fromEntries(
+      Object.entries(K.QUALITY_PRESETS).map(([t, p]) => [t, p[field]]));
+
     // The real builder, which is pure — no device, no textures.
     function ladderFor(tier, holdScale) {
       const r = Object.create(Renderer.prototype);
       r.qualityTier = tier;
       r._flightRenderScale = K.QUALITY_PRESETS[tier].renderScale;
-      r._holdRenderScale = holdScale ?? K.HOLD_RENDER_SCALE_BY_TIER[tier];
+      r._holdRenderScale = holdScale ?? K.QUALITY_PRESETS[tier].holdRenderScale;
       r._buildHoldLadder();
       return r._holdLadder;
     }
@@ -69,25 +73,25 @@ _JS = textwrap.dedent("""
     process.stdout.write(JSON.stringify({
       tierNames: K.QUALITY_TIER_NAMES,
       cheapestFirst: K.QUALITY_TIERS_CHEAPEST_FIRST,
-      parked: K.PARKED_ACCUM_FRAMES_BY_TIER,
+      parked: by("parkedFrames"),
       parkedSppLimits: K.PARKED_SPP_LIMITS,
-      alphaFloor: K.MOTION_ALPHA_FLOOR_BY_TIER,
+      alphaFloor: by("motionAlphaFloor"),
       alphaAtZero: K.MOTION_ALPHA_AT_ZERO_SMOOTHING,
-      defaultSmoothing: K.DEFAULT_MOTION_SMOOTHING_BY_TIER,
+      defaultSmoothing: by("motionSmoothing"),
       legacyAlpha: K.DEFAULT_MOTION_BLEND_ALPHA,
-      defaultHaze: K.DEFAULT_HAZE_BY_TIER,
+      defaultHaze: by("haze"),
       hazeMax: K.HAZE_MAX,
       hazeMin: HAZE_MIN,
       hazeMaxEFoldingKm: K.HAZE_MAX_E_FOLDING_KM,
-      defaultLod: K.DEFAULT_LOD_STRENGTH_BY_TIER,
+      defaultLod: by("lodStrength"),
       lodLimits: K.LOD_STRENGTH_LIMITS,
       lodDegrees: [K.APP_LIGHT_MARCH_LOD_DEGREES, K.APP_VIEW_STEP_LOD_DEGREES],
       holdModes: K.HOLD_MODES,
       defaultHoldMode: K.DEFAULT_HOLD_MODE,
       defaultPreview: K.DEFAULT_QUALITY_PREVIEW,
       presets: K.QUALITY_PRESETS,
-      holdRungs: K.QUALITY_HOLD_RUNGS,
-      holdScale: K.HOLD_RENDER_SCALE_BY_TIER,
+      holdRungs: by("holdRungs"),
+      holdScale: by("holdRenderScale"),
       minRenderScale: K.MIN_RENDER_SCALE,
       alphaFor: Object.fromEntries(tiers.map((t) => [
         t, smoothingSweep.map((s) => K.motionAlphaForSmoothing(s, t))])),
