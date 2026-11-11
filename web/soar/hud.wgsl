@@ -34,7 +34,7 @@ struct HudUniforms {
 // ends.
 //
 // Duplicated from MAP_ACCENT in constants.js because a shader constant
-// cannot import; tests/test_map_ramp_parity.py fails if the two drift.
+// cannot import; tests/app/test_map_ramp_parity.py fails if the two drift.
 const ACCENT: vec3<f32> = vec3<f32>(232.0 / 255.0, 131.0 / 255.0, 74.0 / 255.0);
 const WHITE: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 const INK: vec3<f32> = vec3<f32>(0.02, 0.025, 0.035);

@@ -13,7 +13,7 @@ Destinations (name the ones to write):
                     another field from the same seed). A new tile also
                     needs ocean.wgsl's fif_slope_variance table, the
                     @domain bound on its normals and OCEAN_GLINT_ROUGHNESS
-                    re-measured (tests/test_ocean_tile_bytes.py holds the
+                    re-measured (tests/renderer/test_ocean_tile_bytes.py holds the
                     first two to the bytes).
 
 Cloud fields are not exported here. Each demo field is baked separately by

@@ -3,7 +3,7 @@
 // Sources: cloudyview/soar/look.py (shared with witness),
 // cloudyview/soar/uniforms.py, cloudyview/soar/surfaces.py and
 // cloudyview/soar/tiers.py. A value that drifts from its Python twin silently
-// changes the picture, so tests/test_uniform_parity.py runs this file under
+// changes the picture, so tests/app/test_uniform_parity.py runs this file under
 // node and diffs the packed uniform block against pack_uniforms. Change one,
 // change both.
 
@@ -132,7 +132,7 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // would raise a different, wrong city without a single error. The schema also
 // versions the tile's bin URLs (scene.js loadOceanTile), so a bump reaches
 // every visitor past any cache. Pinned against the tiles and against
-// soar/surfaces.py SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
+// soar/surfaces.py SURFACE_TILE_SCHEMAS by tests/city/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
   ocean: "cloudyview.web.ocean.v2",
   city: "cloudyview.web.city.v2",
@@ -146,7 +146,7 @@ export const SURFACE_TILE_SCHEMAS = {
 // 1500 m/s recorded at 20 fps (75 m a sample) would slide the sea. It is
 // also the period tracks recorded over a moving sea carry, so they replay as
 // recorded. Pinned against soar/surfaces.py SURFACE_FRAME_TILES by
-// tests/test_surface_tile_loader.py.
+// tests/app/test_surface_tile_loader.py.
 export const SURFACE_FRAME_TILES = { ocean: 16, city: 1 };
 // From the same still the start camera and the landing backdrop come from:
 // the moon the view was composed under is part of the view.
@@ -396,7 +396,7 @@ export const CITY_PARKED_LOD_STRENGTH = 0.01;
 // probabilities (tanks, condensers, vents, pipe runs, packaged units; never
 // the stair or the skylights), u.roof_density. 1 is the density the roofs were
 // tuned at. Twin of cloudyview/soar/tiers.py's city_roof_density
-// (tests/test_uniform_parity.py pins them).
+// (tests/app/test_uniform_parity.py pins them).
 // Per tier: QUALITY_PRESETS[tier].cityRoofDensity.
 // The densities the shader's far mean is measured over
 // (cc_rooftopworks_mech_rho's nodes): a density outside them would draw a
@@ -425,7 +425,7 @@ export const LOD_STRENGTH_LIMITS = [0.01, 3.0];
 // the city — so what a still marches is what a parked T view marches.
 //
 // Mirrors soar/uniforms.py DEFAULT_LOD_STRENGTH, and
-// tests/test_uniform_parity.py compares the two hosts' defaults directly,
+// tests/app/test_uniform_parity.py compares the two hosts' defaults directly,
 // which is why this is one named constant rather than a 0.5 written into
 // three call sites.
 export const DEFAULT_LOD_STRENGTH = 0.5;
@@ -586,7 +586,7 @@ export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // last writing the surface the march reads. The city: its boxes, the facade
 // shell (fs_surface_refine), the street (fs_surface_street).
 // soar/surfaces.py SURFACE_STAGES is the Python twin (pinned by
-// tests/test_surface_stages.py); renderer.js derives the rest from it.
+// tests/app/test_surface_stages.py); renderer.js derives the rest from it.
 export const SURFACE_STAGES = {
   city: ["fs_surface", "fs_surface_refine", "fs_surface_street"],
 };
@@ -664,7 +664,7 @@ export const HOLD_RUNG_FRAMES = 4;
 // Above this altitude no steam can be in view, so a parked city view may
 // sleep again: the steam stands below cc_manholesteam_ZTOP (15 m) and is
 // marched only to cc_manholesteam_RANGE (360 m) along the ray
-// (city/components/manholesteam.wgsl; tests/test_live_steam.py pins
+// (city/components/manholesteam.wgsl; tests/city/test_live_steam.py pins
 // the sum). Below it the live view's steam keeps the loop awake, parked or
 // paused (Renderer.drawFrame's liveSteam).
 export const LIVE_STEAM_CEILING_M = 375.0;
@@ -1036,7 +1036,7 @@ export const MAP_OPACITY = 0.74;
 // which is why this is a ramp and not a single blue lerped to white.
 //
 // Kept byte-for-byte with cloudyview/image.py's `cloud_colors` by
-// tests/test_map_ramp_parity.py, because a comment saying "the same ramp" is
+// tests/app/test_map_ramp_parity.py, because a comment saying "the same ramp" is
 // exactly what stops being true.
 export const MAP_CLOUD_RAMP = [
   [0.00, [0x06 / 255, 0x1a / 255, 0x3c / 255]],

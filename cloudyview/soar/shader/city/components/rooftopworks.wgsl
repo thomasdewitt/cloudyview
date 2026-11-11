@@ -1021,7 +1021,7 @@ fn cc_rooftopworks_sky_mean(sk: cc_rooftopworks_Sky, blo: vec2<f32>,
 //   handoff's spot width, tabled with the rest).
 // The constants were measured by a probe that integrates the prop
 // shader's own spots over the props' own faces, at the footprint where the
-// props hand over (tests/test_soar_city_roof_lamps.py, which pins them).
+// props hand over (tests/city/test_soar_city_roof_lamps.py, which pins them).
 // Tank lamps per m^2 of deck, on roofs with clutter, at the clutter
 // densities the tiers use (their cityRoofDensity: 0.5, 0.7, 1, 1.2,
 // 1.4); a slot's probability is held to 1, so it is not proportional. Linear

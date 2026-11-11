@@ -14,7 +14,11 @@ import cloudyview  # noqa: F401
 # Path Configuration
 # =============================================================================
 
-PROJECT_ROOT = Path(__file__).parent.parent
+# The repository root. Tests sit in sub-packages of tests/ (library/, app/,
+# renderer/, city/, lint/, tooling/), so a test computing this from its own
+# __file__ would need to know its depth; they import it from here instead.
+REPO = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = REPO
 DATA_DIR = PROJECT_ROOT / "data"
 REFERENCE_DIR = Path(__file__).parent / "reference_images"
 

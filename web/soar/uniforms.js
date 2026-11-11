@@ -2,7 +2,7 @@
 //
 // The Uniforms struct in shader/uniforms.wgsl declares the layout and says
 // what each slot is. The Python host packs the same block
-// (cloudyview/soar/uniforms.py), and tests/test_uniform_parity.py diffs the
+// (cloudyview/soar/uniforms.py), and tests/app/test_uniform_parity.py diffs the
 // two byte for byte.
 
 "use strict";

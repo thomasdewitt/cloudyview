@@ -70,7 +70,7 @@ from export_web_assets import _volume_aabb
 # sea-level e-folding), and a flight at max or high opens at that same haze,
 # so a still is rendered with max's little haze, not a hazier default.
 # Restated because Python cannot import that ES module;
-# tests/test_soar_meter_grid.py pins the two equal.
+# tests/app/test_soar_meter_grid.py pins the two equal.
 MAX_TIER_HAZE = -0.0380
 
 LOOK_DEFAULTS = {
@@ -1000,7 +1000,7 @@ AE_RESPONSE = 0.5
 AE_LIMITS = (1.0, 4.0)
 # The meter's ray grid: the still's shape at about AE_METER_RAYS rays, the
 # browser's rule (uniforms.js meterSize, AUTO_EXPOSURE_METER_RAYS; pinned by
-# tests/test_soar_meter_grid.py). The grid takes the output's shape, because
+# tests/app/test_soar_meter_grid.py). The grid takes the output's shape, because
 # a fixed 64x36 only has square pixels at 16:9.
 AE_METER_RAYS = 64 * 36
 

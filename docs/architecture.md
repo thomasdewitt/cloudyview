@@ -37,7 +37,9 @@ cloudyview/               the Python package
     renderer.py           SoarRenderer: the wgpu host
 web/soar/                 the browser app (ES modules, no build step)
 tools/                    tile and demo bakers, deploy staging, and checks
-tests/
+tests/                    library/ (the package and CLIs), app/ (web/soar under
+                          node), renderer/ (the shader on a GPU, the sea),
+                          city/, lint/ (source checks), tooling/ (tools/)
 docs/
 ```
 
@@ -75,7 +77,7 @@ The host puts a header of compile-time switches in front:
 `PERIODIC_DOMAIN`, `NESTED`, `TONE_MAP`, `LIGHT_CACHE`. They are
 constants so that the branch not taken costs nothing. `shader.py` and
 `web/soar/shader.js` build the module the same way, and
-`tests/test_uniform_parity.py` checks they produce the same string.
+`tests/app/test_uniform_parity.py` checks they produce the same string.
 
 ### The uniform block
 

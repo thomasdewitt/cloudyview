@@ -147,7 +147,7 @@ const OCEAN_HAZE_BETA_RATIO =
  *
  * h**1.5 is spelled h*sqrt(h) because sqrt is correctly rounded by IEEE-754
  * and Math.pow is not: this number is packed into a uniform block that
- * tests/test_uniform_parity.py diffs byte for byte against Python.
+ * tests/app/test_uniform_parity.py diffs byte for byte against Python.
  */
 export function aerialBetaPerKm(haze) {
   return AERIAL_BETA_FLOOR_PER_KM

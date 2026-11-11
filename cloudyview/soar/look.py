@@ -4,7 +4,7 @@ model that reddens the sun, sky and ambient light as the sun gets low.
 soar/uniforms.py packs the results into the shader's uniform block. The
 look's fixed strengths are constants in the shader itself. The browser has
 its own copy of this file (web/soar/spectral.js and part of constants.js),
-and tests/test_uniform_parity.py holds the two together.
+and tests/app/test_uniform_parity.py holds the two together.
 """
 
 import math

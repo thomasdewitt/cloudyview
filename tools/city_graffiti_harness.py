@@ -12,7 +12,7 @@ a renderer:
   means   measure the painted areas the far mean needs (CITY_GRAFFITI_A_*,
           _RHO_*) from the shader's own shapes, and print them.
   rungs   average FINE, MID and FAR over many runs at a set of heights;
-          they must agree (tests/test_city_graffiti.py holds them to it).
+          they must agree (tests/city/test_city_graffiti.py holds them to it).
   panel   chosen bands of the wall, each beside a reference photograph
           (temp/references/graffiti), for judging the look.
 

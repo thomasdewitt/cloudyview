@@ -3,7 +3,7 @@
 SceneState is the field and the surface under it; ViewState is one frame's
 camera, sun and look. pack_uniforms turns the pair into the 26 rows of four
 float32 that shader/uniforms.wgsl declares. The browser packs the same block
-in web/soar/uniforms.js, and tests/test_uniform_parity.py compares the two
+in web/soar/uniforms.js, and tests/app/test_uniform_parity.py compares the two
 byte for byte, so the arithmetic here is written to match the JavaScript:
 the order of operations, where float64 narrows to float32, and which
 functions are used (sqrt and fmod are correctly rounded everywhere; pow is
@@ -130,7 +130,7 @@ def direction_from_azimuth_elevation(azimuth_deg: float,
 
     camera.py has a function of the same name that computes the same vector
     with numpy's cos and sin. This one uses math's, which is what
-    tests/test_uniform_parity.py holds byte for byte against the browser's
+    tests/app/test_uniform_parity.py holds byte for byte against the browser's
     Math.cos and Math.sin. The two agree to the bit where numpy calls the C
     library, but numpy may use its own vectorized cos and sin on other
     machines, so the uniform block keeps its own.

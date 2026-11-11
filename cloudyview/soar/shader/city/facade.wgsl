@@ -32,7 +32,7 @@
 // glass through the opening (city_recess_off), so at the hand-off the
 // resolved shell IS the flat facade: same point, same glass, same
 // function. The flat facade's octave ladder carries the far field from
-// there. tests/test_soar_city_shell_continuity.py holds this.
+// there. tests/city/test_soar_city_shell_continuity.py holds this.
 //
 // Light. At night a wall is seen by what lights it: the lit pane in its own
 // reveal (the jambs and the sill catch the room's light — a rectangle-source
@@ -48,7 +48,7 @@ const CITY_KIND_SHELL: i32 = 1000;  // 1000 + part + 16 * (side + 4 * tier)
 // than this is clamped to it. The flight collider (web/soar/citylots.js
 // shellDepth) grows each building by its own style's depth, mirrored from
 // city_shell_style, so the camera is never inside a feature — change a
-// relief depth there and tests/test_city_lots_mirror.py says so.
+// relief depth there and tests/city/test_city_lots_mirror.py says so.
 const CITY_SHELL_OUT_MAX: f32 = 1.5;
 const CITY_SHELL_FP_MORPH: f32 = 0.4;
 const CITY_SHELL_FP_BLEND: f32 = 0.6;

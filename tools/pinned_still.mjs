@@ -17,7 +17,7 @@
 // sea, the city is cyberpunk mode's first case. The tree is served here on a
 // fresh port (tools/soar_cdp.mjs) and its shader hash is printed with the
 // stills. CDP_PORT is a Chrome with --remote-debugging-port and a hardware
-// WebGPU adapter (see tests/test_tint_compile.py). The live loop is held off
+// WebGPU adapter (see tests/lint/test_tint_compile.py). The live loop is held off
 // while each still renders (the viewer's own capture flag), and every
 // pipeline and the sun-tau bake are settled first, so nothing but the tree
 // can move a byte.

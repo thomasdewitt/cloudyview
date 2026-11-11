@@ -188,7 +188,7 @@ fn city_flood_pool(f: CityFlood, p: vec2<f32>) -> f32 {
     return exp(-0.5 * (qa * qa + qb * qb));
 }
 
-// erf, Abramowitz & Stegun 7.1.26 (|error| < 1.5e-7). tests/test_city_floods.py
+// erf, Abramowitz & Stegun 7.1.26 (|error| < 1.5e-7). tests/city/test_city_floods.py
 // pins these coefficients and the integral below against brute force.
 fn city_erf(x: f32) -> f32 {
     let a = abs(x);

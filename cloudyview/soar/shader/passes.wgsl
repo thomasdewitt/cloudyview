@@ -155,7 +155,7 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // f below ~6.7e-4, sigma below ~2.2e-5 m^-1. The test is not sigma == 0
 // because a field's clear air can carry a faint positive tail, and the
 // camera samples sigma trilinearly. There the lens drains at K_DRY_CLEAR,
-// reaching 5% in 5 s. tests/test_lens_water.py holds the same law in numpy.
+// reaching 5% in 5 s. tests/renderer/test_lens_water.py holds the same law in numpy.
 const LENS_L_WET: f32 = 30.0;       // m of cloud path that fogs the lens
 const LENS_K_WET: f32 = 0.6;        // 1/s
 const LENS_K_DRY: f32 = 0.2;        // 1/s, in cloud

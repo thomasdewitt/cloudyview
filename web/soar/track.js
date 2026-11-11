@@ -1,5 +1,5 @@
 // Flight-track recording and resampling. cloudyview/track.py's resampler is
-// a port of this one, pinned against it by tests/test_track_resample.py.
+// a port of this one, pinned against it by tests/library/test_track_resample.py.
 //
 // Recording captures only the TRACK — per-frame (t, camera) samples plus the
 // render header — not pixels. The video pass then resamples that track at an

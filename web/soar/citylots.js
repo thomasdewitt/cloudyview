@@ -12,7 +12,7 @@
 // inside). So the port
 // is literal: the same hashes bit for bit, the same draws in the same order,
 // the same variable names, and the storey quantization evaluated in float32
-// the way the GPU evaluates it. tests/test_city_lots_mirror.py runs the WGSL
+// the way the GPU evaluates it. tests/city/test_city_lots_mirror.py runs the WGSL
 // city_cell on the GPU over a couple of thousand cells and holds this file to
 // it.
 //
@@ -1181,7 +1181,7 @@ export class CityLots {
   /**
    * The growth must stay under a cell for the 3 x 3 walk to be exact. A
    * radius may also be a hair negative, the solids shrunk rather than grown
-   * (to SHRINK_MAX): tests/test_city_props_mirror.py brackets the GPU's
+   * (to SHRINK_MAX): tests/city/test_city_props_mirror.py brackets the GPU's
    * float32 decision at an edge between a grown and a shrunk sweep.
    */
   _checkReach(r) {

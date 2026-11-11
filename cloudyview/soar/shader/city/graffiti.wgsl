@@ -62,7 +62,7 @@
 // colour and coverage — conditional on the run's level, which a far run
 // still shows. The areas the expectations need are the shader's own shapes,
 // measured (tools/city_graffiti_harness.py means) and pinned by
-// tests/test_city_graffiti.py; the palettes' means are exact.
+// tests/city/test_city_graffiti.py; the palettes' means are exact.
 
 struct CityGraffitiRun {
     seed: vec2<u32>,   // the run's own draw
@@ -134,7 +134,7 @@ const CITY_GRAFFITI_TAG_MID1: f32 = 0.15;
 // A tag's strokes lose area where they meet as the filter widens: at a
 // junction the blurred union counts one footprint's width of stroke once
 // where it is painted twice. Measured (tools/city_graffiti_harness.py
-// bias; tests/test_city_graffiti.py), the loss is TAG_LOSS f^2 (f the
+// bias; tests/city/test_city_graffiti.py), the loss is TAG_LOSS f^2 (f the
 // footprint in units of the tag's height), within half a percent to
 // TAG_MID1; FINE puts it back.
 const CITY_GRAFFITI_TAG_LOSS: f32 = 4.5;
@@ -159,7 +159,7 @@ const CITY_GRAFFITI_TAG_A1: f32 = 2.6;
 
 // Painted areas, in units of h^2 (letters: per glyph; buff and tags: per
 // unit of box, L h), from the shader's own shapes
-// (tools/city_graffiti_harness.py means; tests/test_city_graffiti.py).
+// (tools/city_graffiti_harness.py means; tests/city/test_city_graffiti.py).
 // Letters, per glyph (E[area] / E[n]): the fill (the shine painted over it
 // included), the shine, the outline ring, the drips, and a piece's splash
 // ring. Buff and tags, per unit of box (E[area] / E[L], L in h).

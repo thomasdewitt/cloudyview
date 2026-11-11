@@ -65,7 +65,7 @@ from scipy import ndimage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
 
-# The city shader has the same numbers; tests/test_city_lots.py pins them.
+# The city shader has the same numbers; tests/city/test_city_lots.py pins them.
 EMPTY_RANK = 0.22
 SPRAWL_RANK_FULL = 0.60
 SPRAWL_MIN_FRAC = 0.15

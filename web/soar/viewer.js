@@ -49,7 +49,7 @@ export function presentFormat(preferred) {
 }
 
 // Exported for tests, which drive its prototype methods against stubs —
-// see tests/test_soar_load_panels.py. boot() is still the way to build one.
+// see tests/app/test_soar_viewer_state.py. boot() is still the way to build one.
 export class Viewer {
   constructor(device, canvas, uiRoot) {
     this.device = device;

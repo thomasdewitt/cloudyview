@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Hold two versions of the soar shader against each other, in raw float.
 
-The golden images (tests/test_soar_witness_renders.py) compare 8-bit PNGs
+The golden images (tests/renderer/test_soar_witness_renders.py) compare 8-bit PNGs
 with a tolerance, so they cannot tell a 3 percent exposure nudge from a
 sampling difference. This renders a fixed set of views to the float32
 accumulator and compares them exactly. It is the check for a change that

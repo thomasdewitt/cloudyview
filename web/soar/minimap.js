@@ -97,7 +97,7 @@ export function sampleCloudRamp(t) {
 // These six are the shader's (city/layout.wgsl), restated because a shader
 // constant cannot
 // be imported and this arithmetic runs on the CPU.
-// tests/test_city_frame_parity.py fails if any of them drifts.
+// tests/city/test_city_frame_parity.py fails if any of them drifts.
 const CITY_MAP_EMPTY_RANK = 0.22;
 const CITY_MAP_SPRAWL_RANK_FULL = 0.60;
 const CITY_MAP_SPRAWL_MIN_FRAC = 0.15;

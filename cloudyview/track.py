@@ -16,7 +16,7 @@ to video"), and the two exist for different reasons: the in-tab render is
 what a visitor to the site gets; this one is what a GPU under your own
 control gets — a render that survives the tab, and a terminal to watch it
 from. The resampler here and track.js's are one algorithm in two languages,
-pinned against each other by tests/test_track_resample.py.
+pinned against each other by tests/library/test_track_resample.py.
 
 Track schema (shared with the browser, which wrote it):
 

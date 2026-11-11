@@ -4,7 +4,7 @@
 // everything the components add that a flight can run into, mirrored from
 // their WGSL (cloudyview/soar/shader/city/components/) the way citylots.js mirrors
 // city_cell — the same constants by the same names, the same draws in the
-// same order — and held to the renderer by tests/test_city_props_mirror.py,
+// same order — and held to the renderer by tests/city/test_city_props_mirror.py,
 // which traces the shader's own city on the GPU and asks this file where
 // each of those rays first meets something.
 //
