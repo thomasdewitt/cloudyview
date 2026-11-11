@@ -6,7 +6,7 @@ value came from. tone_map is invertible wherever its clamps do not bite;
 there tone_unmap must return the radiance, and tone_map of what it returns
 must be the displayed value. This runs the two WGSL functions as written —
 cut out of raymarch.wgsl by name, over a stub of the two uniforms they read
-(u.flags.w, the white point; u.ocean_realism_b.w, the contrast) — over
+(u.white_point, the white point; u.contrast, the contrast) — over
 radiances from deep shadow through the shoulder, at the ends of every
 slider's range. It also holds the two cases codex found broken in the
 first version: a highlight in the shoulder where its fixed point
@@ -49,7 +49,8 @@ def _module_source():
     functions = "\n\n".join(_extract(source, f) for f in (
         "tone_map", "tone_unmap_channels", "tone_unmap"))
     return textwrap.dedent("""
-        struct Uniforms { flags: vec4<f32>, ocean_realism_b: vec4<f32>, }
+        struct Uniforms { white_point: f32, gamma: f32, contrast: f32,
+                          pad: f32, }
         @group(0) @binding(0) var<uniform> u: Uniforms;
         @group(0) @binding(1) var<storage, read> inp: array<vec4<f32>>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -60,7 +61,7 @@ def _module_source():
         fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let i = id.x;
             if (i >= arrayLength(&inp)) { return; }
-            let gamma = u.ocean_realism_b.x;
+            let gamma = u.gamma;
             var d = inp[i].xyz;
             if (inp[i].w < 0.5) { d = tone_map(inp[i].xyz, EXPOSURE, gamma); }
             let e = tone_unmap(d, EXPOSURE, gamma);
@@ -86,7 +87,7 @@ def run():
     def go(rows, gamma, white_point, contrast):
         rows = np.ascontiguousarray(rows, dtype=np.float32)
         ubuf = device.create_buffer_with_data(
-            data=np.array([0, 0, 0, white_point, gamma, 0, 0, contrast],
+            data=np.array([white_point, gamma, contrast, 0],
                           dtype=np.float32).tobytes(),
             usage=wgpu.BufferUsage.UNIFORM)
         ibuf = device.create_buffer_with_data(
@@ -98,7 +99,7 @@ def run():
         bind = device.create_bind_group(
             layout=pipeline.get_bind_group_layout(0), entries=[
                 {"binding": 0, "resource": {"buffer": ubuf, "offset": 0,
-                                            "size": 32}},
+                                            "size": 16}},
                 {"binding": 1, "resource": {"buffer": ibuf, "offset": 0,
                                             "size": rows.nbytes}},
                 {"binding": 2, "resource": {"buffer": obuf, "offset": 0,

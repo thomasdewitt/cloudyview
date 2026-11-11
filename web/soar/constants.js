@@ -25,9 +25,6 @@ export const ATMOSPHERE_AEROSOL_ANGSTROM = 1.3;
 export const ATMOSPHERE_RGB_WAVELENGTHS_NM = [680.0, 550.0, 460.0];
 export const SUNSET_HORIZON_RADIANCE = [0.42, 0.20, 0.055];
 
-export const LOW_SUN_SKY_FIELD_STRENGTH = 1.0;
-export const CONE_STENCIL_THETA_DEG = 2.0;
-
 export const LIGHT_TRANSFER_SPLIT_STRENGTH = 1.0;
 export const LIGHT_TRANSFER_FULL_ELEVATION_DEG = 45.0;
 export const LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG = 55.0;
@@ -42,18 +39,6 @@ export const AERIAL_SCALE_HEIGHT_M = 2500.0;
 // cheapest range lever there is. Mirrors soar_host.ViewState.
 export const DEFAULT_HAZE_HEIGHT_DEPENDENT = false;
 
-export const OCEAN_REALISM = 1.0;
-export const OCEAN_MIP_BIAS = -0.5;
-export const OCEAN_GLINT_STRENGTH = 0.85;
-// The glint's base roughness: the slope variance below the static tile's
-// 0.1 m texels, as alpha — the sea's whole mean square slope Cox & Munk's at
-// ~7 m/s with the tile's own, and the reflection Thomas kept. Mirrors
-// look.py, which says how it was fitted.
-export const OCEAN_GLINT_ROUGHNESS = 0.170;
-// How much of the slope variance the normal-mip filter removed the sky
-// reflection integrates over (four deterministic taps). Mirrors look.py.
-export const OCEAN_SLOPE_RESOLVED_FRACTION = 0.5;
-export const OCEAN_SKY_SHADOW_FLOOR = 0.75;
 export const OCEAN_HAZE_EXTINCTION_PER_KM = 0.012;
 
 // One knob for the whole aerosol story — aerial extinction, the horizon
@@ -123,7 +108,6 @@ export const DEFAULT_SUN_ELEVATION = 55.0;
 // nearest case it does not touch is DYCOMS at 30.5.
 export const MIN_START_SUN_ELEVATION = 30.0;
 export const DEFAULT_EXPOSURE = 4.0;
-export const DEFAULT_G_HG = 0.76;
 export const DEFAULT_AMBIENT_STRENGTH = 0.15;
 // NB: config.py's witness block carries a different (brighter) ocean
 // reflectance. soar uses this one — do not cross the wires.
@@ -223,14 +207,6 @@ export const CITY_TUTORIAL_CAMERA = {
 // anything SPEED_LIMITS allows; this is only where the session starts, and
 // where R returns it to.
 export const CITY_DEFAULT_SPEED = 20.0;
-
-export const DEFAULT_GRADIENT_SHADING_STRENGTH = 1.50;
-export const DEFAULT_GRADIENT_COARSE_WEIGHT = 0.65;
-export const DEFAULT_GRADIENT_COARSE_RADIUS_M = 500.0;
-export const DEFAULT_DEEP_SHADOW_MS_SUPPRESSION = 0.90;
-export const DEFAULT_AMBIENT_OCCLUSION_STRENGTH = 1.00;
-export const DEFAULT_AMBIENT_OCCLUSION_FLOOR = 0.24;
-export const DEFAULT_BOUNCE_DEPTH_ATTENUATION = 0.80;
 
 export const PERIODIC_AIR_TAU_CUTOFF = 3.912023005428146;  // -ln(0.02)
 export const PERIODIC_MAX_RANGE_M = 4.0e5;
@@ -448,7 +424,7 @@ export const CITY_PARKED_LOD_STRENGTH = 0.01;
 // more for high tier where we can afford it and less for low and minimal?
 // More on med too."): a factor on rooftopworks' clutter families' slot
 // probabilities (tanks, condensers, vents, pipe runs, packaged units; never
-// the stair or the skylights), row 25.x. 1 is the density the roofs were
+// the stair or the skylights), u.roof_density. 1 is the density the roofs were
 // tuned at. Twin of cloudyview/soar_host.py CITY_ROOF_DENSITY_BY_TIER
 // (tests/test_uniform_parity.py pins them).
 export const CITY_ROOF_DENSITY_BY_TIER = {
@@ -488,10 +464,9 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
-// Row 24 is the surface offset the water samples and the city frame are
-// derived from — see raymarch.wgsl's surface_offset. Row 25 (the 26th and
-// last) is the city's look knobs — see raymarch.wgsl's city_look.
-export const UNIFORM_ROWS = 26;
+// Rows of four floats in the uniform block; shader/uniforms.wgsl declares
+// what each holds.
+export const UNIFORM_ROWS = 21;
 // DERIVED, never written out. These were two independent literals until a row
 // was added and only one of them moved: the packer produced 384 bytes, the
 // buffer stayed 368, and every draw failed validation with a black screen.

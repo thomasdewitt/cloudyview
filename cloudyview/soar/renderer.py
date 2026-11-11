@@ -25,7 +25,8 @@ from .surfaces import (SURFACE_DIRS, SURFACE_FORMAT_CHANNELS, SURFACE_STAGES,
                        SURFACE_TILE_SCHEMAS, VEIL_STAGES, check_surface,
                        decode_surface_level, surface_level_files,
                        surface_stage_plan)
-from .uniforms import UNIFORM_NBYTES, SceneState, ViewState, pack_uniforms
+from .uniforms import (SLOT_BAKE_SLICE, SLOT_LENS_DT, UNIFORM_NBYTES,
+                       SceneState, ViewState, pack_uniforms)
 
 # Passes render() accumulates when the caller does not say.
 STILL_ACCUMULATE_FRAMES = 64
@@ -176,7 +177,7 @@ class SoarRenderer:
         # bake_light_cache replaces it with a real cache.
         self._light_tau_tex = self._dummy_volume()
         # Binding 8 is the browser's ice-detection mode. It is never read
-        # here (row 23.w stays 0), but the layout requires it.
+        # here (u.ice_mode stays 0), but the layout requires it.
         self._ice_frac_tex = self._dummy_volume()
         # Group 1's stand-ins: what the march reads there over a surface
         # with no stages.
@@ -465,8 +466,8 @@ class SoarRenderer:
 
     def _ray_pipeline_for(self, view: "ViewState"):
         """The march pipeline for the lighting method `view` asks for: the
-        same two flags pack_uniforms writes into row 23, so the row and the
-        compiled method cannot disagree."""
+        same two flags pack_uniforms writes into the block, so the block and
+        the compiled method cannot disagree."""
         return self._pipeline_for("fs_main", SAMPLE_FORMAT, self._view_spec(view),
                                   layout=self._march_pipeline_layout)
 
@@ -665,7 +666,7 @@ class SoarRenderer:
         bake_pipeline = self._bake_pipeline()
         for ix in range(cx):
             u = base.copy()
-            u[23, 1] = float(ix)
+            u[SLOT_BAKE_SLICE] = float(ix)
             self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
             enc = self.device.create_command_encoder()
             rp = enc.begin_render_pass(color_attachments=[{
@@ -868,7 +869,7 @@ class SoarRenderer:
 
     def _lens_pass(self, state: SceneState, view: ViewState, final, dt: float):
         """One step of the lens state (fs_lens_state in shader/passes.wgsl,
-        dt in row 24.w), then the accumulated image `final` through it
+        dt in u.lens_dt), then the accumulated image `final` through it
         (shader/lens.wgsl). Returns the texture the post pass wrote."""
         if not (math.isfinite(dt) and dt >= 0.0):
             raise ValueError(f"lens_dt must be a finite dt >= 0; got {dt}.")
@@ -882,7 +883,7 @@ class SoarRenderer:
         if self._lens_out is None or self._lens_out[0] != (w, h):
             self._lens_out = ((w, h), self._make_target((w, h), ACCUM_FORMAT))
         u = pack_uniforms(state, view)
-        u[24, 3] = dt
+        u[SLOT_LENS_DT] = dt
         self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
         prev, nxt = self._lens_index, 1 - self._lens_index
         pipeline = self._pipeline_for("fs_lens_state", SURFACE_FORMAT,

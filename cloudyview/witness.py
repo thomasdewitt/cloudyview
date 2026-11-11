@@ -349,8 +349,8 @@ def render_nested(
         state_kwargs["surface_offset_m"] = tuple(origin)
     if surface == "city":
         state_kwargs["city_tile_offset_m"] = tuple(city_offset)
-    # Row 9 of the uniforms describes whichever tile the renderer bound, so
-    # it comes from that tile's own meta.json.
+    # The tile's cell size, extent and top mip describe whichever tile the
+    # renderer bound, so they come from that tile's own meta.json.
     meta = renderer.surface_meta
     state = SceneState(
         bmin=[float(v) for v in outer.bmin], bmax=[float(v) for v in outer.bmax],
@@ -556,8 +556,8 @@ def witness(
         and number of passes.
     surface_origin : (x, y), optional
         The surface offset of the flight being reproduced, in world metres
-        (uniform row 24; the shader derives the water pattern and the
-        city's frame from world minus this, mod the surface period). Omitted
+        (the shader derives the water pattern and the city's frame from
+        world minus this, mod the surface period). Omitted
         means the scene's static offset, which is every fresh render; soar's
         reproduction commands write a flight's own offset here.
     surface : str
@@ -569,7 +569,7 @@ def witness(
         standing under the field. Required with surface="city" and refused
         otherwise; soar's cyberpunk mode flies (8100, -44190).
     scene_time : float
-        The scene clock in seconds (uniform row 24.z): where the city's
+        The scene clock in seconds: where the city's
         steam is in its motion. Refused, unless 0, over a surface with no
         clock (the sea); soar's reproduction commands write the clock the
         still was taken at.
@@ -844,7 +844,7 @@ def cli():
     parser.add_argument("--surface-origin", type=float, nargs=2,
                         metavar=('X', 'Y'),
                         help="The surface offset of the flight being "
-                             "reproduced, in metres (uniform row 24). "
+                             "reproduced, in metres. "
                              "Omitted means the scene's static offset, "
                              "which is every fresh render; a soar "
                              "reproduction command writes the flown "

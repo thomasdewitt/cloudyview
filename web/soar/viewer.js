@@ -231,7 +231,7 @@ export class Viewer {
     this.paused = true;
     this.captured = false;
     this.frameIndex = 0;
-    // The scene clock (s), uniform row 24.z, read by what moves in the
+    // The scene clock (s), u.scene_clock, read by what moves in the
     // scene (the city's steam; the sea has no clock and packs 0). It runs only while the view is flying or a track is being
     // recorded, never while paused — so a parked view is a still scene and
     // its accumulation converges, and a held shot keeps the steam it was
@@ -2546,7 +2546,7 @@ export class Viewer {
   /**
    * The camera pose a resampled track frame renders from. The frame's
    * surface offset rides on the pose the same way the camera origin does —
-   * packUniforms derives row 24 from a pose that carries a surfacePosition
+   * packUniforms derives u.surface_offset from a pose that carries a surfacePosition
    * (world metres, like the live camera's). A v1 track has no surface
    * frame: over a city the frame's world xy folds against the static offset
    * instead, and over the day ocean the null pose frame makes packUniforms
@@ -2700,7 +2700,7 @@ export class Viewer {
           position_m: cityPos,
           tile_offset_m: [...this.scene.cityOffsetM],
           tile_extent_m: this.scene.oceanTileExtent,
-          // The surface offset this render carried (uniform row 24; the
+          // The surface offset this render carried (u.surface_offset; the
           // static offset mod the tile until a period crossing moves it).
           // With the folded camera position above, this — not
           // tile_offset_m — is what reproduces the district and the water
@@ -2745,7 +2745,7 @@ export class Viewer {
         haze_height_dependent: look.hazeHeightDependent,
         // The scene clock the still was taken at (witness --time): for a
         // surface with a clock (the city's steam), and 0 over one without
-        // (the sea), as row 24.z is.
+        // (the sea), as u.scene_clock is.
         scene_time: this.scene.clockPeriod === null ? 0 : this.sceneTime,
         exposure: look.exposure,
         lod_strength: look.lodStrength,
@@ -3040,7 +3040,7 @@ export class Viewer {
    * overrides — the terminal panel — the live values go out.
    */
   /**
-   * The surface offset this view renders with (uniform row 24, folded into
+   * The surface offset this view renders with (u.surface_offset, folded into
    * [0, tileExtent)): the same fold-first subtraction packUniforms makes,
    * or null when the camera has no surface frame.
    */
@@ -3099,7 +3099,7 @@ export class Viewer {
       "--sun-azimuth", n(this.sunAzimuth),
       "--sun-elevation", n(this.sunElevation),
       // The scene clock the view was held at: the city's steam. A surface
-      // with no clock (the sea) reads none — row 24.z is 0
+      // with no clock (the sea) reads none — u.scene_clock is 0
       // there — so it writes none.
       ...(this.scene.clockPeriod === null ? [] : ["--time", n(this.sceneTime)]),
       // What the world stands on, always written: without it a cyberpunk
@@ -3147,7 +3147,7 @@ export class Viewer {
    * frame to protect. Only when the slider is not hand-set (a hand-set
    * slider is the user's, moving or parked) and the hold mode is not "live"
    * (what you flew on is what you keep). The LOD angles sit in the scene key
-   * (uniform row 20.y/z), so the flip restarts accumulation by itself, once,
+   * (u.light_lod_tan, u.view_lod_tan), so the flip restarts accumulation by itself, once,
    * at the moment of parking — which parking does anyway.
    */
   _liveLodStrength() {

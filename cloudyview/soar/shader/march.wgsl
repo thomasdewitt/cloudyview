@@ -84,7 +84,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let ocean_on = !CITY && u.surface_enabled > 0.5;
     var t_ocean = 1e30;
     if (ocean_on && dir.z < -1e-8) {
-        let t_ocean_candidate = (u.surface.x - u.cam_origin.z) / dir.z;
+        let t_ocean_candidate = (u.surface_z - u.cam_origin.z) / dir.z;
         if (t_ocean_candidate > 0.0) {
             t_ocean = t_ocean_candidate;
         }

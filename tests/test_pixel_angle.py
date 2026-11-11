@@ -21,11 +21,8 @@ Three pins:
     same ray (ndc_y = (h - 2 py - 1) tan(hfov/2) / w), so with jitter off they
     must shade the same water. They agree to float rounding, not bit for bit
     (ndc_y's float arithmetic differs with h): 3e-5 at most on the fix, where
-    the height rule put whole rows of sea 1e-2 to 3e-2 apart. Both of the
-    sea's LOD rules are held: the realism path (ocean_shade_realism), with
-    jitter off, and the legacy realism-0 path (ocean_normal_lod), which runs
-    only with jitter on (u.cam_up.w); pass 0 of an accumulation is
-    unjittered in subpixel, so the one-frame render keeps the rays aligned.
+    the height rule put whole rows of sea 1e-2 to 3e-2 apart. The sea is rendered with
+    jitter off, so the one-frame render keeps the rays aligned.
 """
 
 import re
@@ -39,7 +36,7 @@ from .conftest import shader_paths
 REPO = Path(__file__).resolve().parents[1]
 SOAR = REPO / "cloudyview" / "soar"
 SOURCES = shader_paths()
-PIXEL_ANGLE = "2.0 * u.cam_origin.w / u.params.x"
+PIXEL_ANGLE = "2.0 * u.tan_half_fov / u.image_width"
 
 
 def _code(path):
@@ -50,15 +47,15 @@ def test_tan_half_fov_becomes_a_pixel_angle_in_one_place():
     defs, strays = [], []
     for path in SOURCES:
         for n, line in enumerate(_code(path).splitlines(), 1):
-            if "u.cam_origin.w" not in line:
+            if "u.tan_half_fov" not in line:
                 continue
             if PIXEL_ANGLE in line:
                 defs.append((path.name, n))
-            elif not re.fullmatch(r"\s*let tan_half_fov = u\.cam_origin\.w;",
+            elif not re.fullmatch(r"\s*let tan_half_fov = u\.tan_half_fov;",
                                   line):
                 strays.append((path.name, n, line.strip()))
     assert strays == [], (
-        "a pixel angle (or footprint) computed from u.cam_origin.w outside "
+        "a pixel angle (or footprint) computed from u.tan_half_fov outside "
         f"true_pixel_angle(); call it instead: {strays}")
     assert len(defs) == 1, defs
     body = re.search(r"fn true_pixel_angle\(\) -> f32 \{([^}]*)\}",
@@ -67,12 +64,12 @@ def test_tan_half_fov_becomes_a_pixel_angle_in_one_place():
 
 
 def test_the_image_height_is_read_only_to_place_the_ray():
-    """A footprint written over the height without u.cam_origin.w would
-    slip past the lint above; u.params.y has one reader, camera_ray."""
+    """A footprint written over the height without u.tan_half_fov would
+    slip past the lint above; u.image_height has one reader, camera_ray."""
     readers = []
     for path in SOURCES:
         code = _code(path)
-        for m in re.finditer(r"u\.params\.y\b", code):
+        for m in re.finditer(r"u\.image_height\b", code):
             fn = re.findall(r"\bfn (\w+)\(", code[:m.start()])
             readers.append((path.name, fn[-1] if fn else None))
     assert readers == [("camera.wgsl", "camera_ray")], readers
@@ -84,17 +81,17 @@ def test_the_hosts_floor_the_lod_at_the_shaders_pixel_angle(render_size):
     state = SceneState(bmin=(0.0, 0.0, 0.0), bmax=(1000.0, 1000.0, 1000.0),
                        dt_view=10.0, dt_light=10.0, periodic=False)
     # A view-step LOD far finer than a pixel, so the quarter-pixel floor is
-    # what row 20.z carries.
+    # what u.view_lod_tan carries.
     view = ViewState(camera_position=(500.0, 500.0, 500.0), azimuth=0.0,
                      elevation=0.0, fov=70.0, output_size=render_size,
                      render_size=render_size, view_step_lod_degrees=1e-6)
     u = pack_uniforms(state, view).astype(np.float64)
-    shader_pixel_angle = 2.0 * u[0, 3] / u[7, 0]     # true_pixel_angle()
-    assert u[7, 0] == render_size[0]
-    assert u[20, 2] == pytest.approx(0.25 * shader_pixel_angle, rel=1e-6)
+    shader_pixel_angle = 2.0 * u[0, 3] / u[17, 0]    # true_pixel_angle()
+    assert u[17, 0] == render_size[0]
+    assert u[19, 1] == pytest.approx(0.25 * shader_pixel_angle, rel=1e-6)
 
 
-def _sea(h, realism, jitter, device=None):
+def _sea(h, jitter, device=None):
     from cloudyview.soar.renderer import SoarRenderer
     from cloudyview.soar.surfaces import surface_cell_m
     from cloudyview.soar.uniforms import SceneState, ViewState
@@ -118,13 +115,11 @@ def _sea(h, realism, jitter, device=None):
                      elevation=-12.0, fov=70.0, output_size=(96, h),
                      render_size=(96, h), jitter=jitter, sun_azimuth=210.0,
                      sun_elevation=25.0, exposure=1.0, light_cache=False,
-                     sky_probe=False, ocean_realism=realism)
+                     sky_probe=False)
     return r.render(state, view, frames=1), r.device
 
 
-@pytest.mark.parametrize("realism, jitter", [(1.0, False), (0.0, True)],
-                         ids=["realism", "legacy"])
-def test_a_pixels_sea_does_not_depend_on_the_image_height(realism, jitter):
+def test_a_pixels_sea_does_not_depend_on_the_image_height():
     try:
         from .conftest import soar_gpu_adapter
     except ImportError:
@@ -132,8 +127,8 @@ def test_a_pixels_sea_does_not_depend_on_the_image_height(realism, jitter):
     if soar_gpu_adapter() is None:
         pytest.skip("No GPU adapter available (a software rasterizer does "
                     "not count)")
-    short, device = _sea(54, realism, jitter)
-    tall, _ = _sea(96, realism, jitter, device)
+    short, device = _sea(54, jitter=False)
+    tall, _ = _sea(96, jitter=False, device=device)
     k = (96 - 54) // 2
     same_rays = tall[k:k + 54]
     sea = np.arange(54) >= 30          # the rows below the horizon

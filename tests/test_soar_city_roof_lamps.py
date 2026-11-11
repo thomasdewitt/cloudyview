@@ -168,7 +168,7 @@ fn probe_lamp_door(seat: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>,
 # rest), and the roof hook's own test for a roof it draws on.
 CELL = """        let px = vec2<i32>(i32(clamp(0.5 + 0.7 * dir.x, 0.0, 1.0) * 4096.0),
                            i32(clamp(0.5 + 1.4 * dir.z, 0.0, 0.999) * 4096.0));
-        let ci = vec2<i32>(floor(city_camera_origin().xy / u.ocean_params.x))
+        let ci = vec2<i32>(floor(city_camera_origin().xy / u.tile_cell))
                  + px - vec2<i32>(2048);
         let cc = city_cell(ci);
         if (!cc.built || cc.arch == 4 || cc.land_use != CITY_USE_URBAN) {

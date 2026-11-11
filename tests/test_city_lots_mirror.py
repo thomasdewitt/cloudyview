@@ -216,7 +216,8 @@ def _compute_source():
     assert k == STRIDE
     writes = "\n".join(lines)
     return textwrap.dedent("""
-        struct Uniforms { ocean_params: vec4<f32>, }
+        struct Uniforms { tile_cell: f32, tile_extent: f32,
+                          surface_enabled: f32, tile_max_lod: f32, }
         @group(0) @binding(0) var<uniform> u: Uniforms;
         @group(0) @binding(1) var ocean_normals: texture_2d<f32>;
         @group(0) @binding(2) var<storage, read> cells: array<vec2<i32>>;

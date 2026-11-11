@@ -50,10 +50,10 @@ fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
 }
 
 // Whether the city's steam is left out of the march and drawn after the
-// accumulation by fs_steam_live (row 8.w), where it keeps moving over a
+// accumulation by fs_steam_live (u.steam_live), where it keeps moving over a
 // parked, converging picture. Otherwise it is marched into the veil.
 fn city_steam_live() -> bool {
-    return CITY && u.surface.w > 0.5;
+    return CITY && u.steam_live > 0.5;
 }
 
 // No veil: nothing scattered in, everything let through.
@@ -129,7 +129,7 @@ fn fs_surface_street(@builtin(position) frag_pos: vec4<f32>) -> SurfaceOut {
 // accumulated image. This pass integrates its state, one texel, once per
 // presented frame: x = wetness w in [0, 1], y = w*, the level it is heading
 // for at the present extinction, z and w = 0. The host puts the step's dt in
-// row 24.w: the live view's wall-clock frame time (parked or not: the lens
+// u.lens_dt: the live view's wall-clock frame time (parked or not: the lens
 // keeps wetting in cloud and drying out of it while the camera hovers), or a
 // video's frame interval. Stills pass no state and are dry.
 //

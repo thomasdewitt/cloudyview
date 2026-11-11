@@ -9,7 +9,7 @@ does not show.
 
 The shader's map is one line of raymarch.wgsl:
 
-    let uv = xy / u.ocean_params.y;
+    let uv = xy / u.tile_extent;
 
 where `xy` is the CITY FRAME — world minus the row-24 surface offset, folded
 into the tile (city_camera_origin) — and the sampler repeats, so only the
@@ -68,7 +68,7 @@ def test_shader_samples_the_tile_at_the_city_frame_over_extent():
     source = WGSL.read_text()
     body = re.search(r"fn city_glow_sample\(.*?\n\}", source, re.S)
     assert body is not None, "city_glow_sample is gone from raymarch.wgsl"
-    assert re.search(r"let\s+uv\s*=\s*xy\s*/\s*u\.ocean_params\.y\s*;",
+    assert re.search(r"let\s+uv\s*=\s*xy\s*/\s*u\.tile_extent\s*;",
                      body.group(0)), (
         "the city tile's world->tile map changed; scene.js cityFramePosition, "
         "the minimap's city image, the capture metadata and "

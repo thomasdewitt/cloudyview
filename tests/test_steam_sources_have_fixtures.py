@@ -82,7 +82,8 @@ def _compute_source(source):
                     if re.search(rf"\b{s}\b", body) and s != "Uniforms"]
     consts = "\n".join(re.findall(r"^const\s+\w+\s*:.*?;", source, re.S | re.M))
     return textwrap.dedent("""
-        struct Uniforms { ocean_params: vec4<f32>, }
+        struct Uniforms { tile_cell: f32, tile_extent: f32,
+                          surface_enabled: f32, tile_max_lod: f32, }
         @group(0) @binding(0) var<uniform> u: Uniforms;
         @group(0) @binding(1) var ocean_normals: texture_2d<f32>;
         @group(0) @binding(2) var ocean_samp: sampler;

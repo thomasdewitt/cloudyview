@@ -560,7 +560,8 @@ def fold_tile(v: float, tile: float) -> float:
 
 def surface_offset_for(origin_xy, surface_position_m, tile: float
                        ) -> tuple[float, float]:
-    """Row 24 for a pose that carries its own tile phase.
+    """The surface offset (u.surface_offset) for a pose that carries its own
+    tile phase.
 
     cam.xy minus surfacePosition, each folded into [0, tile) — fold(origin)
     FIRST and the surface position subtracted after, exactly as
@@ -750,7 +751,8 @@ def render_track(track_path, out_path=None, *, field_path=None, size=None,
         )
 
     def state_for(frame: TrackFrame, view: ViewState) -> SceneState:
-        # Row 24 per frame: the pose's own tile phase when the track carries
+        # The surface offset per frame: the pose's own tile phase when the
+        # track carries
         # one; otherwise the static offset the header recorded, every frame.
         if frame.surface_position is None:
             return state

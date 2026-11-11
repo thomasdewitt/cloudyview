@@ -418,7 +418,7 @@ fn cc_rooftopworks_mech_on(cc: CityCell) -> bool {
     return gh.w < cc_rooftopworks_MECH_FRAC;
 }
 
-// The clutter's density at this tier (row 25.x, the hosts'
+// The clutter's density at this tier (u.roof_density, the hosts'
 // CITY_ROOF_DENSITY_BY_TIER; 1 as the roofs were tuned): a factor on the
 // clutter families' slot probabilities, each held to 1. The stair, its lift
 // room, the crown and the skylights are not clutter and do not scale.

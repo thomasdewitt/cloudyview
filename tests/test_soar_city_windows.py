@@ -86,7 +86,7 @@ ROUND_TRIP = """    {
         let mean = city_win_add(city_win_zero(), l, 1.0, fog, true);
         let back = city_windows_resolve(mean, fog, true);
         let err = abs(back - l) / max(l, vec3<f32>(1e-6));
-        let e = u.cam_right.w;
+        let e = u.exposure;
         let d0 = city_display_curve((l * fog.x + fog.yzw) * e);
         let d1 = city_display_curve((back * fog.x + fog.yzw) * e);
         let clip = select(0.0, 1.0, max(max(d0.x, d0.y), d0.z) >= 0.999);
@@ -109,7 +109,7 @@ MIXTURE = """    {
         mean = city_win_add(mean, l2, 0.5, fog, true);
         let back = city_windows_resolve(mean, fog, true);
         let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
-        let e = u.cam_right.w;
+        let e = u.exposure;
         let y = dot(city_display_curve((back * fog.x + fog.yzw) * e), lum);
         let ml = 0.5 * (l1 + l2);
         let ch = abs(back / max(back.x + back.y + back.z, 1e-9)

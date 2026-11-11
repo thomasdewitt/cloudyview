@@ -8,7 +8,7 @@
 "use strict";
 
 import * as K from "./constants.js";
-import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize,
+import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize, SLOT,
          motionAlphaForDt, sceneClock } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
 import { specializeShader, shaderVariantKey } from "./shader.js";
@@ -389,7 +389,7 @@ export class Renderer {
     // nest's. Whether it is read is a per-tier preset choice (see
     // QUALITY_PRESETS.lightCache), with lightCacheMode/skyProbeMode as
     // whole-session overrides for A/B ("auto" follows the rung; "on"/"off"
-    // force). The flag actually packed into row 23 is wanted AND baked — an
+    // force). The flag actually packed into the block is wanted AND baked — an
     // unfinished bake reads the live march, never a half-written cache.
     this._lightTauDummy = device.createTexture({
       label: "soar-light-tau-dummy", size: [1, 1, 1], dimension: "3d",
@@ -401,7 +401,7 @@ export class Renderer {
       { bytesPerRow: 2, rowsPerImage: 1 }, [1, 1, 1]);
     // Binding 8 (ice-detection mode): the scene's ice-fraction
     // volume when it has one, this zero stand-in otherwise. The mode flag is
-    // packed into row 23.w only when a real texture is bound.
+    // packed into u.ice_mode only when a real texture is bound.
     // r8unorm, the one format the ice fraction is stored in anywhere — the
     // demo bake writes it (tools/prebake_demos.py), the NetCDF ingest
     // quantizes to it (ingest/worker.js), and the real texture is created as
@@ -855,7 +855,7 @@ export class Renderer {
     if (periodic === this.periodic) return;
     this.periodic = periodic;
     // Nothing to re-upload: the wrap is a sampler and a shader branch, not
-    // texels. Accumulation resets by itself — row 20.x is in the
+    // texels. Accumulation resets by itself — u.periodic_flag is in the
     // scene-identity key — and the specialized module is picked per frame.
     this.prefetchPipelines();
   }
@@ -1219,8 +1219,10 @@ export class Renderer {
   _accumulationPlan(u, deltaSeconds) {
     const currentKey = sceneKey(
       u, this.maxLightSteps, this._outputW, this._outputH);
-    const origin = [u[0], u[1], u[2]];
-    const forward = [u[4], u[5], u[6]];
+    const origin = [u[SLOT.CAM_ORIGIN], u[SLOT.CAM_ORIGIN + 1],
+                    u[SLOT.CAM_ORIGIN + 2]];
+    const forward = [u[SLOT.CAM_FORWARD], u[SLOT.CAM_FORWARD + 1],
+                     u[SLOT.CAM_FORWARD + 2]];
 
     const prevCount = this._accumCount;
     let nextCount = prevCount + 1;
@@ -1307,7 +1309,7 @@ export class Renderer {
     // from the end of this loop to the first submit nothing awaits, so the
     // specialization, the lighting method, the targets and the uniforms
     // below all describe one moment. The method is read once — it picks the
-    // pipelines and it is what row 23 packs — or a bake finishing between
+    // pipelines and it is what the block packs — or a bake finishing between
     // two reads would march one method under the other's scene key. The
     // pair resolves together, so a frame never encodes one without the
     // other. A variant still compiling is waited out only when the caller
@@ -1365,19 +1367,14 @@ export class Renderer {
     const targetView = typeof target === "function" ? target() : target;
 
     // Pack ONCE, learn the scene key from it, then write the sampling flags
-    // the plan chose straight into row 10's x and y. Those two components are
+    // the plan chose straight into their two slots. Those slots are
     // excluded from the key precisely so this is safe — the flags are outputs
-    // of the decision that produced them and cannot change it. The rest of
-    // row 10 (z = haze) is scene state and is left alone.
-    //
-    // This used to re-pack the whole block instead, which meant running the
-    // spectral sky solve, the light-transfer split and two dozen rows of
-    // trigonometry a second time every frame to alter two floats. Nothing
-    // else in the block depends on subpixel or jitterScale, and nothing here
-    // touches row 10's z or w.
+    // of the decision that produced them and cannot change it. Nothing else
+    // in the block depends on subpixel or jitterScale, so the block is not
+    // packed a second time.
     const state = this._sceneState();
     // The effective flags, not the wishes: a wanted-but-unbaked cache reads
-    // the live march. Row 23 is in the scene key, so a bake completing, a
+    // the live march. The method is in the scene key, so a bake completing, a
     // rung switching methods or an override is a scene change: never
     // averaged with the old method, and with a parked camera a clean
     // restart (see methodKey below).
@@ -1405,22 +1402,22 @@ export class Renderer {
     // The live steam's clock is kept out of the key, as the sampling flags
     // are: written back once the plan is made (the march does not read it;
     // fs_steam_live does).
-    const steamClock = u[24 * 4 + 2];
-    if (steamLive) u[24 * 4 + 2] = 0.0;
+    const steamClock = u[SLOT.SCENE_CLOCK];
+    if (steamLive) u[SLOT.SCENE_CLOCK] = 0.0;
     const plan = accumulate && view.jitter !== false
       ? this._accumulationPlan(u, deltaSeconds)
       : null;
-    u[24 * 4 + 2] = steamClock;
+    u[SLOT.SCENE_CLOCK] = steamClock;
     if (plan) {
-      u[10 * 4] = plan.subpixel ? 1.0 : 0.0;
-      u[10 * 4 + 1] = plan.jitterScale;
+      u[SLOT.SUBPIXEL_JITTER] = plan.subpixel ? 1.0 : 0.0;
+      u[SLOT.JITTER_SCALE] = plan.jitterScale;
     } else {
       this._resetAccumulation();
     }
-    // Row 24.w: lens water's dt for the state pass, which reads nothing
+    // u.lens_dt: lens water's dt for the state pass, which reads nothing
     // else of this frame but the camera. Written after the plan, like the
     // sampling flags, so it is never part of the scene key.
-    u[24 * 4 + 3] = lens ? lens.dt : 0.0;
+    u[SLOT.LENS_DT] = lens ? lens.dt : 0.0;
     this.device.queue.writeBuffer(this.uniformBuf, 0, u);
 
     const encoder = this.device.createCommandEncoder();
@@ -1463,9 +1460,9 @@ export class Renderer {
         // Only the three components that differ between samples of one view,
         // for the reason the full repack is avoided above. None of them is in
         // the scene key, so the key computed once still describes all of them.
-        u[4 * 4 + 3] = (view.frameIndex ?? 0) + s * SPP_FRAME_INDEX_STRIDE;
-        u[10 * 4] = step.subpixel ? 1.0 : 0.0;
-        u[10 * 4 + 1] = step.jitterScale;
+        u[SLOT.FRAME_INDEX] = (view.frameIndex ?? 0) + s * SPP_FRAME_INDEX_STRIDE;
+        u[SLOT.SUBPIXEL_JITTER] = step.subpixel ? 1.0 : 0.0;
+        u[SLOT.JITTER_SCALE] = step.jitterScale;
         this.device.queue.writeBuffer(this.uniformBuf, 0, u);
       }
       // One scratch array for the blend weights, refilled rather than rebuilt.
@@ -1739,7 +1736,7 @@ export class Renderer {
   /**
    * Lens water's state step, once per presented frame: fs_lens_state reads
    * the previous texel and the camera's extinction and writes the other
-   * (row 24.w carries the dt). Returns the texel the present should draw
+   * (u.lens_dt carries the dt). Returns the texel the present should draw
    * through — the dry one when `lens` is null, which also leaves the state
    * untouched (a capture does not wet or dry the live lens).
    */
@@ -1838,7 +1835,7 @@ export class Renderer {
   /**
    * The live steam over the accumulated image `accTex`, into the set's live
    * target, which the present then draws (raymarch.wgsl fs_steam_live): the
-   * steam at the clock in row 24.z, along the last march's rays, to its
+   * steam at the clock in u.scene_clock, along the last march's rays, to its
    * surface. Returns the live target.
    */
   _encodeSteam(encoder, targets, accTex, pipeline) {
@@ -1896,7 +1893,7 @@ export class Renderer {
     const encoder = this.device.createCommandEncoder();
     // The live steam keeps the view's clock on a converged view (`steam`:
     // { sceneTime }), over the last march's accumulated image, rays and
-    // surface: only row 24.z is rewritten. Its pipeline built the last
+    // surface: only u.scene_clock is rewritten. Its pipeline built the last
     // march's frame, so it is ready; a lighting change since (which marches
     // again next frame anyway) skips the steam for this one present.
     let shown = this._lastPresented;
@@ -1910,14 +1907,14 @@ export class Renderer {
       if (pipeline && isPending(pipeline)) pipeline.catch(() => {});
       if (pipeline && !isPending(pipeline)) {
         this.device.queue.writeBuffer(
-          this.uniformBuf, (24 * 4 + 2) * 4, new Float32Array(
+          this.uniformBuf, SLOT.SCENE_CLOCK * 4, new Float32Array(
             [sceneClock(steam.sceneTime, this.scene.clockPeriod)]));
         shown = this._encodeSteam(encoder, this._targets, this._lastPresented,
                                   pipeline);
       }
     }
     // Lens water keeps its own time on a converged view: step it here too,
-    // with only row 24.w rewritten (the rest of the block is still the last
+    // with only u.lens_dt rewritten (the rest of the block is still the last
     // march's, and the camera has not moved). A state pipeline still
     // compiling skips the step and keeps the last texel.
     let lensTex = this._lastLensTex;
@@ -1930,7 +1927,7 @@ export class Renderer {
       }
       if (pipeline && isPending(pipeline)) pipeline.catch(() => {});
       if (pipeline && !isPending(pipeline)) {
-        this.device.queue.writeBuffer(this.uniformBuf, (24 * 4 + 3) * 4,
+        this.device.queue.writeBuffer(this.uniformBuf, SLOT.LENS_DT * 4,
                                       new Float32Array([lens.dt]));
         lensTex = this._encodeLensState(encoder, lens, pipeline);
       }
@@ -1961,8 +1958,8 @@ export class Renderer {
 
   /**
    * The lighting method a march from this renderer runs now: the flags
-   * packUniforms writes into row 23 AND the constants the march pipeline is
-   * specialized on (raymarch.wgsl LIGHT_CACHE, SKY_PROBE), from this one
+   * packUniforms writes into the block AND the switches the march module is
+   * compiled with (LIGHT_CACHE, SKY_PROBE), from this one
    * getter so the two can never disagree.
    *
    * What this frame actually does: hand override, else the SELECTED tier's
@@ -2067,12 +2064,12 @@ export class Renderer {
       ...view, outputSize: [cz, cy], renderSize: [cz, cy],
       subpixel: false, jitterScale: 1.0,
     });
-    // Bake at High's light step whatever tier is flying (row 6.w is the
+    // Bake at High's light step whatever tier is flying (u.dt_light is the
     // step the bake's marches take). The bake is paid once, so it takes the
     // finest quadrature any tier would use — which also makes the cache
     // tier-independent: governor climbs, hold-ladder rungs and tier clicks
     // never stale it. Only the sun does.
-    u[6 * 4 + 3] = this.scene.minVoxelM * K.QUALITY_PRESETS.high.lightStepFactor;
+    u[SLOT.DT_LIGHT] = this.scene.minVoxelM * K.QUALITY_PRESETS.high.lightStepFactor;
     this._lightBake = {
       next: 0, cx, cy, cz, sliceTex, u,
       bindGroup: this.device.createBindGroup({
@@ -2118,7 +2115,7 @@ export class Renderer {
     const sliceView = b.sliceTex.createView();
     const end = Math.min(b.next + Math.max(1, slices), b.cx);
     for (let ix = b.next; ix < end; ix++) {
-      b.u[23 * 4 + 1] = ix;
+      b.u[SLOT.BAKE_SLICE] = ix;
       this.device.queue.writeBuffer(this._bakeUniformBuf, 0, b.u);
       const encoder = this.device.createCommandEncoder();
       const p = encoder.beginRenderPass({

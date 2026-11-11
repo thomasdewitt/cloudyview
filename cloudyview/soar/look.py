@@ -25,7 +25,6 @@ ATMOSPHERE_AEROSOL_ANGSTROM = 1.3
 ATMOSPHERE_RGB_WAVELENGTHS_NM = (680.0, 550.0, 460.0)
 SUNSET_HORIZON_RADIANCE = (0.42, 0.20, 0.055)
 
-LOW_SUN_SKY_FIELD_STRENGTH = 1.0
 LOW_SUN_SKY_WARM_ELEVATION_DEG = 32.0
 LOW_SUN_SKY_HORIZON_AZIMUTH_DEG = 105.0
 LOW_SUN_SKY_UPPER_AZIMUTH_DEG = 45.0
@@ -40,34 +39,15 @@ _LOW_SUN_SKY_UPPER_AZIMUTH_COS = math.cos(math.radians(
     LOW_SUN_SKY_UPPER_AZIMUTH_DEG
 ))
 
-CONE_STENCIL_THETA_DEG = 2.0
-
 LIGHT_TRANSFER_SPLIT_STRENGTH = 1.0
 LIGHT_TRANSFER_DIRECT_BOOST = 0.25
 LIGHT_TRANSFER_SHADOW_SKYLIGHT = 0.26
 LIGHT_TRANSFER_FULL_ELEVATION_DEG = 45.0
 LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG = 55.0
 
-AERIAL_PERSPECTIVE_STRENGTH = 1.0
 AERIAL_BETA_PER_KM = 0.035
 AERIAL_SCALE_HEIGHT_M = 2500.0
 
-OCEAN_REALISM = 1.0
-OCEAN_MIP_BIAS = -0.5
-OCEAN_GLINT_STRENGTH = 0.85
-# The glint's base roughness: the slope variance below the tile's 0.1 m
-# texels, as alpha = sqrt(mss). With the tile's own 0.0097 the sea's mean
-# square slope is 0.0386, Cox & Munk's (0.003 + 0.00512 U) at ~7 m/s. 0.170
-# was tuned so the glint's mean and peak match the reference look (to 1%)
-# both looking down into the glint and at a low sun, as well as the
-# far-field total.
-OCEAN_GLINT_ROUGHNESS = 0.170
-# How much of the slope variance that the normal-mip filter removed the sky
-# reflection integrates over (ocean_sky_reflection in shader/ocean.wgsl,
-# four fixed taps). The sun's glint carries all of it as lobe width either
-# way. 1 = the sky sees the whole spread, 0 = only the mean slope.
-OCEAN_SLOPE_RESOLVED_FRACTION = 0.5
-OCEAN_SKY_SHADOW_FLOOR = 0.75
 OCEAN_HAZE_EXTINCTION_PER_KM = 0.012
 
 # --- haze: one knob for the whole aerosol story ----------------------------

@@ -1,4 +1,4 @@
-// The sea: an opaque plane at z = u.surface.x whose surface is a static wave
+// The sea: an opaque plane at z = u.surface_z whose surface is a static wave
 // field. ocean_shade reflects the rendered sky over the unresolved slope
 // distribution, adds a GGX sun glint drawn as glitter, lights a Lambertian
 // water body, and hazes the water with distance.
@@ -377,7 +377,7 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let diffuse_partition = 1.0 - min(OCEAN_GLINT_STRENGTH, 1.0) * sun_fresnel;
     let diff_irr = t_sun_ocean * reflection.transmitted_n_dot_l
         * 0.3183098861837907 * diffuse_partition;
-    let diffuse = diff_irr * SUN_COLOR * u.surface.yzw;
+    let diffuse = diff_irr * SUN_COLOR * u.water_reflectance;
 
     // Cloud shadow, per term. The sun terms already carry t_sun_ocean. The
     // sky reflection dims only to OCEAN_SKY_SHADOW_FLOOR: under a cloud the water

@@ -283,7 +283,7 @@ const CITY_RAND_MEDIA: u32 = 2u;
 // That is what makes the city a pure function of the tile frame: a tile
 // coordinate names a building, so a replayed track — which serializes only
 // the tile phase — renders the very buildings that were flown past, and the
-// whole-tile ambiguity in row 24's folded offset is invisible.
+// whole-tile ambiguity in u.surface_offset, which is folded, is invisible.
 fn city_tile_cell(ci: vec2<i32>) -> vec2<i32> {
     let dims = textureDimensions(ocean_normals, 0);
     let n = vec2<i32>(i32(dims.x), i32(dims.y));

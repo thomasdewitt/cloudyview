@@ -1,4 +1,4 @@
-"""The Python host and the browser must fill the same 416 bytes.
+"""The Python host and the browser must fill the same uniform block.
 
 There is one renderer core — web/soar/raymarch.wgsl — driven by two hosts:
 JavaScript in the tab and Python via wgpu. The shader is shared by
@@ -64,11 +64,8 @@ CASES = [
                 "nest_bmax": [95000.0, 55000.0, 3000.0],
                 "dt_view_nest": 40.0, "dt_light_nest": 40.0}, {}),
     ("ocean_off", {"ocean_enabled": False}, {}),
-    ("exotic_look", {}, {"exposure": 2.5, "g_hg": 0.4, "ambient_strength": 0.3,
-                         "ocean_realism": 0.25, "ocean_mip_bias": 0.75,
-                         "spectral_lighting_strength": 0.5,
-                         "low_sun_sky_field_strength": 0.25,
-                         "cone_stencil_theta_deg": 7.5}),
+    ("exotic_look", {}, {"exposure": 2.5,
+                         "spectral_lighting_strength": 0.5}),
     # The haze profile, both ways. It is packed as a sentinel — row 17.w is
     # the scale height, and 0 means "no height dependence" — so the two hosts
     # can disagree about it without disagreeing about any named value. Both
@@ -211,12 +208,8 @@ def _js_view(extra):
         "subpixel": "subpixel", "jitter_scale": "jitterScale", "jitter": "jitter",
         "light_march_lod_degrees": "lightMarchLodDegrees",
         "view_step_lod_degrees": "viewStepLodDegrees",
-        "exposure": "exposure", "g_hg": "gHg",
-        "ambient_strength": "ambientStrength", "ocean_realism": "oceanRealism",
-        "ocean_mip_bias": "oceanMipBias",
+        "exposure": "exposure",
         "spectral_lighting_strength": "spectralLightingStrength",
-        "low_sun_sky_field_strength": "lowSunSkyFieldStrength",
-        "cone_stencil_theta_deg": "coneStencilThetaDeg",
         "haze": "haze", "haze_height_dependent": "hazeHeightDependent",
         "tone_map_white_point": "toneMapWhitePoint", "contrast": "contrast",
         "scene_time": "sceneTime", "city_roof_density": "cityRoofDensity",
@@ -301,18 +294,65 @@ def test_the_browsers_buffer_is_the_size_of_the_browsers_block():
         f"{sh.UNIFORM_ROWS} / {sh.UNIFORM_NBYTES}")
 
 
-def test_block_is_416_bytes():
-    """26 rows of 4 floats: row 24 is the surface offset (2026-09-01); the
-    desert tile's rows 25..46 left with the desert (2026-11-09); row 25, the
-    last, is the city's look knobs (2026-11-09). Pinned rather than derived
-    on purpose, so that a row added on one side and not the other fails here
-    as well as in the diff above."""
-    assert sh.UNIFORM_NBYTES == 416
-    assert _python_block({}, {}).nbytes == 416
+def _struct_slots():
+    """{field: float index} of the Uniforms struct in shader/uniforms.wgsl,
+    by WGSL's layout rules, and the struct's size in bytes."""
+    import re
+    from cloudyview.soar import shader
+    text = (shader.SHADER_DIR / "uniforms.wgsl").read_text()
+    body = re.sub(r"//[^\n]*", "", text[text.index("struct Uniforms {"):])
+    body = body[:body.index("};")]
+    size_align = {"f32": (4, 4), "vec2<f32>": (8, 8), "vec3<f32>": (12, 16),
+                  "vec4<f32>": (16, 16)}
+    offset, slots = 0, {}
+    for name, kind in re.findall(r"(\w+):\s*([\w<>]+),", body):
+        size, align = size_align[kind]
+        offset = -(-offset // align) * align
+        slots[name] = offset // 4
+        offset += size
+    return slots, -(-offset // 16) * 16
+
+
+def test_the_shader_struct_is_the_block_both_hosts_pack():
+    """The Uniforms struct is the third statement of the layout. Its size is
+    the hosts' block, every row starts on a 16-byte boundary where the hosts
+    start one, and the slots the hosts address by name sit where the struct
+    puts them."""
+    slots, nbytes = _struct_slots()
+    assert nbytes == sh.UNIFORM_NBYTES == 21 * 16
+    assert _python_block({}, {}).nbytes == nbytes
+    row, col = sh.SLOT_LENS_DT
+    assert slots["lens_dt"] == 4 * row + col
+    row, col = sh.SLOT_BAKE_SLICE
+    assert slots["bake_slice"] == 4 * row + col
+    js = json.loads(subprocess.run(
+        ["node", "--input-type=module", "-e",
+         'import { SLOT } from "%s"; console.log(JSON.stringify(SLOT));'
+         % UNIFORMS_JS.as_uri()],
+        capture_output=True, text=True, check=True).stdout)
+    assert js == {
+        "CAM_ORIGIN": slots["cam_origin"], "CAM_FORWARD": slots["cam_forward"],
+        "FRAME_INDEX": slots["frame_index"], "DT_LIGHT": slots["dt_light"],
+        "SCENE_CLOCK": slots["scene_clock"], "LENS_DT": slots["lens_dt"],
+        "SUBPIXEL_JITTER": slots["subpixel_jitter"],
+        "JITTER_SCALE": slots["jitter_scale"],
+        "BAKE_SLICE": slots["bake_slice"]}
+    # A few named values, read back out of a packed block at the struct's
+    # offsets: a slot the hosts and the shader disagree about would render
+    # garbage, but only on a GPU.
+    u = _python_block({}, {"tone_map_gamma": 2.25, "contrast": 1.2,
+                           "haze": 0.5}).ravel()
+    assert u[slots["gamma"]] == np.float32(2.25)
+    assert u[slots["contrast"]] == np.float32(1.2)
+    assert u[slots["haze"]] == np.float32(0.5)
+    assert u[slots["image_width"]] == BASE_VIEW["render_size"][0]
+    assert u[slots["surface_z"]] == 0.0
+    assert tuple(u[slots["water_reflectance"]:slots["water_reflectance"] + 3]) \
+        == tuple(np.float32(sh.DEFAULT_OCEAN_REFLECTANCE))
 
 
 def test_roof_density_tables_agree():
-    """The tier table that fills row 25.x is written in both hosts; they
+    """The tier table that fills u.roof_density is written in both hosts; they
     must be the same table."""
     import re
     text = (REPO / "web" / "soar" / "constants.js").read_text()
@@ -356,7 +396,7 @@ def test_a_running_clock_needs_its_surfaces_period(surface):
 
 def test_a_static_sea_packs_the_same_at_any_clock(js_blocks):
     """The sea's block at scene time 1234.6 and at 987654.3 is the same
-    block, byte for byte, in both hosts: row 24.z is 0 — so the scene key
+    block, byte for byte, in both hosts: the scene clock is 0 — so the scene key
     (these bytes) does not restart the sea's accumulation as the clock
     runs."""
     a = base64.b64decode(js_blocks["ocean_no_clock"])
@@ -364,7 +404,7 @@ def test_a_static_sea_packs_the_same_at_any_clock(js_blocks):
     assert a == b
     ours = _python_block(*[c[1:] for c in CASES
                            if c[0] == "ocean_no_clock"][0])
-    assert ours[24][2] == 0.0
+    assert ours[16][2] == 0.0
 
 
 def test_periodic_requires_sun_above_horizon():

@@ -1,9 +1,9 @@
-// The uniform block: 47 rows of 4 floats, 752 bytes, rebuilt every frame.
+// The uniform block: rows of four floats, rebuilt every frame.
 //
-// A direct port of InteractiveRenderer.write_uniforms. Row order and meaning
-// are fixed by raymarch.wgsl, which the browser shares verbatim with the
-// desktop — so this file is the whole of the look that lives outside the
-// shader. tests/test_web_uniform_parity.py diffs it against Python.
+// The Uniforms struct in shader/uniforms.wgsl declares the layout and says
+// what each slot is. The Python host packs the same block
+// (cloudyview/soar/uniforms.py), and tests/test_uniform_parity.py diffs the
+// two byte for byte.
 
 "use strict";
 
@@ -16,6 +16,22 @@ import {
 import { cameraBasis } from "./camera.js";
 
 const DEG = Math.PI / 180.0;
+
+/**
+ * Where a slot sits in the packed block, as an index into its Float32Array,
+ * for the code that reads or rewrites one slot of a block already packed.
+ */
+export const SLOT = Object.freeze({
+  CAM_ORIGIN: 0,                  // row 0, xyz
+  CAM_FORWARD: 4,                 // row 1, xyz
+  FRAME_INDEX: 4 * 4 + 3,
+  DT_LIGHT: 6 * 4 + 3,
+  SCENE_CLOCK: 16 * 4 + 2,
+  LENS_DT: 16 * 4 + 3,
+  SUBPIXEL_JITTER: 17 * 4 + 2,
+  JITTER_SCALE: 17 * 4 + 3,
+  BAKE_SLICE: 20 * 4 + 3,
+});
 
 /**
  * The auto-exposure meter's ray grid for an output of `[w, h]`: the output's
@@ -71,16 +87,16 @@ export function packUniforms(state, view) {
     oceanZ, oceanReflectance, oceanFifDx, oceanTileExtent, oceanEnabled,
     oceanMaxLod,
     nested = false, nestBmin, nestBmax, dtViewNest, dtLightNest,
-    // The night city (raymarch.wgsl CITY): the ocean-named fields then
-    // describe the city tile, row 4 is the moon, and cityOffsetM is where
-    // the tile sits in world space (row 8.yz).
+    // The night city: the ocean-named fields then describe the city tile,
+    // the sun is the moon, and cityOffsetM is where the tile sits in world
+    // space.
     city = false, cityOffsetM = [0.0, 0.0],
-    // Explicit override of the surface offset row 24 folds and writes;
-    // null means the scene's static offset (cityOffsetM under CITY, the
-    // origin otherwise). Mirrors SceneState.surface_offset_m.
+    // Explicit override of the surface offset; null means the scene's
+    // static offset (cityOffsetM under CITY, the origin otherwise). Mirrors
+    // SceneState.surface_offset_m.
     surfaceOffsetM = null,
-    // The period row 24 folds at: null is the tile extent, every surface's
-    // rule. Mirrors SceneState.surface_period_m.
+    // The period the surface offset folds at: null is the tile extent,
+    // every surface's rule. Mirrors SceneState.surface_period_m.
     surfacePeriodM = null,
     // The surface's clock (its meta.json clock_period_s): a period, the
     // scene clock packed modulo it so float32 never loses the cadence (the
@@ -97,32 +113,15 @@ export function packUniforms(state, view) {
     sunAzimuth = K.DEFAULT_SUN_AZIMUTH,
     sunElevation = K.DEFAULT_SUN_ELEVATION,
     exposure = K.DEFAULT_EXPOSURE,
-    gHg = K.DEFAULT_G_HG,
-    ambientStrength = K.DEFAULT_AMBIENT_STRENGTH,
-    gradientShadingStrength = K.DEFAULT_GRADIENT_SHADING_STRENGTH,
-    gradientCoarseWeight = K.DEFAULT_GRADIENT_COARSE_WEIGHT,
-    gradientCoarseRadiusM = K.DEFAULT_GRADIENT_COARSE_RADIUS_M,
-    deepShadowMsSuppression = K.DEFAULT_DEEP_SHADOW_MS_SUPPRESSION,
-    ambientOcclusionStrength = K.DEFAULT_AMBIENT_OCCLUSION_STRENGTH,
-    ambientOcclusionFloor = K.DEFAULT_AMBIENT_OCCLUSION_FLOOR,
-    bounceDepthAttenuation = K.DEFAULT_BOUNCE_DEPTH_ATTENUATION,
     spectralLightingStrength = K.SPECTRAL_LIGHTING_STRENGTH,
-    lowSunSkyFieldStrength = K.LOW_SUN_SKY_FIELD_STRENGTH,
     lightTransferSplitStrength = K.LIGHT_TRANSFER_SPLIT_STRENGTH,
-    aerialPerspectiveStrength = K.AERIAL_PERSPECTIVE_STRENGTH,
     // One number for the whole aerosol story; no per-term override exists.
     haze = K.DEFAULT_HAZE,
     toneMapWhitePoint = K.DEFAULT_TONE_MAP_WHITE_POINT,
     contrast = K.DEFAULT_CONTRAST,
-    oceanRealism = K.OCEAN_REALISM,
-    oceanMipBias = K.OCEAN_MIP_BIAS,
-    oceanGlintStrength = K.OCEAN_GLINT_STRENGTH,
-    oceanGlintRoughness = K.OCEAN_GLINT_ROUGHNESS,
-    oceanSlopeResolvedFraction = K.OCEAN_SLOPE_RESOLVED_FRACTION,
-    oceanSkyShadowFloor = K.OCEAN_SKY_SHADOW_FLOOR,
-    coneStencilThetaDeg = K.CONE_STENCIL_THETA_DEG,
     hazeHeightDependent = K.DEFAULT_HAZE_HEIGHT_DEPENDENT,
-    // The app's angles at DEFAULT_LOD_STRENGTH, matching soar_host.ViewState.
+    // The app's angles at DEFAULT_LOD_STRENGTH, matching the Python host's
+    // ViewState.
     // The viewer always passes these explicitly (its slider scales them); the
     // defaults are what a caller who does not care gets, and they have to be
     // the same number on both sides — see test_uniform_parity.
@@ -132,26 +131,26 @@ export function packUniforms(state, view) {
     frameIndex = 0,
     subpixel = false,
     jitterScale = 1.0,
-    // Read tau_sun from the baked sun-tau cache (row 23). Only meaningful
+    // Read tau_sun from the baked sun-tau cache. Only meaningful
     // when the renderer has a finished bake bound at binding 7; the packer
     // just writes the flag.
     lightCache = false,
-    // The vertical sky-visibility march (row 23.z inverts it): off means
+    // The vertical sky-visibility march: off means
     // every consumer of t_sky sees a fully open sky.
     skyProbe = true,
-    // Ice-detection false-color mode (row 23.w). Only meaningful
+    // Ice-detection false-color mode. Only meaningful
     // when a real ice-fraction texture is bound at binding 8; the packer
     // just writes the flag, same contract as lightCache.
     iceMode = false,
-    // The scene clock, seconds (row 24.z): where a surface with a clock is
-    // the city's steam.
+    // The scene clock, seconds: where a surface with a clock (the city's
+    // steam) is in its motion.
     sceneTime = 0.0,
     // The city's steam drawn after the accumulation at the live clock
-    // (row 8.w; raymarch.wgsl city_steam_live, fs_steam_live): the live
+    // (city_steam_live, fs_steam_live in the shader): the live
     // view's, and its auto-exposure meter's. Every still, video and replay
     // leaves it off and marches the steam.
     liveSteam = false,
-    // The city's roof clutter density (row 25.x): CITY_ROOF_DENSITY_BY_TIER
+    // The city's roof clutter density: CITY_ROOF_DENSITY_BY_TIER
     // at the flight's tier, 1 as tuned. Packed under CITY only.
     cityRoofDensity = 1.0,
   } = view;
@@ -161,9 +160,6 @@ export function packUniforms(state, view) {
 
   unitInterval("jitter_scale", jitterScale);
   unitInterval("spectral_lighting_strength", spectralLightingStrength);
-  unitInterval("low_sun_sky_field_strength", lowSunSkyFieldStrength);
-  unitInterval("ocean_realism", oceanRealism);
-  unitInterval("ocean_sky_shadow_floor", oceanSkyShadowFloor);
   if (!(Number(haze) >= HAZE_MIN && Number(haze) <= K.HAZE_MAX)) {
     throw new Error(`haze must be in [${HAZE_MIN}, ${K.HAZE_MAX}]; got ${haze}.`);
   }
@@ -179,14 +175,6 @@ export function packUniforms(state, view) {
     if (!(Number(contrast) >= lo && Number(contrast) <= hi)) {
       throw new Error(`contrast must be in [${lo}, ${hi}]; got ${contrast}.`);
     }
-  }
-  if (!(aerialPerspectiveStrength >= 0.0)) {
-    throw new Error(
-      `aerial_perspective_strength must be >= 0; got ${aerialPerspectiveStrength}.`);
-  }
-  if (!(coneStencilThetaDeg >= 0.0 && coneStencilThetaDeg < 90.0)) {
-    throw new Error(
-      `cone_stencil_theta_deg must be in [0, 90); got ${coneStencilThetaDeg}.`);
   }
   for (const [name, value] of [
     ["light_march_lod_degrees", lightMarchLodDegrees],
@@ -217,21 +205,18 @@ export function packUniforms(state, view) {
   const tanHalfFov = Math.tan(camera.fov * DEG * 0.5);
 
   // Under CITY the daytime spectral pipeline is bypassed, not scaled: the
-  // moon's rows are fixed night values, the low-sun sky field and the
-  // light-transfer split are daytime-sun machinery with no night meaning.
-  // Mirrors soar_host.pack_uniforms exactly (test_uniform_parity).
-  let spec, lowSunSky, lightTransferEff;
+  // moon's rows are fixed night values, and the light-transfer split is
+  // daytime-sun machinery with no night meaning.
+  let spec, lightTransferEff;
   if (city) {
     spec = {
       cloudSun: K.NIGHT_MOON_CLOUD_COLOR, ambient: K.NIGHT_AMBIENT_TINT,
       horizon: K.NIGHT_SKY_HORIZON, bloom: K.NIGHT_MOON_BLOOM,
       disc: K.NIGHT_MOON_DISC,
     };
-    lowSunSky = 0.0;
     lightTransferEff = 0.0;
   } else {
     spec = spectralLightingColors(sun, K.SUN_COLOR, spectralLightingStrength);
-    lowSunSky = lowSunSkyFieldStrength;
     lightTransferEff = effectiveLightTransferSplit(
       lightTransferSplitStrength, sunElevation);
   }
@@ -248,79 +233,40 @@ export function packUniforms(state, view) {
   row(4, sun[0], sun[1], sun[2], frameIndex);
   row(5, bmin[0], bmin[1], bmin[2], dtView);
   row(6, bmax[0], bmax[1], bmax[2], dtLight);
-  row(7, w, h, gHg, ambientStrength);
-  if (city) {
-    // Row 8.yz is the tile's static world offset, unchanged per frame. The
-    // live city frame is row 24's job now (the folded per-frame offset the
-    // shader builds p_city from); this row is kept as the scene's own
-    // statement of where the tile was pinned — metadata, the harness and
-    // the parity test read it, the shader no longer does.
-    // w: the live view's steam (liveSteam above).
-    row(8, oceanZ, cityOffsetM[0], cityOffsetM[1], liveSteam ? 1.0 : 0.0);
-  } else {
-    row(8, oceanZ, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2]);
-  }
-  row(9, oceanFifDx, oceanTileExtent, oceanEnabled ? 1.0 : 0.0, oceanMaxLod);
-  // x/y are sampling flags, excluded from scene identity; z is haze, which
-  // is scene state and is not. See sceneKey.
-  row(10, subpixel ? 1.0 : 0.0, jitterScale, haze, toneMapWhitePoint);
-  row(11, gradientShadingStrength, deepShadowMsSuppression,
-       ambientOcclusionStrength, bounceDepthAttenuation);
-  row(12, gradientCoarseWeight, gradientCoarseRadiusM, ambientOcclusionFloor,
-       Math.tan(coneStencilThetaDeg * DEG));
-  row(13, spec.cloudSun[0], spec.cloudSun[1], spec.cloudSun[2],
-       lowSunSky);
-  row(14, spec.ambient[0], spec.ambient[1], spec.ambient[2], lightTransferEff);
-  row(15, spec.horizon[0], spec.horizon[1], spec.horizon[2],
-       aerialPerspectiveStrength);
-  row(16, spec.bloom[0], spec.bloom[1], spec.bloom[2],
-       aerialBetaPerKm(haze) * 1e-3);          // w: beta0 in m^-1
-  // A scale height of 0 is the shader's signal for "no height profile";
-  // see raymarch.wgsl's sky_disc.w.
-  row(17, spec.disc[0], spec.disc[1], spec.disc[2],
-      hazeHeightDependent ? K.AERIAL_SCALE_HEIGHT_M : 0.0);
-  row(18, oceanRealism, oceanMipBias, oceanGlintStrength, oceanGlintRoughness);
-  row(19, oceanSlopeResolvedFraction, oceanHazeExtinctionPerKm(haze) * 1e-3,
-       oceanSkyShadowFloor, contrast);
-  // The view-step angle floors at a QUARTER of the render's pixel angle.
-  // Not the full pixel: the accumulation is jittered, so a converged image
-  // resolves sub-pixel, and a floor at exactly one pixel dissolves the very
-  // detail accumulation would have antialiased (Thomas, in flight: pixel-
-  // matched still read substantially coarser than a pixel). A quarter is
-  // where the return genuinely ends. An exact 0 stays 0 — the "LOD off,
-  // fixed dt" sentinel, unreachable from the slider.
-  const pixelTan = 2.0 * tanHalfFov / w;
-  let viewStepTan = Math.tan(viewStepLodDegrees * DEG);
-  if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, 0.25 * pixelTan);
-  row(20, periodic ? 1.0 : 0.0,
-       Math.tan(lightMarchLodDegrees * DEG),
-       viewStepTan,
-       toneMapGamma);
   if (nested) {
-    row(21, nestBmin[0], nestBmin[1], nestBmin[2], dtViewNest);
-    row(22, nestBmax[0], nestBmax[1], nestBmax[2], dtLightNest);
+    row(7, nestBmin[0], nestBmin[1], nestBmin[2], dtViewNest);
+    row(8, nestBmax[0], nestBmax[1], nestBmax[2], dtLightNest);
   }
-  // Row 23.y is the bake slice index; the renderer's bake pass writes it
-  // into its own copy of the block, never through here.
-  row(23, lightCache ? 1.0 : 0.0, 0.0, skyProbe ? 0.0 : 1.0,
-      iceMode ? 1.0 : 0.0);
-  // Row 24: the surface offset — where the surface tile sits in the world
-  // THIS FRAME renders, folded into [0, surface period) — and in z the
-  // scene clock. The period is the surface's tile (surfacePeriodM). The
-  // shader derives the city frame (and the water uv) as world minus this,
-  // and because the city
-  // is a pure function of the tile frame — every cell index folds at the
-  // tile before it seeds anything — the fold here is invisible: only the
-  // offset mod the tile can matter. Per frame: a camera (or replay pose)
-  // that carries its own tile phase defines the offset as cam.xy minus
-  // surfacePosition, so a cloud-period fold of the camera moves the offset
-  // with it and the surface never jumps. fold(origin) is computed FIRST and
-  // surfacePosition subtracted after: at zero drift fold(origin) is the
-  // very expression surfacePosition was derived from (day scenes; static 0),
-  // so the difference is the literal 0.0 — bit-exact, which is what keeps
-  // the day judge-view goldens byte-identical (the water reads then
-  // subtract exactly 0.0). A camera with no surface frame writes the static
-  // offset, folded. Mirrored in soar_host.pack_uniforms.
+  row(9, spec.cloudSun[0], spec.cloudSun[1], spec.cloudSun[2], lightTransferEff);
+  row(10, spec.ambient[0], spec.ambient[1], spec.ambient[2], haze);
+  row(11, spec.horizon[0], spec.horizon[1], spec.horizon[2],
+      aerialBetaPerKm(haze) * 1e-3);          // beta0 in m^-1
+  // A scale height of 0 is the shader's signal for "no height profile".
+  row(12, spec.bloom[0], spec.bloom[1], spec.bloom[2],
+      hazeHeightDependent ? K.AERIAL_SCALE_HEIGHT_M : 0.0);
+  row(13, spec.disc[0], spec.disc[1], spec.disc[2],
+      oceanHazeExtinctionPerKm(haze) * 1e-3);
+  // The surface: the water's reflectance (none over the city) and its z.
+  if (city) {
+    row(14, 0.0, 0.0, 0.0, oceanZ);
+  } else {
+    row(14, oceanReflectance[0], oceanReflectance[1], oceanReflectance[2],
+        oceanZ);
+  }
+  row(15, oceanFifDx, oceanTileExtent, oceanEnabled ? 1.0 : 0.0, oceanMaxLod);
+  // The surface offset: where the surface tile sits in the world THIS FRAME
+  // renders, folded into [0, surface period), the period being the
+  // surface's tile (surfacePeriodM). The shader derives the city frame (and
+  // the water uv) as world minus this, and because everything on a surface
+  // is periodic in its tile, only the offset mod the tile can matter. A
+  // camera (or replay pose) that carries its own tile phase defines the
+  // offset as cam.xy minus surfacePosition, so a cloud-period fold of the
+  // camera moves the offset with it and the surface never jumps.
+  // fold(origin) is computed FIRST and surfacePosition subtracted after: at
+  // zero drift fold(origin) is the very expression surfacePosition was
+  // derived from, so the difference is the literal 0.0 and a day scene's
+  // water reads subtract exactly zero. A camera with no surface frame
+  // writes the static offset, folded.
   const period = surfacePeriodM ?? oceanTileExtent;
   const foldTile = (v) => {
     const r = v % period;
@@ -339,10 +285,25 @@ export function packUniforms(state, view) {
   if (!Number.isFinite(Number(sceneTime))) {
     throw new Error(`scene_time must be finite; got ${sceneTime}.`);
   }
-  row(24, surfaceOff[0], surfaceOff[1], sceneClock(sceneTime, clockPeriodS),
-      0.0);
-  // Row 25: the city's look knobs. Zero on a day scene, which reads none of
-  // them, so the day's block (and its scene key) is unchanged by them.
+  row(16, surfaceOff[0], surfaceOff[1], sceneClock(sceneTime, clockPeriodS),
+      0.0);                                   // w: the lens-water time step
+  // The two sampling flags (SLOT.SUBPIXEL_JITTER, SLOT.JITTER_SCALE) are
+  // excluded from scene identity; see sceneKey.
+  row(17, w, h, subpixel ? 1.0 : 0.0, jitterScale);
+  row(18, toneMapWhitePoint, toneMapGamma, contrast, iceMode ? 1.0 : 0.0);
+  // The view-step angle floors at a QUARTER of the render's pixel angle.
+  // Not the full pixel: the accumulation is jittered, so a converged image
+  // resolves sub-pixel, and a floor at exactly one pixel dissolves the very
+  // detail accumulation would have antialiased (Thomas, in flight: pixel-
+  // matched still read substantially coarser than a pixel). A quarter is
+  // where the return genuinely ends. An exact 0 stays 0 — the "LOD off,
+  // fixed dt" sentinel, unreachable from the slider.
+  const pixelTan = 2.0 * tanHalfFov / w;
+  let viewStepTan = Math.tan(viewStepLodDegrees * DEG);
+  if (viewStepTan > 0.0) viewStepTan = Math.max(viewStepTan, 0.25 * pixelTan);
+  // The city's two: its roof clutter density and whether its steam is live.
+  // Zero on a day scene, which reads neither.
+  let roofDensity = 0.0;
   if (city) {
     const [lo, hi] = K.CITY_ROOF_DENSITY_RANGE;
     if (!(cityRoofDensity >= lo && cityRoofDensity <= hi)) {
@@ -350,28 +311,34 @@ export function packUniforms(state, view) {
         `cityRoofDensity must be in [${lo}, ${hi}] (the far mean's measured `
         + `range); got ${cityRoofDensity}.`);
     }
-    row(25, cityRoofDensity, 0.0, 0.0, 0.0);
+    roofDensity = cityRoofDensity;
   }
+  row(19, Math.tan(lightMarchLodDegrees * DEG), viewStepTan, roofDensity,
+      city && liveSteam ? 1.0 : 0.0);
+  // The host's copies of three compile-time switches, so that changing one
+  // changes the scene key. w is the bake slice index, which the renderer's
+  // bake pass writes into its own copy of the block.
+  row(20, periodic ? 1.0 : 0.0, lightCache ? 1.0 : 0.0,
+      skyProbe ? 0.0 : 1.0, 0.0);
   return u;
 }
 
 /**
  * The scene-identity key that decides whether temporal accumulation continues
- * or restarts. Two components are zeroed out on purpose:
+ * or restarts. Three slots are zeroed out on purpose:
  *
- *   row 4.w  — the frame index only decorrelates jitter seeds. If it counted,
- *              every frame would read as a scene change and nothing would
- *              ever converge.
- *   row 10.x/y — the sampling flags are OUTPUTS of the accumulation decision.
- *              Including them would make the key self-referential. Only those
- *              two: row 10.z is haze, which is scene state like any other and
- *              must restart the average when it moves.
+ *   the frame index — it only decorrelates jitter seeds. If it counted,
+ *       every frame would read as a scene change and nothing would ever
+ *       converge.
+ *   the two sampling flags (sub-pixel jitter, jitter scale) — they are
+ *       OUTPUTS of the accumulation decision. Including them would make the
+ *       key self-referential.
  *
  * maxLightSteps and the output size are folded in because both change the
  * image without appearing in the buffer.
  */
 /**
- * Row 24.z, the clock a surface reads: only where something reads it (a
+ * The scene clock a surface reads: only where something reads it (a
  * surface with a period: the city's steam), wrapped there in float64,
  * before the narrowing to float32. A surface with no clock packs 0 whatever
  * the scene time, so its accumulation never restarts for it.
@@ -394,8 +361,9 @@ export function sceneClock(sceneTime, clockPeriodS) {
 
 export function sceneKey(u, maxLightSteps, outputW, outputH) {
   const copy = new Float32Array(u);
-  copy[4 * 4 + 3] = 0.0;
-  copy[10 * 4] = 0.0; copy[10 * 4 + 1] = 0.0;
+  copy[SLOT.FRAME_INDEX] = 0.0;
+  copy[SLOT.SUBPIXEL_JITTER] = 0.0;
+  copy[SLOT.JITTER_SCALE] = 0.0;
   const key = new Uint8Array(copy.byteLength + 12);
   key.set(new Uint8Array(copy.buffer), 0);
   new DataView(key.buffer).setUint32(copy.byteLength, maxLightSteps, true);
