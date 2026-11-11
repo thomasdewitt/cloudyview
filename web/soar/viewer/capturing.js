@@ -242,7 +242,7 @@ export const capturing = {
         if (this._videoAbort) throw new Error("Cancelled.");
         const pose = this._trackPose(frames[i]);
         const overlays = this.captureOverlays
-          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look.haze,
+          ? this._offlineOverlays(pose, size, 1.0 / this.videoFps, look,
                                   knocksDue(knocks,
                                             i > 0 ? frames[i - 1].t : -Infinity,
                                             frames[i].t))
@@ -329,9 +329,11 @@ export const capturing = {
   },
 
   /** The overlays an offline frame draws, laid out for that frame's size.
-   *  `haze` is the CAPTURE's, so the minimap reads like the picture it sits
-   *  on rather than like the session it was launched from. */
-  _offlineOverlays(pose, size, dt, haze = this.haze, knocks = []) {
+   *  `look` is the CAPTURE's, so the flyer is exposed like the picture it
+   *  flies in and the minimap carries that picture's haze, not the session's
+   *  it was launched from. */
+  _offlineOverlays(pose, size, dt, look, knocks = []) {
+    const haze = look.haze;
     const overlays = [];
     if (this.flyer && this.flyerEnabled) {
       this.flyer.update(dt, pose);
@@ -341,6 +343,7 @@ export const capturing = {
       for (const knock of knocks) this.flyer.knock(knock);
       this.flyer.writeUniforms(pose, size, {
         sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+        exposure: look.exposure,
         toneMapGamma: this.toneMapGamma,
         toneMapWhitePoint: this.toneMapWhitePoint,
         contrast: this.contrast,
@@ -414,13 +417,8 @@ export const capturing = {
     // overlays are re-laid-out for it. The bird holds the pose it had when
     // the button was pressed rather than flying on through the accumulation.
     const stillOverlays = [];
-    if (overlays && this.flyer && this.flyerEnabled) {
-      this.flyer.writeUniforms(this.camera, size, {
-        sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
-        toneMapGamma: this.toneMapGamma,
-        toneMapWhitePoint: this.toneMapWhitePoint,
-        contrast: this.contrast,
-      });
+    const flyerDrawn = overlays && this.flyer && this.flyerEnabled;
+    if (flyerDrawn) {
       stillOverlays.push((enc, view, format) =>
         this.flyer.encodePass(enc, view, format, size));
     }
@@ -435,6 +433,16 @@ export const capturing = {
     }
     try {
       look.exposure = await this._meterCaptureExposure(look, size);
+      if (flyerDrawn) {
+        // After the metering, so the flyer is exposed like the picture.
+        this.flyer.writeUniforms(this.camera, size, {
+          sunAzimuth: this.sunAzimuth, sunElevation: this.sunElevation,
+          exposure: look.exposure,
+          toneMapGamma: this.toneMapGamma,
+          toneMapWhitePoint: this.toneMapWhitePoint,
+          contrast: this.contrast,
+        });
+      }
       const image = await renderStill(
         this.device, this.renderer,
         this._captureViewKwargs(look), size,
