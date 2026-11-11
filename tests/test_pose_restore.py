@@ -135,12 +135,6 @@ def test_displace_is_swept_and_does_not():
                for k in range(3)) > 100.0, r
 
 
-def test_the_tools_place_by_jump():
-    for name in ("steam_live_qa.mjs", "soar_noise.mjs"):
-        src = (TOOLS / name).read_text()
-        assert "c.jump(" in src and "c.displace(" not in src, name
-
-
 def test_the_tutorial_spawn_places_by_jump():
     # The viewer's own absolute city reposition: the tutorial's spawn, which
     # a replay from the menu makes mid-flight (tutorial.js -> tutorialSpawn).

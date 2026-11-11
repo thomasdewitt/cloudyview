@@ -43,8 +43,8 @@ const scenes = option("--scenes", "city,day").split(",");
 const tiers = option("--tiers", "high,low,max").split(",");
 const [w, h] = option("--size", "640x360").split("x").map(Number);
 const saveDir = option("--save", null);
-// Extra query parameters for every soar page, e.g. "surfacecs=1" (an
-// experiment flag the viewer reads at load).
+// Extra query parameters for every soar page (a flag the viewer reads at
+// load).
 const query = option("--query", "");
 const q = (sep) => (query ? `${sep}${query}` : "");
 if (saveDir) mkdirSync(saveDir, { recursive: true });

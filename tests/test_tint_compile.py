@@ -1,19 +1,14 @@
 """Every shader soar ships must compile in a browser, not only under wgpu.
 
 naga (wgpu's compiler, which every other test here goes through) accepts
-some WGSL the spec does not — `a ^ b * c` shipped on master (abbc9dc,
-2026-09-23) and no Chrome, Edge or Safari could build the shader while the
-suite stayed green. This drives tools/tint_check.mjs, which compiles every
-specialization with Chrome's own compiler (Tint) through the DevTools
-protocol.
+some WGSL the spec does not: `a ^ b * c` once shipped that way, and no
+browser could build the shader while the suite stayed green. This drives
+tools/tint_check.mjs, which compiles every module with Chrome's own compiler
+(Tint) through the DevTools protocol.
 
 It needs a Chrome with --remote-debugging-port (CLOUDYVIEW_CDP_PORT, default
-9333) and a hardware WebGPU adapter. On the Fedora box:
-
-    google-chrome --user-data-dir=/tmp/soar-cdp --remote-debugging-port=9333 \
-        --enable-features=Vulkan --ozone-platform=x11
-
-Without one it skips, and says why — it never passes vacuously.
+9333) and a hardware WebGPU adapter; tools/tint_check.mjs gives the command.
+Without one it skips, and says why.
 """
 
 import os
@@ -38,8 +33,7 @@ def _cdp_reachable() -> bool:
 
 
 def test_every_specialization_compiles_under_tint():
-    """The tool serves this checkout's web/ itself, on a fresh port, and
-    checks the served shader is this tree's before compiling anything."""
+    """The tool serves this checkout's web/ itself, on a fresh port."""
     if shutil.which("node") is None:
         pytest.skip("needs node")
     if not _cdp_reachable():
@@ -48,10 +42,7 @@ def test_every_specialization_compiles_under_tint():
     proc = subprocess.run(
         ["node", str(REPO / "tools" / "tint_check.mjs"),
          "--web", str(REPO / "web"), "--cdp", CDP_PORT],
-        capture_output=True, text=True, timeout=600,
-        # pytest is not held to tools/gpulock (Thomas runs it directly), so
-        # the tool it drives is exempted for this child (gpulock_guard).
-        env={**os.environ, "SOAR_GPULOCK_EXEMPT": "pytest"})
+        capture_output=True, text=True, timeout=600)
     if proc.returncode == 2:
         pytest.skip("tint_check could not run: "
                     + (proc.stderr or proc.stdout).strip()[-400:])

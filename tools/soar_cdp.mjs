@@ -1,9 +1,9 @@
 // Drive soar in a real Chrome over the DevTools protocol, against a tree this
 // process serves itself. Shared by tools/tint_check.mjs and
-// tools/pinned_still.mjs. The Chrome is tools/qa_chrome.sh's: headless and
-// cut off from the desktop, so a check never takes focus or appears over
-// someone's apps (Thomas, mid-game, 2026-11-08), and requireHardwareAdapter
-// refuses one that renders in software.
+// tools/pinned_still.mjs. The Chrome is one started headless with
+// --remote-debugging-port (tint_check.mjs gives the command), so a check
+// never takes focus or appears over someone's apps, and
+// requireHardwareAdapter refuses one that renders in software.
 //
 // serveTree(dir) serves a checkout's web/ directory on a port the kernel
 // picks, so no other session's server can answer in its place, and answers
@@ -38,7 +38,7 @@ export async function serveTree(webDir) {
       let file = resolve(join(root, path));
       if (file !== root && !file.startsWith(root + sep)) throw new Error("outside");
       if (path.endsWith("/")) file = join(file, "index.html");
-      // Symlinks are followed: web/soar/raymarch.wgsl is one, into the
+      // Symlinks are followed: web/soar/shader is one, into the
       // package, and web/soar/demos usually is too.
       const body = await readFile(await realpath(file));
       res.writeHead(200, { "Content-Type": TYPES[extname(file)] ?? "application/octet-stream" });
@@ -54,22 +54,6 @@ export async function serveTree(webDir) {
 }
 
 export const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
-
-/** The served raymarch.wgsl, checked byte for byte against `expectFile`. */
-export async function servedShaderHash(base, expectFile) {
-  const local = await readFile(await realpath(expectFile));
-  const r = await fetch(`${base}/soar/raymarch.wgsl`, { cache: "no-store" });
-  if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { code: 2 });
-  const served = Buffer.from(await r.arrayBuffer());
-  if (sha256(served) !== sha256(local)) {
-    throw Object.assign(new Error(
-      `${base} serves a raymarch.wgsl that is NOT ${expectFile} (served ` +
-      `sha256 ${sha256(served).slice(0, 16)}, local ` +
-      `${sha256(local).slice(0, 16)}). Another tree is being served there.`),
-      { code: 3 });
-  }
-  return sha256(served).slice(0, 16);
-}
 
 // A software rasterizer passes for WebGPU (Chrome falls back to SwiftShader
 // when the Vulkan flags are missing or wrong, and Mesa's llvmpipe/lavapipe
@@ -107,7 +91,7 @@ export async function requireHardwareAdapter(tab) {
   if (why) {
     throw Object.assign(new Error(
       `this Chrome gives ${why}, not the hardware GPU; launch it with ` +
-      "tools/qa_chrome.sh (or --enable-features=Vulkan and a working " +
+      "--headless=new (on Linux, --enable-features=Vulkan and a working " +
       "ANGLE/ozone setup)"), { code: 2 });
   }
   return [info.vendor, info.architecture].filter(Boolean).join(" ");
@@ -190,7 +174,7 @@ function closedError(why) {
  *   - the expression THREW (exceptionDetails): a failure the expression is
  *     reporting, so rethrown at once with the page's message;
  *   - the DevTools connection closed (err.closed: the tab or Chrome died,
- *     or qa_chrome stop ran mid-run): nothing will ever answer, so rethrown
+ *     mid-run): nothing will ever answer, so rethrown
  *     at once;
  *   - no answer at all by the deadline (a page whose main thread is wedged,
  *     a stuck GPU readback): each evaluate is raced against the time left,

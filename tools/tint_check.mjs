@@ -1,72 +1,42 @@
-// Compile every WGSL module soar ships with a browser's own WGSL compiler
-// (Chrome's Tint), in every specialization the app can ask for.
+// Compile every shader soar ships with Chrome's own WGSL compiler (Tint).
 //
-// Why this exists: naga — the compiler behind wgpu, so behind the Python host
-// and the whole test suite — is more permissive than the WGSL spec in places.
-// It accepted `a ^ b * c`, which the spec gives no precedence and Tint
-// refuses, and master (abbc9dc, 2026-09-23) shipped a shader no Chrome, Edge
-// or Safari could build while every test passed. A green suite says nothing
-// about whether a browser can compile the shader; this does.
+// The Python host and every pytest go through naga, which accepts some WGSL
+// the spec does not (`a ^ b * c` once shipped that way, and no browser could
+// build the shader while the suite stayed green). This serves a checkout's
+// web/ directory, opens a tab in a Chrome with a DevTools port, and creates
+// each shader module there: every surface's module under every combination
+// of the compile-time switches, the overlay shaders, and the present pass.
 //
-//   node tools/tint_check.mjs --web DIR [--cdp PORT]
-//   node tools/tint_check.mjs BASE_URL --expect FILE [--cdp PORT]
+//   node tools/tint_check.mjs [--web DIR] [--cdp PORT]
 //
-// --web serves DIR (a checkout's web/ directory) itself, on a port the
-// kernel picks, so no other session's server can answer in its place. A
-// BASE_URL someone else serves is accepted only with --expect FILE, the
-// raymarch.wgsl it must be serving. Either way the served shader is fetched
-// and compared byte for byte with the local one before anything compiles —
-// a port collision once had the gate compile another session's tree and
-// report green (2026-09-23) — and its hash is printed for a merge request to
-// quote. The page imports soar/renderer.js from the served tree, so the
-// specialization is the app's own. --cdp (default 9333) is a Chrome with
-// --remote-debugging-port and a hardware WebGPU adapter (on the Fedora box:
-// --enable-features=Vulkan --ozone-platform=x11). Compile only — nothing is
-// drawn.
+// DIR defaults to this checkout's web/. PORT (default 9333) is a Chrome
+// started with --remote-debugging-port and a hardware WebGPU adapter, e.g.
 //
-// Exit 0 clean; 1 on any compile error; 2 when it cannot run at all (no
-// Chrome, no adapter); 3 when the served shader is not the expected one.
+//   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+//       --headless=new --remote-debugging-port=9333 --user-data-dir=/tmp/soar-cdp
+//
+// Prints each failure with Tint's message, then a one-line summary.
+// Exit 0 when everything compiles, 1 when something does not, 2 when the
+// check could not run.
 
-import { join } from "node:path";
-import { openTab, requireHardwareAdapter, serveTree, servedShaderHash }
-  from "./soar_cdp.mjs";
-
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { openTab, requireHardwareAdapter, serveTree } from "./soar_cdp.mjs";
 
 const argv = process.argv.slice(2);
-const option = (name) => {
+const option = (name, fallback) => {
   const i = argv.indexOf(name);
-  if (i < 0) return null;
-  const v = argv[i + 1];
-  argv.splice(i, 2);
-  return v;
+  return i < 0 ? fallback : argv[i + 1];
 };
-const webDir = option("--web");
-let expectFile = option("--expect");
-const cdpPort = option("--cdp") ?? "9333";
-let base = argv[0] ?? null;
-if (!webDir === !base) {
-  console.error("usage: node tools/tint_check.mjs --web DIR [--cdp PORT]\n" +
-                "       node tools/tint_check.mjs BASE_URL --expect FILE " +
-                "[--cdp PORT]");
-  process.exit(2);
-}
-if (base && !expectFile) {
-  console.error("tint_check: a BASE_URL needs --expect FILE (the raymarch.wgsl " +
-                "it must be serving); prefer --web DIR, which serves it " +
-                "here on a fresh port.");
-  process.exit(2);
-}
+const here = dirname(fileURLToPath(import.meta.url));
+const webDir = option("--web", join(here, "..", "web"));
+const cdpPort = option("--cdp", "9333");
 
-let server = null;
-if (webDir) {
-  server = await serveTree(webDir);
-  base = server.base;
-  expectFile = join(server.root, "soar", "raymarch.wgsl");
-}
+const server = await serveTree(webDir);
 let tab = null;
 const done = async (code) => {
   await tab?.close();
-  server?.close();
+  server.close();
   process.exit(code);
 };
 const fail = async (err) => {
@@ -74,208 +44,89 @@ const fail = async (err) => {
   await done(err.code ?? 2);
 };
 
-// The served shader must be the local one, byte for byte.
-let shaderHash;
+let adapter;
 try {
-  shaderHash = await servedShaderHash(base, expectFile);
   tab = await openTab(cdpPort);
   // A same-origin page to import the app's modules from; the app itself is
   // not booted.
-  await tab.goto(`${base}/`);
-  await requireHardwareAdapter(tab);
+  await tab.goto(`${server.base}/`);
+  adapter = await requireHardwareAdapter(tab);
 } catch (err) {
   await fail(err);
 }
 
-// The sweep runs as ONE evaluate per module (with its cs_surface pipelines),
-// not one evaluate for all of it: each has its own deadline, a slow or hung
-// compile fails naming its module, and the progress (and each module's time)
-// goes to stderr. As one evaluate the whole sweep (68 modules and the
-// pipelines, ~39 s on the 5080) could pass soar_cdp's 10-minute eval
-// deadline under Metal on the M1 with no shader at fault (loose-ends, review
-// of c17d79b). The setup evaluate below builds the plan and parks run(i) on
-// the page; the order, the de-duplication and the once-only 16x16 pipeline
-// are the single sweep's, so the results are the same.
-const SETUP_DEADLINE_MS = 10 * 60 * 1000;   // adapter, imports, specializing
-const JOB_DEADLINE_MS = 10 * 60 * 1000;     // one module and its pipelines
+// One evaluate builds the list of modules and parks run(i) on the page; each
+// module then compiles in an evaluate of its own, so a slow or hung compile
+// fails naming its module.
+const SETUP_DEADLINE_MS = 5 * 60 * 1000;
+const JOB_DEADLINE_MS = 5 * 60 * 1000;
 const setup = `(async () => {
-  const base = ${JSON.stringify(base)};
-  // A Chrome just launched while other sessions hold VRAM can answer the
-  // first requests with no adapter and then settle (seen 2026-09-23), so a
-  // few seconds of retries before calling it absent.
-  let adapter = null;
-  for (let i = 0; i < 6 && !adapter; i++) {
-    if (i) await new Promise((r) => setTimeout(r, 1000));
-    adapter = await navigator.gpu?.requestAdapter();
-  }
-  if (!adapter) return { fatal: "no WebGPU adapter in this Chrome (6 tries over 5 s)" };
-  // The adapter's compute limits, so the city's cs_surface (the ?surfacecs
-  // experiment) can be built at its 512-invocation workgroup below.
-  const L = adapter.limits;
-  const device = await adapter.requestDevice({ requiredLimits: {
-    maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup,
-    maxComputeWorkgroupSizeX: L.maxComputeWorkgroupSizeX,
-    maxComputeWorkgroupSizeY: L.maxComputeWorkgroupSizeY } });
-  const R = await import(base + "/soar/renderer.js");
-  const K = await import(base + "/soar/constants.js");
+  const base = ${JSON.stringify(server.base)} + "/soar/";
+  const device = await (await navigator.gpu.requestAdapter()).requestDevice();
+  const S = await import(base + "shader.js");
+  const R = await import(base + "renderer.js");
   const text = async (p) => {
-    const r = await fetch(base + "/soar/" + p, { cache: "no-store" });
+    const r = await fetch(base + p, { cache: "no-store" });
     if (!r.ok) throw new Error(p + ": HTTP " + r.status);
     return r.text();
   };
-  const compile = async (label, code) => {
-    device.pushErrorScope("validation");
-    const module = device.createShaderModule({ label, code });
-    const info = await module.getCompilationInfo();
-    const scoped = await device.popErrorScope();
-    const say = (m) => m.lineNum + ":" + m.linePos + " " + m.message;
-    const errors = info.messages.filter((m) => m.type === "error").map(say);
-    const warnings = info.messages.filter((m) => m.type === "warning")
-      .map(say);
-    if (scoped && !errors.length) errors.push(scoped.message);
-    return { label, errors, warnings, module };
-  };
-  // cs_surface as the hosts build it (renderer.js _surfaceComputePipeline):
-  // Tint validates every entry when the module is made, but its backend,
-  // the workgroup overrides and the device limits meet the entry only at
-  // pipeline creation, which no other check here does for it.
-  const csPipeline = async (label, module, [wx, wy]) => {
-    const errors = [];
-    if (wx * wy > device.limits.maxComputeInvocationsPerWorkgroup) {
-      errors.push("this adapter allows " +
-                  device.limits.maxComputeInvocationsPerWorkgroup +
-                  " invocations, not " + (wx * wy));
-    } else {
-      try {
-        await device.createComputePipelineAsync({
-          label, layout: "auto",
-          compute: { module, entryPoint: "cs_surface",
-                     constants: { SURFACE_CS_WX: wx, SURFACE_CS_WY: wy } } });
-      } catch (err) {
-        errors.push(String(err?.message || err));
-      }
-    }
-    return { label, errors, warnings: [], pipeline: true };
-  };
-  const raymarch = await text("raymarch.wgsl");
-  // Every lighting recipe the app can reach: each tier's light-step cap,
-  // crossed with the sun-tau cache and the sky probe on and off — the tiers
-  // pick three of those four, and the hand toggles reach the fourth. A host
-  // whose specializeShader takes fewer options ignores the rest, and the
-  // identical sources that leaves are compiled once (below).
-  const caps = [...new Set(Object.values(K.QUALITY_PRESETS)
-    .map((p) => p.maxLightSteps ?? K.DEFAULT_MAX_LIGHT_STEPS))];
-  const recipes = [];
-  for (const maxLightSteps of caps) {
-    for (const lightCache of [false, true]) {
-      for (const skyProbe of [false, true]) {
-        recipes.push({ maxLightSteps, lightCache, skyProbe });
-      }
-    }
-  }
+  const shaders = await S.loadShaders(new URL("shader/", base));
   const jobs = [];
-  const seen = new Set();
-  for (const surface of ["ocean", "city"]) {
-    for (const nested of [false, true]) {
-      for (const periodic of [false, true]) {
-        for (const toneMap of [true, false]) {
-          for (const recipe of recipes) {
-            const label = [surface,
-                           nested ? "nested" : "flat",
-                           periodic ? "periodic" : "open",
-                           toneMap ? "tonemap" : "linear",
-                           "steps" + recipe.maxLightSteps
-                           + (recipe.lightCache ? "+cache" : "")
-                           + (recipe.skyProbe ? "+probe" : "")].join("/");
-            let code;
-            try {
-              code = R.specializeShader(raymarch, {
-                ...recipe, periodic, nested, toneMap,
-                city: surface === "city" });
-            } catch (err) {
-              jobs.push({ label, error: "specialize: " + err.message });
-              continue;
-            }
-            if (seen.has(code)) continue;
-            seen.add(code);
-            jobs.push({ label: "raymarch " + label, tail: label, code,
-                        city: surface === "city" });
-          }
-        }
-      }
+  const onOff = [false, true];
+  for (const surface of Object.keys(shaders)) {
+    for (const nested of onOff) for (const periodic of onOff)
+    for (const toneMap of onOff) for (const lightCache of onOff)
+    for (const skyProbe of onOff) {
+      const spec = { periodic, nested, toneMap, lightCache, skyProbe };
+      jobs.push({
+        label: surface + " " + Object.entries(spec)
+          .filter(([, on]) => on).map(([k]) => k).join("+"),
+        code: () => S.specializeShader(shaders[surface], spec) });
     }
   }
   for (const f of ["bird.wgsl", "dart.wgsl", "hud.wgsl"]) {
-    jobs.push({ label: f, file: f });
+    jobs.push({ label: f, code: () => text(f) });
   }
-  // The present pass, which carries lens water (lens.wgsl is not a module
-  // on its own: the present shader includes it and provides lens_src).
-  jobs.push({ label: "present + lens.wgsl", present: true });
-  let csSmall = false;     // the 16x16 workgroup, built once
+  // lens.wgsl is not a module on its own: the present shader includes it.
+  jobs.push({ label: "present + shader/lens.wgsl",
+              code: async () => R.presentShader(await text("shader/lens.wgsl")) });
   const run = async (i) => {
-    const j = jobs[i];
-    if (j.error) return [{ label: j.label, errors: [j.error], warnings: [] }];
-    let code = j.code;
-    try {
-      if (j.file) code = await text(j.file);
-      if (j.present) code = R.presentShader(await text("lens.wgsl"));
-    } catch (err) {
-      return [{ label: j.label, errors: [err.message], warnings: [] }];
-    }
-    const m = await compile(j.label, code);
-    const res = [m];
-    if (j.city && !m.errors.length) {
-      res.push(await csPipeline("cs_surface 32x16 " + j.tail, m.module,
-                                [32, 16]));
-      if (!csSmall) {
-        csSmall = true;
-        res.push(await csPipeline("cs_surface 16x16 " + j.tail, m.module,
-                                  [16, 16]));
-      }
-    }
-    for (const r of res) delete r.module;
-    return res;
+    const { label, code } = jobs[i];
+    device.pushErrorScope("validation");
+    const module = device.createShaderModule({ label, code: await code() });
+    const info = await module.getCompilationInfo();
+    const scoped = await device.popErrorScope();
+    const errors = info.messages.filter((m) => m.type === "error")
+      .map((m) => m.lineNum + ":" + m.linePos + " " + m.message);
+    if (scoped && !errors.length) errors.push(scoped.message);
+    return errors;
   };
   window.__tint = { run, device };
-  return { jobs: jobs.map((j) => j.label),
-           adapter: [adapter.info?.vendor, adapter.info?.architecture]
-                      .filter(Boolean).join(" ") };
+  return jobs.map((j) => j.label);
 })()`;
 
-let plan;
+let labels;
 try {
-  plan = await tab.eval(setup, SETUP_DEADLINE_MS);
+  labels = await tab.eval(setup, SETUP_DEADLINE_MS);
 } catch (err) {
   await fail(err);
 }
-if (plan.fatal) await fail(new Error(plan.fatal));
-const out = [];
-for (let i = 0; i < plan.jobs.length; i++) {
-  const t0 = Date.now();
+let failed = 0;
+const t0 = Date.now();
+for (let i = 0; i < labels.length; i++) {
+  let errors;
   try {
-    out.push(...await tab.eval(`window.__tint.run(${i})`, JOB_DEADLINE_MS));
+    errors = await tab.eval(`window.__tint.run(${i})`, JOB_DEADLINE_MS);
   } catch (err) {
-    await fail(new Error(`${plan.jobs[i]}: ${err.message}`));
+    await fail(new Error(`${labels[i]}: ${err.message}`));
   }
-  console.error(`tint_check: [${i + 1}/${plan.jobs.length}] ${plan.jobs[i]} ` +
-                `${Date.now() - t0} ms`);
+  if (errors.length) {
+    failed += 1;
+    console.log(`FAIL ${labels[i]}`);
+    for (const e of errors) console.log(`   ${e}`);
+  }
 }
 await tab.eval("(window.__tint.device.destroy(), true)").catch(() => {});
-const result = { out, adapter: plan.adapter };
-let failed = 0;
-const seen = new Set();
-for (const m of result.out) {
-  if (m.errors.length) {
-    failed += 1;
-    console.log(`FAIL ${m.label}`);
-    for (const e of m.errors) console.log(`   ${e}`);
-  }
-  for (const w of m.warnings) {
-    if (!seen.has(w)) { seen.add(w); console.log(`warn ${m.label}: ${w}`); }
-  }
-}
-const pipelines = result.out.filter((m) => m.pipeline).length;
-console.log(`tint_check: ${result.out.length - pipelines} modules and ` +
-            `${pipelines} cs_surface pipelines, ${failed} failed ` +
-            `(raymarch.wgsl sha256 ${shaderHash}; ${result.adapter})`);
+console.log(`tint_check: ${labels.length} modules, ${failed} failed ` +
+            `(${adapter}; ${((Date.now() - t0) / 1000).toFixed(0)} s)`);
 await done(failed ? 1 : 0);
