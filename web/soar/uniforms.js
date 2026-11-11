@@ -334,8 +334,8 @@ export function packUniforms(state, view) {
  *       OUTPUTS of the accumulation decision. Including them would make the
  *       key self-referential.
  *
- * maxLightSteps and the output size are folded in because both change the
- * image without appearing in the buffer.
+ * The output size is folded in because it changes the image without
+ * appearing in the buffer.
  */
 /**
  * The scene clock a surface reads: only where something reads it (a
@@ -359,16 +359,15 @@ export function sceneClock(sceneTime, clockPeriodS) {
   return clock < 0 ? clock + clockPeriodS : clock;
 }
 
-export function sceneKey(u, maxLightSteps, outputW, outputH) {
+export function sceneKey(u, outputW, outputH) {
   const copy = new Float32Array(u);
   copy[SLOT.FRAME_INDEX] = 0.0;
   copy[SLOT.SUBPIXEL_JITTER] = 0.0;
   copy[SLOT.JITTER_SCALE] = 0.0;
-  const key = new Uint8Array(copy.byteLength + 12);
+  const key = new Uint8Array(copy.byteLength + 8);
   key.set(new Uint8Array(copy.buffer), 0);
-  new DataView(key.buffer).setUint32(copy.byteLength, maxLightSteps, true);
-  new DataView(key.buffer).setUint32(copy.byteLength + 4, outputW, true);
-  new DataView(key.buffer).setUint32(copy.byteLength + 8, outputH, true);
+  new DataView(key.buffer).setUint32(copy.byteLength, outputW, true);
+  new DataView(key.buffer).setUint32(copy.byteLength + 4, outputH, true);
   return key;
 }
 

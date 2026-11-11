@@ -58,7 +58,7 @@
 // against the previous one, since a frame moves at most a few hundred
 // metres and the tile is 92 km across.
 //
-// --- Order within a frame (viewer.js) ---------------------------------------
+// --- Order within a frame (viewer/loop.js) ----------------------------------
 //
 //   collider.advance(dt, camera)   the episode's clock: controls damped, the
 //                                  bounce and the fall applied, shake taken

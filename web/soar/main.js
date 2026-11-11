@@ -41,21 +41,21 @@ const dom = {
 
 // --- the loading takeover -------------------------------------------------
 
-export function showLoading(stage) {
+function showLoading(stage) {
   dom.loading.hidden = false;
   dom.loading.classList.remove("failed");
   dom.stage.textContent = stage;
   dom.bar.style.width = "0%";
 }
 
-export function progress(stage, fraction) {
+function progress(stage, fraction) {
   dom.stage.textContent = stage;
   if (typeof fraction === "number") {
     dom.bar.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
   }
 }
 
-export function hideLoading() {
+function hideLoading() {
   dom.loading.hidden = true;
 }
 
@@ -64,7 +64,7 @@ export function hideLoading() {
  * says what broke, the body says why, and the advice says what to do about
  * it — which for the interesting failures is a real, specific instruction.
  */
-export function showFailure(title, body, advice) {
+function showFailure(title, body, advice) {
   dom.loading.hidden = false;
   dom.loading.classList.add("failed");
   dom.stage.textContent = "";
@@ -165,7 +165,7 @@ function reportNoGPU() {
 // Relative, and deliberately not absolute: the same folder has to work from
 // file://, from a local http.server, and from the site, without a build-time
 // substitution or a hostname compiled into the app.
-export const DEMOS_URL = "./demos";
+const DEMOS_URL = "./demos";
 
 /**
  * Accept either index shape and return a list of groups.
@@ -932,7 +932,7 @@ wireFlyPair(buildRail());
 //
 // ?surface=ocean, beside ?demo, stands the demo on the day sea whatever its
 // meta says. Checked here, before anything loads: a name the viewer does
-// not know (the desert included: it lives on the `desert` branch), or a day
+// not know, or a day
 // surface asked of the night city, is refused rather than flown as
 // something else.
 const query = new URLSearchParams(location.search);
@@ -941,10 +941,6 @@ const wantedSurface = query.get("surface");
 if (wantedSurface !== null) {
   if (wanted === null) {
     throw new Error("?surface needs ?demo: it picks the ground a demo stands on.");
-  }
-  if (wantedSurface === "desert") {
-    throw new Error("?surface=desert: the desert is not part of this soar " +
-                    "(it lives on the cloudyview `desert` branch).");
   }
   if (wantedSurface !== "ocean") {
     throw new Error(`?surface=${wantedSurface}: expected 'ocean'.`);
@@ -972,5 +968,3 @@ if (wanted !== null) {
                   ...(wantedSurface ? { surfaceKind: wantedSurface } : {}) });
   }, () => {});
 }
-
-export { browserGuess };

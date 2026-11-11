@@ -211,7 +211,6 @@ export const CITY_DEFAULT_SPEED = 20.0;
 export const PERIODIC_AIR_TAU_CUTOFF = 3.912023005428146;  // -ln(0.02)
 export const PERIODIC_MAX_RANGE_M = 4.0e5;
 export const STEP_VOXEL_FACTOR = 2.0;
-export const DEFAULT_MAX_LIGHT_STEPS = 512;
 
 // The library defaults are 0.0 (exact legacy marching); the app opts in, and
 // the browser ships the app's values. The coarser light march is most of what
@@ -475,8 +474,6 @@ export const UNIFORM_ROWS = 21;
 // row — it was about the copy.
 export const UNIFORM_NBYTES = UNIFORM_ROWS * 16;
 
-export const AUTO_FP16_MIN_VOXELS = 256 * 1024 * 1024;
-
 // --- the sun-tau cache (prototype, 2026-08-19) ----------------------------
 //
 // Linear reduction of the cache grid against the volume grid. 2 costs an
@@ -515,7 +512,7 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 // steps before it leaves the cloud and the tier brightens in a way that
 // depends on the viewing direction. A coarse step integrates the whole path;
 // a low cap integrates part of it and stops. So the cap is now a safety
-// ceiling at DEFAULT_MAX_LIGHT_STEPS for every tier, and the light march is
+// ceiling (the shader's MAX_LIGHT_STEPS) for every tier, and the light march is
 // made cheap by its step instead.
 //
 // Holding the cap equal across tiers has a second effect worth as much as the
@@ -548,22 +545,18 @@ export const QUALITY_PRESETS = {
   // own panel marches what a PARKED view at that tier converges to (Thomas,
   // 2026-09-01): the tier's lighting method, spp and look defaults, but the
   // top hold rung's sampling — High's step factors — never the flight
-  // stepping below. See capture.beginOfflineRender.
+  // stepping below. See Renderer.beginOffline.
   max:    { name: "max",    label: "Max",    renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 8,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
             lightCache: false, skyProbe: true },
   high:   { name: "high",   label: "High",   renderScale: 1.0,
             stepFactor: 2.0, lightStepFactor: 2.0, sppPerFrame: 1,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
             lightCache: true, skyProbe: true },
   medium: { name: "medium", label: "Medium", renderScale: 0.70,
             stepFactor: 2.5, lightStepFactor: 4.0, sppPerFrame: 1,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
             lightCache: true, skyProbe: false },
   low:    { name: "low",    label: "Low",    renderScale: 0.30,
             stepFactor: 3.0, lightStepFactor: 8.0, sppPerFrame: 1,
-            maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
             lightCache: true, skyProbe: false },
   // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
   // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
@@ -573,7 +566,7 @@ export const QUALITY_PRESETS = {
   // machines it used to insult as "Potato".
   minimal: { name: "minimal", label: "Minimal",
             renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
-            sppPerFrame: 1, maxLightSteps: DEFAULT_MAX_LIGHT_STEPS,
+            sppPerFrame: 1,
             lightCache: true, skyProbe: false },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
@@ -786,11 +779,6 @@ export const AUTO_TIER_WARMUP_FRAMES = 1;
 // anything, and the probe is paid for in real frames the user is watching, so
 // it is also as many as is polite. Total cost: 4 frames x 4 tiers, worst case.
 export const AUTO_TIER_SAMPLE_FRAMES = 3;
-// When even the floor tier cannot hold this, say so out loud. There is
-// nothing left to fall back to — the floor is the floor — so the honest
-// move is to settle there and tell the user what they are looking at rather
-// than let them conclude the app is broken.
-export const AUTO_TIER_FLOOR_WARN_MS = 50.0;
 
 // --- the probe's clock, calibrated before it is believed ------------------
 //
@@ -984,7 +972,6 @@ export const CAPTURE_SIZE_PRESETS = [
   ["2K", [1920, 1080]],
   ["4K", [3840, 2160]],
 ];
-export const CAPTURE_SIZE_LIMITS = [64, 7680];
 export const DEFAULT_VIDEO_FPS = 60.0;
 export const VIDEO_FPS_LIMITS = [12.0, 120.0];
 

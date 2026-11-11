@@ -342,7 +342,7 @@ export class Tutorial {
     // step here dims the screen around one of that panel's rows. A pause onto
     // any other panel is a place this chapter cannot point at, so the flight
     // chapter starts over instead of advancing blind. Every source of such a
-    // pause is refused while a chapter runs (TUTORIAL_REFUSED in viewer.js);
+    // pause is refused while a chapter runs (TUTORIAL_REFUSED in viewer/input.js);
     // this is the guard that keeps the silent void unreachable rather than a
     // path anything is expected to take.
     if (this.step.menuKey && this.steps !== this._researchSteps
@@ -478,7 +478,7 @@ export class Tutorial {
    * "Not yet" — the one answer to anything the running step did not ask for.
    *
    * Shared by the click interceptor, interceptEscape and the viewer's keyboard
-   * refusal (see TUTORIAL_REFUSED in viewer.js) so that a shortcut, a row and
+   * refusal (see TUTORIAL_REFUSED in viewer/input.js) so that a shortcut, a row and
    * Escape all say the same sentence in the same place.
    *
    * @returns {boolean} true if a chapter is running and was told to say so.

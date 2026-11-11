@@ -84,15 +84,10 @@ _JS = textwrap.dedent("""
       // A report must only happen after the sync for its pass has resolved.
       syncsAtReport: [],
       resetAccumulation() {},
-      setQualityTier() {},
-      setRenderScale() {},
-      flightRenderScale: 1.0,
-      qualityTier: "high",
-      lightCacheMode: "auto",
-      skyProbeMode: "auto",
-      parkedSppOverride: null,
-      lightBakePending: false,
-      stepLightBake() { return true; },
+      // renderStill's offline mode is the renderer's own (Renderer.
+      // beginOffline / endOffline); nothing here depends on what it sets.
+      async beginOffline() {},
+      endOffline() {},
       async drawFrame() { this.passes += 1; },
     });
 

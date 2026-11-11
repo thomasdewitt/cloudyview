@@ -66,9 +66,10 @@ def js_binding_lists():
     """Every binding list in renderer.js built against the raymarch layout.
 
     Found by walking the calls rather than by line anchors: there is the
-    layout itself, the main bind group, the exposure meter's own, and the
-    light-cache bake's — and the ones a person editing refreshBindGroup
-    forgets are exactly the ones not next to it.
+    layout itself and the one bind group built against it (_rayGroup, which
+    the frame, the exposure meter and the light-cache bake all call). A
+    second hand-written list is what this count refuses: the ones a person
+    editing one copy forgets are exactly the ones not next to it.
     """
     source = RENDERER_JS.read_text()
     lists = {}
@@ -84,10 +85,14 @@ def js_binding_lists():
         seen += 1
         lists[f"bindGroup{seen}"] = {
             int(n) for n in re.findall(r"binding:\s*(\d+)", block)}
-    assert seen == 3, (
-        f"expected 3 bind groups against rayLayout in renderer.js (main, "
-        f"exposure meter, light-cache bake), found {seen}; the parser or "
-        f"the renderer has moved")
+    assert seen == 1, (
+        f"expected 1 bind group against rayLayout in renderer.js "
+        f"(_rayGroup), found {seen}; the parser or the renderer has moved")
+    for label, buffer in (("soar-raymarch", "this.uniformBuf"),
+                          ("soar-light-bake", "this._bakeUniformBuf"),
+                          ("soar-meter", "this._meterUniformBuf")):
+        assert f'this._rayGroup("{label}", {buffer})' in source, (
+            f"the '{label}' march no longer binds group 0 through _rayGroup")
     for label, numbers in lists.items():
         assert numbers, f"no bindings parsed out of {label}"
     return lists

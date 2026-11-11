@@ -74,6 +74,7 @@ HASH_CHARS = 8
 FINGERPRINT_PATTERNS = (
     "*.js",
     "ingest/*.js",
+    "viewer/*.js",
     "hud.wgsl",
     "bird.wgsl",
     "dart.wgsl",

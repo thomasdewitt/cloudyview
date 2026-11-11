@@ -24,7 +24,7 @@ const STILL_FORMAT = "rgba8unorm";
 export async function renderStill(device, renderer, view, size, tier,
                                   overlays = null, onProgress = null) {
   const target = createOfflineTarget(device, size, "soar-still");
-  const saved = await beginOfflineRender(renderer, tier);
+  await renderer.beginOffline(tier);
   try {
     await renderAccumulated(
       renderer, target.view, size, view, captureFrames(tier), overlays,
@@ -42,7 +42,7 @@ export async function renderStill(device, renderer, view, size, tier,
     }
   } finally {
     target.texture.destroy();
-    endOfflineRender(renderer, saved);
+    renderer.endOffline();
   }
 }
 
@@ -84,80 +84,6 @@ export function captureFrames(tier) {
   if (!preset) throw new Error(`unknown capture tier '${tier}'.`);
   return Math.max(1, Math.round(
     K.PARKED_ACCUM_FRAMES_BY_TIER[tier] / (preset.sppPerFrame ?? 1)));
-}
-
-/**
- * Configure the renderer for an offline render at `tier`, returning what to
- * restore. A capture at tier T marches what a PARKED T view converges to
- * (Thomas, 2026-09-01): T's lighting method and parked spp, but the hold
- * ladder's TOP-rung sampling — High's step factors and light-step cap for
- * every tier — never the flight stepping. The offline paths drive drawFrame
- * directly and never climb the ladder, so without the explicit override here
- * a minimal capture marched at minimal's flight step (4.0/12.0) while a
- * parked minimal view marched at High's 2.0/2.0. Pure preset, no session
- * overrides — which is also what keeps a capture reproducible from the CLI:
- * witness --quality applies the same recipe with nothing invisible mixed in.
- *
- * The one deviation from "parked, full stop": render scale is 1.0 at the
- * capture's explicit pixel size, not the tier's hold-scale cap (0.5 on
- * minimal, 0.25 in the old table's terms). Those caps are interactivity
- * concessions — a frame someone is waiting to fly out of — and a capture
- * has no frame to protect.
- */
-export async function beginOfflineRender(renderer, tier = "high") {
-  const saved = { scale: renderer.flightRenderScale,
-                  tier: renderer.qualityTier,
-                  lightCacheMode: renderer.lightCacheMode,
-                  skyProbeMode: renderer.skyProbeMode,
-                  parkedSppOverride: renderer.parkedSppOverride };
-  renderer.setQualityTier(tier);
-  renderer.lightCacheMode = "auto";
-  renderer.skyProbeMode = "auto";
-  renderer.parkedSppOverride = null;
-  renderer.setRenderScale(1.0);
-  // Parked sampling, applied after setRenderScale (whose rung rebuild resets
-  // the step factors to the tier's flight numbers). endOfflineRender's
-  // setQualityTier rebuilds the rungs again, which is what restores these.
-  const parked = K.QUALITY_PRESETS.high;
-  renderer.stepFactor = parked.stepFactor;
-  renderer.lightStepFactor = parked.lightStepFactor;
-  renderer.maxLightSteps = parked.maxLightSteps;
-  // Most tiers read the sun-tau cache, and a capture must not race a
-  // half-done bake: the frames before completion would light differently
-  // from the frames after. Finish it here — the capture owns the GPU. The
-  // bake's pipeline may still be compiling (a periodicity toggle, say, moves
-  // its specialization), and a compile can only finish if this yields to
-  // the event loop, so it is awaited rather than spun on; a failed compile
-  // throws, and the session is put back the way it was before rethrowing.
-  try {
-    while (renderer.lightBakePending) {
-      const compiling = renderer.bakePipelinePending();
-      if (compiling) {
-        await compiling;
-        continue;
-      }
-      renderer.stepLightBake(64);
-    }
-  } catch (err) {
-    endOfflineRender(renderer, saved);
-    throw err;
-  }
-  renderer.resetAccumulation();
-  // Never more than two marches queued: the compositor shares the GPU and
-  // Chrome gives its swapchain acquire two seconds (renderer._submit).
-  renderer.boundedQueue = true;
-  return saved;
-}
-
-export function endOfflineRender(renderer, saved) {
-  renderer.boundedQueue = false;
-  renderer._queueFences = [];
-  renderer.setQualityTier(saved.tier);
-  renderer.setRenderScale(saved.scale);
-  renderer.lightCacheMode = saved.lightCacheMode;
-  renderer.skyProbeMode = saved.skyProbeMode;
-  renderer.parkedSppOverride = saved.parkedSppOverride;
-  renderer.resetAccumulation();
 }
 
 /**

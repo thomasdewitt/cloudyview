@@ -993,7 +993,7 @@ def march(spec: dict, subject, *, position, azimuth, elevation, fov, size,
 # --- auto exposure ----------------------------------------------------------
 
 # soar's auto-exposure rule, restated from web/soar/constants.js and
-# viewer.js::_aeTick. This is the second copy and it has to stay the first
+# viewer/exposure.js::_aeTick. This is the second copy and it has to stay the first
 # one's equal: a still baked at a hand-chosen exposure and a flight that
 # opens on the same camera and immediately meters its way somewhere else is
 # the jump cut the whole `still` block exists to prevent.

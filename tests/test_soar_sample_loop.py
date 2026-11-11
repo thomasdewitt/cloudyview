@@ -89,7 +89,7 @@ _JS = textwrap.dedent("""
       r._holdCapped = false;
       r._holdMode = K.DEFAULT_HOLD_MODE;
       r.renderScale = null; r.stepFactor = null;
-      r.lightStepFactor = null; r.maxLightSteps = null;
+      r.lightStepFactor = null;
       r._resetAccumulation();
       r._applyEffectiveQuality();
       r.motionBlendAlpha = K.DEFAULT_MOTION_BLEND_ALPHA;

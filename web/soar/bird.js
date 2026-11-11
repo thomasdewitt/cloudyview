@@ -15,9 +15,6 @@
 // camera-relative matrices, the uniform block, the pass, the placement ahead
 // of the camera — lives in flyer.js and is shared with the paper dart. What
 // is left here is the swift: its wingbeat, and how a bird banks.
-//
-// `setStatic(camera, t, overrides)` replaces `update` for a deterministic
-// pose (offscreen stills), matching Bird.set_static.
 
 "use strict";
 
@@ -183,32 +180,5 @@ export class Bird extends Flyer {
     this.tailSpread += (spreadTarget - this.tailSpread) * kb;
 
     this._place(camera.position, this._flap(dt));
-  }
-
-  /**
-   * Deterministic pose for offscreen rendering (no dynamics).
-   *
-   * The bird cruises along the view direction: steady wingbeat at phase
-   * 2*pi*FLAP_HZ_FAST*t, climbing/descending with the camera elevation as if
-   * flying that trajectory, unless `bank`/`pitch` (deg) or `flapPhase` (rad)
-   * override it.
-   */
-  setStatic(camera, t = 0.0, { bank = null, pitch = null, flapPhase = null } = {}) {
-    this.heading = camera.azimuth;
-    this.course = camera.azimuth;   // a still is of a bird cruising straight
-    this.viewElevation = camera.elevation;
-    this.bank = bank === null ? 0.0 : Number(bank);
-    this.pitch = pitch === null
-      ? clamp(0.6 * camera.elevation, -PITCH_MAX, PITCH_MAX)
-      : Number(pitch);
-    this.flapAmp = FLAP_AMPLITUDE;
-    this.flapPhase = flapPhase === null
-      ? mod2pi(TWO_PI * FLAP_HZ_FAST * t)
-      : Number(flapPhase);
-    this.flapAngle = REST_DIHEDRAL + this.flapAmp * Math.sin(this.flapPhase);
-    this.wristFlex = WRIST_FLEX * Math.sin(this.flapPhase - WRIST_LAG);
-    this.handTwist = HAND_TWIST * Math.cos(this.flapPhase);
-    this.tailSpread = 0.0;
-    this._place(camera.position, BOB_AMPLITUDE * Math.sin(this.flapPhase - 1.2));
   }
 }

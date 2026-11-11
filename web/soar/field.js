@@ -290,16 +290,3 @@ export function viewSpansDomainEdge(origin, basis, fovDeg, aspect, bmin, bmax) {
   }
   return false;
 }
-
-/**
- * Coordinates are stored ascending. A strictly descending axis is reversed,
- * along with the field data on that axis — matching CloudField.__post_init__,
- * including its strictness: one flat or ascending step and no flip happens.
- */
-export function needsFlip(coord) {
-  if (coord.length < 2) return false;
-  for (let i = 1; i < coord.length; i++) {
-    if (!(coord[i] - coord[i - 1] < 0)) return false;
-  }
-  return true;
-}

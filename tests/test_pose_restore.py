@@ -138,7 +138,7 @@ def test_displace_is_swept_and_does_not():
 def test_the_tutorial_spawn_places_by_jump():
     # The viewer's own absolute city reposition: the tutorial's spawn, which
     # a replay from the menu makes mid-flight (tutorial.js -> tutorialSpawn).
-    src = (SOAR / "viewer.js").read_text()
+    src = (SOAR / "viewer" / "input.js").read_text()
     start = src.index("  tutorialSpawn() {")
-    body = src[start:src.index("\n  }\n", start)]
+    body = src[start:src.index("\n  },\n", start)]
     assert "this.camera.jump(" in body and "displace(" not in body

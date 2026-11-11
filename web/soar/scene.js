@@ -676,11 +676,6 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
   progress?.("Downloading the cloud field…", 0);
   const meta = await (await fetch(`${baseUrl}/meta.json`)).json();
   const surfaceKind = forcedSurface ?? meta.surface ?? "ocean";
-  if (surfaceKind === "desert") {
-    throw new Error(
-      `The '${meta.id}' demo was baked over the desert, which this soar no ` +
-      "longer has (it lives on the cloudyview `desert` branch).");
-  }
   if (!["ocean", "city"].includes(surfaceKind)) {
     throw new Error(
       `The '${meta.id}' demo asks for surface '${surfaceKind}', which this ` +

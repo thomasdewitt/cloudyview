@@ -23,9 +23,6 @@
 //   - It flies slightly WING DOWN, always, because dartmesh.js folds it
 //     slightly crooked. The geometry and the trim agree on which way, which
 //     is the sort of thing nobody notices and everybody believes.
-//
-// `setStatic(camera, t, overrides)` replaces `update` for a deterministic
-// pose, matching the bird's.
 
 "use strict";
 
@@ -255,39 +252,5 @@ export class Dart extends Flyer {
 
     this._flutter(dt);
     this._place(camera.position, phugoid.bob);
-  }
-
-  /**
-   * Deterministic pose for offscreen rendering (no dynamics). `t` walks the
-   * phugoid, so a sequence of stills shows the porpoise.
-   */
-  setStatic(camera, t = 0.0, { bank = null, pitch = null, phugoidPhase = null } = {}) {
-    this.heading = camera.azimuth;
-    this.course = camera.azimuth;   // a still is of a dart flying straight
-    this.viewElevation = camera.elevation;
-    this._clock = t;
-    this.phugoidPhase = phugoidPhase === null
-      ? mod2pi(TWO_PI * t / PHUGOID_PERIOD)
-      : Number(phugoidPhase);
-    const wander = 0.72 + 0.28 * Math.sin(TWO_PI * PHUGOID_WANDER_HZ * t);
-    const swing = PHUGOID_PITCH_DEG * wander * Math.sin(this.phugoidPhase);
-    const bob = PHUGOID_BOB_M * wander
-              * Math.sin(this.phugoidPhase - PHUGOID_BOB_LAG);
-
-    this._bankSteady = bank === null ? 0.0 : Number(bank);
-    this.bank = this._bankSteady;
-    this._pitchSteady = pitch === null
-      ? clamp(0.6 * camera.elevation, -PITCH_MAX, PITCH_MAX)
-      : Number(pitch);
-    this.pitch = this._pitchSteady + (pitch === null ? swing : 0.0);
-
-    this.wobbleAmp = WOBBLE_IDLE;
-    this.wobblePhase = 0.0;
-    this.flutterAmp = 0.35;
-    this.flutterPhase = mod2pi(TWO_PI * 14.0 * t);
-    this.wingFlex = FLEX_PER_G
-      * (-0.55 * Math.sin(this.phugoidPhase - PHUGOID_BOB_LAG));
-    this.keelSway = 0.0;
-    this._place(camera.position, bob);
   }
 }

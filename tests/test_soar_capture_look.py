@@ -27,7 +27,7 @@ from cloudyview.soar.tiers import QUALITY_PRESETS
 
 REPO = Path(__file__).resolve().parents[1]
 VIEWER_JS = (REPO / "web" / "soar" / "viewer.js").as_posix()
-CAPTURE_JS = (REPO / "web" / "soar" / "capture.js").as_posix()
+RENDERER_JS = (REPO / "web" / "soar" / "renderer.js").as_posix()
 CONSTANTS_JS = (REPO / "web" / "soar" / "constants.js").as_posix()
 
 needs_node = pytest.mark.skipif(
@@ -36,7 +36,7 @@ needs_node = pytest.mark.skipif(
 
 _JS = textwrap.dedent("""
     import { Viewer, autoExposureTarget } from "%s";
-    import { beginOfflineRender } from "%s";
+    import { Renderer } from "%s";
     import * as K from "%s";
 
     // A viewer stub carrying only what the look/metadata paths read. The
@@ -117,7 +117,8 @@ _JS = textwrap.dedent("""
         v._captureLook("high"), [64, 36]);
     }
 
-    // (d) beginOfflineRender marches parked (High) sampling for every tier.
+    // (d) Renderer.beginOffline marches parked (High) sampling for every
+    // tier.
     {
       const r = {
         flightRenderScale: 0.125, qualityTier: "minimal",
@@ -127,15 +128,13 @@ _JS = textwrap.dedent("""
           this.qualityTier = t;
           this.stepFactor = K.QUALITY_PRESETS[t].stepFactor;
           this.lightStepFactor = K.QUALITY_PRESETS[t].lightStepFactor;
-          this.maxLightSteps = K.QUALITY_PRESETS[t].maxLightSteps;
         },
         setRenderScale(s) { this.renderScale = s; },
         resetAccumulation() {},
       };
-      beginOfflineRender(r, "minimal");
+      Renderer.prototype.beginOffline.call(r, "minimal");
       out.offline = { stepFactor: r.stepFactor,
                       lightStepFactor: r.lightStepFactor,
-                      maxLightSteps: r.maxLightSteps,
                       renderScale: r.renderScale,
                       tier: r.qualityTier };
     }
@@ -226,7 +225,7 @@ _JS = textwrap.dedent("""
       parkedFrames: K.PARKED_ACCUM_FRAMES_BY_TIER,
     };
     process.stdout.write(JSON.stringify(out));
-""") % (VIEWER_JS, CAPTURE_JS, CONSTANTS_JS)
+""") % (VIEWER_JS, RENDERER_JS, CONSTANTS_JS)
 
 
 @pytest.fixture(scope="module")
@@ -300,7 +299,6 @@ def test_offline_render_marches_parked_sampling(js):
     assert offline["tier"] == "minimal"          # lighting method is the tier's
     assert offline["stepFactor"] == high["stepFactor"]
     assert offline["lightStepFactor"] == high["lightStepFactor"]
-    assert offline["maxLightSteps"] == high["maxLightSteps"]
     assert offline["renderScale"] == 1.0         # no hold-scale cap: no frame
                                                  # to protect
 

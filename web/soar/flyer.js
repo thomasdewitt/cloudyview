@@ -308,19 +308,6 @@ export class Flyer {
     });
   }
 
-  /**
-   * Point the flyer at a different field without recompiling its shader.
-   * A new scene brings a new texture and new bounds, and the old view refers
-   * to a texture the scene has already destroyed.
-   */
-  setVolume({ volumeView, bmin, bmax }) {
-    if (!volumeView) throw new Error(`${this.label}.setVolume needs a volume view.`);
-    this.volumeView = volumeView;
-    this.bmin = [...bmin];
-    this.bmax = [...bmax];
-    this._refreshBindGroup();
-  }
-
   // ------------------------------------------------------------------
   // Setup
   // ------------------------------------------------------------------

@@ -278,7 +278,6 @@ export class Renderer {
     this.renderScale = null;
     this.stepFactor = null;
     this.lightStepFactor = null;
-    this.maxLightSteps = null;
     this._resetAccumulation();          // _applyRung resets it again; be defined first
     this._applyEffectiveQuality();
 
@@ -298,6 +297,9 @@ export class Renderer {
     // Offline renders cap the GPU queue at two marches; see _submit.
     this.boundedQueue = false;
     this._queueFences = [];
+    // The live quality state an offline render put aside, or null when not
+    // rendering offline; see beginOffline.
+    this._offline = null;
 
     this.uniformBuf = device.createBuffer({
       label: "soar-uniforms",
@@ -558,12 +560,22 @@ export class Renderer {
   refreshBindGroup() {
     // A nest attached or removed moves the NESTED specialization.
     this.prefetchPipelines();
+    this.rayBindGroup = this._rayGroup("soar-raymarch", this.uniformBuf);
+  }
+
+  /**
+   * Group 0 of a march, reading `uniformBuf`: the uniform block, the volume,
+   * the surface tile, the nest, the sun-tau cache and the ice fraction. The
+   * frame, the light bake and the exposure meter each bind one, with a
+   * uniform buffer of their own.
+   */
+  _rayGroup(label, uniformBuf) {
     const scene = this.scene;
-    this.rayBindGroup = this.device.createBindGroup({
-      label: "soar-raymarch",
+    return this.device.createBindGroup({
+      label,
       layout: this.rayLayout,
       entries: [
-        { binding: 0, resource: { buffer: this.uniformBuf } },
+        { binding: 0, resource: { buffer: uniformBuf } },
         { binding: 1, resource: scene.volumeView },
         { binding: 2, resource: this.volSampler },
         { binding: 3, resource: scene.oceanView },
@@ -669,7 +681,6 @@ export class Renderer {
       scale: this._flightRenderScale,
       stepFactor: preset.stepFactor,
       lightStepFactor: preset.lightStepFactor,
-      maxLightSteps: preset.maxLightSteps,
       costRatio: 1.0,
     }];
     const steps = [
@@ -699,7 +710,6 @@ export class Renderer {
         scale: step.scale,
         stepFactor: sampling.stepFactor,
         lightStepFactor: sampling.lightStepFactor,
-        maxLightSteps: sampling.maxLightSteps,
         // What this rung is expected to cost relative to the one below it.
         // Pixels go as the square of the scale. The view march takes a step
         // every stepFactor voxels, so halving the step factor doubles the
@@ -729,12 +739,10 @@ export class Renderer {
     const rung = this._holdLadder[this._holdRung];
     const changed = rung.scale !== this.renderScale
       || rung.stepFactor !== this.stepFactor
-      || rung.lightStepFactor !== this.lightStepFactor
-      || rung.maxLightSteps !== this.maxLightSteps;
+      || rung.lightStepFactor !== this.lightStepFactor;
     this.renderScale = rung.scale;
     this.stepFactor = rung.stepFactor;
     this.lightStepFactor = rung.lightStepFactor;
-    this.maxLightSteps = rung.maxLightSteps;
     if (changed) this._resetAccumulation();
   }
 
@@ -1217,8 +1225,7 @@ export class Renderer {
    * keeps a ghost of the approach.
    */
   _accumulationPlan(u, deltaSeconds) {
-    const currentKey = sceneKey(
-      u, this.maxLightSteps, this._outputW, this._outputH);
+    const currentKey = sceneKey(u, this._outputW, this._outputH);
     const origin = [u[SLOT.CAM_ORIGIN], u[SLOT.CAM_ORIGIN + 1],
                     u[SLOT.CAM_ORIGIN + 2]];
     const forward = [u[SLOT.CAM_FORWARD], u[SLOT.CAM_FORWARD + 1],
@@ -1284,7 +1291,7 @@ export class Renderer {
    * state touched.
    */
   async drawFrame(target, targetFormat, outputSize, view,
-                  { deltaSeconds = null, accumulate = true,
+                  { deltaSeconds = null,
                     overlays = null, waitForPipeline = true,
                     lens = null, liveSteam = false } = {}) {
     // `lens`: null draws a dry lens (captures, stills, the switch off);
@@ -1297,10 +1304,9 @@ export class Renderer {
     // `liveSteam` (the live loop's): the city's steam is drawn after the
     // accumulation at the view's clock (raymarch.wgsl fs_steam_live), and
     // the clock leaves the scene key, so it runs over a parked picture that
-    // goes on converging. Only an accumulating city frame has it; every
-    // other caller marches the steam, exact, as before.
-    const steamLive = liveSteam && this.liveSteamActive && accumulate
-      && view.jitter !== false;
+    // goes on converging. Only the live loop asks for it; every other
+    // caller marches the steam, exact.
+    const steamLive = liveSteam && this.liveSteamActive;
     const [outputW, outputH] = outputSize;
     this._outputW = outputW;
     this._outputH = outputH;
@@ -1404,16 +1410,10 @@ export class Renderer {
     // fs_steam_live does).
     const steamClock = u[SLOT.SCENE_CLOCK];
     if (steamLive) u[SLOT.SCENE_CLOCK] = 0.0;
-    const plan = accumulate && view.jitter !== false
-      ? this._accumulationPlan(u, deltaSeconds)
-      : null;
+    const plan = this._accumulationPlan(u, deltaSeconds);
     u[SLOT.SCENE_CLOCK] = steamClock;
-    if (plan) {
-      u[SLOT.SUBPIXEL_JITTER] = plan.subpixel ? 1.0 : 0.0;
-      u[SLOT.JITTER_SCALE] = plan.jitterScale;
-    } else {
-      this._resetAccumulation();
-    }
+    u[SLOT.SUBPIXEL_JITTER] = plan.subpixel ? 1.0 : 0.0;
+    u[SLOT.JITTER_SCALE] = plan.jitterScale;
     // u.lens_dt: lens water's dt for the state pass, which reads nothing
     // else of this frame but the camera. Written after the plan, like the
     // sampling flags, so it is never part of the scene key.
@@ -1421,25 +1421,6 @@ export class Renderer {
     this.device.queue.writeBuffer(this.uniformBuf, 0, u);
 
     const encoder = this.device.createCommandEncoder();
-
-    if (!plan) {
-      // No accumulation: march at a float intermediate and present from it.
-      // The march could target the canvas directly when the sizes match, and
-      // used to — but then the hardware would quantize the march's own output
-      // and this frame would be the one path in the renderer that skips the
-      // present pass's dither. One full-screen blit is cheaper than a second
-      // encode point.
-      const exact = renderSize[0] === outputW && renderSize[1] === outputH;
-      this._encodeMarch(encoder, targets, this.rayBindGroup, rayPipeline,
-                        surfacePipelines);
-      const lensTex = this._encodeLensState(encoder, lens, lensPipeline);
-      this._encodeBlit(encoder, targets.sample, targetView, targetFormat,
-                       exact, lensTex);
-      encodeOverlays(overlays, encoder, targetView, targetFormat);
-      await this._submit(encoder.finish());
-      this._startLensRead();          // this submit carried the state's copy
-      return true;
-    }
 
     // How many jittered marches go into this one presented frame. Every tier
     // but Max takes a single one; see QUALITY_PRESETS.
@@ -1452,7 +1433,7 @@ export class Renderer {
     // dear exist at all without risking the device. (It also means the
     // uniform buffer can be rewritten between samples, which is what
     // decorrelates their jitter.)
-    const samples = accumulate ? Math.max(1, this.sppPerFrame) : 1;
+    const samples = Math.max(1, this.sppPerFrame);
     let outTex = null;
     for (let s = 0; s < samples; s++) {
       const step = s === 0 ? plan : this._extraSamplePlan(plan.jitterScale);
@@ -1557,6 +1538,86 @@ export class Renderer {
     while (this._queueFences.length >= 2) await this._queueFences.shift();
     this.device.queue.submit([commandBuffer]);
     this._queueFences.push(this.device.queue.onSubmittedWorkDone());
+  }
+
+  /**
+   * Configure the renderer for an offline render (a still, a video) at
+   * `tier`; endOffline puts the live state back. A capture at tier T marches
+   * what a PARKED T view converges to (Thomas, 2026-09-01): T's lighting
+   * method and parked spp, but the hold ladder's TOP-rung sampling — High's
+   * step factors for every tier — never the flight stepping. The offline
+   * paths drive drawFrame directly and never climb the ladder, so without
+   * the explicit override here a minimal capture marched at minimal's flight
+   * step (4.0/12.0) while a parked minimal view marched at High's 2.0/2.0.
+   * Pure preset, no session overrides — which is also what keeps a capture
+   * reproducible from the CLI: witness --quality applies the same recipe
+   * with nothing invisible mixed in.
+   *
+   * The one deviation from "parked, full stop": render scale is 1.0 at the
+   * capture's explicit pixel size, not the tier's hold-scale cap (0.5 on
+   * minimal, 0.25 in the old table's terms). Those caps are interactivity
+   * concessions — a frame someone is waiting to fly out of — and a capture
+   * has no frame to protect.
+   */
+  async beginOffline(tier = "high") {
+    if (this._offline) {
+      throw new Error("beginOffline: an offline render is already running.");
+    }
+    this._offline = { scale: this.flightRenderScale,
+                      tier: this.qualityTier,
+                      lightCacheMode: this.lightCacheMode,
+                      skyProbeMode: this.skyProbeMode,
+                      parkedSppOverride: this.parkedSppOverride };
+    this.setQualityTier(tier);
+    this.lightCacheMode = "auto";
+    this.skyProbeMode = "auto";
+    this.parkedSppOverride = null;
+    this.setRenderScale(1.0);
+    // Parked sampling, applied after setRenderScale (whose rung rebuild resets
+    // the step factors to the tier's flight numbers). endOffline's
+    // setQualityTier rebuilds the rungs again, which is what restores these.
+    const parked = K.QUALITY_PRESETS.high;
+    this.stepFactor = parked.stepFactor;
+    this.lightStepFactor = parked.lightStepFactor;
+    // Most tiers read the sun-tau cache, and a capture must not race a
+    // half-done bake: the frames before completion would light differently
+    // from the frames after. Finish it here — the capture owns the GPU. The
+    // bake's pipeline may still be compiling (a periodicity toggle, say, moves
+    // its specialization), and a compile can only finish if this yields to
+    // the event loop, so it is awaited rather than spun on; a failed compile
+    // throws, and the session is put back the way it was before rethrowing.
+    try {
+      while (this.lightBakePending) {
+        const compiling = this.bakePipelinePending();
+        if (compiling) {
+          await compiling;
+          continue;
+        }
+        this.stepLightBake(64);
+      }
+    } catch (err) {
+      this.endOffline();
+      throw err;
+    }
+    this.resetAccumulation();
+    // Never more than two marches queued: the compositor shares the GPU and
+    // Chrome gives its swapchain acquire two seconds (_submit).
+    this.boundedQueue = true;
+  }
+
+  /** Back to the live quality state beginOffline put aside. */
+  endOffline() {
+    const saved = this._offline;
+    if (!saved) throw new Error("endOffline: no offline render is running.");
+    this._offline = null;
+    this.boundedQueue = false;
+    this._queueFences = [];
+    this.setQualityTier(saved.tier);
+    this.setRenderScale(saved.scale);
+    this.lightCacheMode = saved.lightCacheMode;
+    this.skyProbeMode = saved.skyProbeMode;
+    this.parkedSppOverride = saved.parkedSppOverride;
+    this.resetAccumulation();
   }
 
   /**
@@ -2072,22 +2133,7 @@ export class Renderer {
     u[SLOT.DT_LIGHT] = this.scene.minVoxelM * K.QUALITY_PRESETS.high.lightStepFactor;
     this._lightBake = {
       next: 0, cx, cy, cz, sliceTex, u,
-      bindGroup: this.device.createBindGroup({
-        label: "soar-light-bake",
-        layout: this.rayLayout,
-        entries: [
-          { binding: 0, resource: { buffer: this._bakeUniformBuf } },
-          { binding: 1, resource: this.scene.volumeView },
-          { binding: 2, resource: this.volSampler },
-          { binding: 3, resource: this.scene.oceanView },
-          { binding: 4, resource: this.oceanSampler },
-          { binding: 5, resource: this.scene.nestView },
-          { binding: 6, resource: this.volWrapSampler },
-          { binding: 7, resource: this._lightTauTex.createView() },
-          { binding: 8, resource:
-              this.scene.iceView ?? this._iceDummy.createView() },
-        ],
-      }),
+      bindGroup: this._rayGroup("soar-light-bake", this._bakeUniformBuf),
     };
   }
 
@@ -2240,23 +2286,7 @@ export class Renderer {
         subpixel: false, jitterScale: 1.0, ...lighting,
       });
       this.device.queue.writeBuffer(this._meterUniformBuf, 0, u);
-      const bindGroup = this.device.createBindGroup({
-        label: "soar-meter",
-        layout: this.rayLayout,
-        entries: [
-          { binding: 0, resource: { buffer: this._meterUniformBuf } },
-          { binding: 1, resource: this.scene.volumeView },
-          { binding: 2, resource: this.volSampler },
-          { binding: 3, resource: this.scene.oceanView },
-          { binding: 4, resource: this.oceanSampler },
-          { binding: 5, resource: this.scene.nestView },
-          { binding: 6, resource: this.volWrapSampler },
-          { binding: 7, resource:
-              (this._lightTauTex ?? this._lightTauDummy).createView() },
-          { binding: 8, resource:
-              this.scene.iceView ?? this._iceDummy.createView() },
-        ],
-      });
+      const bindGroup = this._rayGroup("soar-meter", this._meterUniformBuf);
       const encoder = this.device.createCommandEncoder();
       this._encodeMarch(encoder, this._meterTargets, bindGroup, pipeline,
                         surfaces);
