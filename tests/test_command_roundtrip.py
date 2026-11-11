@@ -321,27 +321,26 @@ def test_the_surface_round_trips_to_the_uniforms(
     kind = "city" if scene.get("city") else "ocean"
     meta = renderer.surface_meta
     assert renderer.surface == kind
-    # Row 9: cell size, tile extent, surface on, top mip — the bound tile's.
+    # Cell size, tile extent, surface on, top mip: the bound tile's (row 15).
     cell = meta["dx_m"] if kind == "ocean" else meta["cell_m"]
-    assert tuple(u[9]) == pytest.approx(
+    assert tuple(u[15]) == pytest.approx(
         (cell, tile, 1.0, meta["mips"] - 1), rel=0, abs=0)
-    # Row 24: the offset the browser view rendered with, float32-exact, and
-    # the scene clock it was held at.
-    assert tuple(u[24][:2]) == tuple(
+    # The surface offset the browser view rendered with, float32-exact, and
+    # the scene clock it was held at (row 16).
+    assert tuple(u[16][:2]) == tuple(
         np.float32(emitted["surfaceOffsetM"]))
     # The clock runs where something reads it: a city still carries it (its
     # period far exceeds it, so it packs unwrapped); an ocean still neither
     # writes --time nor packs one.
     if kind == "city":
-        assert u[24][2] == np.float32(SCENE_TIME)
+        assert u[16][2] == np.float32(SCENE_TIME)
     else:
-        assert u[24][2] == 0.0
+        assert u[16][2] == 0.0
         assert "--time" not in argv
     assert ("--surface-origin" in argv) == drift
     # Row 0: the camera, through worldToRelative and back.
     assert u[0][:3] == pytest.approx(emitted["position"], rel=1e-9, abs=1e-6)
     if kind == "city":
-        assert tuple(u[8][1:3]) == tuple(np.float32(CITY_OFFSET))
         # Under CITY the sun row is the moon the browser flew under.
         assert "--sun-elevation 20" in emitted["command"]
 

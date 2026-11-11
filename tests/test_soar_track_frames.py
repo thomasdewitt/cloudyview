@@ -265,17 +265,10 @@ _JS = textwrap.dedent("""
         outputSize: [64, 36], renderSize: [64, 36],
         sunAzimuth: 20, sunElevation: 55,
       };
-      const withFrame = packUniforms(state, { ...view, camera: inside });
-      const noFrame = packUniforms(state, { ...view, camera: {
-        position: [...inside.position], azimuth: 0, elevation: 0, fov: 70,
-      } });
       out.identity = {
         spawnSp: [...spawn.surfacePosition], cityM,
         offModTile: [fold(off[0] - OFFSET[0], TILE),
                      fold(off[1] - OFFSET[1], TILE)],
-        row8WithFrame: [withFrame[33], withFrame[34]],
-        row8NoFrame: [noFrame[33], noFrame[34]],
-        row8Static: [Math.fround(OFFSET[0]), Math.fround(OFFSET[1])],
         tile: TILE,
       };
     }
@@ -296,7 +289,8 @@ _JS = textwrap.dedent("""
         camera, outputSize: [64, 36], renderSize: [64, 36],
         sunAzimuth: 20, sunElevation: 55,
       });
-      const row24 = (u) => [u[96], u[97], u[98], u[99]];
+      // u.surface_offset, u.scene_clock, u.lens_dt: row 16 of the block.
+      const row24 = (u) => [u[64], u[65], u[66], u[67]];
 
       const parked = dayCamera();
       parked.teleport(1000, -2000);
@@ -480,11 +474,6 @@ def test_the_uniforms_offset_identity_at_spawn(result):
     # cam.xy - surfacePosition = staticOffset + k * tileExtent exactly.
     for v in ident["offModTile"]:
         assert min(v, ident["tile"] - v) == pytest.approx(0.0, abs=1e-6)
-    # Row 8's city packing is the STATIC offset, camera or no camera — the
-    # live frame is row 24's job, and row 8 is the scene's own statement of
-    # where the tile was pinned.
-    assert ident["row8NoFrame"] == ident["row8Static"]
-    assert ident["row8WithFrame"] == ident["row8Static"]
 
 
 def test_row24_is_the_folded_surface_offset(result):
@@ -523,10 +512,9 @@ def test_the_shader_derives_water_and_city_from_the_tile_frame():
     quietly reverts one site — a regenerated city block included, since the
     composer rewrites the GENERATED section wholesale."""
     src = SHADER.read_text()
-    # The two water reads (the moving sea, and the legacy shader's normal)
-    # sample the offset-corrected frame.
+    # The water's tile read samples the offset-corrected frame.
     assert ShaderModule("ocean").read_text().count(
-        "world_xy - u.surface_offset") == 2
+        "world_xy - u.surface_offset") == 1
     # The city frame has ONE entry, and the trace and the dome probe both
     # use it; nothing calls city_trace with a raw world origin.
     assert "fn city_camera_origin()" in src
