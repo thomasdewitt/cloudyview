@@ -24,11 +24,6 @@ const DEEP_SHADOW_MS_SUPPRESSION: f32 = 0.90;
 const AMBIENT_OCCLUSION_FLOOR: f32 = 0.24; // the ambient fill a fully buried sample keeps
 const BOUNCE_DEPTH_ATTENUATION: f32 = 0.80; // per unit optical depth into cloud
 
-// Radiance scale of the direct sun, linear RGB. The hosts hold the same
-// value and derive the per-frame beam colour u.cloud_sun from it; here it
-// lights the sea's diffuse term.
-const SUN_COLOR: vec3<f32> = vec3<f32>(20.2, 21.0, 22.4);
-
 // Diffraction spike on the once-scattered beam.
 //
 // One HG lobe at g ~ 0.76 has the shape of a cloud's side and back
