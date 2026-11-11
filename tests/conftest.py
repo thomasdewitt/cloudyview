@@ -268,6 +268,28 @@ def render_soar_view(level, view):
 # Pytest Configuration
 # =============================================================================
 
+class ShaderModule:
+    """One surface's shader module as text: the files manifest.json joins for
+    it. Has the two methods the tests used of the single-file shader's path."""
+
+    def __init__(self, surface):
+        self.surface = surface
+        self.name = f"the {surface} shader module"
+
+    def read_text(self):
+        from cloudyview.soar import shader
+        return shader.assemble(self.surface)
+
+    def exists(self):
+        return True
+
+
+def shader_paths():
+    """Every WGSL file of the shader, each once."""
+    from cloudyview.soar import shader
+    return sorted(shader.SHADER_DIR.rglob("*.wgsl"))
+
+
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line(

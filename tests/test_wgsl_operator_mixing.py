@@ -19,9 +19,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCES = sorted(
-    [REPO / "cloudyview" / "soar" / "raymarch.wgsl"]
-    + list((REPO / "cloudyview" / "soar" / "city" / "components").glob(
-        "*.wgsl"))
+    list((REPO / "cloudyview" / "soar" / "shader").rglob("*.wgsl"))
     + list((REPO / "web" / "soar").glob("*.wgsl")))
 
 BITWISE = {"^", "|", "&", "<<", ">>"}

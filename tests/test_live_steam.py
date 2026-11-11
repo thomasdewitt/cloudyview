@@ -15,7 +15,7 @@ def _const(text, name):
 
 
 def test_the_sleep_ceiling_is_the_steam_top_plus_its_range():
-    steam = (ROOT / "cloudyview/soar/city/components/manholesteam.wgsl").read_text()
+    steam = (ROOT / "cloudyview/soar/shader/city/components/manholesteam.wgsl").read_text()
     consts = (ROOT / "web/soar/constants.js").read_text()
     assert _const(consts, "LIVE_STEAM_CEILING_M") == (
         _const(steam, "cc_manholesteam_ZTOP")

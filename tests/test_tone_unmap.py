@@ -23,8 +23,9 @@ import numpy as np
 import pytest
 
 from tests.conftest import soar_gpu_adapter
+from .conftest import ShaderModule
 
-WGSL = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
+WGSL = ShaderModule("ocean")
 
 # The sliders' ends and defaults (constants.js: TONE_MAP_GAMMA_LIMITS,
 # TONE_MAP_WHITE_POINT_LIMITS, CONTRAST_LIMITS; DEFAULT_* in the middle).

@@ -51,6 +51,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -59,7 +60,7 @@ try:
 except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
-SHADER = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
+SHADER = ShaderModule("city")
 # The plain pass's mark for the shell; replaced to render the flat facade
 # everywhere.
 MARK = """    let near = city_shell_on_wall(chit, t_lim)

@@ -11,6 +11,7 @@ import * as K from "./constants.js";
 import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize,
          motionAlphaForDt, sceneClock } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
+import { specializeShader, shaderVariantKey } from "./shader.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -206,15 +207,6 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 `;
 
 /**
- * Bake the three compile-time constants into raymarch.wgsl.
- *
- * These are textual replacements rather than WGSL `override`s on purpose:
- * folding them at compile time removes the branches from the march's hot
- * loops entirely, and MAX_LIGHT_STEPS bounds a loop, which an overridable
- * value cannot do. Each sentinel must appear exactly once — a shader that
- * quietly failed to specialize would render the wrong thing at full speed.
- */
-/**
  * Run whatever wants to draw on top of the finished frame — the minimap, the
  * bird. Each is `(encoder, targetView, targetFormat)` and encodes its own
  * load-op-"load" pass; nulls are skipped so a caller can pass a fixed-shape
@@ -313,158 +305,6 @@ function stageFormats(entry) {
   return SURFACE_FORMAT;
 }
 
-// Section stripping (raymarch.wgsl's `// @section` markers): a module keeps
-// the compiled surface's sections and the other surfaces' stubs, so it
-// carries no code of a surface it cannot show — another surface's dead code
-// had been moving this one's codegen. soar_host.strip_sections is the twin;
-// tests/test_wgsl_sections.py pins the two to the same bytes.
-const SECTION_NAMES = ["sea", "city"];
-// Sections of surfaces this line no longer has. They exist so the tooling
-// can still specialize and compile a revision from before a surface left,
-// and so a branch that keeps it (the `desert` branch) still compiles here: a
-// retired name's sections are always blanked and its stub always kept, which
-// is exactly how every scene but its own specialized such a shader. It
-// specializes and compiles; it does not render under this host, whose
-// uniform block and bindings are not its own (soar_host.RETIRED_SECTIONS has
-// the why). The desert branch's merge back into this line removes "desert"
-// from here again. soar_host.RETIRED_SECTIONS is the twin.
-const RETIRED_SECTIONS = ["desert"];
-const SECTION_MARKER = /^\/\/ @(section|end|stub|end-stub) (\w+)\s*$/;
-
-/**
- * `source` with every section but `keep`'s blanked, and `keep`'s stub
- * blanked. Lines are blanked, not removed, so a compile error's line number
- * is still the file's. A source with no markers passes through; one with
- * any must be complete (every surface: at least one section, exactly one
- * stub; no nesting; every block closed).
- */
-export function stripSections(source, keep) {
-  if (!SECTION_NAMES.includes(keep)) {
-    throw new Error(`unknown section ${keep}`);
-  }
-  const lines = source.split("\n");
-  const marks = [];
-  lines.forEach((l, i) => {
-    const m = SECTION_MARKER.exec(l);
-    if (m) marks.push([i, m[1], m[2]]);
-  });
-  if (marks.length === 0) return source;
-  const names = [...SECTION_NAMES, ...RETIRED_SECTIONS];
-  const seen = Object.fromEntries(
-    names.map((n) => [n, { section: 0, stub: 0 }]));
-  const out = lines.slice();
-  let open = null;                     // [kind, name, line]
-  for (const [i, kind, name] of marks) {
-    if (!names.includes(name)) {
-      throw new Error(`raymarch.wgsl line ${i + 1}: unknown section ` +
-                      `${name}; the sections are ${names.slice().sort()}.`);
-    }
-    if (kind === "section" || kind === "stub") {
-      if (open) {
-        throw new Error(`raymarch.wgsl line ${i + 1}: @${kind} ${name} ` +
-                        `opens inside @${open[0]} ${open[1]} (line ` +
-                        `${open[2] + 1}); blocks do not nest.`);
-      }
-      open = [kind, name, i];
-      seen[name][kind] += 1;
-      continue;
-    }
-    const want = kind === "end" ? "section" : "stub";
-    if (!open || open[0] !== want || open[1] !== name) {
-      throw new Error(`raymarch.wgsl line ${i + 1}: @${kind} ${name} ` +
-                      `closes nothing open as @${want} ${name}.`);
-    }
-    const drop = want === "section" ? name !== keep : name === keep;
-    if (drop) {
-      for (let j = open[2] + 1; j < i; j++) out[j] = "";
-    }
-    open = null;
-  }
-  if (open) {
-    throw new Error(`raymarch.wgsl line ${open[2] + 1}: @${open[0]} ` +
-                    `${open[1]} is never closed.`);
-  }
-  for (const name of names) {
-    const n = seen[name];
-    // A retired surface may be absent; where it is present (an old
-    // revision), it is held to the same rule.
-    if (!SECTION_NAMES.includes(name) && n.section === 0 && n.stub === 0) {
-      continue;
-    }
-    if (n.section < 1 || n.stub !== 1) {
-      throw new Error(`raymarch.wgsl: ${name} has ${n.section} section ` +
-                      `block(s) and ${n.stub} stub block(s); a marked ` +
-                      "shader needs at least one and exactly one.");
-    }
-  }
-  return out.join("\n");
-}
-
-export function specializeShader(source,
-                                 { periodic, nested, maxLightSteps,
-                                   toneMap = true, city = false,
-                                   lightCache, skyProbe }) {
-  if (!(maxLightSteps >= 1 && maxLightSteps <= K.DEFAULT_MAX_LIGHT_STEPS)) {
-    throw new Error(
-      `max_light_steps must be in [1, ${K.DEFAULT_MAX_LIGHT_STEPS}]; ` +
-      `got ${maxLightSteps}.`);
-  }
-  // The lighting method has no default here on purpose: it is the same pair
-  // of flags packUniforms writes into row 23, and a caller that forgot to
-  // say which method it compiled would render one method under the other's
-  // scene key. See Renderer.lighting.
-  if (typeof lightCache !== "boolean" || typeof skyProbe !== "boolean") {
-    throw new Error(
-      "specializeShader needs the lighting method: lightCache and skyProbe " +
-      `as booleans; got ${lightCache} and ${skyProbe}.`);
-  }
-  const swaps = [
-    ["const PERIODIC_DOMAIN: bool = true;",
-     `const PERIODIC_DOMAIN: bool = ${periodic ? "true" : "false"};`],
-    ["const NESTED: bool = false;",
-     `const NESTED: bool = ${nested ? "true" : "false"};`],
-    ["const MAX_LIGHT_STEPS: i32 = 512;",
-     `const MAX_LIGHT_STEPS: i32 = ${maxLightSteps};`],
-    // The auto-exposure meter compiles the encode out and reads linear HDR —
-    // the same switch witness's return_linear uses (soar_host.specialize).
-    ["const TONE_MAP: bool = true;",
-     `const TONE_MAP: bool = ${toneMap ? "true" : "false"};`],
-    ["const LIGHT_CACHE: bool = false;",
-     `const LIGHT_CACHE: bool = ${lightCache ? "true" : "false"};`],
-    ["const SKY_PROBE: bool = true;",
-     `const SKY_PROBE: bool = ${skyProbe ? "true" : "false"};`],
-  ];
-  // Demanded only when asked for, like soar_host.specialize: a shader that
-  // predates the night city still serves every daytime render.
-  if (city) {
-    swaps.push(["const CITY: bool = false;", "const CITY: bool = true;"]);
-  }
-  let out = stripSections(source, city ? "city" : "sea");
-  for (const [sentinel, replacement] of swaps) {
-    const count = out.split(sentinel).length - 1;
-    if (count !== 1) {
-      throw new Error(
-        `raymarch.wgsl must contain "${sentinel}" exactly once; found ` +
-        `${count}. The shader and this host are out of step.`);
-    }
-    out = out.replace(sentinel, replacement);
-  }
-  return out;
-}
-
-/**
- * The one cache key for a raymarch.wgsl specialization: every field of
- * specializeShader's argument, in a fixed order. Every module and pipeline
- * cache in this file keys on it (plus the entry point and target format),
- * so a new specialization axis is added here once rather than threaded
- * through each cache's own string.
- */
-export function shaderVariantKey(spec) {
-  const surface = spec.city ? "city" : "ocean";
-  return [spec.periodic, spec.nested, spec.maxLightSteps, spec.toneMap,
-          surface, spec.lightCache, spec.skyProbe].join("|");
-}
-
 export class Renderer {
   /**
    * `scene` supplies the resident GPU resources and the field geometry:
@@ -473,12 +313,13 @@ export class Renderer {
    *  surfacePeriod, clockPeriod, oceanMaxLod}. oceanView is binding 3, the
    *  surface's tile (the ocean's normals, the city's density).
    */
-  constructor(device, shaderSource, scene, { canvasFormat, lensSource }) {
+  constructor(device, shaders, scene, { canvasFormat, lensSource }) {
     if (typeof lensSource !== "string") {
       throw new Error("Renderer needs lensSource, lens.wgsl's text.");
     }
     this.device = device;
-    this.shaderSource = shaderSource;
+    // Each surface's module source (shader.js loadShaders).
+    this.shaders = shaders;
     this.scene = scene;
     this.canvasFormat = canvasFormat;
     // ?surfacecs (surfaceComputeWorkgroup). The device must allow the
@@ -1146,9 +987,8 @@ export class Renderer {
     return {
       periodic: this.periodic,
       nested: Boolean(this.scene.nested),
-      maxLightSteps: this.maxLightSteps,
       toneMap,
-      city: Boolean(this.scene.city),
+      surface: this.scene.city ? "city" : "ocean",
       lightCache: lighting.lightCache,
       skyProbe: lighting.skyProbe,
     };
@@ -1160,7 +1000,7 @@ export class Renderer {
     if (!module) {
       module = this.device.createShaderModule({
         label: `raymarch(${key})`,
-        code: specializeShader(this.shaderSource, spec),
+        code: specializeShader(this.shaders[spec.surface], spec),
       });
       this._modules.set(key, module);
     }

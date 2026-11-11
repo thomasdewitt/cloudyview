@@ -49,6 +49,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -59,7 +60,7 @@ except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
     from test_soar_city_shell_continuity import TILE_OFFSET
 
-SHADER = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
+SHADER = ShaderModule("city")
 RANGE = "const CITY_PROP_RANGE: f32 = 2200.0;"
 FP_H = "        let fp_h = lod_pixel_angle() * CITY_PROP_RANGE;"
 TRACE = ("    let chit = city_trace(city_o, dir, 0.0, CITY_TRACE_RANGE, "

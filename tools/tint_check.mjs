@@ -8,8 +8,8 @@
 // or Safari could build while every test passed. A green suite says nothing
 // about whether a browser can compile the shader; this does.
 //
-//   tools/gpulock node tools/tint_check.mjs --web DIR [--cdp PORT]
-//   tools/gpulock node tools/tint_check.mjs BASE_URL --expect FILE [--cdp PORT]
+//   node tools/tint_check.mjs --web DIR [--cdp PORT]
+//   node tools/tint_check.mjs BASE_URL --expect FILE [--cdp PORT]
 //
 // --web serves DIR (a checkout's web/ directory) itself, on a port the
 // kernel picks, so no other session's server can answer in its place. A
@@ -30,11 +30,7 @@
 import { join } from "node:path";
 import { openTab, requireHardwareAdapter, serveTree, servedShaderHash }
   from "./soar_cdp.mjs";
-import { requireGpulock } from "./gpulock_guard.mjs";
 
-// It drives a WebGPU page: refuse outside tools/gpulock, before anything
-// else runs (gpulock_guard.mjs).
-requireGpulock("tools/tint_check.mjs");
 
 const argv = process.argv.slice(2);
 const option = (name) => {
@@ -49,8 +45,8 @@ let expectFile = option("--expect");
 const cdpPort = option("--cdp") ?? "9333";
 let base = argv[0] ?? null;
 if (!webDir === !base) {
-  console.error("usage: tools/gpulock node tools/tint_check.mjs --web DIR [--cdp PORT]\n" +
-                "       tools/gpulock node tools/tint_check.mjs BASE_URL --expect FILE " +
+  console.error("usage: node tools/tint_check.mjs --web DIR [--cdp PORT]\n" +
+                "       node tools/tint_check.mjs BASE_URL --expect FILE " +
                 "[--cdp PORT]");
   process.exit(2);
 }

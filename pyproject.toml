@@ -65,10 +65,12 @@ include = ["cloudyview*"]
 [tool.setuptools.package-data]
 cloudyview = [
     "Mie_tables/*_normalized.txt",
-    "soar/raymarch.wgsl",
+    "soar/shader/manifest.json",
+    "soar/shader/*.wgsl",
+    "soar/shader/city/*.wgsl",
+    "soar/shader/city/components/*.wgsl",
     "soar/ocean/*",
-    # The night city's tile, not its component sources (those are compiled
-    # into raymarch.wgsl) nor the landing backdrop.
+    # The night city's tile, not the landing backdrop.
     "soar/city/meta.json",
     "soar/city/fif_mip*.bin",
 ]

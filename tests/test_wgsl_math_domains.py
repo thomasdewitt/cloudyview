@@ -28,13 +28,9 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-CORE = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
 SOURCES = sorted(
-    [CORE]
-    + list((REPO / "cloudyview" / "soar" / "city" / "components").glob(
-        "*.wgsl"))
-    + [p for p in (REPO / "web" / "soar").glob("*.wgsl")
-       if p.name != "raymarch.wgsl"])     # web/soar/raymarch.wgsl is CORE
+    list((REPO / "cloudyview" / "soar" / "shader").rglob("*.wgsl"))
+    + list((REPO / "web" / "soar").glob("*.wgsl")))
 
 # The builtins, and the outermost calls that visibly keep each argument in
 # its domain. log / inverseSqrt want > 0, which abs cannot promise.
@@ -51,8 +47,6 @@ GUARDS = {
 # Calls whose result is never negative (for pow's base and sqrt).
 NON_NEGATIVE = ("length", "exp", "exp2", "fract", "smoothstep", "max",
                 "clamp", "abs", "saturate")
-MARK_OPEN = "// >>> GENERATED CITY COMPONENTS"
-MARK_CLOSE = "// <<< GENERATED CITY COMPONENTS"
 NUMBER = r"-?[0-9]*\.?[0-9]+(e[-+]?[0-9]+)?"
 
 
@@ -212,18 +206,9 @@ def unguarded_calls(text):
     return sorted(found)
 
 
-def _source_text(path):
-    text = path.read_text()
-    if path == CORE:
-        # The components are scanned at their source; keep the line numbers.
-        a, b = text.index(MARK_OPEN), text.index(MARK_CLOSE)
-        text = text[:a] + "\n" * text[a:b].count("\n") + text[b:]
-    return text
-
-
 @pytest.mark.parametrize("path", SOURCES, ids=lambda p: p.name)
 def test_math_builtins_stay_in_their_domain(path):
-    found = unguarded_calls(_source_text(path))
+    found = unguarded_calls(path.read_text())
     assert not found, (
         f"{path.name}: calls not visibly in their domain — guard the "
         f"argument (clamp / max / ...) or say why it is safe with a "

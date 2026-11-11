@@ -34,8 +34,8 @@ guarding instead is the arithmetic that took over.
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
-REPO_SHADER = "web/soar/raymarch.wgsl"
 
 
 # --- models -----------------------------------------------------------------
@@ -336,7 +336,7 @@ def gpu_sampler_probe():
         pytest.skip("no usable GPU adapter (a software rasterizer is not one)")
     device = adapter.request_device_sync()
 
-    source = (Path(__file__).resolve().parents[1] / REPO_SHADER).read_text()
+    source = ShaderModule("ocean").read_text()
     code = HARNESS % (_extract_wgsl_function(source, "edge_taper"),
                       _extract_wgsl_function(source, "sample_level"))
     module = device.create_shader_module(code=code)

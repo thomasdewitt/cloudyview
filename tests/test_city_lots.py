@@ -24,10 +24,11 @@ from cloudyview.city_lots import (
     USE_INDUSTRIAL, USE_OPEN, USE_URBAN, USE_YARD, WORD_OFFSET,
     bake_lots, glow_weight,
 )
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
 TILE = REPO / "cloudyview" / "soar" / "city"
-WGSL = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+WGSL = ShaderModule("city")
 
 
 def _mip(level):

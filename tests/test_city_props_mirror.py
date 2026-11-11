@@ -42,6 +42,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -51,7 +52,7 @@ except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+SHADER = ShaderModule("city")
 SOAR = REPO / "web" / "soar"
 TILE_DIR = REPO / "cloudyview" / "soar" / "city"
 

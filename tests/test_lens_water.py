@@ -205,8 +205,8 @@ def test_only_the_lens_state_pass_reads_row_24_w():
     it. No GPU."""
     import re
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "cloudyview" / "soar"
-           / "raymarch.wgsl").read_text()
+    from .conftest import ShaderModule
+    src = ShaderModule("city").read_text()
     code = re.sub(r"//[^\n]*", "", src)
     start = code.index("fn fs_lens_state(")
     end = code.index("\n}\n", start)

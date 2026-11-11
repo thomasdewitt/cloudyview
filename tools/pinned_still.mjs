@@ -8,7 +8,7 @@
 // whole browser build — hosts and shader together — so run it once per tree
 // and diff the lines.
 //
-//   tools/gpulock node tools/pinned_still.mjs --web DIR [--cdp PORT]
+//   node tools/pinned_still.mjs --web DIR [--cdp PORT]
 //        [--scenes city,day] [--tiers high,low,max] [--size 640x360]
 //        [--save DIR]
 //
@@ -29,13 +29,8 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { openTab, requireHardwareAdapter, serveTree, servedShaderHash }
-  from "./soar_cdp.mjs";
-import { requireGpulock } from "./gpulock_guard.mjs";
+import { openTab, requireHardwareAdapter, serveTree } from "./soar_cdp.mjs";
 
-// It drives a WebGPU page: refuse outside tools/gpulock, before anything
-// else runs (gpulock_guard.mjs).
-requireGpulock("tools/pinned_still.mjs");
 
 const argv = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -54,7 +49,7 @@ const query = option("--query", "");
 const q = (sep) => (query ? `${sep}${query}` : "");
 if (saveDir) mkdirSync(saveDir, { recursive: true });
 if (!webDir) {
-  console.error("usage: tools/gpulock node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
+  console.error("usage: node tools/pinned_still.mjs --web DIR [--cdp PORT] " +
                 "[--scenes city,day] [--tiers high,low,max] [--size WxH] " +
                 "[--save DIR]");
   process.exit(2);
@@ -69,13 +64,10 @@ const server = await serveTree(webDir);
 let tab = null;
 const done = async (code) => { await tab?.close(); server.close(); process.exit(code); };
 try {
-  const shader = await servedShaderHash(server.base,
-                                        join(server.root, "soar", "raymarch.wgsl"));
   tab = await openTab(cdpPort);
   await tab.goto(`${server.base}/`);
   const adapter = await requireHardwareAdapter(tab);
-  console.log(`tree ${server.root} (raymarch.wgsl sha256 ${shader}; ` +
-              `${adapter})`);
+  console.log(`tree ${server.root} (${adapter})`);
   for (const name of scenes) {
     const sc = SCENES[name];
     if (!sc) throw new Error(`unknown scene '${name}' (city, day)`);

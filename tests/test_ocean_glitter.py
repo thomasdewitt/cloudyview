@@ -12,9 +12,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+SHADER = ShaderModule("ocean")
 
 
 def _wgsl_scalar(src, name):

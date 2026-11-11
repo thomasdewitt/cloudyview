@@ -34,10 +34,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from .conftest import shader_paths
+
 REPO = Path(__file__).resolve().parents[1]
 SOAR = REPO / "cloudyview" / "soar"
-SOURCES = sorted([SOAR / "raymarch.wgsl", SOAR / "lens.wgsl"]
-                 + list((SOAR / "city" / "components").glob("*.wgsl")))
+SOURCES = shader_paths()
 PIXEL_ANGLE = "2.0 * u.cam_origin.w / u.params.x"
 
 
@@ -61,7 +62,7 @@ def test_tan_half_fov_becomes_a_pixel_angle_in_one_place():
         f"true_pixel_angle(); call it instead: {strays}")
     assert len(defs) == 1, defs
     body = re.search(r"fn true_pixel_angle\(\) -> f32 \{([^}]*)\}",
-                     _code(SOAR / "raymarch.wgsl"))
+                     _code(SOAR / "shader" / "camera.wgsl"))
     assert body and PIXEL_ANGLE in body.group(1)
 
 
@@ -74,7 +75,7 @@ def test_the_image_height_is_read_only_to_place_the_ray():
         for m in re.finditer(r"u\.params\.y\b", code):
             fn = re.findall(r"\bfn (\w+)\(", code[:m.start()])
             readers.append((path.name, fn[-1] if fn else None))
-    assert readers == [("raymarch.wgsl", "camera_ray")], readers
+    assert readers == [("camera.wgsl", "camera_ray")], readers
 
 
 @pytest.mark.parametrize("render_size", [(1600, 900), (900, 1600), (640, 640)])

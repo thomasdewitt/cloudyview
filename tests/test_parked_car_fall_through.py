@@ -28,6 +28,7 @@ import re
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -37,7 +38,7 @@ except ImportError:
     from conftest import build_soar_level, soar_gpu_adapter
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+SHADER = ShaderModule("city")
 
 ANCHOR = ("    let chit = city_trace(city_o, dir, 0.0, CITY_TRACE_RANGE, "
           "CITY_TRACE_ALL);\n")

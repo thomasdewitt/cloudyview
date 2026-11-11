@@ -20,9 +20,10 @@ from pathlib import Path
 import pytest
 
 from cloudyview.soar_host import SURFACE_DIRS, surface_clock_period_s
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+SHADER = ShaderModule("city")
 
 
 def _meta(surface):

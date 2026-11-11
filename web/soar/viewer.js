@@ -8,6 +8,7 @@
 
 import * as K from "./constants.js";
 import { Renderer } from "./renderer.js";
+import { loadShaders } from "./shader.js";
 import { FlightCamera, cameraBasis } from "./camera.js";
 import { viewSpansDomainEdge } from "./field.js";
 import { loadDemoIceVolume, loadDemoScene, loadOceanTile } from "./scene.js";
@@ -313,8 +314,8 @@ export class Viewer {
   // --- setup ---------------------------------------------------------------
 
   async start(source, progress) {
-    this.shaderSource = await (await fetch("raymarch.wgsl")).text();
-    this.lensSource = await (await fetch("lens.wgsl")).text();
+    this.shaders = await loadShaders(new URL("./shader/", import.meta.url));
+    this.lensSource = await (await fetch("shader/lens.wgsl")).text();
     this.hudSource = await (await fetch("hud.wgsl")).text();
     this.birdSource = await (await fetch("bird.wgsl")).text();
     this.dartSource = await (await fetch("dart.wgsl")).text();
@@ -439,7 +440,7 @@ export class Viewer {
           });
       }
 
-      renderer = new Renderer(this.device, this.shaderSource, scene,
+      renderer = new Renderer(this.device, this.shaders, scene,
                               { canvasFormat: this.canvasFormat,
                                 lensSource: this.lensSource });
       if (scene.periodicDefault === false) renderer.setPeriodic(false);

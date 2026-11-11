@@ -21,9 +21,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
-WGSL = (Path(__file__).resolve().parents[1]
-        / "cloudyview" / "soar" / "raymarch.wgsl").read_text()
+WGSL = ShaderModule("city").read_text()
 
 # city_erf's coefficients, as the WGSL states them.
 P = 0.3275911

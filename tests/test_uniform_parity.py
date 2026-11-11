@@ -372,12 +372,40 @@ def test_periodic_requires_sun_above_horizon():
         _python_block({}, {"sun_elevation": -1.0})
 
 
-def test_specialize_demands_its_sentinels():
-    src = sh.SHADER_PATH.read_text()
-    out = sh.specialize(src, periodic=False, nested=True, max_light_steps=128)
-    assert "const PERIODIC_DOMAIN: bool = false;" in out
-    assert "const NESTED: bool = true;" in out
-    assert "const MAX_LIGHT_STEPS: i32 = 128;" in out
-    with pytest.raises(RuntimeError, match="drifted apart"):
-        sh.specialize("nothing to replace here", periodic=True, nested=False,
-                      max_light_steps=512)
+def test_both_hosts_build_the_same_shader_module():
+    """The module text a host compiles — manifest.json's files joined behind
+    the switch header — is the same string from soar/shader.py and from
+    web/soar/shader.js, for every surface and every switch."""
+    from cloudyview.soar import shader
+    script = textwrap.dedent("""
+        import fs from "node:fs";
+        import path from "node:path";
+        import { assembleShader, shaderFiles, specializeShader }
+          from "%s";
+        const dir = "%s";
+        const manifest = JSON.parse(
+          fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+        const out = {};
+        for (const surface of Object.keys(manifest.surfaces)) {
+          const texts = {};
+          for (const f of shaderFiles(manifest, surface)) {
+            texts[f] = fs.readFileSync(path.join(dir, f), "utf8");
+          }
+          const source = assembleShader(manifest, texts, surface);
+          out[surface] = [false, true].map((on) => specializeShader(source, {
+            periodic: on, nested: !on, toneMap: on,
+            lightCache: !on, skyProbe: on }));
+        }
+        console.log(JSON.stringify(out));
+    """) % ((REPO / "web" / "soar" / "shader.js").as_uri(), shader.SHADER_DIR)
+    js = json.loads(subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True).stdout)
+    assert set(js) == set(shader.surfaces())
+    for surface in shader.surfaces():
+        source = shader.assemble(surface)
+        for k, on in enumerate((False, True)):
+            py = shader.specialize(source, periodic=on, nested=not on,
+                                   tone_map=on, light_cache=not on,
+                                   sky_probe=on)
+            assert js[surface][k] == py, surface

@@ -1,0 +1,46 @@
+{
+  "schema": "cloudyview.soar.shader.v1",
+  "core": [
+    "uniforms.wgsl",
+    "math.wgsl",
+    "volume.wgsl",
+    "clouds.wgsl",
+    "sky.wgsl",
+    "ice.wgsl",
+    "tonemap.wgsl",
+    "camera.wgsl",
+    "passes.wgsl",
+    "march.wgsl"
+  ],
+  "surfaces": {
+    "ocean": {
+      "files": ["ocean.wgsl"],
+      "absent": ["ocean_absent.wgsl"]
+    },
+    "city": {
+      "files": [
+        "city/layout.wgsl",
+        "city/graffiti.wgsl",
+        "city/street.wgsl",
+        "city/floods.wgsl",
+        "city/shade.wgsl",
+        "city/facade.wgsl",
+        "city/facade_light.wgsl",
+        "city/windows.wgsl",
+        "city/components/windowlife.wgsl",
+        "city/components/facadeworks.wgsl",
+        "city/components/skyway.wgsl",
+        "city/components/rooftopworks.wgsl",
+        "city/components/skybridges.wgsl",
+        "city/components/streetlife.wgsl",
+        "city/components/adscreens.wgsl",
+        "city/components/manholesteam.wgsl",
+        "city/components/industry.wgsl",
+        "city/components/streetfurniture.wgsl",
+        "city/components/dispatch.wgsl",
+        "city/passes.wgsl"
+      ],
+      "absent": ["city/absent.wgsl"]
+    }
+  }
+}

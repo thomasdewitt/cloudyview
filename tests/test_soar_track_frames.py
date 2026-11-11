@@ -54,10 +54,11 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
 TRACK_JS = REPO / "web" / "soar" / "track.js"
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+SHADER = ShaderModule("city")
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None or not TRACK_JS.exists(),

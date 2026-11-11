@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -32,7 +33,7 @@ try:
 except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
-SHADER = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
+SHADER = ShaderModule("city")
 ANCHOR = "    let city_o = city_camera_origin();\n    let chit = city_trace("
 FOG_VALUES = {"clear": (1.0, 0.0, 0.0, 0.0),
               "fog": (0.55, 0.004, 0.005, 0.008)}

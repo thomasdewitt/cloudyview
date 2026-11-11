@@ -28,7 +28,6 @@ Conventions inherited from the shader, all easy to get subtly wrong:
 
 from __future__ import annotations
 
-import functools
 import math
 import re
 import time
@@ -39,15 +38,14 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from . import look
+from .soar import shader
 
-# The shader and ocean tiles live here in the package — the one copy. The
-# browser reaches the same files through symlinks at web/soar/raymarch.wgsl
-# and web/soar/ocean, so there is still exactly one renderer core and the
-# look cannot drift between the Python host and the web app.
+# The shader and the surface tiles live in the package, in cloudyview/soar/.
+# The browser reaches the same files through symlinks under web/soar/, so
+# both hosts compile one shader.
 SOAR_DIR = Path(__file__).resolve().parent / "soar"
-SHADER_PATH = SOAR_DIR / "raymarch.wgsl"
-# Lens water's look, shared with the browser's present pass (lens.wgsl).
-LENS_SHADER_PATH = SOAR_DIR / "lens.wgsl"
+# Lens water's look, shared with the browser's present pass.
+LENS_SHADER_PATH = shader.SHADER_DIR / "lens.wgsl"
 OCEAN_DIR = SOAR_DIR / "ocean"
 # The night-city surface tile. Same byte format and same binding as the ocean
 # tile (rgba16float mip chain, binding 3) — under CITY the shader reads it as
@@ -58,7 +56,7 @@ CITY_DIR = SOAR_DIR / "city"
 
 # What the world stands on. "ocean" is the day scene; "city" is the night
 # city. Each compiles its own specialization and binds its own tile at
-# binding 3 — see `specialize` and SoarRenderer. (The Sonoran desert lives on
+# binding 3 — see SoarRenderer. (The Sonoran desert lives on
 # the `desert` branch: check_surface names it when asked for it.)
 SURFACES = ("ocean", "city")
 SURFACE_DIRS = {"ocean": OCEAN_DIR, "city": CITY_DIR}
@@ -200,18 +198,9 @@ class _Unstated:
 UNSTATED = _Unstated()
 
 
-def read_shader() -> str:
-    """The shader source, or a diagnosis of why there isn't any."""
-    if not SHADER_PATH.exists():
-        raise FileNotFoundError(
-            f"the ray-marching shader is missing: {SHADER_PATH}\n"
-            "It ships inside the package (cloudyview/soar/), so this "
-            "install is broken — reinstall from PyPI, or work from a "
-            "checkout:\n"
-            "    git clone https://github.com/thomasdewitt/cloudyview\n"
-            "    cd cloudyview && uv sync\n"
-            "glimpse and behold do not need the shader and still work.")
-    return SHADER_PATH.read_text()
+def read_shader(surface: str = "ocean") -> str:
+    """The shader source of `surface`'s module (soar/shader.py assemble)."""
+    return shader.assemble(check_surface(surface))
 
 # Row 24 is the surface offset the water samples and the city frame are
 # derived from — see raymarch.wgsl's surface_offset. Row 25 (the 26th and
@@ -266,7 +255,6 @@ DEFAULT_LOD_STRENGTH = 0.5
 # web/soar/constants.js DEFAULT_HAZE_HEIGHT_DEPENDENT; see ViewState below.
 DEFAULT_HAZE_HEIGHT_DEPENDENT = False
 STEP_VOXEL_FACTOR = 2.0
-DEFAULT_MAX_LIGHT_STEPS = 512
 
 # Tone map. 1.4 is what the numba renderer used; 2.66 is what soar shows and
 # is now the default, because soar is the renderer.
@@ -827,103 +815,6 @@ SURFACE_STREET_SURFACES = tuple(
 VEIL_FORMAT = "rgba32uint"
 
 
-# EXPERIMENT: the first surface stage as a compute pass (raymarch.wgsl
-# cs_surface; renderer.js surfaceComputeWorkgroup is the browser's twin).
-# The workgroups it may run at: 32x16 (512 invocations, which bounds the
-# stage at 128 registers on NVIDIA) and 16x16.
-SURFACE_CS_WORKGROUPS = ((32, 16), (16, 16))
-
-
-def check_surface_cs(surface_cs) -> Optional[Tuple[int, int]]:
-    """None, or one of SURFACE_CS_WORKGROUPS as a tuple; anything else
-    raises (a mistyped workgroup must not quietly time the fragment
-    stage)."""
-    if surface_cs is None:
-        return None
-    wg = tuple(int(v) for v in surface_cs)
-    if wg not in SURFACE_CS_WORKGROUPS:
-        raise ValueError(f"surface_cs={surface_cs!r}: expected None or one "
-                         f"of {SURFACE_CS_WORKGROUPS}")
-    return wg
-
-
-def parse_surface_cs(name: str) -> Optional[Tuple[int, int]]:
-    """The tools' spelling: "cs512" -> (32, 16), "cs256" -> (16, 16),
-    "frag" -> None."""
-    names = {"frag": None, "cs512": (32, 16), "cs256": (16, 16)}
-    if name not in names:
-        raise ValueError(f"{name!r}: expected one of {sorted(names)}")
-    return names[name]
-
-
-def surface_cs_source(code: str, surface_cs) -> str:
-    """`code` with cs_surface's workgroup written in: its two overrides
-    become constants. The browser sets them as pipeline constants; here
-    wgpu-native 29 refuses to (its override processing rejects this module:
-    "Pipeline constant error: Function 'cc_industry_grid' is invalid",
-    2026-11-09), so the source carries the size, and a surface_cs
-    renderer's modules are its own (its pipeline keys say so)."""
-    for name, value in zip(("SURFACE_CS_WX", "SURFACE_CS_WY"), surface_cs):
-        decl = re.compile(rf"^override {name}: u32 = \d+u;$", re.M)
-        code, n = decl.subn(f"const {name}: u32 = {int(value)}u;", code)
-        if n != 1:
-            raise RuntimeError(f"raymarch.wgsl declares {name} {n} times; "
-                               "cs_surface's workgroup cannot be set")
-    return code
-
-
-# What _prove_surface_cs clears cs_surface's output to: no surface it writes
-# is this in every channel. renderer.js SURFACE_CS_SENTINEL is the same.
-SURFACE_CS_SENTINEL = -3.0e38
-_SENTINEL_BITS = np.array([SURFACE_CS_SENTINEL], np.float32).view(np.uint32)[0]
-
-
-def surface_cs_failure(surface_cs, unwritten: int, total: int,
-                       smaller: str) -> str:
-    """The message for a compute surface stage that did not run: the
-    workgroup, what was left unwritten, the likely cause, the alternative
-    (`smaller`, in the host's own spelling, or the fragment stage)."""
-    wx, wy = surface_cs
-    alt = (f"try {smaller}" if (wx, wy) != (16, 16)
-           else "no smaller workgroup is defined: use the fragment stage")
-    return (f"The surface stage as compute did not run: {unwritten} of "
-            f"{total} pixels unwritten at a {wx}x{wy} workgroup. The GPU may "
-            f"have refused threadgroups that large for this shader (Metal "
-            f"caps each pipeline's maxTotalThreadsPerThreadgroup, and "
-            f"wgpu-native does not check it); {alt}.")
-
-
-def surface_cs_limits(surface_cs) -> dict:
-    """What a device must be asked for to run cs_surface at `surface_cs`
-    (WebGPU's default floor is 256 invocations; wgpu-native happens to hand
-    out the adapter's own limits, but a device someone else made may hold
-    the floor); nothing for the fragment stage, whose device is asked for
-    exactly what it was before."""
-    if surface_cs is None:
-        return {}
-    wx, wy = surface_cs
-    return {"max_compute_invocations_per_workgroup": wx * wy,
-            "max_compute_workgroup_size_x": wx,
-            "max_compute_workgroup_size_y": wy}
-
-
-def require_surface_cs_limits(device, surface_cs) -> None:
-    """Refuse a device whose limits do not allow `surface_cs`'s workgroup,
-    rather than fall back to the fragment stage or a smaller group."""
-    # wgpu takes required_limits in snake_case and reports device.limits
-    # with hyphens.
-    have = {k: device.limits.get(k.replace("_", "-"))
-            for k in surface_cs_limits(surface_cs)}
-    short = {k: (have[k], v) for k, v in surface_cs_limits(surface_cs).items()
-             if (have[k] or 0) < v}
-    if short:
-        raise ValueError(
-            f"surface_cs={surface_cs}: this device's limits do not allow the "
-            "workgroup (" + ", ".join(f"{k} {have} < {need}"
-                                      for k, (have, need) in short.items())
-            + "); create it with required_limits=surface_cs_limits(...)")
-
-
 def surface_stage_entries(surface: str) -> tuple:
     """The surface stages (raymarch.wgsl entries) a view of `surface` runs,
     in order; none over the sea."""
@@ -943,144 +834,6 @@ def surface_stage_plan(n: int) -> list:
     return plan
 
 
-# Section stripping (raymarch.wgsl's `// @section` markers). Each surface's
-# code is fenced in one or more section blocks plus one stub block that
-# re-declares, with neutral bodies, exactly the symbols shared code calls
-# into it. A module keeps the compiled surface's sections and the OTHER
-# surfaces' stubs, so it carries no code of a surface it cannot show: dead
-# code of another surface had been moving this one's codegen (a dead desert
-# call moved ocean pixels; the desert's tables moved the city's surface pass
-# 128 -> 168 registers). renderer.js stripSections is the twin, and
-# tests/test_wgsl_sections.py pins the two to the same bytes.
-SECTION_OF_SURFACE = {"ocean": "sea", "city": "city"}
-# Sections of surfaces this line no longer has. They exist so the tooling
-# (soar_regcount, tint: `--a git:REV`) can still specialize and compile a
-# revision from before a surface left, and so a branch that keeps it (the
-# `desert` branch) still compiles here: a retired name's sections are always
-# blanked and its stub always kept, which is exactly how every scene but its
-# own specialized such a shader. Specializes and compiles, not renders: such
-# a revision's uniform block and bindings are its own host's (752 bytes,
-# bindings this host no longer lays out), so a render of it under this host
-# fails validation — render it under its own (soar_shader_ab --save there,
-# --against here). The desert branch's
-# merge back into this line removes "desert" from here again.
-RETIRED_SECTIONS = ("desert",)
-_SECTION_MARKER = re.compile(r"^// @(section|end|stub|end-stub) (\w+)\s*$")
-
-
-def strip_sections(source: str, surface: str) -> str:
-    """`source` with every section but `surface`'s blanked, and `surface`'s
-    stub blanked. Lines are blanked, not removed, so a compile error's line
-    number is still the file's. A source with no markers (a revision from
-    before them, which soar_shader_ab replays) is returned as it is; one
-    with any must be complete: every surface has at least one section and
-    exactly one stub, blocks do not nest, and each closes what it opened."""
-    keep = SECTION_OF_SURFACE[check_surface(surface)]
-    lines = source.split("\n")
-    marks = [(i, m.group(1), m.group(2)) for i, l in enumerate(lines)
-             for m in [_SECTION_MARKER.match(l)] if m]
-    if not marks:
-        return source
-    live = set(SECTION_OF_SURFACE.values())
-    names = live | set(RETIRED_SECTIONS)
-    seen = {n: {"section": 0, "stub": 0} for n in names}
-    out, open_ = list(lines), None          # open_: (kind, name, line)
-    for i, kind, name in marks:
-        if name not in names:
-            raise RuntimeError(f"raymarch.wgsl line {i + 1}: unknown section "
-                               f"{name!r}; the sections are {sorted(names)}.")
-        if kind in ("section", "stub"):
-            if open_ is not None:
-                raise RuntimeError(
-                    f"raymarch.wgsl line {i + 1}: @{kind} {name} opens inside "
-                    f"@{open_[0]} {open_[1]} (line {open_[2] + 1}); blocks "
-                    "do not nest.")
-            open_ = (kind, name, i)
-            seen[name][kind] += 1
-            continue
-        want = "section" if kind == "end" else "stub"
-        if open_ is None or open_[:2] != (want, name):
-            raise RuntimeError(f"raymarch.wgsl line {i + 1}: @{kind} {name} "
-                               f"closes nothing open as @{want} {name}.")
-        start = open_[2]
-        drop = (name != keep) if want == "section" else (name == keep)
-        if drop:
-            for j in range(start + 1, i):
-                out[j] = ""
-        open_ = None
-    if open_ is not None:
-        raise RuntimeError(f"raymarch.wgsl line {open_[2] + 1}: "
-                           f"@{open_[0]} {open_[1]} is never closed.")
-    for name, n in sorted(seen.items()):
-        # A retired surface may be absent; where it is present (an old
-        # revision), it is held to the same rule.
-        if name not in live and n["section"] == 0 and n["stub"] == 0:
-            continue
-        if n["section"] < 1 or n["stub"] != 1:
-            raise RuntimeError(
-                f"raymarch.wgsl: {name} has {n['section']} section block(s) "
-                f"and {n['stub']} stub block(s); a marked shader needs at "
-                "least one and exactly one.")
-    return "\n".join(out)
-
-
-def specialize(source: str, *, periodic: bool, nested: bool,
-               max_light_steps: int, tone_map: bool = True,
-               surface: str = "ocean", light_cache: bool = False,
-               sky_probe: bool = True) -> str:
-    """Bake the compile-time constants into the shader source.
-
-    Textual replacement rather than WGSL `override` because MAX_LIGHT_STEPS
-    bounds a loop. Each sentinel must appear exactly once — a miss renders
-    the wrong thing at full speed and says nothing.
-
-    `surface` "city" turns CITY on, and it is only rewritten when it is
-    being turned ON: its declared value is already `false`, so the ocean is a
-    no-op rewrite. Turning it on demands its declaration, like every other
-    sentinel here.
-
-    `light_cache` and `sky_probe` are the lighting method (raymarch.wgsl
-    LIGHT_CACHE, SKY_PROBE): the same two flags pack_uniforms writes into
-    row 23, compiled in because a run-time branch on them cost every sample
-    its untaken side. A shader revision from before they were constants
-    (2026-09-23) declares neither and reads row 23 instead —
-    tools/soar_shader_ab.py replays such revisions through this host — so
-    for it there is nothing to rewrite. Any revision that declares one must
-    declare both, exactly once, like every other sentinel.
-    """
-    if not (1 <= int(max_light_steps) <= 512):
-        raise ValueError(f"max_light_steps must be in [1, 512]; got {max_light_steps}.")
-    source = strip_sections(source, surface)
-    swaps = [
-        ("const PERIODIC_DOMAIN: bool = true;",
-         f"const PERIODIC_DOMAIN: bool = {'true' if periodic else 'false'};"),
-        ("const NESTED: bool = false;",
-         f"const NESTED: bool = {'true' if nested else 'false'};"),
-        ("const MAX_LIGHT_STEPS: i32 = 512;",
-         f"const MAX_LIGHT_STEPS: i32 = {int(max_light_steps)};"),
-        ("const TONE_MAP: bool = true;",
-         f"const TONE_MAP: bool = {'true' if tone_map else 'false'};"),
-    ]
-    if surface == "city":
-        swaps.append(("const CITY: bool = false;",
-                      "const CITY: bool = true;"))
-    if "const LIGHT_CACHE: bool" in source:
-        swaps += [
-            ("const LIGHT_CACHE: bool = false;",
-             f"const LIGHT_CACHE: bool = {'true' if light_cache else 'false'};"),
-            ("const SKY_PROBE: bool = true;",
-             f"const SKY_PROBE: bool = {'true' if sky_probe else 'false'};"),
-        ]
-    for sentinel, replacement in swaps:
-        if source.count(sentinel) != 1:
-            raise RuntimeError(
-                f"Expected exactly one occurrence of {sentinel!r} in "
-                f"{SHADER_PATH.name}; found {source.count(sentinel)}. The "
-                "shader and this host have drifted apart.")
-        source = source.replace(sentinel, replacement)
-    return source
-
-
 class SoarRenderer:
     """A device, the specialized shader, and one uploaded field.
 
@@ -1090,53 +843,40 @@ class SoarRenderer:
     """
 
     def __init__(self, *, periodic: bool = True, nested: bool = False,
-                 max_light_steps: int = DEFAULT_MAX_LIGHT_STEPS,
                  tone_map: bool = True, surface: str = "ocean", device=None,
-                 shader_source: Optional[str] = None,
-                 surface_cs: Optional[Tuple[int, int]] = None):
-        """`shader_source` overrides the checked-in shader.
+                 shader_source: Optional[str] = None):
+        """`shader_source` replaces the checked-in shader for `surface`
+        (read_shader(surface), before the switch header).
 
-        `surface_cs` (EXPERIMENT, the browser's ?surfacecs): None for the
-        fragment first surface stage (fs_surface), or a workgroup (32, 16) /
-        (16, 16) to run it as the compute pass cs_surface — a bound on its
-        registers the driver must respect (raymarch.wgsl cs_surface). The
-        device must allow the workgroup: one made here asks for it, one
-        passed in that does not allow it is refused.
-
-        It exists so two revisions of raymarch.wgsl can be held against each
+        It exists so two revisions of the shader can be held against each
         other on one device, in raw float, without a checkout — which is how
         a change claiming to preserve the image gets to prove it (see
         tools/soar_shader_ab.py). Everything else reads the file.
 
         `surface` is what the world stands on — "ocean" or the night "city".
-        The city compiles its own constant into the shader and binds its own
-        tile at binding 3 in place of the ocean's. It is a property of the renderer rather than of a frame
-        because both of those are fixed at construction. The SceneState
+        Each has its own shader module and its own tile at binding 3, both
+        fixed at construction, so it is a property of the renderer rather
+        than of a frame. The SceneState
         passed to each render must agree — set `SceneState.surface` to match.
         """
         import wgpu                                    # local: GPU only on use
         self.wgpu = wgpu
-        self.surface_cs = check_surface_cs(surface_cs)
         if device is None:
             adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-            device = adapter.request_device_sync(
-                required_limits=surface_cs_limits(self.surface_cs))
-        if self.surface_cs is not None:
-            require_surface_cs_limits(device, self.surface_cs)
+            device = adapter.request_device_sync()
         self.device = device
         self.periodic = bool(periodic)
         self.nested = bool(nested)
-        self.max_light_steps = int(max_light_steps)
         self.tone_map = bool(tone_map)
         self.surface = check_surface(surface)
 
-        # One module per specialization (see specialize and _spec), compiled
+        # One module per set of switches (see _spec), compiled
         # when a render first asks for it. The declared default lighting —
         # the live march with the sky probe, Max's method — is compiled here
         # so that a shader that does not compile fails at construction, not
         # at the first frame.
         self._shader_source = (shader_source if shader_source is not None
-                               else read_shader())
+                               else read_shader(self.surface))
         self._modules = {}
         self._pipelines = {}
         self._module_for(self._spec(light_cache=False, sky_probe=True))
@@ -1327,10 +1067,7 @@ class SoarRenderer:
         wgpu = self.wgpu
         d = self.device
         tex3d = {"sample_type": "float", "view_dimension": "3d"}
-        # Under surface_cs group 0 is also the compute stage's.
         vis = wgpu.ShaderStage.FRAGMENT
-        if self.surface_cs is not None:
-            vis = vis | wgpu.ShaderStage.COMPUTE
         self._ray_layout = d.create_bind_group_layout(entries=[
             {"binding": 0, "visibility": vis,
              "buffer": {"type": "uniform"}},
@@ -1349,20 +1086,6 @@ class SoarRenderer:
         ])
         self._ray_pipeline_layout = d.create_pipeline_layout(
             bind_group_layouts=[self._ray_layout])
-        if self.surface_cs is not None:
-            # cs_surface: group 0, an empty group 1, its outputs at group 2
-            # (write-only storage in the two surface formats, both core).
-            store = lambda fmt: {"access": "write-only", "format": fmt,  # noqa: E731
-                                 "view_dimension": "2d"}
-            self._cs_out_layout = d.create_bind_group_layout(entries=[
-                {"binding": 0, "visibility": wgpu.ShaderStage.COMPUTE,
-                 "storage_texture": store(SURFACE_FORMAT)},
-                {"binding": 1, "visibility": wgpu.ShaderStage.COMPUTE,
-                 "storage_texture": store(VEIL_FORMAT)}])
-            empty = d.create_bind_group_layout(entries=[])
-            self._cs_empty_group = d.create_bind_group(layout=empty, entries=[])
-            self._cs_pipeline_layout = d.create_pipeline_layout(
-                bind_group_layouts=[self._ray_layout, empty, self._cs_out_layout])
         # Group 1: the surface pre-pass's targets (raymarch.wgsl) — the final
         # surface, read by the march; the previous stage's, read by each later
         # stage (fs_surface_refine, fs_surface_street); and the veil, read by
@@ -1432,23 +1155,20 @@ class SoarRenderer:
         self._lens_out = None
 
     def _spec(self, *, light_cache: bool, sky_probe: bool) -> dict:
-        """Everything specialize() takes, from this renderer's attributes as
-        they stand now plus a lighting method. Every module and pipeline
+        """The module's compile-time switches: this renderer's attributes
+        as they stand now plus a lighting method. Every module and pipeline
         cache here keys on the whole of it, so an attribute changed after
         construction can never be served a module compiled for the old
         value."""
         return dict(periodic=self.periodic, nested=self.nested,
-                    max_light_steps=self.max_light_steps,
-                    tone_map=self.tone_map, surface=self.surface,
+                    tone_map=self.tone_map,
                     light_cache=bool(light_cache), sky_probe=bool(sky_probe))
 
     def _module_for(self, spec: dict):
         key = tuple(sorted(spec.items()))
         module = self._modules.get(key)
         if module is None:
-            code = specialize(self._shader_source, **spec)
-            if self.surface_cs is not None:
-                code = surface_cs_source(code, self.surface_cs)
+            code = shader.specialize(self._shader_source, **spec)
             module = self.device.create_shader_module(code=code)
             self._modules[key] = module
         return module
@@ -1461,8 +1181,7 @@ class SoarRenderer:
         with several outputs (the surface stages that write the veil)."""
         formats = ((target_format,) if isinstance(target_format, str)
                    else tuple(target_format))
-        key = (entry_point, formats, tuple(sorted(spec.items())),
-               self.surface_cs)
+        key = (entry_point, formats, tuple(sorted(spec.items())))
         pipeline = self._pipelines.get(key)
         if pipeline is None:
             module = self._module_for(spec)
@@ -1504,8 +1223,6 @@ class SoarRenderer:
         """One surface stage's pipeline on `view`'s specialization: the
         first reads nothing at group 1, a later one the stage before (the
         march's layout); a VEIL_STAGES entry writes the veil too."""
-        if self.surface_cs is not None and entry == "fs_surface":
-            return self._surface_cs_pipeline(self._view_spec(view))
         if entry in VEIL_STAGES:
             formats = (SURFACE_FORMAT, VEIL_FORMAT)
         else:
@@ -1513,20 +1230,6 @@ class SoarRenderer:
         return self._pipeline_for(
             entry, formats, self._view_spec(view),
             layout=None if first else self._march_pipeline_layout)
-
-    def _surface_cs_pipeline(self, spec: dict):
-        """surface_cs: cs_surface's compute pipeline for `spec`
-        (renderer.js _surfaceComputePipeline), its workgroup written into
-        the module's source (surface_cs_source)."""
-        key = ("cs_surface", tuple(sorted(spec.items())), self.surface_cs)
-        pipeline = self._pipelines.get(key)
-        if pipeline is None:
-            pipeline = self.device.create_compute_pipeline(
-                layout=self._cs_pipeline_layout,
-                compute={"module": self._module_for(spec),
-                         "entry_point": "cs_surface"})
-            self._pipelines[key] = pipeline
-        return pipeline
 
     def _ensure_targets(self, size, view: Optional["ViewState"] = None):
         """This size's render targets, with the surface intermediates
@@ -1539,8 +1242,8 @@ class SoarRenderer:
         n_mid = min(max(len(entries) - 1, 0), 2)
         if self._targets is None or self._targets["size"] != size:
             has = self.surface in SURFACE_PASS_SURFACES
-            surface = self._make_target(size, SURFACE_FORMAT, True) if has else None
-            veil = self._make_target(size, VEIL_FORMAT, True) if has else None
+            surface = self._make_target(size, SURFACE_FORMAT) if has else None
+            veil = self._make_target(size, VEIL_FORMAT) if has else None
             self._targets = {
                 "size": size, "sample": self._make_target(size, SAMPLE_FORMAT),
                 "accum": [self._make_target(size, ACCUM_FORMAT),
@@ -1559,24 +1262,20 @@ class SoarRenderer:
         for name, after, needed in (("plain", "after_plain", n_mid >= 1),
                                     ("mid", "after_mid", n_mid >= 2)):
             if needed and t[name] is None:
-                t[name] = self._make_target(size, SURFACE_FORMAT, True)
+                t[name] = self._make_target(size, SURFACE_FORMAT)
             if t[name] is not None and t[after] is None:
                 # A later stage's group: what it reads.
                 t[after] = self._group1(self._surface_dummy, t[name],
                                         self._veil_dummy)
         return t
 
-    def _make_target(self, size, fmt, surface_stage: bool = False):
-        """A render target; a surface stage's (the surface, its
-        intermediates, the veil) is also storage-writable under surface_cs,
-        which cs_surface writes."""
+    def _make_target(self, size, fmt):
+        """A render target."""
         wgpu = self.wgpu
         w, h = size
         usage = (wgpu.TextureUsage.RENDER_ATTACHMENT
                  | wgpu.TextureUsage.TEXTURE_BINDING
                  | wgpu.TextureUsage.COPY_SRC)
-        if surface_stage and self.surface_cs is not None:
-            usage = usage | wgpu.TextureUsage.STORAGE_BINDING
         return self.device.create_texture(
             size=(w, h, 1), dimension="2d", format=fmt, usage=usage)
 
@@ -1607,131 +1306,6 @@ class SoarRenderer:
             stages.append((self._stage_pipeline_for(entry, k == 0, view),
                            None if reads is None else slot[reads][1], out))
         return stages
-
-    def _cs_out_group(self, targets, writes):
-        """surface_cs: cs_surface's group 2 over the textures it writes
-        (the slot's surface and the veil), made once per target set."""
-        groups = targets.setdefault("cs_out_groups", {})
-        key = id(writes[0])
-        if key not in groups:
-            groups[key] = self.device.create_bind_group(
-                layout=self._cs_out_layout, entries=[
-                    {"binding": 0, "resource": writes[0].create_view()},
-                    {"binding": 1, "resource": writes[1].create_view()}])
-        return groups[key]
-
-    def _encode_surface_cs(self, cp, targets, pipeline, bind_group, writes):
-        """cs_surface's dispatch into compute pass `cp`: every pixel of the
-        target set's size, in workgroups of surface_cs."""
-        wx, wy = self.surface_cs
-        w, h = targets["size"]
-        cp.set_pipeline(pipeline)
-        cp.set_bind_group(0, bind_group)
-        cp.set_bind_group(1, self._cs_empty_group)
-        cp.set_bind_group(2, self._cs_out_group(targets, writes))
-        self._dispatch_surface_cs(cp, -(-w // wx), -(-h // wy))
-
-    def _dispatch_surface_cs(self, cp, gx: int, gy: int):
-        """The one dispatch call (a test replaces it with one that writes
-        nothing, which the proof must catch)."""
-        cp.dispatch_workgroups(gx, gy)
-
-    def _prove_surface_cs(self, targets, pipeline, bind_group, writes):
-        """Once per target set and slot: prove cs_surface ran, or raise.
-
-        wgpu-hal 29's Metal backend never compares a compute pipeline's
-        maxTotalThreadsPerThreadgroup, which a kernel this heavy can push
-        under 512, with the workgroup it dispatches; Metal then gets an
-        invalid threadgroup and the surface keeps whatever it held — a wrong
-        city and no error. So the slot is cleared to SURFACE_CS_SENTINEL in
-        every channel (cs_surface writes every pixel, and no surface it
-        writes is that: radiance is not negative, the red channel's mark is
-        one bit, |t| is kilometres), cs_surface dispatched once on the
-        uniforms as they stand, and the slot read back: one pixel still
-        holding the sentinel fails the renderer."""
-        proven = targets.setdefault("cs_proven", set())
-        key = id(writes[0])
-        if key in proven:
-            return
-        wgpu = self.wgpu
-        w, h = targets["size"]
-        enc = self.device.create_command_encoder()
-        rp = enc.begin_render_pass(color_attachments=[
-            {"view": writes[0].create_view(), "load_op": "clear",
-             "store_op": "store", "clear_value": (SURFACE_CS_SENTINEL,) * 4}])
-        rp.end()
-        cp = enc.begin_compute_pass()
-        self._encode_surface_cs(cp, targets, pipeline, bind_group, writes)
-        cp.end()
-        row = -(-w * 16 // 256) * 256
-        buf = self.device.create_buffer(
-            size=row * h,
-            usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ)
-        enc.copy_texture_to_buffer(
-            {"texture": writes[0], "mip_level": 0, "origin": (0, 0, 0)},
-            {"buffer": buf, "offset": 0, "bytes_per_row": row,
-             "rows_per_image": h}, (w, h, 1))
-        self.device.queue.submit([enc.finish()])
-        buf.map_sync(wgpu.MapMode.READ)
-        px = np.frombuffer(bytearray(buf.read_mapped()), np.uint32)
-        buf.unmap()
-        buf.destroy()
-        px = px.reshape(h, row // 4)[:, :w * 4].reshape(h, w, 4)
-        unwritten = int(np.all(px == _SENTINEL_BITS, axis=-1).sum())
-        if unwritten:
-            raise RuntimeError(surface_cs_failure(self.surface_cs, unwritten,
-                                                  w * h, "surface_cs=(16, 16)"))
-        proven.add(key)
-
-    def encode_frame_passes(self, enc, targets, view: "ViewState", bind_group,
-                            timestamps=None):
-        """The surface stages under `view`'s rays, then the march into
-        targets["sample"], as render() encodes them each frame — and the
-        pass timer (tools/benchmarking/soar_pass_timer.py), which passes
-        `timestamps(k)`: the timestamp_writes for pass k (stages first, the
-        march last) or None. One encoding, so what is timed is what renders.
-        Under surface_cs the first stage is a compute dispatch, which
-        writes every pixel, so it has no clear."""
-        stamp = timestamps or (lambda k: None)
-        stages = self._surface_stages(targets, view)
-        for k, (pipeline, group1, writes) in enumerate(stages):
-            tw = stamp(k)
-            if isinstance(pipeline, self.wgpu.GPUComputePipeline):
-                self._prove_surface_cs(targets, pipeline, bind_group, writes)
-                cp = (enc.begin_compute_pass(timestamp_writes=tw) if tw
-                      else enc.begin_compute_pass())
-                self._encode_surface_cs(cp, targets, pipeline, bind_group,
-                                        writes)
-                cp.end()
-                continue
-            attachments = [
-                {"view": tex.create_view(), "load_op": "clear",
-                 "store_op": "store",
-                 "clear_value": ((0.0, 0.0, 0.0, 1e30) if j == 0
-                                 else (0, 0, 0, 0))}
-                for j, tex in enumerate(writes)]
-            sp = (enc.begin_render_pass(color_attachments=attachments,
-                                        timestamp_writes=tw) if tw
-                  else enc.begin_render_pass(color_attachments=attachments))
-            sp.set_pipeline(pipeline)
-            sp.set_bind_group(0, bind_group)
-            if group1 is not None:
-                sp.set_bind_group(1, group1)
-            sp.draw(3)
-            sp.end()
-        tw = stamp(len(stages))
-        attachments = [{"view": targets["sample"].create_view(),
-                        "load_op": "clear", "store_op": "store",
-                        "clear_value": (0.0, 0.0, 0.0, 1.0)}]
-        rp = (enc.begin_render_pass(color_attachments=attachments,
-                                    timestamp_writes=tw) if tw
-              else enc.begin_render_pass(color_attachments=attachments))
-        rp.set_pipeline(self._ray_pipeline_for(view))
-        rp.set_bind_group(0, bind_group)
-        rp.set_bind_group(1, targets["surface_group"])
-        rp.draw(3)
-        rp.end()
-        return len(stages) + 1
 
     def _ensure_bind_group(self):
         if self._bind_group is not None:
@@ -1966,16 +1540,6 @@ class SoarRenderer:
             # pass band by band.
             stages = self._surface_stages(targets, view)
             for k, (pipeline, group1, writes) in enumerate(stages):
-                if isinstance(pipeline, self.wgpu.GPUComputePipeline):
-                    # surface_cs: one dispatch, which writes every pixel.
-                    self._prove_surface_cs(targets, pipeline, bind_group, writes)
-                    enc = self.device.create_command_encoder()
-                    cp = enc.begin_compute_pass()
-                    self._encode_surface_cs(cp, targets, pipeline, bind_group,
-                                            writes)
-                    cp.end()
-                    queue.submit([enc.finish()])
-                    continue
                 self._draw_banded(
                     k, pipeline,
                     [bind_group] if group1 is None else [bind_group, group1],

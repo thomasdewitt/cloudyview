@@ -48,6 +48,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -57,8 +58,8 @@ except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
 ROOT = Path(__file__).resolve().parents[1]
-SHADER = ROOT / "cloudyview/soar/raymarch.wgsl"
-COMPONENT = ROOT / "cloudyview/soar/city/components/rooftopworks.wgsl"
+SHADER = ShaderModule("city")
+COMPONENT = ROOT / "cloudyview/soar/shader/city/components/rooftopworks.wgsl"
 ANCHOR = "    let city_o = city_camera_origin();\n    let chit = city_trace("
 
 # Module-scope helpers for the probes: one face's integral of a lamp's two

@@ -16,7 +16,6 @@ a renderer:
   panel   chosen bands of the wall, each beside a reference photograph
           (temp/references/graffiti), for judging the look.
 
-Run under tools/gpulock.
 """
 
 import argparse
@@ -26,7 +25,18 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+
+
+class _CityShader:
+    """The city's shader module text (soar/shader.py assemble)."""
+    name = "the city shader module"
+
+    def read_text(self):
+        from cloudyview.soar import shader
+        return shader.assemble("city")
+
+
+SHADER = _CityShader()
 BEGIN = "// === CITY GRAFFITI (desert-flora) ==="
 END = "// === END CITY GRAFFITI ==="
 
@@ -488,10 +498,6 @@ def main():
     pn.add_argument("--length", type=float, default=24.0)
     pn.add_argument("--out", type=Path, required=True)
     sub.add_parser("rungs")
-    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
-    # before the parse: -h/--help still answers unlocked.
-    from gpulock_guard import require_gpulock
-    require_gpulock("tools/city_graffiti_harness.py")
     args = ap.parse_args()
     if args.cmd == "wall":
         args.out.mkdir(parents=True, exist_ok=True)

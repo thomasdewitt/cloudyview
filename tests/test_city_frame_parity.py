@@ -35,11 +35,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
 SCENE_JS = REPO / "web" / "soar" / "scene.js"
 MINIMAP_JS = REPO / "web" / "soar" / "minimap.js"
-WGSL = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+WGSL = ShaderModule("city")
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None or not SCENE_JS.exists(),

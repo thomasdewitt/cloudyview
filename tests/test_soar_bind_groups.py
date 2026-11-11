@@ -26,9 +26,10 @@ import re
 from pathlib import Path
 
 import pytest
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = REPO / "web" / "soar" / "raymarch.wgsl"
+SHADER = ShaderModule("city")
 RENDERER_JS = REPO / "web" / "soar" / "renderer.js"
 SOAR_HOST = REPO / "cloudyview" / "soar_host.py"
 

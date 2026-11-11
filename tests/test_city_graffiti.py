@@ -25,9 +25,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
-SHADER = (REPO / "cloudyview" / "soar" / "raymarch.wgsl").read_text()
+SHADER = ShaderModule("city").read_text()
 
 
 def _harness():

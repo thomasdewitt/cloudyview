@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from .conftest import ShaderModule
 
 pytest.importorskip("wgpu")
 
@@ -35,7 +36,7 @@ try:
 except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
-SHADER = Path(__file__).resolve().parents[1] / "cloudyview/soar/raymarch.wgsl"
+SHADER = ShaderModule("city")
 ANCHOR = "    let t_lim = min(select(1e30, chit.t, chit.hit),"
 GRID = 128
 # Out: x the largest |cover - count| over the four shares, y which zones

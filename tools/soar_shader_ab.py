@@ -72,8 +72,8 @@ sys.path.insert(0, str(REPO / "tests"))
 from conftest import SOAR_VIEWS, build_soar_level          # noqa: E402
 from cloudyview.soar_host import (                          # noqa: E402
     SceneState, SoarRenderer,
-    ViewState, camera_world_origin, parse_surface_cs, read_shader,
-    surface_cell_m, surface_clock_period_s, surface_cs_limits,
+    ViewState, camera_world_origin,
+    surface_cell_m, surface_clock_period_s,
     surface_period_m,
 )
 from cloudyview.witness import OCEAN_REFLECTANCE   # noqa: E402
@@ -137,41 +137,27 @@ def synthetic_nest(level):
                        name="synthetic_nest")
 
 
-def source_for(spec: str) -> str:
-    """'tree', 'git:<rev>', or a path."""
+def source_for(spec: str, surface: str):
+    """'tree' (this checkout's shader), or another shader directory — a
+    cloudyview/soar/shader with its manifest.json, as in a second worktree."""
     if spec == "tree":
-        return read_shader()
-    if spec.startswith("git:"):
-        # The shader moved from web/soar/ into the package 2026-08-18;
-        # web/soar/raymarch.wgsl is a symlink since then, and `git show` of a
-        # symlink path yields the link target text, not the shader. Try the
-        # package path first, then the old location for pre-move revisions.
-        errors = []
-        for relpath in ("cloudyview/soar/raymarch.wgsl",
-                        "web/soar/raymarch.wgsl"):
-            out = subprocess.run(
-                ["git", "show", f"{spec[4:]}:{relpath}"],
-                cwd=REPO, capture_output=True, text=True)
-            if out.returncode == 0 and "fn " in out.stdout:
-                return out.stdout
-            errors.append(out.stderr.strip())
-        raise SystemExit(f"git show failed for {spec!r}:\n" + "\n".join(errors))
-    return Path(spec).read_text()
+        return None
+    root = Path(spec)
+    m = json.loads((root / "manifest.json").read_text())
+    files = list(m["core"]) + list(m["surfaces"][surface]["files"])
+    for other, entry in m["surfaces"].items():
+        if other != surface:
+            files += entry["absent"]
+    return "\n".join((root / f).read_text() for f in files)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--a", default=None,
-                    help="baseline revision (default git:HEAD)")
-    ap.add_argument("--b", default="tree", help="candidate revision")
-    ap.add_argument("--a-surface-cs", default="frag",
-                    choices=("frag", "cs512", "cs256"),
-                    help="EXPERIMENT: A's first surface stage as compute "
-                         "(SoarRenderer surface_cs); with --b-surface-cs, "
-                         "one revision against itself shows the rounding "
-                         "the compute stage moves")
-    ap.add_argument("--b-surface-cs", default="frag",
-                    choices=("frag", "cs512", "cs256"))
+                    help="baseline: another shader directory (a second "
+                         "worktree's cloudyview/soar/shader)")
+    ap.add_argument("--b", default="tree",
+                    help="candidate: 'tree' or a shader directory")
     ap.add_argument("--size", type=int, nargs=2, default=(400, 225))
     ap.add_argument("--frames", type=int, default=1,
                     help="accumulated passes (1 = one deterministic frame)")
@@ -201,10 +187,6 @@ def main():
                     help="hold B against the renders a --save run wrote "
                          "(another tree, under its own host) instead of "
                          "rendering A here")
-    # It opens a GPU device: refuse outside tools/gpulock (gpulock_guard),
-    # before the parse: -h/--help still answers unlocked.
-    from gpulock_guard import require_gpulock
-    require_gpulock("tools/soar_shader_ab.py")
     args = ap.parse_args()
     # What a saved set was rendered under: an --against run under any other
     # settings would compare different pictures.
@@ -226,19 +208,14 @@ def main():
                      f"{run}.")
         if args.a is not None:
             ap.error("--a and --against: A is the saved set")
+    elif args.a is None and args.save is None:
+        ap.error("name a baseline: --a SHADER_DIR, or --against a saved set")
     elif args.a is None:
-        args.a = "git:HEAD"
+        args.a = "tree"
 
     import wgpu
-    modes = {"a": parse_surface_cs(args.a_surface_cs),
-             "b": parse_surface_cs(args.b_surface_cs)}
-    limits = {}
-    for mode in modes.values():
-        for k, v in surface_cs_limits(mode).items():
-            limits[k] = max(limits.get(k, 0), v)
     device = wgpu.gpu.request_adapter_sync(
-        power_preference="high-performance").request_device_sync(
-            required_limits=limits)
+        power_preference="high-performance").request_device_sync()
 
     if args.demo is not None:
         sys.path.insert(0, str(REPO / "tools" / "benchmarking"))
@@ -269,8 +246,8 @@ def main():
     for side, spec in ((("b", args.b),) if args.against is not None
                        else (("a", args.a), ("b", args.b))):
         r = SoarRenderer(device=device, periodic=periodic, nested=nested,
-                         surface=surface, shader_source=source_for(spec),
-                         surface_cs=modes[side])
+                         surface=surface,
+                         shader_source=source_for(spec, surface))
         r.upload_volume(level.sigma)
         if nested:
             r.upload_nest(nest.sigma)
@@ -296,9 +273,7 @@ def main():
             for name, v in CITY_VIEWS.items()}
     wanted = args.views.split(",") if args.views else list(views)
     w, h = args.size
-    stage = {k: "" if v is None else f" (first stage compute {v[0]}x{v[1]})"
-             for k, v in modes.items()}
-    print(f"A = {args.against or args.a}{stage['a']}\nB = {args.b}{stage['b']}")
+    print(f"A = {args.against or args.a}\nB = {args.b}")
     print(f"{w}x{h}, {args.frames} frame(s), jitter "
           f"{'on' if args.jitter else 'off'}, periodic {args.periodic}, "
           f"scene {args.scene}, tier {args.tier or 'judge (live march)'}\n")

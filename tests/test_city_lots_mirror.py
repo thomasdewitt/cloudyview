@@ -42,9 +42,10 @@ import numpy as np
 import pytest
 
 from tests.conftest import soar_gpu_adapter
+from .conftest import ShaderModule
 
 REPO = Path(__file__).resolve().parents[1]
-WGSL = REPO / "cloudyview" / "soar" / "raymarch.wgsl"
+WGSL = ShaderModule("city")
 CITYLOTS_JS = REPO / "web" / "soar" / "citylots.js"
 TILE_DIR = REPO / "cloudyview" / "soar" / "city"
 
