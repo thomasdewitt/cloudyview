@@ -14,6 +14,7 @@ transpose.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import time
 from typing import Optional, Tuple
@@ -21,7 +22,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from . import shader
-from .tiers import LIGHT_CACHE_DIVISOR
+from .tiers import LIGHT_CACHE_DIVISOR, QUALITY_PRESETS
 from .surfaces import (SURFACE_DIRS, SURFACE_FORMAT_CHANNELS, SURFACE_STAGES,
                        SURFACE_TILE_SCHEMAS, VEIL_STAGES, check_surface,
                        decode_surface_level, surface_level_files,
@@ -627,8 +628,11 @@ class SoarRenderer:
     @staticmethod
     def _light_cache_key_for(state: SceneState, view: ViewState) -> tuple:
         """What a baked cache is the cache of, apart from the field itself
-        (an upload discards the cache): the sun and the boxes."""
+        (an upload discards the cache): the sun, whether the domain wraps,
+        and the boxes. The bake chooses its own light step, so the scene's
+        is not part of it."""
         return (float(view.sun_azimuth), float(view.sun_elevation),
+                bool(state.periodic),
                 tuple(float(v) for v in state.bmin),
                 tuple(float(v) for v in state.bmax),
                 bool(state.nested)
@@ -645,13 +649,13 @@ class SoarRenderer:
         render with view.light_cache=True reads the first instead of
         marching to the sun per cloud sample. render() bakes when the cache
         is not the one for its field, boxes and sun, so calling this
-        directly is only needed to choose what the bake is made with:
+        directly is only needed to choose `divisor`, the linear resolution
+        reduction against the volume grid (1 = one cache texel per voxel).
 
-        `divisor` is the linear resolution reduction against the volume grid
-        (1 = one cache texel per voxel). The bake's sun marches step at
-        `state.dt_light`, with no angular LOD. The browser always bakes at
-        the High tier's light step, so that its cache stays valid when the
-        tier changes.
+        The bake's sun marches step at the High tier's light step (that many
+        of the level's smallest voxels), with no angular LOD, whatever
+        `state.dt_light` is. The browser bakes the same way, so one cache
+        serves every tier and does not depend on which render asked for it.
 
         The bake is one fs_bake_light draw per field-x plane, copied into the
         3D cache. Returns the cache dims (nx, ny, nz) in field axis order.
@@ -684,7 +688,16 @@ class SoarRenderer:
                    | wgpu.TextureUsage.COPY_SRC))
         slice_view = slice_tex.create_view()
 
-        base = pack_uniforms(state, view)
+        light_step = QUALITY_PRESETS["high"]["light_step_factor"]
+        box = np.subtract(state.bmax, state.bmin)
+        bake_state = dataclasses.replace(
+            state, dt_light=float(np.min(box / (vx, vy, vz))) * light_step)
+        if state.nested:
+            nz, ny, nx = self._nest_tex.size
+            nest_box = np.subtract(state.nest_bmax, state.nest_bmin)
+            bake_state.dt_light_nest = (
+                float(np.min(nest_box / (nx, ny, nz))) * light_step)
+        base = pack_uniforms(bake_state, view)
         bake_pipeline = self._bake_pipeline()
         for ix in range(cx):
             u = base.copy()

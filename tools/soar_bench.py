@@ -162,12 +162,6 @@ def main():
                 surface_period_m=surface_period_m(surface, meta),
                 clock_period_s=surface_clock_period_s(surface, meta))
 
-        # One sun per scene, so one light cache: baked at High's light step
-        # whatever the tier flies with, as the browser bakes it.
-        renderer.bake_light_cache(
-            scene_state("high"),
-            ViewState(output_size=(out_w, out_h), render_size=(out_w, out_h),
-                      **views[wanted[0]]))
         for tier in sorted(args.tiers.split(","), key=TIER_ORDER.index):
             p = presets[tier]
             state = scene_state(tier)
@@ -177,7 +171,9 @@ def main():
                 view = ViewState(output_size=(out_w, out_h), render_size=size,
                                  jitter=True, light_cache=bool(p["lightCache"]),
                                  **views[name])
-                renderer.render(state, view, frames=2)       # pipelines, caches
+                # Untimed: compiles the pipelines and, for the scene's first
+                # view, bakes the light cache.
+                renderer.render(state, view, frames=2)
                 ms = float("inf")
                 for _ in range(args.repeats):
                     t0 = time.perf_counter()
