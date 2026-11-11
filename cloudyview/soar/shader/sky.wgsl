@@ -84,7 +84,7 @@ fn circumsolar_amplitude(haze: f32) -> f32 {
     // correction vanishes at the anchor.
     let span = CIRCUMSOLAR_AMPLITUDE - CIRCUMSOLAR_AMPLITUDE_FLOOR;
     return CIRCUMSOLAR_AMPLITUDE
-        // @domain: haze >= 0: the only caller, sky_radiance, reads max(u.flags.z, 0.0) (docs/soar-bugs.md 21)
+        // @domain: haze >= 0: the only caller, sky_radiance, reads max(u.haze, 0.0) (docs/soar-bugs.md 21)
         + span * (pow(haze / HAZE_ANCHOR, CIRCUMSOLAR_HAZE_EXPONENT) - 1.0);
 }
 
@@ -109,7 +109,7 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     // and circumsolar_amplitude raises haze / anchor to a power, which is
     // NaN for a negative base. From zero down the sky holds its aerosol-free
     // look; the host's extinction handles the negative range itself.
-    let haze = max(u.flags.z, 0.0);
+    let haze = max(u.haze, 0.0);
     let zc = t / sky_haze_elevation_sigma(haze);
     let w_horizon = min(
         one_minus * one_minus * one_minus * exp(-zc * zc)

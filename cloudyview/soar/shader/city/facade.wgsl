@@ -168,7 +168,7 @@ fn city_crown(cc: CityCell, ci: vec2<i32>) -> CityCrown {
     } else if (cc.arch != 2 && cc.tiers >= 3) {
         dlo = cc.b3min.xy; dhi = cc.b3max.xy; dz = cc.b3max.z;
     }
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let cmin = vec2<f32>(ci) * cell;
     let rlo = max(dlo, cmin);
     let rhi = min(dhi, cmin + vec2<f32>(cell, cell));

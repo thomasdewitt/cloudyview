@@ -232,7 +232,7 @@ fn cc_skybridges_build(clo: vec2<i32>, axis: i32, ca: CityCell, cb: CityCell,
         return s;
     }
 
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     // Faces along the axis, and the row the edge lives in across it.
     var a_face: f32; var b_face: f32; var bnd: f32;
     var a_lo: f32; var a_hi: f32; var b_lo: f32; var b_hi: f32;
@@ -538,12 +538,12 @@ fn cc_skybridges_truss(h: CityHit, s: cc_skybridges_Span, tint: vec3<f32>,
 
 fn cc_skybridges_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
         -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(h.pos.xy, 3.0));
     let k = h.kind - cc_skybridges_KIND_BASE;
     let axis = k & 1;
     let ty = k >> 1;
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
 
     // Rebuild the exact span from the hit. Containment guarantees the tube
     // straddles one block boundary and stays in one row, so rounding the hit

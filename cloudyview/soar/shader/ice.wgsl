@@ -1,7 +1,7 @@
 // Ice-detection mode: a false-colour view of cloud phase. Cloud source terms
 // keep their luminance and take a hue from the local ice fraction, the sky
 // is redrawn green and the sea dark teal, so the red-to-cyan clouds carry
-// the frame. Everything here runs only when u.light_cache.w is set.
+// the frame. Everything here runs only when u.ice_mode is set.
 
 // Ice fraction of extinction at a world point, from the outer level's grid.
 // The outer box covers any nest, so one texture serves both levels.
@@ -13,7 +13,7 @@ fn ice_fraction_at(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(ice_frac, 0));
     let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
-    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims - 0.5;
+    let data_g = ((q - u.bmin) / (u.bmax - u.bmin)) * dims - 0.5;
     let tex_coord = vec3<f32>(
         data_g.z + 0.5,
         data_g.y + 0.5,
@@ -62,8 +62,8 @@ fn ice_recolor(x: vec3<f32>, tint: vec3<f32>, on: bool) -> vec3<f32> {
 // the horizon falling to a deep teal overhead. `disc` is passed through so
 // that a caller can leave the solar disc out, as with sky_radiance.
 fn alien_sky(dir: vec3<f32>, sun: vec3<f32>, disc: vec3<f32>) -> vec3<f32> {
-    let phys = sky_radiance(dir, sun, u.sky_horizon.xyz, u.sky_bloom.xyz,
-                            disc, u.cloud_sun.w);
+    let phys = sky_radiance(dir, sun, u.sky_horizon, u.sky_bloom,
+                            disc, u.low_sun_sky);
     let lum = dot(phys, ICE_LUM);
     let up = clamp(dir.z, 0.0, 1.0);
     // Dimmer than the physical sky: the palette's luminances are ~0.7 and

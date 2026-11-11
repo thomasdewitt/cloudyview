@@ -244,7 +244,7 @@ struct cc_streetfurniture_Edge {
 
 fn cc_streetfurniture_edge(ci: vec2<i32>, cc: CityCell, side: i32)
         -> cc_streetfurniture_Edge {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let cmin = vec2<f32>(ci) * cellm;
     let cmax = cmin + vec2<f32>(cellm);
     var e: cc_streetfurniture_Edge;
@@ -1196,7 +1196,7 @@ fn cc_streetfurniture_miss(ci: vec2<i32>) -> CityHit {
 // is one feature, not a lattice that could moire.
 fn cc_streetfurniture_fpx(t: f32) -> f32 {
     let pa = true_pixel_angle();
-    return max(0.35 * max(pa, u.periodic.z), pa) * max(t, 0.0);
+    return max(0.35 * max(pa, u.view_lod_tan), pa) * max(t, 0.0);
 }
 
 // A candidate: a box the ray entered, named by where it lives, so holding
@@ -1535,7 +1535,7 @@ fn cc_streetfurniture_material(m: f32, v: cc_streetfurniture_Prop)
 // what black plastic does: the highlight is small and it clips.
 fn cc_streetfurniture_glints(p: vec3<f32>, n: vec3<f32>, rf: vec3<f32>,
                              shine: f32) -> f32 {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let h2 = CITY_LAMP_HEAD_Z * CITY_LAMP_HEAD_Z;
     let norm = (shine + 2.0) * 0.15915494;
     let lit = city_lamp_lines(p.xy);

@@ -53,7 +53,7 @@ fn veil_pack(rgb: vec3<f32>, trans: f32, t: f32) -> vec4<u32> {
 // accumulation by fs_steam_live (row 8.w), where it keeps moving over a
 // parked, converging picture. Otherwise it is marched into the veil.
 fn city_steam_live() -> bool {
-    return CITY && u.ocean.w > 0.5;
+    return CITY && u.surface.w > 0.5;
 }
 
 // No veil: nothing scattered in, everything let through.
@@ -168,10 +168,10 @@ fn fs_lens_state(@builtin(position) frag_pos: vec4<f32>)
     // The previous state, at the binding the later surface stages read
     // their input from.
     let prev = textureLoad(surface_plain, vec2<i32>(0, 0), 0);
-    let dt = max(u.surface_offset.w, 0.0);
+    let dt = max(u.lens_dt, 0.0);
     // A NaN extinction reads as none. A comparison with NaN is false, so the
     // select is defined where max(NaN, 0) is left to the implementation.
-    let s_raw = sample_sigma(u.cam_origin.xyz);
+    let s_raw = sample_sigma(u.cam_origin);
     let sigma = select(0.0, s_raw, s_raw > 0.0);
     let f = 1.0 - exp(-sigma * LENS_L_WET);
     // Clear air: the in-cloud law's level would count as dry. Its
@@ -213,7 +213,7 @@ fn fs_steam_live(@builtin(position) frag_pos: vec4<f32>)
 
 // One field-x plane of the sun optical depth cache. The host renders this
 // into a 2D r16float target of size (cache_nz, cache_ny) for the slice
-// u.light_cache.y, then copies the target into that depth slice of the
+// u.bake_slice, then copies the target into that depth slice of the
 // light_tau texture. A 3D texture cannot be a render target and r16float is
 // not a storage format, but r16float can be rendered to, so the bake is a
 // render pass per slice and not a compute pass. Slice by slice also lets
@@ -231,15 +231,15 @@ fn fs_bake_light(@builtin(position) frag_pos: vec4<f32>)
     // frag_pos.xy = (iz + 0.5, iy + 0.5) over the (nz, ny) target. The slice
     // index is the field-x plane.
     let data_g = vec3<f32>(
-        u.light_cache.y,
+        u.bake_slice,
         frag_pos.y - 0.5,
         frag_pos.x - 0.5
     );
     // Texel i sits at box fraction (i + 0.5) / N, the convention
     // sample_level and sample_light_tau map with, so a read at a texel
     // centre returns exactly what was baked there.
-    let p = u.bmin.xyz
-        + ((data_g + 0.5) / dims) * (u.bmax.xyz - u.bmin.xyz);
-    let tau = light_march_tau(p, u.sun_dir.xyz, 0.0, 0.0);
+    let p = u.bmin
+        + ((data_g + 0.5) / dims) * (u.bmax - u.bmin);
+    let tau = light_march_tau(p, u.sun_dir, 0.0, 0.0);
     return vec4<f32>(tau, 0.0, 0.0, 1.0);
 }

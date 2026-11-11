@@ -254,7 +254,7 @@ fn cc_manholesteam_site(k: i32, j: i32, along_y: bool) -> cc_manholesteam_Site {
     }
     // Seeded like the site itself (city_manhole): the street and the along
     // index folded at the tile, so a plume keeps its shape across the seam.
-    let jn = i32(round(u.ocean_params.y / CITY_MH_PITCH));
+    let jn = i32(round(u.tile_extent / CITY_MH_PITCH));
     let r = city_rand4(vec2<u32>(
         city_line_seed(k) * 0x2545f491u + select(0x6a09e667u, 0xbb67ae85u,
                                                  along_y),
@@ -398,7 +398,7 @@ struct cc_manholesteam_Street {
 
 fn cc_manholesteam_street(s: cc_manholesteam_Site, k: i32, along_y: bool)
         -> cc_manholesteam_Street {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     var st: cc_manholesteam_Street;
     st.along_y = along_y;
     let a = i32(floor(select(s.c.x, s.c.y, along_y) / cellm));
@@ -535,7 +535,7 @@ fn cc_manholesteam_media(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     if (t_lo >= t_hi) {
         return acc;
     }
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     // Plumes are composited as found. Within one street they are found in
     // ray order; between streets, a plume wholly in front of everything so
     // far goes in front, and anything else behind — exact unless two
@@ -655,7 +655,7 @@ fn cc_manholesteam_props_trace(o: vec3<f32>, dir: vec3<f32>,
     if (fp > cc_manholesteam_FP_END) {
         return res;
     }
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let lo = vec2<f32>(ci) * cellm;
     let hi = lo + vec2<f32>(cellm);
     var t_end = t1;

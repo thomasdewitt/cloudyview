@@ -158,7 +158,7 @@ const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0084, 0.1047);
 // says which street that is: it sits CITY_STREET_HALF (plus the avenue
 // extra) from the centreline, and the centreline is the nearest boundary.
 fn city_sidewalk_w(plot_edge: f32) -> f32 {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let gap = abs(plot_edge - round(plot_edge / cellm) * cellm);
     return select(CITY_SIDEWALK_W, CITY_SIDEWALK_W_AVE,
                   gap > CITY_STREET_HALF + 1.0);
@@ -175,7 +175,7 @@ fn city_has_walk(cc: CityCell) -> bool {
 // cell carries a street, read from the cell's street word exactly as
 // city_street_pools reads it, so pools, glints and lamp light agree.
 fn city_lamp_lines(p: vec2<f32>) -> vec2<bool> {
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let ci = vec2<i32>(floor(p / cell));
     let st = city_word(textureLoad(ocean_normals, city_tile_cell(ci), 0).a);
     let bxi = i32(round(p.x / cell));
@@ -231,7 +231,7 @@ struct CityRoad {
 }
 
 fn city_road(p: vec2<f32>) -> CityRoad {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     var r: CityRoad;
     r.kx = i32(round(p.x / cellm));
     r.ky = i32(round(p.y / cellm));
@@ -326,9 +326,9 @@ fn city_detail(p: vec2<f32>, freq: f32, off: f32, amp: f32, fp: f32,
 // in a travel lane; sites that would fall in an intersection's box, its
 // crosswalks or its stop lines are not present.
 fn city_manhole(k: i32, j: i32, along_y: bool) -> vec4<f32> {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     // The along index folds at the tile too: CITY_MH_PITCH divides it.
-    let jn = i32(round(u.ocean_params.y / CITY_MH_PITCH));
+    let jn = i32(round(u.tile_extent / CITY_MH_PITCH));
     let r = city_rand4(vec2<u32>(
         city_line_seed(k) * 0x9e3779b9u + select(0x1b873593u, 0xcc9e2d51u,
                                                  along_y),
@@ -693,7 +693,7 @@ fn city_ground_is_lot(paved: bool, cc: CityCell) -> bool {
 // faintly, as moonlit and city-lit dirt rather than a void. Their mottle has
 // mean one and dissolves as the footprint outgrows a patch.
 fn city_lot_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(p.xy, 3.0));
     let alb = select(CITY_YARD_ALBEDO, CITY_SCRUB_ALBEDO,
                      cc.land_use == CITY_USE_OPEN)
@@ -712,7 +712,7 @@ fn city_lot_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
 // has switched off), it is the mean of the neighbouring pools' tails.
 fn city_ground_lit(p: vec3<f32>, cc: CityCell, dir: vec3<f32>, fp: f32,
                    g: CityGround, paved: bool) -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * city_glow_sample(p.xy, 3.0));
     let s = city_lamp_scale(p.xy);
     let raw = s * city_street_pools(p.xy);
@@ -748,7 +748,7 @@ fn city_ground_lit(p: vec3<f32>, cc: CityCell, dir: vec3<f32>, fp: f32,
 // times 4 pi so that isotropic (g = 0) matches a surface facing the lamp —
 // strong forward g is what makes steam blaze where a lamp stands behind it.
 fn city_street_light_g(p: vec3<f32>, n: vec3<f32>, g: f32) -> vec3<f32> {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let s = city_lamp_scale(p.xy);
     let h2 = CITY_LAMP_HEAD_Z * CITY_LAMP_HEAD_Z;
     let medium = g < 1.5;
@@ -820,7 +820,7 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
     if (film + g.puddle <= 0.0) {
         return vec3<f32>(0.0);
     }
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let s = city_lamp_scale(p.xy);
     let h2 = CITY_LAMP_HEAD_Z * CITY_LAMP_HEAD_Z;
     let v = -dir;
@@ -987,7 +987,7 @@ fn city_wet_lobe(h: CityHit, g: CityGround, dir: vec3<f32>,
 const CITY_REFL_CLOUD_STEPS: i32 = 10;
 const CITY_REFL_CLOUD_SPAN: f32 = 4000.0;
 fn city_reflect_sky(world_o: vec3<f32>, r: vec3<f32>, jit: f32) -> vec3<f32> {
-    let sky = night_sky_radiance(r, u.sun_dir.xyz);
+    let sky = night_sky_radiance(r, u.sun_dir);
     let ta = max((u.bmin.z - world_o.z) / r.z, 0.0);
     let tb = min((u.bmax.z - world_o.z) / r.z, ta + CITY_REFL_CLOUD_SPAN);
     if (tb <= ta) {
@@ -1004,9 +1004,9 @@ fn city_reflect_sky(world_o: vec3<f32>, r: vec3<f32>, jit: f32) -> vec3<f32> {
             base = q;
         }
     }
-    // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
-    let lod = clamp(log2(max(base.z, u.ocean_params.x) / u.ocean_params.x),
-                    0.0, u.ocean_params.w);
+    // @domain: a positive max over u.tile_cell, the surface tile's cell size (> 0)
+    let lod = clamp(log2(max(base.z, u.tile_cell) / u.tile_cell),
+                    0.0, u.tile_max_lod);
     let g_raw = max(city_glow_sample(city_fold_xy(base.xy), lod)
                     - CITY_UPLIGHT_GLOW_BIAS, 0.0);
     let g_up = g_raw / (CITY_UPLIGHT_GLOW_HALF + g_raw);
@@ -1035,7 +1035,7 @@ fn city_reflect_env(p: vec2<f32>, r: vec3<f32>) -> vec3<f32> {
     // street stepped at the hand-off under a lit sky).
     let o = vec3<f32>(p, 0.0);
     let l = 0.5 * CITY_REFL_RANGE;
-    return city_fog(mix(night_sky_radiance(r, u.sun_dir.xyz), facade, skyline),
+    return city_fog(mix(night_sky_radiance(r, u.sun_dir), facade, skyline),
                     o, r, l, o + l * r);
 }
 
@@ -1045,7 +1045,7 @@ fn city_reflect_env(p: vec2<f32>, r: vec3<f32>) -> vec3<f32> {
 // is lot ground — including a strip along an edge with no street, and
 // every boundary inside a multi-block lot.
 fn city_ground_paved(cc: CityCell, ci: vec2<i32>, p: vec2<f32>) -> bool {
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let q = p - vec2<f32>(ci) * cell;
     let hw0 = vec2<f32>(
         CITY_STREET_HALF + select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(ci.x)),

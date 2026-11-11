@@ -8,7 +8,7 @@
 // distance along it. No marcher, no DDA, no per-cell state.
 //
 // LATTICE. Routes ride the avenue lattice, sparsely. Blocks are
-// `u.ocean_params.x` metres (90 on the shipped tile) and avenues fall every
+// `u.tile_cell` metres (90 on the shipped tile) and avenues fall every
 // `CITY_AVENUE_PERIOD` = 8 blocks, so the finest legal route spacing is 720 m
 // — far too dense. The route period is 24 blocks (2160 m), three avenues
 // apart, which is what makes the network read as sparse drama rather than as
@@ -616,7 +616,7 @@ fn cc_skyway_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>)
         return miss;
     }
 
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let period = cc_skyway_ROUTE_BLOCKS * cell;
     var best = cc_skyway_Best(1e30, vec3<f32>(0.0, 0.0, 1.0), -1);
 
@@ -662,7 +662,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     let code = h.kind - cc_skyway_KIND_BASE;
     let fam = code / cc_skyway_FAM_STRIDE;
     let part = code % cc_skyway_FAM_STRIDE;
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let period = cc_skyway_ROUTE_BLOCKS * cell;
     let phase = select(0.0, cc_skyway_OFFSET_BLOCKS * cell, fam == 1);
 
@@ -691,7 +691,7 @@ fn cc_skyway_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32)
     // true grazing the exact factor stops meaning anything.
     //
     // Worth knowing when sizing any of these windows: `fp` is NOT the naive
-    // pixel footprint. `pixel_angle` is `max(2*tan(fov/2)/width, u.periodic.z)`
+    // pixel footprint. `pixel_angle` is `max(2*tan(fov/2)/width, u.view_lod_tan)`
     // and the LOD floor wins by 3.6x at 960 px with the app's default slider,
     // so every window below is exercised at 3.6x the range you would guess.
     let fp_eff = fp / clamp(abs(dot(dir, h.normal)), 0.20, 1.0);

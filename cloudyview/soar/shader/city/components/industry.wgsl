@@ -1457,7 +1457,7 @@ fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 // meeting the tone map's shoulder as a flat white face.
 fn cc_industry_lit(cc: CityCell, p: vec3<f32>, n: vec3<f32>, alb: vec3<f32>)
         -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let lamp = (alb / cc_industry_ALB_REF) * cc_industry_light(cc, p, n);
     return lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
            + alb * (cc_industry_fill(p)
@@ -1544,7 +1544,7 @@ fn cc_industry_glaze_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
 }
 
 fn cc_industry_roof_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let light = cc_industry_fill(h.pos)
                 + CITY_MOONLIGHT * max(dot(h.normal, moon), 0.0);
     if (abs(h.normal.z) < 0.3) {
@@ -1580,7 +1580,7 @@ fn cc_industry_sky_shade(h: CityHit, cc: CityCell, fp: f32) -> vec3<f32> {
     let loc = rel - (vec2<f32>(ij) + 0.5) * g.cell;
     let inside = all(abs(loc) < 0.5 * g.obj);
     let light = cc_industry_fill(h.pos)
-                + CITY_MOONLIGHT * max(dot(h.normal, u.sun_dir.xyz), 0.0);
+                + CITY_MOONLIGHT * max(dot(h.normal, u.sun_dir), 0.0);
     // The pattern: a glowing panel (its level drawn per skylight) inside a
     // skylight's footprint, dark curb on its sides, roof between.
     let dl = cc_industry_draw(cc, 15u, ij.x, ij.y);
@@ -2238,7 +2238,7 @@ fn cc_industry_facade(cc: CityCell, h: CityHit, dir: vec3<f32>, uc: f32,
     let lamp = (alb / cc_industry_ALB_REF) * light;
     let refl = lamp / (vec3<f32>(1.0) + lamp / cc_industry_LAMP_KNEE)
                + alb * (cc_industry_fill(h.pos)
-                        + CITY_MOONLIGHT * max(dot(n, u.sun_dir.xyz), 0.0));
+                        + CITY_MOONLIGHT * max(dot(n, u.sun_dir), 0.0));
     return refl + emit;
 }
 

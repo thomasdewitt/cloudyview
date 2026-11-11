@@ -51,14 +51,14 @@ const CITY_COVER_LOD: vec2<f32> = vec2<f32>(1.6, 6.5);
 // pivot (an affine map, which commutes with an average), its highlight
 // shoulder included.
 fn city_display_curve(e: vec3<f32>) -> vec3<f32> {
-    let w2 = u.flags.w * u.flags.w;
+    let w2 = u.white_point * u.white_point;
     let per_channel = e * (1.0 + e / w2) / (1.0 + e);
     let y = dot(e, vec3<f32>(0.2126, 0.7152, 0.0722));
     let chroma_preserving = e * (1.0 + y / w2) / (1.0 + y);
     let k = TONE_MAP_SHOULDER * smoothstep(1.0, 3.0, y);
     let mapped = mix(per_channel, chroma_preserving, k);
     return pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
-               vec3<f32>(1.0 / u.periodic.w));
+               vec3<f32>(1.0 / u.gamma));
 }
 
 // One area element, weighted `a`, of radiance l seen through the fog: its
@@ -81,7 +81,7 @@ fn city_win_add(acc: CityWinSum, l: vec3<f32>, a: f32, fog: vec4<f32>,
     let x = max(l * fog.x + fog.yzw, vec3<f32>(0.0));
     var d = vec3<f32>(0.0);
     if (shown) {
-        d = city_display_curve(x * u.cam_right.w);
+        d = city_display_curve(x * u.exposure);
     }
     return CityWinSum(acc.shown + d * a, acc.light + x * a);
 }
@@ -115,7 +115,7 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
     let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
     let target_y = dot(mean.shown, lum);
     let goal = target_y - CITY_RESOLVE_EPS;
-    let e = u.cam_right.w;
+    let e = u.exposure;
     let x0 = light * fog.x;
     let y_light = dot(x0 * e, lum);
     if (y_light <= 0.0) {
@@ -123,8 +123,8 @@ fn city_windows_resolve(mean: CityWinSum, fog: vec4<f32>,
     }
     // First guess: the exposed luminance the per-channel curve shows as
     // target_y, over the light's own.
-    let m = pow(clamp(target_y, 0.0, 0.999999), u.periodic.w);
-    let w2 = u.flags.w * u.flags.w;
+    let m = pow(clamp(target_y, 0.0, 0.999999), u.gamma);
+    let w2 = u.white_point * u.white_point;
     // @domain: (1 - m)^2 >= 0, m >= 0, and w2 >= 16 (both hosts hold the white point to [4, 40])
     let e_y = 2.0 * m / ((1.0 - m) + sqrt((1.0 - m) * (1.0 - m) + 4.0 * m / w2));
     let guess = clamp((e_y - dot(fog.yzw * e, lum)) / y_light, 1e-6, 1e6);
@@ -287,7 +287,7 @@ fn city_lit_pane(cc: CityCell, refl: vec3<f32>, through: f32,
                 let x = max((refl + c * (g * b_mean)) * fog.x + fog.yzw,
                             vec3<f32>(0.0));
                 acc.shown = acc.shown
-                    + city_display_curve(x * u.cam_right.w)
+                    + city_display_curve(x * u.exposure)
                       * (share * (wb - wa));
             }
         }
@@ -810,7 +810,7 @@ fn city_windows_mean(cc: CityCell, f: CityFace, zp: vec3<u32>,
 fn city_facade_flat(cc: CityCell, f: CityFace, h: CityHit, dir: vec3<f32>,
                     fp: f32, fp_filter: f32, direct: bool,
                     fill: vec3<f32>) -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let l = city_face_local(f, h.pos);
     let uc = l.x;
     let vc = h.pos.z;

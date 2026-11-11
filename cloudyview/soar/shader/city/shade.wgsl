@@ -49,7 +49,7 @@ fn city_roof_albedo(cc: CityCell, h: CityHit, fp: f32) -> f32 {
 // direct false for a surface seen in a reflection.
 fn city_shade(h: CityHit, dir: vec3<f32>, fp: f32, fp_filter: f32,
               direct: bool) -> vec3<f32> {
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     let cc = city_cell(h.cell);
     let local_glow = city_glow_sample(h.pos.xy, 3.0);
     let fill = CITY_SKYGLOW * (0.5 + 1.5 * local_glow);
@@ -224,7 +224,7 @@ fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
     col = col + CITY_MOON_HALO_AMP * halo * vec3<f32>(0.75, 0.80, 0.95);
     if (cm > 0.0) {
         let a = CITY_MOON_BLOOM_W / ((1.0 - cm) + CITY_MOON_BLOOM_W);
-        col = col + a * u.sky_bloom.xyz;
+        col = col + a * u.sky_bloom;
     }
     let off = dir - moon * cm;
     let sin_r = length(off);

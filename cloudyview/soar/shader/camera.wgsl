@@ -22,15 +22,15 @@ struct CameraRay {
 // surface filters its texture over this footprint whatever the LOD angle is:
 // a wider one would only blur it.
 fn true_pixel_angle() -> f32 {
-    return 2.0 * u.cam_origin.w / u.params.x;
+    return 2.0 * u.tan_half_fov / u.image_width;
 }
 
 // The angle a surface's level of detail resolves at: the true pixel's, or
-// the view-step LOD angle (u.periodic.z) where that is coarser. It is the
+// the view-step LOD angle (u.view_lod_tan) where that is coarser. It is the
 // same angle that sets the cloud march's step, so one setting coarsens the
 // march and cuts the surfaces' work together.
 fn lod_pixel_angle() -> f32 {
-    return max(true_pixel_angle(), u.periodic.z);
+    return max(true_pixel_angle(), u.view_lod_tan);
 }
 
 // fs_main and the surface passes all take their ray from here, so a surface
@@ -39,16 +39,16 @@ fn lod_pixel_angle() -> f32 {
 // detail accumulate.
 fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     var cr: CameraRay;
-    let img_w = u.params.x;
-    let img_h = u.params.y;
-    let tan_half_fov = u.cam_origin.w;
-    let aspect = u.cam_forward.w;
-    let subpixel_on = u.flags.x;
-    let jitter_scale = clamp(u.flags.y, 0.0, 1.0);
+    let img_w = u.image_width;
+    let img_h = u.image_height;
+    let tan_half_fov = u.tan_half_fov;
+    let aspect = u.aspect;
+    let subpixel_on = u.subpixel_jitter;
+    let jitter_scale = clamp(u.jitter_scale, 0.0, 1.0);
     // The frame's index in the accumulation is the sequence coordinate of
     // every stratified stream, and the pixel seeds their rotations (see
     // math.wgsl).
-    cr.frame_index = u32(max(u.sun_dir.w, 0.0));
+    cr.frame_index = u32(max(u.frame_index, 0.0));
     cr.strat_pixel = vec2<u32>(frag_pos.xy);
 
     // Pixel -> camera ray. frag_pos.xy is the pixel centre, (px + 0.5,
@@ -64,12 +64,12 @@ fn camera_ray(frag_pos: vec4<f32>) -> CameraRay {
     let ndc_x = (2.0 * sample_pos.x / img_w - 1.0) * tan_half_fov;
     let ndc_y = (1.0 - 2.0 * sample_pos.y / img_h) * tan_half_fov / aspect;
     // @domain: forward plus in-plane offsets of the camera's orthonormal basis
-    cr.dir = normalize(u.cam_forward.xyz
-                       + ndc_x * u.cam_right.xyz
-                       + ndc_y * u.cam_up.xyz);
+    cr.dir = normalize(u.cam_forward
+                       + ndc_x * u.cam_right
+                       + ndc_y * u.cam_up);
     // The two angles: see true_pixel_angle and lod_pixel_angle.
     cr.true_pixel_angle = true_pixel_angle();
     cr.pixel_angle = lod_pixel_angle();
-    cr.jitter_amp = u.cam_up.w * jitter_scale;
+    cr.jitter_amp = u.march_jitter * jitter_scale;
     return cr;
 }

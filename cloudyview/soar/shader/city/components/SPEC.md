@@ -58,7 +58,7 @@ you may not redefine them. The structs you exchange with the core:
   (0 slab/setback, 2 growth, 3 tapered shaft, 4 spire crown, with `fmin/
   fmax/fscale` describing the frustum of 3 and 4), the window style
   (`win_style/win_pitch/pane_lo/pane_hi/win_mono`), and `merged`
-  (a 2x2 superblock building). Blocks are `u.ocean_params.x` meters on a
+  (a 2x2 superblock building). Blocks are `u.tile_cell` meters on a
   side (90 on the shipped tile); streets run between plots, avenues every
   8 blocks (`city_is_avenue`).
   **Respect the architecture**: rooftop furniture (antennas, clutter,

@@ -74,7 +74,7 @@ fn city_shell_cap(o: vec3<f32>, dir: vec3<f32>) -> f32 {
     if (o.z > CITY_SLAB_TOP && dir.z < -1e-7) {
         t0 = (CITY_SLAB_TOP - o.z) / dir.z;
     }
-    return t0 + f32(CITY_SHELL_REFINE_MAX_CELLS - 2) * u.ocean_params.x
+    return t0 + f32(CITY_SHELL_REFINE_MAX_CELLS - 2) * u.tile_cell
                 / max(abs(dir.x) + abs(dir.y), 1e-6);
 }
 
@@ -106,7 +106,7 @@ struct CityWalk {
 // `live` false: the ray never enters the slab.
 fn city_walk_start(o: vec3<f32>, dir: vec3<f32>, w: ptr<function, CityWalk>)
         -> bool {
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     var t0 = 0.0;
     if (o.z > CITY_SLAB_TOP) {
         if (dir.z >= -1e-7) {
@@ -504,8 +504,8 @@ fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
     }
     // fs_main's exposure and gamma, read as it reads them (the exposure
     // slider and auto-exposure keep it >= 0.5).
-    let exposure = u.cam_right.w;
-    let gamma = u.periodic.w;
+    let exposure = u.exposure;
+    let gamma = u.gamma;
     let t_front = acc.a;
     let b = select(tone_unmap(acc.rgb, exposure, gamma), vec3<f32>(0.0),
                    acc.rgb <= vec3<f32>(0.0));
@@ -556,7 +556,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
                        pixel_angle: f32, frame_index: u32,
                        strat_pixel: vec2<u32>) -> vec3<f32> {
     let pos = city_o + t * dir;
-    let cell = vec2<i32>(floor(pos.xy / u.ocean_params.x));
+    let cell = vec2<i32>(floor(pos.xy / u.tile_cell));
     let cc = city_cell(cell);
     let paved = city_ground_paved(cc, cell, pos.xy);
     if (city_ground_is_lot(paved, cc)) {
@@ -586,7 +586,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
             // Fogged over the range it searched, as a hit at the range
             // would have been.
             let far = ro + CITY_REFL_RANGE * lobe.r;
-            l = city_fog(city_reflect_sky(u.cam_origin.xyz + t * dir, lobe.r,
+            l = city_fog(city_reflect_sky(u.cam_origin + t * dir, lobe.r,
                                           city_frame_rand(strat_pixel,
                                                           frame_index,
                                                           CITY_RAND_REFLECT).w),

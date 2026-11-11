@@ -240,7 +240,7 @@ const CITY_PROP_RANGE: f32 = 2200.0;
 fn city_props_drawn(ci: vec2<i32>, p: vec3<f32>, t: f32) -> bool {
     let o = city_camera_origin();
     let dir = (p - o) / max(t, 1e-3);
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let inv = vec3<f32>(select(1e30, 1.0 / dir.x, abs(dir.x) > 1e-9),
                         select(1e30, 1.0 / dir.y, abs(dir.y) > 1e-9),
                         select(1e30, 1.0 / dir.z, abs(dir.z) > 1e-9));
@@ -296,8 +296,8 @@ fn city_tile_cell(ci: vec2<i32>) -> vec2<i32> {
 // 24-block route lattice — 1024 is not a multiple of 24) is pinned by it to
 // one canonical alignment, so live flight and replay agree there too.
 fn city_fold_xy(xy: vec2<f32>) -> vec2<f32> {
-    let t = u.ocean_params.y;
-    let q = (xy - u.surface_offset.xy) / t;
+    let t = u.tile_extent;
+    let q = (xy - u.surface_offset) / t;
     return t * (q - floor(q));
 }
 
@@ -366,8 +366,8 @@ fn city_lamp_station(k: i32, a: f32) -> f32 {
 // origin, so the uv is simply the coordinate over the extent: which
 // district sits where is decided entirely by the offset the host wrote.
 fn city_glow_sample(xy: vec2<f32>, lod: f32) -> f32 {
-    let uv = xy / u.ocean_params.y;
-    let l = clamp(lod, 1.0, u.ocean_params.w);
+    let uv = xy / u.tile_extent;
+    let l = clamp(lod, 1.0, u.tile_max_lod);
     return textureSampleLevel(ocean_normals, ocean_samp, uv, l).r;
 }
 
@@ -443,7 +443,7 @@ fn city_edge_street(cc: CityCell, side: i32) -> bool {
 fn city_cell(ci: vec2<i32>) -> CityCell {
     var c: CityCell;
     c.cell = ci;
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
 
     // The lot. Which blocks belong together, what the land is used for and
     // where the streets run were decided offline (cloudyview/city_lots.py)
@@ -1088,7 +1088,7 @@ fn city_trace(o: vec3<f32>, dir: vec3<f32>, t_min: f32, t_max: f32,
     var res: CityHit;
     res.hit = false;
     res.t = 1e30;
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
 
     var t0 = t_min;
     if (o.z + t0 * dir.z > CITY_SLAB_TOP) {
@@ -1341,7 +1341,7 @@ fn city_room_band_colour(k: i32) -> vec3<f32> {
 // cell's own edges, so the cell's one street word says which of the two
 // lines carries lamps; a line through open scrub is dark.
 fn city_street_pools(p: vec2<f32>) -> f32 {
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let ci = vec2<i32>(floor(p / cell));
     let st = city_word(textureLoad(ocean_normals, city_tile_cell(ci), 0).a);
     var pool = 0.0;

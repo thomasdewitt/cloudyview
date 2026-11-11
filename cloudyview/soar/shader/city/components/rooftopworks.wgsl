@@ -276,7 +276,7 @@ fn cc_rooftopworks_overlap(alo: vec2<f32>, ahi: vec2<f32>,
 // — which is what the DDA requires, and what gives a merged superblock four
 // independently furnished quadrants instead of one roof drawn four times.
 fn cc_rooftopworks_column(ci: vec2<i32>) -> vec4<f32> {
-    let cell = u.ocean_params.x;
+    let cell = u.tile_cell;
     let cmin = vec2<f32>(ci) * cell;
     return vec4<f32>(cmin, cmin + vec2<f32>(cell, cell));
 }
@@ -423,7 +423,7 @@ fn cc_rooftopworks_mech_on(cc: CityCell) -> bool {
 // clutter families' slot probabilities, each held to 1. The stair, its lift
 // room, the crown and the skylights are not clutter and do not scale.
 fn cc_rooftopworks_density() -> f32 {
-    return u.city_look.x;
+    return u.roof_density;
 }
 
 fn cc_rooftopworks_slot_draw(ci: vec2<i32>, s: i32) -> vec4<f32> {
@@ -1904,7 +1904,7 @@ fn cc_rooftopworks_dark(h: CityHit, albedo: f32) -> vec3<f32> {
     let fill = cc_rooftopworks_fill(h.pos);
     let side = 1.0 - abs(h.normal.z);
     return albedo * fill * (1.0 + 1.6 * side)
-         + albedo * CITY_MOONLIGHT * max(dot(h.normal, u.sun_dir.xyz), 0.0);
+         + albedo * CITY_MOONLIGHT * max(dot(h.normal, u.sun_dir), 0.0);
 }
 
 // The house colour, where the building has one; cool white otherwise.

@@ -274,7 +274,7 @@ fn city_ground_mottle(p: vec2<f32>, fp: f32) -> f32 {
         let amp = select(0.35, 0.65, o == 0)
                   * (1.0 - smoothstep(0.25 * scale, scale, fp));
         if (amp > 0.0) {
-            let per = i32(round(u.ocean_params.y / scale));
+            let per = i32(round(u.tile_extent / scale));
             let q = p / scale;
             let i = vec2<i32>(floor(q));
             let f = q - floor(q);

@@ -304,7 +304,7 @@ struct cc_streetlife_Side {
 
 fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
         -> cc_streetlife_Side {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let cmin = vec2<f32>(ci) * cellm;
     let cmax = cmin + vec2<f32>(cellm);
     let kr = city_kerb_rect(cc);
@@ -343,7 +343,7 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
     s.c_min = select(cmin.x, cmin.y, s.ax == 0);
     s.c_max = select(cmax.x, cmax.y, s.ax == 0);
     // Along the kerb, clear of the two cross streets' corners.
-    let cm = u.ocean_params.x;
+    let cm = u.tile_cell;
     let k0 = i32(round(s.a_min / cm));
     let k1 = i32(round(s.a_max / cm));
     s.p_min = s.a_min + CITY_STREET_HALF
@@ -370,7 +370,7 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
 // four candidates city_street_pools sums over, and the one that wins. Used
 // as the light direction for everything this component shades.
 fn cc_streetlife_nearest_lamp(p: vec2<f32>) -> vec3<f32> {
-    let cellm = u.ocean_params.x;
+    let cellm = u.tile_cell;
     let bx = round(p.x / cellm) * cellm;
     let by = round(p.y / cellm) * cellm;
     let kx = i32(round(p.x / cellm));

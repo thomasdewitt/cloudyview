@@ -248,7 +248,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
         win = city_pent_window(cc, f, b.iu, b.iv);
     }
     let n = h.normal;
-    let moon = u.sun_dir.xyz;
+    let moon = u.sun_dir;
     var ao = 1.0;
     var alb = st.albedo;
     var e = vec3<f32>(0.0);

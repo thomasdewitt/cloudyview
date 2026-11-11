@@ -20,8 +20,8 @@
 // Slab-method intersection of a ray with the outer box. Returns
 // (t_near, t_far); the ray misses when t_near > t_far.
 fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
-    let t0 = (u.bmin.xyz - origin) * inv_dir;
-    let t1 = (u.bmax.xyz - origin) * inv_dir;
+    let t0 = (u.bmin - origin) * inv_dir;
+    let t1 = (u.bmax - origin) * inv_dir;
     let tmin = min(t0, t1);
     let tmax = max(t0, t1);
     let t_near = max(max(tmin.x, tmin.y), tmin.z);
@@ -60,9 +60,9 @@ fn level_data_dims(t: texture_3d<f32>) -> vec3<f32> {
 // Voxel size (m) of whichever level is active at the sample point.
 fn level_voxel_size(in_nest: bool) -> vec3<f32> {
     if (NESTED && in_nest) {
-        return (u.nest_bmax.xyz - u.nest_bmin.xyz) / level_data_dims(nest_vol);
+        return (u.nest_bmax - u.nest_bmin) / level_data_dims(nest_vol);
     }
-    return (u.bmax.xyz - u.bmin.xyz) / level_data_dims(vol);
+    return (u.bmax - u.bmin) / level_data_dims(vol);
 }
 
 // Fold a world point into the outer tile. The whole scene, nest included, is
@@ -82,7 +82,7 @@ fn in_nest_box(q: vec3<f32>) -> bool {
     if (!NESTED) {
         return false;
     }
-    return all(q >= u.nest_bmin.xyz) && all(q <= u.nest_bmax.xyz);
+    return all(q >= u.nest_bmin) && all(q <= u.nest_bmax);
 }
 
 // The window that fades a level to zero across the half cell outside its
@@ -152,7 +152,7 @@ fn sample_light_tau(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(light_tau, 0));
     let dims = vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
-    let data_g = ((q - u.bmin.xyz) / (u.bmax.xyz - u.bmin.xyz)) * dims - 0.5;
+    let data_g = ((q - u.bmin) / (u.bmax - u.bmin)) * dims - 0.5;
     let tex_coord = vec3<f32>(
         data_g.z + 0.5,
         data_g.y + 0.5,
@@ -167,10 +167,10 @@ fn sample_light_tau(p: vec3<f32>) -> f32 {
 // Extinction from a chosen level at an already-wrapped point.
 fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
     if (NESTED && in_nest) {
-        return sample_level(nest_vol, q, u.nest_bmin.xyz, u.nest_bmax.xyz,
+        return sample_level(nest_vol, q, u.nest_bmin, u.nest_bmax,
                             false);
     }
-    return sample_level(vol, q, u.bmin.xyz, u.bmax.xyz, PERIODIC_DOMAIN);
+    return sample_level(vol, q, u.bmin, u.bmax, PERIODIC_DOMAIN);
 }
 
 // Extinction at a world point: the finest level that covers it.
@@ -187,11 +187,11 @@ fn sample_level_at(p: vec3<f32>) -> LevelSample {
     s.in_nest = nested_here;
     s.sigma = sample_sigma_pinned(q, nested_here);
     if (NESTED && nested_here) {
-        s.dt_view = u.nest_bmin.w;
-        s.dt_light = u.nest_bmax.w;
+        s.dt_view = u.nest_dt_view;
+        s.dt_light = u.nest_dt_light;
     } else {
-        s.dt_view = u.bmin.w;
-        s.dt_light = u.bmax.w;
+        s.dt_view = u.dt_view;
+        s.dt_light = u.dt_light;
     }
     return s;
 }
@@ -282,7 +282,7 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
         return vec4<f32>(fine_grad, fine_conf);
     }
 
-    let extent = u.bmax.xyz - u.bmin.xyz;
+    let extent = u.bmax - u.bmin;
 
     // The coarse radius. Under the cone stencil it is
     // sample_distance_m * tan(theta): a fixed angle, so the normal is taken

@@ -1,6 +1,6 @@
 // The tone map, linear radiance to display values, and its inverse.
 //
-// With e = exposure * radiance, w the white point (u.flags.w) and
+// With e = exposure * radiance, w the white point (u.white_point) and
 // y = luminance(e), the curve is extended Reinhard,
 //
 //     per channel:        m = e (1 + e / w^2) / (1 + e)
@@ -10,12 +10,12 @@
 //
 //     display = 0.5 + c (clamp(m, 0, 1)^(1 / gamma) - 0.5),
 //
-// c the contrast (u.ocean_realism_b.w; 1.0 is the identity). The white point
+// c the contrast (u.contrast; 1.0 is the identity). The white point
 // is the exposed radiance that displays as 1.0: plain Reinhard e / (1 + e)
 // only reaches 1 at infinity, which holds sunlit cloud faces under a grey
 // ceiling. For e << w^2 the curve is plain Reinhard.
 //
-// The gamma (u.periodic.w) is the only display encoding there is. The
+// The gamma (u.gamma) is the only display encoding there is. The
 // output target must be a plain unorm format, never an sRGB one, or the
 // encoding would be applied twice.
 
@@ -27,7 +27,7 @@ const TONE_MAP_SHOULDER: f32 = 0.35;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
-    let wp = u.flags.w;
+    let wp = u.white_point;
     let w2 = wp * wp;
     let per_channel = exposed * (1.0 + exposed / w2) / (1.0 + exposed);
     let y = dot(exposed, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -36,7 +36,7 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let mapped = mix(per_channel, chroma_preserving, k);
     let encoded = pow(clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0)),
                       vec3<f32>(1.0 / gamma));
-    let c = u.ocean_realism_b.w;
+    let c = u.contrast;
     return clamp(vec3<f32>(0.5) + (encoded - vec3<f32>(0.5)) * c,
                  vec3<f32>(0.0), vec3<f32>(1.0));
 }
@@ -58,11 +58,11 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
 // is the one y that reproduces itself. It is found by bisection, because a
 // fixed-point iteration on y can oscillate there.
 fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
-    let c = u.ocean_realism_b.w;
+    let c = u.contrast;
     let encoded = clamp((display - vec3<f32>(0.5)) / c + vec3<f32>(0.5),
                         vec3<f32>(0.0), vec3<f32>(1.0));
     let m = pow(encoded, vec3<f32>(gamma));
-    let w2 = u.flags.w * u.flags.w;
+    let w2 = u.white_point * u.white_point;
     let lum = vec3<f32>(0.2126, 0.7152, 0.0722);
     let e0 = tone_unmap_channels(m, 0.0, 1.0, w2);
     if (dot(e0, lum) < 1.0) {

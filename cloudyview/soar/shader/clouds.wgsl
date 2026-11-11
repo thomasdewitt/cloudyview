@@ -380,7 +380,7 @@ const PERIODIC_MAX_RANGE_M: f32 = 4.0e5;
 const MAX_VIEW_STEPS_PERIODIC: i32 = 4096;
 
 // Light-transfer split: a low-sun adjustment whose strength
-// (u.ambient_tint.w) the host fades with sun elevation. The beam terms are
+// (u.light_split) the host fades with sun elevation. The beam terms are
 // scaled by 1 + strength * DIRECT_BOOST * exp(-tau_sun), and a skylight fill
 // of strength * SHADOW_SKYLIGHT is added in deep shadow.
 const LIGHT_TRANSFER_DIRECT_BOOST: f32 = 0.25;
@@ -446,7 +446,7 @@ fn step_dt_for_sigma(sigma: f32, dt_max: f32) -> f32 {
 // LIGHT_TAU_CUTOFF.
 //
 // `dt_floor` (m) coarsens the quadrature for distant samples without
-// shortening its range: callers pass view_distance * u.periodic.y. At 0 the
+// shortening its range: callers pass view_distance * u.light_lod_tan. At 0 the
 // step is the level's own.
 //
 // `jit` in [0, 1) shifts the whole quadrature grid by a fraction of a step.
@@ -492,7 +492,7 @@ fn light_march_tau(p: vec3<f32>, sun: vec3<f32>, dt_floor: f32,
     // here. A shadow ray that starts inside the nest is offset by more than
     // one of its own steps, which still decorrelates it and still
     // integrates the same range.
-    let dt_fine = u.bmax.w;
+    let dt_fine = u.dt_light;
     let dt_nominal = max(dt_fine, dt_floor);
     let lod_fade = clamp(
         (dt_floor / max(dt_fine, 1e-6) - 1.0) / (LIGHT_JITTER_LOD_FULL - 1.0),
@@ -557,8 +557,8 @@ const DEEP_FILL_SUN_FRACTION: f32 = 0.15;
 const LUMA_WEIGHTS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722); // Rec. 709
 
 fn deep_fill_tint(ambient: vec3<f32>) -> vec3<f32> {
-    let sun_luma = max(dot(u.cloud_sun.xyz, LUMA_WEIGHTS), 1e-6);
-    let sun_chroma = u.cloud_sun.xyz / sun_luma;
+    let sun_luma = max(dot(u.cloud_sun, LUMA_WEIGHTS), 1e-6);
+    let sun_chroma = u.cloud_sun / sun_luma;
     // Both chromaticities have unit luma, so their mix does too and the
     // result has exactly the ambient's luminance.
     let amb_luma = max(dot(ambient, LUMA_WEIGHTS), 1e-6);
@@ -597,14 +597,14 @@ fn sky_probe_transmittance(p: vec3<f32>, g: f32, jit: f32) -> f32 {
 fn premarch_tau_ahead(origin: vec3<f32>, dir: vec3<f32>,
                       t0: f32, t1: f32, jit: f32) -> f32 {
     var tau = 0.0;
-    let dt_base = u.bmin.w * AHEAD_STEP_SCALE;
+    let dt_base = u.dt_view * AHEAD_STEP_SCALE;
     var t = t0 + clamp(jit, 0.0, 1.0) * dt_base;
     for (var i: i32 = 0; i < AHEAD_MAX_STEPS; i = i + 1) {
         if (t >= t1 || tau > AHEAD_TAU_CAP) {
             break;
         }
         let s = sample_level_at(origin + t * dir);
-        var dt = max(s.dt_view * AHEAD_STEP_SCALE, t * u.periodic.z);
+        var dt = max(s.dt_view * AHEAD_STEP_SCALE, t * u.view_lod_tan);
         if (t + dt > t1) {
             dt = t1 - t;
         }
@@ -628,10 +628,10 @@ fn periodic_march_cap(cam_z: f32, dir: vec3<f32>) -> f32 {
     if (h_len > 1e-8) {
         cap = PERIODIC_MAX_RANGE_M / h_len;
     }
-    let aerial_strength = u.sky_horizon.w;
+    let aerial_strength = u.aerial_strength;
     if (aerial_strength > 0.0) {
-        let aer_beta0 = u.sky_bloom.w;
-        let aer_h = u.sky_disc.w;
+        let aer_beta0 = u.haze_beta0;
+        let aer_h = u.haze_scale_height;
         let z0 = max(cam_z, 0.0);
         let mu = dir.z;
         let tau_cap = PERIODIC_AIR_TAU_CUTOFF / aerial_strength;

@@ -1,9 +1,9 @@
-// The sea: an opaque plane at z = u.ocean.x whose surface is a static wave
+// The sea: an opaque plane at z = u.surface.x whose surface is a static wave
 // field. There are two shaders. ocean_shade is the simple one: a mirror of a
 // fixed sky gradient over a Lambertian water body. ocean_shade_realism
 // reflects the rendered sky over the unresolved slope distribution, adds a
 // GGX sun glint drawn as glitter, and hazes the water with distance.
-// ocean_shade_dispatch picks between them by u.ocean_realism_a.x.
+// ocean_shade_dispatch picks between them by u.ocean_realism.
 
 // ocean_shade: the fraction of its brightness the water keeps in full cloud
 // shadow.
@@ -74,7 +74,7 @@ fn fif_slope_variance_removed(lod: f32) -> f32 {
 // centre at i cells.
 fn ocean_normal_mip_sample(world_xy: vec2<f32>, level: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, i32(level)));
-    let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
+    let coord = (world_xy - u.surface_offset) / u.tile_extent
         + 0.5 / dims;
     return textureSampleLevel(ocean_normals, ocean_samp, coord, level).rgb;
 }
@@ -82,7 +82,7 @@ fn ocean_normal_mip_sample(world_xy: vec2<f32>, level: f32) -> vec3<f32> {
 // The footprint's mean normal at a fractional mip: the two levels blended.
 fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let level0 = floor(lod);
-    let level1 = min(level0 + 1.0, u.ocean_params.w);
+    let level1 = min(level0 + 1.0, u.tile_max_lod);
     let f = lod - level0;
     var n = ocean_normal_mip_sample(world_xy, level0);
     if (level1 > level0 && f > 0.0) {
@@ -210,15 +210,15 @@ fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
 fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
     let pixel_span = max(t_hit, 0.0) * true_pixel_angle();
     let ocean_span = pixel_span / max(abs(dir.z), 0.03);
-    let texel_span = max(ocean_span / u.ocean_params.x, 1.0);
-    return clamp(log2(texel_span), 0.0, u.ocean_params.w);
+    let texel_span = max(ocean_span / u.tile_cell, 1.0);
+    return clamp(log2(texel_span), 0.0, u.tile_max_lod);
 }
 
 // ocean_shade's normal: the tile through the sampler's own trilinear mip
 // filter.
 fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, 0));
-    let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
+    let coord = (world_xy - u.surface_offset) / u.tile_extent
         + 0.5 / dims;
     let n = textureSampleLevel(ocean_normals, ocean_samp, coord, lod).rgb;
     // @domain: every texel of every mip has z >= 0.923 (the tile's bytes), and filtering is convex
@@ -227,16 +227,16 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
 
 // The simple sea. A mirror of ocean_reflection_sky weighted by Schlick's
 // Fresnel term, 0.02 + 0.98 (1 - cos_i)^5, over a Lambertian body of
-// reflectance u.ocean.yzw lit by the sun through the cloud; the sum is
+// reflectance u.surface.yzw lit by the sun through the cloud; the sum is
 // dimmed toward OCEAN_SHADOW_FLOOR in cloud shadow. `sun_shadow` is the
 // direction drawn on the solar disc and serves only the cloud-shadow march;
 // every shading term keeps the disc centre. The mip level is used only with
-// march jitter on (u.cam_up.w); without it the tile is read at mip 0.
+// march jitter on (u.march_jitter); without it the tile is read at mip 0.
 fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                sun_shadow: vec3<f32>, t_hit: f32,
                jit: f32) -> vec3<f32> {
     var normal_lod = 0.0;
-    if (u.cam_up.w > 0.5) {
+    if (u.march_jitter > 0.5) {
         normal_lod = ocean_normal_lod(t_hit, dir);
     }
     let n = ocean_wave_normal(hit.xy, normal_lod);
@@ -253,12 +253,12 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let om2 = one_minus * one_minus;
     let fresnel = 0.02 + 0.98 * om2 * om2 * one_minus;
 
-    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.periodic.y,
+    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.light_lod_tan,
                                     jit);
     let t_sun_ocean = exp(-tau_ocean);
     let cos_sun_n = max(0.0, dot(sun, n));
     let diff_irr = t_sun_ocean * cos_sun_n * 0.3183098861837907;
-    let diffuse = diff_irr * SUN_COLOR * u.ocean.yzw;
+    let diffuse = diff_irr * SUN_COLOR * u.surface.yzw;
 
     let lit = fresnel * sky + (1.0 - fresnel) * diffuse;
     let t_eff = OCEAN_SHADOW_FLOOR + (1.0 - OCEAN_SHADOW_FLOOR) * t_sun_ocean;
@@ -283,8 +283,8 @@ fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
     t = 1.0 - one_minus * one_minus * one_minus;
     let legacy = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
     let rendered = sky_radiance(vec3<f32>(dir.xy, max(dir.z, 0.0)), sun,
-                                u.sky_horizon.xyz, u.sky_bloom.xyz,
-                                vec3<f32>(0.0), u.cloud_sun.w);
+                                u.sky_horizon, u.sky_bloom,
+                                vec3<f32>(0.0), u.low_sun_sky);
     var col = mix(rendered, legacy, legacy_glint_weight);
     let cos_rs = dot(dir, sun);
     if (cos_rs > 0.0 && legacy_glint_weight > 0.0) {
@@ -352,13 +352,13 @@ fn ocean_sky_reflection(dir: vec3<f32>, sun: vec3<f32>, slope: vec2<f32>,
 fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                        sun_shadow: vec3<f32>, t_hit: f32,
                        jit: f32) -> vec3<f32> {
-    let ocean_realism = u.ocean_realism_a.x;
-    let ocean_mip_bias = u.ocean_realism_a.y;
-    let glint_strength = u.ocean_realism_a.z;
-    let glint_roughness = u.ocean_realism_a.w;
-    let slope_resolved_fraction = clamp(u.ocean_realism_b.x, 0.0, 1.0);
-    let haze_beta0 = u.ocean_realism_b.y;
-    let sky_shadow_floor = u.ocean_realism_b.z;
+    let ocean_realism = u.ocean_realism;
+    let ocean_mip_bias = u.ocean_mip_bias;
+    let glint_strength = u.glint_strength;
+    let glint_roughness = u.glint_roughness;
+    let slope_resolved_fraction = clamp(u.slope_resolved_fraction, 0.0, 1.0);
+    let haze_beta0 = u.ocean_haze_beta;
+    let sky_shadow_floor = u.sky_shadow_floor;
 
     // One pixel's angular span projected onto the water. The grazing factor
     // stretches it along the view and takes the horizon to coarser mips.
@@ -366,9 +366,9 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let pixel_angular_span = true_pixel_angle();
     let across = t_hit * pixel_angular_span;
     let along = across / grazing;
-    let texel_span = max(along / u.ocean_params.x, 1.0);
+    let texel_span = max(along / u.tile_cell, 1.0);
     var lod = log2(texel_span) + ocean_mip_bias;
-    lod = clamp(lod, 0.0, u.ocean_params.w);
+    lod = clamp(lod, 0.0, u.tile_max_lod);
     // The mip level scales with the realism gate, so intermediate gate
     // values are a continuous range.
     lod = lod * ocean_realism;
@@ -394,8 +394,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     // @domain: side >= SEA_GLITTER_FACET_M > 0 (the max above)
     let level = ceil(log2(side / SEA_GLITTER_FACET_M));
     let cell = SEA_GLITTER_FACET_M * exp2(level);
-    let p = hit.xy - u.surface_offset.xy;
-    let q = p - u.ocean_params.y * floor(p / u.ocean_params.y);
+    let p = hit.xy - u.surface_offset;
+    let q = p - u.tile_extent * floor(p / u.tile_extent);
     let glitter_seed = pcg2d(vec2<u32>(floor(q / cell))
                              + vec2<u32>(u32(level) * 40503u, 0u));
     let glitter_facets = exp2(2.0 * level);
@@ -416,7 +416,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
         sqrt(0.5 * slope_resolved_fraction * sea_variance),
         legacy_glint_weight);
 
-    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.periodic.y,
+    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.light_lod_tan,
                                     jit);
     let t_sun_ocean = exp(-tau_ocean);
 
@@ -477,7 +477,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                         / lambda;
                     sparkle = 1.0 + core * (draw - 1.0);
                 }
-                glint = spec * sparkle * u.cloud_sun.xyz;
+                glint = spec * sparkle * u.cloud_sun;
             }
         }
     }
@@ -488,7 +488,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let diffuse_partition = 1.0 - energy_weight * sun_fresnel;
     let diff_irr = t_sun_ocean * reflection.transmitted_n_dot_l
         * 0.3183098861837907 * diffuse_partition;
-    let diffuse = diff_irr * SUN_COLOR * u.ocean.yzw;
+    let diffuse = diff_irr * SUN_COLOR * u.surface.yzw;
 
     // Cloud shadow, per term. The sun terms already carry t_sun_ocean. The
     // sky reflection dims only to sky_shadow_floor: under a cloud the water
@@ -505,8 +505,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
         let haze = 1.0 - exp(-haze_tau);
         let haze_col = sky_radiance(
             vec3<f32>(h, 0.0), sun,
-            u.sky_horizon.xyz, u.sky_bloom.xyz, vec3<f32>(0.0),
-            u.cloud_sun.w
+            u.sky_horizon, u.sky_bloom, vec3<f32>(0.0),
+            u.low_sun_sky
         );
         ol = mix(ol, haze_col, haze);
     }
@@ -519,7 +519,7 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                         sun_shadow: vec3<f32>, t_hit: f32,
                         jit: f32) -> vec3<f32> {
-    if (u.ocean_realism_a.x == 0.0) {
+    if (u.ocean_realism == 0.0) {
         return ocean_shade(hit, dir, sun, sun_shadow, t_hit, jit);
     }
     return ocean_shade_realism(hit, dir, sun, sun_shadow, t_hit, jit);
