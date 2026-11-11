@@ -35,9 +35,9 @@ substitution.
 
 ## Why fingerprinted filenames
 
-Every module, shader and stylesheet is emitted as `name.<hash8>.ext`, with the
-hash covering the file *and its whole transitive dependency set*, so changing
-`constants.js` renames every module that reaches it. The import graph is
+Every module, overlay shader and stylesheet is emitted as `name.<hash8>.ext`,
+with the hash covering the file *and its whole transitive dependency set*, so
+changing `constants.js` renames every module that reaches it. The import graph is
 rewritten to match. Edge caching and the zone's 4 h browser TTL then cannot
 serve a stale mix: a changed file is a new URL, an unchanged one keeps its
 name and stays cached.
@@ -46,7 +46,18 @@ name and stays cached.
 URL. It is the only file that must revalidate, and it is 2 kB.
 
 Left alone for the same reason in reverse — never imported, fetched by
-constructed paths, effectively immutable: `vendor/`, `ocean/`, `demos/`.
+constructed paths, effectively immutable: `vendor/`, `ocean/`, `city/`,
+`demos/`.
+
+The renderer's shader (`shader/`) is the one thing fetched by constructed
+paths that does change. Its files keep their names, and staging writes a hash
+of all of them into `shader/manifest.json` as `version`. The app fetches the
+manifest with revalidation on every load and appends `?v=<version>` to each
+shader file it then fetches (`shader.js`), so a new shader is a new set of
+URLs and the files of two builds cannot mix. This was checked by booting a
+staged build locally; it has not yet been through Cloudflare, so the first
+deploy after 2026-11-11 is worth one look at the Network tab for the
+`?v=` on `shader/*.wgsl`.
 
 The tool refuses to emit a tree it cannot vouch for. It fails on a reference
 it cannot resolve, a renamed file still named somewhere by its old name, a

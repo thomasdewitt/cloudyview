@@ -1,82 +1,93 @@
 # CLAUDE.md - CloudyView Project Instructions
 
-## Python Environment
+`docs/architecture.md` says how the project is put together. Read it first.
 
-This project uses **uv** for dependency management. A `.venv` and `uv.lock` are already present.
+## Python environment
 
-When running Python commands via Bash, use `uv run`:
+This project uses **uv**. A `.venv` and `uv.lock` are present.
 
 ```bash
-uv run python your_command_here
 uv run witness cloud.nc
+uv run --extra dev python -m pytest tests/ -v
 ```
 
-For commands that need optional dependencies (tests):
+The `dev` extra carries pytest and what the tile bakers under `tools/` need
+(scaleinvariance).
+
+## What is here
+
+- `glimpse <file.nc>`: quick 2D visual-albedo top view (matplotlib).
+- `witness <file.nc>`: volumetric ray-marched render on the GPU, through wgpu.
+- `behold <file.nc> --cpu|--gpu [quality]`: path-traced render (Mitsuba 3).
+- `soar <track.json>`: re-render a flight recorded in the browser app into an
+  mp4 (`cloudyview/track.py`; frames piped to ffmpeg).
+- Soar itself, the real-time fly-through, is a browser app under `web/soar/`:
+  WebGPU, no build step, no Python at run time.
+
+witness and soar are one renderer: the WGSL under `cloudyview/soar/shader/`
+(`web/soar/shader` is a symlink to it), compiled by a Python host
+(`cloudyview/soar/renderer.py`) and a JavaScript host
+(`web/soar/renderer.js`). A change to the shader or to the uniform block is
+a change to both.
+
+Library API: `cv.load()` gives a `CloudField`; `cv.Camera`;
+`cv.glimpse/witness/behold` return arrays. Examples in the README.
+
+## Geometry is exact; lighting is tuned
+
+In witness and soar, where things are and what occludes what comes straight
+from the field, the camera and the sun. Do not trade that for speed or looks.
+Brightness and colour are approximations tuned by eye, and are fair game.
+
+## behold is slow
+
+Deep path budgets are catastrophically slow on real clouds: with the old
+depths (max_depth=64+, rr_depth=16+), medium and high renders of reasonable
+cloud fields were on the order of months. The presets min to high therefore
+truncate at max_depth<=8; only `max` keeps deep budgets. Do not quote or
+estimate behold render times.
+
+## Running soar locally
+
+```bash
+python3 tools/dev_server.py        # http://localhost:8765/soar/
+```
+
+The demo set (`web/soar/demos`) is not in this repository; it is a symlink
+into the website's working tree. Without it the app still opens a file you
+drop on it.
+
+## Checking a change
 
 ```bash
 uv run --extra dev python -m pytest tests/ -v
 ```
 
-## Project Overview
+The whole suite takes several minutes on a laptop GPU. When reading its
+result, look at every `FAILED` line, not the tail.
 
-CloudyView is a 3D cloud field visualization toolkit with radiative transfer capabilities. It uses Mitsuba 3 for Monte Carlo path tracing with physically-based sky models and Mie scattering phase functions.
+For a change to the shader or a host that should not move pixels:
 
-## Key Commands
+- `tools/soar_shader_ab.py --save DIR` before, `--against DIR` after: a fixed
+  set of views in raw float, compared exactly.
+- `node tools/tint_check.mjs`: compiles every shader variant in Chrome, whose
+  WGSL compiler is stricter than wgpu's. Needs a Chrome started with
+  `--remote-debugging-port=9333`.
+- `node tools/pinned_still.mjs`: stills from the browser with every input
+  pinned, for a before/after hash.
 
-- `behold <file.nc> --cpu|--gpu [quality]` - Photorealistic path-traced render
-  (Mitsuba 3). Deep path budgets are catastrophically slow on real clouds:
-  with the old depths (max_depth=64+, rr_depth=16+), medium and high renders
-  of reasonable cloud fields were on the order of MONTHS (Thomas, 2026-08-18:
-  "I am seeing months for medium and high, order of magnitude"). The presets
-  min–high therefore truncate at max_depth≤8; only 'max' keeps deep budgets.
-  Never quote or estimate behold render times; if depth settings come up,
-  assume intractability until Thomas's own timings say otherwise.
-- `glimpse <file.nc>` - Quick 2D visual-albedo top view
-- `witness <file.nc>` - Volumetric ray-marched render. Drives the same
-  `cloudyview/soar/raymarch.wgsl` the browser does (web/soar/raymarch.wgsl is
-  a symlink to it), via wgpu, so there is one renderer core and one
-  definition of the look. Needs a GPU.
-- `soar <track.json>` - Re-render a flight track recorded in the browser
-  app into an mp4 (`cloudyview/track.py`; frames piped to ffmpeg). Every
-  setting comes from the track's header; `--field` when the NetCDF is not
-  where the header says. The resampler is a port of `web/soar/track.js`,
-  pinned against it by `tests/test_track_resample.py`.
+`tests/reference_images/` holds golden images for witness/soar (eight views)
+and behold. They must be baked on real GPU hardware; the generator refuses a
+software rasterizer. Re-bake one set with `tests/generate_references.py
+--target soar|behold`, and only when the look is meant to have changed.
 
-Soar, the real-time fly-through, is a browser app under `web/soar/` — WebGPU, no
-Python at run time. Serve the `web/` directory and open `soar/`:
+## Deploying
 
-```bash
-python3 -m http.server 8765 --directory web
-```
+`tools/stage_deploy.py --clean` writes `dist/soar/`; `docs/deploy.md` has the
+rest. The site itself is deployed by Thomas from the website repository.
 
-`tools/export_web_assets.py` regenerates its binary assets (the FIF ocean tile
-and the demo field).
+## Data
 
-Library API (preferred): `cv.load()` → `CloudField`, `cv.Camera`, `cv.glimpse/witness/behold` return arrays. See `docs/architecture.md` for the design spec and README for examples.
-
-## Running Tests
-
-```bash
-uv run --extra dev python -m pytest tests/ -v
-```
-
-To generate reference images for render tests:
-
-```bash
-uv run python tests/generate_references.py
-```
-
-Two golden-image sets guard the renderers. `behold` covers the Mitsuba path
-tracer; `soar` covers the witness/soar WGSL renderer via the eight frozen
-judge views of the lighting loop, and so pins the browser's look too. The
-soar set must be baked on real GPU hardware — the generator refuses a
-software rasterizer rather than falling back to one, and the test skips when
-no usable adapter is present. Re-bake one set with `--target soar` or
-`--target behold`; see `tests/conftest.py` for the views and for how the
-tolerances were measured.
-
-## Data Files
-
-Test data is stored in `data/`:
-- `TWPICE_subvolume_256x256_5km.nc` - Real cloud data from TWPICE campaign
-- `QC_FIF_Square_512,512,256.nc` - Synthetic FIF cloud field
+`data/` holds test fields (`TWPICE_subvolume_*.nc`, real cloud from the
+TWP-ICE campaign) and the ice scattering models behold uses. The demo
+sources, when present, are in `data/demos/`.

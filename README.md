@@ -6,7 +6,7 @@ A toolkit for 3D cloud field visualization with optical depth calculations and M
 
 Visit [thomasddewitt.com/soar](https://thomasddewitt.com/soar), open your NetCDF file containing cloud condensate, adjust quality and time of day, and render images and videos. Soar uses the `witness` renderer, described below.
 
-![Witness render of a STEAM cloud field, looking into the sun](https://raw.githubusercontent.com/thomasdewitt/cloudyview/master/docs/witness_small_c002_s0100_into_sun.png)
+![Witness render of a STEAM cloud field, looking into the sun](https://raw.githubusercontent.com/thomasdewitt/cloudyview/main/docs/witness_small_c002_s0100_into_sun.png)
 
 ## Programmatic rendering: Overview
 
@@ -48,9 +48,8 @@ witness example_cloud.nc
 
 Generates a volumetric ray-marched render with multi-scattering, procedural sky, and ocean surface.
 
-Quality presets (positional argument; image size only): `min` 150×100,
-`low` 300×200, `medium` 600×400 (default), `high` 1600×1200.
-`--size W H` overrides the preset.
+`--size W H` sets the image size (default 600×400). `--quality` renders as
+the app's capture at that tier (`minimal`, `low`, `medium`, `high`, `max`).
 
 Options:
 
@@ -67,7 +66,7 @@ Options:
 | `--gamma`                 | `1.66`       | Tone-map gamma                                                                |
 | `--white-point`           | `15.0`       | Extended-Reinhard white point: the exposed radiance mapping to 1.0            |
 | `--contrast`              | `1.0`        | Display contrast about mid-grey, applied after the gamma encode               |
-| `--haze`                  | `1.0`        | Aerosol amount, 0 to 2                                                        |
+| `--haze`                  | `1.0`        | Aerosol amount, as soar's haze slider: -0.22 (clearest) to 2.5                |
 | `--haze-height-dependent` | off          | Thin the haze with height on a 2500 m scale height                            |
 | `--lod`                   | `0.5`        | Angular level of detail; smaller is finer and slower                          |
 | `--periodic`              | off          | Wrap the domain in x and y, as soar does for LES fields                       |
@@ -162,10 +161,11 @@ pip install cloudyview            # glimpse and witness
 pip install 'cloudyview[behold]'  # + Mitsuba 3 for path-traced renders
 ```
 
-`witness` needs a GPU (WebGPU via wgpu-py). The soar shader and ocean tiles
-ship inside the package (`cloudyview/soar/`); the web app reaches the same
-files through symlinks under `web/soar/`, so the browser and the Python host
-always share one renderer core.
+`witness` needs a GPU (WebGPU via wgpu-py; Metal on a Mac, Vulkan or D3D12
+elsewhere). The soar shader and the ocean and city tiles ship inside the
+package (`cloudyview/soar/`); the web app reaches the same files through
+symlinks under `web/soar/`, so the browser and the Python host compile one
+shader.
 
 ### Development install
 
@@ -218,15 +218,20 @@ Notes:
 - The functions `cv.glimpse` / `cv.witness` / `cv.behold` shadow the
   same-named submodules on the package namespace; the modules remain
   importable directly (e.g. `from cloudyview.witness import NestedLevel`).
+- A finer field nested inside a coarser one renders as
+  `cv.witness(field, camera, nest=fine_field)`.
+- `cloudyview.image.read_metadata("still.png")` returns what soar embedded
+  in a still: the source file, camera, sun and the command that reproduces
+  it.
 
 ## Input Data Requirements
 
 NetCDF files must contain:
 
-- **Liquid water variable** (required): One of `qc`, `ql`, `LWC`, `cloud_liquid_water_mixing_ratio`, `liquid_water_content`, `q_liquid`, or `lwc`
-- **Ice water variable** (optional): One of `qi`, `qice`, `IWC`, `cloud_ice_mixing_ratio`, `ice_water_content`, `q_ice`, or `iwc`
-- **Spatial dimensions**: Must be 3D (e.g., x, y, z or lon, lat, height)
-- **Temporal dimension**: Must contain exactly one timestep
+- **Liquid water variable** (required): One of `qc`, `QC`, `ql`, `QL`, `LWC`, `clw`, `cloud_liquid_water_mixing_ratio`, `liquid_water_content`, `q_liquid`, or `lwc`
+- **Ice water variable** (optional): One of `qi`, `QI`, `qice`, `QICE`, `IWC`, `cli`, `cloud_ice_mixing_ratio`, `ice_water_content`, `q_ice`, or `iwc`
+- **Spatial dimensions**: Must be 3D, with physical x/y/z coordinates
+- **Temporal dimension**: One timestep is rendered; pick it with `--timestep N` on a multi-step file
 
 When autodetection is not enough — non-standard names, variables inside
 NetCDF groups, unusual dimension names — all three commands accept the same
@@ -300,48 +305,16 @@ behold cloud.nc low --gpu
 behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth 32
 ```
 
-## Module Structure
+## Where things are
 
-### Core Modules
-
-- **`io.py`**: NetCDF file handling and data validation
-  
-  - `load_data()`: Load NetCDF file with xarray
-  - `infer_liquid_water()`: Auto-detect liquid water variable
-  - `infer_ice_water()`: Auto-detect ice water variable
-  - `load_and_validate()`: Complete data loading with validation
-
-- **`optical_depth.py`**: Optical depth calculations
-  
-  - `compute_extinction_field()`: Compute extinction coefficient from water content
-  - Supports variable vertical spacing
-
-- **`domain.py`**: Shared domain geometry
-  
-  - `DomainGeometry`: Dataclass with physical dimensions and aspect ratios
-  - `compute_domain_geometry()`: Factory from coordinate arrays (handles non-uniform dz)
-
-- **`config.py`**: Built-in configuration defaults
-  
-  - `get_witness_config()`: Get witness configuration
-  - `get_behold_config()`: Get behold configuration
-
-- **`basic_render.py`**: Matplotlib-based visualization
-  
-  - Column optical depth visualization
-
-- **`radiative_transfer.py`**: Mitsuba 3 Monte Carlo path tracing
-  
-  - `load_mie_phase_tables()`: Load Mie scattering phase functions
-  - `render_view()`: Render a single RGB view with Mitsuba
-  - `look_at_world_up()`: Camera transform helper
-  - Physically-based Preetham sunsky model
-
-### CLI Scripts
-
-- **`glimpse.py`**: Entry point for quick 2D visualization
-- **`witness.py`**: Entry point for volumetric ray marching
-- **`behold.py`**: Entry point for Mitsuba photorealistic rendering
+- `cloudyview/` is the Python package: loading (`field.py`, `io.py`), the
+  three renderers (`glimpse.py`, `witness.py`, `behold.py`) and `track.py`,
+  which renders a recorded flight (`soar TRACK.json`).
+- `cloudyview/soar/` is the renderer that `witness` and the browser share:
+  the WGSL shader (`shader/`), its surface tiles, and the Python host that
+  drives it through wgpu.
+- `web/soar/` is the browser app.
+- `docs/architecture.md` describes how the pieces fit.
 
 ## Features
 
@@ -354,7 +327,7 @@ behold cloud.nc custom --gpu --size 1024 768 --spp 256 --max-depth 64 --rr-depth
 ### Data Handling
 
 - Automatic variable name inference (tries common naming conventions)
-- Comprehensive validation (checks dimensions, timestep count)
+- Comprehensive validation (checks dimensions, units and coordinates)
 - Support for both liquid and ice water phases
 - Works with different coordinate systems
 - Variable vertical spacing supported

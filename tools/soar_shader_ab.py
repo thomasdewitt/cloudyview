@@ -1,65 +1,44 @@
 #!/usr/bin/env python
-"""Hold two revisions of raymarch.wgsl against each other, in raw float.
+"""Hold two versions of the soar shader against each other, in raw float.
 
-The eight golden images (tests/test_soar_witness_renders.py) are the look
-regression and they compare 8-bit PNGs at RMSE 0.006 / max 0.12 — by their
-own measurement they cannot separate a 3 percent exposure nudge from a
-sampling difference. A change that claims to preserve the image exactly needs
-a sharper instrument than that, and this is it: both revisions compiled on one
-device, the same deterministic frames, the float32 accumulator compared
-without ever passing through 8 bits.
+The golden images (tests/test_soar_witness_renders.py) compare 8-bit PNGs
+with a tolerance, so they cannot tell a 3 percent exposure nudge from a
+sampling difference. This renders a fixed set of views to the float32
+accumulator and compares them exactly. It is the check for a change that
+claims not to move pixels.
 
-    tools/gpulock uv run python tools/soar_shader_ab.py                     # HEAD vs tree
-    tools/gpulock uv run python tools/soar_shader_ab.py --a git:HEAD~3 --b git:HEAD
-    tools/gpulock uv run python tools/soar_shader_ab.py --frames 64 --jitter
-    tools/gpulock uv run python tools/soar_shader_ab.py --periodic off --views repro
-    tools/gpulock uv run python tools/soar_shader_ab.py --tier low --frames 4 --jitter
-    tools/gpulock uv run python tools/soar_shader_ab.py --scene city --frames 4 --jitter
-    tools/gpulock uv run python tools/soar_shader_ab.py --scene nested --frames 4 --jitter
+Before a change, save the views; after it, hold the tree against them:
 
-`--tier` renders with a quality preset's flight sampling and lighting methods
-(step factors, the baked sun-tau cache, the sky probe) rather than the judge
-views' High-style live march, because those are different code paths: every
-tier but Max reads the cache, and a change that is neutral on one can move the
-other. `--scene city` compiles CITY in and renders the night-city harness's
-views under its moon; `--scene nested` binds a synthetic nest (the outer
-field's central box, refined 2x) so the NESTED paths run. A claim of
-bit-identity should be backed by all three scenes, not just the day one.
+    uv run python tools/soar_shader_ab.py --save /tmp/ab
+    uv run python tools/soar_shader_ab.py --against /tmp/ab
 
-One thing to know before reading a result, because it cost an afternoon to
-learn: a difference of order 1e-4 on a handful of channels does NOT
-necessarily mean the two revisions compute different things. They are two
-different programs, and the driver is free to contract `a + b * c` into an FMA
-in one and not the other; on this box that shows up as roughly one channel in
-270000, always in a long accumulation (the forward pre-march's tau, which then
-crosses its own cap at a different step and amplifies). If a change is meant
-to be exactly neutral and lands there instead of at zero, the way to settle it
-is to make the two runs the SAME compilation and vary the data instead.
+or compare with the shader of a second checkout, both under this tree's host
+(only possible while the two shaders take the same uniform block and
+bindings):
 
-Anything larger than that is a real difference and should be explained.
+    uv run python tools/soar_shader_ab.py --a ../other/cloudyview/soar/shader
 
-What this cannot compare: a change that moves the HOSTS as well as the
-shader — a new binding, a new pass, a changed bind-group layout. Both
-revisions run under this tree's one Python host, so the old shader meets the
-new layout and fails validation (the surface pre-pass, 2026-09-23, broke it
-for the city). For those, compare whole browser builds
-(tools/pinned_still.mjs renders pinned stills of each tree in Chrome and
-hashes them byte for byte), or run this tool in each tree with its own host:
-`--save DIR` in the one writes every view's float render there, and
-`--against DIR` in the other renders only its B and holds it against those
-(the desert's removal, 2026-11-09, moved the uniform block and two bindings).
-A tree from before --save existed takes a copy of this file anywhere inside
-it (REPO is found from the file's own path). The run's settings are written
-beside the renders (run.json) and an --against run with others is refused.
+The settings of a --save run are written beside the renders (run.json), and
+an --against run under other settings is refused.
 
-    cp tools/soar_shader_ab.py ../old-tree/temp/ab.py     # if it lacks --save
-    (cd ../old-tree && uv run python temp/ab.py --a tree --b tree --save /tmp/ab-old)
-    uv run python tools/soar_shader_ab.py --b tree --against /tmp/ab-old
+What to cover. `--tier` renders with a quality tier's flight sampling and
+lighting method instead of the judge views' live sun march; every tier but
+Max reads the light cache, and a change that is neutral on one path can move
+the other. `--scene city` renders the night city's views under its moon;
+`--scene nested` binds a synthetic nest so the NESTED paths run; `--periodic
+off` covers the bounded domain. A claim of identity should hold over all of
+them.
+
+Reading a result. Zero is zero. A difference near 1e-4 on a handful of
+channels is one half-float step, and does not have to mean the two shaders
+compute different things: they are two compilations, and the driver may
+contract `a + b * c` into a fused multiply-add in one and not the other.
+Folding a uniform into a constant does this. Anything larger is a real
+difference and should be explained.
 """
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 

@@ -8,8 +8,7 @@ accumulating files").
 
 Numbers are never reused, so a number that is not here is closed. Several
 code comments cite the closed ones — bugs 1, 2, 4, 5, 6, 8 and 12 are named
-in `viewer.js`, `ui.js`, `main.js`, `raymarch.wgsl`, `soar_shader_ab.py` and
-`tests/test_io_overrides.py`. Those comments carry the reasoning themselves;
+in the browser app, the shader and `tests/test_io_overrides.py`. Those comments carry the reasoning themselves;
 the entry behind them is one `git log` away if the full account is wanted.
 
 Entries 1–10, 12, 16, 18 and 19 were removed on 2026-08-15, all closed. 11
@@ -181,7 +180,7 @@ NaN, and a NaN anywhere in the tone map is a black screen.
 
 **Candidate fix landed 2026-08-18, same day:** `circumsolar_amplitude` takes
 `pow(haze / HAZE_ANCHOR, 1.4)`, which is NaN in WGSL for negative haze.
-sky_radiance now clamps its haze read at zero (raymarch.wgsl) — extinction
+sky_radiance now clamps its haze read at zero (shader/sky.wgsl) — extinction
 keeps the sign-preserving negative range, the sky cosmetics hold their
 aerosol-free look below zero. Matters doubly because the high/max tiers now
 DEFAULT to 70 km (aerosol -0.038), on the wrong side of the cliff. Needs
