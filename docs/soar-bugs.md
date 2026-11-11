@@ -163,30 +163,6 @@ it).
 
 ---
 
-## 21. Haze distance past ~70 km blacks the screen
-
-**Status:** open, reported 2026-08-18 on macOS (M1, 8 GB) against the
-quality panel's haze slider. Thomas: *"there is also a bug where beyond
-about 70 km for the haze, the screen goes black."*
-
-Suggestive fact: 70 km is where the aerosol coordinate crosses ZERO —
-`hazeFromEFoldingKm(70) ≈ -0.038`, and the slider deliberately runs past
-haze 0 toward the 200 km Rayleigh end (`HAZE_MIN` in spectral.js is
-negative). So the first suspects are consumers of haze that assume it is
-non-negative: `haze * Math.sqrt(Math.abs(haze))` in aerialBetaPerKm is
-sign-preserving on purpose, but anything downstream taking `pow(haze, x)`,
-`log(haze)`, or a division by a beta that has crossed zero would produce a
-NaN, and a NaN anywhere in the tone map is a black screen.
-
-**Candidate fix landed 2026-08-18, same day:** `circumsolar_amplitude` takes
-`pow(haze / HAZE_ANCHOR, 1.4)`, which is NaN in WGSL for negative haze.
-sky_radiance now clamps its haze read at zero (shader/sky.wgsl) — extinction
-keeps the sign-preserving negative range, the sky cosmetics hold their
-aerosol-free look below zero. Matters doubly because the high/max tiers now
-DEFAULT to 70 km (aerosol -0.038), on the wrong side of the cliff. Needs
-verification on the Mac against the slider's whole clear end; verified here
-only that the shader compiles and the golden views are unchanged.
-
 ## 23. Edge or Chrome on Windows: a ≥2 GiB volume dies at the first slab upload
 
 **Status:** fix pushed 2026-09-13 (`dcabe7b`, branch
