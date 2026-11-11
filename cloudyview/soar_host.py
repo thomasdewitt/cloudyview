@@ -31,6 +31,7 @@ from __future__ import annotations
 import functools
 import math
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -294,6 +295,12 @@ CONTRAST_LIMITS = (0.5, 1.6)
 
 MIN_SUN_ELEVATION_DEG = 0.5
 STILL_ACCUMULATE_FRAMES = 64
+# How long one submitted band of the sample pass should take, in seconds,
+# and how many pixels the first band of a frame covers before anything is
+# known about the scene's cost. See SoarRenderer.render: a single long
+# command buffer is what the macOS GPU watchdog kills.
+SUBMIT_BUDGET_S = 0.25
+INITIAL_BAND_PIXELS = 65536
 
 # --- night, for CITY -------------------------------------------------------
 #
@@ -1177,6 +1184,7 @@ class SoarRenderer:
         self._ocean_tex = self._load_surface_tile()
         self._targets = None
         self._bind_group = None
+        self._band_rows = {}
         self._build_pipelines()
 
     # -- resources ---------------------------------------------------------
@@ -1841,11 +1849,65 @@ class SoarRenderer:
             self.device.queue.submit([enc.finish()])
         return (cx, cy, cz)
 
+    def _draw_banded(self, slot, pipeline, groups, clears, size,
+                     submit_budget_s: float) -> None:
+        """One full-frame fragment pass, drawn in horizontal scissor bands
+        with one command buffer per band, waiting on the device between them.
+
+        `clears` is the pass's attachments as (texture, clear value). The
+        clear is its own submit, so every band loads the target as it stands
+        and keeps the others. The band height aims each submit at
+        `submit_budget_s` from the measured cost of the last one, and is
+        remembered per pass (`slot`) and size, so cheap frames settle to one
+        band per pass.
+        """
+        w, h = size
+        queue = self.device.queue
+        views = [tex.create_view() for tex, _ in clears]
+        enc = self.device.create_command_encoder()
+        enc.begin_render_pass(color_attachments=[
+            {"view": v, "load_op": "clear", "store_op": "store",
+             "clear_value": clear}
+            for v, (_, clear) in zip(views, clears)]).end()
+        queue.submit([enc.finish()])
+        # The first band of a new size is small, so that even a pathological
+        # scene cannot run long before the host knows what it costs.
+        band_rows = self._band_rows.get(
+            (size, slot), max(1, min(h, INITIAL_BAND_PIXELS // max(w, 1))))
+        y = 0
+        while y < h:
+            rows = min(band_rows, h - y)
+            enc = self.device.create_command_encoder()
+            rp = enc.begin_render_pass(color_attachments=[
+                {"view": v, "load_op": "load", "store_op": "store"}
+                for v in views])
+            rp.set_pipeline(pipeline)
+            for g, group in enumerate(groups):
+                rp.set_bind_group(g, group)
+            rp.set_scissor_rect(0, y, w, rows)
+            rp.draw(3)
+            rp.end()
+            t0 = time.perf_counter()
+            queue.submit([enc.finish()])
+            # wgpu-py 0.32's on_submitted_work_done_sync is broken (its C
+            # callback is declared with the wrong arity); a blocking device
+            # poll is what its map_sync waits on.
+            self.device._poll_wait()
+            elapsed = time.perf_counter() - t0
+            y += rows
+            # Never more than doubling: a band of cheap sky says little about
+            # the cloud rows below it.
+            per_row = max(elapsed, 1e-4) / rows
+            band_rows = int(max(1, min(2 * band_rows, h,
+                                       submit_budget_s / per_row)))
+        self._band_rows[(size, slot)] = band_rows
+
     # -- rendering ---------------------------------------------------------
 
     def render(self, state: SceneState, view: ViewState, *,
                frames: int = STILL_ACCUMULATE_FRAMES,
-               lens_dt: Optional[float] = None) -> np.ndarray:
+               lens_dt: Optional[float] = None,
+               submit_budget_s: float = SUBMIT_BUDGET_S) -> np.ndarray:
         """Accumulate `frames` passes at a fixed camera and read the result.
 
         This is the offline path, not the interactive one: the scene key never
@@ -1855,17 +1917,35 @@ class SoarRenderer:
         backwards — all passes jittered, or none — is the likeliest silent
         divergence from the browser.
 
+        Each pass is drawn in horizontal bands, one command buffer per band,
+        and the host waits for each band before submitting the next. That is
+        not an optimisation, it is what keeps the frame on the GPU at all: a
+        4K grazing-sun march is a single fragment draw that can run for tens
+        of seconds, and macOS's GPU watchdog kills any command buffer that
+        runs that long (IOGPUScheduler "eRestartRequest", 2026-09-01, M1 —
+        the restart also discards the WindowServer's work, which is why the
+        machine froze). The killed tiles come back as whatever was in memory,
+        typically NaN. `submit_budget_s` is the wall-clock each band aims
+        for; the band height adapts to it from the measured cost of the last
+        one. The image is identical however it is banded — a fragment knows
+        nothing of the scissor — so this pins nothing about the look.
+
         Returns (h, w, 3) float64 in [0, 1], already tone-mapped by the
         shader. Read back from the float accumulator rather than an 8-bit
-        blit, so nothing is quantised on the way out.
+        blit, so nothing is quantised on the way out. Raises rather than
+        returns if any pixel is non-finite: the shader has no way to produce
+        one, so it is always a frame the GPU did not finish.
         """
         if frames < 1:
             raise ValueError(f"frames must be >= 1; got {frames}.")
+        if not submit_budget_s > 0.0:
+            raise ValueError(f"submit_budget_s must be > 0; got {submit_budget_s}.")
         self._check_scene(state)
         w, h = view.render_size
         targets = self._ensure_targets((w, h), view)
         bind_group = self._ensure_bind_group()
         sample_view = targets["sample"].create_view()
+        queue = self.device.queue
 
         accum_index = 0
         for i in range(frames):
@@ -1874,12 +1954,39 @@ class SoarRenderer:
                                      "subpixel": i >= 1,
                                      "jitter_scale": 1.0})
             u = pack_uniforms(state, pass_view)
-            self.device.queue.write_buffer(self._uniform_buf, 0, u.tobytes())
+            queue.write_buffer(self._uniform_buf, 0, u.tobytes())
             prev_w = 0.0 if i == 0 else i / (i + 1.0)
             samp_w = 1.0 if i == 0 else 1.0 / (i + 1.0)
-            self.device.queue.write_buffer(
+            queue.write_buffer(
                 self._accum_buf, 0,
                 np.array([prev_w, samp_w, 0.0, 0.0], np.float32).tobytes())
+
+            # The surface under this frame's rays, then the march over it:
+            # same uniforms, same frame, same pixels, pass by pass and each
+            # pass band by band.
+            stages = self._surface_stages(targets, view)
+            for k, (pipeline, group1, writes) in enumerate(stages):
+                if isinstance(pipeline, self.wgpu.GPUComputePipeline):
+                    # surface_cs: one dispatch, which writes every pixel.
+                    self._prove_surface_cs(targets, pipeline, bind_group, writes)
+                    enc = self.device.create_command_encoder()
+                    cp = enc.begin_compute_pass()
+                    self._encode_surface_cs(cp, targets, pipeline, bind_group,
+                                            writes)
+                    cp.end()
+                    queue.submit([enc.finish()])
+                    continue
+                self._draw_banded(
+                    k, pipeline,
+                    [bind_group] if group1 is None else [bind_group, group1],
+                    [(tex, (0.0, 0.0, 0.0, 1e30) if j == 0 else (0, 0, 0, 0))
+                     for j, tex in enumerate(writes)],
+                    (w, h), submit_budget_s)
+            self._draw_banded(
+                len(stages), self._ray_pipeline_for(view),
+                [bind_group, targets["surface_group"]],
+                [(targets["sample"], (0.0, 0.0, 0.0, 1.0))],
+                (w, h), submit_budget_s)
 
             prev_tex = targets["accum"][accum_index]
             out_tex = targets["accum"][1 - accum_index]
@@ -1890,12 +1997,7 @@ class SoarRenderer:
                     {"binding": 1, "resource": sample_view},
                     {"binding": 2, "resource": prev_tex.create_view()},
                 ])
-
             enc = self.device.create_command_encoder()
-            # The surface under this frame's rays, then the march over it:
-            # same uniforms, same frame, same pixels, stage by stage.
-            self.encode_frame_passes(enc, targets, view, bind_group)
-
             ap = enc.begin_render_pass(color_attachments=[{
                 "view": out_tex.create_view(), "load_op": "clear",
                 "store_op": "store", "clear_value": (0.0, 0.0, 0.0, 1.0)}])
@@ -1903,15 +2005,24 @@ class SoarRenderer:
             ap.set_bind_group(0, accum_bg)
             ap.draw(3)
             ap.end()
-            self.device.queue.submit([enc.finish()])
+            queue.submit([enc.finish()])
             accum_index = 1 - accum_index
 
         final = targets["accum"][accum_index]
-        if lens_dt is None:
-            # A still: no lens, no extra pass, byte for byte what it was.
-            return self._read_back(final, w, h)
-        return self._read_back(self._lens_pass(state, view, final, lens_dt),
-                               w, h)
+        if lens_dt is not None:
+            final = self._lens_pass(state, view, final, lens_dt)
+        img = self._read_back(final, w, h)
+        bad = ~np.isfinite(img).all(axis=-1)
+        if bad.any():
+            rows = np.flatnonzero(bad.any(axis=1))
+            raise RuntimeError(
+                f"{int(bad.sum())} of {w * h} pixels came back non-finite "
+                f"(rows {rows.min()}-{rows.max()}). The shader cannot produce "
+                "one, so the GPU did not finish this frame — on macOS that is "
+                "the GPU watchdog killing a command buffer (check `log show "
+                "--predicate 'eventMessage CONTAINS \"GPURestart\"'`). Lower "
+                "submit_budget_s, or the resolution.")
+        return img
 
     # --- lens water -----------------------------------------------------------
 

@@ -105,6 +105,23 @@ export const DEFAULT_HAZE_BY_TIER = {
 
 export const DEFAULT_SUN_AZIMUTH = 20.0;
 export const DEFAULT_SUN_ELEVATION = 55.0;
+
+// The lowest sun flight will OPEN at, in degrees above the horizon -- a
+// zenith of 60. It is a performance floor, not a look: a sun a few degrees
+// up makes every ray march the long way through the haze, and a demo lit
+// that way opens slow enough to feel broken on modest hardware (Thomas,
+// 2026-09-01: "sunsets are much slower to fly").
+//
+// It clamps only the STARTING sun, and only upward. A demo's own `sun` is
+// still the light its still was made under and still what the card shows;
+// this raises the hour for the first frame, and the sun stays a control the
+// flyer can drag straight back down. Azimuth is untouched -- elevation is
+// the only thing that costs.
+//
+// As of 2026-09-01 this binds on exactly two demos, both sunsets at 4.5
+// degrees: STEAM stratified cirrus and the coarse marine congestus. The
+// nearest case it does not touch is DYCOMS at 30.5.
+export const MIN_START_SUN_ELEVATION = 30.0;
 export const DEFAULT_EXPOSURE = 4.0;
 export const DEFAULT_G_HG = 0.76;
 export const DEFAULT_AMBIENT_STRENGTH = 0.15;
