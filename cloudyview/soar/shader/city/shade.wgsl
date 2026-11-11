@@ -169,7 +169,7 @@ fn city_uplight_probe_tau(p: vec3<f32>, jit: f32) -> f32 {
 }
 
 // The night sky: gradient, stars, the city's own glow dome at the skyline,
-// and a crescent moon where the sun used to be.
+// and a crescent moon in the day scene's sun direction (u.sun_dir).
 fn night_sky_radiance(dir: vec3<f32>, moon: vec3<f32>) -> vec3<f32> {
     let zc = clamp(dir.z, 0.0, 1.0);
     var col = mix(CITY_NIGHT_HORIZON, CITY_NIGHT_ZENITH, pow(zc, 0.55));

@@ -91,9 +91,9 @@ const cc_manholesteam_WIND: vec2<f32> = vec2<f32>(0.4472136, 0.8944272);
 // follow), wider than the iron (CITY_MH_R) because the steam billows out
 // within a metre. A stack's leaves its own mouth.
 const cc_manholesteam_R0_COVER: f32 = 0.9;
-// The first metre of a cover's plume (Thomas, 2026-11-08: a plume "just on
-// a random bit of street" — its cover was there, buried in the plume's own
-// dense 0.9 m base). Steam leaves through the lid's vent holes and rim gap,
+// The first metre of a cover's plume. A plume dense from its 0.9 m base
+// buries its cover and seems to rise from a random bit of street. Steam
+// leaves through the lid's vent holes and rim gap,
 // so the plume's edge starts at the lid (CITY_MH_R) and relaxes onto the
 // body's radius over NECK_L; and it leaves as hot vapour, near transparent,
 // condensing into the visible plume as it mixes with the cold air — its

@@ -4,14 +4,14 @@
 //
 // The camera can fly down onto the pavement and stop a metre from any of
 // this, so every object is sphere-traced from a real SDF, to wiper-blade
-// detail and no further (Thomas): a hydrant has its bonnet, operating nut,
+// detail and no further (SPEC's detail calibration): a hydrant has its bonnet, operating nut,
 // two hose caps and a pumper cap on their chains; a dumpster has its sloped
 // front, fork pockets, casters, hinge knuckles and two lids, propped or
 // thrown open over the garbage heaped inside; a bag has its knot. No text,
 // no logos, nothing that would be noise at ten metres.
 //
-// LAYOUT. A built cell's sidewalk runs round its plot (THE STREET SURFACE in
-// raymarch.wgsl): CITY_SIDEWALK_W (3 m, 4.5 m on an avenue) from the building
+// LAYOUT. A built cell's sidewalk runs round its plot (THE STREET SURFACE,
+// street.wgsl): CITY_SIDEWALK_W (3 m, 4.5 m on an avenue) from the building
 // line to the kerb line, its top at CITY_KERB_H. Each of the four EDGES whose
 // city_edge_street is true carries two LANES, each a row of slots on a
 // lattice anchored at the cell's corner:

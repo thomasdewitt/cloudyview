@@ -10,9 +10,8 @@
 // should still be a colored vertical line, which is what makes a skyline
 // read as a CITY and not a lit grid.
 //
-// (Balconies and fire escapes used to be drawn here as light on a flat wall;
-// they are the core facade shell's now, in 3D, with their flat twins in
-// city_facade_flat.)
+// (Balconies and fire escapes are not drawn here: they are the core facade
+// shell's, in 3D, with their flat twins in city_facade_flat.)
 //
 // LOD discipline (SPEC rule 3). Every layer states its own mean and blends
 // to it as the pixel footprint grows; nothing switches off. Two subtleties
@@ -27,9 +26,8 @@
 //     view/normal cosine); we have no `dir` here. So our thresholds are on
 //     the un-foreshortened footprint and are set a little conservatively.
 //
-// The composer's namespace rule covers function-local `var` too, so this
-// file is written without mutable locals — which is no loss: every layer is
-// a mask times a color.
+// The file is written without mutable locals, and needs none: every layer
+// is a mask times a color.
 
 // --- Vertical neon signage -------------------------------------------------
 const cc_facadeworks_SIGN_FRAC: u32 = 31u;      // of 256 buildings (~12%)

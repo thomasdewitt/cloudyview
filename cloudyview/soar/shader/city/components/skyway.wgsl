@@ -32,7 +32,7 @@
 // the centreline therefore clears the facades by 8 m on each side BY
 // CONSTRUCTION, at any height — the flat-roof rule in SPEC's "Respect the
 // architecture" is satisfied without a single building test. (Multi-block
-// lots cannot break this either: cloudyview/city_lots.py never lets a lot
+// lots cannot break this either: tools/city_lots.py never lets a lot
 // contain an avenue line, and city_cell clamps growth buds to the plot on
 // avenue edges.)
 //
@@ -76,10 +76,9 @@
 // from the air. The string dashes (radiance 5, warm white, every 9 m along
 // both rail tops, collapsing into a continuous line of the same mean energy
 // once a dash is sub-pixel) are the close read; the deck's own mean radiance
-// is the far one. There is no traffic: the deck carried "frozen traffic",
-// the light of cars painted on the asphalt with no car under it, until
-// Thomas flew it (2026-11): "they dont have a source". Real cars on the
-// decks were the alternative; he chose an empty road.
+// is the far one. There is no traffic: the light of cars painted on the
+// asphalt with no car under it reads as light without a source, so the
+// decks are an empty road.
 //
 // A note on what "bright" can mean here. At exposure 6 the tone map is
 // nearly flat above radiance 1: 0.47 renders at 0.85 display and 1.7 (a
@@ -100,26 +99,11 @@
 // facade 2 km from any route, pays the z clip and six corridor rejects and
 // nothing else.
 //
-// Measured on a 5080 at 200 accumulated passes, 960x540, registry entry on vs
-// off, three interleaved repetitions per camera (interleaved because the box
-// is SHARED and a block of A followed by a block of B measures the drift
-// between them; the numbers below are the minimum of three and are contended
-// regardless, so read them as an upper bound):
-//
-//     sky only   0.860 on / 0.850 off        artery aerial  0.470 / 0.460
-//     on deck    0.350 on / 0.350 off        under deck     0.380 / 0.370
-//
-// That is +0.01 s on 200 passes where it is non-zero at all — 50 microseconds
-// a pass, and exactly one tick of the harness's 10 ms print granularity. The
-// honest reading is that the component's cost is at or below what this rig can
-// measure, not that it is precisely 50 us.
-//
-// One caveat on the last two rows, since it would be easy to quote them as an
-// occlusion win: with skyway disabled those cameras are not looking at the
-// same scene at all — they are parked in mid-air over an empty avenue — so
-// they are not an A/B of anything. An earlier revision of this header claimed
-// a canyon view got twice as FAST with the network, from that same confound.
-// It does not reproduce, and the claim is withdrawn.
+// Timed with the component on and off, over the sky and over an artery from
+// the air, its cost is at or below what a frame timing resolves (about
+// 50 us a pass at 960x540). Cameras on or under a deck give no A/B: with
+// the component off they hang in mid-air over an empty avenue, a different
+// scene, so their timings say nothing about what the network costs or saves.
 
 // --- lattice ---------------------------------------------------------------
 // In blocks, so the network scales with the tile's own cell size.
@@ -164,8 +148,7 @@ const cc_skyway_Z_TOP: f32 = 35.1;    // HIGH_Z + RAIL_H: the component's slab
 const cc_skyway_STR_COLOR: vec3<f32> = vec3<f32>(1.00, 0.85, 0.60);
 // The brief's number. It is also, at this exposure, an unfalsifiable one: the
 // lit face of a rail lands at radiance 3 either way and the tone map has
-// nothing left above 2, so 5 and the 6.5 this file used to carry are the same
-// pixel. The rail is 0.36 m of a 17 m cross-section, so the far-field mean
+// nothing left above 2, so 5 and 6.5 are the same pixel. The rail is 0.36 m of a 17 m cross-section, so the far-field mean
 // does not notice either. Kept at the contract value because deviating from it
 // buys nothing.
 const cc_skyway_STR_RAD: f32 = 5.0;
@@ -185,9 +168,9 @@ const cc_skyway_RAIL_FACE_IN: f32 = 0.60;
 const cc_skyway_RAIL_FACE_OUT: f32 = 0.34;
 const cc_skyway_RAIL_BAND: f32 = 0.35;  // lit depth below the rail top (m)
 // The spill: what the strip throws down the OUTSIDE of the barrier and on
-// down the deck's fascia below it. Without it the side of a deck was near-
-// black from the band to the soffit — a 2.5 m slab with nothing on it once
-// the fascia was drawn at all (Thomas's flights, 2026-11). It falls off
+// down the deck's fascia below it. Without it the side of a deck is near-
+// black from the band to the soffit — a 2.5 m slab with nothing on it. It
+// falls off
 // with depth below the rail top, it is scalloped along the deck under each
 // lamp exactly as the wash on the road is (the same rhythm, and so the same
 // far mean), and an expansion joint breaks it, which is what lets you read
@@ -543,11 +526,11 @@ fn cc_skyway_route(o: vec3<f32>, dir: vec3<f32>, fam: i32, lat_c: f32,
     // The ribbon pieces clip from the z slab's entry, not the corridor's:
     // the deck's fascia and the outer faces of its rails lie ON the
     // corridor's lateral bounds, and a piece whose clip started at ct0 could
-    // never raise its entry there, so it never learned the face it entered
-    // by — and dropped the hit. From outside the corridor the fascia and the
-    // rails' outer faces were not drawn at all; a ray went through to the
-    // deck top or the soffit behind them (found by the collider's mirror
-    // test, 2026-11). The corridor bound still rejects everything else.
+    // never raise its entry there, so it would never learn the face it
+    // entered by and would drop the hit: from outside the corridor the
+    // fascia and the rails' outer faces would not be drawn at all, and a ray
+    // would go through to the deck top or the soffit behind them. The
+    // corridor bound still rejects everything else.
     let raised = fam == 1;
     if (!raised) {
         // Flat from horizon to horizon.

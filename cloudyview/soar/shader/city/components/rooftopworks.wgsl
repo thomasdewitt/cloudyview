@@ -40,9 +40,9 @@
 //      building rather than to the cell: every member cell of a merged
 //      superblock derives the same ring and catches whatever part of it
 //      falls in its own ray segment.
-//   3. PENTHOUSE CROWNS are not here: since 2026-11 the crown is core
-//      massing (raymarch.wgsl city_crown), so a far tower's silhouette no
-//      longer changes at CITY_PROP_RANGE. The same draw places the helipad
+//   3. PENTHOUSE CROWNS are not here: the crown is core massing
+//      (city_crown, facade.wgsl), so a far tower's silhouette does not
+//      change at CITY_PROP_RANGE. The same draw places the helipad
 //      below, and every piece here keeps clear of what it puts on the roof.
 //   4. HELIPADS. On the biggest flat roofs only (a merged superblock, or a
 //      footprint over 60 m): a pad slab 0.3 m proud with four warm corner
@@ -84,7 +84,7 @@
 const cc_rooftopworks_K_MECH: i32 = 600;
 const cc_rooftopworks_K_ACC: i32 = 604;
 const cc_rooftopworks_K_PARAPET: i32 = 608;
-// 609 was the penthouse (core massing since 2026-11: city_crown).
+// 609 is unused: the penthouse is core massing (city_crown).
 const cc_rooftopworks_K_PAD: i32 = 611;
 const cc_rooftopworks_K_PIPE: i32 = 612;
 const cc_rooftopworks_K_UNIT: i32 = 610;
@@ -170,8 +170,7 @@ const cc_rooftopworks_PIPE_FP: f32 = 1.20;
 const cc_rooftopworks_PIPE_FADE: f32 = 0.75;
 
 // --- bulkheads, runs, round tanks, skylights ---------------------------------
-// Thomas, 2026-09: "more roof detail could be added. pipes etc." A roof is
-// not a lid with three boxes on it. The stair comes up through a bulkhead
+// A roof is not a lid with three boxes on it. The stair comes up through a bulkhead
 // with a lamp over its door; pipe racks and ducts run across the deck
 // between the plant; walk-ups carry the round wooden tank on its steel legs
 // (New York's, seen from the Empire State); a low roof often has a field of

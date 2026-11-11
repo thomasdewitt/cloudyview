@@ -1,11 +1,10 @@
 // === CITY GRAFFITI (desert-flora) ===
-// CITY GRAFFITI (2026-11-08)
+// CITY GRAFFITI
 // ===========================================================================
 //
-// Spray paint on the city's surfaces (Thomas: "a really excellent addition
-// perhaps could be graffiti, esp on containers/in industrial areas") —
-// today the industry component's containers, warehouse walls and dock
-// doors (CITY_GRAFFITI_*). What the references show
+// Spray paint on the city's surfaces, starting where it is commonest, on
+// containers and in industrial areas: today the industry component's
+// containers, warehouse walls and dock doors (CITY_GRAFFITI_*). What the references show
 // (temp/references/graffiti, Commons photographs), and so what this draws:
 //
 //   * A REACH BAND. Paint lives from ~0.3 to ~2.5 m above whatever the

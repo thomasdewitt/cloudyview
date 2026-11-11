@@ -33,8 +33,8 @@
 // to a cabin bubble set back from the nose, wheels in cut arches (or a hover
 // plenum and intake scallops, 38% of them), mirror stalks, wiper blades
 // across the base of the windshield, and lamp housings and a nose intake cut
-// as recesses. Detail to wiper-blade level and no further (Thomas,
-// 2026-08-20): door seams, shut lines and a rocker crease are SHADING bands
+// as recesses. Detail to wiper-blade level and no further (SPEC's detail
+// calibration): door seams, shut lines and a rocker crease are SHADING bands
 // in the hull's own frame, which is where panel lines belong — no badges, no
 // text, nothing that would be noise at 10 m.
 //
@@ -113,12 +113,6 @@ const cc_streetlife_MAST_EDGE: f32 = 0.105;
 // on the one kerb city_park_side picks on a 6 m minor carriageway. The lamps
 // stand on the sidewalk just inboard of that kerb, so a parked car is always
 // in the brightest part of its pool.
-//
-// (Until 2026-09-23 the lane was set PARK_LANE outboard of the lamp line and
-// required 1.6 m of clearance to the plot edge. The lamp-inset fix of
-// 2026-08-20 put the lamp line 2.5 m from the plot edge on every street,
-// which left 0.89 m, so no car parked anywhere in the city from then on —
-// every kerb failed park_ok and the renders simply had no cars in them.)
 const cc_streetlife_PARK_OFF: f32 = 1.20;   // kerb line to the car's centre
 // No parking this close to the cross street's building line: the corner
 // radius, the crosswalk and the stop line are all inside it.
@@ -968,9 +962,9 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // The slots are walked over the stretch of the run below the car tops
     // only. The kerb slab is pole-tall, so a ray coming down from a few
     // metres up crosses it for tens of metres before it is low enough to
-    // meet a car, and the five near-end slots used to be spent on slots it
-    // passes high over: from 6 m up, the parked cars of the whole block
-    // ahead were missing. (inv_dir.z is the core's, 1e30 when level, which
+    // meet a car, and the five near-end slots would otherwise be spent on
+    // slots it passes high over: from 6 m up, the parked cars of the whole
+    // block ahead would be missing. (inv_dir.z is the core's, 1e30 when level, which
     // gives the right empty or unbounded window.)
     // And only where it is inside the parking band across the kerb: with
     // the z window this is the stretch where a car can be, so the walk's
@@ -1274,15 +1268,14 @@ fn cc_streetlife_near_trace(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     // FALL-THROUGH. A ray can enter a car's box and miss its hull — over
     // the roof (the box stands 1.74 m, a small car's roof 1.4), past a
     // flank, over the bonnet — and then the car BEHIND it is what it meets.
-    // This once returned the miss, on the reasoning that cars sit 2.4 m
-    // apart and the loss was a sliver on a silhouette. It was not a sliver:
-    // from a few metres up, a ray down to the lower body of a parked car
-    // passes through the box of the one parked in front of it, just above
-    // that car's roof, so the whole body below the shoulder showed the road
-    // through it, cut by the invisible box's vertical edge, with only the
-    // roof left floating (Thomas's flight of dev 1853300, 2026-11-09: "it
-    // looked as though there was an invisible object in front of the
-    // car"). So a miss resumes the search past the box it missed in. The
+    // Returning the miss would lose more than a sliver on a silhouette,
+    // though cars sit 2.4 m apart: from a few metres up, a ray down to the
+    // lower body of a parked car passes through the box of the one parked
+    // in front of it, just above that car's roof, so the whole body below
+    // the shoulder would show the road through it, cut by the invisible
+    // box's vertical edge, with only the roof left floating — as though an
+    // invisible object stood in front of the car. So a miss resumes the
+    // search past the box it missed in. The
     // boxes are disjoint (adjacent slots' centres are at least 5.8 m apart,
     // their boxes 5.42 m long at the full yaw), so each is entered at most
     // once and the next candidate starts at or after this one's exit. The

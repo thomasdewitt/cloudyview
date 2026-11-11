@@ -27,12 +27,11 @@
 //
 // Colour follows the lot, the way a site is fitted out in one go: sodium,
 // metal halide, cool LED or warm LED, with the odd fixture replaced by
-// another family. The first cut used one 0.85 peak for every family and
-// rendered each LED pool as a clipped white disc; each family now carries
-// its own radiance, set so the brightest family at the brightest draw stays
-// under the tone map's knee at the reference exposure — a second cut, 30%
-// down, after a close view under a cool LED pole still read as white
-// ground (the lead, 2026-09-23).
+// another family. Each family carries its own radiance (one shared peak
+// renders every LED pool as a clipped white disc), set so the brightest
+// family at the brightest draw stays under the tone map's knee at the
+// reference exposure, and then 30% lower again: at the knee, a close view
+// under a cool LED pole still reads as white ground.
 
 const CITY_FLOOD_MAX: i32 = 4;
 const CITY_FLOOD_SODIUM: vec3<f32> = vec3<f32>(0.42, 0.19, 0.052);

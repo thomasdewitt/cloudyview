@@ -68,7 +68,7 @@ const CITY_SUPERTALL_H: f32 = 1200.0;
 // only on the very tallest; everything below takes its slenderness from its
 // taper and spire, not from its width.
 const CITY_SLENDER_MAX: f32 = 60.0;
-// Land use, from the baked lot words (cloudyview/city_lots.py). A lot word
+// Land use, from the baked lot words (tools/city_lots.py). A lot word
 // is an integer of at most 12 bits stored offset by -2048, where float16
 // holds every integer exactly.
 const CITY_USE_URBAN: i32 = 0;
@@ -177,15 +177,14 @@ const CITY_MOON_BLOOM_W: f32 = 0.0008;
 
 // --- City component hooks --------------------------------------------------
 //
-// The city grows by COMPONENTS: small WGSL files under
-// cloudyview/soar/city/components/, each owning one kind of thing (a street
-// prop, a facade layer, an elevated highway), registered in registry.json
-// and spliced into this file by tools/compose_city.py between the GENERATED
-// markers below. The core calls ten hooks; the composer generates their
-// dispatchers over whatever is registered, and when nothing is, the
-// defaults below make every hook a no-op — except the shade dispatcher,
-// which returns magenta, because an unclaimed hit kind is a bug and should
-// look like one.
+// The city grows by COMPONENTS: small WGSL files under city/components/,
+// each owning one kind of thing (a street prop, a facade layer, an elevated
+// highway). A component is its file, its line in manifest.json, and its
+// calls in components/dispatch.wgsl. The core calls ten hooks, each a
+// dispatcher in dispatch.wgsl that calls every component implementing it;
+// a hook no component implements does nothing — except the shade
+// dispatcher, which returns magenta for a kind no component claims,
+// because an unclaimed hit kind is a bug and should look like one.
 //
 //   cc_extra_trace       geometry independent of the block grid (highways):
 //                        traced once per ray, nearest hit wins against the
@@ -315,11 +314,10 @@ fn city_is_avenue(k: i32) -> bool {
 
 // The lamp line's inset from the CELL BOUNDARY on line k. Lamps stand
 // CITY_LAMP_OFFSET off the KERB — 3.5 m from the boundary of a 12 m minor
-// street, 13.5 m on a 32 m avenue. The old fixed 2.5 m inset measured from
-// the boundary, which on an avenue is the road's CENTERLINE: both lamp
-// lines hugged the median and floodlit the middle of every downtown
-// avenue into clipping (found via streetlife's report, proven by
-// ablation + a numpy rebuild of the pool field, 2026-08-20). streetlife's
+// street, 13.5 m on a 32 m avenue. A fixed inset from the boundary, which
+// on an avenue is the road's CENTERLINE, would put both lamp lines on the
+// median and floodlight the middle of every downtown avenue into clipping.
+// streetlife's
 // poles and parking share this function, so light, hardware and cars
 // move together.
 fn city_lamp_inset(k: i32) -> f32 {
@@ -399,7 +397,7 @@ struct CityCell {
     fscale: f32,
     // One building can own a lot of several blocks — up to 4x4 under a tall
     // tower among lower neighbours, 2x2 under a mid-rise superblock, 2x1 or
-    // 2x2 under a warehouse (cloudyview/city_lots.py); every member cell
+    // 2x2 under a warehouse (tools/city_lots.py); every member cell
     // then reports the same plot, seed and boxes.
     merged: bool,
     // The window style (see the style block in city_cell): 0 grid,
@@ -446,7 +444,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     let cell = u.tile_cell;
 
     // The lot. Which blocks belong together, what the land is used for and
-    // where the streets run were decided offline (cloudyview/city_lots.py)
+    // where the streets run were decided offline (tools/city_lots.py)
     // and packed into b and a at mip 0, because every one of those answers
     // is non-local: a supertall claims the blocks around its peak, and a
     // street exists only if it joins the network. Every member cell of a lot
@@ -603,9 +601,9 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // run real towers follow from floor-plate economics and sway — and then
     // holds, continuous and never shrinking with height: what carries a
     // supertall is its taper, setbacks and spire, not bulk (a 3 km tower
-    // 150 m wide read from across the city as a slab, where the skyline
-    // Thomas loved was a cluster of needles; a step down in width at some
-    // height read as wrong the other way). A slenderness floor (SLENDER_MAX)
+    // 150 m wide reads from across the city as a slab, where the skyline
+    // should be a cluster of needles; a step down in width at some
+    // height reads as wrong the other way). A slenderness floor (SLENDER_MAX)
     // widens only the very tallest. Where the tower leaves most of its plot
     // open it stands on a podium that fills the plot — on the multi-block
     // lot its peak claimed, when it stood among lower neighbours: the street
@@ -644,9 +642,9 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     // The architecture. Low buildings stay slabs; above 60 m the draw picks
     // among four archetypes, spires growing commoner with height, and above
     // SPIRE_H every tower is one of the two frustum forms — a 3 km
-    // rectangular extrusion is a wall, a 3 km tapering shaft is a spire
-    // (Thomas: not perfect rectangular prisms; architectures that grow, or
-    // have a spire). Spire crowns are the majority up there: the needles
+    // rectangular extrusion is a wall, a 3 km tapering shaft is a spire, so
+    // the tall city is architectures that grow or end in a spire, not
+    // rectangular prisms. Spire crowns are the majority up there: the needles
     // are what the skyline is.
     if (h > 60.0) {
         let spire_p = select(0.13, 0.30, h > 300.0);
@@ -726,7 +724,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         // A supertall's shaft closes a little further than a tower's and
         // ends in a needle. Closed much
         // further (to a fifth) the shafts read as cones, not the needles of
-        // the skyline Thomas loved.
+        // the skyline.
         c.fscale = select(0.55 + 0.25 * r4d.z, 0.40 + 0.20 * r4d.z,
                           h > CITY_SUPERTALL_H);
     } else if (c.arch == 4) {
@@ -849,8 +847,8 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     }
 
     // The window style: the lattice itself varies building to building, or
-    // mid-distance towers all wear the same texture and blur together
-    // (Thomas, in flight). Style follows height and architecture loosely —
+    // mid-distance towers all wear the same texture and blur together.
+    // Style follows height and architecture loosely —
     // curtain walls on towers, punched openings on low-rise — and pitch is
     // jittered so even two buildings sharing a style disagree in period.
     let r4e = city_rand4(c.seed ^ vec2<u32>(0xb5297a4du, 0x68e31da4u));
@@ -897,8 +895,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     }
     // A fifth of buildings keep a house color: every window draws near one
     // palette coordinate, so a tower can be THE cyan tower — the color
-    // balance is a property of the building, not only of the window
-    // (Thomas, 2026-08-20).
+    // balance is a property of the building, not only of the window.
     let mono_draw = city_rand4(
         c.seed ^ vec2<u32>(0x3c6ef372u, 0xa54ff53au));
     c.win_mono = select(-1.0, mono_draw.y, mono_draw.x < 0.20);
@@ -909,8 +906,8 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
 
     // Roof furniture belongs on roofs: a spire crown has no flat top to
     // stand a mast on, and a tapered shaft only offers its shrunken crown
-    // cap (Thomas, 2026-08-20: bridges/antennas only on the building types
-    // that can carry them — components read cc.arch for the same rule).
+    // cap (bridges and antennas only on the building types that can carry
+    // them; components read cc.arch for the same rule).
     // A supertall's tapered shaft always ends in a needle: a mast scaled to
     // the tower (6-11% of its height, as thick as a needle that long must
     // be), centred on the crown, and kept under the DDA's z gate.

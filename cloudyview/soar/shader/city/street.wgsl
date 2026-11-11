@@ -1,4 +1,4 @@
-// THE STREET SURFACE (city-street, 2026-09-23)
+// THE STREET SURFACE
 // ===========================================================================
 //
 // What a street is, in cross-section, measured outward from the BUILDING
@@ -92,17 +92,18 @@ const CITY_MH_PRESENT: f32 = 0.55;
 const CITY_MH_STEAM_FRAC_LO: f32 = 0.015;
 const CITY_MH_STEAM_FRAC_HI: f32 = 0.26;
 // A steaming cover is hot: it and the asphalt round it stay dry on a wet
-// street, a pale patch the plume rises out of (Thomas, 2026-11-08: steam
-// "just on a random bit of street"; the dark wet lid under it did not read,
-// and from his pose the plume's own foot hides the lid itself). Dry out to
+// street, a pale patch the plume rises out of, so the steam is seen to come
+// from a cover and not from a random bit of street: the dark wet lid under
+// it does not read, and from some poses the plume's own foot hides the lid
+// itself. Dry out to
 // CITY_MH_R + DRY_IN, fading to wet by CITY_MH_R + DRY_OUT.
 const CITY_MH_DRY_IN: f32 = 0.35;
 const CITY_MH_DRY_OUT: f32 = 0.45;
 // A wet cover's gloss: tyre-polished iron under a film, sheened all over
 // rather than mottled like the asphalt round it, so at night a lid reads as
 // a lid — it catches the lamps (city_lamp_glint) and the lit windows (the
-// film lobe) where dark iron alone was a dark disc on dark asphalt (Thomas,
-// 2026-11-08: a plume from "a random bit of street", its cover unread).
+// film lobe), where dark iron alone is a dark disc on dark asphalt and the
+// plume above it seems to rise from nowhere.
 const CITY_MH_GLOSS: f32 = 0.9;
 // Storm-drain grates: one in each gutter, this far from the cross street's
 // centreline, beyond its crosswalk and stop line.
@@ -123,11 +124,10 @@ const CITY_REFL_RANGE: f32 = 600.0;
 // Lobes that carry less than this are traced only by Russian roulette: a
 // lobe of weight w < RR is traced with probability w / RR and counted RR / w
 // times over, binary noise on the dim film (a steep view, a damp patch). At
-// 0.05 rather than the first 0.15, Thomas's wet avenue (2026-11-08) traces
-// more of them: its one-sample spread 8 % lower (3.54 vs 3.90 levels on
-// the street, with the stratified draws), its first 8 frames 8 % nearer the
-// converged mean, for +1.6 % of the frame (768x432, High, interleaved with
-// a +0.7 % null; tier verified in every tab). Unbiased in
+// 0.05 rather than 0.15 a view down a wet avenue traces more of them: its
+// one-sample spread 8 % lower (3.54 vs 3.90 levels on the street, with the
+// stratified draws), its first 8 frames 8 % nearer the converged mean, for
+// +1.6 % of the frame time. Unbiased in
 // linear light; the accumulation averages tone-mapped samples, so fewer
 // rare RR / w samples brighten a converged wet reflection a little (+0.6
 // levels mean on reflective pixels), toward the tone map of the true mean.
@@ -586,8 +586,8 @@ fn city_ground(p: vec2<f32>, ci: vec2<i32>, cc: CityCell, fp: f32)
     // 0.85 m either side of its centre. Noise only decides where along
     // those the water breaks.
     // Both are narrow bands and both feed the puddle threshold, so both are
-    // footprint-filtered or they alias into sparkle at a few m/px (the
-    // Claude review): the gutter widens with fp at constant area, and the
+    // footprint-filtered or they alias into sparkle at a few m/px: the
+    // gutter widens with fp at constant area, and the
     // ruts hand over to their duty cycle inside the travel lanes (two
     // ~0.4 m ruts per 3.1 m lane).
     let gutter = select(0.0, (1.0 - smoothstep(0.10, 0.70 + fp, d))
@@ -835,12 +835,12 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
     // The heads a mirror shows are the ones near where the MIRROR ray (the
     // view ray reflected about the ground) reaches head height — at grazing
     // incidence that is far down the street, not beside the point. Summing
-    // the two stations beside the point lost every lamp past ~35 m from an
-    // eye-level camera (the Claude review, 2026-09-23). The rough lobe
+    // the two stations beside the point loses every lamp past ~35 m from an
+    // eye-level camera. The rough lobe
     // centres on the same direction, so the same stations serve both: the
     // three nearest the mirror point, because with only the two bracketing
-    // it the set switched as the point crossed a station and dropped a lamp
-    // the film lobe still saw — a hard band across every wet road.
+    // it the set switches as the point crosses a station and drops a lamp
+    // the film lobe still sees — a hard band across every wet road.
     let t_head = min((CITY_LAMP_HEAD_Z - p.z) / max(-dir.z, 0.02), 300.0);
     var e = 0.0;
     for (var dirn: i32 = 0; dirn < 2; dirn = dirn + 1) {

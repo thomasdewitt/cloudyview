@@ -1,16 +1,15 @@
 // industry — the industrial belt: warehouse roofs, the floodlights, and what
 // stands in their light.
 //
-// Where the cascade thins, the city stops being towers (Thomas: the regions
-// with no buildings "would be sort of industrial regions with things like
-// forklifts/large warehouses/empty lots with construction refuse"). The core
-// already lays that belt out: INDUSTRIAL lots carry one low warehouse box
+// Where the cascade thins, the city stops being towers and becomes an
+// industrial belt: large warehouses, forklifts, empty lots with
+// construction refuse. The core already lays that belt out: INDUSTRIAL lots carry one low warehouse box
 // pushed against one long side of the plot, the other side being its truck
 // court; YARD lots front a street and carry no building; OPEN land is scrub.
 // It also already decides where the belt's few lamps are (city_flood) and
 // paints their pools on the ground. This component owns everything above
-// that ground except the warehouse WALLS (city-facades: cladding, doors,
-// docks) and the streets (city-street):
+// that ground except the streets (street.wgsl), the warehouse WALLS
+// included (cladding, doors, docks: THE WAREHOUSE WALLS, below):
 //
 //   1. ROOFS. Every warehouse draws one of three: SAWTOOTH (40%) — teeth 8-12
 //      m apart and 2.5-3.5 m tall, each a sloped sheet with a vertical glazed
@@ -1233,13 +1232,13 @@ fn cc_industry_piles_hit(best_in: CityHit, o: vec3<f32>, dir: vec3<f32>,
 // and seen through at night it is invisible against the dark yard. Posts
 // every 3 m and a top rail are what reads, and only close in.
 //
-// Written for the register file, not for generality: a first version found
-// its gate by probing the neighbouring lots' land use in a loop, broke the
-// rail in two around it and walked the posts over the ray's run, and that
-// body alone cost 12% on URBAN vistas that never reach it (inlined into the
-// core's DDA, its registers are paid by every city pixel; measured by
-// ablation, 2026-09-23). The gate is now a drawn side, the rail one box
-// whose hit is refused inside the gap, and the posts the two nearest the
+// Written for the register file, not for generality: inlined into the
+// core's DDA, its registers are paid by every city pixel, and finding the
+// gate by probing the neighbouring lots' land use in a loop, breaking the
+// rail in two around it and walking the posts over the ray's run costs 12%
+// on URBAN vistas that never reach a fence. So the gate is a drawn side,
+// the rail one box whose hit is refused inside the gap, and the posts the
+// two nearest the
 // ray's run through the fence line — a ray is inside that 8 cm slab for a
 // post pitch or less unless it runs down the fence, where the nearest post
 // hides the rest.
@@ -1426,8 +1425,8 @@ fn cc_industry_fill(p: vec3<f32>) -> vec3<f32> {
 // gets: a surface facing away catches none, one squarely facing catches
 // what the ground does. The pools' peaks are calibrated for ground a head's
 // height below the lamp; a container top two metres under it, lit with the
-// inverse square, would take several times that, and first renders showed
-// exactly that as flat white tops (the lead, 2026-09-23). Then the street
+// inverse square, would take several times that and render as flat white
+// tops. Then the street
 // lamps, for the yards that front one, falling mostly on up-facing
 // surfaces.
 fn cc_industry_light(cc: CityCell, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
@@ -1718,7 +1717,7 @@ fn cc_industry_head_shade(h: CityHit, cc: CityCell) -> vec3<f32> {
 // THE WAREHOUSE WALLS (the facade hook)
 // ============================================================================
 //
-// city-facades handed the warehouse walls to this component (2026-09-23):
+// The warehouse walls are this component's:
 // the core draws no windows in their ground band and adds no reflectance of
 // its own on them, so what a warehouse wall looks like is decided here, at
 // every range — the facade hook runs wherever a wall is hit. A wall is:
@@ -1971,9 +1970,9 @@ fn cc_industry_door_at(cc: CityCell, l: cc_industry_Lot, p: vec3<f32>,
 // The pixel's paint: a closed dock door's own where the pixel is on one,
 // the wall's everywhere else. Taken first thing in cc_industry_facade, one
 // paint a pixel, while little else is live: taken after the wall's look
-// and the doors', it raised the city's first stage from 128 registers
-// (16 warps an SM, some spilled) to 168 (12 warps) in the binary wgpu builds
-// (perf's tools/soar_regcount.py, 2026-11-09), which cost every city pixel.
+// and the doors', it raises the city's first stage from 128 registers
+// to 168 in the binary wgpu builds, fewer threads resident at once, which
+// costs every city pixel.
 fn cc_industry_wall_graffiti(cc: CityCell, h: CityHit, dir: vec3<f32>,
                              vc: f32, fp: f32, court: bool, face: i32)
         -> CityGraffitiPaint {

@@ -454,7 +454,7 @@ fn city_inv_dir(dir: vec3<f32>) -> vec3<f32> {
 // march it averages STEAM_LIVE_SAMPLES, stratified over the offset's range
 // from a start fixed per pixel: a parked view shows the steam moving through
 // a still, fine dither rather than a fresh grain every frame (one offset
-// alone was a coarse grain, 2026-11-08). In linear light, with B the
+// alone is a coarse grain). In linear light, with B the
 // accumulated image's radiance and
 // S, T_s the steam's in-scattered radiance and transmittance,
 //     L = B (1 - T_f (1 - T_s)) + T_f S.
@@ -474,8 +474,8 @@ fn city_inv_dir(dir: vec3<f32>) -> vec3<f32> {
 //   - under contrast > 1 a background the contrast clipped to black has
 //     lost its radiance: a channel displayed at exactly 0 is taken as black
 //     (B = 0, the clip's low end, where thin steam then reads as itself)
-//     rather than as the clip's edge, which made a plume over the night sky
-//     larger and greyer than the still's (loose-ends' review, 2026-11-08);
+//     rather than as the clip's edge, which would make a plume over the
+//     night sky larger and greyer than the still's;
 //     a dark background just above the clip keeps its inverse;
 //   - the steam takes the LAST sample's ray and surface depth, so its edge
 //     along a silhouette is one sample's, not the average's.
@@ -531,7 +531,7 @@ fn steam_live_city(cr: CameraRay, acc: vec4<f32>, t_surf: f32) -> vec4<f32> {
 // drew them before; the sky probe's jitter still does.
 // Each dimension has a near neighbour among the strat streams the city
 // runs, and two Weyl sequences whose steps differ by d move nearly in step
-// for ~1/(2d) frames (loose-ends' review): x by the subpixel offset's y
+// for ~1/(2d) frames: x by the subpixel offset's y
 // (STRAT_ALPHA_2, d 0.020, ~25 frames), y by the moon cone's u (ALPHA_5,
 // 0.015, ~32), z by its v (ALPHA_6, 0.044, ~11), w by the pre-march jitter
 // (ALPHA_9, 0.013, ~37). With eight 1-D streams already on the circle no

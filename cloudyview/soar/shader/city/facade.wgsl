@@ -11,7 +11,7 @@
 //   w  outward from the wall plane; w < 0 is inside the building.
 // The face is divided into BAYS: an integer number of window cells between
 // two corner margins, the building's pitch stretched to fit. A world-anchored
-// lattice (what the flat facade used to be) puts a window across a corner,
+// lattice puts a window across a corner,
 // which a painted window survives and a recessed one does not — it opens a
 // hole in the building. Floors are CITY_FLOOR_H and the tiers start on floor
 // lines, so v needs no such care.
@@ -925,22 +925,19 @@ const CITY_LOFT_PANE_HI: vec2<f32> = vec2<f32>(0.94, 0.95);
 const CITY_STORE_PANE_LO: vec2<f32> = vec2<f32>(0.06, 0.055);
 const CITY_STORE_PANE_HI: vec2<f32> = vec2<f32>(0.94, 0.92);
 const CITY_STORE_LIT_FRAC: f32 = 4.0;
-// The crown's glass room (Thomas, 2026-11-09: "Bring back glass room"): a
-// penthouse glazed on every side, its own 2.1 m bays, the glass between
-// slim mullions floor to ceiling, 58% of the bays lit, each at its own level
-// over 1.8 in the house's colour (warm where the house has none). It was
-// rooftopworks' prop until the crown became core massing; now it is a zone
-// of the crown's faces, so the windows machinery draws it exactly at every
-// range.
+// The crown's glass room: a penthouse glazed on every side, its own 2.1 m
+// bays, the glass between slim mullions floor to ceiling, 58% of the bays
+// lit, each at its own level over 1.8 in the house's colour (warm where the
+// house has none). It is a zone of the crown's faces, so the windows
+// machinery draws it exactly at every range.
 const CITY_PENT_PITCH: f32 = 2.10;
 const CITY_PENT_PANE_LO: vec2<f32> = vec2<f32>(0.065, 0.03);
 const CITY_PENT_PANE_HI: vec2<f32> = vec2<f32>(0.935, 0.97);
 const CITY_PENT_LIT: f32 = 0.58;
 const CITY_PENT_RAD: f32 = 1.80;
 const CITY_PENT_COL: vec3<f32> = vec3<f32>(1.00, 0.72, 0.42);
-// The odd shop whose interior is cyan neon, drawn shop by shop (Thomas:
-// "if some rare shops had an interior cyan color like the original, that
-// would be kinda cool"): the palette's own cyan (band 4).
+// The odd shop whose interior is cyan neon, drawn shop by shop: rare (this
+// fraction of lit shops), in the palette's own cyan (band 4).
 const CITY_SHOP_CYAN_FRAC: f32 = 0.05;
 
 struct CityZones {
