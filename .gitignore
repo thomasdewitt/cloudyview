@@ -173,7 +173,8 @@ references/ai-generated-thunderstorms/
 # megabytes, and binaries in git are forever. Bake it with
 # tools/prebake_demos.py; ship it with tools/stage_deploy.py.
 data/demos/
-web/soar/demos/
+# No trailing slash: here it is a symlink into the website's working tree.
+web/soar/demos
 web/_mockups/media/
 
 # Reference photos/images: kept on disk, not in git (history has the originals)
