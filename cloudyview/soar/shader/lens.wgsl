@@ -1,30 +1,26 @@
 // Lens water: small drops on the camera's lens after it flies through cloud.
 //
-// One look, drawn by both hosts AFTER accumulation — the browser's present
-// pass (web/soar/renderer.js presentShader) and the Python host's post pass
-// (cloudyview/soar_host.py _LENS_POST_SHADER) include this file — so the
-// accumulated image never holds a drop, a parked view converges under the
-// lens whatever the lens does, and `soar TRACK.json` draws what the browser
-// drew.
+// This file is not part of the march's module. Each host includes it in the
+// pass that draws the finished image (the browser's present pass, the Python
+// host's post pass), after the accumulation. The accumulated image therefore
+// never holds a drop, a parked view converges under the lens whatever the
+// lens does, and the two hosts draw the same lens.
 //
-// The includer provides:
-//   fn lens_src(uv: vec2<f32>) -> vec3<f32>   the image at uv: both hosts
-//       define it as lens_bilinear(<their source texture>, uv)
-// and passes the lens state texel raymarch.wgsl's fs_lens_state wrote:
-//   x wetness [0, 1] (y, z, w are 0).
+// The includer provides
+//   fn lens_src(uv: vec2<f32>) -> vec3<f32>   the image at uv, defined in
+//       both hosts as lens_bilinear(<their source texture>, uv)
+// and passes the state texel that fs_lens_state (passes.wgsl) wrote, of
+// which only x, the wetness in [0, 1], is read here.
 //
-// Wetness 0 returns the pixel untouched, bit for bit: a dry lens (every
-// still, every capture, the switch off) costs one compare.
+// Wetness 0 returns the pixel untouched, so a dry lens costs one compare.
 //
-// Only small beads, and they never grow or run (Thomas, flying it: the
-// small ones "look pretty solid"; grown and falling they "look very
-// unrealistic"). A wetter lens carries MORE of them: two interleaved layers
-// fill in as the wetness rises. Everything is procedural and measured in
-// screen heights, so a bead keeps its size at any resolution. A bead is a
-// small lens: it shows the scene behind it inverted, darkened at its rim
-// where the water curves away, with a glint on its upper side. Each pixel
-// looks only at its own cell of each layer (a bead never leaves its cell),
-// so the cost is fixed and small.
+// The drops are small beads that neither grow nor run. A wetter lens carries
+// more of them: two interleaved layers fill in as the wetness rises.
+// Everything is procedural and measured in screen heights, so a bead keeps
+// its size at any resolution. A bead is a small lens: it shows the scene
+// behind it inverted, darkened at its rim where the water curves away, with
+// a glint on its upper side. Each pixel looks only at its own cell of each
+// layer (a bead never leaves its cell), so the cost is fixed.
 
 const LENS_CELL_A: f32 = 0.038;        // screen heights: the first layer
 const LENS_CELL_B: f32 = 0.029;        // the second, filling in when wetter
@@ -34,9 +30,9 @@ const LENS_REFRACT: f32 = 1.6;         // how far a bead throws the view
 const LENS_RIM_DARK: f32 = 0.45;       // rim darkening at a bead's edge
 const LENS_GLINT: f32 = 0.35;          // the highlight on a bead's upper side
 
-// Clamp-to-edge bilinear from an unfilterable float texture, by hand (core
-// WebGPU cannot filter rgba32float): what each includer's lens_src reads
-// the image through, so the two hosts throw the view identically.
+// Clamp-to-edge bilinear read of an unfilterable float texture, done by hand
+// (core WebGPU cannot filter rgba32float). Each includer's lens_src reads
+// the image through it, so the two hosts refract the view identically.
 fn lens_bilinear(src: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
     let size = vec2<f32>(textureDimensions(src, 0));
     let p = uv * size - vec2<f32>(0.5);
@@ -52,6 +48,7 @@ fn lens_bilinear(src: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
+// Four uniforms in [0, 1] from a cell index and a salt (an integer hash).
 fn lens_hash4(c: vec2<i32>, salt: u32) -> vec4<f32> {
     var v = vec4<u32>(bitcast<u32>(c.x), bitcast<u32>(c.y), salt,
                       bitcast<u32>(c.x) ^ bitcast<u32>(c.y));
@@ -77,6 +74,8 @@ struct LensDrop {
     glint: f32,
 }
 
+// The bead of layer `salt` in g's cell, if the cell has one: a fraction
+// `share` of the cells do.
 fn lens_bead(g: vec2<f32>, salt: u32, share: f32) -> LensDrop {
     var d: LensDrop;
     d.off = vec2<f32>(0.0);
@@ -88,9 +87,9 @@ fn lens_bead(g: vec2<f32>, salt: u32, share: f32) -> LensDrop {
     if (h.x >= share) {
         return d;
     }
-    // Inside the cell, so no neighbour ever needs looking at: centre in
-    // [0.25, 0.75], semi-axes <= 0.15 across and 0.1725 down. A bead sags a
-    // little: taller than wide.
+    // The bead stays inside its cell, so no neighbouring cell ever needs
+    // looking at: centre in [0.25, 0.75], semi-axes at most 0.15 across and
+    // 0.1725 down. A bead sags a little, so it is taller than wide.
     let c = vec2<f32>(0.25, 0.25) + 0.5 * h.yz;
     let r = LENS_BEAD_R + LENS_BEAD_R_VAR * h.w;
     let q = (g - ci - c) / vec2<f32>(r, 1.15 * r);
@@ -98,8 +97,9 @@ fn lens_bead(g: vec2<f32>, salt: u32, share: f32) -> LensDrop {
     if (dd >= 1.0) {
         return d;
     }
-    // A spherical cap: the view through it is inverted and thrown by the
-    // slope, and the rim, where the surface turns away, goes dark.
+    // A spherical cap: the view through it is inverted and displaced in
+    // proportion to the slope, and the rim, where the surface turns away,
+    // goes dark.
     d.off = -q * (LENS_REFRACT * r);
     d.cover = 1.0 - smoothstep(0.85, 1.0, dd);
     d.rim = smoothstep(0.30, 1.0, dd);
@@ -110,9 +110,9 @@ fn lens_bead(g: vec2<f32>, salt: u32, share: f32) -> LensDrop {
 }
 
 // `uv` is the pixel's place on the image ([0, 1], y down), `aspect` the
-// image's width / height and `texel` one source texel in uv: nothing here
-// depends on the output's pixel count, so the browser's upscaling present
-// and the Python post pass at the render size draw the same lens.
+// image's width / height and `texel` one source texel in uv. Nothing here
+// depends on the output's pixel count, so a present pass that upscales and a
+// post pass at the render size draw the same lens.
 fn lens_apply(rgb: vec3<f32>, uv: vec2<f32>, aspect: f32, texel: vec2<f32>,
               st: vec4<f32>) -> vec3<f32> {
     let w = st.x;
@@ -134,8 +134,8 @@ fn lens_apply(rgb: vec3<f32>, uv: vec2<f32>, aspect: f32, texel: vec2<f32>,
     if (d.cover <= 0.0) {
         return rgb;
     }
-    // The view through the water: the thrown sample and a small cross of
-    // taps around it for the water's softness.
+    // The view through the water: the displaced sample, and a small cross
+    // of taps around it for the water's softness.
     let c = uv + (d.off * cell) * vec2<f32>(1.0 / aspect, 1.0);
     let t = 1.2 * texel;
     let seen = 0.4 * lens_src(c)

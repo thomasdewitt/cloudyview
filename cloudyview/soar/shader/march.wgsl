@@ -1,22 +1,45 @@
-// Cloud uplight: the city as the cloud field's second light source. The
-// glow mip under the sample (footprint ~ its height, so the mip level is
-// log2(z / cell)) times the two-stream transmittance of the cloud below.
+// The cloud march: fs_main, one view ray per fragment.
+//
+// The ray is intersected with the volume (in a periodic domain, with its z
+// slab and a range cap) and marched front to back. Each step that holds
+// cloud adds its source terms, weighted by the step's optical depth d_tau
+// and by the transmittance so far, then multiplies the transmittance by
+// exp(-d_tau). What lies behind the cloud is composited where the ray
+// reaches it: the sea or the city, the city's veil, the sky. The constants
+// and derivations of the lighting terms are in clouds.wgsl.
+//
+// Carried along the ray:
+//   transmittance  exp(-optical depth crossed so far)
+//   tau_depth      optical depth since the ray last entered cloud
+//   tau_view       optical depth crossed in total
+// Measured at each cloud sample:
+//   tau_sun        optical depth toward the sun
+//   t_sky          two-stream sky visibility overhead (the sky probe)
+//   tau_ahead      optical depth still ahead on the sightline (the pre-march)
+
+// City uplight: the city as the night clouds' second light source. At a
+// cloud sample it is the city's glow averaged over a footprint as wide as
+// the sample is high (the glow texture's mip level log2(z / cell)), times
+// the transmittance of the cloud below the sample.
 const CITY_UPLIGHT_STRENGTH: f32 = 0.5;
-// Only glow above the citywide background lifts a cloud base: the bias is
-// what keeps sprawl bases moonlit blue-grey while the district overhead
-// burns amber. Without it even a 0.02-radiance warm pedestal reads, because
-// the night clouds it lands on sit near 0.05.
+// Only glow above the citywide background lights a cloud base, so a base
+// over ordinary sprawl stays moonlit and one over a bright district turns
+// amber. The night clouds are dark enough that even a small warm pedestal
+// would show on all of them.
 const CITY_UPLIGHT_GLOW_BIAS: f32 = 0.15;
 const CITY_UPLIGHT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.38, 0.10);
-// The glow feeding the uplight saturates: g/(HALF+g). Over the megatower
-// district the raw mip runs to ~3x the p99.5 level, and any linear scaling
-// bright enough to warm an ordinary district's cloud base bleaches the
-// district's whole sky cream — the saturation is what lets both exist.
+// The glow saturates as g / (HALF + g). The brightest district's glow is
+// several times an ordinary bright district's, and a linear scale strong
+// enough to warm an ordinary cloud base would bleach the whole sky over the
+// brightest.
 const CITY_UPLIGHT_GLOW_HALF: f32 = 0.6;
+// The probe straight down from the sample: its span (m) and step count.
 const CITY_UP_PROBE_SPAN: f32 = 1400.0;
 const CITY_UP_PROBE_STEPS: i32 = 12;
+// The uplight a sample keeps under any depth of cloud.
 const CITY_UPLIGHT_FLOOR: f32 = 0.02;
-// e-folding of the amber in probe tau: 1/0.25 = 4 optical depths of skin.
+// The uplight falls as exp(-TAU_SCALE * tau_down): one e-folding per
+// 1 / 0.25 = 4 optical depths of cloud below.
 const CITY_UPLIGHT_TAU_SCALE: f32 = 0.25;
 
 @fragment
@@ -35,24 +58,22 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let gradient_coarse_radius_m = u.cb_params.y;
     let ambient_occlusion_floor = u.cb_params.z;
 
-    // The camera ray, shared with the surface pre-pass (camera_ray), so the
-    // surface it traced is the surface this march composites.
+    // The camera ray, shared with the surface passes (camera_ray), so the
+    // surface they traced is the surface this march composites.
     let cr = camera_ray(frag_pos);
     let frame_index = cr.frame_index;
     let strat_pixel = cr.strat_pixel;
     let dir = cr.dir;
 
-    // safe_inv_dir, not 1.0 / dir: an exactly axis-aligned pixel ray would
-    // divide by zero, and the infinity makes the slab test below
-    // indeterminate (the sun path's same bug, desert-ground 2026-09-24).
+    // safe_inv_dir, not 1.0 / dir: an axis-aligned ray would divide by zero
+    // (see safe_inv_dir).
     let inv_dir = safe_inv_dir(dir);
     let periodic_on = PERIODIC_DOMAIN;
     var t_near: f32;
     var t_far: f32;
     if (periodic_on) {
-        // Tiled domain: only the z slab bounds the march (rays never exit
-        // horizontally); the horizontal exit is replaced by the clear-air
-        // transmittance / wrap-ceiling cap.
+        // Tiled domain: only the z slab bounds the march. In place of a
+        // horizontal exit there is the range cap (periodic_march_cap).
         let tz0 = (u.bmin.z - u.cam_origin.z) * inv_dir.z;
         let tz1 = (u.bmax.z - u.cam_origin.z) * inv_dir.z;
         t_near = max(min(tz0, tz1), 0.0);
@@ -66,9 +87,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         t_far = hit.y;
     }
 
-    // Under CITY the ocean plane is compiled out entirely: the surface below
-    // is the traced city, which fills the same role (an opaque floor at
-    // t_city) through the same guards.
+    // Under CITY there is no ocean plane. The surface below is the traced
+    // city, an opaque floor at t_city that goes through the same guards.
     let ocean_on = !CITY && u.ocean_params.z > 0.5;
     var t_ocean = 1e30;
     if (ocean_on && dir.z < -1e-8) {
@@ -78,13 +98,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    // The opaque surface below — the traced city — was
-    // found by the surface pre-pass (fs_surface) for this very ray: its
-    // fogged or hazed radiance and its distance, one texel per pixel. It is
-    // composited when the march reaches it, exactly as the ocean plane is,
-    // so the march loop only ever multiplies it by transmittance. Reading it
-    // rather than tracing it here keeps every surface register out of this
-    // kernel (see the surface pre-pass section).
+    // The opaque surface below (the traced city) was found for this very ray
+    // by the surface passes: its radiance, fog included, and its distance,
+    // one texel per pixel. It is composited where the march reaches it, as
+    // the ocean plane is.
     var t_city = 1e30;
     var city_rgb = vec3<f32>(0.0);
     if (CITY) {
@@ -93,17 +110,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         city_rgb = sp.xyz;
     }
     let t_surface = select(t_ocean, t_city, CITY);
-    // The veil (the city's steam): composited once,
-    // where the march passes its depth — so a cloud in front of it stays in
-    // front and a cloud behind it is seen through it — and only if it lies
-    // in front of the surface.
+    // The veil (the city's steam) is composited once, where the march passes
+    // its depth, so that a cloud in front of it stays in front and a cloud
+    // behind it is seen through it. Only a veil in front of the surface
+    // counts.
     var veil = Veil(vec3<f32>(0.0), 1.0, 1e30);
     if (CITY) {
         veil = veil_unpack(textureLoad(veil_buf, vec2<i32>(frag_pos.xy), 0));
     }
-    // Under the live view's steam the veil is only its depth (trans 1), and
-    // the march notes the cloud's transmittance there, t_front, in the
-    // sample's alpha for fs_steam_live; elsewhere the alpha is 1.
+    // When the steam is drawn after the accumulation the veil holds only its
+    // depth (trans = 1). The march then records the cloud's transmittance at
+    // that depth, t_front, and returns it in alpha for fs_steam_live.
+    // Otherwise alpha is 1.
     let steam_live = city_steam_live();
     var veil_pending = CITY && (veil.trans < 1.0 || steam_live)
         && veil.t < t_surface;
@@ -111,23 +129,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     let cos_scatter = dot(dir, sun);
     let phase = hg_phase(cos_scatter, g_hg);
-    // Once-scattered diffraction spike (see DIFFRACTION_G). Constant along
-    // the ray, like `phase`; the window makes it exactly zero beyond 30 deg
-    // from the sun, so any view not containing the near-sun sky is
-    // bit-identical.
+    // The diffraction spike's phase function (see DIFFRACTION_G). Like
+    // `phase` it is constant along the ray, and it is exactly zero beyond
+    // 30 deg from the sun.
     let phase_diffraction = DIFFRACTION_WEIGHT
         * hg_phase(cos_scatter, DIFFRACTION_G)
         * smoothstep(DIFFRACTION_WINDOW_COS_START,
                      DIFFRACTION_WINDOW_COS_FULL, cos_scatter);
 
-    // Scattering-geometry weight on the powder term (see POWDER_FWD_*). One
-    // value per pixel: cos_scatter is constant along a view ray. 1 keeps the
-    // full boundary darkening, 1 - POWDER_FWD_FADE is what survives at exact
-    // forward scattering.
+    // The powder term's dependence on scattering angle (see POWDER_COEFF).
+    // One value per pixel: 1 keeps the whole darkening, and
+    // 1 - POWDER_FWD_FADE is left at exact forward scattering.
     let g2_hg = g_hg * g_hg;
-    // clamped short of 1 so the smoothstep below can never be degenerate; the
-    // select handles the isotropic case, where no forward cone exists at all
-    // and powder must stay whole in every direction.
+    // mu_cross, clamped short of 1 so that the smoothstep below is never
+    // degenerate. The select handles isotropic scattering (g = 0), which
+    // has no forward cone: powder stays whole in every direction.
     let powder_fwd_cos_start = clamp(
         (1.0 + g2_hg - pow(max(1.0 - g2_hg, 1e-6), 2.0 / 3.0))
         / (2.0 * max(g_hg, 1e-4)),
@@ -139,21 +155,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         g_hg > 1e-4
     );
 
-    // Aerial perspective (witness iter_008): this sightline's horizon sky
-    // color (solar disc excluded) — the same asymptotic target the ocean
-    // haze uses, so cloud and water converge to one haze color.
-    // Ice-detection mode: 0.0 unless research mode has switched it on, and
-    // every branch on it below leaves the math bit-identical when off.
+    // Aerial perspective. `aer` is the colour distant cloud fades into: the
+    // sky at the horizon in this sightline's azimuth, solar disc excluded.
+    // The sea's haze fades into the same colour, so cloud and water converge
+    // on one.
+    //
+    // ice_on is the false-colour ice view (ice.wgsl).
     let ice_on = u.light_cache.w > 0.5;
-    // In ice mode most of the aerial haze is given up (select is 1.0 with
-    // the mode off): full strength converges every distant cloud onto the
-    // one horizon color and the phase information drowns in it.
+    // The ice view runs at 0.3 of the haze strength: at full strength every
+    // distant cloud converges on the one horizon colour and the phase
+    // colouring is lost in it.
     let aerial_strength = u.sky_horizon.w * select(1.0, 0.3, ice_on);
     var aer = vec3<f32>(0.0);
     if (aerial_strength > 0.0) {
         if (CITY) {
-            // At night the horizon asymptote is the host-packed night haze
-            // color directly; the daytime sky model has nothing to add.
+            // At night the target is the host's night haze colour itself.
             aer = u.sky_horizon.xyz;
         } else {
             let ah_len = length(dir.xy);
@@ -162,7 +178,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ah = dir.xy / ah_len;
             }
             if (ice_on) {
-                // Distance fades into the alien horizon, not the blue one.
+                // The green sky's horizon.
                 aer = alien_sky(vec3<f32>(ah, 0.0), sun, vec3<f32>(0.0));
             } else {
                 aer = sky_radiance(
@@ -174,36 +190,33 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    // Jittered first step: decorrelates the sampling shells between
-    // neighboring pixels, killing the coherent ring/banding artifact.
-    // Stratified over the accumulation (iter_011), so the shells a pixel tests
-    // across frames tile its entry interval instead of clumping.
-    // The entry step scale is the outer level's: the nest is required to lie
-    // strictly inside the outer AABB, so a ray always enters through it.
+    // Jittered first step: the march starts a random fraction of a step past
+    // t_near, which decorrelates the sampling shells of neighbouring pixels
+    // (coherent, they show as rings). The draw is stratified over the
+    // accumulation, so the shells a pixel tests over its frames tile the
+    // step. The step is the outer level's: the nest lies strictly inside the
+    // outer box, so a ray always enters through the outer level.
     let jitter = strat1(frame_index, strat_pixel, STRAT_STREAM_ENTRY,
                         STRAT_ALPHA_3);
-    // Independent stream for the sky probe's quadrature offset.
+    // The sky probe's quadrature offset, in [-0.5, 0.5).
     let probe_jitter = strat1(frame_index, strat_pixel,
                               STRAT_STREAM_SKY_PROBE,
                               STRAT_ALPHA_10) - 0.5;
-    // Independent stream for the sun march's quadrature offset (iter_003).
-    // Under the same jitter_on switch as the view march: turning jitter off
-    // asks for a deterministic march, and this is one, artifact and all.
+    // The sun march's quadrature offset. With jitter off it is zero and the
+    // sun march is deterministic.
     let shadow_jitter = jitter_on * jitter_scale
                         * strat1(frame_index, strat_pixel,
                                  STRAT_STREAM_SUN_MARCH,
                                  STRAT_ALPHA_4);
-    // Independent stream for the solar-cone draw (iter_007). Two uniforms:
-    // squared radius and azimuth on the disc.
+    // The draw on the solar disc: two uniforms, squared radius and azimuth.
     let sun_cone_seed = strat2(frame_index, strat_pixel,
                                STRAT_STREAM_SUN_CONE,
                                vec2<f32>(STRAT_ALPHA_5, STRAT_ALPHA_6));
     let penumbra_tan = SUN_ANGULAR_RADIUS * SUN_CONE_WIDEN
                        * jitter_on * jitter_scale;
-    // Built once here, not once per draw: same crosses, same normalize, same
-    // order, so every deflected direction is the number it always was.
+    // The disc's tangent frame, built once per fragment.
     let sun_frame = sun_tangent_frame(sun);
-    // Independent stream for the forward pre-march's quadrature offset.
+    // The forward pre-march's quadrature offset.
     let ahead_jitter = jitter_on * jitter_scale
                        * strat1(frame_index, strat_pixel,
                                 STRAT_STREAM_PREMARCH,
@@ -214,49 +227,43 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     var transmittance = 1.0;
     var col = vec3<f32>(0.0);
     var tau_depth = 0.0;
-    // Whether the march below shaded the water, tracked rather than inferred
-    // (docs/soar-bugs.md 6). The far-water fallback used to decide the same
-    // thing from `t_ocean > t_far`, which is only meaningful when the ray hit
-    // the box at all: ray_box returns t_near > t_far on a MISS with t_far
-    // still a positive finite number — the nearest exit plane of a box the
-    // ray never entered. Such a ray skips the march (the guard below wants
-    // t_near < t_far) and then failed the fallback too whenever that
-    // leftover t_far happened to exceed t_ocean, so the ocean was hit and
-    // nothing shaded it. Because t_far varies smoothly with direction that
-    // came out as a contiguous region of sky where the water should be,
-    // reachable with periodicity off and the camera just outside the domain
-    // looking down.
+    // Whether the surface (the water, or the city) has been composited. It
+    // is tracked and not inferred afterwards from t_ocean > t_far: on a miss
+    // ray_box returns t_near > t_far with t_far still a positive finite
+    // number (the nearest exit plane of a box the ray never entered), so a
+    // test against t_far would decide the far-water fallback wrongly for
+    // rays that pass beside the box.
     var ocean_consumed = false;
-    // The march reached the water. Shading it is left to the one
-    // ocean_shade_dispatch call after the loop rather than done here: the
-    // ocean shader carries two sun marches, and inlining it twice into
-    // fs_main cost the ocean views 7-9% for nothing (2026-09-23). The two
-    // paths computed the same expression on the same values — transmittance
-    // is not touched between this break and that call — so it is one call
-    // with two ways in.
+    // The march reached the water. It is shaded by the one
+    // ocean_shade_dispatch call after the loop, which also shades water the
+    // march never reached: the ocean shader holds two sun marches, and a
+    // second inlined copy of it would enlarge fs_main for nothing.
+    // Transmittance is not touched between the break and that call.
     var ocean_in_march = false;
-    // Optical depth this ray has already crossed, so the pre-march total can
-    // be turned into "what is still ahead of this sample". Unlike tau_depth
-    // this never resets: it is the ray's own coordinate along its chord.
+    // Optical depth this ray has crossed in total, which turns the
+    // pre-march's total into what is still ahead of a sample. Unlike
+    // tau_depth it never resets.
     var tau_view = 0.0;
-    // Whether the previous view sample sat inside the nest, so the march can
-    // notice the fine->coarse crossing (docs/soar-bugs.md 4).
+    // Whether the previous view sample was inside the nest, to detect the
+    // fine -> coarse crossing.
     var was_in_nest = false;
 
-    // The periodic march can legitimately cover several domain widths, so
-    // it gets more step headroom; the non-periodic bound is untouched.
+    // The periodic march can cover many domain widths, so it has a larger
+    // step cap.
     let max_view_steps = select(MAX_VIEW_STEPS, MAX_VIEW_STEPS_PERIODIC,
                                 periodic_on);
 
-    // How much new hemisphere the sightline probe covers that iter_001's
-    // vertical probe did not: the sine of the angle between the two.
+    // The pre-march's weight: the sine of the angle between the sightline
+    // and the vertical, i.e. how much of the hemisphere the sightline
+    // covers that the vertical sky probe does not.
     let ahead_novelty = sqrt(max(1.0 - dir.z * dir.z, 0.0));
 
-    // Spectrum of the buried residual of the diffuse fills — per frame, not
-    // per sample (it depends only on the two lighting spectra).
+    // Colour of the fill a buried sample keeps (deep_fill_tint). It depends
+    // only on the two lighting colours, so once per fragment.
     let deep_tint = deep_fill_tint(u.ambient_tint.xyz);
 
-    // One coarse pass over the whole sightline before anything is composited.
+    // The forward pre-march: one coarse pass over the whole sightline before
+    // anything is composited.
     var tau_total = 0.0;
     if (t_near >= 0.0 && t_near < t_far) {
         tau_total = premarch_tau_ahead(
@@ -266,10 +273,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     if (t_near >= 0.0 && t_near < t_far) {
         for (var i: i32 = 0; i < max_view_steps; i = i + 1) {
-            // witness.py:621-646 tests ocean before the t_far break so an
-            // ocean plane coincident with the box floor is still shaded.
-            // The water is shaded after the loop, by the same call that
-            // shades water the march never reached (see ocean_in_march).
+            // The surface is tested before the t_far break, so that a plane
+            // coincident with the box floor is still composited.
             if (ocean_on && t >= t_ocean) {
                 ocean_in_march = true;
                 ocean_consumed = true;
@@ -292,26 +297,20 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 break;
             }
             let p = u.cam_origin.xyz + t * dir;
-            // The active level sets the step scale, so the march refines on
-            // entering the nest and coarsens on leaving it. The dt-invariant
-            // powder term below is what lets the two levels composite
-            // without a brightness seam (witness.py header).
+            // The active level sets the step, so the march refines on
+            // entering the nest and coarsens on leaving it.
             let level = sample_level_at(p);
-            // Crossing OUT of the nest, the step length jumps fine -> coarse,
-            // but every ray crosses at the same geometric plane and arrives
-            // with at most a fine step's worth of phase — so sample phase
-            // past the seam covered barely half the coarse period, and the
-            // coherent remainder survived accumulation as stripes parallel
-            // to the seam (docs/soar-bugs.md 4; the A/B pinned the view
-            // march, not the light march). The cure is the file's usual one:
-            // an independent per-pixel-per-frame uniform phase, spanning the
-            // FULL effective coarse step — adding a full-period uniform
-            // modulo the period is uniform whatever the crossing
-            // distribution was, where re-using the entry draw or spanning
-            // only the step difference both leave a coherent residual
-            // (measured; the first attempt did the former and the stripes
-            // survived it). The reverse crossing needs nothing: a coarse
-            // period of phase folded into a fine one already covers it.
+            // Leaving the nest, the step jumps from fine to coarse. Every
+            // ray crosses the nest's face at the same plane and arrives with
+            // at most a fine step of phase, so past the seam the samples of
+            // neighbouring pixels and successive frames would cover only a
+            // fraction of the coarse step, and the coherent remainder would
+            // survive accumulation as stripes parallel to the seam. One more
+            // uniform phase is drawn, spanning the full coarse step: a
+            // uniform over a whole period, added modulo the period, is
+            // uniform whatever the incoming distribution was. Entering the
+            // nest needs nothing, since a coarse period of phase folded into
+            // a fine one already covers it.
             if (NESTED && was_in_nest && !level.in_nest) {
                 was_in_nest = false;
                 let seam_jitter = strat1(frame_index, strat_pixel,
@@ -327,9 +326,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             was_in_nest = level.in_nest;
             let sigma = level.sigma;
 
-            // Distance LOD: the step floor grows with distance so far
-            // wrapped copies march in angular, not metric, resolution
-            // (0 = fixed dt). Dense-sigma refinement still applies.
+            // Distance LOD: the step is at least t * u.periodic.z, a fixed
+            // angle, so distant cloud is marched at angular and not metric
+            // resolution (0 = fixed dt). The shortening in dense cloud still
+            // applies. The step then lands exactly on the far face, the
+            // water, the veil and the city, whichever comes first.
             var dt = step_dt_for_sigma(
                 sigma, max(level.dt_view, t * u.periodic.z)
             );
@@ -347,6 +348,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
 
             let d_tau = sigma * dt;
+            // Clear air: nothing to shade, and the depth since cloud entry
+            // resets.
             if (d_tau < EMPTY_DTAU_CUTOFF) {
                 tau_depth = 0.0;
                 t = t + dt;
@@ -356,16 +359,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             tau_depth = tau_depth + d_tau;
             tau_view = tau_view + d_tau;
 
-            // Ice-detection tint for this sample's cloud source terms.
-            // Exactly 1.0 with the mode off, so the multiplies below are
-            // bit-exact no-ops.
+            // The ice view's hue for this sample; vec3(1) with the mode off.
             var phase_tint = vec3<f32>(1.0);
             if (ice_on) {
                 phase_tint = ice_tint(ice_fraction_at(p));
             }
 
-            // Aerial perspective: clear-air transmittance camera->sample via
-            // the closed-form exponential atmosphere (witness._render_image).
+            // Aerial perspective: the clear-air transmittance from the
+            // camera to the sample, in closed form for a haze extinction
+            // beta0 exp(-z / H):
+            //   tau_air = beta0 (H / mu) (exp(-z0 / H) - exp(-z1 / H)),
+            // mu = dir.z, with the limit beta0 t exp(-z0 / H) for a
+            // horizontal ray and beta0 t for the uniform haze (H <= 0).
             var air_t = 1.0;
             if (aerial_strength > 0.0) {
                 let aer_beta0 = u.sky_bloom.w;
@@ -386,21 +391,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
 
             // A view ray takes many steps, so its shadow rays advance the
-            // offset by the golden ratio instead of reusing one value: the
-            // sequence is low-discrepancy along the march, which averages the
-            // quadrature noise down within a single frame rather than leaving
-            // it all for temporal accumulation.
+            // quadrature offset by the golden ratio and do not reuse one
+            // value. The sequence is low-discrepancy along the march, which
+            // averages the quadrature noise down within a single frame.
             let step_shadow_jitter = fract(
                 shadow_jitter + f32(i) * 0.6180339887498949
             );
-            // Draw this sample's point on the solar disc (iter_007). The R2
-            // additive recurrence advances both coordinates along the view
-            // march for the same reason the golden ratio advances the
-            // quadrature phase above: the many shadow rays that composite into
-            // one pixel then cover the disc low-discrepancy within a single
-            // frame, so soar's first frame shows a soft edge with light dither
-            // rather than a hard edge that only melts once accumulation
-            // settles.
+            // This sample's point on the solar disc. The R2 additive
+            // recurrence (the golden ratio's 2D analogue) advances both
+            // coordinates along the march for the same reason: the shadow
+            // rays that composite into one pixel cover the disc within a
+            // single frame, so a shadow's edge is soft from the first frame
+            // and not only once the accumulation settles.
             let sun_shadow = sun_cone_dir(
                 sun, sun_frame,
                 fract(sun_cone_seed + f32(i) * vec2<f32>(
@@ -408,10 +410,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 )),
                 penumbra_tan
             );
-            // The cache replaces the march, the disc jitter and the
-            // distance-LOD coarsening in one move: it is the central-sun,
-            // zero-jitter tau at the cache's own resolution, trilinearly
-            // filtered. See Uniforms.light_cache.
+            // Under LIGHT_CACHE the baked value stands in for the march: the
+            // central sun, no disc draw, no distance LOD (sample_light_tau).
             var tau_sun: f32;
             if (LIGHT_CACHE) {
                 tau_sun = sample_light_tau(p);
@@ -420,37 +420,30 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                                           step_shadow_jitter);
             }
             let light_transfer_split_strength = u.ambient_tint.w;
-            // Unconditional: the diffuse beam and the high-sun skylight
-            // consume this gate too, so computing it only when the storm
-            // machinery is enabled would hand a buried storm the full
-            // shallow treatment when suppression/AO/split are all zero
-            // (codex review 2026-08-11, finding 3).
-            // Log-space: per-e-fold travel between tau 15 and 1000 (see the
-            // DEEP_SHADOW_TAU constants). The max() guard only matters for
-            // tau_sun < 1, which is far below the gate's onset anyway.
+            // The deep-shadow gate, in log tau (see DEEP_SHADOW_TAU_START).
+            // It is computed whatever the strengths of the deep-shadow terms
+            // are, because the diffused beam and the high-sun skylight read
+            // it too. The max() guards the log as tau_sun -> 0, far below
+            // the gate's onset.
             let deep_shadow_gate = smoothstep(
                 DEEP_SHADOW_LOG_TAU_START, DEEP_SHADOW_LOG_TAU_FULL,
                 log(max(tau_sun, 1e-3))
             );
 
-            // Moderate-shadow gate: where the beam and MS octaves are spent
-            // but the deep-shadow machinery has not engaged. This is where
-            // the skylight fill lives. Exponential onset — see the
-            // SHADOW_SKYLIGHT_TAU_ONSET comment for why not a smoothstep.
+            // The moderate-shadow gate, which the high-sun skylight fill
+            // uses (see SHADOW_SKYLIGHT_TAU_ONSET).
             let shadow_gate = 1.0 - exp(-tau_sun / SHADOW_SKYLIGHT_TAU_ONSET);
 
-            // Sky visibility, measured (hoisted from the diffuse block below
-            // so the MS floor can use it too). Run for any meaningfully
-            // shadowed sample — elsewhere tau_sun still carries the shading
-            // and this costs nothing. One probe serves every consumer.
+            // Sky visibility overhead: one probe for every consumer. It is
+            // skipped only where neither gate is open, which is where
+            // tau_sun is zero.
             var t_sky = 1.0;
             var shallow_open = 0.0;
             if (shadow_gate > 0.0 || deep_shadow_gate > 0.0) {
                 if (!SKY_PROBE) {
-                    // Sky probe disabled (a cost/look toggle, J in the
-                    // browser): every consumer sees a fully open sky, which
-                    // is the neutral the floors already assume. Buried
-                    // samples brighten — that is the look being priced.
+                    // Sky probe compiled out: every consumer sees a fully
+                    // open sky, the neutral value the floors assume. Buried
+                    // samples are then brighter.
                     shallow_open = 1.0;
                 } else {
                     t_sky = sky_probe_transmittance(p, g_hg, probe_jitter);
@@ -459,38 +452,30 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     );
                 }
             }
-            // A buried storm sample keeps the full tuned suppression; an
-            // optically open shallow shadow keeps only a quarter of it.
+            // A buried sample keeps the whole suppression; an open shallow
+            // shadow keeps SHALLOW_SUPPRESSION_KEEP of it.
             let storm_weight = mix(
                 SHALLOW_SUPPRESSION_KEEP, 1.0, 1.0 - shallow_open
             );
 
-            // Diffusion depth for the isotropic tail (see MS_TAIL_FLOOR).
-            // The knee is what keeps this a *contrast* change rather than a
-            // dimming: below it the factor is exactly 1, so thin cloud and
-            // the directly lit shoulder of a turret are bit-identical to
-            // iter_001 and only the genuinely self-shadowed parts move.
+            // Diffusion depth of the isotropic octaves (see MS_TAIL_FLOOR).
+            // Exactly 1 below the knee.
             let ms_tail_factor = MS_TAIL_FLOOR + (1.0 - MS_TAIL_FLOOR)
                 * diffuse_transmittance(
                     max(tau_sun - MS_TAIL_TAU_KNEE, 0.0), g_hg
                 );
 
-            // Local surface frame. Hoisted above the MS loop (iter_006) so the
-            // tail can be weighted by the beam's incidence on the skin; the
-            // gradient *shading* below consumes exactly these values in exactly
-            // the same way it did, so that term is untouched.
+            // The local surface frame: the density gradient and the gate on
+            // its use (see GRADIENT_SHADING_*).
             //
-            // The stencil is skipped on the entry skin, where it cannot
-            // matter. surface_gate's depth factor is a smoothstep that is
-            // exactly 0 at or below GRADIENT_SHADING_TAU_START, and with the
-            // gate at exactly 0 every consumer of the gradient is exactly
+            // The stencil, twelve texture reads, is skipped on the entry
+            // skin, where it cannot matter. At tau_depth <=
+            // GRADIENT_SHADING_TAU_START the gate's depth factor is exactly
+            // 0, and with the gate at 0 every consumer of the gradient is
             // neutral: tail_mu_factor is mix(1, x, 0), gradient_factor is
-            // max(0.2, 1 + 0) and fill_shape is mix(1, 1, w). Leaving grad at
-            // zero takes the grad_len guards below instead, which leave the
-            // same three ones in place. That saves twelve texture reads per
-            // sample over the first quarter optical depth after every cloud
-            // entry — most of a thin field's samples, a few percent of a
-            // thick one's.
+            // max(0.2, 1 + 0) and fill_shape is mix(1, 1, w). Leaving grad
+            // at zero takes the grad_len guards below instead, which leave
+            // the same three ones in place.
             var grad = vec3<f32>(0.0);
             var grad_len = 0.0;
             var surface_gate = 0.0;
@@ -513,11 +498,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
             }
 
-            // Beam incidence on the skin, relative to a horizontal face (see
-            // the TAIL_MU_* block). Exactly 1 where the field is level, so it
-            // costs no brightness on flat cloud top and only the flanks of
-            // turrets and the walls of the crevices between them give the tail
-            // up.
+            // Beam incidence on the skin relative to a horizontal face (see
+            // TAIL_MU_FLOOR). 1 where the cloud top is level.
             var tail_mu_factor = 1.0;
             if (grad_len > 1e-12) {
                 let mu0 = max(-dot(grad, sun) / grad_len, 0.0);
@@ -531,6 +513,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
             }
 
+            // The octaves (see MS_OCTAVES).
             var ms = vec3<f32>(0.0);
             var ms_atten = 1.0;
             for (var octave: i32 = 0; octave < MS_OCTAVES; octave = octave + 1) {
@@ -539,10 +522,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 let oct_phase = phase * (1.0 - blend) + ISO_PHASE * blend;
                 var contrib = ms_atten * t_sun_ms * oct_phase;
                 let iso_gate = smoothstep(0.35, 1.0, blend);
-                // Octaves 0-1 still carry the beam and keep their exact
-                // baseline value; the tail is put on the diffusion depth in
-                // proportion to how isotropic it has already become, so the
-                // handover is continuous and nothing is double-counted.
+                // Octaves 0 and 1 carry the beam and are left as they are.
+                // The diffusion-depth and incidence factors come in with
+                // iso_gate, i.e. in proportion to how isotropic the octave
+                // already is, so the handover is continuous.
                 contrib = contrib
                     * mix(1.0, ms_tail_factor * tail_mu_factor, iso_gate);
                 if (deep_shadow_ms_suppression > 0.0) {
@@ -559,18 +542,17 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ms_atten = ms_atten * MS_ATTEN;
             }
 
-            // The diffraction spike joins the ladder as part of the
-            // once-scattered term: octave 0's transmittance, no tail or
-            // suppression factors (octave 0's iso_gate is 0), and it shares
-            // the direct-boost and gradient multipliers below exactly as
-            // octave 0 does. The guard is per-pixel-coherent (the window is
-            // constant along the ray), so far-from-sun pixels skip the exp.
+            // The diffraction spike joins as part of the once-scattered
+            // term: octave 0's transmittance, none of the tail or
+            // suppression factors, and the direct boost and gradient factor
+            // below, as octave 0 has them. The guard is constant along the
+            // ray, so pixels far from the sun skip the exp.
             if (phase_diffraction > 0.0) {
                 ms = ms + phase_diffraction * exp(-tau_sun) * u.cloud_sun.xyz;
             }
 
-            // Light-transfer split, warm side: modest boost of the unoccluded
-            // direct/MS source at low sun (witness iter_006).
+            // Light-transfer split, direct side: a modest boost of the
+            // unoccluded beam at low sun.
             if (light_transfer_split_strength > 0.0) {
                 let direct_factor = 1.0 + light_transfer_split_strength
                     * LIGHT_TRANSFER_DIRECT_BOOST
@@ -578,14 +560,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 ms = ms * direct_factor;
             }
 
-            // fill_shape carries the surface's billow orientation into the
-            // diffuse fills below (2026-08-11): once tau_sun saturates, ms
-            // is spent and every remaining light source was orientation-
-            // blind, so shaded cloud went flat. Real anvil undersides
-            // (IMG_7053) keep soft billow definition deep into shadow. The
-            // fills take the same measured gradient at reduced weight —
-            // diffuse light is directional enough to shade billows, just
-            // more softly than the beam.
+            // Gradient shading of the beam terms, and fill_shape: the same
+            // factor at reduced weight, for the diffuse fills below (see
+            // FILL_GRADIENT_WEIGHT). Without it shadowed cloud, which only
+            // the fills light, has no billow relief.
             var fill_shape = 1.0;
             if (gradient_shading_strength > 0.0) {
                 if (grad_len > 1e-12) {
@@ -605,45 +583,28 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 }
             }
 
-            // Powder is a function of cumulative optical depth since the current
-            // cloud entry, not the current step size (witness.py:729-732).
-            // powder_weight is the scattering-geometry dependence powder has
-            // always been missing; at weight 1 this is exactly the old
-            // expression. Note no extra depth gate is needed: the deficit it
-            // scales, exp(-POWDER_COEFF * tau_depth), is already dead by
-            // tau_depth ~ 2, so the change is confined to the thin skin and
-            // the edges, which is where the physics lives.
+            // Powder (see POWDER_COEFF): a function of the optical depth
+            // since cloud entry, not of the step size. It needs no depth
+            // gate of its own, since exp(-POWDER_COEFF * tau_depth) is
+            // negligible by tau_depth ~ 3.
             let powder = 1.0 - powder_weight * exp(-POWDER_COEFF * tau_depth);
             let scatter_weight = d_tau * powder * transmittance * air_t;
             col = col + ice_recolor(scatter_weight * ms, phase_tint, ice_on);
 
-            // (t_sky and shallow_open were measured above the MS loop.)
-
-            // Second probe direction, free from the pre-march: how much cloud
-            // lies beyond this sample along the sightline. A skin sample on a
-            // wisp is open both ways and keeps its full diffuse fill; the
-            // same skin on a deep mass is open only backward, toward the
-            // camera, and is a poor place for diffuse light to reach. This is
-            // the whole of the entry-face thick/thin distinction, and because
-            // the direction is the sightline the structure it reports is
-            // registered with the silhouette: a luminous fringe around every
-            // edge and gap, with the body behind it falling away.
+            // The pre-march's factor on the diffuse fills (see
+            // AHEAD_STEP_SCALE): how buried the sample is along the
+            // sightline.
             //
-            // It multiplies the diffuse terms rather than feeding t_sky,
-            // deliberately. Both consumers of t_sky wrap it in a floor
-            // (ambient_occlusion_floor, SKY_PROBE_FILL_FLOOR) that exists so
-            // one vertical measurement cannot drive a sample to black; the
-            // forward measurement is independent evidence about a different
-            // part of the hemisphere and should not be spent inside another
-            // term's safety floor. It carries its own.
+            // It multiplies the fills and does not feed t_sky. Both
+            // consumers of t_sky wrap it in a floor (ambient_occlusion_floor,
+            // SKY_PROBE_FILL_FLOOR) that exists so that one vertical
+            // measurement cannot drive a sample to black. The forward
+            // measurement is independent evidence about another part of the
+            // hemisphere, and it carries its own floor.
             //
-            // Its weight is the sine of the angle between the two probe
-            // directions (ahead_novelty, hoisted out of the loop). A sightline
-            // pointing straight up is re-measuring what iter_001 already
-            // measured and must not be counted twice; an oblique or horizontal
-            // one is genuinely new information about the hemisphere. That is
-            // the whole of the two-direction quadrature: coincident samples
-            // collapse to one, orthogonal samples both count.
+            // ahead_novelty weights it: a sightline straight up repeats the
+            // sky probe and must not be counted twice, while a horizontal
+            // one is wholly new.
             var ahead_factor = 1.0;
             if (deep_shadow_gate > 0.0) {
                 let tau_ahead = max(tau_total - tau_view, 0.0);
@@ -655,10 +616,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 );
             }
 
-            // Ambient: height-based on the outer box (witness._render_image).
-            // The ramp floor is by openness: a storm interior keeps the tuned
-            // 0.3, an open shallow base — which sees sky sideways and bright
-            // surface below — keeps 0.6 of the full fill.
+            // Ambient fill. It ramps with height in the outer box, from a
+            // floor that is AMBIENT_HEIGHT_FLOOR for a buried sample and
+            // AMBIENT_HEIGHT_FLOOR_SHALLOW for an open shallow base.
             let h = clamp((p.z - u.bmin.z) / (u.bmax.z - u.bmin.z), 0.0, 1.0);
             let height_floor = mix(
                 AMBIENT_HEIGHT_FLOOR, AMBIENT_HEIGHT_FLOOR_SHALLOW,
@@ -667,27 +627,26 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             let height_ramp = height_floor + (1.0 - height_floor) * h;
             let amb = ambient_strength * height_ramp * ahead_factor
                       * fill_shape;
-            // The constant deep-shadow floor becomes the T_sky -> 0 limit
-            // of a measured factor: fully buried samples land on exactly
-            // ambient_occlusion_floor as before, and everything less
-            // buried lifts continuously toward unoccluded.
+            // Ambient occlusion from the measured sky visibility. With
+            // s = strength * storm_weight * deep_shadow_gate and
+            // floor = ambient_occlusion_floor,
             //
-            //   amb_factor = (1 - s) + s*floor + s*(1 - floor)*t_sky
+            //   amb_factor = (1 - s) + s*floor + s*(1 - floor)*t_sky,
             //
-            // written out rather than as a mix() because its three pieces do
-            // not share a spectrum. The first two are the fill a buried
-            // sample keeps; the third is the part measured to arrive from the
-            // sky. Summed, the weights are exactly the old amb_factor, so
-            // this is a spectral split at unchanged luminance.
+            // so a fully buried sample (t_sky = 0) keeps `floor` and less
+            // buried ones rise continuously to 1. It is written as two
+            // weights and not as a mix() because the pieces differ in
+            // colour: the s*floor part is the fill a buried sample keeps
+            // (fill_tint), and the rest arrives from the sky (the ambient
+            // tint).
             let ao_s = select(
                 0.0,
                 clamp(ambient_occlusion_strength, 0.0, 1.0)
                     * storm_weight * deep_shadow_gate,
                 ambient_occlusion_strength > 0.0
             );
-            // Open shallow shadow is filled by skylight and keeps the
-            // ambient's blue; only genuinely buried fill decays to the
-            // neutral deep tint (same luminance, storm-tuned chroma).
+            // An open shallow shadow is filled by skylight and keeps the
+            // ambient's blue. Only buried fill takes the deep tint.
             let fill_tint = mix(deep_tint, u.ambient_tint.xyz, shallow_open);
             let amb_w_deep = ao_s * ambient_occlusion_floor;
             let amb_w_sky = (1.0 - ao_s)
@@ -697,16 +656,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 * (amb_w_sky * u.ambient_tint.xyz
                    + amb_w_deep * fill_tint), phase_tint, ice_on);
 
-            // Light-transfer split, cool side: a skylight floor restored only
-            // in saturated sun shadow; lit faces keep their contrast. The
-            // tuned low-sun path, unchanged.
+            // Light-transfer split, shadow side: a skylight fill in
+            // saturated sun shadow only, so lit faces keep their contrast.
             if (light_transfer_split_strength > 0.0
                 && deep_shadow_gate > 0.0) {
-                // Same measured visibility: this fill is skylight too, and it
-                // is the larger of the two diffuse terms, so leaving it flat
-                // would wash the structure back out.
-                // Same spectral split as the ambient above: the floor part is
-                // sunlight that diffused in, the t_sky part is sky.
+                // The same visibility and the same split by colour as the
+                // ambient: the floor part is sunlight that diffused in, the
+                // t_sky part is sky.
                 let fill_w_deep = deep_shadow_gate * SKY_PROBE_FILL_FLOOR;
                 let fill_w_sky = (1.0 - deep_shadow_gate)
                     + deep_shadow_gate * (1.0 - SKY_PROBE_FILL_FLOOR) * t_sky;
@@ -720,15 +676,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                        + fill_w_deep * fill_tint), phase_tint, ice_on);
             }
 
-            // High-sun shadow skylight (2026-08-11): where the split above
-            // is gated off, moderately shadowed samples used to get no
-            // skylight at all — the beam and the MS octaves are spent by
-            // tau_sun ~ 20, so a fair-weather base went from white to dark
-            // grey across a few steps. Openness decides the coefficient
-            // (a buried storm interior keeps almost nothing, which is what
-            // keeps storm bases dark), and the measured sky visibility
-            // carves the spatial structure so bases brighten toward their
-            // edges and thin spots.
+            // High-sun shadow skylight: the counterpart of the fill above
+            // where the split is off (see HIGH_SUN_SHADOW_SKYLIGHT_STORM).
+            // Openness sets the coefficient: a buried storm interior keeps
+            // almost none, which is what keeps storm bases dark. The sky
+            // visibility gives it spatial structure, so bases brighten
+            // toward their edges and thin spots.
             let high_sun_fill = (1.0 - light_transfer_split_strength)
                 * mix(HIGH_SUN_SHADOW_SKYLIGHT_STORM,
                       HIGH_SUN_SHADOW_SKYLIGHT_SHALLOW,
@@ -742,10 +695,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     * vis * u.ambient_tint.xyz, phase_tint, ice_on);
             }
 
-            // Diffused-beam glow (see the constants block): isotropic
-            // re-emission of the diffusion tail of the direct beam. The
-            // dominant base-lighting term for moderately thick fair-weather
-            // cloud; fades to a quarter for buried storm interiors.
+            // Diffused beam (see DIFFUSE_BEAM_STRENGTH): isotropic emission
+            // of the sun's diffusion tail. It is the main light on the base
+            // of a moderately thick fair-weather cloud. A buried storm
+            // interior keeps DIFFUSE_BEAM_STORM_KEEP of it.
             let diffuse_beam = DIFFUSE_BEAM_STRENGTH
                 * diffuse_transmittance(tau_sun, g_hg)
                 * (1.0 - exp(-tau_sun / DIFFUSE_BEAM_TAU_ONSET))
@@ -759,22 +712,21 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     phase_tint, ice_on);
             }
 
-            // City uplight: the second light source of the night. The glow
-            // mip under the sample at a footprint of its own height (the
-            // solid-angle average of the city it actually sees), times the
-            // two-stream transmittance of the cloud below, delivered like
-            // the ambient fill. Replaces the daytime surface bounce, which
-            // is gated off under CITY just below.
+            // City uplight (see CITY_UPLIGHT_STRENGTH): the glow under the
+            // sample over a footprint of the sample's own height, times the
+            // transmittance of the cloud below, delivered like the ambient
+            // fill. It takes the place of the surface bounce.
             if (CITY) {
-                // Never below mip 1: mip 0's r is the density the heights
-                // come from, the glow starts at mip 1 (export_web_assets).
+                // Never below mip 1: mip 0's red channel holds the density
+                // the building heights come from, and the glow starts at
+                // mip 1.
                 let up_lod = clamp(
                     // @domain: a positive max over u.ocean_params.x, the surface tile's cell size (> 0)
                     log2(max(p.z, u.ocean_params.x) / u.ocean_params.x),
                     1.0, u.ocean_params.w);
                 let g_raw = max(
-                    // p is a WORLD cloud sample: convert for the glow
-                    // (city frame), keep world for the tau probe below.
+                    // p is a world point: folded into the city's frame for
+                    // the glow, kept in world space for the tau probe.
                     city_glow_sample(city_fold_xy(p.xy), up_lod)
                         - CITY_UPLIGHT_GLOW_BIAS,
                     0.0);
@@ -787,34 +739,22 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                             * fill_shape * CITY_UPLIGHT_COLOR;
             }
 
-            // Surface bounce is anchored at physical z=0, not the AABB floor.
+            // Surface bounce (see BOUNCE_STRENGTH), measured from z = 0 and
+            // not from the box floor.
             if (BOUNCE_STRENGTH > 0.0 && !CITY) {
                 let bounce_frac = clamp(1.0 - p.z / u.bmax.z, 0.0, 1.0);
                 var bounce = BOUNCE_STRENGTH * bounce_frac;
                 if (bounce_depth_attenuation > 0.0) {
                     bounce = bounce * exp(-bounce_depth_attenuation * tau_depth);
                 }
-                // The surface underneath is in this cloud's own shadow. The
-                // bounce pedestal only exists in proportion to the sunlight
-                // that actually reaches the ground, and under a saturated
-                // column that is nearly none — which is why a real storm
-                // base is dark and this one was not. tau_depth alone could
-                // never see it: every base sample has just entered the
-                // cloud, so the existing depth attenuation is the same
-                // number everywhere across a base and the term composited
-                // as a flat pedestal over the whole frame. Faded in by the
-                // saturation gate, so thin cloud keeps its bounce exactly.
-                //
-                // A lateral floor (iter_001 flagged this as the one thing it
-                // would tune): the ground a base sample sees is a hemisphere,
-                // not a point, and a cloud shadow is finite. Beyond its edge
-                // is sunlit surface, and that light reaches the base without
-                // ever passing through the saturated column overhead — so the
-                // sunward attenuation must not run to zero. T(80) = 0.10 with
-                // no floor; the floor puts it back to a small but nonzero
-                // pedestal, and because BOUNCE_TINT is warm it restores
-                // warmth exactly at the cloud base, where the accumulated
-                // blue collected worst.
+                // The ground under a saturated column is in the cloud's own
+                // shadow, and the bounce exists only in proportion to the
+                // sunlight that reaches the ground. tau_depth cannot see
+                // that: every base sample has only just entered the cloud.
+                // So under the deep-shadow gate the bounce is scaled by the
+                // column's two-stream transmittance, floored at
+                // BOUNCE_LATERAL_FLOOR for the sunlit ground beyond the
+                // shadow's edge.
                 bounce = bounce * mix(
                     1.0,
                     max(diffuse_transmittance(tau_sun, g_hg),
@@ -826,14 +766,13 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                     phase_tint, ice_on);
             }
 
-            // This step's attenuation, computed once. The aerial in-scatter
-            // below and the transmittance update are the same exp of the same
-            // operand; the compiler cannot always see that across the branch,
-            // and it is one transcendental per view step either way.
+            // This step's attenuation, computed once for the in-scatter and
+            // for the transmittance update.
             let step_atten = exp(-d_tau);
 
-            // Aerial in-scatter: sky light scattered into the path replaces
-            // exactly the radiance this sample occludes.
+            // Aerial in-scatter. The source terms above were attenuated by
+            // air_t; the fraction 1 - air_t of this step's opacity is filled
+            // with the haze colour.
             if (aerial_strength > 0.0 && air_t < 1.0) {
                 let aer_in = transmittance
                     * (1.0 - step_atten)
@@ -846,19 +785,14 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    // Ocean for rays that exit or MISS the outer box without becoming opaque.
-    // The condition is what it always meant to say — the water was hit, the
-    // ray still carries light, and the march did not already shade it — with
-    // no reference to a t_far that a missing ray never had (see
-    // ocean_consumed above).
+    // The water, for rays that leave or miss the box without becoming
+    // opaque: it was hit, the ray still carries light, and the march did not
+    // already reach it.
     //
-    // The 50-outer-width clamp below is a second, much larger-scale version
-    // of the same shape and is deliberately left alone: past it the water is
-    // unshaded and the sky shows through, but at that range the ocean's own
-    // aerial haze (ocean_realism_b.y * t_hit) has already carried it onto the
-    // horizon sky colour, so the seam is invisible at the shipped settings
-    // and only appears with the legacy no-haze ocean. Removing it is a look
-    // change — water drawn to the edge of the float — not a bug fix.
+    // Beyond 50 box widths from the box's centre the water is not shaded and
+    // the sky shows through. At that range the sea's own haze
+    // (ocean_realism_b.y * t_hit) has carried it onto the horizon colour, so
+    // the seam shows only with that haze off.
     var shade_ocean = ocean_in_march;
     if (ocean_on
         && !ocean_consumed
@@ -891,9 +825,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         transmittance = transmittance * veil.trans;
     }
 
-    // City for rays that exit or miss the volume without becoming opaque —
-    // the night twin of the far-water fallback above, minus the range clamp
-    // (the city fog has already carried a distant hit onto the haze).
+    // The city, for rays that leave or miss the volume without becoming
+    // opaque: the counterpart of the water above, without the range clamp
+    // (the city's fog has already carried a distant hit onto the haze).
     if (CITY
         && !ocean_consumed
         && transmittance > TRANSMITTANCE_CUTOFF
@@ -902,6 +836,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         transmittance = 0.0;
     }
 
+    // Whatever transmittance is left sees the sky.
     if (transmittance > TRANSMITTANCE_CUTOFF) {
         var sky: vec3<f32>;
         if (CITY) {
@@ -917,6 +852,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
         col = col + transmittance * sky;
     }
+    // Alpha is 1, except under the live steam, where it carries t_front.
     if (!TONE_MAP) {
         return vec4<f32>(col, 1.0);
     }

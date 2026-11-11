@@ -1,7 +1,18 @@
-const OCEAN_SHADOW_FLOOR: f32 = 0.35; // witness legacy ocean shadow floor
+// The sea: an opaque plane at z = u.ocean.x whose surface is a static wave
+// field. There are two shaders. ocean_shade is the simple one: a mirror of a
+// fixed sky gradient over a Lambertian water body. ocean_shade_realism
+// reflects the rendered sky over the unresolved slope distribution, adds a
+// GGX sun glint drawn as glitter, and hazes the water with distance.
+// ocean_shade_dispatch picks between them by u.ocean_realism_a.x.
 
-// Ocean reflection sky ported from witness._reflection_sky
-// (witness.py lines 445-470).
+// ocean_shade: the fraction of its brightness the water keeps in full cloud
+// shadow.
+const OCEAN_SHADOW_FLOOR: f32 = 0.35;
+
+// The sky ocean_shade reflects: a fixed gradient from horizon to zenith
+// (the colours of SKY_BASE_HORIZON and SKY_ZENITH, weight (1 - z)^3 on the
+// horizon) plus a warm lobe about the sun, a Lorentzian in 1 - cos at half
+// its peak where 1 - cos = 0.02 (11.5 deg).
 fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
@@ -21,16 +32,19 @@ fn ocean_reflection_sky(dir: vec3<f32>, sun: vec3<f32>) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// The sea: a static FIF wave field (cloudyview/ocean_fif.py), 1024^2 texels of
-// 0.1 m (102.4 m, tiled), stored as unit normals with box-filtered mips and
-// bound at 3. A pixel reads the mip its footprint covers; what that mip
-// averaged away is handed back as slope variance — to the microfacet lobe,
-// and in part to the sky reflection's integral over slope.
+// The wave field: a static FIF (fractionally integrated flux) tile, 1024^2
+// texels of 0.1 m (102.4 m, repeated), stored as unit normals with
+// box-filtered mips at binding 3. A pixel reads the mip its footprint
+// covers. What that mip averaged away is handed back as slope variance: to
+// the glint's microfacet lobe, and in part to the sky reflection's integral
+// over slope.
 
-// The slope variance each mip level removed from the tile's normals (level 0
-// removes none; by the top, the tile's whole 0.098 RMS slope). A switch, not
-// a const array: a runtime-indexed array costs a private variable at
-// fs_main's entry and moves every scene's registers.
+// The slope variance each mip level has removed from the tile's normals:
+// none at level 0, and by the top level the tile's whole variance (an RMS
+// slope of 0.098). The table belongs to the tile and changes with it. It is
+// a switch and not a const array because a module-scope array indexed at run
+// time costs a private variable at fs_main's entry, which enlarges every
+// scene's fragment program.
 fn fif_slope_variance(k: i32) -> f32 {
     switch k {
         case 0: { return 0.000000; }
@@ -47,6 +61,7 @@ fn fif_slope_variance(k: i32) -> f32 {
     }
 }
 
+// The table, linearly interpolated at a fractional mip level.
 fn fif_slope_variance_removed(lod: f32) -> f32 {
     let l0 = clamp(floor(lod), 0.0, 10.0);
     let l1 = min(l0 + 1.0, 10.0);
@@ -54,6 +69,9 @@ fn fif_slope_variance_removed(lod: f32) -> f32 {
     return mix(fif_slope_variance(i32(l0)), fif_slope_variance(i32(l1)), f);
 }
 
+// The tile's normal at one mip level. The tile is read at
+// (world - surface offset) / extent; the half-texel shift puts texel i's
+// centre at i cells.
 fn ocean_normal_mip_sample(world_xy: vec2<f32>, level: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, i32(level)));
     let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
@@ -74,23 +92,23 @@ fn ocean_wave_normal_mipped(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     return normalize(n);
 }
 
-// Glitter. The glint lobe is the MEAN of what the unresolved facets in a
-// footprint reflect, and it is the right mean — but the sun is a disc 0.27
-// degrees across, so of the facets under a pixel only a handful, or none,
-// tilt to send it to the camera: a pixel is either one brilliant facet or
-// dark water, which is what glitter is. So the footprint's glint is drawn as
-// K / lambda times the lobe, K ~ Poisson(lambda), lambda the expected number
-// of facets that reflect the disc: (footprint / facet area) times the
-// probability one does, D(h) (n.h) / (4 v.h) times the sun's solid angle.
-// E[K / lambda] = 1, so the mean — and the far field, where lambda is
-// large and the draw is 1 to within its own noise — is untouched. The draw
-// is anchored to a cell of the sea at the pixel's own scale, in the tile's
-// frame, so a parked view keeps its sparkles (accumulation does not average
-// them away: they are the surface, not noise).
+// Glitter. The glint lobe is the mean of what the unresolved facets in a
+// footprint reflect. But the sun is a disc 0.53 deg across, so of the facets
+// under a pixel only a handful, or none, are tilted to send it to the
+// camera: a pixel is one brilliant facet or dark water. So the footprint's
+// glint is drawn as K / lambda times the lobe, K ~ Poisson(lambda), with
+// lambda the expected number of facets that reflect the disc:
+// (footprint / facet area) times the probability that one does,
+// D(h) (n.h) / (4 v.h) times the sun's solid angle. E[K / lambda] = 1, so
+// the mean is untouched, and so is the far field, where lambda is large and
+// the draw is 1 to within its own noise. The draw is seeded by a cell of the
+// sea at the pixel's own scale, fixed in the tile's frame, so a parked view
+// keeps its sparkles: they are the surface, not noise for the accumulation
+// to average away.
 //
-// A capillary facet is ~1 cm (the base roughness is everything below the
-// tile's 0.1 m). Cells are that times a power of two, so a whole number of
-// them spans the tile and the pattern folds with it.
+// A capillary facet is ~1 cm (the base roughness stands for everything below
+// the tile's 0.1 m texel). Cells are that times a power of two, so a whole
+// number of them spans the tile and the pattern repeats with it.
 const SEA_GLITTER_FACET_M: f32 = 0.0125;          // 102.4 m / 2^13
 const SEA_SUN_SOLID_ANGLE: f32 = 6.8e-5;          // pi (0.266 deg)^2
 
@@ -102,37 +120,39 @@ fn sea_uniforms(seed: vec2<u32>) -> vec2<f32> {
 
 // How bright the K facets that catch the sun are, in units of the mean
 // facet. A facet's contribution goes as its area and as how squarely it
-// holds the disc, and neither is the same from facet to facet: most glints
-// are faint and a few are blinding. So each facet is a lognormal draw of
-// mean exactly 1 (sigma SEA_GLITTER_SPREAD) and the K are summed, which
-// keeps E[sum / lambda] = 1 — the far field untouched — while a lone
-// sparkle is no longer always the same clipped dot. Past a few facets the
-// sum is its mean, K: the pixel holds enough of them to average.
+// holds the disc, and both vary from facet to facet: most glints are faint
+// and a few are blinding. So each facet is a lognormal draw of mean exactly
+// 1 (log standard deviation SEA_GLITTER_SPREAD) and the K are summed, which
+// keeps E[sum / lambda] = 1. Past a few facets the sum is replaced by its
+// mean, K.
 const SEA_GLITTER_SPREAD: f32 = 1.3;
-// Glitter lives in the core of the sun's lobe — around its reflection —
-// and nowhere else. Out in the lobe's tails a lone facet catching the sun is
-// possible but rare, and drawn as such it strewed the whole sea with
-// equally bright dots that read as snow (Thomas, 2026-09-25: "Exactly.
-// Snow."). So the draw is blended toward its own mean, the smooth lobe, by
-// where the half vector sits in the lobe: GGX D(h) over its peak, 1 on the
-// sun's reflection, falling as the facets that would reflect it get rarer.
-// And only where a glitter cell expects a few glints: with lambda well
-// under one, a drawn cell is almost always empty, and next to smooth sheen
-// an empty cell on a sunlit wave face reads as a hole in the water (a dark
-// blob round one dot) rather than as glitter; from a few glints up an empty
-// cell is rare (e^-4 at lambda 4) and the draw reads as texture. The weight
-// reads the count at the footprint's own size, not the cell's: the cell is
-// rounded to a power of two, so lambda jumps fourfold where it steps — as
-// wide as this ramp — and a ramp on it would draw a contour at a fixed
-// footprint, sheen on one side and texture on the other. The draw's mean is 1 (E[K / lambda] = 1, and each facet's
-// brightness has mean 1), so any blend keeps the lobe's mean exactly — the
-// energy stays the smooth Cox-Munk specular's, with the sparkles only where
-// it is bright and the footprint holds enough of them.
+// Where glitter is drawn.
+//
+// Only in the core of the sun's lobe, around its reflection. Out in the
+// lobe's tails a lone facet catching the sun is possible but rare, and drawn
+// as such it strews the whole sea with equally bright dots. So the draw is
+// blended toward its own mean, the smooth lobe, by where the half vector
+// sits in the lobe: GGX D(h) over its peak, which is 1 on the sun's
+// reflection (CORE_LO to CORE_HI).
+//
+// And only where a footprint expects a few glints (FEW to MANY). With lambda
+// well under one a cell is almost always empty, and beside smooth sheen an
+// empty cell on a sunlit wave face reads as a hole in the water. From a few
+// glints up an empty cell is rare (e^-4 at lambda = 4) and the draw reads as
+// texture. This weight takes the expected count at the footprint's own size
+// and not the cell's: the cell is rounded to a power of two, so its lambda
+// jumps fourfold where the rounding steps, as wide as the ramp itself, and
+// a ramp on it would draw a contour at a fixed footprint.
+//
+// The count over lambda and each facet's brightness both have mean 1, so any
+// blend keeps the lobe's mean exactly: the energy is the smooth specular's.
 const SEA_GLITTER_CORE_LO: f32 = 0.3;
 const SEA_GLITTER_CORE_HI: f32 = 0.7;
 const SEA_GLITTER_FEW: f32 = 1.0;
 const SEA_GLITTER_MANY: f32 = 4.0;
 
+// The summed brightness of k facets: k lognormal draws of mean 1, from
+// Box-Muller normals. Zero facets give 0, and four or more give k.
 fn sea_glitter_brightness(k: f32, seed: vec2<u32>) -> f32 {
     if (k >= 4.0 || k <= 0.0) {
         return k;
@@ -174,7 +194,8 @@ fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
         k = k + 1.0;
         pmf = pmf * lambda / k;
         let next = cdf + pmf;
-        // float32's cdf can stall just below 1; past that, no more mass.
+        // In float32 the cdf can stall just below 1; there is no more mass
+        // past that.
         if (next <= cdf) {
             break;
         }
@@ -183,7 +204,9 @@ fn sea_poisson(lambda: f32, r: vec2<f32>) -> f32 {
     return k;
 }
 
-// The legacy shader's LOD (realism 0): no bias, the one true pixel angle.
+// ocean_shade's mip level: log2 of the pixel's footprint on the water in
+// texels. The footprint is t * (pixel angle), stretched along the view by
+// 1 / |dir.z| (with |dir.z| floored at 0.03).
 fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
     let pixel_span = max(t_hit, 0.0) * true_pixel_angle();
     let ocean_span = pixel_span / max(abs(dir.z), 0.03);
@@ -191,7 +214,8 @@ fn ocean_normal_lod(t_hit: f32, dir: vec3<f32>) -> f32 {
     return clamp(log2(texel_span), 0.0, u.ocean_params.w);
 }
 
-// The legacy shader's normal: the tile at one mip.
+// ocean_shade's normal: the tile through the sampler's own trilinear mip
+// filter.
 fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(ocean_normals, 0));
     let coord = (world_xy - u.surface_offset.xy) / u.ocean_params.y
@@ -201,9 +225,13 @@ fn ocean_wave_normal(world_xy: vec2<f32>, lod: f32) -> vec3<f32> {
     return normalize(n);
 }
 
-// Ocean shade ported from witness._ocean_shade (witness.py lines 473-541).
-// `sun_shadow` is the penumbra-deflected direction (iter_007) and is used
-// only for the cloud-shadow march; every shading term keeps the disc centre.
+// The simple sea. A mirror of ocean_reflection_sky weighted by Schlick's
+// Fresnel term, 0.02 + 0.98 (1 - cos_i)^5, over a Lambertian body of
+// reflectance u.ocean.yzw lit by the sun through the cloud; the sum is
+// dimmed toward OCEAN_SHADOW_FLOOR in cloud shadow. `sun_shadow` is the
+// direction drawn on the solar disc and serves only the cloud-shadow march;
+// every shading term keeps the disc centre. The mip level is used only with
+// march jitter on (u.cam_up.w); without it the tile is read at mip 0.
 fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                sun_shadow: vec3<f32>, t_hit: f32,
                jit: f32) -> vec3<f32> {
@@ -238,17 +266,16 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
 }
 
 // ---------------------------------------------------------------------------
-// Ocean realism path (witness iter_004/009/011): footprint-filtered normal
-// mips, energy-partitioned spectral GGX sun glint, per-term cloud shadowing,
-// and sky-field haze along the ocean sightline.
+// The realism path: footprint-filtered normals, a GGX sun glint that shares
+// the sun's energy with the water body, cloud shadow per term, and haze
+// along the sightline.
 // ---------------------------------------------------------------------------
 
-// The sky the water reflects: the rendered sky (solar disc excluded — the GGX
-// glint is the sun's reflection), faded by the master gate toward the legacy
-// fixed gradient and its fixed glint lobe (witness._reflection_sky_realism).
-// At ocean_realism = 1 the water mirrors the same sky the camera sees, so a
-// sunset sea takes the sunset's colour; the legacy gradient was the sky of a
-// 55-degree sun and left the water blue under every other.
+// The sky the water reflects: the rendered sky (solar disc excluded, since
+// the glint is the sun's reflection), blended by
+// legacy_glint_weight = 1 - realism toward ocean_shade's fixed gradient and
+// lobe. At realism 1 the water mirrors the sky the camera sees, so a sunset
+// sea takes the sunset's colour.
 fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
                           legacy_glint_weight: f32) -> vec3<f32> {
     var t = max(0.0, dir.z);
@@ -269,28 +296,20 @@ fn reflection_sky_realism(dir: vec3<f32>, sun: vec3<f32>,
 }
 
 // What the sea reflects of the sky, and lets through to the water below,
-// over the sub-pixel slope distribution about the footprint's mean slope:
-// Gaussian, per-axis standard deviation `sigma` (the slope of a filtered
-// Gaussian-ish wave field is Gaussian). At grazing incidence the reflected
-// radiance is strongly convex in slope — Fresnel goes as (1 - n.v)^5 and the
-// sky's gradient is steep at the horizon — so the footprint's shading is not
-// the shading at its mean slope.
+// integrated over the sub-pixel slope distribution about the footprint's
+// mean slope: a Gaussian of standard deviation `sigma` per axis (the slope
+// of a filtered, roughly Gaussian wave field is Gaussian). At grazing
+// incidence the reflected radiance is strongly convex in slope, because
+// Fresnel goes as (1 - n.v)^5 and the sky's gradient is steep at the
+// horizon, so the footprint's shading is not the shading at its mean slope.
 //
-// Integrated, not drawn. Until 2026-11-09 this was one random slope per
-// pixel per frame (lighting-loop iter_008), exact once accumulated, and the
-// sea's speckle in flight and on the first parked frames: at grazing angles
-// a slope spread of ~0.07 outruns the ~0.03 grazing angle, so one draw
-// reflected the horizon and the next the sky well above it. Four taps at
-// +-sqrt(2) sigma along each slope axis, weight 1/4 each, match the
-// Gaussian's moments through the third, with no noise to accumulate away:
-// a flying frame and a parked one shade the same footprint the same way.
-// What no moment-matching rule integrates is the integrand's creases: at a
-// few degrees below the horizon a third or more of the footprint's slopes
-// face away from the viewer (n.v clamps to 0, Fresnel to 1) or reflect
-// below the horizon (folded back up, below). Against the accumulated draw
-// the converged sea moves by up to ~3.5 display levels (exposure 4) in the
-// band below the horizon, mostly brighter; a degree-5 rule (seven taps)
-// closes none of it, which is the creases' signature.
+// The integral is a fixed quadrature and not a random draw, so it has no
+// noise for the accumulation to remove: four taps at +-sqrt(2) sigma along
+// each slope axis, weight 1/4 each, which match the Gaussian's moments
+// through the third. What no moment-matching rule captures is the
+// integrand's creases: a few degrees below the horizon a sizeable part of
+// the footprint's slopes face away from the viewer (n.v clamps to 0, Fresnel
+// to 1) or reflect below the horizon (folded back up, below).
 struct SeaReflection {
     // The Fresnel-weighted reflected sky, averaged over the taps.
     sky: vec3<f32>,
@@ -328,8 +347,8 @@ fn ocean_sky_reflection(dir: vec3<f32>, sun: vec3<f32>, slope: vec2<f32>,
     return r;
 }
 
-// Footprint-filtered ocean with microfacet sun glint and path haze
-// (witness._ocean_shade_realism).
+// The realism sea: the sky reflection of ocean_sky_reflection, the sun's
+// glint, and the Lambertian water body, then haze toward the horizon colour.
 fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                        sun_shadow: vec3<f32>, t_hit: f32,
                        jit: f32) -> vec3<f32> {
@@ -341,9 +360,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let haze_beta0 = u.ocean_realism_b.y;
     let sky_shadow_floor = u.ocean_realism_b.z;
 
-    // Project one pixel's angular span onto the water; the grazing-angle
-    // factor stretches it along the view and drives the horizon toward
-    // coarser mip levels.
+    // One pixel's angular span projected onto the water. The grazing factor
+    // stretches it along the view and takes the horizon to coarser mips.
     let grazing = max(abs(dir.z), 0.03);
     let pixel_angular_span = true_pixel_angle();
     let across = t_hit * pixel_angular_span;
@@ -351,8 +369,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let texel_span = max(along / u.ocean_params.x, 1.0);
     var lod = log2(texel_span) + ocean_mip_bias;
     lod = clamp(lod, 0.0, u.ocean_params.w);
-    // Scaling LOD with the master gate keeps intermediate gate values a
-    // continuous tuning range (witness does the same).
+    // The mip level scales with the realism gate, so intermediate gate
+    // values are a continuous range.
     lod = lod * ocean_realism;
 
     let h_len = length(dir.xy);
@@ -360,15 +378,15 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     if (h_len > 1e-8) {
         h = dir.xy / h_len;
     }
-    // The footprint's mean slope from the tile's mip, and the slope
-    // variance the mip averaged away.
+    // The footprint's mean slope from the tile's mip, and the slope variance
+    // that mip averaged away.
     let n_mip = ocean_wave_normal_mipped(hit.xy, lod);
     let sea_slope = -n_mip.xy / max(n_mip.z, 1e-4);
     let sea_variance = fif_slope_variance_removed(lod);
-    // The glitter's cell: half the footprint, rounded to a power of two of
-    // facets and folded at the tile. Smaller than the pixel, so the
-    // jittered samples of one pixel see several cells and a sparkle lands
-    // as a point, antialiased, not as a cell-shaped tile.
+    // The glitter's cell: half the footprint, rounded up to a power of two
+    // of facets and folded at the tile. It is smaller than the pixel, so the
+    // jittered samples of one pixel see several cells and a sparkle lands as
+    // an antialiased point, not as a cell-shaped tile.
     let fp_along = along * ocean_realism;
     let fp_across = across * ocean_realism;
     // @domain: along and across are footprints: t_hit times a positive pixel span
@@ -381,19 +399,16 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     let glitter_seed = pcg2d(vec2<u32>(floor(q / cell))
                              + vec2<u32>(u32(level) * 40503u, 0u));
     let glitter_facets = exp2(2.0 * level);
-    // The same count before the cell is rounded to a power of two: what the
-    // draw's weight reads, so it varies with the footprint smoothly.
+    // The same count before the cell is rounded to a power of two. The
+    // draw's weight reads this one, so it varies smoothly with the
+    // footprint.
     let glitter_count = (side / SEA_GLITTER_FACET_M)
         * (side / SEA_GLITTER_FACET_M);
 
-    // The footprint mean slope is not the footprint's shading. Every judge
-    // view's water is sub-pixel: at v7's near field one pixel covers tens
-    // of metres of a 0.1 m wave field, so the honest statement is not "this
-    // facet is flat" but "this pixel contains a slope distribution whose
-    // variance the filters removed". The sky reflection integrates
-    // `slope_resolved_fraction` of that variance (per axis, hence the 0.5 —
-    // the variances are totals over both axes; ocean_sky_reflection); the
-    // sun's glint below carries all of it as microfacet-lobe width.
+    // A pixel covers many waves: a slope distribution whose variance the mip
+    // removed. The sky reflection integrates `slope_resolved_fraction` of
+    // that variance (per axis, hence the 0.5: the variances are totals over
+    // both axes). The sun's glint below takes all of it, as lobe width.
     let legacy_glint_weight = 1.0 - ocean_realism;
     let reflection = ocean_sky_reflection(
         dir, sun, sea_slope,
@@ -405,13 +420,10 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                                     jit);
     let t_sun_ocean = exp(-tau_ocean);
 
-    // Direct-sun GGX glint, tinted by the spectral beam color, about the
-    // footprint's RESOLVED mean normal with all the unresolved variance in
-    // the lobe — not about the sky reflection's slope taps. The glitter
-    // draw below is already the unresolved facets' own statistics;
-    // evaluating it at a random slope as well (the sky's draw, before
-    // 2026-11-09) smeared the sparkles evenly over the sea, where real
-    // glitter clusters on the wave faces tilted to the sun.
+    // Sun glint: a GGX lobe tinted by the beam colour, about the footprint's
+    // mean normal, with all of the unresolved variance in the lobe's width.
+    // It is not evaluated at the sky reflection's slope taps: the glitter
+    // draw below already is the statistics of the unresolved facets.
     let n_g = normalize(vec3<f32>(-sea_slope, 1.0));
     let n_g_dot_l = max(0.0, dot(sun, n_g));
     let n_g_dot_v = clamp(-dot(dir, n_g), 0.0, 1.0);
@@ -430,8 +442,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                 let vh2 = one_minus_vh * one_minus_vh;
                 sun_fresnel = 0.02 + 0.98 * vh2 * vh2 * one_minus_vh;
 
-                // Base roughness is what lives BELOW the tile's 0.1 m
-                // texels — ripple no tile holds — plus the variance the
+                // The base roughness is what lies below the tile's 0.1 m
+                // texels, ripple that no tile holds, plus the variance the
                 // footprint's mip filtered away. Variances add; roughnesses
                 // do not.
                 let alpha = clamp(
@@ -447,8 +459,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                     * ggx_smith_g1(n_g_dot_l, alpha_squared);
                 let spec = glint_weight * t_sun_ocean * d_ggx * g_smith
                     * sun_fresnel / (4.0 * n_g_dot_v);
-                // Glitter (see SEA_GLITTER_*): the lobe drawn as the facets
-                // that actually catch the disc, in the lobe's core only.
+                // Glitter (see SEA_GLITTER_FACET_M): the lobe drawn as the
+                // facets that catch the disc, in the lobe's core only.
                 let lambda = glitter_facets * d_ggx * n_dot_h
                     * SEA_SUN_SOLID_ANGLE / (4.0 * max(v_dot_h, 1e-4));
                 // D(h) / D(n.h = 1) = alpha^4 / denom^2, in (0, 1].
@@ -470,23 +482,24 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
         }
     }
 
-    // Direct subsurface light uses the complement of the incident Fresnel
-    // allocation so the specular sun path does not create energy.
+    // The water body takes the complement of the Fresnel share given to the
+    // glint, so the specular sun path does not create energy.
     let energy_weight = min(glint_weight, 1.0);
     let diffuse_partition = 1.0 - energy_weight * sun_fresnel;
     let diff_irr = t_sun_ocean * reflection.transmitted_n_dot_l
         * 0.3183098861837907 * diffuse_partition;
     let diffuse = diff_irr * SUN_COLOR * u.ocean.yzw;
 
-    // Per-term cloud shadowing (witness iter_011): the sun terms already
-    // carry t_sun_ocean; only the sky-reflection term dims, and only to
-    // sky_shadow_floor — under a cloud the water still reflects the mostly
-    // unblocked sky dome and keeps its wave texture.
+    // Cloud shadow, per term. The sun terms already carry t_sun_ocean. The
+    // sky reflection dims only to sky_shadow_floor: under a cloud the water
+    // still reflects the mostly unblocked sky dome and keeps its wave
+    // texture.
     let sky_shadow = sky_shadow_floor + (1.0 - sky_shadow_floor) * t_sun_ocean;
     var ol = reflection.sky * sky_shadow + diffuse + glint;
 
-    // Ocean-only aerial perspective toward the same angular sky field the
-    // cloud haze uses (solar disc excluded), killing the horizon seam.
+    // Haze along the sightline to the water, toward the horizon sky colour
+    // the cloud haze fades into (solar disc excluded), so the sea meets the
+    // sky without a seam.
     let haze_tau = ocean_realism * haze_beta0 * t_hit;
     if (haze_tau > 0.0) {
         let haze = 1.0 - exp(-haze_tau);
@@ -501,8 +514,8 @@ fn ocean_shade_realism(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     return ol;
 }
 
-// Master-gate dispatch: exact-zero realism keeps the untouched legacy ocean
-// arithmetic (witness._ocean_shade_dispatch).
+// A realism of exactly zero selects ocean_shade, anything else
+// ocean_shade_realism.
 fn ocean_shade_dispatch(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                         sun_shadow: vec3<f32>, t_hit: f32,
                         jit: f32) -> vec3<f32> {

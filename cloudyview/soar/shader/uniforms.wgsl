@@ -12,6 +12,10 @@
 //                                   depth instead of marching to the sun
 //     const SKY_PROBE: bool         run the vertical sky-visibility march
 //
+// A sixth switch, CITY (the surface under the clouds is the night city, not
+// the sea), comes with the surface: city/layout.wgsl declares it true and
+// the stand-in city/absent.wgsl declares it false.
+//
 // They are constants rather than uniforms so that the branch not taken costs
 // nothing: every `if` on one folds away when the module is compiled.
 //
@@ -19,204 +23,212 @@
 // - World space is absolute metres, +x east, +y north, +z up.
 // - The volume's box is cell-edge aligned (half a cell beyond the outermost
 //   cell centres).
+// - The field is extinction sigma (m^-1); tau is optical depth; radiance is
+//   linear RGB until tone_map.
 // - The field of view is horizontal; pixel row 0 is the top of the image.
 // - The density texture is uploaded with width = nz, height = ny, depth = nx,
 //   so an (nx, ny, nz) C-order array uploads as it lies in memory. Normalized
 //   sample coordinates are therefore (z, y, x); see sample_level.
 //
 // This file: what the host hands the shader. One uniform block and the
-// textures of group 0, shared by every pass; group 1 holds the surface
-// pre-pass's targets, which are sized to the frame.
+// textures of group 0, shared by every pass; group 1 holds the per-frame
+// targets of the surface passes, which are sized to the frame.
+//
+// The block is rows of four floats, numbered from 0 in declaration order
+// ("row 8.w" is ocean.w). The JavaScript and Python hosts must fill it
+// identically. The whole block is also the hosts' scene key: a change in any
+// row restarts the accumulation, except the sampling state (row 4.w and
+// row 10.xy). That is why a few slots the shader never reads are packed.
 
 struct Uniforms {
-    // xyz = camera origin (m), w = tan(fov_horizontal / 2)
+    // Row 0. xyz = camera origin (m), w = tan(horizontal field of view / 2)
     cam_origin: vec4<f32>,
-    // xyz = forward, w = aspect (width / height)
+    // Row 1. xyz = unit forward, w = aspect (width / height)
     cam_forward: vec4<f32>,
-    // xyz = right, w = exposure (Reinhard pre-scale)
+    // Row 2. xyz = unit right, w = exposure: the factor on radiance ahead of
+    // the tone curve
     cam_right: vec4<f32>,
-    // xyz = up, w = jitter enable (0.0 or 1.0)
+    // Row 3. xyz = unit up, w = march jitter enable (0.0 or 1.0): the entry
+    // phase of the view march, the quadrature phases of the sun march and
+    // the forward pre-march, and the draw on the solar disc
     cam_up: vec4<f32>,
-    // xyz = unit direction toward the sun, w = frame index (jitter decorrelation)
+    // Row 4. xyz = unit direction toward the sun (the moon under CITY),
+    // w = this frame's index in the accumulation, which every stratified
+    // stream is indexed by (math.wgsl)
     sun_dir: vec4<f32>,
-    // xyz = volume AABB min (m), w = view-ray step dt (m)
+    // Row 5. xyz = volume box min (m), w = view-march step dt (m)
     bmin: vec4<f32>,
-    // xyz = volume AABB max (m), w = light-march step dt (m)
+    // Row 6. xyz = volume box max (m), w = light-march step dt (m)
     bmax: vec4<f32>,
-    // x = image width (px), y = image height (px), z = HG asymmetry g, w = ambient strength
+    // Row 7. x = image width (px), y = image height (px),
+    // z = Henyey-Greenstein asymmetry g of the cloud phase function,
+    // w = ambient strength
     params: vec4<f32>,
-    // x = ocean z (m), yzw = ocean reflectance (witness.py:104-106).
-    // Under CITY: x = ground z, yz = the tile's STATIC world offset, w =
-    // the live view's steam (1.0: drawn after the accumulation at the live
-    // clock, city_steam_live). yz is informational since row 24 — the
-    // shader builds the city frame from the per-frame offset there
-    // (city_camera_origin) and no longer reads this pair; hosts keep
-    // writing it as the scene's own statement of where the tile was pinned.
+    // Row 8. x = sea surface z (m), yzw = RGB reflectance of the water body.
+    // Under CITY: x = ground z (m); yz = the tile's static world offset (m),
+    // which no shader code reads (the city's frame comes from row 24);
+    // w = 1.0 when the steam is drawn after the accumulation rather than
+    // marched into it (city_steam_live), else 0.0.
     ocean: vec4<f32>,
-    // x = FIF dx (m), y = FIF tile extent (m), z = ocean enabled, w = max normal LOD
+    // Row 9. x = cell size of the surface tile (m), y = tile extent (m),
+    // z = ocean enabled (0.0 or 1.0), w = highest mip level of the tile.
+    // The tile is the sea's wave normals, or the city's tile under CITY.
     ocean_params: vec4<f32>,
-    // x = subpixel camera-ray jitter enable (0.0 or 1.0),
-    // y = jitter amplitude scale (x and y are sampling flags, excluded from
-    //     the host's scene-identity key),
-    // z = haze in [0, HAZE_MAX] — the user's one aerosol knob, which also
-    //     sets row 16.w and row 19.y on the host side;
-    // w = tone-map white point (exposed radiance that displays as 1.0)
+    // Row 10. x = sub-pixel camera-ray jitter enable (0.0 or 1.0),
+    // y = jitter amplitude in [0, 1], a scale on every jittered quantity,
+    // z = haze, the one aerosol amount; the host derives rows 16.w and 19.y
+    //     from it. It is negative at the clear end of its range; the sky
+    //     terms clamp it at 0 (sky_radiance).
+    // w = tone-map white point: the exposed radiance that displays as 1.0
     flags: vec4<f32>,
-    // x = gradient shading, y = deep-shadow MS suppression,
-    // z = directional ambient occlusion, w = bounce depth attenuation
+    // Row 11. Strengths of four cloud-lighting terms, each off at 0:
+    // x = gradient shading, y = deep-shadow suppression of the
+    // multiple-scattering octaves, z = ambient occlusion,
+    // w = attenuation of the surface bounce per unit optical depth into cloud
     cb_realism: vec4<f32>,
-    // x = gradient coarse weight, y = gradient coarse radius (m),
-    // z = directional ambient occlusion floor,
-    // w = cone stencil tan(theta) (0 = legacy fixed coarse radius)
+    // Row 12. x = weight of the coarse gradient stencil in [0, 1],
+    // y = fixed coarse stencil radius (m), used only when w == 0,
+    // z = ambient occlusion floor: the fill a fully buried sample keeps,
+    // w = tan of the cone stencil's angle: the coarse radius is
+    //     view distance * w (0 selects the fixed radius of y)
     cb_params: vec4<f32>,
-    // Rows 13-17: witness realism package (per-frame CPU spectral precompute,
-    // see witness._spectral_lighting_colors / engine.write_uniforms).
-    // xyz = spectral direct-beam color for cloud MS octaves,
-    // w = low-sun sky field strength (0 = iter_006 azimuth-only field)
+    // Rows 13-17: the lighting spectra, computed by the host each frame from
+    // the sun's elevation (fixed night values under CITY).
+    // Row 13. xyz = colour of the direct beam on cloud,
+    // w = low-sun sky field strength (0 = the azimuth-only field; see
+    // sky_radiance)
     cloud_sun: vec4<f32>,
-    // xyz = spectral ambient tint, w = effective light-transfer split
-    // strength (already elevation-faded on the CPU; 0 = legacy shader)
+    // Row 14. xyz = colour of the ambient (skylight) fill,
+    // w = light-transfer split strength, already faded with sun elevation
+    // by the host (0 = off, and always 0 under CITY)
     ambient_tint: vec4<f32>,
-    // xyz = spectral sky horizon color, w = aerial perspective strength
-    // (0 = exact legacy: no haze extinction, no in-scatter)
+    // Row 15. xyz = sky colour at the horizon (the night haze colour under
+    // CITY), w = aerial perspective strength, a factor on the haze optical
+    // depth (0 = no haze extinction and no in-scatter)
     sky_horizon: vec4<f32>,
-    // xyz = circumsolar bloom color, w = aerial beta0 (m^-1, sea level)
+    // Row 16. xyz = circumsolar bloom colour,
+    // w = haze extinction at sea level, beta0 (m^-1)
     sky_bloom: vec4<f32>,
-    // xyz = solar disc color, w = aerial haze scale height (m), where
-    //     w <= 0 means the haze does NOT thin with height: the sea-level
-    //     extinction applies at every altitude. That is unphysical and it is
-    //     the point — an exponential atmosphere lets an upward ray leave the
-    //     haze without ever reaching the cutoff optical depth, so it marches
-    //     to the range ceiling, while a uniform one caps every ray at the
-    //     same distance. It is the cheapest range lever there is.
+    // Row 17. xyz = solar disc colour, w = haze scale height H (m):
+    // extinction is beta0 exp(-z / H). w <= 0 selects a uniform haze, beta0
+    // at every altitude. That is unphysical but bounds the periodic march:
+    // in an exponential atmosphere an upward ray can leave the haze without
+    // reaching the cutoff optical depth and so runs to the range ceiling,
+    // while in a uniform one every ray ends at the same distance
+    // (periodic_march_cap).
     sky_disc: vec4<f32>,
-    // Rows 18-19: ocean realism (witness iter_004/009/011).
-    // x = master gate (0 = exact legacy ocean shader), y = mip bias,
-    // z = GGX glint strength, w = GGX base roughness
+    // Rows 18-19: the sea (ocean.wgsl).
+    // Row 18. x = ocean realism gate: exactly 0 selects ocean_shade, anything
+    // else ocean_shade_realism, where it also scales the mip level and
+    // blends the reflected sky; y = mip bias (levels);
+    // z = sun glint strength; w = GGX base roughness: the RMS slope of the
+    // ripples smaller than a tile texel
     ocean_realism_a: vec4<f32>,
-    // x = ocean slope resolved fraction, y = ocean haze extinction
-    // (m^-1), z = sky-reflection cloud-shadow floor,
-    // w = display contrast about mid-grey (1.0 = identity)
+    // Row 19. x = fraction of the unresolved slope variance that the sky
+    // reflection integrates over, y = haze extinction along the sightline to
+    // the water (m^-1), z = floor on the cloud-shadow dimming of the sky
+    // reflection, w = display contrast about mid-grey (1.0 = identity; read
+    // by tone_map, not by the sea)
     ocean_realism_b: vec4<f32>,
-    // Row 20: periodic domain + distance LOD (2026-07-17 perf pass).
-    // x = periodic enable in host scene identity (0.0 or 1.0); the shader
-    //     itself branches on the compile-time PERIODIC_DOMAIN const.
-    // y = light-march LOD tan(theta): sun-march dt floor grows as
-    //     view_distance * y so distant cloud copies get coarser (never
+    // Row 20. Periodic domain and distance level of detail.
+    // x = 1.0 when the domain is periodic. The shader does not read it (it
+    //     branches on PERIODIC_DOMAIN); the host packs it for the scene key.
+    // y = light-march LOD, tan(theta): the sun march's step is at least
+    //     view_distance * y, so distant cloud gets a coarser (never a
     //     truncated) tau quadrature. 0 = fixed dt.
-    // z = view-step LOD tan(theta): view-march dt floor grows as t * z —
-    //     the degrees-not-meters step. 0 = fixed dt.
+    // z = view-step LOD, tan(theta): the view march's step is at least
+    //     t * z, a step of fixed angle rather than fixed length. 0 = fixed
+    //     dt. Also the angle the surfaces resolve detail at
+    //     (lod_pixel_angle).
+    // w = tone-map gamma: the display value is the tone curve raised to
+    //     1 / gamma.
     periodic: vec4<f32>,
-    // Rows 21-22: the optional nest (NESTED). Same packing as rows 5-6 but
-    // for the finer level: xyz = nest AABB min/max (m), w = the nest's own
-    // view-ray / light-march step dt (m). Zero-filled when NESTED is false.
+    // Rows 21-22: the nest (NESTED), packed as rows 5-6 are for the outer
+    // level: xyz = the nest's box min / max (m), w = its own view-march /
+    // light-march step dt (m). Zero when NESTED is false.
     nest_bmin: vec4<f32>,
     nest_bmax: vec4<f32>,
-    // Row 23: the lighting method, and the bake's slice index.
-    //
-    // x and z are NOT read by fs_main any more (2026-09-23): each is a
-    // compile-time specialization (LIGHT_CACHE, SKY_PROBE — see their
-    // declarations), because a run-time branch here paid for its untaken
-    // side on every sample. The hosts still pack both, from the same flags
-    // that pick the specialization, because the row is part of the
-    // accumulation's scene key: a bake completing or a tier switching
-    // methods is a scene change (and the browser restarts a parked view's
-    // average on it outright — renderer.js drawFrame).
-    //
-    // x = read tau_sun for CLOUD samples from the light_tau texture instead
-    //     of marching to the sun per sample (0.0 or 1.0). The ocean's two
-    //     shadow marches and the sky probe stay live either way. The cached
-    //     value is the central sun direction at zero quadrature jitter, so
-    //     the solar-disc penumbra sampling (iter_007) does not apply to it —
-    //     trilinear filtering of the cache is the only softening left, which
-    //     is exactly what the A/B is judging.
-    // y = bake slice index (the fs_bake_light pass only; fs_main never
-    //     reads it): the field-x plane of the cache being rendered.
-    // z = skip the vertical sky probe (0.0 or 1.0): every consumer of
-    //     t_sky then sees a fully open sky. A cost/look toggle while the
-    //     per-tier fate of these marches is decided.
-    // w = ice-detection mode (0.0 or 1.0), a false-color view:
-    //     cloud source terms are tinted by the per-voxel ice fraction
-    //     (binding 8) and the sky is remapped to an alien green. At 0.0
-    //     every multiply below is by exactly 1.0 and the frame is
-    //     bit-identical to a build without the mode.
+    // Row 23. The lighting method, the bake's slice index and the ice view.
+    // x = 1.0 when cloud samples read tau_sun from the light_tau texture,
+    // z = 1.0 when the sky probe is off. The shader reads neither: they are
+    //     the host's copies of the LIGHT_CACHE and (inverted) SKY_PROBE
+    //     switches, packed so that changing either changes the scene key.
+    // y = the field-x plane of the cache being rendered. Read by
+    //     fs_bake_light only.
+    // w = ice-detection mode (0.0 or 1.0), a false-colour view: cloud source
+    //     terms are recoloured by the per-voxel ice fraction (binding 8) and
+    //     the sky is drawn green (ice.wgsl). At 0.0 nothing is recoloured.
     light_cache: vec4<f32>,
-    // Row 24: the surface offset (2026-09-01). xy = where the surface tile
-    // sits in the world THIS FRAME renders, folded into [0, tile extent).
-    // The water-normal reads sample at (world - offset), and the city
-    // system derives its whole frame from it (see city_camera_origin). The
-    // hosts write it per frame as cam.xy - surfacePosition — the camera's
-    // own tile phase — so a cloud-period camera fold moves the offset with
-    // the camera and the surface never jumps; a static render writes the
-    // scene's static offset, folded. The fold is harmless BECAUSE the city
-    // is a pure function of the tile frame: every cell index folds at the
-    // tile (city_tile_cell) before it seeds anything, so only the offset
-    // mod the tile can matter. A day scene with a parked camera writes
-    // exactly 0.0, making the water subtraction bit-neutral — which is
-    // what keeps the frozen judge-view goldens byte-identical.
-    // z = the scene clock (scene_time, per surface: the sea and the city
-    // run it). w = lens water's step dt for fs_lens_state (s; 0 in every
-    // other pass, which never reads it).
+    // Row 24. xy = the surface offset (m): where the surface tile's origin
+    // sits in the world in this frame, folded into [0, tile extent). The
+    // water-normal lookups read the tile at (world - offset), and the city
+    // builds its whole frame from it (city_camera_origin). The hosts write
+    // the camera's own phase within the tile, cam.xy - surface position, so
+    // that folding the camera back by a cloud period moves the offset with
+    // it and the surface does not jump. Only the offset modulo the tile can
+    // matter, because everything drawn on the surface is periodic in the
+    // tile. A scene whose surface is fixed in the world writes its static
+    // offset, which for the sea is exactly 0.0.
+    // z = the scene clock (s; scene_time). w = the time step of the
+    // lens-water state (s), read by fs_lens_state only and 0 in every other
+    // pass.
     surface_offset: vec4<f32>,
-    // Row 25: the city's look knobs, zero on a day scene, which reads none.
-    // x = roof clutter density (the hosts' CITY_ROOF_DENSITY_BY_TIER at the
-    //     tier: a factor on rooftopworks' clutter slot probabilities, 1 as
-    //     the roofs were tuned); yzw spare.
+    // Row 25. The city's look. x = roof clutter density, a factor on the
+    // rooftop clutter probabilities (1 = as tuned); yzw spare. Zero on a day
+    // scene, which reads none of it.
     city_look: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+// The outer level's extinction field (m^-1). r32float or filterable r16float;
+// either reads as texture_3d<f32>, and both levels share one format.
 @group(0) @binding(1) var vol: texture_3d<f32>;
+// Trilinear, clamp-to-edge on all three axes.
 @group(0) @binding(2) var vol_samp: sampler;
-// The surface tile: the sea's normals under the ocean, the city's tile under
-// CITY.
+// The surface tile: the sea's wave normals under the ocean, the city's tile
+// under CITY.
 @group(0) @binding(3) var ocean_normals: texture_2d<f32>;
 // Repeat-wrapping trilinear sampler for binding 3.
 @group(0) @binding(4) var ocean_samp: sampler;
 // The finer nested level. Always bound (a 1x1x1 zero texture when there is
-// no nest) so one bind-group layout serves both specializations.
+// no nest) so one bind-group layout serves both cases.
 @group(0) @binding(5) var nest_vol: texture_3d<f32>;
-// The same volume texture read the periodic way: repeat on the two lateral
-// texture axes (w indexes field x, v indexes field y), clamp on the vertical.
-// A doubly periodic domain wraps in hardware rather than through an uploaded
-// ghost ring — see sample_level.
+// The periodic way to read a volume texture: repeat on the two lateral
+// texture axes (depth indexes field x, height indexes field y), clamp on the
+// vertical (width). See sample_level.
 @group(0) @binding(6) var vol_wrap_samp: sampler;
-// The baked sun-tau cache over the outer AABB — see Uniforms.light_cache and
-// sample_light_tau. Always bound (a 1x1x1 zero texture while the cache is
-// off or stale) so one bind-group layout serves both paths.
+// The baked sun optical depth over the outer box (sample_light_tau,
+// fs_bake_light). Always bound: a 1x1x1 zero texture while there is no
+// finished bake.
 @group(0) @binding(7) var light_tau: texture_3d<f32>;
-// Ice-detection mode: per-voxel ice extinction fraction
-// sigma_ice / (sigma_liq + sigma_ice) over the OUTER level's grid, same
-// texel layout as `vol`. Always bound — a 1x1x1 zero stand-in when the field
-// carries no ice variable — so one bind-group layout serves both. Read only
-// when u.light_cache.w is set.
+// The ice fraction of extinction, sigma_ice / (sigma_liq + sigma_ice), per
+// voxel of the outer level, in the texel layout of `vol`. Always bound: a
+// 1x1x1 zero texture when the field has no ice variable. Read only in
+// ice-detection mode (u.light_cache.w).
 @group(0) @binding(8) var ice_frac: texture_3d<f32>;
 
-// Group 1: the surface pre-pass's target, size-specific, so it lives apart
-// from the scene resources in group 0 (which every pass shares unchanged):
-// the opaque surface under the clouds — the traced city — as the pre-pass
-// left it for this frame, (radiance, t) per render pixel, t = 1e30 on a
-// miss. The march reads it, and only under CITY; other scenes bind a 1x1
-// stand-in and never run the pass. See the surface pre-pass section.
+// Group 1 holds what is sized to the frame, apart from the scene resources
+// of group 0. Its three bindings mean different things to different passes;
+// a pass that does not use one is given a 1x1 stand-in.
+//
+// Binding 0, for fs_main: the opaque surface under the clouds (the traced
+// city) as the surface passes left it for this frame, (radiance, t) per
+// render pixel, with t = 1e30 on a miss. Read only under CITY.
 @group(1) @binding(0) var surface_buf: texture_2d<f32>;
-// The previous stage's surface, for a surface traced in stages
-// (fs_surface_refine, fs_surface_street) — the city's plain boxes, then its
-// facade shell — and a 1x1 stand-in for every other pass.
+// Binding 1: the previous stage's output, for a pass that continues one:
+// the surface so far (fs_surface_refine, fs_surface_street), the previous
+// lens state (fs_lens_state), the accumulated image (fs_steam_live).
 @group(1) @binding(1) var surface_plain: texture_2d<f32>;
-// The VEIL: one semi-transparent layer per pixel in front of the surface —
-// the city's steam — as the last surface stage left it: premultiplied
-// in-scattered radiance, opacity, and the depth the march composites it at
-// (veil_pack / veil_unpack). Read by the march only under CITY.
+// Binding 2, the veil: one semi-transparent layer per pixel in front of the
+// surface (the city's steam), as the last surface stage left it:
+// premultiplied in-scattered radiance, opacity, and the depth the march
+// composites it at (veil_pack / veil_unpack). Read by fs_main only under
+// CITY.
 @group(1) @binding(2) var veil_buf: texture_2d<u32>;
 
-// The scene clock (s, row 24.z). The live view advances it every frame,
-// parked and paused included, and keeps it out of its accumulation: the
-// march leaves the steam to fs_steam_live, drawn at this clock after the
-// accumulation, so a held view converges under steam that moves. Every
-// still holds it fixed; a recorded track carries it per sample (track.js),
-// and `witness --time` sets it. Anything in the scene that moves reads it here (the
-// city's steam); a surface where nothing moves (the sea) has no clock, and
-// the hosts pack 0 for it.
+// The scene clock (s, row 24.z). Anything in the scene that moves reads the
+// time here (the city's steam). The hosts pack 0 for a surface where nothing
+// moves (the sea).
 fn scene_time() -> f32 {
     return u.surface_offset.z;
 }

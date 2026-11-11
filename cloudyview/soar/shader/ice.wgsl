@@ -1,10 +1,14 @@
-// Ice-detection mode (false-color phase) ------------------------------------
-//
-// Ice extinction fraction at a world point, from the outer level's grid —
-// the outer AABB covers any nest, so one texture serves both levels. Same
-// coordinate convention as sample_light_tau: no edge taper (a fraction is
-// not extinction; ramping it to zero at the boundary would paint the domain
-// edge liquid-red), lateral wrap in a periodic domain, clamp vertically.
+// Ice-detection mode: a false-colour view of cloud phase. Cloud source terms
+// keep their luminance and take a hue from the local ice fraction, the sky
+// is redrawn green and the sea dark teal, so the red-to-cyan clouds carry
+// the frame. Everything here runs only when u.light_cache.w is set.
+
+// Ice fraction of extinction at a world point, from the outer level's grid.
+// The outer box covers any nest, so one texture serves both levels.
+// Coordinates as in sample_light_tau: lateral wrap in a periodic domain,
+// clamp on the vertical, and no edge taper (a fraction is not extinction,
+// and ramping it to zero at the boundary would colour the domain's edge as
+// liquid).
 fn ice_fraction_at(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(ice_frac, 0));
@@ -21,16 +25,15 @@ fn ice_fraction_at(p: vec3<f32>) -> f32 {
     return textureSampleLevel(ice_frac, vol_samp, tex_coord, 0.0).r;
 }
 
-// The false-color ramp: liquid burns crimson, ice glows cyan, and the mixed
-// phase between them crosses through electric violet. NOT luminance-
-// normalized: dividing by the hue's luminance blows the red channel far past
-// the tone map's shoulder and deep red comes out pink. Max-component ~1
-// instead, so red reads darker than cyan — deep red to vibrant cyan, which
-// is the intended reading.
+// The false-colour ramp: liquid crimson, ice cyan, mixed phase through
+// violet. It is normalized to a maximum component of ~1 and not to unit
+// luminance: dividing by a deep red's luminance drives the red channel far
+// past the tone curve's shoulder, and it displays as pink. Red therefore
+// reads darker than cyan.
 fn ice_tint(f_in: f32) -> vec3<f32> {
     let f = clamp(f_in, 0.0, 1.0);
-    // Authored for the display: the tone map's gamma lifts weak channels,
-    // so the linear palette is deeper than the hue it lands on.
+    // Chosen for the displayed colour: the tone map's gamma lifts weak
+    // channels, so the linear palette is deeper than the hue it lands on.
     let c_liquid = vec3<f32>(1.00, 0.010, 0.030);
     let c_mixed  = vec3<f32>(0.60, 0.015, 1.00);
     let c_ice    = vec3<f32>(0.010, 0.85, 1.00);
@@ -38,16 +41,15 @@ fn ice_tint(f_in: f32) -> vec3<f32> {
                c_ice, smoothstep(0.5, 1.0, f));
 }
 
-const ICE_LUM: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+const ICE_LUM: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722); // Rec. 709
 
-// The sea under the alien sky: its shaded luminance on a dark teal, so the
-// glint and wave structure survive the recolor.
+// The sea in this view: its shaded luminance on a dark teal, which keeps
+// the glint and the wave structure.
 const ICE_OCEAN_TINT: vec3<f32> = vec3<f32>(0.04, 0.30, 0.24);
 
-// A cloud source term recolored for the false-color view: its luminance —
-// which carries all the shading, shadowing and silhouette structure — on the
-// ramp's hue. With the mode off the term passes through untouched, so every
-// call site is bit-identical to the pre-mode shader.
+// A cloud source term recoloured: its luminance, which carries the shading,
+// the shadows and the silhouette, on the hue `tint`. With the mode off the
+// term is returned as it came.
 fn ice_recolor(x: vec3<f32>, tint: vec3<f32>, on: bool) -> vec3<f32> {
     if (on) {
         return dot(x, ICE_LUM) * tint;
@@ -55,19 +57,17 @@ fn ice_recolor(x: vec3<f32>, tint: vec3<f32>, on: bool) -> vec3<f32> {
     return x;
 }
 
-// The alien sky: the physical sky's own luminance — gradients, circumsolar
-// bloom, disc, haze behavior all intact — recolored onto a green palette,
-// acid chartreuse at the horizon falling to deep emerald-teal overhead.
-// Luminance-preserving, so exposure, tone map and aerial haze all keep
-// working; `disc` is passed through so the aerial-perspective caller can
-// exclude the solar disc exactly as it does from the physical sky.
+// The sky in this view: the physical sky's luminance (gradient, circumsolar
+// lobe, bloom, disc and haze behaviour) on a green palette, chartreuse at
+// the horizon falling to a deep teal overhead. `disc` is passed through so
+// that a caller can leave the solar disc out, as with sky_radiance.
 fn alien_sky(dir: vec3<f32>, sun: vec3<f32>, disc: vec3<f32>) -> vec3<f32> {
     let phys = sky_radiance(dir, sun, u.sky_horizon.xyz, u.sky_bloom.xyz,
                             disc, u.cloud_sun.w);
     let lum = dot(phys, ICE_LUM);
     let up = clamp(dir.z, 0.0, 1.0);
-    // Dimmer than the physical sky it replaces (the ramp luminances are
-    // ~0.7 and ~0.3, not 1), so the red/cyan clouds carry the frame.
+    // Dimmer than the physical sky: the palette's luminances are ~0.7 and
+    // ~0.3, not 1.
     let horizon = vec3<f32>(0.35, 0.90, 0.10);
     let zenith  = vec3<f32>(0.01, 0.38, 0.26);
     return lum * mix(horizon, zenith, pow(up, 0.45));

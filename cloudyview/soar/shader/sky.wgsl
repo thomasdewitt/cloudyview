@@ -1,69 +1,67 @@
-// Low-sun sky color field (witness iter_007). Direction-cosine-space
-// constants derived from the witness tuning block:
-//   sin(LOW_SUN_SKY_WARM_ELEVATION_DEG = 32),
-//   cos(LOW_SUN_SKY_HORIZON_AZIMUTH_DEG = 105),
-//   cos(LOW_SUN_SKY_UPPER_AZIMUTH_DEG = 45).
+// The daytime sky: radiance as a function of direction. A zenith-to-horizon
+// gradient, a horizon whitening that the haze amount controls, a warm field
+// around a low sun, a broad circumsolar aerosol lobe, a tight bloom and the
+// solar disc. It is a look model, tuned by eye against photographs, in
+// linear RGB.
+
+// Zenith and horizon colours of the base gradient. SKY_BASE_HORIZON is also
+// the horizon colour the host packs at high sun, and sky_radiance compares
+// u.sky_horizon against it.
 const SKY_ZENITH: vec3<f32> = vec3<f32>(0.0044, 0.035, 0.1156);
 const SKY_BASE_HORIZON: vec3<f32> = vec3<f32>(0.10, 0.18, 0.38);
-// The haze knob's anchor. Every haze-dependent expression below is written
-// as a deviation from its tuned constant, so haze == HAZE_ANCHOR recovers
-// that constant EXACTLY rather than to within a ULP — the default look is
-// meant to be a fixed point of the whole parameterization.
-//
-// It very nearly is. What survives is one hardware artifact: the horizon
-// wedge divides by a sigma that used to be a literal and is now a value,
-// and this GPU's runtime divide is a reciprocal-and-refine that lands ~1
-// ULP off the compile-time fold. Measured on the TWPICE still, that moves
-// 47 of 172800 samples by at most 0.002 of an 8-bit level and changes zero
-// 8-bit codes. Writing the divide as t * (1/sigma) does not help; only
-// freezing sigma back into a literal would, which is the feature.
-// Twin of look.DEFAULT_HAZE.
+// The haze amount at which every haze-dependent expression below equals its
+// tuned constant. Each is written as a deviation from that constant, so that
+// haze == HAZE_ANCHOR recovers the constant exactly and not to within
+// rounding. It is the hosts' default haze, and they hold the same value.
 const HAZE_ANCHOR: f32 = 0.35;
 
-// Angular scale height (in dir.z) of the horizon-whitening wedge; see
-// sky_radiance. Solved against the 2026-08-11 reference photo so mid-sky
-// (z ~ 0.6) lands within ~1/255 of the photo on all three channels.
+// Scale height, in dir.z, of the Gaussian that confines the horizon
+// whitening to low elevation (see sky_radiance), at the anchor haze.
 const SKY_HAZE_ELEVATION_SIGMA: f32 = 0.33;
-// How far up the sky the whitening reaches as haze grows. Thicker aerosol
-// is deeper as well as denser, so the wedge climbs; the bounds stop it
-// before it either collapses to a hairline at the skyline (0.15) or washes
-// the zenith out, which no photograph of a hazy day does (0.65).
+// How far up the sky the whitening reaches as haze grows: thicker aerosol is
+// deeper as well as denser. The bounds keep the wedge from collapsing to a
+// line at the skyline or from washing out the zenith.
 const SKY_HAZE_SIGMA_PER_HAZE: f32 = 0.45;
 const SKY_HAZE_SIGMA_MIN: f32 = 0.15;
 const SKY_HAZE_SIGMA_MAX: f32 = 0.65;
-// Reach alone is not enough: a clear day is not a hazy day with a shorter
-// wedge, it is a *weaker* one, so the amplitude moves too. Piecewise linear
-// through (0, 0.60), (HAZE_ANCHOR, 1.0), (1, 1.585) — the kink is the
-// anchor, and the steeper upper leg is what lets haze 1 read as murk.
+// The whitening's amplitude moves with haze too: a clear day's wedge is
+// weaker, not only shorter. Piecewise linear through (0, 0.60),
+// (HAZE_ANCHOR, 1.0), (1, 1.585), with the kink at the anchor.
 const SKY_HAZE_WEDGE_GAIN_AT_ZERO: f32 = 0.60;
 const SKY_HAZE_WEDGE_GAIN_SLOPE: f32 = 0.9;
 
-// Broad circumsolar aerosol lobe (sky_radiance). Peak-normalized HG:
-// g = 0.68 is ~17 deg half-width; the amplitude is the radiance added at
-// the peak. The tint is the aerosol's own mild-Angstrom spectrum; the
-// spectral bloom ratio warms it at low sun.
+// Broad circumsolar aerosol lobe (sky_radiance): a peak-normalized HG lobe,
+// (1 - g)^3 / (1 + g^2 - 2 g mu)^(3/2). g = 0.68 gives a half-width of ~17
+// deg; the amplitude is the radiance added at the peak, at the anchor haze.
 const CIRCUMSOLAR_G: f32 = 0.68;
 const CIRCUMSOLAR_AMPLITUDE: f32 = 0.045;
-// The lobe is the aerosol seen head-on, so it scales with the same knob.
-// A floor of 0.015 remains at haze 0: even Rayleigh air has a faint
-// forward brightening around the sun. The 1.2 power is milder than the
-// aerial extinction's 1.5 because the lobe saturates — past a certain
-// loading the sky near the sun is simply white.
+// The lobe is the aerosol seen head-on, so its amplitude scales with haze:
+// FLOOR at haze 0 (even Rayleigh air brightens a little toward the sun),
+// rising to AMPLITUDE at the anchor as (haze / anchor)^EXPONENT.
 const CIRCUMSOLAR_AMPLITUDE_FLOOR: f32 = 0.015;
 const CIRCUMSOLAR_HAZE_EXPONENT: f32 = 1.2;
+// The lobe's colour: the aerosol's own, slightly cool, times u.sky_bloom
+// over the bloom colour at high sun (LEGACY_BLOOM_CONST), so the lobe warms
+// with the beam at low sun.
 const CIRCUMSOLAR_TINT: vec3<f32> = vec3<f32>(0.75, 0.92, 1.00);
 const LEGACY_BLOOM_CONST: vec3<f32> = vec3<f32>(0.8, 0.6, 0.3);
+// The low-sun warm field, in direction cosines.
+// MAX_WARM_DZ = sin(32 deg): the elevation above which no warmth is added.
+// HORIZON_AZIMUTH_COS = cos(105 deg), UPPER_AZIMUTH_COS = cos(45 deg): the
+// azimuth from the sun at which the warmth ends, at the horizon and at the
+// top of the field.
 const LOW_SUN_SKY_MAX_WARM_DZ: f32 = 0.5299192642332049;
 const LOW_SUN_SKY_HORIZON_AZIMUTH_COS: f32 = -0.25881904510252074;
 const LOW_SUN_SKY_UPPER_AZIMUTH_COS: f32 = 0.7071067811865476;
+// Horizon colour of the neutral stage between the blue sky and the warm one.
 const LOW_SUN_SKY_NEUTRAL_RADIANCE: vec3<f32> = vec3<f32>(0.27, 0.30, 0.32);
-const SUNSET_HORIZON_RADIANCE_R: f32 = 0.42; // SUNSET_HORIZON_RADIANCE[0]
+// Red channel of the host's sunset horizon colour: the far end of the range
+// over which u.sky_horizon.r moves away from SKY_BASE_HORIZON.r.
+const SUNSET_HORIZON_RADIANCE_R: f32 = 0.42;
 
-// --- the haze knob's three sky terms ---------------------------------------
+// --- the haze amount's three sky terms --------------------------------------
 //
-// All three read u.flags.z rather than taking a parameter: haze is a property
-// of the air, not of the ray, and threading it through sky_radiance's five
-// existing arguments would only invite a call site that forgets it.
+// Each takes the haze amount, which the caller has clamped at 0.
 
 fn sky_haze_elevation_sigma(haze: f32) -> f32 {
     return clamp(
@@ -76,48 +74,41 @@ fn sky_haze_wedge_gain(haze: f32) -> f32 {
         return SKY_HAZE_WEDGE_GAIN_AT_ZERO
             + (1.0 - SKY_HAZE_WEDGE_GAIN_AT_ZERO) * haze / HAZE_ANCHOR;
     }
-    // At the anchor this branch is 1.0 exactly, and a multiply by 1.0 is
-    // exact — which is how the default wedge survives untouched.
+    // Exactly 1.0 at the anchor.
     return 1.0 + SKY_HAZE_WEDGE_GAIN_SLOPE * (haze - HAZE_ANCHOR);
 }
 
 fn circumsolar_amplitude(haze: f32) -> f32 {
-    // Deviation form, not the algebraically equal floor + span * pow(h/h0, k):
-    // pow(1, k) is exactly 1, so the correction vanishes at the anchor,
-    // whereas summing floor and span would land a ULP or two off 0.045.
+    // Written as a deviation from the anchor value, not as the algebraically
+    // equal floor + span * pow(h / h0, k): pow(1, k) is exactly 1, so the
+    // correction vanishes at the anchor.
     let span = CIRCUMSOLAR_AMPLITUDE - CIRCUMSOLAR_AMPLITUDE_FLOOR;
     return CIRCUMSOLAR_AMPLITUDE
         // @domain: haze >= 0: the only caller, sky_radiance, reads max(u.flags.z, 0.0) (docs/soar-bugs.md 21)
         + span * (pow(haze / HAZE_ANCHOR, CIRCUMSOLAR_HAZE_EXPONENT) - 1.0);
 }
 
-// Procedural sky ported from witness._sky_radiance, including the spectral
-// horizon and low-sun elevation x azimuth warm wedge (iter_002 + iter_007).
-// hor/bloom/disc are the per-frame spectral colors from the uniforms; the
-// aerial/ocean haze targets pass disc = 0 to exclude the solar disc.
+// Sky radiance toward `dir`. hor, bloom and disc are the per-frame colours
+// from the uniforms. A caller that wants the sky as a haze colour or as a
+// reflection passes disc = 0 to leave the solar disc out.
 fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
                 hor: vec3<f32>, bloom: vec3<f32>, disc: vec3<f32>,
                 low_sun_sky_field_strength: f32) -> vec3<f32> {
     var t = max(0.0, dir.z);
     let one_minus = 1.0 - t;
-    // Horizon whitening = legacy cubic shape times a Gaussian elevation
-    // cutoff. The cubic alone still mixed ~6% horizon white at 35-40
-    // degrees, which read as a steel-grey wash across the whole upper sky;
-    // reference photos hold zenith-deep saturation down to ~35 degrees.
-    // The Gaussian kills the whitening by mid-elevation while leaving the
-    // horizon band (z < ~0.15) within ~1/255 of the approved legacy sky.
-    // Its width is the whitening's angular scale height, which is exactly
-    // what an aerosol amount sets — so the haze knob drives both it and the
-    // wedge's strength. The ceiling matters at the top of the slider: a gain
-    // above 1 would otherwise push the skyline past pure horizon colour and
-    // start subtracting zenith blue back out.
-    // Clamped at zero: the aerosol coordinate runs NEGATIVE past a 70 km
-    // e-folding (the slider's clear end reaches 200 km), and these sky
-    // cosmetics are written against a non-negative haze — circumsolar_
-    // amplitude takes pow(haze/anchor, 1.4), which is NaN for haze < 0, and
-    // one NaN in sky radiance is a black screen. Extinction handles the
-    // negative range itself (aerialBetaPerKm is sign-preserving); the sky's
-    // wedge and lobe just hold their aerosol-free look from zero down.
+    // Horizon whitening. The weight of the horizon colour is
+    //   (1 - z)^3 * exp(-(z / sigma)^2) * gain,  z = dir.z.
+    // The cubic alone still mixes several percent of horizon white at 35-40
+    // deg elevation, a grey wash over the upper sky; the Gaussian confines
+    // it to low elevation. Its width is the angular scale height of the
+    // whitening, which is what an aerosol amount sets, so haze drives both
+    // sigma and gain. The min() matters at high haze: a gain above 1 would
+    // push the skyline past the pure horizon colour.
+    //
+    // Haze is clamped at zero. It is negative at the clear end of its range,
+    // and circumsolar_amplitude raises haze / anchor to a power, which is
+    // NaN for a negative base. From zero down the sky holds its aerosol-free
+    // look; the host's extinction handles the negative range itself.
     let haze = max(u.flags.z, 0.0);
     let zc = t / sky_haze_elevation_sigma(haze);
     let w_horizon = min(
@@ -129,12 +120,8 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     let base_sky = SKY_BASE_HORIZON + (SKY_ZENITH - SKY_BASE_HORIZON) * t;
     var col = base_sky;
 
-    // Strength-0 spectral lighting and the calibrated 55-degree sun both
-    // reproduce the base horizon exactly, so the low-sun angular wedge is
-    // skipped. NOTE (2026-08-11): this bypass is no longer a bit-exact
-    // legacy contract — the Gaussian horizon cutoff above and the
-    // circumsolar lobe below run unconditionally; they are the base look
-    // now, pinned by the re-baked goldens rather than by strength-0.
+    // The warm field is skipped while the horizon colour is the base one
+    // (a high sun), where it would reproduce the base sky.
     if (any(hor != SKY_BASE_HORIZON)) {
         let view_h_len = length(dir.xy);
         let sun_h_len = length(sun.xy);
@@ -145,7 +132,9 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
             );
         }
 
-        // Exact iter_006 azimuth-only field (the strength-0 bypass target).
+        // The azimuth-only field, which low_sun_sky_field_strength = 0
+        // selects: the horizon colour goes from base to `hor` by a
+        // smoothstep of the azimuth from the sun.
         var legacy_az_weight = 0.5 + 0.5 * cos_sun_az;
         legacy_az_weight = legacy_az_weight * legacy_az_weight
                            * (3.0 - 2.0 * legacy_az_weight);
@@ -153,8 +142,9 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
                          + legacy_az_weight * (hor - SKY_BASE_HORIZON);
         let legacy_sky = legacy_hor + (SKY_ZENITH - legacy_hor) * t;
 
-        // Warmth confined vertically; azimuthal support widens toward the
-        // horizon where the aerosol slant path is longest.
+        // The warm field is confined in elevation, and its azimuthal extent
+        // widens toward the horizon, where the slant path through the
+        // aerosol is longest.
         let elevation_progress = smoothstep(
             0.0, LOW_SUN_SKY_MAX_WARM_DZ, max(0.0, dir.z)
         );
@@ -164,8 +154,9 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
         let azimuth_weight = smoothstep(azimuth_cutoff, 1.0, cos_sun_az);
         let warm_weight = (1.0 - elevation_progress) * azimuth_weight;
 
-        // Recover the horizon's spectral mix so the neutral bridge also
-        // vanishes exactly at SPECTRAL_LIGHTING_STRENGTH = 0.
+        // How far the horizon colour has moved from base toward sunset, read
+        // off its red channel, so the neutral stage scales with it and
+        // vanishes when `hor` is the base colour.
         let sunset_red_span = SUNSET_HORIZON_RADIANCE_R - SKY_BASE_HORIZON.r;
         let horizon_mix = clamp(
             (hor.r - SKY_BASE_HORIZON.r) / sunset_red_span, 0.0, 1.0
@@ -175,8 +166,8 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
         let neutral_sky = neutral_hor + (SKY_ZENITH - neutral_hor) * t;
         let warm_sky = hor + (SKY_ZENITH - hor) * t;
 
-        // Quadratic Bezier in linear radiance: blue -> neutral -> warm,
-        // avoiding the purple midpoint of a straight blue/orange lerp.
+        // Quadratic Bezier in linear radiance, blue -> neutral -> warm,
+        // which avoids the purple midpoint of a straight blue-to-orange mix.
         let cool_weight = 1.0 - warm_weight;
         let wedge_sky = cool_weight * cool_weight * base_sky
             + 2.0 * cool_weight * warm_weight * neutral_sky
@@ -187,14 +178,11 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
 
     let cos_sun = dot(dir, sun);
 
-    // Broad aerosol forward lobe: the faint brightening-and-desaturation
-    // the sky shows for tens of degrees around the sun, which the tight
-    // Lorentzian bloom (half-width ~3.6 deg) cannot supply. Peak-normalized
-    // Henyey-Greenstein, no angular cutoff and no elevation gate — the
-    // sunward hue change is a permanent feature of a hazy sky, at noon as
-    // at dusk. The tint is cool (mild Angstrom spectrum) scaled by the
-    // spectral bloom's warm ratio, so at noon it desaturates toward white
-    // and at low sun it inherits the beam's warmth.
+    // Broad aerosol forward lobe: the faint brightening and desaturation of
+    // the sky for tens of degrees around the sun, which the tight bloom
+    // below cannot supply. It has no angular cutoff and no elevation gate.
+    // Its tint is cool, times the bloom's warm ratio, so at noon it
+    // desaturates toward white and at low sun it takes the beam's warmth.
     let g_a = CIRCUMSOLAR_G;
     let d_hg = 1.0 + g_a * g_a - 2.0 * g_a * cos_sun;
     let one_minus_g = 1.0 - g_a;
@@ -205,11 +193,14 @@ fn sky_radiance(dir: vec3<f32>, sun: vec3<f32>,
     col = col + circumsolar_amplitude(haze) * lobe
         * CIRCUMSOLAR_TINT * warm_ratio;
 
+    // Tight bloom: a Lorentzian in 1 - cos, at half its peak where
+    // 1 - cos = 0.002 (3.6 deg from the sun).
     if (cos_sun > 0.0) {
         let sun_half_width = 0.002;
         let a = sun_half_width / ((1.0 - cos_sun) + sun_half_width);
         col = col + a * bloom;
     }
+    // The solar disc: cos > 0.9998 is a radius of 1.15 deg.
     if (cos_sun > 0.9998) {
         col = col + disc;
     }

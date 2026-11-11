@@ -1,23 +1,29 @@
-// Highlight shoulder: how far bright regions blend from per-channel
-// Reinhard toward a luminance-normalized curve. Per-channel compression
-// desaturates highlights toward grey; the luminance-preserving branch
-// keeps the beam's chroma, so lit faces read vibrant rather than chalky.
-// Gated on luminance so sky and shadow keep the per-channel curve exactly.
-const TONE_MAP_SHOULDER: f32 = 0.35;
+// The tone map, linear radiance to display values, and its inverse.
+//
+// With e = exposure * radiance, w the white point (u.flags.w) and
+// y = luminance(e), the curve is extended Reinhard,
+//
+//     per channel:        m = e (1 + e / w^2) / (1 + e)
+//     chroma preserving:  m = e (1 + y / w^2) / (1 + y)
+//
+// mixed by k = TONE_MAP_SHOULDER * smoothstep(1, 3, y), then
+//
+//     display = 0.5 + c (clamp(m, 0, 1)^(1 / gamma) - 0.5),
+//
+// c the contrast (u.ocean_realism_b.w; 1.0 is the identity). The white point
+// is the exposed radiance that displays as 1.0: plain Reinhard e / (1 + e)
+// only reaches 1 at infinity, which holds sunlit cloud faces under a grey
+// ceiling. For e << w^2 the curve is plain Reinhard.
+//
+// The gamma (u.periodic.w) is the only display encoding there is. The
+// output target must be a plain unorm format, never an sRGB one, or the
+// encoding would be applied twice.
 
-// Reinhard + gamma, matching radiative_transfer.tone_map (lines 675-680)
-// with witness's default exposure=4.0 (witness.py lines 955-959, 1072-1073).
-// Gamma arrives per-frame (u.periodic.w) rather than as the GAMMA const:
-// it is the one knob that decides how much the far field lifts, and it is
-// the only place the encode may happen — the swapchain must be a plain
-// unorm format, never *-srgb, or this runs a second time.
-// Extended Reinhard: plain e/(1+e) crushes lit cloud faces into a grey
-// ceiling (a face at exposed radiance ~4.7 displays at 227/255 and cannot
-// move). The white point (u.flags.w, user slider) is the exposed radiance
-// that reaches 1.0, so sunlit faces read vibrant white; below ~10% of it
-// the curve is within 0.3% of plain Reinhard, so sky and shadow are
-// untouched. Contrast (u.ocean_realism_b.w) pivots the encoded value on
-// mid-grey; at 1.0 the multiply-add is the exact identity.
+// How far bright regions (y > 1) move from the per-channel curve toward the
+// chroma-preserving one. Per-channel compression desaturates highlights
+// toward grey; the other keeps the beam's colour in them. Sky and shadow
+// (y < 1) take the per-channel curve alone.
+const TONE_MAP_SHOULDER: f32 = 0.35;
 
 fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let exposed = hdr * exposure;
@@ -35,19 +41,22 @@ fn tone_map(hdr: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
                  vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// tone_map run backwards: the linear radiance a displayed value came from,
-// for the live steam (fs_steam_live), which composites in linear light onto
-// an image already accumulated in display values. Exact wherever tone_map
-// is invertible (tests/test_tone_unmap.py holds the round trip on the GPU);
-// what its clamps threw away does not come back: a channel whose curve
-// reached 1 (at the white point, or below it for a saturated colour in the
-// shoulder, whose chroma-preserving branch overshoots) returns where it
-// reached it, and under contrast > 1 a value clipped to 0 or 1 returns the
-// clip's edge. Below the shoulder (exposed luminance
-// y < 1) the curve is per channel and inverts in closed form. In it, y fixes
-// the shoulder's mix k and chroma gain g and with them every channel, so
-// the solve is for the one y that reproduces itself, by bisection: a fixed
-// point iterated on y can oscillate there (codex, 2026-11-08).
+// tone_map inverted: the linear radiance a display value came from. The live
+// steam (fs_steam_live) needs it to composite in linear light onto an image
+// accumulated in display values.
+//
+// It is exact wherever tone_map is invertible. What tone_map's clamps
+// discarded does not come back: a channel whose curve reached 1 (at the
+// white point, or below it for a saturated colour in the shoulder, where the
+// chroma-preserving curve overshoots) returns the radiance at which it
+// reached 1, and under contrast > 1 a value clipped to 0 or 1 returns the
+// edge of the clip.
+//
+// Below the shoulder (y < 1) the curve is per channel and inverts in closed
+// form. In the shoulder, y fixes the mix k and the chroma gain
+// g = (1 + y / w^2) / (1 + y), and with them every channel, so the unknown
+// is the one y that reproduces itself. It is found by bisection, because a
+// fixed-point iteration on y can oscillate there.
 fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     let c = u.ocean_realism_b.w;
     let encoded = clamp((display - vec3<f32>(0.5)) / c + vec3<f32>(0.5),
@@ -59,9 +68,9 @@ fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
     if (dot(e0, lum) < 1.0) {
         return e0 / exposure;
     }
-    // y lies in [1, y_hi]: every channel's m <= 1, and with k at most
-    // TONE_MAP_SHOULDER the per-channel part alone caps e where the plain
-    // curve reaches 1 / (1 - TONE_MAP_SHOULDER).
+    // y lies in [1, y_hi]. Every channel has m <= 1, and with k at most
+    // TONE_MAP_SHOULDER the per-channel part alone bounds e by the value at
+    // which the plain curve reaches 1 / (1 - TONE_MAP_SHOULDER).
     var lo = 1.0;
     var hi = tone_unmap_channels(vec3<f32>(1.0 / (1.0 - TONE_MAP_SHOULDER)),
                                  0.0, 1.0, w2).x;
@@ -81,11 +90,12 @@ fn tone_unmap(display: vec3<f32>, exposure: f32, gamma: f32) -> vec3<f32> {
         / exposure;
 }
 
-// Each channel's exposed e with (1 - k) e (1 + e/w2)/(1 + e) + k g e = m,
-// the shoulder's mix k and chroma gain g held fixed: a e^2 + b e - m = 0,
-// a = (1 - k)/w2 + k g > 0, b = (1 - k) + k g - m. Its root e >= 0 in the
-// form that does not cancel for either sign of b (the plain one lost a dark
-// value to 0 in float32, codex 2026-11-08).
+// Each channel's exposed e from (1 - k) e (1 + e/w2)/(1 + e) + k g e = m,
+// with the shoulder's mix k and chroma gain g held fixed. Multiplying through
+// by (1 + e) gives a e^2 + b e - m = 0 with a = (1 - k)/w2 + k g > 0 and
+// b = (1 - k) + k g - m. The root e >= 0 is taken in the form that does not
+// cancel for either sign of b; the textbook form loses a dark value to 0 in
+// float32.
 fn tone_unmap_channels(m: vec3<f32>, k: f32, g: f32, w2: f32) -> vec3<f32> {
     let a = (1.0 - k) / w2 + k * g;
     let b = vec3<f32>((1.0 - k) + k * g) - m;

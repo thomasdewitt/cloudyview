@@ -1,104 +1,24 @@
-// EMPTY-SPACE SKIPPING: measured three times, lost three times. Do not read
-// the sparseness of cloud fields as an unclaimed opportunity — it is a claim
-// that has been tested to destruction, and this note replaces the TODO that
-// used to invite it.
+// The volume: the ray/box intersection, reading extinction from the field's
+// one or two levels by hardware trilinear filtering, reading the baked sun
+// optical depth, and the density gradient that the cloud shading uses as a
+// surface normal.
 //
-//   2026-07-17  view-march occupancy skip. 1.2-2.5x SLOWER. Fine-dt empty
-//               samples are cheap; the skip machinery is not.
-//   2026-08-11  8^3 majorant/occupancy grid on the light march. Proven
-//               max|diff| == 0.0 and measured 0.5-0.9x. Machinery cost 47 ms;
-//               skipping 36% of bricks recovered 0.8 ms.
-//   2026-08-13  full sparse bricks: page table, atlas with a 1-voxel apron,
-//               brick-DDA traversal that consults only the page table in
-//               vacuum, and a skip that lands on the march's own sample
-//               lattice so the picture is unchanged. Proven correct against a
-//               dense render (the difference is a Monte Carlo realization and
-//               falls as 1/sqrt(frames)). Measured 3-6x SLOWER on an RTX 5080
-//               across both a 33%-occupied field and an 8%-occupied one, and
-//               slower again on Apple silicon — which was the one hypothesis
-//               left standing after the first two, since both of those were
-//               5080 texture-latency measurements wearing the costume of a
-//               measurement about an algorithm.
+// The density texture is r32float or filterable r16float. Either reads as
+// texture_3d<f32>; half floats change only storage and bandwidth.
 //
-//   2026-09-23  no skipping at all, only the READ: an 8^3 max-sigma grid
-//               (one compute pass, dilated for the trilinear footprint),
-//               cached per brick crossing, so a step the grid proves empty
-//               takes sigma = 0 in place of the fetch and runs the same
-//               arithmetic at the same t. Exact (A/B max|diff| == 0) and it
-//               removed the fetch from 60-77% of all view steps on TWP-ICE —
-//               and was 16-43% SLOWER on the 5080, 18-49% at the clock lock
-//               that stands in for an M1; only DYCOMS's view from inside
-//               the deck gained (4-8%). The control that settles it: the
-//               same code compiled in behind a guard that never fires cost
-//               14-20% by itself. The fetches it removed were nearly free;
-//               fs_main's register budget is not.
-//
-// The mechanism, consistent across all four: this march is texture-LATENCY
-// bound, and every scheme that knows where the empty space is must ask
-// something to find out. In occupied space that ask lands on the critical
-// path of a loop that tolerates no added control flow (a bit-identical
-// micro-opt — reusing the view sample as the light march's first tap — also
-// regressed). The skip cannot outrun the question.
-//
-// Two things worth knowing before a fifth attempt. The per-crossing fetch
-// that the third attempt left untried has now been tried (the fourth) and it
-// is not the fetch that costs: any per-step machinery in fs_main pays for
-// its registers whether it fires or not. And bricking has a memory
-// break-even that is lower than it looks: an 8^3 brick with its apron stores
-// 1000 texels to hold 512,
-// so it only shrinks a field below 51% brick occupancy (16^3: 70%, 32^3:
-// 83%). The whole attempt is in git — see the commit that reverted it for
-// the entry point, and benchmarking/soar_frame_results.md for the numbers.
-//
-// What DID pay, and shipped, is cropping the empty sky off a field at load:
-// same insight about sparseness, applied to storage rather than traversal,
-// where nothing has to be asked per sample. See web/soar/zcrop.js.
+// What sets the march's cost, for anyone changing it:
+// - It is bound by texture latency and by the size of the compiled fragment
+//   program, not by the number of fetches. fs_main compiles as one kernel,
+//   so code added to it costs every pixel whether or not its branch runs,
+//   and a change has to be timed on scenes it does not touch as well.
+// - Cloud fields are mostly empty, but skipping the empty samples does not
+//   pay: the per-step bookkeeping that finds out a sample is empty costs
+//   more than the fetch it saves.
+// - The sparseness is used at load instead, where the empty sky is cropped
+//   off the field (web/soar/zcrop.js) and nothing is asked per sample.
 
-// FS_MAIN IS ONE COMPILE, and the driver treats it as one (2026-09-23). Five
-// measurements from one day, all the same fact:
-//   - the empty-space guard above cost 14-20% while never firing;
-//   - compiling out the lighting method a tier does not use (LIGHT_CACHE,
-//     SKY_PROBE) bought 3-14%, where the branch it replaced was never taken;
-//   - the city's 3D facade shell cost 35-50% on pixels that never run it,
-//     by pushing the whole kernel over a register threshold (which is why
-//     the opaque surfaces are moving to their own pass);
-//   - a function-local `var c: array<f32, 4>` in CITY-only code moved DAY
-//     frames by 2^-11 — a specialization that was compiled out still
-//     changed how the rest of the kernel was compiled. Scalars fixed it.
-//   - running the forward pre-march lazily, at a ray's first deep-shadow
-//     sample instead of before the loop, was exact and saves the march for
-//     every ray that never gets there — and cost 28-213% on the views where
-//     rays do get there, because a call inside the loop is paid in
-//     registers, and lanes reaching it at different steps serialize.
-// So a change's cost is not where its code runs, and a bit-identity claim
-// has to be proven on scenes the change does not touch. Measure with
-// tools/benchmarking/soar_pass_timer.py and prove with
-// tools/soar_shader_ab.py --scene day|city|nested, both on the
-// specialization the app actually compiles.
-//
-// And look, rather than guess: tools/soar_regcount.py prints the register
-// count, spills and size of the binary wgpu actually built for an entry
-// point (read back from the NVIDIA driver's shader cache; a pure compile,
-// no GPU work). A count is a diagnosis, not a score — fs_main at Low was
-// 96 registers one day against 80 the morning before, and faster — so
-// time what it suggests. Near 128 a count is not stable either: the driver
-// picks each stage's register target by its own spill-cost estimate, and
-// a stage whose demand sits near it flips between 128 with spills (16
-// warps an SM) and ~160 without (12 warps) on changes that do no work —
-// the city's first stage, 10-14% apart (2026-11-09). Counts quoted before
-// that date came from a compile of our own (naga 26), not the binary the
-// app runs, and can be wrong in either direction.
-
-// The host may bind either r32float (reference/default) or filterable r16float
-// density. Both expose texture_3d<f32> here; fp16 only changes storage/bandwidth.
-// Both levels always share one format.
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// Slab-method ray/AABB intersection. Returns (t_near, t_far); miss when
-// t_near > t_far.
+// Slab-method intersection of a ray with the outer box. Returns
+// (t_near, t_far); the ray misses when t_near > t_far.
 fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
     let t0 = (u.bmin.xyz - origin) * inv_dir;
     let t1 = (u.bmax.xyz - origin) * inv_dir;
@@ -110,22 +30,18 @@ fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {
 }
 
 // ray_box's inv_dir for a direction that may lie along an axis. 1 / 0 is an
-// infinity, and in WGSL an operation that produces one is indeterminate: the
-// driver may assume it never happens, so what the slab test then returns is
-// whatever the codegen of the day makes of it. It did differ — the desert's
-// straight-up march, (0, 0, 1) in a bounded domain, measured the whole cloud
-// column above the ground in one build and no cloud at all in the next
-// (2026-09-24). A component of 1e30 bounds the ray only where the origin is
-// outside that slab, which is what the infinity was meant to do.
+// infinity, and WGSL leaves an expression that produces one indeterminate:
+// an implementation may assume it never happens, so the slab test's result
+// would depend on the compiler. A component of 1e30 does what the infinity
+// was meant to: an origin inside that axis's slab is not constrained by it,
+// and an origin outside it misses.
 fn safe_inv_dir(d: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(select(1e30, 1.0 / d.x, abs(d.x) > 1e-9),
                      select(1e30, 1.0 / d.y, abs(d.y) > 1e-9),
                      select(1e30, 1.0 / d.z, abs(d.z) > 1e-9));
 }
 
-// One refinement level's sample, plus the march step sizes that level asks
-// for. witness carries the same two things out of _sample_sigma_nested (the
-// value and the level index that sets dt_max).
+// One level's sample, with the march step sizes that level asks for.
 struct LevelSample {
     sigma: f32,
     dt_view: f32,
@@ -133,9 +49,9 @@ struct LevelSample {
     in_nest: bool,
 }
 
-// Data dims in FIELD axis order (nx, ny, nz). The texture is stored
-// transposed — (w=nz, h=ny, d=nx) — and holds nothing but the field, so this
-// is a swizzle and no longer a swizzle-minus-a-border.
+// A level's grid size in field axis order (nx, ny, nz). The texture is
+// stored transposed, (width = nz, height = ny, depth = nx), and holds the
+// field alone, with no border texels.
 fn level_data_dims(t: texture_3d<f32>) -> vec3<f32> {
     let tex_dims = vec3<f32>(textureDimensions(t, 0));
     return vec3<f32>(tex_dims.z, tex_dims.y, tex_dims.x);
@@ -149,9 +65,9 @@ fn level_voxel_size(in_nest: bool) -> vec3<f32> {
     return (u.bmax.xyz - u.bmin.xyz) / level_data_dims(vol);
 }
 
-// Fold a world point into the outer tile. The scene — nest included — is one
-// periodic tile, so this runs before any level test: every domain copy then
-// carries a copy of the nest at the same place within the tile.
+// Fold a world point into the outer tile. The whole scene, nest included, is
+// one periodic tile, so this runs before any level test: every copy of the
+// domain then carries a copy of the nest at the same place within it.
 fn wrap_to_domain(p: vec3<f32>) -> vec3<f32> {
     if (!PERIODIC_DOMAIN) {
         return p;
@@ -161,7 +77,7 @@ fn wrap_to_domain(p: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(u.bmin.xy + g * extent, p.z);
 }
 
-// Containment test for the already-wrapped point (witness._active_level).
+// Whether an already-wrapped point lies in the nest's box.
 fn in_nest_box(q: vec3<f32>) -> bool {
     if (!NESTED) {
         return false;
@@ -169,37 +85,39 @@ fn in_nest_box(q: vec3<f32>) -> bool {
     return all(q >= u.nest_bmin.xyz) && all(q <= u.nest_bmax.xyz);
 }
 
-// The linear taper a zero ghost texel used to supply, computed instead.
+// The window that fades a level to zero across the half cell outside its
+// outermost cell centres.
 //
-// Sampling a zero-bordered volume at data coordinate g gives, along one axis,
-// v_0*(g+1) for g in [-1, 0] and v_{N-1}*(N-g) for g in [N-1, N] — a ramp from
-// the outermost data value down to zero across the outer half-cell either
-// side. Clamp-to-edge on an UNPADDED texture returns exactly those same
-// outermost values over that range and holds them beyond it, so multiplying by
-// this window reproduces the padded result. Trilinear filtering is separable
-// and the border was zero on every axis, so the three windows multiply, which
-// makes the identity hold at edges, at corners, and everywhere between.
+// g is the data coordinate along one axis of N cells (cell centre i at
+// g = i). Clamp-to-edge sampling returns the outermost value, v_0 for g < 0
+// and v_{N-1} for g > N - 1. Times this window that is v_0 (g + 1) on
+// [-1, 0] and v_{N-1} (N - g) on [N - 1, N]: a linear ramp from the
+// outermost value down to zero, which is what trilinear filtering against a
+// ring of zero texels would return. Trilinear filtering is separable, so the
+// windows of the three axes multiply and the identity holds at edges and
+// corners too.
 //
-// That is what buys the two texels back: a 2048-cell axis no longer asks a
-// browser clamped to the WebGPU spec floor for 2050.
+// Computing the ramp rather than storing the ring keeps the texture at the
+// field's own size. A ring would add two texels per axis, and a 2048-cell
+// axis would then exceed the 3D texture size WebGPU guarantees (2048).
 fn edge_taper(g: f32, n: f32) -> f32 {
     return clamp(min(g + 1.0, n - g), 0.0, 1.0);
 }
 
-// Extinction (m^-1) from one level via hardware trilinear filtering.
-// Coordinate swizzle: texture is (w=nz, h=ny, d=nx), see file header. The
-// AABB is half-cell padded, so cell centre i sits at fraction (i+0.5)/N of
-// the box: data_g = fraction*N - 0.5 puts data value i at data_g=i, texel i
-// IS data value i, and the normalized coord is (data_g+0.5)/N — which is the
-// box fraction itself, with no border to skip past.
+// Extinction (m^-1) from one level, by hardware trilinear filtering.
 //
-// `periodic_level` picks how the domain edge behaves. A doubly periodic outer
-// level wraps: the repeat sampler fetches the far face as the trilinear
-// partner across the seam, which is what the uploaded ghost ring used to do,
-// exactly and for free, corners included. Everything else — every nest, and a
-// non-periodic outer level — tapers into zero at its own boundary, which is
-// how a nest blends out into the coarse field around it. Either way the
-// vertical is never periodic and always tapers.
+// The box extends half a cell beyond the outermost cell centres, so cell
+// centre i sits at box fraction (i + 0.5) / N. data_g = fraction * N - 0.5
+// is the data coordinate (cell i at data_g = i), and the normalized texture
+// coordinate (data_g + 0.5) / N is the box fraction itself. The swizzle is
+// the texture's (width = nz, height = ny, depth = nx) transposition.
+//
+// `periodic_level` picks how the lateral edges behave. A doubly periodic
+// outer level wraps: the repeat sampler takes the far face as the trilinear
+// partner across the seam, corners included. Every nest, and a non-periodic
+// outer level, tapers to zero at its own boundary (edge_taper), which is
+// also how a nest blends into the coarse field around it. The vertical is
+// never periodic and always tapers.
 fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
                 bmin: vec3<f32>, bmax: vec3<f32>, periodic_level: bool) -> f32 {
     let tex_dims = vec3<f32>(textureDimensions(t, 0));
@@ -219,16 +137,17 @@ fn sample_level(t: texture_3d<f32>, q: vec3<f32>,
     return textureSampleLevel(t, vol_samp, tex_coord, 0.0).r * taper;
 }
 
-// Sun optical depth from the baked cache — the trilinear read that replaces
-// light_march_tau for cloud samples under LIGHT_CACHE.
+// Sun optical depth from the baked cache: the read that stands in for
+// light_march_tau on cloud samples under LIGHT_CACHE. The cached value is
+// for the sun's central direction with no quadrature jitter, so it carries
+// no solar-disc penumbra; trilinear filtering is its only softening.
 //
-// Same coordinate convention as sample_level over the same outer AABB (the
-// cache's texel i sits AT data coordinate i, see fs_bake_light), same
-// (w=nz, h=ny, d=nx) transposition, same lateral wrap in a periodic domain —
-// but NO edge taper: tau is not extinction, and ramping it to zero at the
-// domain edge would punch sunlight into the boundary column. Clamp-to-edge
-// on the vertical is right at both ends: above the top slice tau is ~0 and
-// below the bottom the nearest baked value is the honest answer.
+// Coordinates are sample_level's over the same outer box (texel i at data
+// coordinate i; see fs_bake_light), with the same lateral wrap in a periodic
+// domain, but there is no edge taper: tau is not extinction, and ramping it
+// to zero at the domain edge would let sunlight into the boundary column.
+// Clamp-to-edge is right on the vertical: above the top slice tau is ~0,
+// and below the bottom slice the nearest baked value is the best available.
 fn sample_light_tau(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     let tex_dims = vec3<f32>(textureDimensions(light_tau, 0));
@@ -244,9 +163,8 @@ fn sample_light_tau(p: vec3<f32>) -> f32 {
     }
     return textureSampleLevel(light_tau, vol_samp, tex_coord, 0.0).r;
 }
-// ---------------------------------------------------------------------------
 
-// Sample a *chosen* level at an already-wrapped point.
+// Extinction from a chosen level at an already-wrapped point.
 fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
     if (NESTED && in_nest) {
         return sample_level(nest_vol, q, u.nest_bmin.xyz, u.nest_bmax.xyz,
@@ -255,13 +173,13 @@ fn sample_sigma_pinned(q: vec3<f32>, in_nest: bool) -> f32 {
     return sample_level(vol, q, u.bmin.xyz, u.bmax.xyz, PERIODIC_DOMAIN);
 }
 
-// Finest level covering p wins (witness._sample_sigma_nested).
+// Extinction at a world point: the finest level that covers it.
 fn sample_sigma(p: vec3<f32>) -> f32 {
     let q = wrap_to_domain(p);
     return sample_sigma_pinned(q, in_nest_box(q));
 }
 
-// Same dispatch, carrying the active level's step sizes back to the caller.
+// The same, with the active level's step sizes.
 fn sample_level_at(p: vec3<f32>) -> LevelSample {
     let q = wrap_to_domain(p);
     let nested_here = in_nest_box(q);
@@ -278,13 +196,12 @@ fn sample_level_at(p: vec3<f32>) -> LevelSample {
     return s;
 }
 
-// One gradient tap. `pin` keeps the tap on the caller's level instead of
-// re-dispatching — used for the one-voxel fine stencil, where crossing into
-// the coarse field mid-stencil would measure the resolution change rather
-// than the cloud. The coarse stencil deliberately does NOT pin: its radius
-// routinely leaves the nest, and reading the parent field there is both
-// cheaper and more honest than reading the nest's ghost-zero taper (witness
-// pins at every radius, which puts a spurious edge on the nest boundary).
+// One tap of a gradient stencil. `pin` keeps the tap on the level `pin_nest`
+// names instead of choosing the level at the tap. The one-voxel fine stencil
+// pins: crossing into the coarse field mid-stencil would difference the
+// change of resolution rather than the cloud. The coarse stencil does not:
+// its radius routinely leaves the nest, and there the parent field is a
+// better reading than the nest's taper to zero.
 fn sigma_tap(p: vec3<f32>, pin: bool, pin_nest: bool) -> f32 {
     if (NESTED && pin) {
         return sample_sigma_pinned(wrap_to_domain(p), pin_nest);
@@ -292,6 +209,7 @@ fn sigma_tap(p: vec3<f32>, pin: bool, pin_nest: bool) -> f32 {
     return sample_sigma(p);
 }
 
+// Central-difference gradient of sigma (m^-2), half-width h (m) per axis.
 fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>,
                             pin: bool, pin_nest: bool) -> vec3<f32> {
     let sxp = sigma_tap(p + vec3<f32>(h.x, 0.0, 0.0), pin, pin_nest);
@@ -307,20 +225,16 @@ fn sigma_gradient_at_radius(p: vec3<f32>, h: vec3<f32>,
     );
 }
 
-// One component of the coarse gradient, taken from the fine gradient where the
-// two stencils' radii coincide on that axis. The cone stencil's radius is
-// floored at a voxel, so for every sample nearer than a voxel / tan(theta) —
-// ~29 voxels at the shipped 2 degrees — coarse_h equals fine_h on that axis,
-// and the coarse pair of taps IS the fine pair: the same two points, read from
-// the same level, differenced over the same radius. The fine component is
-// therefore not an approximation of this one but the same number, and taking
-// it saves two of the twelve texture reads per cloud sample (on a flat grid
-// like DYCOMS, where dz is half of dx, that is the x and y pairs for nearly
-// every visible sample).
+// One component of the coarse gradient, borrowed from the fine gradient
+// where the two stencils have the same radius on that axis. The coarse
+// radius is floored at the fine one, so for a near sample (under the cone
+// stencil, one closer than a voxel / tan(theta)) the coarse pair of taps is
+// the fine pair: the same two points, differenced over the same radius.
+// Borrowing saves two texture reads per axis.
 //
-// "The same level" is the one thing to check. The fine taps are pinned to the
-// sample's level and the coarse ones are not, so under NESTED the fine
-// component only stands in if neither tap lands across the nest boundary.
+// The fine taps are pinned to the sample's level and the coarse ones are
+// not, so under NESTED the fine component stands in only if neither tap
+// lands across the nest boundary.
 fn coarse_gradient_component(p: vec3<f32>, offset: vec3<f32>, h: f32,
                              same_radius: bool, fine_component: f32,
                              in_nest: bool) -> f32 {
@@ -337,14 +251,24 @@ fn coarse_gradient_component(p: vec3<f32>, offset: vec3<f32>, h: f32,
     return (sp - sm) / (2.0 * h);
 }
 
+// The density gradient at a cloud sample, which the shading uses as the
+// local surface normal (outward normal = -grad / |grad|). Returns
+// xyz = the gradient and w = a confidence, |grad| h / sigma: the relative
+// change of sigma across the stencil radius h, near 0 in a uniform interior
+// and of order 1 at an edge.
+//
+// Two stencils are blended by coarse_weight_in. The fine one, of radius
+// GRADIENT_SHADING_RADIUS_VOXELS, resolves the voxel-scale skin. The coarse
+// one gives the shape of the billow. For a weight strictly between 0 and 1
+// the two unit normals are summed with weights (1 - w) and w, each times a
+// smoothstep of its own confidence, so xyz is then a direction and not a
+// gradient in m^-2. The callers use only its direction.
 fn sigma_gradient(p: vec3<f32>, sigma: f32,
                   coarse_weight_in: f32,
                   coarse_radius_m: f32,
                   sample_distance_m: f32,
                   cone_stencil_tan_theta: f32,
                   in_nest: bool) -> vec4<f32> {
-    // One voxel-size lookup for both stencils: the coarse branch below asked
-    // level_voxel_size(in_nest) for the same answer a second time.
     let voxel = level_voxel_size(in_nest);
     let fine_h = voxel * GRADIENT_SHADING_RADIUS_VOXELS;
     let fine_grad = sigma_gradient_at_radius(p, fine_h, true, in_nest);
@@ -360,11 +284,12 @@ fn sigma_gradient(p: vec3<f32>, sigma: f32,
 
     let extent = u.bmax.xyz - u.bmin.xyz;
 
-    // Cone stencil (witness iter_001): a fixed angular radius follows
-    // apparent cloud scale — distant samples use a broader world-space
-    // normal while nearby samples converge on the fine stencil. An exact
-    // zero explicitly selects the legacy fixed-radius path, which keeps
-    // its larger minimum-voxel floor and the domain-fraction ceiling.
+    // The coarse radius. Under the cone stencil it is
+    // sample_distance_m * tan(theta): a fixed angle, so the normal is taken
+    // at the scale the pixel sees, and near samples converge on the fine
+    // stencil. A tangent of exactly 0 selects the fixed radius
+    // coarse_radius_m, floored at GRADIENT_SHADING_COARSE_MIN_VOXELS voxels
+    // and capped at GRADIENT_SHADING_COARSE_MAX_DOMAIN_FRACTION of the box.
     var cone_radius_m: f32;
     var coarse_min_voxels: f32;
     if (cone_stencil_tan_theta > 0.0) {
