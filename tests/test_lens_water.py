@@ -200,10 +200,10 @@ def test_the_lens_never_touches_the_accumulation(scene):
     assert all(np.array_equal(a, b) for a, b in zip(plain, wet))
 
 
-def test_only_the_lens_state_pass_reads_row_24_w():
-    """Row 24.w carries the lens dt, written for the state pass alone (and left
-    over in the uniform block for the passes after it): nothing else may read
-    it. No GPU."""
+def test_only_the_lens_state_pass_reads_the_lens_dt():
+    """u.lens_dt is written for the state pass alone (and left over in the
+    uniform block for the passes after it): nothing else may read it. No
+    GPU."""
     import re
     from pathlib import Path
     from .conftest import ShaderModule
@@ -211,7 +211,7 @@ def test_only_the_lens_state_pass_reads_row_24_w():
     code = re.sub(r"//[^\n]*", "", src)
     start = code.index("fn fs_lens_state(")
     end = code.index("\n}\n", start)
-    reads = [m.start() for m in re.finditer(r"surface_offset\.w\b", code)]
-    assert reads, "the state pass no longer reads its dt from row 24.w"
+    reads = [m.start() for m in re.finditer(r"u\.lens_dt\b", code)]
+    assert reads, "the state pass no longer reads its dt from u.lens_dt"
     outside = [code[:i].count("\n") + 1 for i in reads if not start <= i < end]
-    assert not outside, f"row 24.w read outside fs_lens_state at lines {outside}"
+    assert not outside, f"u.lens_dt read outside fs_lens_state at lines {outside}"

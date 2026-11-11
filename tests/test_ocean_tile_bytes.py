@@ -86,7 +86,6 @@ def test_the_normalize_bound_is_the_tiles():
     assert min(float(lv[..., 2].min()) for lv in _levels()) >= Z_BOUND
     notes = re.findall(r"// @domain: every texel of every mip has z >= "
                        r"([0-9.]+)", SHADER.read_text())
-    # One on each normalize() of the tile's normals: the mipped and the
-    # legacy sampler.
-    assert len(notes) == 2
+    # On the normalize() of the tile's mipped normals.
+    assert len(notes) == 1
     assert all(float(v) == pytest.approx(Z_BOUND) for v in notes)
