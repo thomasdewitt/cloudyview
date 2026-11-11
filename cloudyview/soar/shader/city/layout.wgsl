@@ -83,10 +83,6 @@ const CITY_INDUSTRY_LIT_FRAC: f32 = 0.03;
 const CITY_INDUSTRY_DOOR_BAND: f32 = 5.0;
 // Windows.
 const CITY_WIN_PITCH_U: f32 = 3.4;  // horizontal window pitch (m)
-const CITY_WIN_U_LO: f32 = 0.14;    // pane bounds within the pitch cell
-const CITY_WIN_U_HI: f32 = 0.86;
-const CITY_WIN_V_LO: f32 = 0.28;
-const CITY_WIN_V_HI: f32 = 0.90;
 const CITY_DARK_FLOOR_FRAC: f32 = 0.04; // whole storeys gone dark
 // A lit room's radiance through its pane, before the per-window brightness
 // draw (0.25 + 5 w^7, mean CITY_WIN_BRIGHT_MEAN): THE knob for how bright
