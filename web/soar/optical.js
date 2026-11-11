@@ -1,8 +1,8 @@
 // Condensate to extinction. Port of cloudyview/optical_depth.py.
 //
-// sigma = (3 Q_ext / 4) * q * rho_air(z) / (rho_particle * r_eff), with
-// Q_ext = 2 in the geometric-optics limit — hence the 1.5 folded into the
-// prefactors in constants.js. q is a mixing ratio in g/kg, sigma is m^-1.
+// sigma = k * q * rho_air(z): q is a mixing ratio in g/kg, k the species'
+// mass extinction coefficient in m^2/g (constants.js: geometric optics for
+// liquid, Ebert & Curry for ice), sigma is m^-1.
 //
 // The atmosphere is a fixed isothermal profile, NOT the field's own: the
 // same assumption witness and behold make, so all three agree.

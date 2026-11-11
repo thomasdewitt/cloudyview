@@ -957,9 +957,9 @@ export const DEFAULT_BEHOLD_QUALITY = "high";
 
 // --- extinction (optical_depth.py) ---------------------------------------
 //
-// sigma = (1.5 / (rho * r_eff)) * q * rho_air(z), with q in g/kg and the
-// result in m^-1. The 1.5 is 3*Q_ext/4 at the geometric-optics limit Q_ext=2.
-// The atmosphere is a fixed isothermal profile — not the field's own.
+// sigma = k * q * rho_air(z), with q in g/kg, k the species' mass extinction
+// coefficient in m^2/g (below) and the result in m^-1. The atmosphere is a
+// fixed isothermal profile, not the field's own.
 
 export const AIR_R = 287.05;             // J/kg/K
 export const AIR_T = 280.0;              // K
@@ -967,33 +967,31 @@ export const AIR_SCALE_HEIGHT_M = 7000.0;
 export const AIR_P0 = 101300.0;          // Pa
 export const RE_LIQUID_UM = 10.0;
 export const RE_ICE_UM = 30.0;
-export const RHO_WATER_G_M3 = 1e6;
-export const RHO_ICE_G_M3 = 917e3;
 // An ice field whose global maximum is below this is treated as no ice at all.
 export const ICE_NEGLIGIBLE_G_KG = 1e-6;
 
-export const SIGMA_LIQUID_PREFACTOR =
-  1.5 / (RHO_WATER_G_M3 * RE_LIQUID_UM * 1e-6);   // 0.15 m^2/g
-export const SIGMA_ICE_PREFACTOR =
-  1.5 / (RHO_ICE_G_M3 * RE_ICE_UM * 1e-6);        // 0.054525... m^2/g
-
-// --- column optical depth (glimpse) ---------------------------------------
+// --- mass extinction --------------------------------------------------------
 //
-// The minimap is a glimpse image, and glimpse does NOT integrate the same
-// sigma the raymarch uses. Liquid agrees — both are geometric optics with
-// Q_ext = 2 — but ice does not: Ebert & Curry gives 0.0845 m^2/g at
-// r_e = 30 um against sigma's geometric-optics 0.0545. So the map cannot be
-// derived from the extinction volume — it is accumulated separately, from
-// lwc and iwc, on the way past.
+// One pair of coefficients for the whole toolkit, the same as
+// cloudyview/optical_depth.py: the extinction the march reads, the ice
+// fraction, and the column optical depth of the minimap all use them, so a
+// field loaded here is the field witness renders.
 
-// tau = 1.5 * LWP / r_e_um: geometric optics, Q_ext = 2 exactly.
+// Liquid, tau = 1.5 * LWP / r_e_um: geometric optics, Q_ext = 2 exactly.
 // Petty (2006), "A First Course in Atmospheric Radiation", 2nd ed., Eq. 7.86.
 export const TAU_PER_LWP_UM = 1.5;       // m^2 um / g
 
-// tau = IWP * (a + b / r_e_um): Ebert & Curry (1992), JGR 97(D4), 3831-3836,
-// doi:10.1029/91JD02472, Table 2 band 1 (0.25-0.7 um), used exactly.
+// Ice, tau = IWP * (a + b / r_e_um): Ebert & Curry (1992), JGR 97(D4),
+// 3831-3836, doi:10.1029/91JD02472, Table 2 band 1 (0.25-0.7 um), used
+// exactly. It is fitted to real, nonspherical ice cloud, whose area per unit
+// mass exceeds a sphere's: the geometric-optics sphere at bulk ice density
+// gives 0.0545 m^2/g at 30 um, 1.55 times less.
 export const EC92_BAND1_A = 3.448e-3;    // m^2 / g
 export const EC92_BAND1_B = 2.431;       // m^2 um / g
+
+export const SIGMA_LIQUID_PREFACTOR = TAU_PER_LWP_UM / RE_LIQUID_UM;  // 0.15 m^2/g
+export const SIGMA_ICE_PREFACTOR =
+  EC92_BAND1_A + EC92_BAND1_B / RE_ICE_UM;                   // 0.0845 m^2/g
 
 // Conservative-scattering two-stream reflectance, A = tau / (tau + 2/(1-g)).
 // Exactly Eq. 5.51 of Bohren & Clothiaux (2006), "Fundamentals of

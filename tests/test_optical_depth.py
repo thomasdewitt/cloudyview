@@ -104,6 +104,39 @@ def test_one_ice_coefficient_for_every_renderer():
         float(EC92_BAND1_A + EC92_BAND1_B / np.float32(30.0)))
 
 
+def test_the_browser_and_the_demo_baker_use_the_same_coefficients():
+    """The browser turns an uploaded file's cloud water into extinction and
+    an ice fraction itself (web/soar/optical.js), and the demo baker writes
+    the ice fraction of a baked demo. Both must use the coefficients
+    compute_extinction_field uses, or the same field would be a different
+    cloud in the browser than in witness: the browser kept the
+    geometric-optics ice coefficient, 1.55 times smaller, after Python moved
+    to Ebert & Curry."""
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    script = ('import * as K from "%s"; import { sigmaAt } from "%s";'
+              "console.log(JSON.stringify([K.RE_LIQUID_UM, K.RE_ICE_UM,"
+              " K.SIGMA_LIQUID_PREFACTOR, K.SIGMA_ICE_PREFACTOR,"
+              " sigmaAt(0.3, 0.0, 1.0), sigmaAt(0.0, 0.3, 1.0)]));"
+              % ((repo / "web/soar/constants.js").as_uri(),
+                 (repo / "web/soar/optical.js").as_uri()))
+    re_liquid, re_ice, k_liquid, k_ice, sigma_liquid, sigma_ice = json.loads(
+        subprocess.run(["node", "--input-type=module", "-e", script],
+                       capture_output=True, text=True, check=True).stdout)
+    assert k_liquid == pytest.approx(float(liquid_mass_extinction(re_liquid)))
+    assert k_ice == pytest.approx(float(ice_mass_extinction(re_ice)))
+    assert sigma_liquid == pytest.approx(0.3 * k_liquid)
+    assert sigma_ice == pytest.approx(0.3 * k_ice)
+
+    sys.path.insert(0, str(repo / "tools"))
+    import prebake_demos
+    assert prebake_demos.SIGMA_LIQUID_PREFACTOR == pytest.approx(k_liquid)
+    assert prebake_demos.SIGMA_ICE_PREFACTOR == pytest.approx(k_ice)
+
+
 def test_behold_ice_fraction_is_extinction_weighted():
     """Equal masses of liquid and ice are NOT equal shares of the light.
 

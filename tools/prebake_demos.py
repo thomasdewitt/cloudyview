@@ -527,15 +527,14 @@ def _extinction(lwc, z, iwc):
                                                   re_ice=30.0)
 
 
-# Ice's share of the extinction, with the SAME prefactors _extinction uses:
-# 3 Q_ext / 4 = 1.5 over rho_particle * r_eff, at re = 10 um liquid and
-# 30 um ice. Written out here rather than called out of compute_extinction_field
-# because rho_air cancels in the ratio — the fraction is a pure function of the
-# two mixing ratios, which is exactly what optical.js's iceExtinctionFraction
-# is, and the browser has to agree with this bake voxel for voxel or a demo
-# and an uploaded copy of the same field would paint different phases.
-SIGMA_LIQUID_PREFACTOR = 1.5 / (1e6 * 10.0e-6)        # m^2/g, 0.15
-SIGMA_ICE_PREFACTOR = 1.5 / (917e3 * 30.0e-6)         # m^2/g, 0.0545...
+# Ice's share of the extinction, with the coefficients _extinction uses, at
+# re = 10 um liquid and 30 um ice. rho_air cancels in the ratio, so the
+# fraction is a function of the two mixing ratios alone, which is what
+# optical.js's iceExtinctionFraction is: the browser has to agree with this
+# bake voxel for voxel, or a demo and an uploaded copy of the same field would
+# paint different phases.
+SIGMA_LIQUID_PREFACTOR = float(optical_depth.liquid_mass_extinction(10.0))
+SIGMA_ICE_PREFACTOR = float(optical_depth.ice_mass_extinction(30.0))
 
 
 def _split_phases(spec: dict, src: Path, qn: np.ndarray, dims: str,
